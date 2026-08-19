@@ -1,4 +1,4 @@
-# AI Harness
+# A.R.T.H.U.R. — AI Harness
 
 A Windows-first local engineering harness that combines a ChatGPT/Codex lead
 model with DeepSeek workers, or can run in a strict DeepSeek-only mode. Runtime
