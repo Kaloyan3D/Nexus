@@ -1,0 +1,12 @@
+{
+  "name": "aih-global-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned runtime dependencies for the global AI engineering harness.",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-subagent-codex": "0.1.0-rc.6",
+    "openai-oauth": "2.0.0"
+  }
+}

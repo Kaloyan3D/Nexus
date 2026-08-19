@@ -1,0 +1,38 @@
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+auth.json
+**/.credentials.yaml
+
+# Installed/generated runtime
+app/
+runtime/node/
+node_modules/
+
+# Local AI Harness state
+data/
+logs/
+_tmp_ws/
+
+# Test/build output
+coverage/
+dist/
+build/
+tmp/
+*.log
+*.tmp
+
+# Editors and operating systems
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+.DS_Store
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,71 @@
+agent-default-model:
+  provider: sol-local
+  model: gpt-5.6-sol
+  reasoningEffort: xhigh
+
+agent-presets:
+  default: aih-engineering
+
+llm-pi-ai:
+  providers:
+    sol-local:
+      displayName: GPT-5.6 Sol (local OAuth)
+      apiKeyEnv: AIH_LOCAL_OAUTH_KEY
+      api: openai-responses
+      baseURL: http://127.0.0.1:10531/v1
+      reasoning: xhigh
+      models:
+        - id: gpt-5.6-sol
+          name: GPT-5.6 Sol
+          reasoningEfforts:
+            off:
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+            max: max
+    deepseek-pro-direct:
+      displayName: DeepSeek V4 Pro MAX (direct)
+      apiKeyEnv: DEEPSEEK_API_KEY
+      api: openai-completions
+      baseURL: https://api.deepseek.com
+      reasoning: max
+      compat:
+        thinkingFormat: deepseek
+      models:
+        - id: deepseek-v4-pro
+          name: DeepSeek V4 Pro MAX
+          reasoningEfforts:
+            off:
+            high: high
+            max: max
+    flash-max-direct:
+      displayName: DeepSeek V4 Flash MAX (direct)
+      apiKeyEnv: DEEPSEEK_API_KEY
+      api: openai-completions
+      baseURL: https://api.deepseek.com
+      reasoning: max
+      compat:
+        thinkingFormat: deepseek
+      models:
+        - id: deepseek-v4-flash
+          name: DeepSeek V4 Flash MAX
+          reasoningEfforts:
+            off:
+            high: high
+            max: max
+    flash-high-direct:
+      displayName: DeepSeek V4 Flash High (direct)
+      apiKeyEnv: DEEPSEEK_API_KEY
+      api: openai-completions
+      baseURL: https://api.deepseek.com
+      reasoning: high
+      compat:
+        thinkingFormat: deepseek
+      models:
+        - id: deepseek-v4-flash
+          name: DeepSeek V4 Flash High
+          reasoningEfforts:
+            off:
+            high: high
+            max: max

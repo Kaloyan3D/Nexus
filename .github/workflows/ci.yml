@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-tests:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned runtime
+        shell: pwsh
+        run: ./scripts/Setup.ps1 -InstallRoot "$env:RUNNER_TEMP\AI-Harness" -SkipPathUpdate
+      - name: Run deterministic tests
+        shell: pwsh
+        run: ./scripts/Test-Harness.ps1 -InstallRoot "$env:RUNNER_TEMP\AI-Harness"

@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "defaultPreset": "aih-engineering",
+  "presets": {
+    "aih-engineering": {
+      "displayName": "Normal Engineering",
+      "allowOpenAI": true,
+      "allowCodexSubagent": true,
+      "failurePolicy": "provider-terminal",
+      "tiers": {
+        "1": { "name": "GPT-5.6 Sol xhigh", "provider": "sol-local", "model": "gpt-5.6-sol", "reasoning": "xhigh" },
+        "2": { "name": "DeepSeek Flash MAX", "provider": "flash-max-direct", "model": "deepseek-v4-flash", "reasoning": "max" },
+        "3": { "name": "DeepSeek Flash High", "provider": "flash-high-direct", "model": "deepseek-v4-flash", "reasoning": "high" }
+      },
+      "semanticVerifier": { "provider": "sol-local", "model": "gpt-5.6-sol", "reasoning": "xhigh" }
+    },
+    "aih-deepseek": {
+      "displayName": "DeepSeek Only",
+      "allowOpenAI": false,
+      "allowCodexSubagent": false,
+      "failurePolicy": "fail-closed",
+      "tiers": {
+        "1": { "name": "DeepSeek V4 Pro MAX", "provider": "deepseek-pro-direct", "model": "deepseek-v4-pro", "reasoning": "max" },
+        "2": { "name": "DeepSeek Flash MAX", "provider": "flash-max-direct", "model": "deepseek-v4-flash", "reasoning": "max" },
+        "3": { "name": "DeepSeek Flash High", "provider": "flash-high-direct", "model": "deepseek-v4-flash", "reasoning": "high" }
+      },
+      "semanticVerifier": { "provider": "deepseek-pro-direct", "model": "deepseek-v4-pro", "reasoning": "max" }
+    }
+  },
+  "defaultTier": 3,
+  "tiers": {
+    "1": {
+      "name": "GPT-5.6 Sol xhigh",
+      "provider": "sol-local",
+      "model": "gpt-5.6-sol",
+      "reasoning": "xhigh"
+    },
+    "2": {
+      "name": "DeepSeek Flash MAX",
+      "provider": "flash-max-direct",
+      "model": "deepseek-v4-flash",
+      "reasoning": "max"
+    },
+    "3": {
+      "name": "DeepSeek Flash High",
+      "provider": "flash-high-direct",
+      "model": "deepseek-v4-flash",
+      "reasoning": "high"
+    }
+  },
+  "initialRules": [
+    {
+      "id": "tier1-security-architecture-risk",
+      "tier": 1,
+      "complexity": "high",
+      "risk": "high",
+      "reason": "Security-sensitive, architectural, or high-risk cross-system work requires Tier 1 oversight.",
+      "patterns": [
+        "\\b(auth|authentication|authorization|permission|credential|secret|cryptograph|encryption|security|threat model)\\b",
+        "\\b(architecture decision|system architecture|cross-system decision|high-risk|high risk)\\b"
+      ]
+    },
+    {
+      "id": "tier2-substantial-implementation",
+      "tier": 2,
+      "complexity": "medium",
+      "risk": "medium",
+      "reason": "Substantial implementation, multi-file, integration, refactor, or complex debugging work fits Tier 2.",
+      "patterns": [
+        "\\b(refactor|multi-file|multiple files|integration|business logic|complex debugging|difficult debugging|difficult tests?)\\b",
+        "\\b(substantial implementation|feature work|medium complexity|high complexity|cross-system implementation)\\b"
+      ]
+    },
+    {
+      "id": "tier3-routine-work",
+      "tier": 3,
+      "complexity": "low",
+      "risk": "low",
+      "reason": "Exploration, routine implementation, documentation, tests, or narrow mechanical work fits Tier 3.",
+      "patterns": [
+        "\\b(find|locate|search|explore|summari[sz]e|repository exploration|file discovery)\\b",
+        "\\b(boilerplate|crud|documentation|docs|simple tests?|lint|type errors?|mechanical fix|narrow edit|low-risk|low risk)\\b"
+      ]
+    }
+  ],
+  "escalation": {
+    "repeatedAttemptThreshold": 2,
+    "repeatedVerificationThreshold": 2,
+    "immediateSignals": [
+      "blocker",
+      "serious-uncertainty",
+      "architecture-required",
+      "acceptance-unmet",
+      "broad-unrelated-changes",
+      "tier2-failed"
+    ],
+    "nonEscalatingSignals": [
+      "none",
+      "progress",
+      "minor-error"
+    ]
+  }
+}

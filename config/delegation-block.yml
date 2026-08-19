@@ -1,0 +1,58 @@
+# ── delegation and workflows ────────────────────────────────────────────────
+
+- id: delegation
+  name: cordis:group
+  group: true
+  isolate:
+    workflowEngine: true
+  config:
+    - id: tool-subagent-control
+      name: '@deepseek-ai/dsh-tool-subagent-control'
+
+    - id: tool-subagent-list-agents
+      name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+
+    - id: tier3-flash-worker
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: tier3_flash
+        backgroundMode: continuable
+        maxDepth: 1
+        agentOptions:
+          provider: flash-high-direct
+          model: deepseek-v4-flash
+          reasoningEffort: high
+        persona: >-
+          You are a fresh Tier 3 DeepSeek V4 Flash worker. Perform the bounded task you receive. The task must include its routing taskId and Tier 3 decision; if either is absent or mismatched, do not work and report a routing-record blocker. Prefer repository exploration, file discovery, summarization, boilerplate, simple CRUD, simple tests, documentation, mechanical fixes, straightforward lint/type errors, and low-risk narrow edits. Treat acceptance criteria as mandatory. Do not request escalation for one minor error. If the same relevant failure persists, deterministic verification repeatedly fails for the same reason, acceptance criteria remain unmet after repeated attempts, you face a blocker or serious uncertainty, architecture is required beyond scope, or your changes are becoming broad and unrelated, stop and report exactly one ROUTING_SIGNAL with the concrete evidence. You may report your bounded task finished, but you never have authority to declare the overall user objective complete. Avoid overlapping writes with other workers and report changed files plus verification evidence.
+
+    - id: tier2-flash-worker
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: tier2_flash_max
+        backgroundMode: continuable
+        maxDepth: 1
+        agentOptions:
+          provider: flash-max-direct
+          model: deepseek-v4-flash
+          reasoningEffort: max
+        persona: >-
+          You are a fresh Tier 2 DeepSeek V4 Flash MAX worker. The task must include its routing taskId and Tier 2 decision; if either is absent or mismatched, do not work and report a routing-record blocker. Perform substantial implementation, multi-file features, refactors, complex debugging, business logic, integration work, difficult tests, and medium/high-complexity edits within the bounded task and acceptance criteria you receive. Do not request escalation for one minor error. If genuinely blocked after repeated relevant attempts, security or architecture decisions exceed scope, or deterministic verification repeatedly fails for the same reason, stop and report exactly one ROUTING_SIGNAL with concrete evidence. You may report your bounded task finished, but you never have authority to declare the overall user objective complete. Avoid overlapping writes with other workers and report changed files plus verification evidence.
+
+    - id: tool-subagent-codex
+      name: '@deepseek-ai/dsh-tool-subagent'
+      disabled: !!js process.env.AIH_ENABLE_CODEX_SUBAGENT !== '1'
+      config:
+        provider: codex
+        toolName: subagent_codex
+        enableRunInBackground: false
+        maxDepth: provider-managed
+
+    - id: workflow-worker-thread
+      name: '@deepseek-ai/dsh-workflow-worker-thread'
+      config:
+        provider: spawn
+
+    - id: tool-workflow
+      name: '@deepseek-ai/dsh-tool-workflow'

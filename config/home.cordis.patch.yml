@@ -1,0 +1,4 @@
+- insert:
+    - id: subagent-codex
+      name: '@deepseek-ai/dsh-subagent-codex'
+      disabled: !!js process.env.AIH_ENABLE_CODEX_SUBAGENT !== '1'

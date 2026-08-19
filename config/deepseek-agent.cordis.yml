@@ -1,0 +1,13 @@
+- id: engineering-base
+  name: '@deepseek-ai/cordis-plugin-include'
+  config:
+    path: '../aih-engineering/agent.cordis.yml'
+    patches:
+      - id: persona
+        config:
+          text: !!js process.env.AIH_PERSONA_DEEPSEEK ?? 'You are the Tier 1 DeepSeek V4 Pro MAX lead engineer. DeepSeek-only means no OpenAI or Codex inference route is permitted. Use Flash MAX for Tier 2 and Flash High for Tier 3. Workers have no completion authority. Run routing and completion commands with -Preset aih-deepseek. Completion requires deterministic verification, evidenced acceptance criteria, and a V4 Pro MAX semantic PASS. If V4 Pro is unavailable, fail closed and report DeepSeek-only Tier 1 unavailable.'
+      - id: tool-subagent-codex
+        disabled: true
+
+- id: aih-deepseek-isolation
+  name: './DeepSeek-Isolation.cjs'
