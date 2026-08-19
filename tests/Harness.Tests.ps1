@@ -95,6 +95,8 @@ Assert-Aih ($null -eq $secretLeak) 'no credential value exists in source/config 
 $gitIgnore = Get-Content -Raw -LiteralPath (Join-Path $InstallRoot '.gitignore')
 Assert-Aih ($gitIgnore -match '(?m)^data/$' -and $gitIgnore -match '(?m)^app/$' -and $gitIgnore -match '(?m)^runtime/node/$') 'generated runtime, state, and credentials are excluded from Git'
 Assert-Aih ((Test-Path -LiteralPath (Join-Path $layout.Scripts 'Set-OpenAiOAuth.ps1')) -and (Test-Path -LiteralPath (Join-Path $layout.Bin 'aih-auth.cmd'))) 'per-user ChatGPT/Codex login helper is installed'
+$oauthSetupText = Get-Content -Raw -LiteralPath (Join-Path $layout.Scripts 'Set-OpenAiOAuth.ps1')
+Assert-Aih ($oauthSetupText -match '\$layout\.OAuth login --no-open') 'Windows OAuth login preserves the complete authorization URL'
 $previousCodexHome = $env:CODEX_HOME
 try {
     $env:CODEX_HOME = Join-Path ([IO.Path]::GetTempPath()) 'aih-custom-codex-home'

@@ -29,7 +29,7 @@ else {
 }
 
 if (-not $SkipOpenAiLogin) {
-    Write-Host '3/4 Opening the ChatGPT/Codex sign-in flow...'
+    Write-Host '3/4 Starting the ChatGPT/Codex sign-in flow...'
     & (Join-Path $InstallRoot 'scripts\Set-OpenAiOAuth.ps1') -InstallRoot $InstallRoot
 }
 else {

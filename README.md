@@ -31,7 +31,8 @@ The setup script will:
    `C:\AI-Harness`;
 2. ask for `DEEPSEEK_API_KEY` with hidden input and store it in a local,
    user-protected credential file;
-3. open a browser login for the current user's own ChatGPT/Codex account;
+3. print a complete browser-login URL for the current user's own ChatGPT/Codex
+   account;
 4. add `C:\AI-Harness\bin` to the user's `PATH` and run offline checks.
 
 Open a new terminal after setup. From any project repository, run:
@@ -65,8 +66,10 @@ person's `.codex\auth.json`, `data\.credentials.yaml`, or `.env` file.
 Normal Engineering uses the third-party `openai-oauth` npm package to expose a
 loopback-only OpenAI-compatible endpoint at `http://127.0.0.1:10531/v1`. The
 package uses the current Windows user's Codex-compatible auth file. Its login is
-interactive and opens a browser; credentials are never written into this
-repository.
+interactive and prints a complete URL to Ctrl+click or copy into a browser;
+credentials are never written into this repository. The wrapper deliberately
+uses `--no-open` because the package's Windows browser launcher can truncate
+OAuth query parameters containing `&`.
 
 Keep the proxy bound to `127.0.0.1`. Binding it to a LAN/public interface would
 let anyone who can reach the port use the authenticated account's quota.
