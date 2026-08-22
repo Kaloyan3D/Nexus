@@ -36,7 +36,40 @@ function Get-AihLayout {
         RoutingPolicy = Join-Path $root 'config\routing-policy.json'
         RoutingData = Join-Path $root 'data\routing'
         CompletionData = Join-Path $root 'data\completion'
+        EvaluationData = Join-Path $root 'data\evaluation'
     }
+}
+
+function Write-AihAtomicText {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Content
+    )
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $directory = Split-Path -Parent $fullPath
+    New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    $temporary = Join-Path $directory ('.' + [System.IO.Path]::GetFileName($fullPath) + '.' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        [System.IO.File]::WriteAllText($temporary, $Content, [Text.UTF8Encoding]::new($false))
+        if (Test-Path -LiteralPath $fullPath) {
+            try { [System.IO.File]::Replace($temporary, $fullPath, $null, $true) }
+            catch { Move-Item -LiteralPath $temporary -Destination $fullPath -Force }
+        }
+        else { Move-Item -LiteralPath $temporary -Destination $fullPath }
+    }
+    finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force } }
+}
+
+function Write-AihAtomicJson {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$Value, [int]$Depth = 20)
+    Write-AihAtomicText -Path $Path -Content ($Value | ConvertTo-Json -Depth $Depth)
+}
+
+function Add-AihJsonLine {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$Value, [int]$Depth = 20)
+    $directory = Split-Path -Parent ([System.IO.Path]::GetFullPath($Path))
+    New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    [System.IO.File]::AppendAllText($Path, (($Value | ConvertTo-Json -Depth $Depth -Compress) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
 }
 
 function Get-AihVersions {

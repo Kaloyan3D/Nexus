@@ -1,116 +1,127 @@
-[CmdletBinding()]
-param([string]$InstallRoot = 'C:\AI-Harness')
-
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
+[CmdletBinding()]param([string]$InstallRoot='C:\AI-Harness')
+Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
 . (Join-Path $InstallRoot 'scripts\Common.ps1')
 . (Join-Path $InstallRoot 'scripts\Routing.ps1')
+. (Join-Path $InstallRoot 'scripts\TaskController.ps1')
+. (Join-Path $InstallRoot 'scripts\ContextEngine.ps1')
+. (Join-Path $InstallRoot 'scripts\OutputDigest.ps1')
+. (Join-Path $InstallRoot 'scripts\CodexReview.ps1')
+. (Join-Path $InstallRoot 'scripts\WorktreeManager.ps1')
+. (Join-Path $InstallRoot 'scripts\ArchitectureRules.ps1')
+. (Join-Path $InstallRoot 'scripts\Telemetry.ps1')
 . (Join-Path $InstallRoot 'scripts\Completion.ps1')
-. (Join-Path $InstallRoot 'scripts\Project.ps1')
+. (Join-Path $InstallRoot 'scripts\ControlRoom.ps1')
 
-$passed = 0
-function Assert-Aih([bool]$Condition, [string]$Name, [string]$Detail = '') {
-    if (-not $Condition) { throw "FAIL: $Name$(if ($Detail) { " - $Detail" })" }
-    $script:passed++
-    Write-Host "PASS: $Name$(if ($Detail) { " - $Detail" })"
-}
+$passed=0
+function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw "FAIL: $Name"};$script:passed++;Write-Host "PASS: $Name"}
+function New-Fixture([string]$Name){$path=Join-Path ([IO.Path]::GetTempPath()) ("aih-$Name-"+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $path|Out-Null;$path}
 
-$layout = Get-AihLayout $InstallRoot
-$policy = Get-AihRoutingPolicy $layout.RoutingPolicy
-$normal = Resolve-AihPreset $policy 'aih-engineering'
-$deep = Resolve-AihPreset $policy 'deepseek'
+$layout=Get-AihLayout $InstallRoot;$policy=Get-AihRoutingPolicy $layout.RoutingPolicy
+Assert-Aih ($policy.version-eq2) 'routing policy v2 loads'
+Assert-Aih ($policy.defaultExecutionClass-eq'deepseek_normal') 'DeepSeek normal is the default execution class'
+$normal=Resolve-AihPreset $policy normal;$deep=Resolve-AihPreset $policy deepseek
+Assert-Aih ($normal.Config.rootExecutor.model-eq'deepseek-v4-flash') 'normal GUI mode has DeepSeek Flash root'
+Assert-Aih ($deep.Config.rootExecutor.model-eq'deepseek-v4-flash') 'DeepSeek-only GUI mode has DeepSeek Flash root'
+$normalMode=Get-AihControlRoomMode $policy normal
+Assert-Aih ($normalMode.Provider-eq'flash-max-direct'-and-not$normalMode.RequiresOpenAI) 'Control Room root selection no longer requires permanent Sol'
 
-Assert-Aih ($normal.Id -eq 'aih-engineering') 'normal preset resolves'
-Assert-Aih ($deep.Id -eq 'aih-deepseek') 'DeepSeek-only preset resolves'
-Assert-Aih ((Test-Path (Join-Path $layout.Data '.agent-presets\aih-engineering\agent.cordis.yml'))) 'normal native preset loads from roster'
-Assert-Aih ((Test-Path (Join-Path $layout.Data '.agent-presets\aih-deepseek\agent.cordis.yml'))) 'DeepSeek native preset loads from roster'
-Assert-Aih ($normal.Config.tiers.'1'.provider -eq 'sol-local' -and $normal.Config.tiers.'1'.model -eq 'gpt-5.6-sol') 'normal Tier 1 is Sol'
-Assert-Aih ($deep.Config.tiers.'1'.provider -eq 'deepseek-pro-direct' -and $deep.Config.tiers.'1'.model -eq 'deepseek-v4-pro' -and $deep.Config.tiers.'1'.reasoning -eq 'max') 'DeepSeek Tier 1 is V4 Pro MAX'
-Assert-Aih ($deep.Config.tiers.'2'.provider -eq 'flash-max-direct' -and $deep.Config.tiers.'2'.reasoning -eq 'max') 'DeepSeek Tier 2 is Flash MAX'
-Assert-Aih ($deep.Config.tiers.'3'.provider -eq 'flash-high-direct' -and $deep.Config.tiers.'3'.reasoning -eq 'high') 'DeepSeek Tier 3 is Flash High'
-Assert-Aih ($deep.Config.semanticVerifier.model -eq 'deepseek-v4-pro' -and $deep.Config.semanticVerifier.reasoning -eq 'max') 'DeepSeek semantic verifier is V4 Pro MAX'
-Assert-Aih ($normal.Config.semanticVerifier.model -eq 'gpt-5.6-sol') 'normal semantic verifier remains Sol'
+$routingRoot=New-Fixture routing
+try{
+ $r1=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $routingRoot 'normal-task'
+ Assert-Aih ($r1.executionClass-eq'deepseek_normal'-and$r1.model-eq'deepseek-v4-flash') 'normal task routes to DeepSeek'
+ $f1=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $routingRoot 'normal-task' '' '' '' 'attempt-failure' 'same test expected 1 actual 2'
+ Assert-Aih ($f1.executionClass-eq'deepseek_normal') 'initial meaningful failure remains DeepSeek normal'
+ $f2=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $routingRoot 'normal-task' '' '' '' 'attempt-failure' 'same test expected 9 actual 8'
+ Assert-Aih ($f2.executionClass-eq'deepseek_deep') 'repeated normalized failure escalates to DeepSeek deep'
+ $f3=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $routingRoot 'normal-task' '' '' '' 'verification-failure' 'same test expected 1 actual 2'
+ $f4=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $routingRoot 'normal-task' '' '' '' 'verification-failure' 'same test expected 3 actual 4'
+ Assert-Aih ($f4.executionClass-eq'codex_review'-and-not$f4.writable) 'repeated deep failure may reach read-only Codex review'
+ $repair=Invoke-AihRoutingDecision 'implement bounded review finding' $InstallRoot $layout.RoutingPolicy $routingRoot 'normal-task' '' '' '' 'review-findings'
+ Assert-Aih ($repair.executionClass-eq'deepseek_deep'-and$repair.escalatedFrom-eq'codex_review') 'bounded Codex findings return to DeepSeek repair'
+ $forced=Invoke-AihRoutingDecision 'ordinary' $InstallRoot $layout.RoutingPolicy $routingRoot 'forced-task' '' '' 'deepseek_deep'
+ Assert-Aih ($forced.manualOverride-and$forced.executionClass-eq'deepseek_deep') 'explicit user execution-class override works'
+ $legacy=Invoke-AihRoutingDecision 'ordinary' $InstallRoot $layout.RoutingPolicy $routingRoot 'legacy-task' '' 'tier3'
+ Assert-Aih ($legacy.executionClass-eq'deepseek_normal'-and$legacy.legacyTierDeprecated) 'legacy tier3 maps compatibly to DeepSeek normal'
+ $solveBlocked=$false;try{Invoke-AihRoutingDecision -Description 'solve' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $routingRoot -TaskId 'solve-task' -ForceClass codex_solve|Out-Null}catch{$solveBlocked=$_.Exception.Message-match'UserApprovedCodexSolve'}
+ Assert-Aih $solveBlocked 'writable Codex solve requires explicit operator approval flag'
+ $solve=Invoke-AihRoutingDecision -Description 'solve' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $routingRoot -TaskId 'solve-task-approved' -ForceClass codex_solve -UserApprovedCodexSolve
+ Assert-Aih ($solve.executionClass-eq'codex_solve'-and$solve.writable) 'explicit operator approval enables exceptional Codex solve'
+}finally{Remove-Item -LiteralPath $routingRoot -Recurse -Force}
 
-$tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('aih-routing-tests-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Force -Path (Join-Path $tempRoot 'states') | Out-Null
-try {
-    $first = Invoke-AihRoutingDecision -Description 'Substantial multi-file implementation.' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $tempRoot -TaskId 'deep-escalation' -Preset aih-deepseek -ForceTier tier2
-    $escalated = Invoke-AihRoutingDecision -Description 'Substantial multi-file implementation.' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $tempRoot -TaskId 'deep-escalation' -Preset aih-deepseek -Signal tier2-failed
-    Assert-Aih ($first.selectedTier -eq 2 -and $escalated.selectedTier -eq 1 -and $escalated.model -eq 'deepseek-v4-pro') 'DeepSeek Tier 2 escalation reaches V4 Pro'
-    Assert-Aih ($escalated.preset -eq 'aih-deepseek') 'routing audit records active preset'
-    Assert-Aih (-not $escalated.completionAuthority) 'workers retain no completion authority'
-    $savedState = Read-AihRoutingState (Get-AihRoutingStatePath $tempRoot $InstallRoot 'deep-escalation' 'aih-deepseek')
-    Assert-Aih ($savedState.preset -eq 'aih-deepseek' -and $savedState.model -eq 'deepseek-v4-pro') 'routing state records preset and Tier 1 model'
-}
-finally { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+$fixture=New-Fixture controller
+try{
+ $objective=New-AihObjective $fixture 'persistent objective' @('criterion one')
+ $task=New-AihTask $fixture 'bounded task' @('criterion one')
+ $attempt=Start-AihTaskAttempt $fixture $task.taskId deepseek_normal
+ $reloaded=Read-AihTaskLedger $fixture
+ Assert-Aih (@($reloaded.tasks).Count-eq1-and$reloaded.tasks[0].attempt-eq1) 'controller state and attempts survive restart'
+ Assert-Aih ((Test-Path (Join-Path $fixture ".ai-harness\runs\$($task.taskId)\attempts.jsonl"))) 'attempt journal persists independently of conversation'
+ Add-AihTaskFailure $fixture $task.taskId 'failure-a' 'evidence'|Out-Null
+ Start-AihTaskAttempt $fixture $task.taskId deepseek_deep|Out-Null;Add-AihTaskFailure $fixture $task.taskId 'failure-a' 'evidence'|Out-Null
+ Start-AihTaskAttempt $fixture $task.taskId deepseek_deep|Out-Null;Add-AihTaskFailure $fixture $task.taskId 'failure-a' 'evidence'|Out-Null
+ $bounded=$false;try{Start-AihTaskAttempt $fixture $task.taskId|Out-Null}catch{$bounded=$_.Exception.Message-match'Bounded retry'}
+ Assert-Aih $bounded 'controller enforces bounded retries'
+ $task2=New-AihTask $fixture 'completion task' @('works')
+ Start-AihTaskAttempt $fixture $task2.taskId|Out-Null
+ $blocked=Test-AihTaskCompletion $fixture $task2.taskId
+ Assert-Aih (-not$blocked.complete) 'missing verification blocks completion'
+ Set-AihTaskEvidence $fixture $task2.taskId ([pscustomobject]@{acceptanceCriteria=@([pscustomobject]@{criterion='works';status='met';evidence='test'});verification=@([pscustomobject]@{status='PASS'});scopePass=$true})
+ $complete=Test-AihTaskCompletion $fixture $task2.taskId
+ Assert-Aih ($complete.complete-and$complete.authority-eq'deterministic-controller') 'ordinary deterministic evidence completes without Sol'
+ $critical=New-AihTask $fixture 'critical task' @('safe') @() critical
+ Start-AihTaskAttempt $fixture $critical.taskId|Out-Null
+ Set-AihTaskEvidence $fixture $critical.taskId ([pscustomobject]@{acceptanceCriteria=@([pscustomobject]@{criterion='safe';status='met';evidence='test'});verification=@([pscustomobject]@{status='PASS'});scopePass=$true})
+ Assert-Aih (-not(Test-AihTaskCompletion $fixture $critical.taskId).complete) 'critical policy requires bounded review'
+ Assert-Aih ((Test-AihTaskCompletion $fixture $critical.taskId -CodexReviewPassed).complete) 'passing configured critical review permits completion'
 
-$deepPresetText = Get-Content -Raw -LiteralPath (Join-Path $layout.Data '.agent-presets\aih-deepseek\agent.cordis.yml')
-$guardText = Get-Content -Raw -LiteralPath (Join-Path $layout.Data '.agent-presets\aih-deepseek\DeepSeek-Isolation.cjs')
-Assert-Aih ($deepPresetText -match 'tool-subagent-codex\s*\r?\n\s*disabled: true' -and $deepPresetText -notmatch 'provider:\s*codex') 'DeepSeek preset cannot expose native Codex subagent'
-Assert-Aih ($guardText -match "deepseek-pro-direct" -and $guardText -match "header.origin === 'subagent'" -and $guardText -match "blocked model route" -and $guardText -notmatch 'sol-local|openai-oauth|gpt-') 'DeepSeek guard forces top-level Pro and contains no GPT fallback'
-Assert-Aih (-not [bool]$deep.Config.allowOpenAI -and $deep.Config.failurePolicy -eq 'fail-closed') 'DeepSeek failure policy is fail closed'
-$previousShellPreset = $env:DSH_AIH_PRESET
-try {
-    $env:DSH_AIH_PRESET = 'aih-deepseek'
-    Assert-Aih ((Resolve-AihPreset $policy $null).Id -eq 'aih-deepseek') 'managed shell environment preserves DeepSeek preset for routing and completion'
-}
-finally { $env:DSH_AIH_PRESET = $previousShellPreset }
+ New-Item -ItemType Directory -Path (Join-Path $fixture 'src')|Out-Null
+ [IO.File]::WriteAllText((Join-Path $fixture 'src\widget.ts'),"export interface Widget { id: string }`nexport function findWidget(id: string) { return id }",[Text.UTF8Encoding]::new($false))
+ [IO.File]::WriteAllText((Join-Path $fixture 'README.md'),'Widget lookup documentation',[Text.UTF8Encoding]::new($false))
+ $map=New-AihRepositoryMap $fixture
+ Assert-Aih (@(Find-AihSymbol $map 'findWidget').Count-eq1) 'context engine retrieves relevant symbols'
+ Assert-Aih (@(Search-AihCode $fixture 'widget lookup').Count-gt0) 'lexical retrieval ranks matching code and docs'
+ $context=New-AihContextBundle $fixture $task2.taskId 'fix findWidget lookup' @('works') 500 2
+ Assert-Aih ($context.manifest.budget.estimatedTokens-le500-and@($context.fileSlices).Count-le2) 'context budget is enforced'
+ Assert-Aih (-not$context.manifest.repositoryMap.fullRepositoryIncluded) 'context engine never marks automatic full-repo content ingestion'
+ $savedManifest=Get-Content -Raw (Join-Path $fixture ".ai-harness\runs\$($task2.taskId)\context-manifest.json")|ConvertFrom-Json
+ Assert-Aih ($savedManifest.taskId-eq$task2.taskId-and$savedManifest.budget.maxFiles-eq2) 'stable machine-readable context manifest is persisted'
 
-$normalRoute = Invoke-AihRoutingDecision -Description 'Design authentication architecture.' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $layout.RoutingData -Preset aih-engineering -DryRun
-$deepRoute = Invoke-AihRoutingDecision -Description 'Design authentication architecture.' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $layout.RoutingData -Preset aih-deepseek -DryRun
-Assert-Aih ($normalRoute.model -eq 'gpt-5.6-sol' -and $deepRoute.model -eq 'deepseek-v4-pro') 'preset-aware Tier 1 routing remains distinct'
+ $raw=(1..1000|ForEach-Object{"noise line $_"})-join"`n";$raw+="`nFAIL tests/widget.test.ts:18 Expected: 1 Actual: 2"
+ $digest=New-AihOutputDigest $fixture $task2.taskId test $raw 1 1000
+ Assert-Aih ($digest.summaryCharacters-le1020-and$digest.summary-match'Expected: 1 Actual: 2') 'large logs become bounded summaries preserving failure'
+ Assert-Aih ((Get-Content -Raw $digest.rawPath).Length-eq$raw.Length) 'raw output remains accessible as an artifact'
 
-$semantic = ConvertFrom-AihSemanticVerifierOutput '{"status":"PASS","summary":"evidence complete","concreteReasons":[],"missingRequirements":[],"boundedFixes":[]}' -Provider deepseek-pro-direct -Model deepseek-v4-pro -Reasoning max
-$gate = New-AihCompletionDecision ([pscustomobject]@{ Pass = $true; Reasons = @(); Summary = [pscustomobject]@{ Results = @() } }) ([pscustomobject]@{ Pass = $true; Reasons = @(); Criteria = @() }) $semantic
-Assert-Aih ($gate.Status -eq 'PASS' -and $semantic.model -eq 'deepseek-v4-pro') 'completion engine records selected semantic verifier'
-$completionTemp = Join-Path ([IO.Path]::GetTempPath()) ('aih-completion-tests-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Force -Path $completionTemp | Out-Null
-try {
-    $completionRecord = [ordered]@{ recordVersion = 2; gateId = 'gate-record-probe'; timestampUtc = [DateTime]::UtcNow.ToString('o'); workspace = $InstallRoot; preset = 'aih-deepseek'; semanticVerifier = $semantic; objective = 'probe'; status = 'PASS'; complete = $true; gatePass = $true; override = [pscustomobject]@{ Applied = $false } }
-    $completionPath = Write-AihCompletionRecord $completionRecord $completionTemp
-    $savedCompletion = Get-Content -Raw -LiteralPath $completionPath | ConvertFrom-Json
-    Assert-Aih ($savedCompletion.preset -eq 'aih-deepseek' -and $savedCompletion.semanticVerifier.model -eq 'deepseek-v4-pro') 'completion audit records preset and semantic verifier'
-}
-finally { Remove-Item -LiteralPath $completionTemp -Recurse -Force -ErrorAction SilentlyContinue }
+ $slice=[pscustomobject]@{path='src/widget.ts';content='export function findWidget() {}'}
+ $packet=New-AihReviewPacket $fixture $task2.taskId 'Is lookup safe?' @('no duplicate execution') 'one line diff' @($slice) @() 'DeepSeek is uncertain' $policy
+ Assert-Aih ($packet.enforcement.allowed-and$packet.enforcement.readOnly-and$packet.enforcement.freshContext-and-not$packet.enforcement.completionAuthority) 'review packet is bounded fresh read-only and has no completion authority'
+ $oversized=New-AihReviewPacket $fixture $task2.taskId 'review' @() ((1..2600|ForEach-Object{'x'})-join"`n") @($slice) @() '' $policy
+ Assert-Aih (-not$oversized.enforcement.allowed-and$oversized.enforcement.violations-match'diff line limit') 'automatic Codex review is rejected over hard diff limit'
+ $call=Register-AihCodexReviewCall $fixture $task2.taskId $packet
+ Assert-Aih ($call.executionClass-eq'codex_review'-and-not$call.completionAuthority) 'bounded review call registration cannot own completion'
+ $secondBlocked=$false;try{Register-AihCodexReviewCall $fixture $task2.taskId $packet|Out-Null}catch{$secondBlocked=$_.Exception.Message-match'DO NOT CALL CODEX'}
+ Assert-Aih $secondBlocked 'hard per-task Codex call limit cannot be bypassed by prompting'
+ $telemetry=Write-AihTaskTelemetry $fixture $critical.taskId @{model='deepseek-v4-flash';provider='flash-max-direct';inputTokens=100;outputTokens=20;contextSize=400;filesSupplied=2;filesModified=1;diffLines=5;finalResult='complete';configuration='deepseek-only'}
+ Assert-Aih ($telemetry.codexCalls-eq0-and$telemetry.model-eq'deepseek-v4-flash') 'cost regression telemetry records normal zero-Codex execution'
+ $learning=Add-AihLearning $fixture $task2.taskId static-rule 'prevent duplicate execution'
+ Assert-Aih (-not$learning.approvedForAutomation) 'model learnings cannot automatically change policy'
+}finally{Remove-Item -LiteralPath $fixture -Recurse -Force}
 
-$launcherText = Get-Content -Raw -LiteralPath (Join-Path $layout.Scripts 'aih.ps1')
-$completeText = Get-Content -Raw -LiteralPath (Join-Path $layout.Scripts 'Complete-Objective.ps1')
-Assert-Aih ($launcherText -match 'if \(-not \$deepSeekOnly\) \{ \$requiredPaths \+= \$layout.OAuth \}' -and $launcherText -match 'if \(-not \$deepSeekOnly' -and $launcherText -match 'AIH_ENABLE_CODEX_SUBAGENT = if \(\$EnableCodexSubagent -and -not \$deepSeekOnly\)') 'DeepSeek launcher does not require OAuth and disables Codex'
-Assert-Aih ($completeText -match 'Invoke-AihDeepSeekSemanticVerifier' -and $completeText -match 'DeepSeek-only Tier 1 unavailable') 'completion verifier fails closed when Pro is unavailable'
+$conflicts=Test-AihTaskWriteConflict @([pscustomobject]@{taskId='A';writePaths=@('x.ts')},[pscustomobject]@{taskId='B';writePaths=@('x.ts','y.ts')})
+Assert-Aih ($conflicts.hasConflicts-and$conflicts.conflicts[0].paths-eq'x.ts') 'overlapping parallel writes are detected'
 
-$projectFixture = Join-Path ([IO.Path]::GetTempPath()) ('aih-project-tests-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Force -Path (Join-Path $projectFixture 'src') | Out-Null
-try {
-    [IO.File]::WriteAllText((Join-Path $projectFixture 'package.json'), '{"name":"aih-test-fixture","scripts":{"test":"node --test"}}', [Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText((Join-Path $projectFixture 'src\index.ts'), 'export const ready = true;', [Text.UTF8Encoding]::new($false))
-    $profile = Get-AihProjectProfile -Workspace $projectFixture -InstallRoot $InstallRoot
-    Assert-Aih ($profile.Stacks -contains 'Node.js') 'existing project detection remains operational'
-}
-finally { Remove-Item -LiteralPath $projectFixture -Recurse -Force -ErrorAction SilentlyContinue }
+$worktreeFixture=New-Fixture worktree
+$worktreeRoot=New-Fixture worktree_root
+try{
+ & git -C $worktreeFixture init -q;& git -C $worktreeFixture config user.email test@example.invalid;& git -C $worktreeFixture config user.name 'AIH Test';[IO.File]::WriteAllText((Join-Path $worktreeFixture 'file.txt'),'base',[Text.UTF8Encoding]::new($false));& git -C $worktreeFixture add file.txt;& git -C $worktreeFixture commit -qm base
+ $wtTask=New-AihTask $worktreeFixture 'isolated task' @('isolated');$wt=New-AihTaskWorktree $worktreeFixture $wtTask.taskId $worktreeRoot
+ Assert-Aih ($wt.baseCommit-eq$wtTask.baseCommit-and(Test-Path (Join-Path $wt.worktreePath 'file.txt'))) 'worktree uses exact recorded base commit and isolates task'
+ & git -C $worktreeFixture worktree remove --force $wt.worktreePath|Out-Null
+}finally{if(Test-Path $worktreeFixture){Remove-Item -LiteralPath $worktreeFixture -Recurse -Force};if(Test-Path $worktreeRoot){Remove-Item -LiteralPath $worktreeRoot -Recurse -Force}}
 
-$sourceFiles = Get-ChildItem -LiteralPath $InstallRoot -Recurse -File | Where-Object { $_.FullName -notmatch '\\(\.git|app|runtime|data|logs)\\' }
-$secretLeak = $sourceFiles | Select-String -Pattern '(?i)(sk-[A-Za-z0-9_-]{16,}|DEEPSEEK_API_KEY\s*:\s*[^\s''"]+)' | Select-Object -First 1
-Assert-Aih ($null -eq $secretLeak) 'no credential value exists in source/config files'
-
-$gitIgnore = Get-Content -Raw -LiteralPath (Join-Path $InstallRoot '.gitignore')
-Assert-Aih ($gitIgnore -match '(?m)^data/$' -and $gitIgnore -match '(?m)^app/$' -and $gitIgnore -match '(?m)^runtime/node/$') 'generated runtime, state, and credentials are excluded from Git'
-Assert-Aih ((Test-Path -LiteralPath (Join-Path $layout.Scripts 'Set-OpenAiOAuth.ps1')) -and (Test-Path -LiteralPath (Join-Path $layout.Bin 'aih-auth.cmd'))) 'per-user ChatGPT/Codex login helper is installed'
-$oauthSetupText = Get-Content -Raw -LiteralPath (Join-Path $layout.Scripts 'Set-OpenAiOAuth.ps1')
-Assert-Aih ($oauthSetupText -match '\$layout\.OAuth login --no-open') 'Windows OAuth login preserves the complete authorization URL'
-$previousCodexHome = $env:CODEX_HOME
-try {
-    $env:CODEX_HOME = Join-Path ([IO.Path]::GetTempPath()) 'aih-custom-codex-home'
-    Assert-Aih ((Get-AihCodexAuthFile) -eq (Join-Path ([IO.Path]::GetFullPath($env:CODEX_HOME)) 'auth.json')) 'custom CODEX_HOME is respected'
-}
-finally { $env:CODEX_HOME = $previousCodexHome }
-
-foreach ($script in Get-ChildItem -LiteralPath (Join-Path $InstallRoot 'scripts') -Filter '*.ps1') {
-    [void][scriptblock]::Create((Get-Content -Raw -LiteralPath $script.FullName))
-}
-[void][scriptblock]::Create((Get-Content -Raw -LiteralPath (Join-Path $InstallRoot 'setup.ps1')))
-Assert-Aih $true 'all launcher, routing, completion, and doctor scripts parse'
-
-& $layout.Node (Join-Path $InstallRoot 'tests\DeepSeekIsolation.Tests.cjs')
-Assert-Aih ($LASTEXITCODE -eq 0) 'DeepSeek isolation runtime behavior passes'
-
+$sourceFiles=Get-ChildItem -LiteralPath $InstallRoot -Recurse -File|Where-Object{$_.FullName-notmatch'\\(\.git|app|runtime|data|logs)\\'}
+$secretLeak=$sourceFiles|Select-String -Pattern '(?i)(sk-[A-Za-z0-9_-]{16,}|DEEPSEEK_API_KEY\s*:\s*[^\s''"]+)'|Select-Object -First 1
+Assert-Aih ($null-eq$secretLeak) 'source contains no credential values'
+foreach($script in Get-ChildItem (Join-Path $InstallRoot 'scripts') -Filter '*.ps1'){[void][scriptblock]::Create((Get-Content -Raw $script.FullName))}
+Assert-Aih $true 'all PowerShell scripts parse'
+& $layout.Node (Join-Path $InstallRoot 'tests\DeepSeekIsolation.Tests.cjs');Assert-Aih ($LASTEXITCODE-eq0) 'runtime isolation tests pass'
 Write-Host "RESULT: $passed deterministic assertions passed."

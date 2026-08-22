@@ -6,12 +6,15 @@ param(
     [string]$Kind = 'all',
     [switch]$ContinueOnFailure,
     [switch]$Json
+    ,[string]$TaskId
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Common.ps1')
 . (Join-Path $PSScriptRoot 'Project.ps1')
+. (Join-Path $PSScriptRoot 'OutputDigest.ps1')
+. (Join-Path $PSScriptRoot 'ArchitectureRules.ps1')
 
 function ConvertTo-AihArgument {
     param([string]$Value)
@@ -154,6 +157,14 @@ $results = [System.Collections.Generic.List[object]]::new()
 foreach ($command in $commands) {
     if (-not $Json) { Write-Host "RUN  [$($command.Kind)] $($command.Name): $($command.Display)" }
     $result = Invoke-AihVerificationCommand $command
+    if (-not [string]::IsNullOrWhiteSpace($TaskId) -and (($result.StandardOutput.Length + $result.StandardError.Length) -gt 8000)) {
+        $raw = @($result.StandardOutput, $result.StandardError) -join [Environment]::NewLine
+        $digestKind = if ($result.Kind -in @('test','build','typecheck','lint')) { $result.Kind } else { 'other' }
+        $digest = New-AihOutputDigest -Workspace $profile.Workspace -TaskId $TaskId -Kind $digestKind -RawOutput $raw -ExitCode $(if ($result.Status -eq 'PASS') { 0 } else { 1 })
+        $result.StandardOutput = $digest.summary
+        $result.StandardError = ''
+        $result | Add-Member -NotePropertyName RawOutputPath -NotePropertyValue $digest.rawPath
+    }
     $results.Add($result)
     if (-not $Json) {
         Write-Host "$($result.Status) $($result.Name) ($($result.DurationSeconds)s)"
@@ -162,6 +173,10 @@ foreach ($command in $commands) {
         if ($result.Error) { Write-Host $result.Error }
     }
     if ($result.Status -eq 'FAIL' -and -not $ContinueOnFailure) { break }
+}
+$architecture = Invoke-AihArchitectureRules $profile.Workspace
+if ($Kind -in @('all','verify')) {
+    $results.Add([pscustomobject]@{ Name='architecture:rules'; Kind='verify'; Status=$architecture.status; ExitCode=if($architecture.status -eq 'PASS'){0}else{1}; DurationSeconds=0; Command='aih-rules'; WorkingDirectory=$profile.Workspace; StandardOutput=($architecture | ConvertTo-Json -Depth 8 -Compress); StandardError=''; Error=$null })
 }
 $failed = @($results | Where-Object Status -eq 'FAIL').Count
 $summary = [pscustomobject]@{ Workspace = $profile.Workspace; Kind = $Kind; Passed = @($results | Where-Object Status -eq 'PASS').Count; Failed = $failed; Skipped = @($results | Where-Object Status -eq 'SKIP').Count; Results = @($results) }

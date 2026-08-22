@@ -41,21 +41,21 @@ function ConvertFrom-AihSemanticVerifierOutput {
         [Parameter(Mandatory = $true)][string]$Text,
         [string]$Provider = 'sol-local',
         [string]$Model = 'gpt-5.6-sol',
-        [string]$Reasoning = 'xhigh'
+        [string]$Reasoning = 'medium'
     )
     $candidate = $Text.Trim()
     if ($candidate -match '(?s)^```(?:json)?\s*(\{.*\})\s*```$') { $candidate = $Matches[1] }
-    try { $result = $candidate | ConvertFrom-Json } catch { throw "Tier 1 semantic verifier did not return valid JSON: $($_.Exception.Message)" }
+    try { $result = $candidate | ConvertFrom-Json } catch { throw "Bounded completion assessment did not return valid JSON: $($_.Exception.Message)" }
     $status = ([string](Get-AihPropertyValue $result 'status' '')).ToUpperInvariant()
-    if ($status -notin @('PASS', 'FAIL')) { throw 'Tier 1 semantic verifier status must be PASS or FAIL.' }
+    if ($status -notin @('PASS', 'FAIL')) { throw 'Bounded completion assessment status must be PASS or FAIL.' }
     $summary = [string](Get-AihPropertyValue $result 'summary' '')
-    if ([string]::IsNullOrWhiteSpace($summary)) { throw 'Tier 1 semantic verifier must provide a summary.' }
+    if ([string]::IsNullOrWhiteSpace($summary)) { throw 'Bounded completion assessment must provide a summary.' }
     $reasons = @((Get-AihPropertyValue $result 'concreteReasons' @()) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $missing = @((Get-AihPropertyValue $result 'missingRequirements' @()) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $fixes = @((Get-AihPropertyValue $result 'boundedFixes' @()) | ForEach-Object {
         [pscustomobject]@{ description = [string](Get-AihPropertyValue $_ 'description' ''); acceptanceCriteria = @((Get-AihPropertyValue $_ 'acceptanceCriteria' @()) | ForEach-Object { [string]$_ }) }
     } | Where-Object { -not [string]::IsNullOrWhiteSpace($_.description) })
-    if ($status -eq 'FAIL' -and $reasons.Count -eq 0) { throw 'Tier 1 semantic verifier FAIL must include concreteReasons.' }
+    if ($status -eq 'FAIL' -and $reasons.Count -eq 0) { throw 'Bounded completion assessment FAIL must include concreteReasons.' }
     [pscustomobject]@{ status = $status; summary = $summary; concreteReasons = $reasons; missingRequirements = $missing; boundedFixes = $fixes; tier = 1; provider = $Provider; model = $Model; reasoning = $Reasoning }
 }
 
@@ -72,7 +72,7 @@ function Get-AihResponsesOutputText {
             }
         }
     }
-    if ($parts.Count -eq 0) { throw 'Tier 1 Responses API returned no output_text content.' }
+    if ($parts.Count -eq 0) { throw 'Bounded assessment response contained no output_text.' }
     return $parts -join "`n"
 }
 
@@ -105,9 +105,9 @@ function Get-AihBoundedFixes {
         $fixes.Add([pscustomobject]@{ source = 'acceptance-criteria'; description = "Correct acceptance-criteria accounting: $reason"; acceptanceCriteria = @('Every acceptance criterion has a unique id, nonempty text, met status, and concrete evidence.') })
     }
     if ($null -ne $Semantic -and $Semantic.status -eq 'FAIL') {
-        foreach ($fix in @($Semantic.boundedFixes)) { $fixes.Add([pscustomobject]@{ source = 'tier1-semantic-verifier'; description = $fix.description; acceptanceCriteria = @($fix.acceptanceCriteria) }) }
+        foreach ($fix in @($Semantic.boundedFixes)) { $fixes.Add([pscustomobject]@{ source = 'bounded-review'; description = $fix.description; acceptanceCriteria = @($fix.acceptanceCriteria) }) }
         if (@($Semantic.boundedFixes).Count -eq 0) {
-            foreach ($reason in @($Semantic.concreteReasons)) { $fixes.Add([pscustomobject]@{ source = 'tier1-semantic-verifier'; description = "Address semantic verifier failure: $reason"; acceptanceCriteria = @('Tier 1 semantic verifier no longer reports this failure.') }) }
+            foreach ($reason in @($Semantic.concreteReasons)) { $fixes.Add([pscustomobject]@{ source = 'bounded-review'; description = "Address bounded review failure: $reason"; acceptanceCriteria = @('The bounded review finding is resolved with deterministic evidence.') }) }
         }
     }
     @($fixes)
@@ -126,8 +126,8 @@ function New-AihCompletionDecision {
     foreach ($reason in @($Deterministic.Reasons)) { $reasons.Add($reason) }
     foreach ($reason in @($Acceptance.Reasons)) { $reasons.Add($reason) }
     if ($null -eq $Semantic -or $Semantic.status -ne 'PASS') {
-        if ($null -eq $Semantic) { $reasons.Add('Tier 1 semantic verification was not run because a prerequisite gate failed.') }
-        else { foreach ($reason in @($Semantic.concreteReasons)) { $reasons.Add("Tier 1 semantic verifier: $reason") } }
+        if ($null -eq $Semantic) { $reasons.Add('Controller completion assessment was not produced because a prerequisite gate failed.') }
+        else { foreach ($reason in @($Semantic.concreteReasons)) { $reasons.Add("Completion assessment: $reason") } }
     }
     $basePass = $Deterministic.Pass -and $Acceptance.Pass -and $null -ne $Semantic -and $Semantic.status -eq 'PASS'
     if ($Override) {
@@ -143,7 +143,7 @@ function Invoke-AihCompletionFixRouting {
     param([object[]]$Fixes, [string]$GateId, [string]$Workspace, [string]$PolicyPath, [string]$RoutingData, [string]$Preset)
     $records = [System.Collections.Generic.List[object]]::new()
     $fallbackPreset = Resolve-AihPreset (Get-AihRoutingPolicy $PolicyPath) $Preset
-    $fallbackTier = $fallbackPreset.Config.tiers.'1'
+    $fallbackRoute = (Get-AihRoutingPolicy $PolicyPath).executionClasses.deepseek_deep
     for ($index = 0; $index -lt $Fixes.Count; $index++) {
         $taskId = "$GateId-fix-$('{0:d3}' -f ($index + 1))"
         try {
@@ -151,7 +151,7 @@ function Invoke-AihCompletionFixRouting {
             $records.Add([pscustomobject]@{ fix = $Fixes[$index]; dispatchStatus = 'routed'; routingError = $null; routingDecision = $record })
         }
         catch {
-            $fallback = [pscustomobject]@{ recordVersion = 2; taskId = $taskId; workspace = $Workspace; preset = $fallbackPreset.Id; description = $Fixes[$index].description; selectedTier = 1; selectedRoute = [string]$fallbackTier.name; provider = [string]$fallbackTier.provider; model = [string]$fallbackTier.model; reasoning = [string]$fallbackTier.reasoning; reason = "Automatic routing failed; explicit Tier 1 operator dispatch is required: $($_.Exception.Message)"; complexity = 'high'; risk = 'high'; escalatedFrom = $null; manualOverride = $false; signal = 'routing-error'; dryRun = $false; completionAuthority = $false }
+            $fallback = [pscustomobject]@{ recordVersion = 3; taskId = $taskId; workspace = $Workspace; preset = $fallbackPreset.Id; description = $Fixes[$index].description; executionClass = 'deepseek_deep'; selectedExecutionClass = 'deepseek_deep'; provider = [string]$fallbackRoute.provider; model = [string]$fallbackRoute.model; reasoning = [string]$fallbackRoute.reasoning; reason = "Automatic routing failed; explicit controller repair dispatch is required: $($_.Exception.Message)"; risk = 'high'; escalatedFrom = $null; manualOverride = $false; signal = 'routing-error'; dryRun = $false; completionAuthority = $false }
             $records.Add([pscustomobject]@{ fix = $Fixes[$index]; dispatchStatus = 'operator-required'; routingError = $_.Exception.Message; routingDecision = $fallback })
         }
     }

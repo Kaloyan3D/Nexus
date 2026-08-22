@@ -23,8 +23,7 @@ function Add-Check([string]$Name, [bool]$Pass, [string]$Detail) {
 Add-Check 'install root' (Test-Path -LiteralPath $layout.Root) $layout.Root
 Add-Check 'portable Node' (Test-Path -LiteralPath $layout.Node) $versions.NodeVersion
 Add-Check 'DeepSeek Harness' (Test-Path -LiteralPath $layout.Dsh) $versions.HarnessVersion
-if ($deepSeekOnly) { Add-Check 'openai-oauth (optional)' $true $(if (Test-Path -LiteralPath $layout.OAuth) { "installed $($versions.OpenAiOAuthVersion); not required" } else { 'not installed; not required' }) }
-else { Add-Check 'openai-oauth' (Test-Path -LiteralPath $layout.OAuth) $versions.OpenAiOAuthVersion }
+Add-Check 'openai-oauth (optional review)' $true $(if (Test-Path -LiteralPath $layout.OAuth) { "installed $($versions.OpenAiOAuthVersion); not required for ordinary tasks" } else { 'not installed; bounded Codex review unavailable' })
 Add-Check 'settings' (Test-Path -LiteralPath $layout.Settings) $layout.Settings
 Add-Check 'Normal preset' (Test-Path -LiteralPath (Join-Path $layout.Data '.agent-presets\aih-engineering\agent.cordis.yml')) 'aih-engineering / Normal Engineering'
 Add-Check 'DeepSeek-only preset' (Test-Path -LiteralPath (Join-Path $layout.Data '.agent-presets\aih-deepseek\agent.cordis.yml')) 'aih-deepseek / DeepSeek Only'
@@ -37,7 +36,7 @@ Add-Check 'routing policy' $routingPolicyValid $routingPolicyDetail
 if ($routingPolicyValid) {
     $routineProbe = Get-AihRoutingInitialDecision 'Locate a repository symbol.' $routingPolicy
     $securityProbe = Get-AihRoutingInitialDecision 'Design authentication architecture.' $routingPolicy
-    Add-Check 'routing engine' ($routineProbe.Tier -eq 3 -and $securityProbe.Tier -eq 1) 'deterministic Tier 3/Tier 1 probes'
+    Add-Check 'routing engine' ($routineProbe.ExecutionClass -eq 'deepseek_normal' -and $securityProbe.ExecutionClass -eq 'deepseek_deep' -and $securityProbe.ReviewRequired) 'deterministic DeepSeek normal/critical probes'
 }
 else { Add-Check 'routing engine' $false 'policy unavailable' }
 Add-Check 'routing CLI' (Test-Path -LiteralPath (Join-Path $layout.Bin 'aih-route.cmd')) (Join-Path $layout.Bin 'aih-route.cmd')
@@ -45,7 +44,7 @@ Add-Check 'routing state' (Test-Path -LiteralPath (Join-Path $layout.RoutingData
 Add-Check 'completion CLI' (Test-Path -LiteralPath (Join-Path $layout.Bin 'aih-complete.cmd')) (Join-Path $layout.Bin 'aih-complete.cmd')
 Add-Check 'completion records' (Test-Path -LiteralPath (Join-Path $layout.CompletionData 'records') -PathType Container) $layout.CompletionData
 $gateProbe = New-AihCompletionDecision (Get-AihDeterministicAssessment ([pscustomobject]@{ Failed = 0; Results = @([pscustomobject]@{ Name = 'probe'; Status = 'PASS' }) })) (Get-AihAcceptanceAssessment @([pscustomobject]@{ id = 'probe'; criterion = 'probe'; status = 'met'; evidence = 'probe' })) (ConvertFrom-AihSemanticVerifierOutput '{"status":"PASS","summary":"probe","concreteReasons":[],"missingRequirements":[],"boundedFixes":[]}')
-Add-Check 'completion engine' ($gateProbe.Status -eq 'PASS' -and $gateProbe.Complete) 'verification + criteria + Tier 1 semantic decision'
+Add-Check 'completion engine' ($gateProbe.Status -eq 'PASS' -and $gateProbe.Complete) 'controller-owned verification + criteria decision'
 Add-Check 'launcher state engine' (Test-Path -LiteralPath (Join-Path $layout.Scripts 'Startup.ps1')) 'STARTING / READY / FAILED readiness state machine'
 Add-Check 'aih-stop CLI' (Test-Path -LiteralPath (Join-Path $layout.Bin 'aih-stop.cmd')) (Join-Path $layout.Bin 'aih-stop.cmd')
 if (Test-Path -LiteralPath $layout.State) {
@@ -60,7 +59,7 @@ else { Add-Check 'launcher state record' $true 'no instance has been launched ye
 $keyPresent = -not [string]::IsNullOrWhiteSpace((Get-AihDeepSeekKey $InstallRoot))
 Add-Check 'DeepSeek credential' $keyPresent $(if ($keyPresent) { 'configured' } else { 'run aih-key' })
 
-if (-not $Offline -and -not $deepSeekOnly) {
+if (-not $Offline -and -not $deepSeekOnly -and (Test-Path -LiteralPath (Get-AihCodexAuthFile))) {
     $oauthReady = Test-AihEndpoint -Uri "$($versions.OAuthBaseUrl)/models" -TimeoutSec 3
     Add-Check 'OAuth endpoint' $oauthReady $versions.OAuthBaseUrl
     if ($oauthReady) {
@@ -78,11 +77,9 @@ if (-not $Offline -and $keyPresent) {
         $headers = @{ Authorization = "Bearer $key" }
         $models = Invoke-RestMethod -Uri 'https://api.deepseek.com/models' -Headers $headers -TimeoutSec 20
         $ids = @($models.data | ForEach-Object id)
-        Add-Check 'DeepSeek Pro' ($ids -contains 'deepseek-v4-pro') 'deepseek-v4-pro'
         Add-Check 'DeepSeek Flash' ($ids -contains 'deepseek-v4-flash') 'deepseek-v4-flash'
     }
     catch {
-        Add-Check 'DeepSeek Pro' $false $_.Exception.Message
         Add-Check 'DeepSeek Flash' $false $_.Exception.Message
     }
     finally { $key = $null; $headers = $null }

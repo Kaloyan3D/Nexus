@@ -1,152 +1,119 @@
-# A.R.T.H.U.R. — AI Harness
+# A.R.T.H.U.R. — AI Harness vNext.1
 
-A Windows-first local engineering harness that combines a ChatGPT/Codex lead
-model with DeepSeek workers, or can run in a strict DeepSeek-only mode. Runtime
-dependencies and Node.js are downloaded from pinned versions during setup; no
-API keys, OAuth tokens, sessions, logs, or generated runtime files belong in
-Git.
+A Windows-first coding harness with a deterministic task controller, DeepSeek V4 Flash as the primary engineer, deterministic verification, and rare bounded Codex review. The web GUI, DSH runtime, provider integrations, filesystem/shell tools, permissions, sessions, Git support, and project-aware verification remain intact.
 
-## Requirements
+```text
+User -> deterministic controller -> budgeted context -> DeepSeek Flash
+                                                |          |
+                                                |     targeted verification
+                                                |          |
+                                                +---- PASS -> controller completion
+                                                           |
+                                             repeated/critical failure
+                                                           v
+                                               bounded Codex review
+                                                           |
+                                                   DeepSeek repair
+```
 
-- Windows 10/11 and PowerShell 5.1 or newer
+Codex is not a parent agent and ordinary completion never requires it.
+
+## Requirements and setup
+
+- Windows 10/11 and PowerShell 5.1+
 - Internet access during installation
 - A DeepSeek API key
-- Optional: a ChatGPT plan/account with Codex access for Normal Engineering mode
-
-The ChatGPT subscription and an OpenAI API account are different billing paths.
-For subscription access, sign in with ChatGPT in the browser flow. Do not enter
-an OpenAI Platform API key unless you intentionally want usage-based API billing.
-
-## Quick start after cloning
-
-Open PowerShell in the cloned repository and run:
+- Optional ChatGPT/Codex login for bounded review
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
+aih-key
+aih-auth   # optional bounded Codex review
 ```
 
-The setup script will:
+The setup installs pinned portable dependencies, protects local credentials, adds `bin` to the user PATH, and composes the DSH presets. Credentials, sessions, state under `data`, logs, installed packages, and portable Node are excluded from Git.
 
-1. install the pinned portable Node.js and npm dependencies into
-   `C:\AI-Harness`;
-2. ask for `DEEPSEEK_API_KEY` with hidden input and store it in a local,
-   user-protected credential file;
-3. print a complete browser-login URL for the current user's own ChatGPT/Codex
-   account;
-4. add `C:\AI-Harness\bin` to the user's `PATH` and run offline checks.
-
-Open a new terminal after setup. From any project repository, run:
+From a project repository:
 
 ```powershell
-aih
+aih -Open
 ```
 
-Useful setup options:
+Both **Normal Engineering** and **DeepSeek Only** use DeepSeek V4 Flash as the root executor. Normal Engineering permits controller-approved bounded Codex review; DeepSeek Only fails closed without any OpenAI/Codex inference. Mode changes in the Control Room apply atomically to blank/new sessions without restarting a healthy GUI.
+
+## Controller commands
 
 ```powershell
-# Install dependencies now, configure credentials later
-.\setup.ps1 -SkipDeepSeekLogin -SkipOpenAiLogin
-
-# Do not modify the user PATH
-.\setup.ps1 -SkipPathUpdate
+aih-task -Action create-objective -Description "Add retry safety"
+aih-task -Action create-task -Description "Implement retry guard" -AcceptanceCriteria "test passes"
+aih-task -Action begin-attempt -TaskId TASK-0001
+aih-route "Implement retry guard" -TaskId TASK-0001
+aih-context -Operation bundle -TaskId TASK-0001 -Query "retry guard"
+aih-verify -Kind test -TaskId TASK-0001
+aih-complete -TaskId TASK-0001 -Objective "Add retry safety" -AcceptanceCriteriaPath criteria.json
 ```
 
-Configure or replace credentials later with:
+The project ledger lives under `.ai-harness/state` and task artifacts under `.ai-harness/runs/<task-id>`. JSON documents use atomic replacement where state can be rewritten; decisions, attempts, and learnings are append-only JSONL. Model sessions can terminate at task boundaries because the ledger, context manifest, evidence, telemetry, and summaries are durable.
+
+## Execution classes and compatibility
+
+| Execution class | Purpose | Writable |
+|---|---|---:|
+| `deterministic` | Mechanical lookup or checks without an LLM | No |
+| `deepseek_normal` | Default implementation and debugging | Yes |
+| `deepseek_deep` | Expanded DeepSeek reasoning after evidence-backed failure | Yes |
+| `codex_review` | Fresh, bounded, independent review | No |
+| `codex_solve` | Exceptional explicit user-approved solve | Yes |
+
+Deprecated flags remain temporarily compatible: `tier3 -> deepseek_normal`, `tier2 -> deepseek_deep`, and `tier1 -> codex_review`. They no longer imply management authority. `-EnableCodexSubagent` is deprecated and raw Codex delegation remains disabled.
+
+## Context and coding interface
+
+`aih-context` exposes `map`, `search_code`, `find_symbol`, `find_references`, `file_outline`, and `bundle`. Bundles rank lexical matches, include compact symbols/imports, relevant repository documents, and Git state, enforce file/token budgets, and persist `context-manifest.json`. Repository contents are never dumped automatically and no vector database is required.
+
+Raw `read`, `grep`, `glob`, editing, PowerShell, background jobs, and filesystem tools remain escape hatches. Higher-value command paths include context lookup, `aih-verify -Kind ...` for targeted tests, `git diff`, task checkpoints in the ledger, and architecture rules through `aih-rules`.
+
+Large task-scoped verification output is written to `.ai-harness/runs/<task-id>/artifacts`; the executor receives a bounded digest containing failures and a raw artifact path.
+
+## Routing, completion, and Codex protection
+
+Normal policy is:
+
+```text
+deepseek_normal -> verify -> deepseek_deep repair -> bounded codex_review -> DeepSeek repair
+```
+
+The same normalized failure must repeat at the configured threshold before ordinary escalation. Critical security, concurrency, migration, auth/permission boundaries, or an explicit user request may create a scoped review requirement. “Hard task” alone is not a Codex route.
+
+Ordinary completion requires all acceptance criteria evidenced, required deterministic checks passing, scope constraints passing, and controller-owned evaluation. Critical tasks can additionally require a passing bounded review. Models and routing records have `completionAuthority=false`.
+
+`aih-review` creates `review-packet.json` before any call. Code enforces one automatic call per task, at most 8 files, 2,500 diff lines, 30,000 estimated input tokens, and 2,500 output tokens. It rejects an oversized packet with `DO NOT CALL CODEX`. Full-repository context requires explicit approval. Each call is a fresh tool-free Responses request and persists a structured result; it cannot modify files or complete the task.
+
+## Worktrees, sandbox, and rules
+
+Parallel writes use task worktrees created from the exact recorded `baseCommit`; the ledger records branch and worktree path. The controller detects declared overlapping write paths. Workspace resolution and verification working directories reject escapes, sensitive external operations still require explicit permission, and no unrestricted secret set is inherited by task state.
+
+`aih-rules` provides an executable rule seam. vNext.1 includes:
+
+- `SEC001`: potential secrets may not be persisted in source/tool records.
+- `MIG001`: tracked migration edits are surfaced for explicit safety review.
+
+Add rules as deterministic findings in `scripts/ArchitectureRules.ps1`, cover them in `tests/Harness.Tests.ps1`, and document the remediation. Review findings can be recorded as a proposed test, static rule, tool improvement, documentation, or routing-policy learning; they are never activated automatically from model output.
+
+## Telemetry and evaluation
+
+Per-task `telemetry.json` can record execution class, model/provider, input/cached/output token usage, cost proxy, context and file counts, diff size, attempts, failure signatures, verification, Codex calls/findings, result, and elapsed time. `New-AihEvaluationResult` defines the initial comparison record for `current`, `deepseek-only`, and `deepseek-codex-review`; learned routing and replay orchestration are intentionally deferred.
+
+## Diagnostics and security
 
 ```powershell
-aih-key   # DeepSeek API key; hidden input
-aih-auth  # ChatGPT/Codex browser login
+aih-doctor -Offline
+aih-test
+aih-test-tiers       # live provider probes; may consume quota
+aih-detect
+aih-stop
 ```
 
-Every user must run these commands with their own accounts. Never copy another
-person's `.codex\auth.json`, `data\.credentials.yaml`, or `.env` file.
+The local OAuth adapter stays bound to `127.0.0.1`. Every user must authenticate their own account. Never copy `.codex/auth.json`, `data/.credentials.yaml`, or another user’s environment files.
 
-## ChatGPT/Codex OAuth details
-
-Normal Engineering uses the third-party `openai-oauth` npm package to expose a
-loopback-only OpenAI-compatible endpoint at `http://127.0.0.1:10531/v1`. The
-package uses the current Windows user's Codex-compatible auth file. Its login is
-interactive and prints a complete URL to Ctrl+click or copy into a browser;
-credentials are never written into this repository. The wrapper deliberately
-uses `--no-open` because the package's Windows browser launcher can truncate
-OAuth query parameters containing `&`.
-
-Keep the proxy bound to `127.0.0.1`. Binding it to a LAN/public interface would
-let anyone who can reach the port use the authenticated account's quota.
-
-OpenAI's official Codex login can also be checked or cleared with an installed
-Codex CLI:
-
-```powershell
-codex login status
-codex logout
-```
-
-## Modes
-
-### Normal Engineering (default)
-
-```powershell
-aih
-# equivalent:
-aih -Preset normal
-```
-
-Uses GPT-5.6 Sol xhigh as Tier 1 and semantic completion verifier, DeepSeek V4
-Flash MAX as Tier 2, and DeepSeek V4 Flash High as Tier 3. Native Codex
-delegation is opt-in with `-EnableCodexSubagent`.
-
-### DeepSeek Only
-
-```powershell
-aih -Preset deepseek
-```
-
-Uses DeepSeek V4 Pro MAX as Tier 1 and semantic verifier, with Flash MAX/High
-workers. This mode blocks OpenAI/Codex inference routes and fails closed if the
-required DeepSeek provider or credential is unavailable.
-
-In the Web UI, select **Normal Engineering** or **DeepSeek Only** on a blank/new
-session before submitting a task.
-
-## Diagnostics and tests
-
-```powershell
-aih-doctor -Offline              # local configuration only
-aih-doctor -Preset normal        # live OpenAI OAuth + DeepSeek readiness
-aih-doctor -Preset deepseek      # live DeepSeek-only readiness
-aih-test                         # deterministic test suite
-aih-test-tiers                   # small live model probes (may consume quota)
-aih-stop                         # stop the tracked harness process
-```
-
-Completion is preset-aware:
-
-```powershell
-aih-complete -Preset aih-engineering ...
-aih-complete -Preset aih-deepseek ...
-```
-
-Both modes require deterministic project verification, evidenced acceptance
-criteria, and a Tier 1 semantic `PASS`. Workers never receive completion
-authority.
-
-## Repository layout
-
-- `bin/` — user-facing command wrappers
-- `scripts/` — installer, launcher, routing, completion, and diagnostics
-- `config/` — version pins, model providers, presets, and routing policy
-- `runtime/package*.json` — reproducible npm dependency manifest
-- `tests/` — deterministic PowerShell and JavaScript tests
-- `app/`, `data/`, `logs/`, `runtime/node/` — generated locally and ignored
-
-## Updating and contributing
-
-Run `aih-update` from an updated checkout to reinstall the pinned source files
-and dependencies. Before pushing a change, run `aih-test` and verify that
-`git status --ignored` shows credentials, session data, logs, `node_modules`, and
-portable Node under ignored paths.
-
-This repository is currently marked `UNLICENSED` in its package manifest. Add an
-explicit license before making it public if you want others to have permission
-to copy, modify, or redistribute it.
+See [docs/vnext-architecture.md](docs/vnext-architecture.md) for contracts, lifecycle details, migration decisions, state schemas, and deferred work.

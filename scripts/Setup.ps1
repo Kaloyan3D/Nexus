@@ -2,7 +2,8 @@
 param(
     [string]$InstallRoot = 'C:\AI-Harness',
     [switch]$SkipPathUpdate,
-    [switch]$ResetManagedSettings
+    [switch]$ResetManagedSettings,
+    [switch]$SkipDependencyInstall
 )
 
 Set-StrictMode -Version Latest
@@ -35,6 +36,10 @@ foreach ($directory in @($layout.Root, $layout.App, $layout.Bin, $layout.Config,
 
 foreach ($name in @('setup.ps1', 'README.md', 'SECURITY.md', '.gitignore', '.gitattributes', '.env.example')) {
     Copy-AihSourceFile -Source (Join-Path $sourceRoot $name) -Destination (Join-Path $layout.Root $name)
+}
+New-Item -ItemType Directory -Force -Path (Join-Path $layout.Root 'docs') | Out-Null
+foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'docs') -File -ErrorAction SilentlyContinue) {
+    Copy-AihSourceFile -Source $file.FullName -Destination (Join-Path $layout.Root 'docs')
 }
 
 foreach ($name in @('versions.json', 'settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'DeepSeek-Isolation.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json')) {
@@ -99,10 +104,14 @@ if ($installedNodeVersion -ne $nodeVersion) {
 
 Copy-Item -LiteralPath (Join-Path $layout.Runtime 'package.json') -Destination (Join-Path $layout.App 'package.json') -Force
 Copy-Item -LiteralPath (Join-Path $layout.Runtime 'package-lock.json') -Destination (Join-Path $layout.App 'package-lock.json') -Force
-& $layout.Npm ci --omit=dev --prefix $layout.App
-if ($LASTEXITCODE -ne 0) {
-    throw 'npm ci failed while installing the pinned Harness runtime.'
+if (-not $SkipDependencyInstall) {
+    & $layout.Npm ci --omit=dev --prefix $layout.App
+    if ($LASTEXITCODE -ne 0) { throw 'npm ci failed while installing the pinned Harness runtime.' }
 }
+elseif (-not (Test-Path -LiteralPath $layout.Dsh)) {
+    throw '-SkipDependencyInstall requires an existing installed DSH runtime.'
+}
+& (Join-Path $layout.Scripts 'Patch-ControlRoomUi.ps1') -InstallRoot $InstallRoot
 
 if ($ResetManagedSettings -or -not (Test-Path -LiteralPath $layout.Settings)) {
     Copy-Item -LiteralPath (Join-Path $layout.Config 'settings.yaml') -Destination $layout.Settings
@@ -115,17 +124,17 @@ if (-not (Test-Path -LiteralPath (Join-Path $shippedPreset 'agent.cordis.yml')))
     throw "Pinned Harness does not contain the expected Code Mode preset: $shippedPreset"
 }
 New-Item -ItemType Directory -Force -Path $targetPreset | Out-Null
-$presetText = Get-Content -Raw -LiteralPath (Join-Path $shippedPreset 'agent.cordis.yml')
+$presetText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $shippedPreset 'agent.cordis.yml')
 $personaPattern = '(?ms)^- id: persona\r?\n.*?(?=^- id: agent-instructions)'
 $personaReplacement = @'
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: !!js process.env.AIH_PERSONA ?? 'You are the Tier 1 GPT-5.6 Sol lead engineer. Sol thinks; Flash works; deterministic tools verify facts. You own architecture, planning, decomposition, acceptance criteria, difficult debugging, final semantic verification, and the overall completion decision. Workers and routing decisions never have authority to declare the overall objective complete. Use Tier 3 first for ordinary work, Tier 2 for serious implementation or genuine difficulty, and do not escalate for one minor error. Before overall completion, require C:\AI-Harness\bin\aih-complete.cmd to return ordinary PASS from deterministic verification, fully evidenced acceptance criteria, and Tier 1 semantic verification. A failed gate returns bounded fix cycles and must not silently complete. OVERRIDDEN is an explicit audited operator exception, never PASS. Parallelize independent read-only research only and use separate Git worktrees or branches for independent writes.'
+    text: !!js process.env.AIH_PERSONA ?? 'You are the DeepSeek implementation agent. Complete the supplied bounded task using repository-local instructions and relevant context. Use targeted verification and return structured evidence. The deterministic controller owns routing, retries, budgets, escalation, and completion. If blocked, return one scoped escalation with a stable failure signature.'
 
 '@
-$delegationPattern = '(?ms)^# ── delegation and workflows.*?(?=^# ── remaining model-facing rows)'
-$delegationReplacement = Get-Content -Raw -LiteralPath (Join-Path $layout.Config 'delegation-block.yml')
+$delegationPattern = '(?ms)^# [^\r\n]*delegation and workflows[^\r\n]*\r?\n.*?(?=^# [^\r\n]*remaining model-facing rows)'
+$delegationReplacement = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $layout.Config 'delegation-block.yml')
 $personaMatches = [regex]::Matches($presetText, $personaPattern).Count
 $delegationMatches = [regex]::Matches($presetText, $delegationPattern).Count
 if ($personaMatches -ne 1 -or $delegationMatches -ne 1) {
@@ -138,13 +147,16 @@ Copy-Item -LiteralPath (Join-Path $layout.Config 'preset.yml') -Destination (Joi
 
 $deepSeekPreset = Join-Path $layout.Data '.agent-presets\aih-deepseek'
 New-Item -ItemType Directory -Force -Path $deepSeekPreset | Out-Null
-Copy-Item -LiteralPath (Join-Path $layout.Config 'deepseek-agent.cordis.yml') -Destination (Join-Path $deepSeekPreset 'agent.cordis.yml') -Force
+& (Join-Path $layout.Scripts 'Build-DeepSeekPreset.ps1') -EngineeringPresetPath (Join-Path $targetPreset 'agent.cordis.yml') -DeepSeekPresetPath (Join-Path $deepSeekPreset 'agent.cordis.yml')
 Copy-Item -LiteralPath (Join-Path $layout.Config 'preset-deepseek.yml') -Destination (Join-Path $deepSeekPreset 'preset.yml') -Force
 Copy-Item -LiteralPath (Join-Path $layout.Config 'DeepSeek-Isolation.cjs') -Destination (Join-Path $deepSeekPreset 'DeepSeek-Isolation.cjs') -Force
+& (Join-Path $layout.Scripts 'Enable-EngineeringIsolation.ps1') -PresetDirectory $targetPreset
+Copy-Item -LiteralPath (Join-Path $layout.Config 'Engineering-Isolation.cjs') -Destination (Join-Path $targetPreset 'Engineering-Isolation.cjs') -Force
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $layout.Credentials) | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $layout.RoutingData 'states') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $layout.CompletionData 'records') | Out-Null
+New-Item -ItemType Directory -Force -Path $layout.EvaluationData | Out-Null
 Protect-AihPrivatePath -Path $layout.Data
 
 if (-not $SkipPathUpdate) {
