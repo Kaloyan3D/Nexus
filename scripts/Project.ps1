@@ -23,11 +23,30 @@ function Get-AihWorkspaceFiles {
         finally { Pop-Location }
     }
 
-    $excluded = @('.git', 'node_modules', '.venv', 'venv', 'target', 'bin', 'obj', 'dist', 'build')
-    return @(Get-ChildItem -LiteralPath $Workspace -File -Recurse -Force -ErrorAction SilentlyContinue | Where-Object {
-        $relative = Get-AihRelativePath -Root $Workspace -Path $_.FullName
-        -not @($relative -split '[\\/]' | Where-Object { $excluded -contains $_ }).Count
-    } | ForEach-Object { Get-AihRelativePath -Root $Workspace -Path $_.FullName })
+    # Get-ChildItem -Recurse can terminate the entire scan when it encounters a
+    # broken reparse point or a directory that Windows cannot enumerate. Walk one
+    # directory at a time so a bad entry only excludes that subtree. This also
+    # prevents expensive excluded trees from being traversed before filtering.
+    $excluded = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in @('.git', 'node_modules', '.venv', 'venv', 'target', 'bin', 'obj', 'dist', 'build')) { [void]$excluded.Add($name) }
+    $pending = [System.Collections.Generic.Queue[string]]::new()
+    $pending.Enqueue($Workspace)
+    $files = [System.Collections.Generic.List[string]]::new()
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Dequeue()
+        try { $entries = @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop) }
+        catch { continue }
+        foreach ($entry in $entries) {
+            if ($entry.PSIsContainer) {
+                if ($excluded.Contains($entry.Name) -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+                $pending.Enqueue($entry.FullName)
+                continue
+            }
+            try { $files.Add((Get-AihRelativePath -Root $Workspace -Path $entry.FullName)) }
+            catch { continue }
+        }
+    }
+    return @($files)
 }
 
 function Test-AihExecutable {

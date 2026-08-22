@@ -9,7 +9,7 @@ $layout = Get-AihLayout $InstallRoot
 $versions = Get-AihVersions $InstallRoot
 $oauthModelsUrl = "$($versions.OAuthBaseUrl)/models"
 
-if ($Mode -ne 'deepseek' -and -not (Test-AihEndpoint -Uri $oauthModelsUrl -TimeoutSec 2)) {
+if ($Mode -eq 'normal' -and (Test-Path -LiteralPath (Get-AihCodexAuthFile)) -and -not (Test-AihEndpoint -Uri $oauthModelsUrl -TimeoutSec 2)) {
     $oauthProcess = Start-Process -FilePath $layout.Node -ArgumentList @($layout.OAuth, '--detach', '--no-open') -WindowStyle Hidden -Wait -PassThru
     if ($oauthProcess.ExitCode -ne 0 -or -not (Wait-AihEndpoint -Uri $oauthModelsUrl -TimeoutSec 20)) {
         throw 'openai-oauth is not ready. Run its local login command first.'
@@ -28,13 +28,10 @@ if ([regex]::Matches($baseSettings, $selectionPattern).Count -ne 1) {
 }
 
 $probes = @(
-    [pscustomobject]@{ Tier = 'Normal Tier 1'; Provider = 'sol-local'; Model = 'gpt-5.6-sol'; Effort = 'xhigh'; Expected = 'NORMAL_TIER1_OK' },
-    [pscustomobject]@{ Tier = 'DeepSeek Tier 1'; Provider = 'deepseek-pro-direct'; Model = 'deepseek-v4-pro'; Effort = 'max'; Expected = 'DEEPSEEK_TIER1_OK' },
-    [pscustomobject]@{ Tier = 'DeepSeek Tier 2'; Provider = 'flash-max-direct'; Model = 'deepseek-v4-flash'; Effort = 'max'; Expected = 'DEEPSEEK_TIER2_OK' },
-    [pscustomobject]@{ Tier = 'DeepSeek Tier 3'; Provider = 'flash-high-direct'; Model = 'deepseek-v4-flash'; Effort = 'high'; Expected = 'DEEPSEEK_TIER3_OK' }
+    [pscustomobject]@{ Tier = 'DeepSeek normal'; Provider = 'flash-high-direct'; Model = 'deepseek-v4-flash'; Effort = 'high'; Expected = 'DEEPSEEK_NORMAL_OK' },
+    [pscustomobject]@{ Tier = 'DeepSeek deep'; Provider = 'flash-max-direct'; Model = 'deepseek-v4-flash'; Effort = 'max'; Expected = 'DEEPSEEK_DEEP_OK' }
 )
-if ($Mode -eq 'normal') { $probes = @($probes | Where-Object Provider -eq 'sol-local') }
-elseif ($Mode -eq 'deepseek') { $probes = @($probes | Where-Object Provider -ne 'sol-local') }
+if ($Mode -eq 'normal' -and (Test-AihEndpoint -Uri $oauthModelsUrl -TimeoutSec 2)) { $probes += [pscustomobject]@{ Tier = 'Bounded Codex review'; Provider = 'sol-local'; Model = 'gpt-5.6-sol'; Effort = 'medium'; Expected = 'CODEX_REVIEW_OK' } }
 
 $temporaryBase = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
 $probeRoot = Join-Path $temporaryBase ("aih-tier-probes-" + [guid]::NewGuid().ToString('N'))

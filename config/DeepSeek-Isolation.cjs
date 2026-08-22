@@ -10,11 +10,27 @@ function allowed(provider, model) {
   return ALLOWED.get(provider)?.has(model) === true
 }
 
+function topLevelReasoning(proposed) {
+  return proposed.reasoningEffort === 'high' || proposed.reasoningEffort === 'max'
+    ? proposed.reasoningEffort
+    : 'max'
+}
+
+function sessionPreset(session) {
+  for (let index = session.events.length - 1; index >= 0; index -= 1) {
+    const event = session.events[index]
+    if (event?.type === 'agent-preset/selected') return event.data.agentPreset
+  }
+  return session.header.agentPreset
+}
+
 function apply(ctx) {
   ctx.shellEnv.register({
     name: 'aih-deepseek-preset',
     variables: { DSH_AIH_PRESET: { description: 'Active AI Harness engineering preset.' } },
-    resolve: (execution) => execution.agent === undefined ? {} : { DSH_AIH_PRESET: 'aih-deepseek' },
+    resolve: (execution) => execution.agent === undefined || sessionPreset(execution.agent.session) !== 'aih-deepseek'
+      ? {}
+      : { DSH_AIH_PRESET: 'aih-deepseek' },
   })
 
   ctx.on('agent/request', async (_payload, next) => {
@@ -24,9 +40,9 @@ function apply(ctx) {
     if (isWorker && allowed(proposed.provider, proposed.model)) return proposed
     return Object.freeze({
       ...proposed,
-      provider: 'deepseek-pro-direct',
-      model: 'deepseek-v4-pro',
-      reasoningEffort: 'max',
+      provider: 'flash-max-direct',
+      model: 'deepseek-v4-flash',
+      reasoningEffort: topLevelReasoning(proposed),
     })
   })
 
@@ -35,13 +51,6 @@ function apply(ctx) {
       throw new Error(`DeepSeek-only blocked recovery from provider: ${payload.provider}`)
     }
     return undefined
-  })
-
-  ctx.on('llm/stream', async function* (options, next) {
-    if (!allowed(options.provider, options.model)) {
-      throw new Error(`DeepSeek-only blocked model route: ${options.provider}/${options.model}`)
-    }
-    yield* next()
   })
 }
 

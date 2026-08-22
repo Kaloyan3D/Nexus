@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict')
 const isolation = require('../config/DeepSeek-Isolation.cjs')
+const engineeringIsolation = require('../config/Engineering-Isolation.cjs')
 
 async function main() {
   const handlers = {}
@@ -11,29 +12,46 @@ async function main() {
     shellEnv: { register(value) { contributor = value } },
   })
   assert.equal(isolation.inject[0], 'shellEnv')
-  assert.equal(contributor.resolve({ agent: {} }).DSH_AIH_PRESET, 'aih-deepseek')
+  const deepSession = { header: { agentPreset: 'aih-deepseek' }, events: [] }
+  const normalSession = { header: { agentPreset: 'aih-engineering' }, events: [] }
+  assert.equal(contributor.resolve({ agent: { session: deepSession } }).DSH_AIH_PRESET, 'aih-deepseek')
+  assert.deepEqual(contributor.resolve({ agent: { session: normalSession } }), {})
+  assert.deepEqual(contributor.resolve({ agent: { session: { header: { agentPreset: 'aih-deepseek' }, events: [{ type: 'agent-preset/selected', data: { agentPreset: 'aih-engineering' } }] } } }), {})
 
   const topLevel = { agent: { session: { header: {} } } }
   const worker = { agent: { session: { header: { origin: 'subagent', delegationDepth: 1 } } } }
-  const sol = { provider: 'sol-local', model: 'gpt-5.6-sol', reasoningEffort: 'xhigh' }
+  const sol = { provider: 'sol-local', model: 'gpt-5.6-sol', reasoningEffort: 'medium' }
   const flashMax = { provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoningEffort: 'max' }
+  const proHigh = { provider: 'deepseek-pro-direct', model: 'deepseek-v4-pro', reasoningEffort: 'high' }
 
   const replacedSol = await handlers['agent/request'](topLevel, async () => sol)
-  assert.deepEqual({ provider: replacedSol.provider, model: replacedSol.model, reasoningEffort: replacedSol.reasoningEffort }, { provider: 'deepseek-pro-direct', model: 'deepseek-v4-pro', reasoningEffort: 'max' })
+  assert.deepEqual({ provider: replacedSol.provider, model: replacedSol.model, reasoningEffort: replacedSol.reasoningEffort }, { provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoningEffort: 'max' })
   const replacedTopFlash = await handlers['agent/request'](topLevel, async () => flashMax)
-  assert.equal(replacedTopFlash.provider, 'deepseek-pro-direct')
+  assert.equal(replacedTopFlash.provider, 'flash-max-direct')
+  const retainedTopHigh = await handlers['agent/request'](topLevel, async () => proHigh)
+  assert.equal(retainedTopHigh.provider, 'flash-max-direct')
   const retainedWorker = await handlers['agent/request'](worker, async () => flashMax)
   assert.equal(retainedWorker.provider, 'flash-max-direct')
+
+  const engineeringHandlers = {}
+  engineeringIsolation.apply({
+    on(name, handler) { engineeringHandlers[name] = handler },
+  })
+  assert.equal(engineeringIsolation.inject, undefined)
+  const normalizedEngineering = await engineeringHandlers['agent/request'](topLevel, async () => flashMax)
+  assert.deepEqual(
+    { provider: normalizedEngineering.provider, model: normalizedEngineering.model, reasoningEffort: normalizedEngineering.reasoningEffort },
+    { provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoningEffort: 'max' },
+  )
+  const retainedEngineeringWorker = await engineeringHandlers['agent/request'](worker, async () => flashMax)
+  assert.equal(retainedEngineeringWorker.provider, 'flash-max-direct')
 
   let fallbackCalled = false
   const retry = await handlers['agent/request-error']({ provider: 'deepseek-pro-direct' }, async () => { fallbackCalled = true; return { kind: 'retry' } })
   assert.equal(retry, undefined)
   assert.equal(fallbackCalled, false)
 
-  await assert.rejects(async () => {
-    const stream = handlers['llm/stream'](sol, async function* () { yield { type: 'text-delta', text: 'unsafe' } })
-    await stream.next()
-  }, /blocked model route/)
+  assert.equal(handlers['llm/stream'], undefined)
 
   console.log('PASS: DeepSeek isolation runtime guard behavior')
 }
