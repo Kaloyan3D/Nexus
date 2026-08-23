@@ -11,9 +11,24 @@ param(
     [string]$Signal = 'none',
     [string]$FailureReason,
     [switch]$UserApprovedCodexSolve,
+    [switch]$ReviewRequested,
     [Alias('dry-run')][switch]$DryRun,
-    [switch]$History
+    [switch]$History,
+    [string]$PayloadFile
 )
+# User-derived free text must not travel on the command line (ANSI codepage
+# mangling + unescaped control characters in ConvertTo-Json break the
+# controller bridge's strict JSON parse). The bridge writes a UTF-8 payload
+# file and names it here.
+if ($PayloadFile) {
+    if (-not (Test-Path -LiteralPath $PayloadFile)) { throw "Payload file not found: $PayloadFile" }
+    $__aihPayload = Get-Content -Raw -Encoding UTF8 -LiteralPath $PayloadFile | ConvertFrom-Json
+    if ($null -ne $__aihPayload.PSObject.Properties['Workspace']) { $Workspace = [string]$__aihPayload.Workspace }
+    if ($null -ne $__aihPayload.PSObject.Properties['Description']) { $Description = [string]$__aihPayload.Description }
+    if ($null -ne $__aihPayload.PSObject.Properties['ReviewRequested']) { $ReviewRequested = [bool]$__aihPayload.ReviewRequested }
+    if ($null -ne $__aihPayload.PSObject.Properties['Signal']) { $Signal = [string]$__aihPayload.Signal }
+    if ($null -ne $__aihPayload.PSObject.Properties['FailureReason']) { $FailureReason = [string]$__aihPayload.FailureReason }
+}
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -28,7 +43,7 @@ if ($History) {
     exit 0
 }
 if ([string]::IsNullOrWhiteSpace($Description)) { throw 'A task description is required unless -History is used.' }
-$decision = Invoke-AihRoutingDecision -Description $Description -Workspace $Workspace -PolicyPath $layout.RoutingPolicy -DataRoot $layout.RoutingData -TaskId $TaskId -Preset $Preset -ForceTier $ForceTier -ForceClass $ForceClass -Signal $Signal -FailureReason $FailureReason -UserApprovedCodexSolve:$UserApprovedCodexSolve -DryRun:$DryRun
+$decision = Invoke-AihRoutingDecision -Description $Description -Workspace $Workspace -PolicyPath $layout.RoutingPolicy -DataRoot $layout.RoutingData -TaskId $TaskId -Preset $Preset -ForceTier $ForceTier -ForceClass $ForceClass -Signal $Signal -FailureReason $FailureReason -UserApprovedCodexSolve:$UserApprovedCodexSolve -ReviewRequested:$ReviewRequested -DryRun:$DryRun
 if (-not $DryRun -and (Test-Path -LiteralPath (Join-Path ([IO.Path]::GetFullPath($Workspace)) '.ai-harness\state\tasks.json'))) {
     try { Set-AihTaskExecutionClass -Workspace $Workspace -TaskId $decision.taskId -ExecutionClass $decision.executionClass -Reason $decision.reason | Out-Null }
     catch { if ($_.Exception.Message -notmatch 'Task was not found') { throw } }

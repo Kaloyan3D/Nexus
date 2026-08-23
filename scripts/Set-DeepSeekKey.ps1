@@ -13,7 +13,8 @@ try {
         throw 'No API key was entered.'
     }
     $escaped = $plain.Trim().Replace("'", "''")
-    [System.IO.File]::WriteAllText($layout.Credentials, "DEEPSEEK_API_KEY: '$escaped'`r`n", [System.Text.UTF8Encoding]::new($false))
+    $credentialDocument = "version: 1`r`nrefs:`r`n  DEEPSEEK_API_KEY: '$escaped'`r`n"
+    [System.IO.File]::WriteAllText($layout.Credentials, $credentialDocument, [System.Text.UTF8Encoding]::new($false))
     Protect-AihPrivatePath -Path $layout.Credentials
 }
 finally {

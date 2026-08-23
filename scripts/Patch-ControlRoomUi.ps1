@@ -11,8 +11,8 @@ if (-not (Test-Path -LiteralPath $manifestPath) -or -not (Test-Path -LiteralPath
     throw 'The pinned agent-preset UI package is missing. Run npm ci before applying the Control Room patch.'
 }
 $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
-if ([string]$manifest.version -ne '0.1.0-rc.6') {
-    throw "Control Room UI patch supports @deepseek-ai/dsh-client-ui-agent-preset 0.1.0-rc.6, found $($manifest.version)."
+if ([string]$manifest.version -ne '0.1.1-rc.2') {
+    throw "Control Room UI patch supports @deepseek-ai/dsh-client-ui-agent-preset 0.1.1-rc.2, found $($manifest.version)."
 }
 
 $text = Get-Content -Raw -Encoding UTF8 -LiteralPath $clientPath

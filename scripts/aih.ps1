@@ -101,10 +101,13 @@ if ($null -ne $runningState -and $null -ne $runningState.Pid) {
     }
     if ($null -ne $existing -and (Test-AihEndpoint -Uri $webUrl -TimeoutSec 2)) {
         if ($runningState.Workspace -eq $workspace -and $controlRoomSchema -ge 3 -and -not $Restart) {
+            $runningState.Status = 'READY'
             $runningState.Preset = $Preset
             $runningState.DefaultMode = $Preset
             $runningState.UpdatedAtUtc = [DateTime]::UtcNow.ToString('o')
             $runningState.ModeCapabilities = [ordered]@{ NormalEngineering = $oauthAvailable; DeepSeekOnly = $true }
+            $runningState | Add-Member -NotePropertyName ReadyAtUtc -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
+            $runningState | Add-Member -NotePropertyName ReadinessEvidence -NotePropertyValue ([ordered]@{ TcpReachable = $true; HttpReady = $true; HttpStatus = 200; StdoutMarker = $true }) -Force
             Write-AihState -Path $layout.State -State $runningState
             Write-Host "AI Harness status: READY (already running for $workspace)"
             Write-Host "Default mode for new sessions: $($mode.DisplayName) (source: $presetSource)"

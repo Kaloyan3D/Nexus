@@ -60,7 +60,9 @@ function New-AihTask {
     param(
         [Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$Description,
         [string[]]$AcceptanceCriteria = @(), [string[]]$DependsOn = @(),
-        [ValidateSet('low','normal','high','critical')][string]$Risk = 'normal', [string]$BaseCommit
+        [ValidateSet('low','normal','high','critical')][string]$Risk = 'normal', [string]$BaseCommit,
+        [switch]$ReviewRequested,
+        [ValidateSet('deterministic','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClassOverride
     )
     $layout = Initialize-AihTaskLedger $Workspace
     $mutex=[Threading.Mutex]::new($false,(Get-AihLedgerMutexName $Workspace));$taken=$false
@@ -71,10 +73,12 @@ function New-AihTask {
         try { $BaseCommit = (& git -C $layout.Workspace rev-parse HEAD 2>$null | Select-Object -First 1).Trim() } catch { $BaseCommit = $null }
     }
     $taskId = 'TASK-{0:D4}' -f [int]$ledger.nextSequence
+    $initialExecutionClass = if (-not [string]::IsNullOrWhiteSpace($ExecutionClassOverride)) { $ExecutionClassOverride } else { 'deepseek_normal' }
     $task = [ordered]@{
         schemaVersion = 1; taskId = $taskId; description = $Description; status = 'ready'; dependencies = @($DependsOn)
-        baseCommit = $BaseCommit; executionClass = 'deepseek_normal'; executor = 'deepseek_normal'; attempt = 0; maxAttempts = 3
+        baseCommit = $BaseCommit; executionClass = $initialExecutionClass; executor = $initialExecutionClass; attempt = 0; maxAttempts = 3
         risk = $Risk; acceptanceCriteria = @($AcceptanceCriteria); verification = [ordered]@{ required = @(); outcomes = @() }
+        reviewRequested = [bool]$ReviewRequested; executionClassOverride = $ExecutionClassOverride
         worktree = $null; failureSignatures = @(); codexCalls = 0; completionAuthority = 'controller'
         createdAtUtc = [DateTime]::UtcNow.ToString('o'); updatedAtUtc = [DateTime]::UtcNow.ToString('o'); completedAtUtc = $null
     }
@@ -142,6 +146,12 @@ function Set-AihTaskExecutionClass {
     $task
 }
 
+function Set-AihTaskReviewRequested {
+    param([string]$Workspace, [string]$TaskId)
+    $task = Update-AihTaskRecord $Workspace $TaskId { param($item) $item.reviewRequested = $true }
+    $task
+}
+
 function Set-AihTaskEvidence {
     param([string]$Workspace, [string]$TaskId, [Parameter(Mandatory = $true)]$Evidence)
     $layout = Initialize-AihTaskLedger $Workspace
@@ -165,7 +175,9 @@ function Test-AihTaskCompletion {
         if ($null -ne $evidence.PSObject.Properties['scopePass'] -and -not [bool]$evidence.scopePass) { $reasons.Add('Scope constraints did not pass.') }
     }
     $reviewRequired = $task.risk -eq 'critical'
-    if ($reviewRequired -and -not ($CodexReviewPassed -or $CodexFindingsResolved)) { $reasons.Add('Configured critical task requires a passing bounded Codex review or deterministic evidence that its findings were resolved.') }
+    if ($null -ne $task.PSObject.Properties['reviewRequested'] -and [bool]$task.reviewRequested) { $reviewRequired = $true }
+    if ($null -ne $task.PSObject.Properties['executionClassOverride'] -and [string]$task.executionClassOverride -eq 'codex_review') { $reviewRequired = $true }
+    if ($reviewRequired -and -not ($CodexReviewPassed -or $CodexFindingsResolved)) { $reasons.Add('This task requires a passing bounded Codex review or deterministic evidence that its findings were resolved (critical policy, explicit review request, or execution-class override).') }
     $complete = $reasons.Count -eq 0
     if ($complete) {
         Update-AihTaskRecord $Workspace $TaskId { param($item); $item.status = 'complete'; $item.completedAtUtc = [DateTime]::UtcNow.ToString('o') } | Out-Null
