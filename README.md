@@ -117,3 +117,5 @@ aih-stop
 The local OAuth adapter stays bound to `127.0.0.1`. Every user must authenticate their own account. Never copy `.codex/auth.json`, `data/.credentials.yaml`, or another user’s environment files.
 
 See [docs/vnext-architecture.md](docs/vnext-architecture.md) for contracts, lifecycle details, migration decisions, state schemas, and deferred work.
+
+Кратко ръководство на български: [docs/quick-start-bg.md](docs/quick-start-bg.md).

@@ -1,7 +1,7 @@
 {
-  "HarnessVersion": "0.1.0-rc.6",
+  "HarnessVersion": "0.1.1-rc.2",
   "OpenAiOAuthVersion": "2.0.0",
-  "CodexSubagentVersion": "0.1.0-rc.6",
+  "CodexSubagentVersion": "0.1.1-rc.2",
   "NodeVersion": "24.18.1",
   "DefaultInstallRoot": "C:\\AI-Harness",
   "OAuthBaseUrl": "http://127.0.0.1:10531/v1",

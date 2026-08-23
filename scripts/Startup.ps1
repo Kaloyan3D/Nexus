@@ -62,8 +62,9 @@ function Get-AihWebProbe {
     }
     catch {
         $httpError = $_.Exception.Message
-        if ($null -ne $_.Exception.Response) {
-            try { $httpStatus = [int]$_.Exception.Response.StatusCode } catch { }
+        $responseProperty = $_.Exception.PSObject.Properties['Response']
+        if ($null -ne $responseProperty -and $null -ne $responseProperty.Value) {
+            try { $httpStatus = [int]$responseProperty.Value.StatusCode } catch { }
         }
     }
 

@@ -95,7 +95,7 @@ function New-AihContextBundle {
     foreach($match in $ranked){
         if($slices.Count -ge $MaxFiles){break}
         $path=Join-Path $layout.Workspace $match.file
-        $content=Get-Content -Raw -LiteralPath $path
+        $content=[string](Get-Content -Raw -LiteralPath $path)
         $remaining=$budgetChars-$used
         if($remaining -le 0){break}
         $slice=if($content.Length -gt $remaining){$content.Substring(0,$remaining)}else{$content}

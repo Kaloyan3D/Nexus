@@ -39,6 +39,28 @@ User -> TaskController -> Routing policy -> ContextEngine
 
 Every phase preserves a runnable PowerShell/DSH harness. Existing project discovery, verification commands, provider configuration, browser UI, runtime tools, logs, background jobs, permissions, credentials, Git integration, and command wrappers were reused.
 
+## GUI bridge (aih-controller)
+
+The Web GUI message path is wired to the controller by a small agent-plane plugin
+(`config/AihController.cjs`, mounted in both generated presets by `Setup.ps1`). It keeps
+DeepSeek as the normal root engineer while making the controller real:
+
+- Every GUI session is bound to a `TaskController` task; the first user prompt is routed
+  through the routing policy and the decision is persisted. The selected execution path is
+  posted into the session as a controller notice and exposed as
+  `DSH_AIH_TASK_ID` / `DSH_AIH_EXECUTION_CLASS` / `DSH_AIH_REVIEW_REQUIRED`.
+- `/codex-review <question>` is the deterministic explicit review path: TaskController task
+  with `reviewRequested=true` -> routing selects `codex_review` -> bounded Review Packet
+  (context bundle capped at the Codex budget) -> hard budget validation -> one fresh read-only
+  Codex call -> ReviewResult + telemetry posted to the session. The turn is rejected, so no
+  DeepSeek audit runs first (DeepSeek calls = 0). Oversized packets produce a structured
+  packet-too-large result and Codex is not called.
+- Turn errors are routed as `attempt-failure` signals, so the same normalized-failure
+  escalation (`deepseek_normal` -> `deepseek_deep` -> `codex_review`) works from GUI
+  sessions; review findings return to DeepSeek repair via the `review-findings` signal.
+- Codex is never exposed to the model as a tool: `tool-subagent-codex` stays disabled and
+  the review service is invoked only by the controller through packet enforcement.
+
 ## State and lifecycle
 
 ```text

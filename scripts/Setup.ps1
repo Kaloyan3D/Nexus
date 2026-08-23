@@ -105,7 +105,7 @@ if ($installedNodeVersion -ne $nodeVersion) {
 Copy-Item -LiteralPath (Join-Path $layout.Runtime 'package.json') -Destination (Join-Path $layout.App 'package.json') -Force
 Copy-Item -LiteralPath (Join-Path $layout.Runtime 'package-lock.json') -Destination (Join-Path $layout.App 'package-lock.json') -Force
 if (-not $SkipDependencyInstall) {
-    & $layout.Npm ci --omit=dev --prefix $layout.App
+    & $layout.Npm ci --omit=dev --legacy-peer-deps --prefix $layout.App
     if ($LASTEXITCODE -ne 0) { throw 'npm ci failed while installing the pinned Harness runtime.' }
 }
 elseif (-not (Test-Path -LiteralPath $layout.Dsh)) {
@@ -152,6 +152,19 @@ Copy-Item -LiteralPath (Join-Path $layout.Config 'preset-deepseek.yml') -Destina
 Copy-Item -LiteralPath (Join-Path $layout.Config 'DeepSeek-Isolation.cjs') -Destination (Join-Path $deepSeekPreset 'DeepSeek-Isolation.cjs') -Force
 & (Join-Path $layout.Scripts 'Enable-EngineeringIsolation.ps1') -PresetDirectory $targetPreset
 Copy-Item -LiteralPath (Join-Path $layout.Config 'Engineering-Isolation.cjs') -Destination (Join-Path $targetPreset 'Engineering-Isolation.cjs') -Force
+foreach ($presetDirectory in @($targetPreset, $deepSeekPreset)) {
+    Copy-Item -LiteralPath (Join-Path $layout.Config 'AihController.cjs') -Destination (Join-Path $presetDirectory 'AihController.cjs') -Force
+    $presetFile = Join-Path $presetDirectory 'agent.cordis.yml'
+    $presetText = Get-Content -Raw -Encoding UTF8 -LiteralPath $presetFile
+    if (-not $presetText.Contains('- id: aih-controller')) {
+        $controllerRow = @"
+
+- id: aih-controller
+  name: './AihController.cjs'
+"@
+        Add-Content -Path $presetFile -Value $controllerRow -Encoding UTF8
+    }
+}
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $layout.Credentials) | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $layout.RoutingData 'states') | Out-Null

@@ -5,18 +5,26 @@ $ErrorActionPreference='Stop'
 
 function Get-AihCodexBudget { param([object]$Policy) $Policy.codex.automaticReview }
 function New-AihReviewPacket {
-    param([string]$Workspace,[string]$TaskId,[string]$Question,[string[]]$Invariants=@(),[string]$Diff,[object[]]$RelevantFiles=@(),[object[]]$FailingEvidence=@(),[string]$DeepSeekAssessment,[object]$Policy,[switch]$UserApprovedFullRepo)
+    param([string]$Workspace,[string]$TaskId,[string]$Question,[string[]]$Invariants=@(),[string]$Diff,[object[]]$RelevantFiles=@(),[object[]]$FailingEvidence=@(),[string]$DeepSeekAssessment,[object]$Policy,[switch]$UserApprovedFullRepo,[ValidateSet('bundle','files','inline')][string]$ContextMode='bundle')
     $budget=Get-AihCodexBudget $Policy
+    if($null -eq $Invariants){$Invariants=@()};if($null -eq $FailingEvidence){$FailingEvidence=@()}
+    # ConvertFrom-Json yields $null for '[]' and @($null) for a single null;
+    # drop null entries so empty context cannot become one empty slice.
+    $RelevantFiles=@($RelevantFiles|Where-Object{$null -ne $_})
     $diffLines=@($Diff -split '\r?\n').Count;$estimatedTokens=[Math]::Ceiling((($Question+$Diff+$DeepSeekAssessment+($RelevantFiles|ConvertTo-Json -Depth 6)).Length)/4)
     $violations=[Collections.Generic.List[string]]::new()
     if(@($RelevantFiles).Count -gt [int]$budget.maxFiles){$violations.Add("file limit exceeded: $(@($RelevantFiles).Count)/$($budget.maxFiles)")}
     if($diffLines -gt [int]$budget.maxDiffLines){$violations.Add("diff line limit exceeded: $diffLines/$($budget.maxDiffLines)")}
     if($estimatedTokens -gt [int]$budget.maxContextTokens){$violations.Add("context token limit exceeded: $estimatedTokens/$($budget.maxContextTokens)")}
-    if(@($RelevantFiles).Count -eq 0 -and -not $UserApprovedFullRepo -and [bool]$Policy.codex.fullRepo.requiresUserApproval){$violations.Add('full repository context requires explicit user approval')}
+    # A packet with zero files would silently become a full-repository review
+    # and needs explicit user approval - EXCEPT for 'inline' reviews, which by
+    # definition carry no repository content at all (zero files, zero diff),
+    # so the full-repo consent guard does not apply to them.
+    if(@($RelevantFiles).Count -eq 0 -and $ContextMode -ne 'inline' -and -not $UserApprovedFullRepo -and [bool]$Policy.codex.fullRepo.requiresUserApproval){$violations.Add('full repository context requires explicit user approval')}
     $task=Get-AihTask $Workspace $TaskId
     if([int]$task.codexCalls -ge [int]$budget.maxCallsPerTask){$violations.Add("call limit exceeded: $($task.codexCalls)/$($budget.maxCallsPerTask)")}
     $allowed=$violations.Count -eq 0
-    $packet=[ordered]@{schemaVersion=1;taskId=$TaskId;question=$Question;invariants=@($Invariants);diff=$Diff;relevantFiles=@($RelevantFiles);failingEvidence=@($FailingEvidence);deepseekAssessment=$DeepSeekAssessment;requestedAction='Return a bounded independent review; do not modify files or declare task completion.';budget=[ordered]@{maxCallsPerTask=[int]$budget.maxCallsPerTask;maxFiles=[int]$budget.maxFiles;maxDiffLines=[int]$budget.maxDiffLines;maxContextTokens=[int]$budget.maxContextTokens;maxOutputTokens=[int]$budget.maxOutputTokens};enforcement=[ordered]@{allowed=$allowed;violations=@($violations);estimatedContextTokens=$estimatedTokens;diffLines=$diffLines;readOnly=$true;freshContext=$true;completionAuthority=$false}}
+    $packet=[ordered]@{schemaVersion=1;taskId=$TaskId;question=$Question;invariants=@($Invariants);diff=$Diff;relevantFiles=@($RelevantFiles);failingEvidence=@($FailingEvidence);deepseekAssessment=$DeepSeekAssessment;requestedAction='Return a bounded independent review; do not modify files or declare task completion.';contextMode=$ContextMode;budget=[ordered]@{maxCallsPerTask=[int]$budget.maxCallsPerTask;maxFiles=[int]$budget.maxFiles;maxDiffLines=[int]$budget.maxDiffLines;maxContextTokens=[int]$budget.maxContextTokens;maxOutputTokens=[int]$budget.maxOutputTokens};enforcement=[ordered]@{allowed=$allowed;violations=@($violations);estimatedContextTokens=$estimatedTokens;diffLines=$diffLines;readOnly=$true;freshContext=$true;completionAuthority=$false}}
     $layout=Initialize-AihTaskLedger $Workspace
     Write-AihAtomicJson (Join-Path (Join-Path $layout.Runs $TaskId) 'review-packet.json') $packet
     [pscustomobject]$packet

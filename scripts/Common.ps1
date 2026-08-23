@@ -1,6 +1,12 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# JSON produced by these CLIs is consumed by the controller bridge (Node).
+# Windows PowerShell 5.1 otherwise writes stdout in the console codepage,
+# which mangles non-ASCII text (U+2192 becomes a raw 0x1A byte) and breaks
+# the bridge's JSON parse. Emit UTF-8 explicitly.
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+
 function Get-AihInstallRoot {
     param([string]$InstallRoot)
 
@@ -116,11 +122,11 @@ function Get-AihDeepSeekKey {
     if (-not (Test-Path -LiteralPath $layout.Credentials)) {
         return $null
     }
-    $line = Get-Content -LiteralPath $layout.Credentials | Where-Object { $_ -match '^DEEPSEEK_API_KEY\s*:' } | Select-Object -First 1
+    $line = Get-Content -LiteralPath $layout.Credentials | Where-Object { $_ -match '^\s*DEEPSEEK_API_KEY\s*:' } | Select-Object -First 1
     if ($null -eq $line) {
         return $null
     }
-    $value = ($line -replace '^DEEPSEEK_API_KEY\s*:\s*', '').Trim()
+    $value = ($line -replace '^\s*DEEPSEEK_API_KEY\s*:\s*', '').Trim()
     if ($value.StartsWith("'") -and $value.EndsWith("'")) {
         $value = $value.Substring(1, $value.Length - 2).Replace("''", "'")
     }
