@@ -22,8 +22,10 @@ const ROOT = path.resolve(__dirname, '..')
 const ADAPTER = path.join(ROOT, 'ui', 'nexus-controller', 'lib', 'status.cjs')
 const HOST = path.join(ROOT, 'ui', 'nexus-controller', 'lib', 'index.js')
 const CLIENT = path.join(ROOT, 'ui', 'nexus-controller', 'lib', 'client.js')
+const DETAIL = path.join(ROOT, 'ui', 'nexus-controller', 'lib', 'detail.cjs')
 
 const status = require(ADAPTER)
+const detail = require(DETAIL)
 const pexec = promisify(execFile)
 
 function tmpDir(prefix) {
@@ -172,6 +174,61 @@ function fixtureFileMap(dataRoot, workspace, { task, executionClass, decision, d
   })
   files[path.join(workspace, '.ai-harness', 'state', 'tasks.json')] = JSON.stringify(task || FIXTURE_TASK)
   return files
+}
+
+/**
+ * Detail-adapter fixture map: the same files as fixtureFileMap plus the
+ * run artifacts the Task Control Room reads (attempts, evidence, review).
+ * Pass decisions: [] to write an EMPTY routing ledger (no history).
+ */
+function detailFixtureFileMap(dataRoot, workspace, {
+  task, decisions, lifecycle, attempts, evidence, reviewPacket, reviewResult,
+  routingState, corrupt = {},
+} = {}) {
+  const files = fixtureFileMap(dataRoot, workspace, { task, decisions })
+  if (Array.isArray(decisions) && decisions.length === 0) {
+    // fixtureFileMap falls back to the default decision for empty arrays —
+    // an explicit empty array means a genuinely empty routing ledger.
+    files[path.join(dataRoot, 'routing', 'decisions.jsonl')] = ''
+  }
+  const ledgerPath = path.join(workspace, '.ai-harness', 'state', 'decisions.jsonl')
+  files[ledgerPath] = Array.isArray(lifecycle) ? lifecycle.map((r) => JSON.stringify(r)).join('\n') + '\n' : ''
+  const runsDir = path.join(workspace, '.ai-harness', 'runs', 'TASK-0042')
+  files[path.join(runsDir, 'manifest.json')] = '{}'
+  if (attempts !== undefined) files[path.join(runsDir, 'attempts.jsonl')] = attempts.map((r) => JSON.stringify(r)).join('\n') + '\n'
+  if (evidence !== undefined) files[path.join(runsDir, 'evidence.json')] = JSON.stringify(evidence)
+  if (reviewPacket !== undefined) files[path.join(runsDir, 'review-packet.json')] = JSON.stringify(reviewPacket)
+  if (reviewResult !== undefined) files[path.join(runsDir, 'review-result.json')] = JSON.stringify(reviewResult)
+  if (corrupt.evidence) files[path.join(runsDir, 'evidence.json')] = '{ this is not json'
+  if (corrupt.attempts) files[path.join(runsDir, 'attempts.jsonl')] = '{broken}\n'
+  if (corrupt.decisions) files[path.join(dataRoot, 'routing', 'decisions.jsonl')] = '{broken line}\n' + files[path.join(dataRoot, 'routing', 'decisions.jsonl')]
+  if (corrupt.lifecycle) files[ledgerPath] = '{broken}\n' + files[ledgerPath]
+  if (routingState) {
+    const stateFile = status.routingStateFileName(workspace, 'aih-engineering', 'TASK-0042')
+    files[path.join(dataRoot, 'routing', 'states', stateFile)] = JSON.stringify(routingState)
+  }
+  return files
+}
+
+async function detailFixture(overrides = {}) {
+  const dataRoot = tmpDir('nexus-ctr-d-')
+  const workspace = path.join(dataRoot, 'ws')
+  const files = detailFixtureFileMap(dataRoot, workspace, overrides)
+  writeTree(dataRoot, files)
+  const snapshot = await detail.buildDetailSnapshot({
+    dataRoot,
+    sessionId: 'session-0001',
+    statePath: path.join(dataRoot, 'aih-state.json'),
+    readFile: memoryReader(files),
+    modelNames: {
+      'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash MAX',
+      'sol-local/gpt-5.6-sol': 'GPT-5.6 Sol',
+    },
+    gitSummary: null,
+    gitFiles: null,
+    nowUtc: () => '2026-08-28T18:00:00.000Z',
+  })
+  return { snapshot, dataRoot, workspace }
 }
 
 async function fixtureSnapshot(overrides = {}) {
@@ -387,10 +444,10 @@ async function main() {
       // 11a. REGRESSION: the plugin activates BEFORE webServer exists (late
       // composition ordering). The route must NOT be lost to a one-time
       // lookup — nothing registers until the service becomes available.
-      let captured = null
+      let captured = []
       let injectKeys = null
       let injectCallback = null
-      const fakeWebServer = { register(spec) { captured = spec } }
+      const fakeWebServer = { register(spec) { captured.push(spec) } }
       const noWebCtx = {
         inject(keys, callback) { injectKeys = keys; injectCallback = callback },
         effect() { return () => {} },
@@ -398,20 +455,23 @@ async function main() {
       plugin.apply(noWebCtx)
       assert.ok(injectKeys, 'apply must declare a lifecycle injection for webServer')
       assert.ok(Array.isArray(injectKeys) && injectKeys.includes('webServer'), 'injection must require the webServer service')
-      assert.equal(captured, null, 'no route may register before webServer is available')
+      assert.equal(captured.length, 0, 'no route may register before webServer is available')
 
       // 11b. webServer becomes available later → the injection callback
-      // applies and the route registers (Cordis lifecycle semantics).
+      // applies and BOTH routes register (Cordis lifecycle semantics).
       assert.doesNotThrow(() => injectCallback({ webServer: fakeWebServer, effect(fn) { fn(); return () => {} } }), 'injection callback must apply cleanly once the service exists')
-      assert.ok(captured, 'route must register after webServer becomes available')
-      assert.equal(captured.kind, 'exact')
-      assert.equal(captured.path, '/nexus/controller.json')
-      const route = captured
+      assert.equal(captured.length, 2, 'both routes must register after webServer becomes available')
+      const paths = captured.map((spec) => spec.path).sort()
+      assert.deepEqual(paths, ['/nexus/control-room.json', '/nexus/controller.json'])
+      const route = captured.find((spec) => spec.path === '/nexus/controller.json')
+      assert.equal(route.kind, 'exact')
+      const roomRoute = captured.find((spec) => spec.path === '/nexus/control-room.json')
+      assert.equal(roomRoute.kind, 'exact')
 
       // 11c. profiles that NEVER provide webServer stay inert (tui/headless)
-      captured = null
+      captured = []
       plugin.apply({ inject() {}, effect() { return () => {} } })
-      assert.equal(captured, null)
+      assert.equal(captured.length, 0)
 
       const res = {
         writeHead(code, headers) { this.code = code; this.headers = headers },
@@ -433,6 +493,28 @@ async function main() {
       const idlePayload = JSON.parse(res.body)
       assert.equal(idlePayload.state, 'idle')
       assert.equal(idlePayload.binding, null)
+
+      // control-room endpoint: detail envelope for the bound session
+      await roomRoute.handler({ url: '/nexus/control-room.json?session=session-0001' }, res)
+      const roomPayload = JSON.parse(res.body)
+      assert.equal(res.code, 200)
+      assert.equal(res.headers['content-type'], 'application/json; charset=utf-8')
+      assert.equal(res.headers['cache-control'], 'no-store')
+      assert.equal(roomPayload.schemaVersion, 1)
+      assert.equal(roomPayload.binding.taskId, 'TASK-0042')
+      assert.ok(Array.isArray(roomPayload.routingHistory), 'routingHistory is an array')
+      assert.equal(roomPayload.routingHistory.length, 1)
+      assert.equal(roomPayload.routingHistory[0].kind, 'primary')
+      assert.deepEqual(roomPayload.attempts, [], 'no attempts recorded in fixture')
+      assert.equal(roomPayload.verification.total, 2, 'verification falls back to the ledger outcomes')
+      assert.equal(roomPayload.controller.status, 'READY')
+      assert.equal(roomPayload.binding.workspace, workspace)
+      // unknown session → idle envelope on the detail endpoint too
+      await roomRoute.handler({ url: '/nexus/control-room.json?session=session-nope' }, res)
+      const roomIdle = JSON.parse(res.body)
+      assert.equal(roomIdle.state, 'idle')
+      assert.equal(roomIdle.binding, null)
+      assert.equal(roomIdle.error, undefined, 'unbound session is an idle envelope, not an error')
     } finally {
       if (previousHome === undefined) delete process.env.DSH_HOME
       else process.env.DSH_HOME = previousHome
@@ -463,17 +545,18 @@ async function main() {
       // the service appears AFTER the plugin activated — the deferred
       // injection resolves and the route registers.
       root.provide('webServer', fakeWebServer)
-      for (let i = 0; i < 60 && registered.length === 0; i++) await tick(50)
-      assert.equal(registered.length, 1, 'real cordis: route registers after webServer becomes available')
-      assert.equal(registered[0].kind, 'exact')
-      assert.equal(registered[0].path, '/nexus/controller.json')
+      for (let i = 0; i < 60 && registered.length < 2; i++) await tick(50)
+      assert.equal(registered.length, 2, 'real cordis: both routes register after webServer becomes available')
+      assert.deepEqual(registered.map((spec) => spec.path).sort(), ['/nexus/control-room.json', '/nexus/controller.json'])
+      assert.ok(registered.every((spec) => spec.kind === 'exact'))
 
       // the registered handler keeps the existing semantics.
       const res = {
         writeHead(code, headers) { this.code = code; this.headers = headers },
         end(body) { this.body = body },
       }
-      await registered[0].handler({ url: '/nexus/controller.json?session=session-0001' }, res)
+      const stateRoute = registered.find((spec) => spec.path === '/nexus/controller.json')
+      await stateRoute.handler({ url: '/nexus/controller.json?session=session-0001' }, res)
       const payload = JSON.parse(res.body)
       assert.equal(res.code, 200)
       assert.equal(payload.schemaVersion, 1)
@@ -1020,6 +1103,354 @@ async function main() {
     assert.ok(!snapshot.task.description.includes('\u00C3'), 'no double-corruption mojibake')
     const envelope = JSON.stringify(snapshot)
     assert.ok(!envelope.includes('\u00E2\u20AC') && !envelope.includes('\u00C3'), 'route envelope carries no mojibake')
+  }
+
+
+  // ── 18. detail adapter (ui/nexus-controller/lib/detail.cjs) ─────────────
+  // 18a. routing timeline: root decision stays the root executor; the newer
+  //      review decision appears as history, never as the root. ───────────
+  {
+    const primaryDecision = {
+      recordVersion: 3, timestampUtc: '2026-08-28T17:28:02.8454102Z', taskId: 'TASK-0042', workspace: null, preset: 'aih-engineering',
+      kind: 'routed', selectedExecutionClass: 'deepseek_normal', executionClass: 'deepseek_normal',
+      provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoning: 'max', risk: 'normal', reviewRequired: false, writable: true,
+    }
+    const reviewDecision = {
+      recordVersion: 3, timestampUtc: '2026-08-28T19:07:30.3811953Z', taskId: 'TASK-0042', workspace: null, preset: 'aih-engineering',
+      kind: 'routed', selectedExecutionClass: 'codex_review', executionClass: 'codex_review',
+      provider: 'sol-local', model: 'gpt-5.6-sol', reasoning: 'off', risk: 'normal', reviewRequired: true, escalatedFrom: 'deepseek_normal', writable: false,
+    }
+    const { snapshot } = await detailFixture({ decisions: [primaryDecision, reviewDecision] })
+    assert.equal(snapshot.execution.model, 'DeepSeek V4 Flash MAX', 'root executor is the PRIMARY decision, not the newer review')
+    assert.equal(snapshot.execution.escalatedFrom, null, 'root executor carries no escalation marker')
+    assert.equal(snapshot.execution.reasoning, 'max')
+    assert.equal(snapshot.routingHistory.length, 2, 'history holds every routed decision')
+    assert.equal(snapshot.routingHistory[0].kind, 'primary')
+    assert.equal(snapshot.routingHistory[1].kind, 'review')
+    assert.equal(snapshot.routingHistory[1].model, 'GPT-5.6 Sol', 'history carries display model names')
+    assert.equal(snapshot.reviews.decisions.length, 1, 'review decisions surface under reviews')
+    assert.equal(snapshot.reviews.decisions[0].kind, 'review')
+  }
+
+  // 18b. no routing history at all → graceful empty timeline, task intact.
+  {
+    const { snapshot } = await detailFixture({ decisions: [] })
+    assert.deepEqual(snapshot.routingHistory, [])
+    assert.deepEqual(snapshot.reviews.decisions, [])
+    assert.equal(snapshot.task.taskId, 'TASK-0042', 'task ledger unaffected by an empty routing ledger')
+    assert.equal(snapshot.binding.taskId, 'TASK-0042')
+  }
+
+  // 18c. attempts: ordering, status derivation, durations, attempt 0 absent.
+  {
+    const attempts = [
+      { attemptId: 'TASK-0042-A1', taskId: 'TASK-0042', sequence: 1, executionClass: 'deepseek_normal', status: 'started', startedAtUtc: '2026-08-28T17:30:00.000Z' },
+      { taskId: 'TASK-0042', sequence: 1, status: 'failed', failureSignature: 'first-sig', evidence: 'logs/a1.txt', timestampUtc: '2026-08-28T18:00:00.000Z' },
+      { attemptId: 'TASK-0042-A2', taskId: 'TASK-0042', sequence: 2, executionClass: 'deepseek_normal', status: 'started', startedAtUtc: '2026-08-28T18:05:00.000Z' },
+    ]
+    const { snapshot } = await detailFixture({ attempts })
+    assert.equal(snapshot.attempts.length, 2, 'grouped by sequence, ordered ascending')
+    assert.equal(snapshot.attempts[0].sequence, 1)
+    assert.equal(snapshot.attempts[0].status, 'failed')
+    assert.equal(snapshot.attempts[0].failureSignature, 'first-sig')
+    assert.equal(snapshot.attempts[0].evidence, 'logs/a1.txt')
+    assert.equal(snapshot.attempts[0].durationSeconds, 1800, 'duration only from real start→failure timestamps')
+    assert.equal(snapshot.attempts[1].sequence, 2)
+    assert.equal(snapshot.attempts[1].status, 'started', 'in-flight attempt stays started (ledger not complete)')
+    assert.equal(snapshot.attempts[1].durationSeconds, null, 'no duration for an in-flight attempt')
+
+    const completeTask = { ...FIXTURE_TASK, tasks: [{ ...FIXTURE_TASK.tasks[0], status: 'complete', completedAtUtc: '2026-08-28T18:30:00.000Z' }] }
+    const done = await detailFixture({ task: completeTask, attempts })
+    assert.equal(done.snapshot.attempts[1].status, 'passed', 'started-without-failure + complete ledger = passed (derived, never fabricated)')
+
+    const none = await detailFixture({})
+    assert.deepEqual(none.snapshot.attempts, [], 'no attempts records → empty list, no attempt 0 row')
+  }
+
+  // 18d. verification: pass / fail / partial / malformed / ledger fallback.
+  {
+    const evidence = {
+      acceptanceCriteria: [{ criterion: 'panel renders', status: 'PASS', evidence: 'boot-verify' }],
+      verification: [
+        { name: 'typecheck', status: 'PASS', evidence: 'tsc --noEmit' },
+        { name: 'tests', status: 'PASS', evidence: 'npm test' },
+      ],
+      scopePass: true,
+    }
+    const { snapshot } = await detailFixture({ evidence })
+    assert.equal(snapshot.verification.status, 'passed')
+    assert.equal(snapshot.verification.passed, 2)
+    assert.equal(snapshot.verification.failed, 0)
+    assert.equal(snapshot.verification.total, 2)
+    assert.equal(snapshot.verification.source, 'evidence-artifact')
+    assert.equal(snapshot.verification.artifactPresent, true)
+    assert.equal(snapshot.verification.acceptanceCriteria.length, 1)
+    assert.equal(snapshot.verification.scopePass, true)
+
+    const fail = await detailFixture({ evidence: { verification: [{ name: 'typecheck', status: 'FAIL' }] } })
+    assert.equal(fail.snapshot.verification.status, 'failed')
+    const partial = await detailFixture({ evidence: { verification: [{ name: 'a', status: 'PASS' }, { name: 'b', status: 'FAIL' }] } })
+    assert.equal(partial.snapshot.verification.status, 'partial')
+
+    const malformed = await detailFixture({ evidence: { verification: [{ name: 'typecheck', status: 'PASS' }, { status: 'FAIL' }] } })
+    assert.equal(malformed.snapshot.verification.checks.length, 1, 'a check without a name is dropped')
+    assert.equal(malformed.snapshot.verification.passed, 1, 'healthy checks survive a malformed sibling')
+
+    const ledgerOnly = await detailFixture({})
+    assert.equal(ledgerOnly.snapshot.verification.source, 'ledger', 'no artifact → ledger outcomes')
+    assert.equal(ledgerOnly.snapshot.verification.total, 2)
+    assert.equal(ledgerOnly.snapshot.verification.artifactPresent, false)
+  }
+
+  // 18e. failures: first-seen-order signature counts, current signature.
+  {
+    const task = { ...FIXTURE_TASK, tasks: [{ ...FIXTURE_TASK.tasks[0], failureSignatures: ['sig-a', 'sig-b', 'sig-a'] }] }
+    const { snapshot } = await detailFixture({ task })
+    assert.deepEqual(snapshot.failures.signatures, [
+      { signature: 'sig-a', count: 2 },
+      { signature: 'sig-b', count: 1 },
+    ], 'signature counts preserve first-seen order')
+    assert.equal(snapshot.failures.current, 'sig-a', 'current = last recorded signature')
+
+    const routed = await detailFixture({
+      task,
+      routingState: { taskId: 'TASK-0042', workspace: null, preset: 'aih-engineering', executionClass: 'deepseek_normal', sameFailureCount: 3, updatedAtUtc: '2026-08-28T18:10:00.000Z' },
+    })
+    assert.equal(routed.snapshot.failures.sameFailureCount, 3, 'same-failure count comes from the routing state')
+  }
+
+  // 18f. reviews: none recorded / full packet meta + result findings.
+  {
+    const plain = await detailFixture({})
+    assert.equal(plain.snapshot.reviews.codexCalls, 0)
+    assert.equal(plain.snapshot.reviews.reviewRequired, false)
+    assert.equal(plain.snapshot.reviews.result, null)
+    assert.equal(plain.snapshot.reviews.packet, null)
+
+    const reviewResult = {
+      schemaVersion: 1, taskId: 'TASK-0042', verdict: 'fail',
+      findings: [{ severity: 'high', location: 'lib/client.js:120', problem: 'room leaks the timeline', evidence: 'full internal note' }],
+      needsBroaderContext: true,
+    }
+    const reviewPacket = {
+      schemaVersion: 1, taskId: 'TASK-0042', question: 'is the room truthful?', invariants: [],
+      diff: 'diff-content', relevantFiles: [{ path: 'lib/client.js', score: 0.9, content: 'full file content' }],
+    }
+    const task = { ...FIXTURE_TASK, tasks: [{ ...FIXTURE_TASK.tasks[0], codexCalls: 1, reviewRequested: true }] }
+    const { snapshot } = await detailFixture({ task, reviewResult, reviewPacket })
+    assert.equal(snapshot.reviews.codexCalls, 1)
+    assert.equal(snapshot.reviews.reviewRequired, true)
+    assert.equal(snapshot.reviews.result.verdict, 'fail')
+    assert.equal(snapshot.reviews.result.findings.length, 1)
+    assert.equal(snapshot.reviews.result.findings[0].severity, 'high')
+    assert.equal(snapshot.reviews.result.findings[0].location, 'lib/client.js:120')
+    assert.equal(snapshot.reviews.result.findings[0].problem, 'room leaks the timeline')
+    assert.equal('evidence' in snapshot.reviews.result.findings[0], false, 'findings expose severity/location/problem only — never evidence text')
+    assert.equal(snapshot.reviews.result.needsBroaderContext, true)
+    assert.equal(snapshot.reviews.packet.question, 'is the room truthful?')
+    assert.equal(snapshot.reviews.packet.relevantFileCount, 1)
+    assert.equal(snapshot.reviews.packet.diffLength, 'diff-content'.length)
+    assert.equal('diff' in snapshot.reviews.packet, false, 'packet exposes meta only — never the diff')
+    assert.equal('relevantFiles' in snapshot.reviews.packet, false, 'packet never exposes file contents')
+  }
+
+  // 18g. git files: merged porcelain + numstat for a REAL fixture repo.
+  {
+    const repo = tmpDir('nexus-git-d-')
+    await pexec('git', ['init', '-q', repo])
+    await pexec('git', ['-C', repo, 'config', 'user.email', 'test@example.com'])
+    await pexec('git', ['-C', repo, 'config', 'user.name', 'Test'])
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n', 'utf8')
+    fs.writeFileSync(path.join(repo, 'b.txt'), 'base\n', 'utf8')
+    await pexec('git', ['-C', repo, 'add', 'a.txt', 'b.txt'])
+    await pexec('git', ['-C', repo, 'commit', '-q', '-m', 'base'])
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'base\nchanged\n', 'utf8')
+    fs.unlinkSync(path.join(repo, 'b.txt'))
+    fs.writeFileSync(path.join(repo, 'u.txt'), 'untracked\n', 'utf8')
+    fs.writeFileSync(path.join(repo, 'd.txt'), 'new\n', 'utf8')
+    await pexec('git', ['-C', repo, 'add', 'd.txt'])
+
+    const files = await detail.collectGitFiles(repo)
+    assert.equal(files.error, null)
+    const byPath = Object.fromEntries(files.files.map((f) => [f.path, f]))
+    assert.ok(byPath['a.txt'], 'modified file present')
+    assert.equal(byPath['a.txt'].insertions, 1)
+    assert.equal(byPath['a.txt'].deletions, 0)
+    assert.ok(byPath['b.txt'], 'deleted file present')
+    assert.equal(byPath['b.txt'].deletions, 1)
+    assert.ok(byPath['d.txt'], 'staged new file present')
+    assert.equal(byPath['d.txt'].insertions, 1)
+    assert.ok(byPath['u.txt'], 'untracked file present')
+    assert.equal(byPath['u.txt'].untracked, true)
+    assert.equal(byPath['u.txt'].insertions, null, 'untracked never gets invented line counts')
+
+    const clean = tmpDir('nexus-git-c-')
+    await pexec('git', ['init', '-q', clean])
+    await pexec('git', ['-C', clean, 'config', 'user.email', 'test@example.com'])
+    await pexec('git', ['-C', clean, 'config', 'user.name', 'Test'])
+    fs.writeFileSync(path.join(clean, 'x.txt'), 'x\n', 'utf8')
+    await pexec('git', ['-C', clean, 'add', 'x.txt'])
+    await pexec('git', ['-C', clean, 'commit', '-q', '-m', 'base'])
+    const cleanFiles = await detail.collectGitFiles(clean)
+    assert.equal(cleanFiles.files.length, 0, 'clean tree → no file rows')
+
+    const notRepo = await detail.collectGitFiles(tmpDir('nexus-git-n-'))
+    assert.equal(notRepo.error, 'git-unavailable', 'non-repo degrades to git-unavailable, never throws')
+  }
+
+  // 18h. corruption isolation: one corrupt subsystem never erases the rest.
+  {
+    const primaryDecision = {
+      recordVersion: 3, timestampUtc: '2026-08-28T17:28:02.8454102Z', taskId: 'TASK-0042', workspace: null, preset: 'aih-engineering',
+      kind: 'routed', selectedExecutionClass: 'deepseek_normal', executionClass: 'deepseek_normal',
+      provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoning: 'max', risk: 'normal', reviewRequired: false, writable: true,
+    }
+    const broken = await detailFixture({ decisions: [primaryDecision], corrupt: { decisions: true, lifecycle: true } })
+    assert.equal(broken.snapshot.routingHistory.length, 1, 'corrupt routing line is skipped, valid one classified')
+    assert.equal(broken.snapshot.routingHistory[0].kind, 'primary')
+    assert.equal(broken.snapshot.task.taskId, 'TASK-0042', 'task ledger intact despite corrupt routing/lifecycle')
+
+    const brokenEvidence = await detailFixture({ corrupt: { evidence: true } })
+    assert.equal(brokenEvidence.snapshot.task.taskId, 'TASK-0042', 'task intact with corrupt evidence artifact')
+    assert.equal(brokenEvidence.snapshot.verification.artifactPresent, false)
+    assert.equal(brokenEvidence.snapshot.verification.total, 2, 'corrupt artifact falls back to ledger outcomes')
+    assert.equal(brokenEvidence.snapshot.routingHistory.length, 1, 'routing intact with corrupt evidence')
+
+    const brokenAttempts = await detailFixture({ corrupt: { attempts: true } })
+    assert.equal(brokenAttempts.snapshot.task.taskId, 'TASK-0042')
+    assert.deepEqual(brokenAttempts.snapshot.attempts, [], 'corrupt attempt line is skipped')
+  }
+
+  // 18i. UTF-8: em dash, arrow, check mark, CJK, accents round-trip intact.
+  {
+    const utfDescription = '# TASK \u2014 Control Room \u2192 \u2713 \u4E2D\u6587 caf\u00E9'
+    const task = { ...FIXTURE_TASK, tasks: [{ ...FIXTURE_TASK.tasks[0], description: utfDescription }] }
+    const { snapshot } = await detailFixture({
+      task,
+      lifecycle: [{ kind: 'task-created', taskId: 'TASK-0042', timestampUtc: '2026-08-28T17:00:00.000Z', reason: '\u4E2D\u6587 \u2192 ok' }],
+    })
+    assert.equal(snapshot.task.description, utfDescription, 'detail description round-trips intact')
+    assert.ok(snapshot.task.description.includes('\u2014') && snapshot.task.description.includes('\u2713') && snapshot.task.description.includes('\u4E2D\u6587'))
+    assert.ok(snapshot.lifecycle[0].reason.includes('\u4E2D\u6587'), 'lifecycle reasons keep non-ASCII')
+    const envelope = JSON.stringify(snapshot)
+    assert.ok(!envelope.includes('\uFFFD'), 'no replacement characters in the detail envelope')
+    assert.ok(!envelope.includes('\u00E2\u20AC'), 'no mojibake in the detail envelope')
+  }
+
+
+  // ── 19. client: Task Control Room (expanded drawer) ─────────────────────
+  {
+    const requireFromApp = require('node:module').createRequire(path.join(ROOT, 'app', 'package.json'))
+    const react = requireFromApp('react')
+    const jsxRuntime = requireFromApp('react/jsx-runtime')
+    const renderToStaticMarkup = requireFromApp('react-dom/server').renderToStaticMarkup
+    let source = fs.readFileSync(CLIENT, 'utf8')
+    const detailHeader = 'function useDetailSnapshot(sessionId, enabled) {'
+    assert.ok(source.includes(detailHeader), 'detail hook header must exist in client.js')
+    source = source.replace(detailHeader, detailHeader + '\n    if (typeof window !== "undefined" && (window.__NX_TEST_DETAIL__ !== undefined || window.__NX_TEST_DETAIL_FAILED__)) return { detail: window.__NX_TEST_DETAIL__ ?? null, failed: window.__NX_TEST_DETAIL_FAILED__ === true }')
+    const viewHeader = 'function readRoomViewPref() {'
+    assert.ok(source.includes(viewHeader), 'room view pref header must exist in client.js')
+    source = source.replace(viewHeader, viewHeader + '\n    if (typeof window !== "undefined" && window.__NX_TEST_ROOM_VIEW__) return window.__NX_TEST_ROOM_VIEW__')
+    const openHeader = 'function readRoomOpenPref() {'
+    assert.ok(source.includes(openHeader), 'room open pref header must exist in client.js')
+    source = source.replace(openHeader, openHeader + '\n    if (typeof window !== "undefined" && window.__NX_TEST_ROOM_OPEN__ !== undefined) return window.__NX_TEST_ROOM_OPEN__')
+
+    let moduleExports = null
+    const sandbox = {
+      console, URL, setTimeout, clearTimeout,
+      window: {
+        __ModuleLoader__: {
+          load(def) {
+            moduleExports = def.factory((name) => {
+              if (name === 'react') return react
+              if (name === 'react/jsx-runtime') return jsxRuntime
+              throw new Error('unexpected require: ' + name)
+            })
+          },
+        },
+        localStorage: { getItem() { return null }, setItem() {} },
+        setInterval() { return 1 },
+        clearInterval() {},
+      },
+      document: { createElement() { return { dataset: {}, remove() {} } }, head: { appendChild() {} } },
+    }
+    vm.createContext(sandbox)
+    vm.runInContext(source, sandbox)
+    assert.ok(moduleExports && typeof moduleExports.ControlRoom === 'function', 'ControlRoom must be exported')
+    assert.equal(moduleExports.ROOM_TABS.join(','), 'overview,activity,verification,files', 'exactly four room tabs')
+
+    const dataRoot = tmpDir('nexus-ctr-r-')
+    const workspace = path.join(dataRoot, 'ws')
+    const primaryDecision = {
+      recordVersion: 3, timestampUtc: '2026-08-28T17:28:02.8454102Z', taskId: 'TASK-0042', workspace: null, preset: 'aih-engineering',
+      kind: 'routed', selectedExecutionClass: 'deepseek_normal', executionClass: 'deepseek_normal',
+      provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoning: 'max', risk: 'normal', reviewRequired: false, writable: true,
+    }
+    const reviewDecision = {
+      recordVersion: 3, timestampUtc: '2026-08-28T19:07:30.3811953Z', taskId: 'TASK-0042', workspace: null, preset: 'aih-engineering',
+      kind: 'routed', selectedExecutionClass: 'codex_review', executionClass: 'codex_review',
+      provider: 'sol-local', model: 'gpt-5.6-sol', reasoning: 'off', risk: 'normal', reviewRequired: true, escalatedFrom: 'deepseek_normal', writable: false,
+    }
+    const files = detailFixtureFileMap(dataRoot, workspace, {
+      decisions: [primaryDecision, reviewDecision],
+      lifecycle: [{ kind: 'task-created', taskId: 'TASK-0042', timestampUtc: '2026-08-28T17:00:00.000Z' }],
+      attempts: [
+        { attemptId: 'TASK-0042-A1', taskId: 'TASK-0042', sequence: 1, executionClass: 'deepseek_normal', status: 'started', startedAtUtc: '2026-08-28T17:30:00.000Z' },
+        { taskId: 'TASK-0042', sequence: 1, status: 'failed', failureSignature: 'first-sig', timestampUtc: '2026-08-28T18:00:00.000Z' },
+      ],
+    })
+    writeTree(dataRoot, files)
+    const detailSnap = await detail.buildDetailSnapshot({
+      dataRoot, sessionId: 'session-0001', statePath: path.join(dataRoot, 'aih-state.json'),
+      readFile: memoryReader(files),
+      modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash MAX', 'sol-local/gpt-5.6-sol': 'GPT-5.6 Sol' },
+      gitSummary: null, gitFiles: null, nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    const Room = moduleExports.ControlRoom
+    const renderRoom = (view, detailValue, failedValue) => {
+      sandbox.window.__NX_TEST_DETAIL__ = detailValue
+      sandbox.window.__NX_TEST_DETAIL_FAILED__ = failedValue
+      sandbox.window.__NX_TEST_ROOM_VIEW__ = view
+      return renderToStaticMarkup(react.createElement(Room, { sessionId: 'session-0001', running: true, onClose() {} }))
+    }
+
+    const overviewHtml = renderRoom('overview', detailSnap, false)
+    assert.ok(overviewHtml.includes('TASK CONTROL ROOM'), 'room header renders')
+    assert.ok(overviewHtml.includes('Overview') && overviewHtml.includes('Activity') && overviewHtml.includes('Verification') && overviewHtml.includes('Files'), 'all four tabs render')
+    assert.ok(overviewHtml.includes('Root Executor'), 'overview has a root executor section')
+    assert.ok(overviewHtml.includes('DeepSeek V4 Flash MAX'), 'overview shows the root executor display name')
+    assert.ok(overviewHtml.includes('TASK-0042'), 'overview shows the task id')
+    assert.ok(overviewHtml.includes('GPT-5.6 Sol'), 'overview review section shows the review model')
+
+    const activityHtml = renderRoom('activity', detailSnap, false)
+    assert.ok(activityHtml.includes('PRIMARY'), 'activity timeline marks the primary routing decision')
+    assert.ok(activityHtml.includes('REVIEW'), 'activity timeline marks the review decision')
+    assert.ok(activityHtml.includes('Routed'), 'activity shows the routed event')
+    assert.ok(activityHtml.includes('Review requested'), 'activity shows the review event')
+    assert.ok(activityHtml.includes('Attempt 1 failed'), 'activity shows the failed attempt')
+    assert.ok(activityHtml.includes('first-sig'), 'activity shows the failure signature')
+    assert.ok(activityHtml.includes('Task created'), 'activity shows lifecycle events')
+
+    const verificationHtml = renderRoom('verification', detailSnap, false)
+    assert.ok(verificationHtml.includes('2 passed'), 'verification summary renders real counts')
+
+    const filesHtml = renderRoom('files', detailSnap, false)
+    assert.ok(filesHtml.includes('Git unavailable'), 'non-repo workspace degrades fail-closed in the files view')
+
+    const failedHtml = renderRoom('overview', null, true)
+    assert.ok(failedHtml.includes('Detail state unavailable'), 'detail fetch failure renders the fail-closed face, no crash')
+
+    // compact drawer: expand affordance only when a task is bound
+    const compactSnap = await status.buildControllerSnapshot({
+      dataRoot, sessionId: 'session-0001', statePath: path.join(dataRoot, 'aih-state.json'),
+      readFile: memoryReader(files), modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash MAX' },
+      gitSummary: null, nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    const Body = moduleExports.ControllerBody
+    const boundBody = renderToStaticMarkup(react.createElement(Body, { snapshot: compactSnap, failed: false, running: false, pressure: null, onClose() {}, onExpand() {} }))
+    assert.ok(boundBody.includes('Open task control room'), 'bound drawer offers the room expand action')
+    const unboundBody = renderToStaticMarkup(react.createElement(Body, { snapshot: null, failed: false, running: false, pressure: null, onClose() {} }))
+    assert.ok(!unboundBody.includes('Open task control room'), 'unbound drawer has no expand action')
   }
 
   console.log('PASS: nexus controller panel state layer')

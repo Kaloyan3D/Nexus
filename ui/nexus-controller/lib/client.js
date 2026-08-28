@@ -45,6 +45,9 @@ const POLL_MS = 1500;
 const PREF_KEY = "nexus.controller.panel.open";
 const MAX_VISIBLE_CHECKS = 5;
 const DRAWER_WIDTH = 340;
+const ROOM_WIDTH = 600;
+const ROOM_POLL_MS = 4000;
+const ROOM_TABS = ["overview", "activity", "verification", "files"];
 
 //#region open/close state (module-level external store)
 let openPref = null;
@@ -187,6 +190,81 @@ function useControllerSnapshot(sessionId) {
 }
 //#endregion
 
+//#region control-room state + polling (detail endpoint, open-only)
+function readRoomOpenPref() {
+	try { return window.localStorage.getItem("nexus.controller.room.open") === "1"; } catch { return false; }
+}
+function writeRoomOpenPref(open) {
+	try {
+		if (open) window.localStorage.setItem("nexus.controller.room.open", "1");
+		else window.localStorage.removeItem("nexus.controller.room.open");
+	} catch { /* localStorage unavailable: in-memory state still works */ }
+}
+function readRoomViewPref() {
+	try {
+		const value = window.localStorage.getItem("nexus.controller.room.view");
+		return ROOM_TABS.includes(value) ? value : "overview";
+	} catch { return "overview"; }
+}
+function writeRoomViewPref(view) {
+	try { window.localStorage.setItem("nexus.controller.room.view", view); } catch { /* ignore */ }
+}
+
+/**
+ * Detail snapshot for the Task Control Room. Polls /nexus/control-room.json
+ * ONLY while enabled (the room is open) — the compact 1.5s path is untouched.
+ */
+function useDetailSnapshot(sessionId, enabled) {
+	const [detail, setDetail] = react.useState(null);
+	const [failed, setFailed] = react.useState(false);
+	react.useEffect(() => {
+		if (!enabled) return;
+		let cancelled = false;
+		let timer = null;
+		let inflight = false;
+		const poll = async () => {
+			if (inflight || cancelled) return;
+			inflight = true;
+			try {
+				const response = await fetch("./nexus/control-room.json?session=" + encodeURIComponent(sessionId || ""), { cache: "no-store" });
+				if (!response.ok) throw new Error("control room http " + response.status);
+				const data = await response.json();
+				if (cancelled) return;
+				setDetail(data);
+				setFailed(false);
+			} catch {
+				if (!cancelled) setFailed(true);
+			} finally {
+				inflight = false;
+			}
+		};
+		poll();
+		timer = window.setInterval(poll, ROOM_POLL_MS);
+		return () => {
+			cancelled = true;
+			if (timer !== null) window.clearInterval(timer);
+		};
+	}, [sessionId, enabled]);
+	return { detail, failed };
+}
+
+function formatTimeUtc(isoUtc) {
+	if (!isoUtc) return null;
+	const date = new Date(isoUtc);
+	if (Number.isNaN(date.getTime())) return null;
+	const pad = (n) => String(n).padStart(2, "0");
+	return pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds());
+}
+
+/** Routing-kind chip label (routing semantics, never model-name guessing). */
+function routingKindLabel(kind) {
+	if (kind === "primary") return "PRIMARY";
+	if (kind === "review") return "REVIEW";
+	if (kind === "escalation") return "ESCALATION";
+	return null;
+}
+//#endregion
+
 //#region small building blocks
 function Section({ label, children }) {
 	return react_jsx_runtime.jsxs("div", {
@@ -280,7 +358,7 @@ function CheckRow({ check }) {
 * the section list. Pure render — the drawer owns polling and session derivation,
 * so this component takes resolved values as props.
 */
-function ControllerBody({ snapshot, failed, running, pressure, onClose }) {
+function ControllerBody({ snapshot, failed, running, pressure, onClose, onExpand }) {
 	const bound = !!(snapshot && snapshot.binding);
 	const task = snapshot && snapshot.task ? snapshot.task : null;
 	const execution = snapshot && snapshot.execution ? snapshot.execution : null;
@@ -309,6 +387,25 @@ function ControllerBody({ snapshot, failed, running, pressure, onClose }) {
 				children: [
 					react_jsx_runtime.jsx("div", { className: "nx-title", children: "CONTROLLER" }),
 					react_jsx_runtime.jsx(StatusPill, { state: displayState }),
+					bound && onExpand && react_jsx_runtime.jsx("button", {
+						type: "button",
+						className: "nx-room-open",
+						"aria-label": "Open task control room",
+						title: "Open task control room",
+						onClick: () => onExpand(),
+						children: react_jsx_runtime.jsx("svg", {
+							viewBox: "0 0 16 16",
+							width: "13",
+							height: "13",
+							"aria-hidden": true,
+							children: react_jsx_runtime.jsx("path", {
+								d: "M6 3H3v3M10 3h3v3M6 13H3v-3M10 13h3v-3",
+								stroke: "currentColor",
+								strokeWidth: "1.4",
+								strokeLinecap: "round",
+							}),
+						}),
+					}),
 					react_jsx_runtime.jsx("button", {
 						type: "button",
 						className: "nx-close",
@@ -486,6 +583,306 @@ function ControllerBody({ snapshot, failed, running, pressure, onClose }) {
 }
 //#endregion
 
+//#region task control room (expanded drawer surface)
+function RoomOverview({ detail, running, failed }) {
+	if (failed) {
+		return react_jsx_runtime.jsx("div", { className: "nx-empty", children: "Detail state unavailable" });
+	}
+	if (!detail) {
+		return react_jsx_runtime.jsx("div", { className: "nx-empty", children: "Loading…" });
+	}
+	if (!detail.binding || !detail.task) {
+		return react_jsx_runtime.jsxs("div", {
+			className: "nx-empty",
+			children: [
+				react_jsx_runtime.jsx("div", { className: "nx-empty-title", children: "No managed task" }),
+				react_jsx_runtime.jsx("div", { className: "nx-empty-note", children: "This session is not bound to a controller task." }),
+			],
+		});
+	}
+	const task = detail.task;
+	const execution = detail.execution;
+	const reviews = detail.reviews;
+	const failures = detail.failures;
+	const controller = detail.controller;
+	const displayState = resolveDisplayState(detail, running, failed);
+	const showReasoningBadge = reasoningBadgeVisible(execution ? execution.model : null, execution ? execution.reasoning : null);
+	const reviewModels = reviews && Array.isArray(reviews.decisions) && reviews.decisions.length > 0
+		? reviews.decisions.map((decision) => decision.model).filter(Boolean)
+		: [];
+	const meta = [
+		{ key: "Created", value: task.createdAtUtc },
+		{ key: "Updated", value: task.updatedAtUtc },
+		{ key: "Completed", value: task.completedAtUtc || "—" },
+		{ key: "Base commit", value: task.baseCommit || "—" },
+		{ key: "Worktree", value: task.worktree || "—" },
+		{ key: "Controller", value: controller ? controller.status + (controller.pid ? " · pid " + controller.pid : "") : "—" },
+	];
+	return react_jsx_runtime.jsxs(react.Fragment, {
+		children: [
+			react_jsx_runtime.jsxs(Section, {
+				label: "Status",
+				children: [react_jsx_runtime.jsx(StatusPill, { state: displayState })],
+			}),
+			execution && react_jsx_runtime.jsxs(Section, {
+				label: "Root Executor",
+				children: [
+					react_jsx_runtime.jsxs("div", {
+						className: "nx-value nx-executor",
+						children: [
+							react_jsx_runtime.jsx("span", { className: "nx-model", children: execution.model || "—" }),
+							showReasoningBadge && react_jsx_runtime.jsx("span", { className: "nx-badge", children: execution.reasoning.toUpperCase() }),
+						],
+					}),
+					react_jsx_runtime.jsx("div", { className: "nx-sub", children: execution.provider || "—" }),
+					react_jsx_runtime.jsxs("div", { className: "nx-sub", children: ["Execution class ", react_jsx_runtime.jsx("code", { className: "nx-class", children: execution.class || "—" })] }),
+					execution.escalatedFrom ? react_jsx_runtime.jsx("div", { className: "nx-sub nx-muted", children: "Escalated from " + execution.escalatedFrom }) : null,
+				],
+			}),
+			react_jsx_runtime.jsxs(Section, {
+				label: "Review",
+				children: [
+					react_jsx_runtime.jsx("div", { className: "nx-value", children: (reviews && reviews.reviewRequired ? "Required" : "Not required") + " · Codex calls " + (reviews ? formatCount(reviews.codexCalls) : "—") }),
+					reviewModels.length > 0 && react_jsx_runtime.jsx("div", { className: "nx-sub", children: reviewModels.join(", ") }),
+				],
+			}),
+			react_jsx_runtime.jsxs(Section, {
+				label: "Task",
+				children: [
+					react_jsx_runtime.jsxs("div", {
+						className: "nx-value nx-task-row",
+						children: [
+							react_jsx_runtime.jsx("span", { className: "nx-task-id", children: task.taskId }),
+							react_jsx_runtime.jsx(CopyButton, { text: task.taskId, label: "Copy task id" }),
+						],
+					}),
+					task.description && react_jsx_runtime.jsx("div", { className: "nx-task-desc", title: task.description, children: task.description }),
+					react_jsx_runtime.jsx("div", { className: "nx-meta-grid", children: meta.map((item) => react_jsx_runtime.jsxs("div", {
+						className: "nx-meta-cell",
+						children: [
+							react_jsx_runtime.jsx("div", { className: "nx-meta-key", children: item.key }),
+							react_jsx_runtime.jsx("div", { className: "nx-meta-val", title: item.value || "", children: item.value || "—" }),
+						],
+					}, item.key)) }),
+				],
+			}),
+			react_jsx_runtime.jsxs(Section, {
+				label: "Failure",
+				children: failures && failures.current
+					? [
+						react_jsx_runtime.jsxs("div", {
+							className: "nx-value nx-failure-row",
+							children: [
+								react_jsx_runtime.jsx("span", { className: "nx-failure-sig", children: failures.current }),
+								react_jsx_runtime.jsx(CopyButton, { text: failures.current, label: "Copy failure signature" }),
+							],
+						}),
+						typeof failures.sameFailureCount === "number" && failures.sameFailureCount > 0 ? react_jsx_runtime.jsx("div", { className: "nx-sub", children: "same failure seen " + failures.sameFailureCount + " times" }) : null,
+					]
+					: [react_jsx_runtime.jsx("div", { className: "nx-sub", children: "No failure recorded" })],
+			}),
+		],
+	});
+}
+
+function RoomActivity({ detail }) {
+	if (!detail || !detail.binding) {
+		return react_jsx_runtime.jsx("div", { className: "nx-empty", children: "No managed task" });
+	}
+	const entries = [];
+	for (const event of detail.lifecycle || []) {
+		if (event.kind === "task-created") {
+			entries.push({ at: event.timestampUtc, title: "Task created", sub: null, chip: null });
+		} else if (event.kind === "execution-class-selected") {
+			entries.push({ at: event.timestampUtc, title: "Execution class selected", sub: (event.executionClass || "—") + (event.reason ? " — " + event.reason : ""), chip: null });
+		}
+	}
+	for (const record of detail.routingHistory || []) {
+		const chip = routingKindLabel(record.kind);
+		if (record.kind === "review") {
+			entries.push({ at: record.timestampUtc, title: "Review requested", sub: (record.executionClass || "—") + (record.model ? " · " + record.model : ""), chip });
+		} else if (record.kind === "escalation") {
+			entries.push({ at: record.timestampUtc, title: "Escalated", sub: (record.executionClass || "—") + (record.escalatedFrom ? " from " + record.escalatedFrom : ""), chip });
+		} else {
+			entries.push({ at: record.timestampUtc, title: "Routed", sub: (record.executionClass || "—") + (record.model ? " · " + record.model : "") + (record.reasoning ? " · " + record.reasoning : ""), chip });
+		}
+	}
+	for (const attempt of detail.attempts || []) {
+		if (attempt.status === "failed") {
+			entries.push({ at: attempt.startedAtUtc || attempt.failedAtUtc, title: "Attempt " + attempt.sequence + " failed", sub: attempt.failureSignature || null, chip: null });
+		} else {
+			entries.push({ at: attempt.startedAtUtc, title: "Attempt " + attempt.sequence + " started", sub: attempt.executionClass || null, chip: null });
+		}
+	}
+	entries.sort((a, b) => String(a.at || "").localeCompare(String(b.at || "")));
+	if (entries.length === 0) {
+		return react_jsx_runtime.jsx("div", { className: "nx-empty", children: "No recorded activity for this task" });
+	}
+	return react_jsx_runtime.jsx("div", {
+		className: "nx-timeline",
+		children: entries.map((entry) => react_jsx_runtime.jsxs("div", {
+			className: "nx-tl-row",
+			children: [
+				react_jsx_runtime.jsx("div", { className: "nx-tl-time", children: formatTimeUtc(entry.at) || "—" }),
+				react_jsx_runtime.jsxs("div", {
+					className: "nx-tl-body",
+					children: [
+						react_jsx_runtime.jsxs("div", {
+							className: "nx-tl-title",
+							children: [
+								entry.chip && react_jsx_runtime.jsx("span", { className: "nx-kind-chip", children: entry.chip }),
+								entry.title,
+							],
+						}),
+						entry.sub && react_jsx_runtime.jsx("div", { className: "nx-tl-sub", children: entry.sub }),
+					],
+				}),
+			],
+		}, entry.at + entry.title)),
+	});
+}
+
+function RoomVerification({ detail }) {
+	if (!detail || !detail.binding) {
+		return react_jsx_runtime.jsx("div", { className: "nx-empty", children: "No managed task" });
+	}
+	const verification = detail.verification;
+	if (!verification || (verification.status === "not-run" && (!verification.checks || verification.checks.length === 0))) {
+		return react_jsx_runtime.jsx("div", { className: "nx-empty", children: "Verification not run" });
+	}
+	return react_jsx_runtime.jsxs(react.Fragment, {
+		children: [
+			react_jsx_runtime.jsxs("div", {
+				className: "nx-value",
+				children: [
+					react_jsx_runtime.jsx("span", { children: formatCount(verification.passed) + " passed" }),
+					verification.failed > 0 && react_jsx_runtime.jsx("span", { className: "nx-sub-inline", children: " · " + formatCount(verification.failed) + " failed" }),
+					verification.skipped > 0 && react_jsx_runtime.jsx("span", { className: "nx-sub-inline", children: " · " + formatCount(verification.skipped) + " skipped" }),
+				],
+			}),
+			react_jsx_runtime.jsx("div", {
+				className: "nx-checks",
+				children: (verification.checks || []).map((check) => react_jsx_runtime.jsxs("div", {
+					className: "nx-check",
+					children: [
+						react_jsx_runtime.jsx("span", { className: "nx-check-glyph nx-check-" + (check.status === "PASS" ? "pass" : check.status === "FAIL" ? "fail" : "skip"), children: check.status === "PASS" ? "✓" : check.status === "FAIL" ? "✕" : "–" }),
+						react_jsx_runtime.jsx("span", { className: "nx-check-name", title: check.name, children: check.name }),
+						check.evidence && react_jsx_runtime.jsx("span", { className: "nx-check-evidence", title: check.evidence, children: check.evidence }),
+					],
+				}, check.name)),
+			}),
+			verification.artifactPresent && react_jsx_runtime.jsxs("div", {
+				className: "nx-foot",
+				children: [
+					react_jsx_runtime.jsx("div", { className: "nx-muted", children: "Artifact " + verification.artifactPath }),
+					react_jsx_runtime.jsx(CopyButton, { text: verification.artifactPath, label: "Copy artifact path" }),
+				],
+			}),
+		],
+	});
+}
+
+function RoomFiles({ detail }) {
+	if (!detail || !detail.binding) {
+		return react_jsx_runtime.jsx("div", { className: "nx-empty", children: "No managed task" });
+	}
+	const git = detail.git;
+	if (!git || !git.files) {
+		return react_jsx_runtime.jsx("div", { className: "nx-empty", children: "Git unavailable" });
+	}
+	const files = Array.isArray(git.files.files) ? git.files.files : [];
+	if (files.length === 0) {
+		return react_jsx_runtime.jsx("div", { className: "nx-empty", children: git.files.branch ? "Working tree clean · " + git.files.branch : "Working tree clean" });
+	}
+	return react_jsx_runtime.jsxs(react.Fragment, {
+		children: [
+			react_jsx_runtime.jsxs("div", {
+				className: "nx-value",
+				children: [
+					react_jsx_runtime.jsx("span", { children: git.files.branch || "—" }),
+					react_jsx_runtime.jsx("span", { className: "nx-sub-inline", children: " · " + formatCount(files.length) + " files" }),
+				],
+			}),
+			react_jsx_runtime.jsx("div", {
+				className: "nx-file-list",
+				children: files.map((file) => react_jsx_runtime.jsxs("div", {
+					className: "nx-file-row",
+					children: [
+						react_jsx_runtime.jsx("span", { className: "nx-file-status", children: file.status || "??" }),
+						react_jsx_runtime.jsx("span", { className: "nx-file-path", title: file.path, children: file.path }),
+						typeof file.insertions === "number" && react_jsx_runtime.jsxs("span", { className: "nx-file-diff", children: [react_jsx_runtime.jsx("span", { className: "nx-ins", children: "+" + formatCount(file.insertions) }), react_jsx_runtime.jsx("span", { className: "nx-del", children: " −" + formatCount(file.deletions) })] }),
+					],
+				}, file.path)),
+			}),
+		],
+	});
+}
+
+function ControlRoom({ sessionId, running, onClose }) {
+	const { detail, failed } = useDetailSnapshot(sessionId, true);
+	const [view, setView] = react.useState(() => readRoomViewPref());
+	const selectView = react.useCallback((next) => {
+		setView(next);
+		writeRoomViewPref(next);
+	}, []);
+	const task = detail && detail.binding && detail.binding.taskId ? detail.binding.taskId : null;
+	return react_jsx_runtime.jsxs("div", {
+		className: "nx-panel nx-room",
+		"data-nexus-control-room": true,
+		children: [
+			react_jsx_runtime.jsxs("div", {
+				className: "nx-room-head",
+				children: [
+					react_jsx_runtime.jsx("div", { className: "nx-room-title", children: "TASK CONTROL ROOM" }),
+					task && react_jsx_runtime.jsx("div", { className: "nx-room-task", title: task, children: task }),
+					react_jsx_runtime.jsx("button", {
+						type: "button",
+						className: "nx-close",
+						"aria-label": "Collapse task control room",
+						title: "Collapse to controller",
+						onClick: () => onClose(),
+						children: react_jsx_runtime.jsx("svg", {
+							viewBox: "0 0 16 16",
+							width: "13",
+							height: "13",
+							"aria-hidden": true,
+							children: react_jsx_runtime.jsx("path", {
+								d: "M4 4l8 8M12 4l-8 8",
+								stroke: "currentColor",
+								strokeWidth: "1.4",
+								strokeLinecap: "round",
+							}),
+						}),
+					}),
+				],
+			}),
+			react_jsx_runtime.jsx("div", {
+				className: "nx-room-tabbar",
+				role: "tablist",
+				children: ROOM_TABS.map((tab) => react_jsx_runtime.jsx("button", {
+					type: "button",
+					role: "tab",
+					"aria-selected": view === tab,
+					className: "nx-room-tab" + (view === tab ? " nx-room-tab-on" : ""),
+					onClick: () => selectView(tab),
+					children: tab.charAt(0).toUpperCase() + tab.slice(1),
+				}, tab)),
+			}),
+			react_jsx_runtime.jsx("div", {
+				className: "nx-body nx-room-body",
+				children: view === "overview"
+					? react_jsx_runtime.jsx(RoomOverview, { detail, running, failed })
+					: view === "activity"
+						? react_jsx_runtime.jsx(RoomActivity, { detail })
+						: view === "verification"
+							? react_jsx_runtime.jsx(RoomVerification, { detail })
+							: react_jsx_runtime.jsx(RoomFiles, { detail }),
+			}),
+		],
+	});
+}
+//#endregion
+
 //#region drawer (shell.overlay entry)
 /**
 * The right-edge controller drawer. Registered into the additive shell.overlay
@@ -507,6 +904,11 @@ function ControllerDrawer({ useSessions }) {
 	}) : undefined;
 	const { snapshot, failed } = useControllerSnapshot(sessionId);
 	const open = react.useSyncExternalStore(subscribeOpenPref, getOpenSnapshot, () => readOpenPref());
+	const [roomOpen, setRoomOpenState] = react.useState(() => readRoomOpenPref());
+	const setRoomOpen = react.useCallback((value) => {
+		setRoomOpenState(value);
+		writeRoomOpenPref(value);
+	}, []);
 
 	const bound = !!(snapshot && snapshot.binding);
 
@@ -527,11 +929,15 @@ function ControllerDrawer({ useSessions }) {
 	react.useEffect(() => {
 		if (!open) return;
 		const onKey = (event) => {
-			if (event.key === "Escape") close();
+			if (event.key === "Escape") {
+				// Escape closes the expanded Control Room first, then the drawer.
+				if (roomOpen) setRoomOpen(false);
+				else close();
+			}
 		};
 		window.addEventListener("keydown", onKey);
 		return () => window.removeEventListener("keydown", onKey);
-	}, [open, close]);
+	}, [open, roomOpen, close, setRoomOpen]);
 
 	// Coherence with the native details column: when the layout opens the details
 	// column (native tool details), the controller drawer closes itself — the two
@@ -550,6 +956,19 @@ function ControllerDrawer({ useSessions }) {
 	}, [open, close]);
 
 	if (!open) return null;
+	if (roomOpen && bound) {
+		return react_jsx_runtime.jsx("div", {
+			className: "nx-drawer nx-drawer--room",
+			"data-nexus-drawer": true,
+			"aria-label": "Task control room",
+			style: { width: "min(" + ROOM_WIDTH + "px, calc(100vw - 24px))" },
+			children: react_jsx_runtime.jsx(ControlRoom, {
+				sessionId,
+				running,
+				onClose: () => setRoomOpen(false),
+			}),
+		});
+	}
 	return react_jsx_runtime.jsx("div", {
 		className: "nx-drawer",
 		"data-nexus-drawer": true,
@@ -561,6 +980,7 @@ function ControllerDrawer({ useSessions }) {
 			running,
 			pressure,
 			onClose: close,
+			onExpand: () => setRoomOpen(true),
 		}),
 	});
 }
@@ -666,6 +1086,36 @@ const PANEL_CSS = [
 	".nx-toggle:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}",
 	".nx-toggle-on{color:var(--dsw-alias-state-business-primary)}",
 	".nx-toggle-on:hover{color:var(--dsw-alias-state-business-primary)}",
+	".nx-room-open{width:26px;height:26px;display:grid;place-items:center;border:none;background:transparent;color:var(--dsw-alias-label-tertiary);border-radius:7px;cursor:pointer;padding:0;margin-left:auto}",
+	".nx-room-open:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}",
+	".nx-room{display:flex;flex-direction:column;height:100%}",
+	".nx-room-head{display:flex;align-items:center;gap:8px;padding:12px 14px 8px;flex:none}",
+	".nx-room-title{font-size:11px;font-weight:600;letter-spacing:.08em;color:var(--dsw-alias-label-primary)}",
+	".nx-room-task{font-family:var(--ds-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);font-size:10.5px;color:var(--dsw-alias-label-secondary);border:1px solid var(--dsw-alias-border-l1);border-radius:6px;padding:1px 6px}",
+	".nx-room-tabbar{display:flex;gap:2px;padding:0 14px 8px;border-bottom:1px solid var(--dsw-alias-border-l1);flex:none}",
+	".nx-room-tab{border:none;background:transparent;color:var(--dsw-alias-label-tertiary);font-size:11px;padding:4px 10px;border-radius:6px;cursor:pointer}",
+	".nx-room-tab:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}",
+	".nx-room-tab-on{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);font-weight:600}",
+	".nx-room-body{padding-top:10px}",
+	".nx-meta-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px;margin-top:8px}",
+	".nx-meta-key{font-size:10px;color:var(--dsw-alias-label-tertiary)}",
+	".nx-meta-val{font-size:11px;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+	".nx-timeline{display:flex;flex-direction:column;gap:0;padding:2px 0}",
+	".nx-tl-row{display:flex;gap:10px;padding:6px 0;border-left:1px solid var(--dsw-alias-border-l1);margin-left:4px;padding-left:12px}",
+	".nx-tl-time{font-family:var(--ds-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);font-size:10.5px;color:var(--dsw-alias-label-tertiary);min-width:62px;flex:none}",
+	".nx-tl-body{min-width:0}",
+	".nx-tl-title{font-size:11.5px;color:var(--dsw-alias-label-primary);display:flex;align-items:center;gap:6px;flex-wrap:wrap}",
+	".nx-tl-sub{font-size:10.5px;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+	".nx-kind-chip{font-size:9px;font-weight:700;letter-spacing:.06em;padding:1px 5px;border-radius:4px;color:var(--dsw-alias-label-secondary);border:1px solid var(--dsw-alias-border-l1)}",
+	".nx-failure-row{display:flex;align-items:center;gap:6px;min-width:0}",
+	".nx-failure-sig{font-family:var(--ds-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+	".nx-check-evidence{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--ds-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);font-size:10px;color:var(--dsw-alias-label-tertiary)}",
+	".nx-file-list{display:flex;flex-direction:column;gap:4px;margin-top:8px}",
+	".nx-file-row{display:flex;align-items:baseline;gap:8px;min-width:0}",
+	".nx-file-status{font-family:var(--ds-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);font-size:10.5px;color:var(--dsw-alias-label-secondary);width:24px;flex:none}",
+	".nx-file-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--ds-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);font-size:11px;flex:1;min-width:0}",
+	".nx-file-diff{font-family:var(--ds-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);font-size:10.5px;flex:none}",
+	".nx-muted{color:var(--dsw-alias-label-tertiary)}",
 ].join("");
 //#endregion
 
@@ -708,6 +1158,8 @@ exports.apply = apply;
 exports.inject = inject;
 exports.resolveDisplayState = resolveDisplayState;
 exports.ControllerBody = ControllerBody;
+exports.ControlRoom = ControlRoom;
+exports.ROOM_TABS = ROOM_TABS;
 return module.exports;
 }
 });

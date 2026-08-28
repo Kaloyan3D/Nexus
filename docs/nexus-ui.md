@@ -142,6 +142,68 @@ are never targeted.
   theme is possible before plugin application (the boot script already sets
   the dark attribute, so this is minimal).
 
+## Phase 3 — Task Control Room (expanded detail surface)
+
+The compact drawer answers "what is Nexus doing right now". The Control Room
+answers "how did this task get here, what happened during execution, what
+verification ran, why did a failure/review happen" — from REAL Nexus records
+only. No mocked timelines, no inferred attempts, no fake verification, no
+synthetic model transitions.
+
+### Surfaces and interaction
+
+- The compact drawer is unchanged. When a task is bound, its header gains an
+  expand action (between the status pill and the collapse button).
+- Expanding widens the drawer to `min(600px, calc(100vw - 24px))` (the compact
+  drawer keeps `min(340px, calc(100vw - 40px))`) and swaps the body for the
+  TASK CONTROL ROOM.
+- The room has four tabs: **Overview / Activity / Verification / Files**.
+  Active tab and room-open state persist in localStorage
+  (`nexus.controller.room.view`, `nexus.controller.room.open`).
+- Escape collapses the room first, then the drawer. The room never registers
+  into `details` or `conversation.details.tool`; it is the same
+  `shell.overlay` seat as the compact drawer.
+- READ ONLY: the room has no reroute/retry/approve/complete/Codex/edit/stage
+  actions. File paths are shown and copyable; nothing opens files.
+- Detail polling (`/nexus/control-room.json`, ~4 s while the room is open)
+  never touches the compact 1.5 s path, which stays lightweight.
+
+### Data sources (authoritative, per section)
+
+| Section | Source | Semantics |
+| --- | --- | --- |
+| Status | derived display state (same as compact) | — |
+| Root Executor | **last non-escalation routed decision** for the task | review/escalation decisions never replace the primary executor |
+| Routing history | every `decisions.jsonl` record for the task, oldest first | PRIMARY = no `escalatedFrom`, class ≠ `codex_review`; REVIEW = `codex_review`; ESCALATION = `escalatedFrom` present, class ≠ `codex_review`. Classification is routing semantics, never model-name guessing |
+| Lifecycle | workspace `.ai-harness/state/decisions.jsonl` (`task-created`, `execution-class-selected`, …) | — |
+| Attempts | `runs/<task>/attempts.jsonl` grouped by `sequence` | `failed` = failed record; `passed` = started record, no failed record, AND ledger `complete`; else `started`. Attempt 0 never exists — the GUI never calls begin-attempt. Durations only from real start→failure timestamps |
+| Verification | `runs/<task>/evidence.json` else ledger `verification.outcomes` | status passed/failed/partial/not-run; checks carry name/status/evidence; acceptance criteria + scopePass from the artifact |
+| Failures | ledger `failureSignatures` (first-seen order) + routing-state `sameFailureCount` | — |
+| Reviews | `codex_review` decisions + `codexCalls` + `reviewRequired` + `review-packet.json` meta (question, relevant-file count, diff length — never the diff or file contents) + `review-result.json` (verdict, needsBroaderContext, findings severity/location/problem — never evidence text) | — |
+| Files | live git porcelain + numstat (worktree + index), cached ~10 s | untracked rows show no line counts; non-repo → `Git unavailable` |
+
+### Detail endpoint
+
+`GET /nexus/control-room.json?session=<id>` — registered through the same
+Cordis `webServer` lifecycle injection as the compact route. The session id
+resolves server-side to the authoritative binding. Envelope
+`{schemaVersion: 1, generatedAtUtc, state, binding, task, execution,
+routingHistory, lifecycle, attempts, verification, failures, reviews, git,
+controller}`. Unbound sessions get an `idle` envelope; build failures get an
+`error: 'control-room-unavailable'` envelope — both HTTP 200,
+`application/json; charset=utf-8`, `cache-control: no-store`.
+
+The snapshot is cached per session against a key of source-file mtimes (hard
+60 s cap); git detail is cached ~10 s. Immutable historical records are never
+recomputed on every poll.
+
+### Fail-closed behavior
+
+Each subsystem degrades independently: a corrupt routing line is skipped, a
+corrupt evidence artifact falls back to ledger outcomes (or `not-run`), a
+corrupt attempts line is skipped, and a missing/non-repo workspace degrades
+the Files view only. No corrupt subsystem can erase healthy sections.
+
 ## Phase 1.5 — compact premium layout
 
 Follow-up polish pass. All behavior preserved; no controller/runtime changes.
@@ -354,6 +416,8 @@ projections (no polling). Git is cached 10 s per workspace on the host so the
 ## Files
 
 Added: `ui/nexus-controller/package.json`, `lib/status.cjs`,
+`lib/detail.cjs` (Task Control Room adapter — routing timeline, attempts,
+verification, failures, reviews, git files; fail-closed per subsystem),
 `lib/index.js`, `lib/client.js`, `tests/NexusControllerPanel.Tests.cjs`,
 `ui/nexus-controller/tools/boot-verify-drawer.mjs` (CDP boot verification
 against the live composition), `ui/nexus-controller/tools/cold-restart-verify.mjs`
@@ -443,6 +507,23 @@ composition regression groups:
 6. **UTF-8 ledger text.** A fixture ledger carrying a real em-dash plus
    CJK/arrows/accents round-trips through the snapshot and the route
    envelope byte-for-byte with no mojibake.
+7. **Control Room (TASK-0003).** Group 18 drives the detail adapter over
+   fixtures: root-vs-review routing timeline (the primary decision stays the
+   root executor while the newer review lands in history), empty-history
+   grace, attempt grouping/status derivation (failed / in-flight started /
+   passed only when the ledger is complete) and durations from real
+   timestamps only, verification pass/fail/partial/malformed/ledger-fallback,
+   failure-signature counts in first-seen order, reviews zero/recorded
+   (packet meta and findings severity/location/problem only — never diff or
+   file contents), git files over a REAL fixture repo (modified/deleted/
+   staged-new with numstat counts, untracked without counts, clean tree,
+   non-repo degradation), corruption isolation in both directions, and
+   UTF-8 (— → ✓ 中文) round-trip. Group 19 renders the real ControlRoom via
+   SSR with the detail hook patched: four tabs, PRIMARY/REVIEW chips in the
+   timeline, attempt rows, real verification counts, fail-closed faces, and
+   the bound-only expand action. The host group asserts the second route
+   registers through the same Cordis injection and serves the detail
+   envelope (200, UTF-8, no-store, idle envelope for unknown sessions).
 
 `tests/ControllerRouting.Tests.ps1` gained two deterministic sections:
 section 9 (UTF-8 ledger boundary — a fixture task with a real em-dash
@@ -494,19 +575,48 @@ second driver run is a byte-exact no-op).
   escalation (sol-local / gpt-5.6-sol) is shown under Review, never as the
   Executor. Display names come from settings.yaml, prettified ids are the
   fallback.
+- Control Room (Phase 3) fields Nexus does not record, shown only when a
+  real record exists: verification durations/timestamps, review timestamps,
+  per-attempt completion events (a "passed" attempt is derived: started
+  sequence + no failed record + complete ledger). Attempt 0 has no timeline
+  row (the GUI never calls begin-attempt — documented limitation, the room
+  never fabricates one).
+- Control Room files: file paths are displayed and copyable only — nothing
+  opens files, and large review-packet diff/file contents are never rendered
+  inline (packet meta only).
 - Light theme: the drawer uses only `--dsw-alias-*` tokens
   (theme-agnostic by design); the theme preference is store-owned and cannot
   be switched from a headless probe, so the light pass relies on the
   Phase-1 light-theme verification plus the shared token layer.
 
-## Phase 3 recommendations
+## Phase 4 recommendations
 
-1. Push updates: expose a controller event stream/SSE endpoint instead of
-   1.5 s polling.
-2. Task-details navigation + verification artifact deep links (runs/
-   evidence files).
-3. Operator WAITING/approval signal (e.g., the review-required gate) so the
-   panel can surface "waiting for operator".
-4. Wire begin-attempt for GUI sessions so Attempt reflects controller
-   retries.
-5. Per-session panel preference (not global) when a settings system exists.
+Phase 3 delivered: the Task Control Room (Overview/Activity/Verification/
+Files) with real routing history, attempt records, verification checks,
+failure signatures, review outcomes, and git detail; the separate
+`/nexus/control-room.json` endpoint; fail-closed per subsystem. The
+Phase-2 recommendation list was folded in as follows: polling stays (the
+compact 1.5 s + room 4 s paths are both lightweight; an SSE push endpoint
+would replace them when the controller grows an event stream) and
+begin-attempt is intentionally NOT wired (the GUI never calls
+begin-attempt; Attempt stays "—" at 0 — a documented limitation).
+
+1. **Controller event stream/SSE.** The controller writes attempts and
+   verification asynchronously; an SSE or a `since=` delta endpoint would
+   let the room react without 4 s polling and without re-reading histories.
+2. **Verification artifact deep links.** The room shows the evidence
+   artifact path (copyable). When a file-serving endpoint exists with
+   authorization, link it — never a general file-read endpoint.
+3. **Operator WAITING signal.** Surface the review-required gate as an
+   explicit operator-wait state once the controller records an operator
+   gate event.
+4. **Per-attempt verification records.** evidence.json has no timestamps or
+   per-attempt breakdown; recording `verificationStartedAtUtc` /
+   `verificationFinishedAtUtc` per attempt would let the room show real
+   verification durations (currently intentionally omitted).
+5. **Review timestamps.** review-packet/result files carry no timestamps;
+   recording them would let the Activity timeline interleave review
+   outcomes chronologically with attempts.
+6. **Per-session panel preference** (room view/width) when a settings
+   system exists.
+
