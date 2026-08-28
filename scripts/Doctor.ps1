@@ -85,5 +85,44 @@ if (-not $Offline -and $keyPresent) {
     finally { $key = $null; $headers = $null }
 }
 
+
+# --- Nexus UI customization ------------------------------------------------
+$nexusPackage = Join-Path $layout.Data 'profiles\node_modules\@nexus\ui-brand\package.json'
+Add-Check 'Nexus UI package' (Test-Path -LiteralPath $nexusPackage) 'installed @nexus/ui-brand (profile module fallback)'
+$homePatch = Join-Path $layout.Data 'cordis.patch.yml'
+if (Test-Path -LiteralPath $homePatch) {
+    $patchText = Get-Content -Raw -Encoding UTF8 -LiteralPath $homePatch
+    Add-Check 'Nexus composition' ($patchText.Contains('nexus-ui-brand') -and $patchText.Contains('ui-brand-official') -and $patchText.Contains('disabled: true')) 'home patch rows: nexus-ui-brand + ui-brand-official disabled'
+}
+else { Add-Check 'Nexus composition' $false 'home cordis patch missing' }
+$distIndex = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-web-frontend\dist\index.html'
+$distFavicon = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-web-frontend\dist\favicon.svg'
+$distManifest = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-web-frontend\dist\manifest.webmanifest'
+if (Test-Path -LiteralPath $distIndex) {
+    Add-Check 'Nexus app title' ((Get-Content -Raw -Encoding UTF8 -LiteralPath $distIndex).Contains('<title>Nexus</title>')) 'dist index.html'
+}
+else { Add-Check 'Nexus app title' $false 'dist index.html missing' }
+if (Test-Path -LiteralPath $distFavicon) {
+    Add-Check 'Nexus favicon' ((Get-Content -Raw -Encoding UTF8 -LiteralPath $distFavicon).Contains('#7C5CFF')) 'geometric Nexus mark, no DeepSeek whale'
+}
+else { Add-Check 'Nexus favicon' $false 'dist favicon.svg missing' }
+if (Test-Path -LiteralPath $distManifest) {
+    try {
+        $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $distManifest | ConvertFrom-Json
+        Add-Check 'Nexus PWA identity' ([string]$manifest.name -eq 'Nexus' -and [string]$manifest.short_name -eq 'Nexus') 'manifest name/short_name'
+    }
+    catch { Add-Check 'Nexus PWA identity' $false $_.Exception.Message }
+}
+else { Add-Check 'Nexus PWA identity' $false 'dist manifest missing' }
+$rendererBundle = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-renderer\lib\client.js'
+if (Test-Path -LiteralPath $rendererBundle) {
+    Add-Check 'Nexus runtime title' ((Get-Content -Raw -Encoding UTF8 -LiteralPath $rendererBundle).Contains('const productTitle = "Nexus"')) 'document title owner patched'
+}
+else { Add-Check 'Nexus runtime title' $false 'renderer client bundle missing' }
+if (Test-Path -LiteralPath $layout.Settings) {
+    Add-Check 'Nexus dark default' ([regex]::IsMatch((Get-Content -Raw -Encoding UTF8 -LiteralPath $layout.Settings), '(?m)^ui-theme:\s*\r?\n\s+preference:\s*dark')) 'settings ui-theme preference'
+}
+else { Add-Check 'Nexus dark default' $false 'settings missing' }
+
 $results | Format-Table -AutoSize
 if (@($results | Where-Object Status -eq 'FAIL').Count -gt 0) { exit 1 }

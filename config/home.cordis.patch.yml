@@ -1,4 +1,14 @@
+# Nexus product composition over the pinned DeepSeek Harness bundle layers.
+# Applied as the last patch layer (rows here override bundle rows by id).
 - insert:
+    - id: nexus-ui-brand
+      name: '@nexus/ui-brand'
     - id: subagent-codex
       name: '@deepseek-ai/dsh-subagent-codex'
       disabled: !!js process.env.AIH_ENABLE_CODEX_SUBAGENT !== '1'
+
+# The DeepSeek fish brand must never render as the Nexus product mark; the
+# Nexus client plugin (@nexus/ui-brand) fills sidebar.brand.* and
+# conversation.hero.brand.mark instead.
+- id: ui-brand-official
+  disabled: true
