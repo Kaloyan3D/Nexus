@@ -1,0 +1,38 @@
+{
+  "name": "@nexus/ui-brand",
+  "description": "Nexus product identity and dark visual system for the DeepSeek Harness Web GUI (client brand slots + semantic theme tokens + deterministic installer targets).",
+  "version": "1.0.0",
+  "publishConfig": {
+    "access": "restricted"
+  },
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-theme"
+      ],
+      "platform": "web"
+    }
+  },
+  "license": "UNLICENSED",
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "nexus-favicon.svg",
+    "patch-copy.json"
+  ]
+}

@@ -69,3 +69,6 @@ llm-pi-ai:
             off:
             high: high
             max: max
+
+ui-theme:
+  preference: dark

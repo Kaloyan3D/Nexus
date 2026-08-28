@@ -55,6 +55,13 @@ New-Item -ItemType Directory -Force -Path (Join-Path $layout.Root 'tests') | Out
 foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'tests') -File | Where-Object Extension -in @('.ps1', '.cjs')) {
     Copy-AihSourceFile -Source $file.FullName -Destination (Join-Path $layout.Root 'tests')
 }
+New-Item -ItemType Directory -Force -Path (Join-Path $layout.Root 'ui') | Out-Null
+foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'ui') -Recurse -File) {
+    $relative = $file.FullName.Substring((Join-Path $sourceRoot 'ui').Length).TrimStart([IO.Path]::DirectorySeparatorChar)
+    $target = Join-Path (Join-Path $layout.Root 'ui') $relative
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+    Copy-AihSourceFile -Source $file.FullName -Destination $target
+}
 Copy-AihSourceFile -Source (Join-Path $sourceRoot 'runtime\package.json') -Destination (Join-Path $layout.Runtime 'package.json')
 Copy-AihSourceFile -Source (Join-Path $sourceRoot 'runtime\package-lock.json') -Destination (Join-Path $layout.Runtime 'package-lock.json')
 
@@ -112,6 +119,7 @@ elseif (-not (Test-Path -LiteralPath $layout.Dsh)) {
     throw '-SkipDependencyInstall requires an existing installed DSH runtime.'
 }
 & (Join-Path $layout.Scripts 'Patch-ControlRoomUi.ps1') -InstallRoot $InstallRoot
+& (Join-Path $layout.Scripts 'Patch-NexusUi.ps1') -InstallRoot $InstallRoot
 
 if ($ResetManagedSettings -or -not (Test-Path -LiteralPath $layout.Settings)) {
     Copy-Item -LiteralPath (Join-Path $layout.Config 'settings.yaml') -Destination $layout.Settings
