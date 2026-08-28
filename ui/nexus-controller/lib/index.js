@@ -21,6 +21,7 @@ import { execFile } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import status from './status.cjs'
+import detail from './detail.cjs'
 
 const name = 'nexus-controller'
 
@@ -49,7 +50,10 @@ function apply(ctx) {
   }
 
   const gitCache = new Map()
+  const gitFilesCache = new Map()
   const settingsCache = { at: 0, value: null }
+  const detailCache = new Map() // sessionId -> { key, at, value } (mtime-keyed)
+
 
   function execGit(command, args, options) {
     return new Promise((resolve, reject) => {
@@ -68,6 +72,17 @@ function apply(ctx) {
     if (cached && now - cached.at < GIT_TTL_MS) return cached.value
     const value = await status.collectGitSummary(workspace, execGit)
     gitCache.set(workspace, { at: now, value })
+    return value
+  }
+
+  /** Read-only per-file git detail, cached per workspace (GIT_TTL_MS). */
+  async function gitFiles(workspace) {
+    if (!workspace) return null
+    const now = Date.now()
+    const cached = gitFilesCache.get(workspace)
+    if (cached && now - cached.at < GIT_TTL_MS) return cached.value
+    const value = await detail.collectGitFiles(workspace, execGit)
+    gitFilesCache.set(workspace, { at: now, value })
     return value
   }
 
@@ -136,9 +151,133 @@ function apply(ctx) {
     res.end(body)
   }
 
+  // Files that feed the detail snapshot, per bound session. mtime-keyed so
+  // the (immutable-history) snapshot is only recomputed when a source changes.
+  function detailSourceKey(workspace, taskId, sessionId) {
+    const paths = [
+      join(dataRoot, 'routing', 'session-bindings.json'),
+      join(dataRoot, 'routing', 'decisions.jsonl'),
+      join(dataRoot, 'routing', 'states', status.routingStateFileName(workspace, bindingOf(sessionId)?.preset || 'aih-engineering', taskId)),
+      join(workspace, '.ai-harness', 'state', 'tasks.json'),
+      join(workspace, '.ai-harness', 'state', 'decisions.jsonl'),
+      join(workspace, '.ai-harness', 'runs', taskId, 'attempts.jsonl'),
+      join(workspace, '.ai-harness', 'runs', taskId, 'evidence.json'),
+      join(workspace, '.ai-harness', 'runs', taskId, 'review-packet.json'),
+      join(workspace, '.ai-harness', 'runs', taskId, 'review-result.json'),
+      statePath,
+    ]
+    let key = sessionId
+    for (const filePath of paths) {
+      try {
+        key += '|' + filePath + ':' + statSync(filePath).mtimeMs
+      } catch {
+        key += '|' + filePath + ':missing'
+      }
+    }
+    return key
+  }
+
+  function bindingOf(sessionId) {
+    const document = readJsonSafeSync(join(dataRoot, 'routing', 'session-bindings.json'))
+    if (!document) return null
+    return status.bindingsOf(document)[String(sessionId || '')] || null
+  }
+
+  function readJsonSafeSync(filePath) {
+    try {
+      const text = readFileSync(filePath, 'utf8')
+      return text.trim() === '' ? null : JSON.parse(text)
+    } catch {
+      return null
+    }
+  }
+
+  const detailHandler = async (req, res) => {
+    const generatedAtUtc = new Date().toISOString()
+    let body
+    try {
+      const url = new URL(req.url ?? '/', 'http://x')
+      const sessionId = (url.searchParams.get('session') || '').trim()
+      const binding = bindingOf(sessionId)
+      if (!binding || !binding.workspace || !binding.taskId) {
+        body = JSON.stringify({
+          schemaVersion: 1,
+          generatedAtUtc,
+          state: 'idle',
+          binding: null,
+          task: null,
+          execution: null,
+          routingHistory: [],
+          lifecycle: [],
+          attempts: [],
+          verification: { status: 'not-run', passed: 0, failed: 0, skipped: 0, total: 0, checks: [], artifactPath: null, artifactPresent: false, source: null },
+          failures: { current: null, signatures: [], sameFailureCount: null },
+          reviews: { codexCalls: 0, reviewRequired: false, decisions: [], result: null, packet: null },
+          git: { summary: null, files: null },
+          controller: null,
+        })
+      } else {
+        const workspace = String(binding.workspace)
+        const taskId = String(binding.taskId)
+        const key = detailSourceKey(workspace, taskId, sessionId)
+        const cached = detailCache.get(sessionId)
+        const now = Date.now()
+        if (cached && cached.key === key && now - cached.at < 60000) {
+          body = JSON.stringify(cached.value)
+        } else {
+          const snapshot = await detail.buildDetailSnapshot({
+            dataRoot,
+            sessionId,
+            statePath,
+            modelNames: modelNames(),
+            gitSummary: await gitSummary(workspace),
+            gitFiles: await gitFiles(workspace),
+            nowUtc: () => generatedAtUtc,
+          })
+          if (!snapshot) {
+            body = JSON.stringify({
+              schemaVersion: 1,
+              generatedAtUtc,
+              state: 'idle',
+              binding: null,
+              task: null,
+              execution: null,
+              routingHistory: [],
+              lifecycle: [],
+              attempts: [],
+              verification: { status: 'not-run', passed: 0, failed: 0, skipped: 0, total: 0, checks: [], artifactPath: null, artifactPresent: false, source: null },
+              failures: { current: null, signatures: [], sameFailureCount: null },
+              reviews: { codexCalls: 0, reviewRequired: false, decisions: [], result: null, packet: null },
+              git: { summary: null, files: null },
+              controller: null,
+            })
+          } else {
+            detailCache.set(sessionId, { key, at: now, value: snapshot })
+            body = JSON.stringify(snapshot)
+          }
+        }
+      }
+    } catch {
+      body = JSON.stringify({
+        schemaVersion: 1,
+        generatedAtUtc,
+        error: 'control-room-unavailable',
+      })
+    }
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    })
+    res.end(body)
+  }
+
     webCtx.effect(
       () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/controller.json', handler }),
       'nexus-controller: read-only state route',
+    )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/control-room.json', handler: detailHandler }),
+      'nexus-controller: read-only control-room route',
     )
   })
 }

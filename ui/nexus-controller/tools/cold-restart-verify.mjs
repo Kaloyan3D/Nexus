@@ -24,6 +24,7 @@ const ROUTE_OUT = 'C:/AI-Harness/logs/cold-restart-route.json'
 const BOOT_OUT = 'C:/AI-Harness/logs/boot-cold'
 const SESSION = 'session-239a6df4-46da-4537-9622-99c1e7eaf6b5'
 const URL = 'http://127.0.0.1:3080/nexus/controller.json?session=' + SESSION
+const DETAIL_URL = 'http://127.0.0.1:3080/nexus/control-room.json?session=' + SESSION
 const FLUSH_WAIT_MS = Number(process.argv[2] || 60000)
 const POWER_SHELL = 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
 
@@ -91,6 +92,38 @@ async function main() {
     log('ROUTE FAILED after 240s: ' + lastError)
   }
 
+  log('--- control-room route verification:', DETAIL_URL, '---')
+  let detailPayload = null
+  let detailError = 'no attempt'
+  for (let i = 0; i < 120; i++) {
+    try {
+      const res = await fetch(DETAIL_URL, { cache: 'no-store' })
+      const text = await res.text()
+      if (res.status === 200) {
+        const data = JSON.parse(text)
+        if (data && data.schemaVersion === 1 && data.binding) { detailPayload = data; break }
+        lastError = '200 but no detail envelope: ' + text.slice(0, 160)
+      } else {
+        detailError = 'http ' + res.status + ' ' + text.slice(0, 120)
+      }
+    } catch (e) {
+      detailError = String(e.message || e)
+    }
+    await sleep(1000)
+  }
+  if (detailPayload) {
+    log('DETAIL ROUTE OK: HTTP 200 JSON')
+    log('  routingHistory:', detailPayload.routingHistory.length, 'entries; kinds:', detailPayload.routingHistory.map((r) => r.kind).join(','))
+    log('  lifecycle:', detailPayload.lifecycle.length, 'entries')
+    log('  attempts:', detailPayload.attempts.length)
+    log('  verification:', detailPayload.verification.status, '(', detailPayload.verification.total, 'checks )')
+    log('  reviews.decisions:', detailPayload.reviews.decisions.length)
+    log('  git.files:', detailPayload.git && detailPayload.git.files ? (detailPayload.git.files.files || []).length : 'n/a')
+    try { fs.writeFileSync('C:/AI-Harness/logs/cold-restart-detail.json', JSON.stringify(detailPayload, null, 2), 'utf8') } catch {}
+  } else {
+    log('DETAIL ROUTE FAILED after 120s: ' + detailError)
+  }
+
   log('--- served composition sanity ---')
   try {
     const page = await (await fetch('http://127.0.0.1:3080/', { cache: 'no-store' })).text()
@@ -106,6 +139,7 @@ async function main() {
       if (ctrl) {
         const client = await (await fetch('http://127.0.0.1:3080' + ctrl.url.split('?')[0], { cache: 'no-store' })).text()
         log('served client.js: UNAVAILABLE =', client.includes('UNAVAILABLE'), '| details inject =', client.includes('inject("details"'), '| shell.overlay =', client.includes('"shell.overlay"'))
+        log('served client.js: TASK CONTROL ROOM =', client.includes('TASK CONTROL ROOM'), '| control-room.json =', client.includes('control-room.json'), '| ROOM tabs =', client.includes('"overview"') && client.includes('"activity"') && client.includes('"verification"') && client.includes('"files"'))
       }
     }
   } catch (e) { log('composition sanity failed:', String(e.message || e)) }

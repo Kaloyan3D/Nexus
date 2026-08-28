@@ -30,6 +30,7 @@ const react = requireFromApp('react')
 const jsxRuntime = requireFromApp('react/jsx-runtime')
 const { renderToStaticMarkup } = requireFromApp('react-dom/server')
 const status = require(ADAPTER)
+const detail = require(path.join(ROOT, 'ui', 'nexus-controller', 'lib', 'detail.cjs'))
 
 const HOOK_HEADER = 'function useControllerSnapshot(sessionId) {'
 const HOOK_PATCHED =
@@ -38,16 +39,34 @@ const HOOK_PATCHED =
   '      return { snapshot: window.__NX_TEST_SNAPSHOT__ ?? null, failed: window.__NX_TEST_FAILED__ === true }\n' +
   '    }'
 
+const DETAIL_HOOK_HEADER = 'function useDetailSnapshot(sessionId, enabled) {'
+const DETAIL_HOOK_PATCHED =
+  'function useDetailSnapshot(sessionId, enabled) {\n' +
+  "    if (typeof window !== 'undefined' && (window.__NX_TEST_DETAIL__ !== undefined || window.__NX_TEST_DETAIL_FAILED__)) {\n" +
+  '      return { detail: window.__NX_TEST_DETAIL__ ?? null, failed: window.__NX_TEST_DETAIL_FAILED__ === true }\n' +
+  '    }'
+const VIEW_PREF_HEADER = 'function readRoomViewPref() {'
+const VIEW_PREF_PATCHED =
+  'function readRoomViewPref() {\n' +
+  "    if (typeof window !== 'undefined' && window.__NX_TEST_ROOM_VIEW__) return window.__NX_TEST_ROOM_VIEW__"
+
 function loadBundle() {
   let source = fs.readFileSync(CLIENT, 'utf8')
   if (!source.includes(HOOK_HEADER)) throw new Error('renderer: hook header not found; client.js changed')
   source = source.replace(HOOK_HEADER, HOOK_PATCHED)
+  if (!source.includes(DETAIL_HOOK_HEADER)) throw new Error('renderer: detail hook header not found; client.js changed')
+  source = source.replace(DETAIL_HOOK_HEADER, DETAIL_HOOK_PATCHED)
+  if (!source.includes(VIEW_PREF_HEADER)) throw new Error('renderer: view pref header not found; client.js changed')
+  source = source.replace(VIEW_PREF_HEADER, VIEW_PREF_PATCHED)
 
   const registered = []
   const moduleExports = { value: null }
   const sandboxWindow = {
     __NX_TEST_SNAPSHOT__: undefined,
     __NX_TEST_FAILED__: undefined,
+    __NX_TEST_DETAIL__: undefined,
+    __NX_TEST_DETAIL_FAILED__: undefined,
+    __NX_TEST_ROOM_VIEW__: undefined,
     __ModuleLoader__: {
       load(def) {
         moduleExports.value = def.factory((name) => {
@@ -99,18 +118,30 @@ function loadBundle() {
   const overlay = registered.find((r) => r.spec.name === 'shell.overlay')
   const actions = registered.find((r) => r.spec.name === 'conversation.session.header.actions')
   if (!overlay || !actions) throw new Error('renderer: seat registrations missing')
-  return { Drawer: overlay.component, Toggle: actions.component, css: panelCss, window: sandboxWindow }
+  return { Drawer: overlay.component, Toggle: actions.component, Room: moduleExports.value && moduleExports.value.ControlRoom, css: panelCss, window: sandboxWindow }
 }
 
 function renderVariant(bundle, snapshot, { running = false, pressure, failed = false } = {}) {
   bundle.window.__NX_TEST_SNAPSHOT__ = snapshot
   bundle.window.__NX_TEST_FAILED__ = failed
+  bundle.window.__NX_TEST_DETAIL__ = undefined
+  bundle.window.__NX_TEST_DETAIL_FAILED__ = undefined
+  bundle.window.__NX_TEST_ROOM_VIEW__ = undefined
   const session = { current: 'session-visual', byId: { 'session-visual': { running } } }
   if (pressure !== undefined) {
     session.byId['session-visual'].projections = { values: { contextPressure: pressure } }
   }
   const useSessions = (selector) => selector(session)
   return renderToStaticMarkup(react.createElement(bundle.Drawer, { useSessions }))
+}
+
+function renderRoomVariant(bundle, detail, view, { running = false, failed = false } = {}) {
+  bundle.window.__NX_TEST_DETAIL__ = detail
+  bundle.window.__NX_TEST_DETAIL_FAILED__ = failed
+  bundle.window.__NX_TEST_ROOM_VIEW__ = view
+  bundle.window.__NX_TEST_SNAPSHOT__ = undefined
+  bundle.window.__NX_TEST_FAILED__ = false
+  return renderToStaticMarkup(react.createElement(bundle.Room, { sessionId: 'session-visual', running, onClose() {} }))
 }
 
 async function main() {
@@ -207,6 +238,23 @@ async function main() {
 
   // 6. unavailable-transport: fetch failure — UNAVAILABLE, never IDLE.
   variants['unavailable-transport'] = renderVariant(bundle, null, { failed: true })
+
+  // 8. CONTROL ROOM variants from a LIVE detail snapshot (real data root).
+  const liveDetail = await detail.buildDetailSnapshot({
+    dataRoot: path.join(ROOT, 'data'),
+    sessionId: 'session-239a6df4-46da-4537-9622-99c1e7eaf6b5',
+    statePath: path.join(ROOT, 'data', 'aih-state.json'),
+    modelNames: liveModelNames,
+    gitSummary: liveGit,
+    gitFiles: await detail.collectGitFiles(path.join(ROOT), execGit),
+    nowUtc: () => new Date().toISOString(),
+  })
+  if (!bundle.Room) throw new Error('renderer: ControlRoom export missing; client.js changed')
+  variants['room-overview'] = renderRoomVariant(bundle, liveDetail, 'overview', { running: true })
+  variants['room-activity'] = renderRoomVariant(bundle, liveDetail, 'activity', { running: true })
+  variants['room-verification'] = renderRoomVariant(bundle, liveDetail, 'verification', { running: true })
+  variants['room-files'] = renderRoomVariant(bundle, liveDetail, 'files', { running: true })
+  variants['room-unavailable'] = renderRoomVariant(bundle, null, 'overview', { failed: true })
 
   // 7. unavailable-error: the host could not build a snapshot (envelope error).
   variants['unavailable-error'] = renderVariant(bundle, {

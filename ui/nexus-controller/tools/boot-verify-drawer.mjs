@@ -72,6 +72,7 @@ class Cdp {
     this.exceptions = []
     this.httpFailures = []
     this.controllerFetches = []
+    this.roomFetches = []
     this.ws.onmessage = (event) => {
       const message = JSON.parse(event.data)
       if (message.id) {
@@ -96,6 +97,9 @@ class Cdp {
         }
         if (message.method === 'Network.requestWillBeSent' && message.params.request.url.includes('nexus/controller.json')) {
           this.controllerFetches.push(message.params.request.url)
+        }
+        if (message.method === 'Network.requestWillBeSent' && message.params.request.url.includes('nexus/control-room.json')) {
+          this.roomFetches.push(message.params.request.url)
         }
       }
     }
@@ -198,6 +202,72 @@ async function main() {
   console.log('drawer info:', JSON.stringify(drawerInfo, null, 1))
   console.log('controller fetches:', JSON.stringify(cdp.controllerFetches.slice(0, 4)))
   await shot('1-boot-drawer-open')
+
+  // 3b. TASK CONTROL ROOM: expand, real detail data, per-tab screenshots.
+  const expandInfo = await evalInPage(`(() => {
+    const btn = document.querySelector('[aria-label="Open task control room"]')
+    if (!btn) return null
+    btn.click()
+    return 'clicked'
+  })()`)
+  console.log('room expand button:', expandInfo)
+  for (let i = 0; i < 30; i++) {
+    const present = await evalInPage('!!document.querySelector("[data-nexus-control-room]")')
+    if (present) break
+    await sleep(500)
+  }
+  const roomInfo = await evalInPage(`(() => {
+    const room = document.querySelector('[data-nexus-control-room]')
+    if (!room) return null
+    const drawer = room.closest('[data-nexus-drawer]')
+    const text = room.textContent.replace(/\s+/g, ' ').trim()
+    return {
+      width: drawer ? drawer.getBoundingClientRect().width : null,
+      hasTitle: text.includes('TASK CONTROL ROOM'),
+      hasTask: text.includes('TASK-0002'),
+      tabs: ['Overview', 'Activity', 'Verification', 'Files'].filter((t) => text.includes(t)),
+      sample: text.slice(0, 260),
+    }
+  })()`)
+  console.log('room info:', JSON.stringify(roomInfo))
+  for (let i = 0; i < 20; i++) {
+    const hasData = await evalInPage('!!document.querySelector("[data-nexus-control-room]") && (document.querySelector("[data-nexus-control-room]").textContent.includes("Root Executor") || document.querySelector("[data-nexus-control-room]").textContent.includes("No managed task") || document.querySelector("[data-nexus-control-room]").textContent.includes("Detail state unavailable"))')
+    if (hasData) break
+    await sleep(1000)
+  }
+  await shot('1b-room-overview')
+  for (const tab of ['Activity', 'Verification', 'Files']) {
+    const clicked = await evalInPage(`(() => { const b = [...document.querySelectorAll('[data-nexus-control-room] [role="tab"]')].find((t) => t.textContent.trim() === ${JSON.stringify(tab)}); if (b) b.click(); return !!b })()`)
+    console.log('room tab click', tab, ':', clicked)
+    await sleep(800)
+    await shot('1b-room-' + tab.toLowerCase())
+  }
+  const roomData = await evalInPage(`(() => {
+    const room = document.querySelector('[data-nexus-control-room]')
+    if (!room) return null
+    const text = room.textContent.replace(/\s+/g, ' ').trim()
+    return {
+      hasRootExecutor: text.includes('Root Executor'),
+      hasPrimary: text.includes('PRIMARY'),
+      hasReview: text.includes('REVIEW'),
+      sample: text.slice(0, 320),
+    }
+  })()`)
+  console.log('room after tabs:', JSON.stringify(roomData))
+  console.log('room fetches:', JSON.stringify(cdp.roomFetches.slice(0, 4)))
+  // Esc collapses the ROOM first (drawer stays), Esc again closes the drawer
+  await evalInPage('document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); "esc"')
+  await sleep(700)
+  const afterRoomEsc = await evalInPage('({ room: !!document.querySelector("[data-nexus-control-room]"), drawer: !!document.querySelector("[data-nexus-drawer]") })')
+  console.log('after room Esc:', JSON.stringify(afterRoomEsc), '(expect room false, drawer true)')
+  await evalInPage('document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); "esc"')
+  await sleep(700)
+  const afterSecondEsc = await evalInPage('!!document.querySelector("[data-nexus-drawer]")')
+  console.log('after second Esc (drawer):', afterSecondEsc, '(expect false)')
+  await evalInPage("document.querySelector('[aria-label=\"Controller panel\"][type=\"button\"]').click(); 'clicked'")
+  await sleep(800)
+  const drawerReopened = await evalInPage('!!document.querySelector("[data-nexus-drawer]")')
+  console.log('drawer reopened for remaining steps:', drawerReopened)
 
   // 4. native details cell intact
   const detailsInfo = await evalInPage(`(() => {
@@ -337,6 +407,48 @@ async function main() {
   })()`)
   console.log('narrow 320:', JSON.stringify(clampInfo))
   await shot('5-narrow-320')
+
+  // 9. Control Room at every required viewport (expanded drawer clamps,
+  //    never squeezes the conversation).
+  const roomAt320 = await evalInPage(`(() => {
+    const btn = document.querySelector('[aria-label="Open task control room"]')
+    if (!btn) return null
+    btn.click()
+    return 'clicked'
+  })()`)
+  console.log('room reopen at 320:', roomAt320)
+  for (let i = 0; i < 30; i++) {
+    const present = await evalInPage('!!document.querySelector("[data-nexus-control-room]")')
+    if (present) break
+    await sleep(500)
+  }
+  await sleep(1200)
+  const roomNarrowInfo = await evalInPage(`(() => {
+    const drawer = document.querySelector('[data-nexus-drawer]')
+    const room = document.querySelector('[data-nexus-control-room]')
+    if (!drawer || !room) return null
+    const rect = drawer.getBoundingClientRect()
+    return { width: rect.width, viewport: window.innerWidth, fits: rect.width <= window.innerWidth, hasRoom: true }
+  })()`)
+  console.log('room narrow 320:', JSON.stringify(roomNarrowInfo))
+  await shot('6-room-narrow-320')
+  for (const [w, h, name] of [[1280, 800, '7-room-1280'], [1440, 900, '8-room-1440'], [1920, 1080, '9-room-1920']]) {
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: false })
+    await sleep(1000)
+    const wInfo = await evalInPage(`(() => {
+      const drawer = document.querySelector('[data-nexus-drawer]')
+      if (!drawer) return null
+      const rect = drawer.getBoundingClientRect()
+      return { width: rect.width, viewport: window.innerWidth, fits: rect.width <= window.innerWidth }
+    })()`)
+    console.log('room ' + w + ':', JSON.stringify(wInfo))
+    await shot(name)
+  }
+  const roomFinal = await evalInPage(`(() => {
+    const room = document.querySelector('[data-nexus-control-room]')
+    return room ? room.textContent.replace(/\s+/g, ' ').slice(0, 240) : null
+  })()`)
+  console.log('room final text:', roomFinal)
 
   await cdp.send('Browser.close').catch(() => {})
   cdp.close()
