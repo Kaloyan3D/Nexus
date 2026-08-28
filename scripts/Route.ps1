@@ -39,7 +39,7 @@ $layout = Get-AihLayout $InstallRoot
 $historyPath = Join-Path $layout.RoutingData 'decisions.jsonl'
 if ($History) {
     if (-not (Test-Path -LiteralPath $historyPath)) { @(); exit 0 }
-    Get-Content -LiteralPath $historyPath | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { [string]::IsNullOrWhiteSpace($TaskId) -or $_.taskId -eq $TaskId } | ConvertTo-Json -Depth 8
+    Get-Content -Encoding UTF8 -LiteralPath $historyPath | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { [string]::IsNullOrWhiteSpace($TaskId) -or $_.taskId -eq $TaskId } | ConvertTo-Json -Depth 8
     exit 0
 }
 if ([string]::IsNullOrWhiteSpace($Description)) { throw 'A task description is required unless -History is used.' }

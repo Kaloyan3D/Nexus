@@ -132,6 +132,11 @@ $distManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $distDir
 Assert-Aih ([string]$distManifest.name -eq 'Nexus' -and [string]$distManifest.short_name -eq 'Nexus') 'PWA manifest identity is Nexus'
 $rendererBundle = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-renderer\lib\client.js'
 Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath $rendererBundle).Contains('const productTitle = "Nexus"')) 'runtime document title is Nexus'
+Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-layout\lib\client.js')).Contains('panels.sidebar === 0 ? 288 : panels.sidebar')) 'expanded sidebar default is 288px'
+$liveConversation = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-conversation\lib\client.js')
+Assert-Aih ($liveConversation.Contains('background:var(--dsw-alias-button-primary-fill);color:#fff')) 'composer send button uses violet primary'
+Assert-Aih ($liveConversation.Contains('#7C5CFF') -and -not $liveConversation.Contains('#6187D8')) 'hero glow tinted violet'
+Assert-Aih ((Test-Path -LiteralPath (Join-Path $distDir 'assets\nexus-logo.png')) -and (Test-Path -LiteralPath (Join-Path $distDir 'assets\nexus-mark.png'))) 'Nexus brand assets served from dist'
 
 $fixture = New-Fixture 'nexus-ui'
 try {
@@ -149,7 +154,13 @@ try {
     [IO.File]::WriteAllText((Join-Path $fixtureRenderer 'client.js'), "const productTitle = ""DeepSeek Harness"";`r`n", [Text.UTF8Encoding]::new($false))
     $fixtureConversation = Join-Path $fixtureApp 'dsh-client-ui-conversation\lib'
     New-Item -ItemType Directory -Force -Path $fixtureConversation | Out-Null
-    [IO.File]::WriteAllText((Join-Path $fixtureConversation 'client.js'), """hero.headline"": ""Into the Unknown"",`r`n""hero.headline"": ""探索未至之境""`r`n", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $fixtureConversation 'client.js'), """hero.headline"": ""Into the Unknown"",`r`n""hero.headline"": ""探索未至之境""`r`nbackground:var(--dsw-alias-button-info-fill);color:#fff`r`nvar(--dsw-alias-button-info-hover)`r`n#6187D8`r`n", [Text.UTF8Encoding]::new($false))
+    $fixtureLayout = Join-Path $fixtureApp 'dsh-client-ui-layout\lib'
+    New-Item -ItemType Directory -Force -Path $fixtureLayout | Out-Null
+    [IO.File]::WriteAllText((Join-Path $fixtureLayout 'client.js'), "const w = { sidebar: 280, details: 0 };`r`nd.sidebar = d.sidebar === 0 ? 280 : 0;`r`nconst w = panels.sidebar === 0 ? 280 : panels.sidebar;`r`n", [Text.UTF8Encoding]::new($false))
+    $fixtureModelSel = Join-Path $fixtureApp 'dsh-client-ui-model-selection\lib'
+    New-Item -ItemType Directory -Force -Path $fixtureModelSel | Out-Null
+    [IO.File]::WriteAllText((Join-Path $fixtureModelSel 'client.js'), "const x = effortLabel !== void 0 && (0, react_jsx_runtime.jsx)(`"span`", {`r`n", [Text.UTF8Encoding]::new($false))
     $fixtureModels = Join-Path $fixtureApp 'dsh-client-ui-settings-models\lib'
     New-Item -ItemType Directory -Force -Path $fixtureModels | Out-Null
     # Build the welcome-notice block from the exact copy strings in patch-copy.json so the
@@ -170,6 +181,11 @@ try {
     Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureRenderer 'client.js')).Contains('const productTitle = "Nexus"')) 'fixture: renderer title patched'
     $fixtureConversationText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureConversation 'client.js')
     Assert-Aih ($fixtureConversationText.Contains('Nexus — deterministic AI engineering') -and $fixtureConversationText.Contains('Nexus — 确定性 AI 工程')) 'fixture: hero headlines patched (en + zh)'
+    $fixtureLayoutText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureLayout 'client.js')
+    Assert-Aih ($fixtureLayoutText.Contains('sidebar: 288,') -and $fixtureLayoutText.Contains('d.sidebar === 0 ? 288 : 0')) 'fixture: sidebar default width patched to 288'
+    Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureModelSel 'client.js')).Contains('!modelLabel.toUpperCase().endsWith(effortLabel.toUpperCase())')) 'fixture: model effort dedupe patched'
+    Assert-Aih ($fixtureConversationText.Contains('background:var(--dsw-alias-button-primary-fill);color:#fff') -and $fixtureConversationText.Contains('var(--dsw-alias-button-primary-hover)') -and $fixtureConversationText.Contains('#7C5CFF') -and -not $fixtureConversationText.Contains('#6187D8')) 'fixture: send button violet + glow tinted'
+    Assert-Aih ((Test-Path -LiteralPath (Join-Path $fixtureDist 'assets\nexus-logo.png')) -and (Test-Path -LiteralPath (Join-Path $fixtureDist 'assets\nexus-mark.png'))) 'fixture: brand assets copied to dist'
     $fixtureModelsText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureModels 'client.js')
     Assert-Aih ($fixtureModelsText.Contains('About Nexus') -and $fixtureModelsText.Contains('关于 Nexus') -and -not $fixtureModelsText.Contains('Internal Testing Notice')) 'fixture: welcome notice patched'
     Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureData 'settings.yaml')).Contains('preference: dark')) 'fixture: dark theme default added'
@@ -178,12 +194,16 @@ try {
     $firstIndex = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureDist 'index.html')
     $firstModels = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureModels 'client.js')
     $firstRenderer = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureRenderer 'client.js')
+    $firstConversation = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureConversation 'client.js')
+    $firstLayout = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureLayout 'client.js')
     & (Join-Path $InstallRoot 'scripts\Patch-NexusUi.ps1') -InstallRoot $fixture -SourceRoot $InstallRoot
     if ($LASTEXITCODE -ne 0) { throw 'Nexus UI patch failed on the second run' }
     $secondIndex = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureDist 'index.html')
     $secondModels = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureModels 'client.js')
     $secondRenderer = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureRenderer 'client.js')
-    Assert-Aih ($firstIndex.Hash -eq $secondIndex.Hash -and $firstModels.Hash -eq $secondModels.Hash -and $firstRenderer.Hash -eq $secondRenderer.Hash) 'fixture: Nexus patch is idempotent (second run changes nothing)'
+    $secondConversation = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureConversation 'client.js')
+    $secondLayout = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureLayout 'client.js')
+    Assert-Aih ($firstIndex.Hash -eq $secondIndex.Hash -and $firstModels.Hash -eq $secondModels.Hash -and $firstRenderer.Hash -eq $secondRenderer.Hash -and $firstConversation.Hash -eq $secondConversation.Hash -and $firstLayout.Hash -eq $secondLayout.Hash) 'fixture: Nexus patch is idempotent (second run changes nothing)'
 
     # Fail-closed: when the pinned upstream structure changes, the patch must refuse.
     [IO.File]::WriteAllText((Join-Path $fixtureRenderer 'client.js'), "const productTitle = ""Something Else"";`r`n", [Text.UTF8Encoding]::new($false))

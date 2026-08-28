@@ -1,14 +1,8 @@
-{"timestampUtc":"2026-08-23T17:00:50.5833598Z","kind":"task-created","taskId":"TASK-0001","dependencies":[]}
-{"timestampUtc":"2026-08-23T17:00:51.2388614Z","kind":"execution-class-selected","taskId":"TASK-0001","executionClass":"codex_review","reason":"Explicit user-requested bounded Codex review (reviewRequested metadata; controller-owned, fresh, read-only).","completionAuthority":false}
-{"timestampUtc":"2026-08-23T17:31:08.8176259Z","kind":"task-created","taskId":"TASK-0002","dependencies":[]}
-{"timestampUtc":"2026-08-23T17:31:09.5952418Z","kind":"execution-class-selected","taskId":"TASK-0002","executionClass":"codex_review","reason":"Explicit user-requested bounded Codex review (reviewRequested metadata; controller-owned, fresh, read-only).","completionAuthority":false}
-{"timestampUtc":"2026-08-23T17:31:18.6237626Z","kind":"task-created","taskId":"TASK-0003","dependencies":[]}
-{"timestampUtc":"2026-08-23T17:31:19.3355800Z","kind":"execution-class-selected","taskId":"TASK-0003","executionClass":"codex_review","reason":"Explicit user-requested bounded Codex review (reviewRequested metadata; controller-owned, fresh, read-only).","completionAuthority":false}
-{"timestampUtc":"2026-08-23T17:32:02.6468050Z","kind":"task-created","taskId":"TASK-0004","dependencies":[]}
-{"timestampUtc":"2026-08-23T17:32:03.3847586Z","kind":"execution-class-selected","taskId":"TASK-0004","executionClass":"codex_review","reason":"Explicit user-requested bounded Codex review (reviewRequested metadata; controller-owned, fresh, read-only).","completionAuthority":false}
-{"timestampUtc":"2026-08-23T17:32:25.3500399Z","kind":"task-created","taskId":"TASK-0005","dependencies":[]}
-{"timestampUtc":"2026-08-23T17:32:26.0629786Z","kind":"execution-class-selected","taskId":"TASK-0005","executionClass":"codex_review","reason":"Explicit user-requested bounded Codex review (reviewRequested metadata; controller-owned, fresh, read-only).","completionAuthority":false}
-{"timestampUtc":"2026-08-23T17:34:26.8419336Z","kind":"task-created","taskId":"TASK-0006","dependencies":[]}
-{"timestampUtc":"2026-08-23T17:34:27.5796343Z","kind":"execution-class-selected","taskId":"TASK-0006","executionClass":"codex_review","reason":"Explicit user-requested bounded Codex review (reviewRequested metadata; controller-owned, fresh, read-only).","completionAuthority":false}
-{"timestampUtc":"2026-08-28T16:24:13.7043256Z","kind":"task-created","taskId":"TASK-0007","dependencies":[]}
-{"timestampUtc":"2026-08-28T16:24:14.8607565Z","kind":"execution-class-selected","taskId":"TASK-0007","executionClass":"codex_review","reason":"Explicit user-requested bounded Codex review (reviewRequested metadata; controller-owned, fresh, read-only).","completionAuthority":false}
+{"timestampUtc":"2026-08-28T18:56:18.9107855Z","kind":"task-created","taskId":"TASK-0001","dependencies":[]}
+{"timestampUtc":"2026-08-28T18:56:20.2796883Z","kind":"execution-class-selected","taskId":"TASK-0001","executionClass":"codex_review","reason":"Explicit user-requested bounded Codex review (reviewRequested metadata; controller-owned, fresh, read-only).","completionAuthority":false}
+{"timestampUtc":"2026-08-28T19:07:29.6167333Z","kind":"task-created","taskId":"TASK-0002","dependencies":[]}
+{"timestampUtc":"2026-08-28T19:07:30.5479115Z","kind":"execution-class-selected","taskId":"TASK-0002","executionClass":"codex_review","reason":"Explicit user-requested bounded Codex review (reviewRequested metadata; controller-owned, fresh, read-only).","completionAuthority":false}
+{"timestampUtc":"2026-08-28T19:34:10.3321564Z","kind":"task-created","taskId":"TASK-0003","dependencies":[]}
+{"timestampUtc":"2026-08-28T19:34:11.5150233Z","kind":"execution-class-selected","taskId":"TASK-0003","executionClass":"codex_review","reason":"Explicit user-requested bounded Codex review (reviewRequested metadata; controller-owned, fresh, read-only).","completionAuthority":false}
+{"timestampUtc":"2026-08-28T20:32:06.5622485Z","kind":"task-created","taskId":"TASK-0004","dependencies":[]}
+{"timestampUtc":"2026-08-28T20:32:07.4014798Z","kind":"execution-class-selected","taskId":"TASK-0004","executionClass":"codex_review","reason":"Explicit user-requested bounded Codex review (reviewRequested metadata; controller-owned, fresh, read-only).","completionAuthority":false}

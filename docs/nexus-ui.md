@@ -141,3 +141,372 @@ are never targeted.
 - The Nexus theme is applied at client boot; a flash of the upstream dark
   theme is possible before plugin application (the boot script already sets
   the dark attribute, so this is minimal).
+
+## Phase 1.5 — compact premium layout
+
+Follow-up polish pass. All behavior preserved; no controller/runtime changes.
+
+### Changes
+- **Sidebar**: expanded default width 288px (was 280) via a deterministic
+  patch of the app-shell layout bundle (`dsh-client-ui-layout`
+  `panels.sidebar === 0 ? 280 → 288`). Collapsed rail (56px) and
+  user-dragged widths (clamp 264–420) unchanged. Density: logo row 52px,
+  inline padding 10px (Nexus CSS).
+- **Official logo**: `ui/nexus-ui/assets/nexus-logo.png` (lockup: hexagon
+  mark + NEXUS wordmark, 1056×282 content band) replaces the inline SVG mark.
+  The icon-only form is `ui/nexus-ui/assets/nexus-mark.png` (288×288 crop,
+  regenerated deterministically by `ui/assets-regenerate-mark.ps1`). The
+  client plugin renders both images and swaps them with CSS keyed on the
+  stable `[data-sidebar-collapsed]` frame attribute; assets are copied into
+  `dist/assets/` by the patch script (step 2d) and referenced from
+  `/assets/`.
+- **Hero headline**: 26px → 30px (target band 28–32), stack gap 12→8, hero
+  padding 24→16, composer-hero bottom clearance 32→16, hero input min-height
+  52→44 (Nexus CSS, suffix selectors scoped to `[data-phase="hero"]`).
+- **Main content width**: `--dsh-chat-content-width` 748px → 900px on
+  `[data-phase]`, widening the conversation column and composer
+  (`--dsh-composer-card-max-width` derives from it).
+- **Primary action violet**: composer send button switched from
+  `--dsw-alias-button-info-*` (cyan) to `--dsw-alias-button-primary-*`
+  (violet) via deterministic bundle patch; hero glow recolored
+  `#6187D8 → #7C5CFF`. Cyan remains only on semantically informational
+  controls.
+- **Composer**: elevated surface (input-major token → `#17171D`), clearer
+  border (l2-darkmode-thin token → full `#27272F`), 10px radius, violet
+  `:focus-within` ring (`0 0 0 3px #7C5CFF26`), 15px base font.
+- **Hero chips** (mode seat + workspace): shared Nexus surface
+  (hover bg + l2 border, 8px radius) so the Normal Engineering / DeepSeek
+  Only selector belongs to the shell.
+- **Selected rows**: `--dsw-alias-interactive-bg-active` dark → violet tint
+  `#7C5CFF2E`; menu/option rows with `[aria-selected=true]` get the accent
+  hover tint; active sidebar nav item surface → `#221D38` violet tint.
+- **Preview badge**: de-emphasized — transparent bg, tertiary text, 11px.
+- **Model selector**: unchanged upstream component; duplicates such as
+  "MAX Max" are suppressed by the mode-seat rendering (see verification).
+
+### Patches added in 1.5
+- `dsh-client-ui-layout`: sidebar default width 280 → 288.
+- `dsh-client-ui-conversation`: send button fill/hover → primary tokens;
+  hero glow `#6187D8 → #7C5CFF`.
+- `dist/assets/nexus-logo.png` + `nexus-mark.png` copies.
+
+### Verification (CDP-driven live browser session, 1440×900, dark theme)
+| Metric | Before (stock/Phase 1) | After (Phase 1.5) |
+| --- | --- | --- |
+| Expanded sidebar | 280px | **288px** (fresh load and reopen-after-collapse; collapsed rail 56px) |
+| Hero headline | 26px/32px | **30px/34px** |
+| Hero stack gap | 12px | 8px |
+| Hero horizontal padding | 24px | 16px |
+| Composer width | 780px (748 content) | **932px** (900 content), still centered |
+| Composer radius | 22px (overridden 10px) | **10px** |
+| Composer surface | #111116 | **#17171D**, border #27272F, violet focus ring |
+| Send button | cyan #49C6E5 | **violet #7C5CFF** (34×34) |
+| Hero glow | #6187D8 | **#7C5CFF** |
+| Model chip | "DeepSeek V4 Flash MAX Max" | **"DeepSeek V4 Flash MAX"** (effort deduped) |
+
+Behavioral checks (all passed in the live session): workspace selection via
+picker, mode seat menu (Standard/PTC/Minimal/Creator/Normal Engineering/
+DeepSeek Only), composer typing + mirror, New Session reset to hero, Settings
+open, Appearance Light ↔ Dark toggle, sidebar collapse (56px rail, icon mark)
+and expand (288px, lockup). Pixel sampling of screenshots confirmed the
+lockup (violet+navy+light pixels) in the expanded rail, the icon mark in the
+collapsed rail, and the violet send button (max B−R diff 131 ≈ #7C5CFF).
+
+Suites: Harness.Tests.ps1 63/63 (incl. fixture idempotency + fail-closed for
+all new patches), ControllerRouting.Tests.ps1 47/47, AihController.Tests.cjs
+PASS, Doctor.ps1 all PASS (12 Nexus checks).
+
+
+---
+
+# Phase 2 — live Controller panel
+
+The Controller panel exposes REAL deterministic-controller state (task ledger,
+session bindings, routing state, routing decisions, launcher state, git) in a
+right-edge drawer over the Web GUI shell. It is strictly read-only and observes
+existing state; it never owns controller behavior.
+
+> TASK-0002 repair (drawer architecture): the first Phase-2 build registered
+> into the official `details` seat. That seat is kind `single` / scope
+> `session` and is OCCUPIED by the native DetailsPanel (client-ui-conversation)
+> at priority 0 — and that occupant declares `conversation.details.tool`. The
+> pinned slot core REJECTS an equal-priority second registration ("single slot
+> … already has a registration"), so the live loader failed to apply the entry
+> and the composition had to disable the row. The pinned architecture offers no
+> additive right-column seat (verified in the slot declaration table), so the
+> repaired build mounts into `shell.overlay` — the documented additive seat
+> for a frame-wide surface of your own — as a right-edge drawer. Native details
+> behavior is entirely untouched: the DetailsPanel keeps the `details` seat
+> and keeps declaring `conversation.details.tool`; open/close/drag stay
+> layout-owned; a ResizeObserver closes the drawer whenever the native details
+> column opens, so the two surfaces never overlap.
+
+## Architecture
+
+```
+Nexus controller state (task ledger, bindings, routing state,
+decisions.jsonl, settings.yaml, aih-state.json, git)
+        |
+        v
+ui/nexus-controller/lib/status.cjs      pure read-only state adapter (CJS)
+        |                                (normalize, degrade, derive, git)
+        v
+lib/index.js                             host plugin: one exact GET route
+        |                                (bound via Cordis lifecycle
+        |                                injection of the webServer service —
+        |                                activates whenever/wherever the
+        |                                service becomes available; inert in
+        |                                profiles without it)
+        |                                /nexus/controller.json?session=<id>
+        v
+lib/client.js                            client plugin: shell.overlay drawer
+                                         (additive list seat, root scope)
+                                         + session-header toggle
+        v
+Web GUI frame overlay layer (click-through layer; the drawer surface opts
+back into pointer events; right edge, width min(340px, 100vw - 40px))
+```
+
+Layering follows the Phase 1 priority: official slots/extension points first
+(the ADDITIVE `shell.overlay` list seat — the documented "additive seat for
+a frame-wide surface of your own" — and the `conversation.session.header.actions`
+additive seat), Nexus-owned plugin second, Nexus-owned CSS third, no upstream
+patch at all. The `details` seat and its `conversation.details.tool`
+child are deliberately left to the native occupants (see the repair note
+above); the controller never registers into either.
+
+## Authoritative source for every displayed field
+
+| Panel field | Source | Live update |
+| --- | --- | --- |
+| Task id / description / status | `<workspace>/.ai-harness/state/tasks.json` (ledger) | poll 1.5 s |
+| Session → task binding | `data/routing/session-bindings.json` | poll 1.5 s |
+| Execution class / review-required | routing state `data/routing/states/<sha256>.json` (falls back to binding) | poll 1.5 s |
+| Executor provider / model / reasoning | the **last non-escalation** decision in `data/routing/decisions.jsonl` — the decision that owns primary execution; review/escalation records (`escalatedFrom` set) never replace it just because they are newer; if only escalations exist (edge), the newest record is the fail-closed fallback; display name from `data/settings.yaml` `llm-pi-ai.providers.*.models[].name` | poll 1.5 s |
+| Attempt | `task.attempt` / `task.maxAttempts` (ledger; real max = 3); attempt 0 renders `—` (no attempt started), positive attempts render `N / max` unchanged | poll 1.5 s |
+| Verification | `task.verification.outcomes[]` (status PASS/FAIL/SKIP; written by the controller's own evidence step) | poll 1.5 s |
+| Codex reviews | `task.codexCalls` (real recorded count; never triggers Codex) | poll 1.5 s |
+| Context | live `useProjection('contextPressure')` (same source as the composer ring) | push (client projection) |
+| Working vs waiting | live `useSession(s => s.running)` folded over the file state | push (client store) |
+| Git | `git -c core.quotepath=false status --porcelain=v1` + `diff --numstat HEAD` + branch, cached 10 s per workspace server-side | poll 1.5 s (cached 10 s) |
+| Controller status / pid | `data/aih-state.json` | poll 1.5 s |
+
+Every value degrades fail-closed: missing/corrupt files become `null` and
+the UI renders "—" or omits the row. No fake telemetry anywhere.
+
+## Display-state mapping (smallest truthful set)
+
+`unavailable` (transport/HTTP failure: fetch error, non-200, unparseable
+envelope, or a host-side envelope error — the controller state cannot be
+read at all; NEVER `idle`) · `idle` (HEALTHY controller with no active
+work — no binding) · `starting` (bound, ledger record absent) ·
+`working` (ready/implementing — GUI sessions never call begin-attempt, so a
+live task stays `ready` through its whole turn) · `reviewing` (running &&
+codex_review) · `repairing` (running && deepseek_deep) · `verifying`
+(ledger status `verifying`, CLI-owned, shown even while idle) · `waiting`
+(bound but agent loop idle) · `complete` · `failed`. The client folds the
+session's live `running` flag over the file-derived state; VERIFYING is
+exempt because deterministic verification runs through the CLI outside the
+agent loop. File-level fail-closed degradation INSIDE a healthy envelope
+(missing/corrupt sources become null rows) does not flip the pill — only
+transport/envelope failure does.
+
+## Live-update mechanism
+
+There is no browser-exposed event stream for ledger state, so the panel uses
+the fallback ladder's last rung: bounded polling of the read-only adapter
+endpoint every 1.5 s (the task's own guidance: 1–2 s is sufficient for
+controller telemetry). Context and running-flag come from live client
+projections (no polling). Git is cached 10 s per workspace on the host so the
+1.5 s polls never run git.
+
+## Layout integration
+
+- Drawer: registered into the ADDITIVE `shell.overlay` list seat (root
+  scope, id `nexus-controller`, order 100) as a right-edge drawer
+  (`position:absolute; top:0; right:0; bottom:0` inside the frame's overlay
+  layer — the layer is click-through, the drawer surface opts back into
+  pointer events, so the app stays usable around it). Width
+  `min(340px, calc(100vw - 40px))` — narrow windows clamp instead of
+  overflowing. Slide-in animation with a `prefers-reduced-motion` guard.
+- Toggle: additive `conversation.session.header.actions` entry (id
+  `nexus-controller`, order 90) — the per-session way to open/close the
+  drawer. Escape also closes it; the drawer header has a close button.
+- Auto-open: once per controller-bound session, when the drawer is not yet
+  decided-for that session and the user's stored preference says open. The
+  preference lives in `localStorage` (`nexus.controller.panel.open`)
+  because upstream layout state is transient by design and no other UI-setting
+  persistence exists to reuse. Any user decision (toggle/close/Esc) marks the
+  session decided, so the drawer never re-opens on its own afterwards.
+- Coherence with native details: a ResizeObserver watches the `details`
+  column cell; when the layout opens the native details column while the
+  drawer is open, the drawer closes itself (and marks the session decided).
+  The two right-side surfaces never overlap, and native tool-call details
+  keep working exactly as shipped.
+- Session data: the drawer receives only the standard overlay kit
+  (`useSessions` + `useWorkspaces`); the current session id, the live
+  `running` flag and `projections.values.contextPressure` all come from
+  the session summary records (the same source the sidebar badge uses).
+- Read-only: no execution-class switching, no routing override, no Codex
+  trigger, no task/git mutation. Allowed interactions: collapse/expand, copy
+  task id.
+
+## Files
+
+Added: `ui/nexus-controller/package.json`, `lib/status.cjs`,
+`lib/index.js`, `lib/client.js`, `tests/NexusControllerPanel.Tests.cjs`,
+`ui/nexus-controller/tools/boot-verify-drawer.mjs` (CDP boot verification
+against the live composition), `ui/nexus-controller/tools/cold-restart-verify.mjs`
+(cold-restart + post-restart route verification driver).
+Changed: `lib/status.cjs` — executor selection prefers the last
+non-escalation decision; `lib/client.js` — attempt 0 renders `—`;
+`scripts/TaskController.ps1`, `scripts/Route.ps1`,
+`scripts/Complete-Objective.ps1` — every state read that carries
+user-derived text now uses `Get-Content -Encoding UTF8` (the
+UTF-8-no-BOM ledger/manifest/decisions files were being decoded through the
+Windows PowerShell 5.1 ANSI codepage, which corrupted any non-ASCII
+character on read-modify-write cycles); added
+`scripts/Repair-LedgerEncoding.ps1` — idempotent repair driver that
+restores corrupted task descriptions from the authoritative clean source
+(the task's last non-escalation routing decision), fixed the live
+TASK-0001/TASK-0002 ledger + run manifests; `config/home.cordis.patch.yml` (+ `data/cordis.patch.yml`
+copy) — `nexus-controller` row (must stay ENABLED — see the repair note);
+`scripts/Patch-NexusUi.ps1` — installs @nexus/controller into the profile
+module fallback, ensures the composition row AND strips any
+`disabled: true` that belongs to the controller row (idempotent,
+CRLF/LF-tolerant, fail-closed); `scripts/Doctor.ps1` — 5 Nexus controller
+checks (package, files, row, ROW ENABLED, route); `docs/nexus-ui.md` —
+this record.
+
+## Tests
+
+`tests/NexusControllerPanel.Tests.cjs` (deterministic, fixture-based, no
+Codex, no live state): empty state, active DeepSeek task (fixture
+ledger+bindings+routing state+decision+settings → deepseek_normal /
+"DeepSeek V4 Flash MAX" / TASK-0042), verification pass/fail/partial, codex
+count, display-state derivation, routing-state filename cross-validated
+against a real PowerShell-written file, corrupt/missing state degradation,
+git parsers + a real fixture repository, host-route registration + endpoint
+handler over a fixture request (200, no-store, graceful idle envelope, inert
+without webServer), a client-bundle load/registration/SSR smoke test
+(asserts the controller registers shell.overlay + header actions only and
+never injects into `details`), and — added by the TASK-0002 repair — two
+composition regression groups:
+
+1. **Slot-collision regression (mini slot-core).** A faithful port of the
+   pinned shell-bundle slot register core (index-ClqxG24t.js, register at
+   char ~191268 — same guards, same declaration flow, same sort, same error
+   strings). The REAL controller client bundle is applied against a
+   mini-core seeded with the STOCK composition (root → details +
+   shell.overlay; DetailsPanel → conversation.details.tool; conversation →
+   conversation.session.header → header.actions). It must apply cleanly, own
+   shell.overlay + header actions, and leave `details` /
+   `conversation.details.tool` owned by the native occupants. The NEGATIVE
+   case re-registers into `details` at priority 0 and must throw the exact
+   live loader error: `single slot "details" already has a registration at
+   priority 0 — register at a different priority to shadow it (lowest
+   renders)`. This group FAILS if the controller ever goes back to the
+   details seat.
+2. **Native tool-details reachability.** After the controller integration
+   the `details` seat and `conversation.details.tool` remain occupied by
+   the native entries (asserted through the mini-core registry), the client
+   bundle contains no `details` injection at all, and the native
+   DetailsPanel/ToolDetails render path is exercised.
+3. **Host route lifecycle injection.** The host plugin activates with NO
+   webServer present and must not lose the route to a one-time lookup:
+   nothing registers until the service exists; when it appears later the
+   injection callback applies and the route registers with unchanged handler
+   semantics. One group drives the REAL Cordis runtime from the app closure
+   (plugin applied on a bare Context, `webServer` provided afterwards,
+   route asserted after the deferred injection resolves); the other asserts
+   the contract structurally (inject declares `webServer`, no registration
+   before availability, inert forever in profiles that never provide it).
+4. **UNAVAILABLE vs IDLE semantics.** Transport failure and envelope errors
+   resolve to `unavailable` — never `idle`; a healthy controller with no
+   work stays `idle`; healthy states are unchanged; the SSR failure face
+   renders the UNAVAILABLE pill and the "Controller state unavailable"
+   empty message.
+
+`tests/AihController.Tests.cjs` covers the controller bridge behavior
+(unchanged, still PASS).
+
+
+4. **Executor = primary decision.** Fixture decisions.jsonl with a primary
+   record (no `escalatedFrom`) followed by a NEWER review escalation
+   (codex_review / sol-local / gpt-5.6-sol) — the snapshot must report the
+   PRIMARY executor (provider/model/reasoning from the primary record,
+   `escalatedFrom` null). Also covered: escalation-before-primary ordering
+   and the all-escalations edge (fail-closed fallback to the newest record).
+5. **Attempt 0 → `—`.** SSR of the real ControllerBody: attempt 0 renders
+   the em-dash placeholder and never `0 / max` (progress bar suppressed);
+   a positive attempt renders `N / max` unchanged.
+6. **UTF-8 ledger text.** A fixture ledger carrying a real em-dash plus
+   CJK/arrows/accents round-trips through the snapshot and the route
+   envelope byte-for-byte with no mojibake.
+
+`tests/ControllerRouting.Tests.ps1` gained two deterministic sections:
+section 9 (UTF-8 ledger boundary — a fixture task with a real em-dash
+survives `New-AihTask` + `Update-AihTaskRecord` read-modify-write with
+the ledger byte-compared via `[IO.File]::ReadAllText` UTF-8) and section
+10 (repair driver — a corrupted fixture description is restored from the
+authoritative routing decision, the run manifest is restored too, and a
+second driver run is a byte-exact no-op).
+
+## Known limitations
+
+- The live dsh instance is never restarted during this work (a restart would
+  kill the agent session); the composition is applied LIVE through the
+  Cordis HMR watcher on `data/cordis.patch.yml` — the served boot graph and
+  the served `@nexus/controller` client bundle were re-fetched and
+  verified to be the drawer build, and the final acceptance is the CDP boot
+  verification below against the real running composition.
+- The live instance was cold-restarted as part of the host-route repair
+  (the one-time `ctx.get('webServer')` activation check could permanently
+  skip the route when the service was late; the route is now bound through
+  Cordis lifecycle injection). The restart itself and the post-restart URL
+  check are orchestrated by `ui/nexus-controller/tools/cold-restart-verify.mjs`
+  (results in `logs/cold-restart-verify.log`).
+- Boot verification (headless Edge via CDP against the LIVE server, the real
+  plugin loaded from the real composition — no injected markup):
+  - the page boots with NO "already has a registration" loader error;
+  - the controller toggle renders in the real header action row;
+  - the drawer opens (auto-open honors the stored preference) and shows REAL
+    controller data for the bound live session (task id, executor model,
+    state pill, controller status/pid);
+  - the native details column still mounts the native DetailsPanel
+    (its empty-state copy is present in the details cell; the controller
+    title is NOT) — the controller does not shadow native tool details;
+  - coherence: forcing the native details column open closes the drawer;
+  - toggle reopen, Escape close, narrow-viewport clamp all work.
+- The native details column itself has no reachable UI in the stock app
+  (upstream `openDetails` is implemented but never called), so "open tool
+  details" in the coherence check is exercised at the layout level (the
+  drawer watches the real column width, which is exactly what the layout
+  store drives). Tool input/output stays fully visible through the
+  conversation's inline tool rows (verified: rows render and expand), and
+  the `conversation.details.tool` seat + its native occupant are asserted
+  by the regression tests.
+- `attempt` is `0` while GUI sessions run (the controller never calls
+  begin-attempt for GUI sessions); the panel renders `—` for 0 — never
+  `0 / max` — and positive attempts render unchanged.
+- The EXECUTOR for the live session is the primary routing decision:
+  `flash-high-direct / deepseek-v4-flash / high`; the newer codex_review
+  escalation (sol-local / gpt-5.6-sol) is shown under Review, never as the
+  Executor. Display names come from settings.yaml, prettified ids are the
+  fallback.
+- Light theme: the drawer uses only `--dsw-alias-*` tokens
+  (theme-agnostic by design); the theme preference is store-owned and cannot
+  be switched from a headless probe, so the light pass relies on the
+  Phase-1 light-theme verification plus the shared token layer.
+
+## Phase 3 recommendations
+
+1. Push updates: expose a controller event stream/SSE endpoint instead of
+   1.5 s polling.
+2. Task-details navigation + verification artifact deep links (runs/
+   evidence files).
+3. Operator WAITING/approval signal (e.g., the review-required gate) so the
+   panel can surface "waiting for operator".
+4. Wire begin-attempt for GUI sessions so Attempt reflects controller
+   retries.
+5. Per-session panel preference (not global) when a settings system exists.

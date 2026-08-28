@@ -73,7 +73,7 @@ window.__ModuleLoader__.load({
 			"--dsw-alias-border-inverted": { dark: "#FFFFFF12", light: "#00000014" },
 			"--dsw-alias-border-inverted2": { dark: "#FFFFFF14", light: "#0000001A" },
 			"--dsw-alias-border-l1": { dark: "#27272F66", light: "#0000000A" },
-			"--dsw-alias-border-l2-darkmode-thin": { dark: "#27272F80", light: "#0000001A" },
+			"--dsw-alias-border-l2-darkmode-thin": { dark: NEXUS_PALETTE.border, light: "#0000001A" },
 			"--dsw-alias-border-l2": { dark: NEXUS_PALETTE.border, light: NEXUS_PALETTE.lightBorder },
 			"--dsw-alias-border-l3": { dark: "#27272FE6", light: NEXUS_PALETTE.lightBorderStrong },
 			"--dsw-alias-border-l4": { dark: NEXUS_PALETTE.border, light: "#00000029" },
@@ -96,7 +96,7 @@ window.__ModuleLoader__.load({
 			"--dsw-alias-button-tool-bar-fill": { dark: "#27272F80", light: "#0000001F" },
 			"--dsw-alias-button-tool-bar-fill-invisible": { dark: "#17171D5C", light: "#FFFFFF" },
 			"--dsw-alias-button-tool-bar-hover": { dark: "#27272F99", light: "#00000029" },
-			"--dsw-alias-interactive-bg-active": { dark: "#FFFFFF1F", light: "#00000012" },
+			"--dsw-alias-interactive-bg-active": { dark: "#7C5CFF2E", light: "#7C5CFF14" },
 			"--dsw-alias-interactive-bg-hover": { dark: "#FFFFFF12", light: "#00000008" },
 			"--dsw-alias-interactive-bg-hover-accent": { dark: NEXUS_PALETTE.accentSoft, light: NEXUS_PALETTE.accentSoft },
 			"--dsw-alias-interactive-bg-hover-danger": { dark: "#F0443826", light: "#DC262614" },
@@ -137,12 +137,12 @@ window.__ModuleLoader__.load({
 			"--dsw-alias-tooltip-bg": { dark: NEXUS_PALETTE.elevated2, light: NEXUS_PALETTE.elevated2 },
 			"--dsw-specific-bubble": { dark: NEXUS_PALETTE.elevated, light: NEXUS_PALETTE.lightElevated },
 			"--dsw-specific-bubble-highlight": { dark: NEXUS_PALETTE.elevated2, light: NEXUS_PALETTE.lightPlatform },
-			"--dsw-specific-input-major": { dark: NEXUS_PALETTE.surface, light: NEXUS_PALETTE.lightElevated },
+			"--dsw-specific-input-major": { dark: NEXUS_PALETTE.elevated, light: NEXUS_PALETTE.lightElevated },
 			"--dsw-specific-login-input": { dark: NEXUS_PALETTE.sidebar, light: NEXUS_PALETTE.lightElevated },
 			"--dsw-specific-menu": { dark: NEXUS_PALETTE.elevated, light: NEXUS_PALETTE.lightElevated },
 			"--dsw-specific-selector": { dark: NEXUS_PALETTE.elevated, light: NEXUS_PALETTE.lightElevated },
 			"--dsw-specific-sidebar-fill": { dark: NEXUS_PALETTE.sidebar, light: NEXUS_PALETTE.lightSurface },
-			"--dsw-specific-sidebar-nav-item-active": { dark: NEXUS_PALETTE.elevated, light: NEXUS_PALETTE.lightNavActive },
+			"--dsw-specific-sidebar-nav-item-active": { dark: "#221D38", light: NEXUS_PALETTE.lightNavActive },
 			"--dsw-specific-sidebar-nav-item-active-accent": { dark: NEXUS_PALETTE.accent, light: NEXUS_PALETTE.accent },
 			"--dsw-specific-sidebar-nav-item-hover": { dark: NEXUS_PALETTE.surface, light: NEXUS_PALETTE.lightNavHover },
 			"--dsw-specific-tip": { dark: NEXUS_PALETTE.elevated, light: NEXUS_PALETTE.lightElevated },
@@ -168,46 +168,62 @@ window.__ModuleLoader__.load({
 			"[data-composer-card]{border-radius:10px}",
 			"[data-phase=hero] button[aria-haspopup=menu]{border-radius:8px}",
 			"body[data-ds-dark-theme]::-webkit-scrollbar-thumb{border-radius:5px}",
-			"body[data-ds-dark-theme]{--dsh-scrollbar-width:10px}"
+			"body[data-ds-dark-theme]{--dsh-scrollbar-width:10px}",
+			//#region phase 1.5 — compact premium layout
+			// Main content: widen the chat column for every conversation phase.
+			"[data-phase]{--dsh-chat-content-width:900px}",
+			// Hero: headline at product scale (28-32px), tighter vertical rhythm.
+			"[data-phase=hero] [class*=headline]{font-size:30px;line-height:34px}",
+			"[data-phase=hero] [class*=stack]{gap:8px}",
+			"[data-phase=hero] [class*=composerHero]{padding-bottom:16px}",
+			"[data-phase=hero] [data-input-mirror=true]{min-height:44px}",
+			"[data-phase=hero] [class*=root]:has(> [class*=stack]){padding:0 16px}",
+			// Hero chips (mode seat + workspace chip): Nexus surface treatment.
+			"[data-phase=hero] button[aria-haspopup=menu]{background:var(--dsw-alias-interactive-bg-hover);border:1px solid var(--dsw-alias-border-l2)}",
+			"[data-phase=hero] button[aria-haspopup=menu]:hover{background:var(--dsw-alias-interactive-bg-hover-solid);border-color:var(--dsw-alias-border-l3)}",
+			// Composer: elevated surface, clear border, polished focus, 8-10px radius.
+			"[data-composer-card]{border-radius:10px;font-size:15px;line-height:22px;border-color:var(--dsw-alias-border-l2)}",
+			"[data-composer-card]:focus-within{border-color:var(--dsw-alias-state-business-primary);box-shadow:0 0 0 3px #7C5CFF26,var(--dsw-shadow-lv2)}",
+			// The card is the only bordered surface: the inner editable area is
+			// fully borderless/transparent and keeps no independent focus border.
+			"[data-composer-card] textarea,[data-composer-card] textarea:focus,[data-composer-card] textarea:focus-visible{outline:none;border:none;box-shadow:none;background:transparent}",
+			"[data-input-scroll=true]{padding-top:8px}",
+			// Preview badge: de-emphasized (no product meaning on Nexus).
+			"[data-phase=hero] [class*=previewBadge]{background:transparent;border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;padding:1px 6px 0}",
+			// Sidebar brand: icon-only mark (34px hero / 30px expanded / 26px rail);
+			// the NEXUS wordmark renders via the brand-name slot.
+			".nexus-brand-mark{display:block;width:34px;height:34px}",
+			"[data-slot=sidebar] .nexus-brand-mark{width:30px;height:30px}",
+			"[data-sidebar-collapsed] [data-slot=sidebar] .nexus-brand-mark{width:26px;height:26px}",
+			"[data-slot=sidebar] [class*=brandIdentity]{height:32px}",
+			"[data-sidebar-collapsed] [data-slot=sidebar] [class*=brandName]{display:none}",
+			// Sidebar density: tighter logo row and inline padding.
+			"[data-slot=sidebar] [class*=logoRow]{height:52px;margin-bottom:4px}",
+			"[data-sidebar-collapsed] [data-slot=sidebar] [class*=logoRow]{height:36px;margin-bottom:12px;padding:0}",
+			"[data-slot=sidebar]>div{--dsh-sidebar-inline-padding:10px}",
+			"[data-slot=sidebar] [class*=navItem]:hover{background:var(--dsw-alias-interactive-bg-hover)}",
+			// Selected rows in pickers/menus get a subtle violet treatment.
+			"[role=menuitem][aria-selected=true],[role=option][aria-selected=true]{background:var(--dsw-alias-interactive-bg-hover-accent);color:var(--dsw-alias-label-primary)}"
+			//#endregion
 		].join("");
 		//#endregion
 		//#region nexus brand components
 		/**
-		* The geometric Nexus mark: a hexagonal node ring with a hub core — a
-		* network nexus, not a DeepSeek fish. Rendered inline so the sidebar and
-		* conversation hero slots need no asset pipeline.
+		* The official Nexus icon mark. Sized purely with CSS so the slot host's
+		* intrinsic size does not constrain it: 34px in the conversation hero,
+		* 30px in the expanded sidebar brand row, 26px in the collapsed rail.
+		* The NEXUS wordmark renders separately through the sidebar.brand.name
+		* slot. The asset is copied into the web frontend dist by
+		* scripts/Patch-NexusUi.ps1 (step 2d) and served from /assets/.
 		* @param props - host-supplied mark presentation (size + positioning class).
-		* @returns the Nexus mark svg.
+		* @returns the Nexus icon mark.
 		*/
 		function NexusMark({ size, className }) {
-			return (0, react_jsx_runtime.jsxs)("svg", {
-				width: size,
-				height: size,
-				viewBox: "0 0 24 24",
-				className,
-				"aria-hidden": "true",
-				children: [
-					(0, react_jsx_runtime.jsx)("path", {
-						d: "M12 2.8 19.97 7.6v8.8L12 21.2 4.03 16.4V7.6Z",
-						stroke: NEXUS_PALETTE.accent,
-						strokeWidth: "1.7",
-						strokeLinejoin: "round",
-						fill: "none"
-					}),
-					(0, react_jsx_runtime.jsx)("path", {
-						d: "M12 12V2.8M12 12l7.97 4.4M12 12 4.03 16.4",
-						stroke: NEXUS_PALETTE.accent,
-						strokeWidth: "1.4",
-						strokeLinecap: "round",
-						opacity: "0.5"
-					}),
-					(0, react_jsx_runtime.jsx)("circle", {
-						cx: "12",
-						cy: "12",
-						r: "2.4",
-						fill: NEXUS_PALETTE.textPrimary
-					})
-				]
+			return (0, react_jsx_runtime.jsx)("img", {
+				className: className ? "nexus-brand-mark " + className : "nexus-brand-mark",
+				src: "/assets/nexus-mark.png",
+				alt: "",
+				"aria-hidden": "true"
 			});
 		}
 		/**

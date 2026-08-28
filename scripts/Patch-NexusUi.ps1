@@ -10,6 +10,9 @@ $ErrorActionPreference = 'Stop'
 # Nexus UI customization installer. Runs AFTER npm ci (and after the Control
 # Room compatibility patch) and recreates the branded Nexus interface:
 #   1. installs the @nexus/ui-brand package into the profile module fallback
+#   1b. installs the @nexus/controller package (live Controller panel: host
+#       read-only status route + client panel) into the profile module fallback
+#   1c. ensures the @nexus/controller composition row exists in data/cordis.patch.yml
 #   2. patches the built web frontend dist (title / favicon / manifest)
 #   3. patches the installed client bundles that own runtime brand copy
 # The brand copy text lives in ui\nexus-ui\patch-copy.json (UTF-8); this
@@ -103,6 +106,56 @@ if (-not (Test-Path -LiteralPath (Join-Path $nexusTarget 'package.json'))) {
     throw "Failed to install @nexus/ui-brand into $profileModules"
 }
 
+# --- 1b. install @nexus/controller into the profile module fallback ----------
+# The live Controller panel (host read-only status route + client panel).
+# Same deterministic fresh-copy semantics as the brand package.
+$controllerSource = Join-Path $SourceRoot 'ui\nexus-controller'
+$controllerTarget = Join-Path $profileModules '@nexus\controller'
+if (Test-Path -LiteralPath $controllerTarget) {
+    Remove-Item -LiteralPath $controllerTarget -Recurse -Force
+}
+Copy-Item -LiteralPath $controllerSource -Destination $controllerTarget -Recurse -Force
+if (-not (Test-Path -LiteralPath (Join-Path $controllerTarget 'package.json'))) {
+    throw "Failed to install @nexus/controller into $profileModules"
+}
+foreach ($controllerFile in @('lib\index.js', 'lib\client.js', 'lib\status.cjs')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $controllerTarget $controllerFile))) {
+        throw "Failed to install @nexus/controller $controllerFile into $profileModules"
+    }
+}
+
+# --- 1c. ensure the @nexus/controller composition row ------------------------
+# The home patch (config/home.cordis.patch.yml -> data/cordis.patch.yml) carries
+# the row; Setup.ps1 copies it. When the patch script runs standalone on an
+# install whose data copy predates the row, insert it idempotently (fail-closed
+# when the shape is ambiguous).
+$cordisPatchPath = Join-Path $layout.Data 'cordis.patch.yml'
+if (Test-Path -LiteralPath $cordisPatchPath) {
+    $cordisText = Get-Content -Raw -Encoding UTF8 -LiteralPath $cordisPatchPath
+    if (-not $cordisText.Contains("'@nexus/controller'")) {
+        if (-not $cordisText.Contains("    - id: nexus-ui-brand")) {
+            throw "cordis.patch.yml structure changed; cannot insert the @nexus/controller row. Refusing an unsafe patch."
+        }
+        $crlf = [string][char]13 + [string][char]10
+        $lf = [string][char]10
+        $nl = if ($cordisText.Contains($crlf)) { $crlf } else { $lf }
+        $row = $nl + '    - id: nexus-controller' + $nl + "      name: '@nexus/controller'" + $nl
+        $cordisText = $cordisText.Replace('    - id: nexus-ui-brand', '    - id: nexus-ui-brand' + $row)
+        Write-AihUtf8NoBom -Path $cordisPatchPath -Content $cordisText
+    }
+    # The controller row must stay ENABLED: the previous composition disabled it
+    # (its invalid details-seat registration broke the client boot). Strip any
+    # `disabled: true` line that belongs to the nexus-controller row — the live
+    # loader must never see it again. Idempotent, CRLF/LF tolerant, and scoped to
+    # the controller row only (other rows keep their own flags).
+    $controllerRowPattern = '(?m)^(    - id: nexus-controller\r?\n      name: ''@nexus/controller''\r?\n)(      disabled: true\r?\n)?'
+    $cordisText = [regex]::Replace($cordisText, $controllerRowPattern, '$1')
+    if ($cordisText.Contains("disabled: true") -and $cordisText -match '(?m)^    - id: nexus-controller\r?\n      name: ''@nexus/controller''\r?\n      disabled: true') {
+        throw 'cordis.patch.yml nexus-controller row still disabled after strip; refusing an unsafe patch.'
+    }
+    Write-AihUtf8NoBom -Path $cordisPatchPath -Content $cordisText
+}
+
 # --- 2. web frontend dist patches --------------------------------------------
 $distDir = Join-Path $frontendDir 'dist'
 
@@ -133,6 +186,15 @@ $manifest.name = 'Nexus'
 $manifest.short_name = 'Nexus'
 Write-AihUtf8NoBom -Path $manifestPath -Content ($manifest | ConvertTo-Json -Depth 10)
 
+# 2d. brand assets - official Nexus logo + icon mark for the client plugin.
+$distAssets = Join-Path $distDir 'assets'
+New-Item -ItemType Directory -Force -Path $distAssets | Out-Null
+foreach ($assetName in @('nexus-logo.png', 'nexus-mark.png')) {
+    $assetSource = Join-Path $nexusSource ("assets\" + $assetName)
+    if (-not (Test-Path -LiteralPath $assetSource)) { throw "Nexus brand asset missing at $assetSource" }
+    Copy-Item -LiteralPath $assetSource -Destination (Join-Path $distAssets $assetName) -Force
+}
+
 # --- 3. runtime brand copy in the installed client bundles -------------------
 # 3a. document title owner (dsh-client-ui-renderer).
 $rendererPath = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-renderer\lib\client.js'
@@ -141,6 +203,29 @@ $rendererText = Get-Content -Raw -Encoding UTF8 -LiteralPath $rendererPath
 $rendererPair = Update-AihCopyPair -Text $rendererText -From $copy.rendererProductTitle.from -To $copy.rendererProductTitle.to -What 'renderer document title' -Path $rendererPath
 if ($rendererPair[1]) { Write-AihUtf8NoBom -Path $rendererPath -Content $rendererPair[0] }
 
+# 3a2. app-shell layout - expanded sidebar default width (collapsed rail unchanged).
+$layoutPath = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-layout\lib\client.js'
+if (-not (Test-Path -LiteralPath $layoutPath)) { throw "layout client bundle missing at $layoutPath" }
+$layoutText = Get-Content -Raw -Encoding UTF8 -LiteralPath $layoutPath
+$layoutChanged = $false
+foreach ($pair in @(
+    @('sidebar: 280,', 'sidebar: 288,', 'sidebar contract default'),
+    @('d.sidebar === 0 ? 280 : 0', 'd.sidebar === 0 ? 288 : 0', 'sidebar reopen width')
+)) {
+    $layoutResult = Update-AihCopyPair -Text $layoutText -From $pair[0] -To $pair[1] -What $pair[2] -Path $layoutPath
+    $layoutText = $layoutResult[0]
+    if ($layoutResult[1]) { $layoutChanged = $true }
+}
+if ($layoutChanged) { Write-AihUtf8NoBom -Path $layoutPath -Content $layoutText }
+
+# 3a3. model-selection - hide the reasoning-effort badge when the model name
+# already ends with the same token (e.g. "DeepSeek V4 Flash MAX" + effort "Max").
+$modelSelPath = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-model-selection\lib\client.js'
+if (-not (Test-Path -LiteralPath $modelSelPath)) { throw "model-selection client bundle missing at $modelSelPath" }
+$modelSelText = Get-Content -Raw -Encoding UTF8 -LiteralPath $modelSelPath
+$modelSelPair = Update-AihCopyPair -Text $modelSelText -From 'effortLabel !== void 0 && (0, react_jsx_runtime.jsx)("span", {' -To 'effortLabel !== void 0 && !modelLabel.toUpperCase().endsWith(effortLabel.toUpperCase()) && (0, react_jsx_runtime.jsx)("span", {' -What 'model trigger effort dedupe' -Path $modelSelPath
+if ($modelSelPair[1]) { Write-AihUtf8NoBom -Path $modelSelPath -Content $modelSelPair[0] }
+
 # 3b. conversation hero headline (dsh-client-ui-conversation dictionaries).
 $conversationPath = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-conversation\lib\client.js'
 if (-not (Test-Path -LiteralPath $conversationPath)) { throw "conversation client bundle missing at $conversationPath" }
@@ -148,6 +233,18 @@ $conversationText = Get-Content -Raw -Encoding UTF8 -LiteralPath $conversationPa
 $conversationChanged = $false
 foreach ($pair in $copy.heroHeadline) {
     $result = Update-AihCopyPair -Text $conversationText -From $pair.from -To $pair.to -What 'hero headline' -Path $conversationPath
+    $conversationText = $result[0]
+    if ($result[1]) { $conversationChanged = $true }
+}
+if ($conversationChanged) { Write-AihUtf8NoBom -Path $conversationPath -Content $conversationText }
+
+# 3b2. phase 1.5 - primary action violet (send button) and hero glow tint.
+foreach ($pair in @(
+    @('background:var(--dsw-alias-button-info-fill);color:#fff', 'background:var(--dsw-alias-button-primary-fill);color:#fff', 'composer send button fill'),
+    @('var(--dsw-alias-button-info-hover)', 'var(--dsw-alias-button-primary-hover)', 'composer send button hover'),
+    @('#6187D8', '#7C5CFF', 'hero glow tint')
+)) {
+    $result = Update-AihCopyPair -Text $conversationText -From $pair[0] -To $pair[1] -What $pair[2] -Path $conversationPath
     $conversationText = $result[0]
     if ($result[1]) { $conversationChanged = $true }
 }
