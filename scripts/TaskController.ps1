@@ -33,7 +33,7 @@ function Get-AihLedgerMutexName {
 function Read-AihTaskLedger {
     param([Parameter(Mandatory = $true)][string]$Workspace)
     $layout = Initialize-AihTaskLedger $Workspace
-    try { $document = Get-Content -Raw -LiteralPath $layout.Tasks | ConvertFrom-Json }
+    try { $document = Get-Content -Raw -Encoding UTF8 -LiteralPath $layout.Tasks | ConvertFrom-Json }
     catch { throw "Task ledger is invalid: $($layout.Tasks)" }
     if ([int]$document.schemaVersion -ne 1) { throw 'Task ledger schemaVersion must be 1.' }
     return $document
@@ -167,7 +167,7 @@ function Test-AihTaskCompletion {
     $reasons = [Collections.Generic.List[string]]::new()
     if (-not (Test-Path -LiteralPath $evidencePath)) { $reasons.Add('Required evidence.json is missing.') }
     else {
-        $evidence = Get-Content -Raw -LiteralPath $evidencePath | ConvertFrom-Json
+        $evidence = Get-Content -Raw -Encoding UTF8 -LiteralPath $evidencePath | ConvertFrom-Json
         foreach ($criterion in @($task.acceptanceCriteria)) {
             if (-not @($evidence.acceptanceCriteria | Where-Object { $_.criterion -eq $criterion -and $_.status -eq 'met' -and -not [string]::IsNullOrWhiteSpace([string]$_.evidence) }).Count) { $reasons.Add("Acceptance criterion is not evidenced: $criterion") }
         }

@@ -168,4 +168,49 @@ try{
  Assert-Aih ($packetOut.question -eq 'Review this function for correctness only: function divide(a,b){ return a/b }') 'Review.ps1 payload question reaches the review packet'
 }finally{if(Test-Path $payloadRoot){Remove-Item -LiteralPath $payloadRoot -Recurse -Force}}
 
+
+# ── 9. UTF-8 LEDGER BOUNDARY: read-modify-write preserves non-ASCII ──
+$utf8Root = New-Fixture utf8
+try {
+    $utf8Desc = '# TASK ' + [string][char]0x2014 + ' Nexus UI Phase 2 - ' + [string][char]0x4E2D + [string][char]0x6587 + ' ok'
+    $utf8Task = New-AihTask $utf8Root $utf8Desc @() @() 'normal'
+    $utf8LedgerPath = Join-Path (Join-Path $utf8Root '.ai-harness\state') 'tasks.json'
+    $utf8Text = [IO.File]::ReadAllText($utf8LedgerPath, [Text.UTF8Encoding]::new($false))
+    Assert-Aih ($utf8Text.Contains([string][char]0x2014)) 'ledger file stores the real em dash as UTF-8'
+    Assert-Aih (-not $utf8Text.Contains([string][char]0xFFFD)) 'ledger file carries no replacement characters'
+    # a read-modify-write cycle must not corrupt non-ASCII (regression for the
+    # ANSI Get-Content default that mangled the live TASK-0002 description)
+    $null = Update-AihTaskRecord $utf8Root $utf8Task.taskId { param($item) $item.status = 'ready' }
+    $utf8After = [IO.File]::ReadAllText($utf8LedgerPath, [Text.UTF8Encoding]::new($false))
+    Assert-Aih ($utf8After.Contains([string][char]0x2014) -and -not $utf8After.Contains([string][char]0x00E2 + [string][char]0x20AC)) 'read-modify-write round-trip preserves the em dash'
+    $utf8Read = Read-AihTaskLedger $utf8Root
+    $utf8Round = @($utf8Read.tasks | Where-Object taskId -eq $utf8Task.taskId)[0]
+    Assert-Aih ([string]$utf8Round.description -eq $utf8Desc) 'ledger read returns the intact description'
+} finally { if (Test-Path $utf8Root) { Remove-Item -LiteralPath $utf8Root -Recurse -Force } }
+
+# ── 10. LEDGER ENCODING REPAIR: authoritative restoration, idempotent ──
+$repairRoot = New-Fixture repair
+try {
+    # simulate the historical corruption: the description was mis-decoded as
+    # CP1252 and re-encoded UTF-8 (exactly what happened to TASK-0002)
+    $corruptDesc = '# TASK ' + [string][char]0x00E2 + [string][char]0x20AC + [string][char]0x201D + ' Nexus'
+    $cleanDesc = '# TASK ' + [string][char]0x2014 + ' Nexus'
+    $repairTask = New-AihTask $repairRoot $corruptDesc @() @() 'normal'
+    # authoritative clean source: a NON-escalation routing decision record
+    $decisionDir = Join-Path $repairRoot 'data\routing'
+    New-Item -ItemType Directory -Force -Path $decisionDir | Out-Null
+    @{ recordVersion = 3; timestampUtc = '2026-08-28T17:28:02.8454102Z'; taskId = $repairTask.taskId; workspace = $repairRoot; description = $cleanDesc; provider = 'flash-max-direct'; model = 'deepseek-v4-flash' } | ConvertTo-Json -Depth 5 -Compress | Add-Content -LiteralPath (Join-Path $decisionDir 'decisions.jsonl') -Encoding UTF8
+    # in-process invocation: the suite host cannot capture nested native stdout (sandbox EPERM)
+    & (Join-Path $layout.Scripts 'Repair-LedgerEncoding.ps1') -InstallRoot $repairRoot -Workspace $repairRoot | Out-Null
+    $repaired = Get-AihTask $repairRoot $repairTask.taskId
+    Assert-Aih ([string]$repaired.description -eq $cleanDesc) 'repair restores the authoritative clean description'
+    $manifestPath = Join-Path (Join-Path (Join-Path $repairRoot '.ai-harness\runs') $repairTask.taskId) 'manifest.json'
+    Assert-Aih ([IO.File]::ReadAllText($manifestPath, [Text.UTF8Encoding]::new($false)).Contains($cleanDesc)) 'repair also restores the run manifest'
+    # idempotent: a second run is a no-op
+    $repairLedgerPath = Join-Path (Join-Path $repairRoot '.ai-harness\state') 'tasks.json'
+    $before = [IO.File]::ReadAllText($repairLedgerPath, [Text.UTF8Encoding]::new($false))
+    & (Join-Path $layout.Scripts 'Repair-LedgerEncoding.ps1') -InstallRoot $repairRoot -Workspace $repairRoot | Out-Null
+    Assert-Aih ($before -eq [IO.File]::ReadAllText($repairLedgerPath, [Text.UTF8Encoding]::new($false))) 'repair is idempotent'
+} finally { if (Test-Path $repairRoot) { Remove-Item -LiteralPath $repairRoot -Recurse -Force } }
+
 Write-Host "RESULT: $passed deterministic controller-routing assertions passed."

@@ -123,6 +123,53 @@ if (Test-Path -LiteralPath $layout.Settings) {
     Add-Check 'Nexus dark default' ([regex]::IsMatch((Get-Content -Raw -Encoding UTF8 -LiteralPath $layout.Settings), '(?m)^ui-theme:\s*\r?\n\s+preference:\s*dark')) 'settings ui-theme preference'
 }
 else { Add-Check 'Nexus dark default' $false 'settings missing' }
+$frontendDist = Split-Path -Parent $distIndex
+$nexusAssets = Join-Path $frontendDist 'assets'
+if (Test-Path -LiteralPath (Join-Path $nexusAssets 'nexus-logo.png')) {
+    Add-Check 'Nexus brand assets' ((Test-Path -LiteralPath (Join-Path $nexusAssets 'nexus-logo.png')) -and (Test-Path -LiteralPath (Join-Path $nexusAssets 'nexus-mark.png'))) 'dist assets: logo lockup + icon mark'
+}
+else { Add-Check 'Nexus brand assets' $false 'dist assets missing' }
+$layoutBundle = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-layout\lib\client.js'
+if (Test-Path -LiteralPath $layoutBundle) {
+    $layoutBundleText = Get-Content -Raw -Encoding UTF8 -LiteralPath $layoutBundle
+    Add-Check 'Nexus sidebar width' ($layoutBundleText.Contains('sidebar: 288,') -and $layoutBundleText.Contains('d.sidebar === 0 ? 288 : 0')) 'expanded sidebar default 288px'
+}
+else { Add-Check 'Nexus sidebar width' $false 'layout client bundle missing' }
+$conversationBundle = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-conversation\lib\client.js'
+if (Test-Path -LiteralPath $conversationBundle) {
+    $conversationText = Get-Content -Raw -Encoding UTF8 -LiteralPath $conversationBundle
+    Add-Check 'Nexus primary action' ($conversationText.Contains('background:var(--dsw-alias-button-primary-fill);color:#fff')) 'send button violet'
+    Add-Check 'Nexus hero glow' ($conversationText.Contains('#7C5CFF') -and -not $conversationText.Contains('#6187D8')) 'hero glow tinted violet'
+}
+else { Add-Check 'Nexus primary action' $false 'conversation client bundle missing' }
+$modelSelBundle = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-model-selection\lib\client.js'
+if (Test-Path -LiteralPath $modelSelBundle) {
+    Add-Check 'Nexus model chip' ((Get-Content -Raw -Encoding UTF8 -LiteralPath $modelSelBundle).Contains('!modelLabel.toUpperCase().endsWith(effortLabel.toUpperCase())')) 'reasoning badge deduped'
+}
+else { Add-Check 'Nexus model chip' $false 'model-selection client bundle missing' }
+
+# --- Nexus Controller panel --------------------------------------------------
+$controllerPackage = Join-Path $layout.Data 'profiles\node_modules\@nexus\controller\package.json'
+Add-Check 'Nexus controller package' (Test-Path -LiteralPath $controllerPackage) 'installed @nexus/controller (profile module fallback)'
+$controllerHost = Join-Path $layout.Data 'profiles\node_modules\@nexus\controller\lib\index.js'
+$controllerClient = Join-Path $layout.Data 'profiles\node_modules\@nexus\controller\lib\client.js'
+$controllerAdapter = Join-Path $layout.Data 'profiles\node_modules\@nexus\controller\lib\status.cjs'
+Add-Check 'Nexus controller files' ((Test-Path -LiteralPath $controllerHost) -and (Test-Path -LiteralPath $controllerClient) -and (Test-Path -LiteralPath $controllerAdapter)) 'host route + client panel + state adapter'
+if (Test-Path -LiteralPath $homePatch) {
+    $patchText = Get-Content -Raw -Encoding UTF8 -LiteralPath $homePatch
+    Add-Check 'Nexus controller row' ($patchText.Contains('nexus-controller') -and $patchText.Contains("'@nexus/controller'")) 'home patch row: nexus-controller'
+    # The row must be ENABLED — the invalid details-seat registration previously
+    # forced the live composition to disable it. A disabled controller row is a
+    # FAIL (the client boots without the panel otherwise).
+    $controllerRowDisabled = $patchText -match '(?m)^    - id: nexus-controller\r?\n      name: ''@nexus/controller''\r?\n      disabled: true\r?\n'
+    Add-Check 'Nexus controller enabled' (-not $controllerRowDisabled) 'nexus-controller row must not carry disabled: true'
+}
+else { Add-Check 'Nexus controller row' $false 'home cordis patch missing' }
+if (Test-Path -LiteralPath $controllerHost) {
+    $controllerHostText = Get-Content -Raw -Encoding UTF8 -LiteralPath $controllerHost
+    Add-Check 'Nexus controller route' ($controllerHostText.Contains('/nexus/controller.json')) 'read-only status route registered on the webServer registry'
+}
+else { Add-Check 'Nexus controller route' $false 'controller host bundle missing' }
 
 $results | Format-Table -AutoSize
 if (@($results | Where-Object Status -eq 'FAIL').Count -gt 0) { exit 1 }

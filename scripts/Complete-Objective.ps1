@@ -37,7 +37,7 @@ function Get-AihCompletionDiff {
     param([string]$WorkspacePath, [string]$ProvidedPath)
     if (-not [string]::IsNullOrWhiteSpace($ProvidedPath)) {
         if (-not (Test-Path -LiteralPath $ProvidedPath -PathType Leaf)) { throw "Diff evidence file is missing: $ProvidedPath" }
-        return Get-AihBoundedText (Get-Content -Raw -LiteralPath $ProvidedPath) 50000
+        return Get-AihBoundedText (Get-Content -Raw -Encoding UTF8 -LiteralPath $ProvidedPath) 50000
     }
     try {
         $status = (& git -C $WorkspacePath status --short 2>$null | Out-String).TrimEnd()
@@ -51,12 +51,12 @@ if ($History) {
     if (-not [string]::IsNullOrWhiteSpace($GateId)) {
         $recordPath = Join-Path (Join-Path $layout.CompletionData 'records') "$GateId.json"
         if (-not (Test-Path -LiteralPath $recordPath)) { throw "Completion gate record was not found: $GateId" }
-        Get-Content -Raw -LiteralPath $recordPath
+        Get-Content -Raw -Encoding UTF8 -LiteralPath $recordPath
         exit 0
     }
     $historyPath = Join-Path $layout.CompletionData 'history.jsonl'
     if (-not (Test-Path -LiteralPath $historyPath)) { @(); exit 0 }
-    Get-Content -LiteralPath $historyPath | ForEach-Object { $_ | ConvertFrom-Json } | ConvertTo-Json -Depth 10
+    Get-Content -Encoding UTF8 -LiteralPath $historyPath | ForEach-Object { $_ | ConvertFrom-Json } | ConvertTo-Json -Depth 10
     exit 0
 }
 
@@ -78,7 +78,7 @@ $deterministic = Get-AihDeterministicAssessment $verification
 $diff = Get-AihCompletionDiff $workspacePath $DiffPath
 $workerReports = if ([string]::IsNullOrWhiteSpace($WorkerReportsPath)) { 'No worker reports were supplied.' } else {
     if (-not (Test-Path -LiteralPath $WorkerReportsPath -PathType Leaf)) { throw "Worker reports file is missing: $WorkerReportsPath" }
-    Get-AihBoundedText (Get-Content -Raw -LiteralPath $WorkerReportsPath) 30000
+    Get-AihBoundedText (Get-Content -Raw -Encoding UTF8 -LiteralPath $WorkerReportsPath) 30000
 }
 $semantic = $null
 if ($deterministic.Pass -and $acceptance.Pass) {
@@ -88,7 +88,7 @@ if ($deterministic.Pass -and $acceptance.Pass) {
             $semantic = [pscustomobject]@{ status = 'FAIL'; summary = 'A bounded Codex review is required but no review result was supplied.'; concreteReasons = @('Required bounded review evidence is missing.'); missingRequirements = @('review-result.json'); boundedFixes = @(); provider = 'codex-review-service'; model = 'gpt-5.6-sol'; reasoning = 'bounded' }
         }
         else {
-            $review = Get-Content -Raw -LiteralPath $ReviewResultPath | ConvertFrom-Json
+            $review = Get-Content -Raw -Encoding UTF8 -LiteralPath $ReviewResultPath | ConvertFrom-Json
             $reviewPass = [string]$review.verdict -eq 'pass' -and -not @($review.findings | Where-Object severity -in @('blocker','high')).Count
             $semantic = [pscustomobject]@{ status = if ($reviewPass) { 'PASS' } else { 'FAIL' }; summary = 'Bounded Codex review result consumed by the deterministic controller.'; concreteReasons = @($review.findings | Where-Object severity -in @('blocker','high') | ForEach-Object problem); missingRequirements = @(); boundedFixes = @(); provider = 'codex-review-service'; model = 'gpt-5.6-sol'; reasoning = 'bounded' }
         }

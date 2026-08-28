@@ -1,12 +1,12 @@
 {
     "schemaVersion":  1,
     "taskId":  "TASK-0004",
-    "description":  "Verify only the ARTHUR Phase 2 remediation for findings F1, F2 and F3.\r\nRepository: D:\\A.R.T.H.U.R â†’ arrows â€” emdash Ã  accented ä¸­æ–‡\r\nQuotes: \"double\" and \u0027single\u0027 and backslash: C:\\path\\to\\x\r\nControl: \u001a\u0001\r\nF2 - replay after forget\r\n- remember \u001a forget again",
+    "description":  "Verify only the ARTHUR Phase 2 remediation for findings F1, F2 and F3.\r\nRepository: D:\\A.R.T.H.U.R → arrows — emdash à accented 中文\r\nQuotes: \"double\" and \u0027single\u0027 and backslash: C:\\path\\to\\x\r\nControl: \u001a\u0001\r\nF2 - replay after forget\r\n- remember \u001a forget again",
     "status":  "ready",
     "dependencies":  [
 
                      ],
-    "baseCommit":  "c1fb924dc82f602d17e1c03c661bd6d9644c6ca6",
+    "baseCommit":  "",
     "executionClass":  "codex_review",
     "executor":  "codex_review",
     "attempt":  0,
@@ -31,7 +31,7 @@
                           ],
     "codexCalls":  0,
     "completionAuthority":  "controller",
-    "createdAtUtc":  "2026-08-23T17:32:02.5735621Z",
-    "updatedAtUtc":  "2026-08-23T17:32:03.3687590Z",
+    "createdAtUtc":  "2026-08-28T20:32:06.4780268Z",
+    "updatedAtUtc":  "2026-08-28T20:32:07.3738547Z",
     "completedAtUtc":  null
 }
