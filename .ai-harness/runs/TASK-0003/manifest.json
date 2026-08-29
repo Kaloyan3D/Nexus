@@ -1,0 +1,37 @@
+{
+    "schemaVersion":  1,
+    "taskId":  "TASK-0003",
+    "description":  "We are continuing development of the Nexus repository from a previous machine/session.\n\nThe previous conversation history is not available here, so reconstruct the authoritative context from the repository itself.\n\nDo not modify anything yet.\n\nPhase 1, Phase 1.5, Phase 2 and Phase 3 are complete.\n\nBefore continuing, inspect at minimum:\n\ndocs/nexus-ui.md\nui/nexus-controller/lib/status.cjs\nui/nexus-controller/lib/detail.cjs\nui/nexus-controller/lib/index.js\nui/nexus-controller/lib/client.js\ntests/NexusControllerPanel.Tests.cjs\nscripts/TaskController.ps1\nscripts/Route.ps1\nscripts/Complete-Objective.ps1\nconfig/home.cordis.patch.yml\n\nAlso inspect the current:\n\ngit status\ngit log\ndata/routing/\n.ai-harness/state/\n\nTreat the repository, tests, task ledger and docs/nexus-ui.md as authoritative. Do not try to reconstruct implementation details from assumptions.\n\nImportant existing architecture:\n\nPhase 2 compact Controller is implemented through shell.overlay.\nNative DSH details / conversation.details.tool must remain untouched.\nCompact state endpoint is /nexus/controller.json.\nPhase 3 Task Control Room uses /nexus/control-room.json.\nCompact polling remains lightweight.\nRoot executor is distinct from review/escalation decisions.\nGUI attempt = 0 currently renders as — because GUI execution does not yet enter the controller attempt lifecycle.\nUTF-8 Windows PowerShell ledger boundaries have already been repaired and must not regress.\nPhase 3 is read-only.\n\nRead the repository and give me a concise summary of the current architecture, current Git state, and any discrepancies you find.\n\nDo not edit anything until that reconstruction is complete.",
+    "status":  "ready",
+    "dependencies":  [
+
+                     ],
+    "baseCommit":  "f1ca76dc7b6320ee9fc27eaa277f6107959332b8",
+    "executionClass":  "deepseek_normal",
+    "executor":  "deepseek_normal",
+    "attempt":  0,
+    "maxAttempts":  3,
+    "risk":  "normal",
+    "acceptanceCriteria":  [
+
+                           ],
+    "verification":  {
+                         "required":  [
+
+                                      ],
+                         "outcomes":  [
+
+                                      ]
+                     },
+    "reviewRequested":  false,
+    "executionClassOverride":  "deepseek_normal",
+    "worktree":  null,
+    "failureSignatures":  [
+
+                          ],
+    "codexCalls":  0,
+    "completionAuthority":  "controller",
+    "createdAtUtc":  "2026-08-29T16:56:52.3552833Z",
+    "updatedAtUtc":  "2026-08-29T16:56:53.8853996Z",
+    "completedAtUtc":  null
+}

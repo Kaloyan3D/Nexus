@@ -155,38 +155,78 @@ function reasoningBadgeVisible(modelName, reasoning) {
 }
 //#endregion
 
-//#region polling
-function useControllerSnapshot(sessionId) {
-	const [snapshot, setSnapshot] = react.useState(null);
-	const [failed, setFailed] = react.useState(false);
-	react.useEffect(() => {
-		let cancelled = false;
-		let timer = null;
-		let inflight = false;
-		const poll = async () => {
-			if (inflight || cancelled) return;
-			inflight = true;
-			try {
-				const response = await fetch("./nexus/controller.json?session=" + encodeURIComponent(sessionId || ""), { cache: "no-store" });
-				if (!response.ok) throw new Error("controller state http " + response.status);
-				const data = await response.json();
-				if (cancelled) return;
-				setSnapshot(data);
-				setFailed(false);
-			} catch {
-				if (!cancelled) setFailed(true);
-			} finally {
-				inflight = false;
+//#region polling (one shared 1.5s poll per session)
+/**
+ * ONE polling loop per session id, shared by every consumer (the drawer and
+ * the composer executor pill): the first subscriber starts the loop, the
+ * last one stops it. Compact polling stays lightweight — the drawer and the
+ * pill never double-fetch the endpoint.
+ */
+const snapshotPolls = new Map(); // key -> { snapshot, failed, listeners, timer, inflight, started }
+function controllerSnapshotKey(sessionId) {
+	return String(sessionId || "");
+}
+function notifySnapshotListeners(key, entry) {
+	for (const listener of [...entry.listeners]) {
+		try { listener(entry.snapshot, entry.failed); } catch { /* never break the UI */ }
+	}
+}
+function pollControllerSnapshot(key, entry) {
+	if (entry.inflight || entry.cancelled) return;
+	entry.inflight = true;
+	fetch("./nexus/controller.json?session=" + encodeURIComponent(key), { cache: "no-store" })
+		.then((response) => {
+			if (!response.ok) throw new Error("controller state http " + response.status);
+			return response.json();
+		})
+		.then((data) => {
+			if (entry.cancelled) return;
+			entry.snapshot = data;
+			entry.failed = false;
+			notifySnapshotListeners(key, entry);
+		})
+		.catch(() => {
+			if (!entry.cancelled) {
+				entry.failed = true;
+				notifySnapshotListeners(key, entry);
 			}
-		};
-		poll();
-		timer = window.setInterval(poll, POLL_MS);
+		})
+		.finally(() => {
+			entry.inflight = false;
+		});
+}
+function ensureSnapshotPolling(key) {
+	let entry = snapshotPolls.get(key);
+	if (!entry) {
+		entry = { snapshot: null, failed: false, listeners: new Set(), timer: null, inflight: false, started: false, cancelled: false };
+		snapshotPolls.set(key, entry);
+	}
+	if (!entry.started) {
+		entry.started = true;
+		pollControllerSnapshot(key, entry);
+		entry.timer = window.setInterval(() => pollControllerSnapshot(key, entry), POLL_MS);
+	}
+	return entry;
+}
+function stopSnapshotPolling(key, entry) {
+	if (entry.timer !== null) { window.clearInterval(entry.timer); entry.timer = null; }
+	entry.cancelled = true;
+	snapshotPolls.delete(key);
+}
+function useControllerSnapshot(sessionId) {
+	const key = controllerSnapshotKey(sessionId);
+	const [state, setState] = react.useState({ snapshot: null, failed: false });
+	react.useEffect(() => {
+		const entry = ensureSnapshotPolling(key);
+		const apply = () => setState({ snapshot: entry.snapshot, failed: entry.failed });
+		entry.listeners.add(apply);
+		apply();
 		return () => {
-			cancelled = true;
-			if (timer !== null) window.clearInterval(timer);
+			entry.listeners.delete(apply);
+			if (entry.listeners.size === 0) stopSnapshotPolling(key, entry);
 		};
-	}, [sessionId]);
-	return { snapshot, failed };
+	}, [key]);
+	return state && typeof state === "object" ? state : { snapshot: null, failed: false };
 }
 //#endregion
 
@@ -1018,6 +1058,97 @@ function ControllerToggle({ sessionId }) {
 }
 //#endregion
 
+//#region composer executor pill
+/**
+* Additive composer tool-row pills (conversation.input.right) that separate
+* the two model values the composer shows (TASK-0003.3):
+*
+*   RUNNING    — the EFFECTIVE task executor assigned by Nexus deterministic
+*                routing (the authoritative routing decision; read-only).
+*   PREFERRED  — the session PREFERENCE (agent-default-model written by the
+*                mode seat from the preset rootExecutor; the same value the
+*                upstream model chip displays).
+*
+* Model identity and reasoning effort are SEPARATE (TASK-0003.3a): the
+* base display model is "DeepSeek V4 Flash" (modelId deepseek-v4-flash) and
+* the effort renders as its own badge (HIGH / MAX) — the settings model
+* names no longer embed the tier. In Normal Engineering the preference is
+* DeepSeek V4 Flash · MAX while deepseek_normal routes to the High tier
+* (flash-high-direct / high): the preference is a ceiling, not a promise.
+* The pills make that explicit next to the chip; both are read-only and
+* never change the session model, the routing records, or the agent
+* isolation. PREFERRED is hidden only when it is fully redundant (no
+* effective executor → only PREFERRED shows; identical identity AND effort
+* → only RUNNING shows). Below 480px the pills collapse to their compact
+* form [RUNNING · HIGH] / [PREFERRED · MAX]; the tooltip always carries the
+* full model name.
+*/
+function executorChipContent(snapshot) {
+	if (!snapshot || snapshot.error) return null;
+	const modelName = snapshot.execution && typeof snapshot.execution.model === "string" && snapshot.execution.model ? snapshot.execution.model : null;
+	const effectiveReasoning = snapshot.execution && typeof snapshot.execution.reasoning === "string" && snapshot.execution.reasoning ? snapshot.execution.reasoning : null;
+	const preference = snapshot.preference && typeof snapshot.preference.label === "string" && snapshot.preference.label ? snapshot.preference.label : null;
+	const preferenceReasoning = snapshot.preference && typeof snapshot.preference.reasoning === "string" && snapshot.preference.reasoning ? snapshot.preference.reasoning : null;
+	const reasoning = reasoningBadgeVisible(modelName, effectiveReasoning) ? effectiveReasoning : null;
+	// PREFERRED adds information only when it differs from RUNNING (or when
+	// there is no RUNNING value at all); equal values must not create noise.
+	// Model identity and effort are separate (TASK-0003.3a): the same base
+	// model at a different effort is a real difference (PREFERRED MAX vs
+	// RUNNING HIGH) and keeps both chips; identical identity AND effort
+	// collapses to the single RUNNING chip.
+	const showPreference = preference !== null && (
+		modelName === null ||
+		preference.toUpperCase() !== modelName.toUpperCase() ||
+		String(preferenceReasoning || '').toUpperCase() !== String(effectiveReasoning || '').toUpperCase()
+	);
+	if (modelName === null && !showPreference) return null;
+	return {
+		modelName,
+		reasoning,
+		preference: showPreference ? preference : null,
+		preferenceReasoning: showPreference && reasoningBadgeVisible(preference, preferenceReasoning) ? preferenceReasoning : null,
+	};
+}
+function ExecutorPill({ content }) {
+	if (!content) return null;
+	const chips = [];
+	if (content.modelName) {
+		const effort = content.reasoning ? String(content.reasoning).toUpperCase() : null;
+		chips.push(react_jsx_runtime.jsx("span", {
+			className: "nx-executor-pill",
+			"data-nexus-executor": true,
+			title: "RUNNING — " + content.modelName + (effort ? " · " + effort : "") + " — the model actually executing this task, assigned by Nexus deterministic routing. Read-only; it never changes the session model.",
+			children: [
+				react_jsx_runtime.jsx("span", { className: "nx-executor-pill-label", children: "RUNNING" }, "label"),
+				react_jsx_runtime.jsx("span", { className: "nx-executor-pill-model", children: content.modelName }, "model"),
+				effort ? react_jsx_runtime.jsx("span", { className: "nx-executor-pill-effort", children: effort }, "effort") : null,
+			],
+		}, "running"));
+	}
+	if (content.preference) {
+		const effort = content.preferenceReasoning ? String(content.preferenceReasoning).toUpperCase() : null;
+		const detail = "Preferred model: " + content.preference + (effort ? " · Maximum effort: " + effort : "") + ". Nexus may route individual tasks below this ceiling according to the active engineering policy.";
+		chips.push(react_jsx_runtime.jsx("span", {
+			className: "nx-executor-pill nx-executor-pill-pref",
+			"data-nexus-preferred": true,
+			title: detail,
+			children: [
+				react_jsx_runtime.jsx("span", { className: "nx-executor-pill-label", children: "PREFERRED" }, "label"),
+				react_jsx_runtime.jsx("span", { className: "nx-executor-pill-model", children: content.preference }, "model"),
+				effort ? react_jsx_runtime.jsx("span", { className: "nx-executor-pill-effort", children: effort }, "effort") : null,
+			],
+		}, "preferred"));
+	}
+	if (chips.length === 0) return null;
+	return react_jsx_runtime.jsx("span", { className: "nx-executor-pills", children: chips });
+}
+function ExecutorChip({ session }) {
+	const sessionId = session && typeof session.sessionId === "string" ? session.sessionId : null;
+	const { snapshot } = useControllerSnapshot(sessionId);
+	return react_jsx_runtime.jsx(ExecutorPill, { content: executorChipContent(snapshot) });
+}
+//#endregion
+
 //#region styles
 /**
 * Panel + drawer styles, scoped to the nx-* classes and the
@@ -1116,6 +1247,14 @@ const PANEL_CSS = [
 	".nx-file-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--ds-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);font-size:11px;flex:1;min-width:0}",
 	".nx-file-diff{font-family:var(--ds-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);font-size:10.5px;flex:none}",
 	".nx-muted{color:var(--dsw-alias-label-tertiary)}",
+	".nx-executor-pill{display:inline-flex;align-items:center;gap:6px;height:28px;max-width:min(260px,40vw);padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-elevated);white-space:nowrap;overflow:hidden;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:26px}",
+	".nx-executor-pill-label{font-size:9px;font-weight:700;letter-spacing:.08em;color:var(--dsw-alias-label-tertiary);flex:none}",
+	".nx-executor-pill-model{font-weight:600;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis}",
+	".nx-executor-pill-effort{font-size:10px;font-weight:600;color:var(--dsw-alias-label-tertiary);flex:none}",
+	".nx-executor-pills{display:inline-flex;align-items:center;gap:6px;max-width:100%;min-width:0}",
+	".nx-executor-pill-pref{background:transparent;border-color:var(--dsw-alias-border-l1)}",
+	".nx-executor-pill-pref .nx-executor-pill-label{color:var(--dsw-alias-label-tertiary)}",
+	"@media (max-width: 480px){.nx-executor-pill-model{display:none}}",
 ].join("");
 //#endregion
 
@@ -1152,14 +1291,32 @@ function apply(ctx) {
 		order: 90,
 		label: "Controller",
 	}, ControllerToggle));
+	// Additive composer tool-row pills (right of the upstream model chip):
+	// RUNNING names the EFFECTIVE routed executor; PREFERRED labels the
+	// session preference whenever it differs (or no executor is routed), so
+	// the preference chip is never read as the active model. The seat is
+	// additive-list and unoccupied upstream; both pills are read-only display.
+	ctx.slots.inject("conversation.input.right", () => ctx.slots.register({
+		name: "conversation.input.right",
+		id: "nexus-controller",
+		order: 90,
+		label: "Task executor",
+	}, ExecutorChip));
 }
 //#endregion
 exports.apply = apply;
 exports.inject = inject;
+// Testability face: the snapshot hook itself, so deterministic suites can
+// assert it never returns undefined (TASK-0003.1b regression — the shared
+// poll's bare listener() call once collapsed the hook return to undefined).
+exports.useControllerSnapshot = useControllerSnapshot;
 exports.resolveDisplayState = resolveDisplayState;
 exports.ControllerBody = ControllerBody;
 exports.ControlRoom = ControlRoom;
 exports.ROOM_TABS = ROOM_TABS;
+exports.executorChipContent = executorChipContent;
+exports.ExecutorPill = ExecutorPill;
+exports.ExecutorChip = ExecutorChip;
 return module.exports;
 }
 });
