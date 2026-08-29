@@ -62,6 +62,26 @@ function readJsonSafeText(filePath, readFile) {
   }
 }
 
+/**
+ * Normalize a workspace path for IDENTITY COMPARISON ONLY — never for
+ * display and never for filesystem access (TASK-0003.2 isolation). The
+ * normalization is deterministic and IO-free:
+ *   - forward slashes become backslashes and redundant separators collapse
+ *   - trailing separators are trimmed (a drive root like `C:\` is kept)
+ *   - comparison is case-insensitive (Windows path semantics)
+ * It deliberately does NOT resolve `..`/`.` segments, does not touch the
+ * filesystem, and never treats prefix-related paths as equal:
+ * `C:\Repo` != `C:\Repo2`, `C:\AI-Harness` != `C:\AI-Harness\tests`.
+ */
+function normalizeWorkspacePath(workspace) {
+  if (typeof workspace !== 'string' || workspace === '') return ''
+  let normalized = workspace.replace(/[\\/]+/g, '\\')
+  while (normalized.length > 3 && normalized.endsWith('\\')) {
+    normalized = normalized.slice(0, -1)
+  }
+  return normalized.toLowerCase()
+}
+
 /** The routing-state file name mirroring Routing.ps1 Get-AihRoutingStatePath. */
 function routingStateFileName(workspace, preset, taskId) {
   const normalized = path.resolve(String(workspace || '')).toLowerCase()
@@ -99,19 +119,30 @@ function jsonLinesOf(text) {
   return records
 }
 
-/** Last routing decision record for a task (decisions.jsonl). */
-function lastDecisionOf(records, taskId) {
+/**
+ * Last routing decision record for a task inside ONE workspace namespace
+ * (decisions.jsonl). taskId is NOT globally unique (TASK-0003 lives in
+ * several workspaces), so a record joins ONLY when BOTH identities match:
+ *   normalizeWorkspacePath(record.workspace) === normalizeWorkspacePath(workspace)
+ *   AND record.taskId === taskId
+ * A missing workspace on either side never matches (fail-closed) — the
+ * old taskId-only join made correctness depend on record ordering.
+ * The Executor must be the model that OWNS primary execution. Review and
+ * escalation decisions carry "escalatedFrom" (e.g. a later Codex/Sol
+ * review) and must NOT replace the primary route merely because their
+ * record is newer. Among primary decisions the newest wins; if only
+ * escalations exist (edge), the last record is used as a fail-closed
+ * best effort.
+ */
+function lastDecisionOf(records, taskId, workspace) {
   if (!Array.isArray(records)) return null
-  // The Executor must be the model that OWNS primary execution. Review and
-  // escalation decisions carry "escalatedFrom" (e.g. a later Codex/Sol
-  // review) and must NOT replace the primary route merely because their
-  // record is newer. Among primary decisions the newest wins; if only
-  // escalations exist (edge), the last record is used as a fail-closed
-  // best effort.
+  const normalizedWorkspace = normalizeWorkspacePath(workspace)
+  if (normalizedWorkspace === '') return null
   let primary = null
   let fallback = null
   for (const record of records) {
     if (!record || record.taskId !== taskId) continue
+    if (normalizeWorkspacePath(record.workspace) !== normalizedWorkspace) continue
     fallback = record
     const escalatedFrom = record.escalatedFrom
     if (escalatedFrom === undefined || escalatedFrom === null || escalatedFrom === '') {
@@ -228,6 +259,63 @@ function modelNameOf(provider, modelId, modelNames) {
     if (typeof direct === 'string' && direct !== '') return direct
   }
   return prettyModelId(modelId)
+}
+
+/**
+ * Parse the `agent-default-model` block of data/settings.yaml — the
+ * session PREFERENCE written by the mode seat (ControlRoom.ps1) from the
+ * preset's rootExecutor. Fail-closed: any malformed/missing block yields
+ * null; the preference is display metadata only and never changes routing.
+ * The block is a flat 3-key YAML mapping:
+ *
+ *   agent-default-model:
+ *     provider: flash-max-direct
+ *     model: deepseek-v4-flash
+ *     reasoningEffort: max
+ */
+function parseDefaultModel(settingsText) {
+  if (typeof settingsText !== 'string' || settingsText === '') return null
+  const lines = settingsText.split(/\r?\n/)
+  let inBlock = false
+  let result = null
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\s+$/, '')
+    const indent = line.match(/^\s*/)[0].length
+    if (!inBlock) {
+      if (/^\s*agent-default-model:\s*$/.test(line)) { inBlock = true; result = {} }
+      continue
+    }
+    if (indent === 0 && line !== '') break
+    const match = /^\s*([A-Za-z][A-Za-z0-9]*):\s*(.*)$/.exec(line)
+    if (!match) continue
+    const key = match[1]
+    const value = match[2].replace(/^['"]|['"]$/g, '').trim()
+    if (key === 'provider') result.provider = value
+    else if (key === 'model') result.model = value
+    else if (key === 'reasoningEffort') result.reasoningEffort = value
+  }
+  if (!result || typeof result.provider !== 'string' || result.provider === '' ||
+      typeof result.model !== 'string' || result.model === '') return null
+  return result
+}
+
+/**
+ * Normalize the parsed default-model selection into the snapshot's
+ * preference block (label via the settings display-name map, same source
+ * the composer model chip renders). Null when the selection is unknown.
+ */
+function normalizePreference(defaultModel, modelNames) {
+  if (!defaultModel || typeof defaultModel !== 'object') return null
+  const provider = String(defaultModel.provider || '')
+  const modelId = String(defaultModel.model || '')
+  if (provider === '' || modelId === '') return null
+  const reasoning = defaultModel.reasoningEffort ? String(defaultModel.reasoningEffort) : null
+  return {
+    provider,
+    modelId,
+    reasoning,
+    label: modelNameOf(provider, modelId, modelNames),
+  }
 }
 
 /** Build the normalized executor block. */
@@ -369,6 +457,7 @@ async function buildControllerSnapshot(options) {
   const {
     dataRoot,
     sessionId,
+    settingsPath,
     statePath,
     readFile = defaultReadFile,
     modelNames = {},
@@ -379,6 +468,13 @@ async function buildControllerSnapshot(options) {
   const bindingsDocument = readJson(path.join(dataRoot, 'routing', 'session-bindings.json'), readFile)
   const bindings = bindingsOf(bindingsDocument)
   const binding = sessionId ? (bindings[sessionId] || null) : null
+  // Session PREFERENCE (agent-default-model) is binding-independent: it is
+  // display metadata the composer chip already renders; the snapshot carries
+  // it so the pill can label the preference truthfully even when no task is
+  // bound. Never consulted for routing.
+  const defaultModel = settingsPath
+    ? parseDefaultModel(readJsonSafeText(settingsPath, readFile))
+    : null
 
   let task = null
   let routingState = null
@@ -400,7 +496,7 @@ async function buildControllerSnapshot(options) {
         const stateFileName = routingStateFileName(workspace, preset, taskId)
         routingState = readJson(path.join(dataRoot, 'routing', 'states', stateFileName), readFile)
         const decisionsText = readJsonSafeText(path.join(dataRoot, 'routing', 'decisions.jsonl'), readFile)
-        decision = lastDecisionOf(jsonLinesOf(decisionsText), taskId)
+        decision = lastDecisionOf(jsonLinesOf(decisionsText), taskId, workspace)
       }
       if (gitSummary && workspace) {
         try { git = await gitSummary(workspace) } catch { git = null }
@@ -425,6 +521,7 @@ async function buildControllerSnapshot(options) {
       boundAtUtc: binding.boundAtUtc ? String(binding.boundAtUtc) : null,
     } : null,
     task: taskRecord,
+    preference: normalizePreference(defaultModel, modelNames),
     execution: normalizeExecution(binding, taskRecord, routingState, decision, modelNames),
     review: binding ? {
       codexCalls: taskRecord ? taskRecord.codexCalls : 0,
@@ -448,6 +545,9 @@ async function buildControllerSnapshot(options) {
 
 module.exports = {
   DISPLAY_STATES,
+  normalizeWorkspacePath,
+  parseDefaultModel,
+  normalizePreference,
   defaultReadFile,
   readJson,
   routingStateFileName,

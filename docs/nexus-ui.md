@@ -264,7 +264,7 @@ Follow-up polish pass. All behavior preserved; no controller/runtime changes.
 | Composer surface | #111116 | **#17171D**, border #27272F, violet focus ring |
 | Send button | cyan #49C6E5 | **violet #7C5CFF** (34×34) |
 | Hero glow | #6187D8 | **#7C5CFF** |
-| Model chip | "DeepSeek V4 Flash MAX Max" | **"DeepSeek V4 Flash MAX"** (effort deduped) |
+| Model chip | "DeepSeek V4 Flash MAX Max" | **"DeepSeek V4 Flash · Max"** (TASK-0003.3a: model names no longer embed the tier; the effort renders as its own label) |
 
 Behavioral checks (all passed in the live session): workspace selection via
 picker, mode seat menu (Standard/PTC/Minimal/Creator/Normal Engineering/
@@ -355,6 +355,114 @@ above); the controller never registers into either.
 
 Every value degrades fail-closed: missing/corrupt files become `null` and
 the UI renders "—" or omits the row. No fake telemetry anywhere.
+
+### Workspace/task identity isolation (TASK-0003.2)
+
+`taskId` is NOT globally unique: the same id (e.g. `TASK-0003`) exists in
+many workspaces, and `data/routing/decisions.jsonl` is one shared ledger
+across all of them. Every Control Room / compact Controller join therefore
+carries the authoritative namespace chain
+
+    session → binding (data/routing/session-bindings.json)
+            → normalized workspace + taskId
+
+and matches a routing decision ONLY when BOTH
+`normalizeWorkspacePath(record.workspace) === normalizeWorkspacePath(binding.workspace)`
+and `record.taskId === binding.taskId` hold. Records without a workspace
+never match (fail-closed). `normalizeWorkspacePath` is deterministic and
+IO-free: forward slashes → backslashes, redundant separators collapse,
+trailing separators trimmed (drive root kept), case-insensitive — but it
+never resolves `..` and never equates prefix paths (`C:\Repo` ≠
+`C:\Repo2`, `C:\AI-Harness` ≠ `C:\AI-Harness\tests`). The raw
+original path is kept for display (`routingHistory[].workspace`).
+
+Task lifecycle, attempts, verification, review packet/result and run
+artifacts resolve under `<binding.workspace>/.ai-harness` from the
+AUTHORITATIVE binding only — never from browser-provided paths, never by
+matching a same-`taskId` artifact from another workspace. A corrupt or
+missing artifact degrades only its own subsystem; historical records from
+other workspaces remain on disk but never surface here.
+
+## Model preference vs routed executor (composer chip + RUNNING/PREFERRED pills)
+
+### Canonical model identity vs reasoning tier (TASK-0003.3a)
+
+Model identity and execution effort are SEPARATE concepts:
+
+| Concept | Canonical value |
+| --- | --- |
+| modelId | `deepseek-v4-flash` (unchanged) |
+| display model | **DeepSeek V4 Flash** (unchanged modelId, tier-free label) |
+| effort | `high` | `max` (unchanged ids) |
+| provider/profile | `flash-high-direct` | `flash-max-direct` (unchanged) |
+
+The tier was previously embedded in the settings model `name` ("DeepSeek
+V4 Flash MAX" / "DeepSeek V4 Flash High" in `config/settings.yaml`, copied
+to `data/settings.yaml` by `scripts/Setup.ps1`) — the source of the
+"DeepSeek V4 Flash MAX Max" duplication. Those names are now the tier-free
+base label ("DeepSeek V4 Flash", "DeepSeek V4 Pro"); provider ids, model
+ids, reasoningEffort ids and `config/routing-policy.json` are untouched.
+The upstream chip therefore renders **DeepSeek V4 Flash · Max** (model ·
+effort), the RUNNING/PREFERRED pills render the effort as their own badge
+(HIGH / MAX), and the endpoint exposes `model: "DeepSeek V4 Flash"` +
+`reasoning: "high"` + `provider: "flash-high-direct"` — the schema is
+unchanged, only the label value is now tier-free. Provider `displayName`
+keeps the tier because it names the API PROFILE (flash-max-direct vs
+flash-high-direct are distinct providers; stripping the tier would make the
+two selector groups indistinguishable). Below 480px the pills collapse to
+`[RUNNING · HIGH]` / `[PREFERRED · MAX]`; the tooltip always carries the
+full model name.
+
+### Preference vs routed executor
+
+The composer's model chip (upstream `conversation.input.model`) shows the
+SESSION's model preference, never a routing guarantee: the
+`agent-default-model` entry in `data/settings.yaml`, written by the mode
+seat (`scripts/ControlRoom.ps1`) from the preset's `rootExecutor`
+(`config/routing-policy.json`). For Normal Engineering that is **DeepSeek
+V4 Flash · Max** (`flash-max-direct / deepseek-v4-flash / max`), which the
+per-preset isolation plugin (`config/Engineering-Isolation.cjs`) also
+enforces for every non-worker agent request.
+
+Nexus deterministic routing assigns the task its execution class
+independently and records the tier in `data/routing/decisions.jsonl`: the
+`executionClasses` map gives `deepseek_normal` → **flash-high-direct /
+deepseek-v4-flash / high** (the same tier the `deepseek_normal` worker
+tool spawns with). The panel's Executor row and the Control Room's Root
+Executor show this routed decision, so for a bound Normal Engineering
+session the effective task executor (High) and the session preference chip
+(Max) legitimately differ; nothing synchronizes them, by design.
+
+The controller registers additive composer pills —
+`conversation.input.right`, right of the model chip — that make the two
+values explicit without merging them (TASK-0003.3):
+
+- **RUNNING** — the effective routed executor (the authoritative routing
+  decision), shown whenever the snapshot knows the routed model.
+- **PREFERRED** — the session preference (the same `agent-default-model`
+  value the model chip displays), shown only when it adds information:
+  when no executor is routed, or when the effort differs from RUNNING.
+  Identical identity AND effort render a single RUNNING pill (no redundant
+  noise).
+
+Both pills are read-only spans (no click target), share the drawer's single
+1.5 s poll, and never change the session model, the routing records, or the
+agent isolation. The PREFERRED pill's tooltip carries the ceiling
+explanation: *"Nexus may route individual tasks below this ceiling according
+to the active engineering policy."* Transport failures and envelope errors
+render no pills.
+
+Mode semantics (from `config/routing-policy.json`):
+
+- **Normal Engineering** (`aih-engineering`) — preference Max; routed
+  `deepseek_normal` executes at the High tier, so RUNNING HIGH and
+  PREFERRED MAX legitimately coexist on the same base model (ceiling vs
+  effective).
+- **DeepSeek Only** (`aih-deepseek`) — same Max root executor; no Codex /
+  OpenAI providers at all (`allowOpenAI: false`, `allowCodexSubagent:
+  false`, `failurePolicy: fail-closed`); `deepseek_normal` still routes
+  to the High tier. The ceiling wording stays truthful: only DeepSeek
+  models exist to prefer, and tier-3 work still runs below the Max ceiling.
 
 ## Display-state mapping (smallest truthful set)
 
@@ -570,11 +678,11 @@ second driver run is a byte-exact no-op).
 - `attempt` is `0` while GUI sessions run (the controller never calls
   begin-attempt for GUI sessions); the panel renders `—` for 0 — never
   `0 / max` — and positive attempts render unchanged.
-- The EXECUTOR for the live session is the primary routing decision:
-  `flash-high-direct / deepseek-v4-flash / high`; the newer codex_review
-  escalation (sol-local / gpt-5.6-sol) is shown under Review, never as the
-  Executor. Display names come from settings.yaml, prettified ids are the
-  fallback.
+- The RUNNING executor for the live session is the primary routing
+  decision: `flash-high-direct / deepseek-v4-flash / high`; the newer
+  codex_review escalation (sol-local / gpt-5.6-sol) is shown under Review,
+  never as the Executor. Display names come from settings.yaml, prettified
+  ids are the fallback.
 - Control Room (Phase 3) fields Nexus does not record, shown only when a
   real record exists: verification durations/timestamps, review timestamps,
   per-attempt completion events (a "passed" attempt is derived: started

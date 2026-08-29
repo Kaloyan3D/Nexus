@@ -34,7 +34,7 @@ llm-pi-ai:
         thinkingFormat: deepseek
       models:
         - id: deepseek-v4-pro
-          name: DeepSeek V4 Pro MAX
+          name: DeepSeek V4 Pro
           reasoningEfforts:
             off:
             high: high
@@ -49,7 +49,7 @@ llm-pi-ai:
         thinkingFormat: deepseek
       models:
         - id: deepseek-v4-flash
-          name: DeepSeek V4 Flash MAX
+          name: DeepSeek V4 Flash
           reasoningEfforts:
             off:
             high: high
@@ -64,7 +64,7 @@ llm-pi-ai:
         thinkingFormat: deepseek
       models:
         - id: deepseek-v4-flash
-          name: DeepSeek V4 Flash High
+          name: DeepSeek V4 Flash
           reasoningEfforts:
             off:
             high: high

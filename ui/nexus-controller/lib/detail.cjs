@@ -5,7 +5,10 @@
 // verification ran / why did a failure happen" from REAL Nexus records only:
 //
 //   data/routing/session-bindings.json     session -> task binding
-//   data/routing/decisions.jsonl           routing decisions (routed events)
+//   data/routing/decisions.jsonl           routing decisions (routed events,
+//                                          joined ONLY on normalized
+//                                          workspace + taskId — taskId alone
+//                                          is not globally unique)
 //   data/routing/states/<sha256>.json      routing state (same-failure count)
 //   <workspace>/.ai-harness/state/tasks.json            task ledger
 //   <workspace>/.ai-harness/state/decisions.jsonl       task lifecycle events
@@ -297,8 +300,13 @@ async function buildDetailSnapshot({
   }
 
   const decisions = status.jsonLinesOf(safeReadText(path.join(dataRoot, 'routing', 'decisions.jsonl'), readFile))
-  const routed = decisions.filter((record) => record && record.taskId === taskId)
-  const primary = status.lastDecisionOf(decisions, taskId)
+  // Identity isolation (TASK-0003.2): taskId alone is not unique across
+  // workspaces, so a decision joins this session ONLY when BOTH the
+  // normalized workspace AND the taskId match the authoritative binding.
+  // Records without a workspace never match (fail-closed).
+  const workspaceKey = status.normalizeWorkspacePath(workspace)
+  const routed = decisions.filter((record) => record && record.taskId === taskId && status.normalizeWorkspacePath(record.workspace) === workspaceKey)
+  const primary = status.lastDecisionOf(decisions, taskId, workspace)
   const execution = status.normalizeExecution(binding, task, routingState, primary, modelNames)
 
   // routing history: every real decision for the task, oldest first
@@ -306,6 +314,7 @@ async function buildDetailSnapshot({
     .sort((a, b) => String(a.timestampUtc || '').localeCompare(String(b.timestampUtc || '')))
     .map((record) => ({
       timestampUtc: record.timestampUtc ? String(record.timestampUtc) : null,
+      workspace: record.workspace ? String(record.workspace) : null,
       kind: routingKindOf(record),
       executionClass: record.executionClass ? String(record.executionClass) : null,
       selectedExecutionClass: record.selectedExecutionClass ? String(record.selectedExecutionClass) : null,

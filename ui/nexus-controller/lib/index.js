@@ -16,7 +16,7 @@
 // ever activates once the webServer service is available — and if the
 // service arrives AFTER this plugin starts (composition ordering), the
 // injection resolves then, instead of being lost to a one-time lookup.
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'

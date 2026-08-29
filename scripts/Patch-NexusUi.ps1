@@ -219,7 +219,10 @@ foreach ($pair in @(
 if ($layoutChanged) { Write-AihUtf8NoBom -Path $layoutPath -Content $layoutText }
 
 # 3a3. model-selection - hide the reasoning-effort badge when the model name
-# already ends with the same token (e.g. "DeepSeek V4 Flash MAX" + effort "Max").
+# already ends with the same token. Since TASK-0003.3a the settings model
+# names are tier-free ("DeepSeek V4 Flash", effort "Max" rendered as its own
+# label), so this guard is inert for the canonical names; it stays as a
+# safety net so "…MAX Max" can never render if a tier-embedded name returns.
 $modelSelPath = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-model-selection\lib\client.js'
 if (-not (Test-Path -LiteralPath $modelSelPath)) { throw "model-selection client bundle missing at $modelSelPath" }
 $modelSelText = Get-Content -Raw -Encoding UTF8 -LiteralPath $modelSelPath

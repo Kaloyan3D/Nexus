@@ -124,7 +124,7 @@ const FIXTURE_SETTINGS = [
   '      displayName: DeepSeek V4 Flash MAX (direct)',
   '      models:',
   '        - id: deepseek-v4-flash',
-  '          name: DeepSeek V4 Flash MAX',
+  '          name: DeepSeek V4 Flash',
   '          reasoningEfforts:',
   '            off:',
   '            high: high',
@@ -133,7 +133,7 @@ const FIXTURE_SETTINGS = [
   '      displayName: DeepSeek V4 Pro MAX (direct)',
   '      models:',
   '        - id: deepseek-v4-pro',
-  '          name: DeepSeek V4 Pro MAX',
+  '          name: DeepSeek V4 Pro',
   '',
 ].join('\n')
 
@@ -158,8 +158,15 @@ function fixtureFileMap(dataRoot, workspace, { task, executionClass, decision, d
     updatedAtUtc: '2026-08-28T17:30:00.000Z',
   })
   const decisionRecord = decision || { ...FIXTURE_DECISION, workspace, executionClass: executionClass || 'deepseek_normal', selectedExecutionClass: executionClass || 'deepseek_normal' }
-  if (Array.isArray(decisions) && decisions.length > 0) {
-    files[path.join(dataRoot, 'routing', 'decisions.jsonl')] = decisions.map((record) => JSON.stringify(record)).join('\n') + '\n'
+  // Identity isolation (TASK-0003.2): routing decisions JOIN on normalized
+  // workspace + taskId, so fixture records without a workspace are authored
+  // FOR this fixture workspace (records with an explicit workspace — e.g.
+  // the cross-workspace collision fixture — are kept verbatim).
+  const authoredDecisions = Array.isArray(decisions)
+    ? decisions.map((record) => (record && record.workspace == null ? { ...record, workspace } : record))
+    : null
+  if (Array.isArray(authoredDecisions) && authoredDecisions.length > 0) {
+    files[path.join(dataRoot, 'routing', 'decisions.jsonl')] = authoredDecisions.map((record) => JSON.stringify(record)).join('\n') + '\n'
   } else {
     files[path.join(dataRoot, 'routing', 'decisions.jsonl')] = JSON.stringify(decisionRecord) + '\n'
   }
@@ -221,7 +228,7 @@ async function detailFixture(overrides = {}) {
     statePath: path.join(dataRoot, 'aih-state.json'),
     readFile: memoryReader(files),
     modelNames: {
-      'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash MAX',
+      'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash',
       'sol-local/gpt-5.6-sol': 'GPT-5.6 Sol',
     },
     gitSummary: null,
@@ -241,7 +248,7 @@ async function fixtureSnapshot(overrides = {}) {
     sessionId: 'session-0001',
     statePath: path.join(dataRoot, 'aih-state.json'),
     readFile: memoryReader(files),
-    modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash MAX' },
+    modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash' },
     gitSummary: null,
     nowUtc: () => '2026-08-28T18:00:00.000Z',
   })
@@ -283,7 +290,7 @@ async function main() {
     assert.equal(snapshot.task.attempt, 2)
     assert.equal(snapshot.task.maxAttempts, 3)
     assert.equal(snapshot.execution.class, 'deepseek_normal')
-    assert.equal(snapshot.execution.model, 'DeepSeek V4 Flash MAX')
+    assert.equal(snapshot.execution.model, 'DeepSeek V4 Flash')
     assert.equal(snapshot.execution.modelId, 'deepseek-v4-flash')
     assert.equal(snapshot.execution.reasoning, 'max')
     assert.equal(snapshot.execution.provider, 'flash-max-direct')
@@ -623,8 +630,8 @@ async function main() {
       },
     }
     moduleExports.apply(fakeCtx)
-    assert.deepEqual(injected.map((i) => i.name), ['shell.overlay', 'conversation.session.header.actions'])
-    assert.equal(registered.length, 2)
+    assert.deepEqual(injected.map((i) => i.name), ['shell.overlay', 'conversation.session.header.actions', 'conversation.input.right'])
+    assert.equal(registered.length, 3)
     assert.equal(registered[0].spec.name, 'shell.overlay')
     assert.equal(registered[0].spec.id, 'nexus-controller')
     assert.equal(registered[0].spec.order, 100)
@@ -632,6 +639,11 @@ async function main() {
     assert.equal(registered[1].spec.id, 'nexus-controller')
     assert.equal(registered[1].spec.order, 90)
     assert.equal(typeof registered[0].component, 'function')
+    // composer tool row: additive pill seat for the routed executor
+    assert.equal(registered[2].spec.name, 'conversation.input.right')
+    assert.equal(registered[2].spec.id, 'nexus-controller')
+    assert.equal(registered[2].spec.order, 90)
+    assert.equal(typeof registered[2].component, 'function')
 
     // The controller must NOT register into the single details seat (that seat
     // belongs to the native DetailsPanel and its child declaration).
@@ -647,6 +659,44 @@ async function main() {
     assert.match(markup, /CONTROLLER/)
     const toggleMarkup = renderToStaticMarkup(react.createElement(Toggle, { sessionId: 'session-x' }))
     assert.match(toggleMarkup, /nx-toggle/)
+
+    // ── executor pill: preferred-model chip vs effective routed executor ──
+    const pillContent = moduleExports.executorChipContent
+    assert.equal(typeof pillContent, 'function', 'executorChipContent must be exported')
+    // bound session with a routed executor: pill names the routed model.
+    // TASK-0003.3a: the canonical display name is the BASE model identity;
+    // the effort badge is its own value and always survives (the tier is no
+    // longer embedded in the label). A legacy tier-embedded label still
+    // dedupes its badge (generic guard).
+    // NOTE: pillContent runs inside the test VM, so cross-realm objects are
+    // compared field-by-field (deepStrictEqual would reject the prototypes).
+    const highContent = pillContent({ state: 'working', binding: { taskId: 'TASK-0042' }, execution: { class: 'deepseek_normal', provider: 'flash-high-direct', model: 'DeepSeek V4 Flash', reasoning: 'high' } })
+    assert.equal(highContent.modelName, 'DeepSeek V4 Flash', 'canonical base model identity')
+    assert.equal(highContent.reasoning, 'high', 'effort badge always survives a clean base label')
+    // legacy tier-embedded name (any provider that still ships one): the
+    // badge is deduped so "…High High" can never render
+    const legacyContent = pillContent({ state: 'working', binding: { taskId: 'TASK-0042' }, execution: { class: 'deepseek_normal', provider: 'flash-high-direct', model: 'DeepSeek V4 Flash High', reasoning: 'high' } })
+    assert.equal(legacyContent.modelName, 'DeepSeek V4 Flash High')
+    assert.equal(legacyContent.reasoning, null, 'effort badge deduped when a legacy display name carries it')
+    // unbound / no execution / empty model / error envelope / no snapshot → no pill
+    assert.equal(pillContent({ state: 'idle', binding: null, execution: null }), null, 'unbound session never shows an executor pill')
+    assert.equal(pillContent({ state: 'waiting', binding: { taskId: 'TASK-0042' }, execution: null }), null)
+    assert.equal(pillContent({ state: 'waiting', binding: { taskId: 'TASK-0042' }, execution: { class: 'deepseek_normal', provider: 'flash-high-direct', model: '', reasoning: 'high' } }), null)
+    assert.equal(pillContent({ state: 'idle', error: 'controller-state-unavailable' }), null, 'envelope errors never show an executor pill')
+    assert.equal(pillContent(null), null)
+    const ExecutorPill = moduleExports.ExecutorPill
+    assert.equal(typeof ExecutorPill, 'function', 'ExecutorPill must be exported')
+    const pillHtml = renderToStaticMarkup(react.createElement(ExecutorPill, { content: { modelName: 'DeepSeek V4 Flash', reasoning: 'high', preference: null, preferenceReasoning: null } }))
+    assert.match(pillHtml, /data-nexus-executor/)
+    assert.match(pillHtml, /RUNNING/)
+    assert.match(pillHtml, /DeepSeek V4 Flash/)
+    assert.match(pillHtml, />HIGH</, 'effort badge renders uppercase')
+    assert.ok(!pillHtml.includes('High High'), 'never renders a duplicated effort')
+    assert.equal(renderToStaticMarkup(react.createElement(ExecutorPill, { content: null })), '', 'no content renders no pill markup')
+    const ExecutorChip = moduleExports.ExecutorChip
+    assert.equal(typeof ExecutorChip, 'function', 'ExecutorChip must be exported')
+    // SSR without a snapshot (poll has not landed yet) → no pill markup
+    assert.equal(renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-x' } })), '', 'empty snapshot renders no pill')
 
     // ── display-state: UNAVAILABLE vs IDLE semantics ────────────────────────
     const resolve = moduleExports.resolveDisplayState
@@ -703,6 +753,7 @@ async function main() {
       ['shell.overlay', { kind: 'list', scope: 'root' }],
       ['conversation.view', { kind: 'list', scope: 'session' }],
       ['conversation.session.header.actions', { kind: 'list', scope: 'session' }],
+      ['conversation.input.right', { kind: 'list', scope: 'session' }],
     ])
     const declaredBy = new Map([
       ['root', '(built-in)'],
@@ -710,6 +761,7 @@ async function main() {
       ['conversation.details.tool', 'an entry in "details" (client-ui-conversation)'],
       ['shell.overlay', 'an entry in "root" (client-ui-layout)'],
       ['conversation.session.header.actions', 'an entry in "conversation.view" (client-ui-conversation)'],
+      ['conversation.input.right', 'an entry in "conversation" (client-ui-conversation)'],
     ])
     class MiniSlotCore {
       constructor() {
@@ -805,7 +857,7 @@ async function main() {
     core.register({ name: 'root', registrant: 'client-ui-layout', children: { conversation: { kind: 'single', scope: 'session-maybe' }, details: { kind: 'single', scope: 'session' }, 'shell.overlay': { kind: 'list', scope: 'root' } } }, NativeAppFrame)
     core.register({ name: 'details', registrant: 'client-ui-conversation', children: { 'conversation.details.tool': { kind: 'single', scope: 'session' } } }, NativeDetailsPanel)
     core.register({ name: 'conversation.details.tool', registrant: 'client-ui-tool' }, NativeToolDetails)
-    core.register({ name: 'conversation', registrant: 'client-ui-conversation', children: { 'conversation.session': { kind: 'single', scope: 'session' }, 'conversation.session.header': { kind: 'single', scope: 'session' } } }, NativeConversation)
+    core.register({ name: 'conversation', registrant: 'client-ui-conversation', children: { 'conversation.session': { kind: 'single', scope: 'session' }, 'conversation.session.header': { kind: 'single', scope: 'session' }, 'conversation.input.right': { kind: 'list', scope: 'session' } } }, NativeConversation)
     core.register({ name: 'conversation.session', registrant: 'client-ui-conversation', children: { 'conversation.view': { kind: 'list', scope: 'session' } } }, NativeConversationSession)
     core.register({ name: 'conversation.session.header', registrant: 'client-ui-conversation', children: { 'conversation.session.header.actions': { kind: 'list', scope: 'session' } } }, NativeSessionHeader)
     core.register({ name: 'conversation.view', registrant: 'client-ui-conversation', id: 'chat', order: 0 }, NativeChatView)
@@ -855,6 +907,9 @@ async function main() {
     // header actions: controller entry present.
     const actionsEntries = core.entries('conversation.session.header.actions')
     assert.ok(actionsEntries.some((e) => e.options.id === 'nexus-controller' && e.options.order === 90))
+    // composer tool row: the executor pill registers additively (list seat).
+    const rightEntries = core.entries('conversation.input.right')
+    assert.ok(rightEntries.some((e) => e.options.id === 'nexus-controller' && e.options.order === 90 && e.options.label === 'Task executor'))
 
     // NEGATIVE regression: the old behavior (registering into details at
     // priority 0) must throw the EXACT pinned loader error. This is the
@@ -911,8 +966,8 @@ async function main() {
         register(spec, component) { return { spec, component } },
       },
     })
-    // The integration touches exactly two additive seats.
-    assert.deepEqual(registered.sort(), ['conversation.session.header.actions', 'shell.overlay'])
+    // The integration touches exactly three additive seats.
+    assert.deepEqual(registered.sort(), ['conversation.input.right', 'conversation.session.header.actions', 'shell.overlay'])
     assert.ok(!registered.includes('details'), 'details seat untouched')
     assert.ok(!registered.includes('conversation.details.tool'), 'conversation.details.tool untouched')
 
@@ -1093,7 +1148,7 @@ async function main() {
       sessionId: 'session-0001',
       statePath: path.join(dataRoot, 'aih-state.json'),
       readFile: memoryReader(files),
-      modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash MAX' },
+      modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash' },
       gitSummary: null,
       nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
@@ -1121,7 +1176,7 @@ async function main() {
       provider: 'sol-local', model: 'gpt-5.6-sol', reasoning: 'off', risk: 'normal', reviewRequired: true, escalatedFrom: 'deepseek_normal', writable: false,
     }
     const { snapshot } = await detailFixture({ decisions: [primaryDecision, reviewDecision] })
-    assert.equal(snapshot.execution.model, 'DeepSeek V4 Flash MAX', 'root executor is the PRIMARY decision, not the newer review')
+    assert.equal(snapshot.execution.model, 'DeepSeek V4 Flash', 'root executor is the PRIMARY decision, not the newer review')
     assert.equal(snapshot.execution.escalatedFrom, null, 'root executor carries no escalation marker')
     assert.equal(snapshot.execution.reasoning, 'max')
     assert.equal(snapshot.routingHistory.length, 2, 'history holds every routed decision')
@@ -1403,7 +1458,7 @@ async function main() {
     const detailSnap = await detail.buildDetailSnapshot({
       dataRoot, sessionId: 'session-0001', statePath: path.join(dataRoot, 'aih-state.json'),
       readFile: memoryReader(files),
-      modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash MAX', 'sol-local/gpt-5.6-sol': 'GPT-5.6 Sol' },
+      modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash', 'sol-local/gpt-5.6-sol': 'GPT-5.6 Sol' },
       gitSummary: null, gitFiles: null, nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
     const Room = moduleExports.ControlRoom
@@ -1418,7 +1473,7 @@ async function main() {
     assert.ok(overviewHtml.includes('TASK CONTROL ROOM'), 'room header renders')
     assert.ok(overviewHtml.includes('Overview') && overviewHtml.includes('Activity') && overviewHtml.includes('Verification') && overviewHtml.includes('Files'), 'all four tabs render')
     assert.ok(overviewHtml.includes('Root Executor'), 'overview has a root executor section')
-    assert.ok(overviewHtml.includes('DeepSeek V4 Flash MAX'), 'overview shows the root executor display name')
+    assert.ok(overviewHtml.includes('DeepSeek V4 Flash'), 'overview shows the root executor base display name')
     assert.ok(overviewHtml.includes('TASK-0042'), 'overview shows the task id')
     assert.ok(overviewHtml.includes('GPT-5.6 Sol'), 'overview review section shows the review model')
 
@@ -1443,7 +1498,7 @@ async function main() {
     // compact drawer: expand affordance only when a task is bound
     const compactSnap = await status.buildControllerSnapshot({
       dataRoot, sessionId: 'session-0001', statePath: path.join(dataRoot, 'aih-state.json'),
-      readFile: memoryReader(files), modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash MAX' },
+      readFile: memoryReader(files), modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash' },
       gitSummary: null, nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
     const Body = moduleExports.ControllerBody
@@ -1453,6 +1508,559 @@ async function main() {
     assert.ok(!unboundBody.includes('Open task control room'), 'unbound drawer has no expand action')
   }
 
+  // ── 20. client: routed-executor pill (preference vs effective executor) ─
+  {
+    const requireFromApp = require('node:module').createRequire(path.join(ROOT, 'app', 'package.json'))
+    const react = requireFromApp('react')
+    const jsxRuntime = requireFromApp('react/jsx-runtime')
+    const renderToStaticMarkup = requireFromApp('react-dom/server').renderToStaticMarkup
+    let source = fs.readFileSync(CLIENT, 'utf8')
+    const hookHeader = 'function useControllerSnapshot(sessionId) {'
+    assert.ok(source.includes(hookHeader), 'snapshot hook header must exist in client.js')
+    source = source.replace(hookHeader, hookHeader + '\n\tif (typeof window !== "undefined" && (window.__NX_TEST_SNAPSHOT__ !== undefined || window.__NX_TEST_SNAPSHOT_FAILED__)) return { snapshot: window.__NX_TEST_SNAPSHOT__ ?? null, failed: window.__NX_TEST_SNAPSHOT_FAILED__ === true };')
+
+    let moduleExports = null
+    const sandbox = {
+      console, URL, setTimeout, clearTimeout,
+      window: {
+        __ModuleLoader__: {
+          load(def) {
+            moduleExports = def.factory((name) => {
+              if (name === 'react') return react
+              if (name === 'react/jsx-runtime') return jsxRuntime
+              throw new Error('unexpected require: ' + name)
+            })
+          },
+        },
+        localStorage: { getItem() { return null }, setItem() {} },
+        setInterval() { return 1 },
+        clearInterval() {},
+      },
+      document: { createElement() { return { dataset: {}, remove() {} } }, head: { appendChild() {} } },
+    }
+    vm.createContext(sandbox)
+    vm.runInContext(source, sandbox)
+    const ExecutorChip = moduleExports.ExecutorChip
+    assert.equal(typeof ExecutorChip, 'function', 'ExecutorChip must be exported')
+    assert.equal(typeof moduleExports.ExecutorPill, 'function')
+    assert.equal(typeof moduleExports.executorChipContent, 'function')
+
+    // Bound session whose routed executor (deepseek_normal → High tier)
+    // differs from the session model default (MAX): the pill renders the
+    // EFFECTIVE executor next to the preference chip — never the preference.
+    // TASK-0003.3a: model identity and effort are separate — the base label
+    // is "DeepSeek V4 Flash" and the effort renders as its own badge.
+    sandbox.window.__NX_TEST_SNAPSHOT__ = {
+      schemaVersion: 1, generatedAtUtc: new Date().toISOString(), state: 'working',
+      binding: { sessionId: 'session-0001', taskId: 'TASK-0042', workspace: 'C:\\ws', preset: 'aih-engineering', executionClass: 'deepseek_normal' },
+      execution: { class: 'deepseek_normal', provider: 'flash-high-direct', model: 'DeepSeek V4 Flash', modelId: 'deepseek-v4-flash', reasoning: 'high' },
+    }
+    sandbox.window.__NX_TEST_SNAPSHOT_FAILED__ = false
+    const boundHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    assert.match(boundHtml, /data-nexus-executor/, 'bound session renders the executor pill')
+    assert.match(boundHtml, /RUNNING/, 'executor pill label is RUNNING (TASK-0003.3)')
+    assert.match(boundHtml, /DeepSeek V4 Flash/, 'pill names the base model identity')
+    assert.match(boundHtml, />HIGH</, 'effort renders as its own uppercase badge (TASK-0003.3a)')
+    assert.ok(!boundHtml.includes('DeepSeek V4 Flash High'), 'tier is never embedded in the model label')
+    assert.ok(!boundHtml.includes('<button'), 'executor pill is read-only (no button/click target)')
+    assert.ok(!boundHtml.includes('PREFERRED'), 'no preference data means no PREFERRED chip')
+
+    // ── TASK-0003.3 / 3a states: RUNNING + PREFERRED pair, truthfully ─────
+    // preferred MAX + effective High → same model identity, different effort:
+    // RUNNING · DeepSeek V4 Flash · HIGH + PREFERRED · DeepSeek V4 Flash · MAX
+    sandbox.window.__NX_TEST_SNAPSHOT__ = {
+      schemaVersion: 1, generatedAtUtc: new Date().toISOString(), state: 'working',
+      binding: { sessionId: 'session-0001', taskId: 'TASK-0042', workspace: 'C:\\ws', preset: 'aih-engineering', executionClass: 'deepseek_normal' },
+      execution: { class: 'deepseek_normal', provider: 'flash-high-direct', model: 'DeepSeek V4 Flash', modelId: 'deepseek-v4-flash', reasoning: 'high' },
+      preference: { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash' },
+    }
+    const pairHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    assert.match(pairHtml, /data-nexus-executor/, 'RUNNING chip present')
+    assert.match(pairHtml, /data-nexus-preferred/, 'PREFERRED chip present when the effort differs')
+    assert.match(pairHtml, />RUNNING</, 'RUNNING label rendered')
+    assert.match(pairHtml, />PREFERRED</, 'PREFERRED label rendered')
+    assert.match(pairHtml, />HIGH</, 'RUNNING effort badge is HIGH')
+    assert.match(pairHtml, />MAX</, 'PREFERRED effort badge is MAX')
+    assert.ok(!pairHtml.includes('DeepSeek V4 Flash High') && !pairHtml.includes('DeepSeek V4 Flash MAX'), 'never renders a tier-embedded model label')
+    assert.ok(!pairHtml.includes('MAX Max') && !pairHtml.includes('High High'), 'never renders a duplicated effort')
+    assert.ok(pairHtml.includes('Nexus may route individual tasks below this ceiling'), 'PREFERRED tooltip carries the ceiling explanation')
+    assert.ok(pairHtml.includes('RUNNING — DeepSeek V4 Flash · HIGH'), 'RUNNING tooltip carries the full model identity + effort')
+    assert.ok(!pairHtml.includes('<button'), 'pair stays read-only')
+
+    // preferred MAX + effective MAX (identical identity AND effort) → only
+    // RUNNING (no redundant presentation)
+    sandbox.window.__NX_TEST_SNAPSHOT__ = {
+      schemaVersion: 1, generatedAtUtc: new Date().toISOString(), state: 'working',
+      binding: { sessionId: 'session-0001', taskId: 'TASK-0042', workspace: 'C:\\ws', preset: 'aih-engineering', executionClass: 'deepseek_normal' },
+      execution: { class: 'deepseek_normal', provider: 'flash-max-direct', model: 'DeepSeek V4 Flash', modelId: 'deepseek-v4-flash', reasoning: 'max' },
+      preference: { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash' },
+    }
+    const equalHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    assert.match(equalHtml, /data-nexus-executor/, 'RUNNING still shown when preference equals effective')
+    assert.match(equalHtml, />MAX</, 'RUNNING carries the MAX effort badge')
+    assert.ok(!equalHtml.includes('data-nexus-preferred'), 'PREFERRED hidden when identity AND effort are identical')
+    assert.ok(equalHtml.includes('DeepSeek V4 Flash'), 'single truthful model identity rendered')
+
+    // routing decision absent (bound, no executor) → no fake RUNNING; PREFERRED only
+    sandbox.window.__NX_TEST_SNAPSHOT__ = {
+      schemaVersion: 1, generatedAtUtc: new Date().toISOString(), state: 'waiting',
+      binding: { sessionId: 'session-0001', taskId: 'TASK-0042', workspace: 'C:\\ws', preset: 'aih-engineering', executionClass: 'deepseek_normal' },
+      execution: null,
+      preference: { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash' },
+    }
+    const noExecHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    assert.ok(!noExecHtml.includes('data-nexus-executor'), 'no effective executor → no fake RUNNING value')
+    assert.match(noExecHtml, /data-nexus-preferred/, 'PREFERRED remains when no executor is routed')
+    assert.match(noExecHtml, />PREFERRED</)
+    assert.match(noExecHtml, />MAX</, 'PREFERRED effort badge survives without RUNNING')
+
+    // unbound session → preference stays usable (PREFERRED chip labels the selector)
+    sandbox.window.__NX_TEST_SNAPSHOT__ = {
+      schemaVersion: 1, generatedAtUtc: new Date().toISOString(), state: 'idle',
+      binding: null,
+      execution: null,
+      preference: { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash' },
+    }
+    const unboundHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    assert.ok(!unboundHtml.includes('data-nexus-executor'), 'unbound session never invents a RUNNING value')
+    assert.match(unboundHtml, /data-nexus-preferred/, 'unbound session keeps the preference labeled and usable')
+
+    // transport failure / no snapshot → no pill (UNAVAILABLE is the drawer's face)
+    sandbox.window.__NX_TEST_SNAPSHOT__ = null
+    sandbox.window.__NX_TEST_SNAPSHOT_FAILED__ = true
+    assert.equal(renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } })), '', 'transport failure renders no pill')
+    sandbox.window.__NX_TEST_SNAPSHOT__ = null
+    sandbox.window.__NX_TEST_SNAPSHOT_FAILED__ = false
+    assert.equal(renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } })), '', 'no snapshot renders no pill')
+    // no session scope (hero phase) → no pill
+    assert.equal(renderToStaticMarkup(react.createElement(ExecutorChip, { session: null })), '', 'no session scope renders no pill')
+  }
+
+  // ── 21. detail cache: mtime-keyed reuse + fail-closed missing files ──────
+  {
+    const dataRoot = tmpDir('nexus-ctr-cache-')
+    const workspace = path.join(dataRoot, 'ws')
+    const sessionId = 'session-cache-01'
+    const decision = {
+      recordVersion: 3, timestampUtc: '2026-08-28T17:29:00.000Z', taskId: 'TASK-0042', workspace, preset: 'aih-engineering',
+      kind: 'routed', selectedExecutionClass: 'deepseek_normal', executionClass: 'deepseek_normal',
+      provider: 'flash-high-direct', model: 'deepseek-v4-flash', reasoning: 'high', risk: 'normal', reviewRequired: false, writable: true,
+    }
+    const files = detailFixtureFileMap(dataRoot, workspace, {
+      decisions: [decision],
+      lifecycle: [{ timestampUtc: '2026-08-28T17:00:00.000Z', kind: 'task-created', taskId: 'TASK-0042', dependencies: [] }],
+      attempts: [],
+      evidence: { verification: [{ name: 'build', status: 'PASS', evidence: 'dotnet build' }] },
+    })
+    // bind the fixture under the cache-test session id
+    files[path.join(dataRoot, 'routing', 'session-bindings.json')] = JSON.stringify({
+      schemaVersion: 1,
+      bindings: {
+        [sessionId]: { sessionId, taskId: 'TASK-0042', workspace, preset: 'aih-engineering', description: 'cache fixture', executionClass: 'deepseek_normal', reviewRequired: false, boundAtUtc: '2026-08-28T17:00:00.000Z' },
+      },
+    })
+    writeTree(dataRoot, files)
+
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = dataRoot
+    try {
+      const plugin = await import(pathToFileURL(HOST).href)
+      let captured = []
+      let injectCallback = null
+      plugin.apply({ inject(keys, cb) { injectCallback = cb }, effect() { return () => {} } })
+      injectCallback({ webServer: { register(spec) { captured.push(spec) } }, effect(fn) { fn(); return () => {} } })
+      const roomRoute = captured.find((spec) => spec.path === '/nexus/control-room.json')
+      assert.ok(roomRoute, 'control-room route must register')
+      const res = {
+        writeHead(code, headers) { this.code = code; this.headers = headers },
+        end(body) { this.body = body },
+      }
+      const call = async () => {
+        await roomRoute.handler({ url: '/nexus/control-room.json?session=' + sessionId }, res)
+        return JSON.parse(res.body)
+      }
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+      // 21a. unchanged sources → the cached snapshot is REUSED: byte-identical
+      // body including the same generatedAtUtc even after a 15 ms gap
+      // (a recompute would stamp a fresh generatedAtUtc).
+      const body1 = await call()
+      assert.equal(res.code, 200)
+      assert.equal(body1.binding.taskId, 'TASK-0042')
+      assert.equal(body1.verification.source, 'evidence-artifact', 'fixture ships an evidence artifact')
+      await sleep(15)
+      const body2 = await call()
+      assert.deepEqual(body2, body1, 'unchanged sources must reuse the cached detail snapshot (same mtime key)')
+
+      // 21b. an mtime change MUST change the key → the snapshot recomputes.
+      const ledgerPath = path.join(workspace, '.ai-harness', 'state', 'tasks.json')
+      const future = new Date(Date.now() + 60000)
+      fs.utimesSync(ledgerPath, future, future)
+      await sleep(5)
+      const body3 = await call()
+      assert.notEqual(body3.generatedAtUtc, body1.generatedAtUtc, 'a changed mtime must invalidate the detail cache key')
+      assert.equal(body3.binding.taskId, 'TASK-0042', 'the rebuilt snapshot is still healthy')
+
+      // 21c. a MISSING file must keep fail-closed behavior AND change the
+      // key (the ':missing' marker) so the next call rebuilds.
+      fs.rmSync(path.join(workspace, '.ai-harness', 'runs', 'TASK-0042', 'evidence.json'), { force: true })
+      await sleep(5)
+      const body4 = await call()
+      assert.equal(res.code, 200, 'missing evidence must not break the envelope')
+      assert.equal(body4.error, undefined, 'missing evidence must not flip the envelope to error')
+      assert.equal(body4.verification.source, 'ledger', 'verification falls back to the ledger outcomes')
+      assert.equal(body4.verification.artifactPresent, false)
+      assert.equal(body4.verification.total, 2, 'ledger fallback keeps its checks')
+      assert.notEqual(body4.generatedAtUtc, body3.generatedAtUtc, 'the missing-file marker must change the cache key')
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
+  }
+
+  // ── 22. TASK-0003.1b regression: the snapshot hook can never return
+  //        undefined and no raw setter is ever registered as a poll listener.
+  //        Live bug: notifySnapshotListeners called listener() with no
+  //        arguments, the hook had registered React's raw setState, so the
+  //        first completed poll set state to undefined → the hook returned
+  //        undefined → the drawer's destructure crashed in the real app and
+  //        the slot boundary swallowed the drawer AND the executor pill.
+  {
+    const requireFromApp = require('node:module').createRequire(path.join(ROOT, 'app', 'package.json'))
+    const react = requireFromApp('react')
+    const jsxRuntime = requireFromApp('react/jsx-runtime')
+    const renderToStaticMarkup = requireFromApp('react-dom/server').renderToStaticMarkup
+    const source = fs.readFileSync(CLIENT, 'utf8')
+
+    // 22a. The shared-poll notification must hand snapshot data to its
+    // listeners — the bug called listener() with no arguments, which turned
+    // a raw setState into setState(undefined).
+    assert.match(source, /listener\(entry\.snapshot, entry\.failed\)/, 'notifySnapshotListeners must pass the snapshot data to listeners')
+
+    // 22b. The hook must register an adapter that reads the shared entry —
+    // never React's raw setState (setState() with no argument collapses the
+    // state to undefined on the next render).
+    const hookSource = source.slice(source.indexOf('function useControllerSnapshot'), source.indexOf('//#endregion', source.indexOf('function useControllerSnapshot')))
+    assert.doesNotMatch(hookSource, /listeners\.add\(setState\)/, 'the hook must never register the raw setState as a poll listener')
+    assert.match(hookSource, /listeners\.add\(apply\)/, 'the hook registers an adapter that reads the shared entry state')
+
+    // 22c. The hook's return must be shape-independent: a well-formed
+    // { snapshot, failed } object even if a state collapse ever produced
+    // null/undefined.
+    assert.match(hookSource, /return state && typeof state === "object" \? state : \{ snapshot: null, failed: false \}/, 'hook return must fall back to a well-formed object')
+
+    // 22d. Behavioral probe through the REAL hook: render a probe component
+    // that calls useControllerSnapshot and serialize its return — it must
+    // always be the { snapshot, failed } object, never undefined.
+    let moduleExports = null
+    const sandbox = {
+      console, URL, setTimeout, clearTimeout,
+      window: {
+        __ModuleLoader__: {
+          load(def) {
+            moduleExports = def.factory((name) => {
+              if (name === 'react') return react
+              if (name === 'react/jsx-runtime') return jsxRuntime
+              throw new Error('unexpected require: ' + name)
+            })
+          },
+        },
+        localStorage: { getItem() { return null }, setItem() {} },
+        setInterval() { return 1 },
+        clearInterval() {},
+      },
+      document: { createElement() { return { dataset: {}, remove() {} } }, head: { appendChild() {} } },
+    }
+    vm.createContext(sandbox)
+    vm.runInContext(source, sandbox)
+    const useControllerSnapshot = moduleExports.useControllerSnapshot
+    assert.equal(typeof useControllerSnapshot, 'function', 'useControllerSnapshot must be exported for deterministic probing')
+    const Probe = () => {
+      const hookResult = useControllerSnapshot('session-regression')
+      return react.createElement('x-probe', { 'data-return': JSON.stringify(hookResult) })
+    }
+    const probeHtml = renderToStaticMarkup(react.createElement(Probe))
+    const serialized = probeHtml.match(/data-return="([^"]*)"/)
+    assert.ok(serialized, 'probe must serialize the hook return')
+    const hookReturn = JSON.parse(serialized[1].replace(/&quot;/g, '"'))
+    assert.deepEqual(hookReturn, { snapshot: null, failed: false }, 'useControllerSnapshot must return a well-formed object, never undefined')
+  }
+
+  // ── 23. TASK-0003.2 identity isolation: workspace + taskId joins ─────
+  // taskId is NOT globally unique (TASK-0003 exists in many workspaces).
+  // Every Control Room join must carry the authoritative namespace
+  // session → binding → normalized workspace → taskId. The fixture below
+  // collides C:\RepoA and D:\RepoB on the SAME taskId with DISTINCT
+  // decisions, reviews, escalations, lifecycle, attempts, verification
+  // and run artifacts, then proves each session sees only its own state.
+  {
+    // path normalization semantics (deterministic, Windows-safe, IO-free)
+    const norm = status.normalizeWorkspacePath
+    assert.equal(norm('C:\\AI-Harness'), norm('c:/ai-harness/'), 'separator + case + trailing-slash normalization matches')
+    assert.equal(norm('C:\\AI-Harness'), norm('C:\\AI-Harness\\'), 'trailing separator trimmed')
+    assert.equal(norm('C:\\AI-Harness'), norm('C:\\\\AI-Harness'), 'redundant separators collapse')
+    assert.equal(norm('C:\\Repo'), norm('C:\\Repo\\'), 'plain trailing slash is inert')
+    assert.notEqual(norm('C:\\Repo'), norm('C:\\Repo2'), 'prefix-related paths must never be equal')
+    assert.notEqual(norm('C:\\AI-Harness'), norm('C:\\AI-Harness\\tests'), 'subdirectory is a different workspace')
+    assert.notEqual(norm('C:\\AI-Harness'), norm('D:\\AI-Harness'), 'different drive is a different workspace')
+    assert.equal(norm('C:\\'), 'c:\\', 'drive root survives trimming')
+    assert.equal(norm(''), '', 'empty normalizes to empty')
+    assert.equal(norm(null), '', 'null normalizes to empty')
+
+    const dataRoot = 'C:\\aih-fixture-data'
+    const repoA = 'C:\\RepoA'
+    const repoB = 'D:\\RepoB'
+    const taskId = 'TASK-0003'
+    const modelNames = {
+      'flash-high-direct/deepseek-v4-flash': 'DeepSeek V4 Flash',
+      'sol-local/gpt-5.6-sol': 'GPT-5.6 Sol',
+    }
+
+    const decision = (ts, workspace, extra) => JSON.stringify(Object.assign({
+      recordVersion: 1, timestampUtc: ts, taskId, workspace,
+      kind: 'routed', risk: 'normal',
+    }, extra))
+    const decisionsText = [
+      decision('2026-08-29T10:00:00.000Z', 'C:/RepoA/', { selectedExecutionClass: 'deepseek_normal', executionClass: 'deepseek_normal', provider: 'flash-high-direct', model: 'deepseek-v4-flash', reasoning: 'high', reason: 'A primary' }),
+      decision('2026-08-29T10:05:00.000Z', repoA, { selectedExecutionClass: 'codex_review', executionClass: 'codex_review', provider: 'sol-local', model: 'gpt-5.6-sol', escalatedFrom: 'deepseek_normal', reviewRequired: true, reason: 'A review' }),
+      decision('2026-08-29T10:06:00.000Z', repoA, { selectedExecutionClass: 'deepseek_deep', executionClass: 'deepseek_deep', provider: 'flash-high-direct', model: 'deepseek-v4-flash', escalatedFrom: 'codex_review', reason: 'A escalation' }),
+      decision('2026-08-29T11:00:00.000Z', repoB, { selectedExecutionClass: 'deepseek_deep', executionClass: 'deepseek_deep', provider: 'flash-high-direct', model: 'deepseek-v4-flash', reasoning: 'max', reason: 'B primary (NEWER than every A record)' }),
+      decision('2026-08-29T11:05:00.000Z', repoB, { selectedExecutionClass: 'codex_review', executionClass: 'codex_review', provider: 'sol-local', model: 'gpt-5.6-sol', escalatedFrom: 'deepseek_deep', reviewRequired: true, reason: 'B review' }),
+      '{ this line is corrupt JSON from RepoB \u2014 jsonLinesOf must skip it }',
+      JSON.stringify({ recordVersion: 1, timestampUtc: '2026-08-29T12:00:00.000Z', taskId, reason: 'no workspace field — must never match (fail-closed)' }),
+    ].join('\n') + '\n'
+
+    const lifecycle = (ts, kind, extra) => JSON.stringify(Object.assign({ timestampUtc: ts, taskId }, extra, { kind }))
+    const files = {
+      [path.join(dataRoot, 'routing', 'session-bindings.json')]: JSON.stringify({ schemaVersion: 1, bindings: {
+        'session-A': { sessionId: 'session-A', taskId, workspace: repoA, preset: 'aih-engineering', executionClass: 'deepseek_normal', reviewRequired: false, boundAtUtc: '2026-08-29T09:59:00.000Z' },
+        'session-B': { sessionId: 'session-B', taskId, workspace: repoB, preset: 'aih-engineering', executionClass: 'deepseek_deep', reviewRequired: false, boundAtUtc: '2026-08-29T10:59:00.000Z' },
+      } }),
+      [path.join(dataRoot, 'routing', 'decisions.jsonl')]: decisionsText,
+      [path.join(dataRoot, 'routing', 'states', status.routingStateFileName(repoA, 'aih-engineering', taskId))]: JSON.stringify({ executionClass: 'deepseek_normal', reviewRequired: false, sameFailureCount: 2, updatedAtUtc: '2026-08-29T10:01:00.000Z' }),
+      [path.join(dataRoot, 'routing', 'states', status.routingStateFileName(repoB, 'aih-engineering', taskId))]: JSON.stringify({ executionClass: 'deepseek_deep', reviewRequired: false, sameFailureCount: 5, updatedAtUtc: '2026-08-29T11:01:00.000Z' }),
+      [path.join(dataRoot, 'aih-state.json')]: JSON.stringify({ SchemaVersion: 3, Status: 'READY', Pid: 1, Workspace: repoA, ProcessStartedAtUtc: '2026-08-29T09:00:00.000Z' }),
+      // workspace A state
+      [path.join(repoA, '.ai-harness', 'state', 'tasks.json')]: JSON.stringify({ schemaVersion: 1, nextSequence: 2, tasks: [{ schemaVersion: 1, taskId, description: 'A task', status: 'implementing', attempt: 0, maxAttempts: 3, executionClass: 'deepseek_normal', reviewRequested: false, codexCalls: 0, failureSignatures: ['sig-A'], createdAtUtc: '2026-08-29T09:58:00.000Z', updatedAtUtc: '2026-08-29T10:06:00.000Z' }] }),
+      [path.join(repoA, '.ai-harness', 'state', 'decisions.jsonl')]: [
+        lifecycle('2026-08-29T09:58:00.000Z', 'task-created', { dependencies: [] }),
+        lifecycle('2026-08-29T10:01:00.000Z', 'execution-class-selected', { executionClass: 'deepseek_normal', reason: 'A route' }),
+      ].join('\n') + '\n',
+      [path.join(repoA, '.ai-harness', 'runs', taskId, 'manifest.json')]: '{}',
+      [path.join(repoA, '.ai-harness', 'runs', taskId, 'attempts.jsonl')]: JSON.stringify({ sequence: 1, status: 'started', attemptId: 'attempt-A-1', executionClass: 'deepseek_normal', startedAtUtc: '2026-08-29T10:02:00.000Z' }) + '\n',
+      [path.join(repoA, '.ai-harness', 'runs', taskId, 'evidence.json')]: JSON.stringify({ verification: [{ name: 'build-A', status: 'PASS', evidence: 'a' }], acceptanceCriteria: [{ criterion: 'c-A', status: 'PASS' }], scopePass: true }),
+      [path.join(repoA, '.ai-harness', 'runs', taskId, 'review-packet.json')]: JSON.stringify({ question: 'A review question', relevantFiles: ['a.ts'], diff: 'diff-a' }),
+      [path.join(repoA, '.ai-harness', 'runs', taskId, 'review-result.json')]: JSON.stringify({ verdict: 'PASS', needsBroaderContext: false, findings: [{ severity: 'info', location: 'a.ts', problem: 'p-A' }] }),
+      // workspace B state (same taskId, entirely different content)
+      [path.join(repoB, '.ai-harness', 'state', 'tasks.json')]: JSON.stringify({ schemaVersion: 1, nextSequence: 2, tasks: [{ schemaVersion: 1, taskId, description: 'B task', status: 'failed', attempt: 1, maxAttempts: 3, executionClass: 'deepseek_deep', reviewRequested: true, codexCalls: 1, failureSignatures: ['sig-B'], createdAtUtc: '2026-08-29T10:58:00.000Z', updatedAtUtc: '2026-08-29T11:06:00.000Z' }] }),
+      [path.join(repoB, '.ai-harness', 'state', 'decisions.jsonl')]: [
+        lifecycle('2026-08-29T10:58:00.000Z', 'task-created', { dependencies: [] }),
+        lifecycle('2026-08-29T11:01:00.000Z', 'execution-class-selected', { executionClass: 'deepseek_deep', reason: 'B route' }),
+      ].join('\n') + '\n',
+      [path.join(repoB, '.ai-harness', 'runs', taskId, 'manifest.json')]: '{}',
+      [path.join(repoB, '.ai-harness', 'runs', taskId, 'attempts.jsonl')]: JSON.stringify({ sequence: 1, status: 'failed', attemptId: 'attempt-B-1', executionClass: 'deepseek_deep', failureSignature: 'sig-B', startedAtUtc: '2026-08-29T11:02:00.000Z', timestampUtc: '2026-08-29T11:05:00.000Z' }) + '\n',
+      [path.join(repoB, '.ai-harness', 'runs', taskId, 'evidence.json')]: JSON.stringify({ verification: [{ name: 'build-B', status: 'FAIL', evidence: 'b' }] }),
+      [path.join(repoB, '.ai-harness', 'runs', taskId, 'review-packet.json')]: JSON.stringify({ question: 'B review question', relevantFiles: ['b.ts'], diff: 'diff-b' }),
+      [path.join(repoB, '.ai-harness', 'runs', taskId, 'review-result.json')]: JSON.stringify({ verdict: 'FAIL', needsBroaderContext: true, findings: [{ severity: 'critical', location: 'b.ts', problem: 'p-B' }] }),
+    }
+    const readFile = memoryReader(files)
+
+    // 23a. negative control: taskId-only filtering WOULD mix the workspaces
+    const taskIdOnly = status.jsonLinesOf(decisionsText).filter((r) => r && r.taskId === taskId)
+    const taskIdOnlyWorkspaces = new Set(taskIdOnly.map((r) => status.normalizeWorkspacePath(r.workspace)))
+    assert.ok(taskIdOnlyWorkspaces.has(status.normalizeWorkspacePath(repoA)) && taskIdOnlyWorkspaces.has(status.normalizeWorkspacePath(repoB)), 'negative control: taskId alone spans both workspaces')
+    const newestTaskIdOnlyPrimary = taskIdOnly
+      .filter((r) => !r.escalatedFrom && status.normalizeWorkspacePath(r.workspace) !== '')
+      .sort((a, b) => String(b.timestampUtc).localeCompare(String(a.timestampUtc)))[0]
+    assert.equal(newestTaskIdOnlyPrimary.workspace, repoB, 'negative control: taskId-only root selection is order-dependent across workspaces')
+
+    // 23b. lastDecisionOf itself is namespace-scoped and fail-closed
+    const records = status.jsonLinesOf(decisionsText)
+    assert.equal(status.lastDecisionOf(records, taskId, repoA).provider, 'flash-high-direct', 'A decision resolves inside RepoA')
+    assert.equal(status.lastDecisionOf(records, taskId, repoA).escalatedFrom == null, true, 'A root is the primary, not the newer review/escalation')
+    assert.equal(status.lastDecisionOf(records, taskId, 'c:/repoa/').timestampUtc, '2026-08-29T10:00:00.000Z', 'normalized spelling of RepoA matches')
+    assert.equal(status.lastDecisionOf(records, taskId, repoB).executionClass, 'deepseek_deep', 'B decision resolves inside RepoB')
+    assert.equal(status.lastDecisionOf(records, taskId, 'C:\\SomewhereElse'), null, 'unknown workspace never joins')
+    assert.equal(status.lastDecisionOf(records, taskId, ''), null, 'empty workspace never joins (fail-closed)')
+    assert.equal(status.lastDecisionOf(records, taskId, null), null, 'null workspace never joins')
+
+    // 23c. session bound to RepoA → ONLY RepoA state
+    const snapshotA = await detail.buildDetailSnapshot({ dataRoot, sessionId: 'session-A', statePath: path.join(dataRoot, 'aih-state.json'), readFile, modelNames, gitSummary: null, gitFiles: null, nowUtc: () => '2026-08-29T12:00:00.000Z' })
+    assert.equal(snapshotA.binding.workspace, repoA)
+    assert.equal(snapshotA.execution.model, 'DeepSeek V4 Flash', 'A root executor comes from RepoA, not from RepoB\'s newer primary')
+    assert.equal(snapshotA.routingHistory.length, 3, 'A history holds only RepoA decisions')
+    assert.ok(snapshotA.routingHistory.every((h) => status.normalizeWorkspacePath(h.workspace) === status.normalizeWorkspacePath(repoA)), 'every A history record is from RepoA')
+    assert.deepEqual(snapshotA.routingHistory.map((h) => h.kind), ['primary', 'review', 'escalation'])
+    assert.equal(snapshotA.reviews.decisions.length, 1, 'A reviews carry only the RepoA review decision')
+    assert.equal(snapshotA.reviews.decisions[0].model, 'GPT-5.6 Sol')
+    assert.equal(snapshotA.reviews.result.verdict, 'PASS', 'A review result is RepoA\'s artifact')
+    assert.equal(snapshotA.reviews.packet.question, 'A review question')
+    assert.equal(snapshotA.reviews.codexCalls, 0)
+    assert.equal(snapshotA.reviews.reviewRequired, false)
+    assert.deepEqual(snapshotA.lifecycle.map((l) => l.kind), ['task-created', 'execution-class-selected'], 'A lifecycle is RepoA\'s own ledger')
+    assert.equal(snapshotA.attempts.length, 1)
+    assert.equal(snapshotA.attempts[0].attemptId, 'attempt-A-1', 'A attempts come from RepoA\'s runs dir')
+    assert.equal(snapshotA.verification.source, 'evidence-artifact')
+    assert.deepEqual(snapshotA.verification.checks.map((c) => c.name), ['build-A'], 'A verification checks are RepoA\'s evidence')
+    assert.ok(snapshotA.verification.artifactPath.includes('RepoA'), 'A artifact path stays inside RepoA')
+    assert.deepEqual(snapshotA.failures.signatures, [{ signature: 'sig-A', count: 1 }])
+    assert.equal(snapshotA.failures.sameFailureCount, 2, 'A failure count comes from RepoA\'s routing state')
+
+    // 23d. session bound to RepoB → ONLY RepoB state (mirror)
+    const snapshotB = await detail.buildDetailSnapshot({ dataRoot, sessionId: 'session-B', statePath: path.join(dataRoot, 'aih-state.json'), readFile, modelNames, gitSummary: null, gitFiles: null, nowUtc: () => '2026-08-29T12:00:00.000Z' })
+    assert.equal(snapshotB.binding.workspace, repoB)
+    assert.equal(snapshotB.execution.class, 'deepseek_deep', 'B root executor comes from RepoB (deepseek_deep, not A\'s deepseek_normal)')
+    assert.equal(snapshotB.routingHistory.length, 2, 'B history holds only RepoB decisions')
+    assert.ok(snapshotB.routingHistory.every((h) => status.normalizeWorkspacePath(h.workspace) === status.normalizeWorkspacePath(repoB)))
+    assert.equal(snapshotB.reviews.decisions.length, 1)
+    assert.equal(snapshotB.reviews.result.verdict, 'FAIL')
+    assert.equal(snapshotB.reviews.codexCalls, 1)
+    assert.equal(snapshotB.reviews.reviewRequired, true)
+    assert.equal(snapshotB.attempts.length, 1)
+    assert.equal(snapshotB.attempts[0].sequence, 1, 'B attempts come from RepoB\'s runs dir')
+    assert.equal(snapshotB.attempts[0].status, 'failed', 'B attempt failed record is RepoB\'s')
+    assert.equal(snapshotB.attempts[0].failureSignature, 'sig-B')
+    assert.deepEqual(snapshotB.verification.checks.map((c) => c.name), ['build-B'])
+    assert.deepEqual(snapshotB.failures.signatures, [{ signature: 'sig-B', count: 1 }])
+    assert.equal(snapshotB.failures.sameFailureCount, 5)
+
+    // 23e. compact Controller (and EXECUTOR pill data) is namespace-scoped
+    const compactA = await status.buildControllerSnapshot({ dataRoot, sessionId: 'session-A', statePath: path.join(dataRoot, 'aih-state.json'), readFile, modelNames, gitSummary: null, nowUtc: () => '2026-08-29T12:00:00.000Z' })
+    assert.equal(compactA.execution.model, 'DeepSeek V4 Flash', 'compact root executor ignores RepoB\'s NEWER primary — correctness never depends on ordering')
+    const compactB = await status.buildControllerSnapshot({ dataRoot, sessionId: 'session-B', statePath: path.join(dataRoot, 'aih-state.json'), readFile, modelNames, gitSummary: null, nowUtc: () => '2026-08-29T12:00:00.000Z' })
+    assert.equal(compactB.execution.class, 'deepseek_deep')
+  }
+
+  // ── 23f. corruption behavior: fail-closed, no cross-workspace fallback ──
+  {
+    const dataRoot = 'C:\\aih-fixture-data-2'
+    const repoA = 'C:\\RepoA'
+    const repoB = 'D:\\RepoB'
+    const taskId = 'TASK-0003'
+    const decision = (ts, workspace, extra) => JSON.stringify(Object.assign({ recordVersion: 1, timestampUtc: ts, taskId, workspace, kind: 'routed' }, extra))
+    const decisionsText = [
+      decision('2026-08-29T10:00:00.000Z', repoA, { executionClass: 'deepseek_normal', provider: 'flash-high-direct', model: 'deepseek-v4-flash', reason: 'A primary' }),
+      decision('2026-08-29T11:00:00.000Z', repoB, { executionClass: 'deepseek_deep', provider: 'flash-high-direct', model: 'deepseek-v4-flash', reason: 'B primary' }),
+      '{ corrupt decision line from RepoB }',
+    ].join('\n') + '\n'
+    const files = {
+      [path.join(dataRoot, 'routing', 'session-bindings.json')]: JSON.stringify({ schemaVersion: 1, bindings: {
+        'session-A': { sessionId: 'session-A', taskId, workspace: repoA, preset: 'aih-engineering', executionClass: 'deepseek_normal', reviewRequired: false, boundAtUtc: '2026-08-29T09:59:00.000Z' },
+      } }),
+      [path.join(dataRoot, 'routing', 'decisions.jsonl')]: decisionsText,
+      [path.join(dataRoot, 'routing', 'states', status.routingStateFileName(repoA, 'aih-engineering', taskId))]: JSON.stringify({ executionClass: 'deepseek_normal', reviewRequired: false, sameFailureCount: 1, updatedAtUtc: '2026-08-29T10:01:00.000Z' }),
+      [path.join(dataRoot, 'aih-state.json')]: JSON.stringify({ SchemaVersion: 3, Status: 'READY', Pid: 1, Workspace: repoA, ProcessStartedAtUtc: '2026-08-29T09:00:00.000Z' }),
+      [path.join(repoA, '.ai-harness', 'state', 'tasks.json')]: JSON.stringify({ schemaVersion: 1, nextSequence: 2, tasks: [{ schemaVersion: 1, taskId, description: 'A task', status: 'implementing', attempt: 0, maxAttempts: 3, executionClass: 'deepseek_normal', reviewRequested: false, codexCalls: 0, failureSignatures: ['sig-A'], createdAtUtc: '2026-08-29T09:58:00.000Z' }] }),
+      [path.join(repoA, '.ai-harness', 'state', 'decisions.jsonl')]: JSON.stringify({ timestampUtc: '2026-08-29T09:58:00.000Z', taskId, kind: 'task-created', dependencies: [] }) + '\n',
+      [path.join(repoA, '.ai-harness', 'runs', taskId, 'manifest.json')]: '{}',
+      // RepoA has NO evidence.json (missing current-workspace artifact) and
+      // NO ledger verification outcomes → verification degrades to null-ish
+      // and must NEVER fall back to RepoB's evidence artifact.
+      [path.join(repoB, '.ai-harness', 'state', 'tasks.json')]: JSON.stringify({ schemaVersion: 1, nextSequence: 2, tasks: [{ schemaVersion: 1, taskId, description: 'B task', status: 'failed', attempt: 1, maxAttempts: 3, executionClass: 'deepseek_deep', reviewRequested: true, codexCalls: 1, failureSignatures: ['sig-B'], createdAtUtc: '2026-08-29T10:58:00.000Z' }] }),
+      [path.join(repoB, '.ai-harness', 'state', 'decisions.jsonl')]: JSON.stringify({ timestampUtc: '2026-08-29T10:58:00.000Z', taskId, kind: 'task-created', dependencies: [] }) + '\n',
+      [path.join(repoB, '.ai-harness', 'runs', taskId, 'manifest.json')]: '{}',
+      [path.join(repoB, '.ai-harness', 'runs', taskId, 'evidence.json')]: JSON.stringify({ verification: [{ name: 'build-B', status: 'PASS', evidence: 'b' }] }),
+      [path.join(repoB, '.ai-harness', 'runs', taskId, 'review-result.json')]: '{ corrupt review result from RepoB',
+    }
+    const readFile = memoryReader(files)
+    const snapshotA = await detail.buildDetailSnapshot({ dataRoot, sessionId: 'session-A', statePath: path.join(dataRoot, 'aih-state.json'), readFile, modelNames: {}, gitSummary: null, gitFiles: null, nowUtc: () => '2026-08-29T12:00:00.000Z' })
+    assert.equal(snapshotA.verification.artifactPresent, false, 'missing RepoA evidence degrades the verification subsystem')
+    assert.equal(snapshotA.verification.source, null)
+    assert.equal(snapshotA.verification.total, 0)
+    assert.ok(!JSON.stringify(snapshotA.verification).includes('build-B'), 'never falls back to RepoB\'s evidence artifact')
+    assert.ok(snapshotA.verification.artifactPath.includes('RepoA'), 'artifact path stays inside RepoA even when missing')
+    assert.equal(snapshotA.reviews.result, null, 'corrupt RepoB review result does not reach RepoA')
+    assert.equal(snapshotA.routingHistory.length, 1, 'corrupt RepoB decision line does not reach RepoA (skipped by jsonLinesOf)')
+    assert.equal(snapshotA.routingHistory[0].workspace, repoA)
+    assert.equal(snapshotA.execution.model, 'DeepSeek V4 Flash', 'RepoA execution intact despite RepoB corruption')
+    assert.equal(snapshotA.task.description, 'A task', 'RepoA task ledger intact despite RepoB corruption')
+    assert.deepEqual(snapshotA.failures.signatures, [{ signature: 'sig-A', count: 1 }])
+  }
+  // ── 24. TASK-0003.3: session preference block (agent-default-model) ────
+  {
+    // parseDefaultModel unit cases (fail-closed)
+    const SETTINGS = 'agent-default-model:\n  provider: flash-max-direct\n  model: deepseek-v4-flash\n  reasoningEffort: max\n\nllm-pi-ai:\n  providers: {}\n'
+    assert.deepEqual(status.parseDefaultModel(SETTINGS), { provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoningEffort: 'max' }, 'parses the flat 3-key block')
+    assert.equal(status.parseDefaultModel('agent-default-model:\n  provider: flash-max-direct\n'), null, 'missing model is fail-closed')
+    assert.equal(status.parseDefaultModel('llm-pi-ai:\n  providers: {}\n'), null, 'no block is fail-closed')
+    assert.equal(status.parseDefaultModel(''), null, 'empty settings are fail-closed')
+    assert.equal(status.parseDefaultModel(null), null, 'null settings are fail-closed')
+    assert.equal(status.parseDefaultModel('agent-default-model:\n  provider:\n  model: deepseek-v4-flash\n'), null, 'empty provider value is fail-closed')
+
+    // TASK-0003.3a canonical naming rule: the display label is the BASE
+    // model identity; the effort is a separate value, never embedded.
+    const canonicalMap = {
+      'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash',
+      'flash-high-direct/deepseek-v4-flash': 'DeepSeek V4 Flash',
+      'deepseek-pro-direct/deepseek-v4-pro': 'DeepSeek V4 Pro',
+    }
+    assert.equal(status.modelNameOf('flash-max-direct', 'deepseek-v4-flash', canonicalMap), 'DeepSeek V4 Flash', 'max provider maps to the base label')
+    assert.equal(status.modelNameOf('flash-high-direct', 'deepseek-v4-flash', canonicalMap), 'DeepSeek V4 Flash', 'high provider maps to the same base label')
+    assert.equal(status.modelNameOf('flash-max-direct', 'deepseek-v4-flash', canonicalMap).includes('MAX'), false, 'tier never embedded in the model label')
+    assert.equal(status.modelNameOf('flash-high-direct', 'deepseek-v4-flash', canonicalMap).includes('High'), false, 'tier never embedded in the model label')
+    assert.equal(status.modelNameOf('flash-max-direct', 'deepseek-v4-flash', canonicalMap).endsWith('Max'), false, 'no effort token at the label end')
+    const canonicalExecution = status.normalizeExecution(
+      { sessionId: 'session-x', taskId: 'TASK-0042', workspace: 'C:\\ws', preset: 'aih-engineering' },
+      null, { executionClass: 'deepseek_normal' },
+      { provider: 'flash-high-direct', model: 'deepseek-v4-flash', reasoning: 'high' },
+      canonicalMap,
+    )
+    assert.equal(canonicalExecution.model, 'DeepSeek V4 Flash', 'execution block exposes the base model')
+    assert.equal(canonicalExecution.reasoning, 'high', 'execution block keeps the effort separate')
+    assert.equal(canonicalExecution.provider, 'flash-high-direct', 'provider id unchanged')
+
+    const pref = status.normalizePreference({ provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoningEffort: 'max' }, { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash' })
+    assert.deepEqual(pref, { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash' }, 'preference label resolves to the base model via the settings display-name map')
+    assert.equal(status.normalizePreference(null, {}), null, 'no selection → null preference')
+    assert.equal(status.normalizePreference({}, {}), null, 'empty selection → null preference')
+
+    const dataRoot = tmpDir('nexus-ctr-')
+    const workspace = path.join(dataRoot, 'ws')
+    const files = fixtureFileMap(dataRoot, workspace, {})
+    files[path.join(dataRoot, 'settings.yaml')] = 'agent-default-model:\n  provider: flash-max-direct\n  model: deepseek-v4-flash\n  reasoningEffort: max\n'
+    writeTree(dataRoot, files)
+    const snapshot = await status.buildControllerSnapshot({
+      dataRoot,
+      sessionId: 'session-0001',
+      settingsPath: path.join(dataRoot, 'settings.yaml'),
+      statePath: path.join(dataRoot, 'aih-state.json'),
+      readFile: memoryReader(files),
+      modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash' },
+      gitSummary: null,
+      nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    assert.deepEqual(snapshot.preference, { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash' }, 'bound snapshot carries the preference')
+    assert.equal(snapshot.execution.model, 'DeepSeek V4 Flash', 'fixture decision resolves to the base display model')
+
+    // unbound session: preference remains available (pill can still label the selector)
+    const unbound = await status.buildControllerSnapshot({
+      dataRoot,
+      sessionId: 'session-nobody',
+      settingsPath: path.join(dataRoot, 'settings.yaml'),
+      statePath: path.join(dataRoot, 'aih-state.json'),
+      readFile: memoryReader(files),
+      modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash' },
+      gitSummary: null,
+      nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    assert.equal(unbound.binding, null, 'unbound session has no binding')
+    assert.deepEqual(unbound.preference, { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash' }, 'unbound session still exposes the preference')
+
+    // corrupt settings degrade only the preference (fail-closed subsystem)
+    files[path.join(dataRoot, 'settings.yaml')] = '{ this is not yaml: [unclosed'
+    const corrupt = await status.buildControllerSnapshot({
+      dataRoot,
+      sessionId: 'session-0001',
+      settingsPath: path.join(dataRoot, 'settings.yaml'),
+      statePath: path.join(dataRoot, 'aih-state.json'),
+      readFile: memoryReader(files),
+      modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash' },
+      gitSummary: null,
+      nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    assert.equal(corrupt.preference, null, 'corrupt settings → no preference, never a guessed one')
+    assert.equal(corrupt.binding.taskId, 'TASK-0042', 'corrupt settings never damage the task state')
+  }
   console.log('PASS: nexus controller panel state layer')
 }
 
