@@ -2,6 +2,8 @@
 param([string]$InstallRoot = 'C:\AI-Harness')
 
 . (Join-Path $InstallRoot 'scripts\Common.ps1')
+& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'tests\SetupUpgrade.Tests.ps1') -InstallRoot $InstallRoot
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'tests\Harness.Tests.ps1') -InstallRoot $InstallRoot
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'tests\ControllerRouting.Tests.ps1') -InstallRoot $InstallRoot
