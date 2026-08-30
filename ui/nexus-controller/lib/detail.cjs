@@ -280,7 +280,11 @@ function summarizeVerification(evidence, ledger) {
   const skipped = checks.filter((check) => check.status === 'SKIP').length
   let statusValue = 'not-run'
   if (checks.length > 0) {
-    statusValue = failed > 0 ? (passed > 0 ? 'partial' : 'failed') : 'passed'
+    // TASK-0004.1: any FAILed check makes the overall status FAILED — a
+    // completed verification containing a required FAIL is never 'partial'.
+    // The current schema has no incomplete-execution state, so the smallest
+    // truthful set is failed / passed / not-run.
+    statusValue = failed > 0 ? 'failed' : 'passed'
   }
   // Verification lifecycle timestamps come from the evidence artifact only
   // (producer boundary); durations are derived, never invented.
@@ -491,14 +495,20 @@ async function buildDetailSnapshot({
       activity.push({ atUtc: attempt.verifyingAtUtc, kind: 'verification-started', sequence: attempt.sequence, detail: 'Verification started · attempt ' + attempt.sequence })
     }
   }
-  if (verification && verification.startedAtUtc) {
+  // TASK-0004.1: the attempt 'verifying' event is the authoritative
+  // verification-start signal. evidence.startedAtUtc is used ONLY as a
+  // backward-compatible fallback when no attempt carries a verifying event —
+  // never a second row for the same logical transition.
+  const hasVerifyingEvent = attempts.some((attempt) => Boolean(attempt.verifyingAtUtc))
+  if (verification && verification.startedAtUtc && !hasVerifyingEvent) {
     activity.push({ atUtc: verification.startedAtUtc, kind: 'verification-started', detail: 'Verification run started' })
   }
   if (verification && verification.finishedAtUtc) {
+    // TASK-0004.1: lifecycle-oriented summary — N passed · M failed · duration.
     activity.push({
       atUtc: verification.finishedAtUtc,
       kind: 'verification-finished',
-      detail: 'Verification ' + (verification.status || 'unknown') + ' · ' + verification.total + ' check(s)' + (verification.durationSeconds !== null ? ' · ' + verification.durationSeconds + 's' : ''),
+      detail: 'Verification finished · ' + verification.passed + ' passed · ' + verification.failed + ' failed' + (verification.durationSeconds !== null ? ' · ' + verification.durationSeconds + 's' : ''),
     })
   }
   if (reviews.packet && reviews.packet.requestedAtUtc) {
@@ -526,6 +536,11 @@ async function buildDetailSnapshot({
     if (record.timestampUtc) {
       activity.push({ atUtc: record.timestampUtc, kind: 'lifecycle', detail: String(record.kind || ''), sub: record.executionClass || null })
     }
+  }
+  // TASK-0004.1: one authoritative completion row from the producer
+  // timestamp; no synthetic timestamp, no duplicate completion events.
+  if (task && typeof task.completedAtUtc === 'string' && task.completedAtUtc !== '') {
+    activity.push({ atUtc: task.completedAtUtc, kind: 'task-completed', detail: 'Task completed' })
   }
   activity.sort((a, b) => String(a.atUtc).localeCompare(String(b.atUtc)))
 

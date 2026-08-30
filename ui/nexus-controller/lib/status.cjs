@@ -248,7 +248,9 @@ function normalizeTaskRecord(task) {
   const skipped = checks.filter((check) => check.status === 'SKIP').length
   let verificationStatus = 'not-run'
   if (checks.length > 0) {
-    verificationStatus = failed > 0 ? (passed > 0 ? 'partial' : 'failed') : 'passed'
+    // TASK-0004.1: any FAILed check makes the overall status FAILED; the
+    // schema has no incomplete-execution state, so 'partial' is never emitted.
+    verificationStatus = failed > 0 ? 'failed' : 'passed'
   }
   const failureSignatures = Array.isArray(task.failureSignatures) ? task.failureSignatures.map(String) : []
   return {

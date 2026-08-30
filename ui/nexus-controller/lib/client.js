@@ -837,6 +837,7 @@ function activityKindTitle(kind) {
 		case "review-completed": return "Review completed";
 		case "gate-created": return "Operator gate opened";
 		case "gate-resolved": return "Gate resolved";
+		case "task-completed": return "Task completed";
 		case "routing": return "Routed";
 		case "lifecycle": return "Lifecycle";
 		default: return kind || "Event";
@@ -929,12 +930,12 @@ function RoomVerification({ detail }) {
 	}
 	return react_jsx_runtime.jsxs(react.Fragment, {
 		children: [
+			// TASK-0004.1: unmistakable overall status — never counts-only.
 			react_jsx_runtime.jsxs("div", {
-				className: "nx-value",
+				className: "nx-verify-banner " + (verification.status === "failed" ? "nx-verify-fail" : "nx-verify-pass"),
 				children: [
-					react_jsx_runtime.jsx("span", { children: formatCount(verification.passed) + " passed" }),
-					verification.failed > 0 && react_jsx_runtime.jsx("span", { className: "nx-sub-inline", children: " · " + formatCount(verification.failed) + " failed" }),
-					verification.skipped > 0 && react_jsx_runtime.jsx("span", { className: "nx-sub-inline", children: " · " + formatCount(verification.skipped) + " skipped" }),
+					react_jsx_runtime.jsx("span", { className: "nx-verify-banner-label", children: verification.status === "failed" ? "FAILED" : "PASSED" }),
+					react_jsx_runtime.jsx("span", { className: "nx-verify-banner-counts", children: formatCount(verification.passed) + " passed · " + formatCount(verification.failed) + " failed" + (verification.skipped > 0 ? " · " + formatCount(verification.skipped) + " skipped" : "") }),
 				],
 			}),
 			// TASK-0004: verification is per-attempt with producer timestamps;
@@ -950,15 +951,29 @@ function RoomVerification({ detail }) {
 			}),
 			react_jsx_runtime.jsx("div", {
 				className: "nx-checks",
-				children: (verification.checks || []).map((check) => react_jsx_runtime.jsxs("div", {
-					className: "nx-check",
-					children: [
-						react_jsx_runtime.jsx("span", { className: "nx-check-glyph nx-check-" + (check.status === "PASS" ? "pass" : check.status === "FAIL" ? "fail" : "skip"), children: check.status === "PASS" ? "✓" : check.status === "FAIL" ? "✕" : "–" }),
-						react_jsx_runtime.jsx("span", { className: "nx-check-name", title: check.name, children: check.name }),
-						check.durationSeconds !== null && check.durationSeconds !== undefined && react_jsx_runtime.jsx("span", { className: "nx-check-duration", children: check.durationSeconds + "s" }),
-						check.evidence && react_jsx_runtime.jsx("span", { className: "nx-check-evidence", title: check.evidence, children: check.evidence }),
-					],
-				}, check.name)),
+				children: (verification.checks || []).map((check) => {
+					const isFailed = check.status === "FAIL";
+					// TASK-0004.1: failed checks show FAIL + exit code + duration
+					// inline; exact start/finish timestamps and the command live
+					// in the row tooltip (never invented when absent).
+					const tooltip = [
+						check.command ? "command: " + check.command : null,
+						check.startedAtUtc ? "started " + check.startedAtUtc : null,
+						check.finishedAtUtc ? "finished " + check.finishedAtUtc : null,
+					].filter(Boolean).join(" · ");
+					return react_jsx_runtime.jsxs("div", {
+						className: "nx-check" + (isFailed ? " nx-check-failed" : ""),
+						title: tooltip || undefined,
+						children: [
+							react_jsx_runtime.jsx("span", { className: "nx-check-glyph nx-check-" + (check.status === "PASS" ? "pass" : check.status === "FAIL" ? "fail" : "skip"), children: check.status === "PASS" ? "✓" : check.status === "FAIL" ? "✕" : "–" }),
+							react_jsx_runtime.jsx("span", { className: "nx-check-name", title: check.name, children: check.name }),
+							isFailed && react_jsx_runtime.jsx("span", { className: "nx-check-fail-tag", children: "FAIL" }),
+							isFailed && check.exitCode !== null && check.exitCode !== undefined && react_jsx_runtime.jsx("span", { className: "nx-check-exit", children: "exit " + check.exitCode }),
+							check.durationSeconds !== null && check.durationSeconds !== undefined && react_jsx_runtime.jsx("span", { className: "nx-check-duration", children: check.durationSeconds + "s" }),
+							check.evidence && react_jsx_runtime.jsx("span", { className: "nx-check-evidence", title: check.evidence, children: check.evidence }),
+						],
+					}, check.name);
+				}),
 			}),
 			verification.artifactPresent && react_jsx_runtime.jsxs("div", {
 				className: "nx-foot",
@@ -1375,6 +1390,14 @@ const PANEL_CSS = [
 	".nx-check-fail{color:var(--dsw-alias-state-error-primary)}",
 	".nx-check-skip{color:var(--dsw-alias-label-tertiary)}",
 	".nx-check-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+	".nx-verify-banner{display:flex;align-items:baseline;gap:8px;padding:6px 10px;border-radius:6px;margin-bottom:8px;background:var(--dsw-alias-interactive-bg-hover)}",
+	".nx-verify-banner-label{font-weight:700;letter-spacing:.08em;font-size:12px}",
+	".nx-verify-pass .nx-verify-banner-label{color:var(--dsw-alias-state-success-primary)}",
+	".nx-verify-fail .nx-verify-banner-label{color:var(--dsw-alias-state-error-primary)}",
+	".nx-verify-banner-counts{color:var(--dsw-alias-label-tertiary);font-size:11px}",
+	".nx-check-failed{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,transparent);border-radius:4px}",
+	".nx-check-fail-tag{color:var(--dsw-alias-state-error-primary);font-weight:700;font-size:10px;letter-spacing:.05em}",
+	".nx-check-exit{color:var(--dsw-alias-state-warn-primary);font-size:10.5px;font-family:var(--ds-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)}",
 	".nx-branch{font-family:var(--ds-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);font-size:11.5px}",
 	".nx-diff{display:flex;gap:8px;margin-top:1px}",
 	".nx-ins{color:var(--dsw-alias-state-success-primary)}",

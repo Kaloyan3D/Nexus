@@ -317,7 +317,8 @@ async function main() {
     ]
     failing.tasks[0].status = 'verifying'
     const { snapshot } = await fixtureSnapshot({ task: failing })
-    assert.equal(snapshot.task.verification.status, 'partial')
+    // TASK-0004.1: 1 PASS + 1 FAIL is FAILED — never 'partial'.
+    assert.equal(snapshot.task.verification.status, 'failed')
     assert.equal(snapshot.task.verification.passed, 1)
     assert.equal(snapshot.task.verification.failed, 1)
     assert.equal(snapshot.task.verification.total, 2)
@@ -1246,8 +1247,9 @@ async function main() {
 
     const fail = await detailFixture({ evidence: { verification: [{ name: 'typecheck', status: 'FAIL' }] } })
     assert.equal(fail.snapshot.verification.status, 'failed')
+    // TASK-0004.1: PASS + FAIL is FAILED, never 'partial'.
     const partial = await detailFixture({ evidence: { verification: [{ name: 'a', status: 'PASS' }, { name: 'b', status: 'FAIL' }] } })
-    assert.equal(partial.snapshot.verification.status, 'partial')
+    assert.equal(partial.snapshot.verification.status, 'failed')
 
     const malformed = await detailFixture({ evidence: { verification: [{ name: 'typecheck', status: 'PASS' }, { status: 'FAIL' }] } })
     assert.equal(malformed.snapshot.verification.checks.length, 1, 'a check without a name is dropped')
@@ -1496,6 +1498,46 @@ async function main() {
 
     const failedHtml = renderRoom('overview', null, true)
     assert.ok(failedHtml.includes('Detail state unavailable'), 'detail fetch failure renders the fail-closed face, no crash')
+
+    // TASK-0004.1: Verification tab shows an unmistakable overall status and
+    // real failed-check details (FAIL · exit <code> · duration inline; exact
+    // start/finish timestamps and the command in the row tooltip).
+    const vfFiles = detailFixtureFileMap(dataRoot, workspace, {
+      attempts: [
+        { taskId: 'TASK-0042', sequence: 1, status: 'started', startedAtUtc: '2026-08-28T17:20:00.000Z', sessionId: 'session-0001', startedByTurn: '2' },
+        { taskId: 'TASK-0042', sequence: 1, status: 'verifying', timestampUtc: '2026-08-28T17:30:00.000Z', sessionId: 'session-0001' },
+        { taskId: 'TASK-0042', sequence: 1, status: 'failed', failureSignature: 'verification-failed', timestampUtc: '2026-08-28T17:35:00.000Z', sessionId: 'session-0001' },
+      ],
+      evidence: {
+        schemaVersion: 2, attempt: 1,
+        startedAtUtc: '2026-08-28T17:30:00.000Z', finishedAtUtc: '2026-08-28T17:35:00.000Z',
+        verification: [
+          { name: 'typecheck', kind: 'test', status: 'PASS', exitCode: 0, command: 'tsc', startedAtUtc: '2026-08-28T17:30:05.000Z', finishedAtUtc: '2026-08-28T17:30:20.000Z', attempt: 1 },
+          { name: 'e2e', kind: 'test', status: 'FAIL', exitCode: 1, command: 'npm run e2e', startedAtUtc: '2026-08-28T17:30:25.000Z', finishedAtUtc: '2026-08-28T17:34:55.000Z', attempt: 1 },
+        ],
+        scopePass: false,
+      },
+    })
+    writeTree(dataRoot, vfFiles)
+    const vfSnap = await detail.buildDetailSnapshot({
+      dataRoot, sessionId: 'session-0001', statePath: path.join(dataRoot, 'aih-state.json'),
+      readFile: memoryReader(vfFiles),
+      modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash', 'sol-local/gpt-5.6-sol': 'GPT-5.6 Sol' },
+      gitSummary: null, gitFiles: null, nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    const verifyHtml = renderRoom('verification', vfSnap, false)
+    assert.ok(verifyHtml.includes('FAILED'), 'verification tab states FAILED explicitly')
+    assert.ok(verifyHtml.includes('1 passed'), 'verification tab keeps the pass count')
+    assert.ok(verifyHtml.includes('1 failed'), 'verification tab keeps the fail count')
+    assert.ok(verifyHtml.includes('>FAIL<'), 'failed check is labeled FAIL')
+    assert.ok(verifyHtml.includes('exit 1'), 'failed check shows its real exit code')
+    assert.ok(verifyHtml.includes('270s'), 'failed check duration shown')
+    assert.ok(verifyHtml.includes('2026-08-28T17:30:25.000Z'), 'failed check exact start timestamp in tooltip')
+    assert.ok(verifyHtml.includes('2026-08-28T17:34:55.000Z'), 'failed check exact finish timestamp in tooltip')
+    assert.ok(verifyHtml.includes('npm run e2e'), 'failed check command in tooltip')
+    const passHtml = renderRoom('verification', detailSnap, false)
+    assert.ok(passHtml.includes('PASSED'), 'verification tab states PASSED explicitly')
+    assert.ok(passHtml.includes('2 passed'), 'PASSED banner keeps the real counts')
 
     // compact drawer: expand affordance only when a task is bound
     const compactSnap = await status.buildControllerSnapshot({
@@ -2169,7 +2211,7 @@ async function main() {
     assert.equal(snapshot.reviews.packet.attempt, 1, 'review packet links the attempt')
     assert.equal(snapshot.reviews.result.completedAtUtc, '2026-08-28T17:41:00.000Z', 'review completedAtUtc from the result')
 
-    // failed verification → partial/failed summary; interrupted attempt closes
+    // failed verification → FAILED summary (TASK-0004.1); interrupted attempt closes
     const { snapshot: snapFail } = await detailFixture({
       attempts: [
         { taskId: 'TASK-0042', sequence: 1, status: 'started', startedAtUtc: '2026-08-28T17:30:00.000Z' },
@@ -2186,7 +2228,7 @@ async function main() {
         ],
       },
     })
-    assert.equal(snapFail.verification.status, 'partial', 'PASS+FAIL → partial')
+    assert.equal(snapFail.verification.status, 'failed', 'PASS+FAIL → failed')
     assert.equal(snapFail.verification.failed, 1, 'FAIL counted')
     assert.equal(snapFail.attempts[0].status, 'interrupted', 'stale verifying closed as interrupted')
 
@@ -2453,6 +2495,98 @@ async function main() {
     assert.equal(snapVf.verification.failed, 2, 'FAIL counted')
     assert.equal(snapVf.verification.durationSeconds, 30, 'verification duration derived from envelope timestamps')
     assert.equal(snapVf.attempts[0].durationSeconds, 90, 'attempt duration spans started → terminal timestamp')
+  }
+  // ── 29. TASK-0004.1: activity truthfulness + verification status ────────────
+  {
+    // 29a. attempt verifying event + evidence startedAtUtc → exactly ONE row,
+    // preferring the attempt event; completion row from completedAtUtc.
+    const snapDup = await detailFixture({
+      task: { tasks: [{ ...FIXTURE_TASK.tasks[0], status: 'complete', completedAtUtc: '2026-08-28T17:40:00.000Z' }] },
+      attempts: [
+        { taskId: 'TASK-0042', sequence: 1, status: 'started', startedAtUtc: '2026-08-28T17:20:00.000Z', sessionId: 'session-0001', startedByTurn: '2' },
+        { taskId: 'TASK-0042', sequence: 1, status: 'verifying', timestampUtc: '2026-08-28T17:30:00.000Z', sessionId: 'session-0001' },
+        { taskId: 'TASK-0042', sequence: 1, status: 'passed', timestampUtc: '2026-08-28T17:35:00.000Z', sessionId: 'session-0001' },
+      ],
+      evidence: {
+        schemaVersion: 2, attempt: 1,
+        startedAtUtc: '2026-08-28T17:30:00.000Z', finishedAtUtc: '2026-08-28T17:35:00.000Z',
+        verification: [
+          { name: 'typecheck', kind: 'test', status: 'PASS', exitCode: 0, command: 'tsc', startedAtUtc: '2026-08-28T17:30:05.000Z', finishedAtUtc: '2026-08-28T17:30:20.000Z', attempt: 1 },
+        ],
+        scopePass: true,
+      },
+    })
+    const startsDup = snapDup.snapshot.activity.filter((event) => event.kind === 'verification-started')
+    assert.equal(startsDup.length, 1, 'one verification-start row when the verifying event exists')
+    assert.equal(startsDup[0].detail, 'Verification started · attempt 1', 'verification-start prefers the attempt verifying event')
+    assert.equal(startsDup[0].atUtc, '2026-08-28T17:30:00.000Z', 'verification-start uses the verifying event timestamp')
+    const finishedDup = snapDup.snapshot.activity.filter((event) => event.kind === 'verification-finished')
+    assert.equal(finishedDup.length, 1, 'one verification-finished row')
+    assert.ok(finishedDup[0].detail.includes('1 passed'), 'verification-finished carries the pass count')
+    const attemptsFinishedDup = snapDup.snapshot.activity.filter((event) => event.kind === 'attempt-finished')
+    assert.equal(attemptsFinishedDup.length, 1, 'one attempt-finished row')
+    const completedDup = snapDup.snapshot.activity.filter((event) => event.kind === 'task-completed')
+    assert.equal(completedDup.length, 1, 'one task-completed row')
+    assert.equal(completedDup[0].atUtc, '2026-08-28T17:40:00.000Z', 'completion row uses the authoritative completedAtUtc')
+    assert.equal(completedDup[0].detail, 'Task completed', 'completion row detail is Task completed')
+
+    // 29b. legacy: evidence startedAtUtc without any verifying event → ONE
+    // fallback verification-start row; no synthetic completion row.
+    const snapLegacy = await detailFixture({
+      attempts: [
+        { taskId: 'TASK-0042', sequence: 1, status: 'started', startedAtUtc: '2026-08-28T17:20:00.000Z', sessionId: 'session-0001', startedByTurn: '2' },
+      ],
+      evidence: {
+        schemaVersion: 2, attempt: 1,
+        startedAtUtc: '2026-08-28T17:30:00.000Z', finishedAtUtc: '2026-08-28T17:35:00.000Z',
+        verification: [
+          { name: 'typecheck', kind: 'test', status: 'PASS', exitCode: 0, command: 'tsc', startedAtUtc: '2026-08-28T17:30:05.000Z', finishedAtUtc: '2026-08-28T17:30:20.000Z', attempt: 1 },
+        ],
+        scopePass: true,
+      },
+    })
+    const startsLegacy = snapLegacy.snapshot.activity.filter((event) => event.kind === 'verification-started')
+    assert.equal(startsLegacy.length, 1, 'legacy evidence-only verification-start row is exactly one')
+    assert.equal(startsLegacy[0].detail, 'Verification run started', 'fallback row uses the evidence-started detail')
+    const completedLegacy = snapLegacy.snapshot.activity.filter((event) => event.kind === 'task-completed')
+    assert.equal(completedLegacy.length, 0, 'no synthetic completion row without completedAtUtc')
+
+    // 29c. verification overall status semantics (evidence + endpoint).
+    const mixed = await detailFixture({
+      evidence: {
+        schemaVersion: 2, attempt: 1,
+        startedAtUtc: '2026-08-28T17:30:00.000Z', finishedAtUtc: '2026-08-28T17:35:00.000Z',
+        verification: [
+          { name: 'typecheck', kind: 'test', status: 'PASS', exitCode: 0, command: 'tsc', startedAtUtc: '2026-08-28T17:30:05.000Z', finishedAtUtc: '2026-08-28T17:30:20.000Z', attempt: 1 },
+          { name: 'e2e', kind: 'test', status: 'FAIL', exitCode: 1, command: 'npm run e2e', startedAtUtc: '2026-08-28T17:30:25.000Z', finishedAtUtc: '2026-08-28T17:34:55.000Z', attempt: 1 },
+        ],
+        scopePass: false,
+      },
+    })
+    assert.equal(mixed.snapshot.verification.status, 'failed', '1 PASS + 1 FAIL is failed, never partial')
+    assert.equal(mixed.snapshot.verification.failed, 1, 'failed check counted')
+    assert.equal(mixed.snapshot.verification.passed, 1, 'passed check counted')
+    const failCheck = mixed.snapshot.verification.checks.find((check) => check.status === 'FAIL')
+    assert.equal(failCheck.exitCode, 1, 'failed check exposes the real exit code')
+    assert.equal(failCheck.durationSeconds, 270, 'failed check duration derived from its timestamps')
+    assert.equal(failCheck.command, 'npm run e2e', 'failed check exposes the command')
+    assert.equal(failCheck.startedAtUtc, '2026-08-28T17:30:25.000Z', 'failed check exposes the exact start timestamp')
+    assert.equal(failCheck.finishedAtUtc, '2026-08-28T17:34:55.000Z', 'failed check exposes the exact finish timestamp')
+
+    const allPass29 = await detailFixture({
+      evidence: {
+        schemaVersion: 2, attempt: 1,
+        startedAtUtc: '2026-08-28T17:30:00.000Z', finishedAtUtc: '2026-08-28T17:35:00.000Z',
+        verification: [
+          { name: 'typecheck', kind: 'test', status: 'PASS', exitCode: 0, command: 'tsc', startedAtUtc: '2026-08-28T17:30:05.000Z', finishedAtUtc: '2026-08-28T17:30:20.000Z', attempt: 1 },
+        ],
+        scopePass: true,
+      },
+    })
+    assert.equal(allPass29.snapshot.verification.status, 'passed', 'all checks passed → passed')
+
+    const notRun29 = await detailFixture({ task: { tasks: [{ ...FIXTURE_TASK.tasks[0], verification: null }] } })
+    assert.equal(notRun29.snapshot.verification.status, 'not-run', 'no checks → not-run')
   }
   console.log('PASS: nexus controller panel state layer')
 }
