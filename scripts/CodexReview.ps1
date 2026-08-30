@@ -36,7 +36,7 @@ function Register-AihCodexReviewCall {
     $current=Get-AihTask $Workspace $TaskId
     if([int]$current.codexCalls -ge [int]$Packet.budget.maxCallsPerTask){throw "DO NOT CALL CODEX: call limit exceeded: $($current.codexCalls)/$($Packet.budget.maxCallsPerTask)"}
     Update-AihTaskRecord $Workspace $TaskId {param($item);$item.codexCalls=[int]$item.codexCalls+1}|Out-Null
-    [pscustomobject]@{taskId=$TaskId;executionClass='codex_review';readOnly=$true;freshContext=$true;maxOutputTokens=[int]$Packet.budget.maxOutputTokens;completionAuthority=$false}
+    [pscustomobject]@{taskId=$TaskId;executionClass='reviewer';readOnly=$true;freshContext=$true;maxOutputTokens=[int]$Packet.budget.maxOutputTokens;completionAuthority=$false}
 }
 
 function Test-AihReviewResult {
@@ -55,7 +55,7 @@ function Get-AihReviewOutputText {
 }
 
 function Invoke-AihCodexReview {
-    param([string]$Workspace,[string]$TaskId,[Parameter(Mandatory=$true)]$Packet,[string]$InstallRoot='C:\AI-Harness')
+    param([string]$Workspace,[string]$TaskId,[Parameter(Mandatory=$true)]$Packet,[string]$InstallRoot='C:\AI-Harness',[string]$Model='gpt-5.6-sol',[string]$Reasoning='medium')
     $call=Register-AihCodexReviewCall $Workspace $TaskId $Packet
     $layout=Get-AihLayout $InstallRoot;$versions=Get-AihVersions $InstallRoot;$modelsUrl="$($versions.OAuthBaseUrl)/models"
     if(-not(Test-AihEndpoint $modelsUrl 2)){throw 'Bounded Codex review service is unavailable; start or authenticate the local OAuth service.'}
@@ -66,7 +66,7 @@ REVIEW PACKET
 $($Packet|ConvertTo-Json -Depth 15)
 END REVIEW PACKET
 "@
-    $body=[ordered]@{model='gpt-5.6-sol';input=@([ordered]@{role='user';content=@([ordered]@{type='input_text';text=$prompt})});reasoning=[ordered]@{effort='medium';summary='auto'};max_output_tokens=[int]$Packet.budget.maxOutputTokens;store=$false}
+    $body=[ordered]@{model=$Model;input=@([ordered]@{role='user';content=@([ordered]@{type='input_text';text=$prompt})});reasoning=[ordered]@{effort=$Reasoning;summary='auto'};max_output_tokens=[int]$Packet.budget.maxOutputTokens;store=$false}
     $response=Invoke-RestMethod -Method Post -Uri "$($versions.OAuthBaseUrl)/responses" -Headers @{Authorization='Bearer local-oauth-no-secret'} -ContentType 'application/json; charset=utf-8' -Body ($body|ConvertTo-Json -Depth 20 -Compress) -TimeoutSec 300
     $text=(Get-AihReviewOutputText $response).Trim();if($text-match'(?s)^```(?:json)?\s*(\{.*\})\s*```$'){$text=$Matches[1]}
     try{$result=$text|ConvertFrom-Json}catch{throw 'Codex review returned invalid JSON.'}

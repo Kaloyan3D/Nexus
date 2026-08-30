@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "description": "Engineering Profiles: logical, model-independent role bindings. Routing selects an EXECUTION CLASS; the active profile decides WHICH model fulfills the mapped role. Changing a profile must not require any routing or controller code change.",
+  "profiles": [
+    {
+      "id": "deepseek-codex",
+      "displayName": "DeepSeek + Codex",
+      "description": "Default Nexus behavior: DeepSeek V4 Flash engineers (HIGH normal / MAX deep) with bounded, read-only Codex review and approval-gated Codex solve. Equivalent to the pre-Phase-2 production system.",
+      "roles": {
+        "primaryEngineer": {
+          "model": "deepseek-v4-flash",
+          "reasoning": "high"
+        },
+        "deepEngineer": {
+          "model": "deepseek-v4-flash",
+          "reasoning": "max"
+        },
+        "reviewer": {
+          "model": "gpt-5.6-sol",
+          "reasoning": "medium"
+        },
+        "solver": {
+          "model": "gpt-5.6-sol",
+          "reasoning": "high"
+        },
+        "fallback": {
+          "model": "deepseek-v4-flash",
+          "reasoning": "max"
+        }
+      }
+    },
+    {
+      "id": "glm-codex",
+      "displayName": "GLM + Codex",
+      "description": "GLM engineers (GLM-5.3-Flash primary / GLM-5.3 deep) with bounded, read-only Codex review and approval-gated Codex solve.",
+      "roles": {
+        "primaryEngineer": {
+          "model": "glm-5.3-flash",
+          "reasoning": "high"
+        },
+        "deepEngineer": {
+          "model": "glm-5.3",
+          "reasoning": "max"
+        },
+        "reviewer": {
+          "model": "gpt-5.6-sol",
+          "reasoning": "medium"
+        },
+        "solver": {
+          "model": "gpt-5.6-sol",
+          "reasoning": "high"
+        },
+        "fallback": {
+          "model": "glm-5.3",
+          "reasoning": "max"
+        }
+      }
+    }
+  ]
+}

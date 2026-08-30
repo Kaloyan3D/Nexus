@@ -16,13 +16,15 @@
 // ever activates once the webServer service is available — and if the
 // service arrives AFTER this plugin starts (composition ordering), the
 // injection resolves then, instead of being lost to a one-time lookup.
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync, statSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import status from './status.cjs'
 import detail from './detail.cjs'
 import gate from './gate.cjs'
+import engineering from './engineering.cjs'
 
 const name = 'nexus-controller'
 
@@ -126,6 +128,8 @@ function apply(ctx) {
         sessionId,
         settingsPath,
         statePath,
+        profilesPath: join(installRoot, 'config', 'engineering-profiles.json'),
+        customProfilesPath: join(dataRoot, 'custom-engineering-profile.json'),
         modelNames: modelNames(),
         gitSummary,
         nowUtc: () => generatedAtUtc,
@@ -232,6 +236,8 @@ function apply(ctx) {
             dataRoot,
             sessionId,
             statePath,
+            profilesPath: join(installRoot, 'config', 'engineering-profiles.json'),
+            customProfilesPath: join(dataRoot, 'custom-engineering-profile.json'),
             modelNames: modelNames(),
             gitSummary: await gitSummary(workspace),
             gitFiles: await gitFiles(workspace),
@@ -308,7 +314,118 @@ function apply(ctx) {
       })
     }
 
-    const gateHandler = async (req, res) => {
+    /** Exec the EngineeringProfile.ps1 controller CLI (same shape as
+     *  execPowerShell; free-form payloads travel via a UTF-8 payload file,
+     *  never argv — identical to the Task.ps1 contract). */
+    function execEngineeringProfile(args) {
+      return new Promise((resolve) => {
+        execFile('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'EngineeringProfile.ps1'), ...args], { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
+          if (error) { resolve(null); return }
+          try { resolve(JSON.parse((stdout || '').trim())) } catch { resolve(null) }
+        })
+      })
+    }
+
+    function writePayloadFile(payload) {
+      mkdirSync(join(dataRoot, 'tmp'), { recursive: true })
+      const payloadPath = join(dataRoot, 'tmp', 'aih-engineering-payload-' + randomUUID() + '.json')
+      writeFileSync(payloadPath, JSON.stringify(payload), 'utf8')
+      return payloadPath
+    }
+
+    /** GET  /nexus/engineering-profile.json — read-only editor state. */
+    const engineeringHandler = async (req, res) => {
+      const respond = (statusCode, body) => {
+        res.writeHead(statusCode, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        res.end(JSON.stringify(body))
+      }
+      if (req.method !== 'GET') {
+        respond(405, { ok: false, error: 'method-not-allowed' })
+        return
+      }
+      try {
+        const state = engineering.buildEngineeringProfileState({
+          installRoot,
+          dataRoot,
+          settingsPath,
+          profilesPath: join(installRoot, 'config', 'engineering-profiles.json'),
+          registryPath: join(installRoot, 'config', 'model-registry.json'),
+          customProfilePath: join(dataRoot, 'custom-engineering-profile.json'),
+          nowUtc: () => new Date().toISOString(),
+        })
+        respond(200, state)
+      } catch {
+        respond(500, { ok: false, error: 'engineering-state-failed' })
+      }
+    }
+
+    /** POST /nexus/engineering-profile.json — validated editor actions.
+     *  Only two bounded actions: select (preferred profile) and save-custom
+     *  (persist operator role bindings). The browser sends identifiers +
+     *  bindings; the controller validates authoritatively and writes
+     *  atomically. Never edits config files or ledgers in the browser. */
+    const engineeringActionHandler = async (req, res) => {
+      const respond = (statusCode, body) => {
+        res.writeHead(statusCode, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        res.end(JSON.stringify(body))
+      }
+      if (req.method !== 'POST') {
+        respond(405, { ok: false, error: 'method-not-allowed' })
+        return
+      }
+      const request = await readJsonBody(req)
+      if (!request) {
+        respond(400, { ok: false, error: 'invalid-json-body' })
+        return
+      }
+      const action = String(request.action || '')
+      if (action !== 'select' && action !== 'save-custom') {
+        respond(422, { ok: false, error: 'unknown-action' })
+        return
+      }
+      let payloadPath = null
+      try {
+        let result
+        if (action === 'select') {
+          const profileId = String(request.profileId || '').trim()
+          if (profileId === '') {
+            respond(422, { ok: false, error: 'missing-profile-id' })
+            return
+          }
+          result = await execEngineeringProfile(['-Action', 'select', '-ProfileId', profileId])
+        } else {
+          const roles = request.roles
+          const shapeError = engineering.validateSaveCustomPayload(roles, null)
+          if (shapeError) {
+            respond(422, { ok: false, error: shapeError })
+            return
+          }
+          payloadPath = writePayloadFile({ roles })
+          result = await execEngineeringProfile(['-Action', 'save-custom', '-PayloadFile', payloadPath])
+        }
+        if (!result) {
+          respond(500, { ok: false, error: action === 'select' ? 'select-failed' : 'save-custom-failed' })
+          return
+        }
+        if (result.ok === false) {
+          respond(422, { ok: false, error: String(result.error || 'controller-rejected') })
+          return
+        }
+        respond(200, result)
+      } catch {
+        respond(500, { ok: false, error: 'engineering-action-failed' })
+      } finally {
+        if (payloadPath) { try { unlinkSync(payloadPath) } catch { /* best-effort cleanup */ } }
+      }
+    }
+
+        const gateHandler = async (req, res) => {
       const respond = (statusCode, body) => {
         res.writeHead(statusCode, {
           'content-type': 'application/json; charset=utf-8',
@@ -379,6 +496,14 @@ function apply(ctx) {
     webCtx.effect(
       () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/gate-action.json', handler: gateHandler }),
       'nexus-controller: operator gate action route',
+    )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/engineering-profile.json', handler: engineeringHandler }),
+      'nexus-controller: engineering profile read route',
+    )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/engineering-profile-action.json', handler: engineeringActionHandler }),
+      'nexus-controller: engineering profile action route',
     )
   })
 }

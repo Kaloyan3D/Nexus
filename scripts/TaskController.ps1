@@ -2,6 +2,29 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Common.ps1')
 
+# ── Phase 2: canonical execution classes ────────────────────────────────────
+# Execution classes describe SEMANTICS, not model identity:
+#   deterministic | engineer_normal | engineer_deep | reviewer | solver
+# Legacy names (deepseek_normal / deepseek_deep / codex_review / codex_solve)
+# remain valid INPUTS so old callers and persisted records keep working; every
+# write is normalized to the canonical name. Readers stay tolerant of legacy
+# names in historical records (they are never rewritten).
+$AihExecutionClassAliases = @{
+    'deepseek_normal' = 'engineer_normal'
+    'deepseek_deep'   = 'engineer_deep'
+    'codex_review'    = 'reviewer'
+    'codex_solve'     = 'solver'
+}
+
+function ConvertTo-AihCanonicalExecutionClass {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $key = $Value.Trim().ToLowerInvariant()
+    if ($AihExecutionClassAliases.ContainsKey($key)) { return $AihExecutionClassAliases[$key] }
+    return $key
+}
+
+
 function Get-AihLedgerLayout {
     param([Parameter(Mandatory = $true)][string]$Workspace)
     $workspacePath = [IO.Path]::GetFullPath($Workspace)
@@ -62,7 +85,7 @@ function New-AihTask {
         [string[]]$AcceptanceCriteria = @(), [string[]]$DependsOn = @(),
         [ValidateSet('low','normal','high','critical')][string]$Risk = 'normal', [string]$BaseCommit,
         [switch]$ReviewRequested,
-        [ValidateSet('deterministic','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClassOverride
+        [ValidateSet('deterministic','engineer_normal','engineer_deep','reviewer','solver','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClassOverride
     )
     $layout = Initialize-AihTaskLedger $Workspace
     $mutex=[Threading.Mutex]::new($false,(Get-AihLedgerMutexName $Workspace));$taken=$false
@@ -73,7 +96,7 @@ function New-AihTask {
         try { $BaseCommit = (& git -C $layout.Workspace rev-parse HEAD 2>$null | Select-Object -First 1).Trim() } catch { $BaseCommit = $null }
     }
     $taskId = 'TASK-{0:D4}' -f [int]$ledger.nextSequence
-    $initialExecutionClass = if (-not [string]::IsNullOrWhiteSpace($ExecutionClassOverride)) { $ExecutionClassOverride } else { 'deepseek_normal' }
+    $initialExecutionClass = if (-not [string]::IsNullOrWhiteSpace($ExecutionClassOverride)) { ConvertTo-AihCanonicalExecutionClass $ExecutionClassOverride } else { 'engineer_normal' }
     $task = [ordered]@{
         schemaVersion = 1; taskId = $taskId; description = $Description; status = 'ready'; dependencies = @($DependsOn)
         baseCommit = $BaseCommit; executionClass = $initialExecutionClass; executor = $initialExecutionClass; attempt = 0; maxAttempts = 3
@@ -132,7 +155,7 @@ function Get-AihLatestAttempt {
 }
 
 function Start-AihTaskAttempt {
-    param([string]$Workspace, [string]$TaskId, [ValidateSet('deterministic','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClass = 'deepseek_normal', [switch]$RequireNoOpenAttempt, [string]$SessionId, [string]$StartedByTurn)
+    param([string]$Workspace, [string]$TaskId, [ValidateSet('deterministic','engineer_normal','engineer_deep','reviewer','solver','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClass = 'engineer_normal', [switch]$RequireNoOpenAttempt, [string]$SessionId, [string]$StartedByTurn)
     $layout = Initialize-AihTaskLedger $Workspace
     $task = Update-AihTaskRecord $Workspace $TaskId {
         param($item)
@@ -145,9 +168,9 @@ function Start-AihTaskAttempt {
                 throw "An attempt is already open for task $TaskId (status $($latest.status)); duplicate start is rejected."
             }
         }
-        $item.attempt = [int]$item.attempt + 1; $item.status = 'implementing'; $item.executionClass = $ExecutionClass; $item.executor = $ExecutionClass
+        $item.attempt = [int]$item.attempt + 1; $item.status = 'implementing'; $item.executionClass = (ConvertTo-AihCanonicalExecutionClass $ExecutionClass); $item.executor = (ConvertTo-AihCanonicalExecutionClass $ExecutionClass)
     }
-    $attempt = [ordered]@{ attemptId = "$TaskId-A$($task.attempt)"; taskId = $TaskId; workspace = $Workspace; sequence = [int]$task.attempt; executionClass = $ExecutionClass; status = 'started'; startedAtUtc = [DateTime]::UtcNow.ToString('o') }
+    $attempt = [ordered]@{ attemptId = "$TaskId-A$($task.attempt)"; taskId = $TaskId; workspace = $Workspace; sequence = [int]$task.attempt; executionClass = (ConvertTo-AihCanonicalExecutionClass $ExecutionClass); status = 'started'; startedAtUtc = [DateTime]::UtcNow.ToString('o') }
     if (-not [string]::IsNullOrWhiteSpace($SessionId)) { $attempt['sessionId'] = $SessionId }
     if (-not [string]::IsNullOrWhiteSpace($StartedByTurn)) { $attempt['startedByTurn'] = $StartedByTurn }
     Add-AihJsonLine (Join-Path (Join-Path $layout.Runs $TaskId) 'attempts.jsonl') $attempt
@@ -189,9 +212,9 @@ function Add-AihTaskFailure {
 }
 
 function Set-AihTaskExecutionClass {
-    param([string]$Workspace,[string]$TaskId,[ValidateSet('deterministic','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClass,[string]$Reason)
+    param([string]$Workspace,[string]$TaskId,[ValidateSet('deterministic','engineer_normal','engineer_deep','reviewer','solver','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClass,[string]$Reason)
     $layout=Initialize-AihTaskLedger $Workspace
-    $task=Update-AihTaskRecord $Workspace $TaskId {param($item);$item.executionClass=$ExecutionClass;$item.executor=$ExecutionClass}
+    $task=Update-AihTaskRecord $Workspace $TaskId {param($item);$item.executionClass=(ConvertTo-AihCanonicalExecutionClass $ExecutionClass);$item.executor=(ConvertTo-AihCanonicalExecutionClass $ExecutionClass)}
     Add-AihJsonLine $layout.Decisions ([ordered]@{timestampUtc=[DateTime]::UtcNow.ToString('o');kind='execution-class-selected';taskId=$TaskId;executionClass=$ExecutionClass;reason=$Reason;completionAuthority=$false})
     $task
 }
@@ -226,12 +249,12 @@ function Test-AihTaskCompletion {
     }
     $reviewRequired = $task.risk -eq 'critical'
     if ($null -ne $task.PSObject.Properties['reviewRequested'] -and [bool]$task.reviewRequested) { $reviewRequired = $true }
-    if ($null -ne $task.PSObject.Properties['executionClassOverride'] -and [string]$task.executionClassOverride -eq 'codex_review') { $reviewRequired = $true }
+    if ($null -ne $task.PSObject.Properties['executionClassOverride'] -and (ConvertTo-AihCanonicalExecutionClass ([string]$task.executionClassOverride)) -eq 'reviewer') { $reviewRequired = $true }
     if ($reviewRequired -and -not ($CodexReviewPassed -or $CodexFindingsResolved)) { $reasons.Add('This task requires a passing bounded Codex review or deterministic evidence that its findings were resolved (critical policy, explicit review request, or execution-class override).') }
     $complete = $reasons.Count -eq 0
     if ($complete) {
         Update-AihTaskRecord $Workspace $TaskId { param($item); $item.status = 'complete'; $item.completedAtUtc = [DateTime]::UtcNow.ToString('o') } | Out-Null
-        $summary = "# $TaskId`n`nStatus: COMPLETE`n`nExecution class: $($task.executionClass)`n`nAttempts: $($task.attempt)`n`nCodex disposition: $(if($CodexReviewPassed){'pass'}elseif($CodexFindingsResolved){'findings resolved'}else{'not required'})`n`nCompletion authority: deterministic controller`n"
+        $summary = "# $TaskId`n`nStatus: COMPLETE`n`nExecution class: $($task.executionClass)`n`nAttempts: $($task.attempt)`n`nReview disposition: $(if($CodexReviewPassed){'pass'}elseif($CodexFindingsResolved){'findings resolved'}else{'not required'})`n`nCompletion authority: deterministic controller`n"
         Write-AihAtomicText (Join-Path (Join-Path $layout.Runs $TaskId) 'summary.md') $summary
     }
     [pscustomobject]@{ taskId = $TaskId; status = if ($complete) { 'COMPLETE' } else { 'INCOMPLETE' }; complete = $complete; reasons = @($reasons); authority = 'deterministic-controller'; codexRequired = $reviewRequired; codexDisposition = if($CodexReviewPassed){'pass'}elseif($CodexFindingsResolved){'findings-resolved'}else{'none'} }

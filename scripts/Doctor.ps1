@@ -36,7 +36,7 @@ Add-Check 'routing policy' $routingPolicyValid $routingPolicyDetail
 if ($routingPolicyValid) {
     $routineProbe = Get-AihRoutingInitialDecision 'Locate a repository symbol.' $routingPolicy
     $securityProbe = Get-AihRoutingInitialDecision 'Design authentication architecture.' $routingPolicy
-    Add-Check 'routing engine' ($routineProbe.ExecutionClass -eq 'deepseek_normal' -and $securityProbe.ExecutionClass -eq 'deepseek_deep' -and $securityProbe.ReviewRequired) 'deterministic DeepSeek normal/critical probes'
+    Add-Check 'routing engine' ($routineProbe.ExecutionClass -eq 'engineer_normal' -and $securityProbe.ExecutionClass -eq 'engineer_deep' -and $securityProbe.ReviewRequired) 'deterministic engineer normal/critical probes'
 }
 else { Add-Check 'routing engine' $false 'policy unavailable' }
 Add-Check 'routing CLI' (Test-Path -LiteralPath (Join-Path $layout.Bin 'aih-route.cmd')) (Join-Path $layout.Bin 'aih-route.cmd')

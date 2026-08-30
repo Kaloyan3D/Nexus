@@ -34,6 +34,45 @@ const DISPLAY_STATES = [
   'repairing', 'waiting', 'complete', 'failed',
 ]
 
+// Phase 2: execution classes describe semantics, not model identity.
+// Legacy names (deepseek_normal / deepseek_deep / codex_review / codex_solve)
+// stay readable in old records and are normalized for display and state
+// derivation; historical records are never rewritten.
+const EXECUTION_CLASS_ALIASES = {
+  deepseek_normal: 'engineer_normal',
+  deepseek_deep: 'engineer_deep',
+  codex_review: 'reviewer',
+  codex_solve: 'solver',
+}
+const EXECUTION_CLASS_DISPLAY = {
+  deterministic: 'Deterministic',
+  engineer_normal: 'Engineer Normal',
+  engineer_deep: 'Engineer Deep',
+  reviewer: 'Independent Review',
+  solver: 'Solve',
+}
+const EXECUTION_CLASS_ROLES = {
+  deterministic: null,
+  engineer_normal: 'primaryEngineer',
+  engineer_deep: 'deepEngineer',
+  reviewer: 'reviewer',
+  solver: 'solver',
+}
+
+function canonicalExecutionClass(executionClass) {
+  if (typeof executionClass !== 'string' || executionClass === '') return executionClass
+  const key = executionClass.trim().toLowerCase()
+  return EXECUTION_CLASS_ALIASES[key] || key
+}
+
+function executionClassDisplayName(executionClass) {
+  return EXECUTION_CLASS_DISPLAY[canonicalExecutionClass(executionClass)] || executionClass
+}
+
+function roleOfExecutionClass(executionClass) {
+  return EXECUTION_CLASS_ROLES[canonicalExecutionClass(executionClass)] || null
+}
+
 /** Default file reader (UTF-8). */
 function defaultReadFile(filePath) {
   return fs.readFileSync(filePath, 'utf8')
@@ -295,8 +334,9 @@ function deriveFileState(binding, task) {
   if (status === 'implementing' || status === 'ready') {
     // GUI sessions never call begin-attempt, so a live task stays 'ready'
     // through its whole turn; both map to the working family.
-    if (executionClass === 'codex_review') return 'reviewing'
-    if (executionClass === 'deepseek_deep') return 'repairing'
+    const canonical = canonicalExecutionClass(executionClass)
+    if (canonical === 'reviewer') return 'reviewing'
+    if (canonical === 'engineer_deep') return 'repairing'
     return 'working'
   }
   return 'working'
@@ -379,6 +419,52 @@ function parseDefaultModel(settingsText) {
  * preference block (label via the settings display-name map, same source
  * the composer model chip renders). Null when the selection is unknown.
  */
+
+/**
+ * Parse the operator-set `engineering-profile:` key from settings.yaml.
+ * This is the PREFERRED profile (configuration), reported separately from the
+ * RUNNING profile resolved per task — the Control Room never collapses the
+ * two, exactly like PREFERRED vs RUNNING model.
+ */
+function parseEngineeringProfile(settingsText) {
+  if (typeof settingsText !== 'string' || settingsText === '') return null
+  const match = /^engineering-profile:\s*([^\s#\r\n]+)/m.exec(settingsText)
+  if (!match) return null
+  const id = match[1].replace(/^['"]|['"]$/g, '').trim()
+  return id === '' ? null : id
+}
+
+/**
+ * Resolve the PREFERRED engineering profile for display: settings
+ * `engineering-profile:` (operator choice) with displayName from the profile
+ * registry when available. Never consulted for routing.
+ */
+function preferredProfileOf(settingsText, profilesPath, readFile, customProfilesPath) {
+  const profileId = parseEngineeringProfile(settingsText)
+  if (!profileId) return null
+  let displayName = profileId
+  if (profilesPath) {
+    const document = readJson(profilesPath, readFile)
+    if (document && Array.isArray(document.profiles)) {
+      for (const profile of document.profiles) {
+        if (profile && String(profile.id) === profileId) {
+          displayName = String(profile.displayName || profileId)
+          break
+        }
+      }
+    }
+  }
+  // Phase 2.1: the operator-defined CUSTOM profile lives in its own file —
+  // look up its display name when the preferred profile is the custom one.
+  if (displayName === profileId && customProfilesPath) {
+    const custom = readJson(customProfilesPath, readFile)
+    if (custom && custom.schemaVersion === 1 && custom.displayName && String(custom.profileId || 'custom') === profileId) {
+      displayName = String(custom.displayName)
+    }
+  }
+  return { id: profileId, displayName }
+}
+
 function normalizePreference(defaultModel, modelNames) {
   if (!defaultModel || typeof defaultModel !== 'object') return null
   const provider = String(defaultModel.provider || '')
@@ -402,10 +488,23 @@ function normalizeExecution(binding, task, routingState, decision, modelNames) {
   const executionClass = routingState && routingState.executionClass
     ? String(routingState.executionClass)
     : (typeof binding.executionClass === 'string' ? binding.executionClass : null)
+  // Phase 2: role/profile come from the decision record when present (new
+  // records), from the routing state (new states), or are derived from the
+  // execution class (works for legacy records too). The model display name is
+  // the registry display name when the record carries one, with the settings
+  // map as fallback — the UI must report the EFFECTIVE model, never the
+  // configured profile name alone.
+  const recordRole = (decision && decision.role) || (routingState && routingState.role) || null
+  const recordProfile = (decision && decision.profile) || (routingState && routingState.profile) || null
+  const recordProfileDisplay = (decision && decision.profileDisplayName) || (routingState && routingState.profileDisplayName) || null
   return {
     class: executionClass,
+    classDisplay: executionClassDisplayName(executionClass),
+    role: recordRole || roleOfExecutionClass(executionClass),
+    profile: recordProfile,
+    profileDisplayName: recordProfileDisplay,
     provider,
-    model: modelNameOf(provider, modelId, modelNames),
+    model: (decision && decision.modelDisplayName) || modelNameOf(provider, modelId, modelNames),
     modelId,
     reasoning,
     reviewRequired: Boolean(
@@ -534,6 +633,8 @@ async function buildControllerSnapshot(options) {
     sessionId,
     settingsPath,
     statePath,
+    profilesPath,
+    customProfilesPath = null,
     readFile = defaultReadFile,
     modelNames = {},
     gitSummary = null,
@@ -549,6 +650,12 @@ async function buildControllerSnapshot(options) {
   // bound. Never consulted for routing.
   const defaultModel = settingsPath
     ? parseDefaultModel(readJsonSafeText(settingsPath, readFile))
+    : null
+  // PREFERRED profile (operator configuration) — display metadata, reported
+  // next to the RUNNING execution (class/role/model/provider) without ever
+  // being collapsed into it.
+  const preferredProfile = settingsPath
+    ? preferredProfileOf(readJsonSafeText(settingsPath, readFile), profilesPath, readFile, customProfilesPath)
     : null
 
   let task = null
@@ -609,6 +716,7 @@ async function buildControllerSnapshot(options) {
     attempt,
     gate,
     preference: normalizePreference(defaultModel, modelNames),
+    preferredProfile,
     execution: normalizeExecution(binding, taskRecord, routingState, decision, modelNames),
     review: binding ? {
       codexCalls: taskRecord ? taskRecord.codexCalls : 0,
@@ -632,11 +740,20 @@ async function buildControllerSnapshot(options) {
 
 module.exports = {
   DISPLAY_STATES,
+  EXECUTION_CLASS_ALIASES,
+  EXECUTION_CLASS_DISPLAY,
+  EXECUTION_CLASS_ROLES,
+  canonicalExecutionClass,
+  executionClassDisplayName,
+  roleOfExecutionClass,
+  parseEngineeringProfile,
+  preferredProfileOf,
   normalizeWorkspacePath,
   parseDefaultModel,
   normalizePreference,
   defaultReadFile,
   readJson,
+  readJsonSafeText,
   routingStateFileName,
   bindingsOf,
   lastDecisionOf,

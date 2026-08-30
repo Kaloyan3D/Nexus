@@ -6,15 +6,23 @@ The policy lives in `config/routing-policy.json` and maps work into an **executi
 
 ## Execution classes
 
-| Execution class | Typical purpose | Writable | Default provider/model |
-| --- | --- | ---: | --- |
-| `deterministic` | Mechanical checks or lookups that need no LLM | No | none |
-| `deepseek_normal` | Normal implementation and debugging | Yes | DeepSeek V4 Flash, HIGH |
-| `deepseek_deep` | Expanded reasoning after evidence-backed escalation / critical work | Yes | DeepSeek V4 Flash, MAX |
-| `codex_review` | Fresh, bounded, independent review | No | GPT/Codex review path |
-| `codex_solve` | Exceptional explicit user-approved solve | Yes | GPT/Codex solve path |
+Execution classes describe **semantics**, never a model or vendor. The actual
+model for each class is resolved per **engineering profile** (see
+[engineering-profiles.md](engineering-profiles.md)): execution class → role →
+profile → model registry → provider.
 
-Legacy tier names remain compatibility aliases only; they are not the architecture.
+| Execution class | Role | Typical purpose | Writable | Profile-bound model (DeepSeek + Codex) |
+| --- | --- | --- | ---: | --- |
+| `deterministic` | — | Mechanical checks or lookups that need no LLM | No | none |
+| `engineer_normal` | primaryEngineer | Normal implementation and debugging | Yes | DeepSeek V4 Flash, HIGH |
+| `engineer_deep` | deepEngineer | Expanded reasoning after evidence-backed escalation / critical work | Yes | DeepSeek V4 Flash, MAX |
+| `reviewer` | reviewer | Fresh, bounded, independent review | No | GPT/Codex review path |
+| `solver` | solver | Exceptional explicit user-approved solve | Yes | GPT/Codex solve path |
+
+Legacy tier names and pre-Phase-2 class names (`deepseek_normal`,
+`deepseek_deep`, `codex_review`, `codex_solve`) remain compatibility
+aliases only; they are never rewritten in persisted records and normalize on
+read.
 
 ## Normal route
 
@@ -22,7 +30,7 @@ The intended ordinary path is:
 
 ```text
 user engineering request
--> deepseek_normal
+-> engineer_normal
 -> deterministic verification
 -> complete
 ```
@@ -30,12 +38,12 @@ user engineering request
 When evidence justifies escalation:
 
 ```text
-deepseek_normal
+engineer_normal
 -> verification/failure evidence
--> deepseek_deep
+-> engineer_deep
 -> verification
--> bounded codex_review when policy requires it
--> DeepSeek repair
+-> bounded reviewer when policy requires it
+-> deep-engineer repair (same profile)
 -> deterministic completion
 ```
 
@@ -90,7 +98,7 @@ The UI must not silently rewrite the preferred model to match the current route,
 
 Review/escalation decisions do not replace the root executor in the Control Room.
 
-The root executor is the primary non-review/non-escalation route for the task. A later `codex_review` decision remains a review event, not evidence that Codex became the task's root engineer.
+The root executor is the primary non-review/non-escalation route for the task. A later `reviewer` decision remains a review event, not evidence that the reviewer model became the task's root engineer.
 
 ## DeepSeek Only mode
 
@@ -101,6 +109,22 @@ In **DeepSeek Only** mode, OpenAI/Codex inference is disabled. The same task/con
 Routing history is append-only and includes workspace identity. The Control Room scopes records by the authoritative binding's normalized workspace + task ID.
 
 A record with the same task ID from another workspace is not part of the current task.
+
+## Profile resolution
+
+The active engineering profile is resolved in this order (first match wins):
+
+1. `DSH_AIH_PROFILE` environment variable
+2. `AIH_ACTIVE_PROFILE` environment variable
+3. `engineering-profile:` in `data/settings.yaml`
+4. Preset `profile` binding
+5. Policy `defaultProfile`
+
+Presets with `profileOverrideAllowed: false` (DeepSeek Only) ignore global
+overrides. Routing decisions record `profile`, `profileDisplayName`, `role`,
+`provider`, `model`, `modelDisplayName`, `vendor` and `reasoning` (record
+version 4) so the Control Room can report the effective execution without
+re-deriving it.
 
 ## When changing routing
 

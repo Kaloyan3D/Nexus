@@ -1,6 +1,6 @@
 # Nexus
 
-**A deterministic AI engineering harness with DeepSeek as the primary engineer, bounded Codex review, durable task state, and a live Control Room.**
+**A deterministic AI engineering harness with profile-driven engineering execution (DeepSeek + Codex by default, GLM + Codex optional), bounded review, durable task state, and a live Control Room.**
 
 Nexus turns a coding-agent session into a controller-owned engineering workflow. The model implements; the controller owns routing, attempts, verification, completion, and operator gates. The UI observes authoritative state instead of guessing from chat history.
 
@@ -15,29 +15,33 @@ flowchart LR
     U[User] --> UI[Nexus / DSH UI]
     UI --> C[Deterministic Controller]
     C --> R[Routing Policy]
-    R --> D[DeepSeek V4 Flash]
-    D --> V[Deterministic Verification]
+    R --> E[engineer_normal]
+    E --> P[Active Engineering Profile]
+    P --> M[Model Registry]
+    M --> MD[(Provider: DeepSeek / Z.ai / Codex)]
+    E --> V[Deterministic Verification]
     V -->|PASS| C
-    V -->|failure / critical boundary| RV[Bounded Codex Review]
-    RV --> D
+    V -->|failure / critical boundary| RV[Bounded Reviewer]
+    RV --> E
     C --> G[Operator Gate]
     C --> S[Durable Task State]
     S --> CR[Control Room]
 ```
 
-DeepSeek remains the normal root executor. Codex is not a parent agent and is not required for ordinary completion.
+DeepSeek (or the profile's primary engineer) remains the normal root executor. The reviewer is not a parent agent and is not required for ordinary completion.
 
 ## Core features
 
 - **Deterministic task controller** — task identity, execution class, attempts, evidence, verification, failures, review requirements, and completion live outside the model.
-- **Execution classes** — mechanical checks, normal DeepSeek work, deeper DeepSeek reasoning, bounded Codex review, and explicit user-approved Codex solve paths.
+- **Execution classes** — mechanical checks (`deterministic`), normal engineering (`engineer_normal`), deeper reasoning (`engineer_deep`), bounded review (`reviewer`), and explicit user-approved solve (`solver`). Classes are vendor-neutral; models are chosen by the active engineering profile (see [docs/architecture/engineering-profiles.md](docs/architecture/engineering-profiles.md)).
+- **Engineering Profile editor (Phase 2.1)** — the Control Room's Engineering tab lets the operator pick the preferred profile (DeepSeek + Codex / GLM + Codex / Custom) and bind each role to a registered model with a supported reasoning level. All writes are validated by the controller and applied at the next safe execution boundary; RUNNING execution is never rewritten (see [docs/architecture/engineering-profiles.md](docs/architecture/engineering-profiles.md)).
 - **Real attempt lifecycle** — GUI engineering turns create bounded attempts; reloads and reconnects do not create fake retries.
 - **Verification evidence** — `/verify` records per-check command, status, exit code, attempt linkage, timestamps, and overall evidence.
 - **Crash-safe reconciliation** — an interrupted verification is closed truthfully instead of remaining `verifying` forever or silently creating a new attempt.
-- **Bounded Codex review** — fresh, read-only review packets with enforced file, diff, context, output, and call-count limits.
+- **Bounded review** — fresh, read-only review packets with enforced file, diff, context, output, and call-count limits; reviewer model bound by the active profile (this phase: the local Codex/OAuth adapter).
 - **Operator gates** — controller-advertised actions such as Approve / Reject are validated server-side with stale/duplicate protection.
 - **Control Room** — live Overview, Activity, Verification, and Files views backed by authoritative records.
-- **RUNNING vs PREFERRED model visibility** — the UI separates the executor actually routed for the task from the session's preferred model/effort ceiling.
+- **RUNNING vs PREFERRED model visibility** — the UI separates the executor actually routed for the task from the session's preferred model/effort ceiling, and adds the preferred **engineering profile** and the decision's role/profile/provider/model.
 - **Workspace isolation** — identity is resolved as `session -> binding -> normalized workspace + taskId`; same task IDs in different repositories cannot contaminate each other.
 - **Durable state** — JSON/JSONL task records survive model context limits, browser reloads, and Nexus restarts.
 - **Fail-closed behavior** — missing, stale, corrupt, or unauthorized state is not silently converted into successful-looking UI state.

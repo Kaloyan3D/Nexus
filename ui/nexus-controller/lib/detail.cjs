@@ -133,7 +133,7 @@ function routingKindOf(record) {
   const executionClass = String(record.executionClass || record.selectedExecutionClass || '')
   const escalatedFrom = record.escalatedFrom
   const hasEscalation = escalatedFrom !== undefined && escalatedFrom !== null && escalatedFrom !== ''
-  if (executionClass === 'codex_review') return 'review'
+  if (status.canonicalExecutionClass(executionClass) === 'reviewer') return 'review'
   if (hasEscalation) return 'escalation'
   return 'primary'
 }
@@ -334,6 +334,8 @@ async function buildDetailSnapshot({
   sessionId,
   settingsPath,
   statePath,
+  profilesPath,
+  customProfilesPath = null,
   readFile = defaultReadFile,
   modelNames = {},
   gitSummary = null,
@@ -381,8 +383,13 @@ async function buildDetailSnapshot({
       executionClass: record.executionClass ? String(record.executionClass) : null,
       selectedExecutionClass: record.selectedExecutionClass ? String(record.selectedExecutionClass) : null,
       provider: record.provider ? String(record.provider) : null,
-      model: record.model ? status.modelNameOf(String(record.provider || ''), String(record.model), modelNames) : null,
+      model: record.modelDisplayName
+        ? String(record.modelDisplayName)
+        : (record.model ? status.modelNameOf(String(record.provider || ''), String(record.model), modelNames) : null),
       modelId: record.model ? String(record.model) : null,
+      role: record.role ? String(record.role) : status.roleOfExecutionClass(record.executionClass),
+      profile: record.profile ? String(record.profile) : null,
+      profileDisplayName: record.profileDisplayName ? String(record.profileDisplayName) : null,
       reasoning: record.reasoning ? String(record.reasoning) : null,
       writable: typeof record.writable === 'boolean' ? record.writable : null,
       reviewRequired: Boolean(record.reviewRequired),
@@ -570,6 +577,9 @@ async function buildDetailSnapshot({
     },
     task,
     execution,
+    preferredProfile: settingsPath
+      ? status.preferredProfileOf(status.readJsonSafeText(settingsPath, readFile), profilesPath, readFile, customProfilesPath)
+      : null,
     routingHistory,
     lifecycle,
     attempts,

@@ -18,20 +18,23 @@
  *  - exposes DSH_AIH_TASK_ID / DSH_AIH_EXECUTION_CLASS / DSH_AIH_REVIEW_REQUIRED
  *    to the agent environment so the selected execution path is visible;
  *  - posts a visible controller notice into the session so the UI shows the
- *    execution path (NORMAL ENGINEERING vs CODEX REVIEW);
- *  - implements the explicit /codex-review command: TaskController ->
- *    executionClass codex_review -> bounded Review Packet -> hard budget
- *    validation -> ONE fresh read-only Codex review -> ReviewResult ->
- *    telemetry. No DeepSeek audit runs first; the turn is rejected so the
- *    review is controller-owned (0 DeepSeek calls);
+ *    execution path (ENGINEER NORMAL vs INDEPENDENT REVIEW);
+ *  - implements the explicit /review (legacy /codex-review) command:
+ *    TaskController -> execution class reviewer -> bounded Review Packet ->
+ *    hard budget validation -> ONE fresh read-only independent review ->
+ *    ReviewResult -> telemetry. No engineering audit runs first; the turn is
+ *    rejected so the review is controller-owned (0 engineer calls);
  *  - feeds deterministic failure signals (turn errors) into the routing
- *    state, so the same normalized-failure escalation to codex_review works
+ *    state, so the same normalized-failure escalation to the reviewer works
  *    from GUI sessions;
- *  - returns review findings to DeepSeek repair (review-findings signal).
+ *  - returns review findings to the Deep Engineer for repair
+ *    (review-findings signal).
  *
- * Codex is never exposed to the model as a tool: the preset keeps
+ * The reviewer is never exposed to the model as a tool: the preset keeps
  * tool-subagent-codex disabled and the review service is invoked only by this
  * controller bridge, always through New-AihReviewPacket budget enforcement.
+ * The reviewer model is resolved from the ACTIVE ENGINEERING PROFILE (the
+ * reviewer role); it can never become the root engineering model.
  */
 
 const { execFile } = require('node:child_process')
@@ -41,7 +44,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
 
-const REVIEW_COMMAND = /^\s*\/codex-review\b/i
+const REVIEW_COMMAND = /^\s*\/(?:codex-)?review\b/i
 const VERIFY_COMMAND = /^\s*\/verify\b/i
 const MAX_FILES = 8
 const MAX_CONTEXT_TOKENS = 30000
@@ -55,6 +58,12 @@ function isReviewCommand(text) {
 
 function isVerifyCommand(text) {
   return typeof text === 'string' && VERIFY_COMMAND.test(text)
+}
+
+/** True when an execution class is the read-only reviewer class (canonical
+ *  or legacy alias), so old persisted classes keep working. */
+function isReviewClass(executionClass) {
+  return canonicalExecutionClass(executionClass) === 'reviewer'
 }
 
 /**
@@ -99,7 +108,7 @@ function verificationCliStdout(error) {
 
 function reviewQuestionOf(text) {
   if (typeof text !== 'string') return ''
-  const match = text.match(/^\s*\/codex-review\b[\s:]*(.*)$/is)
+  const match = text.match(/^\s*\/(?:codex-)?review\b[\s:]*(.*)$/is)
   return match ? match[1].trim() : text.trim()
 }
 
@@ -198,19 +207,31 @@ function isWorkerAgent(header) {
   return Boolean(header && (header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0))
 }
 
+// Phase 2: labels describe EXECUTION SEMANTICS, never model identity. The
+// actual model/provider for a run is reported separately (routing decision
+// fields), so the UI never implies a vendor from the execution class.
+const EXECUTION_CLASS_LABELS = {
+  deterministic: 'Deterministic',
+  engineer_normal: 'Engineer \u00b7 Normal',
+  engineer_deep: 'Engineer \u00b7 Deep',
+  reviewer: 'Independent Review (read-only, bounded)',
+  solver: 'Solve (writable, approval-gated)',
+}
+const LEGACY_EXECUTION_CLASS_ALIASES = {
+  deepseek_normal: 'engineer_normal',
+  deepseek_deep: 'engineer_deep',
+  codex_review: 'reviewer',
+  codex_solve: 'solver',
+}
+
+function canonicalExecutionClass(executionClass) {
+  if (typeof executionClass !== 'string' || executionClass === '') return executionClass
+  const key = executionClass.trim().toLowerCase()
+  return LEGACY_EXECUTION_CLASS_ALIASES[key] || key
+}
+
 function executionClassLabel(executionClass) {
-  switch (executionClass) {
-    case 'codex_review':
-      return 'Codex Review (read-only, bounded)'
-    case 'deepseek_deep':
-      return 'DeepSeek Deep'
-    case 'deterministic':
-      return 'Deterministic'
-    case 'codex_solve':
-      return 'Codex Solve (writable, approval-gated)'
-    default:
-      return 'DeepSeek Normal'
-  }
+  return EXECUTION_CLASS_LABELS[canonicalExecutionClass(executionClass)] || 'Engineer \u00b7 Normal'
 }
 
 function createControllerMessage(text, form) {
@@ -464,7 +485,7 @@ function apply(ctx) {
   }
 
   async function beginAttempt(binding, turn) {
-    return invokePowerShell('Task.ps1', ['-Action', 'begin-attempt', '-TaskId', binding.taskId, '-ExecutionClass', binding.executionClass || 'deepseek_normal'], {
+    return invokePowerShell('Task.ps1', ['-Action', 'begin-attempt', '-TaskId', binding.taskId, '-ExecutionClass', binding.executionClass || 'engineer_normal'], {
       payload: {
         workspace: binding.workspace,
         sessionId: binding.sessionId,
@@ -751,7 +772,7 @@ function apply(ctx) {
   function reviewResultText(binding, summary, raw) {
     const lines = [
       'Controller review result · task ' + binding.taskId,
-      'Execution: Codex Review (read-only, bounded)',
+      'Execution: Independent Review (read-only, bounded)',
       'Verdict: ' + summary.verdict,
       'Findings: ' + summary.findings + (summary.severities.length ? ' (' + summary.severities.join(', ') + ')' : ''),
       'Provider: ' + summary.provider + ' · model: ' + summary.model + ' · calls: ' + summary.callCount,
@@ -784,7 +805,7 @@ function apply(ctx) {
         appendMessage(
           session,
           createControllerMessage(
-            'Controller review rejected · task ' + taskId + '\nCodex was NOT called (hard budget validation failed).\nViolations: ' +
+            'Controller review rejected · task ' + taskId + '\nThe reviewer was NOT called (hard budget validation failed).\nViolations: ' +
               (Array.isArray(review.violations) ? review.violations.join('; ') : 'unknown') +
               '\nRead-only: true · completion authority: controller',
             'review-packet-too-large',
@@ -980,7 +1001,7 @@ function apply(ctx) {
         log({ event: 'attempt-reconcile-failed', sessionId: session.id, taskId: binding.taskId, error: String(error) })
       }
 
-      if (binding.executionClass === 'codex_review') {
+      if (isReviewClass(binding.executionClass)) {
         const decision = await routeTask(binding.workspace, binding.taskId, promptText, {
           preset: binding.preset,
           signal: 'review-findings',
@@ -989,7 +1010,7 @@ function apply(ctx) {
         appendMessage(
           session,
           createControllerMessage(
-            'Controller: bounded review findings returned to DeepSeek for repair. Execution: ' + executionClassLabel(decision.executionClass) + '. Codex does not remain the parent.',
+            'Controller: bounded review findings returned to the Deep Engineer for repair. Execution: ' + executionClassLabel(decision.executionClass) + '. The reviewer does not remain the parent.',
             'controller-repair',
           ),
         )
@@ -999,12 +1020,12 @@ function apply(ctx) {
       if (binding.needsRouteCheck) {
         binding.needsRouteCheck = false
         const decision = await routeTask(binding.workspace, binding.taskId, promptText, { preset: binding.preset })
-        if (decision.executionClass === 'codex_review') {
+        if (isReviewClass(decision.executionClass)) {
           binding.executionClass = decision.executionClass
           appendMessage(
             session,
             createControllerMessage(
-              'Controller: repeated identical failure reached the configured threshold; escalating to bounded Codex review. Execution: ' + executionClassLabel('codex_review'),
+              'Controller: repeated identical failure reached the configured threshold; escalating to bounded independent review. Execution: ' + executionClassLabel('reviewer'),
               'controller-escalation',
             ),
           )
@@ -1055,7 +1076,7 @@ function apply(ctx) {
           appendMessage(
             session,
             createControllerMessage(
-              'Codex review unavailable: controller bridge failed.\n' + message + '\nNo files were modified; no model call was made; completion authority remains with the controller.',
+              'Independent review unavailable: controller bridge failed.\n' + message + '\nNo files were modified; no model call was made; completion authority remains with the controller.',
               'controller-error',
             ),
           )
@@ -1106,6 +1127,8 @@ module.exports.textOf = textOf
 module.exports.isUserPrompt = isUserPrompt
 module.exports.userPromptMessages = userPromptMessages
 module.exports.executionClassLabel = executionClassLabel
+module.exports.canonicalExecutionClass = canonicalExecutionClass
+module.exports.isReviewClass = isReviewClass
 module.exports.isWorkerAgent = isWorkerAgent
 module.exports.createControllerMessage = createControllerMessage
 module.exports.parseCliJson = parseCliJson

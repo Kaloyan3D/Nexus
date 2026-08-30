@@ -123,6 +123,27 @@ Typical envelope sections include:
 
 The detail path is cached against source-file changes with a bounded lifetime; Git detail has its own shorter cache.
 
+## Execution class, role, profile, provider, model (Phase 2)
+
+The Control Room reports the **effective** execution, never the configured
+name alone:
+
+- **Execution class** — canonical semantics (`engineer_normal`,
+  `engineer_deep`, `reviewer`, `solver`, `deterministic`); legacy class
+  names in old records stay readable and display through the canonical labels;
+- **Role** — `primaryEngineer`, `deepEngineer`, `reviewer`, `solver` —
+  from the routing decision when present, else derived from the class;
+- **Profile** — the active engineering profile (id + display name) that
+  produced the running model;
+- **Provider / model / reasoning** — the concrete endpoint and effort from
+  the routing record.
+
+Additionally the room shows a **Preferred profile** (operator choice from
+`engineering-profile:` in settings.yaml) next to the preferred root executor.
+PREFERRED (configuration) and RUNNING (decision record) are never collapsed:
+a GLM preferred profile can coexist with a running DeepSeek decision and vice
+versa.
+
 ## RUNNING vs PREFERRED
 
 Nexus intentionally shows two different concepts near the composer:
@@ -143,7 +164,7 @@ A MAX preference does not force every task to execute at MAX if deterministic ro
 
 The root executor is the task's primary route. Later review/escalation records do not replace it.
 
-A `codex_review` record remains review metadata; it does not make Codex appear as the task's root engineer.
+A `reviewer` record remains review metadata; it does not make the reviewer model appear as the task's root engineer.
 
 ## Operator gates
 
@@ -214,7 +235,19 @@ ui/nexus-controller/lib/index.js
 ui/nexus-controller/lib/status.cjs
 ui/nexus-controller/lib/detail.cjs
 ui/nexus-controller/lib/gate.cjs
+ui/nexus-controller/lib/engineering.cjs
 ui/nexus-controller/lib/client.js
 ```
+
+## Phase 2.1: Engineering Profile editor
+
+The room gained an **Engineering** tab: a compact operator editor that picks
+the PREFERRED engineering profile (built-ins or Custom) and binds each role to
+a registered model. Reads are served by
+`ui/nexus-controller/lib/engineering.cjs` (pure adapter over the same files
+the controller reads); writes go through
+`POST /nexus/engineering-profile-action.json` → `scripts/EngineeringProfile.ps1`
+which validates capabilities and writes atomically. See
+[engineering-profiles.md](engineering-profiles.md) for the full contract.
 
 For detailed phase history and upstream-patching notes, see [../nexus-ui.md](../nexus-ui.md).

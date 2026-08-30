@@ -6,6 +6,8 @@ agent-default-model:
 agent-presets:
   default: aih-engineering
 
+engineering-profile: deepseek-codex
+
 llm-pi-ai:
   providers:
     sol-local:
@@ -69,6 +71,23 @@ llm-pi-ai:
             off:
             high: high
             max: max
-
+    zai-direct:
+      displayName: Z.ai GLM (direct)
+      apiKeyEnv: ZAI_API_KEY
+      api: openai-completions
+      baseURL: https://api.z.ai/api/paas/v4
+      reasoning: high
+      models:
+        - id: glm-5.3-flash
+          name: GLM-5.3-Flash
+          reasoningEfforts:
+            off:
+            high: high
+        - id: glm-5.3
+          name: GLM-5.3
+          reasoningEfforts:
+            off:
+            high: high
+            max: max
 ui-theme:
   preference: dark
