@@ -109,7 +109,7 @@ aih-task -Action create-task `
 aih-task -Action begin-attempt -TaskId TASK-0001
 aih-route "Поправи грешката при запис" -TaskId TASK-0001
 
-a ih-context -Operation bundle `
+aih-context -Operation bundle `
   -TaskId TASK-0001 `
   -Query "грешка при запис"
 
