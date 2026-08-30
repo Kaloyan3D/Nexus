@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Common.ps1')
 
@@ -112,29 +112,79 @@ function Update-AihTaskRecord {
     }finally{if($taken){$mutex.ReleaseMutex()};$mutex.Dispose()}
 }
 
+# An attempt is OPEN while its latest attempts.jsonl record is one of these
+# statuses; only an open attempt can be extended or closed. This is the
+# authoritative guard against duplicate start events (TASK-0004).
+$AihOpenAttemptStatuses = @('started', 'verifying')
+
+function Get-AihLatestAttempt {
+    param([Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$TaskId)
+    $layout = Get-AihLedgerLayout $Workspace
+    $path = Join-Path (Join-Path $layout.Runs $TaskId) 'attempts.jsonl'
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    $latest = $null
+    foreach ($line in Get-Content -Encoding UTF8 -LiteralPath $path) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try { $record = $line | ConvertFrom-Json } catch { continue }
+        if ($null -ne $record -and [string]$record.taskId -eq $TaskId) { $latest = $record }
+    }
+    return $latest
+}
+
 function Start-AihTaskAttempt {
-    param([string]$Workspace, [string]$TaskId, [ValidateSet('deterministic','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClass = 'deepseek_normal')
+    param([string]$Workspace, [string]$TaskId, [ValidateSet('deterministic','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClass = 'deepseek_normal', [switch]$RequireNoOpenAttempt, [string]$SessionId, [string]$StartedByTurn)
     $layout = Initialize-AihTaskLedger $Workspace
     $task = Update-AihTaskRecord $Workspace $TaskId {
         param($item)
         foreach ($dependency in @($item.dependencies)) { if ((Get-AihTask $Workspace $dependency).status -ne 'complete') { throw "Dependency $dependency is not complete." } }
         if ($item.status -in @('complete','cancelled')) { throw "Cannot begin an attempt for task in state '$($item.status)'." }
         if ([int]$item.attempt -ge [int]$item.maxAttempts) { throw 'Bounded retry limit has been reached.' }
+        if ($RequireNoOpenAttempt) {
+            $latest = Get-AihLatestAttempt $Workspace $TaskId
+            if ($null -ne $latest -and [string]$latest.status -in $AihOpenAttemptStatuses) {
+                throw "An attempt is already open for task $TaskId (status $($latest.status)); duplicate start is rejected."
+            }
+        }
         $item.attempt = [int]$item.attempt + 1; $item.status = 'implementing'; $item.executionClass = $ExecutionClass; $item.executor = $ExecutionClass
     }
-    $attempt = [ordered]@{ attemptId = "$TaskId-A$($task.attempt)"; taskId = $TaskId; sequence = [int]$task.attempt; executionClass = $ExecutionClass; status = 'started'; startedAtUtc = [DateTime]::UtcNow.ToString('o') }
+    $attempt = [ordered]@{ attemptId = "$TaskId-A$($task.attempt)"; taskId = $TaskId; workspace = $Workspace; sequence = [int]$task.attempt; executionClass = $ExecutionClass; status = 'started'; startedAtUtc = [DateTime]::UtcNow.ToString('o') }
+    if (-not [string]::IsNullOrWhiteSpace($SessionId)) { $attempt['sessionId'] = $SessionId }
+    if (-not [string]::IsNullOrWhiteSpace($StartedByTurn)) { $attempt['startedByTurn'] = $StartedByTurn }
     Add-AihJsonLine (Join-Path (Join-Path $layout.Runs $TaskId) 'attempts.jsonl') $attempt
     [pscustomobject]$attempt
+}
+
+# One bounded attempt transition (TASK-0004): verification starts (verifying),
+# verification passes (passed), or the execution was interrupted. Every record
+# carries the producer timestampUtc; open-attempt and transition validation
+# fail closed so a stale or out-of-order event can never corrupt the timeline.
+function Add-AihAttemptEvent {
+    param([string]$Workspace, [string]$TaskId, [ValidateSet('verifying','passed','interrupted')][string]$Status, [string]$FailureSignature, [string]$Evidence, [string]$Reason)
+    $layout = Initialize-AihTaskLedger $Workspace
+    $latest = Get-AihLatestAttempt $Workspace $TaskId
+    if ($null -eq $latest) { throw "No attempt is open for task $TaskId." }
+    $sequence = [int]$latest.sequence
+    if ([string]$latest.status -notin $AihOpenAttemptStatuses) { throw "Attempt $sequence of task $TaskId is already closed ($($latest.status))." }
+    if ($Status -eq 'verifying' -and [string]$latest.status -ne 'started') { throw "Attempt $sequence of task $TaskId cannot re-enter verifying (status $($latest.status))." }
+    if ($Status -eq 'passed' -and [string]$latest.status -ne 'verifying') { throw "Attempt $sequence of task $TaskId cannot pass without a verifying record (status $($latest.status))." }
+    $record = [ordered]@{ attemptId = "$TaskId-A$sequence"; taskId = $TaskId; workspace = $Workspace; sequence = $sequence; status = $Status; timestampUtc = [DateTime]::UtcNow.ToString('o') }
+    if (-not [string]::IsNullOrWhiteSpace($FailureSignature)) { $record['failureSignature'] = $FailureSignature }
+    if (-not [string]::IsNullOrWhiteSpace($Evidence)) { $record['evidence'] = $Evidence }
+    if (-not [string]::IsNullOrWhiteSpace($Reason)) { $record['reason'] = $Reason }
+    Add-AihJsonLine (Join-Path (Join-Path $layout.Runs $TaskId) 'attempts.jsonl') $record
+    [pscustomobject]$record
 }
 
 function Add-AihTaskFailure {
     param([string]$Workspace, [string]$TaskId, [Parameter(Mandatory = $true)][string]$Signature, [string]$Evidence)
     $layout = Initialize-AihTaskLedger $Workspace
+    $latest = Get-AihLatestAttempt $Workspace $TaskId
+    if ($null -eq $latest -or [string]$latest.status -notin $AihOpenAttemptStatuses) { throw "No open attempt to fail for task $TaskId." }
     $task = Update-AihTaskRecord $Workspace $TaskId {
         param($item)
         $item.status = 'failed'; $item.failureSignatures = @($item.failureSignatures) + @($Signature)
     }
-    Add-AihJsonLine (Join-Path (Join-Path $layout.Runs $TaskId) 'attempts.jsonl') ([ordered]@{ taskId = $TaskId; sequence = [int]$task.attempt; status = 'failed'; failureSignature = $Signature; evidence = $Evidence; timestampUtc = [DateTime]::UtcNow.ToString('o') })
+    Add-AihJsonLine (Join-Path (Join-Path $layout.Runs $TaskId) 'attempts.jsonl') ([ordered]@{ attemptId = "$TaskId-A$($task.attempt)"; taskId = $TaskId; workspace = $Workspace; sequence = [int]$task.attempt; status = 'failed'; failureSignature = $Signature; evidence = $Evidence; timestampUtc = [DateTime]::UtcNow.ToString('o') })
     return $task
 }
 

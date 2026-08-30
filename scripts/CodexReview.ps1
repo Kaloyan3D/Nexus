@@ -1,11 +1,11 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Common.ps1')
 . (Join-Path $PSScriptRoot 'TaskController.ps1')
 
 function Get-AihCodexBudget { param([object]$Policy) $Policy.codex.automaticReview }
 function New-AihReviewPacket {
-    param([string]$Workspace,[string]$TaskId,[string]$Question,[string[]]$Invariants=@(),[string]$Diff,[object[]]$RelevantFiles=@(),[object[]]$FailingEvidence=@(),[string]$DeepSeekAssessment,[object]$Policy,[switch]$UserApprovedFullRepo,[ValidateSet('bundle','files','inline')][string]$ContextMode='bundle')
+    param([string]$Workspace,[string]$TaskId,[string]$Question,[string[]]$Invariants=@(),[string]$Diff,[object[]]$RelevantFiles=@(),[object[]]$FailingEvidence=@(),[string]$DeepSeekAssessment,[object]$Policy,[switch]$UserApprovedFullRepo,[ValidateSet('bundle','files','inline')][string]$ContextMode='bundle',[string]$Attempt)
     $budget=Get-AihCodexBudget $Policy
     if($null -eq $Invariants){$Invariants=@()};if($null -eq $FailingEvidence){$FailingEvidence=@()}
     # ConvertFrom-Json yields $null for '[]' and @($null) for a single null;
@@ -24,7 +24,7 @@ function New-AihReviewPacket {
     $task=Get-AihTask $Workspace $TaskId
     if([int]$task.codexCalls -ge [int]$budget.maxCallsPerTask){$violations.Add("call limit exceeded: $($task.codexCalls)/$($budget.maxCallsPerTask)")}
     $allowed=$violations.Count -eq 0
-    $packet=[ordered]@{schemaVersion=1;taskId=$TaskId;question=$Question;invariants=@($Invariants);diff=$Diff;relevantFiles=@($RelevantFiles);failingEvidence=@($FailingEvidence);deepseekAssessment=$DeepSeekAssessment;requestedAction='Return a bounded independent review; do not modify files or declare task completion.';contextMode=$ContextMode;budget=[ordered]@{maxCallsPerTask=[int]$budget.maxCallsPerTask;maxFiles=[int]$budget.maxFiles;maxDiffLines=[int]$budget.maxDiffLines;maxContextTokens=[int]$budget.maxContextTokens;maxOutputTokens=[int]$budget.maxOutputTokens};enforcement=[ordered]@{allowed=$allowed;violations=@($violations);estimatedContextTokens=$estimatedTokens;diffLines=$diffLines;readOnly=$true;freshContext=$true;completionAuthority=$false}}
+    $packet=[ordered]@{schemaVersion=1;taskId=$TaskId;question=$Question;invariants=@($Invariants);diff=$Diff;relevantFiles=@($RelevantFiles);failingEvidence=@($FailingEvidence);deepseekAssessment=$DeepSeekAssessment;requestedAction='Return a bounded independent review; do not modify files or declare task completion.';contextMode=$ContextMode;requestedAtUtc=[DateTime]::UtcNow.ToString('o');attempt=$(if([string]::IsNullOrWhiteSpace($Attempt)){$null}else{[string]$Attempt});budget=[ordered]@{maxCallsPerTask=[int]$budget.maxCallsPerTask;maxFiles=[int]$budget.maxFiles;maxDiffLines=[int]$budget.maxDiffLines;maxContextTokens=[int]$budget.maxContextTokens;maxOutputTokens=[int]$budget.maxOutputTokens};enforcement=[ordered]@{allowed=$allowed;violations=@($violations);estimatedContextTokens=$estimatedTokens;diffLines=$diffLines;readOnly=$true;freshContext=$true;completionAuthority=$false}}
     $layout=Initialize-AihTaskLedger $Workspace
     Write-AihAtomicJson (Join-Path (Join-Path $layout.Runs $TaskId) 'review-packet.json') $packet
     [pscustomobject]$packet
@@ -71,6 +71,7 @@ END REVIEW PACKET
     $text=(Get-AihReviewOutputText $response).Trim();if($text-match'(?s)^```(?:json)?\s*(\{.*\})\s*```$'){$text=$Matches[1]}
     try{$result=$text|ConvertFrom-Json}catch{throw 'Codex review returned invalid JSON.'}
     $validated=Test-AihReviewResult $result;$ledger=Initialize-AihTaskLedger $Workspace
+    $validated.result | Add-Member -NotePropertyName completedAtUtc -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
     Write-AihAtomicJson (Join-Path (Join-Path $ledger.Runs $TaskId) 'review-result.json') $validated.result
     $validated.result
 }

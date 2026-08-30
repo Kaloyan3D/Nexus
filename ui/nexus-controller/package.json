@@ -18,6 +18,12 @@
     "./status": {
       "default": "./lib/status.cjs"
     },
+    "./detail": {
+      "default": "./lib/detail.cjs"
+    },
+    "./gate": {
+      "default": "./lib/gate.cjs"
+    },
     "./package.json": "./package.json"
   },
   "dsh": {
@@ -34,6 +40,8 @@
   "files": [
     "lib/index.js",
     "lib/client.js",
-    "lib/status.cjs"
+    "lib/status.cjs",
+    "lib/detail.cjs",
+    "lib/gate.cjs"
   ]
 }

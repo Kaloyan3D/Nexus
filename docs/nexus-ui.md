@@ -532,6 +532,31 @@ against the live composition), `ui/nexus-controller/tools/cold-restart-verify.mj
 (cold-restart + post-restart route verification driver).
 Changed: `lib/status.cjs` — executor selection prefers the last
 non-escalation decision; `lib/client.js` — attempt 0 renders `—`;
+(TASK-0004) `lib/status.cjs` — `attempt` + `gate` snapshot fields and
+pure readers (`latestAttemptOfTask`, `currentGateOf`, normalizers);
+`lib/detail.cjs` — full attempt status set (verifying/passed/interrupted),
+per-attempt verification with producer timestamps and derived durations,
+review `requestedAtUtc`/`completedAtUtc` + attempt linkage, `gates`
+(current + history), `activity` timeline of real recorded events;
+`lib/index.js` — POST `/nexus/gate-action.json` (identifier-only body,
+server-side validation, requestId idempotency, serialized mutations) and
+gates journals in the mtime-keyed cache; `lib/client.js` — OPERATOR ACTION
+REQUIRED section with buttons from `allowedActions` only, pending-disable,
+non-crashing stale notices, compact gate badge, Attempt section (old tasks
+render `—`), Activity from real records, per-attempt Verification tab;
+`lib/gate.cjs` — shared gate journal module (ensure/validate/resolve/
+supersede, identity-isolated); `config/AihController.cjs` — attempt start
+guard + durable turn identity, turn/end failure/interrupt recording,
+crash reconciliation, `/verify` controller-owned verification, gate
+creation on review FAIL + supersede on PASS, review attempt linkage;
+`scripts/TaskController.ps1` — `Start-AihTaskAttempt` guard
+(`-RequireNoOpenAttempt`, sessionId/startedByTurn identity),
+`Add-AihAttemptEvent` (verifying/passed/interrupted transitions),
+`Get-AihLatestAttempt`; `scripts/Task.ps1` — begin-attempt/attempt-event/
+evidence actions; `scripts/Verify-Project.ps1` — per-check producer
+timestamps; `scripts/CodexReview.ps1`/`Review.ps1` — `requestedAtUtc`/
+`completedAtUtc` + attempt linkage; `scripts/Patch-NexusUi.ps1` — sidebar
+reopen-width pair (completes the 288px patch the docs already claimed);
 `scripts/TaskController.ps1`, `scripts/Route.ps1`,
 `scripts/Complete-Objective.ps1` — every state read that carries
 user-derived text now uses `Get-Content -Encoding UTF8` (the
@@ -641,15 +666,124 @@ the ledger byte-compared via `[IO.File]::ReadAllText` UTF-8) and section
 authoritative routing decision, the run manifest is restored too, and a
 second driver run is a byte-exact no-op).
 
+## Phase 4 — Execution Lifecycle & Operator Gates (TASK-0004)
+
+The Control Room previously derived its timeline from conversation-adjacent
+state; an execution could complete real work while task.attempt stayed 0.
+Phase 4 makes the GUI lifecycle controller-owned end to end:
+
+task bound → attempt started → execution → verification started →
+verification checks → verification finished → pass/fail → retry / review /
+operator gate / complete
+
+### Producers (who writes what, where)
+
+| Event | Producer | Record | Timestamps |
+| --- | --- | --- | --- |
+| attempt start | bridge (pre-step, engineering turns only) | <ws>/.ai-harness/runs/<task>/attempts.jsonl via Start-AihTaskAttempt | startedAtUtc |
+| attempt failure | bridge (turn/end error) | attempts.jsonl via Add-AihTaskFailure | timestampUtc |
+| attempt interrupt | bridge (turn/end aborted/interrupted) | attempts.jsonl via Add-AihAttemptEvent | timestampUtc |
+| verification start/end | bridge (/verify command) | attempts.jsonl (verifying), then evidence.json | timestampUtc, startedAtUtc/finishedAtUtc |
+| verification checks | Verify-Project.ps1 | evidence.json verification[] | per-check StartedAtUtc/FinishedAtUtc |
+| review request/result | review service | review-packet.json / review-result.json | requestedAtUtc / completedAtUtc |
+| operator gate | bridge (review FAIL + review required) | data/completion/gates.jsonl (append-only journal) | createdAtUtc / resolvedAtUtc |
+| gate action | server route | gates.jsonl + gate-actions.jsonl (requestId journal) | resolvedAtUtc |
+
+The UI never writes or timestamps anything: status.cjs/detail.cjs read the
+records and only DERIVE durations (and omit them when unavailable).
+
+### Attempt identity and idempotency
+
+- One execution = exactly one attempt. The ledger's open-attempt guard
+  (Start-AihTaskAttempt -RequireNoOpenAttempt) is authoritative; the
+  bridge passes the durable turn identity (startedByTurn), so reload,
+  reconnect and restart never add an attempt.
+- A retry is a new attempt only after the previous one closed; maxAttempts
+  (3) still bounds retries.
+- Crash recovery: pre-step reconciliation closes an attempt left in
+  verifying from REAL records only — the evidence artifact for that
+  attempt (passed/failed) or interrupted (verification-incomplete)
+  when the artifact is missing. A restart never silently creates Attempt N+1.
+- Old tasks (attempt 0, no journal) render unchanged; every reader is
+  optional-field aware and schema-version tolerant.
+
+### Operator gates
+
+- A gate opens only at a real bounded decision point: review verdict FAIL
+  while completion requires review. status: waiting → the Control Room
+  Overview leads with the compact high-priority OPERATOR ACTION REQUIRED
+  section; the compact Controller shows a badge only (no buttons).
+- Buttons render ONLY from gate.allowedActions (approve/reject).
+  The browser POSTs identifiers only — {sessionId, gateId, actionId,
+  requestId} — to /nexus/gate-action.json; the server validates the
+  gate is current (revision), the action is advertised, the binding
+  matches, and the requestId is not a replay. A duplicate action can
+  never double-transition; a stale/conflicting response degrades to a
+  quiet notice in the room (never a crash).
+- approve performs the only bounded transition: completion with the
+  review passed (fails closed when verification or criteria are unmet).
+  reject resolves the gate only. A newer PASS verdict supersedes a
+  waiting gate.
+- Gates survive restarts (the journal is the state) and are identity
+  isolated by session + normalized workspace + taskId.
+
+Live acceptance (2026-08-30, gate acceptance driver): a fresh real GUI
+session was bound by the live controller (session-4050d000 → TASK-0011);
+ensureGate — the same module the controller route uses — opened a waiting
+gate with allowedActions exactly [approve, reject]; the room rendered
+OPERATOR ACTION REQUIRED with exactly those buttons; Approve resolved the
+gate (revision +1, resolvedBy operator-gui) and the actions disappeared;
+a duplicate requestId against the resolved gate returned 409
+gate-not-waiting twice (idempotent — no double transition), a fake gateId
+409 gate-stale, and a reject on the approved gate 409 gate-not-waiting;
+the attempt number never increments from a gate action. request-replay
+(200 {ok:false, replay:true}) is the race-protection path for two
+concurrent identical posts while the gate is still open; sequentially it
+is shadowed by gate-not-waiting once the gate resolves. The gate state
+rendered identically at 1920/1280/320 with the room kept open.
+
+### Reading layer
+
+- /nexus/controller.json (compact, polled) gains attempt and gate
+  (light last-record reads).
+- /nexus/control-room.json (cached, mtime-keyed) gains per-attempt
+  verification (attempt, timestamps, derived durations), review timestamps,
+  gates (current + history) and activity — a timeline of ONLY real
+  recorded events (attempts, verification, reviews, gates, routing,
+  lifecycle); entries without producer timestamps are excluded, never
+  synthesized.
+
+### Verification flow (/verify)
+
+/verify (like /codex-review, controller-owned, 0 model calls) closes
+the current open attempt: verifying → Verify-Project.ps1 -Json
+-ContinueOnFailure → evidence.json (attempt-linked, with producer
+timestamps) → attempt passed (then the completion decision: review
+disposition aware, gate ensured on FAIL verdict when required) or failure
+record (signature verification-failed) when any check FAILs. There is no
+inferred attempt: /verify on a session with no open attempt is rejected
+with a notice.
+
+Verify-Project.ps1 reports FAILing checks by exiting 1 while still
+writing valid verification-shaped JSON to stdout; the controller recovers
+that stdout (tolerateNonZeroJson + verificationCliStdout), so a FAILing
+check yields real evidence instead of being mistaken for a crash. A stale
+verifying attempt (record without evidence artifact) is closed as
+interrupted (verification-incomplete) on reconcile — the smallest
+truthful state — and a restart never silently creates Attempt N+1.
+
 ## Known limitations
 
-- The live dsh instance is never restarted during this work (a restart would
-  kill the agent session); the composition is applied LIVE through the
-  Cordis HMR watcher on `data/cordis.patch.yml` — the served boot graph and
-  the served `@nexus/controller` client bundle were re-fetched and
-  verified to be the drawer build, and the final acceptance is the CDP boot
-  verification below against the real running composition.
-- The live instance was cold-restarted as part of the host-route repair
+- The live instance WAS cold-restarted exactly once at the end of
+  TASK-0004 so the staged build (whitelist persistBindings + trace
+  cleanup, presets A388247A) became the actual live code: aih-state
+  READY with a new pid, all /nexus endpoints responsive, session
+  bindings (vnext-e2e → TASK-0005, TASK-0011) persisted across the
+  restart, and attempts/evidence/gates still readable afterwards (the
+  journals are the state). No competing orchestrators ran; acceptance
+  Chrome processes were terminated by PID tree only, never by image
+  name.
+- Earlier in the phase the live instance was cold-restarted as part of the host-route repair
   (the one-time `ctx.get('webServer')` activation check could permanently
   skip the route when the service was late; the route is now bound through
   Cordis lifecycle injection). The restart itself and the post-restart URL
@@ -696,6 +830,20 @@ second driver run is a byte-exact no-op).
   (theme-agnostic by design); the theme preference is store-owned and cannot
   be switched from a headless probe, so the light pass relies on the
   Phase-1 light-theme verification plus the shared token layer.
+- The architecture SEC001 data/tmp fixture no longer exists on the live
+  workspace (the rules skip gitignored runtime/scratch state and the
+  key-setter script no longer matches), so the FAILED-verification pass is
+  covered by the deterministic suites (exit-code matrix, section 29) and
+  authored records; the PASS path was live-proven twice (4/4 checks on
+  C:\AI-Harness, 2/2 on tmp/vnext-e2e).
+- Gate approve fails closed: TASK-0011's gate approved (rev 2) but the
+  task stayed implementing because no evidence existed — completion
+  requires evidence + PASS + scope + review disposition. The demo task was
+  then closed via Task.ps1 -Action failure (attempt failed,
+  failureSignatures [operator-gate-demo]).
+- The e837e738 old-task browser re-verify was skipped per controller:
+  old-task rendering was already accepted in Phase A at all widths, so the
+  gate acceptance used a fresh real session instead.
 
 ## Phase 4 recommendations
 
@@ -715,13 +863,13 @@ begin-attempt; Attempt stays "—" at 0 — a documented limitation).
 2. **Verification artifact deep links.** The room shows the evidence
    artifact path (copyable). When a file-serving endpoint exists with
    authorization, link it — never a general file-read endpoint.
-3. **Operator WAITING signal.** Surface the review-required gate as an
-   explicit operator-wait state once the controller records an operator
-   gate event.
-4. **Per-attempt verification records.** evidence.json has no timestamps or
-   per-attempt breakdown; recording `verificationStartedAtUtc` /
-   `verificationFinishedAtUtc` per attempt would let the room show real
-   verification durations (currently intentionally omitted).
+3. ~~**Operator WAITING signal.**~~ DELIVERED in TASK-0004: a waiting gate
+   surfaces as the OPERATOR badge in the compact Controller plus the
+   OPERATOR ACTION REQUIRED section in the room, buttons from
+   gate.allowedActions only.
+4. ~~**Per-attempt verification records.**~~ DELIVERED in TASK-0004:
+   evidence.json is attempt-linked with producer
+   `startedAtUtc`/`finishedAtUtc`; durations are derived in readers/UI.
 5. **Review timestamps.** review-packet/result files carry no timestamps;
    recording them would let the Activity timeline interleave review
    outcomes chronologically with attempts.
