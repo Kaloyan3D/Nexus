@@ -268,9 +268,15 @@ try{
  Assert-Aih ($dd.provider -eq 'flash-max-direct' -and $dd.model -eq 'deepseek-v4-flash' -and $dd.reasoning -eq 'max') '20: deep execution equivalent (DeepSeek V4 Flash MAX)'
  $r=Invoke-AihRoutingDecision 'audit the boundary' $InstallRoot $layout.RoutingPolicy $equivRoot 'eq-review' 'aih-engineering' -ReviewRequested
  Assert-Aih ($r.provider -eq 'sol-local' -and $r.model -eq 'gpt-5.6-sol' -and $r.reasoning -eq 'medium' -and -not $r.writable) '20: review execution equivalent (Codex, read-only, medium)'
- $mode=Get-AihControlRoomMode $policy 'aih-engineering' (Join-Path (Split-Path -Parent $layout.RoutingPolicy) 'engineering-profiles.json') $layout.Settings
- Assert-Aih ($mode.Profile -eq 'deepseek-codex' -and $mode.ProfileDisplayName -eq 'DeepSeek + Codex') '20: Control Room reports the preferred profile'
- Assert-Aih ($mode.Provider -eq 'flash-max-direct' -and $mode.Model -eq 'deepseek-v4-flash') '20: Control Room preferred root executor unchanged'
+ # Hermetic: the mode resolves the preferred profile from the settings key
+ # when no env override is present — an operator who switches profiles (Phase
+ # 2.1 editor / composer selector) must not flip this suite. Pin the
+ # migration default via the documented top-priority env override.
+ With-AihProfile 'deepseek-codex' {
+  $mode=Get-AihControlRoomMode $policy 'aih-engineering' (Join-Path (Split-Path -Parent $layout.RoutingPolicy) 'engineering-profiles.json') $layout.Settings
+  Assert-Aih ($mode.Profile -eq 'deepseek-codex' -and $mode.ProfileDisplayName -eq 'DeepSeek + Codex') '20: Control Room reports the preferred profile'
+  Assert-Aih ($mode.Provider -eq 'flash-max-direct' -and $mode.Model -eq 'deepseek-v4-flash') '20: Control Room preferred root executor unchanged'
+ }
 }finally{if(Test-Path $equivRoot){Remove-Item -LiteralPath $equivRoot -Recurse -Force}}
 
 Write-Host "RESULT: $passed Phase-2 engineering-profile assertions passed."

@@ -130,6 +130,8 @@ function apply(ctx) {
         statePath,
         profilesPath: join(installRoot, 'config', 'engineering-profiles.json'),
         customProfilesPath: join(dataRoot, 'custom-engineering-profile.json'),
+        policyPath: join(installRoot, 'config', 'routing-policy.json'),
+        registryPath: join(installRoot, 'config', 'model-registry.json'),
         modelNames: modelNames(),
         gitSummary,
         nowUtc: () => generatedAtUtc,

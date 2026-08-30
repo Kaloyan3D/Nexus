@@ -2851,6 +2851,326 @@ async function main() {
     const html = renderToStaticMarkup(jsxRuntime.jsx(moduleExports.ControlRoom, { sessionId: 'session-0001', running: null, onClose() {} }))
     assert.ok(html.includes('>Engineering<'), 'engineering tab button rendered')
   }
+  // ── 34. PHASE 2.2: composer mode gate + preferred engineer (status.cjs) ──
+  {
+    const dataRoot = tmpDir('nexus-ctr-eng2-')
+    const policyPath = path.join(ROOT, 'config', 'routing-policy.json')
+    const registryPath = path.join(ROOT, 'config', 'model-registry.json')
+    const profilesPath = path.join(ROOT, 'config', 'engineering-profiles.json')
+    const settingsPath = path.join(dataRoot, 'settings.yaml')
+    const settingsA = [
+      'agent-default-model:',
+      '  provider: zai-direct',
+      '  model: glm-5.3-flash',
+      '  reasoningEffort: high',
+      '',
+      'agent-presets:',
+      '  default: aih-engineering',
+      '',
+      'engineering-profile: glm-codex',
+      '',
+    ].join('\n')
+    const snapshotOptions = (settingsText, overrides = {}) => {
+      // stateful leftovers from earlier cases must never leak into the next
+      fs.rmSync(path.join(dataRoot, 'routing'), { recursive: true, force: true })
+      fs.rmSync(path.join(dataRoot, 'custom-engineering-profile.json'), { force: true })
+      const files = { 'settings.yaml': settingsText }
+      if (overrides.files) Object.assign(files, overrides.files)
+      delete overrides.files
+      writeTree(dataRoot, files)
+      return {
+        dataRoot,
+        sessionId: 'session-0001',
+        settingsPath,
+        statePath: path.join(dataRoot, 'aih-state.json'),
+        profilesPath,
+        customProfilesPath: path.join(dataRoot, 'custom-engineering-profile.json'),
+        policyPath,
+        registryPath,
+        gitSummary: null,
+        ...overrides,
+      }
+    }
+
+    // 34a. default preset aih-engineering + preferred glm-codex →
+    // engineering composer mode with the GLM PREFERRED engineer
+    const snapA = await status.buildControllerSnapshot(snapshotOptions(settingsA))
+    assert.equal(snapA.composer.mode, 'engineering', 'aih-engineering default opens engineering composer mode')
+    assert.equal(snapA.composer.preset, 'aih-engineering')
+    assert.deepEqual(snapA.composer.preferredEngineer, {
+      profileId: 'glm-codex',
+      profileDisplayName: 'GLM + Codex',
+      modelId: 'glm-5.3-flash',
+      modelDisplayName: 'GLM-5.3-Flash',
+      vendor: 'Z.ai',
+      reasoning: 'high',
+      provider: 'zai-direct',
+    }, 'preferred engineer = profile primaryEngineer resolved through the registry')
+    assert.ok(snapA.preference && snapA.preference.modelId === 'glm-5.3-flash', 'legacy preference block survives (fail-safe display)')
+
+    // 34b. deepseek-codex preferred → DeepSeek V4 Flash · high (DoD example)
+    const snapB = await status.buildControllerSnapshot(snapshotOptions(
+      settingsA.replace('engineering-profile: glm-codex', 'engineering-profile: deepseek-codex'),
+    ))
+    assert.equal(snapB.composer.preferredEngineer.modelDisplayName, 'DeepSeek V4 Flash')
+    assert.equal(snapB.composer.preferredEngineer.reasoning, 'high')
+    assert.equal(snapB.composer.preferredEngineer.provider, 'flash-high-direct')
+
+    // 34c. bound DeepSeek-Only session flips the composer to legacy even
+    // though the settings default is engineering
+    const snapC = await status.buildControllerSnapshot(snapshotOptions(settingsA, {
+      files: {
+        'routing/session-bindings.json': JSON.stringify({
+          schemaVersion: 1,
+          bindings: {
+            'session-0001': {
+              sessionId: 'session-0001',
+              taskId: 'TASK-0002',
+              workspace: 'C:\\ws-legacy',
+              preset: 'aih-deepseek',
+              boundAtUtc: '2026-08-28T18:00:00.000Z',
+            },
+          },
+        }),
+      },
+    }))
+    assert.equal(snapC.composer.mode, 'legacy', 'bound DeepSeek-Only session keeps the legacy composer')
+    assert.equal(snapC.composer.preset, 'aih-deepseek')
+
+    // 34d. settings default aih-deepseek (unbound) → legacy
+    const snapD = await status.buildControllerSnapshot(snapshotOptions(
+      settingsA.replace('default: aih-engineering', 'default: aih-deepseek'),
+    ))
+    assert.equal(snapD.composer.mode, 'legacy', 'aih-deepseek default keeps the shipped selector')
+
+    // 34e. custom preferred profile → primaryEngineer GLM-5.3 · high
+    const customDoc = {
+      schemaVersion: 1,
+      profileId: 'custom',
+      displayName: 'Custom',
+      roles: {
+        primaryEngineer: { model: 'glm-5.3', reasoning: 'high' },
+        deepEngineer: { model: 'glm-5.3', reasoning: 'max' },
+        reviewer: { model: 'gpt-5.6-sol', reasoning: 'medium' },
+        solver: { model: 'gpt-5.6-sol', reasoning: 'high' },
+        fallback: { model: 'glm-5.3', reasoning: 'high' },
+      },
+    }
+    const snapE = await status.buildControllerSnapshot(snapshotOptions(
+      settingsA.replace('engineering-profile: glm-codex', 'engineering-profile: custom'),
+      { files: { 'custom-engineering-profile.json': JSON.stringify(customDoc, null, 2) } },
+    ))
+    assert.equal(snapE.composer.mode, 'engineering')
+    assert.equal(snapE.composer.preferredEngineer.profileId, 'custom')
+    assert.equal(snapE.composer.preferredEngineer.modelDisplayName, 'GLM-5.3')
+    assert.equal(snapE.composer.preferredEngineer.reasoning, 'high')
+
+    // 34f. fail-safe legacy: missing policy / corrupt policy / unknown preset
+    const snapF1 = await status.buildControllerSnapshot(snapshotOptions(settingsA, { policyPath: null }))
+    assert.equal(snapF1.composer.mode, 'legacy', 'missing policy fails safe to legacy')
+    const snapF2 = await status.buildControllerSnapshot(snapshotOptions(settingsA, { policyPath: path.join(dataRoot, 'routing-policy.json') }))
+    assert.equal(snapF2.composer.mode, 'legacy', 'unreadable policy fails safe to legacy')
+    const snapF3 = await status.buildControllerSnapshot(snapshotOptions(
+      settingsA.replace('default: aih-engineering', 'default: aih-unknown'),
+    ))
+    assert.equal(snapF3.composer.mode, 'legacy', 'unknown preset fails safe to legacy')
+
+    // 34g. unsatisfiable preferred binding → no preferred engineer (fail-closed)
+    const snapG = await status.buildControllerSnapshot(snapshotOptions(
+      settingsA.replace('engineering-profile: glm-codex', 'engineering-profile: custom'),
+    ))
+    assert.equal(snapG.composer.preferredEngineer, null, 'missing custom profile file yields no preferred engineer')
+    assert.equal(snapG.composer.mode, 'engineering', 'mode itself still resolves')
+  }
+
+  // ── 35. PHASE 2.2: composer Engineering selector (client.js) ─────────────
+  {
+    const { createRequire } = require('node:module')
+    const requireFromApp = createRequire(path.join(ROOT, 'app', 'package.json'))
+    const react = requireFromApp('react')
+    const jsxRuntime = requireFromApp('react/jsx-runtime')
+    const renderToStaticMarkup = requireFromApp('react-dom/server').renderToStaticMarkup
+    const source = fs.readFileSync(CLIENT, 'utf8')
+    // deterministic snapshot + editor-state injection (same pattern as §30)
+    const hookHeader = 'function useControllerSnapshot(sessionId) {'
+    const editorHeader = 'function useEngineeringEditor(sessionId) {'
+    assert.ok(source.includes(hookHeader) && source.includes(editorHeader), 'shared hooks exist in client.js')
+    const patched = source
+      .replace(hookHeader, hookHeader + '\n\tif (typeof window !== "undefined" && (window.__NX_TEST_SNAPSHOT__ !== undefined || window.__NX_TEST_SNAPSHOT_FAILED__)) return { snapshot: window.__NX_TEST_SNAPSHOT__ ?? null, failed: window.__NX_TEST_SNAPSHOT_FAILED__ === true };')
+      .replace(editorHeader, editorHeader + '\n\tif (typeof window !== "undefined" && window.__NX_TEST_EDITOR__ !== undefined) return window.__NX_TEST_EDITOR__;')
+    let moduleExports = null
+    const sandbox = {
+      console, URL, setTimeout, clearTimeout,
+      window: {
+        __ModuleLoader__: {
+          load(def) {
+            moduleExports = def.factory((name) => {
+              if (name === 'react') return react
+              if (name === 'react/jsx-runtime') return jsxRuntime
+              throw new Error('unexpected require: ' + name)
+            })
+          },
+        },
+        localStorage: { getItem() { return null }, setItem() {} },
+        setInterval() { return 1 },
+        clearInterval() {},
+      },
+      document: { createElement() { return { dataset: {}, remove() {} } }, head: { appendChild() {} } },
+    }
+    vm.createContext(sandbox)
+    vm.runInContext(patched, sandbox)
+    assert.equal(typeof moduleExports.EngineeringSelector, 'function', 'EngineeringSelector exported')
+    assert.equal(typeof moduleExports.EngineeringEditorFields, 'function', 'EngineeringEditorFields exported')
+    assert.equal(typeof moduleExports.useEngineeringEditor, 'function', 'useEngineeringEditor exported')
+    assert.equal(typeof moduleExports.preferredEngineerFromEditorState, 'function', 'preferredEngineerFromEditorState exported')
+
+    // 35a. legacy snapshot (no composer block): unchanged pills-only render —
+    // no trigger button, and the legacy preference label still comes through
+    sandbox.window.__NX_TEST_SNAPSHOT__ = {
+      schemaVersion: 1, generatedAtUtc: new Date().toISOString(), state: 'working',
+      preference: { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash MAX' },
+      execution: { class: 'deepseek_normal', provider: 'flash-high-direct', model: 'DeepSeek V4 Flash', reasoning: 'high' },
+    }
+    sandbox.window.__NX_TEST_SNAPSHOT_FAILED__ = false
+    sandbox.window.__NX_TEST_EDITOR__ = undefined
+    const legacyHtml = renderToStaticMarkup(react.createElement(moduleExports.ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    assert.match(legacyHtml, /data-nexus-preferred/, 'legacy mode still renders the preference pill')
+    assert.match(legacyHtml, /DeepSeek V4 Flash MAX/, 'legacy preference label unchanged (agent-default-model)')
+    assert.ok(!legacyHtml.includes('<button'), 'legacy mode renders no control chrome')
+    assert.ok(!legacyHtml.includes('nx-eng-trigger'), 'legacy mode renders no Engineering selector')
+
+    // 35b. engineering mode: PREFERRED names the profile's primaryEngineer —
+    // never the legacy agent-default-model — plus the Engineering trigger
+    sandbox.window.__NX_TEST_SNAPSHOT__ = {
+      schemaVersion: 1, generatedAtUtc: new Date().toISOString(), state: 'working',
+      composer: {
+        mode: 'engineering',
+        preset: 'aih-engineering',
+        preferredEngineer: { profileId: 'glm-codex', profileDisplayName: 'GLM + Codex', modelId: 'glm-5.3-flash', modelDisplayName: 'GLM-5.3-Flash', vendor: 'Z.ai', reasoning: 'high', provider: 'zai-direct' },
+      },
+      preference: { provider: 'zai-direct', modelId: 'glm-5.3-flash', reasoning: 'high', label: 'GLM-5.3-Flash' },
+      execution: { class: 'deepseek_normal', provider: 'flash-high-direct', model: 'DeepSeek V4 Flash', reasoning: 'high' },
+    }
+    const engHtml = renderToStaticMarkup(react.createElement(moduleExports.ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    assert.match(engHtml, /GLM-5\.3-Flash/, 'PREFERRED names the profile primaryEngineer binding')
+    assert.match(engHtml, />HIGH</, 'PREFERRED effort badge renders uppercase')
+    assert.match(engHtml, /nx-eng-trigger/, 'Engineering trigger rendered in engineering mode')
+    assert.match(engHtml, />Engineering</, 'trigger is labeled Engineering')
+    assert.ok(!engHtml.includes('DeepSeek V4 Flash MAX'), 'legacy agent-default-model label never leaks into engineering mode')
+    assert.match(engHtml, /data-nexus-executor/, 'RUNNING pill still names the effective executor')
+    assert.match(engHtml, /DeepSeek V4 Flash/, 'RUNNING identity unchanged by the preference swap')
+
+    // 35c. after a save the refetched editor state (fresher than the poll)
+    // updates the PREFERRED label immediately — no page refresh needed
+    sandbox.window.__NX_TEST_EDITOR__ = {
+      state: {
+        schemaVersion: 1,
+        profiles: [{ id: 'custom', displayName: 'Custom', builtin: false, roles: { primaryEngineer: { model: 'glm-5.3', reasoning: 'high' } } }],
+        registry: [{ id: 'glm-5.3', displayName: 'GLM-5.3', vendor: 'Z.ai' }],
+        preferredProfile: { id: 'custom', displayName: 'Custom' },
+      },
+      failed: false,
+      profileId: 'custom',
+      roles: { primaryEngineer: { model: 'glm-5.3', reasoning: 'high' } },
+      dirty: false,
+      fetchedAt: Date.now(),
+    }
+    const savedHtml = renderToStaticMarkup(react.createElement(moduleExports.ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    assert.match(savedHtml, /GLM-5\.3</, 'PREFERRED flips to the saved custom binding immediately')
+    assert.ok(!savedHtml.includes('GLM-5.3-Flash ·'), 'stale snapshot preference no longer shown once the editor state is fresher')
+
+    // 35d. editor fields: both variants render 11 selects (1 profile + 5×2),
+    // the room variant carries the meta line, the composer one stays compact
+    const editorState = {
+      state: {
+        schemaVersion: 1,
+        profiles: [
+          { id: 'glm-codex', displayName: 'GLM + Codex', builtin: true, roles: { primaryEngineer: { model: 'glm-5.3-flash', reasoning: 'high' } } },
+          { id: 'custom', displayName: 'Custom', builtin: false, roles: { primaryEngineer: { model: 'glm-5.3', reasoning: 'high' } } },
+        ],
+        registry: [
+          { id: 'glm-5.3-flash', displayName: 'GLM-5.3-Flash', vendor: 'Z.ai', supportedReasoningLevels: ['off', 'high'] },
+          { id: 'glm-5.3', displayName: 'GLM-5.3', vendor: 'Z.ai', supportedReasoningLevels: ['off', 'high', 'max'] },
+        ],
+        roleModels: { primaryEngineer: ['glm-5.3-flash', 'glm-5.3'] },
+        preferredProfile: { id: 'custom', displayName: 'Custom' },
+      },
+      profileId: 'custom',
+      roles: {
+        primaryEngineer: { model: 'glm-5.3', reasoning: 'high' },
+        deepEngineer: { model: 'glm-5.3', reasoning: 'max' },
+        reviewer: { model: 'gpt-5.6-sol', reasoning: 'medium' },
+        solver: { model: 'gpt-5.6-sol', reasoning: 'high' },
+        fallback: { model: 'glm-5.3', reasoning: 'high' },
+      },
+      dirty: false, notice: null, noticeTone: 'ok', saving: false,
+      selectProfile() {}, changeRole() {}, save() {},
+      modelEntry(id) { return editorState.state.registry.find((m) => m.id === id) || null },
+    }
+    const roomHtml = renderToStaticMarkup(react.createElement(moduleExports.EngineeringEditorFields, { editor: editorState, variant: 'room' }))
+    const composerHtml = renderToStaticMarkup(react.createElement(moduleExports.EngineeringEditorFields, { editor: editorState, variant: 'composer' }))
+    for (const html of [roomHtml, composerHtml]) {
+      assert.equal((html.match(/<select/g) || []).length, 11, 'profile dropdown + 5 role rows (model + reasoning each)')
+      for (const label of ['Primary Engineer', 'Deep Engineer', 'Reviewer', 'Solver', 'Fallback']) {
+        assert.ok(html.includes(label), 'role row rendered: ' + label)
+      }
+      assert.ok(html.includes('Save Custom Profile'), 'save button present (custom profile selected)')
+    }
+    assert.match(roomHtml, /PREFERRED PROFILE:/, 'room variant keeps the meta line')
+    assert.ok(!composerHtml.includes('PREFERRED PROFILE:'), 'composer variant stays compact')
+
+    // 35e. built-in profile selection disables the role selects (immutability)
+    const builtinEditor = { ...editorState, profileId: 'glm-codex' }
+    const builtinHtml = renderToStaticMarkup(react.createElement(moduleExports.EngineeringEditorFields, { editor: builtinEditor, variant: 'composer' }))
+    assert.ok(builtinHtml.includes('disabled'), 'built-in profile role selects are disabled')
+    assert.ok(builtinHtml.includes('Select Profile'), 'built-in save labels as Select Profile')
+
+    // 35f. scoped CSS retires the upstream DSH model seat only in
+    // engineering mode; the anchor is the pinned frontend build's scoped
+    // class family and fails open if that build ever changes
+    assert.ok(source.includes("body[data-nexus-composer-mode='engineering']"), 'body mode flag CSS hook present')
+    assert.ok(source.includes('_7KE1Ra_root'), 'upstream model seat suppression rule present')
+    assert.ok(source.includes('nexusComposerMode'), 'body dataset flag wiring present')
+    assert.ok(source.includes('nx-eng-popover'), 'popover styles present')
+    assert.ok(source.includes('engineering-profile-action.json'), 'save posts to the shared action endpoint')
+
+    // 35g. executorChipContent: engineering mode ignores agent-default-model;
+    // unsatisfiable binding → no PREFERRED chip (fail-closed)
+    const pill = moduleExports.executorChipContent
+    const engContent = pill({
+      composer: { mode: 'engineering', preferredEngineer: { profileId: 'glm-codex', modelDisplayName: 'GLM-5.3-Flash', reasoning: 'high' } },
+      preference: { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash MAX' },
+      execution: { model: 'DeepSeek V4 Flash', reasoning: 'high' },
+    })
+    assert.equal(engContent.preference, 'GLM-5.3-Flash', 'engineering PREFERRED comes from the profile binding')
+    assert.equal(engContent.preferenceReasoning, 'high')
+    const failContent = pill({
+      composer: { mode: 'engineering', preferredEngineer: null },
+      preference: { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash MAX' },
+      execution: { model: 'DeepSeek V4 Flash', reasoning: 'high' },
+    })
+    assert.equal(failContent.preference, null, 'unsatisfiable binding shows no PREFERRED chip')
+    const legacyContent = pill({
+      preference: { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash MAX' },
+      execution: { model: 'DeepSeek V4 Flash', reasoning: 'high' },
+    })
+    assert.equal(legacyContent.preference, 'DeepSeek V4 Flash MAX', 'legacy mode keeps the agent-default-model display')
+
+    // 35h. derived-from-editor mirror of the snapshot field (same shape)
+    const derived = moduleExports.preferredEngineerFromEditorState({
+      preferredProfile: { id: 'custom', displayName: 'Custom' },
+      profiles: [{ id: 'custom', roles: { primaryEngineer: { model: 'glm-5.3', reasoning: 'high' } } }],
+      registry: [{ id: 'glm-5.3', displayName: 'GLM-5.3', vendor: 'Z.ai' }],
+    })
+    // cross-realm object (created inside the test VM): compare field-by-field
+    assert.equal(derived.profileId, 'custom')
+    assert.equal(derived.profileDisplayName, 'Custom')
+    assert.equal(derived.modelId, 'glm-5.3')
+    assert.equal(derived.modelDisplayName, 'GLM-5.3')
+    assert.equal(derived.vendor, 'Z.ai')
+    assert.equal(derived.reasoning, 'high')
+  }
+
   console.log('PASS: nexus controller panel state layer')
 }
 

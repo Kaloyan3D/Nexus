@@ -1045,7 +1045,25 @@ function RoomFiles({ detail }) {
 	});
 }
 
-function EngineeringEditor({ sessionId }) {
+const ENGINEERING_ROLES = ["primaryEngineer", "deepEngineer", "reviewer", "solver", "fallback"];
+const ENGINEERING_ROLE_LABELS = {
+	primaryEngineer: "Primary Engineer",
+	deepEngineer: "Deep Engineer",
+	reviewer: "Reviewer",
+	solver: "Solver",
+	fallback: "Fallback",
+};
+
+/**
+* Shared Engineering editor state — ONE implementation of profile select,
+* the built-in→Custom auto-switch, save (select | save-custom), and refresh.
+* Both surfaces reuse it: the Control Room Engineering tab and the composer
+* Engineering popover read/write the same endpoints
+* (GET /nexus/engineering-profile.json, POST /nexus/engineering-profile-action.json),
+* so the two surfaces always agree. No model compatibility logic lives here:
+* roleRequirements/roleModels arrive resolved from the controller.
+*/
+function useEngineeringEditor(sessionId) {
 	const [state, setState] = react.useState(null);
 	const [failed, setFailed] = react.useState(false);
 	const [profileId, setProfileId] = react.useState(null);
@@ -1054,6 +1072,7 @@ function EngineeringEditor({ sessionId }) {
 	const [noticeTone, setNoticeTone] = react.useState("ok");
 	const [saving, setSaving] = react.useState(false);
 	const [dirty, setDirty] = react.useState(false);
+	const [fetchedAt, setFetchedAt] = react.useState(0);
 
 	const refresh = react.useCallback((then) => {
 		fetch("./nexus/engineering-profile.json", { cache: "no-store" })
@@ -1061,14 +1080,16 @@ function EngineeringEditor({ sessionId }) {
 			.then((data) => {
 				setState(data);
 				setFailed(false);
+				setFetchedAt(Date.now());
 				if (then) then(data);
 			})
 			.catch(() => setFailed(true));
 	}, []);
 
 	react.useEffect(() => {
+		if (!sessionId) return;
 		refresh();
-	}, [refresh]);
+	}, [sessionId, refresh]);
 
 	// initialize the form once state arrives (or after a save refreshes it)
 	react.useEffect(() => {
@@ -1097,7 +1118,7 @@ function EngineeringEditor({ sessionId }) {
 
 	function deepCloneRoles(source) {
 		const out = {};
-		for (const role of ["primaryEngineer", "deepEngineer", "reviewer", "solver", "fallback"]) {
+		for (const role of ENGINEERING_ROLES) {
 			const binding = source && source[role];
 			out[role] = binding && binding.model
 				? { model: String(binding.model), reasoning: String(binding.reasoning || "") }
@@ -1120,6 +1141,7 @@ function EngineeringEditor({ sessionId }) {
 
 	function changeRole(role, patch) {
 		const current = roles || bindingsFor(profileId);
+		if (!current) return;
 		const next = { ...current, [role]: { ...current[role], ...patch } };
 		if (profileId && profileId !== "custom") {
 			// Built-in profiles are immutable: editing a binding auto-creates
@@ -1166,46 +1188,32 @@ function EngineeringEditor({ sessionId }) {
 			.finally(() => setSaving(false));
 	}
 
-	const roleLabels = {
-		primaryEngineer: "Primary Engineer",
-		deepEngineer: "Deep Engineer",
-		reviewer: "Reviewer",
-		solver: "Solver",
-		fallback: "Fallback",
-	};
+	return { state, failed, profileId, roles, notice, noticeTone, saving, dirty, fetchedAt, refresh, selectProfile, changeRole, save, bindingsFor, modelEntry };
+}
 
-	if (failed) {
-		return react_jsx_runtime.jsx(Section, {
-			label: "Engineering Profile",
-			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." }),
-		});
-	}
-	if (!state || !Array.isArray(state.profiles) || !roles) {
-		return react_jsx_runtime.jsx(Section, {
-			label: "Engineering Profile",
-			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading engineering configuration…" }),
-		});
-	}
-
-	const selectedProfile = state.profiles.find((p) => p && String(p.id) === profileId) || null;
-	const runningSummary = null; // RUNNING execution is shown in the Overview tab
-	return react_jsx_runtime.jsxs(Section, {
-		label: "Engineering Profile",
+/**
+* Presentational editor fields shared by both surfaces. variant "room"
+* renders the long PREFERRED PROFILE meta line; variant "composer" keeps
+* the popover compact. All state and verbs come from useEngineeringEditor.
+*/
+function EngineeringEditorFields({ editor, variant }) {
+	const { state, profileId, roles, dirty, notice, noticeTone, saving, selectProfile, changeRole, save, modelEntry } = editor;
+	return react_jsx_runtime.jsxs(react_jsx_runtime.Fragment, {
 		children: [
 			react_jsx_runtime.jsx("div", {
 				className: "nx-eng-head",
 				children: [
-					react_jsx_runtime.jsx("span", { className: "nx-eng-label", children: "Profile" }),
+					react_jsx_runtime.jsx("span", { className: "nx-eng-label", children: "Profile" }, "label"),
 					react_jsx_runtime.jsx("select", {
 						className: "nx-eng-profile",
 						value: profileId || "",
 						onChange: (event) => selectProfile(event.target.value),
 						"aria-label": "Preferred engineering profile",
 						children: state.profiles.map((profile) => react_jsx_runtime.jsx("option", { value: String(profile.id), children: String(profile.displayName || profile.id) + (profile.id === "custom" ? " (operator-defined)" : "") }, String(profile.id))),
-					}),
+					}, "profile"),
 				],
-			}),
-			["primaryEngineer", "deepEngineer", "reviewer", "solver", "fallback"].map((role) => {
+			}, "head"),
+			ENGINEERING_ROLES.map((role) => {
 				const binding = roles[role] || { model: "", reasoning: "" };
 				const compatible = (state.roleModels && Array.isArray(state.roleModels[role]) ? state.roleModels[role] : []);
 				const entry = modelEntry(binding.model);
@@ -1213,9 +1221,8 @@ function EngineeringEditor({ sessionId }) {
 				const isCustom = profileId === "custom";
 				return react_jsx_runtime.jsxs("div", {
 					className: "nx-eng-row",
-					key: role,
 					children: [
-						react_jsx_runtime.jsx("span", { className: "nx-eng-label", title: role, children: roleLabels[role] || role }),
+						react_jsx_runtime.jsx("span", { className: "nx-eng-label", title: role, children: ENGINEERING_ROLE_LABELS[role] || role }),
 						react_jsx_runtime.jsx("select", {
 							className: "nx-eng-select",
 							value: binding.model,
@@ -1236,22 +1243,42 @@ function EngineeringEditor({ sessionId }) {
 							children: reasoningLevels.map((level) => react_jsx_runtime.jsx("option", { value: level, children: level }, level)),
 						}),
 					],
-				});
+				}, role);
 			}),
 			(dirty || profileId === "custom") && react_jsx_runtime.jsx("div", {
 				className: "nx-eng-hint",
 				children: "Custom bindings apply to the selected role when the next task starts (or escalates). Built-in profiles are never modified.",
-			}),
-			notice && react_jsx_runtime.jsx("div", { className: "nx-eng-notice " + (noticeTone === "ok" ? "nx-eng-notice-ok" : "nx-eng-notice-err"), children: notice }),
+			}, "hint"),
+			notice && react_jsx_runtime.jsx("div", { className: "nx-eng-notice " + (noticeTone === "ok" ? "nx-eng-notice-ok" : "nx-eng-notice-err"), children: notice }, "notice"),
 			react_jsx_runtime.jsx("button", {
 				type: "button",
 				className: "nx-eng-save",
 				disabled: saving,
 				onClick: () => save(),
 				children: saving ? "Saving…" : (profileId === "custom" ? "Save Custom Profile" : "Select Profile"),
-			}),
-			react_jsx_runtime.jsx("div", { className: "nx-eng-meta", children: "PREFERRED PROFILE: " + String((state.preferredProfile && state.preferredProfile.displayName) || (state.preferredProfile && state.preferredProfile.id) || "none") + " · the RUNNING execution (class/role/model/provider) is shown in the Overview tab and is never rewritten by a save." }),
+			}, "save"),
+			variant === "room" && react_jsx_runtime.jsx("div", { className: "nx-eng-meta", children: "PREFERRED PROFILE: " + String((state.preferredProfile && state.preferredProfile.displayName) || (state.preferredProfile && state.preferredProfile.id) || "none") + " · the RUNNING execution (class/role/model/provider) is shown in the Overview tab and is never rewritten by a save." }, "meta"),
 		],
+	});
+}
+
+function EngineeringEditor({ sessionId }) {
+	const editor = useEngineeringEditor(sessionId);
+	if (editor.failed) {
+		return react_jsx_runtime.jsx(Section, {
+			label: "Engineering Profile",
+			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." }),
+		});
+	}
+	if (!editor.state || !Array.isArray(editor.state.profiles) || !editor.roles) {
+		return react_jsx_runtime.jsx(Section, {
+			label: "Engineering Profile",
+			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading engineering configuration…" }),
+		});
+	}
+	return react_jsx_runtime.jsx(Section, {
+		label: "Engineering Profile",
+		children: react_jsx_runtime.jsx(EngineeringEditorFields, { editor, variant: "room" }),
 	});
 }
 
@@ -1482,12 +1509,70 @@ function ControllerToggle({ sessionId }) {
 * form [RUNNING · HIGH] / [PREFERRED · MAX]; the tooltip always carries the
 * full model name.
 */
-function executorChipContent(snapshot) {
+/**
+* Derive the composer PREFERRED engineer from a loaded editor state: the
+* preferred profile's primaryEngineer binding resolved through the same
+* registry the editor dropdowns render. Mirrors the snapshot's
+* composer.preferredEngineer field (status.cjs) field-for-field.
+*/
+function preferredEngineerFromEditorState(editorState) {
+	if (!editorState || !editorState.preferredProfile || !Array.isArray(editorState.profiles)) return null;
+	const profileId = String(editorState.preferredProfile.id || "");
+	const profile = editorState.profiles.find((p) => p && String(p.id) === profileId);
+	const binding = profile && profile.roles ? profile.roles.primaryEngineer : null;
+	if (!binding || !binding.model) return null;
+	const entry = Array.isArray(editorState.registry) ? editorState.registry.find((m) => m && String(m.id) === binding.model) || null : null;
+	return {
+		profileId,
+		profileDisplayName: String(editorState.preferredProfile.displayName || profileId),
+		modelId: String(binding.model),
+		modelDisplayName: entry ? String(entry.displayName || entry.id || binding.model) : String(binding.model),
+		vendor: entry && entry.vendor ? String(entry.vendor) : null,
+		reasoning: String(binding.reasoning || ""),
+	};
+}
+
+/**
+* PREFERRED engineer for the composer pill (engineering mode only). The
+* editor state is refetched immediately after a successful save, so while
+* it is FRESHER than the last polled snapshot it carries the new preference
+* before the poll does; otherwise the polled snapshot — the shared truth
+* both surfaces agree on — wins. Never consulted for RUNNING.
+*/
+function composerPreferredEngineer(snapshot, editor) {
+	const composer = snapshot && snapshot.composer && typeof snapshot.composer === "object" ? snapshot.composer : null;
+	if (!composer || composer.mode !== "engineering") return null;
+	const snapshotAt = Date.parse(String(snapshot.generatedAtUtc || "")) || 0;
+	const editorAt = editor && typeof editor.fetchedAt === "number" ? editor.fetchedAt : 0;
+	if (editor && editor.state && editorAt >= snapshotAt) {
+		const derived = preferredEngineerFromEditorState(editor.state);
+		if (derived) return derived;
+	}
+	return composer.preferredEngineer && typeof composer.preferredEngineer === "object" ? composer.preferredEngineer : null;
+}
+
+function executorChipContent(snapshot, editor) {
 	if (!snapshot || snapshot.error) return null;
+	const composer = snapshot.composer && typeof snapshot.composer === "object" ? snapshot.composer : null;
+	const engineeringMode = !!(composer && composer.mode === "engineering");
 	const modelName = snapshot.execution && typeof snapshot.execution.model === "string" && snapshot.execution.model ? snapshot.execution.model : null;
 	const effectiveReasoning = snapshot.execution && typeof snapshot.execution.reasoning === "string" && snapshot.execution.reasoning ? snapshot.execution.reasoning : null;
-	const preference = snapshot.preference && typeof snapshot.preference.label === "string" && snapshot.preference.label ? snapshot.preference.label : null;
-	const preferenceReasoning = snapshot.preference && typeof snapshot.preference.reasoning === "string" && snapshot.preference.reasoning ? snapshot.preference.reasoning : null;
+	let preference = null;
+	let preferenceReasoning = null;
+	if (engineeringMode) {
+		// Normal Engineering mode: PREFERRED is the preferred profile's
+		// primaryEngineer binding (Model Registry displayName) — NEVER the
+		// legacy DSH agent-default-model selection. An unsatisfiable binding
+		// omits the chip entirely (fail-closed: no misleading label).
+		const preferred = composerPreferredEngineer(snapshot, editor);
+		if (preferred) {
+			preference = preferred.modelDisplayName || preferred.modelId || null;
+			preferenceReasoning = preferred.reasoning || null;
+		}
+	} else {
+		preference = snapshot.preference && typeof snapshot.preference.label === "string" && snapshot.preference.label ? snapshot.preference.label : null;
+		preferenceReasoning = snapshot.preference && typeof snapshot.preference.reasoning === "string" && snapshot.preference.reasoning ? snapshot.preference.reasoning : null;
+	}
 	const reasoning = reasoningBadgeVisible(modelName, effectiveReasoning) ? effectiveReasoning : null;
 	// PREFERRED adds information only when it differs from RUNNING (or when
 	// there is no RUNNING value at all); equal values must not create noise.
@@ -1541,13 +1626,115 @@ function ExecutorPill({ content }) {
 	if (chips.length === 0) return null;
 	return react_jsx_runtime.jsx("span", { className: "nx-executor-pills", children: chips });
 }
+/**
+* Composer Engineering selector (Normal Engineering mode only): the compact
+* trigger + anchored popover that REPLACES the legacy DSH model selector as
+* the operator's effective model-preference control. Reuses the shared
+* editor hook — the exact same profile/role state, validation, and save
+* flow as the Control Room Engineering tab; unsaved edits survive closing
+* and reopening because the state lives here, above the popover.
+*/
+function EngineeringSelector({ editor }) {
+	const [open, setOpen] = react.useState(false);
+	const rootRef = react.useRef(null);
+	react.useEffect(() => {
+		if (!open) return;
+		const closeOutside = (event) => {
+			if (rootRef.current && event.target instanceof Node && !rootRef.current.contains(event.target)) setOpen(false);
+		};
+		const closeEscape = (event) => {
+			if (event.key === "Escape") setOpen(false);
+		};
+		document.addEventListener("mousedown", closeOutside);
+		document.addEventListener("keydown", closeEscape);
+		return () => {
+			document.removeEventListener("mousedown", closeOutside);
+			document.removeEventListener("keydown", closeEscape);
+		};
+	}, [open]);
+	const ready = !editor.failed && editor.state && Array.isArray(editor.state.profiles) && editor.roles;
+	return react_jsx_runtime.jsxs("span", {
+		className: "nx-eng-composer",
+		ref: rootRef,
+		children: [
+			react_jsx_runtime.jsx("button", {
+				type: "button",
+				className: "nx-eng-trigger",
+				"aria-haspopup": "dialog",
+				"aria-expanded": open,
+				title: "Engineering profile — the PREFERRED engineer applies at the next safe execution boundary",
+				onClick: () => setOpen(!open),
+				children: [
+					react_jsx_runtime.jsx("span", { className: "nx-eng-trigger-label", children: "Engineering" }, "label"),
+					react_jsx_runtime.jsx("span", { className: "nx-eng-trigger-caret", children: "▾" }, "caret"),
+				],
+			}),
+			open && react_jsx_runtime.jsx("div", {
+				className: "nx-eng-popover",
+				role: "dialog",
+				"aria-label": "Engineering profile",
+				children: editor.failed
+					? react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." })
+					: !ready
+						? react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading engineering configuration…" })
+						: react_jsx_runtime.jsx(EngineeringEditorFields, { editor, variant: "composer" }),
+			}),
+		],
+	});
+}
+
+/**
+* Composer seat (conversation.input.right): the read-only executor pills
+* plus — in Normal Engineering mode only — the Engineering selector that
+* replaces the legacy DSH model selector as the effective preference
+* control. Legacy presets keep the exact previous rendering.
+*/
 function ExecutorChip({ session }) {
 	const sessionId = session && typeof session.sessionId === "string" ? session.sessionId : null;
 	const { snapshot } = useControllerSnapshot(sessionId);
-	return react_jsx_runtime.jsx(ExecutorPill, { content: executorChipContent(snapshot) });
+	const composer = snapshot && snapshot.composer && typeof snapshot.composer === "object" ? snapshot.composer : null;
+	const engineeringMode = !!(composer && composer.mode === "engineering");
+	const editor = useEngineeringEditor(engineeringMode ? sessionId : null);
+	// Body-level mode flag: scoped CSS retires the upstream DSH model seat
+	// while the Engineering selector owns the composer preference. Legacy
+	// presets never set it, so the shipped selector stays untouched there.
+	react.useEffect(() => {
+		const body = typeof document !== "undefined" && document.body ? document.body : null;
+		if (!body) return;
+		if (!engineeringMode) {
+			delete body.dataset.nexusComposerMode;
+			return;
+		}
+		body.dataset.nexusComposerMode = "engineering";
+		return () => {
+			delete body.dataset.nexusComposerMode;
+		};
+	}, [engineeringMode]);
+	// Follow external preference changes (e.g. saved from the Control Room)
+	// without clobbering unsaved operator edits in the open popover.
+	const preferredProfileId = composer && composer.preferredEngineer && typeof composer.preferredEngineer === "object" ? String(composer.preferredEngineer.profileId || "") : "";
+	const dirtyRef = react.useRef(editor.dirty);
+	dirtyRef.current = editor.dirty;
+	const seenProfileRef = react.useRef(preferredProfileId);
+	react.useEffect(() => {
+		if (!engineeringMode) return;
+		if (seenProfileRef.current === preferredProfileId) return;
+		seenProfileRef.current = preferredProfileId;
+		if (!dirtyRef.current) editor.refresh();
+	}, [engineeringMode, preferredProfileId, editor.refresh]);
+	const content = executorChipContent(snapshot, engineeringMode ? editor : null);
+	if (!engineeringMode) {
+		// Legacy mode: unchanged rendering — pills only, no control chrome.
+		return react_jsx_runtime.jsx(ExecutorPill, { content });
+	}
+	return react_jsx_runtime.jsxs("span", {
+		className: "nx-executor-chip",
+		children: [
+			react_jsx_runtime.jsx(ExecutorPill, { content }, "pills"),
+			react_jsx_runtime.jsx(EngineeringSelector, { editor }, "selector"),
+		],
+	});
 }
-//#endregion
-
 //#region styles
 /**
 * Panel + drawer styles, scoped to the nx-* classes and the
@@ -1695,6 +1882,21 @@ const PANEL_CSS = [
 ".nx-eng-save:disabled{opacity:.5;cursor:wait}",
 ".nx-eng-meta{font-size:10px;color:var(--dsw-alias-label-tertiary);line-height:1.45}",
 ".nx-eng-hint{font-size:10px;color:var(--dsw-alias-label-tertiary)}",
+".nx-executor-chip{display:inline-flex;align-items:center;gap:8px;min-width:0}",
+".nx-eng-composer{position:relative;display:inline-flex;align-items:center}",
+".nx-eng-trigger{display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-elevated);color:var(--dsw-alias-label-primary);font-size:11px;font-weight:600;white-space:nowrap;cursor:pointer}",
+".nx-eng-trigger:hover{border-color:var(--dsw-alias-border-l1);background:var(--dsw-alias-interactive-bg)}",
+".nx-eng-trigger-caret{font-size:9px;line-height:1;color:var(--dsw-alias-label-tertiary)}",
+".nx-eng-popover{position:absolute;bottom:calc(100% + 8px);right:0;z-index:60;width:360px;max-width:min(92vw,420px);max-height:72vh;overflow:auto;display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-base);box-shadow:0 12px 30px rgba(0,0,0,.3);color:var(--dsw-alias-label-secondary);font-size:11px}",
+".nx-eng-popover .nx-eng-profile{max-width:216px}",
+".nx-eng-popover .nx-eng-save{margin-top:4px}",
+// Normal Engineering mode only: the upstream DSH model seat no longer
+// presents itself as the operator's model-preference control — the
+// Engineering selector owns that role. Legacy presets never set the body
+// flag and keep the shipped selector. Fail-open by design: if the upstream
+// build changes its scoped class names, the shipped seat simply reappears.
+"body[data-nexus-composer-mode='engineering'] [class*='_7KE1Ra_root']{display:none!important}",
+"body[data-nexus-composer-mode='engineering'] [class*='_7KE1Ra_menu']{display:none!important}",
 ].join("");
 //#endregion
 
@@ -1759,6 +1961,10 @@ exports.ExecutorPill = ExecutorPill;
 exports.ExecutorChip = ExecutorChip;
 exports.GateActions = GateActions;
 exports.EngineeringEditor = EngineeringEditor;
+exports.useEngineeringEditor = useEngineeringEditor;
+exports.EngineeringEditorFields = EngineeringEditorFields;
+exports.EngineeringSelector = EngineeringSelector;
+exports.preferredEngineerFromEditorState = preferredEngineerFromEditorState;
 exports.activityKindTitle = activityKindTitle;
 return module.exports;
 }
