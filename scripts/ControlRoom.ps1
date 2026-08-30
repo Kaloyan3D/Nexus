@@ -4,17 +4,36 @@ $ErrorActionPreference = 'Stop'
 function Get-AihControlRoomMode {
     param(
         [Parameter(Mandatory = $true)]$RoutingPolicy,
-        [Parameter(Mandatory = $true)][string]$Preset
+        [Parameter(Mandatory = $true)][string]$Preset,
+        [string]$ProfilesPath,
+        [string]$SettingsPath,
+        [string]$CustomProfilePath
     )
 
     $resolved = Resolve-AihPreset $RoutingPolicy $Preset
     $rootExecutor = $resolved.Config.rootExecutor
+    # Phase 2: the PREFERRED root executor stays a preset property (the
+    # session preference/ceiling), while RUNNING model selection happens per
+    # role through the active Engineering Profile. The mode record carries the
+    # preferred profile so the Control Room can report it without conflating
+    # preference with routing.
+    $profileId = [string]$resolved.Config.profile
+    $profileDisplayName = $profileId
+    if ([string]::IsNullOrWhiteSpace($profileId)) { $profileId = [string]$RoutingPolicy.defaultProfile; $profileDisplayName = $profileId }
+    if (-not [string]::IsNullOrWhiteSpace($ProfilesPath) -and (Test-Path -LiteralPath $ProfilesPath)) {
+        $profiles = Get-AihEngineeringProfiles $ProfilesPath $CustomProfilePath
+        $resolvedProfile = Resolve-AihProfile $RoutingPolicy $resolved $profiles $SettingsPath
+        $profileId = $resolvedProfile.Id
+        $profileDisplayName = $resolvedProfile.DisplayName
+    }
     [pscustomobject]@{
         Id = $resolved.Id
         DisplayName = [string]$resolved.Config.displayName
         Provider = [string]$rootExecutor.provider
         Model = [string]$rootExecutor.model
         ReasoningEffort = [string]$rootExecutor.reasoning
+        Profile = $profileId
+        ProfileDisplayName = $profileDisplayName
         RequiresOpenAI = $false
         AllowsCodexSubagent = [bool]$resolved.Config.allowCodexSubagent
         FailurePolicy = [string]$resolved.Config.failurePolicy

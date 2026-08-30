@@ -151,7 +151,7 @@ function Invoke-AihCompletionFixRouting {
             $records.Add([pscustomobject]@{ fix = $Fixes[$index]; dispatchStatus = 'routed'; routingError = $null; routingDecision = $record })
         }
         catch {
-            $fallback = [pscustomobject]@{ recordVersion = 3; taskId = $taskId; workspace = $Workspace; preset = $fallbackPreset.Id; description = $Fixes[$index].description; executionClass = 'deepseek_deep'; selectedExecutionClass = 'deepseek_deep'; provider = [string]$fallbackRoute.provider; model = [string]$fallbackRoute.model; reasoning = [string]$fallbackRoute.reasoning; reason = "Automatic routing failed; explicit controller repair dispatch is required: $($_.Exception.Message)"; risk = 'high'; escalatedFrom = $null; manualOverride = $false; signal = 'routing-error'; dryRun = $false; completionAuthority = $false }
+            $fallback = [pscustomobject]@{ recordVersion = 4; taskId = $taskId; workspace = $Workspace; preset = $fallbackPreset.Id; description = $Fixes[$index].description; executionClass = 'engineer_deep'; selectedExecutionClass = 'engineer_deep'; role = 'deepEngineer'; profile = $null; provider = $null; model = $null; reasoning = $null; reason = "Automatic routing failed; explicit controller repair dispatch is required: $($_.Exception.Message)"; risk = 'high'; escalatedFrom = $null; manualOverride = $false; signal = 'routing-error'; dryRun = $false; completionAuthority = $false }
             $records.Add([pscustomobject]@{ fix = $Fixes[$index]; dispatchStatus = 'operator-required'; routingError = $_.Exception.Message; routingDecision = $fallback })
         }
     }

@@ -157,7 +157,9 @@ function fixtureFileMap(dataRoot, workspace, { task, executionClass, decision, d
     sameFailureCount: 0,
     updatedAtUtc: '2026-08-28T17:30:00.000Z',
   })
-  const decisionRecord = decision || { ...FIXTURE_DECISION, workspace, executionClass: executionClass || 'deepseek_normal', selectedExecutionClass: executionClass || 'deepseek_normal' }
+  const decisionRecord = decision
+    ? { ...decision, workspace: decision.workspace == null ? workspace : decision.workspace }
+    : { ...FIXTURE_DECISION, workspace, executionClass: executionClass || 'deepseek_normal', selectedExecutionClass: executionClass || 'deepseek_normal' }
   // Identity isolation (TASK-0003.2): routing decisions JOIN on normalized
   // workspace + taskId, so fixture records without a workspace are authored
   // FOR this fixture workspace (records with an explicit workspace — e.g.
@@ -468,15 +470,19 @@ async function main() {
       // 11b. webServer becomes available later → the injection callback
       // applies and BOTH routes register (Cordis lifecycle semantics).
       assert.doesNotThrow(() => injectCallback({ webServer: fakeWebServer, effect(fn) { fn(); return () => {} } }), 'injection callback must apply cleanly once the service exists')
-      assert.equal(captured.length, 3, 'all routes must register after webServer becomes available')
+      assert.equal(captured.length, 5, 'all routes must register after webServer becomes available')
       const paths = captured.map((spec) => spec.path).sort()
-      assert.deepEqual(paths, ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/gate-action.json'])
+      assert.deepEqual(paths, ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json'])
       const route = captured.find((spec) => spec.path === '/nexus/controller.json')
       assert.equal(route.kind, 'exact')
       const roomRoute = captured.find((spec) => spec.path === '/nexus/control-room.json')
       assert.equal(roomRoute.kind, 'exact')
       const gateRoute = captured.find((spec) => spec.path === '/nexus/gate-action.json')
       assert.equal(gateRoute.kind, 'exact')
+      const engineeringRoute = captured.find((spec) => spec.path === '/nexus/engineering-profile.json')
+      assert.equal(engineeringRoute.kind, 'exact')
+      const engineeringActionRoute = captured.find((spec) => spec.path === '/nexus/engineering-profile-action.json')
+      assert.equal(engineeringActionRoute.kind, 'exact')
 
       // 11c. profiles that NEVER provide webServer stay inert (tui/headless)
       captured = []
@@ -555,9 +561,9 @@ async function main() {
       // the service appears AFTER the plugin activated — the deferred
       // injection resolves and the route registers.
       root.provide('webServer', fakeWebServer)
-      for (let i = 0; i < 60 && registered.length < 3; i++) await tick(50)
-      assert.equal(registered.length, 3, 'real cordis: all routes register after webServer becomes available')
-      assert.deepEqual(registered.map((spec) => spec.path).sort(), ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/gate-action.json'])
+      for (let i = 0; i < 60 && registered.length < 5; i++) await tick(50)
+      assert.equal(registered.length, 5, 'real cordis: all routes register after webServer becomes available')
+      assert.deepEqual(registered.map((spec) => spec.path).sort(), ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json'])
       assert.ok(registered.every((spec) => spec.kind === 'exact'))
 
       // the registered handler keeps the existing semantics.
@@ -1436,7 +1442,7 @@ async function main() {
     vm.createContext(sandbox)
     vm.runInContext(source, sandbox)
     assert.ok(moduleExports && typeof moduleExports.ControlRoom === 'function', 'ControlRoom must be exported')
-    assert.equal(moduleExports.ROOM_TABS.join(','), 'overview,activity,verification,files', 'exactly four room tabs')
+    assert.equal(moduleExports.ROOM_TABS.join(','), 'overview,activity,verification,files,engineering', 'exactly five room tabs (engineering added in Phase 2.1)')
 
     const dataRoot = tmpDir('nexus-ctr-r-')
     const workspace = path.join(dataRoot, 'ws')
@@ -2587,6 +2593,263 @@ async function main() {
 
     const notRun29 = await detailFixture({ task: { tasks: [{ ...FIXTURE_TASK.tasks[0], verification: null }] } })
     assert.equal(notRun29.snapshot.verification.status, 'not-run', 'no checks → not-run')
+  }
+  // ── 30. PHASE 2: role/profile/classDisplay/modelDisplayName and the
+  //           PREFERRED vs RUNNING profile distinction ─────────────────────
+  {
+    const { snapshot } = await fixtureSnapshot({
+      executionClass: 'engineer_normal',
+      decision: { ...FIXTURE_DECISION, executionClass: 'engineer_normal', role: 'primaryEngineer', profile: 'deepseek-codex', profileDisplayName: 'DeepSeek + Codex', provider: 'flash-high-direct', model: 'deepseek-v4-flash', modelDisplayName: 'DeepSeek V4 Flash', reasoning: 'high' },
+    })
+    assert.equal(snapshot.execution.class, 'engineer_normal')
+    assert.equal(snapshot.execution.classDisplay, 'Engineer Normal')
+    assert.equal(snapshot.execution.role, 'primaryEngineer')
+    assert.equal(snapshot.execution.profile, 'deepseek-codex')
+    assert.equal(snapshot.execution.profileDisplayName, 'DeepSeek + Codex')
+    assert.equal(snapshot.execution.provider, 'flash-high-direct')
+    assert.equal(snapshot.execution.model, 'DeepSeek V4 Flash')
+    assert.equal(snapshot.execution.modelId, 'deepseek-v4-flash')
+    assert.equal(snapshot.execution.reasoning, 'high')
+  }
+  {
+    // Legacy decision/state (pre-Phase-2 class names) stay readable: the raw
+    // class is preserved for tolerance, display/role are derived canonically.
+    const { snapshot } = await fixtureSnapshot({})
+    assert.equal(snapshot.execution.class, 'deepseek_normal')
+    assert.equal(snapshot.execution.classDisplay, 'Engineer Normal')
+    assert.equal(snapshot.execution.role, 'primaryEngineer')
+    assert.equal(snapshot.execution.profile, null)
+  }
+  {
+    // PREFERRED profile (operator settings) is reported next to the RUNNING
+    // profile (decision record) and is never collapsed into it.
+    const dataRoot = tmpDir('nexus-ctr-pp-')
+    const workspace = path.join(dataRoot, 'ws')
+    const stateFile = status.routingStateFileName(workspace, 'aih-engineering', 'TASK-0042')
+    const files = {
+      [path.join(dataRoot, 'routing', 'session-bindings.json')]: JSON.stringify({ schemaVersion: 1, bindings: { 'session-0001': { ...FIXTURE_BINDING, workspace } } }),
+      [path.join(dataRoot, 'routing', 'states', stateFile)]: JSON.stringify({ taskId: 'TASK-0042', workspace, preset: 'aih-engineering', executionClass: 'engineer_normal', selectedTier: 3, risk: 'normal', reviewRequired: false, reviewRequested: false, lastFailureSignature: '', sameFailureCount: 0, updatedAtUtc: '2026-08-28T17:30:00.000Z' }),
+      [path.join(dataRoot, 'routing', 'decisions.jsonl')]: JSON.stringify({ ...FIXTURE_DECISION, workspace, executionClass: 'engineer_normal', role: 'primaryEngineer', profile: 'deepseek-codex', profileDisplayName: 'DeepSeek + Codex', provider: 'flash-high-direct', model: 'deepseek-v4-flash' }) + '\n',
+      [path.join(dataRoot, 'settings.yaml')]: 'agent-default-model:\n  provider: flash-max-direct\n  model: deepseek-v4-flash\n  reasoningEffort: max\nengineering-profile: glm-codex\n',
+      [path.join(dataRoot, 'profiles.json')]: JSON.stringify({ schemaVersion: 1, profiles: [{ id: 'glm-codex', displayName: 'GLM + Codex' }, { id: 'deepseek-codex', displayName: 'DeepSeek + Codex' }] }),
+      [path.join(dataRoot, 'aih-state.json')]: JSON.stringify({ SchemaVersion: 3, Status: 'READY', Pid: 12345, ProcessStartedAtUtc: '2026-08-28T17:00:00.0000000Z', Workspace: workspace, Url: 'http://127.0.0.1:3080' }),
+      [path.join(workspace, '.ai-harness', 'state', 'tasks.json')]: JSON.stringify({ schemaVersion: 1, tasks: [{ ...FIXTURE_TASK.tasks[0], workspace }] }),
+    }
+    writeTree(dataRoot, files)
+    const snapshot = await status.buildControllerSnapshot({
+      dataRoot,
+      sessionId: 'session-0001',
+      settingsPath: path.join(dataRoot, 'settings.yaml'),
+      statePath: path.join(dataRoot, 'aih-state.json'),
+      profilesPath: path.join(dataRoot, 'profiles.json'),
+      readFile: memoryReader(files),
+      modelNames: { 'flash-high-direct/deepseek-v4-flash': 'DeepSeek V4 Flash' },
+      gitSummary: null,
+      nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    assert.deepEqual(snapshot.preferredProfile, { id: 'glm-codex', displayName: 'GLM + Codex' }, 'preferred profile comes from settings + registry')
+    assert.equal(snapshot.execution.profile, 'deepseek-codex', 'RUNNING profile stays the decision profile')
+    assert.equal(snapshot.execution.classDisplay, 'Engineer Normal')
+    assert.equal(snapshot.execution.role, 'primaryEngineer')
+    assert.equal(snapshot.execution.provider, 'flash-high-direct')
+    assert.equal(snapshot.execution.model, 'DeepSeek V4 Flash')
+  }
+  {
+    // Detail envelope: routing history carries role/profile/modelDisplayName
+    // and the preferred profile is reported alongside the execution.
+    const { snapshot } = await detailFixture({
+      decisions: [
+        { ...FIXTURE_DECISION, executionClass: 'engineer_normal', role: 'primaryEngineer', profile: 'deepseek-codex', profileDisplayName: 'DeepSeek + Codex', provider: 'flash-high-direct', model: 'deepseek-v4-flash', modelDisplayName: 'DeepSeek V4 Flash', reasoning: 'high' },
+      ],
+    })
+    assert.equal(snapshot.preferredProfile, null)
+    const routed = (snapshot.routingHistory || []).filter((r) => r.kind !== 'review')
+    assert.equal(routed.length, 1)
+    assert.equal(routed[0].executionClass, 'engineer_normal')
+    assert.equal(routed[0].role, 'primaryEngineer')
+    assert.equal(routed[0].profile, 'deepseek-codex')
+    assert.equal(routed[0].profileDisplayName, 'DeepSeek + Codex')
+    assert.equal(routed[0].model, 'DeepSeek V4 Flash')
+    assert.equal(routed[0].modelId, 'deepseek-v4-flash')
+    assert.equal(snapshot.execution.role, 'primaryEngineer')
+    assert.equal(snapshot.execution.classDisplay, 'Engineer Normal')
+  }
+  // ── 31. PHASE 2.1: engineering profile editor — state adapter + routes ──
+  {
+    const { buildEngineeringProfileState, compatibleModelsForRole, modelCompatibleWithRole, roleBindingTarget, bindingsSatisfiable, validateSaveCustomPayload, ROLES } = require(path.join(ROOT, 'ui', 'nexus-controller', 'lib', 'engineering.cjs'))
+    const dataRoot = tmpDir('nexus-ctr-eng-')
+    const settingsText = 'agent-default-model:\n  provider: zai-direct\n  model: glm-5.3-flash\n  reasoningEffort: high\n\nengineering-profile: deepseek-codex\n'
+    const customDoc = {
+      schemaVersion: 1,
+      profileId: 'custom',
+      displayName: 'Custom',
+      roles: {
+        primaryEngineer: { model: 'glm-5.3', reasoning: 'high' },
+        deepEngineer: { model: 'glm-5.3', reasoning: 'max' },
+        reviewer: { model: 'gpt-5.6-sol', reasoning: 'medium' },
+        solver: { model: 'gpt-5.6-sol', reasoning: 'high' },
+        fallback: { model: 'deepseek-v4-flash', reasoning: 'max' },
+      },
+    }
+    const files = {
+      [path.join(dataRoot, 'settings.yaml')]: settingsText,
+      [path.join(dataRoot, 'custom-engineering-profile.json')]: JSON.stringify(customDoc, null, 2),
+    }
+    writeTree(dataRoot, files)
+
+    // 31a. custom profile merged into the editor state with builtin flags
+    const state = buildEngineeringProfileState({
+      installRoot: ROOT, // real config: engineering-profiles.json + model-registry.json
+      dataRoot,
+      settingsPath: path.join(dataRoot, 'settings.yaml'),
+      customProfilePath: path.join(dataRoot, 'custom-engineering-profile.json'),
+      nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    assert.equal(state.schemaVersion, 1)
+    const ids = state.profiles.map((p) => p.id)
+    assert.deepEqual(ids, ['deepseek-codex', 'glm-codex', 'custom'])
+    assert.equal(state.profiles[0].builtin, true)
+    assert.equal(state.profiles[2].builtin, false)
+    assert.equal(state.preferredProfile.id, 'deepseek-codex')
+    assert.equal(state.preferredProfile.displayName, 'DeepSeek + Codex')
+    assert.ok(state.customRoles && state.customRoles.primaryEngineer.model === 'glm-5.3', 'custom roles read from the custom profile file')
+    assert.deepEqual(ROLES, ['primaryEngineer', 'deepEngineer', 'reviewer', 'solver', 'fallback'])
+
+    // 31b. capability filtering: engineer roles need tools; reviewer needs sol-local
+    assert.deepEqual(state.roleModels.primaryEngineer, ['deepseek-v4-flash', 'deepseek-v4-pro', 'glm-5.3-flash', 'glm-5.3'])
+    assert.deepEqual(state.roleModels.reviewer, ['gpt-5.6-sol'])
+    assert.ok(state.roleModels.solver.includes('gpt-5.6-sol'), 'solver accepts a no-tools reasoning model (approval-gated)')
+    assert.ok(!state.roleModels.primaryEngineer.includes('gpt-5.6-sol'), 'primaryEngineer rejects a model without tools')
+
+    // 31c. role binding target resolves provider through the registry
+    const customProfile = state.profiles[2]
+    const target = roleBindingTarget({ models: state.registry }, customProfile, 'primaryEngineer')
+    assert.equal(target.provider, 'zai-direct')
+    assert.equal(target.reasoning, 'high')
+    assert.ok(bindingsSatisfiable({ models: state.registry }, customProfile), 'DoD custom bindings all satisfiable')
+    const bad = { ...customProfile, roles: { ...customProfile.roles, reviewer: { model: 'glm-5.3', reasoning: 'medium' } } }
+    assert.ok(!bindingsSatisfiable({ models: state.registry }, bad), 'reviewer binding to a non-sol-local model fails closed')
+
+    // 31d. save-custom payload shape validation (host-side fail fast)
+    assert.equal(validateSaveCustomPayload(null, null), 'save-custom requires a roles object')
+    assert.equal(validateSaveCustomPayload({ primaryEngineer: {} }, null), 'missing role binding: deepEngineer')
+    assert.equal(validateSaveCustomPayload({ primaryEngineer: { model: 'glm-5.3', reasoning: 'high' }, deepEngineer: { model: 'glm-5.3', reasoning: 'max' }, reviewer: { model: 'gpt-5.6-sol', reasoning: 'medium' }, solver: { model: 'gpt-5.6-sol', reasoning: 'high' }, fallback: { model: 'deepseek-v4-flash', reasoning: 'max' } }, null), null, 'well-formed payload passes host shape check')
+  }
+
+  // ── 32. PHASE 2.1: host GET route — engineering profile state ───────────
+  {
+    const dataRoot = tmpDir('nexus-ctr-engr-')
+    writeTree(dataRoot, {
+      [path.join(dataRoot, 'settings.yaml')]: 'engineering-profile: glm-codex\n',
+    })
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = dataRoot
+    try {
+      const plugin = await import(pathToFileURL(HOST).href)
+      let captured = []
+      let injectCallback = null
+      plugin.apply({
+        inject(keys, callback) { injectCallback = callback },
+        effect() { return () => {} },
+      })
+      injectCallback({
+        webServer: { register(spec) { captured.push(spec) } },
+        effect(fn) { fn(); return () => {} },
+      })
+      const engineeringRoute = captured.find((spec) => spec.path === '/nexus/engineering-profile.json')
+      assert.ok(engineeringRoute, 'engineering profile read route registered')
+      const res = { writeHead(code, headers) { this.code = code; this.headers = headers }, end(body) { this.body = body } }
+      await engineeringRoute.handler({ method: 'GET', url: '/nexus/engineering-profile.json' }, res)
+      const payload = JSON.parse(res.body)
+      assert.equal(res.code, 200)
+      assert.equal(payload.schemaVersion, 1)
+      assert.equal(payload.preferredProfile.id, 'glm-codex')
+      // DSH_HOME points at an isolated tmp root without config profiles: the
+      // route fails closed and falls back to the id as displayName.
+      assert.equal(payload.preferredProfile.displayName, 'glm-codex')
+      // isolated tmp DSH_HOME has no config files → fail-closed empty state
+      assert.ok(Array.isArray(payload.profiles) && payload.profiles.length === 0, 'isolated root: no profiles exposed, state degrades safely')
+      assert.ok(payload.roleModels && Array.isArray(payload.roleModels.primaryEngineer) && payload.roleModels.primaryEngineer.length === 0, 'isolated root: role models degrade to empty lists')
+      // GET with POST verb → 405
+      await engineeringRoute.handler({ method: 'POST', url: '/nexus/engineering-profile.json' }, res)
+      assert.equal(res.code, 405)
+
+      // 32b. action route: shape/action validation before the controller boundary
+      const actionRoute = captured.find((spec) => spec.path === '/nexus/engineering-profile-action.json')
+      assert.ok(actionRoute, 'engineering profile action route registered')
+      const actionRes = { writeHead(code, headers) { this.code = code; this.headers = headers }, end(body) { this.body = body } }
+      // readJsonBody needs a streaming request; craft a minimal one
+      const request = (payload) => ({
+        method: 'POST',
+        url: '/nexus/engineering-profile-action.json',
+        on(event, handler) {
+          if (event === 'data' && payload !== null) handler(JSON.stringify(payload))
+          if (event === 'end') handler()
+        },
+      })
+      await actionRoute.handler(request({ action: 'bogus' }), actionRes)
+      assert.equal(actionRes.code, 422)
+      const badRes = { writeHead(code, headers) { this.code = code; this.headers = headers }, end(body) { this.body = body } }
+      await actionRoute.handler(request({ action: 'select' }), badRes)
+      assert.equal(badRes.code, 422)
+      const shapeRes = { writeHead(code, headers) { this.code = code; this.headers = headers }, end(body) { this.body = body } }
+      await actionRoute.handler(request({ action: 'save-custom', roles: { primaryEngineer: { model: 'glm-5.3', reasoning: 'high' } } }), shapeRes)
+      assert.equal(shapeRes.code, 422)
+      const methodRes = { writeHead(code, headers) { this.code = code; this.headers = headers }, end(body) { this.body = body } }
+      await actionRoute.handler({ method: 'GET' }, methodRes)
+      assert.equal(methodRes.code, 405)
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
+  }
+
+  // ── 33. PHASE 2.1: client — engineering tab + editor render ─────────────
+  {
+    const code = fs.readFileSync(CLIENT, 'utf8')
+    const requireFromApp = require('node:module').createRequire(path.join(ROOT, 'app', 'package.json'))
+    const react = requireFromApp('react')
+    const jsxRuntime = requireFromApp('react/jsx-runtime')
+    const renderToStaticMarkup = requireFromApp('react-dom/server').renderToStaticMarkup
+    let moduleExports = null
+    const sandbox = {
+      console,
+      URL,
+      setTimeout,
+      clearTimeout,
+      window: {
+        __ModuleLoader__: {
+          load(def) {
+            moduleExports = def.factory((name) => {
+              if (name === 'react') return react
+              if (name === 'react/jsx-runtime') return jsxRuntime
+              throw new Error('unexpected require: ' + name)
+            })
+          },
+        },
+        localStorage: {
+          getItem() { return null },
+          setItem() {},
+        },
+        setInterval() { return 1 },
+        clearInterval() {},
+      },
+      document: {
+        createElement() {
+          return { dataset: {}, remove() {} }
+        },
+        head: { appendChild() {} },
+      },
+    }
+    vm.createContext(sandbox)
+    vm.runInContext(code, sandbox)
+    assert.ok(moduleExports.ROOM_TABS.includes('engineering'), 'engineering tab added to ROOM_TABS')
+    assert.ok(typeof moduleExports.ControlRoom === 'function')
+    assert.ok(typeof moduleExports.EngineeringEditor === 'function', 'EngineeringEditor exported for the tab')
+
+    // engineering tab button renders in the tab bar
+    const html = renderToStaticMarkup(jsxRuntime.jsx(moduleExports.ControlRoom, { sessionId: 'session-0001', running: null, onClose() {} }))
+    assert.ok(html.includes('>Engineering<'), 'engineering tab button rendered')
   }
   console.log('PASS: nexus controller panel state layer')
 }

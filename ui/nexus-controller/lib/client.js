@@ -47,7 +47,7 @@ const MAX_VISIBLE_CHECKS = 5;
 const DRAWER_WIDTH = 340;
 const ROOM_WIDTH = 600;
 const ROOM_POLL_MS = 4000;
-const ROOM_TABS = ["overview", "activity", "verification", "files"];
+const ROOM_TABS = ["overview", "activity", "verification", "files", "engineering"];
 
 //#region open/close state (module-level external store)
 let openPref = null;
@@ -136,6 +136,24 @@ function formatTokens(value) {
 }
 function formatCount(value) {
 	return typeof value === "number" && Number.isFinite(value) ? String(value) : "—";
+}
+// Phase 2: presentation is generic — the execution class describes semantics
+// and the actual model/provider come from the routing record. Legacy class
+// names (deepseek_normal & co.) stay readable and display through the same
+// canonical labels.
+const LEGACY_CLASS_ALIASES = { deepseek_normal: "engineer_normal", deepseek_deep: "engineer_deep", codex_review: "reviewer", codex_solve: "solver" };
+const CLASS_DISPLAY = { deterministic: "Deterministic", engineer_normal: "Engineer Normal", engineer_deep: "Engineer Deep", reviewer: "Independent Review", solver: "Solve" };
+const ROLE_DISPLAY = { primaryEngineer: "Primary Engineer", deepEngineer: "Deep Engineer", reviewer: "Reviewer", solver: "Solver", fallback: "Fallback" };
+function canonicalClass(value) {
+	if (typeof value !== "string" || value === "") return value;
+	const key = value.trim().toLowerCase();
+	return LEGACY_CLASS_ALIASES[key] || key;
+}
+function classDisplay(value) {
+	return CLASS_DISPLAY[canonicalClass(value)] || (typeof value === "string" && value !== "" ? value : "—");
+}
+function roleDisplay(value) {
+	return ROLE_DISPLAY[value] || value || null;
 }
 function formatElapsed(isoUtc) {
 	if (!isoUtc) return null;
@@ -507,7 +525,9 @@ function ControllerBody({ snapshot, failed, running, pressure, onClose, onExpand
 										execution && react_jsx_runtime.jsxs(Section, {
 											label: "Execution Class",
 											children: [
-												react_jsx_runtime.jsx("div", { className: "nx-value", children: react_jsx_runtime.jsx("code", { className: "nx-class", children: execution.class || "—" }) }),
+												react_jsx_runtime.jsx("div", { className: "nx-value", children: react_jsx_runtime.jsx("code", { className: "nx-class", children: classDisplay(execution.class) }) }),
+												roleDisplay(execution.role) && react_jsx_runtime.jsx("div", { className: "nx-sub", children: "Role: " + roleDisplay(execution.role) }),
+												execution.profile && react_jsx_runtime.jsx("div", { className: "nx-sub", children: "Profile: " + (execution.profileDisplayName || execution.profile) }),
 											],
 										}),
 										react_jsx_runtime.jsxs(Section, {
@@ -569,7 +589,7 @@ function ControllerBody({ snapshot, failed, running, pressure, onClose, onExpand
 											],
 										}),
 										review && react_jsx_runtime.jsxs(Section, {
-											label: "Codex Reviews",
+											label: "Reviews",
 											children: [
 												react_jsx_runtime.jsxs("div", {
 													className: "nx-value nx-attempt",
@@ -745,6 +765,7 @@ function RoomOverview({ detail, running, failed }) {
 		{ key: "Worktree", value: task.worktree || "—" },
 		{ key: "Attempts", value: attempts.length > 0 ? String(attempts[attempts.length - 1].sequence) : (task.attempt && task.attempt > 0 ? String(task.attempt) : "—") },
 		{ key: "Controller", value: controller ? controller.status + (controller.pid ? " · pid " + controller.pid : "") : "—" },
+		{ key: "Preferred profile", value: detail.preferredProfile ? (detail.preferredProfile.displayName || detail.preferredProfile.id) : "—" },
 	];
 	return react_jsx_runtime.jsxs(react.Fragment, {
 		children: [
@@ -776,14 +797,16 @@ function RoomOverview({ detail, running, failed }) {
 						],
 					}),
 					react_jsx_runtime.jsx("div", { className: "nx-sub", children: execution.provider || "—" }),
-					react_jsx_runtime.jsxs("div", { className: "nx-sub", children: ["Execution class ", react_jsx_runtime.jsx("code", { className: "nx-class", children: execution.class || "—" })] }),
+					react_jsx_runtime.jsxs("div", { className: "nx-sub", children: ["Execution class ", react_jsx_runtime.jsx("code", { className: "nx-class", children: classDisplay(execution.class) })] }),
+					roleDisplay(execution.role) && react_jsx_runtime.jsx("div", { className: "nx-sub", children: "Role: " + roleDisplay(execution.role) }),
+					execution.profile && react_jsx_runtime.jsx("div", { className: "nx-sub", children: "Profile: " + (execution.profileDisplayName || execution.profile) }),
 					execution.escalatedFrom ? react_jsx_runtime.jsx("div", { className: "nx-sub nx-muted", children: "Escalated from " + execution.escalatedFrom }) : null,
 				],
 			}),
 			react_jsx_runtime.jsxs(Section, {
 				label: "Review",
 				children: [
-					react_jsx_runtime.jsx("div", { className: "nx-value", children: (reviews && reviews.reviewRequired ? "Required" : "Not required") + " · Codex calls " + (reviews ? formatCount(reviews.codexCalls) : "—") }),
+					react_jsx_runtime.jsx("div", { className: "nx-value", children: (reviews && reviews.reviewRequired ? "Required" : "Not required") + " · Review calls " + (reviews ? formatCount(reviews.codexCalls) : "—") }),
 					reviewModels.length > 0 && react_jsx_runtime.jsx("div", { className: "nx-sub", children: reviewModels.join(", ") }),
 				],
 			}),
@@ -1022,6 +1045,216 @@ function RoomFiles({ detail }) {
 	});
 }
 
+function EngineeringEditor({ sessionId }) {
+	const [state, setState] = react.useState(null);
+	const [failed, setFailed] = react.useState(false);
+	const [profileId, setProfileId] = react.useState(null);
+	const [roles, setRoles] = react.useState(null);
+	const [notice, setNotice] = react.useState(null);
+	const [noticeTone, setNoticeTone] = react.useState("ok");
+	const [saving, setSaving] = react.useState(false);
+	const [dirty, setDirty] = react.useState(false);
+
+	const refresh = react.useCallback((then) => {
+		fetch("./nexus/engineering-profile.json", { cache: "no-store" })
+			.then((response) => response.json().catch(() => null))
+			.then((data) => {
+				setState(data);
+				setFailed(false);
+				if (then) then(data);
+			})
+			.catch(() => setFailed(true));
+	}, []);
+
+	react.useEffect(() => {
+		refresh();
+	}, [refresh]);
+
+	// initialize the form once state arrives (or after a save refreshes it)
+	react.useEffect(() => {
+		if (!state || !Array.isArray(state.profiles) || state.profiles.length === 0) return;
+		const preferred = state.preferredProfile && state.preferredProfile.id;
+		const preferredKnown = state.profiles.some((p) => p && String(p.id) === preferred);
+		const initialId = preferredKnown ? preferred : String(state.profiles[0].id);
+		setProfileId(initialId);
+		setRoles(bindingsFor(initialId));
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [state]);
+
+	function bindingsFor(id) {
+		if (!state) return null;
+		const profile = state.profiles.find((p) => p && String(p.id) === id);
+		if (!profile) return null;
+		if (id === "custom") {
+			// seed the operator's custom form from the last saved bindings,
+			// falling back to the current built-in bindings as a baseline
+			if (state.customRoles) return deepCloneRoles(state.customRoles);
+			const current = state.profiles.find((p) => p && p.id !== "custom");
+			return current && current.roles ? deepCloneRoles(current.roles) : null;
+		}
+		return profile.roles ? deepCloneRoles(profile.roles) : null;
+	}
+
+	function deepCloneRoles(source) {
+		const out = {};
+		for (const role of ["primaryEngineer", "deepEngineer", "reviewer", "solver", "fallback"]) {
+			const binding = source && source[role];
+			out[role] = binding && binding.model
+				? { model: String(binding.model), reasoning: String(binding.reasoning || "") }
+				: { model: "", reasoning: "" };
+		}
+		return out;
+	}
+
+	function modelEntry(modelId) {
+		if (!state || !Array.isArray(state.registry)) return null;
+		return state.registry.find((m) => m && String(m.id) === modelId) || null;
+	}
+
+	function selectProfile(nextId) {
+		setProfileId(nextId);
+		setDirty(false);
+		setNotice(null);
+		setRoles(bindingsFor(nextId));
+	}
+
+	function changeRole(role, patch) {
+		const current = roles || bindingsFor(profileId);
+		const next = { ...current, [role]: { ...current[role], ...patch } };
+		if (profileId && profileId !== "custom") {
+			// Built-in profiles are immutable: editing a binding auto-creates
+			// the operator's Custom profile (the built-in is never mutated).
+			setProfileId("custom");
+			setDirty(true);
+			setNotice("Editing a built-in profile creates a Custom profile.");
+			setNoticeTone("ok");
+		}
+		setRoles(next);
+	}
+
+	function save() {
+		if (saving) return;
+		setSaving(true);
+		setNotice(null);
+		const requestId = (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "req-" + Date.now() + "-" + Math.random().toString(36).slice(2));
+		const action = profileId === "custom" ? "save-custom" : "select";
+		const body = { sessionId: sessionId || "", action, requestId };
+		if (action === "save-custom") body.roles = roles;
+		else body.profileId = profileId;
+		fetch("./nexus/engineering-profile-action.json", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+			cache: "no-store",
+		})
+			.then((response) => response.json().catch(() => ({ ok: false, error: "engineering-action-unreadable" })))
+			.then((body) => {
+				if (body && body.ok) {
+					setNotice(action === "select" ? "Preferred profile updated. The change applies at the next safe execution boundary." : "Custom profile saved and set as preferred. The change applies at the next safe execution boundary.");
+					setNoticeTone("ok");
+					setDirty(false);
+					refresh();
+				} else {
+					setNotice("Could not save: " + (body && body.error ? body.error : "unknown error"));
+					setNoticeTone("err");
+				}
+			})
+			.catch(() => {
+				setNotice("Could not save the engineering profile. Try again.");
+				setNoticeTone("err");
+			})
+			.finally(() => setSaving(false));
+	}
+
+	const roleLabels = {
+		primaryEngineer: "Primary Engineer",
+		deepEngineer: "Deep Engineer",
+		reviewer: "Reviewer",
+		solver: "Solver",
+		fallback: "Fallback",
+	};
+
+	if (failed) {
+		return react_jsx_runtime.jsx(Section, {
+			label: "Engineering Profile",
+			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." }),
+		});
+	}
+	if (!state || !Array.isArray(state.profiles) || !roles) {
+		return react_jsx_runtime.jsx(Section, {
+			label: "Engineering Profile",
+			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading engineering configuration…" }),
+		});
+	}
+
+	const selectedProfile = state.profiles.find((p) => p && String(p.id) === profileId) || null;
+	const runningSummary = null; // RUNNING execution is shown in the Overview tab
+	return react_jsx_runtime.jsxs(Section, {
+		label: "Engineering Profile",
+		children: [
+			react_jsx_runtime.jsx("div", {
+				className: "nx-eng-head",
+				children: [
+					react_jsx_runtime.jsx("span", { className: "nx-eng-label", children: "Profile" }),
+					react_jsx_runtime.jsx("select", {
+						className: "nx-eng-profile",
+						value: profileId || "",
+						onChange: (event) => selectProfile(event.target.value),
+						"aria-label": "Preferred engineering profile",
+						children: state.profiles.map((profile) => react_jsx_runtime.jsx("option", { value: String(profile.id), children: String(profile.displayName || profile.id) + (profile.id === "custom" ? " (operator-defined)" : "") }, String(profile.id))),
+					}),
+				],
+			}),
+			["primaryEngineer", "deepEngineer", "reviewer", "solver", "fallback"].map((role) => {
+				const binding = roles[role] || { model: "", reasoning: "" };
+				const compatible = (state.roleModels && Array.isArray(state.roleModels[role]) ? state.roleModels[role] : []);
+				const entry = modelEntry(binding.model);
+				const reasoningLevels = entry && Array.isArray(entry.supportedReasoningLevels) ? entry.supportedReasoningLevels : [];
+				const isCustom = profileId === "custom";
+				return react_jsx_runtime.jsxs("div", {
+					className: "nx-eng-row",
+					key: role,
+					children: [
+						react_jsx_runtime.jsx("span", { className: "nx-eng-label", title: role, children: roleLabels[role] || role }),
+						react_jsx_runtime.jsx("select", {
+							className: "nx-eng-select",
+							value: binding.model,
+							disabled: !isCustom,
+							"aria-label": role + " model",
+							onChange: (event) => changeRole(role, { model: event.target.value, reasoning: "" }),
+							children: compatible.map((modelId) => {
+								const m = modelEntry(modelId);
+								return react_jsx_runtime.jsx("option", { value: modelId, children: (m ? String(m.displayName || m.id) : modelId) + (m && m.vendor ? " · " + m.vendor : "") }, modelId);
+							}),
+						}),
+						react_jsx_runtime.jsx("select", {
+							className: "nx-eng-reason",
+							value: binding.reasoning,
+							disabled: !isCustom,
+							"aria-label": role + " reasoning",
+							onChange: (event) => changeRole(role, { reasoning: event.target.value }),
+							children: reasoningLevels.map((level) => react_jsx_runtime.jsx("option", { value: level, children: level }, level)),
+						}),
+					],
+				});
+			}),
+			(dirty || profileId === "custom") && react_jsx_runtime.jsx("div", {
+				className: "nx-eng-hint",
+				children: "Custom bindings apply to the selected role when the next task starts (or escalates). Built-in profiles are never modified.",
+			}),
+			notice && react_jsx_runtime.jsx("div", { className: "nx-eng-notice " + (noticeTone === "ok" ? "nx-eng-notice-ok" : "nx-eng-notice-err"), children: notice }),
+			react_jsx_runtime.jsx("button", {
+				type: "button",
+				className: "nx-eng-save",
+				disabled: saving,
+				onClick: () => save(),
+				children: saving ? "Saving…" : (profileId === "custom" ? "Save Custom Profile" : "Select Profile"),
+			}),
+			react_jsx_runtime.jsx("div", { className: "nx-eng-meta", children: "PREFERRED PROFILE: " + String((state.preferredProfile && state.preferredProfile.displayName) || (state.preferredProfile && state.preferredProfile.id) || "none") + " · the RUNNING execution (class/role/model/provider) is shown in the Overview tab and is never rewritten by a save." }),
+		],
+	});
+}
+
 function ControlRoom({ sessionId, running, onClose }) {
 	const { detail, failed } = useDetailSnapshot(sessionId, true);
 	const [view, setView] = react.useState(() => readRoomViewPref());
@@ -1080,7 +1313,9 @@ function ControlRoom({ sessionId, running, onClose }) {
 						? react_jsx_runtime.jsx(RoomActivity, { detail })
 						: view === "verification"
 							? react_jsx_runtime.jsx(RoomVerification, { detail })
-							: react_jsx_runtime.jsx(RoomFiles, { detail }),
+							: view === "engineering"
+								? react_jsx_runtime.jsx(EngineeringEditor, { sessionId })
+								: react_jsx_runtime.jsx(RoomFiles, { detail }),
 			}),
 		],
 	});
@@ -1445,6 +1680,21 @@ const PANEL_CSS = [
 	".nx-executor-pill-pref{background:transparent;border-color:var(--dsw-alias-border-l1)}",
 	".nx-executor-pill-pref .nx-executor-pill-label{color:var(--dsw-alias-label-tertiary)}",
 	"@media (max-width: 480px){.nx-executor-pill-model{display:none}}",
+".nx-eng{display:flex;flex-direction:column;gap:8px;padding:2px 0 6px}",
+".nx-eng-row{display:flex;align-items:center;gap:6px;min-width:0}",
+".nx-eng-label{flex:none;width:104px;font-size:10.5px;color:var(--dsw-alias-label-secondary);font-weight:600;letter-spacing:.02em}",
+".nx-eng-select{flex:1;min-width:0;font-size:11px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);border:1px solid var(--dsw-alias-border-l1);border-radius:5px;padding:3px 4px;font-family:var(--ds-font-family-ui, inherit)}",
+".nx-eng-select:disabled{opacity:.55;cursor:not-allowed}",
+".nx-eng-reason{flex:none;width:82px;font-size:11px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);border:1px solid var(--dsw-alias-border-l1);border-radius:5px;padding:3px 4px;font-family:var(--ds-font-family-ui, inherit)}",
+".nx-eng-head{display:flex;align-items:center;gap:8px;margin-bottom:2px}",
+".nx-eng-profile{flex:1;font-size:11.5px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);border:1px solid var(--dsw-alias-border-l1);border-radius:5px;padding:4px 6px;font-family:var(--ds-font-family-ui, inherit)}",
+".nx-eng-notice{font-size:10.5px;color:var(--dsw-alias-label-secondary);padding:4px 8px;border-radius:5px;background:var(--dsw-alias-interactive-bg-hover)}",
+".nx-eng-notice-ok{color:var(--dsw-alias-state-success-primary)}",
+".nx-eng-notice-err{color:var(--dsw-alias-state-error-primary)}",
+".nx-eng-save{align-self:flex-start;margin-top:2px;font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-state-business-primary);border:none;border-radius:6px;padding:5px 14px;cursor:pointer}",
+".nx-eng-save:disabled{opacity:.5;cursor:wait}",
+".nx-eng-meta{font-size:10px;color:var(--dsw-alias-label-tertiary);line-height:1.45}",
+".nx-eng-hint{font-size:10px;color:var(--dsw-alias-label-tertiary)}",
 ].join("");
 //#endregion
 
@@ -1508,6 +1758,7 @@ exports.executorChipContent = executorChipContent;
 exports.ExecutorPill = ExecutorPill;
 exports.ExecutorChip = ExecutorChip;
 exports.GateActions = GateActions;
+exports.EngineeringEditor = EngineeringEditor;
 exports.activityKindTitle = activityKindTitle;
 return module.exports;
 }

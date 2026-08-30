@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "description": "Central Nexus model registry. A model entry is vendor-neutral configuration: it maps a profile-facing model id to a provider configuration identifier (settings.yaml llm-pi-ai.providers) and declares capabilities. Routing/controller code must never branch on vendor; vendor-specific handling belongs only in provider adapters and enforcement layers.",
+  "models": [
+    {
+      "id": "deepseek-v4-flash",
+      "displayName": "DeepSeek V4 Flash",
+      "vendor": "DeepSeek",
+      "provider": "flash-max-direct",
+      "providers": {
+        "high": "flash-high-direct",
+        "max": "flash-max-direct",
+        "default": "flash-max-direct"
+      },
+      "model": "deepseek-v4-flash",
+      "supportedReasoningLevels": [
+        "off",
+        "high",
+        "max"
+      ],
+      "supportsTools": true,
+      "supportsReasoning": true,
+      "supportsVision": false,
+      "supportsStreaming": true,
+      "contextWindow": 131072,
+      "maxOutputTokens": 8192,
+      "enabled": true
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "displayName": "DeepSeek V4 Pro",
+      "vendor": "DeepSeek",
+      "provider": "deepseek-pro-direct",
+      "providers": {
+        "high": "deepseek-pro-direct",
+        "max": "deepseek-pro-direct",
+        "default": "deepseek-pro-direct"
+      },
+      "model": "deepseek-v4-pro",
+      "supportedReasoningLevels": [
+        "off",
+        "high",
+        "max"
+      ],
+      "supportsTools": true,
+      "supportsReasoning": true,
+      "supportsVision": false,
+      "supportsStreaming": true,
+      "contextWindow": 131072,
+      "maxOutputTokens": 8192,
+      "enabled": true
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "displayName": "GPT-5.6 Sol",
+      "vendor": "OpenAI",
+      "provider": "sol-local",
+      "providers": {
+        "default": "sol-local"
+      },
+      "model": "gpt-5.6-sol",
+      "supportedReasoningLevels": [
+        "off",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "supportsTools": false,
+      "supportsReasoning": true,
+      "supportsVision": true,
+      "supportsStreaming": true,
+      "contextWindow": 400000,
+      "maxOutputTokens": 2500,
+      "enabled": true,
+      "readOnlyDefault": true
+    },
+    {
+      "id": "glm-5.3-flash",
+      "displayName": "GLM-5.3-Flash",
+      "vendor": "Z.ai",
+      "provider": "zai-direct",
+      "providers": {
+        "default": "zai-direct",
+        "high": "zai-direct"
+      },
+      "model": "glm-5.3-flash",
+      "supportedReasoningLevels": [
+        "off",
+        "high"
+      ],
+      "supportsTools": true,
+      "supportsReasoning": true,
+      "supportsVision": true,
+      "supportsStreaming": true,
+      "contextWindow": 131072,
+      "maxOutputTokens": 8192,
+      "enabled": true
+    },
+    {
+      "id": "glm-5.3",
+      "displayName": "GLM-5.3",
+      "vendor": "Z.ai",
+      "provider": "zai-direct",
+      "providers": {
+        "default": "zai-direct",
+        "high": "zai-direct",
+        "max": "zai-direct"
+      },
+      "model": "glm-5.3",
+      "supportedReasoningLevels": [
+        "off",
+        "high",
+        "max"
+      ],
+      "supportsTools": true,
+      "supportsReasoning": true,
+      "supportsVision": true,
+      "supportsStreaming": true,
+      "contextWindow": 131072,
+      "maxOutputTokens": 8192,
+      "enabled": true
+    }
+  ]
+}

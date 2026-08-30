@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param([string]$Workspace=(Get-Location).Path,[string]$InstallRoot='C:\AI-Harness',[Parameter(Mandatory=$true)][string]$TaskId,[string]$Question,[string[]]$Invariants=@(),[string]$DiffPath,[string]$FilesPath,[string]$Assessment,[switch]$Execute,[switch]$UserApprovedFullRepo,[ValidateSet('bundle','files','inline')][string]$ContextMode='bundle',[string]$Attempt,[string]$PayloadFile)
+param([string]$Workspace=(Get-Location).Path,[string]$InstallRoot='C:\AI-Harness',[Parameter(Mandatory=$true)][string]$TaskId,[string]$Question,[string[]]$Invariants=@(),[string]$DiffPath,[string]$FilesPath,[string]$Assessment,[switch]$Execute,[switch]$UserApprovedFullRepo,[ValidateSet('bundle','files','inline')][string]$ContextMode='bundle',[string]$Attempt,[string]$Preset,[string]$PayloadFile)
 . (Join-Path $PSScriptRoot 'Common.ps1')
 . (Join-Path $PSScriptRoot 'Routing.ps1')
 . (Join-Path $PSScriptRoot 'CodexReview.ps1')
@@ -17,6 +17,18 @@ if ($PayloadFile) {
 }
 if ([string]::IsNullOrWhiteSpace($Question)) { throw 'A review question is required.' }
 $layout=Get-AihLayout $InstallRoot;$policy=Get-AihRoutingPolicy $layout.RoutingPolicy
+# Phase 2: the reviewer ROLE is resolved through the active engineering
+# profile + model registry (routing selected the class; the profile decides
+# WHICH model fulfills the reviewer role). The bounded review transport in
+# this phase is the local Codex/OAuth adapter (provider sol-local); any other
+# reviewer provider fails closed at this adapter boundary.
+$profiles=Get-AihEngineeringProfiles (Join-Path (Split-Path -Parent $layout.RoutingPolicy) 'engineering-profiles.json') $layout.CustomEngineeringProfile
+$registry=Get-AihModelRegistry (Join-Path (Split-Path -Parent $layout.RoutingPolicy) 'model-registry.json')
+$resolvedPreset=Resolve-AihPreset $policy $Preset
+$profile=Resolve-AihProfile $policy $resolvedPreset $profiles $layout.Settings
+$reviewerTarget=Resolve-AihModelTarget $registry $profile 'reviewer'
+if($reviewerTarget.Provider -ne 'sol-local'){throw "Reviewer provider '$($reviewerTarget.Provider)' is not supported by the bounded review adapter in this phase; fail closed."}
+
 $diff=''
 if(-not[string]::IsNullOrWhiteSpace($DiffPath)){$diff=Get-Content -Raw -LiteralPath $DiffPath}
 elseif([string]::IsNullOrWhiteSpace($FilesPath)){$previousErrorAction=$ErrorActionPreference;try{$ErrorActionPreference='Continue';$diff=(& git -C $Workspace diff --no-ext-diff HEAD -- 2>$null|Out-String)}finally{$ErrorActionPreference=$previousErrorAction}}
@@ -37,13 +49,13 @@ if(-not[string]::IsNullOrWhiteSpace($FilesPath)){
 $packet=New-AihReviewPacket $Workspace $TaskId $Question $Invariants $diff $files @() $Assessment $policy -UserApprovedFullRepo:$UserApprovedFullRepo -ContextMode $ContextMode -Attempt $Attempt
 if($Execute){
     if(-not [bool]$packet.enforcement.allowed){
-        $result=[ordered]@{ok=$false;kind='packet-too-large';taskId=$TaskId;executionClass='codex_review';codexCalled=$false;violations=@($packet.enforcement.violations);enforcement=$packet.enforcement;budget=$packet.budget;readOnly=$true;completionAuthority=$false}
+        $result=[ordered]@{ok=$false;kind='packet-too-large';taskId=$TaskId;executionClass='reviewer';role='reviewer';profile=$profile.Id;provider=$reviewerTarget.Provider;model=$reviewerTarget.Model;reviewerCalled=$false;codexCalled=$false;violations=@($packet.enforcement.violations);enforcement=$packet.enforcement;budget=$packet.budget;readOnly=$true;completionAuthority=$false}
         $result|ConvertTo-Json -Depth 20
         exit 3
     }
-    $reviewResult=Invoke-AihCodexReview $Workspace $TaskId $packet $InstallRoot
+    $reviewResult=Invoke-AihCodexReview $Workspace $TaskId $packet $InstallRoot -Model $reviewerTarget.Model -Reasoning $reviewerTarget.Reasoning
     $budget=Get-AihCodexBudget $policy
-    $telemetry=Write-AihTaskTelemetry $Workspace $TaskId @{executionClass='codex_review';model='gpt-5.6-sol';provider='sol-local';modelCalls=1;codexFindings=@($reviewResult.findings);finalResult=$reviewResult.verdict;configuration='deepseek-codex-review';filesSupplied=@($files).Count}
-    $result=[ordered]@{ok=$true;taskId=$TaskId;executionClass='codex_review';provider='sol-local';model='gpt-5.6-sol';reasoning='medium';callCount=[int](Get-AihTask $Workspace $TaskId).codexCalls;budget=[ordered]@{maxCallsPerTask=[int]$budget.maxCallsPerTask;maxFiles=[int]$budget.maxFiles;maxDiffLines=[int]$budget.maxDiffLines;maxContextTokens=[int]$budget.maxContextTokens;maxOutputTokens=[int]$budget.maxOutputTokens};readOnly=$true;freshContext=$true;completionAuthority=$false;result=$reviewResult;telemetry=$telemetry}
+    $telemetry=Write-AihTaskTelemetry $Workspace $TaskId @{executionClass='reviewer';model=$reviewerTarget.Model;provider=$reviewerTarget.Provider;modelCalls=1;codexFindings=@($reviewResult.findings);finalResult=$reviewResult.verdict;configuration=$profile.Id;filesSupplied=@($files).Count}
+    $result=[ordered]@{ok=$true;taskId=$TaskId;executionClass='reviewer';role='reviewer';profile=$profile.Id;profileDisplayName=$profile.DisplayName;provider=$reviewerTarget.Provider;model=$reviewerTarget.Model;modelDisplayName=$reviewerTarget.ModelDisplayName;reasoning=$reviewerTarget.Reasoning;callCount=[int](Get-AihTask $Workspace $TaskId).codexCalls;budget=[ordered]@{maxCallsPerTask=[int]$budget.maxCallsPerTask;maxFiles=[int]$budget.maxFiles;maxDiffLines=[int]$budget.maxDiffLines;maxContextTokens=[int]$budget.maxContextTokens;maxOutputTokens=[int]$budget.maxOutputTokens};readOnly=$true;freshContext=$true;completionAuthority=$false;result=$reviewResult;telemetry=$telemetry}
     $result|ConvertTo-Json -Depth 20
 }else{$packet|ConvertTo-Json -Depth 20}

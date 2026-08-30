@@ -81,7 +81,7 @@ The exact implementation remains the authority; documentation should not be used
 
 A failure is recorded as controller state, including a normalized signature where applicable. Routing policy can use repeated evidence-backed failure or critical signals to select deeper DeepSeek reasoning or bounded review.
 
-A generic feeling that a task is difficult is not enough to hand authority to Codex.
+A generic feeling that a task is difficult is not enough to hand authority to a reviewer model.
 
 ## Verification authority
 
@@ -116,16 +116,19 @@ This prevents restarts from creating silent Attempt N+1 records or leaving perma
 
 ## Review authority
 
-Codex review is intentionally narrow:
+Review is intentionally narrow, regardless of which model the active profile
+binds to the reviewer role (this phase: the local Codex/OAuth adapter):
 
 - fresh review request;
 - bounded packet;
 - read-only by default;
 - enforced call/file/diff/context/output limits;
 - no global completion authority;
-- review result returns to controller/DeepSeek repair flow.
+- review result returns to controller/deep-engineer repair flow (same profile);
+- reviewer is never the task's root executor.
 
-Writable `codex_solve` is exceptional and requires explicit user approval.
+Writable `solver` execution is exceptional and requires explicit user
+approval (`-UserApprovedCodexSolve` — parameter name kept for compatibility).
 
 ## Operator-gate authority
 

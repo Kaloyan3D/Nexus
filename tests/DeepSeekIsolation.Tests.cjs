@@ -38,10 +38,14 @@ async function main() {
     on(name, handler) { engineeringHandlers[name] = handler },
   })
   assert.equal(engineeringIsolation.inject, undefined)
+  // Phase 2: the engineering isolation is profile-driven. With no task
+  // binding the default profile (DeepSeek + Codex) applies, and the
+  // primaryEngineer role declares DeepSeek V4 Flash HIGH — enforcement now
+  // matches the routing semantics instead of forcing MAX on every root call.
   const normalizedEngineering = await engineeringHandlers['agent/request'](topLevel, async () => flashMax)
   assert.deepEqual(
     { provider: normalizedEngineering.provider, model: normalizedEngineering.model, reasoningEffort: normalizedEngineering.reasoningEffort },
-    { provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoningEffort: 'max' },
+    { provider: 'flash-high-direct', model: 'deepseek-v4-flash', reasoningEffort: 'high' },
   )
   const retainedEngineeringWorker = await engineeringHandlers['agent/request'](worker, async () => flashMax)
   assert.equal(retainedEngineeringWorker.provider, 'flash-max-direct')

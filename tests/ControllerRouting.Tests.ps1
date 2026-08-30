@@ -17,10 +17,10 @@ $layout=Get-AihLayout $InstallRoot;$policy=Get-AihRoutingPolicy $layout.RoutingP
 $normalRoot=New-Fixture normal
 try{
  $task=New-AihTask $normalRoot 'implement ordinary change' @() @() 'normal'
- Assert-Aih ($task.executionClass -eq 'deepseek_normal') 'normal GUI task starts on DeepSeek normal'
+ Assert-Aih ($task.executionClass -eq 'engineer_normal') 'normal GUI task starts with engineer_normal'
  Assert-Aih (-not $task.reviewRequested) 'normal GUI task has reviewRequested=false'
  $decision=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $normalRoot $task.taskId 'aih-engineering'
- Assert-Aih ($decision.executionClass -eq 'deepseek_normal') 'normal task routes to deepseek_normal'
+ Assert-Aih ($decision.executionClass -eq 'engineer_normal') 'normal task routes to engineer_normal'
  Assert-Aih (-not $decision.reviewRequired) 'normal task does not require review'
  Assert-Aih ([int]$task.codexCalls -eq 0) 'normal task records codexCalls=0'
  $completion=Test-AihTaskCompletion $normalRoot $task.taskId
@@ -33,9 +33,9 @@ try{
  $task=New-AihTask $reviewRoot 'audit the isolation boundary' @() @() 'normal' $null -ReviewRequested
  Assert-Aih ([bool]$task.reviewRequested) 'explicit task records reviewRequested=true'
  $decision=Invoke-AihRoutingDecision -Description 'audit the isolation boundary' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $reviewRoot -TaskId $task.taskId -Preset 'aih-engineering' -ReviewRequested
- Assert-Aih ($decision.executionClass -eq 'codex_review') 'explicit review request selects codex_review'
+ Assert-Aih ($decision.executionClass -eq 'reviewer') 'explicit review request selects reviewer'
  Assert-Aih ([bool]$decision.reviewRequired) 'explicit review request marks reviewRequired'
- Assert-Aih (-not $decision.writable) 'codex_review is read-only'
+ Assert-Aih (-not $decision.writable) 'reviewer is read-only'
  $packet=New-AihReviewPacket $reviewRoot $task.taskId 'audit the isolation boundary' @() 'diff: ok' @([pscustomobject]@{path='src/a.ts';content='const a=1'}) @() '' $policy
  Assert-Aih ([bool]$packet.enforcement.allowed) 'small explicit review packet is allowed'
  $call=Register-AihCodexReviewCall $reviewRoot $task.taskId $packet
@@ -44,11 +44,11 @@ try{
  Assert-Aih ([int]$after.codexCalls -eq 1) 'explicit review registers exactly one call'
  $blocked=$false;try{Register-AihCodexReviewCall $reviewRoot $task.taskId $packet}catch{$blocked=$true}
  Assert-Aih $blocked 'second Codex call for the same task is blocked (max 1 per task)'
- $telemetry=Write-AihTaskTelemetry $reviewRoot $task.taskId @{executionClass='codex_review';model='gpt-5.6-sol';provider='sol-local';modelCalls=1;codexFindings=@();finalResult='pass';configuration='deepseek-codex-review'}
- Assert-Aih ($telemetry.executionClass -eq 'codex_review') 'review telemetry records executionClass=codex_review'
+ $telemetry=Write-AihTaskTelemetry $reviewRoot $task.taskId @{executionClass='reviewer';model='gpt-5.6-sol';provider='sol-local';modelCalls=1;codexFindings=@();finalResult='pass';configuration='deepseek-codex'}
+ Assert-Aih ($telemetry.executionClass -eq 'reviewer') 'review telemetry records executionClass=reviewer'
  Assert-Aih ($telemetry.provider -eq 'sol-local' -and $telemetry.model -eq 'gpt-5.6-sol') 'review telemetry records Codex provider/model'
  Assert-Aih ([int]$telemetry.codexCalls -eq 1) 'review telemetry records call count'
- Assert-Aih ($telemetry.configuration -eq 'deepseek-codex-review') 'review telemetry records configuration'
+ Assert-Aih ($telemetry.configuration -eq 'deepseek-codex') 'review telemetry records the engineering profile'
 }finally{if(Test-Path $reviewRoot){Remove-Item -LiteralPath $reviewRoot -Recurse -Force}}
 
 # ── 3. BUDGET REJECTION: oversized review -> Codex NOT called, structured result ──
@@ -72,10 +72,10 @@ try{
  $task=New-AihTask $escalationRoot 'implement ordinary change'
  $d1=Invoke-AihRoutingDecision -Description 'implement ordinary change' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $escalationRoot -TaskId $task.taskId -Preset 'aih-engineering' -Signal 'attempt-failure' -FailureReason 'same test expected 1 actual 2'
  $d2=Invoke-AihRoutingDecision -Description 'implement ordinary change' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $escalationRoot -TaskId $task.taskId -Preset 'aih-engineering' -Signal 'attempt-failure' -FailureReason 'same test expected 1 actual 2'
- Assert-Aih ($d2.executionClass -eq 'deepseek_deep') 'repeated identical failure escalates to DeepSeek deep'
+ Assert-Aih ($d2.executionClass -eq 'engineer_deep') 'repeated identical failure escalates to engineer_deep'
  $d3=Invoke-AihRoutingDecision -Description 'implement ordinary change' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $escalationRoot -TaskId $task.taskId -Preset 'aih-engineering' -Signal 'attempt-failure' -FailureReason 'same test expected 1 actual 2'
  $d4=Invoke-AihRoutingDecision -Description 'implement ordinary change' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $escalationRoot -TaskId $task.taskId -Preset 'aih-engineering' -Signal 'verification-failure' -FailureReason 'same test expected 1 actual 2'
- Assert-Aih ($d4.executionClass -eq 'codex_review') 'threshold reached: same normalized failure escalates to codex_review'
+ Assert-Aih ($d4.executionClass -eq 'reviewer') 'threshold reached: same normalized failure escalates to reviewer'
  Assert-Aih (-not $d4.writable) 'automatic escalation stays read-only'
 }finally{if(Test-Path $escalationRoot){Remove-Item -LiteralPath $escalationRoot -Recurse -Force}}
 
@@ -96,10 +96,10 @@ foreach($preset in @($engineeringPreset,$deepseekPreset)){
   Assert-Aih ($codexIndex -lt 0) "preset $presetName removes subagent_codex entirely"
  }
 }
-$solveBlocked=$false;try{Invoke-AihRoutingDecision 'solve' $InstallRoot $layout.RoutingPolicy $escalationRoot 'solve-task' 'aih-engineering' '' 'codex_solve'}catch{$solveBlocked=$true}
-Assert-Aih $solveBlocked 'codex_solve requires explicit user approval and is never auto-selected'
-$solveApproved=Invoke-AihRoutingDecision -Description 'solve' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $escalationRoot -TaskId 'solve-task' -Preset 'aih-engineering' -ForceClass 'codex_solve' -UserApprovedCodexSolve
-Assert-Aih ($solveApproved.executionClass -eq 'codex_solve' -and $solveApproved.writable) 'codex_solve is writable only with explicit approval'
+$solveBlocked=$false;try{Invoke-AihRoutingDecision 'solve' $InstallRoot $layout.RoutingPolicy $escalationRoot 'solve-task' 'aih-engineering' '' 'solver'}catch{$solveBlocked=$true}
+Assert-Aih $solveBlocked 'solver requires explicit user approval and is never auto-selected'
+$solveApproved=Invoke-AihRoutingDecision -Description 'solve' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $escalationRoot -TaskId 'solve-task' -Preset 'aih-engineering' -ForceClass 'solver' -UserApprovedCodexSolve
+Assert-Aih ($solveApproved.executionClass -eq 'solver' -and $solveApproved.writable) 'solver is writable only with explicit approval'
 
 # ── 6. COMPLETION: reviewer cannot complete; controller decides ──
 $completionRoot=New-Fixture completion
@@ -125,11 +125,11 @@ try{
  Assert-Aih ($task.reviewRequested -eq $true) 'aih-task create-task -ReviewRequested stores the metadata'
  $decisionJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Route.ps1') -Workspace $cliRoot -TaskId $task.taskId -Description 'audit the boundary' -ReviewRequested
  $decision=$decisionJson|ConvertFrom-Json
- Assert-Aih ($decision.executionClass -eq 'codex_review') 'aih-route -ReviewRequested selects codex_review'
+ Assert-Aih ($decision.executionClass -eq 'reviewer') 'aih-route -ReviewRequested selects reviewer'
  Assert-Aih ($decision.reviewRequested -eq $true) 'routing decision record carries reviewRequested=true'
  $statePath=Get-AihRoutingStatePath $layout.RoutingData $cliRoot $task.taskId
  $state=Read-AihRoutingState $statePath
- Assert-Aih ($state.executionClass -eq 'codex_review') 'routing state persists the codex_review execution class'
+ Assert-Aih ($state.executionClass -eq 'reviewer') 'routing state persists the reviewer execution class'
 }finally{if(Test-Path $cliRoot){Remove-Item -LiteralPath $cliRoot -Recurse -Force}}
 
 # ── 8. PAYLOAD FILE BRIDGE: hostile user text round-trips byte-exact ──
@@ -155,7 +155,7 @@ try{
  Assert-Aih ($task.reviewRequested -eq $true) 'payload reviewRequested reaches New-AihTask'
  $decisionJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Route.ps1') -Workspace $payloadRoot -TaskId $task.taskId -PayloadFile $payloadPath
  $decision=$decisionJson|ConvertFrom-Json
- Assert-Aih ($decision.executionClass -eq 'codex_review') 'payload routing selects codex_review for the hostile prompt'
+ Assert-Aih ($decision.executionClass -eq 'reviewer') 'payload routing selects reviewer for the hostile prompt'
  Assert-Aih ($decision.reviewRequested -eq $true) 'payload routing decision carries reviewRequested=true'
  $srJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Task.ps1') -Action set-review-requested -TaskId $task.taskId -PayloadFile $payloadPath
  Assert-Aih (-not [string]::IsNullOrWhiteSpace($srJson)) 'payload set-review-requested action is accepted'
@@ -212,5 +212,19 @@ try {
     & (Join-Path $layout.Scripts 'Repair-LedgerEncoding.ps1') -InstallRoot $repairRoot -Workspace $repairRoot | Out-Null
     Assert-Aih ($before -eq [IO.File]::ReadAllText($repairLedgerPath, [Text.UTF8Encoding]::new($false))) 'repair is idempotent'
 } finally { if (Test-Path $repairRoot) { Remove-Item -LiteralPath $repairRoot -Recurse -Force } }
+
+Write-Host "# ── 9. LEGACY TOLERANCE: pre-Phase-2 class names stay readable ──"
+$legacyRoot=New-Fixture legacy
+try{
+ Assert-Aih ((ConvertTo-AihExecutionClass 'deepseek_normal' $policy) -eq 'engineer_normal') 'legacy deepseek_normal normalizes to engineer_normal'
+ Assert-Aih ((ConvertTo-AihExecutionClass 'codex_review' $policy) -eq 'reviewer') 'legacy codex_review normalizes to reviewer'
+ # legacy class names remain valid CLI inputs and normalize on write
+ $legacyTask=New-AihTask $legacyRoot 'legacy task' @('c') @() 'normal'
+ $legacyAtt=Start-AihTaskAttempt $legacyRoot $legacyTask.taskId 'deepseek_deep'
+ Assert-Aih ($legacyAtt.executionClass -eq 'engineer_deep') 'legacy deepseek_deep attempt input normalizes to engineer_deep'
+ # a legacy routing record (class deepseek_normal) stays readable via the CLI
+ $legacyDecision=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $legacyRoot 'legacy-cli-task' 'aih-engineering' '' 'codex_solve' '' '' -UserApprovedCodexSolve
+ Assert-Aih ($legacyDecision.executionClass -eq 'solver') 'legacy codex_solve force-class normalizes to solver'
+}finally{if(Test-Path $legacyRoot){Remove-Item -LiteralPath $legacyRoot -Recurse -Force}}
 
 Write-Host "RESULT: $passed deterministic controller-routing assertions passed."

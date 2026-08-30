@@ -1,18 +1,41 @@
 {
-  "version": 2,
+  "version": 3,
   "defaultPreset": "aih-engineering",
-  "defaultExecutionClass": "deepseek_normal",
+  "defaultProfile": "deepseek-codex",
+  "defaultExecutionClass": "engineer_normal",
   "presets": {
     "aih-engineering": {
       "displayName": "Normal Engineering",
       "allowOpenAI": true,
       "allowCodexSubagent": true,
       "failurePolicy": "bounded-escalation",
-      "rootExecutor": { "name": "DeepSeek V4 Flash MAX", "provider": "flash-max-direct", "model": "deepseek-v4-flash", "reasoning": "max" },
+      "profile": "deepseek-codex",
+      "profileOverrideAllowed": true,
+      "rootExecutor": {
+        "name": "DeepSeek V4 Flash MAX",
+        "provider": "flash-max-direct",
+        "model": "deepseek-v4-flash",
+        "reasoning": "max"
+      },
       "tiers": {
-        "1": { "name": "Codex manual review (deprecated tier1)", "provider": "sol-local", "model": "gpt-5.6-sol", "reasoning": "medium" },
-        "2": { "name": "DeepSeek deep (deprecated tier2)", "provider": "flash-max-direct", "model": "deepseek-v4-flash", "reasoning": "max" },
-        "3": { "name": "DeepSeek normal (deprecated tier3)", "provider": "flash-high-direct", "model": "deepseek-v4-flash", "reasoning": "high" }
+        "1": {
+          "name": "Review (legacy tier1)",
+          "provider": "sol-local",
+          "model": "gpt-5.6-sol",
+          "reasoning": "medium"
+        },
+        "2": {
+          "name": "Engineer deep (legacy tier2)",
+          "provider": "flash-max-direct",
+          "model": "deepseek-v4-flash",
+          "reasoning": "max"
+        },
+        "3": {
+          "name": "Engineer normal (legacy tier3)",
+          "provider": "flash-high-direct",
+          "model": "deepseek-v4-flash",
+          "reasoning": "high"
+        }
       }
     },
     "aih-deepseek": {
@@ -20,34 +43,128 @@
       "allowOpenAI": false,
       "allowCodexSubagent": false,
       "failurePolicy": "fail-closed",
-      "rootExecutor": { "name": "DeepSeek V4 Flash MAX", "provider": "flash-max-direct", "model": "deepseek-v4-flash", "reasoning": "max" },
+      "profile": "deepseek-codex",
+      "profileOverrideAllowed": false,
+      "rootExecutor": {
+        "name": "DeepSeek V4 Flash MAX",
+        "provider": "flash-max-direct",
+        "model": "deepseek-v4-flash",
+        "reasoning": "max"
+      },
       "tiers": {
-        "1": { "name": "DeepSeek deep (deprecated tier1)", "provider": "flash-max-direct", "model": "deepseek-v4-flash", "reasoning": "max" },
-        "2": { "name": "DeepSeek deep (deprecated tier2)", "provider": "flash-max-direct", "model": "deepseek-v4-flash", "reasoning": "max" },
-        "3": { "name": "DeepSeek normal (deprecated tier3)", "provider": "flash-high-direct", "model": "deepseek-v4-flash", "reasoning": "high" }
+        "1": {
+          "name": "DeepSeek deep (legacy tier1)",
+          "provider": "flash-max-direct",
+          "model": "deepseek-v4-flash",
+          "reasoning": "max"
+        },
+        "2": {
+          "name": "DeepSeek deep (legacy tier2)",
+          "provider": "flash-max-direct",
+          "model": "deepseek-v4-flash",
+          "reasoning": "max"
+        },
+        "3": {
+          "name": "DeepSeek normal (legacy tier3)",
+          "provider": "flash-high-direct",
+          "model": "deepseek-v4-flash",
+          "reasoning": "high"
+        }
       }
     }
   },
   "executionClasses": {
-    "deterministic": { "provider": null, "model": null, "reasoning": null, "writable": false },
-    "deepseek_normal": { "provider": "flash-high-direct", "model": "deepseek-v4-flash", "reasoning": "high", "writable": true },
-    "deepseek_deep": { "provider": "flash-max-direct", "model": "deepseek-v4-flash", "reasoning": "max", "writable": true },
-    "codex_review": { "provider": "sol-local", "model": "gpt-5.6-sol", "reasoning": "medium", "writable": false },
-    "codex_solve": { "provider": "sol-local", "model": "gpt-5.6-sol", "reasoning": "high", "writable": true, "requiresUserApproval": true }
+    "deterministic": {
+      "role": null,
+      "writable": false,
+      "requiresUserApproval": false,
+      "reasoning": null
+    },
+    "engineer_normal": {
+      "role": "primaryEngineer",
+      "writable": true,
+      "requiresUserApproval": false
+    },
+    "engineer_deep": {
+      "role": "deepEngineer",
+      "writable": true,
+      "requiresUserApproval": false
+    },
+    "reviewer": {
+      "role": "reviewer",
+      "writable": false,
+      "requiresUserApproval": false
+    },
+    "solver": {
+      "role": "solver",
+      "writable": true,
+      "requiresUserApproval": true
+    }
   },
-  "legacyTierMap": { "tier3": "deepseek_normal", "tier2": "deepseek_deep", "tier1": "codex_review" },
+  "executionClassAliases": {
+    "deepseek_normal": "engineer_normal",
+    "deepseek_deep": "engineer_deep",
+    "codex_review": "reviewer",
+    "codex_solve": "solver"
+  },
+  "legacyTierMap": {
+    "tier3": "engineer_normal",
+    "tier2": "engineer_deep",
+    "tier1": "reviewer"
+  },
   "initialRules": [
-    { "id": "critical-boundary", "executionClass": "deepseek_deep", "risk": "critical", "reviewRequired": true, "reason": "Critical security, concurrency, migration, authentication, or permission boundaries start with deeper DeepSeek work and require bounded review.", "patterns": ["\\b(auth|authentication|authorization|permission architecture|credential boundary|security boundary|cryptograph|encryption|database migration|migration safety|concurrency correctness)\\b"] },
-    { "id": "mechanical-deterministic", "executionClass": "deterministic", "risk": "low", "reviewRequired": false, "reason": "A purely mechanical fact or verification operation needs no model.", "patterns": ["^(run|show|list|check|verify)\\s+(tests?|lint|typecheck|build|status|diff)(\\s|$)"] }
+    {
+      "id": "critical-boundary",
+      "executionClass": "engineer_deep",
+      "risk": "critical",
+      "reviewRequired": true,
+      "reason": "Critical security, concurrency, migration, authentication, or permission boundaries start with deeper engineering work and require bounded review.",
+      "patterns": [
+        "\\b(auth|authentication|authorization|permission architecture|credential boundary|security boundary|cryptograph|encryption|database migration|migration safety|concurrency correctness)\\b"
+      ]
+    },
+    {
+      "id": "mechanical-deterministic",
+      "executionClass": "deterministic",
+      "risk": "low",
+      "reviewRequired": false,
+      "reason": "A purely mechanical fact or verification operation needs no model.",
+      "patterns": [
+        "^(run|show|list|check|verify)\\s+(tests?|lint|typecheck|build|status|diff)(\\s|$)"
+      ]
+    }
   ],
   "escalation": {
     "sameFailureThreshold": 2,
-    "immediateReviewSignals": ["critical-security-boundary", "concurrency-uncertainty", "migration-safety", "auth-permission-architecture", "user-codex"],
-    "nonEscalatingSignals": ["none", "progress", "minor-error", "attempt-failure", "verification-failure"]
+    "immediateReviewSignals": [
+      "critical-security-boundary",
+      "concurrency-uncertainty",
+      "migration-safety",
+      "auth-permission-architecture",
+      "user-codex"
+    ],
+    "nonEscalatingSignals": [
+      "none",
+      "progress",
+      "minor-error",
+      "attempt-failure",
+      "verification-failure"
+    ]
   },
   "codex": {
-    "automaticReview": { "maxCallsPerTask": 1, "maxFiles": 8, "maxDiffLines": 2500, "maxContextTokens": 30000, "maxOutputTokens": 2500 },
-    "writable": { "default": false },
-    "fullRepo": { "default": false, "requiresUserApproval": true }
+    "automaticReview": {
+      "maxCallsPerTask": 1,
+      "maxFiles": 8,
+      "maxDiffLines": 2500,
+      "maxContextTokens": 30000,
+      "maxOutputTokens": 2500
+    },
+    "writable": {
+      "default": false
+    },
+    "fullRepo": {
+      "default": false,
+      "requiresUserApproval": true
+    }
   }
 }

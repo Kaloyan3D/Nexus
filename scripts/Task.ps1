@@ -2,7 +2,7 @@
 param(
  [ValidateSet('init','create-objective','create-task','set-review-requested','begin-attempt','attempt-event','evidence','failure','show','complete','learning')][string]$Action='show',
  [string]$Workspace=(Get-Location).Path,[string]$TaskId,[string]$Description,[string[]]$AcceptanceCriteria=@(),[string[]]$DependsOn=@(),
- [ValidateSet('low','normal','high','critical')][string]$Risk='normal',[string]$ExecutionClass='deepseek_normal',[switch]$ReviewRequested,[string]$FailureSignature,[string]$Evidence,
+ [ValidateSet('low','normal','high','critical')][string]$Risk='normal',[ValidateSet('deterministic','engineer_normal','engineer_deep','reviewer','solver','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClass='engineer_normal',[switch]$ReviewRequested,[string]$FailureSignature,[string]$Evidence,
  [string]$Classification,[switch]$CodexReviewPassed,[switch]$CodexFindingsResolved,
  [ValidateSet('verifying','passed','interrupted')][string]$Status,[string]$Reason,[string]$SessionId,[string]$StartedByTurn,[switch]$RequireNoOpenAttempt,[object]$EvidenceDoc,
  [string]$PayloadFile

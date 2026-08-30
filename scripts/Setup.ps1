@@ -42,7 +42,7 @@ foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'docs') -Fil
     Copy-AihSourceFile -Source $file.FullName -Destination (Join-Path $layout.Root 'docs')
 }
 
-foreach ($name in @('versions.json', 'settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'DeepSeek-Isolation.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json')) {
+foreach ($name in @('versions.json', 'settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'DeepSeek-Isolation.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json', 'engineering-profiles.json', 'model-registry.json', 'Engineering-Profiles.cjs')) {
     Copy-AihSourceFile -Source (Join-Path $sourceRoot "config\$name") -Destination (Join-Path $layout.Config $name)
 }
 foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'scripts') -File | Where-Object Extension -in @('.ps1', '.mjs')) {
@@ -166,6 +166,7 @@ Copy-Item -LiteralPath (Join-Path $layout.Config 'DeepSeek-Isolation.cjs') -Dest
 Copy-Item -LiteralPath (Join-Path $layout.Config 'Engineering-Isolation.cjs') -Destination (Join-Path $targetPreset 'Engineering-Isolation.cjs') -Force
 foreach ($presetDirectory in @($targetPreset, $deepSeekPreset)) {
     Copy-Item -LiteralPath (Join-Path $layout.Config 'AihController.cjs') -Destination (Join-Path $presetDirectory 'AihController.cjs') -Force
+    Copy-Item -LiteralPath (Join-Path $layout.Config 'Engineering-Profiles.cjs') -Destination (Join-Path $presetDirectory 'Engineering-Profiles.cjs') -Force
     $presetFile = Join-Path $presetDirectory 'agent.cordis.yml'
     $presetText = Get-Content -Raw -Encoding UTF8 -LiteralPath $presetFile
     if (-not $presetText.Contains('- id: aih-controller')) {

@@ -17,8 +17,8 @@ function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw "FA
 function New-Fixture([string]$Name){$path=Join-Path ([IO.Path]::GetTempPath()) ("aih-$Name-"+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $path|Out-Null;$path}
 
 $layout=Get-AihLayout $InstallRoot;$policy=Get-AihRoutingPolicy $layout.RoutingPolicy
-Assert-Aih ($policy.version-eq2) 'routing policy v2 loads'
-Assert-Aih ($policy.defaultExecutionClass-eq'deepseek_normal') 'DeepSeek normal is the default execution class'
+Assert-Aih ($policy.version-eq3) 'routing policy v3 loads (Phase 2 generalized classes)'
+Assert-Aih ($policy.defaultExecutionClass-eq'engineer_normal') 'engineer_normal is the default execution class'
 $normal=Resolve-AihPreset $policy normal;$deep=Resolve-AihPreset $policy deepseek
 Assert-Aih ($normal.Config.rootExecutor.model-eq'deepseek-v4-flash') 'normal GUI mode has DeepSeek Flash root'
 Assert-Aih ($deep.Config.rootExecutor.model-eq'deepseek-v4-flash') 'DeepSeek-only GUI mode has DeepSeek Flash root'
@@ -28,24 +28,24 @@ Assert-Aih ($normalMode.Provider-eq'flash-max-direct'-and-not$normalMode.Require
 $routingRoot=New-Fixture routing
 try{
  $r1=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $routingRoot 'normal-task'
- Assert-Aih ($r1.executionClass-eq'deepseek_normal'-and$r1.model-eq'deepseek-v4-flash') 'normal task routes to DeepSeek'
+ Assert-Aih ($r1.executionClass-eq'engineer_normal'-and$r1.model-eq'deepseek-v4-flash') 'normal task routes to engineer_normal'
  $f1=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $routingRoot 'normal-task' '' '' '' 'attempt-failure' 'same test expected 1 actual 2'
- Assert-Aih ($f1.executionClass-eq'deepseek_normal') 'initial meaningful failure remains DeepSeek normal'
+ Assert-Aih ($f1.executionClass-eq'engineer_normal') 'initial meaningful failure remains engineer_normal'
  $f2=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $routingRoot 'normal-task' '' '' '' 'attempt-failure' 'same test expected 9 actual 8'
- Assert-Aih ($f2.executionClass-eq'deepseek_deep') 'repeated normalized failure escalates to DeepSeek deep'
+ Assert-Aih ($f2.executionClass-eq'engineer_deep') 'repeated normalized failure escalates to engineer_deep'
  $f3=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $routingRoot 'normal-task' '' '' '' 'verification-failure' 'same test expected 1 actual 2'
  $f4=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $routingRoot 'normal-task' '' '' '' 'verification-failure' 'same test expected 3 actual 4'
- Assert-Aih ($f4.executionClass-eq'codex_review'-and-not$f4.writable) 'repeated deep failure may reach read-only Codex review'
+ Assert-Aih ($f4.executionClass-eq'reviewer'-and-not$f4.writable) 'repeated deep failure may reach read-only reviewer'
  $repair=Invoke-AihRoutingDecision 'implement bounded review finding' $InstallRoot $layout.RoutingPolicy $routingRoot 'normal-task' '' '' '' 'review-findings'
- Assert-Aih ($repair.executionClass-eq'deepseek_deep'-and$repair.escalatedFrom-eq'codex_review') 'bounded Codex findings return to DeepSeek repair'
- $forced=Invoke-AihRoutingDecision 'ordinary' $InstallRoot $layout.RoutingPolicy $routingRoot 'forced-task' '' '' 'deepseek_deep'
- Assert-Aih ($forced.manualOverride-and$forced.executionClass-eq'deepseek_deep') 'explicit user execution-class override works'
+ Assert-Aih ($repair.executionClass-eq'engineer_deep'-and$repair.escalatedFrom-eq'reviewer') 'bounded review findings return to deep-engineer repair'
+ $forced=Invoke-AihRoutingDecision 'ordinary' $InstallRoot $layout.RoutingPolicy $routingRoot 'forced-task' '' '' 'engineer_deep'
+ Assert-Aih ($forced.manualOverride-and$forced.executionClass-eq'engineer_deep') 'explicit user execution-class override works'
  $legacy=Invoke-AihRoutingDecision 'ordinary' $InstallRoot $layout.RoutingPolicy $routingRoot 'legacy-task' '' 'tier3'
- Assert-Aih ($legacy.executionClass-eq'deepseek_normal'-and$legacy.legacyTierDeprecated) 'legacy tier3 maps compatibly to DeepSeek normal'
- $solveBlocked=$false;try{Invoke-AihRoutingDecision -Description 'solve' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $routingRoot -TaskId 'solve-task' -ForceClass codex_solve|Out-Null}catch{$solveBlocked=$_.Exception.Message-match'UserApprovedCodexSolve'}
- Assert-Aih $solveBlocked 'writable Codex solve requires explicit operator approval flag'
- $solve=Invoke-AihRoutingDecision -Description 'solve' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $routingRoot -TaskId 'solve-task-approved' -ForceClass codex_solve -UserApprovedCodexSolve
- Assert-Aih ($solve.executionClass-eq'codex_solve'-and$solve.writable) 'explicit operator approval enables exceptional Codex solve'
+ Assert-Aih ($legacy.executionClass-eq'engineer_normal'-and$legacy.legacyTierDeprecated) 'legacy tier3 maps compatibly to engineer_normal'
+ $solveBlocked=$false;try{Invoke-AihRoutingDecision -Description 'solve' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $routingRoot -TaskId 'solve-task' -ForceClass solver|Out-Null}catch{$solveBlocked=$_.Exception.Message-match'UserApprovedCodexSolve'}
+ Assert-Aih $solveBlocked 'writable solver requires explicit operator approval flag'
+ $solve=Invoke-AihRoutingDecision -Description 'solve' -Workspace $InstallRoot -PolicyPath $layout.RoutingPolicy -DataRoot $routingRoot -TaskId 'solve-task-approved' -ForceClass solver -UserApprovedCodexSolve
+ Assert-Aih ($solve.executionClass-eq'solver'-and$solve.writable) 'explicit operator approval enables exceptional solve'
 }finally{Remove-Item -LiteralPath $routingRoot -Recurse -Force}
 
 $fixture=New-Fixture controller
@@ -127,7 +127,7 @@ try{
  $oversized=New-AihReviewPacket $fixture $task2.taskId 'review' @() ((1..2600|ForEach-Object{'x'})-join"`n") @($slice) @() '' $policy
  Assert-Aih (-not$oversized.enforcement.allowed-and$oversized.enforcement.violations-match'diff line limit') 'automatic Codex review is rejected over hard diff limit'
  $call=Register-AihCodexReviewCall $fixture $task2.taskId $packet
- Assert-Aih ($call.executionClass-eq'codex_review'-and-not$call.completionAuthority) 'bounded review call registration cannot own completion'
+ Assert-Aih ($call.executionClass-eq'reviewer'-and-not$call.completionAuthority) 'bounded review call registration cannot own completion'
  $secondBlocked=$false;try{Register-AihCodexReviewCall $fixture $task2.taskId $packet|Out-Null}catch{$secondBlocked=$_.Exception.Message-match'DO NOT CALL CODEX'}
  Assert-Aih $secondBlocked 'hard per-task Codex call limit cannot be bypassed by prompting'
  $telemetry=Write-AihTaskTelemetry $fixture $critical.taskId @{model='deepseek-v4-flash';provider='flash-max-direct';inputTokens=100;outputTokens=20;contextSize=400;filesSupplied=2;filesModified=1;diffLines=5;finalResult='complete';configuration='deepseek-only'}

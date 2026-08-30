@@ -174,13 +174,21 @@ synthetic model transitions.
 | --- | --- | --- |
 | Status | derived display state (same as compact) | — |
 | Root Executor | **last non-escalation routed decision** for the task | review/escalation decisions never replace the primary executor |
-| Routing history | every `decisions.jsonl` record for the task, oldest first | PRIMARY = no `escalatedFrom`, class ≠ `codex_review`; REVIEW = `codex_review`; ESCALATION = `escalatedFrom` present, class ≠ `codex_review`. Classification is routing semantics, never model-name guessing |
+| Routing history | every `decisions.jsonl` record for the task, oldest first | PRIMARY = no `escalatedFrom`, class ∉ review classes (`reviewer`/legacy `codex_review`); REVIEW = canonical class `reviewer` (legacy names normalize); ESCALATION = `escalatedFrom` present, class ∉ review classes. Classification is routing semantics, never model-name guessing |
 | Lifecycle | workspace `.ai-harness/state/decisions.jsonl` (`task-created`, `execution-class-selected`, …) | — |
 | Attempts | `runs/<task>/attempts.jsonl` grouped by `sequence` | `failed` = failed record; `passed` = started record, no failed record, AND ledger `complete`; else `started`. Attempt 0 never exists — the GUI never calls begin-attempt. Durations only from real start→failure timestamps |
 | Verification | `runs/<task>/evidence.json` else ledger `verification.outcomes` | status passed/failed/partial/not-run; checks carry name/status/evidence; acceptance criteria + scopePass from the artifact |
 | Failures | ledger `failureSignatures` (first-seen order) + routing-state `sameFailureCount` | — |
-| Reviews | `codex_review` decisions + `codexCalls` + `reviewRequired` + `review-packet.json` meta (question, relevant-file count, diff length — never the diff or file contents) + `review-result.json` (verdict, needsBroaderContext, findings severity/location/problem — never evidence text) | — |
+| Reviews | reviewer decisions (canonical class `reviewer`, legacy `codex_review` normalized) + `codexCalls` + `reviewRequired` + `review-packet.json` meta (question, relevant-file count, diff length — never the diff or file contents) + `review-result.json` (verdict, needsBroaderContext, findings severity/location/problem — never evidence text) | — |
 | Files | live git porcelain + numstat (worktree + index), cached ~10 s | untracked rows show no line counts; non-repo → `Git unavailable` |
+
+Phase 2 presentation note: the drawer/room render the execution class via
+canonical labels (legacy class names display identically), show the Role and
+Profile lines, and report the concrete provider/model from the routing record
+(`modelDisplayName` when the record carries it). The **Preferred profile**
+(operator `engineering-profile:` setting) is shown separately from the
+RUNNING decision. Review wording is generic (`Review calls`), never
+model-branded.
 
 ### Detail endpoint
 
@@ -426,9 +434,9 @@ enforces for every non-worker agent request.
 
 Nexus deterministic routing assigns the task its execution class
 independently and records the tier in `data/routing/decisions.jsonl`: the
-`executionClasses` map gives `deepseek_normal` → **flash-high-direct /
-deepseek-v4-flash / high** (the same tier the `deepseek_normal` worker
-tool spawns with). The panel's Executor row and the Control Room's Root
+`executionClasses` map gives `engineer_normal` → **flash-high-direct /
+deepseek-v4-flash / high** (the same class the `engineer_normal` worker
+tool spawns with; the legacy name `deepseek_normal` normalizes to it). The panel's Executor row and the Control Room's Root
 Executor show this routed decision, so for a bound Normal Engineering
 session the effective task executor (High) and the session preference chip
 (Max) legitimately differ; nothing synchronizes them, by design.
@@ -455,12 +463,12 @@ render no pills.
 Mode semantics (from `config/routing-policy.json`):
 
 - **Normal Engineering** (`aih-engineering`) — preference Max; routed
-  `deepseek_normal` executes at the High tier, so RUNNING HIGH and
+  `engineer_normal` executes at the High tier, so RUNNING HIGH and
   PREFERRED MAX legitimately coexist on the same base model (ceiling vs
   effective).
 - **DeepSeek Only** (`aih-deepseek`) — same Max root executor; no Codex /
   OpenAI providers at all (`allowOpenAI: false`, `allowCodexSubagent:
-  false`, `failurePolicy: fail-closed`); `deepseek_normal` still routes
+  false`, `failurePolicy: fail-closed`); `engineer_normal` still routes
   to the High tier. The ceiling wording stays truthful: only DeepSeek
   models exist to prefer, and tier-3 work still runs below the Max ceiling.
 
@@ -471,8 +479,8 @@ envelope, or a host-side envelope error — the controller state cannot be
 read at all; NEVER `idle`) · `idle` (HEALTHY controller with no active
 work — no binding) · `starting` (bound, ledger record absent) ·
 `working` (ready/implementing — GUI sessions never call begin-attempt, so a
-live task stays `ready` through its whole turn) · `reviewing` (running &&
-codex_review) · `repairing` (running && deepseek_deep) · `verifying`
+live task stays `ready` through its whole turn) · `reviewing` (running && canonical class `reviewer`) · `repairing` (running
+&& canonical class `engineer_deep`) · `verifying`
 (ledger status `verifying`, CLI-owned, shown even while idle) · `waiting`
 (bound but agent loop idle) · `complete` · `failed`. The client folds the
 session's live `running` flag over the file-derived state; VERIFYING is
@@ -579,10 +587,11 @@ this record.
 
 `tests/NexusControllerPanel.Tests.cjs` (deterministic, fixture-based, no
 Codex, no live state): empty state, active DeepSeek task (fixture
-ledger+bindings+routing state+decision+settings → deepseek_normal /
-"DeepSeek V4 Flash MAX" / TASK-0042), verification pass/fail/partial, codex
-count, display-state derivation, routing-state filename cross-validated
-against a real PowerShell-written file, corrupt/missing state degradation,
+ledger+bindings+routing state+decision+settings → legacy deepseek_normal
+class kept readable / "DeepSeek V4 Flash MAX" / TASK-0042), verification
+pass/fail/partial, codex count, display-state derivation, routing-state
+filename cross-validated against a real PowerShell-written file,
+corrupt/missing state degradation,
 git parsers + a real fixture repository, host-route registration + endpoint
 handler over a fixture request (200, no-store, graceful idle envelope, inert
 without webServer), a client-bundle load/registration/SSR smoke test
@@ -630,7 +639,7 @@ composition regression groups:
 
 4. **Executor = primary decision.** Fixture decisions.jsonl with a primary
    record (no `escalatedFrom`) followed by a NEWER review escalation
-   (codex_review / sol-local / gpt-5.6-sol) — the snapshot must report the
+   (reviewer / sol-local / gpt-5.6-sol) — the snapshot must report the
    PRIMARY executor (provider/model/reasoning from the primary record,
    `escalatedFrom` null). Also covered: escalation-before-primary ordering
    and the all-escalations edge (fail-closed fallback to the newest record).
@@ -772,6 +781,17 @@ verifying attempt (record without evidence artifact) is closed as
 interrupted (verification-incomplete) on reconcile — the smallest
 truthful state — and a restart never silently creates Attempt N+1.
 
+## Phase 2.1: Engineering Profile editor
+
+The Control Room gained an **Engineering** tab with a compact editor: a
+profile dropdown (built-ins + Custom) and one row per role (model + reasoning
+dropdowns). It is fully operator-driven — Nexus never auto-selects models.
+Backend contract: `GET /nexus/engineering-profile.json` (read-only state) and
+`POST /nexus/engineering-profile-action.json` (select / save-custom, validated
+by `scripts/EngineeringProfile.ps1`, atomic writes). Custom bindings persist to
+`data/custom-engineering-profile.json`; built-in registry files are never
+mutated. See [architecture/engineering-profiles.md](architecture/engineering-profiles.md).
+
 ## Known limitations
 
 - The live instance WAS cold-restarted exactly once at the end of
@@ -814,7 +834,7 @@ truthful state — and a restart never silently creates Attempt N+1.
   `0 / max` — and positive attempts render unchanged.
 - The RUNNING executor for the live session is the primary routing
   decision: `flash-high-direct / deepseek-v4-flash / high`; the newer
-  codex_review escalation (sol-local / gpt-5.6-sol) is shown under Review,
+  reviewer escalation (sol-local / gpt-5.6-sol) is shown under Review,
   never as the Executor. Display names come from settings.yaml, prettified
   ids are the fallback.
 - Control Room (Phase 3) fields Nexus does not record, shown only when a

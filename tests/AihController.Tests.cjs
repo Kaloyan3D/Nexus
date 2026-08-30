@@ -11,15 +11,21 @@ function pluginMessage(text, form) {
 }
 
 async function main() {
-  // 1. Explicit review command detection is deterministic (exact prefix, not keyword sniffing)
+  // 1. Explicit review command detection is deterministic (exact prefix, not
+  //    keyword sniffing). /codex-review remains a compatibility alias of /review.
   assert.equal(controller.isReviewCommand('/codex-review audit the boundary'), true)
   assert.equal(controller.isReviewCommand('/codex-review'), true)
   assert.equal(controller.isReviewCommand('  /codex-review  run it'), true)
+  assert.equal(controller.isReviewCommand('/review audit the boundary'), true)
+  assert.equal(controller.isReviewCommand('/review'), true)
+  assert.equal(controller.isReviewCommand('  /review  run it'), true)
   assert.equal(controller.isReviewCommand('audit the security boundary'), false)
   assert.equal(controller.isReviewCommand('please review this code'), false)
   assert.equal(controller.isReviewCommand('/codex'), false)
   assert.equal(controller.reviewQuestionOf('/codex-review   audit the boundary  '), 'audit the boundary')
+  assert.equal(controller.reviewQuestionOf('/review   audit the boundary  '), 'audit the boundary')
   assert.equal(controller.reviewQuestionOf('/codex-review'), '')
+  assert.equal(controller.reviewQuestionOf('/review'), '')
   assert.equal(controller.reviewQuestionOf('audit the boundary'), 'audit the boundary')
 
   // 2. Only genuine user prompts drive binding; plugin/system messages are ignored
@@ -36,9 +42,18 @@ async function main() {
   assert.equal(controller.isWorkerAgent({ delegationDepth: 2 }), true)
   assert.equal(controller.isWorkerAgent({ agentPreset: 'aih-engineering' }), false)
 
-  // 4. Execution labels make the path visible to the user
-  assert.equal(controller.executionClassLabel('codex_review'), 'Codex Review (read-only, bounded)')
-  assert.equal(controller.executionClassLabel('deepseek_normal'), 'DeepSeek Normal')
+  // 4. Execution labels make the path visible to the user (Phase 2:
+  //    canonical classes; legacy names resolve through the same labels)
+  assert.equal(controller.executionClassLabel('reviewer'), 'Independent Review (read-only, bounded)')
+  assert.equal(controller.executionClassLabel('codex_review'), 'Independent Review (read-only, bounded)')
+  assert.equal(controller.executionClassLabel('engineer_normal'), 'Engineer \u00b7 Normal')
+  assert.equal(controller.executionClassLabel('deepseek_normal'), 'Engineer \u00b7 Normal')
+  assert.equal(controller.executionClassLabel('engineer_deep'), 'Engineer \u00b7 Deep')
+  assert.equal(controller.executionClassLabel('solver'), 'Solve (writable, approval-gated)')
+  assert.equal(controller.canonicalExecutionClass('deepseek_deep'), 'engineer_deep')
+  assert.equal(controller.isReviewClass('codex_review'), true)
+  assert.equal(controller.isReviewClass('reviewer'), true)
+  assert.equal(controller.isReviewClass('engineer_normal'), false)
 
   // 5. Controller messages are plugin-owned user-role messages (visible, no model source)
   const message = controller.createControllerMessage('Controller: task bound', 'controller-binding')
@@ -101,7 +116,7 @@ async function main() {
   )
   const decision = controller.parseCliJson((routeResult.stdout || '').trim())
   assert.ok(decision && decision.executionClass, 'Route.ps1 payload returned a decision')
-  assert.equal(decision.executionClass, 'codex_review', 'explicit review metadata routes to codex_review')
+  assert.equal(decision.executionClass, 'reviewer', 'explicit review metadata routes to reviewer')
   fs.rmSync(payloadDir, { recursive: true, force: true })
 
   // 8. Structured CLI failures (exit 3 = hard budget rejection) must surface
