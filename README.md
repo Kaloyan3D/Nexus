@@ -1,110 +1,87 @@
-# A.R.T.H.U.R. — AI Harness vNext.1
+# Nexus
 
-A Windows-first coding harness with a deterministic task controller, DeepSeek V4 Flash as the primary engineer, deterministic verification, and rare bounded Codex review. The web GUI, DSH runtime, provider integrations, filesystem/shell tools, permissions, sessions, Git support, and project-aware verification remain intact.
+**A deterministic AI engineering harness with DeepSeek as the primary engineer, bounded Codex review, durable task state, and a live Control Room.**
 
-```text
-User -> deterministic controller -> budgeted context -> DeepSeek Flash
-                                                |          |
-                                                |     targeted verification
-                                                |          |
-                                                +---- PASS -> controller completion
-                                                           |
-                                             repeated/critical failure
-                                                           v
-                                               bounded Codex review
-                                                           |
-                                                   DeepSeek repair
+Nexus turns a coding-agent session into a controller-owned engineering workflow. The model implements; the controller owns routing, attempts, verification, completion, and operator gates. The UI observes authoritative state instead of guessing from chat history.
+
+> Windows-first. Built on the DeepSeek Harness (DSH) runtime without replacing its sessions, tools, permissions, Git integration, or web UI.
+
+## Why Nexus
+
+Most coding agents are conversation-first: the model decides what to do, remembers progress in context, and often decides for itself when the task is finished. Nexus moves the important engineering state out of the model and into deterministic controller records.
+
+```mermaid
+flowchart LR
+    U[User] --> UI[Nexus / DSH UI]
+    UI --> C[Deterministic Controller]
+    C --> R[Routing Policy]
+    R --> D[DeepSeek V4 Flash]
+    D --> V[Deterministic Verification]
+    V -->|PASS| C
+    V -->|failure / critical boundary| RV[Bounded Codex Review]
+    RV --> D
+    C --> G[Operator Gate]
+    C --> S[Durable Task State]
+    S --> CR[Control Room]
 ```
 
-Codex is not a parent agent and ordinary completion never requires it.
+DeepSeek remains the normal root executor. Codex is not a parent agent and is not required for ordinary completion.
 
-## Requirements and setup
+## Core features
 
-- Windows 10/11 and PowerShell 5.1+
+- **Deterministic task controller** — task identity, execution class, attempts, evidence, verification, failures, review requirements, and completion live outside the model.
+- **Execution classes** — mechanical checks, normal DeepSeek work, deeper DeepSeek reasoning, bounded Codex review, and explicit user-approved Codex solve paths.
+- **Real attempt lifecycle** — GUI engineering turns create bounded attempts; reloads and reconnects do not create fake retries.
+- **Verification evidence** — `/verify` records per-check command, status, exit code, attempt linkage, timestamps, and overall evidence.
+- **Crash-safe reconciliation** — an interrupted verification is closed truthfully instead of remaining `verifying` forever or silently creating a new attempt.
+- **Bounded Codex review** — fresh, read-only review packets with enforced file, diff, context, output, and call-count limits.
+- **Operator gates** — controller-advertised actions such as Approve / Reject are validated server-side with stale/duplicate protection.
+- **Control Room** — live Overview, Activity, Verification, and Files views backed by authoritative records.
+- **RUNNING vs PREFERRED model visibility** — the UI separates the executor actually routed for the task from the session's preferred model/effort ceiling.
+- **Workspace isolation** — identity is resolved as `session -> binding -> normalized workspace + taskId`; same task IDs in different repositories cannot contaminate each other.
+- **Durable state** — JSON/JSONL task records survive model context limits, browser reloads, and Nexus restarts.
+- **Fail-closed behavior** — missing, stale, corrupt, or unauthorized state is not silently converted into successful-looking UI state.
+
+## Control Room
+
+Nexus adds a lightweight compact Controller drawer plus an expanded **Task Control Room**.
+
+| Surface | What it answers |
+| --- | --- |
+| **Overview** | What task is active, what state is it in, which attempt is running, which executor was routed, and whether operator action is required? |
+| **Activity** | What authoritative lifecycle transitions happened, and when? |
+| **Verification** | What checks actually ran, did verification PASS or FAIL, and what command/exit/timing data exists? |
+| **Files** | What does Git currently report as changed for the bound workspace? |
+
+The Control Room does not manufacture events from polling deltas. It reads controller/task records and renders them. Operator buttons are shown only when the current gate explicitly advertises those actions.
+
+## Quick start
+
+### Requirements
+
+- Windows 10/11
+- PowerShell 5.1+
 - Internet access during installation
 - A DeepSeek API key
-- Optional ChatGPT/Codex login for bounded review
+- Optional ChatGPT/Codex authentication for bounded review
+
+### Install
 
 ```powershell
+git clone https://github.com/Kaloyan3D/Nexus.git
+cd Nexus
 powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 aih-key
-aih-auth   # optional bounded Codex review
+aih-auth   # optional: bounded Codex review
 ```
 
-The setup installs pinned portable dependencies, protects local credentials, adds `bin` to the user PATH, and composes the DSH presets. Credentials, sessions, state under `data`, logs, installed packages, and portable Node are excluded from Git.
-
-From a project repository:
+Then open Nexus from a project repository:
 
 ```powershell
 aih -Open
 ```
 
-Both **Normal Engineering** and **DeepSeek Only** use DeepSeek V4 Flash as the root executor. Normal Engineering permits controller-approved bounded Codex review; DeepSeek Only fails closed without any OpenAI/Codex inference. Mode changes in the Control Room apply atomically to blank/new sessions without restarting a healthy GUI.
-
-## Controller commands
-
-```powershell
-aih-task -Action create-objective -Description "Add retry safety"
-aih-task -Action create-task -Description "Implement retry guard" -AcceptanceCriteria "test passes"
-aih-task -Action begin-attempt -TaskId TASK-0001
-aih-route "Implement retry guard" -TaskId TASK-0001
-aih-context -Operation bundle -TaskId TASK-0001 -Query "retry guard"
-aih-verify -Kind test -TaskId TASK-0001
-aih-complete -TaskId TASK-0001 -Objective "Add retry safety" -AcceptanceCriteriaPath criteria.json
-```
-
-The project ledger lives under `.ai-harness/state` and task artifacts under `.ai-harness/runs/<task-id>`. JSON documents use atomic replacement where state can be rewritten; decisions, attempts, and learnings are append-only JSONL. Model sessions can terminate at task boundaries because the ledger, context manifest, evidence, telemetry, and summaries are durable.
-
-## Execution classes and compatibility
-
-| Execution class | Purpose | Writable |
-|---|---|---:|
-| `deterministic` | Mechanical lookup or checks without an LLM | No |
-| `deepseek_normal` | Default implementation and debugging | Yes |
-| `deepseek_deep` | Expanded DeepSeek reasoning after evidence-backed failure | Yes |
-| `codex_review` | Fresh, bounded, independent review | No |
-| `codex_solve` | Exceptional explicit user-approved solve | Yes |
-
-Deprecated flags remain temporarily compatible: `tier3 -> deepseek_normal`, `tier2 -> deepseek_deep`, and `tier1 -> codex_review`. They no longer imply management authority. `-EnableCodexSubagent` is deprecated and raw Codex delegation remains disabled.
-
-## Context and coding interface
-
-`aih-context` exposes `map`, `search_code`, `find_symbol`, `find_references`, `file_outline`, and `bundle`. Bundles rank lexical matches, include compact symbols/imports, relevant repository documents, and Git state, enforce file/token budgets, and persist `context-manifest.json`. Repository contents are never dumped automatically and no vector database is required.
-
-Raw `read`, `grep`, `glob`, editing, PowerShell, background jobs, and filesystem tools remain escape hatches. Higher-value command paths include context lookup, `aih-verify -Kind ...` for targeted tests, `git diff`, task checkpoints in the ledger, and architecture rules through `aih-rules`.
-
-Large task-scoped verification output is written to `.ai-harness/runs/<task-id>/artifacts`; the executor receives a bounded digest containing failures and a raw artifact path.
-
-## Routing, completion, and Codex protection
-
-Normal policy is:
-
-```text
-deepseek_normal -> verify -> deepseek_deep repair -> bounded codex_review -> DeepSeek repair
-```
-
-The same normalized failure must repeat at the configured threshold before ordinary escalation. Critical security, concurrency, migration, auth/permission boundaries, or an explicit user request may create a scoped review requirement. “Hard task” alone is not a Codex route.
-
-Ordinary completion requires all acceptance criteria evidenced, required deterministic checks passing, scope constraints passing, and controller-owned evaluation. Critical tasks can additionally require a passing bounded review. Models and routing records have `completionAuthority=false`.
-
-`aih-review` creates `review-packet.json` before any call. Code enforces one automatic call per task, at most 8 files, 2,500 diff lines, 30,000 estimated input tokens, and 2,500 output tokens. It rejects an oversized packet with `DO NOT CALL CODEX`. Full-repository context requires explicit approval. Each call is a fresh tool-free Responses request and persists a structured result; it cannot modify files or complete the task.
-
-## Worktrees, sandbox, and rules
-
-Parallel writes use task worktrees created from the exact recorded `baseCommit`; the ledger records branch and worktree path. The controller detects declared overlapping write paths. Workspace resolution and verification working directories reject escapes, sensitive external operations still require explicit permission, and no unrestricted secret set is inherited by task state.
-
-`aih-rules` provides an executable rule seam. vNext.1 includes:
-
-- `SEC001`: potential secrets may not be persisted in source/tool records.
-- `MIG001`: tracked migration edits are surfaced for explicit safety review.
-
-Add rules as deterministic findings in `scripts/ArchitectureRules.ps1`, cover them in `tests/Harness.Tests.ps1`, and document the remediation. Review findings can be recorded as a proposed test, static rule, tool improvement, documentation, or routing-policy learning; they are never activated automatically from model output.
-
-## Telemetry and evaluation
-
-Per-task `telemetry.json` can record execution class, model/provider, input/cached/output token usage, cost proxy, context and file counts, diff size, attempts, failure signatures, verification, Codex calls/findings, result, and elapsed time. `New-AihEvaluationResult` defines the initial comparison record for `current`, `deepseek-only`, and `deepseek-codex-review`; learned routing and replay orchestration are intentionally deferred.
-
-## Diagnostics and security
+Useful commands:
 
 ```powershell
 aih-doctor -Offline
@@ -114,8 +91,129 @@ aih-detect
 aih-stop
 ```
 
-The local OAuth adapter stays bound to `127.0.0.1`. Every user must authenticate their own account. Never copy `.codex/auth.json`, `data/.credentials.yaml`, or another user’s environment files.
+Bulgarian quick start: **[docs/quick-start-bg.md](docs/quick-start-bg.md)**.
 
-See [docs/vnext-architecture.md](docs/vnext-architecture.md) for contracts, lifecycle details, migration decisions, state schemas, and deferred work.
+## Engineering modes
 
-Кратко ръководство на български: [docs/quick-start-bg.md](docs/quick-start-bg.md).
+### Normal Engineering
+
+DeepSeek V4 Flash is the root engineer. The controller may permit bounded Codex review when deterministic policy requires it.
+
+### DeepSeek Only
+
+DeepSeek V4 Flash remains the root engineer, while OpenAI/Codex inference is disabled and the policy fails closed instead of silently substituting another model.
+
+## Execution classes
+
+| Class | Purpose | Writable |
+| --- | --- | ---: |
+| `deterministic` | Mechanical lookup / verification with no LLM | No |
+| `deepseek_normal` | Default implementation and debugging | Yes |
+| `deepseek_deep` | Expanded DeepSeek reasoning after evidence-backed escalation | Yes |
+| `codex_review` | Fresh, bounded, independent review | No |
+| `codex_solve` | Exceptional explicit user-approved solve | Yes |
+
+The default routing path is intentionally simple:
+
+```text
+deepseek_normal
+  -> verify
+  -> deepseek_deep repair when policy/evidence justifies escalation
+  -> bounded codex_review when required
+  -> DeepSeek repair
+  -> deterministic completion
+```
+
+## Controller-owned completion
+
+A model cannot mark its own task complete.
+
+```text
+acceptance criteria accounted for
++ required verification PASS
++ scope / architecture rules PASS
++ evidence present
++ policy-required review PASS (when applicable)
+= controller COMPLETE
+```
+
+Critical or review-required failures may open an **operator gate**. The browser submits only bounded identifiers; the controller validates session binding, gate identity/revision, advertised actions, request identity, and current gate state before any transition.
+
+## State and storage
+
+Project-scoped engineering state lives under `.ai-harness`:
+
+```text
+.ai-harness/
+  state/
+    objective.json
+    tasks.json
+    decisions.jsonl
+    learnings.jsonl
+  runs/TASK-NNNN/
+    manifest.json
+    attempts.jsonl
+    evidence.json
+    context-manifest.json
+    review-packet.json
+    review-result.json
+    telemetry.json
+    artifacts/
+    summary.md
+```
+
+Runtime bindings, routing history, gate journals, logs, credentials, installed packages, and sessions live outside committed project source. Credentials are never meant to be stored in task ledgers.
+
+## Bounded Codex review
+
+`codex_review` is an independent review service, not an unrestricted subagent. The current policy enforces a fresh packet and bounded call with limits for files, diff size, estimated context, output, and automatic calls per task. Full-repository context and writable Codex solve paths require explicit approval.
+
+Automatic review is intended for repeated evidence-backed failure or critical boundaries—not simply because a task feels difficult.
+
+## Security model
+
+Nexus intentionally keeps authority narrow:
+
+- the browser cannot directly edit task ledgers;
+- session bindings resolve workspace/task identity server-side;
+- stale or mismatched operator gates fail closed;
+- verification failures are distinct from verification infrastructure failures;
+- review results do not gain global completion authority;
+- workspace escapes and sensitive external operations remain subject to controller/tool policy;
+- `SEC001` detects potential persisted secret material while allowing explicit placeholder forms;
+- `MIG001` surfaces tracked migration changes for explicit review.
+
+See **[SECURITY.md](SECURITY.md)** for credential and reporting guidance.
+
+## Documentation
+
+Start at **[docs/README.md](docs/README.md)**.
+
+- [Architecture overview](docs/architecture/overview.md)
+- [Controller and authority](docs/architecture/controller.md)
+- [Routing and execution classes](docs/architecture/routing.md)
+- [Task, attempt, verification, review, and gate lifecycle](docs/architecture/task-lifecycle.md)
+- [Control Room architecture](docs/architecture/control-room.md)
+- [State and storage reference](docs/reference/state-and-storage.md)
+- [HTTP endpoint reference](docs/reference/endpoints.md)
+- [Setup, testing, and troubleshooting](docs/operations/setup-testing-troubleshooting.md)
+- [Architecture decisions](docs/decisions/README.md)
+
+Detailed implementation/history notes remain available in [docs/nexus-ui.md](docs/nexus-ui.md) and [docs/vnext-architecture.md](docs/vnext-architecture.md).
+
+## Testing
+
+Nexus includes deterministic PowerShell and Node regression suites for the controller, routing, lifecycle, verification contracts, gates, UI adapters, workspace isolation, patch idempotency, and architecture rules.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Harness.Tests.ps1
+node .\tests\NexusControllerPanel.Tests.cjs
+```
+
+Live provider probes are separate because they can consume quota.
+
+## Design principle
+
+> **The model performs engineering work. The controller owns engineering truth.**
+
+That principle drives routing, attempts, verification, review, completion, persistence, and the Control Room.
