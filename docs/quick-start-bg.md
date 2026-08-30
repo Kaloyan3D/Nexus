@@ -1,14 +1,14 @@
-# Кратко ръководство за AI Harness (`aih`)
+# Nexus — кратко ръководство (`aih`)
 
 ## 1. Първоначална настройка
 
-Отвори PowerShell в `C:\AI-Harness` и изпълни:
+Отвори PowerShell в папката на Nexus и изпълни:
 
 ```powershell
-.\setup.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
-Ако по-късно трябва да смениш достъпа:
+После настрой достъпа:
 
 ```powershell
 aih-key   # DeepSeek API ключ
@@ -24,19 +24,19 @@ cd C:\път\до\проекта
 aih -Open
 ```
 
-Това стартира уеб интерфейса на:
+Уеб интерфейсът обикновено е на:
 
 ```text
 http://127.0.0.1:3080
 ```
 
-Основният изпълнител е DeepSeek V4 Flash. Codex не е постоянен ръководител и се използва само за ограничено ревю при сериозен или повтарящ се проблем.
+Основният инженер е **DeepSeek V4 Flash**. Codex не е постоянен ръководител и се използва само за ограничено независимо ревю, когато deterministic policy го изисква или когато потребителят изрично поиска това.
 
 ## 3. Режими
 
 ```powershell
 aih -Preset normal    # DeepSeek + възможност за ограничено Codex ревю
-aih -Preset deepseek  # само DeepSeek; без Codex/OpenAI заявки
+aih -Preset deepseek  # само DeepSeek; без Codex/OpenAI inference
 ```
 
 Спиране и рестартиране:
@@ -46,39 +46,77 @@ aih-stop
 aih -Restart -Open
 ```
 
-## 4. Обичаен работен процес
+## 4. Как Nexus работи
 
-Най-лесно е да опишеш задачата директно в уеб интерфейса. Например:
+Най-лесно е просто да опишеш задачата в GUI. Nexus controller-ът пази task identity, routing, attempts, verification evidence, failures, review requirements и completion state извън chat history.
+
+Типичен flow:
 
 ```text
-Поправи грешката при запис на потребител. Добави тест и изпълни само
-необходимите проверки. Не променяй несвързани файлове.
+prompt
+-> task + route
+-> Attempt 1
+-> DeepSeek implementation
+-> /verify
+-> PASSED / FAILED
+-> optional review / operator gate
+-> controller completion
 ```
 
-Harness-ът избира изпълнител, пази състоянието, стартира проверки и решава дали задачата е завършена.
+Reload на браузъра не създава нов attempt.
 
-За ръчно управление през PowerShell:
+## 5. Control Room
+
+Nexus има compact **Controller** и expanded **Task Control Room**.
+
+Четирите основни tabs са:
+
+- **Overview** — task, state, attempt, executor, execution class, gate/review status;
+- **Activity** — реалните lifecycle transitions по време;
+- **Verification** — PASSED/FAILED, checks, exit codes, timings;
+- **Files** — Git-visible промените за bound workspace-а.
+
+До composer-а може да видиш например:
+
+```text
+RUNNING   · DeepSeek V4 Flash · HIGH
+PREFERRED · DeepSeek V4 Flash · MAX
+```
+
+`RUNNING` е това, което controller routing-ът реално използва за задачата. `PREFERRED` е session preference/ceiling и не отменя deterministic routing-а.
+
+## 6. Verification
+
+За bound task в GUI използвай:
+
+```text
+/verify
+```
+
+Verification е controller-owned и записва evidence с check status, command, exit code, timestamps и attempt linkage.
+
+Важно: валиден verification result може да съдържа failed check и process exit code != 0. Това е нормален **FAILED verification**, не задължително crash на verifier-а.
+
+## 7. Ръчно управление през PowerShell
+
+Ако ти трябва low-level controller workflow:
 
 ```powershell
-# Създаване на задача
 aih-task -Action create-task `
   -Description "Поправи грешката при запис" `
   -AcceptanceCriteria "Тестът минава"
 
-# Начало на опит
 aih-task -Action begin-attempt -TaskId TASK-0001
-
-# Определяне на маршрут
 aih-route "Поправи грешката при запис" -TaskId TASK-0001
 
-# Подготовка на ограничен контекст
-aih-context -Operation bundle `
+a ih-context -Operation bundle `
   -TaskId TASK-0001 `
   -Query "грешка при запис"
 
-# Проверки
 aih-verify -Kind test -TaskId TASK-0001
 ```
+
+> Забележка: в нормалния GUI flow controller bridge-ът сам управлява attempt lifecycle-а; не е нужно ръчно да стартираш attempt за всеки GUI turn.
 
 Състоянието и доказателствата се пазят в:
 
@@ -87,20 +125,17 @@ aih-verify -Kind test -TaskId TASK-0001
 <проект>\.ai-harness\runs\TASK-0001\
 ```
 
-## 5. Полезни команди
+## 8. Полезни команди
 
 ```powershell
-aih-doctor -Offline  # проверка на локалната инсталация
-aih-test             # тестове на самия AI Harness
-aih-detect           # разпознаване на проекта и командите за проверка
-aih-verify           # всички намерени проверки
-aih-verify -Kind test
-aih-verify -Kind lint
-aih-verify -Kind typecheck
-aih-rules            # архитектурни и security правила
+aih-doctor -Offline
+aih-test
+aih-test-tiers       # live provider probes; може да използват quota
+aih-detect
+aih-rules
 ```
 
-Търсене и контекст:
+Контекст и code search:
 
 ```powershell
 aih-context -Operation search_code -Query "име или текст"
@@ -109,30 +144,24 @@ aih-context -Operation find_references -Query "ИмеНаФункция"
 aih-context -Operation file_outline -File "src/app.ts"
 ```
 
-## 6. Съвети за добри задачи
+## 9. Полезни правила
 
-Посочвай ясно:
+- Стартирай `aih` от директорията на проекта, по който искаш да работиш.
+- Не записвай API ключове в source files, task ledgers или prompt-и.
+- Обикновените задачи обичайно трябва да приключват с `Codex calls = 0`.
+- Не използвай `git add .` на сляпо, когато `.ai-harness` съдържа runtime/test history.
+- Провери `git diff` и `git status` преди commit.
+- При browser acceptance не използвай broad `taskkill /IM chrome.exe`; спирай само process-а, който тестът е стартирал.
 
-- какъв резултат искаш;
-- кои файлове или части на проекта са в обхвата;
-- как се проверява успехът;
-- какво не трябва да се променя.
+## 10. Повече документация
 
-Пример:
+Започни от [docs/README.md](README.md).
 
-```text
-Добави валидация за празен имейл в src/users.ts.
-Добави тест за празен и валиден имейл.
-Успех: целевите тестове и typecheck минават.
-Не променяй API формата и базата данни.
-```
-
-## 7. Важно
-
-- Стартирай `aih` от директорията на проекта, не от потребителската си папка.
-- Не записвай API ключове в проекта или в prompt-и.
-- Обикновените задачи трябва да приключват с `Codex calls = 0`.
-- За паралелни промени използвай отделни Git worktree директории.
-- Провери `git diff` преди commit.
-
-За архитектурни подробности виж [vnext-architecture.md](vnext-architecture.md).
+- [Architecture overview](architecture/overview.md)
+- [Controller](architecture/controller.md)
+- [Routing](architecture/routing.md)
+- [Task lifecycle](architecture/task-lifecycle.md)
+- [Control Room](architecture/control-room.md)
+- [State and storage](reference/state-and-storage.md)
+- [Endpoints](reference/endpoints.md)
+- [Setup/testing/troubleshooting](operations/setup-testing-troubleshooting.md)
