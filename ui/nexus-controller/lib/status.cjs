@@ -153,6 +153,79 @@ function lastDecisionOf(records, taskId, workspace) {
 }
 
 /**
+ * TASK-0004 attempt readers. Attempts are a controller-owned journal at
+ * <workspace>/.ai-harness/runs/<taskId>/attempts.jsonl; each record is
+ * produced by the controller CLI (Start-AihTaskAttempt / Add-AihAttemptEvent).
+ * The panel only READS; the last record for this exact task is the current
+ * attempt. No timestamps are ever derived here.
+ */
+function attemptsOf(text) {
+  return jsonLinesOf(text)
+}
+
+/** Latest attempt record for exactly this taskId (workspace-scoped by path). */
+function latestAttemptOfTask(records, taskId) {
+  if (!Array.isArray(records)) return null
+  let latest = null
+  for (const record of records) {
+    if (record && String(record.taskId) === String(taskId)) latest = record
+  }
+  return latest
+}
+
+/** Smallest truthful attempt shape for the panel. */
+function normalizeAttemptRecord(record) {
+  if (!record || typeof record !== 'object') return null
+  return {
+    sequence: Number.isInteger(record.sequence) ? record.sequence : null,
+    status: typeof record.status === 'string' ? record.status : null,
+    startedAtUtc: typeof record.startedAtUtc === 'string' ? record.startedAtUtc : null,
+    timestampUtc: typeof record.timestampUtc === 'string' ? record.timestampUtc : null,
+    sessionId: typeof record.sessionId === 'string' ? record.sessionId : null,
+    startedByTurn: typeof record.startedByTurn === 'string' ? record.startedByTurn : null,
+  }
+}
+
+/**
+ * TASK-0004 operator-gate readers. Gates live in data/completion/gates.jsonl
+ * (append-only journal). The current gate for a binding is the LAST record
+ * whose sessionId + normalized workspace + taskId match (never taskId alone).
+ */
+function currentGateOf(records, sessionId, workspace, taskId) {
+  if (!Array.isArray(records)) return null
+  const normalized = normalizeWorkspacePath(workspace)
+  if (normalized === '') return null
+  let current = null
+  for (const record of records) {
+    if (!record || typeof record !== 'object') continue
+    if (String(record.sessionId) !== String(sessionId)) continue
+    if (normalizeWorkspacePath(record.workspace) !== normalized) continue
+    if (String(record.taskId) !== String(taskId)) continue
+    current = record
+  }
+  return current
+}
+
+/** Smallest truthful gate shape for the panel (buttons render ONLY from allowedActions). */
+function normalizeGateRecord(record) {
+  if (!record || typeof record !== 'object') return null
+  return {
+    gateId: typeof record.gateId === 'string' ? record.gateId : null,
+    kind: typeof record.kind === 'string' ? record.kind : null,
+    reason: typeof record.reason === 'string' ? record.reason : null,
+    status: typeof record.status === 'string' ? record.status : null,
+    allowedActions: Array.isArray(record.allowedActions) ? record.allowedActions.filter((a) => typeof a === 'string') : [],
+    attempt: Number.isInteger(record.attempt) ? record.attempt : null,
+    reviewVerdict: typeof record.reviewVerdict === 'string' ? record.reviewVerdict : null,
+    revision: Number.isInteger(record.revision) ? record.revision : null,
+    createdAtUtc: typeof record.createdAtUtc === 'string' ? record.createdAtUtc : null,
+    resolvedAtUtc: typeof record.resolvedAtUtc === 'string' ? record.resolvedAtUtc : null,
+    resolvedBy: typeof record.resolvedBy === 'string' ? record.resolvedBy : null,
+    actionId: typeof record.actionId === 'string' ? record.actionId : null,
+  }
+}
+
+/**
  * Normalize the task ledger record into the panel shape. Only fields the
  * panel displays are carried; both PascalCase (PowerShell) and camelCase
  * spellings are accepted for nested verification fields.
@@ -480,6 +553,8 @@ async function buildControllerSnapshot(options) {
   let routingState = null
   let decision = null
   let git = null
+  let attempt = null
+  let gate = null
 
   if (binding) {
     const workspace = typeof binding.workspace === 'string' ? binding.workspace : null
@@ -501,6 +576,14 @@ async function buildControllerSnapshot(options) {
       if (gitSummary && workspace) {
         try { git = await gitSummary(workspace) } catch { git = null }
       }
+      // TASK-0004: attempt + gate are read from their authoritative records;
+      // both degrade to null for old tasks (render as "—"), never to guesses.
+      if (workspace) {
+        const attemptsText = readJsonSafeText(path.join(workspace, '.ai-harness', 'runs', taskId, 'attempts.jsonl'), readFile)
+        attempt = normalizeAttemptRecord(latestAttemptOfTask(attemptsOf(attemptsText), taskId))
+      }
+      const gatesText = readJsonSafeText(path.join(dataRoot, 'completion', 'gates.jsonl'), readFile)
+      gate = normalizeGateRecord(currentGateOf(jsonLinesOf(gatesText), String(sessionId || ''), workspace || '', taskId))
     }
   }
 
@@ -521,6 +604,8 @@ async function buildControllerSnapshot(options) {
       boundAtUtc: binding.boundAtUtc ? String(binding.boundAtUtc) : null,
     } : null,
     task: taskRecord,
+    attempt,
+    gate,
     preference: normalizePreference(defaultModel, modelNames),
     execution: normalizeExecution(binding, taskRecord, routingState, decision, modelNames),
     review: binding ? {
@@ -553,6 +638,11 @@ module.exports = {
   routingStateFileName,
   bindingsOf,
   lastDecisionOf,
+  attemptsOf,
+  latestAttemptOfTask,
+  normalizeAttemptRecord,
+  currentGateOf,
+  normalizeGateRecord,
   jsonLinesOf,
   normalizeTaskRecord,
   deriveFileState,

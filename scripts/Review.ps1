@@ -1,5 +1,5 @@
-[CmdletBinding()]
-param([string]$Workspace=(Get-Location).Path,[string]$InstallRoot='C:\AI-Harness',[Parameter(Mandatory=$true)][string]$TaskId,[string]$Question,[string[]]$Invariants=@(),[string]$DiffPath,[string]$FilesPath,[string]$Assessment,[switch]$Execute,[switch]$UserApprovedFullRepo,[ValidateSet('bundle','files','inline')][string]$ContextMode='bundle',[string]$PayloadFile)
+﻿[CmdletBinding()]
+param([string]$Workspace=(Get-Location).Path,[string]$InstallRoot='C:\AI-Harness',[Parameter(Mandatory=$true)][string]$TaskId,[string]$Question,[string[]]$Invariants=@(),[string]$DiffPath,[string]$FilesPath,[string]$Assessment,[switch]$Execute,[switch]$UserApprovedFullRepo,[ValidateSet('bundle','files','inline')][string]$ContextMode='bundle',[string]$Attempt,[string]$PayloadFile)
 . (Join-Path $PSScriptRoot 'Common.ps1')
 . (Join-Path $PSScriptRoot 'Routing.ps1')
 . (Join-Path $PSScriptRoot 'CodexReview.ps1')
@@ -34,7 +34,7 @@ if(-not[string]::IsNullOrWhiteSpace($FilesPath)){
     $parsedFiles=Get-Content -Raw -Encoding UTF8 -LiteralPath $FilesPath|ConvertFrom-Json
     if($null -ne $parsedFiles){$files=@($parsedFiles)}
 }
-$packet=New-AihReviewPacket $Workspace $TaskId $Question $Invariants $diff $files @() $Assessment $policy -UserApprovedFullRepo:$UserApprovedFullRepo -ContextMode $ContextMode
+$packet=New-AihReviewPacket $Workspace $TaskId $Question $Invariants $diff $files @() $Assessment $policy -UserApprovedFullRepo:$UserApprovedFullRepo -ContextMode $ContextMode -Attempt $Attempt
 if($Execute){
     if(-not [bool]$packet.enforcement.allowed){
         $result=[ordered]@{ok=$false;kind='packet-too-large';taskId=$TaskId;executionClass='codex_review';codexCalled=$false;violations=@($packet.enforcement.violations);enforcement=$packet.enforcement;budget=$packet.budget;readOnly=$true;completionAuthority=$false}

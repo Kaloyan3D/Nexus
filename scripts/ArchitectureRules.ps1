@@ -8,8 +8,19 @@ function Invoke-AihArchitectureRules {
     foreach($file in @(Get-AihWorkspaceFiles $workspacePath)){
         $path=Join-Path $workspacePath $file
         if($file -notmatch '(?i)(lock|package-lock)\.json$' -and (Get-Item -LiteralPath $path).Length -lt 1048576){
-            $matches=Select-String -LiteralPath $path -Pattern '(?i)(sk-[A-Za-z0-9_-]{16,}|DEEPSEEK_API_KEY\s*[:=]\s*["''][^"'']+)' -ErrorAction SilentlyContinue
-            foreach($match in $matches){$findings.Add([pscustomobject]@{ruleId='SEC001';severity='blocker';file=$file;line=$match.LineNumber;message='Potential secret material must not be persisted in source or tool records.'})}
+            # SEC001-only exclusion — deliberately NOT a loop-level continue:
+            # gitignored local runtime/scratch state (credential store, logs,
+            # routing records, browser profiles) is not source material, so the
+            # secret scan skips it; any rule added later in this loop still
+            # operates on data/ and tmp/ files.
+            if($file -notmatch '^(data|tmp)[\\/]'){
+                # SEC001 recognizes ONLY explicit placeholder forms in
+                # DEEPSEEK_API_KEY values — $env:NAME / $var / braced
+                # interpolation and <YOUR_KEY> / <REPLACE_...> tokens. Every
+                # other value (and sk-* material anywhere) is a potential secret.
+                $matches=Select-String -LiteralPath $path -Pattern '(?i)(sk-[A-Za-z0-9_-]{16,}|DEEPSEEK_API_KEY\s*[:=]\s*["''](?!(?:\$env:[A-Za-z_][A-Za-z0-9_]*|\$[A-Za-z_][A-Za-z0-9_]*|\$\{[^}"'']+\}|<YOUR_[A-Z0-9_]+>|<REPLACE_[A-Z0-9_]+>))[^"'']+)' -ErrorAction SilentlyContinue
+                foreach($match in $matches){$findings.Add([pscustomobject]@{ruleId='SEC001';severity='blocker';file=$file;line=$match.LineNumber;message='Potential secret material must not be persisted in source or tool records.'})}
+            }
         }
     }
     try{

@@ -138,7 +138,14 @@ function routingKindOf(record) {
   return 'primary'
 }
 
-/** Group attempts.jsonl records into ordered attempt rows. */
+/**
+ * Group attempts.jsonl records into ordered attempt rows (TASK-0004).
+ * Status resolution is the smallest truthful state over REAL records:
+ * passed > failed > interrupted > verifying > started; the ledger-complete
+ * fallback keeps legacy tasks (which predate the lifecycle journal) legible.
+ * Durations are DERIVED here from producer timestamps and omitted when the
+ * timestamps are unavailable (never invented).
+ */
 function groupAttempts(records, ledger) {
   if (!Array.isArray(records) || records.length === 0) return []
   const bySequence = new Map()
@@ -147,13 +154,20 @@ function groupAttempts(records, ledger) {
     const sequence = Number.isInteger(record.sequence) ? record.sequence : Number.parseInt(record.sequence, 10)
     if (!Number.isInteger(sequence) || sequence < 1) continue
     if (!bySequence.has(sequence)) {
-      bySequence.set(sequence, { sequence, started: null, failed: null })
+      bySequence.set(sequence, { sequence, started: null, failed: null, verifying: null, passed: null, interrupted: null })
     }
     const row = bySequence.get(sequence)
-    if (String(record.status) === 'started' && row.started === null && record.startedAtUtc) {
+    const recordStatus = String(record.status || '')
+    if (recordStatus === 'started' && row.started === null && record.startedAtUtc) {
       row.started = record
-    } else if (String(record.status) === 'failed' && row.failed === null) {
+    } else if (recordStatus === 'failed' && row.failed === null) {
       row.failed = record
+    } else if (recordStatus === 'verifying' && row.verifying === null) {
+      row.verifying = record
+    } else if (recordStatus === 'passed' && row.passed === null) {
+      row.passed = record
+    } else if (recordStatus === 'interrupted' && row.interrupted === null) {
+      row.interrupted = record
     }
   }
   const ledgerComplete = Boolean(ledger && ledger.status === 'complete')
@@ -162,21 +176,34 @@ function groupAttempts(records, ledger) {
     .map(([sequence, row]) => {
       const startedAtUtc = row.started ? String(row.started.startedAtUtc) : null
       const failedAtUtc = row.failed ? String(row.failed.timestampUtc || '') : null
+      const verifyingAtUtc = row.verifying ? String(row.verifying.timestampUtc || '') : null
+      const finishedAtUtc = row.passed
+        ? String(row.passed.timestampUtc || '')
+        : (row.interrupted ? String(row.interrupted.timestampUtc || '') : null)
       let durationSeconds = null
-      if (row.failed && row.started && failedAtUtc && startedAtUtc) {
-        const end = Date.parse(failedAtUtc)
+      const terminalAtUtc = finishedAtUtc || failedAtUtc
+      if (terminalAtUtc && startedAtUtc) {
+        const end = Date.parse(terminalAtUtc)
         const start = Date.parse(startedAtUtc)
         if (Number.isFinite(end) && Number.isFinite(start) && end >= start) {
           durationSeconds = Math.round((end - start) / 1000)
         }
       }
+      let status = 'started'
+      if (row.passed) status = 'passed'
+      else if (row.failed) status = 'failed'
+      else if (row.interrupted) status = 'interrupted'
+      else if (row.verifying) status = 'verifying'
+      else if (ledgerComplete) status = 'passed'
       return {
         sequence,
         attemptId: row.started && row.started.attemptId ? String(row.started.attemptId) : null,
         executionClass: row.started && row.started.executionClass ? String(row.started.executionClass) : null,
-        status: row.failed ? 'failed' : (ledgerComplete ? 'passed' : 'started'),
+        status,
         startedAtUtc,
         failedAtUtc,
+        verifyingAtUtc,
+        finishedAtUtc,
         failureSignature: row.failed && row.failed.failureSignature ? String(row.failed.failureSignature) : null,
         evidence: row.failed && row.failed.evidence ? String(row.failed.evidence) : null,
         durationSeconds,
@@ -223,10 +250,27 @@ function summarizeVerification(evidence, ledger) {
     const name = check.name ?? check.Name
     if (typeof name !== 'string' || name === '') return null
     const statusValue = String(check.status ?? check.Status ?? 'PASS').toUpperCase()
+    const startedAtUtc = typeof check.startedAtUtc === 'string' ? check.startedAtUtc : null
+    const finishedAtUtc = typeof check.finishedAtUtc === 'string' ? check.finishedAtUtc : null
+    let durationSeconds = null
+    if (startedAtUtc && finishedAtUtc) {
+      const end = Date.parse(finishedAtUtc)
+      const start = Date.parse(startedAtUtc)
+      if (Number.isFinite(end) && Number.isFinite(start) && end >= start) {
+        durationSeconds = Math.round((end - start) / 1000)
+      }
+    }
     return {
       name,
+      kind: typeof check.kind === 'string' ? check.kind : null,
       status: statusValue,
       evidence: typeof check.evidence === 'string' ? check.evidence : null,
+      command: typeof check.command === 'string' ? check.command : null,
+      exitCode: Number.isInteger(check.exitCode) ? check.exitCode : null,
+      startedAtUtc,
+      finishedAtUtc,
+      attempt: Number.isInteger(check.attempt) ? check.attempt : null,
+      durationSeconds,
     }
   }).filter(Boolean)
 
@@ -238,12 +282,26 @@ function summarizeVerification(evidence, ledger) {
   if (checks.length > 0) {
     statusValue = failed > 0 ? (passed > 0 ? 'partial' : 'failed') : 'passed'
   }
+  // Verification lifecycle timestamps come from the evidence artifact only
+  // (producer boundary); durations are derived, never invented.
+  let verificationDurationSeconds = null
+  if (evidence && typeof evidence.startedAtUtc === 'string' && typeof evidence.finishedAtUtc === 'string') {
+    const end = Date.parse(evidence.finishedAtUtc)
+    const start = Date.parse(evidence.startedAtUtc)
+    if (Number.isFinite(end) && Number.isFinite(start) && end >= start) {
+      verificationDurationSeconds = Math.round((end - start) / 1000)
+    }
+  }
   return {
     status: statusValue,
     passed,
     failed,
     skipped,
     total: checks.length,
+    attempt: evidence && Number.isInteger(evidence.attempt) ? evidence.attempt : null,
+    startedAtUtc: evidence && typeof evidence.startedAtUtc === 'string' ? evidence.startedAtUtc : null,
+    finishedAtUtc: evidence && typeof evidence.finishedAtUtc === 'string' ? evidence.finishedAtUtc : null,
+    durationSeconds: verificationDurationSeconds,
     checks,
     acceptanceCriteria: evidence && Array.isArray(evidence.acceptanceCriteria)
       ? evidence.acceptanceCriteria.map((criterion) => {
@@ -381,6 +439,7 @@ async function buildDetailSnapshot({
     result: reviewResult && typeof reviewResult === 'object' ? {
       verdict: typeof reviewResult.verdict === 'string' ? reviewResult.verdict : null,
       needsBroaderContext: Boolean(reviewResult.needsBroaderContext),
+      completedAtUtc: typeof reviewResult.completedAtUtc === 'string' ? reviewResult.completedAtUtc : null,
       findings: Array.isArray(reviewResult.findings) ? reviewResult.findings.map((finding) => {
         if (!finding || typeof finding !== 'object') return null
         return {
@@ -394,8 +453,81 @@ async function buildDetailSnapshot({
       question: typeof reviewPacket.question === 'string' ? reviewPacket.question : null,
       relevantFileCount: Array.isArray(reviewPacket.relevantFiles) ? reviewPacket.relevantFiles.length : null,
       diffLength: typeof reviewPacket.diff === 'string' ? reviewPacket.diff.length : null,
+      requestedAtUtc: typeof reviewPacket.requestedAtUtc === 'string' ? reviewPacket.requestedAtUtc : null,
+      attempt: Number.isInteger(reviewPacket.attempt) ? reviewPacket.attempt : null,
     } : null,
   }
+
+  // TASK-0004 operator gates: authoritative records from the completion
+  // journal (data/completion/gates.jsonl). The current gate drives the room's
+  // OPERATOR ACTION REQUIRED section; history feeds Activity.
+  const gateRecords = status.jsonLinesOf(safeReadText(path.join(dataRoot, 'completion', 'gates.jsonl'), readFile))
+    .filter((record) => record && String(record.sessionId) === String(sessionId)
+      && status.normalizeWorkspacePath(record.workspace) === workspaceKey
+      && String(record.taskId) === taskId)
+  const currentGate = status.normalizeGateRecord(
+    gateRecords.length > 0 ? gateRecords[gateRecords.length - 1] : null,
+  )
+  const gates = {
+    current: currentGate,
+    history: gateRecords.slice(-8).map((record) => status.normalizeGateRecord(record)),
+  }
+
+  // TASK-0004 activity timeline: every entry comes from a REAL recorded
+  // event with a producer timestamp (attempts, verification, reviews, gates,
+  // routing decisions, lifecycle). Entries without timestamps are excluded —
+  // no synthetic timeline events, ever.
+  const activity = []
+  for (const attempt of attempts) {
+    if (attempt.startedAtUtc) {
+      activity.push({ atUtc: attempt.startedAtUtc, kind: 'attempt-started', sequence: attempt.sequence, detail: 'Attempt ' + attempt.sequence + ' started' })
+    }
+    if (attempt.failedAtUtc) {
+      activity.push({ atUtc: attempt.failedAtUtc, kind: 'attempt-failed', sequence: attempt.sequence, detail: 'Attempt ' + attempt.sequence + ' failed' + (attempt.failureSignature ? ' · ' + attempt.failureSignature : '') })
+    } else if (attempt.finishedAtUtc) {
+      activity.push({ atUtc: attempt.finishedAtUtc, kind: 'attempt-finished', sequence: attempt.sequence, detail: 'Attempt ' + attempt.sequence + ' ' + attempt.status })
+    }
+    if (attempt.verifyingAtUtc) {
+      activity.push({ atUtc: attempt.verifyingAtUtc, kind: 'verification-started', sequence: attempt.sequence, detail: 'Verification started · attempt ' + attempt.sequence })
+    }
+  }
+  if (verification && verification.startedAtUtc) {
+    activity.push({ atUtc: verification.startedAtUtc, kind: 'verification-started', detail: 'Verification run started' })
+  }
+  if (verification && verification.finishedAtUtc) {
+    activity.push({
+      atUtc: verification.finishedAtUtc,
+      kind: 'verification-finished',
+      detail: 'Verification ' + (verification.status || 'unknown') + ' · ' + verification.total + ' check(s)' + (verification.durationSeconds !== null ? ' · ' + verification.durationSeconds + 's' : ''),
+    })
+  }
+  if (reviews.packet && reviews.packet.requestedAtUtc) {
+    activity.push({ atUtc: reviews.packet.requestedAtUtc, kind: 'review-requested', detail: 'Review requested' + (reviews.packet.attempt ? ' · attempt ' + reviews.packet.attempt : '') })
+  }
+  if (reviews.result && reviews.result.completedAtUtc) {
+    activity.push({ atUtc: reviews.result.completedAtUtc, kind: 'review-completed', detail: 'Review completed · verdict ' + (reviews.result.verdict || 'unknown') })
+  }
+  for (const gateRecord of gates.history) {
+    if (gateRecord.createdAtUtc) {
+      activity.push({ atUtc: gateRecord.createdAtUtc, kind: 'gate-created', detail: 'Operator gate opened · ' + (gateRecord.reason || 'review-required') })
+    }
+    if (gateRecord.resolvedAtUtc) {
+      activity.push({ atUtc: gateRecord.resolvedAtUtc, kind: 'gate-resolved', detail: 'Gate ' + (gateRecord.status || 'resolved') + (gateRecord.actionId ? ' · ' + gateRecord.actionId : '') })
+    }
+  }
+  for (const record of routingHistory) {
+    if (record.timestampUtc) {
+      const chip = record.kind === 'review' ? 'REVIEW' : record.kind === 'escalation' ? 'ESCALATION' : 'PRIMARY'
+      const sub = [record.model || null, record.reasoning || null].filter(Boolean).join(' · ') || null
+      activity.push({ atUtc: record.timestampUtc, kind: 'routing', detail: record.executionClass || record.kind || '', sub, chip })
+    }
+  }
+  for (const record of lifecycle) {
+    if (record.timestampUtc) {
+      activity.push({ atUtc: record.timestampUtc, kind: 'lifecycle', detail: String(record.kind || ''), sub: record.executionClass || null })
+    }
+  }
+  activity.sort((a, b) => String(a.atUtc).localeCompare(String(b.atUtc)))
 
   const controller = (() => {
     const doc = status.readJson(statePath, readFile)
@@ -429,6 +561,8 @@ async function buildDetailSnapshot({
     verification,
     failures,
     reviews,
+    gates,
+    activity,
     git: {
       summary: gitSummary || null,
       files: gitFiles || null,

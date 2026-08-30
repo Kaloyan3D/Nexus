@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$InstallRoot = 'C:\AI-Harness',
     [string]$SourceRoot
@@ -210,7 +210,8 @@ $layoutText = Get-Content -Raw -Encoding UTF8 -LiteralPath $layoutPath
 $layoutChanged = $false
 foreach ($pair in @(
     @('sidebar: 280,', 'sidebar: 288,', 'sidebar contract default'),
-    @('d.sidebar === 0 ? 280 : 0', 'd.sidebar === 0 ? 288 : 0', 'sidebar reopen width')
+    @('d.sidebar === 0 ? 280 : 0', 'd.sidebar === 0 ? 288 : 0', 'sidebar reopen width'),
+    @('panels.sidebar === 0 ? 280 : panels.sidebar', 'panels.sidebar === 0 ? 288 : panels.sidebar', 'sidebar reopen compute')
 )) {
     $layoutResult = Update-AihCopyPair -Text $layoutText -From $pair[0] -To $pair[1] -What $pair[2] -Path $layoutPath
     $layoutText = $layoutResult[0]

@@ -427,6 +427,11 @@ function ControllerBody({ snapshot, failed, running, pressure, onClose, onExpand
 				children: [
 					react_jsx_runtime.jsx("div", { className: "nx-title", children: "CONTROLLER" }),
 					react_jsx_runtime.jsx(StatusPill, { state: displayState }),
+					snapshot && snapshot.gate && snapshot.gate.status === "waiting" && react_jsx_runtime.jsx("span", {
+						className: "nx-gate-badge",
+						title: "Operator action required — open the Task Control Room",
+						children: "OPERATOR",
+					}),
 					bound && onExpand && react_jsx_runtime.jsx("button", {
 						type: "button",
 						className: "nx-room-open",
@@ -624,6 +629,84 @@ function ControllerBody({ snapshot, failed, running, pressure, onClose, onExpand
 //#endregion
 
 //#region task control room (expanded drawer surface)
+/**
+ * Operator gate (TASK-0004). Buttons render ONLY from gate.allowedActions —
+ * never inferred from the status. The browser POSTs identifiers only
+ * (sessionId, gateId, actionId, requestId); the server validates currency,
+ * advertising and replay idempotency. While a request is pending the buttons
+ * disable, and a stale/conflicting response degrades to a quiet notice — it
+ * can never crash the room.
+ */
+function GateActions({ gate, sessionId }) {
+	const [pending, setPending] = react.useState(false);
+	const [notice, setNotice] = react.useState(null);
+	if (!gate || !gate.gateId) return null;
+	const waiting = gate.status === "waiting";
+	const allowed = waiting && Array.isArray(gate.allowedActions) ? gate.allowedActions : [];
+	const postAction = react.useCallback((actionId) => {
+		if (pending) return;
+		setPending(true);
+		setNotice(null);
+		const requestId = (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "req-" + Date.now() + "-" + Math.random().toString(36).slice(2));
+		fetch("./nexus/gate-action.json", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ sessionId, gateId: gate.gateId, actionId, requestId }),
+			cache: "no-store",
+		})
+			.then((response) => response.json().catch(() => ({ ok: false, error: "gate-action-unreadable" })))
+			.then((body) => {
+				if (body && body.ok) {
+					setNotice(null);
+					// The snapshot refresh (mtime-keyed) picks up the new gate
+					// and completion state on its next poll.
+				} else if (body && body.replay) {
+					setNotice("This action was already applied.");
+				} else if (body && body.error === "gate-stale" || body && body.error === "gate-not-waiting") {
+					setNotice("The gate changed — the refreshed state below is current.");
+				} else if (body && body.error === "action-not-allowed" || body && body.error === "action-not-advertised") {
+					setNotice("This action is not available for this gate.");
+				} else if (body && body.error === "session-unbound") {
+					setNotice("This session is no longer bound to the task.");
+				} else {
+					setNotice("The gate action could not be applied. Try again.");
+				}
+			})
+			.catch(() => setNotice("The gate action could not be applied. Try again."))
+			.finally(() => setPending(false));
+	}, [pending, sessionId, gate]);
+	if (!waiting) {
+		return react_jsx_runtime.jsx("div", {
+			className: "nx-gate-resolved",
+			children: "Gate " + (gate.status || "resolved") + (gate.resolvedAtUtc ? " · " + formatTimeUtc(gate.resolvedAtUtc) : "") + (gate.actionId ? " · " + gate.actionId : ""),
+		});
+	}
+	return react_jsx_runtime.jsxs("div", {
+		className: "nx-gate",
+		children: [
+			react_jsx_runtime.jsxs("div", {
+				className: "nx-gate-head",
+				children: [
+					react_jsx_runtime.jsx("span", { className: "nx-gate-alert", children: "OPERATOR ACTION REQUIRED" }),
+					react_jsx_runtime.jsx("span", { className: "nx-gate-reason", children: gate.reason || "review-required" }),
+				],
+			}),
+			react_jsx_runtime.jsx("div", {
+				className: "nx-gate-actions",
+				children: allowed.map((actionId) => react_jsx_runtime.jsx("button", {
+					type: "button",
+					className: "nx-gate-btn nx-gate-btn-" + actionId,
+					disabled: pending,
+					"aria-label": "Gate action: " + actionId,
+					onClick: () => postAction(actionId),
+					children: actionId === "approve" ? "Approve" : actionId === "reject" ? "Reject" : actionId,
+				}, actionId)),
+			}),
+			notice && react_jsx_runtime.jsx("div", { className: "nx-gate-notice", children: notice }),
+		],
+	});
+}
+
 function RoomOverview({ detail, running, failed }) {
 	if (failed) {
 		return react_jsx_runtime.jsx("div", { className: "nx-empty", children: "Detail state unavailable" });
@@ -650,19 +733,37 @@ function RoomOverview({ detail, running, failed }) {
 	const reviewModels = reviews && Array.isArray(reviews.decisions) && reviews.decisions.length > 0
 		? reviews.decisions.map((decision) => decision.model).filter(Boolean)
 		: [];
+	const attempts = Array.isArray(detail.attempts) ? detail.attempts : [];
+	const latestAttempt = attempts.length > 0 ? attempts[attempts.length - 1] : null;
+	const gates = detail.gates || null;
+	const currentGate = gates && gates.current ? gates.current : null;
 	const meta = [
 		{ key: "Created", value: task.createdAtUtc },
 		{ key: "Updated", value: task.updatedAtUtc },
 		{ key: "Completed", value: task.completedAtUtc || "—" },
 		{ key: "Base commit", value: task.baseCommit || "—" },
 		{ key: "Worktree", value: task.worktree || "—" },
+		{ key: "Attempts", value: attempts.length > 0 ? String(attempts[attempts.length - 1].sequence) : (task.attempt && task.attempt > 0 ? String(task.attempt) : "—") },
 		{ key: "Controller", value: controller ? controller.status + (controller.pid ? " · pid " + controller.pid : "") : "—" },
 	];
 	return react_jsx_runtime.jsxs(react.Fragment, {
 		children: [
+			currentGate && react_jsx_runtime.jsx(GateActions, { gate: currentGate, sessionId: detail.binding.sessionId }),
 			react_jsx_runtime.jsxs(Section, {
 				label: "Status",
 				children: [react_jsx_runtime.jsx(StatusPill, { state: displayState })],
+			}),
+			react_jsx_runtime.jsxs(Section, {
+				label: "Attempt",
+				children: latestAttempt
+					? [
+						react_jsx_runtime.jsx("div", { className: "nx-value", children: "Attempt " + latestAttempt.sequence + " · " + latestAttempt.status }),
+						latestAttempt.startedAtUtc && react_jsx_runtime.jsx("div", {
+							className: "nx-sub",
+							children: "started " + formatTimeUtc(latestAttempt.startedAtUtc) + (latestAttempt.durationSeconds !== null && latestAttempt.durationSeconds !== undefined ? " · " + latestAttempt.durationSeconds + "s" : ""),
+						}),
+					]
+					: [react_jsx_runtime.jsx("div", { className: "nx-value", children: "—" })],
 			}),
 			execution && react_jsx_runtime.jsxs(Section, {
 				label: "Root Executor",
@@ -725,33 +826,69 @@ function RoomOverview({ detail, running, failed }) {
 	});
 }
 
+function activityKindTitle(kind) {
+	switch (kind) {
+		case "attempt-started": return "Attempt started";
+		case "attempt-failed": return "Attempt failed";
+		case "attempt-finished": return "Attempt finished";
+		case "verification-started": return "Verification started";
+		case "verification-finished": return "Verification finished";
+		case "review-requested": return "Review requested";
+		case "review-completed": return "Review completed";
+		case "gate-created": return "Operator gate opened";
+		case "gate-resolved": return "Gate resolved";
+		case "routing": return "Routed";
+		case "lifecycle": return "Lifecycle";
+		default: return kind || "Event";
+	}
+}
+
 function RoomActivity({ detail }) {
 	if (!detail || !detail.binding) {
 		return react_jsx_runtime.jsx("div", { className: "nx-empty", children: "No managed task" });
 	}
+	// TASK-0004: the Activity tab shows ONLY real recorded events from the
+	// controller's activity timeline (attempts, verification, reviews, gates,
+	// routing, lifecycle). The derivation below is the legacy fallback for
+	// snapshots that predate the timeline.
 	const entries = [];
-	for (const event of detail.lifecycle || []) {
-		if (event.kind === "task-created") {
-			entries.push({ at: event.timestampUtc, title: "Task created", sub: null, chip: null });
-		} else if (event.kind === "execution-class-selected") {
-			entries.push({ at: event.timestampUtc, title: "Execution class selected", sub: (event.executionClass || "—") + (event.reason ? " — " + event.reason : ""), chip: null });
+	if (Array.isArray(detail.activity) && detail.activity.length > 0) {
+		for (const event of detail.activity) {
+			if (event.kind === "routing") {
+				const chip = event.chip || "PRIMARY";
+				const title = chip === "REVIEW" ? "Review requested" : chip === "ESCALATION" ? "Escalated" : "Routed";
+				entries.push({ at: event.atUtc, title, sub: event.sub || event.detail || null, chip });
+			} else if (event.kind === "lifecycle") {
+				const title = event.detail === "task-created" ? "Task created" : event.detail === "execution-class-selected" ? "Execution class selected" : activityKindTitle(event.kind);
+				entries.push({ at: event.atUtc, title, sub: event.sub || null, chip: null });
+			} else {
+				entries.push({ at: event.atUtc, title: activityKindTitle(event.kind), sub: event.detail || null, chip: null });
+			}
 		}
-	}
-	for (const record of detail.routingHistory || []) {
-		const chip = routingKindLabel(record.kind);
-		if (record.kind === "review") {
-			entries.push({ at: record.timestampUtc, title: "Review requested", sub: (record.executionClass || "—") + (record.model ? " · " + record.model : ""), chip });
-		} else if (record.kind === "escalation") {
-			entries.push({ at: record.timestampUtc, title: "Escalated", sub: (record.executionClass || "—") + (record.escalatedFrom ? " from " + record.escalatedFrom : ""), chip });
-		} else {
-			entries.push({ at: record.timestampUtc, title: "Routed", sub: (record.executionClass || "—") + (record.model ? " · " + record.model : "") + (record.reasoning ? " · " + record.reasoning : ""), chip });
+	} else {
+		for (const event of detail.lifecycle || []) {
+			if (event.kind === "task-created") {
+				entries.push({ at: event.timestampUtc, title: "Task created", sub: null, chip: null });
+			} else if (event.kind === "execution-class-selected") {
+				entries.push({ at: event.timestampUtc, title: "Execution class selected", sub: (event.executionClass || "—") + (event.reason ? " — " + event.reason : ""), chip: null });
+			}
 		}
-	}
-	for (const attempt of detail.attempts || []) {
-		if (attempt.status === "failed") {
-			entries.push({ at: attempt.startedAtUtc || attempt.failedAtUtc, title: "Attempt " + attempt.sequence + " failed", sub: attempt.failureSignature || null, chip: null });
-		} else {
-			entries.push({ at: attempt.startedAtUtc, title: "Attempt " + attempt.sequence + " started", sub: attempt.executionClass || null, chip: null });
+		for (const record of detail.routingHistory || []) {
+			const chip = routingKindLabel(record.kind);
+			if (record.kind === "review") {
+				entries.push({ at: record.timestampUtc, title: "Review requested", sub: (record.executionClass || "—") + (record.model ? " · " + record.model : ""), chip });
+			} else if (record.kind === "escalation") {
+				entries.push({ at: record.timestampUtc, title: "Escalated", sub: (record.executionClass || "—") + (record.escalatedFrom ? " from " + record.escalatedFrom : ""), chip });
+			} else {
+				entries.push({ at: record.timestampUtc, title: "Routed", sub: (record.executionClass || "—") + (record.model ? " · " + record.model : "") + (record.reasoning ? " · " + record.reasoning : ""), chip });
+			}
+		}
+		for (const attempt of detail.attempts || []) {
+			if (attempt.status === "failed") {
+				entries.push({ at: attempt.startedAtUtc || attempt.failedAtUtc, title: "Attempt " + attempt.sequence + " failed", sub: attempt.failureSignature || null, chip: null });
+			} else {
+				entries.push({ at: attempt.startedAtUtc, title: "Attempt " + attempt.sequence + " started", sub: attempt.executionClass || null, chip: null });
+			}
 		}
 	}
 	entries.sort((a, b) => String(a.at || "").localeCompare(String(b.at || "")));
@@ -800,6 +937,17 @@ function RoomVerification({ detail }) {
 					verification.skipped > 0 && react_jsx_runtime.jsx("span", { className: "nx-sub-inline", children: " · " + formatCount(verification.skipped) + " skipped" }),
 				],
 			}),
+			// TASK-0004: verification is per-attempt with producer timestamps;
+			// durations are derived and omitted when unavailable.
+			(verification.attempt || verification.startedAtUtc || verification.finishedAtUtc) && react_jsx_runtime.jsx("div", {
+				className: "nx-sub",
+				children: [
+					verification.attempt ? "Attempt " + verification.attempt : "",
+					verification.startedAtUtc ? (verification.attempt ? " · " : "") + "started " + formatTimeUtc(verification.startedAtUtc) : "",
+					verification.finishedAtUtc ? " · finished " + formatTimeUtc(verification.finishedAtUtc) : "",
+					verification.durationSeconds !== null && verification.durationSeconds !== undefined ? " · " + verification.durationSeconds + "s" : "",
+				].filter(Boolean).join(""),
+			}),
 			react_jsx_runtime.jsx("div", {
 				className: "nx-checks",
 				children: (verification.checks || []).map((check) => react_jsx_runtime.jsxs("div", {
@@ -807,6 +955,7 @@ function RoomVerification({ detail }) {
 					children: [
 						react_jsx_runtime.jsx("span", { className: "nx-check-glyph nx-check-" + (check.status === "PASS" ? "pass" : check.status === "FAIL" ? "fail" : "skip"), children: check.status === "PASS" ? "✓" : check.status === "FAIL" ? "✕" : "–" }),
 						react_jsx_runtime.jsx("span", { className: "nx-check-name", title: check.name, children: check.name }),
+						check.durationSeconds !== null && check.durationSeconds !== undefined && react_jsx_runtime.jsx("span", { className: "nx-check-duration", children: check.durationSeconds + "s" }),
 						check.evidence && react_jsx_runtime.jsx("span", { className: "nx-check-evidence", title: check.evidence, children: check.evidence }),
 					],
 				}, check.name)),
@@ -1157,6 +1306,24 @@ function ExecutorChip({ session }) {
 * maps onto the Nexus palette), so light/dark/system themes keep working
 * without any duplicate palette.
 */
+const GATE_CSS = [
+	".nx-gate{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1);border-left:3px solid #d97706;border-radius:6px;background:var(--dsw-alias-bg-l2);margin-bottom:10px}",
+	".nx-gate-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}",
+	".nx-gate-alert{font-size:11px;font-weight:700;letter-spacing:.08em;color:#d97706}",
+	".nx-gate-reason{font-size:11px;color:var(--dsw-alias-label-tertiary)}",
+	".nx-gate-actions{display:flex;gap:8px}",
+	".nx-gate-btn{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-interactive-bg);color:var(--dsw-alias-label-primary);font-size:11.5px;font-weight:600;padding:4px 12px;border-radius:5px;cursor:pointer}",
+	".nx-gate-btn:disabled{opacity:.45;cursor:default}",
+	".nx-gate-btn-approve{border-color:#16a34a;color:#16a34a}",
+	".nx-gate-btn-approve:hover:not(:disabled){background:rgba(22,163,74,.12)}",
+	".nx-gate-btn-reject{border-color:#dc2626;color:#dc2626}",
+	".nx-gate-btn-reject:hover:not(:disabled){background:rgba(220,38,38,.12)}",
+	".nx-gate-notice{font-size:11px;color:var(--dsw-alias-label-tertiary)}",
+	".nx-gate-resolved{font-size:11px;color:var(--dsw-alias-label-tertiary);padding:6px 0 10px}",
+	".nx-gate-badge{font-size:9px;font-weight:700;letter-spacing:.08em;color:#d97706;border:1px solid rgba(217,119,6,.5);border-radius:4px;padding:1px 5px;margin-left:6px}",
+	".nx-check-duration{font-size:10px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;margin-left:6px;flex:none}",
+];
+
 const PANEL_CSS = [
 	"[data-nexus-controller]{box-sizing:border-box;height:100%;display:flex;flex-direction:column;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;overflow:hidden}",
 	"[data-nexus-controller] *,[data-nexus-controller] *::before,[data-nexus-controller] *::after{box-sizing:border-box}",
@@ -1266,7 +1433,7 @@ function apply(ctx) {
 		const tag = document.createElement("style");
 		tag.dataset.plugin = "@nexus/controller";
 		tag.dataset.pluginCss = "@nexus/controller/panel.css";
-		tag.textContent = PANEL_CSS;
+		tag.textContent = GATE_CSS.join("") + PANEL_CSS;
 		document.head.appendChild(tag);
 		return () => {
 			tag.remove();
@@ -1317,6 +1484,8 @@ exports.ROOM_TABS = ROOM_TABS;
 exports.executorChipContent = executorChipContent;
 exports.ExecutorPill = ExecutorPill;
 exports.ExecutorChip = ExecutorChip;
+exports.GateActions = GateActions;
+exports.activityKindTitle = activityKindTitle;
 return module.exports;
 }
 });

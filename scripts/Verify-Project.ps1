@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$Workspace = (Get-Location).Path,
     [string]$InstallRoot = 'C:\AI-Harness',
@@ -81,7 +81,7 @@ function Invoke-AihVerificationCommand {
 
     $started = [DateTime]::UtcNow
     if (-not $Command.Available) {
-        return [pscustomobject]@{ Name = $Command.Name; Kind = $Command.Kind; Status = if ($Command.Required) { 'FAIL' } else { 'SKIP' }; ExitCode = $null; DurationSeconds = 0; Command = $Command.Display; Error = 'Required executable is unavailable.' }
+        return [pscustomobject]@{ Name = $Command.Name; Kind = $Command.Kind; Status = if ($Command.Required) { 'FAIL' } else { 'SKIP' }; ExitCode = $null; DurationSeconds = 0; StartedAtUtc = $started.ToString('o'); FinishedAtUtc = [DateTime]::UtcNow.ToString('o'); Command = $Command.Display; Error = 'Required executable is unavailable.' }
     }
     $info = [System.Diagnostics.ProcessStartInfo]::new()
     if (-not [string]::IsNullOrWhiteSpace($Command.ShellCommand)) {
@@ -142,6 +142,8 @@ function Invoke-AihVerificationCommand {
         Status = $status
         ExitCode = $exitCode
         DurationSeconds = [Math]::Round(([DateTime]::UtcNow - $started).TotalSeconds, 3)
+        StartedAtUtc = $started.ToString('o')
+        FinishedAtUtc = [DateTime]::UtcNow.ToString('o')
         Command = $Command.Display
         WorkingDirectory = $Command.WorkingDirectory
         StandardOutput = $stdout
@@ -176,7 +178,8 @@ foreach ($command in $commands) {
 }
 $architecture = Invoke-AihArchitectureRules $profile.Workspace
 if ($Kind -in @('all','verify')) {
-    $results.Add([pscustomobject]@{ Name='architecture:rules'; Kind='verify'; Status=$architecture.status; ExitCode=if($architecture.status -eq 'PASS'){0}else{1}; DurationSeconds=0; Command='aih-rules'; WorkingDirectory=$profile.Workspace; StandardOutput=($architecture | ConvertTo-Json -Depth 8 -Compress); StandardError=''; Error=$null })
+    $archStarted = [DateTime]::UtcNow
+    $results.Add([pscustomobject]@{ Name='architecture:rules'; Kind='verify'; Status=$architecture.status; ExitCode=if($architecture.status -eq 'PASS'){0}else{1}; DurationSeconds=0; StartedAtUtc=$archStarted.ToString('o'); FinishedAtUtc=[DateTime]::UtcNow.ToString('o'); Command='aih-rules'; WorkingDirectory=$profile.Workspace; StandardOutput=($architecture | ConvertTo-Json -Depth 8 -Compress); StandardError=''; Error=$null })
 }
 $failed = @($results | Where-Object Status -eq 'FAIL').Count
 $summary = [pscustomobject]@{ Workspace = $profile.Workspace; Kind = $Kind; Passed = @($results | Where-Object Status -eq 'PASS').Count; Failed = $failed; Skipped = @($results | Where-Object Status -eq 'SKIP').Count; Results = @($results) }

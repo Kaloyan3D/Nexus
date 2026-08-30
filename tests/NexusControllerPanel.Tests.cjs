@@ -467,13 +467,15 @@ async function main() {
       // 11b. webServer becomes available later → the injection callback
       // applies and BOTH routes register (Cordis lifecycle semantics).
       assert.doesNotThrow(() => injectCallback({ webServer: fakeWebServer, effect(fn) { fn(); return () => {} } }), 'injection callback must apply cleanly once the service exists')
-      assert.equal(captured.length, 2, 'both routes must register after webServer becomes available')
+      assert.equal(captured.length, 3, 'all routes must register after webServer becomes available')
       const paths = captured.map((spec) => spec.path).sort()
-      assert.deepEqual(paths, ['/nexus/control-room.json', '/nexus/controller.json'])
+      assert.deepEqual(paths, ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/gate-action.json'])
       const route = captured.find((spec) => spec.path === '/nexus/controller.json')
       assert.equal(route.kind, 'exact')
       const roomRoute = captured.find((spec) => spec.path === '/nexus/control-room.json')
       assert.equal(roomRoute.kind, 'exact')
+      const gateRoute = captured.find((spec) => spec.path === '/nexus/gate-action.json')
+      assert.equal(gateRoute.kind, 'exact')
 
       // 11c. profiles that NEVER provide webServer stay inert (tui/headless)
       captured = []
@@ -552,9 +554,9 @@ async function main() {
       // the service appears AFTER the plugin activated — the deferred
       // injection resolves and the route registers.
       root.provide('webServer', fakeWebServer)
-      for (let i = 0; i < 60 && registered.length < 2; i++) await tick(50)
-      assert.equal(registered.length, 2, 'real cordis: both routes register after webServer becomes available')
-      assert.deepEqual(registered.map((spec) => spec.path).sort(), ['/nexus/control-room.json', '/nexus/controller.json'])
+      for (let i = 0; i < 60 && registered.length < 3; i++) await tick(50)
+      assert.equal(registered.length, 3, 'real cordis: all routes register after webServer becomes available')
+      assert.deepEqual(registered.map((spec) => spec.path).sort(), ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/gate-action.json'])
       assert.ok(registered.every((spec) => spec.kind === 'exact'))
 
       // the registered handler keeps the existing semantics.
@@ -2060,6 +2062,397 @@ async function main() {
     })
     assert.equal(corrupt.preference, null, 'corrupt settings → no preference, never a guessed one')
     assert.equal(corrupt.binding.taskId, 'TASK-0042', 'corrupt settings never damage the task state')
+  }
+
+  // ── 25. TASK-0004: attempt lifecycle (pure readers + snapshots) ─────────
+  {
+    // First execution → attempt 1; duplicate start while open → still 1;
+    // reload/reconnect observes the same record; retry after closure → 2;
+    // an OLD task (no journal) → null (UI renders "—").
+    const attempts = [
+      { attemptId: 'T-1-A1', taskId: 'T-1', workspace: 'C:\\ws', sequence: 1, executionClass: 'deepseek_normal', status: 'started', startedAtUtc: '2026-08-28T17:30:00.000Z', sessionId: 'session-0001', startedByTurn: '7', timestampUtc: '2026-08-28T17:30:01.000Z' },
+      { taskId: 'T-1', workspace: 'C:\\ws', sequence: 1, status: 'verifying', timestampUtc: '2026-08-28T17:35:00.000Z' },
+      { taskId: 'T-1', workspace: 'C:\\ws', sequence: 1, status: 'passed', timestampUtc: '2026-08-28T17:35:40.000Z' },
+      { attemptId: 'T-1-A2', taskId: 'T-1', workspace: 'C:\\ws', sequence: 2, executionClass: 'deepseek_normal', status: 'started', startedAtUtc: '2026-08-28T18:00:00.000Z', sessionId: 'session-0001', startedByTurn: '19', timestampUtc: '2026-08-28T18:00:01.000Z' },
+    ]
+    const latest = status.latestAttemptOfTask(status.attemptsOf(attempts.map((r) => JSON.stringify(r)).join('\n')), 'T-1')
+    assert.equal(latest.sequence, 2, 'latest attempt is the last real record (retry → attempt 2)')
+    assert.equal(latest.status, 'started', 'attempt 2 is open after the retry')
+    assert.equal(status.latestAttemptOfTask(status.attemptsOf(''), 'T-1'), null, 'empty journal → no attempt')
+    const normalized = status.normalizeAttemptRecord(latest)
+    assert.deepEqual(normalized, {
+      sequence: 2, status: 'started', startedAtUtc: '2026-08-28T18:00:00.000Z', timestampUtc: '2026-08-28T18:00:01.000Z',
+      sessionId: 'session-0001', startedByTurn: '19',
+    }, 'normalized attempt carries the producer identity')
+
+    // groupAttempts: lifecycle statuses + derived durations (never invented)
+    const rows = detail.groupAttempts(status.attemptsOf(attempts.map((r) => JSON.stringify(r)).join('\n')), { status: 'in-progress' })
+    assert.equal(rows.length, 2, 'two attempt rows from the journal')
+    assert.equal(rows[0].status, 'passed', 'attempt 1 closed passed after verification')
+    assert.equal(rows[0].verifyingAtUtc, '2026-08-28T17:35:00.000Z', 'verifying timestamp recorded')
+    assert.equal(rows[0].finishedAtUtc, '2026-08-28T17:35:40.000Z', 'finished timestamp recorded')
+    assert.equal(rows[0].durationSeconds, 340, 'duration derived from producer timestamps')
+    assert.equal(rows[1].status, 'started', 'attempt 2 remains open')
+    assert.equal(rows[1].durationSeconds, null, 'no duration for an open attempt')
+
+    // interrupted + failed rows
+    const mixed = [
+      { taskId: 'T-2', sequence: 1, status: 'started', startedAtUtc: '2026-08-28T17:00:00.000Z' },
+      { taskId: 'T-2', sequence: 1, status: 'interrupted', timestampUtc: '2026-08-28T17:05:00.000Z' },
+      { taskId: 'T-2', sequence: 2, status: 'started', startedAtUtc: '2026-08-28T18:00:00.000Z' },
+      { taskId: 'T-2', sequence: 2, status: 'failed', failureSignature: 'sig-x', timestampUtc: '2026-08-28T18:10:00.000Z' },
+    ]
+    const mixedRows = detail.groupAttempts(status.attemptsOf(mixed.map((r) => JSON.stringify(r)).join('\n')), {})
+    assert.equal(mixedRows[0].status, 'interrupted', 'abort closes as interrupted')
+    assert.equal(mixedRows[0].durationSeconds, 300, 'interrupted duration derived')
+    assert.equal(mixedRows[1].status, 'failed', 'failed attempt closed')
+    assert.equal(mixedRows[1].failureSignature, 'sig-x', 'failure signature linked')
+    assert.equal(mixedRows[1].durationSeconds, 600, 'failed duration derived')
+
+    // snapshot carries attempt for a live task; old tasks degrade to null
+    const dataRoot25 = tmpDir('nexus-ctr-')
+    const workspace25 = path.join(dataRoot25, 'ws')
+    const files25 = fixtureFileMap(dataRoot25, workspace25, {})
+    files25[path.join(workspace25, '.ai-harness', 'runs', 'TASK-0042', 'attempts.jsonl')] =
+      attempts.map((record) => JSON.stringify({ ...record, taskId: 'TASK-0042' })).join('\n') + '\n'
+    writeTree(dataRoot25, files25)
+    const snap25 = await status.buildControllerSnapshot({
+      dataRoot: dataRoot25, sessionId: 'session-0001', settingsPath: path.join(dataRoot25, 'settings.yaml'),
+      statePath: path.join(dataRoot25, 'aih-state.json'), readFile: memoryReader(files25),
+      modelNames: { 'flash-max-direct/deepseek-v4-flash': 'DeepSeek V4 Flash' },
+      gitSummary: null, nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    assert.equal(snap25.attempt.sequence, 2, 'compact snapshot exposes the latest attempt')
+    assert.equal(snap25.attempt.status, 'started', 'compact snapshot attempt status truthful')
+
+    const oldTaskDataRoot = tmpDir('nexus-ctr-')
+    const oldTaskFiles = fixtureFileMap(oldTaskDataRoot, path.join(oldTaskDataRoot, 'ws'), {})
+    writeTree(oldTaskDataRoot, oldTaskFiles)
+    const oldSnap = await status.buildControllerSnapshot({
+      dataRoot: oldTaskDataRoot, sessionId: 'session-0001', settingsPath: path.join(oldTaskDataRoot, 'settings.yaml'),
+      statePath: path.join(oldTaskDataRoot, 'aih-state.json'), readFile: memoryReader(oldTaskFiles),
+      modelNames: {}, gitSummary: null, nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    assert.equal(oldSnap.attempt, null, 'old task without a journal → attempt null (renders "—")')
+  }
+
+  // ── 26. TASK-0004: verification + review timestamps and linkage ─────────
+  {
+    const { snapshot } = await detailFixture({
+      attempts: [
+        { taskId: 'TASK-0042', sequence: 1, status: 'started', startedAtUtc: '2026-08-28T17:30:00.000Z' },
+        { taskId: 'TASK-0042', sequence: 1, status: 'verifying', timestampUtc: '2026-08-28T17:31:00.000Z' },
+        { taskId: 'TASK-0042', sequence: 1, status: 'passed', timestampUtc: '2026-08-28T17:31:20.000Z' },
+      ],
+      evidence: {
+        schemaVersion: 2, attempt: 1,
+        startedAtUtc: '2026-08-28T17:31:00.000Z', finishedAtUtc: '2026-08-28T17:31:20.000Z',
+        acceptanceCriteria: [], scopePass: true,
+        verification: [
+          { name: 'unit tests', kind: 'test', status: 'PASS', exitCode: 0, command: 'npm run test', startedAtUtc: '2026-08-28T17:31:02.000Z', finishedAtUtc: '2026-08-28T17:31:18.000Z', attempt: 1 },
+          { name: 'typecheck', kind: 'verify', status: 'SKIP', exitCode: null, command: 'tsc', startedAtUtc: null, finishedAtUtc: null, attempt: 1 },
+        ],
+      },
+      reviewPacket: { schemaVersion: 1, question: 'q', attempt: 1, requestedAtUtc: '2026-08-28T17:40:00.000Z' },
+      reviewResult: { schemaVersion: 1, verdict: 'fail', completedAtUtc: '2026-08-28T17:41:00.000Z', findings: [] },
+    })
+    const v = snapshot.verification
+    assert.equal(v.attempt, 1, 'verification links to attempt 1')
+    assert.equal(v.startedAtUtc, '2026-08-28T17:31:00.000Z', 'verification startedAtUtc from the evidence artifact')
+    assert.equal(v.finishedAtUtc, '2026-08-28T17:31:20.000Z', 'verification finishedAtUtc from the evidence artifact')
+    assert.equal(v.durationSeconds, 20, 'verification duration derived')
+    assert.equal(v.passed, 1, 'PASS counted')
+    assert.equal(v.skipped, 1, 'SKIP counted')
+    assert.equal(v.checks[0].durationSeconds, 16, 'per-check duration derived from producer timestamps')
+    assert.equal(v.checks[1].durationSeconds, null, 'no timestamps → no duration (never invented)')
+    assert.equal(snapshot.reviews.packet.requestedAtUtc, '2026-08-28T17:40:00.000Z', 'review requestedAtUtc from the packet')
+    assert.equal(snapshot.reviews.packet.attempt, 1, 'review packet links the attempt')
+    assert.equal(snapshot.reviews.result.completedAtUtc, '2026-08-28T17:41:00.000Z', 'review completedAtUtc from the result')
+
+    // failed verification → partial/failed summary; interrupted attempt closes
+    const { snapshot: snapFail } = await detailFixture({
+      attempts: [
+        { taskId: 'TASK-0042', sequence: 1, status: 'started', startedAtUtc: '2026-08-28T17:30:00.000Z' },
+        { taskId: 'TASK-0042', sequence: 1, status: 'verifying', timestampUtc: '2026-08-28T17:31:00.000Z' },
+        { taskId: 'TASK-0042', sequence: 1, status: 'interrupted', timestampUtc: '2026-08-28T17:31:30.000Z' },
+      ],
+      evidence: {
+        schemaVersion: 2, attempt: 1,
+        startedAtUtc: '2026-08-28T17:31:00.000Z', finishedAtUtc: '2026-08-28T17:31:30.000Z',
+        acceptanceCriteria: [], scopePass: true,
+        verification: [
+          { name: 'unit tests', status: 'PASS', startedAtUtc: '2026-08-28T17:31:02.000Z', finishedAtUtc: '2026-08-28T17:31:10.000Z', attempt: 1 },
+          { name: 'integration', status: 'FAIL', exitCode: 1, startedAtUtc: '2026-08-28T17:31:11.000Z', finishedAtUtc: '2026-08-28T17:31:29.000Z', attempt: 1 },
+        ],
+      },
+    })
+    assert.equal(snapFail.verification.status, 'partial', 'PASS+FAIL → partial')
+    assert.equal(snapFail.verification.failed, 1, 'FAIL counted')
+    assert.equal(snapFail.attempts[0].status, 'interrupted', 'stale verifying closed as interrupted')
+
+    // legacy evidence (no timestamps, no attempt) still renders
+    const { snapshot: snapOld } = await detailFixture({
+      evidence: { schemaVersion: 1, acceptanceCriteria: [], verification: [{ name: 'legacy check', status: 'PASS' }], scopePass: true },
+    })
+    assert.equal(snapOld.verification.attempt, null, 'legacy evidence → attempt omitted')
+    assert.equal(snapOld.verification.startedAtUtc, null, 'legacy evidence → no start timestamp')
+    assert.equal(snapOld.verification.durationSeconds, null, 'legacy evidence → no duration')
+    assert.equal(snapOld.verification.checks[0].status, 'PASS', 'legacy checks still render')
+  }
+
+  // ── 27. TASK-0004: operator gates (pure + server-side validation) ──────
+  {
+    const gateModule = require(path.join(ROOT, 'ui', 'nexus-controller', 'lib', 'gate.cjs'))
+    const dataRoot = tmpDir('nexus-ctr-')
+    const workspace = path.join(dataRoot, 'ws')
+    const binding = { sessionId: 'session-0001', workspace, taskId: 'TASK-0042' }
+
+    // no gate → no actions anywhere
+    assert.equal(status.currentGateOf([], 'session-0001', workspace, 'TASK-0042'), null, 'no gate records → null')
+
+    // active gate → exact allowedActions; buttons come only from them
+    const created = gateModule.ensureGate(dataRoot, binding, 'review-required', { attempt: 1, reviewVerdict: 'fail' })
+    assert.equal(created.status, 'waiting', 'gate opens waiting')
+    assert.deepEqual(created.allowedActions, ['approve', 'reject'], 'gate advertises exactly approve/reject')
+    const dup = gateModule.ensureGate(dataRoot, binding, 'review-required', { attempt: 1 })
+    assert.equal(dup.gateId, created.gateId, 'ensureGate is idempotent — one transition per review failure')
+    const normalized = status.normalizeGateRecord(status.currentGateOf(
+      gateModule.readJsonLines(gateModule.gatesPathOf(dataRoot)), 'session-0001', workspace, 'TASK-0042',
+    ))
+    assert.equal(normalized.status, 'waiting', 'snapshot gate shows waiting')
+    assert.deepEqual(normalized.allowedActions, ['approve', 'reject'], 'snapshot carries allowedActions')
+
+    // invalid / stale / duplicate handling (server-side validation)
+    const ok = gateModule.validateGateAction(dataRoot, binding, { sessionId: 'session-0001', gateId: created.gateId, actionId: 'approve', requestId: 'req-1' })
+    assert.equal(ok.ok, true, 'valid current action accepted')
+    const badAction = gateModule.validateGateAction(dataRoot, binding, { sessionId: 'session-0001', gateId: created.gateId, actionId: 'force', requestId: 'req-2' })
+    assert.equal(badAction.ok, false, 'unadvertised action rejected')
+    const staleGate = gateModule.validateGateAction(dataRoot, binding, { sessionId: 'session-0001', gateId: 'gate-gone', actionId: 'approve', requestId: 'req-3' })
+    assert.equal(staleGate.ok, false, 'stale gateId rejected')
+
+    // one transition: approve resolves; the same requestId can never re-mutate
+    const resolved = gateModule.resolveGate(dataRoot, binding, ok.gate, 'approve', 'req-1')
+    assert.equal(resolved.status, 'approved', 'approve resolves the gate')
+    const after = gateModule.validateGateAction(dataRoot, binding, { sessionId: 'session-0001', gateId: created.gateId, actionId: 'approve', requestId: 'req-4' })
+    assert.equal(after.ok, false, 'a resolved gate rejects further actions')
+    const actionRecords = gateModule.readJsonLines(gateModule.actionsPathOf(dataRoot))
+    assert.equal(actionRecords.length, 1, 'exactly one action journaled')
+
+    // pending gate survives a restart (journal is the state)
+    const reloaded = gateModule.currentGateFor(dataRoot, 'session-0001', workspace, 'TASK-0042')
+    assert.equal(reloaded.status, 'approved', 'gate state survives restart reads')
+
+    // isolation: the same taskId under another session/workspace never matches
+    const otherSession = gateModule.currentGateFor(dataRoot, 'session-OTHER', workspace, 'TASK-0042')
+    assert.equal(otherSession, null, 'other session isolated')
+    const otherWorkspace = gateModule.currentGateFor(dataRoot, 'session-0001', workspace + '\\other', 'TASK-0042')
+    assert.equal(otherWorkspace, null, 'other workspace isolated')
+
+    // snapshot exposes the gate for the bound session
+    const files27 = fixtureFileMap(dataRoot, workspace, {})
+    files27[path.join(dataRoot, 'completion', 'gates.jsonl')] = fs.readFileSync(gateModule.gatesPathOf(dataRoot), 'utf8')
+    writeTree(dataRoot, files27)
+    const snap27 = await status.buildControllerSnapshot({
+      dataRoot, sessionId: 'session-0001', settingsPath: path.join(dataRoot, 'settings.yaml'),
+      statePath: path.join(dataRoot, 'aih-state.json'), readFile: memoryReader(files27),
+      modelNames: {}, gitSummary: null, nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    assert.equal(snap27.gate.status, 'approved', 'compact snapshot exposes the resolved gate')
+    const files27b = fixtureFileMap(tmpDir('nexus-ctr-'), path.join(tmpDir('nexus-ctr-'), 'ws'), {})
+    writeTree(path.dirname(Object.keys(files27b)[0]).split('routing')[0].replace(/\\$/, ''), files27b)
+    const snap27b = await status.buildControllerSnapshot({
+      dataRoot: path.dirname(Object.keys(files27b)[0]).split('routing')[0].replace(/\\$/, ''),
+      sessionId: 'session-0001', settingsPath: Object.keys(files27b).find((f) => f.endsWith('settings.yaml')),
+      statePath: Object.keys(files27b).find((f) => f.endsWith('aih-state.json')), readFile: memoryReader(files27b),
+      modelNames: {}, gitSummary: null, nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    assert.equal(snap27b.gate, null, 'old task without gate records → gate null')
+  }
+
+  // ── 28. TASK-0004: room + compact UI renders (gate, attempt, activity) ─
+  {
+    const requireFromApp = require('node:module').createRequire(path.join(ROOT, 'app', 'package.json'))
+    const react = requireFromApp('react')
+    const jsxRuntime = requireFromApp('react/jsx-runtime')
+    const renderToStaticMarkup = requireFromApp('react-dom/server').renderToStaticMarkup
+    let source = fs.readFileSync(CLIENT, 'utf8')
+    const hookHeader = 'function useControllerSnapshot(sessionId) {'
+    assert.ok(source.includes(hookHeader), 'snapshot hook header must exist in client.js')
+    source = source.replace(hookHeader, hookHeader + '\n\tif (typeof window !== "undefined" && (window.__NX_TEST_SNAPSHOT__ !== undefined || window.__NX_TEST_SNAPSHOT_FAILED__)) return { snapshot: window.__NX_TEST_SNAPSHOT__ ?? null, failed: window.__NX_TEST_SNAPSHOT_FAILED__ === true };')
+    const detailHeader = 'function useDetailSnapshot(sessionId, enabled) {'
+    assert.ok(source.includes(detailHeader), 'detail hook header must exist in client.js')
+    source = source.replace(detailHeader, detailHeader + '\n\tif (typeof window !== "undefined" && (window.__NX_TEST_DETAIL__ !== undefined || window.__NX_TEST_DETAIL_FAILED__)) return { detail: window.__NX_TEST_DETAIL__ ?? null, failed: window.__NX_TEST_DETAIL_FAILED__ === true };')
+    const viewHeader = 'function readRoomViewPref() {'
+    assert.ok(source.includes(viewHeader), 'room view pref header must exist in client.js')
+    source = source.replace(viewHeader, viewHeader + '\n\tif (typeof window !== "undefined" && window.__NX_TEST_ROOM_VIEW__) return window.__NX_TEST_ROOM_VIEW__')
+    let moduleExports = null
+    const sandbox = {
+      console, URL, setTimeout, clearTimeout,
+      window: {
+        __ModuleLoader__: { load(def) { moduleExports = def.factory((name) => {
+          if (name === 'react') return react
+          if (name === 'react/jsx-runtime') return jsxRuntime
+          throw new Error('unexpected require: ' + name)
+        }) } },
+        localStorage: { getItem() { return null }, setItem() {} },
+        setInterval() { return 1 },
+        clearInterval() {},
+      },
+      document: { createElement() { return { dataset: {}, remove() {} } }, head: { appendChild() {} } },
+    }
+    vm.createContext(sandbox)
+    vm.runInContext(source, sandbox)
+    const { ControllerBody, ControlRoom, GateActions, ROOM_TABS } = moduleExports
+
+    // 28a. GateActions: buttons ONLY from allowedActions; resolved → no buttons
+    const waitingGate = { gateId: 'gate-1', status: 'waiting', allowedActions: ['approve', 'reject'], reason: 'review-required', revision: 1 }
+    const waitingHtml = renderToStaticMarkup(react.createElement(GateActions, { gate: waitingGate, sessionId: 's1' }))
+    assert.ok(waitingHtml.includes('OPERATOR ACTION REQUIRED'), 'waiting gate shows the operator alert')
+    assert.ok(waitingHtml.includes('Approve') && waitingHtml.includes('Reject'), 'waiting gate renders approve/reject')
+    const resolvedGate = { gateId: 'gate-1', status: 'approved', allowedActions: [], revision: 2, actionId: 'approve', resolvedAtUtc: '2026-08-28T18:00:00.000Z' }
+    const resolvedHtml = renderToStaticMarkup(react.createElement(GateActions, { gate: resolvedGate, sessionId: 's1' }))
+    assert.ok(!resolvedHtml.includes('Approve') && !resolvedHtml.includes('Reject'), 'resolved gate renders NO action buttons')
+    assert.ok(resolvedHtml.includes('approved'), 'resolved gate shows its outcome')
+    const stripped = { gateId: 'gate-2', status: 'waiting', allowedActions: ['approve'], revision: 1 }
+    const strippedHtml = renderToStaticMarkup(react.createElement(GateActions, { gate: stripped, sessionId: 's1' }))
+    assert.ok(strippedHtml.includes('Approve') && !strippedHtml.includes('Reject'), 'buttons render exactly the advertised actions')
+
+    // 28b. compact Controller: unchanged chrome + gate badge, never buttons
+    const compactSnapshot = {
+      schemaVersion: 1, generatedAtUtc: new Date().toISOString(), state: 'working',
+      binding: { sessionId: 'session-0001', taskId: 'TASK-0042', workspace: 'C:\\ws', preset: 'aih-engineering' },
+      task: { taskId: 'TASK-0042', attempt: 1, status: 'implementing' },
+      attempt: { sequence: 1, status: 'verifying', startedAtUtc: '2026-08-28T17:30:00.000Z' },
+      gate: { gateId: 'gate-1', status: 'waiting', allowedActions: ['approve', 'reject'], reason: 'review-required' },
+      execution: { class: 'deepseek_normal', provider: 'flash-high-direct', model: 'DeepSeek V4 Flash', reasoning: 'high' },
+      review: { reviewRequired: true },
+    }
+    const compactHtml = renderToStaticMarkup(react.createElement(ControllerBody, { snapshot: compactSnapshot, failed: false, running: true, pressure: null, onClose() {}, onExpand() {} }))
+    assert.ok(compactHtml.includes('CONTROLLER'), 'compact controller title intact')
+    assert.ok(compactHtml.includes('OPERATOR'), 'compact controller shows the gate badge')
+    assert.ok(!compactHtml.includes('Gate action: approve'), 'compact controller NEVER renders gate buttons')
+
+    // 28c. room overview: OPERATOR ACTION REQUIRED first, attempt row, old task "—"
+    const { snapshot: roomSnap } = await detailFixture({
+      attempts: [
+        { taskId: 'TASK-0042', sequence: 1, status: 'started', startedAtUtc: '2026-08-28T17:30:00.000Z' },
+        { taskId: 'TASK-0042', sequence: 1, status: 'verifying', timestampUtc: '2026-08-28T17:31:00.000Z' },
+        { taskId: 'TASK-0042', sequence: 1, status: 'passed', timestampUtc: '2026-08-28T17:31:20.000Z' },
+      ],
+      evidence: {
+        schemaVersion: 2, attempt: 1, startedAtUtc: '2026-08-28T17:31:00.000Z', finishedAtUtc: '2026-08-28T17:31:20.000Z',
+        acceptanceCriteria: [], scopePass: true,
+        verification: [{ name: 'unit tests', status: 'PASS', startedAtUtc: '2026-08-28T17:31:02.000Z', finishedAtUtc: '2026-08-28T17:31:18.000Z', attempt: 1 }],
+      },
+    })
+    const gateRecords = [
+      { schemaVersion: 1, gateId: 'gate-1', kind: 'operator', reason: 'review-required', status: 'waiting', allowedActions: ['approve', 'reject'], createdAtUtc: '2026-08-28T17:45:00.000Z', sessionId: 'session-0001', workspace: roomSnap.binding.workspace, taskId: 'TASK-0042', attempt: 1, reviewVerdict: 'fail', revision: 1 },
+    ]
+    roomSnap.gates = {
+      current: status.normalizeGateRecord(gateRecords[0]),
+      history: gateRecords.map((r) => status.normalizeGateRecord(r)),
+    }
+    roomSnap.activity = [
+      { atUtc: '2026-08-28T17:30:00.000Z', kind: 'attempt-started', detail: 'Attempt 1 started' },
+      { atUtc: '2026-08-28T17:31:00.000Z', kind: 'verification-started', detail: 'Verification started · attempt 1' },
+      { atUtc: '2026-08-28T17:31:20.000Z', kind: 'verification-finished', detail: 'Verification passed · 1 check(s) · 20s' },
+      { atUtc: '2026-08-28T17:45:00.000Z', kind: 'gate-created', detail: 'Operator gate opened · review-required' },
+    ]
+    sandbox.window.__NX_TEST_DETAIL__ = roomSnap
+    sandbox.window.__NX_TEST_DETAIL_FAILED__ = false
+    sandbox.window.__NX_TEST_ROOM_VIEW__ = 'overview'
+    const overviewHtml = renderToStaticMarkup(react.createElement(ControlRoom, { sessionId: 'session-0001', running: true, onClose() {} }))
+    assert.ok(overviewHtml.includes('OPERATOR ACTION REQUIRED'), 'room overview leads with the operator gate')
+    assert.ok(overviewHtml.includes('Approve') && overviewHtml.includes('Reject'), 'room overview renders the gate actions')
+    assert.ok(overviewHtml.includes('Attempt 1 · passed'), 'overview shows the latest attempt + status')
+    assert.ok(overviewHtml.includes('80s'), 'overview shows the derived attempt duration (17:30:00 → 17:31:20)')
+
+    // 28d. activity tab renders ONLY real recorded events
+    sandbox.window.__NX_TEST_ROOM_VIEW__ = 'activity'
+    const activityHtml = renderToStaticMarkup(react.createElement(ControlRoom, { sessionId: 'session-0001', running: true, onClose() {} }))
+    assert.ok(activityHtml.includes('Attempt started'), 'activity shows attempt events')
+    assert.ok(activityHtml.includes('Verification started'), 'activity shows verification events')
+    assert.ok(activityHtml.includes('Verification finished'), 'activity shows verification completion')
+    assert.ok(activityHtml.includes('Operator gate opened'), 'activity shows the gate creation')
+
+    // 28e. verification tab shows per-attempt timing + durations
+    sandbox.window.__NX_TEST_ROOM_VIEW__ = 'verification'
+    const verificationHtml = renderToStaticMarkup(react.createElement(ControlRoom, { sessionId: 'session-0001', running: true, onClose() {} }))
+    assert.ok(verificationHtml.includes('Attempt 1'), 'verification tab links the attempt')
+    assert.ok(verificationHtml.includes('1 passed'), 'verification summary renders')
+    assert.ok(verificationHtml.includes('16s'), 'per-check duration renders')
+
+    // 28f. old task: attempt "—", no gate section, no crash
+    const oldSnap28 = await status.buildControllerSnapshot({
+      dataRoot: tmpDir('nexus-ctr-'), sessionId: 'session-0001',
+      settingsPath: path.join(tmpDir('nexus-ctr-'), 'settings.yaml'),
+      statePath: path.join(tmpDir('nexus-ctr-'), 'aih-state.json'),
+      readFile: () => { throw new Error('no files') }, modelNames: {}, gitSummary: null,
+      nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    const oldDetail = await detail.buildDetailSnapshot({
+      dataRoot: tmpDir('nexus-ctr-'), sessionId: 'session-0001',
+      statePath: path.join(tmpDir('nexus-ctr-'), 'aih-state.json'),
+      readFile: () => { throw new Error('no files') }, modelNames: {}, gitSummary: null, gitFiles: null,
+      nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    assert.equal(oldDetail, null, 'unbound session detail stays null (no crash)')
+  }
+  // ── 29. TASK-0004: verification CLI exit-code recovery (regression) ────
+  // Verify-Project.ps1 reports FAILED CHECKS by exiting non-zero while still
+  // emitting the complete structured JSON on stdout. The bridge must treat
+  // that as a VALID failed-verification result, not an infrastructure
+  // failure; genuine failures (launch, timeout/abort, malformed/empty output)
+  // must recover nothing so the attempt closes terminally.
+  {
+    const controller = require('../config/AihController.cjs')
+    const okJson = JSON.stringify({ Workspace: 'C:\\w', Kind: 'all', Passed: 3, Failed: 1, Skipped: 0, Results: [
+      { Name: 'unit tests', Kind: 'test', Status: 'PASS', ExitCode: 0 },
+      { Name: 'architecture:rules', Kind: 'verify', Status: 'FAIL', ExitCode: 1 },
+    ] })
+    // exit 1 + parseable verification JSON → recovered (checks failed, run valid)
+    const recovered = controller.verificationCliStdout({ code: 1, stdout: okJson, stderr: '' })
+    assert.equal(recovered, okJson, 'exit 1 with verification JSON recovers the stdout')
+    // exit 1 + JSON WITHOUT the verification shape → not a verification result
+    assert.equal(controller.verificationCliStdout({ code: 1, stdout: JSON.stringify({ hello: 'world' }), stderr: '' }), null, 'unshaped JSON → not recovered')
+    // malformed JSON output
+    assert.equal(controller.verificationCliStdout({ code: 1, stdout: 'not json at all {{{', stderr: '' }), null, 'malformed JSON → not recovered')
+    // empty stdout (infrastructure failure)
+    assert.equal(controller.verificationCliStdout({ code: 1, stdout: '', stderr: 'boom' }), null, 'empty stdout → not recovered')
+    assert.equal(controller.verificationCliStdout({ code: 1, stderr: 'boom' }), null, 'no stdout field → not recovered')
+    // launch failure (ENOENT)
+    assert.equal(controller.verificationCliStdout({ code: 'ENOENT', stdout: '', stderr: 'spawn failed' }), null, 'launch failure → not recovered')
+    // timeout/abort (killed, no stdout)
+    assert.equal(controller.verificationCliStdout({ code: null, killed: true, signal: 'SIGTERM', stdout: '', stderr: '' }), null, 'timeout/abort → not recovered')
+    // non-error → nothing to recover (exit-0 path is untouched)
+    assert.equal(controller.verificationCliStdout(null), null, 'no error → nothing recovered')
+    // structured exit-3 failure still recovered by the original helper
+    const structured = JSON.stringify({ ok: false, reason: 'budget-exceeded' })
+    assert.equal(controller.structuredCliStdout({ code: 3, stdout: structured }), structured, 'exit-3 structured failure still recovered')
+    // failed verification stays linked to the same attempt + terminal + signature
+    const { snapshot: snapVf } = await detailFixture({
+      attempts: [
+        { taskId: 'TASK-0042', sequence: 1, status: 'started', startedAtUtc: '2026-08-28T17:30:00.000Z' },
+        { taskId: 'TASK-0042', sequence: 1, status: 'verifying', timestampUtc: '2026-08-28T17:31:00.000Z' },
+        { taskId: 'TASK-0042', sequence: 1, status: 'failed', timestampUtc: '2026-08-28T17:31:30.000Z', failureSignature: 'verification-failed', reason: '2 of 3 check(s) failed during verification of attempt 1' },
+      ],
+      evidence: {
+        schemaVersion: 2, attempt: 1,
+        startedAtUtc: '2026-08-28T17:31:00.000Z', finishedAtUtc: '2026-08-28T17:31:30.000Z',
+        acceptanceCriteria: [], scopePass: true,
+        verification: [
+          { name: 'unit tests', kind: 'test', status: 'FAIL', exitCode: 1, command: 'npm run test', startedAtUtc: '2026-08-28T17:31:02.000Z', finishedAtUtc: '2026-08-28T17:31:10.000Z', attempt: 1 },
+          { name: 'architecture:rules', kind: 'verify', status: 'FAIL', exitCode: 1, command: 'aih-rules', startedAtUtc: '2026-08-28T17:31:11.000Z', finishedAtUtc: '2026-08-28T17:31:29.000Z', attempt: 1 },
+        ],
+      },
+    })
+    assert.equal(snapVf.attempts[0].status, 'failed', 'failed verification leaves the attempt failed (terminal)')
+    assert.equal(snapVf.attempts[0].failureSignature, 'verification-failed', 'failure signature recorded')
+    assert.equal(snapVf.verification.attempt, 1, 'evidence links to attempt 1')
+    assert.equal(snapVf.verification.status, 'failed', 'all checks FAIL → failed summary')
+    assert.equal(snapVf.verification.failed, 2, 'FAIL counted')
+    assert.equal(snapVf.verification.durationSeconds, 30, 'verification duration derived from envelope timestamps')
+    assert.equal(snapVf.attempts[0].durationSeconds, 90, 'attempt duration spans started → terminal timestamp')
   }
   console.log('PASS: nexus controller panel state layer')
 }

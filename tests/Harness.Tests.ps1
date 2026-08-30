@@ -74,6 +74,36 @@ try{
  Assert-Aih (-not(Test-AihTaskCompletion $fixture $critical.taskId).complete) 'critical policy requires bounded review'
  Assert-Aih ((Test-AihTaskCompletion $fixture $critical.taskId -CodexReviewPassed).complete) 'passing configured critical review permits completion'
 
+ # ── TASK-0004 attempt lifecycle (producer level) ──────────────────────────
+ $lc=New-AihTask $fixture 'lifecycle task' @('ok')
+ $a1=Start-AihTaskAttempt $fixture $lc.taskId deepseek_normal -SessionId 'session-x' -StartedByTurn '7'
+ Assert-Aih ($a1.sequence-eq1-and$a1.status-eq'started'-and$a1.sessionId-eq'session-x'-and$a1.startedByTurn-eq'7') 'first GUI execution creates attempt 1 with runtime identity'
+ $dupRejected=$false;try{Start-AihTaskAttempt $fixture $lc.taskId deepseek_normal -RequireNoOpenAttempt|Out-Null}catch{$dupRejected=$_.Exception.Message-match'duplicate start'}
+ Assert-Aih $dupRejected 'duplicate start event while attempt open is rejected (attempt stays 1)'
+ $a1reload=Get-AihLatestAttempt $fixture $lc.taskId
+ Assert-Aih ($a1reload.sequence-eq1-and$a1reload.status-eq'started') 'reload/reconnect observes the same open attempt'
+ Add-AihAttemptEvent $fixture $lc.taskId verifying|Out-Null
+ $nowVerifying=Get-AihLatestAttempt $fixture $lc.taskId
+ Assert-Aih ($nowVerifying.status-eq'verifying'-and$nowVerifying.timestampUtc) 'verification start records a producer timestamp'
+ $reverifyRejected=$false;try{Add-AihAttemptEvent $fixture $lc.taskId verifying|Out-Null}catch{$reverifyRejected=$_.Exception.Message-match're-enter verifying'}
+ Assert-Aih $reverifyRejected 'verifying cannot re-enter verifying'
+ Add-AihAttemptEvent $fixture $lc.taskId passed|Out-Null
+ Assert-Aih ((Get-AihLatestAttempt $fixture $lc.taskId).status-eq'passed') 'verification pass closes the attempt as passed'
+ $closedRejected=$false;try{Add-AihAttemptEvent $fixture $lc.taskId interrupted|Out-Null}catch{$closedRejected=$_.Exception.Message-match'already closed'}
+ Assert-Aih $closedRejected 'events against a closed attempt fail closed'
+ $a2=Start-AihTaskAttempt $fixture $lc.taskId deepseek_normal -RequireNoOpenAttempt -SessionId 'session-x' -StartedByTurn '19'
+ Assert-Aih ($a2.sequence-eq2) 'a real retry after the attempt closed creates attempt 2'
+ $lc2=New-AihTask $fixture 'interrupt task' @('ok')
+ Start-AihTaskAttempt $fixture $lc2.taskId|Out-Null
+ Add-AihAttemptEvent $fixture $lc2.taskId interrupted -Reason 'user-abort'|Out-Null
+ Assert-Aih ((Get-AihLatestAttempt $fixture $lc2.taskId).status-eq'interrupted') 'user abort records interrupted'
+ $failNoOpen=$false;try{Add-AihTaskFailure $fixture $lc2.taskId 'late-failure' 'evidence'|Out-Null}catch{$failNoOpen=$_.Exception.Message-match'No open attempt'}
+ Assert-Aih $failNoOpen 'failure without an open attempt fails closed'
+ $lc3=New-AihTask $fixture 'pass-guard task' @('ok')
+ Start-AihTaskAttempt $fixture $lc3.taskId|Out-Null
+ $passNoVerify=$false;try{Add-AihAttemptEvent $fixture $lc3.taskId passed|Out-Null}catch{$passNoVerify=$_.Exception.Message-match'without a verifying'}
+ Assert-Aih $passNoVerify 'passing without a verifying record fails closed'
+
  New-Item -ItemType Directory -Path (Join-Path $fixture 'src')|Out-Null
  [IO.File]::WriteAllText((Join-Path $fixture 'src\widget.ts'),"export interface Widget { id: string }`nexport function findWidget(id: string) { return id }",[Text.UTF8Encoding]::new($false))
  [IO.File]::WriteAllText((Join-Path $fixture 'README.md'),'Widget lookup documentation',[Text.UTF8Encoding]::new($false))
@@ -218,7 +248,83 @@ finally {
     if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture -Recurse -Force }
 }
 
-$sourceFiles=Get-ChildItem -LiteralPath $InstallRoot -Recurse -File|Where-Object{$_.FullName-notmatch'\\(\.git|app|runtime|data|logs)\\'}
+# --- TASK-0004: Verify-Project.ps1 exit-code contract ------------------------
+# Verify-Project.ps1 reports FAILED CHECKS by exiting non-zero while still
+# emitting the complete structured JSON on stdout. The controller bridge
+# consumes that JSON as a VALID failed-verification result (never an
+# infrastructure exception); the exit-code contract is pinned here.
+$verifyFixture = New-Fixture 'verify-exit'
+try {
+    $verifyWorkspace = Join-Path $verifyFixture 'ws'
+    New-Item -ItemType Directory -Force -Path (Join-Path $verifyWorkspace '.ai-harness') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $verifyWorkspace '.ai-harness\verification.yml'), "version: 1`nmode: replace`ncommands:`n  - name: pass-check`n    kind: test`n    workingDirectory: .`n    command: node -v`n    required: true`n    timeoutSeconds: 60`n", [Text.UTF8Encoding]::new($false))
+    $verifyOut = & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts\Verify-Project.ps1') -Workspace $verifyWorkspace -InstallRoot $InstallRoot -TaskId TASK-FIXTURE -Kind all -ContinueOnFailure -Json 2>$null | Out-String
+    $verifyExit = $LASTEXITCODE
+    $verifyJson = $verifyOut | ConvertFrom-Json
+    Assert-Aih ($verifyExit -eq 0) 'Verify-Project.ps1 exits 0 when all checks pass'
+    Assert-Aih ($verifyJson.Passed -ge 1 -and $verifyJson.Failed -eq 0) 'passing workspace reports Passed>=1, Failed=0'
+    Assert-Aih ($null -ne $verifyJson.Results) 'passing JSON carries the Results rows'
+    [IO.File]::WriteAllText((Join-Path $verifyWorkspace '.ai-harness\verification.yml'), "version: 1`nmode: replace`ncommands:`n  - name: fail-check`n    kind: test`n    workingDirectory: .`n    command: cmd /c exit 3`n    required: true`n    timeoutSeconds: 60`n", [Text.UTF8Encoding]::new($false))
+    $verifyOut2 = & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts\Verify-Project.ps1') -Workspace $verifyWorkspace -InstallRoot $InstallRoot -TaskId TASK-FIXTURE -Kind all -ContinueOnFailure -Json 2>$null | Out-String
+    $verifyExit2 = $LASTEXITCODE
+    $verifyJson2 = $verifyOut2 | ConvertFrom-Json
+    Assert-Aih ($verifyExit2 -eq 1) 'Verify-Project.ps1 exits 1 when checks fail'
+    Assert-Aih ($verifyJson2.Failed -ge 1) 'failing workspace reports Failed>=1'
+    Assert-Aih (@($verifyJson2.Results | Where-Object { $_.Status -eq 'FAIL' }).Count -ge 1) 'failing JSON carries the FAIL result rows'
+    Assert-Aih ($verifyJson2.Results | Where-Object { $_.Status -eq 'FAIL' } | Select-Object -First 1).ExitCode -eq 3 'failing row keeps the real exit code'
+}
+finally {
+    if (Test-Path -LiteralPath $verifyFixture) { Remove-Item -LiteralPath $verifyFixture -Recurse -Force }
+}
+# --- SEC001 placeholder policy + scoped data/tmp exclusion --------------------
+# SEC001 recognizes ONLY explicit placeholder forms in DEEPSEEK_API_KEY values
+# ($env:NAME, $var, braced interpolation, <YOUR_KEY>, <REPLACE_...>); the
+# data/tmp exclusion is scoped to SEC001 alone (no loop-level continue), so
+# later rules keep operating on runtime/scratch files. Fixture content is
+# assembled at runtime so the test source itself never contains a
+# secret-shaped literal.
+$secFixture = New-Fixture 'sec001'
+try {
+    $secWs = Join-Path $secFixture 'ws'
+    New-Item -ItemType Directory -Force -Path (Join-Path $secWs 'src') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $secWs 'data') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $secWs 'tmp') | Out-Null
+    $sq = [char]39
+    $secWrite = { param($rel, $content) [IO.File]::WriteAllText((Join-Path $secWs $rel), $content, [Text.UTF8Encoding]::new($false)) }
+    $keyLine = { param($value, $sep) ('{0}{1}{2}{3}{2}' -f 'DEEPSEEK_API_KEY', $sep, $sq, $value) }
+    & $secWrite 'src\real-key.ps1'   ((& $keyLine 'abcdef1234567890abcdef1234567890' '=') + [Environment]::NewLine)
+    & $secWrite 'src\real-sk.ps1'    ((& $keyLine ('sk-' + 'abcdefghijklmnop1234') '=') + [Environment]::NewLine)
+    & $secWrite 'src\sk-token.txt'   (('export TOKEN=' + ('sk-' + '0123456789abcdef0123456789')) + [Environment]::NewLine)
+    & $secWrite 'src\env-ph.ps1'     ((& $keyLine ('$env:AIH_DEEPSEEK_API_KEY') '=') + [Environment]::NewLine)
+    & $secWrite 'src\braced-ph.ps1'  ((& $keyLine ('${DEEPSEEK_API_KEY}') '=') + [Environment]::NewLine)
+    & $secWrite 'src\your-ph.ps1'    ((& $keyLine '<YOUR_KEY>' '=') + [Environment]::NewLine)
+    & $secWrite 'src\replace-ph.ps1' ((& $keyLine '<REPLACE_WITH_YOUR_KEY>' '=') + [Environment]::NewLine)
+    & $secWrite 'src\suspicious.ps1' ((& $keyLine 'not-a-placeholder' '=') + [Environment]::NewLine)
+    & $secWrite 'src\angle-susp.ps1' ((& $keyLine '<secret>' '=') + [Environment]::NewLine)
+    & $secWrite 'data\creds.yaml'    ((& $keyLine ('sk-' + 'abcdefghijklmnop1234') (':' + ' ')) + [Environment]::NewLine)
+    & $secWrite 'tmp\scratch.txt'    ((& $keyLine ('sk-' + 'abcdefghijklmnop1234') (':' + ' ')) + [Environment]::NewLine)
+    $secResult = Invoke-AihArchitectureRules $secWs
+    $secFindings = @($secResult.findings | Where-Object { $_.ruleId -eq 'SEC001' })
+    Assert-Aih ($secResult.status -eq 'FAIL') 'SEC001 fixture workspace reports FAIL'
+    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\real-key.ps1' }).Count -eq 1) 'SEC001 blocks a real DeepSeek key assignment'
+    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\real-sk.ps1' }).Count -eq 1) 'SEC001 blocks sk-* material in a key assignment'
+    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\sk-token.txt' }).Count -eq 1) 'SEC001 blocks standalone sk-* tokens'
+    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\env-ph.ps1' }).Count -eq 0) 'SEC001 allows $env:NAME placeholders'
+    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\braced-ph.ps1' }).Count -eq 0) 'SEC001 allows braced interpolation placeholders'
+    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\your-ph.ps1' }).Count -eq 0) 'SEC001 allows <YOUR_KEY> placeholders'
+    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\replace-ph.ps1' }).Count -eq 0) 'SEC001 allows <REPLACE_...> placeholders'
+    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\suspicious.ps1' }).Count -eq 1) 'SEC001 blocks a suspicious non-placeholder value'
+    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\angle-susp.ps1' }).Count -eq 1) 'SEC001 blocks unrecognized angle-bracket values'
+    Assert-Aih (@($secFindings | Where-Object { $_.file -like 'data\*' -or $_.file -like 'tmp\*' }).Count -eq 0) 'SEC001 data/tmp exclusion still suppresses runtime scratch state'
+    $arSource = [IO.File]::ReadAllText((Join-Path $InstallRoot 'scripts\ArchitectureRules.ps1'))
+    Assert-Aih (-not $arSource.Contains('{continue}')) 'no loop-level continue exempts data/tmp from later rules'
+    Assert-Aih ($arSource.Contains('^(data|tmp)[\\/]')) 'SEC001-scoped runtime/scratch exclusion present'
+    Assert-Aih (($secResult.rules -join ',') -eq 'SEC001,MIG001') 'both architecture rules still reported'
+}
+finally {
+    if (Test-Path -LiteralPath $secFixture) { Remove-Item -LiteralPath $secFixture -Recurse -Force }
+}
+$sourceFiles=Get-ChildItem -LiteralPath $InstallRoot -Recurse -File|Where-Object{$_.FullName-notmatch'\\(\.git|app|runtime|data|logs|nx-chrome-profile)\\' -and $_.Name-notmatch'^(lockfile|LOCK|SingletonLock)$'}
 $secretLeak=$sourceFiles|Select-String -Pattern '(?i)(sk-[A-Za-z0-9_-]{16,}|DEEPSEEK_API_KEY\s*:\s*[^\s''"]+)'|Select-Object -First 1
 Assert-Aih ($null-eq$secretLeak) 'source contains no credential values'
 foreach($script in Get-ChildItem (Join-Path $InstallRoot 'scripts') -Filter '*.ps1'){[void][scriptblock]::Create((Get-Content -Raw $script.FullName))}

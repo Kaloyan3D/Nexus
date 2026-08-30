@@ -22,6 +22,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import status from './status.cjs'
 import detail from './detail.cjs'
+import gate from './gate.cjs'
 
 const name = 'nexus-controller'
 
@@ -164,6 +165,8 @@ function apply(ctx) {
       join(workspace, '.ai-harness', 'runs', taskId, 'evidence.json'),
       join(workspace, '.ai-harness', 'runs', taskId, 'review-packet.json'),
       join(workspace, '.ai-harness', 'runs', taskId, 'review-result.json'),
+      join(dataRoot, 'completion', 'gates.jsonl'),
+      join(dataRoot, 'completion', 'gate-actions.jsonl'),
       statePath,
     ]
     let key = sessionId
@@ -271,6 +274,100 @@ function apply(ctx) {
     res.end(body)
   }
 
+    // ── operator gate action (TASK-0004) ────────────────────────────────
+    // The browser NEVER mutates controller state directly: it sends
+    // identifiers only ({sessionId, gateId, actionId, requestId}) and the
+    // server validates the gate is current, the action is advertised, and
+    // the requestId is not a replay. Duplicate submissions can therefore
+    // never double-transition a gate (requestId idempotency + open-status
+    // guard). Serialized through one in-process promise chain.
+    let gateMutationChain = Promise.resolve()
+    function withGateMutex(task) {
+      const run = gateMutationChain.then(task, task)
+      gateMutationChain = run.catch(() => {})
+      return run
+    }
+
+    function readJsonBody(req) {
+      return new Promise((resolve) => {
+        let text = ''
+        req.on('data', (chunk) => { text += chunk })
+        req.on('end', () => {
+          try { resolve(JSON.parse(text)) } catch { resolve(null) }
+        })
+        req.on('error', () => resolve(null))
+      })
+    }
+
+    function execPowerShell(args) {
+      return new Promise((resolve) => {
+        execFile('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'Task.ps1'), ...args], { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
+          if (error) { resolve(null); return }
+          try { resolve(JSON.parse((stdout || '').trim())) } catch { resolve(null) }
+        })
+      })
+    }
+
+    const gateHandler = async (req, res) => {
+      const respond = (statusCode, body) => {
+        res.writeHead(statusCode, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        res.end(JSON.stringify(body))
+      }
+      if (req.method !== 'POST') {
+        respond(405, { ok: false, error: 'method-not-allowed' })
+        return
+      }
+      const request = await readJsonBody(req)
+      if (!request) {
+        respond(400, { ok: false, error: 'invalid-json-body' })
+        return
+      }
+      const sessionId = String(request.sessionId || '')
+      const gateId = String(request.gateId || '')
+      const actionId = String(request.actionId || '')
+      const requestId = String(request.requestId || '')
+      if (!sessionId || !gateId || !actionId || !requestId) {
+        respond(400, { ok: false, error: 'missing-identifier' })
+        return
+      }
+      const binding = bindingOf(sessionId)
+      try {
+        const outcome = await withGateMutex(() => {
+          const validation = gate.validateGateAction(dataRoot, binding, { sessionId, gateId, actionId, requestId })
+          if (!validation.ok) {
+            if (validation.replay) return { kind: 'replay' }
+            const statusCode = validation.error === 'gate-stale' || validation.error === 'gate-not-waiting' ? 409 : (validation.error === 'action-not-allowed' || validation.error === 'action-not-advertised' ? 422 : 404)
+            return { kind: 'error', statusCode, error: validation.error }
+          }
+          const resolved = gate.resolveGate(dataRoot, binding, validation.gate, actionId, requestId)
+          let completion = null
+          if (actionId === 'approve') {
+            // The ONLY bounded controller transition for approval: attempt
+            // completion with the review passed (fails closed when
+            // verification or criteria are not met).
+            completion = execPowerShell(['-Action', 'complete', '-TaskId', String(binding.taskId), '-CodexReviewPassed'])
+          }
+          return { kind: 'ok', gate: status.normalizeGateRecord(resolved), completion }
+        })
+        if (outcome.kind === 'ok') {
+          respond(200, {
+            ok: true,
+            gate: outcome.gate,
+            completion: outcome.completion,
+          })
+        } else if (outcome.kind === 'replay') {
+          respond(200, { ok: false, error: 'request-replay', replay: true })
+        } else {
+          respond(outcome.statusCode, { ok: false, error: outcome.error })
+        }
+      } catch (error) {
+        respond(500, { ok: false, error: 'gate-action-failed' })
+      }
+    }
+
     webCtx.effect(
       () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/controller.json', handler }),
       'nexus-controller: read-only state route',
@@ -278,6 +375,10 @@ function apply(ctx) {
     webCtx.effect(
       () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/control-room.json', handler: detailHandler }),
       'nexus-controller: read-only control-room route',
+    )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/gate-action.json', handler: gateHandler }),
+      'nexus-controller: operator gate action route',
     )
   })
 }
