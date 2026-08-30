@@ -36,3 +36,11 @@ tmp/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Nexus / AI Harness runtime data
+.ai-harness/runs/
+.ai-harness/state/
+
+# Test-generated harness runtime
+tests/.ai-harness/runs/
+tests/.ai-harness/state/
