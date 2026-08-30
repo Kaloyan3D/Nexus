@@ -28,6 +28,11 @@ const path = require('node:path')
 const crypto = require('node:crypto')
 const { execFile } = require('node:child_process')
 
+// Phase 2.2: the composer's Engineering selector derives the PREFERRED
+// engineer (profile -> primaryEngineer -> registry) from the SAME resolver
+// the Engineering editor state uses — never a second compatibility rule set.
+const engineeringProfiles = require('./engineering.cjs')
+
 /** Display states — the smallest truthful set mapped from real Nexus state. */
 const DISPLAY_STATES = [
   'idle', 'starting', 'working', 'verifying', 'reviewing',
@@ -615,6 +620,93 @@ async function collectGitSummary(workspace, exec = DEFAULT_EXEC) {
 }
 
 /**
+ * Parse the `agent-presets.default` key from settings.yaml — the preset a
+ * NEW task will run under when no session binding exists yet. Fail-closed:
+ * any malformed/missing block yields null.
+ */
+function parseAgentPresetsDefault(settingsText) {
+  if (typeof settingsText !== 'string' || settingsText === '') return null
+  const lines = settingsText.split(/\r?\n/)
+  let inBlock = false
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\s+$/, '')
+    const indent = line.match(/^\s*/)[0].length
+    if (!inBlock) {
+      if (/^\s*agent-presets:\s*$/.test(line)) inBlock = true
+      continue
+    }
+    if (indent === 0 && line !== '') break
+    const match = /^\s+default:\s*(['"]?)([^\s#'"]+)\1\s*$/.exec(line)
+    if (match) return match[2]
+  }
+  return null
+}
+
+/**
+ * The preset the composer's NEXT task would run under: the session binding's
+ * preset while a task is bound, else the settings default, else the Normal
+ * Engineering preset. Display/mode metadata only — never consulted for
+ * routing.
+ */
+function composerPresetOf(binding, settingsText) {
+  if (binding && typeof binding.preset === 'string' && binding.preset !== '') return binding.preset
+  const fallback = parseAgentPresetsDefault(settingsText)
+  return fallback || 'aih-engineering'
+}
+
+/**
+ * Composer mode gate: engineering mode iff the active preset's routing
+ * policy allows profile overrides (profileOverrideAllowed !== false). Every
+ * other condition — missing policy, unknown preset, corrupt policy — fails
+ * safe to the legacy composer behavior (the preset owns the model choice).
+ */
+function composerModeOf(activePreset, policyPath, readFile) {
+  if (!policyPath || typeof activePreset !== 'string' || activePreset === '') return 'legacy'
+  const policy = readJson(policyPath, readFile)
+  if (!policy || typeof policy !== 'object' || !policy.presets || typeof policy.presets !== 'object') return 'legacy'
+  const preset = policy.presets[activePreset]
+  if (!preset || typeof preset !== 'object') return 'legacy'
+  return preset.profileOverrideAllowed === false ? 'legacy' : 'engineering'
+}
+
+/**
+ * Derive the PREFERRED engineer for the composer label: preferred profile ->
+ * primaryEngineer binding -> Model Registry displayName + resolved provider.
+ * Same resolver rules as the Engineering editor state (engineering.cjs); the
+ * target is null when the binding is not satisfiable (fail-closed — the UI
+ * then shows no preferred chip rather than a wrong one).
+ */
+function preferredEngineerOf(settingsText, profilesPath, customProfilesPath, registryPath, readFile) {
+  if (!settingsText) return null
+  const profilesDocument = profilesPath || customProfilesPath
+    ? engineeringProfiles.loadProfilesDocument(profilesPath, customProfilesPath, readFile)
+    : null
+  const preferred = engineeringProfiles.preferredProfileOf(settingsText, profilesDocument, readFile)
+  if (!preferred || !profilesDocument || !Array.isArray(profilesDocument.profiles)) return null
+  let profile = null
+  for (const candidate of profilesDocument.profiles) {
+    if (candidate && String(candidate.id) === preferred.id) { profile = candidate; break }
+  }
+  if (!profile) return null
+  const registry = registryPath ? engineeringProfiles.loadRegistryDocument(registryPath, readFile) : null
+  const target = engineeringProfiles.roleBindingTarget(registry, profile, 'primaryEngineer')
+  if (!target) return null
+  let entry = null
+  for (const candidate of (registry && Array.isArray(registry.models) ? registry.models : [])) {
+    if (candidate && String(candidate.id) === target.modelId) { entry = candidate; break }
+  }
+  return {
+    profileId: preferred.id,
+    profileDisplayName: preferred.displayName,
+    modelId: target.modelId,
+    modelDisplayName: entry ? String(entry.displayName || entry.id || target.modelId) : target.modelId,
+    vendor: entry && entry.vendor ? String(entry.vendor) : null,
+    reasoning: target.reasoning,
+    provider: target.provider,
+  }
+}
+
+/**
  * Assemble the complete normalized snapshot for one session.
  *
  * @param options.dataRoot - the harness data directory (DSH_HOME).
@@ -635,6 +727,8 @@ async function buildControllerSnapshot(options) {
     statePath,
     profilesPath,
     customProfilesPath = null,
+    policyPath = null,
+    registryPath = null,
     readFile = defaultReadFile,
     modelNames = {},
     gitSummary = null,
@@ -657,6 +751,17 @@ async function buildControllerSnapshot(options) {
   const preferredProfile = settingsPath
     ? preferredProfileOf(readJsonSafeText(settingsPath, readFile), profilesPath, readFile, customProfilesPath)
     : null
+  // Phase 2.2: composer integration block — which selector the composer
+  // shows (engineering vs legacy by active preset policy) and the PREFERRED
+  // engineer derived from the preferred profile's primaryEngineer binding.
+  // Both are configuration/preference display; RUNNING is never touched.
+  const settingsText = settingsPath ? readJsonSafeText(settingsPath, readFile) : null
+  const composerPreset = composerPresetOf(binding, settingsText)
+  const composer = {
+    mode: composerModeOf(composerPreset, policyPath, readFile),
+    preset: composerPreset,
+    preferredEngineer: preferredEngineerOf(settingsText, profilesPath, customProfilesPath, registryPath, readFile),
+  }
 
   let task = null
   let routingState = null
@@ -717,6 +822,7 @@ async function buildControllerSnapshot(options) {
     gate,
     preference: normalizePreference(defaultModel, modelNames),
     preferredProfile,
+    composer,
     execution: normalizeExecution(binding, taskRecord, routingState, decision, modelNames),
     review: binding ? {
       codexCalls: taskRecord ? taskRecord.codexCalls : 0,
@@ -748,6 +854,10 @@ module.exports = {
   roleOfExecutionClass,
   parseEngineeringProfile,
   preferredProfileOf,
+  parseAgentPresetsDefault,
+  composerPresetOf,
+  composerModeOf,
+  preferredEngineerOf,
   normalizeWorkspacePath,
   parseDefaultModel,
   normalizePreference,

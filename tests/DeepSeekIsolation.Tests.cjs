@@ -5,6 +5,14 @@ const isolation = require('../config/DeepSeek-Isolation.cjs')
 const engineeringIsolation = require('../config/Engineering-Isolation.cjs')
 
 async function main() {
+  // Hermetic profile pin: with no task binding the engineering isolation
+  // resolves the ACTIVE profile from the live data/settings.yaml — an
+  // operator who switches profiles (Phase 2.1 editor / composer selector)
+  // must not flip this suite. Pin the profile these assertions were written
+  // against via the documented top-priority env override, then restore.
+  const previousProfileEnv = process.env.DSH_AIH_PROFILE
+  process.env.DSH_AIH_PROFILE = 'deepseek-codex'
+  try {
   const handlers = {}
   let contributor
   isolation.apply({
@@ -58,6 +66,10 @@ async function main() {
   assert.equal(handlers['llm/stream'], undefined)
 
   console.log('PASS: DeepSeek isolation runtime guard behavior')
+  } finally {
+    if (previousProfileEnv === undefined) delete process.env.DSH_AIH_PROFILE
+    else process.env.DSH_AIH_PROFILE = previousProfileEnv
+  }
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1 })

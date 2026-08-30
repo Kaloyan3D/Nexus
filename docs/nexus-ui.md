@@ -792,6 +792,35 @@ by `scripts/EngineeringProfile.ps1`, atomic writes). Custom bindings persist to
 `data/custom-engineering-profile.json`; built-in registry files are never
 mutated. See [architecture/engineering-profiles.md](architecture/engineering-profiles.md).
 
+## Phase 2.2: Composer Engineering selector
+
+In Normal Engineering mode the main composer replaces the legacy DSH model
+selector as the operator's effective preference control:
+
+- The **PREFERRED pill** names the preferred profile's `primaryEngineer`
+  binding resolved through the Model Registry (e.g. `GLM-5.3-Flash · HIGH` for
+  GLM + Codex, `GLM-5.3 · HIGH` for a Custom profile) — never the legacy
+  `agent-default-model` selection. RUNNING keeps naming the actually routed
+  executor and is never rewritten by a preference change.
+- An **Engineering trigger** (`Engineering ▾`) opens a compact anchored
+  popover with the SAME editor the Control Room Engineering tab uses (shared
+  `useEngineeringEditor` state: profile dropdown, the five role rows, save).
+  It closes on outside click/Escape, preserves unsaved edits while closed, and
+  refreshes the pill immediately after a successful save — no page refresh.
+  Both surfaces read/write the same endpoints, so they always agree.
+- Mode gate: the active preset (session binding, else the settings
+  `agent-presets.default`) is engineering mode iff its routing policy preset
+  does not set `profileOverrideAllowed: false`. Every other condition —
+  DeepSeek Only, unknown preset, missing/corrupt policy — fails safe to the
+  legacy composer (shipped model selector untouched).
+- The shipped DSH model seat is retired via a body-level mode flag plus a
+  scoped CSS rule keyed to the pinned frontend build's scoped class family;
+  it fails open if that build ever changes its class names.
+- The snapshot's `composer` block (`mode`, `preset`, `preferredEngineer`) is
+  derived by `status.cjs` from the same resolver (`engineering.cjs`) the
+  editor state uses; an unsatisfiable binding omits the PREFERRED chip
+  (fail-closed) instead of showing a wrong one.
+
 ## Known limitations
 
 - The live instance WAS cold-restarted exactly once at the end of
