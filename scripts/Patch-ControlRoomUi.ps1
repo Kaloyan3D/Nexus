@@ -18,8 +18,8 @@ $layout = Get-AihLayout $InstallRoot
 $source = Join-Path $layout.Root 'ui\nexus-mode-selector'
 $manifest = Join-Path $source 'package.json'
 $client = Join-Path $source 'lib\client.js'
-$host = Join-Path $source 'lib\index.js'
-foreach ($required in @($manifest, $client, $host)) {
+$hostPath = Join-Path $source 'lib\index.js'
+foreach ($required in @($manifest, $client, $hostPath)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Nexus mode-selector source is missing: $required"
     }
