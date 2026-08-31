@@ -1,9 +1,14 @@
 [CmdletBinding()]
 param(
-    [string]$InstallRoot = 'C:\AI-Harness',
+    [string]$InstallRoot,
     [string]$Preset,
     [switch]$Offline
 )
+
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    $InstallRoot = Split-Path -Parent $PSScriptRoot
+}
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
 . (Join-Path $PSScriptRoot 'Routing.ps1')
@@ -84,7 +89,6 @@ if (-not $Offline -and $keyPresent) {
     }
     finally { $key = $null; $headers = $null }
 }
-
 
 # --- Nexus UI customization ------------------------------------------------
 $nexusPackage = Join-Path $layout.Data 'profiles\node_modules\@nexus\ui-brand\package.json'
