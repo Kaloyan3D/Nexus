@@ -1,6 +1,6 @@
 {
     "schemaVersion":  1,
-    "nextSequence":  14,
+    "nextSequence":  16,
     "tasks":  [
                   {
                       "schemaVersion":  1,
@@ -413,6 +413,82 @@
                       "completionAuthority":  "controller",
                       "createdAtUtc":  "2026-08-31T18:10:38.8269849Z",
                       "updatedAtUtc":  "2026-08-31T18:10:40.6610426Z",
+                      "completedAtUtc":  null
+                  },
+                  {
+                      "schemaVersion":  1,
+                      "taskId":  "TASK-0014",
+                      "taskInstanceId":  "task_c347942870c94abcb1b96f8b22afc655",
+                      "description":  "Verify only the ARTHUR Phase 2 remediation for findings F1, F2 and F3.\r\nRepository: D:\\A.R.T.H.U.R → arrows — emdash à accented 中文\r\nQuotes: \"double\" and \u0027single\u0027 and backslash: C:\\path\\to\\x\r\nControl: \u001a\u0001\r\nF2 - replay after forget\r\n- remember \u001a forget again",
+                      "status":  "ready",
+                      "dependencies":  [
+
+                                       ],
+                      "baseCommit":  "98f9d8ee1dea73cad89c1726feaf3479e780a1de",
+                      "executionClass":  "reviewer",
+                      "executor":  "reviewer",
+                      "attempt":  0,
+                      "maxAttempts":  3,
+                      "risk":  "normal",
+                      "acceptanceCriteria":  [
+
+                                             ],
+                      "verification":  {
+                                           "required":  [
+
+                                                        ],
+                                           "outcomes":  [
+
+                                                        ]
+                                       },
+                      "reviewRequested":  false,
+                      "executionClassOverride":  "engineer_normal",
+                      "worktree":  null,
+                      "failureSignatures":  [
+
+                                            ],
+                      "codexCalls":  0,
+                      "completionAuthority":  "controller",
+                      "createdAtUtc":  "2026-08-31T19:59:11.8884983Z",
+                      "updatedAtUtc":  "2026-08-31T19:59:13.5688172Z",
+                      "completedAtUtc":  null
+                  },
+                  {
+                      "schemaVersion":  1,
+                      "taskId":  "TASK-0015",
+                      "taskInstanceId":  "task_3b1b8134e9b246499b20014c216f1640",
+                      "description":  "Verify only the ARTHUR Phase 2 remediation for findings F1, F2 and F3.\r\nRepository: D:\\A.R.T.H.U.R → arrows — emdash à accented 中文\r\nQuotes: \"double\" and \u0027single\u0027 and backslash: C:\\path\\to\\x\r\nControl: \u001a\u0001\r\nF2 - replay after forget\r\n- remember \u001a forget again",
+                      "status":  "ready",
+                      "dependencies":  [
+
+                                       ],
+                      "baseCommit":  "98f9d8ee1dea73cad89c1726feaf3479e780a1de",
+                      "executionClass":  "reviewer",
+                      "executor":  "reviewer",
+                      "attempt":  0,
+                      "maxAttempts":  3,
+                      "risk":  "normal",
+                      "acceptanceCriteria":  [
+
+                                             ],
+                      "verification":  {
+                                           "required":  [
+
+                                                        ],
+                                           "outcomes":  [
+
+                                                        ]
+                                       },
+                      "reviewRequested":  false,
+                      "executionClassOverride":  "engineer_normal",
+                      "worktree":  null,
+                      "failureSignatures":  [
+
+                                            ],
+                      "codexCalls":  0,
+                      "completionAuthority":  "controller",
+                      "createdAtUtc":  "2026-08-31T20:21:35.4555637Z",
+                      "updatedAtUtc":  "2026-08-31T20:21:37.2078999Z",
                       "completedAtUtc":  null
                   }
               ]
