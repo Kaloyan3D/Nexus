@@ -19,7 +19,7 @@
 import { readFileSync, statSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import status from './status.cjs'
 import detail from './detail.cjs'
@@ -36,8 +36,10 @@ function apply(ctx) {
   // service is available (immediately, or later when the service appears).
   // Without the service the callback never runs — the plugin stays inert.
   ctx.inject(['webServer'], (webCtx) => {
-    const installRoot = process.env.DSH_HOME ? dirname(process.env.DSH_HOME) : 'C:\\AI-Harness'
-    const dataRoot = process.env.DSH_HOME ? process.env.DSH_HOME : join(installRoot, 'data')
+    const configuredRoot = process.env.AIH_INSTALL_ROOT || (process.env.DSH_HOME ? dirname(resolve(process.env.DSH_HOME)) : '')
+    if (!configuredRoot) throw new Error('Nexus install root is unavailable; launch through the repo-local aih entrypoint.')
+    const installRoot = resolve(configuredRoot)
+    const dataRoot = process.env.DSH_HOME ? resolve(process.env.DSH_HOME) : join(installRoot, 'data')
     const settingsPath = join(dataRoot, 'settings.yaml')
     const statePath = join(dataRoot, 'aih-state.json')
 
@@ -59,10 +61,10 @@ function apply(ctx) {
 
 
   function execGit(command, args, options) {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolvePromise, reject) => {
       execFile(command, args, options, (error, stdout) => {
         if (error) reject(error)
-        else resolve({ stdout })
+        else resolvePromise({ stdout })
       })
     })
   }
@@ -297,21 +299,21 @@ function apply(ctx) {
     }
 
     function readJsonBody(req) {
-      return new Promise((resolve) => {
+      return new Promise((resolvePromise) => {
         let text = ''
         req.on('data', (chunk) => { text += chunk })
         req.on('end', () => {
-          try { resolve(JSON.parse(text)) } catch { resolve(null) }
+          try { resolvePromise(JSON.parse(text)) } catch { resolvePromise(null) }
         })
-        req.on('error', () => resolve(null))
+        req.on('error', () => resolvePromise(null))
       })
     }
 
     function execPowerShell(args) {
-      return new Promise((resolve) => {
+      return new Promise((resolvePromise) => {
         execFile('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'Task.ps1'), ...args], { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
-          if (error) { resolve(null); return }
-          try { resolve(JSON.parse((stdout || '').trim())) } catch { resolve(null) }
+          if (error) { resolvePromise(null); return }
+          try { resolvePromise(JSON.parse((stdout || '').trim())) } catch { resolvePromise(null) }
         })
       })
     }
@@ -320,10 +322,10 @@ function apply(ctx) {
      *  execPowerShell; free-form payloads travel via a UTF-8 payload file,
      *  never argv — identical to the Task.ps1 contract). */
     function execEngineeringProfile(args) {
-      return new Promise((resolve) => {
+      return new Promise((resolvePromise) => {
         execFile('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'EngineeringProfile.ps1'), ...args], { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
-          if (error) { resolve(null); return }
-          try { resolve(JSON.parse((stdout || '').trim())) } catch { resolve(null) }
+          if (error) { resolvePromise(null); return }
+          try { resolvePromise(JSON.parse((stdout || '').trim())) } catch { resolvePromise(null) }
         })
       })
     }
@@ -427,7 +429,7 @@ function apply(ctx) {
       }
     }
 
-        const gateHandler = async (req, res) => {
+    const gateHandler = async (req, res) => {
       const respond = (statusCode, body) => {
         res.writeHead(statusCode, {
           'content-type': 'application/json; charset=utf-8',
@@ -461,7 +463,7 @@ function apply(ctx) {
             const statusCode = validation.error === 'gate-stale' || validation.error === 'gate-not-waiting' ? 409 : (validation.error === 'action-not-allowed' || validation.error === 'action-not-advertised' ? 422 : 404)
             return { kind: 'error', statusCode, error: validation.error }
           }
-          const resolved = gate.resolveGate(dataRoot, binding, validation.gate, actionId, requestId)
+          const resolvedGate = gate.resolveGate(dataRoot, binding, validation.gate, actionId, requestId)
           let completion = null
           if (actionId === 'approve') {
             // The ONLY bounded controller transition for approval: attempt
@@ -469,7 +471,7 @@ function apply(ctx) {
             // verification or criteria are not met).
             completion = execPowerShell(['-Action', 'complete', '-TaskId', String(binding.taskId), '-CodexReviewPassed'])
           }
-          return { kind: 'ok', gate: status.normalizeGateRecord(resolved), completion }
+          return { kind: 'ok', gate: status.normalizeGateRecord(resolvedGate), completion }
         })
         if (outcome.kind === 'ok') {
           respond(200, {
