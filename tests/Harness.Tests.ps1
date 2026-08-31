@@ -122,8 +122,12 @@ try{
  Assert-Aih ((Get-Content -Raw $digest.rawPath).Length-eq$raw.Length) 'raw output remains accessible as an artifact'
 
  # TASK-0007: unlimited context mode (0 = unlimited, explicit semantic).
- $largeContent=('large lookup logic '*300)
+ # TASK-0009: the extra src files are GENUINELY relevant to the query (findWidget
+ # + lookup in path and content), so the unlimited-count assertion exercises
+ # relevance selection, not weak incidental matches; weak matches stay out.
+ $largeContent=('findWidget large lookup logic '*300)
  [IO.File]::WriteAllText((Join-Path $fixture 'src\large.ts'),$largeContent,[Text.UTF8Encoding]::new($false))
+ for($i=1;$i -le 14;$i++){ [IO.File]::WriteAllText((Join-Path $fixture ('src\lookup{0:d2}.ts' -f $i)),('findWidget lookup widget case {0}' -f $i),[Text.UTF8Encoding]::new($false)) }
  for($i=1;$i -le 14;$i++){ [IO.File]::WriteAllText((Join-Path $fixture ('src\gen{0:d2}.ts' -f $i)),(('generated lookup logic {0}' -f $i)+"`n")*3,[Text.UTF8Encoding]::new($false)) }
  $unl=New-AihContextBundle $fixture $task2.taskId 'fix findWidget lookup' @('works') 0 0
  Assert-Aih ($unl.manifest.budget.maxContextTokens-eq0-and$unl.manifest.budget.maxFiles-eq0) 'context bundle records 0 = unlimited explicitly'
@@ -162,6 +166,112 @@ try{
  $learning=Add-AihLearning $fixture $task2.taskId static-rule 'prevent duplicate execution'
  Assert-Aih (-not$learning.approvedForAutomation) 'model learnings cannot automatically change policy'
 }finally{Remove-Item -LiteralPath $fixture -Recurse -Force}
+
+# ── TASK-0009: review context retrieval quality ──────────────────────────────
+# Deterministic regressions for repository-review context: eligibility (runtime/
+# generated/state exclusion with reasons), weighted lexical ranking (idf + tf
+# saturation + path/identifier boosts), evidence classification, relevance floor,
+# unlimited-budget semantics, context-quality guard and manifest provenance.
+$ctxFixture=New-Fixture 'ctxq'
+try{
+ $ctxDirs=@('scripts\intelligence','tests','data\routing','data\fixtures','third-party-generated','blocked-artifacts','artifacts','src','docs\architecture','gen')
+ foreach($d in $ctxDirs){New-Item -ItemType Directory -Force -Path (Join-Path $ctxFixture $d)|Out-Null}
+ $ctxWrite={param($rel,$content)[IO.File]::WriteAllText((Join-Path $ctxFixture $rel),$content,[Text.UTF8Encoding]::new($false))}
+ & $ctxWrite 'scripts\intelligence\Intelligence.CodeStore.ps1' "function New-AihCodeIntelligenceStore {`n    # CodeIntelligenceStore implements the Phase 3.2 deterministic code intelligence snapshot store.`n}"
+ & $ctxWrite 'tests\Intelligence.CodeFoundation.Tests.ps1' "Describe 'CodeIntelligenceStore' {`n    It 'activates Phase 3.2 code intelligence snapshots' { }`n}"
+ & $ctxWrite 'docs\architecture\code-intelligence.md' '# Deterministic Code Intelligence (Phase 3.2)'
+ & $ctxWrite 'config.json' '{"codeIntelligence":{"snapshotStore":"content-addressed-v1"}}'
+ & $ctxWrite 'data\fixtures\expected.json' '{"expected":["CodeIntelligenceStore"]}'
+ & $ctxWrite 'src\CodeIntelligenceStore.ps1' '# CodeIntelligenceStore identifier lives here once for the repetition test.'
+ & $ctxWrite 'third-party-generated\stuff.json' '{"generated":true}'
+ & $ctxWrite 'blocked-artifacts\leak.ps1' 'Write-Output leak'
+ & $ctxWrite '.env' 'SECRET=placeholder'
+ & $ctxWrite 'gen\bundle.min.js' 'function codeIntelligenceStoreMinified(){}'
+ $reviewPrompt='{"prompt": "Review the complete Phase 3.2 Deterministic Code Intelligence implementation as the quality gate before Phase 3.3."}'
+ & $ctxWrite 'data\routing\decisions.jsonl' ((1..300|ForEach-Object{$reviewPrompt}) -join [Environment]::NewLine)
+ & $ctxWrite 'artifacts\review.log' ((1..1000|ForEach-Object{"review entry $_"}) -join [Environment]::NewLine)
+ & $ctxWrite 'data\routing\keep-manual.md' '# manually kept runtime note about review gates'
+ $nexusYaml="context:`n  exclude_globs:`n    - 'third-party-generated/**'`n    - '!data/routing/keep-manual.md'`n    - '!blocked-artifacts/leak.ps1'`nsecurity:`n  blocked_globs:`n    - 'blocked-artifacts/**'`n"
+ [IO.File]::WriteAllText((Join-Path $ctxFixture '.nexus.yml'),$nexusYaml,[Text.UTF8Encoding]::new($false))
+ $ctxTask=New-AihTask $ctxFixture 'review context quality task' @('evidence')
+ $ctxQuery='Review the complete Phase 3.2 Deterministic Code Intelligence implementation as the quality gate before Phase 3.3.'
+
+ # A. eligibility: runtime/state is excluded with a reason; config can shape it
+ $elig=Get-AihContextEligibleFiles $ctxFixture
+ $decElig=@($elig|Where-Object{$_.path -eq 'data/routing/decisions.jsonl'})[0]
+ Assert-Aih ($null-ne$decElig-and-not$decElig.eligible-and"$($decElig.exclusionReason)"-match'nexus-runtime-defaults'-and$decElig.evidenceClass-eq'runtime-state') 'routing runtime state is ineligible review evidence with a recorded reason'
+ $keepElig=@($elig|Where-Object{$_.path -eq 'data/routing/keep-manual.md'})[0]
+ Assert-Aih ($keepElig.eligible-and$keepElig.evidenceClass-eq'runtime-state') 'config negation re-includes a runtime file as deprioritized runtime-state evidence'
+ $fixElig=@($elig|Where-Object{$_.path -eq 'data/fixtures/expected.json'})[0]
+ Assert-Aih ($fixElig.eligible-and$fixElig.evidenceClass-eq'config') 'legitimate data fixtures under data/ stay eligible (data is not globally banned)'
+ $cfgExcl=@($elig|Where-Object{$_.path -eq 'third-party-generated/stuff.json'})[0]
+ Assert-Aih (-not$cfgExcl.eligible-and"$($cfgExcl.exclusionReason)"-match'nexus-context-config') 'context exclusions are repository-configurable via .nexus.yml'
+ $blockedElig=@($elig|Where-Object{$_.path -eq 'blocked-artifacts/leak.ps1'})[0]
+ Assert-Aih (-not$blockedElig.eligible-and"$($blockedElig.exclusionReason)"-match'sensitivity') 'config negation cannot re-include security-blocked files'
+ $envElig=@($elig|Where-Object{$_.path -eq '.env'})[0]
+ Assert-Aih (-not$envElig.eligible-and"$($envElig.exclusionReason)"-match'sensitivity') 'sensitive files never enter review context'
+ Assert-Aih ((@($elig|Where-Object{$_.path -eq 'scripts/intelligence/Intelligence.CodeStore.ps1'})[0]).evidenceClass-eq'source') 'source evidence classification is deterministic'
+ Assert-Aih ((@($elig|Where-Object{$_.path -eq 'tests/Intelligence.CodeFoundation.Tests.ps1'})[0]).evidenceClass-eq'test') 'test evidence classification is deterministic'
+ Assert-Aih ((@($elig|Where-Object{$_.path -eq 'docs/architecture/code-intelligence.md'})[0]).evidenceClass-eq'docs') 'docs evidence classification is deterministic'
+ Assert-Aih ((@($elig|Where-Object{$_.path -eq 'config.json'})[0]).evidenceClass-eq'config') 'config evidence classification is deterministic'
+ Assert-Aih ((@($elig|Where-Object{$_.path -eq 'gen/bundle.min.js'})[0]).evidenceClass-eq'generated') 'generated evidence classification is deterministic'
+
+ # C. the runtime log cannot outrank or displace the real implementation/tests
+ $ranked=@(Search-AihCode $ctxFixture $ctxQuery 0)
+ Assert-Aih (@($ranked|Where-Object{$_.file -match 'data/routing/decisions\.jsonl'}).Count-eq0) 'decisions.jsonl no longer enters review retrieval at all'
+ $firstSource=@($ranked|Where-Object{$_.evidenceClass -eq 'source'}|Select-Object -First 1)
+ Assert-Aih ($null-ne$firstSource-and$firstSource.file-eq'scripts/intelligence/Intelligence.CodeStore.ps1') 'the specific implementation outranks every other candidate for the phase query'
+ Assert-Aih (@($ranked|Where-Object{$_.file -eq 'tests/Intelligence.CodeFoundation.Tests.ps1'}).Count-eq1) 'the matching test file is retrieved as strong test evidence'
+
+ # C2. repeating a generic word 1000x cannot dominate a specific identifier
+ $repSearch=@(Search-AihCode $ctxFixture 'CodeIntelligenceStore review' 0)
+ $repTop=$repSearch|Select-Object -First 1
+ $logHits=@($repSearch|Where-Object{$_.file -eq 'artifacts/review.log'})
+ Assert-Aih ($repTop.file-eq'src/CodeIntelligenceStore.ps1'-and@($logHits).Count-eq1-and$logHits[0].score-lt$repTop.score) '1000x word repetition stays far below a specific identifier match'
+
+ # C3. stopword-only queries must not cause broad repository inclusion
+ Assert-Aih (@(Search-AihCode $ctxFixture 'the and of to is was' 0).Count-eq0) 'stopword-only queries retrieve nothing'
+ $stopBundle=New-AihContextBundle $ctxFixture $ctxTask.taskId 'the and of to is was' @() 0 0
+ Assert-Aih (@($stopBundle.fileSlices).Count-eq0-and@($stopBundle.manifest.selection.meaningfulTerms).Count-eq0) 'stopword-only bundle stays empty with no meaningful terms'
+
+ # C4. filename/path exact matches receive deterministic preference
+ & $ctxWrite 'src\widget.service.ts' 'widget'
+ & $ctxWrite 'docs\notes.md' (('widget content ' * 60))
+ $pathSearch=@(Search-AihCode $ctxFixture 'widget' 0)
+ $svc=@($pathSearch|Where-Object{$_.file -eq 'src/widget.service.ts'})[0]
+ $notes=@($pathSearch|Where-Object{$_.file -eq 'docs/notes.md'})[0]
+ Assert-Aih ($null-ne$svc-and$null-ne$notes-and$svc.score-gt$notes.score) 'exact filename/path matches outrank raw repetition'
+
+ # D/E/G/H. unlimited bundle: relevance stays, budgets do not; manifest provenance
+ $ctxBundle=New-AihContextBundle $ctxFixture $ctxTask.taskId $ctxQuery @() 0 0
+ Assert-Aih ($ctxBundle.manifest.budget.maxContextTokens-eq0-and$ctxBundle.manifest.budget.maxFiles-eq0-and$ctxBundle.manifest.budget.enforceLimits-eq$false) 'unlimited bundle keeps explicit 0=unlimited budget semantics'
+ Assert-Aih (@($ctxBundle.fileSlices|Where-Object{$_.truncated}).Count-eq0) 'unlimited bundle never truncates selected files solely for a budget'
+ $bundlePaths=@($ctxBundle.fileSlices|ForEach-Object{$_.path})
+ Assert-Aih (@($bundlePaths|Where-Object{$_ -match 'decisions\.jsonl'}).Count-eq0) 'bundle never selects routing runtime state as evidence'
+ Assert-Aih (@($bundlePaths|Where-Object{$_ -eq 'scripts/intelligence/Intelligence.CodeStore.ps1'}).Count-eq1) 'bundle includes the real implementation'
+ Assert-Aih (@($bundlePaths|Where-Object{$_ -eq 'tests/Intelligence.CodeFoundation.Tests.ps1'}).Count-eq1) 'bundle includes the real tests'
+ Assert-Aih (@($bundlePaths|Where-Object{$_ -eq 'docs/architecture/code-intelligence.md'}).Count-eq1) 'docs-specific evidence remains retrievable'
+ $implSlice=@($ctxBundle.fileSlices|Where-Object{$_.path -eq 'scripts/intelligence/Intelligence.CodeStore.ps1'})[0]
+ Assert-Aih ($implSlice.score-gt0-and$implSlice.evidenceClass-eq'source'-and@($implSlice.matchedTerms).Count-gt0-and@($implSlice.pathMatches).Count-gt0) 'selected slices carry score/evidenceClass/matchedTerms/pathMatches provenance'
+ $savedCtx=Get-Content -Raw (Join-Path $ctxFixture ".ai-harness\runs\$($ctxTask.taskId)\context-manifest.json")|ConvertFrom-Json
+ Assert-Aih ($savedCtx.schemaVersion-eq2-and$savedCtx.taskId-eq$ctxTask.taskId) 'context manifest v2 persists with task identity'
+ $ev0=@($savedCtx.selection.evidence)[0]
+ Assert-Aih ($null-ne$ev0-and$ev0.path-and$null-ne$ev0.score-and$ev0.evidenceClass-and$null-ne$ev0.matchedTerms-and$null-ne$ev0.eligibility-and$ev0.reason) 'context manifest records per-file selection provenance'
+ Assert-Aih ($savedCtx.selection.excludedByReason.'context-excluded:nexus-runtime-defaults:data/routing/**' -ge 1) 'context manifest records exclusion reasons with counts'
+ Assert-Aih (@($savedCtx.selection.meaningfulTerms) -contains 'intelligence'-and@($savedCtx.selection.stoppedTerms) -contains 'the') 'manifest records meaningful and stopped query terms'
+ Assert-Aih ($savedCtx.contextQuality.status-eq'pass'-and@($savedCtx.contextQuality.meaningfulEvidenceClasses).Count-gt0) 'context quality guard passes with meaningful evidence'
+
+ # F. context-quality guard: no meaningful evidence -> structured failure, not garbage
+ $guardFixture=New-Fixture 'ctxguard'
+ try{
+  New-Item -ItemType Directory -Force -Path (Join-Path $guardFixture 'data\routing')|Out-Null
+  [IO.File]::WriteAllText((Join-Path $guardFixture 'data\routing\decisions.jsonl'),(('{"prompt":"review the routing decision"}')+"`n")*20,[Text.UTF8Encoding]::new($false))
+  $guardTask=New-AihTask $guardFixture 'guard task' @('evidence')
+  $guardBundle=New-AihContextBundle $guardFixture $guardTask.taskId 'review the routing decision' @() 0 0
+  Assert-Aih (@($guardBundle.fileSlices).Count-eq0) 'context-quality failure produces an empty bundle instead of garbage'
+  Assert-Aih ($guardBundle.manifest.contextQuality.status-eq'fail'-and$guardBundle.manifest.contextQuality.broadenRetryUsed-eq$true) 'context-quality guard fails closed after one deterministic broaden retry'
+ }finally{Remove-Item -LiteralPath $guardFixture -Recurse -Force}
+}finally{Remove-Item -LiteralPath $ctxFixture -Recurse -Force}
 
 $conflicts=Test-AihTaskWriteConflict @([pscustomobject]@{taskId='A';writePaths=@('x.ts')},[pscustomobject]@{taskId='B';writePaths=@('x.ts','y.ts')})
 Assert-Aih ($conflicts.hasConflicts-and$conflicts.conflicts[0].paths-eq'x.ts') 'overlapping parallel writes are detected'
