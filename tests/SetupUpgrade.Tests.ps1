@@ -1,8 +1,38 @@
 [CmdletBinding()]
-param([string]$InstallRoot = 'C:\AI-Harness')
+param([string]$InstallRoot = (Split-Path -Parent $PSScriptRoot))
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+$rootSetupPath = Join-Path $InstallRoot 'setup.ps1'
+if (-not (Test-Path -LiteralPath $rootSetupPath)) {
+    throw "Root setup script missing at $rootSetupPath"
+}
+$rootSetupText = Get-Content -Raw -Encoding UTF8 -LiteralPath $rootSetupPath
+if (-not $rootSetupText.Contains('[string]$InstallRoot = $PSScriptRoot')) {
+    throw 'FAIL: root setup.ps1 must default InstallRoot to the checkout root.'
+}
+if ($rootSetupText.Contains("[string]`$InstallRoot = 'C:\AI-Harness'")) {
+    throw 'FAIL: root setup.ps1 regressed to the legacy C:\AI-Harness default.'
+}
+
+$updatePath = Join-Path $InstallRoot 'scripts\Update.ps1'
+$updateText = Get-Content -Raw -Encoding UTF8 -LiteralPath $updatePath
+if ($updateText.Contains("[string]`$InstallRoot = 'C:\AI-Harness'")) {
+    throw 'FAIL: Update.ps1 regressed to the legacy C:\AI-Harness default.'
+}
+
+$launcherRoot = Join-Path $InstallRoot 'bin'
+foreach ($launcher in Get-ChildItem -LiteralPath $launcherRoot -Filter '*.cmd' -File) {
+    $launcherText = Get-Content -Raw -Encoding UTF8 -LiteralPath $launcher.FullName
+    if ($launcherText.Contains('C:\AI-Harness')) {
+        throw "FAIL: launcher $($launcher.Name) contains a hard-coded C:\AI-Harness root."
+    }
+}
+$mainLauncher = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $launcherRoot 'aih.cmd')
+if (-not $mainLauncher.Contains('%~dp0..') -or -not $mainLauncher.Contains('-InstallRoot "%AIH_ROOT%"')) {
+    throw 'FAIL: aih.cmd must resolve and pass the checkout root explicitly.'
+}
 
 $setupPath = Join-Path $InstallRoot 'scripts\Setup.ps1'
 if (-not (Test-Path -LiteralPath $setupPath)) {
@@ -69,6 +99,7 @@ foreach ($contract in @(
     }
 }
 
+Write-Host 'PASS: repo-local setup/update/launchers are portable and checkout-relative'
 Write-Host 'PASS: managed cordis.patch.yml is synced before Nexus UI migration'
 Write-Host 'PASS: required engineering config modules are installed on fresh setup'
 Write-Host 'PASS: Control Room mode lifecycle is Nexus-owned and no longer patches compiled upstream UI'
