@@ -3,7 +3,7 @@ param(
     [string]$Objective,
     [string]$AcceptanceCriteriaPath,
     [string]$Workspace = (Get-Location).Path,
-    [string]$InstallRoot = 'C:\AI-Harness',
+    [string]$InstallRoot,
     [string]$Preset,
     [string]$DiffPath,
     [string]$WorkerReportsPath,
@@ -16,6 +16,11 @@ param(
     ,[switch]$RequireCodexReview
     ,[string]$ReviewResultPath
 )
+
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    $InstallRoot = Split-Path -Parent $PSScriptRoot
+}
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
