@@ -10,6 +10,9 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $passed=0
 function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw "FAIL: $Name"};$script:passed++;Write-Host "PASS: $Name"}
 function New-Fixture([string]$Name){$path=Join-Path ([IO.Path]::GetTempPath()) ("aih-$Name-"+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $path|Out-Null;$path}
+# TASK-0007: a policy clone with the LEGACY hard budgets re-enabled, used to
+# prove the old rejection behavior still works behind enforceLimits=true.
+function Copy-AihPolicyEnforced([object]$Policy){$clone=$Policy|ConvertTo-Json -Depth 20|ConvertFrom-Json;$clone.codex.automaticReview.enforceLimits=$true;return $clone}
 
 $layout=Get-AihLayout $InstallRoot;$policy=Get-AihRoutingPolicy $layout.RoutingPolicy
 
@@ -27,7 +30,7 @@ try{
  Assert-Aih ($completion.codexRequired -eq $false) 'normal task completion does not require Codex'
 }finally{if(Test-Path $normalRoot){Remove-Item -LiteralPath $normalRoot -Recurse -Force}}
 
-# ── 2. EXPLICIT REVIEW: reviewRequested metadata -> codex_review, exactly one bounded call ──
+# ── 2. EXPLICIT REVIEW: reviewRequested metadata -> codex_review, zero engineer calls; budget enforcement disabled by default ──
 $reviewRoot=New-Fixture review
 try{
  $task=New-AihTask $reviewRoot 'audit the isolation boundary' @() @() 'normal' $null -ReviewRequested
@@ -41,30 +44,76 @@ try{
  $call=Register-AihCodexReviewCall $reviewRoot $task.taskId $packet
  Assert-Aih ($call.completionAuthority -eq $false) 'registered review call has no completion authority'
  $after=Get-AihTask $reviewRoot $task.taskId
- Assert-Aih ([int]$after.codexCalls -eq 1) 'explicit review registers exactly one call'
- $blocked=$false;try{Register-AihCodexReviewCall $reviewRoot $task.taskId $packet}catch{$blocked=$true}
- Assert-Aih $blocked 'second Codex call for the same task is blocked (max 1 per task)'
+ Assert-Aih ([int]$after.codexCalls -eq 1) 'explicit review registers the first reviewer call'
+ # TASK-0007: with budget enforcement disabled (shipped default) multiple
+ # /review calls on one task are allowed; the reviewer stays read-only.
+ $second=Register-AihCodexReviewCall $reviewRoot $task.taskId $packet
+ Assert-Aih ($second.executionClass -eq 'reviewer' -and -not $second.completionAuthority) 'second review call is allowed while budget enforcement is disabled'
+ Assert-Aih ($null -eq $second.maxOutputTokens) 'unlimited review call carries no Nexus maxOutputTokens budget'
+ $afterTwo=Get-AihTask $reviewRoot $task.taskId
+ Assert-Aih ([int]$afterTwo.codexCalls -eq 2) 'multiple /review calls on one task register (enforceLimits=false)'
+ # enforceLimits=true keeps the legacy maxCallsPerTask hard limit.
+ $enforcedPolicy=Copy-AihPolicyEnforced $policy
+ $enforcedPacket=New-AihReviewPacket $reviewRoot $task.taskId 'audit the isolation boundary' @() 'diff: ok' @([pscustomobject]@{path='src/a.ts';content='const a=1'}) @() '' $enforcedPolicy
+ Assert-Aih ([bool]$enforcedPacket.budget.enforceLimits) 'enforced packet records enforceLimits=true'
+ $blocked=$false;try{Register-AihCodexReviewCall $reviewRoot $task.taskId $enforcedPacket}catch{$blocked=$_.Exception.Message-match'call limit exceeded'}
+ Assert-Aih $blocked 'enforceLimits=true keeps the hard maxCallsPerTask limit'
  $telemetry=Write-AihTaskTelemetry $reviewRoot $task.taskId @{executionClass='reviewer';model='gpt-5.6-sol';provider='sol-local';modelCalls=1;codexFindings=@();finalResult='pass';configuration='deepseek-codex'}
  Assert-Aih ($telemetry.executionClass -eq 'reviewer') 'review telemetry records executionClass=reviewer'
  Assert-Aih ($telemetry.provider -eq 'sol-local' -and $telemetry.model -eq 'gpt-5.6-sol') 'review telemetry records Codex provider/model'
- Assert-Aih ([int]$telemetry.codexCalls -eq 1) 'review telemetry records call count'
+ Assert-Aih ([int]$telemetry.codexCalls -eq 2) 'review telemetry records the call count'
  Assert-Aih ($telemetry.configuration -eq 'deepseek-codex') 'review telemetry records the engineering profile'
 }finally{if(Test-Path $reviewRoot){Remove-Item -LiteralPath $reviewRoot -Recurse -Force}}
 
-# ── 3. BUDGET REJECTION: oversized review -> Codex NOT called, structured result ──
+# ── 3. BUDGET REJECTION (enforceLimits=true): oversized review -> Codex NOT called, structured result ──
 $budgetRoot=New-Fixture budget
 try{
+ $enforcedPolicy=Copy-AihPolicyEnforced $policy
  $task=New-AihTask $budgetRoot 'oversized review' @() @() 'normal' $null -ReviewRequested
  $hugeFiles=@()
  for($i=0;$i -lt 12;$i++){ $hugeFiles += [pscustomobject]@{path="src/f$i.ts";content=('x'*1000)} }
- $packet=New-AihReviewPacket $budgetRoot $task.taskId 'oversized review' @() 'diff' $hugeFiles @() '' $policy
- Assert-Aih (-not [bool]$packet.enforcement.allowed) 'oversized packet is rejected by budget enforcement'
+ $packet=New-AihReviewPacket $budgetRoot $task.taskId 'oversized review' @() 'diff' $hugeFiles @() '' $enforcedPolicy
+ Assert-Aih (-not [bool]$packet.enforcement.allowed) 'enforceLimits=true rejects the oversized packet'
  Assert-Aih (@($packet.enforcement.violations | Where-Object { $_ -match 'file limit exceeded' }).Count -eq 1) 'packet rejection names the file-limit violation'
  $blocked=$false;try{Register-AihCodexReviewCall $budgetRoot $task.taskId $packet}catch{$blocked=$true}
- Assert-Aih $blocked 'DO NOT CALL CODEX when the packet exceeds the budget'
+ Assert-Aih $blocked 'DO NOT CALL CODEX when the packet exceeds the enforced budget'
  $after=Get-AihTask $budgetRoot $task.taskId
  Assert-Aih ([int]$after.codexCalls -eq 0) 'no Codex call is registered for an oversized review'
 }finally{if(Test-Path $budgetRoot){Remove-Item -LiteralPath $budgetRoot -Recurse -Force}}
+
+# ── 3b. UNLIMITED REVIEW (TASK-0007): shipped default enforceLimits=false never rejects for budgets ──
+# The legacy limit VALUES stay present in the policy; they are simply inert.
+$unlimitedRoot=New-Fixture unlimited
+try{
+ $task=New-AihTask $unlimitedRoot 'large independent review' @() @() 'normal' $null -ReviewRequested
+ Assert-Aih ([int]$policy.codex.automaticReview.maxContextTokens -eq 30000) 'legacy 30000 token value is still present in policy'
+ Assert-Aih (-not [bool]$policy.codex.automaticReview.enforceLimits) 'shipped policy disables review budget enforcement'
+ # 1. 31,270+ estimated tokens with the old 30,000 value present -> allowed.
+ $bigDiff='x'*125120
+ $bigFiles=@([pscustomobject]@{path='src/big.ts';content=('y'*1000)})
+ $bigPacket=New-AihReviewPacket $unlimitedRoot $task.taskId 'review the large change' @() $bigDiff $bigFiles @() '' $policy
+ Assert-Aih ([int]$bigPacket.enforcement.estimatedContextTokens -ge 31270) "measured context exceeds the legacy ceiling ($([int]$bigPacket.enforcement.estimatedContextTokens) est. tokens)"
+ Assert-Aih ([bool]$bigPacket.enforcement.allowed) '31k-token review is allowed while budget enforcement is disabled'
+ Assert-Aih (-not [bool]$bigPacket.budget.enforceLimits) 'unlimited packet records enforceLimits=false'
+ Assert-Aih ($null -eq $bigPacket.budget.maxContextTokens) 'unlimited packet carries null context budget (0/null = unlimited, no magic number)'
+ # 2. More than 8 files -> allowed.
+ $many=@()
+ for($i=0;$i -lt 12;$i++){ $many += [pscustomobject]@{path="src/f$i.ts";content='const a=1'} }
+ $manyPacket=New-AihReviewPacket $unlimitedRoot $task.taskId 'review many files' @() 'diff' $many @() '' $policy
+ Assert-Aih (@($manyPacket.relevantFiles).Count -gt 8) 'packet carries more than 8 files'
+ Assert-Aih ([bool]$manyPacket.enforcement.allowed) '12-file review is allowed while budget enforcement is disabled'
+ # 3. More than 2500 diff lines -> allowed.
+ $longDiff=(1..2600|ForEach-Object{"line $_"})-join"`n"
+ $longPacket=New-AihReviewPacket $unlimitedRoot $task.taskId 'review long diff' @() $longDiff @([pscustomobject]@{path='src/diff.ts';content='const d=1'}) @() '' $policy
+ Assert-Aih ([int]$longPacket.enforcement.diffLines -gt 2500) 'measured diff lines exceed the legacy ceiling'
+ Assert-Aih ([bool]$longPacket.enforcement.allowed) '2600-line diff review is allowed while budget enforcement is disabled'
+ Assert-Aih (@($longPacket.enforcement.violations).Count -eq 0) 'no budget violations are recorded under unlimited mode'
+ # 4. The unlimited review stays read-only / fresh / without completion authority.
+ Assert-Aih ([bool]$longPacket.enforcement.readOnly -and [bool]$longPacket.enforcement.freshContext -and -not [bool]$longPacket.enforcement.completionAuthority) 'unlimited review packet stays read-only fresh and completion-authority-free'
+ $call=Register-AihCodexReviewCall $unlimitedRoot $task.taskId $longPacket
+ Assert-Aih ([bool]$call.readOnly -and -not [bool]$call.completionAuthority) 'unlimited review call registration cannot own completion'
+ Assert-Aih (-not [string]::IsNullOrWhiteSpace([string]$call.taskInstanceId)) 'unlimited review call is taskInstanceId scoped'
+}finally{if(Test-Path $unlimitedRoot){Remove-Item -LiteralPath $unlimitedRoot -Recurse -Force}}
 
 # ── 4. REPEATED FAILURE ESCALATION: same normalized failure -> deep -> codex_review ──
 $escalationRoot=New-Fixture escalation
@@ -123,7 +172,7 @@ try{
  $taskJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Task.ps1') -Action create-task -Workspace $cliRoot -Description 'audit the boundary' -ReviewRequested
  $task=$taskJson|ConvertFrom-Json
  Assert-Aih ($task.reviewRequested -eq $true) 'aih-task create-task -ReviewRequested stores the metadata'
- $decisionJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Route.ps1') -Workspace $cliRoot -TaskId $task.taskId -Description 'audit the boundary' -ReviewRequested
+ $decisionJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Route.ps1') -Workspace $cliRoot -InstallRoot $InstallRoot -TaskId $task.taskId -Description 'audit the boundary' -ReviewRequested
  $decision=$decisionJson|ConvertFrom-Json
  Assert-Aih ($decision.executionClass -eq 'reviewer') 'aih-route -ReviewRequested selects reviewer'
  Assert-Aih ($decision.reviewRequested -eq $true) 'routing decision record carries reviewRequested=true'
@@ -153,7 +202,7 @@ try{
  $task=$taskJson|ConvertFrom-Json
  Assert-Aih ($task.description -eq $hostile) 'hostile description round-trips byte-exact through Task.ps1 payload'
  Assert-Aih ($task.reviewRequested -eq $true) 'payload reviewRequested reaches New-AihTask'
- $decisionJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Route.ps1') -Workspace $payloadRoot -TaskId $task.taskId -PayloadFile $payloadPath
+ $decisionJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Route.ps1') -Workspace $payloadRoot -InstallRoot $InstallRoot -TaskId $task.taskId -PayloadFile $payloadPath
  $decision=$decisionJson|ConvertFrom-Json
  Assert-Aih ($decision.executionClass -eq 'reviewer') 'payload routing selects reviewer for the hostile prompt'
  Assert-Aih ($decision.reviewRequested -eq $true) 'payload routing decision carries reviewRequested=true'
@@ -163,7 +212,7 @@ try{
  Assert-Aih ($srTask.taskId -eq $task.taskId) 'set-review-requested returns the updated task'
  $qPayloadPath=Join-Path $payloadRoot 'qpayload.json'
  @{Workspace=$payloadRoot;Question='Review this function for correctness only: function divide(a,b){ return a/b }'}|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $qPayloadPath -Encoding UTF8
- $packetJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Review.ps1') -Workspace $payloadRoot -TaskId $task.taskId -PayloadFile $qPayloadPath
+ $packetJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Review.ps1') -Workspace $payloadRoot -InstallRoot $InstallRoot -TaskId $task.taskId -PayloadFile $qPayloadPath
  $packetOut=$packetJson|ConvertFrom-Json
  Assert-Aih ($packetOut.question -eq 'Review this function for correctness only: function divide(a,b){ return a/b }') 'Review.ps1 payload question reaches the review packet'
 }finally{if(Test-Path $payloadRoot){Remove-Item -LiteralPath $payloadRoot -Recurse -Force}}

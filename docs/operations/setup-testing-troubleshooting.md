@@ -8,7 +8,7 @@ This guide covers the normal Windows workflow for installing, starting, testing,
 - PowerShell 5.1+
 - Internet access during installation/update
 - DeepSeek API key
-- Optional ChatGPT/Codex authentication for bounded review
+- Optional ChatGPT/Codex authentication for independent review
 - Git available for repositories/worktree operations
 
 ## Install
@@ -25,7 +25,7 @@ Then configure providers:
 
 ```powershell
 aih-key
-aih-auth   # optional; bounded Codex review
+aih-auth   # optional; independent Codex review
 ```
 
 Setup installs/composes pinned runtime dependencies and Nexus UI/controller packages. Local credentials, sessions, generated profiles/packages, runtime data, and portable dependencies are not intended to be committed to Git.

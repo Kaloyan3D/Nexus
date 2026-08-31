@@ -120,7 +120,7 @@ No synthetic completion timestamp should be invented by the UI.
 
 ## Review lifecycle
 
-A task may require bounded review because of policy, repeated evidence-backed failure, a critical boundary, or explicit user intent.
+A task may require independent review because of policy, repeated evidence-backed failure, a critical boundary, or explicit user intent.
 
 Typical path:
 
@@ -129,7 +129,7 @@ DeepSeek work
 -> verification/failure evidence
 -> review requirement
 -> review-packet.json
--> bounded fresh Codex review
+-> fresh independent Codex review
 -> review-result.json
 -> DeepSeek repair / completion policy
 ```

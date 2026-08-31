@@ -1,6 +1,6 @@
 {
     "schemaVersion":  1,
-    "nextSequence":  5,
+    "nextSequence":  11,
     "tasks":  [
                   {
                       "schemaVersion":  1,
@@ -148,6 +148,233 @@
                       "completionAuthority":  "controller",
                       "createdAtUtc":  "2026-08-28T20:32:06.4780268Z",
                       "updatedAtUtc":  "2026-08-28T20:32:07.3738547Z",
+                      "completedAtUtc":  null
+                  },
+                  {
+                      "schemaVersion":  1,
+                      "taskId":  "TASK-0005",
+                      "description":  "Verify only the ARTHUR Phase 2 remediation for findings F1, F2 and F3.\r\nRepository: D:\\A.R.T.H.U.R → arrows — emdash à accented 中文\r\nQuotes: \"double\" and \u0027single\u0027 and backslash: C:\\path\\to\\x\r\nControl: \u001a\u0001\r\nF2 - replay after forget\r\n- remember \u001a forget again",
+                      "status":  "ready",
+                      "dependencies":  [
+
+                                       ],
+                      "baseCommit":  "c81c9c3eb5dc299d5072827566ee9baad7038171",
+                      "executionClass":  "reviewer",
+                      "executor":  "reviewer",
+                      "attempt":  0,
+                      "maxAttempts":  3,
+                      "risk":  "normal",
+                      "acceptanceCriteria":  [
+
+                                             ],
+                      "verification":  {
+                                           "required":  [
+
+                                                        ],
+                                           "outcomes":  [
+
+                                                        ]
+                                       },
+                      "reviewRequested":  false,
+                      "executionClassOverride":  "engineer_normal",
+                      "worktree":  null,
+                      "failureSignatures":  [
+
+                                            ],
+                      "codexCalls":  0,
+                      "completionAuthority":  "controller",
+                      "createdAtUtc":  "2026-08-31T10:39:18.7318396Z",
+                      "updatedAtUtc":  "2026-08-31T10:39:20.5990042Z",
+                      "completedAtUtc":  null
+                  },
+                  {
+                      "schemaVersion":  1,
+                      "taskId":  "TASK-0006",
+                      "taskInstanceId":  "task_d95e34caa28d4b729e9c428abf77bdb5",
+                      "description":  "Verify only the ARTHUR Phase 2 remediation for findings F1, F2 and F3.\r\nRepository: D:\\A.R.T.H.U.R → arrows — emdash à accented 中文\r\nQuotes: \"double\" and \u0027single\u0027 and backslash: C:\\path\\to\\x\r\nControl: \u001a\u0001\r\nF2 - replay after forget\r\n- remember \u001a forget again",
+                      "status":  "ready",
+                      "dependencies":  [
+
+                                       ],
+                      "baseCommit":  "c81c9c3eb5dc299d5072827566ee9baad7038171",
+                      "executionClass":  "reviewer",
+                      "executor":  "reviewer",
+                      "attempt":  0,
+                      "maxAttempts":  3,
+                      "risk":  "normal",
+                      "acceptanceCriteria":  [
+
+                                             ],
+                      "verification":  {
+                                           "required":  [
+
+                                                        ],
+                                           "outcomes":  [
+
+                                                        ]
+                                       },
+                      "reviewRequested":  false,
+                      "executionClassOverride":  "engineer_normal",
+                      "worktree":  null,
+                      "failureSignatures":  [
+
+                                            ],
+                      "codexCalls":  0,
+                      "completionAuthority":  "controller",
+                      "createdAtUtc":  "2026-08-31T14:55:23.6631368Z",
+                      "updatedAtUtc":  "2026-08-31T14:55:25.5166838Z",
+                      "completedAtUtc":  null
+                  },
+                  {
+                      "schemaVersion":  1,
+                      "taskId":  "TASK-0007",
+                      "taskInstanceId":  "task_058683c958604ff5b3999125f4a049f9",
+                      "description":  "Verify only the ARTHUR Phase 2 remediation for findings F1, F2 and F3.\r\nRepository: D:\\A.R.T.H.U.R → arrows — emdash à accented 中文\r\nQuotes: \"double\" and \u0027single\u0027 and backslash: C:\\path\\to\\x\r\nControl: \u001a\u0001\r\nF2 - replay after forget\r\n- remember \u001a forget again",
+                      "status":  "ready",
+                      "dependencies":  [
+
+                                       ],
+                      "baseCommit":  "c81c9c3eb5dc299d5072827566ee9baad7038171",
+                      "executionClass":  "reviewer",
+                      "executor":  "reviewer",
+                      "attempt":  0,
+                      "maxAttempts":  3,
+                      "risk":  "normal",
+                      "acceptanceCriteria":  [
+
+                                             ],
+                      "verification":  {
+                                           "required":  [
+
+                                                        ],
+                                           "outcomes":  [
+
+                                                        ]
+                                       },
+                      "reviewRequested":  false,
+                      "executionClassOverride":  "engineer_normal",
+                      "worktree":  null,
+                      "failureSignatures":  [
+
+                                            ],
+                      "codexCalls":  1,
+                      "completionAuthority":  "controller",
+                      "createdAtUtc":  "2026-08-31T16:10:30.6969828Z",
+                      "updatedAtUtc":  "2026-08-31T16:10:34.4996398Z",
+                      "completedAtUtc":  null
+                  },
+                  {
+                      "schemaVersion":  1,
+                      "taskId":  "TASK-0008",
+                      "taskInstanceId":  "task_de046090b46f4a75b02c1271b86e2fea",
+                      "description":  "Verify only the ARTHUR Phase 2 remediation for findings F1, F2 and F3.\r\nRepository: D:\\A.R.T.H.U.R → arrows — emdash à accented 中文\r\nQuotes: \"double\" and \u0027single\u0027 and backslash: C:\\path\\to\\x\r\nControl: \u001a\u0001\r\nF2 - replay after forget\r\n- remember \u001a forget again",
+                      "status":  "ready",
+                      "dependencies":  [
+
+                                       ],
+                      "baseCommit":  "c81c9c3eb5dc299d5072827566ee9baad7038171",
+                      "executionClass":  "reviewer",
+                      "executor":  "reviewer",
+                      "attempt":  0,
+                      "maxAttempts":  3,
+                      "risk":  "normal",
+                      "acceptanceCriteria":  [
+
+                                             ],
+                      "verification":  {
+                                           "required":  [
+
+                                                        ],
+                                           "outcomes":  [
+
+                                                        ]
+                                       },
+                      "reviewRequested":  false,
+                      "executionClassOverride":  "engineer_normal",
+                      "worktree":  null,
+                      "failureSignatures":  [
+
+                                            ],
+                      "codexCalls":  0,
+                      "completionAuthority":  "controller",
+                      "createdAtUtc":  "2026-08-31T16:11:22.6095431Z",
+                      "updatedAtUtc":  "2026-08-31T16:11:24.4379338Z",
+                      "completedAtUtc":  null
+                  },
+                  {
+                      "schemaVersion":  1,
+                      "taskId":  "TASK-0009",
+                      "taskInstanceId":  "task_a15919a8bc8d430c9a95da7c9774f11a",
+                      "description":  "Verify only the ARTHUR Phase 2 remediation for findings F1, F2 and F3.\r\nRepository: D:\\A.R.T.H.U.R → arrows — emdash à accented 中文\r\nQuotes: \"double\" and \u0027single\u0027 and backslash: C:\\path\\to\\x\r\nControl: \u001a\u0001\r\nF2 - replay after forget\r\n- remember \u001a forget again",
+                      "status":  "ready",
+                      "dependencies":  [
+
+                                       ],
+                      "baseCommit":  "c81c9c3eb5dc299d5072827566ee9baad7038171",
+                      "executionClass":  "reviewer",
+                      "executor":  "reviewer",
+                      "attempt":  0,
+                      "maxAttempts":  3,
+                      "risk":  "normal",
+                      "acceptanceCriteria":  [
+
+                                             ],
+                      "verification":  {
+                                           "required":  [
+
+                                                        ],
+                                           "outcomes":  [
+
+                                                        ]
+                                       },
+                      "reviewRequested":  false,
+                      "executionClassOverride":  "engineer_normal",
+                      "worktree":  null,
+                      "failureSignatures":  [
+
+                                            ],
+                      "codexCalls":  0,
+                      "completionAuthority":  "controller",
+                      "createdAtUtc":  "2026-08-31T16:12:38.5516972Z",
+                      "updatedAtUtc":  "2026-08-31T16:12:40.3955908Z",
+                      "completedAtUtc":  null
+                  },
+                  {
+                      "schemaVersion":  1,
+                      "taskId":  "TASK-0010",
+                      "taskInstanceId":  "task_ab22b9a56d4d4778b00a5f880c967489",
+                      "description":  "Verify only the ARTHUR Phase 2 remediation for findings F1, F2 and F3.\r\nRepository: D:\\A.R.T.H.U.R → arrows — emdash à accented 中文\r\nQuotes: \"double\" and \u0027single\u0027 and backslash: C:\\path\\to\\x\r\nControl: \u001a\u0001\r\nF2 - replay after forget\r\n- remember \u001a forget again",
+                      "status":  "ready",
+                      "dependencies":  [
+
+                                       ],
+                      "baseCommit":  "c81c9c3eb5dc299d5072827566ee9baad7038171",
+                      "executionClass":  "reviewer",
+                      "executor":  "reviewer",
+                      "attempt":  0,
+                      "maxAttempts":  3,
+                      "risk":  "normal",
+                      "acceptanceCriteria":  [
+
+                                             ],
+                      "verification":  {
+                                           "required":  [
+
+                                                        ],
+                                           "outcomes":  [
+
+                                                        ]
+                                       },
+                      "reviewRequested":  false,
+                      "executionClassOverride":  "engineer_normal",
+                      "worktree":  null,
+                      "failureSignatures":  [
+
+                                            ],
+                      "codexCalls":  0,
+                      "completionAuthority":  "controller",
+                      "createdAtUtc":  "2026-08-31T16:16:51.3888870Z",
+                      "updatedAtUtc":  "2026-08-31T16:16:53.2953348Z",
                       "completedAtUtc":  null
                   }
               ]

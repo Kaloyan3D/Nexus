@@ -126,10 +126,17 @@ function normalizeWorkspacePath(workspace) {
   return normalized.toLowerCase()
 }
 
-/** The routing-state file name mirroring Routing.ps1 Get-AihRoutingStatePath. */
-function routingStateFileName(workspace, preset, taskId) {
+/**
+ * The routing-state file name mirroring Routing.ps1 Get-AihRoutingStatePath.
+ * TASK-0005 Part 14: when a taskInstanceId is supplied the file is keyed by
+ * normalized workspace + preset + taskInstanceId — two lifecycle generations
+ * of one display id read DIFFERENT state files. Legacy tasks (no instance)
+ * keep the workspace+taskId compatibility key.
+ */
+function routingStateFileName(workspace, preset, taskId, taskInstanceId) {
   const normalized = path.resolve(String(workspace || '')).toLowerCase()
-  const key = normalized + '\n' + String(preset || 'aih-engineering').toLowerCase() + '\n' + String(taskId || '')
+  const identity = (typeof taskInstanceId === 'string' && taskInstanceId !== '') ? taskInstanceId : String(taskId || '')
+  const key = normalized + '\n' + String(preset || 'aih-engineering').toLowerCase() + '\n' + identity
   const hash = crypto.createHash('sha256').update(key, 'utf8').digest('hex')
   return hash + '.json'
 }
@@ -178,15 +185,24 @@ function jsonLinesOf(text) {
  * escalations exist (edge), the last record is used as a fail-closed
  * best effort.
  */
-function lastDecisionOf(records, taskId, workspace) {
+function lastDecisionOf(records, taskId, workspace, taskInstanceId) {
   if (!Array.isArray(records)) return null
   const normalizedWorkspace = normalizeWorkspacePath(workspace)
   if (normalizedWorkspace === '') return null
+  // TASK-0005 Part 15/20: for a task WITH an immutable taskInstanceId only
+  // records carrying THAT exact instance join; legacy taskId-only records are
+  // NEVER mixed into an instance-aware task's execution state (that fallback
+  // would recreate the cross-generation contamination bug). When no instance
+  // is expected (legacy task), the historical workspace+taskId join applies.
+  const expectedInstance = (typeof taskInstanceId === 'string' && taskInstanceId !== '') ? taskInstanceId : null
   let primary = null
   let fallback = null
   for (const record of records) {
     if (!record || record.taskId !== taskId) continue
     if (normalizeWorkspacePath(record.workspace) !== normalizedWorkspace) continue
+    if (expectedInstance !== null) {
+      if (typeof record.taskInstanceId !== 'string' || record.taskInstanceId !== expectedInstance) continue
+    }
     fallback = record
     const escalatedFrom = record.escalatedFrom
     if (escalatedFrom === undefined || escalatedFrom === null || escalatedFrom === '') {
@@ -207,12 +223,20 @@ function attemptsOf(text) {
   return jsonLinesOf(text)
 }
 
-/** Latest attempt record for exactly this taskId (workspace-scoped by path). */
-function latestAttemptOfTask(records, taskId) {
+/**
+ * Latest attempt record for exactly this task (workspace-scoped by path).
+ * TASK-0005: when a taskInstanceId is expected, only attempt records carrying
+ * THAT instance join — a surviving journal of an older generation that shared
+ * the display id can never be attributed to the new one.
+ */
+function latestAttemptOfTask(records, taskId, taskInstanceId) {
   if (!Array.isArray(records)) return null
+  const expectedInstance = (typeof taskInstanceId === 'string' && taskInstanceId !== '') ? taskInstanceId : null
   let latest = null
   for (const record of records) {
-    if (record && String(record.taskId) === String(taskId)) latest = record
+    if (!record || String(record.taskId) !== String(taskId)) continue
+    if (expectedInstance !== null && record.taskInstanceId !== expectedInstance) continue
+    latest = record
   }
   return latest
 }
@@ -220,7 +244,7 @@ function latestAttemptOfTask(records, taskId) {
 /** Smallest truthful attempt shape for the panel. */
 function normalizeAttemptRecord(record) {
   if (!record || typeof record !== 'object') return null
-  return {
+  const normalized = {
     sequence: Number.isInteger(record.sequence) ? record.sequence : null,
     status: typeof record.status === 'string' ? record.status : null,
     startedAtUtc: typeof record.startedAtUtc === 'string' ? record.startedAtUtc : null,
@@ -228,6 +252,12 @@ function normalizeAttemptRecord(record) {
     sessionId: typeof record.sessionId === 'string' ? record.sessionId : null,
     startedByTurn: typeof record.startedByTurn === 'string' ? record.startedByTurn : null,
   }
+  // TASK-0005: the immutable instance rides along ONLY for instance-aware
+  // records, so legacy records keep their exact historical shape.
+  if (typeof record.taskInstanceId === 'string' && record.taskInstanceId !== '') {
+    normalized.taskInstanceId = record.taskInstanceId
+  }
+  return normalized
 }
 
 /**
@@ -235,16 +265,20 @@ function normalizeAttemptRecord(record) {
  * (append-only journal). The current gate for a binding is the LAST record
  * whose sessionId + normalized workspace + taskId match (never taskId alone).
  */
-function currentGateOf(records, sessionId, workspace, taskId) {
+function currentGateOf(records, sessionId, workspace, taskId, taskInstanceId) {
   if (!Array.isArray(records)) return null
   const normalized = normalizeWorkspacePath(workspace)
   if (normalized === '') return null
+  // TASK-0005: gates are lifecycle-scoped too — an instance-aware binding
+  // never inherits a gate recorded for another generation of the display id.
+  const expectedInstance = (typeof taskInstanceId === 'string' && taskInstanceId !== '') ? taskInstanceId : null
   let current = null
   for (const record of records) {
     if (!record || typeof record !== 'object') continue
     if (String(record.sessionId) !== String(sessionId)) continue
     if (normalizeWorkspacePath(record.workspace) !== normalized) continue
     if (String(record.taskId) !== String(taskId)) continue
+    if (expectedInstance !== null && record.taskInstanceId !== expectedInstance) continue
     current = record
   }
   return current
@@ -253,7 +287,7 @@ function currentGateOf(records, sessionId, workspace, taskId) {
 /** Smallest truthful gate shape for the panel (buttons render ONLY from allowedActions). */
 function normalizeGateRecord(record) {
   if (!record || typeof record !== 'object') return null
-  return {
+  const normalized = {
     gateId: typeof record.gateId === 'string' ? record.gateId : null,
     kind: typeof record.kind === 'string' ? record.kind : null,
     reason: typeof record.reason === 'string' ? record.reason : null,
@@ -267,6 +301,12 @@ function normalizeGateRecord(record) {
     resolvedBy: typeof record.resolvedBy === 'string' ? record.resolvedBy : null,
     actionId: typeof record.actionId === 'string' ? record.actionId : null,
   }
+  // TASK-0005: instance-aware gate records carry the immutable identity;
+  // legacy records keep the exact historical shape.
+  if (typeof record.taskInstanceId === 'string' && record.taskInstanceId !== '') {
+    normalized.taskInstanceId = record.taskInstanceId
+  }
+  return normalized
 }
 
 /**
@@ -297,7 +337,7 @@ function normalizeTaskRecord(task) {
     verificationStatus = failed > 0 ? 'failed' : 'passed'
   }
   const failureSignatures = Array.isArray(task.failureSignatures) ? task.failureSignatures.map(String) : []
-  return {
+  const normalized = {
     taskId: String(task.taskId ?? ''),
     description: typeof task.description === 'string' ? task.description : '',
     status: String(task.status ?? ''),
@@ -322,6 +362,12 @@ function normalizeTaskRecord(task) {
       required: Array.isArray(verification.required) ? verification.required.map(String) : [],
     },
   }
+  // TASK-0005: instance-aware ledger records carry the immutable identity;
+  // legacy records keep the exact historical shape (panel deep-equal parity).
+  if (typeof task.taskInstanceId === 'string' && task.taskInstanceId !== '') {
+    normalized.taskInstanceId = task.taskInstanceId
+  }
+  return normalized
 }
 
 /**
@@ -484,9 +530,60 @@ function normalizePreference(defaultModel, modelNames) {
   }
 }
 
+/**
+ * TASK-0005 Part 24: execution-snapshot identity consistency. Returns a
+ * reason string when the sources used to build ONE execution tuple belong to
+ * DIFFERENT task lifecycle generations (or to no instance while the task has
+ * one), null when the tuple is internally consistent. A contradictory tuple
+ * must never be assembled — the caller fails closed instead.
+ */
+function executionIdentityInconsistency(binding, routingState, decision) {
+  const expected = binding && typeof binding.taskInstanceId === 'string' && binding.taskInstanceId !== ''
+    ? binding.taskInstanceId
+    : null
+  const stateInstance = routingState && typeof routingState.taskInstanceId === 'string' && routingState.taskInstanceId !== ''
+    ? routingState.taskInstanceId
+    : null
+  const decisionInstance = decision && typeof decision.taskInstanceId === 'string' && decision.taskInstanceId !== ''
+    ? decision.taskInstanceId
+    : null
+  // Two modern records that name different instances can never merge.
+  if (stateInstance && decisionInstance && stateInstance !== decisionInstance) return 'routing-state-and-decision-disagree'
+  // An instance-aware task must not inherit generation-blind (legacy
+  // taskId-only) routing sources either.
+  if (expected) {
+    if (routingState && stateInstance !== expected) return 'routing-state-from-other-task-generation'
+    if (decision && decisionInstance !== expected) return 'routing-decision-from-other-task-generation'
+  }
+  return null
+}
+
 /** Build the normalized executor block. */
 function normalizeExecution(binding, task, routingState, decision, modelNames) {
   if (!binding) return null
+  // TASK-0005 Part 24: fail closed instead of assembling an impossible tuple
+  // (class from generation B + model from generation A). The panel renders
+  // the inconsistency explicitly rather than a plausible-looking lie.
+  const inconsistency = executionIdentityInconsistency(binding, routingState, decision)
+  if (inconsistency) {
+    return {
+      identityInconsistent: true,
+      inconsistencyReason: inconsistency,
+      class: null,
+      classDisplay: null,
+      role: null,
+      profile: null,
+      profileDisplayName: null,
+      provider: null,
+      model: null,
+      modelId: null,
+      reasoning: null,
+      reviewRequired: Boolean(binding.reviewRequired),
+      sameFailureCount: 0,
+      escalatedFrom: null,
+      routedAtUtc: null,
+    }
+  }
   const provider = decision && decision.provider ? String(decision.provider) : null
   const modelId = decision && decision.model ? String(decision.model) : null
   const reasoning = decision && decision.reasoning ? String(decision.reasoning) : null
@@ -774,18 +871,31 @@ async function buildControllerSnapshot(options) {
     const workspace = typeof binding.workspace === 'string' ? binding.workspace : null
     const taskId = typeof binding.taskId === 'string' ? binding.taskId : null
     const preset = typeof binding.preset === 'string' ? binding.preset : 'aih-engineering'
+    // TASK-0005: the bound task's immutable lifecycle instance (null for
+    // legacy bindings). Every join below prefers it.
+    const taskInstanceId = typeof binding.taskInstanceId === 'string' && binding.taskInstanceId !== ''
+      ? binding.taskInstanceId
+      : null
     if (taskId) {
       const ledger = readJson(path.join(workspace || '', '.ai-harness', 'state', 'tasks.json'), readFile)
       if (ledger && Array.isArray(ledger.tasks)) {
         for (const candidate of ledger.tasks) {
-          if (candidate && candidate.taskId === taskId) { task = candidate; break }
+          if (!candidate || candidate.taskId !== taskId) continue
+          if (taskInstanceId !== null) {
+            // Instance-aware binding: the ledger record must be the SAME
+            // lifecycle generation; a re-allocated display id of an older
+            // generation is never merged into this snapshot.
+            if (candidate.taskInstanceId !== taskInstanceId) continue
+          }
+          task = candidate
+          break
         }
       }
       if (workspace) {
-        const stateFileName = routingStateFileName(workspace, preset, taskId)
+        const stateFileName = routingStateFileName(workspace, preset, taskId, taskInstanceId)
         routingState = readJson(path.join(dataRoot, 'routing', 'states', stateFileName), readFile)
         const decisionsText = readJsonSafeText(path.join(dataRoot, 'routing', 'decisions.jsonl'), readFile)
-        decision = lastDecisionOf(jsonLinesOf(decisionsText), taskId, workspace)
+        decision = lastDecisionOf(jsonLinesOf(decisionsText), taskId, workspace, taskInstanceId)
       }
       if (gitSummary && workspace) {
         try { git = await gitSummary(workspace) } catch { git = null }
@@ -794,10 +904,10 @@ async function buildControllerSnapshot(options) {
       // both degrade to null for old tasks (render as "—"), never to guesses.
       if (workspace) {
         const attemptsText = readJsonSafeText(path.join(workspace, '.ai-harness', 'runs', taskId, 'attempts.jsonl'), readFile)
-        attempt = normalizeAttemptRecord(latestAttemptOfTask(attemptsOf(attemptsText), taskId))
+        attempt = normalizeAttemptRecord(latestAttemptOfTask(attemptsOf(attemptsText), taskId, taskInstanceId))
       }
       const gatesText = readJsonSafeText(path.join(dataRoot, 'completion', 'gates.jsonl'), readFile)
-      gate = normalizeGateRecord(currentGateOf(jsonLinesOf(gatesText), String(sessionId || ''), workspace || '', taskId))
+      gate = normalizeGateRecord(currentGateOf(jsonLinesOf(gatesText), String(sessionId || ''), workspace || '', taskId, taskInstanceId))
     }
   }
 
@@ -810,6 +920,7 @@ async function buildControllerSnapshot(options) {
     state: deriveFileState(binding, taskRecord),
     binding: binding ? {
       sessionId: String(binding.sessionId ?? sessionId),
+      taskInstanceId: typeof binding.taskInstanceId === 'string' && binding.taskInstanceId !== '' ? binding.taskInstanceId : null,
       taskId: String(binding.taskId ?? ''),
       workspace: typeof binding.workspace === 'string' ? binding.workspace : null,
       preset: typeof binding.preset === 'string' ? binding.preset : null,

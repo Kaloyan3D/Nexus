@@ -62,16 +62,23 @@ function readJsonLines(filePath) {
   }
 }
 
-/** The current gate for a session binding, or null. */
-function currentGateFor(dataRoot, sessionId, workspace, taskId) {
+/**
+ * The current gate for a session binding, or null.
+ * TASK-0005: when a taskInstanceId is expected, only gate records carrying
+ * THAT lifecycle instance join — a gate belonging to another generation of
+ * the same display id is never resolved or superseded by mistake.
+ */
+function currentGateFor(dataRoot, sessionId, workspace, taskId, taskInstanceId) {
   const records = readJsonLines(gatesPathOf(dataRoot))
   const normalized = normalizeWorkspacePath(workspace)
+  const expectedInstance = (typeof taskInstanceId === 'string' && taskInstanceId !== '') ? taskInstanceId : null
   let current = null
   for (const record of records) {
     if (!record || typeof record !== 'object') continue
     if (record.sessionId !== sessionId) continue
     if (normalizeWorkspacePath(record.workspace) !== normalized) continue
     if (String(record.taskId) !== String(taskId)) continue
+    if (expectedInstance !== null && record.taskInstanceId !== expectedInstance) continue
     current = record
   }
   return current
@@ -93,8 +100,11 @@ function ensureGate(dataRoot, binding, reason, extra) {
   const sessionId = binding.sessionId
   const workspace = binding.workspace
   const taskId = binding.taskId
+  const taskInstanceId = typeof binding.taskInstanceId === 'string' && binding.taskInstanceId !== ''
+    ? binding.taskInstanceId
+    : null
   if (!sessionId || !workspace || !taskId) return null
-  const current = currentGateFor(dataRoot, sessionId, workspace, taskId)
+  const current = currentGateFor(dataRoot, sessionId, workspace, taskId, taskInstanceId)
   if (current && GATE_OPEN_STATUSES.has(String(current.status))) return current
   const gateId = 'gate-' + crypto.randomUUID()
   const revision = (current && Number.isInteger(current.revision) ? current.revision : 0) + 1
@@ -109,6 +119,7 @@ function ensureGate(dataRoot, binding, reason, extra) {
     sessionId,
     workspace,
     taskId,
+    taskInstanceId,
     attempt: extra && Number.isInteger(extra.attempt) ? extra.attempt : null,
     reviewVerdict: extra && typeof extra.reviewVerdict === 'string' ? extra.reviewVerdict : null,
     revision,
@@ -122,7 +133,10 @@ function ensureGate(dataRoot, binding, reason, extra) {
  * Appends a resolved record; the previous revision remains in the journal.
  */
 function supersedeGate(dataRoot, binding, reason) {
-  const current = currentGateFor(dataRoot, binding.sessionId, binding.workspace, binding.taskId)
+  const taskInstanceId = typeof binding.taskInstanceId === 'string' && binding.taskInstanceId !== ''
+    ? binding.taskInstanceId
+    : null
+  const current = currentGateFor(dataRoot, binding.sessionId, binding.workspace, binding.taskId, taskInstanceId)
   if (!current || !GATE_OPEN_STATUSES.has(String(current.status))) return null
   const record = {
     schemaVersion: 1,
@@ -138,6 +152,7 @@ function supersedeGate(dataRoot, binding, reason) {
     sessionId: current.sessionId,
     workspace: current.workspace,
     taskId: current.taskId,
+    taskInstanceId: typeof current.taskInstanceId === 'string' ? current.taskInstanceId : null,
     attempt: current.attempt,
     revision: (Number.isInteger(current.revision) ? current.revision : 0) + 1,
   }
@@ -158,7 +173,8 @@ function validateGateAction(dataRoot, binding, request) {
   if (!binding || !binding.workspace || !binding.taskId) return { ok: false, error: 'session-unbound' }
   if (String(binding.sessionId) !== sessionId) return { ok: false, error: 'session-mismatch' }
   if (!GATE_ALLOWED_ACTIONS.has(actionId)) return { ok: false, error: 'action-not-allowed' }
-  const gate = currentGateFor(dataRoot, sessionId, binding.workspace, binding.taskId)
+  const gate = currentGateFor(dataRoot, sessionId, binding.workspace, binding.taskId,
+    typeof binding.taskInstanceId === 'string' && binding.taskInstanceId !== '' ? binding.taskInstanceId : null)
   if (!gate || String(gate.gateId) !== gateId) return { ok: false, error: 'gate-stale' }
   if (!GATE_OPEN_STATUSES.has(String(gate.status))) return { ok: false, error: 'gate-not-waiting' }
   if (!Array.isArray(gate.allowedActions) || !gate.allowedActions.includes(actionId)) {

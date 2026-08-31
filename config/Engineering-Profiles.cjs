@@ -309,13 +309,24 @@ function resolveTarget(installRoot, profileId, role) {
   }
 }
 
-/** Mirrors Routing.ps1 Get-AihRoutingStatePath for one binding. */
+/**
+ * Mirrors Routing.ps1 Get-AihRoutingStatePath for one binding.
+ * TASK-0005 Part 17: for a binding that carries an immutable taskInstanceId
+ * the state file is keyed by normalized workspace + preset + taskInstanceId
+ * (the SAME composition the PowerShell plane uses), so stale routing state
+ * from an older lifecycle generation of the same display id can never select
+ * the root executor. Legacy bindings (no instance) keep the explicit
+ * workspace+taskId compatibility key.
+ */
 function routingStatePath(installRoot, binding) {
   try {
     const workspace = path.resolve(String((binding && binding.workspace) || '')).toLowerCase()
     const preset = String((binding && binding.preset) || 'aih-engineering').toLowerCase()
-    const taskId = String((binding && binding.taskId) || '')
-    const key = workspace + '\n' + preset + '\n' + taskId
+    const instance = binding && typeof binding.taskInstanceId === 'string' && binding.taskInstanceId !== ''
+      ? binding.taskInstanceId
+      : null
+    const identity = instance || String((binding && binding.taskId) || '')
+    const key = workspace + '\n' + preset + '\n' + identity
     const hash = crypto.createHash('sha256').update(key, 'utf8').digest('hex')
     return path.join(installRoot, 'data', 'routing', 'states', hash + '.json')
   } catch {

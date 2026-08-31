@@ -223,3 +223,18 @@ mutex per store (Use-AihIntelligenceLock), matching Nexus conventions
 No embeddings, no RAG, no AST parsing, no dependency graph, and no AI
 memory are implemented here — deliberately. The event bus and snapshot
 engine are the seams Phase 3.2 will consume.
+
+## Ignore semantics divergence from Git (locked)
+
+Nexus deliberately does **not** replicate Git's ignore quirks. The engine
+(`Intelligence.Scanning.ps1`) uses uniform layered last-match-wins semantics:
+
+- Deeper-scope negations (`!src/**`, nested `.gitignore`) re-include paths under
+  a shallower-excluded directory via inherited exclusion rules; un-negated
+  siblings stay excluded.
+- Real Git (probed with 2.50) is internally inconsistent for `**` + `!src/**`
+  and for `foo/` + `!foo/bar.txt`; Nexus's behavior is deterministic and tested
+  (`tests/Intelligence.IgnoreRegression.Tests.ps1`), even where it differs from Git.
+- Precedence: default rules (0+) < `.gitignore` (1000+) < `.nexus.yml`
+  `index.exclude` (200000+) < `.nexusignore` (300000+). The canonical config key
+  is `index.exclude`; a top-level `exclude:` list remains accepted for compatibility.

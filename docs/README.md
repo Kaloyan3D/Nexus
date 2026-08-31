@@ -8,13 +8,14 @@ The short version is in the repository [README](../README.md). The documents her
 
 1. **[Architecture overview](architecture/overview.md)** — the system at a glance and the major authority boundaries.
 2. **[Controller and authority](architecture/controller.md)** — what the deterministic controller owns and what models are allowed to do.
-3. **[Routing and execution classes](architecture/routing.md)** — how Nexus chooses DeepSeek, deeper reasoning, deterministic work, or bounded Codex review.
+3. **[Routing and execution classes](architecture/routing.md)** — how Nexus chooses DeepSeek, deeper reasoning, deterministic work, or independent Codex review.
 4. **[Task lifecycle](architecture/task-lifecycle.md)** — tasks, attempts, verification, failure, review, gates, completion, and crash reconciliation.
 5. **[Control Room](architecture/control-room.md)** — compact Controller, full room tabs, polling, adapter truthfulness, and operator actions.
 
 ## Reference
 
 - **[Repository foundation](architecture/repository-foundation.md)** — Phase 3.1: repository identity and registry, Git state, file inventory, module discovery, snapshot engine, services, and events.
+- **[Deterministic code intelligence](architecture/code-intelligence.md)** — Phase 3.2: language detection, structural providers, content-addressed intelligence store, snapshot indexing and reuse, definitions/references, events, and ID semantics.
 
 - **[State and storage](reference/state-and-storage.md)** — project state, run artifacts, runtime journals, identity, append-only histories, and compatibility.
 - **[HTTP endpoints](reference/endpoints.md)** — `/nexus/controller.json`, `/nexus/control-room.json`, and `/nexus/gate-action.json`.

@@ -65,6 +65,7 @@ function Find-AihReferences {
 }
 
 function Search-AihCode {
+    # TASK-0007: $MaxResults 0 = unlimited (explicit semantic, no magic number).
     param([string]$Workspace,[Parameter(Mandatory=$true)][string]$Query,[int]$MaxResults=20)
     $terms=@($Query.ToLowerInvariant() -split '\W+' | Where-Object Length -gt 1 | Select-Object -Unique)
     $workspacePath=[IO.Path]::GetFullPath($Workspace)
@@ -82,18 +83,29 @@ function Search-AihCode {
             $ranked.Add([pscustomobject]@{file=$file.Replace('\','/');score=$score;snippet=$snippet})
         }
     }
-    @($ranked | Sort-Object @{Expression='score';Descending=$true}, @{Expression='file';Descending=$false} | Select-Object -First $MaxResults)
+    $ordered=@($ranked | Sort-Object @{Expression='score';Descending=$true}, @{Expression='file';Descending=$false})
+    if($MaxResults -gt 0){$ordered=@($ordered|Select-Object -First $MaxResults)}
+    $ordered
 }
 
 function New-AihContextBundle {
+    # TASK-0007: 0 = unlimited (explicit semantic; never a huge magic number).
+    # Unlimited mode removes the token/file cutoffs but keeps RELEVANCE:
+    # retrieval still ranks and selects the files that match the task, slices
+    # are included whole, and the bundle never claims full-repository content
+    # ingestion unless that was explicitly requested.
     param([string]$Workspace,[string]$TaskId,[string]$Task,[string[]]$AcceptanceCriteria=@(),[int]$MaxContextTokens=12000,[int]$MaxFiles=12)
-    if($MaxContextTokens -lt 500){throw 'Context budget must be at least 500 tokens.'}
+    if($MaxContextTokens -lt 0 -or $MaxFiles -lt 0){throw 'Context budget values must be non-negative (0 = unlimited).'}
+    if($MaxContextTokens -ne 0 -and $MaxContextTokens -lt 500){throw 'Context budget must be at least 500 tokens (or 0 for unlimited).'}
+    $unlimitedTokens=$MaxContextTokens -eq 0
+    $unlimitedFiles=$MaxFiles -eq 0
     $layout=Initialize-AihTaskLedger $Workspace
     $repoMap=New-AihRepositoryMap $Workspace
-    $ranked=@(Search-AihCode $Workspace ($Task+' '+($AcceptanceCriteria -join ' ')) ($MaxFiles*2))
-    $budgetChars=$MaxContextTokens*4; $used=0; $slices=[Collections.Generic.List[object]]::new()
+    $rankLimit=if($unlimitedFiles){0}else{$MaxFiles*2}
+    $ranked=@(Search-AihCode $Workspace ($Task+' '+($AcceptanceCriteria -join ' ')) $rankLimit)
+    $budgetChars=if($unlimitedTokens){[int]::MaxValue}else{$MaxContextTokens*4}; $used=0; $slices=[Collections.Generic.List[object]]::new()
     foreach($match in $ranked){
-        if($slices.Count -ge $MaxFiles){break}
+        if(-not $unlimitedFiles -and $slices.Count -ge $MaxFiles){break}
         $path=Join-Path $layout.Workspace $match.file
         $content=[string](Get-Content -Raw -LiteralPath $path)
         $remaining=$budgetChars-$used
@@ -110,7 +122,7 @@ function New-AihContextBundle {
     $git=[ordered]@{baseCommit=$null;changedFiles=@();diffStat=''}
     try{$git.baseCommit=(& git -C $layout.Workspace rev-parse HEAD 2>$null|Select-Object -First 1).Trim();$git.changedFiles=@(& git -C $layout.Workspace status --short 2>$null);$git.diffStat=(& git -C $layout.Workspace diff --stat 2>$null|Out-String).Trim()}catch{}
     $symbolCount=0;foreach($entry in @($repoMap.files)){$symbolCount+=@($entry.symbols).Count}
-    $manifest=[ordered]@{schemaVersion=1;taskId=$TaskId;budget=[ordered]@{maxContextTokens=$MaxContextTokens;estimatedTokens=[Math]::Ceiling($used/4);maxFiles=$MaxFiles};repositoryMap=[ordered]@{fileCount=@($repoMap.files).Count;symbolCount=$symbolCount;fullRepositoryIncluded=$false};files=@($slices|ForEach-Object{$_.path});documents=@($docs|ForEach-Object{$_.path});git=$git;generatedAtUtc=[DateTime]::UtcNow.ToString('o')}
+    $manifest=[ordered]@{schemaVersion=1;taskId=$TaskId;budget=[ordered]@{maxContextTokens=$MaxContextTokens;estimatedTokens=[Math]::Ceiling($used/4);maxFiles=$MaxFiles;enforceLimits=(-not $unlimitedTokens -and -not $unlimitedFiles)};repositoryMap=[ordered]@{fileCount=@($repoMap.files).Count;symbolCount=$symbolCount;fullRepositoryIncluded=$false};files=@($slices|ForEach-Object{$_.path});documents=@($docs|ForEach-Object{$_.path});git=$git;generatedAtUtc=[DateTime]::UtcNow.ToString('o')}
     if(-not [string]::IsNullOrWhiteSpace($TaskId)){Write-AihAtomicJson (Join-Path (Join-Path $layout.Runs $TaskId) 'context-manifest.json') $manifest}
     [pscustomobject]@{task=$Task;acceptanceCriteria=@($AcceptanceCriteria);repositoryMap=$repoMap;fileSlices=@($slices);documents=@($docs);git=$git;manifest=[pscustomobject]$manifest}
 }

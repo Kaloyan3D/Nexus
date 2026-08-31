@@ -351,15 +351,22 @@ async function buildDetailSnapshot({
   const workspace = String(binding.workspace)
   const taskId = String(binding.taskId || '')
   const preset = String(binding.preset || 'aih-engineering')
+  // TASK-0005: the bound task's immutable lifecycle identity (null for legacy
+  // bindings). Every join below prefers it so two generations that share the
+  // display id can never merge into one view.
+  const taskInstanceId = typeof binding.taskInstanceId === 'string' && binding.taskInstanceId !== ''
+    ? binding.taskInstanceId
+    : null
 
   const stateDir = path.join(dataRoot, 'routing', 'states')
-  const routingState = status.readJson(path.join(stateDir, status.routingStateFileName(workspace, preset, taskId)), readFile)
+  const routingState = status.readJson(path.join(stateDir, status.routingStateFileName(workspace, preset, taskId, taskInstanceId)), readFile)
 
   let task = null
   let rawTask = null
   const ledger = status.readJson(path.join(workspace, '.ai-harness', 'state', 'tasks.json'), readFile)
   if (ledger && Array.isArray(ledger.tasks)) {
-    rawTask = ledger.tasks.find((t) => t && t.taskId === taskId) || null
+    rawTask = ledger.tasks.find((t) => t && t.taskId === taskId
+      && (taskInstanceId === null || t.taskInstanceId === taskInstanceId)) || null
     if (rawTask) task = status.normalizeTaskRecord(rawTask)
   }
 
@@ -368,9 +375,17 @@ async function buildDetailSnapshot({
   // workspaces, so a decision joins this session ONLY when BOTH the
   // normalized workspace AND the taskId match the authoritative binding.
   // Records without a workspace never match (fail-closed).
+  // TASK-0005 (Part 15): for an instance-aware task the join ALSO requires
+  // the exact taskInstanceId — legacy taskId-only records of another
+  // lifecycle generation are never mixed into this view.
   const workspaceKey = status.normalizeWorkspacePath(workspace)
-  const routed = decisions.filter((record) => record && record.taskId === taskId && status.normalizeWorkspacePath(record.workspace) === workspaceKey)
-  const primary = status.lastDecisionOf(decisions, taskId, workspace)
+  const routed = decisions.filter((record) => {
+    if (!record || record.taskId !== taskId) return false
+    if (status.normalizeWorkspacePath(record.workspace) !== workspaceKey) return false
+    if (taskInstanceId !== null && record.taskInstanceId !== taskInstanceId) return false
+    return true
+  })
+  const primary = status.lastDecisionOf(decisions, taskId, workspace, taskInstanceId)
   const execution = status.normalizeExecution(binding, task, routingState, primary, modelNames)
 
   // routing history: every real decision for the task, oldest first
@@ -399,8 +414,12 @@ async function buildDetailSnapshot({
     }))
 
   // task lifecycle events (workspace ledger), oldest first
+  // TASK-0005: lifecycle events of an instance-aware task join by their
+  // taskInstanceId; legacy events (no instance) stay visible only for
+  // legacy tasks.
   const lifecycle = status.jsonLinesOf(safeReadText(path.join(workspace, '.ai-harness', 'state', 'decisions.jsonl'), readFile))
-    .filter((record) => record && record.taskId === taskId)
+    .filter((record) => record && record.taskId === taskId
+      && (taskInstanceId === null || record.taskInstanceId === taskInstanceId))
     .sort((a, b) => String(a.timestampUtc || '').localeCompare(String(b.timestampUtc || '')))
     .map((record) => ({
       timestampUtc: record.timestampUtc ? String(record.timestampUtc) : null,
@@ -411,10 +430,12 @@ async function buildDetailSnapshot({
     }))
 
   const runsDir = path.join(workspace, '.ai-harness', 'runs', taskId)
-  const attempts = groupAttempts(
-    status.jsonLinesOf(safeReadText(path.join(runsDir, 'attempts.jsonl'), readFile)),
-    task,
-  )
+  // TASK-0005: the attempts journal may contain records of an older task
+  // generation that reused the display id; only records carrying the bound
+  // lifecycle instance belong to this view.
+  const attemptRecords = status.jsonLinesOf(safeReadText(path.join(runsDir, 'attempts.jsonl'), readFile))
+    .filter((record) => taskInstanceId === null || (record && record.taskInstanceId === taskInstanceId))
+  const attempts = groupAttempts(attemptRecords, task)
 
   const evidence = status.readJson(path.join(runsDir, 'evidence.json'), readFile)
   // Ledger fallback reads the RAW record: normalizeTaskRecord rebuilds
@@ -437,7 +458,12 @@ async function buildDetailSnapshot({
       : null,
   }
 
-  const reviewResult = status.readJson(path.join(runsDir, 'review-result.json'), readFile)
+  const reviewResultRaw = status.readJson(path.join(runsDir, 'review-result.json'), readFile)
+  // TASK-0005: a review result written for a different lifecycle generation
+  // of the same display id never becomes this task's verdict (no state
+  // crossover across generations).
+  const reviewResult = reviewResultRaw && (taskInstanceId === null
+    || reviewResultRaw.taskInstanceId === taskInstanceId) ? reviewResultRaw : null
   const reviewPacket = status.readJson(path.join(runsDir, 'review-packet.json'), readFile)
   const reviews = {
     codexCalls: task ? task.codexCalls : 0,
@@ -475,7 +501,8 @@ async function buildDetailSnapshot({
   const gateRecords = status.jsonLinesOf(safeReadText(path.join(dataRoot, 'completion', 'gates.jsonl'), readFile))
     .filter((record) => record && String(record.sessionId) === String(sessionId)
       && status.normalizeWorkspacePath(record.workspace) === workspaceKey
-      && String(record.taskId) === taskId)
+      && String(record.taskId) === taskId
+      && (taskInstanceId === null || record.taskInstanceId === taskInstanceId))
   const currentGate = status.normalizeGateRecord(
     gateRecords.length > 0 ? gateRecords[gateRecords.length - 1] : null,
   )
@@ -571,6 +598,7 @@ async function buildDetailSnapshot({
     state,
     binding: {
       sessionId: binding.sessionId ? String(binding.sessionId) : sessionId,
+      taskInstanceId,
       taskId,
       workspace,
       preset,

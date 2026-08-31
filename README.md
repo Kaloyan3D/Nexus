@@ -1,6 +1,6 @@
 # Nexus
 
-**A deterministic AI engineering harness with profile-driven engineering execution (DeepSeek + Codex by default, GLM + Codex optional), bounded review, durable task state, and a live Control Room.**
+**A deterministic AI engineering harness with profile-driven engineering execution (DeepSeek + Codex by default, GLM + Codex optional), independent review, durable task state, and a live Control Room.**
 
 Nexus turns a coding-agent session into a controller-owned engineering workflow. The model implements; the controller owns routing, attempts, verification, completion, and operator gates. The UI observes authoritative state instead of guessing from chat history.
 
@@ -21,7 +21,7 @@ flowchart LR
     M --> MD[(Provider: DeepSeek / Z.ai / Codex)]
     E --> V[Deterministic Verification]
     V -->|PASS| C
-    V -->|failure / critical boundary| RV[Bounded Reviewer]
+    V -->|failure / critical boundary| RV[Independent Reviewer]
     RV --> E
     C --> G[Operator Gate]
     C --> S[Durable Task State]
@@ -33,12 +33,12 @@ DeepSeek (or the profile's primary engineer) remains the normal root executor. T
 ## Core features
 
 - **Deterministic task controller** — task identity, execution class, attempts, evidence, verification, failures, review requirements, and completion live outside the model.
-- **Execution classes** — mechanical checks (`deterministic`), normal engineering (`engineer_normal`), deeper reasoning (`engineer_deep`), bounded review (`reviewer`), and explicit user-approved solve (`solver`). Classes are vendor-neutral; models are chosen by the active engineering profile (see [docs/architecture/engineering-profiles.md](docs/architecture/engineering-profiles.md)).
+- **Execution classes** — mechanical checks (`deterministic`), normal engineering (`engineer_normal`), deeper reasoning (`engineer_deep`), independent review (`reviewer`), and explicit user-approved solve (`solver`). Classes are vendor-neutral; models are chosen by the active engineering profile (see [docs/architecture/engineering-profiles.md](docs/architecture/engineering-profiles.md)).
 - **Engineering Profile editor (Phase 2.1)** — the Control Room's Engineering tab lets the operator pick the preferred profile (DeepSeek + Codex / GLM + Codex / Custom) and bind each role to a registered model with a supported reasoning level. All writes are validated by the controller and applied at the next safe execution boundary; RUNNING execution is never rewritten (see [docs/architecture/engineering-profiles.md](docs/architecture/engineering-profiles.md)).
 - **Real attempt lifecycle** — GUI engineering turns create bounded attempts; reloads and reconnects do not create fake retries.
 - **Verification evidence** — `/verify` records per-check command, status, exit code, attempt linkage, timestamps, and overall evidence.
 - **Crash-safe reconciliation** — an interrupted verification is closed truthfully instead of remaining `verifying` forever or silently creating a new attempt.
-- **Bounded review** — fresh, read-only review packets with enforced file, diff, context, output, and call-count limits; reviewer model bound by the active profile (this phase: the local Codex/OAuth adapter).
+- **Independent Review (read-only)** — fresh, read-only review packets with a policy-driven budget: `codex.automaticReview.enforceLimits` defaults to `false` (unlimited review context), and the legacy file/diff/context/output/call-count limits stay available behind `enforceLimits=true`; reviewer model bound by the active profile (this phase: the local Codex/OAuth adapter).
 - **Operator gates** — controller-advertised actions such as Approve / Reject are validated server-side with stale/duplicate protection.
 - **Control Room** — live Overview, Activity, Verification, and Files views backed by authoritative records.
 - **RUNNING vs PREFERRED model visibility** — the UI separates the executor actually routed for the task from the session's preferred model/effort ceiling, and adds the preferred **engineering profile** and the decision's role/profile/provider/model.
@@ -67,7 +67,7 @@ The Control Room does not manufacture events from polling deltas. It reads contr
 - PowerShell 5.1+
 - Internet access during installation
 - A DeepSeek API key
-- Optional ChatGPT/Codex authentication for bounded review
+- Optional ChatGPT/Codex authentication for independent review
 
 ### Install
 
@@ -76,7 +76,7 @@ git clone https://github.com/Kaloyan3D/Nexus.git
 cd Nexus
 powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 aih-key
-aih-auth   # optional: bounded Codex review
+aih-auth   # optional: independent Codex review
 ```
 
 Then open Nexus from a project repository:
@@ -101,7 +101,7 @@ Bulgarian quick start: **[docs/quick-start-bg.md](docs/quick-start-bg.md)**.
 
 ### Normal Engineering
 
-DeepSeek V4 Flash is the root engineer. The controller may permit bounded Codex review when deterministic policy requires it.
+DeepSeek V4 Flash is the root engineer. The controller may permit independent Codex review when deterministic policy requires it.
 
 ### DeepSeek Only
 
@@ -114,7 +114,7 @@ DeepSeek V4 Flash remains the root engineer, while OpenAI/Codex inference is dis
 | `deterministic` | Mechanical lookup / verification with no LLM | No |
 | `deepseek_normal` | Default implementation and debugging | Yes |
 | `deepseek_deep` | Expanded DeepSeek reasoning after evidence-backed escalation | Yes |
-| `codex_review` | Fresh, bounded, independent review | No |
+| `codex_review` | Fresh, independent review (read-only) | No |
 | `codex_solve` | Exceptional explicit user-approved solve | Yes |
 
 The default routing path is intentionally simple:
@@ -123,7 +123,7 @@ The default routing path is intentionally simple:
 deepseek_normal
   -> verify
   -> deepseek_deep repair when policy/evidence justifies escalation
-  -> bounded codex_review when required
+  -> independent codex_review when required
   -> DeepSeek repair
   -> deterministic completion
 ```
@@ -168,9 +168,13 @@ Project-scoped engineering state lives under `.ai-harness`:
 
 Runtime bindings, routing history, gate journals, logs, credentials, installed packages, and sessions live outside committed project source. Credentials are never meant to be stored in task ledgers.
 
-## Bounded Codex review
+## Independent Codex review
 
-`codex_review` is an independent review service, not an unrestricted subagent. The current policy enforces a fresh packet and bounded call with limits for files, diff size, estimated context, output, and automatic calls per task. Full-repository context and writable Codex solve paths require explicit approval.
+`codex_review` is an independent review service, not an unrestricted subagent. The review is always a fresh, read-only, controller-owned packet scoped to the task instance; the reviewer never gains completion authority.
+
+Review budget enforcement is policy-driven (`codex.automaticReview.enforceLimits`). The shipped Nexus default is `false`: the review context is **unlimited** — Nexus does not reject reviews for file count, diff size, estimated context tokens, or calls per task, and no `max_output_tokens` is sent to the provider. The Context Engine treats `0` as an explicit "unlimited" value and still ranks/selects relevant files instead of blindly dumping the repository. Provider/model context windows remain the provider's own capacity boundary and surface as provider-capacity errors. The legacy hard budgets (8 files / 2500 diff lines / 30000 context tokens / 1 call per task / capped output) stay available behind `enforceLimits=true` for operators or tests that want them.
+
+Full-repository context and writable Codex solve paths still require explicit user approval; this authorization boundary is separate from budget enforcement and stays active when budgets are disabled.
 
 Automatic review is intended for repeated evidence-backed failure or critical boundaries—not simply because a task feels difficult.
 

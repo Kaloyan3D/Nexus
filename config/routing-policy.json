@@ -153,6 +153,7 @@
   },
   "codex": {
     "automaticReview": {
+      "enforceLimits": false,
       "maxCallsPerTask": 1,
       "maxFiles": 8,
       "maxDiffLines": 2500,

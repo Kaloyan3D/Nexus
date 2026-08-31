@@ -19,7 +19,7 @@ flowchart TD
     R --> X[Execution class]
     X --> DS[DeepSeek V4 Flash]
     X --> DET[Deterministic tools]
-    X --> CX[Bounded Codex review]
+    X --> CX[Independent Codex review]
     DS --> V[Verification + architecture rules]
     DET --> V
     CX --> DS
@@ -41,7 +41,7 @@ PowerShell controller modules and the GUI bridge own deterministic state transit
 
 ### 3. Model execution layer
 
-DeepSeek V4 Flash is the ordinary engineering executor. The controller routes to an execution class and supplies task/context boundaries. Codex is a bounded independent reviewer, not a permanent lead model.
+DeepSeek V4 Flash is the ordinary engineering executor. The controller routes to an execution class and supplies task/context boundaries. Codex is an independent read-only reviewer, not a permanent lead model. Review budget enforcement is policy-driven and disabled by default (TASK-0007: `codex.automaticReview.enforceLimits=false`), so Nexus no longer token- or file-caps review packets.
 
 ### 4. Durable state
 
@@ -62,7 +62,7 @@ The Control Room is an observer/operator surface over controller-owned records. 
 | Attempt number | Task ledger |
 | Verification truth | Deterministic verification producer + evidence |
 | Review requirement | Routing/completion policy |
-| Review verdict | Bounded review result |
+| Review verdict | Independent review result |
 | Operator actions | Current controller gate `allowedActions` |
 | Completion | Deterministic controller |
 | UI state | Read/derived from authoritative records |

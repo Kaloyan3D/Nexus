@@ -1,4 +1,6 @@
 [CmdletBinding()]
+# TASK-0007: for the 'bundle' operation, 0 = unlimited context/files (explicit
+# semantic; the Context Engine never truncates or file-caps in that mode).
 param([ValidateSet('map','search_code','find_symbol','find_references','file_outline','bundle')][string]$Operation='map',[string]$Workspace=(Get-Location).Path,[string]$Query,[string]$File,[string]$TaskId,[int]$MaxContextTokens=12000,[int]$MaxFiles=12,[string]$PayloadFile)
 . (Join-Path $PSScriptRoot 'ContextEngine.ps1')
 if ($PayloadFile) {
