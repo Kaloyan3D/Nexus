@@ -27,6 +27,13 @@ if ($managedPatchCopyIndex -gt $modeInstallerIndex -or $managedPatchCopyIndex -g
     throw 'FAIL: managed cordis.patch.yml must be synced before Nexus UI installers so upgrades from stale installs can migrate safely.'
 }
 
+foreach ($managedModule in @('Engineering-Isolation.cjs', 'AihController.cjs')) {
+    $managedModulePath = Join-Path $InstallRoot "config\$managedModule"
+    if (-not (Test-Path -LiteralPath $managedModulePath)) {
+        throw "FAIL: Setup.ps1 did not install required managed config module: $managedModule"
+    }
+}
+
 $modeInstallerPath = Join-Path $InstallRoot 'scripts\Patch-ControlRoomUi.ps1'
 $modeInstaller = Get-Content -Raw -Encoding UTF8 -LiteralPath $modeInstallerPath
 if ($modeInstaller.Contains('AIH_CONTROL_ROOM_MODE_MODEL_SYNC') -or $modeInstaller.Contains('$clientPath') -or $modeInstaller.Contains('.Replace($old')) {
@@ -63,5 +70,6 @@ foreach ($contract in @(
 }
 
 Write-Host 'PASS: managed cordis.patch.yml is synced before Nexus UI migration'
+Write-Host 'PASS: required engineering config modules are installed on fresh setup'
 Write-Host 'PASS: Control Room mode lifecycle is Nexus-owned and no longer patches compiled upstream UI'
 Write-Host 'PASS: mode-selector installer avoids PowerShell automatic-variable collisions'
