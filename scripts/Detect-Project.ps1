@@ -1,9 +1,14 @@
 [CmdletBinding()]
 param(
     [string]$Workspace = (Get-Location).Path,
-    [string]$InstallRoot = 'C:\AI-Harness',
+    [string]$InstallRoot,
     [switch]$Json
 )
+
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    $InstallRoot = Split-Path -Parent $PSScriptRoot
+}
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
