@@ -168,6 +168,7 @@ function Resolve-AihRepositoryConfig {
         securityExternalContext = $false
         blockedGlobs          = @()
         sensitiveGlobs        = @()
+        contextExcludeGlobs   = @()
         configErrors          = @()
         configFile            = $null
     }
@@ -211,12 +212,20 @@ function Resolve-AihRepositoryConfig {
     if ($parsed.Contains('modules') -and $null -ne $parsed['modules'] -and $parsed['modules'] -is [System.Collections.IDictionary]) {
         if ($parsed['modules'].Contains('autodetect')) { $config.modulesAutoDetect = [bool]$parsed['modules']['autodetect'] }
     }
+    # TASK-0009: ordered context-exclusion globs for review/search context
+    # eligibility (ContextEngine). These never affect Phase 3.1 indexing
+    # semantics; '!' negations re-include paths excluded by earlier layers.
+    if ($parsed.Contains('context') -and $null -ne $parsed['context'] -and $parsed['context'] -is [System.Collections.IDictionary]) {
+        if ($parsed['context'].Contains('exclude_globs') -and $null -ne $parsed['context']['exclude_globs']) {
+            $config.contextExcludeGlobs = @($parsed['context']['exclude_globs'] | ForEach-Object { "$_" } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        }
+    }
     if ($parsed.Contains('security') -and $null -ne $parsed['security'] -and $parsed['security'] -is [System.Collections.IDictionary]) {
         if ($parsed['security'].Contains('external_context')) { $config.securityExternalContext = [bool]$parsed['security']['external_context'] }
         if ($parsed['security'].Contains('blocked_globs')) { $config.blockedGlobs = @($parsed['security']['blocked_globs'] | ForEach-Object { "$_" }) }
         if ($parsed['security'].Contains('sensitive_globs')) { $config.sensitiveGlobs = @($parsed['security']['sensitive_globs'] | ForEach-Object { "$_" }) }
     }
-    foreach ($known in @('version', 'repository', 'index', 'exclude', 'modules', 'security')) {
+    foreach ($known in @('version', 'repository', 'index', 'exclude', 'modules', 'security', 'context')) {
         if ($parsed.Contains($known)) { $parsed.Remove($known) }
     }
     foreach ($unexpected in @($parsed.Keys)) {

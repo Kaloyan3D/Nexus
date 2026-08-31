@@ -1072,6 +1072,14 @@ function apply(ctx) {
     }
     const bundle = await invokePowerShell('Context.ps1', bundleArgs, { payload: { workspace, query: question } })
     if (!bundle || !Array.isArray(bundle.fileSlices)) throw new Error('aih-controller: context bundle returned no file slices')
+    // TASK-0009: context-quality guard. When the Context Engine reports that
+    // the bundle contains no meaningful source/test/docs/config evidence (even
+    // after its one deterministic broaden retry), the reviewer is NOT called:
+    // the empty fileSlices plus the structured contextQuality report travel
+    // back to executeReviewTurn, which rejects the review turn.
+    if (bundle.contextQuality && bundle.contextQuality.status === 'fail') {
+      return { contextMode, fileSlices: [], contextQuality: bundle.contextQuality }
+    }
     return { contextMode, fileSlices: bundle.fileSlices }
   }
 
@@ -1133,7 +1141,24 @@ function apply(ctx) {
         binding.reviewRequired = Boolean(decision.reviewRequired)
         await markReviewRequested(workspace, taskId, taskInstanceId)
       }
-      const { contextMode, fileSlices } = await contextBundle(workspace, taskId, question)
+      const { contextMode, fileSlices, contextQuality } = await contextBundle(workspace, taskId, question)
+      // TASK-0009: fail closed BEFORE the reviewer when the bundle quality
+      // guard rejected the selected evidence. Zero engineer and zero reviewer
+      // calls happen on this path; the operator gets a structured reason.
+      if (contextQuality && contextQuality.status === 'fail') {
+        appendMessage(
+          session,
+          createControllerMessage(
+            'Controller review rejected · task ' + taskId +
+              '\nThe reviewer was NOT called: the repository context bundle contained no meaningful source/test/config/docs evidence for this question.' +
+              '\nReason: ' + (contextQuality.reason || 'no meaningful evidence selected') +
+              '\nNo files were modified; completion authority remains with the controller.',
+            'review-context-quality',
+          ),
+        )
+        log({ event: 'review-context-quality', taskId, contextMode, quality: contextQuality })
+        return { kind: 'reject' }
+      }
       const latest = latestAttemptOf(workspace, taskId)
       const reviewAttempt = latest && Number.isInteger(latest.sequence) ? latest.sequence : null
       const review = await runReview(workspace, taskId, question, fileSlices, contextMode, reviewAttempt, taskInstanceId)
