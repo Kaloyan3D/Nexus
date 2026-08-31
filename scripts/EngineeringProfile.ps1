@@ -1,11 +1,13 @@
 [CmdletBinding()]
 param(
  [ValidateSet('get','select','save-custom')][string]$Action='get',
- [string]$InstallRoot='C:\AI-Harness',
+ [string]$InstallRoot,
  [string]$ProfileId,
  [string]$PayloadFile
 )
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+if([string]::IsNullOrWhiteSpace($InstallRoot)){$InstallRoot=Split-Path -Parent $PSScriptRoot}
+$InstallRoot=[System.IO.Path]::GetFullPath($InstallRoot)
 . (Join-Path $PSScriptRoot 'Common.ps1')
 . (Join-Path $PSScriptRoot 'Routing.ps1')
 
