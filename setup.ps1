@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$InstallRoot = 'C:\AI-Harness',
+    [string]$InstallRoot = $PSScriptRoot,
     [switch]$SkipPathUpdate,
     [switch]$SkipDeepSeekLogin,
     [switch]$SkipOpenAiLogin
@@ -13,9 +13,12 @@ if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
     throw 'AI Harness currently supports Windows only.'
 }
 
-$sourceRoot = $PSScriptRoot
+$sourceRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 $installer = Join-Path $sourceRoot 'scripts\Setup.ps1'
 
+Write-Host "Nexus source: $sourceRoot"
+Write-Host "Nexus install root: $InstallRoot"
 Write-Host '1/4 Installing the pinned AI Harness runtime...'
 & $installer -InstallRoot $InstallRoot -SkipPathUpdate:$SkipPathUpdate
 if ($LASTEXITCODE -ne 0) { throw 'Harness installation failed.' }
@@ -51,5 +54,6 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ''
-Write-Host 'Setup complete. Open a new terminal, enter a project directory, and run: aih'
+Write-Host 'Setup complete. Nexus is installed in this repository by default.'
+Write-Host 'Open a new terminal, enter any project directory, and run: aih'
 Write-Host 'DeepSeek-only mode: aih -Preset deepseek'
