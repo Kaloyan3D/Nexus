@@ -1,6 +1,6 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
-    [string]$InstallRoot = 'C:\AI-Harness',
+    [string]$InstallRoot,
     [string]$SourceRoot
 )
 
@@ -21,6 +21,10 @@ $ErrorActionPreference = 'Stop'
 # already present (second run), and the script FAILS when the pinned upstream
 # structure changed in an ambiguous way. Regexes tolerate CRLF vs LF.
 
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    $InstallRoot = Split-Path -Parent $PSScriptRoot
+}
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
     $SourceRoot = Split-Path -Parent $PSScriptRoot
 }
