@@ -13,9 +13,6 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Install pinned runtime
+      - name: Install and test repo-local Nexus checkout
         shell: pwsh
-        run: ./scripts/Setup.ps1 -InstallRoot "$env:RUNNER_TEMP\AI-Harness" -SkipPathUpdate
-      - name: Run deterministic tests
-        shell: pwsh
-        run: ./scripts/Test-Harness.ps1 -InstallRoot "$env:RUNNER_TEMP\AI-Harness"
+        run: ./setup.ps1 -SkipPathUpdate -SkipDeepSeekLogin -SkipOpenAiLogin
