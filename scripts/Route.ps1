@@ -2,7 +2,7 @@
 param(
     [Parameter(Position = 0)][string]$Description,
     [string]$Workspace = (Get-Location).Path,
-    [string]$InstallRoot = 'C:\AI-Harness',
+    [string]$InstallRoot,
     [string]$TaskId,
     [string]$Preset,
     [Alias('force')][string]$ForceTier,
@@ -16,6 +16,11 @@ param(
     [switch]$History,
     [string]$PayloadFile
 )
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    $InstallRoot = Split-Path -Parent $PSScriptRoot
+}
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
+
 # User-derived free text must not travel on the command line (ANSI codepage
 # mangling + unescaped control characters in ConvertTo-Json break the
 # controller bridge's strict JSON parse). The bridge writes a UTF-8 payload
