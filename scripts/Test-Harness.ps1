@@ -1,5 +1,10 @@
 [CmdletBinding()]
-param([string]$InstallRoot = 'C:\AI-Harness')
+param([string]$InstallRoot)
+
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    $InstallRoot = Split-Path -Parent $PSScriptRoot
+}
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 
 . (Join-Path $InstallRoot 'scripts\Common.ps1')
 & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'tests\SetupUpgrade.Tests.ps1') -InstallRoot $InstallRoot
