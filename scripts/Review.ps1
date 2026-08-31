@@ -68,6 +68,11 @@ if($Execute){
     # ceilings only when the policy enforces limits, null (unlimited) otherwise.
     $budgetOut=[ordered]@{enforceLimits=$enforceLimits;maxCallsPerTask=$(if($enforceLimits){[int]$budget.maxCallsPerTask}else{$null});maxFiles=$(if($enforceLimits){[int]$budget.maxFiles}else{$null});maxDiffLines=$(if($enforceLimits){[int]$budget.maxDiffLines}else{$null});maxContextTokens=$(if($enforceLimits){[int]$budget.maxContextTokens}else{$null});maxOutputTokens=$(if($enforceLimits){[int]$budget.maxOutputTokens}else{$null})}
     $telemetry=Write-AihTaskTelemetry $Workspace $TaskId @{executionClass='reviewer';model=$reviewerTarget.Model;provider=$reviewerTarget.Provider;modelCalls=1;codexFindings=@($reviewResult.findings);finalResult=$reviewResult.verdict;configuration=$profile.Id;filesSupplied=@($files).Count} -TaskInstanceId $TaskInstanceId
-    $result=[ordered]@{ok=$true;taskId=$TaskId;executionClass='reviewer';role='reviewer';profile=$profile.Id;profileDisplayName=$profile.DisplayName;provider=$reviewerTarget.Provider;model=$reviewerTarget.Model;modelDisplayName=$reviewerTarget.ModelDisplayName;reasoning=$reviewerTarget.Reasoning;callCount=[int](Get-AihTask $Workspace $TaskId -TaskInstanceId $TaskInstanceId).codexCalls;budget=$budgetOut;readOnly=$true;freshContext=$true;completionAuthority=$false;result=$reviewResult;telemetry=$telemetry}
+    # TASK-0012: surface the provider-capacity summary (real transport
+    # capacity + packing state) alongside the budget block so the Nexus-budget
+    # vs provider-capacity distinction is visible to callers.
+    $providerCapacityOut=$null
+    if($null-ne $reviewResult.PSObject.Properties['providerCapacity']){$providerCapacityOut=$reviewResult.providerCapacity}
+    $result=[ordered]@{ok=$true;taskId=$TaskId;executionClass='reviewer';role='reviewer';profile=$profile.Id;profileDisplayName=$profile.DisplayName;provider=$reviewerTarget.Provider;model=$reviewerTarget.Model;modelDisplayName=$reviewerTarget.ModelDisplayName;reasoning=$reviewerTarget.Reasoning;callCount=[int](Get-AihTask $Workspace $TaskId -TaskInstanceId $TaskInstanceId).codexCalls;budget=$budgetOut;providerCapacity=$providerCapacityOut;readOnly=$true;freshContext=$true;completionAuthority=$false;result=$reviewResult;telemetry=$telemetry}
     $result|ConvertTo-Json -Depth 20
 }else{$packet|ConvertTo-Json -Depth 20}

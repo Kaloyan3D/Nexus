@@ -31,6 +31,90 @@ $script:AihContextEvidenceWeights = @{
     'runtime-state' = 0.25
 }
 
+# ── TASK-0012: query-term importance and relevance concentration ─────────────
+# Problem being fixed: with a long review question (100+ meaningful terms) the
+# TASK-0009 relevance floor passes nearly every eligible file, so "unlimited"
+# degenerated into "everything weakly matching". Unlimited must mean "no
+# arbitrary budget truncation", never "every weakly relevant file enters the
+# packet". Three deterministic signals now separate repository-specific
+# evidence from generic task/review vocabulary:
+#   1. sharpened rarity weighting: idf^2 (BM25 idf squared) so terms rare in
+#      THIS corpus dominate terms that merely occur everywhere;
+#   2. a small, stable weak-term vocabulary of generic task/review language
+#      ("review", "complete", "implementation", "quality", "gate", "tests",
+#      "code", ...) downweighted by a fixed factor - one signal, never the
+#      whole solution (corpus statistics remain the primary signal);
+#   3. phrase/compound evidence: adjacent query n-grams ("code intelligence",
+#      "deterministic code intelligence") matched in content or path weigh
+#      more than the same terms matching independently.
+# Identifier-like terms keep their TASK-0009 boost. None of this is a budget:
+# file counts, token ceilings and diff ceilings remain policy-driven only.
+$script:AihContextWeakTermFactor = 0.5
+$script:AihContextPhraseWeight = 1.5
+$script:AihContextPhraseMinTokens = 2
+$script:AihContextPhraseMaxTokens = 3
+# Second-stage concentration thresholds (RELATIVE, never counts/tokens).
+# All confidence values are fractions of the strongest SPECIFIC (non-generic)
+# evidence in the result set, not of the raw total score: a rare generic word
+# in a small corpus can inflate totals, but it can never inflate specific
+# evidence, so generic-heavy files cannot displace or gate domain evidence.
+#   strongConfidence  - a candidate whose specific evidence reaches this
+#                       fraction of the strongest specific evidence is
+#                       selected outright (relative score confidence);
+#   marginalCoverage  - a candidate adding at least this fraction of the
+#                       anchor's specific term/phrase mass as NEW coverage is
+#                       selected (diminishing marginal query-term coverage);
+#   coverageConfidence- the specific-evidence fraction at which a candidate
+#                       may introduce a not-yet-covered evidence class
+#                       (source/test/docs/config balancing).
+$script:AihContextStrongConfidence = 0.25
+$script:AihContextMarginalCoverage = 0.15
+$script:AihContextCoverageConfidence = 0.10
+# Small stable vocabulary of GENERIC task/review/engineering vocabulary. It is
+# deliberately NOT domain-aware and never contains repository identifiers:
+# rare repository-specific terms must outrank these through corpus statistics.
+$script:AihContextWeakTerms = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($__weak in @(
+    'review','reviewed','reviews','reviewing',
+    'complete','completed','completely','completion',
+    'implement','implemented','implements','implementing','implementation','implementations',
+    'quality','gate','gates',
+    'actual','actually',
+    'test','tested','testing','tests',
+    'code','codes',
+    'check','checked','checking','checks',
+    'verify','verified','verifies','verifying',
+    'validate','validated','validates','validating','validation',
+    'ensure','ensured','ensures','ensuring',
+    'correct','corrected','correcting','correctness','correctly',
+    'fix','fixed','fixes','fixing',
+    'bug','bugs','issue','issues',
+    'change','changed','changes','changing',
+    'update','updated','updates','updating',
+    'add','added','adding','adds','remove','removed','removes','removing',
+    'use','used','useful','uses','using',
+    'make','makes','making','work','worked','working','works',
+    'support','supported','supporting','supports',
+    'require','required','requirement','requirements','requires',
+    'need','needed','needs',
+    'task','tasks','file','files','path','paths','line','lines',
+    'function','functions','return','returned','returns','value','values',
+    'call','called','calls','run','ran','running','runs',
+    'execute','executed','executes','execution',
+    'build','building','builds','default','defaults',
+    'behavior','behaviors','general','generally',
+    'specific','specifically','particular','particularly',
+    'broad','broadly','whole','entire','full','fully',
+    'meaningful','strongly','weak','weakly','high','low',
+    'problem','problems','finding','findings','evidence',
+    'explicit','explicitly','concrete','superficial','sufficient','alone',
+    'treat','attention','pay','rather','end','ends',
+    'ready','readiness','release','green','suite',
+    'pass','passed','passes','passing',
+    'write','writes','writing','large','failure','failures','handling','remaining'
+)) { [void]$script:AihContextWeakTerms.Add($__weak) }
+Remove-Variable -Name __weak -ErrorAction SilentlyContinue
+
 function Get-AihCodeSymbols {
     param([string]$Workspace, [string]$RelativePath)
     $path = Join-Path $Workspace $RelativePath
@@ -230,15 +314,57 @@ function Get-AihBoundedTermCount {
     $count
 }
 
+function Get-AihNormalizedPathText {
+    # TASK-0012: phrase evidence must survive repository naming conventions:
+    # 'code-intelligence.md', 'code_intelligence.ts' and 'code/intelligence'
+    # all normalize to the same spaced tokens so the query phrase "code
+    # intelligence" matches path evidence deterministically.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    return ($Path -replace '[-_.]', ' ')
+}
+
+function Get-AihContextPhraseCandidates {
+    # TASK-0012: deterministic phrase/compound candidates from the meaningful
+    # query-term sequence (bigrams and trigrams, first-seen order, deduped).
+    # A candidate is kept only when at least one constituent term is NOT
+    # generic task/review vocabulary: phrases made purely of weak terms
+    # ("quality gate", "review complete") carry no domain signal, while
+    # "code intelligence" / "deterministic code intelligence" do.
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Terms)
+    $phrases = [Collections.Generic.List[object]]::new()
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $maxN = [Math]::Max($script:AihContextPhraseMinTokens, $script:AihContextPhraseMaxTokens)
+    for ($n = $script:AihContextPhraseMinTokens; $n -le $maxN; $n++) {
+        for ($i = 0; $i -le $Terms.Count - $n; $i++) {
+            $window = @()
+            for ($j = 0; $j -lt $n; $j++) { $window += $Terms[$i + $j] }
+            $phrase = ($window -join ' ')
+            if ($seen.Contains($phrase)) { continue }
+            [void]$seen.Add($phrase)
+            $hasSpecific = $false
+            foreach ($term in $window) { if (-not $script:AihContextWeakTerms.Contains($term)) { $hasSpecific = $true; break } }
+            if (-not $hasSpecific) { continue }
+            $phrases.Add([pscustomobject]@{ phrase = $phrase; terms = @($window) })
+        }
+    }
+    @($phrases)
+}
+
 function Invoke-AihContextRetrieval {
     # Deterministic weighted lexical retrieval over context-ELIGIBLE files.
-    #   idf(t)      = ln(1 + (N - df + 0.5) / (df + 0.5))     [BM25-style]
-    #   tf-term     = tf / (tf + 2), tf capped at 50           [saturation]
+    #   idf(t)      = ln(1 + (N - df + 0.5) / (df + 0.5))      [BM25-style]
+    #   importance  = idf^2 * weakFactor * identifierBoost     [TASK-0012]
+    #   tf-term     = tf / (tf + 2), tf capped at 50            [saturation]
     #   path bonus  = +1.0 basename hit, +0.5 directory-segment hit
     #   identifier  = x2.0 for identifier-like terms
+    #   phrase      = ngram weight * (tfSat + path bonus)      [TASK-0012]
     #   evidence    = per-class weight (source/test strongest, runtime lowest)
-    # A candidate is selected only when its final score reaches the relevance
-    # floor AND it matches at least one meaningful term in content or path.
+    # A candidate passes the relevance floor on its TOTAL score (TASK-0009),
+    # then the deterministic second-stage concentration selector marks which
+    # floor-passing candidates carry SELECTED relevance: relative score
+    # confidence, diminishing marginal specific-term/phrase coverage and
+    # evidence-class coverage. Concentration is relevance-driven; it is never
+    # a file-count, token or top-N budget.
     param(
         [string]$Workspace,
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Query,
@@ -249,6 +375,7 @@ function Invoke-AihContextRetrieval {
     $parsedTerms = Get-AihMeaningfulQueryTerms $Query
     $terms = @($parsedTerms.terms)
     $identifierFlags = @($parsedTerms.identifierLike)
+    $phraseCandidates = @(Get-AihContextPhraseCandidates -Terms $terms)
     $inventory = @(Get-AihContextEligibleFiles -Workspace $workspacePath)
     $eligible = @($inventory | Where-Object { $_.eligible })
     $excludedByReason = [ordered]@{}
@@ -256,6 +383,17 @@ function Invoke-AihContextRetrieval {
         $key = [string]$entry.exclusionReason
         if ($excludedByReason.Contains($key)) { $excludedByReason[$key] = $excludedByReason[$key] + 1 }
         else { $excludedByReason[$key] = 1 }
+    }
+    $concentrationDefaults = [ordered]@{
+        method              = 'relative-confidence+coverage-saturation'
+        strongConfidence    = $script:AihContextStrongConfidence
+        marginalCoverage    = $script:AihContextMarginalCoverage
+        coverageConfidence  = $script:AihContextCoverageConfidence
+        anchorScore         = 0.0
+        anchorSpecificScore = 0.0
+        candidateCount      = 0
+        selectedCount       = 0
+        genericQuery        = $false
     }
     $diagnostics = [ordered]@{
         query           = $Query
@@ -266,12 +404,17 @@ function Invoke-AihContextRetrieval {
         eligibleFiles   = @($eligible).Count
         excludedFiles   = (@($inventory).Count - @($eligible).Count)
         excludedByReason = $excludedByReason
+        weakTerms       = @($terms | Where-Object { $script:AihContextWeakTerms.Contains($_) })
+        phrases         = @($phraseCandidates | ForEach-Object { $_.phrase })
+        termImportance  = [ordered]@{}
+        concentration   = $concentrationDefaults
     }
     $emptyResult = [pscustomobject]($diagnostics + @{ candidates = @() })
     if ($terms.Count -eq 0 -or @($eligible).Count -eq 0) { return $emptyResult }
 
-    # pass 1: per-file term occurrences + path hits; document frequency per term
-    $tfTable = @{}; $pathTable = @{}; $byPath = @{}; $df = @{}
+    # pass 1: per-file term occurrences + path hits + phrase hits; document
+    # frequency per term
+    $tfTable = @{}; $pathTable = @{}; $phraseTable = @{}; $byPath = @{}; $df = @{}
     foreach ($entry in $eligible) {
         $text = $null
         try {
@@ -282,7 +425,9 @@ function Invoke-AihContextRetrieval {
         $lower = $text.ToLowerInvariant()
         $fileName = ([IO.Path]::GetFileName($entry.path)).ToLowerInvariant()
         $pathLower = $entry.path.ToLowerInvariant()
-        $tfRow = @{}; $pathRow = @{}; $hitAny = $false
+        $fileNameNorm = (Get-AihNormalizedPathText $fileName).ToLowerInvariant()
+        $pathNorm = (Get-AihNormalizedPathText $pathLower).ToLowerInvariant()
+        $tfRow = @{}; $pathRow = @{}; $phraseRow = @{}; $hitAny = $false
         for ($i = 0; $i -lt $terms.Count; $i++) {
             $term = $terms[$i]
             $count = 0; $bonus = 0.0
@@ -294,9 +439,21 @@ function Invoke-AihContextRetrieval {
                 if ($df.ContainsKey($term)) { $df[$term] = $df[$term] + 1 } else { $df[$term] = 1 }
             }
         }
+        foreach ($candidate in $phraseCandidates) {
+            $phrase = $candidate.phrase
+            $pCount = 0; $pBonus = 0.0
+            if ($lower.Contains($phrase)) { $pCount = Get-AihBoundedTermCount -Text $lower -Term $phrase -Cap $script:AihContextTermOccurrenceCap }
+            if ($fileNameNorm.Contains($phrase)) { $pBonus = 1.0 }
+            elseif ($pathNorm.Contains($phrase)) { $pBonus = 0.5 }
+            if ($pCount -gt 0 -or $pBonus -gt 0) {
+                $phraseRow[$phrase] = @{ count = $pCount; bonus = $pBonus }
+                $hitAny = $true
+            }
+        }
         if ($hitAny) {
             $tfTable[$entry.path] = $tfRow
             $pathTable[$entry.path] = $pathRow
+            $phraseTable[$entry.path] = $phraseRow
             $byPath[$entry.path] = $entry
         }
     }
@@ -306,31 +463,71 @@ function Invoke-AihContextRetrieval {
     $fileCount = [double]$eligible.Count
     if ($tfTable.Keys.Count -le 0) { return $emptyResult }
 
+    # TASK-0012: term importance. Squaring the BM25 idf sharpens rarity so a
+    # term rare in THIS corpus dominates a term that merely occurs everywhere;
+    # generic task/review vocabulary is additionally damped by the weak-term
+    # factor (one small stable vocabulary, corpus statistics stay primary);
+    # identifier-like terms keep their TASK-0009 boost.
+    $importance = @{}; $weakFlag = @{}
+    for ($i = 0; $i -lt $terms.Count; $i++) {
+        $term = $terms[$i]
+        $dfTerm = 0.0
+        if ($df.ContainsKey($term)) { $dfTerm = [double]$df[$term] }
+        $idf = [Math]::Log(1.0 + (($fileCount - $dfTerm + 0.5) / ($dfTerm + 0.5)))
+        $weak = [bool]$script:AihContextWeakTerms.Contains($term)
+        $boost = if ($identifierFlags[$i]) { 2.0 } else { 1.0 }
+        $factor = 1.0
+        if ($weak) { $factor = $script:AihContextWeakTermFactor }
+        $importance[$term] = [Math]::Round(($idf * $idf) * $factor * $boost, 6)
+        $weakFlag[$term] = $weak
+    }
+    foreach ($key in @($importance.Keys)) { $diagnostics.termImportance[$key] = $importance[$key] }
+    $phraseWeights = @{}
+    foreach ($candidate in $phraseCandidates) {
+        $weight = 0.0
+        foreach ($term in @($candidate.terms)) { $weight = $weight + [double]$importance[$term] }
+        $phraseWeights[$candidate.phrase] = [Math]::Round($weight * $script:AihContextPhraseWeight, 6)
+    }
+
     # pass 2: score, floor, order (only floor-passing files are re-read for snippets)
     $ranked = [Collections.Generic.List[object]]::new()
     foreach ($path in @($tfTable.Keys)) {
         $entry = $byPath[$path]
-        $tfRow = $tfTable[$path]; $pathRow = $pathTable[$path]
+        $tfRow = $tfTable[$path]; $pathRow = $pathTable[$path]; $phraseRow = $phraseTable[$path]
         $weight = $script:AihContextEvidenceWeights[[string]$entry.evidenceClass]
         if ($null -eq $weight) { $weight = 0.75 }
-        $score = 0.0
+        $score = 0.0; $specific = 0.0
         $matched = [Collections.Generic.List[string]]::new()
         $pathMatched = [Collections.Generic.List[string]]::new()
+        $phraseMatched = [Collections.Generic.List[string]]::new()
         for ($i = 0; $i -lt $terms.Count; $i++) {
             $term = $terms[$i]
             if (-not $tfRow.ContainsKey($term)) { continue }
-            $dfTerm = [double]$df[$term]
-            $idf = [Math]::Log(1.0 + (($fileCount - $dfTerm + 0.5) / ($dfTerm + 0.5)))
-            $boost = if ($identifierFlags[$i]) { 2.0 } else { 1.0 }
+            $imp = [double]$importance[$term]
             $tf = [double]$tfRow[$term]
             $tfSat = $tf / ($tf + 2.0)
             $bonus = [double]$pathRow[$term]
-            $score = $score + ($idf * $boost * ($tfSat + $bonus))
+            $contribution = $imp * ($tfSat + $bonus)
+            $score = $score + $contribution
+            if (-not $weakFlag[$term]) { $specific = $specific + $contribution }
             $matched.Add($term)
             if ($bonus -gt 0) { $pathMatched.Add($term) }
         }
+        # Phrase/compound evidence: adjacent specific query terms matched
+        # together (content or normalized path) weigh more than the same
+        # terms matching independently, and always count as specific evidence.
+        foreach ($phrase in @($phraseRow.Keys)) {
+            $pWeight = [double]$phraseWeights[$phrase]
+            $pTf = [double]$phraseRow[$phrase].count
+            $pBonus = [double]$phraseRow[$phrase].bonus
+            $pContribution = $pWeight * (($pTf / ($pTf + 2.0)) + $pBonus)
+            $score = $score + $pContribution
+            $specific = $specific + $pContribution
+            $phraseMatched.Add($phrase)
+        }
         $final = [Math]::Round($score * $weight, 6)
         if ($final -lt $RelevanceFloor) { continue }
+        $specificFinal = [Math]::Round($specific * $weight, 6)
         $snippet = ''
         try {
             $picked = [Collections.Generic.List[string]]::new()
@@ -345,14 +542,117 @@ function Invoke-AihContextRetrieval {
             $snippet = (@($picked) -join [string][char]10)
         } catch { $snippet = '' }
         $ranked.Add([pscustomobject]@{
-            file = $path; score = $final; snippet = $snippet
+            file = $path; score = $final; specificScore = $specificFinal; snippet = $snippet
             evidenceClass = $entry.evidenceClass; classification = $entry.classification
-            matchedTerms = @($matched); pathMatches = @($pathMatched)
+            matchedTerms = @($matched); pathMatches = @($pathMatched); matchedPhrases = @($phraseMatched)
         })
     }
     $ordered = @($ranked | Sort-Object @{Expression='score';Descending=$true}, @{Expression='file';Descending=$false})
     if ($MaxResults -gt 0) { $ordered = @($ordered | Select-Object -First $MaxResults) }
-    [pscustomobject]($diagnostics + @{ candidates = $ordered })
+    if (@($ordered).Count -eq 0) { return $emptyResult }
+
+    # TASK-0012 second stage: deterministic relevance concentration over the
+    # shape of the ranked result set. Everything is RELATIVE to the strongest
+    # evidence in THIS result set (fractions, never counts or token budgets):
+    #   - strong relative confidence: specific evidence within a fraction of
+    #     the strongest specific evidence is selected;
+    #   - diminishing marginal coverage: a file is selected while it still
+    #     adds NEW specific term/phrase mass; once additional files only
+    #     repeat already-covered evidence they stop being selected;
+    #   - evidence-class coverage: source/test/docs/config balance without
+    #     forced quotas (a class is only pulled in when its own evidence is
+    #     genuinely strong).
+    # Deterministic tie-breaking: ranked order (score desc, path asc).
+    $topScore = [double]$ordered[0].score
+    $anchorSpecific = 0.0
+    foreach ($candidate in $ordered) { if ([double]$candidate.specificScore -gt $anchorSpecific) { $anchorSpecific = [double]$candidate.specificScore } }
+    # The concentration anchor is the STRONGEST SPECIFIC evidence in the result
+    # set (not merely the top total score, which generic-rare vocabulary can
+    # inflate); when the query has no specific signal at all the anchor falls
+    # back to the best total-score match.
+    $anchorIndex = 0
+    if ($anchorSpecific -gt 0.0) {
+        $best = 0.0
+        for ($i = 0; $i -lt $ordered.Count; $i++) {
+            if ([double]$ordered[$i].specificScore -gt $best) { $best = [double]$ordered[$i].specificScore; $anchorIndex = $i }
+        }
+    }
+    $coveredTerms = @{}
+    $coveredPhrases = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $coveredClasses = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $meaningfulClasses = @('source','test','docs','config')
+    $genericQuery = ($anchorSpecific -le 0.0)
+    $marked = [Collections.Generic.List[object]]::new()
+    for ($i = 0; $i -lt $ordered.Count; $i++) {
+        $candidate = $ordered[$i]
+        # normalizedScore is SPECIFIC-relative: the file's repository-specific
+        # evidence as a fraction of the strongest specific evidence present.
+        $norm = 0.0
+        if ($anchorSpecific -gt 0.0) { $norm = [double]$candidate.specificScore / $anchorSpecific }
+        $newMass = 0.0
+        foreach ($term in @($candidate.matchedTerms)) {
+            if ($weakFlag[$term]) { continue }
+            $imp = [double]$importance[$term]
+            $covered = 0.0
+            if ($coveredTerms.ContainsKey($term)) { $covered = [double]$coveredTerms[$term] }
+            if ($imp -gt $covered) { $newMass = $newMass + ($imp - $covered) }
+        }
+        foreach ($phrase in @($candidate.matchedPhrases)) {
+            if (-not $coveredPhrases.Contains($phrase)) { $newMass = $newMass + [double]$phraseWeights[$phrase] }
+        }
+        $selected = $false; $reason = 'below-confidence'
+        if ($i -eq $anchorIndex) {
+            $selected = $true
+            if ($genericQuery) { $reason = 'generic-query-anchor-only' } else { $reason = 'strongest-specific-anchor' }
+        } elseif ($genericQuery) {
+            # The query carries NO repository-specific signal at all (only
+            # generic task/review vocabulary): only the single best generic
+            # match enters the packet, never the long generic tail.
+            $reason = 'generic-query-anchor-only'
+        } else {
+            $strong = ($norm -ge $script:AihContextStrongConfidence)
+            $marginal = ($newMass -ge ($script:AihContextMarginalCoverage * $anchorSpecific))
+            $classNovel = (($meaningfulClasses -contains [string]$candidate.evidenceClass) -and (-not $coveredClasses.Contains([string]$candidate.evidenceClass)))
+            $coverage = ($classNovel -and ([double]$candidate.specificScore -ge ($script:AihContextCoverageConfidence * $anchorSpecific)))
+            if ($strong) { $selected = $true; $reason = 'strong-relative-confidence' }
+            elseif ($marginal) { $selected = $true; $reason = 'marginal-coverage' }
+            elseif ($coverage) { $selected = $true; $reason = 'evidence-class-coverage' }
+            elseif ([double]$candidate.specificScore -gt 0.0) { $reason = 'redundant-weak-evidence' }
+        }
+        if ($selected) {
+            foreach ($term in @($candidate.matchedTerms)) {
+                if ($weakFlag[$term]) { continue }
+                $imp = [double]$importance[$term]
+                if (-not $coveredTerms.ContainsKey($term) -or $imp -gt [double]$coveredTerms[$term]) { $coveredTerms[$term] = $imp }
+            }
+            foreach ($phrase in @($candidate.matchedPhrases)) { [void]$coveredPhrases.Add($phrase) }
+            if ($meaningfulClasses -contains [string]$candidate.evidenceClass) { [void]$coveredClasses.Add([string]$candidate.evidenceClass) }
+        }
+        $coverageContribution = 0.0
+        if ($anchorSpecific -gt 0.0) { $coverageContribution = [Math]::Round($newMass / $anchorSpecific, 4) }
+        $marked.Add([pscustomobject]@{
+            file = $candidate.file; score = $candidate.score; specificScore = $candidate.specificScore; snippet = $candidate.snippet
+            evidenceClass = $candidate.evidenceClass; classification = $candidate.classification
+            matchedTerms = @($candidate.matchedTerms); pathMatches = @($candidate.pathMatches); matchedPhrases = @($candidate.matchedPhrases)
+            normalizedScore = [Math]::Round($norm, 6)
+            selectedByRelevance = [bool]$selected
+            selectionReason = $reason
+            coverageContribution = $coverageContribution
+        })
+    }
+    $selectedCount = @($marked | Where-Object { $_.selectedByRelevance }).Count
+    $diagnostics.concentration = [ordered]@{
+        method              = 'relative-confidence+coverage-saturation'
+        strongConfidence    = $script:AihContextStrongConfidence
+        marginalCoverage    = $script:AihContextMarginalCoverage
+        coverageConfidence  = $script:AihContextCoverageConfidence
+        anchorScore         = [double]$ordered[$anchorIndex].score
+        anchorSpecificScore = $anchorSpecific
+        candidateCount      = @($marked).Count
+        selectedCount       = $selectedCount
+        genericQuery        = $genericQuery
+    }
+    [pscustomobject]($diagnostics + @{ candidates = @($marked) })
 }
 
 function Search-AihCode {
@@ -424,10 +724,38 @@ function Select-AihBundleSlices {
         $reason=if(@($match.pathMatches).Count -gt 0 -and @($match.matchedTerms).Count -gt @($match.pathMatches).Count){'path+content term match'}
                 elseif(@($match.pathMatches).Count -gt 0){'path match'}
                 else{'content term match'}
-        $slices.Add([pscustomobject]@{path=$match.file;score=$match.score;evidenceClass=$match.evidenceClass;classification=$match.classification;matchedTerms=@($match.matchedTerms);pathMatches=@($match.pathMatches);eligibility='eligible';reason=$reason;content=$slice;truncated=$slice.Length -lt $content.Length})
+        # TASK-0012: slices carry the concentration provenance (matchedPhrases,
+        # normalizedScore, specificScore, selectionReason) so the review packet
+        # and the provider-capacity packing see why each file was selected.
+        $normalizedScore=$null;$specificScore=$null;$selectionReason=$null;$matchedPhrases=@();$coverageContribution=$null
+        if($null-ne $match.PSObject.Properties['normalizedScore']){$normalizedScore=$match.normalizedScore}
+        if($null-ne $match.PSObject.Properties['specificScore']){$specificScore=$match.specificScore}
+        if($null-ne $match.PSObject.Properties['selectionReason']){$selectionReason=$match.selectionReason}
+        if($null-ne $match.PSObject.Properties['matchedPhrases']){$matchedPhrases=@($match.matchedPhrases)}
+        if($null-ne $match.PSObject.Properties['coverageContribution']){$coverageContribution=$match.coverageContribution}
+        $slices.Add([pscustomobject]@{path=$match.file;score=$match.score;retrievalScore=$match.score;specificScore=$specificScore;normalizedScore=$normalizedScore;evidenceClass=$match.evidenceClass;classification=$match.classification;matchedTerms=@($match.matchedTerms);matchedPhrases=@($matchedPhrases);pathMatches=@($match.pathMatches);coverageContribution=$coverageContribution;eligibility='eligible';reason=$reason;selectionReason=$selectionReason;selectedByRelevance=$true;content=$slice;truncated=$slice.Length -lt $content.Length})
         $used += $slice.Length
     }
     [pscustomobject]@{slices=@($slices);used=$used}
+}
+
+function Select-AihConcentratedCandidates {
+    # TASK-0012: the review bundle consumes ONLY the candidates the
+    # second-stage concentration selector marked as selected relevance. This
+    # is relevance-driven concentration, never a file-count budget: every
+    # strongly relevant candidate stays selected no matter how many files are
+    # already selected, and weak/redundant matches stay out no matter how few
+    # files are selected. Candidates without a selection mark (defensive
+    # fallback) are passed through unchanged.
+    param($Retrieval)
+    $candidates = @()
+    if ($null -ne $Retrieval -and $null -ne $Retrieval.PSObject.Properties['candidates']) {
+        $candidates = @($Retrieval.candidates | Where-Object {
+            ($null -ne $_.PSObject.Properties['selectedByRelevance'] -and [bool]$_.selectedByRelevance) -or
+            ($null -eq $_.PSObject.Properties['selectedByRelevance'])
+        })
+    }
+    [pscustomobject]@{ candidates = $candidates }
 }
 
 function New-AihContextBundle {
@@ -457,16 +785,22 @@ function New-AihContextBundle {
     $retrieval=Invoke-AihContextRetrieval $Workspace $query $rankLimit
     $broadenRetry=$false
     $meaningfulClasses=@('source','test','docs','config')
-    $selected=Select-AihBundleSlices -Retrieval $retrieval -WorkspaceRoot $layout.Workspace -UnlimitedTokens:$unlimitedTokens -UnlimitedFiles:$unlimitedFiles -MaxFiles $MaxFiles -MaxContextTokens $MaxContextTokens
+    # TASK-0012: concentrate BEFORE slicing - the bundle is built from the
+    # relevance-selected candidates only (no file-count budget involved).
+    $concentrated=Select-AihConcentratedCandidates $retrieval
+    $selected=Select-AihBundleSlices -Retrieval $concentrated -WorkspaceRoot $layout.Workspace -UnlimitedTokens:$unlimitedTokens -UnlimitedFiles:$unlimitedFiles -MaxFiles $MaxFiles -MaxContextTokens $MaxContextTokens
     $hasMeaningful=@($selected.slices | Where-Object { $meaningfulClasses -contains $_.evidenceClass }).Count -gt 0
     $requiresRepoEvidence=@($retrieval.meaningfulTerms).Count -gt 0
     if(-not $hasMeaningful -and $requiresRepoEvidence){
         # One deterministic broaden/retrieval retry: drop the relevance floor.
         # Eligibility, evidence weighting and budgets are unchanged; no LLM and
-        # no engineer model participates in context repair.
+        # no engineer model participates in context repair. Concentration still
+        # applies: a lower floor admits more CANDIDATES, never more weak
+        # selections.
         $broadenRetry=$true
         $retrieval=Invoke-AihContextRetrieval $Workspace $query $rankLimit 0
-        $selected=Select-AihBundleSlices -Retrieval $retrieval -WorkspaceRoot $layout.Workspace -UnlimitedTokens:$unlimitedTokens -UnlimitedFiles:$unlimitedFiles -MaxFiles $MaxFiles -MaxContextTokens $MaxContextTokens
+        $concentrated=Select-AihConcentratedCandidates $retrieval
+        $selected=Select-AihBundleSlices -Retrieval $concentrated -WorkspaceRoot $layout.Workspace -UnlimitedTokens:$unlimitedTokens -UnlimitedFiles:$unlimitedFiles -MaxFiles $MaxFiles -MaxContextTokens $MaxContextTokens
         $hasMeaningful=@($selected.slices | Where-Object { $meaningfulClasses -contains $_.evidenceClass }).Count -gt 0
     }
     $meaningfulSelected=@($selected.slices | Where-Object { $meaningfulClasses -contains $_.evidenceClass } | ForEach-Object { $_.evidenceClass } | Sort-Object -Unique)
@@ -489,13 +823,33 @@ function New-AihContextBundle {
     $git=[ordered]@{baseCommit=$null;changedFiles=@();diffStat=''}
     try{$git.baseCommit=(& git -C $layout.Workspace rev-parse HEAD 2>$null|Select-Object -First 1).Trim();$git.changedFiles=@(& git -C $layout.Workspace status --short 2>$null);$git.diffStat=(& git -C $layout.Workspace diff --stat 2>$null|Out-String).Trim()}catch{}
     $symbolCount=0;foreach($entry in @($repoMap.files)){$symbolCount+=@($entry.symbols).Count}
+    # TASK-0012: per-file provenance answers BOTH questions the manifest must
+    # explain: RETRIEVAL (why was this file selected - score, normalized and
+    # specific relevance, matched terms/phrases/paths, coverage contribution,
+    # deterministic selection reason) and, once the review transport packs for
+    # provider capacity, PACKING (includedInProviderPacket /
+    # providerOmissionReason, filled in by the transport, $null = not yet
+    # packed).
     $evidence=@($slices | ForEach-Object { [ordered]@{
-        path=$_.'path'; score=$_.'score'; evidenceClass=$_.'evidenceClass'; classification=$_.'classification'
-        matchedTerms=@($_.'matchedTerms'); pathMatches=@($_.'pathMatches')
+        path=$_.'path'; score=$_.'score'; retrievalScore=$_.'retrievalScore'; normalizedScore=$_.'normalizedScore'; specificScore=$_.'specificScore'
+        evidenceClass=$_.'evidenceClass'; classification=$_.'classification'
+        matchedTerms=@($_.'matchedTerms'); matchedPhrases=@($_.'matchedPhrases'); pathMatches=@($_.'pathMatches')
+        coverageContribution=$_.'coverageContribution'; selectionReason=$_.'selectionReason'; selectedByRelevance=$_.'selectedByRelevance'
         eligibility=$_.'eligibility'; reason=$_.'reason'
+        includedInProviderPacket=$null; providerOmissionReason=$null
+    } })
+    # Floor-passing candidates the concentration selector did NOT select, with
+    # the deterministic reason (relevance concentration transparency). The
+    # recorded list is a diagnostics cap only - it never influences selection.
+    $nonSelectedAll=@($retrieval.candidates | Where-Object { $null -ne $_.PSObject.Properties['selectedByRelevance'] -and -not [bool]$_.selectedByRelevance })
+    $nonSelected=@($nonSelectedAll | Select-Object -First 200 | ForEach-Object { [ordered]@{
+        path=$_.file; retrievalScore=$_.score; normalizedScore=$_.normalizedScore; specificScore=$_.specificScore
+        evidenceClass=$_.evidenceClass
+        matchedTerms=@($_.matchedTerms); matchedPhrases=@($_.matchedPhrases)
+        selectionReason=$_.selectionReason
     } })
     $manifest=[ordered]@{
-        schemaVersion=2
+        schemaVersion=3
         taskId=$TaskId
         budget=[ordered]@{maxContextTokens=$MaxContextTokens;estimatedTokens=[Math]::Ceiling($used/4);maxFiles=$MaxFiles;enforceLimits=(-not $unlimitedTokens -and -not $unlimitedFiles)}
         repositoryMap=[ordered]@{fileCount=@($repoMap.files).Count;symbolCount=$symbolCount;fullRepositoryIncluded=$false}
@@ -503,6 +857,9 @@ function New-AihContextBundle {
             query=$retrieval.query
             meaningfulTerms=@($retrieval.meaningfulTerms)
             stoppedTerms=@($retrieval.stoppedTerms)
+            weakTerms=@($retrieval.weakTerms)
+            phrases=@($retrieval.phrases)
+            termImportance=$retrieval.termImportance
             relevanceFloor=$retrieval.relevanceFloor
             broadenRetry=$broadenRetry
             scannedFiles=$retrieval.scannedFiles
@@ -510,7 +867,12 @@ function New-AihContextBundle {
             excludedFiles=$retrieval.excludedFiles
             excludedByReason=$retrieval.excludedByReason
             candidateCount=@($retrieval.candidates).Count
+            concentration=$retrieval.concentration
+            selectedEvidenceCount=@($slices).Count
             evidence=$evidence
+            nonSelectedEvidence=$nonSelected
+            nonSelectedTotal=@($nonSelectedAll).Count
+            nonSelectedRecorded=@($nonSelected).Count
         }
         contextQuality=[ordered]@{status=$qualityStatus;meaningfulEvidenceClasses=@($meaningfulSelected);broadenRetryUsed=$broadenRetry;reason=$qualityReason}
         files=@($slices|ForEach-Object{$_.path})
