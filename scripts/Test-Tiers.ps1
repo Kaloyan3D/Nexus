@@ -31,7 +31,7 @@ $probes = @(
     [pscustomobject]@{ Tier = 'DeepSeek normal'; Provider = 'flash-high-direct'; Model = 'deepseek-v4-flash'; Effort = 'high'; Expected = 'DEEPSEEK_NORMAL_OK' },
     [pscustomobject]@{ Tier = 'DeepSeek deep'; Provider = 'flash-max-direct'; Model = 'deepseek-v4-flash'; Effort = 'max'; Expected = 'DEEPSEEK_DEEP_OK' }
 )
-if ($Mode -eq 'normal' -and (Test-AihEndpoint -Uri $oauthModelsUrl -TimeoutSec 2)) { $probes += [pscustomobject]@{ Tier = 'Bounded Codex review'; Provider = 'sol-local'; Model = 'gpt-5.6-sol'; Effort = 'medium'; Expected = 'CODEX_REVIEW_OK' } }
+if ($Mode -eq 'normal' -and (Test-AihEndpoint -Uri $oauthModelsUrl -TimeoutSec 2)) { $probes += [pscustomobject]@{ Tier = 'Independent Codex review'; Provider = 'sol-local'; Model = 'gpt-5.6-sol'; Effort = 'medium'; Expected = 'CODEX_REVIEW_OK' } }
 
 $temporaryBase = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
 $probeRoot = Join-Path $temporaryBase ("aih-tier-probes-" + [guid]::NewGuid().ToString('N'))

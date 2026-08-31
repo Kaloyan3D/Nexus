@@ -29,13 +29,13 @@ Conversation state is temporary and model judgments are not a reliable state mac
 
 ---
 
-## ADR-002 — DeepSeek is the ordinary root executor; Codex is bounded review
+## ADR-002 — DeepSeek is the ordinary root executor; Codex is independent review
 
 **Status:** Accepted
 
 ### Decision
 
-DeepSeek V4 Flash owns normal planning/implementation/debugging/repair. Codex is a fresh bounded independent review path and is not a permanent parent agent.
+DeepSeek V4 Flash owns normal planning/implementation/debugging/repair. Codex is a fresh, read-only, independent review path and is not a permanent parent agent. Review budget enforcement is policy-driven (`codex.automaticReview.enforceLimits`, default `false` = unlimited review context).
 
 Writable Codex solving is exceptional and user-approved.
 

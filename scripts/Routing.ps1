@@ -7,7 +7,7 @@ function Get-AihPropertyValue { param([object]$Object,[string]$Name,$Default=$nu
 # Execution classes describe EXECUTION SEMANTICS, never model identity:
 #   engineer_normal -> the primaryEngineer role of the ACTIVE engineering profile
 #   engineer_deep   -> the deepEngineer role
-#   reviewer        -> the reviewer role (read-only, bounded, controller-owned)
+#   reviewer        -> the reviewer role (read-only, controller-owned)
 #   solver          -> the solver role (writable only under explicit approval)
 # The active Engineering Profile (config/engineering-profiles.json) binds each
 # role to a model-registry entry (config/model-registry.json) which resolves
@@ -246,7 +246,15 @@ function Test-AihEngineeringProfileBindings {
 }
 
 function Get-AihLegacyTier {param([string]$ExecutionClass)switch($ExecutionClass){'reviewer'{1}'codex_review'{1}'solver'{1}'codex_solve'{1}'engineer_deep'{2}'deepseek_deep'{2}default{3}}}
-function Get-AihRoutingStatePath {param([string]$DataRoot,[string]$Workspace,[string]$TaskId,[string]$Preset='aih-engineering')$bytes=[Text.Encoding]::UTF8.GetBytes(([IO.Path]::GetFullPath($Workspace).ToLowerInvariant()+"`n"+$Preset.ToLowerInvariant()+"`n"+$TaskId));$sha=[Security.Cryptography.SHA256]::Create();try{$name=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()+'.json'}finally{$sha.Dispose()};Join-Path (Join-Path $DataRoot 'states') $name}
+# TASK-0005 Part 14: durable routing-state identity.
+# For tasks with an immutable taskInstanceId the state file is keyed by
+#   normalized workspace + preset + taskInstanceId
+# so two lifecycle generations of one display id (TASK-0004 gen A vs gen B)
+# can never share routing state. taskId remains the key ONLY for legacy tasks
+# created before instance identity existed (explicit compatibility path). The
+# third key component IS the instance when one is supplied, so an
+# instance-aware state file can never collide with a legacy taskId-only file.
+function Get-AihRoutingStatePath {param([string]$DataRoot,[string]$Workspace,[string]$TaskId,[string]$Preset='aih-engineering',[string]$TaskInstanceId)$identity=if(-not[string]::IsNullOrWhiteSpace($TaskInstanceId)){$TaskInstanceId}else{$TaskId};$bytes=[Text.Encoding]::UTF8.GetBytes(([IO.Path]::GetFullPath($Workspace).ToLowerInvariant()+"`n"+$Preset.ToLowerInvariant()+"`n"+$identity));$sha=[Security.Cryptography.SHA256]::Create();try{$name=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()+'.json'}finally{$sha.Dispose()};Join-Path (Join-Path $DataRoot 'states') $name}
 function Read-AihRoutingState {param([string]$Path)if(-not(Test-Path -LiteralPath $Path)){return $null};try{Get-Content -Raw -LiteralPath $Path|ConvertFrom-Json}catch{throw "Routing state is invalid: $Path"}}
 function Get-AihRoutingMutexName {param([string]$DataRoot)$bytes=[Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($DataRoot).ToLowerInvariant());$sha=[Security.Cryptography.SHA256]::Create();try{$suffix=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').Substring(0,24)}finally{$sha.Dispose()};"AIHarnessRouting-$suffix"}
 
@@ -259,7 +267,12 @@ function Get-AihRoutingInitialDecision {
 function Get-AihFailureSignature {param([string]$FailureReason)if([string]::IsNullOrWhiteSpace($FailureReason)){return ''};$normalized=($FailureReason.ToLowerInvariant()-replace '\b\d+\b','#'-replace '\s+',' ').Trim();$bytes=[Text.Encoding]::UTF8.GetBytes($normalized);$sha=[Security.Cryptography.SHA256]::Create();try{([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').Substring(0,16).ToLowerInvariant()}finally{$sha.Dispose()}}
 
 function Invoke-AihRoutingDecision {
-    param([Parameter(Mandatory=$true)][string]$Description,[Parameter(Mandatory=$true)][string]$Workspace,[Parameter(Mandatory=$true)][string]$PolicyPath,[Parameter(Mandatory=$true)][string]$DataRoot,[string]$TaskId,[string]$Preset,[string]$ForceTier,[string]$ForceClass,[string]$Signal='none',[string]$FailureReason,[switch]$UserApprovedCodexSolve,[switch]$ReviewRequested,[switch]$DryRun,[string]$SettingsPath,[string]$CustomProfilePath)
+    # TASK-0005 Part 16: when -TaskInstanceId is supplied the routing request
+    # is instance-guarded (fail closed on mismatch against the authoritative
+    # ledger) and the durable state/decision records carry the lifecycle
+    # identity (Part 15). Legacy callers that omit it keep the exact old
+    # behavior (explicit compatibility path).
+    param([Parameter(Mandatory=$true)][string]$Description,[Parameter(Mandatory=$true)][string]$Workspace,[Parameter(Mandatory=$true)][string]$PolicyPath,[Parameter(Mandatory=$true)][string]$DataRoot,[string]$TaskId,[string]$Preset,[string]$ForceTier,[string]$ForceClass,[string]$Signal='none',[string]$FailureReason,[switch]$UserApprovedCodexSolve,[switch]$ReviewRequested,[switch]$DryRun,[string]$SettingsPath,[string]$CustomProfilePath,[string]$TaskInstanceId)
     $policy=Get-AihRoutingPolicy $PolicyPath;$profilesPath=Join-Path (Split-Path -Parent $PolicyPath) 'engineering-profiles.json';$registryPath=Join-Path (Split-Path -Parent $PolicyPath) 'model-registry.json'
     $profiles=Get-AihEngineeringProfiles $profilesPath $CustomProfilePath;$registry=Get-AihModelRegistry $registryPath
     $resolved=Resolve-AihPreset $policy $Preset;$profile=Resolve-AihProfile $policy $resolved $profiles $SettingsPath
@@ -267,7 +280,16 @@ function Invoke-AihRoutingDecision {
     if([string]::IsNullOrWhiteSpace($TaskId)){$TaskId=[guid]::NewGuid().ToString('N')};if($TaskId-notmatch'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'){throw 'TaskId is invalid.'}
     $mutex=$null;$taken=$false;if(-not $DryRun){$mutex=[Threading.Mutex]::new($false,(Get-AihRoutingMutexName $DataRoot));try{$taken=$mutex.WaitOne(30000)}catch [Threading.AbandonedMutexException]{$taken=$true};if(-not $taken){throw 'Timed out waiting for routing lock.'}}
     try{
-        $statePath=Get-AihRoutingStatePath $DataRoot $workspacePath $TaskId $resolved.Id;$state=Read-AihRoutingState $statePath;$initial=Get-AihRoutingInitialDecision $Description $policy
+        # TASK-0005: instance guard. A request carrying taskInstanceId must
+        # never route a different lifecycle generation that merely shares the
+        # display task id. The guard runs only when an authoritative ledger
+        # exists (standalone routing against a synthetic TaskId is unchanged).
+        if(-not[string]::IsNullOrWhiteSpace($TaskInstanceId)-and(Test-Path -LiteralPath (Join-Path $workspacePath '.ai-harness\state\tasks.json'))){
+            $identity=Test-AihTaskIdentity -Workspace $workspacePath -TaskId $TaskId -TaskInstanceId $TaskInstanceId
+            if(-not [bool]$identity.exists){throw "Routing rejected: task was not found in the authoritative ledger: $TaskId"}
+            if(-not [bool]$identity.instanceMatches){throw "Routing rejected: task $TaskId no longer holds the expected taskInstanceId '$TaskInstanceId' (generation mismatch)."}
+        }
+        $statePath=Get-AihRoutingStatePath $DataRoot $workspacePath $TaskId $resolved.Id $TaskInstanceId;$state=Read-AihRoutingState $statePath;$initial=Get-AihRoutingInitialDecision $Description $policy
         $overrideValue=if(-not[string]::IsNullOrWhiteSpace($ForceClass)){$ForceClass}else{$ForceTier};$forced=ConvertTo-AihExecutionClass $overrideValue $policy
         $current=if($null-ne$forced){$forced}elseif($null-ne$state){ConvertTo-AihExecutionClass ([string]$state.executionClass) $policy}else{$initial.ExecutionClass}
         $signature=Get-AihFailureSignature $FailureReason;$sameCount=if($null-ne$state-and$state.lastFailureSignature-eq$signature-and-not[string]::IsNullOrWhiteSpace($signature)){[int]$state.sameFailureCount}else{0}
@@ -276,17 +298,17 @@ function Invoke-AihRoutingDecision {
         if($null -ne $state){if($null -ne $state.PSObject.Properties['reviewRequired']){$reviewRequired=$reviewRequired -or [bool]$state.reviewRequired};if($null -ne $state.PSObject.Properties['risk'] -and [string]$state.risk -ne 'normal'){$risk=[string]$state.risk}}
         if($null-ne$forced){$reason="Manual operator override selected $current."}
         elseif($ReviewRequested -and $resolved.Id -eq 'aih-deepseek'){throw 'Codex is disabled by the DeepSeek-only preset.'}
-        elseif($ReviewRequested){$escalatedFrom=$current;$current='reviewer';$reviewRequired=$true;$reason='Explicit user-requested bounded independent review (reviewRequested metadata; controller-owned, fresh, read-only).'}
-        elseif($Signal-eq'review-findings'-and$current-eq'reviewer'){$escalatedFrom='reviewer';$current='engineer_deep';$sameCount=0;$reason='Bounded review findings return to the deep engineer for implementation; the reviewer does not remain the parent.'}
+        elseif($ReviewRequested){$escalatedFrom=$current;$current='reviewer';$reviewRequired=$true;$reason='Explicit user-requested independent review (reviewRequested metadata; controller-owned, fresh, read-only).'}
+        elseif($Signal-eq'review-findings'-and$current-eq'reviewer'){$escalatedFrom='reviewer';$current='engineer_deep';$sameCount=0;$reason='Independent review findings return to the deep engineer for implementation; the reviewer does not remain the parent.'}
         elseif($resolved.Id-eq'aih-deepseek'-and$Signal-eq'user-codex'){throw 'Codex is disabled by the DeepSeek-only preset.'}
-        elseif(@($policy.escalation.immediateReviewSignals)-contains$Signal){$escalatedFrom=$current;$current='reviewer';$reviewRequired=$true;$reason="Evidence-based bounded independent review signal: $Signal."}
+        elseif(@($policy.escalation.immediateReviewSignals)-contains$Signal){$escalatedFrom=$current;$current='reviewer';$reviewRequired=$true;$reason="Evidence-based independent review signal: $Signal."}
         elseif($sameCount-ge[int]$policy.escalation.sameFailureThreshold){$escalatedFrom=$current;if($current-eq'engineer_normal'){$current='engineer_deep'}elseif($current-eq'engineer_deep'){$current=if($resolved.Config.allowCodexSubagent){'reviewer'}else{'engineer_deep'}};$sameCount=0;$reason='The same meaningful failure repeated at the configured threshold; escalation is scoped to that failure.'}
         $route=$policy.executionClasses.PSObject.Properties[$current].Value;if($current-eq'solver'-and-not$UserApprovedCodexSolve){throw 'solver requires the explicit -UserApprovedCodexSolve operator flag.'}
         $role=Get-AihRoleForExecutionClass $policy $current
         $target=$null;if(-not[string]::IsNullOrWhiteSpace($role)){$target=Resolve-AihModelTarget $registry $profile $role}
         $provider=if($null-ne$target){$target.Provider}else{$null};$model=if($null-ne$target){$target.Model}else{$null};$modelDisplayName=if($null-ne$target){$target.ModelDisplayName}else{$null};$vendor=if($null-ne$target){$target.Vendor}else{$null};$reasoning=if($null-ne$target){$target.Reasoning}else{$null}
-        $record=[ordered]@{recordVersion=4;recordId=[guid]::NewGuid().ToString('N');timestampUtc=[DateTime]::UtcNow.ToString('o');taskId=$TaskId;workspace=$workspacePath;description=$Description;preset=$resolved.Id;selectedExecutionClass=$current;executionClass=$current;role=$role;profile=$profile.Id;profileDisplayName=$profile.DisplayName;provider=$provider;model=$model;modelDisplayName=$modelDisplayName;vendor=$vendor;reasoning=$reasoning;writable=[bool]$route.writable;risk=$risk;reviewRequired=$reviewRequired;reviewRequested=[bool]$ReviewRequested;reason=$reason;escalatedFrom=$escalatedFrom;manualOverride=$null-ne$forced;signal=$Signal;failureSignature=$signature;sameFailureCount=$sameCount;matchedRule=$initial.RuleId;matchedPatterns=@($initial.MatchedPatterns);freshSession=$true;completionAuthority=$false;selectedTier=(Get-AihLegacyTier $current);legacyTierDeprecated=$true;dryRun=[bool]$DryRun}
-        if(-not$DryRun){New-Item -ItemType Directory -Force -Path (Join-Path $DataRoot 'states')|Out-Null;$newState=[ordered]@{taskId=$TaskId;workspace=$workspacePath;preset=$resolved.Id;executionClass=$current;selectedTier=(Get-AihLegacyTier $current);role=$role;profile=$profile.Id;profileDisplayName=$profile.DisplayName;provider=$provider;model=$model;modelDisplayName=$modelDisplayName;reasoning=$reasoning;risk=$risk;reviewRequired=$reviewRequired;reviewRequested=[bool]$ReviewRequested;lastFailureSignature=$signature;sameFailureCount=$sameCount;updatedAtUtc=[DateTime]::UtcNow.ToString('o')};Write-AihAtomicJson $statePath $newState;Add-AihJsonLine (Join-Path $DataRoot 'decisions.jsonl') $record}
+        $record=[ordered]@{recordVersion=4;recordId=[guid]::NewGuid().ToString('N');timestampUtc=[DateTime]::UtcNow.ToString('o');taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;description=$Description;preset=$resolved.Id;selectedExecutionClass=$current;executionClass=$current;role=$role;profile=$profile.Id;profileDisplayName=$profile.DisplayName;provider=$provider;model=$model;modelDisplayName=$modelDisplayName;vendor=$vendor;reasoning=$reasoning;writable=[bool]$route.writable;risk=$risk;reviewRequired=$reviewRequired;reviewRequested=[bool]$ReviewRequested;reason=$reason;escalatedFrom=$escalatedFrom;manualOverride=$null-ne$forced;signal=$Signal;failureSignature=$signature;sameFailureCount=$sameCount;matchedRule=$initial.RuleId;matchedPatterns=@($initial.MatchedPatterns);freshSession=$true;completionAuthority=$false;selectedTier=(Get-AihLegacyTier $current);legacyTierDeprecated=$true;dryRun=[bool]$DryRun}
+        if(-not$DryRun){New-Item -ItemType Directory -Force -Path (Join-Path $DataRoot 'states')|Out-Null;$newState=[ordered]@{taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;preset=$resolved.Id;executionClass=$current;selectedTier=(Get-AihLegacyTier $current);role=$role;profile=$profile.Id;profileDisplayName=$profile.DisplayName;provider=$provider;model=$model;modelDisplayName=$modelDisplayName;reasoning=$reasoning;risk=$risk;reviewRequired=$reviewRequired;reviewRequested=[bool]$ReviewRequested;lastFailureSignature=$signature;sameFailureCount=$sameCount;updatedAtUtc=[DateTime]::UtcNow.ToString('o')};Write-AihAtomicJson $statePath $newState;Add-AihJsonLine (Join-Path $DataRoot 'decisions.jsonl') $record}
         [pscustomobject]$record
     }finally{if($taken){$mutex.ReleaseMutex()};if($null-ne$mutex){$mutex.Dispose()}}
 }

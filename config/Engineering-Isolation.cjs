@@ -56,6 +56,13 @@ function apply(ctx) {
     if (!activeProfile) {
       return Object.freeze({ ...proposed, provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoningEffort: 'max' })
     }
+    // TASK-0005 Part 17: for tasks with an immutable taskInstanceId the live
+    // execution-class lookup goes through the GENERATION-AWARE routing state
+    // (workspace + preset + taskInstanceId key, resolved inside
+    // profiles.routingStatePath). Stale state from another lifecycle
+    // generation of the same display taskId can therefore no longer flip
+    // engineer roles onto a wrong model (e.g. engineer_deep -> the reviewer
+    // model under GLM + Codex).
     const executionClass = profiles.liveExecutionClassOf(installRoot, binding)
     const role = profiles.roleOfExecutionClass(executionClass) || 'primaryEngineer'
     const target = profiles.resolveTarget(installRoot, activeProfile.id, role)

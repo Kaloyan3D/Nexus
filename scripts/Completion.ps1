@@ -107,7 +107,7 @@ function Get-AihBoundedFixes {
     if ($null -ne $Semantic -and $Semantic.status -eq 'FAIL') {
         foreach ($fix in @($Semantic.boundedFixes)) { $fixes.Add([pscustomobject]@{ source = 'bounded-review'; description = $fix.description; acceptanceCriteria = @($fix.acceptanceCriteria) }) }
         if (@($Semantic.boundedFixes).Count -eq 0) {
-            foreach ($reason in @($Semantic.concreteReasons)) { $fixes.Add([pscustomobject]@{ source = 'bounded-review'; description = "Address bounded review failure: $reason"; acceptanceCriteria = @('The bounded review finding is resolved with deterministic evidence.') }) }
+            foreach ($reason in @($Semantic.concreteReasons)) { $fixes.Add([pscustomobject]@{ source = 'bounded-review'; description = "Address independent review failure: $reason"; acceptanceCriteria = @('The independent review finding is resolved with deterministic evidence.') }) }
         }
     }
     @($fixes)

@@ -243,6 +243,11 @@ function Invoke-AihSnapshotBuild {
         $moduleRows = @()
         $nowModules = [DateTime]::UtcNow.ToString('o')
         foreach ($candidate in $moduleCandidates) {
+            # moduleId is the stable LOGICAL identity (repository + path);
+            # metadataHash is the deterministic version of the manifest-derived
+            # metadata at snapshot time, so a changed manifest yields the same
+            # moduleId with a different metadata version.
+            $metadataFingerprint = ($candidate.metadata | ConvertTo-Json -Depth 6 -Compress)
             $moduleRow = [pscustomobject][ordered]@{
                 schemaVersion = 1
                 moduleId      = (New-AihDeterministicId 'module' ($repository.repositoryId + '|' + $candidate.path))
@@ -252,10 +257,26 @@ function Invoke-AihSnapshotBuild {
                 type          = $candidate.type
                 manifestPath  = $candidate.manifestPath
                 metadata      = $candidate.metadata
+                metadataHash  = ('sha256:' + (Get-AihSha256Text -Text $metadataFingerprint))
                 createdAt     = $nowModules
                 updatedAt     = $nowModules
             }
             $moduleRows = @($moduleRows) + @($moduleRow)
+        }
+
+        # ── file → module ownership for this snapshot ───────────────────────
+        # Longest-prefix match over module paths; the generic root module ('')
+        # owns everything not claimed by a nested module.
+        $moduleOwnership = @{}
+        $ownedModules = @($moduleRows | Sort-Object -Property { "$($_.path)".Length } -Descending)
+        foreach ($fileEntry in @($scan.files)) {
+            $ownerId = $null
+            foreach ($candidate in $ownedModules) {
+                $modulePath = "$($candidate.path)"
+                if ($modulePath -eq '') { $ownerId = $candidate.moduleId; break }
+                if ($fileEntry.path -eq $modulePath -or $fileEntry.path.StartsWith($modulePath + '/')) { $ownerId = $candidate.moduleId; break }
+            }
+            if ($null -ne $ownerId) { $moduleOwnership[$fileEntry.path] = $ownerId }
         }
 
         # ── content-addressed file objects ──────────────────────────────────
@@ -280,6 +301,7 @@ function Invoke-AihSnapshotBuild {
         New-Item -ItemType Directory -Force -Path $snapshotDir | Out-Null
         $fileRows = @()
         foreach ($fileEntry in @($scan.files)) {
+            $ownerKey = "$($fileEntry.path)"
             $fileRows = @($fileRows) + @([pscustomobject][ordered]@{
                 snapshotId    = $snapshot.snapshotId
                 path          = $fileEntry.path
@@ -292,6 +314,7 @@ function Invoke-AihSnapshotBuild {
                 isBinary      = [bool]$fileEntry.isBinary
                 isSymlink     = [bool]$fileEntry.isSymlink
                 isTracked     = [bool]$fileEntry.isTracked
+                moduleId      = $(if ($moduleOwnership.ContainsKey($ownerKey)) { $moduleOwnership[$ownerKey] } else { $null })
             })
         }
         $filesDocument = [pscustomobject]@{ schemaVersion = 1; snapshotId = $snapshot.snapshotId; files = $fileRows }

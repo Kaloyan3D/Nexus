@@ -145,7 +145,7 @@ $env:AIH_LOCAL_OAUTH_KEY = if ($oauthAvailable) { 'local-oauth-no-secret' } else
 $env:DEEPSEEK_API_KEY = $deepSeekKey
 $env:AIH_ACTIVE_PRESET = $null
 $env:AIH_ENABLE_CODEX_SUBAGENT = '0'
-if ($EnableCodexSubagent) { Write-Warning '-EnableCodexSubagent is deprecated; Codex is now available only through the bounded review service.' }
+if ($EnableCodexSubagent) { Write-Warning '-EnableCodexSubagent is deprecated; Codex is now available only through the independent review service.' }
 $env:AIH_PERSONA = @"
 You are the DeepSeek implementation agent for workspace $workspace. Complete the supplied bounded task. Use repository-local instructions and relevant context. Respect scope, use targeted verification, and return structured evidence. The deterministic controller owns task state, routing, retries, budgets, escalation, and completion. If blocked, return one scoped escalation with a stable failure signature.
 

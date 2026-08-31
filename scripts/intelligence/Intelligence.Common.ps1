@@ -165,40 +165,58 @@ function ConvertFrom-AihSimpleYaml {
     #   * lists of scalars ('- item'), inline or one per line;
     #   * quoted or bare scalars, true/false/null and integers.
     # Comments and blank lines are ignored. Anything else fails closed.
+    # List items attach to the deepest currently-open key: a nested key with
+    # an empty value (e.g. 'exclude:' under 'index:') receives the list.
     param([Parameter(Mandatory = $true)][string]$Content)
     $result = [ordered]@{}
-    $currentKey = $null
+    $topKey = $null        # last top-level key whose map/list is open
+    $nestedKey = $null     # last nested key (under $topKey) awaiting a list
     foreach ($rawLine in ($Content.Replace([string][char]13, '') -split [string][char]10)) {
         if ($rawLine -match '^\s*#') { continue }
         if ([string]::IsNullOrWhiteSpace($rawLine)) { continue }
         $indent = ($rawLine.Length - $rawLine.TrimStart().Length)
         $line = $rawLine.Trim()
         if ($line -match '^-(?:\s+(.*))?$') {
-            if ($null -eq $currentKey) { throw "YAML list item outside a key is unsupported: $rawLine" }
+            if ($null -eq $topKey) { throw "YAML list item outside a key is unsupported: $rawLine" }
             $itemText = if ($null -ne $Matches[1]) { $Matches[1].Trim() } else { '' }
             if ($itemText -eq '') { throw "Empty YAML list item is unsupported: $rawLine" }
             $list = [System.Collections.ArrayList]::new()
-            if ($null -ne $result[$currentKey]) {
-                foreach ($existing in @($result[$currentKey])) { $null = $list.Add($existing) }
+            $existingValue = $null
+            if ($null -ne $nestedKey) {
+                $nestedMap = $result[$topKey]
+                if ($null -ne $nestedMap -and $nestedMap -is [System.Collections.IDictionary] -and $nestedMap.Contains($nestedKey)) { $existingValue = $nestedMap[$nestedKey] }
+            } else {
+                $existingValue = $result[$topKey]
+            }
+            if ($null -ne $existingValue) {
+                foreach ($existing in @($existingValue)) { $null = $list.Add($existing) }
             }
             $null = $list.Add((ConvertFrom-AihSimpleYamlScalar $itemText))
-            $result[$currentKey] = @($list.ToArray())
+            $listValue = @($list.ToArray())
+            if ($null -ne $nestedKey) {
+                $nestedMap = $result[$topKey]
+                if ($null -eq $nestedMap -or -not ($nestedMap -is [System.Collections.IDictionary])) { throw "YAML list under a scalar value is unsupported: $rawLine" }
+                $nestedMap[$nestedKey] = $listValue
+            } else {
+                $result[$topKey] = $listValue
+            }
             continue
         }
         if ($line -match '^([^:]+):(?:\s*(.*))?$') {
             $key = $Matches[1].Trim().Trim('"', "'")
             $valueText = if ($null -ne $Matches[2]) { $Matches[2].Trim() } else { '' }
             if ($indent -eq 0) {
-                $currentKey = $key
-                if ($valueText -eq '') { $result[$currentKey] = $null }
-                else { $result[$currentKey] = ConvertFrom-AihSimpleYamlScalar $valueText; $currentKey = $null }
+                $topKey = $key
+                $nestedKey = $null
+                if ($valueText -eq '') { $result[$topKey] = $null }
+                else { $result[$topKey] = ConvertFrom-AihSimpleYamlScalar $valueText; $topKey = $null }
             } else {
-                if ($null -eq $currentKey) { throw "YAML nesting without a parent key is unsupported: $rawLine" }
-                if ($null -eq $result[$currentKey] -or -not ($result[$currentKey] -is [System.Collections.IDictionary])) {
-                    $result[$currentKey] = [ordered]@{}
+                if ($null -eq $topKey) { throw "YAML nesting without a parent key is unsupported: $rawLine" }
+                if ($null -eq $result[$topKey] -or -not ($result[$topKey] -is [System.Collections.IDictionary])) {
+                    $result[$topKey] = [ordered]@{}
                 }
-                if ($valueText -eq '') { $result[$currentKey][$key] = $null }
-                else { $result[$currentKey][$key] = ConvertFrom-AihSimpleYamlScalar $valueText }
+                if ($valueText -eq '') { $result[$topKey][$key] = $null; $nestedKey = $key }
+                else { $result[$topKey][$key] = ConvertFrom-AihSimpleYamlScalar $valueText; $nestedKey = $null }
             }
             continue
         }

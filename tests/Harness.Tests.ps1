@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]param([string]$InstallRoot='C:\AI-Harness')
+[CmdletBinding()]param([string]$InstallRoot='C:\AI-Harness')
 Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
 . (Join-Path $InstallRoot 'scripts\Common.ps1')
 . (Join-Path $InstallRoot 'scripts\Routing.ps1')
@@ -121,15 +121,42 @@ try{
  Assert-Aih ($digest.summaryCharacters-le1020-and$digest.summary-match'Expected: 1 Actual: 2') 'large logs become bounded summaries preserving failure'
  Assert-Aih ((Get-Content -Raw $digest.rawPath).Length-eq$raw.Length) 'raw output remains accessible as an artifact'
 
+ # TASK-0007: unlimited context mode (0 = unlimited, explicit semantic).
+ $largeContent=('large lookup logic '*300)
+ [IO.File]::WriteAllText((Join-Path $fixture 'src\large.ts'),$largeContent,[Text.UTF8Encoding]::new($false))
+ for($i=1;$i -le 14;$i++){ [IO.File]::WriteAllText((Join-Path $fixture ('src\gen{0:d2}.ts' -f $i)),(('generated lookup logic {0}' -f $i)+"`n")*3,[Text.UTF8Encoding]::new($false)) }
+ $unl=New-AihContextBundle $fixture $task2.taskId 'fix findWidget lookup' @('works') 0 0
+ Assert-Aih ($unl.manifest.budget.maxContextTokens-eq0-and$unl.manifest.budget.maxFiles-eq0) 'context bundle records 0 = unlimited explicitly'
+ Assert-Aih ($unl.manifest.budget.enforceLimits-eq$false) 'unlimited context bundle reports enforceLimits=false'
+ Assert-Aih (@($unl.fileSlices|Where-Object{$_.truncated}).Count-eq0) 'unlimited bundle never truncates matched slices'
+ $largeSlice=@($unl.fileSlices|Where-Object{$_.path-eq'src/large.ts'})[0]
+ Assert-Aih ($null-ne$largeSlice-and$largeSlice.content.Length-eq$largeContent.Length) 'unlimited bundle includes the whole matched file'
+ Assert-Aih (@($unl.fileSlices).Count-gt12) 'unlimited bundle is not capped at the old 12-file default'
+ Assert-Aih (-not$unl.manifest.repositoryMap.fullRepositoryIncluded) 'unlimited mode still never claims full-repository ingestion'
+ $negBlocked=$false;try{New-AihContextBundle $fixture $task2.taskId 'x' @() -5 0|Out-Null}catch{$negBlocked=$true}
+ Assert-Aih $negBlocked 'negative context budgets stay invalid (0 is the only unlimited value)'
+
  $slice=[pscustomobject]@{path='src/widget.ts';content='export function findWidget() {}'}
  $packet=New-AihReviewPacket $fixture $task2.taskId 'Is lookup safe?' @('no duplicate execution') 'one line diff' @($slice) @() 'DeepSeek is uncertain' $policy
- Assert-Aih ($packet.enforcement.allowed-and$packet.enforcement.readOnly-and$packet.enforcement.freshContext-and-not$packet.enforcement.completionAuthority) 'review packet is bounded fresh read-only and has no completion authority'
+ Assert-Aih ($packet.enforcement.allowed-and$packet.enforcement.readOnly-and$packet.enforcement.freshContext-and-not$packet.enforcement.completionAuthority) 'review packet is fresh read-only and has no completion authority'
+ # TASK-0007: enforcement disabled (shipped default) -> the legacy diff-line ceiling is inert.
  $oversized=New-AihReviewPacket $fixture $task2.taskId 'review' @() ((1..2600|ForEach-Object{'x'})-join"`n") @($slice) @() '' $policy
- Assert-Aih (-not$oversized.enforcement.allowed-and$oversized.enforcement.violations-match'diff line limit') 'automatic Codex review is rejected over hard diff limit'
+ Assert-Aih ([bool]$oversized.enforcement.allowed) '2600-line diff is allowed while review budget enforcement is disabled'
+ # enforceLimits=true keeps the legacy hard diff limit.
+ $enforcedPolicy=$policy|ConvertTo-Json -Depth 20|ConvertFrom-Json
+ $enforcedPolicy.codex.automaticReview.enforceLimits=$true
+ $enforcedOversized=New-AihReviewPacket $fixture $task2.taskId 'review' @() ((1..2600|ForEach-Object{'x'})-join"`n") @($slice) @() '' $enforcedPolicy
+ Assert-Aih (-not$enforcedOversized.enforcement.allowed-and$enforcedOversized.enforcement.violations-match'diff line limit') 'enforceLimits=true still rejects over the hard diff limit'
  $call=Register-AihCodexReviewCall $fixture $task2.taskId $packet
- Assert-Aih ($call.executionClass-eq'reviewer'-and-not$call.completionAuthority) 'bounded review call registration cannot own completion'
- $secondBlocked=$false;try{Register-AihCodexReviewCall $fixture $task2.taskId $packet|Out-Null}catch{$secondBlocked=$_.Exception.Message-match'DO NOT CALL CODEX'}
- Assert-Aih $secondBlocked 'hard per-task Codex call limit cannot be bypassed by prompting'
+ Assert-Aih ($call.executionClass-eq'reviewer'-and-not$call.completionAuthority) 'review call registration cannot own completion'
+ # TASK-0007: repeated review calls register while enforcement is disabled.
+ Register-AihCodexReviewCall $fixture $task2.taskId $packet|Out-Null
+ $callsAfterTwo=(Get-AihTask $fixture $task2.taskId).codexCalls
+ Assert-Aih ([int]$callsAfterTwo-ge2) 'repeated /review calls on one task register while budget enforcement is disabled'
+ # enforceLimits=true keeps the hard per-task Codex call limit.
+ $enforcedSmall=New-AihReviewPacket $fixture $task2.taskId 'Is lookup safe?' @('no duplicate execution') 'one line diff' @($slice) @() 'DeepSeek is uncertain' $enforcedPolicy
+ $secondBlocked=$false;try{Register-AihCodexReviewCall $fixture $task2.taskId $enforcedSmall|Out-Null}catch{$secondBlocked=$_.Exception.Message-match'call limit exceeded'}
+ Assert-Aih $secondBlocked 'hard per-task Codex call limit cannot be bypassed when enforceLimits=true'
  $telemetry=Write-AihTaskTelemetry $fixture $critical.taskId @{model='deepseek-v4-flash';provider='flash-max-direct';inputTokens=100;outputTokens=20;contextSize=400;filesSupplied=2;filesModified=1;diffLines=5;finalResult='complete';configuration='deepseek-only'}
  Assert-Aih ($telemetry.codexCalls-eq0-and$telemetry.model-eq'deepseek-v4-flash') 'cost regression telemetry records normal zero-Codex execution'
  $learning=Add-AihLearning $fixture $task2.taskId static-rule 'prevent duplicate execution'
@@ -175,6 +202,12 @@ try {
     $fixtureDist = Join-Path $fixtureFrontend 'dist'
     New-Item -ItemType Directory -Force -Path $fixtureDist | Out-Null
     [IO.File]::WriteAllText((Join-Path $fixtureFrontend 'package.json'), '{"name":"@deepseek-ai/dsh-web-frontend","version":"0.1.1-rc.2"}', [Text.UTF8Encoding]::new($false))
+    # Non-ASCII copy strings are read from patch-copy.json (explicit UTF-8) —
+    # never inlined as literals — because a BOM-less script file is decoded with
+    # the system ANSI codepage by Windows PowerShell 5.1, which would corrupt
+    # the fixture on non-UTF-8 codepages. The fixture must mirror the pinned
+    # bundle byte-for-byte on every machine.
+    $fixtureCopy = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'ui\nexus-ui\patch-copy.json') | ConvertFrom-Json
     # Fixture files deliberately use CRLF line endings to prove the patch is line-ending tolerant.
     [IO.File]::WriteAllText((Join-Path $fixtureDist 'index.html'), "<!doctype html>`r`n<html><head><title>DeepSeek Harness</title></head><body></body></html>", [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $fixtureDist 'favicon.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>', [Text.UTF8Encoding]::new($false))
@@ -184,7 +217,8 @@ try {
     [IO.File]::WriteAllText((Join-Path $fixtureRenderer 'client.js'), "const productTitle = ""DeepSeek Harness"";`r`n", [Text.UTF8Encoding]::new($false))
     $fixtureConversation = Join-Path $fixtureApp 'dsh-client-ui-conversation\lib'
     New-Item -ItemType Directory -Force -Path $fixtureConversation | Out-Null
-    [IO.File]::WriteAllText((Join-Path $fixtureConversation 'client.js'), """hero.headline"": ""Into the Unknown"",`r`n""hero.headline"": ""探索未至之境""`r`nbackground:var(--dsw-alias-button-info-fill);color:#fff`r`nvar(--dsw-alias-button-info-hover)`r`n#6187D8`r`n", [Text.UTF8Encoding]::new($false))
+    $conversationFixture = $fixtureCopy.heroHeadline[0].from + ",`r`n" + $fixtureCopy.heroHeadline[1].from + "`r`nbackground:var(--dsw-alias-button-info-fill);color:#fff`r`nvar(--dsw-alias-button-info-hover)`r`n#6187D8`r`n"
+    [IO.File]::WriteAllText((Join-Path $fixtureConversation 'client.js'), $conversationFixture, [Text.UTF8Encoding]::new($false))
     $fixtureLayout = Join-Path $fixtureApp 'dsh-client-ui-layout\lib'
     New-Item -ItemType Directory -Force -Path $fixtureLayout | Out-Null
     [IO.File]::WriteAllText((Join-Path $fixtureLayout 'client.js'), "const w = { sidebar: 280, details: 0 };`r`nd.sidebar = d.sidebar === 0 ? 280 : 0;`r`nconst w = panels.sidebar === 0 ? 280 : panels.sidebar;`r`n", [Text.UTF8Encoding]::new($false))
@@ -195,8 +229,11 @@ try {
     New-Item -ItemType Directory -Force -Path $fixtureModels | Out-Null
     # Build the welcome-notice block from the exact copy strings in patch-copy.json so the
     # fixture mirrors the pinned bundle byte-for-byte (including the literal backslash-n sequences).
-    $fixtureCopy = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'ui\nexus-ui\patch-copy.json') | ConvertFrom-Json
-    $noticeBlock = "const WELCOME_NOTICE_COPY = {`r`n`t`t`tzh: {`r`n`t`t`t`ttitle: " + $fixtureCopy.welcomeNotice.titleZh.from + ",`r`n`t`t`t`tbody: " + $fixtureCopy.welcomeNotice.bodyZh.from + "`r`n`t`t`t`tcontinueLabel: `"继续`"`r`n`t`t`t},`r`n`t`t`ten: {`r`n`t`t`t`ttitle: " + $fixtureCopy.welcomeNotice.titleEn.from + ",`r`n`t`t`t`tbody: " + $fixtureCopy.welcomeNotice.bodyEn.from + "`r`n`t`t`t`tcontinueLabel: `"Continue`"`r`n`t`t`t}`r`n`t`t};"
+    # The zh continue label is composed from codepoints so the fixture stays
+    # byte-faithful on any ANSI codepage (patch-copy.json carries no key for it
+    # and the patcher never rewrites it).
+    $zhContinue = '"' + [string][char]0x7EE7 + [string][char]0x7EED + '"'
+    $noticeBlock = "const WELCOME_NOTICE_COPY = {`r`n`t`t`tzh: {`r`n`t`t`t`ttitle: " + $fixtureCopy.welcomeNotice.titleZh.from + ",`r`n`t`t`t`tbody: " + $fixtureCopy.welcomeNotice.bodyZh.from + "`r`n`t`t`t`tcontinueLabel: " + $zhContinue + "`r`n`t`t`t},`r`n`t`t`ten: {`r`n`t`t`t`ttitle: " + $fixtureCopy.welcomeNotice.titleEn.from + ",`r`n`t`t`t`tbody: " + $fixtureCopy.welcomeNotice.bodyEn.from + "`r`n`t`t`t`tcontinueLabel: ""Continue""`r`n`t`t`t}`r`n`t`t};"
     [IO.File]::WriteAllText((Join-Path $fixtureModels 'client.js'), $noticeBlock, [Text.UTF8Encoding]::new($false))
     $fixtureData = Join-Path $fixture 'data'
     New-Item -ItemType Directory -Force -Path (Join-Path $fixtureData 'profiles\node_modules') | Out-Null
@@ -210,14 +247,14 @@ try {
     Assert-Aih ([string]$fixtureManifest.name -eq 'Nexus') 'fixture: manifest name patched'
     Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureRenderer 'client.js')).Contains('const productTitle = "Nexus"')) 'fixture: renderer title patched'
     $fixtureConversationText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureConversation 'client.js')
-    Assert-Aih ($fixtureConversationText.Contains('Nexus — deterministic AI engineering') -and $fixtureConversationText.Contains('Nexus — 确定性 AI 工程')) 'fixture: hero headlines patched (en + zh)'
+    Assert-Aih ($fixtureConversationText.Contains($fixtureCopy.heroHeadline[0].to) -and $fixtureConversationText.Contains($fixtureCopy.heroHeadline[1].to)) 'fixture: hero headlines patched (en + zh)'
     $fixtureLayoutText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureLayout 'client.js')
     Assert-Aih ($fixtureLayoutText.Contains('sidebar: 288,') -and $fixtureLayoutText.Contains('d.sidebar === 0 ? 288 : 0')) 'fixture: sidebar default width patched to 288'
     Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureModelSel 'client.js')).Contains('!modelLabel.toUpperCase().endsWith(effortLabel.toUpperCase())')) 'fixture: model effort dedupe patched'
     Assert-Aih ($fixtureConversationText.Contains('background:var(--dsw-alias-button-primary-fill);color:#fff') -and $fixtureConversationText.Contains('var(--dsw-alias-button-primary-hover)') -and $fixtureConversationText.Contains('#7C5CFF') -and -not $fixtureConversationText.Contains('#6187D8')) 'fixture: send button violet + glow tinted'
     Assert-Aih ((Test-Path -LiteralPath (Join-Path $fixtureDist 'assets\nexus-logo.png')) -and (Test-Path -LiteralPath (Join-Path $fixtureDist 'assets\nexus-mark.png'))) 'fixture: brand assets copied to dist'
     $fixtureModelsText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureModels 'client.js')
-    Assert-Aih ($fixtureModelsText.Contains('About Nexus') -and $fixtureModelsText.Contains('关于 Nexus') -and -not $fixtureModelsText.Contains('Internal Testing Notice')) 'fixture: welcome notice patched'
+    Assert-Aih ($fixtureModelsText.Contains('About Nexus') -and $fixtureModelsText.Contains($fixtureCopy.welcomeNotice.titleZh.to) -and -not $fixtureModelsText.Contains('Internal Testing Notice')) 'fixture: welcome notice patched'
     Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureData 'settings.yaml')).Contains('preference: dark')) 'fixture: dark theme default added'
     Assert-Aih (Test-Path -LiteralPath (Join-Path $fixtureData 'profiles\node_modules\@nexus\ui-brand\package.json')) 'fixture: Nexus package installed'
 
@@ -324,7 +361,12 @@ try {
 finally {
     if (Test-Path -LiteralPath $secFixture) { Remove-Item -LiteralPath $secFixture -Recurse -Force }
 }
-$sourceFiles=Get-ChildItem -LiteralPath $InstallRoot -Recurse -File|Where-Object{$_.FullName-notmatch'\\(\.git|app|runtime|data|logs|nx-chrome-profile)\\' -and $_.Name-notmatch'^(lockfile|LOCK|SingletonLock)$'}
+# TASK-0005: .ai-harness is controller-owned RUNTIME state (ledger, run
+# manifests, bindings). Task descriptions legitimately embed user prompt text
+# (recovery format specs can name stale reasons like 'task' + '-instance' +
+# '-mismatch', which the credential pattern reads as a sk- prefixed token), so
+# runtime state is excluded from the SOURCE credential scan like data/logs are.
+$sourceFiles=Get-ChildItem -LiteralPath $InstallRoot -Recurse -File|Where-Object{$_.FullName-notmatch'\\(\.git|app|runtime|data|logs|nx-chrome-profile|\.ai-harness)\\' -and $_.Name-notmatch'^(lockfile|LOCK|SingletonLock)$'}
 $secretLeak=$sourceFiles|Select-String -Pattern '(?i)(sk-[A-Za-z0-9_-]{16,}|DEEPSEEK_API_KEY\s*:\s*[^\s''"]+)'|Select-Object -First 1
 Assert-Aih ($null-eq$secretLeak) 'source contains no credential values'
 foreach($script in Get-ChildItem (Join-Path $InstallRoot 'scripts') -Filter '*.ps1'){[void][scriptblock]::Create((Get-Content -Raw $script.FullName))}

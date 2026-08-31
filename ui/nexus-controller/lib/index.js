@@ -163,10 +163,15 @@ function apply(ctx) {
   // Files that feed the detail snapshot, per bound session. mtime-keyed so
   // the (immutable-history) snapshot is only recomputed when a source changes.
   function detailSourceKey(workspace, taskId, sessionId) {
+    const binding = bindingOf(sessionId)
+    const taskInstanceId = binding && typeof binding.taskInstanceId === 'string' && binding.taskInstanceId !== ''
+      ? binding.taskInstanceId
+      : null
     const paths = [
       join(dataRoot, 'routing', 'session-bindings.json'),
       join(dataRoot, 'routing', 'decisions.jsonl'),
-      join(dataRoot, 'routing', 'states', status.routingStateFileName(workspace, bindingOf(sessionId)?.preset || 'aih-engineering', taskId)),
+      // TASK-0005: the cache key follows the generation-aware state file name.
+      join(dataRoot, 'routing', 'states', status.routingStateFileName(workspace, binding?.preset || 'aih-engineering', taskId, taskInstanceId)),
       join(workspace, '.ai-harness', 'state', 'tasks.json'),
       join(workspace, '.ai-harness', 'state', 'decisions.jsonl'),
       join(workspace, '.ai-harness', 'runs', taskId, 'attempts.jsonl'),
@@ -468,8 +473,11 @@ function apply(ctx) {
           if (actionId === 'approve') {
             // The ONLY bounded controller transition for approval: attempt
             // completion with the review passed (fails closed when
-            // verification or criteria are not met).
-            completion = execPowerShell(['-Action', 'complete', '-TaskId', String(binding.taskId), '-CodexReviewPassed'])
+            // verification or criteria are not met). TASK-0005: the completion
+            // is instance-guarded to the bound lifecycle generation.
+            const completeArgs = ['-Action', 'complete', '-TaskId', String(binding.taskId), '-CodexReviewPassed']
+            if (binding.taskInstanceId) completeArgs.push('-TaskInstanceId', binding.taskInstanceId)
+            completion = execPowerShell(completeArgs)
           }
           return { kind: 'ok', gate: status.normalizeGateRecord(resolvedGate), completion }
         })

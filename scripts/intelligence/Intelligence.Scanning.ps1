@@ -202,6 +202,11 @@ function Resolve-AihRepositoryConfig {
         if ($parsed['index'].Contains('respect_gitignore')) { $config.respectGitignore = [bool]$parsed['index']['respect_gitignore'] }
         if ($parsed['index'].Contains('max_file_bytes')) { $config.maxFileBytes = [long]$parsed['index']['max_file_bytes'] }
         if ($parsed['index'].Contains('sample_bytes')) { $config.sampleBytes = [long]$parsed['index']['sample_bytes'] }
+        # canonical location for exclude globs; a top-level 'exclude:' is
+        # tolerated for compatibility but index.exclude wins when both exist
+        if ($parsed['index'].Contains('exclude') -and $null -ne $parsed['index']['exclude']) {
+            $config.exclude = @($parsed['index']['exclude'] | ForEach-Object { "$_" } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        }
     }
     if ($parsed.Contains('modules') -and $null -ne $parsed['modules'] -and $parsed['modules'] -is [System.Collections.IDictionary]) {
         if ($parsed['modules'].Contains('autodetect')) { $config.modulesAutoDetect = [bool]$parsed['modules']['autodetect'] }

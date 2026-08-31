@@ -16,7 +16,7 @@ profile → model registry → provider.
 | `deterministic` | — | Mechanical checks or lookups that need no LLM | No | none |
 | `engineer_normal` | primaryEngineer | Normal implementation and debugging | Yes | DeepSeek V4 Flash, HIGH |
 | `engineer_deep` | deepEngineer | Expanded reasoning after evidence-backed escalation / critical work | Yes | DeepSeek V4 Flash, MAX |
-| `reviewer` | reviewer | Fresh, bounded, independent review | No | GPT/Codex review path |
+| `reviewer` | reviewer | Fresh, independent review (read-only) | No | GPT/Codex review path |
 | `solver` | solver | Exceptional explicit user-approved solve | Yes | GPT/Codex solve path |
 
 Legacy tier names and pre-Phase-2 class names (`deepseek_normal`,
@@ -42,7 +42,7 @@ engineer_normal
 -> verification/failure evidence
 -> engineer_deep
 -> verification
--> bounded reviewer when policy requires it
+-> independent reviewer when policy requires it
 -> deep-engineer repair (same profile)
 -> deterministic completion
 ```
@@ -51,7 +51,7 @@ Codex is not a permanent parent agent.
 
 ## Critical boundaries
 
-Current policy can mark critical areas such as security, authentication/authorization, permission boundaries, migration safety, concurrency correctness, or similar high-risk architectural boundaries for deeper work and bounded review.
+Current policy can mark critical areas such as security, authentication/authorization, permission boundaries, migration safety, concurrency correctness, or similar high-risk architectural boundaries for deeper work and independent review.
 
 These are policy signals, not a permission for arbitrary model escalation.
 

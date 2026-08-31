@@ -8,7 +8,7 @@
  * aih-route, aih-context, aih-review). Previously the Web GUI message path
  * went straight from the chat to the root DeepSeek model with no task state,
  * no routing decision, and no way for an explicit user review request to
- * reach the bounded Codex Review Service.
+ * reach the independent review service.
  *
  * This plugin is mounted in the aih-engineering and aih-deepseek agent
  * presets (see Setup.ps1). It:
@@ -20,8 +20,9 @@
  *  - posts a visible controller notice into the session so the UI shows the
  *    execution path (ENGINEER NORMAL vs INDEPENDENT REVIEW);
  *  - implements the explicit /review (legacy /codex-review) command:
- *    TaskController -> execution class reviewer -> bounded Review Packet ->
- *    hard budget validation -> ONE fresh read-only independent review ->
+ *    TaskController -> execution class reviewer -> review packet (budget
+ *    enforcement is POLICY-DRIVEN via codex.automaticReview.enforceLimits,
+ *    disabled by default) -> ONE fresh read-only independent review ->
  *    ReviewResult -> telemetry. No engineering audit runs first; the turn is
  *    rejected so the review is controller-owned (0 engineer calls);
  *  - feeds deterministic failure signals (turn errors) into the routing
@@ -32,7 +33,9 @@
  *
  * The reviewer is never exposed to the model as a tool: the preset keeps
  * tool-subagent-codex disabled and the review service is invoked only by this
- * controller bridge, always through New-AihReviewPacket budget enforcement.
+ * controller bridge, always through New-AihReviewPacket policy-driven
+ * enforcement (TASK-0007: unlimited review context unless the policy opts
+ * back into the legacy hard budgets with enforceLimits=true).
  * The reviewer model is resolved from the ACTIVE ENGINEERING PROFILE (the
  * reviewer role); it can never become the root engineering model.
  */
@@ -46,9 +49,59 @@ const crypto = require('node:crypto')
 
 const REVIEW_COMMAND = /^\s*\/(?:codex-)?review\b/i
 const VERIFY_COMMAND = /^\s*\/verify\b/i
-const MAX_FILES = 8
-const MAX_CONTEXT_TOKENS = 30000
+// TASK-0007: these are NOT the review budget anymore. They are the LEGACY
+// hard-budget fallbacks, used ONLY when the routing policy cannot be read or
+// opts back into enforcement with codex.automaticReview.enforceLimits=true.
+// The shipped Nexus policy sets enforceLimits=false: the controller bridge
+// must not impose a file count or a context-token ceiling on its own.
+const LEGACY_MAX_FILES = 8
+const LEGACY_MAX_CONTEXT_TOKENS = 30000
 const CLI_TIMEOUT_MS = 320000
+
+// ── review budget policy (TASK-0007) ────────────────────────────────────────
+//
+// codex.automaticReview.enforceLimits decides whether the LEGACY hard budgets
+// (file count / diff lines / context tokens / calls per task / output tokens)
+// apply to the independent review. The shipped default is FALSE: unlimited
+// review context, with only the provider/model context window as a real
+// capacity boundary (surfaced as a provider-capacity error by the review
+// transport). A missing flag or an unreadable policy fails SAFE to the
+// legacy enforced behavior.
+const REVIEW_BUDGET_POLICY_CACHE = new Map()
+
+function reviewBudgetPolicy(installRoot) {
+  // Direct helper calls (including checkout-local diagnostics/tests) resolve
+  // from configured runtime state first, then from this checked-out module.
+  // The live plugin path always supplies apply()'s validated installRoot.
+  const root = installRoot
+    ? path.resolve(String(installRoot))
+    : process.env.AIH_INSTALL_ROOT
+      ? path.resolve(process.env.AIH_INSTALL_ROOT)
+      : process.env.DSH_HOME
+        ? path.dirname(path.resolve(process.env.DSH_HOME))
+        : path.resolve(__dirname, '..')
+  const policyPath = path.join(root, 'config', 'routing-policy.json')
+  const fallback = { enforceLimits: true, maxFiles: LEGACY_MAX_FILES, maxContextTokens: LEGACY_MAX_CONTEXT_TOKENS, source: 'fallback' }
+  let mtimeMs = null
+  try { mtimeMs = fs.statSync(policyPath).mtimeMs } catch { return fallback }
+  const cached = REVIEW_BUDGET_POLICY_CACHE.get(policyPath)
+  if (cached && cached.mtimeMs === mtimeMs) return cached.value
+  let value = fallback
+  try {
+    const document = JSON.parse(fs.readFileSync(policyPath, 'utf8'))
+    const review = document && document.codex && document.codex.automaticReview
+    if (review && typeof review === 'object') {
+      value = {
+        enforceLimits: review.enforceLimits === undefined ? true : Boolean(review.enforceLimits),
+        maxFiles: Number.isFinite(Number(review.maxFiles)) ? Number(review.maxFiles) : LEGACY_MAX_FILES,
+        maxContextTokens: Number.isFinite(Number(review.maxContextTokens)) ? Number(review.maxContextTokens) : LEGACY_MAX_CONTEXT_TOKENS,
+        source: 'policy',
+      }
+    }
+  } catch { value = fallback }
+  REVIEW_BUDGET_POLICY_CACHE.set(policyPath, { mtimeMs, value })
+  return value
+}
 
 // ── pure helpers (exported for deterministic tests) ─────────────────────────
 
@@ -139,7 +192,9 @@ const REVIEW_INLINE_CODE_RES = [
 ]
 const REVIEW_FILE_MAX_BYTES = 64 * 1024 * 1024
 
-function referencedFilesOf(question) {
+// TASK-0007: maxFiles is the policy-derived cap (LEGACY_MAX_FILES only when
+// the policy enforces limits); null or 0 means UNLIMITED.
+function referencedFilesOf(question, maxFiles = LEGACY_MAX_FILES) {
   if (typeof question !== 'string') return []
   const tokens = []
   const seen = new Set()
@@ -148,7 +203,7 @@ function referencedFilesOf(question) {
     if (seen.has(token)) continue
     seen.add(token)
     tokens.push(token)
-    if (tokens.length >= MAX_FILES) break
+    if (maxFiles !== null && maxFiles > 0 && tokens.length >= maxFiles) break
   }
   return tokens
 }
@@ -157,11 +212,11 @@ function hasInlineCode(question) {
   return typeof question === 'string' && REVIEW_INLINE_CODE_RES.some((re) => re.test(question))
 }
 
-function resolveReviewFiles(workspace, question) {
+function resolveReviewFiles(workspace, question, maxFiles = LEGACY_MAX_FILES) {
   const root = path.resolve(String(workspace || ''))
   const slices = []
-  for (const token of referencedFilesOf(question)) {
-    if (slices.length >= MAX_FILES) break
+  for (const token of referencedFilesOf(question, maxFiles)) {
+    if (maxFiles !== null && maxFiles > 0 && slices.length >= maxFiles) break
     const candidate = path.resolve(root, token)
     if (candidate !== root && !candidate.startsWith(root + path.sep)) continue
     let stat
@@ -174,9 +229,9 @@ function resolveReviewFiles(workspace, question) {
   return slices
 }
 
-function classifyReviewContext(workspace, question) {
-  if (referencedFilesOf(question).length > 0) {
-    return resolveReviewFiles(workspace, question).length > 0 ? 'files' : 'bundle'
+function classifyReviewContext(workspace, question, maxFiles = LEGACY_MAX_FILES) {
+  if (referencedFilesOf(question, maxFiles).length > 0) {
+    return resolveReviewFiles(workspace, question, maxFiles).length > 0 ? 'files' : 'bundle'
   }
   return hasInlineCode(question) ? 'inline' : 'bundle'
 }
@@ -210,11 +265,14 @@ function isWorkerAgent(header) {
 // Phase 2: labels describe EXECUTION SEMANTICS, never model identity. The
 // actual model/provider for a run is reported separately (routing decision
 // fields), so the UI never implies a vendor from the execution class.
+// TASK-0007: the review class is "Independent Review (read-only)" — it is
+// called "bounded" ONLY when the policy enforces the legacy hard budgets
+// (enforceLimits=true), which is not the shipped default.
 const EXECUTION_CLASS_LABELS = {
   deterministic: 'Deterministic',
   engineer_normal: 'Engineer \u00b7 Normal',
   engineer_deep: 'Engineer \u00b7 Deep',
-  reviewer: 'Independent Review (read-only, bounded)',
+  reviewer: 'Independent Review (read-only)',
   solver: 'Solve (writable, approval-gated)',
 }
 const LEGACY_EXECUTION_CLASS_ALIASES = {
@@ -241,6 +299,31 @@ function createControllerMessage(text, form) {
     content: [{ type: 'text', text }],
     source: { kind: 'plugin', plugin: 'aih-controller', form: form ?? 'notice' },
   }
+}
+
+/**
+ * TASK-0007: review result notice. With budget enforcement disabled the
+ * Control Room must NOT report the obsolete budget numbers ("8 files /
+ * 30000 context tokens / 1 call"); it reports the enforcement state instead:
+ * "Budget enforcement: disabled" next to the unchanged read-only/fresh facts.
+ */
+function reviewResultText(binding, summary, raw) {
+  const budget = summary && summary.budget ? summary.budget : null
+  const enforced = Boolean(budget && budget.enforceLimits)
+  const budgetLine = enforced && budget
+    ? 'Budget enforcement: enabled (' + budget.maxFiles + ' files / ' + budget.maxContextTokens + ' context tokens / ' + budget.maxCallsPerTask + ' call)'
+    : 'Budget enforcement: disabled'
+  const lines = [
+    'Controller review result · task ' + binding.taskId,
+    'Execution: Independent Review (read-only)',
+    'Verdict: ' + summary.verdict,
+    'Findings: ' + summary.findings + (summary.severities.length ? ' (' + summary.severities.join(', ') + ')' : ''),
+    'Provider: ' + summary.provider + ' · model: ' + summary.model + ' · calls: ' + summary.callCount,
+    budgetLine,
+    'Read-only: true · fresh context: true · completion authority: controller (reviewer cannot complete the task)',
+  ]
+  if (raw && typeof raw === 'object') lines.push('Result JSON: ' + JSON.stringify(raw))
+  return lines.join('\n')
 }
 
 /**
@@ -295,6 +378,194 @@ function parseCliJson(text) {
   return JSON.parse(parsed)
 }
 
+// ── TASK-0005: task identity / session binding validation ───────────────────
+//
+// Core invariants implemented here:
+//   > TaskController state is authoritative. Session bindings are references
+//     only.
+//   > TASK DISPLAY IDENTITY != TASK LIFECYCLE IDENTITY.
+//   > Once a task has an immutable lifecycle identity, no controller operation
+//     may silently target another task merely because it shares TASK-NNNN.
+//
+//   taskId          'TASK-NNNN' — human-facing label (UI, logs, local
+//                   sequencing). NEVER sufficient for durable identity.
+//   taskInstanceId  'task_<32 hex>' — immutable lifecycle identity of exactly
+//                   one task generation (routing identity, session binding
+//                   identity, attempts, review identity, completion identity,
+//                   operator gates, telemetry, cross-record joins). Generated
+//                   once by TaskController; never reused.
+
+/**
+ * Normalize a workspace path for IDENTITY COMPARISON ONLY (never for display
+ * or filesystem access). Mirrors status.cjs normalizeWorkspacePath:
+ *   - forward slashes become backslashes; separators collapse
+ *   - trailing separators are trimmed (a drive root like C:\ stays)
+ *   - comparison is case-insensitive (Windows path semantics)
+ * Equivalent forms compare equal (C:\Repo == c:\repo\) while
+ * prefix-related paths never do (C:\Repo != C:\Repo2). Repository-relative
+ * source path case semantics are untouched — this is workspace identity only.
+ */
+function normalizeWorkspaceIdentity(workspace) {
+  if (typeof workspace !== 'string' || workspace === '') return ''
+  let normalized = workspace.replace(/[\\/]+/g, '\\')
+  while (normalized.length > 3 && normalized.endsWith('\\')) {
+    normalized = normalized.slice(0, -1)
+  }
+  return normalized.toLowerCase()
+}
+
+/**
+ * Compare the workspace recorded in a binding with the CURRENT session
+ * workspace. Returns 'workspace-mismatch' when they differ, null otherwise.
+ * A missing workspace on either side never compares equal (fail-closed).
+ */
+function classifyBindingWorkspace(binding, workspace) {
+  const bindingWorkspace = binding && typeof binding.workspace === 'string' ? binding.workspace : ''
+  const normalizedBinding = normalizeWorkspaceIdentity(bindingWorkspace)
+  const normalizedCurrent = normalizeWorkspaceIdentity(workspace)
+  if (normalizedBinding === '' || normalizedCurrent === '') return 'workspace-mismatch'
+  return normalizedBinding === normalizedCurrent ? null : 'workspace-mismatch'
+}
+
+/**
+ * Classify a persisted binding against an authoritative TaskController
+ * identity result (Task.ps1 -Action test-task). PURE and deterministic:
+ *
+ *   binding has taskInstanceId + exact instance exists  -> { verdict: 'valid' }
+ *   task missing from the ledger                        -> stale 'task-missing'
+ *   task exists under a DIFFERENT taskInstanceId        -> stale 'instance-mismatch'
+ *   binding has NO taskInstanceId (legacy)              -> stale 'ambiguous-legacy-binding'
+ *                                                          (its lifecycle generation
+//                                                           cannot be proven, so it
+//                                                           must never silently
+//                                                           attach to a new
+//                                                           generation)
+ *
+ * An unusable identity result (CLI failure, malformed output, missing ledger,
+ * timeout — anything the TaskController could not answer authoritatively)
+ * THROWS with code 'binding-validation-inconclusive': the caller must then
+ * PRESERVE the binding, create NO replacement task and classify NOTHING as
+ * missing. 'exists=false' is trusted only because the TaskController contract
+ * guarantees it means 'ledger successfully read, task absent'.
+ */
+function classifyBindingIdentity(binding, identity) {
+  if (!binding || typeof binding !== 'object') {
+    const error = new Error('binding identity classification requires a binding')
+    error.code = 'binding-validation-inconclusive'
+    throw error
+  }
+  if (!identity || typeof identity !== 'object' || typeof identity.exists !== 'boolean') {
+    const error = new Error('task identity could not be validated: the TaskController returned no authoritative answer (validation infrastructure failure)')
+    error.code = 'binding-validation-inconclusive'
+    throw error
+  }
+  const bindingInstance = typeof binding.taskInstanceId === 'string' ? binding.taskInstanceId : ''
+  if (bindingInstance === '') {
+    return { verdict: 'stale', reason: 'ambiguous-legacy-binding' }
+  }
+  if (!identity.exists) {
+    return { verdict: 'stale', reason: 'task-missing' }
+  }
+  if (identity.instanceMatches !== true) {
+    return { verdict: 'stale', reason: 'instance-mismatch' }
+  }
+  return { verdict: 'valid' }
+}
+
+/**
+ * Session-scoped binding validation/recovery lock (Part 13). One stale
+ * session + two simultaneous controller events = ONE replacement task: the
+ * second event waits for the first recovery to settle and then re-validates
+ * against the fresh binding. The lock is PER SESSION — different sessions
+ * never block each other.
+ */
+function createBindingGuard(deps) {
+  const locks = new Map()
+  async function withSessionBindingLock(sessionId, operation) {
+    const key = String(sessionId || '')
+    const previous = locks.get(key) || Promise.resolve()
+    const run = previous.then(() => operation())
+    const tail = run.then(() => null, () => null)
+    locks.set(key, tail)
+    tail.then(() => {
+      if (locks.get(key) === tail) locks.delete(key)
+    })
+    return run
+  }
+
+  async function recoverStaleBinding(agent, session, workspace, promptText, stale, reason) {
+    // Part 10: structured detection event with the full identity context,
+    // removal from memory, persisted removal, then a FRESH authoritative task
+    // through the normal binding flow. The stale binding is never pointed at
+    // another task that merely shares its taskId, and no task is ever
+    // reconstructed from binding contents.
+    deps.log({
+      event: 'stale-binding-detected',
+      sessionId: session && session.id ? session.id : null,
+      taskId: stale.taskId,
+      oldTaskInstanceId: stale.taskInstanceId ?? null,
+      oldWorkspace: stale.workspace ?? null,
+      currentWorkspace: workspace,
+      reason,
+    })
+    deps.invalidateBinding(stale)
+    const created = await deps.createBinding(agent, session, workspace, promptText)
+    return { binding: created, outcome: 'recovered', stale: { taskId: stale.taskId, reason } }
+  }
+
+  /**
+   * Validate (and if deterministically proven stale, recover) the session
+   * binding under the session-scoped lock. Returns
+   *   { binding, outcome: 'valid' | 'bound' | 'recovered', stale? }
+   * and THROWS with code 'binding-validation-inconclusive' when validation
+   * infrastructure fails (binding preserved, nothing created — Part 12).
+   */
+  async function ensureBinding(agent, session, workspace, promptText) {
+    return withSessionBindingLock(session.id, async () => {
+      const binding = deps.bindingFor(session)
+      if (!binding) {
+        const created = await deps.createBinding(agent, session, workspace, promptText)
+        return { binding: created, outcome: 'bound' }
+      }
+      const workspaceReason = classifyBindingWorkspace(binding, workspace)
+      if (workspaceReason) {
+        return recoverStaleBinding(agent, session, workspace, promptText, binding, workspaceReason)
+      }
+      // Part 21: a legacy binding WITHOUT taskInstanceId can never prove its
+      // lifecycle generation, so it must not silently attach to (possibly
+      // different) current controller state. It is stale/ambiguous by
+      // definition and is safely rebound through the normal flow.
+      const bindingInstance = typeof binding.taskInstanceId === 'string' ? binding.taskInstanceId : ''
+      if (bindingInstance === '') {
+        return recoverStaleBinding(agent, session, workspace, promptText, binding, 'ambiguous-legacy-binding')
+      }
+      // Part 5/8: the authoritative identity test. A TaskController failure
+      // here THROWS (inconclusive) — it must never become 'task missing'.
+      let identity
+      try {
+        identity = await deps.testTaskIdentity(workspace, binding.taskId, binding.taskInstanceId)
+      } catch (error) {
+        if (error && error.code === 'binding-validation-inconclusive') throw error
+        // Centralized Part 12 semantics: any validation-infrastructure
+        // failure (CLI launch failure, timeout, corrupt ledger, malformed
+        // JSON) is INCONCLUSIVE. The caller must preserve the binding, create
+        // no replacement task, and classify nothing as missing.
+        const wrapped = new Error('task identity could not be validated: ' + String(error && error.message ? error.message : error))
+        wrapped.code = 'binding-validation-inconclusive'
+        wrapped.cause = error
+        throw wrapped
+      }
+      const verdict = classifyBindingIdentity(binding, identity)
+      if (verdict.verdict === 'stale') {
+        return recoverStaleBinding(agent, session, workspace, promptText, binding, verdict.reason)
+      }
+      return { binding, outcome: 'valid' }
+    })
+  }
+
+  return { ensureBinding, withSessionBindingLock, locks }
+}
+
 // ── plugin ──────────────────────────────────────────────────────────────────
 
 function resolveInstallRoot() {
@@ -336,6 +607,10 @@ function apply(ctx) {
       for (const [sessionId, binding] of Object.entries(bindings)) {
         serializable[sessionId] = {
           sessionId: binding.sessionId,
+          // TASK-0005 Part 7: the binding is an identity REFERENCE into
+          // TaskController state. taskInstanceId is the lifecycle identity it
+          // is bound to (immutable, never reused); taskId remains display.
+          taskInstanceId: binding.taskInstanceId ?? null,
           taskId: binding.taskId,
           workspace: binding.workspace,
           preset: binding.preset,
@@ -427,16 +702,42 @@ function apply(ctx) {
     if (options.signal) payload.signal = options.signal
     if (options.failureReason) payload.failureReason = options.failureReason
     if (options.reviewRequested) payload.reviewRequested = true
-    const args = ['-TaskId', taskId, '-Preset', options.preset ?? 'aih-engineering']
+    // TASK-0005 Part 16: route requests carry the lifecycle instance; Route.ps1
+    // re-validates it against the authoritative ledger (fail closed).
+    if (options.taskInstanceId) payload.taskInstanceId = options.taskInstanceId
+    const args = ['-TaskId', taskId, '-Preset', options.preset ?? 'aih-engineering', '-InstallRoot', installRoot]
     const decision = await invokePowerShell('Route.ps1', args, { payload })
     if (!decision || !decision.executionClass) throw new Error('aih-controller: routing returned no execution class')
     return decision
   }
 
-  async function markReviewRequested(workspace, taskId) {
-    await invokePowerShell('Task.ps1', ['-Action', 'set-review-requested', '-TaskId', taskId], {
+  async function markReviewRequested(workspace, taskId, taskInstanceId) {
+    const args = ['-Action', 'set-review-requested', '-TaskId', taskId]
+    if (taskInstanceId) args.push('-TaskInstanceId', taskInstanceId)
+    await invokePowerShell('Task.ps1', args, {
       payload: { workspace },
     })
+  }
+
+  /**
+   * TASK-0005 Part 5: authoritative task identity lookup through the
+   * TaskController CLI (Task.ps1 -Action test-task). Returns the identity
+   * contract { exists, taskId, taskInstanceId, instanceMatches } where
+   * exists=false means ONLY 'ledger successfully read and task absent'.
+   * Any validation-infrastructure failure (launch failure, timeout, corrupt
+   * ledger, malformed JSON, non-zero exit) THROWS here — it must never be
+   * misread as a missing task (Part 12).
+   */
+  async function testTaskIdentity(workspace, taskId, taskInstanceId) {
+    const args = ['-Action', 'test-task', '-TaskId', taskId]
+    if (taskInstanceId) args.push('-TaskInstanceId', taskInstanceId)
+    const identity = await invokePowerShell('Task.ps1', args, { payload: { workspace } })
+    if (!identity || typeof identity !== 'object' || typeof identity.exists !== 'boolean') {
+      const error = new Error('aih-controller: test-task returned no authoritative identity result')
+      error.code = 'binding-validation-inconclusive'
+      throw error
+    }
+    return identity
   }
 
   // ── TASK-0004: controller-owned attempt/verification/gate lifecycle ─────
@@ -459,6 +760,25 @@ function apply(ctx) {
   }
 
   const gateModule = loadGateModule()
+
+  // ── TASK-0005: session binding validation / recovery guard ────────────────
+  // Part 13: ONE session-scoped in-flight validation/recovery per session id.
+  // Two overlapping controller events for the same stale session therefore
+  // create exactly ONE replacement task; different sessions never block each
+  // other (no global lock).
+  const bindingGuard = createBindingGuard({
+    bindingFor: (session) => bindingFor(session),
+    createBinding: (agent, session, workspace, promptText) => bindSession(agent, session, workspace, promptText),
+    testTaskIdentity,
+    log,
+    invalidateBinding: (stale) => {
+      const key = stale && stale.sessionId ? stale.sessionId : null
+      if (key && bindings[key]) {
+        delete bindings[key]
+        persistBindings()
+      }
+    },
+  })
 
   function attemptsRecordsOf(workspace, taskId) {
     const filePath = path.join(workspace, '.ai-harness', 'runs', taskId, 'attempts.jsonl')
@@ -488,6 +808,14 @@ function apply(ctx) {
     return Boolean(record && (record.status === 'started' || record.status === 'verifying'))
   }
 
+  // TASK-0005 Part 6: every task-scoped mutation carries the lifecycle
+  // instance when the binding has one; TaskController fails closed on a
+  // generation mismatch. Centralized at the bridge boundary by always passing
+  // binding.taskInstanceId through the payload.
+  function instancePayloadOf(binding) {
+    return binding && binding.taskInstanceId ? { taskInstanceId: binding.taskInstanceId } : {}
+  }
+
   async function beginAttempt(binding, turn) {
     return invokePowerShell('Task.ps1', ['-Action', 'begin-attempt', '-TaskId', binding.taskId, '-ExecutionClass', binding.executionClass || 'engineer_normal'], {
       payload: {
@@ -495,12 +823,13 @@ function apply(ctx) {
         sessionId: binding.sessionId,
         startedByTurn: String(turn ?? ''),
         requireNoOpenAttempt: true,
+        ...instancePayloadOf(binding),
       },
     })
   }
 
   async function attemptEvent(binding, status, extra) {
-    const payload = { workspace: binding.workspace, taskId: binding.taskId, status }
+    const payload = { workspace: binding.workspace, taskId: binding.taskId, status, ...instancePayloadOf(binding) }
     if (extra && extra.reason) payload.reason = extra.reason
     if (extra && extra.failureSignature) payload.failureSignature = extra.failureSignature
     if (extra && extra.evidence) payload.evidence = extra.evidence
@@ -509,20 +838,20 @@ function apply(ctx) {
 
   async function recordFailure(binding, signature, evidence) {
     return invokePowerShell('Task.ps1', ['-Action', 'failure', '-TaskId', binding.taskId], {
-      payload: { workspace: binding.workspace, failureSignature: signature, evidence: evidence || '' },
+      payload: { workspace: binding.workspace, failureSignature: signature, evidence: evidence || '', ...instancePayloadOf(binding) },
     })
   }
 
   async function writeEvidence(binding, evidenceDoc) {
     return invokePowerShell('Task.ps1', ['-Action', 'evidence', '-TaskId', binding.taskId], {
-      payload: { workspace: binding.workspace, evidenceDoc },
+      payload: { workspace: binding.workspace, evidenceDoc, ...instancePayloadOf(binding) },
     })
   }
 
   async function completionCheck(binding, codexReviewPassed) {
     const args = ['-Action', 'complete', '-TaskId', binding.taskId]
     if (codexReviewPassed) args.push('-CodexReviewPassed')
-    return invokePowerShell('Task.ps1', args, { payload: { workspace: binding.workspace } })
+    return invokePowerShell('Task.ps1', args, { payload: { workspace: binding.workspace, ...instancePayloadOf(binding) } })
   }
 
   function readReviewResult(workspace, taskId) {
@@ -602,7 +931,7 @@ function apply(ctx) {
       appendMessage(
         session,
         createControllerMessage(
-          'Controller: task ' + binding.taskId + ' COMPLETE.\nCompletion authority: deterministic controller. Verification passed' + (reviewPass ? '; bounded review passed.' : '.'),
+          'Controller: task ' + binding.taskId + ' COMPLETE.\nCompletion authority: deterministic controller. Verification passed' + (reviewPass ? '; independent review passed.' : '.'),
           'controller-complete',
         ),
       )
@@ -669,6 +998,9 @@ function apply(ctx) {
       const evidence = {
         schemaVersion: 2,
         attempt: latest.sequence,
+        // TASK-0005 Part 19: the verification artifact names the lifecycle
+        // instance it evidences.
+        taskInstanceId: binding.taskInstanceId || null,
         startedAtUtc: verificationStartedAtUtc,
         finishedAtUtc,
         acceptanceCriteria: [],
@@ -717,30 +1049,41 @@ function apply(ctx) {
   }
 
   async function contextBundle(workspace, taskId, question) {
+    // TASK-0007: the routing policy decides the review budget. With
+    // enforcement disabled (shipped default) the controller imposes NO file
+    // count and NO context-token ceiling: it passes the explicit unlimited
+    // semantic (0 = unlimited) to the Context Engine. Retrieval still ranks
+    // and selects relevant files; unlimited never means a blind full-repo
+    // dump, and full-repository consent stays a separate authorization gate.
+    const budget = reviewBudgetPolicy(installRoot)
     // Progressive disclosure: the explicit review question decides how much
     // repository context is gathered. 'inline' (self-contained code in the
     // question) gathers none; 'files' (explicitly named workspace files)
     // gathers exactly those; 'bundle' falls through to the Context Engine.
-    const contextMode = classifyReviewContext(workspace, question)
+    const maxFiles = budget.enforceLimits ? budget.maxFiles : null
+    const contextMode = classifyReviewContext(workspace, question, maxFiles)
     if (contextMode === 'inline') return { contextMode, fileSlices: [] }
-    if (contextMode === 'files') return { contextMode, fileSlices: resolveReviewFiles(workspace, question) }
-    const bundle = await invokePowerShell('Context.ps1', [
-      '-Operation', 'bundle',
-      '-TaskId', taskId,
-      '-MaxContextTokens', String(MAX_CONTEXT_TOKENS),
-      '-MaxFiles', String(MAX_FILES),
-    ], { payload: { workspace, query: question } })
+    if (contextMode === 'files') return { contextMode, fileSlices: resolveReviewFiles(workspace, question, maxFiles) }
+    const bundleArgs = ['-Operation', 'bundle', '-TaskId', taskId]
+    if (budget.enforceLimits) {
+      bundleArgs.push('-MaxContextTokens', String(budget.maxContextTokens), '-MaxFiles', String(budget.maxFiles))
+    } else {
+      bundleArgs.push('-MaxContextTokens', '0', '-MaxFiles', '0')
+    }
+    const bundle = await invokePowerShell('Context.ps1', bundleArgs, { payload: { workspace, query: question } })
     if (!bundle || !Array.isArray(bundle.fileSlices)) throw new Error('aih-controller: context bundle returned no file slices')
     return { contextMode, fileSlices: bundle.fileSlices }
   }
 
-  async function runReview(workspace, taskId, question, filesSlices, contextMode, attempt) {
+  async function runReview(workspace, taskId, question, filesSlices, contextMode, attempt, taskInstanceId) {
     fs.mkdirSync(tmpRoot, { recursive: true })
     const filesPath = path.join(tmpRoot, 'review-' + taskId + '-' + Date.now() + '.json')
     fs.writeFileSync(filesPath, JSON.stringify(filesSlices))
-    const args = ['-TaskId', taskId, '-FilesPath', filesPath, '-Execute']
+    const args = ['-TaskId', taskId, '-FilesPath', filesPath, '-Execute', '-InstallRoot', installRoot]
     if (attempt && Number.isInteger(Number(attempt))) args.push('-Attempt', String(attempt))
-    return invokePowerShell('Review.ps1', args, { payload: { workspace, question, contextMode } })
+    // TASK-0005: the review is identity-scoped to exactly this lifecycle instance.
+    if (taskInstanceId) args.push('-TaskInstanceId', taskInstanceId)
+    return invokePowerShell('Review.ps1', args, { payload: { workspace, question, contextMode, taskInstanceId: taskInstanceId || undefined } })
   }
 
   function reviewSummary(review) {
@@ -767,49 +1110,38 @@ function apply(ctx) {
   function noticeText(binding) {
     return [
       'Controller: task ' + binding.taskId + ' bound to this session.',
+      binding.taskInstanceId ? 'Task instance: ' + binding.taskInstanceId : null,
       'Execution: ' + executionClassLabel(binding.executionClass),
       'Review: ' + (binding.reviewRequired ? 'required (policy or explicit request)' : 'not required'),
       'Completion authority: deterministic controller.',
-    ].join('\n')
-  }
-
-  function reviewResultText(binding, summary, raw) {
-    const lines = [
-      'Controller review result · task ' + binding.taskId,
-      'Execution: Independent Review (read-only, bounded)',
-      'Verdict: ' + summary.verdict,
-      'Findings: ' + summary.findings + (summary.severities.length ? ' (' + summary.severities.join(', ') + ')' : ''),
-      'Provider: ' + summary.provider + ' · model: ' + summary.model + ' · calls: ' + summary.callCount,
-      'Budget: ' + (summary.budget ? summary.budget.maxFiles + ' files / ' + summary.budget.maxContextTokens + ' context tokens / ' + summary.budget.maxCallsPerTask + ' call' : 'controller-enforced'),
-      'Read-only: true · fresh context: true · completion authority: controller (reviewer cannot complete the task)',
-    ]
-    if (raw && typeof raw === 'object') lines.push('Result JSON: ' + JSON.stringify(raw))
-    return lines.join('\n')
+    ].filter(Boolean).join('\n')
   }
 
   async function executeReviewTurn(agent, binding, question, options) {
     const session = agent.session
     const workspace = binding.workspace
     const taskId = binding.taskId
+    const taskInstanceId = binding.taskInstanceId || null
     try {
       if (options.explicit) {
         const decision = await routeTask(workspace, taskId, question, {
           preset: binding.preset,
           reviewRequested: true,
+          taskInstanceId,
         })
         binding.executionClass = decision.executionClass
         binding.reviewRequired = Boolean(decision.reviewRequired)
-        await markReviewRequested(workspace, taskId)
+        await markReviewRequested(workspace, taskId, taskInstanceId)
       }
       const { contextMode, fileSlices } = await contextBundle(workspace, taskId, question)
       const latest = latestAttemptOf(workspace, taskId)
       const reviewAttempt = latest && Number.isInteger(latest.sequence) ? latest.sequence : null
-      const review = await runReview(workspace, taskId, question, fileSlices, contextMode, reviewAttempt)
+      const review = await runReview(workspace, taskId, question, fileSlices, contextMode, reviewAttempt, taskInstanceId)
       if (review && review.ok === false && review.kind === 'packet-too-large') {
         appendMessage(
           session,
           createControllerMessage(
-            'Controller review rejected · task ' + taskId + '\nThe reviewer was NOT called (hard budget validation failed).\nViolations: ' +
+            'Controller review rejected · task ' + taskId + '\nThe reviewer was NOT called (the review packet was rejected by policy).\nViolations: ' +
               (Array.isArray(review.violations) ? review.violations.join('; ') : 'unknown') +
               '\nRead-only: true · completion authority: controller',
             'review-packet-too-large',
@@ -856,12 +1188,17 @@ function apply(ctx) {
   async function bindSession(agent, session, workspace, promptText) {
     const reviewRequested = isReviewCommand(promptText)
     const task = await createTask(workspace, reviewRequested ? reviewQuestionOf(promptText) : promptText, reviewRequested)
+    // TASK-0005 Part 1: every newly created task carries an immutable
+    // taskInstanceId from the TaskController; the binding references it.
+    const taskInstanceId = task.taskInstanceId ?? null
     const decision = await routeTask(workspace, task.taskId, task.description, {
       preset: agentPresetOf(session),
       reviewRequested,
+      taskInstanceId,
     })
     const binding = {
       sessionId: session.id,
+      taskInstanceId,
       taskId: task.taskId,
       workspace,
       preset: agentPresetOf(session),
@@ -875,7 +1212,7 @@ function apply(ctx) {
     persistBindings()
     registerShellEnvironment()
     appendMessage(session, createControllerMessage(noticeText(binding), 'controller-binding'))
-    log({ event: 'session-bound', sessionId: session.id, taskId: task.taskId, executionClass: binding.executionClass })
+    log({ event: 'session-bound', sessionId: session.id, taskId: task.taskId, taskInstanceId, executionClass: binding.executionClass })
     return binding
   }
 
@@ -902,8 +1239,9 @@ function apply(ctx) {
         name: 'aih-controller-task-state',
         variables: {
           DSH_AIH_TASK_ID: { description: 'TaskController task id bound to this session.' },
+          DSH_AIH_TASK_INSTANCE_ID: { description: 'Immutable lifecycle instance identity of the bound task (task_<32hex>).' },
           DSH_AIH_EXECUTION_CLASS: { description: 'Execution class selected by the deterministic routing policy.' },
-          DSH_AIH_REVIEW_REQUIRED: { description: '1 when a bounded Codex review is required for completion.' },
+          DSH_AIH_REVIEW_REQUIRED: { description: '1 when an independent review is required for completion.' },
         },
         resolve: (execution) => {
           const agent = execution && execution.agent
@@ -913,6 +1251,7 @@ function apply(ctx) {
           if (!binding) return {}
           return {
             DSH_AIH_TASK_ID: binding.taskId,
+            DSH_AIH_TASK_INSTANCE_ID: binding.taskInstanceId || undefined,
             DSH_AIH_EXECUTION_CLASS: binding.executionClass,
             DSH_AIH_REVIEW_REQUIRED: binding.reviewRequired ? '1' : '0',
           }
@@ -943,6 +1282,7 @@ function apply(ctx) {
           preset: binding.preset,
           signal: 'attempt-failure',
           failureReason: String(reason.error.message),
+          taskInstanceId: binding.taskInstanceId || undefined,
         })
           .then((decision) => {
             binding.executionClass = decision.executionClass
@@ -981,9 +1321,63 @@ function apply(ctx) {
 
       registerShellEnvironment()
 
-      let binding = bindingFor(session)
-      if (!binding) {
-        binding = await bindSession(agent, session, workspace, promptText)
+      // ── TASK-0005: binding validation before ANY reuse ──────────────────
+      // TaskController state is authoritative; a persisted binding is a
+      // reference only. Validation/recovery runs under the session-scoped
+      // lock (exactly one replacement task per stale session), and a
+      // validation-infrastructure failure fails SAFE (binding preserved, no
+      // replacement task, nothing classified as missing).
+      let ensured
+      try {
+        ensured = await bindingGuard.ensureBinding(agent, session, workspace, promptText)
+      } catch (error) {
+        if (error && error.code === 'binding-validation-inconclusive') {
+          const reason = String(error && error.message ? error.message : error)
+          log({ event: 'binding-validation-inconclusive', sessionId: session.id, error: reason })
+          if (explicitReview) {
+            // Part 12: explicit /review keeps its fail-closed behavior —
+            // no engineer fallback, no fake review result, no model call.
+            appendMessage(
+              session,
+              createControllerMessage(
+                'Independent review unavailable: the controller could not validate the session binding against the authoritative task ledger (validation infrastructure failure).\n' + reason + '\nThe existing binding was preserved; no task was created or removed; no model call was made; completion authority remains with the controller.',
+                'controller-error',
+              ),
+            )
+            return { kind: 'reject' }
+          }
+          if (isVerifyCommand(promptText)) {
+            appendMessage(
+              session,
+              createControllerMessage(
+                'Controller verification unavailable: the session binding could not be validated against the authoritative task ledger.\n' + reason + '\nThe existing binding was preserved; no task was created or removed; no verification ran.',
+                'controller-verify-error',
+              ),
+            )
+            return { kind: 'reject' }
+          }
+          appendMessage(
+            session,
+            createControllerMessage(
+              'Controller: the session binding could not be validated (validation infrastructure failure).\n' + reason + '\nThe existing binding was preserved; no task was created or removed; controller state was not recorded for this turn.',
+              'controller-error',
+            ),
+          )
+          return next()
+        }
+        throw error
+      }
+      let binding = ensured.binding
+      if (ensured.outcome === 'recovered') {
+        // Part 10: the stale binding self-healed into a FRESH authoritative
+        // task; nothing from the old generation is carried over.
+        appendMessage(
+          session,
+          createControllerMessage(
+            'Controller: the previous session binding was stale (' + ensured.stale.reason + ' · task ' + ensured.stale.taskId + ').\nA fresh authoritative task was created and bound: ' + binding.taskId + (binding.taskInstanceId ? ' (instance ' + binding.taskInstanceId + ')' : '') + '.\nNo record from the previous task generation was carried over.',
+            'controller-recovery',
+          ),
+        )
       }
 
       if (explicitReview) {
@@ -1009,12 +1403,13 @@ function apply(ctx) {
         const decision = await routeTask(binding.workspace, binding.taskId, promptText, {
           preset: binding.preset,
           signal: 'review-findings',
+          taskInstanceId: binding.taskInstanceId || undefined,
         })
         binding.executionClass = decision.executionClass
         appendMessage(
           session,
           createControllerMessage(
-            'Controller: bounded review findings returned to the Deep Engineer for repair. Execution: ' + executionClassLabel(decision.executionClass) + '. The reviewer does not remain the parent.',
+            'Controller: independent review findings returned to the Deep Engineer for repair. Execution: ' + executionClassLabel(decision.executionClass) + '. The reviewer does not remain the parent.',
             'controller-repair',
           ),
         )
@@ -1023,13 +1418,13 @@ function apply(ctx) {
 
       if (binding.needsRouteCheck) {
         binding.needsRouteCheck = false
-        const decision = await routeTask(binding.workspace, binding.taskId, promptText, { preset: binding.preset })
+        const decision = await routeTask(binding.workspace, binding.taskId, promptText, { preset: binding.preset, taskInstanceId: binding.taskInstanceId || undefined })
         if (isReviewClass(decision.executionClass)) {
           binding.executionClass = decision.executionClass
           appendMessage(
             session,
             createControllerMessage(
-              'Controller: repeated identical failure reached the configured threshold; escalating to bounded independent review. Execution: ' + executionClassLabel('reviewer'),
+              'Controller: repeated identical failure reached the configured threshold; escalating to independent review. Execution: ' + executionClassLabel('reviewer'),
               'controller-escalation',
             ),
           )
@@ -1136,9 +1531,15 @@ module.exports.isReviewClass = isReviewClass
 module.exports.isWorkerAgent = isWorkerAgent
 module.exports.createControllerMessage = createControllerMessage
 module.exports.parseCliJson = parseCliJson
+module.exports.normalizeWorkspaceIdentity = normalizeWorkspaceIdentity
+module.exports.classifyBindingWorkspace = classifyBindingWorkspace
+module.exports.classifyBindingIdentity = classifyBindingIdentity
+module.exports.createBindingGuard = createBindingGuard
 module.exports.structuredCliStdout = structuredCliStdout
 module.exports.verificationCliStdout = verificationCliStdout
 module.exports.referencedFilesOf = referencedFilesOf
 module.exports.hasInlineCode = hasInlineCode
 module.exports.resolveReviewFiles = resolveReviewFiles
 module.exports.classifyReviewContext = classifyReviewContext
+module.exports.reviewBudgetPolicy = reviewBudgetPolicy
+module.exports.reviewResultText = reviewResultText

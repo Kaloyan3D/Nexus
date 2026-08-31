@@ -14,6 +14,10 @@ param(
     [switch]$ReviewRequested,
     [Alias('dry-run')][switch]$DryRun,
     [switch]$History,
+    # TASK-0005: immutable lifecycle identity of the routed task. Supplied by
+    # the controller bridge for instance-aware tasks; triggers the routing
+    # instance guard and lands in the decision/state records.
+    [string]$TaskInstanceId,
     [string]$PayloadFile
 )
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
@@ -33,6 +37,7 @@ if ($PayloadFile) {
     if ($null -ne $__aihPayload.PSObject.Properties['ReviewRequested']) { $ReviewRequested = [bool]$__aihPayload.ReviewRequested }
     if ($null -ne $__aihPayload.PSObject.Properties['Signal']) { $Signal = [string]$__aihPayload.Signal }
     if ($null -ne $__aihPayload.PSObject.Properties['FailureReason']) { $FailureReason = [string]$__aihPayload.FailureReason }
+    if ($null -ne $__aihPayload.PSObject.Properties['TaskInstanceId']) { $TaskInstanceId = [string]$__aihPayload.TaskInstanceId }
 }
 
 Set-StrictMode -Version Latest
@@ -48,9 +53,14 @@ if ($History) {
     exit 0
 }
 if ([string]::IsNullOrWhiteSpace($Description)) { throw 'A task description is required unless -History is used.' }
-$decision = Invoke-AihRoutingDecision -Description $Description -Workspace $Workspace -PolicyPath $layout.RoutingPolicy -DataRoot $layout.RoutingData -TaskId $TaskId -Preset $Preset -ForceTier $ForceTier -ForceClass $ForceClass -Signal $Signal -FailureReason $FailureReason -UserApprovedCodexSolve:$UserApprovedCodexSolve -ReviewRequested:$ReviewRequested -DryRun:$DryRun -SettingsPath $layout.Settings -CustomProfilePath $layout.CustomEngineeringProfile
+$decision = Invoke-AihRoutingDecision -Description $Description -Workspace $Workspace -PolicyPath $layout.RoutingPolicy -DataRoot $layout.RoutingData -TaskId $TaskId -Preset $Preset -ForceTier $ForceTier -ForceClass $ForceClass -Signal $Signal -FailureReason $FailureReason -UserApprovedCodexSolve:$UserApprovedCodexSolve -ReviewRequested:$ReviewRequested -DryRun:$DryRun -SettingsPath $layout.Settings -CustomProfilePath $layout.CustomEngineeringProfile -TaskInstanceId $TaskInstanceId
 if (-not $DryRun -and (Test-Path -LiteralPath (Join-Path ([IO.Path]::GetFullPath($Workspace)) '.ai-harness\state\tasks.json'))) {
-    try { Set-AihTaskExecutionClass -Workspace $Workspace -TaskId $decision.taskId -ExecutionClass $decision.executionClass -Reason $decision.reason | Out-Null }
-    catch { if ($_.Exception.Message -notmatch 'Task was not found') { throw } }
+    # TASK-0005: 'task absent' is now an authoritative READ (Test-AihTaskExists),
+    # never an exception-string parse of a PowerShell error message. A malformed
+    # ledger or any other validation-infrastructure failure still throws (fail
+    # closed) instead of being silently swallowed.
+    if (Test-AihTaskExists -Workspace $Workspace -TaskId $decision.taskId) {
+        Set-AihTaskExecutionClass -Workspace $Workspace -TaskId $decision.taskId -ExecutionClass $decision.executionClass -Reason $decision.reason -TaskInstanceId $TaskInstanceId | Out-Null
+    }
 }
 $decision | ConvertTo-Json -Depth 8
