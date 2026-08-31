@@ -54,11 +54,29 @@ const CLASS_ROLES = {
   solver: 'solver',
 }
 
+function findInstallRoot(startDir) {
+  let current = path.resolve(startDir)
+  for (;;) {
+    if (
+      fs.existsSync(path.join(current, 'config', 'routing-policy.json')) &&
+      fs.existsSync(path.join(current, 'scripts', 'Common.ps1'))
+    ) return current
+    const parent = path.dirname(current)
+    if (parent === current) return null
+    current = parent
+  }
+}
+
 function installRootOf() {
+  if (typeof process.env.AIH_INSTALL_ROOT === 'string' && process.env.AIH_INSTALL_ROOT !== '') {
+    return path.resolve(process.env.AIH_INSTALL_ROOT)
+  }
   if (typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOME !== '') {
     return path.dirname(path.resolve(process.env.DSH_HOME))
   }
-  return 'C:\\AI-Harness'
+  const discovered = findInstallRoot(__dirname)
+  if (discovered) return discovered
+  throw new Error('Nexus install root is unavailable; launch through the repo-local aih entrypoint.')
 }
 
 function readJson(filePath) {
@@ -90,7 +108,7 @@ function loadPolicy(installRoot) {
 }
 
 function loadProfiles(installRoot) {
-  const document = readJson(path.join(installRoot, 'config', 'engineering-profiles.json'))
+  let document = readJson(path.join(installRoot, 'config', 'engineering-profiles.json'))
   if (!document) return document
   // Phase 2.1: the operator-defined CUSTOM profile lives next to the
   // built-in registry as data/custom-engineering-profile.json. It is merged
@@ -279,7 +297,7 @@ function resolveTarget(installRoot, profileId, role) {
   }
   if (!entry || entry.enabled === false) return null
   const providers = entry.providers && typeof entry.providers === 'object' ? entry.providers : {}
-  let provider = providers[reasoning] || providers.default || (typeof entry.provider === 'string' ? entry.provider : null)
+  const provider = providers[reasoning] || providers.default || (typeof entry.provider === 'string' ? entry.provider : null)
   if (!provider) return null
   return {
     modelId,
