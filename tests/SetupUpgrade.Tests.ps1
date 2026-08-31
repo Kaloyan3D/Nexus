@@ -1,19 +1,24 @@
 [CmdletBinding()]
-param([string]$InstallRoot = (Split-Path -Parent $PSScriptRoot))
+param([string]$InstallRoot)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    $InstallRoot = Split-Path -Parent $PSScriptRoot
+}
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 
 $rootSetupPath = Join-Path $InstallRoot 'setup.ps1'
 if (-not (Test-Path -LiteralPath $rootSetupPath)) {
     throw "Root setup script missing at $rootSetupPath"
 }
 $rootSetupText = Get-Content -Raw -Encoding UTF8 -LiteralPath $rootSetupPath
-if (-not $rootSetupText.Contains('[string]$InstallRoot = $PSScriptRoot')) {
-    throw 'FAIL: root setup.ps1 must default InstallRoot to the checkout root.'
-}
 if ($rootSetupText.Contains("[string]`$InstallRoot = 'C:\AI-Harness'")) {
     throw 'FAIL: root setup.ps1 regressed to the legacy C:\AI-Harness default.'
+}
+if (-not $rootSetupText.Contains('if ([string]::IsNullOrWhiteSpace($InstallRoot))') -or -not $rootSetupText.Contains('$InstallRoot = $sourceRoot')) {
+    throw 'FAIL: root setup.ps1 must resolve an omitted InstallRoot to the checkout root in the script body.'
 }
 
 $updatePath = Join-Path $InstallRoot 'scripts\Update.ps1'
