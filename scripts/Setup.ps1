@@ -119,16 +119,20 @@ elseif (-not (Test-Path -LiteralPath $layout.Dsh)) {
     throw '-SkipDependencyInstall requires an existing installed DSH runtime.'
 }
 
+# Initialize managed settings before any UI patcher reads them. Fresh repo-local
+# installs have an empty data directory, so Patch-NexusUi must never run before
+# data\settings.yaml exists. Existing user settings are preserved unless the
+# caller explicitly requests -ResetManagedSettings.
+if ($ResetManagedSettings -or -not (Test-Path -LiteralPath $layout.Settings)) {
+    Copy-Item -LiteralPath (Join-Path $layout.Config 'settings.yaml') -Destination $layout.Settings
+}
+
 # data\cordis.patch.yml is managed by this installer. Sync it before the Nexus
 # patcher inspects composition so upgrades from pre-controller installs see the
 # current nexus-controller row instead of failing against stale managed state.
 Copy-Item -LiteralPath (Join-Path $layout.Config 'home.cordis.patch.yml') -Destination (Join-Path $layout.Data 'cordis.patch.yml') -Force
 & (Join-Path $layout.Scripts 'Patch-ControlRoomUi.ps1') -InstallRoot $InstallRoot
 & (Join-Path $layout.Scripts 'Patch-NexusUi.ps1') -InstallRoot $InstallRoot
-
-if ($ResetManagedSettings -or -not (Test-Path -LiteralPath $layout.Settings)) {
-    Copy-Item -LiteralPath (Join-Path $layout.Config 'settings.yaml') -Destination $layout.Settings
-}
 
 $shippedPreset = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh\config\agent-presets\code'
 $targetPreset = Join-Path $layout.Data '.agent-presets\aih-engineering'
