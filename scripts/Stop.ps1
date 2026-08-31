@@ -1,5 +1,10 @@
 [CmdletBinding()]
-param([string]$InstallRoot = 'C:\AI-Harness')
+param([string]$InstallRoot)
+
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    $InstallRoot = Split-Path -Parent $PSScriptRoot
+}
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
 . (Join-Path $PSScriptRoot 'Startup.ps1')
