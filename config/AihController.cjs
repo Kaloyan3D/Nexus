@@ -297,10 +297,14 @@ function parseCliJson(text) {
 
 // ── plugin ──────────────────────────────────────────────────────────────────
 
+function resolveInstallRoot() {
+  if (process.env.AIH_INSTALL_ROOT) return path.resolve(process.env.AIH_INSTALL_ROOT)
+  if (process.env.DSH_HOME) return path.dirname(path.resolve(process.env.DSH_HOME))
+  throw new Error('Nexus install root is unavailable; launch through the repo-local aih entrypoint.')
+}
+
 function apply(ctx) {
-  const installRoot = process.env.DSH_HOME
-    ? path.dirname(path.resolve(process.env.DSH_HOME))
-    : 'C:\\AI-Harness'
+  const installRoot = resolveInstallRoot()
   const dataRoot = process.env.DSH_HOME
     ? path.resolve(process.env.DSH_HOME)
     : path.join(installRoot, 'data')
