@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$InstallRoot = 'C:\AI-Harness',
+    [string]$InstallRoot,
     [switch]$SkipPathUpdate,
     [switch]$ResetManagedSettings,
     [switch]$SkipDependencyInstall
@@ -10,6 +10,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $sourceRoot = Split-Path -Parent $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    $InstallRoot = $sourceRoot
+}
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 . (Join-Path $PSScriptRoot 'Common.ps1')
 $layout = Get-AihLayout $InstallRoot
 $sourceVersions = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'config\versions.json') | ConvertFrom-Json
