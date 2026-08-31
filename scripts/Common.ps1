@@ -16,7 +16,10 @@ function Get-AihInstallRoot {
     if (-not [string]::IsNullOrWhiteSpace($env:AIH_INSTALL_ROOT)) {
         return [System.IO.Path]::GetFullPath($env:AIH_INSTALL_ROOT)
     }
-    return 'C:\AI-Harness'
+    if (-not [string]::IsNullOrWhiteSpace($env:DSH_HOME)) {
+        return [System.IO.Path]::GetFullPath((Split-Path -Parent $env:DSH_HOME))
+    }
+    return [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 }
 
 function Get-AihLayout {
