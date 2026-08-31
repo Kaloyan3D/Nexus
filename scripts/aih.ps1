@@ -1,11 +1,17 @@
 [CmdletBinding()]
 param(
-    [string]$InstallRoot = 'C:\AI-Harness',
+    [string]$InstallRoot,
     [Alias('Mode')][string]$Preset,
     [switch]$Open,
     [switch]$EnableCodexSubagent,
     [switch]$Restart
 )
+
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    $InstallRoot = Split-Path -Parent $PSScriptRoot
+}
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
+$env:AIH_INSTALL_ROOT = $InstallRoot
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
 . (Join-Path $PSScriptRoot 'Project.ps1')
@@ -134,6 +140,7 @@ elseif ((Test-AihEndpoint -Uri $webUrl -TimeoutSec 2) -and -not $Restart) {
 
 $projectName = Split-Path -Leaf $workspace
 $env:DSH_HOME = $layout.Data
+$env:AIH_INSTALL_ROOT = $layout.Root
 $env:AIH_LOCAL_OAUTH_KEY = if ($oauthAvailable) { 'local-oauth-no-secret' } else { $null }
 $env:DEEPSEEK_API_KEY = $deepSeekKey
 $env:AIH_ACTIVE_PRESET = $null
