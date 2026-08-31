@@ -1,4 +1,4 @@
-﻿Set-StrictMode -Version Latest
+Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Common.ps1')
 . (Join-Path $PSScriptRoot 'TaskController.ps1')
@@ -55,7 +55,9 @@ function Get-AihReviewOutputText {
 }
 
 function Invoke-AihCodexReview {
-    param([string]$Workspace,[string]$TaskId,[Parameter(Mandatory=$true)]$Packet,[string]$InstallRoot='C:\AI-Harness',[string]$Model='gpt-5.6-sol',[string]$Reasoning='medium')
+    param([string]$Workspace,[string]$TaskId,[Parameter(Mandatory=$true)]$Packet,[string]$InstallRoot,[string]$Model='gpt-5.6-sol',[string]$Reasoning='medium')
+    if([string]::IsNullOrWhiteSpace($InstallRoot)){$InstallRoot=Get-AihInstallRoot $null}
+    $InstallRoot=[System.IO.Path]::GetFullPath($InstallRoot)
     $call=Register-AihCodexReviewCall $Workspace $TaskId $Packet
     $layout=Get-AihLayout $InstallRoot;$versions=Get-AihVersions $InstallRoot;$modelsUrl="$($versions.OAuthBaseUrl)/models"
     if(-not(Test-AihEndpoint $modelsUrl 2)){throw 'Bounded Codex review service is unavailable; start or authenticate the local OAuth service.'}
