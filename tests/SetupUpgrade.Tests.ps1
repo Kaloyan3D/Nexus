@@ -32,6 +32,9 @@ $modeInstaller = Get-Content -Raw -Encoding UTF8 -LiteralPath $modeInstallerPath
 if ($modeInstaller.Contains('AIH_CONTROL_ROOM_MODE_MODEL_SYNC') -or $modeInstaller.Contains('$clientPath') -or $modeInstaller.Contains('.Replace($old')) {
     throw 'FAIL: Patch-ControlRoomUi.ps1 regressed to compiled upstream bundle monkey-patching.'
 }
+if ($modeInstaller -match '(?im)^\s*\$host\s*=') {
+    throw 'FAIL: Patch-ControlRoomUi.ps1 shadows the read-only PowerShell $Host automatic variable.'
+}
 if (-not $modeInstaller.Contains("'@nexus/mode-selector'")) {
     throw 'FAIL: Patch-ControlRoomUi.ps1 no longer installs the Nexus-owned mode-selector plugin.'
 }
@@ -61,3 +64,4 @@ foreach ($contract in @(
 
 Write-Host 'PASS: managed cordis.patch.yml is synced before Nexus UI migration'
 Write-Host 'PASS: Control Room mode lifecycle is Nexus-owned and no longer patches compiled upstream UI'
+Write-Host 'PASS: mode-selector installer avoids PowerShell automatic-variable collisions'
