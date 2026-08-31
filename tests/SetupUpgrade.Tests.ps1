@@ -45,10 +45,14 @@ if (-not (Test-Path -LiteralPath $setupPath)) {
 }
 
 $setupText = Get-Content -Raw -Encoding UTF8 -LiteralPath $setupPath
+$settingsInitIndex = $setupText.IndexOf("if (`$ResetManagedSettings -or -not (Test-Path -LiteralPath `$layout.Settings))")
 $managedPatchCopyIndex = $setupText.LastIndexOf("home.cordis.patch.yml")
 $modeInstallerIndex = $setupText.IndexOf("Patch-ControlRoomUi.ps1")
 $nexusPatchIndex = $setupText.IndexOf("Patch-NexusUi.ps1")
 
+if ($settingsInitIndex -lt 0) {
+    throw 'FAIL: Setup.ps1 no longer initializes data\settings.yaml.'
+}
 if ($managedPatchCopyIndex -lt 0) {
     throw 'FAIL: Setup.ps1 no longer syncs the managed home.cordis.patch.yml into data.'
 }
@@ -57,6 +61,9 @@ if ($modeInstallerIndex -lt 0) {
 }
 if ($nexusPatchIndex -lt 0) {
     throw 'FAIL: Setup.ps1 no longer invokes Patch-NexusUi.ps1.'
+}
+if ($settingsInitIndex -gt $modeInstallerIndex -or $settingsInitIndex -gt $nexusPatchIndex) {
+    throw 'FAIL: data\settings.yaml must exist before UI patchers run on a fresh repo-local install.'
 }
 if ($managedPatchCopyIndex -gt $modeInstallerIndex -or $managedPatchCopyIndex -gt $nexusPatchIndex) {
     throw 'FAIL: managed cordis.patch.yml must be synced before Nexus UI installers so upgrades from stale installs can migrate safely.'
@@ -105,6 +112,7 @@ foreach ($contract in @(
 }
 
 Write-Host 'PASS: repo-local setup/update/launchers are portable and checkout-relative'
+Write-Host 'PASS: fresh install creates settings before Nexus UI patchers run'
 Write-Host 'PASS: managed cordis.patch.yml is synced before Nexus UI migration'
 Write-Host 'PASS: required engineering config modules are installed on fresh setup'
 Write-Host 'PASS: Control Room mode lifecycle is Nexus-owned and no longer patches compiled upstream UI'
