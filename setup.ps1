@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$InstallRoot = $PSScriptRoot,
+    [string]$InstallRoot,
     [switch]$SkipPathUpdate,
     [switch]$SkipDeepSeekLogin,
     [switch]$SkipOpenAiLogin
@@ -13,7 +13,13 @@ if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
     throw 'AI Harness currently supports Windows only.'
 }
 
+# Windows PowerShell 5.1 can evaluate parameter default expressions before
+# $PSScriptRoot is populated. Resolve the checkout root in the script body
+# instead of using $PSScriptRoot as a parameter default.
 $sourceRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    $InstallRoot = $sourceRoot
+}
 $InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 $installer = Join-Path $sourceRoot 'scripts\Setup.ps1'
 
