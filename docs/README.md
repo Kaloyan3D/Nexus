@@ -14,6 +14,8 @@ The short version is in the repository [README](../README.md). The documents her
 
 ## Reference
 
+- **[Repository foundation](architecture/repository-foundation.md)** — Phase 3.1: repository identity and registry, Git state, file inventory, module discovery, snapshot engine, services, and events.
+
 - **[State and storage](reference/state-and-storage.md)** — project state, run artifacts, runtime journals, identity, append-only histories, and compatibility.
 - **[HTTP endpoints](reference/endpoints.md)** — `/nexus/controller.json`, `/nexus/control-room.json`, and `/nexus/gate-action.json`.
 
