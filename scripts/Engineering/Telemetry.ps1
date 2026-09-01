@@ -154,11 +154,17 @@ function Get-AihEngineeringTelemetry {
         taskId = $TaskId
         taskInstanceId = if ([string]::IsNullOrWhiteSpace($TaskInstanceId)) { $null } else { $TaskInstanceId }
         generatedAtUtc = Get-AihEngineeringUtcNow
-        totalModelCalls = $(if (@($usageRecords).Count -gt 0) { @($usageRecords).Count } else { [int]$routing.steps })
-        modelCallsNormal = $(if (@($usageRecords).Count -gt 0) { [int]$byRole['engineer_normal'] } else { [int]$routing.normalSteps })
-        modelCallsDeep = $(if (@($usageRecords).Count -gt 0) { [int]$byRole['engineer_deep'] } else { [int]$routing.deepSteps })
+        # Preserve semantic engineering-step counts from StepRouting. Provider
+        # usage events are reported separately so a partial runtime telemetry
+        # stream can never silently rewrite controller routing history.
+        totalModelCalls = [int]$routing.steps
+        modelCallsNormal = [int]$routing.normalSteps
+        modelCallsDeep = [int]$routing.deepSteps
         modelCallsReviewer = [int]$byRole['reviewer']
         usageRecordedCalls = @($usageRecords).Count
+        usageCallsNormal = [int]$byRole['engineer_normal']
+        usageCallsDeep = [int]$byRole['engineer_deep']
+        usageCallsReviewer = [int]$byRole['reviewer']
         escalationCount = $routing.escalationCount
         deescalationCount = $routing.deescalationCount
         escalationReasons = @($routing.escalationReasons)
