@@ -17,6 +17,7 @@ $suites = @(
     [ordered]@{ name='TestHarness.Reporting'; script='tests\TestHarness.Reporting.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='JsonSerialization'; script='tests\JsonSerialization.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='EpistemicPolicy'; script='tests\EpistemicPolicy.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='EngineeringTelemetry'; script='tests\EngineeringTelemetry.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='ControllerRouting'; script='tests\ControllerRouting.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='TaskIdentity'; script='tests\TaskIdentity.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='EngineeringProfiles'; script='tests\EngineeringProfiles.Tests.ps1'; executable=$powershell; kind='powershell' },
@@ -32,6 +33,7 @@ $suites = @(
     [ordered]@{ name='Intelligence.CodeIntelligence'; script='tests\Intelligence.CodeIntelligence.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='Intelligence.CodeScale'; script='tests\Intelligence.CodeScale.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='AihController'; script='tests\AihController.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='EpistemicProductionHardening'; script='tests\EpistemicProductionHardening.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='AihControllerIdentity'; script='tests\AihControllerIdentity.Tests.cjs'; executable=$layout.Node; kind='node' }
 )
 
