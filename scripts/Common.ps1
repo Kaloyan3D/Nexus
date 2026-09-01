@@ -72,16 +72,55 @@ function Write-AihAtomicText {
     finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force } }
 }
 
+function ConvertTo-AihJsonSafe {
+    # Normalize a value for JSON emission. OrderedDictionary/IDictionary
+    # values serialize through the PSObject adapter, which leaks .NET
+    # reflection members (Count, Keys, Values, SyncRoot, ...) into the JSON
+    # alongside the real keys, and pipeline piping unrolls the dictionary
+    # into DictionaryEntry items. Convert every dictionary to a
+    # pscustomobject (recursively) so ConvertTo-Json -InputObject emits
+    # exactly the authored keys.
+    param([object]$Value)
+    if ($null -eq $Value) { return $null }
+    # PS 5.1 quirk: cmdlet outputs (e.g. Split-Path -Leaf) can arrive wrapped
+    # in a PSObject whose extended type makes `-is [pscustomobject]` true even
+    # for a plain string, which would serialize {Length: n} instead of the
+    # value. Serialize the string value itself, never its reflection members.
+    if ($Value -is [string]) { return $Value }
+    if ($Value -is [Collections.Specialized.OrderedDictionary] -or $Value -is [Collections.IDictionary]) {
+        $output = [ordered]@{}
+        foreach ($entry in ([Collections.IDictionary]$Value).GetEnumerator()) {
+            $output[[string]$entry.Key] = ConvertTo-AihJsonSafe $entry.Value
+        }
+        return [pscustomobject]$output
+    }
+    if ($Value -is [Collections.IEnumerable] -and $Value -isnot [string] -and $Value -isnot [scriptblock]) {
+        $items = @()
+        foreach ($item in $Value) { $items += (ConvertTo-AihJsonSafe $item) }
+        return ,$items
+    }
+    if ($Value -is [pscustomobject]) {
+        $output = [ordered]@{}
+        foreach ($property in $Value.PSObject.Properties) {
+            $output[$property.Name] = ConvertTo-AihJsonSafe $property.Value
+        }
+        return [pscustomobject]$output
+    }
+    return $Value
+}
+
 function Write-AihAtomicJson {
-    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$Value, [int]$Depth = 20)
-    Write-AihAtomicText -Path $Path -Content ($Value | ConvertTo-Json -Depth $Depth)
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][AllowNull()]$Value, [int]$Depth = 20)
+    $json = if ($null -eq $Value) { 'null' } else { ConvertTo-Json -InputObject (ConvertTo-AihJsonSafe $Value) -Depth $Depth }
+    Write-AihAtomicText -Path $Path -Content $json
 }
 
 function Add-AihJsonLine {
-    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$Value, [int]$Depth = 20)
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][AllowNull()]$Value, [int]$Depth = 20)
     $directory = Split-Path -Parent ([System.IO.Path]::GetFullPath($Path))
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
-    [System.IO.File]::AppendAllText($Path, (($Value | ConvertTo-Json -Depth $Depth -Compress) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+    $json = if ($null -eq $Value) { 'null' } else { ConvertTo-Json -InputObject (ConvertTo-AihJsonSafe $Value) -Depth $Depth -Compress }
+    [System.IO.File]::AppendAllText($Path, ($json + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
 }
 
 function Get-AihVersions {

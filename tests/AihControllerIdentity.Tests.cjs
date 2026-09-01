@@ -400,6 +400,7 @@ async function runBridgeEndToEnd() {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-identity-e2e-'))
   fs.mkdirSync(path.join(fixture, 'src'))
   fs.writeFileSync(path.join(fixture, 'src', 'huge.js'), 'x'.repeat(140000))
+  fs.writeFileSync(path.join(fixture, 'package.json'), JSON.stringify({ private: true, scripts: { test: 'node -e "process.exit(0)"' } }))
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = dataHome
   const bindingsPath = path.join(dataHome, 'routing', 'session-bindings.json')
@@ -451,13 +452,37 @@ async function runBridgeEndToEnd() {
     assert.notEqual(taskB.taskInstanceId, bindingA.taskInstanceId, 'B != A')
     const bindingB = readBinding()
     assert.equal(bindingB.taskInstanceId, taskB.taskInstanceId, 'the fresh binding references instance B')
+    const runRootB = path.join(fixture, '.ai-harness', 'runs', taskB.taskId)
+    const workingSetB = JSON.parse(fs.readFileSync(path.join(runRootB, 'working-set.json'), 'utf8'))
+    const requirementsB = JSON.parse(fs.readFileSync(path.join(runRootB, 'requirements.json'), 'utf8'))
+    const metricsB = JSON.parse(fs.readFileSync(path.join(runRootB, 'engineering-metrics.json'), 'utf8'))
+    const epistemicStateB = JSON.parse(fs.readFileSync(path.join(runRootB, 'epistemic-state.json'), 'utf8'))
+    const epistemicActionsB = fs.readFileSync(path.join(runRootB, 'epistemic-actions.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    const stepRoutingB = fs.readFileSync(path.join(runRootB, 'step-routing.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    for (const artifact of [workingSetB, requirementsB, metricsB, epistemicStateB, epistemicActionsB[epistemicActionsB.length - 1], stepRoutingB[stepRoutingB.length - 1]]) {
+      assert.equal(artifact.taskInstanceId, taskB.taskInstanceId, 'production Engineering artifact is scoped to generation B')
+    }
+    assert.equal(workingSetB.objective, taskB.description, 'the real GUI binding initializes the Working Set objective')
+    assert.equal(requirementsB.requirements.length, 1, 'the real GUI binding compiles the user request as a stable requirement')
+    assert.equal(requirementsB.requirements[0].text, taskB.description, 'the Requirement Compiler preserves the original user wording')
+    assert.equal(epistemicStateB.uncertainties.length, 1, 'the real GUI pre-step creates task-local uncertainty state')
+    assert.equal(epistemicStateB.uncertainties[0].selectedAction, 'reason', 'the controller records the deterministic epistemic action before model work')
+    assert.equal(epistemicActionsB.find((record) => record.event === 'action-routed').selectedRole, 'engineer_normal', 'Epistemic Policy composes with the real StepRouting role')
+    assert.equal(workingSetB.epistemic.currentUncertaintyId, epistemicStateB.uncertainties[0].id, 'Working Set mirrors the production uncertainty identity')
+    assert.equal(stepRoutingB[stepRoutingB.length - 1].selectedRole, 'engineer_normal', 'the real GUI pre-step records its current engineering role')
+    assert.ok(!JSON.stringify([workingSetB, requirementsB, metricsB, epistemicStateB, epistemicActionsB, stepRoutingB]).includes(bindingA.taskInstanceId), 'generation B engineering state cannot consume generation A identity')
     const bridgeLog = fs.readFileSync(path.join(dataHome, 'logs', 'aih-controller.log'), 'utf8')
     const staleEvents = bridgeLog.split('\n').filter((l) => l.indexOf('"event":"stale-binding-detected"') !== -1).map((l) => JSON.parse(l))
     assert.equal(staleEvents.length, 1, 'the stale binding self-heals exactly once')
     assert.equal(staleEvents[0].reason, 'task-missing')
     assert.equal(staleEvents[0].oldTaskInstanceId, bindingA.taskInstanceId, 'the structured event carries the old instance')
     assert.equal(staleEvents[0].currentWorkspace, fixture)
-    // 13. Normal GLM engineering: engineer_normal -> primaryEngineer -> GLM-5.3-Flash.
+    const activeProfile = profiles.resolveActiveProfile(installRoot, 'aih-engineering')
+    assert.ok(activeProfile, 'the fixture resolves an active Engineering Profile')
+    const normalTarget = profiles.resolveTarget(installRoot, activeProfile.id, 'primaryEngineer')
+    const deepTarget = profiles.resolveTarget(installRoot, activeProfile.id, 'deepEngineer')
+    const reviewerTarget = profiles.resolveTarget(installRoot, activeProfile.id, 'reviewer')
+    // 13. Normal engineering resolves through the active profile's primaryEngineer role.
     const attemptText = fs.readFileSync(path.join(fixture, '.ai-harness', 'runs', taskB.taskId, 'attempts.jsonl'), 'utf8')
     const attemptB = JSON.parse(attemptText.trim().split('\n').pop())
     assert.equal(attemptB.taskInstanceId, taskB.taskInstanceId, 'attempt records carry instance B')
@@ -476,23 +501,47 @@ async function runBridgeEndToEnd() {
     assert.equal(snapshot.task.taskInstanceId, taskB.taskInstanceId, 'the ledger task joins by instance')
     assert.equal(snapshot.execution.identityInconsistent, undefined)
     assert.equal(snapshot.execution.class, 'engineer_normal')
-    assert.equal(snapshot.execution.modelId, 'glm-5.3-flash', 'Engineer Normal under GLM + Codex resolves GLM-5.3-Flash')
-    assert.equal(snapshot.execution.model, 'GLM-5.3-Flash', 'the reported executor is the GLM-5.3-Flash display name')
+    assert.equal(snapshot.execution.modelId, normalTarget.modelId, 'Engineer Normal resolves through the active profile primaryEngineer binding')
+    assert.equal(snapshot.execution.model, normalTarget.modelDisplayName, 'the reported executor display name comes from the active profile registry target')
     assert.equal(snapshot.execution.role, 'primaryEngineer')
     // 8. No reviewer record of generation A can attach to B.
     const decisionsText = fs.readFileSync(path.join(dataHome, 'routing', 'decisions.jsonl'), 'utf8')
     const allDecisions = decisionsText.trim().split('\n').map((l) => JSON.parse(l))
     const forB = status.lastDecisionOf(allDecisions, taskB.taskId, fixture, taskB.taskInstanceId)
     assert.equal(forB.executionClass, 'engineer_normal')
-    assert.notEqual(forB.modelId, 'gpt-5.6-sol', 'the A reviewer decision never becomes B\'s executor')
+    assert.notEqual(forB.modelId, reviewerTarget.modelId, 'the A reviewer decision never becomes B\'s executor')
 
-    // 14. Engineer Deep routes to GLM-5.3 under GLM + Codex (the state-level
-    //     regression lives in TaskIdentity.Tests.ps1; here the profile
-    //     resolution is verified through the same configuration layer).
-    const deepTarget = profiles.resolveTarget(installRoot, 'glm-codex', 'deepEngineer')
-    assert.equal(deepTarget.model, 'glm-5.3')
-    const reviewerTarget = profiles.resolveTarget(installRoot, 'glm-codex', 'reviewer')
-    assert.equal(reviewerTarget.model, 'gpt-5.6-sol')
+    // 14. Engineer Deep resolves through the ACTIVE profile configuration
+    //     (the state-level regression lives in TaskIdentity.Tests.ps1): the
+    //     expected targets are DERIVED from the fixture's copied glm-codex
+    //     profile + model registry, so the configuration layer is validated
+    //     and no model identity is hardcoded here — Phase 3.2.5 remapped the
+    //     deep role with zero controller changes.
+    assert.ok(deepTarget && reviewerTarget, 'deepEngineer and reviewer targets resolve through the active profile + registry')
+
+    // 14b. The real controller /verify path mirrors its result into the
+    // Phase 3.2.5 verification log, updates requirements, exposes telemetry,
+    // and lets deterministic completion consume the verified requirement.
+    const verifyOutcome = await turn(preStep2, '/verify')
+    assert.equal(verifyOutcome && verifyOutcome.kind, 'reject', 'controller-owned /verify completes without an engineer model turn')
+    const verificationRecords = fs.readFileSync(path.join(runRootB, 'verification-log.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    assert.equal(verificationRecords.length, 1, 'production /verify records one Phase 3.2.5 verification')
+    assert.equal(verificationRecords[0].taskInstanceId, taskB.taskInstanceId, 'verification record preserves taskInstanceId')
+    assert.equal(verificationRecords[0].result, 'pass', 'verification record consumes the successful project verification')
+    assert.deepEqual(verificationRecords[0].requirementIds, [requirementsB.requirements[0].id], 'verification record links the compiled requirement identity')
+    const verifiedRequirementsB = JSON.parse(fs.readFileSync(path.join(runRootB, 'requirements.json'), 'utf8'))
+    assert.equal(verifiedRequirementsB.requirements[0].status, 'verified', 'linked PASS verification moves the required requirement to verified')
+    assert.equal(verifiedRequirementsB.requirements[0].verificationEvidence[0].verificationId, verificationRecords[0].verificationId, 'requirement state links back to the exact verification record')
+    assert.equal(readLedger().tasks.find((item) => item.taskInstanceId === taskB.taskInstanceId).status, 'complete', 'controller completion consumes verified requirement state')
+    const telemetryResult = await run('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(installRoot, 'scripts', 'Engineering.ps1'), '-Action', 'telemetry-snapshot', '-TaskId', taskB.taskId, '-Workspace', fixture, '-TaskInstanceId', taskB.taskInstanceId], { timeout: 320000, windowsHide: true })
+    const engineeringTelemetry = JSON.parse(telemetryResult.stdout)
+    assert.equal(engineeringTelemetry.taskInstanceId, taskB.taskInstanceId, 'engineering telemetry remains generation-scoped')
+    assert.equal(engineeringTelemetry.totalModelCalls, 1, 'telemetry derives the real GUI engineering step count')
+    assert.deepEqual(engineeringTelemetry.verificationCommands, ['aih-verify-project'], 'telemetry consumes the production verification record')
+    assert.equal(engineeringTelemetry.epistemicActions.reason, 1, 'telemetry counts the production GUI reasoning action')
+    assert.equal(engineeringTelemetry.epistemicActions.verify, 1, 'telemetry counts controller-owned VERIFY without fabricating a model call')
+    const epistemicAfterVerify = fs.readFileSync(path.join(runRootB, 'epistemic-actions.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    assert.ok(epistemicAfterVerify.some((record) => record.event === 'action-completed' && record.result === 'succeeded'), 'production verification closes its epistemic action lifecycle')
 
     // 15. Explicit /review routes ONLY through the independent reviewer: the
     //     packet-too-large rejection (legacy enforceLimits=true, set in this
@@ -513,10 +562,15 @@ async function runBridgeEndToEnd() {
       .filter((r) => r.taskId === taskB.taskId && r.taskInstanceId === taskB.taskInstanceId)
     const reviewDecision = bDecisions[bDecisions.length - 1]
     assert.equal(reviewDecision.executionClass, 'reviewer', 'the explicit review routed the reviewer class')
-    assert.equal(reviewDecision.model, 'gpt-5.6-sol', 'reviewer under GLM + Codex is GPT-5.6 Sol')
+    assert.equal(reviewDecision.model, reviewerTarget.model, 'reviewer resolves through the active profile reviewer target')
     assert.equal(bDecisions.filter((r) => r.executionClass === 'reviewer').length, 1, 'exactly one reviewer decision, instance-scoped')
+    const stepRoutingAfterReview = fs.readFileSync(path.join(runRootB, 'step-routing.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    assert.equal(stepRoutingAfterReview.length, 1, 'review does not create an engineering step-selection record')
+    assert.ok(stepRoutingAfterReview.every((record) => record.selectedRole !== 'reviewer'), 'reviewer remains outside engineering step selection')
+    const epistemicAfterReview = fs.readFileSync(path.join(runRootB, 'epistemic-actions.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    assert.ok(epistemicAfterReview.every((record) => record.selectedAction !== 'reviewer'), 'reviewer never becomes an epistemic action in production')
     const attemptsForReview = fs.existsSync(path.join(fixture, '.ai-harness', 'runs', taskB.taskId, 'attempts.jsonl'))
-      ? fs.readFileSync(path.join(fixture, '.ai-harness', 'runs', taskB.taskId, 'attempts.jsonl'), 'utf8').trim().split('\n').length
+      ? fs.readFileSync(path.join(fixture, '.ai-harness', 'runs', taskB.taskId, 'attempts.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line)).filter((record) => record.status === 'started').length
       : 0
     assert.equal(attemptsForReview, 1, 'zero engineer calls before review (the only attempt predates the review turn)')
     assert.ok(session.messages.some((m) => m.message && m.message.source && m.message.source.form === 'review-packet-too-large'), 'the oversized packet was rejected by budget enforcement')

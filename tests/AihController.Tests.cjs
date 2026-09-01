@@ -28,6 +28,16 @@ async function main() {
   assert.equal(controller.reviewQuestionOf('/review'), '')
   assert.equal(controller.reviewQuestionOf('audit the boundary'), 'audit the boundary')
 
+  // TASK-0016: ordinary GUI prompts are converted to conservative structured
+  // policy inputs without a classifier model or reasoning-text inspection.
+  assert.equal(controller.classifyEpistemicPrompt('Implement the requested change').implementationReady, true)
+  assert.equal(controller.classifyEpistemicPrompt('Which file defines this symbol?').kind, 'repository')
+  const empiricalPolicyInput = controller.classifyEpistemicPrompt('What type does this PowerShell runtime value serialize to?')
+  assert.equal(empiricalPolicyInput.kind, 'empirical')
+  assert.equal(empiricalPolicyInput.probeAvailable, true)
+  assert.equal(empiricalPolicyInput.probeRisk, 'safe')
+  assert.equal(controller.classifyEpistemicPrompt('Which architecture preserves both invariants?').kind, 'judgment')
+
   // 2. Only genuine user prompts drive binding; plugin/system messages are ignored
   assert.equal(controller.isUserPrompt(userMessage('do the thing')), true)
   assert.equal(controller.isUserPrompt(pluginMessage('context snapshot', 'snapshot')), false)
@@ -90,7 +100,24 @@ async function main() {
   const path = require('node:path')
   const os = require('node:os')
   const runCli = promisify(execFile)
-  const scriptsRoot = path.join(__dirname, '..', 'scripts')
+  // Exercise the real default install-root resolution without touching the
+  // live Nexus install: all controller CLIs run from a disposable copy of the
+  // production scripts/config/data layout. The exit hook also runs after an
+  // assertion failure, so fixture state is cleaned on both pass and failure.
+  const sourceRoot = path.join(__dirname, '..')
+  const bridgeInstallRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-controller-install-'))
+  const bridgeWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-controller-workspace-'))
+  fs.cpSync(path.join(sourceRoot, 'scripts'), path.join(bridgeInstallRoot, 'scripts'), { recursive: true })
+  fs.cpSync(path.join(sourceRoot, 'config'), path.join(bridgeInstallRoot, 'config'), { recursive: true })
+  fs.mkdirSync(path.join(bridgeInstallRoot, 'data', 'routing'), { recursive: true })
+  if (fs.existsSync(path.join(sourceRoot, 'data', 'settings.yaml'))) {
+    fs.copyFileSync(path.join(sourceRoot, 'data', 'settings.yaml'), path.join(bridgeInstallRoot, 'data', 'settings.yaml'))
+  }
+  process.once('exit', () => {
+    fs.rmSync(bridgeInstallRoot, { recursive: true, force: true })
+    fs.rmSync(bridgeWorkspace, { recursive: true, force: true })
+  })
+  const scriptsRoot = path.join(bridgeInstallRoot, 'scripts')
   const payloadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-payload-'))
   const hostileDescription =
     'Verify only the ARTHUR Phase 2 remediation for findings F1, F2 and F3.\r\n' +
@@ -99,7 +126,7 @@ async function main() {
     'Control: ' + String.fromCharCode(0x1a, 0x01) + '\r\n' +
     'F2 - replay after forget\r\n- remember ' + String.fromCharCode(0x1a) + ' forget again'
   const payloadPath = path.join(payloadDir, 'task.json')
-  fs.writeFileSync(payloadPath, JSON.stringify({ workspace: __dirname, description: hostileDescription, reviewRequested: false }))
+  fs.writeFileSync(payloadPath, JSON.stringify({ workspace: bridgeWorkspace, description: hostileDescription, reviewRequested: false }))
   const taskResult = await runCli(
     'powershell.exe',
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Task.ps1'), '-Action', 'create-task', '-PayloadFile', payloadPath],
@@ -108,7 +135,7 @@ async function main() {
   const task = controller.parseCliJson((taskResult.stdout || '').trim())
   assert.ok(task && task.taskId, 'Task.ps1 payload create-task returned a task')
   assert.equal(task.description, hostileDescription, 'Task.ps1 description round-trips byte-exact')
-  fs.writeFileSync(payloadPath, JSON.stringify({ workspace: __dirname, description: hostileDescription, reviewRequested: true }))
+  fs.writeFileSync(payloadPath, JSON.stringify({ workspace: bridgeWorkspace, description: hostileDescription, reviewRequested: true }))
   const routeResult = await runCli(
     'powershell.exe',
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Route.ps1'), '-TaskId', task.taskId, '-Preset', 'aih-engineering', '-PayloadFile', payloadPath],
@@ -146,7 +173,7 @@ async function main() {
   const bigContent = 'x'.repeat(140000)
   fs.writeFileSync(oversizedBundle, JSON.stringify([{ path: 'huge.txt', score: 1, content: bigContent }]))
   const reviewPayload = path.join(oversizedDir, 'review.json')
-  fs.writeFileSync(reviewPayload, JSON.stringify({ workspace: __dirname, question: 'Review this function for correctness only.' }))
+  fs.writeFileSync(reviewPayload, JSON.stringify({ workspace: bridgeWorkspace, question: 'Review this function for correctness only.' }))
   let reviewError = null
   let reviewStdout = ''
   try {

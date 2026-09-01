@@ -64,7 +64,17 @@ function apply(ctx) {
     // engineer roles onto a wrong model (e.g. engineer_deep -> the reviewer
     // model under GLM + Codex).
     const executionClass = profiles.liveExecutionClassOf(installRoot, binding)
-    const role = profiles.roleOfExecutionClass(executionClass) || 'primaryEngineer'
+    // Phase 3.2.5: the CURRENT step role (mirrored by the deterministic step
+    // router into the routing state) describes THIS step's reasoning
+    // requirement - engineer_normal by default, engineer_deep only while a
+    // structured escalation is open. It overrides the task-level class for
+    // model resolution WITHOUT ever rewriting that class. Only the two
+    // engineering roles are honored: the reviewer (and any other class) can
+    // never be selected as the engineering/root-executor role through this
+    // mechanism.
+    const stepRole = profiles.liveStepRoleOf(installRoot, binding)
+    const resolutionClass = stepRole || executionClass
+    const role = profiles.roleOfExecutionClass(resolutionClass) || 'primaryEngineer'
     const target = profiles.resolveTarget(installRoot, activeProfile.id, role)
     if (!target) {
       return Object.freeze({ ...proposed, provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoningEffort: 'max' })

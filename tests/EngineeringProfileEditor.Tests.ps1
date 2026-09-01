@@ -83,7 +83,7 @@ try{
     $d2=Invoke-AihRoutingDecision 'implement ordinary change' $fixture (Join-Path $fixture 'config/routing-policy.json') (Join-Path $fixture 'data/routing') 'editor-task-6' 'aih-engineering' -DryRun -SettingsPath $flayout.Settings -CustomProfilePath $flayout.CustomEngineeringProfile
     Assert-Aih ($d2.provider -eq 'zai-direct' -and $d2.model -eq 'glm-5.3-flash') '6: next execution uses glm-5.3-flash with ZERO routing/controller changes'
 
-    # 7. deepEngineer independent change (glm-5.3-flash deep / max unsupported → use glm-5.3/max then deep via glm-5.3)
+    # 7. deepEngineer independent change (custom binding glm-5.3/max — independent of the built-in glm-codex deep role Phase 3.2.5 remapped to glm-5.3-flash/max)
     $dodRoles3=@{primaryEngineer=@{model='glm-5.3';reasoning='high'};deepEngineer=@{model='glm-5.3';reasoning='max'};reviewer=@{model='gpt-5.6-sol';reasoning='medium'};solver=@{model='gpt-5.6-sol';reasoning='high'};fallback=@{model='deepseek-v4-flash';reasoning='max'}}
     Save-AihEditorCustom $dodRoles3|Out-Null
     $d3=Invoke-AihRoutingDecision 'escalate' $fixture (Join-Path $fixture 'config/routing-policy.json') (Join-Path $fixture 'data/routing') 'editor-task-7' 'aih-engineering' -DryRun -SettingsPath $flayout.Settings -CustomProfilePath $flayout.CustomEngineeringProfile -ForceClass engineer_deep
@@ -134,10 +134,17 @@ try{
     Assert-Aih $threw '12: reviewer rejects a non-sol-local model (transport constraint)'
 
     # 13. unsupported reasoning level rejected
-    $badReasoning=@{primaryEngineer=@{model='glm-5.3-flash';reasoning='max'};deepEngineer=@{model='glm-5.3';reasoning='max'};reviewer=@{model='gpt-5.6-sol';reasoning='medium'};solver=@{model='gpt-5.6-sol';reasoning='high'};fallback=@{model='deepseek-v4-flash';reasoning='max'}}
+    # 13. unsupported reasoning level rejected (the probed level is DERIVED
+    #     from the fixture registry, so registry rebalances — e.g. Phase 3.2.5
+    #     granting glm-5.3-flash max support — cannot silently flip the scenario)
+    $fixtureRegistry13=Get-Content -Raw (Join-Path $fixture 'config/model-registry.json')|ConvertFrom-Json
+    $flash13=@($fixtureRegistry13.models)|Where-Object{$_.id -eq 'glm-5.3-flash'}
+    $badLevel13=@('low','medium','xhigh')|Where-Object{@($flash13.supportedReasoningLevels) -notcontains $_}|Select-Object -First 1
+    Assert-Aih (-not [string]::IsNullOrWhiteSpace([string]$badLevel13)) '13: fixture probe prerequisite (a reasoning level glm-5.3-flash does not support)'
+    $badReasoning=@{primaryEngineer=@{model='glm-5.3-flash';reasoning=[string]$badLevel13};deepEngineer=@{model='glm-5.3';reasoning='max'};reviewer=@{model='gpt-5.6-sol';reasoning='medium'};solver=@{model='gpt-5.6-sol';reasoning='high'};fallback=@{model='deepseek-v4-flash';reasoning='max'}}
     $threw=$false
     try{Save-AihEditorCustom $badReasoning|Out-Null}catch{$threw=$true}
-    Assert-Aih $threw '13: unsupported reasoning level rejected (glm-5.3-flash/max)'
+    Assert-Aih $threw "13: unsupported reasoning level rejected (glm-5.3-flash/$badLevel13)"
 
     # 14. invalid payload (malformed JSON / missing roles) rejected atomically
     Set-Content -Path (Join-Path $fixture 'bad.json') -Value '{not-json' -Encoding UTF8

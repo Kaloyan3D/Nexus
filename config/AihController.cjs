@@ -113,6 +113,27 @@ function isVerifyCommand(text) {
   return typeof text === 'string' && VERIFY_COMMAND.test(text)
 }
 
+/**
+ * Cheap deterministic INPUT classification for the controller's production
+ * pre-step boundary. This classifies the requested operation, never model
+ * reasoning text, and never calls another model. Rich clients can use the
+ * PowerShell structured contract directly; this conservative adapter exists
+ * for ordinary GUI prompts.
+ */
+function classifyEpistemicPrompt(text) {
+  const value = typeof text === 'string' ? text.trim() : ''
+  if (/^(implement|build|fix|change|update|create|add|remove|refactor|rename|apply|write|edit)\b/i.test(value)) {
+    return { kind: 'judgment', implementationReady: true, probeAvailable: false, repositoryAvailable: true, subject: 'implementation.request' }
+  }
+  if (/^(where|which (file|function|test|config)|what does (the )?(current|repository|implementation)|find (the )?(symbol|references|callers))\b/i.test(value)) {
+    return { kind: 'repository', implementationReady: false, probeAvailable: false, repositoryAvailable: true, subject: 'repository.question' }
+  }
+  if (/^(does|is|what (type|value|exit code)|how does).*\b(runtime|serialize|serialise|regex|path|command|powershell|node|exit code)\b/i.test(value)) {
+    return { kind: 'empirical', implementationReady: false, probeAvailable: true, probeCost: 'low', probeRisk: 'safe', expectedInformationGain: 'high', decisionRelevance: 'medium', repositoryAvailable: true, subject: 'runtime.question' }
+  }
+  return { kind: 'judgment', implementationReady: false, probeAvailable: false, repositoryAvailable: true, subject: 'engineering.question' }
+}
+
 /** True when an execution class is the read-only reviewer class (canonical
  *  or legacy alias), so old persisted classes keep working. */
 function isReviewClass(executionClass) {
@@ -568,9 +589,23 @@ function createBindingGuard(deps) {
 
 // ── plugin ──────────────────────────────────────────────────────────────────
 
-function resolveInstallRoot() {
-  if (process.env.AIH_INSTALL_ROOT) return path.resolve(process.env.AIH_INSTALL_ROOT)
-  if (process.env.DSH_HOME) return path.dirname(path.resolve(process.env.DSH_HOME))
+function resolveInstallRoot(env) {
+  // Phase 3.2.5 (root-cause fix for the TASK-0005 e2e baseline failure):
+  // the LIVE runtime data root (DSH_HOME) owns install-root identity.
+  // AIH_INSTALL_ROOT is an operator override for CLIs that run WITHOUT the
+  // DSH runtime. When both are present they are set consistently by the
+  // aih entrypoints; when they DISAGREE (isolated test fixtures, relocated
+  // data roots, alternate checkouts), resolving the install root from
+  // AIH_INSTALL_ROOT sent this bridge's child controller CLIs (Route.ps1,
+  // Task.ps1) to the PRODUCTION data root while the bridge itself wrote
+  // runtime state under DSH_HOME - cross-root contamination, and the
+  // documented fixture contract ("the bridge resolves relative to DSH_HOME")
+  // was violated. Priority is therefore DSH_HOME first, AIH_INSTALL_ROOT
+  // second. (PowerShell CLIs keep explicit -InstallRoot as the strongest
+  // binding; resolveInstallRoot only fills what the caller omits.)
+  const environment = env || process.env
+  if (environment.DSH_HOME) return path.dirname(path.resolve(environment.DSH_HOME))
+  if (environment.AIH_INSTALL_ROOT) return path.resolve(environment.AIH_INSTALL_ROOT)
   throw new Error('Nexus install root is unavailable; launch through the repo-local aih entrypoint.')
 }
 
@@ -816,8 +851,70 @@ function apply(ctx) {
     return binding && binding.taskInstanceId ? { taskInstanceId: binding.taskInstanceId } : {}
   }
 
-  async function beginAttempt(binding, turn) {
-    return invokePowerShell('Task.ps1', ['-Action', 'begin-attempt', '-TaskId', binding.taskId, '-ExecutionClass', binding.executionClass || 'engineer_normal'], {
+  // Phase 3.2.5: step/milestone-level role selection. EVERY engineering turn
+  // selects its CURRENT role deterministically: engineer_normal is the
+  // default; engineer_deep requires a task-local structured escalation
+  // reason and de-escalates once its artifact is recorded. The task-level
+  // classification is never overwritten by this (it stays the initial
+  // planning/UI metadata); the step role applies to THIS step and is
+  // mirrored into the routing state for the model enforcement layer. The
+  // reviewer is never selected by this mechanism. Fail-safe: on any
+  // engineering-plane failure the task-level class is used.
+  async function selectEngineeringEpistemicStep(binding, turn, promptText) {
+    const policyInput = classifyEpistemicPrompt(promptText)
+    const uncertainty = await invokePowerShell('Engineering.ps1', ['-Action', 'uncertainty-create', '-TaskId', binding.taskId], {
+      payload: {
+        workspace: binding.workspace,
+        taskInstanceId: binding.taskInstanceId || undefined,
+        question: promptText,
+        uncertaintyKind: policyInput.kind,
+        subject: policyInput.subject,
+        decisionImpact: 'medium',
+        probeAvailable: Boolean(policyInput.probeAvailable),
+        probeCost: policyInput.probeCost || 'low',
+        probeRisk: policyInput.probeRisk || 'safe',
+        expectedInformationGain: policyInput.expectedInformationGain || 'medium',
+        decisionRelevance: policyInput.decisionRelevance || 'medium',
+        repositoryAvailable: policyInput.repositoryAvailable !== false,
+      },
+    })
+    if (!uncertainty || !uncertainty.id) return null
+    const decision = await invokePowerShell('Engineering.ps1', ['-Action', 'epistemic-step', '-TaskId', binding.taskId, '-Preset', binding.preset || 'aih-engineering'], {
+      payload: {
+        workspace: binding.workspace,
+        taskInstanceId: binding.taskInstanceId || undefined,
+        uncertaintyId: uncertainty.id,
+        question: promptText,
+        implementationReady: Boolean(policyInput.implementationReady),
+        stepKind: 'turn',
+        milestoneId: turn ? String(turn) : undefined,
+      },
+    })
+    if (!decision || !decision.selectedRole) return null
+    if (decision.selectedRole !== 'engineer_normal' && decision.selectedRole !== 'engineer_deep') return null
+    return decision
+  }
+
+  async function selectEngineeringVerificationAction(binding) {
+    const question = 'Acquire final correctness evidence for the current implementation.'
+    const uncertainty = await invokePowerShell('Engineering.ps1', ['-Action', 'uncertainty-create', '-TaskId', binding.taskId], {
+      payload: { workspace: binding.workspace, ...instancePayloadOf(binding), question, uncertaintyKind: 'verification', subject: 'verification.final', probeAvailable: false },
+    })
+    if (!uncertainty || !uncertainty.id) return null
+    return invokePowerShell('Engineering.ps1', ['-Action', 'epistemic-select', '-TaskId', binding.taskId], {
+      payload: { workspace: binding.workspace, ...instancePayloadOf(binding), uncertaintyId: uncertainty.id, verificationRequired: true },
+    })
+  }
+
+  async function completeEngineeringEpistemicAction(binding, actionId, result, summary, failureSignature) {
+    if (!actionId) return null
+    return invokePowerShell('Engineering.ps1', ['-Action', 'epistemic-complete', '-TaskId', binding.taskId], {
+      payload: { workspace: binding.workspace, ...instancePayloadOf(binding), actionId, actionResult: result, summary: summary || '', failureSignature: failureSignature || '' },
+    })
+  }
+
+  async function beginAttempt(binding, turn, executionClass) {
+    return invokePowerShell('Task.ps1', ['-Action', 'begin-attempt', '-TaskId', binding.taskId, '-ExecutionClass', executionClass || binding.executionClass || 'engineer_normal'], {
       payload: {
         workspace: binding.workspace,
         sessionId: binding.sessionId,
@@ -836,9 +933,33 @@ function apply(ctx) {
     return invokePowerShell('Task.ps1', ['-Action', 'attempt-event', '-TaskId', binding.taskId], { payload })
   }
 
+  // Phase 3.2.5: normalize a raw failure text through the deterministic
+  // failure classifier (Engineering.ps1 classify-failure) so equivalent
+  // failures share ONE stable task-local signature. Never fatal: when the
+  // engineering plane is unavailable the caller's label is kept as-is.
+  async function classifyFailureSignature(binding, evidence) {
+    try {
+      const classified = await invokePowerShell('Engineering.ps1', ['-Action', 'classify-failure', '-TaskId', binding.taskId], {
+        payload: {
+          workspace: binding.workspace,
+          taskInstanceId: binding.taskInstanceId || undefined,
+          evidenceText: evidence || '',
+          actionSummary: 'turn-error',
+        },
+      })
+      if (classified && classified.signature) {
+        return { signature: String(classified.signature), classification: String(classified.classification || 'unknown') }
+      }
+    } catch { /* fail-safe below */ }
+    return null
+  }
+
   async function recordFailure(binding, signature, evidence) {
+    let failureSignature = signature
+    const classified = await classifyFailureSignature(binding, evidence)
+    if (classified && classified.signature) failureSignature = classified.signature
     return invokePowerShell('Task.ps1', ['-Action', 'failure', '-TaskId', binding.taskId], {
-      payload: { workspace: binding.workspace, failureSignature: signature, evidence: evidence || '', ...instancePayloadOf(binding) },
+      payload: { workspace: binding.workspace, failureSignature, evidence: evidence || '', ...instancePayloadOf(binding) },
     })
   }
 
@@ -852,6 +973,59 @@ function apply(ctx) {
     const args = ['-Action', 'complete', '-TaskId', binding.taskId]
     if (codexReviewPassed) args.push('-CodexReviewPassed')
     return invokePowerShell('Task.ps1', args, { payload: { workspace: binding.workspace, ...instancePayloadOf(binding) } })
+  }
+
+  // Phase 3.2.5 production integration: initialize the task-local Engineering
+  // lifecycle once, at the same authoritative binding boundary that creates
+  // taskInstanceId. The CLI action is idempotent and generation-aware.
+  async function initializeEngineeringLifecycle(binding) {
+    if (!binding || (binding.executionClass !== 'engineer_normal' && binding.executionClass !== 'engineer_deep')) return null
+    return invokePowerShell('Engineering.ps1', ['-Action', 'lifecycle-init', '-TaskId', binding.taskId], {
+      payload: {
+        workspace: binding.workspace,
+        taskInstanceId: binding.taskInstanceId || undefined,
+        text: binding.description || '',
+      },
+    })
+  }
+
+  async function planEngineeringVerification(binding) {
+    await initializeEngineeringLifecycle(binding)
+    const requirements = await invokePowerShell('Engineering.ps1', ['-Action', 'requirements-snapshot', '-TaskId', binding.taskId], {
+      payload: { workspace: binding.workspace, ...instancePayloadOf(binding) },
+    })
+    const requirementIds = requirements && Array.isArray(requirements.requirements)
+      ? requirements.requirements.filter((item) => item && item.required !== false).map((item) => String(item.id || '')).filter(Boolean)
+      : []
+    return invokePowerShell('Engineering.ps1', ['-Action', 'plan-verification', '-TaskId', binding.taskId], {
+      payload: {
+        workspace: binding.workspace,
+        ...instancePayloadOf(binding),
+        verificationScope: 'final',
+        reason: 'Controller-owned /verify final project verification.',
+        requirementIds,
+        commands: [{
+          name: 'aih-verify-project',
+          executable: 'powershell.exe',
+          argv: ['-File', path.join(scriptsRoot, 'Verify-Project.ps1'), '-Kind', 'all'],
+          cwd: binding.workspace,
+          timeoutMs: 600000,
+        }],
+      },
+    })
+  }
+
+  async function completeEngineeringVerification(binding, plan, result, summary) {
+    if (!plan || !plan.verificationId) throw new Error('Engineering verification plan did not return a verificationId.')
+    return invokePowerShell('Engineering.ps1', ['-Action', 'complete-verification', '-TaskId', binding.taskId], {
+      payload: {
+        workspace: binding.workspace,
+        ...instancePayloadOf(binding),
+        verificationId: plan.verificationId,
+        status: result,
+        summary,
+      },
+    })
   }
 
   function readReviewResult(workspace, taskId) {
@@ -964,8 +1138,11 @@ function apply(ctx) {
       return { kind: 'reject' }
     }
     const verificationStartedAtUtc = new Date().toISOString()
+    let epistemicAction = null
     try {
+      epistemicAction = await selectEngineeringVerificationAction(binding)
       await attemptEvent(binding, 'verifying')
+      const engineeringVerification = await planEngineeringVerification(binding)
       const result = await invokePowerShell('Verify-Project.ps1', [
         '-Workspace', binding.workspace,
         '-InstallRoot', installRoot,
@@ -1007,6 +1184,13 @@ function apply(ctx) {
         verification: normalized,
         scopePass: true,
       }
+      await completeEngineeringVerification(
+        binding,
+        engineeringVerification,
+        failed > 0 ? 'fail' : 'pass',
+        passed + ' passed, ' + failed + ' failed, ' + skipped + ' skipped',
+      )
+      await completeEngineeringEpistemicAction(binding, epistemicAction && epistemicAction.actionId, failed > 0 ? 'failed' : 'succeeded', passed + ' passed, ' + failed + ' failed, ' + skipped + ' skipped')
       await writeEvidence(binding, evidence)
       if (failed > 0) {
         await recordFailure(binding, 'verification-failed', failed + ' of ' + normalized.length + ' check(s) failed during verification of attempt ' + latest.sequence)
@@ -1026,6 +1210,7 @@ function apply(ctx) {
       )
       return { kind: 'reject' }
     } catch (error) {
+      await completeEngineeringEpistemicAction(binding, epistemicAction && epistemicAction.actionId, 'interrupted', String(error && error.message ? error.message : error)).catch(() => null)
       // Infrastructure failure (launch failure, timeout/abort, or no
       // parseable structured result): the attempt must NEVER stay
       // live-looking in 'verifying'. The smallest truthful terminal state is
@@ -1233,6 +1418,7 @@ function apply(ctx) {
       needsRouteCheck: false,
       boundAtUtc: new Date().toISOString(),
     }
+    await initializeEngineeringLifecycle(binding)
     bindings[session.id] = binding
     persistBindings()
     registerShellEnvironment()
@@ -1294,6 +1480,10 @@ function apply(ctx) {
     if (event.type === 'turn/end' && event.data && event.data.reason) {
       const reason = event.data.reason
       if (reason.kind === 'error' && reason.error && reason.error.message) {
+        const actionId = binding.currentEpistemicActionId
+        binding.currentEpistemicActionId = null
+        completeEngineeringEpistemicAction(binding, actionId, 'failed', String(reason.error.message), 'turn-error')
+          .catch((error) => log({ event: 'epistemic-action-complete-failed', sessionId: subject.id, error: String(error) }))
         // TASK-0004: a genuinely failed turn records the attempt failure at
         // the producer boundary (the controller owns the ledger).
         const latest = latestAttemptOf(binding.workspace, binding.taskId)
@@ -1315,6 +1505,10 @@ function apply(ctx) {
           })
           .catch((error) => log({ event: 'failure-signal-failed', sessionId: subject.id, error: String(error) }))
       } else if (reason.kind === 'aborted' || reason.kind === 'interrupted') {
+        const actionId = binding.currentEpistemicActionId
+        binding.currentEpistemicActionId = null
+        completeEngineeringEpistemicAction(binding, actionId, 'interrupted', 'turn-' + reason.kind)
+          .catch((error) => log({ event: 'epistemic-action-complete-failed', sessionId: subject.id, error: String(error) }))
         // TASK-0004: a user abort or system interrupt closes the open attempt
         // as interrupted (smallest truthful state) instead of leaving it open.
         const latest = latestAttemptOf(binding.workspace, binding.taskId)
@@ -1323,6 +1517,11 @@ function apply(ctx) {
             .then(() => log({ event: 'attempt-interrupted-recorded', sessionId: subject.id, taskId: binding.taskId }))
             .catch((error) => log({ event: 'attempt-interrupt-record-failed', sessionId: subject.id, error: String(error) }))
         }
+      } else {
+        const actionId = binding.currentEpistemicActionId
+        binding.currentEpistemicActionId = null
+        completeEngineeringEpistemicAction(binding, actionId, 'succeeded', 'engineering turn completed')
+          .catch((error) => log({ event: 'epistemic-action-complete-failed', sessionId: subject.id, error: String(error) }))
       }
     }
   })
@@ -1465,12 +1664,31 @@ function apply(ctx) {
       const latest = latestAttemptOf(binding.workspace, binding.taskId)
       if (!latest || !attemptIsOpen(latest)) {
         const nextSequence = latest ? latest.sequence + 1 : 1
+        // Phase 3.2.5: the step role for THIS turn (deterministic; Normal is
+        // the default; Deep only through the structured escalation gate).
+        let stepRole = null
         try {
-          await beginAttempt(binding, payload.turn)
+          const stepDecision = await selectEngineeringEpistemicStep(binding, payload.turn, promptText)
+          if (stepDecision) {
+            stepRole = stepDecision.selectedRole
+            binding.currentEpistemicActionId = stepDecision.actionId || null
+            appendMessage(
+              session,
+              createControllerMessage(
+                'Controller epistemic action: ' + String(stepDecision.selectedAction || 'reason').toUpperCase() + ' · ' + String(stepDecision.selectionReason || '') + '\nEngineering role: ' + executionClassLabel(stepRole) + '.',
+                'controller-epistemic-action',
+              ),
+            )
+          }
+        } catch (error) {
+          log({ event: 'step-routing-failed', sessionId: session.id, taskId: binding.taskId, error: String(error) })
+        }
+        try {
+          await beginAttempt(binding, payload.turn, stepRole)
           appendMessage(
             session,
             createControllerMessage(
-              'Controller: attempt ' + nextSequence + ' started · task ' + binding.taskId + ' (execution ' + executionClassLabel(binding.executionClass) + ').',
+              'Controller: attempt ' + nextSequence + ' started · task ' + binding.taskId + ' (execution ' + executionClassLabel(stepRole || binding.executionClass) + ' · step-routed).',
               'controller-attempt',
             ),
           )
@@ -1547,6 +1765,7 @@ function loadBindings(bindingsPath) {
 module.exports = { name: 'aih-controller', inject: ['shellEnv'], apply }
 module.exports.isReviewCommand = isReviewCommand
 module.exports.reviewQuestionOf = reviewQuestionOf
+module.exports.classifyEpistemicPrompt = classifyEpistemicPrompt
 module.exports.textOf = textOf
 module.exports.isUserPrompt = isUserPrompt
 module.exports.userPromptMessages = userPromptMessages
