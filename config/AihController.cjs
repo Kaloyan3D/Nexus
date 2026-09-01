@@ -120,18 +120,76 @@ function isVerifyCommand(text) {
  * PowerShell structured contract directly; this conservative adapter exists
  * for ordinary GUI prompts.
  */
+const IMPLEMENTATION_REQUEST_RE = /^(implement|build|fix|change|update|create|add|remove|refactor|rename|apply|write|edit)\b/i
+const EMPIRICAL_REQUEST_RE = /^(does|is|what (type|value|exit code)|how does).*\b(runtime|serialize|serialise|regex|path|command|powershell|node|exit code)\b/i
+const REPOSITORY_REQUEST_RES = [
+  /^(where|which (file|function|test|config|module|script|component|code path)|what does (the )?(current|repository|implementation)|find (the )?(symbol|references|callers|definition|implementation))\b/i,
+  /^(inspect|locate|trace|show|identify)\b/i,
+  /^(explain|describe|show)\s+how\s+(the\s+)?(current|existing|repository|implementation|controller|code)\b/i,
+  /^how\s+does\s+(the\s+)?(current|existing|repository|implementation|controller|code)\b/i,
+  /^what\s+currently\s+(handles|implements|writes|reads|routes|resolves|creates|updates)\b/i,
+  /\b(current|existing)\s+(implementation|code|controller|architecture|code path|routing|verification)\b/i,
+  /\b(where|how)\s+[^?\n]*\b(defined|implemented|wired|connected|resolved|handled|written|used|called)\b/i,
+]
+const PRESCRIPTIVE_JUDGMENT_RES = [
+  /\bshould\b/i,
+  /^(recommend|design|choose|propose|decide)\b/i,
+  /\b(best|better|safer)\s+(architecture|approach|design|option|strategy)\b/i,
+]
+
 function classifyEpistemicPrompt(text) {
   const value = typeof text === 'string' ? text.trim() : ''
-  if (/^(implement|build|fix|change|update|create|add|remove|refactor|rename|apply|write|edit)\b/i.test(value)) {
+  if (IMPLEMENTATION_REQUEST_RE.test(value)) {
     return { kind: 'judgment', implementationReady: true, probeAvailable: false, repositoryAvailable: true, subject: 'implementation.request' }
   }
-  if (/^(where|which (file|function|test|config)|what does (the )?(current|repository|implementation)|find (the )?(symbol|references|callers))\b/i.test(value)) {
-    return { kind: 'repository', implementationReady: false, probeAvailable: false, repositoryAvailable: true, subject: 'repository.question' }
-  }
-  if (/^(does|is|what (type|value|exit code)|how does).*\b(runtime|serialize|serialise|regex|path|command|powershell|node|exit code)\b/i.test(value)) {
+  // Runtime-observable questions win over generic references to "current"
+  // implementation: empirical uncertainty should be measured, not read or
+  // reasoned about.
+  if (EMPIRICAL_REQUEST_RE.test(value)) {
     return { kind: 'empirical', implementationReady: false, probeAvailable: true, probeCost: 'low', probeRisk: 'safe', expectedInformationGain: 'high', decisionRelevance: 'medium', repositoryAvailable: true, subject: 'runtime.question' }
   }
+  const prescriptive = PRESCRIPTIVE_JUDGMENT_RES.some((re) => re.test(value))
+  const repositoryDescriptive = REPOSITORY_REQUEST_RES.some((re) => re.test(value))
+  if (repositoryDescriptive && !prescriptive) {
+    return { kind: 'repository', implementationReady: false, probeAvailable: false, repositoryAvailable: true, subject: 'repository.question' }
+  }
+  if (prescriptive) {
+    return { kind: 'judgment', implementationReady: false, probeAvailable: false, repositoryAvailable: true, subject: 'engineering.judgment' }
+  }
   return { kind: 'judgment', implementationReady: false, probeAvailable: false, repositoryAvailable: true, subject: 'engineering.question' }
+}
+
+/**
+ * Parse the authoritative DSH assistant/chunk usage event. DSH reports newly
+ * processed (uncached) input in inputTokens and cache hits separately in
+ * cacheReadTokens. Missing cacheReadTokens means no cache hit for that call.
+ * No cost is inferred here.
+ */
+function engineeringUsageOfEvent(event) {
+  if (!event || event.type !== 'assistant/chunk') return null
+  const data = event.data
+  const chunk = data && data.chunk
+  const usage = chunk && chunk.type === 'usage' ? chunk.usage : null
+  if (!usage || typeof usage !== 'object') return null
+  const uncached = Number(usage.inputTokens)
+  const output = Number(usage.outputTokens)
+  const cache = usage.cacheReadTokens === undefined || usage.cacheReadTokens === null ? 0 : Number(usage.cacheReadTokens)
+  if (!Number.isFinite(uncached) || !Number.isFinite(output) || !Number.isFinite(cache)) return null
+  const inputTokens = Math.max(0, Math.trunc(uncached))
+  const cacheReadTokens = Math.max(0, Math.trunc(cache))
+  const outputTokens = Math.max(0, Math.trunc(output))
+  const turn = data && data.turn !== undefined && data.turn !== null ? String(data.turn) : ''
+  const step = data && data.step !== undefined && data.step !== null ? String(data.step) : ''
+  return {
+    turn,
+    step,
+    stepId: turn || step ? turn + ':' + step : '',
+    inputTokens,
+    uncachedInputTokens: inputTokens,
+    cacheReadTokens,
+    outputTokens,
+    usageAvailable: true,
+  }
 }
 
 /** True when an execution class is the read-only reviewer class (canonical
@@ -892,7 +950,25 @@ function apply(ctx) {
     })
     if (!decision || !decision.selectedRole) return null
     if (decision.selectedRole !== 'engineer_normal' && decision.selectedRole !== 'engineer_deep') return null
-    return decision
+
+    let retrieval = null
+    let retrievalError = null
+    if (decision.selectedAction === 'retrieve') {
+      try {
+        retrieval = await invokePowerShell('Engineering.ps1', ['-Action', 'working-set-retrieve', '-TaskId', binding.taskId], {
+          payload: {
+            workspace: binding.workspace,
+            taskInstanceId: binding.taskInstanceId || undefined,
+            query: promptText,
+            maxResults: 20,
+          },
+        })
+      } catch (error) {
+        retrievalError = String(error && error.message ? error.message : error)
+        log({ event: 'epistemic-retrieve-failed', taskId: binding.taskId, taskInstanceId: binding.taskInstanceId || null, error: retrievalError })
+      }
+    }
+    return { ...decision, retrieval, retrievalError }
   }
 
   async function selectEngineeringVerificationAction(binding) {
@@ -1473,10 +1549,36 @@ function apply(ctx) {
     }
   }
 
+  async function recordEngineeringModelUsage(binding, event) {
+    const usage = engineeringUsageOfEvent(event)
+    const current = binding && binding.currentEngineeringStep
+    if (!usage || !current || !current.role) return null
+    const roleTarget = current.roleTarget && typeof current.roleTarget === 'object' ? current.roleTarget : {}
+    return invokePowerShell('Engineering.ps1', ['-Action', 'record-model-usage', '-TaskId', binding.taskId], {
+      payload: {
+        workspace: binding.workspace,
+        taskInstanceId: binding.taskInstanceId || undefined,
+        role: current.role,
+        milestoneId: usage.stepId || current.stepId || '',
+        inputTokens: usage.inputTokens,
+        uncachedInputTokens: usage.uncachedInputTokens,
+        cacheReadTokens: usage.cacheReadTokens,
+        outputTokens: usage.outputTokens,
+        usageAvailable: usage.usageAvailable,
+        model: roleTarget.model || '',
+        provider: roleTarget.provider || '',
+      },
+    })
+  }
+
   ctx.on('session/event', (subject, event) => {
     if (!subject || !event) return
     const binding = bindings[subject.id]
     if (!binding) return
+    if (engineeringUsageOfEvent(event) && binding.currentEngineeringStep) {
+      recordEngineeringModelUsage(binding, event)
+        .catch((error) => log({ event: 'engineering-usage-record-failed', sessionId: subject.id, taskId: binding.taskId, error: String(error) }))
+    }
     if (event.type === 'turn/end' && event.data && event.data.reason) {
       const reason = event.data.reason
       if (reason.kind === 'error' && reason.error && reason.error.message) {
@@ -1523,6 +1625,7 @@ function apply(ctx) {
         completeEngineeringEpistemicAction(binding, actionId, 'succeeded', 'engineering turn completed')
           .catch((error) => log({ event: 'epistemic-action-complete-failed', sessionId: subject.id, error: String(error) }))
       }
+      binding.currentEngineeringStep = null
     }
   })
 
@@ -1672,10 +1775,23 @@ function apply(ctx) {
           if (stepDecision) {
             stepRole = stepDecision.selectedRole
             binding.currentEpistemicActionId = stepDecision.actionId || null
+            binding.currentEngineeringStep = {
+              role: stepRole,
+              stepId: stepDecision.step && stepDecision.step.stepId ? String(stepDecision.step.stepId) : String(payload.turn ?? ''),
+              roleTarget: stepDecision.roleTarget || (stepDecision.step && stepDecision.step.roleTarget) || null,
+              selectedAction: stepDecision.selectedAction || null,
+            }
+            const candidates = stepDecision.retrieval && Array.isArray(stepDecision.retrieval.candidates) ? stepDecision.retrieval.candidates : []
+            const paths = candidates.map((item) => item && item.file ? String(item.file) : '').filter(Boolean).slice(0, 8)
+            const retrievalLine = stepDecision.selectedAction === 'retrieve'
+              ? '\nRepository evidence preload: ' + (stepDecision.retrievalError
+                  ? 'FAILED (' + stepDecision.retrievalError + '); structured retrieval remains available to Engineer Normal.'
+                  : String(candidates.length) + ' candidate(s)' + (paths.length ? ' · ' + paths.join(', ') : '') + '.')
+              : ''
             appendMessage(
               session,
               createControllerMessage(
-                'Controller epistemic action: ' + String(stepDecision.selectedAction || 'reason').toUpperCase() + ' · ' + String(stepDecision.selectionReason || '') + '\nEngineering role: ' + executionClassLabel(stepRole) + '.',
+                'Controller epistemic action: ' + String(stepDecision.selectedAction || 'reason').toUpperCase() + ' · ' + String(stepDecision.selectionReason || '') + '\nEngineering role: ' + executionClassLabel(stepRole) + '.' + retrievalLine,
                 'controller-epistemic-action',
               ),
             )
@@ -1766,6 +1882,7 @@ module.exports = { name: 'aih-controller', inject: ['shellEnv'], apply }
 module.exports.isReviewCommand = isReviewCommand
 module.exports.reviewQuestionOf = reviewQuestionOf
 module.exports.classifyEpistemicPrompt = classifyEpistemicPrompt
+module.exports.engineeringUsageOfEvent = engineeringUsageOfEvent
 module.exports.textOf = textOf
 module.exports.isUserPrompt = isUserPrompt
 module.exports.userPromptMessages = userPromptMessages
