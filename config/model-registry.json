@@ -83,12 +83,14 @@
       "provider": "zai-direct",
       "providers": {
         "default": "zai-direct",
-        "high": "zai-direct"
+        "high": "zai-direct",
+        "max": "zai-direct"
       },
       "model": "glm-5.3-flash",
       "supportedReasoningLevels": [
         "off",
-        "high"
+        "high",
+        "max"
       ],
       "supportsTools": true,
       "supportsReasoning": true,

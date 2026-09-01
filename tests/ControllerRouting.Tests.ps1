@@ -1,5 +1,6 @@
-[CmdletBinding()]param([string]$InstallRoot='C:\AI-Harness')
+[CmdletBinding()]param([string]$InstallRoot)
 Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
+if([string]::IsNullOrWhiteSpace($InstallRoot)){$InstallRoot=Split-Path -Parent $PSScriptRoot}
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 . (Join-Path $InstallRoot 'scripts\Common.ps1')
 . (Join-Path $InstallRoot 'scripts\Routing.ps1')
@@ -10,6 +11,14 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $passed=0
 function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw "FAIL: $Name"};$script:passed++;Write-Host "PASS: $Name"}
 function New-Fixture([string]$Name){$path=Join-Path ([IO.Path]::GetTempPath()) ("aih-$Name-"+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $path|Out-Null;$path}
+function New-InstallFixture([object]$SourceLayout,[string]$Name){
+ $root=New-Fixture $Name
+ Copy-Item -LiteralPath $SourceLayout.Scripts -Destination (Join-Path $root 'scripts') -Recurse
+ Copy-Item -LiteralPath $SourceLayout.Config -Destination (Join-Path $root 'config') -Recurse
+ New-Item -ItemType Directory -Path (Join-Path $root 'data\routing') -Force|Out-Null
+ if(Test-Path -LiteralPath $SourceLayout.Settings){Copy-Item -LiteralPath $SourceLayout.Settings -Destination (Join-Path $root 'data\settings.yaml')}
+ return $root
+}
 # TASK-0007: a policy clone with the LEGACY hard budgets re-enabled, used to
 # prove the old rejection behavior still works behind enforceLimits=true.
 function Copy-AihPolicyEnforced([object]$Policy){$clone=$Policy|ConvertTo-Json -Depth 20|ConvertFrom-Json;$clone.codex.automaticReview.enforceLimits=$true;return $clone}
@@ -166,20 +175,33 @@ try{
  Assert-Aih ($complete.complete -and $complete.codexDisposition -eq 'pass') 'controller completes only after a passing review result'
 }finally{if(Test-Path $completionRoot){Remove-Item -LiteralPath $completionRoot -Recurse -Force}}
 
-# ── 7. CLI WIRING: aih-task create-task honors the metadata; aih-route records it ──
+# ── 7. CLI WIRING: default install-root routing remains production-real but hermetic ──
 $cliRoot=New-Fixture cli
+$cliInstallRoot=New-InstallFixture $layout cli-install
 try{
- $taskJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Task.ps1') -Action create-task -Workspace $cliRoot -Description 'audit the boundary' -ReviewRequested
+ # Copy the real scripts/config into an isolated INSTALL ROOT. Route.ps1 still
+ # derives <install root> -> data/routing through Get-AihLayout; only the root
+ # is disposable. No production-only branch or DataRoot override is used.
+ $cliLayout=Get-AihLayout $cliInstallRoot
+ $taskJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $cliLayout.Scripts 'Task.ps1') -Action create-task -Workspace $cliRoot -Description 'audit the boundary' -ReviewRequested
  $task=$taskJson|ConvertFrom-Json
  Assert-Aih ($task.reviewRequested -eq $true) 'aih-task create-task -ReviewRequested stores the metadata'
- $decisionJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Route.ps1') -Workspace $cliRoot -InstallRoot $InstallRoot -TaskId $task.taskId -Description 'audit the boundary' -ReviewRequested
+ $liveStatePath=Get-AihRoutingStatePath $layout.RoutingData $cliRoot $task.taskId
+ Assert-Aih (-not(Test-Path -LiteralPath $liveStatePath)) 'fixture identity has no pre-existing live routing state'
+ $decisionJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $cliLayout.Scripts 'Route.ps1') -Workspace $cliRoot -InstallRoot $cliInstallRoot -TaskId $task.taskId -Description 'audit the boundary' -ReviewRequested
  $decision=$decisionJson|ConvertFrom-Json
  Assert-Aih ($decision.executionClass -eq 'reviewer') 'aih-route -ReviewRequested selects reviewer'
  Assert-Aih ($decision.reviewRequested -eq $true) 'routing decision record carries reviewRequested=true'
- $statePath=Get-AihRoutingStatePath $layout.RoutingData $cliRoot $task.taskId
+ $statePath=Get-AihRoutingStatePath $cliLayout.RoutingData $cliRoot $task.taskId
  $state=Read-AihRoutingState $statePath
  Assert-Aih ($state.executionClass -eq 'reviewer') 'routing state persists the reviewer execution class'
-}finally{if(Test-Path $cliRoot){Remove-Item -LiteralPath $cliRoot -Recurse -Force}}
+ Assert-Aih ($statePath.StartsWith($cliLayout.RoutingData,[StringComparison]::OrdinalIgnoreCase)) 'default layout resolves state beneath the isolated install root data/routing'
+ Assert-Aih (-not(Test-Path -LiteralPath $liveStatePath)) 'default-layout CLI routing never writes the corresponding live routing state'
+}finally{
+ if(Test-Path $cliRoot){Remove-Item -LiteralPath $cliRoot -Recurse -Force}
+ if(Test-Path $cliInstallRoot){Remove-Item -LiteralPath $cliInstallRoot -Recurse -Force}
+}
+Assert-Aih (-not(Test-Path -LiteralPath $cliInstallRoot)) 'isolated install fixture is cleaned after the default-layout test'
 
 # ── 8. PAYLOAD FILE BRIDGE: hostile user text round-trips byte-exact ──
 # Regression for session-85b96a59: a real /codex-review prompt (quotes, CRLF,
@@ -189,7 +211,9 @@ try{
 # DeepSeek received the review. User text must now travel in a UTF-8 payload
 # file and the CLI stdout must round-trip byte-exact.
 $payloadRoot=New-Fixture payload
+$payloadInstallRoot=New-InstallFixture $layout payload-install
 try{
+ $payloadLayout=Get-AihLayout $payloadInstallRoot
  $hostile='Verify only the ARTHUR Phase 2 remediation for findings F1, F2 and F3.' + [char]13 + [char]10 +
    'Repository: D:' + [char]92 + 'A.R.T.H.U.R ' + [char]0x2192 + ' arrows ' + [char]0x2014 + ' emdash ' + [char]0xE0 + ' accented 中文' + [char]13 + [char]10 +
    'Quotes: "double" and ''single'' and backslash: C:' + [char]92 + 'path' + [char]92 + 'to' + [char]92 + 'x' + [char]13 + [char]10 +
@@ -197,25 +221,30 @@ try{
    'F2 - replay after forget' + [char]13 + [char]10 + '- remember ' + [char]0x1A + ' forget again'
  $payloadPath=Join-Path $payloadRoot 'payload.json'
  @{Workspace=$payloadRoot;Description=$hostile;ReviewRequested=$true}|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $payloadPath -Encoding UTF8
- $taskJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Task.ps1') -Action create-task -PayloadFile $payloadPath
+ $taskJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $payloadLayout.Scripts 'Task.ps1') -Action create-task -PayloadFile $payloadPath
  Assert-Aih (-not [string]::IsNullOrWhiteSpace($taskJson)) 'payload create-task emits output'
  $task=$taskJson|ConvertFrom-Json
  Assert-Aih ($task.description -eq $hostile) 'hostile description round-trips byte-exact through Task.ps1 payload'
  Assert-Aih ($task.reviewRequested -eq $true) 'payload reviewRequested reaches New-AihTask'
- $decisionJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Route.ps1') -Workspace $payloadRoot -InstallRoot $InstallRoot -TaskId $task.taskId -PayloadFile $payloadPath
+ $payloadLiveStatePath=Get-AihRoutingStatePath $layout.RoutingData $payloadRoot $task.taskId
+ $decisionJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $payloadLayout.Scripts 'Route.ps1') -Workspace $payloadRoot -InstallRoot $payloadInstallRoot -TaskId $task.taskId -PayloadFile $payloadPath
  $decision=$decisionJson|ConvertFrom-Json
  Assert-Aih ($decision.executionClass -eq 'reviewer') 'payload routing selects reviewer for the hostile prompt'
  Assert-Aih ($decision.reviewRequested -eq $true) 'payload routing decision carries reviewRequested=true'
- $srJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Task.ps1') -Action set-review-requested -TaskId $task.taskId -PayloadFile $payloadPath
+ Assert-Aih (-not(Test-Path -LiteralPath $payloadLiveStatePath)) 'payload bridge routing does not write live routing state'
+ $srJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $payloadLayout.Scripts 'Task.ps1') -Action set-review-requested -TaskId $task.taskId -PayloadFile $payloadPath
  Assert-Aih (-not [string]::IsNullOrWhiteSpace($srJson)) 'payload set-review-requested action is accepted'
  $srTask=$srJson|ConvertFrom-Json
  Assert-Aih ($srTask.taskId -eq $task.taskId) 'set-review-requested returns the updated task'
  $qPayloadPath=Join-Path $payloadRoot 'qpayload.json'
  @{Workspace=$payloadRoot;Question='Review this function for correctness only: function divide(a,b){ return a/b }'}|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $qPayloadPath -Encoding UTF8
- $packetJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Review.ps1') -Workspace $payloadRoot -InstallRoot $InstallRoot -TaskId $task.taskId -PayloadFile $qPayloadPath
+ $packetJson=& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $payloadLayout.Scripts 'Review.ps1') -Workspace $payloadRoot -InstallRoot $payloadInstallRoot -TaskId $task.taskId -PayloadFile $qPayloadPath
  $packetOut=$packetJson|ConvertFrom-Json
  Assert-Aih ($packetOut.question -eq 'Review this function for correctness only: function divide(a,b){ return a/b }') 'Review.ps1 payload question reaches the review packet'
-}finally{if(Test-Path $payloadRoot){Remove-Item -LiteralPath $payloadRoot -Recurse -Force}}
+}finally{
+ if(Test-Path $payloadRoot){Remove-Item -LiteralPath $payloadRoot -Recurse -Force}
+ if(Test-Path $payloadInstallRoot){Remove-Item -LiteralPath $payloadInstallRoot -Recurse -Force}
+}
 
 
 # ── 9. UTF-8 LEDGER BOUNDARY: read-modify-write preserves non-ASCII ──

@@ -32,14 +32,14 @@
     {
       "id": "glm-codex",
       "displayName": "GLM + Codex",
-      "description": "GLM engineers (GLM-5.3-Flash primary / GLM-5.3 deep) with an unlimited, read-only independent Codex review (budget enforcement off by default) and approval-gated Codex solve.",
+      "description": "GLM engineers (GLM-5.3-Flash primary / GLM-5.3-Flash MAX deep = the Flash model at max reasoning) with an unlimited, read-only independent Codex review (budget enforcement off by default) and approval-gated Codex solve. A stronger manual tier (e.g. GLM-5.3 MAX) stays available as an operator-selected binding; it is never an automatic escalation target.",
       "roles": {
         "primaryEngineer": {
           "model": "glm-5.3-flash",
           "reasoning": "high"
         },
         "deepEngineer": {
-          "model": "glm-5.3",
+          "model": "glm-5.3-flash",
           "reasoning": "max"
         },
         "reviewer": {

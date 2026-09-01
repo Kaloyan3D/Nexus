@@ -14,7 +14,9 @@
 #   Part 16 routing requests are instance-guarded (fail closed)
 #   Part 20 legacy records stay readable
 #   Part 23 generation-collision regression (reviewer records of generation A
-#           never influence generation B)
+#           never influence generation B; Phase 3.2.5: the expected deep and
+#           reviewer targets are DERIVED from the ACTIVE Engineering Profile
+#           the fixture selects, never hardcoded)
 #   Part 25 sequence regression (nextSequence=4 with TASK-0004/0005 surviving
 #           allocates TASK-0006, never overwrites either run)
 Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
@@ -22,6 +24,7 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 . (Join-Path $InstallRoot 'scripts\Common.ps1')
 . (Join-Path $InstallRoot 'scripts\Routing.ps1')
 . (Join-Path $InstallRoot 'scripts\TaskController.ps1')
+. (Join-Path $InstallRoot 'tests\TestHelpers.ps1')
 
 $passed=0
 function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw "FAIL: $Name"};$script:passed++;Write-Host "PASS: $Name"}
@@ -181,10 +184,25 @@ try{
  $dataRoot=Join-Path $root7 'data'
  $glmSettings=Join-Path $root7 'settings.yaml'
  Set-Content -LiteralPath $glmSettings -Value 'engineering-profile: glm-codex' -Encoding UTF8
+ # Phase 3.2.5: routing selects EXECUTION SEMANTICS (the deepEngineer role);
+ # the model/provider/reasoning come from the ACTIVE Engineering Profile the
+ # fixture selects through settings.yaml. The expected targets below are
+ # DERIVED from that active profile via the production resolvers, so this
+ # regression validates active-profile resolution and hardcodes no model
+ # identity of its own.
+ $policy7=Get-AihRoutingPolicy $layout.RoutingPolicy
+ $profiles7=Get-AihEngineeringProfiles $layout.EngineeringProfiles
+ $registry7=Get-AihModelRegistry $layout.ModelRegistry
+ $expected7=Resolve-AihExpectedProfileTargets -Policy $policy7 -Profiles $profiles7 -Registry $registry7 -SettingsPath $glmSettings -Roles @('deepEngineer','reviewer')
+ $activeProfile7=$expected7.Profile
+ Assert-Aih ([string]$activeProfile7.Id -eq 'glm-codex') 'fixture: settings.yaml selects the GLM + Codex active profile'
+ $deepTarget7=$expected7.Targets.deepEngineer
+ $reviewerTarget7=$expected7.Targets.reviewer
  $a=New-AihTask $root7 'engineer deep work generation A'
  $aInstance=[string]$a.taskInstanceId
  $reviewA=Invoke-AihRoutingDecision -Description 'review the boundary' -Workspace $root7 -PolicyPath $layout.RoutingPolicy -DataRoot $dataRoot -TaskId $a.taskId -Preset 'aih-engineering' -ReviewRequested -SettingsPath $glmSettings -TaskInstanceId $aInstance
- Assert-Aih ($reviewA.executionClass -eq 'reviewer' -and $reviewA.model -eq 'gpt-5.6-sol') 'generation A produced a reviewer decision (GPT-5.6 Sol)'
+ Assert-Aih ($reviewA.executionClass -eq 'reviewer' -and $reviewA.role -eq 'reviewer') 'generation A produced a reviewer decision'
+ Assert-Aih ([string]$reviewA.profile -eq [string]$activeProfile7.Id -and [string]$reviewA.model -eq [string]$reviewerTarget7.Model -and [string]$reviewA.provider -eq [string]$reviewerTarget7.Provider -and [string]$reviewA.reasoning -eq [string]$reviewerTarget7.Reasoning) 'generation A reviewer binds through the ACTIVE profile reviewer role'
  $ledgerPath=Join-Path $root7 '.ai-harness\state\tasks.json'
  Write-AihAtomicJson $ledgerPath ([ordered]@{schemaVersion=1;nextSequence=1;tasks=@()})
  Remove-Item -LiteralPath (Join-Path $root7 '.ai-harness\runs') -Recurse -Force
@@ -194,15 +212,17 @@ try{
  $bInstance=[string]$b.taskInstanceId
  $routeB=Invoke-AihRoutingDecision -Description 'engineer deep work generation B' -Workspace $root7 -PolicyPath $layout.RoutingPolicy -DataRoot $dataRoot -TaskId $b.taskId -Preset 'aih-engineering' -ForceClass 'engineer_deep' -SettingsPath $glmSettings -TaskInstanceId $bInstance
  Assert-Aih ($routeB.executionClass -eq 'engineer_deep') 'generation B routes as engineer_deep'
- Assert-Aih ($routeB.role -eq 'deepEngineer' -and $routeB.model -eq 'glm-5.3') 'engineer_deep under GLM + Codex targets deepEngineer -> GLM-5.3'
+ Assert-Aih ($routeB.role -eq 'deepEngineer') 'engineer_deep resolves to the semantic deepEngineer role'
+ Assert-Aih ([string]$routeB.profile -eq [string]$activeProfile7.Id) 'engineer_deep resolves through the ACTIVE Engineering Profile (fixture settings.yaml)'
+ Assert-Aih ([string]$routeB.model -eq [string]$deepTarget7.Model -and [string]$routeB.provider -eq [string]$deepTarget7.Provider -and [string]$routeB.reasoning -eq [string]$deepTarget7.Reasoning) 'engineer_deep model/provider/reasoning bind through the ACTIVE profile deepEngineer role (no hardcoded model identity)'
  $decisions=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $dataRoot 'decisions.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
  $bRecords=@($decisions | Where-Object { $_.taskId -eq $b.taskId -and $_.taskInstanceId -eq $bInstance })
  $aRecords=@($decisions | Where-Object { $_.taskId -eq $a.taskId -and $_.taskInstanceId -eq $aInstance })
- Assert-Aih (@($bRecords).Count -eq 1 -and [string]$bRecords[0].model -eq 'glm-5.3') 'B joins only its own engineer_deep decision'
- Assert-Aih (@($aRecords).Count -eq 1 -and [string]$aRecords[0].model -eq 'gpt-5.6-sol') 'A reviewer record survives untouched under its own instance'
+ Assert-Aih (@($bRecords).Count -eq 1 -and [string]$bRecords[0].model -eq [string]$deepTarget7.Model) 'B joins only its own engineer_deep decision'
+ Assert-Aih (@($aRecords).Count -eq 1 -and [string]$aRecords[0].model -eq [string]$reviewerTarget7.Model) 'A reviewer record survives untouched under its own instance'
  Assert-Aih (@($decisions | Where-Object { $_.taskId -eq $b.taskId -and $null -eq $_.taskInstanceId }).Count -eq 0) 'no taskId-only (instance-blind) record exists that could join B'
  $joinB=@($decisions | Where-Object { $_.taskId -eq $b.taskId -and $_.taskInstanceId -eq $bInstance -and $_.executionClass -eq 'engineer_deep' })
- Assert-Aih (@($joinB).Count -eq 1 -and [string]$joinB[0].model -eq 'glm-5.3') 'an instance-aware join for B resolves ONLY the GLM engineer decision, never the A reviewer decision'
+ Assert-Aih (@($joinB).Count -eq 1 -and [string]$joinB[0].model -eq [string]$deepTarget7.Model) 'an instance-aware join for B resolves ONLY the active-profile deep engineer decision, never the A reviewer decision'
  $legacyDecision=Invoke-AihRoutingDecision -Description 'legacy routing path' -Workspace $root7 -PolicyPath $layout.RoutingPolicy -DataRoot $dataRoot -TaskId 'legacy-cli-task' -Preset 'aih-engineering'
  Assert-Aih ($legacyDecision.executionClass -eq 'engineer_normal') 'legacy taskId-only routing (no instance) still works'
  $legacyState=Read-AihRoutingState (Get-AihRoutingStatePath $dataRoot $root7 'legacy-cli-task' 'aih-engineering')

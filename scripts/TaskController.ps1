@@ -397,6 +397,17 @@ function Test-AihTaskCompletion {
     if ($null -ne $task.PSObject.Properties['reviewRequested'] -and [bool]$task.reviewRequested) { $reviewRequired = $true }
     if ($null -ne $task.PSObject.Properties['executionClassOverride'] -and (ConvertTo-AihCanonicalExecutionClass ([string]$task.executionClassOverride)) -eq 'reviewer') { $reviewRequired = $true }
     if ($reviewRequired -and -not ($CodexReviewPassed -or $CodexFindingsResolved)) { $reasons.Add('This task requires a passing independent review or deterministic evidence that its findings were resolved (critical policy, explicit review request, or execution-class override).') }
+    # Phase 3.2.5 requirement traceability: when the task carries a compiled
+    # requirements document, required-unverified requirements block
+    # completion where policy requires verification (IMPLEMENTED != VERIFIED).
+    # Tasks WITHOUT a requirements document are unaffected (the gate only
+    # activates when the Requirement Compiler ran for this task generation).
+    $requirementsPath = Join-Path (Join-Path $layout.Runs $TaskId) 'requirements.json'
+    if (Test-Path -LiteralPath $requirementsPath) {
+        . (Join-Path $PSScriptRoot (Join-Path 'Engineering' 'Shared.ps1'))
+        . (Join-Path $PSScriptRoot (Join-Path 'Engineering' 'Requirements.ps1'))
+        foreach ($traceabilityReason in @(Test-AihRequirementsCompletionBlock -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId)) { $reasons.Add([string]$traceabilityReason) }
+    }
     $complete = $reasons.Count -eq 0
     if ($complete) {
         Update-AihTaskRecord $Workspace $TaskId -TaskInstanceId $TaskInstanceId { param($item); $item.status = 'complete'; $item.completedAtUtc = [DateTime]::UtcNow.ToString('o') } | Out-Null

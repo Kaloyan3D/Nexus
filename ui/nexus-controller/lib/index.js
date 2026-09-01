@@ -36,7 +36,16 @@ function apply(ctx) {
   // service is available (immediately, or later when the service appears).
   // Without the service the callback never runs — the plugin stays inert.
   ctx.inject(['webServer'], (webCtx) => {
-    const configuredRoot = process.env.AIH_INSTALL_ROOT || (process.env.DSH_HOME ? dirname(resolve(process.env.DSH_HOME)) : '')
+    // Phase 3.2.5: the LIVE runtime data root (DSH_HOME) owns install-root
+    // identity — the same precedence as the controller bridge and the
+    // engineering profile layer. AIH_INSTALL_ROOT stays the fallback for
+    // tooling that runs without the DSH runtime; when both are set they are
+    // set consistently by the aih entrypoints, and when they disagree the
+    // DSH runtime root must win so the UI reads the same data plane the
+    // controller writes.
+    const configuredRoot = process.env.DSH_HOME
+      ? dirname(resolve(process.env.DSH_HOME))
+      : (process.env.AIH_INSTALL_ROOT || '')
     if (!configuredRoot) throw new Error('Nexus install root is unavailable; launch through the repo-local aih entrypoint.')
     const installRoot = resolve(configuredRoot)
     const dataRoot = process.env.DSH_HOME ? resolve(process.env.DSH_HOME) : join(installRoot, 'data')

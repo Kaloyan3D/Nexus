@@ -68,11 +68,17 @@ function findInstallRoot(startDir) {
 }
 
 function installRootOf() {
-  if (typeof process.env.AIH_INSTALL_ROOT === 'string' && process.env.AIH_INSTALL_ROOT !== '') {
-    return path.resolve(process.env.AIH_INSTALL_ROOT)
-  }
+  // Phase 3.2.5: the LIVE runtime data root (DSH_HOME) owns install-root
+  // identity, exactly like the controller bridge. AIH_INSTALL_ROOT remains
+  // the fallback for tooling that runs without the DSH runtime. When both
+  // are present they are set consistently by the aih entrypoints; when they
+  // disagree (isolated fixtures, relocated data roots), the DSH runtime root
+  // must win so enforcement reads the SAME data plane the controller writes.
   if (typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOME !== '') {
     return path.dirname(path.resolve(process.env.DSH_HOME))
+  }
+  if (typeof process.env.AIH_INSTALL_ROOT === 'string' && process.env.AIH_INSTALL_ROOT !== '') {
+    return path.resolve(process.env.AIH_INSTALL_ROOT)
   }
   const discovered = findInstallRoot(__dirname)
   if (discovered) return discovered
@@ -349,6 +355,20 @@ function liveExecutionClassOf(installRoot, binding) {
   return null
 }
 
+/**
+ * Phase 3.2.5: the CURRENT STEP role for a binding, when the deterministic
+ * step router mirrored one into the routing state. Only the two engineering
+ * roles are honored - the reviewer (and any other class) is NEVER selected
+ * through this mechanism. Returns null when no valid step role exists.
+ */
+function liveStepRoleOf(installRoot, binding) {
+  const statePath = routingStatePath(installRoot, binding)
+  const state = statePath ? readJson(statePath) : null
+  if (!state || typeof state.stepRole !== 'string') return null
+  const stepRole = state.stepRole
+  return stepRole === 'engineer_normal' || stepRole === 'engineer_deep' ? stepRole : null
+}
+
 module.exports = {
   LEGACY_CLASS_ALIASES,
   CLASS_DISPLAY_NAMES,
@@ -373,4 +393,5 @@ module.exports = {
   resolveTarget,
   routingStatePath,
   liveExecutionClassOf,
+  liveStepRoleOf,
 }
