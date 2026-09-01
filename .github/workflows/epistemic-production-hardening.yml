@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - fix/epistemic-production-hardening
+  pull_request:
+    branches:
+      - feature/memory-layer
 
 permissions:
   contents: write
@@ -16,6 +19,7 @@ jobs:
       - name: Check out hardening branch
         uses: actions/checkout@v4
         with:
+          ref: fix/epistemic-production-hardening
           fetch-depth: 0
 
       - name: Apply bounded production hardening
