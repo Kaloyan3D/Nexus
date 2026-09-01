@@ -116,7 +116,11 @@ function Get-AihEngineeringTelemetry {
     $estimatedCost = $null
     $timeByRole = [ordered]@{ engineer_normal = 0; engineer_deep = 0; reviewer = 0 }
     foreach ($usage in $usageRecords) {
-        if ($null -ne $byRole.PSObject.Properties[[string]$usage.role]) { $byRole[[string]$usage.role] = [int]$byRole[[string]$usage.role] + 1 }
+        $roleKey = [string]$usage.role
+        # OrderedDictionary authored keys are not exposed through
+        # .PSObject.Properties under Windows PowerShell 5.1. Query the
+        # dictionary itself or role counters silently remain zero.
+        if ($byRole.Contains($roleKey)) { $byRole[$roleKey] = [int]$byRole[$roleKey] + 1 }
         if ([bool]$usage.usageAvailable) {
             $inputTokens += [int]$usage.inputTokens
             $uncachedInputTokens += [int]$usage.uncachedInputTokens
@@ -127,7 +131,7 @@ function Get-AihEngineeringTelemetry {
         if ($null -ne $usage.PSObject.Properties['startedAtUtc'] -and $null -ne $usage.PSObject.Properties['finishedAtUtc']) {
             $from = [DateTime]::MinValue; $to = [DateTime]::MinValue
             if ([DateTime]::TryParse($usage.startedAtUtc, [ref]$from) -and [DateTime]::TryParse($usage.finishedAtUtc, [ref]$to) -and $to -ge $from) {
-                if ($null -ne $timeByRole.PSObject.Properties[[string]$usage.role]) { $timeByRole[[string]$usage.role] = [int]$timeByRole[[string]$usage.role] + [int]($to - $from).TotalMilliseconds }
+                if ($timeByRole.Contains($roleKey)) { $timeByRole[$roleKey] = [int]$timeByRole[$roleKey] + [int]($to - $from).TotalMilliseconds }
             }
         }
     }
