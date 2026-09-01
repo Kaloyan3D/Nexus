@@ -1,0 +1,62 @@
+name: Epistemic production hardening
+
+on:
+  push:
+    branches:
+      - fix/epistemic-production-hardening
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out hardening branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply bounded production hardening
+        shell: pwsh
+        run: node scripts/patch-epistemic-production-hardening.mjs
+
+      - name: Check controller syntax
+        shell: pwsh
+        run: node --check config/AihController.cjs
+
+      - name: Run epistemic production classifier and usage regressions
+        shell: pwsh
+        run: node tests/EpistemicProductionHardening.Tests.cjs
+
+      - name: Run engineering telemetry regressions
+        shell: powershell
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/EngineeringTelemetry.Tests.ps1 -InstallRoot $PWD.Path
+
+      - name: Run existing controller regressions
+        shell: pwsh
+        run: node tests/AihController.Tests.cjs
+
+      - name: Run existing epistemic policy regressions
+        shell: powershell
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/EpistemicPolicy.Tests.ps1 -InstallRoot $PWD.Path
+
+      - name: Run full durable harness
+        shell: powershell
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'epistemic-production-hardening.report.json'
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/Test-Harness.ps1 -InstallRoot $PWD.Path -ReportPath $report
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Content -Raw $report
+
+      - name: Commit verified hardening and remove bootstrap workflow
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm scripts/patch-epistemic-production-hardening.mjs .github/workflows/epistemic-production-hardening.yml
+          git add config/AihController.cjs scripts/Engineering/Telemetry.ps1 scripts/Test-Harness.ps1 tests/EpistemicProductionHardening.Tests.cjs tests/EngineeringTelemetry.Tests.ps1
+          git diff --cached --check
+          git commit -m "fix(engineering): harden epistemic production routing"
+          git push origin HEAD:fix/epistemic-production-hardening
