@@ -32,6 +32,13 @@ function Add-AihModelUsage {
     if ($null -eq $metrics -or -not (Test-AihEngineeringArtifactIdentity -Artifact $metrics -TaskInstanceId $TaskInstanceId)) {
         $metrics = New-AihEngineeringMetricsBase -TaskId $TaskId -TaskInstanceId $TaskInstanceId
     }
+    # Session events can be replayed after reconnect. A task-local model step
+    # is therefore an idempotency key for usage recording, not a reason to
+    # double-count one provider call.
+    if (-not [string]::IsNullOrWhiteSpace($StepId)) {
+        $existing = @($metrics.usageRecords | Where-Object { [string]$_.stepId -eq $StepId -and [string]$_.role -eq $Role }) | Select-Object -First 1
+        if ($null -ne $existing) { return $existing }
+    }
     $usageEntry = [ordered]@{
         timestampUtc = Get-AihEngineeringUtcNow
         role = $Role
@@ -109,7 +116,11 @@ function Get-AihEngineeringTelemetry {
     $estimatedCost = $null
     $timeByRole = [ordered]@{ engineer_normal = 0; engineer_deep = 0; reviewer = 0 }
     foreach ($usage in $usageRecords) {
-        if ($null -ne $byRole.PSObject.Properties[[string]$usage.role]) { $byRole[[string]$usage.role] = [int]$byRole[[string]$usage.role] + 1 }
+        $roleKey = [string]$usage.role
+        # OrderedDictionary authored keys are not exposed through
+        # .PSObject.Properties under Windows PowerShell 5.1. Query the
+        # dictionary itself or role counters silently remain zero.
+        if ($byRole.Contains($roleKey)) { $byRole[$roleKey] = [int]$byRole[$roleKey] + 1 }
         if ([bool]$usage.usageAvailable) {
             $inputTokens += [int]$usage.inputTokens
             $uncachedInputTokens += [int]$usage.uncachedInputTokens
@@ -120,7 +131,7 @@ function Get-AihEngineeringTelemetry {
         if ($null -ne $usage.PSObject.Properties['startedAtUtc'] -and $null -ne $usage.PSObject.Properties['finishedAtUtc']) {
             $from = [DateTime]::MinValue; $to = [DateTime]::MinValue
             if ([DateTime]::TryParse($usage.startedAtUtc, [ref]$from) -and [DateTime]::TryParse($usage.finishedAtUtc, [ref]$to) -and $to -ge $from) {
-                if ($null -ne $timeByRole.PSObject.Properties[[string]$usage.role]) { $timeByRole[[string]$usage.role] = [int]$timeByRole[[string]$usage.role] + [int]($to - $from).TotalMilliseconds }
+                if ($timeByRole.Contains($roleKey)) { $timeByRole[$roleKey] = [int]$timeByRole[$roleKey] + [int]($to - $from).TotalMilliseconds }
             }
         }
     }
@@ -147,11 +158,17 @@ function Get-AihEngineeringTelemetry {
         taskId = $TaskId
         taskInstanceId = if ([string]::IsNullOrWhiteSpace($TaskInstanceId)) { $null } else { $TaskInstanceId }
         generatedAtUtc = Get-AihEngineeringUtcNow
-        totalModelCalls = $routing.steps
-        modelCallsNormal = $routing.normalSteps
-        modelCallsDeep = $routing.deepSteps
+        # Preserve semantic engineering-step counts from StepRouting. Provider
+        # usage events are reported separately so a partial runtime telemetry
+        # stream can never silently rewrite controller routing history.
+        totalModelCalls = [int]$routing.steps
+        modelCallsNormal = [int]$routing.normalSteps
+        modelCallsDeep = [int]$routing.deepSteps
         modelCallsReviewer = [int]$byRole['reviewer']
         usageRecordedCalls = @($usageRecords).Count
+        usageCallsNormal = [int]$byRole['engineer_normal']
+        usageCallsDeep = [int]$byRole['engineer_deep']
+        usageCallsReviewer = [int]$byRole['reviewer']
         escalationCount = $routing.escalationCount
         deescalationCount = $routing.deescalationCount
         escalationReasons = @($routing.escalationReasons)

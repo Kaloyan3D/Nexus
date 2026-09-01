@@ -359,6 +359,10 @@ function Get-AihEpistemicSnapshot {
     $records=@(Get-AihEpistemicActionRecords -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId)
     $selected=@($records|Where-Object{$_.event -eq 'action-selected'}); $probes=@($records|Where-Object{$_.event -eq 'probe-completed'}); $routed=@($records|Where-Object{$_.event -eq 'action-routed'})
     $counts=[ordered]@{reuse=0;retrieve=0;probe=0;reason=0;execute=0;verify=0}; foreach($entry in $selected){$name=[string]$entry.selectedAction;$counts[$name]=[int]$counts[$name]+1}
-    $uncertainties=if($null -eq $state){@()}else{@($state.uncertainties)}
+    # Keep an actual empty array under Windows PowerShell 5.1. Assigning an
+    # if-expression whose selected branch emits @() produces $null, and
+    # StrictMode then throws when telemetry reads .Count on that value.
+    $uncertainties=@()
+    if($null -ne $state){$uncertainties=@($state.uncertainties)}
     return [ordered]@{schemaVersion=1;taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};actionCounts=$counts;actionsSelected=$selected.Count;reasoningAvoided=@($selected|Where-Object{[bool]$_.reasoningAvoided}).Count;uncertainties=[ordered]@{created=$uncertainties.Count;resolved=@($uncertainties|Where-Object{$_.status -eq 'resolved'}).Count;superseded=@($uncertainties|Where-Object{$_.status -eq 'superseded'}).Count;blocked=@($uncertainties|Where-Object{$_.status -eq 'blocked'}).Count;evidenceConflicts=@($uncertainties|Where-Object{[bool]$_.evidenceConflict}).Count};probes=[ordered]@{count=$probes.Count;success=@($probes|Where-Object{$_.result -eq 'success'}).Count;failure=@($probes|Where-Object{$_.result -eq 'failure'}).Count;resolved=@($probes|Where-Object{[bool]$_.resolvedQuestion}).Count;costTiers=@($probes|ForEach-Object{$_.costTier})};routing=[ordered]@{normalActions=@($routed|Where-Object{$_.selectedRole -eq 'engineer_normal'}).Count;deepActions=@($routed|Where-Object{$_.selectedRole -eq 'engineer_deep'}).Count;deepProbeNormal=@($routed|Where-Object{$_.selectedAction -eq 'probe' -and $_.previousRole -eq 'engineer_deep' -and $_.selectedRole -eq 'engineer_normal'}).Count};records=$records;state=$state}
 }
