@@ -32,9 +32,14 @@ try {
   if($LASTEXITCODE -ne 0){throw 'deep usage failed'}
 
   @{workspace=$root;taskInstanceId=$instance}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath $payload
-  $snapshotJson=& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts\Engineering.ps1') -Action telemetry-snapshot -TaskId $task.taskId -PayloadFile $payload
-  if($LASTEXITCODE -ne 0){throw 'telemetry snapshot failed'}
-  $snapshot=(($snapshotJson -join [Environment]::NewLine)|ConvertFrom-Json)
+  $snapshotOutput=@(& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts\Engineering.ps1') -Action telemetry-snapshot -TaskId $task.taskId -PayloadFile $payload 2>&1)
+  $snapshotExitCode=[int]$LASTEXITCODE
+  if($snapshotExitCode -ne 0){
+    Write-Host ('TELEMETRY CHILD FAILED (exit {0})' -f $snapshotExitCode)
+    foreach($line in $snapshotOutput){Write-Host ([string]$line)}
+    throw 'telemetry snapshot failed'
+  }
+  $snapshot=(($snapshotOutput -join [Environment]::NewLine)|ConvertFrom-Json)
   Assert-Aih ([string]$snapshot.taskInstanceId -eq $instance) 'telemetry keeps exact taskInstanceId'
   Assert-Aih ([int]$snapshot.usageRecordedCalls -eq 2) 'replayed usage event is idempotent'
   Assert-Aih ([int]$snapshot.usageCallsNormal -eq 1) 'normal provider usage count is recorded'
