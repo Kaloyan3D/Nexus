@@ -12,7 +12,7 @@ try {
   @{workspace=$root;description='telemetry fixture';reviewRequested=$false}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath $payload
   $taskJson=& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts\Task.ps1') -Action create-task -PayloadFile $payload
   if($LASTEXITCODE -ne 0){throw 'task create failed'}
-  $task=$taskJson|ConvertFrom-Json
+  $task=(($taskJson -join [Environment]::NewLine)|ConvertFrom-Json)
   $instance=[string]$task.taskInstanceId
   @{workspace=$root;taskInstanceId=$instance;text='telemetry fixture'}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath $payload
   $null=& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts\Engineering.ps1') -Action lifecycle-init -TaskId $task.taskId -PayloadFile $payload
@@ -34,7 +34,7 @@ try {
   @{workspace=$root;taskInstanceId=$instance}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath $payload
   $snapshotJson=& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts\Engineering.ps1') -Action telemetry-snapshot -TaskId $task.taskId -PayloadFile $payload
   if($LASTEXITCODE -ne 0){throw 'telemetry snapshot failed'}
-  $snapshot=$snapshotJson|ConvertFrom-Json
+  $snapshot=(($snapshotJson -join [Environment]::NewLine)|ConvertFrom-Json)
   Assert-Aih ([string]$snapshot.taskInstanceId -eq $instance) 'telemetry keeps exact taskInstanceId'
   Assert-Aih ([int]$snapshot.usageRecordedCalls -eq 2) 'replayed usage event is idempotent'
   Assert-Aih ([int]$snapshot.usageCallsNormal -eq 1) 'normal provider usage count is recorded'
