@@ -32,6 +32,13 @@ function Add-AihModelUsage {
     if ($null -eq $metrics -or -not (Test-AihEngineeringArtifactIdentity -Artifact $metrics -TaskInstanceId $TaskInstanceId)) {
         $metrics = New-AihEngineeringMetricsBase -TaskId $TaskId -TaskInstanceId $TaskInstanceId
     }
+    # Session events can be replayed after reconnect. A task-local model step
+    # is therefore an idempotency key for usage recording, not a reason to
+    # double-count one provider call.
+    if (-not [string]::IsNullOrWhiteSpace($StepId)) {
+        $existing = @($metrics.usageRecords | Where-Object { [string]$_.stepId -eq $StepId -and [string]$_.role -eq $Role }) | Select-Object -First 1
+        if ($null -ne $existing) { return $existing }
+    }
     $usageEntry = [ordered]@{
         timestampUtc = Get-AihEngineeringUtcNow
         role = $Role
@@ -147,11 +154,17 @@ function Get-AihEngineeringTelemetry {
         taskId = $TaskId
         taskInstanceId = if ([string]::IsNullOrWhiteSpace($TaskInstanceId)) { $null } else { $TaskInstanceId }
         generatedAtUtc = Get-AihEngineeringUtcNow
-        totalModelCalls = $routing.steps
-        modelCallsNormal = $routing.normalSteps
-        modelCallsDeep = $routing.deepSteps
+        # Preserve semantic engineering-step counts from StepRouting. Provider
+        # usage events are reported separately so a partial runtime telemetry
+        # stream can never silently rewrite controller routing history.
+        totalModelCalls = [int]$routing.steps
+        modelCallsNormal = [int]$routing.normalSteps
+        modelCallsDeep = [int]$routing.deepSteps
         modelCallsReviewer = [int]$byRole['reviewer']
         usageRecordedCalls = @($usageRecords).Count
+        usageCallsNormal = [int]$byRole['engineer_normal']
+        usageCallsDeep = [int]$byRole['engineer_deep']
+        usageCallsReviewer = [int]$byRole['reviewer']
         escalationCount = $routing.escalationCount
         deescalationCount = $routing.deescalationCount
         escalationReasons = @($routing.escalationReasons)
