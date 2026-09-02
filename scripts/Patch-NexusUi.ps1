@@ -244,6 +244,15 @@ foreach ($pair in $copy.heroHeadline) {
     $conversationText = $result[0]
     if ($result[1]) { $conversationChanged = $true }
 }
+# Workspace selection is asynchronous. Upstream renders the optimistic target
+# title immediately but used to leave the old session's composer enabled until
+# connectWorkspace() completed. A fast submit therefore displayed workspace B
+# while appending/executing in session A. Disable the composer for that bounded
+# transition; it re-enables only after the current session belongs to B (or the
+# selection fails and the optimistic target is cleared).
+$workspaceTransitionPair = Update-AihCopyPair -Text $conversationText -From 'const inert = sessionId === void 0 || hero && chipTitle === void 0;' -To 'const inert = pendingWorkspaceId !== void 0 || sessionId === void 0 || hero && chipTitle === void 0;' -What 'workspace transition execution guard' -Path $conversationPath
+$conversationText = $workspaceTransitionPair[0]
+if ($workspaceTransitionPair[1]) { $conversationChanged = $true }
 if ($conversationChanged) { Write-AihUtf8NoBom -Path $conversationPath -Content $conversationText }
 
 # 3b2. phase 1.5 - primary action violet (send button) and hero glow tint.

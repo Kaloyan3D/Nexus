@@ -148,6 +148,69 @@ try {
     Set-AihCodeIntelligenceStore -Store $codeStore
     Assert-Aih ($stateD.storeName -eq 'stub-v1' -and $script:writes -gt 0) 'alternate store implementation received intelligence writes (replaceable seam)'
 
+    # ── TASK-0012 F02: staged generations, activation gate, crash-safe retry ─
+    Reset-AihCodeIntelligenceStore
+    $genStore = New-AihContentAddressedCodeStore -StoreRoot $store
+    Set-AihCodeIntelligenceStore -Store $genStore
+    $genRepo = 'repo_' + [guid]::NewGuid().ToString('N')
+    $genSnap = 'snap_' + [guid]::NewGuid().ToString('N')
+    & $genStore.AppendSnapshotRows $genRepo $genSnap 'mapping.jsonl' @([ordered]@{ path = 'a.ts'; status = 'ready' })
+    Assert-Aih (@(& $genStore.ReadSnapshotRows $genRepo $genSnap 'mapping.jsonl').Count -eq 0) 'F02: unactivated staging rows are never readable (crash-safe gate)'
+    $null = (& $genStore.PutSnapshotState $genRepo $genSnap ([pscustomobject][ordered]@{ schemaVersion = 1; status = 'ready' }))
+    $activatedRows = @(& $genStore.ReadSnapshotRows $genRepo $genSnap 'mapping.jsonl')
+    Assert-Aih ($activatedRows.Count -eq 1 -and [string]$activatedRows[0].path -eq 'a.ts') 'F02: activated generation rows become readable'
+    $activatedState = & $genStore.GetSnapshotState $genRepo $genSnap
+    Assert-Aih (-not [string]::IsNullOrWhiteSpace([string]$activatedState.activeGeneration)) 'F02: activation state names the activated generation'
+    # crash retry: a fresh store instance reconciles abandoned staging and
+    # never appends duplicate rows to the activated history
+    $retryStore = New-AihContentAddressedCodeStore -StoreRoot $store
+    & $retryStore.AppendSnapshotRows $genRepo $genSnap 'mapping.jsonl' @([ordered]@{ path = 'a.ts'; status = 'ready' })
+    $null = (& $retryStore.PutSnapshotState $genRepo $genSnap ([pscustomobject][ordered]@{ schemaVersion = 1; status = 'ready' }))
+    $retryRows = @(& $retryStore.ReadSnapshotRows $genRepo $genSnap 'mapping.jsonl')
+    Assert-Aih ($retryRows.Count -eq 1) 'F02: retry after a crash yields exactly one readable generation (no duplicated rows)'
+    # legacy layout: rows beside an activated state.json stay readable
+    $legacySnap = 'snap_' + [guid]::NewGuid().ToString('N')
+    $legacyDir = & $genStore.SnapshotIntelligenceDir $genRepo $legacySnap
+    New-Item -ItemType Directory -Force -Path $legacyDir | Out-Null
+    [IO.File]::WriteAllLines((Join-Path $legacyDir 'mapping.jsonl'), @('{"path":"legacy.ts"}'), [Text.UTF8Encoding]::new($false))
+    Assert-Aih (@(& $genStore.ReadSnapshotRows $genRepo $legacySnap 'mapping.jsonl').Count -eq 0) 'F02: legacy rows without activation state are never readable'
+    $null = (& $genStore.PutSnapshotState $genRepo $legacySnap ([pscustomobject][ordered]@{ schemaVersion = 1; status = 'ready' }))
+    $legacyRows = @(& $genStore.ReadSnapshotRows $genRepo $legacySnap 'mapping.jsonl')
+    Assert-Aih ($legacyRows.Count -eq 1 -and [string]$legacyRows[0].path -eq 'legacy.ts') 'F02: legacy activated layouts remain readable through the same gate'
+
+    # ── TASK-0012 F08: persistence-boundary traversal is rejected fail-closed
+    $traversalRejected = $false
+    try { & $genStore.AppendSnapshotRows '..\evil' $genSnap 'mapping.jsonl' @([ordered]@{ path = 'x' }) } catch { $traversalRejected = $true }
+    Assert-Aih ($traversalRejected) 'F08: traversal-shaped repository id is rejected by the store'
+    $badSnapRejected = $false
+    try { & $genStore.AppendSnapshotRows $genRepo 'snap_x\..\y' 'mapping.jsonl' @([ordered]@{ path = 'x' }) } catch { $badSnapRejected = $true }
+    Assert-Aih ($badSnapRejected) 'F08: traversal-shaped snapshot id is rejected by the store'
+    $badFileRejected = $false
+    try { & $genStore.AppendSnapshotRows $genRepo $genSnap '..\state.json' @([ordered]@{ path = 'x' }) } catch { $badFileRejected = $true }
+    Assert-Aih ($badFileRejected) 'F08: non-allowlisted row file name is rejected by the store'
+    $badFiIdRejected = $false
+    try { & $genStore.GetFileIntelligenceById 'cfi_../../evil' } catch { $badFiIdRejected = $true }
+    Assert-Aih ($badFiIdRejected) 'F08: traversal-shaped file intelligence id is rejected'
+    $queryRejected = $false
+    try { Get-AihFileCodeSymbols -StoreRoot $store -RepositoryId $genRepo -SnapshotId $genSnap -Path '..\..\secret.ts' } catch { $queryRejected = $true }
+    Assert-Aih ($queryRejected) 'F08: traversal-shaped query path is rejected fail-closed'
+    Assert-Aih (-not (Test-Path -LiteralPath (Join-Path $store 'evil'))) 'F08: rejected traversal created nothing outside the store'
+
+    # ── TASK-0012 F09: batched writes and streaming reads at the store seam ─
+    $batchSnap = 'snap_' + [guid]::NewGuid().ToString('N')
+    $batchRows = [System.Collections.Generic.List[object]]::new()
+    for ($r = 0; $r -lt 2000; $r++) { $null = $batchRows.Add([ordered]@{ path = ('f' + $r + '.ts'); status = 'ready' }) }
+    & $genStore.AppendSnapshotRows $genRepo $batchSnap 'mapping.jsonl' $batchRows
+    $null = (& $genStore.PutSnapshotState $genRepo $batchSnap ([pscustomobject][ordered]@{ schemaVersion = 1; status = 'ready' }))
+    $script:streamed = 0
+    $null = (& $genStore.StreamSnapshotRows $genRepo $batchSnap 'mapping.jsonl' { param($row) $script:streamed = $script:streamed + 1 })
+    Assert-Aih ($script:streamed -eq 2000) 'F09: streaming reader hands every row to the query callback'
+    $subset = [System.Collections.Generic.List[object]]::new()
+    $null = (& $genStore.StreamSnapshotRows $genRepo $batchSnap 'mapping.jsonl' { param($row) if ([string]$row.path -eq 'f7.ts') { $null = $subset.Add($row) } })
+    Assert-Aih ($subset.Count -eq 1) 'F09: streaming query filters without materializing the whole segment'
+    $materialized = @(& $genStore.ReadSnapshotRows $genRepo $batchSnap 'mapping.jsonl')
+    Assert-Aih ($materialized.Count -eq 2000) 'F09: one batched write produced 2000 readable rows in one generation'
+
     Write-Host ("Code-intelligence foundation: $passed assertions passed.")
 } finally {
     Reset-AihCodeIntelligenceStore

@@ -79,11 +79,23 @@ aih-key
 aih-auth   # optional: independent Codex review
 ```
 
-Then open Nexus from a project repository:
+Then open the universal Nexus application:
 
 ```powershell
 aih -Open
 ```
+
+Choose **Open Folder** in Nexus before creating a conversation. To preselect
+a folder from the CLI without binding the server process to it:
+
+```powershell
+aih -Open .
+aih -Open C:\path\to\project
+```
+
+Each conversation permanently captures its own execution directory. Several
+repositories can therefore remain open and execute concurrently in one Nexus
+process; selecting another workspace affects new conversations only.
 
 Useful commands:
 

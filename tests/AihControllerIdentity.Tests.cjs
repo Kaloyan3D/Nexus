@@ -144,14 +144,17 @@ async function unitBindingGuard() {
     assert.equal(h.bindings.s1.reviewRequired, true)
   }
 
-  // E. Workspace mismatch: stale even when the other workspace has the task.
+  // E. Workspace mismatch: fail closed even when the other workspace has the task.
   {
     const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\RepoA' } })
     h.ledger.set('TASK-0004', instance(1)) // RepoB even contains the same task
-    const result = await h.guard.ensureBinding(null, session, 'C:\\RepoB', 'continue the work')
-    assert.equal(result.outcome, 'recovered')
-    assert.equal(result.stale.reason, 'workspace-mismatch')
+    await assert.rejects(
+      () => h.guard.ensureBinding(null, session, 'C:\\RepoB', 'continue the work'),
+      (error) => error.code === 'session-workspace-mismatch'
+    )
     assert.equal(h.calls.testTaskIdentity, 0, 'workspace mismatch never consults the other workspace ledger')
+    assert.equal(h.calls.createBinding.length, 0, 'workspace mismatch never silently rebinds the session')
+    assert.equal(h.calls.invalidate, 0, 'workspace mismatch preserves the original binding')
   }
 
   // F. Equivalent Windows paths validate as the same workspace.
@@ -228,6 +231,10 @@ function unitIdentityHelpers() {
   assert.equal(controller.classifyBindingWorkspace({ workspace: 'c:\\ai-harness\\' }, 'C:\\AI-Harness'), null)
   assert.equal(controller.classifyBindingWorkspace({ workspace: 'C:\\Repo' }, 'C:\\Repo2'), 'workspace-mismatch')
   assert.equal(controller.classifyBindingWorkspace({ workspace: null }, 'C:\\Repo'), 'workspace-mismatch')
+  const repositoryIdentity = { workspaceId: 'ws_1', repositoryId: 'repo_1', checkoutId: 'checkout_1', checkoutRootPath: 'C:\\Repo', executionRoot: 'C:\\Repo\\app' }
+  assert.equal(controller.classifyBindingRepositoryIdentity({ ...repositoryIdentity }, repositoryIdentity), null)
+  assert.equal(controller.classifyBindingRepositoryIdentity({ ...repositoryIdentity, checkoutId: 'checkout_2' }, repositoryIdentity), 'repository-identity-mismatch')
+  assert.equal(controller.classifyBindingRepositoryIdentity({ workspace: 'C:\\Repo\\app' }, repositoryIdentity), null, 'legacy path-only binding may be upgraded in place')
 
   // Part 5 contract classification (mirror of the TaskController answer).
   assert.deepEqual(controller.classifyBindingIdentity({ taskInstanceId: instance(1) }, { exists: true, taskInstanceId: instance(1), instanceMatches: true }), { verdict: 'valid' })
@@ -370,8 +377,47 @@ async function unitDetailJoins() {
 // -- end-to-end: the full DoD scenario through the REAL bridge ---------------
 async function runBridgeEndToEnd() {
   const { execFile } = require('node:child_process')
+  const { spawnSync } = require('node:child_process')
   const { promisify } = require('node:util')
-  const run = promisify(execFile)
+  const fs = require('node:fs')
+  // Transport note (TASK-0017): sandboxed environments deny anonymous-pipe and
+  // fd-redirected stdio capture from Node children (spawn EPERM), while
+  // stdio:'inherit' spawns are allowed. This wrapper runs each CLI through
+  // cmd.exe with cmd-side redirection into temporary files (no pipes anywhere)
+  // and preserves the promisify(execFile) result and rejection shapes.
+  let runSeq = 0
+  const run = async (file, args, opts) => {
+    const seq = ++runSeq
+    const token = process.pid + '-' + seq
+    const outPath = path.join(os.tmpdir(), 'aih-cli-out-' + token + '.txt')
+    const errPath = path.join(os.tmpdir(), 'aih-cli-err-' + token + '.txt')
+    const batchPath = path.join(os.tmpdir(), 'aih-cli-' + token + '.cmd')
+    const q = (value) => '"' + String(value) + '"'
+    const command = [q(file)].concat(args.map(q)).join(' ') + ' > ' + q(outPath) + ' 2> ' + q(errPath)
+    fs.writeFileSync(batchPath, '@echo off\r\n' + command + '\r\n', 'utf8')
+    const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', batchPath], Object.assign({}, opts, { stdio: 'ignore', windowsHide: true }))
+    const read = (p) => { try { return fs.readFileSync(p, 'utf8') } catch (_) { return '' } }
+    const stdout = read(outPath)
+    const stderr = read(errPath)
+    try { fs.rmSync(outPath, { force: true }) } catch (_) { }
+    try { fs.rmSync(errPath, { force: true }) } catch (_) { }
+    try { fs.rmSync(batchPath, { force: true }) } catch (_) { }
+    if (result.error) {
+      result.error.stdout = stdout
+      result.error.stderr = stderr
+      throw result.error
+    }
+    if (result.status !== 0) {
+      const failure = new Error('Command failed: ' + file)
+      failure.code = result.status === null ? -1 : result.status
+      failure.killed = result.signal != null
+      failure.signal = result.signal
+      failure.stdout = stdout
+      failure.stderr = stderr
+      throw failure
+    }
+    return { stdout, stderr }
+  }
   const repoRoot = path.join(__dirname, '..')
   const homeName = '.aih-e2e-home-' + crypto.randomUUID().slice(0, 8)
   const installRoot = path.join(repoRoot, homeName)

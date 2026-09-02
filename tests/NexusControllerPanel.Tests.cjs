@@ -470,9 +470,9 @@ async function main() {
       // 11b. webServer becomes available later → the injection callback
       // applies and BOTH routes register (Cordis lifecycle semantics).
       assert.doesNotThrow(() => injectCallback({ webServer: fakeWebServer, effect(fn) { fn(); return () => {} } }), 'injection callback must apply cleanly once the service exists')
-      assert.equal(captured.length, 5, 'all routes must register after webServer becomes available')
+      assert.equal(captured.length, 6, 'all routes must register after webServer becomes available')
       const paths = captured.map((spec) => spec.path).sort()
-      assert.deepEqual(paths, ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json'])
+      assert.deepEqual(paths, ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/workspace-registration.json'])
       const route = captured.find((spec) => spec.path === '/nexus/controller.json')
       assert.equal(route.kind, 'exact')
       const roomRoute = captured.find((spec) => spec.path === '/nexus/control-room.json')
@@ -483,6 +483,8 @@ async function main() {
       assert.equal(engineeringRoute.kind, 'exact')
       const engineeringActionRoute = captured.find((spec) => spec.path === '/nexus/engineering-profile-action.json')
       assert.equal(engineeringActionRoute.kind, 'exact')
+      const workspaceRegistrationRoute = captured.find((spec) => spec.path === '/nexus/workspace-registration.json')
+      assert.equal(workspaceRegistrationRoute.kind, 'exact')
 
       // 11c. profiles that NEVER provide webServer stay inert (tui/headless)
       captured = []
@@ -562,8 +564,8 @@ async function main() {
       // injection resolves and the route registers.
       root.provide('webServer', fakeWebServer)
       for (let i = 0; i < 60 && registered.length < 5; i++) await tick(50)
-      assert.equal(registered.length, 5, 'real cordis: all routes register after webServer becomes available')
-      assert.deepEqual(registered.map((spec) => spec.path).sort(), ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json'])
+      assert.equal(registered.length, 6, 'real cordis: all routes register after webServer becomes available')
+      assert.deepEqual(registered.map((spec) => spec.path).sort(), ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/workspace-registration.json'])
       assert.ok(registered.every((spec) => spec.kind === 'exact'))
 
       // the registered handler keeps the existing semantics.
@@ -603,6 +605,8 @@ async function main() {
       setTimeout,
       clearTimeout,
       window: {
+        location: { href: 'http://127.0.0.1:3080/' },
+        history: { state: null, replaceState() {} },
         __ModuleLoader__: {
           load(def) {
             moduleExports = def.factory((name) => {
@@ -629,10 +633,16 @@ async function main() {
     vm.createContext(sandbox)
     vm.runInContext(code, sandbox)
     assert.ok(moduleExports, 'client bundle must export a module')
-    assert.equal(JSON.stringify(moduleExports.inject), JSON.stringify(['slots']), 'client services')
+    assert.equal(JSON.stringify(moduleExports.inject), JSON.stringify(['slots', 'workspaces']), 'client services')
 
     const fakeCtx = {
       effect(fn) { fn(); return () => {} },
+      workspaces: {
+        list: {
+          getSnapshot() { return { phase: 'pending', items: [] } },
+          subscribe() { return () => {} },
+        },
+      },
       slots: {
         inject(name, callback) { injected.push({ name, callback }); callback() },
         register(spec, component) { registered.push({ spec, component }) },
@@ -997,7 +1007,7 @@ async function main() {
 
     // The drawer still renders independently (controller panel intact).
     const Drawer = null // resolved through the mini-core path in group 13; here assert bundle exports
-    assert.equal(JSON.stringify(moduleExports.inject), JSON.stringify(['slots']))
+    assert.equal(JSON.stringify(moduleExports.inject), JSON.stringify(['slots', 'workspaces']))
     assert.equal(typeof moduleExports.apply, 'function')
   }
 

@@ -506,6 +506,58 @@ function apply(ctx) {
       }
     }
 
+    /** POST /nexus/workspace-registration.json
+     *
+     * Bridge the DSH UI Workspace path into the existing Nexus Phase 3.1
+     * Machine -> Workspace -> Repository -> Checkout identity model. The
+     * browser supplies only a candidate path; Nexus resolves/canonicalizes it
+     * host-side and returns the authoritative identity chain. No process cwd
+     * is read or changed here.
+     */
+    const workspaceRegistrationHandler = async (req, res) => {
+      const respond = (statusCode, body) => {
+        res.writeHead(statusCode, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        res.end(JSON.stringify(body))
+      }
+      if (req.method !== 'POST') {
+        respond(405, { ok: false, error: 'method-not-allowed' })
+        return
+      }
+      const request = await readJsonBody(req)
+      const workspacePath = request && typeof request.path === 'string' ? request.path.trim() : ''
+      if (workspacePath === '') {
+        respond(400, { ok: false, error: 'missing-workspace-path' })
+        return
+      }
+      let payloadPath = null
+      try {
+        payloadPath = writePayloadFile({ path: workspacePath })
+        const result = await new Promise((resolvePromise) => {
+          execFile(
+            'powershell.exe',
+            ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'NexusWorkspace.ps1'), '-Action', 'resolve', '-PayloadFile', payloadPath],
+            { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+            (error, stdout) => {
+              if (error) { resolvePromise(null); return }
+              try { resolvePromise(JSON.parse((stdout || '').trim())) } catch { resolvePromise(null) }
+            },
+          )
+        })
+        if (!result || !result.workspaceId || !result.repositoryId || !result.checkoutId || !result.executionRoot) {
+          respond(422, { ok: false, error: 'workspace-resolution-failed' })
+          return
+        }
+        respond(200, { ok: true, identity: result })
+      } catch {
+        respond(500, { ok: false, error: 'workspace-registration-failed' })
+      } finally {
+        if (payloadPath) { try { unlinkSync(payloadPath) } catch { /* best-effort cleanup */ } }
+      }
+    }
+
     webCtx.effect(
       () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/controller.json', handler }),
       'nexus-controller: read-only state route',
@@ -525,6 +577,10 @@ function apply(ctx) {
     webCtx.effect(
       () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/engineering-profile-action.json', handler: engineeringActionHandler }),
       'nexus-controller: engineering profile action route',
+    )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/workspace-registration.json', handler: workspaceRegistrationHandler }),
+      'nexus-controller: Phase 3.1 workspace registration route',
     )
   })
 }

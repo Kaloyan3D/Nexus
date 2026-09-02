@@ -47,6 +47,150 @@ function ConvertTo-AihQualifiedName {
     return (($parts | Where-Object { -not [string]::IsNullOrEmpty($_) }) -join '.')
 }
 
+function Get-AihCodeSyntaxStrippedLines {
+    # F05 (TASK-0012): occurrence scanning must see code, not lexical text.
+    # Returns one code-only string per input line: comments and string
+    # literal CONTENTS are removed with language-aware, stateful scanning
+    # (line/block comments, quotes, template/triple/here strings). Escaped
+    # characters never terminate a string. Deterministic; no external
+    # processes. Over-stripping is conservative: it can only reduce
+    # occurrences, never fabricate them.
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines,
+        [Parameter(Mandatory = $true)][ValidateSet('tsjs', 'python', 'powershell')][string]$Language
+    )
+    $output = [System.Collections.Generic.List[string]]::new()
+    # code | block | single | double | template | here-single | here-double | triple-single | triple-double
+    $state = 'code'
+    foreach ($line in @($Lines)) {
+        $code = [Text.StringBuilder]::new()
+        $i = 0
+        $n = $line.Length
+        $lineOpen = $true
+        while ($i -lt $n -and $lineOpen) {
+            $ch = $line[$i]
+            $next = $(if ($i + 1 -lt $n) { [string]$line[$i + 1] } else { '' })
+            $two = [string]$ch + $next
+            $three = $(if ($i + 2 -lt $n) { $line.Substring($i, 3) } else { '' })
+            if ($state -eq 'code') {
+                if (($Language -eq 'tsjs' -and $two -eq '//') -or ($Language -ne 'tsjs' -and $ch -eq '#')) {
+                    $lineOpen = $false
+                } elseif ($Language -eq 'python' -and ($three -eq "'''" -or $three -eq '"""')) {
+                    $state = $(if ($three -eq "'''") { 'triple-single' } else { 'triple-double' }); $i = $i + 3
+                } elseif ($Language -eq 'tsjs' -and $two -eq '/*') {
+                    $state = 'block'; $i = $i + 2
+                } elseif ($Language -eq 'powershell' -and $two -eq '<#') {
+                    $state = 'block'; $i = $i + 2
+                } elseif ($Language -eq 'tsjs' -and $ch -eq [char]96) {
+                    $state = 'template'; $i = $i + 1
+                } elseif ($Language -eq 'powershell' -and ($two -eq ('@' + [string][char]39) -or $two -eq ('@' + [string][char]34)) -and $line.Substring($i + 2).Trim() -eq '') {
+                    $state = $(if ($two -eq ('@' + [string][char]39)) { 'here-single' } else { 'here-double' }); $i = $i + 2; $lineOpen = $false
+                } elseif ($ch -eq [char]39) {
+                    $state = 'single'; $i = $i + 1
+                } elseif ($ch -eq [char]34) {
+                    $state = 'double'; $i = $i + 1
+                } else {
+                    [void]$code.Append($ch); $i = $i + 1
+                }
+            } elseif ($state -eq 'block') {
+                $closer = $(if ($Language -eq 'powershell') { '#>' } else { '*/' })
+                if ($two -eq $closer) { $state = 'code'; $i = $i + 2 } else { $i = $i + 1 }
+            } elseif ($state -eq 'single') {
+                if ($Language -eq 'powershell' -and $two -eq [string][char]39 + [string][char]39) { $i = $i + 2 }
+                elseif ($Language -ne 'powershell' -and $ch -eq '\') { $i = $i + 2 }
+                elseif ($ch -eq [char]39) { $state = 'code'; $i = $i + 1 }
+                else { $i = $i + 1 }
+            } elseif ($state -eq 'double') {
+                if ($Language -eq 'powershell' -and $ch -eq [char]96) { $i = $i + 2 }
+                elseif ($Language -eq 'powershell' -and $two -eq [string][char]34 + [string][char]34) { $i = $i + 2 }
+                elseif ($Language -ne 'powershell' -and $ch -eq '\') { $i = $i + 2 }
+                elseif ($ch -eq [char]34) { $state = 'code'; $i = $i + 1 }
+                else { $i = $i + 1 }
+            } elseif ($state -eq 'template') {
+                if ($ch -eq '\') { $i = $i + 2 }
+                elseif ($ch -eq [char]96) { $state = 'code'; $i = $i + 1 }
+                else { $i = $i + 1 }
+            } elseif ($state -eq 'here-single') {
+                $lineOpen = $false
+                if ($line.Trim() -eq ([string][char]39 + '@')) { $state = 'code' }
+            } elseif ($state -eq 'here-double') {
+                $lineOpen = $false
+                if ($line.Trim() -eq ([string][char]34 + '@')) { $state = 'code' }
+            } elseif ($state -eq 'triple-single') {
+                if ($three -eq "'''") { $state = 'code'; $i = $i + 3 } elseif ($ch -eq '\') { $i = $i + 2 } else { $i = $i + 1 }
+            } elseif ($state -eq 'triple-double') {
+                if ($three -eq '"""') { $state = 'code'; $i = $i + 3 } elseif ($ch -eq '\') { $i = $i + 2 } else { $i = $i + 1 }
+            }
+        }
+        $output.Add($code.ToString())
+    }
+    return $output.ToArray()
+}
+
+function Get-AihCodeDefinitionLineSet {
+    # F05: definition lines are definition evidence; they never yield calls
+    # or resolved references.
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()]$Symbols)
+    $set = @{}
+    foreach ($symbol in @($Symbols)) {
+        if ([int]$symbol.startLine -gt 0) { $set[[int]$symbol.startLine] = $true }
+    }
+    return $set
+}
+
+function Get-AihCodeImportLineSet {
+    # F05: import declarations bind names; they never yield references.
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines, [Parameter(Mandatory = $true)][ValidateSet('tsjs', 'python')][string]$Language)
+    $set = @{}
+    for ($i = 0; $i -lt @($Lines).Count; $i++) {
+        $trimmed = $Lines[$i].Trim()
+        $isImport = $false
+        if ($Language -eq 'python') {
+            $isImport = ($trimmed -match '^import\s' -or $trimmed -match '^from\s+\S+\s+import\s')
+        } else {
+            $isImport = ($trimmed -match '^import\s' -or $trimmed -match '=\s*require\s*\(' -or $trimmed -match '^export\s[^;]*\sfrom\s["' + [string][char]39 + ']')
+        }
+        if ($isImport) { $set[$i + 1] = $true }
+    }
+    return $set
+}
+
+function Get-AihCodeParameterShadowRanges {
+    # F05 scope guard: name -> line ranges of containers whose parameter list
+    # declares that name. A parameter shadows outer definitions inside its
+    # container, so same-file-unique evidence must not resolve there.
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()]$Symbols)
+    $ranges = @{}
+    foreach ($symbol in @($Symbols)) {
+        $signature = [string]$symbol.signature
+        $open = $signature.IndexOf('(')
+        if ($open -lt 0) { continue }
+        $close = $signature.LastIndexOf(')')
+        if ($close -le $open) { continue }
+        $parameterText = $signature.Substring($open + 1, $close - $open - 1)
+        if ([string]::IsNullOrWhiteSpace($parameterText)) { continue }
+        foreach ($part in ($parameterText -split ',')) {
+            $m = [regex]::Match($part.Trim(), '^(?:\.\.\.|\*\*|\*)?(?:(?:private|protected|public|readonly|final|var|val|ref|out|in)\s+)*([A-Za-z_$][A-Za-z0-9_$]*)')
+            if (-not $m.Success) { continue }
+            $parameterName = $m.Groups[1].Value
+            if ([string]::IsNullOrWhiteSpace($parameterName)) { continue }
+            if ($script:AihCallKeywordBlocklist -contains $parameterName) { continue }
+            if (-not $ranges.ContainsKey($parameterName)) { $ranges[$parameterName] = @() }
+            $ranges[$parameterName] = @($ranges[$parameterName]) + @(@{ start = [int]$symbol.startLine; end = [int]$symbol.endLine })
+        }
+    }
+    return $ranges
+}
+
+function Test-AihCodeCallPosition {
+    # F05: a bare name directly followed by an argument list is a call
+    # position. Call positions keep the documented unresolved-call semantics
+    # and never yield resolved same-file references.
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line, [Parameter(Mandatory = $true)][int]$Index, [Parameter(Mandatory = $true)][int]$Length)
+    $rest = $Line.Substring([Math]::Min($Index + $Length, $Line.Length))
+    return ($rest.TrimStart(' ', [string][char]9).StartsWith('('))
+}
+
 $script:AihCallKeywordBlocklist = @('if', 'for', 'while', 'switch', 'catch', 'function', 'return', 'typeof', 'new', 'delete', 'void', 'in', 'of', 'else', 'do', 'try', 'foreach', 'lock', 'using', 'base', 'this')
 
 function Invoke-AihStructuralTsJs {
@@ -159,23 +303,37 @@ function Invoke-AihStructuralTsJs {
             $exports = @($exports) + @([pscustomobject][ordered]@{ name = $Matches[1]; kind = 'from'; sourceTarget = $Matches[2]; line = $lineNo })
         }
 
-        # call occurrences (syntactic; target intentionally unresolved)
-        if ($callCount -lt 400) {
-            $callMatches = [regex]::Matches($line, '(?<![A-Za-z0-9_$.])([A-Za-z_$][\w$]*)\s*\(')
+        $depth = $depth + ([regex]::Matches($line, '\{').Count) - ([regex]::Matches($line, '\}').Count)
+    }
+
+    # F05: call occurrences (syntactic; target intentionally unresolved) are
+    # scanned over comment/string-stripped code and never on definition
+    # lines, so lexical text and signature heads cannot invent call evidence.
+    if ($callCount -lt 400) {
+        $codeLines = Get-AihCodeSyntaxStrippedLines -Lines $lines -Language 'tsjs'
+        $definitionLineNumbers = Get-AihCodeDefinitionLineSet -Symbols $symbols
+        for ($i = 0; $i -lt $lines.Count -and $callCount -lt 400; $i++) {
+            if ($definitionLineNumbers.ContainsKey($i + 1)) { continue }
+            $callMatches = [regex]::Matches($codeLines[$i], '(?<![A-Za-z0-9_$.])([A-Za-z_$][\w$]*)\s*\(')
             foreach ($m in $callMatches) {
                 $name = $m.Groups[1].Value
                 if ($script:AihCallKeywordBlocklist -contains $name) { continue }
                 if ($callCount -ge 400) { break }
                 $callCount = $callCount + 1
-                $occurrences = @($occurrences) + @((New-AihParsedOccurrence -FileIntelligenceId $FileIntelligenceId -Role 'call' -Name $name -Line $lineNo -Column ($m.Index + 1) -Resolution 'unresolved'))
+                $occurrences = @($occurrences) + @((New-AihParsedOccurrence -FileIntelligenceId $FileIntelligenceId -Role 'call' -Name $name -Line ($i + 1) -Column ($m.Index + 1) -Resolution 'unresolved'))
             }
         }
-
-        $depth = $depth + ([regex]::Matches($line, '\{').Count) - ([regex]::Matches($line, '\}').Count)
     }
 
-    # same-file references for uniquely-named definitions (whole file: a
-    # unique bare name may be referenced before or after its definition)
+    # F05: same-file references for uniquely-named definitions (whole file: a
+    # unique bare name may be referenced before or after its definition).
+    # Resolution is conservative syntax-aware evidence only:
+    #   * scanned over comment/string-stripped code lines;
+    #   * import and definition lines never yield references;
+    #   * call positions keep their unresolved call occurrence and are never
+    #     also counted as resolved references;
+    #   * lines inside containers whose parameter list shadows the name are
+    #     skipped (scope-shadowing guard).
     $names = @{}
     foreach ($symbol in $symbols) {
         if (@('function', 'class', 'interface', 'enum', 'typeAlias', 'constant') -contains $symbol.kind) {
@@ -184,22 +342,35 @@ function Invoke-AihStructuralTsJs {
         }
     }
     if ($lines.Count -le 3000) {
-    foreach ($name in $names.Keys) {
-        $definitions = @($names[$name])
-        if ($definitions.Count -ne 1) { continue }   # ambiguous inside file: never resolve
-        $definition = $definitions[0]
-        $refCount = 0
-        for ($i = 0; $i -lt $lines.Count -and $refCount -lt 100; $i++) {
-            $lineNo = $i + 1
-            if ($lineNo -eq $definition.startLine) { continue }
-            $matchesHere = [regex]::Matches($lines[$i], '(?<![A-Za-z0-9_$.])' + [regex]::Escape($name) + '(?![\w$])')
-            foreach ($m in $matchesHere) {
-                if ($refCount -ge 100) { break }
-                $refCount = $refCount + 1
-                $occurrences = @($occurrences) + @((New-AihParsedOccurrence -FileIntelligenceId $FileIntelligenceId -Role 'reference' -Name $name -Line $lineNo -Column ($m.Index + 1) -Resolution 'same-file-unique' -ResolvedTargetId $definition.sid))
+        $codeLines = Get-AihCodeSyntaxStrippedLines -Lines $lines -Language 'tsjs'
+        $definitionLineNumbers = Get-AihCodeDefinitionLineSet -Symbols $symbols
+        $importLineNumbers = Get-AihCodeImportLineSet -Lines $lines -Language 'tsjs'
+        $shadowRanges = Get-AihCodeParameterShadowRanges -Symbols $symbols
+        foreach ($name in $names.Keys) {
+            $definitions = @($names[$name])
+            if ($definitions.Count -ne 1) { continue }   # ambiguous inside file: never resolve
+            $definition = $definitions[0]
+            $shadowList = @()
+            if ($shadowRanges.ContainsKey($name)) { $shadowList = @($shadowRanges[$name]) }
+            $refCount = 0
+            for ($i = 0; $i -lt $lines.Count -and $refCount -lt 100; $i++) {
+                $lineNo = $i + 1
+                if ($lineNo -eq $definition.startLine) { continue }
+                if ($importLineNumbers.ContainsKey($lineNo)) { continue }
+                $inShadow = $false
+                foreach ($range in $shadowList) {
+                    if ($lineNo -ge [int]$range.start -and $lineNo -le [int]$range.end) { $inShadow = $true; break }
+                }
+                if ($inShadow) { continue }
+                $matchesHere = [regex]::Matches($codeLines[$i], '(?<![A-Za-z0-9_$.])' + [regex]::Escape($name) + '(?![\w$])')
+                foreach ($m in $matchesHere) {
+                    if (Test-AihCodeCallPosition -Line $codeLines[$i] -Index $m.Index -Length $m.Length) { continue }   # calls stay unresolved
+                    if ($refCount -ge 100) { break }
+                    $refCount = $refCount + 1
+                    $occurrences = @($occurrences) + @((New-AihParsedOccurrence -FileIntelligenceId $FileIntelligenceId -Role 'reference' -Name $name -Line $lineNo -Column ($m.Index + 1) -Resolution 'same-file-unique' -ResolvedTargetId $definition.sid))
+                }
             }
         }
-    }
     }
 
     return [pscustomobject][ordered]@{
@@ -342,7 +513,11 @@ function Invoke-AihStructuralPython {
     }
     foreach ($entry in $open) { $entry.symbol.endLine = $lines.Count }
 
-    # same-file references for unique def/class/method names (whole file)
+    # F05: same-file references for unique def/class/method names (whole
+    # file), conservative syntax-aware evidence only: comment/string-stripped
+    # code, definition/import lines excluded, parameter-shadowed ranges
+    # excluded, and call positions emitted as honest unresolved call
+    # occurrences instead of resolved references.
     $names = @{}
     foreach ($symbol in $symbols) {
         if (@('function', 'class', 'method') -contains $symbol.kind) {
@@ -351,22 +526,38 @@ function Invoke-AihStructuralPython {
         }
     }
     if ($lines.Count -le 3000) {
-    foreach ($name in $names.Keys) {
-        $definitions = @($names[$name])
-        if ($definitions.Count -ne 1) { continue }
-        $definition = $definitions[0]
-        $refCount = 0
-        for ($i = 0; $i -lt $lines.Count -and $refCount -lt 100; $i++) {
-            $lineNo = $i + 1
-            if ($lineNo -eq $definition.startLine) { continue }
-            $matchesHere = [regex]::Matches($lines[$i], '(?<![A-Za-z0-9_$.])' + [regex]::Escape($name) + '(?![\w$])')
-            foreach ($m in $matchesHere) {
-                if ($refCount -ge 100) { break }
-                $refCount = $refCount + 1
-                $occurrences = @($occurrences) + @((New-AihParsedOccurrence -FileIntelligenceId $FileIntelligenceId -Role 'reference' -Name $name -Line $lineNo -Column ($m.Index + 1) -Resolution 'same-file-unique' -ResolvedTargetId $definition.sid))
+        $codeLines = Get-AihCodeSyntaxStrippedLines -Lines $lines -Language 'python'
+        $definitionLineNumbers = Get-AihCodeDefinitionLineSet -Symbols $symbols
+        $importLineNumbers = Get-AihCodeImportLineSet -Lines $lines -Language 'python'
+        $shadowRanges = Get-AihCodeParameterShadowRanges -Symbols $symbols
+        foreach ($name in $names.Keys) {
+            $definitions = @($names[$name])
+            if ($definitions.Count -ne 1) { continue }
+            $definition = $definitions[0]
+            $shadowList = @()
+            if ($shadowRanges.ContainsKey($name)) { $shadowList = @($shadowRanges[$name]) }
+            $refCount = 0
+            for ($i = 0; $i -lt $lines.Count -and $refCount -lt 100; $i++) {
+                $lineNo = $i + 1
+                if ($lineNo -eq $definition.startLine) { continue }
+                if ($importLineNumbers.ContainsKey($lineNo)) { continue }
+                $inShadow = $false
+                foreach ($range in $shadowList) {
+                    if ($lineNo -ge [int]$range.start -and $lineNo -le [int]$range.end) { $inShadow = $true; break }
+                }
+                if ($inShadow) { continue }
+                $matchesHere = [regex]::Matches($codeLines[$i], '(?<![A-Za-z0-9_$.])' + [regex]::Escape($name) + '(?![\w$])')
+                foreach ($m in $matchesHere) {
+                    if ($refCount -ge 100) { break }
+                    $refCount = $refCount + 1
+                    if (Test-AihCodeCallPosition -Line $codeLines[$i] -Index $m.Index -Length $m.Length) {
+                        $occurrences = @($occurrences) + @((New-AihParsedOccurrence -FileIntelligenceId $FileIntelligenceId -Role 'call' -Name $name -Line $lineNo -Column ($m.Index + 1) -Resolution 'unresolved'))
+                        continue
+                    }
+                    $occurrences = @($occurrences) + @((New-AihParsedOccurrence -FileIntelligenceId $FileIntelligenceId -Role 'reference' -Name $name -Line $lineNo -Column ($m.Index + 1) -Resolution 'same-file-unique' -ResolvedTargetId $definition.sid))
+                }
             }
         }
-    }
     }
     return [pscustomobject][ordered]@{
         status = 'ready'; symbols = $symbols; imports = $imports; exports = $exports
@@ -397,8 +588,13 @@ function Invoke-AihStructuralPowerShell {
             $occurrences = @($occurrences) + @((New-AihParsedOccurrence -FileIntelligenceId $FileIntelligenceId -Role 'definition' -Name $Matches[1] -Line $lineNo -Column ($line.IndexOf($Matches[1]) + 1) -Resolution 'exact' -ResolvedTargetId $symbol.sid))
         }
     }
-    # same-file references for uniquely-named functions (whole file scan)
+    # F05: same-file references for uniquely-named functions (whole file
+    # scan) over comment/string-stripped code; definition lines never yield
+    # references. PowerShell bare-name command invocation of a unique
+    # same-file function remains same-file resolvable evidence; parameters
+    # are $-prefixed and cannot shadow a Verb-Noun function name.
     if ($lines.Count -le 3000) {
+        $codeLines = Get-AihCodeSyntaxStrippedLines -Lines $lines -Language 'powershell'
         $names = @{}
         foreach ($symbol in $symbols) {
             if (-not $names.ContainsKey($symbol.name)) { $names[$symbol.name] = @() }
@@ -412,7 +608,7 @@ function Invoke-AihStructuralPowerShell {
             for ($i = 0; $i -lt $lines.Count -and $refCount -lt 100; $i++) {
                 $lineNo = $i + 1
                 if ($lineNo -eq $definition.startLine) { continue }
-                $matchesHere = [regex]::Matches($lines[$i], '(?<![A-Za-z0-9_$.-])' + [regex]::Escape($name) + '(?![\w$-])')
+                $matchesHere = [regex]::Matches($codeLines[$i], '(?<![A-Za-z0-9_$.-])' + [regex]::Escape($name) + '(?![\w$-])')
                 foreach ($m in $matchesHere) {
                     if ($refCount -ge 100) { break }
                     $refCount = $refCount + 1

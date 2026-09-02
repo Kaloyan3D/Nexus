@@ -32,11 +32,22 @@ Setup installs/composes pinned runtime dependencies and Nexus UI/controller pack
 
 ## Start Nexus
 
-From the project you want Nexus to work on:
+Launch the universal application from any directory, then choose **Open
+Folder** in the UI:
 
 ```powershell
 aih -Open
 ```
+
+Optional explicit preselection:
+
+```powershell
+aih -Open .
+aih -Open C:\path\to\project
+```
+
+An already-running Nexus process is reused. The explicit path is handed to the
+UI and never becomes a process-global cwd.
 
 Useful lifecycle commands:
 
