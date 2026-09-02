@@ -1902,8 +1902,85 @@ const PANEL_CSS = [
 
 //#region apply
 /** Required client service: the UI slot registry. */
-const inject = ["slots"];
+const inject = ["slots", "workspaces"];
 function apply(ctx) {
+	if (ctx.workspaces && ctx.workspaces.list) {
+	// Keep the UI Workspace registry and Nexus Phase 3.1 repository foundation
+	// on one identity path. Existing/recent workspaces are reconciled once at
+	// startup; newly opened folders are reconciled when the Workspace baseline
+	// changes. The host canonicalizes and validates every path.
+	ctx.effect(() => {
+		let disposed = false;
+		const registered = /* @__PURE__ */ new Set();
+		const registerPath = async (path) => {
+			const key = String(path || "").replaceAll("/", "\\").toLocaleLowerCase();
+			if (key === "" || registered.has(key)) return;
+			registered.add(key);
+			try {
+				const response = await fetch("/nexus/workspace-registration.json", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ path })
+				});
+				if (!response.ok) registered.delete(key);
+			} catch {
+				registered.delete(key);
+			}
+		};
+		const reconcile = () => {
+			if (disposed) return;
+			const snapshot = ctx.workspaces.list.getSnapshot();
+			if (snapshot.phase !== "ready") return;
+			for (const workspace of snapshot.items) registerPath(workspace.path);
+		};
+		const unsubscribe = ctx.workspaces.list.subscribe(reconcile);
+		reconcile();
+		return () => {
+			disposed = true;
+			unsubscribe();
+		};
+	}, "nexus-controller: Phase 3.1 workspace reconciliation");
+	// `aih -Open <path>` uses a URL-scoped handoff. It never mutates server cwd
+	// and works against an already-running universal Nexus process: register or
+	// reuse the DSH Workspace, then create/open its blank session. The query is
+	// consumed exactly once so reload cannot create another conversation.
+	ctx.effect(() => {
+		const url = new URL(window.location.href);
+		const requestedPath = url.searchParams.get("nexus-open");
+		if (requestedPath === null || requestedPath.trim() === "") return;
+		let disposed = false;
+		let started = false;
+		const consume = async () => {
+			if (disposed || started) return;
+			const snapshot = ctx.workspaces.list.getSnapshot();
+			if (snapshot.phase !== "ready") return;
+			started = true;
+			try {
+				const registration = await fetch("/nexus/workspace-registration.json", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ path: requestedPath })
+				});
+				if (!registration.ok) throw new Error("Nexus workspace registration failed");
+				const key = requestedPath.replaceAll("/", "\\").replace(/[\\]+$/g, "").toLocaleLowerCase();
+				let workspace = snapshot.items.find((item) => item.path.replaceAll("/", "\\").replace(/[\\]+$/g, "").toLocaleLowerCase() === key);
+				if (workspace === void 0) workspace = await ctx.workspaces.create({ path: requestedPath });
+				if (!disposed) ctx.workspaces.startSession(workspace.workspaceId);
+			} catch (reason) {
+				console.warn("Nexus workspace handoff failed:", reason);
+			} finally {
+				url.searchParams.delete("nexus-open");
+				window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+			}
+		};
+		const unsubscribe = ctx.workspaces.list.subscribe(consume);
+		consume();
+		return () => {
+			disposed = true;
+			unsubscribe();
+		};
+	}, "nexus-controller: launcher workspace handoff");
+	}
 	ctx.effect(() => {
 		const tag = document.createElement("style");
 		tag.dataset.plugin = "@nexus/controller";

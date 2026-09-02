@@ -510,6 +510,7 @@ Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $layout.App
 $liveConversation = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-conversation\lib\client.js')
 Assert-Aih ($liveConversation.Contains('background:var(--dsw-alias-button-primary-fill);color:#fff')) 'composer send button uses violet primary'
 Assert-Aih ($liveConversation.Contains('#7C5CFF') -and -not $liveConversation.Contains('#6187D8')) 'hero glow tinted violet'
+Assert-Aih ($liveConversation.Contains('const inert = pendingWorkspaceId !== void 0 || sessionId === void 0 || hero && chipTitle === void 0;')) 'live UI blocks old-session submission during workspace transition'
 Assert-Aih ((Test-Path -LiteralPath (Join-Path $distDir 'assets\nexus-logo.png')) -and (Test-Path -LiteralPath (Join-Path $distDir 'assets\nexus-mark.png'))) 'Nexus brand assets served from dist'
 
 $fixture = New-Fixture 'nexus-ui'
@@ -534,7 +535,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $fixtureRenderer 'client.js'), "const productTitle = ""DeepSeek Harness"";`r`n", [Text.UTF8Encoding]::new($false))
     $fixtureConversation = Join-Path $fixtureApp 'dsh-client-ui-conversation\lib'
     New-Item -ItemType Directory -Force -Path $fixtureConversation | Out-Null
-    $conversationFixture = $fixtureCopy.heroHeadline[0].from + ",`r`n" + $fixtureCopy.heroHeadline[1].from + "`r`nbackground:var(--dsw-alias-button-info-fill);color:#fff`r`nvar(--dsw-alias-button-info-hover)`r`n#6187D8`r`n"
+    $conversationFixture = $fixtureCopy.heroHeadline[0].from + ",`r`n" + $fixtureCopy.heroHeadline[1].from + "`r`nconst inert = sessionId === void 0 || hero && chipTitle === void 0;`r`nbackground:var(--dsw-alias-button-info-fill);color:#fff`r`nvar(--dsw-alias-button-info-hover)`r`n#6187D8`r`n"
     [IO.File]::WriteAllText((Join-Path $fixtureConversation 'client.js'), $conversationFixture, [Text.UTF8Encoding]::new($false))
     $fixtureLayout = Join-Path $fixtureApp 'dsh-client-ui-layout\lib'
     New-Item -ItemType Directory -Force -Path $fixtureLayout | Out-Null
@@ -565,6 +566,7 @@ try {
     Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureRenderer 'client.js')).Contains('const productTitle = "Nexus"')) 'fixture: renderer title patched'
     $fixtureConversationText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureConversation 'client.js')
     Assert-Aih ($fixtureConversationText.Contains($fixtureCopy.heroHeadline[0].to) -and $fixtureConversationText.Contains($fixtureCopy.heroHeadline[1].to)) 'fixture: hero headlines patched (en + zh)'
+    Assert-Aih ($fixtureConversationText.Contains('const inert = pendingWorkspaceId !== void 0 || sessionId === void 0 || hero && chipTitle === void 0;')) 'fixture: workspace transition blocks submission to the previous session'
     $fixtureLayoutText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureLayout 'client.js')
     Assert-Aih ($fixtureLayoutText.Contains('sidebar: 288,') -and $fixtureLayoutText.Contains('d.sidebar === 0 ? 288 : 0')) 'fixture: sidebar default width patched to 288'
     Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureModelSel 'client.js')).Contains('!modelLabel.toUpperCase().endsWith(effortLabel.toUpperCase())')) 'fixture: model effort dedupe patched'

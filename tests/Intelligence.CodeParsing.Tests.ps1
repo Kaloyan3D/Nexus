@@ -67,8 +67,9 @@ Assert-Aih ($dotCalls.Count -eq 0) 'TS member calls are not claimed as bare-name
 $kwCalls = @($ts.occurrences | Where-Object { $_.role -eq 'call' -and $_.name -eq 'if' })
 Assert-Aih ($kwCalls.Count -eq 0) 'TS keyword pseudo-calls excluded'
 
-# ── reference policy: same-file unique vs ambiguous ────────────────────────
+# ── reference policy: same-file unique vs ambiguous (conservative, F05) ────
 $refContent = @(
+    'import { uniqueHelper } from ''./external'';',
     'function uniqueHelper() {',
     '  return 1;',
     '}',
@@ -81,15 +82,33 @@ $refContent = @(
     '  return duplicated(also);',
     '}',
     '',
+    '// uniqueHelper mentioned in a comment must not resolve',
+    'const commentProbe = "uniqueHelper inside a string must not resolve";',
+    '',
+    'function shadowingProbe(uniqueHelper) {',
+    '  return uniqueHelper;',
+    '}',
+    '',
     'export function caller() {',
     '  const a = uniqueHelper();',
     '  const b = duplicated(3);',
-    '  return a + b;',
+    '  const c = uniqueHelper;',
+    '  return a + b + c;',
     '}'
 ) -join $nl
 $ref = Invoke-AihStructuralTsJs -Content $refContent -FileIntelligenceId 'cfi_refprobe00000000000000'
 $uniqueRefs = @($ref.occurrences | Where-Object { $_.role -eq 'reference' -and $_.name -eq 'uniqueHelper' })
-Assert-Aih ($uniqueRefs.Count -eq 1 -and $uniqueRefs[0].resolution -eq 'same-file-unique') 'unique same-file name resolves with same-file-unique evidence'
+Assert-Aih ($uniqueRefs.Count -eq 1 -and $uniqueRefs[0].resolution -eq 'same-file-unique' -and $uniqueRefs[0].line -eq 24) 'unique same-file name resolves only its identifier use (same-file-unique evidence)'
+$callLineRefs = @($ref.occurrences | Where-Object { $_.role -eq 'reference' -and $_.name -eq 'uniqueHelper' -and $_.line -eq 22 })
+Assert-Aih ($callLineRefs.Count -eq 0) 'call position of a unique same-file name is never double-counted as a resolved reference'
+$callOcc = @($ref.occurrences | Where-Object { $_.role -eq 'call' -and $_.name -eq 'uniqueHelper' -and $_.line -eq 22 })
+Assert-Aih ($callOcc.Count -eq 1 -and $callOcc[0].resolution -eq 'unresolved') 'same-file call keeps honest unresolved call evidence'
+$commentOrStringOcc = @($ref.occurrences | Where-Object { ($_.role -eq 'reference' -or $_.role -eq 'call') -and $_.name -eq 'uniqueHelper' -and ($_.line -eq 14 -or $_.line -eq 15) })
+Assert-Aih ($commentOrStringOcc.Count -eq 0) 'comments and string literals never yield call or reference evidence'
+$importLineOcc = @($ref.occurrences | Where-Object { ($_.role -eq 'reference' -or $_.role -eq 'call') -and $_.name -eq 'uniqueHelper' -and $_.line -eq 1 })
+Assert-Aih ($importLineOcc.Count -eq 0) 'import declaration lines never yield resolved references'
+$shadowOcc = @($ref.occurrences | Where-Object { ($_.role -eq 'reference' -or $_.role -eq 'call') -and $_.name -eq 'uniqueHelper' -and ($_.line -eq 16 -or $_.line -eq 17) })
+Assert-Aih ($shadowOcc.Count -eq 0) 'parameter-shadowed name never resolves to the outer same-file definition'
 $ambigRefs = @($ref.occurrences | Where-Object { $_.role -eq 'reference' -and $_.name -eq 'duplicated' })
 Assert-Aih ($ambigRefs.Count -eq 0) 'ambiguous same-file name yields NO invented resolution (negative ambiguity test)'
 
@@ -135,6 +154,7 @@ $pyLines = @(
     '',
     'class AuthService:',
     '    """docstring"""',
+    '    # fetch mentioned in a comment must not resolve',
     '    def __init__(self, store):',
     '        self.store = store',
     '',
@@ -162,8 +182,14 @@ Assert-Aih ($pyNames.ContainsKey('function:helper')) 'Python top-level function 
 $fromImports = @($py.imports | Where-Object { $_.rawTarget -eq 'collections' })
 Assert-Aih ($py.imports.Count -eq 2 -and $fromImports.Count -eq 1) 'Python from-imports recorded'
 Assert-Aih (@($fromImports[0].bindings) -contains 'OD') 'Python alias binding uses the local alias'
-$pyUniqueRefs = @($py.occurrences | Where-Object { $_.role -eq 'reference' -and $_.name -eq 'fetch' })
-Assert-Aih ($pyUniqueRefs.Count -ge 1 -and $pyUniqueRefs[0].resolution -eq 'same-file-unique') 'Python same-file unique reference resolved'
+$pyFetchRefs = @($py.occurrences | Where-Object { $_.role -eq 'reference' -and $_.name -eq 'fetch' })
+Assert-Aih ($pyFetchRefs.Count -eq 0) 'Python call-position use of a unique method is never a resolved reference (conservative)'
+$pyFetchCalls = @($py.occurrences | Where-Object { $_.role -eq 'call' -and $_.name -eq 'fetch' })
+Assert-Aih ($pyFetchCalls.Count -eq 1 -and $pyFetchCalls[0].resolution -eq 'unresolved') 'Python call position keeps honest unresolved call evidence'
+$pyHelperRefs = @($py.occurrences | Where-Object { $_.role -eq 'reference' -and $_.name -eq 'helper' })
+Assert-Aih ($pyHelperRefs.Count -eq 1 -and $pyHelperRefs[0].resolution -eq 'same-file-unique') 'Python bare identifier use of a unique function resolves same-file-unique'
+$pyCommentOcc = @($py.occurrences | Where-Object { ($_.role -eq 'reference' -or $_.role -eq 'call') -and $_.name -eq 'fetch' -and $_.line -eq 4 })
+Assert-Aih ($pyCommentOcc.Count -eq 0) 'Python docstring/comment text never yields call or reference evidence'
 
 # ── PowerShell structural parser ────────────────────────────────────────────
 $ps1Content = @(
@@ -172,15 +198,20 @@ $ps1Content = @(
     '    Write-Output $Target',
     '}',
     '',
+    '# Invoke-Deploy in a comment must not resolve',
+    '$script:note = "Invoke-Deploy inside a string must not resolve"',
+    '',
     'function Get-DeployStatus {',
     '    return Invoke-Deploy',
     '}'
 ) -join $nl
 $ps1 = Invoke-AihStructuralPowerShell -Content $ps1Content -FileIntelligenceId 'cfi_psprobe0000000000000000'
 Assert-Aih (@($ps1.symbols | Where-Object { $_.name -eq 'Invoke-Deploy' }).Count -eq 1) 'PowerShell function parsed'
-Assert-Aih (@($ps1.symbols | Where-Object { $_.name -eq 'Get-DeployStatus' })[0].endLine -eq 8) 'PowerShell function range brace-matched'
+Assert-Aih (@($ps1.symbols | Where-Object { $_.name -eq 'Get-DeployStatus' })[0].endLine -eq 11) 'PowerShell function range brace-matched'
 $psRefs = @($ps1.occurrences | Where-Object { $_.role -eq 'reference' -and $_.name -eq 'Invoke-Deploy' })
-Assert-Aih ($psRefs.Count -eq 1 -and $psRefs[0].resolution -eq 'same-file-unique') 'PowerShell same-file function reference resolved'
+Assert-Aih ($psRefs.Count -eq 1 -and $psRefs[0].resolution -eq 'same-file-unique' -and $psRefs[0].line -eq 10) 'PowerShell same-file function reference resolved from code only'
+$psLexicalOcc = @($ps1.occurrences | Where-Object { ($_.role -eq 'reference' -or $_.role -eq 'call') -and $_.name -eq 'Invoke-Deploy' -and ($_.line -eq 6 -or $_.line -eq 7) })
+Assert-Aih ($psLexicalOcc.Count -eq 0) 'PowerShell comments and strings never yield call or reference evidence'
 
 # ── provider registry & capability matrix ───────────────────────────────────
 $matrix = Get-AihProviderCapabilityMatrix

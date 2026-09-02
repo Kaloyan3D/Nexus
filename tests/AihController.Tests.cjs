@@ -99,7 +99,46 @@ async function main() {
   const fs = require('node:fs')
   const path = require('node:path')
   const os = require('node:os')
-  const runCli = promisify(execFile)
+  const { spawnSync } = require('node:child_process')
+  // Transport note (TASK-0017): sandboxed environments deny anonymous-pipe and
+  // fd-redirected stdio capture from Node children (spawn EPERM), while
+  // stdio:'inherit' spawns are allowed. The wrapper below runs each CLI through
+  // cmd.exe with cmd-side redirection into temporary files (no pipes anywhere),
+  // then returns the same bytes promisify(execFile) would have produced,
+  // including the rejection shape (error.code/.stdout/.stderr/.signal).
+  let runCliSeq = 0
+  const runCli = async (file, args, opts) => {
+    const seq = ++runCliSeq
+    const token = process.pid + '-' + seq
+    const outPath = path.join(os.tmpdir(), 'aih-cli-out-' + token + '.txt')
+    const errPath = path.join(os.tmpdir(), 'aih-cli-err-' + token + '.txt')
+    const batchPath = path.join(os.tmpdir(), 'aih-cli-' + token + '.cmd')
+    const q = (value) => '"' + String(value) + '"'
+    const command = [q(file)].concat(args.map(q)).join(' ') + ' > ' + q(outPath) + ' 2> ' + q(errPath)
+    fs.writeFileSync(batchPath, '@echo off\r\n' + command + '\r\n', 'utf8')
+    const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', batchPath], Object.assign({}, opts, { stdio: 'ignore', windowsHide: true }))
+    const read = (p) => { try { return fs.readFileSync(p, 'utf8') } catch (_) { return '' } }
+    const stdout = read(outPath)
+    const stderr = read(errPath)
+    try { fs.rmSync(outPath, { force: true }) } catch (_) { }
+    try { fs.rmSync(errPath, { force: true }) } catch (_) { }
+    try { fs.rmSync(batchPath, { force: true }) } catch (_) { }
+    if (result.error) {
+      result.error.stdout = stdout
+      result.error.stderr = stderr
+      throw result.error
+    }
+    if (result.status !== 0) {
+      const failure = new Error('Command failed: ' + file)
+      failure.code = result.status === null ? -1 : result.status
+      failure.killed = result.signal != null
+      failure.signal = result.signal
+      failure.stdout = stdout
+      failure.stderr = stderr
+      throw failure
+    }
+    return { stdout, stderr }
+  }
   // Exercise the real default install-root resolution without touching the
   // live Nexus install: all controller CLIs run from a disposable copy of the
   // production scripts/config/data layout. The exit hook also runs after an

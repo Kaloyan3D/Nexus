@@ -40,11 +40,12 @@
  * reviewer role); it can never become the root engineering model.
  */
 
-const { execFile } = require('node:child_process')
+const { execFile, spawn } = require('node:child_process')
 const { promisify } = require('node:util')
 const { createRequire } = require('node:module')
 const fs = require('node:fs')
 const path = require('node:path')
+const os = require('node:os')
 const crypto = require('node:crypto')
 
 const REVIEW_COMMAND = /^\s*\/(?:codex-)?review\b/i
@@ -506,6 +507,22 @@ function classifyBindingWorkspace(binding, workspace) {
   return normalizedBinding === normalizedCurrent ? null : 'workspace-mismatch'
 }
 
+/** Compare a persisted Phase 3.1 session identity with a freshly resolved
+ * identity for the immutable session cwd. Missing legacy identity is allowed
+ * so it can be upgraded in place; any contradictory identity fails closed. */
+function classifyBindingRepositoryIdentity(binding, identity) {
+  if (!binding || !identity) return 'repository-identity-missing'
+  const fields = ['workspaceId', 'repositoryId', 'checkoutId']
+  const hasPersistedIdentity = fields.some((field) => typeof binding[field] === 'string' && binding[field] !== '')
+  if (!hasPersistedIdentity) return null
+  for (const field of fields) {
+    if (typeof binding[field] !== 'string' || binding[field] === '' || binding[field] !== identity[field]) return 'repository-identity-mismatch'
+  }
+  if (normalizeWorkspaceIdentity(binding.executionRoot) !== normalizeWorkspaceIdentity(identity.executionRoot)) return 'repository-identity-mismatch'
+  if (normalizeWorkspaceIdentity(binding.checkoutRootPath) !== normalizeWorkspaceIdentity(identity.checkoutRootPath)) return 'repository-identity-mismatch'
+  return null
+}
+
 /**
  * Classify a persisted binding against an authoritative TaskController
  * identity result (Task.ps1 -Action test-task). PURE and deterministic:
@@ -608,8 +625,11 @@ function createBindingGuard(deps) {
       }
       const workspaceReason = classifyBindingWorkspace(binding, workspace)
       if (workspaceReason) {
-        return recoverStaleBinding(agent, session, workspace, promptText, binding, workspaceReason)
+        const error = new Error(`session workspace mismatch: binding '${binding.workspace ?? ''}', session '${workspace ?? ''}'`)
+        error.code = 'session-workspace-mismatch'
+        throw error
       }
+      if (typeof deps.validateWorkspaceIdentity === 'function') await deps.validateWorkspaceIdentity(binding, workspace)
       // Part 21: a legacy binding WITHOUT taskInstanceId can never prove its
       // lifecycle generation, so it must not silently attach to (possibly
       // different) current controller state. It is stale/ambiguous by
@@ -677,6 +697,54 @@ function apply(ctx) {
   const scriptsRoot = path.join(installRoot, 'scripts')
 
   const runCli = promisify(execFile)
+  // Capture transport (TASK-0017): sandboxed environments may deny
+  // anonymous-pipe and fd-redirected stdio capture from Node children
+  // (spawn EPERM) while stdio:'ignore'/'inherit' spawns remain allowed.
+  // On Windows, run each CLI through cmd.exe with cmd-side redirection
+  // into temporary files (no pipes anywhere) and return the same bytes,
+  // preserving the promisify(execFile) result and rejection shapes
+  // (.code/.stdout/.stderr/.killed/.signal). Non-Windows platforms keep
+  // the original pipe transport.
+  const quoteWindowsArg = (value) => {
+    const text = String(value)
+    if (text !== '' && !/[\s"]/.test(text)) return text
+    return '"' + text.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1') + '"'
+  }
+  const readCliFile = (file) => { try { return fs.readFileSync(file, 'utf8') } catch { return '' } }
+  const spawnCaptured = (file, args, options) => {
+    if (process.platform !== 'win32') return runCli(file, args, options)
+    const token = process.pid + '-' + crypto.randomUUID()
+    const outPath = path.join(os.tmpdir(), 'aih-cli-out-' + token + '.txt')
+    const errPath = path.join(os.tmpdir(), 'aih-cli-err-' + token + '.txt')
+    const batchPath = path.join(os.tmpdir(), 'aih-cli-' + token + '.cmd')
+    const command = [file].concat(args).map(quoteWindowsArg).join(' ') + ' > "' + outPath + '" 2> "' + errPath + '"'
+    fs.writeFileSync(batchPath, '@echo off\r\n' + command + '\r\n', 'utf8')
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const finish = (fn) => { if (!settled) { settled = true; fn() } }
+      const child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/c', batchPath], {
+        stdio: 'ignore',
+        windowsHide: !!(options && options.windowsHide),
+        timeout: (options && options.timeout) || 0,
+      })
+      child.on('error', (error) => finish(() => reject(error)))
+      child.on('close', (code, signal) => finish(() => {
+        const stdout = readCliFile(outPath)
+        const stderr = readCliFile(errPath)
+        try { fs.rmSync(outPath, { force: true }) } catch { /* best effort */ }
+        try { fs.rmSync(errPath, { force: true }) } catch { /* best effort */ }
+        try { fs.rmSync(batchPath, { force: true }) } catch { /* best effort */ }
+        if (code === 0 && signal === null) return resolve({ stdout, stderr })
+        const failure = new Error('Command failed: ' + file)
+        failure.code = code === null ? null : code
+        failure.killed = signal != null
+        failure.signal = signal
+        failure.stdout = stdout
+        failure.stderr = stderr
+        reject(failure)
+      }))
+    })
+  }
   const bindings = loadBindings(bindingsPath)
 
   function log(entry) {
@@ -706,6 +774,11 @@ function apply(ctx) {
           taskInstanceId: binding.taskInstanceId ?? null,
           taskId: binding.taskId,
           workspace: binding.workspace,
+          workspaceId: binding.workspaceId ?? null,
+          repositoryId: binding.repositoryId ?? null,
+          checkoutId: binding.checkoutId ?? null,
+          checkoutRootPath: binding.checkoutRootPath ?? null,
+          executionRoot: binding.executionRoot ?? binding.workspace,
           preset: binding.preset,
           description: binding.description,
           executionClass: binding.executionClass,
@@ -746,7 +819,7 @@ function apply(ctx) {
       args = [...args, '-PayloadFile', payloadPath]
     }
     try {
-      const result = await runCli(
+      const result = await spawnCaptured(
         'powershell.exe',
         ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, script), ...args],
         { timeout: CLI_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
@@ -788,6 +861,18 @@ function apply(ctx) {
     })
     if (!task || !task.taskId) throw new Error('aih-controller: task creation returned no taskId')
     return task
+  }
+
+  async function resolveWorkspaceIdentity(workspace) {
+    const identity = await invokePowerShell('NexusWorkspace.ps1', ['-Action', 'resolve'], {
+      payload: { path: workspace },
+    })
+    if (!identity || !identity.workspaceId || !identity.repositoryId || !identity.checkoutId || !identity.executionRoot || !identity.checkoutRootPath) {
+      const error = new Error('aih-controller: Phase 3.1 workspace identity could not be resolved')
+      error.code = 'session-workspace-identity-unavailable'
+      throw error
+    }
+    return identity
   }
 
   async function routeTask(workspace, taskId, description, options = {}) {
@@ -863,6 +948,23 @@ function apply(ctx) {
     bindingFor: (session) => bindingFor(session),
     createBinding: (agent, session, workspace, promptText) => bindSession(agent, session, workspace, promptText),
     testTaskIdentity,
+    validateWorkspaceIdentity: async (binding, workspace) => {
+      const identity = await resolveWorkspaceIdentity(workspace)
+      const mismatch = classifyBindingRepositoryIdentity(binding, identity)
+      if (mismatch) {
+        const error = new Error(`session repository identity mismatch: expected ${binding.repositoryId || 'unrecorded'}/${binding.checkoutId || 'unrecorded'}, actual ${identity.repositoryId}/${identity.checkoutId}`)
+        error.code = mismatch
+        throw error
+      }
+      // In-place upgrade for pre-universal bindings. The session cwd is
+      // immutable and the Phase 3.1 resolver just validated it, so this adds
+      // identity without migrating the session or its task.
+      if (!binding.repositoryId) {
+        Object.assign(binding, identity)
+        binding.workspace = identity.executionRoot
+        persistBindings()
+      }
+    },
     log,
     invalidateBinding: (stale) => {
       const key = stale && stale.sessionId ? stale.sessionId : null
@@ -1472,6 +1574,12 @@ function apply(ctx) {
   }
 
   async function bindSession(agent, session, workspace, promptText) {
+    const workspaceIdentity = await resolveWorkspaceIdentity(workspace)
+    if (normalizeWorkspaceIdentity(workspaceIdentity.executionRoot) !== normalizeWorkspaceIdentity(workspace)) {
+      const error = new Error(`session execution root mismatch: expected '${workspaceIdentity.executionRoot}', actual '${workspace}'`)
+      error.code = 'session-workspace-mismatch'
+      throw error
+    }
     const reviewRequested = isReviewCommand(promptText)
     const task = await createTask(workspace, reviewRequested ? reviewQuestionOf(promptText) : promptText, reviewRequested)
     // TASK-0005 Part 1: every newly created task carries an immutable
@@ -1487,6 +1595,11 @@ function apply(ctx) {
       taskInstanceId,
       taskId: task.taskId,
       workspace,
+      workspaceId: workspaceIdentity.workspaceId,
+      repositoryId: workspaceIdentity.repositoryId,
+      checkoutId: workspaceIdentity.checkoutId,
+      checkoutRootPath: workspaceIdentity.checkoutRootPath,
+      executionRoot: workspaceIdentity.executionRoot,
       preset: agentPresetOf(session),
       description: task.description,
       executionClass: decision.executionClass,
@@ -1529,6 +1642,9 @@ function apply(ctx) {
           DSH_AIH_TASK_INSTANCE_ID: { description: 'Immutable lifecycle instance identity of the bound task (task_<32hex>).' },
           DSH_AIH_EXECUTION_CLASS: { description: 'Execution class selected by the deterministic routing policy.' },
           DSH_AIH_REVIEW_REQUIRED: { description: '1 when an independent review is required for completion.' },
+          DSH_AIH_WORKSPACE_ID: { description: 'Nexus Phase 3.1 logical Workspace identity.' },
+          DSH_AIH_REPOSITORY_ID: { description: 'Nexus Phase 3.1 logical Repository identity.' },
+          DSH_AIH_CHECKOUT_ID: { description: 'Nexus Phase 3.1 physical Checkout identity.' },
         },
         resolve: (execution) => {
           const agent = execution && execution.agent
@@ -1541,6 +1657,9 @@ function apply(ctx) {
             DSH_AIH_TASK_INSTANCE_ID: binding.taskInstanceId || undefined,
             DSH_AIH_EXECUTION_CLASS: binding.executionClass,
             DSH_AIH_REVIEW_REQUIRED: binding.reviewRequired ? '1' : '0',
+            DSH_AIH_WORKSPACE_ID: binding.workspaceId || undefined,
+            DSH_AIH_REPOSITORY_ID: binding.repositoryId || undefined,
+            DSH_AIH_CHECKOUT_ID: binding.checkoutId || undefined,
           }
         },
       })
@@ -1826,6 +1945,18 @@ function apply(ctx) {
       log({ event: 'pre-step-error', error: message })
       const agent = payload && payload.agent
       const session = agent && agent.session
+      if (error && (error.code === 'session-workspace-mismatch' || error.code === 'repository-identity-mismatch' || error.code === 'repository-identity-missing' || error.code === 'session-workspace-identity-unavailable')) {
+        if (session) {
+          appendMessage(
+            session,
+            createControllerMessage(
+              'Controller blocked execution: the session workspace identity could not be proven.\n' + message + '\nNo model or tool execution was allowed. Reopen the registered checkout or create a new conversation from the intended workspace.',
+              'controller-workspace-error',
+            ),
+          )
+        }
+        return { kind: 'reject' }
+      }
       if (explicitReview) {
         // FAIL CLOSED: an explicit /codex-review must never degrade into a
         // DeepSeek review while appearing to the user as Codex. Surface the
@@ -1894,6 +2025,7 @@ module.exports.createControllerMessage = createControllerMessage
 module.exports.parseCliJson = parseCliJson
 module.exports.normalizeWorkspaceIdentity = normalizeWorkspaceIdentity
 module.exports.classifyBindingWorkspace = classifyBindingWorkspace
+module.exports.classifyBindingRepositoryIdentity = classifyBindingRepositoryIdentity
 module.exports.classifyBindingIdentity = classifyBindingIdentity
 module.exports.createBindingGuard = createBindingGuard
 module.exports.structuredCliStdout = structuredCliStdout

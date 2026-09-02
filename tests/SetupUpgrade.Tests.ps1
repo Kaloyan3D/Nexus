@@ -94,6 +94,11 @@ if (-not $managedPatch.Contains("name: '@nexus/mode-selector'")) {
     throw 'FAIL: managed composition no longer carries @nexus/mode-selector.'
 }
 
+$nexusPatch = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'scripts\Patch-NexusUi.ps1')
+if (-not $nexusPatch.Contains('pendingWorkspaceId !== void 0')) {
+    throw 'FAIL: Nexus UI patch no longer blocks composer submission during an optimistic workspace transition.'
+}
+
 $modeClientPath = Join-Path $InstallRoot 'ui\nexus-mode-selector\lib\client.js'
 if (-not (Test-Path -LiteralPath $modeClientPath)) {
     throw "FAIL: Nexus mode-selector client source missing at $modeClientPath"
@@ -117,3 +122,4 @@ Write-Host 'PASS: managed cordis.patch.yml is synced before Nexus UI migration'
 Write-Host 'PASS: required engineering config modules are installed on fresh setup'
 Write-Host 'PASS: Control Room mode lifecycle is Nexus-owned and no longer patches compiled upstream UI'
 Write-Host 'PASS: mode-selector installer avoids PowerShell automatic-variable collisions'
+Write-Host 'PASS: workspace transition blocks old-session submission until the selected workspace is current'

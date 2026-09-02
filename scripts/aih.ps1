@@ -4,7 +4,8 @@ param(
     [Alias('Mode')][string]$Preset,
     [switch]$Open,
     [switch]$EnableCodexSubagent,
-    [switch]$Restart
+    [switch]$Restart,
+    [Parameter(Position = 0)][string]$WorkspacePath
 )
 
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
@@ -18,6 +19,7 @@ $env:AIH_INSTALL_ROOT = $InstallRoot
 . (Join-Path $PSScriptRoot 'Startup.ps1')
 . (Join-Path $PSScriptRoot 'Routing.ps1')
 . (Join-Path $PSScriptRoot 'ControlRoom.ps1')
+. (Join-Path $PSScriptRoot 'Workspace.ps1')
 $layout = Get-AihLayout $InstallRoot
 $versions = Get-AihVersions $InstallRoot
 $routingPolicy = Get-AihRoutingPolicy $layout.RoutingPolicy
@@ -28,17 +30,15 @@ if ([string]::IsNullOrWhiteSpace($Preset)) {
 }
 $mode = Get-AihControlRoomMode -RoutingPolicy $routingPolicy -Preset $Preset
 $Preset = $mode.Id
-$workspace = [System.IO.Path]::GetFullPath((Get-Location).Path)
-$userProfile = [System.IO.Path]::GetFullPath([Environment]::GetFolderPath('UserProfile'))
-if ($workspace.Equals($userProfile, [StringComparison]::OrdinalIgnoreCase)) {
-    Write-Host "AI Harness must be launched from a project directory, not your user profile. Change directory first, for example: cd C:\path\to\your-project; aih -Open" -ForegroundColor Red
-    exit 2
+$preselected = $null
+if (-not [string]::IsNullOrWhiteSpace($WorkspacePath)) {
+    $requestedPath = [IO.Path]::GetFullPath($WorkspacePath)
+    Write-Host "Nexus: resolving workspace $requestedPath ..."
+    $preselected = Resolve-AihNexusWorkspaceIdentity -Path $requestedPath
+    Write-Host "Nexus: workspace ready ($($preselected.workspaceId) -> $($preselected.repositoryId) -> $($preselected.checkoutId))."
 }
-Write-Host "AI Harness: scanning workspace $workspace ..."
-$projectProfile = Get-AihProjectProfile -Workspace $workspace -InstallRoot $InstallRoot
-$projectContext = Format-AihProjectContext -Profile $projectProfile
-Write-Host "AI Harness: workspace scan complete (stacks: $(if ($projectProfile.Stacks.Count) { $projectProfile.Stacks -join ', ' } else { 'none detected' }))."
 $webUrl = $versions.HarnessUrl
+$openUrl = Get-AihNexusOpenUrl -BaseUrl $webUrl -ExecutionRoot $(if ($null -eq $preselected) { $null } else { [string]$preselected.executionRoot })
 $oauthModelsUrl = "$($versions.OAuthBaseUrl)/models"
 
 $requiredPaths = @($layout.Node, $layout.Dsh, $layout.Settings)
@@ -106,7 +106,7 @@ if ($null -ne $runningState -and $null -ne $runningState.Pid) {
         throw "Refusing to reuse or stop PID $($runningState.Pid): the saved process identity is stale or does not match DSH."
     }
     if ($null -ne $existing -and (Test-AihEndpoint -Uri $webUrl -TimeoutSec 2)) {
-        if ($runningState.Workspace -eq $workspace -and $controlRoomSchema -ge 3 -and -not $Restart) {
+        if (Test-AihReusableUniversalRuntimeState -State $runningState -Restart:$Restart) {
             $runningState.Status = 'READY'
             $runningState.Preset = $Preset
             $runningState.DefaultMode = $Preset
@@ -115,16 +115,20 @@ if ($null -ne $runningState -and $null -ne $runningState.Pid) {
             $runningState | Add-Member -NotePropertyName ReadyAtUtc -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
             $runningState | Add-Member -NotePropertyName ReadinessEvidence -NotePropertyValue ([ordered]@{ TcpReachable = $true; HttpReady = $true; HttpStatus = 200; StdoutMarker = $true }) -Force
             Write-AihState -Path $layout.State -State $runningState
-            Write-Host "AI Harness status: READY (already running for $workspace)"
+            Write-Host 'Nexus status: READY (universal runtime already running)'
+            if ($null -ne $preselected) { Write-Host "Preselecting workspace: $($preselected.executionRoot)" }
             Write-Host "Default mode for new sessions: $($mode.DisplayName) (source: $presetSource)"
-            Write-Host $webUrl
-            if ($Open) { Start-Process $webUrl | Out-Null }
+            Write-Host $openUrl
+            if ($Open) { Start-Process $openUrl | Out-Null }
             exit 0
+        }
+        if ($controlRoomSchema -lt 4 -and -not $Restart) {
+            Write-Host 'Nexus: upgrading the legacy project-bound runtime to the universal runtime ...'
         }
         Stop-Process -Id $existing.Id -Force
         $existing.WaitForExit(10000) | Out-Null
     }
-    elseif ($null -ne $existing -and $runningState.Workspace -eq $workspace -and $controlRoomSchema -ge 3 -and -not $Restart) {
+    elseif ($null -ne $existing -and (Test-AihReusableUniversalRuntimeState -State $runningState -Restart:$Restart)) {
         $process = $existing
         $resumingStartup = $true
         Write-Host "AI Harness status: STARTING (resuming readiness checks for PID $($process.Id))"
@@ -138,7 +142,6 @@ elseif ((Test-AihEndpoint -Uri $webUrl -TimeoutSec 2) -and -not $Restart) {
     throw "$webUrl is already in use by an untracked process. Stop it or rerun with -Restart after confirming ownership."
 }
 
-$projectName = Split-Path -Leaf $workspace
 $env:DSH_HOME = $layout.Data
 $env:AIH_INSTALL_ROOT = $layout.Root
 $env:AIH_LOCAL_OAUTH_KEY = if ($oauthAvailable) { 'local-oauth-no-secret' } else { $null }
@@ -147,14 +150,10 @@ $env:AIH_ACTIVE_PRESET = $null
 $env:AIH_ENABLE_CODEX_SUBAGENT = '0'
 if ($EnableCodexSubagent) { Write-Warning '-EnableCodexSubagent is deprecated; Codex is now available only through the independent review service.' }
 $env:AIH_PERSONA = @"
-You are the DeepSeek implementation agent for workspace $workspace. Complete the supplied bounded task. Use repository-local instructions and relevant context. Respect scope, use targeted verification, and return structured evidence. The deterministic controller owns task state, routing, retries, budgets, escalation, and completion. If blocked, return one scoped escalation with a stable failure signature.
-
-$projectContext
+You are the DeepSeek implementation agent for the workspace captured by the current session. The immutable session cwd is the only execution-root authority; never infer a repository from the Nexus server process cwd or prompt text. Complete the supplied bounded task. Use repository-local instructions and relevant context. Respect scope, use targeted verification, and return structured evidence. The deterministic controller owns task state, routing, retries, budgets, escalation, and completion. If blocked, return one scoped escalation with a stable failure signature.
 "@
 $env:AIH_PERSONA_DEEPSEEK = @"
-You are the DeepSeek implementation agent for workspace $workspace. Complete the supplied bounded task. Use repository-local instructions and relevant context. Respect scope, use targeted verification, and return structured evidence. The deterministic controller owns task state, routing, retries, budgets, escalation, and completion. Codex is unavailable in this preset. If blocked, return one scoped escalation with a stable failure signature.
-
-$projectContext
+You are the DeepSeek implementation agent for the workspace captured by the current session. The immutable session cwd is the only execution-root authority; never infer a repository from the Nexus server process cwd or prompt text. Complete the supplied bounded task. Use repository-local instructions and relevant context. Respect scope, use targeted verification, and return structured evidence. The deterministic controller owns task state, routing, retries, budgets, escalation, and completion. Codex is unavailable in this preset. If blocked, return one scoped escalation with a stable failure signature.
 "@
 
 $stdoutLog = Join-Path $layout.Logs 'dsh.out.log'
@@ -162,15 +161,19 @@ $stderrLog = Join-Path $layout.Logs 'dsh.err.log'
 $launchTime = [DateTime]::UtcNow
 if (-not $resumingStartup) {
     $arguments = @($layout.Dsh, 'web', '--port', '3080')
-    $process = Start-Process -FilePath $layout.Node -ArgumentList $arguments -WorkingDirectory $workspace -WindowStyle Hidden -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru
+    # The server has a neutral runtime directory. Every actual command/file/git
+    # operation resolves its cwd from the immutable session header; Nexus never
+    # uses process.chdir() or launch-directory switching.
+    $process = Start-Process -FilePath $layout.Node -ArgumentList $arguments -WorkingDirectory $layout.Data -WindowStyle Hidden -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru
     $process.Refresh()
     $launchTime = $process.StartTime.ToUniversalTime()
     $state = [ordered]@{
-        SchemaVersion = 3
+        SchemaVersion = 4
         Status = 'STARTING'
         Pid = $process.Id
         ProcessStartedAtUtc = $launchTime.ToString('o')
-        Workspace = $workspace
+        Workspace = $null
+        RuntimeRoot = $layout.Data
         Preset = $Preset
         DefaultMode = $Preset
         ModeCapabilities = [ordered]@{ NormalEngineering = $oauthAvailable; DeepSeekOnly = $true }
@@ -217,7 +220,7 @@ if ($startup.Status -eq 'FAILED') {
     Write-AihState -Path $layout.State -State $state
     $stderrTail = Get-AihLogTail -Path $stderrLog
     $stdoutTail = Get-AihLogTail -Path $stdoutLog
-    throw "DeepSeek Harness Web UI FAILED for $projectName.`nChild exit code: $($startup.ExitCode)`nStderr tail:`n$stderrTail`nStdout tail:`n$stdoutTail"
+    throw "Nexus Web UI FAILED.`nChild exit code: $($startup.ExitCode)`nStderr tail:`n$stderrTail`nStdout tail:`n$stdoutTail"
 }
 if ($startup.Status -eq 'STARTING') {
     $state['Status'] = 'STARTING'
@@ -237,8 +240,8 @@ $state['ReadinessReason'] = $startup.Reason
 $state['StartupEvidence'] = [ordered]@{ TcpReachable = $startup.Probe.TcpReachable; HttpReady = $startup.Probe.HttpReady; HttpStatus = $startup.Probe.HttpStatus; StdoutMarker = $startup.Probe.StdoutMarker }
 Write-AihState -Path $layout.State -State $state
 
-Write-Host "AI Harness status: READY for $workspace"
+Write-Host 'Nexus status: READY (universal runtime)'
 Write-Host "Default mode for new sessions: $Preset ($($mode.DisplayName); source: $presetSource)"
-Write-Host "Detected stacks: $(if ($projectProfile.Stacks.Count) { $projectProfile.Stacks -join ', ' } else { 'none' }); verification commands: $($projectProfile.VerificationCommands.Count)"
-Write-Host $webUrl
-if ($Open) { Start-Process $webUrl | Out-Null }
+if ($null -ne $preselected) { Write-Host "Preselected workspace: $($preselected.executionRoot)" }
+Write-Host $openUrl
+if ($Open) { Start-Process $openUrl | Out-Null }

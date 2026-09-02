@@ -22,6 +22,7 @@ $suites = @(
     [ordered]@{ name='TaskIdentity'; script='tests\TaskIdentity.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='EngineeringProfiles'; script='tests\EngineeringProfiles.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='EngineeringProfileEditor'; script='tests\EngineeringProfileEditor.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='NexusWorkspace'; script='tests\NexusWorkspace.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='Intelligence.Registry'; script='tests\Intelligence.Registry.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='Intelligence.Scanning'; script='tests\Intelligence.Scanning.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='Intelligence.Snapshots'; script='tests\Intelligence.Snapshots.Tests.ps1'; executable=$powershell; kind='powershell' },

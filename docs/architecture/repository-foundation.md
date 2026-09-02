@@ -203,6 +203,23 @@ mutex per store (Use-AihIntelligenceLock), matching Nexus conventions
 - Snapshot -Validator seam (policy checks between build and activation).
 - Event subscriptions (e.g. Phase 3.2 indexing on snapshot.activated).
 
+## Runtime workspace contract
+
+The universal Nexus process has a neutral runtime directory and is not a
+project identity. A conversation's immutable session `cwd` is resolved by
+`scripts/Workspace.ps1` into:
+
+    Machine -> Workspace -> WorkspaceRepository -> Repository -> Checkout
+                                                    -> checkout.rootPath
+    session.executionRoot (equal to or contained by checkout.rootPath)
+
+The controller persists `workspaceId`, `repositoryId`, `checkoutId`,
+`checkoutRootPath`, and `executionRoot` beside its task binding. On every turn
+it re-resolves the immutable session cwd and fails closed if any identity is
+missing, unavailable, or contradictory. UI **Open Folder** registrations and
+`aih -Open <path>` use the same resolver; neither maintains a second project
+database or changes process-global cwd.
+
 ## Known limitations
 
 - Remote normalization covers git@host:path.git and scheme URLs; exotic
