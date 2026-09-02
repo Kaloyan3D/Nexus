@@ -23,6 +23,7 @@ $suites = @(
     [ordered]@{ name='EngineeringProfiles'; script='tests\EngineeringProfiles.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='EngineeringProfileEditor'; script='tests\EngineeringProfileEditor.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='NexusWorkspace'; script='tests\NexusWorkspace.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='NexusSkills'; script='tests\NexusSkills.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='Intelligence.Registry'; script='tests\Intelligence.Registry.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='Intelligence.Scanning'; script='tests\Intelligence.Scanning.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='Intelligence.Snapshots'; script='tests\Intelligence.Snapshots.Tests.ps1'; executable=$powershell; kind='powershell' },
@@ -34,6 +35,7 @@ $suites = @(
     [ordered]@{ name='Intelligence.CodeIntelligence'; script='tests\Intelligence.CodeIntelligence.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='Intelligence.CodeScale'; script='tests\Intelligence.CodeScale.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='AihController'; script='tests\AihController.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusSkillsRuntime'; script='tests\NexusSkills.Runtime.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='EpistemicProductionHardening'; script='tests\EpistemicProductionHardening.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='AihControllerIdentity'; script='tests\AihControllerIdentity.Tests.cjs'; executable=$layout.Node; kind='node' }
 )

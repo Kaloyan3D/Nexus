@@ -3,7 +3,8 @@ param(
     [string]$InstallRoot,
     [switch]$SkipPathUpdate,
     [switch]$ResetManagedSettings,
-    [switch]$SkipDependencyInstall
+    [switch]$SkipDependencyInstall,
+    [switch]$SkipSkillsInstall
 )
 
 Set-StrictMode -Version Latest
@@ -65,6 +66,17 @@ foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'ui') -Recur
     $target = Join-Path (Join-Path $layout.Root 'ui') $relative
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
     Copy-AihSourceFile -Source $file.FullName -Destination $target
+}
+# The canonical global engineering skill pack ships with the install so the
+# skill installer below (and re-runs) always have a version-controlled source.
+if (Test-Path -LiteralPath (Join-Path $sourceRoot 'skills')) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $layout.Root 'skills') | Out-Null
+    foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'skills') -Recurse -File) {
+        $relative = $file.FullName.Substring((Join-Path $sourceRoot 'skills').Length).TrimStart([IO.Path]::DirectorySeparatorChar)
+        $target = Join-Path (Join-Path $layout.Root 'skills') $relative
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        Copy-AihSourceFile -Source $file.FullName -Destination $target
+    }
 }
 Copy-AihSourceFile -Source (Join-Path $sourceRoot 'runtime\package.json') -Destination (Join-Path $layout.Runtime 'package.json')
 Copy-AihSourceFile -Source (Join-Path $sourceRoot 'runtime\package-lock.json') -Destination (Join-Path $layout.Runtime 'package-lock.json')
@@ -192,6 +204,15 @@ New-Item -ItemType Directory -Force -Path (Join-Path $layout.RoutingData 'states
 New-Item -ItemType Directory -Force -Path (Join-Path $layout.CompletionData 'records') | Out-Null
 New-Item -ItemType Directory -Force -Path $layout.EvaluationData | Out-Null
 Protect-AihPrivatePath -Path $layout.Data
+
+# Publish the canonical global engineering skills into the user's native
+# Agent Skills root (~.agentsskills). Deterministic, idempotent, and
+# non-destructive (unrelated skills are preserved; same-name non-Nexus
+# skills refuse to be overwritten). -SkipSkillsInstall opts out.
+if (-not $SkipSkillsInstall) {
+    & (Join-Path $layout.Scripts 'Install-NexusSkills.ps1') -InstallRoot $InstallRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Nexus skill installation failed; fix the reported skill source or target conflict and rerun Setup.ps1.' }
+}
 
 if (-not $SkipPathUpdate) {
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
