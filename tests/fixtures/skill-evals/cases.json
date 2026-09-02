@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "description": "Deterministic skill-selection eval cases for Nexus Skills Foundation v1. Each case maps a real task to the skills whose catalog and body text must carry the routing signal a model (or human) needs to select them. Concepts are checked as case-insensitive regular expressions against the winning skill's description (catalog surface) and body.",
+  "cases": [
+    {
+      "id": "case-a-sqlite-stale-ui",
+      "kind": "bug report",
+      "task": "In our Expo React Native app backed by SQLite, a successful save is not reflected in the list screen; the old rows remain until the app is restarted. Someone suggested syncing the database into Redux to fix it.",
+      "expectedSkills": [
+        {
+          "name": "local-first-sqlite",
+          "catalogPatterns": [
+            "sqlite|canonical",
+            "invalidat|reactiv"
+          ],
+          "bodyPatterns": [
+            "canonical",
+            "invalidat",
+            "NEVER solve stale UI by requiring a restart",
+            "reread|re-read",
+            "Redux|Zustand",
+            "transient"
+          ]
+        },
+        {
+          "name": "react-native-expo",
+          "catalogPatterns": [
+            "react native|expo"
+          ],
+          "bodyPatterns": [
+            "Expo Router|lifecycle",
+            "expo-doctor|expo install"
+          ]
+        },
+        {
+          "name": "test-driven-hardening",
+          "catalogPatterns": [
+            "regression|bug"
+          ],
+          "bodyPatterns": [
+            "regression",
+            "reproduce"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "case-b-mockup-implementation",
+      "kind": "feature from design",
+      "task": "Here is the approved mobile mockup for the new dashboard. Implement it in the app.",
+      "expectedSkills": [
+        {
+          "name": "frontend-design-fidelity",
+          "catalogPatterns": [
+            "design|mockup",
+            "fidelity|screenshot"
+          ],
+          "bodyPatterns": [
+            "TOKEN COMPLIANCE != DESIGN FIDELITY",
+            "hierarchy",
+            "density",
+            "screenshot",
+            "spacing|proportions",
+            "empty-state|empty state"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "case-c-schema-migration",
+      "kind": "database work",
+      "task": "We need a schema migration adding a payments table. Amounts must never be negative, and the change has to ship without breaking the current app version.",
+      "expectedSkills": [
+        {
+          "name": "database-engineering",
+          "catalogPatterns": [
+            "schema|migrat"
+          ],
+          "bodyPatterns": [
+            "constraint",
+            "invariant",
+            "backwards compatibility|backward compatible|compatibility",
+            "transaction",
+            "index"
+          ]
+        },
+        {
+          "name": "test-driven-hardening",
+          "catalogPatterns": [
+            "regression|hardening|bug"
+          ],
+          "bodyPatterns": [
+            "regression test",
+            "deterministic"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "case-d-release-gate",
+      "kind": "release",
+      "task": "Wrap up phase 1.4: give me the release readiness status for the mobile build.",
+      "expectedSkills": [
+        {
+          "name": "ci-release-readiness",
+          "catalogPatterns": [
+            "release|readiness|gate"
+          ],
+          "bodyPatterns": [
+            "PASS",
+            "FAIL",
+            "UNVERIFIED",
+            "all green|fully passing",
+            "native build"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "case-e-git-author-change",
+      "kind": "git anomaly",
+      "task": "git log shows the last commit's author changed to a different name and email than usual. What happened and what do we do?",
+      "expectedSkills": [
+        {
+          "name": "git-safety",
+          "catalogPatterns": [
+            "git|identity|commit"
+          ],
+          "bodyPatterns": [
+            "user-owned",
+            "git config",
+            "author and committer|author",
+            "STOP",
+            "never|NEVER"
+          ]
+        }
+      ]
+    }
+  ]
+}
