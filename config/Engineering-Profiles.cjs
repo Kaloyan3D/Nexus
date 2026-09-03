@@ -199,12 +199,22 @@ function resolveActiveProfile(installRoot, presetId) {
 // re-validates on every save (fail closed, atomic, never partial).
 
 const ROLE_REQUIREMENTS = {
-  primaryEngineer: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true },
-  deepEngineer: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true },
-  fallback: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true },
-  reviewer: { writable: false, requiresTools: false, requiresSolLocal: true, requiresReasoning: true },
-  solver: { writable: true, requiresTools: false, requiresSolLocal: false, requiresReasoning: true },
+  primaryEngineer: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true, requiresVision: false },
+  deepEngineer: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true, requiresVision: false },
+  fallback: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true, requiresVision: false },
+  reviewer: { writable: false, requiresTools: false, requiresSolLocal: true, requiresReasoning: true, requiresVision: false },
+  solver: { writable: true, requiresTools: false, requiresSolLocal: false, requiresReasoning: true, requiresVision: false },
+  // Phase V0/V1: OPTIONAL visual-review role (orthogonal verification
+  // capability, never an execution class). Requires explicit vision support;
+  // absence from a profile is valid everywhere bindings are checked.
+  visualReviewer: { writable: false, requiresTools: false, requiresSolLocal: false, requiresReasoning: true, requiresVision: true },
 }
+
+/** Core roles every profile MUST bind (profile satisfiability contract). */
+const CORE_ROLES = ['primaryEngineer', 'deepEngineer', 'reviewer', 'solver', 'fallback']
+
+/** Optional roles: validated only when a profile declares them. */
+const OPTIONAL_ROLES = ['visualReviewer']
 
 function roleRequirementsOf(role) {
   return ROLE_REQUIREMENTS[String(role || '')] || null
@@ -228,6 +238,10 @@ function modelCompatibleWithRole(entry, role, reasoning) {
   if (!req) return false
   if (req.requiresReasoning && entry.supportsReasoning === false) return false
   if (req.requiresTools && entry.supportsTools === false) return false
+  // A vision role fails closed unless the registry entry EXPLICITLY declares
+  // supportsVision=true — a missing capability declaration is never treated
+  // as vision-capable.
+  if (req.requiresVision && entry.supportsVision !== true) return false
   if (req.requiresSolLocal && modelResolvedProvider(entry, reasoning) !== 'sol-local') return false
   if (reasoning) {
     const levels = Array.isArray(entry.supportedReasoningLevels) ? entry.supportedReasoningLevels : []
@@ -275,7 +289,9 @@ function roleBindingTarget(registry, profile, role, reasoningOverride) {
 }
 
 function bindingsSatisfiable(registry, profile) {
-  for (const role of ['primaryEngineer', 'deepEngineer', 'reviewer', 'solver', 'fallback']) {
+  // Only CORE roles are mandatory; OPTIONAL_ROLES (visualReviewer) never
+  // invalidate a legacy/custom profile by their absence.
+  for (const role of CORE_ROLES) {
     if (!roleBindingTarget(registry, profile, role)) return false
   }
   return true
@@ -381,6 +397,8 @@ module.exports = {
   loadProfiles,
   loadRegistry,
   ROLE_REQUIREMENTS,
+  CORE_ROLES,
+  OPTIONAL_ROLES,
   roleRequirementsOf,
   modelResolvedProvider,
   modelCompatibleWithRole,

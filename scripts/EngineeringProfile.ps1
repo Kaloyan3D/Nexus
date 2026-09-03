@@ -71,7 +71,9 @@ function Get-AihEditorState {
         $customRoles=$custom.roles
     }
     $roleModels=[ordered]@{}
-    foreach($role in @('primaryEngineer','deepEngineer','reviewer','solver','fallback')){
+    # visualReviewer is an OPTIONAL role: exposed to the editor (requirements +
+    # compatible models) but never part of the mandatory satisfiability set.
+    foreach($role in @('primaryEngineer','deepEngineer','reviewer','solver','fallback','visualReviewer')){
         $roleModels[$role]=@(Get-AihCompatibleModelsForRole $registry $role)
     }
     [pscustomobject]@{
@@ -87,6 +89,7 @@ function Get-AihEditorState {
             reviewer=Get-AihRoleRequirements 'reviewer'
             solver=Get-AihRoleRequirements 'solver'
             fallback=Get-AihRoleRequirements 'fallback'
+            visualReviewer=Get-AihRoleRequirements 'visualReviewer'
         }
         roleModels=$roleModels
     }
@@ -96,11 +99,29 @@ function Save-AihCustomProfile {
     param([object]$Layout,[object]$Payload)
     if($null-eq$Payload-or$null-eq$Payload.PSObject.Properties['roles']){throw 'save-custom requires a roles object.'}
     $roles=$Payload.roles
+    # CORE roles are mandatory; OPTIONAL roles (visualReviewer) are validated
+    # only when the operator actually declares them, so legacy/custom profiles
+    # without a visual binding stay valid (Phase V0/V1 backward compatibility).
     $missing=@();foreach($role in @('primaryEngineer','deepEngineer','reviewer','solver','fallback')){if($null-eq$roles.PSObject.Properties[$role]){$missing+=$role}}
     if($missing.Count-gt0){throw "Custom profile is missing role binding(s): $($missing -join ', ')"}
     $registry=Get-AihModelRegistry $Layout.ModelRegistry
     $candidate=[ordered]@{id='custom';displayName='Custom';roles=[ordered]@{}}
-    foreach($role in @('primaryEngineer','deepEngineer','reviewer','solver','fallback')){
+    $coreRoles=@('primaryEngineer','deepEngineer','reviewer','solver','fallback')
+    $optionalRoles=@('visualReviewer')
+    foreach($role in $coreRoles){
+        $binding=$roles.$role
+        $modelId=[string]$binding.model
+        $reasoning=[string]$binding.reasoning
+        if([string]::IsNullOrWhiteSpace($modelId)){throw "Custom profile role $role has no model."}
+        if([string]::IsNullOrWhiteSpace($reasoning)){throw "Custom profile role $role has no reasoning level."}
+        $entry=$null
+        foreach($candidateEntry in @($registry.models)){if([string]$candidateEntry.id -eq $modelId){$entry=$candidateEntry;break}}
+        if($null-eq$entry){throw "Custom profile role $role references unknown model id '$modelId'."}
+        if(-not(Test-AihModelRoleCompatible $entry $role $reasoning)){throw "Custom profile role $role is incompatible with model '$modelId' (reasoning '$reasoning')." }
+        $candidate.roles[$role]=[ordered]@{model=$modelId;reasoning=$reasoning}
+    }
+    foreach($role in $optionalRoles){
+        if($null-eq$roles.PSObject.Properties[$role]-or$null-eq$roles.$role){continue}
         $binding=$roles.$role
         $modelId=[string]$binding.model
         $reasoning=[string]$binding.reasoning

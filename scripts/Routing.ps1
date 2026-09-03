@@ -168,12 +168,18 @@ function Resolve-AihModelTarget {
 
 function Get-AihRoleRequirements {
     param([string]$Role)
+    # Phase V0/V1 (visual review): visualReviewer is an OPTIONAL logical role —
+    # orthogonal verification capability, NOT a new execution class. It is
+    # read-only, needs no tools and no sol-local transport, and is the only
+    # role that REQUIRES vision. Absence from a (legacy/custom) profile is
+    # valid everywhere bindings are checked.
     switch($Role){
-        'primaryEngineer' { [pscustomobject]@{writable=$true;requiresTools=$true;requiresSolLocal=$false;requiresReasoning=$true} }
-        'deepEngineer'    { [pscustomobject]@{writable=$true;requiresTools=$true;requiresSolLocal=$false;requiresReasoning=$true} }
-        'fallback'        { [pscustomobject]@{writable=$true;requiresTools=$true;requiresSolLocal=$false;requiresReasoning=$true} }
-        'reviewer'        { [pscustomobject]@{writable=$false;requiresTools=$false;requiresSolLocal=$true;requiresReasoning=$true} }
-        'solver'          { [pscustomobject]@{writable=$true;requiresTools=$false;requiresSolLocal=$false;requiresReasoning=$true} }
+        'primaryEngineer' { [pscustomobject]@{writable=$true;requiresTools=$true;requiresSolLocal=$false;requiresReasoning=$true;requiresVision=$false} }
+        'deepEngineer'    { [pscustomobject]@{writable=$true;requiresTools=$true;requiresSolLocal=$false;requiresReasoning=$true;requiresVision=$false} }
+        'fallback'        { [pscustomobject]@{writable=$true;requiresTools=$true;requiresSolLocal=$false;requiresReasoning=$true;requiresVision=$false} }
+        'reviewer'        { [pscustomobject]@{writable=$false;requiresTools=$false;requiresSolLocal=$true;requiresReasoning=$true;requiresVision=$false} }
+        'solver'          { [pscustomobject]@{writable=$true;requiresTools=$false;requiresSolLocal=$false;requiresReasoning=$true;requiresVision=$false} }
+        'visualReviewer'  { [pscustomobject]@{writable=$false;requiresTools=$false;requiresSolLocal=$false;requiresReasoning=$true;requiresVision=$true} }
         default { throw "Unknown engineering role: $Role" }
     }
 }
@@ -196,6 +202,13 @@ function Test-AihModelRoleCompatible {
     $req=Get-AihRoleRequirements $Role
     if($req.requiresReasoning-and$null-ne$Entry.PSObject.Properties['supportsReasoning']-and-not[bool]$Entry.supportsReasoning){return $false}
     if($req.requiresTools-and$null-ne$Entry.PSObject.Properties['supportsTools']-and-not[bool]$Entry.supportsTools){return $false}
+    # A vision role fails closed unless the registry entry EXPLICITLY declares
+    # supportsVision=true — a missing capability declaration is never treated
+    # as vision-capable.
+    if($req.requiresVision){
+        if($null-eq$Entry.PSObject.Properties['supportsVision']){return $false}
+        if(-not[bool]$Entry.supportsVision){return $false}
+    }
     if($req.requiresSolLocal){
         $resolved=Get-AihModelResolvedProvider $Entry $Reasoning
         if($resolved-ne'sol-local'){return $false}
@@ -236,8 +249,11 @@ function Get-AihRoleBindingTarget {
 
 function Test-AihEngineeringProfileBindings {
     param([object]$Registry,[object]$Profile)
-    # Returns @{ok;error} — never throws. All five roles must bind a known,
+    # Returns @{ok;error} — never throws. All five CORE roles must bind a known,
     # enabled, capability-compatible model with a supported reasoning level.
+    # visualReviewer is an OPTIONAL role: its absence never invalidates a
+    # (legacy/custom) profile, but when a binding IS present it must satisfy
+    # the same capability rules (checked where the visual review resolves it).
     foreach($role in @('primaryEngineer','deepEngineer','reviewer','solver','fallback')){
         $target=Get-AihRoleBindingTarget $Registry $Profile $role
         if($null-eq$target){return @{ok=$false;error="role '$role' is not satisfied by any compatible enabled model"}}
