@@ -1324,6 +1324,31 @@ function apply(ctx) {
     })
   }
 
+  async function detectVisualLoop(binding) {
+    return invokePowerShell('VisualLoop.ps1', ['-Action', 'detect', '-TaskId', binding.taskId, '-InstallRoot', installRoot], {
+      payload: { workspace: binding.workspace, ...instancePayloadOf(binding) },
+    })
+  }
+
+  function persistVisualUnavailable(binding, reason) {
+    const visualRoot = path.join(binding.workspace, '.ai-harness', 'runs', binding.taskId, 'visual')
+    const statePath = path.join(visualRoot, 'state.json')
+    let state = null
+    try { state = JSON.parse(fs.readFileSync(statePath, 'utf8')) } catch { return null }
+    if (!state || state.required !== true) return null
+    const exactReason = 'controller invocation failed: ' + String(reason || 'unknown visual-loop failure')
+    const reasons = Array.isArray(state.reasons) ? state.reasons.map(String) : []
+    if (!reasons.includes(exactReason)) reasons.push(exactReason)
+    state.status = 'unavailable'
+    state.reasons = reasons.slice(-20)
+    state.updatedAtUtc = new Date().toISOString()
+    fs.mkdirSync(visualRoot, { recursive: true })
+    const temporary = statePath + '.' + crypto.randomUUID() + '.tmp'
+    fs.writeFileSync(temporary, JSON.stringify(state, null, 2))
+    fs.renameSync(temporary, statePath)
+    return state
+  }
+
   function visualRepairPacketText(binding, loop) {
     const lines = [
       'Controller: visual verification requires repair · task ' + binding.taskId + ' · iteration ' + String(loop.iteration) + '/' + String(loop.maxIterations),
@@ -1343,16 +1368,20 @@ function apply(ctx) {
     // V2: automatic visual loop at the completion boundary. Failures of the
     // loop infrastructure must never block non-visual completion accounting.
     let visualLoop = null
-    let visualLoopFailed = false
     try {
       visualLoop = await runVisualLoop(binding)
     } catch (error) {
-      visualLoopFailed = true
-      log({ event: 'visual-loop-failed', taskId: binding.taskId, error: String(error) })
+      const reason = String(error && error.message ? error.message : error)
+      const unavailableState = persistVisualUnavailable(binding, reason)
+      visualLoop = unavailableState
+        ? { ok: false, visualWorkRequired: true, errorKind: 'visual-review-controller-invocation-failed', error: reason, reason, state: unavailableState }
+        : null
+      log({ event: 'visual-loop-failed', taskId: binding.taskId, error: reason, visualRequired: Boolean(unavailableState) })
     }
     const visualState = visualLoop && visualLoop.state ? visualLoop.state : null
     const visualStatus = visualState && visualState.status ? String(visualState.status) : 'none'
-    if (visualLoop && visualLoop.visualWorkRequired === true && (visualStatus === 'revise' || visualStatus === 'exhausted' || visualStatus === 'unavailable')) {
+    const visualWorkRequired = Boolean(visualLoop && (visualLoop.visualWorkRequired === true || (visualState && visualState.required === true)))
+    if (visualWorkRequired && visualStatus !== 'pass') {
       if (visualStatus === 'revise' && visualLoop.repairPacket) {
         appendMessage(
           session,
@@ -1367,6 +1396,11 @@ function apply(ctx) {
         appendMessage(
           session,
           createControllerMessage('Controller: visual verification unavailable · task ' + binding.taskId + ' · ' + String(visualLoop.reason || visualLoop.error || 'runtime or provider unavailable') + ' · no fabricated PASS; completion stays blocked until visual status is pass.', 'controller-visual-blocked'),
+        )
+      } else {
+        appendMessage(
+          session,
+          createControllerMessage('Controller: visual verification incomplete · task ' + binding.taskId + ' · status ' + visualStatus + ' · no fabricated PASS; completion stays blocked until the controller-owned visual loop reaches pass.', 'controller-visual-blocked'),
         )
       }
       return { complete: false, visualBlocked: true, visualStatus, visualLoop }
@@ -1503,6 +1537,40 @@ function apply(ctx) {
       )
       log({ event: 'verify-failed', taskId: binding.taskId, error: String(error) })
       return { kind: 'reject' }
+    }
+  }
+
+  async function automaticallyVerifyVisualTask(session, binding) {
+    if (!session || !binding || binding.visualAutoGateRunning) return null
+    const latest = latestAttemptOf(binding.workspace, binding.taskId)
+    if (!latest || !attemptIsOpen(latest)) return null
+    binding.visualAutoGateRunning = true
+    try {
+      const detection = await detectVisualLoop(binding)
+      const required = Boolean(detection && (detection.required === true || (detection.state && detection.state.required === true)))
+      if (!required) return detection
+      appendMessage(
+        session,
+        createControllerMessage(
+          'Controller: visual verification REQUIRED · task ' + binding.taskId + '. The controller will run deterministic verification and then the automatic VisualLoop. Visual Review is a controller-owned capability; no skill lookup or engineer invocation is required.',
+          'controller-visual-required',
+        ),
+      )
+      return executeVerifyTurn({ session }, binding)
+    } catch (error) {
+      const reason = String(error && error.message ? error.message : error)
+      const state = persistVisualUnavailable(binding, reason)
+      appendMessage(
+        session,
+        createControllerMessage(
+          'Controller: automatic visual gate unavailable · task ' + binding.taskId + ' · ' + reason + '. No skill fallback and no fabricated PASS; completion remains blocked' + (state ? ' with visual status unavailable.' : ' until requirement detection can run.'),
+          'controller-visual-blocked',
+        ),
+      )
+      log({ event: 'automatic-visual-gate-failed', taskId: binding.taskId, error: reason, statePersisted: Boolean(state) })
+      return null
+    } finally {
+      binding.visualAutoGateRunning = false
     }
   }
 
@@ -1868,7 +1936,7 @@ function apply(ctx) {
     })
   }
 
-  ctx.on('session/event', (subject, event) => {
+  ctx.on('session/event', async (subject, event) => {
     if (!subject || !event) return
     const binding = bindings[subject.id]
     if (!binding) return
@@ -1878,6 +1946,7 @@ function apply(ctx) {
     }
     if (event.type === 'turn/end' && event.data && event.data.reason) {
       const reason = event.data.reason
+      const completedEngineeringStep = Boolean(binding.currentEngineeringStep && binding.currentEngineeringStep.role)
       if (reason.kind === 'error' && reason.error && reason.error.message) {
         const actionId = binding.currentEpistemicActionId
         binding.currentEpistemicActionId = null
@@ -1919,10 +1988,13 @@ function apply(ctx) {
       } else {
         const actionId = binding.currentEpistemicActionId
         binding.currentEpistemicActionId = null
-        completeEngineeringEpistemicAction(binding, actionId, 'succeeded', 'engineering turn completed')
+        await completeEngineeringEpistemicAction(binding, actionId, 'succeeded', 'engineering turn completed')
           .catch((error) => log({ event: 'epistemic-action-complete-failed', sessionId: subject.id, error: String(error) }))
       }
       binding.currentEngineeringStep = null
+      if (completedEngineeringStep && reason.kind !== 'error' && reason.kind !== 'aborted' && reason.kind !== 'interrupted') {
+        await automaticallyVerifyVisualTask(subject, binding)
+      }
     }
   })
 

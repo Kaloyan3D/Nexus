@@ -326,8 +326,16 @@ fabricates or infers a visual-review PASS.
 
 ### Automatic loop mechanics
 
-- The hook lives in the bridge completion tail (`runCompletionTail`): after a
-  PASSED deterministic `/verify` the controller invokes `VisualLoop.ps1 -Action iterate`.
+- Normal GUI engineering completion enters the controller's automatic visual
+  gate. The bridge first invokes `VisualLoop.ps1 -Action detect`; non-visual
+  tasks return without verification or vision work. For a REQUIRED task the
+  controller runs deterministic verification, then the completion tail invokes
+  `VisualLoop.ps1 -Action iterate`. Explicit `/verify` remains supported and
+  reaches the same completion tail.
+- The bridge and `VisualLoop.ps1` share the standard UTF-8 `-PayloadFile`
+  contract for workspace and task-instance identity. A standalone invocation
+  with direct `-Workspace` arguments is not a substitute for this production
+  integration seam.
 - Runtime capture reuses `Capture-VisualEvidence.ps1` (viewport mode; one
   adb target); a capture failure sets status `unavailable` — never a
   fabricated PASS.
@@ -376,6 +384,18 @@ reviewer never edits files; repairs happen in the engineering session.
   (`Test-AihTaskCompletion` visual reason) and request operator attention.
 - A verification failure exits the loop into normal engineering failure
   semantics.
+
+### V2 automatic-bridge regression fixed
+
+The original V2 bridge called `VisualLoop.ps1` through the controller payload
+transport, but the script neither accepted `-PayloadFile` nor decoded the
+workspace/task-instance fields. Production automatic calls therefore failed
+during PowerShell parameter binding, while direct standalone tests passed.
+The bridge then swallowed that launch failure and could proceed without a
+visual state. The corrected path shares the payload contract, automatically
+starts from a successful required-UI engineering turn, and persists
+`unavailable` when a required visual state exists but controller invocation
+fails. No skill catalog participates in detection, routing, or invocation.
 
 ### Structured output (V1.1 hardening)
 

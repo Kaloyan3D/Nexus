@@ -145,10 +145,13 @@ EXTERNAL (V3 gate) and is never auto-recorded by any component.
 
 ### Ordering invariant
 
-The loop runs in the bridge completion tail AFTER deterministic verification
-passed, and after a repair handoff the loop requires a FRESH deterministic
-verification (newer evidence attempt) before recapturing. The ordering
-`repair → /verify → capture → review` is structural, not conventional.
+For a normal successful engineering turn, the bridge deterministically detects
+the changed visual surface. A REQUIRED result automatically runs controller
+verification and enters the completion tail; explicit `/verify` remains an
+independent manual entry to that same tail. After a repair handoff the loop
+requires a FRESH deterministic verification (newer evidence attempt) before
+recapturing. The ordering `repair → deterministic verification → capture →
+review` is structural, not conventional.
 
 ### Convergence
 

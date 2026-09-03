@@ -188,10 +188,15 @@ function Copy-AihVisualEvidenceImage {
         $destination=Join-Path $DestinationDirectory ('{0}-{1}{2}'-f$stem,$Index,$ext)
     }
     Copy-Item -LiteralPath $SourcePath -Destination $destination
-    $hash=Get-FileHash -LiteralPath $destination -Algorithm SHA256
+    # Use the same framework-level hashing path as VisualLoop. Some hosted
+    # controller processes disable module auto-loading, so relying on the
+    # Microsoft.PowerShell.Utility Get-FileHash cmdlet can make the automatic
+    # child service fail even though standalone interactive runs succeed.
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{$hash=([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($destination)))-replace '-','').ToLowerInvariant()}finally{$sha.Dispose()}
     [pscustomobject]@{
         role=$Role; fileName=[IO.Path]::GetFileName($destination); originalPath=[IO.Path]::GetFullPath($SourcePath)
-        storedPath=$destination; bytes=(Get-Item -LiteralPath $destination).Length; sha256=$hash.Hash.ToLowerInvariant()
+        storedPath=$destination; bytes=(Get-Item -LiteralPath $destination).Length; sha256=$hash
         mediaType=Get-AihVisualMediaType -Path $destination
     }
 }
