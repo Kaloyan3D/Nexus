@@ -42,8 +42,17 @@ llm-pi-ai:
     $mockDir=Join-Path $fixture 'mock'
     New-Item -ItemType Directory -Path $mockDir -Force|Out-Null
     $pngPath=Join-Path $workspace 'shot-source.png'
-    [byte[]]$pngBytes=0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,0,0,0,13
-    [IO.File]::WriteAllBytes($pngPath,$pngBytes)
+    # A real rendered-looking PNG (deterministic colored bars) so the
+    # preflight geometry/pixel-variance checks operate on valid input.
+    Add-Type -AssemblyName System.Drawing
+    $shotBmp=New-Object System.Drawing.Bitmap(400,800)
+    try{
+        for($bar=0;$bar-lt 40;$bar++){
+            $brush=New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255,(($bar*37)%256),(($bar*71)%256),(($bar*113)%256)))
+            try{ $g=[System.Drawing.Graphics]::FromImage($shotBmp); $g.FillRectangle($brush,0,($bar*20),400,20); $g.Dispose() }finally{ $brush.Dispose() }
+        }
+        $shotBmp.Save($pngPath,[System.Drawing.Imaging.ImageFormat]::Png)
+    }finally{ $shotBmp.Dispose() }
 
     $script:loopSeq=0
     function Invoke-AihLoop {
@@ -219,6 +228,56 @@ llm-pi-ai:
     Assert-Aih ($runD.exitCode -eq 3 -and $runD.json.errorKind -eq 'visual-review-schema-invalid') '5: malformed visual result fails closed with schema error'
     $stateD=Get-Content (Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $taskD.taskId) 'visual') 'state.json') -Raw|ConvertFrom-Json
     Assert-Aih ([int]$stateD.iteration -eq 0) '5: a failed review does not consume visual iteration budget'
+
+    # ── 5b. RETRY OWNERSHIP: transport exhaustion is terminal for the loop ────
+    # Invoke-VisualReview owns the bounded retry (max 2 provider HTTP attempts).
+    # When it exhausts them the controller must NOT silently re-invoke the
+    # reviewer: fail closed, mark unavailable, never burn the iteration.
+    $taskR=New-AihTask $workspace 'empty content task'
+    Push-Location $workspace
+    try{ 'export const Retry=()=>null' | Set-Content (Join-Path $workspace 'apps\mobile\src\components\Retry.tsx'); git add -A; git commit -m 'retry ui change' | Out-Null }finally{ Pop-Location }
+    $emptyMock=Join-Path $mockDir 'empty-loop.json'
+    @{status=200;body=@{choices=@(@{message=@{content=''}})}}|ConvertTo-Json -Depth 6|Set-Content -Path $emptyMock -Encoding UTF8
+    $runE=Invoke-AihLoop -Action 'iterate' -MockResponseFile $emptyMock -ScenarioPath $scenarioPath -PolicyPath $policyPath -LoopTaskId $taskR.taskId
+    Assert-Aih ($runE.exitCode -eq 3 -and $runE.json.errorKind -eq 'visual-review-empty-content') '5b: exhausted transport fails closed with empty-content'
+    $stateE=Get-Content (Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $taskR.taskId) 'visual') 'state.json') -Raw|ConvertFrom-Json
+    Assert-Aih ($stateE.status -eq 'unavailable') '5b: exhausted transport marks the reviewer unavailable'
+    Assert-Aih ([int]$stateE.iteration -eq 0) '5b: exhausted transport does not burn the iteration'
+    Assert-Aih ((@($stateE.reasons)|Where-Object{$_-match'reviewer not invoked: visual-review-empty-content'}|Measure-Object).Count -ge 1) '5b: the unavailable reason names the exhausted transport'
+    $terr=Get-Content (Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $taskR.taskId) 'visual\iteration-01') 'transport-error.json') -Raw|ConvertFrom-Json
+    Assert-Aih ([int]$terr.attemptCount -eq 2 -and @($terr.attempts).Count -eq 2 -and @($terr.attempts|Where-Object{$_.kind -eq 'empty-content'}).Count -eq 2) '5b: the transport owned exactly 2 provider HTTP attempts'
+
+    # ── 6b. VISUAL PREFLIGHT (deterministic; complements, never replaces) ─────
+    $taskP=New-AihTask $workspace 'preflight probe task'
+    Push-Location $workspace
+    try{ New-Item -ItemType Directory -Path (Join-Path $workspace 'apps\mobile\src\components') -Force|Out-Null; 'export const Chip=()=>null' | Set-Content (Join-Path $workspace 'apps\mobile\src\components\Chip.tsx'); git add -A; git commit -m 'chip ui' | Out-Null }finally{ Pop-Location }
+    $runP=Invoke-AihLoop -Action 'preflight' -MockResponseFile $passMock -ScenarioPath $scenarioPath -PolicyPath $policyPath -LoopTaskId $taskP.taskId
+    Assert-Aih ($runP.exitCode -eq 0 -and $runP.json.kind -eq 'visual-preflight-run') '6b: preflight action runs deterministically'
+    Assert-Aih ($runP.json.visualPreflight.status -eq 'pass') '6b: preflight passes on a real capture'
+    Assert-Aih ($null-ne$runP.json.visualPreflight.checks -and @($runP.json.visualPreflight.checks | Where-Object { $_.name -like 'pixel-variance:*' }).Count -ge 1) '6b: pixel-variance check ran'
+    Assert-Aih ($runP.json.note -match 'NOT a visual-review PASS') '6b: preflight output states it is not a visual-review PASS'
+    $stateP=Get-Content (Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $taskP.taskId) 'visual') 'state.json') -Raw|ConvertFrom-Json
+    Assert-Aih ($stateP.status -eq 'pending' -and [int]$stateP.iteration -eq 0) '6b: preflight does not advance iteration or set a verdict'
+    Assert-Aih ($stateP.visualPreflight.status -eq 'pass') '6b: preflight result persisted in visual state'
+    $telPathP=Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $taskP.taskId) 'telemetry.json'
+    $telZero=$true
+    if(Test-Path $telPathP){ $telP=Get-Content $telPathP -Raw|ConvertFrom-Json; $telZero=((@($telP.PSObject.Properties|Where-Object{$_.Name -eq 'modelCalls'})|Measure-Object).Count -eq 0 -or [int]$telP.modelCalls -eq 0) }
+    Assert-Aih $telZero '6b: preflight made zero provider calls'
+    $blockedP=Test-AihTaskCompletion $workspace $taskP.taskId
+    Assert-Aih (($blockedP.complete -eq $false) -and ((@($blockedP.reasons)|Where-Object{$_-match'Visual verification is required'}|Measure-Object).Count -ge 1)) '6b: preflight PASS alone never satisfies the visual completion gate'
+
+    # blank/tiny screenshot fails preflight; reviewer not invoked; no iteration burn
+    $blankPng=Join-Path $mockDir 'blank.png'
+    Add-Type -AssemblyName System.Drawing
+    $bmp=New-Object System.Drawing.Bitmap(4,4)
+    try{ $bmp.Save($blankPng,[System.Drawing.Imaging.ImageFormat]::Png) }finally{ $bmp.Dispose() }
+    $blankScenario=Join-Path $mockDir 'scenario-blank.json'
+    @{schemaVersion=1;kind='visual-review-scenarios';defaultScenario='blank';scenarios=@(@{id='blank';platform='android';captures=@(@{name='blank';mode='file';sourceFile=$blankPng})})}|ConvertTo-Json -Depth 6|Set-Content -Path $blankScenario -Encoding UTF8
+    $runPB=Invoke-AihLoop -Action 'iterate' -MockResponseFile $passMock -ScenarioPath $blankScenario -PolicyPath $policyPath -LoopTaskId $taskP.taskId
+    Assert-Aih ($runPB.exitCode -eq 3 -and $runPB.json.errorKind -eq 'visual-preflight-failed') '6b: blank screenshot fails preflight and the reviewer is not invoked'
+    $statePB=Get-Content (Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $taskP.taskId) 'visual') 'state.json') -Raw|ConvertFrom-Json
+    Assert-Aih ($statePB.status -eq 'unavailable' -and [int]$statePB.iteration -eq 0) '6b: preflight failure marks unavailable without burning iteration'
+    Assert-Aih ((@($statePB.reasons)|Where-Object{$_-match'reviewer not invoked'}|Measure-Object).Count -ge 1) '6b: the unavailable reason is recorded in state'
 
     # ── 6. NON-VISUAL TASKS NEVER INVOKE VISION ───────────────────────────────
     Push-Location $workspace

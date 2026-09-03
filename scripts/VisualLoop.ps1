@@ -3,7 +3,7 @@ param(
  [Parameter(Mandatory=$true)][string]$Workspace,
  [Parameter(Mandatory=$true)][string]$TaskId,
  [string]$TaskInstanceId,
- [ValidateSet('detect','iterate','status','record-manual')][string]$Action='iterate',
+ [ValidateSet('detect','iterate','status','record-manual','preflight')][string]$Action='iterate',
  [string]$PolicyPath,
  [string]$ScenarioPath,
  [int]$MaxIterations=3,
@@ -36,6 +36,115 @@ $InstallRoot=[System.IO.Path]::GetFullPath($InstallRoot)
 
 $script:AihVisualLoopStatuses=@('pending','reviewing','revise','pass','exhausted','unavailable')
 $script:AihVisualMaxCaptures=5
+# Failure kinds that mean the visualReviewer itself could not be invoked
+# (resolution/role/provider/key/transport). These must surface as
+# visual.status='unavailable' with the reason recorded — never as a review
+# result and never as a fabricated PASS.
+$script:AihVisualReviewerUnavailableKinds=@(
+    'visual-review-role-unbound',
+    'visual-review-target-unresolved',
+    'visual-review-not-vision-capable',
+    'visual-review-provider-unresolved',
+    'visual-review-resolution-failed',
+    'visual-review-api-key-missing',
+    'visual-review-transport-unavailable',
+    'visual-review-empty-content',
+    'visual-review-timeout',
+    'visual-review-transport-error',
+    'visual-review-provider-response-shape'
+)
+function Add-AihVisualStateReason {
+    # Append a reason to the state reasons list (deduplicated, bounded).
+    param($State,[string]$Reason)
+    if($null-eq$State){ return }
+    if($null-eq$State.PSObject.Properties['reasons']){ $State | Add-Member -NotePropertyName 'reasons' -NotePropertyValue @() -Force }
+    $existing=@($State.reasons)
+    if($existing-notcontains$Reason){
+        $trimmed=@($existing | Select-Object -Last 19)+@($Reason)
+        $State.reasons=$trimmed
+    }
+}
+
+# ── DETERMINISTIC VISUAL PREFLIGHT (complements, never replaces, the reviewer) ──
+# Geometry/pixel/token assertions over the captured PNGs. May PASS
+# independently; a preflight PASS is NOT a visual-review PASS and never
+# satisfies a required visual task on its own.
+function Get-AihVisualPreflight {
+    param($Captures,[string]$Question,[int]$MaxImages=5)
+    $checks=@()
+    $totalBytes=0
+    foreach($capture in @($Captures)){
+        $path=[string]$capture.storedPath
+        $name=[string]$capture.name
+        if(-not(Test-Path -LiteralPath $path)){
+            $checks+=[ordered]@{ name='file-exists:'+ $name; status='FAIL'; detail=('capture file missing: '+$path) }
+            continue
+        }
+        $bytes=[System.IO.File]::ReadAllBytes($path)
+        $totalBytes+=$bytes.Length
+        $magicOk=($bytes.Length-ge 8)-and($bytes[0]-eq 0x89)-and($bytes[1]-eq 0x50)-and($bytes[2]-eq 0x4E)-and($bytes[3]-eq 0x47)
+        $checks+=[ordered]@{ name='png-magic:'+$name; status=if($magicOk){'PASS'}else{'FAIL'}; detail=('bytes='+$bytes.Length) }
+        if(-not$magicOk){ continue }
+        # PNG IHDR geometry: width/height are big-endian at offsets 16..23.
+        # Truncated or stub files fail geometry instead of crashing.
+        if($bytes.Length-lt 24){
+            $checks+=[ordered]@{ name='geometry:'+$name; status='FAIL'; detail=('truncated PNG header ('+$bytes.Length+' bytes)') }
+            continue
+        }
+        $width=([int]$bytes[16]-shl 24)-bor([int]$bytes[17]-shl 16)-bor([int]$bytes[18]-shl 8)-bor([int]$bytes[19])
+        $height=([int]$bytes[20]-shl 24)-bor([int]$bytes[21]-shl 16)-bor([int]$bytes[22]-shl 8)-bor([int]$bytes[23])
+        $geometryOk=($width-ge 200)-and($height-ge 200)-and($width-le 8192)-and($height-le 8192)
+        $checks+=[ordered]@{ name='geometry:'+$name; status=if($geometryOk){'PASS'}else{'FAIL'}; detail=('{0}x{1}'-f$width,$height) }
+        if(-not$geometryOk){ continue }
+        # Pixel variance (blank-screen detector): sample the decoded bitmap and
+        # reject screenshots that are essentially a single solid color.
+        try{
+            Add-Type -AssemblyName System.Drawing
+            $bitmap=New-Object System.Drawing.Bitmap($path)
+            try{
+                $sampled=0; $distinct=@{}; $maxShare=0.0
+                $stepX=[Math]::Max(1,[int]($bitmap.Width/40))
+                $stepY=[Math]::Max(1,[int]($bitmap.Height/40))
+                for($y=0;$y-lt$bitmap.Height;$y+=$stepY){
+                    for($x=0;$x-lt$bitmap.Width;$x+=$stepX){
+                        $c=$bitmap.GetPixel($x,$y)
+                        $key=('{0:X2}{1:X2}{2:X2}'-f$c.R,$c.G,$c.B)
+                        if($distinct.ContainsKey($key)){ $distinct[$key]++ }else{ $distinct[$key]=1 }
+                        $sampled++
+                    }
+                }
+                if($sampled-gt 0){
+                    $maxShare=([double](@($distinct.Values) | Measure-Object -Maximum).Maximum)/[double]$sampled
+                }
+                $varianceOk=($distinct.Count-ge 8)-and($maxShare-le 0.98)
+                $checks+=[ordered]@{ name='pixel-variance:'+$name; status=if($varianceOk){'PASS'}else{'FAIL'}; detail=('distinctColors='+$distinct.Count+' dominantShare='+('{0:F3}'-f$maxShare)) }
+            }finally{ $bitmap.Dispose() }
+        }catch{
+            # Decoder unavailable in this environment: the deterministic geometry
+            # and byte checks still ran; variance is reported as SKIPPED, not FAIL.
+            $checks+=[ordered]@{ name='pixel-variance:'+$name; status='SKIPPED'; detail=('decoder unavailable: '+$_.Exception.Message) }
+        }
+    }
+    if(@($Captures).Count-gt $MaxImages){
+        $checks+=[ordered]@{ name='capture-budget'; status='FAIL'; detail=('captures='+@($Captures).Count+' max='+$MaxImages) }
+    }else{
+        $checks+=[ordered]@{ name='capture-budget'; status='PASS'; detail=('captures='+@($Captures).Count+' max='+$MaxImages) }
+    }
+    # Token analysis: deterministic estimate of the multimodal request budget.
+    $questionChars=0
+    if(-not[string]::IsNullOrWhiteSpace([string]$Question)){ $questionChars=[string]$Question.Length }
+    $estimatedTokens=[int][Math]::Ceiling($questionChars/4.0)+(@($Captures).Count*1100)
+    $tokenOk=$estimatedTokens-le 8000
+    $checks+=[ordered]@{ name='token-budget'; status=if($tokenOk){'PASS'}else{'FAIL'}; detail=('estimatedTokens='+$estimatedTokens+' questionChars='+$questionChars+' images='+@($Captures).Count) }
+    $failed=@($checks | Where-Object { [string]$_.status -eq 'FAIL' })
+    return [ordered]@{
+        status=if(@($failed).Count-eq 0){'pass'}else{'fail'}
+        checks=$checks
+        totalBytes=$totalBytes
+        estimatedTokens=$estimatedTokens
+        note='deterministic preflight; a preflight PASS is NOT a visual-review PASS'
+    }
+}
 
 function Write-AihVisualLoopFailure {
     param([string]$ErrorKind,[string]$Message,[string]$TaskId,[string]$TaskInstanceId,$State=$null)
@@ -73,7 +182,7 @@ function Get-AihVisualState {
 
 function Save-AihVisualState {
     param([string]$StatePath,$State)
-    $State.updatedAtUtc=[DateTime]::UtcNow.ToString('o')
+    $State | Add-Member -NotePropertyName 'updatedAtUtc' -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
     Write-AihAtomicJson -Path $StatePath -Value $State
 }
 
@@ -328,7 +437,10 @@ if($null-eq$state){
     $required=([string]$detection.requirement -eq 'required')
     $initialStatus='pending'
     if(-not$required){ $initialStatus='none' }
-    $state=[ordered]@{
+    # [pscustomobject] (not a bare [ordered] dictionary): a dictionary silently
+# swallows Add-Member note properties, so fresh-task state must be a
+# pscustomobject for visualPreflight persistence to work.
+$state=[pscustomobject][ordered]@{
         schemaVersion=1
         kind='visual-state'
         taskId=$TaskId
@@ -429,16 +541,18 @@ try{
     $captures=@(Invoke-AihLoopCapture -Scenario $scenario -IterationDirectory $iterationDir -Workspace $Workspace)
 }catch{
     $state.status='unavailable'
+    Add-AihVisualStateReason -State $state -Reason ('reviewer not invoked: runtime capture failed ('+[string]$_.Exception.Message+')')
     Save-AihVisualState -StatePath $loop.StatePath -State $state
     Write-AihVisualLoopFailure -ErrorKind 'visual-review-capture-unavailable' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message ('runtime capture failed: '+$_.Exception.Message) -State $state
 }
 if(@($captures).Count-eq 0){
     $state.status='unavailable'
+    Add-AihVisualStateReason -State $state -Reason 'reviewer not invoked: the visual scenario produced no captures'
     Save-AihVisualState -StatePath $loop.StatePath -State $state
-    Write-AihVisualLoopFailure -ErrorKind 'visual-review-capture-unavailable' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message 'the visual scenario produced no captures' -State $state
+    Write-AihVisualLoopFailure -ErrorKind 'visual-review-capture-unavailable' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message 'the visual scenario produced no captures'
 }
 
-# 2. previous-review packing (iteration >= 2): previous screenshots + result.
+
 $previousResultPath=$null
 $previousScreens=@()
 if($nextIteration-ge 2){
@@ -484,6 +598,31 @@ $questionText=($goalText+' Changed visual areas: '+$changedText+'. '+$focus)
 if(@($previousScreens).Count-gt 0){
     $questionText+=(' Compare against the previous screenshots and classify every previous finding as resolved, improved, unchanged, regressed, or not-applicable, then report meaningful new defects only.')
 }
+
+# 1b. deterministic visual preflight (geometry/pixel/token; no provider call).
+#     A preflight PASS never satisfies a required visual task; a preflight
+#     FAIL marks the reviewer unavailable for this attempt with the reason.
+$preflight=Get-AihVisualPreflight -Captures $captures -Question $questionText -MaxImages $script:AihVisualMaxCaptures
+Write-AihAtomicJson -Path (Join-Path $iterationDir 'preflight.json') -Value ([ordered]@{
+    schemaVersion=1; kind='visual-preflight'; taskId=$TaskId; taskInstanceId=$effectiveInstanceId; iteration=$nextIteration
+    preflight=$preflight; timestampUtc=[DateTime]::UtcNow.ToString('o')
+})
+$state | Add-Member -NotePropertyName 'visualPreflight' -NotePropertyValue ([pscustomobject][ordered]@{ status=[string]$preflight.status; estimatedTokens=[int]$preflight.estimatedTokens; checks=@($preflight.checks) }) -Force
+if([string]$preflight.status -ne 'pass'){
+    $state.status='unavailable'
+    Add-AihVisualStateReason -State $state -Reason ('reviewer not invoked: deterministic visual preflight failed ('+((@($preflight.checks)|Where-Object{[string]$_.status -eq 'FAIL'}|ForEach-Object{[string]$_.name})-join ', ')+')')
+    Save-AihVisualState -StatePath $loop.StatePath -State $state
+    Write-AihVisualLoopFailure -ErrorKind 'visual-preflight-failed' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message 'deterministic visual preflight failed; the visualReviewer was not invoked and no PASS can be fabricated'
+}
+if($Action-eq'preflight'){
+    # Deterministic-only action: capture + preflight, NO reviewer call, NO
+    # iteration burn, and never a visual-review verdict.
+    $state.status=if([bool]$state.repairPending){'revise'}else{'pending'}
+    $state.iteration=$nextIteration-1
+    Save-AihVisualState -StatePath $loop.StatePath -State $state
+    [ordered]@{ ok=$true; kind='visual-preflight-run'; taskId=$TaskId; taskInstanceId=$effectiveInstanceId; capability='visual-review'; role='visualReviewer'; trigger='automatic'; visualPreflight=$preflight; visualStatus=$state.status; note='preflight PASS is NOT a visual-review PASS'; iteration=$state.iteration; maxIterations=$state.maxIterations; readOnly=$true; completionAuthority=$false; humanAcceptance=$false }|ConvertTo-Json -Depth 20
+    exit 0
+}
 $allCapturePaths=@($captures | ForEach-Object { [string]$_.storedPath })
 # The question/screenshots/references travel in a JSON payload file (never
 # on the command line): free text with quotes/unicode would break cmd-level
@@ -526,14 +665,18 @@ if(-not[string]::IsNullOrWhiteSpace($reviewStdoutText)){
 }
 if($null-eq$reviewDoc){
     $state.status='unavailable'
+    Add-AihVisualStateReason -State $state -Reason 'reviewer not invoked: the visual review service returned no structured result'
     Save-AihVisualState -StatePath $loop.StatePath -State $state
     Write-AihVisualLoopFailure -ErrorKind 'visual-review-unavailable' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message ('visual review service returned no structured result (exit '+$reviewExit+')') -State $state
 }
 if([bool]$reviewDoc.ok-ne$true){
     # Provider permanent failure, malformed result, schema-invalid: the loop
     # does NOT fabricate PASS and does NOT consume the iteration.
-    if([string]$reviewDoc.errorKind -eq 'visual-review-provider-error'){
+    if(([string]$reviewDoc.errorKind -eq 'visual-review-provider-error')-or($script:AihVisualReviewerUnavailableKinds -contains [string]$reviewDoc.errorKind)){
+        # The visualReviewer itself could not be invoked (provider/resolution/
+        # role/transport/key): unavailable + reason — never a fabricated PASS.
         $state.status='unavailable'
+        Add-AihVisualStateReason -State $state -Reason ('reviewer not invoked: '+[string]$reviewDoc.errorKind+' ('+[string]$reviewDoc.error+')')
     }else{
         $state.status=if([bool]$state.repairPending){'revise'}else{'pending'}
     }
@@ -591,6 +734,7 @@ Save-AihVisualState -StatePath $loop.StatePath -State $state
 # 7. telemetry (real execution class preserved; capability/role orthogonal).
 $telemetry=Write-AihTaskTelemetry $Workspace $TaskId @{
     model=$reviewDoc.model; provider=$reviewDoc.provider; modelCalls=1
+    visualReviewInvocations=1; providerTransportAttempts=[int]$reviewDoc.attemptCount; successfulStructuredReviews=1
     finalResult=$controllerVerdict
 } -TaskInstanceId $effectiveInstanceId -Capability 'visual-review' -Role 'visualReviewer' -Trigger 'automatic' -VisualIteration $nextIteration -VisualVerdict $controllerVerdict -VisualScore ([double]$reviewDoc.score) -AcceptedFindings $acceptedCount -RejectedFindings $rejectedCount
 
