@@ -408,6 +408,26 @@ function Test-AihTaskCompletion {
         . (Join-Path $PSScriptRoot (Join-Path 'Engineering' 'Requirements.ps1'))
         foreach ($traceabilityReason in @(Test-AihRequirementsCompletionBlock -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId)) { $reasons.Add([string]$traceabilityReason) }
     }
+    # Phase V2: visual verification gate (orthogonal capability, never an
+    # execution class). A visual-REQUIRED task must not complete merely
+    # because deterministic verification passed: pending/reviewing/revise/
+    # exhausted/unavailable all block completion. Only visual status 'pass'
+    # satisfies the visual completion requirement, and the state must never
+    # falsely claim human acceptance (human acceptance is external, V3).
+    $visualStatePath = Join-Path (Join-Path (Join-Path $layout.Runs $TaskId) 'visual') 'state.json'
+    if (Test-Path -LiteralPath $visualStatePath) {
+        try { $visualState = Get-Content -Raw -Encoding UTF8 -LiteralPath $visualStatePath | ConvertFrom-Json } catch { $visualState = $null }
+        if ($null -ne $visualState -and $visualState.PSObject.Properties['required'] -and [bool]$visualState.required) {
+            $visualStatus = if ($visualState.PSObject.Properties['status']) { [string]$visualState.status } else { 'unknown' }
+            if ($visualStatus -eq 'pass' -and $visualState.PSObject.Properties['humanAcceptance'] -and [bool]$visualState.humanAcceptance) {
+                $reasons.Add('Visual state falsely claims human acceptance; human acceptance is external and must never be auto-recorded.')
+            } elseif ($visualStatus -ne 'pass') {
+                $visualIteration = if ($visualState.PSObject.Properties['iteration']) { [int]$visualState.iteration } else { 0 }
+                $visualMax = if ($visualState.PSObject.Properties['maxIterations']) { [int]$visualState.maxIterations } else { 3 }
+                $reasons.Add("Visual verification is required but not satisfied (status: $visualStatus, iteration: $visualIteration/$visualMax). Complete the visual loop or resolve its blocker.")
+            }
+        }
+    }
     $complete = $reasons.Count -eq 0
     if ($complete) {
         Update-AihTaskRecord $Workspace $TaskId -TaskInstanceId $TaskInstanceId { param($item); $item.status = 'complete'; $item.completedAtUtc = [DateTime]::UtcNow.ToString('o') } | Out-Null

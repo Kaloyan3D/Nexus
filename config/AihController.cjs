@@ -1313,17 +1313,72 @@ function apply(ctx) {
     return { reconciled: true, outcome: 'interrupted' }
   }
 
+  // ── Phase V2: controller-owned AUTOMATIC visual verification ───────────
+  // Runs at the completion boundary (after deterministic verification has
+  // passed): detect visual requirement -> bounded loop (capture -> visual
+  // review -> adjudicate -> repair handoff / convergence). The engineering
+  // session never types /visual-review; the loop is controller-owned.
+  async function runVisualLoop(binding) {
+    return invokePowerShell('VisualLoop.ps1', ['-Action', 'iterate', '-TaskId', binding.taskId, '-InstallRoot', installRoot], {
+      payload: { workspace: binding.workspace, ...instancePayloadOf(binding) },
+    })
+  }
+
+  function visualRepairPacketText(binding, loop) {
+    const lines = [
+      'Controller: visual verification requires repair · task ' + binding.taskId + ' · iteration ' + String(loop.iteration) + '/' + String(loop.maxIterations),
+      '',
+      String(loop.repairPacket || ''),
+      '',
+      'Repair in this session, then run /verify again: deterministic re-verification is required before the next automatic visual review.',
+      'The visual reviewer never edits files; findings were adjudicated by controller policy (rejected findings are listed as IGNORED).',
+    ]
+    return lines.join('\n')
+  }
+
   /** Completion decision after a passed verification (review disposition aware). */
   async function runCompletionTail(binding, session) {
     const review = readReviewResult(binding.workspace, binding.taskId)
     const reviewPass = Boolean(review && String(review.verdict) === 'pass')
+    // V2: automatic visual loop at the completion boundary. Failures of the
+    // loop infrastructure must never block non-visual completion accounting.
+    let visualLoop = null
+    let visualLoopFailed = false
+    try {
+      visualLoop = await runVisualLoop(binding)
+    } catch (error) {
+      visualLoopFailed = true
+      log({ event: 'visual-loop-failed', taskId: binding.taskId, error: String(error) })
+    }
+    const visualState = visualLoop && visualLoop.state ? visualLoop.state : null
+    const visualStatus = visualState && visualState.status ? String(visualState.status) : 'none'
+    if (visualLoop && visualLoop.visualWorkRequired === true && (visualStatus === 'revise' || visualStatus === 'exhausted' || visualStatus === 'unavailable')) {
+      if (visualStatus === 'revise' && visualLoop.repairPacket) {
+        appendMessage(
+          session,
+          createControllerMessage(visualRepairPacketText(binding, visualLoop), 'controller-visual-repair'),
+        )
+      } else if (visualStatus === 'exhausted') {
+        appendMessage(
+          session,
+          createControllerMessage('Controller: visual iteration budget exhausted · task ' + binding.taskId + ' · operator attention required (HUMAN_REVIEW_PENDING). No automatic commit; completion stays blocked until visual status is pass.', 'controller-visual-blocked'),
+        )
+      } else if (visualStatus === 'unavailable') {
+        appendMessage(
+          session,
+          createControllerMessage('Controller: visual verification unavailable · task ' + binding.taskId + ' · ' + String(visualLoop.reason || visualLoop.error || 'runtime or provider unavailable') + ' · no fabricated PASS; completion stays blocked until visual status is pass.', 'controller-visual-blocked'),
+        )
+      }
+      return { complete: false, visualBlocked: true, visualStatus, visualLoop }
+    }
     const completion = await completionCheck(binding, reviewPass)
     const complete = Boolean(completion && completion.complete)
     if (complete) {
       appendMessage(
         session,
         createControllerMessage(
-          'Controller: task ' + binding.taskId + ' COMPLETE.\nCompletion authority: deterministic controller. Verification passed' + (reviewPass ? '; independent review passed.' : '.'),
+          'Controller: task ' + binding.taskId + ' COMPLETE.\nCompletion authority: deterministic controller. Verification passed' + (reviewPass ? '; independent review passed.' : '.') +
+            (visualStatus === 'pass' ? '\nVisual review: VISUAL_REVIEW_PASS · HUMAN_REVIEW_PENDING (human acceptance is external; nothing was committed automatically). Final visual report: ' + String((visualLoop && visualLoop.resultPath) || '') : ''),
           'controller-complete',
         ),
       )
@@ -1620,7 +1675,9 @@ function apply(ctx) {
   // writable subagent, never gains completion authority, and never alters
   // routing/task state (telemetry only, via the controller service).
   async function runVisualReview(workspace, taskId, request, taskInstanceId) {
-    const args = ['-TaskId', taskId, '-Execute', '-InstallRoot', installRoot]
+    // V2: manual /visual-review is an operator override - always trigger=manual,
+    // never an automatic loop iteration.
+    const args = ['-TaskId', taskId, '-Execute', '-InstallRoot', installRoot, '-Trigger', 'manual']
     if (taskInstanceId) args.push('-TaskInstanceId', taskInstanceId)
     return invokePowerShell('VisualReview.ps1', args, {
       payload: {
