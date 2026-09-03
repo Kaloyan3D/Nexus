@@ -50,6 +50,10 @@ const crypto = require('node:crypto')
 
 const REVIEW_COMMAND = /^\s*\/(?:codex-)?review\b/i
 const VERIFY_COMMAND = /^\s*\/verify\b/i
+// Phase V0/V1: /visual-review is an ORTHOGONAL controller-owned command (the
+// read-only visual reviewer capability). It is NOT an execution class, never
+// changes routing semantics, and never hands the visual model a tool.
+const VISUAL_REVIEW_COMMAND = /^\s*\/visual-review\b/i
 // TASK-0007: these are NOT the review budget anymore. They are the LEGACY
 // hard-budget fallbacks, used ONLY when the routing policy cannot be read or
 // opts back into enforcement with codex.automaticReview.enforceLimits=true.
@@ -112,6 +116,42 @@ function isReviewCommand(text) {
 
 function isVerifyCommand(text) {
   return typeof text === 'string' && VERIFY_COMMAND.test(text)
+}
+
+function isVisualReviewCommand(text) {
+  return typeof text === 'string' && VISUAL_REVIEW_COMMAND.test(text)
+}
+
+// Image path-shaped tokens inside a /visual-review prompt. Extensions cover
+// the evidence the V1 packet budget accepts (screenshots + references).
+const VISUAL_IMAGE_TOKEN_RE = /[^\s'"`]+\.(?:png|jpe?g|webp|gif)(?![\w.])/gi
+
+/**
+ * Deterministic /visual-review request decomposition: path-shaped tokens that
+ * resolve to files become screenshot evidence (missing paths are KEPT so the
+ * controller service fails closed with a structured 'invalid image path'
+ * error instead of silently reviewing something else); the remaining text is
+ * the review question. This is input metadata, never model reasoning.
+ */
+function visualReviewRequestOf(text, workspace) {
+  const remainder = typeof text === 'string' ? text.replace(/^\s*\/visual-review\b[\s:]*/i, '').trim() : ''
+  const tokens = []
+  VISUAL_IMAGE_TOKEN_RE.lastIndex = 0
+  let match
+  while ((match = VISUAL_IMAGE_TOKEN_RE.exec(remainder)) !== null) tokens.push(match[0])
+  const screenshots = []
+  const seen = new Set()
+  for (const token of tokens) {
+    const candidate = path.isAbsolute(token) ? token : path.resolve(String(workspace || '.'), token)
+    const key = candidate.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    screenshots.push(candidate)
+  }
+  let question = remainder
+  for (const token of tokens) question = question.split(token).join(' ')
+  question = question.replace(/\s+/g, ' ').trim()
+  return { question, screenshots, references: [], platform: 'unknown' }
 }
 
 /**
@@ -1573,6 +1613,87 @@ function apply(ctx) {
     }
   }
 
+  // ── Phase V0/V1: controller-owned VISUAL REVIEW (orthogonal capability) ─
+  // One manual invocation per turn: bounded visual packet -> ONE multimodal
+  // transport call -> validated structured critique -> persisted artifacts.
+  // The turn is REJECTED (no model call): the visual reviewer is never a
+  // writable subagent, never gains completion authority, and never alters
+  // routing/task state (telemetry only, via the controller service).
+  async function runVisualReview(workspace, taskId, request, taskInstanceId) {
+    const args = ['-TaskId', taskId, '-Execute', '-InstallRoot', installRoot]
+    if (taskInstanceId) args.push('-TaskInstanceId', taskInstanceId)
+    return invokePowerShell('VisualReview.ps1', args, {
+      payload: {
+        workspace,
+        question: request.question,
+        platform: request.platform,
+        taskInstanceId: taskInstanceId || undefined,
+        screenshots: request.screenshots,
+        references: request.references,
+        invariants: request.invariants,
+      },
+    })
+  }
+
+  function visualReviewResultText(binding, result) {
+    const lines = [
+      'Controller: visual review complete · task ' + binding.taskId,
+      'Verdict: ' + String(result.verdict) + ' · score: ' + String(result.score) + '/10 · model: ' + String(result.model || result.modelId || ''),
+      'Findings: ' + (Array.isArray(result.findings) ? result.findings.length : 0) + ' · artifacts: ' + String(result.runDirectory || ''),
+    ]
+    for (const finding of Array.isArray(result.findings) ? result.findings.slice(0, 8) : []) {
+      lines.push('- [' + String(finding.severity) + '] ' + String(finding.area) + ': ' + String(finding.observation) + ' → ' + String(finding.recommendation))
+    }
+    lines.push('Read-only: true · no code edits returned · human acceptance and completion authority remain with the controller.')
+    return lines.join('\n')
+  }
+
+  async function executeVisualReviewTurn(agent, binding, request) {
+    const session = agent.session
+    const taskId = binding.taskId
+    const taskInstanceId = binding.taskInstanceId || null
+    try {
+      if (!Array.isArray(request.screenshots) || request.screenshots.length === 0) {
+        appendMessage(
+          session,
+          createControllerMessage(
+            'Controller visual review rejected · task ' + taskId + '\nNo screenshot was supplied. Attach at least one existing PNG/JPEG screenshot path in the /visual-review prompt.\nNothing was modified; completion authority remains with the controller.',
+            'visual-review-missing-screenshot',
+          ),
+        )
+        log({ event: 'visual-review-missing-screenshot', taskId })
+        return { kind: 'reject' }
+      }
+      const review = await runVisualReview(binding.workspace, taskId, request, taskInstanceId)
+      if (!review || review.ok !== true) {
+        const reason = review && review.error ? String(review.error) : 'no structured result'
+        const violations = review && Array.isArray(review.violations) && review.violations.length ? review.violations : null
+        appendMessage(
+          session,
+          createControllerMessage(
+            'Controller visual review failed · task ' + taskId + '\n' + reason + (violations ? '\nViolations: ' + violations.join('; ') : '') + '\nThe visual reviewer was not given any tool; no files were modified; completion authority remains with the controller.',
+            'visual-review-error',
+          ),
+        )
+        log({ event: 'visual-review-failed', taskId, reason, violations })
+        return { kind: 'reject' }
+      }
+      appendMessage(session, createControllerMessage(visualReviewResultText(binding, review), 'visual-review-result'))
+      log({ event: 'visual-review-completed', taskId, iteration: review.iteration, verdict: review.verdict, score: review.score })
+      return { kind: 'reject' }
+    } catch (error) {
+      appendMessage(
+        session,
+        createControllerMessage(
+          'Controller visual review failed · task ' + taskId + '\n' + String(error && error.message ? error.message : error) + '\nNo files were modified; completion authority remains with the controller.',
+          'visual-review-error',
+        ),
+      )
+      log({ event: 'visual-review-failed', taskId, error: String(error) })
+      return { kind: 'reject' }
+    }
+  }
+
   async function bindSession(agent, session, workspace, promptText) {
     const workspaceIdentity = await resolveWorkspaceIdentity(workspace)
     if (normalizeWorkspaceIdentity(workspaceIdentity.executionRoot) !== normalizeWorkspaceIdentity(workspace)) {
@@ -1830,6 +1951,10 @@ function apply(ctx) {
         return executeReviewTurn(agent, binding, reviewQuestionOf(promptText), { explicit: true })
       }
 
+      if (isVisualReviewCommand(promptText)) {
+        return executeVisualReviewTurn(agent, binding, visualReviewRequestOf(promptText, binding.workspace))
+      }
+
       if (isVerifyCommand(promptText)) {
         return executeVerifyTurn(agent, binding)
       }
@@ -2012,6 +2137,8 @@ function loadBindings(bindingsPath) {
 module.exports = { name: 'aih-controller', inject: ['shellEnv'], apply }
 module.exports.isReviewCommand = isReviewCommand
 module.exports.reviewQuestionOf = reviewQuestionOf
+module.exports.isVisualReviewCommand = isVisualReviewCommand
+module.exports.visualReviewRequestOf = visualReviewRequestOf
 module.exports.classifyEpistemicPrompt = classifyEpistemicPrompt
 module.exports.engineeringUsageOfEvent = engineeringUsageOfEvent
 module.exports.textOf = textOf

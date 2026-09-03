@@ -123,6 +123,29 @@
       "contextWindow": 131072,
       "maxOutputTokens": 8192,
       "enabled": true
+    },
+    {
+      "id": "deepseek-v4-flash-vision-exp",
+      "displayName": "DeepSeek V4 Flash Vision (Exp)",
+      "vendor": "DeepSeek",
+      "provider": "deepseek-vision-direct",
+      "providers": {
+        "default": "deepseek-vision-direct",
+        "high": "deepseek-vision-direct"
+      },
+      "model": "deepseek-v4-flash-vision-exp",
+      "supportedReasoningLevels": [
+        "off",
+        "high"
+      ],
+      "supportsTools": false,
+      "supportsReasoning": true,
+      "supportsVision": true,
+      "supportsStreaming": false,
+      "contextWindow": 131072,
+      "maxOutputTokens": 4096,
+      "enabled": true,
+      "readOnlyDefault": true
     }
   ]
 }

@@ -1,6 +1,6 @@
 {
     "schemaVersion":  1,
-    "nextSequence":  21,
+    "nextSequence":  22,
     "tasks":  [
                   {
                       "schemaVersion":  1,
@@ -755,6 +755,44 @@
                       "completionAuthority":  "controller",
                       "createdAtUtc":  "2026-09-02T18:08:09.0579198Z",
                       "updatedAtUtc":  "2026-09-02T18:09:20.6216921Z",
+                      "completedAtUtc":  null
+                  },
+                  {
+                      "schemaVersion":  1,
+                      "taskId":  "TASK-0021",
+                      "taskInstanceId":  "task_7df5a856d026457b889b1609afda94c1",
+                      "description":  "NEXUS VISUAL INTELLIGENCE — PHASE V0/V1\r\nVision Transport + Manual Visual Review\r\n\r\nGoal:\r\nAdd a model-agnostic, read-only visual review capability to Nexus.\r\n\r\nThis phase MUST NOT implement automatic visual iteration yet.\r\nFirst prove the full transport and controller contract.\r\n\r\nARCHITECTURAL RULE:\r\n\r\nVisual Review is NOT a new engineering execution class.\r\n\r\nIt is an orthogonal verification capability.\r\n\r\nDo not alter the semantics of:\r\n- engineer_normal\r\n- engineer_deep\r\n- reviewer\r\n- solver\r\n- deterministic\r\n\r\nDo NOT repurpose the existing reviewer role.\r\n\r\nThe existing reviewer is the bounded independent code reviewer and has\r\ndifferent transport/capability requirements.\r\n\r\n==================================================\r\n1. MODEL\r\n==================================================\r\n\r\nRegister:\r\n\r\ndeepseek-v4-flash-vision-exp\r\n\r\nProvider:\r\ndeepseek-vision-direct\r\n\r\nUse the existing DEEPSEEK_API_KEY.\r\n\r\nThe model must declare:\r\n\r\nsupportsVision: true\r\nreadOnlyDefault: true\r\n\r\nNo routing/controller code may branch on the DeepSeek vendor.\r\n\r\n==================================================\r\n2. ENGINEERING ROLE\r\n==================================================\r\n\r\nAdd a new optional logical role:\r\n\r\nvisualReviewer\r\n\r\nRole requirements:\r\n\r\nwritable: false\r\nrequiresTools: false\r\nrequiresSolLocal: false\r\nrequiresReasoning: true\r\nrequiresVision: true\r\n\r\nExtend both JS and PowerShell capability validation.\r\n\r\nDo not make visualReviewer mandatory for legacy/custom profiles.\r\nCore profile compatibility must remain backward compatible.\r\n\r\nBind visualReviewer in both built-in profiles to:\r\n\r\ndeepseek-v4-flash-vision-exp / high\r\n\r\n==================================================\r\n3. VISUAL REVIEW SERVICE\r\n==================================================\r\n\r\nCreate a controller-owned Visual Review Service.\r\n\r\nSuggested files:\r\n\r\nscripts/VisualReview.ps1\r\nscripts/Invoke-VisualReview.mjs\r\nscripts/Capture-VisualEvidence.ps1\r\n\r\nResponsibilities:\r\n\r\nVisualReview.ps1:\r\n- resolve task\r\n- resolve active engineering profile\r\n- resolve visualReviewer role\r\n- fail closed when the target cannot be resolved\r\n- fail closed when supportsVision != true\r\n- build bounded visual packet\r\n- invoke transport once\r\n- validate result\r\n- persist packet/result\r\n- telemetry\r\n- return structured JSON\r\n\r\nInvoke-VisualReview.mjs:\r\n- generic OpenAI-compatible multimodal transport\r\n- read local image\r\n- encode as base64 data URL\r\n- send text + image content\r\n- never write project files\r\n- never execute tools\r\n- return strict structured review output\r\n\r\nCapture-VisualEvidence.ps1:\r\n- Android ADB only for V1\r\n- capture PNG safely through device file + adb pull\r\n- no binary PowerShell text piping\r\n- deterministic artifact location\r\n\r\n==================================================\r\n4. COMMAND\r\n==================================================\r\n\r\nAdd:\r\n\r\n/visual-review\r\n\r\nand CLI equivalent:\r\n\r\naih-visual-review\r\n\r\nThe command must be controller-owned in the same spirit as /review and\r\n/verify.\r\n\r\nThe visual model must never be exposed as a normal writable subagent tool.\r\n\r\n==================================================\r\n5. ARTIFACTS\r\n==================================================\r\n\r\nPersist under:\r\n\r\n.ai-harness/runs/\u003cTASK-ID\u003e/visual/iteration-XX/\r\n\r\nincluding:\r\n\r\npacket.json\r\nresult.json\r\nscreenshot(s)\r\n\r\nDo not commit screenshots automatically.\r\n\r\n==================================================\r\n6. OUTPUT CONTRACT\r\n==================================================\r\n\r\nVisual model output must be validated into:\r\n\r\nverdict: PASS | REVISE | BLOCK\r\nscore: 0-10\r\n\r\ndimensions:\r\n- hierarchy\r\n- spacing\r\n- density\r\n- typography\r\n- alignment\r\n- colorDiscipline\r\n- interactionClarity\r\n- brandFidelity\r\n- platformQuality\r\n\r\nfindings[]:\r\n- id\r\n- severity\r\n- category\r\n- area\r\n- observation\r\n- whyItMatters\r\n- recommendation\r\n- confidence\r\n\r\nstrengths[]\r\nsummary\r\n\r\nThe visual reviewer must NOT return source edits or code patches.\r\n\r\n==================================================\r\n7. SAFETY / AUTHORITY\r\n==================================================\r\n\r\nVisual reviewer:\r\n\r\nCAN:\r\n- inspect screenshots\r\n- compare screenshots/references\r\n- critique layout/design\r\n- produce structured findings\r\n\r\nCANNOT:\r\n- edit code\r\n- use shell\r\n- write repository files\r\n- commit\r\n- alter task state directly\r\n- claim human acceptance\r\n- gain completion authority\r\n\r\nController remains authoritative.\r\n\r\n==================================================\r\n8. V1 SCOPE\r\n==================================================\r\n\r\nManual invocation only.\r\n\r\nDo NOT yet add:\r\n\r\n- automatic visual-task detection\r\n- automatic repair loops\r\n- baselines\r\n- multi-platform runtimes\r\n- human acceptance automation\r\n- visual completion blocking\r\n\r\nThose are later phases.\r\n\r\n==================================================\r\n9. TESTS\r\n==================================================\r\n\r\nAdd deterministic coverage for:\r\n\r\n- model registry vision capability\r\n- visualReviewer role resolution\r\n- non-vision model rejected for visualReviewer\r\n- missing screenshot\r\n- invalid image path\r\n- provider failure\r\n- malformed model JSON\r\n- result schema validation\r\n- packet persistence\r\n- read-only invariant\r\n- no completion authority\r\n- backward-compatible profiles\r\n- existing reviewer/Codex behavior unchanged\r\n\r\nUse a mocked transport for automated tests.\r\n\r\nThen perform ONE real smoke test using an existing OpenRank emulator\r\nscreenshot.\r\n\r\n==================================================\r\n10. DOCUMENTATION\r\n==================================================\r\n\r\nAdd:\r\n\r\ndocs/architecture/visual-review.md\r\n\r\nDocument:\r\n\r\nMODEL != ROLE != EXECUTION CLASS != PROVIDER\r\n\r\nand:\r\n\r\nVisual Review != Independent Code Review\r\n\r\n==================================================\r\nSTOP CONDITION\r\n==================================================\r\n\r\nPhase V1 is complete when:\r\n\r\nOpenRank screenshot\r\n→ /visual-review\r\n→ controller-owned packet\r\n→ deepseek-v4-flash-vision-exp\r\n→ validated structured visual critique\r\n→ result persisted\r\n→ findings returned to engineering session\r\n\r\nworks end-to-end.\r\n\r\nSTOP after V1.\r\nDo not implement automatic iteration yet.",
+                      "status":  "implementing",
+                      "dependencies":  [
+
+                                       ],
+                      "baseCommit":  "e9c8ba94eff4b186f45eecdf2e8a0b5caf309495",
+                      "executionClass":  "engineer_normal",
+                      "executor":  "engineer_normal",
+                      "attempt":  1,
+                      "maxAttempts":  3,
+                      "risk":  "normal",
+                      "acceptanceCriteria":  [
+
+                                             ],
+                      "verification":  {
+                                           "required":  [
+
+                                                        ],
+                                           "outcomes":  [
+
+                                                        ]
+                                       },
+                      "reviewRequested":  false,
+                      "executionClassOverride":  "engineer_normal",
+                      "worktree":  null,
+                      "failureSignatures":  [
+
+                                            ],
+                      "codexCalls":  0,
+                      "completionAuthority":  "controller",
+                      "createdAtUtc":  "2026-09-03T10:31:43.4674750Z",
+                      "updatedAtUtc":  "2026-09-03T10:31:48.6663256Z",
                       "completedAtUtc":  null
                   }
               ]

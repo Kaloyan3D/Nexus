@@ -26,6 +26,10 @@
         "fallback": {
           "model": "deepseek-v4-flash",
           "reasoning": "max"
+        },
+        "visualReviewer": {
+          "model": "deepseek-v4-flash-vision-exp",
+          "reasoning": "high"
         }
       }
     },
@@ -53,6 +57,10 @@
         "fallback": {
           "model": "glm-5.3",
           "reasoning": "max"
+        },
+        "visualReviewer": {
+          "model": "deepseek-v4-flash-vision-exp",
+          "reasoning": "high"
         }
       }
     }
