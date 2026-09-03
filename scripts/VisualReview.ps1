@@ -74,7 +74,19 @@ No source edits, no code patches, no diffs - design critique only.
 '@
 
 function Write-AihVisualFailure {
-    param([string]$ErrorKind,[string]$Message,[string]$TaskId,[string]$TaskInstanceId,$Violations=$null,$Iteration=$null)
+    # Terminal failure envelope. Telemetry terminology (audit V2): a logical
+    # invocation is one visualReviewInvocations entry; the transport owns ALL
+    # provider HTTP attempts (providerTransportAttempts); only a validated
+    # structured result counts in successfulStructuredReviews. Failures write
+    # modelCalls=0 - never a successful review dressed up as a model call.
+    param([string]$ErrorKind,[string]$Message,[string]$TaskId,[string]$TaskInstanceId,$Violations=$null,$Iteration=$null,[int]$ProviderTransportAttempts=0)
+    $telModel=$null; $telProvider=$null
+    if(Test-Path variable:target){ if($null -ne $target){ $telModel=[string]$target.Model; $telProvider=[string]$target.Provider } }
+    Write-AihTaskTelemetry $workspacePath $TaskId @{
+        model=$telModel; provider=$telProvider; modelCalls=0
+        visualReviewInvocations=1; providerTransportAttempts=[int]$ProviderTransportAttempts; successfulStructuredReviews=0
+        finalResult=[string]$ErrorKind
+    } -TaskInstanceId $TaskInstanceId -Capability 'visual-review' -Role 'visualReviewer' -Trigger ([string]$Trigger) -VisualIteration ([int]$VisualIteration) | Out-Null
     $failure=[ordered]@{
         ok=$false; kind='visual-review-failed'; errorKind=$ErrorKind; error=$Message
         taskId=$TaskId; taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId}
@@ -495,7 +507,7 @@ try{
             $message=[string](Get-AihPropertyValue $outcome 'error' 'the visual transport failed without a structured error')
             $diagnostic=[ordered]@{schemaVersion=1;kind='visual-review-transport-error';taskId=$TaskId;taskInstanceId=$effectiveInstanceId;iteration=$iteration.Iteration;provider=$target.Provider;model=$target.Model;errorKind=$errorKind;error=($message -replace '(?i)bearer\s+[a-z0-9._\-]+','bearer [REDACTED]');attemptCount=$attemptCount;attempts=$attempts;timestampUtc=[DateTime]::UtcNow.ToString('o')}
             Write-AihAtomicJson -Path (Join-Path $iteration.Path 'transport-error.json') -Value $diagnostic
-            Write-AihVisualFailure -ErrorKind $errorKind -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message $message -Iteration $iteration.Iteration
+            Write-AihVisualFailure -ErrorKind $errorKind -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message $message -Iteration $iteration.Iteration -ProviderTransportAttempts $attemptCount
         }
         # 9. validate the strict result contract (PS re-parses the content: the
         #    controller plane is the single schema authority)
@@ -510,7 +522,7 @@ try{
         if(-not$validated.valid){
             $diagnostic=[ordered]@{schemaVersion=1;kind='visual-review-invalid-output';taskId=$TaskId;taskInstanceId=$effectiveInstanceId;iteration=$iteration.Iteration;provider=$target.Provider;model=$target.Model;reasons=@($validated.reasons);contentPreview=$content.Substring(0,[Math]::Min(800,$content.Length));attemptCount=$attemptCount;attempts=$attempts;timestampUtc=[DateTime]::UtcNow.ToString('o')}
             Write-AihAtomicJson -Path (Join-Path $iteration.Path 'transport-error.json') -Value $diagnostic
-            Write-AihVisualFailure -ErrorKind 'visual-review-schema-invalid' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message ('The visual review output violated the strict result contract: '+(@($validated.reasons)-join '; ')) -Violations @($validated.reasons) -Iteration $iteration.Iteration
+            Write-AihVisualFailure -ErrorKind 'visual-review-schema-invalid' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message ('The visual review output violated the strict result contract: '+(@($validated.reasons)-join '; ')) -Violations @($validated.reasons) -Iteration $iteration.Iteration -ProviderTransportAttempts $attemptCount
         }
 
         # 10. persist the validated result with its authority envelope
@@ -538,6 +550,7 @@ try{
         }
         $telemetry=Write-AihTaskTelemetry $workspacePath $TaskId @{
             model=$target.Model; provider=$target.Provider; modelCalls=1
+            visualReviewInvocations=1; providerTransportAttempts=[int]$attemptCount; successfulStructuredReviews=1
             usageAvailable=$usageAvailable; inputTokens=$inputTokens; outputTokens=$outputTokens
             finalResult=[string]$validated.result.verdict
         } -TaskInstanceId $effectiveInstanceId -Capability 'visual-review' -Role 'visualReviewer' -Trigger ([string]$Trigger) -VisualIteration $VisualIteration

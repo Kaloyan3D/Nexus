@@ -206,6 +206,30 @@ Failures are structured JSON on stdout with exit code 3 (CLI) and are
 surfaced as controller messages by the bridge. V1.1 adds exactly one bounded
 retry for transient transport failures (see Transport discipline above).
 
+### Retry ownership (hard invariant)
+
+`Invoke-VisualReview.mjs` is the **only** retry owner: one logical visual-review
+invocation performs at most **2 provider HTTP attempts** (the single bounded
+transient retry above). The V2 controller never re-invokes the review service
+after the transport has exhausted its bounded retry — a transport-exhausted
+invocation (`visual-review-empty-content`, `visual-review-timeout`,
+`visual-review-transport-error`, `visual-review-provider-response-shape`,
+non-transient `visual-review-provider-error`) is terminal for that invocation:
+the loop emits one structured failure, marks the visual status `unavailable`
+with the reason, and does not burn the iteration. A later **explicit**
+execution/resume may start a NEW logical invocation, which is a distinct
+operation — never hidden retry multiplication.
+
+### Telemetry terminology (per visual-review invocation)
+
+    visualReviewInvocations      # 1 per logical invocation of the service
+    providerTransportAttempts    # provider HTTP attempts the transport made (≤2)
+    successfulStructuredReviews  # 1 only when a validated structured result exists
+
+Failed invocations write telemetry with `successfulStructuredReviews: 0` and
+`modelCalls: 0` — a successful review is never dressed up as a bare
+`modelCalls` count.
+
 ## Testing
 
 - `tests/VisualReview.Tests.ps1` — model registry vision capability, role
@@ -254,6 +278,7 @@ identity:
     iteration (1-based) · maxIterations (3) · latestVerdict · latestScore
     humanAcceptance:false (never auto-set) · trigger · repairPending
     repairBaselineAttempt · lastVerificationAttempt · history[] · manualReviews[]
+    visualPreflight (deterministic preflight result; see below)
 
 The iteration counter advances **only** on a validated review — capture
 failures, provider failures, and schema failures never burn budget. The
@@ -270,6 +295,34 @@ text enumerates the ids explicitly, and without a previous result the
 contract is not applied (manual reviews are unaffected). The loop
 resolves the previous result to the structured `result.json` FILE inside
 the iteration directory on both the loop and the service side.
+
+### Visual Preflight != Visual Review (complementary capabilities)
+
+Every automatic loop iteration runs two distinct gates in order:
+
+**visualPreflight** — deterministic, geometry/token/pixel assertions only
+(`Get-AihVisualPreflight` in `scripts/VisualLoop.ps1`; result persisted to
+`preflight.json` and `state.visualPreflight`): PNG magic, IHDR geometry
+(200–8192 px per side, truncated headers fail), pixel-variance sampling
+(a near-uniform image fails), the capture budget, and a question/token
+budget estimate. It makes **no provider call**, may PASS independently,
+and a preflight PASS is **never** a visual-review PASS — a required visual
+task must not become `VISUAL_REVIEW_PASS` from preflight alone. The
+`-Action preflight` surface runs capture + preflight only (no reviewer
+call, no iteration burn).
+
+**visualReview** — the real multimodal gate: capability `visual-review`,
+role `visualReviewer`, resolved strictly as role → engineering-profile
+binding → model registry (`supportsVision: true`) → provider, and executed
+by the same controller-owned `VisualReview.ps1` service the manual
+`/visual-review` command uses. It returns the structured PASS/REVISE/BLOCK
+result. Automatic V2 **never** searches primaryEngineer, deepEngineer,
+reviewer, solver, fallback, or arbitrary delegation/workflow model
+candidates for a vision model; if the visualReviewer cannot be invoked
+(role unbound, target unresolved, not vision-capable, provider/key
+unresolved, transport down, capture or preflight failure) the visual
+status becomes `unavailable` with the recorded reason — the loop never
+fabricates or infers a visual-review PASS.
 
 ### Automatic loop mechanics
 
