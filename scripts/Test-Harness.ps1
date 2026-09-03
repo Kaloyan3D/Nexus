@@ -37,6 +37,7 @@ $suites = @(
     [ordered]@{ name='Intelligence.CodeIntelligence'; script='tests\Intelligence.CodeIntelligence.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='Intelligence.CodeScale'; script='tests\Intelligence.CodeScale.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='AihController'; script='tests\AihController.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='VisualControllerLifecycle'; script='tests\VisualControllerLifecycle.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='VisualReviewBridge'; script='tests\VisualReviewBridge.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='VisualStructuredOutput'; script='tests\VisualStructuredOutput.Tests.mjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='NexusSkillsRuntime'; script='tests\NexusSkills.Runtime.Tests.cjs'; executable=$layout.Node; kind='node' },

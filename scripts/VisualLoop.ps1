@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
- [Parameter(Mandatory=$true)][string]$Workspace,
+ [string]$Workspace=(Get-Location).Path,
  [Parameter(Mandatory=$true)][string]$TaskId,
  [string]$TaskInstanceId,
  [ValidateSet('detect','iterate','status','record-manual','preflight')][string]$Action='iterate',
@@ -11,7 +11,8 @@ param(
  [string]$AdbPath,
  [string]$InstallRoot,
  [string]$Trigger='automatic',
- [string]$ResultPath
+ [string]$ResultPath,
+ [string]$PayloadFile
 )
 # ── Phase V2: Visual Loop Service (controller-owned automatic verification) ──
 # Visual Review is an ORTHOGONAL CAPABILITY - never a new execution class,
@@ -28,6 +29,17 @@ param(
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 if([string]::IsNullOrWhiteSpace($InstallRoot)){$InstallRoot=Split-Path -Parent $PSScriptRoot}
 $InstallRoot=[System.IO.Path]::GetFullPath($InstallRoot)
+
+# The GUI controller passes workspace/identity through the same UTF-8 payload
+# boundary as every other controller CLI. VisualLoop previously lacked this
+# contract, so automatic bridge invocations failed during parameter binding
+# while standalone calls with -Workspace appeared healthy.
+if($PayloadFile){
+    if(-not(Test-Path -LiteralPath $PayloadFile)){throw "Payload file not found: $PayloadFile"}
+    $__aihPayload=Get-Content -Raw -Encoding UTF8 -LiteralPath $PayloadFile|ConvertFrom-Json
+    if($null-ne$__aihPayload.PSObject.Properties['Workspace']){$Workspace=[string]$__aihPayload.Workspace}
+    if($null-ne$__aihPayload.PSObject.Properties['TaskInstanceId']){$TaskInstanceId=[string]$__aihPayload.TaskInstanceId}
+}
 . (Join-Path $PSScriptRoot 'Common.ps1')
 . (Join-Path $PSScriptRoot 'Routing.ps1')
 . (Join-Path $PSScriptRoot 'TaskController.ps1')
@@ -51,7 +63,8 @@ $script:AihVisualReviewerUnavailableKinds=@(
     'visual-review-empty-content',
     'visual-review-timeout',
     'visual-review-transport-error',
-    'visual-review-provider-response-shape'
+    'visual-review-provider-response-shape',
+    'visual-review-service-failed'
 )
 function Add-AihVisualStateReason {
     # Append a reason to the state reasons list (deduplicated, bounded).
