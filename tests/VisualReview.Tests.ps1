@@ -56,11 +56,12 @@ llm-pi-ai:
     [IO.File]::WriteAllBytes($testPng,$pngBytes)
 
     function Invoke-AihVisual {
-        param([string[]]$Screenshots,[switch]$Execute,[string]$MockResponseFile)
+        param([string[]]$Screenshots,[switch]$Execute,[string]$MockResponseFile,[string]$PreviousResultPath)
         $arguments=@('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$visualReviewScript,'-InstallRoot',$fixture,'-Workspace',$workspace,'-TaskId',$script:taskId,'-Question','review the home screen')
         foreach($shot in @($Screenshots)){$arguments+=@('-Screenshots',$shot)}
         if($Execute){$arguments+='-Execute'}
         if($MockResponseFile){$arguments+=@('-MockResponseFile',$MockResponseFile)}
+        if($PreviousResultPath){$arguments+=@('-PreviousResultPath',$PreviousResultPath)}
         $output=& 'powershell.exe' $arguments 2>&1|ForEach-Object{[string]$_}
         [pscustomobject]@{exitCode=$LASTEXITCODE;text=($output-join [Environment]::NewLine)}
     }
@@ -189,6 +190,52 @@ llm-pi-ai:
     $garbageIterationDir=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$garbageJson.iteration)
     $garbageDoc=Get-Content (Join-Path $garbageIterationDir 'transport-error.json') -Raw|ConvertFrom-Json
     Assert-Aih ([int]$garbageDoc.attemptCount -eq 1) '8: a deterministic schema failure never burns a second provider call'
+
+    # ── 8b. STRUCTURED OUTPUT CONTRACT (V1.1 hardening) ──────────────────────
+    # Provider constrained output (response_format json_object) does NOT
+    # replace Nexus validation: prose, arrays, and schema-invalid objects
+    # must still fail closed; markdown-fenced JSON stays parseable.
+    $arrayMock=Join-Path $mockDir 'array.json'
+    @{status=200;body=@{model='deepseek-v4-flash-vision-exp';choices=@(@{message=@{content='[{"verdict":"PASS"}]'}})}}|ConvertTo-Json -Depth 8|Set-Content -Path $arrayMock -Encoding UTF8
+    $arrayRun=Invoke-AihVisual -Screenshots @($testPng) -Execute -MockResponseFile $arrayMock
+    $arrayJson=$arrayRun.text|ConvertFrom-Json
+    Assert-Aih ($arrayRun.exitCode -eq 3 -and $arrayJson.errorKind -eq 'visual-review-schema-invalid') '8b: a JSON array instead of an object fails closed'
+    Assert-Aih ((@($arrayJson.violations)|Where-Object{$_-match'not a JSON object'}|Measure-Object).Count -ge 1) '8b: the rejection names the array-vs-object violation'
+    $proseMock=Join-Path $mockDir 'prose.json'
+    @{status=200;body=@{model='deepseek-v4-flash-vision-exp';choices=@(@{message=@{content='Here is the review: the layout looks good overall.'}})}}|ConvertTo-Json -Depth 8|Set-Content -Path $proseMock -Encoding UTF8
+    $proseRun=Invoke-AihVisual -Screenshots @($testPng) -Execute -MockResponseFile $proseMock
+    $proseJson=$proseRun.text|ConvertFrom-Json
+    Assert-Aih ($proseRun.exitCode -eq 3 -and $proseJson.errorKind -eq 'visual-review-schema-invalid') '8b: prose instead of JSON fails closed (never accepted)'
+
+    # ── 8c. PREVIOUS-FINDING COVERAGE CONTRACT (V2) ───────────────────────────
+    # When a previous result is packed, previousReview must classify EVERY
+    # previous finding id; omissions and invented ids fail closed.
+    $previousResultFile=Join-Path $mockDir 'previous-result.json'
+    @{result=@{verdict='REVISE';score=6;findings=@(@{id='P1';severity='medium';category='c';area='a';observation='o';whyItMatters='w';recommendation='r';confidence='medium'},@{id='P2';severity='low';category='c';area='a';observation='o';whyItMatters='w';recommendation='r';confidence='low'})}}|ConvertTo-Json -Depth 8|Set-Content -Path $previousResultFile -Encoding UTF8
+    $dims=@{hierarchy=8;spacing=8;density=8;typography=8;alignment=8;colorDiscipline=8;interactionClarity=8;brandFidelity=8;platformQuality=8}
+    $findingOne=@(@{id='N1';severity='low';category='c';area='a';observation='o';whyItMatters='w';recommendation='r';confidence='low'})
+    $missingMock=Join-Path $mockDir 'cov-missing.json'
+    @{status=200;body=@{model='deepseek-v4-flash-vision-exp';choices=@(@{message=@{content=(@{verdict='REVISE';score=7;dimensions=$dims;findings=$findingOne;strengths=@('ok');summary='s'}|ConvertTo-Json -Depth 8)}})}}|ConvertTo-Json -Depth 8|Set-Content -Path $missingMock -Encoding UTF8
+    $missingRun=Invoke-AihVisual -Screenshots @($testPng) -Execute -MockResponseFile $missingMock -PreviousResultPath $previousResultFile
+    $missingJson=$missingRun.text|ConvertFrom-Json
+    Assert-Aih ($missingRun.exitCode -eq 3 -and $missingJson.errorKind -eq 'visual-review-schema-invalid') '8c: omitted previousReview classifications fail closed'
+    Assert-Aih ((@($missingJson.violations)|Where-Object{$_-match"missing a classification for previous finding id 'P1'"}|Measure-Object).Count -ge 1) '8c: the rejection names the missing previous finding id'
+    $coveredReview=@{verdict='REVISE';score=7;dimensions=$dims;findings=$findingOne;previousReview=@(@{id='P1';status='unchanged';note='same' },@{id='P2';status='improved';note='better' });strengths=@('ok');summary='s'}
+    $coveredMock=Join-Path $mockDir 'cov-covered.json'
+    @{status=200;body=@{model='deepseek-v4-flash-vision-exp';choices=@(@{message=@{content=($coveredReview|ConvertTo-Json -Depth 8)}})}}|ConvertTo-Json -Depth 8|Set-Content -Path $coveredMock -Encoding UTF8
+    $coveredRun=Invoke-AihVisual -Screenshots @($testPng) -Execute -MockResponseFile $coveredMock -PreviousResultPath $previousResultFile
+    Assert-Aih ($coveredRun.exitCode -eq 0) '8c: full previous finding coverage is accepted'
+    $inventedMock=Join-Path $mockDir 'cov-invented.json'
+    $inventedReview=@{verdict='REVISE';score=7;dimensions=$dims;findings=$findingOne;previousReview=@(@{id='P1';status='unchanged';note='same' },@{id='PX';status='resolved';note='made up' });strengths=@('ok');summary='s'}
+    @{status=200;body=@{model='deepseek-v4-flash-vision-exp';choices=@(@{message=@{content=($inventedReview|ConvertTo-Json -Depth 8)}})}}|ConvertTo-Json -Depth 8|Set-Content -Path $inventedMock -Encoding UTF8
+    $inventedRun=Invoke-AihVisual -Screenshots @($testPng) -Execute -MockResponseFile $inventedMock -PreviousResultPath $previousResultFile
+    $inventedJson=$inventedRun.text|ConvertFrom-Json
+    Assert-Aih ($inventedRun.exitCode -eq 3 -and $inventedJson.errorKind -eq 'visual-review-schema-invalid') '8c: an invented previous finding id fails closed'
+    $manualOkMock=Join-Path $mockDir 'cov-manual-ok.json'
+    $manualReview=@{verdict='PASS';score=9;dimensions=$dims;findings=@();previousReview=@(@{id='PX';status='unchanged';note='no previous result packed' });strengths=@('ok');summary='s'}
+    @{status=200;body=@{model='deepseek-v4-flash-vision-exp';choices=@(@{message=@{content=($manualReview|ConvertTo-Json -Depth 8)}})}}|ConvertTo-Json -Depth 8|Set-Content -Path $manualOkMock -Encoding UTF8
+    $manualOkRun=Invoke-AihVisual -Screenshots @($testPng) -Execute -MockResponseFile $manualOkMock
+    Assert-Aih ($manualOkRun.exitCode -eq 0) '8c: without a previous result the coverage contract is not applied'
 
     # ── 9. FORBIDDEN OUTPUT KEYS (no source edits / code patches) ─────────────
     $patchMock=Join-Path $mockDir 'patch.json'

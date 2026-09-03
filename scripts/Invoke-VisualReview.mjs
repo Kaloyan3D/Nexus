@@ -261,6 +261,15 @@ export async function runTransport(request) {
     contentParts.push({ type: 'image_url', image_url: { url: buildDataUrl(buffer, mediaType) } })
   }
 
+  // V1.1 hardening: provider-level constrained structured output. The
+  // OpenAI-compatible chat-completions field is used by default; a request
+  // may pass an explicit responseFormat object (e.g. json_schema through a
+  // compatible API) which is forwarded verbatim - the controller never
+  // branches on vendor. 'none' opts out. Provider-level structure NEVER
+  // replaces the strict Nexus schema validation downstream.
+  let responseFormat = { type: 'json_object' }
+  if (request.responseFormat === 'none') responseFormat = undefined
+  else if (request.responseFormat && typeof request.responseFormat === 'object') responseFormat = request.responseFormat
   const transportBody = {
     model: String(request.model),
     messages: [
@@ -268,6 +277,10 @@ export async function runTransport(request) {
       { role: 'user', content: contentParts },
     ],
     stream: false,
+  }
+  if (responseFormat) transportBody.response_format = responseFormat
+  if (responseFormat && responseFormat.type === 'json_object') {
+    transportBody.messages[1].content[0].text = String(request.userText) + '\n\nRespond with a single JSON object only - no prose, no Markdown fences, no code blocks.'
   }
   if (Number.isFinite(Number(request.maxOutputTokens)) && Number(request.maxOutputTokens) > 0) {
     transportBody.max_tokens = Number(request.maxOutputTokens)

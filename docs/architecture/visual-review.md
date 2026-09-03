@@ -222,3 +222,127 @@ retry for transient transport failures (see Transport discipline above).
 
 The real transport path (provider HTTP) is exercised only by the manual
 smoke test; automated tests never reach the network.
+
+## Phase V2 — automatic visual verification and repair loop
+
+For significant UI work the controller runs the whole visual pipeline
+**automatically** — the engineering session never types `/visual-review`:
+
+    IMPLEMENT → deterministic verification → runtime capture → visual review
+    → deterministic adjudication → controller verdict → repair handoff
+    → re-verification → recapture → re-review → PASS | exhausted | unavailable
+
+### Visual Requirement Detector (deterministic)
+
+`scripts/VisualRequirement.ps1` classifies every task as
+`none | recommended | required` from deterministic evidence only — never
+LLM keyword guessing: task changed paths/extensions and diff content
+classification, project type, skills, and project policy. Evidence is
+persisted (`reasons[]`, `signals`) to `runs/<TASK>/visual/detection.json`.
+A project `.ai-harness/visual-policy.json` overrides the generic rules
+(OpenRank marks significant UI REQUIRED). A skill containing the marker
+"Significant UI work remains UNVERIFIED until it has been inspected on an
+emulator or device" elevates `recommended` to `required` when a visual
+surface is touched.
+
+### Visual state (first-class controller state)
+
+`runs/<TASK>/visual/state.json` — separate from engineering attempt
+identity:
+
+    requirement · required · status pending|reviewing|revise|pass|exhausted|unavailable
+    iteration (1-based) · maxIterations (3) · latestVerdict · latestScore
+    humanAcceptance:false (never auto-set) · trigger · repairPending
+    repairBaselineAttempt · lastVerificationAttempt · history[] · manualReviews[]
+
+The iteration counter advances **only** on a validated review — capture
+failures, provider failures, and schema failures never burn budget. The
+counter never exceeds 3; iteration 1 is a composition pass, iteration 2
+refinement (previous screenshots + previous findings travel in the packet;
+the reviewer classifies each as resolved|improved|unchanged|regressed|
+not-applicable), iteration 3 polish/verify.
+
+**Previous-finding coverage contract (hard, deterministic).** When a
+previous result is packed, `previousReview` MUST contain exactly one
+entry per previous finding id. Omissions and invented ids fail closed
+(`visual-review-schema-invalid`, violation names the id); the request
+text enumerates the ids explicitly, and without a previous result the
+contract is not applied (manual reviews are unaffected). The loop
+resolves the previous result to the structured `result.json` FILE inside
+the iteration directory on both the loop and the service side.
+
+### Automatic loop mechanics
+
+- The hook lives in the bridge completion tail (`runCompletionTail`): after a
+  PASSED deterministic `/verify` the controller invokes `VisualLoop.ps1 -Action iterate`.
+- Runtime capture reuses `Capture-VisualEvidence.ps1` (viewport mode; one
+  adb target); a capture failure sets status `unavailable` — never a
+  fabricated PASS.
+- Scenario contract: `.ai-harness/visual-scenarios.json`
+  `{id, platform, captures:[{name, mode:'viewport'|'file'}]}`, max 5
+  screenshots per iteration (budget raised 4→5); previous screenshots
+  travel as references (max 4).
+- The review service is invoked with `-Trigger automatic -VisualIteration N`;
+  manual `/visual-review` stays `-Trigger manual` and its results never
+  advance the automatic iteration (state.history is automatic-only;
+  manualReviews records the operator run).
+- **Re-verification gate**: after a repair handoff the loop fails closed
+  (`visual-review-reverification-required`) until a FRESH deterministic
+  verification with a newer evidence attempt exists — the ordering
+  repair → /verify → capture → review is structural.
+
+### Adjudication (the reviewer is advisory)
+
+`Test-AihVisualFindingAdjudication` deterministically rejects or downgrades
+findings that conflict with frozen project invariants (e.g. "add a 7th
+strength row" vs exactly-6-groups), debug/emulator tooling (Expo dev-client
+gear), invented elements, or out-of-scope semantics. Verdicts are
+`accepted | partially-accepted | rejected` with a persisted reason
+(`adjudication.json`).
+
+### Controller verdict policy
+
+BLOCK on reviewer BLOCK or any accepted blocker; REVISE on reviewer REVISE
+or any accepted high finding; PASS only on reviewer PASS with no accepted
+blocker/high findings. Conservative defaults; thresholds are policy-
+overridable, no project-specific numbers are hard-coded.
+
+### Repair handoff
+
+On REVISE the loop posts a compact structured packet (HIGH/MEDIUM/IGNORED
+sections with Actions) as a `controller-visual-repair` message. The visual
+reviewer never edits files; repairs happen in the engineering session.
+
+### Convergence
+
+- reviewer/controller PASS → visual status `pass` → completion allowed with
+  `VISUAL_REVIEW_PASS · HUMAN_REVIEW_PENDING` in the controller message.
+  Human acceptance stays external (V3); nothing is committed automatically.
+- 3 iterations without PASS → `exhausted`; capture/provider failure →
+  `unavailable`. Both block completion via the completion gate
+  (`Test-AihTaskCompletion` visual reason) and request operator attention.
+- A verification failure exits the loop into normal engineering failure
+  semantics.
+
+### Structured output (V1.1 hardening)
+
+The transport requests provider-level constrained output
+(`response_format: {"type":"json_object"}`) and the system/user prompt
+explicitly require a single JSON object. A request may pass an explicit
+responseFormat object (e.g. `json_schema` through a compatible API) that is
+forwarded verbatim — no vendor-specific controller branching. Provider-level
+constrained output does NOT replace Nexus validation:
+
+    provider constrained structured output → JSON parse →
+    Nexus strict allowlist/schema validation → accepted result
+
+Prose, arrays, markdown-wrapped JSON prose, and schema-invalid objects all
+fail closed; fenced JSON remains parseable as a tolerated secondary path.
+
+### Observability and telemetry
+
+Telemetry records `trigger`, `visualIteration`, `visualVerdict`,
+`visualScore`, `acceptedFindings`, `rejectedFindings` while `executionClass`
+stays the real task class. The Control Room task surface shows the visual
+requirement/status/iteration/verdict/score/accepted/rejected/trigger and the
+human-review-pending flag without overloading the routing badge.

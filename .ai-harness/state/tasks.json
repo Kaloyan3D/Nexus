@@ -769,7 +769,7 @@
                       "baseCommit":  "e9c8ba94eff4b186f45eecdf2e8a0b5caf309495",
                       "executionClass":  "engineer_normal",
                       "executor":  "engineer_normal",
-                      "attempt":  1,
+                      "attempt":  2,
                       "maxAttempts":  3,
                       "risk":  "normal",
                       "acceptanceCriteria":  [
@@ -787,12 +787,12 @@
                       "executionClassOverride":  "engineer_normal",
                       "worktree":  null,
                       "failureSignatures":  [
-
+                                                "18f2165cc292c4b98b4c89fdc28f8c2a"
                                             ],
                       "codexCalls":  0,
                       "completionAuthority":  "controller",
                       "createdAtUtc":  "2026-09-03T10:31:43.4674750Z",
-                      "updatedAtUtc":  "2026-09-03T10:31:48.6663256Z",
+                      "updatedAtUtc":  "2026-09-03T15:12:29.5492964Z",
                       "completedAtUtc":  null
                   }
               ]

@@ -241,6 +241,35 @@ function latestAttemptOfTask(records, taskId, taskInstanceId) {
   return latest
 }
 
+/**
+ * Phase V2: smallest truthful visual-state shape for the Control Room task
+ * surface. Visual Review is an orthogonal capability — this block is
+ * observability only and never feeds routing, the routing badge, or
+ * completion authority. humanAcceptance is displayed as the human-pending
+ * flag (always false here — human acceptance is external).
+ */
+function normalizeVisualState(record) {
+  if (!record || typeof record !== 'object') return null
+  const status = typeof record.status === 'string' ? record.status : null
+  const requirement = typeof record.requirement === 'string' ? record.requirement : null
+  const required = Boolean(record.required)
+  if (!status && !requirement && !required) return null
+  return {
+    required,
+    requirement,
+    status,
+    iteration: Number.isInteger(record.iteration) ? record.iteration : null,
+    maxIterations: Number.isInteger(record.maxIterations) ? record.maxIterations : null,
+    latestVerdict: typeof record.latestVerdict === 'string' ? record.latestVerdict : null,
+    latestScore: typeof record.latestScore === 'number' ? record.latestScore : null,
+    trigger: typeof record.trigger === 'string' ? record.trigger : null,
+    humanAcceptance: Boolean(record.humanAcceptance),
+    // human review pending = visual PASS achieved, external human acceptance still outstanding
+    humanReviewPending: Boolean(required && status === 'pass' && !record.humanAcceptance),
+    repairPending: Boolean(record.repairPending),
+  }
+}
+
 /** Smallest truthful attempt shape for the panel. */
 function normalizeAttemptRecord(record) {
   if (!record || typeof record !== 'object') return null
@@ -866,6 +895,7 @@ async function buildControllerSnapshot(options) {
   let git = null
   let attempt = null
   let gate = null
+  let visual = null
 
   if (binding) {
     const workspace = typeof binding.workspace === 'string' ? binding.workspace : null
@@ -906,6 +936,12 @@ async function buildControllerSnapshot(options) {
         const attemptsText = readJsonSafeText(path.join(workspace, '.ai-harness', 'runs', taskId, 'attempts.jsonl'), readFile)
         attempt = normalizeAttemptRecord(latestAttemptOfTask(attemptsOf(attemptsText), taskId, taskInstanceId))
       }
+      // Phase V2: first-class visual state (orthogonal capability — never an
+      // execution class). Read from the authoritative controller record only;
+      // degrades to null for non-visual tasks.
+      if (workspace) {
+        visual = normalizeVisualState(readJson(path.join(workspace, '.ai-harness', 'runs', taskId, 'visual', 'state.json'), readFile))
+      }
       const gatesText = readJsonSafeText(path.join(dataRoot, 'completion', 'gates.jsonl'), readFile)
       gate = normalizeGateRecord(currentGateOf(jsonLinesOf(gatesText), String(sessionId || ''), workspace || '', taskId, taskInstanceId))
     }
@@ -936,6 +972,7 @@ async function buildControllerSnapshot(options) {
     task: taskRecord,
     attempt,
     gate,
+    visual,
     preference: normalizePreference(defaultModel, modelNames),
     preferredProfile,
     composer,
