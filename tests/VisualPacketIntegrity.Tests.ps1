@@ -46,6 +46,10 @@ try{
     $duplicate=Test-AihVisualPacketIntegrity -Images $duplicateIntent -PacketDirectory $packetDir
     Assert-Aih (-not[bool]$duplicate.valid-and@($duplicate.violations|Where-Object{$_-match'duplicate intended image entry'}).Count-ge1) 'duplicate intended image entry fails packet integrity'
 
+    [IO.File]::WriteAllBytes([string]$records[0].storedPath,[byte[]](42,43,44,45))
+    $tampered=Test-AihVisualPacketIntegrity -Images $records -PacketDirectory $packetDir
+    Assert-Aih (-not[bool]$tampered.valid-and@($tampered.violations|Where-Object{$_-match'declared actual SHA.*recomputed'}).Count-ge1) 'packet-wide recheck detects bytes corrupted after materialization'
+
     Write-Host ('RESULT: '+$script:passed+' visual packet-integrity assertions passed.')
 }finally{
     if(Test-Path $fixture){Remove-Item -LiteralPath $fixture -Recurse -Force}
