@@ -1,6 +1,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Platform abstraction (OS detection, executable resolution, process spawn,
+# browser open, private-path permissions). Loaded first so every shared
+# helper below can rely on it. All OS-dependent decisions live in Platform.ps1.
+. (Join-Path $PSScriptRoot 'Platform.ps1')
+
 # JSON produced by these CLIs is consumed by the controller bridge (Node).
 # Windows PowerShell 5.1 otherwise writes stdout in the console codepage,
 # which mangles non-ASCII text (U+2192 becomes a raw 0x1A byte) and breaks
@@ -26,6 +31,15 @@ function Get-AihLayout {
     param([string]$InstallRoot)
 
     $root = Get-AihInstallRoot $InstallRoot
+    # The pinned Node distribution layout differs per platform: the Windows
+    # ZIP keeps node.exe/npm.cmd at the root, the Linux .tar.xz keeps the
+    # executable under bin/ and npm's CLI module under lib/node_modules/npm.
+    # npm is always invoked through node with npm-cli.js on Linux so the
+    # launcher's shebang never depends on PATH resolution.
+    $nodeRelative = Get-AihNodeRelativeExecutable
+    $runtimeNode = Join-Path (Join-Path $root 'runtime') 'node'
+    $npmRelative = if (Test-AihIsWindows) { 'npm.cmd' } else { Join-Path (Join-Path (Join-Path (Join-Path 'lib' 'node_modules') 'npm') 'bin') 'npm-cli.js' }
+    $runtimePwsh = Join-Path (Join-Path $root 'runtime') 'pwsh'
     [pscustomobject]@{
         Root = $root
         App = Join-Path $root 'app'
@@ -35,20 +49,21 @@ function Get-AihLayout {
         Logs = Join-Path $root 'logs'
         Runtime = Join-Path $root 'runtime'
         Scripts = Join-Path $root 'scripts'
-        Node = Join-Path $root 'runtime\node\node.exe'
-        Npm = Join-Path $root 'runtime\node\npm.cmd'
-        Dsh = Join-Path $root 'app\node_modules\@deepseek-ai\dsh\lib\bin.js'
-        OAuth = Join-Path $root 'app\node_modules\openai-oauth\dist\cli.js'
-        Credentials = Join-Path $root 'data\.credentials.yaml'
-        Settings = Join-Path $root 'data\settings.yaml'
-        State = Join-Path $root 'data\aih-state.json'
-        RoutingPolicy = Join-Path $root 'config\routing-policy.json'
-        ModelRegistry = Join-Path $root 'config\model-registry.json'
-        EngineeringProfiles = Join-Path $root 'config\engineering-profiles.json'
-        CustomEngineeringProfile = Join-Path $root 'data\custom-engineering-profile.json'
-        RoutingData = Join-Path $root 'data\routing'
-        CompletionData = Join-Path $root 'data\completion'
-        EvaluationData = Join-Path $root 'data\evaluation'
+        Node = Join-Path $runtimeNode $nodeRelative
+        Npm = Join-Path $runtimeNode $npmRelative
+        Pwsh = if (Test-AihIsWindows) { $null } else { Join-Path $runtimePwsh 'pwsh' }
+        Dsh = Join-Path $root 'app/node_modules/@deepseek-ai/dsh/lib/bin.js'
+        OAuth = Join-Path $root 'app/node_modules/openai-oauth/dist/cli.js'
+        Credentials = Join-Path $root 'data/.credentials.yaml'
+        Settings = Join-Path $root 'data/settings.yaml'
+        State = Join-Path $root 'data/aih-state.json'
+        RoutingPolicy = Join-Path $root 'config/routing-policy.json'
+        ModelRegistry = Join-Path $root 'config/model-registry.json'
+        EngineeringProfiles = Join-Path $root 'config/engineering-profiles.json'
+        CustomEngineeringProfile = Join-Path $root 'data/custom-engineering-profile.json'
+        RoutingData = Join-Path $root 'data/routing'
+        CompletionData = Join-Path $root 'data/completion'
+        EvaluationData = Join-Path $root 'data/evaluation'
     }
 }
 
@@ -136,7 +151,11 @@ function Get-AihVersions {
 
 function Get-AihCodexAuthFile {
     $codexHome = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
-        Join-Path $env:USERPROFILE '.codex'
+        # The Codex CLI stores auth under the user profile directory. Windows
+        # keeps USERPROFILE; other platforms use HOME (Codex itself resolves
+        # it the same way).
+        $userHome = if (Test-AihIsWindows) { $env:USERPROFILE } else { $env:HOME }
+        Join-Path $userHome '.codex'
     }
     else { [System.IO.Path]::GetFullPath($env:CODEX_HOME) }
     return Join-Path $codexHome 'auth.json'
@@ -179,25 +198,6 @@ function Get-AihDeepSeekKey {
         return $null
     }
     return $value
-}
-
-function Protect-AihPrivatePath {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return
-    }
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $item = Get-Item -LiteralPath $Path
-    if ($item.PSIsContainer) {
-        & icacls.exe $Path '/inheritance:r' "/grant:r" "${identity}:(OI)(CI)F" | Out-Null
-    }
-    else {
-        & icacls.exe $Path '/inheritance:r' "/grant:r" "${identity}:F" | Out-Null
-    }
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to restrict permissions on $Path"
-    }
 }
 
 function Wait-AihEndpoint {

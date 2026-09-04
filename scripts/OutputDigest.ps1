@@ -4,7 +4,7 @@ $ErrorActionPreference='Stop'
 
 function New-AihOutputDigest {
     param([string]$Workspace,[string]$TaskId,[ValidateSet('test','build','typecheck','lint','git','search','other')][string]$Kind,[AllowEmptyString()][string]$RawOutput,[int]$ExitCode=0,[int]$MaxCharacters=6000)
-    $root=Join-Path ([IO.Path]::GetFullPath($Workspace)) '.ai-harness\runs'
+    $root=Join-Path ([IO.Path]::GetFullPath($Workspace)) '.ai-harness/runs'
     $artifactDir=Join-Path (Join-Path $root $TaskId) 'artifacts'
     New-Item -ItemType Directory -Force -Path $artifactDir|Out-Null
     $artifactId='output-'+[guid]::NewGuid().ToString('N')

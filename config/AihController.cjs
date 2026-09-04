@@ -735,6 +735,19 @@ function apply(ctx) {
   const bindingsPath = path.join(dataRoot, 'routing', 'session-bindings.json')
   const tmpRoot = path.join(dataRoot, 'tmp')
   const scriptsRoot = path.join(installRoot, 'scripts')
+  // Platform-aware PowerShell host resolution (mirror of scripts/Platform.ps1
+  // Get-AihPowerShellHost): Windows keeps powershell.exe; POSIX prefers the
+  // AIH_PWSH_HOST override, then the setup.sh-pinned runtime/pwsh/pwsh, then a
+  // system pwsh on PATH.
+  const resolvePowerShellHost = (root) => {
+    if (process.platform === 'win32') return 'powershell.exe'
+    const override = process.env.AIH_PWSH_HOST
+    if (override) return override
+    const pinned = path.join(root, 'runtime', 'pwsh', 'pwsh')
+    try { fs.accessSync(pinned, fs.constants.X_OK); return pinned } catch { /* fall through */ }
+    return 'pwsh'
+  }
+  const pwshHost = resolvePowerShellHost(installRoot)
 
   const runCli = promisify(execFile)
   // Capture transport (TASK-0017): sandboxed environments may deny
@@ -860,7 +873,7 @@ function apply(ctx) {
     }
     try {
       const result = await spawnCaptured(
-        'powershell.exe',
+        pwshHost,
         ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, script), ...args],
         { timeout: CLI_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
       ).catch((error) => {
@@ -1224,7 +1237,7 @@ function apply(ctx) {
         requirementIds,
         commands: [{
           name: 'aih-verify-project',
-          executable: 'powershell.exe',
+          executable: pwshHost,
           argv: ['-File', path.join(scriptsRoot, 'Verify-Project.ps1'), '-Kind', 'all'],
           cwd: binding.workspace,
           timeoutMs: 600000,

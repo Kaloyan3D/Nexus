@@ -44,26 +44,42 @@ if (-not (Test-Path -LiteralPath $setupPath)) {
     throw "Setup script missing at $setupPath"
 }
 
+# TASK-0023: the post-provision composition (settings init, managed patch
+# sync, UI patchers, preset composition, data dirs, private-path protection)
+# moved into scripts/Complete-Install.ps1 so Windows and Linux installers run
+# the SAME single source of truth. Setup.ps1 must delegate to it and keep the
+# Windows-only provisioning (pinned Node zip, npm ci, PATH) local.
 $setupText = Get-Content -Raw -Encoding UTF8 -LiteralPath $setupPath
-$settingsInitIndex = $setupText.IndexOf("if (`$ResetManagedSettings -or -not (Test-Path -LiteralPath `$layout.Settings))")
-$managedPatchCopyIndex = $setupText.LastIndexOf("home.cordis.patch.yml")
-$modeInstallerIndex = $setupText.IndexOf("Patch-ControlRoomUi.ps1")
-$nexusPatchIndex = $setupText.IndexOf("Patch-NexusUi.ps1")
+if (-not $setupText.Contains('Complete-Install.ps1')) {
+    throw 'FAIL: Setup.ps1 must delegate the shared install composition to Complete-Install.ps1.'
+}
+if (-not $setupText.Contains('-ResetManagedSettings:$ResetManagedSettings')) {
+    throw 'FAIL: Setup.ps1 must forward -ResetManagedSettings to the shared composition.'
+}
+$completeInstallPath = Join-Path $InstallRoot 'scripts\Complete-Install.ps1'
+if (-not (Test-Path -LiteralPath $completeInstallPath)) {
+    throw "Shared install composition missing at $completeInstallPath"
+}
+$compositionText = Get-Content -Raw -Encoding UTF8 -LiteralPath $completeInstallPath
+$settingsInitIndex = $compositionText.IndexOf("if (`$ResetManagedSettings -or -not (Test-Path -LiteralPath `$layout.Settings))")
+$managedPatchCopyIndex = $compositionText.LastIndexOf("home.cordis.patch.yml")
+$modeInstallerIndex = $compositionText.IndexOf("Patch-ControlRoomUi.ps1")
+$nexusPatchIndex = $compositionText.IndexOf("Patch-NexusUi.ps1")
 
 if ($settingsInitIndex -lt 0) {
-    throw 'FAIL: Setup.ps1 no longer initializes data\settings.yaml.'
+    throw 'FAIL: the shared install composition no longer initializes data\settings.yaml.'
 }
 if ($managedPatchCopyIndex -lt 0) {
-    throw 'FAIL: Setup.ps1 no longer syncs the managed home.cordis.patch.yml into data.'
+    throw 'FAIL: the shared install composition no longer syncs the managed home.cordis.patch.yml into data.'
 }
 if ($modeInstallerIndex -lt 0) {
-    throw 'FAIL: Setup.ps1 no longer invokes the Nexus mode-selector compatibility installer.'
+    throw 'FAIL: the shared install composition no longer invokes the Nexus mode-selector compatibility installer.'
 }
 if ($nexusPatchIndex -lt 0) {
-    throw 'FAIL: Setup.ps1 no longer invokes Patch-NexusUi.ps1.'
+    throw 'FAIL: the shared install composition no longer invokes Patch-NexusUi.ps1.'
 }
 if ($settingsInitIndex -gt $modeInstallerIndex -or $settingsInitIndex -gt $nexusPatchIndex) {
-    throw 'FAIL: data\settings.yaml must exist before UI patchers run on a fresh repo-local install.'
+    throw 'FAIL: data\settings.yaml must exist before UI patchers run on a fresh install.'
 }
 if ($managedPatchCopyIndex -gt $modeInstallerIndex -or $managedPatchCopyIndex -gt $nexusPatchIndex) {
     throw 'FAIL: managed cordis.patch.yml must be synced before Nexus UI installers so upgrades from stale installs can migrate safely.'

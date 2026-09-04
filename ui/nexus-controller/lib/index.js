@@ -16,7 +16,7 @@
 // ever activates once the webServer service is available — and if the
 // service arrives AFTER this plugin starts (composition ordering), the
 // injection resolves then, instead of being lost to a one-time lookup.
-import { readFileSync, statSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs'
+import { readFileSync, statSync, writeFileSync, unlinkSync, mkdirSync, accessSync, constants } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
@@ -49,6 +49,17 @@ function apply(ctx) {
     if (!configuredRoot) throw new Error('Nexus install root is unavailable; launch through the repo-local aih entrypoint.')
     const installRoot = resolve(configuredRoot)
     const dataRoot = process.env.DSH_HOME ? resolve(process.env.DSH_HOME) : join(installRoot, 'data')
+    // Platform-aware PowerShell host (mirror of scripts/Platform.ps1
+    // Get-AihPowerShellHost): Windows keeps powershell.exe; POSIX prefers the
+    // AIH_PWSH_HOST override, the setup.sh-pinned runtime/pwsh/pwsh, then a
+    // system pwsh on PATH.
+    const pwshHost = (() => {
+      if (process.platform === 'win32') return 'powershell.exe'
+      if (process.env.AIH_PWSH_HOST) return process.env.AIH_PWSH_HOST
+      const pinned = join(installRoot, 'runtime', 'pwsh', 'pwsh')
+      try { accessSync(pinned, constants.X_OK); return pinned } catch { /* fall through */ }
+      return 'pwsh'
+    })()
     const settingsPath = join(dataRoot, 'settings.yaml')
     const statePath = join(dataRoot, 'aih-state.json')
 
@@ -325,7 +336,7 @@ function apply(ctx) {
 
     function execPowerShell(args) {
       return new Promise((resolvePromise) => {
-        execFile('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'Task.ps1'), ...args], { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
+        execFile(pwshHost, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'Task.ps1'), ...args], { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
           if (error) { resolvePromise(null); return }
           try { resolvePromise(JSON.parse((stdout || '').trim())) } catch { resolvePromise(null) }
         })
@@ -337,7 +348,7 @@ function apply(ctx) {
      *  never argv — identical to the Task.ps1 contract). */
     function execEngineeringProfile(args) {
       return new Promise((resolvePromise) => {
-        execFile('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'EngineeringProfile.ps1'), ...args], { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
+        execFile(pwshHost, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'EngineeringProfile.ps1'), ...args], { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
           if (error) { resolvePromise(null); return }
           try { resolvePromise(JSON.parse((stdout || '').trim())) } catch { resolvePromise(null) }
         })
@@ -537,7 +548,7 @@ function apply(ctx) {
         payloadPath = writePayloadFile({ path: workspacePath })
         const result = await new Promise((resolvePromise) => {
           execFile(
-            'powershell.exe',
+            pwshHost,
             ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'NexusWorkspace.ps1'), '-Action', 'resolve', '-PayloadFile', payloadPath],
             { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
             (error, stdout) => {

@@ -22,7 +22,7 @@ try{
     New-Item -ItemType Directory -Path (Join-Path $fixture 'scripts') -Force|Out-Null
     New-Item -ItemType Directory -Path (Join-Path $fixture 'data') -Force|Out-Null
     foreach($name in @('routing-policy.json','engineering-profiles.json','model-registry.json')){Copy-Item (Join-Path $liveLayout.Root ('config\'+$name)) (Join-Path $fixture ('config\'+$name))}
-    foreach($name in @('Common.ps1','Routing.ps1','TaskController.ps1','Telemetry.ps1','VisualPacketIntegrity.ps1','VisualReview.ps1','VisualLoop.ps1','VisualRequirement.ps1','RuntimeTarget.ps1','Invoke-VisualReview.mjs','Capture-VisualEvidence.ps1')){Copy-Item (Join-Path $liveLayout.Root ('scripts\'+$name)) (Join-Path $fixture ('scripts\'+$name))}
+    foreach($name in @('Platform.ps1','Common.ps1','Routing.ps1','TaskController.ps1','Telemetry.ps1','VisualPacketIntegrity.ps1','VisualReview.ps1','VisualLoop.ps1','VisualRequirement.ps1','RuntimeTarget.ps1','Invoke-VisualReview.mjs','Capture-VisualEvidence.ps1')){Copy-Item (Join-Path $liveLayout.Root ('scripts\'+$name)) (Join-Path $fixture ('scripts\'+$name))}
     @'
 engineering-profile: deepseek-codex
 llm-pi-ai:

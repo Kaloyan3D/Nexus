@@ -6,11 +6,14 @@ param(
 
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Split-Path -Parent $PSScriptRoot }
 $InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\TestHarness.Reporting.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/TestHarness.Reporting.ps1')
 
 $layout = Get-AihLayout $InstallRoot
-$powershell = 'powershell.exe'
+# Platform-aware PowerShell host: Windows keeps powershell.exe; POSIX uses the
+# setup.sh-pinned runtime/pwsh/pwsh (with the same fallback chain as
+# Get-AihPowerShellHost).
+$powershell = Get-AihPowerShellHost $InstallRoot
 $suites = @(
     [ordered]@{ name='SetupUpgrade'; script='tests\SetupUpgrade.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='Harness'; script='tests\Harness.Tests.ps1'; executable=$powershell; kind='powershell' },
@@ -42,7 +45,9 @@ $suites = @(
     [ordered]@{ name='VisualStructuredOutput'; script='tests\VisualStructuredOutput.Tests.mjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='NexusSkillsRuntime'; script='tests\NexusSkills.Runtime.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='EpistemicProductionHardening'; script='tests\EpistemicProductionHardening.Tests.cjs'; executable=$layout.Node; kind='node' },
-    [ordered]@{ name='AihControllerIdentity'; script='tests\AihControllerIdentity.Tests.cjs'; executable=$layout.Node; kind='node' }
+    [ordered]@{ name='AihControllerIdentity'; script='tests\AihControllerIdentity.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='PlatformSupport'; script='tests\PlatformSupport.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='AihControllerHost'; script='tests\AihControllerHost.Tests.cjs'; executable=$layout.Node; kind='node' }
 )
 
 $started = [DateTime]::UtcNow

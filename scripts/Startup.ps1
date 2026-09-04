@@ -131,6 +131,30 @@ function Wait-AihWebStartup {
     }
 }
 
+function Get-AihLinuxProcessStartEpoch {
+    # Linux: convert a procfs process start time (clock ticks since boot,
+    # /proc/<pid>/stat field 22) into a UTC DateTime using the kernel boot
+    # time (btime from /proc/stat) and the userspace clock tick rate.
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    $identity = Get-AihLinuxProcessIdentity -ProcessId $ProcessId
+    if ($null -eq $identity) { return $null }
+    $clkTck = 100  # USER_HZ default on Linux
+    try {
+        $conf = (& getconf CLK_TCK 2>$null)
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($conf)) { $clkTck = [long]$conf }
+    } catch { }
+    $btime = $null
+    try {
+        foreach ($line in [System.IO.File]::ReadAllLines('/proc/stat')) {
+            if ($line.StartsWith('btime ')) { $btime = [long]$line.Substring(6).Trim(); break }
+        }
+    } catch { return $null }
+    if ($null -eq $btime -or $clkTck -le 0) { return $null }
+    $seconds = [long][Math]::Floor($identity.StartTimeTicks / $clkTck)
+    return [DateTimeOffset]::FromUnixTimeSeconds($btime + $seconds).UtcDateTime
+}
+
 function Test-AihTrackedProcessIdentity {
     param(
         [Parameter(Mandatory = $true)]$Process,
@@ -140,11 +164,44 @@ function Test-AihTrackedProcessIdentity {
 
     try {
         if ([int]$Process.Id -ne [int]$State.Pid) { return $false }
-        if ([System.IO.Path]::GetFullPath($Process.Path) -ne [System.IO.Path]::GetFullPath($ExpectedExecutable)) { return $false }
         if ($null -eq $State.ProcessStartedAtUtc -or [string]::IsNullOrWhiteSpace([string]$State.ProcessStartedAtUtc)) { return $false }
         $expectedStart = ([datetime]$State.ProcessStartedAtUtc).ToUniversalTime()
-        $actualStart = $Process.StartTime.ToUniversalTime()
+        if (Test-AihIsWindows) {
+            if ([System.IO.Path]::GetFullPath($Process.Path) -ne [System.IO.Path]::GetFullPath($ExpectedExecutable)) { return $false }
+            $actualStart = $Process.StartTime.ToUniversalTime()
+            return [Math]::Abs(($actualStart - $expectedStart).TotalSeconds) -lt 2
+        }
+        # Linux: Get-Process does not reliably expose .Path for processes it
+        # did not spawn, so executable identity comes from /proc/<pid>/exe and
+        # start identity from /proc/<pid>/stat (+ btime). Guarantees stay the
+        # same: PID + exact executable + start-time match within tolerance.
+        $identity = Get-AihLinuxProcessIdentity -ProcessId $Process.Id
+        if ($null -eq $identity) { return $false }
+        if ($identity.Executable -ne [System.IO.Path]::GetFullPath($ExpectedExecutable)) { return $false }
+        $actualStart = Get-AihLinuxProcessStartEpoch -ProcessId $Process.Id
+        if ($null -eq $actualStart) { return $false }
         return [Math]::Abs(($actualStart - $expectedStart).TotalSeconds) -lt 2
     }
     catch { return $false }
+}
+
+function Stop-AihTrackedProcess {
+    # Platform-aware tracked-process stop for a process Nexus owns.
+    # Windows keeps the existing forceful termination unchanged. Linux sends
+    # SIGTERM first (clean shutdown for the DSH server and its children) and
+    # escalates to SIGKILL only when the process ignores it within the
+    # bounded wait. Never used for processes Nexus does not track: callers
+    # gate on Test-AihTrackedProcessIdentity first.
+    param(
+        [Parameter(Mandatory = $true)]$Process,
+        [int]$WaitMilliseconds = 10000
+    )
+
+    Stop-Process -Id $Process.Id -Force
+    if ($Process.WaitForExit($WaitMilliseconds)) { return $true }
+    if (-not (Test-AihIsWindows)) {
+        try { & kill -9 $Process.Id 2>$null } catch { }
+        return [bool]$Process.WaitForExit(5000)
+    }
+    return $false
 }

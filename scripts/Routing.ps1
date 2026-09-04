@@ -270,7 +270,7 @@ function Get-AihLegacyTier {param([string]$ExecutionClass)switch($ExecutionClass
 # created before instance identity existed (explicit compatibility path). The
 # third key component IS the instance when one is supplied, so an
 # instance-aware state file can never collide with a legacy taskId-only file.
-function Get-AihRoutingStatePath {param([string]$DataRoot,[string]$Workspace,[string]$TaskId,[string]$Preset='aih-engineering',[string]$TaskInstanceId)$identity=if(-not[string]::IsNullOrWhiteSpace($TaskInstanceId)){$TaskInstanceId}else{$TaskId};$bytes=[Text.Encoding]::UTF8.GetBytes(([IO.Path]::GetFullPath($Workspace).ToLowerInvariant()+"`n"+$Preset.ToLowerInvariant()+"`n"+$identity));$sha=[Security.Cryptography.SHA256]::Create();try{$name=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()+'.json'}finally{$sha.Dispose()};Join-Path (Join-Path $DataRoot 'states') $name}
+function Get-AihRoutingStatePath {param([string]$DataRoot,[string]$Workspace,[string]$TaskId,[string]$Preset='aih-engineering',[string]$TaskInstanceId)$identity=if(-not[string]::IsNullOrWhiteSpace($TaskInstanceId)){$TaskInstanceId}else{$TaskId};$workspacePath=[IO.Path]::GetFullPath($Workspace);$workspaceKey=if(Test-AihIsWindows){$workspacePath.ToLowerInvariant()}else{$workspacePath};$bytes=[Text.Encoding]::UTF8.GetBytes(($workspaceKey+"`n"+$Preset.ToLowerInvariant()+"`n"+$identity));$sha=[Security.Cryptography.SHA256]::Create();try{$name=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()+'.json'}finally{$sha.Dispose()};Join-Path (Join-Path $DataRoot 'states') $name}
 function Read-AihRoutingState {param([string]$Path)if(-not(Test-Path -LiteralPath $Path)){return $null};try{Get-Content -Raw -LiteralPath $Path|ConvertFrom-Json}catch{throw "Routing state is invalid: $Path"}}
 function Get-AihRoutingMutexName {param([string]$DataRoot)$bytes=[Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($DataRoot).ToLowerInvariant());$sha=[Security.Cryptography.SHA256]::Create();try{$suffix=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').Substring(0,24)}finally{$sha.Dispose()};"AIHarnessRouting-$suffix"}
 
@@ -300,7 +300,7 @@ function Invoke-AihRoutingDecision {
         # never route a different lifecycle generation that merely shares the
         # display task id. The guard runs only when an authoritative ledger
         # exists (standalone routing against a synthetic TaskId is unchanged).
-        if(-not[string]::IsNullOrWhiteSpace($TaskInstanceId)-and(Test-Path -LiteralPath (Join-Path $workspacePath '.ai-harness\state\tasks.json'))){
+        if(-not[string]::IsNullOrWhiteSpace($TaskInstanceId)-and(Test-Path -LiteralPath (Join-Path $workspacePath '.ai-harness/state/tasks.json'))){
             $identity=Test-AihTaskIdentity -Workspace $workspacePath -TaskId $TaskId -TaskInstanceId $TaskInstanceId
             if(-not [bool]$identity.exists){throw "Routing rejected: task was not found in the authoritative ledger: $TaskId"}
             if(-not [bool]$identity.instanceMatches){throw "Routing rejected: task $TaskId no longer holds the expected taskInstanceId '$TaskInstanceId' (generation mismatch)."}

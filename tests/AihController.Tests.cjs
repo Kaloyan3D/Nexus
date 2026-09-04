@@ -108,6 +108,29 @@ async function main() {
   // including the rejection shape (error.code/.stdout/.stderr/.signal).
   let runCliSeq = 0
   const runCli = async (file, args, opts) => {
+    if (process.platform !== 'win32') {
+      // POSIX: direct capture is safe there (the TASK-0017 anonymous-pipe
+      // EPERM boundary is a Windows-sandbox restriction, not a POSIX one).
+      // Keep the same result/failure shapes as the cmd.exe transport.
+      const direct = spawnSync(file, args, Object.assign({}, opts, { encoding: 'utf8' }))
+      const stdout = direct.stdout || ''
+      const stderr = direct.stderr || ''
+      if (direct.error) {
+        direct.error.stdout = stdout
+        direct.error.stderr = stderr
+        throw direct.error
+      }
+      if (direct.status !== 0) {
+        const failure = new Error('Command failed: ' + file)
+        failure.code = direct.status === null ? -1 : direct.status
+        failure.killed = direct.signal != null
+        failure.signal = direct.signal
+        failure.stdout = stdout
+        failure.stderr = stderr
+        throw failure
+      }
+      return { stdout, stderr }
+    }
     const seq = ++runCliSeq
     const token = process.pid + '-' + seq
     const outPath = path.join(os.tmpdir(), 'aih-cli-out-' + token + '.txt')

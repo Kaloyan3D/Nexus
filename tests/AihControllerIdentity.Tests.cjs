@@ -448,7 +448,15 @@ async function runBridgeEndToEnd() {
   fs.writeFileSync(path.join(fixture, 'src', 'huge.js'), 'x'.repeat(140000))
   fs.writeFileSync(path.join(fixture, 'package.json'), JSON.stringify({ private: true, scripts: { test: 'node -e "process.exit(0)"' } }))
   const previousHome = process.env.DSH_HOME
+  const previousInstallRoot = process.env.AIH_INSTALL_ROOT
   process.env.DSH_HOME = dataHome
+  // Hermetic fixture: pin AIH_INSTALL_ROOT to the fixture as well, or an
+  // ambient real-install value leaks into spawned controller CLIs (PowerShell
+  // resolves AIH_INSTALL_ROOT ahead of DSH_HOME for CLIs run without the DSH
+  // runtime) and sends them to the production data root. See the comment on
+  // resolveInstallRoot: when both env vars disagree, DSH_HOME must own the
+  // fixture, and the CLIs must not see a foreign AIH_INSTALL_ROOT at all.
+  process.env.AIH_INSTALL_ROOT = installRoot
   const bindingsPath = path.join(dataHome, 'routing', 'session-bindings.json')
   const ledgerPath = path.join(fixture, '.ai-harness', 'state', 'tasks.json')
   function boot() {
@@ -638,6 +646,8 @@ async function runBridgeEndToEnd() {
     console.log('PASS: aih-controller identity end-to-end (DoD scenario)')
   } finally {
     process.env.DSH_HOME = previousHome
+    if (previousInstallRoot === undefined) delete process.env.AIH_INSTALL_ROOT
+    else process.env.AIH_INSTALL_ROOT = previousInstallRoot
     fs.rmSync(installRoot, { recursive: true, force: true })
     fs.rmSync(fixture, { recursive: true, force: true })
   }

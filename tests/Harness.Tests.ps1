@@ -1,4 +1,5 @@
-[CmdletBinding()]param([string]$InstallRoot='C:\AI-Harness')
+[CmdletBinding()]param([string]$InstallRoot)
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
 Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
 . (Join-Path $InstallRoot 'scripts\Common.ps1')
 . (Join-Path $InstallRoot 'scripts\Routing.ps1')

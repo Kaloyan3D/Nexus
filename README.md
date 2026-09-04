@@ -4,7 +4,7 @@
 
 Nexus turns a coding-agent session into a controller-owned engineering workflow. The model implements; the controller owns routing, attempts, verification, completion, and operator gates. The UI observes authoritative state instead of guessing from chat history.
 
-> Windows-first. Built on the DeepSeek Harness (DSH) runtime without replacing its sessions, tools, permissions, Git integration, or web UI.
+> Runs natively on **Windows** and **Linux**. Built on the DeepSeek Harness (DSH) runtime without replacing its sessions, tools, permissions, Git integration, or web UI.
 
 ## Why Nexus
 
@@ -63,11 +63,23 @@ The Control Room does not manufacture events from polling deltas. It reads contr
 
 ### Requirements
 
+Windows:
+
 - Windows 10/11
 - PowerShell 5.1+
 - Internet access during installation
 - A DeepSeek API key
 - Optional ChatGPT/Codex authentication for independent review
+
+Linux (x86_64, user-scoped install, no sudo):
+
+- git, tar, xz, sha256sum, and curl or wget (distribution packages)
+- Internet access during installation
+- A DeepSeek API key
+- Node.js and PowerShell are provisioned pinned per-platform by the installer with SHA256 verification - no system-wide install needed
+
+See [docs/linux.md](docs/linux.md) for the full Linux guide (PATH setup for
+bash/fish, the XDG install layout, updates, uninstall, and troubleshooting).
 
 ### Install
 
@@ -75,6 +87,17 @@ The Control Room does not manufacture events from polling deltas. It reads contr
 git clone https://github.com/Kaloyan3D/Nexus.git
 cd Nexus
 powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
+aih-key
+aih-auth   # optional: independent Codex review
+```
+
+On Linux, install natively with the POSIX installer (same features, same
+controller, user-scoped under ~/.local/share/nexus):
+
+```sh
+git clone https://github.com/Kaloyan3D/Nexus.git
+cd Nexus
+./setup.sh
 aih-key
 aih-auth   # optional: independent Codex review
 ```
