@@ -26,7 +26,7 @@ try{
     Copy-Item (Join-Path $liveLayout.Root 'config\engineering-profiles.json') (Join-Path $fixture 'config\engineering-profiles.json')
     Copy-Item (Join-Path $liveLayout.Root 'config\model-registry.json') (Join-Path $fixture 'config\model-registry.json')
     New-Item -ItemType Directory -Path (Join-Path $fixture 'scripts') -Force|Out-Null
-    foreach($script in @('Common.ps1','Routing.ps1','TaskController.ps1','Telemetry.ps1','VisualReview.ps1','Invoke-VisualReview.mjs','CodexReview.ps1')){
+    foreach($script in @('Common.ps1','Routing.ps1','TaskController.ps1','Telemetry.ps1','VisualPacketIntegrity.ps1','VisualReview.ps1','Invoke-VisualReview.mjs','CodexReview.ps1')){
         Copy-Item (Join-Path $liveLayout.Root ('scripts\'+$script)) (Join-Path $fixture ('scripts\'+$script))
     }
     New-Item -ItemType Directory -Path (Join-Path $fixture 'data') -Force|Out-Null
@@ -56,12 +56,14 @@ llm-pi-ai:
     [IO.File]::WriteAllBytes($testPng,$pngBytes)
 
     function Invoke-AihVisual {
-        param([string[]]$Screenshots,[switch]$Execute,[string]$MockResponseFile,[string]$PreviousResultPath)
+        param([string[]]$Screenshots,[string[]]$References,[switch]$Execute,[string]$MockResponseFile,[string]$PreviousResultPath,[string]$PayloadFile)
         $arguments=@('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$visualReviewScript,'-InstallRoot',$fixture,'-Workspace',$workspace,'-TaskId',$script:taskId,'-Question','review the home screen')
         foreach($shot in @($Screenshots)){$arguments+=@('-Screenshots',$shot)}
+        foreach($reference in @($References)){$arguments+=@('-References',$reference)}
         if($Execute){$arguments+='-Execute'}
         if($MockResponseFile){$arguments+=@('-MockResponseFile',$MockResponseFile)}
         if($PreviousResultPath){$arguments+=@('-PreviousResultPath',$PreviousResultPath)}
+        if($PayloadFile){$arguments+=@('-PayloadFile',$PayloadFile)}
         $output=& 'powershell.exe' $arguments 2>&1|ForEach-Object{[string]$_}
         [pscustomobject]@{exitCode=$LASTEXITCODE;text=($output-join [Environment]::NewLine)}
     }
@@ -135,11 +137,27 @@ llm-pi-ai:
     Assert-Aih ($packetDoc.model.provider -eq 'deepseek-vision-direct' -and $packetDoc.model.supportsVision -eq $true) '6: packet records the resolved vision model/provider'
     Assert-Aih ($packetDoc.enforcement.readOnly -eq $true -and $packetDoc.enforcement.completionAuthority -eq $false) '6: packet enforcement carries read-only + no completion authority'
     Assert-Aih (@($packetDoc.images).Count -eq 1 -and [string]$packetDoc.images[0].sha256 -match'^[0-9a-f]{64}$') '6: evidence image copied with sha256'
-    $evidenceName=[IO.Path]::GetFileName($testPng)
-    Assert-Aih (Test-Path (Join-Path $iterationDir1 $evidenceName)) '6: the screenshot itself persists in the iteration directory'
+    Assert-Aih ((Test-Path -LiteralPath $packetDoc.images[0].storedPath)-and$packetDoc.images[0].fileName-match'^subject-iteration-00-01-shot-source-[0-9a-f]{12}\.png$') '6: the screenshot persists under its collision-proof packet-local name'
     $packetRun2=Invoke-AihVisual -Screenshots @($testPng)
     $packet2=$packetRun2.text|ConvertFrom-Json
     Assert-Aih ($packet2.iteration -eq 2) '6: next invocation allocates iteration-02 deterministically'
+
+    # ── 6b. PACKET EVIDENCE INTEGRITY FAILS BEFORE TRANSPORT ────────────────
+    $badShaPayload=Join-Path $workspace 'bad-sha-payload.json'
+    @{Workspace=$workspace;Question='must not reach provider';Screenshots=@($testPng);ScreenshotEvidence=@(@{path=$testPng;expectedSha256=('0'*64);sourceIteration=2;originalSourcePath=$testPng})}|ConvertTo-Json -Depth 8|Set-Content $badShaPayload -Encoding UTF8
+    $badShaRun=Invoke-AihVisual -Screenshots @() -Execute -PayloadFile $badShaPayload
+    $badShaJson=$badShaRun.text|ConvertFrom-Json
+    Assert-Aih ($badShaRun.exitCode-eq3-and$badShaJson.errorKind-eq'visual-review-packet-integrity-failed') '6b: declared/source SHA mismatch fails closed before provider invocation'
+    $badShaDir=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$badShaJson.iteration)
+    $badShaFailure=Get-Content (Join-Path $badShaDir 'packet-integrity-failure.json') -Raw|ConvertFrom-Json
+    $badShaTelemetry=Get-Content (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'telemetry.json') -Raw|ConvertFrom-Json
+    Assert-Aih ($badShaFailure.providerCalls-eq0-and$badShaTelemetry.modelCalls-eq0-and-not(Test-Path (Join-Path $badShaDir 'result.json'))) '6b: SHA integrity failure consumes zero provider calls and writes no review result'
+
+    $duplicatePayload=Join-Path $workspace 'duplicate-payload.json'
+    @{Workspace=$workspace;Question='must not reach provider';Screenshots=@($testPng,$testPng)}|ConvertTo-Json -Depth 8|Set-Content $duplicatePayload -Encoding UTF8
+    $duplicateRun=Invoke-AihVisual -Screenshots @() -Execute -PayloadFile $duplicatePayload
+    $duplicateJson=$duplicateRun.text|ConvertFrom-Json
+    Assert-Aih ($duplicateRun.exitCode-eq3-and$duplicateJson.errorKind-eq'visual-review-packet-integrity-failed'-and@($duplicateJson.violations|Where-Object{$_-match'duplicate intended image entry'}).Count-ge1) '6b: duplicate intended packet image fails closed before provider invocation'
 
     # ── 7. PROVIDER FAILURE (mocked transport) ────────────────────────────────
     $mockDir=Join-Path $fixture 'mock'

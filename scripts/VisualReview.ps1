@@ -34,6 +34,10 @@ $InstallRoot=[System.IO.Path]::GetFullPath($InstallRoot)
 . (Join-Path $PSScriptRoot 'Routing.ps1')
 . (Join-Path $PSScriptRoot 'TaskController.ps1')
 . (Join-Path $PSScriptRoot 'Telemetry.ps1')
+. (Join-Path $PSScriptRoot 'VisualPacketIntegrity.ps1')
+
+$ScreenshotEvidence=@()
+$ReferenceEvidence=@()
 
 # User-derived free text must not travel on the command line (ANSI codepage
 # mangling + unescaped control characters break the bridge's JSON parse).
@@ -46,6 +50,8 @@ if ($PayloadFile) {
     if ($null -ne $__aihPayload.PSObject.Properties['TaskInstanceId']) { $TaskInstanceId = [string]$__aihPayload.TaskInstanceId }
     if ($null -ne $__aihPayload.PSObject.Properties['Screenshots'] -and @($__aihPayload.Screenshots).Count -gt 0) { $Screenshots = @($__aihPayload.Screenshots | ForEach-Object { [string]$_ }) }
     if ($null -ne $__aihPayload.PSObject.Properties['References'] -and @($__aihPayload.References).Count -gt 0) { $References = @($__aihPayload.References | ForEach-Object { [string]$_ }) }
+    if ($null -ne $__aihPayload.PSObject.Properties['ScreenshotEvidence']) { $ScreenshotEvidence = @($__aihPayload.ScreenshotEvidence) }
+    if ($null -ne $__aihPayload.PSObject.Properties['ReferenceEvidence']) { $ReferenceEvidence = @($__aihPayload.ReferenceEvidence) }
     if ($null -ne $__aihPayload.PSObject.Properties['Invariants'] -and @($__aihPayload.Invariants).Count -gt 0) { $Invariants = @($__aihPayload.Invariants | ForEach-Object { [string]$_ }) }
     if ($null -ne $__aihPayload.PSObject.Properties['PreviousResultPath']) { $PreviousResultPath = [string]$__aihPayload.PreviousResultPath }
 }
@@ -122,7 +128,7 @@ function Test-AihVisualImage {
     try{$bytes=(Get-Item -LiteralPath $Path).Length}catch{$bytes=-1}
     if($bytes-lt0){return @{valid=$false;violation="image size could not be read: $Path";bytes=$null}}
     if($bytes-gt$MaxBytes){return @{valid=$false;violation="image exceeds the packet budget of $MaxBytes bytes: $Path ($bytes bytes)";bytes=$bytes}}
-    return @{valid=$true;violation=$null;bytes=$bytes}
+    return @{valid=$true;violation=$null;bytes=$bytes;sha256=(Get-AihVisualSha256 -Path ([IO.Path]::GetFullPath($Path)))}
 }
 
 function Resolve-AihVisualProviderConfig {
@@ -177,28 +183,6 @@ function Resolve-AihVisualIterationDirectory {
     $path=Join-Path $visualRoot ('iteration-{0:D2}'-f$iteration)
     New-Item -ItemType Directory -Force -Path $path|Out-Null
     [pscustomobject]@{Iteration=$iteration;Path=$path;VisualRoot=$visualRoot}
-}
-
-function Copy-AihVisualEvidenceImage {
-    param([string]$SourcePath,[string]$DestinationDirectory,[int]$Index,[string]$Role)
-    $name=[IO.Path]::GetFileName($SourcePath)
-    $destination=Join-Path $DestinationDirectory $name
-    if(Test-Path -LiteralPath $destination){
-        $stem=[IO.Path]::GetFileNameWithoutExtension($name);$ext=[IO.Path]::GetExtension($name)
-        $destination=Join-Path $DestinationDirectory ('{0}-{1}{2}'-f$stem,$Index,$ext)
-    }
-    Copy-Item -LiteralPath $SourcePath -Destination $destination
-    # Use the same framework-level hashing path as VisualLoop. Some hosted
-    # controller processes disable module auto-loading, so relying on the
-    # Microsoft.PowerShell.Utility Get-FileHash cmdlet can make the automatic
-    # child service fail even though standalone interactive runs succeed.
-    $sha=[Security.Cryptography.SHA256]::Create()
-    try{$hash=([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($destination)))-replace '-','').ToLowerInvariant()}finally{$sha.Dispose()}
-    [pscustomobject]@{
-        role=$Role; fileName=[IO.Path]::GetFileName($destination); originalPath=[IO.Path]::GetFullPath($SourcePath)
-        storedPath=$destination; bytes=(Get-Item -LiteralPath $destination).Length; sha256=$hash
-        mediaType=Get-AihVisualMediaType -Path $destination
-    }
 }
 
 function Test-AihVisualReviewResult {
@@ -366,14 +350,33 @@ $index=0
 foreach($path in @($Screenshots)){
     $index++
     $check=Test-AihVisualImage -Path $path -MaxBytes ([int]$script:AihVisualBudget.maxImageBytes)
-    if(-not$check.valid){$violations.Add($check.violation)}else{$validatedSubjects+=[pscustomobject]@{path=[IO.Path]::GetFullPath($path);index=$index;bytes=$check.bytes}}
+    if(-not$check.valid){$violations.Add($check.violation)}else{
+        $descriptor=if($index-le@($ScreenshotEvidence).Count){$ScreenshotEvidence[$index-1]}else{$null}
+        $expected=[string]$check.sha256;$sourceIteration=if($VisualIteration-gt0){$VisualIteration}else{0};$original=[IO.Path]::GetFullPath($path)
+        if($null-ne$descriptor){
+            if($null-ne$descriptor.PSObject.Properties['expectedSha256']-and-not[string]::IsNullOrWhiteSpace([string]$descriptor.expectedSha256)){$expected=[string]$descriptor.expectedSha256}
+            if($null-ne$descriptor.PSObject.Properties['sourceIteration']){$sourceIteration=[int]$descriptor.sourceIteration}
+            if($null-ne$descriptor.PSObject.Properties['originalSourcePath']-and-not[string]::IsNullOrWhiteSpace([string]$descriptor.originalSourcePath)){$original=[string]$descriptor.originalSourcePath}
+        }
+        $validatedSubjects+=[pscustomobject]@{path=[IO.Path]::GetFullPath($path);index=$index;bytes=$check.bytes;expectedSha256=$expected;sourceIteration=$sourceIteration;originalSourcePath=$original}
+    }
 }
 $validatedReferences=@()
 $index=0
 foreach($path in @($References)){
     $index++
     $check=Test-AihVisualImage -Path $path -MaxBytes ([int]$script:AihVisualBudget.maxImageBytes)
-    if(-not$check.valid){$violations.Add($check.violation)}else{$validatedReferences+=[pscustomobject]@{path=[IO.Path]::GetFullPath($path);index=$index;bytes=$check.bytes}}
+    if(-not$check.valid){$violations.Add($check.violation)}else{
+        $descriptor=if($index-le@($ReferenceEvidence).Count){$ReferenceEvidence[$index-1]}else{$null}
+        $expected=[string]$check.sha256;$sourceIteration=0;$original=[IO.Path]::GetFullPath($path)
+        if($path-match'[\\/]iteration-(\d+)[\\/]'){$sourceIteration=[int]$Matches[1]}
+        if($null-ne$descriptor){
+            if($null-ne$descriptor.PSObject.Properties['expectedSha256']-and-not[string]::IsNullOrWhiteSpace([string]$descriptor.expectedSha256)){$expected=[string]$descriptor.expectedSha256}
+            if($null-ne$descriptor.PSObject.Properties['sourceIteration']){$sourceIteration=[int]$descriptor.sourceIteration}
+            if($null-ne$descriptor.PSObject.Properties['originalSourcePath']-and-not[string]::IsNullOrWhiteSpace([string]$descriptor.originalSourcePath)){$original=[string]$descriptor.originalSourcePath}
+        }
+        $validatedReferences+=[pscustomobject]@{path=[IO.Path]::GetFullPath($path);index=$index;bytes=$check.bytes;expectedSha256=$expected;sourceIteration=$sourceIteration;originalSourcePath=$original}
+    }
 }
 if(@($validatedSubjects).Count+@($validatedReferences).Count-gt([int]$script:AihVisualBudget.maxImages+[int]$script:AihVisualBudget.maxReferenceImages)){
     $violations.Add("image count exceeds the packet budget ($($script:AihVisualBudget.maxImages) screenshots + $($script:AihVisualBudget.maxReferenceImages) references)")
@@ -400,8 +403,13 @@ try{
         $iteration=Resolve-AihVisualIterationDirectory -Workspace $workspacePath -TaskId $TaskId
     }
     $imageRecords=@()
-    foreach($subject in $validatedSubjects){$imageRecords+=(Copy-AihVisualEvidenceImage -SourcePath $subject.path -DestinationDirectory $iteration.Path -Index $subject.index -Role 'subject')}
-    foreach($reference in $validatedReferences){$imageRecords+=(Copy-AihVisualEvidenceImage -SourcePath $reference.path -DestinationDirectory $iteration.Path -Index $reference.index -Role 'reference')}
+    foreach($subject in $validatedSubjects){$record=Copy-AihVisualPacketImage -SourcePath $subject.path -DestinationDirectory $iteration.Path -Ordinal $subject.index -Role subject -SourceIteration $subject.sourceIteration -ExpectedSha256 $subject.expectedSha256 -OriginalSourcePath $subject.originalSourcePath;$record.mediaType=Get-AihVisualMediaType -Path $record.storedPath;$imageRecords+=$record}
+    foreach($reference in $validatedReferences){$record=Copy-AihVisualPacketImage -SourcePath $reference.path -DestinationDirectory $iteration.Path -Ordinal $reference.index -Role reference -SourceIteration $reference.sourceIteration -ExpectedSha256 $reference.expectedSha256 -OriginalSourcePath $reference.originalSourcePath;$record.mediaType=Get-AihVisualMediaType -Path $record.storedPath;$imageRecords+=$record}
+    $integrity=Test-AihVisualPacketIntegrity -Images $imageRecords -PacketDirectory $iteration.Path
+    if(-not[bool]$integrity.valid){
+        Write-AihAtomicJson -Path (Join-Path $iteration.Path 'packet-integrity-failure.json') -Value ([ordered]@{schemaVersion=1;kind='visual-review-packet-integrity-failure';taskId=$TaskId;taskInstanceId=$effectiveInstanceId;iteration=$iteration.Iteration;images=@($imageRecords);integrity=$integrity;providerCalls=0;timestampUtc=[DateTime]::UtcNow.ToString('o')})
+        Write-AihVisualFailure -ErrorKind 'visual-review-packet-integrity-failed' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Iteration $iteration.Iteration -Message 'Visual packet evidence failed materialization integrity; the visual provider was NOT called.' -Violations @($integrity.violations)
+    }
 
     # 7. build the bounded visual packet
     # Coverage inputs: previous finding ids from the packed previous result
@@ -435,6 +443,14 @@ try{
     }
     Write-AihAtomicJson -Path (Join-Path $iteration.Path 'packet.json') -Value $packet
     if(-not$Execute){$packet|ConvertTo-Json -Depth 20;exit 0}
+
+    # Recompute every packet-file hash immediately before transport. This is
+    # the final authority if bytes changed after materialization/packet write.
+    $finalIntegrity=Test-AihVisualPacketIntegrity -Images $imageRecords -PacketDirectory $iteration.Path
+    if(-not[bool]$finalIntegrity.valid){
+        Write-AihAtomicJson -Path (Join-Path $iteration.Path 'packet-integrity-failure.json') -Value ([ordered]@{schemaVersion=1;kind='visual-review-packet-integrity-failure';taskId=$TaskId;taskInstanceId=$effectiveInstanceId;iteration=$iteration.Iteration;images=@($imageRecords);integrity=$finalIntegrity;providerCalls=0;timestampUtc=[DateTime]::UtcNow.ToString('o')})
+        Write-AihVisualFailure -ErrorKind 'visual-review-packet-integrity-failed' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Iteration $iteration.Iteration -Message 'Visual packet evidence changed before provider invocation; the visual provider was NOT called.' -Violations @($finalIntegrity.violations)
+    }
 
     # 8. invoke the transport ONCE (never a retry loop in V1)
     $requestText=[Text.StringBuilder]::new()

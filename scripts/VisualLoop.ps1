@@ -593,12 +593,22 @@ if(@($captures).Count-eq 0){
 
 $previousResultPath=$null
 $previousScreens=@()
+$previousEvidence=@()
 if($nextIteration-ge 2){
     foreach($entry in @($state.history)){
+        if($null-ne$entry.PSObject.Properties['evidenceStatus']-and[string]$entry.evidenceStatus-eq'invalid'){continue}
         if($null-eq$entry.PSObject.Properties['screenshots']){ continue }
-        foreach($shot in @($entry.screenshots)){ $previousScreens+=([string]$shot.storedPath) }
+        foreach($shot in @($entry.screenshots)){
+            $previousScreens+=([string]$shot.storedPath)
+            $sourceIteration=[int]$entry.iteration
+            if($null-ne$shot.PSObject.Properties['iteration']){$sourceIteration=[int]$shot.iteration}
+            $originalSourcePath=[string]$shot.storedPath
+            if($null-ne$shot.PSObject.Properties['originalPath']-and-not[string]::IsNullOrWhiteSpace([string]$shot.originalPath)){$originalSourcePath=[string]$shot.originalPath}
+            $previousEvidence+=([ordered]@{path=[string]$shot.storedPath;expectedSha256=[string]$shot.sha256;sourceIteration=$sourceIteration;originalSourcePath=$originalSourcePath})
+        }
     }
     foreach($entry in @($state.history)){
+        if($null-ne$entry.PSObject.Properties['evidenceStatus']-and[string]$entry.evidenceStatus-eq'invalid'){continue}
         if($null-ne$entry.PSObject.Properties['resultPath']){
             $candidateResultPath=[string]$entry.resultPath
             # The history stores the iteration directory; the reviewer needs the
@@ -609,7 +619,7 @@ if($nextIteration-ge 2){
             $previousResultPath=$candidateResultPath
         }
     }
-    if(@($previousScreens).Count-gt 4){ $previousScreens=@($previousScreens | Select-Object -Last 4) }
+    if(@($previousScreens).Count-gt 4){$previousScreens=@($previousScreens|Select-Object -Last 4);$previousEvidence=@($previousEvidence|Select-Object -Last 4)}
 }
 
 # 3. invoke the V1/V1.1 review service (single transport owner, V1.1 retry).
@@ -662,6 +672,14 @@ if($Action-eq'preflight'){
     exit 0
 }
 $allCapturePaths=@($captures | ForEach-Object { [string]$_.storedPath })
+$currentEvidence=@()
+foreach($capture in @($captures)){
+    $sourceIteration=$nextIteration
+    if($null-ne$capture.PSObject.Properties['iteration']){$sourceIteration=[int]$capture.iteration}
+    $originalSourcePath=[string]$capture.storedPath
+    if($null-ne$capture.PSObject.Properties['originalPath']-and-not[string]::IsNullOrWhiteSpace([string]$capture.originalPath)){$originalSourcePath=[string]$capture.originalPath}
+    $currentEvidence+=([ordered]@{path=[string]$capture.storedPath;expectedSha256=[string]$capture.sha256;sourceIteration=$sourceIteration;originalSourcePath=$originalSourcePath})
+}
 # The question/screenshots/references travel in a JSON payload file (never
 # on the command line): free text with quotes/unicode would break cmd-level
 # argument quoting and silently corrupt the redirect.
@@ -669,8 +687,9 @@ $reviewPayload=[ordered]@{
   Workspace=([IO.Path]::GetFullPath($Workspace))
   Question=$questionText
   Screenshots=@($allCapturePaths)
+  ScreenshotEvidence=@($currentEvidence)
 }
-if(@($previousScreens).Count-gt 0){ $reviewPayload.References=@($previousScreens) }
+if(@($previousScreens).Count-gt 0){$reviewPayload.References=@($previousScreens);$reviewPayload.ReferenceEvidence=@($previousEvidence)}
 if(-not[string]::IsNullOrWhiteSpace([string]$previousResultPath)){ $reviewPayload.PreviousResultPath=[string]$previousResultPath }
 if(-not[string]::IsNullOrWhiteSpace([string]$TaskInstanceId)){ $reviewPayload.TaskInstanceId=[string]$TaskInstanceId }
 $reviewPayloadPath=Join-Path $iterationDir 'review-payload.json'

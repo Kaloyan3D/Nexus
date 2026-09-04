@@ -124,6 +124,15 @@ The identity record contains `deviceId`, `expectedPackage`, `actualPackage`,
 Deterministic preflight rejects missing or mismatched viewport identity before
 the vision provider can be called.
 
+`VisualReview.ps1 -> VisualPacketIntegrity.ps1` is the immutable evidence
+boundary. Every subject and reference is materialized once under a globally
+unique packet-local name containing its role, source iteration, ordinal, and
+expected-hash prefix. Each packet image records `role`, `sourceIteration`,
+`originalPath`, `expectedSha256`, and `actualMaterializedSha256`. The
+controller verifies filename and intended-entry uniqueness, packet locality,
+and the recomputed bytes of every image after materialization and again
+immediately before transport. Existing packet files are never overwritten.
+
 ### The visualReviewer role contract
 
     writable: false · requiresTools: false · requiresSolLocal: false
@@ -213,6 +222,7 @@ diagnostic carry the full attempt list.
 | task/profile/role/provider unresolved | `visual-review-resolution-failed` / `visual-review-role-unbound` / `visual-review-target-unresolved` / `visual-review-provider-unresolved` | no |
 | model lacks explicit `supportsVision` | `visual-review-not-vision-capable` | no |
 | no/invalid screenshot, budget violation | `visual-review-packet-rejected` | no |
+| duplicate image identity, filename collision, or expected/materialized/recomputed SHA mismatch | `visual-review-packet-integrity-failed` | no |
 | Android package cannot be resolved unambiguously | `visual-review-capture-unavailable` | no |
 | expected package is not resumed after launch/recheck | `visual-capture-target-mismatch` | no |
 | API key missing | `visual-review-api-key-missing` | no |
@@ -223,6 +233,10 @@ diagnostic carry the full attempt list.
 Failures are structured JSON on stdout with exit code 3 (CLI) and are
 surfaced as controller messages by the bridge. V1.1 adds exactly one bounded
 retry for transient transport failures (see Transport discipline above).
+Packet-integrity failures persist an audit diagnostic with `providerCalls: 0`;
+the automatic loop does not append active history, create a repair handoff, or
+consume a visual iteration. Previously recorded corrupt reviews remain in
+`invalidatedHistory` as audit evidence only.
 
 ### Retry ownership (hard invariant)
 
