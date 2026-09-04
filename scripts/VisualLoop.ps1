@@ -66,6 +66,7 @@ $script:AihVisualReviewerUnavailableKinds=@(
     'visual-review-timeout',
     'visual-review-transport-error',
     'visual-review-provider-response-shape',
+    'visual-review-output-truncated',
     'visual-review-service-failed'
 )
 function Add-AihVisualStateReason {

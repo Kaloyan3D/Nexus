@@ -56,7 +56,7 @@ llm-pi-ai:
     [IO.File]::WriteAllBytes($testPng,$pngBytes)
 
     function Invoke-AihVisual {
-        param([string[]]$Screenshots,[string[]]$References,[switch]$Execute,[string]$MockResponseFile,[string]$PreviousResultPath,[string]$PayloadFile)
+        param([string[]]$Screenshots,[string[]]$References,[switch]$Execute,[string]$MockResponseFile,[string]$PreviousResultPath,[string]$PayloadFile,[string]$Trigger)
         $arguments=@('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$visualReviewScript,'-InstallRoot',$fixture,'-Workspace',$workspace,'-TaskId',$script:taskId,'-Question','review the home screen')
         foreach($shot in @($Screenshots)){$arguments+=@('-Screenshots',$shot)}
         foreach($reference in @($References)){$arguments+=@('-References',$reference)}
@@ -64,6 +64,7 @@ llm-pi-ai:
         if($MockResponseFile){$arguments+=@('-MockResponseFile',$MockResponseFile)}
         if($PreviousResultPath){$arguments+=@('-PreviousResultPath',$PreviousResultPath)}
         if($PayloadFile){$arguments+=@('-PayloadFile',$PayloadFile)}
+        if($Trigger){$arguments+=@('-Trigger',$Trigger)}
         $output=& 'powershell.exe' $arguments 2>&1|ForEach-Object{[string]$_}
         [pscustomobject]@{exitCode=$LASTEXITCODE;text=($output-join [Environment]::NewLine)}
     }
@@ -360,6 +361,120 @@ llm-pi-ai:
     $validatedReview=Test-AihReviewResult ([pscustomobject]@{verdict='pass';findings=@()})
     Assert-Aih ($validatedReview.result.verdict -eq 'pass' -and -not[bool]$validatedReview.completionAuthority) '12: review result validation unchanged (verdict pass, no completion authority)'
     Assert-Aih (@(Get-AihCompatibleModelsForRole $registry 'reviewer') -contains 'gpt-5.6-sol') '12: reviewer-compatible models remain sol-local only'
+
+
+    # ── 13. UNCAPPED PROVIDER REQUEST (end-to-end wire proof, V1.2) ───────────
+    # A loopback provider captures the REAL generated chat-completions request
+    # for BOTH triggers: no max_tokens / max_completion_tokens /
+    # max_output_tokens may be present, manual and automatic stay on the SAME
+    # uncapped transport path, finishReason is persisted, and the response's
+    # reasoning_content is never persisted anywhere.
+    $tcpListener=[System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback,0)
+    $tcpListener.Start()
+    $wirePort=([System.Net.IPEndPoint]$tcpListener.LocalEndpoint).Port
+    $tcpListener.Stop()
+    $wireServer=Join-Path $workspace 'wire-capture-server.cjs'
+    @'
+const http = require('http')
+const fs = require('fs')
+const port = Number(process.argv[2])
+const out = process.argv[3]
+const total = Number(process.argv[4] || 2)
+const REVIEW = { verdict: 'REVISE', score: 6.5, dimensions: { hierarchy: 7, spacing: 5, density: 6, typography: 8, alignment: 7, colorDiscipline: 6, interactionClarity: 5, brandFidelity: 7, platformQuality: 6 }, findings: [ { id: 'F1', severity: 'high', category: 'spacing', area: 'top bar', observation: 'crowded', whyItMatters: 'touch targets', recommendation: 'add margin', confidence: 'high' } ], strengths: ['clear hierarchy'], summary: 'solid layout, spacing needs work' }
+const RESPONSE = { model: 'deepseek-v4-flash-vision-exp', choices: [ { message: { content: JSON.stringify(REVIEW), reasoning_content: 'REASONING-SENTINEL-WIRE' }, finish_reason: 'stop' } ], usage: { prompt_tokens: 100, completion_tokens: 200, completion_tokens_details: { reasoning_tokens: 50 } } }
+const captured = []
+const server = http.createServer((req, res) => {
+  let data = ''
+  req.on('data', (c) => { data += c })
+  req.on('end', () => {
+    try { captured.push(JSON.parse(data)) } catch (e) { captured.push({ unparseable: true }) }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(RESPONSE))
+    fs.writeFileSync(out, JSON.stringify({ requests: captured }, null, 2))
+    if (captured.length >= total) setTimeout(() => process.exit(0), 100)
+  })
+})
+server.listen(port, '127.0.0.1')
+setTimeout(() => process.exit(0), 60000)
+'@|Set-Content -Path $wireServer -Encoding ASCII
+    $wireOut=Join-Path $workspace 'wire-captured-requests.json'
+    if(Test-Path $wireOut){Remove-Item $wireOut -Force}
+    $nodeExe=(Get-Command node.exe).Source
+    $wireProc=Start-Process -FilePath $nodeExe -ArgumentList @($wireServer,[string]$wirePort,$wireOut,'2') -PassThru -WindowStyle Hidden
+    $wireReady=$false
+    foreach($i in 1..80){ try{ $probe=New-Object Net.Sockets.TcpClient; $probe.Connect('127.0.0.1',$wirePort); $probe.Close(); $wireReady=$true; break }catch{ Start-Sleep -Milliseconds 100 } }
+    Assert-Aih $wireReady '13: the loopback wire-capture provider is reachable'
+    $wireSettingsTemplate=@'
+engineering-profile: deepseek-codex
+llm-pi-ai:
+  providers:
+    deepseek-vision-direct:
+      displayName: DeepSeek V4 Flash Vision (direct)
+      apiKeyEnv: AIH_VISUAL_TEST_KEY
+      api: openai-completions
+      baseURL: http://127.0.0.1:__WIREPORT__
+      reasoning: high
+      models:
+        - id: deepseek-v4-flash-vision-exp
+          name: DeepSeek V4 Flash Vision (Exp)
+'@
+    ($wireSettingsTemplate -replace '__WIREPORT__',[string]$wirePort)|Set-AihFixtureSettings
+    $wireManual=Invoke-AihVisual -Screenshots @($testPng) -Execute -Trigger manual
+    $wireAuto=Invoke-AihVisual -Screenshots @($testPng) -Execute -Trigger automatic
+    Assert-Aih ($wireManual.exitCode -eq 0 -and $wireAuto.exitCode -eq 0) '13: manual and automatic visual review complete on the SAME uncapped transport path'
+    if(-not$wireProc.WaitForExit(20000)){try{$wireProc.Kill()}catch{ }}
+    $capturedDoc=Get-Content $wireOut -Raw|ConvertFrom-Json
+    Assert-Aih (@($capturedDoc.requests).Count -eq 2) '13: both generated provider requests were captured'
+    foreach($req in @($capturedDoc.requests)){
+        Assert-Aih ($null -eq $req.PSObject.Properties['max_tokens'] -and $null -eq $req.PSObject.Properties['max_completion_tokens'] -and $null -eq $req.PSObject.Properties['max_output_tokens']) '13: the generated provider request carries NO explicit output-token cap'
+    }
+    Assert-Aih ($capturedDoc.requests[0].model -eq 'deepseek-v4-flash-vision-exp') '13: the request targets the resolved vision model'
+    Assert-Aih ($capturedDoc.requests[0].response_format.type -eq 'json_object') '13: provider-level structured output is unchanged'
+    $wireManualJson=$wireManual.text|ConvertFrom-Json
+    $wireIterManual=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$wireManualJson.iteration)
+    $wireResultRaw=Get-Content (Join-Path $wireIterManual 'result.json') -Raw
+    Assert-Aih ((($wireResultRaw|ConvertFrom-Json).transport.finishReason) -eq 'stop') '13: result.json records transport.finishReason metadata'
+    Assert-Aih (-not($wireResultRaw -match 'REASONING-SENTINEL-WIRE')) '13: reasoning_content is never persisted in result.json'
+    $wireRunDir=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$wireManualJson.iteration)
+    Assert-Aih (-not(((Get-ChildItem $wireRunDir -Filter '*.json'|ForEach-Object{Get-Content $_.FullName -Raw})-join '') -match 'REASONING-SENTINEL-WIRE')) '13: reasoning_content is never persisted anywhere in the iteration'
+    # restore the discard-endpoint settings for the remaining assertions
+    @'
+engineering-profile: deepseek-codex
+llm-pi-ai:
+  providers:
+    deepseek-vision-direct:
+      displayName: DeepSeek V4 Flash Vision (direct)
+      apiKeyEnv: AIH_VISUAL_TEST_KEY
+      api: openai-completions
+      baseURL: http://127.0.0.1:9
+      reasoning: high
+      models:
+        - id: deepseek-v4-flash-vision-exp
+          name: DeepSeek V4 Flash Vision (Exp)
+'@|Set-AihFixtureSettings
+
+    # ── 14. OUTPUT TRUNCATION FAILS CLOSED (finish_reason=length, V1.2) ──────
+    $truncMock=Join-Path $mockDir 'truncated-length.json'
+    @{status=200;body=@{model='deepseek-v4-flash-vision-exp';choices=@(@{message=@{content='{"verdict":"REVISE","score":7,"findings":[{"id';reasoning_content='REASONING-SENTINEL-TRUNC'};finish_reason='length'});usage=@{prompt_tokens=1600;completion_tokens=8192;completion_tokens_details=@{reasoning_tokens=7900}}}}|ConvertTo-Json -Depth 8|Set-Content -Path $truncMock -Encoding UTF8
+    $trunc=Invoke-AihVisual -Screenshots @($testPng) -Execute -MockResponseFile $truncMock
+    $truncJson=$trunc.text|ConvertFrom-Json
+    Assert-Aih ($trunc.exitCode -eq 3 -and $truncJson.ok -eq $false -and $truncJson.errorKind -eq 'visual-review-output-truncated') '14: finish_reason=length + truncated JSON fails closed as visual-review-output-truncated'
+    $truncIter=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$truncJson.iteration)
+    $truncDoc=Get-Content (Join-Path $truncIter 'transport-error.json') -Raw|ConvertFrom-Json
+    Assert-Aih ([int]$truncDoc.attemptCount -eq 1) '14: deterministic output truncation is never retried (single provider attempt)'
+    Assert-Aih ($truncDoc.errorKind -eq 'visual-review-output-truncated' -and $truncDoc.finishReason -eq 'length') '14: the truncation diagnostic persists finishReason metadata'
+    Assert-Aih ([int]$truncDoc.usage.completion_tokens -eq 8192 -and [int]$truncDoc.usage.completion_tokens_details.reasoning_tokens -eq 7900) '14: the truncation diagnostic persists safe token-count metadata only'
+    Assert-Aih (-not(((Get-ChildItem $truncIter -Filter '*.json'|ForEach-Object{Get-Content $_.FullName -Raw})-join '') -match 'REASONING-SENTINEL-TRUNC')) '14: reasoning_content is never persisted in the truncation iteration'
+    $truncEmptyMock=Join-Path $mockDir 'empty-length.json'
+    @{status=200;body=@{model='deepseek-v4-flash-vision-exp';choices=@(@{message=@{content='';reasoning_content='REASONING-SENTINEL-EMPTY-REVIEW'};finish_reason='length'});usage=@{completion_tokens=8192;completion_tokens_details=@{reasoning_tokens=8192}}}}|ConvertTo-Json -Depth 8|Set-Content -Path $truncEmptyMock -Encoding UTF8
+    $truncEmpty=Invoke-AihVisual -Screenshots @($testPng) -Execute -MockResponseFile $truncEmptyMock
+    $truncEmptyJson=$truncEmpty.text|ConvertFrom-Json
+    Assert-Aih ($truncEmpty.exitCode -eq 3 -and $truncEmptyJson.errorKind -eq 'visual-review-output-truncated') '14: finish_reason=length + empty content fails closed as output-truncated'
+    $truncEmptyIter=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$truncEmptyJson.iteration)
+    $truncEmptyDoc=Get-Content (Join-Path $truncEmptyIter 'transport-error.json') -Raw|ConvertFrom-Json
+    Assert-Aih ([int]$truncEmptyDoc.attemptCount -eq 1 -and $truncEmptyDoc.finishReason -eq 'length') '14: empty-at-limit truncation is deterministic (never retried)'
+    # unrelated Nexus roles retain their token configuration
+    Assert-Aih ((Get-AihRoutingPolicy $fixtureLayout.RoutingPolicy).codex.automaticReview.maxOutputTokens -eq 2500) '14: unrelated roles keep their token configuration (codex review budget unchanged)'
 
     Write-Host "RESULT: $passed visual-review assertions passed."
 }finally{

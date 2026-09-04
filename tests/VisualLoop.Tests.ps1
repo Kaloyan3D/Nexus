@@ -312,6 +312,27 @@ exit 3
     $terr=Get-Content (Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $taskR.taskId) 'visual\iteration-01') 'transport-error.json') -Raw|ConvertFrom-Json
     Assert-Aih ([int]$terr.attemptCount -eq 2 -and @($terr.attempts).Count -eq 2 -and @($terr.attempts|Where-Object{$_.kind -eq 'empty-content'}).Count -eq 2) '5b: the transport owned exactly 2 provider HTTP attempts'
 
+    # ── 5c. OUTPUT TRUNCATION (finish_reason=length) is terminal (V1.2) ──────
+    # No client-side output cap: when the provider's NATIVE limit yields empty
+    # or truncated content, the loop fails closed as
+    # visual-review-output-truncated - unavailable, no verdict, no repair
+    # handoff, no burned iteration, and reasoning_content is never persisted.
+    $taskT=New-AihTask $workspace 'truncation loop task'
+    Push-Location $workspace
+    try{ New-Item -ItemType Directory -Path (Join-Path $workspace 'apps\mobile\src\components') -Force|Out-Null; 'export const Trunc=()=>null' | Set-Content (Join-Path $workspace 'apps\mobile\src\components\Trunc.tsx'); git add -A; git commit -m 'trunc ui change' | Out-Null }finally{ Pop-Location }
+    $truncLoopMock=Join-Path $mockDir 'trunc-loop.json'
+    @{status=200;body=@{model='deepseek-v4-flash-vision-exp';choices=@(@{message=@{content='{"verdict":"REVISE","score":7';reasoning_content='REASONING-SENTINEL-LOOP'};finish_reason='length'})}}|ConvertTo-Json -Depth 6|Set-Content -Path $truncLoopMock -Encoding UTF8
+    $runT=Invoke-AihLoop -Action 'iterate' -MockResponseFile $truncLoopMock -ScenarioPath $scenarioPath -PolicyPath $policyPath -LoopTaskId $taskT.taskId
+    Assert-Aih ($runT.exitCode -eq 3 -and $runT.json.errorKind -eq 'visual-review-output-truncated') '5c: output truncation fails closed with visual-review-output-truncated'
+    $stateT=Get-Content (Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $taskT.taskId) 'visual') 'state.json') -Raw|ConvertFrom-Json
+    Assert-Aih ($stateT.status -eq 'unavailable') '5c: output truncation marks the reviewer unavailable'
+    Assert-Aih ([int]$stateT.iteration -eq 0) '5c: output truncation does not burn the visual iteration'
+    Assert-Aih (-not[bool]$stateT.repairPending -and @($stateT.history).Count -eq 0 -and $null -eq $stateT.latestVerdict) '5c: output truncation creates no verdict and no repair handoff'
+    Assert-Aih ((@($stateT.reasons)|Where-Object{$_-match'reviewer not invoked: visual-review-output-truncated'}|Measure-Object).Count -ge 1) '5c: the unavailable reason names the truncation kind'
+    $terrT=Get-Content (Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $taskT.taskId) 'visual\iteration-01') 'transport-error.json') -Raw|ConvertFrom-Json
+    Assert-Aih ([int]$terrT.attemptCount -eq 1 -and $terrT.finishReason -eq 'length') '5c: a single provider attempt with finishReason metadata (no added retry)'
+    Assert-Aih (-not(((Get-ChildItem (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $taskT.taskId) 'visual') -Recurse -Filter '*.json'|ForEach-Object{Get-Content $_.FullName -Raw})-join '') -match 'REASONING-SENTINEL-LOOP')) '5c: reasoning_content is never persisted anywhere in the run directory'
+
     # ── 6b. VISUAL PREFLIGHT (deterministic; complements, never replaces) ─────
     $taskP=New-AihTask $workspace 'preflight probe task'
     Push-Location $workspace

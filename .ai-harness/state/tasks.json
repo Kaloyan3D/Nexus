@@ -1,6 +1,6 @@
 {
     "schemaVersion":  1,
-    "nextSequence":  22,
+    "nextSequence":  23,
     "tasks":  [
                   {
                       "schemaVersion":  1,
@@ -793,6 +793,44 @@
                       "completionAuthority":  "controller",
                       "createdAtUtc":  "2026-09-03T10:31:43.4674750Z",
                       "updatedAtUtc":  "2026-09-03T15:12:29.5492964Z",
+                      "completedAtUtc":  null
+                  },
+                  {
+                      "schemaVersion":  1,
+                      "taskId":  "TASK-0022",
+                      "taskInstanceId":  "task_8c062fced34642fc8144e82dd952e804",
+                      "description":  "Investigate the repeated visual-review-empty-content responses from\r\ndeepseek-vision-direct.\r\n\r\nDo not modify OpenRank and do not change retry policy yet.\r\n\r\nThe request reaches the provider successfully and returns HTTP 200, but\r\nNexus classifies the response as empty assistant content.\r\n\r\nDetermine whether:\r\n\r\nA) the provider genuinely returns an empty model generation\r\n\r\nor\r\n\r\nB) the provider returns valid content in a response field that the current\r\nInvoke-VisualReview.mjs parser does not extract.\r\n\r\nFor one diagnostic invocation:\r\n\r\n1. Capture the raw HTTP 200 response envelope before Nexus parsing.\r\n2. Sanitize all secrets/API keys.\r\n3. Record only structural fields and bounded content needed for diagnosis.\r\n4. Compare the actual response structure with the extraction logic in\r\n   Invoke-VisualReview.mjs.\r\n5. Check all provider-supported content shapes, including:\r\n   - message.content string\r\n   - message.content array/parts\r\n   - output_text\r\n   - reasoning/content separation\r\n   - alternative OpenAI-compatible response envelopes\r\n\r\nDo not loosen structured-result validation.\r\n\r\nIf usable assistant content exists but Nexus fails to extract it:\r\nfix the parser and add regression coverage.\r\n\r\nIf the raw provider response genuinely contains no usable assistant\r\ncontent:\r\nreport it as an upstream provider/model failure and make no code change.\r\n\r\nDo not commit.\r\n\r\nFinal report:\r\n- sanitized raw response shape\r\n- exact field Nexus currently reads\r\n- whether usable content existed elsewhere\r\n- root cause: parser bug or upstream empty generation\r\n- any tests/fix if applicable",
+                      "status":  "implementing",
+                      "dependencies":  [
+
+                                       ],
+                      "baseCommit":  "9707da1a6686098f132c38f5bed7ac9210ed87f8",
+                      "executionClass":  "engineer_normal",
+                      "executor":  "engineer_normal",
+                      "attempt":  1,
+                      "maxAttempts":  3,
+                      "risk":  "normal",
+                      "acceptanceCriteria":  [
+
+                                             ],
+                      "verification":  {
+                                           "required":  [
+
+                                                        ],
+                                           "outcomes":  [
+
+                                                        ]
+                                       },
+                      "reviewRequested":  false,
+                      "executionClassOverride":  "engineer_normal",
+                      "worktree":  null,
+                      "failureSignatures":  [
+
+                                            ],
+                      "codexCalls":  0,
+                      "completionAuthority":  "controller",
+                      "createdAtUtc":  "2026-09-04T14:29:19.3070634Z",
+                      "updatedAtUtc":  "2026-09-04T14:29:23.6568490Z",
                       "completedAtUtc":  null
                   }
               ]
