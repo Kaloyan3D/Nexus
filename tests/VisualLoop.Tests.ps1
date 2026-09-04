@@ -22,7 +22,7 @@ try{
     New-Item -ItemType Directory -Path (Join-Path $fixture 'scripts') -Force|Out-Null
     New-Item -ItemType Directory -Path (Join-Path $fixture 'data') -Force|Out-Null
     foreach($name in @('routing-policy.json','engineering-profiles.json','model-registry.json')){Copy-Item (Join-Path $liveLayout.Root ('config\'+$name)) (Join-Path $fixture ('config\'+$name))}
-    foreach($name in @('Common.ps1','Routing.ps1','TaskController.ps1','Telemetry.ps1','VisualReview.ps1','VisualLoop.ps1','VisualRequirement.ps1','RuntimeTarget.ps1','Invoke-VisualReview.mjs','Capture-VisualEvidence.ps1')){Copy-Item (Join-Path $liveLayout.Root ('scripts\'+$name)) (Join-Path $fixture ('scripts\'+$name))}
+    foreach($name in @('Common.ps1','Routing.ps1','TaskController.ps1','Telemetry.ps1','VisualPacketIntegrity.ps1','VisualReview.ps1','VisualLoop.ps1','VisualRequirement.ps1','RuntimeTarget.ps1','Invoke-VisualReview.mjs','Capture-VisualEvidence.ps1')){Copy-Item (Join-Path $liveLayout.Root ('scripts\'+$name)) (Join-Path $fixture ('scripts\'+$name))}
     @'
 engineering-profile: deepseek-codex
 llm-pi-ai:
@@ -255,6 +255,25 @@ exit 1
     Assert-Aih ($runIdentity.exitCode-eq0-and@($identityPreflight.preflight.checks|Where-Object{$_.name-eq'target-identity:current'-and$_.status-eq'PASS'}).Count-eq1) '5: deterministic preflight includes verified target identity'
     Assert-Aih ($identityPreflight.runtimeTarget.deviceId-eq'emulator-5554'-and$identityPreflight.runtimeTarget.packageName-eq'app.expected.mobile'-and(Test-Path (Join-Path $identityRoot 'current.png.identity.json'))) '5: runtime binding and screenshot identity are persisted together'
     Remove-Item Env:AIH_LOOP_FAKE_ADB_LOG,Env:AIH_LOOP_FAKE_ADB_STATE,Env:AIH_LOOP_FAKE_ADB_PNG -ErrorAction SilentlyContinue
+
+    # Service-level packet integrity failures are infrastructure failures:
+    # the loop cannot activate a verdict/history entry or create a handoff.
+    Push-Location $workspace
+    try{ 'export const PacketIntegrity=()=>null'|Set-Content (Join-Path $workspace 'apps\mobile\src\components\PacketIntegrity.tsx');git add -A;git commit -m 'packet integrity ui'|Out-Null }finally{Pop-Location}
+    $taskIntegrity=New-AihTask $workspace 'packet integrity failure task'
+    Push-Location $workspace
+    try{ 'export const PacketIntegrity2=()=>null'|Set-Content (Join-Path $workspace 'apps\mobile\src\components\PacketIntegrity2.tsx');git add -A;git commit -m 'packet integrity followup'|Out-Null }finally{Pop-Location}
+    $fixtureVisualReview=Join-Path $fixture 'scripts\VisualReview.ps1'
+    @'
+[CmdletBinding()]param([string]$InstallRoot,[string]$Workspace,[string]$TaskId,[switch]$Execute,[string]$Trigger,[int]$VisualIteration,[string]$PayloadFile,[string]$MockResponseFile)
+[ordered]@{ok=$false;kind='visual-review-failed';errorKind='visual-review-packet-integrity-failed';error='injected deterministic packet integrity failure';taskId=$TaskId;iteration=$VisualIteration;violations=@('expected SHA does not equal actual packet-file SHA')}|ConvertTo-Json -Depth 8
+exit 3
+'@|Set-Content -LiteralPath $fixtureVisualReview -Encoding UTF8
+    $integrityRun=Invoke-AihLoop -Action 'iterate' -MockResponseFile $reviseMock -ScenarioPath $scenarioPath -PolicyPath $policyPath -LoopTaskId $taskIntegrity.taskId
+    Copy-Item (Join-Path $liveLayout.Root 'scripts\VisualReview.ps1') $fixtureVisualReview -Force
+    $integrityState=Get-Content (Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $taskIntegrity.taskId) 'visual') 'state.json') -Raw|ConvertFrom-Json
+    Assert-Aih ($integrityRun.exitCode-eq3-and$integrityRun.json.errorKind-eq'visual-review-packet-integrity-failed'-and[int]$integrityState.iteration-eq0) '5: packet integrity failure does not burn the visual iteration'
+    Assert-Aih (@($integrityState.history).Count-eq0-and-not[bool]$integrityState.repairPending-and$null-eq$integrityState.latestVerdict) '5: corrupted review cannot enter active history or produce an engineer repair handoff'
     # provider permanent failure (HTTP 400 -> non-transient)
     $failMock=Join-Path $mockDir 'permfail.json'
     @{status=400;body=@{error=@{message='bad request'}}}|ConvertTo-Json -Depth 5|Set-Content -Path $failMock -Encoding UTF8
