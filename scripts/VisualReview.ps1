@@ -164,7 +164,10 @@ function Resolve-AihVisualProviderConfig {
 function Resolve-AihVisualNodeExecutable {
     param([object]$Layout)
     if(Test-Path -LiteralPath $Layout.Node -PathType Leaf){return $Layout.Node}
-    $command=Get-Command 'node.exe' -ErrorAction SilentlyContinue
+    # Platform-aware PATH probe: the managed Node distribution is preferred;
+    # the fallback executable name differs per platform (node.exe on Windows).
+    $nodeName=if(Test-AihIsWindows){'node.exe'}else{'node'}
+    $command=Get-Command $nodeName -ErrorAction SilentlyContinue
     if($null-ne$command){return $command.Source}
     return $null
 }

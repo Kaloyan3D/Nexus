@@ -720,8 +720,17 @@ function Invoke-AihCodexReview {
             $ex=$_.Exception
             $hasResponse=$null -ne $ex -and $null -ne $ex.PSObject.Properties['Response'] -and $null -ne $ex.Response
             if($hasResponse){
-                $stream=$ex.Response.GetResponseStream()
-                if($null -ne $stream){$reader=[IO.StreamReader]::new($stream);$detail=$reader.ReadToEnd()}
+                # Windows PowerShell 5.1 exposes HttpWebResponse
+                # (GetResponseStream); PowerShell 7+ on every platform exposes
+                # HttpResponseMessage (ReadAsStringAsync). Handle both so the
+                # provider error body is readable under either host.
+                if($ex.Response -is [System.Net.Http.HttpResponseMessage]){
+                    $detail=$ex.Response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                }
+                else{
+                    $stream=$ex.Response.GetResponseStream()
+                    if($null -ne $stream){$reader=[IO.StreamReader]::new($stream);$detail=$reader.ReadToEnd()}
+                }
             }
         }catch{}
         Write-AihReviewTransportDiagnostic -Workspace $Workspace -TaskId $TaskId -TaskInstanceId ([string]$call.taskInstanceId) -Provider 'sol-local' -Model $Model -Shape $null -ErrorText ('[provider-transport-error] '+$detail) -EstimatedPacketTokens ([int64]$packing.estimatedRequestTokens) -SelectedFileCount ([int]$packing.selectedFileCount) -ProviderCapacityKnown ([bool]$packing.providerCapacityKnown) -ProviderCapacityPacking ([string]$packing.providerCapacityPacking)

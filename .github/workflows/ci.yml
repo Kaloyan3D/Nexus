@@ -16,3 +16,30 @@ jobs:
       - name: Install and test repo-local Nexus checkout
         shell: pwsh
         run: ./setup.ps1 -SkipPathUpdate -SkipDeepSeekLogin -SkipOpenAiLogin
+
+  native-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate POSIX shell sources
+        run: |
+          sh -n setup.sh
+          for wrapper in bin/linux/*.sh; do
+            sh -n "$wrapper"
+          done
+      - name: Install and test natively on Linux
+        run: |
+          ./setup.sh \
+            --install-root "$HOME/.local/share/nexus" \
+            --skip-deepseek-login \
+            --skip-openai-login \
+            --skip-path-check
+      - name: Pinned runtimes are checksum-verified and executable
+        run: |
+          test -x "$HOME/.local/share/nexus/runtime/node/bin/node"
+          test -x "$HOME/.local/share/nexus/runtime/pwsh/pwsh"
+      - name: Linux launchers resolve and run doctor offline
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          "$HOME/.local/share/nexus/bin/aih-doctor" -Offline

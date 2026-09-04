@@ -6,8 +6,8 @@ $ErrorActionPreference = 'Stop'
 # TASK-0009: context eligibility and retrieval reuse the Phase 3.1 machinery
 # (glob engine, repository config, classification, sensitivity) instead of a
 # second, incompatible path walker.
-. (Join-Path $PSScriptRoot 'intelligence\Intelligence.Common.ps1')
-. (Join-Path $PSScriptRoot 'intelligence\Intelligence.Scanning.ps1')
+. (Join-Path $PSScriptRoot 'intelligence/Intelligence.Common.ps1')
+. (Join-Path $PSScriptRoot 'intelligence/Intelligence.Scanning.ps1')
 
 # ── TASK-0009: deterministic context-retrieval constants ─────────────────────
 # The relevance floor keeps weak/incidental matches out of review packets. It

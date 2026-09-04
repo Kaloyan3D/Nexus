@@ -296,9 +296,16 @@ function Invoke-AihLoopCapture {
         if(-not[string]::IsNullOrWhiteSpace([string]$InstallRoot)){ $args+=@('-InstallRoot',$InstallRoot) }
         $capOutFile=Join-Path $IterationDirectory ($name+'-capture-stdout.txt')
         $capErrFile=Join-Path $IterationDirectory ($name+'-capture-stderr.txt')
+        if(Test-AihIsWindows){
         $capCmd=('powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+(Join-Path $PSScriptRoot 'Capture-VisualEvidence.ps1')+'" '+($args|ForEach-Object{ if($_ -match '[\s"]'){ '"'+($_ -replace '"','\"')+'"' } else { $_ } })-join ' ')+(' > "'+$capOutFile+'" 2> "'+$capErrFile+'"')
         cmd /c $capCmd
         $captureExit=$LASTEXITCODE
+        }
+        else {
+            # POSIX: exact-argv transport through the platform PowerShell host
+            # with the SAME stdout/stderr file contract (TASK-0017: no pipes).
+            $captureExit=Invoke-AihPwshScriptFile -ScriptPath (Join-Path $PSScriptRoot 'Capture-VisualEvidence.ps1') -ScriptArguments $args -StdoutPath $capOutFile -StderrPath $capErrFile -InstallRoot $InstallRoot
+        }
         # Parse the structured capture result from the stdout file; stderr
         # (adb progress lines) never participates in JSON parsing.
         $captureDoc=$null
@@ -702,9 +709,16 @@ if(-not[string]::IsNullOrWhiteSpace([string]$MockResponseFile)){ $reviewArgs+=@(
 # wrappers with the structured JSON and breaks deterministic parsing.
 $reviewOutFile=Join-Path $iterationDir 'review-stdout.txt'
 $reviewErrFile=Join-Path $iterationDir 'review-stderr.txt'
+if(Test-AihIsWindows){
 $reviewCmd=('powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+(Join-Path $PSScriptRoot 'VisualReview.ps1')+'" '+($reviewArgs|ForEach-Object{ if($_ -match '[\s"]'){ '"'+($_ -replace '"','\"')+'"' } else { $_ } })-join ' ')+(' > "'+$reviewOutFile+'" 2> "'+$reviewErrFile+'"')
 cmd /c $reviewCmd
 $reviewExit=$LASTEXITCODE
+}
+else {
+    # POSIX: exact-argv transport through the platform PowerShell host with
+    # the SAME stdout/stderr file contract (TASK-0017: no pipes).
+    $reviewExit=Invoke-AihPwshScriptFile -ScriptPath (Join-Path $PSScriptRoot 'VisualReview.ps1') -ScriptArguments $reviewArgs -StdoutPath $reviewOutFile -StderrPath $reviewErrFile -InstallRoot $InstallRoot
+}
 $reviewOutput=@(Get-Content -LiteralPath $reviewOutFile -ErrorAction SilentlyContinue)+@(Get-Content -LiteralPath $reviewErrFile -ErrorAction SilentlyContinue)
 # Parse the structured review envelope from the stdout file only; stderr
 # diagnostics never participate in JSON parsing.

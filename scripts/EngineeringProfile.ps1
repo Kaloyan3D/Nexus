@@ -37,7 +37,7 @@ function Get-AihPreferredProfileId {
 
 function Set-AihEngineeringProfileKey {
     param([Parameter(Mandatory=$true)][string]$SettingsPath,[Parameter(Mandatory=$true)][string]$ProfileId)
-    $mutex=[Threading.Mutex]::new($false,'Local\AIHarness.EngineeringProfile')
+    $mutex=[Threading.Mutex]::new($false,(ConvertTo-AihSafeSyncName 'Local\AIHarness.EngineeringProfile'))
     $locked=$false
     try{
         $locked=$mutex.WaitOne([TimeSpan]::FromSeconds(10))

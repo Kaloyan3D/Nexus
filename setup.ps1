@@ -10,7 +10,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
-    throw 'AI Harness currently supports Windows only.'
+    throw 'This PowerShell entry point installs the Windows runtime only. On Linux, install Nexus natively with: ./setup.sh'
 }
 
 # Windows PowerShell 5.1 can evaluate parameter default expressions before

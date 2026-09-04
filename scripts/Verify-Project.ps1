@@ -46,11 +46,17 @@ function Get-AihExecutableLaunch {
     else {
         $workspacePrefix = $WorkingDirectory.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
         $candidates = @(Get-Command $Executable -All -ErrorAction SilentlyContinue | Where-Object { $_.Source })
-        $candidates = @($candidates | Where-Object { -not $_.Source.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase) })
+        # Skip project-local shims (e.g. node_modules/.bin). Path comparison
+        # case sensitivity follows the platform filesystem.
+        $comparison = if (Test-AihIsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+        $candidates = @($candidates | Where-Object { -not $_.Source.StartsWith($workspacePrefix, $comparison) })
         $ranked = @($candidates | Sort-Object @{ Expression = {
             $source = $_.Source
+            # Extensionless executables are directly launchable on Linux, so
+            # they rank first there; on Windows they remain last.
             if ($source -match '\.exe$') { 0 }
-            elseif ($source -match '\.(cmd|bat)$') { 1 }
+            elseif (-not (Test-AihIsWindows) -and $source -notmatch '\.[a-zA-Z]+$') { 1 }
+            elseif ($source -match '\.(cmd|bat)$') { if (Test-AihIsWindows) { 1 } else { 4 } }
             elseif ($source -match '\.ps1$') { 2 }
             else { 3 }
         } })
@@ -58,6 +64,9 @@ function Get-AihExecutableLaunch {
     }
     if ([string]::IsNullOrWhiteSpace($resolvedPath)) { return $null }
     if ($resolvedPath -match '\.(cmd|bat)$') {
+        # Windows-only: batch files need the cmd.exe host. On Linux a .cmd/.bat
+        # file is not executable, so resolution should never land here.
+        if (-not (Test-AihIsWindows)) { return $null }
         return [pscustomobject]@{
             FileName = (Join-Path $env:SystemRoot 'System32\cmd.exe')
             PrefixArguments = @('/d', '/s', '/c')
@@ -66,8 +75,19 @@ function Get-AihExecutableLaunch {
         }
     }
     if ($resolvedPath -match '\.ps1$') {
+        # PowerShell scripts launch through the platform PowerShell host:
+        # Windows PowerShell 5.1 at its fixed location on Windows, the Nexus
+        # managed (or system) pwsh elsewhere.
+        if (Test-AihIsWindows) {
+            return [pscustomobject]@{
+                FileName = (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')
+                PrefixArguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $resolvedPath)
+                Command = $resolvedPath
+                WrapCommand = $false
+            }
+        }
         return [pscustomobject]@{
-            FileName = (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')
+            FileName = (Get-AihPowerShellHost $InstallRoot)
             PrefixArguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $resolvedPath)
             Command = $resolvedPath
             WrapCommand = $false
@@ -91,20 +111,34 @@ function Invoke-AihVerificationCommand {
     $info = [System.Diagnostics.ProcessStartInfo]::new()
     if (-not [string]::IsNullOrWhiteSpace($Command.ShellCommand)) {
         $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Command.ShellCommand))
-        $info.FileName = 'powershell.exe'
+        # Shell verification commands run through the platform PowerShell host
+        # (Windows PowerShell 5.1 on Windows, the Nexus pinned pwsh elsewhere).
+        $info.FileName = (Get-AihPowerShellHost $InstallRoot)
         $info.Arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded"
     }
     else {
         $launch = Get-AihExecutableLaunch -Executable $Command.Executable -WorkingDirectory $Command.WorkingDirectory
         if ($null -eq $launch) { throw "Could not resolve executable for launch: $($Command.Executable)" }
         $info.FileName = $launch.FileName
-        $quotedArguments = @($Command.Arguments | ForEach-Object { ConvertTo-AihArgument $_ })
-        if ($launch.WrapCommand) {
-            $inner = ((@('"' + $launch.Command + '"')) + $quotedArguments) -join ' '
-            $info.Arguments = '/d /s /c "' + $inner + '"'
+        if (Test-AihIsWindows) {
+            # Windows: CreateProcess argument-string semantics with
+            # CreateProcess quoting rules (unchanged behavior).
+            $quotedArguments = @($Command.Arguments | ForEach-Object { ConvertTo-AihArgument $_ })
+            if ($launch.WrapCommand) {
+                $inner = ((@('"' + $launch.Command + '"')) + $quotedArguments) -join ' '
+                $info.Arguments = '/d /s /c "' + $inner + '"'
+            }
+            else {
+                $info.Arguments = (@($launch.PrefixArguments) + $quotedArguments) -join ' '
+            }
         }
         else {
-            $info.Arguments = (@($launch.PrefixArguments) + $quotedArguments) -join ' '
+            # Linux: argv is passed directly through ArgumentList, so spaces
+            # and quotes inside arguments are preserved exactly without any
+            # shell-level quoting.
+            foreach ($argument in @($launch.PrefixArguments) + @($Command.Arguments)) {
+                $info.ArgumentList.Add([string]$argument)
+            }
         }
     }
     $info.WorkingDirectory = $Command.WorkingDirectory
