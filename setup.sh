@@ -16,6 +16,9 @@
 set -eu
 
 AIH_SOURCE_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Checksum verification is a shared POSIX library so it is unit-testable
+# (tests/aih-verify-sha256.Tests.sh) and structurally parsed in one place.
+. "$AIH_SOURCE_ROOT/scripts/lib/aih-verify-sha256.sh"
 AIH_DEFAULT_ROOT="$HOME/.local/share/nexus"
 AIH_INSTALL_ROOT="${AIH_INSTALL_ROOT:-$AIH_DEFAULT_ROOT}"
 AIH_RESET_MANAGED_SETTINGS=0
@@ -116,28 +119,6 @@ aih_fetch() {
     fi
   }
   aih_fetch_impl "$1" "$2"
-}
-
-aih_verify_sha256() {
-  # Verify an archive against a sha256sum-style manifest (HASH<ws>NAME).
-  # Fails closed when the manifest is missing the artifact line.
-  aih_verify_sha256_impl() {
-    _archive=$1
-    _manifest=$2
-    _name=$3
-    _line=$(grep -E "(^|[[:space:]])${_name}([[:space:]]|$)" "$_manifest" | head -n 1 || true)
-    if [ -z "$_line" ]; then
-      echo "Nexus installer: checksum manifest does not contain '$_name'. Refusing an unverified download." >&2
-      exit 1
-    fi
-    _expected=$(printf '%s' "$_line" | awk '{print tolower($1)}')
-    _actual=$(sha256sum "$_archive" | awk '{print $1}')
-    if [ "$_actual" != "$_expected" ]; then
-      echo "Nexus installer: SHA256 mismatch for '$_name' (expected $_expected, got $_actual)." >&2
-      exit 1
-    fi
-  }
-  aih_verify_sha256_impl "$1" "$2" "$3"
 }
 
 aih_read_version() {

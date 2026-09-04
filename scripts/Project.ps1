@@ -260,6 +260,13 @@ function Get-AihProjectProfile {
     $resolvedWorkspace = [System.IO.Path]::GetFullPath($Workspace)
     if (-not (Test-Path -LiteralPath $resolvedWorkspace -PathType Container)) { throw "Workspace does not exist: $resolvedWorkspace" }
     $files = @(Get-AihWorkspaceFiles -Workspace $resolvedWorkspace)
+    # Runtime scratch state is not a verification surface. Stale task
+    # fixtures under gitignored scratch directories (e.g. a deliberately
+    # failing node:test workspace left in tmp/ by an earlier audit) used to
+    # surface as failing verification commands for the whole workspace. Drop
+    # those prefixes before stack detection so discovery only sees project
+    # source trees.
+    $files = @($files | Where-Object { $_ -notmatch '^(tmp|data|logs|runtime|\.ai-harness)[\\/]' })
     $stacks = [System.Collections.Generic.List[string]]::new()
     $commands = [System.Collections.Generic.List[object]]::new()
     Get-AihNodeCommands -Workspace $resolvedWorkspace -Files $files -Stacks $stacks -Commands $commands
