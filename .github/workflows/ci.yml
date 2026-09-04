@@ -25,9 +25,12 @@ jobs:
       - name: Validate POSIX shell sources
         run: |
           sh -n setup.sh
+          sh -n scripts/lib/aih-verify-sha256.sh
           for wrapper in bin/linux/*.sh; do
             sh -n "$wrapper"
           done
+      - name: Checksum manifest parser regression suite
+        run: sh tests/aih-verify-sha256.Tests.sh
       - name: Install and test natively on Linux
         run: |
           ./setup.sh \

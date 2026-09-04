@@ -91,7 +91,14 @@ try {
 
     # ── installer artifacts ──
     $setupSh=[IO.File]::ReadAllText((Join-Path $InstallRoot 'setup.sh'))
-    Assert-Aih ($setupSh.Contains('sha256sum')-and$setupSh.Contains('Refusing an unverified download')) 'setup.sh verifies downloads with sha256 and fails closed'
+    Assert-Aih ($setupSh.Contains('scripts/lib/aih-verify-sha256.sh')) 'setup.sh sources the shared checksum-verification library'
+    $shaLib=[IO.File]::ReadAllText((Join-Path $InstallRoot 'scripts/lib/aih-verify-sha256.sh'))
+    Assert-Aih ($shaLib.Contains('sha256sum')-and$shaLib.Contains('Refusing an unverified download')) 'checksum library verifies downloads with sha256 and fails closed'
+    Assert-Aih (-not $shaLib.Contains('grep -E')) 'checksum library never regex-matches the artifact name (structural parse)'
+    Assert-Aih ($shaLib.Contains('entry == name')) 'checksum library compares the artifact name with exact equality'
+    Assert-Aih ($shaLib.Contains('substr(entry, 1, 1) == "*"')) 'checksum library strips the GNU binary marker (*NAME)'
+    Assert-Aih ($shaLib.Contains('length(digest) != 64')) 'checksum library validates the 64-hex digest shape'
+    Assert-Aih (-not ([IO.File]::ReadAllBytes((Join-Path $InstallRoot 'scripts/lib/aih-verify-sha256.sh')) -contains 13)) 'checksum library is LF-only'
     $sudoLines=@($setupSh -split "`r?`n" | Where-Object { $_ -match '^\s*sudo\s' })
     Assert-Aih (@($sudoLines).Count-eq0) 'setup.sh never executes sudo'
     Assert-Aih ($setupSh.Contains('--install-root')-and$setupSh.Contains('--skip-path-check')) 'setup.sh exposes install-root and path-check flags'
