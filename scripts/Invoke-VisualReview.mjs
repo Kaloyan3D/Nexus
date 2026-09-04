@@ -11,8 +11,10 @@
  *     task ledger, and NEVER gains completion authority. The API key is read
  *     from the environment (never from the request file, never persisted).
  *   - It returns a strict JSON transport outcome on stdout:
- *       { ok: true,  model, content, review|null, usage }
- *       { ok: false, errorKind, error }
+ *       { ok: true,  model, content, review|null, usage, finishReason }
+ *       { ok: false, errorKind, error, finishReason }
+ *     finishReason is safe provider metadata (choices[0].finish_reason);
+ *     reasoning_content is NEVER extracted, used as content, or persisted.
  *     Review SEMANTICS (schema validation, verdict/score/dimensions contract)
  *     are owned by the controller plane (scripts/VisualReview.ps1).
  *   - Mock seam: request.mockFile substitutes the HTTP round-trip with a
@@ -117,6 +119,8 @@ export function parseReviewText(text) {
 // (empty content, HTTP 429/5xx, timeout, malformed transport envelope).
 // Valid results, deterministic schema failures, and local request problems
 // are never retried. Maximum provider calls per invocation: 2.
+// V1.2: output truncation (finish_reason=length with empty or incomplete
+// content) is deterministic - classified output-truncated and never retried.
 const MAX_TRANSPORT_ATTEMPTS = 2
 const TRANSIENT_HTTP_STATUS = new Set([429, 500, 502, 503, 504])
 
@@ -130,7 +134,7 @@ function mockEntryFor(document, cursor) {
   return document
 }
 
-function mockOutcomeFor(document, cursor) {
+function mockOutcomeFor(document, cursor, requestModel) {
   const entry = mockEntryFor(document, cursor)
   const status = Number(entry && entry.status)
   const body = entry ? entry.body : undefined
@@ -142,18 +146,59 @@ function mockOutcomeFor(document, cursor) {
     outcome.status = Number.isInteger(status) ? status : null
     return outcome
   }
+  const outcome = responseOutcomeFor(status, body, requestModel)
+  outcome.mocked = true
+  return outcome
+}
+
+/** Classify a 2xx chat-completions response body into the transport outcome.
+ *  V1.2: this transport NEVER imposes a client-side output-token cap - the
+ *  provider/model enforces its native generation limits. finish_reason=length
+ *  with empty or incomplete assistant content is deterministic output
+ *  truncation: classified 'output-truncated', failed closed, never retried,
+ *  and never heuristically repaired. reasoning_content is never extracted,
+ *  never used as result content, and never persisted; only safe metadata
+ *  (finishReason, usage token counts, model) travels on the outcome. */
+function responseOutcomeFor(status, body, requestModel) {
+  const first = body && Array.isArray(body.choices) ? body.choices[0] : null
+  const finishReason = first && first.finish_reason != null ? String(first.finish_reason) : null
   const content = extractContent(body)
-  if (content != null && content.trim() === '') {
-    const outcome = errorOutcome('empty-content', 'provider returned empty assistant content')
-    outcome.status = status
-    return outcome
-  }
+  const usage = body && typeof body === 'object' ? body.usage : null
   if (content == null) {
-    const outcome = errorOutcome('provider-response-shape', 'provider returned no assistant text content')
+    const outcome = finishReason === 'length'
+      ? errorOutcome('output-truncated', 'provider hit its native output limit (finish_reason=length) before producing assistant text content')
+      : errorOutcome('provider-response-shape', 'provider returned no assistant text content')
     outcome.status = status
+    outcome.finishReason = finishReason
+    outcome.usage = usage
     return outcome
   }
-  return { ok: true, content, review: parseReviewText(content), usage: body && typeof body === 'object' ? body.usage : null, mocked: true, status }
+  if (content.trim() === '') {
+    const outcome = finishReason === 'length'
+      ? errorOutcome('output-truncated', 'provider hit its native output limit (finish_reason=length) with empty assistant content')
+      : errorOutcome('empty-content', 'provider returned empty assistant content')
+    outcome.status = status
+    outcome.finishReason = finishReason
+    outcome.usage = usage
+    return outcome
+  }
+  const review = parseReviewText(content)
+  if (finishReason === 'length' && review == null) {
+    const outcome = errorOutcome('output-truncated', 'provider hit its native output limit (finish_reason=length); assistant content is truncated and not a complete JSON object')
+    outcome.status = status
+    outcome.finishReason = finishReason
+    outcome.usage = usage
+    return outcome
+  }
+  return {
+    ok: true,
+    model: body && typeof body === 'object' && typeof body.model === 'string' ? body.model : String(requestModel),
+    content,
+    review,
+    usage: body && typeof body === 'object' ? body.usage : null,
+    finishReason,
+    status,
+  }
 }
 
 /** One provider call. Returns { outcome, transient }. */
@@ -161,7 +206,7 @@ async function attemptOnce(request, mockDoc, cursor, transportBody, apiKeyEnv, t
   const startedAt = Date.now()
   let outcome
   if (mockDoc != null) {
-    outcome = mockOutcomeFor(mockDoc, cursor)
+    outcome = mockOutcomeFor(mockDoc, cursor, String(request.model))
   } else {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -196,25 +241,7 @@ async function attemptOnce(request, mockDoc, cursor, transportBody, apiKeyEnv, t
       outcome.status = response.status
       return finishAttempt(outcome, startedAt)
     }
-    const content = extractContent(responseBody)
-    if (content == null) {
-      outcome = errorOutcome('provider-response-shape', 'provider returned no assistant text content')
-      outcome.status = response.status
-      return finishAttempt(outcome, startedAt)
-    }
-    if (content.trim() === '') {
-      outcome = errorOutcome('empty-content', 'provider returned empty assistant content')
-      outcome.status = response.status
-      return finishAttempt(outcome, startedAt)
-    }
-    outcome = {
-      ok: true,
-      model: typeof responseBody.model === 'string' ? responseBody.model : String(request.model),
-      content,
-      review: parseReviewText(content),
-      usage: responseBody && typeof responseBody === 'object' ? responseBody.usage : null,
-      status: response.status,
-    }
+    outcome = responseOutcomeFor(response.status, responseBody, request.model)
   }
   return finishAttempt(outcome, startedAt)
 }
@@ -282,9 +309,10 @@ export async function runTransport(request) {
   if (responseFormat && responseFormat.type === 'json_object') {
     transportBody.messages[1].content[0].text = String(request.userText) + '\n\nRespond with a single JSON object only - no prose, no Markdown fences, no code blocks.'
   }
-  if (Number.isFinite(Number(request.maxOutputTokens)) && Number(request.maxOutputTokens) > 0) {
-    transportBody.max_tokens = Number(request.maxOutputTokens)
-  }
+  // V1.2: NO client-side output-token cap. max_tokens / max_completion_tokens
+  // / max_output_tokens are never sent for visual review; the configured
+  // provider/model enforces its native generation limits. finish_reason=length
+  // is detected and classified output-truncated by responseOutcomeFor.
 
   const apiKeyEnv = typeof request.apiKeyEnv === 'string' && request.apiKeyEnv !== '' ? request.apiKeyEnv : 'DEEPSEEK_API_KEY'
   const timeoutMs = Number.isFinite(Number(request.timeoutMs)) && Number(request.timeoutMs) > 0 ? Number(request.timeoutMs) : 180000
@@ -298,6 +326,7 @@ export async function runTransport(request) {
       ok: outcome.ok === true,
       kind: outcome.ok ? 'success' : String(outcome.errorKind || 'error'),
       status: outcome.status == null ? null : Number(outcome.status),
+      finishReason: outcome.finishReason == null ? null : String(outcome.finishReason),
       durationMs: Number(outcome.durationMs) || 0,
       error: outcome.ok ? null : String(outcome.error || '').slice(0, 200),
     })

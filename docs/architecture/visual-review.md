@@ -202,14 +202,26 @@ malformed JSON all fail closed (`visual-review-schema-invalid`).
 One visual-review invocation performs **at most two provider calls**: exactly
 one retry, only for clearly transient transport failures —
 
-- empty assistant content (observed once against the live provider)
+- empty assistant content WITHOUT `finish_reason=length`
 - HTTP 429 / HTTP 5xx
 - transport timeout
 - malformed provider transport envelope (HTTP 200 without a usable response body)
 
+V1.2 output-token policy: the transport sends **no client-side output-token
+cap** for visual review (no `max_tokens` / `max_completion_tokens` /
+`max_output_tokens`) — the configured provider/model enforces its native
+generation limits. `finish_reason` is persisted as safe metadata
+(`transport.finishReason` plus usage token counts). When the provider reaches
+its native limit (`finish_reason=length`) and the assistant content is empty
+or not a complete JSON object, the transport fails closed with
+`visual-review-output-truncated`: never retried, never heuristically
+repaired, no verdict and no repair handoff, and `reasoning_content` is never
+persisted and never used as the review result.
+
 Never retried: a valid PASS/REVISE/BLOCK result, any schema-valid result,
 deterministic local validation failures (strict schema, missing/invalid
-screenshot, capability rejection), and non-transient provider rejections
+screenshot, capability rejection), output truncation
+(`visual-review-output-truncated`), and non-transient provider rejections
 (HTTP 4xx). When a retry occurs the evidence of **both** attempts is persisted
 as `transport-retry.json` in the iteration directory, and `result.json`
 (`transport.attemptCount` / `transport.attempts`) plus every failure
@@ -229,6 +241,7 @@ diagnostic carry the full attempt list.
 | HTTP/provider failure, timeout (429/5xx/empty content/malformed envelope) | `visual-review-provider-error` / `visual-review-timeout` / `visual-review-transport-error` | once + one bounded transient retry (max 2 calls) |
 | malformed model JSON | `visual-review-schema-invalid` | once — deterministic schema failures are never retried |
 | schema violation (incl. forbidden patch keys) | `visual-review-schema-invalid` | once — deterministic schema failures are never retried |
+| native output limit reached (`finish_reason=length`) with empty or truncated content | `visual-review-output-truncated` | once — deterministic truncation is never retried |
 
 Failures are structured JSON on stdout with exit code 3 (CLI) and are
 surfaced as controller messages by the bridge. V1.1 adds exactly one bounded
@@ -246,6 +259,7 @@ transient retry above). The V2 controller never re-invokes the review service
 after the transport has exhausted its bounded retry — a transport-exhausted
 invocation (`visual-review-empty-content`, `visual-review-timeout`,
 `visual-review-transport-error`, `visual-review-provider-response-shape`,
+`visual-review-output-truncated`,
 non-transient `visual-review-provider-error`) is terminal for that invocation:
 the loop emits one structured failure, marks the visual status `unavailable`
 with the reason, and does not burn the iteration. A later **explicit**

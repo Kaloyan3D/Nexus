@@ -466,7 +466,11 @@ try{
         baseUrl=$providerConfig.baseURL; apiKeyEnv=$providerConfig.apiKeyEnv; model=$target.Model
         systemPrompt=$script:AihVisualSystemPrompt; userText=$requestText.ToString()
         images=@($imageRecords|ForEach-Object{[ordered]@{path=$_.storedPath;mediaType=$_.mediaType}})
-        maxOutputTokens=4096; timeoutMs=180000
+        # V1.2: NO client-side output-token cap is sent for visual review (no
+        # max_tokens / max_completion_tokens / max_output_tokens); the
+        # configured provider/model enforces its native generation limits and
+        # finish_reason=length is classified by the transport.
+        timeoutMs=180000
         mockFile=if([string]::IsNullOrWhiteSpace($MockResponseFile)){$null}else{[IO.Path]::GetFullPath($MockResponseFile)}
     }
     $tempRoot=[IO.Path]::GetTempPath()
@@ -526,7 +530,7 @@ try{
             $errorKind='visual-review-provider-failed'
             if(-not[string]::IsNullOrWhiteSpace([string](Get-AihPropertyValue $outcome 'errorKind' ''))){$errorKind='visual-review-'+[string](Get-AihPropertyValue $outcome 'errorKind' '')}
             $message=[string](Get-AihPropertyValue $outcome 'error' 'the visual transport failed without a structured error')
-            $diagnostic=[ordered]@{schemaVersion=1;kind='visual-review-transport-error';taskId=$TaskId;taskInstanceId=$effectiveInstanceId;iteration=$iteration.Iteration;provider=$target.Provider;model=$target.Model;errorKind=$errorKind;error=($message -replace '(?i)bearer\s+[a-z0-9._\-]+','bearer [REDACTED]');attemptCount=$attemptCount;attempts=$attempts;timestampUtc=[DateTime]::UtcNow.ToString('o')}
+            $diagnostic=[ordered]@{schemaVersion=1;kind='visual-review-transport-error';taskId=$TaskId;taskInstanceId=$effectiveInstanceId;iteration=$iteration.Iteration;provider=$target.Provider;model=$target.Model;errorKind=$errorKind;error=($message -replace '(?i)bearer\s+[a-z0-9._\-]+','bearer [REDACTED]');finishReason=(Get-AihPropertyValue $outcome 'finishReason' $null);usage=(Get-AihPropertyValue $outcome 'usage' $null);attemptCount=$attemptCount;attempts=$attempts;timestampUtc=[DateTime]::UtcNow.ToString('o')}
             Write-AihAtomicJson -Path (Join-Path $iteration.Path 'transport-error.json') -Value $diagnostic
             Write-AihVisualFailure -ErrorKind $errorKind -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message $message -Iteration $iteration.Iteration -ProviderTransportAttempts $attemptCount
         }
@@ -553,7 +557,7 @@ try{
             iteration=$iteration.Iteration; capability='visual-review'; role='visualReviewer'
             trigger=[string]$Trigger; visualIteration=$VisualIteration
             profile=$profile.Id; model=[ordered]@{id=$target.ModelId;model=$target.Model;displayName=$target.ModelDisplayName;vendor=$target.Vendor;provider=$target.Provider;reasoning=$target.Reasoning}
-            transport=[ordered]@{provider=$target.Provider;mocked=[bool](Get-AihPropertyValue $outcome 'mocked' $false);attemptCount=$attemptCount;attempts=$attempts;usage=$usage}
+            transport=[ordered]@{provider=$target.Provider;mocked=[bool](Get-AihPropertyValue $outcome 'mocked' $false);attemptCount=$attemptCount;attempts=$attempts;finishReason=(Get-AihPropertyValue $outcome 'finishReason' $null);usage=$usage}
             packetPath=(Join-Path $iteration.Path 'packet.json')
             readOnly=$true; freshContext=$true; completionAuthority=$false; humanAcceptance=$false
             completedAtUtc=[DateTime]::UtcNow.ToString('o')
