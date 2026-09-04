@@ -90,6 +90,11 @@ engineering execution class and not a repurposed reviewer:
   in the engineering workspace (`packet.json`, `result.json`, screenshot
   copies; `transport-error.json` for diagnostics). The runs tree is
   git-ignored, so screenshots are never committed automatically.
+- **Runtime target binding** — every automatic Android viewport capture binds
+  `task -> workspace/project -> { platform, deviceId, packageName, activity?,
+  deepLink? }`. `expo.android.package` in `app.json` or `app.config.*` supplies
+  the project-agnostic default; `.ai-harness/runtime-target.json` and a
+  scenario-local `runtimeTarget` provide explicit overrides.
 - **Validation authority** — the controller service (`scripts/VisualReview.ps1`)
   is the *single* schema authority. The transport script parses the model
   text best-effort, but the controller plane re-parses and strictly
@@ -108,6 +113,16 @@ request file and environment, and writes nothing. Capture-VisualEvidence.ps1
 (Android/ADB: `screencap` writes the PNG **on the device**, `adb pull`
 transfers it to a deterministic host path — no binary data ever crosses a
 PowerShell text pipe).
+
+`VisualLoop.ps1 -> RuntimeTarget.ps1 -> Capture-VisualEvidence.ps1` is the
+runtime identity boundary. Capture uses a named mutex derived from `deviceId`.
+Inside that device-scoped critical section it inspects the resumed package,
+foregrounds the expected activity/deep link/launcher when needed, rechecks the
+resumed package, captures, hashes, and persists `<screenshot>.identity.json`.
+The identity record contains `deviceId`, `expectedPackage`, `actualPackage`,
+`foregroundActivity`, `timestamp`, `sha256`, `iteration`, and `scenarioId`.
+Deterministic preflight rejects missing or mismatched viewport identity before
+the vision provider can be called.
 
 ### The visualReviewer role contract
 
@@ -148,8 +163,9 @@ The deterministic controller remains the completion authority.
   call); the validated findings are posted back to the engineering session.
 - `bin/aih-visual-review.cmd` — CLI equivalent (same controller service,
   `-TaskId` required).
-- `scripts/Capture-VisualEvidence.ps1 -OutputPath <artifact>` — deterministic
-  Android-only screenshot capture (device file + `adb pull`).
+- `scripts/Capture-VisualEvidence.ps1 -OutputPath <artifact> -PackageName
+  <android.package> [-DeviceSerial <serial>]` — identity-verified Android-only
+  screenshot capture (device file + `adb pull`).
 
 The visual model is **never** exposed as a normal writable subagent tool.
 
@@ -197,6 +213,8 @@ diagnostic carry the full attempt list.
 | task/profile/role/provider unresolved | `visual-review-resolution-failed` / `visual-review-role-unbound` / `visual-review-target-unresolved` / `visual-review-provider-unresolved` | no |
 | model lacks explicit `supportsVision` | `visual-review-not-vision-capable` | no |
 | no/invalid screenshot, budget violation | `visual-review-packet-rejected` | no |
+| Android package cannot be resolved unambiguously | `visual-review-capture-unavailable` | no |
+| expected package is not resumed after launch/recheck | `visual-capture-target-mismatch` | no |
 | API key missing | `visual-review-api-key-missing` | no |
 | HTTP/provider failure, timeout (429/5xx/empty content/malformed envelope) | `visual-review-provider-error` / `visual-review-timeout` / `visual-review-transport-error` | once + one bounded transient retry (max 2 calls) |
 | malformed model JSON | `visual-review-schema-invalid` | once — deterministic schema failures are never retried |

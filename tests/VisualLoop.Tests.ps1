@@ -22,7 +22,7 @@ try{
     New-Item -ItemType Directory -Path (Join-Path $fixture 'scripts') -Force|Out-Null
     New-Item -ItemType Directory -Path (Join-Path $fixture 'data') -Force|Out-Null
     foreach($name in @('routing-policy.json','engineering-profiles.json','model-registry.json')){Copy-Item (Join-Path $liveLayout.Root ('config\'+$name)) (Join-Path $fixture ('config\'+$name))}
-    foreach($name in @('Common.ps1','Routing.ps1','TaskController.ps1','Telemetry.ps1','VisualReview.ps1','VisualLoop.ps1','VisualRequirement.ps1','Invoke-VisualReview.mjs','Capture-VisualEvidence.ps1')){Copy-Item (Join-Path $liveLayout.Root ('scripts\'+$name)) (Join-Path $fixture ('scripts\'+$name))}
+    foreach($name in @('Common.ps1','Routing.ps1','TaskController.ps1','Telemetry.ps1','VisualReview.ps1','VisualLoop.ps1','VisualRequirement.ps1','RuntimeTarget.ps1','Invoke-VisualReview.mjs','Capture-VisualEvidence.ps1')){Copy-Item (Join-Path $liveLayout.Root ('scripts\'+$name)) (Join-Path $fixture ('scripts\'+$name))}
     @'
 engineering-profile: deepseek-codex
 llm-pi-ai:
@@ -56,7 +56,7 @@ llm-pi-ai:
 
     $script:loopSeq=0
     function Invoke-AihLoop {
-        param([string]$Action='iterate',[string]$MockResponseFile,[string]$ScenarioPath,[string]$PolicyPath,[string]$AdbPath,[int]$MaxIterations=3,[string]$LoopTaskId)
+        param([string]$Action='iterate',[string]$MockResponseFile,[string]$ScenarioPath,[string]$PolicyPath,[string]$AdbPath,[string]$DeviceSerial,[int]$MaxIterations=3,[string]$LoopTaskId)
         $script:loopSeq++
         $targetTaskId=$task.taskId
         if(-not[string]::IsNullOrWhiteSpace($LoopTaskId)){ $targetTaskId=$LoopTaskId }
@@ -67,6 +67,7 @@ llm-pi-ai:
         if($ScenarioPath){$cmd+=(' -ScenarioPath "'+$ScenarioPath+'"')}
         if($PolicyPath){$cmd+=(' -PolicyPath "'+$PolicyPath+'"')}
         if($AdbPath){$cmd+=(' -AdbPath "'+$AdbPath+'"')}
+        if($DeviceSerial){$cmd+=(' -DeviceSerial "'+$DeviceSerial+'"')}
         $cmd+=(' > "'+$outFile+'" 2> "'+$errFile+'"')
         cmd /c $cmd
         $exit=$LASTEXITCODE
@@ -209,6 +210,51 @@ llm-pi-ai:
     Assert-Aih ($runC.exitCode -eq 3 -and $runC.json.errorKind -eq 'visual-review-capture-unavailable') '5: adb unavailable -> capture-unavailable (no fabricated PASS)'
     $stateC=Get-Content (Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $taskC.taskId) 'visual') 'state.json') -Raw|ConvertFrom-Json
     Assert-Aih ($stateC.status -eq 'unavailable' -and [int]$stateC.iteration -eq 0) '5: unavailable status recorded without burning an iteration'
+
+    # Resumed package remains wrong after launch: fail with the dedicated
+    # identity error before preflight/reviewer and do not burn iteration 1.
+    @{expo=@{android=@{package='app.expected.mobile'}}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $workspace 'app.json') -Encoding UTF8
+    $fakeAdbPs=Join-Path $mockDir 'fake-mismatch-adb.ps1'
+    $fakeAdbCmd=Join-Path $mockDir 'adb-mismatch.cmd'
+    $fakeAdbLog=Join-Path $mockDir 'fake-mismatch-adb.log'
+    $fakeAdbState=Join-Path $mockDir 'fake-mismatch-foreground.txt'
+    'com.wrong.mobile'|Set-Content -LiteralPath $fakeAdbState -NoNewline
+    @'
+param()
+$a=@($args);if($a.Count-ge2-and$a[0]-eq'-s'){$a=@($a|Select-Object -Skip 2)}
+$command=$a-join' ';[IO.File]::AppendAllText($env:AIH_LOOP_FAKE_ADB_LOG,$command+[Environment]::NewLine)
+if($a[0]-eq'devices'){"List of devices attached`nemulator-5554`tdevice";exit 0}
+if($command-like'shell dumpsys activity activities*'){ $pkg=(Get-Content -Raw $env:AIH_LOOP_FAKE_ADB_STATE).Trim();"mResumedActivity: ActivityRecord{x u0 $pkg/.MainActivity t1}";exit 0 }
+if($command-like'shell monkey *'){if($env:AIH_LOOP_FAKE_ADB_STICKY-ne'1'){$i=[Array]::IndexOf($a,'-p');[IO.File]::WriteAllText($env:AIH_LOOP_FAKE_ADB_STATE,$a[$i+1])};'Events injected: 1';exit 0 }
+if($command-like'shell screencap *'){exit 0}
+if($a[0]-eq'pull'){Copy-Item -LiteralPath $env:AIH_LOOP_FAKE_ADB_PNG -Destination $a[-1] -Force;exit 0}
+if($command-like'shell rm *'){exit 0}
+exit 1
+'@|Set-Content -LiteralPath $fakeAdbPs -Encoding UTF8
+    ('@powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "'+$fakeAdbPs+'" %*')|Set-Content -LiteralPath $fakeAdbCmd -Encoding ASCII
+    $env:AIH_LOOP_FAKE_ADB_LOG=$fakeAdbLog;$env:AIH_LOOP_FAKE_ADB_STATE=$fakeAdbState;$env:AIH_LOOP_FAKE_ADB_PNG=$pngPath;$env:AIH_LOOP_FAKE_ADB_STICKY='1'
+    Push-Location $workspace
+    try{ 'export const Mismatch=()=>null'|Set-Content (Join-Path $workspace 'apps\mobile\src\components\Mismatch.tsx');git add -A;git commit -m 'mismatch ui change'|Out-Null }finally{Pop-Location}
+    $taskMismatch=New-AihTask $workspace 'shared emulator mismatch task'
+    Push-Location $workspace
+    try{ 'export const Mismatch2=()=>null'|Set-Content (Join-Path $workspace 'apps\mobile\src\components\Mismatch2.tsx');git add -A;git commit -m 'mismatch ui followup'|Out-Null }finally{Pop-Location}
+    $runMismatch=Invoke-AihLoop -Action 'iterate' -MockResponseFile $reviseMock -ScenarioPath $viewportScenario -PolicyPath $policyPath -AdbPath $fakeAdbCmd -DeviceSerial emulator-5554 -LoopTaskId $taskMismatch.taskId
+    Assert-Aih ($runMismatch.exitCode-eq3-and$runMismatch.json.errorKind-eq'visual-capture-target-mismatch') '5: target mismatch fails closed with dedicated error'
+    $mismatchRoot=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $taskMismatch.taskId) 'visual') 'iteration-01'
+    $mismatchState=Get-Content (Join-Path (Split-Path -Parent $mismatchRoot) 'state.json') -Raw|ConvertFrom-Json
+    Assert-Aih ([int]$mismatchState.iteration-eq0-and-not(Test-Path (Join-Path $mismatchRoot 'review-stdout.txt'))) '5: mismatch makes zero provider calls and leaves visual iteration unchanged'
+    Remove-Item Env:AIH_LOOP_FAKE_ADB_STICKY
+    Push-Location $workspace
+    try{ 'export const Identity=()=>null'|Set-Content (Join-Path $workspace 'apps\mobile\src\components\Identity.tsx');git add -A;git commit -m 'identity preflight ui'|Out-Null }finally{Pop-Location}
+    $taskIdentity=New-AihTask $workspace 'identity preflight task'
+    Push-Location $workspace
+    try{ 'export const Identity2=()=>null'|Set-Content (Join-Path $workspace 'apps\mobile\src\components\Identity2.tsx');git add -A;git commit -m 'identity preflight followup'|Out-Null }finally{Pop-Location}
+    $runIdentity=Invoke-AihLoop -Action 'preflight' -MockResponseFile $reviseMock -ScenarioPath $viewportScenario -PolicyPath $policyPath -AdbPath $fakeAdbCmd -DeviceSerial emulator-5554 -LoopTaskId $taskIdentity.taskId
+    $identityRoot=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $taskIdentity.taskId) 'visual') 'iteration-01'
+    $identityPreflight=Get-Content (Join-Path $identityRoot 'preflight.json') -Raw|ConvertFrom-Json
+    Assert-Aih ($runIdentity.exitCode-eq0-and@($identityPreflight.preflight.checks|Where-Object{$_.name-eq'target-identity:current'-and$_.status-eq'PASS'}).Count-eq1) '5: deterministic preflight includes verified target identity'
+    Assert-Aih ($identityPreflight.runtimeTarget.deviceId-eq'emulator-5554'-and$identityPreflight.runtimeTarget.packageName-eq'app.expected.mobile'-and(Test-Path (Join-Path $identityRoot 'current.png.identity.json'))) '5: runtime binding and screenshot identity are persisted together'
+    Remove-Item Env:AIH_LOOP_FAKE_ADB_LOG,Env:AIH_LOOP_FAKE_ADB_STATE,Env:AIH_LOOP_FAKE_ADB_PNG -ErrorAction SilentlyContinue
     # provider permanent failure (HTTP 400 -> non-transient)
     $failMock=Join-Path $mockDir 'permfail.json'
     @{status=400;body=@{error=@{message='bad request'}}}|ConvertTo-Json -Depth 5|Set-Content -Path $failMock -Encoding UTF8
@@ -311,6 +357,7 @@ llm-pi-ai:
     Write-Host "RESULT: $passed visual-loop assertions passed."
 }finally{
     Remove-Item Env:AIH_VISUAL_LOOP_TEST_KEY -ErrorAction SilentlyContinue
+    Remove-Item Env:AIH_LOOP_FAKE_ADB_LOG,Env:AIH_LOOP_FAKE_ADB_STATE,Env:AIH_LOOP_FAKE_ADB_PNG,Env:AIH_LOOP_FAKE_ADB_STICKY -ErrorAction SilentlyContinue
     if($env:AIH_KEEP_LOOP_FIXTURE -ne '1'){
         if(Test-Path $fixture){Remove-Item -LiteralPath $fixture -Recurse -Force}
         if(Test-Path $workspace){Remove-Item -LiteralPath $workspace -Recurse -Force}

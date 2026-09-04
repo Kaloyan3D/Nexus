@@ -9,6 +9,7 @@ param(
  [int]$MaxIterations=3,
  [string]$MockResponseFile,
  [string]$AdbPath,
+ [string]$DeviceSerial,
  [string]$InstallRoot,
  [string]$Trigger='automatic',
  [string]$ResultPath,
@@ -45,6 +46,7 @@ if($PayloadFile){
 . (Join-Path $PSScriptRoot 'TaskController.ps1')
 . (Join-Path $PSScriptRoot 'Telemetry.ps1')
 . (Join-Path $PSScriptRoot 'VisualRequirement.ps1')
+. (Join-Path $PSScriptRoot 'RuntimeTarget.ps1')
 
 $script:AihVisualLoopStatuses=@('pending','reviewing','revise','pass','exhausted','unavailable')
 $script:AihVisualMaxCaptures=5
@@ -83,12 +85,16 @@ function Add-AihVisualStateReason {
 # independently; a preflight PASS is NOT a visual-review PASS and never
 # satisfies a required visual task on its own.
 function Get-AihVisualPreflight {
-    param($Captures,[string]$Question,[int]$MaxImages=5)
+    param($Captures,[string]$Question,[int]$MaxImages=5,$RuntimeTarget=$null)
     $checks=@()
     $totalBytes=0
     foreach($capture in @($Captures)){
         $path=[string]$capture.storedPath
         $name=[string]$capture.name
+        if([string]$capture.mode-eq'viewport'){
+            $identityOk=(-not[string]::IsNullOrWhiteSpace([string]$capture.deviceId))-and(-not[string]::IsNullOrWhiteSpace([string]$capture.expectedPackage))-and([string]$capture.expectedPackage-eq[string]$capture.actualPackage)-and(-not[string]::IsNullOrWhiteSpace([string]$capture.foregroundActivity))
+            $checks+=[ordered]@{name='target-identity:'+$name;status=if($identityOk){'PASS'}else{'FAIL'};detail=('deviceId='+[string]$capture.deviceId+' expectedPackage='+[string]$capture.expectedPackage+' actualPackage='+[string]$capture.actualPackage+' foregroundActivity='+[string]$capture.foregroundActivity)}
+        }
         if(-not(Test-Path -LiteralPath $path)){
             $checks+=[ordered]@{ name='file-exists:'+ $name; status='FAIL'; detail=('capture file missing: '+$path) }
             continue
@@ -156,6 +162,7 @@ function Get-AihVisualPreflight {
         totalBytes=$totalBytes
         estimatedTokens=$estimatedTokens
         note='deterministic preflight; a preflight PASS is NOT a visual-review PASS'
+        runtimeTarget=$RuntimeTarget
     }
 }
 
@@ -261,7 +268,7 @@ function Copy-AihLoopCaptureFile {
 }
 
 function Invoke-AihLoopCapture {
-    param($Scenario,[string]$IterationDirectory,[string]$Workspace)
+    param($Scenario,[string]$IterationDirectory,[string]$Workspace,$RuntimeTarget,[int]$Iteration)
     $captures=@($Scenario.captures)
     if(@($captures).Count-eq 0){ throw 'the visual scenario defines no captures' }
     if(@($captures).Count-gt $script:AihVisualMaxCaptures){ $captures=@($captures | Select-Object -First $script:AihVisualMaxCaptures) }
@@ -281,10 +288,13 @@ function Invoke-AihLoopCapture {
         $outputPath=Join-Path $IterationDirectory ($name+'.png')
         # -Force: the loop owns the iteration directory and wants a fresh capture per attempt
         $args=@('-OutputPath',$outputPath,'-Force')
+        $args+=@('-DeviceSerial',[string]$RuntimeTarget.deviceId,'-PackageName',[string]$RuntimeTarget.packageName,'-ScenarioId',[string]$Scenario.id,'-Iteration',[string]$Iteration)
+        if(-not[string]::IsNullOrWhiteSpace([string]$RuntimeTarget.activity)){$args+=@('-Activity',[string]$RuntimeTarget.activity)}
+        if(-not[string]::IsNullOrWhiteSpace([string]$RuntimeTarget.deepLink)){$args+=@('-DeepLink',[string]$RuntimeTarget.deepLink)}
         if(-not[string]::IsNullOrWhiteSpace([string]$AdbPath)){ $args+=@('-AdbPath',$AdbPath) }
         if(-not[string]::IsNullOrWhiteSpace([string]$InstallRoot)){ $args+=@('-InstallRoot',$InstallRoot) }
-        $capOutFile=Join-Path $iterationDir ($name+'-capture-stdout.txt')
-        $capErrFile=Join-Path $iterationDir ($name+'-capture-stderr.txt')
+        $capOutFile=Join-Path $IterationDirectory ($name+'-capture-stdout.txt')
+        $capErrFile=Join-Path $IterationDirectory ($name+'-capture-stderr.txt')
         $capCmd=('powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+(Join-Path $PSScriptRoot 'Capture-VisualEvidence.ps1')+'" '+($args|ForEach-Object{ if($_ -match '[\s"]'){ '"'+($_ -replace '"','\"')+'"' } else { $_ } })-join ' ')+(' > "'+$capOutFile+'" 2> "'+$capErrFile+'"')
         cmd /c $capCmd
         $captureExit=$LASTEXITCODE
@@ -298,10 +308,12 @@ function Invoke-AihLoopCapture {
         if($captureExit-ne 0){
             $reason='ADB capture failed with exit code '+$captureExit
             if($null-ne$captureDoc-and$null-ne$captureDoc.error){ $reason=[string]$captureDoc.error }
-            throw $reason
+            $failure=New-Object System.Exception($reason)
+            if($null-ne$captureDoc-and$null-ne$captureDoc.errorKind){$failure.Data['AihErrorKind']=[string]$captureDoc.errorKind}
+            throw $failure
         }
         if($null-eq$captureDoc-or-not[bool]$captureDoc.ok){ throw 'ADB capture did not return a valid structured result' }
-        $evidence.Add([ordered]@{ name=$name; storedPath=[string]$captureDoc.outputPath; originalPath=[string]$captureDoc.outputPath; bytes=[int]$captureDoc.bytes; sha256=[string]$captureDoc.sha256; mediaType=[string]$captureDoc.mediaType; mode='viewport'; deviceSerial=[string]$captureDoc.deviceSerial })
+        $evidence.Add([ordered]@{name=$name;storedPath=[string]$captureDoc.outputPath;originalPath=[string]$captureDoc.outputPath;identityPath=[string]$captureDoc.identityPath;bytes=[int]$captureDoc.bytes;sha256=[string]$captureDoc.sha256;mediaType=[string]$captureDoc.mediaType;mode='viewport';deviceSerial=[string]$captureDoc.deviceSerial;deviceId=[string]$captureDoc.deviceId;expectedPackage=[string]$captureDoc.expectedPackage;actualPackage=[string]$captureDoc.actualPackage;foregroundActivity=[string]$captureDoc.foregroundActivity;timestamp=[string]$captureDoc.timestamp;iteration=[int]$captureDoc.iteration;scenarioId=[string]$captureDoc.scenarioId})
     }
     return @($evidence)
 }
@@ -551,12 +563,25 @@ New-Item -ItemType Directory -Path $iterationDir -Force|Out-Null
 # 1. runtime capture (reuse Capture-VisualEvidence.ps1; never duplicate ADB).
 try{
     $scenario=Get-AihVisualScenario -Workspace $Workspace -ScenarioPath $ScenarioPath -Policy $Policy
-    $captures=@(Invoke-AihLoopCapture -Scenario $scenario -IterationDirectory $iterationDir -Workspace $Workspace)
+    $viewportCaptures=@($scenario.captures|Where-Object{
+        $captureMode='viewport'
+        if($null-ne$_.PSObject.Properties['mode']){$captureMode=[string]$_.mode}
+        $captureMode-ne'file'
+    })
+    $runtimeTarget=$null
+    if($viewportCaptures.Count-gt0){
+        $runtimeTarget=Resolve-AihRuntimeTarget -Workspace $Workspace -Scenario $scenario -DeviceId $DeviceSerial -AdbPath $AdbPath
+        $state|Add-Member -NotePropertyName 'runtimeTarget' -NotePropertyValue $runtimeTarget -Force
+        Save-AihVisualState -StatePath $loop.StatePath -State $state
+    }
+    $captures=@(Invoke-AihLoopCapture -Scenario $scenario -IterationDirectory $iterationDir -Workspace $Workspace -RuntimeTarget $runtimeTarget -Iteration $nextIteration)
 }catch{
     $state.status='unavailable'
     Add-AihVisualStateReason -State $state -Reason ('reviewer not invoked: runtime capture failed ('+[string]$_.Exception.Message+')')
     Save-AihVisualState -StatePath $loop.StatePath -State $state
-    Write-AihVisualLoopFailure -ErrorKind 'visual-review-capture-unavailable' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message ('runtime capture failed: '+$_.Exception.Message) -State $state
+    $captureErrorKind='visual-review-capture-unavailable'
+    if($null-ne$_.Exception.Data['AihErrorKind']-and-not[string]::IsNullOrWhiteSpace([string]$_.Exception.Data['AihErrorKind'])){$captureErrorKind=[string]$_.Exception.Data['AihErrorKind']}
+    Write-AihVisualLoopFailure -ErrorKind $captureErrorKind -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message ('runtime capture failed: '+$_.Exception.Message) -State $state
 }
 if(@($captures).Count-eq 0){
     $state.status='unavailable'
@@ -615,10 +640,10 @@ if(@($previousScreens).Count-gt 0){
 # 1b. deterministic visual preflight (geometry/pixel/token; no provider call).
 #     A preflight PASS never satisfies a required visual task; a preflight
 #     FAIL marks the reviewer unavailable for this attempt with the reason.
-$preflight=Get-AihVisualPreflight -Captures $captures -Question $questionText -MaxImages $script:AihVisualMaxCaptures
+$preflight=Get-AihVisualPreflight -Captures $captures -Question $questionText -MaxImages $script:AihVisualMaxCaptures -RuntimeTarget $runtimeTarget
 Write-AihAtomicJson -Path (Join-Path $iterationDir 'preflight.json') -Value ([ordered]@{
     schemaVersion=1; kind='visual-preflight'; taskId=$TaskId; taskInstanceId=$effectiveInstanceId; iteration=$nextIteration
-    preflight=$preflight; timestampUtc=[DateTime]::UtcNow.ToString('o')
+    runtimeTarget=$runtimeTarget; captures=@($captures); preflight=$preflight; timestampUtc=[DateTime]::UtcNow.ToString('o')
 })
 $state | Add-Member -NotePropertyName 'visualPreflight' -NotePropertyValue ([pscustomobject][ordered]@{ status=[string]$preflight.status; estimatedTokens=[int]$preflight.estimatedTokens; checks=@($preflight.checks) }) -Force
 if([string]$preflight.status -ne 'pass'){
