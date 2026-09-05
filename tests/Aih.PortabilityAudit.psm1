@@ -678,6 +678,177 @@ function Test-AihPathLiteralAllowed {
     return $false
 }
 
+function Get-AihPlatformDependencyFindings {
+    # TASK-0025: platform-layer dependency direction. The platform layer
+    # (scripts/Platform.ps1) MUST be independently sourceable: it may not
+    # invoke any function that is defined only by a HIGHER layer
+    # (scripts/Common.ps1). Detected via the AST: every command invoked in
+    # Platform.ps1 that is defined in Common.ps1 but not in Platform.ps1 is
+    # a reverse dependency.
+    param([Parameter(Mandatory = $true)]$Root)
+
+    $findings = [System.Collections.Generic.List[object]]::new()
+    $platformPath = Join-Path $Root 'scripts/Platform.ps1'
+    $commonPath = Join-Path $Root 'scripts/Common.ps1'
+    if (-not (Test-Path -LiteralPath $platformPath) -or -not (Test-Path -LiteralPath $commonPath)) { return @() }
+    $platformErrors = $null
+    $platformAst = [System.Management.Automation.Language.Parser]::ParseFile($platformPath, [ref]$null, [ref]$platformErrors)
+    if ($platformErrors.Count -gt 0) { return @() }
+    $commonAst = [System.Management.Automation.Language.Parser]::ParseFile($commonPath, [ref]$null, [ref]$null)
+    $platformDefined = @($platformAst.FindAll({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
+    $commonDefined = @($commonAst.FindAll({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
+    $commonOnly = @($commonDefined | Where-Object { $platformDefined -notcontains $_ })
+    if ($commonOnly.Count -eq 0) { return @() }
+    $commands = $platformAst.FindAll({ param($a) $a -is [System.Management.Automation.Language.CommandAst] }, $true)
+    $platformLines = [System.IO.File]::ReadAllLines($platformPath)
+    foreach ($command in $commands) {
+        $name = [string]$command.GetCommandName()
+        if ($commonOnly -contains $name) {
+            $findings.Add([pscustomobject]@{
+                Kind = 'PlatformReverseDependency'; File = 'scripts/Platform.ps1'; Line = $command.Extent.StartLineNumber
+                Token = $name; Classification = 'platform-reverse-dependency'
+                Detail = 'Platform.ps1 invokes a function defined only by Common.ps1; the platform layer must stay independently sourceable.'
+            })
+        }
+    }
+    return @($findings)
+}
+
+function Get-AihJsExecutableFindings {
+    # TASK-0025 RC4: the JS plane (*.js, *.cjs, *.mjs) was outside the
+    # PowerShell-centric audit. Flags hardcoded Windows-executable literals
+    # (powershell.exe / cmd.exe / .cmd references) in JS sources; a literal
+    # inside a platform-guarded context is verified by the gate through the
+    # Guard proximity check, and the shared test transport carries its own
+    # documented allowance.
+    param([Parameter(Mandatory = $true)]$Root)
+
+    $findings = [System.Collections.Generic.List[object]]::new()
+    $rootPath = [System.IO.Path]::GetFullPath($Root)
+    $allFiles = [System.Collections.Generic.List[string]]::new()
+    $stackDirs = [System.Collections.Generic.Stack[string]]::new()
+    $stackDirs.Push($rootPath)
+    # Segment-wise pruning: EVERY path segment matching one of these names is
+    # excluded. 'app' is the harness vendor checkout at the repository root
+    # (third-party DSH implementation), not Nexus product source.
+    $excludedSegments = @('.git', 'node_modules', 'runtime', 'coverage', 'dist', 'build', 'logs', 'data', 'tmp', '_audit', '_tmp_ws', '.ai-harness', '.vscode', 'app')
+    while ($stackDirs.Count -gt 0) {
+        $dir = $stackDirs.Pop()
+        $children = @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue)
+        foreach ($child in $children) {
+            if ($child.Attributes -band [IO.FileAttributes]::Directory) {
+                if ($excludedSegments -contains $child.Name) { continue }
+                $stackDirs.Push($child.FullName)
+            }
+            else {
+                $extension = [IO.Path]::GetExtension($child.Name).ToLowerInvariant()
+                if ($extension -in @('.js', '.cjs', '.mjs')) { $allFiles.Add($child.FullName) }
+            }
+        }
+    }
+    foreach ($file in $allFiles) {
+        $relative = $file.Substring($rootPath.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Replace('\', '/')
+        $lines = [System.IO.File]::ReadAllLines($file)
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            # Strip comments before matching so documented rationale in
+            # comments never produces a finding: block comments on one line,
+            # then line comments not preceded by a URL colon.
+            $line = $lines[$i] -replace '/\*.*?\*/', ''
+            $line = $line -replace '(?<!:)//.*$', ''
+            foreach ($token in @('powershell.exe', 'cmd.exe')) {
+                if ($line.ToLowerInvariant().Contains($token)) {
+                    $findings.Add([pscustomobject]@{
+                        Kind = 'JsWindowsExecutable'; File = $relative; Line = ($i + 1); Token = $token
+                        Classification = 'js-platform-executable'; Detail = 'hardcoded Windows executable literal in a JS source'
+                    })
+                }
+            }
+            if ($line -match '\x27\.cmd\x27|\x22\.cmd\x22|\.cmd[\x27\x22 ]') {
+                $findings.Add([pscustomobject]@{
+                    Kind = 'JsCmdReference'; File = $relative; Line = ($i + 1); Token = '.cmd'
+                    Classification = 'js-cmd-assumption'; Detail = 'a .cmd file is referenced or created in a JS source'
+                })
+            }
+        }
+    }
+    return @($findings)
+}
+
+function Get-AihWindowsFixtureFindings {
+    # TASK-0025 RC3: Windows-only fixture technologies in test suites.
+    # System.Drawing is unsupported on POSIX pwsh (.NET 6+), so a test that
+    # GENERATES fixtures with it fails on Linux. Tests must use committed
+    # platform-neutral fixtures. Production decoders with graceful SKIPPED
+    # fallbacks are outside this scan (scripts are not scanned here).
+    param([Parameter(Mandatory = $true)]$Root)
+
+    $findings = [System.Collections.Generic.List[object]]::new()
+    $rootPath = [System.IO.Path]::GetFullPath($Root)
+    $testsDir = Join-Path $rootPath 'tests'
+    if (-not (Test-Path -LiteralPath $testsDir)) { return @() }
+    foreach ($file in @(Get-ChildItem -LiteralPath $testsDir -Filter '*.Tests.ps1' -File -Recurse -ErrorAction SilentlyContinue)) {
+        $relative = 'tests/' + $file.Name
+        $lines = [System.IO.File]::ReadAllLines($file.FullName)
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $trimmedLine = $lines[$i].TrimStart()
+            if ($trimmedLine.StartsWith('#')) { continue }   # rationale comments never count as fixture technology
+            if ($lines[$i] -match 'System\.Drawing') {
+                $findings.Add([pscustomobject]@{
+                    Kind = 'WindowsOnlyFixtureTechnology'; File = $relative; Line = ($i + 1); Token = 'System.Drawing'
+                    Classification = 'windows-only-fixture'; Detail = 'a PowerShell test suite generates fixtures with System.Drawing, which is unavailable on POSIX pwsh'
+                })
+            }
+        }
+    }
+    return @($findings)
+}
+
+function Get-AihResultSchemaFindings {
+    # TASK-0025 RC5: invariant result-object schemas. For each declared
+    # contract (a named function that returns result objects), EVERY object
+    # the function returns must define the SAME key set, including every
+    # required key. A future return site that forgets a key fails the gate.
+    param([Parameter(Mandatory = $true)]$Root)
+
+    $contracts = @(
+        @{
+            File = 'scripts/Verify-Project.ps1'; Function = 'Invoke-AihVerificationCommand'
+            RequiredKeys = @('Name', 'Kind', 'Status', 'ExitCode', 'DurationSeconds', 'StartedAtUtc', 'FinishedAtUtc', 'Command', 'WorkingDirectory', 'StandardOutput', 'StandardError', 'Error')
+            Reason = 'the controller bridge and JSON reports consume verification results unconditionally'
+        }
+    )
+    $findings = [System.Collections.Generic.List[object]]::new()
+    foreach ($contract in $contracts) {
+        $path = Join-Path $Root ($contract.File -replace '/', [IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$parseErrors)
+        if ($parseErrors.Count -gt 0) { continue }
+        $functionAst = @($ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | Where-Object { $_.Name -eq $contract.Function })
+        if ($functionAst.Count -eq 0) { continue }
+        $returnStatements = $functionAst[0].Body.FindAll({ param($a) $a -is [System.Management.Automation.Language.ReturnStatementAst] }, $true)
+        foreach ($returnStatement in $returnStatements) {
+            if ($null -eq $returnStatement.Pipeline) { continue }
+            $hashAsts = $returnStatement.Pipeline.FindAll({ param($a) $a -is [System.Management.Automation.Language.HashtableAst] }, $true)
+            foreach ($hashAst in $hashAsts) {
+                $keys = @($hashAst.KeyValuePairs | ForEach-Object {
+                    if ($_.Item1 -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $_.Item1.Value } else { $null }
+                } | Where-Object { $null -ne $_ })
+                foreach ($requiredKey in $contract.RequiredKeys) {
+                    if ($keys -notcontains $requiredKey) {
+                        $findings.Add([pscustomobject]@{
+                            Kind = 'ResultSchemaMismatch'; File = $contract.File; Line = $returnStatement.Extent.StartLineNumber
+                            Token = $requiredKey; Classification = 'inconsistent-result-schema'
+                            Detail = ('return site in ' + $contract.Function + ' does not define ' + $requiredKey + '; every result must carry the full schema')
+                        })
+                    }
+                }
+            }
+        }
+    }
+    return @($findings)
+}
+
 function Invoke-AihPortabilityAudit {
     # Full audit: returns a structured object; never throws on findings.
     param(
@@ -699,6 +870,10 @@ function Invoke-AihPortabilityAudit {
     $executables = Get-AihWindowsExecutableFindings -Files $files -ParsedFiles $parsed
     $linuxLaunchers = Get-AihLinuxLauncherFindings -Files $files
     $suiteTable = Get-AihHarnessSuiteTableFindings -Root $rootPath -ParsedFiles $parsed
+    $platformDeps = Get-AihPlatformDependencyFindings -Root $rootPath
+    $jsExecutables = Get-AihJsExecutableFindings -Root $rootPath
+    $windowsFixtures = Get-AihWindowsFixtureFindings -Root $rootPath
+    $resultSchemas = Get-AihResultSchemaFindings -Root $rootPath
 
     return [pscustomobject]@{
         GeneratedAtUtc = [DateTime]::UtcNow.ToString('o')
@@ -715,6 +890,10 @@ function Invoke-AihPortabilityAudit {
         ExecutableFindings = $executables
         LinuxLauncherFindings = $linuxLaunchers
         SuiteTableFindings = $suiteTable
+        PlatformDependencyFindings = $platformDeps
+        JsExecutableFindings = $jsExecutables
+        WindowsFixtureFindings = $windowsFixtures
+        ResultSchemaFindings = $resultSchemas
     }
 }
 
@@ -737,5 +916,6 @@ Export-ModuleMember -Function @(
     'Get-AihReservedVariableSet', 'Get-AihParsedPowerShellFiles', 'Get-AihAutomaticVariableFindings',
     'Get-AihStringLiteralFindings', 'Get-AihInstallRootFindings', 'Get-AihWindowsExecutableFindings',
     'Get-AihLinuxLauncherFindings', 'Get-AihHarnessSuiteTableFindings', 'Invoke-AihPortabilityAudit',
-    'Test-AihPathLiteralAllowed', 'Write-AihPortabilityInventoryReport'
+    'Get-AihPlatformDependencyFindings', 'Get-AihJsExecutableFindings', 'Get-AihWindowsFixtureFindings',
+    'Get-AihResultSchemaFindings', 'Test-AihPathLiteralAllowed', 'Write-AihPortabilityInventoryReport'
 )

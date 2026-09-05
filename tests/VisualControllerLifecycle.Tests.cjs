@@ -12,35 +12,14 @@ function userMessage(text) {
   return { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] }
 }
 
-// TASK-0017 transport: sandboxed Windows environments deny anonymous-pipe and
-// fd-redirected stdio capture from Node children (spawn EPERM) while
-// stdio:'ignore' spawns are allowed, so Windows runs each CLI through cmd.exe
-// with cmd-side redirection into temporary files (no pipes anywhere). POSIX
-// keeps the direct pipe transport. Both shapes return captured stdout.
-let runSeq = 0
-function run(file, args, cwd) {
-  if (process.platform !== 'win32') {
-    const direct = spawnSync(file, args, { cwd, encoding: 'utf8', windowsHide: true })
-    if (direct.status !== 0) throw new Error((direct.stderr || direct.stdout || file + ' failed').trim())
-    return direct.stdout
-  }
-  const seq = ++runSeq
-  const token = process.pid + '-' + seq
-  const outPath = path.join(os.tmpdir(), 'aih-vcl-out-' + token + '.txt')
-  const errPath = path.join(os.tmpdir(), 'aih-vcl-err-' + token + '.txt')
-  const batchPath = path.join(os.tmpdir(), 'aih-vcl-' + token + '.cmd')
-  const q = (value) => '"' + String(value).replace(/%/g, '%%') + '"'
-  const command = [q(file)].concat(args.map(q)).join(' ') + ' > ' + q(outPath) + ' 2> ' + q(errPath)
-  fs.writeFileSync(batchPath, '@echo off\r\n' + command + '\r\n', 'utf8')
-  const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', batchPath], { cwd, stdio: 'ignore', windowsHide: true })
-  const read = (p) => { try { return fs.readFileSync(p, 'utf8') } catch (_) { return '' } }
-  const stdout = read(outPath)
-  const stderr = read(errPath)
-  try { fs.rmSync(outPath, { force: true }) } catch (_) { }
-  try { fs.rmSync(errPath, { force: true }) } catch (_) { }
-  try { fs.rmSync(batchPath, { force: true }) } catch (_) { }
-  if (result.status !== 0) throw new Error((stderr || stdout || file + ' failed').trim())
-  return stdout
+// TASK-0017 transport (TASK-0025 RC4): the shared test transport helper is
+// the ONE implementation - Windows keeps the cmd.exe no-pipes redirection
+// transport, POSIX captures directly. Both shapes return captured stdout.
+const { createAihCliRunner } = require(path.join(__dirname, 'lib', 'AihTestTransport.cjs'))
+const runRaw = createAihCliRunner()
+async function run(file, args, cwd) {
+  const result = await runRaw(file, args, cwd ? { cwd } : undefined)
+  return result.stdout
 }
 
 async function main() {
@@ -100,11 +79,11 @@ async function main() {
     process.env.AIH_INSTALL_ROOT = installRoot
     process.env.AIH_VISUAL_CONTROLLER_TEST_KEY = 'test-key-not-real'
 
-    run('git', ['init'], workspace)
+    await run('git', ['init'], workspace)
     fs.writeFileSync(path.join(workspace, 'package.json'), JSON.stringify({ private: true, scripts: { test: 'node -e "process.exit(0)"' } }))
     fs.mkdirSync(path.join(workspace, 'apps', 'mobile', 'src', 'app'), { recursive: true })
     fs.writeFileSync(path.join(workspace, 'apps', 'mobile', 'src', 'app', 'index.tsx'), 'export default function Screen(){ return null }\n')
-    run('git', ['add', 'package.json', 'apps/mobile/src/app/index.tsx'], workspace)
+    await run('git', ['add', 'package.json', 'apps/mobile/src/app/index.tsx'], workspace)
 
     // The capture source is a checked-in fixture: generating PNGs through
     // System.Drawing is Windows-only, and this suite must also run on the

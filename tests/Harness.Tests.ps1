@@ -631,6 +631,45 @@ try {
     Assert-Aih ($verifyJson2.Failed -ge 1) 'failing workspace reports Failed>=1'
     Assert-Aih (@($verifyJson2.Results | Where-Object { $_.Status -eq 'FAIL' }).Count -ge 1) 'failing JSON carries the FAIL result rows'
     Assert-Aih ($verifyJson2.Results | Where-Object { $_.Status -eq 'FAIL' } | Select-Object -First 1).ExitCode -eq 3 'failing row keeps the real exit code'
+
+    # ── RC5 schema invariant (TASK-0025): EVERY Invoke-AihVerificationCommand
+    # result carries the SAME shape. Consumers (the controller bridge, JSON
+    # reports) read StandardOutput/StandardError/WorkingDirectory
+    # unconditionally; the unavailable branch used to return an abbreviated
+    # object and crashed the real Linux controller run.
+    $vpText = [IO.File]::ReadAllText((Join-Path $InstallRoot 'scripts/Verify-Project.ps1'))
+    $vpParseErrors = $null
+    $vpAst = [System.Management.Automation.Language.Parser]::ParseInput($vpText, [ref]$null, [ref]$vpParseErrors)
+    $vpFns = @('ConvertTo-AihArgument', 'Get-AihExecutableLaunch', 'Invoke-AihVerificationCommand')
+    $extracted = New-Object Text.StringBuilder
+    foreach ($fn in $vpAst.FindAll({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $vpFns -contains $a.Name }, $true)) {
+        [void]$extracted.AppendLine($fn.Extent.Text)
+    }
+    Assert-Aih ($vpParseErrors.Count -eq 0 -and $extracted.Length -gt 0) 'Verify-Project functions extract cleanly for schema probing'
+    Invoke-Expression ($extracted.ToString())
+    $schemaKeys = @('Name','Kind','Status','ExitCode','DurationSeconds','StartedAtUtc','FinishedAtUtc','Command','WorkingDirectory','StandardOutput','StandardError','Error')
+    foreach ($scenario in @(
+        @{ name='PASS'; command=[pscustomobject]@{ Name='schema-pass'; Kind='test'; Required=$true; Available=$true; Display='exit 0'; ShellCommand='exit 0'; Executable=''; Arguments=@(); WorkingDirectory=$InstallRoot; TimeoutSeconds=30 } },
+        @{ name='FAIL'; command=[pscustomobject]@{ Name='schema-fail'; Kind='test'; Required=$true; Available=$true; Display='exit 3'; ShellCommand='exit 3'; Executable=''; Arguments=@(); WorkingDirectory=$InstallRoot; TimeoutSeconds=30 } },
+        @{ name='SKIP/unavailable'; command=[pscustomobject]@{ Name='schema-skip'; Kind='test'; Required=$false; Available=$false; Display='missing-tool'; ShellCommand=''; Executable=''; Arguments=@(); WorkingDirectory=$InstallRoot; TimeoutSeconds=30 } },
+        @{ name='timeout'; command=[pscustomobject]@{ Name='schema-timeout'; Kind='test'; Required=$true; Available=$true; Display='sleep'; ShellCommand='Start-Sleep -Seconds 8'; Executable=''; Arguments=@(); WorkingDirectory=$InstallRoot; TimeoutSeconds=1 } },
+        @{ name='process-start error'; command=[pscustomobject]@{ Name='schema-start-error'; Kind='test'; Required=$true; Available=$true; Display='bad cwd'; ShellCommand='exit 0'; Executable=''; Arguments=@(); WorkingDirectory=(Join-Path $InstallRoot 'definitely/missing/dir'); TimeoutSeconds=30 } }
+    )) {
+        $schemaResult = Invoke-AihVerificationCommand $scenario.command
+        foreach ($schemaKey in $schemaKeys) {
+            Assert-Aih ($null -ne $schemaResult.PSObject.Properties[$schemaKey]) ('verification result (' + $scenario.name + ') carries ' + $schemaKey)
+        }
+    }
+    $skipResult = Invoke-AihVerificationCommand ([pscustomobject]@{ Name='schema-skip2'; Kind='test'; Required=$false; Available=$false; Display='missing-tool'; ShellCommand=''; Executable=''; Arguments=@(); WorkingDirectory=$InstallRoot; TimeoutSeconds=30 })
+    Assert-Aih ($skipResult.Status -eq 'SKIP' -and $skipResult.StandardOutput -eq '' -and $skipResult.StandardError -eq '' -and -not [string]::IsNullOrEmpty($skipResult.WorkingDirectory) -and -not [string]::IsNullOrEmpty($skipResult.Error)) 'SKIP result carries empty stdout/stderr plus WorkingDirectory and Error'
+    $passResult = Invoke-AihVerificationCommand ([pscustomobject]@{ Name='schema-pass2'; Kind='test'; Required=$true; Available=$true; Display='exit 0'; ShellCommand='exit 0'; Executable=''; Arguments=@(); WorkingDirectory=$InstallRoot; TimeoutSeconds=30 })
+    Assert-Aih ($passResult.Status -eq 'PASS' -and $passResult.ExitCode -eq 0) 'PASS result keeps status and exit code'
+    $failResult = Invoke-AihVerificationCommand ([pscustomobject]@{ Name='schema-fail2'; Kind='test'; Required=$true; Available=$true; Display='exit 3'; ShellCommand='exit 3'; Executable=''; Arguments=@(); WorkingDirectory=$InstallRoot; TimeoutSeconds=30 })
+    Assert-Aih ($failResult.Status -eq 'FAIL' -and $failResult.ExitCode -eq 3) 'FAIL result keeps status and exit code'
+    $timeoutResult = Invoke-AihVerificationCommand ([pscustomobject]@{ Name='schema-timeout2'; Kind='test'; Required=$true; Available=$true; Display='sleep'; ShellCommand='Start-Sleep -Seconds 8'; Executable=''; Arguments=@(); WorkingDirectory=$InstallRoot; TimeoutSeconds=1 })
+    Assert-Aih ($timeoutResult.Status -eq 'FAIL' -and $timeoutResult.Error -match 'Timed out') 'timeout result fails with a timeout error'
+    $startErrorResult = Invoke-AihVerificationCommand ([pscustomobject]@{ Name='schema-start-error2'; Kind='test'; Required=$true; Available=$true; Display='bad cwd'; ShellCommand='exit 0'; Executable=''; Arguments=@(); WorkingDirectory=(Join-Path $InstallRoot 'definitely/missing/dir'); TimeoutSeconds=30 })
+    Assert-Aih ($startErrorResult.Status -eq 'FAIL' -and -not [string]::IsNullOrEmpty($startErrorResult.Error)) 'process-start error result fails with the error text'
 }
 finally {
     if (Test-Path -LiteralPath $verifyFixture) { Remove-Item -LiteralPath $verifyFixture -Recurse -Force }

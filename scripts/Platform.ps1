@@ -22,6 +22,28 @@ function Get-AihPlatformName {
     return 'unknown'
 }
 
+function Get-AihInstallRoot {
+    # Foundation-layer install-root resolver. Lives in Platform.ps1 (NOT
+    # Common.ps1) so Platform.ps1 is independently sourceable: the pinned
+    # POSIX PowerShell host resolution below needs this resolver, and a
+    # Platform -> Common reference would be an illegal reverse dependency
+    # (Common.ps1 sources Platform.ps1 first). Resolution precedence is the
+    # single authoritative contract: explicit argument > AIH_INSTALL_ROOT >
+    # DSH_HOME > parent of this script's directory.
+    param([string]$InstallRoot)
+
+    if (-not [string]::IsNullOrWhiteSpace($InstallRoot)) {
+        return [System.IO.Path]::GetFullPath($InstallRoot)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:AIH_INSTALL_ROOT)) {
+        return [System.IO.Path]::GetFullPath($env:AIH_INSTALL_ROOT)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:DSH_HOME)) {
+        return [System.IO.Path]::GetFullPath((Split-Path -Parent $env:DSH_HOME))
+    }
+    return [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+}
+
 function Get-AihLauncherExtension {
     # CLI launchers ship as .cmd batch files on Windows and as extensionless
     # POSIX executables on Linux. Doctor-style checks resolve names through
