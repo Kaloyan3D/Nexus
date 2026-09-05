@@ -234,4 +234,15 @@ Assert-Aih ($controllerText.Contains('AIH_TOOLCHAIN_ROOT') -and $controllerText.
 $testHarnessText = [System.IO.File]::ReadAllText((Join-Path $InstallRoot 'scripts/Test-Harness.ps1'))
 Assert-Aih ($testHarnessText.Contains('$env:AIH_TOOLCHAIN_ROOT = $InstallRoot')) 'the harness driver anchors suite children to the toolchain root'
 
+# 12. TASK-0027 entrypoint contract: a directly executable script (any
+#     launcher-reachable target or installer-referenced entrypoint) may
+#     invoke a Platform.ps1-owned function only after dot-sourcing the
+#     platform abstraction from its own directory. Regression: aih-update
+#     died in a fresh PowerShell process with CommandNotFoundException
+#     'Test-AihIsWindows' (scripts/Update.ps1:25) because the entrypoint
+#     assumed the abstraction had been preloaded by another script.
+$entrypointFindings = @($audit.EntrypointPlatformFindings)
+$entrypointText = ((@($entrypointFindings) | ForEach-Object { $_.File + ":" + $_.Line + " " + $_.Token }) -join ", ")
+Assert-Aih ($entrypointFindings.Count -eq 0) ("directly executable entrypoints load the platform abstraction before any Platform.ps1-owned call (found: " + $entrypointText + ")")
+
 Write-Host ("RESULT: $script:passed portability gate assertions passed.")

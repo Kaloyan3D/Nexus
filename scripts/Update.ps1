@@ -13,6 +13,13 @@ param(
 #          install composition (Complete-Install.ps1), which preserves user
 #          settings, credentials, and controller state.
 
+# Directly-invoked CLI entrypoint (aih-update): a fresh PowerShell process
+# preloads NO Nexus functions, so the platform abstraction is dot-sourced
+# HERE, from this script's own directory, before the first platform-owned
+# call. Platform.ps1 - not Common.ps1 - keeps this entrypoint dependency-
+# minimal and independently executable (TASK-0027 aih-update regression).
+. (Join-Path $PSScriptRoot 'Platform.ps1')
+
 if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
     $SourceRoot = Split-Path -Parent $PSScriptRoot
 }
