@@ -60,15 +60,25 @@ llm-pi-ai:
     [IO.File]::WriteAllBytes($testPng,$pngBytes)
 
     function Invoke-AihVisual {
-        param([string[]]$Screenshots,[string[]]$References,[switch]$Execute,[string]$MockResponseFile,[string]$PreviousResultPath,[string]$PayloadFile,[string]$Trigger)
+        param([string[]]$Screenshots,[string[]]$References,[switch]$Execute,[string]$MockResponseFile,[string]$PreviousResultPath,[string]$PayloadFile,[string]$Trigger,[switch]$EmitOnly)
         $arguments=@('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$visualReviewScript,'-InstallRoot',$fixture,'-Workspace',$workspace,'-TaskId',$script:taskId,'-Question','review the home screen')
-        foreach($shot in @($Screenshots)){$arguments+=@('-Screenshots',$shot)}
-        foreach($reference in @($References)){$arguments+=@('-References',$reference)}
+        # TASK-0023: optional array parameters are emitted ONLY when they
+        # carry values. Unary @($null) (an omitted parameter) enumerates once
+        # over $null and used to append a dangling '-References' token whose
+        # $null value POSIX pwsh native argument passing drops - the child
+        # binder then exited 1 before production validation could reject the
+        # packet. Each value keeps its own '-Name value' pair so every path
+        # (spaces included) stays one exact argv boundary.
+        foreach($shot in @($Screenshots)){if($null-ne$shot){$arguments+=@('-Screenshots',$shot)}}
+        foreach($reference in @($References)){if($null-ne$reference){$arguments+=@('-References',$reference)}}
         if($Execute){$arguments+='-Execute'}
         if($MockResponseFile){$arguments+=@('-MockResponseFile',$MockResponseFile)}
         if($PreviousResultPath){$arguments+=@('-PreviousResultPath',$PreviousResultPath)}
         if($PayloadFile){$arguments+=@('-PayloadFile',$PayloadFile)}
         if($Trigger){$arguments+=@('-Trigger',$Trigger)}
+        # -EmitOnly is the argv-emission probe: it returns the exact argument
+        # array (the same one the child invocation splats) without spawning.
+        if($EmitOnly){return @($arguments)}
         # TASK-0026 capture-first transport: stdout and stderr are captured as
         # SEPARATE streams (no 2>&1 merging). The JSON transport contract
         # lives on stdout ALONE; stderr diagnostics never participate in
@@ -170,6 +180,39 @@ llm-pi-ai:
     $packetRun2=Invoke-AihVisual -Screenshots @($testPng)
     $packet2=$packetRun2.text|ConvertFrom-Json
     Assert-Aih ($packet2.iteration -eq 2) '6: next invocation allocates iteration-02 deterministically'
+
+    # ── 6a. OPTIONAL-ARRAY ARGV CONTRACT (no dangling tokens, exact boundaries) ──
+    # TASK-0023 regression: an omitted optional array parameter must never
+    # leave a dangling '-Name' token (POSIX pwsh native argument passing
+    # drops the $null value, so the child binder exits 1 BEFORE production
+    # validation can reject the packet), and a supplied value - spaces
+    # included - must stay ONE exact argv boundary. Round trips use one
+    # value per parameter: pwsh -File binds a [string[]] parameter from a
+    # single named token and REJECTS repeated '-Screenshots' occurrences, so
+    # multi-value screenshots always travel through the payload file in
+    # production. Multiple values are therefore asserted at the emission
+    # layer below, where every value must produce its own '-Name value' pair.
+    $spaceDir=Join-Path $workspace 'space dir'
+    New-Item -ItemType Directory -Path $spaceDir -Force|Out-Null
+    $shotSpaceA=Join-Path $spaceDir 'shot two.png'
+    $shotSpaceB=Join-Path $spaceDir 'shot three.png'
+    $refSpace=Join-Path $spaceDir 'reference one.png'
+    foreach($imagePath in @($shotSpaceA,$shotSpaceB,$refSpace)){[IO.File]::WriteAllBytes($imagePath,$pngBytes)}
+    $spacedRun=Invoke-AihVisual -Screenshots @($shotSpaceA) -References @($refSpace)
+    $spacedJson=$spacedRun.text|ConvertFrom-Json
+    Assert-Aih ($spacedRun.exitCode-eq0-and$spacedJson.kind-eq'visual-review-packet') '6a: a spaced screenshot and a spaced reference arrive (exit 0 packet)'
+    $spacedSubjects=@($spacedJson.images|Where-Object{$_.role-eq'subject'})
+    $spacedRefs=@($spacedJson.images|Where-Object{$_.role-eq'reference'})
+    Assert-Aih (@($spacedSubjects).Count-eq1-and@($spacedRefs).Count-eq1) '6a: the spaced screenshot and reference keep their argv roles'
+    Assert-Aih ((Test-Path -LiteralPath ([string]$spacedJson.images[0].storedPath))-and(Test-Path -LiteralPath ([string]$spacedJson.images[1].storedPath))) '6a: spaced paths materialize as whole single-boundary records'
+    $emitArgs=Invoke-AihVisual -Screenshots @($shotSpaceA,$shotSpaceB) -References @($refSpace) -EmitOnly
+    Assert-Aih (@($emitArgs|Where-Object{$_-eq'-Screenshots'}).Count-eq2-and@($emitArgs|Where-Object{$_-eq'-References'}).Count-eq1) '6a: multiple values emit one -Name occurrence per element'
+    $nameIndexes=@()
+    $emitCount=@($emitArgs).Count
+    for($emitIndex=0;$emitIndex-lt$emitCount;$emitIndex++){if($emitArgs[$emitIndex]-eq'-Screenshots'-or$emitArgs[$emitIndex]-eq'-References'){$nameIndexes+=$emitIndex}}
+    Assert-Aih ($emitArgs[$nameIndexes[0]+1]-eq$shotSpaceA -and $emitArgs[$nameIndexes[1]+1]-eq$shotSpaceB -and $emitArgs[$nameIndexes[2]+1]-eq$refSpace) '6a: every emitted value follows its own parameter token verbatim'
+    $emitEmpty=Invoke-AihVisual -Screenshots @() -EmitOnly
+    Assert-Aih ((@($emitEmpty|Where-Object{$_-eq'-Screenshots'}).Count-eq0)-and(@($emitEmpty|Where-Object{$_-eq'-References'}).Count-eq0)) '6a: empty/omitted array parameters emit no dangling -Name token'
 
     # ── 6b. PACKET EVIDENCE INTEGRITY FAILS BEFORE TRANSPORT ────────────────
     $badShaPayload=Join-Path $workspace 'bad-sha-payload.json'

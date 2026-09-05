@@ -556,7 +556,23 @@ try{
         if($null-eq$candidate){
             $candidateText=$content.Trim()
             if($candidateText-match'(?s)```(?:json)?\s*(\{.*\})\s*```'){$candidateText=$Matches[1]}
-            try{$candidate=$candidateText|ConvertFrom-Json}catch{$candidate=$null}
+            # TASK-0023: output collection unwraps a SINGLE-ELEMENT JSON
+            # array into its element on every PowerShell edition (pipeline
+            # semantics), so a one-entry top-level array would silently
+            # parse into an object and dodge the array-vs-object rejection
+            # below. The raw text is the shape authority: when the top-level
+            # shape is an array, re-wrap the parsed result so the strict
+            # contract check sees the array it is (an empty array collects
+            # to $null, so it is re-wrapped as the empty array).
+            $candidateIsTopLevelArray=$false
+            $candidateParseFailed=$false
+            try{$candidate=$candidateText|ConvertFrom-Json}catch{$candidate=$null;$candidateParseFailed=$true}
+            $candidateShapeProbe=$candidateText.TrimStart()
+            if($candidateShapeProbe.StartsWith('[')){$candidateIsTopLevelArray=$true}
+            if($candidateIsTopLevelArray-and-not$candidateParseFailed){
+                if($null-eq$candidate){$candidate=@()}
+                elseif(-not($candidate-is[System.Array])){$candidate=@($candidate)}
+            }
         }
         $validated=Test-AihVisualReviewResult $candidate $requiredPreviousIds
         if(-not$validated.valid){
