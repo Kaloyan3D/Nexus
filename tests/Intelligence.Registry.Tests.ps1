@@ -1,7 +1,9 @@
-[CmdletBinding()]param([string]$InstallRoot = 'C:\AI-Harness')
+[CmdletBinding()]param([string]$InstallRoot = (Split-Path -Parent $PSScriptRoot))
+# Platform-aware child host: Windows keeps powershell.exe; POSIX uses the pinned Nexus pwsh.
+if (-not (Get-Command Test-AihIsWindows -ErrorAction SilentlyContinue)) { . (Join-Path $InstallRoot 'scripts/Platform.ps1') }; $aihPsHost = Get-AihPowerShellHost -InstallRoot $InstallRoot
 Set-StrictMode -Version Latest;$ErrorActionPreference = 'Stop'
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\Intelligence.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Intelligence.ps1')
 
 # ── Phase 3.1A (Identity & Registry) + 3.1B (Git State) acceptance tests ────
 $passed = 0
@@ -23,7 +25,7 @@ function Invoke-FreshProcess {
     $scriptText = ". 'C:\AI-Harness\scripts\Intelligence.ps1'; " + $Expression
     $bytes = [Text.Encoding]::Unicode.GetBytes($scriptText)
     $encoded = [Convert]::ToBase64String($bytes)
-    $output = & powershell.exe -NoProfile -NonInteractive -EncodedCommand $encoded
+    $output = & $aihPsHost -NoProfile -NonInteractive -EncodedCommand $encoded
     if ($LASTEXITCODE -ne 0) { throw "fresh-process check failed: $($output -join ' ')" }
     return ($output -join [Environment]::NewLine)
 }
@@ -83,7 +85,7 @@ try {
     # ── non-Git directory ────────────────────────────────────────────────
     $plain = Join-Path $fixtureRoot 'plain'
     New-Item -ItemType Directory -Path (Join-Path $plain 'lib') -Force | Out-Null
-    Set-TestFile (Join-Path $plain 'lib\util.py') 'print("x")'
+    Set-TestFile (Join-Path $plain 'lib/util.py') 'print("x")'
     $registeredPlain = Register-AihRepository -StoreRoot $store -Path $plain
     Assert-Aih ($registeredPlain.repository.vcs -eq 'none') 'non-Git directory registers with vcs=none'
     Assert-Aih ($registeredPlain.checkout.kind -eq 'non_git') 'non-Git checkout kind is non_git'
@@ -101,7 +103,7 @@ try {
     $created = @($created) + @($repoA2)
 
     # ── repository identity must not depend on checkout location ─────────
-    $repoA3 = Join-Path $fixtureRoot 'deeply\nested\repoA-copy'
+    $repoA3 = Join-Path $fixtureRoot 'deeply/nested/repoA-copy'
     New-Item -ItemType Directory -Path $repoA3 -Force | Out-Null
     Copy-Item -Path (Join-Path $repoA '*') -Destination $repoA3 -Recurse -Force
     $registeredA3 = Register-AihRepository -StoreRoot $store -Path $repoA3

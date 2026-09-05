@@ -1,7 +1,9 @@
-[CmdletBinding()]param([string]$InstallRoot = 'C:\AI-Harness')
+[CmdletBinding()]param([string]$InstallRoot = (Split-Path -Parent $PSScriptRoot))
+# Platform-aware child host: Windows keeps powershell.exe; POSIX uses the pinned Nexus pwsh.
+if (-not (Get-Command Test-AihIsWindows -ErrorAction SilentlyContinue)) { . (Join-Path $InstallRoot 'scripts/Platform.ps1') }; $aihPsHost = Get-AihPowerShellHost -InstallRoot $InstallRoot
 Set-StrictMode -Version Latest;$ErrorActionPreference = 'Stop'
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\Intelligence.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Intelligence.ps1')
 
 # ── Phase 3.1F (Services, Events, API) + multi-repo acceptance tests ────────
 $passed = 0
@@ -25,7 +27,7 @@ function New-MatrixRepos([string]$Root) {
     $dirs = @{}
     # 1. simple TypeScript project
     $ts = New-TestGitRepo (Join-Path $Root 'ts-project')
-    Set-TestFile (Join-Path $ts 'src\app.ts') 'export const app = 1;'
+    Set-TestFile (Join-Path $ts 'src/app.ts') 'export const app = 1;'
     Set-TestFile (Join-Path $ts 'package.json') '{"name":"ts-project","version":"0.1.0"}'
     Invoke-TestGit $ts @('add', '.') | Out-Null
     Invoke-TestGit $ts @('-c', 'user.email=t@nexus.test', '-c', 'user.name=nexus-test', 'commit', '-q', '-m', 'init') | Out-Null
@@ -36,7 +38,7 @@ function New-MatrixRepos([string]$Root) {
     Set-TestFile (Join-Path $mono 'package.json') '{"name":"mono-root","workspaces":["packages/*"]}'
     Set-TestFile (Join-Path $mono 'pnpm-workspace.yaml') (@('packages:', '  - "packages/*"') -join $nl)
     foreach ($p in @('core', 'ui')) {
-        Set-TestFile (Join-Path $mono "packages\$p\package.json") ('{"name":"mono-' + $p + '"}')
+        Set-TestFile (Join-Path $mono "packages/$p/package.json") ('{"name":"mono-' + $p + '"}')
     }
     Invoke-TestGit $mono @('add', '.') | Out-Null
     Invoke-TestGit $mono @('-c', 'user.email=t@nexus.test', '-c', 'user.name=nexus-test', 'commit', '-q', '-m', 'init') | Out-Null
@@ -45,7 +47,7 @@ function New-MatrixRepos([string]$Root) {
     $dn = New-TestGitRepo (Join-Path $Root 'dotnet-suite')
     $slnBody = @('Microsoft Visual Studio Solution File, Format Version 12.00', 'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Host", "src\Host\Host.csproj", "{11111111-1111-1111-1111-111111111111}"', 'EndProject', 'Global', 'EndGlobal')
     Set-TestFile (Join-Path $dn 'Host.sln') ($slnBody -join $nl)
-    Set-TestFile (Join-Path $dn 'src\Host\Host.csproj') '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>'
+    Set-TestFile (Join-Path $dn 'src/Host/Host.csproj') '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>'
     Invoke-TestGit $dn @('add', '.') | Out-Null
     Invoke-TestGit $dn @('-c', 'user.email=t@nexus.test', '-c', 'user.name=nexus-test', 'commit', '-q', '-m', 'init') | Out-Null
     $dirs['dotnet-suite'] = $dn
@@ -145,11 +147,11 @@ try {
     Assert-Aih ($null -ne $s1 -and $s1.status -eq 'ready') 'e2e 2: snapshot of a registered repository is ready and active'
     # (3) restart survival via a fresh process
     $freshScript = '. {0}; $a = Get-AihActiveSnapshot -StoreRoot {1} -CheckoutId {2}; Write-Output (''ACTIVE='' + $a.snapshotId); Write-Output (''FILES='' + @(Get-AihSnapshotFiles -StoreRoot {1} -SnapshotId $a.snapshotId -RepositoryId $a.repositoryId).Count)' -f "'C:\AI-Harness\scripts\Intelligence.ps1'", ("'" + $store + "'"), ("'" + $e2eCheckout + "'")
-    $freshOut = & powershell.exe -NoProfile -NonInteractive -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($freshScript)))
+    $freshOut = & $aihPsHost -NoProfile -NonInteractive -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($freshScript)))
     Assert-Aih (($freshOut -join ' ') -like '*ACTIVE=snap_*') 'e2e 3: active snapshot survives a Nexus restart'
     Assert-Aih (($freshOut -join ' ') -like '*FILES=*') 'e2e 3: snapshot files survive a Nexus restart'
     # (4) modify exactly one file
-    Set-TestFile (Join-Path $tsDir 'src\app.ts') 'export const app = 42;'
+    Set-TestFile (Join-Path $tsDir 'src/app.ts') 'export const app = 42;'
     # (5) new snapshot
     $s2build = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $e2eCheckout
     Assert-Aih ($s2build.stateChanged -and $s2build.snapshot.isDirty) 'e2e 4-5: one modified file yields a new dirty snapshot'
@@ -175,7 +177,7 @@ try {
     Assert-Aih ($secondRegistered.repository.repositoryId -eq $e2eRepository) 'e2e 9: second checkout resolves to the same repository'
     Assert-Aih ($secondRegistered.checkout.checkoutId -ne $e2eCheckout) 'e2e 9: second checkout keeps its own identity'
     $firstActiveBefore = Get-AihActiveSnapshot -StoreRoot $store -CheckoutId $e2eCheckout
-    Set-TestFile (Join-Path $second 'src\app.ts') 'export const app = 100;'
+    Set-TestFile (Join-Path $second 'src/app.ts') 'export const app = 100;'
     $secondBuild = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $secondRegistered.checkout.checkoutId
     Assert-Aih ($secondBuild.snapshot.isDirty) 'e2e 9: modifying the second checkout dirties only its snapshot'
     $firstActiveAfter = Get-AihActiveSnapshot -StoreRoot $store -CheckoutId $e2eCheckout

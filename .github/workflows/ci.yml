@@ -85,4 +85,11 @@ jobs:
       - name: Linux launchers resolve and run doctor offline
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          "$HOME/.local/share/nexus/bin/aih-doctor" -Offline
+          "$HOME/.local/bin/aih-doctor" -Offline
+      - name: INSTALLED-tree harness (aih-test from ~/.local/bin, all suites)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          # Exercises the exact installed-tree path that failed on CachyOS:
+          # every suite runs from ~/.local/share/nexus/tests against the
+          # installed Linux layout (extensionless launchers, POSIX paths).
+          "$HOME/.local/bin/aih-test"

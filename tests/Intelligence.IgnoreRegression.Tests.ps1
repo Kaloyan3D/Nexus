@@ -1,7 +1,7 @@
 [CmdletBinding()]param([string]$InstallRoot = 'C:\AI-Harness')
 Set-StrictMode -Version Latest;$ErrorActionPreference = 'Stop'
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\Intelligence.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Intelligence.ps1')
 
 # ── Phase 3.1 hardening Fix 2: ignore-engine regression compatibility ───────
 $passed = 0
@@ -12,7 +12,7 @@ function Set-TestFile([string]$Path, [string]$Content) { $parent = Split-Path -P
 function New-Tree([hashtable[]]$Files) {
     $dir = New-Fixture tree
     foreach ($f in $Files) {
-        Set-TestFile (Join-Path $dir ($f.path -replace '/', '\')) ($(if ($f.ContainsKey('content')) { $f.content } else { 'x' }))
+        Set-TestFile (Join-Path $dir ($f.path -replace '/', '/')) ($(if ($f.ContainsKey('content')) { $f.content } else { 'x' }))
     }
     return $dir
 }

@@ -1,7 +1,7 @@
 [CmdletBinding()]param([string]$InstallRoot = 'C:\AI-Harness')
 Set-StrictMode -Version Latest;$ErrorActionPreference = 'Stop'
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\Intelligence.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Intelligence.ps1')
 
 # ── Phase 3.2C/D: structural parsing + definitions/references semantics ─────
 $passed = 0

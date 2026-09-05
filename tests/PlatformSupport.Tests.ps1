@@ -1,7 +1,7 @@
 [CmdletBinding()]param([string]$InstallRoot)
 Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot=Split-Path -Parent $PSScriptRoot }
-. (Join-Path $InstallRoot 'scripts\Platform.ps1')
+. (Join-Path $InstallRoot 'scripts/Platform.ps1')
 $passed=0
 function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw "FAIL: $Name"};$script:passed++;Write-Host "PASS: $Name"}
 $isWindows=Test-AihIsWindows
@@ -268,4 +268,28 @@ try {
 } catch {
     throw
 }
+# TASK-0023 attempt 7: installed harness tests are platform-aware. The
+# launcher contract follows Get-AihLauncherExtension (aih.cmd on Windows,
+# extensionless aih on Linux), child hosts are resolved through
+# Get-AihPowerShellHost, and no suite constructs paths with backslash-only
+# subpaths or spawns a bare powershell.exe.
+$setupUpgrade=[IO.File]::ReadAllText((Join-Path $InstallRoot 'tests/SetupUpgrade.Tests.ps1'))
+Assert-Aih ($setupUpgrade.Contains('Get-AihLauncherExtension')-and$setupUpgrade.Contains('Test-AihIsWindows')) 'SetupUpgrade suite selects the launcher contract through the shared platform abstraction'
+Assert-Aih (-not $setupUpgrade.Contains("(Join-Path " + [char]36 + "launcherRoot 'aih.cmd')")) 'SetupUpgrade suite never unconditionally requires aih.cmd'
+Assert-Aih ($setupUpgrade.Contains('%~dp0..')-and$setupUpgrade.Contains('-InstallRoot "%AIH_ROOT%"')) 'Windows aih.cmd contracts remain asserted inside the Windows branch'
+Assert-Aih ($setupUpgrade.Contains('#!/bin/sh')-and$setupUpgrade.Contains('AIH_BAKED_ROOT')) 'POSIX launcher contract remains asserted'
+Assert-Aih (-not $setupUpgrade.Contains("Join-Path " + [char]36 + "launcherRoot 'aih.cmd'")) 'no unconditional aih.cmd path construction remains'
+$testDir=Join-Path $InstallRoot 'tests'
+$bareSpawns=@(Get-ChildItem -LiteralPath $testDir -Filter '*.Tests.ps1' | ForEach-Object { [IO.File]::ReadAllText($_.FullName) } | Where-Object { $_ -match '&\s*powershell\.exe' -or $_ -match 'Start-Process\s+powershell\.exe' })
+Assert-Aih (@($bareSpawns).Count-eq0) 'no suite spawns a bare powershell.exe child (Get-AihPowerShellHost everywhere)'
+$backslashJoins=0
+Get-ChildItem -LiteralPath $testDir -Filter '*.Tests.ps1' | ForEach-Object {
+  foreach ($line in [IO.File]::ReadAllLines($_.FullName)) {
+    $quotedBs = [string][char]39 + '[^' + [char]39 + ']*' + [char]92 + [char]92 + '[^' + [char]39 + ']*' + [char]39
+    if ($line-match'Join-Path'-and$line-match$quotedBs) { $backslashJoins++ }
+  }
+}
+Assert-Aih ($backslashJoins-eq0) "no Join-Path with backslash-only subpaths remains ($backslashJoins found)"
+$platformSupportSelf=[IO.File]::ReadAllText((Join-Path $InstallRoot 'scripts/Platform.ps1'))
+Assert-Aih ($platformSupportSelf.Contains("if (Test-AihIsWindows) { return '.cmd' }")-or$platformSupportSelf.Contains("return '.cmd'")) 'Get-AihLauncherExtension keeps .cmd on Windows'
 Write-Host "RESULT: $passed platform-support assertions passed."

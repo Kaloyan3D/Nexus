@@ -1,17 +1,19 @@
 [CmdletBinding()]param([string]$InstallRoot)
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
+# Platform-aware child host: Windows keeps powershell.exe; POSIX uses the pinned Nexus pwsh.
+if (-not (Get-Command Test-AihIsWindows -ErrorAction SilentlyContinue)) { . (Join-Path $InstallRoot 'scripts/Platform.ps1') }; $aihPsHost = Get-AihPowerShellHost -InstallRoot $InstallRoot
 Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\Routing.ps1')
-. (Join-Path $InstallRoot 'scripts\TaskController.ps1')
-. (Join-Path $InstallRoot 'scripts\ContextEngine.ps1')
-. (Join-Path $InstallRoot 'scripts\OutputDigest.ps1')
-. (Join-Path $InstallRoot 'scripts\CodexReview.ps1')
-. (Join-Path $InstallRoot 'scripts\WorktreeManager.ps1')
-. (Join-Path $InstallRoot 'scripts\ArchitectureRules.ps1')
-. (Join-Path $InstallRoot 'scripts\Telemetry.ps1')
-. (Join-Path $InstallRoot 'scripts\Completion.ps1')
-. (Join-Path $InstallRoot 'scripts\ControlRoom.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Routing.ps1')
+. (Join-Path $InstallRoot 'scripts/TaskController.ps1')
+. (Join-Path $InstallRoot 'scripts/ContextEngine.ps1')
+. (Join-Path $InstallRoot 'scripts/OutputDigest.ps1')
+. (Join-Path $InstallRoot 'scripts/CodexReview.ps1')
+. (Join-Path $InstallRoot 'scripts/WorktreeManager.ps1')
+. (Join-Path $InstallRoot 'scripts/ArchitectureRules.ps1')
+. (Join-Path $InstallRoot 'scripts/Telemetry.ps1')
+. (Join-Path $InstallRoot 'scripts/Completion.ps1')
+. (Join-Path $InstallRoot 'scripts/ControlRoom.ps1')
 
 $passed=0
 function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw "FAIL: $Name"};$script:passed++;Write-Host "PASS: $Name"}
@@ -56,7 +58,7 @@ try{
  $attempt=Start-AihTaskAttempt $fixture $task.taskId deepseek_normal
  $reloaded=Read-AihTaskLedger $fixture
  Assert-Aih (@($reloaded.tasks).Count-eq1-and$reloaded.tasks[0].attempt-eq1) 'controller state and attempts survive restart'
- Assert-Aih ((Test-Path (Join-Path $fixture ".ai-harness\runs\$($task.taskId)\attempts.jsonl"))) 'attempt journal persists independently of conversation'
+ Assert-Aih ((Test-Path (Join-Path $fixture ".ai-harness/runs/$($task.taskId)/attempts.jsonl"))) 'attempt journal persists independently of conversation'
  Add-AihTaskFailure $fixture $task.taskId 'failure-a' 'evidence'|Out-Null
  Start-AihTaskAttempt $fixture $task.taskId deepseek_deep|Out-Null;Add-AihTaskFailure $fixture $task.taskId 'failure-a' 'evidence'|Out-Null
  Start-AihTaskAttempt $fixture $task.taskId deepseek_deep|Out-Null;Add-AihTaskFailure $fixture $task.taskId 'failure-a' 'evidence'|Out-Null
@@ -106,7 +108,7 @@ try{
  Assert-Aih $passNoVerify 'passing without a verifying record fails closed'
 
  New-Item -ItemType Directory -Path (Join-Path $fixture 'src')|Out-Null
- [IO.File]::WriteAllText((Join-Path $fixture 'src\widget.ts'),"export interface Widget { id: string }`nexport function findWidget(id: string) { return id }",[Text.UTF8Encoding]::new($false))
+ [IO.File]::WriteAllText((Join-Path $fixture 'src/widget.ts'),"export interface Widget { id: string }`nexport function findWidget(id: string) { return id }",[Text.UTF8Encoding]::new($false))
  [IO.File]::WriteAllText((Join-Path $fixture 'README.md'),'Widget lookup documentation',[Text.UTF8Encoding]::new($false))
  $map=New-AihRepositoryMap $fixture
  Assert-Aih (@(Find-AihSymbol $map 'findWidget').Count-eq1) 'context engine retrieves relevant symbols'
@@ -114,7 +116,7 @@ try{
  $context=New-AihContextBundle $fixture $task2.taskId 'fix findWidget lookup' @('works') 500 2
  Assert-Aih ($context.manifest.budget.estimatedTokens-le500-and@($context.fileSlices).Count-le2) 'context budget is enforced'
  Assert-Aih (-not$context.manifest.repositoryMap.fullRepositoryIncluded) 'context engine never marks automatic full-repo content ingestion'
- $savedManifest=Get-Content -Raw (Join-Path $fixture ".ai-harness\runs\$($task2.taskId)\context-manifest.json")|ConvertFrom-Json
+ $savedManifest=Get-Content -Raw (Join-Path $fixture ".ai-harness/runs/$($task2.taskId)/context-manifest.json")|ConvertFrom-Json
  Assert-Aih ($savedManifest.taskId-eq$task2.taskId-and$savedManifest.budget.maxFiles-eq2) 'stable machine-readable context manifest is persisted'
 
  $raw=(1..1000|ForEach-Object{"noise line $_"})-join"`n";$raw+="`nFAIL tests/widget.test.ts:18 Expected: 1 Actual: 2"
@@ -127,9 +129,9 @@ try{
  # + lookup in path and content), so the unlimited-count assertion exercises
  # relevance selection, not weak incidental matches; weak matches stay out.
  $largeContent=('findWidget large lookup logic '*300)
- [IO.File]::WriteAllText((Join-Path $fixture 'src\large.ts'),$largeContent,[Text.UTF8Encoding]::new($false))
- for($i=1;$i -le 14;$i++){ [IO.File]::WriteAllText((Join-Path $fixture ('src\lookup{0:d2}.ts' -f $i)),('findWidget lookup widget case {0}' -f $i),[Text.UTF8Encoding]::new($false)) }
- for($i=1;$i -le 14;$i++){ [IO.File]::WriteAllText((Join-Path $fixture ('src\gen{0:d2}.ts' -f $i)),(('generated lookup logic {0}' -f $i)+"`n")*3,[Text.UTF8Encoding]::new($false)) }
+ [IO.File]::WriteAllText((Join-Path $fixture 'src/large.ts'),$largeContent,[Text.UTF8Encoding]::new($false))
+ for($i=1;$i -le 14;$i++){ [IO.File]::WriteAllText((Join-Path $fixture ('src/lookup{0:d2}.ts' -f $i)),('findWidget lookup widget case {0}' -f $i),[Text.UTF8Encoding]::new($false)) }
+ for($i=1;$i -le 14;$i++){ [IO.File]::WriteAllText((Join-Path $fixture ('src/gen{0:d2}.ts' -f $i)),(('generated lookup logic {0}' -f $i)+"`n")*3,[Text.UTF8Encoding]::new($false)) }
  $unl=New-AihContextBundle $fixture $task2.taskId 'fix findWidget lookup' @('works') 0 0
  Assert-Aih ($unl.manifest.budget.maxContextTokens-eq0-and$unl.manifest.budget.maxFiles-eq0) 'context bundle records 0 = unlimited explicitly'
  Assert-Aih ($unl.manifest.budget.enforceLimits-eq$false) 'unlimited context bundle reports enforceLimits=false'
@@ -254,7 +256,7 @@ try{
  Assert-Aih (@($bundlePaths|Where-Object{$_ -eq 'docs/architecture/code-intelligence.md'}).Count-eq1) 'docs-specific evidence remains retrievable'
  $implSlice=@($ctxBundle.fileSlices|Where-Object{$_.path -eq 'scripts/intelligence/Intelligence.CodeStore.ps1'})[0]
  Assert-Aih ($implSlice.score-gt0-and$implSlice.evidenceClass-eq'source'-and@($implSlice.matchedTerms).Count-gt0-and@($implSlice.pathMatches).Count-gt0) 'selected slices carry score/evidenceClass/matchedTerms/pathMatches provenance'
- $savedCtx=Get-Content -Raw (Join-Path $ctxFixture ".ai-harness\runs\$($ctxTask.taskId)\context-manifest.json")|ConvertFrom-Json
+ $savedCtx=Get-Content -Raw (Join-Path $ctxFixture ".ai-harness/runs/$($ctxTask.taskId)/context-manifest.json")|ConvertFrom-Json
  Assert-Aih ($savedCtx.schemaVersion-eq3-and$savedCtx.taskId-eq$ctxTask.taskId) 'context manifest v3 persists with task identity (TASK-0012 extends provenance, never replaces it)'
  $ev0=@($savedCtx.selection.evidence)[0]
  Assert-Aih ($null-ne$ev0-and$ev0.path-and$null-ne$ev0.score-and$ev0.evidenceClass-and$null-ne$ev0.matchedTerms-and$null-ne$ev0.eligibility-and$ev0.reason) 'context manifest records per-file selection provenance'
@@ -268,8 +270,8 @@ try{
  # F. context-quality guard: no meaningful evidence -> structured failure, not garbage
  $guardFixture=New-Fixture 'ctxguard'
  try{
-  New-Item -ItemType Directory -Force -Path (Join-Path $guardFixture 'data\routing')|Out-Null
-  [IO.File]::WriteAllText((Join-Path $guardFixture 'data\routing\decisions.jsonl'),(('{"prompt":"review the routing decision"}')+"`n")*20,[Text.UTF8Encoding]::new($false))
+  New-Item -ItemType Directory -Force -Path (Join-Path $guardFixture 'data/routing')|Out-Null
+  [IO.File]::WriteAllText((Join-Path $guardFixture 'data/routing/decisions.jsonl'),(('{"prompt":"review the routing decision"}')+"`n")*20,[Text.UTF8Encoding]::new($false))
   $guardTask=New-AihTask $guardFixture 'guard task' @('evidence')
   $guardBundle=New-AihContextBundle $guardFixture $guardTask.taskId 'review the routing decision' @() 0 0
   Assert-Aih (@($guardBundle.fileSlices).Count-eq0) 'context-quality failure produces an empty bundle instead of garbage'
@@ -370,7 +372,7 @@ try{
 # 8. documentation-specific query emphasizes docs without forced source/test quotas
 $docsFixture=New-Fixture 'docsq'
 try{
- New-Item -ItemType Directory -Force -Path (Join-Path $docsFixture 'docs\architecture'),(Join-Path $docsFixture 'src'),(Join-Path $docsFixture 'tests')|Out-Null
+ New-Item -ItemType Directory -Force -Path (Join-Path $docsFixture 'docs/architecture'),(Join-Path $docsFixture 'src'),(Join-Path $docsFixture 'tests')|Out-Null
  $docsWrite={param($rel,$content)[IO.File]::WriteAllText((Join-Path $docsFixture $rel),$content,[Text.UTF8Encoding]::new($false))}
  & $docsWrite 'docs\architecture\orbital-telemetry.md' ('# Orbital Telemetry architecture' + "`n`n" + 'The orbital telemetry documentation covers the antenna calibration, downlink scheduling and the orbital telemetry data model.')
  & $docsWrite 'src\collector.ts' "export const orbitalTelemetryCollector = () => 'orbital telemetry samples'"
@@ -459,14 +461,14 @@ try{
  $diagTask=New-AihTask $diagFixture 'diagnostic task' @('evidence')
  $diagShape=Get-AihReviewResponseShape $providerErrorResponse
  Write-AihReviewTransportDiagnostic -Workspace $diagFixture -TaskId $diagTask.taskId -TaskInstanceId $diagTask.taskInstanceId -Provider 'sol-local' -Model 'gpt-5.6-sol' -Shape $diagShape -ErrorText 'Authorization: Bearer supersecret123 plus sk-abcdef123456 leaked' -EstimatedPacketTokens 12345 -SelectedFileCount 19 -ProviderCapacityKnown $true -ProviderCapacityPacking 'not-needed'
- $diagPath=Join-Path $diagFixture ".ai-harness\runs\$($diagTask.taskId)\review-transport-diagnostic.json"
+ $diagPath=Join-Path $diagFixture ".ai-harness/runs/$($diagTask.taskId)/review-transport-diagnostic.json"
  Assert-Aih (Test-Path -LiteralPath $diagPath) 'TASK-0012: failed review transport persists a diagnostic artifact in the task run directory'
  $diagRaw=Get-Content -Raw -LiteralPath $diagPath
  Assert-Aih (($diagRaw-notmatch'supersecret123')-and($diagRaw-notmatch'sk-abcdef123456')-and($diagRaw-notmatch'Bearer ')) 'TASK-0012: no credentials are ever written to diagnostics'
  $diagDoc=$diagRaw|ConvertFrom-Json
  Assert-Aih ($diagDoc.taskId-eq$diagTask.taskId-and$diagDoc.taskInstanceId-eq$diagTask.taskInstanceId-and$diagDoc.provider-eq'sol-local'-and$diagDoc.model-eq'gpt-5.6-sol'-and$diagDoc.responseStatus-eq'failed'-and$diagDoc.providerError.type-eq'rate_limit'-and$diagDoc.estimatedPacketTokens-eq12345-and$diagDoc.selectedFileCount-eq19-and$diagDoc.providerCapacityKnown-and$diagDoc.timestamp) 'TASK-0012: diagnostic carries taskId/instance/provider/model/status/error/usage-fields/capacity state'
  # manifest packing annotations: budgetEnforcement vs providerCapacityPacking distinction
- $manifestPath=Join-Path $diagFixture ".ai-harness\runs\$($diagTask.taskId)\context-manifest.json"
+ $manifestPath=Join-Path $diagFixture ".ai-harness/runs/$($diagTask.taskId)/context-manifest.json"
  Write-AihAtomicJson $manifestPath ([ordered]@{schemaVersion=3;taskId=$diagTask.taskId;selection=[ordered]@{evidence=@(
    [ordered]@{path='src/a.ts';retrievalScore=10;evidenceClass='source'},
    [ordered]@{path='tests/a.test.ts';retrievalScore=9;evidenceClass='test'},
@@ -495,28 +497,28 @@ try{
 
 
 # --- Nexus UI customization -------------------------------------------------
-$nexusUiPackage = Join-Path $layout.Data 'profiles\node_modules\@nexus\ui-brand\package.json'
+$nexusUiPackage = Join-Path $layout.Data 'profiles/node_modules/@nexus/ui-brand/package.json'
 Assert-Aih (Test-Path -LiteralPath $nexusUiPackage) 'Nexus UI package installed into the profile module fallback'
 $homePatch = Join-Path $layout.Data 'cordis.patch.yml'
 $homePatchText = Get-Content -Raw -Encoding UTF8 -LiteralPath $homePatch
 Assert-Aih ($homePatchText.Contains('nexus-ui-brand') -and $homePatchText.Contains('ui-brand-official') -and $homePatchText.Contains('disabled: true')) 'home patch composes Nexus brand and disables the official DeepSeek brand'
-$distDir = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-web-frontend\dist'
+$distDir = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-web-frontend/dist'
 Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $distDir 'index.html')).Contains('<title>Nexus</title>')) 'dist index title is Nexus'
 Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $distDir 'favicon.svg')).Contains('#7C5CFF')) 'dist favicon is the Nexus mark'
 $distManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $distDir 'manifest.webmanifest') | ConvertFrom-Json
 Assert-Aih ([string]$distManifest.name -eq 'Nexus' -and [string]$distManifest.short_name -eq 'Nexus') 'PWA manifest identity is Nexus'
-$rendererBundle = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-renderer\lib\client.js'
+$rendererBundle = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-client-ui-renderer/lib/client.js'
 Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath $rendererBundle).Contains('const productTitle = "Nexus"')) 'runtime document title is Nexus'
-Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-layout\lib\client.js')).Contains('panels.sidebar === 0 ? 288 : panels.sidebar')) 'expanded sidebar default is 288px'
-$liveConversation = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-conversation\lib\client.js')
+Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-client-ui-layout/lib/client.js')).Contains('panels.sidebar === 0 ? 288 : panels.sidebar')) 'expanded sidebar default is 288px'
+$liveConversation = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js')
 Assert-Aih ($liveConversation.Contains('background:var(--dsw-alias-button-primary-fill);color:#fff')) 'composer send button uses violet primary'
 Assert-Aih ($liveConversation.Contains('#7C5CFF') -and -not $liveConversation.Contains('#6187D8')) 'hero glow tinted violet'
 Assert-Aih ($liveConversation.Contains('const inert = pendingWorkspaceId !== void 0 || sessionId === void 0 || hero && chipTitle === void 0;')) 'live UI blocks old-session submission during workspace transition'
-Assert-Aih ((Test-Path -LiteralPath (Join-Path $distDir 'assets\nexus-logo.png')) -and (Test-Path -LiteralPath (Join-Path $distDir 'assets\nexus-mark.png'))) 'Nexus brand assets served from dist'
+Assert-Aih ((Test-Path -LiteralPath (Join-Path $distDir 'assets/nexus-logo.png')) -and (Test-Path -LiteralPath (Join-Path $distDir 'assets/nexus-mark.png'))) 'Nexus brand assets served from dist'
 
 $fixture = New-Fixture 'nexus-ui'
 try {
-    $fixtureApp = Join-Path $fixture 'app\node_modules\@deepseek-ai'
+    $fixtureApp = Join-Path $fixture 'app/node_modules/@deepseek-ai'
     $fixtureFrontend = Join-Path $fixtureApp 'dsh-web-frontend'
     $fixtureDist = Join-Path $fixtureFrontend 'dist'
     New-Item -ItemType Directory -Force -Path $fixtureDist | Out-Null
@@ -526,25 +528,25 @@ try {
     # the system ANSI codepage by Windows PowerShell 5.1, which would corrupt
     # the fixture on non-UTF-8 codepages. The fixture must mirror the pinned
     # bundle byte-for-byte on every machine.
-    $fixtureCopy = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'ui\nexus-ui\patch-copy.json') | ConvertFrom-Json
+    $fixtureCopy = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'ui/nexus-ui/patch-copy.json') | ConvertFrom-Json
     # Fixture files deliberately use CRLF line endings to prove the patch is line-ending tolerant.
     [IO.File]::WriteAllText((Join-Path $fixtureDist 'index.html'), "<!doctype html>`r`n<html><head><title>DeepSeek Harness</title></head><body></body></html>", [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $fixtureDist 'favicon.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>', [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $fixtureDist 'manifest.webmanifest'), '{"id":"/","name":"DeepSeek Harness","short_name":"DSH","display":"fullscreen"}', [Text.UTF8Encoding]::new($false))
-    $fixtureRenderer = Join-Path $fixtureApp 'dsh-client-ui-renderer\lib'
+    $fixtureRenderer = Join-Path $fixtureApp 'dsh-client-ui-renderer/lib'
     New-Item -ItemType Directory -Force -Path $fixtureRenderer | Out-Null
     [IO.File]::WriteAllText((Join-Path $fixtureRenderer 'client.js'), "const productTitle = ""DeepSeek Harness"";`r`n", [Text.UTF8Encoding]::new($false))
-    $fixtureConversation = Join-Path $fixtureApp 'dsh-client-ui-conversation\lib'
+    $fixtureConversation = Join-Path $fixtureApp 'dsh-client-ui-conversation/lib'
     New-Item -ItemType Directory -Force -Path $fixtureConversation | Out-Null
     $conversationFixture = $fixtureCopy.heroHeadline[0].from + ",`r`n" + $fixtureCopy.heroHeadline[1].from + "`r`nconst inert = sessionId === void 0 || hero && chipTitle === void 0;`r`nbackground:var(--dsw-alias-button-info-fill);color:#fff`r`nvar(--dsw-alias-button-info-hover)`r`n#6187D8`r`n"
     [IO.File]::WriteAllText((Join-Path $fixtureConversation 'client.js'), $conversationFixture, [Text.UTF8Encoding]::new($false))
-    $fixtureLayout = Join-Path $fixtureApp 'dsh-client-ui-layout\lib'
+    $fixtureLayout = Join-Path $fixtureApp 'dsh-client-ui-layout/lib'
     New-Item -ItemType Directory -Force -Path $fixtureLayout | Out-Null
     [IO.File]::WriteAllText((Join-Path $fixtureLayout 'client.js'), "const w = { sidebar: 280, details: 0 };`r`nd.sidebar = d.sidebar === 0 ? 280 : 0;`r`nconst w = panels.sidebar === 0 ? 280 : panels.sidebar;`r`n", [Text.UTF8Encoding]::new($false))
-    $fixtureModelSel = Join-Path $fixtureApp 'dsh-client-ui-model-selection\lib'
+    $fixtureModelSel = Join-Path $fixtureApp 'dsh-client-ui-model-selection/lib'
     New-Item -ItemType Directory -Force -Path $fixtureModelSel | Out-Null
     [IO.File]::WriteAllText((Join-Path $fixtureModelSel 'client.js'), "const x = effortLabel !== void 0 && (0, react_jsx_runtime.jsx)(`"span`", {`r`n", [Text.UTF8Encoding]::new($false))
-    $fixtureModels = Join-Path $fixtureApp 'dsh-client-ui-settings-models\lib'
+    $fixtureModels = Join-Path $fixtureApp 'dsh-client-ui-settings-models/lib'
     New-Item -ItemType Directory -Force -Path $fixtureModels | Out-Null
     # Build the welcome-notice block from the exact copy strings in patch-copy.json so the
     # fixture mirrors the pinned bundle byte-for-byte (including the literal backslash-n sequences).
@@ -555,10 +557,10 @@ try {
     $noticeBlock = "const WELCOME_NOTICE_COPY = {`r`n`t`t`tzh: {`r`n`t`t`t`ttitle: " + $fixtureCopy.welcomeNotice.titleZh.from + ",`r`n`t`t`t`tbody: " + $fixtureCopy.welcomeNotice.bodyZh.from + "`r`n`t`t`t`tcontinueLabel: " + $zhContinue + "`r`n`t`t`t},`r`n`t`t`ten: {`r`n`t`t`t`ttitle: " + $fixtureCopy.welcomeNotice.titleEn.from + ",`r`n`t`t`t`tbody: " + $fixtureCopy.welcomeNotice.bodyEn.from + "`r`n`t`t`t`tcontinueLabel: ""Continue""`r`n`t`t`t}`r`n`t`t};"
     [IO.File]::WriteAllText((Join-Path $fixtureModels 'client.js'), $noticeBlock, [Text.UTF8Encoding]::new($false))
     $fixtureData = Join-Path $fixture 'data'
-    New-Item -ItemType Directory -Force -Path (Join-Path $fixtureData 'profiles\node_modules') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $fixtureData 'profiles/node_modules') | Out-Null
     [IO.File]::WriteAllText((Join-Path $fixtureData 'settings.yaml'), "agent-default-model:`r`n  provider: flash-max-direct`r`n", [Text.UTF8Encoding]::new($false))
 
-    & (Join-Path $InstallRoot 'scripts\Patch-NexusUi.ps1') -InstallRoot $fixture -SourceRoot $InstallRoot
+    & (Join-Path $InstallRoot 'scripts/Patch-NexusUi.ps1') -InstallRoot $fixture -SourceRoot $InstallRoot
     if ($LASTEXITCODE -ne 0) { throw 'Nexus UI patch failed on the fixture' }
     Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureDist 'index.html')).Contains('<title>Nexus</title>')) 'fixture: dist title patched'
     Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureDist 'favicon.svg')).Contains('#7C5CFF')) 'fixture: favicon replaced with Nexus mark'
@@ -572,18 +574,18 @@ try {
     Assert-Aih ($fixtureLayoutText.Contains('sidebar: 288,') -and $fixtureLayoutText.Contains('d.sidebar === 0 ? 288 : 0')) 'fixture: sidebar default width patched to 288'
     Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureModelSel 'client.js')).Contains('!modelLabel.toUpperCase().endsWith(effortLabel.toUpperCase())')) 'fixture: model effort dedupe patched'
     Assert-Aih ($fixtureConversationText.Contains('background:var(--dsw-alias-button-primary-fill);color:#fff') -and $fixtureConversationText.Contains('var(--dsw-alias-button-primary-hover)') -and $fixtureConversationText.Contains('#7C5CFF') -and -not $fixtureConversationText.Contains('#6187D8')) 'fixture: send button violet + glow tinted'
-    Assert-Aih ((Test-Path -LiteralPath (Join-Path $fixtureDist 'assets\nexus-logo.png')) -and (Test-Path -LiteralPath (Join-Path $fixtureDist 'assets\nexus-mark.png'))) 'fixture: brand assets copied to dist'
+    Assert-Aih ((Test-Path -LiteralPath (Join-Path $fixtureDist 'assets/nexus-logo.png')) -and (Test-Path -LiteralPath (Join-Path $fixtureDist 'assets/nexus-mark.png'))) 'fixture: brand assets copied to dist'
     $fixtureModelsText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureModels 'client.js')
     Assert-Aih ($fixtureModelsText.Contains('About Nexus') -and $fixtureModelsText.Contains($fixtureCopy.welcomeNotice.titleZh.to) -and -not $fixtureModelsText.Contains('Internal Testing Notice')) 'fixture: welcome notice patched'
     Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureData 'settings.yaml')).Contains('preference: dark')) 'fixture: dark theme default added'
-    Assert-Aih (Test-Path -LiteralPath (Join-Path $fixtureData 'profiles\node_modules\@nexus\ui-brand\package.json')) 'fixture: Nexus package installed'
+    Assert-Aih (Test-Path -LiteralPath (Join-Path $fixtureData 'profiles/node_modules/@nexus/ui-brand/package.json')) 'fixture: Nexus package installed'
 
     $firstIndex = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureDist 'index.html')
     $firstModels = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureModels 'client.js')
     $firstRenderer = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureRenderer 'client.js')
     $firstConversation = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureConversation 'client.js')
     $firstLayout = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureLayout 'client.js')
-    & (Join-Path $InstallRoot 'scripts\Patch-NexusUi.ps1') -InstallRoot $fixture -SourceRoot $InstallRoot
+    & (Join-Path $InstallRoot 'scripts/Patch-NexusUi.ps1') -InstallRoot $fixture -SourceRoot $InstallRoot
     if ($LASTEXITCODE -ne 0) { throw 'Nexus UI patch failed on the second run' }
     $secondIndex = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureDist 'index.html')
     $secondModels = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureModels 'client.js')
@@ -596,7 +598,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $fixtureRenderer 'client.js'), "const productTitle = ""Something Else"";`r`n", [Text.UTF8Encoding]::new($false))
     $refused = $false
     try {
-        & (Join-Path $InstallRoot 'scripts\Patch-NexusUi.ps1') -InstallRoot $fixture -SourceRoot $InstallRoot
+        & (Join-Path $InstallRoot 'scripts/Patch-NexusUi.ps1') -InstallRoot $fixture -SourceRoot $InstallRoot
     }
     catch { $refused = $true }
     Assert-Aih $refused 'fixture: Nexus patch fails closed on changed upstream structure'
@@ -614,15 +616,15 @@ $verifyFixture = New-Fixture 'verify-exit'
 try {
     $verifyWorkspace = Join-Path $verifyFixture 'ws'
     New-Item -ItemType Directory -Force -Path (Join-Path $verifyWorkspace '.ai-harness') | Out-Null
-    [IO.File]::WriteAllText((Join-Path $verifyWorkspace '.ai-harness\verification.yml'), "version: 1`nmode: replace`ncommands:`n  - name: pass-check`n    kind: test`n    workingDirectory: .`n    command: node -v`n    required: true`n    timeoutSeconds: 60`n", [Text.UTF8Encoding]::new($false))
-    $verifyOut = & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts\Verify-Project.ps1') -Workspace $verifyWorkspace -InstallRoot $InstallRoot -TaskId TASK-FIXTURE -Kind all -ContinueOnFailure -Json 2>$null | Out-String
+    [IO.File]::WriteAllText((Join-Path $verifyWorkspace '.ai-harness/verification.yml'), "version: 1`nmode: replace`ncommands:`n  - name: pass-check`n    kind: test`n    workingDirectory: .`n    command: node -v`n    required: true`n    timeoutSeconds: 60`n", [Text.UTF8Encoding]::new($false))
+    $verifyOut = & $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts/Verify-Project.ps1') -Workspace $verifyWorkspace -InstallRoot $InstallRoot -TaskId TASK-FIXTURE -Kind all -ContinueOnFailure -Json 2>$null | Out-String
     $verifyExit = $LASTEXITCODE
     $verifyJson = $verifyOut | ConvertFrom-Json
     Assert-Aih ($verifyExit -eq 0) 'Verify-Project.ps1 exits 0 when all checks pass'
     Assert-Aih ($verifyJson.Passed -ge 1 -and $verifyJson.Failed -eq 0) 'passing workspace reports Passed>=1, Failed=0'
     Assert-Aih ($null -ne $verifyJson.Results) 'passing JSON carries the Results rows'
-    [IO.File]::WriteAllText((Join-Path $verifyWorkspace '.ai-harness\verification.yml'), "version: 1`nmode: replace`ncommands:`n  - name: fail-check`n    kind: test`n    workingDirectory: .`n    command: cmd /c exit 3`n    required: true`n    timeoutSeconds: 60`n", [Text.UTF8Encoding]::new($false))
-    $verifyOut2 = & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts\Verify-Project.ps1') -Workspace $verifyWorkspace -InstallRoot $InstallRoot -TaskId TASK-FIXTURE -Kind all -ContinueOnFailure -Json 2>$null | Out-String
+    [IO.File]::WriteAllText((Join-Path $verifyWorkspace '.ai-harness/verification.yml'), "version: 1`nmode: replace`ncommands:`n  - name: fail-check`n    kind: test`n    workingDirectory: .`n    command: cmd /c exit 3`n    required: true`n    timeoutSeconds: 60`n", [Text.UTF8Encoding]::new($false))
+    $verifyOut2 = & $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts/Verify-Project.ps1') -Workspace $verifyWorkspace -InstallRoot $InstallRoot -TaskId TASK-FIXTURE -Kind all -ContinueOnFailure -Json 2>$null | Out-String
     $verifyExit2 = $LASTEXITCODE
     $verifyJson2 = $verifyOut2 | ConvertFrom-Json
     Assert-Aih ($verifyExit2 -eq 1) 'Verify-Project.ps1 exits 1 when checks fail'
@@ -673,7 +675,7 @@ try {
     Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\suspicious.ps1' }).Count -eq 1) 'SEC001 blocks a suspicious non-placeholder value'
     Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\angle-susp.ps1' }).Count -eq 1) 'SEC001 blocks unrecognized angle-bracket values'
     Assert-Aih (@($secFindings | Where-Object { $_.file -like 'data\*' -or $_.file -like 'tmp\*' }).Count -eq 0) 'SEC001 data/tmp exclusion still suppresses runtime scratch state'
-    $arSource = [IO.File]::ReadAllText((Join-Path $InstallRoot 'scripts\ArchitectureRules.ps1'))
+    $arSource = [IO.File]::ReadAllText((Join-Path $InstallRoot 'scripts/ArchitectureRules.ps1'))
     Assert-Aih (-not $arSource.Contains('{continue}')) 'no loop-level continue exempts data/tmp from later rules'
     Assert-Aih ($arSource.Contains('^(data|tmp)[\\/]')) 'SEC001-scoped runtime/scratch exclusion present'
     Assert-Aih (($secResult.rules -join ',') -eq 'SEC001,MIG001') 'both architecture rules still reported'
@@ -691,5 +693,5 @@ $secretLeak=$sourceFiles|Select-String -Pattern '(?i)(sk-[A-Za-z0-9_-]{16,}|DEEP
 Assert-Aih ($null-eq$secretLeak) 'source contains no credential values'
 foreach($script in Get-ChildItem (Join-Path $InstallRoot 'scripts') -Filter '*.ps1'){[void][scriptblock]::Create((Get-Content -Raw $script.FullName))}
 Assert-Aih $true 'all PowerShell scripts parse'
-& $layout.Node (Join-Path $InstallRoot 'tests\DeepSeekIsolation.Tests.cjs');Assert-Aih ($LASTEXITCODE-eq0) 'runtime isolation tests pass'
+& $layout.Node (Join-Path $InstallRoot 'tests/DeepSeekIsolation.Tests.cjs');Assert-Aih ($LASTEXITCODE-eq0) 'runtime isolation tests pass'
 Write-Host "RESULT: $passed deterministic assertions passed."

@@ -1,4 +1,6 @@
-[CmdletBinding()]param([string]$InstallRoot='C:\AI-Harness')
+[CmdletBinding()]param([string]$InstallRoot= (Split-Path -Parent $PSScriptRoot))
+# Platform-aware child host: Windows keeps powershell.exe; POSIX uses the pinned Nexus pwsh.
+if (-not (Get-Command Test-AihIsWindows -ErrorAction SilentlyContinue)) { . (Join-Path $InstallRoot 'scripts/Platform.ps1') }; $aihPsHost = Get-AihPowerShellHost -InstallRoot $InstallRoot
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 
@@ -59,7 +61,7 @@ exit 1
 
     function Invoke-Capture([string]$Package,[string]$Name){
         $out=Join-Path $fixture ($Name+'.png')
-        $text=& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts\Capture-VisualEvidence.ps1') -OutputPath $out -AdbPath $fakeCmd -DeviceSerial emulator-5554 -PackageName $Package -ScenarioId workout -Iteration 1 -Force
+        $text=& $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts/Capture-VisualEvidence.ps1') -OutputPath $out -AdbPath $fakeCmd -DeviceSerial emulator-5554 -PackageName $Package -ScenarioId workout -Iteration 1 -Force
         [pscustomobject]@{exitCode=$LASTEXITCODE;json=($text|ConvertFrom-Json);output=$out;text=($text-join[Environment]::NewLine)}
     }
 
@@ -83,23 +85,23 @@ exit 1
     Assert-Aih (-not((Get-Content -Raw $log)-match'shell screencap')) 'mismatch after launch captures nothing'
     Remove-Item Env:AIH_FAKE_ADB_STICKY_MISMATCH
 
-    . (Join-Path $InstallRoot 'scripts\RuntimeTarget.ps1')
+    . (Join-Path $InstallRoot 'scripts/RuntimeTarget.ps1')
     $openrank=Join-Path $fixture 'OpenRank'; $autopulse=Join-Path $fixture 'AutoPulse'
-    New-Item -ItemType Directory -Path (Join-Path $openrank 'apps\mobile') -Force|Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $openrank 'apps/mobile') -Force|Out-Null
     New-Item -ItemType Directory -Path $autopulse -Force|Out-Null
-    'export default { expo: { android: { package: "app.openrank.mobile" } } };'|Set-Content (Join-Path $openrank 'apps\mobile\app.config.ts')
+    'export default { expo: { android: { package: "app.openrank.mobile" } } };'|Set-Content (Join-Path $openrank 'apps/mobile/app.config.ts')
     @{expo=@{android=@{package='com.autopulse.mobile'}}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $autopulse 'app.json')
     $orTarget=Resolve-AihRuntimeTarget -Workspace $openrank -Scenario ([pscustomobject]@{id='workout';platform='android'}) -DeviceId emulator-5554
     $apTarget=Resolve-AihRuntimeTarget -Workspace $autopulse -Scenario ([pscustomobject]@{id='live';platform='android'}) -DeviceId emulator-5554
     Assert-Aih ($orTarget.packageName-eq'app.openrank.mobile'-and$apTarget.packageName-eq'com.autopulse.mobile') 'OpenRank and AutoPulse bindings remain independent on one device'
     New-Item -ItemType Directory -Path (Join-Path $autopulse '.ai-harness') -Force|Out-Null
-    @{platform='android';deviceId='emulator-7777';packageName='com.autopulse.override';activity='.DebugActivity'}|ConvertTo-Json|Set-Content (Join-Path $autopulse '.ai-harness\runtime-target.json')
+    @{platform='android';deviceId='emulator-7777';packageName='com.autopulse.override';activity='.DebugActivity'}|ConvertTo-Json|Set-Content (Join-Path $autopulse '.ai-harness/runtime-target.json')
     $override=Resolve-AihRuntimeTarget -Workspace $autopulse -Scenario ([pscustomobject]@{id='debug';platform='android'})
     Assert-Aih ($override.deviceId-eq'emulator-7777'-and$override.packageName-eq'com.autopulse.override'-and$override.activity-eq'.DebugActivity') 'explicit project runtime target overrides manifest defaults'
 
     [IO.File]::WriteAllText($log,''); 'com.other'|Set-Content -LiteralPath $state -NoNewline
-    $p1=Start-Process powershell.exe -PassThru -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $InstallRoot 'scripts\Capture-VisualEvidence.ps1'),'-OutputPath',(Join-Path $fixture 'parallel-a.png'),'-AdbPath',$fakeCmd,'-DeviceSerial','emulator-5554','-PackageName','app.openrank.mobile','-ScenarioId','a','-Iteration','1','-Force')
-    $p2=Start-Process powershell.exe -PassThru -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $InstallRoot 'scripts\Capture-VisualEvidence.ps1'),'-OutputPath',(Join-Path $fixture 'parallel-b.png'),'-AdbPath',$fakeCmd,'-DeviceSerial','emulator-5554','-PackageName','com.autopulse.mobile','-ScenarioId','b','-Iteration','1','-Force')
+    $p1=Start-Process $aihPsHost -PassThru -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $InstallRoot 'scripts/Capture-VisualEvidence.ps1'),'-OutputPath',(Join-Path $fixture 'parallel-a.png'),'-AdbPath',$fakeCmd,'-DeviceSerial','emulator-5554','-PackageName','app.openrank.mobile','-ScenarioId','a','-Iteration','1','-Force')
+    $p2=Start-Process $aihPsHost -PassThru -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $InstallRoot 'scripts/Capture-VisualEvidence.ps1'),'-OutputPath',(Join-Path $fixture 'parallel-b.png'),'-AdbPath',$fakeCmd,'-DeviceSerial','emulator-5554','-PackageName','com.autopulse.mobile','-ScenarioId','b','-Iteration','1','-Force')
     $p1.WaitForExit(); $p2.WaitForExit()
     $capturePackages=@(Get-Content $log|Where-Object{$_-like'captured-package=*'}|ForEach-Object{$_-replace'^captured-package=',''} )
     Assert-Aih ($p1.ExitCode-eq0-and$p2.ExitCode-eq0-and$capturePackages.Count-eq2-and$capturePackages.Contains('app.openrank.mobile')-and$capturePackages.Contains('com.autopulse.mobile')) 'shared-device critical sections cannot interleave'

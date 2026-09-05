@@ -1,7 +1,7 @@
 [CmdletBinding()]param([string]$InstallRoot = 'C:\AI-Harness')
 Set-StrictMode -Version Latest;$ErrorActionPreference = 'Stop'
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\Intelligence.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Intelligence.ps1')
 
 # ── Phase 3.2E: scale test (~800 files) — architecture validated by write
 # counts, not microbenchmarks: one changed file => exactly one store write.
@@ -26,7 +26,7 @@ try {
     # 8 modules x 100 files = 800 TypeScript sources with unique symbols
     $fileIndex = 0
     for ($moduleNo = 1; $moduleNo -le 8; $moduleNo++) {
-        $moduleDir = Join-Path $repo ('modules\mod' + $moduleNo)
+        $moduleDir = Join-Path $repo ('modules/mod' + $moduleNo)
         New-Item -ItemType Directory -Path $moduleDir -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $moduleDir 'package.json') -Value ('{"name":"mod' + $moduleNo + '"}') -Encoding UTF8
         for ($fileNo = 1; $fileNo -le 100; $fileNo++) {
@@ -69,7 +69,7 @@ try {
     Assert-Aih ($fiCountA -eq 808) ('store holds exactly one FI document per parsed file (' + $fiCountA + ')')
 
     # touch ONE file; everything else must be reused with ONE new store write
-    Set-Content -LiteralPath (Join-Path $repo 'modules\mod4\unit40.ts') -Value (@(
+    Set-Content -LiteralPath (Join-Path $repo 'modules/mod4/unit40.ts') -Value (@(
         "import { shared4 } from './shared';",
         'export class Service400 {',
         '  handle(request: string) {',
@@ -96,7 +96,7 @@ try {
     # expectation is well BELOW 1.0x here, because the doubled index reuses
     # the already-parsed first half).
     for ($moduleNo = 9; $moduleNo -le 16; $moduleNo++) {
-        $moduleDir = Join-Path $repo ('modules\mod' + $moduleNo)
+        $moduleDir = Join-Path $repo ('modules/mod' + $moduleNo)
         New-Item -ItemType Directory -Force -Path $moduleDir | Out-Null
         Set-Content -LiteralPath (Join-Path $moduleDir 'package.json') -Value ('{"name":"mod' + $moduleNo + '"}') -Encoding UTF8
         Set-Content -LiteralPath (Join-Path $moduleDir 'shared.ts') -Value ('export const shared' + $moduleNo + ' = ' + $moduleNo + ';') -Encoding UTF8
