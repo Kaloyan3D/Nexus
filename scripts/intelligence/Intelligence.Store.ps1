@@ -43,6 +43,56 @@ function New-AihIntFileObjectsDocument {
     [pscustomobject]@{ schemaVersion = 1; objects = @() }
 }
 
+function ConvertTo-AihIntCanonicalJsonScalars {
+    # TASK-0025 RC7: canonical scalar semantics for deserialized store
+    # documents across hosts. PowerShell 7's JSON deserializer can
+    # materialize ISO-8601 strings as [datetime] values where Windows
+    # PowerShell 5.1 keeps them as strings. The intelligence store contract
+    # is that persisted timestamps are ISO-8601 STRINGS, so any [datetime]
+    # that appears after deserialization is normalized back to its canonical
+    # round-trip form. On hosts that already keep strings this is a no-op,
+    # and in-memory documents (which store timestamps as strings) compare
+    # equal to round-tripped documents on every host.
+    # Collection-shaped returns use the unary comma (,Node): PowerShell
+    # UNROLLS a function's returned collection into the pipeline, so a bare
+    # 'return $array' emits an EMPTY array as zero items (the caller sees
+    # $null) and a single-element array as its bare element - silently
+    # corrupting the document shape on read. The comma preserves the
+    # collection as exactly one pipeline object.
+    param($Node)
+    if ($null -eq $Node) { return $Node }
+    if ($Node -is [datetime]) { return $Node.ToUniversalTime().ToString('o') }
+    if ($Node -is [pscustomobject]) {
+        foreach ($property in @($Node.PSObject.Properties)) {
+            $normalized = ConvertTo-AihIntCanonicalJsonScalars -Node $property.Value
+            if (-not [object]::ReferenceEquals($normalized, $property.Value)) {
+                $property.Value = $normalized
+            }
+        }
+        return ,$Node
+    }
+    if ($Node -is [System.Collections.IDictionary]) {
+        foreach ($key in @($Node.Keys)) {
+            $normalized = ConvertTo-AihIntCanonicalJsonScalars -Node $Node[$key]
+            if (-not [object]::ReferenceEquals($normalized, $Node[$key])) {
+                $Node[$key] = $normalized
+            }
+        }
+        return ,$Node
+    }
+    if ($Node -is [System.Collections.IEnumerable] -and $Node -isnot [string]) {
+        $items = @($Node)
+        for ($i = 0; $i -lt $items.Count; $i++) {
+            $normalized = ConvertTo-AihIntCanonicalJsonScalars -Node $items[$i]
+            if (-not [object]::ReferenceEquals($normalized, $items[$i])) {
+                $items[$i] = $normalized
+            }
+        }
+        return ,$Node
+    }
+    return $Node
+}
+
 function Read-AihIntStoreJson {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -57,7 +107,7 @@ function Read-AihIntStoreJson {
     if ($null -eq $document) { throw "Intelligence store document is invalid: $Path" }
     if (-not ($document.PSObject.Properties['schemaVersion'])) { throw "Intelligence store document is missing schemaVersion: $Path" }
     if ([int]$document.schemaVersion -ne 1) { throw "Unsupported intelligence store schemaVersion in $Path" }
-    return $document
+    return (ConvertTo-AihIntCanonicalJsonScalars -Node $document)
 }
 
 function Save-AihIntStoreJson {
