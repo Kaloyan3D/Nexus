@@ -45,6 +45,11 @@ jobs:
           aih_manifest_to_utf8 /tmp/official-hashes.sha256 | grep -F 'powershell-7.5.3-linux-x64.tar.gz'
       - name: PowerShell provisioning regression suite
         run: sh tests/aih-provision-pwsh.Tests.sh
+      - name: Pinned-Node environment propagation suite (system Node removed from PATH)
+        run: |
+          # The suite's fixtures run with a PATH that does not contain any
+          # system node, reproducing the CachyOS npm error 127 class.
+          sh tests/aih-node-env.Tests.sh
       - name: Real PowerShell tarball provisioning smoke (download -> verify -> extract -> chmod -> --version)
         run: |
           AIH_VERSION=$(grep '"PowerShellVersion"' config/versions.json | sed 's/.*: *"\([^"]*\)".*/\1/')

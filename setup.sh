@@ -22,6 +22,9 @@ AIH_SOURCE_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # Pinned-PowerShell archive provisioning (structure validation, executable
 # bit repair on the exact pwsh launcher, install move, --version gate).
 . "$AIH_SOURCE_ROOT/scripts/lib/aih-provision-pwsh.sh"
+# Pinned-Node runtime environment: gates the runtime and prepends its bin to
+# PATH for this process tree so npm lifecycle scripts resolve the pinned node.
+. "$AIH_SOURCE_ROOT/scripts/lib/aih-node-env.sh"
 AIH_DEFAULT_ROOT="$HOME/.local/share/nexus"
 AIH_INSTALL_ROOT="${AIH_INSTALL_ROOT:-$AIH_DEFAULT_ROOT}"
 AIH_RESET_MANAGED_SETTINGS=0
@@ -274,6 +277,12 @@ if [ "$AIH_SKIP_DEPENDENCY_INSTALL" -eq 1 ]; then
     exit 1
   fi
 else
+  # npm lifecycle scripts (e.g. koffi's `sh -c node ./cnoke.cjs`) resolve
+  # node through PATH, so the pinned runtime bin is prepended for this
+  # process tree. The absolute npm-cli.js invocation is unchanged; the
+  # caller's PATH is preserved behind the pinned entry and nothing
+  # persistent (rc files) is touched.
+  aih_use_pinned_node "$AIH_NODE_DIR" "$AIH_NODE_VERSION"
   "$AIH_NODE_DIR/bin/node" "$AIH_NPM_CLI" ci --omit=dev --legacy-peer-deps --prefix "$AIH_INSTALL_ROOT/app"
 fi
 
