@@ -723,6 +723,10 @@ $script:AihPathLiteralAllowlistEntries = @(
     @{ File = 'scripts/Setup.ps1'; Reason = 'Windows installer (setup.sh is the POSIX installer): hint referencing the Windows-only .cmd launcher.' },
     @{ File = 'scripts/Verify-Project.ps1'; Value = 'System32\cmd.exe'; Reason = 'guarded Windows-only branch (Test-AihIsWindows) resolving the cmd.exe host for .cmd/.bat resolution.' },
     @{ File = 'scripts/Verify-Project.ps1'; Value = 'System32\WindowsPowerShell\v1.0\powershell.exe'; Reason = 'guarded Windows-only branch (Test-AihIsWindows) resolving the fixed Windows PowerShell 5.1 host path.' },
+    @{ File = 'tests/Harness.Tests.ps1'; Value = 'data\routing\decisions.jsonl'; Reason = 'separator-agnostic source-scan regression: backslash-style relative path is INTENTIONAL negative test data for the component classifier.' },
+    @{ File = 'tests/Harness.Tests.ps1'; Value = '.ai-harness\state\tasks.json'; Reason = 'separator-agnostic source-scan regression: backslash-style relative path is INTENTIONAL negative test data for the component classifier.' },
+    @{ File = 'tests/Harness.Tests.ps1'; Value = 'runtime\node\lib\x.js'; Reason = 'separator-agnostic source-scan regression: backslash-style relative path is INTENTIONAL negative test data for the component classifier.' },
+    @{ File = 'tests/Harness.Tests.ps1'; Value = 'src\real-key.ps1'; Reason = 'separator-agnostic source-scan regression: backslash-style relative path is INTENTIONAL negative test data for the component classifier.' },
     @{ File = 'scripts/Project.ps1'; Value = 'System32\WindowsPowerShell\v1.0\powershell.exe'; Reason = 'guarded Windows-only branch (Test-AihIsWindows) resolving the fixed Windows PowerShell 5.1 host path.' },
     @{ File = 'scripts/Engineering/Execution.ps1'; Value = 'System32\WindowsPowerShell\v1.0\powershell.exe'; Reason = 'guarded Windows-only branch (Test-AihIsWindows) resolving the fixed Windows PowerShell 5.1 host path.' },
     @{ File = 'tests/Intelligence.CodeFoundation.Tests.ps1'; Value = '..\evil'; Reason = 'traversal payload the store is asserted to REJECT (negative test data, not path construction).' },
@@ -892,6 +896,82 @@ function Get-AihWindowsFixtureFindings {
     return @($findings)
 }
 
+function Get-AihOsAssumptionFindings {
+    # TASK-0026 class detectors, each proven by the real CachyOS
+    # installed-tree audit. Structural shapes only - never a per-file
+    # blacklist. This module's own detection data is exempt.
+    param([Parameter(Mandatory = $true)][string]$Root, [Parameter(Mandatory = $true)][object[]]$Files)
+
+    $findings = [System.Collections.Generic.List[object]]::new()
+
+    # Class A: backslash-anchored component filter. A single-quoted string
+    # literal of the shape '\\(alternation)\\' assumes FullName uses
+    # backslashes around directory components; on POSIX such a filter
+    # never matches, excluded trees silently enter the scan, and runtime
+    # state with credential-shaped task text produced a false SOURCE
+    # credential finding.
+    foreach ($file in $Files) {
+        if ($file.RelativePath -eq 'tests/Aih.PortabilityAudit.psm1') { continue }
+        $fileExtension = [System.IO.Path]::GetExtension($file.FullName)
+        if ($fileExtension -ne '.ps1' -and $fileExtension -ne '.psm1') { continue }
+        $lines = [System.IO.File]::ReadAllLines($file.FullName)
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -notmatch "''[^'']{0,240}") { continue }  # cheap prefilter: a quoted literal is present
+            if ($lines[$i] -match '\\\\[^''\r\n]{1,160}\\\\') { continue }  # a \\\\...\\\\ pair alone is a normal UNC/regex escape, not the anchored-component shape
+            if ($lines[$i] -match '\\\\\([^''\r\n]{1,160}\)\\\\') {
+                $findings.Add([pscustomobject]@{ File = $file.RelativePath; Line = ($i + 1); Kind = 'BackslashComponentFilter'; Token = ''; Value = $lines[$i].Trim(); Classification = 'review'; Detail = 'path filter hardcodes backslash-anchored directory components; use separator-agnostic component logic' })
+            }
+        }
+    }
+
+    # Class B: a Windows-only behavioral contract asserted without a
+    # platform simulation or guard. A PS test that binds/asserts
+    # Start-Process WindowStyle can only ever pass on Windows unless the
+    # file simulates the platform (function override) or the occurrence
+    # sits inside a Test-AihIsWindows guard.
+    $psTestFiles = @($Files | Where-Object { $_.RelativePath -like 'tests/*.Tests.ps1' })
+    foreach ($file in $psTestFiles) {
+        # The audit engine and the gate test carry their own detection/
+        # allowlist data; their WindowStyle mentions are classification
+        # inputs, never behavioral assertions.
+        if ($file.RelativePath -eq 'tests/Aih.PortabilityAudit.psm1' -or $file.RelativePath -eq 'tests/PowerShellPortability.Tests.ps1') { continue }
+        $lines = [System.IO.File]::ReadAllLines($file.FullName)
+        $windowLines = @()
+        for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match 'WindowStyle') { $windowLines += $i } }
+        if ($windowLines.Count -eq 0) { continue }
+        $text = [System.IO.File]::ReadAllText($file.FullName)
+        if ($text -match 'function:Test-AihIsWindows' -or $text -match 'function\s+Test-AihIsWindows') { continue }
+        $unguarded = @()
+        foreach ($idx in $windowLines) {
+            $from = [Math]::Max(0, $idx - 4); $to = [Math]::Min($lines.Count - 1, $idx + 4)
+            $guarded = $false
+            for ($i = $from; $i -le $to; $i++) { if ($lines[$i] -match 'Test-AihIsWindows') { $guarded = $true; break } }
+            if (-not $guarded) { $unguarded += ($idx + 1) }
+        }
+        if ($unguarded.Count -gt 0) {
+            $findings.Add([pscustomobject]@{ File = $file.RelativePath; Line = $unguarded[0]; Kind = 'WindowsContractWithoutPlatformSimulation'; Token = 'WindowStyle'; Value = ($unguarded -join ','); Classification = 'review'; Detail = 'Windows-only behavior asserted without simulating the platform; force Test-AihIsWindows per section and restore it' })
+        }
+    }
+
+    # Class C: a source-only config artifact read by a JS suite without a
+    # layout-plane guard. The install composition copies a SELECTED config
+    # set; source-only metadata (config/*.psd1) legitimately does not exist
+    # in an installed tree, so an unconditional read is an ENOENT crash.
+    $jsTestFiles = @($Files | Where-Object { $_.RelativePath -like 'tests/*.Tests.cjs' -or $_.RelativePath -like 'tests/*.mjs' })
+    foreach ($file in $jsTestFiles) {
+        if ($file.RelativePath -eq 'tests/Aih.PortabilityAudit.psm1') { continue }
+        $text = [System.IO.File]::ReadAllText($file.FullName)
+        if ($text -notmatch 'config/[A-Za-z0-9._-]+\.psd1') { continue }
+        if ($text -match 'layout\.kind') { continue }
+        $lines = [System.IO.File]::ReadAllLines($file.FullName)
+        $line = 1
+        for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match 'config/[A-Za-z0-9._-]+\.psd1') { $line = $i + 1; break } }
+        $findings.Add([pscustomobject]@{ File = $file.RelativePath; Line = $line; Kind = 'SourceOnlyConfigArtifactWithoutPlaneGuard'; Token = 'config/*.psd1'; Value = ''; Classification = 'review'; Detail = 'source-only config artifact read without a layout-plane guard; scope the read to the plane that owns the artifact' })
+    }
+
+    return ,@($findings.ToArray())
+}
+
 function Get-AihResultSchemaFindings {
     # TASK-0025 RC5: invariant result-object schemas. For each declared
     # contract (a named function that returns result objects), EVERY object
@@ -964,6 +1044,7 @@ function Invoke-AihPortabilityAudit {
     $jsExecutables = Get-AihJsExecutableFindings -Root $rootPath
     $windowsFixtures = Get-AihWindowsFixtureFindings -Root $rootPath
     $resultSchemas = Get-AihResultSchemaFindings -Root $rootPath
+    $osAssumptions = Get-AihOsAssumptionFindings -Root $rootPath -Files $files
 
     return [pscustomobject]@{
         GeneratedAtUtc = [DateTime]::UtcNow.ToString('o')
@@ -985,6 +1066,7 @@ function Invoke-AihPortabilityAudit {
         JsExecutableFindings = $jsExecutables
         WindowsFixtureFindings = $windowsFixtures
         ResultSchemaFindings = $resultSchemas
+        OsAssumptionFindings = $osAssumptions
     }
 }
 
