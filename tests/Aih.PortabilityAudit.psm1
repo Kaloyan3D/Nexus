@@ -404,8 +404,34 @@ function Get-AihAutomaticVariableFindings {
 # ---------------------------------------------------------------------------
 
 function Test-AihRegexLikeString {
+    # TASK-0025 Class E sharpening: a string with the SHAPE of a backslash-
+    # separated relative path (word/dot/dash/space segments between
+    # separators) is a filesystem path, NOT a regular expression - even when
+    # one of its segments starts with a letter that collides with a regex
+    # escape class ('data\routing\decisions.jsonl' contains '\r',
+    # 'src\widget.service.ts' contains '\w'). Previously such fixture paths
+    # were silently classified 'regex-escape' and the gate missed them.
+    # Genuine patterns nearly always carry a metacharacter (anchor, group,
+    # quantifier) or an escape that cannot be a path segment start, so the
+    # path-shape check must run BEFORE the escape-letter checks.
     param([string]$Value)
 
+    # Path-shape predicate (TASK-0025 Class E): every backslash is followed by
+    # a word character (no escaped metacharacters), a separator sits between
+    # segment material, and the string has multi-segment structure or a
+    # dot-extension. 'data\routing\decisions.jsonl' and
+    # 'src\widget.service.ts' are paths; 'decisions\.jsonl' (escaped dot)
+    # and 'function\b' (no extension/structure) remain regex-like.
+    $wordBackslash = $Value -notmatch '\\[^A-Za-z0-9_]'
+    $multiSegment = ([regex]::Matches($Value, '\\')).Count -ge 2
+    $hasExtension = $Value -match '\.[A-Za-z0-9]+$'
+    # Real filesystem paths never carry regex metacharacters; genuine
+    # patterns ('(?i)sk-...\s*:', '[^\s*sudo\s]') almost always do.
+    $hasMetachars = $Value -match '[()\[\]{}+*?^$|]'
+    # A path segment never starts with a separator and is never a single
+    # control-escape letter ('\r\n' splits lines; 'data\routing' routes).
+    $pathShape = $Value -match '^[A-Za-z0-9_.\- ]+(\\[A-Za-z0-9_][A-Za-z0-9_.\- ]+)+$'
+    if ($wordBackslash -and $pathShape -and ($multiSegment -or $hasExtension) -and -not $hasMetachars) { return $false }
     if ($Value -match '\\[sSwWdDbBrRnNtTvVfF/(){}+*?|^$.\[\]]') { return $true }
     if ($Value -match '\\["' + "'" + ']') { return $true }
     if ($Value.Length -gt 2 -and $Value.Substring(1).Contains('\\')) { return $true }
@@ -482,6 +508,63 @@ function Get-AihInstallRootFindings {
                     Classification = 'review'; Detail = 'literal occurrence; classify (negative assertion / guarded Windows contract / fixture)'
                 })
             }
+        }
+
+        # TASK-0025 Class A strengthening: AST-constant scanning alone misses
+        # occurrences embedded inside larger literals (single-quoted constants
+        # that BEGIN with a quote) and inside expandable strings - exactly the
+        # shapes generated executable child-script bodies use, e.g.
+        # ". 'C:\AI-Harness\scripts\Intelligence.ps1'; <expression>".
+        # Scan the raw file text so a generated body can never silently
+        # reintroduce the legacy install root; every hit is classified
+        # explicitly by the allowlist consumer.
+        $seenLines = @($findings | Where-Object { $_.File -eq $parsed.File.RelativePath -and $_.Kind -eq 'LiteralOccurrence' } | ForEach-Object { $_.Line })
+        $rawLines = [System.IO.File]::ReadAllLines($parsed.File.FullName)
+        for ($i = 0; $i -lt $rawLines.Count; $i++) {
+            if ($rawLines[$i] -notmatch '(?i)C:[\/]AI-Harness') { continue }
+            if ($seenLines -contains ($i + 1)) { continue }
+            $findings.Add([pscustomobject]@{
+                File = $parsed.File.RelativePath; Line = ($i + 1);
+                Kind = 'LiteralOccurrence'; Name = ''; Value = $rawLines[$i].Trim();
+                Classification = 'review'; Detail = 'raw-text legacy-root occurrence (embedded/expandable); classify (negative assertion / guarded Windows contract / fixture)'
+            })
+        }
+    }
+    return ,@($findings.ToArray())
+}
+
+function Get-AihPathSeparatorFindings {
+    # TASK-0025 Class B strengthening: hardcoded PATH separator joins. Windows
+    # uses ';' and POSIX uses ':' for PATH; the only portable separator is
+    # [IO.Path]::PathSeparator (PowerShell plane) / path.delimiter (Node
+    # plane). A PATH mutation that joins with a literal ';'/':' produces a
+    # corrupt single-entry PATH on the other OS (the exact defect that broke
+    # the visual suites on Linux). The rule is line-level and generic so a
+    # new file with the same defect is caught automatically.
+    param([Parameter(Mandatory = $true)]$ParsedFiles)
+
+    $findings = [System.Collections.Generic.List[object]]::new()
+    foreach ($parsed in $ParsedFiles) {
+        if ($parsed.File.RelativePath -eq 'tests/Aih.PortabilityAudit.psm1') { continue }  # this engine's own detection data
+        $lines = [System.IO.File]::ReadAllLines($parsed.File.FullName)
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $line = $lines[$i]
+            # The rule targets PATH construction only: a literal ';'/':' join
+            # on a line that touches PATH (or a PATH-like variable). Generic
+            # ':' concatenations (dictionary keys) are not PATH joins.
+            $mentionsPath = $line -match 'env:PATH' -or $line -match 'env:Path' -or $line -match '\bPATH\b'
+            if (-not $mentionsPath) { continue }
+            $isPathMutation = $line -match 'env:PATH\s*=' -or $line -match 'env:Path\s*='
+            $isSeparatorJoin = $line -match "\+';'\+" -or $line -match '\+";"\+' -or $line -match "\+ ':' \+"
+            if (-not $isPathMutation -and -not $isSeparatorJoin) { continue }
+            if ($line -match '\[IO\.Path\]::PathSeparator') { continue }
+            if ($line -notmatch '[''"](;|:)[''"]') { continue }
+            $findings.Add([pscustomobject]@{
+                File = $parsed.File.RelativePath; Line = ($i + 1); Kind = 'PathSeparatorJoin';
+                Value = $line.Trim();
+                Classification = 'review';
+                Detail = 'PATH joined with a literal platform-specific separator; use [IO.Path]::PathSeparator (PowerShell) or path.delimiter (Node)'
+            })
         }
     }
     return ,@($findings.ToArray())
@@ -639,7 +722,13 @@ function Get-AihHarnessSuiteTableFindings {
 $script:AihPathLiteralAllowlistEntries = @(
     @{ File = 'scripts/Setup.ps1'; Reason = 'Windows installer (setup.sh is the POSIX installer): hint referencing the Windows-only .cmd launcher.' },
     @{ File = 'scripts/Verify-Project.ps1'; Value = 'System32\cmd.exe'; Reason = 'guarded Windows-only branch (Test-AihIsWindows) resolving the cmd.exe host for .cmd/.bat resolution.' },
+    @{ File = 'scripts/Verify-Project.ps1'; Value = 'System32\WindowsPowerShell\v1.0\powershell.exe'; Reason = 'guarded Windows-only branch (Test-AihIsWindows) resolving the fixed Windows PowerShell 5.1 host path.' },
+    @{ File = 'scripts/Project.ps1'; Value = 'System32\WindowsPowerShell\v1.0\powershell.exe'; Reason = 'guarded Windows-only branch (Test-AihIsWindows) resolving the fixed Windows PowerShell 5.1 host path.' },
+    @{ File = 'scripts/Engineering/Execution.ps1'; Value = 'System32\WindowsPowerShell\v1.0\powershell.exe'; Reason = 'guarded Windows-only branch (Test-AihIsWindows) resolving the fixed Windows PowerShell 5.1 host path.' },
     @{ File = 'tests/Intelligence.CodeFoundation.Tests.ps1'; Value = '..\evil'; Reason = 'traversal payload the store is asserted to REJECT (negative test data, not path construction).' },
+    @{ File = 'tests/Intelligence.CodeFoundation.Tests.ps1'; Value = 'snap_x\..\y'; Reason = 'traversal payload the store is asserted to REJECT (negative test data, not path construction).' },
+    @{ File = 'tests/Intelligence.CodeFoundation.Tests.ps1'; Value = '..\state.json'; Reason = 'traversal payload the store is asserted to REJECT (negative test data, not path construction).' },
+    @{ File = 'tests/Intelligence.CodeFoundation.Tests.ps1'; Value = '..\..\secret.ts'; Reason = 'traversal payload the store is asserted to REJECT (negative test data, not path construction).' },
     @{ File = 'tests/Intelligence.EndToEnd.Tests.ps1'; ValueContains = 'src\Host\Host.csproj'; Reason = 'Visual Studio .sln file-content fixture; the .sln format contract itself uses backslash separators.' },
     @{ File = 'tests/Intelligence.Scanning.Tests.ps1'; ValueContains = 'src\Api\Api.csproj'; Reason = 'Visual Studio .sln file-content fixture.' },
     @{ File = 'tests/SetupUpgrade.Tests.ps1'; ValueContains = 'C:\AI-Harness'; Reason = 'negative regression assertions that the legacy checkout root never returns.' },
@@ -867,6 +956,7 @@ function Invoke-AihPortabilityAudit {
     $collisions = Get-AihAutomaticVariableFindings -ParsedFiles $parsed -ReservedVariables $reserved
     $installRoot = Get-AihInstallRootFindings -ParsedFiles $parsed
     $paths = Get-AihStringLiteralFindings -ParsedFiles $parsed
+    $pathSeparators = Get-AihPathSeparatorFindings -ParsedFiles $parsed
     $executables = Get-AihWindowsExecutableFindings -Files $files -ParsedFiles $parsed
     $linuxLaunchers = Get-AihLinuxLauncherFindings -Files $files
     $suiteTable = Get-AihHarnessSuiteTableFindings -Root $rootPath -ParsedFiles $parsed
@@ -887,6 +977,7 @@ function Invoke-AihPortabilityAudit {
         AutomaticVariableFindings = $collisions
         InstallRootFindings = $installRoot
         PathFindings = $paths
+        PathSeparatorFindings = $pathSeparators
         ExecutableFindings = $executables
         LinuxLauncherFindings = $linuxLaunchers
         SuiteTableFindings = $suiteTable
@@ -915,6 +1006,7 @@ Export-ModuleMember -Function @(
     'Get-AihPortabilityScanFiles', 'Get-AihPortabilityFileTraits', 'Invoke-AihReservedVariableProbe',
     'Get-AihReservedVariableSet', 'Get-AihParsedPowerShellFiles', 'Get-AihAutomaticVariableFindings',
     'Get-AihStringLiteralFindings', 'Get-AihInstallRootFindings', 'Get-AihWindowsExecutableFindings',
+    'Get-AihPathSeparatorFindings',
     'Get-AihLinuxLauncherFindings', 'Get-AihHarnessSuiteTableFindings', 'Invoke-AihPortabilityAudit',
     'Get-AihPlatformDependencyFindings', 'Get-AihJsExecutableFindings', 'Get-AihWindowsFixtureFindings',
     'Get-AihResultSchemaFindings', 'Test-AihPathLiteralAllowed', 'Write-AihPortabilityInventoryReport'

@@ -21,7 +21,7 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
     $InstallRoot = $sourceRoot
 }
 $InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
-$installer = Join-Path $sourceRoot 'scripts\Setup.ps1'
+$installer = Join-Path $sourceRoot 'scripts/Setup.ps1'
 
 Write-Host "Nexus source: $sourceRoot"
 Write-Host "Nexus install root: $InstallRoot"
@@ -31,7 +31,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Harness installation failed.' }
 
 if (-not $SkipDeepSeekLogin) {
     Write-Host '2/4 Configuring DeepSeek (the key input is hidden)...'
-    & (Join-Path $InstallRoot 'scripts\Set-DeepSeekKey.ps1') -InstallRoot $InstallRoot
+    & (Join-Path $InstallRoot 'scripts/Set-DeepSeekKey.ps1') -InstallRoot $InstallRoot
 }
 else {
     Write-Host '2/4 Skipping DeepSeek credential setup.'
@@ -49,7 +49,7 @@ Write-Host '4/4 Running local checks...'
 . (Join-Path $InstallRoot 'scripts/Common.ps1')
 $hasDeepSeekCredential = -not [string]::IsNullOrWhiteSpace((Get-AihDeepSeekKey -InstallRoot $InstallRoot))
 if ($hasDeepSeekCredential) {
-    & (Join-Path $InstallRoot 'scripts\Doctor.ps1') -InstallRoot $InstallRoot -Preset $(if ($SkipOpenAiLogin) { 'deepseek' } else { 'normal' }) -Offline
+    & (Join-Path $InstallRoot 'scripts/Doctor.ps1') -InstallRoot $InstallRoot -Preset $(if ($SkipOpenAiLogin) { 'deepseek' } else { 'normal' }) -Offline
 }
 else {
     Write-Host 'DeepSeek is not configured yet; running credential-free deterministic tests instead.'
