@@ -134,12 +134,31 @@ ok(setupSh.includes('Complete-Install.ps1'), 'setup.sh runs the shared install c
 ok(setupSh.includes('$HOME/.local/bin'), 'setup.sh installs user launchers into ~/.local/bin')
 ok(fs.existsSync(path.join(sourceRoot, 'scripts', 'Complete-Install.ps1')), 'Complete-Install.ps1 exists')
 
-// ── pinned versions agreement ──────────────────────────────────────────────
+// ── pinned versions: plane-aware composition (TASK-0026) ──────────────────
+// config/versions.json is the AUTHORITATIVE version metadata in EVERY plane
+// (the install composition copies it into both installed trees).
+// config/versions.psd1 is a SOURCE-ONLY mirror - Setup.ps1's config copy
+// list never includes it, so the installed POSIX tree legitimately has no
+// such file (reading it unconditionally crashed this suite on CachyOS with
+// ENOENT). The source plane asserts the two files agree; installed planes
+// assert versions.json alone and treat a present psd1 as an optional
+// mirror that must still agree.
 const versions = JSON.parse(read('config/versions.json'))
 ok(typeof versions.PowerShellVersion === 'string' && /^\d+\.\d+\.\d+$/.test(versions.PowerShellVersion), 'versions.json pins an exact PowerShellVersion')
 ok(typeof versions.NodeVersion === 'string' && /^\d+\.\d+\.\d+$/.test(versions.NodeVersion), 'versions.json pins an exact NodeVersion')
-const psd1 = read('config/versions.psd1')
-ok(psd1.includes("PowerShellVersion = '" + versions.PowerShellVersion + "'"), 'versions.psd1 agrees with versions.json about PowerShellVersion')
-ok(psd1.includes("NodeVersion = '" + versions.NodeVersion + "'"), 'versions.psd1 agrees with versions.json about NodeVersion')
+if (layout.kind === 'source') {
+  const psd1 = read('config/versions.psd1')
+  ok(psd1.includes("PowerShellVersion = '" + versions.PowerShellVersion + "'"), 'versions.psd1 agrees with versions.json about PowerShellVersion (source plane)')
+  ok(psd1.includes("NodeVersion = '" + versions.NodeVersion + "'"), 'versions.psd1 agrees with versions.json about NodeVersion (source plane)')
+} else {
+  const psd1Path = path.join(sourceRoot, 'config', 'versions.psd1')
+  if (fs.existsSync(psd1Path)) {
+    const psd1 = fs.readFileSync(psd1Path, 'utf8')
+    ok(psd1.includes("PowerShellVersion = '" + versions.PowerShellVersion + "'"), 'installed plane: present versions.psd1 mirror agrees about PowerShellVersion')
+    ok(psd1.includes("NodeVersion = '" + versions.NodeVersion + "'"), 'installed plane: present versions.psd1 mirror agrees about NodeVersion')
+  } else {
+    ok(true, 'installed plane: versions.json is the authoritative version metadata (versions.psd1 is source-only)')
+  }
+}
 
 console.log('RESULT: ' + passed + ' controller-host platform assertions passed.')
