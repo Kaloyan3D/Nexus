@@ -61,6 +61,48 @@ function Get-AihLayoutLauncherPath {
     return Join-Path $Layout.Bin ($Name + (Get-AihLauncherExtension))
 }
 
+function Get-AihLauncherLayout {
+    # Explicit launcher-layout abstraction (TASK-0025 Class C).
+    #
+    # Distinguishes the two layout planes by TREE CONTENT, never by OS alone:
+    #   source            - a checkout: bin/*.cmd launchers plus the bin/linux
+    #                       POSIX twin templates they mirror. Windows and Linux
+    #                       checkouts both look like this.
+    #   installed-posix   - a POSIX installation: extensionless executables in
+    #                       bin/ and NO bin/linux twin directory (setup.sh
+    #                       installs the twins as canonical extensionless
+    #                       launchers; a copy with a baked root lands in
+    #                       ~/.local/bin).
+    #   installed-windows - a Windows installation: bin/*.cmd launchers and no
+    #                       bin/linux twin directory.
+    #   unknown           - neither plane detected (empty or broken tree).
+    # Consumers assert the contract of the plane they actually run against;
+    # the Windows checkout keeps its full .cmd -> POSIX twin parity coverage,
+    # and an installed POSIX tree is asserted by its OWN launcher contract.
+    param([string]$InstallRoot)
+    $root = Get-AihInstallRoot $InstallRoot
+    $bin = Join-Path $root 'bin'
+    $posixTwinDirectory = Join-Path $bin 'linux'
+    $hasPosixTwinTemplates = $false
+    if (Test-Path -LiteralPath $posixTwinDirectory -PathType Container) {
+        $hasPosixTwinTemplates = @(Get-ChildItem -LiteralPath $posixTwinDirectory -Filter '*.sh' -File -ErrorAction SilentlyContinue).Count -gt 0
+    }
+    $cmdLaunchers = @(Get-ChildItem -LiteralPath $bin -Filter '*.cmd' -File -ErrorAction SilentlyContinue)
+    $hasExtensionlessLaunchers = Test-Path -LiteralPath (Join-Path $bin 'aih') -PathType Leaf
+    $kind = 'unknown'
+    if ($hasPosixTwinTemplates) { $kind = 'source' }
+    elseif ($hasExtensionlessLaunchers) { $kind = 'installed-posix' }
+    elseif ($cmdLaunchers.Count -gt 0) { $kind = 'installed-windows' }
+    return [pscustomobject]@{
+        Kind                      = $kind
+        Bin                       = $bin
+        PosixTwinDirectory        = $posixTwinDirectory
+        HasPosixTwinTemplates     = $hasPosixTwinTemplates
+        WindowsLauncherCount      = $cmdLaunchers.Count
+        HasExtensionlessLaunchers = $hasExtensionlessLaunchers
+    }
+}
+
 function Get-AihPowerShellHost {
     param([string]$InstallRoot)
 
@@ -74,10 +116,15 @@ function Get-AihPowerShellHost {
     if (-not [string]::IsNullOrWhiteSpace($env:AIH_PWSH_HOST)) {
         return $env:AIH_PWSH_HOST
     }
-    if (-not [string]::IsNullOrWhiteSpace($InstallRoot)) {
-        $pinned = Join-Path (Join-Path (Join-Path (Get-AihInstallRoot $InstallRoot) 'runtime') 'pwsh') 'pwsh'
-        if (Test-Path -LiteralPath $pinned -PathType Leaf) { return $pinned }
-    }
+    # The pinned-runtime probe resolves through the FULL install-root chain
+    # (explicit argument > AIH_INSTALL_ROOT > DSH_HOME > parent of this
+    # script's directory), so every Nexus-owned POSIX process prefers the
+    # setup.sh-installed runtime even when the caller has no explicit root
+    # (TASK-0025 Class B: Engineering/Execution.ps1 passes no root). An
+    # explicit AIH_PWSH_HOST still wins, and a system pwsh remains the last
+    # fallback before failing closed.
+    $pinned = Join-Path (Join-Path (Join-Path (Get-AihInstallRoot $InstallRoot) 'runtime') 'pwsh') 'pwsh'
+    if (Test-Path -LiteralPath $pinned -PathType Leaf) { return $pinned }
     $system = Get-Command 'pwsh' -ErrorAction SilentlyContinue
     if ($null -ne $system) { return $system.Source }
     throw 'Nexus requires a PowerShell 7 runtime (pwsh). Run the Nexus installer (./setup.sh) to install the pinned runtime, or install pwsh and re-run it.'
@@ -102,6 +149,39 @@ function Get-AihNodeRelativeExecutable {
     # to the runtime node directory.
     if (Test-AihIsWindows) { return 'node.exe' }
     return Join-Path 'bin' 'node'
+}
+
+function Get-AihPinnedNodeDirectory {
+    # Directory that contains the Nexus-pinned node executable for THIS
+    # platform: the Windows ZIP layout keeps node.exe at the runtime root,
+    # the POSIX .tar.xz layout keeps node under bin/. This is the single
+    # resolution point for "the Node runtime Nexus owns" (TASK-0025 Class B);
+    # callers prepend it to PATH so Nexus-owned children resolve the pinned
+    # runtime ahead of any system Node.
+    param([string]$InstallRoot)
+    $root = Get-AihInstallRoot $InstallRoot
+    $runtimeNode = Join-Path (Join-Path $root 'runtime') 'node'
+    if (Test-AihIsWindows) { return $runtimeNode }
+    return Join-Path $runtimeNode 'bin'
+}
+
+function Add-AihPinnedNodeToPath {
+    # Nexus-owned child execution environment (TASK-0025 Class B).
+    #
+    # Prepends the Nexus-pinned Node runtime directory to THIS process's PATH
+    # with the platform path separator ([IO.Path]::PathSeparator), so every
+    # child this process spawns (node, npm, project verification runners, and
+    # their nested children) resolves the pinned runtime first while the
+    # pre-existing PATH stays intact behind it. The modification is strictly
+    # process-scoped: it is inherited by children, never persisted, and never
+    # written to any shell profile. No system Node dependency is introduced:
+    # when no pinned runtime is installed at the resolved root the call is a
+    # no-op so source checkouts keep their ambient tool resolution.
+    param([string]$InstallRoot)
+    $pinnedBin = Get-AihPinnedNodeDirectory -InstallRoot $InstallRoot
+    if ([string]::IsNullOrWhiteSpace($pinnedBin) -or -not (Test-Path -LiteralPath $pinnedBin -PathType Container)) { return $false }
+    $env:PATH = $pinnedBin + [IO.Path]::PathSeparator + $env:PATH
+    return $true
 }
 
 function ConvertTo-AihSafeSyncName {

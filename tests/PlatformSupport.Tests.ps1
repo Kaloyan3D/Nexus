@@ -75,6 +75,34 @@ Get-AihPowerShellHost -InstallRoot $InstallRoot
     if ($runningOnWindows) { Assert-Aih ((Get-AihNodeRelativeExecutable)-eq'node.exe') 'Windows pinned node executable is node.exe' }
     else { Assert-Aih ((Get-AihNodeRelativeExecutable)-eq'bin/node') 'Linux pinned node executable is bin/node' }
 
+    # ── pinned Node child environment (TASK-0025 Class B) ──
+    # One resolution point for the Node runtime Nexus owns: the directory must
+    # match the runtime layout on every platform, the PATH prepend must use
+    # the platform path separator while preserving the existing PATH, the
+    # pinned runtime must actually win node resolution when present, and a
+    # root without a pinned runtime must be a no-op (source checkouts keep
+    # their ambient tool resolution; no system Node dependency is created).
+    $expectedPinnedDir=Join-Path (Join-Path $InstallRoot 'runtime') 'node'
+    if (-not $runningOnWindows) { $expectedPinnedDir=Join-Path $expectedPinnedDir 'bin' }
+    Assert-Aih ((Get-AihPinnedNodeDirectory -InstallRoot $InstallRoot)-eq$expectedPinnedDir) 'pinned Node directory matches the runtime layout on this platform'
+    $pathBefore=$env:PATH
+    $pinnedExists=Test-Path -LiteralPath (Get-AihPinnedNodeDirectory -InstallRoot $InstallRoot) -PathType Container
+    $prepended=Add-AihPinnedNodeToPath -InstallRoot $InstallRoot
+    Assert-Aih ($prepended-eq$pinnedExists) 'pinned Node prepend reports honestly whether a pinned runtime exists'
+    if ($pinnedExists) {
+        Assert-Aih ($env:PATH.StartsWith((Get-AihPinnedNodeDirectory -InstallRoot $InstallRoot)+[IO.Path]::PathSeparator)) 'pinned Node directory wins the front of PATH with the platform separator'
+        Assert-Aih ($env:PATH.EndsWith($pathBefore)) 'existing PATH is preserved behind the pinned prepend'
+        $resolvedNode=(Get-Command node -ErrorAction SilentlyContinue)
+        Assert-Aih ($null-ne$resolvedNode-and$resolvedNode.Source.StartsWith((Get-AihPinnedNodeDirectory -InstallRoot $InstallRoot),[StringComparison]::OrdinalIgnoreCase)) 'node resolves from the Nexus-pinned runtime when present'
+    }
+    $env:PATH=$pathBefore
+    $noOpRoot=Join-Path ([IO.Path]::GetTempPath()) ('aih-noruntime-'+[guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $noOpRoot -Force|Out-Null
+    $pathBeforeNoOp=$env:PATH
+    Assert-Aih (-not (Add-AihPinnedNodeToPath -InstallRoot $noOpRoot)) 'root without a pinned runtime is a no-op (source checkout keeps ambient resolution)'
+    Assert-Aih ($env:PATH-eq$pathBeforeNoOp) 'no-op prepend leaves PATH untouched'
+    Remove-Item -LiteralPath $noOpRoot -Recurse -Force
+
     # ── sync-name safety ──
     $safeName=ConvertTo-AihSafeSyncName 'Local\AIHarness.EngineeringProfile'
     Assert-Aih ($safeName -and $safeName.GetType().Name-eq'String') 'ConvertTo-AihSafeSyncName returns a usable sync name'
@@ -169,15 +197,40 @@ Get-AihPowerShellHost -InstallRoot $InstallRoot
     $gitattributes=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot '.gitattributes')
     Assert-Aih ($gitattributes.Contains('*.sh text eol=lf')) '.gitattributes forces LF for shell scripts'
 
-    # ── launcher parity: every Windows .cmd has a Linux twin ──
-    $cmdLaunchers=@(Get-ChildItem -LiteralPath (Join-Path $InstallRoot 'bin') -Filter '*.cmd' -File -ErrorAction SilentlyContinue)
-    Assert-Aih (@($cmdLaunchers).Count-gt 0) 'bin contains Windows .cmd launchers to mirror'
-    foreach ($cmd in @($cmdLaunchers)) {
-        $twin=Join-Path $InstallRoot ('bin/linux/'+$cmd.BaseName+'.sh')
-        Assert-Aih (Test-Path -LiteralPath $twin) ("Linux launcher exists for " + $cmd.BaseName)
-        $twinText=[IO.File]::ReadAllText($twin)
-        Assert-Aih ($twinText.Contains('AIH_BAKED_ROOT=""')) ("Linux launcher " + $cmd.BaseName + " keeps the bake marker for ~/.local/bin installs")
-        Assert-Aih (-not ([IO.File]::ReadAllBytes($twin) -contains 13)) ("Linux launcher " + $cmd.BaseName + " is LF-only")
+    # ── launcher contract (layout-plane aware, TASK-0025 Class C) ──
+    # The launcher-layout abstraction distinguishes the planes by TREE
+    # CONTENT, never by OS alone: the checkout asserts .cmd -> POSIX twin
+    # parity; the installed POSIX tree asserts its own extensionless launcher
+    # contract; the installed Windows tree asserts its .cmd set. No plane
+    # requires fake .cmd artifacts or copies of the source twin templates.
+    $launcherLayout=Get-AihLauncherLayout -InstallRoot $InstallRoot
+    Assert-Aih ($launcherLayout.Kind-ne'unknown') 'launcher layout plane is detectable from the tree'
+    if ($launcherLayout.Kind-eq'source') {
+        $cmdLaunchers=@(Get-ChildItem -LiteralPath $launcherLayout.Bin -Filter '*.cmd' -File -ErrorAction SilentlyContinue)
+        Assert-Aih (@($cmdLaunchers).Count-gt 0) 'bin contains Windows .cmd launchers to mirror'
+        foreach ($cmd in @($cmdLaunchers)) {
+            $twin=Join-Path $launcherLayout.PosixTwinDirectory ($cmd.BaseName+'.sh')
+            Assert-Aih (Test-Path -LiteralPath $twin) ("Linux launcher exists for " + $cmd.BaseName)
+            $twinText=[IO.File]::ReadAllText($twin)
+            Assert-Aih ($twinText.Contains('AIH_BAKED_ROOT=""')) ("Linux launcher " + $cmd.BaseName + " keeps the bake marker for ~/.local/bin installs")
+            Assert-Aih (-not ([IO.File]::ReadAllBytes($twin) -contains 13)) ("Linux launcher " + $cmd.BaseName + " is LF-only")
+        }
+    }
+    elseif ($launcherLayout.Kind-eq'installed-posix') {
+        Assert-Aih (-not (Test-Path -LiteralPath $launcherLayout.PosixTwinDirectory)) 'the installed POSIX tree does not carry the source-layout bin/linux twin templates'
+        $installedLaunchers=@(Get-ChildItem -LiteralPath $launcherLayout.Bin -File | Where-Object { $_.Name.StartsWith('aih') -and -not $_.Name.Contains('.') })
+        Assert-Aih (@($installedLaunchers).Count-ge 15) 'the installed POSIX tree publishes the extensionless launcher set'
+        foreach ($launcher in @($installedLaunchers)) {
+            $launcherText=[IO.File]::ReadAllText($launcher.FullName)
+            Assert-Aih ($launcherText.Contains('AIH_BAKED_ROOT=')) ("installed launcher " + $launcher.Name + " keeps the bake marker")
+            Assert-Aih (-not ([IO.File]::ReadAllBytes($launcher.FullName) -contains 13)) ("installed launcher " + $launcher.Name + " is LF-only")
+        }
+        $strayCmd=@(Get-ChildItem -LiteralPath $launcherLayout.Bin -Filter '*.cmd' -File -ErrorAction SilentlyContinue)
+        Assert-Aih (@($strayCmd).Count-eq 0) 'the installed Linux tree contains no fake Windows .cmd launchers'
+    }
+    else {
+        Assert-Aih ($launcherLayout.WindowsLauncherCount-gt 0) 'the installed Windows tree contains the .cmd launcher set'
+        Assert-Aih (-not (Test-Path -LiteralPath $launcherLayout.PosixTwinDirectory)) 'the installed Windows tree does not carry the source-layout bin/linux twin templates'
     }
     Assert-Aih (-not ([IO.File]::ReadAllBytes((Join-Path $InstallRoot 'setup.sh')) -contains 13)) 'setup.sh is LF-only'
 
