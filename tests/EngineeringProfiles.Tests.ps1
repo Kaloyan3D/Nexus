@@ -1,13 +1,13 @@
 [CmdletBinding()]param([string]$InstallRoot='C:\AI-Harness')
 Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\Routing.ps1')
-. (Join-Path $InstallRoot 'scripts\TaskController.ps1')
-. (Join-Path $InstallRoot 'scripts\CodexReview.ps1')
-. (Join-Path $InstallRoot 'scripts\Telemetry.ps1')
-. (Join-Path $InstallRoot 'scripts\ControlRoom.ps1')
-. (Join-Path $InstallRoot 'tests\TestHelpers.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Routing.ps1')
+. (Join-Path $InstallRoot 'scripts/TaskController.ps1')
+. (Join-Path $InstallRoot 'scripts/CodexReview.ps1')
+. (Join-Path $InstallRoot 'scripts/Telemetry.ps1')
+. (Join-Path $InstallRoot 'scripts/ControlRoom.ps1')
+. (Join-Path $InstallRoot 'tests/TestHelpers.ps1')
 
 $passed=0
 function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw "FAIL: $Name"};$script:passed++;Write-Host "PASS: $Name"}
@@ -263,12 +263,12 @@ try{
 }finally{if(Test-Path $verifyRoot){Remove-Item -LiteralPath $verifyRoot -Recurse -Force}}
 
 # -- 19. SUBAGENT / DELEGATION CONFIGURATION IS UNTOUCHED -----------------
-$delegationPath=Join-Path $InstallRoot 'config\delegation-block.yml'
+$delegationPath=Join-Path $InstallRoot 'config/delegation-block.yml'
 $delegation=Get-Content -Raw -Encoding UTF8 -LiteralPath $delegationPath
 Assert-Aih ($delegation -match 'toolName: deepseek_normal') '19: deepseek_normal subagent tool registration unchanged (compat alias)'
 Assert-Aih ($delegation -match 'toolName: deepseek_deep') '19: deepseek_deep subagent tool registration unchanged (compat alias)'
 Assert-Aih ($delegation -match 'tool-subagent-codex[\s\S]*?disabled: true') '19: Codex subagent remains disabled by default'
-$engPreset=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'data\.agent-presets\aih-engineering\agent.cordis.yml')
+$engPreset=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'data/.agent-presets/aih-engineering/agent.cordis.yml')
 Assert-Aih ($engPreset -match '- id: tool-subagent-codex[\s\S]*?disabled: true') '19: engineering preset keeps the Codex subagent disabled'
 Assert-Aih ($engPreset -match '- id: aih-engineering-isolation') '19: engineering preset keeps its isolation plugin'
 Assert-Aih ($engPreset -match '- id: aih-controller') '19: engineering preset keeps the controller bridge'

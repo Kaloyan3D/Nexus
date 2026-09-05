@@ -1,9 +1,11 @@
 [CmdletBinding()]
-param([string]$InstallRoot = 'C:\AI-Harness')
+param([string]$InstallRoot = (Split-Path -Parent $PSScriptRoot))
+# Platform-aware child host: Windows keeps powershell.exe; POSIX uses the pinned Nexus pwsh.
+if (-not (Get-Command Test-AihIsWindows -ErrorAction SilentlyContinue)) { . (Join-Path $InstallRoot 'scripts/Platform.ps1') }; $aihPsHost = Get-AihPowerShellHost -InstallRoot $InstallRoot
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
 
 $passed = 0
 function Assert-Aih([bool]$Condition, [string]$Name) {
@@ -22,12 +24,12 @@ function Invoke-AihInstaller {
     # child invocation exactly like scripts\Test-Harness.ps1 does.
     param([string]$Source, [string]$Target, [switch]$Force)
     $arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-        '-File', (Join-Path $InstallRoot 'scripts\Install-NexusSkills.ps1'),
+        '-File', (Join-Path $InstallRoot 'scripts/Install-NexusSkills.ps1'),
         '-SourceRoot', $Source, '-TargetRoot', $Target)
     if ($Force) { $arguments += '-Force' }
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try { $output = @(& powershell.exe @arguments 2>&1 | ForEach-Object { [string]$_ }) }
+    try { $output = @(& $aihPsHost @arguments 2>&1 | ForEach-Object { [string]$_ }) }
     finally { $ErrorActionPreference = $savedPreference }
     return [pscustomobject]@{ ExitCode = [int]$LASTEXITCODE; Output = $output; Text = ($output -join [Environment]::NewLine) }
 }
@@ -35,7 +37,7 @@ function Invoke-AihChildSuite {
     param([string]$ScriptPath)
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try { $output = @(& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ScriptPath 2>&1 | ForEach-Object { [string]$_ }) }
+    try { $output = @(& $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ScriptPath 2>&1 | ForEach-Object { [string]$_ }) }
     finally { $ErrorActionPreference = $savedPreference }
     return [pscustomobject]@{ ExitCode = [int]$LASTEXITCODE; Output = $output; Text = ($output -join [Environment]::NewLine) }
 }
@@ -50,7 +52,7 @@ function New-AihFixtureSkill {
 $layout = Get-AihLayout $InstallRoot
 
 # -- 1. RUNTIME NATIVE CAPABILITY PRESENT (resolved composition) -----------
-$verify = Invoke-AihChildSuite -ScriptPath (Join-Path $InstallRoot 'scripts\Verify-SkillsRuntime.ps1')
+$verify = Invoke-AihChildSuite -ScriptPath (Join-Path $InstallRoot 'scripts/Verify-SkillsRuntime.ps1')
 $verifyOutput = $verify.Output
 $verifyExit = $verify.ExitCode
 $verifyText = $verify.Text
@@ -61,7 +63,7 @@ Assert-Aih ($verifyText -match '(?m)^model skill tool available: yes\r?$') '1: m
 Assert-Aih ($verifyText -match '(?m)^native boot verified: yes\r?$') '1: native registry+provider boots end-to-end'
 
 # -- 16-19. CORE PACK VALIDATION ---------------------------------------------
-$coreRoot = Join-Path $InstallRoot 'skills\core'
+$coreRoot = Join-Path $InstallRoot 'skills/core'
 $coreDirs = @(Get-ChildItem -LiteralPath $coreRoot -Directory | Sort-Object -Property Name)
 $expectedCore = @(
     'nexus-engineering-workflow', 'git-safety', 'test-driven-hardening',
@@ -103,33 +105,33 @@ Assert-Aih $true '19: no duplicate core skill names'
 # -- 12-15 + ownership policy. INSTALLER BEHAVIOR ----------------------------
 $installFixture = New-Fixture skills-install
 try {
-    $target = Join-Path $installFixture '.agents\skills'
+    $target = Join-Path $installFixture '.agents/skills'
     New-AihFixtureSkill -Directory (Join-Path $target 'third-party-notes') -Name 'third-party-notes' -Description 'Pre-existing user skill that must survive the installer.' -Body 'user body'
-    $thirdPartyHashBefore = (Get-FileHash -Algorithm SHA256 (Join-Path $target 'third-party-notes\SKILL.md')).Hash
+    $thirdPartyHashBefore = (Get-FileHash -Algorithm SHA256 (Join-Path $target 'third-party-notes/SKILL.md')).Hash
 
     $run1 = Invoke-AihInstaller -Source $coreRoot -Target $target
     Assert-Aih ($run1.ExitCode -eq 0) '4: installer installs the canonical global pack (exit 0)'
     Assert-Aih ($run1.Text -match 'git-safety' -and $run1.Text -match 'local-first-sqlite') '4: installer installs core skill names'
-    Assert-Aih (Test-Path -LiteralPath (Join-Path $target 'nexus-engineering-workflow\SKILL.md')) '4: installed skill directory landed at the user root'
-    Assert-Aih ((Get-FileHash -Algorithm SHA256 (Join-Path $target 'third-party-notes\SKILL.md')).Hash -eq $thirdPartyHashBefore) '12: unrelated pre-existing user skill is preserved byte-for-byte'
+    Assert-Aih (Test-Path -LiteralPath (Join-Path $target 'nexus-engineering-workflow/SKILL.md')) '4: installed skill directory landed at the user root'
+    Assert-Aih ((Get-FileHash -Algorithm SHA256 (Join-Path $target 'third-party-notes/SKILL.md')).Hash -eq $thirdPartyHashBefore) '12: unrelated pre-existing user skill is preserved byte-for-byte'
     Assert-Aih (Test-Path -LiteralPath (Join-Path $target 'nexus-skills.manifest.json')) '12: ownership manifest records the installed names'
 
     $run2 = Invoke-AihInstaller -Source $coreRoot -Target $target
     Assert-Aih ($run2.ExitCode -eq 0) '13: second installer run exits clean'
     Assert-Aih ($run2.Text -notmatch '(?m)^  installed: ' -and $run2.Text -notmatch '(?m)^  updated: ') '13: installer is idempotent (second run reports everything unchanged)'
-    Assert-Aih ((Get-FileHash -Algorithm SHA256 (Join-Path $target 'git-safety\SKILL.md')).Hash -eq (Get-FileHash -Algorithm SHA256 (Join-Path $coreRoot 'git-safety\SKILL.md')).Hash) '13: idempotent run did not rewrite skill bytes'
+    Assert-Aih ((Get-FileHash -Algorithm SHA256 (Join-Path $target 'git-safety/SKILL.md')).Hash -eq (Get-FileHash -Algorithm SHA256 (Join-Path $coreRoot 'git-safety/SKILL.md')).Hash) '13: idempotent run did not rewrite skill bytes'
 
     # deterministic update: mutate a copy of the source pack, reinstall
     $mutatedSource = Join-Path $installFixture 'mutated-core'
     New-Item -ItemType Directory -Force -Path $mutatedSource | Out-Null
     Copy-Item -LiteralPath (Join-Path $coreRoot 'git-safety') -Destination $mutatedSource -Recurse
-    $mutatedSkill = Join-Path $mutatedSource 'git-safety\SKILL.md'
+    $mutatedSkill = Join-Path $mutatedSource 'git-safety/SKILL.md'
     $mutated = [System.IO.File]::ReadAllText($mutatedSkill)
     [System.IO.File]::WriteAllText($mutatedSkill, $mutated + [Environment]::NewLine + 'Deterministic update marker NXSKILL-UPDATE-MARKER.' + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
     $run3 = Invoke-AihInstaller -Source $mutatedSource -Target $target
     Assert-Aih ($run3.ExitCode -eq 0) '14: update run exits clean'
     Assert-Aih ($run3.Text -match '(?m)^  updated:\s+git-safety\s*$') '14: update replaces the Nexus-owned installed skill'
-    $installedSkill = [System.IO.File]::ReadAllText((Join-Path $target 'git-safety\SKILL.md'))
+    $installedSkill = [System.IO.File]::ReadAllText((Join-Path $target 'git-safety/SKILL.md'))
     Assert-Aih ($installedSkill.Contains('NXSKILL-UPDATE-MARKER')) '14: updated content landed deterministically'
     $run4 = Invoke-AihInstaller -Source $mutatedSource -Target $target
     Assert-Aih ($run4.Text -match '(?m)^  unchanged:\s+git-safety\s*$') '14: post-update run is again unchanged (deterministic)'
@@ -137,29 +139,29 @@ try {
     # malformed source: fails loudly before any write
     $badSource = Join-Path $installFixture 'bad-core'
     New-AihFixtureSkill -Directory (Join-Path $badSource 'broken-skill') -Name '' -Description 'no name here' -Body 'body'
-    $badTarget = Join-Path $installFixture 'bad-target\skills'
+    $badTarget = Join-Path $installFixture 'bad-target/skills'
     $run5 = Invoke-AihInstaller -Source $badSource -Target $badTarget
     Assert-Aih ($run5.ExitCode -eq 1) '15: malformed skill source fails loudly'
     Assert-Aih ($run5.Text -match 'Malformed Nexus skill source') '15: malformed source names the defect'
     Assert-Aih (-not (Test-Path -LiteralPath $badTarget)) '15: malformed source writes nothing to the target'
 
     # ownership: same-name non-Nexus skill is a conflict without -Force
-    $ownedTarget = Join-Path $installFixture 'owned-target\skills'
+    $ownedTarget = Join-Path $installFixture 'owned-target/skills'
     New-AihFixtureSkill -Directory (Join-Path $ownedTarget 'git-safety') -Name 'git-safety' -Description 'User-owned skill squatting a Nexus name.' -Body 'user content'
     $run6 = Invoke-AihInstaller -Source $coreRoot -Target $ownedTarget
     Assert-Aih ($run6.ExitCode -eq 2) '5: same-name non-Nexus skill is refused without -Force'
-    $squatter = [System.IO.File]::ReadAllText((Join-Path $ownedTarget 'git-safety\SKILL.md'))
+    $squatter = [System.IO.File]::ReadAllText((Join-Path $ownedTarget 'git-safety/SKILL.md'))
     Assert-Aih ($squatter.Contains('squatting')) '5: refused conflict did not touch the user-owned skill'
     $run7 = Invoke-AihInstaller -Source $coreRoot -Target $ownedTarget -Force
     Assert-Aih ($run7.ExitCode -eq 0) '5: -Force takes documented Nexus ownership'
-    Assert-Aih (-not ([System.IO.File]::ReadAllText((Join-Path $ownedTarget 'git-safety\SKILL.md')).Contains('squatting'))) '5: ownership transfer replaced the content'
+    Assert-Aih (-not ([System.IO.File]::ReadAllText((Join-Path $ownedTarget 'git-safety/SKILL.md')).Contains('squatting'))) '5: ownership transfer replaced the content'
 }
 finally {
     if (Test-Path $installFixture) { Remove-Item -LiteralPath $installFixture -Recurse -Force }
 }
 
 # -- 21. EVAL FIXTURES MAP TASKS TO SKILLS ------------------------------------
-$casesPath = Join-Path $InstallRoot 'tests\fixtures\skill-evals\cases.json'
+$casesPath = Join-Path $InstallRoot 'tests/fixtures/skill-evals/cases.json'
 Assert-Aih (Test-Path -LiteralPath $casesPath -PathType Leaf) '21: eval cases fixture exists'
 $cases = Get-Content -Raw -Encoding UTF8 -LiteralPath $casesPath | ConvertFrom-Json
 Assert-Aih (@($cases.cases).Count -eq 5) '21: eval harness defines the five foundation cases'
@@ -170,16 +172,16 @@ foreach ($case in $cases.cases) {
     foreach ($expected in $case.expectedSkills) {
         Assert-Aih ($expected.name -match $kebabPattern) "21: case $($case.id) expected skill name is kebab-case"
         Assert-Aih (@($expected.catalogPatterns).Count -ge 1 -and @($expected.bodyPatterns).Count -ge 1) "21: case $($case.id) pins catalog and body concepts for $($expected.name)"
-        $expectedPath = Join-Path $coreRoot ($expected.name + '\SKILL.md')
+        $expectedPath = Join-Path $coreRoot ($expected.name + '/SKILL.md')
         Assert-Aih (Test-Path -LiteralPath $expectedPath -PathType Leaf) "21: case $($case.id) expected skill exists in the core pack: $($expected.name)"
     }
 }
-$eval = Invoke-AihChildSuite -ScriptPath (Join-Path $InstallRoot 'scripts\Invoke-SkillEvals.ps1')
+$eval = Invoke-AihChildSuite -ScriptPath (Join-Path $InstallRoot 'scripts/Invoke-SkillEvals.ps1')
 Assert-Aih ($eval.ExitCode -eq 0) '21: deterministic skill selection evals pass (cases A-E)'
 Assert-Aih ($eval.Text -match 'failures: 0') '21: eval harness reports zero failures'
 
 # -- 22. SECURITY DOCS/POLICY PRESENT ------------------------------------------
-$securityPath = Join-Path $InstallRoot 'docs\skills\SECURITY.md'
+$securityPath = Join-Path $InstallRoot 'docs/skills/SECURITY.md'
 Assert-Aih (Test-Path -LiteralPath $securityPath -PathType Leaf) '22: skills security policy document exists'
 $securityText = Get-Content -Raw -Encoding UTF8 -LiteralPath $securityPath
 Assert-Aih ($securityText -match 'not an authority|authority elevation') '22: security policy states skills are not authority elevation'
@@ -187,13 +189,13 @@ Assert-Aih ($securityText -match 'permission model') '22: security policy covers
 Assert-Aih ($securityText -match 'sandbox') '22: security policy covers the sandbox boundary'
 Assert-Aih ($securityText -match 'Git') '22: security policy covers Git safety'
 Assert-Aih ($securityText -match 'inert') '22: security policy states scripts/templates ship inert'
-Assert-Aih (Test-Path -LiteralPath (Join-Path $InstallRoot 'docs\skills\README.md')) '22: skills README exists'
-Assert-Aih (Test-Path -LiteralPath (Join-Path $InstallRoot 'docs\skills\SKILL_AUTHORING.md')) '22: skill authoring guide exists'
-Assert-Aih (Test-Path -LiteralPath (Join-Path $InstallRoot 'docs\skills\EVALS.md')) '22: skills evals documentation exists'
-$readmeText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'docs\skills\README.md')
+Assert-Aih (Test-Path -LiteralPath (Join-Path $InstallRoot 'docs/skills/README.md')) '22: skills README exists'
+Assert-Aih (Test-Path -LiteralPath (Join-Path $InstallRoot 'docs/skills/SKILL_AUTHORING.md')) '22: skill authoring guide exists'
+Assert-Aih (Test-Path -LiteralPath (Join-Path $InstallRoot 'docs/skills/EVALS.md')) '22: skills evals documentation exists'
+$readmeText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'docs/skills/README.md')
 Assert-Aih ($readmeText -match 'project-agents') '22: README documents native project-agents discovery'
 Assert-Aih ($readmeText -match 'user-agents') '22: README documents native user-agents discovery'
-$authoringText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'docs\skills\SKILL_AUTHORING.md')
+$authoringText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'docs/skills/SKILL_AUTHORING.md')
 Assert-Aih ($authoringText -match 'kebab-case') '22: authoring guide enforces kebab-case names'
 Assert-Aih ($authoringText -match 'Memory') '22: authoring guide documents the skills/memory boundary'
 

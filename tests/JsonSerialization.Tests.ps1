@@ -1,7 +1,7 @@
 [CmdletBinding()]param([string]$InstallRoot)
 Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
 if ([string]::IsNullOrWhiteSpace($InstallRoot)){$InstallRoot=Split-Path -Parent $PSScriptRoot}
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
 $passed=0
 function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw "FAIL: $Name"};$script:passed++;Write-Host "PASS: $Name"}
 function Convert-AihContractJson($Value){if($null-eq$Value){return 'null'};ConvertTo-Json -InputObject (ConvertTo-AihJsonSafe $Value) -Depth 20 -Compress}

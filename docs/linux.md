@@ -11,6 +11,10 @@ Nexus runs natively on Linux — the same deterministic controller, the same tas
 
 Node.js and PowerShell are NOT system requirements: the installer downloads pinned, checksum-verified per-platform builds into the install root (`config/versions.json` pins `NodeVersion` and `PowerShellVersion`).
 
+## Known follow-up (dependency audit, tracked separately)
+
+The pinned dependency installation currently reports `2 vulnerabilities (1 moderate, 1 high)` from `npm audit`, and npm prints allow-scripts notices for `@deepseek-ai/dsh-subprocess-local`, `@google/genai`, `koffi`, `node-pty`, and `protobufjs`. These are recorded as a separate dependency/security audit item: do NOT run `npm audit fix` or bump pinned versions casually — dependency changes are reviewed deliberately, and they are unrelated to installer provisioning.
+
 ## Install
 
 ```sh
