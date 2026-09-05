@@ -64,9 +64,27 @@ $rootViolations = @($rootLiterals | Where-Object { $allowedRootLiteralFiles -not
 Assert-Aih ($rootViolations.Count -eq 0) ("legacy-root literal occurrences are confined to documented negative assertions/contracts (found: " + (Format-Findings $rootViolations) + ")")
 
 # 5. Cross-platform path construction must not use backslash literals.
+#    TASK-0025 Class E: the classifier no longer lets a backslash path shape
+#    hide behind regex-escape collision letters ('data\routing\...' contains
+#    '\r'), so Windows-only relative fixture paths are caught here.
 $pathViolations = @($audit.PathFindings | Where-Object { -not (Test-AihPathLiteralAllowed -File $_.File -Value $_.Value -Classification $_.Classification) })
 $pathText = ((@($pathViolations) | ForEach-Object { $_.File + ":" + $_.Line + " [" + $_.Value + "]" }) -join ", ")
 Assert-Aih ($pathViolations.Count -eq 0) ("no cross-platform path construction uses backslash literals (found: " + $pathText + ")")
+
+# 5b. PATH mutations must use [IO.Path]::PathSeparator, never a literal ';'/':'
+#     join (TASK-0025 Class B): a hardcoded separator corrupts PATH on the
+#     other OS and broke the visual suites on Linux. Allowances are classified
+#     below; everything else fails.
+$pathSeparatorAllow = @(
+    @{ File = 'scripts/Setup.ps1'; Reason = 'Windows installer mutating the Windows USER Path registry value; Windows-only file (setup.sh is the POSIX installer)' }
+)
+$separatorViolations = [System.Collections.Generic.List[string]]::new()
+foreach ($finding in @($audit.PathSeparatorFindings)) {
+    $allowed = $false
+    foreach ($entry in $pathSeparatorAllow) { if ($entry.File -eq $finding.File) { $allowed = $true; break } }
+    if (-not $allowed) { $separatorViolations.Add(($finding.File + ":" + $finding.Line + " [" + $finding.Value + "]")) }
+}
+Assert-Aih ($separatorViolations.Count -eq 0) ("PATH mutations use the platform path separator, never a literal ';'/':' join (found: " + (($separatorViolations.ToArray()) -join ", ") + ")")
 
 # 6. The POSIX launcher plane stays POSIX.
 Assert-Aih (@($audit.LinuxLauncherFindings).Count -eq 0) "bin/linux stays POSIX: no fake .cmd artifacts, LF-only, shebang present, no cmd.exe references"
@@ -92,7 +110,8 @@ $jsAllow = @(
     @{ File = 'tests/lib/AihTestTransport.cjs'; Reason = 'the ONE shared test transport: its Windows branch implements the production host strategy and the TASK-0017 cmd.exe no-pipes transport' },
     @{ File = 'config/AihController.cjs'; Reason = 'production controller bridge: platform-aware spawnCaptured/runCli resolvers (guards verified in-file)' },
     @{ File = 'ui/nexus-controller/lib/index.js'; Reason = 'production UI controller: platform-aware pwsh host resolver (guards verified in-file)' },
-    @{ File = 'tests/AihControllerHost.Tests.cjs'; Reason = 'this suite ASSERTS the platform launcher/host contracts; its literals are test data that must match production source, never spawns' }
+    @{ File = 'tests/AihControllerHost.Tests.cjs'; Reason = 'this suite ASSERTS the platform launcher/host contracts; its literals are test data that must match production source, never spawns' },
+    @{ File = 'tests/lib/AihLauncherLayout.cjs'; Reason = 'launcher-layout abstraction twin (TASK-0025 Class C): its .cmd literals are layout-plane DETECTION data (endsWith filter) and contract documentation, never spawns' }
 )
 $jsViolations = [System.Collections.Generic.List[string]]::new()
 foreach ($finding in @($audit.JsExecutableFindings)) {
