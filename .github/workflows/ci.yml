@@ -16,6 +16,9 @@ jobs:
       - name: Install and test repo-local Nexus checkout
         shell: pwsh
         run: ./setup.ps1 -SkipPathUpdate -SkipDeepSeekLogin -SkipOpenAiLogin
+      - name: Execution target authority regression (Windows)
+        shell: pwsh
+        run: ./runtime/node/node.exe ./tests/EngineeringIsolation.Tests.cjs
       - name: PowerShell 7 lane (test-only host override)
         shell: pwsh
         run: |
@@ -84,6 +87,8 @@ jobs:
             --skip-deepseek-login \
             --skip-openai-login \
             --skip-path-check
+      - name: Execution target authority regression (installed Linux tree)
+        run: "$HOME/.local/share/nexus/runtime/node/bin/node $HOME/.local/share/nexus/tests/EngineeringIsolation.Tests.cjs"
       - name: Pinned runtimes are checksum-verified and executable
         run: |
           test -x "$HOME/.local/share/nexus/runtime/node/bin/node"
