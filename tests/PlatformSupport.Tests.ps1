@@ -145,6 +145,97 @@ try {
         $mode=(stat -c '%a' $credPath)
         Assert-Aih ($mode-eq'600') 'credential file is 0600 after Protect-AihPrivatePath on Linux'
     }
+    # ── Start-AihDetachedProcess optional-parameter contract (A–J + OAuth shape) ──
+    # Start-Process is intercepted by a same-name session function (functions
+    # shadow cmdlets), so the exact bound parameter set is asserted without
+    # spawning real children. A parameter ABSENT from $PSBoundParameters means
+    # the caller's omission reached Start-Process untouched; an explicitly
+    # bound $null (the old defect) shows up as a present-but-null entry.
+    $realTestAihIsWindows = ${function:Test-AihIsWindows}
+    $script:aihStartProcessCaptures = [System.Collections.Generic.List[object]]::new()
+    function Start-Process {
+        [CmdletBinding()]param($FilePath, $ArgumentList, $WorkingDirectory, $WindowStyle, $RedirectStandardOutput, $RedirectStandardError, [switch]$Wait, [switch]$PassThru)
+        # Keys copied into an ordered hashtable: PSBoundParametersDictionary
+        # method resolution differs across PowerShell editions, and Key
+        # membership via -contains is stable everywhere.
+        $captured = [ordered]@{}
+        foreach ($key in @($PSBoundParameters.Keys)) { $captured[$key] = $PSBoundParameters[$key] }
+        $script:aihStartProcessCaptures.Add([pscustomobject]@{ Bound = $captured })
+        return [pscustomobject]@{ Id = 424242; HasExited = $true; ExitCode = 0; StartTime = (Get-Date) }
+    }
+    function script:Get-AihLastStartProcessBound { @($script:aihStartProcessCaptures)[-1].Bound }
+
+    # A: Windows, FilePath + ArgumentList only (the exact OAuth startup shape).
+    $null = Start-AihDetachedProcess -FilePath 'node.exe' -ArgumentList @('oauth.js', '--detach', '--no-open')
+    $bound = Get-AihLastStartProcessBound
+    Assert-Aih (-not $bound.Contains('WorkingDirectory')) 'A: omitted WorkingDirectory is never forwarded (not even as null)'
+    Assert-Aih ($bound.Contains('WindowStyle') -and [string]$bound.WindowStyle -eq 'Hidden') 'A: Windows keeps WindowStyle Hidden'
+    Assert-Aih ($bound.Contains('PassThru')) 'A: PassThru present'
+    Assert-Aih ($bound.Contains('FilePath') -and [string]$bound.FilePath -eq 'node.exe') 'A: FilePath forwarded exactly'
+    Assert-Aih ($bound.Contains('ArgumentList') -and @($bound.ArgumentList).Count -eq 3) 'A: ArgumentList forwarded exactly'
+
+    # B: explicit WorkingDirectory is forwarded exactly.
+    $null = Start-AihDetachedProcess -FilePath 'node.exe' -ArgumentList @('x') -WorkingDirectory 'C:/repo with space'
+    $bound = Get-AihLastStartProcessBound
+    Assert-Aih ($bound.Contains('WorkingDirectory') -and [string]$bound.WorkingDirectory -eq 'C:/repo with space') 'B: explicit WorkingDirectory forwarded exactly'
+
+    # C: stdout-only redirection.
+    $null = Start-AihDetachedProcess -FilePath 'node.exe' -ArgumentList @('x') -WorkingDirectory 'C:/w' -RedirectStandardOutput 'C:/w/out.log'
+    $bound = Get-AihLastStartProcessBound
+    Assert-Aih ($bound.Contains('RedirectStandardOutput') -and [string]$bound.RedirectStandardOutput -eq 'C:/w/out.log') 'C: stdout-only redirect forwarded'
+    Assert-Aih (-not $bound.Contains('RedirectStandardError')) 'C: stdout-only does not forward RedirectStandardError'
+
+    # D: stderr-only redirection.
+    $null = Start-AihDetachedProcess -FilePath 'node.exe' -ArgumentList @('x') -WorkingDirectory 'C:/w' -RedirectStandardError 'C:/w/err.log'
+    $bound = Get-AihLastStartProcessBound
+    Assert-Aih ($bound.Contains('RedirectStandardError') -and [string]$bound.RedirectStandardError -eq 'C:/w/err.log') 'D: stderr-only redirect forwarded'
+    Assert-Aih (-not $bound.Contains('RedirectStandardOutput')) 'D: stderr-only does not forward RedirectStandardOutput'
+
+    # E: both redirects.
+    $null = Start-AihDetachedProcess -FilePath 'node.exe' -ArgumentList @('x') -WorkingDirectory 'C:/w' -RedirectStandardOutput 'C:/w/out.log' -RedirectStandardError 'C:/w/err.log'
+    $bound = Get-AihLastStartProcessBound
+    Assert-Aih ($bound.Contains('RedirectStandardOutput') -and $bound.Contains('RedirectStandardError')) 'E: both redirects forwarded together'
+
+    # F: null/empty/whitespace WorkingDirectory is omitted.
+    $null = Start-AihDetachedProcess -FilePath 'node.exe' -ArgumentList @('x') -WorkingDirectory ''
+    $bound = Get-AihLastStartProcessBound
+    Assert-Aih (-not $bound.Contains('WorkingDirectory')) 'F: empty WorkingDirectory is omitted'
+    $null = Start-AihDetachedProcess -FilePath 'node.exe' -ArgumentList @('x') -WorkingDirectory '   '
+    $bound = Get-AihLastStartProcessBound
+    Assert-Aih (-not $bound.Contains('WorkingDirectory')) 'F: whitespace WorkingDirectory is omitted'
+
+    # G/H: Linux branch — no WindowStyle, WorkingDirectory only when supplied.
+    function Test-AihIsWindows { return $false }
+    $null = Start-AihDetachedProcess -FilePath 'node' -ArgumentList @('x')
+    $bound = Get-AihLastStartProcessBound
+    Assert-Aih (-not $bound.Contains('WindowStyle')) 'G: Linux never receives WindowStyle'
+    Assert-Aih (-not $bound.Contains('WorkingDirectory')) 'G: Linux omitted WorkingDirectory is never forwarded'
+    $null = Start-AihDetachedProcess -FilePath 'node' -ArgumentList @('x') -WorkingDirectory '/home/user/nexus data'
+    $bound = Get-AihLastStartProcessBound
+    Assert-Aih ($bound.Contains('WorkingDirectory') -and [string]$bound.WorkingDirectory -eq '/home/user/nexus data') 'H: Linux explicit WorkingDirectory forwarded exactly'
+    ${function:Test-AihIsWindows} = $realTestAihIsWindows
+
+    # I/J: -Wait forwarding is exact, not a behavioral change.
+    $null = Start-AihDetachedProcess -FilePath 'node.exe' -ArgumentList @('x') -WorkingDirectory 'C:/w'
+    $bound = Get-AihLastStartProcessBound
+    Assert-Aih (-not $bound.Contains('Wait')) 'I: no -Wait means Start-Process never receives Wait'
+    $null = Start-AihDetachedProcess -FilePath 'node.exe' -ArgumentList @('x') -WorkingDirectory 'C:/w' -Wait
+    $bound = Get-AihLastStartProcessBound
+    Assert-Aih ($bound.Contains('Wait') -and $bound.Wait) 'J: -Wait forwards Wait to Start-Process'
+
+    # Real Start-Process (no mock): the exact aih.ps1 OAuth call shape with NO
+    # WorkingDirectory must bind and start — this is the regression's crash
+    # site (Cannot validate argument on parameter 'WorkingDirectory').
+    Remove-Item function:Start-Process -ErrorAction SilentlyContinue
+    $realNode = (Get-Command node -ErrorAction SilentlyContinue)
+    if ($null -ne $realNode) {
+        $oauthShape = Start-AihDetachedProcess -FilePath $realNode.Source -ArgumentList @('-e', 'setTimeout(function(){}, 2500)')
+        Assert-Aih ($null -ne $oauthShape -and $oauthShape.Id -gt 0) 'OAuth startup shape (FilePath+ArgumentList only) starts without a WorkingDirectory validation error'
+        Stop-Process -Id $oauthShape.Id -Force -ErrorAction SilentlyContinue
+    } else {
+        Write-Host 'SKIP: node not on PATH; real OAuth-shape spawn not verifiable here'
+    }
+    Remove-Item function:Start-Process -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $credRoot -Recurse -Force
 } catch {
     throw
