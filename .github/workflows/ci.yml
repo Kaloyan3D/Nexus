@@ -26,8 +26,12 @@ jobs:
         run: |
           sh -n setup.sh
           sh -n scripts/lib/aih-verify-sha256.sh
+          sh -n scripts/lib/aih-provision-pwsh.sh
           for wrapper in bin/linux/*.sh; do
             sh -n "$wrapper"
+          done
+          for suite in tests/*.Tests.sh; do
+            sh -n "$suite"
           done
       - name: Checksum manifest parser regression suite
         run: |
@@ -39,6 +43,25 @@ jobs:
           file /tmp/official-hashes.sha256
           . scripts/lib/aih-verify-sha256.sh
           aih_manifest_to_utf8 /tmp/official-hashes.sha256 | grep -F 'powershell-7.5.3-linux-x64.tar.gz'
+      - name: PowerShell provisioning regression suite
+        run: sh tests/aih-provision-pwsh.Tests.sh
+      - name: Real PowerShell tarball provisioning smoke (download -> verify -> extract -> chmod -> --version)
+        run: |
+          AIH_VERSION=$(grep '"PowerShellVersion"' config/versions.json | sed 's/.*: *"\([^"]*\)".*/\1/')
+          AIH_ARTIFACT="powershell-$AIH_VERSION-linux-x64.tar.gz"
+          AIH_TMP=$(mktemp -d)
+          curl -fsSL "https://github.com/PowerShell/PowerShell/releases/download/v$AIH_VERSION/$AIH_ARTIFACT" -o "$AIH_TMP/$AIH_ARTIFACT"
+          curl -fsSL "https://github.com/PowerShell/PowerShell/releases/download/v$AIH_VERSION/hashes.sha256" -o "$AIH_TMP/hashes.sha256"
+          . scripts/lib/aih-verify-sha256.sh
+          . scripts/lib/aih-provision-pwsh.sh
+          aih_verify_sha256 "$AIH_TMP/$AIH_ARTIFACT" "$AIH_TMP/hashes.sha256" "$AIH_ARTIFACT"
+          mkdir -p "$AIH_TMP/expanded"
+          tar -xzf "$AIH_TMP/$AIH_ARTIFACT" -C "$AIH_TMP/expanded"
+          test -f "$AIH_TMP/expanded/pwsh"
+          aih_provision_pwsh_archive "$AIH_TMP/expanded" "$AIH_TMP/runtime/pwsh" "$AIH_VERSION"
+          test -x "$AIH_TMP/runtime/pwsh/pwsh"
+          "$AIH_TMP/runtime/pwsh/pwsh" --version
+          rm -rf "$AIH_TMP"
       - name: Install and test natively on Linux
         run: |
           ./setup.sh \
@@ -50,6 +73,10 @@ jobs:
         run: |
           test -x "$HOME/.local/share/nexus/runtime/node/bin/node"
           test -x "$HOME/.local/share/nexus/runtime/pwsh/pwsh"
+          pinned=$(grep '"PowerShellVersion"' config/versions.json | head -n1 | sed 's/.*: *"\([^"]*\)".*/\1/')
+          reported=$("$HOME/.local/share/nexus/runtime/pwsh/pwsh" --version | sed 's/^PowerShell //')
+          test "$reported" = "$pinned"
+          echo "installed pwsh reports $reported (pinned $pinned)"
       - name: Linux launchers resolve and run doctor offline
         run: |
           export PATH="$HOME/.local/bin:$PATH"
