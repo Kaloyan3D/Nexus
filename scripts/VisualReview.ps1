@@ -36,6 +36,13 @@ $InstallRoot=[System.IO.Path]::GetFullPath($InstallRoot)
 . (Join-Path $PSScriptRoot 'Telemetry.ps1')
 . (Join-Path $PSScriptRoot 'VisualPacketIntegrity.ps1')
 
+# Nexus-owned child execution environment (TASK-0025 Class B): the visual
+# transport child (node Invoke-VisualReview.mjs) must resolve the Nexus-pinned
+# Node runtime ahead of any system Node. Process-scoped; no system Node
+# dependency, no shell profile modification. The helper's return value is
+# suppressed: this script's stdout is a JSON transport contract.
+$null = Add-AihPinnedNodeToPath -InstallRoot $InstallRoot
+
 $ScreenshotEvidence=@()
 $ReferenceEvidence=@()
 
