@@ -191,8 +191,8 @@ function Invoke-AihVerificationCommand {
     }
 }
 
-$profile = Get-AihProjectProfile -Workspace $Workspace -InstallRoot $InstallRoot
-$commands = @($profile.VerificationCommands | Where-Object { $Kind -eq 'all' -or $_.Kind -eq $Kind })
+$projectProfile = Get-AihProjectProfile -Workspace $Workspace -InstallRoot $InstallRoot
+$commands = @($projectProfile.VerificationCommands | Where-Object { $Kind -eq 'all' -or $_.Kind -eq $Kind })
 if ($commands.Count -eq 0) { throw "No deterministic verification commands were found for kind '$Kind'. Run aih-detect for details." }
 $results = [System.Collections.Generic.List[object]]::new()
 foreach ($command in $commands) {
@@ -201,7 +201,7 @@ foreach ($command in $commands) {
     if (-not [string]::IsNullOrWhiteSpace($TaskId) -and (($result.StandardOutput.Length + $result.StandardError.Length) -gt 8000)) {
         $raw = @($result.StandardOutput, $result.StandardError) -join [Environment]::NewLine
         $digestKind = if ($result.Kind -in @('test','build','typecheck','lint')) { $result.Kind } else { 'other' }
-        $digest = New-AihOutputDigest -Workspace $profile.Workspace -TaskId $TaskId -Kind $digestKind -RawOutput $raw -ExitCode $(if ($result.Status -eq 'PASS') { 0 } else { 1 })
+        $digest = New-AihOutputDigest -Workspace $projectProfile.Workspace -TaskId $TaskId -Kind $digestKind -RawOutput $raw -ExitCode $(if ($result.Status -eq 'PASS') { 0 } else { 1 })
         $result.StandardOutput = $digest.summary
         $result.StandardError = ''
         $result | Add-Member -NotePropertyName RawOutputPath -NotePropertyValue $digest.rawPath
@@ -215,12 +215,12 @@ foreach ($command in $commands) {
     }
     if ($result.Status -eq 'FAIL' -and -not $ContinueOnFailure) { break }
 }
-$architecture = Invoke-AihArchitectureRules $profile.Workspace
+$architecture = Invoke-AihArchitectureRules $projectProfile.Workspace
 if ($Kind -in @('all','verify')) {
     $archStarted = [DateTime]::UtcNow
-    $results.Add([pscustomobject]@{ Name='architecture:rules'; Kind='verify'; Status=$architecture.status; ExitCode=if($architecture.status -eq 'PASS'){0}else{1}; DurationSeconds=0; StartedAtUtc=$archStarted.ToString('o'); FinishedAtUtc=[DateTime]::UtcNow.ToString('o'); Command='aih-rules'; WorkingDirectory=$profile.Workspace; StandardOutput=($architecture | ConvertTo-Json -Depth 8 -Compress); StandardError=''; Error=$null })
+    $results.Add([pscustomobject]@{ Name='architecture:rules'; Kind='verify'; Status=$architecture.status; ExitCode=if($architecture.status -eq 'PASS'){0}else{1}; DurationSeconds=0; StartedAtUtc=$archStarted.ToString('o'); FinishedAtUtc=[DateTime]::UtcNow.ToString('o'); Command='aih-rules'; WorkingDirectory=$projectProfile.Workspace; StandardOutput=($architecture | ConvertTo-Json -Depth 8 -Compress); StandardError=''; Error=$null })
 }
 $failed = @($results | Where-Object Status -eq 'FAIL').Count
-$summary = [pscustomobject]@{ Workspace = $profile.Workspace; Kind = $Kind; Passed = @($results | Where-Object Status -eq 'PASS').Count; Failed = $failed; Skipped = @($results | Where-Object Status -eq 'SKIP').Count; Results = @($results) }
+$summary = [pscustomobject]@{ Workspace = $projectProfile.Workspace; Kind = $Kind; Passed = @($results | Where-Object Status -eq 'PASS').Count; Failed = $failed; Skipped = @($results | Where-Object Status -eq 'SKIP').Count; Results = @($results) }
 if ($Json) { $summary | ConvertTo-Json -Depth 8 }
 if ($failed) { exit 1 }

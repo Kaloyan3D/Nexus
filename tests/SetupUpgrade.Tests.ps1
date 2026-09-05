@@ -13,7 +13,7 @@ $InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 # string heuristics: the same Test-AihIsWindows/Get-AihLauncherExtension the
 # installer plane uses decides which launcher contract this suite asserts.
 . (Join-Path $InstallRoot 'scripts/Platform.ps1')
-$isWindows = Test-AihIsWindows
+$runningOnWindows = Test-AihIsWindows
 $launcherExtension = Get-AihLauncherExtension
 
 function Assert-PosixLauncherContract {
@@ -75,7 +75,7 @@ if (-not (Test-Path -LiteralPath $mainLauncherPath -PathType Leaf)) {
 }
 $mainLauncher = Get-Content -Raw -Encoding UTF8 -LiteralPath $mainLauncherPath
 
-if ($isWindows) {
+if ($runningOnWindows) {
     # Windows .cmd contracts (batch-specific; asserted only on Windows).
     foreach ($launcher in Get-ChildItem -LiteralPath $launcherRoot -Filter '*.cmd' -File) {
         $launcherText = Get-Content -Raw -Encoding UTF8 -LiteralPath $launcher.FullName
@@ -195,7 +195,7 @@ foreach ($contract in @(
     }
 }
 
-$platformNote = if ($isWindows) { 'aih.cmd %~dp0/AIH_ROOT contracts' } else { 'extensionless POSIX aih contracts (native, executable)' }
+$platformNote = if ($runningOnWindows) { 'aih.cmd %~dp0/AIH_ROOT contracts' } else { 'extensionless POSIX aih contracts (native, executable)' }
 Write-Host "PASS: platform launcher contract asserted: $platformNote"
 Write-Host 'PASS: repo-local setup/update/launchers are portable and checkout-relative'
 Write-Host 'PASS: fresh install creates settings before Nexus UI patchers run'

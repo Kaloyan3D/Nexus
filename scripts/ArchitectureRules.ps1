@@ -29,8 +29,8 @@ function Invoke-AihArchitectureRules {
                 # DEEPSEEK_API_KEY values — $env:NAME / $var / braced
                 # interpolation and <YOUR_KEY> / <REPLACE_...> tokens. Every
                 # other value (and sk-* material anywhere) is a potential secret.
-                $matches=Select-String -LiteralPath $path -Pattern '(?i)(sk-[A-Za-z0-9_-]{16,}|DEEPSEEK_API_KEY\s*[:=]\s*["''](?!(?:\$env:[A-Za-z_][A-Za-z0-9_]*|\$[A-Za-z_][A-Za-z0-9_]*|\$\{[^}"'']+\}|<YOUR_[A-Z0-9_]+>|<REPLACE_[A-Z0-9_]+>))[^"'']+)' -ErrorAction SilentlyContinue
-                foreach($match in $matches){$findings.Add([pscustomobject]@{ruleId='SEC001';severity='blocker';file=$file;line=$match.LineNumber;message='Potential secret material must not be persisted in source or tool records.'})}
+                $secretMatches=Select-String -LiteralPath $path -Pattern '(?i)(sk-[A-Za-z0-9_-]{16,}|DEEPSEEK_API_KEY\s*[:=]\s*["''](?!(?:\$env:[A-Za-z_][A-Za-z0-9_]*|\$[A-Za-z_][A-Za-z0-9_]*|\$\{[^}"'']+\}|<YOUR_[A-Z0-9_]+>|<REPLACE_[A-Z0-9_]+>))[^"'']+)' -ErrorAction SilentlyContinue
+                foreach($match in $secretMatches){$findings.Add([pscustomobject]@{ruleId='SEC001';severity='blocker';file=$file;line=$match.LineNumber;message='Potential secret material must not be persisted in source or tool records.'})}
             }
         }
     try{

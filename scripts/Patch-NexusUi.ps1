@@ -122,7 +122,7 @@ Copy-Item -LiteralPath $controllerSource -Destination $controllerTarget -Recurse
 if (-not (Test-Path -LiteralPath (Join-Path $controllerTarget 'package.json'))) {
     throw "Failed to install @nexus/controller into $profileModules"
 }
-foreach ($controllerFile in @('lib\index.js', 'lib\client.js', 'lib\status.cjs')) {
+foreach ($controllerFile in @('lib/index.js', 'lib/client.js', 'lib/status.cjs')) {
     if (-not (Test-Path -LiteralPath (Join-Path $controllerTarget $controllerFile))) {
         throw "Failed to install @nexus/controller $controllerFile into $profileModules"
     }
@@ -194,7 +194,7 @@ Write-AihUtf8NoBom -Path $manifestPath -Content ($manifest | ConvertTo-Json -Dep
 $distAssets = Join-Path $distDir 'assets'
 New-Item -ItemType Directory -Force -Path $distAssets | Out-Null
 foreach ($assetName in @('nexus-logo.png', 'nexus-mark.png')) {
-    $assetSource = Join-Path $nexusSource ("assets\" + $assetName)
+    $assetSource = Join-Path $nexusSource ('assets/' + $assetName)
     if (-not (Test-Path -LiteralPath $assetSource)) { throw "Nexus brand asset missing at $assetSource" }
     Copy-Item -LiteralPath $assetSource -Destination (Join-Path $distAssets $assetName) -Force
 }

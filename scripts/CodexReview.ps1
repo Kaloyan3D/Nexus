@@ -393,13 +393,13 @@ function Get-AihReviewResponseShape {
     # incomplete details, usage and the output/content item types. The old
     # generic 'no output text' failure destroyed exactly this information.
     param([object]$Response)
-    $status = $null; $error = $null; $incomplete = $null; $usage = $null
+    $status = $null; $errorPayload = $null; $incomplete = $null; $usage = $null
     $outputTypes = [Collections.Generic.List[string]]::new()
     $contentTypes = [Collections.Generic.List[string]]::new()
     if ($null -ne $Response) {
         $rawStatus = Get-AihCodexPolicyValue $Response 'status' $null
         if ($null -ne $rawStatus) { $status = [string]$rawStatus }
-        $error = Get-AihCodexPolicyValue $Response 'error' $null
+        $errorPayload = Get-AihCodexPolicyValue $Response 'error' $null
         $incomplete = Get-AihCodexPolicyValue $Response 'incomplete_details' $null
         $usage = Get-AihCodexPolicyValue $Response 'usage' $null
         $output = Get-AihCodexPolicyValue $Response 'output' $null
@@ -421,7 +421,7 @@ function Get-AihReviewResponseShape {
     }
     [pscustomobject]@{
         status            = $status
-        error             = $error
+        error             = $errorPayload
         incompleteDetails = $incomplete
         usage             = $usage
         outputTypes       = @($outputTypes | Select-Object -Unique)
@@ -532,12 +532,12 @@ function Write-AihReviewTransportDiagnostic {
                 }
                 if ($usageSafe.Count -eq 0) { $usageSafe = $null }
             }
-            $error = Get-AihCodexPolicyValue $Shape 'error' $null
-            if ($null -ne $error) {
+            $errorPayload = Get-AihCodexPolicyValue $Shape 'error' $null
+            if ($null -ne $errorPayload) {
                 $providerError = [ordered]@{
-                    message = (ConvertTo-AihSafeDiagnosticText ([string](Get-AihCodexPolicyValue $error 'message' '')))
-                    type    = [string](Get-AihCodexPolicyValue $error 'type' '')
-                    code    = [string](Get-AihCodexPolicyValue $error 'code' '')
+                    message = (ConvertTo-AihSafeDiagnosticText ([string](Get-AihCodexPolicyValue $errorPayload 'message' '')))
+                    type    = [string](Get-AihCodexPolicyValue $errorPayload 'type' '')
+                    code    = [string](Get-AihCodexPolicyValue $errorPayload 'code' '')
                 }
             }
         }

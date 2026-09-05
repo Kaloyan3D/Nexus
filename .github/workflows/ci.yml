@@ -16,6 +16,16 @@ jobs:
       - name: Install and test repo-local Nexus checkout
         shell: pwsh
         run: ./setup.ps1 -SkipPathUpdate -SkipDeepSeekLogin -SkipOpenAiLogin
+      - name: PowerShell 7 lane (test-only host override)
+        shell: pwsh
+        run: |
+          # TASK-0024: the deterministic suites must behave identically under
+          # PowerShell 7. Windows production keeps powershell.exe; this lane
+          # uses the test-only -PowerShellExecutable override and audit mode
+          # so one run reports every failing suite.
+          $pwsh7 = Join-Path $env:ProgramFiles 'PowerShell/7/pwsh.exe'
+          if (-not (Test-Path $pwsh7)) { $pwsh7 = (Get-Command pwsh).Source }
+          ./scripts/Test-Harness.ps1 -PowerShellExecutable $pwsh7 -ContinueOnFailure
 
   native-linux:
     runs-on: ubuntu-latest
@@ -86,10 +96,14 @@ jobs:
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           "$HOME/.local/bin/aih-doctor" -Offline
-      - name: INSTALLED-tree harness (aih-test from ~/.local/bin, all suites)
+      - name: INSTALLED-tree harness (aih-test from ~/.local/bin, audit mode: ALL suites)
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           # Exercises the exact installed-tree path that failed on CachyOS:
           # every suite runs from ~/.local/share/nexus/tests against the
           # installed Linux layout (extensionless launchers, POSIX paths).
-          "$HOME/.local/bin/aih-test"
+          # TASK-0024: -ContinueOnFailure is the portability AUDIT mode - it
+          # runs ALL suites (no fail-fast hiding suite 32 behind suite 2),
+          # records every failing suite, and still exits non-zero if ANY
+          # suite failed. Default aih-test behavior stays fail-fast.
+          "$HOME/.local/bin/aih-test" -ContinueOnFailure

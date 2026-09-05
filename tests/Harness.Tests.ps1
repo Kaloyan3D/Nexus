@@ -177,19 +177,19 @@ try{
 # unlimited-budget semantics, context-quality guard and manifest provenance.
 $ctxFixture=New-Fixture 'ctxq'
 try{
- $ctxDirs=@('scripts\intelligence','tests','data\routing','data\fixtures','third-party-generated','blocked-artifacts','artifacts','src','docs\architecture','gen')
+ $ctxDirs=@('scripts/intelligence','tests','data/routing','data/fixtures','third-party-generated','blocked-artifacts','artifacts','src','docs/architecture','gen')
  foreach($d in $ctxDirs){New-Item -ItemType Directory -Force -Path (Join-Path $ctxFixture $d)|Out-Null}
  $ctxWrite={param($rel,$content)[IO.File]::WriteAllText((Join-Path $ctxFixture $rel),$content,[Text.UTF8Encoding]::new($false))}
- & $ctxWrite 'scripts\intelligence\Intelligence.CodeStore.ps1' "function New-AihCodeIntelligenceStore {`n    # CodeIntelligenceStore implements the Phase 3.2 deterministic code intelligence snapshot store.`n}"
- & $ctxWrite 'tests\Intelligence.CodeFoundation.Tests.ps1' "Describe 'CodeIntelligenceStore' {`n    It 'activates Phase 3.2 code intelligence snapshots' { }`n}"
- & $ctxWrite 'docs\architecture\code-intelligence.md' '# Deterministic Code Intelligence (Phase 3.2)'
+ & $ctxWrite 'scripts/intelligence/Intelligence.CodeStore.ps1' "function New-AihCodeIntelligenceStore {`n    # CodeIntelligenceStore implements the Phase 3.2 deterministic code intelligence snapshot store.`n}"
+ & $ctxWrite 'tests/Intelligence.CodeFoundation.Tests.ps1' "Describe 'CodeIntelligenceStore' {`n    It 'activates Phase 3.2 code intelligence snapshots' { }`n}"
+ & $ctxWrite 'docs/architecture/code-intelligence.md' '# Deterministic Code Intelligence (Phase 3.2)'
  & $ctxWrite 'config.json' '{"codeIntelligence":{"snapshotStore":"content-addressed-v1"}}'
- & $ctxWrite 'data\fixtures\expected.json' '{"expected":["CodeIntelligenceStore"]}'
- & $ctxWrite 'src\CodeIntelligenceStore.ps1' '# CodeIntelligenceStore identifier lives here once for the repetition test.'
- & $ctxWrite 'third-party-generated\stuff.json' '{"generated":true}'
- & $ctxWrite 'blocked-artifacts\leak.ps1' 'Write-Output leak'
+ & $ctxWrite 'data/fixtures/expected.json' '{"expected":["CodeIntelligenceStore"]}'
+ & $ctxWrite 'src/CodeIntelligenceStore.ps1' '# CodeIntelligenceStore identifier lives here once for the repetition test.'
+ & $ctxWrite 'third-party-generated/stuff.json' '{"generated":true}'
+ & $ctxWrite 'blocked-artifacts/leak.ps1' 'Write-Output leak'
  & $ctxWrite '.env' 'SECRET=placeholder'
- & $ctxWrite 'gen\bundle.min.js' 'function codeIntelligenceStoreMinified(){}'
+ & $ctxWrite 'gen/bundle.min.js' 'function codeIntelligenceStoreMinified(){}'
  $reviewPrompt='{"prompt": "Review the complete Phase 3.2 Deterministic Code Intelligence implementation as the quality gate before Phase 3.3."}'
  & $ctxWrite 'data\routing\decisions.jsonl' ((1..300|ForEach-Object{$reviewPrompt}) -join [Environment]::NewLine)
  & $ctxWrite 'artifacts\review.log' ((1..1000|ForEach-Object{"review entry $_"}) -join [Environment]::NewLine)
@@ -287,7 +287,7 @@ try{
 # ceilings) stay exactly as TASK-0007/TASK-0009 left them.
 $concFixture=New-Fixture 'conc'
 try{
- $concDirs=@('src','tests','docs\architecture','config','ui','notes')
+ $concDirs=@('src','tests','docs/architecture','config','ui','notes')
  foreach($d in $concDirs){New-Item -ItemType Directory -Force -Path (Join-Path $concFixture $d)|Out-Null}
  $concWrite={param($rel,$content)[IO.File]::WriteAllText((Join-Path $concFixture $rel),$content,[Text.UTF8Encoding]::new($false))}
  # domain-specific source, tests and docs
@@ -360,8 +360,8 @@ $strongFixture=New-Fixture 'strong'
 try{
  New-Item -ItemType Directory -Force -Path (Join-Path $strongFixture 'src'),(Join-Path $strongFixture 'notes')|Out-Null
  $strongWrite={param($rel,$content)[IO.File]::WriteAllText((Join-Path $strongFixture $rel),$content,[Text.UTF8Encoding]::new($false))}
- for($i=1;$i -le 30;$i++){ & $strongWrite ('src\module{0:d2}.ts' -f $i) ("flux capacitor calibration module {0} aligns the phase matrix deterministically" -f $i) }
- for($i=1;$i -le 5;$i++){ & $strongWrite ('notes\generic{0:d2}.md' -f $i) "review note $i about the complete implementation quality gate" }
+ for($i=1;$i -le 30;$i++){ & $strongWrite ('src/module{0:d2}.ts' -f $i) ("flux capacitor calibration module {0} aligns the phase matrix deterministically" -f $i) }
+ for($i=1;$i -le 5;$i++){ & $strongWrite ('notes/generic{0:d2}.md' -f $i) "review note $i about the complete implementation quality gate" }
  $strongTask=New-AihTask $strongFixture 'strong task' @('evidence')
  $strongBundle=New-AihContextBundle $strongFixture $strongTask.taskId 'Review the complete flux capacitor calibration implementation and tests as the quality gate before release.' @() 0 0
  $strongPaths=@($strongBundle.fileSlices|ForEach-Object{$_.path})
@@ -374,9 +374,9 @@ $docsFixture=New-Fixture 'docsq'
 try{
  New-Item -ItemType Directory -Force -Path (Join-Path $docsFixture 'docs/architecture'),(Join-Path $docsFixture 'src'),(Join-Path $docsFixture 'tests')|Out-Null
  $docsWrite={param($rel,$content)[IO.File]::WriteAllText((Join-Path $docsFixture $rel),$content,[Text.UTF8Encoding]::new($false))}
- & $docsWrite 'docs\architecture\orbital-telemetry.md' ('# Orbital Telemetry architecture' + "`n`n" + 'The orbital telemetry documentation covers the antenna calibration, downlink scheduling and the orbital telemetry data model.')
- & $docsWrite 'src\collector.ts' "export const orbitalTelemetryCollector = () => 'orbital telemetry samples'"
- & $docsWrite 'tests\placeholder.test.ts' "it('review the complete implementation quality gate', () => {})"
+ & $docsWrite 'docs/architecture/orbital-telemetry.md' ('# Orbital Telemetry architecture' + "`n`n" + 'The orbital telemetry documentation covers the antenna calibration, downlink scheduling and the orbital telemetry data model.')
+ & $docsWrite 'src/collector.ts' "export const orbitalTelemetryCollector = () => 'orbital telemetry samples'"
+ & $docsWrite 'tests/placeholder.test.ts' "it('review the complete implementation quality gate', () => {})"
  $docsTask=New-AihTask $docsFixture 'docs query task' @('evidence')
  $docsBundle=New-AihContextBundle $docsFixture $docsTask.taskId 'Review the orbital telemetry architecture documentation.' @() 0 0
  $docsPaths=@($docsBundle.fileSlices|ForEach-Object{$_.path})
@@ -654,27 +654,30 @@ try {
     & $secWrite 'src\real-key.ps1'   ((& $keyLine 'abcdef1234567890abcdef1234567890' '=') + [Environment]::NewLine)
     & $secWrite 'src\real-sk.ps1'    ((& $keyLine ('sk-' + 'abcdefghijklmnop1234') '=') + [Environment]::NewLine)
     & $secWrite 'src\sk-token.txt'   (('export TOKEN=' + ('sk-' + '0123456789abcdef0123456789')) + [Environment]::NewLine)
-    & $secWrite 'src\env-ph.ps1'     ((& $keyLine ('$env:AIH_DEEPSEEK_API_KEY') '=') + [Environment]::NewLine)
+    & $secWrite 'src/env-ph.ps1'     ((& $keyLine ('$env:AIH_DEEPSEEK_API_KEY') '=') + [Environment]::NewLine)
     & $secWrite 'src\braced-ph.ps1'  ((& $keyLine ('${DEEPSEEK_API_KEY}') '=') + [Environment]::NewLine)
-    & $secWrite 'src\your-ph.ps1'    ((& $keyLine '<YOUR_KEY>' '=') + [Environment]::NewLine)
+    & $secWrite 'src/your-ph.ps1'    ((& $keyLine '<YOUR_KEY>' '=') + [Environment]::NewLine)
     & $secWrite 'src\replace-ph.ps1' ((& $keyLine '<REPLACE_WITH_YOUR_KEY>' '=') + [Environment]::NewLine)
     & $secWrite 'src\suspicious.ps1' ((& $keyLine 'not-a-placeholder' '=') + [Environment]::NewLine)
-    & $secWrite 'src\angle-susp.ps1' ((& $keyLine '<secret>' '=') + [Environment]::NewLine)
-    & $secWrite 'data\creds.yaml'    ((& $keyLine ('sk-' + 'abcdefghijklmnop1234') (':' + ' ')) + [Environment]::NewLine)
+    & $secWrite 'src/angle-susp.ps1' ((& $keyLine '<secret>' '=') + [Environment]::NewLine)
+    & $secWrite 'data/creds.yaml'    ((& $keyLine ('sk-' + 'abcdefghijklmnop1234') (':' + ' ')) + [Environment]::NewLine)
     & $secWrite 'tmp\scratch.txt'    ((& $keyLine ('sk-' + 'abcdefghijklmnop1234') (':' + ' ')) + [Environment]::NewLine)
     $secResult = Invoke-AihArchitectureRules $secWs
     $secFindings = @($secResult.findings | Where-Object { $_.ruleId -eq 'SEC001' })
     Assert-Aih ($secResult.status -eq 'FAIL') 'SEC001 fixture workspace reports FAIL'
-    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\real-key.ps1' }).Count -eq 1) 'SEC001 blocks a real DeepSeek key assignment'
-    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\real-sk.ps1' }).Count -eq 1) 'SEC001 blocks sk-* material in a key assignment'
-    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\sk-token.txt' }).Count -eq 1) 'SEC001 blocks standalone sk-* tokens'
-    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\env-ph.ps1' }).Count -eq 0) 'SEC001 allows $env:NAME placeholders'
-    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\braced-ph.ps1' }).Count -eq 0) 'SEC001 allows braced interpolation placeholders'
-    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\your-ph.ps1' }).Count -eq 0) 'SEC001 allows <YOUR_KEY> placeholders'
-    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\replace-ph.ps1' }).Count -eq 0) 'SEC001 allows <REPLACE_...> placeholders'
-    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\suspicious.ps1' }).Count -eq 1) 'SEC001 blocks a suspicious non-placeholder value'
-    Assert-Aih (@($secFindings | Where-Object { $_.file -eq 'src\angle-susp.ps1' }).Count -eq 1) 'SEC001 blocks unrecognized angle-bracket values'
-    Assert-Aih (@($secFindings | Where-Object { $_.file -like 'data\*' -or $_.file -like 'tmp\*' }).Count -eq 0) 'SEC001 data/tmp exclusion still suppresses runtime scratch state'
+    # Finding file values carry platform separators (Get-AihWorkspaceFiles);
+    # normalize before comparing so the assertions hold on Windows AND POSIX.
+    $secNorm = { param($f) ($f -replace '\\', '/') }
+    Assert-Aih (@($secFindings | Where-Object { (& $secNorm $_.file) -eq 'src/real-key.ps1' }).Count -eq 1) 'SEC001 blocks a real DeepSeek key assignment'
+    Assert-Aih (@($secFindings | Where-Object { (& $secNorm $_.file) -eq 'src/real-sk.ps1' }).Count -eq 1) 'SEC001 blocks sk-* material in a key assignment'
+    Assert-Aih (@($secFindings | Where-Object { (& $secNorm $_.file) -eq 'src/sk-token.txt' }).Count -eq 1) 'SEC001 blocks standalone sk-* tokens'
+    Assert-Aih (@($secFindings | Where-Object { (& $secNorm $_.file) -eq 'src/env-ph.ps1' }).Count -eq 0) 'SEC001 allows $env:NAME placeholders'
+    Assert-Aih (@($secFindings | Where-Object { (& $secNorm $_.file) -eq 'src/braced-ph.ps1' }).Count -eq 0) 'SEC001 allows braced interpolation placeholders'
+    Assert-Aih (@($secFindings | Where-Object { (& $secNorm $_.file) -eq 'src/your-ph.ps1' }).Count -eq 0) 'SEC001 allows <YOUR_KEY> placeholders'
+    Assert-Aih (@($secFindings | Where-Object { (& $secNorm $_.file) -eq 'src/replace-ph.ps1' }).Count -eq 0) 'SEC001 allows <REPLACE_...> placeholders'
+    Assert-Aih (@($secFindings | Where-Object { (& $secNorm $_.file) -eq 'src/suspicious.ps1' }).Count -eq 1) 'SEC001 blocks a suspicious non-placeholder value'
+    Assert-Aih (@($secFindings | Where-Object { (& $secNorm $_.file) -eq 'src/angle-susp.ps1' }).Count -eq 1) 'SEC001 blocks unrecognized angle-bracket values'
+    Assert-Aih (@($secFindings | Where-Object { (& $secNorm $_.file) -like 'data/*' -or (& $secNorm $_.file) -like 'tmp/*' }).Count -eq 0) 'SEC001 data/tmp exclusion still suppresses runtime scratch state'
     $arSource = [IO.File]::ReadAllText((Join-Path $InstallRoot 'scripts/ArchitectureRules.ps1'))
     Assert-Aih (-not $arSource.Contains('{continue}')) 'no loop-level continue exempts data/tmp from later rules'
     Assert-Aih ($arSource.Contains('^(data|tmp)[\\/]')) 'SEC001-scoped runtime/scratch exclusion present'

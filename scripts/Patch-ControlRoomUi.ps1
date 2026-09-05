@@ -38,7 +38,7 @@ if (Test-Path -LiteralPath $target) {
     Remove-Item -LiteralPath $target -Recurse -Force
 }
 Copy-Item -LiteralPath $source -Destination $target -Recurse -Force
-foreach ($required in @('package.json', 'lib\client.js', 'lib\index.js')) {
+foreach ($required in @('package.json', 'lib/client.js', 'lib/index.js')) {
     if (-not (Test-Path -LiteralPath (Join-Path $target $required))) {
         throw "Failed to install @nexus/mode-selector file: $required"
     }
@@ -54,9 +54,9 @@ if (-not (Test-Path -LiteralPath $cordisPatch)) {
 $text = Get-Content -Raw -Encoding UTF8 -LiteralPath $cordisPatch
 if (-not $text.Contains("'@nexus/mode-selector'")) {
     $pattern = "(?m)^(    - id: nexus-controller\r?\n      name: '@nexus/controller'\r?\n)"
-    $matches = [regex]::Matches($text, $pattern).Count
-    if ($matches -ne 1) {
-        throw "cordis.patch.yml structure changed for Nexus mode-selector migration (matches: $matches). Refusing an unsafe edit."
+    $matchCount = [regex]::Matches($text, $pattern).Count
+    if ($matchCount -ne 1) {
+        throw "cordis.patch.yml structure changed for Nexus mode-selector migration (matches: $matchCount). Refusing an unsafe edit."
     }
     $newline = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
     $row = '    - id: nexus-mode-selector' + $newline + "      name: '@nexus/mode-selector'" + $newline

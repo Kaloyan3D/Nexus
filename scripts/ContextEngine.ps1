@@ -702,8 +702,8 @@ function Get-AihFileOutline {
 function Find-AihReferences {
     param([string]$Workspace, [Parameter(Mandatory=$true)][string]$Symbol, [int]$MaxResults=100)
     $workspacePath=[IO.Path]::GetFullPath($Workspace)
-    $matches = & rg --line-number --column --glob '!node_modules/**' --glob '!app/**' --glob '!runtime/node/**' --glob '!data/**' --glob '!logs/**' --fixed-strings -- $Symbol $workspacePath 2>$null
-    @($matches | Select-Object -First $MaxResults | ForEach-Object { [string]$_ })
+    $referenceHits = & rg --line-number --column --glob '!node_modules/**' --glob '!app/**' --glob '!runtime/node/**' --glob '!data/**' --glob '!logs/**' --fixed-strings -- $Symbol $workspacePath 2>$null
+    @($referenceHits | Select-Object -First $MaxResults | ForEach-Object { [string]$_ })
 }
 
 function Select-AihBundleSlices {

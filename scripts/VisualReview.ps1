@@ -282,8 +282,8 @@ function Test-AihVisualReviewResult {
     # omissions or invented ids).
     if(@($RequiredPreviousIds).Count -gt 0){
         foreach($requiredId in @($RequiredPreviousIds)){
-            $matches=@($previousReview | Where-Object { [string]$_.id -eq [string]$requiredId })
-            if(@($matches).Count -eq 0){ $reasons+="previousReview is missing a classification for previous finding id '$requiredId'" }
+            $classifiedMatches=@($previousReview | Where-Object { [string]$_.id -eq [string]$requiredId })
+            if(@($classifiedMatches).Count -eq 0){ $reasons+="previousReview is missing a classification for previous finding id '$requiredId'" }
         }
         foreach($entry in $previousReview){
             if(@($RequiredPreviousIds) -notcontains [string]$entry.id){ $reasons+="previousReview entry '$($entry.id)' does not match any previous finding id" }
@@ -319,23 +319,23 @@ try{
     $policy=Get-AihRoutingPolicy $layout.RoutingPolicy
     $resolvedPreset=Resolve-AihPreset $policy $null
     $profiles=Get-AihEngineeringProfiles (Join-Path (Split-Path -Parent $layout.RoutingPolicy) 'engineering-profiles.json') $layout.CustomEngineeringProfile
-    $profile=Resolve-AihProfile $policy $resolvedPreset $profiles $layout.Settings
+    $resolvedProfile=Resolve-AihProfile $policy $resolvedPreset $profiles $layout.Settings
     $registry=Get-AihModelRegistry $layout.ModelRegistry
-    if($null-eq$profile.Config.roles.PSObject.Properties['visualReviewer']){
-        Write-AihVisualFailure -ErrorKind 'visual-review-role-unbound' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message "The active engineering profile '$($profile.Id)' does not bind the optional visualReviewer role; visual review fails closed."
+    if($null-eq$resolvedProfile.Config.roles.PSObject.Properties['visualReviewer']){
+        Write-AihVisualFailure -ErrorKind 'visual-review-role-unbound' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message "The active engineering profile '$($resolvedProfile.Id)' does not bind the optional visualReviewer role; visual review fails closed."
     }
     $entry=$null
-    foreach($candidateEntry in @($registry.models)){if([string]$candidateEntry.id -eq [string]$profile.Config.roles.visualReviewer.model){$entry=$candidateEntry;break}}
+    foreach($candidateEntry in @($registry.models)){if([string]$candidateEntry.id -eq [string]$resolvedProfile.Config.roles.visualReviewer.model){$entry=$candidateEntry;break}}
     if($null-eq$entry){
-        Write-AihVisualFailure -ErrorKind 'visual-review-target-unresolved' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message "Model registry has no entry for visualReviewer model '$($profile.Config.roles.visualReviewer.model)' (profile $($profile.Id))."
+        Write-AihVisualFailure -ErrorKind 'visual-review-target-unresolved' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message "Model registry has no entry for visualReviewer model '$($resolvedProfile.Config.roles.visualReviewer.model)' (profile $($resolvedProfile.Id))."
     }
     $supportsVision=($null-ne$entry.PSObject.Properties['supportsVision'])-and([bool]$entry.supportsVision)
     if(-not$supportsVision){
-        Write-AihVisualFailure -ErrorKind 'visual-review-not-vision-capable' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message "Model '$($profile.Config.roles.visualReviewer.model)' does not declare supportsVision=true; visual review fails closed."
+        Write-AihVisualFailure -ErrorKind 'visual-review-not-vision-capable' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message "Model '$($resolvedProfile.Config.roles.visualReviewer.model)' does not declare supportsVision=true; visual review fails closed."
     }
-    $target=Resolve-AihModelTarget $registry $profile 'visualReviewer'
+    $target=Resolve-AihModelTarget $registry $resolvedProfile 'visualReviewer'
     if($null-eq$target){
-        Write-AihVisualFailure -ErrorKind 'visual-review-target-unresolved' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message "The visualReviewer role could not be resolved through the active profile '$($profile.Id)'."
+        Write-AihVisualFailure -ErrorKind 'visual-review-target-unresolved' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message "The visualReviewer role could not be resolved through the active profile '$($resolvedProfile.Id)'."
     }
     $providerConfig=Resolve-AihVisualProviderConfig -SettingsPath $layout.Settings -ProviderId $target.Provider
     if($null-eq$providerConfig){
@@ -432,7 +432,7 @@ try{
     $packet=[ordered]@{
         schemaVersion=1; kind='visual-review-packet'; taskId=$TaskId; taskInstanceId=$effectiveInstanceId
         workspace=$workspacePath; capability='visual-review'; iteration=$iteration.Iteration
-        role='visualReviewer'; profile=$profile.Id; profileDisplayName=$profile.DisplayName
+        role='visualReviewer'; profile=$resolvedProfile.Id; profileDisplayName=$resolvedProfile.DisplayName
         model=[ordered]@{id=$target.ModelId;model=$target.Model;displayName=$target.ModelDisplayName;provider=$target.Provider;reasoning=$target.Reasoning;supportsVision=$supportsVision;readOnlyDefault=($null-ne$entry.PSObject.Properties['readOnlyDefault']-and[bool]$entry.readOnlyDefault)}
         platform=$Platform; question=$Question; invariants=@($Invariants)
         trigger=[string]$Trigger; visualIteration=$VisualIteration
@@ -559,7 +559,7 @@ try{
             schemaVersion=1; kind='visual-review-result'; taskId=$TaskId; taskInstanceId=$effectiveInstanceId
             iteration=$iteration.Iteration; capability='visual-review'; role='visualReviewer'
             trigger=[string]$Trigger; visualIteration=$VisualIteration
-            profile=$profile.Id; model=[ordered]@{id=$target.ModelId;model=$target.Model;displayName=$target.ModelDisplayName;vendor=$target.Vendor;provider=$target.Provider;reasoning=$target.Reasoning}
+            profile=$resolvedProfile.Id; model=[ordered]@{id=$target.ModelId;model=$target.Model;displayName=$target.ModelDisplayName;vendor=$target.Vendor;provider=$target.Provider;reasoning=$target.Reasoning}
             transport=[ordered]@{provider=$target.Provider;mocked=[bool](Get-AihPropertyValue $outcome 'mocked' $false);attemptCount=$attemptCount;attempts=$attempts;finishReason=(Get-AihPropertyValue $outcome 'finishReason' $null);usage=$usage}
             packetPath=(Join-Path $iteration.Path 'packet.json')
             readOnly=$true; freshContext=$true; completionAuthority=$false; humanAcceptance=$false
@@ -589,7 +589,7 @@ try{
             iteration=$iteration.Iteration; runDirectory=$iteration.Path
             role='visualReviewer'; capability='visual-review'
             trigger=[string]$Trigger; visualIteration=$VisualIteration
-            profile=$profile.Id; profileDisplayName=$profile.DisplayName
+            profile=$resolvedProfile.Id; profileDisplayName=$resolvedProfile.DisplayName
             provider=$target.Provider; model=$target.Model; modelId=$target.ModelId; modelDisplayName=$target.ModelDisplayName; reasoning=$target.Reasoning
             supportsVision=$supportsVision; readOnlyDefault=($null-ne$entry.PSObject.Properties['readOnlyDefault']-and[bool]$entry.readOnlyDefault)
             platform=$Platform; attemptCount=$attemptCount; retried=($attemptCount-gt 1)

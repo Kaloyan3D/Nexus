@@ -78,16 +78,16 @@ function Resolve-AihStepRoleTarget {
     $profiles = Get-AihEngineeringProfiles $layout.EngineeringProfiles $layout.CustomEngineeringProfile
     $registry = Get-AihModelRegistry $layout.ModelRegistry
     $resolved = Resolve-AihPreset $policy $Preset
-    $profile = Resolve-AihProfile $policy $resolved $profiles $layout.Settings
+    $resolvedProfile = Resolve-AihProfile $policy $resolved $profiles $layout.Settings
     $targets = [ordered]@{}
     foreach ($class in @('engineer_normal','engineer_deep','reviewer')) {
         $role = Get-AihRoleForExecutionClass $policy $class
         if ([string]::IsNullOrWhiteSpace($role)) { continue }
-        $target = Resolve-AihModelTarget $registry $profile $role
+        $target = Resolve-AihModelTarget $registry $resolvedProfile $role
         $targets[$class] = [ordered]@{
             role = $role
-            profileId = $profile.Id
-            profileDisplayName = $profile.DisplayName
+            profileId = $resolvedProfile.Id
+            profileDisplayName = $resolvedProfile.DisplayName
             provider = $target.Provider
             model = $target.Model
             modelDisplayName = $target.ModelDisplayName

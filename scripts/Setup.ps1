@@ -17,7 +17,7 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
 $InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 . (Join-Path $PSScriptRoot 'Common.ps1')
 $layout = Get-AihLayout $InstallRoot
-$sourceVersions = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'config\versions.json') | ConvertFrom-Json
+$sourceVersions = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'config/versions.json') | ConvertFrom-Json
 
 function Copy-AihSourceFile {
     param(
@@ -78,8 +78,8 @@ if (Test-Path -LiteralPath (Join-Path $sourceRoot 'skills')) {
         Copy-AihSourceFile -Source $file.FullName -Destination $target
     }
 }
-Copy-AihSourceFile -Source (Join-Path $sourceRoot 'runtime\package.json') -Destination (Join-Path $layout.Runtime 'package.json')
-Copy-AihSourceFile -Source (Join-Path $sourceRoot 'runtime\package-lock.json') -Destination (Join-Path $layout.Runtime 'package-lock.json')
+Copy-AihSourceFile -Source (Join-Path $sourceRoot 'runtime/package.json') -Destination (Join-Path $layout.Runtime 'package.json')
+Copy-AihSourceFile -Source (Join-Path $sourceRoot 'runtime/package-lock.json') -Destination (Join-Path $layout.Runtime 'package-lock.json')
 
 $nodeVersion = $sourceVersions.NodeVersion
 $nodeDir = Join-Path $layout.Runtime 'node'
