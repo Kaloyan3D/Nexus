@@ -38,6 +38,34 @@ try {
         Assert-Aih (-not $threw) 'Linux host resolution finds the pinned or system pwsh (CI installs it)'
     }
 
+    # ── Platform.ps1 is independently sourceable (TASK-0025 RC1) ──
+    # A fresh process dot-sources ONLY Platform.ps1 and must still resolve
+    # the platform PowerShell host: the pinned POSIX runtime resolution
+    # depends on the foundation-layer root resolver, so Platform.ps1 must
+    # not reference anything defined only by Common.ps1.
+    $platformOnlyScript = Join-Path ([IO.Path]::GetTempPath()) ('aih-platform-only-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    [IO.File]::WriteAllText($platformOnlyScript, @'
+param([string]$InstallRoot)
+Set-StrictMode -Version Latest
+. (Join-Path $InstallRoot 'scripts/Platform.ps1')
+Get-AihPowerShellHost -InstallRoot $InstallRoot
+'@, [Text.UTF8Encoding]::new($false))
+    $platformProbeHost = if ($runningOnWindows) { 'powershell.exe' } else { Get-AihPowerShellHost -InstallRoot $InstallRoot }
+    $platformProbeOut = & $platformProbeHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $platformOnlyScript -InstallRoot $InstallRoot 2>&1 | ForEach-Object { [string]$_ }
+    $platformProbeExit = $LASTEXITCODE
+    Remove-Item -LiteralPath $platformOnlyScript -ErrorAction SilentlyContinue
+    $platformProbeDetail = [string]$platformProbeExit
+    if ($platformProbeExit -ne 0) { $platformProbeDetail = $platformProbeExit.ToString() + ': ' + (@($platformProbeOut) -join ' | ') }
+    Assert-Aih ($platformProbeExit -eq 0) ('Platform.ps1 is independently sourceable in a fresh process (exit ' + $platformProbeDetail + ')')
+    $platformResolved = (@($platformProbeOut) | Select-Object -Last 1)
+    Assert-Aih (-not [string]::IsNullOrWhiteSpace($platformResolved)) 'fresh Platform.ps1-only process resolves the platform PowerShell host'
+    if ($runningOnWindows) {
+        Assert-Aih ((Split-Path -Leaf $platformResolved) -eq 'powershell.exe') 'fresh Platform.ps1-only process keeps powershell.exe on Windows'
+    }
+    else {
+        Assert-Aih ((Split-Path -Leaf $platformResolved) -eq 'pwsh') ('fresh Platform.ps1-only process resolves the pinned pwsh on Linux (got: ' + $platformResolved + ')')
+    }
+
     # ── Node artifact selection ──
     Assert-Aih ((Get-AihNodeArchiveName -Version '24.18.1' -Target 'win-x64')-eq'node-v24.18.1-win-x64.zip') 'win-x64 Node artifact is the zip'
     Assert-Aih ((Get-AihNodeArchiveName -Version '24.18.1' -Target 'linux-x64')-eq'node-v24.18.1-linux-x64.tar.xz') 'linux-x64 Node artifact is the tar.xz'

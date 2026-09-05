@@ -51,6 +51,35 @@ try{
  Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath $nullAtomicPath)-eq'null') 'Write-AihAtomicJson emits explicit JSON null'
  $nullLinePath=Join-Path $root 'null.jsonl';Add-AihJsonLine -Path $nullLinePath -Value $null
  Assert-Aih ((Get-Content -Raw -Encoding UTF8 -LiteralPath $nullLinePath).Trim()-eq'null') 'Add-AihJsonLine emits explicit JSON null'
- Assert-Aih ($PSVersionTable.PSVersion.Major-eq5) 'serializer regression executes under Windows PowerShell 5.1'
+ # RC7 regression: the store read path (Read-AihIntStoreJson) must preserve
+# ARRAY-SHAPED properties exactly. PowerShell functions UNROLL a returned
+# collection, so a normalization helper doing a bare 'return $array' emits
+# an empty array as ZERO pipeline items (caller sees $null) and a
+# single-element array as its bare element - silently corrupting the
+# document shape on every read.
+. (Join-Path $InstallRoot 'scripts/intelligence/Intelligence.Store.ps1')
+$storeShapePath = Join-Path $root 'store-shape.json'
+$storeShapeDoc = [pscustomobject]@{
+    schemaVersion = 1
+    repositories  = @()
+    configs       = @([pscustomobject]@{ repositoryId = 'repo_shape'; updatedAt = '2026-09-05T14:55:04.8251033Z' })
+}
+Save-AihIntStoreJson -Path $storeShapePath -Document $storeShapeDoc
+$storeShapeBack = Read-AihIntStoreJson -Path $storeShapePath -Factory { [pscustomobject]@{ schemaVersion = 1 } }
+Assert-Aih ($storeShapeBack.repositories -is [object[]]) 'empty array property survives store read as an array (not $null)'
+Assert-Aih (@($storeShapeBack.repositories).Count -eq 0) 'empty array property keeps element count 0 across store read'
+Assert-Aih ($storeShapeBack.configs -is [object[]]) 'single-element array property survives store read as an array (not the bare element)'
+Assert-Aih ($storeShapeBack.configs[0].repositoryId -eq 'repo_shape') 'single-element array property keeps its row across store read'
+Assert-Aih ($storeShapeBack.configs[0].updatedAt -eq '2026-09-05T14:55:04.8251033Z' -and $storeShapeBack.configs[0].updatedAt -is [string]) 'store read keeps timestamps as canonical ISO strings'
+# Host-contract assertion: Windows production runs the serializer plane on
+# Windows PowerShell 5.1, POSIX runs it on PowerShell 7 (TASK-0025 RC2).
+# The serializer BEHAVIOR assertions above are host-independent; this final
+# assertion only pins the APPLICABLE host contract for the current lane.
+if ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)) {
+    Assert-Aih ($PSVersionTable.PSVersion.Major-eq5) 'serializer regression executes under Windows PowerShell 5.1'
+}
+else {
+    Assert-Aih ($PSVersionTable.PSVersion.Major-ge7) 'serializer regression executes under PowerShell 7 on POSIX'
+}
 }finally{if(Test-Path -LiteralPath $root){Remove-Item -LiteralPath $root -Recurse -Force}}
 Write-Host "RESULT: $passed JSON serializer contract assertions passed."

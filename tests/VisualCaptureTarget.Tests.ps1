@@ -11,18 +11,14 @@ $fixture=Join-Path ([IO.Path]::GetTempPath()) ('aih-visual-target-'+[guid]::NewG
 New-Item -ItemType Directory -Path $fixture -Force|Out-Null
 try{
     $png=Join-Path $fixture 'screen.png'
-    Add-Type -AssemblyName System.Drawing
-    $bmp=New-Object System.Drawing.Bitmap(400,800)
-    try{
-        $g=[Drawing.Graphics]::FromImage($bmp)
-        try{ $g.Clear([Drawing.Color]::DarkOrange); $g.FillRectangle([Drawing.Brushes]::Black,20,20,200,200) }finally{$g.Dispose()}
-        $bmp.Save($png,[Drawing.Imaging.ImageFormat]::Png)
-    }finally{$bmp.Dispose()}
+    # Committed deterministic fixture (TASK-0025 RC3): System.Drawing is
+    # unavailable on POSIX pwsh, so the suite COPIES the committed capture-
+    # source PNG instead of generating it at runtime.
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'fixtures/visual/viewport-target-400x800.png') -Destination $png -Force
 
     $state=Join-Path $fixture 'foreground.txt'
     $log=Join-Path $fixture 'adb.log'
     $fakePs=Join-Path $fixture 'fake-adb.ps1'
-    $fakeCmd=Join-Path $fixture 'adb.cmd'
     @'
 param()
 $argsList=@($args)
@@ -56,7 +52,19 @@ if($argsList[0]-eq'pull'){Copy-Item -LiteralPath $env:AIH_FAKE_ADB_PNG -Destinat
 if($command-like'shell rm *'){exit 0}
 exit 1
 '@|Set-Content -LiteralPath $fakePs -Encoding UTF8
-    ('@powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "'+$fakePs+'" %*')|Set-Content -LiteralPath $fakeCmd -Encoding ASCII
+    # Platform-aware fake-adb wrapper (TASK-0025 RC3): BOTH wrappers exercise
+    # the SAME fake-adb PowerShell behavior; only the launcher shell differs.
+    if (Test-AihIsWindows) {
+        $fakeCmd=Join-Path $fixture 'adb.cmd'
+        ('@powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "'+$fakePs+'" %*')|Set-Content -LiteralPath $fakeCmd -Encoding ASCII
+    }
+    else {
+        $fakeCmd=Join-Path $fixture 'adb'
+        $posixWrapper='#!/bin/sh'+[Environment]::NewLine+'exec "'+$aihPsHost+'" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$fakePs+'" "$@"'+[Environment]::NewLine
+        [IO.File]::WriteAllText($fakeCmd,$posixWrapper,[Text.UTF8Encoding]::new($false))
+        & chmod '+x' $fakeCmd
+        if($LASTEXITCODE -ne 0){ throw 'failed to make the POSIX fake-adb wrapper executable' }
+    }
     $env:AIH_FAKE_ADB_LOG=$log; $env:AIH_FAKE_ADB_STATE=$state; $env:AIH_FAKE_ADB_PNG=$png
 
     function Invoke-Capture([string]$Package,[string]$Name){

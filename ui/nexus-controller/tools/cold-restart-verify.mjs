@@ -26,7 +26,7 @@ const SESSION = 'session-239a6df4-46da-4537-9622-99c1e7eaf6b5'
 const URL = 'http://127.0.0.1:3080/nexus/controller.json?session=' + SESSION
 const DETAIL_URL = 'http://127.0.0.1:3080/nexus/control-room.json?session=' + SESSION
 const FLUSH_WAIT_MS = Number(process.argv[2] || 60000)
-const POWER_SHELL = 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
+const POWER_SHELL = process.platform === 'win32' ? 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe' : 'pwsh'
 
 const log = (...parts) => {
   const line = new Date().toISOString() + ' ' + parts.join(' ')
