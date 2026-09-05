@@ -106,7 +106,24 @@ function Invoke-AihVerificationCommand {
 
     $started = [DateTime]::UtcNow
     if (-not $Command.Available) {
-        return [pscustomobject]@{ Name = $Command.Name; Kind = $Command.Kind; Status = if ($Command.Required) { 'FAIL' } else { 'SKIP' }; ExitCode = $null; DurationSeconds = 0; StartedAtUtc = $started.ToString('o'); FinishedAtUtc = [DateTime]::UtcNow.ToString('o'); Command = $Command.Display; Error = 'Required executable is unavailable.' }
+        # TASK-0025 RC5: EVERY result carries the SAME schema. Consumers
+        # (the controller bridge, JSON reports) read StandardOutput,
+        # StandardError, and WorkingDirectory unconditionally, so an
+        # unavailable command must never return an abbreviated object.
+        return [pscustomobject]@{
+            Name = $Command.Name
+            Kind = $Command.Kind
+            Status = if ($Command.Required) { 'FAIL' } else { 'SKIP' }
+            ExitCode = $null
+            DurationSeconds = 0
+            StartedAtUtc = $started.ToString('o')
+            FinishedAtUtc = [DateTime]::UtcNow.ToString('o')
+            Command = $Command.Display
+            WorkingDirectory = $Command.WorkingDirectory
+            StandardOutput = ''
+            StandardError = ''
+            Error = 'Required executable is unavailable.'
+        }
     }
     $info = [System.Diagnostics.ProcessStartInfo]::new()
     if (-not [string]::IsNullOrWhiteSpace($Command.ShellCommand)) {

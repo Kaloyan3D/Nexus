@@ -77,7 +77,73 @@ Assert-Aih ($shCr.Count -eq 0) ("POSIX shell sources are LF-only (found: " + $sh
 # 7. The harness suite table is a valid forward-slash path contract.
 Assert-Aih (@($audit.SuiteTableFindings).Count -eq 0) "harness suite table uses forward slashes and every referenced suite file exists"
 
-# 8. Windows-only executables and APIs appear only inside the platform
+# 8.5 Platform-layer dependency direction (TASK-0025 RC1): Platform.ps1
+#     must be independently sourceable - no reverse dependency on
+#     Common.ps1-defined functions.
+$platformDeps = @($audit.PlatformDependencyFindings)
+$platformDepText = ((@($platformDeps) | ForEach-Object { $_.File + ":" + $_.Line + " " + $_.Token }) -join ", ")
+Assert-Aih ($platformDeps.Count -eq 0) ("Platform.ps1 invokes no function defined only by Common.ps1 (found: " + $platformDepText + ")")
+
+# 8.6 JS-plane hardcoded platform executables (TASK-0025 RC4). A literal is
+#     allowed when a process.platform guard sits within 8 lines (platform-
+#     aware resolver/branch) or when the file carries a documented allowance
+#     (the shared test transport's Windows branch). Everything else fails.
+$jsAllow = @(
+    @{ File = 'tests/lib/AihTestTransport.cjs'; Reason = 'the ONE shared test transport: its Windows branch implements the production host strategy and the TASK-0017 cmd.exe no-pipes transport' },
+    @{ File = 'config/AihController.cjs'; Reason = 'production controller bridge: platform-aware spawnCaptured/runCli resolvers (guards verified in-file)' },
+    @{ File = 'ui/nexus-controller/lib/index.js'; Reason = 'production UI controller: platform-aware pwsh host resolver (guards verified in-file)' },
+    @{ File = 'tests/AihControllerHost.Tests.cjs'; Reason = 'this suite ASSERTS the platform launcher/host contracts; its literals are test data that must match production source, never spawns' }
+)
+$jsViolations = [System.Collections.Generic.List[string]]::new()
+foreach ($finding in @($audit.JsExecutableFindings)) {
+    $lines = [System.IO.File]::ReadAllLines((Join-Path $InstallRoot $finding.File))
+    $from = [Math]::Max(0, $finding.Line - 9)
+    $to = [Math]::Min($lines.Count - 1, $finding.Line + 8)
+    $guarded = $false
+    for ($i = $from; $i -le $to; $i++) { if ($lines[$i] -match "process\.platform\s*(===|!==)\s*'win32'") { $guarded = $true; break } }
+    $allowed = $false
+    foreach ($entry in $jsAllow) { if ($entry.File -eq $finding.File) { $allowed = $true; break } }
+    if (-not $guarded -and -not $allowed) {
+        $jsViolations.Add(($finding.File + ":" + $finding.Line + " [" + $finding.Kind + "] " + $finding.Token))
+    }
+}
+Assert-Aih ($jsViolations.Count -eq 0) ("JS sources hardcode no unguarded Windows executables (found: " + (($jsViolations.ToArray()) -join ", ") + ")")
+
+# 8.7 No Windows-only fixture technologies in PowerShell test suites
+#     (TASK-0025 RC3): fixtures must be committed platform-neutral bytes.
+$fixtureViolations = @($audit.WindowsFixtureFindings)
+$fixtureText = ((@($fixtureViolations) | ForEach-Object { $_.File + ":" + $_.Line }) -join ", ")
+Assert-Aih ($fixtureViolations.Count -eq 0) ("PowerShell test suites use no Windows-only fixture technologies (found: " + $fixtureText + ")")
+
+# 8.8 Invariant result-object schemas (TASK-0025 RC5): every declared
+#     result contract returns objects with the full key set at EVERY return
+#     site.
+$schemaViolations = @($audit.ResultSchemaFindings)
+$schemaText = ((@($schemaViolations) | ForEach-Object { $_.File + ":" + $_.Line + " missing " + $_.Token }) -join ", ")
+Assert-Aih ($schemaViolations.Count -eq 0) ("declared result contracts keep an invariant schema (found: " + $schemaText + ")")
+
+# 8.9 PS5.1 vs PS7 JSON scalar/date compatibility (TASK-0025 RC7): the
+#     intelligence store contract is that persisted timestamps are ISO-8601
+#     STRINGS on every host. Round-trip a document through the real store
+#     helpers and assert the canonical string semantics survive.
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/intelligence/Intelligence.Store.ps1')
+$jsonCompatRoot = Join-Path ([IO.Path]::GetTempPath()) ('aih-portability-json-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $jsonCompatRoot | Out-Null
+try {
+    $isoStamp = '2026-09-05T14:55:04.8251033Z'
+    $compatDoc = [pscustomobject]@{ schemaVersion = 1; completedAt = $isoStamp; nested = [pscustomobject]@{ startedAt = $isoStamp; rows = @([pscustomobject]@{ at = $isoStamp }) } }
+    $compatPath = Join-Path $jsonCompatRoot 'compat.json'
+    Save-AihIntStoreJson -Path $compatPath -Document $compatDoc
+    $roundTrip = Read-AihIntStoreJson -Path $compatPath -Factory { [pscustomobject]@{ schemaVersion = 1 } }
+    Assert-Aih ([string]$roundTrip.completedAt -eq $isoStamp) 'store round-trip preserves the canonical ISO timestamp value'
+    Assert-Aih ($roundTrip.completedAt -is [string]) 'store round-trip exposes timestamps as strings on this host'
+    Assert-Aih ([string]$roundTrip.nested.rows[0].at -eq $isoStamp) 'store round-trip normalizes nested timestamps too'
+} finally {
+    if (Test-Path -LiteralPath $jsonCompatRoot) { Remove-Item -LiteralPath $jsonCompatRoot -Recurse -Force }
+}
+
+# 9. Windows-only executables and APIs appear only inside the platform
 #    abstraction layer or explicitly guarded contexts.
 #
 #    Auto-allowed classes (documented, verified by this gate's structure):

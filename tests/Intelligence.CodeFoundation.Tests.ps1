@@ -112,7 +112,23 @@ try {
     Assert-Aih ($null -ne $historyState -and $historyState.stats.filesConsidered -eq 2) 'historical snapshot intelligence state remains queryable'
 
     # idempotent re-index returns the activated state
+    # TASK-0025 RC7 instrumentation: the following diagnostics distinguish
+    # a REAL second index (counts/generation move) from host-specific JSON
+    # scalar normalization (type of a timestamp changes). They are printed
+    # on every lane and the assertion below stays strict.
+    $diagActiveProp = $stateB.PSObject.Properties['activeGeneration']
+    $diagActiveBefore = if ($null -ne $diagActiveProp) { [string]$diagActiveProp.Value } else { '<absent>' }
+    $diagFiBefore = (& (Get-AihCodeIntelligenceStore).CountFileIntelligence)
+    Write-Host ('DIAG rc7 stateB.completedAt type=' + $stateB.completedAt.GetType().FullName + ' value=' + $stateB.completedAt)
+    Write-Host ('DIAG rc7 activeGeneration before=' + $diagActiveBefore)
+    Write-Host ('DIAG rc7 fileIntelligence count before=' + $diagFiBefore)
     $again = Invoke-AihCodeIntelligenceIndex -StoreRoot $store -RepositoryId $repositoryId -SnapshotId $buildB.snapshot.snapshotId
+    Write-Host ('DIAG rc7 again.completedAt type=' + $again.completedAt.GetType().FullName + ' value=' + $again.completedAt)
+    $diagActiveAfterProp = $again.PSObject.Properties['activeGeneration']
+    $diagActiveAfter = if ($null -ne $diagActiveAfterProp) { [string]$diagActiveAfterProp.Value } else { '<absent>' }
+    Write-Host ('DIAG rc7 activeGeneration after=' + $diagActiveAfter)
+    Write-Host ('DIAG rc7 fileIntelligence count after=' + (& (Get-AihCodeIntelligenceStore).CountFileIntelligence))
+    Write-Host ('DIAG rc7 stats again: indexed=' + $again.stats.indexed + ' reused=' + $again.stats.reused)
     Assert-Aih ($again.completedAt -eq $stateB.completedAt) 're-indexing an activated snapshot is idempotent'
 
     # provider version invalidation

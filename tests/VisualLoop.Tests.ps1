@@ -49,15 +49,11 @@ llm-pi-ai:
     $pngPath=Join-Path $workspace 'shot-source.png'
     # A real rendered-looking PNG (deterministic colored bars) so the
     # preflight geometry/pixel-variance checks operate on valid input.
-    Add-Type -AssemblyName System.Drawing
-    $shotBmp=New-Object System.Drawing.Bitmap(400,800)
-    try{
-        for($bar=0;$bar-lt 40;$bar++){
-            $brush=New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255,(($bar*37)%256),(($bar*71)%256),(($bar*113)%256)))
-            try{ $g=[System.Drawing.Graphics]::FromImage($shotBmp); $g.FillRectangle($brush,0,($bar*20),400,20); $g.Dispose() }finally{ $brush.Dispose() }
-        }
-        $shotBmp.Save($pngPath,[System.Drawing.Imaging.ImageFormat]::Png)
-    }finally{ $shotBmp.Dispose() }
+    # Committed deterministic fixture (TASK-0025 RC3): System.Drawing is
+    # unavailable on POSIX pwsh, so the suite COPIES the committed PNG
+    # instead of generating it at runtime. Known geometry 400x800 and
+    # 40-color variance are preserved bit-for-bit.
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'fixtures/visual/viewport-bars-400x800.png') -Destination $pngPath -Force
 
     $script:loopSeq=0
     function Invoke-AihLoop {
@@ -224,7 +220,6 @@ llm-pi-ai:
     # identity error before preflight/reviewer and do not burn iteration 1.
     @{expo=@{android=@{package='app.expected.mobile'}}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $workspace 'app.json') -Encoding UTF8
     $fakeAdbPs=Join-Path $mockDir 'fake-mismatch-adb.ps1'
-    $fakeAdbCmd=Join-Path $mockDir 'adb-mismatch.cmd'
     $fakeAdbLog=Join-Path $mockDir 'fake-mismatch-adb.log'
     $fakeAdbState=Join-Path $mockDir 'fake-mismatch-foreground.txt'
     'com.wrong.mobile'|Set-Content -LiteralPath $fakeAdbState -NoNewline
@@ -240,14 +235,26 @@ if($a[0]-eq'pull'){Copy-Item -LiteralPath $env:AIH_LOOP_FAKE_ADB_PNG -Destinatio
 if($command-like'shell rm *'){exit 0}
 exit 1
 '@|Set-Content -LiteralPath $fakeAdbPs -Encoding UTF8
-    ('@powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "'+$fakeAdbPs+'" %*')|Set-Content -LiteralPath $fakeAdbCmd -Encoding ASCII
+    # Platform-aware fake-adb wrapper (TASK-0025 RC3): BOTH wrappers exercise
+    # the SAME fake-adb PowerShell behavior; only the launcher shell differs.
+    if (Test-AihIsWindows) {
+        $fakeAdbExecutable=Join-Path $mockDir 'adb-mismatch.cmd'
+        ('@powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "'+$fakeAdbPs+'" %*')|Set-Content -LiteralPath $fakeAdbExecutable -Encoding ASCII
+    }
+    else {
+        $fakeAdbExecutable=Join-Path $mockDir 'adb-mismatch'
+        $posixWrapper='#!/bin/sh'+[Environment]::NewLine+'exec "'+$powershellHost+'" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$fakeAdbPs+'" "$@"'+[Environment]::NewLine
+        [IO.File]::WriteAllText($fakeAdbExecutable,$posixWrapper,[Text.UTF8Encoding]::new($false))
+        & chmod '+x' $fakeAdbExecutable
+        if($LASTEXITCODE -ne 0){ throw 'failed to make the POSIX fake-adb wrapper executable' }
+    }
     $env:AIH_LOOP_FAKE_ADB_LOG=$fakeAdbLog;$env:AIH_LOOP_FAKE_ADB_STATE=$fakeAdbState;$env:AIH_LOOP_FAKE_ADB_PNG=$pngPath;$env:AIH_LOOP_FAKE_ADB_STICKY='1'
     Push-Location $workspace
     try{ 'export const Mismatch=()=>null'|Set-Content (Join-Path $workspace 'apps/mobile/src/components/Mismatch.tsx');git add -A;git commit -m 'mismatch ui change'|Out-Null }finally{Pop-Location}
     $taskMismatch=New-AihTask $workspace 'shared emulator mismatch task'
     Push-Location $workspace
     try{ 'export const Mismatch2=()=>null'|Set-Content (Join-Path $workspace 'apps/mobile/src/components/Mismatch2.tsx');git add -A;git commit -m 'mismatch ui followup'|Out-Null }finally{Pop-Location}
-    $runMismatch=Invoke-AihLoop -Action 'iterate' -MockResponseFile $reviseMock -ScenarioPath $viewportScenario -PolicyPath $policyPath -AdbPath $fakeAdbCmd -DeviceSerial emulator-5554 -LoopTaskId $taskMismatch.taskId
+    $runMismatch=Invoke-AihLoop -Action 'iterate' -MockResponseFile $reviseMock -ScenarioPath $viewportScenario -PolicyPath $policyPath -AdbPath $fakeAdbExecutable -DeviceSerial emulator-5554 -LoopTaskId $taskMismatch.taskId
     Assert-Aih ($runMismatch.exitCode-eq3-and$runMismatch.json.errorKind-eq'visual-capture-target-mismatch') '5: target mismatch fails closed with dedicated error'
     $mismatchRoot=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness/runs') $taskMismatch.taskId) 'visual') 'iteration-01'
     $mismatchState=Get-Content (Join-Path (Split-Path -Parent $mismatchRoot) 'state.json') -Raw|ConvertFrom-Json
@@ -258,7 +265,7 @@ exit 1
     $taskIdentity=New-AihTask $workspace 'identity preflight task'
     Push-Location $workspace
     try{ 'export const Identity2=()=>null'|Set-Content (Join-Path $workspace 'apps/mobile/src/components/Identity2.tsx');git add -A;git commit -m 'identity preflight followup'|Out-Null }finally{Pop-Location}
-    $runIdentity=Invoke-AihLoop -Action 'preflight' -MockResponseFile $reviseMock -ScenarioPath $viewportScenario -PolicyPath $policyPath -AdbPath $fakeAdbCmd -DeviceSerial emulator-5554 -LoopTaskId $taskIdentity.taskId
+    $runIdentity=Invoke-AihLoop -Action 'preflight' -MockResponseFile $reviseMock -ScenarioPath $viewportScenario -PolicyPath $policyPath -AdbPath $fakeAdbExecutable -DeviceSerial emulator-5554 -LoopTaskId $taskIdentity.taskId
     $identityRoot=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness/runs') $taskIdentity.taskId) 'visual') 'iteration-01'
     $identityPreflight=Get-Content (Join-Path $identityRoot 'preflight.json') -Raw|ConvertFrom-Json
     Assert-Aih ($runIdentity.exitCode-eq0-and@($identityPreflight.preflight.checks|Where-Object{$_.name-eq'target-identity:current'-and$_.status-eq'PASS'}).Count-eq1) '5: deterministic preflight includes verified target identity'
@@ -362,10 +369,9 @@ exit 3
     Assert-Aih (($blockedP.complete -eq $false) -and ((@($blockedP.reasons)|Where-Object{$_-match'Visual verification is required'}|Measure-Object).Count -ge 1)) '6b: preflight PASS alone never satisfies the visual completion gate'
 
     # blank/tiny screenshot fails preflight; reviewer not invoked; no iteration burn
+    # Committed deterministic fixture (TASK-0025 RC3): 4x4 blank PNG.
     $blankPng=Join-Path $mockDir 'blank.png'
-    Add-Type -AssemblyName System.Drawing
-    $bmp=New-Object System.Drawing.Bitmap(4,4)
-    try{ $bmp.Save($blankPng,[System.Drawing.Imaging.ImageFormat]::Png) }finally{ $bmp.Dispose() }
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'fixtures/visual/blank-4x4.png') -Destination $blankPng -Force
     $blankScenario=Join-Path $mockDir 'scenario-blank.json'
     @{schemaVersion=1;kind='visual-review-scenarios';defaultScenario='blank';scenarios=@(@{id='blank';platform='android';captures=@(@{name='blank';mode='file';sourceFile=$blankPng})})}|ConvertTo-Json -Depth 6|Set-Content -Path $blankScenario -Encoding UTF8
     $runPB=Invoke-AihLoop -Action 'iterate' -MockResponseFile $passMock -ScenarioPath $blankScenario -PolicyPath $policyPath -LoopTaskId $taskP.taskId

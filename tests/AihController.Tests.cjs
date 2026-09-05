@@ -99,74 +99,23 @@ async function main() {
   const fs = require('node:fs')
   const path = require('node:path')
   const os = require('node:os')
-  const { spawnSync } = require('node:child_process')
-  // Transport note (TASK-0017): sandboxed environments deny anonymous-pipe and
-  // fd-redirected stdio capture from Node children (spawn EPERM), while
-  // stdio:'inherit' spawns are allowed. The wrapper below runs each CLI through
-  // cmd.exe with cmd-side redirection into temporary files (no pipes anywhere),
-  // then returns the same bytes promisify(execFile) would have produced,
-  // including the rejection shape (error.code/.stdout/.stderr/.signal).
-  let runCliSeq = 0
-  const runCli = async (file, args, opts) => {
-    if (process.platform !== 'win32') {
-      // POSIX: direct capture is safe there (the TASK-0017 anonymous-pipe
-      // EPERM boundary is a Windows-sandbox restriction, not a POSIX one).
-      // Keep the same result/failure shapes as the cmd.exe transport.
-      const direct = spawnSync(file, args, Object.assign({}, opts, { encoding: 'utf8' }))
-      const stdout = direct.stdout || ''
-      const stderr = direct.stderr || ''
-      if (direct.error) {
-        direct.error.stdout = stdout
-        direct.error.stderr = stderr
-        throw direct.error
-      }
-      if (direct.status !== 0) {
-        const failure = new Error('Command failed: ' + file)
-        failure.code = direct.status === null ? -1 : direct.status
-        failure.killed = direct.signal != null
-        failure.signal = direct.signal
-        failure.stdout = stdout
-        failure.stderr = stderr
-        throw failure
-      }
-      return { stdout, stderr }
-    }
-    const seq = ++runCliSeq
-    const token = process.pid + '-' + seq
-    const outPath = path.join(os.tmpdir(), 'aih-cli-out-' + token + '.txt')
-    const errPath = path.join(os.tmpdir(), 'aih-cli-err-' + token + '.txt')
-    const batchPath = path.join(os.tmpdir(), 'aih-cli-' + token + '.cmd')
-    const q = (value) => '"' + String(value) + '"'
-    const command = [q(file)].concat(args.map(q)).join(' ') + ' > ' + q(outPath) + ' 2> ' + q(errPath)
-    fs.writeFileSync(batchPath, '@echo off\r\n' + command + '\r\n', 'utf8')
-    const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', batchPath], Object.assign({}, opts, { stdio: 'ignore', windowsHide: true }))
-    const read = (p) => { try { return fs.readFileSync(p, 'utf8') } catch (_) { return '' } }
-    const stdout = read(outPath)
-    const stderr = read(errPath)
-    try { fs.rmSync(outPath, { force: true }) } catch (_) { }
-    try { fs.rmSync(errPath, { force: true }) } catch (_) { }
-    try { fs.rmSync(batchPath, { force: true }) } catch (_) { }
-    if (result.error) {
-      result.error.stdout = stdout
-      result.error.stderr = stderr
-      throw result.error
-    }
-    if (result.status !== 0) {
-      const failure = new Error('Command failed: ' + file)
-      failure.code = result.status === null ? -1 : result.status
-      failure.killed = result.signal != null
-      failure.signal = result.signal
-      failure.stdout = stdout
-      failure.stderr = stderr
-      throw failure
-    }
-    return { stdout, stderr }
-  }
+  // TASK-0025 RC4: ONE shared test CLI transport + platform PowerShell host
+  // resolution (tests/lib/AihTestTransport.cjs). The transport preserves the
+  // TASK-0017 no-pipes contract (Windows cmd.exe redirection, POSIX direct
+  // capture) and the host resolution mirrors production
+  // Get-AihPowerShellHost so the suites exercise the SAME host strategy as
+  // production on every OS instead of hard-coding powershell.exe.
+  const { createAihCliRunner, resolveAihPowerShellHost } = require(path.join(__dirname, 'lib', 'AihTestTransport.cjs'))
+  const runCli = createAihCliRunner()
   // Exercise the real default install-root resolution without touching the
   // live Nexus install: all controller CLIs run from a disposable copy of the
   // production scripts/config/data layout. The exit hook also runs after an
   // assertion failure, so fixture state is cleaned on both pass and failure.
   const sourceRoot = path.join(__dirname, '..')
+  // Resolve the platform PowerShell host against the REAL repo root (the
+  // pinned POSIX runtime lives under the installed/checkout root, not the
+  // disposable bridge copy).
+  const powershellHost = resolveAihPowerShellHost(sourceRoot)
   const bridgeInstallRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-controller-install-'))
   const bridgeWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-controller-workspace-'))
   fs.cpSync(path.join(sourceRoot, 'scripts'), path.join(bridgeInstallRoot, 'scripts'), { recursive: true })
@@ -190,7 +139,7 @@ async function main() {
   const payloadPath = path.join(payloadDir, 'task.json')
   fs.writeFileSync(payloadPath, JSON.stringify({ workspace: bridgeWorkspace, description: hostileDescription, reviewRequested: false }))
   const taskResult = await runCli(
-    'powershell.exe',
+    powershellHost,
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Task.ps1'), '-Action', 'create-task', '-PayloadFile', payloadPath],
     { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
   )
@@ -199,7 +148,7 @@ async function main() {
   assert.equal(task.description, hostileDescription, 'Task.ps1 description round-trips byte-exact')
   fs.writeFileSync(payloadPath, JSON.stringify({ workspace: bridgeWorkspace, description: hostileDescription, reviewRequested: true }))
   const routeResult = await runCli(
-    'powershell.exe',
+    powershellHost,
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Route.ps1'), '-TaskId', task.taskId, '-Preset', 'aih-engineering', '-PayloadFile', payloadPath],
     { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
   )
@@ -240,7 +189,7 @@ async function main() {
   let reviewStdout = ''
   try {
     const reviewResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Review.ps1'), '-TaskId', task.taskId, '-FilesPath', oversizedBundle, '-Execute', '-PolicyPath', oversizedEnforcedPolicyPath, '-PayloadFile', reviewPayload],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
@@ -317,7 +266,7 @@ async function main() {
     const taskPayload = path.join(inlineDir, 'task.json')
     fs.writeFileSync(taskPayload, JSON.stringify({ workspace: inlineDir, description: inlineDivide, reviewRequested: true }))
     const inlineTaskResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Task.ps1'), '-Action', 'create-task', '-PayloadFile', taskPayload],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
@@ -328,7 +277,7 @@ async function main() {
     const inlinePayloadPath = path.join(inlineDir, 'review.json')
     fs.writeFileSync(inlinePayloadPath, JSON.stringify({ workspace: inlineDir, question: inlineDivide, contextMode: 'inline' }))
     const inlinePacketResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Review.ps1'), '-TaskId', inlineTask.taskId, '-FilesPath', inlineSlicesPath, '-PayloadFile', inlinePayloadPath],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
@@ -357,7 +306,7 @@ async function main() {
     const filesTaskPayload = path.join(filesDir, 'task.json')
     fs.writeFileSync(filesTaskPayload, JSON.stringify({ workspace: filesDir, description: filesQuestion, reviewRequested: true }))
     const filesTaskResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Task.ps1'), '-Action', 'create-task', '-PayloadFile', filesTaskPayload],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
@@ -369,7 +318,7 @@ async function main() {
     const filesPayloadPath = path.join(filesDir, 'review.json')
     fs.writeFileSync(filesPayloadPath, JSON.stringify({ workspace: filesDir, question: filesQuestion, contextMode: 'files' }))
     const filesPacketResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Review.ps1'), '-TaskId', filesTask.taskId, '-FilesPath', filesSlicesPath, '-PayloadFile', filesPayloadPath],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
@@ -402,7 +351,7 @@ async function main() {
     const hugeTaskPayload = path.join(hugeDir, 'task.json')
     fs.writeFileSync(hugeTaskPayload, JSON.stringify({ workspace: hugeDir, description: hugeQuestion, reviewRequested: true }))
     const hugeTaskResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Task.ps1'), '-Action', 'create-task', '-PayloadFile', hugeTaskPayload],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
@@ -417,7 +366,7 @@ async function main() {
     let hugeStdout = ''
     try {
       const hugeReviewResult = await runCli(
-        'powershell.exe',
+        powershellHost,
         ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Review.ps1'), '-TaskId', hugeTask.taskId, '-FilesPath', hugeSlicesPath, '-Execute', '-PolicyPath', enforcedPolicyPath, '-PayloadFile', hugePayloadPath],
         { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
       )
@@ -451,7 +400,7 @@ async function main() {
     const unlimitedTaskPayload = path.join(unlimitedDir, 'task.json')
     fs.writeFileSync(unlimitedTaskPayload, JSON.stringify({ workspace: unlimitedDir, description: unlimitedQuestion, reviewRequested: true }))
     const unlimitedTaskResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Task.ps1'), '-Action', 'create-task', '-PayloadFile', unlimitedTaskPayload],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
@@ -463,7 +412,7 @@ async function main() {
     const unlimitedPayloadPath = path.join(unlimitedDir, 'review.json')
     fs.writeFileSync(unlimitedPayloadPath, JSON.stringify({ workspace: unlimitedDir, question: unlimitedQuestion, contextMode: 'files' }))
     const unlimitedPacketResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Review.ps1'), '-TaskId', unlimitedTask.taskId, '-FilesPath', unlimitedSlicesPath, '-PayloadFile', unlimitedPayloadPath],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
@@ -485,7 +434,7 @@ async function main() {
     const guardTaskPayload = path.join(guardDir, 'task.json')
     fs.writeFileSync(guardTaskPayload, JSON.stringify({ workspace: guardDir, description: 'Review the whole repository', reviewRequested: true }))
     const guardTaskResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Task.ps1'), '-Action', 'create-task', '-PayloadFile', guardTaskPayload],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
@@ -495,7 +444,7 @@ async function main() {
     const guardPayloadPath = path.join(guardDir, 'review.json')
     fs.writeFileSync(guardPayloadPath, JSON.stringify({ workspace: guardDir, question: 'Review the whole repository' })) // no contextMode: defaults to 'bundle'
     const guardPacketResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Review.ps1'), '-TaskId', guardTask.taskId, '-FilesPath', guardSlicesPath, '-PayloadFile', guardPayloadPath],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )

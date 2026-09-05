@@ -12,20 +12,10 @@ $ErrorActionPreference = 'Stop'
 # the bridge's JSON parse. Emit UTF-8 explicitly.
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
-function Get-AihInstallRoot {
-    param([string]$InstallRoot)
-
-    if (-not [string]::IsNullOrWhiteSpace($InstallRoot)) {
-        return [System.IO.Path]::GetFullPath($InstallRoot)
-    }
-    if (-not [string]::IsNullOrWhiteSpace($env:AIH_INSTALL_ROOT)) {
-        return [System.IO.Path]::GetFullPath($env:AIH_INSTALL_ROOT)
-    }
-    if (-not [string]::IsNullOrWhiteSpace($env:DSH_HOME)) {
-        return [System.IO.Path]::GetFullPath((Split-Path -Parent $env:DSH_HOME))
-    }
-    return [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
-}
+# Get-AihInstallRoot is defined in Platform.ps1 (foundation layer): the
+# platform layer must stay independently sourceable, and the pinned POSIX
+# host resolution depends on root resolution. Common.ps1 consumers inherit
+# it through the dot-source above.
 
 function Get-AihLayout {
     param([string]$InstallRoot)
