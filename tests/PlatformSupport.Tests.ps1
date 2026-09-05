@@ -78,13 +78,17 @@ Get-AihPowerShellHost -InstallRoot $InstallRoot
     # ── pinned Node child environment (TASK-0025 Class B) ──
     # One resolution point for the Node runtime Nexus owns: the directory must
     # match the runtime layout on every platform, the PATH prepend must use
-    # the platform path separator while preserving the existing PATH, the
-    # pinned runtime must actually win node resolution when present, and a
-    # root without a pinned runtime must be a no-op (source checkouts keep
-    # their ambient tool resolution; no system Node dependency is created).
-    $expectedPinnedDir=Join-Path (Join-Path $InstallRoot 'runtime') 'node'
+    # the platform path separator while preserving the existing PATH, and
+    # the pinned runtime must actually win node resolution when present.
+    # TASK-0026: resolution is TOOLCHAIN-aware - a logical InstallRoot
+    # without runtime/ resolves the pinned runtime of the RUNNING Nexus
+    # tree (env anchor > the tree that owns Platform.ps1 > the logical
+    # root), so Nexus-owned children never fall back to ambient system
+    # Node. A no-op remains possible only when NO Nexus tree in the
+    # resolution chain owns a runtime.
+    $expectedPinnedDir=Join-Path (Join-Path (Get-AihNexusToolchainRoot -InstallRoot $InstallRoot) 'runtime') 'node'
     if (-not $runningOnWindows) { $expectedPinnedDir=Join-Path $expectedPinnedDir 'bin' }
-    Assert-Aih ((Get-AihPinnedNodeDirectory -InstallRoot $InstallRoot)-eq$expectedPinnedDir) 'pinned Node directory matches the runtime layout on this platform'
+    Assert-Aih ((Get-AihPinnedNodeDirectory -InstallRoot $InstallRoot)-eq$expectedPinnedDir) 'pinned Node directory matches the toolchain runtime layout on this platform'
     $pathBefore=$env:PATH
     $pinnedExists=Test-Path -LiteralPath (Get-AihPinnedNodeDirectory -InstallRoot $InstallRoot) -PathType Container
     $prepended=Add-AihPinnedNodeToPath -InstallRoot $InstallRoot
@@ -99,8 +103,21 @@ Get-AihPowerShellHost -InstallRoot $InstallRoot
     $noOpRoot=Join-Path ([IO.Path]::GetTempPath()) ('aih-noruntime-'+[guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $noOpRoot -Force|Out-Null
     $pathBeforeNoOp=$env:PATH
-    Assert-Aih (-not (Add-AihPinnedNodeToPath -InstallRoot $noOpRoot)) 'root without a pinned runtime is a no-op (source checkout keeps ambient resolution)'
-    Assert-Aih ($env:PATH-eq$pathBeforeNoOp) 'no-op prepend leaves PATH untouched'
+    # TASK-0026 contract: an isolated logical InstallRoot resolves the REAL
+    # pinned runtime of the running Nexus tree - the fixture scenarios that
+    # failed on CachyOS get the pinned Node even though their fixture has
+    # no runtime/ - and the prepend stays process-scoped with the existing
+    # PATH preserved behind it.
+    $toolchainPinned=Get-AihPinnedNodeDirectory -InstallRoot $noOpRoot
+    $toolchainHasRuntime=Test-Path -LiteralPath $toolchainPinned -PathType Container
+    $noOpPrepended=Add-AihPinnedNodeToPath -InstallRoot $noOpRoot
+    Assert-Aih ($noOpPrepended-eq$toolchainHasRuntime) 'fixture logical root resolves the running Nexus toolchain runtime honestly'
+    if ($noOpPrepended) {
+        Assert-Aih ($env:PATH.StartsWith($toolchainPinned+[IO.Path]::PathSeparator)) 'fixture-rooted prepend wins the front of PATH with the pinned runtime'
+        Assert-Aih ($env:PATH.EndsWith($pathBeforeNoOp)) 'fixture-rooted prepend preserves the existing PATH behind the pinned runtime'
+    }
+    else { Assert-Aih ($env:PATH-eq$pathBeforeNoOp) 'prepend stays a no-op only when no Nexus tree owns a runtime' }
+    $env:PATH=$pathBeforeNoOp
     Remove-Item -LiteralPath $noOpRoot -Recurse -Force
 
     # ── sync-name safety ──
@@ -274,6 +291,14 @@ Get-AihPowerShellHost -InstallRoot $InstallRoot
     }
     function script:Get-AihLastStartProcessBound { @($script:aihStartProcessCaptures)[-1].Bound }
 
+    # TASK-0026: sections A-F (and I/J) are WINDOWS contract tests - they run
+    # against the REAL host platform, so on Linux the production code
+    # correctly omits WindowStyle and section A failed. Each section now
+    # explicitly SIMULATES the platform it contracts for; the original
+    # platform function is restored in finally.
+    try {
+    ${function:Test-AihIsWindows} = { return $true }
+
     # A: Windows, FilePath + ArgumentList only (the exact OAuth startup shape).
     $null = Start-AihDetachedProcess -FilePath 'node.exe' -ArgumentList @('oauth.js', '--detach', '--no-open')
     $bound = Get-AihLastStartProcessBound
@@ -313,8 +338,9 @@ Get-AihPowerShellHost -InstallRoot $InstallRoot
     $bound = Get-AihLastStartProcessBound
     Assert-Aih (-not $bound.Contains('WorkingDirectory')) 'F: whitespace WorkingDirectory is omitted'
 
-    # G/H: Linux branch — no WindowStyle, WorkingDirectory only when supplied.
-    function Test-AihIsWindows { return $false }
+    # G/H: LINUX branch (explicitly simulated) - no WindowStyle,
+    # WorkingDirectory only when supplied.
+    ${function:Test-AihIsWindows} = { return $false }
     $null = Start-AihDetachedProcess -FilePath 'node' -ArgumentList @('x')
     $bound = Get-AihLastStartProcessBound
     Assert-Aih (-not $bound.Contains('WindowStyle')) 'G: Linux never receives WindowStyle'
@@ -322,15 +348,19 @@ Get-AihPowerShellHost -InstallRoot $InstallRoot
     $null = Start-AihDetachedProcess -FilePath 'node' -ArgumentList @('x') -WorkingDirectory '/home/user/nexus data'
     $bound = Get-AihLastStartProcessBound
     Assert-Aih ($bound.Contains('WorkingDirectory') -and [string]$bound.WorkingDirectory -eq '/home/user/nexus data') 'H: Linux explicit WorkingDirectory forwarded exactly'
-    ${function:Test-AihIsWindows} = $realTestAihIsWindows
 
-    # I/J: -Wait forwarding is exact, not a behavioral change.
+    # I/J: -Wait forwarding is exact, not a behavioral change (Windows shape).
+    ${function:Test-AihIsWindows} = { return $true }
     $null = Start-AihDetachedProcess -FilePath 'node.exe' -ArgumentList @('x') -WorkingDirectory 'C:/w'
     $bound = Get-AihLastStartProcessBound
     Assert-Aih (-not $bound.Contains('Wait')) 'I: no -Wait means Start-Process never receives Wait'
     $null = Start-AihDetachedProcess -FilePath 'node.exe' -ArgumentList @('x') -WorkingDirectory 'C:/w' -Wait
     $bound = Get-AihLastStartProcessBound
     Assert-Aih ($bound.Contains('Wait') -and $bound.Wait) 'J: -Wait forwards Wait to Start-Process'
+    }
+    finally {
+        ${function:Test-AihIsWindows} = $realTestAihIsWindows
+    }
 
     # Real Start-Process (no mock): the exact aih.ps1 OAuth call shape with NO
     # WorkingDirectory must bind and start — this is the regression's crash
@@ -348,6 +378,46 @@ Get-AihPowerShellHost -InstallRoot $InstallRoot
     Remove-Item -LiteralPath $credRoot -Recurse -Force
 } catch {
     throw
+}
+
+# ── TASK-0026: logical fixture InstallRoot vs Nexus toolchain root ──────────
+# The real CachyOS failing path: a fixture logical InstallRoot (scripts/
+# config/data, NO runtime/) drives deterministic verification, and its
+# fixture-COPY of Verify-Project.ps1 had no way to resolve the pinned Node
+# runtime (no system Node exists on the machine). The shared toolchain
+# contract (AIH_TOOLCHAIN_ROOT > the running Nexus tree > the logical root)
+# must make the nested verification child resolve the REAL pinned runtime:
+# node --version equals the pinned version and the executing executable
+# lives inside the Nexus runtime directory.
+$tcFixture = Join-Path ([IO.Path]::GetTempPath()) ('aih-toolchain-' + [guid]::NewGuid().ToString('N'))
+$tcWorkspace = Join-Path $tcFixture 'ws'
+$previousToolchain = $env:AIH_TOOLCHAIN_ROOT
+try {
+    New-Item -ItemType Directory -Force -Path (Join-Path $tcFixture 'scripts'), (Join-Path $tcFixture 'config'), (Join-Path $tcWorkspace 'src') | Out-Null
+    Copy-Item -Path (Join-Path $InstallRoot 'scripts/*') -Destination (Join-Path $tcFixture 'scripts') -Recurse -Force
+    $pinnedNodeVersion = (Get-Content -Raw (Join-Path $InstallRoot 'config/versions.json') | ConvertFrom-Json).NodeVersion
+    # Quote-free node -e payload: identical argv on cmd.exe and /bin/sh, no
+    # nested-quoting ambiguity in any package manager.
+    $packageJson = '{"private":true,"scripts":{"test":"node -e console.log(process.version,process.execPath)"}}'
+    [IO.File]::WriteAllText((Join-Path $tcWorkspace 'package.json'), $packageJson, [Text.UTF8Encoding]::new($false))
+    # The driver/bridge contract: the anchor is process-scoped env (no
+    # persistent change, no shell profile, existing PATH preserved behind it).
+    $env:AIH_TOOLCHAIN_ROOT = $InstallRoot
+    Assert-Aih ((Get-AihPinnedNodeDirectory -InstallRoot $tcFixture) -eq (Get-AihPinnedNodeDirectory -InstallRoot $InstallRoot)) 'fixture logical root resolves the SAME pinned runtime directory'
+    $tcPsHost = Get-AihPowerShellHost -InstallRoot $InstallRoot
+    $verifyRaw = & $tcPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $tcFixture 'scripts/Verify-Project.ps1') -Workspace $tcWorkspace -InstallRoot $tcFixture -Kind test -Json
+    $verify = (@($verifyRaw | ForEach-Object { [string]$_ }) -join "`n") | ConvertFrom-Json
+    $check = @(@($verify.Results) | Where-Object { $_.Name -eq 'node:test' })[0]
+    Assert-Aih ($null -ne $check -and $check.Status -eq 'PASS') 'fixture InstallRoot nested verification resolves the pinned runtime (node:test PASS)'
+    Assert-Aih ($null -ne $check -and ([string]$check.StandardOutput) -match ('v' + [regex]::Escape($pinnedNodeVersion))) ('nested child node version equals the pinned ' + $pinnedNodeVersion)
+    $pinnedDirNormalized = ((Get-AihPinnedNodeDirectory -InstallRoot $InstallRoot) -replace '\\','/').ToLowerInvariant()
+    $execNormalized = ([string]$check.StandardOutput -replace '\\','/').ToLowerInvariant()
+    Assert-Aih ($execNormalized.Contains($pinnedDirNormalized)) 'the executing node executable belongs to the Nexus pinned runtime'
+}
+finally {
+    if ($null -eq $previousToolchain) { Remove-Item Env:AIH_TOOLCHAIN_ROOT -ErrorAction SilentlyContinue }
+    else { $env:AIH_TOOLCHAIN_ROOT = $previousToolchain }
+    Remove-Item -LiteralPath $tcFixture -Recurse -Force -ErrorAction SilentlyContinue
 }
 # TASK-0023 attempt 7: installed harness tests are platform-aware. The
 # launcher contract follows Get-AihLauncherExtension (aih.cmd on Windows,

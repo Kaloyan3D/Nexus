@@ -747,7 +747,29 @@ function apply(ctx) {
     try { fs.accessSync(pinned, fs.constants.X_OK); return pinned } catch { /* fall through */ }
     return 'pwsh'
   }
-  const pwshHost = resolvePowerShellHost(installRoot)
+  // TASK-0026: the Nexus TOOLCHAIN root (owns runtime/) is formally distinct
+  // from the LOGICAL InstallRoot (owns config/data identity). Isolated test
+  // fixtures legitimately model config/data-only roots with no runtime, so
+  // the bridge resolves its pinned PowerShell through the toolchain chain
+  // (AIH_TOOLCHAIN_ROOT > the tree that owns this controller file > the
+  // logical root) and names that root for every spawned CLI child, so
+  // Nexus-owned nested children always resolve the real pinned runtime.
+  const resolveToolchainRoot = (logicalRoot) => {
+    const candidates = []
+    const fromEnv = process.env.AIH_TOOLCHAIN_ROOT
+    if (fromEnv && String(fromEnv).trim() !== '') candidates.push(path.resolve(String(fromEnv)))
+    candidates.push(path.resolve(__dirname, '..'))
+    if (logicalRoot) candidates.push(path.resolve(logicalRoot))
+    for (const candidate of candidates) {
+      try {
+        if (fs.statSync(path.join(candidate, 'runtime', 'node')).isDirectory()) return candidate
+      } catch (_) { /* candidate does not own a runtime */ }
+    }
+    return logicalRoot
+  }
+  const toolchainRoot = resolveToolchainRoot(installRoot)
+  const childCliEnv = Object.assign({}, process.env, { AIH_TOOLCHAIN_ROOT: toolchainRoot })
+  const pwshHost = resolvePowerShellHost(toolchainRoot)
 
   const runCli = promisify(execFile)
   // Capture transport (TASK-0017): sandboxed environments may deny
@@ -779,6 +801,7 @@ function apply(ctx) {
         stdio: 'ignore',
         windowsHide: !!(options && options.windowsHide),
         timeout: (options && options.timeout) || 0,
+        env: (options && options.env) || process.env,
       })
       child.on('error', (error) => finish(() => reject(error)))
       child.on('close', (code, signal) => finish(() => {
@@ -875,7 +898,7 @@ function apply(ctx) {
       const result = await spawnCaptured(
         pwshHost,
         ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, script), ...args],
-        { timeout: CLI_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
+        { timeout: CLI_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, windowsHide: true, env: childCliEnv },
       ).catch((error) => {
         // PowerShell CLIs report STRUCTURED failures (hard budget rejection,
         // e.g. packet-too-large) by emitting JSON on stdout and exiting 3.

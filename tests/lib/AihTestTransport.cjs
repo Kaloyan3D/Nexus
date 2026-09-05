@@ -21,6 +21,26 @@ const os = require('node:os')
 const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 
+const defaultToolchainRoot = () => path.join(__dirname, '..', '..')
+
+// TASK-0026: the TOOLCHAIN root (owns runtime/) is resolved ahead of the
+// logical InstallRoot so fixture-scoped CLIs still find the pinned runtime:
+// AIH_TOOLCHAIN_ROOT > the tree that owns this transport (the repo root) >
+// the caller-supplied root.
+function resolveAihToolchainRoot(installRoot) {
+  const candidates = []
+  const fromEnv = process.env.AIH_TOOLCHAIN_ROOT
+  if (fromEnv && String(fromEnv).trim() !== '') candidates.push(path.resolve(String(fromEnv)))
+  candidates.push(defaultToolchainRoot())
+  if (installRoot) candidates.push(path.resolve(installRoot))
+  for (const candidate of candidates) {
+    try {
+      if (fs.statSync(path.join(candidate, 'runtime', 'node')).isDirectory()) return candidate
+    } catch (_) { /* candidate does not own a runtime */ }
+  }
+  return installRoot || defaultToolchainRoot()
+}
+
 function resolveAihPowerShellHost(installRoot) {
   if (process.platform === 'win32') {
     return 'powershell.exe'
@@ -29,7 +49,7 @@ function resolveAihPowerShellHost(installRoot) {
   if (fromEnv && String(fromEnv).trim() !== '') {
     return fromEnv
   }
-  const root = installRoot || path.join(__dirname, '..', '..')
+  const root = resolveAihToolchainRoot(installRoot)
   const pinned = path.join(root, 'runtime', 'pwsh', 'pwsh')
   if (fs.existsSync(pinned)) {
     return pinned
@@ -44,11 +64,21 @@ function resolveAihPowerShellHost(installRoot) {
 function createAihCliRunner() {
   let runSeq = 0
   return async (file, args, opts) => {
+    // Every spawned CLI child carries the TOOLCHAIN anchor so fixture-copy
+    // scripts resolve the real pinned runtime (TASK-0026). The caller's
+    // env, when supplied, wins.
+    const childEnv = Object.assign(
+      {},
+      process.env,
+      { AIH_TOOLCHAIN_ROOT: defaultToolchainRoot() },
+      (opts && opts.env) || {},
+    )
+    const childOpts = Object.assign({}, opts, { env: childEnv })
     if (process.platform !== 'win32') {
       // POSIX: direct capture is safe there (the TASK-0017 anonymous-pipe
       // EPERM boundary is a Windows-sandbox restriction, not a POSIX one).
       // Keep the same result/failure shapes as the Windows cmd.exe transport.
-      const direct = spawnSync(file, args, Object.assign({}, opts, { encoding: 'utf8' }))
+      const direct = spawnSync(file, args, Object.assign({}, childOpts, { encoding: 'utf8' }))
       const stdout = direct.stdout || ''
       const stderr = direct.stderr || ''
       if (direct.error) {
@@ -75,7 +105,7 @@ function createAihCliRunner() {
     const q = (value) => '"' + String(value) + '"'
     const command = [q(file)].concat(args.map(q)).join(' ') + ' > ' + q(outPath) + ' 2> ' + q(errPath)
     fs.writeFileSync(batchPath, '@echo off\r\n' + command + '\r\n', 'utf8')
-    const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', batchPath], Object.assign({}, opts, { stdio: 'ignore', windowsHide: true }))
+    const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', batchPath], Object.assign({}, childOpts, { stdio: 'ignore', windowsHide: true }))
     const read = (p) => { try { return fs.readFileSync(p, 'utf8') } catch (_) { return '' } }
     const stdout = read(outPath)
     const stderr = read(errPath)
@@ -100,4 +130,4 @@ function createAihCliRunner() {
   }
 }
 
-module.exports = { resolveAihPowerShellHost, createAihCliRunner }
+module.exports = { resolveAihPowerShellHost, resolveAihToolchainRoot, createAihCliRunner }

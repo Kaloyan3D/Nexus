@@ -123,7 +123,9 @@ function Get-AihPowerShellHost {
     # (TASK-0025 Class B: Engineering/Execution.ps1 passes no root). An
     # explicit AIH_PWSH_HOST still wins, and a system pwsh remains the last
     # fallback before failing closed.
-    $pinned = Join-Path (Join-Path (Join-Path (Get-AihInstallRoot $InstallRoot) 'runtime') 'pwsh') 'pwsh'
+    # TASK-0026: the pinned pwsh probe resolves through the TOOLCHAIN root so
+    # a fixture InstallRoot still finds the real Nexus PowerShell runtime.
+    $pinned = Join-Path (Join-Path (Join-Path (Get-AihNexusToolchainRoot -InstallRoot $InstallRoot) 'runtime') 'pwsh') 'pwsh'
     if (Test-Path -LiteralPath $pinned -PathType Leaf) { return $pinned }
     $system = Get-Command 'pwsh' -ErrorAction SilentlyContinue
     if ($null -ne $system) { return $system.Source }
@@ -151,6 +153,57 @@ function Get-AihNodeRelativeExecutable {
     return Join-Path 'bin' 'node'
 }
 
+function Get-AihNexusToolchainRoot {
+    # TASK-0026: the Nexus TOOLCHAIN root (the tree that owns runtime/ - the
+    # pinned Node and PowerShell distributions) is formally distinct from the
+    # LOGICAL InstallRoot (the tree that owns config/data/scripts identity).
+    # Isolated test fixtures legitimately model config/data-only InstallRoots
+    # with no runtime at all, and on a machine without a system Node the
+    # Nexus-owned nested children of such a fixture must still resolve the
+    # REAL pinned runtime of the Nexus installation that is actually running.
+    # Resolution order: the AIH_TOOLCHAIN_ROOT environment anchor (set
+    # process-scoped by the harness driver and the controller bridge for the
+    # children they spawn), then the tree this file itself is part of (true
+    # for both source checkouts and installed trees), then the logical
+    # InstallRoot chain. A candidate only wins when its runtime/node
+    # directory actually exists; the logical chain is the fallback so
+    # callers keep their existing fail-closed behavior.
+    param([string]$InstallRoot)
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    if (-not [string]::IsNullOrWhiteSpace($env:AIH_TOOLCHAIN_ROOT)) {
+        try { $candidates.Add([System.IO.Path]::GetFullPath($env:AIH_TOOLCHAIN_ROOT)) } catch { }
+    }
+    try { $candidates.Add((Split-Path -Parent $PSScriptRoot)) } catch { }
+    try { $candidates.Add((Get-AihInstallRoot $InstallRoot)) } catch { }
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        if (Test-Path -LiteralPath (Join-Path (Join-Path $candidate 'runtime') 'node') -PathType Container) { return $candidate }
+    }
+    return (Get-AihInstallRoot $InstallRoot)
+}
+
+function Get-AihNodeExecutable {
+    # Resolves the Node EXECUTABLE Nexus-owned children should run. The
+    # TOOLCHAIN root's pinned distribution wins whenever it exists (so a
+    # fixture InstallRoot never silently downgrades to ambient tool
+    # resolution), the logical layout's pinned path is probed second, and
+    # PATH is the last resort before returning $null (callers fail closed).
+    param([string]$InstallRoot)
+    $relative = Get-AihNodeRelativeExecutable
+    $logicalRoot = $null
+    try { $logicalRoot = (Get-AihInstallRoot $InstallRoot) } catch { }
+    $roots = @((Get-AihNexusToolchainRoot -InstallRoot $InstallRoot), $logicalRoot)
+    foreach ($root in $roots) {
+        if ([string]::IsNullOrWhiteSpace($root)) { continue }
+        $candidate = Join-Path (Join-Path (Join-Path $root 'runtime') 'node') $relative
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    $name = if (Test-AihIsWindows) { 'node.exe' } else { 'node' }
+    $command = Get-Command $name -ErrorAction SilentlyContinue
+    if ($null -ne $command) { return $command.Source }
+    return $null
+}
+
 function Get-AihPinnedNodeDirectory {
     # Directory that contains the Nexus-pinned node executable for THIS
     # platform: the Windows ZIP layout keeps node.exe at the runtime root,
@@ -159,7 +212,10 @@ function Get-AihPinnedNodeDirectory {
     # callers prepend it to PATH so Nexus-owned children resolve the pinned
     # runtime ahead of any system Node.
     param([string]$InstallRoot)
-    $root = Get-AihInstallRoot $InstallRoot
+    # The pinned runtime belongs to the TOOLCHAIN root, never to a logical
+    # fixture InstallRoot (TASK-0026): an isolated config/data-only fixture
+    # must resolve the real Nexus runtime, never a silent no-op PATH.
+    $root = Get-AihNexusToolchainRoot -InstallRoot $InstallRoot
     $runtimeNode = Join-Path (Join-Path $root 'runtime') 'node'
     if (Test-AihIsWindows) { return $runtimeNode }
     return Join-Path $runtimeNode 'bin'

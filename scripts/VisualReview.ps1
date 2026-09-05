@@ -169,8 +169,13 @@ function Resolve-AihVisualProviderConfig {
 }
 
 function Resolve-AihVisualNodeExecutable {
-    param([object]$Layout)
-    if(Test-Path -LiteralPath $Layout.Node -PathType Leaf){return $Layout.Node}
+    # TASK-0026: the visual transport child must run the Nexus PINNED Node
+    # even when the caller's logical InstallRoot is an isolated fixture
+    # without runtime/ (a machine without a system Node has no PATH fallback).
+    param([object]$Layout,[string]$InstallRoot)
+    $toolchainNode=Get-AihNodeExecutable -InstallRoot $InstallRoot
+    if(-not[string]::IsNullOrWhiteSpace($toolchainNode)){return $toolchainNode}
+    if($null-ne$Layout-and(Test-Path -LiteralPath $Layout.Node -PathType Leaf)){return $Layout.Node}
     # Platform-aware PATH probe: the managed Node distribution is preferred;
     # the fallback executable name differs per platform (node.exe on Windows).
     $nodeName=if(Test-AihIsWindows){'node.exe'}else{'node'}
@@ -497,7 +502,7 @@ try{
             $keyOwnedByService=$true
         }
         Write-AihAtomicJson -Path $requestPath -Value $transportRequest
-        $nodePath=Resolve-AihVisualNodeExecutable $layout
+        $nodePath=Resolve-AihVisualNodeExecutable $layout -InstallRoot $InstallRoot
         if([string]::IsNullOrWhiteSpace([string]$nodePath)){
             Write-AihVisualFailure -ErrorKind 'visual-review-transport-unavailable' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message 'No Node.js runtime is available for the visual review transport.'
         }
