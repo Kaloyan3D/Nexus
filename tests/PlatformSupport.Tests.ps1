@@ -66,6 +66,74 @@ Get-AihPowerShellHost -InstallRoot $InstallRoot
         Assert-Aih ((Split-Path -Leaf $platformResolved) -eq 'pwsh') ('fresh Platform.ps1-only process resolves the pinned pwsh on Linux (got: ' + $platformResolved + ')')
     }
 
+    # ── Update.ps1 fresh-process entrypoint contract (TASK-0027) ──
+    # Regression: `aih-update` died in a fresh PowerShell process with
+    # CommandNotFoundException 'Test-AihIsWindows' (Update.ps1:25) because the
+    # directly-invoked CLI entrypoint assumed the platform abstraction had
+    # been loaded by some other script. Update.ps1 must self-load
+    # Platform.ps1 from its own directory and resolve the platform branch
+    # alone. The probe hands Update.ps1 an update source containing NEITHER
+    # update target, so a healthy run fails at the BRANCH-LOCAL validation
+    # ('Update source does not contain ...') - proof the platform branch
+    # itself resolved. The regressed run dies with CommandNotFoundException
+    # and reaches no branch. NOTHING is mocked into any session (no
+    # Test-AihIsWindows override): every probe is a brand-new, profile-less
+    # PowerShell process, exactly like the real launcher spawns.
+    $updateFixture = Join-Path ([IO.Path]::GetTempPath()) ('aih-update-fixture-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $updateFixture -Force | Out-Null
+    try {
+        $updateProbeHost = if ($runningOnWindows) { 'powershell.exe' } else { Get-AihPowerShellHost -InstallRoot $InstallRoot }
+        # Contract 1 - directly-invoked script: fresh `powershell -File`.
+        # Native stderr capture runs under ErrorActionPreference 'Continue'
+        # (restored after): the probe EXPECTS child stderr (a regressed run
+        # writes the CommandNotFoundException there), and Windows PowerShell
+        # 5.1 turns a stderr line into a terminating parent error under the
+        # suite's Stop preference. Same hardening as Test-Harness.ps1.
+        $savedPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $directOut = & $updateProbeHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts/Update.ps1') -SourceRoot $updateFixture 2>&1 | ForEach-Object { [string]$_ }
+            $directExit = $LASTEXITCODE
+        }
+        finally { $ErrorActionPreference = $savedPreference }
+        $directText = (@($directOut) -join ' ')
+        Assert-Aih ($directExit -ne 0) 'Update.ps1 fails closed in a fresh process on an empty update source'
+        Assert-Aih ($directText -like '*Update source does not contain*') ('Update.ps1 resolves the platform branch in a fresh process and reaches branch validation: ' + $directText)
+        Assert-Aih ($directText -notmatch 'CommandNotFoundException') ('Update.ps1 fresh-process run has no CommandNotFoundException for a platform helper: ' + $directText)
+
+        # Contract 2 - the real aih-update launcher, layout-plane aware.
+        $updateLauncherLayout = Get-AihLauncherLayout -InstallRoot $InstallRoot
+        if ($runningOnWindows) {
+            $updateLauncher = Join-Path $updateLauncherLayout.Bin 'aih-update.cmd'
+        }
+        elseif ($updateLauncherLayout.Kind -eq 'installed-posix') {
+            $updateLauncher = Join-Path $updateLauncherLayout.Bin 'aih-update'
+        }
+        else {
+            $updateLauncher = Join-Path $updateLauncherLayout.PosixTwinDirectory 'aih-update.sh'
+        }
+        Assert-Aih (Test-Path -LiteralPath $updateLauncher -PathType Leaf) ('aih-update launcher exists on this layout plane: ' + $updateLauncher)
+        $savedPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            if ($runningOnWindows) {
+                $launcherOut = & $updateLauncher -SourceRoot $updateFixture 2>&1 | ForEach-Object { [string]$_ }
+            }
+            else {
+                $launcherOut = & 'sh' $updateLauncher -SourceRoot $updateFixture 2>&1 | ForEach-Object { [string]$_ }
+            }
+            $launcherExit = $LASTEXITCODE
+        }
+        finally { $ErrorActionPreference = $savedPreference }
+        $launcherText = (@($launcherOut) -join ' ')
+        Assert-Aih ($launcherExit -ne 0) 'aih-update launcher fails closed in a fresh process on an empty update source'
+        Assert-Aih ($launcherText -like '*Update source does not contain*') ('aih-update launcher resolves the platform branch in a fresh process: ' + $launcherText)
+        Assert-Aih ($launcherText -notmatch 'CommandNotFoundException') ('aih-update launcher fresh-process run has no CommandNotFoundException: ' + $launcherText)
+    }
+    finally {
+        Remove-Item -LiteralPath $updateFixture -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
     # ── Node artifact selection ──
     Assert-Aih ((Get-AihNodeArchiveName -Version '24.18.1' -Target 'win-x64')-eq'node-v24.18.1-win-x64.zip') 'win-x64 Node artifact is the zip'
     Assert-Aih ((Get-AihNodeArchiveName -Version '24.18.1' -Target 'linux-x64')-eq'node-v24.18.1-linux-x64.tar.xz') 'linux-x64 Node artifact is the tar.xz'

@@ -1,6 +1,6 @@
 {
     "schemaVersion":  1,
-    "nextSequence":  23,
+    "nextSequence":  30,
     "tasks":  [
                   {
                       "schemaVersion":  1,
@@ -831,6 +831,158 @@
                       "completionAuthority":  "controller",
                       "createdAtUtc":  "2026-09-04T14:29:19.3070634Z",
                       "updatedAtUtc":  "2026-09-04T14:29:23.6568490Z",
+                      "completedAtUtc":  null
+                  },
+                  {
+                      "schemaVersion":  1,
+                      "taskId":  "TASK-0026",
+                      "taskInstanceId":  "task_502c54cc6478448c9b13bb6c8a9d96fc",
+                      "description":  "Continue the SAME Linux portability closure task from df1eb56.\r\n\r\nDo NOT create a new TASK number.\r\nDo NOT stop after fixing one failure.\r\nThe real CachyOS installed-tree audit is now authoritative:\r\n\r\n    PASS 1614\r\n    FAIL 7\r\n    suites 34\r\n\r\nSetup: PASS\r\naih-doctor -Offline: PASS\r\n\r\nRemaining failing suites:\r\n\r\n    Harness\r\n    VisualReview\r\n    VisualLoop\r\n    VisualControllerLifecycle\r\n    AihControllerIdentity\r\n    PlatformSupport\r\n    AihControllerHost\r\n\r\nFour previous Linux failures are now confirmed closed on real CachyOS:\r\n\r\n    Intelligence.Registry\r\n    Intelligence.Snapshots\r\n    Intelligence.EndToEnd\r\n    Intelligence.CodeIntelligence\r\n\r\nContinue the closure loop until the REAL installed-tree Linux audit reaches\r\nFAIL 0.\r\n\r\n==================================================\r\n1. HARNESS — SOURCE CREDENTIAL SCAN\r\n==================================================\r\n\r\nReal failure:\r\n\r\n    FAIL: source contains no credential values\r\n\r\nInspect the actual matched FILE PATH safely.\r\nDo NOT print or expose the credential value.\r\n\r\nCurrent source exclusion logic uses a backslash-delimited FullName regex for:\r\n\r\n    .git\r\n    app\r\n    runtime\r\n    data\r\n    logs\r\n    .ai-harness\r\n\r\nThat is not POSIX-safe because Linux FullName values use \u0027/\u0027.\r\n\r\nDetermine whether the Linux failure is the runtime DeepSeek credential being\r\nincorrectly included in the source scan.\r\n\r\nFix this generically with platform-neutral relative-path/component logic.\r\n\r\nDo NOT weaken SEC001.\r\nDo NOT ignore real source credentials.\r\nDo NOT special-case the current credential file.\r\n\r\nAdd a regression proving runtime/state directories are excluded on both path\r\nseparator styles while real source leaks are still caught.\r\n\r\n==================================================\r\n2. PINNED NODE / PARTIAL FIXTURE ROOT CONTRACT\r\n==================================================\r\n\r\nLikely shared failures:\r\n\r\n    VisualLoop\r\n    VisualControllerLifecycle\r\n    AihControllerIdentity\r\n\r\nReal controller evidence:\r\n\r\n    deterministic verification FAILED\r\n    Failing checks: node:test\r\n\r\nAihControllerIdentity similarly receives:\r\n\r\n    verification result = fail\r\n    expected = pass\r\n\r\nInspect the verification result\u0027s:\r\n\r\n    Executable\r\n    Command\r\n    WorkingDirectory\r\n    StandardOutput\r\n    StandardError\r\n    Error\r\n    PATH\r\n    resolved node executable\r\n\r\nbefore changing code.\r\n\r\nImportant architecture fact:\r\n\r\nSeveral tests create isolated logical InstallRoots containing only things like:\r\n\r\n    scripts/\r\n    config/\r\n    data/\r\n\r\nThey intentionally do NOT contain:\r\n\r\n    runtime/node\r\n\r\nOn Linux there is no system Node on the real test machine.\r\n\r\nTherefore do not make Nexus-owned nested child execution depend on ambient\r\nsystem Node, and do not copy runtime/node into every fixture as a workaround.\r\n\r\nFormalize the distinction between:\r\n\r\n    logical/config fixture InstallRoot\r\n    Nexus runtime/toolchain root\r\n\r\nCreate/reuse ONE shared process-scoped runtime environment mechanism so Nexus\r\nowned nested children resolve the real pinned Node runtime even when their\r\nlogical fixture InstallRoot is isolated.\r\n\r\nRequired properties:\r\n\r\n- pinned Node 24.18.1 resolves in the failing nested child paths\r\n- no system Node dependency\r\n- no persistent PATH modification\r\n- no shell profile changes\r\n- existing PATH preserved behind pinned runtime\r\n- Windows behavior preserved\r\n- shared fix, not three suite-specific patches\r\n\r\nProve inside the actual failing nested verification path that:\r\n\r\n    node --version == v24.18.1\r\n\r\nand that the executable belongs to the Nexus pinned runtime.\r\n\r\n==================================================\r\n3. PLATFORM SUPPORT TEST SIMULATION\r\n==================================================\r\n\r\nReal failure:\r\n\r\n    FAIL: A: Windows keeps WindowStyle Hidden\r\n\r\nThis is a TEST contract issue.\r\n\r\nSections A-F are Windows contract tests but currently run against the real\r\nhost platform without first forcing Test-AihIsWindows=true.\r\n\r\nOn Linux, production correctly omits WindowStyle.\r\n\r\nFix the test so:\r\n\r\n    A-F explicitly simulate Windows\r\n    G-H explicitly simulate Linux\r\n\r\nrestore the original platform function afterwards.\r\n\r\nDo NOT change production Start-AihDetachedProcess merely to satisfy this test.\r\n\r\nPreserve the earlier Windows regression guarantee:\r\n\r\n    omitted WorkingDirectory is never forwarded, not even as null.\r\n\r\n==================================================\r\n4. AIHCONTROLLERHOST — CONFIG LAYOUT PLANE\r\n==================================================\r\n\r\nReal failure:\r\n\r\n    ENOENT:\r\n    \u003cinstalled-root\u003e/config/versions.psd1\r\n\r\nThe test currently reads both:\r\n\r\n    config/versions.json\r\n    config/versions.psd1\r\n\r\nunconditionally.\r\n\r\nApply the same source-vs-installed composition philosophy already used for\r\nlaunchers.\r\n\r\nDo NOT copy versions.psd1 into the Linux installed tree merely to satisfy the\r\ntest.\r\n\r\nDefine what belongs to:\r\n\r\n    source checkout\r\n    installed POSIX tree\r\n    installed Windows tree\r\n\r\nand assert the appropriate contract for each.\r\n\r\nThe authoritative installed Linux version metadata must remain sufficient for\r\nruntime operation.\r\n\r\n==================================================\r\n5. VISUALREVIEW — CAPTURE BEFORE PATCHING\r\n==================================================\r\n\r\nReal failure:\r\n\r\n    ConvertFrom-Json\r\n    Unexpected character while parsing value\r\n\r\nThere is also a stray:\r\n\r\n    True\r\n\r\nin suite output.\r\n\r\nThe test currently invokes:\r\n\r\n    Add-AihPinnedNodeToPath -InstallRoot $InstallRoot\r\n\r\nwithout suppressing its return value.\r\n\r\nSuppress that incidental output.\r\n\r\nHowever DO NOT assume that is the root cause of $missing.text.\r\n\r\nBefore changing the parser or failure envelope, capture:\r\n\r\n    $missing.exitCode\r\n    raw stdout\r\n    raw stderr\r\n    exact $missing.text\r\n\r\nfor the missing-screenshot child invocation.\r\n\r\nThe expected contract is a structured JSON rejection with exit code 3.\r\n\r\nFind why the child emits non-JSON on Linux and fix the shared transport/root\r\ncause.\r\n\r\nDo NOT weaken ConvertFrom-Json or accept mixed prose + JSON.\r\n\r\n==================================================\r\n6. PORTABILITY GATE\r\n==================================================\r\n\r\nThe portability gate still passes 17 assertions despite these real Linux\r\nfailures.\r\n\r\nStrengthen it generically to detect the newly proven classes where reasonable:\r\n\r\n- path filtering that assumes \u0027\\\u0027 around directory components\r\n- Windows-only behavioral assertions executed without an explicit platform\r\n  simulation/guard\r\n- source-only config artifacts assumed to exist in installed trees\r\n- partial fixture InstallRoots causing Nexus-owned nested children to lose the\r\n  pinned runtime contract\r\n\r\nDo not implement a blacklist of today\u0027s seven files.\r\n\r\n==================================================\r\nCLOSURE LOOP\r\n==================================================\r\n\r\nAfter fixes:\r\n\r\n1. run focused regressions\r\n2. run full Windows harness and keep FAIL 0\r\n3. commit/push coherent fixes\r\n4. do NOT merge main\r\n\r\nIf this environment still has no Linux host, report the exact commit and ask\r\nonly for the next real CachyOS installed-tree audit.\r\n\r\nDo not create another task.\r\n\r\nOn the real CachyOS machine the acceptance remains:\r\n\r\n    ./setup.sh ...                     PASS\r\n    aih-doctor -Offline                PASS\r\n    installed Test-Harness\r\n      -ContinueOnFailure               34 suites / FAIL 0\r\n    aih-test                           PASS\r\n\r\nA newly exposed repository-fixable Linux failure remains part of THIS SAME\r\nclosure task.\r\n\r\nDo not declare the Linux port READY until the real installed-tree audit is\r\nFAIL 0.",
+                      "status":  "implementing",
+                      "dependencies":  [
+
+                                       ],
+                      "baseCommit":  "df1eb568ddac8160c7ec0f5e71504b0efa77af95",
+                      "executionClass":  "engineer_normal",
+                      "executor":  "engineer_normal",
+                      "attempt":  1,
+                      "maxAttempts":  3,
+                      "risk":  "normal",
+                      "acceptanceCriteria":  [
+
+                                             ],
+                      "verification":  {
+                                           "required":  [
+
+                                                        ],
+                                           "outcomes":  [
+
+                                                        ]
+                                       },
+                      "reviewRequested":  false,
+                      "executionClassOverride":  "engineer_normal",
+                      "worktree":  null,
+                      "failureSignatures":  [
+
+                                            ],
+                      "codexCalls":  0,
+                      "completionAuthority":  "controller",
+                      "createdAtUtc":  "2026-09-05T18:32:18.1599981Z",
+                      "updatedAtUtc":  "2026-09-05T18:32:23.3495577Z",
+                      "completedAtUtc":  null
+                  },
+                  {
+                      "schemaVersion":  1,
+                      "taskId":  "TASK-0027",
+                      "taskInstanceId":  "task_c06d2adae68741c48baf5a2648e71d3a",
+                      "description":  "NEWLY EXPOSED WINDOWS REGRESSION — KEEP IT IN THE SAME CLOSURE TASK\r\n\r\nBefore declaring the Linux-port closure complete, fix this newly discovered\r\nWindows regression as part of the SAME task.\r\n\r\nReal Windows reproduction:\r\n\r\n    PS C:\\AI-Harness\u003e aih-update\r\n\r\nfails with:\r\n\r\n    Test-AihIsWindows : The term \u0027Test-AihIsWindows\u0027 is not recognized\r\n    At C:\\AI-Harness\\scripts\\Update.ps1:25\r\n\r\nCurrent Update.ps1 directly calls:\r\n\r\n    if (Test-AihIsWindows) {\r\n\r\nwithout independently loading the platform abstraction.\r\n\r\nROOT CAUSE TO VERIFY:\r\n\r\nUpdate.ps1 is a directly-invoked CLI entrypoint, but it assumes\r\nTest-AihIsWindows was already loaded by another script/process.\r\n\r\nThat assumption is invalid in a fresh PowerShell process.\r\n\r\nFIX REQUIREMENTS:\r\n\r\n1. Update.ps1 must be independently executable.\r\n\r\n2. Load the platform abstraction before the first Test-AihIsWindows call,\r\n   preferably from the script\u0027s own directory, e.g. through Platform.ps1.\r\n\r\n3. Do not rely on Common.ps1 or a launcher having been loaded previously.\r\n\r\n4. Preserve both branches:\r\n\r\n   Windows:\r\n       Update.ps1 -\u003e scripts/Setup.ps1\r\n\r\n   Linux:\r\n       Update.ps1 -\u003e setup.sh\r\n\r\n5. Add a FRESH-PROCESS regression test.\r\n\r\n   The test must prove that Update.ps1 can start far enough to resolve the\r\n   platform branch without:\r\n\r\n       CommandNotFoundException: Test-AihIsWindows\r\n\r\n   Test both the directly-invoked script contract and the aih-update launcher\r\n   contract where practical.\r\n\r\n6. Do not merely mock Test-AihIsWindows into the caller session.\r\n   The regression specifically concerns a clean process where no Nexus\r\n   functions are preloaded.\r\n\r\n7. Strengthen the portability/platform gate so directly executable scripts\r\n   cannot reference Platform.ps1-owned functions before loading the platform\r\n   abstraction.\r\n\r\nThis is now an acceptance blocker.\r\n\r\nThe closure currently has:\r\n\r\n    Linux remaining:\r\n        VisualReview\r\n        PlatformSupport\r\n\r\n    Windows regression:\r\n        aih-update fresh-process startup\r\n\r\nFix ALL THREE in this same closure loop.\r\n\r\nDo not create another TASK.\r\nDo not merge main.\r\n\r\nAfter fixes, require:\r\n\r\n    Windows:\r\n        aih-update fresh-process regression PASS\r\n        full 34-suite harness FAIL 0\r\n\r\n    CachyOS:\r\n        full installed-tree harness FAIL 0\r\n        aih-test PASS",
+                      "status":  "implementing",
+                      "dependencies":  [
+
+                                       ],
+                      "baseCommit":  "a6e49c7c44a4211353a628a125773a2c60377f84",
+                      "executionClass":  "engineer_normal",
+                      "executor":  "engineer_normal",
+                      "attempt":  1,
+                      "maxAttempts":  3,
+                      "risk":  "normal",
+                      "acceptanceCriteria":  [
+
+                                             ],
+                      "verification":  {
+                                           "required":  [
+
+                                                        ],
+                                           "outcomes":  [
+
+                                                        ]
+                                       },
+                      "reviewRequested":  false,
+                      "executionClassOverride":  "engineer_normal",
+                      "worktree":  null,
+                      "failureSignatures":  [
+
+                                            ],
+                      "codexCalls":  0,
+                      "completionAuthority":  "controller",
+                      "createdAtUtc":  "2026-09-05T20:25:19.4284444Z",
+                      "updatedAtUtc":  "2026-09-05T20:25:23.5175205Z",
+                      "completedAtUtc":  null
+                  },
+                  {
+                      "schemaVersion":  1,
+                      "taskId":  "TASK-0028",
+                      "taskInstanceId":  "task_2330948383874659a8bc0e35ea7156d9",
+                      "description":  "which model are you",
+                      "status":  "implementing",
+                      "dependencies":  [
+
+                                       ],
+                      "baseCommit":  "a6e49c7c44a4211353a628a125773a2c60377f84",
+                      "executionClass":  "engineer_normal",
+                      "executor":  "engineer_normal",
+                      "attempt":  1,
+                      "maxAttempts":  3,
+                      "risk":  "normal",
+                      "acceptanceCriteria":  [
+
+                                             ],
+                      "verification":  {
+                                           "required":  [
+
+                                                        ],
+                                           "outcomes":  [
+
+                                                        ]
+                                       },
+                      "reviewRequested":  false,
+                      "executionClassOverride":  "engineer_normal",
+                      "worktree":  null,
+                      "failureSignatures":  [
+
+                                            ],
+                      "codexCalls":  0,
+                      "completionAuthority":  "controller",
+                      "createdAtUtc":  "2026-09-05T20:50:26.3420823Z",
+                      "updatedAtUtc":  "2026-09-05T20:50:30.4944162Z",
+                      "completedAtUtc":  null
+                  },
+                  {
+                      "schemaVersion":  1,
+                      "taskId":  "TASK-0029",
+                      "taskInstanceId":  "task_2636512525be4452ad907144125ef7e3",
+                      "description":  "which model are you",
+                      "status":  "implementing",
+                      "dependencies":  [
+
+                                       ],
+                      "baseCommit":  "a6e49c7c44a4211353a628a125773a2c60377f84",
+                      "executionClass":  "engineer_normal",
+                      "executor":  "engineer_normal",
+                      "attempt":  1,
+                      "maxAttempts":  3,
+                      "risk":  "normal",
+                      "acceptanceCriteria":  [
+
+                                             ],
+                      "verification":  {
+                                           "required":  [
+
+                                                        ],
+                                           "outcomes":  [
+
+                                                        ]
+                                       },
+                      "reviewRequested":  false,
+                      "executionClassOverride":  "engineer_normal",
+                      "worktree":  null,
+                      "failureSignatures":  [
+
+                                            ],
+                      "codexCalls":  0,
+                      "completionAuthority":  "controller",
+                      "createdAtUtc":  "2026-09-05T20:50:52.2472865Z",
+                      "updatedAtUtc":  "2026-09-05T20:50:56.3833669Z",
                       "completedAtUtc":  null
                   }
               ]

@@ -807,6 +807,107 @@ function Get-AihPlatformDependencyFindings {
     return @($findings)
 }
 
+function Get-AihEntrypointPlatformFindings {
+    # TASK-0027: directly executable entrypoints must SELF-LOAD the platform
+    # abstraction. A script reachable as a launcher target (bin/*.cmd, the
+    # POSIX launcher twins, extensionless installed launchers) or referenced
+    # by an installer entrypoint may invoke a Platform.ps1-owned function
+    # only after dot-sourcing Platform.ps1 or Common.ps1 from its own
+    # directory: a fresh CLI process (aih-update) preloads nothing, and the
+    # unguarded call died with CommandNotFoundException before any platform
+    # branch resolved. References nested inside function definitions execute
+    # only when that function is invoked (after top-level loads), so only
+    # top-level references before the first load are findings.
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $findings = [System.Collections.Generic.List[object]]::new()
+    $rootPath = [System.IO.Path]::GetFullPath($Root)
+    $platformPath = Join-Path $rootPath 'scripts/Platform.ps1'
+    if (-not (Test-Path -LiteralPath $platformPath -PathType Leaf)) { return @() }
+    $platformErrors = $null
+    $platformAst = [System.Management.Automation.Language.Parser]::ParseFile($platformPath, [ref]$null, [ref]$platformErrors)
+    if ($null -eq $platformAst -or $platformErrors.Count -gt 0) { return @() }
+    $platformOwned = @($platformAst.FindAll({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
+    if ($platformOwned.Count -eq 0) { return @() }
+
+    # Entrypoint discovery is launcher-derived and stays self-maintaining:
+    # every scripts/*.ps1 a launcher or installer entrypoint references is
+    # directly executable in a fresh process. The launcher planes are text-
+    # scanned because launchers are plain command lines (bin/*.cmd in the
+    # Windows/source plane, bin/linux/*.sh twins in the checkout, and the
+    # extensionless installed launchers an installed POSIX tree publishes).
+    $entrypoints = [System.Collections.Generic.List[string]]::new()
+    $binDir = Join-Path $rootPath 'bin'
+    if (Test-Path -LiteralPath $binDir -PathType Container) {
+        foreach ($launcher in @(Get-ChildItem -LiteralPath $binDir -File -ErrorAction SilentlyContinue)) {
+            $launcherText = [System.IO.File]::ReadAllText($launcher.FullName)
+            foreach ($match in [regex]::Matches($launcherText, 'scripts[\\/][A-Za-z0-9_.\-]+\.ps1')) {
+                $entrypoints.Add(($match.Value -replace '\\', '/'))
+            }
+        }
+        $linuxDir = Join-Path $binDir 'linux'
+        if (Test-Path -LiteralPath $linuxDir -PathType Container) {
+            foreach ($launcher in @(Get-ChildItem -LiteralPath $linuxDir -File -ErrorAction SilentlyContinue)) {
+                $launcherText = [System.IO.File]::ReadAllText($launcher.FullName)
+                foreach ($match in [regex]::Matches($launcherText, 'scripts/[A-Za-z0-9_.\-]+\.ps1')) {
+                    $entrypoints.Add($match.Value)
+                }
+            }
+        }
+    }
+    foreach ($installer in @('setup.ps1', 'setup.sh')) {
+        $installerPath = Join-Path $rootPath $installer
+        if (Test-Path -LiteralPath $installerPath -PathType Leaf) {
+            $installerText = [System.IO.File]::ReadAllText($installerPath)
+            foreach ($match in [regex]::Matches($installerText, 'scripts[\\/][A-Za-z0-9_.\-]+\.ps1')) {
+                $entrypoints.Add(($match.Value -replace '\\', '/'))
+            }
+            if ($installer -like '*.ps1') { $entrypoints.Add($installer) }
+        }
+    }
+
+    $seen = @{}
+    foreach ($relative in @($entrypoints | Select-Object -Unique)) {
+        $key = $relative.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $scriptPath = Join-Path $rootPath $relative
+        if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { continue }
+        $parseErrors = $null
+        $scriptAst = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$parseErrors)
+        # Parse failures are reported by the dedicated parse gate; skip here.
+        if ($null -eq $scriptAst -or $parseErrors.Count -gt 0) { continue }
+        $localDefined = @($scriptAst.FindAll({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
+        $ownedCalled = @($platformOwned | Where-Object { $localDefined -notcontains $_ })
+        if ($ownedCalled.Count -eq 0) { continue }
+        $commands = @($scriptAst.FindAll({ param($a) $a -is [System.Management.Automation.Language.CommandAst] }, $true))
+        $callSites = @($commands | Where-Object { $ownedCalled -contains [string]$_.GetCommandName() })
+        if ($callSites.Count -eq 0) { continue }
+        # A load is a dot-invoked command whose text names the platform layer:
+        # `. (Join-Path $PSScriptRoot 'Platform.ps1')` or the Common.ps1 form.
+        $loadLines = @($commands | Where-Object {
+            [int]$_.InvocationOperator -eq [int][System.Management.Automation.Language.TokenKind]::Dot -and
+            $_.Extent.Text -match '(Platform|Common)\.ps1'
+        } | ForEach-Object { $_.Extent.StartLineNumber })
+        $firstLoadLine = if ($loadLines.Count -gt 0) { (@($loadLines) | Measure-Object -Minimum).Minimum } else { [int]::MaxValue }
+        $functionExtents = @($scriptAst.FindAll({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Extent })
+        foreach ($call in $callSites) {
+            $insideFunction = $false
+            foreach ($extent in $functionExtents) {
+                if ($call.Extent.StartOffset -ge $extent.StartOffset -and $call.Extent.EndOffset -le $extent.EndOffset) { $insideFunction = $true; break }
+            }
+            if ($insideFunction) { continue }
+            if ($call.Extent.StartLineNumber -ge $firstLoadLine) { continue }
+            $findings.Add([pscustomobject]@{
+                Kind = 'EntrypointPlatformBeforeLoad'; File = $relative; Line = $call.Extent.StartLineNumber
+                Token = [string]$call.GetCommandName(); Classification = 'entrypoint-platform-before-load'
+                Detail = 'a directly executable entrypoint invokes a Platform.ps1-owned function before dot-sourcing Platform.ps1/Common.ps1; a fresh CLI process fails with CommandNotFoundException.'
+            })
+        }
+    }
+    return @($findings)
+}
+
 function Get-AihJsExecutableFindings {
     # TASK-0025 RC4: the JS plane (*.js, *.cjs, *.mjs) was outside the
     # PowerShell-centric audit. Flags hardcoded Windows-executable literals
@@ -1041,6 +1142,7 @@ function Invoke-AihPortabilityAudit {
     $linuxLaunchers = Get-AihLinuxLauncherFindings -Files $files
     $suiteTable = Get-AihHarnessSuiteTableFindings -Root $rootPath -ParsedFiles $parsed
     $platformDeps = Get-AihPlatformDependencyFindings -Root $rootPath
+    $entrypointPlatform = Get-AihEntrypointPlatformFindings -Root $rootPath
     $jsExecutables = Get-AihJsExecutableFindings -Root $rootPath
     $windowsFixtures = Get-AihWindowsFixtureFindings -Root $rootPath
     $resultSchemas = Get-AihResultSchemaFindings -Root $rootPath
@@ -1063,6 +1165,7 @@ function Invoke-AihPortabilityAudit {
         LinuxLauncherFindings = $linuxLaunchers
         SuiteTableFindings = $suiteTable
         PlatformDependencyFindings = $platformDeps
+        EntrypointPlatformFindings = $entrypointPlatform
         JsExecutableFindings = $jsExecutables
         WindowsFixtureFindings = $windowsFixtures
         ResultSchemaFindings = $resultSchemas
@@ -1090,6 +1193,6 @@ Export-ModuleMember -Function @(
     'Get-AihStringLiteralFindings', 'Get-AihInstallRootFindings', 'Get-AihWindowsExecutableFindings',
     'Get-AihPathSeparatorFindings',
     'Get-AihLinuxLauncherFindings', 'Get-AihHarnessSuiteTableFindings', 'Invoke-AihPortabilityAudit',
-    'Get-AihPlatformDependencyFindings', 'Get-AihJsExecutableFindings', 'Get-AihWindowsFixtureFindings',
+    'Get-AihPlatformDependencyFindings', 'Get-AihEntrypointPlatformFindings', 'Get-AihJsExecutableFindings', 'Get-AihWindowsFixtureFindings',
     'Get-AihResultSchemaFindings', 'Test-AihPathLiteralAllowed', 'Write-AihPortabilityInventoryReport'
 )
