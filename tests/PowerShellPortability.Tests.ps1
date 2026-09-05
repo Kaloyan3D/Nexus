@@ -211,4 +211,27 @@ foreach ($finding in @($audit.ExecutableFindings)) {
 }
 Assert-Aih ($execViolations.Count -eq 0) ("Windows-only executables/APIs appear only in guarded or abstraction contexts (found: " + (($execViolations.ToArray()) -join ", ") + ")")
 
+# 10. OS-assumption classes proven by the real CachyOS installed-tree audit
+#     (TASK-0026): backslash-anchored component filters (a filter that
+ #    assumes FullName uses backslashes never matches on POSIX), Windows-only
+#     behavior contracts asserted without a platform simulation, and
+#     source-only config artifacts read without a layout-plane guard.
+$osAssumptions = @($audit.OsAssumptionFindings)
+$osText = ((@($osAssumptions) | ForEach-Object { $_.File + ":" + $_.Line + " [" + $_.Kind + "]" }) -join ", ")
+Assert-Aih ($osAssumptions.Count -eq 0) ("no OS-assumption class findings (found: " + $osText + ")")
+
+# 11. The pinned-runtime TOOLCHAIN contract (TASK-0026): a fixture logical
+#     InstallRoot may carry no runtime/, so pinned Node/PowerShell
+#     resolution must route through the shared toolchain root (env anchor >
+#     the running Nexus tree > the logical root), and both the harness
+#     driver and the controller bridge must name that root for the children
+#     they spawn. Nexus-owned nested children never depend on ambient
+#     system Node, and nothing is persisted.
+$platformText = [System.IO.File]::ReadAllText((Join-Path $InstallRoot 'scripts/Platform.ps1'))
+Assert-Aih ($platformText.Contains('function Get-AihNexusToolchainRoot') -and $platformText.Contains('Get-AihNexusToolchainRoot -InstallRoot $InstallRoot') -and $platformText.Contains('function Get-AihNodeExecutable')) 'pinned-runtime resolution routes through the shared toolchain-root contract'
+$controllerText = [System.IO.File]::ReadAllText((Join-Path $InstallRoot 'config/AihController.cjs'))
+Assert-Aih ($controllerText.Contains('AIH_TOOLCHAIN_ROOT') -and $controllerText.Contains('resolveToolchainRoot')) 'the controller bridge names the toolchain root for the children it spawns'
+$testHarnessText = [System.IO.File]::ReadAllText((Join-Path $InstallRoot 'scripts/Test-Harness.ps1'))
+Assert-Aih ($testHarnessText.Contains('$env:AIH_TOOLCHAIN_ROOT = $InstallRoot')) 'the harness driver anchors suite children to the toolchain root'
+
 Write-Host ("RESULT: $script:passed portability gate assertions passed.")
