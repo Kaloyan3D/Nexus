@@ -19,7 +19,7 @@ $liveLayout=Get-AihLayout $InstallRoot
 # runtime must win BEFORE the system PATH). The shared platform abstraction
 # resolves the pinned runtime directory and prepends it with the platform path
 # separator (TASK-0025 Class B: no hardcoded ';').
-Add-AihPinnedNodeToPath -InstallRoot $InstallRoot
+$null = Add-AihPinnedNodeToPath -InstallRoot $InstallRoot  # return value suppressed: suite output is assertion evidence
 
 # ── fixture install root (isolated copies of config + scripts + live settings) ──
 $fixture=New-Fixture 'install'
@@ -69,8 +69,20 @@ llm-pi-ai:
         if($PreviousResultPath){$arguments+=@('-PreviousResultPath',$PreviousResultPath)}
         if($PayloadFile){$arguments+=@('-PayloadFile',$PayloadFile)}
         if($Trigger){$arguments+=@('-Trigger',$Trigger)}
-        $output=& $aihPsHost $arguments 2>&1|ForEach-Object{[string]$_}
-        [pscustomobject]@{exitCode=$LASTEXITCODE;text=($output-join [Environment]::NewLine)}
+        # TASK-0026 capture-first transport: stdout and stderr are captured as
+        # SEPARATE streams (no 2>&1 merging). The JSON transport contract
+        # lives on stdout ALONE; stderr diagnostics never participate in
+        # parsing, and the raw stream bytes ride on the result object so a
+        # failing assertion prints the exact child output.
+        $captureRoot=[IO.Path]::GetTempPath()
+        $stdoutFile=Join-Path $captureRoot ('aih-vr-'+[guid]::NewGuid().ToString('N')+'.out')
+        $stderrFile=Join-Path $captureRoot ('aih-vr-'+[guid]::NewGuid().ToString('N')+'.err')
+        & $aihPsHost $arguments 1> $stdoutFile 2> $stderrFile
+        $code=$LASTEXITCODE
+        $rawStdout=[string](Get-Content -Raw -LiteralPath $stdoutFile -ErrorAction SilentlyContinue)
+        $rawStderr=[string](Get-Content -Raw -LiteralPath $stderrFile -ErrorAction SilentlyContinue)
+        Remove-Item -LiteralPath $stdoutFile,$stderrFile -Force -ErrorAction SilentlyContinue
+        [pscustomobject]@{exitCode=$code;text=$rawStdout;stdout=$rawStdout;stderr=$rawStderr}
     }
     function Set-AihFixtureSettings {
         # Pipeline-aware: here-strings are piped in, so the content MUST be
@@ -113,8 +125,13 @@ llm-pi-ai:
     Assert-Aih ($compatible-contains'deepseek-v4-flash-vision-exp' -and $compatible-notcontains'deepseek-v4-flash') '2: compatible-models list contains only vision-capable models'
 
     # ── 3. EDITOR STATE EXPOSES THE OPTIONAL ROLE ────────────────────────────
-    $editorStateRaw=& $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $liveLayout.Root 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $fixture 2>&1
-    $editorState=(($editorStateRaw|ForEach-Object{[string]$_})-join '')|ConvertFrom-Json
+    # stdout-only JSON parse with separate stderr capture (TASK-0026).
+    $editorStateOut=Join-Path ([IO.Path]::GetTempPath()) ('aih-vr-'+[guid]::NewGuid().ToString('N')+'.out')
+    $editorStateErr=Join-Path ([IO.Path]::GetTempPath()) ('aih-vr-'+[guid]::NewGuid().ToString('N')+'.err')
+    & $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $liveLayout.Root 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $fixture 1> $editorStateOut 2> $editorStateErr
+    $editorState=(Get-Content -Raw -LiteralPath $editorStateOut)|ConvertFrom-Json
+    $editorStateStderr=[string](Get-Content -Raw -LiteralPath $editorStateErr -ErrorAction SilentlyContinue)
+    Remove-Item -LiteralPath $editorStateOut,$editorStateErr -Force -ErrorAction SilentlyContinue
     Assert-Aih ([bool]$editorState.roleRequirements.visualReviewer.requiresVision -and -not[bool]$editorState.roleRequirements.visualReviewer.writable) '3: editor state exposes visualReviewer requirements'
     Assert-Aih (@($editorState.roleModels.visualReviewer)-contains'deepseek-v4-flash-vision-exp') '3: editor state lists the vision model as visualReviewer-compatible'
 
@@ -122,8 +139,15 @@ llm-pi-ai:
     $task=New-AihTask $workspace 'visual review smoke task'
     $script:taskId=$task.taskId
     $missing=Invoke-AihVisual -Screenshots @() -Execute
-    $missingJson=$missing.text|ConvertFrom-Json
-    Assert-Aih ($missing.exitCode -eq 3 -and $missingJson.ok -eq $false -and $missingJson.errorKind -eq 'visual-review-packet-rejected') '4: missing screenshot fails closed with a structured rejection (exit 3)'
+    # TASK-0026: parse defensively and carry the RAW captured streams in the
+    # failure evidence - the child's exact stdout/stderr/exit code are the
+    # first-class diagnosis, never a parser summary.
+    $missingJson=$null
+    try{$missingJson=$missing.text|ConvertFrom-Json}catch{$missingJson=$null}
+    $evOut=[string]$missing.stdout; if($evOut.Length-gt400){$evOut=$evOut.Substring(0,400)}
+    $evErr=[string]$missing.stderr; if($evErr.Length-gt400){$evErr=$evErr.Substring(0,400)}
+    $evidence='exitCode='+$missing.exitCode+' stdout='+($evOut -replace "`r?`n",' | ')+' stderr='+($evErr -replace "`r?`n",' | ')
+    Assert-Aih ($null-ne$missingJson-and$missing.exitCode-eq3-and$missingJson.ok-eq$false-and$missingJson.errorKind-eq'visual-review-packet-rejected') ('4: missing screenshot fails closed with a structured rejection (exit 3). captured: '+$evidence)
     Assert-Aih ((@($missingJson.violations)|Where-Object{$_-match'no screenshot'}|Measure-Object).Count -ge 1) '4: the rejection names the missing screenshot violation'
 
     # ── 5. INVALID IMAGE PATH ─────────────────────────────────────────────────
