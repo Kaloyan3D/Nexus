@@ -314,29 +314,29 @@ function Get-AihProjectProfile {
 }
 
 function Format-AihProjectContext {
-    param([Parameter(Mandatory = $true)][object]$Profile, [int]$MaxCharacters = 20000)
+    param([Parameter(Mandatory = $true)][object]$ProjectProfile, [int]$MaxCharacters = 20000)
 
     $lines = [System.Collections.Generic.List[string]]::new()
-    $lines.Add("Project workspace: $($Profile.Workspace)")
-    $lines.Add("Detected stacks: $(if ($Profile.Stacks.Count) { $Profile.Stacks -join ', ' } else { 'unknown' })")
-    $lines.Add("Verification mode: $($Profile.LocalVerificationMode)")
-    if ($Profile.VerificationCommands.Count) {
+    $lines.Add("Project workspace: $($ProjectProfile.Workspace)")
+    $lines.Add("Detected stacks: $(if ($ProjectProfile.Stacks.Count) { $ProjectProfile.Stacks -join ', ' } else { 'unknown' })")
+    $lines.Add("Verification mode: $($ProjectProfile.LocalVerificationMode)")
+    if ($ProjectProfile.VerificationCommands.Count) {
         $lines.Add('Deterministic verification commands:')
-        foreach ($command in $Profile.VerificationCommands) {
+        foreach ($command in $ProjectProfile.VerificationCommands) {
             $availability = if ($command.Available) { 'available' } else { 'tool missing' }
             $lines.Add("- [$($command.Kind)] $($command.Display) (cwd: $($command.WorkingDirectory); $availability)")
         }
     }
     foreach ($name in @('project.md', 'architecture.md', 'conventions.md')) {
-        $path = Join-Path $Profile.Workspace ".ai-harness\$name"
+        $path = Join-Path $ProjectProfile.Workspace ".ai-harness\$name"
         if (Test-Path -LiteralPath $path) {
             $content = Get-Content -Raw -LiteralPath $path
             $lines.Add("`n.ai-harness/${name}:`n$content")
         }
     }
-    if ($Profile.Recommendations.Count) {
+    if ($ProjectProfile.Recommendations.Count) {
         $lines.Add("`nConfiguration recommendations:")
-        foreach ($recommendation in $Profile.Recommendations) { $lines.Add("- $recommendation") }
+        foreach ($recommendation in $ProjectProfile.Recommendations) { $lines.Add("- $recommendation") }
     }
     $text = $lines -join "`n"
     if ($text.Length -gt $MaxCharacters) { return $text.Substring(0, $MaxCharacters) + "`n[project context truncated]" }

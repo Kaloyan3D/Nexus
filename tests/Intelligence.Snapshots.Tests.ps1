@@ -93,7 +93,7 @@ try {
     Remove-Item -LiteralPath (Join-Path $repo 'src/extra.ts') -Force
     $buildDelete = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $checkoutId
     Assert-Aih ($buildDelete.stateChanged) 'deleting a file changes the state'
-    Invoke-TestGit $repo @('mv', 'src\main.ts', 'src\renamed.ts') | Out-Null
+    Invoke-TestGit $repo @('mv', 'src/main.ts', 'src/renamed.ts') | Out-Null
     $buildRename = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $checkoutId
     Assert-Aih ($buildRename.stateChanged) 'renaming a file changes the state'
     $renameRows = Get-AihSnapshotFiles -StoreRoot $store -SnapshotId $buildRename.snapshot.snapshotId -RepositoryId $repositoryId
