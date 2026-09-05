@@ -115,6 +115,15 @@ try {
     $tarIdx=$setupSh.IndexOf('tar -xzf "$AIH_PWSH_TMP')
     $provIdx=$setupSh.IndexOf('aih_provision_pwsh_archive "$AIH_PWSH_TMP')
     Assert-Aih ($verifyIdx-ge0-and$tarIdx-gt$verifyIdx-and$provIdx-gt$tarIdx) 'setup.sh ordering: SHA256 verify before extraction before provisioning'
+    $nodeLib=[IO.File]::ReadAllText((Join-Path $InstallRoot 'scripts/lib/aih-node-env.sh'))
+    Assert-Aih ($setupSh.Contains('aih-node-env.sh')-and$setupSh.Contains('aih_use_pinned_node')) 'setup.sh gates and prepends the pinned Node runtime before npm ci'
+    Assert-Aih ($setupSh.IndexOf('aih_use_pinned_node')-lt$setupSh.IndexOf('"$AIH_NODE_DIR/bin/node" "$AIH_NPM_CLI" ci')) 'setup.sh ordering: pinned-Node PATH before npm ci'
+    Assert-Aih ($nodeLib.Contains('PATH="$_node_dir/bin:$PATH"')) 'node-env helper prepends the pinned bin ahead of the existing PATH'
+    Assert-Aih ($nodeLib.Contains('command -v node')) 'node-env helper re-verifies node resolution in the npm environment'
+    Assert-Aih ($nodeLib.Contains('--version')) 'node-env helper gates the pinned Node version'
+    $nodeCode=($nodeLib -split "`r?`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+    Assert-Aih (-not $nodeCode.Contains('eval')) 'node-env helper uses no eval'
+    Assert-Aih (-not ([IO.File]::ReadAllBytes((Join-Path $InstallRoot 'scripts/lib/aih-node-env.sh')) -contains 13)) 'node-env library is LF-only'
     Assert-Aih ($provisionLib.Contains('[ ! -e "$_pwsh_bin" ]')-and$provisionLib.Contains('[ ! -x "$_pwsh_bin" ]')) 'pwsh provisioning distinguishes missing payload, chmod failure, and post-chmod non-executability'
     Assert-Aih (-not $setupSh.Contains('[ -x "$AIH_PWSH_TMP/expanded/pwsh" ]')) 'setup.sh no longer demands a pre-chmod executable bit on the extracted pwsh'
     Assert-Aih ($setupSh.Contains('"$AIH_PWSH_VERSION"')) 'setup.sh gates provisioning on the pinned PowerShellVersion'
