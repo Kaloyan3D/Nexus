@@ -106,21 +106,37 @@ function Start-AihDetachedProcess {
         [switch]$Wait
     )
 
-    # Detached child spawn with optional per-stream log redirection and an
-    # optional blocking wait. -WindowStyle is a Windows-only UI concept and is
-    # rejected by Start-Process on Linux; every other parameter behaves
-    # identically, so the Windows invocation is preserved exactly. Argument
-    # arrays are passed as arrays so arguments containing spaces stay intact.
+    # Detached child spawn with INDEPENDENT optional parameters. Every
+    # Start-Process parameter is forwarded only when actually supplied, via a
+    # parameter splat: callers that omit -WorkingDirectory (the aih.ps1 OAuth
+    # startup path) bind exactly as they did before this abstraction existed,
+    # and stdout/stderr redirection work independently (either, both, or
+    # neither). Null, empty, or whitespace values never reach Start-Process.
+    # Argument arrays are passed as arrays so arguments containing spaces
+    # stay intact; there is no cmd.exe hop and no shell-string reconstruction.
+    # -WindowStyle is a Windows-only UI concept that Start-Process rejects on
+    # Linux, so Linux never receives it.
+    $startParams = @{
+        FilePath     = $FilePath
+        ArgumentList = $ArgumentList
+        PassThru     = $true
+    }
+    if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+        $startParams.WorkingDirectory = $WorkingDirectory
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RedirectStandardOutput)) {
+        $startParams.RedirectStandardOutput = $RedirectStandardOutput
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RedirectStandardError)) {
+        $startParams.RedirectStandardError = $RedirectStandardError
+    }
+    if ($Wait) {
+        $startParams.Wait = $true
+    }
     if (Test-AihIsWindows) {
-        if ($RedirectStandardOutput -and $RedirectStandardError) {
-            return Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -WindowStyle Hidden -RedirectStandardOutput $RedirectStandardOutput -RedirectStandardError $RedirectStandardError -Wait:$Wait -PassThru
-        }
-        return Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -WindowStyle Hidden -Wait:$Wait -PassThru
+        $startParams.WindowStyle = 'Hidden'
     }
-    if ($RedirectStandardOutput -and $RedirectStandardError) {
-        return Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -RedirectStandardOutput $RedirectStandardOutput -RedirectStandardError $RedirectStandardError -Wait:$Wait -PassThru
-    }
-    return Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Wait:$Wait -PassThru
+    return Start-Process @startParams
 }
 
 function Open-AihUrlInBrowser {
