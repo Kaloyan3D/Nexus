@@ -95,7 +95,7 @@ $presetRows = @(
     @{ id = 'tool-skill'; name = '@deepseek-ai/dsh-tool-skill'; bucket = 'modelSkillTool' }
 )
 foreach ($presetName in @('aih-engineering', 'aih-deepseek')) {
-    $presetPath = Join-Path $layout.Data (".agent-presets\" + $presetName + "\agent.cordis.yml")
+    $presetPath = Join-Path $layout.Data ('.agent-presets/' + $presetName + '/agent.cordis.yml')
     if (-not (Test-Path -LiteralPath $presetPath)) {
         foreach ($row in $presetRows) { $results[$row.bucket].evidence += ("MISSING deployed preset: " + $presetName) }
         continue

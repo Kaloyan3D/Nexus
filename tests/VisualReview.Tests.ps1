@@ -67,7 +67,7 @@ llm-pi-ai:
         if($PreviousResultPath){$arguments+=@('-PreviousResultPath',$PreviousResultPath)}
         if($PayloadFile){$arguments+=@('-PayloadFile',$PayloadFile)}
         if($Trigger){$arguments+=@('-Trigger',$Trigger)}
-        $output=& 'powershell.exe' $arguments 2>&1|ForEach-Object{[string]$_}
+        $output=& $aihPsHost $arguments 2>&1|ForEach-Object{[string]$_}
         [pscustomobject]@{exitCode=$LASTEXITCODE;text=($output-join [Environment]::NewLine)}
     }
     function Set-AihFixtureSettings {
@@ -90,7 +90,7 @@ llm-pi-ai:
     $profilesDoc=Get-AihEngineeringProfiles $fixtureLayout.EngineeringProfiles $fixtureLayout.CustomEngineeringProfile
     $policy=Get-AihRoutingPolicy $fixtureLayout.RoutingPolicy
     $deepseekProfile=$null;$glmProfile=$null
-    foreach($profile in @($profilesDoc.profiles)){if($profile.id -eq 'deepseek-codex'){$deepseekProfile=$profile};if($profile.id -eq 'glm-codex'){$glmProfile=$profile}}
+    foreach($profileEntry in @($profilesDoc.profiles)){if($profileEntry.id -eq 'deepseek-codex'){$deepseekProfile=$profileEntry};if($profileEntry.id -eq 'glm-codex'){$glmProfile=$profileEntry}}
     Assert-Aih ($deepseekProfile.roles.visualReviewer.model -eq 'deepseek-v4-flash-vision-exp' -and $deepseekProfile.roles.visualReviewer.reasoning -eq 'high') '1: deepseek-codex binds visualReviewer to the vision model / high'
     Assert-Aih ($glmProfile.roles.visualReviewer.model -eq 'deepseek-v4-flash-vision-exp' -and $glmProfile.roles.visualReviewer.reasoning -eq 'high') '1: glm-codex binds visualReviewer to the vision model / high'
     $target=Resolve-AihModelTarget $registry ([pscustomobject]@{Id='deepseek-codex';DisplayName='x';Config=$deepseekProfile}) 'visualReviewer'
@@ -111,7 +111,7 @@ llm-pi-ai:
     Assert-Aih ($compatible-contains'deepseek-v4-flash-vision-exp' -and $compatible-notcontains'deepseek-v4-flash') '2: compatible-models list contains only vision-capable models'
 
     # ── 3. EDITOR STATE EXPOSES THE OPTIONAL ROLE ────────────────────────────
-    $editorStateRaw=& 'powershell.exe' -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $liveLayout.Root 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $fixture 2>&1
+    $editorStateRaw=& $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $liveLayout.Root 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $fixture 2>&1
     $editorState=(($editorStateRaw|ForEach-Object{[string]$_})-join '')|ConvertFrom-Json
     Assert-Aih ([bool]$editorState.roleRequirements.visualReviewer.requiresVision -and -not[bool]$editorState.roleRequirements.visualReviewer.writable) '3: editor state exposes visualReviewer requirements'
     Assert-Aih (@($editorState.roleModels.visualReviewer)-contains'deepseek-v4-flash-vision-exp') '3: editor state lists the vision model as visualReviewer-compatible'
@@ -401,8 +401,12 @@ setTimeout(() => process.exit(0), 60000)
 '@|Set-Content -Path $wireServer -Encoding ASCII
     $wireOut=Join-Path $workspace 'wire-captured-requests.json'
     if(Test-Path $wireOut){Remove-Item $wireOut -Force}
-    $nodeExe=(Get-Command node.exe).Source
-    $wireProc=Start-Process -FilePath $nodeExe -ArgumentList @($wireServer,[string]$wirePort,$wireOut,'2') -PassThru -WindowStyle Hidden
+    $nodeExe=(Get-Command node).Source
+    # WindowStyle is a Windows-only Start-Process parameter; POSIX starts
+    # the wire server without it.
+    $wireStartArgs=@{FilePath=$nodeExe;ArgumentList=@($wireServer,[string]$wirePort,$wireOut,'2');PassThru=$true}
+    if (Test-AihIsWindows) { $wireStartArgs.WindowStyle='Hidden' }
+    $wireProc=Start-Process @wireStartArgs
     $wireReady=$false
     foreach($i in 1..80){ try{ $probe=New-Object Net.Sockets.TcpClient; $probe.Connect('127.0.0.1',$wirePort); $probe.Close(); $wireReady=$true; break }catch{ Start-Sleep -Milliseconds 100 } }
     Assert-Aih $wireReady '13: the loopback wire-capture provider is reachable'

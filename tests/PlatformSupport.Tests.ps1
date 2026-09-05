@@ -4,26 +4,26 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot=Split-Path -Paren
 . (Join-Path $InstallRoot 'scripts/Platform.ps1')
 $passed=0
 function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw "FAIL: $Name"};$script:passed++;Write-Host "PASS: $Name"}
-$isWindows=Test-AihIsWindows
+$runningOnWindows=Test-AihIsWindows
 $realIsWindows=[System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
 
 try {
     # ── platform detection ──
-    Assert-Aih ($isWindows-eq$realIsWindows) 'Test-AihIsWindows matches RuntimeInformation (PS 5.1 has no $IsWindows)'
+    Assert-Aih ($runningOnWindows-eq$realIsWindows) 'Test-AihIsWindows matches RuntimeInformation (PS 5.1 has no $IsWindows)'
     $platformName=Get-AihPlatformName
-    if ($isWindows) { Assert-Aih ($platformName-eq'windows') 'Get-AihPlatformName reports windows on Windows' }
+    if ($runningOnWindows) { Assert-Aih ($platformName-eq'windows') 'Get-AihPlatformName reports windows on Windows' }
     else { Assert-Aih ($platformName-eq'linux') 'Get-AihPlatformName reports linux on Linux' }
 
     # ── launcher naming ──
-    if ($isWindows) { Assert-Aih ((Get-AihLauncherExtension)-eq'.cmd') 'Windows launcher extension stays .cmd' }
+    if ($runningOnWindows) { Assert-Aih ((Get-AihLauncherExtension)-eq'.cmd') 'Windows launcher extension stays .cmd' }
     else { Assert-Aih ((Get-AihLauncherExtension)-eq'') 'Linux launchers are extensionless' }
     $fixtureLayout=[pscustomobject]@{ Bin=(Join-Path ([IO.Path]::GetTempPath()) 'aih-psupport-bin') }
     $launcherPath=Get-AihLayoutLauncherPath -Layout $fixtureLayout -Name 'aih-route'
-    if ($isWindows) { Assert-Aih ($launcherPath.EndsWith('aih-route.cmd')) 'layout launcher path uses aih-route.cmd on Windows' }
+    if ($runningOnWindows) { Assert-Aih ($launcherPath.EndsWith('aih-route.cmd')) 'layout launcher path uses aih-route.cmd on Windows' }
     else { Assert-Aih ($launcherPath.EndsWith('aih-route')) 'layout launcher path is extensionless on Linux' }
 
     # ── PowerShell host resolution ──
-    if ($isWindows) {
+    if ($runningOnWindows) {
         Assert-Aih ((Get-AihPowerShellHost ([IO.Path]::GetTempPath()))-eq'powershell.exe') 'Windows host stays powershell.exe'
         $previousHost=$env:AIH_PWSH_HOST
         try {
@@ -44,7 +44,7 @@ try {
     Assert-Aih ((Get-AihNodeArchiveName -Version '24.18.1' -Target 'linux-arm64')-eq'node-v24.18.1-linux-arm64.tar.xz') 'linux-arm64 Node artifact is the tar.xz'
     $badTarget=$false; try { Get-AihNodeArchiveName -Version '24.18.1' -Target 'sunos-x64' | Out-Null } catch { $badTarget=$true }
     Assert-Aih $badTarget 'unsupported Node target fails closed'
-    if ($isWindows) { Assert-Aih ((Get-AihNodeRelativeExecutable)-eq'node.exe') 'Windows pinned node executable is node.exe' }
+    if ($runningOnWindows) { Assert-Aih ((Get-AihNodeRelativeExecutable)-eq'node.exe') 'Windows pinned node executable is node.exe' }
     else { Assert-Aih ((Get-AihNodeRelativeExecutable)-eq'bin/node') 'Linux pinned node executable is bin/node' }
 
     # ── sync-name safety ──
@@ -65,7 +65,7 @@ try {
     Remove-Item -LiteralPath $permRoot -Recurse -Force
 
     # ── path-under-root comparison ──
-    if ($isWindows) {
+    if ($runningOnWindows) {
         Assert-Aih (Test-AihUnixPathUnderRoot -Candidate 'C:\AI-Harness\data\Sub' -Root 'C:\ai-harness\data') 'Windows containment compare is case-insensitive'
         Assert-Aih (-not (Test-AihUnixPathUnderRoot -Candidate 'C:\Other\data' -Root 'C:\AI-Harness\data')) 'Windows containment rejects outside paths'
     }
@@ -75,7 +75,7 @@ try {
     }
 
     # ── POSIX child-script transport (POSIX only; Windows keeps cmd.exe) ──
-    if (-not $isWindows) {
+    if (-not $runningOnWindows) {
         $outFile=Join-Path ([IO.Path]::GetTempPath()) ('aih-transport-out-'+[guid]::NewGuid().ToString('N')+'.txt')
         $errFile=Join-Path ([IO.Path]::GetTempPath()) ('aih-transport-err-'+[guid]::NewGuid().ToString('N')+'.txt')
         $probeScript=Join-Path ([IO.Path]::GetTempPath()) ('aih-transport-probe-'+[guid]::NewGuid().ToString('N')+'.ps1')
@@ -158,7 +158,7 @@ try {
     New-Item -ItemType Directory -Path $credRoot -Force | Out-Null
     $credPath=Join-Path $credRoot '.credentials.yaml'
     Set-Content -Path $credPath -Value 'version: 1'
-    if ($isWindows) {
+    if ($runningOnWindows) {
         try {
             Protect-AihPrivatePath -Path $credPath
             Assert-Aih $true 'credential protection applied (Windows ACL path; same code as before)'

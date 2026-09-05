@@ -70,7 +70,7 @@ $fixtureRoot = New-Fixture e2erepos
 try {
     # ── event bus: subscribe / dispatch / unsubscribe / error isolation ──
     $received = @()
-    $subscription = Subscribe-AihIntEvent -EventTypePattern 'snapshot.*' -Handler { param($event) $script:received = @($script:received) + @($event.type) }
+    $subscription = Subscribe-AihIntEvent -EventTypePattern 'snapshot.*' -Handler { param($eventPayload) $script:received = @($script:received) + @($eventPayload.type) }
     $plainRepo = Join-Path $fixtureRoot 'eventprobe'
     Set-TestFile (Join-Path $plainRepo 'package.json') '{"name":"eventprobe"}'
     Set-TestFile (Join-Path $plainRepo 'a.js') 'x;'
@@ -84,7 +84,7 @@ try {
     Assert-Aih ($journalTypes -contains 'module.discovered') 'module.discovered events are journaled'
     Assert-Aih ($journalTypes -contains 'repository.registered') 'repository.registered events are journaled'
     # broken subscriber must not corrupt the emitter
-    $bad = Subscribe-AihIntEvent -EventTypePattern 'snapshot.*' -Handler { param($event) throw 'subscriber bug' }
+    $bad = Subscribe-AihIntEvent -EventTypePattern 'snapshot.*' -Handler { param($eventPayload) throw 'subscriber bug' }
     $countBefore = @($received).Count
     $probeBuild2 = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $registeredProbe.checkout.checkoutId
     Assert-Aih (@($received).Count -gt $countBefore) 'healthy subscriber still receives events despite a broken one'

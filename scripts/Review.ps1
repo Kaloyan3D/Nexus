@@ -33,8 +33,8 @@ $policy=Get-AihRoutingPolicy $resolvedPolicyPath
 $profiles=Get-AihEngineeringProfiles (Join-Path (Split-Path -Parent $layout.RoutingPolicy) 'engineering-profiles.json') $layout.CustomEngineeringProfile
 $registry=Get-AihModelRegistry (Join-Path (Split-Path -Parent $layout.RoutingPolicy) 'model-registry.json')
 $resolvedPreset=Resolve-AihPreset $policy $Preset
-$profile=Resolve-AihProfile $policy $resolvedPreset $profiles $layout.Settings
-$reviewerTarget=Resolve-AihModelTarget $registry $profile 'reviewer'
+$resolvedProfile=Resolve-AihProfile $policy $resolvedPreset $profiles $layout.Settings
+$reviewerTarget=Resolve-AihModelTarget $registry $resolvedProfile 'reviewer'
 if($reviewerTarget.Provider -ne 'sol-local'){throw "Reviewer provider '$($reviewerTarget.Provider)' is not supported by the independent review adapter in this phase; fail closed."}
 
 $diff=''
@@ -57,7 +57,7 @@ if(-not[string]::IsNullOrWhiteSpace($FilesPath)){
 $packet=New-AihReviewPacket $Workspace $TaskId $Question $Invariants $diff $files @() $Assessment $policy -UserApprovedFullRepo:$UserApprovedFullRepo -ContextMode $ContextMode -Attempt $Attempt -TaskInstanceId $TaskInstanceId
 if($Execute){
     if(-not [bool]$packet.enforcement.allowed){
-        $result=[ordered]@{ok=$false;kind='packet-too-large';taskId=$TaskId;executionClass='reviewer';role='reviewer';profile=$profile.Id;provider=$reviewerTarget.Provider;model=$reviewerTarget.Model;reviewerCalled=$false;codexCalled=$false;violations=@($packet.enforcement.violations);enforcement=$packet.enforcement;budget=$packet.budget;readOnly=$true;completionAuthority=$false}
+        $result=[ordered]@{ok=$false;kind='packet-too-large';taskId=$TaskId;executionClass='reviewer';role='reviewer';profile=$resolvedProfile.Id;provider=$reviewerTarget.Provider;model=$reviewerTarget.Model;reviewerCalled=$false;codexCalled=$false;violations=@($packet.enforcement.violations);enforcement=$packet.enforcement;budget=$packet.budget;readOnly=$true;completionAuthority=$false}
         $result|ConvertTo-Json -Depth 20
         exit 3
     }
@@ -67,12 +67,12 @@ if($Execute){
     # TASK-0007: the reported budget mirrors the packet budget - numeric
     # ceilings only when the policy enforces limits, null (unlimited) otherwise.
     $budgetOut=[ordered]@{enforceLimits=$enforceLimits;maxCallsPerTask=$(if($enforceLimits){[int]$budget.maxCallsPerTask}else{$null});maxFiles=$(if($enforceLimits){[int]$budget.maxFiles}else{$null});maxDiffLines=$(if($enforceLimits){[int]$budget.maxDiffLines}else{$null});maxContextTokens=$(if($enforceLimits){[int]$budget.maxContextTokens}else{$null});maxOutputTokens=$(if($enforceLimits){[int]$budget.maxOutputTokens}else{$null})}
-    $telemetry=Write-AihTaskTelemetry $Workspace $TaskId @{executionClass='reviewer';model=$reviewerTarget.Model;provider=$reviewerTarget.Provider;modelCalls=1;codexFindings=@($reviewResult.findings);finalResult=$reviewResult.verdict;configuration=$profile.Id;filesSupplied=@($files).Count} -TaskInstanceId $TaskInstanceId
+    $telemetry=Write-AihTaskTelemetry $Workspace $TaskId @{executionClass='reviewer';model=$reviewerTarget.Model;provider=$reviewerTarget.Provider;modelCalls=1;codexFindings=@($reviewResult.findings);finalResult=$reviewResult.verdict;configuration=$resolvedProfile.Id;filesSupplied=@($files).Count} -TaskInstanceId $TaskInstanceId
     # TASK-0012: surface the provider-capacity summary (real transport
     # capacity + packing state) alongside the budget block so the Nexus-budget
     # vs provider-capacity distinction is visible to callers.
     $providerCapacityOut=$null
     if($null-ne $reviewResult.PSObject.Properties['providerCapacity']){$providerCapacityOut=$reviewResult.providerCapacity}
-    $result=[ordered]@{ok=$true;taskId=$TaskId;executionClass='reviewer';role='reviewer';profile=$profile.Id;profileDisplayName=$profile.DisplayName;provider=$reviewerTarget.Provider;model=$reviewerTarget.Model;modelDisplayName=$reviewerTarget.ModelDisplayName;reasoning=$reviewerTarget.Reasoning;callCount=[int](Get-AihTask $Workspace $TaskId -TaskInstanceId $TaskInstanceId).codexCalls;budget=$budgetOut;providerCapacity=$providerCapacityOut;readOnly=$true;freshContext=$true;completionAuthority=$false;result=$reviewResult;telemetry=$telemetry}
+    $result=[ordered]@{ok=$true;taskId=$TaskId;executionClass='reviewer';role='reviewer';profile=$resolvedProfile.Id;profileDisplayName=$resolvedProfile.DisplayName;provider=$reviewerTarget.Provider;model=$reviewerTarget.Model;modelDisplayName=$reviewerTarget.ModelDisplayName;reasoning=$reviewerTarget.Reasoning;callCount=[int](Get-AihTask $Workspace $TaskId -TaskInstanceId $TaskInstanceId).codexCalls;budget=$budgetOut;providerCapacity=$providerCapacityOut;readOnly=$true;freshContext=$true;completionAuthority=$false;result=$reviewResult;telemetry=$telemetry}
     $result|ConvertTo-Json -Depth 20
 }else{$packet|ConvertTo-Json -Depth 20}

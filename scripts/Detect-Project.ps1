@@ -15,26 +15,26 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Common.ps1')
 . (Join-Path $PSScriptRoot 'Project.ps1')
 
-$profile = Get-AihProjectProfile -Workspace $Workspace -InstallRoot $InstallRoot
+$projectProfile = Get-AihProjectProfile -Workspace $Workspace -InstallRoot $InstallRoot
 if ($Json) {
-    $profile | ConvertTo-Json -Depth 8
+    $projectProfile | ConvertTo-Json -Depth 8
     exit 0
 }
 
-Write-Host "Project: $($profile.Name)"
-Write-Host "Workspace: $($profile.Workspace)"
-Write-Host "Git repository: $($profile.IsGitRepository)"
-Write-Host "Stacks: $(if ($profile.Stacks.Count) { $profile.Stacks -join ', ' } else { 'none detected' })"
-Write-Host "Verification mode: $($profile.LocalVerificationMode)"
-if ($profile.VerificationCommands.Count) {
+Write-Host "Project: $($projectProfile.Name)"
+Write-Host "Workspace: $($projectProfile.Workspace)"
+Write-Host "Git repository: $($projectProfile.IsGitRepository)"
+Write-Host "Stacks: $(if ($projectProfile.Stacks.Count) { $projectProfile.Stacks -join ', ' } else { 'none detected' })"
+Write-Host "Verification mode: $($projectProfile.LocalVerificationMode)"
+if ($projectProfile.VerificationCommands.Count) {
     Write-Host 'Deterministic verification:'
-    foreach ($command in $profile.VerificationCommands) {
+    foreach ($command in $projectProfile.VerificationCommands) {
         $availability = if ($command.Available) { 'ready' } else { 'tool missing' }
         Write-Host "  [$($command.Kind)] $($command.Name): $($command.Display) ($availability)"
     }
 }
 else { Write-Host 'Deterministic verification: no commands discovered' }
-if ($profile.Recommendations.Count) {
+if ($projectProfile.Recommendations.Count) {
     Write-Host 'Recommendations:'
-    foreach ($recommendation in $profile.Recommendations) { Write-Host "  - $recommendation" }
+    foreach ($recommendation in $projectProfile.Recommendations) { Write-Host "  - $recommendation" }
 }
