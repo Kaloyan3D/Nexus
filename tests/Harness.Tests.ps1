@@ -14,6 +14,7 @@ Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
 . (Join-Path $InstallRoot 'scripts/Telemetry.ps1')
 . (Join-Path $InstallRoot 'scripts/Completion.ps1')
 . (Join-Path $InstallRoot 'scripts/ControlRoom.ps1')
+. (Join-Path $InstallRoot 'tests/TestHelpers.ps1')
 
 $passed=0
 function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw "FAIL: $Name"};$script:passed++;Write-Host "PASS: $Name"}
@@ -754,9 +755,37 @@ finally {
 # (recovery format specs can name stale reasons like 'task' + '-instance' +
 # '-mismatch', which the credential pattern reads as a sk- prefixed token), so
 # runtime state is excluded from the SOURCE credential scan like data/logs are.
-$sourceFiles=Get-ChildItem -LiteralPath $InstallRoot -Recurse -File|Where-Object{$_.FullName-notmatch'\\(\.git|app|runtime|data|logs|nx-chrome-profile|\.ai-harness)\\' -and $_.Name-notmatch'^(lockfile|LOCK|SingletonLock)$'}
+# TASK-0026: the runtime-state exclusion is PATH-COMPONENT based and
+# separator-agnostic (the previous FullName regex required backslashes
+# around every excluded component, so on Linux NO tree was ever excluded
+# and runtime state with credential-shaped task text entered the scan).
+$sourceFiles=Get-AihSourceScanFiles -Root $InstallRoot
 $secretLeak=$sourceFiles|Select-String -Pattern '(?i)(sk-[A-Za-z0-9_-]{16,}|DEEPSEEK_API_KEY\s*:\s*[^\s''"]+)'|Select-Object -First 1
 Assert-Aih ($null-eq$secretLeak) 'source contains no credential values'
+
+# Separator-agnostic exclusion regression: runtime/state components are
+# excluded under BOTH separator styles while real source stays scanned.
+Assert-Aih (Test-AihSourceScanPathExcluded 'data\routing\decisions.jsonl') 'source scan excludes data by backslash relative path'
+Assert-Aih (Test-AihSourceScanPathExcluded 'data/routing/decisions.jsonl') 'source scan excludes data by slash relative path'
+Assert-Aih (Test-AihSourceScanPathExcluded '.ai-harness\state\tasks.json') 'source scan excludes .ai-harness by backslash relative path'
+Assert-Aih (Test-AihSourceScanPathExcluded '.ai-harness/state/decisions.jsonl') 'source scan excludes .ai-harness by slash relative path'
+Assert-Aih (Test-AihSourceScanPathExcluded 'runtime\node\lib\x.js') 'source scan excludes runtime by backslash relative path'
+Assert-Aih (Test-AihSourceScanPathExcluded 'runtime/node/bin/node') 'source scan excludes runtime by slash relative path'
+Assert-Aih (-not (Test-AihSourceScanPathExcluded 'src\real-key.ps1')) 'source scan keeps real source (backslash style)'
+Assert-Aih (-not (Test-AihSourceScanPathExcluded 'src/real-key.ps1')) 'source scan keeps real source (slash style)'
+Assert-Aih (-not (Test-AihSourceScanPathExcluded 'src/appended/x.ps1')) 'source scan matches whole components only'
+$scanFixture=Join-Path ([IO.Path]::GetTempPath()) ('aih-scan-'+[guid]::NewGuid().ToString('N'))
+try{
+ New-Item -ItemType Directory -Force -Path (Join-Path $scanFixture 'src'),(Join-Path $scanFixture 'data/routing'),(Join-Path $scanFixture '.ai-harness/state')|Out-Null
+ # Benign bytes: the regression proves ENUMERATION scope (which files the
+ # scan sees), not content matching - the suite source itself must never
+ # embed credential-shaped strings.
+ [IO.File]::WriteAllText((Join-Path $scanFixture 'src/keeper.ps1'),'kept source file',[Text.UTF8Encoding]::new($false))
+ [IO.File]::WriteAllText((Join-Path $scanFixture 'data/routing/decisions.jsonl'),'{"prompt":"runtime state record"}',[Text.UTF8Encoding]::new($false))
+ [IO.File]::WriteAllText((Join-Path $scanFixture '.ai-harness/state/tasks.json'),'{"description":"task state record"}',[Text.UTF8Encoding]::new($false))
+ $scanned=@(Get-AihSourceScanFiles -Root $scanFixture)
+ Assert-Aih ($scanned.Count-eq1-and$scanned[0].Name-eq'keeper.ps1') 'enumerated source scan excludes runtime/state trees on this filesystem'
+}finally{Remove-Item -LiteralPath $scanFixture -Recurse -Force}
 foreach($script in Get-ChildItem (Join-Path $InstallRoot 'scripts') -Filter '*.ps1'){[void][scriptblock]::Create((Get-Content -Raw $script.FullName))}
 Assert-Aih $true 'all PowerShell scripts parse'
 & $layout.Node (Join-Path $InstallRoot 'tests/DeepSeekIsolation.Tests.cjs');Assert-Aih ($LASTEXITCODE-eq0) 'runtime isolation tests pass'
