@@ -9,7 +9,7 @@
 # is requested.
 #
 # Supported: Linux x86_64 (tested target: Arch/CachyOS).
-# Required system tools: git, tar, xz, sha256sum, and curl or wget.
+# Required system tools: git, tar, xz, sha256sum, iconv, and curl or wget.
 # Node.js and PowerShell are provisioned pinned per-platform by this
 # installer with SHA256 verification (no system-wide install needed).
 
@@ -140,6 +140,11 @@ aih_require_tool git git
 aih_require_tool tar tar
 aih_require_tool xz xz
 aih_require_tool sha256sum coreutils
+# iconv decodes vendor checksum manifests that ship as UTF-16 (the official
+# PowerShell hashes.sha256 is UTF-16LE with a BOM). Verified BEFORE any
+# download so the failure is an explicit dependency error, never a mid-
+# install surprise. Phase 1's verifier normalizes encodings through it.
+aih_require_tool iconv glibc
 if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
   echo "Nexus installer: either curl or wget is required to download the pinned runtime." >&2
   echo "Install one (Arch/CachyOS: pacman -S curl) and re-run ./setup.sh" >&2

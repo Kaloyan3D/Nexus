@@ -98,6 +98,11 @@ try {
     Assert-Aih ($shaLib.Contains('entry == name')) 'checksum library compares the artifact name with exact equality'
     Assert-Aih ($shaLib.Contains('substr(entry, 1, 1) == "*"')) 'checksum library strips the GNU binary marker (*NAME)'
     Assert-Aih ($shaLib.Contains('length(digest) != 64')) 'checksum library validates the 64-hex digest shape'
+    Assert-Aih ($shaLib.Contains('aih_manifest_to_utf8')) 'checksum library normalizes encodings before parsing'
+    Assert-Aih ($shaLib.Contains('UTF-16LE') -and $shaLib.Contains('UTF-16BE')) 'checksum library supports UTF-16LE and UTF-16BE BOM detection'
+    Assert-Aih ($shaLib.Contains('iconv')) 'checksum library converts UTF-16 through iconv'
+    Assert-Aih ($shaLib.Contains('LC_ALL=C awk')) 'checksum library parses the normalized manifest with LC_ALL=C awk'
+    Assert-Aih ($setupSh.Contains('aih_require_tool iconv')) 'setup.sh requires iconv before any download'
     Assert-Aih (-not ([IO.File]::ReadAllBytes((Join-Path $InstallRoot 'scripts/lib/aih-verify-sha256.sh')) -contains 13)) 'checksum library is LF-only'
     $sudoLines=@($setupSh -split "`r?`n" | Where-Object { $_ -match '^\s*sudo\s' })
     Assert-Aih (@($sudoLines).Count-eq0) 'setup.sh never executes sudo'

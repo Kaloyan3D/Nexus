@@ -5,7 +5,7 @@ Nexus runs natively on Linux — the same deterministic controller, the same tas
 ## Requirements
 
 - Linux x86_64 (tested target: Arch/CachyOS; any glibc distribution with the tools below works)
-- git, tar, xz, sha256sum, and curl or wget (install with your package manager, e.g. `pacman -S git curl`)
+- git, tar, xz, sha256sum, iconv, and curl or wget (install with your package manager, e.g. `pacman -S git curl`; iconv comes with glibc and decodes vendor checksum manifests that ship as UTF-16 — the official PowerShell `hashes.sha256` is UTF-16LE with a BOM)
 - A DeepSeek API key (optional ChatGPT/Codex authentication for independent review)
 - No sudo, no root: everything installs inside your home directory
 
