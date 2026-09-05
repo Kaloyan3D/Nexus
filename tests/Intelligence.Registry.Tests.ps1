@@ -4,6 +4,7 @@ if (-not (Get-Command Test-AihIsWindows -ErrorAction SilentlyContinue)) { . (Joi
 Set-StrictMode -Version Latest;$ErrorActionPreference = 'Stop'
 . (Join-Path $InstallRoot 'scripts/Common.ps1')
 . (Join-Path $InstallRoot 'scripts/Intelligence.ps1')
+. (Join-Path $InstallRoot 'tests/TestHelpers.ps1')
 
 # ── Phase 3.1A (Identity & Registry) + 3.1B (Git State) acceptance tests ────
 $passed = 0
@@ -21,13 +22,11 @@ function Invoke-TestGit([string]$Path, [string[]]$GitArguments) {
     return $output
 }
 function Invoke-FreshProcess {
+    # TASK-0025 Class A: the child derives the install root from the
+    # AIH_INSTALL_ROOT runtime contract through the shared fresh-process
+    # transport; generated script bodies never embed a literal root.
     param([string]$StoreRoot, [string]$Expression)
-    $scriptText = ". 'C:\AI-Harness\scripts\Intelligence.ps1'; " + $Expression
-    $bytes = [Text.Encoding]::Unicode.GetBytes($scriptText)
-    $encoded = [Convert]::ToBase64String($bytes)
-    $output = & $aihPsHost -NoProfile -NonInteractive -EncodedCommand $encoded
-    if ($LASTEXITCODE -ne 0) { throw "fresh-process check failed: $($output -join ' ')" }
-    return ($output -join [Environment]::NewLine)
+    return Invoke-AihTestFreshProcess -PowerShellHost $aihPsHost -InstallRoot $InstallRoot -Script $Expression
 }
 
 $store = New-Fixture store

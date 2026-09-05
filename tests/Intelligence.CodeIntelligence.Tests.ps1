@@ -116,19 +116,30 @@ try {
     $storeCountC = (& (Get-AihCodeIntelligenceStore -StoreRoot $store).CountFileIntelligence)
     Assert-Aih ($storeCountC -eq 4) 'step 12b: cross-checkout reuse wrote no new store documents'
 
-    # (13) restart persistence: fresh process answers queries without reindexing
+    # (13) restart persistence: fresh process answers queries without reindexing.
+    # TASK-0025 Class A: the generated probe body derives the install root from
+    # the AIH_INSTALL_ROOT runtime contract (Join-Path against the environment
+    # contract), never from a literal root; the parent exports the variable
+    # process-scoped for the child and restores it afterwards.
     $probe = Join-Path $fixtureRoot 'probe.ps1'
     $probeBody = @(
         'param([string]$Store, [string]$RepoId, [string]$SnapId)',
-        '. ''C:\AI-Harness\scripts\Common.ps1''',
-        '. ''C:\AI-Harness\scripts\Intelligence.ps1''',
+        '. (Join-Path $env:AIH_INSTALL_ROOT ''scripts/Common.ps1'')',
+        '. (Join-Path $env:AIH_INSTALL_ROOT ''scripts/Intelligence.ps1'')',
         '$defs = @(Find-AihCodeDefinitions -StoreRoot $Store -RepositoryId $RepoId -SnapshotId $SnapId -Name ''AuthService'')',
         'if ($defs.Count -eq 1 -and $defs[0].path -eq ''auth.ts'') { Write-Output ''PERSIST-OK'' } else { Write-Output ''PERSIST-FAIL''; exit 1 }'
     ) -join $nl
     Set-TestFile $probe $probeBody
     $previousEap = $ErrorActionPreference
+    $previousRoot = $env:AIH_INSTALL_ROOT
     $ErrorActionPreference = 'Continue'
-    try { $probeOut = & $aihPsHost -NoLogo -NoProfile -ExecutionPolicy Bypass -File $probe $store $repositoryId $buildB.snapshot.snapshotId } finally { $ErrorActionPreference = $previousEap }
+    try {
+        $env:AIH_INSTALL_ROOT = [System.IO.Path]::GetFullPath($InstallRoot)
+        $probeOut = & $aihPsHost -NoLogo -NoProfile -ExecutionPolicy Bypass -File $probe $store $repositoryId $buildB.snapshot.snapshotId
+    } finally {
+        $ErrorActionPreference = $previousEap
+        if ($null -eq $previousRoot) { Remove-Item Env:AIH_INSTALL_ROOT -ErrorAction SilentlyContinue } else { $env:AIH_INSTALL_ROOT = $previousRoot }
+    }
     Assert-Aih ((@($probeOut) -join ' ').Contains('PERSIST-OK')) 'step 13: fresh process answers definition queries from persisted intelligence'
 
     # (14) status/diagnostics text

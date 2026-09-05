@@ -4,6 +4,7 @@ if (-not (Get-Command Test-AihIsWindows -ErrorAction SilentlyContinue)) { . (Joi
 Set-StrictMode -Version Latest;$ErrorActionPreference = 'Stop'
 . (Join-Path $InstallRoot 'scripts/Common.ps1')
 . (Join-Path $InstallRoot 'scripts/Intelligence.ps1')
+. (Join-Path $InstallRoot 'tests/TestHelpers.ps1')
 
 # ── Phase 3.1E (Snapshot Engine) acceptance tests ───────────────────────────
 $passed = 0
@@ -18,13 +19,14 @@ function Invoke-TestGit([string]$Path, [string[]]$GitArguments) {
     return $output
 }
 function Invoke-FreshBuild([string]$StoreRoot, [string]$CheckoutId) {
-    # restart seam: the same build flow must behave identically in a new process
-    $template = '. {0}; $result = Invoke-AihSnapshotBuild -StoreRoot {1} -CheckoutId {2}; Write-Output (''STATUS='' + $result.snapshot.status); Write-Output (''ACTIVE='' + (Get-AihActiveSnapshot -StoreRoot {1} -CheckoutId {2}).snapshotId)'
-    $scriptText = $template -f ("'C:\AI-Harness\scripts\Intelligence.ps1'"), ("'" + $StoreRoot + "'"), ("'" + $CheckoutId + "'")
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($scriptText))
-    $output = & $aihPsHost -NoProfile -NonInteractive -EncodedCommand $encoded
-    if ($LASTEXITCODE -ne 0) { throw ("fresh build failed: " + ($output -join ' ')) }
-    return ($output | Where-Object { "$_" -like 'STATUS=*' -or "$_" -like 'ACTIVE=*' })
+    # restart seam: the same build flow must behave identically in a new process.
+    # TASK-0025 Class A: the child derives the install root from the
+    # AIH_INSTALL_ROOT runtime contract through the shared fresh-process
+    # transport; generated script bodies never embed a literal root.
+    $template = '$result = Invoke-AihSnapshotBuild -StoreRoot {0} -CheckoutId {1}; Write-Output (''STATUS='' + $result.snapshot.status); Write-Output (''ACTIVE='' + (Get-AihActiveSnapshot -StoreRoot {0} -CheckoutId {1}).snapshotId)'
+    $expression = $template -f ("'" + $StoreRoot + "'"), ("'" + $CheckoutId + "'")
+    $output = Invoke-AihTestFreshProcess -PowerShellHost $aihPsHost -InstallRoot $InstallRoot -Script $expression
+    return @("$output" -split "\r?\n" | Where-Object { "$_" -like 'STATUS=*' -or "$_" -like 'ACTIVE=*' })
 }
 
 $store = New-Fixture snapstore
