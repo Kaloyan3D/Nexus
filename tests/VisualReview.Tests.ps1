@@ -15,9 +15,11 @@ function New-Fixture([string]$Name){$path=Join-Path ([IO.Path]::GetTempPath()) (
 
 $liveLayout=Get-AihLayout $InstallRoot
 # Deterministic node resolution for fixture install roots (the fixture has no
-# runtime node; the controller service falls back to PATH, so we prepend the
-# pinned runtime BEFORE the system PATH).
-$env:PATH=(Split-Path -Parent $liveLayout.Node)+';'+$env:PATH
+# runtime node; the controller service falls back to PATH, so the Nexus-pinned
+# runtime must win BEFORE the system PATH). The shared platform abstraction
+# resolves the pinned runtime directory and prepends it with the platform path
+# separator (TASK-0025 Class B: no hardcoded ';').
+Add-AihPinnedNodeToPath -InstallRoot $InstallRoot
 
 # ── fixture install root (isolated copies of config + scripts + live settings) ──
 $fixture=New-Fixture 'install'

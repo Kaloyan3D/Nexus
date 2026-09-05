@@ -21,6 +21,14 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'OutputDigest.ps1')
 . (Join-Path $PSScriptRoot 'ArchitectureRules.ps1')
 
+# Nexus-owned child execution environment (TASK-0025 Class B): project
+# verification children (npm/node runners) and their nested children must
+# resolve the Nexus-pinned Node runtime ahead of any system Node. The prepend
+# is process-scoped, uses the platform path separator, and is inherited by
+# every verification child. Nexus never depends on a system Node. The
+# helper's return value is suppressed: -Json output is a transport contract.
+$null = Add-AihPinnedNodeToPath -InstallRoot $InstallRoot
+
 function ConvertTo-AihArgument {
     param([string]$Value)
     if ($Value -notmatch '[\s"]') { return $Value }
