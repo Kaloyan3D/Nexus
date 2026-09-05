@@ -19,6 +19,9 @@ AIH_SOURCE_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # Checksum verification is a shared POSIX library so it is unit-testable
 # (tests/aih-verify-sha256.Tests.sh) and structurally parsed in one place.
 . "$AIH_SOURCE_ROOT/scripts/lib/aih-verify-sha256.sh"
+# Pinned-PowerShell archive provisioning (structure validation, executable
+# bit repair on the exact pwsh launcher, install move, --version gate).
+. "$AIH_SOURCE_ROOT/scripts/lib/aih-provision-pwsh.sh"
 AIH_DEFAULT_ROOT="$HOME/.local/share/nexus"
 AIH_INSTALL_ROOT="${AIH_INSTALL_ROOT:-$AIH_DEFAULT_ROOT}"
 AIH_RESET_MANAGED_SETTINGS=0
@@ -251,10 +254,11 @@ if [ "$AIH_INSTALLED_PWSH_VERSION" != "$AIH_PWSH_VERSION" ]; then
   aih_verify_sha256 "$AIH_PWSH_TMP/$AIH_PWSH_ARTIFACT" "$AIH_PWSH_TMP/hashes.sha256" "$AIH_PWSH_ARTIFACT"
   mkdir -p "$AIH_PWSH_TMP/expanded"
   tar -xzf "$AIH_PWSH_TMP/$AIH_PWSH_ARTIFACT" -C "$AIH_PWSH_TMP/expanded"
-  [ -x "$AIH_PWSH_TMP/expanded/pwsh" ] || { echo "Nexus installer: downloaded PowerShell archive does not contain pwsh. Refusing." >&2; exit 1; }
-  rm -rf "$AIH_PWSH_DIR"
-  mkdir -p "$AIH_INSTALL_ROOT/runtime"
-  mv "$AIH_PWSH_TMP/expanded" "$AIH_PWSH_DIR"
+  # Validate structure, repair the pwsh executable bit (official PowerShell
+  # Linux archives do not reliably carry it), install, and gate on the
+  # binary reporting the pinned version. SHA256 verification already ran
+  # above, before extraction.
+  aih_provision_pwsh_archive "$AIH_PWSH_TMP/expanded" "$AIH_PWSH_DIR" "$AIH_PWSH_VERSION"
   rm -rf "$AIH_PWSH_TMP"
 else
   echo "Pinned PowerShell $AIH_PWSH_VERSION already installed."

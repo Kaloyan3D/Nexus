@@ -104,6 +104,20 @@ try {
     Assert-Aih ($shaLib.Contains('LC_ALL=C awk')) 'checksum library parses the normalized manifest with LC_ALL=C awk'
     Assert-Aih ($setupSh.Contains('aih_require_tool iconv')) 'setup.sh requires iconv before any download'
     Assert-Aih (-not ([IO.File]::ReadAllBytes((Join-Path $InstallRoot 'scripts/lib/aih-verify-sha256.sh')) -contains 13)) 'checksum library is LF-only'
+    $provisionLib=[IO.File]::ReadAllText((Join-Path $InstallRoot 'scripts/lib/aih-provision-pwsh.sh'))
+    Assert-Aih ($setupSh.Contains('aih-provision-pwsh.sh')-and$setupSh.Contains('aih_provision_pwsh_archive')) 'setup.sh provisions the pwsh archive through the shared library'
+    Assert-Aih ($provisionLib.Contains('[ ! -f "$_pwsh_bin" ]')) 'pwsh provisioning validates a regular file, not just executability'
+    Assert-Aih ($provisionLib.Contains('chmod 0755 "$_pwsh_bin"')) 'pwsh provisioning chmods exactly the pwsh launcher with 0755'
+    Assert-Aih (-not $provisionLib.Contains('chmod -R')-and-not $provisionLib.Contains('0777')) 'pwsh provisioning never chmods recursively or world-writable'
+    Assert-Aih ($provisionLib.Contains('--version')) 'pwsh provisioning gates on the binary reporting its version'
+    Assert-Aih (-not ([IO.File]::ReadAllBytes((Join-Path $InstallRoot 'scripts/lib/aih-provision-pwsh.sh')) -contains 13)) 'provisioning library is LF-only'
+    $verifyIdx=$setupSh.IndexOf('aih_verify_sha256 "$AIH_PWSH_TMP')
+    $tarIdx=$setupSh.IndexOf('tar -xzf "$AIH_PWSH_TMP')
+    $provIdx=$setupSh.IndexOf('aih_provision_pwsh_archive "$AIH_PWSH_TMP')
+    Assert-Aih ($verifyIdx-ge0-and$tarIdx-gt$verifyIdx-and$provIdx-gt$tarIdx) 'setup.sh ordering: SHA256 verify before extraction before provisioning'
+    Assert-Aih ($provisionLib.Contains('[ ! -e "$_pwsh_bin" ]')-and$provisionLib.Contains('[ ! -x "$_pwsh_bin" ]')) 'pwsh provisioning distinguishes missing payload, chmod failure, and post-chmod non-executability'
+    Assert-Aih (-not $setupSh.Contains('[ -x "$AIH_PWSH_TMP/expanded/pwsh" ]')) 'setup.sh no longer demands a pre-chmod executable bit on the extracted pwsh'
+    Assert-Aih ($setupSh.Contains('"$AIH_PWSH_VERSION"')) 'setup.sh gates provisioning on the pinned PowerShellVersion'
     $sudoLines=@($setupSh -split "`r?`n" | Where-Object { $_ -match '^\s*sudo\s' })
     Assert-Aih (@($sudoLines).Count-eq0) 'setup.sh never executes sudo'
     Assert-Aih ($setupSh.Contains('--install-root')-and$setupSh.Contains('--skip-path-check')) 'setup.sh exposes install-root and path-check flags'
