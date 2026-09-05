@@ -69,6 +69,12 @@ $started = [DateTime]::UtcNow
 $suiteResults = [Collections.Generic.List[object]]::new()
 $rawLines = [Collections.Generic.List[string]]::new()
 $harnessExitCode = 0
+# TASK-0026: every suite child (PowerShell and Node) inherits the TOOLCHAIN
+# anchor - the tree that owns runtime/ - so fixture-scoped scenarios whose
+# logical InstallRoot carries no runtime still resolve the real pinned Node
+# and PowerShell runtimes. Process-scoped; never persisted, never a shell
+# profile change, and the pre-existing PATH stays behind the pinned prefix.
+$env:AIH_TOOLCHAIN_ROOT = $InstallRoot
 foreach ($suite in $suites) {
     $suiteStarted = [DateTime]::UtcNow
     $scriptPath = Join-Path $InstallRoot $suite.script

@@ -244,7 +244,12 @@ function Get-AihLocalVerification {
     $layout = Get-AihLayout $InstallRoot
     $reader = Join-Path $layout.Scripts 'Read-Verification.mjs'
     if (-not (Test-Path -LiteralPath $reader)) { $reader = Join-Path $PSScriptRoot 'Read-Verification.mjs' }
-    $json = & $layout.Node $reader $path $layout.Root 2>&1
+    # TASK-0026: the reader child resolves Node through the shared toolchain
+    # contract, so a fixture InstallRoot without runtime/ still runs the real
+    # pinned Node instead of failing on ambient PATH resolution.
+    $nodeExecutable = Get-AihNodeExecutable -InstallRoot $InstallRoot
+    if ([string]::IsNullOrWhiteSpace($nodeExecutable)) { throw 'Node runtime is unavailable; run the Nexus installer to install the pinned runtime.' }
+    $json = & $nodeExecutable $reader $path $layout.Root 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Invalid .ai-harness/verification.yml: $($json -join [Environment]::NewLine)" }
     return ($json -join [Environment]::NewLine) | ConvertFrom-Json
 }
