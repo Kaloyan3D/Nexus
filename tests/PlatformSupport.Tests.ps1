@@ -396,9 +396,15 @@ try {
     New-Item -ItemType Directory -Force -Path (Join-Path $tcFixture 'scripts'), (Join-Path $tcFixture 'config'), (Join-Path $tcWorkspace 'src') | Out-Null
     Copy-Item -Path (Join-Path $InstallRoot 'scripts/*') -Destination (Join-Path $tcFixture 'scripts') -Recurse -Force
     $pinnedNodeVersion = (Get-Content -Raw (Join-Path $InstallRoot 'config/versions.json') | ConvertFrom-Json).NodeVersion
-    # Quote-free node -e payload: identical argv on cmd.exe and /bin/sh, no
-    # nested-quoting ambiguity in any package manager.
-    $packageJson = '{"private":true,"scripts":{"test":"node -e console.log(process.version,process.execPath)"}}'
+    # TASK-0023: the fixture command runs through the REAL package-manager
+    # execution path (npm lifecycle -> sh -c on POSIX), so shell-sensitive
+    # inline JavaScript such as node -e 'console.log(...)' is NOT portable
+    # between cmd.exe and POSIX shells - sh rejects the unquoted parentheses
+    # with a syntax error and the verification fails before node runs. A real
+    # fixture file keeps the child argv identical on every platform.
+    $toolchainProbe=Join-Path $tcWorkspace 'toolchain-probe.cjs'
+    [IO.File]::WriteAllText($toolchainProbe,'console.log(process.version, process.execPath)',[Text.UTF8Encoding]::new($false))
+    $packageJson = '{"private":true,"scripts":{"test":"node toolchain-probe.cjs"}}'
     [IO.File]::WriteAllText((Join-Path $tcWorkspace 'package.json'), $packageJson, [Text.UTF8Encoding]::new($false))
     # The driver/bridge contract: the anchor is process-scoped env (no
     # persistent change, no shell profile, existing PATH preserved behind it).
