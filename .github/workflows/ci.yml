@@ -30,7 +30,15 @@ jobs:
             sh -n "$wrapper"
           done
       - name: Checksum manifest parser regression suite
-        run: sh tests/aih-verify-sha256.Tests.sh
+        run: |
+          command -v iconv
+          sh tests/aih-verify-sha256.Tests.sh
+      - name: Official PowerShell manifest decodes through the installer verifier
+        run: |
+          curl -fsSL 'https://github.com/PowerShell/PowerShell/releases/download/v7.5.3/hashes.sha256' -o /tmp/official-hashes.sha256
+          file /tmp/official-hashes.sha256
+          . scripts/lib/aih-verify-sha256.sh
+          aih_manifest_to_utf8 /tmp/official-hashes.sha256 | grep -F 'powershell-7.5.3-linux-x64.tar.gz'
       - name: Install and test natively on Linux
         run: |
           ./setup.sh \

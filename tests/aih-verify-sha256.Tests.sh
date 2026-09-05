@@ -23,7 +23,13 @@ assert_exit() {
   _rc=0
   # The impl exits the shell on failure, so it must run in a subshell.
   _err=$( (aih_verify_sha256_impl "$AIH_ARCHIVE" "$AIH_MANIFEST" "$AIH_NAME") 2>&1 ) || _rc=$?
-  if [ "$_rc" -eq "$_want_rc" ] && printf '%s' "$_err" | grep -qF "$_want_err"; then
+  # The stderr fragment is only meaningful for failure expectations; success
+  # is silent by contract (the wrapper prints nothing on a verified manifest).
+  _fragment_ok=1
+  if [ "$_want_err" != '-' ]; then
+    printf '%s' "$_err" | grep -qF "$_want_err" || _fragment_ok=0
+  fi
+  if [ "$_rc" -eq "$_want_rc" ] && [ "$_fragment_ok" -eq 1 ]; then
     echo "PASS: $_desc"
     passes=$((passes + 1))
   else
@@ -54,11 +60,11 @@ AIH_ARCHIVE="$AIH_TMP/$AIH_PWSH_NAME"
 printf 'powershell fixture\n' > "$AIH_ARCHIVE"
 AIH_TEXT_DIGEST=$(sha256sum "$AIH_ARCHIVE" | awk '{print $1}')
 printf '%s  %s\n' "$AIH_TEXT_DIGEST" "$AIH_PWSH_NAME" > "$AIH_MANIFEST"
-assert_exit 0 'A: text-form manifest (two spaces) verifies' 'SHA256'
+assert_exit 0 'A: text-form manifest (two spaces) verifies' '-'
 
 # B. GNU binary-marker form: HASH + space + *NAME (PowerShell hashes.sha256).
 printf '%s *%s\n' "$AIH_TEXT_DIGEST" "$AIH_PWSH_NAME" > "$AIH_MANIFEST"
-assert_exit 0 'B: binary-marker manifest (*NAME) verifies' 'SHA256'
+assert_exit 0 'B: binary-marker manifest (*NAME) verifies' '-'
 
 # B2. The exact official 7.5.3 linux-x64 line parses to the official digest.
 #     Prove extraction picks the official digest by manifesting it for a
@@ -92,7 +98,7 @@ AIH_NODE_DIGEST=$(sha256sum "$AIH_ARCHIVE" | awk '{print $1}')
 printf '%s *node-v24x18x1-linux-x64.tar.xz\n%s *anode-v24.18.1-linux-x64.tar.xz\n%s *node-v24.18.1-linux-x64.tar.xz.asc\n' "$AIH_NODE_DIGEST" "$AIH_NODE_DIGEST" "$AIH_NODE_DIGEST" > "$AIH_MANIFEST"
 assert_exit 1 'F1: decoy-only manifest fails closed (no regex/prefix match)' 'does not contain'
 printf '%s *node-v24x18x1-linux-x64.tar.xz\n%s *anode-v24.18.1-linux-x64.tar.xz\n%s *node-v24.18.1-linux-x64.tar.xz.asc\n%s *%s\n' "$AIH_NODE_DIGEST" "$AIH_NODE_DIGEST" "$AIH_NODE_DIGEST" "$AIH_NODE_DIGEST" "$AIH_NAME" > "$AIH_MANIFEST"
-assert_exit 0 'F2: dotted artifact name matches literally among decoys' 'SHA256'
+assert_exit 0 'F2: dotted artifact name matches literally among decoys' '-'
 
 # G. Realistic Node SHASUMS256.txt: many entries, text form, target present.
 {
@@ -102,11 +108,85 @@ assert_exit 0 'F2: dotted artifact name matches literally among decoys' 'SHA256'
   printf '%s  win-x64/node.exe\n' "$AIH_NODE_DIGEST"
 } > "$AIH_MANIFEST"
 AIH_NAME='node-v24.18.1-linux-x64.tar.xz'
-assert_exit 0 'G: multi-entry Node SHASUMS256.txt still verifies' 'SHA256'
+assert_exit 0 'G: multi-entry Node SHASUMS256.txt still verifies' '-'
 
 # H. CRLF-edited manifest tolerates the carriage return on the name token.
 printf '%s *%s\r\n' "$AIH_NODE_DIGEST" "$AIH_NAME" > "$AIH_MANIFEST"
-assert_exit 0 'H: CRLF manifest line verifies (CR stripped from name token)' 'SHA256'
+assert_exit 0 'H: CRLF manifest line verifies (CR stripped from name token)' '-'
 
+
+# ── encoding suite: byte-real manifest encodings (attempt 4) ──
+# The official PowerShell hashes.sha256 is UTF-16LE with BOM and CRLF.
+# Fixtures are real byte sequences (printf octal escapes + iconv), never
+# PowerShell-style in-memory strings.
+HAVE_ICONV=1
+command -v iconv >/dev/null 2>&1 || HAVE_ICONV=0
+if [ "$HAVE_ICONV" -eq 0 ]; then
+  echo 'SKIP: iconv not available; byte-encoding cases not verifiable here'
+fi
+
+if [ "$HAVE_ICONV" -eq 1 ]; then
+  # C: UTF-8 BOM (EF BB BF), text form.
+  AIH_NAME='enc-c.tar.gz'
+  AIH_ARCHIVE="$AIH_TMP/$AIH_NAME"; printf 'c fixture\n' > "$AIH_ARCHIVE"
+  AIH_ENC=$(sha256sum "$AIH_ARCHIVE" | awk '{print $1}')
+  printf '\357\273\277%s  %s\n' "$AIH_ENC" "$AIH_NAME" > "$AIH_MANIFEST"
+  assert_exit 0 'encoding C: UTF-8 BOM manifest verifies' '-'
+
+  # D: UTF-16LE BOM + CRLF, binary-marker form — the exact official
+  # PowerShell hashes.sha256 shape seen on CachyOS (FF FE ...).
+  AIH_NAME='powershell-7.5.3-linux-x64.tar.gz'
+  AIH_ARCHIVE="$AIH_TMP/$AIH_NAME"; printf 'pwsh fixture\n' > "$AIH_ARCHIVE"
+  AIH_ENC=$(sha256sum "$AIH_ARCHIVE" | awk '{print $1}')
+  printf '\377\376' > "$AIH_MANIFEST"
+  printf '%s *%s\r\n' "$AIH_ENC" "$AIH_NAME" | iconv -f UTF-8 -t UTF-16LE >> "$AIH_MANIFEST"
+  assert_exit 0 'encoding D: UTF-16LE BOM + CRLF official PowerShell manifest shape verifies' '-'
+
+  # E: UTF-16LE BOM, LF endings, text form.
+  printf '\377\376' > "$AIH_MANIFEST"
+  printf '%s  %s\n' "$AIH_ENC" "$AIH_NAME" | iconv -f UTF-8 -t UTF-16LE >> "$AIH_MANIFEST"
+  assert_exit 0 'encoding E: UTF-16LE BOM text-form manifest verifies' '-'
+
+  # F: UTF-16BE BOM, binary-marker form.
+  printf '\376\377' > "$AIH_MANIFEST"
+  printf '%s *%s\n' "$AIH_ENC" "$AIH_NAME" | iconv -f UTF-8 -t UTF-16BE >> "$AIH_MANIFEST"
+  assert_exit 0 'encoding F: UTF-16BE BOM manifest verifies' '-'
+
+  # G: malformed UTF-16 (BOM + lone high surrogate) fails closed.
+  printf '\377\376\003\330' > "$AIH_MANIFEST"
+  assert_exit 1 'encoding G: malformed UTF-16 fails closed' 'could not be decoded'
+
+  # H: unsupported BOM (UTF-7 EF-free 2B 2F 76) fails closed.
+  printf '\053\057\166%s  %s\n' "$AIH_ENC" "$AIH_NAME" > "$AIH_MANIFEST"
+  assert_exit 1 'encoding H: unsupported BOM fails closed' 'malformed'
+
+  # I: missing filename in a UTF-16LE manifest fails closed.
+  printf '\377\376' > "$AIH_MANIFEST"
+  printf '%s  other-artifact.tar.gz\n' "$AIH_ENC" | iconv -f UTF-8 -t UTF-16LE >> "$AIH_MANIFEST"
+  assert_exit 1 'encoding I: missing filename in UTF-16LE manifest fails closed' 'does not contain'
+
+  # J: malformed digest inside UTF-16LE fails closed.
+  printf '\377\376' > "$AIH_MANIFEST"
+  printf '%s  %s\n' "$(printf '%s' "$AIH_ENC" | cut -c1-63)" "$AIH_NAME" | iconv -f UTF-8 -t UTF-16LE >> "$AIH_MANIFEST"
+  assert_exit 1 'encoding J: malformed digest in UTF-16LE fails closed' 'malformed'
+
+  # K: wrong digest inside UTF-16LE fails closed.
+  AIH_WRONG=$(printf '%s' "$AIH_ENC" | awk '{d=$1; if (substr(d,1,1)=="0") d="1" substr(d,2); else d="0" substr(d,2); print d}')
+  printf '\377\376' > "$AIH_MANIFEST"
+  printf '%s  %s\n' "$AIH_WRONG" "$AIH_NAME" | iconv -f UTF-8 -t UTF-16LE >> "$AIH_MANIFEST"
+  assert_exit 1 'encoding K: wrong digest in UTF-16LE fails closed' 'SHA256 mismatch'
+
+  # M: regex punctuation (dots, +, brackets) in a UTF-16LE name uses exact
+  # equality and matches literally.
+  AIH_NAME='node-v24.18.1+build[1]-linux-x64.tar.xz'
+  AIH_ARCHIVE="$AIH_TMP/$AIH_NAME"; printf 'm fixture\n' > "$AIH_ARCHIVE"
+  AIH_ENC=$(sha256sum "$AIH_ARCHIVE" | awk '{print $1}')
+  printf '\377\376' > "$AIH_MANIFEST"
+  printf '%s *%s\n' "$AIH_ENC" "$AIH_NAME" | iconv -f UTF-8 -t UTF-16LE >> "$AIH_MANIFEST"
+  assert_exit 0 'encoding M: punctuation-rich UTF-16LE name matches exactly' '-'
+  printf '\377\376' > "$AIH_MANIFEST"
+  printf '%s *node-v24.18.1+build1-linux-x64.tar.xz\n' "$AIH_ENC" | iconv -f UTF-8 -t UTF-16LE >> "$AIH_MANIFEST"
+  assert_exit 1 'encoding M2: bracketed name does not match a decoy without brackets' 'does not contain'
+fi
 printf 'RESULT: %d sha256-manifest assertions passed, %d failed.\n' "$passes" "$failures"
 [ "$failures" -eq 0 ]
