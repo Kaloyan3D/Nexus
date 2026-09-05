@@ -19,6 +19,42 @@ function Resolve-AihExpectedProfileTargets {
     return [pscustomobject]@{Preset=$resolvedPreset;Profile=$activeProfile;Targets=[pscustomobject]$targets}
 }
 
+# TASK-0026: SOURCE-credential-scan path classification, shared and
+# platform-neutral. The runtime directories that may legitimately embed
+# credential-shaped text (task descriptions, prompts, evidence) are
+# excluded by PATH COMPONENT, never by a separator-specific regex:
+# 'data/routing/x.json' and 'data\\routing\\x.json' classify identically
+# on Windows and Linux, while real source trees stay inside the scan.
+$script:AihSourceScanExcludedComponents = @('.git', 'app', 'runtime', 'data', 'logs', 'nx-chrome-profile', '.ai-harness')
+
+function Test-AihSourceScanPathExcluded {
+    param([string]$RelativePath)
+    if ([string]::IsNullOrWhiteSpace($RelativePath)) { return $false }
+    $components = @($RelativePath -split '[\\/]' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    foreach ($component in $components) {
+        if ($script:AihSourceScanExcludedComponents -contains $component) { return $true }
+    }
+    return $false
+}
+
+function Get-AihSourceScanFiles {
+    # Enumerates the SOURCE files of a tree for the credential scan: the
+    # same set on both path separator styles (the component test is
+    # separator-agnostic), with runtime/state trees and lock metadata
+    # excluded and every real source file included.
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $rootFull = [System.IO.Path]::GetFullPath($Root)
+    if (-not $rootFull.EndsWith([System.IO.Path]::DirectorySeparatorChar)) { $rootFull += [System.IO.Path]::DirectorySeparatorChar }
+    Get-ChildItem -LiteralPath $Root -Recurse -File | Where-Object {
+        $relative = $_.FullName
+        if ($relative.Length -ge $rootFull.Length -and $relative.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $relative = $relative.Substring($rootFull.Length)
+        }
+        -not (Test-AihSourceScanPathExcluded $relative) -and
+        $_.Name -notmatch '^(lockfile|LOCK|SingletonLock)$'
+    }
+}
+
 function Invoke-AihTestFreshProcess {
     # Shared fresh-process test transport (TASK-0025 Class A closure).
     #
