@@ -1,7 +1,12 @@
-[CmdletBinding()]param([string]$InstallRoot='C:\AI-Harness')
+[CmdletBinding()]param([string]$InstallRoot)
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Split-Path -Parent $PSScriptRoot }
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $InstallRoot 'scripts/Common.ps1')
+# Platform-aware child host: Windows keeps powershell.exe; POSIX uses the
+# pinned Nexus pwsh. Common.ps1 loads Platform.ps1 first.
+$powershellHost = Get-AihPowerShellHost -InstallRoot $InstallRoot
 . (Join-Path $InstallRoot 'scripts/Routing.ps1')
 . (Join-Path $InstallRoot 'scripts/TaskController.ps1')
 . (Join-Path $InstallRoot 'scripts/Telemetry.ps1')
@@ -62,15 +67,19 @@ llm-pi-ai:
         if(-not[string]::IsNullOrWhiteSpace($LoopTaskId)){ $targetTaskId=$LoopTaskId }
         $outFile=Join-Path $fixture ('loop-out-'+$script:loopSeq+'.txt')
         $errFile=Join-Path $fixture ('loop-err-'+$script:loopSeq+'.txt')
-        $cmd='powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+(Join-Path $fixture 'scripts/VisualLoop.ps1')+'" -InstallRoot "'+$fixture+'" -Workspace "'+$workspace+'" -TaskId '+$targetTaskId+' -Action '+$Action+' -MaxIterations '+[string]$MaxIterations
-        if($MockResponseFile){$cmd+=(' -MockResponseFile "'+$MockResponseFile+'"')}
-        if($ScenarioPath){$cmd+=(' -ScenarioPath "'+$ScenarioPath+'"')}
-        if($PolicyPath){$cmd+=(' -PolicyPath "'+$PolicyPath+'"')}
-        if($AdbPath){$cmd+=(' -AdbPath "'+$AdbPath+'"')}
-        if($DeviceSerial){$cmd+=(' -DeviceSerial "'+$DeviceSerial+'"')}
-        $cmd+=(' > "'+$outFile+'" 2> "'+$errFile+'"')
-        cmd /c $cmd
+        # Cross-platform: exact-argv splatting through the platform host
+        # (no cmd.exe string reconstruction, no shell quoting hazards).
+        $loopArguments=@('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $fixture 'scripts/VisualLoop.ps1'),'-InstallRoot',$fixture,'-Workspace',$workspace,'-TaskId',$targetTaskId,'-Action',$Action,'-MaxIterations',[string]$MaxIterations)
+        if($MockResponseFile){$loopArguments+=@('-MockResponseFile',$MockResponseFile)}
+        if($ScenarioPath){$loopArguments+=@('-ScenarioPath',$ScenarioPath)}
+        if($PolicyPath){$loopArguments+=@('-PolicyPath',$PolicyPath)}
+        if($AdbPath){$loopArguments+=@('-AdbPath',$AdbPath)}
+        if($DeviceSerial){$loopArguments+=@('-DeviceSerial',$DeviceSerial)}
+        $loopOutput=& $powershellHost @loopArguments 2>&1|ForEach-Object{[string]$_}
         $exit=$LASTEXITCODE
+        # Preserve the stdout/stderr file contract (UTF-8, no BOM).
+        [IO.File]::WriteAllText($outFile, (@($loopOutput) -join [Environment]::NewLine) + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($errFile, '', [Text.UTF8Encoding]::new($false))
         $output=@(Get-Content -LiteralPath $outFile -ErrorAction SilentlyContinue)+@(Get-Content -LiteralPath $errFile -ErrorAction SilentlyContinue)
         $doc=$null
         for($i=@($output).Count-1;$i-ge 0;$i--){
@@ -374,7 +383,7 @@ exit 3
 
     # ── 7. MANUAL OVERRIDE COMPATIBILITY ──────────────────────────────────────
     $manualArgs=@('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $fixture 'scripts/VisualReview.ps1'),'-InstallRoot',$fixture,'-Workspace',$workspace,'-TaskId',$task.taskId,'-Execute','-Trigger','manual','-Screenshots',$pngPath,'-Question','manual operator check','-MockResponseFile',$passMock)
-    $manualOutput=& 'powershell.exe' $manualArgs 2>&1|ForEach-Object{[string]$_}
+    $manualOutput=& $powershellHost $manualArgs 2>&1|ForEach-Object{[string]$_}
     $manualExit=$LASTEXITCODE
     $manualDoc=$null
     for($i=@($manualOutput).Count-1;$i-ge 0;$i--){

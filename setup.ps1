@@ -39,21 +39,21 @@ else {
 
 if (-not $SkipOpenAiLogin) {
     Write-Host '3/4 Starting the ChatGPT/Codex sign-in flow...'
-    & (Join-Path $InstallRoot 'scripts\Set-OpenAiOAuth.ps1') -InstallRoot $InstallRoot
+    & (Join-Path $InstallRoot 'scripts/Set-OpenAiOAuth.ps1') -InstallRoot $InstallRoot
 }
 else {
     Write-Host '3/4 Skipping ChatGPT/Codex sign-in.'
 }
 
 Write-Host '4/4 Running local checks...'
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
 $hasDeepSeekCredential = -not [string]::IsNullOrWhiteSpace((Get-AihDeepSeekKey -InstallRoot $InstallRoot))
 if ($hasDeepSeekCredential) {
     & (Join-Path $InstallRoot 'scripts\Doctor.ps1') -InstallRoot $InstallRoot -Preset $(if ($SkipOpenAiLogin) { 'deepseek' } else { 'normal' }) -Offline
 }
 else {
     Write-Host 'DeepSeek is not configured yet; running credential-free deterministic tests instead.'
-    & (Join-Path $InstallRoot 'scripts\Test-Harness.ps1') -InstallRoot $InstallRoot
+    & (Join-Path $InstallRoot 'scripts/Test-Harness.ps1') -InstallRoot $InstallRoot
 }
 if ($LASTEXITCODE -ne 0) {
     throw "Setup completed, but local checks failed. Run: $InstallRoot\bin\aih-doctor.cmd -Offline"
