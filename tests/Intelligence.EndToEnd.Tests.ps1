@@ -4,6 +4,7 @@ if (-not (Get-Command Test-AihIsWindows -ErrorAction SilentlyContinue)) { . (Joi
 Set-StrictMode -Version Latest;$ErrorActionPreference = 'Stop'
 . (Join-Path $InstallRoot 'scripts/Common.ps1')
 . (Join-Path $InstallRoot 'scripts/Intelligence.ps1')
+. (Join-Path $InstallRoot 'tests/TestHelpers.ps1')
 
 # ── Phase 3.1F (Services, Events, API) + multi-repo acceptance tests ────────
 $passed = 0
@@ -145,9 +146,12 @@ try {
     # (1) registered from unknown directory state — done above
     $s1 = Get-AihActiveSnapshot -StoreRoot $store -CheckoutId $e2eCheckout
     Assert-Aih ($null -ne $s1 -and $s1.status -eq 'ready') 'e2e 2: snapshot of a registered repository is ready and active'
-    # (3) restart survival via a fresh process
-    $freshScript = '. {0}; $a = Get-AihActiveSnapshot -StoreRoot {1} -CheckoutId {2}; Write-Output (''ACTIVE='' + $a.snapshotId); Write-Output (''FILES='' + @(Get-AihSnapshotFiles -StoreRoot {1} -SnapshotId $a.snapshotId -RepositoryId $a.repositoryId).Count)' -f "'C:\AI-Harness\scripts\Intelligence.ps1'", ("'" + $store + "'"), ("'" + $e2eCheckout + "'")
-    $freshOut = & $aihPsHost -NoProfile -NonInteractive -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($freshScript)))
+    # (3) restart survival via a fresh process.
+    # TASK-0025 Class A: the child derives the install root from the
+    # AIH_INSTALL_ROOT runtime contract through the shared fresh-process
+    # transport; generated script bodies never embed a literal root.
+    $freshScript = '$a = Get-AihActiveSnapshot -StoreRoot {0} -CheckoutId {1}; Write-Output (''ACTIVE='' + $a.snapshotId); Write-Output (''FILES='' + @(Get-AihSnapshotFiles -StoreRoot {0} -SnapshotId $a.snapshotId -RepositoryId $a.repositoryId).Count)' -f ("'" + $store + "'"), ("'" + $e2eCheckout + "'")
+    $freshOut = Invoke-AihTestFreshProcess -PowerShellHost $aihPsHost -InstallRoot $InstallRoot -Script $freshScript
     Assert-Aih (($freshOut -join ' ') -like '*ACTIVE=snap_*') 'e2e 3: active snapshot survives a Nexus restart'
     Assert-Aih (($freshOut -join ' ') -like '*FILES=*') 'e2e 3: snapshot files survive a Nexus restart'
     # (4) modify exactly one file
