@@ -191,9 +191,9 @@ try{
  & $ctxWrite '.env' 'SECRET=placeholder'
  & $ctxWrite 'gen/bundle.min.js' 'function codeIntelligenceStoreMinified(){}'
  $reviewPrompt='{"prompt": "Review the complete Phase 3.2 Deterministic Code Intelligence implementation as the quality gate before Phase 3.3."}'
- & $ctxWrite 'data\routing\decisions.jsonl' ((1..300|ForEach-Object{$reviewPrompt}) -join [Environment]::NewLine)
- & $ctxWrite 'artifacts\review.log' ((1..1000|ForEach-Object{"review entry $_"}) -join [Environment]::NewLine)
- & $ctxWrite 'data\routing\keep-manual.md' '# manually kept runtime note about review gates'
+ & $ctxWrite 'data/routing/decisions.jsonl' ((1..300|ForEach-Object{$reviewPrompt}) -join [Environment]::NewLine)
+ & $ctxWrite 'artifacts/review.log' ((1..1000|ForEach-Object{"review entry $_"}) -join [Environment]::NewLine)
+ & $ctxWrite 'data/routing/keep-manual.md' '# manually kept runtime note about review gates'
  $nexusYaml="context:`n  exclude_globs:`n    - 'third-party-generated/**'`n    - '!data/routing/keep-manual.md'`n    - '!blocked-artifacts/leak.ps1'`nsecurity:`n  blocked_globs:`n    - 'blocked-artifacts/**'`n"
  [IO.File]::WriteAllText((Join-Path $ctxFixture '.nexus.yml'),$nexusYaml,[Text.UTF8Encoding]::new($false))
  $ctxTask=New-AihTask $ctxFixture 'review context quality task' @('evidence')
@@ -238,8 +238,8 @@ try{
  Assert-Aih (@($stopBundle.fileSlices).Count-eq0-and@($stopBundle.manifest.selection.meaningfulTerms).Count-eq0) 'stopword-only bundle stays empty with no meaningful terms'
 
  # C4. filename/path exact matches receive deterministic preference
- & $ctxWrite 'src\widget.service.ts' 'widget'
- & $ctxWrite 'docs\notes.md' (('widget content ' * 60))
+ & $ctxWrite 'src/widget.service.ts' 'widget'
+ & $ctxWrite 'docs/notes.md' (('widget content ' * 60))
  $pathSearch=@(Search-AihCode $ctxFixture 'widget' 0)
  $svc=@($pathSearch|Where-Object{$_.file -eq 'src/widget.service.ts'})[0]
  $notes=@($pathSearch|Where-Object{$_.file -eq 'docs/notes.md'})[0]
@@ -279,6 +279,30 @@ try{
  }finally{Remove-Item -LiteralPath $guardFixture -Recurse -Force}
 }finally{Remove-Item -LiteralPath $ctxFixture -Recurse -Force}
 
+# ── TASK-0025 Class E: enumeration/materialization race degrades deterministically ──
+# A candidate whose file vanishes between ranking and slice materialization
+# must skip THAT slice with an honest provenance record, never abort the
+# whole context build. Driven directly against Select-AihBundleSlices so the
+# race is deterministic (no real deletion timing involved).
+$raceFixture=New-Fixture 'ctxrace'
+try{
+ New-Item -ItemType Directory -Force -Path (Join-Path $raceFixture 'src')|Out-Null
+ [IO.File]::WriteAllText((Join-Path $raceFixture 'src/keeper.ts'),'flux capacitor calibration keeper content',[Text.UTF8Encoding]::new($false))
+ $ranked=[ordered]@{
+  query='flux capacitor calibration';meaningfulTerms=@('flux','capacitor');stoppedTerms=@()
+  relevanceFloor=0.05;scannedFiles=2;eligibleFiles=2;excludedFiles=0;excludedByReason=[ordered]@{}
+  weakTerms=@();phrases=@();termImportance=[ordered]@{};concentration=[ordered]@{method='relative-confidence+coverage-saturation';strongConfidence=0.8;marginalCoverage=0.4;coverageConfidence=0.2;anchorScore=1.0;anchorSpecificScore=1.0;candidateCount=2;selectedCount=2;genericQuery=$false}
+  candidates=@(
+   [pscustomobject]@{file='src/vanished.ts';score=2.0;evidenceClass='source';classification='source';matchedTerms=@('flux','capacitor');matchedPhrases=@();pathMatches=@();selectedByRelevance=$true;selectionReason='race fixture';coverageContribution=$null;normalizedScore=1.0;specificScore=1.0},
+   [pscustomobject]@{file='src/keeper.ts';score=1.5;evidenceClass='source';classification='source';matchedTerms=@('flux');matchedPhrases=@();pathMatches=@();selectedByRelevance=$true;selectionReason='race fixture';coverageContribution=$null;normalizedScore=0.75;specificScore=0.5}
+  )
+ }
+ $raceSelection=Select-AihBundleSlices -Retrieval ([pscustomobject]$ranked) -WorkspaceRoot $raceFixture -UnlimitedTokens:$true -UnlimitedFiles:$true -MaxFiles 10 -MaxContextTokens 1000
+ Assert-Aih (@($raceSelection.slices).Count-eq1-and$raceSelection.slices[0].path-eq'src/keeper.ts') 'vanished candidate is skipped deterministically; surviving candidate still selected'
+ Assert-Aih ($raceSelection.used-gt0) 'skipped slice consumes no budget'
+ Assert-Aih (@($raceSelection.materializationSkipped).Count-eq1-and$raceSelection.materializationSkipped[0].path-eq'src/vanished.ts'-and$raceSelection.materializationSkipped[0].reason-eq'file-removed-between-enumeration-and-materialization') 'materialization skip is recorded with an honest provenance reason'
+}finally{Remove-Item -LiteralPath $raceFixture -Recurse -Force}
+
 # ── TASK-0012: review-context concentration + provider diagnostics ───────────
 # Deterministic regressions for the second-stage relevance concentration
 # (query-term importance, phrase/compound evidence, relative/coverage
@@ -291,17 +315,17 @@ try{
  foreach($d in $concDirs){New-Item -ItemType Directory -Force -Path (Join-Path $concFixture $d)|Out-Null}
  $concWrite={param($rel,$content)[IO.File]::WriteAllText((Join-Path $concFixture $rel),$content,[Text.UTF8Encoding]::new($false))}
  # domain-specific source, tests and docs
- & $concWrite 'src\FluxCapacitorStore.ts' "export class FluxCapacitorStore {`n  // FluxCapacitorStore implements the flux capacitor calibration store.`n  calibrate() { return 'flux capacitor calibration complete' }`n}"
- & $concWrite 'tests\FluxCapacitorStore.Tests.ts' "describe('FluxCapacitorStore', () => { it('validates flux capacitor calibration', () => {}) })"
- & $concWrite 'docs\architecture\flux-capacitor.md' ('# Flux Capacitor Calibration architecture' + "`n`n" + 'The flux capacitor calibration routine aligns the phase matrix.')
+ & $concWrite 'src/FluxCapacitorStore.ts' "export class FluxCapacitorStore {`n  // FluxCapacitorStore implements the flux capacitor calibration store.`n  calibrate() { return 'flux capacitor calibration complete' }`n}"
+ & $concWrite 'tests/FluxCapacitorStore.Tests.ts' "describe('FluxCapacitorStore', () => { it('validates flux capacitor calibration', () => {}) })"
+ & $concWrite 'docs/architecture/flux-capacitor.md' ('# Flux Capacitor Calibration architecture' + "`n`n" + 'The flux capacitor calibration routine aligns the phase matrix.')
  # a scattered match: the same specific terms, far apart, NO compound evidence
- & $concWrite 'ui\scattered.ts' ('flux in one place.' + "`n" + 'capacitor in another.' + "`n" + 'calibration somewhere else.' + "`n" + (('review complete implementation quality gate tests code review complete ')*20))
+ & $concWrite 'ui/scattered.ts' ('flux in one place.' + "`n" + 'capacitor in another.' + "`n" + 'calibration somewhere else.' + "`n" + (('review complete implementation quality gate tests code review complete ')*20))
  # generic controller/UI review vocabulary (no domain terms at all)
  $genericControllerText=(('review the complete implementation quality gate checks tests code review ')*40)
- & $concWrite 'config\ReviewController.cjs' $genericControllerText
- & $concWrite 'ui\ReviewPanel.cjs' $genericControllerText
+ & $concWrite 'config/ReviewController.cjs' $genericControllerText
+ & $concWrite 'ui/ReviewPanel.cjs' $genericControllerText
  # generic fillers so the generic review vocabulary is genuinely BROAD in this corpus
- for($i=1;$i -le 12;$i++){ & $concWrite ('notes\note{0:d2}.md' -f $i) ("review note {0}: the complete implementation quality gate checks tests and code" -f $i) }
+ for($i=1;$i -le 12;$i++){ & $concWrite ('notes/note{0:d2}.md' -f $i) ("review note {0}: the complete implementation quality gate checks tests and code" -f $i) }
  $concTask=New-AihTask $concFixture 'concentration task' @('evidence')
  $concQuery='Review the complete flux capacitor calibration implementation and tests as the quality gate before release.'
  $concDomainFiles=@('src/FluxCapacitorStore.ts','tests/FluxCapacitorStore.Tests.ts','docs/architecture/flux-capacitor.md')
@@ -339,13 +363,13 @@ try{
  Assert-Aih ($concSliceCount-lt$genericEligible-and$concSliceCount-ge3) 'TASK-0012: selection size follows relevance shape, not a fixed file count'
 
  # 5. adding 100 weakly related files does not materially enlarge the packet
- for($i=1;$i -le 100;$i++){ & $concWrite ('notes\weak{0:d3}.md' -f $i) ("review note {0} about generic engineering concerns" -f $i) }
+ for($i=1;$i -le 100;$i++){ & $concWrite ('notes/weak{0:d3}.md' -f $i) ("review note {0} about generic engineering concerns" -f $i) }
  $concBundleAfterWeak=New-AihContextBundle $concFixture $concTask.taskId $concQuery @() 0 0
  $concPathsAfterWeak=@($concBundleAfterWeak.fileSlices|ForEach-Object{$_.path})
  Assert-Aih (@($concBundleAfterWeak.fileSlices).Count-le($concSliceCount+1)) 'TASK-0012: adding 100 weakly related files does not materially enlarge a focused review packet'
 
  # 6. a newly strongly relevant implementation file IS included
- & $concWrite 'src\FluxCapacitorIndex.ts' "export class FluxCapacitorIndex {`n  // flux capacitor calibration index for the phase matrix`n}"
+ & $concWrite 'src/FluxCapacitorIndex.ts' "export class FluxCapacitorIndex {`n  // flux capacitor calibration index for the phase matrix`n}"
  $concBundleAfterStrong=New-AihContextBundle $concFixture $concTask.taskId $concQuery @() 0 0
  $concPathsAfterStrong=@($concBundleAfterStrong.fileSlices|ForEach-Object{$_.path})
  Assert-Aih ($concPathsAfterStrong-contains'src/FluxCapacitorIndex.ts') 'TASK-0012: adding another strongly relevant implementation file includes it even with many files already selected'
@@ -690,17 +714,17 @@ try {
     $sq = [char]39
     $secWrite = { param($rel, $content) [IO.File]::WriteAllText((Join-Path $secWs $rel), $content, [Text.UTF8Encoding]::new($false)) }
     $keyLine = { param($value, $sep) ('{0}{1}{2}{3}{2}' -f 'DEEPSEEK_API_KEY', $sep, $sq, $value) }
-    & $secWrite 'src\real-key.ps1'   ((& $keyLine 'abcdef1234567890abcdef1234567890' '=') + [Environment]::NewLine)
-    & $secWrite 'src\real-sk.ps1'    ((& $keyLine ('sk-' + 'abcdefghijklmnop1234') '=') + [Environment]::NewLine)
-    & $secWrite 'src\sk-token.txt'   (('export TOKEN=' + ('sk-' + '0123456789abcdef0123456789')) + [Environment]::NewLine)
+    & $secWrite 'src/real-key.ps1'   ((& $keyLine 'abcdef1234567890abcdef1234567890' '=') + [Environment]::NewLine)
+    & $secWrite 'src/real-sk.ps1'    ((& $keyLine ('sk-' + 'abcdefghijklmnop1234') '=') + [Environment]::NewLine)
+    & $secWrite 'src/sk-token.txt'   (('export TOKEN=' + ('sk-' + '0123456789abcdef0123456789')) + [Environment]::NewLine)
     & $secWrite 'src/env-ph.ps1'     ((& $keyLine ('$env:AIH_DEEPSEEK_API_KEY') '=') + [Environment]::NewLine)
-    & $secWrite 'src\braced-ph.ps1'  ((& $keyLine ('${DEEPSEEK_API_KEY}') '=') + [Environment]::NewLine)
+    & $secWrite 'src/braced-ph.ps1'  ((& $keyLine ('${DEEPSEEK_API_KEY}') '=') + [Environment]::NewLine)
     & $secWrite 'src/your-ph.ps1'    ((& $keyLine '<YOUR_KEY>' '=') + [Environment]::NewLine)
-    & $secWrite 'src\replace-ph.ps1' ((& $keyLine '<REPLACE_WITH_YOUR_KEY>' '=') + [Environment]::NewLine)
-    & $secWrite 'src\suspicious.ps1' ((& $keyLine 'not-a-placeholder' '=') + [Environment]::NewLine)
+    & $secWrite 'src/replace-ph.ps1' ((& $keyLine '<REPLACE_WITH_YOUR_KEY>' '=') + [Environment]::NewLine)
+    & $secWrite 'src/suspicious.ps1' ((& $keyLine 'not-a-placeholder' '=') + [Environment]::NewLine)
     & $secWrite 'src/angle-susp.ps1' ((& $keyLine '<secret>' '=') + [Environment]::NewLine)
     & $secWrite 'data/creds.yaml'    ((& $keyLine ('sk-' + 'abcdefghijklmnop1234') (':' + ' ')) + [Environment]::NewLine)
-    & $secWrite 'tmp\scratch.txt'    ((& $keyLine ('sk-' + 'abcdefghijklmnop1234') (':' + ' ')) + [Environment]::NewLine)
+    & $secWrite 'tmp/scratch.txt'    ((& $keyLine ('sk-' + 'abcdefghijklmnop1234') (':' + ' ')) + [Environment]::NewLine)
     $secResult = Invoke-AihArchitectureRules $secWs
     $secFindings = @($secResult.findings | Where-Object { $_.ruleId -eq 'SEC001' })
     Assert-Aih ($secResult.status -eq 'FAIL') 'SEC001 fixture workspace reports FAIL'
