@@ -377,48 +377,20 @@ async function unitDetailJoins() {
 // -- end-to-end: the full DoD scenario through the REAL bridge ---------------
 async function runBridgeEndToEnd() {
   const { execFile } = require('node:child_process')
-  const { spawnSync } = require('node:child_process')
   const { promisify } = require('node:util')
   const fs = require('node:fs')
-  // Transport note (TASK-0017): sandboxed environments deny anonymous-pipe and
-  // fd-redirected stdio capture from Node children (spawn EPERM), while
-  // stdio:'inherit' spawns are allowed. This wrapper runs each CLI through
-  // cmd.exe with cmd-side redirection into temporary files (no pipes anywhere)
-  // and preserves the promisify(execFile) result and rejection shapes.
-  let runSeq = 0
-  const run = async (file, args, opts) => {
-    const seq = ++runSeq
-    const token = process.pid + '-' + seq
-    const outPath = path.join(os.tmpdir(), 'aih-cli-out-' + token + '.txt')
-    const errPath = path.join(os.tmpdir(), 'aih-cli-err-' + token + '.txt')
-    const batchPath = path.join(os.tmpdir(), 'aih-cli-' + token + '.cmd')
-    const q = (value) => '"' + String(value) + '"'
-    const command = [q(file)].concat(args.map(q)).join(' ') + ' > ' + q(outPath) + ' 2> ' + q(errPath)
-    fs.writeFileSync(batchPath, '@echo off\r\n' + command + '\r\n', 'utf8')
-    const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', batchPath], Object.assign({}, opts, { stdio: 'ignore', windowsHide: true }))
-    const read = (p) => { try { return fs.readFileSync(p, 'utf8') } catch (_) { return '' } }
-    const stdout = read(outPath)
-    const stderr = read(errPath)
-    try { fs.rmSync(outPath, { force: true }) } catch (_) { }
-    try { fs.rmSync(errPath, { force: true }) } catch (_) { }
-    try { fs.rmSync(batchPath, { force: true }) } catch (_) { }
-    if (result.error) {
-      result.error.stdout = stdout
-      result.error.stderr = stderr
-      throw result.error
-    }
-    if (result.status !== 0) {
-      const failure = new Error('Command failed: ' + file)
-      failure.code = result.status === null ? -1 : result.status
-      failure.killed = result.signal != null
-      failure.signal = result.signal
-      failure.stdout = stdout
-      failure.stderr = stderr
-      throw failure
-    }
-    return { stdout, stderr }
-  }
+  // TASK-0025 RC4: ONE shared test CLI transport + platform PowerShell host
+  // resolution (tests/lib/AihTestTransport.cjs). The Windows branch keeps the
+  // TASK-0017 no-pipes cmd.exe redirection transport and its rejection
+  // shapes; POSIX uses direct capture. Host resolution mirrors production
+  // Get-AihPowerShellHost instead of unconditionally building a .cmd file.
+  const { createAihCliRunner, resolveAihPowerShellHost } = require(path.join(__dirname, 'lib', 'AihTestTransport.cjs'))
+  const run = createAihCliRunner()
   const repoRoot = path.join(__dirname, '..')
+  // Resolve the platform PowerShell host against the REAL repo root (the
+  // pinned POSIX runtime lives under the installed/checkout root, not the
+  // isolated fixture install root below).
+  const powershellHost = resolveAihPowerShellHost(repoRoot)
   const homeName = '.aih-e2e-home-' + crypto.randomUUID().slice(0, 8)
   const installRoot = path.join(repoRoot, homeName)
   const dataHome = path.join(installRoot, 'data')
@@ -448,7 +420,15 @@ async function runBridgeEndToEnd() {
   fs.writeFileSync(path.join(fixture, 'src', 'huge.js'), 'x'.repeat(140000))
   fs.writeFileSync(path.join(fixture, 'package.json'), JSON.stringify({ private: true, scripts: { test: 'node -e "process.exit(0)"' } }))
   const previousHome = process.env.DSH_HOME
+  const previousInstallRoot = process.env.AIH_INSTALL_ROOT
   process.env.DSH_HOME = dataHome
+  // Hermetic fixture: pin AIH_INSTALL_ROOT to the fixture as well, or an
+  // ambient real-install value leaks into spawned controller CLIs (PowerShell
+  // resolves AIH_INSTALL_ROOT ahead of DSH_HOME for CLIs run without the DSH
+  // runtime) and sends them to the production data root. See the comment on
+  // resolveInstallRoot: when both env vars disagree, DSH_HOME must own the
+  // fixture, and the CLIs must not see a foreign AIH_INSTALL_ROOT at all.
+  process.env.AIH_INSTALL_ROOT = installRoot
   const bindingsPath = path.join(dataHome, 'routing', 'session-bindings.json')
   const ledgerPath = path.join(fixture, '.ai-harness', 'state', 'tasks.json')
   function boot() {
@@ -480,7 +460,7 @@ async function runBridgeEndToEnd() {
     fs.mkdirSync(payloadDir, { recursive: true })
     const routePayload = path.join(payloadDir, 'route-a.json')
     fs.writeFileSync(routePayload, JSON.stringify({ workspace: fixture, description: 'review the hardening', reviewRequested: true, taskInstanceId: bindingA.taskInstanceId }))
-    await run('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(installRoot, 'scripts', 'Route.ps1'), '-TaskId', bindingA.taskId, '-Preset', 'aih-engineering', '-ReviewRequested', '-InstallRoot', installRoot, '-PayloadFile', routePayload], { timeout: 320000, windowsHide: true })
+    await run(powershellHost, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(installRoot, 'scripts', 'Route.ps1'), '-TaskId', bindingA.taskId, '-Preset', 'aih-engineering', '-ReviewRequested', '-InstallRoot', installRoot, '-PayloadFile', routePayload], { timeout: 320000, windowsHide: true })
 
     // 3-4. Stop Nexus (fresh plugin instance) + restore the workspace ledger to
     //      an older state where the task is gone and nextSequence regressed.
@@ -579,7 +559,7 @@ async function runBridgeEndToEnd() {
     assert.equal(verifiedRequirementsB.requirements[0].status, 'verified', 'linked PASS verification moves the required requirement to verified')
     assert.equal(verifiedRequirementsB.requirements[0].verificationEvidence[0].verificationId, verificationRecords[0].verificationId, 'requirement state links back to the exact verification record')
     assert.equal(readLedger().tasks.find((item) => item.taskInstanceId === taskB.taskInstanceId).status, 'complete', 'controller completion consumes verified requirement state')
-    const telemetryResult = await run('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(installRoot, 'scripts', 'Engineering.ps1'), '-Action', 'telemetry-snapshot', '-TaskId', taskB.taskId, '-Workspace', fixture, '-TaskInstanceId', taskB.taskInstanceId], { timeout: 320000, windowsHide: true })
+    const telemetryResult = await run(powershellHost, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(installRoot, 'scripts', 'Engineering.ps1'), '-Action', 'telemetry-snapshot', '-TaskId', taskB.taskId, '-Workspace', fixture, '-TaskInstanceId', taskB.taskInstanceId], { timeout: 320000, windowsHide: true })
     const engineeringTelemetry = JSON.parse(telemetryResult.stdout)
     assert.equal(engineeringTelemetry.taskInstanceId, taskB.taskInstanceId, 'engineering telemetry remains generation-scoped')
     assert.equal(engineeringTelemetry.totalModelCalls, 1, 'telemetry derives the real GUI engineering step count')
@@ -638,6 +618,8 @@ async function runBridgeEndToEnd() {
     console.log('PASS: aih-controller identity end-to-end (DoD scenario)')
   } finally {
     process.env.DSH_HOME = previousHome
+    if (previousInstallRoot === undefined) delete process.env.AIH_INSTALL_ROOT
+    else process.env.AIH_INSTALL_ROOT = previousInstallRoot
     fs.rmSync(installRoot, { recursive: true, force: true })
     fs.rmSync(fixture, { recursive: true, force: true })
   }

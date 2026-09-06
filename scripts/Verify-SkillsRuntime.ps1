@@ -63,7 +63,7 @@ function Test-CompositionRow {
     return @{ present = $present; disabled = $disabled }
 }
 
-$baseBundle = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-base\cordis.patch.yml'
+$baseBundle = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-base/cordis.patch.yml'
 if (Test-Path -LiteralPath $baseBundle) {
     $baseText = Get-Content -Raw -Encoding UTF8 -LiteralPath $baseBundle
     $hostRows = @(
@@ -95,7 +95,7 @@ $presetRows = @(
     @{ id = 'tool-skill'; name = '@deepseek-ai/dsh-tool-skill'; bucket = 'modelSkillTool' }
 )
 foreach ($presetName in @('aih-engineering', 'aih-deepseek')) {
-    $presetPath = Join-Path $layout.Data (".agent-presets\" + $presetName + "\agent.cordis.yml")
+    $presetPath = Join-Path $layout.Data ('.agent-presets/' + $presetName + '/agent.cordis.yml')
     if (-not (Test-Path -LiteralPath $presetPath)) {
         foreach ($row in $presetRows) { $results[$row.bucket].evidence += ("MISSING deployed preset: " + $presetName) }
         continue
@@ -120,7 +120,7 @@ foreach ($bucket in @('registry', 'filesystemProvider', 'modelSkillTool')) {
 # --- native end-to-end boot against a disposable fixture ---------------------
 $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('nexus-skills-verify-' + [guid]::NewGuid().ToString('N'))
 try {
-    $fixtureSkill = Join-Path $fixtureRoot '.agents\skills\skills-runtime-verify'
+    $fixtureSkill = Join-Path $fixtureRoot '.agents/skills/skills-runtime-verify'
     New-Item -ItemType Directory -Force -Path $fixtureSkill | Out-Null
     $fixtureBody = '---' + [Environment]::NewLine +
         'name: skills-runtime-verify' + [Environment]::NewLine +
@@ -133,7 +133,7 @@ try {
     New-Item -ItemType Directory -Force -Path $homeRoot | Out-Null
     New-Item -ItemType Directory -Force -Path $agentsRoot | Out-Null
 
-    $catalogScript = Join-Path $layout.Scripts 'skills\catalog.mjs'
+    $catalogScript = Join-Path $layout.Scripts 'skills/catalog.mjs'
     $nodeOutput = & $layout.Node $catalogScript --cwd $fixtureRoot --name 'skills-runtime-verify' --dsh-home $homeRoot --agents-home $agentsRoot --json 2>&1
     $nodeExit = $LASTEXITCODE
     $outputText = (@($nodeOutput) | ForEach-Object { [string]$_ }) -join [Environment]::NewLine

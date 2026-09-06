@@ -52,8 +52,8 @@ function Get-AihLedgerLayout {
     $root = Join-Path $workspacePath '.ai-harness'
     [pscustomobject]@{
         Workspace = $workspacePath; Root = $root; State = Join-Path $root 'state'; Runs = Join-Path $root 'runs'
-        Objective = Join-Path $root 'state\objective.json'; Tasks = Join-Path $root 'state\tasks.json'
-        Decisions = Join-Path $root 'state\decisions.jsonl'; Learnings = Join-Path $root 'state\learnings.jsonl'
+        Objective = Join-Path $root 'state/objective.json'; Tasks = Join-Path $root 'state/tasks.json'
+        Decisions = Join-Path $root 'state/decisions.jsonl'; Learnings = Join-Path $root 'state/learnings.jsonl'
     }
 }
 

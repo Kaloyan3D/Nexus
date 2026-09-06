@@ -35,7 +35,7 @@ if ([string]::IsNullOrWhiteSpace($DshHome)) {
     if (-not [string]::IsNullOrWhiteSpace($env:DSH_HOME)) { $DshHome = $env:DSH_HOME } else { $DshHome = $layout.Data }
 }
 
-$catalogScript = Join-Path $layout.Scripts 'skills\catalog.mjs'
+$catalogScript = Join-Path $layout.Scripts 'skills/catalog.mjs'
 $arguments = @($catalogScript, '--cwd', $Workspace, '--dsh-home', $DshHome)
 if (-not [string]::IsNullOrWhiteSpace($AgentsHome)) { $arguments += @('--agents-home', $AgentsHome) }
 if (-not [string]::IsNullOrWhiteSpace($Name)) { $arguments += @('--name', $Name) }

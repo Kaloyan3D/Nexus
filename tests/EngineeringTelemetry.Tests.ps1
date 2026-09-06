@@ -1,5 +1,7 @@
 [CmdletBinding()]
 param([string]$InstallRoot=(Split-Path -Parent $PSScriptRoot))
+# Platform-aware child host: Windows keeps powershell.exe; POSIX uses the pinned Nexus pwsh.
+if (-not (Get-Command Test-AihIsWindows -ErrorAction SilentlyContinue)) { . (Join-Path $InstallRoot 'scripts/Platform.ps1') }; $aihPsHost = Get-AihPowerShellHost -InstallRoot $InstallRoot
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 try { [Console]::OutputEncoding=[Text.Encoding]::UTF8 } catch {}
@@ -10,29 +12,29 @@ New-Item -ItemType Directory -Force -Path $root|Out-Null
 try {
   $payload=Join-Path $root 'payload.json'
   @{workspace=$root;description='telemetry fixture';reviewRequested=$false}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath $payload
-  $taskJson=& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts\Task.ps1') -Action create-task -PayloadFile $payload
+  $taskJson=& $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts/Task.ps1') -Action create-task -PayloadFile $payload
   if($LASTEXITCODE -ne 0){throw 'task create failed'}
   $task=(($taskJson -join [Environment]::NewLine)|ConvertFrom-Json)
   $instance=[string]$task.taskInstanceId
   @{workspace=$root;taskInstanceId=$instance;text='telemetry fixture'}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath $payload
-  $null=& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts\Engineering.ps1') -Action lifecycle-init -TaskId $task.taskId -PayloadFile $payload
+  $null=& $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts/Engineering.ps1') -Action lifecycle-init -TaskId $task.taskId -PayloadFile $payload
   if($LASTEXITCODE -ne 0){throw 'lifecycle init failed'}
 
   $normal=@{workspace=$root;taskInstanceId=$instance;role='engineer_normal';milestoneId='1:1';inputTokens=100;uncachedInputTokens=100;cacheReadTokens=500;outputTokens=20;usageAvailable=$true;model='fixture-normal';provider='fixture-provider'}
   $normal|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath $payload
-  $null=& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts\Engineering.ps1') -Action record-model-usage -TaskId $task.taskId -PayloadFile $payload
+  $null=& $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts/Engineering.ps1') -Action record-model-usage -TaskId $task.taskId -PayloadFile $payload
   if($LASTEXITCODE -ne 0){throw 'normal usage failed'}
   # Replay the same event: idempotency must prevent a duplicate usage record.
-  $null=& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts\Engineering.ps1') -Action record-model-usage -TaskId $task.taskId -PayloadFile $payload
+  $null=& $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts/Engineering.ps1') -Action record-model-usage -TaskId $task.taskId -PayloadFile $payload
   if($LASTEXITCODE -ne 0){throw 'usage replay failed'}
 
   $deep=@{workspace=$root;taskInstanceId=$instance;role='engineer_deep';milestoneId='1:2';inputTokens=50;uncachedInputTokens=50;cacheReadTokens=250;outputTokens=10;usageAvailable=$true;model='fixture-deep';provider='fixture-provider'}
   $deep|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath $payload
-  $null=& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts\Engineering.ps1') -Action record-model-usage -TaskId $task.taskId -PayloadFile $payload
+  $null=& $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts/Engineering.ps1') -Action record-model-usage -TaskId $task.taskId -PayloadFile $payload
   if($LASTEXITCODE -ne 0){throw 'deep usage failed'}
 
   @{workspace=$root;taskInstanceId=$instance}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath $payload
-  $snapshotOutput=@(& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts\Engineering.ps1') -Action telemetry-snapshot -TaskId $task.taskId -PayloadFile $payload 2>&1)
+  $snapshotOutput=@(& $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts/Engineering.ps1') -Action telemetry-snapshot -TaskId $task.taskId -PayloadFile $payload 2>&1)
   $snapshotExitCode=[int]$LASTEXITCODE
   if($snapshotExitCode -ne 0){
     Write-Host ('TELEMETRY CHILD FAILED (exit {0})' -f $snapshotExitCode)

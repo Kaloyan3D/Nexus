@@ -23,6 +23,7 @@ The short version is in the repository [README](../README.md). The documents her
 ## Operations
 
 - **[Setup, testing, and troubleshooting](operations/setup-testing-troubleshooting.md)** — install, startup, diagnostics, tests, common failures, and safe restart guidance.
+- **[Nexus on Linux](linux.md)** — native Linux install, XDG layout, PATH setup for bash/fish, pinned runtimes, updates, uninstall, and troubleshooting.
 - **[Quick start in Bulgarian](quick-start-bg.md)** — short Bulgarian setup guide.
 
 ## Architecture decisions

@@ -3,8 +3,8 @@ $ErrorActionPreference = 'Stop'
 # The mark is the leftmost content cluster of nexus-logo.png (detected bounding
 # box x 108-384, y 486-768 at 1254px), centered on a 288x288 transparent canvas.
 Add-Type -AssemblyName System.Drawing
-$srcPath = Join-Path $PSScriptRoot 'nexus-ui\assets\nexus-logo.png'
-$outPath = Join-Path $PSScriptRoot 'nexus-ui\assets\nexus-mark.png'
+$srcPath = Join-Path $PSScriptRoot 'nexus-ui/assets/nexus-logo.png'
+$outPath = Join-Path $PSScriptRoot 'nexus-ui/assets/nexus-mark.png'
 $src = [System.Drawing.Bitmap]::FromFile($srcPath)
 $crop = New-Object System.Drawing.Bitmap 276, 282
 $g = [System.Drawing.Graphics]::FromImage($crop)

@@ -36,6 +36,13 @@ $InstallRoot=[System.IO.Path]::GetFullPath($InstallRoot)
 . (Join-Path $PSScriptRoot 'Telemetry.ps1')
 . (Join-Path $PSScriptRoot 'VisualPacketIntegrity.ps1')
 
+# Nexus-owned child execution environment (TASK-0025 Class B): the visual
+# transport child (node Invoke-VisualReview.mjs) must resolve the Nexus-pinned
+# Node runtime ahead of any system Node. Process-scoped; no system Node
+# dependency, no shell profile modification. The helper's return value is
+# suppressed: this script's stdout is a JSON transport contract.
+$null = Add-AihPinnedNodeToPath -InstallRoot $InstallRoot
+
 $ScreenshotEvidence=@()
 $ReferenceEvidence=@()
 
@@ -162,9 +169,17 @@ function Resolve-AihVisualProviderConfig {
 }
 
 function Resolve-AihVisualNodeExecutable {
-    param([object]$Layout)
-    if(Test-Path -LiteralPath $Layout.Node -PathType Leaf){return $Layout.Node}
-    $command=Get-Command 'node.exe' -ErrorAction SilentlyContinue
+    # TASK-0026: the visual transport child must run the Nexus PINNED Node
+    # even when the caller's logical InstallRoot is an isolated fixture
+    # without runtime/ (a machine without a system Node has no PATH fallback).
+    param([object]$Layout,[string]$InstallRoot)
+    $toolchainNode=Get-AihNodeExecutable -InstallRoot $InstallRoot
+    if(-not[string]::IsNullOrWhiteSpace($toolchainNode)){return $toolchainNode}
+    if($null-ne$Layout-and(Test-Path -LiteralPath $Layout.Node -PathType Leaf)){return $Layout.Node}
+    # Platform-aware PATH probe: the managed Node distribution is preferred;
+    # the fallback executable name differs per platform (node.exe on Windows).
+    $nodeName=if(Test-AihIsWindows){'node.exe'}else{'node'}
+    $command=Get-Command $nodeName -ErrorAction SilentlyContinue
     if($null-ne$command){return $command.Source}
     return $null
 }
@@ -279,8 +294,8 @@ function Test-AihVisualReviewResult {
     # omissions or invented ids).
     if(@($RequiredPreviousIds).Count -gt 0){
         foreach($requiredId in @($RequiredPreviousIds)){
-            $matches=@($previousReview | Where-Object { [string]$_.id -eq [string]$requiredId })
-            if(@($matches).Count -eq 0){ $reasons+="previousReview is missing a classification for previous finding id '$requiredId'" }
+            $classifiedMatches=@($previousReview | Where-Object { [string]$_.id -eq [string]$requiredId })
+            if(@($classifiedMatches).Count -eq 0){ $reasons+="previousReview is missing a classification for previous finding id '$requiredId'" }
         }
         foreach($entry in $previousReview){
             if(@($RequiredPreviousIds) -notcontains [string]$entry.id){ $reasons+="previousReview entry '$($entry.id)' does not match any previous finding id" }
@@ -316,23 +331,23 @@ try{
     $policy=Get-AihRoutingPolicy $layout.RoutingPolicy
     $resolvedPreset=Resolve-AihPreset $policy $null
     $profiles=Get-AihEngineeringProfiles (Join-Path (Split-Path -Parent $layout.RoutingPolicy) 'engineering-profiles.json') $layout.CustomEngineeringProfile
-    $profile=Resolve-AihProfile $policy $resolvedPreset $profiles $layout.Settings
+    $resolvedProfile=Resolve-AihProfile $policy $resolvedPreset $profiles $layout.Settings
     $registry=Get-AihModelRegistry $layout.ModelRegistry
-    if($null-eq$profile.Config.roles.PSObject.Properties['visualReviewer']){
-        Write-AihVisualFailure -ErrorKind 'visual-review-role-unbound' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message "The active engineering profile '$($profile.Id)' does not bind the optional visualReviewer role; visual review fails closed."
+    if($null-eq$resolvedProfile.Config.roles.PSObject.Properties['visualReviewer']){
+        Write-AihVisualFailure -ErrorKind 'visual-review-role-unbound' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message "The active engineering profile '$($resolvedProfile.Id)' does not bind the optional visualReviewer role; visual review fails closed."
     }
     $entry=$null
-    foreach($candidateEntry in @($registry.models)){if([string]$candidateEntry.id -eq [string]$profile.Config.roles.visualReviewer.model){$entry=$candidateEntry;break}}
+    foreach($candidateEntry in @($registry.models)){if([string]$candidateEntry.id -eq [string]$resolvedProfile.Config.roles.visualReviewer.model){$entry=$candidateEntry;break}}
     if($null-eq$entry){
-        Write-AihVisualFailure -ErrorKind 'visual-review-target-unresolved' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message "Model registry has no entry for visualReviewer model '$($profile.Config.roles.visualReviewer.model)' (profile $($profile.Id))."
+        Write-AihVisualFailure -ErrorKind 'visual-review-target-unresolved' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message "Model registry has no entry for visualReviewer model '$($resolvedProfile.Config.roles.visualReviewer.model)' (profile $($resolvedProfile.Id))."
     }
     $supportsVision=($null-ne$entry.PSObject.Properties['supportsVision'])-and([bool]$entry.supportsVision)
     if(-not$supportsVision){
-        Write-AihVisualFailure -ErrorKind 'visual-review-not-vision-capable' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message "Model '$($profile.Config.roles.visualReviewer.model)' does not declare supportsVision=true; visual review fails closed."
+        Write-AihVisualFailure -ErrorKind 'visual-review-not-vision-capable' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message "Model '$($resolvedProfile.Config.roles.visualReviewer.model)' does not declare supportsVision=true; visual review fails closed."
     }
-    $target=Resolve-AihModelTarget $registry $profile 'visualReviewer'
+    $target=Resolve-AihModelTarget $registry $resolvedProfile 'visualReviewer'
     if($null-eq$target){
-        Write-AihVisualFailure -ErrorKind 'visual-review-target-unresolved' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message "The visualReviewer role could not be resolved through the active profile '$($profile.Id)'."
+        Write-AihVisualFailure -ErrorKind 'visual-review-target-unresolved' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message "The visualReviewer role could not be resolved through the active profile '$($resolvedProfile.Id)'."
     }
     $providerConfig=Resolve-AihVisualProviderConfig -SettingsPath $layout.Settings -ProviderId $target.Provider
     if($null-eq$providerConfig){
@@ -429,7 +444,7 @@ try{
     $packet=[ordered]@{
         schemaVersion=1; kind='visual-review-packet'; taskId=$TaskId; taskInstanceId=$effectiveInstanceId
         workspace=$workspacePath; capability='visual-review'; iteration=$iteration.Iteration
-        role='visualReviewer'; profile=$profile.Id; profileDisplayName=$profile.DisplayName
+        role='visualReviewer'; profile=$resolvedProfile.Id; profileDisplayName=$resolvedProfile.DisplayName
         model=[ordered]@{id=$target.ModelId;model=$target.Model;displayName=$target.ModelDisplayName;provider=$target.Provider;reasoning=$target.Reasoning;supportsVision=$supportsVision;readOnlyDefault=($null-ne$entry.PSObject.Properties['readOnlyDefault']-and[bool]$entry.readOnlyDefault)}
         platform=$Platform; question=$Question; invariants=@($Invariants)
         trigger=[string]$Trigger; visualIteration=$VisualIteration
@@ -487,7 +502,7 @@ try{
             $keyOwnedByService=$true
         }
         Write-AihAtomicJson -Path $requestPath -Value $transportRequest
-        $nodePath=Resolve-AihVisualNodeExecutable $layout
+        $nodePath=Resolve-AihVisualNodeExecutable $layout -InstallRoot $InstallRoot
         if([string]::IsNullOrWhiteSpace([string]$nodePath)){
             Write-AihVisualFailure -ErrorKind 'visual-review-transport-unavailable' -TaskId $TaskId -TaskInstanceId $effectiveInstanceId -Message 'No Node.js runtime is available for the visual review transport.'
         }
@@ -541,7 +556,23 @@ try{
         if($null-eq$candidate){
             $candidateText=$content.Trim()
             if($candidateText-match'(?s)```(?:json)?\s*(\{.*\})\s*```'){$candidateText=$Matches[1]}
-            try{$candidate=$candidateText|ConvertFrom-Json}catch{$candidate=$null}
+            # TASK-0023: output collection unwraps a SINGLE-ELEMENT JSON
+            # array into its element on every PowerShell edition (pipeline
+            # semantics), so a one-entry top-level array would silently
+            # parse into an object and dodge the array-vs-object rejection
+            # below. The raw text is the shape authority: when the top-level
+            # shape is an array, re-wrap the parsed result so the strict
+            # contract check sees the array it is (an empty array collects
+            # to $null, so it is re-wrapped as the empty array).
+            $candidateIsTopLevelArray=$false
+            $candidateParseFailed=$false
+            try{$candidate=$candidateText|ConvertFrom-Json}catch{$candidate=$null;$candidateParseFailed=$true}
+            $candidateShapeProbe=$candidateText.TrimStart()
+            if($candidateShapeProbe.StartsWith('[')){$candidateIsTopLevelArray=$true}
+            if($candidateIsTopLevelArray-and-not$candidateParseFailed){
+                if($null-eq$candidate){$candidate=@()}
+                elseif(-not($candidate-is[System.Array])){$candidate=@($candidate)}
+            }
         }
         $validated=Test-AihVisualReviewResult $candidate $requiredPreviousIds
         if(-not$validated.valid){
@@ -556,7 +587,7 @@ try{
             schemaVersion=1; kind='visual-review-result'; taskId=$TaskId; taskInstanceId=$effectiveInstanceId
             iteration=$iteration.Iteration; capability='visual-review'; role='visualReviewer'
             trigger=[string]$Trigger; visualIteration=$VisualIteration
-            profile=$profile.Id; model=[ordered]@{id=$target.ModelId;model=$target.Model;displayName=$target.ModelDisplayName;vendor=$target.Vendor;provider=$target.Provider;reasoning=$target.Reasoning}
+            profile=$resolvedProfile.Id; model=[ordered]@{id=$target.ModelId;model=$target.Model;displayName=$target.ModelDisplayName;vendor=$target.Vendor;provider=$target.Provider;reasoning=$target.Reasoning}
             transport=[ordered]@{provider=$target.Provider;mocked=[bool](Get-AihPropertyValue $outcome 'mocked' $false);attemptCount=$attemptCount;attempts=$attempts;finishReason=(Get-AihPropertyValue $outcome 'finishReason' $null);usage=$usage}
             packetPath=(Join-Path $iteration.Path 'packet.json')
             readOnly=$true; freshContext=$true; completionAuthority=$false; humanAcceptance=$false
@@ -586,7 +617,7 @@ try{
             iteration=$iteration.Iteration; runDirectory=$iteration.Path
             role='visualReviewer'; capability='visual-review'
             trigger=[string]$Trigger; visualIteration=$VisualIteration
-            profile=$profile.Id; profileDisplayName=$profile.DisplayName
+            profile=$resolvedProfile.Id; profileDisplayName=$resolvedProfile.DisplayName
             provider=$target.Provider; model=$target.Model; modelId=$target.ModelId; modelDisplayName=$target.ModelDisplayName; reasoning=$target.Reasoning
             supportsVision=$supportsVision; readOnlyDefault=($null-ne$entry.PSObject.Properties['readOnlyDefault']-and[bool]$entry.readOnlyDefault)
             platform=$Platform; attemptCount=$attemptCount; retried=($attemptCount-gt 1)

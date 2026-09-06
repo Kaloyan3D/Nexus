@@ -32,9 +32,9 @@ $ErrorActionPreference = 'Stop'
 
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Get-AihInstallRoot $null }
 $InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
-if ([string]::IsNullOrWhiteSpace($SourceRoot)) { $SourceRoot = Join-Path $InstallRoot 'skills\core' }
+if ([string]::IsNullOrWhiteSpace($SourceRoot)) { $SourceRoot = Join-Path $InstallRoot 'skills/core' }
 if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
-    $TargetRoot = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.agents\skills'
+    $TargetRoot = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.agents/skills'
 }
 $SourceRoot = [System.IO.Path]::GetFullPath($SourceRoot)
 $TargetRoot = [System.IO.Path]::GetFullPath($TargetRoot)

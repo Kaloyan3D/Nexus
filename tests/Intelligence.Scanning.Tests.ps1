@@ -1,7 +1,9 @@
-[CmdletBinding()]param([string]$InstallRoot = 'C:\AI-Harness')
+[CmdletBinding()]param([string]$InstallRoot)
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Split-Path -Parent $PSScriptRoot }
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 Set-StrictMode -Version Latest;$ErrorActionPreference = 'Stop'
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\Intelligence.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Intelligence.ps1')
 
 # ── Phase 3.1C (File Inventory) + 3.1D (Module Discovery) acceptance tests ──
 $passed = 0
@@ -21,8 +23,8 @@ try {
     # ── normal source files + deterministic hashing ──────────────────────
     $simple = Join-Path $fixtureRoot 'simple'
     New-Item -ItemType Directory -Path (Join-Path $simple 'src') -Force | Out-Null
-    Set-TestFile (Join-Path $simple 'src\main.ts') 'export const main = () => 1;'
-    Set-TestFile (Join-Path $simple 'src\utils.ts') 'export const util = 2;'
+    Set-TestFile (Join-Path $simple 'src/main.ts') 'export const main = () => 1;'
+    Set-TestFile (Join-Path $simple 'src/utils.ts') 'export const util = 2;'
     Set-TestFile (Join-Path $simple 'README.md') '# simple'
     Set-TestFile (Join-Path $simple '.gitignore') '*.local'
     Set-TestFile (Join-Path $simple 'secret.local') 'ignored'
@@ -45,8 +47,8 @@ try {
     $nexusIgn = Join-Path $fixtureRoot 'nexusignore'
     Set-TestFile (Join-Path $nexusIgn 'app.js') 'code;'
     New-Item -ItemType Directory -Path (Join-Path $nexusIgn 'build') -Force | Out-Null
-    Set-TestFile (Join-Path $nexusIgn 'build\output.js') 'compiled;'
-    Set-TestFile (Join-Path $nexusIgn 'build\keep.js') 'precious;'
+    Set-TestFile (Join-Path $nexusIgn 'build/output.js') 'compiled;'
+    Set-TestFile (Join-Path $nexusIgn 'build/keep.js') 'precious;'
     Set-TestFile (Join-Path $nexusIgn '.nexusignore') (('build/', '!build/keep.js') -join $nl)
     $nexusIgnScan = Invoke-AihInventoryScan -CheckoutRoot $nexusIgn
     $nexusIgnPaths = @($nexusIgnScan.files | ForEach-Object { $_.path })
@@ -57,11 +59,11 @@ try {
     $configured = Join-Path $fixtureRoot 'configured'
     Set-TestFile (Join-Path $configured 'src.ts') 'source;'
     New-Item -ItemType Directory -Path (Join-Path $configured 'dist') -Force | Out-Null
-    Set-TestFile (Join-Path $configured 'dist\bundle.js') 'generated;'
-    New-Item -ItemType Directory -Path (Join-Path $configured 'node_modules\dep') -Force | Out-Null
-    Set-TestFile (Join-Path $configured 'node_modules\dep\index.js') 'dep;'
-    New-Item -ItemType Directory -Path (Join-Path $configured 'archive\old') -Force | Out-Null
-    Set-TestFile (Join-Path $configured 'archive\old\a.txt') 'old;'
+    Set-TestFile (Join-Path $configured 'dist/bundle.js') 'generated;'
+    New-Item -ItemType Directory -Path (Join-Path $configured 'node_modules/dep') -Force | Out-Null
+    Set-TestFile (Join-Path $configured 'node_modules/dep/index.js') 'dep;'
+    New-Item -ItemType Directory -Path (Join-Path $configured 'archive/old') -Force | Out-Null
+    Set-TestFile (Join-Path $configured 'archive/old/a.txt') 'old;'
     Set-TestFile (Join-Path $configured 'keep.txt') 'keep;'
     $ymlLines = @('version: 1', 'repository:', '  name: My Configured Repo', 'index:', '  respect_gitignore: true', 'exclude:', '  - "archive/**"', 'modules:', '  autodetect: true', 'security:', '  external_context: false')
     Set-TestFile (Join-Path $configured '.nexus.yml') ($ymlLines -join $nl)
@@ -135,7 +137,7 @@ try {
     $symlinks = Join-Path $fixtureRoot 'symlinks'
     Set-TestFile (Join-Path $symlinks 'real.ts') 'real;'
     New-Item -ItemType Directory -Path (Join-Path $symlinks 'actual') -Force | Out-Null
-    Set-TestFile (Join-Path $symlinks 'actual\deep.ts') 'deep;'
+    Set-TestFile (Join-Path $symlinks 'actual/deep.ts') 'deep;'
     $junction = $null
     try { $junction = New-Item -ItemType Junction -Path (Join-Path $symlinks 'loop') -Target $symlinks -ErrorAction Stop } catch { $junction = $null }
     if ($null -ne $junction) {
@@ -164,7 +166,7 @@ try {
     $forced = New-TestGitRepo (Join-Path $fixtureRoot 'forced')
     Set-TestFile (Join-Path $forced '.gitignore') 'vendor/'
     New-Item -ItemType Directory -Path (Join-Path $forced 'vendor') -Force | Out-Null
-    Set-TestFile (Join-Path $forced 'vendor\pinned.js') 'pinned;'
+    Set-TestFile (Join-Path $forced 'vendor/pinned.js') 'pinned;'
     Set-TestFile (Join-Path $forced 'app.ts') 'app;'
     Invoke-TestGit $forced @('add', '-f', 'vendor/pinned.js') | Out-Null
     Invoke-TestGit $forced @('add', 'app.ts', '.gitignore') | Out-Null
@@ -191,11 +193,11 @@ try {
     $wsLines = @('packages:', '  - "packages/*"', '  - "apps/*"')
     Set-TestFile (Join-Path $monorepo 'pnpm-workspace.yaml') ($wsLines -join $nl)
     foreach ($pkg in @('alpha', 'beta')) {
-        New-Item -ItemType Directory -Path (Join-Path $monorepo "packages\$pkg") -Force | Out-Null
-        Set-TestFile (Join-Path $monorepo "packages\$pkg\package.json") ('{"name":"pkg-' + $pkg + '"}')
+        New-Item -ItemType Directory -Path (Join-Path $monorepo "packages/$pkg") -Force | Out-Null
+        Set-TestFile (Join-Path $monorepo "packages/$pkg/package.json") ('{"name":"pkg-' + $pkg + '"}')
     }
-    New-Item -ItemType Directory -Path (Join-Path $monorepo 'apps\web') -Force | Out-Null
-    Set-TestFile (Join-Path $monorepo 'apps\web\package.json') '{"name":"web-app"}'
+    New-Item -ItemType Directory -Path (Join-Path $monorepo 'apps/web') -Force | Out-Null
+    Set-TestFile (Join-Path $monorepo 'apps/web/package.json') '{"name":"web-app"}'
     $monoScan = Invoke-AihInventoryScan -CheckoutRoot $monorepo
     $monoDiscovery = Invoke-AihModuleDiscovery -CheckoutRoot $monorepo -Inventory $monoScan -RepositoryName 'monorepo'
     $monoModules = @($monoDiscovery.modules)
@@ -214,10 +216,10 @@ try {
     $dotnet = Join-Path $fixtureRoot 'dotnet'
     $slnBody = @('Microsoft Visual Studio Solution File, Format Version 12.00', 'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Api", "src\Api\Api.csproj", "{11111111-1111-1111-1111-111111111111}"', 'EndProject', 'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Domain", "src\Domain\Domain.csproj", "{22222222-2222-2222-2222-222222222222}"', 'EndProject', 'Global', 'EndGlobal')
     Set-TestFile (Join-Path $dotnet 'Api.sln') ($slnBody -join $nl)
-    New-Item -ItemType Directory -Path (Join-Path $dotnet 'src\Api') -Force | Out-Null
-    Set-TestFile (Join-Path $dotnet 'src\Api\Api.csproj') '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>'
-    New-Item -ItemType Directory -Path (Join-Path $dotnet 'src\Domain') -Force | Out-Null
-    Set-TestFile (Join-Path $dotnet 'src\Domain\Domain.csproj') '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>'
+    New-Item -ItemType Directory -Path (Join-Path $dotnet 'src/Api') -Force | Out-Null
+    Set-TestFile (Join-Path $dotnet 'src/Api/Api.csproj') '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>'
+    New-Item -ItemType Directory -Path (Join-Path $dotnet 'src/Domain') -Force | Out-Null
+    Set-TestFile (Join-Path $dotnet 'src/Domain/Domain.csproj') '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>'
     $dnScan = Invoke-AihInventoryScan -CheckoutRoot $dotnet
     $dnDiscovery = Invoke-AihModuleDiscovery -CheckoutRoot $dotnet -Inventory $dnScan -RepositoryName 'dotnet-repo'
     $dnModules = @($dnDiscovery.modules)
@@ -249,9 +251,9 @@ try {
     $mixed = Join-Path $fixtureRoot 'mixed'
     Set-TestFile (Join-Path $mixed 'Cargo.toml') (@('[package]', 'name = "tools-core"', 'version = "0.1.0"') -join $nl)
     New-Item -ItemType Directory -Path (Join-Path $mixed 'svc') -Force | Out-Null
-    Set-TestFile (Join-Path $mixed 'svc\go.mod') (@('module example.com/svc', '', 'go 1.21') -join $nl)
+    Set-TestFile (Join-Path $mixed 'svc/go.mod') (@('module example.com/svc', '', 'go 1.21') -join $nl)
     New-Item -ItemType Directory -Path (Join-Path $mixed 'server') -Force | Out-Null
-    Set-TestFile (Join-Path $mixed 'server\pom.xml') '<project><artifactId>server-app</artifactId></project>'
+    Set-TestFile (Join-Path $mixed 'server/pom.xml') '<project><artifactId>server-app</artifactId></project>'
     $mixedScan = Invoke-AihInventoryScan -CheckoutRoot $mixed
     $mixedDiscovery = Invoke-AihModuleDiscovery -CheckoutRoot $mixed -Inventory $mixedScan -RepositoryName 'mixed'
     $mixedTypes = @($mixedDiscovery.modules | ForEach-Object { $_.type })
@@ -262,8 +264,8 @@ try {
     # 6. nested modules (rust workspace)
     $rust = Join-Path $fixtureRoot 'rust'
     Set-TestFile (Join-Path $rust 'Cargo.toml') (@('[workspace]', 'members = ["crates/core"]', '', '[package]', 'name = "root-crate"') -join $nl)
-    New-Item -ItemType Directory -Path (Join-Path $rust 'crates\core') -Force | Out-Null
-    Set-TestFile (Join-Path $rust 'crates\core\Cargo.toml') (@('[package]', 'name = "core-crate"') -join $nl)
+    New-Item -ItemType Directory -Path (Join-Path $rust 'crates/core') -Force | Out-Null
+    Set-TestFile (Join-Path $rust 'crates/core/Cargo.toml') (@('[package]', 'name = "core-crate"') -join $nl)
     $rustScan = Invoke-AihInventoryScan -CheckoutRoot $rust
     $rustDiscovery = Invoke-AihModuleDiscovery -CheckoutRoot $rust -Inventory $rustScan -RepositoryName 'rust'
     $rustRoot = @($rustDiscovery.modules | Where-Object { $_.path -eq '' })[0]

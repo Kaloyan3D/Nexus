@@ -1,7 +1,9 @@
-[CmdletBinding()]param([string]$InstallRoot = 'C:\AI-Harness')
+[CmdletBinding()]param([string]$InstallRoot)
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Split-Path -Parent $PSScriptRoot }
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 Set-StrictMode -Version Latest;$ErrorActionPreference = 'Stop'
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\Intelligence.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Intelligence.ps1')
 
 # ── Phase 3.1 hardening Fix 4: snapshot ↔ module versioning ─────────────────
 $passed = 0
@@ -25,8 +27,8 @@ try {
     Set-TestFile (Join-Path $repo 'package.json') '{"name":"mono-root","workspaces":["packages/*"]}'
     Set-TestFile (Join-Path $repo 'pnpm-workspace.yaml') (@('packages:', '  - "packages/*"') -join $nl)
     foreach ($p in @('alpha', 'beta', 'gamma')) {
-        Set-TestFile (Join-Path $repo "packages\$p\package.json") ('{"name":"pkg-' + $p + '","version":"1.0.0"}')
-        Set-TestFile (Join-Path $repo "packages\$p\index.ts") ('export const ' + $p + ' = 1;')
+        Set-TestFile (Join-Path $repo "packages/$p/package.json") ('{"name":"pkg-' + $p + '","version":"1.0.0"}')
+        Set-TestFile (Join-Path $repo "packages/$p/index.ts") ('export const ' + $p + ' = 1;')
     }
     Set-TestFile (Join-Path $repo 'root.ts') 'export const root = 0;'
     Invoke-TestGit $repo @('add', '.') | Out-Null
@@ -50,9 +52,9 @@ try {
     Assert-Aih ($rootFileA.moduleId -eq @($modulesA | Where-Object { $_.path -eq '' })[0].moduleId) 'root-level files are owned by the generic root module'
 
     # ── module added + manifest changed between snapshots ────────────────
-    Set-TestFile (Join-Path $repo 'packages\delta\package.json') '{"name":"pkg-delta","version":"1.0.0"}'
-    Set-TestFile (Join-Path $repo 'packages\delta\index.ts') 'export const delta = 1;'
-    Set-TestFile (Join-Path $repo 'packages\alpha\package.json') '{"name":"pkg-alpha","version":"2.0.0"}'
+    Set-TestFile (Join-Path $repo 'packages/delta/package.json') '{"name":"pkg-delta","version":"1.0.0"}'
+    Set-TestFile (Join-Path $repo 'packages/delta/index.ts') 'export const delta = 1;'
+    Set-TestFile (Join-Path $repo 'packages/alpha/package.json') '{"name":"pkg-alpha","version":"2.0.0"}'
     Invoke-TestGit $repo @('add', '.') | Out-Null
     Invoke-TestGit $repo @('-c', 'user.email=t@nexus.test', '-c', 'user.name=nexus-test', 'commit', '-q', '-m', 'add delta, bump alpha') | Out-Null
     $buildB = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $checkoutId
@@ -71,7 +73,7 @@ try {
     Assert-Aih ($alphaA2.metadataHash -eq $alphaA.metadataHash) 'historical snapshot A keeps the old module metadata version'
 
     # ── module removed between snapshots ─────────────────────────────────
-    Remove-Item -LiteralPath (Join-Path $repo 'packages\gamma') -Recurse -Force
+    Remove-Item -LiteralPath (Join-Path $repo 'packages/gamma') -Recurse -Force
     Invoke-TestGit $repo @('add', '-A') | Out-Null
     Invoke-TestGit $repo @('-c', 'user.email=t@nexus.test', '-c', 'user.name=nexus-test', 'commit', '-q', '-m', 'remove gamma') | Out-Null
     $buildC = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $checkoutId
@@ -80,7 +82,7 @@ try {
     Assert-Aih (@(Get-AihSnapshotModules -StoreRoot $store -SnapshotId $buildA.snapshot.snapshotId -RepositoryId $repositoryId | Where-Object { $_.path -eq 'packages/gamma' }).Count -eq 1) 'historical snapshot A still contains the removed module'
 
     # ── module moved between snapshots (path changes → new logical id) ───
-    Move-Item -LiteralPath (Join-Path $repo 'packages\beta') -Destination (Join-Path $repo 'packages\beta-renamed')
+    Move-Item -LiteralPath (Join-Path $repo 'packages/beta') -Destination (Join-Path $repo 'packages/beta-renamed')
     Invoke-TestGit $repo @('add', '-A') | Out-Null
     Invoke-TestGit $repo @('-c', 'user.email=t@nexus.test', '-c', 'user.name=nexus-test', 'commit', '-q', '-m', 'move beta') | Out-Null
     $buildD = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $checkoutId

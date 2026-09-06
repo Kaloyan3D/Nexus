@@ -1,16 +1,18 @@
-[CmdletBinding()]param([string]$InstallRoot='C:\AI-Harness')
+[CmdletBinding()]param([string]$InstallRoot)
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Split-Path -Parent $PSScriptRoot }
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 
 $passed=0
 function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw ('FAIL: '+$Name)};$script:passed++;Write-Host ('PASS: '+$Name)}
 
-. (Join-Path $InstallRoot 'scripts\VisualPacketIntegrity.ps1')
+. (Join-Path $InstallRoot 'scripts/VisualPacketIntegrity.ps1')
 $fixture=Join-Path ([IO.Path]::GetTempPath()) ('aih-packet-integrity-'+[guid]::NewGuid().ToString('N'))
 try{
     $subjectDir=Join-Path $fixture 'iteration-02'
     $referenceDirA=Join-Path $fixture 'iteration-01'
-    $referenceDirB=Join-Path $fixture 'other\iteration-01'
+    $referenceDirB=Join-Path $fixture 'other/iteration-01'
     $packetDir=Join-Path $fixture 'packet'
     New-Item -ItemType Directory -Path $subjectDir,$referenceDirA,$referenceDirB,$packetDir -Force|Out-Null
     $subject=Join-Path $subjectDir 'home.png';$referenceA=Join-Path $referenceDirA 'home.png';$referenceB=Join-Path $referenceDirB 'home.png'
