@@ -195,6 +195,36 @@ try{
         Assert-AihTrue (@($nomuseState.nexusProfiles|Where-Object{$_.engine -eq 'dual'}).Count -ge 2) 'Dual entries survive a missing Muse registry (PS/JS parity)'
     }finally{if(Test-Path -LiteralPath $nomuseFixture){Remove-Item -LiteralPath $nomuseFixture -Recurse -Force}}
 
+    # ── Phase M1.2: current backend must fail closed when the authoritative
+    #    Nexus catalog itself is missing or corrupt. Known Dual ids must NOT
+    #    fall back to the legacy Engineering Profiles registry. ──
+    $missingCatalogFixture=Join-Path ([IO.Path]::GetTempPath()) ('nexus-profiles-missingcat-'+[guid]::NewGuid().ToString('N'))
+    try{
+        New-Item -ItemType Directory -Force -Path (Join-Path $missingCatalogFixture 'config')|Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $missingCatalogFixture 'data')|Out-Null
+        foreach($name in @('routing-policy.json','engineering-profiles.json','model-registry.json','muse-profiles.json')){Copy-AihConfigFile $name $missingCatalogFixture}
+        [IO.File]::WriteAllText((Join-Path $missingCatalogFixture 'data/settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
+        $missingBefore=Get-Content -Raw (Join-Path $missingCatalogFixture 'data/settings.yaml')
+        $missingRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $missingCatalogFixture -ProfileId 'deepseek-codex'
+        $missingResult=$missingRaw|ConvertFrom-Json
+        Assert-AihEqual $missingResult.error 'nexus-profile-catalog-unavailable' 'missing Nexus catalog rejects selection of a known Dual profile'
+        Assert-AihTrue ((Get-Content -Raw (Join-Path $missingCatalogFixture 'data/settings.yaml')) -eq $missingBefore) 'missing Nexus catalog rejection leaves settings unchanged'
+    }finally{if(Test-Path -LiteralPath $missingCatalogFixture){Remove-Item -LiteralPath $missingCatalogFixture -Recurse -Force}}
+
+    $corruptCatalogFixture=Join-Path ([IO.Path]::GetTempPath()) ('nexus-profiles-corruptcat-'+[guid]::NewGuid().ToString('N'))
+    try{
+        New-Item -ItemType Directory -Force -Path (Join-Path $corruptCatalogFixture 'config')|Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $corruptCatalogFixture 'data')|Out-Null
+        foreach($name in @('routing-policy.json','engineering-profiles.json','model-registry.json','muse-profiles.json')){Copy-AihConfigFile $name $corruptCatalogFixture}
+        @{schemaVersion=999;profiles=@()}|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 -LiteralPath (Join-Path $corruptCatalogFixture 'config/nexus-profiles.json')
+        [IO.File]::WriteAllText((Join-Path $corruptCatalogFixture 'data/settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
+        $corruptBefore=Get-Content -Raw (Join-Path $corruptCatalogFixture 'data/settings.yaml')
+        $corruptRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $corruptCatalogFixture -ProfileId 'deepseek-codex'
+        $corruptResult=$corruptRaw|ConvertFrom-Json
+        Assert-AihEqual $corruptResult.error 'nexus-profile-catalog-unavailable' 'corrupt Nexus catalog rejects selection of a known Dual profile'
+        Assert-AihTrue ((Get-Content -Raw (Join-Path $corruptCatalogFixture 'data/settings.yaml')) -eq $corruptBefore) 'corrupt Nexus catalog rejection leaves settings unchanged'
+    }finally{if(Test-Path -LiteralPath $corruptCatalogFixture){Remove-Item -LiteralPath $corruptCatalogFixture -Recurse -Force}}
+
     Write-Host "Nexus controller profile foundation tests passed: $script:passed"
 }finally{
     $env:DSH_AIH_PROFILE=$savedDsh
