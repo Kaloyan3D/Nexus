@@ -28,6 +28,16 @@ async function main() {
   assert.equal(controller.reviewQuestionOf('/review'), '')
   assert.equal(controller.reviewQuestionOf('audit the boundary'), 'audit the boundary')
 
+  // TASK-0016: ordinary GUI prompts are converted to conservative structured
+  // policy inputs without a classifier model or reasoning-text inspection.
+  assert.equal(controller.classifyEpistemicPrompt('Implement the requested change').implementationReady, true)
+  assert.equal(controller.classifyEpistemicPrompt('Which file defines this symbol?').kind, 'repository')
+  const empiricalPolicyInput = controller.classifyEpistemicPrompt('What type does this PowerShell runtime value serialize to?')
+  assert.equal(empiricalPolicyInput.kind, 'empirical')
+  assert.equal(empiricalPolicyInput.probeAvailable, true)
+  assert.equal(empiricalPolicyInput.probeRisk, 'safe')
+  assert.equal(controller.classifyEpistemicPrompt('Which architecture preserves both invariants?').kind, 'judgment')
+
   // 2. Only genuine user prompts drive binding; plugin/system messages are ignored
   assert.equal(controller.isUserPrompt(userMessage('do the thing')), true)
   assert.equal(controller.isUserPrompt(pluginMessage('context snapshot', 'snapshot')), false)
@@ -44,8 +54,8 @@ async function main() {
 
   // 4. Execution labels make the path visible to the user (Phase 2:
   //    canonical classes; legacy names resolve through the same labels)
-  assert.equal(controller.executionClassLabel('reviewer'), 'Independent Review (read-only, bounded)')
-  assert.equal(controller.executionClassLabel('codex_review'), 'Independent Review (read-only, bounded)')
+  assert.equal(controller.executionClassLabel('reviewer'), 'Independent Review (read-only)')
+  assert.equal(controller.executionClassLabel('codex_review'), 'Independent Review (read-only)')
   assert.equal(controller.executionClassLabel('engineer_normal'), 'Engineer \u00b7 Normal')
   assert.equal(controller.executionClassLabel('deepseek_normal'), 'Engineer \u00b7 Normal')
   assert.equal(controller.executionClassLabel('engineer_deep'), 'Engineer \u00b7 Deep')
@@ -89,8 +99,36 @@ async function main() {
   const fs = require('node:fs')
   const path = require('node:path')
   const os = require('node:os')
-  const runCli = promisify(execFile)
-  const scriptsRoot = path.join(__dirname, '..', 'scripts')
+  // TASK-0025 RC4: ONE shared test CLI transport + platform PowerShell host
+  // resolution (tests/lib/AihTestTransport.cjs). The transport preserves the
+  // TASK-0017 no-pipes contract (Windows cmd.exe redirection, POSIX direct
+  // capture) and the host resolution mirrors production
+  // Get-AihPowerShellHost so the suites exercise the SAME host strategy as
+  // production on every OS instead of hard-coding powershell.exe.
+  const { createAihCliRunner, resolveAihPowerShellHost } = require(path.join(__dirname, 'lib', 'AihTestTransport.cjs'))
+  const runCli = createAihCliRunner()
+  // Exercise the real default install-root resolution without touching the
+  // live Nexus install: all controller CLIs run from a disposable copy of the
+  // production scripts/config/data layout. The exit hook also runs after an
+  // assertion failure, so fixture state is cleaned on both pass and failure.
+  const sourceRoot = path.join(__dirname, '..')
+  // Resolve the platform PowerShell host against the REAL repo root (the
+  // pinned POSIX runtime lives under the installed/checkout root, not the
+  // disposable bridge copy).
+  const powershellHost = resolveAihPowerShellHost(sourceRoot)
+  const bridgeInstallRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-controller-install-'))
+  const bridgeWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-controller-workspace-'))
+  fs.cpSync(path.join(sourceRoot, 'scripts'), path.join(bridgeInstallRoot, 'scripts'), { recursive: true })
+  fs.cpSync(path.join(sourceRoot, 'config'), path.join(bridgeInstallRoot, 'config'), { recursive: true })
+  fs.mkdirSync(path.join(bridgeInstallRoot, 'data', 'routing'), { recursive: true })
+  if (fs.existsSync(path.join(sourceRoot, 'data', 'settings.yaml'))) {
+    fs.copyFileSync(path.join(sourceRoot, 'data', 'settings.yaml'), path.join(bridgeInstallRoot, 'data', 'settings.yaml'))
+  }
+  process.once('exit', () => {
+    fs.rmSync(bridgeInstallRoot, { recursive: true, force: true })
+    fs.rmSync(bridgeWorkspace, { recursive: true, force: true })
+  })
+  const scriptsRoot = path.join(bridgeInstallRoot, 'scripts')
   const payloadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-payload-'))
   const hostileDescription =
     'Verify only the ARTHUR Phase 2 remediation for findings F1, F2 and F3.\r\n' +
@@ -99,18 +137,18 @@ async function main() {
     'Control: ' + String.fromCharCode(0x1a, 0x01) + '\r\n' +
     'F2 - replay after forget\r\n- remember ' + String.fromCharCode(0x1a) + ' forget again'
   const payloadPath = path.join(payloadDir, 'task.json')
-  fs.writeFileSync(payloadPath, JSON.stringify({ workspace: __dirname, description: hostileDescription, reviewRequested: false }))
+  fs.writeFileSync(payloadPath, JSON.stringify({ workspace: bridgeWorkspace, description: hostileDescription, reviewRequested: false }))
   const taskResult = await runCli(
-    'powershell.exe',
+    powershellHost,
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Task.ps1'), '-Action', 'create-task', '-PayloadFile', payloadPath],
     { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
   )
   const task = controller.parseCliJson((taskResult.stdout || '').trim())
   assert.ok(task && task.taskId, 'Task.ps1 payload create-task returned a task')
   assert.equal(task.description, hostileDescription, 'Task.ps1 description round-trips byte-exact')
-  fs.writeFileSync(payloadPath, JSON.stringify({ workspace: __dirname, description: hostileDescription, reviewRequested: true }))
+  fs.writeFileSync(payloadPath, JSON.stringify({ workspace: bridgeWorkspace, description: hostileDescription, reviewRequested: true }))
   const routeResult = await runCli(
-    'powershell.exe',
+    powershellHost,
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Route.ps1'), '-TaskId', task.taskId, '-Preset', 'aih-engineering', '-PayloadFile', payloadPath],
     { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
   )
@@ -133,20 +171,26 @@ async function main() {
   assert.equal(controller.structuredCliStdout({}), null)
   assert.equal(controller.structuredCliStdout(null), null)
 
-  // 9. REAL Review.ps1 budget rejection (no Codex call): an oversized bundle
-  //    must produce exit 3 with parseable stdout carrying the violations.
+  // 9. REAL Review.ps1 budget rejection (no Codex call): with the LEGACY
+  //    hard budgets enabled in an explicit -PolicyPath (enforceLimits=true;
+  //    the shipped default disables enforcement), an oversized bundle must
+  //    produce exit 3 with parseable stdout carrying the violations.
   const oversizedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-oversized-'))
+  const oversizedEnforcedPolicyPath = path.join(oversizedDir, 'routing-policy.enforced.json')
+  const oversizedPolicyDoc = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config', 'routing-policy.json'), 'utf8'))
+  oversizedPolicyDoc.codex.automaticReview.enforceLimits = true
+  fs.writeFileSync(oversizedEnforcedPolicyPath, JSON.stringify(oversizedPolicyDoc))
   const oversizedBundle = path.join(oversizedDir, 'bundle.json')
   const bigContent = 'x'.repeat(140000)
   fs.writeFileSync(oversizedBundle, JSON.stringify([{ path: 'huge.txt', score: 1, content: bigContent }]))
   const reviewPayload = path.join(oversizedDir, 'review.json')
-  fs.writeFileSync(reviewPayload, JSON.stringify({ workspace: __dirname, question: 'Review this function for correctness only.' }))
+  fs.writeFileSync(reviewPayload, JSON.stringify({ workspace: bridgeWorkspace, question: 'Review this function for correctness only.' }))
   let reviewError = null
   let reviewStdout = ''
   try {
     const reviewResult = await runCli(
-      'powershell.exe',
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Review.ps1'), '-TaskId', task.taskId, '-FilesPath', oversizedBundle, '-Execute', '-PayloadFile', reviewPayload],
+      powershellHost,
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Review.ps1'), '-TaskId', task.taskId, '-FilesPath', oversizedBundle, '-Execute', '-PolicyPath', oversizedEnforcedPolicyPath, '-PayloadFile', reviewPayload],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
     reviewStdout = (reviewResult.stdout || '').trim()
@@ -222,7 +266,7 @@ async function main() {
     const taskPayload = path.join(inlineDir, 'task.json')
     fs.writeFileSync(taskPayload, JSON.stringify({ workspace: inlineDir, description: inlineDivide, reviewRequested: true }))
     const inlineTaskResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Task.ps1'), '-Action', 'create-task', '-PayloadFile', taskPayload],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
@@ -233,7 +277,7 @@ async function main() {
     const inlinePayloadPath = path.join(inlineDir, 'review.json')
     fs.writeFileSync(inlinePayloadPath, JSON.stringify({ workspace: inlineDir, question: inlineDivide, contextMode: 'inline' }))
     const inlinePacketResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Review.ps1'), '-TaskId', inlineTask.taskId, '-FilesPath', inlineSlicesPath, '-PayloadFile', inlinePayloadPath],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
@@ -242,8 +286,9 @@ async function main() {
     assert.equal(inlinePacket.relevantFiles.length, 0, 'no repository files in an inline review')
     assert.equal(inlinePacket.diff, '')
     assert.equal(inlinePacket.enforcement.allowed, true, 'tiny inline review is Codex-eligible')
-    assert.ok(inlinePacket.enforcement.estimatedContextTokens < 2000, 'inline packet is far below the quota')
-    assert.equal(inlinePacket.budget.maxContextTokens, 30000, '30k Codex context quota unchanged')
+    assert.ok(inlinePacket.enforcement.estimatedContextTokens < 2000, 'inline packet is far below any provider concern')
+    assert.equal(inlinePacket.budget.enforceLimits, false, 'review budget enforcement is disabled by default')
+    assert.equal(inlinePacket.budget.maxContextTokens, null, 'no Nexus context-token ceiling is recorded (null = unlimited)')
     const inlineLedger = controller.parseCliJson(fs.readFileSync(path.join(inlineDir, '.ai-harness', 'state', 'tasks.json'), 'utf8'))
     const inlineTaskRecord = inlineLedger.tasks.find((t) => t.taskId === inlineTask.taskId)
     assert.equal(inlineTaskRecord.codexCalls, 0, 'building the inline packet registers no Codex call')
@@ -261,7 +306,7 @@ async function main() {
     const filesTaskPayload = path.join(filesDir, 'task.json')
     fs.writeFileSync(filesTaskPayload, JSON.stringify({ workspace: filesDir, description: filesQuestion, reviewRequested: true }))
     const filesTaskResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Task.ps1'), '-Action', 'create-task', '-PayloadFile', filesTaskPayload],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
@@ -273,7 +318,7 @@ async function main() {
     const filesPayloadPath = path.join(filesDir, 'review.json')
     fs.writeFileSync(filesPayloadPath, JSON.stringify({ workspace: filesDir, question: filesQuestion, contextMode: 'files' }))
     const filesPacketResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Review.ps1'), '-TaskId', filesTask.taskId, '-FilesPath', filesSlicesPath, '-PayloadFile', filesPayloadPath],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
@@ -288,10 +333,16 @@ async function main() {
     fs.rmSync(filesDir, { recursive: true, force: true })
   }
 
-  // 14. BROAD/OVERSIZED guard: a files-mode review whose named file genuinely
-  //     cannot fit keeps the structured packet-too-large rejection and never
-  //     calls Codex (codexCalls stays 0).
+  // 14. BROAD/OVERSIZED guard (enforceLimits=true): a files-mode review whose
+  //     named file genuinely cannot fit the LEGACY budgets keeps the structured
+  //     packet-too-large rejection and never calls Codex (codexCalls stays 0).
+  //     TASK-0007: the shipped default (enforceLimits=false) allows this packet
+  //     (scenario 14b); the old rejection behavior stays behind the policy flag.
   const hugeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-huge-review-'))
+  const enforcedPolicyPath = path.join(hugeDir, 'routing-policy.enforced.json')
+  const shippedPolicy = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config', 'routing-policy.json'), 'utf8'))
+  shippedPolicy.codex.automaticReview.enforceLimits = true
+  fs.writeFileSync(enforcedPolicyPath, JSON.stringify(shippedPolicy))
   try {
     fs.mkdirSync(path.join(hugeDir, 'src'))
     const hugePath = path.join(hugeDir, 'src', 'huge.js')
@@ -300,7 +351,7 @@ async function main() {
     const hugeTaskPayload = path.join(hugeDir, 'task.json')
     fs.writeFileSync(hugeTaskPayload, JSON.stringify({ workspace: hugeDir, description: hugeQuestion, reviewRequested: true }))
     const hugeTaskResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Task.ps1'), '-Action', 'create-task', '-PayloadFile', hugeTaskPayload],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
@@ -315,8 +366,8 @@ async function main() {
     let hugeStdout = ''
     try {
       const hugeReviewResult = await runCli(
-        'powershell.exe',
-        ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Review.ps1'), '-TaskId', hugeTask.taskId, '-FilesPath', hugeSlicesPath, '-Execute', '-PayloadFile', hugePayloadPath],
+        powershellHost,
+        ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Review.ps1'), '-TaskId', hugeTask.taskId, '-FilesPath', hugeSlicesPath, '-Execute', '-PolicyPath', enforcedPolicyPath, '-PayloadFile', hugePayloadPath],
         { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
       )
       hugeStdout = (hugeReviewResult.stdout || '').trim()
@@ -337,6 +388,45 @@ async function main() {
     fs.rmSync(hugeDir, { recursive: true, force: true })
   }
 
+  // 14b. TASK-0007: with the SHIPPED default policy (enforceLimits=false) the
+  //      same oversized packet is ALLOWED - Nexus no longer token-caps the
+  //      review, and the packet records unlimited budgets (null), plus the
+  //      measured size above the legacy ceiling.
+  const unlimitedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-unlimited-review-'))
+  try {
+    fs.mkdirSync(path.join(unlimitedDir, 'src'))
+    fs.writeFileSync(path.join(unlimitedDir, 'src', 'huge.js'), 'x'.repeat(140000))
+    const unlimitedQuestion = 'Review src/huge.js for correctness'
+    const unlimitedTaskPayload = path.join(unlimitedDir, 'task.json')
+    fs.writeFileSync(unlimitedTaskPayload, JSON.stringify({ workspace: unlimitedDir, description: unlimitedQuestion, reviewRequested: true }))
+    const unlimitedTaskResult = await runCli(
+      powershellHost,
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Task.ps1'), '-Action', 'create-task', '-PayloadFile', unlimitedTaskPayload],
+      { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
+    )
+    const unlimitedTask = controller.parseCliJson((unlimitedTaskResult.stdout || '').trim())
+    const unlimitedSlices = controller.resolveReviewFiles(unlimitedDir, unlimitedQuestion, null)
+    assert.equal(unlimitedSlices.length, 1)
+    const unlimitedSlicesPath = path.join(unlimitedDir, 'slices.json')
+    fs.writeFileSync(unlimitedSlicesPath, JSON.stringify(unlimitedSlices))
+    const unlimitedPayloadPath = path.join(unlimitedDir, 'review.json')
+    fs.writeFileSync(unlimitedPayloadPath, JSON.stringify({ workspace: unlimitedDir, question: unlimitedQuestion, contextMode: 'files' }))
+    const unlimitedPacketResult = await runCli(
+      powershellHost,
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Review.ps1'), '-TaskId', unlimitedTask.taskId, '-FilesPath', unlimitedSlicesPath, '-PayloadFile', unlimitedPayloadPath],
+      { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
+    )
+    const unlimitedPacket = controller.parseCliJson((unlimitedPacketResult.stdout || '').trim())
+    assert.equal(unlimitedPacket.enforcement.allowed, true, 'oversized packet is allowed while budget enforcement is disabled')
+    assert.equal(unlimitedPacket.enforcement.violations.length, 0, 'no budget violations under unlimited mode')
+    assert.equal(unlimitedPacket.budget.enforceLimits, false, 'packet records enforceLimits=false')
+    assert.equal(unlimitedPacket.budget.maxContextTokens, null, 'packet carries null context budget (0/null = unlimited)')
+    assert.ok(unlimitedPacket.enforcement.estimatedContextTokens > 30000, 'measured context is reported above the legacy ceiling')
+    assert.equal(unlimitedPacket.enforcement.readOnly, true, 'unlimited review stays read-only')
+  } finally {
+    fs.rmSync(unlimitedDir, { recursive: true, force: true })
+  }
+
   // 15. QUOTA/CONSENT protection unchanged: a zero-file packet WITHOUT the
   //     inline context mode still trips the full-repository consent guard.
   const guardDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-guard-review-'))
@@ -344,7 +434,7 @@ async function main() {
     const guardTaskPayload = path.join(guardDir, 'task.json')
     fs.writeFileSync(guardTaskPayload, JSON.stringify({ workspace: guardDir, description: 'Review the whole repository', reviewRequested: true }))
     const guardTaskResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Task.ps1'), '-Action', 'create-task', '-PayloadFile', guardTaskPayload],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
@@ -354,16 +444,78 @@ async function main() {
     const guardPayloadPath = path.join(guardDir, 'review.json')
     fs.writeFileSync(guardPayloadPath, JSON.stringify({ workspace: guardDir, question: 'Review the whole repository' })) // no contextMode: defaults to 'bundle'
     const guardPacketResult = await runCli(
-      'powershell.exe',
+      powershellHost,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, 'Review.ps1'), '-TaskId', guardTask.taskId, '-FilesPath', guardSlicesPath, '-PayloadFile', guardPayloadPath],
       { timeout: 320000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     )
     const guardPacket = controller.parseCliJson((guardPacketResult.stdout || '').trim())
     assert.equal(guardPacket.enforcement.allowed, false)
-    assert.match(guardPacket.enforcement.violations.join(' '), /full repository context requires explicit user approval/, 'full-repo consent guard unchanged')
-    assert.equal(guardPacket.budget.maxContextTokens, 30000, '30k quota unchanged')
+    assert.match(guardPacket.enforcement.violations.join(' '), /full repository context requires explicit user approval/, 'full-repo consent guard unchanged while budget enforcement is disabled')
+    assert.equal(guardPacket.budget.enforceLimits, false, 'budget enforcement disabled by default')
+    assert.equal(guardPacket.budget.maxContextTokens, null, 'no Nexus token ceiling recorded (null = unlimited)')
   } finally {
     fs.rmSync(guardDir, { recursive: true, force: true })
+  }
+
+  // 16. TASK-0007: the review budget policy reader is policy-driven and
+  //     fails SAFE to the legacy enforced behavior when policy is missing.
+  const disabledDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-budget-policy-off-'))
+  const enabledDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-budget-policy-on-'))
+  const missingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-budget-policy-missing-'))
+  try {
+    for (const [dir, enforceLimits] of [[disabledDir, false], [enabledDir, true]]) {
+      fs.mkdirSync(path.join(dir, 'config'), { recursive: true })
+      fs.writeFileSync(path.join(dir, 'config', 'routing-policy.json'), JSON.stringify({
+        version: 3,
+        codex: { automaticReview: { enforceLimits, maxCallsPerTask: 1, maxFiles: 8, maxDiffLines: 2500, maxContextTokens: 30000, maxOutputTokens: 2500 } },
+      }))
+    }
+    const disabled = controller.reviewBudgetPolicy(disabledDir)
+    assert.equal(disabled.enforceLimits, false, 'enforceLimits=false is read from policy')
+    assert.equal(disabled.maxFiles, 8, 'legacy file value stays readable')
+    assert.equal(disabled.maxContextTokens, 30000, 'legacy token value stays readable')
+    const enabled = controller.reviewBudgetPolicy(enabledDir)
+    assert.equal(enabled.enforceLimits, true, 'enforceLimits=true is read from policy')
+    const missing = controller.reviewBudgetPolicy(missingDir)
+    assert.equal(missing.enforceLimits, true, 'missing routing-policy.json fails safe to the legacy behavior')
+    assert.equal(missing.maxFiles, 8)
+    assert.equal(missing.maxContextTokens, 30000)
+    const defaultRoot = controller.reviewBudgetPolicy(undefined)
+    assert.equal(defaultRoot.enforceLimits, false, 'an undefined install root resolves the shipped default install policy (enforcement disabled)')
+    assert.equal(defaultRoot.source, 'policy')
+  } finally {
+    fs.rmSync(disabledDir, { recursive: true, force: true })
+    fs.rmSync(enabledDir, { recursive: true, force: true })
+    fs.rmSync(missingDir, { recursive: true, force: true })
+  }
+
+  // 17. TASK-0007: the review-result notice reports the enforcement STATE and
+  //     never the obsolete budget numbers while enforcement is disabled.
+  const unlimitedBudget = { enforceLimits: false, maxCallsPerTask: null, maxFiles: null, maxDiffLines: null, maxContextTokens: null, maxOutputTokens: null }
+  const disabledText = controller.reviewResultText({ taskId: 'TASK-0007' }, { verdict: 'pass', findings: 0, severities: [], provider: 'sol-local', model: 'gpt-5.6-sol', callCount: 1, budget: unlimitedBudget }, null)
+  assert.ok(disabledText.includes('Budget enforcement: disabled'), 'disabled enforcement is reported')
+  assert.ok(disabledText.includes('Read-only: true'), 'read-only fact is reported')
+  assert.ok(disabledText.includes('fresh context: true'), 'fresh context fact is reported')
+  assert.ok(disabledText.includes('Independent Review (read-only)'), 'independent review terminology')
+  assert.ok(!disabledText.includes('30000'), 'no obsolete 30000-token number')
+  assert.ok(!disabledText.includes('8 files'), 'no obsolete 8-file number')
+  const enforcedBudget = { enforceLimits: true, maxCallsPerTask: 1, maxFiles: 8, maxDiffLines: 2500, maxContextTokens: 30000, maxOutputTokens: 2500 }
+  const enabledText = controller.reviewResultText({ taskId: 'TASK-0007' }, { verdict: 'pass', findings: 0, severities: [], provider: 'sol-local', model: 'gpt-5.6-sol', callCount: 1, budget: enforcedBudget }, null)
+  assert.ok(enabledText.includes('Budget enforcement: enabled (8 files / 30000 context tokens / 1 call)'), 'enabled enforcement keeps the legacy numbers')
+
+  // 18. TASK-0007: referenced-file resolution is unlimited (null) when the
+  //     policy disables enforcement; an explicit cap still applies under it.
+  const refsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-review-refs-'))
+  try {
+    for (let i = 0; i < 10; i++) fs.writeFileSync(path.join(refsDir, 'f' + i + '.ts'), 'export const a' + i + ' = 1\n')
+    const question = 'Review ' + Array.from({ length: 10 }, (_, i) => 'f' + i + '.ts').join(', ') + ' for correctness'
+    assert.equal(controller.referencedFilesOf(question, null).length, 10, 'unlimited referenced-file scan while enforcement is disabled')
+    assert.equal(controller.referencedFilesOf(question).length, 8, 'legacy default caps at 8 when no policy is supplied')
+    assert.equal(controller.resolveReviewFiles(refsDir, question, null).length, 10, 'unlimited file resolution')
+    assert.equal(controller.resolveReviewFiles(refsDir, question, 8).length, 8, 'explicit cap still applies when provided')
+    assert.equal(controller.classifyReviewContext(refsDir, question, null), 'files', 'classification threads the unlimited cap')
+  } finally {
+    fs.rmSync(refsDir, { recursive: true, force: true })
   }
 
   console.log('PASS: aih-controller bridge behavior')

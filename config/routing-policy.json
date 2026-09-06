@@ -151,8 +151,31 @@
       "verification-failure"
     ]
   },
+  "engineering": {
+    "stepRouting": {
+      "defaultRole": "engineer_normal",
+      "escalationReasons": [
+        "architecture-decision",
+        "conflicting-evidence",
+        "repeated-failure-new-hypothesis",
+        "security-sensitive",
+        "high-risk-refactor",
+        "migration-design",
+        "cross-system-contract",
+        "ambiguous-requirements",
+        "complex-debugging",
+        "provider-runtime-boundary",
+        "unknown-high-impact-behavior",
+        "incompatible-invariants",
+        "uncertain-persistence-semantics"
+      ],
+      "note": "Step routing is task-local and deterministic (scripts/Engineering). The task-level classification remains planning/UI metadata and never permanently pins model invocations. The reviewer is never part of this mechanism."
+    },
+    "completionRequiresVerifiedRequirements": true
+  },
   "codex": {
     "automaticReview": {
+      "enforceLimits": false,
       "maxCallsPerTask": 1,
       "maxFiles": 8,
       "maxDiffLines": 2500,

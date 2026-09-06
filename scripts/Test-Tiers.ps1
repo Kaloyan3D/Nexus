@@ -1,16 +1,17 @@
 [CmdletBinding()]
 param(
-    [string]$InstallRoot = 'C:\AI-Harness',
+    [string]$InstallRoot,
     [ValidateSet('all', 'normal', 'deepseek')][string]$Mode = 'all'
 )
 
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Split-Path -Parent $PSScriptRoot }
 . (Join-Path $PSScriptRoot 'Common.ps1')
 $layout = Get-AihLayout $InstallRoot
 $versions = Get-AihVersions $InstallRoot
 $oauthModelsUrl = "$($versions.OAuthBaseUrl)/models"
 
 if ($Mode -eq 'normal' -and (Test-Path -LiteralPath (Get-AihCodexAuthFile)) -and -not (Test-AihEndpoint -Uri $oauthModelsUrl -TimeoutSec 2)) {
-    $oauthProcess = Start-Process -FilePath $layout.Node -ArgumentList @($layout.OAuth, '--detach', '--no-open') -WindowStyle Hidden -Wait -PassThru
+    $oauthProcess = Start-AihDetachedProcess -FilePath $layout.Node -ArgumentList @($layout.OAuth, '--detach', '--no-open') -WorkingDirectory $layout.Data -Wait
     if ($oauthProcess.ExitCode -ne 0 -or -not (Wait-AihEndpoint -Uri $oauthModelsUrl -TimeoutSec 20)) {
         throw 'openai-oauth is not ready. Run its local login command first.'
     }
@@ -18,7 +19,7 @@ if ($Mode -eq 'normal' -and (Test-Path -LiteralPath (Get-AihCodexAuthFile)) -and
 
 $deepSeekKey = Get-AihDeepSeekKey $InstallRoot
 if ([string]::IsNullOrWhiteSpace($deepSeekKey)) {
-    throw "DeepSeek API key is not configured. Run: $($layout.Bin)\aih-key.cmd"
+    throw "DeepSeek API key is not configured. Run: $(Get-AihLayoutLauncherPath -Layout $layout -Name 'aih-key')"
 }
 
 $baseSettings = Get-Content -Raw -LiteralPath $layout.Settings
@@ -31,7 +32,7 @@ $probes = @(
     [pscustomobject]@{ Tier = 'DeepSeek normal'; Provider = 'flash-high-direct'; Model = 'deepseek-v4-flash'; Effort = 'high'; Expected = 'DEEPSEEK_NORMAL_OK' },
     [pscustomobject]@{ Tier = 'DeepSeek deep'; Provider = 'flash-max-direct'; Model = 'deepseek-v4-flash'; Effort = 'max'; Expected = 'DEEPSEEK_DEEP_OK' }
 )
-if ($Mode -eq 'normal' -and (Test-AihEndpoint -Uri $oauthModelsUrl -TimeoutSec 2)) { $probes += [pscustomobject]@{ Tier = 'Bounded Codex review'; Provider = 'sol-local'; Model = 'gpt-5.6-sol'; Effort = 'medium'; Expected = 'CODEX_REVIEW_OK' } }
+if ($Mode -eq 'normal' -and (Test-AihEndpoint -Uri $oauthModelsUrl -TimeoutSec 2)) { $probes += [pscustomobject]@{ Tier = 'Independent Codex review'; Provider = 'sol-local'; Model = 'gpt-5.6-sol'; Effort = 'medium'; Expected = 'CODEX_REVIEW_OK' } }
 
 $temporaryBase = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
 $probeRoot = Join-Path $temporaryBase ("aih-tier-probes-" + [guid]::NewGuid().ToString('N'))

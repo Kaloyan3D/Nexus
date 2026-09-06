@@ -1,28 +1,35 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Platform abstraction (OS detection, executable resolution, process spawn,
+# browser open, private-path permissions). Loaded first so every shared
+# helper below can rely on it. All OS-dependent decisions live in Platform.ps1.
+. (Join-Path $PSScriptRoot 'Platform.ps1')
+
 # JSON produced by these CLIs is consumed by the controller bridge (Node).
 # Windows PowerShell 5.1 otherwise writes stdout in the console codepage,
 # which mangles non-ASCII text (U+2192 becomes a raw 0x1A byte) and breaks
 # the bridge's JSON parse. Emit UTF-8 explicitly.
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
-function Get-AihInstallRoot {
-    param([string]$InstallRoot)
-
-    if (-not [string]::IsNullOrWhiteSpace($InstallRoot)) {
-        return [System.IO.Path]::GetFullPath($InstallRoot)
-    }
-    if (-not [string]::IsNullOrWhiteSpace($env:AIH_INSTALL_ROOT)) {
-        return [System.IO.Path]::GetFullPath($env:AIH_INSTALL_ROOT)
-    }
-    return 'C:\AI-Harness'
-}
+# Get-AihInstallRoot is defined in Platform.ps1 (foundation layer): the
+# platform layer must stay independently sourceable, and the pinned POSIX
+# host resolution depends on root resolution. Common.ps1 consumers inherit
+# it through the dot-source above.
 
 function Get-AihLayout {
     param([string]$InstallRoot)
 
     $root = Get-AihInstallRoot $InstallRoot
+    # The pinned Node distribution layout differs per platform: the Windows
+    # ZIP keeps node.exe/npm.cmd at the root, the Linux .tar.xz keeps the
+    # executable under bin/ and npm's CLI module under lib/node_modules/npm.
+    # npm is always invoked through node with npm-cli.js on Linux so the
+    # launcher's shebang never depends on PATH resolution.
+    $nodeRelative = Get-AihNodeRelativeExecutable
+    $runtimeNode = Join-Path (Join-Path $root 'runtime') 'node'
+    $npmRelative = if (Test-AihIsWindows) { 'npm.cmd' } else { Join-Path (Join-Path (Join-Path (Join-Path 'lib' 'node_modules') 'npm') 'bin') 'npm-cli.js' }
+    $runtimePwsh = Join-Path (Join-Path $root 'runtime') 'pwsh'
     [pscustomobject]@{
         Root = $root
         App = Join-Path $root 'app'
@@ -32,20 +39,21 @@ function Get-AihLayout {
         Logs = Join-Path $root 'logs'
         Runtime = Join-Path $root 'runtime'
         Scripts = Join-Path $root 'scripts'
-        Node = Join-Path $root 'runtime\node\node.exe'
-        Npm = Join-Path $root 'runtime\node\npm.cmd'
-        Dsh = Join-Path $root 'app\node_modules\@deepseek-ai\dsh\lib\bin.js'
-        OAuth = Join-Path $root 'app\node_modules\openai-oauth\dist\cli.js'
-        Credentials = Join-Path $root 'data\.credentials.yaml'
-        Settings = Join-Path $root 'data\settings.yaml'
-        State = Join-Path $root 'data\aih-state.json'
-        RoutingPolicy = Join-Path $root 'config\routing-policy.json'
-        ModelRegistry = Join-Path $root 'config\model-registry.json'
-        EngineeringProfiles = Join-Path $root 'config\engineering-profiles.json'
-        CustomEngineeringProfile = Join-Path $root 'data\custom-engineering-profile.json'
-        RoutingData = Join-Path $root 'data\routing'
-        CompletionData = Join-Path $root 'data\completion'
-        EvaluationData = Join-Path $root 'data\evaluation'
+        Node = Join-Path $runtimeNode $nodeRelative
+        Npm = Join-Path $runtimeNode $npmRelative
+        Pwsh = if (Test-AihIsWindows) { $null } else { Join-Path $runtimePwsh 'pwsh' }
+        Dsh = Join-Path $root 'app/node_modules/@deepseek-ai/dsh/lib/bin.js'
+        OAuth = Join-Path $root 'app/node_modules/openai-oauth/dist/cli.js'
+        Credentials = Join-Path $root 'data/.credentials.yaml'
+        Settings = Join-Path $root 'data/settings.yaml'
+        State = Join-Path $root 'data/aih-state.json'
+        RoutingPolicy = Join-Path $root 'config/routing-policy.json'
+        ModelRegistry = Join-Path $root 'config/model-registry.json'
+        EngineeringProfiles = Join-Path $root 'config/engineering-profiles.json'
+        CustomEngineeringProfile = Join-Path $root 'data/custom-engineering-profile.json'
+        RoutingData = Join-Path $root 'data/routing'
+        CompletionData = Join-Path $root 'data/completion'
+        EvaluationData = Join-Path $root 'data/evaluation'
     }
 }
 
@@ -69,16 +77,55 @@ function Write-AihAtomicText {
     finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force } }
 }
 
+function ConvertTo-AihJsonSafe {
+    # Normalize a value for JSON emission. OrderedDictionary/IDictionary
+    # values serialize through the PSObject adapter, which leaks .NET
+    # reflection members (Count, Keys, Values, SyncRoot, ...) into the JSON
+    # alongside the real keys, and pipeline piping unrolls the dictionary
+    # into DictionaryEntry items. Convert every dictionary to a
+    # pscustomobject (recursively) so ConvertTo-Json -InputObject emits
+    # exactly the authored keys.
+    param([object]$Value)
+    if ($null -eq $Value) { return $null }
+    # PS 5.1 quirk: cmdlet outputs (e.g. Split-Path -Leaf) can arrive wrapped
+    # in a PSObject whose extended type makes `-is [pscustomobject]` true even
+    # for a plain string, which would serialize {Length: n} instead of the
+    # value. Serialize the string value itself, never its reflection members.
+    if ($Value -is [string]) { return $Value }
+    if ($Value -is [Collections.Specialized.OrderedDictionary] -or $Value -is [Collections.IDictionary]) {
+        $output = [ordered]@{}
+        foreach ($entry in ([Collections.IDictionary]$Value).GetEnumerator()) {
+            $output[[string]$entry.Key] = ConvertTo-AihJsonSafe $entry.Value
+        }
+        return [pscustomobject]$output
+    }
+    if ($Value -is [Collections.IEnumerable] -and $Value -isnot [string] -and $Value -isnot [scriptblock]) {
+        $items = @()
+        foreach ($item in $Value) { $items += (ConvertTo-AihJsonSafe $item) }
+        return ,$items
+    }
+    if ($Value -is [pscustomobject]) {
+        $output = [ordered]@{}
+        foreach ($property in $Value.PSObject.Properties) {
+            $output[$property.Name] = ConvertTo-AihJsonSafe $property.Value
+        }
+        return [pscustomobject]$output
+    }
+    return $Value
+}
+
 function Write-AihAtomicJson {
-    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$Value, [int]$Depth = 20)
-    Write-AihAtomicText -Path $Path -Content ($Value | ConvertTo-Json -Depth $Depth)
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][AllowNull()]$Value, [int]$Depth = 20)
+    $json = if ($null -eq $Value) { 'null' } else { ConvertTo-Json -InputObject (ConvertTo-AihJsonSafe $Value) -Depth $Depth }
+    Write-AihAtomicText -Path $Path -Content $json
 }
 
 function Add-AihJsonLine {
-    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$Value, [int]$Depth = 20)
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][AllowNull()]$Value, [int]$Depth = 20)
     $directory = Split-Path -Parent ([System.IO.Path]::GetFullPath($Path))
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
-    [System.IO.File]::AppendAllText($Path, (($Value | ConvertTo-Json -Depth $Depth -Compress) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+    $json = if ($null -eq $Value) { 'null' } else { ConvertTo-Json -InputObject (ConvertTo-AihJsonSafe $Value) -Depth $Depth -Compress }
+    [System.IO.File]::AppendAllText($Path, ($json + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
 }
 
 function Get-AihVersions {
@@ -94,7 +141,11 @@ function Get-AihVersions {
 
 function Get-AihCodexAuthFile {
     $codexHome = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
-        Join-Path $env:USERPROFILE '.codex'
+        # The Codex CLI stores auth under the user profile directory. Windows
+        # keeps USERPROFILE; other platforms use HOME (Codex itself resolves
+        # it the same way).
+        $userHome = if (Test-AihIsWindows) { $env:USERPROFILE } else { $env:HOME }
+        Join-Path $userHome '.codex'
     }
     else { [System.IO.Path]::GetFullPath($env:CODEX_HOME) }
     return Join-Path $codexHome 'auth.json'
@@ -137,25 +188,6 @@ function Get-AihDeepSeekKey {
         return $null
     }
     return $value
-}
-
-function Protect-AihPrivatePath {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return
-    }
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $item = Get-Item -LiteralPath $Path
-    if ($item.PSIsContainer) {
-        & icacls.exe $Path '/inheritance:r' "/grant:r" "${identity}:(OI)(CI)F" | Out-Null
-    }
-    else {
-        & icacls.exe $Path '/inheritance:r' "/grant:r" "${identity}:F" | Out-Null
-    }
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to restrict permissions on $Path"
-    }
 }
 
 function Wait-AihEndpoint {

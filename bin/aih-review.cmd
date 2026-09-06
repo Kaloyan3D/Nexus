@@ -1,2 +1,6 @@
 @echo off
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\scripts\Review.ps1" %*
+setlocal
+for %%I in ("%~dp0..") do set "AIH_ROOT=%%~fI"
+set "AIH_INSTALL_ROOT=%AIH_ROOT%"
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%AIH_ROOT%\scripts\Review.ps1" -InstallRoot "%AIH_ROOT%" %*
+exit /b %ERRORLEVEL%

@@ -1,12 +1,15 @@
-[CmdletBinding()]param([string]$InstallRoot='C:\AI-Harness')
+[CmdletBinding()]param([string]$InstallRoot)
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Split-Path -Parent $PSScriptRoot }
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\Routing.ps1')
-. (Join-Path $InstallRoot 'scripts\TaskController.ps1')
-. (Join-Path $InstallRoot 'scripts\CodexReview.ps1')
-. (Join-Path $InstallRoot 'scripts\Telemetry.ps1')
-. (Join-Path $InstallRoot 'scripts\ControlRoom.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Routing.ps1')
+. (Join-Path $InstallRoot 'scripts/TaskController.ps1')
+. (Join-Path $InstallRoot 'scripts/CodexReview.ps1')
+. (Join-Path $InstallRoot 'scripts/Telemetry.ps1')
+. (Join-Path $InstallRoot 'scripts/ControlRoom.ps1')
+. (Join-Path $InstallRoot 'tests/TestHelpers.ps1')
 
 $passed=0
 function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw "FAIL: $Name"};$script:passed++;Write-Host "PASS: $Name"}
@@ -26,6 +29,7 @@ Assert-Aih ($policy.executionClasses.reviewer.role -eq 'reviewer' -and -not $pol
 Assert-Aih ($policy.executionClasses.solver.requiresUserApproval -eq $true) 'solver requires explicit user approval'
 $profiles=Get-AihEngineeringProfiles (Join-Path (Split-Path -Parent $layout.RoutingPolicy) 'engineering-profiles.json')
 $registry=Get-AihModelRegistry (Join-Path (Split-Path -Parent $layout.RoutingPolicy) 'model-registry.json')
+$defaultExpected=Resolve-AihExpectedProfileTargets -Policy $policy -Profiles $profiles -Registry $registry -Roles @('primaryEngineer','deepEngineer','reviewer','solver')
 Assert-Aih (@($profiles.profiles|Where-Object id -eq 'deepseek-codex').Count -eq 1) 'DeepSeek + Codex profile is registered'
 Assert-Aih (@($profiles.profiles|Where-Object id -eq 'glm-codex').Count -eq 1) 'GLM + Codex profile is registered'
 Assert-Aih (@($registry.models|Where-Object id -eq 'glm-5.3-flash').Count -eq 1) 'GLM-5.3-Flash is registered'
@@ -37,9 +41,9 @@ try{
  $d=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $normalRoot 'task-normal' 'aih-engineering'
  Assert-Aih ($d.executionClass -eq 'engineer_normal') '1: normal task routes to engineer_normal'
  Assert-Aih ($d.role -eq 'primaryEngineer') '1: engineer_normal maps to role primaryEngineer'
- Assert-Aih ($d.profile -eq 'deepseek-codex' -and $d.profileDisplayName -eq 'DeepSeek + Codex') '1: active profile is DeepSeek + Codex'
- Assert-Aih ($d.provider -eq 'flash-high-direct' -and $d.model -eq 'deepseek-v4-flash' -and $d.reasoning -eq 'high') '1: primaryEngineer resolves to DeepSeek V4 Flash HIGH'
- Assert-Aih ($d.modelDisplayName -eq 'DeepSeek V4 Flash' -and $d.vendor -eq 'DeepSeek') '1: registry display name/vendor reported'
+ Assert-Aih ($d.profile -eq $defaultExpected.Profile.Id -and $d.profileDisplayName -eq $defaultExpected.Profile.DisplayName) '1: active profile comes from current settings/preset resolution'
+ Assert-Aih ($d.provider -eq $defaultExpected.Targets.primaryEngineer.Provider -and $d.model -eq $defaultExpected.Targets.primaryEngineer.Model -and $d.reasoning -eq $defaultExpected.Targets.primaryEngineer.Reasoning) '1: primaryEngineer resolves through the active profile'
+ Assert-Aih ($d.modelDisplayName -eq $defaultExpected.Targets.primaryEngineer.ModelDisplayName -and $d.vendor -eq $defaultExpected.Targets.primaryEngineer.Vendor) '1: registry display name/vendor reported'
  Assert-Aih (-not $d.reviewRequired) '1: normal task does not require review'
  $task=New-AihTask $normalRoot 'implement ordinary change' @() @() 'normal'
  Assert-Aih ($task.executionClass -eq 'engineer_normal') '1: new task records canonical engineer_normal'
@@ -53,7 +57,7 @@ try{
  $d=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $deepRoot 'task-deep' 'aih-engineering' '' 'engineer_deep'
  Assert-Aih ($d.executionClass -eq 'engineer_deep') '2: forced engineer_deep routes to engineer_deep'
  Assert-Aih ($d.role -eq 'deepEngineer') '2: engineer_deep maps to role deepEngineer'
- Assert-Aih ($d.provider -eq 'flash-max-direct' -and $d.model -eq 'deepseek-v4-flash' -and $d.reasoning -eq 'max') '2: deepEngineer resolves to DeepSeek V4 Flash MAX'
+ Assert-Aih ($d.provider -eq $defaultExpected.Targets.deepEngineer.Provider -and $d.model -eq $defaultExpected.Targets.deepEngineer.Model -and $d.reasoning -eq $defaultExpected.Targets.deepEngineer.Reasoning) '2: deepEngineer resolves through the active profile'
 }finally{if(Test-Path $deepRoot){Remove-Item -LiteralPath $deepRoot -Recurse -Force}}
 
 # -- 3. CRITICAL WORK STILL MARKS REVIEW REQUIRED -------------------------
@@ -99,7 +103,7 @@ try{
  Assert-Aih ($r.executionClass -eq 'engineer_deep') '6: review findings route to engineer_deep repair'
  Assert-Aih ($r.role -eq 'deepEngineer') '6: repair uses the deepEngineer role'
  Assert-Aih ($r.escalatedFrom -eq 'reviewer') '6: repair records the reviewer as origin (reviewer does not remain the parent)'
- Assert-Aih ($r.provider -eq 'flash-max-direct' -and $r.reasoning -eq 'max') '6: repair resolves through the profile (DeepSeek V4 Flash MAX)'
+ Assert-Aih ($r.provider -eq $defaultExpected.Targets.deepEngineer.Provider -and $r.model -eq $defaultExpected.Targets.deepEngineer.Model -and $r.reasoning -eq $defaultExpected.Targets.deepEngineer.Reasoning) '6: repair resolves through the active profile deepEngineer role'
 }finally{if(Test-Path $repairRoot){Remove-Item -LiteralPath $repairRoot -Recurse -Force}}
 
 # -- 7. REVIEWER CANNOT GAIN GLOBAL COMPLETION AUTHORITY ------------------
@@ -126,23 +130,34 @@ try{
  $d=Invoke-AihRoutingDecision 'ordinary' $InstallRoot $layout.RoutingPolicy $solRoot 'task-sol' 'aih-engineering' '' 'solver' '' '' -UserApprovedCodexSolve
  Assert-Aih ($d.executionClass -eq 'solver' -and $d.writable) '8: solver with explicit approval is writable'
  Assert-Aih ($d.role -eq 'solver') '8: solver execution uses the solver role'
- Assert-Aih ($d.provider -eq 'sol-local' -and $d.model -eq 'gpt-5.6-sol') '8: solver resolves through the profile to Codex'
+ Assert-Aih ($d.provider -eq $defaultExpected.Targets.solver.Provider -and $d.model -eq $defaultExpected.Targets.solver.Model -and $d.reasoning -eq $defaultExpected.Targets.solver.Reasoning) '8: solver resolves through the active profile solver role'
 }finally{if(Test-Path $solRoot){Remove-Item -LiteralPath $solRoot -Recurse -Force}}
 
 # -- 9/10/11. GLM + CODEX PROFILE -----------------------------------------
 $glmRoot=New-Fixture glmp
 try{
  With-AihProfile 'glm-codex' {
+  # Phase 3.2.5: the expected role targets are DERIVED from the ACTIVE
+  # profile (pinned here through the documented env override) + the model
+  # registry, so the suite validates active-profile resolution and encodes
+  # no model identity of its own.
+  $glmExpected=Resolve-AihExpectedProfileTargets -Policy $policy -Profiles $profiles -Registry $registry
+  $glmActive=$glmExpected.Profile
+  Assert-Aih ([string]$glmActive.Id -eq 'glm-codex') '9: fixture pin resolves the GLM + Codex active profile'
+  $glmNormal=$glmExpected.Targets.primaryEngineer
+  $glmDeep=$glmExpected.Targets.deepEngineer
+  $glmReviewer=$glmExpected.Targets.reviewer
   $n=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $glmRoot 'glm-normal' 'aih-engineering'
   Assert-Aih ($n.executionClass -eq 'engineer_normal' -and $n.role -eq 'primaryEngineer') '9: GLM profile normal routes engineer_normal -> primaryEngineer'
-  Assert-Aih ($n.profile -eq 'glm-codex' -and $n.profileDisplayName -eq 'GLM + Codex') '9: active profile is GLM + Codex'
-  Assert-Aih ($n.provider -eq 'zai-direct' -and $n.model -eq 'glm-5.3-flash') '9: primaryEngineer resolves to GLM-5.3-Flash'
-  Assert-Aih ($n.modelDisplayName -eq 'GLM-5.3-Flash' -and $n.vendor -eq 'Z.ai') '9: GLM registry display name/vendor reported'
+  Assert-Aih ($n.profile -eq $glmActive.Id -and $n.profileDisplayName -eq $glmActive.DisplayName) '9: active profile is GLM + Codex'
+  Assert-Aih ($n.provider -eq $glmNormal.Provider -and $n.model -eq $glmNormal.Model -and $n.reasoning -eq $glmNormal.Reasoning) '9: primaryEngineer binds through the ACTIVE profile'
+  Assert-Aih ($n.modelDisplayName -eq $glmNormal.ModelDisplayName -and $n.vendor -eq $glmNormal.Vendor) '9: registry display name/vendor reported'
   $g=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $glmRoot 'glm-deep' 'aih-engineering' '' 'engineer_deep'
-  Assert-Aih ($g.role -eq 'deepEngineer' -and $g.provider -eq 'zai-direct' -and $g.model -eq 'glm-5.3') '10: GLM deep execution resolves to GLM-5.3'
+  Assert-Aih ($g.role -eq 'deepEngineer' -and $g.profile -eq $glmActive.Id) '10: GLM deep execution uses the deepEngineer role of the active profile'
+  Assert-Aih ($g.provider -eq $glmDeep.Provider -and $g.model -eq $glmDeep.Model -and $g.reasoning -eq $glmDeep.Reasoning) '10: GLM deep model binds through the ACTIVE profile deepEngineer role (no hardcoded model identity)'
   $r=Invoke-AihRoutingDecision 'audit the isolation boundary' $InstallRoot $layout.RoutingPolicy $glmRoot 'glm-review' 'aih-engineering' -ReviewRequested
   Assert-Aih ($r.executionClass -eq 'reviewer' -and $r.role -eq 'reviewer') '11: GLM profile review uses the reviewer role'
-  Assert-Aih ($r.provider -eq 'sol-local' -and $r.model -eq 'gpt-5.6-sol') '11: GLM profile reviewer resolves to Codex'
+  Assert-Aih ($r.provider -eq $glmReviewer.Provider -and $r.model -eq $glmReviewer.Model -and $r.reasoning -eq $glmReviewer.Reasoning) '11: GLM profile reviewer binds through the ACTIVE profile'
  }
 }finally{if(Test-Path $glmRoot){Remove-Item -LiteralPath $glmRoot -Recurse -Force}}
 
@@ -151,8 +166,9 @@ $settingsRoot=New-Fixture setprof
 try{
  $settingsPath=Join-Path $settingsRoot 'settings.yaml'
  [IO.File]::WriteAllText($settingsPath,"engineering-profile: glm-codex" + [char]13 + [char]10,[Text.UTF8Encoding]::new($false))
+ $settingsExpected=Resolve-AihExpectedProfileTargets -Policy $policy -Profiles $profiles -Registry $registry -SettingsPath $settingsPath -Roles @('primaryEngineer')
  $d=Invoke-AihRoutingDecision 'implement ordinary change' $InstallRoot $layout.RoutingPolicy $settingsRoot 'set-task' 'aih-engineering' -SettingsPath $settingsPath
- Assert-Aih ($d.profile -eq 'glm-codex' -and $d.model -eq 'glm-5.3-flash') 'settings engineering-profile key selects GLM + Codex'
+ Assert-Aih ($d.profile -eq $settingsExpected.Profile.Id -and $d.provider -eq $settingsExpected.Targets.primaryEngineer.Provider -and $d.model -eq $settingsExpected.Targets.primaryEngineer.Model -and $d.reasoning -eq $settingsExpected.Targets.primaryEngineer.Reasoning) 'settings engineering-profile key drives the active primaryEngineer target'
 }finally{if(Test-Path $settingsRoot){Remove-Item -LiteralPath $settingsRoot -Recurse -Force}}
 
 # -- 12. SWITCHING PROFILE DOES NOT CHANGE TASK LIFECYCLE SEMANTICS -------
@@ -249,12 +265,12 @@ try{
 }finally{if(Test-Path $verifyRoot){Remove-Item -LiteralPath $verifyRoot -Recurse -Force}}
 
 # -- 19. SUBAGENT / DELEGATION CONFIGURATION IS UNTOUCHED -----------------
-$delegationPath=Join-Path $InstallRoot 'config\delegation-block.yml'
+$delegationPath=Join-Path $InstallRoot 'config/delegation-block.yml'
 $delegation=Get-Content -Raw -Encoding UTF8 -LiteralPath $delegationPath
 Assert-Aih ($delegation -match 'toolName: deepseek_normal') '19: deepseek_normal subagent tool registration unchanged (compat alias)'
 Assert-Aih ($delegation -match 'toolName: deepseek_deep') '19: deepseek_deep subagent tool registration unchanged (compat alias)'
 Assert-Aih ($delegation -match 'tool-subagent-codex[\s\S]*?disabled: true') '19: Codex subagent remains disabled by default'
-$engPreset=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'data\.agent-presets\aih-engineering\agent.cordis.yml')
+$engPreset=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'data/.agent-presets/aih-engineering/agent.cordis.yml')
 Assert-Aih ($engPreset -match '- id: tool-subagent-codex[\s\S]*?disabled: true') '19: engineering preset keeps the Codex subagent disabled'
 Assert-Aih ($engPreset -match '- id: aih-engineering-isolation') '19: engineering preset keeps its isolation plugin'
 Assert-Aih ($engPreset -match '- id: aih-controller') '19: engineering preset keeps the controller bridge'

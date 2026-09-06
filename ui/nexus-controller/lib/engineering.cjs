@@ -24,14 +24,22 @@ const path = require('node:path')
 
 /** Mirrors Routing.ps1 Get-AihRoleRequirements (kept in lockstep by tests). */
 const ROLE_REQUIREMENTS = {
-  primaryEngineer: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true },
-  deepEngineer: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true },
-  fallback: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true },
-  reviewer: { writable: false, requiresTools: false, requiresSolLocal: true, requiresReasoning: true },
-  solver: { writable: true, requiresTools: false, requiresSolLocal: false, requiresReasoning: true },
+  primaryEngineer: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true, requiresVision: false },
+  deepEngineer: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true, requiresVision: false },
+  fallback: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true, requiresVision: false },
+  reviewer: { writable: false, requiresTools: false, requiresSolLocal: true, requiresReasoning: true, requiresVision: false },
+  solver: { writable: true, requiresTools: false, requiresSolLocal: false, requiresReasoning: true, requiresVision: false },
+  // Phase V0/V1: OPTIONAL visual-review role (orthogonal verification
+  // capability, never an execution class). Requires explicit vision support;
+  // absence from a profile is valid everywhere bindings are checked.
+  visualReviewer: { writable: false, requiresTools: false, requiresSolLocal: false, requiresReasoning: true, requiresVision: true },
 }
 
+/** Core roles every profile MUST bind (profile satisfiability contract). */
 const ROLES = ['primaryEngineer', 'deepEngineer', 'reviewer', 'solver', 'fallback']
+
+/** Optional roles: exposed to the editor, validated only when declared. */
+const OPTIONAL_ROLES = ['visualReviewer']
 
 function defaultReadFile(filePath) {
   return require('node:fs').readFileSync(filePath, 'utf8')
@@ -109,6 +117,10 @@ function modelCompatibleWithRole(entry, role, reasoning) {
   if (!req) return false
   if (req.requiresReasoning && entry.supportsReasoning === false) return false
   if (req.requiresTools && entry.supportsTools === false) return false
+  // A vision role fails closed unless the registry entry EXPLICITLY declares
+  // supportsVision=true — a missing capability declaration is never treated
+  // as vision-capable.
+  if (req.requiresVision && entry.supportsVision !== true) return false
   if (req.requiresSolLocal && modelResolvedProvider(entry, reasoning) !== 'sol-local') return false
   if (reasoning) {
     const levels = Array.isArray(entry.supportedReasoningLevels) ? entry.supportedReasoningLevels : []
@@ -194,7 +206,7 @@ function buildEngineeringProfileState(options) {
   )
   const roleRequirements = {}
   const roleModels = {}
-  for (const role of ROLES) {
+  for (const role of ROLES.concat(OPTIONAL_ROLES)) {
     roleRequirements[role] = ROLE_REQUIREMENTS[role]
     roleModels[role] = compatibleModelsForRole(registry, role)
   }
@@ -220,13 +232,16 @@ function buildEngineeringProfileState(options) {
 }
 
 /** Fail-fast host-side validation for a save-custom payload (controller is
- *  still the authority; this only prevents obviously malformed round-trips). */
+ *  still the authority; this only prevents obviously malformed round-trips).
+ *  Core roles are mandatory; OPTIONAL_ROLES are validated only when the
+ *  payload actually declares them (backward compatibility, Phase V0/V1). */
 function validateSaveCustomPayload(roles, registry) {
   if (!roles || typeof roles !== 'object') return 'save-custom requires a roles object'
   for (const role of ROLES) {
     if (!Object.prototype.hasOwnProperty.call(roles, role) || roles[role] == null) return 'missing role binding: ' + role
   }
-  for (const role of ROLES) {
+  const declared = ROLES.concat(OPTIONAL_ROLES.filter((role) => Object.prototype.hasOwnProperty.call(roles, role) && roles[role] != null))
+  for (const role of declared) {
     const binding = roles[role]
     if (typeof binding !== 'object') return 'missing role binding: ' + role
     if (typeof binding.model !== 'string' || binding.model === '') return 'role ' + role + ' has no model'
@@ -238,6 +253,7 @@ function validateSaveCustomPayload(roles, registry) {
 module.exports = {
   ROLE_REQUIREMENTS,
   ROLES,
+  OPTIONAL_ROLES,
   parseEngineeringProfile,
   loadProfilesDocument,
   loadRegistryDocument,

@@ -54,11 +54,35 @@ const CLASS_ROLES = {
   solver: 'solver',
 }
 
+function findInstallRoot(startDir) {
+  let current = path.resolve(startDir)
+  for (;;) {
+    if (
+      fs.existsSync(path.join(current, 'config', 'routing-policy.json')) &&
+      fs.existsSync(path.join(current, 'scripts', 'Common.ps1'))
+    ) return current
+    const parent = path.dirname(current)
+    if (parent === current) return null
+    current = parent
+  }
+}
+
 function installRootOf() {
+  // Phase 3.2.5: the LIVE runtime data root (DSH_HOME) owns install-root
+  // identity, exactly like the controller bridge. AIH_INSTALL_ROOT remains
+  // the fallback for tooling that runs without the DSH runtime. When both
+  // are present they are set consistently by the aih entrypoints; when they
+  // disagree (isolated fixtures, relocated data roots), the DSH runtime root
+  // must win so enforcement reads the SAME data plane the controller writes.
   if (typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOME !== '') {
     return path.dirname(path.resolve(process.env.DSH_HOME))
   }
-  return 'C:\\AI-Harness'
+  if (typeof process.env.AIH_INSTALL_ROOT === 'string' && process.env.AIH_INSTALL_ROOT !== '') {
+    return path.resolve(process.env.AIH_INSTALL_ROOT)
+  }
+  const discovered = findInstallRoot(__dirname)
+  if (discovered) return discovered
+  throw new Error('Nexus install root is unavailable; launch through the repo-local aih entrypoint.')
 }
 
 function readJson(filePath) {
@@ -90,7 +114,7 @@ function loadPolicy(installRoot) {
 }
 
 function loadProfiles(installRoot) {
-  const document = readJson(path.join(installRoot, 'config', 'engineering-profiles.json'))
+  let document = readJson(path.join(installRoot, 'config', 'engineering-profiles.json'))
   if (!document) return document
   // Phase 2.1: the operator-defined CUSTOM profile lives next to the
   // built-in registry as data/custom-engineering-profile.json. It is merged
@@ -175,12 +199,22 @@ function resolveActiveProfile(installRoot, presetId) {
 // re-validates on every save (fail closed, atomic, never partial).
 
 const ROLE_REQUIREMENTS = {
-  primaryEngineer: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true },
-  deepEngineer: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true },
-  fallback: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true },
-  reviewer: { writable: false, requiresTools: false, requiresSolLocal: true, requiresReasoning: true },
-  solver: { writable: true, requiresTools: false, requiresSolLocal: false, requiresReasoning: true },
+  primaryEngineer: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true, requiresVision: false },
+  deepEngineer: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true, requiresVision: false },
+  fallback: { writable: true, requiresTools: true, requiresSolLocal: false, requiresReasoning: true, requiresVision: false },
+  reviewer: { writable: false, requiresTools: false, requiresSolLocal: true, requiresReasoning: true, requiresVision: false },
+  solver: { writable: true, requiresTools: false, requiresSolLocal: false, requiresReasoning: true, requiresVision: false },
+  // Phase V0/V1: OPTIONAL visual-review role (orthogonal verification
+  // capability, never an execution class). Requires explicit vision support;
+  // absence from a profile is valid everywhere bindings are checked.
+  visualReviewer: { writable: false, requiresTools: false, requiresSolLocal: false, requiresReasoning: true, requiresVision: true },
 }
+
+/** Core roles every profile MUST bind (profile satisfiability contract). */
+const CORE_ROLES = ['primaryEngineer', 'deepEngineer', 'reviewer', 'solver', 'fallback']
+
+/** Optional roles: validated only when a profile declares them. */
+const OPTIONAL_ROLES = ['visualReviewer']
 
 function roleRequirementsOf(role) {
   return ROLE_REQUIREMENTS[String(role || '')] || null
@@ -204,6 +238,10 @@ function modelCompatibleWithRole(entry, role, reasoning) {
   if (!req) return false
   if (req.requiresReasoning && entry.supportsReasoning === false) return false
   if (req.requiresTools && entry.supportsTools === false) return false
+  // A vision role fails closed unless the registry entry EXPLICITLY declares
+  // supportsVision=true — a missing capability declaration is never treated
+  // as vision-capable.
+  if (req.requiresVision && entry.supportsVision !== true) return false
   if (req.requiresSolLocal && modelResolvedProvider(entry, reasoning) !== 'sol-local') return false
   if (reasoning) {
     const levels = Array.isArray(entry.supportedReasoningLevels) ? entry.supportedReasoningLevels : []
@@ -251,7 +289,9 @@ function roleBindingTarget(registry, profile, role, reasoningOverride) {
 }
 
 function bindingsSatisfiable(registry, profile) {
-  for (const role of ['primaryEngineer', 'deepEngineer', 'reviewer', 'solver', 'fallback']) {
+  // Only CORE roles are mandatory; OPTIONAL_ROLES (visualReviewer) never
+  // invalidate a legacy/custom profile by their absence.
+  for (const role of CORE_ROLES) {
     if (!roleBindingTarget(registry, profile, role)) return false
   }
   return true
@@ -279,7 +319,7 @@ function resolveTarget(installRoot, profileId, role) {
   }
   if (!entry || entry.enabled === false) return null
   const providers = entry.providers && typeof entry.providers === 'object' ? entry.providers : {}
-  let provider = providers[reasoning] || providers.default || (typeof entry.provider === 'string' ? entry.provider : null)
+  const provider = providers[reasoning] || providers.default || (typeof entry.provider === 'string' ? entry.provider : null)
   if (!provider) return null
   return {
     modelId,
@@ -291,13 +331,29 @@ function resolveTarget(installRoot, profileId, role) {
   }
 }
 
-/** Mirrors Routing.ps1 Get-AihRoutingStatePath for one binding. */
+/**
+ * Mirrors Routing.ps1 Get-AihRoutingStatePath for one binding.
+ * TASK-0005 Part 17: for a binding that carries an immutable taskInstanceId
+ * the state file is keyed by normalized workspace + preset + taskInstanceId
+ * (the SAME composition the PowerShell plane uses), so stale routing state
+ * from an older lifecycle generation of the same display id can never select
+ * the root executor. Legacy bindings (no instance) keep the explicit
+ * workspace+taskId compatibility key.
+ */
 function routingStatePath(installRoot, binding) {
   try {
-    const workspace = path.resolve(String((binding && binding.workspace) || '')).toLowerCase()
+    // Mirrors Routing.ps1 Get-AihRoutingStatePath: the workspace key is
+    // case-folded only on Windows (case-insensitive filesystem identity);
+    // case-sensitive platforms key on the exact resolved path so two
+    // same-named-but-different-case workspaces can never share state.
+    const resolvedWorkspace = path.resolve(String((binding && binding.workspace) || ''))
+    const workspace = process.platform === 'win32' ? resolvedWorkspace.toLowerCase() : resolvedWorkspace
     const preset = String((binding && binding.preset) || 'aih-engineering').toLowerCase()
-    const taskId = String((binding && binding.taskId) || '')
-    const key = workspace + '\n' + preset + '\n' + taskId
+    const instance = binding && typeof binding.taskInstanceId === 'string' && binding.taskInstanceId !== ''
+      ? binding.taskInstanceId
+      : null
+    const identity = instance || String((binding && binding.taskId) || '')
+    const key = workspace + '\n' + preset + '\n' + identity
     const hash = crypto.createHash('sha256').update(key, 'utf8').digest('hex')
     return path.join(installRoot, 'data', 'routing', 'states', hash + '.json')
   } catch {
@@ -320,6 +376,20 @@ function liveExecutionClassOf(installRoot, binding) {
   return null
 }
 
+/**
+ * Phase 3.2.5: the CURRENT STEP role for a binding, when the deterministic
+ * step router mirrored one into the routing state. Only the two engineering
+ * roles are honored - the reviewer (and any other class) is NEVER selected
+ * through this mechanism. Returns null when no valid step role exists.
+ */
+function liveStepRoleOf(installRoot, binding) {
+  const statePath = routingStatePath(installRoot, binding)
+  const state = statePath ? readJson(statePath) : null
+  if (!state || typeof state.stepRole !== 'string') return null
+  const stepRole = state.stepRole
+  return stepRole === 'engineer_normal' || stepRole === 'engineer_deep' ? stepRole : null
+}
+
 module.exports = {
   LEGACY_CLASS_ALIASES,
   CLASS_DISPLAY_NAMES,
@@ -332,6 +402,8 @@ module.exports = {
   loadProfiles,
   loadRegistry,
   ROLE_REQUIREMENTS,
+  CORE_ROLES,
+  OPTIONAL_ROLES,
   roleRequirementsOf,
   modelResolvedProvider,
   modelCompatibleWithRole,
@@ -344,4 +416,5 @@ module.exports = {
   resolveTarget,
   routingStatePath,
   liveExecutionClassOf,
+  liveStepRoleOf,
 }

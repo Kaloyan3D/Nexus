@@ -118,9 +118,61 @@ The Activity view may then render a `Task completed` event using the authoritati
 
 No synthetic completion timestamp should be invented by the UI.
 
+## Visual verification lifecycle (Phase V2)
+
+Visual verification is a **separate controller state machine** layered on
+top of the engineering attempt lifecycle — it never overloads attempt
+identity, never reopens/rewrites terminal attempt history, and never
+replaces deterministic verification:
+
+```text
+engineering attempt(s) → deterministic verification PASS
+  → visual requirement detected (none | recommended | required)
+    ├─ none / recommended → completion gate unaffected (no automatic vision)
+    └─ required → automatic loop (controller-owned, max 3 iterations)
+         pending → reviewing → (REVISE → revise → repair → fresh /verify →
+                    reviewing)* → pass | exhausted | unavailable
+```
+
+### Completion requirement
+
+`Test-AihTaskCompletion` enforces: a visual-REQUIRED task must not complete
+while visual status is `pending`, `reviewing`, `revise`, `exhausted`, or
+`unavailable`. Completion additionally requires deterministic verification
+to be all-PASS. If a visual state ever claims `humanAcceptance: true`,
+completion is blocked with a fabrication-guard reason — human acceptance is
+EXTERNAL (V3 gate) and is never auto-recorded by any component.
+
+### Ordering invariant
+
+For a normal successful engineering turn, the bridge deterministically detects
+the changed visual surface. A REQUIRED result automatically runs controller
+verification and enters the completion tail; explicit `/verify` remains an
+independent manual entry to that same tail. After a repair handoff the loop
+requires a FRESH deterministic verification (newer evidence attempt) before
+recapturing. The ordering `repair → deterministic verification → capture →
+review` is structural, not conventional.
+
+### Convergence
+
+- `pass` — the engineering task may complete; the controller message carries
+  `VISUAL_REVIEW_PASS · HUMAN_REVIEW_PENDING` (no auto-commit).
+- `exhausted` (3 iterations) / `unavailable` (capture or provider failure) —
+  completion stays blocked; operator attention requested; attempt history
+  remains untouched and terminal.
+- verification failure — exits the visual loop into normal engineering
+  failure semantics.
+
+### Manual override
+
+`/visual-review` remains a manual operator override with `trigger=manual`;
+manual results are recorded in `state.manualReviews` and never advance or
+corrupt the automatic iteration state. The trigger (manual vs automatic) is
+never conflated anywhere in telemetry or messages.
+
 ## Review lifecycle
 
-A task may require bounded review because of policy, repeated evidence-backed failure, a critical boundary, or explicit user intent.
+A task may require independent review because of policy, repeated evidence-backed failure, a critical boundary, or explicit user intent.
 
 Typical path:
 
@@ -129,7 +181,7 @@ DeepSeek work
 -> verification/failure evidence
 -> review requirement
 -> review-packet.json
--> bounded fresh Codex review
+-> fresh independent Codex review
 -> review-result.json
 -> DeepSeek repair / completion policy
 ```

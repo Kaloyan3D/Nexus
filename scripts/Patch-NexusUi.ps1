@@ -1,6 +1,6 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
-    [string]$InstallRoot = 'C:\AI-Harness',
+    [string]$InstallRoot,
     [string]$SourceRoot
 )
 
@@ -21,6 +21,10 @@ $ErrorActionPreference = 'Stop'
 # already present (second run), and the script FAILS when the pinned upstream
 # structure changed in an ambiguous way. Regexes tolerate CRLF vs LF.
 
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    $InstallRoot = Split-Path -Parent $PSScriptRoot
+}
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
     $SourceRoot = Split-Path -Parent $PSScriptRoot
 }
@@ -28,7 +32,7 @@ if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
 . (Join-Path $PSScriptRoot 'Common.ps1')
 $layout = Get-AihLayout $InstallRoot
 
-$frontendDir = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-web-frontend'
+$frontendDir = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-web-frontend'
 $frontendManifestPath = Join-Path $frontendDir 'package.json'
 if (-not (Test-Path -LiteralPath $frontendManifestPath)) {
     throw 'The pinned web frontend package is missing. Run npm ci before applying the Nexus UI patch.'
@@ -38,7 +42,7 @@ if ([string]$frontendManifest.version -ne '0.1.1-rc.2') {
     throw "Nexus UI patch supports @deepseek-ai/dsh-web-frontend 0.1.1-rc.2, found $($frontendManifest.version)."
 }
 
-$nexusSource = Join-Path $SourceRoot 'ui\nexus-ui'
+$nexusSource = Join-Path $SourceRoot 'ui/nexus-ui'
 $copyPath = Join-Path $nexusSource 'patch-copy.json'
 if (-not (Test-Path -LiteralPath $copyPath)) {
     throw "Nexus UI source copy missing at $copyPath"
@@ -95,9 +99,9 @@ function Write-AihUtf8NoBom {
 # Node resolves profile plugins from $DSH_HOME\profiles\node_modules (the same
 # directory dsh's own healProfilesModuleFallback manages). A fresh copy on every
 # run keeps the installed package byte-identical to the source tree.
-$profileModules = Join-Path $layout.Data 'profiles\node_modules'
+$profileModules = Join-Path $layout.Data 'profiles/node_modules'
 New-Item -ItemType Directory -Force -Path $profileModules | Out-Null
-$nexusTarget = Join-Path $profileModules '@nexus\ui-brand'
+$nexusTarget = Join-Path $profileModules '@nexus/ui-brand'
 if (Test-Path -LiteralPath $nexusTarget) {
     Remove-Item -LiteralPath $nexusTarget -Recurse -Force
 }
@@ -109,8 +113,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $nexusTarget 'package.json'))) {
 # --- 1b. install @nexus/controller into the profile module fallback ----------
 # The live Controller panel (host read-only status route + client panel).
 # Same deterministic fresh-copy semantics as the brand package.
-$controllerSource = Join-Path $SourceRoot 'ui\nexus-controller'
-$controllerTarget = Join-Path $profileModules '@nexus\controller'
+$controllerSource = Join-Path $SourceRoot 'ui/nexus-controller'
+$controllerTarget = Join-Path $profileModules '@nexus/controller'
 if (Test-Path -LiteralPath $controllerTarget) {
     Remove-Item -LiteralPath $controllerTarget -Recurse -Force
 }
@@ -118,7 +122,7 @@ Copy-Item -LiteralPath $controllerSource -Destination $controllerTarget -Recurse
 if (-not (Test-Path -LiteralPath (Join-Path $controllerTarget 'package.json'))) {
     throw "Failed to install @nexus/controller into $profileModules"
 }
-foreach ($controllerFile in @('lib\index.js', 'lib\client.js', 'lib\status.cjs')) {
+foreach ($controllerFile in @('lib/index.js', 'lib/client.js', 'lib/status.cjs')) {
     if (-not (Test-Path -LiteralPath (Join-Path $controllerTarget $controllerFile))) {
         throw "Failed to install @nexus/controller $controllerFile into $profileModules"
     }
@@ -190,21 +194,21 @@ Write-AihUtf8NoBom -Path $manifestPath -Content ($manifest | ConvertTo-Json -Dep
 $distAssets = Join-Path $distDir 'assets'
 New-Item -ItemType Directory -Force -Path $distAssets | Out-Null
 foreach ($assetName in @('nexus-logo.png', 'nexus-mark.png')) {
-    $assetSource = Join-Path $nexusSource ("assets\" + $assetName)
+    $assetSource = Join-Path $nexusSource ('assets/' + $assetName)
     if (-not (Test-Path -LiteralPath $assetSource)) { throw "Nexus brand asset missing at $assetSource" }
     Copy-Item -LiteralPath $assetSource -Destination (Join-Path $distAssets $assetName) -Force
 }
 
 # --- 3. runtime brand copy in the installed client bundles -------------------
 # 3a. document title owner (dsh-client-ui-renderer).
-$rendererPath = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-renderer\lib\client.js'
+$rendererPath = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-client-ui-renderer/lib/client.js'
 if (-not (Test-Path -LiteralPath $rendererPath)) { throw "renderer client bundle missing at $rendererPath" }
 $rendererText = Get-Content -Raw -Encoding UTF8 -LiteralPath $rendererPath
 $rendererPair = Update-AihCopyPair -Text $rendererText -From $copy.rendererProductTitle.from -To $copy.rendererProductTitle.to -What 'renderer document title' -Path $rendererPath
 if ($rendererPair[1]) { Write-AihUtf8NoBom -Path $rendererPath -Content $rendererPair[0] }
 
 # 3a2. app-shell layout - expanded sidebar default width (collapsed rail unchanged).
-$layoutPath = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-layout\lib\client.js'
+$layoutPath = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-client-ui-layout/lib/client.js'
 if (-not (Test-Path -LiteralPath $layoutPath)) { throw "layout client bundle missing at $layoutPath" }
 $layoutText = Get-Content -Raw -Encoding UTF8 -LiteralPath $layoutPath
 $layoutChanged = $false
@@ -224,14 +228,14 @@ if ($layoutChanged) { Write-AihUtf8NoBom -Path $layoutPath -Content $layoutText 
 # names are tier-free ("DeepSeek V4 Flash", effort "Max" rendered as its own
 # label), so this guard is inert for the canonical names; it stays as a
 # safety net so "…MAX Max" can never render if a tier-embedded name returns.
-$modelSelPath = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-model-selection\lib\client.js'
+$modelSelPath = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-client-ui-model-selection/lib/client.js'
 if (-not (Test-Path -LiteralPath $modelSelPath)) { throw "model-selection client bundle missing at $modelSelPath" }
 $modelSelText = Get-Content -Raw -Encoding UTF8 -LiteralPath $modelSelPath
 $modelSelPair = Update-AihCopyPair -Text $modelSelText -From 'effortLabel !== void 0 && (0, react_jsx_runtime.jsx)("span", {' -To 'effortLabel !== void 0 && !modelLabel.toUpperCase().endsWith(effortLabel.toUpperCase()) && (0, react_jsx_runtime.jsx)("span", {' -What 'model trigger effort dedupe' -Path $modelSelPath
 if ($modelSelPair[1]) { Write-AihUtf8NoBom -Path $modelSelPath -Content $modelSelPair[0] }
 
 # 3b. conversation hero headline (dsh-client-ui-conversation dictionaries).
-$conversationPath = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-conversation\lib\client.js'
+$conversationPath = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js'
 if (-not (Test-Path -LiteralPath $conversationPath)) { throw "conversation client bundle missing at $conversationPath" }
 $conversationText = Get-Content -Raw -Encoding UTF8 -LiteralPath $conversationPath
 $conversationChanged = $false
@@ -240,6 +244,15 @@ foreach ($pair in $copy.heroHeadline) {
     $conversationText = $result[0]
     if ($result[1]) { $conversationChanged = $true }
 }
+# Workspace selection is asynchronous. Upstream renders the optimistic target
+# title immediately but used to leave the old session's composer enabled until
+# connectWorkspace() completed. A fast submit therefore displayed workspace B
+# while appending/executing in session A. Disable the composer for that bounded
+# transition; it re-enables only after the current session belongs to B (or the
+# selection fails and the optimistic target is cleared).
+$workspaceTransitionPair = Update-AihCopyPair -Text $conversationText -From 'const inert = sessionId === void 0 || hero && chipTitle === void 0;' -To 'const inert = pendingWorkspaceId !== void 0 || sessionId === void 0 || hero && chipTitle === void 0;' -What 'workspace transition execution guard' -Path $conversationPath
+$conversationText = $workspaceTransitionPair[0]
+if ($workspaceTransitionPair[1]) { $conversationChanged = $true }
 if ($conversationChanged) { Write-AihUtf8NoBom -Path $conversationPath -Content $conversationText }
 
 # 3b2. phase 1.5 - primary action violet (send button) and hero glow tint.
@@ -255,7 +268,7 @@ foreach ($pair in @(
 if ($conversationChanged) { Write-AihUtf8NoBom -Path $conversationPath -Content $conversationText }
 
 # 3c. models settings welcome notice (dsh-client-ui-settings-models).
-$modelsPath = Join-Path $layout.App 'node_modules\@deepseek-ai\dsh-client-ui-settings-models\lib\client.js'
+$modelsPath = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js'
 if (-not (Test-Path -LiteralPath $modelsPath)) { throw "settings-models client bundle missing at $modelsPath" }
 $modelsText = Get-Content -Raw -Encoding UTF8 -LiteralPath $modelsPath
 $noticePattern = '(?s)const WELCOME_NOTICE_COPY = \{.*?\r?\n[ \t]*\};'
