@@ -39,8 +39,14 @@ if (Test-AihIsWindows) {
     if (-not (Test-Path -LiteralPath $setup)) {
         throw "Update source does not contain scripts\\Setup.ps1: $SourceRoot"
     }
+    # Setup.ps1 is a PowerShell script, not a native executable: it defines
+    # no process exit code, and its failures are terminating errors that
+    # propagate to this caller (it runs under Set-StrictMode with
+    # $ErrorActionPreference = 'Stop' and throws on every failure path).
+    # TASK-0032: the old native-exit-code read after this invocation was
+    # undefined (or stale from an unrelated earlier native command) and
+    # aborted successful updates.
     & $setup -InstallRoot $InstallRoot
-    if ($LASTEXITCODE -ne 0) { throw 'Nexus update failed.' }
 }
 else {
     $setup = Join-Path $SourceRoot 'setup.sh'

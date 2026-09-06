@@ -141,6 +141,35 @@ function Read-AihRecorderLines([Parameter(Mandatory = $true)][string]$RecorderFi
     return @(Get-Content -LiteralPath $RecorderFile | ForEach-Object { [string]$_ })
 }
 
+function Get-AihRecordedInvocationShape([string[]]$Recorded) {
+    # TASK-0032: the recorder stub is plane-specific. On POSIX the recorded
+    # setup.sh prints three lines ('<setup.sh>', '--install-root',
+    # '<installRoot>'); on Windows the recorded Setup.ps1 prints
+    # 'script=<path>' and 'installroot=<path>'. The asserted contract is the
+    # same on both planes: the install composition is invoked from the
+    # resolved SOURCE root with the resolved INSTALL root.
+    if ($runningOnWindows) {
+        $scriptLine = @($Recorded | Where-Object { $_.StartsWith('script=') })
+        $installLine = @($Recorded | Where-Object { $_.StartsWith('installroot=') })
+        if ($scriptLine.Count -ne 1 -or $installLine.Count -ne 1) {
+            throw ('FAIL: the Windows Setup.ps1 recorder stub captured an unexpected invocation shape: ' + (@($Recorded) -join ' | '))
+        }
+        return [pscustomobject]@{
+            Source = $scriptLine[0].Substring('script='.Length)
+            InstallRoot = $installLine[0].Substring('installroot='.Length)
+            ArgumentCount = $Recorded.Count
+        }
+    }
+    if ($Recorded.Count -lt 3) {
+        throw ('FAIL: the recording setup.sh captured an unexpected invocation shape: ' + (@($Recorded) -join ' | '))
+    }
+    return [pscustomobject]@{
+        Source = $Recorded[0]
+        InstallRoot = $Recorded[2]
+        ArgumentCount = $Recorded.Count
+    }
+}
+
 $updateProbeHost = if ($runningOnWindows) { 'powershell.exe' } else { Get-AihPowerShellHost -InstallRoot $InstallRoot }
 $savedInstallRootEnv = $env:AIH_INSTALL_ROOT
 $savedRecorderEnv = $env:AIH_RECORDER_FILE
@@ -185,11 +214,24 @@ try {
     finally { $ErrorActionPreference = $savedPreference }
     $probeText = (@($probeOutput) -join ' ')
     Assert-Aih ($probeExit -eq 0) ('aih-update -SourceRoot succeeds on an installed POSIX layout (exit ' + $probeExit + '): ' + $probeText)
+    # TASK-0032: the recorder stub is plane-specific (POSIX setup.sh prints
+    # '$0', '--install-root', <installRoot>; Windows Setup.ps1 prints
+    # 'script=<path>', 'installroot=<path>'), but the asserted contract is the
+    # SAME on both planes: the install composition is invoked from the
+    # resolved SOURCE root with the resolved INSTALL root, and an explicit
+    # -SourceRoot never retargets the install root.
+    $expectedComposition = if ($runningOnWindows) { Join-Path $checkoutFixture 'scripts/Setup.ps1' } else { Join-Path $checkoutFixture 'setup.sh' }
     $recorded = Read-AihRecorderLines -RecorderFile $recorderFile
-    Assert-Aih ($recorded.Count -ge 3) ('the recording setup.sh captured the invocation (' + $recorded.Count + ' lines)')
-    Assert-AihSamePath -Actual $recorded[0] -Expected (Join-Path $checkoutFixture 'setup.sh') 'setup.sh is invoked from the SOURCE root (spaced path honored end-to-end)'
-    Assert-Aih ($recorded[1] -eq '--install-root') 'setup.sh receives --install-root as the first argument'
-    Assert-AihSamePath -Actual $recorded[2] -Expected $installFixture 'explicit -SourceRoot does not retarget the install root: --install-root stays AIH_INSTALL_ROOT (regressions 1, 2, 4)'
+    $invocation = Get-AihRecordedInvocationShape -Recorded $recorded
+    if ($runningOnWindows) {
+        Assert-Aih ($recorded.Count -ge 2) ('the recording Setup.ps1 captured the invocation (' + $recorded.Count + ' lines)')
+    }
+    else {
+        Assert-Aih ($invocation.ArgumentCount -ge 3) ('the recording setup.sh captured the invocation (' + $invocation.ArgumentCount + ' lines)')
+        Assert-Aih ($recorded[1] -eq '--install-root') 'setup.sh receives --install-root as the first argument'
+    }
+    Assert-AihSamePath -Actual $invocation.Source -Expected $expectedComposition 'the install composition is invoked from the SOURCE root (spaced path honored end-to-end)'
+    Assert-AihSamePath -Actual $invocation.InstallRoot -Expected $installFixture 'explicit -SourceRoot does not retarget the install root: the install root stays AIH_INSTALL_ROOT (regressions 1, 2, 4)'
 
     # Regression: the metadata layer drives a plain no-argument aih-update.
     Clear-AihProbeEnvironment
@@ -209,9 +251,15 @@ try {
     $probeText = (@($probeOutput) -join ' ')
     Assert-Aih ($probeExit -eq 0) ('plain aih-update (no arguments) succeeds on an installed POSIX layout through the persisted source metadata (exit ' + $probeExit + '): ' + $probeText)
     $recorded = Read-AihRecorderLines -RecorderFile $recorderFile
-    Assert-Aih ($recorded.Count -ge 3) 'the no-argument run reached setup.sh (the old self-directory fallback never did)'
-    Assert-AihSamePath -Actual $recorded[0] -Expected (Join-Path $checkoutFixture 'setup.sh') 'no-argument aih-update sources from the persisted installation source metadata checkout'
-    Assert-AihSamePath -Actual $recorded[2] -Expected $installFixture 'no-argument aih-update installs into the launcher-resolved install root'
+    $invocation = Get-AihRecordedInvocationShape -Recorded $recorded
+    if ($runningOnWindows) {
+        Assert-Aih ($recorded.Count -ge 2) 'the no-argument run reached the install composition (the old self-directory fallback never did)'
+    }
+    else {
+        Assert-Aih ($invocation.ArgumentCount -ge 3) 'the no-argument run reached setup.sh (the old self-directory fallback never did)'
+    }
+    Assert-AihSamePath -Actual $invocation.Source -Expected $expectedComposition 'no-argument aih-update sources from the persisted installation source metadata checkout'
+    Assert-AihSamePath -Actual $invocation.InstallRoot -Expected $installFixture 'no-argument aih-update installs into the launcher-resolved install root'
 
     # Regression 3: explicit -InstallRoot overrides AIH_INSTALL_ROOT.
     Clear-AihProbeEnvironment
@@ -231,8 +279,14 @@ try {
     $probeText = (@($probeOutput) -join ' ')
     Assert-Aih ($probeExit -eq 0) ('aih-update -SourceRoot -InstallRoot succeeds (exit ' + $probeExit + '): ' + $probeText)
     $recorded = Read-AihRecorderLines -RecorderFile $recorderFile
-    Assert-Aih ($recorded.Count -ge 3) 'the -InstallRoot override run reached setup.sh'
-    Assert-AihSamePath -Actual $recorded[2] -Expected $secondInstall 'explicit -InstallRoot overrides the launcher-exported AIH_INSTALL_ROOT (regression 3)'
+    $invocation = Get-AihRecordedInvocationShape -Recorded $recorded
+    if ($runningOnWindows) {
+        Assert-Aih ($recorded.Count -ge 2) 'the -InstallRoot override run reached the install composition'
+    }
+    else {
+        Assert-Aih ($invocation.ArgumentCount -ge 3) 'the -InstallRoot override run reached setup.sh'
+    }
+    Assert-AihSamePath -Actual $invocation.InstallRoot -Expected $secondInstall 'explicit -InstallRoot overrides the launcher-exported AIH_INSTALL_ROOT (regression 3)'
 
     # Regression 5 (end-to-end): SourceRoot == InstallRoot on an installed
     # POSIX tree fails closed with the positive-identification message, not
@@ -357,10 +411,38 @@ try {
         }
         finally { $ErrorActionPreference = $savedPreference }
         $probeText = (@($probeOutput) -join ' ')
-        Assert-Aih ($probeExit -eq 0) ('Windows same-root checkout update via the real Update.ps1 succeeds (exit ' + $probeExit + '): ' + $probeText)
+        # TASK-0032: a SUCCEEDING Setup.ps1 must complete the update. Setup.ps1
+        # is a PowerShell script, so it defines no process exit code; the old
+        # defect read the native LASTEXITCODE after this invocation, which was
+        # undefined here and aborted a successful update under StrictMode.
+        Assert-Aih ($probeExit -eq 0) ('Windows same-root checkout update via the real Update.ps1 succeeds; a succeeding Setup.ps1 must not be failed by a native-exit-code read (exit ' + $probeExit + ', TASK-0032): ' + $probeText)
         $recorded = Read-AihRecorderLines -RecorderFile $recorderFile
-        Assert-AihSamePath -Actual $recorded[0] -Expected (Join-Path $checkoutFixture 'scripts/Setup.ps1') 'the Windows branch invokes the SOURCE checkout Setup.ps1'
-        Assert-AihSamePath -Actual ($recorded[1].Substring('installroot='.Length)) -Expected $InstallRoot 'the Windows structural fallback targets the checkout itself (same-root install layout)'
+        $liveInvocation = Get-AihRecordedInvocationShape -Recorded $recorded
+        Assert-AihSamePath -Actual $liveInvocation.Source -Expected (Join-Path $checkoutFixture 'scripts/Setup.ps1') 'the Windows branch invokes the SOURCE checkout Setup.ps1'
+        Assert-AihSamePath -Actual $liveInvocation.InstallRoot -Expected $InstallRoot 'the Windows structural fallback targets the checkout itself (same-root install layout)'
+
+        # TASK-0032: a FAILING Setup.ps1 must still fail the update. Its
+        # terminating error propagates through the call operator as the
+        # update's own failure - removing the meaningless exit-code read never
+        # weakens failure detection.
+        $failingFixture = Join-Path $tempRoot 'nexus source checkout failing setup'
+        New-AihSourceCheckoutFixture -Root $failingFixture -RecorderFile $recorderFile
+        $failingSetup = @'
+param([string]$InstallRoot)
+throw 'SETUP-STUB-TERMINATING-FAILURE'
+'@
+        [IO.File]::WriteAllText((Join-Path $failingFixture 'scripts/Setup.ps1'), $failingSetup, [Text.UTF8Encoding]::new($false))
+        Clear-AihProbeEnvironment
+        $savedPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $probeOutput = & $updateProbeHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'scripts/Update.ps1') -SourceRoot $failingFixture 2>&1 | ForEach-Object { [string]$_ }
+            $probeExit = $LASTEXITCODE
+        }
+        finally { $ErrorActionPreference = $savedPreference }
+        $failingProbeText = (@($probeOutput) -join ' ')
+        Assert-Aih ($probeExit -ne 0) 'a failing Setup.ps1 fails the update as a terminating error (exit != 0, TASK-0032)'
+        Assert-Aih ($failingProbeText.Contains('SETUP-STUB-TERMINATING-FAILURE')) ('the terminating Setup.ps1 failure propagates as the update failure itself: ' + $failingProbeText)
     }
     else {
         Write-Host 'NOTE: Windows live same-root probe runs on the Windows plane only; the plane-agnostic same-root contract is asserted above.'
