@@ -44,3 +44,6 @@ Desktop.ini
 # Test-generated harness runtime
 tests/.ai-harness/runs/
 tests/.ai-harness/state/
+
+.ai-harness/state/
+.ai-harness/runs/
