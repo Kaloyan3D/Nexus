@@ -145,6 +145,56 @@ try{
     Assert-AihTrue (-not[bool]$museEntry2.selectable) 'save-custom leaves Muse non-selectable'
     Assert-AihEqual $museEntry2.availability 'foundation' 'save-custom leaves Muse availability=foundation'
 
+    # ── Phase M1.1: selection gating is selectable-ONLY (fixture catalog
+    #    override — the production Muse availability flags are NOT touched) ──
+    $selFixture=Join-Path ([IO.Path]::GetTempPath()) ('nexus-profiles-selmuse-'+[guid]::NewGuid().ToString('N'))
+    try{
+        New-Item -ItemType Directory -Force -Path (Join-Path $selFixture 'config')|Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $selFixture 'data')|Out-Null
+        foreach($name in @('routing-policy.json','engineering-profiles.json','model-registry.json','muse-profiles.json')){Copy-AihConfigFile $name $selFixture}
+        $selCatalog=Get-Content -Raw (Join-Path $InstallRoot 'config/nexus-profiles.json')|ConvertFrom-Json
+        $selMuseCatalogEntry=@($selCatalog.profiles|Where-Object{$_.id -eq 'muse-spark-1.3'})[0]
+        $selMuseCatalogEntry.selectable=$true
+        $selMuseCatalogEntry.runnable=$false
+        $selCatalog|ConvertTo-Json -Depth 10|Set-Content -Encoding UTF8 -LiteralPath (Join-Path $selFixture 'config/nexus-profiles.json')
+        [IO.File]::WriteAllText((Join-Path $selFixture 'data/settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
+
+        $selRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $selFixture -ProfileId 'muse-spark-1.3'
+        $selResult=$selRaw|ConvertFrom-Json
+        Assert-AihTrue ([bool]$selResult.ok -and $selResult.profileId -eq 'muse-spark-1.3') 'hypothetical selectable Muse is NOT rejected for being Muse (selectable-only gate)'
+        $selSettingsText=Get-Content -Raw (Join-Path $selFixture 'data/settings.yaml')
+        Assert-AihTrue ([regex]::IsMatch($selSettingsText,'(?m)^engineering-profile:\s*muse-spark-1\.3')) 'selectable Muse selection writes the preferred profile key'
+        $selStateRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $selFixture
+        $selState=$selStateRaw|ConvertFrom-Json
+        $selMuseEntry=@($selState.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3'})[0]
+        Assert-AihEqual $selMuseEntry.engine 'muse' 'selectable hypothetical stays engine=muse'
+        Assert-AihEqual $selMuseEntry.selectable $true 'editor state exposes the selectable Muse (engine never forces selectable=false)'
+        Assert-AihEqual $selMuseEntry.runnable $false 'runnable stays independent of selectable'
+        Assert-AihEqual $selState.preferredProfile.id 'muse-spark-1.3' 'preferred Muse profile initializes from the Nexus catalog'
+        $selBackRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $selFixture -ProfileId 'glm-codex'
+        $selBackResult=$selBackRaw|ConvertFrom-Json
+        Assert-AihTrue ([bool]$selBackResult.ok) 'Dual profiles remain selectable after Muse preference work'
+    }finally{if(Test-Path -LiteralPath $selFixture){Remove-Item -LiteralPath $selFixture -Recurse -Force}}
+
+    # Production Muse is STILL rejected because selectable=false (real catalog)
+    $prodRejectRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $fixture -ProfileId 'muse-spark-1.3'
+    $prodReject=$prodRejectRaw|ConvertFrom-Json
+    Assert-AihEqual $prodReject.error 'profile-not-selectable' 'production Muse is still rejected (selectable=false, never engine)'
+
+    # ── Phase M1.1: resolver parity — a missing Muse registry skips ONLY the
+    #    Muse entry (never a partially-resolved muse:null entry) ──
+    $nomuseFixture=Join-Path ([IO.Path]::GetTempPath()) ('nexus-profiles-nomuse-'+[guid]::NewGuid().ToString('N'))
+    try{
+        New-Item -ItemType Directory -Force -Path (Join-Path $nomuseFixture 'config')|Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $nomuseFixture 'data')|Out-Null
+        foreach($name in @('routing-policy.json','engineering-profiles.json','model-registry.json','nexus-profiles.json')){Copy-AihConfigFile $name $nomuseFixture}
+        [IO.File]::WriteAllText((Join-Path $nomuseFixture 'data/settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
+        $nomuseStateRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $nomuseFixture
+        $nomuseState=$nomuseStateRaw|ConvertFrom-Json
+        Assert-AihTrue (@($nomuseState.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3'}).Count -eq 0) 'missing Muse registry leaves the Muse entry unresolved (omitted, not muse:null)'
+        Assert-AihTrue (@($nomuseState.nexusProfiles|Where-Object{$_.engine -eq 'dual'}).Count -ge 2) 'Dual entries survive a missing Muse registry (PS/JS parity)'
+    }finally{if(Test-Path -LiteralPath $nomuseFixture){Remove-Item -LiteralPath $nomuseFixture -Recurse -Force}}
+
     Write-Host "Nexus controller profile foundation tests passed: $script:passed"
 }finally{
     $env:DSH_AIH_PROFILE=$savedDsh

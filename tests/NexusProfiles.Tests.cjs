@@ -345,7 +345,7 @@ function main() {
     }
     assert.ok(museHtml.includes('disabled'), 'Muse Select button is disabled')
     assert.ok(museHtml.includes('profile-not-selectable'), 'Muse Select button names the deterministic rejection code')
-    assert.ok(museHtml.includes('Foundation-only profile'), 'Muse renders the foundation-only hint')
+    assert.ok(museHtml.includes('not selectable yet'), 'Muse renders the not-selectable hint')
     assert.ok(museHtml.includes('Muse Spark 1.3 \u2014 foundation'), 'Muse dropdown option visibly carries its foundation state')
     pass('client renders Muse as read-only foundation metadata without a Dual role editor')
 
@@ -362,42 +362,146 @@ function main() {
     pass('client Dual role editor remains unchanged in behavior')
 
     // 6c. EngineeringEditor readiness: Muse state (roles=null) renders the
-    //     metadata surface instead of hanging in the loading gate.
-    const patchedSource = clientSource.replace(
-      'function useEngineeringEditor(sessionId) {',
-      'function useEngineeringEditor(sessionId) {\n\tif (typeof window !== "undefined" && window.__NX_TEST_EDITOR__ !== undefined) return window.__NX_TEST_EDITOR__;',
-    )
-    assert.notEqual(patchedSource, clientSource, 'shared editor hook header found in client.js')
-    let editorModule = null
-    const editorSandbox = {
-      console,
-      URL,
-      setTimeout,
-      clearTimeout,
-      window: {
-        __ModuleLoader__: {
-          load(def) {
-            editorModule = def.factory((name) => {
-              if (name === 'react') return react
-              if (name === 'react/jsx-runtime') return jsxRuntime
-              throw new Error('unexpected require: ' + name)
-            })
+    //     metadata surface instead of hanging in the loading gate. The hook
+    //     is injected through the same deterministic patch the panel suite
+    //     uses; one helper serves every EngineeringEditor render below.
+    const hookHeader = 'function useEngineeringEditor(sessionId) {'
+    const hookPatch = hookHeader + '\n\tif (typeof window !== "undefined" && window.__NX_TEST_EDITOR__ !== undefined) return window.__NX_TEST_EDITOR__;'
+    assert.ok(clientSource.includes(hookHeader), 'shared editor hook header found in client.js')
+    function renderEditorWithInjection(editorValue, component, props) {
+      const patchedSource = clientSource.replace(hookHeader, hookPatch)
+      let injectedModule = null
+      const injectedSandbox = {
+        console,
+        URL,
+        setTimeout,
+        clearTimeout,
+        window: {
+          __ModuleLoader__: {
+            load(def) {
+              injectedModule = def.factory((name) => {
+                if (name === 'react') return react
+                if (name === 'react/jsx-runtime') return jsxRuntime
+                throw new Error('unexpected require: ' + name)
+              })
+            },
           },
+          __NX_TEST_EDITOR__: editorValue,
+          localStorage: { getItem() { return null }, setItem() {} },
+          setInterval() { return 1 },
+          clearInterval() {},
         },
-        __NX_TEST_EDITOR__: museEditor,
-        localStorage: { getItem() { return null }, setItem() {} },
-        setInterval() { return 1 },
-        clearInterval() {},
-      },
-      document: { createElement() { return { dataset: {}, remove() {} } }, head: { appendChild() {} } },
+        document: { createElement() { return { dataset: {}, remove() {} } }, head: { appendChild() {} } },
+      }
+      vm.createContext(injectedSandbox)
+      vm.runInContext(patchedSource, injectedSandbox)
+      return renderToStaticMarkup(jsxRuntime.jsx(injectedModule[component], props))
     }
-    vm.createContext(editorSandbox)
-    vm.runInContext(patchedSource, editorSandbox)
-    const museTabHtml = renderToStaticMarkup(jsxRuntime.jsx(editorModule.EngineeringEditor, { sessionId: 'session-0001' }))
+    const museTabHtml = renderEditorWithInjection(museEditor, 'EngineeringEditor', { sessionId: 'session-0001' })
     assert.ok(museTabHtml.includes('>Engine<'), 'Engineering tab renders the Muse metadata surface for a Muse selection')
     assert.ok(!museTabHtml.includes('Primary Engineer'), 'Engineering tab renders no Dual role editor for Muse')
     assert.ok(!museTabHtml.includes('Loading engineering configuration'), 'Muse selection does not hang in the loading gate')
     pass('UI adapter does not require Dual roles for Muse (readiness is engine-aware)')
+
+    // ── Phase M1.1 cleanup: selectable-only gating, fail-closed catalog,
+    //    authoritative initialization, and JS/PS resolver parity. ──
+
+    // 7. client save() gating is selectable-only — no engine-based rejection
+    assert.ok(!clientSource.includes('entry.engine !== "dual"'), 'client save() contains no engine-based rejection')
+    assert.ok(clientSource.includes('if (entry && entry.selectable === false) return;'), 'client save() rejects on selectable only')
+    pass('client save() does not reject on engine — selectable only')
+
+    // 8. catalog fallback: contract-present empty NEVER falls back; legacy does
+    const legacyCatalogState = { profiles: [{ id: 'glm-codex', displayName: 'GLM + Codex' }] }
+    const emptyContractState = { profiles: [{ id: 'glm-codex', displayName: 'GLM + Codex' }], nexusProfiles: [] }
+    assert.equal(moduleExports.hasNexusCatalogContract(legacyCatalogState), false, 'state without the property has no Nexus contract')
+    assert.equal(moduleExports.hasNexusCatalogContract(emptyContractState), true, 'state with the property has the Nexus contract')
+    assert.deepEqual(moduleExports.userFacingProfiles(legacyCatalogState), legacyCatalogState.profiles, 'CASE A: legacy host falls back to the Dual list')
+    assert.deepEqual(moduleExports.userFacingProfiles(emptyContractState), [], 'CASE B: contract-present empty catalog is authoritative — NO fallback')
+    assert.equal(moduleExports.isCatalogUnavailable(emptyContractState), true, 'CASE B: contract + empty catalog = configuration unavailable')
+    assert.equal(moduleExports.isCatalogUnavailable(legacyCatalogState), false, 'CASE A: legacy state is never marked catalog-unavailable')
+    pass('legacy vs current-host catalog fallback distinguished')
+
+    // 9. initialization uses the authoritative user-facing catalog
+    const museSelectableEntry = Object.assign({}, nexusEntries[1], { selectable: true })
+    const selectableMuseCatalog = [museSelectableEntry, nexusEntries[0]]
+    assert.equal(moduleExports.initialProfileChoice({ profiles: [{ id: 'glm-codex' }], nexusProfiles: selectableMuseCatalog }), 'muse-spark-1.3', 'initial fallback comes from the Nexus catalog, not the legacy Dual list')
+    assert.equal(moduleExports.initialProfileChoice({ profiles: [{ id: 'glm-codex' }], nexusProfiles: selectableMuseCatalog, preferredProfile: { id: 'muse-spark-1.3' } }), 'muse-spark-1.3', 'a preferred future Muse profile initializes from the Nexus catalog')
+    assert.equal(moduleExports.initialProfileChoice({ profiles: [{ id: 'glm-codex' }], preferredProfile: { id: 'glm-codex' } }), 'glm-codex', 'legacy host keeps the legacy initialization behavior')
+    assert.equal(moduleExports.initialProfileChoice({ profiles: [{ id: 'glm-codex' }], nexusProfiles: [] }), null, 'empty catalog initializes nothing (fail closed)')
+    pass('initialization uses the authoritative user-facing catalog')
+
+    // 10. selectable-Muse hypothetical at the adapter level (fixture override
+    //     ONLY — production config is never modified)
+    const selectableMuseRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-profiles-selmuse-'))
+    for (const name of ['engineering-profiles.json', 'model-registry.json', 'muse-profiles.json']) copyFile(path.join(repoRoot, 'config', name), path.join(selectableMuseRoot, 'config', name))
+    const selectableCatalog = JSON.parse(fs.readFileSync(path.join(repoRoot, 'config', 'nexus-profiles.json'), 'utf8'))
+    const museCatalogEntry = selectableCatalog.profiles.find((p) => p.id === 'muse-spark-1.3')
+    museCatalogEntry.selectable = true
+    museCatalogEntry.runnable = false
+    fs.writeFileSync(path.join(selectableMuseRoot, 'config', 'nexus-profiles.json'), JSON.stringify(selectableCatalog, null, 2), 'utf8')
+    fs.mkdirSync(path.join(selectableMuseRoot, 'data'), { recursive: true })
+    fs.writeFileSync(path.join(selectableMuseRoot, 'data', 'settings.yaml'), 'engineering-profile: glm-codex\n', 'utf8')
+    const selectableMuseState = engineering.buildEngineeringProfileState({
+      installRoot: selectableMuseRoot,
+      dataRoot: selectableMuseRoot,
+      settingsPath: path.join(selectableMuseRoot, 'data', 'settings.yaml'),
+      nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    const selectableMuseAdapter = selectableMuseState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3')
+    assert.ok(selectableMuseAdapter, 'hypothetical selectable Muse resolves')
+    assert.equal(selectableMuseAdapter.engine, 'muse')
+    assert.equal(selectableMuseAdapter.selectable, true, 'engine=muse does NOT force selectable=false')
+    assert.equal(selectableMuseAdapter.runnable, false, 'runnable stays independent of selectable')
+    pass('hypothetical selectable Muse passes the adapter layer (fixture override only)')
+
+    // 11. production Muse flags unchanged
+    const productionMuse = adapterState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3')
+    assert.equal(productionMuse.selectable, false, 'production Muse stays selectable=false')
+    assert.equal(productionMuse.runnable, false, 'production Muse stays runnable=false')
+    assert.equal(productionMuse.availability, 'foundation', 'production Muse stays foundation')
+    pass('production Muse availability flags are untouched')
+
+    // 12. resolver parity: missing muse-profiles.json → the Muse entry is
+    //     omitted entirely (never partially resolved with muse: null)
+    const noMuseRegistryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-profiles-nomuse-'))
+    for (const name of ['engineering-profiles.json', 'model-registry.json', 'nexus-profiles.json']) copyFile(path.join(repoRoot, 'config', name), path.join(noMuseRegistryRoot, 'config', name))
+    fs.mkdirSync(path.join(noMuseRegistryRoot, 'data'), { recursive: true })
+    fs.writeFileSync(path.join(noMuseRegistryRoot, 'data', 'settings.yaml'), 'engineering-profile: glm-codex\n', 'utf8')
+    const noMuseState = engineering.buildEngineeringProfileState({
+      installRoot: noMuseRegistryRoot,
+      dataRoot: noMuseRegistryRoot,
+      settingsPath: path.join(noMuseRegistryRoot, 'data', 'settings.yaml'),
+      nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    assert.equal(noMuseState.nexusProfiles.some((p) => p.id === 'muse-spark-1.3'), false, 'unresolved Muse source is omitted')
+    assert.equal(noMuseState.nexusProfiles.some((p) => p.engine === 'muse' && p.muse === null), false, 'no partially-resolved Muse entry is exposed')
+    assert.ok(noMuseState.nexusProfiles.some((p) => p.id === 'glm-codex'), 'Dual entries survive a missing Muse registry')
+    pass('missing Muse registry skips only the Muse entry in the JS adapter')
+
+    // 13. fail-closed render: a contract-present EMPTY catalog shows the
+    //     unavailable state and never falls back to the legacy Dual list
+    const unavailableEditor = {
+      state: { schemaVersion: 1, profiles: [{ id: 'glm-codex', displayName: 'GLM + Codex', builtin: true, roles: glmRoles }], nexusProfiles: [] },
+      failed: false, profileId: null, roles: null, ready: false,
+      selectedProfile: null, selectedEngine: 'dual', selectedSelectable: false,
+      dirty: false, notice: null, noticeTone: 'ok', saving: false, fetchedAt: 0,
+      refresh() {}, selectProfile() {}, changeRole() {}, save() {}, bindingsFor() { return null }, modelEntry() { return null },
+    }
+    const unavailableHtml = renderEditorWithInjection(unavailableEditor, 'EngineeringEditor', { sessionId: 'session-0001' })
+    assert.ok(unavailableHtml.includes('Engineering configuration is unavailable right now.'), 'empty Nexus catalog renders the unavailable state')
+    assert.ok(!unavailableHtml.includes('GLM + Codex'), 'empty Nexus catalog never falls back to the legacy Dual list')
+    assert.ok(!unavailableHtml.includes('Primary Engineer'), 'empty Nexus catalog renders no Dual role editor')
+    pass('current-host empty Nexus catalog fails closed in the UI')
+
+    // 14. selectable Muse renders the metadata surface with an ENABLED Select
+    //     action — the UI layer no longer rejects engine=muse either
+    const selectableMuseEditor = editorFixture(museSelectableEntry, 'muse', true, null)
+    const selectableMuseHtml = renderToStaticMarkup(jsxRuntime.jsx(moduleExports.EngineeringEditorFields, { editor: selectableMuseEditor, variant: 'room' }))
+    assert.ok(!selectableMuseHtml.includes('disabled'), 'selectable Muse Select button is enabled')
+    assert.ok(!selectableMuseHtml.includes('Primary Engineer'), 'selectable Muse still renders no Dual role rows')
+    assert.ok(selectableMuseHtml.includes('>Engine<'), 'selectable Muse keeps the engine metadata surface')
+    pass('hypothetical selectable Muse is not rejected by the UI layer')
 
     console.log('Nexus profile foundation tests passed: ' + passed)
   } finally {

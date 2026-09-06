@@ -1045,6 +1045,48 @@ function RoomFiles({ detail }) {
 	});
 }
 
+/**
+* Phase M1.1: ONE authoritative user-facing catalog rule, shared by the
+* dropdown, the initial profile choice, entry lookup, and readiness.
+*
+* CASE A — legacy host: the state has NO `nexusProfiles` property at all.
+*          The Nexus Profile contract is absent, so the legacy Dual-only
+*          `profiles` list stays the user-facing catalog.
+* CASE B — current host: the property EXISTS. An empty array is the host
+*          explicitly reporting an unavailable/invalid Nexus catalog —
+*          it is authoritative and must NEVER fall back to `profiles`
+*          (fail closed; the editor shows configuration unavailable).
+*/
+function hasNexusCatalogContract(state) {
+	return !!state && typeof state === "object" && Object.prototype.hasOwnProperty.call(state, "nexusProfiles");
+}
+
+function userFacingProfiles(state) {
+	if (hasNexusCatalogContract(state)) {
+		return Array.isArray(state.nexusProfiles) ? state.nexusProfiles : [];
+	}
+	return Array.isArray(state.profiles) ? state.profiles : [];
+}
+
+/** CASE B fail-closed signal: the Nexus contract exists but the catalog is empty. */
+function isCatalogUnavailable(state) {
+	return hasNexusCatalogContract(state) && userFacingProfiles(state).length === 0;
+}
+
+/**
+* Initial profile choice for the editor form: the preferred profile when
+* the authoritative user-facing catalog knows it, otherwise the FIRST
+* catalog entry. With the Nexus contract present this is the Nexus catalog
+* — never the legacy Dual list; legacy hosts keep the old behavior.
+*/
+function initialProfileChoice(state) {
+	const catalog = userFacingProfiles(state);
+	if (!Array.isArray(catalog) || catalog.length === 0) return null;
+	const preferred = state && state.preferredProfile && state.preferredProfile.id ? String(state.preferredProfile.id) : null;
+	const preferredKnown = catalog.some((p) => p && String(p.id) === preferred);
+	return preferredKnown ? preferred : String(catalog[0].id);
+}
+
 const ENGINEERING_ROLES = ["primaryEngineer", "deepEngineer", "reviewer", "solver", "fallback"];
 const ENGINEERING_ROLE_LABELS = {
 	primaryEngineer: "Primary Engineer",
@@ -1093,10 +1135,11 @@ function useEngineeringEditor(sessionId) {
 
 	// initialize the form once state arrives (or after a save refreshes it)
 	react.useEffect(() => {
-		if (!state || !Array.isArray(state.profiles) || state.profiles.length === 0) return;
-		const preferred = state.preferredProfile && state.preferredProfile.id;
-		const preferredKnown = state.profiles.some((p) => p && String(p.id) === preferred);
-		const initialId = preferredKnown ? preferred : String(state.profiles[0].id);
+		// Phase M1.1: the authoritative user-facing catalog (the Nexus Profile
+		// contract when present, the legacy Dual list only on old hosts) decides
+		// both the preferred-profile lookup and the initial fallback choice.
+		const initialId = initialProfileChoice(state);
+		if (!initialId) return;
 		setProfileId(initialId);
 		setRoles(bindingsFor(initialId));
 		// eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1133,16 +1176,14 @@ function useEngineeringEditor(sessionId) {
 	}
 
 	// Phase M1: the user-facing profile list is the top-level Nexus Profile
-	// catalog (engine classification). Legacy state without nexusProfiles
-	// falls back to the Dual profile list so older hosts keep working.
+	// catalog (engine classification). Phase M1.1: the Dual-list fallback
+	// happens ONLY when the host has no Nexus contract at all — a contract-
+	// present catalog (even empty) is authoritative and never falls back.
 	function nexusEntryFor(id) {
 		if (!state) return null;
 		const wanted = String(id || "").toLowerCase();
-		if (Array.isArray(state.nexusProfiles)) {
-			const entry = state.nexusProfiles.find((p) => p && String(p.id) === wanted);
-			if (entry) return entry;
-		}
-		return state.profiles.find((p) => p && String(p.id) === wanted) || null;
+		const catalog = userFacingProfiles(state);
+		return catalog.find((p) => p && String(p.id) === wanted) || null;
 	}
 
 	function selectProfile(nextId) {
@@ -1169,11 +1210,12 @@ function useEngineeringEditor(sessionId) {
 
 	function save() {
 		if (saving) return;
-		// M1 gate mirrors the controller boundary: non-Dual profiles (Muse)
-		// and any profile the catalog marks selectable=false are never sent
-		// for selection — the backend rejects them with profile-not-selectable.
+		// M1.1 gate mirrors the controller boundary: selection permission
+		// depends on `selectable` ONLY. The engine classifies WHICH execution
+		// architecture is used later; it never blocks the profile-preference
+		// layer. The backend rejects selectable=false with profile-not-selectable.
 		const entry = nexusEntryFor(profileId);
-		if (entry && (entry.engine !== "dual" || entry.selectable === false)) return;
+		if (entry && entry.selectable === false) return;
 		setSaving(true);
 		setNotice(null);
 		const requestId = (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "req-" + Date.now() + "-" + Math.random().toString(36).slice(2));
@@ -1209,10 +1251,11 @@ function useEngineeringEditor(sessionId) {
 	const selectedProfile = profileId ? nexusEntryFor(profileId) : null;
 	const selectedEngine = selectedProfile && selectedProfile.engine ? String(selectedProfile.engine) : "dual";
 	const selectedSelectable = selectedProfile ? selectedProfile.selectable !== false : false;
-	// Readiness is engine-aware: Dual needs role bindings, Muse (metadata-
-	// only in M1) is ready without them. Keeps older hosts rendering exactly
-	// as before (legacy state resolves through the Dual fallback above).
-	const ready = !failed && !!state && Array.isArray(state.profiles) && !!selectedProfile && (selectedEngine !== "dual" || !!roles);
+	// Readiness is engine-aware: Dual needs role bindings, a metadata-only
+	// engine (Muse in M1) is ready without them. The authoritative catalog
+	// (Nexus contract when present, legacy Dual list on old hosts) decides
+	// whether anything is user-facing at all.
+	const ready = !failed && !!state && userFacingProfiles(state).length > 0 && !!selectedProfile && (selectedEngine !== "dual" || !!roles);
 	return { state, failed, profileId, roles, notice, noticeTone, saving, dirty, fetchedAt, refresh, selectProfile, changeRole, save, bindingsFor, modelEntry, selectedProfile, selectedEngine, selectedSelectable, ready };
 }
 
@@ -1258,7 +1301,9 @@ function EngineeringEditorFields({ editor, variant }) {
 	const selectedProfile = editor.selectedProfile || null;
 	const selectedEngine = editor.selectedEngine || (selectedProfile && selectedProfile.engine) || "dual";
 	const selectedSelectable = editor.selectedSelectable !== false;
-	const catalog = state.nexusProfiles && Array.isArray(state.nexusProfiles) && state.nexusProfiles.length > 0 ? state.nexusProfiles : state.profiles;
+	// Phase M1.1: ONE catalog rule — Nexus contract authoritative (empty
+	// fails closed upstream), legacy Dual list only when the property is absent.
+	const catalog = userFacingProfiles(state);
 	return react_jsx_runtime.jsxs(react_jsx_runtime.Fragment, {
 		children: [
 			react_jsx_runtime.jsx("div", {
@@ -1311,12 +1356,12 @@ function EngineeringEditorFields({ editor, variant }) {
 				children: "Custom bindings apply to the selected role when the next task starts (or escalates). Built-in profiles are never modified.",
 			}, "hint"),
 			notice && react_jsx_runtime.jsx("div", { className: "nx-eng-notice " + (noticeTone === "ok" ? "nx-eng-notice-ok" : "nx-eng-notice-err"), children: notice }, "notice"),
-			!selectedSelectable && react_jsx_runtime.jsx("div", { className: "nx-eng-hint", children: "Foundation-only profile: selection and execution arrive in a later phase. Existing Dual profiles are unchanged." }, "locked"),
+			!selectedSelectable && react_jsx_runtime.jsx("div", { className: "nx-eng-hint", children: "This profile is not selectable yet (profile-not-selectable). It unlocks when Nexus marks it selectable." }, "locked"),
 			react_jsx_runtime.jsx("button", {
 				type: "button",
 				className: "nx-eng-save",
 				disabled: saving || !selectedSelectable,
-				title: selectedSelectable ? undefined : "profile-not-selectable \u2014 this profile is foundation-only and cannot be selected yet.",
+				title: selectedSelectable ? undefined : "profile-not-selectable \u2014 this profile is not selectable yet.",
 				onClick: () => save(),
 				children: saving ? "Saving…" : (profileId === "custom" ? "Save Custom Profile" : "Select Profile"),
 			}, "save"),
@@ -1333,7 +1378,16 @@ function EngineeringEditor({ sessionId }) {
 			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." }),
 		});
 	}
-	if (!editor.state || !Array.isArray(editor.state.profiles) || !editor.ready) {
+	// Phase M1.1 CASE B: a current host with an EMPTY Nexus catalog is
+	// explicitly reporting an unavailable/invalid catalog — fail closed
+	// (never fall back to the legacy Dual list).
+	if (isCatalogUnavailable(editor.state)) {
+		return react_jsx_runtime.jsx(Section, {
+			label: "Engineering Profile",
+			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." }),
+		});
+	}
+	if (!editor.ready) {
 		return react_jsx_runtime.jsx(Section, {
 			label: "Engineering Profile",
 			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading engineering configuration…" }),
@@ -1738,9 +1792,11 @@ function EngineeringSelector({ editor }) {
 				"aria-label": "Engineering profile",
 				children: editor.failed
 					? react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." })
-					: !ready
-						? react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading engineering configuration…" })
-						: react_jsx_runtime.jsx(EngineeringEditorFields, { editor, variant: "composer" }),
+					: editor.state && isCatalogUnavailable(editor.state)
+						? react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." })
+						: !ready
+							? react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading engineering configuration…" })
+							: react_jsx_runtime.jsx(EngineeringEditorFields, { editor, variant: "composer" }),
 			}),
 		],
 	});
@@ -2106,6 +2162,10 @@ exports.useEngineeringEditor = useEngineeringEditor;
 exports.EngineeringEditorFields = EngineeringEditorFields;
 exports.EngineeringSelector = EngineeringSelector;
 exports.preferredEngineerFromEditorState = preferredEngineerFromEditorState;
+exports.hasNexusCatalogContract = hasNexusCatalogContract;
+exports.userFacingProfiles = userFacingProfiles;
+exports.isCatalogUnavailable = isCatalogUnavailable;
+exports.initialProfileChoice = initialProfileChoice;
 exports.activityKindTitle = activityKindTitle;
 return module.exports;
 }
