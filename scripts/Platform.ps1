@@ -44,6 +44,115 @@ function Get-AihInstallRoot {
     return [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 }
 
+function Get-AihPersistedSourceRoot {
+    # TASK-0030: reads the installation source metadata the installers persist
+    # (data/install-source-root) so an installed tree remembers WHERE its
+    # source checkout lives. Returns $null when the metadata is absent or
+    # blank; validity (positive checkout identification) is the caller's
+    # contract, enforced by Resolve-AihUpdateRoots.
+    param([Parameter(Mandatory = $true)][string]$InstallRoot)
+
+    $metadataPath = Join-Path $InstallRoot 'data/install-source-root'
+    if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) { return $null }
+    $value = [string](Get-Content -Raw -LiteralPath $metadataPath)
+    if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+    return $value.Trim()
+}
+
+function Test-AihNexusSourceCheckout {
+    # TASK-0030: POSITIVE identification of a Nexus source checkout, required
+    # before the updater may treat a tree as its own update source (and before
+    # a same-root resolution may proceed). A checkout is identified by TREE
+    # CONTENT, never by OS or path shape: the bin/linux POSIX twin templates
+    # exist in every checkout and in NO installed layout (Get-AihLauncherLayout
+    # calls that plane 'source'), and the completeness markers both installers
+    # gate on are present.
+    param([string]$Root)
+
+    if ([string]::IsNullOrWhiteSpace($Root)) { return $false }
+    $fullRoot = $null
+    try { $fullRoot = [System.IO.Path]::GetFullPath($Root) } catch { return $false }
+    if (-not (Test-Path -LiteralPath $fullRoot -PathType Container)) { return $false }
+    $layout = Get-AihLauncherLayout -InstallRoot $fullRoot
+    if ($layout.Kind -ne 'source') { return $false }
+    foreach ($marker in @('setup.sh', 'config/versions.json', 'scripts/Common.ps1', 'scripts/Setup.ps1')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $fullRoot $marker) -PathType Leaf)) { return $false }
+    }
+    return $true
+}
+
+function Resolve-AihUpdateRoots {
+    # TASK-0030: the single authoritative updater root-resolution contract.
+    #   InstallRoot: explicit argument > AIH_INSTALL_ROOT (the value the
+    #                installed launchers export) > StructuralRoot (the tree
+    #                the invoking Update.ps1 itself belongs to).
+    #   SourceRoot:  explicit argument > persisted installation source
+    #                metadata under the RESOLVED install root > StructuralRoot,
+    #                ONLY when positively identified as a Nexus source
+    #                checkout. An explicit -SourceRoot therefore NEVER
+    #                retargets the installation root.
+    #   Same-root:   SourceRoot == InstallRoot fails closed unless that tree
+    #                is a positively identified source plane (the Windows
+    #                checkout layout and an in-place checkout update). This is
+    #                what keeps 'aih-update -SourceRoot <install>' from
+    #                reinstalling a Nexus installation onto itself.
+    param(
+        [string]$InstallRoot,
+        [string]$SourceRoot,
+        [Parameter(Mandatory = $true)][string]$StructuralRoot
+    )
+
+    $installOrigin = 'structural'
+    $resolvedInstall = [System.IO.Path]::GetFullPath($StructuralRoot)
+    if (-not [string]::IsNullOrWhiteSpace($InstallRoot)) {
+        $resolvedInstall = [System.IO.Path]::GetFullPath($InstallRoot)
+        $installOrigin = 'explicit'
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($env:AIH_INSTALL_ROOT)) {
+        $resolvedInstall = [System.IO.Path]::GetFullPath($env:AIH_INSTALL_ROOT)
+        $installOrigin = 'environment'
+    }
+
+    $resolvedSource = $null
+    $sourceOrigin = $null
+    if (-not [string]::IsNullOrWhiteSpace($SourceRoot)) {
+        $resolvedSource = [System.IO.Path]::GetFullPath($SourceRoot)
+        $sourceOrigin = 'explicit'
+    }
+    else {
+        $persistedSource = Get-AihPersistedSourceRoot -InstallRoot $resolvedInstall
+        if (-not [string]::IsNullOrWhiteSpace($persistedSource)) {
+            if (-not (Test-AihNexusSourceCheckout -Root $persistedSource)) {
+                throw ("Nexus update: the persisted install source metadata under '" + $resolvedInstall + "/data/install-source-root' points at '" + $persistedSource + "', which is not a positively identified Nexus source checkout. Re-run the Nexus installer from the source checkout, or pass -SourceRoot explicitly.")
+            }
+            $resolvedSource = [System.IO.Path]::GetFullPath($persistedSource)
+            $sourceOrigin = 'metadata'
+        }
+        elseif (Test-AihNexusSourceCheckout -Root $StructuralRoot) {
+            $resolvedSource = [System.IO.Path]::GetFullPath($StructuralRoot)
+            $sourceOrigin = 'structural'
+        }
+        else {
+            throw ("Nexus update: cannot determine the update source root. No -SourceRoot was passed, no valid persisted install source metadata exists under '" + $resolvedInstall + "', and '" + $StructuralRoot + "' is not positively identified as a Nexus source checkout. Re-run the Nexus installer from the source checkout, or pass -SourceRoot explicitly.")
+        }
+    }
+
+    $rootComparison = [System.StringComparison]::Ordinal
+    if (Test-AihIsWindows) { $rootComparison = [System.StringComparison]::OrdinalIgnoreCase }
+    if ([System.String]::Equals($resolvedSource, $resolvedInstall, $rootComparison)) {
+        if (-not (Test-AihNexusSourceCheckout -Root $resolvedSource)) {
+            throw ("Nexus update: the source root and the install root both resolve to '" + $resolvedSource + "', which is not positively identified as a Nexus source checkout. Updating a Nexus installation from its own installed tree is refused; pass -SourceRoot pointing at a Nexus source checkout.")
+        }
+    }
+
+    return [pscustomobject]@{
+        SourceRoot        = $resolvedSource
+        SourceRootOrigin  = $sourceOrigin
+        InstallRoot       = $resolvedInstall
+        InstallRootOrigin = $installOrigin
+    }
+}
+
 function Get-AihLauncherExtension {
     # CLI launchers ship as .cmd batch files on Windows and as extensionless
     # POSIX executables on Linux. Doctor-style checks resolve names through

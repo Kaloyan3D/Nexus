@@ -39,6 +39,12 @@ foreach ($directory in @($layout.Root, $layout.App, $layout.Bin, $layout.Config,
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
 }
 
+# Persist the installation source root (TASK-0030 updater root-resolution
+# contract): Update.ps1 resolves its update source from this metadata when
+# no explicit -SourceRoot is passed and the running tree is not itself a
+# source checkout.
+[System.IO.File]::WriteAllText((Join-Path $layout.Data 'install-source-root'), $sourceRoot + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+
 foreach ($name in @('setup.ps1', 'README.md', 'SECURITY.md', '.gitignore', '.gitattributes', '.env.example')) {
     Copy-AihSourceFile -Source (Join-Path $sourceRoot $name) -Destination (Join-Path $layout.Root $name)
 }

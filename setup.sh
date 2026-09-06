@@ -172,6 +172,12 @@ mkdir -p "$AIH_INSTALL_ROOT/app" "$AIH_INSTALL_ROOT/bin" "$AIH_INSTALL_ROOT/conf
          "$AIH_INSTALL_ROOT/data" "$AIH_INSTALL_ROOT/logs" "$AIH_INSTALL_ROOT/runtime" \
          "$AIH_INSTALL_ROOT/scripts" "$AIH_INSTALL_ROOT/docs" "$AIH_INSTALL_ROOT/tests" "$AIH_INSTALL_ROOT/ui"
 
+# Persist the installation source root (TASK-0030 updater root-resolution
+# contract): aih-update resolves its update source from this metadata when
+# no -SourceRoot is passed, so an installed POSIX tree never updates from
+# its own installed copy of scripts/Update.ps1.
+printf '%s\n' "$AIH_SOURCE_ROOT" > "$AIH_INSTALL_ROOT/data/install-source-root"
+
 # Root files (same set the Windows installer publishes).
 for _name in setup.sh setup.ps1 README.md SECURITY.md .gitignore .gitattributes .env.example; do
   if [ -f "$AIH_SOURCE_ROOT/$_name" ]; then cp -f "$AIH_SOURCE_ROOT/$_name" "$AIH_INSTALL_ROOT/$_name"; fi
