@@ -8,7 +8,7 @@
  * aih-route, aih-context, aih-review). Previously the Web GUI message path
  * went straight from the chat to the root DeepSeek model with no task state,
  * no routing decision, and no way for an explicit user review request to
- * reach the bounded Codex Review Service.
+ * reach the independent review service.
  *
  * This plugin is mounted in the aih-engineering and aih-deepseek agent
  * presets (see Setup.ps1). It:
@@ -20,8 +20,9 @@
  *  - posts a visible controller notice into the session so the UI shows the
  *    execution path (ENGINEER NORMAL vs INDEPENDENT REVIEW);
  *  - implements the explicit /review (legacy /codex-review) command:
- *    TaskController -> execution class reviewer -> bounded Review Packet ->
- *    hard budget validation -> ONE fresh read-only independent review ->
+ *    TaskController -> execution class reviewer -> review packet (budget
+ *    enforcement is POLICY-DRIVEN via codex.automaticReview.enforceLimits,
+ *    disabled by default) -> ONE fresh read-only independent review ->
  *    ReviewResult -> telemetry. No engineering audit runs first; the turn is
  *    rejected so the review is controller-owned (0 engineer calls);
  *  - feeds deterministic failure signals (turn errors) into the routing
@@ -32,23 +33,80 @@
  *
  * The reviewer is never exposed to the model as a tool: the preset keeps
  * tool-subagent-codex disabled and the review service is invoked only by this
- * controller bridge, always through New-AihReviewPacket budget enforcement.
+ * controller bridge, always through New-AihReviewPacket policy-driven
+ * enforcement (TASK-0007: unlimited review context unless the policy opts
+ * back into the legacy hard budgets with enforceLimits=true).
  * The reviewer model is resolved from the ACTIVE ENGINEERING PROFILE (the
  * reviewer role); it can never become the root engineering model.
  */
 
-const { execFile } = require('node:child_process')
+const { execFile, spawn } = require('node:child_process')
 const { promisify } = require('node:util')
 const { createRequire } = require('node:module')
 const fs = require('node:fs')
 const path = require('node:path')
+const os = require('node:os')
 const crypto = require('node:crypto')
 
 const REVIEW_COMMAND = /^\s*\/(?:codex-)?review\b/i
 const VERIFY_COMMAND = /^\s*\/verify\b/i
-const MAX_FILES = 8
-const MAX_CONTEXT_TOKENS = 30000
+// Phase V0/V1: /visual-review is an ORTHOGONAL controller-owned command (the
+// read-only visual reviewer capability). It is NOT an execution class, never
+// changes routing semantics, and never hands the visual model a tool.
+const VISUAL_REVIEW_COMMAND = /^\s*\/visual-review\b/i
+// TASK-0007: these are NOT the review budget anymore. They are the LEGACY
+// hard-budget fallbacks, used ONLY when the routing policy cannot be read or
+// opts back into enforcement with codex.automaticReview.enforceLimits=true.
+// The shipped Nexus policy sets enforceLimits=false: the controller bridge
+// must not impose a file count or a context-token ceiling on its own.
+const LEGACY_MAX_FILES = 8
+const LEGACY_MAX_CONTEXT_TOKENS = 30000
 const CLI_TIMEOUT_MS = 320000
+
+// ── review budget policy (TASK-0007) ────────────────────────────────────────
+//
+// codex.automaticReview.enforceLimits decides whether the LEGACY hard budgets
+// (file count / diff lines / context tokens / calls per task / output tokens)
+// apply to the independent review. The shipped default is FALSE: unlimited
+// review context, with only the provider/model context window as a real
+// capacity boundary (surfaced as a provider-capacity error by the review
+// transport). A missing flag or an unreadable policy fails SAFE to the
+// legacy enforced behavior.
+const REVIEW_BUDGET_POLICY_CACHE = new Map()
+
+function reviewBudgetPolicy(installRoot) {
+  // Direct helper calls (including checkout-local diagnostics/tests) resolve
+  // from configured runtime state first, then from this checked-out module.
+  // The live plugin path always supplies apply()'s validated installRoot.
+  const root = installRoot
+    ? path.resolve(String(installRoot))
+    : process.env.AIH_INSTALL_ROOT
+      ? path.resolve(process.env.AIH_INSTALL_ROOT)
+      : process.env.DSH_HOME
+        ? path.dirname(path.resolve(process.env.DSH_HOME))
+        : path.resolve(__dirname, '..')
+  const policyPath = path.join(root, 'config', 'routing-policy.json')
+  const fallback = { enforceLimits: true, maxFiles: LEGACY_MAX_FILES, maxContextTokens: LEGACY_MAX_CONTEXT_TOKENS, source: 'fallback' }
+  let mtimeMs = null
+  try { mtimeMs = fs.statSync(policyPath).mtimeMs } catch { return fallback }
+  const cached = REVIEW_BUDGET_POLICY_CACHE.get(policyPath)
+  if (cached && cached.mtimeMs === mtimeMs) return cached.value
+  let value = fallback
+  try {
+    const document = JSON.parse(fs.readFileSync(policyPath, 'utf8'))
+    const review = document && document.codex && document.codex.automaticReview
+    if (review && typeof review === 'object') {
+      value = {
+        enforceLimits: review.enforceLimits === undefined ? true : Boolean(review.enforceLimits),
+        maxFiles: Number.isFinite(Number(review.maxFiles)) ? Number(review.maxFiles) : LEGACY_MAX_FILES,
+        maxContextTokens: Number.isFinite(Number(review.maxContextTokens)) ? Number(review.maxContextTokens) : LEGACY_MAX_CONTEXT_TOKENS,
+        source: 'policy',
+      }
+    }
+  } catch { value = fallback }
+  REVIEW_BUDGET_POLICY_CACHE.set(policyPath, { mtimeMs, value })
+  return value
+}
 
 // ── pure helpers (exported for deterministic tests) ─────────────────────────
 
@@ -58,6 +116,121 @@ function isReviewCommand(text) {
 
 function isVerifyCommand(text) {
   return typeof text === 'string' && VERIFY_COMMAND.test(text)
+}
+
+function isVisualReviewCommand(text) {
+  return typeof text === 'string' && VISUAL_REVIEW_COMMAND.test(text)
+}
+
+// Image path-shaped tokens inside a /visual-review prompt. Extensions cover
+// the evidence the V1 packet budget accepts (screenshots + references).
+const VISUAL_IMAGE_TOKEN_RE = /[^\s'"`]+\.(?:png|jpe?g|webp|gif)(?![\w.])/gi
+
+/**
+ * Deterministic /visual-review request decomposition: path-shaped tokens that
+ * resolve to files become screenshot evidence (missing paths are KEPT so the
+ * controller service fails closed with a structured 'invalid image path'
+ * error instead of silently reviewing something else); the remaining text is
+ * the review question. This is input metadata, never model reasoning.
+ */
+function visualReviewRequestOf(text, workspace) {
+  const remainder = typeof text === 'string' ? text.replace(/^\s*\/visual-review\b[\s:]*/i, '').trim() : ''
+  const tokens = []
+  VISUAL_IMAGE_TOKEN_RE.lastIndex = 0
+  let match
+  while ((match = VISUAL_IMAGE_TOKEN_RE.exec(remainder)) !== null) tokens.push(match[0])
+  const screenshots = []
+  const seen = new Set()
+  for (const token of tokens) {
+    const candidate = path.isAbsolute(token) ? token : path.resolve(String(workspace || '.'), token)
+    const key = candidate.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    screenshots.push(candidate)
+  }
+  let question = remainder
+  for (const token of tokens) question = question.split(token).join(' ')
+  question = question.replace(/\s+/g, ' ').trim()
+  return { question, screenshots, references: [], platform: 'unknown' }
+}
+
+/**
+ * Cheap deterministic INPUT classification for the controller's production
+ * pre-step boundary. This classifies the requested operation, never model
+ * reasoning text, and never calls another model. Rich clients can use the
+ * PowerShell structured contract directly; this conservative adapter exists
+ * for ordinary GUI prompts.
+ */
+const IMPLEMENTATION_REQUEST_RE = /^(implement|build|fix|change|update|create|add|remove|refactor|rename|apply|write|edit)\b/i
+const EMPIRICAL_REQUEST_RE = /^(does|is|what (type|value|exit code)|how does).*\b(runtime|serialize|serialise|regex|path|command|powershell|node|exit code)\b/i
+const REPOSITORY_REQUEST_RES = [
+  /^(where|which (file|function|test|config|module|script|component|code path)|what does (the )?(current|repository|implementation)|find (the )?(symbol|references|callers|definition|implementation))\b/i,
+  /^(inspect|locate|trace|show|identify)\b/i,
+  /^(explain|describe|show)\s+how\s+(the\s+)?(current|existing|repository|implementation|controller|code)\b/i,
+  /^how\s+does\s+(the\s+)?(current|existing|repository|implementation|controller|code)\b/i,
+  /^what\s+currently\s+(handles|implements|writes|reads|routes|resolves|creates|updates)\b/i,
+  /\b(current|existing)\s+(implementation|code|controller|architecture|code path|routing|verification)\b/i,
+  /\b(where|how)\s+[^?\n]*\b(defined|implemented|wired|connected|resolved|handled|written|used|called)\b/i,
+]
+const PRESCRIPTIVE_JUDGMENT_RES = [
+  /\bshould\b/i,
+  /^(recommend|design|choose|propose|decide)\b/i,
+  /\b(best|better|safer)\s+(architecture|approach|design|option|strategy)\b/i,
+]
+
+function classifyEpistemicPrompt(text) {
+  const value = typeof text === 'string' ? text.trim() : ''
+  if (IMPLEMENTATION_REQUEST_RE.test(value)) {
+    return { kind: 'judgment', implementationReady: true, probeAvailable: false, repositoryAvailable: true, subject: 'implementation.request' }
+  }
+  // Runtime-observable questions win over generic references to "current"
+  // implementation: empirical uncertainty should be measured, not read or
+  // reasoned about.
+  if (EMPIRICAL_REQUEST_RE.test(value)) {
+    return { kind: 'empirical', implementationReady: false, probeAvailable: true, probeCost: 'low', probeRisk: 'safe', expectedInformationGain: 'high', decisionRelevance: 'medium', repositoryAvailable: true, subject: 'runtime.question' }
+  }
+  const prescriptive = PRESCRIPTIVE_JUDGMENT_RES.some((re) => re.test(value))
+  const repositoryDescriptive = REPOSITORY_REQUEST_RES.some((re) => re.test(value))
+  if (repositoryDescriptive && !prescriptive) {
+    return { kind: 'repository', implementationReady: false, probeAvailable: false, repositoryAvailable: true, subject: 'repository.question' }
+  }
+  if (prescriptive) {
+    return { kind: 'judgment', implementationReady: false, probeAvailable: false, repositoryAvailable: true, subject: 'engineering.judgment' }
+  }
+  return { kind: 'judgment', implementationReady: false, probeAvailable: false, repositoryAvailable: true, subject: 'engineering.question' }
+}
+
+/**
+ * Parse the authoritative DSH assistant/chunk usage event. DSH reports newly
+ * processed (uncached) input in inputTokens and cache hits separately in
+ * cacheReadTokens. Missing cacheReadTokens means no cache hit for that call.
+ * No cost is inferred here.
+ */
+function engineeringUsageOfEvent(event) {
+  if (!event || event.type !== 'assistant/chunk') return null
+  const data = event.data
+  const chunk = data && data.chunk
+  const usage = chunk && chunk.type === 'usage' ? chunk.usage : null
+  if (!usage || typeof usage !== 'object') return null
+  const uncached = Number(usage.inputTokens)
+  const output = Number(usage.outputTokens)
+  const cache = usage.cacheReadTokens === undefined || usage.cacheReadTokens === null ? 0 : Number(usage.cacheReadTokens)
+  if (!Number.isFinite(uncached) || !Number.isFinite(output) || !Number.isFinite(cache)) return null
+  const inputTokens = Math.max(0, Math.trunc(uncached))
+  const cacheReadTokens = Math.max(0, Math.trunc(cache))
+  const outputTokens = Math.max(0, Math.trunc(output))
+  const turn = data && data.turn !== undefined && data.turn !== null ? String(data.turn) : ''
+  const step = data && data.step !== undefined && data.step !== null ? String(data.step) : ''
+  return {
+    turn,
+    step,
+    stepId: turn || step ? turn + ':' + step : '',
+    inputTokens,
+    uncachedInputTokens: inputTokens,
+    cacheReadTokens,
+    outputTokens,
+    usageAvailable: true,
+  }
 }
 
 /** True when an execution class is the read-only reviewer class (canonical
@@ -139,7 +312,9 @@ const REVIEW_INLINE_CODE_RES = [
 ]
 const REVIEW_FILE_MAX_BYTES = 64 * 1024 * 1024
 
-function referencedFilesOf(question) {
+// TASK-0007: maxFiles is the policy-derived cap (LEGACY_MAX_FILES only when
+// the policy enforces limits); null or 0 means UNLIMITED.
+function referencedFilesOf(question, maxFiles = LEGACY_MAX_FILES) {
   if (typeof question !== 'string') return []
   const tokens = []
   const seen = new Set()
@@ -148,7 +323,7 @@ function referencedFilesOf(question) {
     if (seen.has(token)) continue
     seen.add(token)
     tokens.push(token)
-    if (tokens.length >= MAX_FILES) break
+    if (maxFiles !== null && maxFiles > 0 && tokens.length >= maxFiles) break
   }
   return tokens
 }
@@ -157,11 +332,11 @@ function hasInlineCode(question) {
   return typeof question === 'string' && REVIEW_INLINE_CODE_RES.some((re) => re.test(question))
 }
 
-function resolveReviewFiles(workspace, question) {
+function resolveReviewFiles(workspace, question, maxFiles = LEGACY_MAX_FILES) {
   const root = path.resolve(String(workspace || ''))
   const slices = []
-  for (const token of referencedFilesOf(question)) {
-    if (slices.length >= MAX_FILES) break
+  for (const token of referencedFilesOf(question, maxFiles)) {
+    if (maxFiles !== null && maxFiles > 0 && slices.length >= maxFiles) break
     const candidate = path.resolve(root, token)
     if (candidate !== root && !candidate.startsWith(root + path.sep)) continue
     let stat
@@ -174,9 +349,9 @@ function resolveReviewFiles(workspace, question) {
   return slices
 }
 
-function classifyReviewContext(workspace, question) {
-  if (referencedFilesOf(question).length > 0) {
-    return resolveReviewFiles(workspace, question).length > 0 ? 'files' : 'bundle'
+function classifyReviewContext(workspace, question, maxFiles = LEGACY_MAX_FILES) {
+  if (referencedFilesOf(question, maxFiles).length > 0) {
+    return resolveReviewFiles(workspace, question, maxFiles).length > 0 ? 'files' : 'bundle'
   }
   return hasInlineCode(question) ? 'inline' : 'bundle'
 }
@@ -210,11 +385,14 @@ function isWorkerAgent(header) {
 // Phase 2: labels describe EXECUTION SEMANTICS, never model identity. The
 // actual model/provider for a run is reported separately (routing decision
 // fields), so the UI never implies a vendor from the execution class.
+// TASK-0007: the review class is "Independent Review (read-only)" — it is
+// called "bounded" ONLY when the policy enforces the legacy hard budgets
+// (enforceLimits=true), which is not the shipped default.
 const EXECUTION_CLASS_LABELS = {
   deterministic: 'Deterministic',
   engineer_normal: 'Engineer \u00b7 Normal',
   engineer_deep: 'Engineer \u00b7 Deep',
-  reviewer: 'Independent Review (read-only, bounded)',
+  reviewer: 'Independent Review (read-only)',
   solver: 'Solve (writable, approval-gated)',
 }
 const LEGACY_EXECUTION_CLASS_ALIASES = {
@@ -241,6 +419,31 @@ function createControllerMessage(text, form) {
     content: [{ type: 'text', text }],
     source: { kind: 'plugin', plugin: 'aih-controller', form: form ?? 'notice' },
   }
+}
+
+/**
+ * TASK-0007: review result notice. With budget enforcement disabled the
+ * Control Room must NOT report the obsolete budget numbers ("8 files /
+ * 30000 context tokens / 1 call"); it reports the enforcement state instead:
+ * "Budget enforcement: disabled" next to the unchanged read-only/fresh facts.
+ */
+function reviewResultText(binding, summary, raw) {
+  const budget = summary && summary.budget ? summary.budget : null
+  const enforced = Boolean(budget && budget.enforceLimits)
+  const budgetLine = enforced && budget
+    ? 'Budget enforcement: enabled (' + budget.maxFiles + ' files / ' + budget.maxContextTokens + ' context tokens / ' + budget.maxCallsPerTask + ' call)'
+    : 'Budget enforcement: disabled'
+  const lines = [
+    'Controller review result · task ' + binding.taskId,
+    'Execution: Independent Review (read-only)',
+    'Verdict: ' + summary.verdict,
+    'Findings: ' + summary.findings + (summary.severities.length ? ' (' + summary.severities.join(', ') + ')' : ''),
+    'Provider: ' + summary.provider + ' · model: ' + summary.model + ' · calls: ' + summary.callCount,
+    budgetLine,
+    'Read-only: true · fresh context: true · completion authority: controller (reviewer cannot complete the task)',
+  ]
+  if (raw && typeof raw === 'object') lines.push('Result JSON: ' + JSON.stringify(raw))
+  return lines.join('\n')
 }
 
 /**
@@ -295,20 +498,329 @@ function parseCliJson(text) {
   return JSON.parse(parsed)
 }
 
+// ── TASK-0005: task identity / session binding validation ───────────────────
+//
+// Core invariants implemented here:
+//   > TaskController state is authoritative. Session bindings are references
+//     only.
+//   > TASK DISPLAY IDENTITY != TASK LIFECYCLE IDENTITY.
+//   > Once a task has an immutable lifecycle identity, no controller operation
+//     may silently target another task merely because it shares TASK-NNNN.
+//
+//   taskId          'TASK-NNNN' — human-facing label (UI, logs, local
+//                   sequencing). NEVER sufficient for durable identity.
+//   taskInstanceId  'task_<32 hex>' — immutable lifecycle identity of exactly
+//                   one task generation (routing identity, session binding
+//                   identity, attempts, review identity, completion identity,
+//                   operator gates, telemetry, cross-record joins). Generated
+//                   once by TaskController; never reused.
+
+/**
+ * Normalize a workspace path for IDENTITY COMPARISON ONLY (never for display
+ * or filesystem access). Mirrors status.cjs normalizeWorkspacePath:
+ *   - forward slashes become backslashes; separators collapse
+ *   - trailing separators are trimmed (a drive root like C:\ stays)
+ *   - comparison is case-insensitive (Windows path semantics)
+ * Equivalent forms compare equal (C:\Repo == c:\repo\) while
+ * prefix-related paths never do (C:\Repo != C:\Repo2). Repository-relative
+ * source path case semantics are untouched — this is workspace identity only.
+ */
+function normalizeWorkspaceIdentity(workspace) {
+  if (typeof workspace !== 'string' || workspace === '') return ''
+  let normalized = workspace.replace(/[\\/]+/g, '\\')
+  while (normalized.length > 3 && normalized.endsWith('\\')) {
+    normalized = normalized.slice(0, -1)
+  }
+  return normalized.toLowerCase()
+}
+
+/**
+ * Compare the workspace recorded in a binding with the CURRENT session
+ * workspace. Returns 'workspace-mismatch' when they differ, null otherwise.
+ * A missing workspace on either side never compares equal (fail-closed).
+ */
+function classifyBindingWorkspace(binding, workspace) {
+  const bindingWorkspace = binding && typeof binding.workspace === 'string' ? binding.workspace : ''
+  const normalizedBinding = normalizeWorkspaceIdentity(bindingWorkspace)
+  const normalizedCurrent = normalizeWorkspaceIdentity(workspace)
+  if (normalizedBinding === '' || normalizedCurrent === '') return 'workspace-mismatch'
+  return normalizedBinding === normalizedCurrent ? null : 'workspace-mismatch'
+}
+
+/** Compare a persisted Phase 3.1 session identity with a freshly resolved
+ * identity for the immutable session cwd. Missing legacy identity is allowed
+ * so it can be upgraded in place; any contradictory identity fails closed. */
+function classifyBindingRepositoryIdentity(binding, identity) {
+  if (!binding || !identity) return 'repository-identity-missing'
+  const fields = ['workspaceId', 'repositoryId', 'checkoutId']
+  const hasPersistedIdentity = fields.some((field) => typeof binding[field] === 'string' && binding[field] !== '')
+  if (!hasPersistedIdentity) return null
+  for (const field of fields) {
+    if (typeof binding[field] !== 'string' || binding[field] === '' || binding[field] !== identity[field]) return 'repository-identity-mismatch'
+  }
+  if (normalizeWorkspaceIdentity(binding.executionRoot) !== normalizeWorkspaceIdentity(identity.executionRoot)) return 'repository-identity-mismatch'
+  if (normalizeWorkspaceIdentity(binding.checkoutRootPath) !== normalizeWorkspaceIdentity(identity.checkoutRootPath)) return 'repository-identity-mismatch'
+  return null
+}
+
+/**
+ * Classify a persisted binding against an authoritative TaskController
+ * identity result (Task.ps1 -Action test-task). PURE and deterministic:
+ *
+ *   binding has taskInstanceId + exact instance exists  -> { verdict: 'valid' }
+ *   task missing from the ledger                        -> stale 'task-missing'
+ *   task exists under a DIFFERENT taskInstanceId        -> stale 'instance-mismatch'
+ *   binding has NO taskInstanceId (legacy)              -> stale 'ambiguous-legacy-binding'
+ *                                                          (its lifecycle generation
+//                                                           cannot be proven, so it
+//                                                           must never silently
+//                                                           attach to a new
+//                                                           generation)
+ *
+ * An unusable identity result (CLI failure, malformed output, missing ledger,
+ * timeout — anything the TaskController could not answer authoritatively)
+ * THROWS with code 'binding-validation-inconclusive': the caller must then
+ * PRESERVE the binding, create NO replacement task and classify NOTHING as
+ * missing. 'exists=false' is trusted only because the TaskController contract
+ * guarantees it means 'ledger successfully read, task absent'.
+ */
+function classifyBindingIdentity(binding, identity) {
+  if (!binding || typeof binding !== 'object') {
+    const error = new Error('binding identity classification requires a binding')
+    error.code = 'binding-validation-inconclusive'
+    throw error
+  }
+  if (!identity || typeof identity !== 'object' || typeof identity.exists !== 'boolean') {
+    const error = new Error('task identity could not be validated: the TaskController returned no authoritative answer (validation infrastructure failure)')
+    error.code = 'binding-validation-inconclusive'
+    throw error
+  }
+  const bindingInstance = typeof binding.taskInstanceId === 'string' ? binding.taskInstanceId : ''
+  if (bindingInstance === '') {
+    return { verdict: 'stale', reason: 'ambiguous-legacy-binding' }
+  }
+  if (!identity.exists) {
+    return { verdict: 'stale', reason: 'task-missing' }
+  }
+  if (identity.instanceMatches !== true) {
+    return { verdict: 'stale', reason: 'instance-mismatch' }
+  }
+  return { verdict: 'valid' }
+}
+
+/**
+ * Session-scoped binding validation/recovery lock (Part 13). One stale
+ * session + two simultaneous controller events = ONE replacement task: the
+ * second event waits for the first recovery to settle and then re-validates
+ * against the fresh binding. The lock is PER SESSION — different sessions
+ * never block each other.
+ */
+function createBindingGuard(deps) {
+  const locks = new Map()
+  async function withSessionBindingLock(sessionId, operation) {
+    const key = String(sessionId || '')
+    const previous = locks.get(key) || Promise.resolve()
+    const run = previous.then(() => operation())
+    const tail = run.then(() => null, () => null)
+    locks.set(key, tail)
+    tail.then(() => {
+      if (locks.get(key) === tail) locks.delete(key)
+    })
+    return run
+  }
+
+  async function recoverStaleBinding(agent, session, workspace, promptText, stale, reason) {
+    // Part 10: structured detection event with the full identity context,
+    // removal from memory, persisted removal, then a FRESH authoritative task
+    // through the normal binding flow. The stale binding is never pointed at
+    // another task that merely shares its taskId, and no task is ever
+    // reconstructed from binding contents.
+    deps.log({
+      event: 'stale-binding-detected',
+      sessionId: session && session.id ? session.id : null,
+      taskId: stale.taskId,
+      oldTaskInstanceId: stale.taskInstanceId ?? null,
+      oldWorkspace: stale.workspace ?? null,
+      currentWorkspace: workspace,
+      reason,
+    })
+    deps.invalidateBinding(stale)
+    const created = await deps.createBinding(agent, session, workspace, promptText)
+    return { binding: created, outcome: 'recovered', stale: { taskId: stale.taskId, reason } }
+  }
+
+  /**
+   * Validate (and if deterministically proven stale, recover) the session
+   * binding under the session-scoped lock. Returns
+   *   { binding, outcome: 'valid' | 'bound' | 'recovered', stale? }
+   * and THROWS with code 'binding-validation-inconclusive' when validation
+   * infrastructure fails (binding preserved, nothing created — Part 12).
+   */
+  async function ensureBinding(agent, session, workspace, promptText) {
+    return withSessionBindingLock(session.id, async () => {
+      const binding = deps.bindingFor(session)
+      if (!binding) {
+        const created = await deps.createBinding(agent, session, workspace, promptText)
+        return { binding: created, outcome: 'bound' }
+      }
+      const workspaceReason = classifyBindingWorkspace(binding, workspace)
+      if (workspaceReason) {
+        const error = new Error(`session workspace mismatch: binding '${binding.workspace ?? ''}', session '${workspace ?? ''}'`)
+        error.code = 'session-workspace-mismatch'
+        throw error
+      }
+      if (typeof deps.validateWorkspaceIdentity === 'function') await deps.validateWorkspaceIdentity(binding, workspace)
+      // Part 21: a legacy binding WITHOUT taskInstanceId can never prove its
+      // lifecycle generation, so it must not silently attach to (possibly
+      // different) current controller state. It is stale/ambiguous by
+      // definition and is safely rebound through the normal flow.
+      const bindingInstance = typeof binding.taskInstanceId === 'string' ? binding.taskInstanceId : ''
+      if (bindingInstance === '') {
+        return recoverStaleBinding(agent, session, workspace, promptText, binding, 'ambiguous-legacy-binding')
+      }
+      // Part 5/8: the authoritative identity test. A TaskController failure
+      // here THROWS (inconclusive) — it must never become 'task missing'.
+      let identity
+      try {
+        identity = await deps.testTaskIdentity(workspace, binding.taskId, binding.taskInstanceId)
+      } catch (error) {
+        if (error && error.code === 'binding-validation-inconclusive') throw error
+        // Centralized Part 12 semantics: any validation-infrastructure
+        // failure (CLI launch failure, timeout, corrupt ledger, malformed
+        // JSON) is INCONCLUSIVE. The caller must preserve the binding, create
+        // no replacement task, and classify nothing as missing.
+        const wrapped = new Error('task identity could not be validated: ' + String(error && error.message ? error.message : error))
+        wrapped.code = 'binding-validation-inconclusive'
+        wrapped.cause = error
+        throw wrapped
+      }
+      const verdict = classifyBindingIdentity(binding, identity)
+      if (verdict.verdict === 'stale') {
+        return recoverStaleBinding(agent, session, workspace, promptText, binding, verdict.reason)
+      }
+      return { binding, outcome: 'valid' }
+    })
+  }
+
+  return { ensureBinding, withSessionBindingLock, locks }
+}
+
 // ── plugin ──────────────────────────────────────────────────────────────────
 
+function resolveInstallRoot(env) {
+  // Phase 3.2.5 (root-cause fix for the TASK-0005 e2e baseline failure):
+  // the LIVE runtime data root (DSH_HOME) owns install-root identity.
+  // AIH_INSTALL_ROOT is an operator override for CLIs that run WITHOUT the
+  // DSH runtime. When both are present they are set consistently by the
+  // aih entrypoints; when they DISAGREE (isolated test fixtures, relocated
+  // data roots, alternate checkouts), resolving the install root from
+  // AIH_INSTALL_ROOT sent this bridge's child controller CLIs (Route.ps1,
+  // Task.ps1) to the PRODUCTION data root while the bridge itself wrote
+  // runtime state under DSH_HOME - cross-root contamination, and the
+  // documented fixture contract ("the bridge resolves relative to DSH_HOME")
+  // was violated. Priority is therefore DSH_HOME first, AIH_INSTALL_ROOT
+  // second. (PowerShell CLIs keep explicit -InstallRoot as the strongest
+  // binding; resolveInstallRoot only fills what the caller omits.)
+  const environment = env || process.env
+  if (environment.DSH_HOME) return path.dirname(path.resolve(environment.DSH_HOME))
+  if (environment.AIH_INSTALL_ROOT) return path.resolve(environment.AIH_INSTALL_ROOT)
+  throw new Error('Nexus install root is unavailable; launch through the repo-local aih entrypoint.')
+}
+
 function apply(ctx) {
-  const installRoot = process.env.DSH_HOME
-    ? path.dirname(path.resolve(process.env.DSH_HOME))
-    : 'C:\\AI-Harness'
+  const installRoot = resolveInstallRoot()
   const dataRoot = process.env.DSH_HOME
     ? path.resolve(process.env.DSH_HOME)
     : path.join(installRoot, 'data')
   const bindingsPath = path.join(dataRoot, 'routing', 'session-bindings.json')
   const tmpRoot = path.join(dataRoot, 'tmp')
   const scriptsRoot = path.join(installRoot, 'scripts')
+  // Platform-aware PowerShell host resolution (mirror of scripts/Platform.ps1
+  // Get-AihPowerShellHost): Windows keeps powershell.exe; POSIX prefers the
+  // AIH_PWSH_HOST override, then the setup.sh-pinned runtime/pwsh/pwsh, then a
+  // system pwsh on PATH.
+  const resolvePowerShellHost = (root) => {
+    if (process.platform === 'win32') return 'powershell.exe'
+    const override = process.env.AIH_PWSH_HOST
+    if (override) return override
+    const pinned = path.join(root, 'runtime', 'pwsh', 'pwsh')
+    try { fs.accessSync(pinned, fs.constants.X_OK); return pinned } catch { /* fall through */ }
+    return 'pwsh'
+  }
+  // TASK-0026: the Nexus TOOLCHAIN root (owns runtime/) is formally distinct
+  // from the LOGICAL InstallRoot (owns config/data identity). Isolated test
+  // fixtures legitimately model config/data-only roots with no runtime, so
+  // the bridge resolves its pinned PowerShell through the toolchain chain
+  // (AIH_TOOLCHAIN_ROOT > the tree that owns this controller file > the
+  // logical root) and names that root for every spawned CLI child, so
+  // Nexus-owned nested children always resolve the real pinned runtime.
+  const resolveToolchainRoot = (logicalRoot) => {
+    const candidates = []
+    const fromEnv = process.env.AIH_TOOLCHAIN_ROOT
+    if (fromEnv && String(fromEnv).trim() !== '') candidates.push(path.resolve(String(fromEnv)))
+    candidates.push(path.resolve(__dirname, '..'))
+    if (logicalRoot) candidates.push(path.resolve(logicalRoot))
+    for (const candidate of candidates) {
+      try {
+        if (fs.statSync(path.join(candidate, 'runtime', 'node')).isDirectory()) return candidate
+      } catch (_) { /* candidate does not own a runtime */ }
+    }
+    return logicalRoot
+  }
+  const toolchainRoot = resolveToolchainRoot(installRoot)
+  const childCliEnv = Object.assign({}, process.env, { AIH_TOOLCHAIN_ROOT: toolchainRoot })
+  const pwshHost = resolvePowerShellHost(toolchainRoot)
 
   const runCli = promisify(execFile)
+  // Capture transport (TASK-0017): sandboxed environments may deny
+  // anonymous-pipe and fd-redirected stdio capture from Node children
+  // (spawn EPERM) while stdio:'ignore'/'inherit' spawns remain allowed.
+  // On Windows, run each CLI through cmd.exe with cmd-side redirection
+  // into temporary files (no pipes anywhere) and return the same bytes,
+  // preserving the promisify(execFile) result and rejection shapes
+  // (.code/.stdout/.stderr/.killed/.signal). Non-Windows platforms keep
+  // the original pipe transport.
+  const quoteWindowsArg = (value) => {
+    const text = String(value)
+    if (text !== '' && !/[\s"]/.test(text)) return text
+    return '"' + text.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1') + '"'
+  }
+  const readCliFile = (file) => { try { return fs.readFileSync(file, 'utf8') } catch { return '' } }
+  const spawnCaptured = (file, args, options) => {
+    if (process.platform !== 'win32') return runCli(file, args, options)
+    const token = process.pid + '-' + crypto.randomUUID()
+    const outPath = path.join(os.tmpdir(), 'aih-cli-out-' + token + '.txt')
+    const errPath = path.join(os.tmpdir(), 'aih-cli-err-' + token + '.txt')
+    const batchPath = path.join(os.tmpdir(), 'aih-cli-' + token + '.cmd')
+    const command = [file].concat(args).map(quoteWindowsArg).join(' ') + ' > "' + outPath + '" 2> "' + errPath + '"'
+    fs.writeFileSync(batchPath, '@echo off\r\n' + command + '\r\n', 'utf8')
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const finish = (fn) => { if (!settled) { settled = true; fn() } }
+      const child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/c', batchPath], {
+        stdio: 'ignore',
+        windowsHide: !!(options && options.windowsHide),
+        timeout: (options && options.timeout) || 0,
+        env: (options && options.env) || process.env,
+      })
+      child.on('error', (error) => finish(() => reject(error)))
+      child.on('close', (code, signal) => finish(() => {
+        const stdout = readCliFile(outPath)
+        const stderr = readCliFile(errPath)
+        try { fs.rmSync(outPath, { force: true }) } catch { /* best effort */ }
+        try { fs.rmSync(errPath, { force: true }) } catch { /* best effort */ }
+        try { fs.rmSync(batchPath, { force: true }) } catch { /* best effort */ }
+        if (code === 0 && signal === null) return resolve({ stdout, stderr })
+        const failure = new Error('Command failed: ' + file)
+        failure.code = code === null ? null : code
+        failure.killed = signal != null
+        failure.signal = signal
+        failure.stdout = stdout
+        failure.stderr = stderr
+        reject(failure)
+      }))
+    })
+  }
   const bindings = loadBindings(bindingsPath)
 
   function log(entry) {
@@ -332,8 +844,17 @@ function apply(ctx) {
       for (const [sessionId, binding] of Object.entries(bindings)) {
         serializable[sessionId] = {
           sessionId: binding.sessionId,
+          // TASK-0005 Part 7: the binding is an identity REFERENCE into
+          // TaskController state. taskInstanceId is the lifecycle identity it
+          // is bound to (immutable, never reused); taskId remains display.
+          taskInstanceId: binding.taskInstanceId ?? null,
           taskId: binding.taskId,
           workspace: binding.workspace,
+          workspaceId: binding.workspaceId ?? null,
+          repositoryId: binding.repositoryId ?? null,
+          checkoutId: binding.checkoutId ?? null,
+          checkoutRootPath: binding.checkoutRootPath ?? null,
+          executionRoot: binding.executionRoot ?? binding.workspace,
           preset: binding.preset,
           description: binding.description,
           executionClass: binding.executionClass,
@@ -374,10 +895,10 @@ function apply(ctx) {
       args = [...args, '-PayloadFile', payloadPath]
     }
     try {
-      const result = await runCli(
-        'powershell.exe',
+      const result = await spawnCaptured(
+        pwshHost,
         ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, script), ...args],
-        { timeout: CLI_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
+        { timeout: CLI_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, windowsHide: true, env: childCliEnv },
       ).catch((error) => {
         // PowerShell CLIs report STRUCTURED failures (hard budget rejection,
         // e.g. packet-too-large) by emitting JSON on stdout and exiting 3.
@@ -418,21 +939,59 @@ function apply(ctx) {
     return task
   }
 
+  async function resolveWorkspaceIdentity(workspace) {
+    const identity = await invokePowerShell('NexusWorkspace.ps1', ['-Action', 'resolve'], {
+      payload: { path: workspace },
+    })
+    if (!identity || !identity.workspaceId || !identity.repositoryId || !identity.checkoutId || !identity.executionRoot || !identity.checkoutRootPath) {
+      const error = new Error('aih-controller: Phase 3.1 workspace identity could not be resolved')
+      error.code = 'session-workspace-identity-unavailable'
+      throw error
+    }
+    return identity
+  }
+
   async function routeTask(workspace, taskId, description, options = {}) {
     const payload = { workspace, description }
     if (options.signal) payload.signal = options.signal
     if (options.failureReason) payload.failureReason = options.failureReason
     if (options.reviewRequested) payload.reviewRequested = true
-    const args = ['-TaskId', taskId, '-Preset', options.preset ?? 'aih-engineering']
+    // TASK-0005 Part 16: route requests carry the lifecycle instance; Route.ps1
+    // re-validates it against the authoritative ledger (fail closed).
+    if (options.taskInstanceId) payload.taskInstanceId = options.taskInstanceId
+    const args = ['-TaskId', taskId, '-Preset', options.preset ?? 'aih-engineering', '-InstallRoot', installRoot]
     const decision = await invokePowerShell('Route.ps1', args, { payload })
     if (!decision || !decision.executionClass) throw new Error('aih-controller: routing returned no execution class')
     return decision
   }
 
-  async function markReviewRequested(workspace, taskId) {
-    await invokePowerShell('Task.ps1', ['-Action', 'set-review-requested', '-TaskId', taskId], {
+  async function markReviewRequested(workspace, taskId, taskInstanceId) {
+    const args = ['-Action', 'set-review-requested', '-TaskId', taskId]
+    if (taskInstanceId) args.push('-TaskInstanceId', taskInstanceId)
+    await invokePowerShell('Task.ps1', args, {
       payload: { workspace },
     })
+  }
+
+  /**
+   * TASK-0005 Part 5: authoritative task identity lookup through the
+   * TaskController CLI (Task.ps1 -Action test-task). Returns the identity
+   * contract { exists, taskId, taskInstanceId, instanceMatches } where
+   * exists=false means ONLY 'ledger successfully read and task absent'.
+   * Any validation-infrastructure failure (launch failure, timeout, corrupt
+   * ledger, malformed JSON, non-zero exit) THROWS here — it must never be
+   * misread as a missing task (Part 12).
+   */
+  async function testTaskIdentity(workspace, taskId, taskInstanceId) {
+    const args = ['-Action', 'test-task', '-TaskId', taskId]
+    if (taskInstanceId) args.push('-TaskInstanceId', taskInstanceId)
+    const identity = await invokePowerShell('Task.ps1', args, { payload: { workspace } })
+    if (!identity || typeof identity !== 'object' || typeof identity.exists !== 'boolean') {
+      const error = new Error('aih-controller: test-task returned no authoritative identity result')
+      error.code = 'binding-validation-inconclusive'
+      throw error
+    }
+    return identity
   }
 
   // ── TASK-0004: controller-owned attempt/verification/gate lifecycle ─────
@@ -455,6 +1014,42 @@ function apply(ctx) {
   }
 
   const gateModule = loadGateModule()
+
+  // ── TASK-0005: session binding validation / recovery guard ────────────────
+  // Part 13: ONE session-scoped in-flight validation/recovery per session id.
+  // Two overlapping controller events for the same stale session therefore
+  // create exactly ONE replacement task; different sessions never block each
+  // other (no global lock).
+  const bindingGuard = createBindingGuard({
+    bindingFor: (session) => bindingFor(session),
+    createBinding: (agent, session, workspace, promptText) => bindSession(agent, session, workspace, promptText),
+    testTaskIdentity,
+    validateWorkspaceIdentity: async (binding, workspace) => {
+      const identity = await resolveWorkspaceIdentity(workspace)
+      const mismatch = classifyBindingRepositoryIdentity(binding, identity)
+      if (mismatch) {
+        const error = new Error(`session repository identity mismatch: expected ${binding.repositoryId || 'unrecorded'}/${binding.checkoutId || 'unrecorded'}, actual ${identity.repositoryId}/${identity.checkoutId}`)
+        error.code = mismatch
+        throw error
+      }
+      // In-place upgrade for pre-universal bindings. The session cwd is
+      // immutable and the Phase 3.1 resolver just validated it, so this adds
+      // identity without migrating the session or its task.
+      if (!binding.repositoryId) {
+        Object.assign(binding, identity)
+        binding.workspace = identity.executionRoot
+        persistBindings()
+      }
+    },
+    log,
+    invalidateBinding: (stale) => {
+      const key = stale && stale.sessionId ? stale.sessionId : null
+      if (key && bindings[key]) {
+        delete bindings[key]
+        persistBindings()
+      }
+    },
+  })
 
   function attemptsRecordsOf(workspace, taskId) {
     const filePath = path.join(workspace, '.ai-harness', 'runs', taskId, 'attempts.jsonl')
@@ -484,41 +1079,207 @@ function apply(ctx) {
     return Boolean(record && (record.status === 'started' || record.status === 'verifying'))
   }
 
-  async function beginAttempt(binding, turn) {
-    return invokePowerShell('Task.ps1', ['-Action', 'begin-attempt', '-TaskId', binding.taskId, '-ExecutionClass', binding.executionClass || 'engineer_normal'], {
+  // TASK-0005 Part 6: every task-scoped mutation carries the lifecycle
+  // instance when the binding has one; TaskController fails closed on a
+  // generation mismatch. Centralized at the bridge boundary by always passing
+  // binding.taskInstanceId through the payload.
+  function instancePayloadOf(binding) {
+    return binding && binding.taskInstanceId ? { taskInstanceId: binding.taskInstanceId } : {}
+  }
+
+  // Phase 3.2.5: step/milestone-level role selection. EVERY engineering turn
+  // selects its CURRENT role deterministically: engineer_normal is the
+  // default; engineer_deep requires a task-local structured escalation
+  // reason and de-escalates once its artifact is recorded. The task-level
+  // classification is never overwritten by this (it stays the initial
+  // planning/UI metadata); the step role applies to THIS step and is
+  // mirrored into the routing state for the model enforcement layer. The
+  // reviewer is never selected by this mechanism. Fail-safe: on any
+  // engineering-plane failure the task-level class is used.
+  async function selectEngineeringEpistemicStep(binding, turn, promptText) {
+    const policyInput = classifyEpistemicPrompt(promptText)
+    const uncertainty = await invokePowerShell('Engineering.ps1', ['-Action', 'uncertainty-create', '-TaskId', binding.taskId], {
+      payload: {
+        workspace: binding.workspace,
+        taskInstanceId: binding.taskInstanceId || undefined,
+        question: promptText,
+        uncertaintyKind: policyInput.kind,
+        subject: policyInput.subject,
+        decisionImpact: 'medium',
+        probeAvailable: Boolean(policyInput.probeAvailable),
+        probeCost: policyInput.probeCost || 'low',
+        probeRisk: policyInput.probeRisk || 'safe',
+        expectedInformationGain: policyInput.expectedInformationGain || 'medium',
+        decisionRelevance: policyInput.decisionRelevance || 'medium',
+        repositoryAvailable: policyInput.repositoryAvailable !== false,
+      },
+    })
+    if (!uncertainty || !uncertainty.id) return null
+    const decision = await invokePowerShell('Engineering.ps1', ['-Action', 'epistemic-step', '-TaskId', binding.taskId, '-Preset', binding.preset || 'aih-engineering'], {
+      payload: {
+        workspace: binding.workspace,
+        taskInstanceId: binding.taskInstanceId || undefined,
+        uncertaintyId: uncertainty.id,
+        question: promptText,
+        implementationReady: Boolean(policyInput.implementationReady),
+        stepKind: 'turn',
+        milestoneId: turn ? String(turn) : undefined,
+      },
+    })
+    if (!decision || !decision.selectedRole) return null
+    if (decision.selectedRole !== 'engineer_normal' && decision.selectedRole !== 'engineer_deep') return null
+
+    let retrieval = null
+    let retrievalError = null
+    if (decision.selectedAction === 'retrieve') {
+      try {
+        retrieval = await invokePowerShell('Engineering.ps1', ['-Action', 'working-set-retrieve', '-TaskId', binding.taskId], {
+          payload: {
+            workspace: binding.workspace,
+            taskInstanceId: binding.taskInstanceId || undefined,
+            query: promptText,
+            maxResults: 20,
+          },
+        })
+      } catch (error) {
+        retrievalError = String(error && error.message ? error.message : error)
+        log({ event: 'epistemic-retrieve-failed', taskId: binding.taskId, taskInstanceId: binding.taskInstanceId || null, error: retrievalError })
+      }
+    }
+    return { ...decision, retrieval, retrievalError }
+  }
+
+  async function selectEngineeringVerificationAction(binding) {
+    const question = 'Acquire final correctness evidence for the current implementation.'
+    const uncertainty = await invokePowerShell('Engineering.ps1', ['-Action', 'uncertainty-create', '-TaskId', binding.taskId], {
+      payload: { workspace: binding.workspace, ...instancePayloadOf(binding), question, uncertaintyKind: 'verification', subject: 'verification.final', probeAvailable: false },
+    })
+    if (!uncertainty || !uncertainty.id) return null
+    return invokePowerShell('Engineering.ps1', ['-Action', 'epistemic-select', '-TaskId', binding.taskId], {
+      payload: { workspace: binding.workspace, ...instancePayloadOf(binding), uncertaintyId: uncertainty.id, verificationRequired: true },
+    })
+  }
+
+  async function completeEngineeringEpistemicAction(binding, actionId, result, summary, failureSignature) {
+    if (!actionId) return null
+    return invokePowerShell('Engineering.ps1', ['-Action', 'epistemic-complete', '-TaskId', binding.taskId], {
+      payload: { workspace: binding.workspace, ...instancePayloadOf(binding), actionId, actionResult: result, summary: summary || '', failureSignature: failureSignature || '' },
+    })
+  }
+
+  async function beginAttempt(binding, turn, executionClass) {
+    return invokePowerShell('Task.ps1', ['-Action', 'begin-attempt', '-TaskId', binding.taskId, '-ExecutionClass', executionClass || binding.executionClass || 'engineer_normal'], {
       payload: {
         workspace: binding.workspace,
         sessionId: binding.sessionId,
         startedByTurn: String(turn ?? ''),
         requireNoOpenAttempt: true,
+        ...instancePayloadOf(binding),
       },
     })
   }
 
   async function attemptEvent(binding, status, extra) {
-    const payload = { workspace: binding.workspace, taskId: binding.taskId, status }
+    const payload = { workspace: binding.workspace, taskId: binding.taskId, status, ...instancePayloadOf(binding) }
     if (extra && extra.reason) payload.reason = extra.reason
     if (extra && extra.failureSignature) payload.failureSignature = extra.failureSignature
     if (extra && extra.evidence) payload.evidence = extra.evidence
     return invokePowerShell('Task.ps1', ['-Action', 'attempt-event', '-TaskId', binding.taskId], { payload })
   }
 
+  // Phase 3.2.5: normalize a raw failure text through the deterministic
+  // failure classifier (Engineering.ps1 classify-failure) so equivalent
+  // failures share ONE stable task-local signature. Never fatal: when the
+  // engineering plane is unavailable the caller's label is kept as-is.
+  async function classifyFailureSignature(binding, evidence) {
+    try {
+      const classified = await invokePowerShell('Engineering.ps1', ['-Action', 'classify-failure', '-TaskId', binding.taskId], {
+        payload: {
+          workspace: binding.workspace,
+          taskInstanceId: binding.taskInstanceId || undefined,
+          evidenceText: evidence || '',
+          actionSummary: 'turn-error',
+        },
+      })
+      if (classified && classified.signature) {
+        return { signature: String(classified.signature), classification: String(classified.classification || 'unknown') }
+      }
+    } catch { /* fail-safe below */ }
+    return null
+  }
+
   async function recordFailure(binding, signature, evidence) {
+    let failureSignature = signature
+    const classified = await classifyFailureSignature(binding, evidence)
+    if (classified && classified.signature) failureSignature = classified.signature
     return invokePowerShell('Task.ps1', ['-Action', 'failure', '-TaskId', binding.taskId], {
-      payload: { workspace: binding.workspace, failureSignature: signature, evidence: evidence || '' },
+      payload: { workspace: binding.workspace, failureSignature, evidence: evidence || '', ...instancePayloadOf(binding) },
     })
   }
 
   async function writeEvidence(binding, evidenceDoc) {
     return invokePowerShell('Task.ps1', ['-Action', 'evidence', '-TaskId', binding.taskId], {
-      payload: { workspace: binding.workspace, evidenceDoc },
+      payload: { workspace: binding.workspace, evidenceDoc, ...instancePayloadOf(binding) },
     })
   }
 
   async function completionCheck(binding, codexReviewPassed) {
     const args = ['-Action', 'complete', '-TaskId', binding.taskId]
     if (codexReviewPassed) args.push('-CodexReviewPassed')
-    return invokePowerShell('Task.ps1', args, { payload: { workspace: binding.workspace } })
+    return invokePowerShell('Task.ps1', args, { payload: { workspace: binding.workspace, ...instancePayloadOf(binding) } })
+  }
+
+  // Phase 3.2.5 production integration: initialize the task-local Engineering
+  // lifecycle once, at the same authoritative binding boundary that creates
+  // taskInstanceId. The CLI action is idempotent and generation-aware.
+  async function initializeEngineeringLifecycle(binding) {
+    if (!binding || (binding.executionClass !== 'engineer_normal' && binding.executionClass !== 'engineer_deep')) return null
+    return invokePowerShell('Engineering.ps1', ['-Action', 'lifecycle-init', '-TaskId', binding.taskId], {
+      payload: {
+        workspace: binding.workspace,
+        taskInstanceId: binding.taskInstanceId || undefined,
+        text: binding.description || '',
+      },
+    })
+  }
+
+  async function planEngineeringVerification(binding) {
+    await initializeEngineeringLifecycle(binding)
+    const requirements = await invokePowerShell('Engineering.ps1', ['-Action', 'requirements-snapshot', '-TaskId', binding.taskId], {
+      payload: { workspace: binding.workspace, ...instancePayloadOf(binding) },
+    })
+    const requirementIds = requirements && Array.isArray(requirements.requirements)
+      ? requirements.requirements.filter((item) => item && item.required !== false).map((item) => String(item.id || '')).filter(Boolean)
+      : []
+    return invokePowerShell('Engineering.ps1', ['-Action', 'plan-verification', '-TaskId', binding.taskId], {
+      payload: {
+        workspace: binding.workspace,
+        ...instancePayloadOf(binding),
+        verificationScope: 'final',
+        reason: 'Controller-owned /verify final project verification.',
+        requirementIds,
+        commands: [{
+          name: 'aih-verify-project',
+          executable: pwshHost,
+          argv: ['-File', path.join(scriptsRoot, 'Verify-Project.ps1'), '-Kind', 'all'],
+          cwd: binding.workspace,
+          timeoutMs: 600000,
+        }],
+      },
+    })
+  }
+
+  async function completeEngineeringVerification(binding, plan, result, summary) {
+    if (!plan || !plan.verificationId) throw new Error('Engineering verification plan did not return a verificationId.')
+    return invokePowerShell('Engineering.ps1', ['-Action', 'complete-verification', '-TaskId', binding.taskId], {
+      payload: {
+        workspace: binding.workspace,
+        ...instancePayloadOf(binding),
+        verificationId: plan.verificationId,
+        status: result,
+        summary,
+      },
+    })
   }
 
   function readReviewResult(workspace, taskId) {
@@ -588,17 +1349,106 @@ function apply(ctx) {
     return { reconciled: true, outcome: 'interrupted' }
   }
 
+  // ── Phase V2: controller-owned AUTOMATIC visual verification ───────────
+  // Runs at the completion boundary (after deterministic verification has
+  // passed): detect visual requirement -> bounded loop (capture -> visual
+  // review -> adjudicate -> repair handoff / convergence). The engineering
+  // session never types /visual-review; the loop is controller-owned.
+  async function runVisualLoop(binding) {
+    return invokePowerShell('VisualLoop.ps1', ['-Action', 'iterate', '-TaskId', binding.taskId, '-InstallRoot', installRoot], {
+      payload: { workspace: binding.workspace, ...instancePayloadOf(binding) },
+    })
+  }
+
+  async function detectVisualLoop(binding) {
+    return invokePowerShell('VisualLoop.ps1', ['-Action', 'detect', '-TaskId', binding.taskId, '-InstallRoot', installRoot], {
+      payload: { workspace: binding.workspace, ...instancePayloadOf(binding) },
+    })
+  }
+
+  function persistVisualUnavailable(binding, reason) {
+    const visualRoot = path.join(binding.workspace, '.ai-harness', 'runs', binding.taskId, 'visual')
+    const statePath = path.join(visualRoot, 'state.json')
+    let state = null
+    try { state = JSON.parse(fs.readFileSync(statePath, 'utf8')) } catch { return null }
+    if (!state || state.required !== true) return null
+    const exactReason = 'controller invocation failed: ' + String(reason || 'unknown visual-loop failure')
+    const reasons = Array.isArray(state.reasons) ? state.reasons.map(String) : []
+    if (!reasons.includes(exactReason)) reasons.push(exactReason)
+    state.status = 'unavailable'
+    state.reasons = reasons.slice(-20)
+    state.updatedAtUtc = new Date().toISOString()
+    fs.mkdirSync(visualRoot, { recursive: true })
+    const temporary = statePath + '.' + crypto.randomUUID() + '.tmp'
+    fs.writeFileSync(temporary, JSON.stringify(state, null, 2))
+    fs.renameSync(temporary, statePath)
+    return state
+  }
+
+  function visualRepairPacketText(binding, loop) {
+    const lines = [
+      'Controller: visual verification requires repair · task ' + binding.taskId + ' · iteration ' + String(loop.iteration) + '/' + String(loop.maxIterations),
+      '',
+      String(loop.repairPacket || ''),
+      '',
+      'Repair in this session, then run /verify again: deterministic re-verification is required before the next automatic visual review.',
+      'The visual reviewer never edits files; findings were adjudicated by controller policy (rejected findings are listed as IGNORED).',
+    ]
+    return lines.join('\n')
+  }
+
   /** Completion decision after a passed verification (review disposition aware). */
   async function runCompletionTail(binding, session) {
     const review = readReviewResult(binding.workspace, binding.taskId)
     const reviewPass = Boolean(review && String(review.verdict) === 'pass')
+    // V2: automatic visual loop at the completion boundary. Failures of the
+    // loop infrastructure must never block non-visual completion accounting.
+    let visualLoop = null
+    try {
+      visualLoop = await runVisualLoop(binding)
+    } catch (error) {
+      const reason = String(error && error.message ? error.message : error)
+      const unavailableState = persistVisualUnavailable(binding, reason)
+      visualLoop = unavailableState
+        ? { ok: false, visualWorkRequired: true, errorKind: 'visual-review-controller-invocation-failed', error: reason, reason, state: unavailableState }
+        : null
+      log({ event: 'visual-loop-failed', taskId: binding.taskId, error: reason, visualRequired: Boolean(unavailableState) })
+    }
+    const visualState = visualLoop && visualLoop.state ? visualLoop.state : null
+    const visualStatus = visualState && visualState.status ? String(visualState.status) : 'none'
+    const visualWorkRequired = Boolean(visualLoop && (visualLoop.visualWorkRequired === true || (visualState && visualState.required === true)))
+    if (visualWorkRequired && visualStatus !== 'pass') {
+      if (visualStatus === 'revise' && visualLoop.repairPacket) {
+        appendMessage(
+          session,
+          createControllerMessage(visualRepairPacketText(binding, visualLoop), 'controller-visual-repair'),
+        )
+      } else if (visualStatus === 'exhausted') {
+        appendMessage(
+          session,
+          createControllerMessage('Controller: visual iteration budget exhausted · task ' + binding.taskId + ' · operator attention required (HUMAN_REVIEW_PENDING). No automatic commit; completion stays blocked until visual status is pass.', 'controller-visual-blocked'),
+        )
+      } else if (visualStatus === 'unavailable') {
+        appendMessage(
+          session,
+          createControllerMessage('Controller: visual verification unavailable · task ' + binding.taskId + ' · ' + String(visualLoop.reason || visualLoop.error || 'runtime or provider unavailable') + ' · no fabricated PASS; completion stays blocked until visual status is pass.', 'controller-visual-blocked'),
+        )
+      } else {
+        appendMessage(
+          session,
+          createControllerMessage('Controller: visual verification incomplete · task ' + binding.taskId + ' · status ' + visualStatus + ' · no fabricated PASS; completion stays blocked until the controller-owned visual loop reaches pass.', 'controller-visual-blocked'),
+        )
+      }
+      return { complete: false, visualBlocked: true, visualStatus, visualLoop }
+    }
     const completion = await completionCheck(binding, reviewPass)
     const complete = Boolean(completion && completion.complete)
     if (complete) {
       appendMessage(
         session,
         createControllerMessage(
-          'Controller: task ' + binding.taskId + ' COMPLETE.\nCompletion authority: deterministic controller. Verification passed' + (reviewPass ? '; bounded review passed.' : '.'),
+          'Controller: task ' + binding.taskId + ' COMPLETE.\nCompletion authority: deterministic controller. Verification passed' + (reviewPass ? '; independent review passed.' : '.') +
+            (visualStatus === 'pass' ? '\nVisual review: VISUAL_REVIEW_PASS · HUMAN_REVIEW_PENDING (human acceptance is external; nothing was committed automatically). Final visual report: ' + String((visualLoop && visualLoop.resultPath) || '') : ''),
           'controller-complete',
         ),
       )
@@ -631,8 +1481,11 @@ function apply(ctx) {
       return { kind: 'reject' }
     }
     const verificationStartedAtUtc = new Date().toISOString()
+    let epistemicAction = null
     try {
+      epistemicAction = await selectEngineeringVerificationAction(binding)
       await attemptEvent(binding, 'verifying')
+      const engineeringVerification = await planEngineeringVerification(binding)
       const result = await invokePowerShell('Verify-Project.ps1', [
         '-Workspace', binding.workspace,
         '-InstallRoot', installRoot,
@@ -665,12 +1518,22 @@ function apply(ctx) {
       const evidence = {
         schemaVersion: 2,
         attempt: latest.sequence,
+        // TASK-0005 Part 19: the verification artifact names the lifecycle
+        // instance it evidences.
+        taskInstanceId: binding.taskInstanceId || null,
         startedAtUtc: verificationStartedAtUtc,
         finishedAtUtc,
         acceptanceCriteria: [],
         verification: normalized,
         scopePass: true,
       }
+      await completeEngineeringVerification(
+        binding,
+        engineeringVerification,
+        failed > 0 ? 'fail' : 'pass',
+        passed + ' passed, ' + failed + ' failed, ' + skipped + ' skipped',
+      )
+      await completeEngineeringEpistemicAction(binding, epistemicAction && epistemicAction.actionId, failed > 0 ? 'failed' : 'succeeded', passed + ' passed, ' + failed + ' failed, ' + skipped + ' skipped')
       await writeEvidence(binding, evidence)
       if (failed > 0) {
         await recordFailure(binding, 'verification-failed', failed + ' of ' + normalized.length + ' check(s) failed during verification of attempt ' + latest.sequence)
@@ -690,6 +1553,7 @@ function apply(ctx) {
       )
       return { kind: 'reject' }
     } catch (error) {
+      await completeEngineeringEpistemicAction(binding, epistemicAction && epistemicAction.actionId, 'interrupted', String(error && error.message ? error.message : error)).catch(() => null)
       // Infrastructure failure (launch failure, timeout/abort, or no
       // parseable structured result): the attempt must NEVER stay
       // live-looking in 'verifying'. The smallest truthful terminal state is
@@ -712,31 +1576,84 @@ function apply(ctx) {
     }
   }
 
+  async function automaticallyVerifyVisualTask(session, binding) {
+    if (!session || !binding || binding.visualAutoGateRunning) return null
+    const latest = latestAttemptOf(binding.workspace, binding.taskId)
+    if (!latest || !attemptIsOpen(latest)) return null
+    binding.visualAutoGateRunning = true
+    try {
+      const detection = await detectVisualLoop(binding)
+      const required = Boolean(detection && (detection.required === true || (detection.state && detection.state.required === true)))
+      if (!required) return detection
+      appendMessage(
+        session,
+        createControllerMessage(
+          'Controller: visual verification REQUIRED · task ' + binding.taskId + '. The controller will run deterministic verification and then the automatic VisualLoop. Visual Review is a controller-owned capability; no skill lookup or engineer invocation is required.',
+          'controller-visual-required',
+        ),
+      )
+      return executeVerifyTurn({ session }, binding)
+    } catch (error) {
+      const reason = String(error && error.message ? error.message : error)
+      const state = persistVisualUnavailable(binding, reason)
+      appendMessage(
+        session,
+        createControllerMessage(
+          'Controller: automatic visual gate unavailable · task ' + binding.taskId + ' · ' + reason + '. No skill fallback and no fabricated PASS; completion remains blocked' + (state ? ' with visual status unavailable.' : ' until requirement detection can run.'),
+          'controller-visual-blocked',
+        ),
+      )
+      log({ event: 'automatic-visual-gate-failed', taskId: binding.taskId, error: reason, statePersisted: Boolean(state) })
+      return null
+    } finally {
+      binding.visualAutoGateRunning = false
+    }
+  }
+
   async function contextBundle(workspace, taskId, question) {
+    // TASK-0007: the routing policy decides the review budget. With
+    // enforcement disabled (shipped default) the controller imposes NO file
+    // count and NO context-token ceiling: it passes the explicit unlimited
+    // semantic (0 = unlimited) to the Context Engine. Retrieval still ranks
+    // and selects relevant files; unlimited never means a blind full-repo
+    // dump, and full-repository consent stays a separate authorization gate.
+    const budget = reviewBudgetPolicy(installRoot)
     // Progressive disclosure: the explicit review question decides how much
     // repository context is gathered. 'inline' (self-contained code in the
     // question) gathers none; 'files' (explicitly named workspace files)
     // gathers exactly those; 'bundle' falls through to the Context Engine.
-    const contextMode = classifyReviewContext(workspace, question)
+    const maxFiles = budget.enforceLimits ? budget.maxFiles : null
+    const contextMode = classifyReviewContext(workspace, question, maxFiles)
     if (contextMode === 'inline') return { contextMode, fileSlices: [] }
-    if (contextMode === 'files') return { contextMode, fileSlices: resolveReviewFiles(workspace, question) }
-    const bundle = await invokePowerShell('Context.ps1', [
-      '-Operation', 'bundle',
-      '-TaskId', taskId,
-      '-MaxContextTokens', String(MAX_CONTEXT_TOKENS),
-      '-MaxFiles', String(MAX_FILES),
-    ], { payload: { workspace, query: question } })
+    if (contextMode === 'files') return { contextMode, fileSlices: resolveReviewFiles(workspace, question, maxFiles) }
+    const bundleArgs = ['-Operation', 'bundle', '-TaskId', taskId]
+    if (budget.enforceLimits) {
+      bundleArgs.push('-MaxContextTokens', String(budget.maxContextTokens), '-MaxFiles', String(budget.maxFiles))
+    } else {
+      bundleArgs.push('-MaxContextTokens', '0', '-MaxFiles', '0')
+    }
+    const bundle = await invokePowerShell('Context.ps1', bundleArgs, { payload: { workspace, query: question } })
     if (!bundle || !Array.isArray(bundle.fileSlices)) throw new Error('aih-controller: context bundle returned no file slices')
+    // TASK-0009: context-quality guard. When the Context Engine reports that
+    // the bundle contains no meaningful source/test/docs/config evidence (even
+    // after its one deterministic broaden retry), the reviewer is NOT called:
+    // the empty fileSlices plus the structured contextQuality report travel
+    // back to executeReviewTurn, which rejects the review turn.
+    if (bundle.contextQuality && bundle.contextQuality.status === 'fail') {
+      return { contextMode, fileSlices: [], contextQuality: bundle.contextQuality }
+    }
     return { contextMode, fileSlices: bundle.fileSlices }
   }
 
-  async function runReview(workspace, taskId, question, filesSlices, contextMode, attempt) {
+  async function runReview(workspace, taskId, question, filesSlices, contextMode, attempt, taskInstanceId) {
     fs.mkdirSync(tmpRoot, { recursive: true })
     const filesPath = path.join(tmpRoot, 'review-' + taskId + '-' + Date.now() + '.json')
     fs.writeFileSync(filesPath, JSON.stringify(filesSlices))
-    const args = ['-TaskId', taskId, '-FilesPath', filesPath, '-Execute']
+    const args = ['-TaskId', taskId, '-FilesPath', filesPath, '-Execute', '-InstallRoot', installRoot]
     if (attempt && Number.isInteger(Number(attempt))) args.push('-Attempt', String(attempt))
-    return invokePowerShell('Review.ps1', args, { payload: { workspace, question, contextMode } })
+    // TASK-0005: the review is identity-scoped to exactly this lifecycle instance.
+    if (taskInstanceId) args.push('-TaskInstanceId', taskInstanceId)
+    return invokePowerShell('Review.ps1', args, { payload: { workspace, question, contextMode, taskInstanceId: taskInstanceId || undefined } })
   }
 
   function reviewSummary(review) {
@@ -763,49 +1680,55 @@ function apply(ctx) {
   function noticeText(binding) {
     return [
       'Controller: task ' + binding.taskId + ' bound to this session.',
+      binding.taskInstanceId ? 'Task instance: ' + binding.taskInstanceId : null,
       'Execution: ' + executionClassLabel(binding.executionClass),
       'Review: ' + (binding.reviewRequired ? 'required (policy or explicit request)' : 'not required'),
       'Completion authority: deterministic controller.',
-    ].join('\n')
-  }
-
-  function reviewResultText(binding, summary, raw) {
-    const lines = [
-      'Controller review result · task ' + binding.taskId,
-      'Execution: Independent Review (read-only, bounded)',
-      'Verdict: ' + summary.verdict,
-      'Findings: ' + summary.findings + (summary.severities.length ? ' (' + summary.severities.join(', ') + ')' : ''),
-      'Provider: ' + summary.provider + ' · model: ' + summary.model + ' · calls: ' + summary.callCount,
-      'Budget: ' + (summary.budget ? summary.budget.maxFiles + ' files / ' + summary.budget.maxContextTokens + ' context tokens / ' + summary.budget.maxCallsPerTask + ' call' : 'controller-enforced'),
-      'Read-only: true · fresh context: true · completion authority: controller (reviewer cannot complete the task)',
-    ]
-    if (raw && typeof raw === 'object') lines.push('Result JSON: ' + JSON.stringify(raw))
-    return lines.join('\n')
+    ].filter(Boolean).join('\n')
   }
 
   async function executeReviewTurn(agent, binding, question, options) {
     const session = agent.session
     const workspace = binding.workspace
     const taskId = binding.taskId
+    const taskInstanceId = binding.taskInstanceId || null
     try {
       if (options.explicit) {
         const decision = await routeTask(workspace, taskId, question, {
           preset: binding.preset,
           reviewRequested: true,
+          taskInstanceId,
         })
         binding.executionClass = decision.executionClass
         binding.reviewRequired = Boolean(decision.reviewRequired)
-        await markReviewRequested(workspace, taskId)
+        await markReviewRequested(workspace, taskId, taskInstanceId)
       }
-      const { contextMode, fileSlices } = await contextBundle(workspace, taskId, question)
+      const { contextMode, fileSlices, contextQuality } = await contextBundle(workspace, taskId, question)
+      // TASK-0009: fail closed BEFORE the reviewer when the bundle quality
+      // guard rejected the selected evidence. Zero engineer and zero reviewer
+      // calls happen on this path; the operator gets a structured reason.
+      if (contextQuality && contextQuality.status === 'fail') {
+        appendMessage(
+          session,
+          createControllerMessage(
+            'Controller review rejected · task ' + taskId +
+              '\nThe reviewer was NOT called: the repository context bundle contained no meaningful source/test/config/docs evidence for this question.' +
+              '\nReason: ' + (contextQuality.reason || 'no meaningful evidence selected') +
+              '\nNo files were modified; completion authority remains with the controller.',
+            'review-context-quality',
+          ),
+        )
+        log({ event: 'review-context-quality', taskId, contextMode, quality: contextQuality })
+        return { kind: 'reject' }
+      }
       const latest = latestAttemptOf(workspace, taskId)
       const reviewAttempt = latest && Number.isInteger(latest.sequence) ? latest.sequence : null
-      const review = await runReview(workspace, taskId, question, fileSlices, contextMode, reviewAttempt)
+      const review = await runReview(workspace, taskId, question, fileSlices, contextMode, reviewAttempt, taskInstanceId)
       if (review && review.ok === false && review.kind === 'packet-too-large') {
         appendMessage(
           session,
           createControllerMessage(
-            'Controller review rejected · task ' + taskId + '\nThe reviewer was NOT called (hard budget validation failed).\nViolations: ' +
+            'Controller review rejected · task ' + taskId + '\nThe reviewer was NOT called (the review packet was rejected by policy).\nViolations: ' +
               (Array.isArray(review.violations) ? review.violations.join('; ') : 'unknown') +
               '\nRead-only: true · completion authority: controller',
             'review-packet-too-large',
@@ -849,17 +1772,116 @@ function apply(ctx) {
     }
   }
 
+  // ── Phase V0/V1: controller-owned VISUAL REVIEW (orthogonal capability) ─
+  // One manual invocation per turn: bounded visual packet -> ONE multimodal
+  // transport call -> validated structured critique -> persisted artifacts.
+  // The turn is REJECTED (no model call): the visual reviewer is never a
+  // writable subagent, never gains completion authority, and never alters
+  // routing/task state (telemetry only, via the controller service).
+  async function runVisualReview(workspace, taskId, request, taskInstanceId) {
+    // V2: manual /visual-review is an operator override - always trigger=manual,
+    // never an automatic loop iteration.
+    const args = ['-TaskId', taskId, '-Execute', '-InstallRoot', installRoot, '-Trigger', 'manual']
+    if (taskInstanceId) args.push('-TaskInstanceId', taskInstanceId)
+    return invokePowerShell('VisualReview.ps1', args, {
+      payload: {
+        workspace,
+        question: request.question,
+        platform: request.platform,
+        taskInstanceId: taskInstanceId || undefined,
+        screenshots: request.screenshots,
+        references: request.references,
+        invariants: request.invariants,
+      },
+    })
+  }
+
+  function visualReviewResultText(binding, result) {
+    const lines = [
+      'Controller: visual review complete · task ' + binding.taskId,
+      'Verdict: ' + String(result.verdict) + ' · score: ' + String(result.score) + '/10 · model: ' + String(result.model || result.modelId || ''),
+      'Findings: ' + (Array.isArray(result.findings) ? result.findings.length : 0) + ' · artifacts: ' + String(result.runDirectory || ''),
+    ]
+    for (const finding of Array.isArray(result.findings) ? result.findings.slice(0, 8) : []) {
+      lines.push('- [' + String(finding.severity) + '] ' + String(finding.area) + ': ' + String(finding.observation) + ' → ' + String(finding.recommendation))
+    }
+    lines.push('Read-only: true · no code edits returned · human acceptance and completion authority remain with the controller.')
+    return lines.join('\n')
+  }
+
+  async function executeVisualReviewTurn(agent, binding, request) {
+    const session = agent.session
+    const taskId = binding.taskId
+    const taskInstanceId = binding.taskInstanceId || null
+    try {
+      if (!Array.isArray(request.screenshots) || request.screenshots.length === 0) {
+        appendMessage(
+          session,
+          createControllerMessage(
+            'Controller visual review rejected · task ' + taskId + '\nNo screenshot was supplied. Attach at least one existing PNG/JPEG screenshot path in the /visual-review prompt.\nNothing was modified; completion authority remains with the controller.',
+            'visual-review-missing-screenshot',
+          ),
+        )
+        log({ event: 'visual-review-missing-screenshot', taskId })
+        return { kind: 'reject' }
+      }
+      const review = await runVisualReview(binding.workspace, taskId, request, taskInstanceId)
+      if (!review || review.ok !== true) {
+        const reason = review && review.error ? String(review.error) : 'no structured result'
+        const violations = review && Array.isArray(review.violations) && review.violations.length ? review.violations : null
+        appendMessage(
+          session,
+          createControllerMessage(
+            'Controller visual review failed · task ' + taskId + '\n' + reason + (violations ? '\nViolations: ' + violations.join('; ') : '') + '\nThe visual reviewer was not given any tool; no files were modified; completion authority remains with the controller.',
+            'visual-review-error',
+          ),
+        )
+        log({ event: 'visual-review-failed', taskId, reason, violations })
+        return { kind: 'reject' }
+      }
+      appendMessage(session, createControllerMessage(visualReviewResultText(binding, review), 'visual-review-result'))
+      log({ event: 'visual-review-completed', taskId, iteration: review.iteration, verdict: review.verdict, score: review.score })
+      return { kind: 'reject' }
+    } catch (error) {
+      appendMessage(
+        session,
+        createControllerMessage(
+          'Controller visual review failed · task ' + taskId + '\n' + String(error && error.message ? error.message : error) + '\nNo files were modified; completion authority remains with the controller.',
+          'visual-review-error',
+        ),
+      )
+      log({ event: 'visual-review-failed', taskId, error: String(error) })
+      return { kind: 'reject' }
+    }
+  }
+
   async function bindSession(agent, session, workspace, promptText) {
+    const workspaceIdentity = await resolveWorkspaceIdentity(workspace)
+    if (normalizeWorkspaceIdentity(workspaceIdentity.executionRoot) !== normalizeWorkspaceIdentity(workspace)) {
+      const error = new Error(`session execution root mismatch: expected '${workspaceIdentity.executionRoot}', actual '${workspace}'`)
+      error.code = 'session-workspace-mismatch'
+      throw error
+    }
     const reviewRequested = isReviewCommand(promptText)
     const task = await createTask(workspace, reviewRequested ? reviewQuestionOf(promptText) : promptText, reviewRequested)
+    // TASK-0005 Part 1: every newly created task carries an immutable
+    // taskInstanceId from the TaskController; the binding references it.
+    const taskInstanceId = task.taskInstanceId ?? null
     const decision = await routeTask(workspace, task.taskId, task.description, {
       preset: agentPresetOf(session),
       reviewRequested,
+      taskInstanceId,
     })
     const binding = {
       sessionId: session.id,
+      taskInstanceId,
       taskId: task.taskId,
       workspace,
+      workspaceId: workspaceIdentity.workspaceId,
+      repositoryId: workspaceIdentity.repositoryId,
+      checkoutId: workspaceIdentity.checkoutId,
+      checkoutRootPath: workspaceIdentity.checkoutRootPath,
+      executionRoot: workspaceIdentity.executionRoot,
       preset: agentPresetOf(session),
       description: task.description,
       executionClass: decision.executionClass,
@@ -867,11 +1889,12 @@ function apply(ctx) {
       needsRouteCheck: false,
       boundAtUtc: new Date().toISOString(),
     }
+    await initializeEngineeringLifecycle(binding)
     bindings[session.id] = binding
     persistBindings()
     registerShellEnvironment()
     appendMessage(session, createControllerMessage(noticeText(binding), 'controller-binding'))
-    log({ event: 'session-bound', sessionId: session.id, taskId: task.taskId, executionClass: binding.executionClass })
+    log({ event: 'session-bound', sessionId: session.id, taskId: task.taskId, taskInstanceId, executionClass: binding.executionClass })
     return binding
   }
 
@@ -898,8 +1921,12 @@ function apply(ctx) {
         name: 'aih-controller-task-state',
         variables: {
           DSH_AIH_TASK_ID: { description: 'TaskController task id bound to this session.' },
+          DSH_AIH_TASK_INSTANCE_ID: { description: 'Immutable lifecycle instance identity of the bound task (task_<32hex>).' },
           DSH_AIH_EXECUTION_CLASS: { description: 'Execution class selected by the deterministic routing policy.' },
-          DSH_AIH_REVIEW_REQUIRED: { description: '1 when a bounded Codex review is required for completion.' },
+          DSH_AIH_REVIEW_REQUIRED: { description: '1 when an independent review is required for completion.' },
+          DSH_AIH_WORKSPACE_ID: { description: 'Nexus Phase 3.1 logical Workspace identity.' },
+          DSH_AIH_REPOSITORY_ID: { description: 'Nexus Phase 3.1 logical Repository identity.' },
+          DSH_AIH_CHECKOUT_ID: { description: 'Nexus Phase 3.1 physical Checkout identity.' },
         },
         resolve: (execution) => {
           const agent = execution && execution.agent
@@ -909,8 +1936,12 @@ function apply(ctx) {
           if (!binding) return {}
           return {
             DSH_AIH_TASK_ID: binding.taskId,
+            DSH_AIH_TASK_INSTANCE_ID: binding.taskInstanceId || undefined,
             DSH_AIH_EXECUTION_CLASS: binding.executionClass,
             DSH_AIH_REVIEW_REQUIRED: binding.reviewRequired ? '1' : '0',
+            DSH_AIH_WORKSPACE_ID: binding.workspaceId || undefined,
+            DSH_AIH_REPOSITORY_ID: binding.repositoryId || undefined,
+            DSH_AIH_CHECKOUT_ID: binding.checkoutId || undefined,
           }
         },
       })
@@ -919,13 +1950,44 @@ function apply(ctx) {
     }
   }
 
-  ctx.on('session/event', (subject, event) => {
+  async function recordEngineeringModelUsage(binding, event) {
+    const usage = engineeringUsageOfEvent(event)
+    const current = binding && binding.currentEngineeringStep
+    if (!usage || !current || !current.role) return null
+    const roleTarget = current.roleTarget && typeof current.roleTarget === 'object' ? current.roleTarget : {}
+    return invokePowerShell('Engineering.ps1', ['-Action', 'record-model-usage', '-TaskId', binding.taskId], {
+      payload: {
+        workspace: binding.workspace,
+        taskInstanceId: binding.taskInstanceId || undefined,
+        role: current.role,
+        milestoneId: usage.stepId || current.stepId || '',
+        inputTokens: usage.inputTokens,
+        uncachedInputTokens: usage.uncachedInputTokens,
+        cacheReadTokens: usage.cacheReadTokens,
+        outputTokens: usage.outputTokens,
+        usageAvailable: usage.usageAvailable,
+        model: roleTarget.model || '',
+        provider: roleTarget.provider || '',
+      },
+    })
+  }
+
+  ctx.on('session/event', async (subject, event) => {
     if (!subject || !event) return
     const binding = bindings[subject.id]
     if (!binding) return
+    if (engineeringUsageOfEvent(event) && binding.currentEngineeringStep) {
+      recordEngineeringModelUsage(binding, event)
+        .catch((error) => log({ event: 'engineering-usage-record-failed', sessionId: subject.id, taskId: binding.taskId, error: String(error) }))
+    }
     if (event.type === 'turn/end' && event.data && event.data.reason) {
       const reason = event.data.reason
+      const completedEngineeringStep = Boolean(binding.currentEngineeringStep && binding.currentEngineeringStep.role)
       if (reason.kind === 'error' && reason.error && reason.error.message) {
+        const actionId = binding.currentEpistemicActionId
+        binding.currentEpistemicActionId = null
+        completeEngineeringEpistemicAction(binding, actionId, 'failed', String(reason.error.message), 'turn-error')
+          .catch((error) => log({ event: 'epistemic-action-complete-failed', sessionId: subject.id, error: String(error) }))
         // TASK-0004: a genuinely failed turn records the attempt failure at
         // the producer boundary (the controller owns the ledger).
         const latest = latestAttemptOf(binding.workspace, binding.taskId)
@@ -939,6 +2001,7 @@ function apply(ctx) {
           preset: binding.preset,
           signal: 'attempt-failure',
           failureReason: String(reason.error.message),
+          taskInstanceId: binding.taskInstanceId || undefined,
         })
           .then((decision) => {
             binding.executionClass = decision.executionClass
@@ -946,6 +2009,10 @@ function apply(ctx) {
           })
           .catch((error) => log({ event: 'failure-signal-failed', sessionId: subject.id, error: String(error) }))
       } else if (reason.kind === 'aborted' || reason.kind === 'interrupted') {
+        const actionId = binding.currentEpistemicActionId
+        binding.currentEpistemicActionId = null
+        completeEngineeringEpistemicAction(binding, actionId, 'interrupted', 'turn-' + reason.kind)
+          .catch((error) => log({ event: 'epistemic-action-complete-failed', sessionId: subject.id, error: String(error) }))
         // TASK-0004: a user abort or system interrupt closes the open attempt
         // as interrupted (smallest truthful state) instead of leaving it open.
         const latest = latestAttemptOf(binding.workspace, binding.taskId)
@@ -954,6 +2021,15 @@ function apply(ctx) {
             .then(() => log({ event: 'attempt-interrupted-recorded', sessionId: subject.id, taskId: binding.taskId }))
             .catch((error) => log({ event: 'attempt-interrupt-record-failed', sessionId: subject.id, error: String(error) }))
         }
+      } else {
+        const actionId = binding.currentEpistemicActionId
+        binding.currentEpistemicActionId = null
+        await completeEngineeringEpistemicAction(binding, actionId, 'succeeded', 'engineering turn completed')
+          .catch((error) => log({ event: 'epistemic-action-complete-failed', sessionId: subject.id, error: String(error) }))
+      }
+      binding.currentEngineeringStep = null
+      if (completedEngineeringStep && reason.kind !== 'error' && reason.kind !== 'aborted' && reason.kind !== 'interrupted') {
+        await automaticallyVerifyVisualTask(subject, binding)
       }
     }
   })
@@ -977,13 +2053,71 @@ function apply(ctx) {
 
       registerShellEnvironment()
 
-      let binding = bindingFor(session)
-      if (!binding) {
-        binding = await bindSession(agent, session, workspace, promptText)
+      // ── TASK-0005: binding validation before ANY reuse ──────────────────
+      // TaskController state is authoritative; a persisted binding is a
+      // reference only. Validation/recovery runs under the session-scoped
+      // lock (exactly one replacement task per stale session), and a
+      // validation-infrastructure failure fails SAFE (binding preserved, no
+      // replacement task, nothing classified as missing).
+      let ensured
+      try {
+        ensured = await bindingGuard.ensureBinding(agent, session, workspace, promptText)
+      } catch (error) {
+        if (error && error.code === 'binding-validation-inconclusive') {
+          const reason = String(error && error.message ? error.message : error)
+          log({ event: 'binding-validation-inconclusive', sessionId: session.id, error: reason })
+          if (explicitReview) {
+            // Part 12: explicit /review keeps its fail-closed behavior —
+            // no engineer fallback, no fake review result, no model call.
+            appendMessage(
+              session,
+              createControllerMessage(
+                'Independent review unavailable: the controller could not validate the session binding against the authoritative task ledger (validation infrastructure failure).\n' + reason + '\nThe existing binding was preserved; no task was created or removed; no model call was made; completion authority remains with the controller.',
+                'controller-error',
+              ),
+            )
+            return { kind: 'reject' }
+          }
+          if (isVerifyCommand(promptText)) {
+            appendMessage(
+              session,
+              createControllerMessage(
+                'Controller verification unavailable: the session binding could not be validated against the authoritative task ledger.\n' + reason + '\nThe existing binding was preserved; no task was created or removed; no verification ran.',
+                'controller-verify-error',
+              ),
+            )
+            return { kind: 'reject' }
+          }
+          appendMessage(
+            session,
+            createControllerMessage(
+              'Controller: the session binding could not be validated (validation infrastructure failure).\n' + reason + '\nThe existing binding was preserved; no task was created or removed; controller state was not recorded for this turn.',
+              'controller-error',
+            ),
+          )
+          return next()
+        }
+        throw error
+      }
+      let binding = ensured.binding
+      if (ensured.outcome === 'recovered') {
+        // Part 10: the stale binding self-healed into a FRESH authoritative
+        // task; nothing from the old generation is carried over.
+        appendMessage(
+          session,
+          createControllerMessage(
+            'Controller: the previous session binding was stale (' + ensured.stale.reason + ' · task ' + ensured.stale.taskId + ').\nA fresh authoritative task was created and bound: ' + binding.taskId + (binding.taskInstanceId ? ' (instance ' + binding.taskInstanceId + ')' : '') + '.\nNo record from the previous task generation was carried over.',
+            'controller-recovery',
+          ),
+        )
       }
 
       if (explicitReview) {
         return executeReviewTurn(agent, binding, reviewQuestionOf(promptText), { explicit: true })
+      }
+
+      if (isVisualReviewCommand(promptText)) {
+        return executeVisualReviewTurn(agent, binding, visualReviewRequestOf(promptText, binding.workspace))
       }
 
       if (isVerifyCommand(promptText)) {
@@ -1005,12 +2139,13 @@ function apply(ctx) {
         const decision = await routeTask(binding.workspace, binding.taskId, promptText, {
           preset: binding.preset,
           signal: 'review-findings',
+          taskInstanceId: binding.taskInstanceId || undefined,
         })
         binding.executionClass = decision.executionClass
         appendMessage(
           session,
           createControllerMessage(
-            'Controller: bounded review findings returned to the Deep Engineer for repair. Execution: ' + executionClassLabel(decision.executionClass) + '. The reviewer does not remain the parent.',
+            'Controller: independent review findings returned to the Deep Engineer for repair. Execution: ' + executionClassLabel(decision.executionClass) + '. The reviewer does not remain the parent.',
             'controller-repair',
           ),
         )
@@ -1019,13 +2154,13 @@ function apply(ctx) {
 
       if (binding.needsRouteCheck) {
         binding.needsRouteCheck = false
-        const decision = await routeTask(binding.workspace, binding.taskId, promptText, { preset: binding.preset })
+        const decision = await routeTask(binding.workspace, binding.taskId, promptText, { preset: binding.preset, taskInstanceId: binding.taskInstanceId || undefined })
         if (isReviewClass(decision.executionClass)) {
           binding.executionClass = decision.executionClass
           appendMessage(
             session,
             createControllerMessage(
-              'Controller: repeated identical failure reached the configured threshold; escalating to bounded independent review. Execution: ' + executionClassLabel('reviewer'),
+              'Controller: repeated identical failure reached the configured threshold; escalating to independent review. Execution: ' + executionClassLabel('reviewer'),
               'controller-escalation',
             ),
           )
@@ -1041,12 +2176,44 @@ function apply(ctx) {
       const latest = latestAttemptOf(binding.workspace, binding.taskId)
       if (!latest || !attemptIsOpen(latest)) {
         const nextSequence = latest ? latest.sequence + 1 : 1
+        // Phase 3.2.5: the step role for THIS turn (deterministic; Normal is
+        // the default; Deep only through the structured escalation gate).
+        let stepRole = null
         try {
-          await beginAttempt(binding, payload.turn)
+          const stepDecision = await selectEngineeringEpistemicStep(binding, payload.turn, promptText)
+          if (stepDecision) {
+            stepRole = stepDecision.selectedRole
+            binding.currentEpistemicActionId = stepDecision.actionId || null
+            binding.currentEngineeringStep = {
+              role: stepRole,
+              stepId: stepDecision.step && stepDecision.step.stepId ? String(stepDecision.step.stepId) : String(payload.turn ?? ''),
+              roleTarget: stepDecision.roleTarget || (stepDecision.step && stepDecision.step.roleTarget) || null,
+              selectedAction: stepDecision.selectedAction || null,
+            }
+            const candidates = stepDecision.retrieval && Array.isArray(stepDecision.retrieval.candidates) ? stepDecision.retrieval.candidates : []
+            const paths = candidates.map((item) => item && item.file ? String(item.file) : '').filter(Boolean).slice(0, 8)
+            const retrievalLine = stepDecision.selectedAction === 'retrieve'
+              ? '\nRepository evidence preload: ' + (stepDecision.retrievalError
+                  ? 'FAILED (' + stepDecision.retrievalError + '); structured retrieval remains available to Engineer Normal.'
+                  : String(candidates.length) + ' candidate(s)' + (paths.length ? ' · ' + paths.join(', ') : '') + '.')
+              : ''
+            appendMessage(
+              session,
+              createControllerMessage(
+                'Controller epistemic action: ' + String(stepDecision.selectedAction || 'reason').toUpperCase() + ' · ' + String(stepDecision.selectionReason || '') + '\nEngineering role: ' + executionClassLabel(stepRole) + '.' + retrievalLine,
+                'controller-epistemic-action',
+              ),
+            )
+          }
+        } catch (error) {
+          log({ event: 'step-routing-failed', sessionId: session.id, taskId: binding.taskId, error: String(error) })
+        }
+        try {
+          await beginAttempt(binding, payload.turn, stepRole)
           appendMessage(
             session,
             createControllerMessage(
-              'Controller: attempt ' + nextSequence + ' started · task ' + binding.taskId + ' (execution ' + executionClassLabel(binding.executionClass) + ').',
+              'Controller: attempt ' + nextSequence + ' started · task ' + binding.taskId + ' (execution ' + executionClassLabel(stepRole || binding.executionClass) + ' · step-routed).',
               'controller-attempt',
             ),
           )
@@ -1068,6 +2235,18 @@ function apply(ctx) {
       log({ event: 'pre-step-error', error: message })
       const agent = payload && payload.agent
       const session = agent && agent.session
+      if (error && (error.code === 'session-workspace-mismatch' || error.code === 'repository-identity-mismatch' || error.code === 'repository-identity-missing' || error.code === 'session-workspace-identity-unavailable')) {
+        if (session) {
+          appendMessage(
+            session,
+            createControllerMessage(
+              'Controller blocked execution: the session workspace identity could not be proven.\n' + message + '\nNo model or tool execution was allowed. Reopen the registered checkout or create a new conversation from the intended workspace.',
+              'controller-workspace-error',
+            ),
+          )
+        }
+        return { kind: 'reject' }
+      }
       if (explicitReview) {
         // FAIL CLOSED: an explicit /codex-review must never degrade into a
         // DeepSeek review while appearing to the user as Codex. Surface the
@@ -1123,6 +2302,10 @@ function loadBindings(bindingsPath) {
 module.exports = { name: 'aih-controller', inject: ['shellEnv'], apply }
 module.exports.isReviewCommand = isReviewCommand
 module.exports.reviewQuestionOf = reviewQuestionOf
+module.exports.isVisualReviewCommand = isVisualReviewCommand
+module.exports.visualReviewRequestOf = visualReviewRequestOf
+module.exports.classifyEpistemicPrompt = classifyEpistemicPrompt
+module.exports.engineeringUsageOfEvent = engineeringUsageOfEvent
 module.exports.textOf = textOf
 module.exports.isUserPrompt = isUserPrompt
 module.exports.userPromptMessages = userPromptMessages
@@ -1132,9 +2315,16 @@ module.exports.isReviewClass = isReviewClass
 module.exports.isWorkerAgent = isWorkerAgent
 module.exports.createControllerMessage = createControllerMessage
 module.exports.parseCliJson = parseCliJson
+module.exports.normalizeWorkspaceIdentity = normalizeWorkspaceIdentity
+module.exports.classifyBindingWorkspace = classifyBindingWorkspace
+module.exports.classifyBindingRepositoryIdentity = classifyBindingRepositoryIdentity
+module.exports.classifyBindingIdentity = classifyBindingIdentity
+module.exports.createBindingGuard = createBindingGuard
 module.exports.structuredCliStdout = structuredCliStdout
 module.exports.verificationCliStdout = verificationCliStdout
 module.exports.referencedFilesOf = referencedFilesOf
 module.exports.hasInlineCode = hasInlineCode
 module.exports.resolveReviewFiles = resolveReviewFiles
 module.exports.classifyReviewContext = classifyReviewContext
+module.exports.reviewBudgetPolicy = reviewBudgetPolicy
+module.exports.reviewResultText = reviewResultText

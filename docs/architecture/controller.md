@@ -34,7 +34,7 @@ For normal engineering turns it:
 4. reconciles any stale open verification state;
 5. starts a real attempt at the producer boundary when appropriate;
 6. exposes the selected execution class to the model/runtime;
-7. handles explicit controller-owned commands such as `/verify` and bounded review paths;
+7. handles explicit controller-owned commands such as `/verify` and independent review paths;
 8. emits controller notices back into the session.
 
 The GUI does not call `begin-attempt` directly. This keeps attempt creation tied to the real execution producer rather than browser behavior.

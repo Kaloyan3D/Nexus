@@ -1,6 +1,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Platform helpers (Test-AihIsWindows, Test-AihUnixPathUnderRoot). Dot-sourcing
+# Platform.ps1 is idempotent; this file can also be loaded through consumers
+# that already loaded Common.ps1.
+. (Join-Path $PSScriptRoot 'Platform.ps1')
+
 function Get-AihRelativePath {
     param([string]$Root, [string]$Path)
 
@@ -18,7 +23,7 @@ function Get-AihWorkspaceFiles {
     if ($null -ne $rg) {
         Push-Location $Workspace
         try {
-            return @(& $rg.Source --files --hidden -g '!**/.git/**' -g '!**/node_modules/**' -g '!**/.venv/**' -g '!**/venv/**' -g '!**/target/**' -g '!**/bin/**' -g '!**/obj/**' -g '!**/dist/**' -g '!**/build/**' | ForEach-Object { $_.Replace('/', '\') })
+            return @(& $rg.Source --files --hidden -g '!**/.git/**' -g '!**/node_modules/**' -g '!**/.venv/**' -g '!**/venv/**' -g '!**/target/**' -g '!**/bin/**' -g '!**/obj/**' -g '!**/dist/**' -g '!**/build/**' | ForEach-Object { $_.Replace('\', '/') })
         }
         finally { Pop-Location }
     }
@@ -27,7 +32,10 @@ function Get-AihWorkspaceFiles {
     # broken reparse point or a directory that Windows cannot enumerate. Walk one
     # directory at a time so a bad entry only excludes that subtree. This also
     # prevents expensive excluded trees from being traversed before filtering.
-    $excluded = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    # Excluded directory names compare with platform-appropriate case
+    # sensitivity (Windows filesystems are case-insensitive; Linux is not).
+    $comparer = if (Test-AihIsWindows) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
+    $excluded = [System.Collections.Generic.HashSet[string]]::new($comparer)
     foreach ($name in @('.git', 'node_modules', '.venv', 'venv', 'target', 'bin', 'obj', 'dist', 'build')) { [void]$excluded.Add($name) }
     $pending = [System.Collections.Generic.Queue[string]]::new()
     $pending.Enqueue($Workspace)
@@ -38,7 +46,10 @@ function Get-AihWorkspaceFiles {
         catch { continue }
         foreach ($entry in $entries) {
             if ($entry.PSIsContainer) {
-                if ($excluded.Contains($entry.Name) -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+                # Symlink/reparse-point cycle guard. Windows keeps the
+                # attribute check; other platforms use the link target probe.
+                $isLink = if (Test-AihIsWindows) { ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 } else { $null -ne $entry.LinkTarget }
+                if ($excluded.Contains($entry.Name) -or $isLink) { continue }
                 $pending.Enqueue($entry.FullName)
                 continue
             }
@@ -156,7 +167,7 @@ function Get-AihDotNetCommands {
     Add-AihCommand $Commands (New-AihVerificationCommand -Name 'dotnet:build' -Kind 'build' -WorkingDirectory $Workspace -Executable 'dotnet' -Arguments @('build', $target, '--nologo') -Source $target)
     $testProjects = @($projects | Where-Object {
         $_ -match '(?i)(test|tests|spec)\.(csproj|fsproj|vbproj)$' -or
-        (Get-Content -Raw -LiteralPath (Join-Path $Workspace $_) -ErrorAction SilentlyContinue) -match '(Microsoft\.NET\.Test\.Sdk|<IsTestProject>true</IsTestProject>)'
+        (Get-Content -Raw -LiteralPath (Join-Path $Workspace $_) -ErrorAction SilentlyContinue) -match '(Microsoft/.NET/.Test/.Sdk|<IsTestProject>true</IsTestProject>)'
     })
     if ($testProjects.Count -gt 0) {
         Add-AihCommand $Commands (New-AihVerificationCommand -Name 'dotnet:test' -Kind 'test' -WorkingDirectory $Workspace -Executable 'dotnet' -Arguments @('test', $target, '--no-build', '--nologo') -Source ($testProjects -join ', '))
@@ -200,14 +211,14 @@ function Get-AihConventionalCommands {
     }
     if ($Files -contains 'pom.xml') {
         Add-AihStack $Stacks 'Java/Maven'
-        $maven = if (Test-Path -LiteralPath (Join-Path $Workspace 'mvnw.cmd')) { '.\mvnw.cmd' } else { 'mvn' }
+        $maven = if (Test-Path -LiteralPath (Join-Path $Workspace 'mvnw.cmd')) { './mvnw.cmd' } elseif (-not (Test-AihIsWindows) -and (Test-Path -LiteralPath (Join-Path $Workspace 'mvnw'))) { './mvnw' } else { 'mvn' }
         Add-AihCommand $Commands (New-AihVerificationCommand -Name 'maven:test' -Kind 'test' -WorkingDirectory $Workspace -Executable $maven -Arguments @('--batch-mode', 'test') -Source 'pom.xml')
         Add-AihCommand $Commands (New-AihVerificationCommand -Name 'maven:package' -Kind 'build' -WorkingDirectory $Workspace -Executable $maven -Arguments @('--batch-mode', '-DskipTests', 'package') -Source 'pom.xml')
     }
     $gradleFile = @($Files | Where-Object { $_ -in @('build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts') } | Select-Object -First 1)
     if ($gradleFile.Count -gt 0) {
         Add-AihStack $Stacks 'Java/Gradle'
-        $gradle = if (Test-Path -LiteralPath (Join-Path $Workspace 'gradlew.bat')) { '.\gradlew.bat' } else { 'gradle' }
+        $gradle = if (Test-Path -LiteralPath (Join-Path $Workspace 'gradlew.bat')) { './gradlew.bat' } elseif (-not (Test-AihIsWindows) -and (Test-Path -LiteralPath (Join-Path $Workspace 'gradlew'))) { './gradlew' } else { 'gradle' }
         Add-AihCommand $Commands (New-AihVerificationCommand -Name 'gradle:check' -Kind 'verify' -WorkingDirectory $Workspace -Executable $gradle -Arguments @('--no-daemon', 'check') -Source $gradleFile[0])
         Add-AihCommand $Commands (New-AihVerificationCommand -Name 'gradle:assemble' -Kind 'build' -WorkingDirectory $Workspace -Executable $gradle -Arguments @('--no-daemon', 'assemble') -Source $gradleFile[0])
     }
@@ -228,12 +239,17 @@ function Get-AihConventionalCommands {
 function Get-AihLocalVerification {
     param([string]$Workspace, [string]$InstallRoot)
 
-    $path = Join-Path $Workspace '.ai-harness\verification.yml'
+    $path = Join-Path $Workspace '.ai-harness/verification.yml'
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     $layout = Get-AihLayout $InstallRoot
     $reader = Join-Path $layout.Scripts 'Read-Verification.mjs'
     if (-not (Test-Path -LiteralPath $reader)) { $reader = Join-Path $PSScriptRoot 'Read-Verification.mjs' }
-    $json = & $layout.Node $reader $path $layout.Root 2>&1
+    # TASK-0026: the reader child resolves Node through the shared toolchain
+    # contract, so a fixture InstallRoot without runtime/ still runs the real
+    # pinned Node instead of failing on ambient PATH resolution.
+    $nodeExecutable = Get-AihNodeExecutable -InstallRoot $InstallRoot
+    if ([string]::IsNullOrWhiteSpace($nodeExecutable)) { throw 'Node runtime is unavailable; run the Nexus installer to install the pinned runtime.' }
+    $json = & $nodeExecutable $reader $path $layout.Root 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Invalid .ai-harness/verification.yml: $($json -join [Environment]::NewLine)" }
     return ($json -join [Environment]::NewLine) | ConvertFrom-Json
 }
@@ -241,12 +257,21 @@ function Get-AihLocalVerification {
 function Get-AihProjectProfile {
     param(
         [string]$Workspace = (Get-Location).Path,
-        [string]$InstallRoot = 'C:\AI-Harness'
+        [string]$InstallRoot
     )
+
+    if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Split-Path -Parent $PSScriptRoot }
 
     $resolvedWorkspace = [System.IO.Path]::GetFullPath($Workspace)
     if (-not (Test-Path -LiteralPath $resolvedWorkspace -PathType Container)) { throw "Workspace does not exist: $resolvedWorkspace" }
     $files = @(Get-AihWorkspaceFiles -Workspace $resolvedWorkspace)
+    # Runtime scratch state is not a verification surface. Stale task
+    # fixtures under gitignored scratch directories (e.g. a deliberately
+    # failing node:test workspace left in tmp/ by an earlier audit) used to
+    # surface as failing verification commands for the whole workspace. Drop
+    # those prefixes before stack detection so discovery only sees project
+    # source trees.
+    $files = @($files | Where-Object { $_ -notmatch '^(tmp|data|logs|runtime|\.ai-harness)[\\/]' })
     $stacks = [System.Collections.Generic.List[string]]::new()
     $commands = [System.Collections.Generic.List[object]]::new()
     Get-AihNodeCommands -Workspace $resolvedWorkspace -Files $files -Stacks $stacks -Commands $commands
@@ -259,7 +284,7 @@ function Get-AihProjectProfile {
         $customCommands = [System.Collections.Generic.List[object]]::new()
         foreach ($entry in $local.commands) {
             $workingDirectory = [System.IO.Path]::GetFullPath((Join-Path $resolvedWorkspace $entry.workingDirectory))
-            if (-not $workingDirectory.StartsWith($resolvedWorkspace.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -and $workingDirectory -ne $resolvedWorkspace) {
+            if ($workingDirectory -ne $resolvedWorkspace -and -not (Test-AihUnixPathUnderRoot -Candidate $workingDirectory -Root $resolvedWorkspace)) {
                 throw "verification command working directory escapes workspace: $($entry.workingDirectory)"
             }
             Add-AihCommand $customCommands (New-AihVerificationCommand -Name $entry.name -Kind $entry.kind -WorkingDirectory $workingDirectory -ShellCommand $entry.command -Source '.ai-harness/verification.yml' -Required $entry.required -TimeoutSeconds $entry.timeoutSeconds)
@@ -285,38 +310,38 @@ function Get-AihProjectProfile {
         LocalConfigFiles = @($configFiles)
         LocalVerificationMode = if ($null -eq $local) { 'auto' } else { $local.mode }
         Recommendations = @(
-            if (-not (Test-Path -LiteralPath (Join-Path $resolvedWorkspace '.ai-harness\project.md'))) { 'Add .ai-harness/project.md for the project purpose and acceptance context.' }
-            if (-not (Test-Path -LiteralPath (Join-Path $resolvedWorkspace '.ai-harness\architecture.md'))) { 'Add .ai-harness/architecture.md for system boundaries and data flow.' }
-            if (-not (Test-Path -LiteralPath (Join-Path $resolvedWorkspace '.ai-harness\conventions.md'))) { 'Add .ai-harness/conventions.md for repository-specific engineering rules.' }
+            if (-not (Test-Path -LiteralPath (Join-Path $resolvedWorkspace '.ai-harness/project.md'))) { 'Add .ai-harness/project.md for the project purpose and acceptance context.' }
+            if (-not (Test-Path -LiteralPath (Join-Path $resolvedWorkspace '.ai-harness/architecture.md'))) { 'Add .ai-harness/architecture.md for system boundaries and data flow.' }
+            if (-not (Test-Path -LiteralPath (Join-Path $resolvedWorkspace '.ai-harness/conventions.md'))) { 'Add .ai-harness/conventions.md for repository-specific engineering rules.' }
             if ($commands.Count -eq 0) { 'Add .ai-harness/verification.yml because no deterministic commands were discovered.' }
         )
     }
 }
 
 function Format-AihProjectContext {
-    param([Parameter(Mandatory = $true)][object]$Profile, [int]$MaxCharacters = 20000)
+    param([Parameter(Mandatory = $true)][object]$ProjectProfile, [int]$MaxCharacters = 20000)
 
     $lines = [System.Collections.Generic.List[string]]::new()
-    $lines.Add("Project workspace: $($Profile.Workspace)")
-    $lines.Add("Detected stacks: $(if ($Profile.Stacks.Count) { $Profile.Stacks -join ', ' } else { 'unknown' })")
-    $lines.Add("Verification mode: $($Profile.LocalVerificationMode)")
-    if ($Profile.VerificationCommands.Count) {
+    $lines.Add("Project workspace: $($ProjectProfile.Workspace)")
+    $lines.Add("Detected stacks: $(if ($ProjectProfile.Stacks.Count) { $ProjectProfile.Stacks -join ', ' } else { 'unknown' })")
+    $lines.Add("Verification mode: $($ProjectProfile.LocalVerificationMode)")
+    if ($ProjectProfile.VerificationCommands.Count) {
         $lines.Add('Deterministic verification commands:')
-        foreach ($command in $Profile.VerificationCommands) {
+        foreach ($command in $ProjectProfile.VerificationCommands) {
             $availability = if ($command.Available) { 'available' } else { 'tool missing' }
             $lines.Add("- [$($command.Kind)] $($command.Display) (cwd: $($command.WorkingDirectory); $availability)")
         }
     }
     foreach ($name in @('project.md', 'architecture.md', 'conventions.md')) {
-        $path = Join-Path $Profile.Workspace ".ai-harness\$name"
+        $path = Join-Path $ProjectProfile.Workspace ".ai-harness\$name"
         if (Test-Path -LiteralPath $path) {
             $content = Get-Content -Raw -LiteralPath $path
             $lines.Add("`n.ai-harness/${name}:`n$content")
         }
     }
-    if ($Profile.Recommendations.Count) {
+    if ($ProjectProfile.Recommendations.Count) {
         $lines.Add("`nConfiguration recommendations:")
-        foreach ($recommendation in $Profile.Recommendations) { $lines.Add("- $recommendation") }
+        foreach ($recommendation in $ProjectProfile.Recommendations) { $lines.Add("- $recommendation") }
     }
     $text = $lines -join "`n"
     if ($text.Length -gt $MaxCharacters) { return $text.Substring(0, $MaxCharacters) + "`n[project context truncated]" }

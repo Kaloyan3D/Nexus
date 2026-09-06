@@ -3,6 +3,7 @@
     OpenAiOAuthVersion = '2.0.0'
     CodexSubagentVersion = '0.1.1-rc.2'
     NodeVersion = '24.18.1'
+    PowerShellVersion = '7.5.3'
     DefaultInstallRoot = 'C:\AI-Harness'
     OAuthBaseUrl = 'http://127.0.0.1:10531/v1'
     HarnessUrl = 'http://127.0.0.1:3080'

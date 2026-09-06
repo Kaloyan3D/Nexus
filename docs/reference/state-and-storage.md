@@ -121,13 +121,13 @@ A completed evidence artifact with any required failed check represents overall 
 
 ## Context artifacts
 
-`context-manifest.json` records the bounded context selected for a task. Large verification/tool output can live under `artifacts/`, while the model receives compact digests and references instead of unbounded logs.
+`context-manifest.json` records the context selected for a task (with an explicit `0 = unlimited` budget semantic; unlimited mode still records what was selected). Large verification/tool output can live under `artifacts/`, while the model receives compact digests and references instead of unbounded logs.
 
 ## Review artifacts
 
 ### `review-packet.json`
 
-Bounded request material for independent review. It is intentionally constrained by policy and should not silently expand to full-repository context.
+Request material for the independent review. Under the shipped default (`codex.automaticReview.enforceLimits=false`) the packet is not budget-bounded; it still never silently expands to full-repository context — the zero-file full-repository consent guard stays active regardless of budget enforcement.
 
 ### `review-result.json`
 

@@ -33,7 +33,7 @@ User -> TaskController -> Routing policy -> ContextEngine
 | H3 | Routing policy v2 uses execution classes; completion accepts ordinary deterministic evidence without Sol |
 | H4 | `ContextEngine.ps1`: repository map, symbols, references, lexical ranking, docs, Git, budgets/manifests |
 | H5 | `OutputDigest.ps1`, targeted `aih-verify`, and `aih-context` provide compact tool paths |
-| H6 | `CodexReview.ps1` creates and enforces bounded packets and fresh read-only review calls |
+| H6 | `CodexReview.ps1` creates review packets with policy-driven budget enforcement (`enforceLimits`, default off) and fresh read-only review calls |
 | H7 | `WorktreeManager.ps1` records exact-base worktrees; `ArchitectureRules.ps1` adds sandbox/static seams |
 | H8 | `Telemetry.ps1` records cost/quality inputs and defines configuration comparison records |
 
@@ -50,10 +50,11 @@ DeepSeek as the normal root engineer while making the controller real:
   posted into the session as a controller notice and exposed as
   `DSH_AIH_TASK_ID` / `DSH_AIH_EXECUTION_CLASS` / `DSH_AIH_REVIEW_REQUIRED`.
 - `/codex-review <question>` is the deterministic explicit review path: TaskController task
-  with `reviewRequested=true` -> routing selects `codex_review` -> bounded Review Packet
-  (context bundle capped at the Codex budget) -> hard budget validation -> one fresh read-only
+  with `reviewRequested=true` -> routing selects `codex_review` -> review packet (context
+  bundle unlimited by default: TASK-0007 passes 0 = unlimited; the legacy budgets apply only
+  when the policy sets `enforceLimits=true`) -> one fresh read-only
   Codex call -> ReviewResult + telemetry posted to the session. The turn is rejected, so no
-  DeepSeek audit runs first (DeepSeek calls = 0). Oversized packets produce a structured
+  DeepSeek audit runs first (DeepSeek calls = 0). Policy-rejected packets produce a structured
   packet-too-large result and Codex is not called.
 - Turn errors are routed as `attempt-failure` signals, so the same normalized-failure
   escalation (`deepseek_normal` -> `deepseek_deep` -> `codex_review`) works from GUI
@@ -102,7 +103,7 @@ Ordinary tasks have `Codex calls = 0`. Critical tasks are incomplete until a pas
 
 ## Review packet and enforced limits
 
-The packet contains only the task ID, exact question, invariants, bounded diff, selected file slices, failing evidence, concise DeepSeek assessment, requested action, and budget. It excludes prior conversations, the entire repository/specification, unrelated tools, and raw large logs.
+The packet contains only the task ID, exact question, invariants, diff, selected file slices, failing evidence, concise DeepSeek assessment, requested action, and budget. It excludes prior conversations, the entire repository/specification, unrelated tools, and raw large logs. The budget block records `enforceLimits` plus the numeric ceilings only when the policy enforces limits; with the shipped default (`false`) the values are `null` (0/null = unlimited), and the full-repository consent guard stays active independently of budgets.
 
 Limits in `config/routing-policy.json` are evaluated before a call and rechecked at registration time. A cached packet cannot bypass the current per-task call count. `codex_solve` is writable only through explicit execution-class override; automatic routing never selects it. Full-repository context requires an explicit approval flag.
 
@@ -112,7 +113,7 @@ Limits in `config/routing-policy.json` are evaluated before a call and rechecked
 
 ## Telemetry and cost comparison
 
-`telemetry.json` supports comparisons by configuration and records tokens when providers expose them. A representative ordinary run records DeepSeek as executor, one bounded context, one or more DeepSeek calls, and zero Codex calls. A critical/repeated-failure run records DeepSeek normal/deep, one bounded Codex review maximum, then DeepSeek repair. The deterministic test suite reproduces both route shapes without consuming model quota.
+`telemetry.json` supports comparisons by configuration and records tokens when providers expose them. A representative ordinary run records DeepSeek as executor, one bounded context, one or more DeepSeek calls, and zero Codex calls. A critical/repeated-failure run records DeepSeek normal/deep, one independent Codex review maximum, then DeepSeek repair. The deterministic test suite reproduces both route shapes without consuming model quota.
 
 ## Deprecations
 

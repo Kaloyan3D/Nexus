@@ -62,7 +62,7 @@ function Set-AihControlRoomDefault {
         [Parameter(Mandatory = $true)]$Mode
     )
 
-    $mutex = [Threading.Mutex]::new($false, 'Local\AIHarness.ControlRoom.Settings')
+    $mutex = [Threading.Mutex]::new($false, (ConvertTo-AihSafeSyncName 'Local\AIHarness.ControlRoom.Settings'))
     $locked = $false
     try {
         $locked = $mutex.WaitOne([TimeSpan]::FromSeconds(10))

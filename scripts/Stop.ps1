@@ -1,5 +1,10 @@
 [CmdletBinding()]
-param([string]$InstallRoot = 'C:\AI-Harness')
+param([string]$InstallRoot)
+
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    $InstallRoot = Split-Path -Parent $PSScriptRoot
+}
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
 . (Join-Path $PSScriptRoot 'Startup.ps1')
@@ -35,9 +40,7 @@ if (-not (Test-AihTrackedProcessIdentity -Process $process -State $stateObject -
     throw "Refusing to stop PID $($stateObject.Pid): it does not match the tracked executable and process start time."
 }
 
-Stop-Process -Id $process.Id -Force
-$process.WaitForExit(10000) | Out-Null
-if (-not $process.HasExited) { throw "Timed out stopping tracked AI Harness PID $($process.Id)." }
+if (-not (Stop-AihTrackedProcess -Process $process)) { throw "Timed out stopping tracked AI Harness PID $($process.Id)." }
 
 $state['Status'] = 'STOPPED'
 $state['StoppedAtUtc'] = [DateTime]::UtcNow.ToString('o')

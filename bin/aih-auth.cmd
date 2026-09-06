@@ -1,6 +1,6 @@
 @echo off
 setlocal
-set "AIH_ROOT=%AIH_INSTALL_ROOT%"
-if not defined AIH_ROOT set "AIH_ROOT=C:\AI-Harness"
+for %%I in ("%~dp0..") do set "AIH_ROOT=%%~fI"
+set "AIH_INSTALL_ROOT=%AIH_ROOT%"
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%AIH_ROOT%\scripts\Set-OpenAiOAuth.ps1" -InstallRoot "%AIH_ROOT%" %*
 exit /b %ERRORLEVEL%

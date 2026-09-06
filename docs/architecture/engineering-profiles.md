@@ -173,7 +173,7 @@ No routing or controller changes are required.
 
 ## Reviewer transport (this phase)
 
-The bounded reviewer executes through the local Codex/OAuth adapter only
+The independent reviewer executes through the local Codex/OAuth adapter only
 (provider `sol-local`). A profile that binds the reviewer role to any other
 provider fails closed: the review path throws instead of silently substituting
 a different model.
