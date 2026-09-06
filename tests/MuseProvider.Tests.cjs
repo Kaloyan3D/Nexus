@@ -81,17 +81,17 @@ async function main() {
   const registry = loadRegistry()
 
   // ── 1. Registry / engine scope (JS mirror of the controller rules) ──────
-  const museEntry = registryEntry(registry, 'muse-spark-1.3')
-  assert.ok(museEntry, 'muse-spark-1.3 is registered')
+  const museEntry = registryEntry(registry, 'muse-spark-1.3-contributor')
+  assert.ok(museEntry, 'muse-spark-1.3-contributor is registered')
   assert.equal(museEntry.vendor, 'Meta')
   assert.equal(museEntry.provider, 'meta-model-api')
   pass('1.1: registry entry resolves to Meta / meta-model-api')
 
   for (const role of ['primaryEngineer', 'deepEngineer', 'reviewer', 'solver', 'fallback', 'visualReviewer']) {
     const ids = engineering.compatibleModelsForRole(registry, role)
-    assert.ok(!ids.includes('muse-spark-1.3'), 'muse must not serve Dual role ' + role)
+    assert.ok(!ids.includes('muse-spark-1.3-contributor'), 'muse must not serve Dual role ' + role)
   }
-  pass('1.2: muse-spark-1.3 never appears in Dual role model lists (JS plane)')
+  pass('1.2: muse-spark-1.3-contributor never appears in Dual role model lists (JS plane)')
 
   assert.ok(engineering.compatibleModelsForRole(registry, 'primaryEngineer').includes('glm-5.3'),
     'pre-M2 entries keep Dual eligibility')
@@ -111,7 +111,7 @@ async function main() {
 
   const bindingTarget = engineering.roleBindingTarget(
     registry,
-    { id: 'muse-leak', displayName: 'x', roles: { primaryEngineer: { model: 'muse-spark-1.3', reasoning: 'xhigh' } } },
+    { id: 'muse-leak', displayName: 'x', roles: { primaryEngineer: { model: 'muse-spark-1.3-contributor', reasoning: 'xhigh' } } },
     'primaryEngineer',
   )
   assert.equal(bindingTarget, null)
@@ -119,22 +119,32 @@ async function main() {
 
   // ── 2. Muse profile -> registry -> provider chain ────────────────────────
   const museDoc = JSON.parse(fs.readFileSync(path.join(repoRoot, 'config', 'muse-profiles.json'), 'utf8'))
-  const museProfile = museDoc.profiles.find((p) => p && p.id === 'muse-spark-1.3')
+  const museProfile = museDoc.profiles.find((p) => p && p.id === 'muse-spark-1.3-contributor')
   assert.ok(museProfile, 'muse profile present')
-  assert.equal(nexusProfiles.museModelBindingOf(museProfile), 'muse-spark-1.3')
+  assert.equal(nexusProfiles.museModelBindingOf(museProfile), 'muse-spark-1.3-contributor')
   pass('2.1: Muse profile binds the model registry id, never a provider id')
 
-  const resolved = nexusProfiles.resolveMuseProfileModel(repoRoot, 'muse-spark-1.3')
+  const resolved = nexusProfiles.resolveMuseProfileModel(repoRoot, 'muse-spark-1.3-contributor')
   assert.ok(resolved, 'muse model binding resolves')
   assert.equal(resolved.provider, 'meta-model-api')
-  assert.equal(resolved.model, 'muse-spark-1.3')
+  assert.equal(resolved.model, 'muse-spark-1.3-contributor')
   assert.equal(resolved.reasoning, 'xhigh')
-  assert.equal(resolved.dataUseTier, 'standard')
-  pass('2.2: binding chain resolves profile -> registry -> provider with reasoning and dataUseTier')
+  assert.equal(resolved.dataUseTier, 'contributor')
+  pass('2.2: binding chain resolves profile -> registry -> provider with reasoning and contributor dataUseTier')
 
-  const maxResolved = nexusProfiles.resolveMuseProfileModel(repoRoot, 'muse-spark-1.3', 'max')
-  assert.ok(maxResolved && maxResolved.provider === 'meta-model-api' && maxResolved.reasoning === 'max')
-  pass('2.3: escalation level max resolves through the same provider route')
+  // M2.1 verified contract: 'max' is Standard-tier muse-spark-1.3 only and is
+  // NOT in the contributor supportedReasoningLevels — requesting it fails closed.
+  const maxResolved = nexusProfiles.resolveMuseProfileModel(repoRoot, 'muse-spark-1.3-contributor', 'max')
+  assert.equal(maxResolved, null)
+  pass('2.3: escalation level max (Standard-tier only) fails closed on the contributor route')
+
+  const offResolved = nexusProfiles.resolveMuseProfileModel(repoRoot, 'muse-spark-1.3-contributor', 'off')
+  assert.equal(offResolved, null)
+  pass('2.3b: reasoning off (HTTP 400 on Meta, omission still reasons) fails closed')
+
+  const xhighResolved = nexusProfiles.resolveMuseProfileModel(repoRoot, 'muse-spark-1.3-contributor', 'xhigh')
+  assert.ok(xhighResolved && xhighResolved.provider === 'meta-model-api' && xhighResolved.reasoning === 'xhigh')
+  pass('2.3c: explicit xhigh escalation resolves through the same provider route')
 
   assert.equal(nexusProfiles.resolveMuseProfileModel(repoRoot, 'no-such-muse-profile'), null)
   pass('2.4: unknown Muse profile fails closed')
@@ -145,14 +155,39 @@ async function main() {
     fs.copyFileSync(path.join(repoRoot, 'config', name), path.join(fixtureRoot, 'config', name))
   }
   const leakedRegistry = JSON.parse(JSON.stringify(registry))
-  const leakedEntry = registryEntry(leakedRegistry, 'muse-spark-1.3')
+  const leakedEntry = registryEntry(leakedRegistry, 'muse-spark-1.3-contributor')
   leakedEntry.agentEngines = ['dual']
   leakedEntry.enabled = true
   fs.writeFileSync(path.join(fixtureRoot, 'config', 'model-registry.json'), JSON.stringify(leakedRegistry))
   fs.copyFileSync(path.join(repoRoot, 'config', 'muse-profiles.json'), path.join(fixtureRoot, 'config', 'muse-profiles.json'))
-  assert.equal(nexusProfiles.resolveMuseProfileModel(fixtureRoot, 'muse-spark-1.3'), null,
+  assert.equal(nexusProfiles.resolveMuseProfileModel(fixtureRoot, 'muse-spark-1.3-contributor'), null,
     'a muse-bound model that Dual roles could also claim must not serve the Muse plane')
   pass('2.5: a muse profile cannot bind a model scoped away from the muse engine')
+
+  // M2.1 asymmetry: ABSENCE of agentEngines also fails closed on the muse
+  // plane (an unscoped Dual-legacy entry can never serve the Muse transport),
+  // while the dual plane keeps tolerating absence for pre-M2 entries.
+  const unscopedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'muse-runtime-'))
+  fs.mkdirSync(path.join(unscopedRoot, 'config'), { recursive: true })
+  for (const name of ['routing-policy.json', 'engineering-profiles.json', 'nexus-profiles.json', 'muse-profiles.json']) {
+    fs.copyFileSync(path.join(repoRoot, 'config', name), path.join(unscopedRoot, 'config', name))
+  }
+  const unscopedRegistry = JSON.parse(JSON.stringify(registry))
+  delete registryEntry(unscopedRegistry, 'muse-spark-1.3-contributor').agentEngines
+  fs.writeFileSync(path.join(unscopedRoot, 'config', 'model-registry.json'), JSON.stringify(unscopedRegistry))
+  assert.equal(nexusProfiles.resolveMuseProfileModel(unscopedRoot, 'muse-spark-1.3-contributor'), null,
+    'an unscoped registry entry must not serve the Muse plane')
+  pass('2.6: a registry entry WITHOUT agentEngines fails closed on the muse plane')
+
+  // Shared asymmetric engine contract, JS mirror of Test-AihModelEngineCompatible.
+  const unscoped = { id: 'u', enabled: true }
+  assert.equal(engineering.modelEngineCompatible(unscoped, 'dual'), true)
+  assert.equal(engineering.modelEngineCompatible(unscoped, 'muse'), false)
+  assert.equal(engineering.modelEngineCompatible({ agentEngines: ['dual'] }, 'muse'), false)
+  assert.equal(engineering.modelEngineCompatible({ agentEngines: ['muse'] }, 'dual'), false)
+  assert.equal(engineering.modelEngineCompatible({ agentEngines: ['muse'] }, 'muse'), true)
+  assert.equal(engineering.modelEngineCompatible({ agentEngines: ['dual'] }, 'quantum'), false)
+  pass('2.7: the engine-scope contract is asymmetric and fails closed for unknown engines')
 
   const disabledRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'muse-runtime-'))
   fs.mkdirSync(path.join(disabledRoot, 'config'), { recursive: true })
@@ -160,9 +195,9 @@ async function main() {
     fs.copyFileSync(path.join(repoRoot, 'config', name), path.join(disabledRoot, 'config', name))
   }
   const disabledRegistry = JSON.parse(JSON.stringify(registry))
-  registryEntry(disabledRegistry, 'muse-spark-1.3').enabled = false
+  registryEntry(disabledRegistry, 'muse-spark-1.3-contributor').enabled = false
   fs.writeFileSync(path.join(disabledRoot, 'config', 'model-registry.json'), JSON.stringify(disabledRegistry))
-  assert.equal(nexusProfiles.resolveMuseProfileModel(disabledRoot, 'muse-spark-1.3'), null)
+  assert.equal(nexusProfiles.resolveMuseProfileModel(disabledRoot, 'muse-spark-1.3-contributor'), null)
   pass('2.6: a disabled registry model fails closed')
 
   fs.rmSync(fixtureRoot, { recursive: true, force: true })
@@ -170,7 +205,7 @@ async function main() {
 
   // ── 3. Probe unit contract ──────────────────────────────────────────────
   const body = probe.buildRequestBody({
-    model: 'muse-spark-1.3',
+    model: 'muse-spark-1.3-contributor',
     prompt: 'hi',
     stream: true,
     reasoningEffort: 'high',
@@ -178,7 +213,7 @@ async function main() {
     toolChoice: 'auto',
     maxCompletionTokens: 64,
   })
-  assert.equal(body.model, 'muse-spark-1.3')
+  assert.equal(body.model, 'muse-spark-1.3-contributor')
   assert.equal(body.stream, true)
   assert.deepEqual(body.stream_options, { include_usage: true })
   assert.equal(body.reasoning_effort, 'high')
@@ -187,7 +222,7 @@ async function main() {
   assert.ok(Array.isArray(body.tools) && body.tools[0].function.name === 'get_test_temperature')
   pass('3.1: request body carries the verified Meta wire fields')
 
-  const offBody = probe.buildRequestBody({ model: 'muse-spark-1.3', prompt: 'hi', reasoningEffort: '' })
+  const offBody = probe.buildRequestBody({ model: 'muse-spark-1.3-contributor', prompt: 'hi', reasoningEffort: '' })
   assert.ok(!('reasoning_effort' in offBody))
   pass('3.2: Nexus off omits reasoning_effort (send nothing)')
 
@@ -212,7 +247,7 @@ async function main() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'muse-probe-'))
   try {
     delete process.env.NEXUS_META_LIVE_TEST
-    const missing = await probe.runProbe({ baseUrl: 'https://api.meta.ai/v1', apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3', prompt: 'x' })
+    const missing = await probe.runProbe({ baseUrl: 'https://api.meta.ai/v1', apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3-contributor', prompt: 'x' })
     assert.equal(missing.outcome.ok, false)
     assert.equal(missing.outcome.errorKind, 'missing-api-key')
     assert.equal(missing.exitCode, 0)
@@ -220,8 +255,8 @@ async function main() {
 
     process.env.MODEL_API_KEY = TEST_KEY
     const mockPath = path.join(tmp, 'mock-echo.json')
-    fs.writeFileSync(mockPath, JSON.stringify({ status: 200, body: { model: 'muse-spark-1.3', choices: [{ index: 0, message: { role: 'assistant', content: 'NEXUS' }, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6, completion_tokens_details: { reasoning_tokens: 2 } } }, echoRequest: true }))
-    const echoed = await probe.runProbe({ baseUrl: 'https://api.meta.ai/v1', apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3', prompt: 'Reply with exactly the word NEXUS.', reasoningEffort: 'high', mockFile: mockPath })
+    fs.writeFileSync(mockPath, JSON.stringify({ status: 200, body: { model: 'muse-spark-1.3-contributor', choices: [{ index: 0, message: { role: 'assistant', content: 'NEXUS' }, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6, completion_tokens_details: { reasoning_tokens: 2 } } }, echoRequest: true }))
+    const echoed = await probe.runProbe({ baseUrl: 'https://api.meta.ai/v1', apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3-contributor', prompt: 'Reply with exactly the word NEXUS.', reasoningEffort: 'high', mockFile: mockPath })
     assert.equal(echoed.outcome.ok, true)
     assert.equal(echoed.outcome.content, 'NEXUS')
     assert.equal(echoed.outcome.usage.reasoningTokens, 2)
@@ -236,7 +271,7 @@ async function main() {
       'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6,"completion_tokens_details":{"reasoning_tokens":2}}}',
       'data: [DONE]',
     ]))
-    const streamed = await probe.runProbe({ baseUrl: 'https://api.meta.ai/v1', apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3', prompt: 'x', stream: true, mockStreamFile: streamPath })
+    const streamed = await probe.runProbe({ baseUrl: 'https://api.meta.ai/v1', apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3-contributor', prompt: 'x', stream: true, mockStreamFile: streamPath })
     assert.equal(streamed.outcome.ok, true)
     assert.equal(streamed.outcome.content, 'NEXUS')
     assert.equal(streamed.outcome.finishReason, 'stop')
@@ -246,7 +281,7 @@ async function main() {
 
     const cutPath = path.join(tmp, 'mock-cut.json')
     fs.writeFileSync(cutPath, JSON.stringify(['data: {"choices":[{"index":0,"delta":{"content":"PAR"}}]}']))
-    const cut = await probe.runProbe({ baseUrl: 'https://api.meta.ai/v1', apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3', prompt: 'x', stream: true, mockStreamFile: cutPath })
+    const cut = await probe.runProbe({ baseUrl: 'https://api.meta.ai/v1', apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3-contributor', prompt: 'x', stream: true, mockStreamFile: cutPath })
     assert.equal(cut.outcome.ok, false)
     assert.equal(cut.outcome.errorKind, 'stream-interrupted')
     assert.equal(cut.outcome.content, 'PAR')
@@ -269,7 +304,7 @@ async function main() {
       res.end(JSON.stringify({ error: { message: 'bad key ' + (req.headers.authorization || ''), type: 'authentication_error', param: null, code: null } }))
     })
     try {
-      const outcome = await probe.runProbe({ baseUrl: unauthorized.baseUrl, apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3', prompt: 'x' })
+      const outcome = await probe.runProbe({ baseUrl: unauthorized.baseUrl, apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3-contributor', prompt: 'x' })
       assert.equal(outcome.outcome.ok, false)
       assert.equal(outcome.outcome.errorKind, 'provider-error')
       assert.equal(outcome.outcome.status, 401)
@@ -287,7 +322,7 @@ async function main() {
         res.end(JSON.stringify({ error: { message: 'synthetic ' + status, type: 'provider_error', param: null, code: null } }))
       })
       try {
-        const outcome = await probe.runProbe({ baseUrl: failing.baseUrl, apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3', prompt: 'x' })
+        const outcome = await probe.runProbe({ baseUrl: failing.baseUrl, apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3-contributor', prompt: 'x' })
         assert.equal(outcome.outcome.errorKind, 'provider-error')
         assert.equal(outcome.outcome.status, status)
         assert.ok(!JSON.stringify(outcome.outcome).includes(TEST_KEY))
@@ -298,7 +333,7 @@ async function main() {
     // 5.3 timeout classification against a server that never answers
     const hanging = await startMockProvider(() => { /* never respond */ })
     try {
-      const outcome = await probe.runProbe({ baseUrl: hanging.baseUrl, apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3', prompt: 'x', timeoutMs: 400 })
+      const outcome = await probe.runProbe({ baseUrl: hanging.baseUrl, apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3-contributor', prompt: 'x', timeoutMs: 400 })
       assert.equal(outcome.outcome.ok, false)
       assert.equal(outcome.outcome.errorKind, 'timeout')
       pass('5.3: timeout is classified and normalized')
@@ -313,7 +348,7 @@ async function main() {
       ])
     })
     try {
-      const outcome = await probe.runProbe({ baseUrl: malformedStream.baseUrl, apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3', prompt: 'x', stream: true })
+      const outcome = await probe.runProbe({ baseUrl: malformedStream.baseUrl, apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3-contributor', prompt: 'x', stream: true })
       assert.equal(outcome.outcome.errorKind, 'stream-malformed')
       assert.equal(outcome.outcome.content, 'PAR')
       assert.equal(outcome.outcome.interrupted, true)
@@ -326,7 +361,7 @@ async function main() {
       sse(res, ['data: {"choices":[{"index":0,"delta":{"content":"CUT"}}]}'])
     })
     try {
-      const outcome = await probe.runProbe({ baseUrl: interruptedStream.baseUrl, apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3', prompt: 'x', stream: true })
+      const outcome = await probe.runProbe({ baseUrl: interruptedStream.baseUrl, apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3-contributor', prompt: 'x', stream: true })
       assert.equal(outcome.outcome.errorKind, 'stream-interrupted')
       assert.equal(outcome.outcome.content, 'CUT')
       pass('5.5: interrupted stream normalized over the real wire')
@@ -359,7 +394,7 @@ async function main() {
       ])
     })
     try {
-      const streamOutcome = await probe.runProbe({ baseUrl: good.baseUrl, apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3', prompt: 'x', stream: true })
+      const streamOutcome = await probe.runProbe({ baseUrl: good.baseUrl, apiKeyEnv: 'MODEL_API_KEY', model: 'muse-spark-1.3-contributor', prompt: 'x', stream: true })
       assert.equal(streamOutcome.outcome.ok, true)
       assert.equal(streamOutcome.outcome.content, 'NEXUS')
       assert.equal(streamOutcome.outcome.finishReason, 'stop')
@@ -369,7 +404,7 @@ async function main() {
       const toolOutcome = await probe.runProbe({
         baseUrl: good.baseUrl,
         apiKeyEnv: 'MODEL_API_KEY',
-        model: 'muse-spark-1.3',
+        model: 'muse-spark-1.3-contributor',
         prompt: 'What is the test temperature in Paris?',
         tools: [{ type: 'function', function: { name: 'get_test_temperature', description: 'Recorded test temperature.', parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] } } }],
         toolChoice: 'auto',
@@ -390,7 +425,7 @@ async function main() {
       lastWireBody = bodyDoc
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({
-        model: 'muse-spark-1.3',
+        model: 'muse-spark-1.3-contributor',
         choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: [{ id: 'call_wire_2', type: 'function', function: { name: 'get_test_temperature', arguments: '{"city":"Paris"}' } }] }, finish_reason: 'tool_calls' }],
         usage: { prompt_tokens: 9, completion_tokens: 4, total_tokens: 13 },
       }))
@@ -400,7 +435,7 @@ async function main() {
       const outcome = await probe.runProbe({
         baseUrl: toolServer.baseUrl,
         apiKeyEnv: 'MODEL_API_KEY',
-        model: 'muse-spark-1.3',
+        model: 'muse-spark-1.3-contributor',
         prompt: 'Use the get_test_temperature tool for Paris.',
         tools: [{ type: 'function', function: { name: 'get_test_temperature', description: 'Recorded test temperature.', parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] } } }],
         toolChoice: 'auto',
@@ -418,6 +453,68 @@ async function main() {
     else process.env.MODEL_API_KEY = previousKey
   }
 
+  // ── 6. Provider substrate probe (Hardening 5, TASK-0037) ─────────────────
+  // The REAL DSH provider substrate must recognize the managed route offline:
+  // FileSettingsProvider -> substrate.Config -> substrate.apply -> the real
+  // PiAiAdapter -> listModels/resolveModel. No credentials, no network.
+  {
+    const { spawnSync } = require('node:child_process')
+    const packagesRoot = path.join(repoRoot, 'app', 'node_modules')
+    const probeScript = path.join(repoRoot, 'scripts', 'Invoke-ProviderSubstrateProbe.mjs')
+    if (fs.existsSync(probeScript) && fs.existsSync(path.join(packagesRoot, '@deepseek-ai', 'dsh-llm-pi-ai'))) {
+      const managedSettings = path.join(repoRoot, 'config', 'settings.yaml')
+      const managedOut = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'muse-substrate-')), 'record.json')
+      const managed = spawnSync(process.execPath, [probeScript, '--settings', managedSettings, '--packages', packagesRoot, '--out', managedOut],
+        { encoding: 'utf8', timeout: 60000, stdio: 'ignore' })
+      assert.equal(managed.status, 0, 'substrate probe must pass against the managed template: ' + (managed.stderr || managed.stdout || '').slice(-400))
+      const record = JSON.parse(fs.readFileSync(managedOut, 'utf8'))
+      fs.rmSync(path.dirname(managedOut), { recursive: true, force: true })
+      assert.equal(record.status, 'ready')
+      const checkNames = record.checks.filter((c) => c.ok).map((c) => c.name)
+      for (const required of ['settings-loaded', 'section-present', 'section-schema-valid', 'adapter-registered', 'route-registered',
+        'list-models:muse-spark-1.3-contributor', 'resolve-model', 'context-window', 'output-ceiling',
+        'reasoning-level:minimal', 'reasoning-level:low', 'reasoning-level:medium', 'reasoning-level:high', 'reasoning-level:xhigh',
+        'reasoning-level-refused:off', 'reasoning-level-refused:max']) {
+        assert.ok(checkNames.includes(required), 'substrate probe check missing/failed: ' + required)
+      }
+      pass('6.1: the real substrate recognizes meta-model-api/muse-spark-1.3-contributor offline (window 1048576, ceiling 131072, levels minimal..xhigh, no off/max)')
+
+      // The probe must DISCRIMINATE: the Phase M2 standard route (off/max in
+      // reasoningEfforts) fails the contributor expectations closed.
+      const staleFixture = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'muse-substrate-')), 'settings.yaml')
+      const m2Route = [
+        'llm-pi-ai:',
+        '  providers:',
+        '    meta-model-api:',
+        '      displayName: Meta Model API (Muse Spark, direct)',
+        '      apiKeyEnv: MODEL_API_KEY',
+        '      api: openai-completions',
+        '      baseURL: https://api.meta.ai/v1',
+        '      reasoning: xhigh',
+        '      compat:',
+        '        thinkingFormat: openai',
+        '        supportsReasoningEffort: true',
+        '      models:',
+        '        - id: muse-spark-1.3',
+        '          name: Muse Spark 1.3',
+        '          contextWindow: 1048576',
+        '          maxTokens: 32768',
+        '          reasoningEfforts:',
+        '            off:',
+        '            high: high',
+        '            xhigh: xhigh',
+        '            max: high',
+      ].join('\n') + '\n'
+      fs.writeFileSync(staleFixture, m2Route)
+      const stale = spawnSync(process.execPath, [probeScript, '--settings', staleFixture, '--packages', packagesRoot],
+        { encoding: 'utf8', timeout: 60000, stdio: 'ignore' })
+      fs.rmSync(path.dirname(staleFixture), { recursive: true, force: true })
+      assert.notEqual(stale.status, 0, 'the substrate probe must fail closed against the M2 standard route (it offers off/max)')
+      pass('6.2: the substrate probe discriminates the M2 standard route from the contributor route (fail closed)')
+    } else {
+      console.log('NOTE: pinned substrate packages not present; probe section skipped')
+    }
+  }
   console.log('RESULT: ' + passed + ' MuseProviderRuntime assertions passed.')
 }
 

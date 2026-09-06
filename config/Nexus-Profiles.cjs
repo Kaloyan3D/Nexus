@@ -276,9 +276,12 @@ function resolveMuseProfileModel(installRoot, profileId, reasoningOverride) {
     if (candidate && String(candidate.id) === modelId) { entry = candidate; break }
   }
   if (!entry || entry.enabled === false) return null
-  // Defense in depth: the binding may only resolve to a model scoped to the
-  // muse engine (agentEngines absent = Dual-plane entry = configuration error).
-  if (Array.isArray(entry.agentEngines) && !entry.agentEngines.includes('muse')) return null
+  // Phase M2.1 defense in depth: the binding may only resolve to a model
+  // EXPLICITLY scoped to the muse engine (the shared asymmetric engine
+  // contract from Engineering-Profiles.cjs). Absence of `agentEngines` fails
+  // closed on the Muse plane: an unscoped or Dual-only entry is a
+  // configuration error and must not silently serve the Muse transport.
+  if (!engineering.modelEngineCompatible(entry, 'muse')) return null
   const requested = typeof reasoningOverride === 'string' && reasoningOverride !== ''
     ? reasoningOverride
     : String((museProfile.reasoning && museProfile.reasoning.default) || '')

@@ -29,7 +29,7 @@ try{
     Assert-AihEqual $glm.Engine 'dual' 'GLM profile ids resolve case-insensitively'
     Assert-AihTrue ([bool]$glm.Runnable) 'existing Dual profiles remain runnable'
 
-    $muse=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId 'muse-spark-1.3'
+    $muse=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId 'muse-spark-1.3-contributor'
     Assert-AihEqual $muse.Engine 'muse' 'Muse resolves to a separate agent engine on controller plane'
     Assert-AihTrue (-not[bool]$muse.Selectable) 'Muse stays non-selectable during M1'
     Assert-AihTrue (-not[bool]$muse.Runnable) 'Muse stays non-runnable during M1'
@@ -62,7 +62,7 @@ try{
     $active=Resolve-AihActiveNexusProfile -InstallRoot $fixture -Preset 'aih-engineering'
     Assert-AihEqual $active.Id 'deepseek-codex' 'AIH_ACTIVE_PROFILE preserves existing precedence'
 
-    $env:DSH_AIH_PROFILE='muse-spark-1.3'
+    $env:DSH_AIH_PROFILE='muse-spark-1.3-contributor'
     $active=Resolve-AihActiveNexusProfile -InstallRoot $fixture -Preset 'aih-engineering'
     Assert-AihEqual $active.Engine 'muse' 'DSH_AIH_PROFILE can identify Muse without Dual fallback'
     Assert-AihTrue (-not[bool]$active.Runnable) 'active Muse metadata still exposes the M1 execution gate'
@@ -80,7 +80,7 @@ try{
     $stateScript=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $fixture
     $editorState=$stateScript|ConvertFrom-Json
     $nexusIds=@($editorState.nexusProfiles|ForEach-Object{$_.id})
-    Assert-AihTrue (($nexusIds -contains 'deepseek-codex')-and($nexusIds -contains 'glm-codex')-and($nexusIds -contains 'muse-spark-1.3')-and($nexusIds -contains 'custom')) 'editor GET exposes the top-level Nexus profile catalog incl. dynamic Custom'
+    Assert-AihTrue (($nexusIds -contains 'deepseek-codex')-and($nexusIds -contains 'glm-codex')-and($nexusIds -contains 'muse-spark-1.3-contributor')-and($nexusIds -contains 'custom')) 'editor GET exposes the top-level Nexus profile catalog incl. dynamic Custom'
     $glmEntry=@($editorState.nexusProfiles|Where-Object{$_.id -eq 'glm-codex'})[0]
     Assert-AihEqual $glmEntry.engine 'dual' 'GLM + Codex is classified dual in editor state'
     Assert-AihTrue ([bool]$glmEntry.selectable) 'GLM + Codex stays selectable in editor state'
@@ -89,14 +89,14 @@ try{
     $customEntry=@($editorState.nexusProfiles|Where-Object{$_.id -eq 'custom'})[0]
     Assert-AihEqual $customEntry.engine 'dual' 'operator Custom profile is classified dual in editor state'
     Assert-AihEqual $customEntry.builtin $false 'dynamic Custom entry is marked non-builtin'
-    $museEntry=@($editorState.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3'})[0]
+    $museEntry=@($editorState.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3-contributor'})[0]
     Assert-AihEqual $museEntry.engine 'muse' 'Muse Spark 1.3 is classified muse in editor state'
     Assert-AihTrue (-not[bool]$museEntry.selectable) 'Muse stays selectable=false in editor state'
     Assert-AihTrue (-not[bool]$museEntry.runnable) 'Muse stays runnable=false in editor state'
     Assert-AihEqual $museEntry.availability 'foundation' 'Muse availability=foundation in editor state'
     Assert-AihTrue ($null-eq$museEntry.roles) 'Muse entry is NOT coerced into Dual roles'
     Assert-AihEqual $museEntry.muse.reasoning.default 'xhigh' 'Muse metadata exposes reasoning.default=xhigh'
-    Assert-AihEqual $museEntry.muse.reasoning.escalation 'max' 'Muse metadata exposes reasoning.escalation=max'
+    Assert-AihEqual $museEntry.muse.reasoning.escalation 'xhigh' 'Muse metadata exposes reasoning.escalation=xhigh (the Contributor ceiling, not the Standard-only max)'
     Assert-AihEqual $museEntry.muse.subagents.enabled $false 'Muse metadata exposes subagents.enabled=false'
     Assert-AihEqual $museEntry.muse.review.independent $false 'Muse metadata exposes review.independent=false'
     Assert-AihEqual $museEntry.muse.contributorProtection.required $true 'Muse metadata exposes contributorProtection.required=true'
@@ -104,7 +104,7 @@ try{
 
     # Muse selection is rejected deterministically BEFORE the settings key moves
     $settingsBefore=Get-Content -Raw (Join-Path $fixture 'data/settings.yaml')
-    $museSelectRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $fixture -ProfileId 'muse-spark-1.3'
+    $museSelectRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $fixture -ProfileId 'muse-spark-1.3-contributor'
     $museSelect=$museSelectRaw|ConvertFrom-Json
     Assert-AihEqual $museSelect.ok $false 'select Muse returns ok=false'
     Assert-AihEqual $museSelect.error 'profile-not-selectable' 'select Muse fails deterministically with profile-not-selectable'
@@ -140,7 +140,7 @@ try{
     $stateScript2=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $fixture
     $editorState2=$stateScript2|ConvertFrom-Json
     $customEntry2=@($editorState2.nexusProfiles|Where-Object{$_.id -eq 'custom'})[0]
-    $museEntry2=@($editorState2.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3'})[0]
+    $museEntry2=@($editorState2.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3-contributor'})[0]
     Assert-AihEqual $customEntry2.engine 'dual' 'saved Custom profile remains engine dual (Muse is never rewritten into Custom)'
     Assert-AihTrue (-not[bool]$museEntry2.selectable) 'save-custom leaves Muse non-selectable'
     Assert-AihEqual $museEntry2.availability 'foundation' 'save-custom leaves Muse availability=foundation'
@@ -153,31 +153,31 @@ try{
         New-Item -ItemType Directory -Force -Path (Join-Path $selFixture 'data')|Out-Null
         foreach($name in @('routing-policy.json','engineering-profiles.json','model-registry.json','muse-profiles.json')){Copy-AihConfigFile $name $selFixture}
         $selCatalog=Get-Content -Raw (Join-Path $InstallRoot 'config/nexus-profiles.json')|ConvertFrom-Json
-        $selMuseCatalogEntry=@($selCatalog.profiles|Where-Object{$_.id -eq 'muse-spark-1.3'})[0]
+        $selMuseCatalogEntry=@($selCatalog.profiles|Where-Object{$_.id -eq 'muse-spark-1.3-contributor'})[0]
         $selMuseCatalogEntry.selectable=$true
         $selMuseCatalogEntry.runnable=$false
         $selCatalog|ConvertTo-Json -Depth 10|Set-Content -Encoding UTF8 -LiteralPath (Join-Path $selFixture 'config/nexus-profiles.json')
         [IO.File]::WriteAllText((Join-Path $selFixture 'data/settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
 
-        $selRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $selFixture -ProfileId 'muse-spark-1.3'
+        $selRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $selFixture -ProfileId 'muse-spark-1.3-contributor'
         $selResult=$selRaw|ConvertFrom-Json
-        Assert-AihTrue ([bool]$selResult.ok -and $selResult.profileId -eq 'muse-spark-1.3') 'hypothetical selectable Muse is NOT rejected for being Muse (selectable-only gate)'
+        Assert-AihTrue ([bool]$selResult.ok -and $selResult.profileId -eq 'muse-spark-1.3-contributor') 'hypothetical selectable Muse is NOT rejected for being Muse (selectable-only gate)'
         $selSettingsText=Get-Content -Raw (Join-Path $selFixture 'data/settings.yaml')
         Assert-AihTrue ([regex]::IsMatch($selSettingsText,'(?m)^engineering-profile:\s*muse-spark-1\.3')) 'selectable Muse selection writes the preferred profile key'
         $selStateRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $selFixture
         $selState=$selStateRaw|ConvertFrom-Json
-        $selMuseEntry=@($selState.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3'})[0]
+        $selMuseEntry=@($selState.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3-contributor'})[0]
         Assert-AihEqual $selMuseEntry.engine 'muse' 'selectable hypothetical stays engine=muse'
         Assert-AihEqual $selMuseEntry.selectable $true 'editor state exposes the selectable Muse (engine never forces selectable=false)'
         Assert-AihEqual $selMuseEntry.runnable $false 'runnable stays independent of selectable'
-        Assert-AihEqual $selState.preferredProfile.id 'muse-spark-1.3' 'preferred Muse profile initializes from the Nexus catalog'
+        Assert-AihEqual $selState.preferredProfile.id 'muse-spark-1.3-contributor' 'preferred Muse profile initializes from the Nexus catalog'
         $selBackRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $selFixture -ProfileId 'glm-codex'
         $selBackResult=$selBackRaw|ConvertFrom-Json
         Assert-AihTrue ([bool]$selBackResult.ok) 'Dual profiles remain selectable after Muse preference work'
     }finally{if(Test-Path -LiteralPath $selFixture){Remove-Item -LiteralPath $selFixture -Recurse -Force}}
 
     # Production Muse is STILL rejected because selectable=false (real catalog)
-    $prodRejectRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $fixture -ProfileId 'muse-spark-1.3'
+    $prodRejectRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $fixture -ProfileId 'muse-spark-1.3-contributor'
     $prodReject=$prodRejectRaw|ConvertFrom-Json
     Assert-AihEqual $prodReject.error 'profile-not-selectable' 'production Muse is still rejected (selectable=false, never engine)'
 
@@ -191,7 +191,7 @@ try{
         [IO.File]::WriteAllText((Join-Path $nomuseFixture 'data/settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
         $nomuseStateRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $nomuseFixture
         $nomuseState=$nomuseStateRaw|ConvertFrom-Json
-        Assert-AihTrue (@($nomuseState.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3'}).Count -eq 0) 'missing Muse registry leaves the Muse entry unresolved (omitted, not muse:null)'
+        Assert-AihTrue (@($nomuseState.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3-contributor'}).Count -eq 0) 'missing Muse registry leaves the Muse entry unresolved (omitted, not muse:null)'
         Assert-AihTrue (@($nomuseState.nexusProfiles|Where-Object{$_.engine -eq 'dual'}).Count -ge 2) 'Dual entries survive a missing Muse registry (PS/JS parity)'
     }finally{if(Test-Path -LiteralPath $nomuseFixture){Remove-Item -LiteralPath $nomuseFixture -Recurse -Force}}
 

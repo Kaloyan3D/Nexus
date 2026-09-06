@@ -52,7 +52,7 @@ function main() {
     assert.equal(new Set(ids).size, ids.length)
     assert.ok(ids.includes('deepseek-codex'))
     assert.ok(ids.includes('glm-codex'))
-    assert.ok(ids.includes('muse-spark-1.3'))
+    assert.ok(ids.includes('muse-spark-1.3-contributor'))
     pass('catalog ids are unique and expose both engine families')
 
     const deepSeek = nexusProfiles.resolveNexusProfile(repoRoot, 'deepseek-codex')
@@ -70,7 +70,7 @@ function main() {
     assert.ok(glm.config.roles.reviewer)
     pass('GLM + Codex resolves case-insensitively as a Dual profile')
 
-    const muse = nexusProfiles.resolveNexusProfile(repoRoot, 'muse-spark-1.3')
+    const muse = nexusProfiles.resolveNexusProfile(repoRoot, 'muse-spark-1.3-contributor')
     assert.ok(muse)
     assert.equal(muse.engine, 'muse')
     assert.equal(muse.source.kind, 'muse-profile')
@@ -134,9 +134,9 @@ function main() {
     assert.equal(active.id, 'deepseek-codex')
     pass('AIH_ACTIVE_PROFILE overrides settings using the existing precedence')
 
-    process.env.DSH_AIH_PROFILE = 'muse-spark-1.3'
+    process.env.DSH_AIH_PROFILE = 'muse-spark-1.3-contributor'
     active = nexusProfiles.resolveActiveNexusProfile(fixture, 'aih-engineering')
-    assert.equal(active.id, 'muse-spark-1.3')
+    assert.equal(active.id, 'muse-spark-1.3-contributor')
     assert.equal(active.engine, 'muse')
     assert.equal(active.runnable, false)
     pass('DSH_AIH_PROFILE can resolve Muse metadata without silently falling back to Dual')
@@ -165,7 +165,7 @@ function main() {
     assert.deepEqual(adapterState.profiles.map((p) => p.id), ['deepseek-codex', 'glm-codex'], 'Dual profile state keeps its exact legacy shape (no Muse bleed)')
     pass('adapter Dual profile list is unchanged by the Nexus classification')
     const adapterNexus = adapterState.nexusProfiles.map((p) => p.id)
-    assert.ok(adapterNexus.includes('deepseek-codex') && adapterNexus.includes('glm-codex') && adapterNexus.includes('muse-spark-1.3'))
+    assert.ok(adapterNexus.includes('deepseek-codex') && adapterNexus.includes('glm-codex') && adapterNexus.includes('muse-spark-1.3-contributor'))
     pass('adapter state exposes the top-level Nexus profile catalog')
 
     // 2. Dual entries keep delegating role bindings; Muse carries Muse metadata only
@@ -178,7 +178,7 @@ function main() {
     assert.equal(adapterGlm.muse, null)
     pass('GLM + Codex resolves as dual with Engineering Profile role bindings')
 
-    const adapterMuse = adapterState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3')
+    const adapterMuse = adapterState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3-contributor')
     assert.equal(adapterMuse.engine, 'muse')
     assert.equal(adapterMuse.selectable, false)
     assert.equal(adapterMuse.runnable, false)
@@ -186,7 +186,7 @@ function main() {
     assert.equal(adapterMuse.source.kind, 'muse-profile')
     assert.equal(adapterMuse.roles, null, 'Muse is never coerced into Dual roles')
     assert.equal(adapterMuse.muse.reasoning.default, 'xhigh')
-    assert.equal(adapterMuse.muse.reasoning.escalation, 'max')
+    assert.equal(adapterMuse.muse.reasoning.escalation, 'xhigh', 'escalation is the Contributor ceiling xhigh, not the Standard-only max')
     assert.equal(adapterMuse.muse.subagents.enabled, false)
     assert.equal(adapterMuse.muse.review.independent, false)
     assert.equal(adapterMuse.muse.contributorProtection.required, true)
@@ -219,7 +219,7 @@ function main() {
     assert.equal(customEntry.selectable, true)
     assert.equal(customEntry.builtin, false)
     assert.equal(customEntry.roles.primaryEngineer.model, 'glm-5.3-flash')
-    const museAfterCustom = customState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3')
+    const museAfterCustom = customState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3-contributor')
     assert.equal(museAfterCustom.engine, 'muse')
     assert.equal(museAfterCustom.selectable, false)
     pass('Custom stays dual and Muse is never rewritten into Custom by saves')
@@ -311,7 +311,7 @@ function main() {
     ]
     const nexusEntries = [
       { id: 'glm-codex', displayName: 'GLM + Codex', engine: 'dual', selectable: true, runnable: true, availability: 'ready', source: { kind: 'engineering-profile', profileId: 'glm-codex' }, builtin: true, roles: glmRoles, muse: null },
-      { id: 'muse-spark-1.3', displayName: 'Muse Spark 1.3', engine: 'muse', selectable: false, runnable: false, availability: 'foundation', source: { kind: 'muse-profile', profileId: 'muse-spark-1.3' }, builtin: true, roles: null, muse: { id: 'muse-spark-1.3', displayName: 'Muse Spark 1.3', status: 'foundation', reasoning: { default: 'xhigh', escalation: 'max' }, subagents: { enabled: false }, review: { independent: false }, contributorProtection: { required: true } } },
+      { id: 'muse-spark-1.3-contributor', displayName: 'Muse Spark 1.3 Contributor', engine: 'muse', selectable: false, runnable: false, availability: 'foundation', source: { kind: 'muse-profile', profileId: 'muse-spark-1.3-contributor' }, builtin: true, roles: null, muse: { id: 'muse-spark-1.3-contributor', displayName: 'Muse Spark 1.3 Contributor', status: 'foundation', reasoning: { default: 'xhigh', escalation: 'xhigh' }, subagents: { enabled: false }, review: { independent: false }, contributorProtection: { required: true } } },
     ]
     function editorFixture(selectedProfile, selectedEngine, selectedSelectable, roles) {
       return {
@@ -340,13 +340,13 @@ function main() {
       assert.ok(!museHtml.includes(label), 'Muse renders no Dual role row: ' + label)
     }
     assert.equal((museHtml.match(/<select/g) || []).length, 1, 'Muse renders ONLY the profile dropdown (no empty role dropdowns)')
-    for (const text of ['>Engine<', '>Status<', 'Foundation', '>Reasoning<', 'xhigh', '>Max Reasoning<', '>max<', '>Subagents<', 'Disabled', '>Independent Review<', 'Not available', '>Execution<', 'Not available yet']) {
+    for (const text of ['>Engine<', '>Status<', 'Foundation', '>Reasoning<', 'xhigh', '>Max Reasoning<', '>xhigh<', '>Subagents<', 'Disabled', '>Independent Review<', 'Not available', '>Execution<', 'Not available yet']) {
       assert.ok(museHtml.includes(text), 'Muse metadata rendered: ' + text)
     }
     assert.ok(museHtml.includes('disabled'), 'Muse Select button is disabled')
     assert.ok(museHtml.includes('profile-not-selectable'), 'Muse Select button names the deterministic rejection code')
     assert.ok(museHtml.includes('not selectable yet'), 'Muse renders the not-selectable hint')
-    assert.ok(museHtml.includes('Muse Spark 1.3 \u2014 foundation'), 'Muse dropdown option visibly carries its foundation state')
+    assert.ok(museHtml.includes('Muse Spark 1.3 Contributor \u2014 foundation'), 'Muse dropdown option visibly carries its foundation state')
     pass('client renders Muse as read-only foundation metadata without a Dual role editor')
 
     // 6b. Dual: the exact legacy editor surface (11 selects, role rows, enabled save)
@@ -425,8 +425,8 @@ function main() {
     // 9. initialization uses the authoritative user-facing catalog
     const museSelectableEntry = Object.assign({}, nexusEntries[1], { selectable: true })
     const selectableMuseCatalog = [museSelectableEntry, nexusEntries[0]]
-    assert.equal(moduleExports.initialProfileChoice({ profiles: [{ id: 'glm-codex' }], nexusProfiles: selectableMuseCatalog }), 'muse-spark-1.3', 'initial fallback comes from the Nexus catalog, not the legacy Dual list')
-    assert.equal(moduleExports.initialProfileChoice({ profiles: [{ id: 'glm-codex' }], nexusProfiles: selectableMuseCatalog, preferredProfile: { id: 'muse-spark-1.3' } }), 'muse-spark-1.3', 'a preferred future Muse profile initializes from the Nexus catalog')
+    assert.equal(moduleExports.initialProfileChoice({ profiles: [{ id: 'glm-codex' }], nexusProfiles: selectableMuseCatalog }), 'muse-spark-1.3-contributor', 'initial fallback comes from the Nexus catalog, not the legacy Dual list')
+    assert.equal(moduleExports.initialProfileChoice({ profiles: [{ id: 'glm-codex' }], nexusProfiles: selectableMuseCatalog, preferredProfile: { id: 'muse-spark-1.3-contributor' } }), 'muse-spark-1.3-contributor', 'a preferred future Muse profile initializes from the Nexus catalog')
     assert.equal(moduleExports.initialProfileChoice({ profiles: [{ id: 'glm-codex' }], preferredProfile: { id: 'glm-codex' } }), 'glm-codex', 'legacy host keeps the legacy initialization behavior')
     assert.equal(moduleExports.initialProfileChoice({ profiles: [{ id: 'glm-codex' }], nexusProfiles: [] }), null, 'empty catalog initializes nothing (fail closed)')
     pass('initialization uses the authoritative user-facing catalog')
@@ -436,7 +436,7 @@ function main() {
     const selectableMuseRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-profiles-selmuse-'))
     for (const name of ['engineering-profiles.json', 'model-registry.json', 'muse-profiles.json']) copyFile(path.join(repoRoot, 'config', name), path.join(selectableMuseRoot, 'config', name))
     const selectableCatalog = JSON.parse(fs.readFileSync(path.join(repoRoot, 'config', 'nexus-profiles.json'), 'utf8'))
-    const museCatalogEntry = selectableCatalog.profiles.find((p) => p.id === 'muse-spark-1.3')
+    const museCatalogEntry = selectableCatalog.profiles.find((p) => p.id === 'muse-spark-1.3-contributor')
     museCatalogEntry.selectable = true
     museCatalogEntry.runnable = false
     fs.writeFileSync(path.join(selectableMuseRoot, 'config', 'nexus-profiles.json'), JSON.stringify(selectableCatalog, null, 2), 'utf8')
@@ -448,7 +448,7 @@ function main() {
       settingsPath: path.join(selectableMuseRoot, 'data', 'settings.yaml'),
       nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
-    const selectableMuseAdapter = selectableMuseState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3')
+    const selectableMuseAdapter = selectableMuseState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3-contributor')
     assert.ok(selectableMuseAdapter, 'hypothetical selectable Muse resolves')
     assert.equal(selectableMuseAdapter.engine, 'muse')
     assert.equal(selectableMuseAdapter.selectable, true, 'engine=muse does NOT force selectable=false')
@@ -456,7 +456,7 @@ function main() {
     pass('hypothetical selectable Muse passes the adapter layer (fixture override only)')
 
     // 11. production Muse flags unchanged
-    const productionMuse = adapterState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3')
+    const productionMuse = adapterState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3-contributor')
     assert.equal(productionMuse.selectable, false, 'production Muse stays selectable=false')
     assert.equal(productionMuse.runnable, false, 'production Muse stays runnable=false')
     assert.equal(productionMuse.availability, 'foundation', 'production Muse stays foundation')
@@ -474,7 +474,7 @@ function main() {
       settingsPath: path.join(noMuseRegistryRoot, 'data', 'settings.yaml'),
       nowUtc: () => '2026-08-28T18:00:00.000Z',
     })
-    assert.equal(noMuseState.nexusProfiles.some((p) => p.id === 'muse-spark-1.3'), false, 'unresolved Muse source is omitted')
+    assert.equal(noMuseState.nexusProfiles.some((p) => p.id === 'muse-spark-1.3-contributor'), false, 'unresolved Muse source is omitted')
     assert.equal(noMuseState.nexusProfiles.some((p) => p.engine === 'muse' && p.muse === null), false, 'no partially-resolved Muse entry is exposed')
     assert.ok(noMuseState.nexusProfiles.some((p) => p.id === 'glm-codex'), 'Dual entries survive a missing Muse registry')
     pass('missing Muse registry skips only the Muse entry in the JS adapter')

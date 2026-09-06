@@ -38,7 +38,7 @@ function New-AihMuseFixture{
         'llm-pi-ai:',
         '  providers:',
         '    meta-model-api:',
-        '      displayName: Meta Model API (Muse Spark, direct)',
+        '      displayName: Meta Model API (Muse Spark 1.3 Contributor, direct)',
         '      apiKeyEnv: MODEL_API_KEY',
         '      api: openai-completions',
         '      baseURL: https://api.meta.ai/v1',
@@ -50,15 +50,16 @@ function New-AihMuseFixture{
         '        supportsDeveloperRole: true',
         '        maxTokensField: max_completion_tokens',
         '      models:',
-        '        - id: muse-spark-1.3',
-        '          name: Muse Spark 1.3',
+        '        - id: muse-spark-1.3-contributor',
+        '          name: Muse Spark 1.3 Contributor',
         '          contextWindow: 1048576',
-        '          maxTokens: 32768',
+        '          maxTokens: 131072',
         '          reasoningEfforts:',
-        '            off:',
+        '            minimal: minimal',
+        '            low: low',
+        '            medium: medium',
         '            high: high',
-        '            xhigh: xhigh',
-        '            max: high'
+        '            xhigh: xhigh'
     )
     [IO.File]::WriteAllText((Join-Path $fixtureRoot 'data/settings.yaml'),(($settings -join [Environment]::NewLine)+[Environment]::NewLine),[Text.UTF8Encoding]::new($false))
     return $fixtureRoot
@@ -75,26 +76,29 @@ try{
 
     # -- 1. Registry entry resolves to the Meta provider ----------------------
     $museEntry=$null
-    foreach($candidate in @($registry.models)){if([string]$candidate.id -eq 'muse-spark-1.3'){$museEntry=$candidate;break}}
-    Assert-Aih ($null-ne$museEntry) '1.1: muse-spark-1.3 is registered'
+    foreach($candidate in @($registry.models)){if([string]$candidate.id -eq 'muse-spark-1.3-contributor'){$museEntry=$candidate;break}}
+    Assert-Aih ($null-ne$museEntry) '1.1: muse-spark-1.3-contributor is registered'
     Assert-Aih ([string]$museEntry.vendor -eq 'Meta') '1.2: vendor is Meta'
-    Assert-Aih ([string]$museEntry.provider -eq 'meta-model-api') '1.3: registry maps muse-spark-1.3 to the meta-model-api provider route'
+    Assert-Aih ([string]$museEntry.provider -eq 'meta-model-api') '1.3: registry maps muse-spark-1.3-contributor to the meta-model-api provider route'
     Assert-Aih ([string]$museEntry.providers.default -eq 'meta-model-api') '1.4: providers.default resolves to meta-model-api'
-    Assert-Aih ([string]$museEntry.model -eq 'muse-spark-1.3') '1.5: registry model id is muse-spark-1.3'
+    Assert-Aih ([string]$museEntry.model -eq 'muse-spark-1.3-contributor') '1.5: registry model id is muse-spark-1.3-contributor'
     Assert-Aih ([bool]$museEntry.enabled) '1.6: entry is enabled'
     Assert-Aih ([int]$museEntry.contextWindow -eq 1048576) '1.7: contextWindow is the verified 1,048,576-token window'
-    Assert-Aih ([int]$museEntry.maxOutputTokens -eq 32768) '1.8: maxOutputTokens is the documented conservative value (32768), not a guess'
+    Assert-Aih ([int]$museEntry.maxOutputTokens -eq 131072) '1.8: maxOutputTokens is the vendor-verified hard output ceiling (131072), never a Nexus safety/default cap'
     Assert-Aih ([bool]$museEntry.supportsTools) '1.9: supportsTools=true'
     Assert-Aih ([bool]$museEntry.supportsReasoning) '1.10: supportsReasoning=true'
     Assert-Aih ([bool]$museEntry.supportsStreaming) '1.11: supportsStreaming=true'
     Assert-Aih ([bool]$museEntry.supportsVision) '1.12: supportsVision=true (official vision recipe)'
-    Assert-Aih (@($museEntry.supportedReasoningLevels) -contains 'xhigh' -and @($museEntry.supportedReasoningLevels) -contains 'max') '1.13: xhigh and max are supported reasoning levels'
-    Assert-Aih ([string]$museEntry.dataUseTier -eq 'standard') '1.14: dataUseTier=standard (contributor not registered without direct-API verification)'
+    $museLevels=@($museEntry.supportedReasoningLevels)
+    Assert-Aih (($museLevels-contains'minimal')-and($museLevels-contains'low')-and($museLevels-contains'medium')-and($museLevels-contains'high')-and($museLevels-contains'xhigh')) '1.13: every verified official Contributor reasoning level (minimal..xhigh) is supported'
+    Assert-Aih ((-not($museLevels-contains'off'))-and(-not($museLevels-contains'max'))) '1.14: off and max are ABSENT (off returns HTTP 400 on Meta; max is Standard-tier only)'
+    Assert-Aih ([string]$museEntry.dataUseTier -eq 'contributor') '1.15: dataUseTier=contributor (Contributor-tier data terms, contributorProtection required)'
+    Assert-Aih ((@($museEntry.agentEngines)-contains'muse')-and(@($museEntry.agentEngines).Count -eq 1)) '1.16: the entry is EXPLICITLY and EXCLUSIVELY scoped to the muse engine'
 
     # -- 2. Engine scope keeps Muse out of every Dual role list ---------------
     foreach($role in @('primaryEngineer','deepEngineer','reviewer','solver','fallback','visualReviewer')){
         $compatible=@(Get-AihCompatibleModelsForRole $registry $role)
-        Assert-Aih (-not(@($compatible)-contains'muse-spark-1.3')) ("2."+[string](@($compatible).Count)+"."+$role+": muse-spark-1.3 is NOT role-compatible with $role despite supportsTools=true")
+        Assert-Aih (-not(@($compatible)-contains'muse-spark-1.3-contributor')) ("2."+[string](@($compatible).Count)+"."+$role+": muse-spark-1.3-contributor is NOT role-compatible with $role despite supportsTools=true")
     }
     Assert-Aih (-not(Test-AihModelRoleCompatible $museEntry 'primaryEngineer' 'xhigh')) '2.10: Test-AihModelRoleCompatible fails closed for the muse entry'
     Assert-Aih (-not(Test-AihModelRoleCompatible $museEntry 'fallback' '')) '2.11: Test-AihModelRoleCompatible fails closed without a reasoning argument'
@@ -114,6 +118,16 @@ try{
     Assert-Aih (@($dualIds)-contains'explicit-dual') '3.4: explicit agentEngines=[dual] stays Dual-eligible'
     Assert-Aih (-not(@($dualIds)-contains'muse-only')) '3.5: agentEngines=[muse] is excluded from Dual roles'
     Assert-Aih (@($dualIds)-contains'multi-engine') '3.6: agentEngines listing dual among others stays Dual-eligible'
+    # M2.1: the engine-scope contract is ASYMMETRIC (Test-AihModelEngineCompatible).
+    # The muse plane requires an EXPLICIT muse scope — absence fails closed —
+    # while the dual plane tolerates absence for every pre-M2 entry.
+    Assert-Aih (-not(Test-AihModelEngineCompatible $dualEntry 'muse')) '3.7: a pre-M2 entry WITHOUT agentEngines is NOT muse-eligible (Muse fails closed on absence)'
+    Assert-Aih (Test-AihModelEngineCompatible $museEntry 'muse') '3.8: the explicitly muse-scoped contributor entry is muse-eligible'
+    $unscopedEntry=[pscustomobject]@{id='unscoped';displayName='U';enabled=$true}
+    Assert-Aih (-not(Test-AihModelEngineCompatible $unscopedEntry 'muse')) '3.9: an unscoped registry entry fails closed for the muse engine'
+    Assert-Aih (Test-AihModelEngineCompatible $unscopedEntry 'dual') '3.10: an unscoped registry entry stays dual-eligible (backward compatible)'
+    Assert-Aih (-not(Test-AihModelEngineCompatible $museEntry 'dual')) '3.11: the muse-scoped entry is never dual-eligible'
+    Assert-Aih (-not(Test-AihModelEngineCompatible $dualEntry 'quantum')) '3.12: an unknown engine name fails closed'
 
     # -- 4. Provider configuration resolution --------------------------------
     $providerConfig=Resolve-AihMuseProviderConfig -SettingsPath $layout.Settings
@@ -121,8 +135,9 @@ try{
     Assert-Aih ([string]$providerConfig.baseURL -eq 'https://api.meta.ai/v1') '4.2: base URL is the official https://api.meta.ai/v1'
     Assert-Aih ([string]$providerConfig.apiKeyEnv -eq 'MODEL_API_KEY') '4.3: credential reference is the official MODEL_API_KEY variable'
     Assert-Aih ([string]$providerConfig.api -eq 'openai-completions') '4.4: wire protocol is the generic OpenAI-compatible completions API (no custom HTTP stack)'
-    Assert-Aih ([string]$providerConfig.models[0].id -eq 'muse-spark-1.3') '4.5: provider route serves muse-spark-1.3'
+    Assert-Aih ([string]$providerConfig.models[0].id -eq 'muse-spark-1.3-contributor') '4.5: provider route serves muse-spark-1.3-contributor'
     Assert-Aih ([int64]$providerConfig.models[0].contextWindow -eq 1048576) '4.6: provider route model context matches the registry'
+    Assert-Aih ([int64]$providerConfig.models[0].maxTokens -eq 131072) '4.6b: provider route maxTokens is the verified 131072 output ceiling'
     $unresolved=Resolve-AihMuseProviderConfig -SettingsPath $layout.Settings -ProviderId 'no-such-provider'
     Assert-Aih ($null-eq$unresolved) '4.7: unknown provider route fails closed (returns null)'
 
@@ -156,11 +171,18 @@ try{
     finally{ if($null-eq$savedKey){Remove-Item Env:MODEL_API_KEY -ErrorAction SilentlyContinue}else{$env:MODEL_API_KEY=$savedKey} }
 
     # -- 6. Reasoning contract: mapping validated, fail closed ---------------
-    foreach($pair in @(@('off',''),@('high','high'),@('xhigh','xhigh'),@('max','high'))){
+    # M2.1 verified official Meta contract: minimal/low/medium/high/xhigh map
+    # 1:1 to the official reasoning_effort spelling; 'off' is not representable
+    # (none returns HTTP 400, omission still reasons) and 'max' is Standard-
+    # tier only — the Contributor route refuses both instead of silently
+    # sending a lower effort or omitting the parameter (no omission-as-off).
+    foreach($pair in @(@('minimal','minimal'),@('low','low'),@('medium','medium'),@('high','high'),@('xhigh','xhigh'))){
         $wire=Get-AihMuseReasoningWireValue -ProviderConfig $providerConfig -Level $pair[0]
-        Assert-Aih ($null-ne$wire-and[string]$wire-eq[string]$pair[1]) ('6.'+@('off','high','xhigh','max').IndexOf($pair[0])+': Nexus '+$pair[0]+' maps to the deterministic native value')
+        Assert-Aih ($null-ne$wire-and[string]$wire-eq[string]$pair[1]) ('6.'+@('minimal','low','medium','high','xhigh').IndexOf($pair[0])+': Nexus '+$pair[0]+' maps 1:1 to the official reasoning_effort spelling')
     }
-    Assert-Aih ($null-eq(Get-AihMuseReasoningWireValue -ProviderConfig $providerConfig -Level 'ultra')) '6.5: a level the route does not offer fails closed (null, never a silent lower effort)'
+    foreach($refusedLevel in @('off','max','ultra')){
+        Assert-Aih ($null-eq(Get-AihMuseReasoningWireValue -ProviderConfig $providerConfig -Level $refusedLevel)) ('6.5 '+$refusedLevel+': a level the Contributor route does not offer fails closed (null, never a silent lower effort)')
+    }
 
     # -- 7. Full offline probe battery ---------------------------------------
     $env:MODEL_API_KEY='aih-muse-suite-offline-probe-value'
@@ -172,7 +194,7 @@ try{
         Assert-Aih (-not([string]($probe|ConvertTo-Json -Depth 10)).Contains('aih-muse-suite-offline-probe-value')) '7.4: the probe record never contains the credential value'
         $probeChecks=@{}
         foreach($check in @($probe.checks)){$probeChecks[[string]$check.Name]=[bool]$check.Ok}
-        foreach($required in @('probe-text','probe-usage','probe-stream','probe-stream-malformed','probe-stream-interrupted','probe-tool','probe-reasoning-xhigh','probe-reasoning-max','probe-reasoning-off','reasoning-mapping-fail-closed','probe-error-401','probe-error-429','probe-error-500','secret-hygiene')){
+        foreach($required in @('probe-text','probe-usage','probe-stream','probe-stream-malformed','probe-stream-interrupted','probe-tool','reasoning-mapping-minimal','reasoning-mapping-low','reasoning-mapping-medium','reasoning-mapping-high','reasoning-mapping-xhigh','probe-reasoning-minimal','probe-reasoning-low','probe-reasoning-medium','probe-reasoning-high','probe-reasoning-xhigh','reasoning-mapping-fail-closed-off','reasoning-mapping-fail-closed-max','reasoning-mapping-fail-closed-ultra','probe-error-401','probe-error-429','probe-error-500','secret-hygiene')){
             Assert-Aih ($probeChecks.ContainsKey($required)-and$probeChecks[$required]) ('7.5 '+$required+': probe check passes')
         }
     }
@@ -198,23 +220,35 @@ try{
     finally{ Remove-Item Env:NEXUS_META_LIVE_TEST -ErrorAction SilentlyContinue }
 
     # -- 10. Muse profile stays foundation-only -------------------------------
-    $resolved=Resolve-AihNexusProfile -InstallRoot $fixture -ProfileId 'muse-spark-1.3'
-    Assert-Aih ($null-ne$resolved) '10.1: muse-spark-1.3 resolves from the production catalog'
+    $resolved=Resolve-AihNexusProfile -InstallRoot $fixture -ProfileId 'muse-spark-1.3-contributor'
+    Assert-Aih ($null-ne$resolved) '10.1: muse-spark-1.3-contributor resolves from the production catalog'
     Assert-Aih ([bool]$resolved.Selectable -eq $false) '10.2: production Muse profile remains selectable=false'
     Assert-Aih ([bool]$resolved.Runnable -eq $false) '10.3: production Muse profile remains runnable=false'
     Assert-Aih ([string]$resolved.Availability -eq 'foundation') '10.4: production Muse availability remains foundation'
     Assert-Aih ([string]$resolved.Engine -eq 'muse') '10.5: engine remains muse'
 
     # -- 11. Muse profile -> model registry -> provider chain ------------------
-    Assert-Aih ([string]$resolved.Config.model.primary -eq 'muse-spark-1.3') '11.1: Muse profile references the model REGISTRY id, not a provider id'
+    Assert-Aih ([string]$resolved.Config.model.primary -eq 'muse-spark-1.3-contributor') '11.1: Muse profile references the model REGISTRY id, not a provider id'
     $modelBinding=Resolve-AihMuseProfileModel -MuseProfile $resolved.Config -Registry $registry
     Assert-Aih ($null-ne$modelBinding) '11.2: the muse model binding resolves'
     Assert-Aih ([string]$modelBinding.Provider -eq 'meta-model-api') '11.3: binding chain reaches the meta-model-api provider route'
-    Assert-Aih ([string]$modelBinding.Model -eq 'muse-spark-1.3') '11.4: binding chain resolves the Meta model id'
-    Assert-Aih ([string]$modelBinding.Reasoning -eq 'xhigh') '11.5: default reasoning comes from the Muse profile (xhigh)'
-    Assert-Aih ([string]$modelBinding.DataUseTier -eq 'standard') '11.6: dataUseTier travels on the binding for the later security phase'
+    Assert-Aih ([string]$modelBinding.Model -eq 'muse-spark-1.3-contributor') '11.4: binding chain resolves the Meta contributor model id'
+    Assert-Aih ([string]$modelBinding.Reasoning -eq 'xhigh') '11.5: default reasoning comes from the Muse profile (xhigh, the Contributor ceiling)'
+    Assert-Aih ([string]$modelBinding.DataUseTier -eq 'contributor') '11.6: dataUseTier=contributor travels on the binding for the later security phase'
+    # M2.1: requested reasoning levels outside the verified Contributor set
+    # fail closed (max is Standard-tier only; off is not representable on the
+    # direct Meta contract); the valid escalation level still resolves.
     $maxBinding=Resolve-AihMuseProfileModel -MuseProfile $resolved.Config -Registry $registry -Reasoning 'max'
-    Assert-Aih ($null-ne$maxBinding-and[string]$maxBinding.Provider -eq 'meta-model-api') '11.7: escalation level max resolves through the same route (no provider split)'
+    Assert-Aih ($null-eq$maxBinding) '11.7: reasoning max (Standard-tier only) fails closed on the contributor route'
+    $offBinding=Resolve-AihMuseProfileModel -MuseProfile $resolved.Config -Registry $registry -Reasoning 'off'
+    Assert-Aih ($null-eq$offBinding) '11.8: reasoning off (HTTP 400 on Meta, omission still reasons) fails closed on the contributor route'
+    $xhighBinding=Resolve-AihMuseProfileModel -MuseProfile $resolved.Config -Registry $registry -Reasoning 'xhigh'
+    Assert-Aih ($null-ne$xhighBinding-and[string]$xhighBinding.Provider -eq 'meta-model-api') '11.9: explicit xhigh escalation resolves through the same route'
+    # M2.1: a registry entry WITHOUT agentEngines fails closed on the muse
+    # plane — an unscoped (Dual-legacy) entry can never serve the Muse transport.
+    $unscopedRegistry=[pscustomobject]@{schemaVersion=1;models=@([pscustomobject]@{id='unscoped-model';displayName='U';enabled=$true;supportedReasoningLevels=@('xhigh');provider='meta-model-api'})}
+    $unscopedMuse=[pscustomobject]@{id='unscoped';displayName='U';model=[pscustomobject]@{primary='unscoped-model'};reasoning=[pscustomobject]@{default='xhigh'}}
+    Assert-Aih ($null-eq(Resolve-AihMuseProfileModel -MuseProfile $unscopedMuse -Registry $unscopedRegistry)) '11.10: a registry entry WITHOUT agentEngines fails closed on the muse plane'
 
     # -- 12. Malformed model binding fails closed ------------------------------
     $brokenMusePath=Join-Path $fixture 'config/muse-profiles.json'

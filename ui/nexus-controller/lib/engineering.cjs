@@ -237,16 +237,33 @@ function modelResolvedProvider(entry, reasoning) {
   return null
 }
 
+/**
+ * Phase M2.1 engine-scope contract (TASK-0037) — UI mirror of the shared
+ * asymmetric engine contract (Routing.ps1 Test-AihModelEngineCompatible /
+ * Engineering-Profiles.cjs modelEngineCompatible): 'dual' tolerates absence
+ * (backward compatible), 'muse' requires an EXPLICIT muse scope, unknown
+ * engines fail closed. Metadata driven — no model-id conditionals.
+ */
+function modelEngineCompatible(entry, engine) {
+  if (!entry || typeof engine !== 'string' || engine === '') return false
+  const declared = Array.isArray(entry.agentEngines) ? entry.agentEngines : null
+  if (engine === 'dual') {
+    if (declared === null) return true
+    return declared.includes('dual')
+  }
+  if (engine === 'muse') {
+    if (declared === null) return false
+    return declared.includes('muse')
+  }
+  return false
+}
+
 function modelCompatibleWithRole(entry, role, reasoning) {
   if (!entry) return false
   if (entry.enabled === false) return false
-  // Phase M2 engine scope: a registry entry MAY declare `agentEngines`.
-  // Absence keeps Dual behavior exactly as before (every pre-M2 entry); a
-  // declaration that does not list 'dual' excludes the entry from every Dual
-  // role dropdown, so a Muse-registry model (agentEngines: ['muse']) can
-  // never leak into the Dual role editor. Capability/metadata driven — no
-  // model-id conditionals.
-  if (Array.isArray(entry.agentEngines) && !entry.agentEngines.includes('dual')) return false
+  // Engine scope (Phase M2.1): the Dual role editor never offers a
+  // Muse-scoped model. Delegates to the shared asymmetric engine contract.
+  if (!modelEngineCompatible(entry, 'dual')) return false
   const req = ROLE_REQUIREMENTS[role]
   if (!req) return false
   if (req.requiresReasoning && entry.supportsReasoning === false) return false
@@ -416,6 +433,7 @@ module.exports = {
   museProfileMetadataOf,
   buildNexusProfileEntries,
   modelResolvedProvider,
+  modelEngineCompatible,
   modelCompatibleWithRole,
   compatibleModelsForRole,
   roleBindingTarget,

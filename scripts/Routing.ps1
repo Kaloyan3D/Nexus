@@ -148,6 +148,10 @@ function Resolve-AihModelTarget {
     foreach($candidate in @($Registry.models)){if([string]$candidate.id -eq $modelId){$entry=$candidate;break}}
     if($null-eq $entry){throw "Model registry has no entry for '$modelId' (profile $($ProfileDoc.Id), role $Role)."}
     if(-not[bool]$entry.enabled){throw "Model '$modelId' is disabled in the registry (profile $($ProfileDoc.Id), role $Role)."}
+    # Phase M2.1 engine scope: the Dual role architecture never resolves a
+    # Muse-scoped model. Absence of agentEngines stays backward compatible;
+    # a declaration without 'dual' fails closed here.
+    if(-not(Test-AihModelEngineCompatible $entry 'dual')){throw "Model '$modelId' is not scoped to the dual agent engine (profile $($ProfileDoc.Id), role $Role)."}
     $provider=$null
     $providerMap=if($null-ne $entry.PSObject.Properties['providers']){$entry.providers}else{$null}
     if($null-ne $providerMap){
@@ -195,22 +199,43 @@ function Get-AihModelResolvedProvider {
     return $null
 }
 
+function Test-AihModelEngineCompatible {
+    # Phase M2.1 engine-scope contract (TASK-0037): a registry entry MAY declare
+    # `agentEngines`. The semantics are ASYMMETRIC and both directions fail
+    # closed:
+    #   - 'dual': absence of the declaration keeps every pre-M2 registry entry
+    #     eligible for the Dual role architecture (backward compatible); a
+    #     declaration must list 'dual'.
+    #   - 'muse': the Muse engine plane requires an EXPLICIT muse scope —
+    #     absence of `agentEngines` (or a declaration without 'muse') is never
+    #     eligible, so a Muse profile can never resolve through an unscoped or
+    #     Dual-only model entry.
+    # Unknown engine names fail closed: nothing is compatible with an engine
+    # the registry contract does not define. The filter is metadata driven —
+    # there is no model-id conditional anywhere.
+    param([object]$Entry,[string]$Engine)
+    if($null-eq$Entry){return $false}
+    if([string]::IsNullOrWhiteSpace($Engine)){return $false}
+    $declaredEngines=$null
+    if($null-ne$Entry.PSObject.Properties['agentEngines']){$declaredEngines=@($Entry.agentEngines)}
+    if($Engine -eq 'dual'){
+        if($null-eq$declaredEngines){return $true}
+        return @($declaredEngines|Where-Object{$_-eq'dual'}).Count-gt0
+    }
+    if($Engine -eq 'muse'){
+        if($null-eq$declaredEngines){return $false}
+        return @($declaredEngines|Where-Object{$_-eq'muse'}).Count-gt0
+    }
+    return $false
+}
+
 function Test-AihModelRoleCompatible {
     param([object]$Entry,[string]$Role,[string]$Reasoning)
     if($null-eq$Entry){return $false}
     if($null-ne$Entry.PSObject.Properties['enabled']-and-not[bool]$Entry.enabled){return $false}
-    # Phase M2 engine scope: a registry entry MAY declare `agentEngines`.
-    # Absence of the property keeps the entry in the Dual role architecture
-    # exactly as before (every pre-M2 entry). A declaration excludes the entry
-    # from any role whose agent engine is not listed, so a Muse-registry model
-    # (agentEngines: ["muse"]) can never surface as a Dual
-    # primaryEngineer/deepEngineer/reviewer/solver/fallback/visualReviewer
-    # candidate even when it supports tools. The filter is capability/metadata
-    # driven — there is no model-id conditional anywhere.
-    if($null-ne$Entry.PSObject.Properties['agentEngines']){
-        $declaredEngines=@($Entry.agentEngines)
-        if(@($declaredEngines|Where-Object{$_-eq'dual'}).Count-eq0){return $false}
-    }
+    # Engine scope (Phase M2.1): the Dual role architecture never claims a
+    # Muse-scoped model. Delegates to the shared asymmetric engine contract.
+    if(-not(Test-AihModelEngineCompatible $Entry 'dual')){return $false}
     $req=Get-AihRoleRequirements $Role
     if($req.requiresReasoning-and$null-ne$Entry.PSObject.Properties['supportsReasoning']-and-not[bool]$Entry.supportsReasoning){return $false}
     if($req.requiresTools-and$null-ne$Entry.PSObject.Properties['supportsTools']-and-not[bool]$Entry.supportsTools){return $false}

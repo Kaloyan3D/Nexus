@@ -1808,16 +1808,59 @@ function EngineeringSelector({ editor }) {
 * replaces the legacy DSH model selector as the effective preference
 * control. Legacy presets keep the exact previous rendering.
 */
+/**
+ * Phase M2.1 restart fix (TASK-0037): derive the composer mode from the
+ * CLIENT-side session identity before the first polled snapshot arrives.
+ *
+ * Root cause of the Profile UI disappearing across restarts: the mode came
+ * only from the polled snapshot's composer block, so a freshly restarted
+ * client rendered in legacy posture (upstream model seat visible, Engineering
+ * Profile UI absent) until the first successful poll — and the suppression
+ * CSS keyed on a pinned upstream build's CSS-module hashes, which upstream
+ * refreshes silently invalidate.
+ *
+ * Resolution order:
+ *   1. the authoritative snapshot.composer.mode wins once loaded;
+ *   2. before that, the session's agent preset (client-side ConversationSnapshot
+ *      carries agentPreset / projectionValues.agentPreset) classifies the boot:
+ *      aih-engineering -> engineering, aih-deepseek -> legacy;
+ *   3. anything else — including a failed/absent snapshot (endpoint
+ *      unavailable) — fails CLOSED toward engineering, keeping the Profile UI
+ *      mounted with its loading states until the authoritative mode lands.
+ */
+function composerModeOfSession(session, snapshot) {
+	if (!session) return { mode: "legacy", source: "no-session-scope" };
+	const composer = snapshot && snapshot.composer && typeof snapshot.composer === "object" ? snapshot.composer : null;
+	if (composer && composer.mode === "engineering") return { mode: "engineering", source: "snapshot" };
+	if (composer && composer.mode === "legacy") return { mode: "legacy", source: "snapshot" };
+	let preset = session && typeof session.agentPreset === "string" ? session.agentPreset : "";
+	if (preset === "" && session && session.projectionValues && typeof session.projectionValues === "object" && typeof session.projectionValues.agentPreset === "string") {
+		preset = session.projectionValues.agentPreset;
+	}
+	if (preset === "" && snapshot && snapshot.binding && typeof snapshot.binding.preset === "string") {
+		// A snapshot whose composer block has not landed yet still names the
+		// session's agent preset on its binding — a stronger signal than the
+		// client-side projection alone.
+		preset = snapshot.binding.preset;
+	}
+	if (preset === "aih-engineering") return { mode: "engineering", source: "session-preset" };
+	if (preset === "aih-deepseek") return { mode: "legacy", source: "session-preset" };
+	return { mode: "engineering", source: "boot-fail-closed" };
+}
+
 function ExecutorChip({ session }) {
 	const sessionId = session && typeof session.sessionId === "string" ? session.sessionId : null;
 	const { snapshot } = useControllerSnapshot(sessionId);
-	const composer = snapshot && snapshot.composer && typeof snapshot.composer === "object" ? snapshot.composer : null;
-	const engineeringMode = !!(composer && composer.mode === "engineering");
+	const derivedMode = composerModeOfSession(session, snapshot);
+	const engineeringMode = derivedMode.mode === "engineering";
 	const editor = useEngineeringEditor(engineeringMode ? sessionId : null);
 	// Body-level mode flag: scoped CSS retires the upstream DSH model seat
-	// while the Engineering selector owns the composer preference. Legacy
-	// presets never set it, so the shipped selector stays untouched there.
-	react.useEffect(() => {
+	// while the Engineering selector owns the composer preference. Set through
+	// useLayoutEffect so the flag exists BEFORE the first paint after a
+	// restart — the boot heuristic above already knows the mode client-side,
+	// so the shipped seat never flashes and the Profile UI never disappears.
+	// Legacy presets never set it, so the shipped selector stays untouched there.
+	react.useLayoutEffect(() => {
 		const body = typeof document !== "undefined" && document.body ? document.body : null;
 		if (!body) return;
 		if (!engineeringMode) {
@@ -1831,6 +1874,7 @@ function ExecutorChip({ session }) {
 	}, [engineeringMode]);
 	// Follow external preference changes (e.g. saved from the Control Room)
 	// without clobbering unsaved operator edits in the open popover.
+	const composer = snapshot && snapshot.composer && typeof snapshot.composer === "object" ? snapshot.composer : null;
 	const preferredProfileId = composer && composer.preferredEngineer && typeof composer.preferredEngineer === "object" ? String(composer.preferredEngineer.profileId || "") : "";
 	const dirtyRef = react.useRef(editor.dirty);
 	dirtyRef.current = editor.dirty;
@@ -2013,10 +2057,14 @@ const PANEL_CSS = [
 // Normal Engineering mode only: the upstream DSH model seat no longer
 // presents itself as the operator's model-preference control — the
 // Engineering selector owns that role. Legacy presets never set the body
-// flag and keep the shipped selector. Fail-open by design: if the upstream
-// build changes its scoped class names, the shipped seat simply reappears.
-"body[data-nexus-composer-mode='engineering'] [class*='_7KE1Ra_root']{display:none!important}",
-"body[data-nexus-composer-mode='engineering'] [class*='_7KE1Ra_menu']{display:none!important}",
+// flag and keep the shipped selector. Phase M2.1 (TASK-0037): the selector
+// targets the STABLE slot outlet wrapper the DSH renderer emits for every
+// registered slot (<div data-slot={slotKey}>), never the CSS-module hash classes of a pinned
+// upstream build — those broke on every upstream refresh and were the root cause of the
+// Profile UI disappearing across restarts (a hard test guard forbids reintroducing any hash
+// upstream ModelSelect seat — root and menu — renders INSIDE the
+// conversation.input.model outlet, so one stable rule retires the whole seat.
+"body[data-nexus-composer-mode='engineering'] [data-slot='conversation.input.model']{display:none!important}",
 ].join("");
 //#endregion
 
@@ -2154,6 +2202,7 @@ exports.ControllerBody = ControllerBody;
 exports.ControlRoom = ControlRoom;
 exports.ROOM_TABS = ROOM_TABS;
 exports.executorChipContent = executorChipContent;
+exports.composerModeOfSession = composerModeOfSession;
 exports.ExecutorPill = ExecutorPill;
 exports.ExecutorChip = ExecutorChip;
 exports.GateActions = GateActions;
