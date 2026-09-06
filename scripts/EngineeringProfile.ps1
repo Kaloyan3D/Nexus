@@ -194,29 +194,34 @@ $(switch($Action){
     'select'{
         if([string]::IsNullOrWhiteSpace($ProfileId)){throw 'select requires -ProfileId.'}
         $selectId=$ProfileId.Trim().ToLowerInvariant()
-        # Phase M1.1: the selection gate is the top-level Nexus Profile catalog
-        # and depends on `selectable` ONLY. The engine classifies WHICH
-        # execution architecture is used later; it never blocks the profile-
-        # preference layer itself. selectable=false fails deterministically
-        # with 'profile-not-selectable' and NEVER touches the settings key.
-        $resolvedNexus=$null
-        try{$resolvedNexus=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId $selectId}catch{$resolvedNexus=$null}
-        if($null-ne$resolvedNexus -and [bool]$resolvedNexus.Selectable){
-            Set-AihEngineeringProfileKey $layout.Settings $selectId
-            [pscustomobject]@{ok=$true;profileId=$selectId}
-        }
-        elseif($null-ne$resolvedNexus){
-            [pscustomobject][ordered]@{ok=$false;error='profile-not-selectable';profileId=$selectId;engine=[string]$resolvedNexus.Engine}
+        # Phase M1.2: the top-level Nexus catalog is authoritative for this
+        # current backend. Selection permission depends on `selectable` only,
+        # but a missing/corrupt catalog must NEVER silently fall back to the
+        # legacy Dual registry. Engine-specific resolution failures also fail
+        # closed without writing the preferred-profile settings key.
+        $catalogPath=Join-Path $InstallRoot 'config/nexus-profiles.json'
+        $catalogAvailable=$true
+        try{$null=Get-AihNexusProfileCatalog $catalogPath}catch{$catalogAvailable=$false}
+        if(-not$catalogAvailable){
+            [pscustomobject][ordered]@{ok=$false;error='nexus-profile-catalog-unavailable';profileId=$selectId}
         }
         else{
-            # Catalog could not resolve the id (unknown id, or catalog
-            # unavailable): the EXISTING Dual-only fail-closed behavior is
-            # authoritative — unknown ids still throw.
-            $profiles=Get-AihEngineeringProfiles $layout.EngineeringProfiles $layout.CustomEngineeringProfile
-            $known=@($profiles.profiles|Where-Object{$_.id -eq $selectId})
-            if($known.Count-eq0){throw "Unknown engineering profile '$ProfileId'."}
-            Set-AihEngineeringProfileKey $layout.Settings $selectId
-            [pscustomobject]@{ok=$true;profileId=$selectId}
+            $resolvedNexus=$null
+            $resolutionAvailable=$true
+            try{$resolvedNexus=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId $selectId}catch{$resolutionAvailable=$false}
+            if(-not$resolutionAvailable){
+                [pscustomobject][ordered]@{ok=$false;error='nexus-profile-resolution-unavailable';profileId=$selectId}
+            }
+            elseif($null-ne$resolvedNexus -and [bool]$resolvedNexus.Selectable){
+                Set-AihEngineeringProfileKey $layout.Settings $selectId
+                [pscustomobject]@{ok=$true;profileId=$selectId}
+            }
+            elseif($null-ne$resolvedNexus){
+                [pscustomobject][ordered]@{ok=$false;error='profile-not-selectable';profileId=$selectId;engine=[string]$resolvedNexus.Engine}
+            }
+            else{
+                throw "Unknown Nexus profile '$ProfileId'."
+            }
         }
     }
     'save-custom'{Save-AihCustomProfile $layout $payload}
