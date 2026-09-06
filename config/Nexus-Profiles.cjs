@@ -114,7 +114,38 @@ function validateCatalogDocument(document) {
     if (source.kind !== expectedKind) errors.push(prefix + ':source-kind-mismatch')
     if (!normalizeId(source.profileId)) errors.push(prefix + ':missing-source-profile-id')
   }
+
+  // Phase M3: an engine entry MAY bind the INTERNAL agent preset that runs
+  // the engine's agent plane (muse -> 'aih-muse'). The binding is optional
+  // internal infrastructure — never a user-facing mode. A present but
+  // malformed binding fails closed (the pinned DSH agent-preset id grammar).
+  const engines = document.engines
+  if (engines && typeof engines === 'object' && !Array.isArray(engines)) {
+    for (const [name, value] of Object.entries(engines)) {
+      if (!value || typeof value !== 'object') continue
+      if (!Object.prototype.hasOwnProperty.call(value, 'agentPreset')) continue
+      const agentPreset = typeof value.agentPreset === 'string' ? value.agentPreset.trim() : ''
+      if (!agentPreset) errors.push('engines.' + name + ':agentPreset-empty')
+      else if (!/^[a-z0-9][a-z0-9-]*$/.test(agentPreset)) errors.push('engines.' + name + ':agentPreset-invalid:' + agentPreset)
+    }
+  }
   return errors
+}
+
+/**
+ * The INTERNAL agent preset that runs an engine's agent plane, or null when
+ * the engine declares none (Dual keeps riding the user-facing mode presets).
+ */
+function engineAgentPresetOf(catalog, engine) {
+  if (!catalog || typeof catalog !== 'object') return null
+  if (!catalog.engines || typeof catalog.engines !== 'object') return null
+  const entry = catalog.engines[normalizeId(engine)]
+  if (!entry || typeof entry !== 'object') return null
+  const agentPreset = typeof entry.agentPreset === 'string' ? entry.agentPreset.trim() : ''
+  // Fail closed: only a well-formed agent-preset id crosses this boundary
+  // (the pinned DSH id grammar), so a malformed catalog binding can never
+  // reach the agent plane.
+  return /^[a-z0-9][a-z0-9-]*$/.test(agentPreset) ? agentPreset : null
 }
 
 function dynamicCustomProfile(engineeringProfiles) {
@@ -320,6 +351,7 @@ module.exports = {
   loadMuseProfiles,
   museProfileById,
   validateCatalogDocument,
+  engineAgentPresetOf,
   listNexusProfiles,
   resolveNexusProfile,
   requestedProfileId,

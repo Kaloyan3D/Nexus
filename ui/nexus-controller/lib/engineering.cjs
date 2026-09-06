@@ -148,6 +148,30 @@ function museProfileMetadataOf(museDocument, profileId) {
   return null
 }
 
+/**
+ * Phase M3: the INTERNAL agent preset that runs an engine's agent plane
+ * (muse -> 'aih-muse'), derived from the catalog's engines map. Mirrors
+ * Nexus-Profiles.cjs engineAgentPresetOf; the binding is optional internal
+ * infrastructure — never a user-facing mode. A present but malformed binding
+ * is omitted (fail closed downstream: the session simply never maps to the
+ * engine plane instead of mapping to a malformed id).
+ */
+function engineAgentPresetOf(catalog) {
+  if (!catalog || typeof catalog !== 'object') return {}
+  const engines = catalog.engines
+  if (!engines || typeof engines !== 'object' || Array.isArray(engines)) return {}
+  const result = {}
+  for (const [name, value] of Object.entries(engines)) {
+    const engine = normalizeNexusId(name)
+    if (engine === '') continue
+    if (!value || typeof value !== 'object') continue
+    if (!Object.prototype.hasOwnProperty.call(value, 'agentPreset')) continue
+    const agentPreset = typeof value.agentPreset === 'string' ? value.agentPreset.trim() : ''
+    if (/^[a-z0-9][a-z0-9-]*$/.test(agentPreset)) result[engine] = agentPreset
+  }
+  return result
+}
+
 function cloneRoles(roles) {
   return roles && typeof roles === 'object' ? JSON.parse(JSON.stringify(roles)) : null
 }
@@ -392,6 +416,7 @@ function buildEngineeringProfileState(options) {
     generatedAtUtc: nowUtc(),
     profiles: profiles ? profiles.profiles : [],
     nexusProfiles,
+    engineAgentPresets: engineAgentPresetOf(nexusCatalog),
     registry: registry ? registry.models : [],
     preferredProfile: settingsText ? preferredProfileOf(settingsText, profiles, readFile) : null,
     customRoles,
@@ -431,6 +456,7 @@ module.exports = {
   loadRegistryDocument,
   validateNexusCatalog,
   museProfileMetadataOf,
+  engineAgentPresetOf,
   buildNexusProfileEntries,
   modelResolvedProvider,
   modelEngineCompatible,

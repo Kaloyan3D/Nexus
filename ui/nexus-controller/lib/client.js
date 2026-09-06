@@ -1150,6 +1150,9 @@ function useEngineeringEditor(sessionId, enabled) {
 				setState(data);
 				setFailed(false);
 				setFetchedAt(Date.now());
+				// Phase M3: keep the shared engine mapping in lockstep with the
+				// authoritative editor document (same fetch, same truth).
+				publishNexusEngineState(data);
 				if (then) then(data);
 			})
 			.catch(() => setFailed(true));
@@ -1309,7 +1312,7 @@ function museEditorRows(selectedProfile) {
 		["Max Reasoning", reasoning && reasoning.escalation ? String(reasoning.escalation) : "\u2014", "Muse escalation reasoning ceiling."],
 		["Subagents", muse && muse.subagents && muse.subagents.enabled === false ? "Disabled" : "Enabled", "Muse subagent dispatch."],
 		["Independent Review", muse && muse.review && muse.review.independent === false ? "Not available" : "Independent", "Independent Muse review."],
-		["Execution", selectedProfile && selectedProfile.runnable === false ? "Not available yet" : "Available", "Muse execution path arrives in a later phase."],
+		["Execution", selectedProfile && selectedProfile.runnable === false ? "Contributor-gated" : "Available", "Muse runs on its own single-agent plane; execution stays contributor-gated until outbound contributor protection ships (Phase M5)."],
 	];
 	return rows.map((row) => react_jsx_runtime.jsxs("div", {
 		className: "nx-eng-row",
@@ -1342,7 +1345,7 @@ function EngineeringEditorFields({ editor, variant }) {
 						value: profileId || "",
 						onChange: (event) => selectProfile(event.target.value),
 						"aria-label": "Preferred engineering profile",
-						children: catalog.map((profile) => react_jsx_runtime.jsx("option", { value: String(profile.id), children: String(profile.displayName || profile.id) + (profile.engine === "muse" ? " \u2014 foundation" : profile.id === "custom" ? " (operator-defined)" : "") }, String(profile.id))),
+						children: catalog.map((profile) => react_jsx_runtime.jsx("option", { value: String(profile.id), children: String(profile.displayName || profile.id) + (profile.engine === "muse" ? " \u2014 " + String(profile.availability || "gated") : profile.id === "custom" ? " (operator-defined)" : "") }, String(profile.id))),
 					}, "profile"),
 				],
 			}, "head"),
@@ -1384,6 +1387,7 @@ function EngineeringEditorFields({ editor, variant }) {
 			}, "hint"),
 			notice && react_jsx_runtime.jsx("div", { className: "nx-eng-notice " + (noticeTone === "ok" ? "nx-eng-notice-ok" : "nx-eng-notice-err"), children: notice }, "notice"),
 			!selectedSelectable && react_jsx_runtime.jsx("div", { className: "nx-eng-hint", children: "This profile is not selectable yet (profile-not-selectable). It unlocks when Nexus marks it selectable." }, "locked"),
+			selectedEngine === "muse" && react_jsx_runtime.jsx("div", { className: "nx-eng-hint", children: "Muse engine: new sessions run on the Muse agent plane (single agent, no subagents, no independent review). The current conversation keeps its existing plane." }, "muse-engine-hint"),
 			react_jsx_runtime.jsx("button", {
 				type: "button",
 				className: "nx-eng-save",
@@ -1686,6 +1690,56 @@ function currentNexusModePreset() {
 	if (!nexusModeFacade) return "";
 	const snapshot = nexusModeFacade.getSnapshot();
 	return snapshot && typeof snapshot.current === "string" ? snapshot.current : "";
+}
+//#endregion
+
+//#region nexus engine bridge (shared client-state contract, Phase M3)
+/**
+* Phase M3 (TASK-0040): the ENGINE mapping of the preferred Nexus profile,
+* published as the shared `nexusEngineState` cordis service. The snapshot is
+* derived from the engineering editor's authoritative GET document — the same
+* state the profile seat renders — so the mode selector can map the user-facing
+* Normal Engineering mode onto the preferred engine's INTERNAL agent plane
+* (muse → 'aih-muse') for every NEW (blank) session. Dual preferences publish
+* engine:'dual' with a null agent preset (no mapping, pre-M3 behavior). A null
+* snapshot (no editor fetch yet, or a legacy host) also means no mapping —
+* consumers fail closed to the unmodified mode id.
+*/
+let nexusEngineSnapshot = null;
+const nexusEngineListeners = new Set();
+function announceNexusEngine() {
+	for (const listener of [...nexusEngineListeners]) {
+		try { listener(); } catch { /* bridge observers must not break the composer */ }
+	}
+}
+/** Publish (or clear with null) the engine mapping derived from editor state. Test-visible. */
+function publishNexusEngineState(editorState) {
+	let snapshot = null;
+	if (editorState && typeof editorState === "object") {
+		const preferred = editorState.preferredProfile && editorState.preferredProfile.id ? String(editorState.preferredProfile.id) : null;
+		let engine = "dual";
+		if (preferred && Array.isArray(editorState.nexusProfiles)) {
+			const wanted = preferred.toLowerCase();
+			const entry = editorState.nexusProfiles.find((p) => p && String(p.id || "").toLowerCase() === wanted);
+			if (entry && entry.engine) engine = String(entry.engine);
+		}
+		const presets = editorState.engineAgentPresets && typeof editorState.engineAgentPresets === "object" ? editorState.engineAgentPresets : {};
+		// Defense in depth: the catalog validator already omits malformed
+		// bindings; the publisher enforces the pinned agent-preset id grammar
+		// again so a malformed id can never cross the service boundary.
+		const agentPreset = typeof presets[engine] === "string" && /^[a-z0-9][a-z0-9-]*$/.test(presets[engine]) ? presets[engine] : null;
+		snapshot = { engine, engineAgentPreset: agentPreset, preferredProfileId: preferred };
+	}
+	const changed = JSON.stringify(snapshot) !== JSON.stringify(nexusEngineSnapshot);
+	nexusEngineSnapshot = snapshot;
+	if (changed) announceNexusEngine();
+}
+function subscribeNexusEngine(listener) {
+	nexusEngineListeners.add(listener);
+	return () => nexusEngineListeners.delete(listener);
+}
+function nexusEngineStateSnapshot() {
+	return nexusEngineSnapshot;
 }
 //#endregion
 
@@ -2197,6 +2251,14 @@ const PANEL_CSS = [
 const inject = ["slots", "workspaces"];
 function apply(ctx) {
 	ctx.provide("nexusComposerPreference", { Component: ComposerPreference });
+	// Phase M3 (TASK-0040): the shared engine mapping service consumed by the
+	// mode selector (see the nexus engine bridge region). Published by this
+	// plugin because the engineering editor owns the authoritative GET state;
+	// the snapshot is null until the first editor fetch lands.
+	ctx.provide("nexusEngineState", {
+		getSnapshot: () => nexusEngineStateSnapshot(),
+		subscribe: subscribeNexusEngine,
+	});
 	if (ctx.workspaces && ctx.workspaces.list) {
 	// Keep the UI Workspace registry and Nexus Phase 3.1 repository foundation
 	// on one identity path. Existing/recent workspaces are reconciled once at
@@ -2343,6 +2405,9 @@ exports.ComposerPreference = ComposerPreference;
 exports.attachNexusModeState = attachNexusModeState;
 exports.subscribeNexusMode = subscribeNexusMode;
 exports.currentNexusModePreset = currentNexusModePreset;
+exports.publishNexusEngineState = publishNexusEngineState;
+exports.subscribeNexusEngine = subscribeNexusEngine;
+exports.nexusEngineStateSnapshot = nexusEngineStateSnapshot;
 exports.ExecutorPill = ExecutorPill;
 exports.ExecutorChip = ExecutorChip;
 exports.GateActions = GateActions;

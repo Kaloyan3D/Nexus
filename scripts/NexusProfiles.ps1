@@ -27,6 +27,20 @@ function Get-AihNexusProfileCatalog {
         if([string]$catalogProfile.source.kind -ne $expectedKind){throw "Nexus profile '$id' source kind must be '$expectedKind' for engine '$engine'."}
         if([string]::IsNullOrWhiteSpace([string]$catalogProfile.source.profileId)){throw "Nexus profile '$id' is missing source.profileId."}
     }
+    # Phase M3: an engine entry MAY bind the INTERNAL agent preset that runs
+    # the engine's agent plane (muse -> 'aih-muse'). The binding is optional,
+    # and it is internal infrastructure — never a user-facing mode. A present
+    # but malformed binding fails closed here (the id grammar is the pinned
+    # DSH agent-preset grammar).
+    if($null-ne$catalog.PSObject.Properties['engines']-and$null-ne$catalog.engines){
+        foreach($engineEntry in @($catalog.engines.PSObject.Properties)){
+            if($null-eq$engineEntry.Value){continue}
+            if(-not$engineEntry.Value.PSObject.Properties['agentPreset']){continue}
+            $agentPreset=[string]$engineEntry.Value.agentPreset
+            if([string]::IsNullOrWhiteSpace($agentPreset)){throw "Nexus engine '$($engineEntry.Name)' agentPreset is empty."}
+            if($agentPreset -notmatch '^[a-z0-9][a-z0-9-]*$'){throw "Nexus engine '$($engineEntry.Name)' agentPreset '$agentPreset' is not a valid agent-preset id."}
+        }
+    }
     $catalog
 }
 

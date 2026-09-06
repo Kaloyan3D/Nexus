@@ -49,6 +49,28 @@ window.__ModuleLoader__.load({
       return !!left && left.provider === right.provider && left.model === right.model && (left.reasoningEffort || void 0) === (right.reasoningEffort || void 0);
     }
 
+    // Phase M3 (TASK-0040): the ENGINE plane of a new session follows the
+    // preferred Nexus profile, not the mode label. The mode picker keeps its
+    // two user-facing modes; when the controller's shared `nexusEngineState`
+    // says the preferred profile selects engine=muse, the Normal Engineering
+    // mode maps onto the engine's INTERNAL agent preset ('aih-muse') for the
+    // blank session about to be configured. Every other engine — and any
+    // condition where the mapping is not provably available (service absent,
+    // snapshot null, malformed id, host without the preset) — maps to the
+    // mode id itself, which is exactly the pre-M3 behavior. Fail closed to
+    // legacy, never to a guessed preset id.
+    function resolveEnginePreset(engineState, knownPresetIds, modeId) {
+      if (modeId !== "aih-engineering") return modeId;
+      if (!engineState || typeof engineState.getSnapshot !== "function") return modeId;
+      let snapshot;
+      try { snapshot = engineState.getSnapshot(); } catch { return modeId; }
+      if (!snapshot || snapshot.engine !== "muse") return modeId;
+      const agentPreset = typeof snapshot.engineAgentPreset === "string" ? snapshot.engineAgentPreset : "";
+      if (!/^[a-z0-9][a-z0-9-]*$/.test(agentPreset)) return modeId;
+      if (!knownPresetIds || !knownPresetIds.has(agentPreset)) return modeId;
+      return agentPreset;
+    }
+
     function createModeStore(initial) {
       let snapshot = initial;
       const listeners = new Set();
@@ -75,6 +97,12 @@ window.__ModuleLoader__.load({
       let staged;
       let applying = false;
       let disposed = false;
+      // Phase M3: the shared engine mapping arrives late (the controller row
+      // boots before this plugin and publishes `nexusEngineState`); it is
+      // attached like the controller's own mode bridge. Null until then.
+      let engineState = null;
+      let knownPresetIds = new Set();
+      let engineAutoApplyFailed = false;
 
       async function load() {
         try {
@@ -85,6 +113,7 @@ window.__ModuleLoader__.load({
           return;
         }
         const presets = result.value.presets || [];
+        knownPresetIds = new Set(presets.map((preset) => preset && preset.id ? String(preset.id) : "").filter(Boolean));
         const options = presets
           .filter((preset) => SUPPORTED_MODES.has(preset.id) && preset.broken === void 0)
           .map((preset) => ({ id: preset.id, name: preset.name || preset.id, description: preset.description || "" }));
@@ -138,6 +167,20 @@ window.__ModuleLoader__.load({
           const session = currentSession(scope);
           const current = session === void 0 ? fallback : displayedPreset(session, fallback);
           if (current && current !== store.getSnapshot().current) store.patch({ current });
+          // Phase M3: engine-derived plane auto-application. The preferred
+          // profile's engine decides the agent plane for every NEW (blank)
+          // session even without an explicit mode re-selection: a muse
+          // preference maps the Normal Engineering mode onto 'aih-muse'. Dual
+          // preferences resolve to the mode id itself (no behavior change),
+          // and a non-blank session is never reconfigured here (the engine
+          // applies from the next session; the profile seat says so).
+          if (!engineAutoApplyFailed && session !== void 0 && session.blank && current && SUPPORTED_MODES.has(current)) {
+            const effectiveId = resolveEnginePreset(engineState, knownPresetIds, current);
+            if (presetOf(session) !== effectiveId) {
+              staged = current;
+              void applyStaged();
+            }
+          }
           return;
         }
         const session = currentSession(scope);
@@ -157,16 +200,22 @@ window.__ModuleLoader__.load({
           return;
         }
 
+        // Phase M3: the MODE id the user chose is what gets persisted and
+        // displayed; the AGENT PLANE applied to the blank session is the
+        // engine-mapped one (muse preference → 'aih-muse').
+        const effectiveId = resolveEnginePreset(engineState, knownPresetIds, id);
         applying = true;
         store.patch({ busy: true, error: null });
         try {
-          if (presetOf(session) !== id) {
-            const { result } = await api.agentPresets.select({ sessionId: session.id, agentPreset: id });
+          if (presetOf(session) !== effectiveId) {
+            const { result } = await api.agentPresets.select({ sessionId: session.id, agentPreset: effectiveId });
             if (!result.ok) throw new Error(result.error.message || "Failed to apply the Nexus mode.");
             scope.sessions.noteAgentPreset(session.id, result.value.agentPreset);
           }
+          engineAutoApplyFailed = false;
           await settleAppliedMode(session, id);
         } catch (error) {
+          engineAutoApplyFailed = true;
           if (!disposed) {
             store.patch({ busy: false, error: error instanceof Error ? error.message : String(error) });
           }
@@ -187,10 +236,17 @@ window.__ModuleLoader__.load({
         if (ns === AGENT_PRESET_SETTINGS_NS && staged === void 0) void load();
       });
 
+      function attachEngineState(facade) {
+        engineState = facade && typeof facade.getSnapshot === "function" ? facade : null;
+        engineAutoApplyFailed = false;
+        if (!disposed) void applyStaged();
+      }
+
       return {
         store,
         load,
         select,
+        attachEngineState,
         dispose: () => {
           disposed = true;
           stopSessions();
@@ -268,6 +324,14 @@ window.__ModuleLoader__.load({
           getSnapshot: () => controller.store.getSnapshot(),
           subscribe: (listener) => controller.store.subscribe(listener),
         });
+        // Phase M3 (TASK-0040): consume the controller's shared engine
+        // mapping (preferred profile engine → internal agent preset). The
+        // controller row boots before this plugin, so the service is already
+        // provided when this inject runs; if the controller is absent the
+        // mapping stays null and every mode resolves to itself (pre-M3).
+        ctx.inject(["nexusEngineState"], (engineScope) => {
+          controller.attachEngineState(engineScope.nexusEngineState);
+        });
         scope.effect(() => controller.dispose, "nexus-mode-selector: controller lifecycle");
         scope.slots.inject("conversation.hero.agentPreset", () => scope.slots.register({
           name: "conversation.hero.agentPreset",
@@ -287,6 +351,7 @@ window.__ModuleLoader__.load({
     exports.MODE_SELECTIONS = MODE_SELECTIONS;
     exports.presetOf = presetOf;
     exports.sameSelection = sameSelection;
+    exports.resolveEnginePreset = resolveEnginePreset;
     exports.createModeController = createModeController;
     return module.exports;
   }

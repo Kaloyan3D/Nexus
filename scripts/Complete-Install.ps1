@@ -97,6 +97,58 @@ foreach ($presetDirectory in @($targetPreset, $deepSeekPreset)) {
     }
 }
 
+# Phase M3 (TASK-0040): the Muse Agent Plane V0 preset. Built from the same
+# pinned Code Mode preset as aih-engineering with exactly two structural
+# transforms: the Muse-native persona, and an EMPTY delegation section — the
+# RELEASE BLOCKER is that no Muse subagent can exist in V0, so every Dual
+# delegation/workflow row is structurally absent (disabled rows would still
+# carry the surface; absence is the deterministic guarantee). Isolation and
+# controller rows are appended below like on the Dual presets.
+$musePreset = Join-Path $layout.Data '.agent-presets/aih-muse'
+New-Item -ItemType Directory -Force -Path $musePreset | Out-Null
+$museText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $shippedPreset 'agent.cordis.yml')
+$musePersonaPattern = '(?ms)^- id: persona\r?\n.*?(?=^- id: agent-instructions)'
+$musePersonaReplacement = @'
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: !!js process.env.AIH_PERSONA_MUSE ?? 'You are the Muse engineering agent. Complete the supplied bounded task: inspect the repository evidence first, follow repository-local instructions, use the available tools as required, and verify with a targeted check before reporting. Return concrete evidence for what you changed and verified. The deterministic controller owns routing, attempts, verification results, and task completion; you never declare completion or re-route yourself. You are a single engineering agent: there are no subagents, reviewers, or fallback engineers on this plane.'
+
+'@
+$museDelegationPattern = '(?ms)^# [^\r\n]*delegation and workflows[^\r\n]*\r?\n.*?(?=^# [^\r\n]*remaining model-facing rows)'
+$musePersonaMatches = [regex]::Matches($museText, $musePersonaPattern).Count
+$museDelegationMatches = [regex]::Matches($museText, $museDelegationPattern).Count
+if ($musePersonaMatches -ne 1 -or $museDelegationMatches -ne 1) {
+    throw "Pinned Code Mode preset structure changed for the Muse plane (persona matches: $musePersonaMatches; delegation matches: $museDelegationMatches). Refusing an unsafe transform."
+}
+$museText = [regex]::Replace($museText, $musePersonaPattern, $musePersonaReplacement)
+# The delegation/workflow section is REMOVED, not disabled: the Muse V0 tool
+# surface must not contain subagent or workflow rows at all.
+$museText = [regex]::Replace($museText, $museDelegationPattern, '')
+[System.IO.File]::WriteAllText((Join-Path $musePreset 'agent.cordis.yml'), $museText, [System.Text.UTF8Encoding]::new($false))
+Copy-Item -LiteralPath (Join-Path $layout.Config 'preset-muse.yml') -Destination (Join-Path $musePreset 'preset.yml') -Force
+foreach ($museFile in @('Muse-Isolation.cjs', 'AihController.cjs', 'Engineering-Profiles.cjs')) {
+    Copy-Item -LiteralPath (Join-Path $layout.Config $museFile) -Destination (Join-Path $musePreset $museFile) -Force
+}
+$musePresetFile = Join-Path $musePreset 'agent.cordis.yml'
+$musePresetText = Get-Content -Raw -Encoding UTF8 -LiteralPath $musePresetFile
+if (-not $musePresetText.Contains('- id: aih-muse-isolation')) {
+    $museIsolationRow = @"
+
+- id: aih-muse-isolation
+  name: './Muse-Isolation.cjs'
+"@
+    [System.IO.File]::AppendAllText($musePresetFile, $museIsolationRow, [System.Text.UTF8Encoding]::new($false))
+}
+if (-not $musePresetText.Contains('- id: aih-controller')) {
+    $museControllerRow = @"
+
+- id: aih-controller
+  name: './AihController.cjs'
+"@
+    [System.IO.File]::AppendAllText($musePresetFile, $museControllerRow, [System.Text.UTF8Encoding]::new($false))
+}
+
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $layout.Credentials) | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $layout.RoutingData 'states') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $layout.CompletionData 'records') | Out-Null

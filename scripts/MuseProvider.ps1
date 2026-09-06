@@ -376,6 +376,19 @@ function Invoke-AihMuseOfflineChecks {
     return ,$checks
 }
 
+function New-AihMuseOutcomeView {
+    # Live outcomes are heterogeneous: error paths emit fewer fields than
+    # success paths. Normalize tolerantly so the battery records the failure
+    # truthfully instead of crashing under StrictMode on a missing field.
+    param([object]$Outcome)
+    $view=[ordered]@{}
+    foreach($name in @('ok','model','status','durationMs','ttftMs','usage','content','finishReason','errorKind','toolCalls','interrupted')){
+        $prop=$Outcome.PSObject.Properties[$name]
+        $view[$name]=if($null-ne$prop){$prop.Value}else{$null}
+    }
+    [pscustomobject]$view
+}
+
 function Invoke-AihMuseLiveChecks {
     # Opt-in live battery: a handful of tiny synthetic requests. Only harmless
     # synthetic prompts are sent (never repository source, credentials, or
@@ -385,9 +398,24 @@ function Invoke-AihMuseLiveChecks {
         [Parameter(Mandatory=$true)][object]$Config,
         [Parameter(Mandatory=$true)][string]$ModelId,
         [Parameter(Mandatory=$true)][string]$NodePath,
-        [Parameter(Mandatory=$true)][string]$WorkspacePath
+        [Parameter(Mandatory=$true)][string]$WorkspacePath,
+        [Parameter(Mandatory=$true)][string]$InstallRoot
     )
 
+    # The probe transport child reads the credential from the environment.
+    # The credential may live in the managed credential store rather than the
+    # process environment, so resolve it once through the SAME helper the
+    # credentials check used and expose it to the child for the battery only
+    # (never printed, never written to any file; the previous environment is
+    # restored in finally).
+    $resolvedKey=Get-AihProviderApiKey -ApiKeyEnv $Config.apiKeyEnv -InstallRoot $InstallRoot
+    $previousLiveKey=[Environment]::GetEnvironmentVariable($Config.apiKeyEnv)
+    $liveKeyOwnedByService=$false
+    if(-not[string]::IsNullOrWhiteSpace([string]$resolvedKey)-and[string]::IsNullOrWhiteSpace([string]$previousLiveKey)){
+        [Environment]::SetEnvironmentVariable($Config.apiKeyEnv,[string]$resolvedKey)
+        $liveKeyOwnedByService=$true
+    }
+    try{
     $results=@()
     $baseRequest=[ordered]@{
         baseUrl=$Config.baseURL
@@ -401,14 +429,16 @@ function Invoke-AihMuseLiveChecks {
     $textRequest=[ordered]@{};$baseRequest.GetEnumerator()|ForEach-Object{$textRequest[$_.Key]=$_.Value}
     $textRequest.prompt='Reply with exactly the word NEXUS.'
     $textRun=Invoke-AihMuseProbeRequest -NodeExecutable $NodePath -Request ([pscustomobject]$textRequest) -WorkspacePath $WorkspacePath -Label 'live-text'
-    $results+=[pscustomobject][ordered]@{check='text';ok=[bool]$textRun.Outcome.ok;model=$textRun.Outcome.model;status=$textRun.Outcome.status;ttftMs=$null;durationMs=$textRun.Outcome.durationMs;usage=$textRun.Outcome.usage;errorKind=if([bool]$textRun.Outcome.ok){$null}else{$textRun.Outcome.errorKind}}
+    $textOutcome=New-AihMuseOutcomeView $textRun.Outcome
+    $results+=[pscustomobject][ordered]@{check='text';ok=[bool]$textOutcome.ok;model=$ModelId;status=$textOutcome.status;ttftMs=$null;durationMs=$textOutcome.durationMs;usage=$textOutcome.usage;errorKind=if([bool]$textOutcome.ok){$null}else{$textOutcome.errorKind}}
 
     # STREAM
     $streamRequest=[ordered]@{};$baseRequest.GetEnumerator()|ForEach-Object{$streamRequest[$_.Key]=$_.Value}
     $streamRequest.prompt='Reply with exactly the word NEXUS.'
     $streamRequest.stream=$true
     $streamRun=Invoke-AihMuseProbeRequest -NodeExecutable $NodePath -Request ([pscustomobject]$streamRequest) -WorkspacePath $WorkspacePath -Label 'live-stream'
-    $results+=[pscustomobject][ordered]@{check='stream';ok=[bool]$streamRun.Outcome.ok;model=$streamRun.Outcome.model;status=$streamRun.Outcome.status;ttftMs=$streamRun.Outcome.ttftMs;durationMs=$streamRun.Outcome.durationMs;usage=$streamRun.Outcome.usage;errorKind=if([bool]$streamRun.Outcome.ok){$null}else{$streamRun.Outcome.errorKind}}
+    $streamOutcome=New-AihMuseOutcomeView $streamRun.Outcome
+    $results+=[pscustomobject][ordered]@{check='stream';ok=[bool]$streamOutcome.ok;model=$ModelId;status=$streamOutcome.status;ttftMs=$streamOutcome.ttftMs;durationMs=$streamOutcome.durationMs;usage=$streamOutcome.usage;errorKind=if([bool]$streamOutcome.ok){$null}else{$streamOutcome.errorKind}}
 
     # TOOL CALL (harmless fake tool fixture; the tool is NEVER executed)
     $toolRequest=[ordered]@{};$baseRequest.GetEnumerator()|ForEach-Object{$toolRequest[$_.Key]=$_.Value}
@@ -416,7 +446,8 @@ function Invoke-AihMuseLiveChecks {
     $toolRequest.tools=@([ordered]@{type='function';function=[ordered]@{name='get_test_temperature';description='Return the recorded test temperature for a city.';parameters=[ordered]@{type='object';properties=[ordered]@{city=[ordered]@{type='string'}};required=@('city')}}})
     $toolRequest.toolChoice='auto'
     $toolRun=Invoke-AihMuseProbeRequest -NodeExecutable $NodePath -Request ([pscustomobject]$toolRequest) -WorkspacePath $WorkspacePath -Label 'live-tool'
-    $results+=[pscustomobject][ordered]@{check='tool';ok=([bool]$toolRun.Outcome.ok-and$null-ne$toolRun.Outcome.toolCalls);model=$toolRun.Outcome.model;status=$toolRun.Outcome.status;ttftMs=$null;durationMs=$toolRun.Outcome.durationMs;usage=$toolRun.Outcome.usage;errorKind=if([bool]$toolRun.Outcome.ok){$null}else{$toolRun.Outcome.errorKind}}
+    $toolOutcome=New-AihMuseOutcomeView $toolRun.Outcome
+    $results+=[pscustomobject][ordered]@{check='tool';ok=([bool]$toolOutcome.ok-and$null-ne$toolOutcome.toolCalls);model=$ModelId;status=$toolOutcome.status;ttftMs=$null;durationMs=$toolOutcome.durationMs;usage=$toolOutcome.usage;errorKind=if([bool]$toolOutcome.ok){$null}else{$toolOutcome.errorKind}}
 
     # REASONING (mapped Nexus default effort of the Muse profile)
     $mapped=Get-AihMuseReasoningWireValue -ProviderConfig $Config -Level 'xhigh'
@@ -425,9 +456,15 @@ function Invoke-AihMuseLiveChecks {
         $reasonRequest.prompt='Reply with the single word: ok'
         $reasonRequest.reasoningEffort=$mapped
         $reasonRun=Invoke-AihMuseProbeRequest -NodeExecutable $NodePath -Request ([pscustomobject]$reasonRequest) -WorkspacePath $WorkspacePath -Label 'live-reasoning'
-        $results+=[pscustomobject][ordered]@{check='reasoning';ok=[bool]$reasonRun.Outcome.ok;model=$reasonRun.Outcome.model;status=$reasonRun.Outcome.status;ttftMs=$null;durationMs=$reasonRun.Outcome.durationMs;usage=$reasonRun.Outcome.usage;errorKind=if([bool]$reasonRun.Outcome.ok){$null}else{$reasonRun.Outcome.errorKind}}
+        $reasonOutcome=New-AihMuseOutcomeView $reasonRun.Outcome
+        $results+=[pscustomobject][ordered]@{check='reasoning';ok=[bool]$reasonOutcome.ok;model=$ModelId;status=$reasonOutcome.status;ttftMs=$null;durationMs=$reasonOutcome.durationMs;usage=$reasonOutcome.usage;errorKind=if([bool]$reasonOutcome.ok){$null}else{$reasonOutcome.errorKind}}
     }
     return ,$results
+    }
+    finally{
+        if($liveKeyOwnedByService){[Environment]::SetEnvironmentVariable($Config.apiKeyEnv,$null)}
+        elseif($null-ne$previousLiveKey){[Environment]::SetEnvironmentVariable($Config.apiKeyEnv,[string]$previousLiveKey)}
+    }
 }
 
 function Invoke-AihMuseProviderProbe {
@@ -523,7 +560,7 @@ function Invoke-AihMuseProviderProbe {
                 }
                 else{
                     $probe.live.ran=$true
-                    $probe.live.results=Invoke-AihMuseLiveChecks -Config $config -ModelId $modelId -NodePath $nodePath -WorkspacePath $workspace
+                    $probe.live.results=Invoke-AihMuseLiveChecks -Config $config -ModelId $modelId -NodePath $nodePath -WorkspacePath $workspace -InstallRoot $InstallRoot
                 }
             }
         }

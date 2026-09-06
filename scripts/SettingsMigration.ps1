@@ -91,6 +91,36 @@ $script:ManagedRoutePriorStates = @{
             high: high
             xhigh: xhigh
             max: high
+'@,
+        # Second recognized prior state: the SAME Phase M2 managed route after
+        # a DSH settings rewrite stripped the explanatory comments. A settings
+        # save drops comments, so an installed M2 route can drift to this
+        # comment-less shape; it is still the exact managed M2 content and
+        # must upgrade to the current contributor route, not become
+        # user-owned by accident.
+        @'
+    meta-model-api:
+      displayName: Meta Model API (Muse Spark, direct)
+      apiKeyEnv: MODEL_API_KEY
+      api: openai-completions
+      baseURL: https://api.meta.ai/v1
+      reasoning: xhigh
+      compat:
+        thinkingFormat: openai
+        supportsReasoningEffort: true
+        supportsUsageInStreaming: true
+        supportsDeveloperRole: true
+        maxTokensField: max_completion_tokens
+      models:
+        - id: muse-spark-1.3
+          name: Muse Spark 1.3
+          contextWindow: 1048576
+          maxTokens: 32768
+          reasoningEfforts:
+            off:
+            high: high
+            xhigh: xhigh
+            max: high
 '@
     )
 }
