@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "description": "Muse-native agent-plane profile configuration. Phase M1 defines profile semantics only; provider/model transport is added in Phase M2 and execution remains disabled until Muse Agent Plane V0 exists.",
+  "profiles": [
+    {
+      "id": "muse-spark-1.3",
+      "displayName": "Muse Spark 1.3",
+      "status": "foundation",
+      "reasoning": {
+        "default": "xhigh",
+        "escalation": "max"
+      },
+      "subagents": {
+        "enabled": false
+      },
+      "review": {
+        "independent": false
+      },
+      "contributorProtection": {
+        "required": true
+      }
+    }
+  ]
+}
