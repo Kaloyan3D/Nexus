@@ -74,7 +74,11 @@ function Get-AihNexusEditorProfiles {
         $resolved=@()
         foreach($entry in @($entries)){
             # NOTE: never name this '$profile' — that is a PowerShell automatic variable.
-            $resolvedProfile=Resolve-AihNexusProfile -InstallRoot $Layout.Root -ProfileId ([string]$entry.id)
+            # M1.1 parity: per-entry resolution — an engine-specific source that
+            # cannot be resolved (e.g. missing muse-profiles.json) skips ONLY that
+            # entry; a partially-resolved entry is never exposed.
+            $resolvedProfile=$null
+            try{$resolvedProfile=Resolve-AihNexusProfile -InstallRoot $Layout.Root -ProfileId ([string]$entry.id)}catch{$resolvedProfile=$null}
             if($null-eq$resolvedProfile){continue}
             $isDual=[string]$resolvedProfile.Engine -eq 'dual'
             $resolved+=[pscustomobject][ordered]@{
@@ -190,20 +194,19 @@ $(switch($Action){
     'select'{
         if([string]::IsNullOrWhiteSpace($ProfileId)){throw 'select requires -ProfileId.'}
         $selectId=$ProfileId.Trim().ToLowerInvariant()
-        # Phase M1: the selection gate is the top-level Nexus Profile catalog.
-        # A profile the catalog resolves is governed by its engine
-        # classification: non-Dual engines (Muse) and any entry flagged
-        # selectable=false fail deterministically with 'profile-not-selectable'
-        # and NEVER touch the settings key. Dual profiles keep delegating to
-        # the existing Engineering Profile flow below.
+        # Phase M1.1: the selection gate is the top-level Nexus Profile catalog
+        # and depends on `selectable` ONLY. The engine classifies WHICH
+        # execution architecture is used later; it never blocks the profile-
+        # preference layer itself. selectable=false fails deterministically
+        # with 'profile-not-selectable' and NEVER touches the settings key.
         $resolvedNexus=$null
         try{$resolvedNexus=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId $selectId}catch{$resolvedNexus=$null}
-        if($null-ne$resolvedNexus -and ([string]$resolvedNexus.Engine -ne 'dual' -or -not[bool]$resolvedNexus.Selectable)){
-            [pscustomobject][ordered]@{ok=$false;error='profile-not-selectable';profileId=$selectId;engine=[string]$resolvedNexus.Engine}
-        }
-        elseif($null-ne$resolvedNexus -and [string]$resolvedNexus.Engine -eq 'dual'){
+        if($null-ne$resolvedNexus -and [bool]$resolvedNexus.Selectable){
             Set-AihEngineeringProfileKey $layout.Settings $selectId
             [pscustomobject]@{ok=$true;profileId=$selectId}
+        }
+        elseif($null-ne$resolvedNexus){
+            [pscustomobject][ordered]@{ok=$false;error='profile-not-selectable';profileId=$selectId;engine=[string]$resolvedNexus.Engine}
         }
         else{
             # Catalog could not resolve the id (unknown id, or catalog

@@ -156,7 +156,9 @@ function cloneRoles(roles) {
  * Classify the user-facing profile list (Phase M1). The catalog decides the
  * ENGINE; Dual role bindings come from the already-merged Dual registry
  * (built-ins + operator Custom), Muse metadata comes from the Muse registry.
- * An unresolvable Dual entry is skipped — never reclassified. The operator
+ * An entry whose engine-specific source cannot be resolved (missing Dual
+ * registry config or missing Muse registry profile) is SKIPPED — never
+ * partially resolved. The operator
  * Custom profile is dynamically classified Dual exactly like the catalog
  * resolver does (never duplicated into the immutable catalog).
  */
@@ -191,10 +193,15 @@ function buildNexusProfileEntries(options) {
       entry.roles = cloneRoles(dual.roles)
       if (entry.availability === null) entry.availability = 'ready'
     } else {
+      // M1.1 parity with the PowerShell resolver: a Muse catalog entry is
+      // only user-facing together with its muse-profiles.json source. A
+      // missing engine-specific source is unresolved — the entry is skipped,
+      // never exposed partially resolved with muse: null.
       const muse = museProfileMetadataOf(museDocument, sourceProfileId)
-      entry.muse = muse ? JSON.parse(JSON.stringify(muse)) : null
+      if (!muse) continue
+      entry.muse = JSON.parse(JSON.stringify(muse))
       if (entry.availability === null) {
-        entry.availability = muse && typeof muse.status === 'string' && muse.status !== '' ? muse.status : 'unavailable'
+        entry.availability = typeof muse.status === 'string' && muse.status !== '' ? muse.status : 'unavailable'
       }
     }
     entries.push(entry)
