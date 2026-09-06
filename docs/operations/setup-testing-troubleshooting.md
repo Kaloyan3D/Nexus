@@ -1,15 +1,19 @@
 # Setup, testing, and troubleshooting
 
-This guide covers the normal Windows workflow for installing, starting, testing, restarting, and diagnosing Nexus.
+This guide covers the normal Windows workflow for installing, starting, testing, restarting, and diagnosing Nexus. Linux uses the same commands through extensionless launchers and its own installer — see [docs/linux.md](../linux.md) for the Linux-specific install, PATH, layout, update, and uninstall flow.
 
 ## Requirements
+
+Windows:
 
 - Windows 10/11
 - PowerShell 5.1+
 - Internet access during installation/update
 - DeepSeek API key
-- Optional ChatGPT/Codex authentication for bounded review
+- Optional ChatGPT/Codex authentication for independent review
 - Git available for repositories/worktree operations
+
+Linux (x86_64, user-scoped, no sudo): git, tar, xz, sha256sum, and curl or wget. Node.js and PowerShell are provisioned pinned and checksum-verified by `./setup.sh`; no system-wide installs.
 
 ## Install
 
@@ -25,18 +29,29 @@ Then configure providers:
 
 ```powershell
 aih-key
-aih-auth   # optional; bounded Codex review
+aih-auth   # optional; independent Codex review
 ```
 
 Setup installs/composes pinned runtime dependencies and Nexus UI/controller packages. Local credentials, sessions, generated profiles/packages, runtime data, and portable dependencies are not intended to be committed to Git.
 
 ## Start Nexus
 
-From the project you want Nexus to work on:
+Launch the universal application from any directory, then choose **Open
+Folder** in the UI:
 
 ```powershell
 aih -Open
 ```
+
+Optional explicit preselection:
+
+```powershell
+aih -Open .
+aih -Open C:\path\to\project
+```
+
+An already-running Nexus process is reused. The explicit path is handed to the
+UI and never becomes a process-global cwd.
 
 Useful lifecycle commands:
 
@@ -163,7 +178,7 @@ A source change that is not reflected in the active profile can make browser beh
 
 ## PowerShell encoding
 
-Nexus is Windows-first and PowerShell 5.1 can use legacy implicit encodings.
+On Windows, PowerShell 5.1 can use legacy implicit encodings.
 
 For JSON/JSONL producer/read boundaries, use explicit UTF-8 where the implementation requires it. If you see corrupted arrows/checkmarks/non-Latin text after restart, inspect encoding at the writer and reader before patching UI display code.
 

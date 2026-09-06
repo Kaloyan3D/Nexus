@@ -1,0 +1,33 @@
+{
+  "name": "@nexus/mode-selector",
+  "description": "Nexus-owned new-session mode selector and public-API preset/model synchronization bridge.",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-agent-preset",
+        "@deepseek-ai/dsh-client-ui-model-selection"
+      ],
+      "platform": "web"
+    }
+  },
+  "license": "UNLICENSED",
+  "files": [
+    "lib/index.js",
+    "lib/client.js"
+  ]
+}

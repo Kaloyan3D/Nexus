@@ -1,5 +1,7 @@
-﻿[CmdletBinding()]
-param([string]$Workspace=(Get-Location).Path,[string]$InstallRoot='C:\AI-Harness',[Parameter(Mandatory=$true)][string]$TaskId,[string]$Question,[string[]]$Invariants=@(),[string]$DiffPath,[string]$FilesPath,[string]$Assessment,[switch]$Execute,[switch]$UserApprovedFullRepo,[ValidateSet('bundle','files','inline')][string]$ContextMode='bundle',[string]$Attempt,[string]$Preset,[string]$PayloadFile)
+[CmdletBinding()]
+param([string]$Workspace=(Get-Location).Path,[string]$InstallRoot,[Parameter(Mandatory=$true)][string]$TaskId,[string]$Question,[string[]]$Invariants=@(),[string]$DiffPath,[string]$FilesPath,[string]$Assessment,[switch]$Execute,[switch]$UserApprovedFullRepo,[ValidateSet('bundle','files','inline')][string]$ContextMode='bundle',[string]$Attempt,[string]$Preset,[string]$TaskInstanceId,[string]$PayloadFile,[string]$PolicyPath)
+if([string]::IsNullOrWhiteSpace($InstallRoot)){$InstallRoot=Split-Path -Parent $PSScriptRoot}
+$InstallRoot=[System.IO.Path]::GetFullPath($InstallRoot)
 . (Join-Path $PSScriptRoot 'Common.ps1')
 . (Join-Path $PSScriptRoot 'Routing.ps1')
 . (Join-Path $PSScriptRoot 'CodexReview.ps1')
@@ -14,20 +16,26 @@ if ($PayloadFile) {
     if ($null -ne $__aihPayload.PSObject.Properties['Workspace']) { $Workspace = [string]$__aihPayload.Workspace }
     if ($null -ne $__aihPayload.PSObject.Properties['Question']) { $Question = [string]$__aihPayload.Question }
     if ($null -ne $__aihPayload.PSObject.Properties['ContextMode']) { $ContextMode = [string]$__aihPayload.ContextMode }
+    if ($null -ne $__aihPayload.PSObject.Properties['TaskInstanceId']) { $TaskInstanceId = [string]$__aihPayload.TaskInstanceId }
 }
 if ([string]::IsNullOrWhiteSpace($Question)) { throw 'A review question is required.' }
-$layout=Get-AihLayout $InstallRoot;$policy=Get-AihRoutingPolicy $layout.RoutingPolicy
+$layout=Get-AihLayout $InstallRoot
+# TASK-0007: the routing policy decides review budget enforcement
+# (codex.automaticReview.enforceLimits). -PolicyPath lets tests and operators
+# point the review at an alternate policy without touching the install.
+$resolvedPolicyPath=if([string]::IsNullOrWhiteSpace($PolicyPath)){$layout.RoutingPolicy}else{$PolicyPath}
+$policy=Get-AihRoutingPolicy $resolvedPolicyPath
 # Phase 2: the reviewer ROLE is resolved through the active engineering
 # profile + model registry (routing selected the class; the profile decides
-# WHICH model fulfills the reviewer role). The bounded review transport in
+# WHICH model fulfills the reviewer role). The independent review transport in
 # this phase is the local Codex/OAuth adapter (provider sol-local); any other
 # reviewer provider fails closed at this adapter boundary.
 $profiles=Get-AihEngineeringProfiles (Join-Path (Split-Path -Parent $layout.RoutingPolicy) 'engineering-profiles.json') $layout.CustomEngineeringProfile
 $registry=Get-AihModelRegistry (Join-Path (Split-Path -Parent $layout.RoutingPolicy) 'model-registry.json')
 $resolvedPreset=Resolve-AihPreset $policy $Preset
-$profile=Resolve-AihProfile $policy $resolvedPreset $profiles $layout.Settings
-$reviewerTarget=Resolve-AihModelTarget $registry $profile 'reviewer'
-if($reviewerTarget.Provider -ne 'sol-local'){throw "Reviewer provider '$($reviewerTarget.Provider)' is not supported by the bounded review adapter in this phase; fail closed."}
+$resolvedProfile=Resolve-AihProfile $policy $resolvedPreset $profiles $layout.Settings
+$reviewerTarget=Resolve-AihModelTarget $registry $resolvedProfile 'reviewer'
+if($reviewerTarget.Provider -ne 'sol-local'){throw "Reviewer provider '$($reviewerTarget.Provider)' is not supported by the independent review adapter in this phase; fail closed."}
 
 $diff=''
 if(-not[string]::IsNullOrWhiteSpace($DiffPath)){$diff=Get-Content -Raw -LiteralPath $DiffPath}
@@ -46,16 +54,25 @@ if(-not[string]::IsNullOrWhiteSpace($FilesPath)){
     $parsedFiles=Get-Content -Raw -Encoding UTF8 -LiteralPath $FilesPath|ConvertFrom-Json
     if($null -ne $parsedFiles){$files=@($parsedFiles)}
 }
-$packet=New-AihReviewPacket $Workspace $TaskId $Question $Invariants $diff $files @() $Assessment $policy -UserApprovedFullRepo:$UserApprovedFullRepo -ContextMode $ContextMode -Attempt $Attempt
+$packet=New-AihReviewPacket $Workspace $TaskId $Question $Invariants $diff $files @() $Assessment $policy -UserApprovedFullRepo:$UserApprovedFullRepo -ContextMode $ContextMode -Attempt $Attempt -TaskInstanceId $TaskInstanceId
 if($Execute){
     if(-not [bool]$packet.enforcement.allowed){
-        $result=[ordered]@{ok=$false;kind='packet-too-large';taskId=$TaskId;executionClass='reviewer';role='reviewer';profile=$profile.Id;provider=$reviewerTarget.Provider;model=$reviewerTarget.Model;reviewerCalled=$false;codexCalled=$false;violations=@($packet.enforcement.violations);enforcement=$packet.enforcement;budget=$packet.budget;readOnly=$true;completionAuthority=$false}
+        $result=[ordered]@{ok=$false;kind='packet-too-large';taskId=$TaskId;executionClass='reviewer';role='reviewer';profile=$resolvedProfile.Id;provider=$reviewerTarget.Provider;model=$reviewerTarget.Model;reviewerCalled=$false;codexCalled=$false;violations=@($packet.enforcement.violations);enforcement=$packet.enforcement;budget=$packet.budget;readOnly=$true;completionAuthority=$false}
         $result|ConvertTo-Json -Depth 20
         exit 3
     }
-    $reviewResult=Invoke-AihCodexReview $Workspace $TaskId $packet $InstallRoot -Model $reviewerTarget.Model -Reasoning $reviewerTarget.Reasoning
+    $reviewResult=Invoke-AihCodexReview $Workspace $TaskId $packet $InstallRoot -Model $reviewerTarget.Model -Reasoning $reviewerTarget.Reasoning -TaskInstanceId $TaskInstanceId
     $budget=Get-AihCodexBudget $policy
-    $telemetry=Write-AihTaskTelemetry $Workspace $TaskId @{executionClass='reviewer';model=$reviewerTarget.Model;provider=$reviewerTarget.Provider;modelCalls=1;codexFindings=@($reviewResult.findings);finalResult=$reviewResult.verdict;configuration=$profile.Id;filesSupplied=@($files).Count}
-    $result=[ordered]@{ok=$true;taskId=$TaskId;executionClass='reviewer';role='reviewer';profile=$profile.Id;profileDisplayName=$profile.DisplayName;provider=$reviewerTarget.Provider;model=$reviewerTarget.Model;modelDisplayName=$reviewerTarget.ModelDisplayName;reasoning=$reviewerTarget.Reasoning;callCount=[int](Get-AihTask $Workspace $TaskId).codexCalls;budget=[ordered]@{maxCallsPerTask=[int]$budget.maxCallsPerTask;maxFiles=[int]$budget.maxFiles;maxDiffLines=[int]$budget.maxDiffLines;maxContextTokens=[int]$budget.maxContextTokens;maxOutputTokens=[int]$budget.maxOutputTokens};readOnly=$true;freshContext=$true;completionAuthority=$false;result=$reviewResult;telemetry=$telemetry}
+    $enforceLimits=Get-AihCodexEnforceLimits $policy
+    # TASK-0007: the reported budget mirrors the packet budget - numeric
+    # ceilings only when the policy enforces limits, null (unlimited) otherwise.
+    $budgetOut=[ordered]@{enforceLimits=$enforceLimits;maxCallsPerTask=$(if($enforceLimits){[int]$budget.maxCallsPerTask}else{$null});maxFiles=$(if($enforceLimits){[int]$budget.maxFiles}else{$null});maxDiffLines=$(if($enforceLimits){[int]$budget.maxDiffLines}else{$null});maxContextTokens=$(if($enforceLimits){[int]$budget.maxContextTokens}else{$null});maxOutputTokens=$(if($enforceLimits){[int]$budget.maxOutputTokens}else{$null})}
+    $telemetry=Write-AihTaskTelemetry $Workspace $TaskId @{executionClass='reviewer';model=$reviewerTarget.Model;provider=$reviewerTarget.Provider;modelCalls=1;codexFindings=@($reviewResult.findings);finalResult=$reviewResult.verdict;configuration=$resolvedProfile.Id;filesSupplied=@($files).Count} -TaskInstanceId $TaskInstanceId
+    # TASK-0012: surface the provider-capacity summary (real transport
+    # capacity + packing state) alongside the budget block so the Nexus-budget
+    # vs provider-capacity distinction is visible to callers.
+    $providerCapacityOut=$null
+    if($null-ne $reviewResult.PSObject.Properties['providerCapacity']){$providerCapacityOut=$reviewResult.providerCapacity}
+    $result=[ordered]@{ok=$true;taskId=$TaskId;executionClass='reviewer';role='reviewer';profile=$resolvedProfile.Id;profileDisplayName=$resolvedProfile.DisplayName;provider=$reviewerTarget.Provider;model=$reviewerTarget.Model;modelDisplayName=$reviewerTarget.ModelDisplayName;reasoning=$reviewerTarget.Reasoning;callCount=[int](Get-AihTask $Workspace $TaskId -TaskInstanceId $TaskInstanceId).codexCalls;budget=$budgetOut;providerCapacity=$providerCapacityOut;readOnly=$true;freshContext=$true;completionAuthority=$false;result=$reviewResult;telemetry=$telemetry}
     $result|ConvertTo-Json -Depth 20
 }else{$packet|ConvertTo-Json -Depth 20}

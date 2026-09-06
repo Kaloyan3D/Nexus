@@ -13,9 +13,102 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Install pinned runtime
+      - name: Install and test repo-local Nexus checkout
         shell: pwsh
-        run: ./scripts/Setup.ps1 -InstallRoot "$env:RUNNER_TEMP\AI-Harness" -SkipPathUpdate
-      - name: Run deterministic tests
+        run: ./setup.ps1 -SkipPathUpdate -SkipDeepSeekLogin -SkipOpenAiLogin
+      - name: Execution target authority regression (Windows)
         shell: pwsh
-        run: ./scripts/Test-Harness.ps1 -InstallRoot "$env:RUNNER_TEMP\AI-Harness"
+        run: ./runtime/node/node.exe ./tests/EngineeringIsolation.Tests.cjs
+      - name: PowerShell 7 lane (test-only host override)
+        shell: pwsh
+        run: |
+          # TASK-0024: the deterministic suites must behave identically under
+          # PowerShell 7. Windows production keeps powershell.exe; this lane
+          # uses the test-only -PowerShellExecutable override and audit mode
+          # so one run reports every failing suite.
+          $pwsh7 = Join-Path $env:ProgramFiles 'PowerShell/7/pwsh.exe'
+          if (-not (Test-Path $pwsh7)) { $pwsh7 = (Get-Command pwsh).Source }
+          ./scripts/Test-Harness.ps1 -PowerShellExecutable $pwsh7 -ContinueOnFailure
+
+  native-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate POSIX shell sources
+        run: |
+          sh -n setup.sh
+          sh -n scripts/lib/aih-verify-sha256.sh
+          sh -n scripts/lib/aih-provision-pwsh.sh
+          for wrapper in bin/linux/*.sh; do
+            sh -n "$wrapper"
+          done
+          for suite in tests/*.Tests.sh; do
+            sh -n "$suite"
+          done
+      - name: Checksum manifest parser regression suite
+        run: |
+          command -v iconv
+          sh tests/aih-verify-sha256.Tests.sh
+      - name: Official PowerShell manifest decodes through the installer verifier
+        run: |
+          curl -fsSL 'https://github.com/PowerShell/PowerShell/releases/download/v7.5.3/hashes.sha256' -o /tmp/official-hashes.sha256
+          file /tmp/official-hashes.sha256
+          . scripts/lib/aih-verify-sha256.sh
+          aih_manifest_to_utf8 /tmp/official-hashes.sha256 | grep -F 'powershell-7.5.3-linux-x64.tar.gz'
+      - name: PowerShell provisioning regression suite
+        run: sh tests/aih-provision-pwsh.Tests.sh
+      - name: Pinned-Node environment propagation suite (system Node removed from PATH)
+        run: |
+          # The suite's fixtures run with a PATH that does not contain any
+          # system node, reproducing the CachyOS npm error 127 class.
+          sh tests/aih-node-env.Tests.sh
+      - name: Real PowerShell tarball provisioning smoke (download -> verify -> extract -> chmod -> --version)
+        run: |
+          AIH_VERSION=$(grep '"PowerShellVersion"' config/versions.json | sed 's/.*: *"\([^"]*\)".*/\1/')
+          AIH_ARTIFACT="powershell-$AIH_VERSION-linux-x64.tar.gz"
+          AIH_TMP=$(mktemp -d)
+          curl -fsSL "https://github.com/PowerShell/PowerShell/releases/download/v$AIH_VERSION/$AIH_ARTIFACT" -o "$AIH_TMP/$AIH_ARTIFACT"
+          curl -fsSL "https://github.com/PowerShell/PowerShell/releases/download/v$AIH_VERSION/hashes.sha256" -o "$AIH_TMP/hashes.sha256"
+          . scripts/lib/aih-verify-sha256.sh
+          . scripts/lib/aih-provision-pwsh.sh
+          aih_verify_sha256 "$AIH_TMP/$AIH_ARTIFACT" "$AIH_TMP/hashes.sha256" "$AIH_ARTIFACT"
+          mkdir -p "$AIH_TMP/expanded"
+          tar -xzf "$AIH_TMP/$AIH_ARTIFACT" -C "$AIH_TMP/expanded"
+          test -f "$AIH_TMP/expanded/pwsh"
+          aih_provision_pwsh_archive "$AIH_TMP/expanded" "$AIH_TMP/runtime/pwsh" "$AIH_VERSION"
+          test -x "$AIH_TMP/runtime/pwsh/pwsh"
+          "$AIH_TMP/runtime/pwsh/pwsh" --version
+          rm -rf "$AIH_TMP"
+      - name: Install and test natively on Linux
+        run: |
+          ./setup.sh \
+            --install-root "$HOME/.local/share/nexus" \
+            --skip-deepseek-login \
+            --skip-openai-login \
+            --skip-path-check
+      - name: Execution target authority regression (installed Linux tree)
+        run: "$HOME/.local/share/nexus/runtime/node/bin/node $HOME/.local/share/nexus/tests/EngineeringIsolation.Tests.cjs"
+      - name: Pinned runtimes are checksum-verified and executable
+        run: |
+          test -x "$HOME/.local/share/nexus/runtime/node/bin/node"
+          test -x "$HOME/.local/share/nexus/runtime/pwsh/pwsh"
+          pinned=$(grep '"PowerShellVersion"' config/versions.json | head -n1 | sed 's/.*: *"\([^"]*\)".*/\1/')
+          reported=$("$HOME/.local/share/nexus/runtime/pwsh/pwsh" --version | sed 's/^PowerShell //')
+          test "$reported" = "$pinned"
+          echo "installed pwsh reports $reported (pinned $pinned)"
+      - name: Linux launchers resolve and run doctor offline
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          "$HOME/.local/bin/aih-doctor" -Offline
+      - name: INSTALLED-tree harness (aih-test from ~/.local/bin, audit mode: ALL suites)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          # Exercises the exact installed-tree path that failed on CachyOS:
+          # every suite runs from ~/.local/share/nexus/tests against the
+          # installed Linux layout (extensionless launchers, POSIX paths).
+          # TASK-0024: -ContinueOnFailure is the portability AUDIT mode - it
+          # runs ALL suites (no fail-fast hiding suite 32 behind suite 2),
+          # records every failing suite, and still exits non-zero if ANY
+          # suite failed. Default aih-test behavior stays fail-fast.
+          "$HOME/.local/bin/aih-test" -ContinueOnFailure

@@ -3,7 +3,7 @@ param(
     [string]$Objective,
     [string]$AcceptanceCriteriaPath,
     [string]$Workspace = (Get-Location).Path,
-    [string]$InstallRoot = 'C:\AI-Harness',
+    [string]$InstallRoot,
     [string]$Preset,
     [string]$DiffPath,
     [string]$WorkerReportsPath,
@@ -16,6 +16,11 @@ param(
     ,[switch]$RequireCodexReview
     ,[string]$ReviewResultPath
 )
+
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    $InstallRoot = Split-Path -Parent $PSScriptRoot
+}
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -66,9 +71,10 @@ $workspacePath = [System.IO.Path]::GetFullPath($Workspace)
 $criteria = @(Read-AihAcceptanceCriteria $AcceptanceCriteriaPath)
 $acceptance = Get-AihAcceptanceAssessment $criteria
 
+$verifyHost = Get-AihPowerShellHost $InstallRoot
 $verifyArguments = @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $layout.Scripts 'Verify-Project.ps1'),'-Workspace',$workspacePath,'-InstallRoot',$InstallRoot,'-ContinueOnFailure','-Json')
 if (-not [string]::IsNullOrWhiteSpace($TaskId)) { $verifyArguments += @('-TaskId',$TaskId) }
-$verifyOutput = (& powershell.exe @verifyArguments 2>&1 | Out-String).Trim()
+$verifyOutput = (& $verifyHost @verifyArguments 2>&1 | Out-String).Trim()
 $verifyExitCode = $LASTEXITCODE
 try { $verification = $verifyOutput | ConvertFrom-Json }
 catch {
@@ -85,12 +91,12 @@ if ($deterministic.Pass -and $acceptance.Pass) {
     $evidence = [ordered]@{ objective = $Objective; acceptanceCriteria = $acceptance.Criteria; deterministicVerification = $verification; relevantDiff = $diff; workerReports = $workerReports }
     if ($RequireCodexReview) {
         if ([string]::IsNullOrWhiteSpace($ReviewResultPath) -or -not (Test-Path -LiteralPath $ReviewResultPath -PathType Leaf)) {
-            $semantic = [pscustomobject]@{ status = 'FAIL'; summary = 'A bounded Codex review is required but no review result was supplied.'; concreteReasons = @('Required bounded review evidence is missing.'); missingRequirements = @('review-result.json'); boundedFixes = @(); provider = 'codex-review-service'; model = 'gpt-5.6-sol'; reasoning = 'bounded' }
+            $semantic = [pscustomobject]@{ status = 'FAIL'; summary = 'An independent Codex review is required but no review result was supplied.'; concreteReasons = @('Required review evidence is missing.'); missingRequirements = @('review-result.json'); boundedFixes = @(); provider = 'codex-review-service'; model = 'gpt-5.6-sol'; reasoning = 'bounded' }
         }
         else {
             $review = Get-Content -Raw -Encoding UTF8 -LiteralPath $ReviewResultPath | ConvertFrom-Json
             $reviewPass = [string]$review.verdict -eq 'pass' -and -not @($review.findings | Where-Object severity -in @('blocker','high')).Count
-            $semantic = [pscustomobject]@{ status = if ($reviewPass) { 'PASS' } else { 'FAIL' }; summary = 'Bounded Codex review result consumed by the deterministic controller.'; concreteReasons = @($review.findings | Where-Object severity -in @('blocker','high') | ForEach-Object problem); missingRequirements = @(); boundedFixes = @(); provider = 'codex-review-service'; model = 'gpt-5.6-sol'; reasoning = 'bounded' }
+            $semantic = [pscustomobject]@{ status = if ($reviewPass) { 'PASS' } else { 'FAIL' }; summary = 'Independent Codex review result consumed by the deterministic controller.'; concreteReasons = @($review.findings | Where-Object severity -in @('blocker','high') | ForEach-Object problem); missingRequirements = @(); boundedFixes = @(); provider = 'codex-review-service'; model = 'gpt-5.6-sol'; reasoning = 'bounded' }
         }
     }
     else {

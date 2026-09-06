@@ -16,10 +16,10 @@
 // ever activates once the webServer service is available — and if the
 // service arrives AFTER this plugin starts (composition ordering), the
 // injection resolves then, instead of being lost to a one-time lookup.
-import { readFileSync, statSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs'
+import { readFileSync, statSync, writeFileSync, unlinkSync, mkdirSync, accessSync, constants } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import status from './status.cjs'
 import detail from './detail.cjs'
@@ -36,8 +36,30 @@ function apply(ctx) {
   // service is available (immediately, or later when the service appears).
   // Without the service the callback never runs — the plugin stays inert.
   ctx.inject(['webServer'], (webCtx) => {
-    const installRoot = process.env.DSH_HOME ? dirname(process.env.DSH_HOME) : 'C:\\AI-Harness'
-    const dataRoot = process.env.DSH_HOME ? process.env.DSH_HOME : join(installRoot, 'data')
+    // Phase 3.2.5: the LIVE runtime data root (DSH_HOME) owns install-root
+    // identity — the same precedence as the controller bridge and the
+    // engineering profile layer. AIH_INSTALL_ROOT stays the fallback for
+    // tooling that runs without the DSH runtime; when both are set they are
+    // set consistently by the aih entrypoints, and when they disagree the
+    // DSH runtime root must win so the UI reads the same data plane the
+    // controller writes.
+    const configuredRoot = process.env.DSH_HOME
+      ? dirname(resolve(process.env.DSH_HOME))
+      : (process.env.AIH_INSTALL_ROOT || '')
+    if (!configuredRoot) throw new Error('Nexus install root is unavailable; launch through the repo-local aih entrypoint.')
+    const installRoot = resolve(configuredRoot)
+    const dataRoot = process.env.DSH_HOME ? resolve(process.env.DSH_HOME) : join(installRoot, 'data')
+    // Platform-aware PowerShell host (mirror of scripts/Platform.ps1
+    // Get-AihPowerShellHost): Windows keeps powershell.exe; POSIX prefers the
+    // AIH_PWSH_HOST override, the setup.sh-pinned runtime/pwsh/pwsh, then a
+    // system pwsh on PATH.
+    const pwshHost = (() => {
+      if (process.platform === 'win32') return 'powershell.exe'
+      if (process.env.AIH_PWSH_HOST) return process.env.AIH_PWSH_HOST
+      const pinned = join(installRoot, 'runtime', 'pwsh', 'pwsh')
+      try { accessSync(pinned, constants.X_OK); return pinned } catch { /* fall through */ }
+      return 'pwsh'
+    })()
     const settingsPath = join(dataRoot, 'settings.yaml')
     const statePath = join(dataRoot, 'aih-state.json')
 
@@ -59,10 +81,10 @@ function apply(ctx) {
 
 
   function execGit(command, args, options) {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolvePromise, reject) => {
       execFile(command, args, options, (error, stdout) => {
         if (error) reject(error)
-        else resolve({ stdout })
+        else resolvePromise({ stdout })
       })
     })
   }
@@ -161,10 +183,15 @@ function apply(ctx) {
   // Files that feed the detail snapshot, per bound session. mtime-keyed so
   // the (immutable-history) snapshot is only recomputed when a source changes.
   function detailSourceKey(workspace, taskId, sessionId) {
+    const binding = bindingOf(sessionId)
+    const taskInstanceId = binding && typeof binding.taskInstanceId === 'string' && binding.taskInstanceId !== ''
+      ? binding.taskInstanceId
+      : null
     const paths = [
       join(dataRoot, 'routing', 'session-bindings.json'),
       join(dataRoot, 'routing', 'decisions.jsonl'),
-      join(dataRoot, 'routing', 'states', status.routingStateFileName(workspace, bindingOf(sessionId)?.preset || 'aih-engineering', taskId)),
+      // TASK-0005: the cache key follows the generation-aware state file name.
+      join(dataRoot, 'routing', 'states', status.routingStateFileName(workspace, binding?.preset || 'aih-engineering', taskId, taskInstanceId)),
       join(workspace, '.ai-harness', 'state', 'tasks.json'),
       join(workspace, '.ai-harness', 'state', 'decisions.jsonl'),
       join(workspace, '.ai-harness', 'runs', taskId, 'attempts.jsonl'),
@@ -297,21 +324,21 @@ function apply(ctx) {
     }
 
     function readJsonBody(req) {
-      return new Promise((resolve) => {
+      return new Promise((resolvePromise) => {
         let text = ''
         req.on('data', (chunk) => { text += chunk })
         req.on('end', () => {
-          try { resolve(JSON.parse(text)) } catch { resolve(null) }
+          try { resolvePromise(JSON.parse(text)) } catch { resolvePromise(null) }
         })
-        req.on('error', () => resolve(null))
+        req.on('error', () => resolvePromise(null))
       })
     }
 
     function execPowerShell(args) {
-      return new Promise((resolve) => {
-        execFile('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'Task.ps1'), ...args], { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
-          if (error) { resolve(null); return }
-          try { resolve(JSON.parse((stdout || '').trim())) } catch { resolve(null) }
+      return new Promise((resolvePromise) => {
+        execFile(pwshHost, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'Task.ps1'), ...args], { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
+          if (error) { resolvePromise(null); return }
+          try { resolvePromise(JSON.parse((stdout || '').trim())) } catch { resolvePromise(null) }
         })
       })
     }
@@ -320,10 +347,10 @@ function apply(ctx) {
      *  execPowerShell; free-form payloads travel via a UTF-8 payload file,
      *  never argv — identical to the Task.ps1 contract). */
     function execEngineeringProfile(args) {
-      return new Promise((resolve) => {
-        execFile('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'EngineeringProfile.ps1'), ...args], { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
-          if (error) { resolve(null); return }
-          try { resolve(JSON.parse((stdout || '').trim())) } catch { resolve(null) }
+      return new Promise((resolvePromise) => {
+        execFile(pwshHost, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'EngineeringProfile.ps1'), ...args], { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
+          if (error) { resolvePromise(null); return }
+          try { resolvePromise(JSON.parse((stdout || '').trim())) } catch { resolvePromise(null) }
         })
       })
     }
@@ -427,7 +454,7 @@ function apply(ctx) {
       }
     }
 
-        const gateHandler = async (req, res) => {
+    const gateHandler = async (req, res) => {
       const respond = (statusCode, body) => {
         res.writeHead(statusCode, {
           'content-type': 'application/json; charset=utf-8',
@@ -461,15 +488,18 @@ function apply(ctx) {
             const statusCode = validation.error === 'gate-stale' || validation.error === 'gate-not-waiting' ? 409 : (validation.error === 'action-not-allowed' || validation.error === 'action-not-advertised' ? 422 : 404)
             return { kind: 'error', statusCode, error: validation.error }
           }
-          const resolved = gate.resolveGate(dataRoot, binding, validation.gate, actionId, requestId)
+          const resolvedGate = gate.resolveGate(dataRoot, binding, validation.gate, actionId, requestId)
           let completion = null
           if (actionId === 'approve') {
             // The ONLY bounded controller transition for approval: attempt
             // completion with the review passed (fails closed when
-            // verification or criteria are not met).
-            completion = execPowerShell(['-Action', 'complete', '-TaskId', String(binding.taskId), '-CodexReviewPassed'])
+            // verification or criteria are not met). TASK-0005: the completion
+            // is instance-guarded to the bound lifecycle generation.
+            const completeArgs = ['-Action', 'complete', '-TaskId', String(binding.taskId), '-CodexReviewPassed']
+            if (binding.taskInstanceId) completeArgs.push('-TaskInstanceId', binding.taskInstanceId)
+            completion = execPowerShell(completeArgs)
           }
-          return { kind: 'ok', gate: status.normalizeGateRecord(resolved), completion }
+          return { kind: 'ok', gate: status.normalizeGateRecord(resolvedGate), completion }
         })
         if (outcome.kind === 'ok') {
           respond(200, {
@@ -484,6 +514,58 @@ function apply(ctx) {
         }
       } catch (error) {
         respond(500, { ok: false, error: 'gate-action-failed' })
+      }
+    }
+
+    /** POST /nexus/workspace-registration.json
+     *
+     * Bridge the DSH UI Workspace path into the existing Nexus Phase 3.1
+     * Machine -> Workspace -> Repository -> Checkout identity model. The
+     * browser supplies only a candidate path; Nexus resolves/canonicalizes it
+     * host-side and returns the authoritative identity chain. No process cwd
+     * is read or changed here.
+     */
+    const workspaceRegistrationHandler = async (req, res) => {
+      const respond = (statusCode, body) => {
+        res.writeHead(statusCode, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        res.end(JSON.stringify(body))
+      }
+      if (req.method !== 'POST') {
+        respond(405, { ok: false, error: 'method-not-allowed' })
+        return
+      }
+      const request = await readJsonBody(req)
+      const workspacePath = request && typeof request.path === 'string' ? request.path.trim() : ''
+      if (workspacePath === '') {
+        respond(400, { ok: false, error: 'missing-workspace-path' })
+        return
+      }
+      let payloadPath = null
+      try {
+        payloadPath = writePayloadFile({ path: workspacePath })
+        const result = await new Promise((resolvePromise) => {
+          execFile(
+            pwshHost,
+            ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'NexusWorkspace.ps1'), '-Action', 'resolve', '-PayloadFile', payloadPath],
+            { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+            (error, stdout) => {
+              if (error) { resolvePromise(null); return }
+              try { resolvePromise(JSON.parse((stdout || '').trim())) } catch { resolvePromise(null) }
+            },
+          )
+        })
+        if (!result || !result.workspaceId || !result.repositoryId || !result.checkoutId || !result.executionRoot) {
+          respond(422, { ok: false, error: 'workspace-resolution-failed' })
+          return
+        }
+        respond(200, { ok: true, identity: result })
+      } catch {
+        respond(500, { ok: false, error: 'workspace-registration-failed' })
+      } finally {
+        if (payloadPath) { try { unlinkSync(payloadPath) } catch { /* best-effort cleanup */ } }
       }
     }
 
@@ -506,6 +588,10 @@ function apply(ctx) {
     webCtx.effect(
       () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/engineering-profile-action.json', handler: engineeringActionHandler }),
       'nexus-controller: engineering profile action route',
+    )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/workspace-registration.json', handler: workspaceRegistrationHandler }),
+      'nexus-controller: Phase 3.1 workspace registration route',
     )
   })
 }

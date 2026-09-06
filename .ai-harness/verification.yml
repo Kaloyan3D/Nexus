@@ -1,0 +1,21 @@
+# Nexus deterministic verification plan (workspace-declared).
+#
+# mode=replace: auto-discovery is intentionally suppressed so stale scratch
+# fixtures (gitignored tmp/ workspaces from finished tasks) can never surface
+# as verification commands. This file declares the project's real, fast,
+# deterministic checks; the full 33-suite harness remains the deep gate.
+version: 1
+mode: replace
+commands:
+  - name: controller-host-tests
+    kind: test
+    command: node tests/AihControllerHost.Tests.cjs
+    workingDirectory: .
+    required: true
+    timeoutSeconds: 600
+  - name: platform-support-tests
+    kind: test
+    command: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/PlatformSupport.Tests.ps1
+    workingDirectory: .
+    required: true
+    timeoutSeconds: 600
