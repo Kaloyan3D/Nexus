@@ -56,6 +56,28 @@ function Clear-AihProbeEnvironment {
     Remove-Item Env:AIH_RECORDER_FILE -ErrorAction SilentlyContinue
 }
 
+# TASK-0033: POSIX shell fixture writing. This suite file itself is checked
+# out with CRLF (*.ps1 text eol=crlf), so every here-string in it carries
+# CRLF at parse time, and .gitattributes cannot normalize a GENERATED file
+# that never passes through Git. Those CR bytes made Linux /bin/sh die on
+# the generated fixture setup.sh with "$'{\r': command not found" and
+# "syntax error near unexpected token `}'". Every generated shell script is
+# therefore written explicitly UTF-8 without BOM and LF-only: CRLF becomes
+# LF first, then any lone CR becomes LF - independent of the line endings
+# the host checkout gave this file.
+function ConvertTo-AihPosixShellText {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    return $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+}
+
+function Write-AihPosixShellScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Text
+    )
+    [IO.File]::WriteAllText($Path, (ConvertTo-AihPosixShellText -Text $Text), [Text.UTF8Encoding]::new($false))
+}
+
 function New-AihSourceCheckoutFixture {
     # A minimal but POSITIVELY IDENTIFIABLE Nexus source checkout: the
     # checkout-only marker (bin/linux POSIX twin templates, absent from every
@@ -65,7 +87,7 @@ function New-AihSourceCheckoutFixture {
         [Parameter(Mandatory = $true)][string]$RecorderFile
     )
     New-Item -ItemType Directory -Force -Path (Join-Path $Root 'bin/linux'), (Join-Path $Root 'config'), (Join-Path $Root 'scripts') | Out-Null
-    [IO.File]::WriteAllText((Join-Path $Root 'bin/linux/aih-update.sh'), "#!/bin/sh" + [Environment]::NewLine)
+    Write-AihPosixShellScript -Path (Join-Path $Root 'bin/linux/aih-update.sh') -Text ('#!/bin/sh' + "`n")
     [IO.File]::WriteAllText((Join-Path $Root 'bin/aih-update.cmd'), "@echo off" + [Environment]::NewLine)
     [IO.File]::WriteAllText((Join-Path $Root 'config/versions.json'), "{}" + [Environment]::NewLine)
     [IO.File]::WriteAllText((Join-Path $Root 'scripts/Common.ps1'), "# probe marker" + [Environment]::NewLine)
@@ -80,7 +102,17 @@ function New-AihSourceCheckoutFixture {
 ' "$_arg"; done
 } > "$AIH_RECORDER_FILE"
 '@
-    [IO.File]::WriteAllText((Join-Path $Root 'setup.sh'), $posixRecorder, [Text.UTF8Encoding]::new($false))
+    Write-AihPosixShellScript -Path (Join-Path $Root 'setup.sh') -Text $posixRecorder
+    # TASK-0033 regression: the generated POSIX setup.sh must contain NO CR
+    # (0x0D) bytes and no UTF-8 BOM. The check is byte-level and asserted on
+    # every OS, so a CRLF-carrying checkout of this suite can never
+    # reintroduce the Linux "$'{\r': command not found" fixture failure.
+    $generatedSetupShBytes = [IO.File]::ReadAllBytes((Join-Path $Root 'setup.sh'))
+    $generatedSetupShCrCount = 0
+    foreach ($generatedSetupShByte in $generatedSetupShBytes) { if ($generatedSetupShByte -eq 13) { $generatedSetupShCrCount++ } }
+    Assert-Aih ($generatedSetupShCrCount -eq 0) ('the generated POSIX setup.sh fixture is LF-only - no 0x0D bytes (' + $generatedSetupShBytes.Length + ' bytes inspected, TASK-0033)')
+    $generatedSetupShHasBom = ($generatedSetupShBytes.Length -ge 3 -and $generatedSetupShBytes[0] -eq 239 -and $generatedSetupShBytes[1] -eq 187 -and $generatedSetupShBytes[2] -eq 191)
+    Assert-Aih (-not $generatedSetupShHasBom) 'the generated POSIX setup.sh fixture is UTF-8 without BOM (TASK-0033)'
     # The Windows recorder records the Setup.ps1 delegation contract.
     $windowsRecorder = @'
 param([string]$InstallRoot)
