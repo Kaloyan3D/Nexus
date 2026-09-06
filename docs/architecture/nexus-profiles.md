@@ -248,18 +248,29 @@ M2.1 hardens the M2 foundation without installing any M3 capability. Four delive
 
 `scripts/Invoke-ProviderSubstrateProbe.mjs` proves the REAL DSH provider substrate recognizes `meta-model-api` / `muse-spark-1.3-contributor` without credentials and without network: a real `cordis.Context`, `FileSettingsProvider` loading the managed settings file, `substrate.Config` + `substrate.apply` over the `llm-pi-ai` section, and the real PiAi adapter registered through `ctx.llm.registerAdapter`. The probe asserts the full descriptor chain: route registration, `listModels`, `resolveModel`, `contextWindow: 1048576`, `defaultMaxTokens: 131072` (the output ceiling travels through the substrate), and the reasoning descriptor (`reasoning.efforts` minimal..xhigh with `defaultEffort: xhigh`; `off`/`max` refused). The probe also DISCRIMINATES: pointed at the M2 standard route it fails closed. Wired into `tests/MuseProvider.Tests.cjs` (section 6). **Verification status: documentation + offline execution evidence; `MODEL_API_KEY` is NOT set in the verification environment, so no live Meta call was made or needed.**
 
-### 4. Profile UI restart fix
+### 4. Composer preference ownership (TASK-0039)
 
-Root cause of the Profile UI disappearing across restarts: the Engineering posture was derived ONLY from the polled snapshot's `composer.mode`, so a freshly restarted client rendered the legacy posture until the first successful poll — and the seat-suppression CSS keyed on a pinned upstream build's CSS-module hash classes, which upstream refreshes silently invalidate.
+The real cold-start failure was an initial editor effect calling
+`userFacingProfiles(null)`. The slot boundary removed the crashing selector
+and its CSS marker, exposing the upstream Model/Effort control. The old
+`conversation.input.right` placement also depended on input readiness.
 
-The fix (`ui/nexus-controller/lib/client.js`):
+The pinned model seat now has `session-maybe` scope and delegates through
+`nexusComposerPreference.Component`. Engineering renders the Profile control;
+legacy renders the original upstream `ModelSelect`. The right slot contains
+only RUNNING/PREFERRED pills. No body marker or CSS suppression chooses the
+preference owner.
 
-- The suppression rule now targets the STABLE slot outlet wrapper the DSH renderer emits for every registered slot: `body[data-nexus-composer-mode='engineering'] [data-slot='conversation.input.model']{display:none!important}`. A hard test guard forbids reintroducing any CSS-module hash family.
-- `composerModeOfSession` derives the composer posture per lifecycle state (TASK-0038 mode ownership): for an active session the authoritative `composer.mode` wins once loaded, then the session preset (`agentPreset` / `projectionValues.agentPreset` / `binding.preset`) classifies the boot (`aih-engineering` → engineering, `aih-deepseek` → legacy); for the PRE-SESSION hero (no session, or a session whose preset is not known yet) the mode selector's authoritative client state classifies the posture; unknown boot states fail CLOSED toward engineering/loading so the Profile UI survives. A session-less scope is never classified as legacy for being session-less.
-- The pre-session authority is a real shared client-state contract: `@nexus/mode-selector` publishes its mode store as the `nexusModeState` cordis service (`current` = the stable preset id, never a display label or model id); `@nexus/controller` consumes it through a late-binding bridge (`ctx.inject(["nexusModeState"], ...)` + `useSyncExternalStore`), so a mode change on the hero updates the composer posture immediately. A session-less snapshot is deliberately NOT authoritative on the hero — it describes the persisted default, which a staged hero selection outranks.
-- `useEngineeringEditor` loads the GLOBAL `GET /nexus/engineering-profile.json` state whenever the Engineering surface is enabled — the session id no longer gates loading, so the profile selector works on the hero before the first conversation session exists.
-- The body flag is applied in `useLayoutEffect` (before first paint), so a restart never flashes the upstream model seat.
+The hero (including a blank session) reads the visible mode picker's shared
+`nexusModeState`; an active session retains snapshot/preset authority. The mode
+plugin uses pinned DSH's `connection.api` RPC envelope and `remote.$on` events,
+then records host-confirmed changes with `sessions.noteAgentPreset`. Global
+profile loading does not require an input hook or session. Null, HTTP failure,
+and malformed configuration remain on the Engineering loading/unavailable UI.
 
+The deterministic integration patch validates both package versions and exact
+source blocks before writing either bundle. See
+[the investigation and acceptance record](composer-preference-ownership.md).
 
 ## Compatibility invariant
 

@@ -1,0 +1,15 @@
+{
+  "version": "0.1.1-rc.2",
+  "patches": [
+    {
+      "package": "dsh-client-ui-conversation",
+      "before": "\"conversation.input.model\": {\n\t\t\t\t\t\tkind: \"single\",\n\t\t\t\t\t\tscope: \"session\"\n\t\t\t\t\t}",
+      "after": "\"conversation.input.model\": {\n\t\t\t\t\t\tkind: \"single\",\n\t\t\t\t\t\tscope: \"session-maybe\"\n\t\t\t\t\t}"
+    },
+    {
+      "package": "dsh-client-ui-model-selection",
+      "before": "\t\t\tctx.inject([\"slots\", \"modelDirectories\"], (scope) => {\n\t\t\t\tconst models = scope.modelDirectories;\n\t\t\t\tconst sessions = scope.sessions;\n\t\t\t\tscope.slots.inject(\"conversation.input.model\", () => scope.slots.register({\n\t\t\t\t\tname: \"conversation.input.model\",\n\t\t\t\t\tlocale: NS,\n\t\t\t\t\tinject: (sessionId) => {\n\t\t\t\t\t\tconst directory = models.directoryFor(sessionId);\n\t\t\t\t\t\tconst available = sessions.subagentAddress(sessionId) === void 0;\n\t\t\t\t\t\treturn {\n\t\t\t\t\t\t\tavailable,\n\t\t\t\t\t\t\tdirectory: directory.store,\n\t\t\t\t\t\t\tload: () => {\n\t\t\t\t\t\t\t\tif (available) directory.load().catch(() => {});\n\t\t\t\t\t\t\t},\n\t\t\t\t\t\t\tselect: (selection) => available ? directory.select(selection).then(() => true, () => false) : Promise.resolve(false)\n\t\t\t\t\t\t};\n\t\t\t\t\t}\n\t\t\t\t}, ModelSelect));\n\t\t\t});",
+      "after": "\t\t\tctx.inject([\"slots\", \"modelDirectories\", \"nexusComposerPreference\"], (scope) => {\n\t\t\t\tconst models = scope.modelDirectories;\n                // Nexus owns this preference seat; ModelSelect remains the legacy implementation.\n                function NexusModelPreference(props) {\n                    return (0, react_jsx_runtime.jsx)(scope.nexusComposerPreference.Component, {\n                        ...props,\n                        legacy: props.sessionId === void 0 ? null : (0, react_jsx_runtime.jsx)(ModelSelect, props)\n                    });\n                }\n\t\t\t\tconst sessions = scope.sessions;\n\t\t\t\tscope.slots.inject(\"conversation.input.model\", () => scope.slots.register({\n\t\t\t\t\tname: \"conversation.input.model\",\n\t\t\t\t\tlocale: NS,\n\t\t\t\t\tinject: (sessionId) => {\n\t\t\t\t\t\tif (sessionId === void 0) return {};\n\t\t\t\t\t\tconst directory = models.directoryFor(sessionId);\n\t\t\t\t\t\tconst available = sessions.subagentAddress(sessionId) === void 0;\n\t\t\t\t\t\treturn {\n\t\t\t\t\t\t\tavailable,\n\t\t\t\t\t\t\tdirectory: directory.store,\n\t\t\t\t\t\t\tload: () => {\n\t\t\t\t\t\t\t\tif (available) directory.load().catch(() => {});\n\t\t\t\t\t\t\t},\n\t\t\t\t\t\t\tselect: (selection) => available ? directory.select(selection).then(() => true, () => false) : Promise.resolve(false)\n\t\t\t\t\t\t};\n\t\t\t\t\t}\n\t\t\t\t}, NexusModelPreference));\n\t\t\t});"
+    }
+  ]
+}
