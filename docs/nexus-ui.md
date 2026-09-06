@@ -808,14 +808,21 @@ selector as the operator's effective preference control:
   It closes on outside click/Escape, preserves unsaved edits while closed, and
   refreshes the pill immediately after a successful save — no page refresh.
   Both surfaces read/write the same endpoints, so they always agree.
-- Mode gate: the active preset (session binding, else the settings
-  `agent-presets.default`) is engineering mode iff its routing policy preset
-  does not set `profileOverrideAllowed: false`. Every other condition —
-  DeepSeek Only, unknown preset, missing/corrupt policy — fails safe to the
-  legacy composer (shipped model selector untouched).
+- Mode gate: for an ACTIVE session the authoritative controller snapshot
+  (`composer.mode`, derived by `status.cjs`: the session binding's preset,
+  else the settings `agent-presets.default`, is engineering mode iff its
+  routing policy preset does not set `profileOverrideAllowed: false`) wins;
+  before it loads, the session's own preset classifies the boot. On the
+  PRE-SESSION hero there is no session authority: the posture comes from the
+  mode selector's shared client state (`@nexus/mode-selector` publishes its
+  store as the `nexusModeState` service; stable preset ids only) and unknown
+  boot states fail closed toward Engineering/loading. A hero mode change
+  updates the composer posture immediately — no first message, no manual
+  session creation, no page refresh.
 - The shipped DSH model seat is retired via a body-level mode flag plus a
-  scoped CSS rule keyed to the pinned frontend build's scoped class family;
-  it fails open if that build ever changes its class names.
+  scoped CSS rule keyed to the STABLE slot outlet wrapper the DSH renderer
+  emits for every registered slot (`[data-slot='conversation.input.model']`) —
+  never a pinned build's CSS-module hash family (M2.1, TASK-0037).
 - The snapshot's `composer` block (`mode`, `preset`, `preferredEngineer`) is
   derived by `status.cjs` from the same resolver (`engineering.cjs`) the
   editor state uses; an unsatisfiable binding omits the PREFERRED chip

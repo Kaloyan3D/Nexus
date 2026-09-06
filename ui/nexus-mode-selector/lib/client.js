@@ -248,6 +248,19 @@ window.__ModuleLoader__.load({
         "remote.settings"
       ], (scope) => {
         const controller = createModeController(scope);
+        // Phase M2.1 (TASK-0038): publish this picker's authoritative client
+        // state as the shared `nexusModeState` cordis service. `current` is
+        // the STABLE agent-preset id ("aih-engineering" / "aih-deepseek") —
+        // never a display label and never a model id — so the controller's
+        // composer seat classifies the pre-session (hero) posture from the
+        // exact state this picker renders, including a mode change staged
+        // before any session exists (the store patches synchronously on
+        // select). The facade is deliberately tiny (getSnapshot/subscribe);
+        // the store above remains the single source of truth.
+        scope.provide("nexusModeState", {
+          getSnapshot: () => controller.store.getSnapshot(),
+          subscribe: (listener) => controller.store.subscribe(listener),
+        });
         scope.effect(() => controller.dispose, "nexus-mode-selector: controller lifecycle");
         scope.slots.inject("conversation.hero.agentPreset", () => scope.slots.register({
           name: "conversation.hero.agentPreset",
