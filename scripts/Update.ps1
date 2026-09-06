@@ -20,14 +20,19 @@ param(
 # minimal and independently executable (TASK-0027 aih-update regression).
 . (Join-Path $PSScriptRoot 'Platform.ps1')
 
-if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
-    $SourceRoot = Split-Path -Parent $PSScriptRoot
-}
-$SourceRoot = [System.IO.Path]::GetFullPath($SourceRoot)
-if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
-    $InstallRoot = $SourceRoot
-}
-$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
+# TASK-0030 root-resolution contract: InstallRoot is explicit -InstallRoot >
+# AIH_INSTALL_ROOT (exported by the installed launchers) > the tree this
+# script belongs to; SourceRoot is explicit -SourceRoot > persisted
+# installation source metadata > this tree ONLY when it is positively
+# identified as a Nexus source checkout. An explicit -SourceRoot therefore
+# NEVER retargets the installation root, and a same-root resolution fails
+# closed unless the tree is a legitimate source plane.
+$updateRoots = Resolve-AihUpdateRoots -InstallRoot $InstallRoot -SourceRoot $SourceRoot `
+    -StructuralRoot ([System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot)))
+$SourceRoot = $updateRoots.SourceRoot
+$InstallRoot = $updateRoots.InstallRoot
+Write-Host ("Nexus update source: " + $SourceRoot)
+Write-Host ("Nexus install root: " + $InstallRoot)
 
 if (Test-AihIsWindows) {
     $setup = Join-Path $SourceRoot 'scripts/Setup.ps1'
