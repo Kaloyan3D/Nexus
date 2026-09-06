@@ -117,14 +117,22 @@ function Get-AihMuseReasoningWireValue {
     # record). Deterministic and fail closed:
     #   - a level the route does not declare returns $null — the caller MUST
     #     refuse the request rather than silently send a lower effort;
-    #   - a declared EMPTY value returns '' — send nothing (Nexus "off");
+    #   - a declared EMPTY value returns '' — send nothing (generic transport
+    #     capability; the managed Muse route declares no such level, see the
+    #     verified contract below);
     #   - otherwise the configured native wire value.
-    # Official Meta Model API contract (verified Phase M2, Meta Model API
-    # cookbook): reasoning_effort accepts none < minimal < low < medium < high
-    # plus the accepted alias xhigh (same strength as high; high is the
-    # effective maximum). The Nexus "max" escalation maps to the native
-    # maximum ("high"); Nexus "xhigh" maps to the accepted alias "xhigh".
-    # Both collapse to the same provider reasoning strength at this boundary.
+    # Official Meta Model API contract (RE-VERIFIED Phase M2.1 against the
+    # official dev.meta.ai documentation, /docs/reasoning): the supported
+    # levels are minimal < low < medium < high < xhigh, plus max on
+    # Standard-tier muse-spark-1.3 ONLY ("Extended reasoning beyond xhigh.
+    # Standard-tier muse-spark-1.3 only; not available on Contributor-tier
+    # models."). There is NO explicit no-reasoning value: "none" — Disables
+    # reasoning. Not supported by Muse Spark: returns HTTP 400 — and omission
+    # is not off either ("When you omit the parameter, the model still reasons
+    # at a model-determined level."). The managed Contributor route therefore
+    # declares only minimal..xhigh; requesting Nexus "off" or "max" for Muse
+    # fails closed here ($null), and the empty-value transport capability is
+    # reserved for other providers that officially support omission-as-off.
     param(
         [Parameter(Mandatory=$true)][object]$ProviderConfig,
         [Parameter(Mandatory=$true)][string]$Level
@@ -197,7 +205,7 @@ function New-AihMuseChatBody {
     if($null-ne$Content){$message.content=$Content}
     if($null-ne$ToolCalls-and$ToolCalls.Count-gt0){$message.tool_calls=$ToolCalls}
     $choice=[ordered]@{index=0;message=[pscustomobject]$message;finish_reason=$FinishReason}
-    $body=[ordered]@{id='chatcmpl-muse-probe';object='chat.completion';model='muse-spark-1.3';choices=@([pscustomobject]$choice)}
+    $body=[ordered]@{id='chatcmpl-muse-probe';object='chat.completion';model='muse-spark-1.3-contributor';choices=@([pscustomobject]$choice)}
     if($null-ne$Usage){$body.usage=$Usage}
     [pscustomobject]$body
 }
@@ -312,7 +320,10 @@ function Invoke-AihMuseOfflineChecks {
         #    the mapping of record; the probe sends the mapped native value.
         $mockEchoPath=Join-Path $WorkspacePath 'mock-echo.json'
         Write-AihAtomicJson -Path $mockEchoPath -Value (New-AihMuseMockDocument -Status 200 -Body (New-AihMuseChatBody -Content 'ok') -EchoRequest)
-        foreach($pair in @(@('xhigh','xhigh'),@('max','high'),@('off',''))){
+        # Exact wire test for EVERY supported level: minimal/low/medium/high/
+        # xhigh map 1:1 to the official reasoning_effort spelling and the
+        # request must carry exactly that value.
+        foreach($pair in @(@('minimal','minimal'),@('low','low'),@('medium','medium'),@('high','high'),@('xhigh','xhigh'))){
             $nexusLevel=$pair[0];$expectedNative=$pair[1]
             $wireValue=Get-AihMuseReasoningWireValue -ProviderConfig $Config -Level $nexusLevel
             $mappingOk=$null-ne$wireValue-and[string]$wireValue-eq[string]$expectedNative
@@ -327,13 +338,19 @@ function Invoke-AihMuseOfflineChecks {
                 $reasonOutcome=$reasonResult.Outcome
                 $sent=$null
                 if($null-ne$reasonOutcome.resulting-and$null-ne$reasonOutcome.resulting.PSObject.Properties['reasoning_effort']){$sent=$reasonOutcome.resulting.reasoning_effort}
-                $wireOk=if([string]::IsNullOrWhiteSpace([string]$expectedNative)){$null-eq$sent}else{[string]$sent-eq[string]$expectedNative}
+                $wireOk=[string]$sent-eq[string]$expectedNative
                 $checks+=[pscustomobject][ordered]@{Name=('probe-reasoning-'+$nexusLevel);Ok=$wireOk;Detail=if($wireOk){'request carried the mapped reasoning_effort value'}else{'request reasoning_effort mismatch'}}
             }
         }
-        # fail closed: a level the route does not offer maps to $null
-        $unmapped=Get-AihMuseReasoningWireValue -ProviderConfig $Config -Level 'ultra'
-        $checks+=[pscustomobject][ordered]@{Name='reasoning-mapping-fail-closed';Ok=($null-eq$unmapped);Detail='unoffered Nexus level fails closed (no silent lower effort)'}
+        # fail closed: "off" is NOT representable on the direct Meta contract
+        # (reasoning_effort "none" returns HTTP 400; omission still reasons at
+        # a model-determined level) and "max" is Standard-tier muse-spark-1.3
+        # only — the Contributor route declares neither, so both refuse here
+        # instead of silently sending a lower effort or omitting the parameter.
+        foreach($refusedLevel in @('off','max','ultra')){
+            $refused=Get-AihMuseReasoningWireValue -ProviderConfig $Config -Level $refusedLevel
+            $checks+=[pscustomobject][ordered]@{Name=('reasoning-mapping-fail-closed-'+$refusedLevel);Ok=($null-eq$refused);Detail=('Nexus '+$refusedLevel+' is not offered by the Contributor route and fails closed (no silent lower effort, no omission-as-off)')}
+        }
 
         # 7. normalized provider errors (401/429/5xx)
         foreach($statusCase in @(401,429,500)){

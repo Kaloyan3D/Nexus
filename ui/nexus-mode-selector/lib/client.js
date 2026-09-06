@@ -7,6 +7,13 @@ window.__ModuleLoader__.load({
     let react_jsx_runtime = require("react/jsx-runtime");
     let react = require("react");
 
+    // Internal bootstrap ONLY (Phase M2.1): the MODE KEYS are the agent-preset
+    // ids a session carries for its whole life ("aih-engineering" /
+    // "aih-deepseek") and are the stable contract the controller's composer
+    // boot heuristic classifies on. The model values below are the LEGACY DSH
+    // agent-default-model bindings applied at session creation; in engineering
+    // mode the Engineering Profile selector supersedes them, so treat this
+    // table as UI bootstrap plumbing, not as a model-preference surface.
     const MODE_SELECTIONS = Object.freeze({
       "aih-engineering": Object.freeze({
         provider: "flash-max-direct",

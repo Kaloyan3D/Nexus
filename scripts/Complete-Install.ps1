@@ -27,6 +27,16 @@ $layout = Get-AihLayout $InstallRoot
 if ($ResetManagedSettings -or -not (Test-Path -LiteralPath $layout.Settings)) {
     Copy-Item -LiteralPath (Join-Path $layout.Config 'settings.yaml') -Destination $layout.Settings
 }
+# Phase M2.1 (TASK-0037): migrate additive managed provider configuration into
+# the runtime settings document. Fresh installs copied the template above, so
+# this is a verified no-op for them; an EXISTING install keeps every user
+# value and gains the managed provider routes it is missing (e.g. the Phase M2
+# meta-model-api route), and stale Nexus-managed routes upgrade deterministically
+# (the M2 standard muse-spark-1.3 route becomes the M2.1
+# muse-spark-1.3-contributor route). A structurally invalid Nexus-managed route
+# fails the install closed.
+. (Join-Path $layout.Scripts 'SettingsMigration.ps1')
+$managedSettingsMigration = Sync-AihManagedSettings -TemplatePath (Join-Path $layout.Config 'settings.yaml') -SettingsPath $layout.Settings
 
 # data/cordis.patch.yml is managed by the installer. Sync it before the Nexus
 # patcher inspects composition so upgrades from pre-controller installs see the

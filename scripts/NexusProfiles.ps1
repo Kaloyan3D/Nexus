@@ -74,13 +74,13 @@ function Resolve-AihMuseProfileModel {
     foreach($candidate in @($Registry.models)){if([string]$candidate.id -eq $modelId){$entry=$candidate;break}}
     if($null-eq$entry){return $null}
     if($null-ne$entry.PSObject.Properties['enabled']-and-not[bool]$entry.enabled){return $null}
-    # Defense in depth: the binding may only resolve to a model scoped to the
-    # muse engine. A model that Dual roles can also claim is a configuration
-    # error and must not silently serve the Muse plane.
-    if($null-ne$entry.PSObject.Properties['agentEngines']){
-        $declaredEngines=@($entry.agentEngines)
-        if(@($declaredEngines|Where-Object{$_-eq'muse'}).Count-eq0){return $null}
-    }
+    # Phase M2.1 defense in depth: the binding may only resolve to a model
+    # EXPLICITLY scoped to the muse engine (Test-AihModelEngineCompatible's
+    # asymmetric contract — loaded with Routing.ps1 in every real load order).
+    # Absence of `agentEngines` fails closed on the Muse plane: an unscoped or
+    # Dual-only entry is a configuration error and must not silently serve the
+    # Muse transport.
+    if(-not(Test-AihModelEngineCompatible $entry 'muse')){return $null}
     $requested=if(-not[string]::IsNullOrWhiteSpace($Reasoning)){$Reasoning}
         elseif($null-ne$MuseProfile.PSObject.Properties['reasoning']-and$null-ne$MuseProfile.reasoning.PSObject.Properties['default']){[string]$MuseProfile.reasoning.default}
         else{''}

@@ -120,7 +120,7 @@ Meta Model API (OpenAI-compatible transport)
 ```
 
 - The Muse profile names a **model registry id** (`model.primary`), never a provider id or URL.
-- The registry entry maps `muse-spark-1.3` to the provider route `meta-model-api` and declares real capabilities.
+- The registry entry maps `muse-spark-1.3-contributor` to the provider route `meta-model-api` and declares real capabilities. (M2 registered the Standard checkpoint `muse-spark-1.3`; M2.1 retargeted Nexus to the Contributor checkpoint — see the Phase M2.1 section.)
 - The provider route is generic DSH substrate (`api: openai-completions`) — there is no custom Meta HTTP stack. A route pi-ai does not ship is a fully self-describing provider declaration (`api`, `baseURL`, `apiKeyEnv`, `models`), which is exactly how `meta-model-api` is registered.
 
 ### Official contract (verified against Meta sources, Phase M2)
@@ -131,36 +131,46 @@ Verified against the official **Meta Model API cookbook** (github.com/meta-model
 |---|---|---|
 | Base URL | `https://api.meta.ai/v1` | cookbook setup cells |
 | API key variable | `MODEL_API_KEY` | cookbook setup cells |
-| Standard model id | `muse-spark-1.3` | cookbook (all recipes) |
+| Standard model id | `muse-spark-1.3` (Standard checkpoint; M2) | cookbook (all recipes) |
+| Contributor model id | `muse-spark-1.3-contributor` (Contributor checkpoint; M2.1 target) | dev.meta.ai model docs + cookbook ecosystem listing |
+| Contributor output cap | `max_completion_tokens` hard ceiling **131072** for the Contributor checkpoint | dev.meta.ai model docs (verified before registration) |
 | Context window | 1,048,576 tokens; input and output share the budget | cookbook long-context recipe |
 | API style | OpenAI-compatible chat completions; drop-in via the OpenAI SDK | cookbook README |
 | Streaming | SSE; deltas at `choices[0].delta.content`; final usage chunk via `stream_options.include_usage`; `[DONE]` terminator | cookbook streaming recipe |
 | Tool calling | `tools[].function`; assistant `tool_calls` with `id`/`name`/JSON-string `arguments`; `finish_reason: tool_calls`; **only `tool_choice: auto` is supported** (others → HTTP 400) | cookbook tool-calling recipe |
-| Reasoning | request field `reasoning_effort`; native spectrum `none < minimal < low < medium < high`, plus the accepted alias **`xhigh` (same strength as `high`; `high` is the effective maximum)**; usage reports `completion_tokens_details.reasoning_tokens`; `reasoning_content` is empty on Chat Completions | cookbook reasoning recipe |
+| Reasoning | request field `reasoning_effort`; native spectrum `none < minimal < low < medium < high`, plus the accepted alias **`xhigh`**; **`none` returns HTTP 400 on the public endpoint and OMITTING the field still reasons (omission is NOT off)**; usage reports `completion_tokens_details.reasoning_tokens`; `reasoning_content` is empty on Chat Completions | cookbook reasoning recipe + M2.1 verification |
 | Output cap field | `max_completion_tokens` canonical (`max_tokens` deprecated alias) | cookbook / Meta compatibility docs |
 | Errors | OpenAI-style envelope `{error:{message,type,param,code}}`; 429/5xx/timeouts transient; 400/401/404 permanent | cookbook error-handling recipe |
 | Vision | image input supported (URL/base64) | cookbook vision recipe |
-| maxOutputTokens | **No explicit per-request output ceiling is published.** The registry carries the conservative value 32768 — the DSH substrate's own documented default for unsized models — and no cap is sent unless explicitly configured, matching Meta's "unset = full output budget" semantics | documented judgment, not a guess |
+| maxOutputTokens | M2 (Standard): no explicit per-request ceiling published; registry carried the conservative 32768 (substrate default for unsized models). **M2.1 (Contributor): the vendor-verified hard output ceiling is 131072 and the registry records it as such** — the value is the vendor cap, never a Nexus safety/default cap | dev.meta.ai model docs (M2.1) |
 
-### Checkpoint decision: standard vs Contributor
+### Checkpoint decision: standard vs Contributor (RESOLVED in M2.1)
 
-The ecosystem (gateway aggregators) lists a discounted `muse-spark-1.3-contributor` checkpoint that permits Meta to train on prompts/completions. **It could NOT be verified on any DIRECT Meta official source** (the official cookbook does not mention it; dev.meta.ai pages are application-rendered and could not be read as documentation). Per the M2 rule — never infer Meta's direct model id from a gateway — Nexus registers ONLY `muse-spark-1.3` with `dataUseTier: "standard"`.
+M2 could not verify the Contributor checkpoint on a direct Meta source and registered only the Standard checkpoint. **M2.1 resolved the open question against the official Meta model documentation (dev.meta.ai/docs): the two checkpoints are distinct registered products with distinct ids and distinct limits.**
 
-**M2 follow-up (security phase / M5):** before the Contributor checkpoint can be registered, a direct Meta source (official models page or API listing) must confirm the exact id. The `dataUseTier` metadata field exists so the later outbound-sanitization logic never has to infer the tier from the model-name string.
+- `muse-spark-1.3` — Standard checkpoint. M2's registered target; retained as the documented Standard id.
+- `muse-spark-1.3-contributor` — Contributor checkpoint. Permits Meta to train on prompts/completions; carries a **131072-token hard output ceiling** (verified before registration) and requires contributor-grade outbound protection.
+
+M2.1 retargeted Nexus to the Contributor checkpoint: the registry entry is `muse-spark-1.3-contributor` with `dataUseTier: "contributor"` and `contributorProtection.required: true`. The tier is declared metadata (never inferred from the model-name string), so the later outbound-sanitization phase (M5) consumes the declaration. The `dataUseTier: "standard"` registration of M2 remains the documented prior state that the M2.1 settings migration upgrades in place.
 
 ### Reasoning mapping (provider boundary)
 
 Nexus semantic levels and Meta-native `reasoning_effort` values are different abstraction layers. The mapping lives in `settings.yaml` under the provider route's `reasoningEfforts` and is the mapping of record:
 
-| Nexus level | Meta native wire value | Rationale |
-|---|---|---|
-| `off` | *(field omitted)* | "supported, send nothing" — the parameter's absence; Meta's literal `none` value is documented as not reliably available on the public endpoint |
-| `high` | `high` | canonical native value |
-| `xhigh` | `xhigh` | officially accepted alias (same strength as `high`) |
-| `max` | `high` | native-max-equivalent: `high` IS Meta's effective maximum, and `xhigh` maps to the same strength, so nothing is lost relative to what the provider can do |
-| any other level | **fail closed** (null) | the caller must refuse the request rather than silently send a lower effort |
+M2 mapped `off` by omitting the field and folded `max` onto `high`. **M2.1 retires both compromises after verifying Meta's actual semantics against the official documentation:** the literal `none` value returns HTTP 400 on the public endpoint, and OMITTING `reasoning_effort` does not disable reasoning — the omission-as-off mapping was a lie at the wire. The Contributor route therefore offers exactly the officially verified spectrum and fails closed on everything else:
 
-`xhigh` and `max` collapse to the same provider reasoning strength at the Meta boundary. The M1 profile semantics (`default: xhigh`, `escalation: max`) are unchanged; the mapping is deterministic, documented, and regression-tested.
+| Nexus level | Meta native wire value | Status on the contributor route |
+|---|---|---|
+| `minimal` | `minimal` | offered (official spectrum floor) |
+| `low` | `low` | offered |
+| `medium` | `medium` | offered |
+| `high` | `high` | offered |
+| `xhigh` | `xhigh` | offered (officially accepted alias; route default) |
+| `off` | — | **REMOVED — fail closed** (`none` is HTTP 400 on Meta; omission still reasons, so no truthful wire value exists) |
+| `max` | — | **REMOVED — fail closed** (Standard-tier-only level; not part of the Contributor checkpoint's spectrum) |
+| any other level | — | **fail closed** (null — refuse rather than silently send a lower effort) |
+
+The M1 profile semantics are retargeted accordingly: `default: xhigh` and `escalation: xhigh` (the `max` escalation is gone with the level). The mapping is deterministic, documented, and regression-tested at three layers: the settings route (`reasoningEfforts`), the resolver battery (`MuseProvider.Tests.ps1`), and the real DSH substrate descriptor (`Invoke-ProviderSubstrateProbe.mjs`).
 
 ### Engine isolation (no Dual leak)
 
@@ -205,6 +215,49 @@ The production Muse execution path (M3+) will ride the same settings.yaml route 
 ### M2 / M3 boundary
 
 M2 ends at **provider transport READY**. Still deliberately absent: controller engine dispatch, Muse agent loop, tool loop, Working Set prompting, context assembly, completion logic, verification logic, Muse retries, Muse subagents, Codex calls from Muse, and Muse worktrees. The production Muse profile remains `selectable = false`, `runnable = false`, `availability = foundation`.
+
+## Phase M2.1: Contributor target, engine hardening, substrate proof, UI restart fix
+M2.1 hardens the M2 foundation without installing any M3 capability. Four deliverables:
+
+### 1. Managed settings migration (`scripts/SettingsMigration.ps1`)
+
+`Sync-AihManagedSettings -TemplatePath config/settings.yaml -SettingsPath data/settings.yaml` makes the managed provider route self-healing across upgrades:
+
+- **Additive only.** Routes the user does not own are never touched; managed routes absent from `data/settings.yaml` are appended at the end of the `llm-pi-ai.providers` map with the file's existing newline style preserved (CRLF stays CRLF), atomically (`Write-AihAtomicText`, UTF-8 without BOM).
+- **Idempotent.** A second run against an already-migrated file is a byte-for-byte no-op (newline-normalized comparison, not raw diffing).
+- **Prior-state upgrade.** A managed route that still matches the known M2 state (embedded verbatim as `ManagedRoutePriorStates`) is replaced with the current managed route (the M2 standard route becomes the M2.1 contributor route).
+- **User-edit respect.** A managed route the user has modified (any byte difference from every known prior state) is left untouched and reported as skipped.
+- **Fail closed.** A structurally invalid managed route (missing `apiKeyEnv` or `baseURL`) aborts the migration with a thrown error and the file untouched.
+- `scripts/Complete-Install.ps1` runs the sync between settings initialization and the managed-patch copy; no YAML parser is used — line/indentation-structured text processing only, so the file's formatting survives.
+
+### 2. Engine-scope enforcement (asymmetric, three layers)
+
+`agentEngines` registry metadata is now enforced end-to-end with an asymmetric contract (`Test-AihModelEngineCompatible` in `Routing.ps1`, mirrored in `Engineering-Profiles.cjs`, `Nexus-Profiles.cjs`, and the UI `engineering.cjs`):
+
+| Engine requested | Entry declares `agentEngines` | Result |
+|---|---|---|
+| `dual` | absent | **allowed** (backward compatibility: every pre-M2 entry stays Dual-eligible) |
+| `dual` | present without `dual` | refused |
+| `muse` | absent | **refused (fail closed)** — absence is not an implicit allow-all |
+| `muse` | includes `muse` | allowed |
+| any engine | unknown engine id | refused |
+
+`Test-AihModelRoleCompatible` (Dual role lists) and `Resolve-AihModelTarget` enforce the dual side; `Resolve-AihMuseProfileModel` enforces the muse side independently (defense in depth). Every pre-M2 registry entry has no `agentEngines` and keeps its exact previous Dual behavior; only `muse-spark-1.3-contributor` declares `["muse"]`.
+
+### 3. Real-substrate proof (offline)
+
+`scripts/Invoke-ProviderSubstrateProbe.mjs` proves the REAL DSH provider substrate recognizes `meta-model-api` / `muse-spark-1.3-contributor` without credentials and without network: a real `cordis.Context`, `FileSettingsProvider` loading the managed settings file, `substrate.Config` + `substrate.apply` over the `llm-pi-ai` section, and the real PiAi adapter registered through `ctx.llm.registerAdapter`. The probe asserts the full descriptor chain: route registration, `listModels`, `resolveModel`, `contextWindow: 1048576`, `defaultMaxTokens: 131072` (the output ceiling travels through the substrate), and the reasoning descriptor (`reasoning.efforts` minimal..xhigh with `defaultEffort: xhigh`; `off`/`max` refused). The probe also DISCRIMINATES: pointed at the M2 standard route it fails closed. Wired into `tests/MuseProvider.Tests.cjs` (section 6). **Verification status: documentation + offline execution evidence; `MODEL_API_KEY` is NOT set in the verification environment, so no live Meta call was made or needed.**
+
+### 4. Profile UI restart fix
+
+Root cause of the Profile UI disappearing across restarts: the Engineering posture was derived ONLY from the polled snapshot's `composer.mode`, so a freshly restarted client rendered the legacy posture until the first successful poll — and the seat-suppression CSS keyed on a pinned upstream build's CSS-module hash classes, which upstream refreshes silently invalidate.
+
+The fix (`ui/nexus-controller/lib/client.js`):
+
+- The suppression rule now targets the STABLE slot outlet wrapper the DSH renderer emits for every registered slot: `body[data-nexus-composer-mode='engineering'] [data-slot='conversation.input.model']{display:none!important}`. A hard test guard forbids reintroducing any CSS-module hash family.
+- `composerModeOfSession` derives the boot posture client-side: the authoritative `composer.mode` wins once loaded; before that the session preset (`agentPreset` / `projectionValues.agentPreset` / `binding.preset`) classifies the boot (`aih-engineering` → engineering, `aih-deepseek` → legacy); unknown boot states fail CLOSED toward engineering so the Profile UI survives; a null session scope (hero phase) keeps the pre-M2.1 legacy rendering.
+- The body flag is applied in `useLayoutEffect` (before first paint), so a restart never flashes the upstream model seat.
+
 
 ## Compatibility invariant
 

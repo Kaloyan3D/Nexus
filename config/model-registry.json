@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "description": "Central Nexus model registry. A model entry is vendor-neutral configuration: it maps a profile-facing model id to a provider configuration identifier (settings.yaml llm-pi-ai.providers) and declares capabilities. Routing/controller code must never branch on vendor; vendor-specific handling belongs only in provider adapters and enforcement layers. Optional `agentEngines` (Phase M2) scopes an entry to agent engines: entries WITHOUT the property serve the Dual role architecture exactly as before; a declaration that omits 'dual' (e.g. [\"muse\"]) excludes the entry from every Dual role list. Optional `dataUseTier` (Phase M2) preserves the standard/contributor checkpoint distinction for later outbound-sanitization logic; it must never be inferred from the model-name string.",
+  "description": "Central Nexus model registry. A model entry is vendor-neutral configuration: it maps a profile-facing model id to a provider configuration identifier (settings.yaml llm-pi-ai.providers) and declares capabilities. Routing/controller code must never branch on vendor; vendor-specific handling belongs only in provider adapters and enforcement layers. Optional `agentEngines` (Phase M2) scopes an entry to agent engines: entries WITHOUT the property serve the Dual role architecture exactly as before; a declaration that omits 'dual' (e.g. [\"muse\"]) excludes the entry from every Dual role list. Optional `dataUseTier` (Phase M2) preserves the standard/contributor checkpoint distinction for later outbound-sanitization logic; it must never be inferred from the model-name string. `maxOutputTokens` (Phase M2.1) is a VENDOR-VERIFIED hard output ceiling taken from official vendor documentation and is never a Nexus safety/default cap: when no official ceiling is published the field must be omitted rather than guessed, and Nexus operational/request-level caps live at the call sites that impose them (never in this registry).",
   "models": [
     {
       "id": "deepseek-v4-flash",
@@ -148,31 +148,34 @@
       "readOnlyDefault": true
     },
     {
-      "id": "muse-spark-1.3",
-      "displayName": "Muse Spark 1.3",
+      "id": "muse-spark-1.3-contributor",
+      "displayName": "Muse Spark 1.3 Contributor",
       "vendor": "Meta",
       "provider": "meta-model-api",
       "providers": {
         "default": "meta-model-api",
+        "minimal": "meta-model-api",
+        "low": "meta-model-api",
+        "medium": "meta-model-api",
         "high": "meta-model-api",
-        "xhigh": "meta-model-api",
-        "max": "meta-model-api"
+        "xhigh": "meta-model-api"
       },
-      "model": "muse-spark-1.3",
+      "model": "muse-spark-1.3-contributor",
       "agentEngines": ["muse"],
       "supportedReasoningLevels": [
-        "off",
+        "minimal",
+        "low",
+        "medium",
         "high",
-        "xhigh",
-        "max"
+        "xhigh"
       ],
       "supportsTools": true,
       "supportsReasoning": true,
       "supportsVision": true,
       "supportsStreaming": true,
       "contextWindow": 1048576,
-      "maxOutputTokens": 32768,
-      "dataUseTier": "standard",
+      "maxOutputTokens": 131072,
+      "dataUseTier": "contributor",
       "enabled": true
     }
   ]

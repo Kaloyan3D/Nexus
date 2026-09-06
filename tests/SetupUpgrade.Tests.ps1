@@ -550,6 +550,143 @@ else {
     Write-Host 'NOTE: root setup.ps1 exit-semantics contract (TASK-0033) is Windows-gated; setup.ps1 is a Windows-only entry point.'
 }
 
+# TASK-0037 (Phase M2.1): additive managed provider settings migration.
+# config/settings.yaml is the managed template; data/settings.yaml is the
+# operator-owned runtime document. Complete-Install must migrate managed
+# provider routes additively and idempotently without ever touching user
+# values. These tests exercise the real migration function against temp
+# fixture documents; the live data/settings.yaml is never touched.
+. (Join-Path $InstallRoot 'scripts/SettingsMigration.ps1')
+$migrationTemplatePath = Join-Path $InstallRoot 'config/settings.yaml'
+$migrationTemplateText = [System.IO.File]::ReadAllText($migrationTemplatePath)
+$migrationFixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('aih-migration-' + [System.Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $migrationFixtureRoot | Out-Null
+try {
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    # Scenario 1: fresh-install state (template copied wholesale) is a
+    # verified no-op.
+    $freshPath = Join-Path $migrationFixtureRoot 'fresh.yaml'
+    [System.IO.File]::WriteAllText($freshPath, $migrationTemplateText, $utf8NoBom)
+    $freshBefore = [System.IO.File]::ReadAllText($freshPath)
+    $freshResult = Sync-AihManagedSettings -TemplatePath $migrationTemplatePath -SettingsPath $freshPath
+    if ($freshResult.Changed) { throw 'FAIL: a fresh template copy must migrate as a verified no-op.' }
+    if ((@($freshResult.AddedRoutes).Count -ne 0) -or (@($freshResult.UpgradedRoutes).Count -ne 0)) { throw 'FAIL: a fresh template copy must not add or upgrade routes.' }
+    Write-Host 'PASS: fresh-install template copy migrates as a verified no-op (M2.1)'
+
+    # Scenario 2: pre-M2 install without the managed meta route gains it
+    # verbatim while every user byte (values, comments, order) is preserved,
+    # and the document's CRLF newline style survives the migration.
+    $preM2Path = Join-Path $migrationFixtureRoot 'pre-m2.yaml'
+    $preM2User = @(
+        'agent-default-model:',
+        '  provider: zai-direct',
+        '  model: glm-5.3-flash',
+        '  reasoningEffort: high',
+        '',
+        'engineering-profile: glm-codex',
+        '',
+        '# user comment that must survive migration',
+        'llm-pi-ai:',
+        '  providers:',
+        '    zai-direct:',
+        '      displayName: Z.ai GLM (direct)',
+        '      apiKeyEnv: ZAI_API_KEY',
+        '      api: openai-completions',
+        '      baseURL: https://api.z.ai/api/paas/v4',
+        '      models:',
+        '        - id: glm-5.3-flash',
+        '          name: GLM-5.3-Flash',
+        '',
+        'ui-theme:',
+        '  preference: dark'
+    ) -join "`r`n"
+    [System.IO.File]::WriteAllText($preM2Path, $preM2User + "`r`n", $utf8NoBom)
+    $preM2Result = Sync-AihManagedSettings -TemplatePath $migrationTemplatePath -SettingsPath $preM2Path
+    if (-not $preM2Result.Changed) { throw 'FAIL: a pre-M2 document missing the managed routes must change.' }
+    $preM2After = [System.IO.File]::ReadAllText($preM2Path)
+    if (-not $preM2After.Contains('muse-spark-1.3-contributor')) { throw 'FAIL: the managed meta route was not migrated into the existing document.' }
+    if ($preM2After -notmatch [regex]::Escape('reasoningEfforts:')) { throw 'FAIL: migrated route lost its reasoningEfforts map.' }
+    foreach ($userByte in @('# user comment that must survive migration', 'glm-5.3-flash', 'preference: dark', 'reasoningEffort: high')) {
+        if (-not $preM2After.Contains($userByte)) { throw ('FAIL: migration lost user content: ' + $userByte) }
+    }
+    if (-not $preM2After.Contains("`r`n")) { throw 'FAIL: migration must preserve the document CRLF newline style.' }
+    Write-Host 'PASS: existing install gains managed provider routes additively with user bytes preserved (M2.1)'
+
+    # Scenario 3: the migration is idempotent - a second run is a byte no-op.
+    $idempotentBefore = [System.IO.File]::ReadAllText($preM2Path)
+    $secondResult = Sync-AihManagedSettings -TemplatePath $migrationTemplatePath -SettingsPath $preM2Path
+    $idempotentAfter = [System.IO.File]::ReadAllText($preM2Path)
+    if ($secondResult.Changed -or ($idempotentBefore -ne $idempotentAfter)) { throw 'FAIL: the managed settings migration must be idempotent.' }
+    Write-Host 'PASS: managed settings migration is idempotent (M2.1)'
+
+    # Scenario 4: a stale Phase M2 managed meta route (standard
+    # muse-spark-1.3, off/max reasoning map) upgrades deterministically to the
+    # Phase M2.1 contributor route without duplicating either route.
+    $stalePath = Join-Path $migrationFixtureRoot 'stale-m2.yaml'
+    $staleLines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in ($migrationTemplateText -replace "`r`n", "`n") -split "`n") { $staleLines.Add($line) }
+    $templateRoutes = Get-AihSettingsProviderRouteBlocks -Lines $staleLines
+    $metaRoute = $null
+    foreach ($route in $templateRoutes) { if ($route.Id -eq 'meta-model-api') { $metaRoute = $route; break } }
+    if ($null -eq $metaRoute) { throw 'FAIL: test setup could not find the managed meta-model-api route in the template.' }
+    $priorState = $script:ManagedRoutePriorStates['meta-model-api'][0]
+    if ([string]::IsNullOrWhiteSpace($priorState)) { throw 'FAIL: the M2 prior managed state must stay embedded in SettingsMigration.ps1.' }
+    $staleLines.RemoveRange($metaRoute.StartIndex, ($metaRoute.EndIndex - $metaRoute.StartIndex + 1))
+    $staleLines.InsertRange($metaRoute.StartIndex, (@($priorState -replace "`r`n", "`n") -split "`n"))
+    [System.IO.File]::WriteAllText($stalePath, (($staleLines -join "`r`n") + "`r`n"), $utf8NoBom)
+    $staleResult = Sync-AihManagedSettings -TemplatePath $migrationTemplatePath -SettingsPath $stalePath
+    $staleAfter = [System.IO.File]::ReadAllText($stalePath)
+    if (@($staleResult.UpgradedRoutes) -notcontains 'meta-model-api') { throw 'FAIL: the stale M2 managed route must be reported as upgraded.' }
+    if (-not $staleAfter.Contains('muse-spark-1.3-contributor')) { throw 'FAIL: the M2 managed route did not upgrade to the M2.1 contributor route.' }
+    # Exact-match guard: 'muse-spark-1.3' is a PREFIX of 'muse-spark-1.3-contributor',
+    # so the stale standard id is asserted with a negative lookahead, not a substring test.
+    if ([regex]::IsMatch($staleAfter, [regex]::Escape('- id: muse-spark-1.3') + '(?!-contributor)')) { throw 'FAIL: the stale standard muse-spark-1.3 model entry must not survive the upgrade.' }
+    $metaRouteCount = ([regex]::Matches($staleAfter, [regex]::Escape('    meta-model-api:'))).Count
+    if ($metaRouteCount -ne 1) { throw ('FAIL: the managed meta route must appear exactly once after upgrade, found: ' + $metaRouteCount) }
+    if (-not $staleAfter.Contains('zai-direct') -and -not $migrationTemplateText.Contains('zai-direct')) { throw 'FAIL: unrelated managed routes must survive the upgrade.' }
+    Write-Host 'PASS: stale Phase M2 managed route upgrades deterministically to the contributor route (M2.1)'
+
+    # Scenario 5: a user-modified but structurally valid managed route is
+    # user-owned: the migration never rewrites, reorders, or duplicates it.
+    $userOwnedPath = Join-Path $migrationFixtureRoot 'user-owned.yaml'
+    $userOwnedLines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in $staleLines) { $userOwnedLines.Add($line) }
+    $userOwnedLines[($userOwnedLines.IndexOf('    meta-model-api:') + 1)] = '      displayName: My custom Meta route'
+    [System.IO.File]::WriteAllText($userOwnedPath, (($userOwnedLines -join "`r`n") + "`r`n"), $utf8NoBom)
+    $userOwnedBefore = [System.IO.File]::ReadAllText($userOwnedPath)
+    $userOwnedResult = Sync-AihManagedSettings -TemplatePath $migrationTemplatePath -SettingsPath $userOwnedPath
+    $userOwnedAfter = [System.IO.File]::ReadAllText($userOwnedPath)
+    if (@($userOwnedResult.SkippedUserRoutes) -notcontains 'meta-model-api') { throw 'FAIL: a user-modified managed route must be reported as user-preserved.' }
+    if ($userOwnedBefore -ne $userOwnedAfter) { throw 'FAIL: a user-modified managed route must survive the migration byte-identical.' }
+    Write-Host 'PASS: user-modified managed routes are never rewritten by the migration (M2.1)'
+
+    # Scenario 6: a structurally invalid Nexus-managed route fails the
+    # migration closed (clear error, file untouched on disk).
+    $invalidPath = Join-Path $migrationFixtureRoot 'invalid.yaml'
+    $invalidLines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in $userOwnedLines) { $invalidLines.Add($line) }
+    $invalidLines[($invalidLines.IndexOf('    meta-model-api:') + 2)] = '      apiKeyEnv: # emptied by the user'
+    [System.IO.File]::WriteAllText($invalidPath, (($invalidLines -join "`r`n") + "`r`n"), $utf8NoBom)
+    $invalidBefore = [System.IO.File]::ReadAllText($invalidPath)
+    $invalidThrew = $false
+    try { Sync-AihManagedSettings -TemplatePath $migrationTemplatePath -SettingsPath $invalidPath | Out-Null } catch { $invalidThrew = $true }
+    $invalidAfter = [System.IO.File]::ReadAllText($invalidPath)
+    if (-not $invalidThrew) { throw 'FAIL: a structurally invalid managed route must fail the migration closed.' }
+    if ($invalidBefore -ne $invalidAfter) { throw 'FAIL: a failed migration must leave the document untouched on disk.' }
+    Write-Host 'PASS: structurally invalid managed routes fail the migration closed with the file untouched (M2.1)'
+
+    # Scenario 7: Complete-Install runs the migration between settings init
+    # and the managed patch sync, and the migration module is side-effect
+    # free when dot-sourced.
+    $migrationHookIndex = $compositionText.IndexOf('Sync-AihManagedSettings -TemplatePath')
+    if ($migrationHookIndex -lt 0) { throw 'FAIL: Complete-Install.ps1 must invoke the managed settings migration.' }
+    if ($migrationHookIndex -lt $settingsInitIndex -or $migrationHookIndex -gt $managedPatchCopyIndex) { throw 'FAIL: the settings migration must run after settings init and before the managed patch sync.' }
+    if (-not $compositionText.Contains("SettingsMigration.ps1'")) { throw 'FAIL: Complete-Install.ps1 must dot-source SettingsMigration.ps1.' }
+    Write-Host 'PASS: Complete-Install migrates managed settings after settings init and before patch sync (M2.1)'
+}
+finally {
+    if (Test-Path -LiteralPath $migrationFixtureRoot) { Remove-Item -LiteralPath $migrationFixtureRoot -Recurse -Force -ErrorAction SilentlyContinue }
+}
 $platformNote = if ($runningOnWindows) { 'aih.cmd %~dp0/AIH_ROOT contracts' } else { 'extensionless POSIX aih contracts (native, executable)' }
 Write-Host "PASS: platform launcher contract asserted: $platformNote"
 Write-Host 'PASS: repo-local setup/update/launchers are portable and checkout-relative'

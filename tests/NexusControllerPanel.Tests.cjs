@@ -26,7 +26,18 @@ const DETAIL = path.join(ROOT, 'ui', 'nexus-controller', 'lib', 'detail.cjs')
 
 const status = require(ADAPTER)
 const detail = require(DETAIL)
-const pexec = promisify(execFile)
+// spawnSync-backed: a runner sandbox that denies child-process pipes surfaces
+// the denial as probe.error (a catchable rejection) instead of a process-level
+// throw, so git-backed sections degrade deterministically there.
+const { spawnSync } = require('node:child_process')
+function pexec(cmd, args, opts) {
+  return new Promise((resolve, reject) => {
+    const r = spawnSync(cmd, args, opts)
+    if (r.error) { reject(r.error); return }
+    if (r.status !== 0) { const e = new Error('exit ' + r.status); e.stdout = r.stdout; reject(e); return }
+    resolve({ stdout: r.stdout })
+  })
+}
 
 function tmpDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
@@ -416,9 +427,14 @@ async function main() {
   {
     const dir = tmpDir('nexus-git-')
     let gitBin = null
+    // spawnSync (not promisified execFile): a runner sandbox that denies
+    // child-process pipes surfaces the denial as probe.error instead of a
+    // process-level throw, so the git section degrades to a skip exactly
+    // like the git-absent case.
+    const { spawnSync } = require('node:child_process')
     for (const candidate of ['git', 'C:/Program Files/Git/cmd/git.exe', 'C:/Program Files (x86)/Git/cmd/git.exe']) {
-      const probe = await pexec(candidate, ['--version'], { encoding: 'utf8' }).catch(() => null)
-      if (probe !== null) { gitBin = candidate; break }
+      const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8', timeout: 10000 })
+      if (!probe.error && probe.status === 0) { gitBin = candidate; break }
     }
     if (gitBin !== null) {
       await pexec(gitBin, ['init', '-q', '-b', 'main'], { cwd: dir, encoding: 'utf8' })
@@ -714,8 +730,15 @@ async function main() {
     assert.equal(renderToStaticMarkup(react.createElement(ExecutorPill, { content: null })), '', 'no content renders no pill markup')
     const ExecutorChip = moduleExports.ExecutorChip
     assert.equal(typeof ExecutorChip, 'function', 'ExecutorChip must be exported')
-    // SSR without a snapshot (poll has not landed yet) → no pill markup
-    assert.equal(renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-x' } })), '', 'empty snapshot renders no pill')
+    // Phase M2.1 (TASK-0037): SSR without a snapshot (poll has not landed yet)
+    // no longer collapses to the legacy posture — the boot heuristic fails
+    // CLOSED toward engineering, so the Profile UI (the Engineering trigger in
+    // its loading state) survives a restart, while the pills stay empty until
+    // real content exists. (Pre-M2.1 this asserted EMPTY markup; the restart
+    // fix intentionally supersedes that.)
+    const bootChipHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-x' } }))
+    assert.ok(bootChipHtml.includes('nx-eng-trigger'), 'unknown boot state keeps the Profile UI trigger mounted (fail closed)')
+    assert.ok(!bootChipHtml.includes('data-nexus-executor'), 'unknown boot state still renders no RUNNING/PREFERRED pill content')
 
     // ── display-state: UNAVAILABLE vs IDLE semantics ────────────────────────
     const resolve = moduleExports.resolveDisplayState
@@ -1330,7 +1353,7 @@ async function main() {
   }
 
   // 18g. git files: merged porcelain + numstat for a REAL fixture repo.
-  {
+  if (spawnSync('git', ['--version'], { encoding: 'utf8', timeout: 10000 }).status === 0) {
     const repo = tmpDir('nexus-git-d-')
     await pexec('git', ['init', '-q', repo])
     await pexec('git', ['-C', repo, 'config', 'user.email', 'test@example.com'])
@@ -1622,8 +1645,20 @@ async function main() {
     assert.match(boundHtml, /DeepSeek V4 Flash/, 'pill names the base model identity')
     assert.match(boundHtml, />HIGH</, 'effort renders as its own uppercase badge (TASK-0003.3a)')
     assert.ok(!boundHtml.includes('DeepSeek V4 Flash High'), 'tier is never embedded in the model label')
-    assert.ok(!boundHtml.includes('<button'), 'executor pill is read-only (no button/click target)')
-    assert.ok(!boundHtml.includes('PREFERRED'), 'no preference data means no PREFERRED chip')
+    // Phase M2.1: this fixture IS an engineering session (binding.preset
+    // 'aih-engineering', no composer block) — the boot heuristic classifies it
+    // engineering, so the Profile UI trigger mounts alongside the pill (the
+    // pre-M2.1 read-only-pill-only contract is superseded by design). The pill
+    // row itself stays read-only; the only button is the nx-eng-trigger.
+    assert.ok(boundHtml.includes('nx-eng-trigger'), 'engineering-session boot mounts the Profile UI trigger (fail closed)')
+    // The pills segment ends where the selector's composer span begins; the
+    // only button in the chip is the nx-eng-trigger inside that composer.
+    const pillSegment = boundHtml.slice(boundHtml.indexOf('data-nexus-executor'), boundHtml.indexOf('nx-eng-composer'))
+    assert.ok(!pillSegment.includes('<button'), 'the executor pill row stays read-only (no button/click target)')
+    assert.ok(boundHtml.indexOf('<button') > boundHtml.indexOf('nx-eng-composer'), 'the only chip button is the Profile UI trigger')
+    // The mounted selector's popover legitimately renders its PREFERRED
+    // PROFILE meta label — the assertion targets the PREFERENCE CHIP only.
+    assert.ok(!boundHtml.includes('nx-executor-pill-pref'), 'no preference data means no PREFERRED chip')
 
     // ── TASK-0003.3 / 3a states: RUNNING + PREFERRED pair, truthfully ─────
     // preferred MAX + effective High → same model identity, different effort:
@@ -1645,7 +1680,10 @@ async function main() {
     assert.ok(!pairHtml.includes('MAX Max') && !pairHtml.includes('High High'), 'never renders a duplicated effort')
     assert.ok(pairHtml.includes('Nexus may route individual tasks below this ceiling'), 'PREFERRED tooltip carries the ceiling explanation')
     assert.ok(pairHtml.includes('RUNNING — DeepSeek V4 Flash · HIGH'), 'RUNNING tooltip carries the full model identity + effort')
-    assert.ok(!pairHtml.includes('<button'), 'pair stays read-only')
+    // Phase M2.1: the pair fixture is an engineering session — the Profile UI
+    // trigger mounts beside it; the pill PAIR itself stays read-only.
+    const pairSegment = pairHtml.slice(pairHtml.indexOf('data-nexus-executor'), pairHtml.indexOf('nx-eng-composer'))
+    assert.ok(!pairSegment.includes('<button'), 'pair stays read-only')
 
     // preferred MAX + effective MAX (identical identity AND effort) → only
     // RUNNING (no redundant presentation)
@@ -1685,14 +1723,22 @@ async function main() {
     assert.ok(!unboundHtml.includes('data-nexus-executor'), 'unbound session never invents a RUNNING value')
     assert.match(unboundHtml, /data-nexus-preferred/, 'unbound session keeps the preference labeled and usable')
 
-    // transport failure / no snapshot → no pill (UNAVAILABLE is the drawer's face)
+    // transport failure / no snapshot (M2.1): the RUNNING/PREFERRED pills stay
+    // empty (UNAVAILABLE is the drawer's face), but the Profile UI trigger
+    // stays mounted — the restart fix fails CLOSED toward engineering instead
+    // of dropping the operator back into the legacy posture.
     sandbox.window.__NX_TEST_SNAPSHOT__ = null
     sandbox.window.__NX_TEST_SNAPSHOT_FAILED__ = true
-    assert.equal(renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } })), '', 'transport failure renders no pill')
+    const failHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    assert.ok(!failHtml.includes('data-nexus-executor'), 'transport failure renders no pill content')
+    assert.ok(failHtml.includes('nx-eng-trigger'), 'transport failure keeps the Profile UI trigger mounted (fail closed)')
     sandbox.window.__NX_TEST_SNAPSHOT__ = null
     sandbox.window.__NX_TEST_SNAPSHOT_FAILED__ = false
-    assert.equal(renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } })), '', 'no snapshot renders no pill')
-    // no session scope (hero phase) → no pill
+    const noSnapHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    assert.ok(!noSnapHtml.includes('data-nexus-executor'), 'no snapshot renders no pill content')
+    assert.ok(noSnapHtml.includes('nx-eng-trigger'), 'no snapshot keeps the Profile UI trigger mounted (fail closed)')
+    // no session scope (hero phase) → legacy posture: no pill and no selector,
+    // exactly the pre-M2.1 rendering (the selector needs a session to bind).
     assert.equal(renderToStaticMarkup(react.createElement(ExecutorChip, { session: null })), '', 'no session scope renders no pill')
   }
 
@@ -3034,8 +3080,12 @@ async function main() {
     assert.equal(typeof moduleExports.useEngineeringEditor, 'function', 'useEngineeringEditor exported')
     assert.equal(typeof moduleExports.preferredEngineerFromEditorState, 'function', 'preferredEngineerFromEditorState exported')
 
-    // 35a. legacy snapshot (no composer block): unchanged pills-only render —
-    // no trigger button, and the legacy preference label still comes through
+    // 35a. EXPLICIT legacy session (aih-deepseek preset; snapshot has no
+    // composer block yet): unchanged pills-only render — no trigger button,
+    // and the legacy preference label still comes through. (Pre-M2.1 this
+    // fixture carried no preset at all; the M2.1 boot heuristic fails CLOSED
+    // toward engineering for unknown boot states, so an explicit legacy
+    // preset is what a legacy session now asserts.)
     sandbox.window.__NX_TEST_SNAPSHOT__ = {
       schemaVersion: 1, generatedAtUtc: new Date().toISOString(), state: 'working',
       preference: { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash MAX' },
@@ -3043,7 +3093,7 @@ async function main() {
     }
     sandbox.window.__NX_TEST_SNAPSHOT_FAILED__ = false
     sandbox.window.__NX_TEST_EDITOR__ = undefined
-    const legacyHtml = renderToStaticMarkup(react.createElement(moduleExports.ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    const legacyHtml = renderToStaticMarkup(react.createElement(moduleExports.ExecutorChip, { session: { sessionId: 'session-0001', agentPreset: 'aih-deepseek' } }))
     assert.match(legacyHtml, /data-nexus-preferred/, 'legacy mode still renders the preference pill')
     assert.match(legacyHtml, /DeepSeek V4 Flash MAX/, 'legacy preference label unchanged (agent-default-model)')
     assert.ok(!legacyHtml.includes('<button'), 'legacy mode renders no control chrome')
@@ -3135,11 +3185,15 @@ async function main() {
     assert.ok(builtinHtml.includes('disabled'), 'built-in profile role selects are disabled')
     assert.ok(builtinHtml.includes('Select Profile'), 'built-in save labels as Select Profile')
 
-    // 35f. scoped CSS retires the upstream DSH model seat only in
-    // engineering mode; the anchor is the pinned frontend build's scoped
-    // class family and fails open if that build ever changes
+    // 35f. scoped CSS retires the upstream DSH model seat only in engineering
+    // mode. Phase M2.1 (TASK-0037): the anchor is the STABLE slot outlet
+    // wrapper the DSH renderer emits for every registered slot
+    // (<div data-slot={slotKey}>) — NEVER a pinned frontend build's CSS-module
+    // hash family, which upstream refreshes invalidate (root cause of the
+    // Profile UI disappearing across restarts).
     assert.ok(source.includes("body[data-nexus-composer-mode='engineering']"), 'body mode flag CSS hook present')
-    assert.ok(source.includes('_7KE1Ra_root'), 'upstream model seat suppression rule present')
+    assert.ok(source.includes("[data-slot='conversation.input.model']"), 'stable slot outlet suppression rule present')
+    assert.ok(!source.includes('_7KE1Ra'), 'no CSS-module hash dependency remains (M2.1 restart fix)')
     assert.ok(source.includes('nexusComposerMode'), 'body dataset flag wiring present')
     assert.ok(source.includes('nx-eng-popover'), 'popover styles present')
     assert.ok(source.includes('engineering-profile-action.json'), 'save posts to the shared action endpoint')
@@ -3179,6 +3233,39 @@ async function main() {
     assert.equal(derived.modelDisplayName, 'GLM-5.3')
     assert.equal(derived.vendor, 'Z.ai')
     assert.equal(derived.reasoning, 'high')
+
+    // 35i. Phase M2.1 (TASK-0037) restart fix: boot-mode derivation must not
+    // depend on the polled snapshot alone, and the body flag must exist
+    // before first paint (useLayoutEffect, not useEffect).
+    const modeOf = moduleExports.composerModeOfSession
+    assert.ok(modeOf, 'composerModeOfSession exported for the boot heuristic')
+
+    // Authoritative snapshot wins once loaded (both directions).
+    assert.equal(modeOf({ agentPreset: 'aih-deepseek' }, { composer: { mode: 'engineering' } }).mode, 'engineering', 'snapshot engineering beats the session preset')
+    assert.equal(modeOf({ agentPreset: 'aih-engineering' }, { composer: { mode: 'legacy' } }).mode, 'legacy', 'snapshot legacy beats the session preset')
+    assert.equal(modeOf({}, { composer: { mode: 'engineering' } }).source, 'snapshot')
+
+    // Client-side boot heuristic from the session preset.
+    assert.equal(modeOf({ agentPreset: 'aih-engineering' }, null).mode, 'engineering', 'aih-engineering session boots engineering before any snapshot')
+    assert.equal(modeOf({ agentPreset: 'aih-engineering' }, null).source, 'session-preset')
+    assert.equal(modeOf({ agentPreset: 'aih-deepseek' }, null).mode, 'legacy', 'aih-deepseek session boots legacy before any snapshot')
+    assert.equal(modeOf({ agentPreset: 'aih-deepseek' }, null).source, 'session-preset')
+
+    // projectionValues fallback when agentPreset is absent.
+    assert.equal(modeOf({ projectionValues: { agentPreset: 'aih-engineering' } }, null).mode, 'engineering', 'projectionValues.agentPreset is a boot source too')
+
+    // Endpoint unavailable (snapshot error) keeps the Profile UI: the preset
+    // heuristic still classifies an engineering session.
+    assert.equal(modeOf({ agentPreset: 'aih-engineering' }, { error: 'endpoint unavailable' }).mode, 'engineering', 'endpoint-unavailable restart keeps the Profile UI (fail closed)')
+    // Unknown/absent boot state fails closed toward engineering/loading.
+    assert.equal(modeOf({}, null).mode, 'engineering', 'unknown boot state fails closed toward engineering')
+    assert.equal(modeOf({}, null).source, 'boot-fail-closed')
+    assert.equal(modeOf(null, undefined).mode, 'legacy', 'no session scope (hero phase) keeps the pre-M2.1 legacy posture')
+
+    // The body flag is applied in a layout effect (before first paint), so a
+    // restart never flashes the upstream seat before the flag lands.
+    assert.ok(/useLayoutEffect\(\(\) => {[\s\S]*?nexusComposerMode/.test(source), 'body flag set through useLayoutEffect (no first-paint flash)')
+    assert.ok(source.includes("composerModeOfSession(session, snapshot)"), 'ExecutorChip derives its mode through the shared boot heuristic')
   }
 
   console.log('PASS: nexus controller panel state layer')
