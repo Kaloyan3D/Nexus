@@ -21,6 +21,8 @@ try{
     Copy-Item $layout.EngineeringProfiles (Join-Path $fixture 'config/engineering-profiles.json')
     Copy-Item $layout.ModelRegistry (Join-Path $fixture 'config/model-registry.json')
     Copy-Item $layout.RoutingPolicy (Join-Path $fixture 'config/routing-policy.json')
+    Copy-Item (Join-Path $InstallRoot 'config/nexus-profiles.json') (Join-Path $fixture 'config/nexus-profiles.json')
+    Copy-Item (Join-Path $InstallRoot 'config/muse-profiles.json') (Join-Path $fixture 'config/muse-profiles.json')
     Copy-Item $layout.Settings (Join-Path $fixture 'data/settings.yaml')
     $flayout=Get-AihLayout $fixture
 
