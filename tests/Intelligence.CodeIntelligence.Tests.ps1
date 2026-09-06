@@ -1,7 +1,9 @@
-[CmdletBinding()]param([string]$InstallRoot = 'C:\AI-Harness')
+[CmdletBinding()]param([string]$InstallRoot = (Split-Path -Parent $PSScriptRoot))
+# Platform-aware child host: Windows keeps powershell.exe; POSIX uses the pinned Nexus pwsh.
+if (-not (Get-Command Test-AihIsWindows -ErrorAction SilentlyContinue)) { . (Join-Path $InstallRoot 'scripts/Platform.ps1') }; $aihPsHost = Get-AihPowerShellHost -InstallRoot $InstallRoot
 Set-StrictMode -Version Latest;$ErrorActionPreference = 'Stop'
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\Intelligence.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Intelligence.ps1')
 
 # ── Phase 3.2E/F: end-to-end DoD scenario (17 steps) ────────────────────────
 $passed = 0
@@ -114,19 +116,30 @@ try {
     $storeCountC = (& (Get-AihCodeIntelligenceStore -StoreRoot $store).CountFileIntelligence)
     Assert-Aih ($storeCountC -eq 4) 'step 12b: cross-checkout reuse wrote no new store documents'
 
-    # (13) restart persistence: fresh process answers queries without reindexing
+    # (13) restart persistence: fresh process answers queries without reindexing.
+    # TASK-0025 Class A: the generated probe body derives the install root from
+    # the AIH_INSTALL_ROOT runtime contract (Join-Path against the environment
+    # contract), never from a literal root; the parent exports the variable
+    # process-scoped for the child and restores it afterwards.
     $probe = Join-Path $fixtureRoot 'probe.ps1'
     $probeBody = @(
         'param([string]$Store, [string]$RepoId, [string]$SnapId)',
-        '. ''C:\AI-Harness\scripts\Common.ps1''',
-        '. ''C:\AI-Harness\scripts\Intelligence.ps1''',
+        '. (Join-Path $env:AIH_INSTALL_ROOT ''scripts/Common.ps1'')',
+        '. (Join-Path $env:AIH_INSTALL_ROOT ''scripts/Intelligence.ps1'')',
         '$defs = @(Find-AihCodeDefinitions -StoreRoot $Store -RepositoryId $RepoId -SnapshotId $SnapId -Name ''AuthService'')',
         'if ($defs.Count -eq 1 -and $defs[0].path -eq ''auth.ts'') { Write-Output ''PERSIST-OK'' } else { Write-Output ''PERSIST-FAIL''; exit 1 }'
     ) -join $nl
     Set-TestFile $probe $probeBody
     $previousEap = $ErrorActionPreference
+    $previousRoot = $env:AIH_INSTALL_ROOT
     $ErrorActionPreference = 'Continue'
-    try { $probeOut = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $probe $store $repositoryId $buildB.snapshot.snapshotId } finally { $ErrorActionPreference = $previousEap }
+    try {
+        $env:AIH_INSTALL_ROOT = [System.IO.Path]::GetFullPath($InstallRoot)
+        $probeOut = & $aihPsHost -NoLogo -NoProfile -ExecutionPolicy Bypass -File $probe $store $repositoryId $buildB.snapshot.snapshotId
+    } finally {
+        $ErrorActionPreference = $previousEap
+        if ($null -eq $previousRoot) { Remove-Item Env:AIH_INSTALL_ROOT -ErrorAction SilentlyContinue } else { $env:AIH_INSTALL_ROOT = $previousRoot }
+    }
     Assert-Aih ((@($probeOut) -join ' ').Contains('PERSIST-OK')) 'step 13: fresh process answers definition queries from persisted intelligence'
 
     # (14) status/diagnostics text
@@ -261,7 +274,7 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $sensitiveRepo 'vault') -Force | Out-Null
     Invoke-TestGit $sensitiveRepo @('init', '-q') | Out-Null
     Set-TestFile (Join-Path $sensitiveRepo 'secrets.ts') (@('export class LeakedToken {', '  value = "abc";', '}') -join $nl)
-    Set-TestFile (Join-Path $sensitiveRepo 'vault\key.ts') 'export class VaultKey { open() { return 1; } }'
+    Set-TestFile (Join-Path $sensitiveRepo 'vault/key.ts') 'export class VaultKey { open() { return 1; } }'
     Set-TestFile (Join-Path $sensitiveRepo '.nexus.yml') (@('security:', '  blocked_globs:', '    - ''vault/**''') -join $nl)
     Set-TestFile (Join-Path $sensitiveRepo 'app.ts') 'export class CleanApp { start() { return 1; } }'
     Invoke-TestGit $sensitiveRepo @('add', '.') | Out-Null
@@ -285,17 +298,17 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $dupRepo 'a') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $dupRepo 'b') -Force | Out-Null
     Invoke-TestGit $dupRepo @('init', '-q') | Out-Null
-    Set-TestFile (Join-Path $dupRepo 'a\util.ts') 'export class Helper { run() { return 1; } }'
-    Set-TestFile (Join-Path $dupRepo 'b\util.ts') 'export class Helper { run() { return 2; } }'
+    Set-TestFile (Join-Path $dupRepo 'a/util.ts') 'export class Helper { run() { return 1; } }'
+    Set-TestFile (Join-Path $dupRepo 'b/util.ts') 'export class Helper { run() { return 2; } }'
     Invoke-TestGit $dupRepo @('add', '.') | Out-Null
     Invoke-TestGit $dupRepo @('-c', 'user.email=t@nexus.test', '-c', 'user.name=nexus-test', 'commit', '-q', '-m', 'dup v1') | Out-Null
     $dupReg = Register-AihRepository -StoreRoot $store -Path $dupRepo
     $dupSnap1 = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $dupReg.checkout.checkoutId
     $null = (Invoke-AihCodeIntelligenceIndex -StoreRoot $store -RepositoryId $dupReg.repository.repositoryId -SnapshotId $dupSnap1.snapshot.snapshotId)
-    Set-TestFile (Join-Path $dupRepo 'a\util2.ts') 'export class Helper { run() { return 1; } }'
-    Set-TestFile (Join-Path $dupRepo 'b\util2.ts') 'export class Helper { run() { return 2; } }'
-    Remove-Item -LiteralPath (Join-Path $dupRepo 'a\util.ts') -Force
-    Remove-Item -LiteralPath (Join-Path $dupRepo 'b\util.ts') -Force
+    Set-TestFile (Join-Path $dupRepo 'a/util2.ts') 'export class Helper { run() { return 1; } }'
+    Set-TestFile (Join-Path $dupRepo 'b/util2.ts') 'export class Helper { run() { return 2; } }'
+    Remove-Item -LiteralPath (Join-Path $dupRepo 'a/util.ts') -Force
+    Remove-Item -LiteralPath (Join-Path $dupRepo 'b/util.ts') -Force
     Invoke-TestGit $dupRepo @('add', '-A') | Out-Null
     Invoke-TestGit $dupRepo @('-c', 'user.email=t@nexus.test', '-c', 'user.name=nexus-test', 'commit', '-q', '-m', 'dup v2') | Out-Null
     $dupSnap2 = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $dupReg.checkout.checkoutId
@@ -308,14 +321,14 @@ try {
     $moveRepo = Join-Path $fixtureRoot 'uniqmove'
     New-Item -ItemType Directory -Path (Join-Path $moveRepo 'solo') -Force | Out-Null
     Invoke-TestGit $moveRepo @('init', '-q') | Out-Null
-    Set-TestFile (Join-Path $moveRepo 'solo\util.ts') 'export class Solo { go() { return 1; } }'
+    Set-TestFile (Join-Path $moveRepo 'solo/util.ts') 'export class Solo { go() { return 1; } }'
     Invoke-TestGit $moveRepo @('add', '.') | Out-Null
     Invoke-TestGit $moveRepo @('-c', 'user.email=t@nexus.test', '-c', 'user.name=nexus-test', 'commit', '-q', '-m', 'move v1') | Out-Null
     $moveReg = Register-AihRepository -StoreRoot $store -Path $moveRepo
     $moveSnap1 = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $moveReg.checkout.checkoutId
     $null = (Invoke-AihCodeIntelligenceIndex -StoreRoot $store -RepositoryId $moveReg.repository.repositoryId -SnapshotId $moveSnap1.snapshot.snapshotId)
-    Set-TestFile (Join-Path $moveRepo 'solo\util2.ts') 'export class Solo { go() { return 1; } }'
-    Remove-Item -LiteralPath (Join-Path $moveRepo 'solo\util.ts') -Force
+    Set-TestFile (Join-Path $moveRepo 'solo/util2.ts') 'export class Solo { go() { return 1; } }'
+    Remove-Item -LiteralPath (Join-Path $moveRepo 'solo/util.ts') -Force
     Invoke-TestGit $moveRepo @('add', '-A') | Out-Null
     Invoke-TestGit $moveRepo @('-c', 'user.email=t@nexus.test', '-c', 'user.name=nexus-test', 'commit', '-q', '-m', 'move v2') | Out-Null
     $moveSnap2 = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $moveReg.checkout.checkoutId

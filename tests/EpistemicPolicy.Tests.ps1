@@ -1,14 +1,14 @@
 param([string]$InstallRoot)
 $ErrorActionPreference='Stop'; if([string]::IsNullOrWhiteSpace($InstallRoot)){$InstallRoot=Split-Path -Parent $PSScriptRoot}; $InstallRoot=[IO.Path]::GetFullPath($InstallRoot)
-. (Join-Path $InstallRoot 'scripts\Common.ps1'); . (Join-Path $InstallRoot 'scripts\TaskController.ps1'); . (Join-Path $InstallRoot 'scripts\Routing.ps1')
-foreach($name in @('Shared','WorkingSet','Requirements','StepRouting','Failures','RetryPolicy','EvidenceGate','Execution','EpistemicPolicy','Verification','Telemetry')){. (Join-Path $InstallRoot ('scripts\Engineering\'+$name+'.ps1'))}
+. (Join-Path $InstallRoot 'scripts/Common.ps1'); . (Join-Path $InstallRoot 'scripts/TaskController.ps1'); . (Join-Path $InstallRoot 'scripts/Routing.ps1')
+foreach($name in @('Shared','WorkingSet','Requirements','StepRouting','Failures','RetryPolicy','EvidenceGate','Execution','EpistemicPolicy','Verification','Telemetry')){. (Join-Path $InstallRoot ('scripts/Engineering/'+$name+'.ps1'))}
 $script:pass=0; function Assert-Aih($condition,[string]$message){if(-not $condition){Write-Host "FAIL: $message";throw $message};$script:pass++;Write-Host "PASS: $message"}
 function New-TestTask([string]$root,[string]$description='epistemic policy task'){$task=New-AihTask -Workspace $root -Description $description; New-AihWorkingSet -Workspace $root -TaskId $task.taskId -TaskInstanceId $task.taskInstanceId -Objective $description|Out-Null; Initialize-AihEpistemicState -Workspace $root -TaskId $task.taskId -TaskInstanceId $task.taskInstanceId|Out-Null;return $task}
 function New-U($root,$task,$question,$kind,$subject='subject',$probe=$false,$risk='safe',$cost='low',$gain='high',$relevance='high',$repo=$true){return New-AihUncertainty -Workspace $root -TaskId $task.taskId -TaskInstanceId $task.taskInstanceId -Question $question -Kind $kind -Subject $subject -ProbeAvailable:$probe -ProbeRisk $risk -ProbeCost $cost -ExpectedInformationGain $gain -DecisionRelevance $relevance -RepositoryAvailable:$repo}
 
-$root=Join-Path ([IO.Path]::GetTempPath()) ('aih-epistemic-'+[guid]::NewGuid().ToString('N'));$installFixture=Join-Path $root 'install';$workspace=Join-Path $root 'workspace';New-Item -ItemType Directory -Force -Path $workspace,(Join-Path $installFixture 'config'),(Join-Path $installFixture 'data\routing')|Out-Null
-Copy-Item -LiteralPath (Join-Path $InstallRoot 'config\routing-policy.json'),(Join-Path $InstallRoot 'config\engineering-profiles.json'),(Join-Path $InstallRoot 'config\model-registry.json') -Destination (Join-Path $installFixture 'config')
-if(Test-Path -LiteralPath (Join-Path $InstallRoot 'data\settings.yaml')){New-Item -ItemType Directory -Force -Path (Join-Path $installFixture 'data')|Out-Null;Copy-Item -LiteralPath (Join-Path $InstallRoot 'data\settings.yaml') -Destination (Join-Path $installFixture 'data\settings.yaml')}
+$root=Join-Path ([IO.Path]::GetTempPath()) ('aih-epistemic-'+[guid]::NewGuid().ToString('N'));$installFixture=Join-Path $root 'install';$workspace=Join-Path $root 'workspace';New-Item -ItemType Directory -Force -Path $workspace,(Join-Path $installFixture 'config'),(Join-Path $installFixture 'data/routing')|Out-Null
+Copy-Item -LiteralPath (Join-Path $InstallRoot 'config/routing-policy.json'),(Join-Path $InstallRoot 'config/engineering-profiles.json'),(Join-Path $InstallRoot 'config/model-registry.json') -Destination (Join-Path $installFixture 'config')
+if(Test-Path -LiteralPath (Join-Path $InstallRoot 'data/settings.yaml')){New-Item -ItemType Directory -Force -Path (Join-Path $installFixture 'data')|Out-Null;Copy-Item -LiteralPath (Join-Path $InstallRoot 'data/settings.yaml') -Destination (Join-Path $installFixture 'data/settings.yaml')}
 $oldHome=$env:DSH_HOME;$env:DSH_HOME=(Join-Path $installFixture 'data')
 try{
  $task=New-TestTask $workspace
@@ -186,7 +186,7 @@ try{
  $a2=Select-AihEpistemicAction -Workspace $workspace2 -TaskId $task2.taskId -TaskInstanceId $task2.taskInstanceId -UncertaintyId $u2.id
  Assert-Aih ($a2.selectedAction -eq 'retrieve' -and $a2.selectionReason -eq $retrieve.selectionReason) 'equivalent structured state produces the same deterministic recommendation'
 
- $source=Get-Content -Raw -LiteralPath (Join-Path $InstallRoot 'scripts\Engineering\EpistemicPolicy.ps1')
+ $source=Get-Content -Raw -LiteralPath (Join-Path $InstallRoot 'scripts/Engineering/EpistemicPolicy.ps1')
  Assert-Aih ($source -notmatch '(?i)chain.of.thought|reasoning paragraphs|provider-specific reasoning') 'policy implementation contains no chain-of-thought parser'
  Assert-Aih ($source -notmatch '(?i)invoke.*model|reviewer.*classifier|llm.*call') 'policy introduces no mandatory model classifier call'
  Assert-Aih ($source -notmatch [regex]::Escape('C:\AI-Harness')) 'policy introduces no hardcoded install root'

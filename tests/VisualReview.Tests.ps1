@@ -1,11 +1,13 @@
-[CmdletBinding()]param([string]$InstallRoot='C:\AI-Harness')
+[CmdletBinding()]param([string]$InstallRoot= (Split-Path -Parent $PSScriptRoot))
 Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
+# Platform-aware child host: Windows keeps powershell.exe; POSIX uses the pinned Nexus pwsh.
+if (-not (Get-Command Test-AihIsWindows -ErrorAction SilentlyContinue)) { . (Join-Path $InstallRoot 'scripts/Platform.ps1') }; $aihPsHost = Get-AihPowerShellHost -InstallRoot $InstallRoot
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\Routing.ps1')
-. (Join-Path $InstallRoot 'scripts\TaskController.ps1')
-. (Join-Path $InstallRoot 'scripts\Telemetry.ps1')
-. (Join-Path $InstallRoot 'scripts\CodexReview.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Routing.ps1')
+. (Join-Path $InstallRoot 'scripts/TaskController.ps1')
+. (Join-Path $InstallRoot 'scripts/Telemetry.ps1')
+. (Join-Path $InstallRoot 'scripts/CodexReview.ps1')
 
 $passed=0
 function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw "FAIL: $Name"};$script:passed++;Write-Host "PASS: $Name"}
@@ -13,24 +15,26 @@ function New-Fixture([string]$Name){$path=Join-Path ([IO.Path]::GetTempPath()) (
 
 $liveLayout=Get-AihLayout $InstallRoot
 # Deterministic node resolution for fixture install roots (the fixture has no
-# runtime node; the controller service falls back to PATH, so we prepend the
-# pinned runtime BEFORE the system PATH).
-$env:PATH=(Split-Path -Parent $liveLayout.Node)+';'+$env:PATH
+# runtime node; the controller service falls back to PATH, so the Nexus-pinned
+# runtime must win BEFORE the system PATH). The shared platform abstraction
+# resolves the pinned runtime directory and prepends it with the platform path
+# separator (TASK-0025 Class B: no hardcoded ';').
+$null = Add-AihPinnedNodeToPath -InstallRoot $InstallRoot  # return value suppressed: suite output is assertion evidence
 
 # ── fixture install root (isolated copies of config + scripts + live settings) ──
 $fixture=New-Fixture 'install'
 $workspace=New-Fixture 'ws'
 try{
     New-Item -ItemType Directory -Path (Join-Path $fixture 'config') -Force|Out-Null
-    Copy-Item (Join-Path $liveLayout.Root 'config\routing-policy.json') (Join-Path $fixture 'config\routing-policy.json')
-    Copy-Item (Join-Path $liveLayout.Root 'config\engineering-profiles.json') (Join-Path $fixture 'config\engineering-profiles.json')
-    Copy-Item (Join-Path $liveLayout.Root 'config\model-registry.json') (Join-Path $fixture 'config\model-registry.json')
+    Copy-Item (Join-Path $liveLayout.Root 'config/routing-policy.json') (Join-Path $fixture 'config/routing-policy.json')
+    Copy-Item (Join-Path $liveLayout.Root 'config/engineering-profiles.json') (Join-Path $fixture 'config/engineering-profiles.json')
+    Copy-Item (Join-Path $liveLayout.Root 'config/model-registry.json') (Join-Path $fixture 'config/model-registry.json')
     New-Item -ItemType Directory -Path (Join-Path $fixture 'scripts') -Force|Out-Null
-    foreach($script in @('Common.ps1','Routing.ps1','TaskController.ps1','Telemetry.ps1','VisualPacketIntegrity.ps1','VisualReview.ps1','Invoke-VisualReview.mjs','CodexReview.ps1')){
-        Copy-Item (Join-Path $liveLayout.Root ('scripts\'+$script)) (Join-Path $fixture ('scripts\'+$script))
+    foreach($script in @('Platform.ps1','Common.ps1','Routing.ps1','TaskController.ps1','Telemetry.ps1','VisualPacketIntegrity.ps1','VisualReview.ps1','Invoke-VisualReview.mjs','CodexReview.ps1')){
+        Copy-Item (Join-Path $liveLayout.Root ('scripts/'+$script)) (Join-Path $fixture ('scripts/'+$script))
     }
     New-Item -ItemType Directory -Path (Join-Path $fixture 'data') -Force|Out-Null
-    New-Item -ItemType Directory -Path (Join-Path $fixture 'data\routing') -Force|Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $fixture 'data/routing') -Force|Out-Null
     $fixtureLayout=Get-AihLayout $fixture
     $env:AIH_VISUAL_TEST_KEY='fixture-key'
     @'
@@ -48,7 +52,7 @@ llm-pi-ai:
           name: DeepSeek V4 Flash Vision (Exp)
 '@|Set-Content -Path $fixtureLayout.Settings -Encoding UTF8
 
-    $visualReviewScript=Join-Path $fixture 'scripts\VisualReview.ps1'
+    $visualReviewScript=Join-Path $fixture 'scripts/VisualReview.ps1'
     $testPng=Join-Path $workspace 'shot-source.png'
     # Deterministic PNG-magic evidence bytes (the service validates the
     # extension + size only; the magic check lives in the capture script).
@@ -56,17 +60,39 @@ llm-pi-ai:
     [IO.File]::WriteAllBytes($testPng,$pngBytes)
 
     function Invoke-AihVisual {
-        param([string[]]$Screenshots,[string[]]$References,[switch]$Execute,[string]$MockResponseFile,[string]$PreviousResultPath,[string]$PayloadFile,[string]$Trigger)
+        param([string[]]$Screenshots,[string[]]$References,[switch]$Execute,[string]$MockResponseFile,[string]$PreviousResultPath,[string]$PayloadFile,[string]$Trigger,[switch]$EmitOnly)
         $arguments=@('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$visualReviewScript,'-InstallRoot',$fixture,'-Workspace',$workspace,'-TaskId',$script:taskId,'-Question','review the home screen')
-        foreach($shot in @($Screenshots)){$arguments+=@('-Screenshots',$shot)}
-        foreach($reference in @($References)){$arguments+=@('-References',$reference)}
+        # TASK-0023: optional array parameters are emitted ONLY when they
+        # carry values. Unary @($null) (an omitted parameter) enumerates once
+        # over $null and used to append a dangling '-References' token whose
+        # $null value POSIX pwsh native argument passing drops - the child
+        # binder then exited 1 before production validation could reject the
+        # packet. Each value keeps its own '-Name value' pair so every path
+        # (spaces included) stays one exact argv boundary.
+        foreach($shot in @($Screenshots)){if($null-ne$shot){$arguments+=@('-Screenshots',$shot)}}
+        foreach($reference in @($References)){if($null-ne$reference){$arguments+=@('-References',$reference)}}
         if($Execute){$arguments+='-Execute'}
         if($MockResponseFile){$arguments+=@('-MockResponseFile',$MockResponseFile)}
         if($PreviousResultPath){$arguments+=@('-PreviousResultPath',$PreviousResultPath)}
         if($PayloadFile){$arguments+=@('-PayloadFile',$PayloadFile)}
         if($Trigger){$arguments+=@('-Trigger',$Trigger)}
-        $output=& 'powershell.exe' $arguments 2>&1|ForEach-Object{[string]$_}
-        [pscustomobject]@{exitCode=$LASTEXITCODE;text=($output-join [Environment]::NewLine)}
+        # -EmitOnly is the argv-emission probe: it returns the exact argument
+        # array (the same one the child invocation splats) without spawning.
+        if($EmitOnly){return @($arguments)}
+        # TASK-0026 capture-first transport: stdout and stderr are captured as
+        # SEPARATE streams (no 2>&1 merging). The JSON transport contract
+        # lives on stdout ALONE; stderr diagnostics never participate in
+        # parsing, and the raw stream bytes ride on the result object so a
+        # failing assertion prints the exact child output.
+        $captureRoot=[IO.Path]::GetTempPath()
+        $stdoutFile=Join-Path $captureRoot ('aih-vr-'+[guid]::NewGuid().ToString('N')+'.out')
+        $stderrFile=Join-Path $captureRoot ('aih-vr-'+[guid]::NewGuid().ToString('N')+'.err')
+        & $aihPsHost $arguments 1> $stdoutFile 2> $stderrFile
+        $code=$LASTEXITCODE
+        $rawStdout=[string](Get-Content -Raw -LiteralPath $stdoutFile -ErrorAction SilentlyContinue)
+        $rawStderr=[string](Get-Content -Raw -LiteralPath $stderrFile -ErrorAction SilentlyContinue)
+        Remove-Item -LiteralPath $stdoutFile,$stderrFile -Force -ErrorAction SilentlyContinue
+        [pscustomobject]@{exitCode=$code;text=$rawStdout;stdout=$rawStdout;stderr=$rawStderr}
     }
     function Set-AihFixtureSettings {
         # Pipeline-aware: here-strings are piped in, so the content MUST be
@@ -88,7 +114,7 @@ llm-pi-ai:
     $profilesDoc=Get-AihEngineeringProfiles $fixtureLayout.EngineeringProfiles $fixtureLayout.CustomEngineeringProfile
     $policy=Get-AihRoutingPolicy $fixtureLayout.RoutingPolicy
     $deepseekProfile=$null;$glmProfile=$null
-    foreach($profile in @($profilesDoc.profiles)){if($profile.id -eq 'deepseek-codex'){$deepseekProfile=$profile};if($profile.id -eq 'glm-codex'){$glmProfile=$profile}}
+    foreach($profileEntry in @($profilesDoc.profiles)){if($profileEntry.id -eq 'deepseek-codex'){$deepseekProfile=$profileEntry};if($profileEntry.id -eq 'glm-codex'){$glmProfile=$profileEntry}}
     Assert-Aih ($deepseekProfile.roles.visualReviewer.model -eq 'deepseek-v4-flash-vision-exp' -and $deepseekProfile.roles.visualReviewer.reasoning -eq 'high') '1: deepseek-codex binds visualReviewer to the vision model / high'
     Assert-Aih ($glmProfile.roles.visualReviewer.model -eq 'deepseek-v4-flash-vision-exp' -and $glmProfile.roles.visualReviewer.reasoning -eq 'high') '1: glm-codex binds visualReviewer to the vision model / high'
     $target=Resolve-AihModelTarget $registry ([pscustomobject]@{Id='deepseek-codex';DisplayName='x';Config=$deepseekProfile}) 'visualReviewer'
@@ -109,8 +135,13 @@ llm-pi-ai:
     Assert-Aih ($compatible-contains'deepseek-v4-flash-vision-exp' -and $compatible-notcontains'deepseek-v4-flash') '2: compatible-models list contains only vision-capable models'
 
     # ── 3. EDITOR STATE EXPOSES THE OPTIONAL ROLE ────────────────────────────
-    $editorStateRaw=& 'powershell.exe' -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $liveLayout.Root 'scripts\EngineeringProfile.ps1') -Action get -InstallRoot $fixture 2>&1
-    $editorState=(($editorStateRaw|ForEach-Object{[string]$_})-join '')|ConvertFrom-Json
+    # stdout-only JSON parse with separate stderr capture (TASK-0026).
+    $editorStateOut=Join-Path ([IO.Path]::GetTempPath()) ('aih-vr-'+[guid]::NewGuid().ToString('N')+'.out')
+    $editorStateErr=Join-Path ([IO.Path]::GetTempPath()) ('aih-vr-'+[guid]::NewGuid().ToString('N')+'.err')
+    & $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $liveLayout.Root 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $fixture 1> $editorStateOut 2> $editorStateErr
+    $editorState=(Get-Content -Raw -LiteralPath $editorStateOut)|ConvertFrom-Json
+    $editorStateStderr=[string](Get-Content -Raw -LiteralPath $editorStateErr -ErrorAction SilentlyContinue)
+    Remove-Item -LiteralPath $editorStateOut,$editorStateErr -Force -ErrorAction SilentlyContinue
     Assert-Aih ([bool]$editorState.roleRequirements.visualReviewer.requiresVision -and -not[bool]$editorState.roleRequirements.visualReviewer.writable) '3: editor state exposes visualReviewer requirements'
     Assert-Aih (@($editorState.roleModels.visualReviewer)-contains'deepseek-v4-flash-vision-exp') '3: editor state lists the vision model as visualReviewer-compatible'
 
@@ -118,8 +149,15 @@ llm-pi-ai:
     $task=New-AihTask $workspace 'visual review smoke task'
     $script:taskId=$task.taskId
     $missing=Invoke-AihVisual -Screenshots @() -Execute
-    $missingJson=$missing.text|ConvertFrom-Json
-    Assert-Aih ($missing.exitCode -eq 3 -and $missingJson.ok -eq $false -and $missingJson.errorKind -eq 'visual-review-packet-rejected') '4: missing screenshot fails closed with a structured rejection (exit 3)'
+    # TASK-0026: parse defensively and carry the RAW captured streams in the
+    # failure evidence - the child's exact stdout/stderr/exit code are the
+    # first-class diagnosis, never a parser summary.
+    $missingJson=$null
+    try{$missingJson=$missing.text|ConvertFrom-Json}catch{$missingJson=$null}
+    $evOut=[string]$missing.stdout; if($evOut.Length-gt400){$evOut=$evOut.Substring(0,400)}
+    $evErr=[string]$missing.stderr; if($evErr.Length-gt400){$evErr=$evErr.Substring(0,400)}
+    $evidence='exitCode='+$missing.exitCode+' stdout='+($evOut -replace "`r?`n",' | ')+' stderr='+($evErr -replace "`r?`n",' | ')
+    Assert-Aih ($null-ne$missingJson-and$missing.exitCode-eq3-and$missingJson.ok-eq$false-and$missingJson.errorKind-eq'visual-review-packet-rejected') ('4: missing screenshot fails closed with a structured rejection (exit 3). captured: '+$evidence)
     Assert-Aih ((@($missingJson.violations)|Where-Object{$_-match'no screenshot'}|Measure-Object).Count -ge 1) '4: the rejection names the missing screenshot violation'
 
     # ── 5. INVALID IMAGE PATH ─────────────────────────────────────────────────
@@ -132,7 +170,7 @@ llm-pi-ai:
     $packetRun1=Invoke-AihVisual -Screenshots @($testPng)
     $packet1=$packetRun1.text|ConvertFrom-Json
     Assert-Aih ($packetRun1.exitCode -eq 0 -and $packet1.kind -eq 'visual-review-packet') '6: packet-only mode returns the packet (exit 0, no transport)'
-    $iterationDir1=Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'visual\iteration-01'
+    $iterationDir1=Join-Path (Join-Path (Join-Path $workspace '.ai-harness/runs') $task.taskId) 'visual/iteration-01'
     Assert-Aih (Test-Path (Join-Path $iterationDir1 'packet.json')) '6: packet.json persisted under .ai-harness/runs/<TASK>/visual/iteration-01'
     $packetDoc=Get-Content (Join-Path $iterationDir1 'packet.json') -Raw|ConvertFrom-Json
     Assert-Aih ($packetDoc.model.provider -eq 'deepseek-vision-direct' -and $packetDoc.model.supportsVision -eq $true) '6: packet records the resolved vision model/provider'
@@ -143,15 +181,48 @@ llm-pi-ai:
     $packet2=$packetRun2.text|ConvertFrom-Json
     Assert-Aih ($packet2.iteration -eq 2) '6: next invocation allocates iteration-02 deterministically'
 
+    # ── 6a. OPTIONAL-ARRAY ARGV CONTRACT (no dangling tokens, exact boundaries) ──
+    # TASK-0023 regression: an omitted optional array parameter must never
+    # leave a dangling '-Name' token (POSIX pwsh native argument passing
+    # drops the $null value, so the child binder exits 1 BEFORE production
+    # validation can reject the packet), and a supplied value - spaces
+    # included - must stay ONE exact argv boundary. Round trips use one
+    # value per parameter: pwsh -File binds a [string[]] parameter from a
+    # single named token and REJECTS repeated '-Screenshots' occurrences, so
+    # multi-value screenshots always travel through the payload file in
+    # production. Multiple values are therefore asserted at the emission
+    # layer below, where every value must produce its own '-Name value' pair.
+    $spaceDir=Join-Path $workspace 'space dir'
+    New-Item -ItemType Directory -Path $spaceDir -Force|Out-Null
+    $shotSpaceA=Join-Path $spaceDir 'shot two.png'
+    $shotSpaceB=Join-Path $spaceDir 'shot three.png'
+    $refSpace=Join-Path $spaceDir 'reference one.png'
+    foreach($imagePath in @($shotSpaceA,$shotSpaceB,$refSpace)){[IO.File]::WriteAllBytes($imagePath,$pngBytes)}
+    $spacedRun=Invoke-AihVisual -Screenshots @($shotSpaceA) -References @($refSpace)
+    $spacedJson=$spacedRun.text|ConvertFrom-Json
+    Assert-Aih ($spacedRun.exitCode-eq0-and$spacedJson.kind-eq'visual-review-packet') '6a: a spaced screenshot and a spaced reference arrive (exit 0 packet)'
+    $spacedSubjects=@($spacedJson.images|Where-Object{$_.role-eq'subject'})
+    $spacedRefs=@($spacedJson.images|Where-Object{$_.role-eq'reference'})
+    Assert-Aih (@($spacedSubjects).Count-eq1-and@($spacedRefs).Count-eq1) '6a: the spaced screenshot and reference keep their argv roles'
+    Assert-Aih ((Test-Path -LiteralPath ([string]$spacedJson.images[0].storedPath))-and(Test-Path -LiteralPath ([string]$spacedJson.images[1].storedPath))) '6a: spaced paths materialize as whole single-boundary records'
+    $emitArgs=Invoke-AihVisual -Screenshots @($shotSpaceA,$shotSpaceB) -References @($refSpace) -EmitOnly
+    Assert-Aih (@($emitArgs|Where-Object{$_-eq'-Screenshots'}).Count-eq2-and@($emitArgs|Where-Object{$_-eq'-References'}).Count-eq1) '6a: multiple values emit one -Name occurrence per element'
+    $nameIndexes=@()
+    $emitCount=@($emitArgs).Count
+    for($emitIndex=0;$emitIndex-lt$emitCount;$emitIndex++){if($emitArgs[$emitIndex]-eq'-Screenshots'-or$emitArgs[$emitIndex]-eq'-References'){$nameIndexes+=$emitIndex}}
+    Assert-Aih ($emitArgs[$nameIndexes[0]+1]-eq$shotSpaceA -and $emitArgs[$nameIndexes[1]+1]-eq$shotSpaceB -and $emitArgs[$nameIndexes[2]+1]-eq$refSpace) '6a: every emitted value follows its own parameter token verbatim'
+    $emitEmpty=Invoke-AihVisual -Screenshots @() -EmitOnly
+    Assert-Aih ((@($emitEmpty|Where-Object{$_-eq'-Screenshots'}).Count-eq0)-and(@($emitEmpty|Where-Object{$_-eq'-References'}).Count-eq0)) '6a: empty/omitted array parameters emit no dangling -Name token'
+
     # ── 6b. PACKET EVIDENCE INTEGRITY FAILS BEFORE TRANSPORT ────────────────
     $badShaPayload=Join-Path $workspace 'bad-sha-payload.json'
     @{Workspace=$workspace;Question='must not reach provider';Screenshots=@($testPng);ScreenshotEvidence=@(@{path=$testPng;expectedSha256=('0'*64);sourceIteration=2;originalSourcePath=$testPng})}|ConvertTo-Json -Depth 8|Set-Content $badShaPayload -Encoding UTF8
     $badShaRun=Invoke-AihVisual -Screenshots @() -Execute -PayloadFile $badShaPayload
     $badShaJson=$badShaRun.text|ConvertFrom-Json
     Assert-Aih ($badShaRun.exitCode-eq3-and$badShaJson.errorKind-eq'visual-review-packet-integrity-failed') '6b: declared/source SHA mismatch fails closed before provider invocation'
-    $badShaDir=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$badShaJson.iteration)
+    $badShaDir=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness/runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$badShaJson.iteration)
     $badShaFailure=Get-Content (Join-Path $badShaDir 'packet-integrity-failure.json') -Raw|ConvertFrom-Json
-    $badShaTelemetry=Get-Content (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'telemetry.json') -Raw|ConvertFrom-Json
+    $badShaTelemetry=Get-Content (Join-Path (Join-Path (Join-Path $workspace '.ai-harness/runs') $task.taskId) 'telemetry.json') -Raw|ConvertFrom-Json
     Assert-Aih ($badShaFailure.providerCalls-eq0-and$badShaTelemetry.modelCalls-eq0-and-not(Test-Path (Join-Path $badShaDir 'result.json'))) '6b: SHA integrity failure consumes zero provider calls and writes no review result'
 
     $duplicatePayload=Join-Path $workspace 'duplicate-payload.json'
@@ -170,7 +241,7 @@ llm-pi-ai:
     $providerFail=Invoke-AihVisual -Screenshots @($testPng) -Execute -MockResponseFile $providerErrorMock
     $providerFailJson=$providerFail.text|ConvertFrom-Json
     Assert-Aih ($providerFail.exitCode -eq 3 -and $providerFailJson.ok -eq $false -and $providerFailJson.errorKind -eq 'visual-review-provider-error') '7: provider failure fails closed with a structured provider error'
-    $failIterationDir=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$providerFailJson.iteration)
+    $failIterationDir=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness/runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$providerFailJson.iteration)
     Assert-Aih (Test-Path (Join-Path $failIterationDir 'transport-error.json')) '7: the transport failure is persisted as transport-error.json'
     $failDoc=Get-Content (Join-Path $failIterationDir 'transport-error.json') -Raw|ConvertFrom-Json
     Assert-Aih ([int]$failDoc.attemptCount -eq 2 -and @($failDoc.attempts).Count -eq 2) '7: a transient 5xx is retried exactly once and both attempts are persisted'
@@ -191,7 +262,7 @@ llm-pi-ai:
     $retryRun=Invoke-AihVisual -Screenshots @($testPng) -Execute -MockResponseFile $retryMock
     $retryJson=$retryRun.text|ConvertFrom-Json
     Assert-Aih ($retryRun.exitCode -eq 0 -and $retryJson.ok -eq $true -and $retryJson.verdict -eq 'BLOCK') '7b: a transient failure followed by success completes (verdict BLOCK)'
-    $retryIterationDir=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$retryJson.iteration)
+    $retryIterationDir=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness/runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$retryJson.iteration)
     Assert-Aih (Test-Path (Join-Path $retryIterationDir 'transport-retry.json')) '7b: the retry evidence is persisted as transport-retry.json'
     $retryDoc=Get-Content (Join-Path $retryIterationDir 'transport-retry.json') -Raw|ConvertFrom-Json
     Assert-Aih ([int]$retryDoc.attemptCount -eq 2 -and @($retryDoc.attempts).Count -eq 2) '7b: transport-retry.json records both provider calls (max 2)'
@@ -206,7 +277,7 @@ llm-pi-ai:
     $garbage=Invoke-AihVisual -Screenshots @($testPng) -Execute -MockResponseFile $garbageMock
     $garbageJson=$garbage.text|ConvertFrom-Json
     Assert-Aih ($garbage.exitCode -eq 3 -and $garbageJson.errorKind -eq 'visual-review-schema-invalid') '8: malformed model JSON fails closed with a schema error (exit 3)'
-    $garbageIterationDir=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$garbageJson.iteration)
+    $garbageIterationDir=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness/runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$garbageJson.iteration)
     $garbageDoc=Get-Content (Join-Path $garbageIterationDir 'transport-error.json') -Raw|ConvertFrom-Json
     Assert-Aih ([int]$garbageDoc.attemptCount -eq 1) '8: a deterministic schema failure never burns a second provider call'
 
@@ -284,14 +355,14 @@ llm-pi-ai:
     Assert-Aih ($valid.exitCode -eq 0 -and $validJson.ok -eq $true -and $validJson.kind -eq 'visual-review') '10: valid visual review completes (exit 0)'
     Assert-Aih ($validJson.verdict -eq 'REVISE' -and $validJson.score -eq 6.5) '10: verdict + score are validated and normalized'
     Assert-Aih (@($validJson.findings).Count -eq 1 -and $validJson.findings[0].id -eq 'F1' -and $validJson.findings[0].severity -eq 'high' -and $validJson.findings[0].confidence -eq 'high') '10: findings carry the strict field contract'
-    $iterationDir3=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$validJson.iteration)
+    $iterationDir3=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness/runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$validJson.iteration)
     $resultDoc=Get-Content (Join-Path $iterationDir3 'result.json') -Raw|ConvertFrom-Json
     Assert-Aih ($resultDoc.kind -eq 'visual-review-result' -and $resultDoc.result.verdict -eq 'REVISE') '10: result.json persisted with the validated critique'
     Assert-Aih ($resultDoc.readOnly -eq $true -and $resultDoc.completionAuthority -eq $false -and $resultDoc.humanAcceptance -eq $false) '10: result carries read-only + no-human-acceptance + no-completion-authority'
     Assert-Aih ($resultDoc.model.provider -eq 'deepseek-vision-direct' -and $resultDoc.model.reasoning -eq 'high') '10: result records the resolved provider/model identity'
     Assert-Aih ([int]$resultDoc.transport.attemptCount -eq 1 -and @($resultDoc.transport.attempts).Count -eq 1) '10: a schema-valid result is never retried (exactly one provider call)'
     Assert-Aih (-not(Test-Path (Join-Path $iterationDir3 'transport-retry.json'))) '10: no retry evidence is written when no retry occurred'
-    $telemetryPath=Join-Path (Join-Path $workspace '.ai-harness\runs') ($task.taskId+'\telemetry.json')
+    $telemetryPath=Join-Path (Join-Path $workspace '.ai-harness/runs') ($task.taskId+'/telemetry.json')
     $telemetryDoc=Get-Content $telemetryPath -Raw|ConvertFrom-Json
     Assert-Aih ($telemetryDoc.executionClass -eq $task.executionClass) '10: telemetry PRESERVES the real task execution class (visual review is not an execution class)'
     Assert-Aih ($telemetryDoc.capability -eq 'visual-review' -and $telemetryDoc.role -eq 'visualReviewer') '10: telemetry represents visual review as capability/role, not execution class'
@@ -300,10 +371,10 @@ llm-pi-ai:
     Assert-Aih ($taskAfter.status -eq 'ready' -and [int]$taskAfter.attempt -eq 0) '10: the visual reviewer never alters task state'
 
     # ── 11. BACKWARD COMPATIBILITY ─────────────────────────────────────────────
-    $normalDecision=Invoke-AihRoutingDecision 'implement ordinary change' $fixture $fixtureLayout.RoutingPolicy (Join-Path $fixture 'data\routing') 'visual-backcompat-1' 'aih-engineering' -DryRun -SettingsPath $fixtureLayout.Settings
+    $normalDecision=Invoke-AihRoutingDecision 'implement ordinary change' $fixture $fixtureLayout.RoutingPolicy (Join-Path $fixture 'data/routing') 'visual-backcompat-1' 'aih-engineering' -DryRun -SettingsPath $fixtureLayout.Settings
     Assert-Aih ($normalDecision.executionClass -eq 'engineer_normal' -and $normalDecision.role -eq 'primaryEngineer') '11: engineering routing is unchanged by the visual role'
     Assert-Aih ($normalDecision.provider -eq 'flash-high-direct' -and $normalDecision.model -eq 'deepseek-v4-flash') '11: primaryEngineer resolution unchanged (flash-high-direct / deepseek-v4-flash)'
-    $reviewDecision=Invoke-AihRoutingDecision 'review the boundary' $fixture $fixtureLayout.RoutingPolicy (Join-Path $fixture 'data\routing') 'visual-backcompat-2' 'aih-engineering' -DryRun -SettingsPath $fixtureLayout.Settings -ReviewRequested
+    $reviewDecision=Invoke-AihRoutingDecision 'review the boundary' $fixture $fixtureLayout.RoutingPolicy (Join-Path $fixture 'data/routing') 'visual-backcompat-2' 'aih-engineering' -DryRun -SettingsPath $fixtureLayout.Settings -ReviewRequested
     Assert-Aih ($reviewDecision.executionClass -eq 'reviewer' -and $reviewDecision.model -eq 'gpt-5.6-sol' -and $reviewDecision.provider -eq 'sol-local') '11: independent reviewer resolution unchanged (sol-local / gpt-5.6-sol)'
 
     # custom profile WITHOUT visualReviewer stays valid (optional role)
@@ -333,7 +404,7 @@ llm-pi-ai:
         - id: deepseek-v4-flash-vision-exp
           name: DeepSeek V4 Flash Vision (Exp)
 '@|Set-AihFixtureSettings
-    $customDecision=Invoke-AihRoutingDecision 'implement ordinary change' $fixture $fixtureLayout.RoutingPolicy (Join-Path $fixture 'data\routing') 'visual-backcompat-3' 'aih-engineering' -DryRun -SettingsPath $fixtureLayout.Settings -CustomProfilePath $fixtureLayout.CustomEngineeringProfile
+    $customDecision=Invoke-AihRoutingDecision 'implement ordinary change' $fixture $fixtureLayout.RoutingPolicy (Join-Path $fixture 'data/routing') 'visual-backcompat-3' 'aih-engineering' -DryRun -SettingsPath $fixtureLayout.Settings -CustomProfilePath $fixtureLayout.CustomEngineeringProfile
     Assert-Aih ($customDecision.executionClass -eq 'engineer_normal' -and $customDecision.profile -eq 'custom') '11: custom profile WITHOUT visualReviewer still resolves engineering roles'
     $unbound=Invoke-AihVisual -Screenshots @($testPng) -Execute -MockResponseFile $validMock
     $unboundJson=$unbound.text|ConvertFrom-Json
@@ -399,8 +470,12 @@ setTimeout(() => process.exit(0), 60000)
 '@|Set-Content -Path $wireServer -Encoding ASCII
     $wireOut=Join-Path $workspace 'wire-captured-requests.json'
     if(Test-Path $wireOut){Remove-Item $wireOut -Force}
-    $nodeExe=(Get-Command node.exe).Source
-    $wireProc=Start-Process -FilePath $nodeExe -ArgumentList @($wireServer,[string]$wirePort,$wireOut,'2') -PassThru -WindowStyle Hidden
+    $nodeExe=(Get-Command node).Source
+    # WindowStyle is a Windows-only Start-Process parameter; POSIX starts
+    # the wire server without it.
+    $wireStartArgs=@{FilePath=$nodeExe;ArgumentList=@($wireServer,[string]$wirePort,$wireOut,'2');PassThru=$true}
+    if (Test-AihIsWindows) { $wireStartArgs.WindowStyle='Hidden' }
+    $wireProc=Start-Process @wireStartArgs
     $wireReady=$false
     foreach($i in 1..80){ try{ $probe=New-Object Net.Sockets.TcpClient; $probe.Connect('127.0.0.1',$wirePort); $probe.Close(); $wireReady=$true; break }catch{ Start-Sleep -Milliseconds 100 } }
     Assert-Aih $wireReady '13: the loopback wire-capture provider is reachable'
@@ -431,11 +506,11 @@ llm-pi-ai:
     Assert-Aih ($capturedDoc.requests[0].model -eq 'deepseek-v4-flash-vision-exp') '13: the request targets the resolved vision model'
     Assert-Aih ($capturedDoc.requests[0].response_format.type -eq 'json_object') '13: provider-level structured output is unchanged'
     $wireManualJson=$wireManual.text|ConvertFrom-Json
-    $wireIterManual=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$wireManualJson.iteration)
+    $wireIterManual=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness/runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$wireManualJson.iteration)
     $wireResultRaw=Get-Content (Join-Path $wireIterManual 'result.json') -Raw
     Assert-Aih ((($wireResultRaw|ConvertFrom-Json).transport.finishReason) -eq 'stop') '13: result.json records transport.finishReason metadata'
     Assert-Aih (-not($wireResultRaw -match 'REASONING-SENTINEL-WIRE')) '13: reasoning_content is never persisted in result.json'
-    $wireRunDir=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$wireManualJson.iteration)
+    $wireRunDir=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness/runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$wireManualJson.iteration)
     Assert-Aih (-not(((Get-ChildItem $wireRunDir -Filter '*.json'|ForEach-Object{Get-Content $_.FullName -Raw})-join '') -match 'REASONING-SENTINEL-WIRE')) '13: reasoning_content is never persisted anywhere in the iteration'
     # restore the discard-endpoint settings for the remaining assertions
     @'
@@ -459,7 +534,7 @@ llm-pi-ai:
     $trunc=Invoke-AihVisual -Screenshots @($testPng) -Execute -MockResponseFile $truncMock
     $truncJson=$trunc.text|ConvertFrom-Json
     Assert-Aih ($trunc.exitCode -eq 3 -and $truncJson.ok -eq $false -and $truncJson.errorKind -eq 'visual-review-output-truncated') '14: finish_reason=length + truncated JSON fails closed as visual-review-output-truncated'
-    $truncIter=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$truncJson.iteration)
+    $truncIter=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness/runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$truncJson.iteration)
     $truncDoc=Get-Content (Join-Path $truncIter 'transport-error.json') -Raw|ConvertFrom-Json
     Assert-Aih ([int]$truncDoc.attemptCount -eq 1) '14: deterministic output truncation is never retried (single provider attempt)'
     Assert-Aih ($truncDoc.errorKind -eq 'visual-review-output-truncated' -and $truncDoc.finishReason -eq 'length') '14: the truncation diagnostic persists finishReason metadata'
@@ -470,7 +545,7 @@ llm-pi-ai:
     $truncEmpty=Invoke-AihVisual -Screenshots @($testPng) -Execute -MockResponseFile $truncEmptyMock
     $truncEmptyJson=$truncEmpty.text|ConvertFrom-Json
     Assert-Aih ($truncEmpty.exitCode -eq 3 -and $truncEmptyJson.errorKind -eq 'visual-review-output-truncated') '14: finish_reason=length + empty content fails closed as output-truncated'
-    $truncEmptyIter=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness\runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$truncEmptyJson.iteration)
+    $truncEmptyIter=Join-Path (Join-Path (Join-Path (Join-Path $workspace '.ai-harness/runs') $task.taskId) 'visual') ('iteration-{0:D2}'-f[int]$truncEmptyJson.iteration)
     $truncEmptyDoc=Get-Content (Join-Path $truncEmptyIter 'transport-error.json') -Raw|ConvertFrom-Json
     Assert-Aih ([int]$truncEmptyDoc.attemptCount -eq 1 -and $truncEmptyDoc.finishReason -eq 'length') '14: empty-at-limit truncation is deterministic (never retried)'
     # unrelated Nexus roles retain their token configuration

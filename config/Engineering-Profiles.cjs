@@ -342,7 +342,12 @@ function resolveTarget(installRoot, profileId, role) {
  */
 function routingStatePath(installRoot, binding) {
   try {
-    const workspace = path.resolve(String((binding && binding.workspace) || '')).toLowerCase()
+    // Mirrors Routing.ps1 Get-AihRoutingStatePath: the workspace key is
+    // case-folded only on Windows (case-insensitive filesystem identity);
+    // case-sensitive platforms key on the exact resolved path so two
+    // same-named-but-different-case workspaces can never share state.
+    const resolvedWorkspace = path.resolve(String((binding && binding.workspace) || ''))
+    const workspace = process.platform === 'win32' ? resolvedWorkspace.toLowerCase() : resolvedWorkspace
     const preset = String((binding && binding.preset) || 'aih-engineering').toLowerCase()
     const instance = binding && typeof binding.taskInstanceId === 'string' && binding.taskInstanceId !== ''
       ? binding.taskInstanceId

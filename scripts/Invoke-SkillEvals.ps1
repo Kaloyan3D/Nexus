@@ -26,7 +26,7 @@ $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Get-AihInstallRoot $null }
 $InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 $layout = Get-AihLayout $InstallRoot
-if ([string]::IsNullOrWhiteSpace($CasesFile)) { $CasesFile = Join-Path $InstallRoot 'tests\fixtures\skill-evals\cases.json' }
+if ([string]::IsNullOrWhiteSpace($CasesFile)) { $CasesFile = Join-Path $InstallRoot 'tests/fixtures/skill-evals/cases.json' }
 if (-not (Test-Path -LiteralPath $CasesFile -PathType Leaf)) {
     Write-Error ("Eval cases file not found: " + $CasesFile)
     exit 1
@@ -40,14 +40,14 @@ elseif (-not [string]::IsNullOrWhiteSpace($TargetRoot)) {
     $skillRoots += [pscustomobject]@{ Kind = 'installed'; Path = [System.IO.Path]::GetFullPath($TargetRoot) }
 }
 else {
-    $skillRoots += [pscustomobject]@{ Kind = 'source'; Path = (Join-Path $InstallRoot 'skills\core') }
+    $skillRoots += [pscustomobject]@{ Kind = 'source'; Path = (Join-Path $InstallRoot 'skills/core') }
 }
 
 function Get-AihEvalSkillText {
     param([string]$SkillName)
 
     foreach ($root in $skillRoots) {
-        $skillMd = Join-Path $root.Path ($SkillName + '\SKILL.md')
+        $skillMd = Join-Path $root.Path ($SkillName + '/SKILL.md')
         if (Test-Path -LiteralPath $skillMd -PathType Leaf) {
             return [pscustomobject]@{ Found = $true; Path = $skillMd; Text = [System.IO.File]::ReadAllText($skillMd) }
         }

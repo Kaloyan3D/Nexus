@@ -111,8 +111,16 @@ function Invoke-AihStructuredOperation {
             }
         }
         if ($executableResolved) {
-            $fileName = (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')
-            if (-not (Test-Path -LiteralPath $fileName)) { $fileName = 'powershell.exe' }
+            # PowerShell host is platform-specific: Windows PowerShell 5.1 at
+            # its fixed location on Windows, the Nexus managed (or system)
+            # pwsh elsewhere. The encoded-command transport is identical.
+            if (Test-AihIsWindows) {
+                $fileName = (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')
+                if (-not (Test-Path -LiteralPath $fileName)) { $fileName = 'powershell.exe' }
+            }
+            else {
+                $fileName = (Get-AihPowerShellHost $null)
+            }
             $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($body))
             $argumentList = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',$encoded)
             $arguments = $argumentList

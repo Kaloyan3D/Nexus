@@ -735,6 +735,41 @@ function apply(ctx) {
   const bindingsPath = path.join(dataRoot, 'routing', 'session-bindings.json')
   const tmpRoot = path.join(dataRoot, 'tmp')
   const scriptsRoot = path.join(installRoot, 'scripts')
+  // Platform-aware PowerShell host resolution (mirror of scripts/Platform.ps1
+  // Get-AihPowerShellHost): Windows keeps powershell.exe; POSIX prefers the
+  // AIH_PWSH_HOST override, then the setup.sh-pinned runtime/pwsh/pwsh, then a
+  // system pwsh on PATH.
+  const resolvePowerShellHost = (root) => {
+    if (process.platform === 'win32') return 'powershell.exe'
+    const override = process.env.AIH_PWSH_HOST
+    if (override) return override
+    const pinned = path.join(root, 'runtime', 'pwsh', 'pwsh')
+    try { fs.accessSync(pinned, fs.constants.X_OK); return pinned } catch { /* fall through */ }
+    return 'pwsh'
+  }
+  // TASK-0026: the Nexus TOOLCHAIN root (owns runtime/) is formally distinct
+  // from the LOGICAL InstallRoot (owns config/data identity). Isolated test
+  // fixtures legitimately model config/data-only roots with no runtime, so
+  // the bridge resolves its pinned PowerShell through the toolchain chain
+  // (AIH_TOOLCHAIN_ROOT > the tree that owns this controller file > the
+  // logical root) and names that root for every spawned CLI child, so
+  // Nexus-owned nested children always resolve the real pinned runtime.
+  const resolveToolchainRoot = (logicalRoot) => {
+    const candidates = []
+    const fromEnv = process.env.AIH_TOOLCHAIN_ROOT
+    if (fromEnv && String(fromEnv).trim() !== '') candidates.push(path.resolve(String(fromEnv)))
+    candidates.push(path.resolve(__dirname, '..'))
+    if (logicalRoot) candidates.push(path.resolve(logicalRoot))
+    for (const candidate of candidates) {
+      try {
+        if (fs.statSync(path.join(candidate, 'runtime', 'node')).isDirectory()) return candidate
+      } catch (_) { /* candidate does not own a runtime */ }
+    }
+    return logicalRoot
+  }
+  const toolchainRoot = resolveToolchainRoot(installRoot)
+  const childCliEnv = Object.assign({}, process.env, { AIH_TOOLCHAIN_ROOT: toolchainRoot })
+  const pwshHost = resolvePowerShellHost(toolchainRoot)
 
   const runCli = promisify(execFile)
   // Capture transport (TASK-0017): sandboxed environments may deny
@@ -766,6 +801,7 @@ function apply(ctx) {
         stdio: 'ignore',
         windowsHide: !!(options && options.windowsHide),
         timeout: (options && options.timeout) || 0,
+        env: (options && options.env) || process.env,
       })
       child.on('error', (error) => finish(() => reject(error)))
       child.on('close', (code, signal) => finish(() => {
@@ -860,9 +896,9 @@ function apply(ctx) {
     }
     try {
       const result = await spawnCaptured(
-        'powershell.exe',
+        pwshHost,
         ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, script), ...args],
-        { timeout: CLI_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
+        { timeout: CLI_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, windowsHide: true, env: childCliEnv },
       ).catch((error) => {
         // PowerShell CLIs report STRUCTURED failures (hard budget rejection,
         // e.g. packet-too-large) by emitting JSON on stdout and exiting 3.
@@ -1224,7 +1260,7 @@ function apply(ctx) {
         requirementIds,
         commands: [{
           name: 'aih-verify-project',
-          executable: 'powershell.exe',
+          executable: pwshHost,
           argv: ['-File', path.join(scriptsRoot, 'Verify-Project.ps1'), '-Kind', 'all'],
           cwd: binding.workspace,
           timeoutMs: 600000,

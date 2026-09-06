@@ -6,8 +6,8 @@ $ErrorActionPreference = 'Stop'
 # TASK-0009: context eligibility and retrieval reuse the Phase 3.1 machinery
 # (glob engine, repository config, classification, sensitivity) instead of a
 # second, incompatible path walker.
-. (Join-Path $PSScriptRoot 'intelligence\Intelligence.Common.ps1')
-. (Join-Path $PSScriptRoot 'intelligence\Intelligence.Scanning.ps1')
+. (Join-Path $PSScriptRoot 'intelligence/Intelligence.Common.ps1')
+. (Join-Path $PSScriptRoot 'intelligence/Intelligence.Scanning.ps1')
 
 # ── TASK-0009: deterministic context-retrieval constants ─────────────────────
 # The relevance floor keeps weak/incidental matches out of review packets. It
@@ -677,16 +677,28 @@ function New-AihRepositoryMap {
     $workspacePath = [IO.Path]::GetFullPath($Workspace)
     $files = @((Get-AihContextEligibleFiles -Workspace $workspacePath | Where-Object { $_.eligible } | ForEach-Object { $_.path }) | Select-Object -First $MaxFiles)
     $entries = [Collections.Generic.List[object]]::new()
+    $materializationSkipped = [Collections.Generic.List[object]]::new()
     foreach ($file in $files) {
+        # TASK-0025 Class E: a file may legitimately disappear between the
+        # eligibility enumeration above and this materialization (editor save,
+        # test cleanup, config rewrite). The map degrades deterministically:
+        # the entry is skipped with an honest provenance record instead of
+        # aborting the whole context build.
+        $bytes = $null
+        try { $bytes = (Get-Item -LiteralPath (Join-Path $workspacePath $file) -ErrorAction Stop).Length }
+        catch {
+            $materializationSkipped.Add([pscustomobject]@{ path=$file.Replace('\','/'); reason='file-removed-between-enumeration-and-materialization' })
+            continue
+        }
         $extension = [IO.Path]::GetExtension($file).ToLowerInvariant()
         $symbols = if ($extension -in @('.ps1','.psm1','.js','.cjs','.mjs','.ts','.tsx','.jsx','.py','.cs','.fs','.java','.go','.rs')) { @(Get-AihCodeSymbols $workspacePath $file) } else { @() }
         $imports = @()
         if (@($symbols).Count -or $extension -in @('.json','.yml','.yaml','.md')) {
             $imports = @(Select-String -LiteralPath (Join-Path $workspacePath $file) -Pattern '(?i)(?:from\s+|require\(|import\s+|using\s+)(["''][^"'']+["'']|[A-Za-z0-9_.\\/-]+)' -ErrorAction SilentlyContinue | Select-Object -First 30 | ForEach-Object { $_.Line.Trim() })
         }
-        $entries.Add([pscustomobject]@{ path=$file.Replace('\','/'); bytes=(Get-Item -LiteralPath (Join-Path $workspacePath $file)).Length; symbols=@($symbols); imports=@($imports) })
+        $entries.Add([pscustomobject]@{ path=$file.Replace('\','/'); bytes=$bytes; symbols=@($symbols); imports=@($imports) })
     }
-    [pscustomobject]@{ schemaVersion=1; workspace=$workspacePath; generatedAtUtc=[DateTime]::UtcNow.ToString('o'); truncated=$files.Count -ge $MaxFiles; files=@($entries) }
+    [pscustomobject]@{ schemaVersion=1; workspace=$workspacePath; generatedAtUtc=[DateTime]::UtcNow.ToString('o'); truncated=$files.Count -ge $MaxFiles; files=@($entries); materializationSkipped=@($materializationSkipped) }
 }
 
 function Find-AihSymbol {
@@ -702,8 +714,8 @@ function Get-AihFileOutline {
 function Find-AihReferences {
     param([string]$Workspace, [Parameter(Mandatory=$true)][string]$Symbol, [int]$MaxResults=100)
     $workspacePath=[IO.Path]::GetFullPath($Workspace)
-    $matches = & rg --line-number --column --glob '!node_modules/**' --glob '!app/**' --glob '!runtime/node/**' --glob '!data/**' --glob '!logs/**' --fixed-strings -- $Symbol $workspacePath 2>$null
-    @($matches | Select-Object -First $MaxResults | ForEach-Object { [string]$_ })
+    $referenceHits = & rg --line-number --column --glob '!node_modules/**' --glob '!app/**' --glob '!runtime/node/**' --glob '!data/**' --glob '!logs/**' --fixed-strings -- $Symbol $workspacePath 2>$null
+    @($referenceHits | Select-Object -First $MaxResults | ForEach-Object { [string]$_ })
 }
 
 function Select-AihBundleSlices {
@@ -714,10 +726,19 @@ function Select-AihBundleSlices {
     $budgetChars=if($UnlimitedTokens){[int]::MaxValue}else{$MaxContextTokens*4}
     $used=0
     $slices=[Collections.Generic.List[object]]::new()
+    $materializationSkipped=[Collections.Generic.List[object]]::new()
     foreach($match in @($Retrieval.candidates)){
         if(-not $UnlimitedFiles -and $slices.Count -ge $MaxFiles){break}
         $path=Join-Path $WorkspaceRoot $match.file
-        $content=[string](Get-Content -Raw -LiteralPath $path)
+        # TASK-0025 Class E: the slice stage re-opens the candidate path AFTER
+        # ranking; a file that vanished in between must skip that one slice
+        # deterministically (no entry, no budget consumption) with an honest
+        # provenance record, never abort the whole bundle build.
+        $content=$null
+        try { $content=[string](Get-Content -Raw -LiteralPath $path -ErrorAction Stop) } catch {
+            $materializationSkipped.Add([pscustomobject]@{ path=$match.file; reason='file-removed-between-enumeration-and-materialization' })
+            continue
+        }
         $remaining=$budgetChars-$used
         if($remaining -le 0){break}
         $slice=if($content.Length -gt $remaining){$content.Substring(0,$remaining)}else{$content}
@@ -736,7 +757,7 @@ function Select-AihBundleSlices {
         $slices.Add([pscustomobject]@{path=$match.file;score=$match.score;retrievalScore=$match.score;specificScore=$specificScore;normalizedScore=$normalizedScore;evidenceClass=$match.evidenceClass;classification=$match.classification;matchedTerms=@($match.matchedTerms);matchedPhrases=@($matchedPhrases);pathMatches=@($match.pathMatches);coverageContribution=$coverageContribution;eligibility='eligible';reason=$reason;selectionReason=$selectionReason;selectedByRelevance=$true;content=$slice;truncated=$slice.Length -lt $content.Length})
         $used += $slice.Length
     }
-    [pscustomobject]@{slices=@($slices);used=$used}
+    [pscustomobject]@{slices=@($slices);used=$used;materializationSkipped=@($materializationSkipped)}
 }
 
 function Select-AihConcentratedCandidates {
@@ -818,7 +839,8 @@ function New-AihContextBundle {
     $docs=[Collections.Generic.List[object]]::new()
     foreach($name in @('project.md','architecture.md','conventions.md')){
         $path=Join-Path $layout.Root $name
-        if(Test-Path -LiteralPath $path){$content=Get-Content -Raw -LiteralPath $path; if($used+$content.Length -le $budgetChars){$docs.Add([pscustomobject]@{path='.ai-harness/'+$name;content=$content});$used+=$content.Length}}
+        if(Test-Path -LiteralPath $path){try{$content=Get-Content -Raw -LiteralPath $path -ErrorAction Stop; if($used+$content.Length -le $budgetChars){$docs.Add([pscustomobject]@{path='.ai-harness/'+$name;content=$content});$used+=$content.Length}}catch{ # TOCTOU: the doc vanished between Test-Path and the read; skip it
+        }}
     }
     $git=[ordered]@{baseCommit=$null;changedFiles=@();diffStat=''}
     try{$git.baseCommit=(& git -C $layout.Workspace rev-parse HEAD 2>$null|Select-Object -First 1).Trim();$git.changedFiles=@(& git -C $layout.Workspace status --short 2>$null);$git.diffStat=(& git -C $layout.Workspace diff --stat 2>$null|Out-String).Trim()}catch{}
@@ -852,7 +874,7 @@ function New-AihContextBundle {
         schemaVersion=3
         taskId=$TaskId
         budget=[ordered]@{maxContextTokens=$MaxContextTokens;estimatedTokens=[Math]::Ceiling($used/4);maxFiles=$MaxFiles;enforceLimits=(-not $unlimitedTokens -and -not $unlimitedFiles)}
-        repositoryMap=[ordered]@{fileCount=@($repoMap.files).Count;symbolCount=$symbolCount;fullRepositoryIncluded=$false}
+        repositoryMap=[ordered]@{fileCount=@($repoMap.files).Count;symbolCount=$symbolCount;fullRepositoryIncluded=$false;materializationSkipped=@($repoMap.materializationSkipped)}
         selection=[ordered]@{
             query=$retrieval.query
             meaningfulTerms=@($retrieval.meaningfulTerms)
@@ -873,6 +895,7 @@ function New-AihContextBundle {
             nonSelectedEvidence=$nonSelected
             nonSelectedTotal=@($nonSelectedAll).Count
             nonSelectedRecorded=@($nonSelected).Count
+            materializationSkipped=@($selected.materializationSkipped)
         }
         contextQuality=[ordered]@{status=$qualityStatus;meaningfulEvidenceClasses=@($meaningfulSelected);broadenRetryUsed=$broadenRetry;reason=$qualityReason}
         files=@($slices|ForEach-Object{$_.path})

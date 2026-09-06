@@ -1,8 +1,10 @@
-[CmdletBinding()]param([string]$InstallRoot = 'C:\AI-Harness')
+[CmdletBinding()]param([string]$InstallRoot)
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Split-Path -Parent $PSScriptRoot }
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\Workspace.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Workspace.ps1')
 
 $passed = 0
 function Assert-Aih([bool]$Condition, [string]$Name) { if (-not $Condition) { throw "FAIL: $Name" }; $script:passed++; Write-Host "PASS: $Name" }

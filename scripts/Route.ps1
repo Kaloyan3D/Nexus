@@ -54,7 +54,7 @@ if ($History) {
 }
 if ([string]::IsNullOrWhiteSpace($Description)) { throw 'A task description is required unless -History is used.' }
 $decision = Invoke-AihRoutingDecision -Description $Description -Workspace $Workspace -PolicyPath $layout.RoutingPolicy -DataRoot $layout.RoutingData -TaskId $TaskId -Preset $Preset -ForceTier $ForceTier -ForceClass $ForceClass -Signal $Signal -FailureReason $FailureReason -UserApprovedCodexSolve:$UserApprovedCodexSolve -ReviewRequested:$ReviewRequested -DryRun:$DryRun -SettingsPath $layout.Settings -CustomProfilePath $layout.CustomEngineeringProfile -TaskInstanceId $TaskInstanceId
-if (-not $DryRun -and (Test-Path -LiteralPath (Join-Path ([IO.Path]::GetFullPath($Workspace)) '.ai-harness\state\tasks.json'))) {
+if (-not $DryRun -and (Test-Path -LiteralPath (Join-Path ([IO.Path]::GetFullPath($Workspace)) '.ai-harness/state/tasks.json'))) {
     # TASK-0005: 'task absent' is now an authoritative READ (Test-AihTaskExists),
     # never an exception-string parse of a PowerShell error message. A malformed
     # ledger or any other validation-infrastructure failure still throws (fail

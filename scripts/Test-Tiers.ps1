@@ -1,16 +1,17 @@
 [CmdletBinding()]
 param(
-    [string]$InstallRoot = 'C:\AI-Harness',
+    [string]$InstallRoot,
     [ValidateSet('all', 'normal', 'deepseek')][string]$Mode = 'all'
 )
 
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Split-Path -Parent $PSScriptRoot }
 . (Join-Path $PSScriptRoot 'Common.ps1')
 $layout = Get-AihLayout $InstallRoot
 $versions = Get-AihVersions $InstallRoot
 $oauthModelsUrl = "$($versions.OAuthBaseUrl)/models"
 
 if ($Mode -eq 'normal' -and (Test-Path -LiteralPath (Get-AihCodexAuthFile)) -and -not (Test-AihEndpoint -Uri $oauthModelsUrl -TimeoutSec 2)) {
-    $oauthProcess = Start-Process -FilePath $layout.Node -ArgumentList @($layout.OAuth, '--detach', '--no-open') -WindowStyle Hidden -Wait -PassThru
+    $oauthProcess = Start-AihDetachedProcess -FilePath $layout.Node -ArgumentList @($layout.OAuth, '--detach', '--no-open') -WorkingDirectory $layout.Data -Wait
     if ($oauthProcess.ExitCode -ne 0 -or -not (Wait-AihEndpoint -Uri $oauthModelsUrl -TimeoutSec 20)) {
         throw 'openai-oauth is not ready. Run its local login command first.'
     }
@@ -18,7 +19,7 @@ if ($Mode -eq 'normal' -and (Test-Path -LiteralPath (Get-AihCodexAuthFile)) -and
 
 $deepSeekKey = Get-AihDeepSeekKey $InstallRoot
 if ([string]::IsNullOrWhiteSpace($deepSeekKey)) {
-    throw "DeepSeek API key is not configured. Run: $($layout.Bin)\aih-key.cmd"
+    throw "DeepSeek API key is not configured. Run: $(Get-AihLayoutLauncherPath -Layout $layout -Name 'aih-key')"
 }
 
 $baseSettings = Get-Content -Raw -LiteralPath $layout.Settings

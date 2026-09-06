@@ -1,4 +1,6 @@
-[CmdletBinding()]param([string]$InstallRoot='C:\AI-Harness')
+[CmdletBinding()]param([string]$InstallRoot= (Split-Path -Parent $PSScriptRoot))
+# Platform-aware child host: Windows keeps powershell.exe; POSIX uses the pinned Nexus pwsh.
+if (-not (Get-Command Test-AihIsWindows -ErrorAction SilentlyContinue)) { . (Join-Path $InstallRoot 'scripts/Platform.ps1') }; $aihPsHost = Get-AihPowerShellHost -InstallRoot $InstallRoot
 # TASK-0005: controller identity hardening - deterministic PowerShell-plane
 # regression suite.
 #
@@ -21,10 +23,10 @@
 #           allocates TASK-0006, never overwrites either run)
 Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\Routing.ps1')
-. (Join-Path $InstallRoot 'scripts\TaskController.ps1')
-. (Join-Path $InstallRoot 'tests\TestHelpers.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Routing.ps1')
+. (Join-Path $InstallRoot 'scripts/TaskController.ps1')
+. (Join-Path $InstallRoot 'tests/TestHelpers.ps1')
 
 $passed=0
 function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw "FAIL: $Name"};$script:passed++;Write-Host "PASS: $Name"}
@@ -39,14 +41,14 @@ try{
  $b=New-AihTask $root1 'generation B of the work'
  Assert-Aih ($a.taskInstanceId -ne $b.taskInstanceId) 'two tasks never share a taskInstanceId'
  Assert-Aih ($a.taskId -ne $b.taskId) 'normal allocation still advances the display sequence'
- $manifest=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path (Join-Path (Join-Path $root1 '.ai-harness\runs') $a.taskId) 'manifest.json') | ConvertFrom-Json
+ $manifest=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path (Join-Path (Join-Path $root1 '.ai-harness/runs') $a.taskId) 'manifest.json') | ConvertFrom-Json
  Assert-Aih ([string]$manifest.taskInstanceId -eq [string]$a.taskInstanceId) 'run manifest carries the same taskInstanceId as the ledger'
 }catch{throw}finally{if(Test-Path $root1){Remove-Item -LiteralPath $root1 -Recurse -Force}}
 
 # == 2. SEQUENCE HARDENING (Parts 3/4/25) =====================================
 $root2=New-Fixture sequence
 try{
- $state=Join-Path $root2 '.ai-harness\state';$runs=Join-Path $root2 '.ai-harness\runs'
+ $state=Join-Path $root2 '.ai-harness/state';$runs=Join-Path $root2 '.ai-harness/runs'
  New-Item -ItemType Directory -Force -Path $state,$runs | Out-Null
  Write-AihAtomicJson (Join-Path $state 'tasks.json') ([ordered]@{schemaVersion=1;nextSequence=4;tasks=@()})
  foreach($id in @('TASK-0004','TASK-0005')){
@@ -62,7 +64,7 @@ try{
  $root2b=New-Fixture sequenceledger
  try{
   $null=New-AihTask $root2b 'one';$null=New-AihTask $root2b 'two'
-  $ledgerPath=Join-Path $root2b '.ai-harness\state\tasks.json'
+  $ledgerPath=Join-Path $root2b '.ai-harness/state/tasks.json'
   $doc=Get-Content -Raw -LiteralPath $ledgerPath|ConvertFrom-Json
   $doc.nextSequence=1
   Write-AihAtomicJson $ledgerPath $doc
@@ -87,7 +89,7 @@ try{
  Assert-Aih ([bool]$r4.exists -and $null -eq $r4.instanceMatches) 'no expected instance leaves instanceMatches indeterminate'
  Assert-Aih (Test-AihTaskExists $root3 $t.taskId) 'Test-AihTaskExists true for a real task'
  Assert-Aih (-not (Test-AihTaskExists $root3 'TASK-9999')) 'Test-AihTaskExists false only for a verified-absent task'
- $ledgerPath=Join-Path $root3 '.ai-harness\state\tasks.json'
+ $ledgerPath=Join-Path $root3 '.ai-harness/state/tasks.json'
  $validLedger=[IO.File]::ReadAllText($ledgerPath,[Text.UTF8Encoding]::new($false))
  Set-Content -LiteralPath $ledgerPath -Value '{ this is not json' -Encoding UTF8
  $threw=$false;try{Test-AihTaskIdentity $root3 $t.taskId | Out-Null}catch{$threw=$true}
@@ -113,7 +115,7 @@ try{
  $null=Start-AihTaskAttempt $root4 $t.taskId 'engineer_normal' -TaskInstanceId $instance
  $after=Get-AihTask $root4 $t.taskId
  Assert-Aih ([int]$after.attempt -eq 1) 'begin-attempt with the exact instance succeeds'
- $attempts=Get-Content -Encoding UTF8 -LiteralPath (Join-Path (Join-Path (Join-Path $root4 '.ai-harness\runs') $t.taskId) 'attempts.jsonl')
+ $attempts=Get-Content -Encoding UTF8 -LiteralPath (Join-Path (Join-Path (Join-Path $root4 '.ai-harness/runs') $t.taskId) 'attempts.jsonl')
  $attemptRecord=$attempts | Select-Object -Last 1 | ConvertFrom-Json
  Assert-Aih ([string]$attemptRecord.taskInstanceId -eq $instance) 'attempt records carry the taskInstanceId'
  $threw=$false;try{Add-AihAttemptEvent $root4 $t.taskId 'verifying' -TaskInstanceId $foreign}catch{if($_.Exception.Message -notmatch $mismatch){throw};$threw=$true}
@@ -126,7 +128,7 @@ try{
  $threw=$false;try{Test-AihTaskCompletion $root4 $t.taskId -TaskInstanceId $foreign|Out-Null}catch{if($_.Exception.Message -notmatch $mismatch){throw};$threw=$true}
  Assert-Aih $threw 'complete fails closed on a foreign taskInstanceId'
  $legacy=New-AihTask $root4 'legacy-generation task'
- $ledgerPath=Join-Path $root4 '.ai-harness\state\tasks.json'
+ $ledgerPath=Join-Path $root4 '.ai-harness/state/tasks.json'
  $doc=Get-Content -Raw -LiteralPath $ledgerPath|ConvertFrom-Json
  for($i=0;$i -lt @($doc.tasks).Count;$i++){ if($doc.tasks[$i].taskId -eq $legacy.taskId){ $doc.tasks[$i].PSObject.Properties.Remove('taskInstanceId') } }
  Write-AihAtomicJson $ledgerPath $doc
@@ -139,20 +141,20 @@ try{
 # == 5. TASK.PS1 test-task CLI (bridge boundary of Part 5) ====================
 $root5=New-Fixture cli
 try{
- $taskJson=& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Task.ps1') -Action create-task -Workspace $root5 -Description 'cli identity probe'
+ $taskJson=& $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Task.ps1') -Action create-task -Workspace $root5 -Description 'cli identity probe'
  $task=$taskJson|ConvertFrom-Json
  Assert-Aih ($task.taskInstanceId -match '^task_[0-9a-f]{32}$') 'Task.ps1 create-task returns taskInstanceId'
- $hitJson=& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Task.ps1') -Action test-task -Workspace $root5 -TaskId $task.taskId -TaskInstanceId $task.taskInstanceId
+ $hitJson=& $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Task.ps1') -Action test-task -Workspace $root5 -TaskId $task.taskId -TaskInstanceId $task.taskInstanceId
  $hit=$hitJson|ConvertFrom-Json
  Assert-Aih ([bool]$hit.exists -and [bool]$hit.instanceMatches) 'test-task reports exists=true + instanceMatches=true for the exact instance'
- $missJson=& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Task.ps1') -Action test-task -Workspace $root5 -TaskId 'TASK-9999'
+ $missJson=& $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Task.ps1') -Action test-task -Workspace $root5 -TaskId 'TASK-9999'
  $miss=$missJson|ConvertFrom-Json
  Assert-Aih (-not [bool]$miss.exists) 'test-task reports exists=false for a verified-absent task'
- Set-Content -LiteralPath (Join-Path $root5 '.ai-harness\state\tasks.json') -Value 'not json at all' -Encoding UTF8
+ Set-Content -LiteralPath (Join-Path $root5 '.ai-harness/state/tasks.json') -Value 'not json at all' -Encoding UTF8
  $previousErrorAction=$ErrorActionPreference
  try{
   $ErrorActionPreference='Continue'
-  $null=& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Task.ps1') -Action test-task -Workspace $root5 -TaskId $task.taskId 2>$null
+  $null=& $aihPsHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $layout.Scripts 'Task.ps1') -Action test-task -Workspace $root5 -TaskId $task.taskId 2>$null
  }finally{ $ErrorActionPreference=$previousErrorAction }
  Assert-Aih ($LASTEXITCODE -ne 0) 'test-task exits non-zero on a malformed ledger (validation infrastructure failure)'
 }catch{throw}finally{if(Test-Path $root5){Remove-Item -LiteralPath $root5 -Recurse -Force}}
@@ -203,9 +205,9 @@ try{
  $reviewA=Invoke-AihRoutingDecision -Description 'review the boundary' -Workspace $root7 -PolicyPath $layout.RoutingPolicy -DataRoot $dataRoot -TaskId $a.taskId -Preset 'aih-engineering' -ReviewRequested -SettingsPath $glmSettings -TaskInstanceId $aInstance
  Assert-Aih ($reviewA.executionClass -eq 'reviewer' -and $reviewA.role -eq 'reviewer') 'generation A produced a reviewer decision'
  Assert-Aih ([string]$reviewA.profile -eq [string]$activeProfile7.Id -and [string]$reviewA.model -eq [string]$reviewerTarget7.Model -and [string]$reviewA.provider -eq [string]$reviewerTarget7.Provider -and [string]$reviewA.reasoning -eq [string]$reviewerTarget7.Reasoning) 'generation A reviewer binds through the ACTIVE profile reviewer role'
- $ledgerPath=Join-Path $root7 '.ai-harness\state\tasks.json'
+ $ledgerPath=Join-Path $root7 '.ai-harness/state/tasks.json'
  Write-AihAtomicJson $ledgerPath ([ordered]@{schemaVersion=1;nextSequence=1;tasks=@()})
- Remove-Item -LiteralPath (Join-Path $root7 '.ai-harness\runs') -Recurse -Force
+ Remove-Item -LiteralPath (Join-Path $root7 '.ai-harness/runs') -Recurse -Force
  $b=New-AihTask $root7 'engineer deep work generation B'
  Assert-Aih ($b.taskId -eq $a.taskId) 'fixture reproduces the display-id collision (same TASK-NNNN)'
  Assert-Aih ([string]$b.taskInstanceId -ne $aInstance) 'the reused display id received a fresh taskInstanceId (B != A)'

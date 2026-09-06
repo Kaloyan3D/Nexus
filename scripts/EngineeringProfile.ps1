@@ -37,7 +37,7 @@ function Get-AihPreferredProfileId {
 
 function Set-AihEngineeringProfileKey {
     param([Parameter(Mandatory=$true)][string]$SettingsPath,[Parameter(Mandatory=$true)][string]$ProfileId)
-    $mutex=[Threading.Mutex]::new($false,'Local\AIHarness.EngineeringProfile')
+    $mutex=[Threading.Mutex]::new($false,(ConvertTo-AihSafeSyncName 'Local\AIHarness.EngineeringProfile'))
     $locked=$false
     try{
         $locked=$mutex.WaitOne([TimeSpan]::FromSeconds(10))
@@ -63,7 +63,7 @@ function Get-AihEditorState {
     $preferredId=Get-AihPreferredProfileId $Layout.Settings
     $preferredDisplayName=$preferredId
     if(-not[string]::IsNullOrWhiteSpace($preferredId)){
-        foreach($profile in @($profiles.profiles)){ if([string]$profile.id -eq $preferredId){$preferredDisplayName=[string]$profile.displayName;break} }
+        foreach($profileEntry in @($profiles.profiles)){ if([string]$profileEntry.id -eq $preferredId){$preferredDisplayName=[string]$profileEntry.displayName;break} }
     }
     $customRoles=$null
     if(Test-Path -LiteralPath $Layout.CustomEngineeringProfile -PathType Leaf){

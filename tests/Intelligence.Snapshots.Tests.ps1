@@ -1,7 +1,10 @@
-[CmdletBinding()]param([string]$InstallRoot = 'C:\AI-Harness')
+[CmdletBinding()]param([string]$InstallRoot = (Split-Path -Parent $PSScriptRoot))
+# Platform-aware child host: Windows keeps powershell.exe; POSIX uses the pinned Nexus pwsh.
+if (-not (Get-Command Test-AihIsWindows -ErrorAction SilentlyContinue)) { . (Join-Path $InstallRoot 'scripts/Platform.ps1') }; $aihPsHost = Get-AihPowerShellHost -InstallRoot $InstallRoot
 Set-StrictMode -Version Latest;$ErrorActionPreference = 'Stop'
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\Intelligence.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Intelligence.ps1')
+. (Join-Path $InstallRoot 'tests/TestHelpers.ps1')
 
 # ── Phase 3.1E (Snapshot Engine) acceptance tests ───────────────────────────
 $passed = 0
@@ -16,13 +19,14 @@ function Invoke-TestGit([string]$Path, [string[]]$GitArguments) {
     return $output
 }
 function Invoke-FreshBuild([string]$StoreRoot, [string]$CheckoutId) {
-    # restart seam: the same build flow must behave identically in a new process
-    $template = '. {0}; $result = Invoke-AihSnapshotBuild -StoreRoot {1} -CheckoutId {2}; Write-Output (''STATUS='' + $result.snapshot.status); Write-Output (''ACTIVE='' + (Get-AihActiveSnapshot -StoreRoot {1} -CheckoutId {2}).snapshotId)'
-    $scriptText = $template -f ("'C:\AI-Harness\scripts\Intelligence.ps1'"), ("'" + $StoreRoot + "'"), ("'" + $CheckoutId + "'")
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($scriptText))
-    $output = & powershell.exe -NoProfile -NonInteractive -EncodedCommand $encoded
-    if ($LASTEXITCODE -ne 0) { throw ("fresh build failed: " + ($output -join ' ')) }
-    return ($output | Where-Object { "$_" -like 'STATUS=*' -or "$_" -like 'ACTIVE=*' })
+    # restart seam: the same build flow must behave identically in a new process.
+    # TASK-0025 Class A: the child derives the install root from the
+    # AIH_INSTALL_ROOT runtime contract through the shared fresh-process
+    # transport; generated script bodies never embed a literal root.
+    $template = '$result = Invoke-AihSnapshotBuild -StoreRoot {0} -CheckoutId {1}; Write-Output (''STATUS='' + $result.snapshot.status); Write-Output (''ACTIVE='' + (Get-AihActiveSnapshot -StoreRoot {0} -CheckoutId {1}).snapshotId)'
+    $expression = $template -f ("'" + $StoreRoot + "'"), ("'" + $CheckoutId + "'")
+    $output = Invoke-AihTestFreshProcess -PowerShellHost $aihPsHost -InstallRoot $InstallRoot -Script $expression
+    return @("$output" -split "\r?\n" | Where-Object { "$_" -like 'STATUS=*' -or "$_" -like 'ACTIVE=*' })
 }
 
 $store = New-Fixture snapstore
@@ -30,8 +34,8 @@ $fixtureRoot = New-Fixture snaprepos
 try {
     # ── build 1: clean repository produces a ready, activated snapshot ───
     $repo = New-TestGitRepo (Join-Path $fixtureRoot 'repo')
-    Set-TestFile (Join-Path $repo 'src\main.ts') 'export const main = () => 1;'
-    Set-TestFile (Join-Path $repo 'src\util.ts') 'export const util = () => 2;'
+    Set-TestFile (Join-Path $repo 'src/main.ts') 'export const main = () => 1;'
+    Set-TestFile (Join-Path $repo 'src/util.ts') 'export const util = () => 2;'
     Set-TestFile (Join-Path $repo 'package.json') '{"name":"snap-app"}'
     Invoke-TestGit $repo @('add', '.') | Out-Null
     Invoke-TestGit $repo @('-c', 'user.email=t@nexus.test', '-c', 'user.name=nexus-test', 'commit', '-q', '-m', 'init') | Out-Null
@@ -67,7 +71,7 @@ try {
     Assert-Aih ($build2.snapshot.stateHash -eq $build1.snapshot.stateHash) 'unchanged rebuild state hash stays identical'
 
     # ── build 3: one modified file ───────────────────────────────────────
-    Set-TestFile (Join-Path $repo 'src\util.ts') 'export const util = () => 22;'
+    Set-TestFile (Join-Path $repo 'src/util.ts') 'export const util = () => 22;'
     $build3 = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $checkoutId
     Assert-Aih ($build3.stateChanged) 'modifying one file changes the state hash'
     Assert-Aih ($build3.snapshot.isDirty) 'uncommitted modification marks the snapshot dirty'
@@ -77,21 +81,21 @@ try {
     Assert-Aih ($active3.snapshotId -eq $build3.snapshot.snapshotId) 'new snapshot atomically replaces the active pointer'
 
     # state hash must differentiate dirty states (different dirty content)
-    Set-TestFile (Join-Path $repo 'src\util.ts') 'export const util = () => 33;'
+    Set-TestFile (Join-Path $repo 'src/util.ts') 'export const util = () => 33;'
     $build4 = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $checkoutId
     Assert-Aih ($build4.snapshot.stateHash -ne $build3.snapshot.stateHash) 'different dirty content produces a different state hash'
-    Set-TestFile (Join-Path $repo 'src\util.ts') 'export const util = () => 22;'
+    Set-TestFile (Join-Path $repo 'src/util.ts') 'export const util = () => 22;'
     $build3Repeat = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $checkoutId
     Assert-Aih ($build3Repeat.snapshot.stateHash -eq $build3.snapshot.stateHash) 'returning to the earlier dirty state reproduces its exact state hash'
 
     # ── add / delete / rename all change the state ───────────────────────
-    Set-TestFile (Join-Path $repo 'src\extra.ts') 'export const extra = 3;'
+    Set-TestFile (Join-Path $repo 'src/extra.ts') 'export const extra = 3;'
     $buildAdd = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $checkoutId
     Assert-Aih ($buildAdd.stateChanged -and $buildAdd.filesTotal -eq $build3.filesTotal + 1) 'adding a file changes the state and file count'
-    Remove-Item -LiteralPath (Join-Path $repo 'src\extra.ts') -Force
+    Remove-Item -LiteralPath (Join-Path $repo 'src/extra.ts') -Force
     $buildDelete = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $checkoutId
     Assert-Aih ($buildDelete.stateChanged) 'deleting a file changes the state'
-    Invoke-TestGit $repo @('mv', 'src\main.ts', 'src\renamed.ts') | Out-Null
+    Invoke-TestGit $repo @('mv', 'src/main.ts', 'src/renamed.ts') | Out-Null
     $buildRename = Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $checkoutId
     Assert-Aih ($buildRename.stateChanged) 'renaming a file changes the state'
     $renameRows = Get-AihSnapshotFiles -StoreRoot $store -SnapshotId $buildRename.snapshot.snapshotId -RepositoryId $repositoryId
@@ -101,7 +105,7 @@ try {
 
     # ── validator failure never corrupts the active snapshot ─────────────
     $activeBefore = Get-AihActiveSnapshot -StoreRoot $store -CheckoutId $checkoutId
-    Set-TestFile (Join-Path $repo 'src\util.ts') 'export const broken = true;'
+    Set-TestFile (Join-Path $repo 'src/util.ts') 'export const broken = true;'
     $validatorThrew = $false
     try {
         Invoke-AihSnapshotBuild -StoreRoot $store -CheckoutId $checkoutId -Validator { throw 'simulated validation failure' } | Out-Null
@@ -114,7 +118,7 @@ try {
     Assert-Aih (@($failedList).Count -ge 1 -and $failedList[0].failureReason -like '*simulated validation failure*') 'failed snapshot is recorded with status=failed and a reason'
 
     # ── restart persistence: state survives a fresh Nexus process ────────
-    Set-TestFile (Join-Path $repo 'src\util.ts') 'export const util = () => 22;'
+    Set-TestFile (Join-Path $repo 'src/util.ts') 'export const util = () => 22;'
     $fresh = Invoke-FreshBuild -StoreRoot $store -CheckoutId $checkoutId
     Assert-Aih ("$fresh" -like '*STATUS=ready*') 'snapshot build works identically in a fresh process'
     Assert-Aih ("$fresh" -like '*ACTIVE=snap_*') 'fresh process resolves the active snapshot pointer'

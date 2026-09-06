@@ -34,13 +34,13 @@ function Get-AihEngineeringProfiles {
         $customProfile.roles=$custom.roles
         $customList=@([pscustomobject]$customProfile)
     }
-    foreach($profile in @($profiles.profiles)+@($customList)){
-        if([string]::IsNullOrWhiteSpace([string]$profile.id)){throw 'Engineering profile is missing an id.'}
-        if($null-eq$profile.PSObject.Properties['roles']){throw "Engineering profile $($profile.id) is missing roles."}
+    foreach($resolvedProfile in @($profiles.profiles)+@($customList)){
+        if([string]::IsNullOrWhiteSpace([string]$resolvedProfile.id)){throw 'Engineering profile is missing an id.'}
+        if($null-eq$resolvedProfile.PSObject.Properties['roles']){throw "Engineering profile $($resolvedProfile.id) is missing roles."}
         foreach($role in @('primaryEngineer','deepEngineer','reviewer','solver','fallback')){
-            if($null-eq$profile.roles.PSObject.Properties[$role]){throw "Engineering profile $($profile.id) is missing role $role."}
-            if([string]::IsNullOrWhiteSpace([string]$profile.roles.$role.model)){throw "Engineering profile $($profile.id) role $role has no model binding."}
-            if($null-eq$profile.roles.$role.PSObject.Properties['reasoning']-or[string]::IsNullOrWhiteSpace([string]$profile.roles.$role.reasoning)){throw "Engineering profile $($profile.id) role $role has no reasoning binding."}
+            if($null-eq$resolvedProfile.roles.PSObject.Properties[$role]){throw "Engineering profile $($resolvedProfile.id) is missing role $role."}
+            if([string]::IsNullOrWhiteSpace([string]$resolvedProfile.roles.$role.model)){throw "Engineering profile $($resolvedProfile.id) role $role has no model binding."}
+            if($null-eq$resolvedProfile.roles.$role.PSObject.Properties['reasoning']-or[string]::IsNullOrWhiteSpace([string]$resolvedProfile.roles.$role.reasoning)){throw "Engineering profile $($resolvedProfile.id) role $role has no reasoning binding."}
         }
     }
     $profiles.profiles=@($profiles.profiles)+@($customList)
@@ -114,10 +114,10 @@ function Resolve-AihProfile {
     if([string]::IsNullOrWhiteSpace($requested)-and$null-ne $Preset-and$null-ne $Preset.Config.PSObject.Properties['profile']){$requested=[string]$Preset.Config.profile}
     if([string]::IsNullOrWhiteSpace($requested)){$requested=[string]$Policy.defaultProfile}
     $requested=$requested.Trim().ToLowerInvariant()
-    $profile=$null
-    foreach($candidate in @($Profiles.profiles)){if([string]$candidate.id -eq $requested){$profile=$candidate;break}}
-    if($null-eq $profile){throw "Unknown engineering profile '$requested'."}
-    [pscustomobject]@{Id=[string]$profile.id;DisplayName=[string]$profile.displayName;Config=$profile}
+    $resolvedProfile=$null
+    foreach($candidate in @($Profiles.profiles)){if([string]$candidate.id -eq $requested){$resolvedProfile=$candidate;break}}
+    if($null-eq $resolvedProfile){throw "Unknown engineering profile '$requested'."}
+    [pscustomobject]@{Id=[string]$resolvedProfile.id;DisplayName=[string]$resolvedProfile.displayName;Config=$resolvedProfile}
 }
 
 function ConvertTo-AihExecutionClass {
@@ -138,16 +138,16 @@ function Get-AihRoleForExecutionClass {param([object]$Policy,[string]$ExecutionC
 # registry maps the model to a provider configuration identifier. No vendor
 # conditionals exist here or anywhere in the controller.
 function Resolve-AihModelTarget {
-    param([object]$Registry,[object]$Profile,[string]$Role)
-    $roles=$Profile.Config.roles
-    if($null-eq $roles.PSObject.Properties[$Role]){throw "Engineering profile $($Profile.Id) has no binding for role $Role."}
+    param([object]$Registry,[object]$ProfileDoc,[string]$Role)
+    $roles=$ProfileDoc.Config.roles
+    if($null-eq $roles.PSObject.Properties[$Role]){throw "Engineering profile $($ProfileDoc.Id) has no binding for role $Role."}
     $binding=$roles.$Role
     $modelId=[string]$binding.model
     $reasoning=[string]$binding.reasoning
     $entry=$null
     foreach($candidate in @($Registry.models)){if([string]$candidate.id -eq $modelId){$entry=$candidate;break}}
-    if($null-eq $entry){throw "Model registry has no entry for '$modelId' (profile $($Profile.Id), role $Role)."}
-    if(-not[bool]$entry.enabled){throw "Model '$modelId' is disabled in the registry (profile $($Profile.Id), role $Role)."}
+    if($null-eq $entry){throw "Model registry has no entry for '$modelId' (profile $($ProfileDoc.Id), role $Role)."}
+    if(-not[bool]$entry.enabled){throw "Model '$modelId' is disabled in the registry (profile $($ProfileDoc.Id), role $Role)."}
     $provider=$null
     $providerMap=if($null-ne $entry.PSObject.Properties['providers']){$entry.providers}else{$null}
     if($null-ne $providerMap){
@@ -155,7 +155,7 @@ function Resolve-AihModelTarget {
         elseif($null-ne $providerMap.PSObject.Properties['default']){$provider=[string]$providerMap.default}
     }
     if([string]::IsNullOrWhiteSpace($provider)-and$null-ne $entry.PSObject.Properties['provider']){$provider=[string]$entry.provider}
-    if([string]::IsNullOrWhiteSpace($provider)){throw "Model '$modelId' has no provider resolution (profile $($Profile.Id), role $Role)."}
+    if([string]::IsNullOrWhiteSpace($provider)){throw "Model '$modelId' has no provider resolution (profile $($ProfileDoc.Id), role $Role)."}
     [pscustomobject]@{ModelId=$modelId;Model=if($null-ne $entry.PSObject.Properties['model']-and-not[string]::IsNullOrWhiteSpace([string]$entry.model)){[string]$entry.model}else{$modelId};ModelDisplayName=[string]$entry.displayName;Vendor=[string]$entry.vendor;Provider=$provider;Reasoning=$reasoning}
 }
 
@@ -230,9 +230,9 @@ function Get-AihCompatibleModelsForRole {
 }
 
 function Get-AihRoleBindingTarget {
-    param([object]$Registry,[object]$Profile,[string]$Role,[string]$Reasoning)
+    param([object]$Registry,[object]$ProfileDoc,[string]$Role,[string]$Reasoning)
     # Validate a role binding WITHOUT throwing; returns $null when invalid.
-    $roles=$Profile.roles
+    $roles=$ProfileDoc.roles
     if($null-eq$roles.PSObject.Properties[$Role]){return $null}
     $binding=$roles.$Role
     $modelId=[string]$binding.model
@@ -248,14 +248,14 @@ function Get-AihRoleBindingTarget {
 }
 
 function Test-AihEngineeringProfileBindings {
-    param([object]$Registry,[object]$Profile)
+    param([object]$Registry,[object]$ProfileDoc)
     # Returns @{ok;error} — never throws. All five CORE roles must bind a known,
     # enabled, capability-compatible model with a supported reasoning level.
     # visualReviewer is an OPTIONAL role: its absence never invalidates a
     # (legacy/custom) profile, but when a binding IS present it must satisfy
     # the same capability rules (checked where the visual review resolves it).
     foreach($role in @('primaryEngineer','deepEngineer','reviewer','solver','fallback')){
-        $target=Get-AihRoleBindingTarget $Registry $Profile $role
+        $target=Get-AihRoleBindingTarget $Registry $ProfileDoc $role
         if($null-eq$target){return @{ok=$false;error="role '$role' is not satisfied by any compatible enabled model"}}
     }
     @{ok=$true;error=$null}
@@ -270,7 +270,7 @@ function Get-AihLegacyTier {param([string]$ExecutionClass)switch($ExecutionClass
 # created before instance identity existed (explicit compatibility path). The
 # third key component IS the instance when one is supplied, so an
 # instance-aware state file can never collide with a legacy taskId-only file.
-function Get-AihRoutingStatePath {param([string]$DataRoot,[string]$Workspace,[string]$TaskId,[string]$Preset='aih-engineering',[string]$TaskInstanceId)$identity=if(-not[string]::IsNullOrWhiteSpace($TaskInstanceId)){$TaskInstanceId}else{$TaskId};$bytes=[Text.Encoding]::UTF8.GetBytes(([IO.Path]::GetFullPath($Workspace).ToLowerInvariant()+"`n"+$Preset.ToLowerInvariant()+"`n"+$identity));$sha=[Security.Cryptography.SHA256]::Create();try{$name=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()+'.json'}finally{$sha.Dispose()};Join-Path (Join-Path $DataRoot 'states') $name}
+function Get-AihRoutingStatePath {param([string]$DataRoot,[string]$Workspace,[string]$TaskId,[string]$Preset='aih-engineering',[string]$TaskInstanceId)$identity=if(-not[string]::IsNullOrWhiteSpace($TaskInstanceId)){$TaskInstanceId}else{$TaskId};$workspacePath=[IO.Path]::GetFullPath($Workspace);$workspaceKey=if(Test-AihIsWindows){$workspacePath.ToLowerInvariant()}else{$workspacePath};$bytes=[Text.Encoding]::UTF8.GetBytes(($workspaceKey+"`n"+$Preset.ToLowerInvariant()+"`n"+$identity));$sha=[Security.Cryptography.SHA256]::Create();try{$name=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()+'.json'}finally{$sha.Dispose()};Join-Path (Join-Path $DataRoot 'states') $name}
 function Read-AihRoutingState {param([string]$Path)if(-not(Test-Path -LiteralPath $Path)){return $null};try{Get-Content -Raw -LiteralPath $Path|ConvertFrom-Json}catch{throw "Routing state is invalid: $Path"}}
 function Get-AihRoutingMutexName {param([string]$DataRoot)$bytes=[Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($DataRoot).ToLowerInvariant());$sha=[Security.Cryptography.SHA256]::Create();try{$suffix=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').Substring(0,24)}finally{$sha.Dispose()};"AIHarnessRouting-$suffix"}
 
@@ -291,7 +291,7 @@ function Invoke-AihRoutingDecision {
     param([Parameter(Mandatory=$true)][string]$Description,[Parameter(Mandatory=$true)][string]$Workspace,[Parameter(Mandatory=$true)][string]$PolicyPath,[Parameter(Mandatory=$true)][string]$DataRoot,[string]$TaskId,[string]$Preset,[string]$ForceTier,[string]$ForceClass,[string]$Signal='none',[string]$FailureReason,[switch]$UserApprovedCodexSolve,[switch]$ReviewRequested,[switch]$DryRun,[string]$SettingsPath,[string]$CustomProfilePath,[string]$TaskInstanceId)
     $policy=Get-AihRoutingPolicy $PolicyPath;$profilesPath=Join-Path (Split-Path -Parent $PolicyPath) 'engineering-profiles.json';$registryPath=Join-Path (Split-Path -Parent $PolicyPath) 'model-registry.json'
     $profiles=Get-AihEngineeringProfiles $profilesPath $CustomProfilePath;$registry=Get-AihModelRegistry $registryPath
-    $resolved=Resolve-AihPreset $policy $Preset;$profile=Resolve-AihProfile $policy $resolved $profiles $SettingsPath
+    $resolved=Resolve-AihPreset $policy $Preset;$resolvedProfile=Resolve-AihProfile $policy $resolved $profiles $SettingsPath
     $workspacePath=[IO.Path]::GetFullPath($Workspace)
     if([string]::IsNullOrWhiteSpace($TaskId)){$TaskId=[guid]::NewGuid().ToString('N')};if($TaskId-notmatch'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'){throw 'TaskId is invalid.'}
     $mutex=$null;$taken=$false;if(-not $DryRun){$mutex=[Threading.Mutex]::new($false,(Get-AihRoutingMutexName $DataRoot));try{$taken=$mutex.WaitOne(30000)}catch [Threading.AbandonedMutexException]{$taken=$true};if(-not $taken){throw 'Timed out waiting for routing lock.'}}
@@ -300,7 +300,7 @@ function Invoke-AihRoutingDecision {
         # never route a different lifecycle generation that merely shares the
         # display task id. The guard runs only when an authoritative ledger
         # exists (standalone routing against a synthetic TaskId is unchanged).
-        if(-not[string]::IsNullOrWhiteSpace($TaskInstanceId)-and(Test-Path -LiteralPath (Join-Path $workspacePath '.ai-harness\state\tasks.json'))){
+        if(-not[string]::IsNullOrWhiteSpace($TaskInstanceId)-and(Test-Path -LiteralPath (Join-Path $workspacePath '.ai-harness/state/tasks.json'))){
             $identity=Test-AihTaskIdentity -Workspace $workspacePath -TaskId $TaskId -TaskInstanceId $TaskInstanceId
             if(-not [bool]$identity.exists){throw "Routing rejected: task was not found in the authoritative ledger: $TaskId"}
             if(-not [bool]$identity.instanceMatches){throw "Routing rejected: task $TaskId no longer holds the expected taskInstanceId '$TaskInstanceId' (generation mismatch)."}
@@ -321,10 +321,10 @@ function Invoke-AihRoutingDecision {
         elseif($sameCount-ge[int]$policy.escalation.sameFailureThreshold){$escalatedFrom=$current;if($current-eq'engineer_normal'){$current='engineer_deep'}elseif($current-eq'engineer_deep'){$current=if($resolved.Config.allowCodexSubagent){'reviewer'}else{'engineer_deep'}};$sameCount=0;$reason='The same meaningful failure repeated at the configured threshold; escalation is scoped to that failure.'}
         $route=$policy.executionClasses.PSObject.Properties[$current].Value;if($current-eq'solver'-and-not$UserApprovedCodexSolve){throw 'solver requires the explicit -UserApprovedCodexSolve operator flag.'}
         $role=Get-AihRoleForExecutionClass $policy $current
-        $target=$null;if(-not[string]::IsNullOrWhiteSpace($role)){$target=Resolve-AihModelTarget $registry $profile $role}
+        $target=$null;if(-not[string]::IsNullOrWhiteSpace($role)){$target=Resolve-AihModelTarget $registry $resolvedProfile $role}
         $provider=if($null-ne$target){$target.Provider}else{$null};$model=if($null-ne$target){$target.Model}else{$null};$modelDisplayName=if($null-ne$target){$target.ModelDisplayName}else{$null};$vendor=if($null-ne$target){$target.Vendor}else{$null};$reasoning=if($null-ne$target){$target.Reasoning}else{$null}
-        $record=[ordered]@{recordVersion=4;recordId=[guid]::NewGuid().ToString('N');timestampUtc=[DateTime]::UtcNow.ToString('o');taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;description=$Description;preset=$resolved.Id;selectedExecutionClass=$current;executionClass=$current;role=$role;profile=$profile.Id;profileDisplayName=$profile.DisplayName;provider=$provider;model=$model;modelDisplayName=$modelDisplayName;vendor=$vendor;reasoning=$reasoning;writable=[bool]$route.writable;risk=$risk;reviewRequired=$reviewRequired;reviewRequested=[bool]$ReviewRequested;reason=$reason;escalatedFrom=$escalatedFrom;manualOverride=$null-ne$forced;signal=$Signal;failureSignature=$signature;sameFailureCount=$sameCount;matchedRule=$initial.RuleId;matchedPatterns=@($initial.MatchedPatterns);freshSession=$true;completionAuthority=$false;selectedTier=(Get-AihLegacyTier $current);legacyTierDeprecated=$true;dryRun=[bool]$DryRun}
-        if(-not$DryRun){New-Item -ItemType Directory -Force -Path (Join-Path $DataRoot 'states')|Out-Null;$newState=[ordered]@{taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;preset=$resolved.Id;executionClass=$current;selectedTier=(Get-AihLegacyTier $current);role=$role;profile=$profile.Id;profileDisplayName=$profile.DisplayName;provider=$provider;model=$model;modelDisplayName=$modelDisplayName;reasoning=$reasoning;risk=$risk;reviewRequired=$reviewRequired;reviewRequested=[bool]$ReviewRequested;lastFailureSignature=$signature;sameFailureCount=$sameCount;updatedAtUtc=[DateTime]::UtcNow.ToString('o')};Write-AihAtomicJson $statePath $newState;Add-AihJsonLine (Join-Path $DataRoot 'decisions.jsonl') $record}
+        $record=[ordered]@{recordVersion=4;recordId=[guid]::NewGuid().ToString('N');timestampUtc=[DateTime]::UtcNow.ToString('o');taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;description=$Description;preset=$resolved.Id;selectedExecutionClass=$current;executionClass=$current;role=$role;profile=$resolvedProfile.Id;profileDisplayName=$resolvedProfile.DisplayName;provider=$provider;model=$model;modelDisplayName=$modelDisplayName;vendor=$vendor;reasoning=$reasoning;writable=[bool]$route.writable;risk=$risk;reviewRequired=$reviewRequired;reviewRequested=[bool]$ReviewRequested;reason=$reason;escalatedFrom=$escalatedFrom;manualOverride=$null-ne$forced;signal=$Signal;failureSignature=$signature;sameFailureCount=$sameCount;matchedRule=$initial.RuleId;matchedPatterns=@($initial.MatchedPatterns);freshSession=$true;completionAuthority=$false;selectedTier=(Get-AihLegacyTier $current);legacyTierDeprecated=$true;dryRun=[bool]$DryRun}
+        if(-not$DryRun){New-Item -ItemType Directory -Force -Path (Join-Path $DataRoot 'states')|Out-Null;$newState=[ordered]@{taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;preset=$resolved.Id;executionClass=$current;selectedTier=(Get-AihLegacyTier $current);role=$role;profile=$resolvedProfile.Id;profileDisplayName=$resolvedProfile.DisplayName;provider=$provider;model=$model;modelDisplayName=$modelDisplayName;reasoning=$reasoning;risk=$risk;reviewRequired=$reviewRequired;reviewRequested=[bool]$ReviewRequested;lastFailureSignature=$signature;sameFailureCount=$sameCount;updatedAtUtc=[DateTime]::UtcNow.ToString('o')};Write-AihAtomicJson $statePath $newState;Add-AihJsonLine (Join-Path $DataRoot 'decisions.jsonl') $record}
         [pscustomobject]$record
     }finally{if($taken){$mutex.ReleaseMutex()};if($null-ne$mutex){$mutex.Dispose()}}
 }

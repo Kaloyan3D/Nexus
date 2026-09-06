@@ -53,14 +53,14 @@ $oauthAvailable = Test-AihEndpoint -Uri $oauthModelsUrl -TimeoutSec 2
 if (-not $oauthAvailable -and (Test-Path -LiteralPath $authFile) -and (Test-Path -LiteralPath $layout.OAuth)) {
     Write-Host 'AI Harness: starting the local OpenAI OAuth service for live mode switching ...'
     $oauthArguments = @($layout.OAuth, '--detach', '--no-open')
-    $oauthProcess = Start-Process -FilePath $layout.Node -ArgumentList $oauthArguments -WindowStyle Hidden -PassThru
+    $oauthProcess = Start-AihDetachedProcess -FilePath $layout.Node -ArgumentList $oauthArguments
     $oauthAvailable = Wait-AihEndpoint -Uri $oauthModelsUrl -TimeoutSec 20
     if (-not $oauthAvailable -and -not $oauthProcess.HasExited) {
         Stop-Process -Id $oauthProcess.Id -Force -ErrorAction SilentlyContinue
     }
 }
 if ($mode.RequiresOpenAI -and -not $oauthAvailable) {
-    throw "Normal Engineering requires OpenAI OAuth. Run: $($layout.Bin)\aih-auth.cmd"
+    throw "Normal Engineering requires OpenAI OAuth. Run: $(Get-AihLayoutLauncherPath -Layout $layout -Name 'aih-auth')"
 }
 if ($oauthAvailable) {
     $modelResponse = Invoke-RestMethod -Uri $oauthModelsUrl -TimeoutSec 10
@@ -75,7 +75,7 @@ if (-not $oauthAvailable) { Write-Warning 'Normal Engineering is unavailable in 
 Write-Host 'AI Harness: checking DeepSeek API (timeout: 20 seconds) ...'
 $deepSeekKey = Get-AihDeepSeekKey $InstallRoot
 if ([string]::IsNullOrWhiteSpace($deepSeekKey)) {
-    throw "DeepSeek API key is not configured. Run: $($layout.Bin)\aih-key.cmd"
+    throw "DeepSeek API key is not configured. Run: $(Get-AihLayoutLauncherPath -Layout $layout -Name 'aih-key')"
 }
 $deepSeekHeaders = @{ Authorization = "Bearer $deepSeekKey" }
 try {
@@ -119,14 +119,13 @@ if ($null -ne $runningState -and $null -ne $runningState.Pid) {
             if ($null -ne $preselected) { Write-Host "Preselecting workspace: $($preselected.executionRoot)" }
             Write-Host "Default mode for new sessions: $($mode.DisplayName) (source: $presetSource)"
             Write-Host $openUrl
-            if ($Open) { Start-Process $openUrl | Out-Null }
+            if ($Open) { Open-AihUrlInBrowser -Url $openUrl }
             exit 0
         }
         if ($controlRoomSchema -lt 4 -and -not $Restart) {
             Write-Host 'Nexus: upgrading the legacy project-bound runtime to the universal runtime ...'
         }
-        Stop-Process -Id $existing.Id -Force
-        $existing.WaitForExit(10000) | Out-Null
+        $null = Stop-AihTrackedProcess -Process $existing
     }
     elseif ($null -ne $existing -and (Test-AihReusableUniversalRuntimeState -State $runningState -Restart:$Restart)) {
         $process = $existing
@@ -134,8 +133,7 @@ if ($null -ne $runningState -and $null -ne $runningState.Pid) {
         Write-Host "AI Harness status: STARTING (resuming readiness checks for PID $($process.Id))"
     }
     elseif ($null -ne $existing) {
-        Stop-Process -Id $existing.Id -Force
-        $existing.WaitForExit(10000) | Out-Null
+        $null = Stop-AihTrackedProcess -Process $existing
     }
 }
 elseif ((Test-AihEndpoint -Uri $webUrl -TimeoutSec 2) -and -not $Restart) {
@@ -164,7 +162,7 @@ if (-not $resumingStartup) {
     # The server has a neutral runtime directory. Every actual command/file/git
     # operation resolves its cwd from the immutable session header; Nexus never
     # uses process.chdir() or launch-directory switching.
-    $process = Start-Process -FilePath $layout.Node -ArgumentList $arguments -WorkingDirectory $layout.Data -WindowStyle Hidden -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru
+    $process = Start-AihDetachedProcess -FilePath $layout.Node -ArgumentList $arguments -WorkingDirectory $layout.Data -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
     $process.Refresh()
     $launchTime = $process.StartTime.ToUniversalTime()
     $state = [ordered]@{
@@ -244,4 +242,4 @@ Write-Host 'Nexus status: READY (universal runtime)'
 Write-Host "Default mode for new sessions: $Preset ($($mode.DisplayName); source: $presetSource)"
 if ($null -ne $preselected) { Write-Host "Preselected workspace: $($preselected.executionRoot)" }
 Write-Host $openUrl
-if ($Open) { Start-Process $openUrl | Out-Null }
+if ($Open) { Open-AihUrlInBrowser -Url $openUrl }

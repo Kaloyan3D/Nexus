@@ -288,17 +288,24 @@ function Invoke-AihLoopCapture {
         # mode viewport (default): live ADB capture via Capture-VisualEvidence.ps1.
         $outputPath=Join-Path $IterationDirectory ($name+'.png')
         # -Force: the loop owns the iteration directory and wants a fresh capture per attempt
-        $args=@('-OutputPath',$outputPath,'-Force')
-        $args+=@('-DeviceSerial',[string]$RuntimeTarget.deviceId,'-PackageName',[string]$RuntimeTarget.packageName,'-ScenarioId',[string]$Scenario.id,'-Iteration',[string]$Iteration)
-        if(-not[string]::IsNullOrWhiteSpace([string]$RuntimeTarget.activity)){$args+=@('-Activity',[string]$RuntimeTarget.activity)}
-        if(-not[string]::IsNullOrWhiteSpace([string]$RuntimeTarget.deepLink)){$args+=@('-DeepLink',[string]$RuntimeTarget.deepLink)}
-        if(-not[string]::IsNullOrWhiteSpace([string]$AdbPath)){ $args+=@('-AdbPath',$AdbPath) }
-        if(-not[string]::IsNullOrWhiteSpace([string]$InstallRoot)){ $args+=@('-InstallRoot',$InstallRoot) }
+        $captureArgs=@('-OutputPath',$outputPath,'-Force')
+        $captureArgs+=@('-DeviceSerial',[string]$RuntimeTarget.deviceId,'-PackageName',[string]$RuntimeTarget.packageName,'-ScenarioId',[string]$Scenario.id,'-Iteration',[string]$Iteration)
+        if(-not[string]::IsNullOrWhiteSpace([string]$RuntimeTarget.activity)){$captureArgs+=@('-Activity',[string]$RuntimeTarget.activity)}
+        if(-not[string]::IsNullOrWhiteSpace([string]$RuntimeTarget.deepLink)){$captureArgs+=@('-DeepLink',[string]$RuntimeTarget.deepLink)}
+        if(-not[string]::IsNullOrWhiteSpace([string]$AdbPath)){ $captureArgs+=@('-AdbPath',$AdbPath) }
+        if(-not[string]::IsNullOrWhiteSpace([string]$InstallRoot)){ $captureArgs+=@('-InstallRoot',$InstallRoot) }
         $capOutFile=Join-Path $IterationDirectory ($name+'-capture-stdout.txt')
         $capErrFile=Join-Path $IterationDirectory ($name+'-capture-stderr.txt')
-        $capCmd=('powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+(Join-Path $PSScriptRoot 'Capture-VisualEvidence.ps1')+'" '+($args|ForEach-Object{ if($_ -match '[\s"]'){ '"'+($_ -replace '"','\"')+'"' } else { $_ } })-join ' ')+(' > "'+$capOutFile+'" 2> "'+$capErrFile+'"')
+        if(Test-AihIsWindows){
+        $capCmd=('powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+(Join-Path $PSScriptRoot 'Capture-VisualEvidence.ps1')+'" '+($captureArgs|ForEach-Object{ if($_ -match '[\s"]'){ '"'+($_ -replace '"','\"')+'"' } else { $_ } })-join ' ')+(' > "'+$capOutFile+'" 2> "'+$capErrFile+'"')
         cmd /c $capCmd
         $captureExit=$LASTEXITCODE
+        }
+        else {
+            # POSIX: exact-argv transport through the platform PowerShell host
+            # with the SAME stdout/stderr file contract (TASK-0017: no pipes).
+            $captureExit=Invoke-AihPwshScriptFile -ScriptPath (Join-Path $PSScriptRoot 'Capture-VisualEvidence.ps1') -ScriptArguments $captureArgs -StdoutPath $capOutFile -StderrPath $capErrFile -InstallRoot $InstallRoot
+        }
         # Parse the structured capture result from the stdout file; stderr
         # (adb progress lines) never participates in JSON parsing.
         $captureDoc=$null
@@ -702,9 +709,16 @@ if(-not[string]::IsNullOrWhiteSpace([string]$MockResponseFile)){ $reviewArgs+=@(
 # wrappers with the structured JSON and breaks deterministic parsing.
 $reviewOutFile=Join-Path $iterationDir 'review-stdout.txt'
 $reviewErrFile=Join-Path $iterationDir 'review-stderr.txt'
+if(Test-AihIsWindows){
 $reviewCmd=('powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+(Join-Path $PSScriptRoot 'VisualReview.ps1')+'" '+($reviewArgs|ForEach-Object{ if($_ -match '[\s"]'){ '"'+($_ -replace '"','\"')+'"' } else { $_ } })-join ' ')+(' > "'+$reviewOutFile+'" 2> "'+$reviewErrFile+'"')
 cmd /c $reviewCmd
 $reviewExit=$LASTEXITCODE
+}
+else {
+    # POSIX: exact-argv transport through the platform PowerShell host with
+    # the SAME stdout/stderr file contract (TASK-0017: no pipes).
+    $reviewExit=Invoke-AihPwshScriptFile -ScriptPath (Join-Path $PSScriptRoot 'VisualReview.ps1') -ScriptArguments $reviewArgs -StdoutPath $reviewOutFile -StderrPath $reviewErrFile -InstallRoot $InstallRoot
+}
 $reviewOutput=@(Get-Content -LiteralPath $reviewOutFile -ErrorAction SilentlyContinue)+@(Get-Content -LiteralPath $reviewErrFile -ErrorAction SilentlyContinue)
 # Parse the structured review envelope from the stdout file only; stderr
 # diagnostics never participate in JSON parsing.

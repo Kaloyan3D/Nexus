@@ -12,9 +12,13 @@ function userMessage(text) {
   return { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] }
 }
 
-function run(file, args, cwd) {
-  const result = spawnSync(file, args, { cwd, encoding: 'utf8', windowsHide: true })
-  if (result.status !== 0) throw new Error((result.stderr || result.stdout || file + ' failed').trim())
+// TASK-0017 transport (TASK-0025 RC4): the shared test transport helper is
+// the ONE implementation - Windows keeps the cmd.exe no-pipes redirection
+// transport, POSIX captures directly. Both shapes return captured stdout.
+const { createAihCliRunner } = require(path.join(__dirname, 'lib', 'AihTestTransport.cjs'))
+const runRaw = createAihCliRunner()
+async function run(file, args, cwd) {
+  const result = await runRaw(file, args, cwd ? { cwd } : undefined)
   return result.stdout
 }
 
@@ -52,6 +56,7 @@ async function main() {
   const port = server.address().port
   const previousHome = process.env.DSH_HOME
   const previousKey = process.env.AIH_VISUAL_CONTROLLER_TEST_KEY
+  const previousInstallRoot = process.env.AIH_INSTALL_ROOT
   try {
     fs.cpSync(path.join(sourceRoot, 'scripts'), path.join(installRoot, 'scripts'), { recursive: true })
     fs.cpSync(path.join(sourceRoot, 'config'), path.join(installRoot, 'config'), { recursive: true })
@@ -68,24 +73,25 @@ async function main() {
       '',
     ].join('\n'))
     process.env.DSH_HOME = dataHome
+    // Hermetic fixture: ambient AIH_INSTALL_ROOT (set by a real install) must
+    // not leak into spawned CLIs or they resolve the REAL install root and
+    // write runtime state outside this fixture.
+    process.env.AIH_INSTALL_ROOT = installRoot
     process.env.AIH_VISUAL_CONTROLLER_TEST_KEY = 'test-key-not-real'
 
-    run('git', ['init'], workspace)
+    await run('git', ['init'], workspace)
     fs.writeFileSync(path.join(workspace, 'package.json'), JSON.stringify({ private: true, scripts: { test: 'node -e "process.exit(0)"' } }))
     fs.mkdirSync(path.join(workspace, 'apps', 'mobile', 'src', 'app'), { recursive: true })
     fs.writeFileSync(path.join(workspace, 'apps', 'mobile', 'src', 'app', 'index.tsx'), 'export default function Screen(){ return null }\n')
-    run('git', ['add', 'package.json', 'apps/mobile/src/app/index.tsx'], workspace)
+    await run('git', ['add', 'package.json', 'apps/mobile/src/app/index.tsx'], workspace)
 
+    // The capture source is a checked-in fixture: generating PNGs through
+    // System.Drawing is Windows-only, and this suite must also run on the
+    // native Linux runtime where pwsh has no GDI+.
     const shot = path.join(workspace, 'history.png')
-    const makePng = [
-      'Add-Type -AssemblyName System.Drawing',
-      `$b=New-Object System.Drawing.Bitmap(400,800)`,
-      '$g=[System.Drawing.Graphics]::FromImage($b)',
-      'for($i=0;$i-lt 40;$i++){ $brush=New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255,(($i*37)%256),(($i*71)%256),(($i*113)%256))); $g.FillRectangle($brush,0,$i*20,400,20); $brush.Dispose() }',
-      `$b.Save('${shot.replace(/'/g, "''")}',[System.Drawing.Imaging.ImageFormat]::Png)`,
-      '$g.Dispose();$b.Dispose()',
-    ].join(';')
-    run('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', makePng], workspace)
+    const fixturePng = path.join(sourceRoot, 'tests', 'fixtures', 'visual-lifecycle', 'history.png')
+    assert.ok(fs.existsSync(fixturePng), 'visual lifecycle PNG fixture is checked in')
+    fs.copyFileSync(fixturePng, shot)
     fs.mkdirSync(path.join(workspace, '.ai-harness'), { recursive: true })
     fs.writeFileSync(path.join(workspace, '.ai-harness', 'visual-policy.json'), JSON.stringify({ schemaVersion: 1, requirement: 'auto', requirePatterns: ['apps/mobile/src/app/'] }))
     fs.writeFileSync(path.join(workspace, '.ai-harness', 'visual-scenarios.json'), JSON.stringify({ id: 'history', platform: 'android', captures: [{ name: 'history', mode: 'file', sourceFile: shot }] }))
@@ -143,6 +149,8 @@ async function main() {
     else process.env.DSH_HOME = previousHome
     if (previousKey === undefined) delete process.env.AIH_VISUAL_CONTROLLER_TEST_KEY
     else process.env.AIH_VISUAL_CONTROLLER_TEST_KEY = previousKey
+    if (previousInstallRoot === undefined) delete process.env.AIH_INSTALL_ROOT
+    else process.env.AIH_INSTALL_ROOT = previousInstallRoot
     if (process.env.AIH_KEEP_VISUAL_CONTROLLER_FIXTURE !== '1') {
       fs.rmSync(installRoot, { recursive: true, force: true })
       fs.rmSync(workspace, { recursive: true, force: true })

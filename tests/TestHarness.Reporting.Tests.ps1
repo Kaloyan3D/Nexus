@@ -1,8 +1,8 @@
 [CmdletBinding()]param([string]$InstallRoot)
 Set-StrictMode -Version Latest;$ErrorActionPreference='Stop'
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot=Split-Path -Parent $PSScriptRoot }
-. (Join-Path $InstallRoot 'scripts\Common.ps1')
-. (Join-Path $InstallRoot 'scripts\TestHarness.Reporting.ps1')
+. (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/TestHarness.Reporting.ps1')
 $passed=0
 function Assert-Aih([bool]$Condition,[string]$Name){if(-not$Condition){throw "FAIL: $Name"};$script:passed++;Write-Host "PASS: $Name"}
 $root=Join-Path ([IO.Path]::GetTempPath()) ('aih-harness-report-'+[guid]::NewGuid().ToString('N'))
@@ -18,7 +18,7 @@ try {
  Assert-Aih ($report.totalPassed-eq5-and$report.totalFailed-eq1-and$report.suiteCount-eq2) 'report aggregates assertion totals and suite count'
  Assert-Aih ($report.durationMs-eq1250-and$report.suites[0].durationMs-eq1250) 'report records harness and suite durations'
  Assert-Aih ((Get-AihHarnessAssertionCount @('PASS: a','noise','PASS: b') 'PASS:')-eq2) 'PASS aggregation uses explicit assertion lines'
- $path=Join-Path $root 'alternate\result.json';$written=Write-AihHarnessArtifacts -ReportPath $path -Report $report -RawLog "owned log`n"
+ $path=Join-Path $root 'alternate/result.json';$written=Write-AihHarnessArtifacts -ReportPath $path -Report $report -RawLog "owned log`n"
  Assert-Aih (Test-Path -LiteralPath $written.reportPath) 'report writes to an explicitly supplied alternate location'
  Assert-Aih (Test-Path -LiteralPath $written.rawLogPath) 'raw textual log is stored next to the report'
  $roundTrip=Get-Content -Raw -Encoding UTF8 -LiteralPath $written.reportPath|ConvertFrom-Json

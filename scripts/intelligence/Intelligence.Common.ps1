@@ -98,13 +98,51 @@ function Get-AihPathCaseKey {
 function ConvertTo-AihCheckoutRootPath {
     # PathNormalizer: canonicalize a checkout root. Produces an absolute path
     # with forward slashes and no trailing separator. Case is preserved.
+    #
+    # TASK-0025 foreign-path contract (PathNormalizer): on a non-Windows host
+    # a Windows-drive path ('C:\repo' / 'C:/repo') is NOT a native filesystem
+    # path, so it is canonicalized LEXICALLY: separators become '/', the
+    # trailing separator is trimmed, and the bare-drive form keeps its slash.
+    # No filesystem access happens for drive-prefixed input on non-Windows
+    # hosts. Native absolute paths keep the host filesystem resolution below.
     param([Parameter(Mandatory = $true)][string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path)) { throw 'Checkout root path is empty.' }
+    if (-not (Test-AihWindowsPlatform) -and $Path -match '^[A-Za-z]:[\\/]') {
+        return $Path.Replace('\', '/').TrimEnd('/')
+    }
     $resolved = $executionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     $full = [IO.Path]::GetFullPath($resolved)
     $full = $full.TrimEnd('\', '/')
     if ($full -match '^[A-Za-z]:$') { $full = $full + '/' }  # bare drive root
     return $full.Replace('\', '/')
+}
+
+function ConvertTo-AihLexicalPosixPath {
+    # Lexically canonicalizes a forward-slash path: collapses duplicate
+    # separators and '.'/'..' segments. A leading Windows drive token ('C:')
+    # is preserved as the root anchor and clamps '..' exactly like Windows
+    # path resolution ('C:\..\x' stays at the drive root). Purely lexical:
+    # no filesystem access, case preserved. Relative inputs whose '..'
+    # segments pop past the start throw: an escape attempt is never silently
+    # clamped into a different path.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $driveAnchored = $Path -match '^[A-Za-z]:/'
+    $parts = @()
+    foreach ($segment in $Path.Split('/')) {
+        if ($segment -eq '' -or $segment -eq '.') { continue }
+        if ($segment -eq '..') {
+            if ($driveAnchored) {
+                # Only the drive anchor itself clamps; segments above it do
+                # not exist. With no anchor, popping an empty path escapes.
+                if ($parts.Count -eq 1 -and $parts[0] -match '^[A-Za-z]:$') { continue }
+            }
+            if ($parts.Count -eq 0) { throw "Path traversal escapes the path root: $Path" }
+            $parts = @($parts[0..($parts.Count - 2)])
+            continue
+        }
+        $parts = @($parts) + @($segment)
+    }
+    return ($parts -join '/')
 }
 
 function Test-AihPathInsideRoot {
@@ -124,6 +162,16 @@ function ConvertTo-AihRepositoryRelativePath {
     # Accepts an absolute path under $Root or an already-relative path.
     # Windows separators are converted to '/'; case is preserved; '..' segments
     # that would escape the repository root are rejected.
+    #
+    # TASK-0025 foreign-path contract (PathNormalizer): on a non-Windows host
+    # a Windows-drive path ('C:\repo\file.ts' or 'C:/repo/file.ts') is NOT a
+    # native filesystem path, so drive-prefixed input is normalized LEXICALLY
+    # on every host: dot segments collapse with Windows drive-root clamping
+    # and root containment is a case-insensitive canonical-prefix comparison
+    # (the comparison semantics the drive syntax implies) with NO filesystem
+    # access. Traversal containment is enforced on the COLLAPSED path, so a
+    # '..' sequence can never slip past the repository root. Native absolute
+    # paths keep the host filesystem resolution in the branch below.
     param(
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)][string]$Path
@@ -131,6 +179,16 @@ function ConvertTo-AihRepositoryRelativePath {
     if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
     $normalized = $Path.Replace('\', '/')
     $rootPosix = $Root.Replace('\', '/').TrimEnd('/')
+    if (-not (Test-AihWindowsPlatform) -and $normalized -match '^[A-Za-z]:/') {
+        $collapsed = ConvertTo-AihLexicalPosixPath -Path $normalized
+        $rootKey = $rootPosix.ToLowerInvariant()
+        $pathKey = $collapsed.ToLowerInvariant()
+        if ($pathKey -ne $rootKey -and -not $pathKey.StartsWith($rootKey + '/', [StringComparison]::Ordinal)) {
+            throw "Path is outside the repository root: $Path"
+        }
+        if ($pathKey -eq $rootKey) { return '' }
+        return $collapsed.Substring($rootPosix.Length).TrimStart('/')
+    }
     if ([IO.Path]::IsPathRooted($Path) -or $normalized -match '^[A-Za-z]:/') {
         $absolute = [IO.Path]::GetFullPath($Path)
         if (-not (Test-AihPathInsideRoot -Root $Root -FullPath $absolute)) {

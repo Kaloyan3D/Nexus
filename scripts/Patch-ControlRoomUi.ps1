@@ -20,17 +20,17 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Common.ps1')
 $layout = Get-AihLayout $InstallRoot
 
-$source = Join-Path $layout.Root 'ui\nexus-mode-selector'
+$source = Join-Path $layout.Root 'ui/nexus-mode-selector'
 $manifest = Join-Path $source 'package.json'
-$client = Join-Path $source 'lib\client.js'
-$hostPath = Join-Path $source 'lib\index.js'
+$client = Join-Path $source 'lib/client.js'
+$hostPath = Join-Path $source 'lib/index.js'
 foreach ($required in @($manifest, $client, $hostPath)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Nexus mode-selector source is missing: $required"
     }
 }
 
-$profileModules = Join-Path $layout.Data 'profiles\node_modules'
+$profileModules = Join-Path $layout.Data 'profiles/node_modules'
 $scopeDirectory = Join-Path $profileModules '@nexus'
 $target = Join-Path $scopeDirectory 'mode-selector'
 New-Item -ItemType Directory -Force -Path $scopeDirectory | Out-Null
@@ -38,7 +38,7 @@ if (Test-Path -LiteralPath $target) {
     Remove-Item -LiteralPath $target -Recurse -Force
 }
 Copy-Item -LiteralPath $source -Destination $target -Recurse -Force
-foreach ($required in @('package.json', 'lib\client.js', 'lib\index.js')) {
+foreach ($required in @('package.json', 'lib/client.js', 'lib/index.js')) {
     if (-not (Test-Path -LiteralPath (Join-Path $target $required))) {
         throw "Failed to install @nexus/mode-selector file: $required"
     }
@@ -54,9 +54,9 @@ if (-not (Test-Path -LiteralPath $cordisPatch)) {
 $text = Get-Content -Raw -Encoding UTF8 -LiteralPath $cordisPatch
 if (-not $text.Contains("'@nexus/mode-selector'")) {
     $pattern = "(?m)^(    - id: nexus-controller\r?\n      name: '@nexus/controller'\r?\n)"
-    $matches = [regex]::Matches($text, $pattern).Count
-    if ($matches -ne 1) {
-        throw "cordis.patch.yml structure changed for Nexus mode-selector migration (matches: $matches). Refusing an unsafe edit."
+    $matchCount = [regex]::Matches($text, $pattern).Count
+    if ($matchCount -ne 1) {
+        throw "cordis.patch.yml structure changed for Nexus mode-selector migration (matches: $matchCount). Refusing an unsafe edit."
     }
     $newline = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
     $row = '    - id: nexus-mode-selector' + $newline + "      name: '@nexus/mode-selector'" + $newline

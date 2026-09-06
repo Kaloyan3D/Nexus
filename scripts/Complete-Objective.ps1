@@ -71,9 +71,10 @@ $workspacePath = [System.IO.Path]::GetFullPath($Workspace)
 $criteria = @(Read-AihAcceptanceCriteria $AcceptanceCriteriaPath)
 $acceptance = Get-AihAcceptanceAssessment $criteria
 
+$verifyHost = Get-AihPowerShellHost $InstallRoot
 $verifyArguments = @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $layout.Scripts 'Verify-Project.ps1'),'-Workspace',$workspacePath,'-InstallRoot',$InstallRoot,'-ContinueOnFailure','-Json')
 if (-not [string]::IsNullOrWhiteSpace($TaskId)) { $verifyArguments += @('-TaskId',$TaskId) }
-$verifyOutput = (& powershell.exe @verifyArguments 2>&1 | Out-String).Trim()
+$verifyOutput = (& $verifyHost @verifyArguments 2>&1 | Out-String).Trim()
 $verifyExitCode = $LASTEXITCODE
 try { $verification = $verifyOutput | ConvertFrom-Json }
 catch {
