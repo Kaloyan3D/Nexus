@@ -234,6 +234,13 @@ function modelResolvedProvider(entry, reasoning) {
 function modelCompatibleWithRole(entry, role, reasoning) {
   if (!entry) return false
   if (entry.enabled === false) return false
+  // Phase M2 engine scope: a registry entry MAY declare `agentEngines`.
+  // Absence keeps Dual behavior exactly as before (every pre-M2 entry); a
+  // declaration that does not list 'dual' excludes the entry from every Dual
+  // role, so a Muse-registry model (agentEngines: ['muse']) can never leak
+  // into the Dual role editor or role binding validation. Capability/metadata
+  // driven — no model-id conditionals.
+  if (Array.isArray(entry.agentEngines) && !entry.agentEngines.includes('dual')) return false
   const req = roleRequirementsOf(role)
   if (!req) return false
   if (req.requiresReasoning && entry.supportsReasoning === false) return false

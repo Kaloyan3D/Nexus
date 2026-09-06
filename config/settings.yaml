@@ -103,5 +103,35 @@ llm-pi-ai:
             off:
             high: high
             max: max
+    meta-model-api:
+      displayName: Meta Model API (Muse Spark, direct)
+      apiKeyEnv: MODEL_API_KEY
+      api: openai-completions
+      baseURL: https://api.meta.ai/v1
+      reasoning: xhigh
+      compat:
+        # Meta Model API wire contract (official Meta Model API cookbook,
+        # verified Phase M2): OpenAI-compatible chat completions; reasoning via
+        # reasoning_effort; usage in streaming via stream_options; developer
+        # role preferred over system; canonical output-cap field is
+        # max_completion_tokens. Muse Spark natively accepts reasoning_effort
+        # none < minimal < low < medium < high, PLUS the accepted alias xhigh
+        # (same strength as high). Nexus levels map in reasoningEfforts below;
+        # an unmapped Nexus level is never sent (fail closed at the boundary).
+        thinkingFormat: openai
+        supportsReasoningEffort: true
+        supportsUsageInStreaming: true
+        supportsDeveloperRole: true
+        maxTokensField: max_completion_tokens
+      models:
+        - id: muse-spark-1.3
+          name: Muse Spark 1.3
+          contextWindow: 1048576
+          maxTokens: 32768
+          reasoningEfforts:
+            off:
+            high: high
+            xhigh: xhigh
+            max: high
 ui-theme:
   preference: dark

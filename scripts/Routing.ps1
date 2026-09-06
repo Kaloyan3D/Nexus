@@ -199,6 +199,18 @@ function Test-AihModelRoleCompatible {
     param([object]$Entry,[string]$Role,[string]$Reasoning)
     if($null-eq$Entry){return $false}
     if($null-ne$Entry.PSObject.Properties['enabled']-and-not[bool]$Entry.enabled){return $false}
+    # Phase M2 engine scope: a registry entry MAY declare `agentEngines`.
+    # Absence of the property keeps the entry in the Dual role architecture
+    # exactly as before (every pre-M2 entry). A declaration excludes the entry
+    # from any role whose agent engine is not listed, so a Muse-registry model
+    # (agentEngines: ["muse"]) can never surface as a Dual
+    # primaryEngineer/deepEngineer/reviewer/solver/fallback/visualReviewer
+    # candidate even when it supports tools. The filter is capability/metadata
+    # driven — there is no model-id conditional anywhere.
+    if($null-ne$Entry.PSObject.Properties['agentEngines']){
+        $declaredEngines=@($Entry.agentEngines)
+        if(@($declaredEngines|Where-Object{$_-eq'dual'}).Count-eq0){return $false}
+    }
     $req=Get-AihRoleRequirements $Role
     if($req.requiresReasoning-and$null-ne$Entry.PSObject.Properties['supportsReasoning']-and-not[bool]$Entry.supportsReasoning){return $false}
     if($req.requiresTools-and$null-ne$Entry.PSObject.Properties['supportsTools']-and-not[bool]$Entry.supportsTools){return $false}

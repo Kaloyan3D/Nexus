@@ -42,8 +42,69 @@ function Get-AihMuseProfiles {
         if([string]::IsNullOrWhiteSpace($id)){throw 'Muse profile is missing an id.'}
         if($seen.ContainsKey($id)){throw "Muse profile id '$id' is duplicated."}
         $seen[$id]=$true
+        # Phase M2: the optional model binding must reference a MODEL REGISTRY
+        # id (never a provider id). A declared but malformed binding fails
+        # closed here instead of resolving to nothing at transport time.
+        if($null-ne$museProfile.PSObject.Properties['model']-and$null-ne$museProfile.model){
+            if($null-eq$museProfile.model.PSObject.Properties['primary']){throw "Muse profile '$id' model binding is missing model.primary."}
+            if([string]::IsNullOrWhiteSpace([string]$museProfile.model.primary)){throw "Muse profile '$id' model.primary is empty."}
+        }
     }
     $profiles
+}
+
+function Resolve-AihMuseProfileModel {
+    # Phase M2 transport chain: Muse Profile -> model registry entry ->
+    # provider configuration identifier. This is RESOLUTION ONLY — it never
+    # dispatches execution, and the returned provider id is a settings.yaml
+    # llm-pi-ai.providers route, not a URL or credential. Returns $null when
+    # the chain cannot be satisfied (unknown/disabled/engine-scoped-away model,
+    # missing binding, or unsupported reasoning level); callers fail closed.
+    param(
+        [Parameter(Mandatory=$true)][object]$MuseProfile,
+        [Parameter(Mandatory=$true)][object]$Registry,
+        [string]$Reasoning
+    )
+    if($null-eq$MuseProfile-or$null-eq$Registry){return $null}
+    if($null-eq$MuseProfile.PSObject.Properties['model']-or$null-eq$MuseProfile.model){return $null}
+    if($null-eq$MuseProfile.model.PSObject.Properties['primary']){return $null}
+    $modelId=([string]$MuseProfile.model.primary).Trim()
+    if([string]::IsNullOrWhiteSpace($modelId)){return $null}
+    $entry=$null
+    foreach($candidate in @($Registry.models)){if([string]$candidate.id -eq $modelId){$entry=$candidate;break}}
+    if($null-eq$entry){return $null}
+    if($null-ne$entry.PSObject.Properties['enabled']-and-not[bool]$entry.enabled){return $null}
+    # Defense in depth: the binding may only resolve to a model scoped to the
+    # muse engine. A model that Dual roles can also claim is a configuration
+    # error and must not silently serve the Muse plane.
+    if($null-ne$entry.PSObject.Properties['agentEngines']){
+        $declaredEngines=@($entry.agentEngines)
+        if(@($declaredEngines|Where-Object{$_-eq'muse'}).Count-eq0){return $null}
+    }
+    $requested=if(-not[string]::IsNullOrWhiteSpace($Reasoning)){$Reasoning}
+        elseif($null-ne$MuseProfile.PSObject.Properties['reasoning']-and$null-ne$MuseProfile.reasoning.PSObject.Properties['default']){[string]$MuseProfile.reasoning.default}
+        else{''}
+    if(-not[string]::IsNullOrWhiteSpace($requested)){
+        $levels=@();if($null-ne$entry.PSObject.Properties['supportedReasoningLevels']){$levels=@($entry.supportedReasoningLevels)}
+        if(@($levels|Where-Object{$_-eq$requested}).Count-eq0){return $null}
+    }
+    $provider=if($null-ne$entry.PSObject.Properties['providers']){$entry.providers}else{$null}
+    $resolvedProvider=$null
+    if($null-ne$provider){
+        if(-not[string]::IsNullOrWhiteSpace($requested)-and$null-ne$provider.PSObject.Properties[$requested]){$resolvedProvider=[string]$provider.$requested}
+        elseif($null-ne$provider.PSObject.Properties['default']){$resolvedProvider=[string]$provider.default}
+    }
+    if([string]::IsNullOrWhiteSpace($resolvedProvider)-and$null-ne$entry.PSObject.Properties['provider']){$resolvedProvider=[string]$entry.provider}
+    if([string]::IsNullOrWhiteSpace($resolvedProvider)){return $null}
+    [pscustomobject][ordered]@{
+        ModelId=$modelId
+        Model=if($null-ne$entry.PSObject.Properties['model']-and-not[string]::IsNullOrWhiteSpace([string]$entry.model)){[string]$entry.model}else{$modelId}
+        ModelDisplayName=[string]$entry.displayName
+        Vendor=[string]$entry.vendor
+        Provider=$resolvedProvider
+        Reasoning=$requested
+        DataUseTier=if($null-ne$entry.PSObject.Properties['dataUseTier']){[string]$entry.dataUseTier}else{$null}
+    }
 }
 
 function Find-AihProfileById {
