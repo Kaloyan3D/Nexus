@@ -355,6 +355,201 @@ else {
     Write-Host 'NOTE: Setup.ps1 completion probe runs on the Windows plane only; the exit-semantics text contract is asserted on every OS.'
 }
 
+# TASK-0033: the Windows ROOT setup.ps1 exit-semantics contract. Every
+# invocation in setup.ps1 targets a PowerShell .ps1 script (Setup.ps1,
+# Set-DeepSeekKey.ps1, Set-OpenAiOAuth.ps1, Doctor.ps1, Test-Harness.ps1) and
+# none targets a native executable, so the file must contain NO $LASTEXITCODE
+# read at all: after a .ps1 invocation that variable is either unset (a
+# terminating StrictMode RuntimeException that killed SUCCESSFUL installs on
+# a fresh process) or stale from an unrelated earlier native command - never
+# the invoked script's result. Failures still propagate without the read: the
+# child scripts throw under Set-StrictMode/$ErrorActionPreference='Stop', and
+# Doctor.ps1/Test-Harness.ps1 terminate the process themselves via `exit` on
+# a failing local check. setup.ps1 is a Windows-only entry point (it throws on
+# non-Windows), so this whole contract is Windows-gated.
+if ($runningOnWindows) {
+    $rootSetupLines = @($rootSetupText -split "\r?\n")
+    foreach ($rootLine in $rootSetupLines) {
+        $rootTrimmed = $rootLine.Trim()
+        if ($rootTrimmed.Length -gt 0 -and -not $rootTrimmed.StartsWith('#') -and $rootTrimmed.Contains('$LASTEXITCODE')) {
+            throw ('FAIL: root setup.ps1 reads the native exit code; it invokes only PowerShell .ps1 scripts and script failures must be terminating errors (TASK-0033): ' + $rootTrimmed)
+        }
+    }
+    foreach ($rootAnchor in @(
+        '& $installer -InstallRoot $InstallRoot -SkipPathUpdate:$SkipPathUpdate',
+        'scripts/Set-DeepSeekKey.ps1',
+        'scripts/Set-OpenAiOAuth.ps1',
+        'scripts/Doctor.ps1',
+        'scripts/Test-Harness.ps1'
+    )) {
+        if (-not $rootSetupText.Contains($rootAnchor)) {
+            throw ('FAIL: root setup.ps1 lost its PowerShell .ps1 invocation anchor, so the exit-semantics contract above is vacuous (TASK-0033): ' + $rootAnchor)
+        }
+    }
+
+    function New-AihRootSetupExitSandbox {
+        param([string]$ProbeRoot)
+        $probeSource = Join-Path $ProbeRoot 'source'
+        $probeInstall = Join-Path $ProbeRoot 'install'
+        foreach ($probeDirectory in @($probeSource, (Join-Path $probeSource 'scripts'), $probeInstall, (Join-Path $probeInstall 'scripts'))) {
+            New-Item -ItemType Directory -Force -Path $probeDirectory | Out-Null
+        }
+        # The REAL Windows root entry point runs unchanged in the sandbox.
+        Copy-Item -LiteralPath (Join-Path $InstallRoot 'setup.ps1') -Destination (Join-Path $probeSource 'setup.ps1') -Force
+        # The stub .ps1 scripts SUCCEED without running any native command, so
+        # any post-invocation $LASTEXITCODE read reproduces the fresh-process
+        # defect deterministically (unset under StrictMode, stale otherwise).
+        $stubInstaller = @'
+param(
+    [string]$InstallRoot,
+    [switch]$SkipPathUpdate
+)
+if ($env:AIH_ROOT_SETUP_EXIT_RECORDER) {
+    [System.IO.File]::AppendAllLines($env:AIH_ROOT_SETUP_EXIT_RECORDER, [string[]]@('installer=ok; skippathupdate=' + [bool]$SkipPathUpdate))
+}
+if ($env:AIH_ROOT_SETUP_FAIL_MODE -eq 'installer-throws') { throw 'probe: harness installation failed deterministically' }
+'@
+        [IO.File]::WriteAllText((Join-Path $probeSource 'scripts/Setup.ps1'), $stubInstaller, [Text.UTF8Encoding]::new($false))
+        $stubDeepSeekKey = @'
+param([string]$InstallRoot)
+if ($env:AIH_ROOT_SETUP_EXIT_RECORDER) {
+    [System.IO.File]::AppendAllLines($env:AIH_ROOT_SETUP_EXIT_RECORDER, [string[]]@('deepseek=ok'))
+}
+'@
+        [IO.File]::WriteAllText((Join-Path $probeInstall 'scripts/Set-DeepSeekKey.ps1'), $stubDeepSeekKey, [Text.UTF8Encoding]::new($false))
+        $stubOpenAiOAuth = @'
+param([string]$InstallRoot)
+if ($env:AIH_ROOT_SETUP_EXIT_RECORDER) {
+    [System.IO.File]::AppendAllLines($env:AIH_ROOT_SETUP_EXIT_RECORDER, [string[]]@('openai=ok'))
+}
+'@
+        [IO.File]::WriteAllText((Join-Path $probeInstall 'scripts/Set-OpenAiOAuth.ps1'), $stubOpenAiOAuth, [Text.UTF8Encoding]::new($false))
+        # Credential presence is environment-switchable so the probe covers BOTH
+        # local-check branches (Doctor.ps1 and Test-Harness.ps1).
+        $stubCommon = @'
+function Get-AihDeepSeekKey {
+    param([string]$InstallRoot)
+    if ($env:AIH_ROOT_SETUP_PROBE_CREDENTIAL) { return 'probe-credential' }
+    return $null
+}
+'@
+        [IO.File]::WriteAllText((Join-Path $probeInstall 'scripts/Common.ps1'), $stubCommon, [Text.UTF8Encoding]::new($false))
+        $stubDoctor = @'
+param(
+    [string]$InstallRoot,
+    [string]$Preset,
+    [switch]$Offline
+)
+if ($env:AIH_ROOT_SETUP_EXIT_RECORDER) {
+    [System.IO.File]::AppendAllLines($env:AIH_ROOT_SETUP_EXIT_RECORDER, [string[]]@('doctor=ok; preset=' + $Preset))
+}
+'@
+        [IO.File]::WriteAllText((Join-Path $probeInstall 'scripts/Doctor.ps1'), $stubDoctor, [Text.UTF8Encoding]::new($false))
+        $stubTestHarness = @'
+param([string]$InstallRoot)
+if ($env:AIH_ROOT_SETUP_EXIT_RECORDER) {
+    [System.IO.File]::AppendAllLines($env:AIH_ROOT_SETUP_EXIT_RECORDER, [string[]]@('testharness=ok'))
+}
+'@
+        [IO.File]::WriteAllText((Join-Path $probeInstall 'scripts/Test-Harness.ps1'), $stubTestHarness, [Text.UTF8Encoding]::new($false))
+    }
+
+    function Invoke-AihRootSetupExitProbe {
+        param([string]$ProbeRoot, [string]$RecorderPath, [string]$FailMode, [switch]$WithCredential)
+        [IO.File]::WriteAllText($RecorderPath, '')
+        $savedProbeRecorder = $env:AIH_ROOT_SETUP_EXIT_RECORDER
+        $savedProbeFailMode = $env:AIH_ROOT_SETUP_FAIL_MODE
+        $savedProbeCredential = $env:AIH_ROOT_SETUP_PROBE_CREDENTIAL
+        $savedProbePreference = $ErrorActionPreference
+        try {
+            Set-Item Env:AIH_ROOT_SETUP_EXIT_RECORDER -Value $RecorderPath
+            if ([string]::IsNullOrEmpty($FailMode)) { Remove-Item Env:AIH_ROOT_SETUP_FAIL_MODE -ErrorAction SilentlyContinue } else { Set-Item Env:AIH_ROOT_SETUP_FAIL_MODE -Value $FailMode }
+            if ($WithCredential) { Set-Item Env:AIH_ROOT_SETUP_PROBE_CREDENTIAL -Value '1' } else { Remove-Item Env:AIH_ROOT_SETUP_PROBE_CREDENTIAL -ErrorAction SilentlyContinue }
+            $ErrorActionPreference = 'Continue'
+            # Child hosts are resolved through the shared abstraction
+            # (Get-AihPowerShellHost), never spawned bare.
+            $rootSetupProbeHost = Get-AihPowerShellHost -InstallRoot $InstallRoot
+            & $rootSetupProbeHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path (Join-Path $ProbeRoot 'source') 'setup.ps1') -InstallRoot (Join-Path $ProbeRoot 'install') 2>&1 | ForEach-Object { [string]$_ }
+        }
+        finally {
+            $ErrorActionPreference = $savedProbePreference
+            if ($null -eq $savedProbeRecorder) { Remove-Item Env:AIH_ROOT_SETUP_EXIT_RECORDER -ErrorAction SilentlyContinue } else { Set-Item Env:AIH_ROOT_SETUP_EXIT_RECORDER -Value $savedProbeRecorder }
+            if ($null -eq $savedProbeFailMode) { Remove-Item Env:AIH_ROOT_SETUP_FAIL_MODE -ErrorAction SilentlyContinue } else { Set-Item Env:AIH_ROOT_SETUP_FAIL_MODE -Value $savedProbeFailMode }
+            if ($null -eq $savedProbeCredential) { Remove-Item Env:AIH_ROOT_SETUP_PROBE_CREDENTIAL -ErrorAction SilentlyContinue } else { Set-Item Env:AIH_ROOT_SETUP_PROBE_CREDENTIAL -Value $savedProbeCredential }
+        }
+    }
+
+    $rootSetupProbeRoot = Join-Path ([IO.Path]::GetTempPath()) ('aih-rootsetup-exit-' + [guid]::NewGuid().ToString('N'))
+    try {
+        New-AihRootSetupExitSandbox -ProbeRoot $rootSetupProbeRoot
+        $credRecorderPath = Join-Path $rootSetupProbeRoot 'recorder-credential.txt'
+        $noCredRecorderPath = Join-Path $rootSetupProbeRoot 'recorder-nocredential.txt'
+        $failRecorderPath = Join-Path $rootSetupProbeRoot 'recorder-failure.txt'
+
+        # Behavioral regression 1/3: with a DeepSeek credential configured, root
+        # setup.ps1 must COMPLETE through the Doctor.ps1 local-check branch. The
+        # pre-fix defect read the native exit code after every .ps1 invocation;
+        # the stubs run no native command, so that read was a terminating
+        # StrictMode RuntimeException that killed a fully successful setup.
+        $credProbeOutput = Invoke-AihRootSetupExitProbe -ProbeRoot $rootSetupProbeRoot -RecorderPath $credRecorderPath -WithCredential
+        $credProbeExit = $LASTEXITCODE
+        if ($credProbeExit -ne 0) {
+            throw ('FAIL: root setup.ps1 must complete after succeeding .ps1 invocations (Doctor branch, exit ' + $credProbeExit + '): ' + (@($credProbeOutput) -join ' '))
+        }
+        $credRecorded = @(Get-Content -LiteralPath $credRecorderPath)
+        foreach ($credMarker in @('installer=ok', 'deepseek=ok', 'openai=ok', 'doctor=ok')) {
+            if (@($credRecorded | Where-Object { $_.StartsWith($credMarker) }).Count -ne 1) {
+                throw ('FAIL: root setup.ps1 did not run exactly one ' + $credMarker + ' step (recorder: ' + ($credRecorded -join ' | ') + ')')
+            }
+        }
+        $credProbeText = (@($credProbeOutput) -join ' ')
+        if (-not $credProbeText.Contains('Setup complete')) {
+            throw ('FAIL: root setup.ps1 did not reach its completion line (Doctor branch): ' + $credProbeText)
+        }
+
+        # Behavioral regression 2/3: without a credential the local-check branch
+        # is Test-Harness.ps1 - the same no-native-exit-code contract applies.
+        $noCredProbeOutput = Invoke-AihRootSetupExitProbe -ProbeRoot $rootSetupProbeRoot -RecorderPath $noCredRecorderPath
+        $noCredProbeExit = $LASTEXITCODE
+        if ($noCredProbeExit -ne 0) {
+            throw ('FAIL: root setup.ps1 must complete after succeeding .ps1 invocations (Test-Harness branch, exit ' + $noCredProbeExit + '): ' + (@($noCredProbeOutput) -join ' '))
+        }
+        $noCredRecorded = @(Get-Content -LiteralPath $noCredRecorderPath)
+        foreach ($noCredMarker in @('installer=ok', 'deepseek=ok', 'openai=ok', 'testharness=ok')) {
+            if (@($noCredRecorded | Where-Object { $_.StartsWith($noCredMarker) }).Count -ne 1) {
+                throw ('FAIL: root setup.ps1 did not run exactly one ' + $noCredMarker + ' step (recorder: ' + ($noCredRecorded -join ' | ') + ')')
+            }
+        }
+        $noCredProbeText = (@($noCredProbeOutput) -join ' ')
+        if (-not $noCredProbeText.Contains('Setup complete')) {
+            throw ('FAIL: root setup.ps1 did not reach its completion line (Test-Harness branch): ' + $noCredProbeText)
+        }
+
+        # Behavioral regression 3/3: removing the reads must not swallow real
+        # failures - a terminating error in an invoked .ps1 must still surface
+        # as a non-zero process exit with the error message visible.
+        $failProbeOutput = Invoke-AihRootSetupExitProbe -ProbeRoot $rootSetupProbeRoot -RecorderPath $failRecorderPath -FailMode 'installer-throws'
+        $failProbeExit = $LASTEXITCODE
+        $failProbeText = (@($failProbeOutput) -join ' ')
+        if ($failProbeExit -eq 0) {
+            throw ('FAIL: root setup.ps1 must exit non-zero when an invoked .ps1 raises a terminating error (TASK-0033): ' + $failProbeText)
+        }
+        if (-not $failProbeText.Contains('probe: harness installation failed deterministically')) {
+            throw ('FAIL: the failing .ps1 terminating error did not propagate out of root setup.ps1 (TASK-0033): ' + $failProbeText)
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $rootSetupProbeRoot) { Remove-Item -LiteralPath $rootSetupProbeRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    Write-Host 'PASS: root setup.ps1 invokes only .ps1 scripts and reads no exit code after them (TASK-0033)'
+    Write-Host 'PASS: root setup.ps1 completes both local-check branches after succeeding .ps1 invocations (TASK-0033)'
+    Write-Host 'PASS: root setup.ps1 propagates a failing .ps1 invocation as a non-zero terminating error (TASK-0033)'
+}
+else {
+    Write-Host 'NOTE: root setup.ps1 exit-semantics contract (TASK-0033) is Windows-gated; setup.ps1 is a Windows-only entry point.'
+}
+
 $platformNote = if ($runningOnWindows) { 'aih.cmd %~dp0/AIH_ROOT contracts' } else { 'extensionless POSIX aih contracts (native, executable)' }
 Write-Host "PASS: platform launcher contract asserted: $platformNote"
 Write-Host 'PASS: repo-local setup/update/launchers are portable and checkout-relative'
