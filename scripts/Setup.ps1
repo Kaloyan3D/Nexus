@@ -141,16 +141,21 @@ elseif (-not (Test-Path -LiteralPath $layout.Dsh)) {
     throw '-SkipDependencyInstall requires an existing installed DSH runtime.'
 }
 
+# Complete-Install.ps1 is a PowerShell script, not a native executable: it
+# defines no process exit code, and its failures are terminating errors that
+# propagate to this caller and abort Setup.ps1. TASK-0032: the old
+# native-exit-code read after this invocation was undefined on
+# -SkipDependencyInstall runs and stale from the npm call otherwise.
 & (Join-Path $layout.Scripts 'Complete-Install.ps1') -InstallRoot $InstallRoot -ResetManagedSettings:$ResetManagedSettings
-if ($LASTEXITCODE -ne 0) { throw 'Nexus install composition failed.' }
 
 # Publish the canonical global engineering skills into the user's native
 # Agent Skills root (~.agentsskills). Deterministic, idempotent, and
 # non-destructive (unrelated skills are preserved; same-name non-Nexus
 # skills refuse to be overwritten). -SkipSkillsInstall opts out.
 if (-not $SkipSkillsInstall) {
+    # Install-NexusSkills.ps1 is a PowerShell script: its failures are
+    # terminating errors that propagate to this caller (TASK-0032).
     & (Join-Path $layout.Scripts 'Install-NexusSkills.ps1') -InstallRoot $InstallRoot
-    if ($LASTEXITCODE -ne 0) { throw 'Nexus skill installation failed; fix the reported skill source or target conflict and rerun Setup.ps1.' }
 }
 
 if (-not $SkipPathUpdate) {
