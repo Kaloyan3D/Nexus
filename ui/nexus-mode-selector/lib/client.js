@@ -30,6 +30,7 @@ window.__ModuleLoader__.load({
     const AGENT_PRESET_SETTINGS_NS = "agent-presets";
 
     function presetOf(session) {
+      if (session && typeof session.agentPreset === "string") return session.agentPreset;
       const value = session && session.projectionValues && session.projectionValues.agentPreset;
       return typeof value === "string" ? value : void 0;
     }
@@ -67,6 +68,8 @@ window.__ModuleLoader__.load({
     }
 
     function createModeController(scope) {
+      // Pinned DSH separates RPC (connection.api) from events (remote.$on).
+      const api = scope.get("connection").api;
       const store = createModeStore({ options: [], current: "", busy: false, error: null });
       let fallback = "";
       let staged;
@@ -74,7 +77,8 @@ window.__ModuleLoader__.load({
       let disposed = false;
 
       async function load() {
-        const result = await scope.remote.agentPresets.list();
+        try {
+        const { result } = await api.agentPresets.list({});
         if (disposed) return;
         if (!result.ok) {
           store.patch({ error: result.error.message || "Unable to read Nexus modes." });
@@ -92,10 +96,13 @@ window.__ModuleLoader__.load({
           current: staged !== void 0 ? staged : session === void 0 ? fallback : displayedPreset(session, fallback),
           error: options.length === 0 ? "Nexus modes are not installed." : null
         });
+        } catch (error) {
+          if (!disposed) store.patch({ error: error instanceof Error ? error.message : String(error) });
+        }
       }
 
       async function persistDefault(id) {
-        const result = await scope.remote.settings.update(AGENT_PRESET_SETTINGS_NS, { default: id }, void 0);
+        const { result } = await api.settings.update({ ns: AGENT_PRESET_SETTINGS_NS, patch: { default: id } });
         if (!result.ok) throw new Error(result.error.message || "Failed to persist the Nexus mode.");
       }
 
@@ -154,8 +161,9 @@ window.__ModuleLoader__.load({
         store.patch({ busy: true, error: null });
         try {
           if (presetOf(session) !== id) {
-            const result = await scope.remote.agentPresets.select(session.id, id);
+            const { result } = await api.agentPresets.select({ sessionId: session.id, agentPreset: id });
             if (!result.ok) throw new Error(result.error.message || "Failed to apply the Nexus mode.");
+            scope.sessions.noteAgentPreset(session.id, result.value.agentPreset);
           }
           await settleAppliedMode(session, id);
         } catch (error) {
@@ -243,9 +251,8 @@ window.__ModuleLoader__.load({
         "slots",
         "sessions",
         "modelDirectories",
-        "remote",
-        "remote.agentPresets",
-        "remote.settings"
+        "connection",
+        "remote"
       ], (scope) => {
         const controller = createModeController(scope);
         // Phase M2.1 (TASK-0038): publish this picker's authoritative client

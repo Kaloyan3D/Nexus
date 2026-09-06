@@ -31,6 +31,7 @@ if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
 $layout = Get-AihLayout $InstallRoot
+& (Join-Path $PSScriptRoot 'Patch-NexusComposer.ps1') -InstallRoot $InstallRoot -SourceRoot $SourceRoot
 
 $frontendDir = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh-web-frontend'
 $frontendManifestPath = Join-Path $frontendDir 'package.json'

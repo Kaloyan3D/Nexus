@@ -571,6 +571,12 @@ try {
     $fixtureModelSel = Join-Path $fixtureApp 'dsh-client-ui-model-selection/lib'
     New-Item -ItemType Directory -Force -Path $fixtureModelSel | Out-Null
     [IO.File]::WriteAllText((Join-Path $fixtureModelSel 'client.js'), "const x = effortLabel !== void 0 && (0, react_jsx_runtime.jsx)(`"span`", {`r`n", [Text.UTF8Encoding]::new($false))
+    $composerContract = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'ui/nexus-ui/composer-contract.json') | ConvertFrom-Json
+    foreach ($composerPatch in $composerContract.patches) {
+        $composerPackage = Join-Path $fixtureApp $composerPatch.package
+        [IO.File]::WriteAllText((Join-Path $composerPackage 'package.json'), '{"version":"0.1.1-rc.2"}', [Text.UTF8Encoding]::new($false))
+        [IO.File]::AppendAllText((Join-Path $composerPackage 'lib/client.js'), "`r`n" + $composerPatch.before.Replace("`n", "`r`n"), [Text.UTF8Encoding]::new($false))
+    }
     $fixtureModels = Join-Path $fixtureApp 'dsh-client-ui-settings-models/lib'
     New-Item -ItemType Directory -Force -Path $fixtureModels | Out-Null
     # Build the welcome-notice block from the exact copy strings in patch-copy.json so the
@@ -618,6 +624,31 @@ try {
     $secondConversation = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureConversation 'client.js')
     $secondLayout = Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $fixtureLayout 'client.js')
     Assert-Aih ($firstIndex.Hash -eq $secondIndex.Hash -and $firstModels.Hash -eq $secondModels.Hash -and $firstRenderer.Hash -eq $secondRenderer.Hash -and $firstConversation.Hash -eq $secondConversation.Hash -and $firstLayout.Hash -eq $secondLayout.Hash) 'fixture: Nexus patch is idempotent (second run changes nothing)'
+
+    $modelSeatPath = Join-Path $fixtureModelSel 'client.js'
+    $modelSeatText = Get-Content -Raw -Encoding UTF8 -LiteralPath $modelSeatPath
+    $modelSeatContract = $composerContract.patches | Where-Object { $_.package -eq 'dsh-client-ui-model-selection' }
+    foreach ($invalidSeat in @('changed', 'duplicate', 'mixed')) {
+        $brokenSeat = switch ($invalidSeat) {
+            'changed' { $modelSeatText.Replace('}, NexusModelPreference));', '}, UnexpectedPreference));') }
+            'duplicate' { $modelSeatText + "`n" + $modelSeatContract.after }
+            'mixed' { $modelSeatText + "`n" + $modelSeatContract.before }
+        }
+        [IO.File]::WriteAllText($modelSeatPath, $brokenSeat, [Text.UTF8Encoding]::new($false))
+        $rejectedSeat = $false
+        try { & (Join-Path $InstallRoot 'scripts/Patch-NexusComposer.ps1') -InstallRoot $fixture -SourceRoot $InstallRoot }
+        catch { $rejectedSeat = $true }
+        Assert-Aih $rejectedSeat "fixture: composer patch rejects $invalidSeat upstream contract"
+        Assert-Aih ((Get-FileHash -LiteralPath (Join-Path $fixtureConversation 'client.js')).Hash -eq $secondConversation.Hash) 'fixture: failed composer preflight leaves conversation bundle unchanged'
+    }
+    [IO.File]::WriteAllText($modelSeatPath, $modelSeatText, [Text.UTF8Encoding]::new($false))
+    $modelSeatManifest = Join-Path (Split-Path -Parent $fixtureModelSel) 'package.json'
+    [IO.File]::WriteAllText($modelSeatManifest, '{"version":"0.1.2"}', [Text.UTF8Encoding]::new($false))
+    $rejectedVersion = $false
+    try { & (Join-Path $InstallRoot 'scripts/Patch-NexusComposer.ps1') -InstallRoot $fixture -SourceRoot $InstallRoot }
+    catch { $rejectedVersion = $true }
+    Assert-Aih $rejectedVersion 'fixture: composer patch rejects an unpinned package version'
+    [IO.File]::WriteAllText($modelSeatManifest, '{"version":"0.1.1-rc.2"}', [Text.UTF8Encoding]::new($false))
 
     # Fail-closed: when the pinned upstream structure changes, the patch must refuse.
     [IO.File]::WriteAllText((Join-Path $fixtureRenderer 'client.js'), "const productTitle = ""Something Else"";`r`n", [Text.UTF8Encoding]::new($false))

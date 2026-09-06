@@ -197,9 +197,9 @@ if (-not (Test-Path -LiteralPath $modeClientPath)) {
 $modeClient = Get-Content -Raw -Encoding UTF8 -LiteralPath $modeClientPath
 foreach ($contract in @(
     'priority: -100',
-    'remote.agentPresets.select',
+    'api.agentPresets.select',
     'modelDirectories.directoryFor',
-    'remote.settings.update',
+    'api.settings.update',
     'if (!session.blank)'
 )) {
     if (-not $modeClient.Contains($contract)) {

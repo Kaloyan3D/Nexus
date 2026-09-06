@@ -1062,6 +1062,7 @@ function hasNexusCatalogContract(state) {
 }
 
 function userFacingProfiles(state) {
+	if (!state || typeof state !== "object") return [];
 	if (hasNexusCatalogContract(state)) {
 		return Array.isArray(state.nexusProfiles) ? state.nexusProfiles : [];
 	}
@@ -1140,8 +1141,12 @@ function useEngineeringEditor(sessionId, enabled) {
 
 	const refresh = react.useCallback((then) => {
 		fetch("./nexus/engineering-profile.json", { cache: "no-store" })
-			.then((response) => response.json().catch(() => null))
+			.then((response) => {
+				if (!response.ok) throw new Error("Engineering configuration unavailable");
+				return response.json();
+			})
 			.then((data) => {
+				if (!data || !Array.isArray(data.profiles)) throw new Error("Invalid engineering configuration");
 				setState(data);
 				setFailed(false);
 				setFetchedAt(Date.now());
@@ -1872,7 +1877,7 @@ function EngineeringSelector({ editor }) {
 				title: "Engineering profile — the PREFERRED engineer applies at the next safe execution boundary",
 				onClick: () => setOpen(!open),
 				children: [
-					react_jsx_runtime.jsx("span", { className: "nx-eng-trigger-label", children: "Engineering" }, "label"),
+					react_jsx_runtime.jsx("span", { className: "nx-eng-trigger-label", children: editor.failed || isCatalogUnavailable(editor.state) ? "Engineering configuration unavailable" : !ready ? "Profile · Loading" : "Profile" }, "label"),
 					react_jsx_runtime.jsx("span", { className: "nx-eng-trigger-caret", children: "▾" }, "caret"),
 				],
 			}),
@@ -1893,10 +1898,7 @@ function EngineeringSelector({ editor }) {
 }
 
 /**
-* Composer seat (conversation.input.right): the read-only executor pills
-* plus — in Normal Engineering mode only — the Engineering selector that
-* replaces the legacy DSH model selector as the effective preference
-* control. Legacy presets keep the exact previous rendering.
+* Composer mode derivation shared by the preference owner and executor pills.
 */
 /**
  * The stable preset-id → composer-mode classification. The SAME ids the
@@ -1973,27 +1975,8 @@ function composerModeOfSession(session, snapshot, nexusPreset) {
 	return { mode: "engineering", source: "boot-fail-closed" };
 }
 
-/**
- * Body-level semantic mode marker (data-nexus-composer-mode="engineering").
- * Pure and exported so the regression suite can assert the exact install /
- * removal semantics the layout effect performs: engineering installs the
- * marker, legacy/hero-legacy removes it. The scoped CSS rule keyed on the
- * STABLE slot outlet wrapper ([data-slot='conversation.input.model']) only
- * ever reads this marker — never a CSS-module hash.
- */
-function applyComposerModeMarker(body, engineeringMode) {
-	if (!engineeringMode) {
-		delete body.dataset.nexusComposerMode;
-		return null;
-	}
-	body.dataset.nexusComposerMode = "engineering";
-	return () => {
-		delete body.dataset.nexusComposerMode;
-	};
-}
-
-function ExecutorChip({ session }) {
-	const sessionId = session && typeof session.sessionId === "string" ? session.sessionId : null;
+function useComposerState(session, explicitSessionId) {
+	const sessionId = explicitSessionId || (session && typeof session.sessionId === "string" ? session.sessionId : null);
 	const { snapshot } = useControllerSnapshot(sessionId);
 	// Phase M2.1 (TASK-0038): the pre-session posture rides the shared
 	// nexusModeState service (subscription re-renders synchronously with the
@@ -2004,18 +1987,6 @@ function ExecutorChip({ session }) {
 	// The global profile catalog loads whenever the Engineering surface is
 	// enabled — hero included (no sessionId gate; the endpoint is global).
 	const editor = useEngineeringEditor(sessionId, engineeringMode);
-	// Body-level mode flag: scoped CSS retires the upstream DSH model seat
-	// while the Engineering selector owns the composer preference. Set through
-	// useLayoutEffect so the flag exists BEFORE the first paint after a
-	// restart — the mode derivation above already knows the posture client-side
-	// (mode-selector state on the hero, the session preset for an existing
-	// session), so the shipped seat never flashes and the Profile UI never
-	// disappears. Legacy never sets it, so the shipped selector stays untouched.
-	react.useLayoutEffect(() => {
-		const body = typeof document !== "undefined" && document.body ? document.body : null;
-		if (!body) return;
-		return applyComposerModeMarker(body, engineeringMode);
-	}, [engineeringMode]);
 	// Follow external preference changes (e.g. saved from the Control Room)
 	// without clobbering unsaved operator edits in the open popover.
 	const composer = snapshot && snapshot.composer && typeof snapshot.composer === "object" ? snapshot.composer : null;
@@ -2029,18 +2000,38 @@ function ExecutorChip({ session }) {
 		seenProfileRef.current = preferredProfileId;
 		if (!dirtyRef.current) editor.refresh();
 	}, [engineeringMode, preferredProfileId, editor.refresh]);
-	const content = executorChipContent(snapshot, engineeringMode ? editor : null, derivedMode.mode);
-	if (!engineeringMode) {
-		// Legacy mode: unchanged rendering — pills only, no control chrome.
-		return react_jsx_runtime.jsx(ExecutorPill, { content });
-	}
-	return react_jsx_runtime.jsxs("span", {
-		className: "nx-executor-chip",
-		children: [
-			react_jsx_runtime.jsx(ExecutorPill, { content }, "pills"),
-			react_jsx_runtime.jsx(EngineeringSelector, { editor }, "selector"),
-		],
-	});
+    return { snapshot, editor, derivedMode, nexusPreset };
+}
+
+// Additive execution status has no responsibility for the preference control.
+function ExecutorChip({ session }) {
+    const { snapshot, editor, derivedMode } = useComposerState(session);
+    return react_jsx_runtime.jsx(ExecutorPill, {
+        content: executorChipContent(snapshot, derivedMode.mode === "engineering" ? editor : null, derivedMode.mode),
+    });
+}
+
+// Installed into the pinned model seat by Patch-NexusComposer.ps1. The original
+// upstream component is supplied as a React element, so its hooks run ONLY in
+// legacy mode. No DOM mutation, slot priority race, or copied Model/Effort UI.
+function ComposerPreference({ sessionId, useSession, useSessions, legacy }) {
+    const session = useSession ? useSession((value) => value) : null;
+    const sessions = useSessions ? useSessions((value) => value) : null;
+    const summary = sessions && sessions.byId ? sessions.byId[sessionId] : null;
+    // A blank session still displays the hero picker. Its staged selection
+    // outranks a polled snapshot of the previous preset during mode switching.
+    const current = !sessionId || (summary && summary.blank) ? null : session;
+    const { editor, derivedMode, nexusPreset } = useComposerState(current, sessionId);
+    if (derivedMode.mode === "legacy" && !legacy) return null;
+    return react_jsx_runtime.jsx("span", {
+        "data-nexus-preference-owner": derivedMode.mode === "engineering" ? "profiles" : "upstream-model",
+        "data-nexus-composer-mode": derivedMode.mode,
+        "data-nexus-mode-source": derivedMode.source,
+        "data-nexus-preset": nexusPreset,
+        children: derivedMode.mode === "engineering"
+            ? react_jsx_runtime.jsx(EngineeringSelector, { editor })
+            : legacy,
+    });
 }
 //#region styles
 /**
@@ -2198,17 +2189,6 @@ const PANEL_CSS = [
 ".nx-eng-popover{position:absolute;bottom:calc(100% + 8px);right:0;z-index:60;width:360px;max-width:min(92vw,420px);max-height:72vh;overflow:auto;display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-base);box-shadow:0 12px 30px rgba(0,0,0,.3);color:var(--dsw-alias-label-secondary);font-size:11px}",
 ".nx-eng-popover .nx-eng-profile{max-width:216px}",
 ".nx-eng-popover .nx-eng-save{margin-top:4px}",
-// Normal Engineering mode only: the upstream DSH model seat no longer
-// presents itself as the operator's model-preference control — the
-// Engineering selector owns that role. Legacy presets never set the body
-// flag and keep the shipped selector. Phase M2.1 (TASK-0037): the selector
-// targets the STABLE slot outlet wrapper the DSH renderer emits for every
-// registered slot (<div data-slot={slotKey}>), never the CSS-module hash classes of a pinned
-// upstream build — those broke on every upstream refresh and were the root cause of the
-// Profile UI disappearing across restarts (a hard test guard forbids reintroducing any hash
-// upstream ModelSelect seat — root and menu — renders INSIDE the
-// conversation.input.model outlet, so one stable rule retires the whole seat.
-"body[data-nexus-composer-mode='engineering'] [data-slot='conversation.input.model']{display:none!important}",
 ].join("");
 //#endregion
 
@@ -2216,6 +2196,7 @@ const PANEL_CSS = [
 /** Required client service: the UI slot registry. */
 const inject = ["slots", "workspaces"];
 function apply(ctx) {
+	ctx.provide("nexusComposerPreference", { Component: ComposerPreference });
 	if (ctx.workspaces && ctx.workspaces.list) {
 	// Keep the UI Workspace registry and Nexus Phase 3.1 repository foundation
 	// on one identity path. Existing/recent workspaces are reconciled once at
@@ -2358,7 +2339,7 @@ exports.ROOM_TABS = ROOM_TABS;
 exports.executorChipContent = executorChipContent;
 exports.composerModeOfSession = composerModeOfSession;
 exports.classifyNexusPreset = classifyNexusPreset;
-exports.applyComposerModeMarker = applyComposerModeMarker;
+exports.ComposerPreference = ComposerPreference;
 exports.attachNexusModeState = attachNexusModeState;
 exports.subscribeNexusMode = subscribeNexusMode;
 exports.currentNexusModePreset = currentNexusModePreset;
