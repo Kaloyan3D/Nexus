@@ -48,8 +48,18 @@ function museProfilesPathOf(installRoot) {
   return path.join(installRoot, 'config', 'muse-profiles.json')
 }
 
+function modelRegistryPathOf(installRoot) {
+  return path.join(installRoot, 'config', 'model-registry.json')
+}
+
 function loadNexusProfileCatalog(installRoot) {
   return readJson(catalogPathOf(installRoot))
+}
+
+function loadModelRegistry(installRoot) {
+  const document = readJson(modelRegistryPathOf(installRoot))
+  if (!document || document.schemaVersion !== 1 || !Array.isArray(document.models)) return null
+  return document
 }
 
 function loadMuseProfiles(installRoot) {
@@ -229,12 +239,80 @@ function profileEngineOf(installRoot, profileId) {
   return resolved ? resolved.engine : null
 }
 
+// ── Phase M2: Muse profile → model registry → provider resolution ────────
+//
+// The Muse plane resolves its transport the same way the Dual plane does:
+// the profile names a MODEL REGISTRY id (never a provider id), and the
+// registry maps the model to a settings.yaml llm-pi-ai.providers route.
+// RESOLUTION ONLY — this never dispatches execution and the Muse profile
+// stays selectable=false / runnable=false until the Muse agent plane lands.
+
+/** The muse model binding of a profile document entry, or null. */
+function museModelBindingOf(museProfile) {
+  if (!museProfile || !museProfile.model || typeof museProfile.model !== 'object') return null
+  const primary = String(museProfile.model.primary || '').trim()
+  return primary === '' ? null : primary
+}
+
+/**
+ * Resolve a Muse profile's model binding through the registry. Returns
+ * { modelId, model, modelDisplayName, vendor, provider, reasoning,
+ *   dataUseTier } or null when the chain cannot be satisfied (missing
+ * binding, unknown/disabled model, model not scoped to the muse engine, or
+ * unsupported reasoning level). Callers fail closed.
+ */
+function resolveMuseProfileModel(installRoot, profileId, reasoningOverride) {
+  const museDocument = loadMuseProfiles(installRoot)
+  const registry = loadModelRegistry(installRoot)
+  if (!museDocument || !registry) return null
+  const sourceId = normalizeId(profileId)
+  if (!sourceId) return null
+  const museProfile = museProfileById(museDocument, sourceId)
+  if (!museProfile) return null
+  const modelId = museModelBindingOf(museProfile)
+  if (!modelId) return null
+  let entry = null
+  for (const candidate of registry.models || []) {
+    if (candidate && String(candidate.id) === modelId) { entry = candidate; break }
+  }
+  if (!entry || entry.enabled === false) return null
+  // Defense in depth: the binding may only resolve to a model scoped to the
+  // muse engine (agentEngines absent = Dual-plane entry = configuration error).
+  if (Array.isArray(entry.agentEngines) && !entry.agentEngines.includes('muse')) return null
+  const requested = typeof reasoningOverride === 'string' && reasoningOverride !== ''
+    ? reasoningOverride
+    : String((museProfile.reasoning && museProfile.reasoning.default) || '')
+  if (requested !== '') {
+    const levels = Array.isArray(entry.supportedReasoningLevels) ? entry.supportedReasoningLevels : []
+    if (!levels.includes(requested)) return null
+  }
+  const providers = entry.providers && typeof entry.providers === 'object' ? entry.providers : null
+  let provider = null
+  if (providers) {
+    if (requested !== '' && providers[requested]) provider = String(providers[requested])
+    else if (providers.default) provider = String(providers.default)
+  }
+  if (!provider && typeof entry.provider === 'string' && entry.provider !== '') provider = entry.provider
+  if (!provider) return null
+  return {
+    modelId,
+    model: typeof entry.model === 'string' && entry.model !== '' ? entry.model : modelId,
+    modelDisplayName: typeof entry.displayName === 'string' ? entry.displayName : modelId,
+    vendor: typeof entry.vendor === 'string' ? entry.vendor : '',
+    provider,
+    reasoning: requested,
+    dataUseTier: typeof entry.dataUseTier === 'string' ? entry.dataUseTier : null,
+  }
+}
+
 module.exports = {
   SUPPORTED_ENGINES,
   SOURCE_KIND_BY_ENGINE,
   normalizeId,
   catalogPathOf,
   museProfilesPathOf,
+  modelRegistryPathOf,
+  loadModelRegistry,
   loadNexusProfileCatalog,
   loadMuseProfiles,
   museProfileById,
@@ -244,4 +322,6 @@ module.exports = {
   requestedProfileId,
   resolveActiveNexusProfile,
   profileEngineOf,
+  museModelBindingOf,
+  resolveMuseProfileModel,
 }

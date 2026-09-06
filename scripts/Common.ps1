@@ -190,6 +190,42 @@ function Get-AihDeepSeekKey {
     return $value
 }
 
+function Get-AihProviderApiKey {
+    # Phase M2: generic credential accessor for provider routes declared in
+    # settings.yaml llm-pi-ai.providers via `apiKeyEnv`. Same resolution order
+    # and same protected store as Get-AihDeepSeekKey (environment first, then
+    # the data/.credentials.yaml refs line), parameterized by variable name so
+    # a new provider never needs a bespoke credential mechanism. The returned
+    # value must NEVER be logged, echoed, or embedded in error records.
+    param(
+        [Parameter(Mandatory = $true)][string]$ApiKeyEnv,
+        [string]$InstallRoot
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ApiKeyEnv)) { return $null }
+    $environmentValue = [Environment]::GetEnvironmentVariable($ApiKeyEnv)
+    if (-not [string]::IsNullOrWhiteSpace($environmentValue)) {
+        return $environmentValue.Trim()
+    }
+    $layout = Get-AihLayout $InstallRoot
+    if (-not (Test-Path -LiteralPath $layout.Credentials)) {
+        return $null
+    }
+    $escaped = [regex]::Escape($ApiKeyEnv)
+    $line = Get-Content -LiteralPath $layout.Credentials | Where-Object { $_ -match ('^\s*' + $escaped + '\s*:') } | Select-Object -First 1
+    if ($null -eq $line) {
+        return $null
+    }
+    $value = ($line -replace ('^\s*' + $escaped + '\s*:\s*'), '').Trim()
+    if ($value.StartsWith("'") -and $value.EndsWith("'")) {
+        $value = $value.Substring(1, $value.Length - 2).Replace("''", "'")
+    }
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $null
+    }
+    return $value
+}
+
 function Wait-AihEndpoint {
     param(
         [Parameter(Mandatory = $true)][string]$Uri,
