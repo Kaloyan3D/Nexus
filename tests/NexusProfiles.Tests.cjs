@@ -365,7 +365,7 @@ function main() {
     //     metadata surface instead of hanging in the loading gate. The hook
     //     is injected through the same deterministic patch the panel suite
     //     uses; one helper serves every EngineeringEditor render below.
-    const hookHeader = 'function useEngineeringEditor(sessionId) {'
+    const hookHeader = 'function useEngineeringEditor(sessionId, enabled) {'
     const hookPatch = hookHeader + '\n\tif (typeof window !== "undefined" && window.__NX_TEST_EDITOR__ !== undefined) return window.__NX_TEST_EDITOR__;'
     assert.ok(clientSource.includes(hookHeader), 'shared editor hook header found in client.js')
     function renderEditorWithInjection(editorValue, component, props) {

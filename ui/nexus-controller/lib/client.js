@@ -1105,7 +1105,29 @@ const ENGINEERING_ROLE_LABELS = {
 * so the two surfaces always agree. No model compatibility logic lives here:
 * roleRequirements/roleModels arrive resolved from the controller.
 */
-function useEngineeringEditor(sessionId) {
+/**
+ * Phase M2.1 (TASK-0038): the editor's enable/load lifecycle is keyed on the
+ * ENGINEERING SURFACE being enabled — not on a session existing. GET
+ * /nexus/engineering-profile.json is GLOBAL Engineering Profile configuration
+ * (catalog, registry, preferred profile), so the composer editor loads while
+ * the user is still on the new-session hero screen (no sessionId yet). The
+ * session id stays optional: it only names the session on a save action and
+ * keeps the historical refetch-on-session-change behavior. Callers that pass
+ * no `enabled` (the Control Room tab) keep the always-enabled behavior.
+ */
+/**
+ * The load gate of the editor effect, exported for deterministic regression
+ * coverage: the global profile state loads exactly when the Engineering
+ * surface is enabled — session existence is never consulted (TASK-0038 G).
+ */
+function engineeringEditorLoadGate(surfaceEnabled, refresh) {
+	if (!surfaceEnabled) return false;
+	if (typeof refresh !== "function") return false;
+	refresh();
+	return true;
+}
+
+function useEngineeringEditor(sessionId, enabled) {
 	const [state, setState] = react.useState(null);
 	const [failed, setFailed] = react.useState(false);
 	const [profileId, setProfileId] = react.useState(null);
@@ -1128,10 +1150,10 @@ function useEngineeringEditor(sessionId) {
 			.catch(() => setFailed(true));
 	}, []);
 
+	const surfaceEnabled = enabled !== false;
 	react.useEffect(() => {
-		if (!sessionId) return;
-		refresh();
-	}, [sessionId, refresh]);
+		engineeringEditorLoadGate(surfaceEnabled, refresh);
+	}, [surfaceEnabled, sessionId, refresh]);
 
 	// initialize the form once state arrives (or after a save refreshes it)
 	react.useEffect(() => {
@@ -1601,6 +1623,67 @@ function ControllerToggle({ sessionId }) {
 }
 //#endregion
 
+//#region nexus mode bridge (shared client-state contract, TASK-0038)
+/**
+ * Phase M2.1 mode ownership: the composer must classify the PRE-SESSION
+ * (hero / no-session) posture from the mode selector's authoritative client
+ * state — never from "no session == legacy", which is what let the upstream
+ * DSH model selector survive a restart on the hero screen while the mode
+ * picker already showed "Normal Engineering".
+ *
+ * The contract is a real shared client-state service, not DOM scraping:
+ * @nexus/mode-selector publishes its mode store as the `nexusModeState`
+ * cordis service; `current` carries the STABLE agent-preset id
+ * ("aih-engineering" / "aih-deepseek") — never a display label and never a
+ * model id. This bridge is the controller's late-binding consumer: the
+ * composition boots the controller row before the mode-selector row, so the
+ * service arrives through ctx.inject(["nexusModeState"], ...) after apply;
+ * the bridge re-announces both the attachment and every store patch to the
+ * React subscription below, which is what makes a hero mode change update
+ * the composer posture immediately (no session creation, no refresh, no
+ * polling). If the service never appears (mode selector absent), the bridge
+ * stays empty and the mode derivation fails closed — the controller still
+ * boots.
+ */
+let nexusModeFacade = null;
+let nexusModeFacadeDetach = null;
+let nexusModeVersion = 0;
+const nexusModeListeners = new Set();
+function announceNexusMode() {
+	nexusModeVersion += 1;
+	for (const listener of [...nexusModeListeners]) {
+		try { listener(); } catch { /* bridge observers must not break the composer */ }
+	}
+}
+/** Attach (or clear with null) the shared mode-state facade. Test-visible. */
+function attachNexusModeState(facade) {
+	const next = facade && typeof facade.getSnapshot === "function" && typeof facade.subscribe === "function" ? facade : null;
+	if (next === nexusModeFacade) return;
+	if (nexusModeFacadeDetach) {
+		const detach = nexusModeFacadeDetach;
+		nexusModeFacadeDetach = null;
+		try { detach(); } catch { /* a broken prior facade must not block a new one */ }
+	}
+	nexusModeFacade = next;
+	if (nexusModeFacade) {
+		nexusModeFacadeDetach = nexusModeFacade.subscribe(announceNexusMode);
+	}
+	announceNexusMode();
+}
+/** useSyncExternalStore-compatible subscription over the bridge. */
+function subscribeNexusMode(listener) {
+	nexusModeListeners.add(listener);
+	return () => nexusModeListeners.delete(listener);
+}
+/** The authoritative pre-session mode: a stable preset id, or "" when the
+ * shared state has not landed (the derivation then falls through). */
+function currentNexusModePreset() {
+	if (!nexusModeFacade) return "";
+	const snapshot = nexusModeFacade.getSnapshot();
+	return snapshot && typeof snapshot.current === "string" ? snapshot.current : "";
+}
+//#endregion
+
 //#region composer executor pill
 /**
 * Additive composer tool-row pills (conversation.input.right) that separate
@@ -1668,10 +1751,17 @@ function composerPreferredEngineer(snapshot, editor) {
 	return composer.preferredEngineer && typeof composer.preferredEngineer === "object" ? composer.preferredEngineer : null;
 }
 
-function executorChipContent(snapshot, editor) {
+function executorChipContent(snapshot, editor, composerMode) {
 	if (!snapshot || snapshot.error) return null;
 	const composer = snapshot.composer && typeof snapshot.composer === "object" ? snapshot.composer : null;
-	const engineeringMode = !!(composer && composer.mode === "engineering");
+	// TASK-0038: the pills obey the SAME authoritative mode the chip derived
+	// (snapshot -> session preset -> shared mode selection). The snapshot's
+	// own composer block is only the fallback when the caller has no derived
+	// mode — otherwise a hero Engineering posture (mode selection, no composer
+	// block yet) would still render the legacy agent-default-model preference.
+	const engineeringMode = composerMode !== undefined
+		? composerMode === "engineering"
+		: !!(composer && composer.mode === "engineering");
 	const modelName = snapshot.execution && typeof snapshot.execution.model === "string" && snapshot.execution.model ? snapshot.execution.model : null;
 	const effectiveReasoning = snapshot.execution && typeof snapshot.execution.reasoning === "string" && snapshot.execution.reasoning ? snapshot.execution.reasoning : null;
 	let preference = null;
@@ -1809,68 +1899,122 @@ function EngineeringSelector({ editor }) {
 * control. Legacy presets keep the exact previous rendering.
 */
 /**
- * Phase M2.1 restart fix (TASK-0037): derive the composer mode from the
- * CLIENT-side session identity before the first polled snapshot arrives.
+ * The stable preset-id → composer-mode classification. The SAME ids the
+ * mode selector offers and a session carries for its whole life; display
+ * labels and model ids are deliberately never consulted.
+ */
+const NEXUS_COMPOSER_PRESET_MODES = Object.freeze({
+	"aih-engineering": "engineering",
+	"aih-deepseek": "legacy",
+});
+/** Classify a preset id, or return null when it is not a known Nexus mode. */
+function classifyNexusPreset(preset) {
+	if (typeof preset !== "string" || preset === "") return null;
+	return Object.prototype.hasOwnProperty.call(NEXUS_COMPOSER_PRESET_MODES, preset)
+		? NEXUS_COMPOSER_PRESET_MODES[preset]
+		: null;
+}
+/**
+ * Phase M2.1 restart fix (TASK-0037) + mode-ownership fix (TASK-0038):
+ * derive the composer mode from the authoritative source for the CURRENT
+ * lifecycle state, before the first polled snapshot arrives and after it.
  *
- * Root cause of the Profile UI disappearing across restarts: the mode came
- * only from the polled snapshot's composer block, so a freshly restarted
- * client rendered in legacy posture (upstream model seat visible, Engineering
- * Profile UI absent) until the first successful poll — and the suppression
- * CSS keyed on a pinned upstream build's CSS-module hashes, which upstream
- * refreshes silently invalidate.
+ * Root cause of the hero bug (TASK-0038): the pre-session (hero / no-session)
+ * state was classified as legacy outright, so the mode picker could already
+ * show "Normal Engineering" while the composer still rendered the upstream
+ * DSH model seat and no Engineering Profile UI. A session-less scope is a
+ * lifecycle state with its OWN authority — the mode selector's client
+ * state — never a legacy verdict.
  *
  * Resolution order:
- *   1. the authoritative snapshot.composer.mode wins once loaded;
- *   2. before that, the session's agent preset (client-side ConversationSnapshot
- *      carries agentPreset / projectionValues.agentPreset) classifies the boot:
- *      aih-engineering -> engineering, aih-deepseek -> legacy;
- *   3. anything else — including a failed/absent snapshot (endpoint
- *      unavailable) — fails CLOSED toward engineering, keeping the Profile UI
- *      mounted with its loading states until the authoritative mode lands.
+ *   1. ACTIVE SESSION — the authoritative snapshot.composer.mode wins once
+ *      loaded (it folds the session binding, the preset, and the routing
+ *      policy into one server-side verdict);
+ *   2. ACTIVE SESSION — before that, the session's agent preset (client-side
+ *      ConversationSnapshot carries agentPreset / projectionValues.agentPreset,
+ *      and a composer-less snapshot still names the preset on its binding)
+ *      classifies the boot: aih-engineering -> engineering, aih-deepseek -> legacy;
+ *   3. PRE-SESSION (hero, including a session object without a preset yet) —
+ *      the mode selector's authoritative client state (nexusPreset: the
+ *      staged selection or the persisted default) classifies the posture;
+ *      a staged hero mode change lands here synchronously;
+ *   4. anything else — including a failed/absent snapshot (endpoint
+ *      unavailable) and no mode state at all — fails CLOSED toward
+ *      engineering, keeping the Profile UI mounted with its loading states
+ *      until an authoritative mode lands.
+ *
+ * A session-less snapshot is deliberately NOT authoritative for the hero:
+ * it describes the persisted DEFAULT mode, which a staged hero selection
+ * outranks until a session is created.
  */
-function composerModeOfSession(session, snapshot) {
-	if (!session) return { mode: "legacy", source: "no-session-scope" };
-	const composer = snapshot && snapshot.composer && typeof snapshot.composer === "object" ? snapshot.composer : null;
-	if (composer && composer.mode === "engineering") return { mode: "engineering", source: "snapshot" };
-	if (composer && composer.mode === "legacy") return { mode: "legacy", source: "snapshot" };
-	let preset = session && typeof session.agentPreset === "string" ? session.agentPreset : "";
-	if (preset === "" && session && session.projectionValues && typeof session.projectionValues === "object" && typeof session.projectionValues.agentPreset === "string") {
-		preset = session.projectionValues.agentPreset;
+function composerModeOfSession(session, snapshot, nexusPreset) {
+	if (session) {
+		const composer = snapshot && snapshot.composer && typeof snapshot.composer === "object" ? snapshot.composer : null;
+		if (composer && composer.mode === "engineering") return { mode: "engineering", source: "snapshot" };
+		if (composer && composer.mode === "legacy") return { mode: "legacy", source: "snapshot" };
+		let preset = typeof session.agentPreset === "string" ? session.agentPreset : "";
+		if (preset === "" && session.projectionValues && typeof session.projectionValues === "object" && typeof session.projectionValues.agentPreset === "string") {
+			preset = session.projectionValues.agentPreset;
+		}
+		if (preset === "" && snapshot && snapshot.binding && typeof snapshot.binding.preset === "string") {
+			// A snapshot whose composer block has not landed yet still names the
+			// session's agent preset on its binding — a stronger signal than the
+			// client-side projection alone.
+			preset = snapshot.binding.preset;
+		}
+		const sessionMode = classifyNexusPreset(preset);
+		if (sessionMode) return { mode: sessionMode, source: "session-preset" };
 	}
-	if (preset === "" && snapshot && snapshot.binding && typeof snapshot.binding.preset === "string") {
-		// A snapshot whose composer block has not landed yet still names the
-		// session's agent preset on its binding — a stronger signal than the
-		// client-side projection alone.
-		preset = snapshot.binding.preset;
-	}
-	if (preset === "aih-engineering") return { mode: "engineering", source: "session-preset" };
-	if (preset === "aih-deepseek") return { mode: "legacy", source: "session-preset" };
+	// Pre-session (or a session whose preset is not known yet): the mode
+	// selector's client state is the authority for "which Nexus mode is
+	// currently selected/default".
+	const selectedMode = classifyNexusPreset(nexusPreset);
+	if (selectedMode) return { mode: selectedMode, source: "mode-selection" };
 	return { mode: "engineering", source: "boot-fail-closed" };
+}
+
+/**
+ * Body-level semantic mode marker (data-nexus-composer-mode="engineering").
+ * Pure and exported so the regression suite can assert the exact install /
+ * removal semantics the layout effect performs: engineering installs the
+ * marker, legacy/hero-legacy removes it. The scoped CSS rule keyed on the
+ * STABLE slot outlet wrapper ([data-slot='conversation.input.model']) only
+ * ever reads this marker — never a CSS-module hash.
+ */
+function applyComposerModeMarker(body, engineeringMode) {
+	if (!engineeringMode) {
+		delete body.dataset.nexusComposerMode;
+		return null;
+	}
+	body.dataset.nexusComposerMode = "engineering";
+	return () => {
+		delete body.dataset.nexusComposerMode;
+	};
 }
 
 function ExecutorChip({ session }) {
 	const sessionId = session && typeof session.sessionId === "string" ? session.sessionId : null;
 	const { snapshot } = useControllerSnapshot(sessionId);
-	const derivedMode = composerModeOfSession(session, snapshot);
+	// Phase M2.1 (TASK-0038): the pre-session posture rides the shared
+	// nexusModeState service (subscription re-renders synchronously with the
+	// mode picker's store, so a hero mode change updates immediately).
+	const nexusPreset = react.useSyncExternalStore(subscribeNexusMode, currentNexusModePreset, currentNexusModePreset);
+	const derivedMode = composerModeOfSession(session, snapshot, nexusPreset);
 	const engineeringMode = derivedMode.mode === "engineering";
-	const editor = useEngineeringEditor(engineeringMode ? sessionId : null);
+	// The global profile catalog loads whenever the Engineering surface is
+	// enabled — hero included (no sessionId gate; the endpoint is global).
+	const editor = useEngineeringEditor(sessionId, engineeringMode);
 	// Body-level mode flag: scoped CSS retires the upstream DSH model seat
 	// while the Engineering selector owns the composer preference. Set through
 	// useLayoutEffect so the flag exists BEFORE the first paint after a
-	// restart — the boot heuristic above already knows the mode client-side,
-	// so the shipped seat never flashes and the Profile UI never disappears.
-	// Legacy presets never set it, so the shipped selector stays untouched there.
+	// restart — the mode derivation above already knows the posture client-side
+	// (mode-selector state on the hero, the session preset for an existing
+	// session), so the shipped seat never flashes and the Profile UI never
+	// disappears. Legacy never sets it, so the shipped selector stays untouched.
 	react.useLayoutEffect(() => {
 		const body = typeof document !== "undefined" && document.body ? document.body : null;
 		if (!body) return;
-		if (!engineeringMode) {
-			delete body.dataset.nexusComposerMode;
-			return;
-		}
-		body.dataset.nexusComposerMode = "engineering";
-		return () => {
-			delete body.dataset.nexusComposerMode;
-		};
+		return applyComposerModeMarker(body, engineeringMode);
 	}, [engineeringMode]);
 	// Follow external preference changes (e.g. saved from the Control Room)
 	// without clobbering unsaved operator edits in the open popover.
@@ -1885,7 +2029,7 @@ function ExecutorChip({ session }) {
 		seenProfileRef.current = preferredProfileId;
 		if (!dirtyRef.current) editor.refresh();
 	}, [engineeringMode, preferredProfileId, editor.refresh]);
-	const content = executorChipContent(snapshot, engineeringMode ? editor : null);
+	const content = executorChipContent(snapshot, engineeringMode ? editor : null, derivedMode.mode);
 	if (!engineeringMode) {
 		// Legacy mode: unchanged rendering — pills only, no control chrome.
 		return react_jsx_runtime.jsx(ExecutorPill, { content });
@@ -2189,6 +2333,16 @@ function apply(ctx) {
 		order: 90,
 		label: "Task executor",
 	}, ExecutorChip));
+	// Phase M2.1 (TASK-0038): consume the mode selector's authoritative client
+	// state (see the nexus mode bridge region). The nested inject is
+	// order-independent: the composition boots this plugin before
+	// @nexus/mode-selector, so the shared state arrives here whenever the
+	// service is provided; if it never is (mode selector absent from the
+	// composition), the composer keeps its fail-closed derivation and the
+	// controller still boots.
+	ctx.inject(["nexusModeState"], (scope) => {
+		attachNexusModeState(scope.nexusModeState);
+	});
 }
 //#endregion
 exports.apply = apply;
@@ -2203,11 +2357,17 @@ exports.ControlRoom = ControlRoom;
 exports.ROOM_TABS = ROOM_TABS;
 exports.executorChipContent = executorChipContent;
 exports.composerModeOfSession = composerModeOfSession;
+exports.classifyNexusPreset = classifyNexusPreset;
+exports.applyComposerModeMarker = applyComposerModeMarker;
+exports.attachNexusModeState = attachNexusModeState;
+exports.subscribeNexusMode = subscribeNexusMode;
+exports.currentNexusModePreset = currentNexusModePreset;
 exports.ExecutorPill = ExecutorPill;
 exports.ExecutorChip = ExecutorChip;
 exports.GateActions = GateActions;
 exports.EngineeringEditor = EngineeringEditor;
 exports.useEngineeringEditor = useEngineeringEditor;
+exports.engineeringEditorLoadGate = engineeringEditorLoadGate;
 exports.EngineeringEditorFields = EngineeringEditorFields;
 exports.EngineeringSelector = EngineeringSelector;
 exports.preferredEngineerFromEditorState = preferredEngineerFromEditorState;
