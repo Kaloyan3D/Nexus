@@ -30,7 +30,7 @@ try{
     Copy-Item (Join-Path $liveLayout.Root 'config/engineering-profiles.json') (Join-Path $fixture 'config/engineering-profiles.json')
     Copy-Item (Join-Path $liveLayout.Root 'config/model-registry.json') (Join-Path $fixture 'config/model-registry.json')
     New-Item -ItemType Directory -Path (Join-Path $fixture 'scripts') -Force|Out-Null
-    foreach($script in @('Platform.ps1','Common.ps1','Routing.ps1','TaskController.ps1','Telemetry.ps1','VisualPacketIntegrity.ps1','VisualReview.ps1','Invoke-VisualReview.mjs','CodexReview.ps1')){
+    foreach($script in @('Platform.ps1','Common.ps1','Routing.ps1','NexusProfiles.ps1','TaskController.ps1','Telemetry.ps1','VisualPacketIntegrity.ps1','VisualReview.ps1','Invoke-VisualReview.mjs','CodexReview.ps1')){
         Copy-Item (Join-Path $liveLayout.Root ('scripts/'+$script)) (Join-Path $fixture ('scripts/'+$script))
     }
     New-Item -ItemType Directory -Path (Join-Path $fixture 'data') -Force|Out-Null

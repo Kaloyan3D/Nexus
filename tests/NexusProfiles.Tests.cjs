@@ -76,10 +76,10 @@ function main() {
     assert.equal(muse.source.kind, 'muse-profile')
     assert.equal(muse.selectable, false)
     assert.equal(muse.runnable, false)
-    assert.equal(muse.availability, 'foundation')
+    assert.equal(muse.availability, 'contributor-gated')
     assert.equal(muse.config.reasoning.default, 'xhigh')
     assert.equal(muse.config.subagents.enabled, false)
-    pass('Muse resolves to its own agent engine while remaining disabled in M1')
+    pass('Muse resolves to its own agent engine while staying contributor-gated (M3 activation gate held)')
 
     assert.equal(nexusProfiles.resolveNexusProfile(repoRoot, 'does-not-exist'), null)
     pass('unknown profile fails closed with no fallback')
@@ -182,7 +182,7 @@ function main() {
     assert.equal(adapterMuse.engine, 'muse')
     assert.equal(adapterMuse.selectable, false)
     assert.equal(adapterMuse.runnable, false)
-    assert.equal(adapterMuse.availability, 'foundation')
+    assert.equal(adapterMuse.availability, 'contributor-gated')
     assert.equal(adapterMuse.source.kind, 'muse-profile')
     assert.equal(adapterMuse.roles, null, 'Muse is never coerced into Dual roles')
     assert.equal(adapterMuse.muse.reasoning.default, 'xhigh')
@@ -190,8 +190,8 @@ function main() {
     assert.equal(adapterMuse.muse.subagents.enabled, false)
     assert.equal(adapterMuse.muse.review.independent, false)
     assert.equal(adapterMuse.muse.contributorProtection.required, true)
-    assert.equal(adapterMuse.muse.status, 'foundation')
-    pass('Muse metadata is exposed from the Muse registry (foundation-only)')
+    assert.equal(adapterMuse.muse.status, 'contributor-gated')
+    pass('Muse metadata is exposed from the Muse registry (contributor-gated until outbound protection ships)')
 
     // 3. Custom save still classifies as Dual in the Nexus list
     writeJson(path.join(fixture, 'data', 'custom-engineering-profile.json'), {
@@ -311,7 +311,7 @@ function main() {
     ]
     const nexusEntries = [
       { id: 'glm-codex', displayName: 'GLM + Codex', engine: 'dual', selectable: true, runnable: true, availability: 'ready', source: { kind: 'engineering-profile', profileId: 'glm-codex' }, builtin: true, roles: glmRoles, muse: null },
-      { id: 'muse-spark-1.3-contributor', displayName: 'Muse Spark 1.3 Contributor', engine: 'muse', selectable: false, runnable: false, availability: 'foundation', source: { kind: 'muse-profile', profileId: 'muse-spark-1.3-contributor' }, builtin: true, roles: null, muse: { id: 'muse-spark-1.3-contributor', displayName: 'Muse Spark 1.3 Contributor', status: 'foundation', reasoning: { default: 'xhigh', escalation: 'xhigh' }, subagents: { enabled: false }, review: { independent: false }, contributorProtection: { required: true } } },
+      { id: 'muse-spark-1.3-contributor', displayName: 'Muse Spark 1.3 Contributor', engine: 'muse', selectable: false, runnable: false, availability: 'contributor-gated', source: { kind: 'muse-profile', profileId: 'muse-spark-1.3-contributor' }, builtin: true, roles: null, muse: { id: 'muse-spark-1.3-contributor', displayName: 'Muse Spark 1.3 Contributor', status: 'contributor-gated', reasoning: { default: 'xhigh', escalation: 'xhigh' }, subagents: { enabled: false }, review: { independent: false }, contributorProtection: { required: true } } },
     ]
     function editorFixture(selectedProfile, selectedEngine, selectedSelectable, roles) {
       return {
@@ -340,13 +340,13 @@ function main() {
       assert.ok(!museHtml.includes(label), 'Muse renders no Dual role row: ' + label)
     }
     assert.equal((museHtml.match(/<select/g) || []).length, 1, 'Muse renders ONLY the profile dropdown (no empty role dropdowns)')
-    for (const text of ['>Engine<', '>Status<', 'Foundation', '>Reasoning<', 'xhigh', '>Max Reasoning<', '>xhigh<', '>Subagents<', 'Disabled', '>Independent Review<', 'Not available', '>Execution<', 'Not available yet']) {
+    for (const text of ['>Engine<', '>Status<', 'Contributor-gated', '>Reasoning<', 'xhigh', '>Max Reasoning<', '>xhigh<', '>Subagents<', 'Disabled', '>Independent Review<', 'Not available', '>Execution<']) {
       assert.ok(museHtml.includes(text), 'Muse metadata rendered: ' + text)
     }
     assert.ok(museHtml.includes('disabled'), 'Muse Select button is disabled')
     assert.ok(museHtml.includes('profile-not-selectable'), 'Muse Select button names the deterministic rejection code')
     assert.ok(museHtml.includes('not selectable yet'), 'Muse renders the not-selectable hint')
-    assert.ok(museHtml.includes('Muse Spark 1.3 Contributor \u2014 foundation'), 'Muse dropdown option visibly carries its foundation state')
+    assert.ok(museHtml.includes('Muse Spark 1.3 Contributor \u2014 contributor-gated'), 'Muse dropdown option visibly carries its contributor-gated state')
     pass('client renders Muse as read-only foundation metadata without a Dual role editor')
 
     // 6b. Dual: the exact legacy editor surface (11 selects, role rows, enabled save)
@@ -459,7 +459,7 @@ function main() {
     const productionMuse = adapterState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3-contributor')
     assert.equal(productionMuse.selectable, false, 'production Muse stays selectable=false')
     assert.equal(productionMuse.runnable, false, 'production Muse stays runnable=false')
-    assert.equal(productionMuse.availability, 'foundation', 'production Muse stays foundation')
+    assert.equal(productionMuse.availability, 'contributor-gated', 'production Muse stays contributor-gated')
     pass('production Muse availability flags are untouched')
 
     // 12. resolver parity: missing muse-profiles.json → the Muse entry is
@@ -502,6 +502,52 @@ function main() {
     assert.ok(!selectableMuseHtml.includes('Primary Engineer'), 'selectable Muse still renders no Dual role rows')
     assert.ok(selectableMuseHtml.includes('>Engine<'), 'selectable Muse keeps the engine metadata surface')
     pass('hypothetical selectable Muse is not rejected by the UI layer')
+
+    // ── Phase M3 (TASK-0040): the catalog's internal engine→agent-preset
+    //    binding, mirrored across the JS validator, the adapter state, and
+    //    the shared publisher contract. ──
+
+    // 15. validateCatalogDocument enforces the agentPreset id grammar
+    assert.deepEqual(nexusProfiles.validateCatalogDocument(catalog), [], 'production catalog (with engines.muse.agentPreset) validates')
+    const badPresetErrors = nexusProfiles.validateCatalogDocument({
+      schemaVersion: 1,
+      profiles: [{ id: 'p', engine: 'dual', source: { kind: 'engineering-profile', profileId: 'a' } }],
+      engines: { muse: { agentPreset: 'Muse Plane!' } },
+    })
+    assert.ok(badPresetErrors.some((error) => error.includes('agentPreset-invalid')), 'a malformed agentPreset fails closed')
+    const emptyPresetErrors = nexusProfiles.validateCatalogDocument({
+      schemaVersion: 1,
+      profiles: [{ id: 'p', engine: 'dual', source: { kind: 'engineering-profile', profileId: 'a' } }],
+      engines: { muse: { agentPreset: '' } },
+    })
+    assert.ok(emptyPresetErrors.some((error) => error.includes('agentPreset-empty')), 'an empty agentPreset fails closed')
+    const noBindingErrors = nexusProfiles.validateCatalogDocument({
+      schemaVersion: 1,
+      profiles: [{ id: 'p', engine: 'dual', source: { kind: 'engineering-profile', profileId: 'a' } }],
+      engines: { dual: {} },
+    })
+    assert.deepEqual(noBindingErrors, [], 'an engine WITHOUT an agentPreset binding is valid (optional internal infrastructure)')
+    pass('catalog engines.agentPreset bindings validate fail-closed (JS mirror)')
+
+    // 16. engineAgentPresetOf: the engine's internal agent plane, or null
+    assert.equal(nexusProfiles.engineAgentPresetOf(catalog, 'muse'), 'aih-muse')
+    assert.equal(nexusProfiles.engineAgentPresetOf(catalog, 'dual'), null)
+    assert.equal(nexusProfiles.engineAgentPresetOf(catalog, 'unknown-engine'), null)
+    assert.equal(nexusProfiles.engineAgentPresetOf(null, 'muse'), null)
+    assert.equal(nexusProfiles.engineAgentPresetOf({ engines: { muse: { agentPreset: 'Bad Id!' } } }, 'muse'), null)
+    pass('engineAgentPresetOf resolves the muse agent plane and refuses malformed/absent bindings')
+
+    // 17. the adapter state publishes the engine→agent-preset map
+    assert.deepEqual(adapterState.engineAgentPresets, { muse: 'aih-muse' })
+    pass('adapter state exposes engineAgentPresets from the catalog')
+    const bareEngineState = engineering.buildEngineeringProfileState({
+      installRoot: bareRoot,
+      dataRoot: bareRoot,
+      settingsPath: path.join(bareRoot, 'data', 'settings.yaml'),
+      nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    assert.deepEqual(bareEngineState.engineAgentPresets, {}, 'a missing catalog publishes NO engine mapping')
+    pass('a missing catalog publishes an empty engine mapping (no mapping, no guessing)')
 
     console.log('Nexus profile foundation tests passed: ' + passed)
   } finally {

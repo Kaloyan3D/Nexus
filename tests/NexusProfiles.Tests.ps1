@@ -93,14 +93,14 @@ try{
     Assert-AihEqual $museEntry.engine 'muse' 'Muse Spark 1.3 is classified muse in editor state'
     Assert-AihTrue (-not[bool]$museEntry.selectable) 'Muse stays selectable=false in editor state'
     Assert-AihTrue (-not[bool]$museEntry.runnable) 'Muse stays runnable=false in editor state'
-    Assert-AihEqual $museEntry.availability 'foundation' 'Muse availability=foundation in editor state'
+    Assert-AihEqual $museEntry.availability 'contributor-gated' 'Muse availability=contributor-gated in editor state (M3 activation gate held)'
     Assert-AihTrue ($null-eq$museEntry.roles) 'Muse entry is NOT coerced into Dual roles'
     Assert-AihEqual $museEntry.muse.reasoning.default 'xhigh' 'Muse metadata exposes reasoning.default=xhigh'
     Assert-AihEqual $museEntry.muse.reasoning.escalation 'xhigh' 'Muse metadata exposes reasoning.escalation=xhigh (the Contributor ceiling, not the Standard-only max)'
     Assert-AihEqual $museEntry.muse.subagents.enabled $false 'Muse metadata exposes subagents.enabled=false'
     Assert-AihEqual $museEntry.muse.review.independent $false 'Muse metadata exposes review.independent=false'
     Assert-AihEqual $museEntry.muse.contributorProtection.required $true 'Muse metadata exposes contributorProtection.required=true'
-    Assert-AihEqual $museEntry.muse.status 'foundation' 'Muse metadata exposes status=foundation'
+    Assert-AihEqual $museEntry.muse.status 'contributor-gated' 'Muse metadata exposes status=contributor-gated'
 
     # Muse selection is rejected deterministically BEFORE the settings key moves
     $settingsBefore=Get-Content -Raw (Join-Path $fixture 'data/settings.yaml')
@@ -143,7 +143,7 @@ try{
     $museEntry2=@($editorState2.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3-contributor'})[0]
     Assert-AihEqual $customEntry2.engine 'dual' 'saved Custom profile remains engine dual (Muse is never rewritten into Custom)'
     Assert-AihTrue (-not[bool]$museEntry2.selectable) 'save-custom leaves Muse non-selectable'
-    Assert-AihEqual $museEntry2.availability 'foundation' 'save-custom leaves Muse availability=foundation'
+    Assert-AihEqual $museEntry2.availability 'contributor-gated' 'save-custom leaves Muse availability=contributor-gated'
 
     # ── Phase M1.1: selection gating is selectable-ONLY (fixture catalog
     #    override — the production Muse availability flags are NOT touched) ──

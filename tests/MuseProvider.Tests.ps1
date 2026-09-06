@@ -219,12 +219,12 @@ try{
     }
     finally{ Remove-Item Env:NEXUS_META_LIVE_TEST -ErrorAction SilentlyContinue }
 
-    # -- 10. Muse profile stays foundation-only -------------------------------
+    # -- 10. Muse profile stays contributor-gated (M3 activation gate) --------
     $resolved=Resolve-AihNexusProfile -InstallRoot $fixture -ProfileId 'muse-spark-1.3-contributor'
     Assert-Aih ($null-ne$resolved) '10.1: muse-spark-1.3-contributor resolves from the production catalog'
     Assert-Aih ([bool]$resolved.Selectable -eq $false) '10.2: production Muse profile remains selectable=false'
     Assert-Aih ([bool]$resolved.Runnable -eq $false) '10.3: production Muse profile remains runnable=false'
-    Assert-Aih ([string]$resolved.Availability -eq 'foundation') '10.4: production Muse availability remains foundation'
+    Assert-Aih ([string]$resolved.Availability -eq 'contributor-gated') '10.4: production Muse availability remains contributor-gated'
     Assert-Aih ([string]$resolved.Engine -eq 'muse') '10.5: engine remains muse'
 
     # -- 11. Muse profile -> model registry -> provider chain ------------------

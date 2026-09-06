@@ -1898,10 +1898,25 @@ function apply(ctx) {
     return binding
   }
 
+  // Phase M3: the effective agent preset is resolved from the newest
+  // agent-preset/selected event (the same authority the isolation layer uses),
+  // falling back to the session header. A session recomposed onto another
+  // agent plane (the mode selector's only path) must route as the plane it
+  // now runs — the stale header alone would dispatch the wrong engine.
   function agentPresetOf(session) {
     try {
+      if (Array.isArray(session.events)) {
+        for (let index = session.events.length - 1; index >= 0; index -= 1) {
+          const event = session.events[index]
+          if (event && event.type === 'agent-preset/selected' && event.data && event.data.agentPreset) {
+            const selected = String(event.data.agentPreset)
+            if (selected === 'aih-deepseek' || selected === 'aih-muse') return selected
+          }
+        }
+      }
       const header = session.header || {}
       if (header.agentPreset === 'aih-deepseek') return 'aih-deepseek'
+      if (header.agentPreset === 'aih-muse') return 'aih-muse'
     } catch {
       /* fall through */
     }
@@ -2113,6 +2128,23 @@ function apply(ctx) {
       }
 
       if (explicitReview) {
+        // Phase M3: the Muse engine has NO independent reviewer (profile
+        // review.independent=false). The request fails closed truthfully:
+        // Codex is never invoked from Muse as reviewer, fallback, repair
+        // agent, or worker, and no Muse reviewer exists.
+        if (agentPresetOf(session) === 'aih-muse') {
+          appendMessage(
+            session,
+            createControllerMessage(
+              'Controller: independent review is not available for the Muse engine (engine=muse, review.independent=false).\n' +
+                'The Muse plane never invokes Codex as reviewer, fallback, repair agent, or worker, and no Muse reviewer exists in V0.\n' +
+                'Route the task through a Dual profile (Normal Engineering + GLM/Codex or DeepSeek/Codex) for independent review. No files were modified.',
+              'muse-review-unavailable',
+            ),
+          )
+          log({ event: 'muse-review-unavailable', sessionId: session.id, taskId: binding.taskId })
+          return { kind: 'reject' }
+        }
         return executeReviewTurn(agent, binding, reviewQuestionOf(promptText), { explicit: true })
       }
 
@@ -2179,8 +2211,14 @@ function apply(ctx) {
         // Phase 3.2.5: the step role for THIS turn (deterministic; Normal is
         // the default; Deep only through the structured escalation gate).
         let stepRole = null
+        // Phase M3: the Muse engine runs exactly ONE main agent with NO Dual
+        // role semantics. The epistemic step router is a Dual-plane authority
+        // (it selects engineer roles and step role targets) and never applies
+        // to a muse session: stepRole stays null and the attempt runs on the
+        // task-level execution class (engineer_normal) resolved by routing.
+        const museEngine = agentPresetOf(session) === 'aih-muse'
         try {
-          const stepDecision = await selectEngineeringEpistemicStep(binding, payload.turn, promptText)
+          const stepDecision = museEngine ? null : await selectEngineeringEpistemicStep(binding, payload.turn, promptText)
           if (stepDecision) {
             stepRole = stepDecision.selectedRole
             binding.currentEpistemicActionId = stepDecision.actionId || null
@@ -2213,7 +2251,7 @@ function apply(ctx) {
           appendMessage(
             session,
             createControllerMessage(
-              'Controller: attempt ' + nextSequence + ' started · task ' + binding.taskId + ' (execution ' + executionClassLabel(stepRole || binding.executionClass) + ' · step-routed).',
+              'Controller: attempt ' + nextSequence + ' started · task ' + binding.taskId + ' (execution ' + executionClassLabel(stepRole || binding.executionClass) + (museEngine ? ' · engine=muse' : ' · step-routed') + ').',
               'controller-attempt',
             ),
           )

@@ -8,7 +8,8 @@
     },
     "muse": {
       "displayName": "Muse",
-      "description": "Muse-native single-model agent plane."
+      "description": "Muse-native single-model agent plane.",
+      "agentPreset": "aih-muse"
     }
   },
   "profiles": [
@@ -44,8 +45,8 @@
       },
       "selectable": false,
       "runnable": false,
-      "availability": "foundation",
-      "description": "Muse Agent Plane foundation on the Contributor-tier model. Selection and execution stay disabled until the Meta provider and Muse V0 execution path are installed in later phases."
+      "availability": "contributor-gated",
+      "description": "Muse Agent Plane V0 is installed (engine dispatch, single main agent, tool isolation, controller target authority) and its provider transport is verified. The production profile stays locked until Contributor outbound protection exists (Phase M5): this Contributor-tier checkpoint permits Meta to train on prompts and completions, and contributorProtection.required stays enforced end to end."
     }
   ]
 }

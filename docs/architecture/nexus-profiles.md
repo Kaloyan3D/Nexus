@@ -1,6 +1,6 @@
 # Nexus profiles and agent engines
 
-Status: Phase M1 — profile/engine foundation.
+Status: Phase M3 — profile/engine foundation with the first Muse agent plane.
 
 ## Decision
 
@@ -73,6 +73,8 @@ Muse-specific concepts such as same-model specialists, context compaction, reaso
 - engine-specific source registry and profile id;
 - whether the profile is currently selectable/runnable.
 
+The catalog's `engines` map MAY bind each engine to the INTERNAL agent preset that runs its agent plane (`engines.muse.agentPreset: "aih-muse"`). The binding is optional internal infrastructure — never a user-facing mode — and the id is validated against the pinned DSH agent-preset grammar in both resolvers (`config/Nexus-Profiles.cjs` and the UI mirror `ui/nexus-controller/lib/engineering.cjs`); a present but malformed binding fails closed.
+
 `config/Nexus-Profiles.cjs` validates and resolves this catalog. Dual entries delegate their actual role configuration to the existing Engineering Profile resolver; Muse entries delegate to `muse-profiles.json`.
 
 The operator-defined `custom` Engineering Profile is dynamically exposed as a `dual` Nexus profile rather than copied into the immutable catalog.
@@ -89,17 +91,16 @@ The top-level resolver preserves the existing profile selection precedence:
 
 A preset with `profileOverrideAllowed: false` remains locked. Unknown profile ids fail closed; they never silently select a different engine.
 
-## Phase M1 safety gate
+## Phase M1 safety gate (updated by M3)
 
-Muse Spark 1.3 exists in the catalog during M1 as architecture metadata only:
+Muse Spark 1.3 entered the catalog in M1 as architecture metadata only:
 
 ```text
 selectable = false
 runnable   = false
-availability = foundation
 ```
 
-This prevents a partially implemented Muse profile from reaching the production agent/request path. Phase M2 adds Meta provider/model transport. Phase M3 installs the first runnable Muse Agent Plane.
+This prevented a partially implemented Muse profile from reaching the production agent/request path. Phase M2 added Meta provider/model transport; **Phase M3 installed the first real Muse Agent Plane — and the profile STAYS locked (`selectable = false`, `runnable = false`, `availability = contributor-gated`)** because `contributorProtection.required` is still unsatisfiable: outbound contributor protection ships in Phase M5. Security truth outranks selectability. See [muse-agent-plane-v0.md](muse-agent-plane-v0.md) for the plane's architecture, its operator-consent execution gate, and the exact remaining activation gate.
 
 ## Phase M2: Meta Model API provider transport
 

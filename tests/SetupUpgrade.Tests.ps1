@@ -646,6 +646,60 @@ try {
     if (-not $staleAfter.Contains('zai-direct') -and -not $migrationTemplateText.Contains('zai-direct')) { throw 'FAIL: unrelated managed routes must survive the upgrade.' }
     Write-Host 'PASS: stale Phase M2 managed route upgrades deterministically to the contributor route (M2.1)'
 
+    # Scenario 4b (TASK-0040): the SAME stale M2 route AFTER a DSH settings
+    # rewrite stripped the explanatory comments — the exact shape found on
+    # real upgraded installs. It is still the managed M2 content and must
+    # upgrade, not silently become user-owned.
+    $driftedPrior = $script:ManagedRoutePriorStates['meta-model-api'][1]
+    if ([string]::IsNullOrWhiteSpace($driftedPrior)) { throw 'FAIL: the comment-stripped M2 prior managed state must stay embedded in SettingsMigration.ps1.' }
+    if ($driftedPrior.Contains('#')) { throw 'FAIL: the comment-stripped prior state must not carry comment lines.' }
+    $driftedPath = Join-Path $migrationFixtureRoot 'drifted-m2.yaml'
+    $driftedLines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in ($migrationTemplateText -replace "`r`n", "`n") -split "`n") { $driftedLines.Add($line) }
+    $templateRoutes2 = Get-AihSettingsProviderRouteBlocks -Lines $driftedLines
+    $metaRoute2 = $null
+    foreach ($route in $templateRoutes2) { if ($route.Id -eq 'meta-model-api') { $metaRoute2 = $route; break } }
+    if ($null -eq $metaRoute2) { throw 'FAIL: test setup could not find the managed meta-model-api route in the template (drift scenario).' }
+    $driftedLines.RemoveRange($metaRoute2.StartIndex, ($metaRoute2.EndIndex - $metaRoute2.StartIndex + 1))
+    $driftedLines.InsertRange($metaRoute2.StartIndex, (@($driftedPrior -replace "`r`n", "`n") -split "`n"))
+    [System.IO.File]::WriteAllText($driftedPath, (($driftedLines -join "`r`n") + "`r`n"), $utf8NoBom)
+    $driftedResult = Sync-AihManagedSettings -TemplatePath $migrationTemplatePath -SettingsPath $driftedPath
+    $driftedAfter = [System.IO.File]::ReadAllText($driftedPath)
+    if (@($driftedResult.UpgradedRoutes) -notcontains 'meta-model-api') { throw 'FAIL: the comment-stripped M2 managed route must be reported as upgraded (it is managed content, not user content).' }
+    if (-not $driftedAfter.Contains('muse-spark-1.3-contributor')) { throw 'FAIL: the drifted M2 route did not upgrade to the contributor route.' }
+    if ([regex]::IsMatch($driftedAfter, [regex]::Escape('- id: muse-spark-1.3') + '(?!-contributor)')) { throw 'FAIL: the drifted route must not keep the stale standard model id.' }
+    Write-Host 'PASS: comment-stripped (settings-rewrite drifted) M2 route still upgrades to the contributor route'
+
+    # Scenario 4c (TASK-0040): the drifted shape must match the prior state
+    # EXACTLY as it appears on a real upgraded install — assert the embedded
+    # variant against the literal block this task observed in data/settings.yaml.
+    $expectedDrift = @(
+        '    meta-model-api:',
+        '      displayName: Meta Model API (Muse Spark, direct)',
+        '      apiKeyEnv: MODEL_API_KEY',
+        '      api: openai-completions',
+        '      baseURL: https://api.meta.ai/v1',
+        '      reasoning: xhigh',
+        '      compat:',
+        '        thinkingFormat: openai',
+        '        supportsReasoningEffort: true',
+        '        supportsUsageInStreaming: true',
+        '        supportsDeveloperRole: true',
+        '        maxTokensField: max_completion_tokens',
+        '      models:',
+        '        - id: muse-spark-1.3',
+        '          name: Muse Spark 1.3',
+        '          contextWindow: 1048576',
+        '          maxTokens: 32768',
+        '          reasoningEfforts:',
+        '            off:',
+        '            high: high',
+        '            xhigh: xhigh',
+        '            max: high'
+    ) -join "`n"
+    if ((& { $p = $driftedPrior -replace "`r`n", "`n"; $p.TrimEnd("`n") }) -ne $expectedDrift) { throw 'FAIL: the embedded comment-stripped prior state no longer matches the real drifted install shape.' }
+    Write-Host 'PASS: the embedded drifted prior state matches the real upgraded-install shape verbatim'
+
     # Scenario 5: a user-modified but structurally valid managed route is
     # user-owned: the migration never rewrites, reorders, or duplicates it.
     $userOwnedPath = Join-Path $migrationFixtureRoot 'user-owned.yaml'
@@ -696,3 +750,69 @@ Write-Host 'PASS: required engineering config modules are installed on fresh set
 Write-Host 'PASS: Control Room mode lifecycle is Nexus-owned and no longer patches compiled upstream UI'
 Write-Host 'PASS: mode-selector installer avoids PowerShell automatic-variable collisions'
 Write-Host 'PASS: workspace transition blocks old-session submission until the selected workspace is current'
+
+# ── Phase M3 (TASK-0040): the aih-muse agent plane is built by the shared
+#    installer with exactly two structural transforms (Muse-native persona;
+#    EMPTY delegation section) and the isolation/controller rows. The built
+#    preset must not contain a single Dual delegation/workflow row — the
+#    release blocker is structural ABSENCE, not a disabled flag. ──
+$musePresetBlockIndex = $compositionText.IndexOf("Phase M3 (TASK-0040): the Muse Agent Plane V0 preset")
+if ($musePresetBlockIndex -lt 0) { throw 'FAIL: Complete-Install.ps1 no longer builds the aih-muse agent plane (Phase M3 block missing).' }
+foreach ($museContract in @(
+    'preset-muse.yml',
+    'Muse-Isolation.cjs',
+    'AIH_PERSONA_MUSE',
+    "[regex]::Replace(`$museText, `$museDelegationPattern, '')",
+    "if (`$musePersonaMatches -ne 1 -or `$museDelegationMatches -ne 1)",
+    'aih-muse-isolation',
+    'Engineering-Profiles.cjs'
+)) {
+    if (-not $compositionText.Contains($museContract)) { throw "FAIL: the aih-muse installer block is missing contract: $museContract" }
+}
+Write-Host 'PASS: Complete-Install builds the aih-muse plane with the muse persona, empty delegation section, and isolation/controller rows'
+
+$musePresetMetaPath = Join-Path $InstallRoot 'config/preset-muse.yml'
+if (-not (Test-Path -LiteralPath $musePresetMetaPath)) { throw "FAIL: config/preset-muse.yml missing at $musePresetMetaPath" }
+$musePresetMeta = Get-Content -Raw -Encoding UTF8 -LiteralPath $musePresetMetaPath
+if (-not $musePresetMeta.Contains('name: Muse Agent Plane')) { throw 'FAIL: preset-muse.yml must name the Muse Agent Plane.' }
+if (-not $musePresetMeta.Contains('contributor-gated')) { throw 'FAIL: preset-muse.yml must state the contributor-gated availability truth.' }
+Write-Host 'PASS: the aih-muse preset metadata is installed with the contributor-gated availability truth'
+
+$museIsolationPath = Join-Path $InstallRoot 'config/Muse-Isolation.cjs'
+if (-not (Test-Path -LiteralPath $museIsolationPath)) { throw "FAIL: managed Muse isolation module missing at $museIsolationPath" }
+$museIsolation = Get-Content -Raw -Encoding UTF8 -LiteralPath $museIsolationPath
+foreach ($museIsolationContract in @("name: 'aih-muse-isolation'", 'MUSE_V0_MAX_OUTPUT_TOKENS = 32768', "state.engine !== MUSE_ENGINE", 'nexus-muse-engine-mismatch')) {
+    if (-not $museIsolation.Contains($museIsolationContract)) { throw "FAIL: Muse-Isolation.cjs is missing contract: $museIsolationContract" }
+}
+if ($museIsolation.Contains('isWorker')) { throw 'FAIL: the Muse boundary must not carry a worker exemption (the muse plane has no workers).' }
+Write-Host 'PASS: the Muse V0 request boundary is installed with the 32768 bound, the muse-engine invariant, and no worker exemption'
+
+# When the harness runs against an INSTALLED root, verify the built artifact
+# itself: the delegation surface must be structurally absent.
+$museBuiltPreset = Join-Path $InstallRoot 'data/.agent-presets/aih-muse/agent.cordis.yml'
+if (Test-Path -LiteralPath $museBuiltPreset) {
+    $museBuiltText = Get-Content -Raw -Encoding UTF8 -LiteralPath $museBuiltPreset
+    foreach ($forbiddenRow in @('tool-subagent-control', 'list-agents', 'tool-subagent-fork', 'workflow-worker-thread', 'tool-workflow', 'tool-ralph', 'delegation and workflows')) {
+        if ($museBuiltText.Contains($forbiddenRow)) { throw "FAIL: the built aih-muse preset contains the Dual row '$forbiddenRow' (no Muse subagent may exist in V0)." }
+    }
+    foreach ($requiredRow in @('AIH_PERSONA_MUSE', 'aih-muse-isolation', 'aih-controller', 'Muse-Isolation.cjs')) {
+        if (-not $museBuiltText.Contains($requiredRow)) { throw "FAIL: the built aih-muse preset is missing: $requiredRow" }
+    }
+    $museBuiltMeta = Join-Path $InstallRoot 'data/.agent-presets/aih-muse/preset.yml'
+    if (-not (Test-Path -LiteralPath $museBuiltMeta)) { throw 'FAIL: the built aih-muse preset carries no preset.yml metadata.' }
+    Write-Host 'PASS: the built aih-muse preset has NO Dual delegation surface and carries the muse plane rows'
+} else {
+    Write-Host 'PASS: aih-muse build artifact not present in this checkout (installer run asserted by contract only)'
+}
+# The Dual presets keep their FULL delegation surface (byte-compat regression guard).
+foreach ($dualPresetRel in @('data/.agent-presets/aih-engineering/agent.cordis.yml', 'data/.agent-presets/aih-deepseek/agent.cordis.yml')) {
+    $dualBuiltPreset = Join-Path $InstallRoot $dualPresetRel
+    if (Test-Path -LiteralPath $dualBuiltPreset) {
+        $dualBuiltText = Get-Content -Raw -Encoding UTF8 -LiteralPath $dualBuiltPreset
+        if (-not $dualBuiltText.Contains('aih-controller')) { throw "FAIL: the built Dual preset lost its controller row: $dualPresetRel" }
+        if ($dualPresetRel -like '*aih-engineering*' -and -not $dualBuiltText.Contains('tool-subagent-control')) { throw 'FAIL: aih-engineering lost its Dual delegation surface (M3 must be additive).' }
+    }
+}
+if (Test-Path -LiteralPath (Join-Path $InstallRoot 'data/.agent-presets/aih-engineering/agent.cordis.yml')) {
+    Write-Host 'PASS: the built Dual presets keep their delegation surfaces and controller rows'
+}
