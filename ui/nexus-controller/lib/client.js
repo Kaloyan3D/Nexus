@@ -1132,6 +1132,19 @@ function useEngineeringEditor(sessionId) {
 		return state.registry.find((m) => m && String(m.id) === modelId) || null;
 	}
 
+	// Phase M1: the user-facing profile list is the top-level Nexus Profile
+	// catalog (engine classification). Legacy state without nexusProfiles
+	// falls back to the Dual profile list so older hosts keep working.
+	function nexusEntryFor(id) {
+		if (!state) return null;
+		const wanted = String(id || "").toLowerCase();
+		if (Array.isArray(state.nexusProfiles)) {
+			const entry = state.nexusProfiles.find((p) => p && String(p.id) === wanted);
+			if (entry) return entry;
+		}
+		return state.profiles.find((p) => p && String(p.id) === wanted) || null;
+	}
+
 	function selectProfile(nextId) {
 		setProfileId(nextId);
 		setDirty(false);
@@ -1156,6 +1169,11 @@ function useEngineeringEditor(sessionId) {
 
 	function save() {
 		if (saving) return;
+		// M1 gate mirrors the controller boundary: non-Dual profiles (Muse)
+		// and any profile the catalog marks selectable=false are never sent
+		// for selection — the backend rejects them with profile-not-selectable.
+		const entry = nexusEntryFor(profileId);
+		if (entry && (entry.engine !== "dual" || entry.selectable === false)) return;
 		setSaving(true);
 		setNotice(null);
 		const requestId = (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "req-" + Date.now() + "-" + Math.random().toString(36).slice(2));
@@ -1188,7 +1206,14 @@ function useEngineeringEditor(sessionId) {
 			.finally(() => setSaving(false));
 	}
 
-	return { state, failed, profileId, roles, notice, noticeTone, saving, dirty, fetchedAt, refresh, selectProfile, changeRole, save, bindingsFor, modelEntry };
+	const selectedProfile = profileId ? nexusEntryFor(profileId) : null;
+	const selectedEngine = selectedProfile && selectedProfile.engine ? String(selectedProfile.engine) : "dual";
+	const selectedSelectable = selectedProfile ? selectedProfile.selectable !== false : false;
+	// Readiness is engine-aware: Dual needs role bindings, Muse (metadata-
+	// only in M1) is ready without them. Keeps older hosts rendering exactly
+	// as before (legacy state resolves through the Dual fallback above).
+	const ready = !failed && !!state && Array.isArray(state.profiles) && !!selectedProfile && (selectedEngine !== "dual" || !!roles);
+	return { state, failed, profileId, roles, notice, noticeTone, saving, dirty, fetchedAt, refresh, selectProfile, changeRole, save, bindingsFor, modelEntry, selectedProfile, selectedEngine, selectedSelectable, ready };
 }
 
 /**
@@ -1196,8 +1221,44 @@ function useEngineeringEditor(sessionId) {
 * renders the long PREFERRED PROFILE meta line; variant "composer" keeps
 * the popover compact. All state and verbs come from useEngineeringEditor.
 */
+/**
+* Phase M1: Muse (and any future non-Dual engine) renders READ-ONLY
+* foundation metadata instead of the Dual role editor. No role dropdowns,
+* no editable bindings — Muse is never coerced into the Dual role schema.
+*/
+function museEditorRows(selectedProfile) {
+	const muse = selectedProfile && selectedProfile.muse && typeof selectedProfile.muse === "object" ? selectedProfile.muse : null;
+	const reasoning = muse && muse.reasoning && typeof muse.reasoning === "object" ? muse.reasoning : null;
+	const statusText = selectedProfile && typeof selectedProfile.availability === "string" && selectedProfile.availability !== ""
+		? selectedProfile.availability
+		: (muse && typeof muse.status === "string" && muse.status !== "" ? muse.status : "unavailable");
+	const rows = [
+		["Engine", "Muse", "Muse-native agent plane — a separate engine, never Dual roles."],
+		["Status", statusText.charAt(0).toUpperCase() + statusText.slice(1), "Muse profile availability."],
+		["Reasoning", reasoning && reasoning.default ? String(reasoning.default) : "\u2014", "Default Muse reasoning effort."],
+		["Max Reasoning", reasoning && reasoning.escalation ? String(reasoning.escalation) : "\u2014", "Muse escalation reasoning ceiling."],
+		["Subagents", muse && muse.subagents && muse.subagents.enabled === false ? "Disabled" : "Enabled", "Muse subagent dispatch."],
+		["Independent Review", muse && muse.review && muse.review.independent === false ? "Not available" : "Independent", "Independent Muse review."],
+		["Execution", selectedProfile && selectedProfile.runnable === false ? "Not available yet" : "Available", "Muse execution path arrives in a later phase."],
+	];
+	return rows.map((row) => react_jsx_runtime.jsxs("div", {
+		className: "nx-eng-row",
+		children: [
+			react_jsx_runtime.jsx("span", { className: "nx-eng-label", title: row[2], children: row[0] }),
+			react_jsx_runtime.jsx("span", { className: "nx-eng-value", title: row[2], children: row[1] }),
+		],
+	}, "muse-" + row[0]));
+}
+
 function EngineeringEditorFields({ editor, variant }) {
 	const { state, profileId, roles, dirty, notice, noticeTone, saving, selectProfile, changeRole, save, modelEntry } = editor;
+	// Phase M1: engine-aware editor surface. Dual profiles keep the EXACT
+	// role editor; Muse renders foundation metadata only and cannot be
+	// selected. Legacy editor objects (no engine fields) stay Dual.
+	const selectedProfile = editor.selectedProfile || null;
+	const selectedEngine = editor.selectedEngine || (selectedProfile && selectedProfile.engine) || "dual";
+	const selectedSelectable = editor.selectedSelectable !== false;
+	const catalog = state.nexusProfiles && Array.isArray(state.nexusProfiles) && state.nexusProfiles.length > 0 ? state.nexusProfiles : state.profiles;
 	return react_jsx_runtime.jsxs(react_jsx_runtime.Fragment, {
 		children: [
 			react_jsx_runtime.jsx("div", {
@@ -1209,11 +1270,11 @@ function EngineeringEditorFields({ editor, variant }) {
 						value: profileId || "",
 						onChange: (event) => selectProfile(event.target.value),
 						"aria-label": "Preferred engineering profile",
-						children: state.profiles.map((profile) => react_jsx_runtime.jsx("option", { value: String(profile.id), children: String(profile.displayName || profile.id) + (profile.id === "custom" ? " (operator-defined)" : "") }, String(profile.id))),
+						children: catalog.map((profile) => react_jsx_runtime.jsx("option", { value: String(profile.id), children: String(profile.displayName || profile.id) + (profile.engine === "muse" ? " \u2014 foundation" : profile.id === "custom" ? " (operator-defined)" : "") }, String(profile.id))),
 					}, "profile"),
 				],
 			}, "head"),
-			ENGINEERING_ROLES.map((role) => {
+			selectedEngine === "dual" ? ENGINEERING_ROLES.map((role) => {
 				const binding = roles[role] || { model: "", reasoning: "" };
 				const compatible = (state.roleModels && Array.isArray(state.roleModels[role]) ? state.roleModels[role] : []);
 				const entry = modelEntry(binding.model);
@@ -1244,16 +1305,18 @@ function EngineeringEditorFields({ editor, variant }) {
 						}),
 					],
 				}, role);
-			}),
+			}) : museEditorRows(selectedProfile),
 			(dirty || profileId === "custom") && react_jsx_runtime.jsx("div", {
 				className: "nx-eng-hint",
 				children: "Custom bindings apply to the selected role when the next task starts (or escalates). Built-in profiles are never modified.",
 			}, "hint"),
 			notice && react_jsx_runtime.jsx("div", { className: "nx-eng-notice " + (noticeTone === "ok" ? "nx-eng-notice-ok" : "nx-eng-notice-err"), children: notice }, "notice"),
+			!selectedSelectable && react_jsx_runtime.jsx("div", { className: "nx-eng-hint", children: "Foundation-only profile: selection and execution arrive in a later phase. Existing Dual profiles are unchanged." }, "locked"),
 			react_jsx_runtime.jsx("button", {
 				type: "button",
 				className: "nx-eng-save",
-				disabled: saving,
+				disabled: saving || !selectedSelectable,
+				title: selectedSelectable ? undefined : "profile-not-selectable \u2014 this profile is foundation-only and cannot be selected yet.",
 				onClick: () => save(),
 				children: saving ? "Saving…" : (profileId === "custom" ? "Save Custom Profile" : "Select Profile"),
 			}, "save"),
@@ -1270,7 +1333,7 @@ function EngineeringEditor({ sessionId }) {
 			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." }),
 		});
 	}
-	if (!editor.state || !Array.isArray(editor.state.profiles) || !editor.roles) {
+	if (!editor.state || !Array.isArray(editor.state.profiles) || !editor.ready) {
 		return react_jsx_runtime.jsx(Section, {
 			label: "Engineering Profile",
 			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading engineering configuration…" }),
@@ -1652,7 +1715,7 @@ function EngineeringSelector({ editor }) {
 			document.removeEventListener("keydown", closeEscape);
 		};
 	}, [open]);
-	const ready = !editor.failed && editor.state && Array.isArray(editor.state.profiles) && editor.roles;
+	const ready = !editor.failed && editor.ready;
 	return react_jsx_runtime.jsxs("span", {
 		className: "nx-eng-composer",
 		ref: rootRef,
@@ -1873,6 +1936,7 @@ const PANEL_CSS = [
 ".nx-eng-select{flex:1;min-width:0;font-size:11px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);border:1px solid var(--dsw-alias-border-l1);border-radius:5px;padding:3px 4px;font-family:var(--ds-font-family-ui, inherit)}",
 ".nx-eng-select:disabled{opacity:.55;cursor:not-allowed}",
 ".nx-eng-reason{flex:none;width:82px;font-size:11px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);border:1px solid var(--dsw-alias-border-l1);border-radius:5px;padding:3px 4px;font-family:var(--ds-font-family-ui, inherit)}",
+".nx-eng-value{flex:1;min-width:0;font-size:11px;color:var(--dsw-alias-label-primary);padding:3px 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
 ".nx-eng-head{display:flex;align-items:center;gap:8px;margin-bottom:2px}",
 ".nx-eng-profile{flex:1;font-size:11.5px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);border:1px solid var(--dsw-alias-border-l1);border-radius:5px;padding:4px 6px;font-family:var(--ds-font-family-ui, inherit)}",
 ".nx-eng-notice{font-size:10.5px;color:var(--dsw-alias-label-secondary);padding:4px 8px;border-radius:5px;background:var(--dsw-alias-interactive-bg-hover)}",

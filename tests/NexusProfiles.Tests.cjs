@@ -151,6 +151,254 @@ function main() {
     assert.equal(active, null)
     pass('invalid preferred profile fails closed instead of selecting a different engine')
 
+    // ── Phase M1 integration: the Engineering Profile editor adapter is
+    //    Nexus-profile-aware while the Dual state stays byte-compatible.
+    const engineering = require('../ui/nexus-controller/lib/engineering.cjs')
+
+    // 1. GET adapter state exposes the top-level Nexus classification
+    const adapterState = engineering.buildEngineeringProfileState({
+      installRoot: fixture,
+      dataRoot: fixture,
+      settingsPath: path.join(fixture, 'data', 'settings.yaml'),
+      nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    assert.deepEqual(adapterState.profiles.map((p) => p.id), ['deepseek-codex', 'glm-codex'], 'Dual profile state keeps its exact legacy shape (no Muse bleed)')
+    pass('adapter Dual profile list is unchanged by the Nexus classification')
+    const adapterNexus = adapterState.nexusProfiles.map((p) => p.id)
+    assert.ok(adapterNexus.includes('deepseek-codex') && adapterNexus.includes('glm-codex') && adapterNexus.includes('muse-spark-1.3'))
+    pass('adapter state exposes the top-level Nexus profile catalog')
+
+    // 2. Dual entries keep delegating role bindings; Muse carries Muse metadata only
+    const adapterGlm = adapterState.nexusProfiles.find((p) => p.id === 'glm-codex')
+    assert.equal(adapterGlm.engine, 'dual')
+    assert.equal(adapterGlm.selectable, true)
+    assert.equal(adapterGlm.runnable, true)
+    assert.equal(adapterGlm.availability, 'ready')
+    assert.equal(adapterGlm.roles.primaryEngineer.model, 'glm-5.3-flash')
+    assert.equal(adapterGlm.muse, null)
+    pass('GLM + Codex resolves as dual with Engineering Profile role bindings')
+
+    const adapterMuse = adapterState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3')
+    assert.equal(adapterMuse.engine, 'muse')
+    assert.equal(adapterMuse.selectable, false)
+    assert.equal(adapterMuse.runnable, false)
+    assert.equal(adapterMuse.availability, 'foundation')
+    assert.equal(adapterMuse.source.kind, 'muse-profile')
+    assert.equal(adapterMuse.roles, null, 'Muse is never coerced into Dual roles')
+    assert.equal(adapterMuse.muse.reasoning.default, 'xhigh')
+    assert.equal(adapterMuse.muse.reasoning.escalation, 'max')
+    assert.equal(adapterMuse.muse.subagents.enabled, false)
+    assert.equal(adapterMuse.muse.review.independent, false)
+    assert.equal(adapterMuse.muse.contributorProtection.required, true)
+    assert.equal(adapterMuse.muse.status, 'foundation')
+    pass('Muse metadata is exposed from the Muse registry (foundation-only)')
+
+    // 3. Custom save still classifies as Dual in the Nexus list
+    writeJson(path.join(fixture, 'data', 'custom-engineering-profile.json'), {
+      schemaVersion: 1,
+      profileId: 'custom',
+      displayName: 'Custom',
+      roles: {
+        primaryEngineer: { model: 'glm-5.3-flash', reasoning: 'high' },
+        deepEngineer: { model: 'glm-5.3-flash', reasoning: 'max' },
+        reviewer: { model: 'gpt-5.6-sol', reasoning: 'medium' },
+        solver: { model: 'gpt-5.6-sol', reasoning: 'high' },
+        fallback: { model: 'glm-5.3', reasoning: 'max' },
+      },
+    })
+    const customState = engineering.buildEngineeringProfileState({
+      installRoot: fixture,
+      dataRoot: fixture,
+      settingsPath: path.join(fixture, 'data', 'settings.yaml'),
+      customProfilePath: path.join(fixture, 'data', 'custom-engineering-profile.json'),
+      nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    const customEntry = customState.nexusProfiles.find((p) => p.id === 'custom')
+    assert.ok(customEntry, 'custom entry classified once the operator saves one')
+    assert.equal(customEntry.engine, 'dual')
+    assert.equal(customEntry.selectable, true)
+    assert.equal(customEntry.builtin, false)
+    assert.equal(customEntry.roles.primaryEngineer.model, 'glm-5.3-flash')
+    const museAfterCustom = customState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3')
+    assert.equal(museAfterCustom.engine, 'muse')
+    assert.equal(museAfterCustom.selectable, false)
+    pass('Custom stays dual and Muse is never rewritten into Custom by saves')
+
+    // 4. Fail-closed: missing/invalid catalog degrades to an EMPTY list
+    const bareRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-profiles-bare-'))
+    fs.mkdirSync(path.join(bareRoot, 'data'), { recursive: true })
+    fs.writeFileSync(path.join(bareRoot, 'data', 'settings.yaml'), 'engineering-profile: glm-codex\n', 'utf8')
+    const bareState = engineering.buildEngineeringProfileState({
+      installRoot: bareRoot,
+      dataRoot: bareRoot,
+      settingsPath: path.join(bareRoot, 'data', 'settings.yaml'),
+      nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    assert.deepEqual(bareState.nexusProfiles, [], 'missing catalog: no profiles exposed, state degrades safely')
+    pass('missing Nexus catalog degrades to an empty editor list')
+
+    const corruptRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-profiles-bad-'))
+    for (const name of ['engineering-profiles.json', 'model-registry.json', 'muse-profiles.json']) copyFile(path.join(repoRoot, 'config', name), path.join(corruptRoot, 'config', name))
+    writeJson(path.join(corruptRoot, 'config', 'nexus-profiles.json'), {
+      schemaVersion: 1,
+      profiles: [{ id: 'bad', engine: 'muse', source: { kind: 'engineering-profile', profileId: 'bad' } }],
+    })
+    const corruptState = engineering.buildEngineeringProfileState({
+      installRoot: corruptRoot,
+      dataRoot: corruptRoot,
+      settingsPath: path.join(corruptRoot, 'data', 'settings.yaml'),
+      nowUtc: () => '2026-08-28T18:00:00.000Z',
+    })
+    assert.deepEqual(corruptState.nexusProfiles, [], 'invalid catalog: fail closed instead of guessing')
+    pass('invalid Nexus catalog fails closed with an empty editor list')
+
+    // 5. Muse can never be expressed as a Custom save (role-based contract)
+    assert.equal(
+      engineering.validateSaveCustomPayload({ primaryEngineer: null, deepEngineer: null, reviewer: null, solver: null, fallback: null }, null),
+      'missing role binding: primaryEngineer',
+      'a Muse-shaped metadata payload cannot satisfy the Dual custom contract',
+    )
+    pass('save-custom validation remains Dual-role authoritative')
+
+    // 6. Client renders Muse as read-only foundation metadata — no Dual role
+    //    editor, no empty role dropdowns, Select blocked — and keeps the
+    //    exact Dual rendering for Dual profiles (same vm+react technique as
+    //    the NexusControllerPanel suite).
+    const requireFromApp = require('node:module').createRequire(path.join(repoRoot, 'app', 'package.json'))
+    const react = requireFromApp('react')
+    const jsxRuntime = requireFromApp('react/jsx-runtime')
+    const renderToStaticMarkup = requireFromApp('react-dom/server').renderToStaticMarkup
+    const vm = require('node:vm')
+    const clientSource = fs.readFileSync(path.join(repoRoot, 'ui', 'nexus-controller', 'lib', 'client.js'), 'utf8')
+    let moduleExports = null
+    const sandbox = {
+      console,
+      URL,
+      setTimeout,
+      clearTimeout,
+      window: {
+        __ModuleLoader__: {
+          load(def) {
+            moduleExports = def.factory((name) => {
+              if (name === 'react') return react
+              if (name === 'react/jsx-runtime') return jsxRuntime
+              throw new Error('unexpected require: ' + name)
+            })
+          },
+        },
+        localStorage: { getItem() { return null }, setItem() {} },
+        setInterval() { return 1 },
+        clearInterval() {},
+      },
+      document: { createElement() { return { dataset: {}, remove() {} } }, head: { appendChild() {} } },
+    }
+    vm.createContext(sandbox)
+    vm.runInContext(clientSource, sandbox)
+    assert.equal(typeof moduleExports.EngineeringEditor, 'function', 'EngineeringEditor exported')
+    assert.equal(typeof moduleExports.EngineeringEditorFields, 'function', 'EngineeringEditorFields exported')
+
+    const glmRoles = {
+      primaryEngineer: { model: 'glm-5.3-flash', reasoning: 'high' },
+      deepEngineer: { model: 'glm-5.3-flash', reasoning: 'max' },
+      reviewer: { model: 'gpt-5.6-sol', reasoning: 'medium' },
+      solver: { model: 'gpt-5.6-sol', reasoning: 'high' },
+      fallback: { model: 'glm-5.3', reasoning: 'max' },
+    }
+    const registryEntries = [
+      { id: 'glm-5.3-flash', displayName: 'GLM-5.3-Flash', vendor: 'Z.ai', supportedReasoningLevels: ['off', 'high'] },
+      { id: 'gpt-5.6-sol', displayName: 'Codex GPT-5.6 Sol', vendor: 'OpenAI', supportedReasoningLevels: ['low', 'medium', 'high'] },
+      { id: 'glm-5.3', displayName: 'GLM-5.3', vendor: 'Z.ai', supportedReasoningLevels: ['off', 'high', 'max'] },
+    ]
+    const nexusEntries = [
+      { id: 'glm-codex', displayName: 'GLM + Codex', engine: 'dual', selectable: true, runnable: true, availability: 'ready', source: { kind: 'engineering-profile', profileId: 'glm-codex' }, builtin: true, roles: glmRoles, muse: null },
+      { id: 'muse-spark-1.3', displayName: 'Muse Spark 1.3', engine: 'muse', selectable: false, runnable: false, availability: 'foundation', source: { kind: 'muse-profile', profileId: 'muse-spark-1.3' }, builtin: true, roles: null, muse: { id: 'muse-spark-1.3', displayName: 'Muse Spark 1.3', status: 'foundation', reasoning: { default: 'xhigh', escalation: 'max' }, subagents: { enabled: false }, review: { independent: false }, contributorProtection: { required: true } } },
+    ]
+    function editorFixture(selectedProfile, selectedEngine, selectedSelectable, roles) {
+      return {
+        state: {
+          schemaVersion: 1,
+          profiles: [{ id: 'glm-codex', displayName: 'GLM + Codex', builtin: true, roles: glmRoles }],
+          nexusProfiles: nexusEntries,
+          registry: registryEntries,
+          roleModels: { primaryEngineer: ['glm-5.3-flash'], deepEngineer: ['glm-5.3-flash'], reviewer: ['gpt-5.6-sol'], solver: ['gpt-5.6-sol'], fallback: ['glm-5.3'], visualReviewer: [] },
+          preferredProfile: { id: 'glm-codex', displayName: 'GLM + Codex' },
+        },
+        failed: false,
+        profileId: selectedProfile.id,
+        roles: roles || null,
+        dirty: false, notice: null, noticeTone: 'ok', saving: false, fetchedAt: 0,
+        selectedProfile, selectedEngine, selectedSelectable, ready: true,
+        refresh() {}, selectProfile() {}, changeRole() {}, save() {}, bindingsFor() { return roles || null },
+        modelEntry(id) { return registryEntries.find((m) => m.id === id) || null },
+      }
+    }
+
+    // 6a. Muse: metadata rows, NO role rows, NO role selects, Select disabled
+    const museEditor = editorFixture(nexusEntries[1], 'muse', false, null)
+    const museHtml = renderToStaticMarkup(jsxRuntime.jsx(moduleExports.EngineeringEditorFields, { editor: museEditor, variant: 'room' }))
+    for (const label of ['Primary Engineer', 'Deep Engineer', 'Reviewer', 'Solver', 'Fallback']) {
+      assert.ok(!museHtml.includes(label), 'Muse renders no Dual role row: ' + label)
+    }
+    assert.equal((museHtml.match(/<select/g) || []).length, 1, 'Muse renders ONLY the profile dropdown (no empty role dropdowns)')
+    for (const text of ['>Engine<', '>Status<', 'Foundation', '>Reasoning<', 'xhigh', '>Max Reasoning<', '>max<', '>Subagents<', 'Disabled', '>Independent Review<', 'Not available', '>Execution<', 'Not available yet']) {
+      assert.ok(museHtml.includes(text), 'Muse metadata rendered: ' + text)
+    }
+    assert.ok(museHtml.includes('disabled'), 'Muse Select button is disabled')
+    assert.ok(museHtml.includes('profile-not-selectable'), 'Muse Select button names the deterministic rejection code')
+    assert.ok(museHtml.includes('Foundation-only profile'), 'Muse renders the foundation-only hint')
+    assert.ok(museHtml.includes('Muse Spark 1.3 \u2014 foundation'), 'Muse dropdown option visibly carries its foundation state')
+    pass('client renders Muse as read-only foundation metadata without a Dual role editor')
+
+    // 6b. Dual: the exact legacy editor surface (11 selects, role rows, enabled save)
+    const dualEditor = editorFixture(nexusEntries[0], 'dual', true, glmRoles)
+    const dualHtml = renderToStaticMarkup(jsxRuntime.jsx(moduleExports.EngineeringEditorFields, { editor: dualEditor, variant: 'room' }))
+    assert.equal((dualHtml.match(/<select/g) || []).length, 11, 'Dual profile keeps profile dropdown + 5 role rows (model + reasoning)')
+    for (const label of ['Primary Engineer', 'Deep Engineer', 'Reviewer', 'Solver', 'Fallback']) {
+      assert.ok(dualHtml.includes(label), 'Dual role row still rendered: ' + label)
+    }
+    assert.ok(dualHtml.includes('Select Profile'), 'Dual built-in keeps the Select Profile action')
+    assert.ok(!dualHtml.includes('Not available yet'), 'Dual editor shows no Muse execution gate')
+    assert.ok(!dualHtml.includes('profile-not-selectable'), 'Dual editor never renders the Muse rejection title')
+    pass('client Dual role editor remains unchanged in behavior')
+
+    // 6c. EngineeringEditor readiness: Muse state (roles=null) renders the
+    //     metadata surface instead of hanging in the loading gate.
+    const patchedSource = clientSource.replace(
+      'function useEngineeringEditor(sessionId) {',
+      'function useEngineeringEditor(sessionId) {\n\tif (typeof window !== "undefined" && window.__NX_TEST_EDITOR__ !== undefined) return window.__NX_TEST_EDITOR__;',
+    )
+    assert.notEqual(patchedSource, clientSource, 'shared editor hook header found in client.js')
+    let editorModule = null
+    const editorSandbox = {
+      console,
+      URL,
+      setTimeout,
+      clearTimeout,
+      window: {
+        __ModuleLoader__: {
+          load(def) {
+            editorModule = def.factory((name) => {
+              if (name === 'react') return react
+              if (name === 'react/jsx-runtime') return jsxRuntime
+              throw new Error('unexpected require: ' + name)
+            })
+          },
+        },
+        __NX_TEST_EDITOR__: museEditor,
+        localStorage: { getItem() { return null }, setItem() {} },
+        setInterval() { return 1 },
+        clearInterval() {},
+      },
+      document: { createElement() { return { dataset: {}, remove() {} } }, head: { appendChild() {} } },
+    }
+    vm.createContext(editorSandbox)
+    vm.runInContext(patchedSource, editorSandbox)
+    const museTabHtml = renderToStaticMarkup(jsxRuntime.jsx(editorModule.EngineeringEditor, { sessionId: 'session-0001' }))
+    assert.ok(museTabHtml.includes('>Engine<'), 'Engineering tab renders the Muse metadata surface for a Muse selection')
+    assert.ok(!museTabHtml.includes('Primary Engineer'), 'Engineering tab renders no Dual role editor for Muse')
+    assert.ok(!museTabHtml.includes('Loading engineering configuration'), 'Muse selection does not hang in the loading gate')
+    pass('UI adapter does not require Dual roles for Muse (readiness is engine-aware)')
+
     console.log('Nexus profile foundation tests passed: ' + passed)
   } finally {
     setOrDelete('DSH_AIH_PROFILE', savedDsh)

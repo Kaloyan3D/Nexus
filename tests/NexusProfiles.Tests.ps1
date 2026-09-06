@@ -74,6 +74,77 @@ try{
     $active=Resolve-AihActiveNexusProfile -InstallRoot $fixture -Preset 'aih-engineering'
     Assert-AihTrue ($null-eq$active) 'invalid active profile fails closed instead of selecting another engine'
 
+    # ── Phase M1 integration: the Engineering Profile editor backend is
+    #    Nexus-profile-aware (GET classification + deterministic select
+    #    gate) while Dual selection and the Custom workflow stay untouched.
+    $stateScript=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $fixture
+    $editorState=$stateScript|ConvertFrom-Json
+    $nexusIds=@($editorState.nexusProfiles|ForEach-Object{$_.id})
+    Assert-AihTrue (($nexusIds -contains 'deepseek-codex')-and($nexusIds -contains 'glm-codex')-and($nexusIds -contains 'muse-spark-1.3')-and($nexusIds -contains 'custom')) 'editor GET exposes the top-level Nexus profile catalog incl. dynamic Custom'
+    $glmEntry=@($editorState.nexusProfiles|Where-Object{$_.id -eq 'glm-codex'})[0]
+    Assert-AihEqual $glmEntry.engine 'dual' 'GLM + Codex is classified dual in editor state'
+    Assert-AihTrue ([bool]$glmEntry.selectable) 'GLM + Codex stays selectable in editor state'
+    Assert-AihEqual $glmEntry.roles.primaryEngineer.model 'glm-5.3-flash' 'Dual entries keep delegating role bindings to Engineering Profiles'
+    Assert-AihTrue ($null-eq$glmEntry.muse) 'Dual entries carry no Muse metadata'
+    $customEntry=@($editorState.nexusProfiles|Where-Object{$_.id -eq 'custom'})[0]
+    Assert-AihEqual $customEntry.engine 'dual' 'operator Custom profile is classified dual in editor state'
+    Assert-AihEqual $customEntry.builtin $false 'dynamic Custom entry is marked non-builtin'
+    $museEntry=@($editorState.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3'})[0]
+    Assert-AihEqual $museEntry.engine 'muse' 'Muse Spark 1.3 is classified muse in editor state'
+    Assert-AihTrue (-not[bool]$museEntry.selectable) 'Muse stays selectable=false in editor state'
+    Assert-AihTrue (-not[bool]$museEntry.runnable) 'Muse stays runnable=false in editor state'
+    Assert-AihEqual $museEntry.availability 'foundation' 'Muse availability=foundation in editor state'
+    Assert-AihTrue ($null-eq$museEntry.roles) 'Muse entry is NOT coerced into Dual roles'
+    Assert-AihEqual $museEntry.muse.reasoning.default 'xhigh' 'Muse metadata exposes reasoning.default=xhigh'
+    Assert-AihEqual $museEntry.muse.reasoning.escalation 'max' 'Muse metadata exposes reasoning.escalation=max'
+    Assert-AihEqual $museEntry.muse.subagents.enabled $false 'Muse metadata exposes subagents.enabled=false'
+    Assert-AihEqual $museEntry.muse.review.independent $false 'Muse metadata exposes review.independent=false'
+    Assert-AihEqual $museEntry.muse.contributorProtection.required $true 'Muse metadata exposes contributorProtection.required=true'
+    Assert-AihEqual $museEntry.muse.status 'foundation' 'Muse metadata exposes status=foundation'
+
+    # Muse selection is rejected deterministically BEFORE the settings key moves
+    $settingsBefore=Get-Content -Raw (Join-Path $fixture 'data/settings.yaml')
+    $museSelectRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $fixture -ProfileId 'muse-spark-1.3'
+    $museSelect=$museSelectRaw|ConvertFrom-Json
+    Assert-AihEqual $museSelect.ok $false 'select Muse returns ok=false'
+    Assert-AihEqual $museSelect.error 'profile-not-selectable' 'select Muse fails deterministically with profile-not-selectable'
+    Assert-AihEqual $museSelect.engine 'muse' 'select Muse rejection identifies the blocked engine'
+    Assert-AihTrue ((Get-Content -Raw (Join-Path $fixture 'data/settings.yaml')) -eq $settingsBefore) 'rejected Muse selection never writes the settings key'
+
+    # Unknown ids still fail closed (unchanged Dual-era behavior)
+    $threw=$false
+    try{& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $fixture -ProfileId 'bogus-profile'|Out-Null}catch{$threw=$true}
+    Assert-AihTrue $threw 'select of an unknown profile still fails closed'
+
+    # Dual built-ins remain selectable through the same Nexus gate
+    $dualSelectRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $fixture -ProfileId 'deepseek-codex'
+    $dualSelect=$dualSelectRaw|ConvertFrom-Json
+    Assert-AihTrue ([bool]$dualSelect.ok -and $dualSelect.profileId -eq 'deepseek-codex') 'Dual built-ins remain selectable'
+    $settingsAfterDualSelect=Get-Content -Raw (Join-Path $fixture 'data/settings.yaml')
+    Assert-AihTrue ([regex]::IsMatch($settingsAfterDualSelect,'(?m)^engineering-profile:\s*deepseek-codex')) 'Dual selection still writes the settings key'
+
+    # save-custom workflow unchanged: role-based, engine dual, never touching Muse
+    $customPayloadPath=Join-Path $fixture 'custom-payload.json'
+    @{roles=[ordered]@{
+        primaryEngineer=[ordered]@{model='glm-5.3-flash';reasoning='high'}
+        deepEngineer=[ordered]@{model='glm-5.3-flash';reasoning='max'}
+        reviewer=[ordered]@{model='gpt-5.6-sol';reasoning='medium'}
+        solver=[ordered]@{model='gpt-5.6-sol';reasoning='high'}
+        fallback=[ordered]@{model='glm-5.3';reasoning='max'}
+    }}|ConvertTo-Json -Depth 10|Set-Content -Encoding UTF8 -LiteralPath $customPayloadPath
+    $savedCustomRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action save-custom -InstallRoot $fixture -PayloadFile $customPayloadPath
+    $savedCustom=$savedCustomRaw|ConvertFrom-Json
+    Assert-AihTrue ($null-ne$savedCustom.roles -and $savedCustom.roles.primaryEngineer.model -eq 'glm-5.3-flash') 'save-custom still persists operator role bindings'
+    $settingsAfterCustomSave=Get-Content -Raw (Join-Path $fixture 'data/settings.yaml')
+    Assert-AihTrue ([regex]::IsMatch($settingsAfterCustomSave,'(?m)^engineering-profile:\s*custom')) 'save-custom still sets the preferred profile to custom'
+    $stateScript2=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $fixture
+    $editorState2=$stateScript2|ConvertFrom-Json
+    $customEntry2=@($editorState2.nexusProfiles|Where-Object{$_.id -eq 'custom'})[0]
+    $museEntry2=@($editorState2.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3'})[0]
+    Assert-AihEqual $customEntry2.engine 'dual' 'saved Custom profile remains engine dual (Muse is never rewritten into Custom)'
+    Assert-AihTrue (-not[bool]$museEntry2.selectable) 'save-custom leaves Muse non-selectable'
+    Assert-AihEqual $museEntry2.availability 'foundation' 'save-custom leaves Muse availability=foundation'
+
     Write-Host "Nexus controller profile foundation tests passed: $script:passed"
 }finally{
     $env:DSH_AIH_PROFILE=$savedDsh

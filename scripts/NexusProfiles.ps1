@@ -13,17 +13,19 @@ function Get-AihNexusProfileCatalog {
     if([int]$catalog.schemaVersion -ne 1){throw 'Nexus profile catalog schemaVersion must be 1.'}
     if($null-eq$catalog.PSObject.Properties['profiles']-or@($catalog.profiles).Count-eq0){throw 'Nexus profile catalog must declare at least one profile.'}
     $seen=@{}
-    foreach($profile in @($catalog.profiles)){
-        $id=([string]$profile.id).Trim().ToLowerInvariant()
+    # NOTE: never name the loop variable '$profile' — that is a PowerShell
+    # automatic variable; the portability audit gate fails on it.
+    foreach($catalogProfile in @($catalog.profiles)){
+        $id=([string]$catalogProfile.id).Trim().ToLowerInvariant()
         if([string]::IsNullOrWhiteSpace($id)){throw 'Nexus profile is missing an id.'}
         if($seen.ContainsKey($id)){throw "Nexus profile id '$id' is duplicated."}
         $seen[$id]=$true
-        $engine=([string]$profile.engine).Trim().ToLowerInvariant()
+        $engine=([string]$catalogProfile.engine).Trim().ToLowerInvariant()
         if($engine -notin @('dual','muse')){throw "Nexus profile '$id' has unsupported engine '$engine'."}
-        if($null-eq$profile.PSObject.Properties['source']){throw "Nexus profile '$id' is missing source."}
+        if($null-eq$catalogProfile.PSObject.Properties['source']){throw "Nexus profile '$id' is missing source."}
         $expectedKind=if($engine-eq'dual'){'engineering-profile'}else{'muse-profile'}
-        if([string]$profile.source.kind -ne $expectedKind){throw "Nexus profile '$id' source kind must be '$expectedKind' for engine '$engine'."}
-        if([string]::IsNullOrWhiteSpace([string]$profile.source.profileId)){throw "Nexus profile '$id' is missing source.profileId."}
+        if([string]$catalogProfile.source.kind -ne $expectedKind){throw "Nexus profile '$id' source kind must be '$expectedKind' for engine '$engine'."}
+        if([string]::IsNullOrWhiteSpace([string]$catalogProfile.source.profileId)){throw "Nexus profile '$id' is missing source.profileId."}
     }
     $catalog
 }
@@ -35,8 +37,8 @@ function Get-AihMuseProfiles {
     if([int]$profiles.schemaVersion -ne 1){throw 'Muse profiles schemaVersion must be 1.'}
     if($null-eq$profiles.PSObject.Properties['profiles']-or@($profiles.profiles).Count-eq0){throw 'Muse profiles must declare at least one profile.'}
     $seen=@{}
-    foreach($profile in @($profiles.profiles)){
-        $id=([string]$profile.id).Trim().ToLowerInvariant()
+    foreach($museProfile in @($profiles.profiles)){
+        $id=([string]$museProfile.id).Trim().ToLowerInvariant()
         if([string]::IsNullOrWhiteSpace($id)){throw 'Muse profile is missing an id.'}
         if($seen.ContainsKey($id)){throw "Muse profile id '$id' is duplicated."}
         $seen[$id]=$true
