@@ -31,8 +31,8 @@ try{
 
     $muse=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId 'muse-spark-1.3-contributor'
     Assert-AihEqual $muse.Engine 'muse' 'Muse resolves to a separate agent engine on controller plane'
-    Assert-AihTrue (-not[bool]$muse.Selectable) 'Muse stays non-selectable during M1'
-    Assert-AihTrue (-not[bool]$muse.Runnable) 'Muse stays non-runnable during M1'
+    Assert-AihTrue ([bool]$muse.Selectable) 'Muse is selectable after the Contributor protection gate'
+    Assert-AihTrue ([bool]$muse.Runnable) 'Muse is runnable after the Contributor protection gate'
     Assert-AihEqual $muse.Config.reasoning.default 'xhigh' 'Muse registry carries engine-specific reasoning metadata'
 
     $unknown=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId 'unknown-profile'
@@ -65,7 +65,7 @@ try{
     $env:DSH_AIH_PROFILE='muse-spark-1.3-contributor'
     $active=Resolve-AihActiveNexusProfile -InstallRoot $fixture -Preset 'aih-engineering'
     Assert-AihEqual $active.Engine 'muse' 'DSH_AIH_PROFILE can identify Muse without Dual fallback'
-    Assert-AihTrue (-not[bool]$active.Runnable) 'active Muse metadata still exposes the M1 execution gate'
+    Assert-AihTrue ([bool]$active.Runnable) 'active Muse metadata exposes the completed Contributor protection gate'
 
     $active=Resolve-AihActiveNexusProfile -InstallRoot $fixture -Preset 'aih-deepseek'
     Assert-AihEqual $active.Id 'deepseek-codex' 'DeepSeek-only preset remains locked against engine override'
@@ -91,25 +91,24 @@ try{
     Assert-AihEqual $customEntry.builtin $false 'dynamic Custom entry is marked non-builtin'
     $museEntry=@($editorState.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3-contributor'})[0]
     Assert-AihEqual $museEntry.engine 'muse' 'Muse Spark 1.3 is classified muse in editor state'
-    Assert-AihTrue (-not[bool]$museEntry.selectable) 'Muse stays selectable=false in editor state'
-    Assert-AihTrue (-not[bool]$museEntry.runnable) 'Muse stays runnable=false in editor state'
-    Assert-AihEqual $museEntry.availability 'contributor-gated' 'Muse availability=contributor-gated in editor state (M3 activation gate held)'
+    Assert-AihTrue ([bool]$museEntry.selectable) 'Muse is selectable in editor state after M5'
+    Assert-AihTrue ([bool]$museEntry.runnable) 'Muse is runnable in editor state after M5'
+    Assert-AihEqual $museEntry.availability 'ready' 'Muse availability=ready in editor state'
     Assert-AihTrue ($null-eq$museEntry.roles) 'Muse entry is NOT coerced into Dual roles'
     Assert-AihEqual $museEntry.muse.reasoning.default 'xhigh' 'Muse metadata exposes reasoning.default=xhigh'
     Assert-AihEqual $museEntry.muse.reasoning.escalation 'xhigh' 'Muse metadata exposes reasoning.escalation=xhigh (the Contributor ceiling, not the Standard-only max)'
     Assert-AihEqual $museEntry.muse.subagents.enabled $false 'Muse metadata exposes subagents.enabled=false'
     Assert-AihEqual $museEntry.muse.review.independent $false 'Muse metadata exposes review.independent=false'
     Assert-AihEqual $museEntry.muse.contributorProtection.required $true 'Muse metadata exposes contributorProtection.required=true'
-    Assert-AihEqual $museEntry.muse.status 'contributor-gated' 'Muse metadata exposes status=contributor-gated'
+    Assert-AihEqual $museEntry.muse.status 'ready' 'Muse metadata exposes status=ready'
 
-    # Muse selection is rejected deterministically BEFORE the settings key moves
-    $settingsBefore=Get-Content -Raw (Join-Path $fixture 'data/settings.yaml')
+    # Muse selection is now accepted through the same profile editor contract.
     $museSelectRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $fixture -ProfileId 'muse-spark-1.3-contributor'
     $museSelect=$museSelectRaw|ConvertFrom-Json
-    Assert-AihEqual $museSelect.ok $false 'select Muse returns ok=false'
-    Assert-AihEqual $museSelect.error 'profile-not-selectable' 'select Muse fails deterministically with profile-not-selectable'
-    Assert-AihEqual $museSelect.engine 'muse' 'select Muse rejection identifies the blocked engine'
-    Assert-AihTrue ((Get-Content -Raw (Join-Path $fixture 'data/settings.yaml')) -eq $settingsBefore) 'rejected Muse selection never writes the settings key'
+    Assert-AihEqual $museSelect.ok $true 'select Muse succeeds after the M5 activation gate'
+    Assert-AihEqual $museSelect.profileId 'muse-spark-1.3-contributor' 'select Muse reports the persisted user-facing Profile preference'
+    $settingsAfterMuseSelect=Get-Content -Raw (Join-Path $fixture 'data/settings.yaml')
+    Assert-AihTrue ([regex]::IsMatch($settingsAfterMuseSelect,'(?m)^engineering-profile:\s*muse-spark-1\.3-contributor')) 'Muse selection writes the settings key'
 
     # Unknown ids still fail closed (unchanged Dual-era behavior)
     $threw=$false
@@ -142,8 +141,8 @@ try{
     $customEntry2=@($editorState2.nexusProfiles|Where-Object{$_.id -eq 'custom'})[0]
     $museEntry2=@($editorState2.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3-contributor'})[0]
     Assert-AihEqual $customEntry2.engine 'dual' 'saved Custom profile remains engine dual (Muse is never rewritten into Custom)'
-    Assert-AihTrue (-not[bool]$museEntry2.selectable) 'save-custom leaves Muse non-selectable'
-    Assert-AihEqual $museEntry2.availability 'contributor-gated' 'save-custom leaves Muse availability=contributor-gated'
+    Assert-AihTrue ([bool]$museEntry2.selectable) 'save-custom leaves Muse selectable'
+    Assert-AihEqual $museEntry2.availability 'ready' 'save-custom leaves Muse availability=ready'
 
     # ── Phase M1.1: selection gating is selectable-ONLY (fixture catalog
     #    override — the production Muse availability flags are NOT touched) ──
@@ -176,10 +175,10 @@ try{
         Assert-AihTrue ([bool]$selBackResult.ok) 'Dual profiles remain selectable after Muse preference work'
     }finally{if(Test-Path -LiteralPath $selFixture){Remove-Item -LiteralPath $selFixture -Recurse -Force}}
 
-    # Production Muse is STILL rejected because selectable=false (real catalog)
-    $prodRejectRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $fixture -ProfileId 'muse-spark-1.3-contributor'
-    $prodReject=$prodRejectRaw|ConvertFrom-Json
-    Assert-AihEqual $prodReject.error 'profile-not-selectable' 'production Muse is still rejected (selectable=false, never engine)'
+    # Production Muse remains selectable after exercising fixture overrides.
+    $prodSelectRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $fixture -ProfileId 'muse-spark-1.3-contributor'
+    $prodSelect=$prodSelectRaw|ConvertFrom-Json
+    Assert-AihEqual $prodSelect.ok $true 'production Muse selection remains available'
 
     # ── Phase M1.1: resolver parity — a missing Muse registry skips ONLY the
     #    Muse entry (never a partially-resolved muse:null entry) ──

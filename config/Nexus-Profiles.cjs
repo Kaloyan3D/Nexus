@@ -276,7 +276,8 @@ function profileEngineOf(installRoot, profileId) {
 // the profile names a MODEL REGISTRY id (never a provider id), and the
 // registry maps the model to a settings.yaml llm-pi-ai.providers route.
 // RESOLUTION ONLY — this never dispatches execution and the Muse profile
-// stays selectable=false / runnable=false until the Muse agent plane lands.
+// remains governed by the explicit catalog flags; engine classification never
+// silently changes selectability or runnability.
 
 /** The muse model binding of a profile document entry, or null. */
 function museModelBindingOf(museProfile) {

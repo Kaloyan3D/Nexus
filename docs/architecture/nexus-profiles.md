@@ -1,6 +1,6 @@
 # Nexus profiles and agent engines
 
-Status: Phase M3 — profile/engine foundation with the first Muse agent plane.
+Status: Phase M5 — Muse Contributor protection installed and the Muse profile ready.
 
 ## Decision
 
@@ -91,7 +91,7 @@ The top-level resolver preserves the existing profile selection precedence:
 
 A preset with `profileOverrideAllowed: false` remains locked. Unknown profile ids fail closed; they never silently select a different engine.
 
-## Phase M1 safety gate (updated by M3)
+## Phase M1 safety gate (historical; completed by M5)
 
 Muse Spark 1.3 entered the catalog in M1 as architecture metadata only:
 
@@ -100,11 +100,11 @@ selectable = false
 runnable   = false
 ```
 
-This prevented a partially implemented Muse profile from reaching the production agent/request path. Phase M2 added Meta provider/model transport; **Phase M3 installed the first real Muse Agent Plane — and the profile STAYS locked (`selectable = false`, `runnable = false`, `availability = contributor-gated`)** because `contributorProtection.required` is still unsatisfiable: outbound contributor protection ships in Phase M5. Security truth outranks selectability. See [muse-agent-plane-v0.md](muse-agent-plane-v0.md) for the plane's architecture, its operator-consent execution gate, and the exact remaining activation gate.
+This prevented a partially implemented Muse profile from reaching the production agent/request path. Phase M2 added Meta provider/model transport and Phase M3 installed the first real Muse Agent Plane. Phase M5 now satisfies `contributorProtection.required` at the provider-egress boundary, so the production profile is `selectable = true`, `runnable = true`, and `availability = ready`. Security truth still outranks selectability: unsupported adapter versions or hashes, a missing guard, target mismatches, and unsafe payload shapes fail closed. See [muse-agent-plane-v0.md](muse-agent-plane-v0.md).
 
 ## Phase M2: Meta Model API provider transport
 
-M2 wires the Muse profile to a provider WITHOUT enabling any execution. The architecture after M2 is still `selectable = false`, `runnable = false`, `availability = foundation` for the production Muse profile, and no controller dispatch, agent loop, tool loop, context assembly, or completion logic exists for Muse.
+M2 wired the Muse profile to a provider without enabling execution. At the end of that historical phase the production profile was still `selectable = false`, `runnable = false`, `availability = foundation`, and no Muse controller dispatch existed yet. M3 and M5 subsequently added the agent plane and protected activation.
 
 ### Resolution chain
 
@@ -215,7 +215,7 @@ The production Muse execution path (M3+) will ride the same settings.yaml route 
 
 ### M2 / M3 boundary
 
-M2 ends at **provider transport READY**. Still deliberately absent: controller engine dispatch, Muse agent loop, tool loop, Working Set prompting, context assembly, completion logic, verification logic, Muse retries, Muse subagents, Codex calls from Muse, and Muse worktrees. The production Muse profile remains `selectable = false`, `runnable = false`, `availability = foundation`.
+M2 ended at **provider transport READY**. At that boundary controller engine dispatch, the Muse agent loop, tool loop, completion logic, and retries were deliberately absent. This is historical boundary documentation; the current Phase M5 production profile is protected and ready. Muse subagents, independent Muse review, Codex fallback, and Muse worktrees remain intentionally absent.
 
 ## Phase M2.1: Contributor target, engine hardening, substrate proof, UI restart fix
 M2.1 hardens the M2 foundation without installing any M3 capability. Four deliverables:

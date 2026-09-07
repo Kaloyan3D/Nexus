@@ -1312,7 +1312,7 @@ function museEditorRows(selectedProfile) {
 		["Max Reasoning", reasoning && reasoning.escalation ? String(reasoning.escalation) : "\u2014", "Muse escalation reasoning ceiling."],
 		["Subagents", muse && muse.subagents && muse.subagents.enabled === false ? "Disabled" : "Enabled", "Muse subagent dispatch."],
 		["Independent Review", muse && muse.review && muse.review.independent === false ? "Not available" : "Independent", "Independent Muse review."],
-		["Execution", selectedProfile && selectedProfile.runnable === false ? "Contributor-gated" : "Available", "Muse runs on its own single-agent plane; execution stays contributor-gated until outbound contributor protection ships (Phase M5)."],
+		["Execution", selectedProfile && selectedProfile.runnable === false ? "Contributor-gated" : "Available", "Muse runs on its own protected single-agent plane; provider egress is sanitized and exact-target enforced."],
 	];
 	return rows.map((row) => react_jsx_runtime.jsxs("div", {
 		className: "nx-eng-row",
@@ -1961,6 +1961,7 @@ function EngineeringSelector({ editor }) {
  */
 const NEXUS_COMPOSER_PRESET_MODES = Object.freeze({
 	"aih-engineering": "engineering",
+	"aih-muse": "engineering",
 	"aih-deepseek": "legacy",
 });
 /** Classify a preset id, or return null when it is not a known Nexus mode. */
@@ -1989,7 +1990,8 @@ function classifyNexusPreset(preset) {
  *   2. ACTIVE SESSION — before that, the session's agent preset (client-side
  *      ConversationSnapshot carries agentPreset / projectionValues.agentPreset,
  *      and a composer-less snapshot still names the preset on its binding)
- *      classifies the boot: aih-engineering -> engineering, aih-deepseek -> legacy;
+ *      classifies the boot: aih-engineering/aih-muse -> engineering,
+ *      aih-deepseek -> legacy;
  *   3. PRE-SESSION (hero, including a session object without a preset yet) —
  *      the mode selector's authoritative client state (nexusPreset: the
  *      staged selection or the persisted default) classifies the posture;

@@ -3309,6 +3309,8 @@ async function main() {
     // Client-side boot heuristic from the session preset.
     assert.equal(modeOf({ agentPreset: 'aih-engineering' }, null).mode, 'engineering', 'aih-engineering session boots engineering before any snapshot')
     assert.equal(modeOf({ agentPreset: 'aih-engineering' }, null).source, 'session-preset')
+    assert.equal(modeOf({ agentPreset: 'aih-muse' }, null).mode, 'engineering', 'aih-muse session remains Profile-owned before the first snapshot')
+    assert.equal(modeOf({ projectionValues: { agentPreset: 'aih-muse' } }, null).mode, 'engineering', 'restored aih-muse projection remains Profile-owned')
     assert.equal(modeOf({ agentPreset: 'aih-deepseek' }, null).mode, 'legacy', 'aih-deepseek session boots legacy before any snapshot')
     assert.equal(modeOf({ agentPreset: 'aih-deepseek' }, null).source, 'session-preset')
 
@@ -3345,6 +3347,11 @@ async function main() {
     // Profile UI stays in the Engineering/loading posture (session AND hero).
     assert.equal(modeOf({ agentPreset: 'aih-engineering' }, { error: 'endpoint unavailable' }, 'aih-engineering').mode, 'engineering', 'endpoint-unavailable restart keeps the Profile UI (fail closed)')
     assert.equal(modeOf(null, { error: 'endpoint unavailable' }, 'aih-engineering').mode, 'engineering', 'endpoint-unavailable HERO restart keeps the Profile UI (fail closed)')
+
+    const routingPolicyPath = path.join(ROOT, 'config', 'routing-policy.json')
+    assert.equal(status.composerModeOf('aih-engineering', routingPolicyPath), 'engineering', 'Dual Normal Engineering is Profile-owned server-side')
+    assert.equal(status.composerModeOf('aih-muse', routingPolicyPath), 'engineering', 'Muse Normal Engineering is Profile-owned server-side after binding/response/reload')
+    assert.equal(status.composerModeOf('aih-deepseek', routingPolicyPath), 'legacy', 'DeepSeek Only keeps upstream model ownership')
 
     assert.ok(source.includes("composerModeOfSession(session, snapshot, nexusPreset)"), 'ExecutorChip derives its mode through the shared mode-ownership heuristic')
     assert.ok(source.includes("react.useSyncExternalStore(subscribeNexusMode, currentNexusModePreset, currentNexusModePreset)"), 'ExecutorChip subscribes to the shared nexus mode state')

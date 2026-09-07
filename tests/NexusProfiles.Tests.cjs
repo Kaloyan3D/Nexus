@@ -74,12 +74,12 @@ function main() {
     assert.ok(muse)
     assert.equal(muse.engine, 'muse')
     assert.equal(muse.source.kind, 'muse-profile')
-    assert.equal(muse.selectable, false)
-    assert.equal(muse.runnable, false)
-    assert.equal(muse.availability, 'contributor-gated')
+    assert.equal(muse.selectable, true)
+    assert.equal(muse.runnable, true)
+    assert.equal(muse.availability, 'ready')
     assert.equal(muse.config.reasoning.default, 'xhigh')
     assert.equal(muse.config.subagents.enabled, false)
-    pass('Muse resolves to its own agent engine while staying contributor-gated (M3 activation gate held)')
+    pass('Muse resolves to its own ready single-agent engine with Contributor protection required')
 
     assert.equal(nexusProfiles.resolveNexusProfile(repoRoot, 'does-not-exist'), null)
     pass('unknown profile fails closed with no fallback')
@@ -138,7 +138,7 @@ function main() {
     active = nexusProfiles.resolveActiveNexusProfile(fixture, 'aih-engineering')
     assert.equal(active.id, 'muse-spark-1.3-contributor')
     assert.equal(active.engine, 'muse')
-    assert.equal(active.runnable, false)
+    assert.equal(active.runnable, true)
     pass('DSH_AIH_PROFILE can resolve Muse metadata without silently falling back to Dual')
 
     active = nexusProfiles.resolveActiveNexusProfile(fixture, 'aih-deepseek')
@@ -180,9 +180,9 @@ function main() {
 
     const adapterMuse = adapterState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3-contributor')
     assert.equal(adapterMuse.engine, 'muse')
-    assert.equal(adapterMuse.selectable, false)
-    assert.equal(adapterMuse.runnable, false)
-    assert.equal(adapterMuse.availability, 'contributor-gated')
+    assert.equal(adapterMuse.selectable, true)
+    assert.equal(adapterMuse.runnable, true)
+    assert.equal(adapterMuse.availability, 'ready')
     assert.equal(adapterMuse.source.kind, 'muse-profile')
     assert.equal(adapterMuse.roles, null, 'Muse is never coerced into Dual roles')
     assert.equal(adapterMuse.muse.reasoning.default, 'xhigh')
@@ -190,8 +190,8 @@ function main() {
     assert.equal(adapterMuse.muse.subagents.enabled, false)
     assert.equal(adapterMuse.muse.review.independent, false)
     assert.equal(adapterMuse.muse.contributorProtection.required, true)
-    assert.equal(adapterMuse.muse.status, 'contributor-gated')
-    pass('Muse metadata is exposed from the Muse registry (contributor-gated until outbound protection ships)')
+    assert.equal(adapterMuse.muse.status, 'ready')
+    pass('Muse metadata is exposed from the ready protected Muse registry')
 
     // 3. Custom save still classifies as Dual in the Nexus list
     writeJson(path.join(fixture, 'data', 'custom-engineering-profile.json'), {
@@ -221,8 +221,8 @@ function main() {
     assert.equal(customEntry.roles.primaryEngineer.model, 'glm-5.3-flash')
     const museAfterCustom = customState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3-contributor')
     assert.equal(museAfterCustom.engine, 'muse')
-    assert.equal(museAfterCustom.selectable, false)
-    pass('Custom stays dual and Muse is never rewritten into Custom by saves')
+    assert.equal(museAfterCustom.selectable, true)
+    pass('Custom stays dual and ready Muse is never rewritten into Custom by saves')
 
     // 4. Fail-closed: missing/invalid catalog degrades to an EMPTY list
     const bareRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-profiles-bare-'))
@@ -455,12 +455,12 @@ function main() {
     assert.equal(selectableMuseAdapter.runnable, false, 'runnable stays independent of selectable')
     pass('hypothetical selectable Muse passes the adapter layer (fixture override only)')
 
-    // 11. production Muse flags unchanged
+    // 11. production Muse activation truth after M5
     const productionMuse = adapterState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3-contributor')
-    assert.equal(productionMuse.selectable, false, 'production Muse stays selectable=false')
-    assert.equal(productionMuse.runnable, false, 'production Muse stays runnable=false')
-    assert.equal(productionMuse.availability, 'contributor-gated', 'production Muse stays contributor-gated')
-    pass('production Muse availability flags are untouched')
+    assert.equal(productionMuse.selectable, true, 'production Muse is selectable after M5')
+    assert.equal(productionMuse.runnable, true, 'production Muse is runnable after M5')
+    assert.equal(productionMuse.availability, 'ready', 'production Muse availability is ready')
+    pass('production Muse availability agrees with the completed Contributor gate')
 
     // 12. resolver parity: missing muse-profiles.json → the Muse entry is
     //     omitted entirely (never partially resolved with muse: null)

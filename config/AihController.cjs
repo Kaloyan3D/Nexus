@@ -279,6 +279,49 @@ function verificationCliStdout(error) {
   return null
 }
 
+function redactControllerDiagnostic(value) {
+  return String(value == null ? '' : value)
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, '$1<redacted>')
+    .replace(/\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, '<redacted>')
+    .replace(/((?:MODEL_API_KEY|API[_-]?KEY|ACCESS[_-]?TOKEN|CLIENT[_-]?SECRET|PASSWORD|AUTHORIZATION)\s*[:=]\s*)([^\s,;]+)/gi, '$1<redacted>')
+    .replace(/("(?:apiKey|api_key|accessToken|access_token|clientSecret|client_secret|password|authorization)"\s*:\s*")[^"]*(")/gi, '$1<redacted>$2')
+}
+
+function boundedControllerDiagnostic(value) {
+  const redacted = redactControllerDiagnostic(value).trim()
+  return redacted.length <= 2000 ? redacted : redacted.slice(0, 2000) + '…<truncated>'
+}
+
+/** Safe, structured child-process diagnostics. Payload contents and secrets
+ * never enter this object; only the script, non-payload args, process status,
+ * bounded redacted streams, and structured failure discriminator are kept. */
+function controllerCliFailure(script, args, error) {
+  const stdout = boundedControllerDiagnostic(error && error.stdout)
+  const stderr = boundedControllerDiagnostic(error && error.stderr)
+  let structuredKind = null
+  let structuredCode = null
+  try {
+    const parsed = stdout === '' ? null : parseCliJson(stdout)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      if (typeof parsed.kind === 'string') structuredKind = parsed.kind
+      if (typeof parsed.code === 'string') structuredCode = parsed.code
+    }
+  } catch {
+    /* ordinary diagnostic output */
+  }
+  return {
+    script: path.basename(String(script || 'unknown')),
+    args: Array.isArray(args) ? args.map((arg) => boundedControllerDiagnostic(arg)) : [],
+    exitCode: error && error.code !== undefined ? error.code : null,
+    signal: error && error.signal ? String(error.signal) : null,
+    killed: Boolean(error && error.killed),
+    stdout,
+    stderr,
+    structuredKind,
+    structuredCode,
+  }
+}
+
 function reviewQuestionOf(text) {
   if (typeof text !== 'string') return ''
   const match = text.match(/^\s*\/(?:codex-)?review\b[\s:]*(.*)$/is)
@@ -888,6 +931,7 @@ function apply(ctx) {
    * parses the CLI's stdout leniently.
    */
   async function invokePowerShell(script, args, options) {
+    const diagnosticArgs = Array.isArray(args) ? [...args] : []
     const payload = options && options.payload
     let payloadPath = null
     if (payload && typeof payload === 'object') {
@@ -915,7 +959,13 @@ function apply(ctx) {
           const stdout = typeof error.stdout === 'string' ? error.stdout : ''
           return { stdout, stderr: (error && error.stderr) || '' }
         }
-        throw error
+        const failure = controllerCliFailure(script, diagnosticArgs, error)
+        const detail = failure.structuredKind || failure.structuredCode || failure.stderr || failure.stdout || boundedControllerDiagnostic(error && error.message)
+        const wrapped = new Error(`aih-controller: ${failure.script} failed (exit ${failure.exitCode == null ? 'unknown' : failure.exitCode})${detail ? ': ' + detail : ''}`)
+        wrapped.code = 'aih-controller-cli-failed'
+        wrapped.cause = error
+        wrapped.cliFailure = failure
+        throw wrapped
       })
       const text = (result.stdout || '').trim()
       if (!text) return null
@@ -1867,11 +1917,7 @@ function apply(ctx) {
     // TASK-0005 Part 1: every newly created task carries an immutable
     // taskInstanceId from the TaskController; the binding references it.
     const taskInstanceId = task.taskInstanceId ?? null
-    const decision = await routeTask(workspace, task.taskId, task.description, {
-      preset: agentPresetOf(session),
-      reviewRequested,
-      taskInstanceId,
-    })
+    const preset = agentPresetOf(session)
     const binding = {
       sessionId: session.id,
       taskInstanceId,
@@ -1882,15 +1928,27 @@ function apply(ctx) {
       checkoutId: workspaceIdentity.checkoutId,
       checkoutRootPath: workspaceIdentity.checkoutRootPath,
       executionRoot: workspaceIdentity.executionRoot,
-      preset: agentPresetOf(session),
+      preset,
       description: task.description,
-      executionClass: decision.executionClass,
-      reviewRequired: Boolean(decision.reviewRequired),
-      needsRouteCheck: false,
+      executionClass: task.executionClass || 'engineer_normal',
+      reviewRequired: Boolean(task.reviewRequested),
+      needsRouteCheck: true,
       boundAtUtc: new Date().toISOString(),
     }
-    await initializeEngineeringLifecycle(binding)
+    // Persist the generation-safe identity before routing. If Route.ps1 fails,
+    // the next prompt/restart validates and resumes this same task instead of
+    // creating an orphan plus a duplicate replacement task.
     bindings[session.id] = binding
+    persistBindings()
+    const decision = await routeTask(workspace, task.taskId, task.description, {
+      preset,
+      reviewRequested,
+      taskInstanceId,
+    })
+    binding.executionClass = decision.executionClass
+    binding.reviewRequired = Boolean(decision.reviewRequired)
+    binding.needsRouteCheck = false
+    await initializeEngineeringLifecycle(binding)
     persistBindings()
     registerShellEnvironment()
     appendMessage(session, createControllerMessage(noticeText(binding), 'controller-binding'))
@@ -2110,7 +2168,7 @@ function apply(ctx) {
               'controller-error',
             ),
           )
-          return next()
+          return agentPresetOf(session) === 'aih-muse' ? { kind: 'reject' } : next()
         }
         throw error
       }
@@ -2185,7 +2243,6 @@ function apply(ctx) {
       }
 
       if (binding.needsRouteCheck) {
-        binding.needsRouteCheck = false
         const decision = await routeTask(binding.workspace, binding.taskId, promptText, { preset: binding.preset, taskInstanceId: binding.taskInstanceId || undefined })
         if (isReviewClass(decision.executionClass)) {
           binding.executionClass = decision.executionClass
@@ -2199,6 +2256,9 @@ function apply(ctx) {
           return executeReviewTurn(agent, binding, binding.description, { explicit: false })
         }
         binding.executionClass = decision.executionClass
+        binding.reviewRequired = Boolean(decision.reviewRequired)
+        binding.needsRouteCheck = false
+        persistBindings()
       }
 
       // Engineering turns own the attempt lifecycle: one execution = exactly
@@ -2270,9 +2330,15 @@ function apply(ctx) {
       return next()
     } catch (error) {
       const message = String(error && error.message ? error.message : error)
-      log({ event: 'pre-step-error', error: message })
       const agent = payload && payload.agent
       const session = agent && agent.session
+      log({
+        event: 'pre-step-error',
+        sessionId: session && session.id ? session.id : null,
+        preset: session ? agentPresetOf(session) : null,
+        error: boundedControllerDiagnostic(message),
+        ...(error && error.cliFailure ? { cliFailure: error.cliFailure } : {}),
+      })
       if (error && (error.code === 'session-workspace-mismatch' || error.code === 'repository-identity-mismatch' || error.code === 'repository-identity-missing' || error.code === 'session-workspace-identity-unavailable')) {
         if (session) {
           appendMessage(
@@ -2300,18 +2366,22 @@ function apply(ctx) {
         }
         return { kind: 'reject' }
       }
-      // Normal prompts: surface the failure visibly, then continue the session
-      // rather than silently dropping controller state.
+      // A Muse request without controller state must stop here. Continuing to
+      // agent/request only replaces the useful controller failure with the
+      // secondary Muse-Isolation error `missing-session-binding`.
+      const musePlane = session && agentPresetOf(session) === 'aih-muse'
       if (session && promptText) {
         appendMessage(
           session,
           createControllerMessage(
-            'Controller: task binding failed for this session.\n' + message + '\nThe session continues without controller routing; controller state was not recorded.',
+            'Controller: task binding failed for this session.\n' + boundedControllerDiagnostic(message) + (musePlane
+              ? '\nMuse execution was blocked before model request; no fallback was attempted.'
+              : '\nThe session continues without controller routing; controller state was not recorded.'),
             'controller-error',
           ),
         )
       }
-      return next()
+      return musePlane ? { kind: 'reject' } : next()
     }
   })
 
@@ -2360,6 +2430,8 @@ module.exports.classifyBindingIdentity = classifyBindingIdentity
 module.exports.createBindingGuard = createBindingGuard
 module.exports.structuredCliStdout = structuredCliStdout
 module.exports.verificationCliStdout = verificationCliStdout
+module.exports.controllerCliFailure = controllerCliFailure
+module.exports.redactControllerDiagnostic = redactControllerDiagnostic
 module.exports.referencedFilesOf = referencedFilesOf
 module.exports.hasInlineCode = hasInlineCode
 module.exports.resolveReviewFiles = resolveReviewFiles

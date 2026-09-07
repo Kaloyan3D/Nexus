@@ -142,14 +142,13 @@ try{
     $museDoc.profiles[0].reasoning.escalation=$savedEscalation
     [IO.File]::WriteAllText($museProfilesPath,($museDoc|ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($false))
 
-    # -- 8. Production stays locked: runnable=false blocks execution
-    $lockedTarget=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId 'muse-spark-1.3-contributor'
-    Assert-Aih ($lockedTarget.runnable -eq $false -and $lockedTarget.selectable -eq $false) '8.1: the PRODUCTION muse profile stays selectable=false / runnable=false (contributor-gated)'
-    Assert-Aih ($lockedTarget.engine -eq 'muse') '8.2: the locked profile still classifies as the muse engine'
-    Assert-Aih ($lockedTarget.availability -eq 'contributor-gated') '8.3: the production availability is contributor-gated'
-    $threwLocked=$false
-    try{ Resolve-AihMuseRoutingTarget -InstallRoot $InstallRoot -PresetId 'aih-muse' -SettingsPath (Join-Path $InstallRoot 'data/settings.yaml') | Out-Null }catch{ $threwLocked=($_.Exception.Message -like '*not runnable*') }
-    Assert-Aih $threwLocked '8.4: the production install fails closed on the locked profile (activation gate held)'
+    # -- 8. Production activation truth after M5
+    $readyTarget=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId 'muse-spark-1.3-contributor'
+    Assert-Aih ($readyTarget.runnable -eq $true -and $readyTarget.selectable -eq $true) '8.1: the production Muse profile is explicitly selectable/runnable after M5'
+    Assert-Aih ($readyTarget.engine -eq 'muse') '8.2: the ready profile still classifies as the muse engine'
+    Assert-Aih ($readyTarget.availability -eq 'ready') '8.3: profile availability agrees with the completed local Contributor gate'
+    $productionTarget=Resolve-AihMuseRoutingTarget -InstallRoot $InstallRoot -PresetId 'aih-muse' -SettingsPath (Join-Path $InstallRoot 'data/settings.yaml')
+    Assert-Aih ($productionTarget.provider -eq 'meta-model-api' -and $productionTarget.model -eq 'muse-spark-1.3-contributor' -and $productionTarget.reasoning -eq 'xhigh') '8.4: production activation resolves the exact protected Muse target'
 
     # -- 9. Malformed catalog engine binding fails closed
     $badCatalogPath=Join-Path $fixture.Root 'config/nexus-profiles-bad.json'

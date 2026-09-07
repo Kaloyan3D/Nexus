@@ -124,6 +124,9 @@ async function main() {
   if (fs.existsSync(path.join(sourceRoot, 'data', 'settings.yaml'))) {
     fs.copyFileSync(path.join(sourceRoot, 'data', 'settings.yaml'), path.join(bridgeInstallRoot, 'data', 'settings.yaml'))
   }
+  const bridgeSettingsPath = path.join(bridgeInstallRoot, 'data', 'settings.yaml')
+  const bridgeSettings = fs.readFileSync(bridgeSettingsPath, 'utf8')
+  fs.writeFileSync(bridgeSettingsPath, bridgeSettings.replace(/^engineering-profile:\s*[^\r\n]+/m, 'engineering-profile: deepseek-codex'))
   process.once('exit', () => {
     fs.rmSync(bridgeInstallRoot, { recursive: true, force: true })
     fs.rmSync(bridgeWorkspace, { recursive: true, force: true })
@@ -170,6 +173,19 @@ async function main() {
   assert.equal(controller.structuredCliStdout({ code: 2, stdout: 'x' }), null)
   assert.equal(controller.structuredCliStdout({}), null)
   assert.equal(controller.structuredCliStdout(null), null)
+
+  const diagnostic = controller.controllerCliFailure('Route.ps1', ['-TaskId', 'TASK-0001', '-Preset', 'aih-muse'], {
+    code: 1,
+    signal: null,
+    stdout: '{"ok":false,"kind":"routing-rejected"}',
+    stderr: 'MODEL_API_KEY=must-not-log\nroute failed',
+  })
+  assert.equal(diagnostic.script, 'Route.ps1')
+  assert.equal(diagnostic.exitCode, 1)
+  assert.deepEqual(diagnostic.args, ['-TaskId', 'TASK-0001', '-Preset', 'aih-muse'])
+  assert.equal(diagnostic.structuredKind, 'routing-rejected')
+  assert.equal(diagnostic.stderr.includes('must-not-log'), false)
+  assert.equal(diagnostic.stderr.includes('route failed'), true)
 
   // 9. REAL Review.ps1 budget rejection (no Codex call): with the LEGACY
   //    hard budgets enabled in an explicit -PolicyPath (enforceLimits=true;

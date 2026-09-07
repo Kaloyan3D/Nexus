@@ -406,7 +406,7 @@ exit 3
 
     # ── 8. REGRESSION: reviewer/solver/routing unchanged ─────────────────────
     Assert-Aih ((@(Get-AihCompatibleModelsForRole (Get-AihModelRegistry (Join-Path $fixture 'config/model-registry.json')) 'reviewer')) -contains 'gpt-5.6-sol') '8: independent reviewer unchanged'
-    $routingDecision=Invoke-AihRoutingDecision 'implement ordinary change' $fixture $liveLayout.RoutingPolicy (Join-Path $fixture 'data/routing') 'loop-routing-1' 'aih-engineering' -DryRun -SettingsPath $liveLayout.Settings
+    $routingDecision=Invoke-AihRoutingDecision 'implement ordinary change' $fixture $liveLayout.RoutingPolicy (Join-Path $fixture 'data/routing') 'loop-routing-1' 'aih-engineering' -DryRun -SettingsPath (Join-Path $fixture 'data/settings.yaml')
     Assert-Aih ($routingDecision.executionClass -eq 'engineer_normal') '8: routing unchanged by the visual capability'
 
     Write-Host "RESULT: $passed visual-loop assertions passed."
