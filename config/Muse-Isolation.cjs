@@ -22,12 +22,27 @@
  *   - This plane has NO delegation rows: no subagent or workflow tool can
  *     exist here, so every request is the one Muse main agent. Unlike the
  *     Dual isolation there is deliberately NO worker exemption.
+ *
+ * Adaptive reasoning effort (Phase 2, TASK-0049): the per-call reasoning
+ * effort is resolved by the Muse Reasoning Governor from task-local
+ * reasoning state immediately before each request
+ * (Muse-ReasoningRuntime.cjs prepareMuseRequestEffort). Precedence:
+ *   1. task-local museReasoning state (initialized to discover on first use);
+ *   2. Governor resolution against the actual registry entry;
+ *   3. the resolved effort is written back to state.reasoning AND enforced
+ *      here as reasoningEffort, overriding the static profile-default
+ *      reasoning from routing time. The profile default never overrides an
+ *      adaptive Governor result.
+ * A MuseReasoningCapabilityError propagates unchanged and no request is
+ * returned (fail closed, no fallback effort). Workers cannot override: the
+ * enforced effort is overwritten unconditionally on every request.
  */
 
 const fs = require('node:fs')
 const path = require('node:path')
 const profiles = require('./Engineering-Profiles.cjs')
 const contributorProtection = require('./Muse-ContributorProtection.cjs')
+const reasoningRuntime = require('./Muse-ReasoningRuntime.cjs')
 
 const MUSE_ENGINE = 'muse'
 const MUSE_AGENT_PRESET = 'aih-muse'
@@ -160,14 +175,21 @@ function apply(ctx) {
   })
 
   ctx.on('agent/request', async (payload, next) => {
-    const proposed = await next()
     const session = payload && payload.agent && payload.agent.session
     if (!session) throw enforcementError('missing-session', null, null)
-    if (sessionPreset(session) !== MUSE_AGENT_PRESET) return proposed
+    if (sessionPreset(session) !== MUSE_AGENT_PRESET) return next()
 
     const installRoot = profiles.installRootOf()
     const binding = bindingFor(installRoot, session.id)
     const target = controllerTargetFor(installRoot, binding)
+
+    // Phase 2: per-call adaptive effort from task-local reasoning state.
+    // Resolved BEFORE the downstream pipeline runs, so a capability refusal
+    // (MuseReasoningCapabilityError) means no request is produced at all --
+    // never a fallback effort, never the stale profile default.
+    const adaptive = reasoningRuntime.prepareMuseRequestEffort({ installRoot, binding, target })
+
+    const proposed = await next()
 
     const proposedMaxTokens =
       typeof proposed.maxTokens === 'number' && Number.isFinite(proposed.maxTokens) && proposed.maxTokens > 0
@@ -177,7 +199,7 @@ function apply(ctx) {
       ...proposed,
       provider: target.provider,
       model: target.model,
-      reasoningEffort: target.reasoning,
+      reasoningEffort: adaptive.effort,
       maxTokens: Math.min(proposedMaxTokens, MUSE_V0_MAX_OUTPUT_TOKENS),
     })
   })

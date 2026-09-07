@@ -29,6 +29,13 @@ function pass(name) { passed++; console.log('PASS: ' + name) }
 function makeFixture() {
   const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'muse-iso-'))
   fs.mkdirSync(path.join(installRoot, 'data', 'routing', 'states'), { recursive: true })
+  // Phase 2: the adaptive request boundary resolves capabilities from the
+  // real model registry, so the fixture stages the production registry.
+  fs.mkdirSync(path.join(installRoot, 'config'), { recursive: true })
+  fs.copyFileSync(
+    path.join(repoRoot, 'config', 'model-registry.json'),
+    path.join(installRoot, 'config', 'model-registry.json'),
+  )
   return installRoot
 }
 
@@ -173,10 +180,14 @@ async function main() {
     })
     assert.equal(enforced.provider, 'meta-model-api')
     assert.equal(enforced.model, 'muse-spark-1.3-contributor')
-    assert.equal(enforced.reasoningEffort, 'xhigh')
+    // Phase 2 (spec change, TASK-0049): the Governor owns the per-call
+    // effort. A routing state without a museReasoning block initializes to
+    // the discover phase, so the enforced effort is medium -- the legacy
+    // profile-default xhigh no longer passes through untouched.
+    assert.equal(enforced.reasoningEffort, 'medium')
     assert.equal(enforced.maxTokens, 32768)
     assert.ok(Object.isFrozen(enforced))
-    pass('6: request boundary enforces the muse target and caps vendor 131072 at the 32768 V0 bound')
+    pass('6: request boundary enforces the muse target (adaptive medium) and caps vendor 131072 at the 32768 V0 bound')
     const smaller = await runRequest(ctx, session, { provider: 'x', model: 'y', reasoningEffort: 'max', maxTokens: 1024 })
     assert.equal(smaller.maxTokens, 1024)
     pass('6b: the V0 bound is a ceiling — a smaller requested bound passes through')
