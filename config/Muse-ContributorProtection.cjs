@@ -27,6 +27,7 @@ const REDACTION_JSON = JSON.stringify(REDACTION)
 const MAX_DEPTH = 64
 const MAX_NODES = 200000
 const OMIT_OBJECT_PROPERTY = Symbol('nexus.museContributor.omitObjectProperty')
+const IMAGE_DATA_URL_RE = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]+={0,2})$/
 
 function protectionError(code, message) {
   const error = new Error('Nexus Muse contributor protection blocked outbound payload: ' + message)
@@ -165,7 +166,63 @@ function redactSecretAssignments(text) {
   return pieces.join('')
 }
 
-function sanitizeContributorText(value) {
+function hasImageSignature(bytes, mimeType) {
+  if (mimeType === 'image/png') {
+    return bytes.length >= 8 && bytes.subarray(0, 8).equals(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    )
+  }
+  if (mimeType === 'image/jpeg') {
+    return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+  }
+  if (mimeType === 'image/gif') {
+    const header = bytes.subarray(0, 6).toString('ascii')
+    return header === 'GIF87a' || header === 'GIF89a'
+  }
+  if (mimeType === 'image/webp') {
+    return bytes.length >= 12 &&
+      bytes.subarray(0, 4).toString('ascii') === 'RIFF' &&
+      bytes.subarray(8, 12).toString('ascii') === 'WEBP'
+  }
+  return false
+}
+
+function isValidatedImageDataUrl(value) {
+  const match = String(value).match(IMAGE_DATA_URL_RE)
+  if (!match || match[2].length % 4 !== 0) return false
+
+  const bytes = Buffer.from(match[2], 'base64')
+  if (bytes.length === 0 || bytes.toString('base64') !== match[2]) return false
+  return hasImageSignature(bytes, match[1])
+}
+
+function isProviderNativeImageUrlPath(root, path) {
+  if (
+    path.length !== 6 ||
+    path[0] !== 'messages' ||
+    !Number.isInteger(path[1]) ||
+    path[2] !== 'content' ||
+    !Number.isInteger(path[3]) ||
+    path[4] !== 'image_url' ||
+    path[5] !== 'url'
+  ) return false
+
+  const message = root.messages?.[path[1]]
+  const block = message?.content?.[path[3]]
+  if (
+    !message || message.role !== 'user' ||
+    !block || Object.getPrototypeOf(block) !== Object.prototype ||
+    block.type !== 'image_url' ||
+    !block.image_url || Object.getPrototypeOf(block.image_url) !== Object.prototype
+  ) return false
+
+  const blockKeys = Object.keys(block).sort()
+  const imageUrlKeys = Object.keys(block.image_url).sort()
+  return blockKeys.length === 2 && blockKeys[0] === 'image_url' && blockKeys[1] === 'type' &&
+    imageUrlKeys.length === 1 && imageUrlKeys[0] === 'url'
+}
+
+function sanitizeContributorText(value, options) {
   let text = String(value)
 
   if (text.includes('\u0000')) {
@@ -176,6 +233,9 @@ function sanitizeContributorText(value) {
   }
 
   if (/data:[^,;\s]+;base64,/i.test(text)) {
+    if (options?.allowImageDataUrl === true && isValidatedImageDataUrl(text)) {
+      return text
+    }
     throw protectionError(
       'nexus-muse-contributor-opaque-payload',
       'inline base64 data is not permitted on the Muse Contributor wire'
@@ -200,7 +260,7 @@ function sanitizeContributorText(value) {
   return redactSecretAssignments(text)
 }
 
-function sanitizeContributorValue(value, state, depth, position) {
+function sanitizeContributorValue(value, state, depth, position, path) {
   state.nodes += 1
 
   if (state.nodes > MAX_NODES) {
@@ -221,7 +281,9 @@ function sanitizeContributorValue(value, state, depth, position) {
 
   switch (typeof value) {
     case 'string':
-      return sanitizeContributorText(value)
+      return sanitizeContributorText(value, {
+        allowImageDataUrl: isProviderNativeImageUrlPath(state.root, path),
+      })
 
     case 'boolean':
       return value
@@ -263,8 +325,8 @@ function sanitizeContributorValue(value, state, depth, position) {
 
   try {
     if (Array.isArray(value)) {
-      return value.map((item) =>
-        sanitizeContributorValue(item, state, depth + 1, 'array')
+      return value.map((item, index) =>
+        sanitizeContributorValue(item, state, depth + 1, 'array', path.concat(index))
       )
     }
 
@@ -279,7 +341,7 @@ function sanitizeContributorValue(value, state, depth, position) {
     const output = {}
 
     for (const [key, child] of Object.entries(value)) {
-      const normalized = sanitizeContributorValue(child, state, depth + 1, 'object')
+      const normalized = sanitizeContributorValue(child, state, depth + 1, 'object', path.concat(key))
       if (normalized === OMIT_OBJECT_PROPERTY) continue
       output[key] = isSecretFieldName(key) ? REDACTION : normalized
     }
@@ -300,9 +362,10 @@ function sanitizeContributorPayload(payload) {
 
   return sanitizeContributorValue(
     payload,
-    { seen: new WeakSet(), nodes: 0 },
+    { seen: new WeakSet(), nodes: 0, root: payload },
     0,
-    'root'
+    'root',
+    []
   )
 }
 

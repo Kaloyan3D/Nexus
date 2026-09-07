@@ -36,7 +36,7 @@ if ($ResetManagedSettings -or -not (Test-Path -LiteralPath $layout.Settings)) {
 # muse-spark-1.3-contributor route). A structurally invalid Nexus-managed route
 # fails the install closed.
 . (Join-Path $layout.Scripts 'SettingsMigration.ps1')
-$managedSettingsMigration = Sync-AihManagedSettings -TemplatePath (Join-Path $layout.Config 'settings.yaml') -SettingsPath $layout.Settings
+$managedSettingsMigration = Sync-AihManagedSettings -TemplatePath (Join-Path $layout.Config 'settings.yaml') -SettingsPath $layout.Settings -ModelRegistryPath $layout.ModelRegistry
 
 # Phase M5: exact-version, exact-hash provider-egress protection for Muse Contributor.
 & $layout.Node (Join-Path $layout.Scripts 'Patch-MuseContributorEgress.cjs') $InstallRoot

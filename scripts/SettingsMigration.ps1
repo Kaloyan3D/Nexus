@@ -217,6 +217,37 @@ function Test-AihManagedRouteStructurallyValid {
             -not [string]::IsNullOrWhiteSpace([string]$Route.BaseURL))
 }
 
+function ConvertTo-AihCapabilityDerivedSettingsTemplate {
+    # The model registry owns Nexus capabilities; the managed DSH route owns
+    # transport syntax. Derive the exact Muse input declaration at the install
+    # seam so supportsVision cannot drift from DSH's model descriptor.
+    param(
+        [Parameter(Mandatory = $true)][string]$TemplateText,
+        [Parameter(Mandatory = $true)][string]$ModelRegistryPath
+    )
+
+    if (-not (Test-Path -LiteralPath $ModelRegistryPath -PathType Leaf)) { throw "Model registry missing: $ModelRegistryPath" }
+    $registry = Get-Content -Raw -Encoding UTF8 -LiteralPath $ModelRegistryPath | ConvertFrom-Json
+    $entries = @($registry.models | Where-Object {
+        [string]$_.id -eq 'muse-spark-1.3-contributor' -and
+        [string]$_.provider -eq 'meta-model-api'
+    })
+    if ($entries.Count -ne 1) { throw 'The model registry must contain exactly one Meta Muse Contributor entry.' }
+    $visionProperty = $entries[0].PSObject.Properties['supportsVision']
+    if ($null -eq $visionProperty -or $visionProperty.Value -isnot [bool]) { throw 'The Muse Contributor registry entry must declare boolean supportsVision.' }
+
+    $newline = if ($TemplateText.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $modelPattern = '(?m)^        - id: muse-spark-1\.3-contributor\r?\n          name: Muse Spark 1\.3 Contributor(?:\r?\n          input: \[[^\r\n]*\])?'
+    $modelMatches = [regex]::Matches($TemplateText, $modelPattern)
+    if ($modelMatches.Count -ne 1) { throw 'The managed settings template must contain exactly one Muse Contributor model declaration.' }
+    $desiredInput = if ([bool]$visionProperty.Value) { '[text, image]' } else { '[text]' }
+    $replacement = '        - id: muse-spark-1.3-contributor' + $newline +
+                   '          name: Muse Spark 1.3 Contributor' + $newline +
+                   '          input: ' + $desiredInput
+    return $TemplateText.Substring(0, $modelMatches[0].Index) + $replacement +
+           $TemplateText.Substring($modelMatches[0].Index + $modelMatches[0].Length)
+}
+
 function Sync-AihManagedSettings {
     # Additive, idempotent managed provider-route sync from the managed
     # template (config/settings.yaml) into the user runtime document
@@ -224,13 +255,17 @@ function Sync-AihManagedSettings {
     # route (fail closed). Returns a deterministic migration record.
     param(
         [Parameter(Mandatory = $true)][string]$TemplatePath,
-        [Parameter(Mandatory = $true)][string]$SettingsPath
+        [Parameter(Mandatory = $true)][string]$SettingsPath,
+        [string]$ModelRegistryPath
     )
 
     if (-not (Test-Path -LiteralPath $TemplatePath -PathType Leaf)) { throw "Managed settings template missing: $TemplatePath" }
     if (-not (Test-Path -LiteralPath $SettingsPath -PathType Leaf)) { throw "User settings document missing: $SettingsPath" }
 
     $templateText = [System.IO.File]::ReadAllText($TemplatePath)
+    if (-not [string]::IsNullOrWhiteSpace($ModelRegistryPath)) {
+        $templateText = ConvertTo-AihCapabilityDerivedSettingsTemplate -TemplateText $templateText -ModelRegistryPath $ModelRegistryPath
+    }
     $settingsText = [System.IO.File]::ReadAllText($SettingsPath)
 
     # The user document's newline style is preserved byte-for-byte: detect the
@@ -272,6 +307,21 @@ function Sync-AihManagedSettings {
         if ($script:ManagedRoutePriorStates.ContainsKey($managedId)) {
             foreach ($prior in $script:ManagedRoutePriorStates[$managedId]) {
                 if ([string]$existing.Text -eq (ConvertTo-AihMigrationNormalized $prior)) { $isKnownPriorState = $true; break }
+            }
+        }
+        # A previously installed managed route can differ from the current
+        # template solely because the model's newly declared input modalities
+        # were absent. Treat only that exact byte-for-byte predecessor as
+        # managed so vision capability upgrades reach existing installs;
+        # every other structurally valid customization remains user-owned.
+        if (-not $isKnownPriorState) {
+            $managedWithoutInput = [regex]::Replace(
+                [string]$managed.Text,
+                '(?m)^          input: \[text, image\]\n?',
+                ''
+            )
+            if ([string]$existing.Text -eq (ConvertTo-AihMigrationNormalized $managedWithoutInput)) {
+                $isKnownPriorState = $true
             }
         }
         if (-not $isKnownPriorState) {
