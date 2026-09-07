@@ -214,6 +214,11 @@ try{
     $seamCount=([regex]::Matches($routingText,[regex]::Escape($seamNeedle))).Count
     Assert-Aih ($seamCount -eq 1) '13.1: exactly ONE engine dispatch seam exists in Invoke-AihRoutingDecision'
     Assert-Aih ($routingText -match 'Invoke-AihMuseRoutingDecision @PSBoundParameters') '13.2: the seam delegates to the Muse branch with identical parameters'
+    $controllerText=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'config/AihController.cjs')
+    $presetAuthorityNeedle="selected === 'aih-engineering' || selected === 'aih-deepseek' || selected === 'aih-muse'"
+    Assert-Aih ($controllerText.Contains($presetAuthorityNeedle)) '13.3: latest preset authority recognizes aih-engineering, aih-deepseek, and aih-muse'
+    $staleMuseNeedle="if (selected === 'aih-deepseek' || selected === 'aih-muse') return selected"
+    Assert-Aih (-not $controllerText.Contains($staleMuseNeedle)) '13.4: controller cannot skip a newer aih-engineering event to resurrect stale Muse state'
 
     # -- 14. Dual routing under a muse-absent catalog keeps legacy behavior
     $legacyFixture=New-AihMuseRoutingFixture

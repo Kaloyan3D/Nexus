@@ -1910,7 +1910,7 @@ function apply(ctx) {
           const event = session.events[index]
           if (event && event.type === 'agent-preset/selected' && event.data && event.data.agentPreset) {
             const selected = String(event.data.agentPreset)
-            if (selected === 'aih-deepseek' || selected === 'aih-muse') return selected
+            if (selected === 'aih-engineering' || selected === 'aih-deepseek' || selected === 'aih-muse') return selected
           }
         }
       }
