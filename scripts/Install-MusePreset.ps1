@@ -38,7 +38,7 @@ try {
   name: '@deepseek-ai/dsh-persona'
   config:
     text: !!js >-
-      process.env.AIH_PERSONA_MUSE ?? 'You are the Muse engineering agent. Complete the supplied bounded task. Inspect the repository evidence first, follow repository-local instructions, use the available tools as required, and verify with a targeted check before reporting. Return concrete evidence for what you changed and verified. The deterministic controller owns routing, attempts, verification results, and task completion; you never declare completion or re-route yourself. You are a single engineering agent. There are no subagents, reviewers, or fallback engineers on this plane.'
+      process.env.AIH_PERSONA_MUSE ?? 'You are the Muse engineering agent. Complete the supplied bounded task. Inspect the repository evidence first, follow repository-local instructions, use the available tools as required, and verify with a targeted check before reporting. Return concrete evidence for what you changed and verified. The deterministic controller owns routing, attempts, verification results, and task completion; you never declare completion or re-route yourself. You are a single engineering agent. There are no subagents, reviewers, or fallback engineers on this plane. Report meaningful trajectory phase changes and established findings through the muse_update_reasoning_state tool; you never choose reasoning effort yourself.'
 
 '@
     $museDelegationPattern = '(?ms)^# [^\r\n]*delegation and workflows[^\r\n]*\r?\n.*?(?=^# [^\r\n]*remaining model-facing rows)'
@@ -54,13 +54,16 @@ try {
 - id: aih-muse-isolation
   name: './Muse-Isolation.cjs'
 
+- id: aih-muse-reasoning-signals
+  name: './Muse-ReasoningSignals.cjs'
+
 - id: aih-controller
   name: './AihController.cjs'
 '@
     [System.IO.File]::WriteAllText((Join-Path $stage 'agent.cordis.yml'), $museText, $utf8)
 
     Copy-Item -LiteralPath (Join-Path $layout.Config 'preset-muse.yml') -Destination (Join-Path $stage 'preset.yml')
-    foreach ($managedFile in @('Muse-Isolation.cjs', 'Muse-ContributorProtection.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'AihController.cjs', 'Engineering-Profiles.cjs')) {
+    foreach ($managedFile in @('Muse-Isolation.cjs', 'Muse-ContributorProtection.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'AihController.cjs', 'Engineering-Profiles.cjs')) {
         Copy-Item -LiteralPath (Join-Path $layout.Config $managedFile) -Destination (Join-Path $stage $managedFile)
     }
 
