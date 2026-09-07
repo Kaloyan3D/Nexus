@@ -154,6 +154,8 @@ try {
   const contextWindow = resolved && resolved.context && resolved.context.contextWindow;
   record("context-window", Number(contextWindow) === expectContext,
     "contextWindow=" + String(contextWindow) + " expected=" + String(expectContext));
+  record("image-input", Array.isArray(resolved && resolved.inputModalities) && resolved.inputModalities.includes("image"),
+    "inputModalities=" + JSON.stringify(resolved && resolved.inputModalities));
   if (resolved && resolved.defaultMaxTokens !== undefined) {
     record("output-ceiling", Number(resolved.defaultMaxTokens) === expectMaxTokens,
       "defaultMaxTokens=" + String(resolved.defaultMaxTokens) + " expected=" + String(expectMaxTokens));

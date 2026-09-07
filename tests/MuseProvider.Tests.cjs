@@ -85,7 +85,8 @@ async function main() {
   assert.ok(museEntry, 'muse-spark-1.3-contributor is registered')
   assert.equal(museEntry.vendor, 'Meta')
   assert.equal(museEntry.provider, 'meta-model-api')
-  pass('1.1: registry entry resolves to Meta / meta-model-api')
+  assert.equal(museEntry.supportsVision, true)
+  pass('1.1: registry entry resolves to Meta / meta-model-api and declares vision')
 
   for (const role of ['primaryEngineer', 'deepEngineer', 'reviewer', 'solver', 'fallback', 'visualReviewer']) {
     const ids = engineering.compatibleModelsForRole(registry, role)
@@ -473,6 +474,7 @@ async function main() {
       const checkNames = record.checks.filter((c) => c.ok).map((c) => c.name)
       for (const required of ['settings-loaded', 'section-present', 'section-schema-valid', 'adapter-registered', 'route-registered',
         'list-models:muse-spark-1.3-contributor', 'resolve-model', 'context-window', 'output-ceiling',
+        'image-input',
         'reasoning-level:minimal', 'reasoning-level:low', 'reasoning-level:medium', 'reasoning-level:high', 'reasoning-level:xhigh',
         'reasoning-level-refused:off', 'reasoning-level-refused:max']) {
         assert.ok(checkNames.includes(required), 'substrate probe check missing/failed: ' + required)

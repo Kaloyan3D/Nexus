@@ -558,6 +558,7 @@ else {
 # fixture documents; the live data/settings.yaml is never touched.
 . (Join-Path $InstallRoot 'scripts/SettingsMigration.ps1')
 $migrationTemplatePath = Join-Path $InstallRoot 'config/settings.yaml'
+$migrationRegistryPath = Join-Path $InstallRoot 'config/model-registry.json'
 $migrationTemplateText = [System.IO.File]::ReadAllText($migrationTemplatePath)
 $migrationFixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('aih-migration-' + [System.Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $migrationFixtureRoot | Out-Null
@@ -605,6 +606,7 @@ try {
     if (-not $preM2Result.Changed) { throw 'FAIL: a pre-M2 document missing the managed routes must change.' }
     $preM2After = [System.IO.File]::ReadAllText($preM2Path)
     if (-not $preM2After.Contains('muse-spark-1.3-contributor')) { throw 'FAIL: the managed meta route was not migrated into the existing document.' }
+    if (-not $preM2After.Contains('          input: [text, image]')) { throw 'FAIL: the managed Muse route must install the DSH image-input declaration.' }
     if ($preM2After -notmatch [regex]::Escape('reasoningEfforts:')) { throw 'FAIL: migrated route lost its reasoningEfforts map.' }
     foreach ($userByte in @('# user comment that must survive migration', 'glm-5.3-flash', 'preference: dark', 'reasoningEffort: high')) {
         if (-not $preM2After.Contains($userByte)) { throw ('FAIL: migration lost user content: ' + $userByte) }
@@ -618,6 +620,21 @@ try {
     $idempotentAfter = [System.IO.File]::ReadAllText($preM2Path)
     if ($secondResult.Changed -or ($idempotentBefore -ne $idempotentAfter)) { throw 'FAIL: the managed settings migration must be idempotent.' }
     Write-Host 'PASS: managed settings migration is idempotent (M2.1)'
+
+    # Scenario 3b: the immediately prior managed Contributor route differed
+    # only by the missing DSH image-input declaration. That exact managed
+    # predecessor upgrades, while the user-owned-route test below continues
+    # to prove broader edits are preserved.
+    $preVisionTemplatePath = Join-Path $migrationFixtureRoot 'pre-vision-template.yaml'
+    $preVisionPath = Join-Path $migrationFixtureRoot 'pre-vision.yaml'
+    $preVisionText = $migrationTemplateText -replace '(?m)^          input: \[text, image\]\r?\n', ''
+    [System.IO.File]::WriteAllText($preVisionTemplatePath, $preVisionText, $utf8NoBom)
+    [System.IO.File]::WriteAllText($preVisionPath, $preVisionText, $utf8NoBom)
+    $preVisionResult = Sync-AihManagedSettings -TemplatePath $preVisionTemplatePath -SettingsPath $preVisionPath -ModelRegistryPath $migrationRegistryPath
+    $preVisionAfter = [System.IO.File]::ReadAllText($preVisionPath)
+    if (@($preVisionResult.UpgradedRoutes) -notcontains 'meta-model-api') { throw 'FAIL: the exact pre-vision managed route must be reported as upgraded.' }
+    if (-not $preVisionAfter.Contains('          input: [text, image]')) { throw 'FAIL: an existing managed Muse route must gain the DSH image-input declaration.' }
+    Write-Host 'PASS: exact pre-vision managed Muse route upgrades to DSH image input'
 
     # Scenario 4: a stale Phase M2 managed meta route (standard
     # muse-spark-1.3, off/max reasoning map) upgrades deterministically to the
@@ -734,6 +751,7 @@ try {
     # free when dot-sourced.
     $migrationHookIndex = $compositionText.IndexOf('Sync-AihManagedSettings -TemplatePath')
     if ($migrationHookIndex -lt 0) { throw 'FAIL: Complete-Install.ps1 must invoke the managed settings migration.' }
+    if (-not $compositionText.Contains('-ModelRegistryPath $layout.ModelRegistry')) { throw 'FAIL: Complete-Install.ps1 must derive managed DSH capabilities from the model registry.' }
     if ($migrationHookIndex -lt $settingsInitIndex -or $migrationHookIndex -gt $managedPatchCopyIndex) { throw 'FAIL: the settings migration must run after settings init and before the managed patch sync.' }
     if (-not $compositionText.Contains("SettingsMigration.ps1'")) { throw 'FAIL: Complete-Install.ps1 must dot-source SettingsMigration.ps1.' }
     Write-Host 'PASS: Complete-Install migrates managed settings after settings init and before patch sync (M2.1)'

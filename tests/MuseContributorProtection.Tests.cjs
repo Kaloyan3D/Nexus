@@ -171,6 +171,89 @@ function main() {
 
   pass('6: cyclic, binary, and opaque base64 payloads fail closed')
 
+  const pngDataUrl =
+    'data:image/png;base64,' +
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString('base64')
+  const imagePayload = {
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe only what you see.' },
+          { type: 'image_url', image_url: { url: pngDataUrl } },
+        ],
+      },
+    ],
+  }
+
+  assert.deepEqual(
+    protection.payloadGuard(imagePayload, exactTarget),
+    imagePayload
+  )
+  const imageAndSecret = protection.payloadGuard({
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'API_KEY=' + ['sk', 'abcdefghijklmnopqrstuvwxyz012345'].join('-') },
+        imagePayload.messages[0].content[1],
+      ],
+    }],
+  }, exactTarget)
+  assert.equal(imageAndSecret.messages[0].content[1].image_url.url, pngDataUrl)
+  assert.equal(JSON.stringify(imageAndSecret).includes('abcdefghijklmnopqrstuvwxyz012345'), false)
+  assert.throws(
+    () => protection.sanitizeContributorPayload({
+      messages: [{ role: 'user', content: pngDataUrl }],
+    }),
+    (error) => error.code === 'nexus-muse-contributor-opaque-payload'
+  )
+  assert.throws(
+    () => protection.sanitizeContributorPayload({
+      messages: [{
+        role: 'user',
+        content: [{
+          type: 'image_url',
+          image_url: { url: pngDataUrl, detail: 'auto' },
+        }],
+      }],
+    }),
+    (error) => error.code === 'nexus-muse-contributor-opaque-payload'
+  )
+  assert.throws(
+    () => protection.sanitizeContributorPayload({
+      messages: [{
+        role: 'user',
+        content: [{
+          type: 'image_url',
+          image_url: { url: 'data:application/octet-stream;base64,AAAA' },
+        }],
+      }],
+    }),
+    (error) => error.code === 'nexus-muse-contributor-opaque-payload'
+  )
+  assert.throws(
+    () => protection.sanitizeContributorPayload({
+      messages: [{
+        role: 'user',
+        content: [{
+          type: 'image_url',
+          image_url: { url: 'data:image/png;base64,AAAA' },
+        }],
+      }],
+    }),
+    (error) => error.code === 'nexus-muse-contributor-opaque-payload'
+  )
+
+  assert.equal(
+    protection.payloadGuard(imagePayload, {
+      provider: 'zai-direct',
+      id: 'glm-5.3-flash',
+    }),
+    undefined
+  )
+
+  pass('6.1: only validated provider-native image data URLs pass for the exact Muse target')
+
   const omitted = Symbol('omitted')
   const jsonCompatibleSource = {
     keep: 'value',
