@@ -19,6 +19,10 @@ function New-InstallFixture([object]$SourceLayout,[string]$Name){
  Copy-Item -LiteralPath $SourceLayout.Config -Destination (Join-Path $root 'config') -Recurse
  New-Item -ItemType Directory -Path (Join-Path $root 'data/routing') -Force|Out-Null
  if(Test-Path -LiteralPath $SourceLayout.Settings){Copy-Item -LiteralPath $SourceLayout.Settings -Destination (Join-Path $root 'data/settings.yaml')}
+ $fixtureSettings=Join-Path $root 'data/settings.yaml'
+ $fixtureSettingsText=if(Test-Path -LiteralPath $fixtureSettings){Get-Content -Raw -LiteralPath $fixtureSettings}else{''}
+ if($fixtureSettingsText -match '(?m)^engineering-profile:'){$fixtureSettingsText=[regex]::Replace($fixtureSettingsText,'(?m)^engineering-profile:.*$','engineering-profile: deepseek-codex')}else{$fixtureSettingsText="engineering-profile: deepseek-codex`r`n"+$fixtureSettingsText}
+ Set-Content -LiteralPath $fixtureSettings -Value $fixtureSettingsText -Encoding UTF8
  return $root
 }
 # TASK-0007: a policy clone with the LEGACY hard budgets re-enabled, used to

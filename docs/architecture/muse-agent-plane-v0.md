@@ -1,6 +1,6 @@
 # Muse Agent Plane V0 (Muse Spark 1.3 Contributor)
 
-Status: Phase M3 — first real Muse execution plane. The Muse profile remains LOCKED (`selectable = false`, `runnable = false`, `availability = contributor-gated`); see [Activation policy](#activation-policy).
+Status: Phase M5 — protected Muse execution plane. The profile is `selectable = true`, `runnable = true`, and `availability = ready`; see [Activation policy](#activation-policy).
 
 Task reference: TASK-0040.
 
@@ -72,11 +72,13 @@ Muse never invokes Codex as reviewer, fallback, repair agent, or worker. Visual 
 - **Output bound**: `Muse-Isolation.cjs` caps every root request at `MUSE_V0_MAX_OUTPUT_TOKENS = 32768` completion tokens — the Nexus V0 effective maximum, deterministic and engine-owned. The vendor hard maximum for `muse-spark-1.3-contributor` (131072 completion tokens, configured in the managed settings route) is a separate, larger number and is NOT the Nexus budget. The bound is a ceiling: a smaller explicitly requested bound passes through; an absent one gets the 32768 default.
 - **Reasoning bound**: `xhigh` is the profile default AND the escalation ceiling in V0; the ceiling itself is validated against the registry at resolution time, so an unsupported ceiling fails closed before any execution.
 
-## Contributor safety (M3 truth)
+## Contributor safety (M5 truth)
 
 The Contributor checkpoint's terms permit Meta to train on prompts and completions. `muse-profiles.json` carries `contributorProtection.required: true` and the model registry carries `dataUseTier: contributor`; both survive end to end into the routing record (`dataUseTier`, `contributorProtectionRequired`) and the request boundary's target.
 
-Outbound contributor protection (sanitization of repo content before it leaves the machine) is Phase M5 and is NOT implemented in M3. The runtime therefore consumes the metadata and enforces an activation gate instead of claiming protection exists:
+Phase M5 installs outbound contributor protection immediately before the real pi-ai HTTP serialization boundary. The guard is scoped to the exact `meta-model-api` / `muse-spark-1.3-contributor` target, deep-clones and redacts the outgoing payload without mutating durable conversation state, preserves JSON serialization semantics for provider-native undefined/non-finite values, and rejects cyclic, binary, opaque, custom-prototype, or otherwise unsupported payloads. The adapter patch is pinned to the verified DSH/pi-ai versions and pristine hash; drift fails closed without modifying installed bytes.
+
+The runtime also retains the versioned operator acknowledgement gate:
 
 ```yaml
 # operator-owned, versioned acknowledgement in data/settings.yaml
@@ -88,11 +90,11 @@ This is the minimal explicit operator-consent mechanism: Nexus never writes the 
 
 ## Activation policy
 
-The M3 activation decision: **the Muse profile stays LOCKED.** `selectable = false`, `runnable = false`, `availability = contributor-gated` in `config/nexus-profiles.json`; `status: contributor-gated` in `muse-profiles.json`. The remaining gate is exact and named: Phase M5 outbound contributor protection (`contributorProtection.required` unsatisfiable in M3). Unlocking requires (1) the M5 protection implementation, (2) the operator acknowledgement above, and (3) the catalog flags flipped — never a weakening of the `required` flag. The routing plane and the request boundary both enforce the locked flags fail-closed today (`8.4` in the routing suite proves the production install rejects execution).
+The Phase M5 activation decision is **ready with protection required**. `config/nexus-profiles.json` declares `selectable = true`, `runnable = true`, `availability = ready`; `muse-profiles.json` declares `status: ready`. This does not weaken `contributorProtection.required`: execution still requires the exact operator acknowledgement, a valid controller binding and target, the installed guard, and a verified provider adapter. Any failed gate rejects the request with no provider/model/engine fallback.
 
 ## Persona
 
-The muse persona is a minimal Muse-native engineering identity — deliberately NOT the DeepSeek implementation agent. It is injected two ways, mirroring the Dual pattern: the installer default inline in `scripts/Complete-Install.ps1`, and the runtime override `AIH_PERSONA_MUSE` set by `scripts/aih.ps1`. It states the bounded-task contract, repo-local instructions, targeted verification, evidence return, and that the deterministic controller owns routing/attempts/verification/completion — and that the agent is single: no subagents, reviewers, or fallback engineers exist on this plane. It carries no routing policy and no completion authority.
+The muse persona is a minimal Muse-native engineering identity — deliberately NOT the DeepSeek implementation agent. It is injected two ways, mirroring the Dual pattern: the transactional preset builder in `scripts/Install-MusePreset.ps1`, and the runtime override `AIH_PERSONA_MUSE` set by `scripts/aih.ps1`. It states the bounded-task contract, repo-local instructions, targeted verification, evidence return, and that the deterministic controller owns routing/attempts/verification/completion — and that the agent is single: no subagents, reviewers, or fallback engineers exist on this plane. It carries no routing policy and no completion authority.
 
 ## Session preset lifecycle (UI)
 

@@ -43,10 +43,10 @@
         "kind": "muse-profile",
         "profileId": "muse-spark-1.3-contributor"
       },
-      "selectable": false,
-      "runnable": false,
-      "availability": "contributor-gated",
-      "description": "Muse Agent Plane V0 is installed (engine dispatch, single main agent, tool isolation, controller target authority) and its provider transport is verified. The production profile stays locked until Contributor outbound protection exists (Phase M5): this Contributor-tier checkpoint permits Meta to train on prompts and completions, and contributorProtection.required stays enforced end to end."
+      "selectable": true,
+      "runnable": true,
+      "availability": "ready",
+      "description": "Muse Agent Plane V0 with Contributor outbound protection. M5 deterministic protection is locally verified; successful live provider execution remains unverified."
     }
   ]
 }

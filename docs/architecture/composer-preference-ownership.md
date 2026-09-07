@@ -174,13 +174,15 @@ Evidence directory: `C:/AI-Harness/tmp/task-0039/`.
 - `legacy-final.png`: original Model/Effort restored.
 - `engineering-return-final.png`: immediate switch back.
 - `profile-popover-final.png`: working real profile editor.
-- `muse-foundation-final.png`: read-only metadata and disabled Select Profile.
+- `muse-foundation-final.png`: historical pre-M5 metadata and disabled Select Profile.
 - `runtime-acceptance.json`: visible mode, derived mode, both outlet flags,
   mounted EngineeringSelector, preference owner, and zero slot errors.
 - `startup-acceptance.log`, `install.log`: official runtime procedure.
 
-Production Muse remains `selectable=false`, `runnable=false`,
-`availability=foundation`. No M3 code or Muse execution was added.
+This TASK-0039 acceptance predates the Muse execution phases. Its captured UI
+correctly showed the then-current foundation state. Phase M5 now publishes
+Muse as `selectable=true`, `runnable=true`, `availability=ready`; the composer
+ownership decision in this record is unchanged.
 
 ## Changed files
 

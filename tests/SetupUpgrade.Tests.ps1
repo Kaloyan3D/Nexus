@@ -756,27 +756,31 @@ Write-Host 'PASS: workspace transition blocks old-session submission until the s
 #    EMPTY delegation section) and the isolation/controller rows. The built
 #    preset must not contain a single Dual delegation/workflow row — the
 #    release blocker is structural ABSENCE, not a disabled flag. ──
-$musePresetBlockIndex = $compositionText.IndexOf("Phase M3 (TASK-0040): the Muse Agent Plane V0 preset")
-if ($musePresetBlockIndex -lt 0) { throw 'FAIL: Complete-Install.ps1 no longer builds the aih-muse agent plane (Phase M3 block missing).' }
+$musePresetBlockIndex = $compositionText.IndexOf('Install-MusePreset.ps1')
+if ($musePresetBlockIndex -lt 0) { throw 'FAIL: Complete-Install.ps1 no longer installs the staged aih-muse agent plane.' }
+$museInstallerText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'scripts/Install-MusePreset.ps1')
 foreach ($museContract in @(
     'preset-muse.yml',
     'Muse-Isolation.cjs',
+    'Muse-ContributorProtection.cjs',
     'AIH_PERSONA_MUSE',
     "[regex]::Replace(`$museText, `$museDelegationPattern, '')",
-    "if (`$musePersonaMatches -ne 1 -or `$museDelegationMatches -ne 1)",
+    'Validate-MusePreset.cjs',
+    'text: !!js >-',
     'aih-muse-isolation',
     'Engineering-Profiles.cjs'
 )) {
-    if (-not $compositionText.Contains($museContract)) { throw "FAIL: the aih-muse installer block is missing contract: $museContract" }
+    if (-not $museInstallerText.Contains($museContract)) { throw "FAIL: the staged aih-muse installer is missing contract: $museContract" }
 }
-Write-Host 'PASS: Complete-Install builds the aih-muse plane with the muse persona, empty delegation section, and isolation/controller rows'
+Write-Host 'PASS: Complete-Install atomically builds and validates the aih-muse plane with no delegation surface'
 
 $musePresetMetaPath = Join-Path $InstallRoot 'config/preset-muse.yml'
 if (-not (Test-Path -LiteralPath $musePresetMetaPath)) { throw "FAIL: config/preset-muse.yml missing at $musePresetMetaPath" }
 $musePresetMeta = Get-Content -Raw -Encoding UTF8 -LiteralPath $musePresetMetaPath
 if (-not $musePresetMeta.Contains('name: Muse Agent Plane')) { throw 'FAIL: preset-muse.yml must name the Muse Agent Plane.' }
-if (-not $musePresetMeta.Contains('contributor-gated')) { throw 'FAIL: preset-muse.yml must state the contributor-gated availability truth.' }
-Write-Host 'PASS: the aih-muse preset metadata is installed with the contributor-gated availability truth'
+if ($musePresetMeta.Contains('contributor-gated')) { throw 'FAIL: preset-muse.yml still advertises the obsolete contributor-gated state.' }
+if (-not $musePresetMeta.Contains('provider-egress protection')) { throw 'FAIL: preset-muse.yml must state the protected runtime truth.' }
+Write-Host 'PASS: the aih-muse preset metadata agrees with the protected runnable state'
 
 $museIsolationPath = Join-Path $InstallRoot 'config/Muse-Isolation.cjs'
 if (-not (Test-Path -LiteralPath $museIsolationPath)) { throw "FAIL: managed Muse isolation module missing at $museIsolationPath" }
