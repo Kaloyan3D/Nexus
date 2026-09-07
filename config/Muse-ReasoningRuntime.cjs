@@ -120,6 +120,8 @@ function museReasoningStateOf(routingState) {
     solutionEstablished: block.solutionEstablished,
     failedHypotheses: block.failedHypotheses,
     failedImplementationAttempts: block.failedImplementationAttempts,
+    totalFailedHypotheses: block.totalFailedHypotheses,
+    totalFailedImplementationAttempts: block.totalFailedImplementationAttempts,
     conflictingEvidence: block.conflictingEvidence,
     requestMax: block.requestMax === undefined ? false : block.requestMax,
   });
@@ -151,6 +153,8 @@ function blockFromState(state, lastResolution, processedSignalIds) {
     solutionEstablished: state.solutionEstablished,
     failedHypotheses: state.failedHypotheses,
     failedImplementationAttempts: state.failedImplementationAttempts,
+    totalFailedHypotheses: state.totalFailedHypotheses,
+    totalFailedImplementationAttempts: state.totalFailedImplementationAttempts,
     conflictingEvidence: state.conflictingEvidence,
     requestMax: state.requestMax,
     lastResolution: lastResolution === undefined ? null : lastResolution,
@@ -280,7 +284,27 @@ function transitionMuseReasoningState({ installRoot, binding, mutate, recordSign
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
     throw new TypeError('Muse reasoning transition must produce a patch object.');
   }
-  const nextState = governor.updateMuseReasoningState(current, patch);
+  // Progress-aware escalation windows (Phase 2.1-F1): meaningful progress
+  // resolves the ACTIVE difficulty window without erasing history.
+  // Resets fire ONLY on the false -> true establishment edge -- re-marking an
+  // already-established flag, changing phase, invalidating, resolving a
+  // conflict, or any other event never resets. Boundaries:
+  //   rootCause newly established  -> failedHypotheses = 0,
+  //                                   conflictingEvidence = false
+  //   solution newly established   -> failedImplementationAttempts = 0
+  // A new establishment always opens a zeroed active window, even when the
+  // same transition also records failure events (those still increment the
+  // historical totals -- they belong to the resolved window, not the fresh
+  // one). Historical totals are never reset here (or anywhere).
+  const fullPatch = { ...patch };
+  if (fullPatch.rootCauseEstablished === true && current.rootCauseEstablished === false) {
+    fullPatch.failedHypotheses = 0;
+    fullPatch.conflictingEvidence = false;
+  }
+  if (fullPatch.solutionEstablished === true && current.solutionEstablished === false) {
+    fullPatch.failedImplementationAttempts = 0;
+  }
+  const nextState = governor.updateMuseReasoningState(current, fullPatch);
   const block = stateBlockOf(routingState);
   const preserved = block && block.lastResolution !== undefined ? block.lastResolution : null;
   let signalIds = processedSignalIdsOf(block);
@@ -328,7 +352,10 @@ function recordMuseHypothesisFailure({ installRoot, binding } = {}) {
     binding,
     mutate: (current) => {
       observed = current.failedHypotheses + 1;
-      return { failedHypotheses: observed };
+      return {
+        failedHypotheses: observed,
+        totalFailedHypotheses: current.totalFailedHypotheses + 1,
+      };
     },
   });
   return observed;
@@ -341,7 +368,10 @@ function recordMuseImplementationFailure({ installRoot, binding } = {}) {
     binding,
     mutate: (current) => {
       observed = current.failedImplementationAttempts + 1;
-      return { failedImplementationAttempts: observed };
+      return {
+        failedImplementationAttempts: observed,
+        totalFailedImplementationAttempts: current.totalFailedImplementationAttempts + 1,
+      };
     },
   });
   return observed;
@@ -365,6 +395,48 @@ function requestMuseMaxReasoning({ installRoot, binding, request = true } = {}) 
   });
 }
 
+/**
+ * Explicit invalidation: later evidence disproved the established diagnosis.
+ * Clears BOTH rootCauseEstablished and solutionEstablished (a solution chosen
+ * for a disproved diagnosis cannot stand). Failure counters are preserved:
+ * past difficulty stays active until a NEW establishment opens a fresh
+ * window. No phase is fabricated -- the caller sets diagnose/recover
+ * explicitly via setMuseReasoningPhase.
+ */
+function invalidateMuseRootCause({ installRoot, binding } = {}) {
+  return transitionMuseReasoningState({
+    installRoot,
+    binding,
+    mutate: () => ({ rootCauseEstablished: false, solutionEstablished: false }),
+  });
+}
+
+/**
+ * Explicit invalidation: implementation evidence disproved the chosen
+ * solution while the diagnosis still holds. The root cause is preserved so a
+ * corrected approach can be established without re-diagnosing.
+ */
+function invalidateMuseSolution({ installRoot, binding } = {}) {
+  return transitionMuseReasoningState({
+    installRoot,
+    binding,
+    mutate: () => ({ solutionEstablished: false }),
+  });
+}
+
+/**
+ * Explicit conflict resolution: new evidence reconciled the observations, so
+ * the conflict no longer independently forces escalation. Other active
+ * signals are untouched.
+ */
+function resolveMuseConflictingEvidence({ installRoot, binding } = {}) {
+  return transitionMuseReasoningState({
+    installRoot,
+    binding,
+    mutate: () => ({ conflictingEvidence: false }),
+  });
+}
+
 module.exports = {
   MAX_PROCESSED_SIGNAL_IDS,
   bindingForSession,
@@ -373,6 +445,9 @@ module.exports = {
   registryEntryFor,
   prepareMuseRequestEffort,
   transitionMuseReasoningState,
+  invalidateMuseRootCause,
+  invalidateMuseSolution,
+  resolveMuseConflictingEvidence,
   setMuseReasoningPhase,
   markMuseRootCauseEstablished,
   markMuseSolutionEstablished,
