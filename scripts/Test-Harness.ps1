@@ -65,6 +65,7 @@ $suites = @(
     [ordered]@{ name='NexusSkillsRuntime'; script='tests/NexusSkills.Runtime.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='NexusProfilesRuntime'; script='tests/NexusProfiles.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='MuseProviderRuntime'; script='tests/MuseProvider.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='MuseReasoningGovernor'; script='tests/MuseReasoningGovernor.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='MuseIsolation'; script='tests/MuseIsolation.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='MuseContributorProtection'; script='tests/MuseContributorProtection.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='NexusEngineContract'; script='tests/NexusEngineContract.Tests.cjs'; executable=$layout.Node; kind='node' },
