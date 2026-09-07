@@ -89,6 +89,28 @@ function engineFacade(snapshot) {
   return { getSnapshot: () => snapshot, subscribe: () => () => {} }
 }
 
+function mutableEngineFacade(initial) {
+  let snapshot = initial
+  const listeners = new Set()
+  return {
+    getSnapshot: () => snapshot,
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    setSnapshot(next) {
+      snapshot = next
+      for (const listener of [...listeners]) listener()
+    },
+    listenerCount: () => listeners.size,
+  }
+}
+
+async function settleAsyncWork() {
+  await new Promise((resolve) => setImmediate(resolve))
+  await new Promise((resolve) => setImmediate(resolve))
+}
+
 function seatControls(scope) {
   const seatEntry = scope._registered.find((entry) => entry.spec.name === 'conversation.hero.agentPreset')
   if (!seatEntry) throw new Error('mode picker seat not registered')
@@ -164,6 +186,58 @@ async function main() {
     await controls.select('aih-engineering')
     assert.deepEqual(scope._selectCalls, [])
     pass('A14: on a host without the muse preset the mode applies exactly as before (no engine plane, no error)')
+  }
+
+  {
+    const dualSnapshot = { engine: 'dual', engineAgentPreset: null, preferredProfileId: 'glm-codex' }
+    const reactiveEngine = mutableEngineFacade(dualSnapshot)
+    const scope = makeModeScope({})
+    const controller = modePlugin.createModeController(scope)
+    controller.attachEngineState(reactiveEngine)
+    await controller.load()
+    await settleAsyncWork()
+    assert.deepEqual(scope._selectCalls, [])
+
+    reactiveEngine.setSnapshot(museSnapshot)
+    await settleAsyncWork()
+    assert.equal(JSON.stringify(scope._selectCalls), JSON.stringify([{ sessionId: 's', agentPreset: 'aih-muse' }]))
+    assert.equal(scope._state.byId.s.agentPreset, 'aih-muse')
+    pass('A15: a live Dual -> Muse profile transition re-composes the existing blank session onto aih-muse')
+
+    reactiveEngine.setSnapshot(dualSnapshot)
+    await settleAsyncWork()
+    assert.equal(JSON.stringify(scope._selectCalls), JSON.stringify([
+      { sessionId: 's', agentPreset: 'aih-muse' },
+      { sessionId: 's', agentPreset: 'aih-engineering' },
+    ]))
+    assert.equal(scope._state.byId.s.agentPreset, 'aih-engineering')
+    pass('A16: a live Muse -> Dual profile transition re-composes the blank session back onto aih-engineering')
+
+    controller.dispose()
+    assert.equal(reactiveEngine.listenerCount(), 0)
+    reactiveEngine.setSnapshot(museSnapshot)
+    await settleAsyncWork()
+    assert.equal(scope._selectCalls.length, 2)
+    pass('A17: disposing the mode controller unsubscribes the engine-state listener')
+  }
+
+  {
+    const dualSnapshot = { engine: 'dual', engineAgentPreset: null, preferredProfileId: 'glm-codex' }
+    const reactiveEngine = mutableEngineFacade(dualSnapshot)
+    const scope = makeModeScope({ session: { blank: false, agentPreset: 'aih-engineering' } })
+    const controller = modePlugin.createModeController(scope)
+    controller.attachEngineState(reactiveEngine)
+    await controller.load()
+
+    reactiveEngine.setSnapshot(museSnapshot)
+    await settleAsyncWork()
+    assert.deepEqual(scope._selectCalls, [])
+
+    scope._newSession({ id: 's2', blank: true, agentPreset: 'aih-engineering' })
+    await settleAsyncWork()
+    assert.equal(JSON.stringify(scope._selectCalls), JSON.stringify([{ sessionId: 's2', agentPreset: 'aih-muse' }]))
+    pass('A18: an engine change never rewrites non-blank history and applies Muse to the next blank session')
+    controller.dispose()
   }
 
   // ── Part B: the controller's engine bridge ─────────────────────────────

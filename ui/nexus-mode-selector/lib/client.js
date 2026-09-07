@@ -101,6 +101,7 @@ window.__ModuleLoader__.load({
       // boots before this plugin and publishes `nexusEngineState`); it is
       // attached like the controller's own mode bridge. Null until then.
       let engineState = null;
+      let stopEngineState = null;
       let knownPresetIds = new Set();
       let engineAutoApplyFailed = false;
 
@@ -237,8 +238,18 @@ window.__ModuleLoader__.load({
       });
 
       function attachEngineState(facade) {
+        if (stopEngineState) {
+          try { stopEngineState(); } catch { /* bridge teardown must not break mode state */ }
+          stopEngineState = null;
+        }
         engineState = facade && typeof facade.getSnapshot === "function" ? facade : null;
         engineAutoApplyFailed = false;
+        if (engineState && typeof engineState.subscribe === "function") {
+          stopEngineState = engineState.subscribe(() => {
+            engineAutoApplyFailed = false;
+            if (!disposed) void applyStaged();
+          });
+        }
         if (!disposed) void applyStaged();
       }
 
@@ -249,6 +260,10 @@ window.__ModuleLoader__.load({
         attachEngineState,
         dispose: () => {
           disposed = true;
+          if (stopEngineState) {
+            try { stopEngineState(); } catch { /* best-effort bridge cleanup */ }
+            stopEngineState = null;
+          }
           stopSessions();
           stopSettings();
         }
