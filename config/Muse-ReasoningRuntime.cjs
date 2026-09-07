@@ -143,7 +143,7 @@ function requestedEffortOfTrace(trace, phase, fallback) {
   return fallback;
 }
 
-function blockFromState(state, lastResolution) {
+function blockFromState(state, lastResolution, processedSignalIds) {
   return {
     phase: state.phase,
     currentEffort: state.currentEffort,
@@ -154,7 +154,30 @@ function blockFromState(state, lastResolution) {
     conflictingEvidence: state.conflictingEvidence,
     requestMax: state.requestMax,
     lastResolution: lastResolution === undefined ? null : lastResolution,
+    processedSignalIds: processedSignalIds === undefined ? [] : processedSignalIds,
   };
+}
+
+/** Read the persisted session binding (workspace/taskId/preset) for a session. */
+function bindingForSession(installRoot, sessionId) {
+  try {
+    const document = JSON.parse(
+      fs.readFileSync(path.join(installRoot, 'data', 'routing', 'session-bindings.json'), 'utf8'),
+    );
+    if (document && document.schemaVersion === 1 && document.bindings && typeof document.bindings === 'object') {
+      return document.bindings[sessionId] || null;
+    }
+  } catch {
+    /* callers fail closed */
+  }
+  return null;
+}
+
+const MAX_PROCESSED_SIGNAL_IDS = 100;
+
+function processedSignalIdsOf(block) {
+  if (!block || !Array.isArray(block.processedSignalIds)) return [];
+  return block.processedSignalIds.filter((id) => typeof id === 'string').slice(-MAX_PROCESSED_SIGNAL_IDS);
 }
 /**
  * THE per-call adaptive resolution (Phase 2 seam). Reads task-local
@@ -211,6 +234,8 @@ function prepareMuseRequestEffort({ installRoot, binding, target } = {}) {
         trace: Array.from(resolved.trace),
         atUtc: nowUtc,
       },
+      // Resolution never clears signal history: dedup survives requests.
+      processedSignalIdsOf(stateBlockOf(routingState)),
     ),
   };
   writeAtomicJson(statePath, next);
@@ -229,7 +254,7 @@ function prepareMuseRequestEffort({ installRoot, binding, target } = {}) {
  * (fail-closed) and persisted with lastResolution preserved. Returns the new
  * validated state. Transitions never set effort directly.
  */
-function transitionMuseReasoningState({ installRoot, binding, mutate } = {}) {
+function transitionMuseReasoningState({ installRoot, binding, mutate, recordSignalId } = {}) {
   if (typeof installRoot !== 'string' || installRoot === '') {
     throw new TypeError('Muse reasoning transition requires installRoot.');
   }
@@ -238,6 +263,9 @@ function transitionMuseReasoningState({ installRoot, binding, mutate } = {}) {
   }
   if (typeof mutate !== 'function') {
     throw new TypeError('Muse reasoning transition requires a mutate function.');
+  }
+  if (recordSignalId !== undefined && (typeof recordSignalId !== 'string' || recordSignalId === '')) {
+    throw new TypeError('Muse reasoning recordSignalId must be a non-empty string when present.');
   }
   const statePath = profiles.routingStatePath(installRoot, binding);
   if (!statePath) throw new TypeError('Muse reasoning transition cannot address routing state.');
@@ -255,9 +283,13 @@ function transitionMuseReasoningState({ installRoot, binding, mutate } = {}) {
   const nextState = governor.updateMuseReasoningState(current, patch);
   const block = stateBlockOf(routingState);
   const preserved = block && block.lastResolution !== undefined ? block.lastResolution : null;
+  let signalIds = processedSignalIdsOf(block);
+  if (recordSignalId !== undefined) {
+    signalIds = signalIds.filter((id) => id !== recordSignalId).concat([recordSignalId]).slice(-MAX_PROCESSED_SIGNAL_IDS);
+  }
   const next = {
     ...routingState,
-    museReasoning: blockFromState(nextState, preserved),
+    museReasoning: blockFromState(nextState, preserved, signalIds),
   };
   writeAtomicJson(statePath, next);
   return nextState;
@@ -334,6 +366,9 @@ function requestMuseMaxReasoning({ installRoot, binding, request = true } = {}) 
 }
 
 module.exports = {
+  MAX_PROCESSED_SIGNAL_IDS,
+  bindingForSession,
+  processedSignalIdsOf,
   museReasoningStateOf,
   registryEntryFor,
   prepareMuseRequestEffort,
