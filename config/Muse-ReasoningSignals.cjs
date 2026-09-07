@@ -68,10 +68,13 @@ const SIGNAL_DESCRIPTION = [
 const SIGNAL_FIELDS = Object.freeze([
   'phase',
   'markRootCauseEstablished',
+  'invalidateRootCause',
   'markSolutionEstablished',
+  'invalidateSolution',
   'recordHypothesisFailure',
   'recordImplementationFailure',
   'conflictingEvidence',
+  'resolveConflictingEvidence',
 ]);
 const SIGNAL_FIELD_SET = new Set(SIGNAL_FIELDS);
 
@@ -138,10 +141,13 @@ function validateReasoningSignal(signal) {
   const plan = {
     phase: null,
     rootCause: false,
+    unrootCause: false,
     solution: false,
+    unsolution: false,
     hypothesisFailures: 0,
     implementationFailures: 0,
     conflicting: false,
+    resolveConflict: false,
     applied: [],
   };
   if (signal.phase !== undefined) {
@@ -164,10 +170,13 @@ function validateReasoningSignal(signal) {
     plan.applied.push(field);
   };
   flag('markRootCauseEstablished', 'rootCause');
+  flag('invalidateRootCause', 'unrootCause');
   flag('markSolutionEstablished', 'solution');
+  flag('invalidateSolution', 'unsolution');
   flag('recordHypothesisFailure', 'hypothesisFailures');
   flag('recordImplementationFailure', 'implementationFailures');
   flag('conflictingEvidence', 'conflicting');
+  flag('resolveConflictingEvidence', 'resolveConflict');
   return plan;
 }
 
@@ -204,6 +213,8 @@ function ackOf(state, duplicate, applied) {
     solutionEstablished: state.solutionEstablished,
     failedHypotheses: state.failedHypotheses,
     failedImplementationAttempts: state.failedImplementationAttempts,
+    totalFailedHypotheses: state.totalFailedHypotheses,
+    totalFailedImplementationAttempts: state.totalFailedImplementationAttempts,
     conflictingEvidence: state.conflictingEvidence,
   };
 }
@@ -260,13 +271,27 @@ function applyReasoningSignal({ installRoot, binding, signal, dispatchKey } = {}
     mutate: (current) => {
       const patch = {};
       if (plan.phase !== null) patch.phase = plan.phase;
-      // Monotonic: established/conflicting flags only move false -> true.
-      // An explicit true on an already-true flag is a harmless no-op.
+      // Monotonic marks: established/conflicting flags only move false ->
+      // true here. Explicit invalidation events below are the ONLY path back
+      // to false, so casual resets stay impossible while disproven
+      // conclusions remain explicitly revocable.
       if (plan.rootCause && !current.rootCauseEstablished) patch.rootCauseEstablished = true;
       if (plan.solution && !current.solutionEstablished) patch.solutionEstablished = true;
       if (plan.conflicting && !current.conflictingEvidence) patch.conflictingEvidence = true;
-      if (plan.hypothesisFailures > 0) patch.failedHypotheses = current.failedHypotheses + 1;
-      if (plan.implementationFailures > 0) patch.failedImplementationAttempts = current.failedImplementationAttempts + 1;
+      if (plan.unrootCause) {
+        patch.rootCauseEstablished = false;
+        patch.solutionEstablished = false;
+      }
+      if (plan.unsolution) patch.solutionEstablished = false;
+      if (plan.resolveConflict) patch.conflictingEvidence = false;
+      if (plan.hypothesisFailures > 0) {
+        patch.failedHypotheses = current.failedHypotheses + 1;
+        patch.totalFailedHypotheses = current.totalFailedHypotheses + 1;
+      }
+      if (plan.implementationFailures > 0) {
+        patch.failedImplementationAttempts = current.failedImplementationAttempts + 1;
+        patch.totalFailedImplementationAttempts = current.totalFailedImplementationAttempts + 1;
+      }
       return patch;
     },
   });
@@ -285,11 +310,19 @@ function defineReasoningSignalTool(defineTool) {
       },
       markRootCauseEstablished: {
         type: 'boolean',
-        description: 'The root cause is confirmed. Event: true records it (monotonic); omit or false for no change.',
+        description: 'The root cause is confirmed. Event: true records it and opens a fresh diagnosis window; omit or false for no change.',
+      },
+      invalidateRootCause: {
+        type: 'boolean',
+        description: 'Later evidence disproved the diagnosis. Event: true clears both the root cause and the solution; omit or false for no change.',
       },
       markSolutionEstablished: {
         type: 'boolean',
-        description: 'The technical solution is confirmed. Event: true records it (monotonic); omit or false for no change.',
+        description: 'The technical solution is confirmed. Event: true records it and opens a fresh implementation window; omit or false for no change.',
+      },
+      invalidateSolution: {
+        type: 'boolean',
+        description: 'Implementation evidence disproved the chosen approach (diagnosis still holds). Event: true clears the solution only; omit or false for no change.',
       },
       recordHypothesisFailure: {
         type: 'boolean',
@@ -301,7 +334,11 @@ function defineReasoningSignalTool(defineTool) {
       },
       conflictingEvidence: {
         type: 'boolean',
-        description: 'Observations genuinely conflict. Event: true records it (monotonic); omit or false for no change.',
+        description: 'Observations genuinely conflict. Event: true records it; omit or false for no change.',
+      },
+      resolveConflictingEvidence: {
+        type: 'boolean',
+        description: 'New evidence reconciled the conflict. Event: true clears it; omit or false for no change.',
       },
     },
     output: {
@@ -317,6 +354,8 @@ function defineReasoningSignalTool(defineTool) {
           solutionEstablished: { type: 'boolean' },
           failedHypotheses: { type: 'integer' },
           failedImplementationAttempts: { type: 'integer' },
+          totalFailedHypotheses: { type: 'integer' },
+          totalFailedImplementationAttempts: { type: 'integer' },
           conflictingEvidence: { type: 'boolean' },
         },
       },
@@ -348,6 +387,8 @@ function renderAck(value) {
     'solutionEstablished: ' + String(value.solutionEstablished),
     'failedHypotheses: ' + String(value.failedHypotheses),
     'failedImplementationAttempts: ' + String(value.failedImplementationAttempts),
+    'totalFailedHypotheses: ' + String(value.totalFailedHypotheses),
+    'totalFailedImplementationAttempts: ' + String(value.totalFailedImplementationAttempts),
     'conflictingEvidence: ' + String(value.conflictingEvidence),
   ];
   if (Array.isArray(value.applied)) lines.push('applied: ' + (value.applied.length ? value.applied.join(', ') : '(none)'));

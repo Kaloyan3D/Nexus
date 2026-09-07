@@ -423,6 +423,51 @@ function main() {
   );
   pass('28b: registry entry without canonical Muse levels fails closed');
 
+  // -- Phase 2.1-F1: historical totals are inert diagnostics --
+  // Totals default to zero and validate as non-negative integers.
+  const freshTotals = stateFor('discover');
+  assert.equal(freshTotals.totalFailedHypotheses, 0);
+  assert.equal(freshTotals.totalFailedImplementationAttempts, 0);
+  assert.throws(() => stateFor('discover', { totalFailedHypotheses: -1 }), TypeError);
+  assert.throws(() => stateFor('discover', { totalFailedImplementationAttempts: 1.5 }), TypeError);
+  pass('F1-G1: totals default to zero and validate as non-negative integers');
+
+  // Historical totals NEVER escalate on their own.
+  assert.equal(
+    governor.resolveMuseReasoningEffort({
+      state: stateFor('diagnose', { totalFailedHypotheses: 99, totalFailedImplementationAttempts: 99 }),
+      capabilities: contributorSupport(),
+    }).effort,
+    'high',
+  );
+  pass('F1-G2: huge historical totals alone resolve the phase default (never xhigh)');
+
+  // A cleared active window with established solution de-escalates even when
+  // history is large -- the governor reads active values only.
+  assert.equal(
+    governor.resolveMuseReasoningEffort({
+      state: stateFor('implement', {
+        rootCauseEstablished: true,
+        solutionEstablished: true,
+        failedHypotheses: 0,
+        failedImplementationAttempts: 0,
+        conflictingEvidence: false,
+        totalFailedHypotheses: 4,
+        totalFailedImplementationAttempts: 3,
+      }),
+      capabilities: contributorSupport(),
+    }).effort,
+    'medium',
+  );
+  pass('F1-G3: cleared active window de-escalates despite large history');
+
+  // Totals flow through patches independently of active counters.
+  // (Progress resets live in the runtime transition layer, not here.)
+  const withTotals = governor.updateMuseReasoningState(stateFor('discover'), { totalFailedHypotheses: 2 });
+  assert.equal(withTotals.totalFailedHypotheses, 2);
+  assert.equal(withTotals.failedHypotheses, 0);
+  pass('F1-G4: totals patch independently of active counters');
+
   // -- State validation fails closed (never resolves a malformed state) --
   assert.throws(() => stateFor('planning'), TypeError);
   pass('29: unknown phase fails closed');

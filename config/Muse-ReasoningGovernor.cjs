@@ -19,6 +19,15 @@
  * - One pure deterministic resolver. No network, no model calls, no
  *   classifier, no subagents.
  *
+ * Active vs historical state (Phase 2.1-F1): failedHypotheses,
+ * failedImplementationAttempts, and conflictingEvidence carry ACTIVE-window
+ * semantics -- unresolved difficulty since the last meaningful progress
+ * checkpoint -- and ONLY these drive strong escalation. Historical totals
+ * (totalFailedHypotheses / totalFailedImplementationAttempts) are monotonic
+ * diagnostics for future telemetry and NEVER influence effort selection.
+ * The runtime layer owns progress resets; this module reads whatever active
+ * values it is given.
+ *
  * Precedence inside resolveMuseReasoningEffort (the single site):
  * 1. phase default, 2. strong escalation to xhigh, 3. implement
  * de-escalation carve-out, 4. explicit max request, 5. capability clamp.
@@ -106,9 +115,17 @@ function normalizeMuseReasoningState(state) {
   if (!MUSE_REASONING_PHASE_SET.has(phase)) {
     throw new TypeError('Muse reasoning state.phase must be a known phase.');
   }
-  const counters = ['failedHypotheses', 'failedImplementationAttempts'];
+  // Active-window counters drive escalation. Historical totals
+  // (totalFailedHypotheses / totalFailedImplementationAttempts) are
+  // monotonic diagnostics only and NEVER influence effort selection.
+  const counters = [
+    'failedHypotheses',
+    'failedImplementationAttempts',
+    'totalFailedHypotheses',
+    'totalFailedImplementationAttempts',
+  ];
   for (const field of counters) {
-    const value = state[field];
+    const value = state[field] === undefined && field.indexOf('total') === 0 ? 0 : state[field];
     if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
       throw new TypeError('Muse reasoning state.' + field + ' must be a non-negative integer.');
     }
@@ -141,6 +158,10 @@ function normalizeMuseReasoningState(state) {
     solutionEstablished: state.solutionEstablished,
     failedHypotheses: state.failedHypotheses,
     failedImplementationAttempts: state.failedImplementationAttempts,
+    totalFailedHypotheses: state.totalFailedHypotheses === undefined ? 0 : state.totalFailedHypotheses,
+    totalFailedImplementationAttempts: state.totalFailedImplementationAttempts === undefined
+      ? 0
+      : state.totalFailedImplementationAttempts,
     conflictingEvidence: state.conflictingEvidence,
     requestMax,
   };
@@ -154,6 +175,8 @@ function createMuseReasoningState(phase, overrides) {
     solutionEstablished: false,
     failedHypotheses: 0,
     failedImplementationAttempts: 0,
+    totalFailedHypotheses: 0,
+    totalFailedImplementationAttempts: 0,
     conflictingEvidence: false,
     requestMax: false,
   };
@@ -173,6 +196,8 @@ function updateMuseReasoningState(state, patch) {
     'solutionEstablished',
     'failedHypotheses',
     'failedImplementationAttempts',
+    'totalFailedHypotheses',
+    'totalFailedImplementationAttempts',
     'conflictingEvidence',
     'requestMax',
   ]);
@@ -243,6 +268,9 @@ function capabilitiesFromRegistryEntry(entry) {
   return { supportedEfforts: Object.freeze(supported) };
 }
 
+// Strong escalation reads ACTIVE-window signals only. Historical totals
+// (totalFailed*) are deliberately absent here: past resolved difficulty must
+// not permanently force xhigh.
 function hasStrongEscalation(state) {
   return (
     state.failedHypotheses >= MUSE_ESCALATION_FAILURE_THRESHOLD ||

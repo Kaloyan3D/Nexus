@@ -428,6 +428,117 @@ async function main() {
       pass('G6: control transitions preserve the last resolution diagnostic');
     }
 
+    // -- Phase 2.1-F1: progress-aware escalation windows --
+    {
+      const installRoot = makeInstallRoot();
+      process.env.DSH_HOME = path.join(installRoot, 'data');
+      process.env.AIH_INSTALL_ROOT = installRoot;
+      const binding = { workspace: path.join(installRoot, 'ws'), taskId: 'TASK-5700', taskInstanceId: 'inst-h', preset: 'aih-muse' };
+      writeState(installRoot, binding, museState({ taskId: 'TASK-5700', taskInstanceId: 'inst-h' }));
+      writeBindings(installRoot, 'sess-h', binding);
+      const target = { provider: 'meta-model-api', model: 'muse-spark-1.3-contributor' };
+      const request = () => runtime.prepareMuseRequestEffort({ installRoot, binding, target }).effort;
+
+      // A. Hypothesis escalation then de-escalation.
+      runtime.setMuseReasoningPhase({ installRoot, binding, phase: 'diagnose' });
+      assert.equal(request(), 'high');
+      runtime.recordMuseHypothesisFailure({ installRoot, binding });
+      assert.equal(request(), 'high');
+      runtime.recordMuseHypothesisFailure({ installRoot, binding });
+      assert.equal(request(), 'xhigh');
+      runtime.markMuseRootCauseEstablished({ installRoot, binding });
+      runtime.markMuseSolutionEstablished({ installRoot, binding });
+      runtime.setMuseReasoningPhase({ installRoot, binding, phase: 'implement' });
+      assert.equal(request(), 'medium');
+      const afterHyp = readState(installRoot, binding).museReasoning;
+      assert.equal(afterHyp.failedHypotheses, 0);
+      assert.equal(afterHyp.totalFailedHypotheses, 2);
+      pass('H-A: failure, failure, xhigh, then establishment de-escalates to medium');
+
+      // B. Implementation escalation then de-escalation (second cycle).
+      runtime.recordMuseImplementationFailure({ installRoot, binding });
+      runtime.setMuseReasoningPhase({ installRoot, binding, phase: 'recover' });
+      assert.equal(request(), 'high');
+      runtime.recordMuseImplementationFailure({ installRoot, binding });
+      assert.equal(request(), 'xhigh');
+      // The failed approach is explicitly invalidated, then the corrected
+      // solution is established (false -> true edge re-opens the window).
+      runtime.invalidateMuseSolution({ installRoot, binding });
+      runtime.markMuseSolutionEstablished({ installRoot, binding });
+      runtime.setMuseReasoningPhase({ installRoot, binding, phase: 'implement' });
+      assert.equal(request(), 'medium');
+      runtime.setMuseReasoningPhase({ installRoot, binding, phase: 'verify' });
+      assert.equal(request(), 'medium');
+      const afterImpl = readState(installRoot, binding).museReasoning;
+      assert.equal(afterImpl.failedImplementationAttempts, 0);
+      assert.equal(afterImpl.totalFailedImplementationAttempts, 2);
+      assert.equal(afterImpl.totalFailedHypotheses, 2);
+      pass('H-B: second cycle escalates and de-escalates; totals accumulate');
+
+      // Re-marking an established flag is a no-op for windows (no reset).
+      runtime.recordMuseHypothesisFailure({ installRoot, binding });
+      runtime.markMuseRootCauseEstablished({ installRoot, binding });
+      assert.equal(readState(installRoot, binding).museReasoning.failedHypotheses, 1);
+      pass('H-edge: re-marking an established flag does not reset the window');
+
+      // Phase changes alone never reset active escalation.
+      runtime.setMuseReasoningPhase({ installRoot, binding, phase: 'diagnose' });
+      assert.equal(readState(installRoot, binding).museReasoning.failedHypotheses, 1);
+      pass('H-phase: phase change alone preserves active counters');
+    }
+
+    // -- Invalidation and conflict lifecycle --
+    {
+      const installRoot = makeInstallRoot();
+      process.env.DSH_HOME = path.join(installRoot, 'data');
+      process.env.AIH_INSTALL_ROOT = installRoot;
+      const binding = { workspace: path.join(installRoot, 'ws'), taskId: 'TASK-5701', taskInstanceId: 'inst-i', preset: 'aih-muse' };
+      writeState(installRoot, binding, museState({ taskId: 'TASK-5701', taskInstanceId: 'inst-i' }));
+      writeBindings(installRoot, 'sess-i', binding);
+      const target = { provider: 'meta-model-api', model: 'muse-spark-1.3-contributor' };
+      const request = () => runtime.prepareMuseRequestEffort({ installRoot, binding, target }).effort;
+
+      // D. Root-cause invalidation clears both flags, keeps counters.
+      runtime.markMuseRootCauseEstablished({ installRoot, binding });
+      runtime.markMuseSolutionEstablished({ installRoot, binding });
+      runtime.recordMuseHypothesisFailure({ installRoot, binding });
+      runtime.invalidateMuseRootCause({ installRoot, binding });
+      const invalid = readState(installRoot, binding).museReasoning;
+      assert.equal(invalid.rootCauseEstablished, false);
+      assert.equal(invalid.solutionEstablished, false);
+      assert.equal(invalid.failedHypotheses, 1);
+      runtime.setMuseReasoningPhase({ installRoot, binding, phase: 'diagnose' });
+      assert.equal(request(), 'high');
+      pass('H-D: invalidateRootCause clears both flags, keeps evidence, diagnose resolves high');
+
+      // E. Solution invalidation preserves the diagnosis.
+      runtime.markMuseRootCauseEstablished({ installRoot, binding });
+      runtime.markMuseSolutionEstablished({ installRoot, binding });
+      runtime.invalidateMuseSolution({ installRoot, binding });
+      const invalidSol = readState(installRoot, binding).museReasoning;
+      assert.equal(invalidSol.rootCauseEstablished, true);
+      assert.equal(invalidSol.solutionEstablished, false);
+      pass('H-E: invalidateSolution clears solution only, diagnosis preserved');
+
+      // C. Conflict lifecycle: active -> xhigh, resolved -> phase default.
+      // (Fresh task so no other escalation signal interferes.)
+      const binding2 = { workspace: path.join(installRoot, 'ws'), taskId: 'TASK-5702', taskInstanceId: 'inst-i2', preset: 'aih-muse' };
+      writeState(installRoot, binding2, museState({ taskId: 'TASK-5702', taskInstanceId: 'inst-i2' }));
+      const request2 = () => runtime.prepareMuseRequestEffort({ installRoot, binding: binding2, target }).effort;
+      runtime.setMuseReasoningPhase({ installRoot, binding: binding2, phase: 'diagnose' });
+      runtime.setMuseConflictingEvidence({ installRoot, binding: binding2, conflicting: true });
+      assert.equal(request2(), 'xhigh');
+      runtime.resolveMuseConflictingEvidence({ installRoot, binding: binding2 });
+      assert.equal(request2(), 'high');
+      pass('H-C: conflict forces xhigh while active, releases to phase default when resolved');
+
+      // Establishing the root cause also clears an active conflict.
+      runtime.setMuseConflictingEvidence({ installRoot, binding: binding2, conflicting: true });
+      runtime.markMuseRootCauseEstablished({ installRoot, binding: binding2 });
+      assert.equal(readState(installRoot, binding2).museReasoning.conflictingEvidence, false);
+      pass('H-C2: root-cause establishment resolves the diagnosis window including conflict');
+    }
+
     console.log('RESULT: ' + passed + ' MuseReasoningRuntime assertions passed.');
   } finally {
     if (previousHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previousHome;

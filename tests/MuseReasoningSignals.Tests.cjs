@@ -417,6 +417,121 @@ async function main() {
       pass('18b: dedup history survives request resolution write-back');
     }
 
+    // -- Phase 2.1-F1: full escalation/de-escalation loop via the tool --
+    // discover m, diagnose h, fail h, fail xhigh, establish implement m,
+    // impl-fail recover h, impl-fail xhigh, corrected implement m, verify m.
+    // All transitions via signalTool.execute; all requests via the real
+    // isolation boundary. Runtime functions are never called directly here.
+    {
+      const installRoot = makeInstallRoot();
+      process.env.DSH_HOME = path.join(installRoot, 'data');
+      process.env.AIH_INSTALL_ROOT = installRoot;
+      const binding = testBinding(installRoot, 'TASK-6600', 'inst-loop');
+      writeState(installRoot, binding, museState('TASK-6600', 'inst-loop'));
+      writeBindings(installRoot, 'sess-loop', binding);
+      const requestCtx = makeRequestCtx();
+      isolation.apply(requestCtx);
+      const requestHandler = requestCtx.handlers['agent/request'];
+      const session = museSession('sess-loop');
+      let callSeq = 0;
+      const signal = (s) => {
+        callSeq += 1;
+        return modelSignal(s, 'sess-loop', { rootCallId: 'loop-root-' + callSeq, callId: 'loop-call-' + callSeq, token: Symbol('loop-' + callSeq) });
+      };
+      const request = async () => {
+        const enforced = await requestHandler(
+          { agent: { session } },
+          async () => ({ provider: 'x', model: 'y', reasoningEffort: 'xhigh' }),
+        );
+        return enforced.reasoningEffort;
+      };
+
+      const wireEfforts = [await request()];
+      await signal({ phase: 'diagnose' });
+      wireEfforts.push(await request());
+      await signal({ recordHypothesisFailure: true });
+      wireEfforts.push(await request());
+      await signal({ recordHypothesisFailure: true });
+      wireEfforts.push(await request());
+      await signal({ markRootCauseEstablished: true, markSolutionEstablished: true, phase: 'implement' });
+      wireEfforts.push(await request());
+      await signal({ recordImplementationFailure: true, phase: 'recover' });
+      wireEfforts.push(await request());
+      await signal({ recordImplementationFailure: true });
+      wireEfforts.push(await request());
+      await signal({ invalidateSolution: true });
+      await signal({ markSolutionEstablished: true, phase: 'implement' });
+      wireEfforts.push(await request());
+      await signal({ phase: 'verify' });
+      wireEfforts.push(await request());
+
+      assert.deepEqual(wireEfforts, ['medium', 'high', 'high', 'xhigh', 'medium', 'high', 'xhigh', 'medium', 'medium']);
+      pass('TRAJ-F1: full loop de-escalates after progress (xhigh never sticky)');
+
+      const stored = readState(installRoot, binding);
+      assert.equal(stored.museReasoning.totalFailedHypotheses, 2);
+      assert.equal(stored.museReasoning.totalFailedImplementationAttempts, 2);
+      assert.equal(stored.museReasoning.failedHypotheses, 0);
+      assert.equal(stored.museReasoning.failedImplementationAttempts, 0);
+      pass('TRAJ-F1-history: totals persist while active windows reset');
+    }
+
+    console.log('PART-TRAJ-F1-OK');
+
+    // -- Invalidation / resolve events via the tool (D, E, C) --
+    {
+      const installRoot = makeInstallRoot();
+      process.env.DSH_HOME = path.join(installRoot, 'data');
+      process.env.AIH_INSTALL_ROOT = installRoot;
+      const binding = testBinding(installRoot, 'TASK-6601', 'inst-inv');
+      writeState(installRoot, binding, museState('TASK-6601', 'inst-inv'));
+      writeBindings(installRoot, 'sess-inv', binding);
+      let seq = 500;
+      const once = (s) => {
+        seq += 1;
+        return modelSignal(s, 'sess-inv', { rootCallId: 'inv-root-' + seq, callId: 'inv-call-' + seq, token: Symbol('inv' + seq) });
+      };
+
+      await once({ markRootCauseEstablished: true, markSolutionEstablished: true });
+      const cleared = await once({ invalidateRootCause: true });
+      assert.equal(cleared.rootCauseEstablished, false);
+      assert.equal(cleared.solutionEstablished, false);
+      pass('D: tool invalidateRootCause clears both flags');
+
+      await once({ markRootCauseEstablished: true, markSolutionEstablished: true });
+      const kept = await once({ invalidateSolution: true });
+      assert.equal(kept.rootCauseEstablished, true);
+      assert.equal(kept.solutionEstablished, false);
+      pass('E: tool invalidateSolution preserves the diagnosis');
+
+      await once({ conflictingEvidence: true });
+      const resolved = await once({ resolveConflictingEvidence: true });
+      assert.equal(resolved.conflictingEvidence, false);
+      pass('C: tool resolveConflictingEvidence clears the active conflict');
+
+      // Retry dedup covers the new events: redelivered invalidation is a
+      // duplicate no-op, not a second mutation.
+      const dupIds = { rootCallId: 'inv-dup', callId: 'inv-dup-c', token: Symbol('invdup') };
+      await modelSignal({ markRootCauseEstablished: true }, 'sess-inv', dupIds);
+      const redelivered = await modelSignal({ markRootCauseEstablished: true }, 'sess-inv', dupIds);
+      assert.equal(redelivered.duplicate, true);
+      const invDup = { rootCallId: 'inv-dup2', callId: 'inv-dup2-c', token: Symbol('invdup2') };
+      await modelSignal({ invalidateRootCause: true }, 'sess-inv', invDup);
+      const invRedelivered = await modelSignal({ invalidateRootCause: true }, 'sess-inv', invDup);
+      assert.equal(invRedelivered.duplicate, true);
+      assert.equal(readState(installRoot, binding).museReasoning.rootCauseEstablished, false);
+      pass('F: new mark/invalidate events dedupe under retry');
+
+      // Ack carries totals alongside active values, and no effort.
+      const ackKeys = Object.keys(await once({ phase: 'diagnose' }));
+      assert.ok(ackKeys.includes('totalFailedHypotheses'));
+      assert.ok(ackKeys.includes('totalFailedImplementationAttempts'));
+      assert.ok(!ackKeys.includes('effort') && !ackKeys.includes('reasoningEffort'));
+      pass('ACK: acknowledgement exposes totals, never effort');
+    }
+
+    console.log('PART-F1-EVENTS-OK');
+
     // 22 + installation surface: the row exists only in the Muse preset.
     {
       const installerText = fs.readFileSync(path.join(repoRoot, 'scripts', 'Install-MusePreset.ps1'), 'utf8');
