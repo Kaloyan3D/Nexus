@@ -9,9 +9,15 @@
  * here duplicates resolver logic in a fake helper; each assertion calls
  * resolveMuseReasoningEffort / resolveMuseReasoningEffortForRequest directly.
  *
- * Required coverage (task section 9):
+ * Required coverage (task section 9, plus Phase 1-F1 fail-closed semantics):
  * phase defaults 1-7, escalation 8-10, non-escalation 11-12, de-escalation
  * 13, capability handling 14-16, plus malformed/unsupported combinations.
+ *
+ * Phase 1-F1: capability resolution is strictly fail-closed. Every resolver
+ * call in this suite passes EXPLICIT capabilities; unknown / missing / empty
+ * capability data, or no supported level at-or-below the request, throws
+ * MuseReasoningCapabilityError (code
+ * 'nexus-muse-reasoning-capability-unavailable') instead of resolving.
  */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -33,8 +39,22 @@ function stateFor(phase, overrides) {
 function resolveEffort(phase, overrides, capabilities) {
   return governor.resolveMuseReasoningEffort({
     state: stateFor(phase, overrides),
-    capabilities: capabilities === undefined ? null : capabilities,
+    capabilities: capabilities === undefined ? fullSupport() : capabilities,
   }).effort;
+}
+
+function assertCapabilityRefused(fn, expectedRequested, label) {
+  assert.throws(
+    fn,
+    (error) => (
+      error instanceof governor.MuseReasoningCapabilityError &&
+      error.name === 'MuseReasoningCapabilityError' &&
+      error.code === 'nexus-muse-reasoning-capability-unavailable' &&
+      error.requested === expectedRequested &&
+      Array.isArray(error.supported)
+    ),
+    label,
+  );
 }
 
 function fullSupport() {
@@ -165,23 +185,79 @@ function main() {
   assert.ok(maxAfterEscalation.trace[2] === 'explicit-max-request->max');
   pass('18b: explicit max applies after escalation and owns the reason');
 
-  // -- Malformed / unsupported capability combinations --
-  // Empty capability set: safe fallback, and max still clamps to xhigh.
+  // -- Valid downward-clamp table (F1 cases 1-4) --
+  // Exact supported effort resolves unchanged (F1 case 1 is covered by 14).
   assert.equal(
     governor.resolveMuseReasoningEffort({
-      state: stateFor('design', { requestMax: true }),
-      capabilities: { supportedEfforts: [] },
+      state: stateFor('diagnose'),
+      capabilities: { supportedEfforts: ['medium', 'high', 'xhigh'] },
     }).effort,
-    'xhigh',
-  );
-  pass('19: empty capabilities + max request -> safe xhigh fallback (never blind max)');
-
-  // Missing supportedEfforts array: same safe fallback, no throw at resolve.
-  assert.equal(
-    resolveEffort('diagnose', {}, {}),
     'high',
   );
-  pass('20: malformed capabilities object (no array) falls back safe, never throws');
+  pass('F1-1: exact supported effort resolves unchanged');
+
+  // max -> xhigh when max unsupported but xhigh supported (F1 case 2 = 16).
+  // xhigh -> high when only medium/high supported (F1 case 3).
+  assert.equal(
+    governor.resolveMuseReasoningEffort({
+      state: stateFor('diagnose', { conflictingEvidence: true }),
+      capabilities: { supportedEfforts: ['medium', 'high'] },
+    }).effort,
+    'high',
+  );
+  pass('F1-3: xhigh requested + only medium/high supported -> high');
+
+  // high -> medium when only medium supported (F1 case 4).
+  assert.equal(
+    governor.resolveMuseReasoningEffort({
+      state: stateFor('diagnose'),
+      capabilities: { supportedEfforts: ['medium'] },
+    }).effort,
+    'medium',
+  );
+  pass('F1-4: high requested + only medium supported -> medium');
+
+  // -- Fail-closed capability cases (F1 cases 5-9) --
+  // Empty supported set refuses, even for a max request (F1 case 5).
+  assertCapabilityRefused(
+    () => governor.resolveMuseReasoningEffort({
+      state: stateFor('design', { requestMax: true }),
+      capabilities: { supportedEfforts: [] },
+    }),
+    'max',
+    'empty capabilities must refuse',
+  );
+  pass('19: empty capabilities + max request -> fail closed (no invented xhigh)');
+
+  // Missing capabilities argument refuses (F1 case 6a).
+  assertCapabilityRefused(
+    () => governor.resolveMuseReasoningEffort({ state: stateFor('diagnose') }),
+    'high',
+    'missing capabilities must refuse',
+  );
+  pass('20a: missing capabilities argument fails closed');
+
+  // Malformed capabilities object (no array) refuses (F1 case 6b).
+  assertCapabilityRefused(
+    () => governor.resolveMuseReasoningEffort({
+      state: stateFor('diagnose'),
+      capabilities: {},
+    }),
+    'high',
+    'malformed capabilities must refuse',
+  );
+  pass('20: malformed capabilities object (no array) fails closed');
+
+  // Null registry entry through the Phase-2 seam refuses (F1 case 6c).
+  assertCapabilityRefused(
+    () => governor.resolveMuseReasoningEffortForRequest({
+      state: stateFor('diagnose'),
+      registryEntry: null,
+    }),
+    'high',
+    'null registry entry must refuse',
+  );
+  pass('20c: null registry entry fails closed through the request seam');
 
   // Unknown level strings are dropped, never invented as support.
   assert.deepEqual(
@@ -200,7 +276,7 @@ function main() {
   );
   pass('22: capability matching is case-insensitive');
 
-  // Narrow floor (only high supported): escalation clamps DOWN to high.
+  // Narrow support (medium/high): escalation clamps DOWN to high.
   assert.equal(
     governor.resolveMuseReasoningEffort({
       state: stateFor('diagnose', { conflictingEvidence: true }),
@@ -210,15 +286,95 @@ function main() {
   );
   pass('23: xhigh requested but unsupported clamps down to high (never up, never max)');
 
-  // Only max supported (theoretical): a medium request cannot step down, so it
-  // takes the lowest supported level with the clamp recorded in the trace.
-  const floorCase = governor.resolveMuseReasoningEffort({
-    state: stateFor('discover'),
-    capabilities: { supportedEfforts: ['max'] },
-  });
-  assert.equal(floorCase.effort, 'max');
-  assert.ok(floorCase.trace.some((step) => step.indexOf('below-supported-floor') >= 0));
-  pass('24: request below the supported floor is explicit in the trace');
+  // No supported level at-or-below requested: fail closed, never upward.
+  // medium requested + only [high] supported (F1 case 7).
+  assertCapabilityRefused(
+    () => governor.resolveMuseReasoningEffort({
+      state: stateFor('discover'),
+      capabilities: { supportedEfforts: ['high'] },
+    }),
+    'medium',
+    'medium requested with only high supported must refuse',
+  );
+  pass('F1-7: requested medium + supported [high] -> fail closed');
+
+  // medium requested + only [xhigh, max] supported (F1 case 8).
+  // Previously this resolved UP to max; now it refuses.
+  assertCapabilityRefused(
+    () => governor.resolveMuseReasoningEffort({
+      state: stateFor('discover'),
+      capabilities: { supportedEfforts: ['xhigh', 'max'] },
+    }),
+    'medium',
+    'medium requested with only xhigh/max supported must refuse',
+  );
+  pass('F1-8: requested medium + supported [xhigh,max] -> fail closed');
+
+  // high requested + only [xhigh, max] supported (F1 case 9).
+  assertCapabilityRefused(
+    () => governor.resolveMuseReasoningEffort({
+      state: stateFor('diagnose'),
+      capabilities: { supportedEfforts: ['xhigh', 'max'] },
+    }),
+    'high',
+    'high requested with only xhigh/max supported must refuse',
+  );
+  pass('F1-9: requested high + supported [xhigh,max] -> fail closed');
+
+  // medium requested + only [max] supported: the old upward-escalation case.
+  assertCapabilityRefused(
+    () => governor.resolveMuseReasoningEffort({
+      state: stateFor('discover'),
+      capabilities: { supportedEfforts: ['max'] },
+    }),
+    'medium',
+    'medium requested with only max supported must refuse',
+  );
+  pass('24: below-floor request fails closed (upward resolution removed)');
+
+  // Ladder invariant (F1 case 10): for every successful resolution over a
+  // meaningful requested x supported matrix, resolved index <= requested.
+  const ladder = governor.MUSE_REASONING_EFFORTS;
+  const ladderIndexOf = (effort) => ladder.indexOf(effort);
+  const supportedSubsets = [
+    ['medium'],
+    ['high'],
+    ['medium', 'high'],
+    ['medium', 'high', 'xhigh'],
+    ['medium', 'high', 'xhigh', 'max'],
+    ['xhigh', 'max'],
+    ['max'],
+  ];
+  let matrixSuccesses = 0;
+  for (const requested of ladder) {
+    const phaseForRequest = requested === 'medium' ? 'discover' : 'diagnose';
+    for (const supported of supportedSubsets) {
+      const caps = { supportedEfforts: supported };
+      let outcome = null;
+      let refused = false;
+      try {
+        outcome = governor.resolveMuseReasoningEffort({
+          state: stateFor(phaseForRequest),
+          capabilities: caps,
+        });
+      } catch (error) {
+        assert.ok(
+          error instanceof governor.MuseReasoningCapabilityError,
+          'only the typed capability error may reject: ' + requested + ' vs [' + supported.join(',') + ']',
+        );
+        refused = true;
+      }
+      if (!refused) {
+        matrixSuccesses += 1;
+        assert.ok(
+          ladderIndexOf(outcome.effort) <= ladderIndexOf(requested),
+          'resolved ' + outcome.effort + ' must not exceed requested ' + requested,
+        );
+      }
+    }
+  }
+  assert.ok(matrixSuccesses > 0, 'matrix must contain successful resolutions');
+  pass('F1-10: ladder invariant holds over the requested x supported matrix (' + matrixSuccesses + ' successes)');
 
   // -- Registry seam: capabilities come from existing metadata, never invented --
   const registry = JSON.parse(fs.readFileSync(path.join(repoRoot, 'config', 'model-registry.json'), 'utf8'));
@@ -245,10 +401,27 @@ function main() {
   );
   pass('27: non-governor registry levels (minimal/low) do not enter capabilities');
 
-  // Missing entry (null) means no constraint; malformed entry means safe empty set.
+  // Missing entry (null) stays null (unknown); a malformed entry derives an
+  // empty set. Both refuse at resolve time -- neither invents support.
   assert.equal(governor.capabilitiesFromRegistryEntry(null), null);
   assert.deepEqual(governor.capabilitiesFromRegistryEntry({}).supportedEfforts, []);
-  pass('28: null registry entry is unconstrained; malformed entry is safely empty');
+  pass('28: null registry entry is unknown; malformed entry derives empty (both refuse at resolve)');
+
+  // A registry entry whose levels contain no canonical Muse effort derives an
+  // empty set and refuses at resolve (never guesses from the model id).
+  assert.deepEqual(
+    governor.capabilitiesFromRegistryEntry({ supportedReasoningLevels: ['minimal', 'low'] }).supportedEfforts,
+    [],
+  );
+  assertCapabilityRefused(
+    () => governor.resolveMuseReasoningEffortForRequest({
+      state: stateFor('diagnose'),
+      registryEntry: { supportedReasoningLevels: ['minimal', 'low'] },
+    }),
+    'high',
+    'entry with no canonical Muse levels must refuse',
+  );
+  pass('28b: registry entry without canonical Muse levels fails closed');
 
   // -- State validation fails closed (never resolves a malformed state) --
   assert.throws(() => stateFor('planning'), TypeError);
