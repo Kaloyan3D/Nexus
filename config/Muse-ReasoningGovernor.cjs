@@ -22,6 +22,13 @@
  * Precedence inside resolveMuseReasoningEffort (the single site):
  * 1. phase default, 2. strong escalation to xhigh, 3. implement
  * de-escalation carve-out, 4. explicit max request, 5. capability clamp.
+ *
+ * Step 5 is strictly fail-closed (Phase 1-F1): it resolves only to a
+ * capability explicitly known to be supported AND at or below the requested
+ * effort. Unknown / missing / empty capability data, or no supported level
+ * at-or-below the request, THROWS MuseReasoningCapabilityError -- a Phase 2
+ * caller can never accidentally send a guessed or upward-clamped effort.
+ * Downward clamps (max -> xhigh, xhigh -> high) remain valid.
  */
 const MUSE_REASONING_EFFORTS = Object.freeze(['medium', 'high', 'xhigh', 'max']);
 const MUSE_REASONING_EFFORT_SET = new Set(MUSE_REASONING_EFFORTS);
@@ -50,6 +57,35 @@ const DEFAULT_MUSE_REASONING_POLICY = Object.freeze({
   phaseEffort: DEFAULT_MUSE_PHASE_EFFORT,
 });
 const MUSE_ESCALATION_FAILURE_THRESHOLD = 2;
+
+/**
+ * Typed fail-closed capability error. Thrown by step 5 when no explicitly
+ * supported effort exists at or below the requested effort (unknown, missing,
+ * empty, or floor-mismatched capability data). Carries code
+ * 'nexus-muse-reasoning-capability-unavailable' plus the requested effort and
+ * the normalized supported set, so a Phase 2 caller can log the refusal
+ * without ever placing a guessed effort on the wire. An instanceof check is
+ * the supported discriminator (error.name === 'MuseReasoningCapabilityError').
+ */
+class MuseReasoningCapabilityError extends Error {
+  constructor(requested, supported) {
+    const supportedList = Array.isArray(supported) && supported.length > 0
+      ? supported.join(', ')
+      : '(none known)';
+    super(
+      'Muse reasoning capability unavailable: requested effort ' +
+        String(requested) +
+        ' has no explicitly supported effort at or below it ' +
+        '(supported: ' + supportedList + '). ' +
+        'Refusing to guess provider capabilities.',
+    );
+    this.name = 'MuseReasoningCapabilityError';
+    this.code = 'nexus-muse-reasoning-capability-unavailable';
+    this.requested = requested;
+    this.supported = Object.freeze((Array.isArray(supported) ? supported : []).slice());
+  }
+}
+
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -232,17 +268,23 @@ function clampMuseEffortToCapabilities(requested, capabilities) {
     throw new TypeError('Requested Muse effort must be canonical.');
   }
   const normalized = normalizeMuseReasoningCapabilities(capabilities);
-  if (normalized === null) {
-    return { effort: requested, clamped: false, note: 'no-capability-constraint' };
+  // Fail closed on unknown capability data: a missing capabilities argument
+  // (null/undefined) or a malformed/empty normalized set means the resolver
+  // cannot establish support from authoritative metadata, so it must refuse
+  // rather than resolve unconstrained or invent a default set.
+  if (normalized === null || normalized.supportedEfforts.length === 0) {
+    throw new MuseReasoningCapabilityError(
+      requested,
+      normalized === null ? [] : Array.from(normalized.supportedEfforts),
+    );
   }
   const supported = new Set(normalized.supportedEfforts);
-  if (supported.size === 0) {
-    const fallback = requested === 'max' ? 'xhigh' : requested;
-    return { effort: fallback, clamped: fallback !== requested, note: 'empty-capabilities-safe-fallback' };
-  }
   if (supported.has(requested)) {
     return { effort: requested, clamped: false, note: 'supported' };
   }
+  // Downward clamp only: the highest supported effort at or below requested.
+  // When none exists (request sits below the supported floor), fail closed --
+  // resolving upward would silently escalate compute beyond what was asked.
   const ladderIndex = MUSE_REASONING_EFFORTS.indexOf(requested);
   for (let index = ladderIndex - 1; index >= 0; index -= 1) {
     const candidate = MUSE_REASONING_EFFORTS[index];
@@ -250,8 +292,7 @@ function clampMuseEffortToCapabilities(requested, capabilities) {
       return { effort: candidate, clamped: true, note: 'clamped-down-to-' + candidate };
     }
   }
-  const lowest = MUSE_REASONING_EFFORTS.find((effort) => supported.has(effort));
-  return { effort: lowest, clamped: true, note: 'below-supported-floor-raised-to-' + lowest };
+  throw new MuseReasoningCapabilityError(requested, Array.from(normalized.supportedEfforts));
 }
 
 function resolveMuseReasoningEffort(input) {
@@ -316,6 +357,7 @@ function resolveMuseReasoningEffortForRequest(input) {
 }
 
 module.exports = {
+  MuseReasoningCapabilityError,
   MUSE_REASONING_EFFORTS,
   MUSE_REASONING_PHASES,
   MUSE_REASONING_MODE,
