@@ -90,6 +90,13 @@ try{
     Assert-Aih ($dual.preset -eq 'aih-engineering') '3.4: the Dual record names its own preset'
     $mechanical=Invoke-AihRoutingDecision -Description 'run tests' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot (Join-Path $fixture.Root 'data/routing') -Preset 'aih-engineering' -DryRun -SettingsPath $fixture.Settings
     Assert-Aih ($mechanical.executionClass -eq 'deterministic' -and $mechanical.role -eq $null) '3.5: Dual deterministic routing is unchanged'
+    # TASK-0056: Muse keeps NO Dual-derived deterministic path. 'run tests' is
+    # a Dual mechanical class (writable=false, role=null, no model target);
+    # the Muse plane always runs its one main agent instead of consulting it.
+    $museMechanical=Invoke-AihRoutingDecision -Description 'run tests' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot (Join-Path $fixture.Root 'data/routing') -Preset 'aih-muse' -DryRun -SettingsPath $fixture.Settings
+    Assert-Aih ($museMechanical.engine -eq 'muse' -and $museMechanical.executionClass -eq 'muse_main' -and $null-eq$museMechanical.role) '3.5b: Muse run-tests stays on the Muse main-agent plane (no Dual deterministic path)'
+    Assert-Aih ($museMechanical.risk -eq 'normal' -and $museMechanical.matchedRule -eq 'muse-default') '3.5c: Muse run-tests records neutral risk metadata (no Dual classification)'
+    Assert-Aih ($museMechanical.provider -eq 'meta-model-api' -and $museMechanical.model -eq 'muse-spark-1.3-contributor') '3.5d: Muse run-tests keeps the exact Muse target'
 
     # -- 3b. Critical Muse work stays on the Muse main-agent plane
     $criticalMuse=Invoke-AihRoutingDecision -Description 'Fix the authentication authorization security boundary, database migration, and concurrency correctness defects.' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot (Join-Path $fixture.Root 'data/routing') -Preset 'aih-muse' -DryRun -SettingsPath $fixture.Settings

@@ -359,7 +359,7 @@ function Get-AihMuseRoutingSignals {
         Risk=if($critical){'critical'}else{'normal'}
         RuleId=if($critical){'muse-critical-signals'}else{'muse-default'}
         MatchedPatterns=$matched
-        Reason=if($critical){'Muse-native security, migration, authentication, or concurrency signals strengthen reasoning and verification on the same Muse main-agent plane.'}else{'Muse-native routing selected the single Muse main-agent plane.'}
+        Reason=if($critical){'Muse-native security, migration, authentication, or concurrency signals recorded as risk metadata on the same Muse main-agent plane.'}else{'Muse-native routing selected the single Muse main-agent plane.'}
     }
 }
 
