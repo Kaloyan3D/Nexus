@@ -56,6 +56,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const governor = require('./Muse-ReasoningGovernor.cjs');
 const profiles = require('./Engineering-Profiles.cjs');
+const activity = require('./Muse-ReasoningActivity.cjs');
 
 function readJson(filePath) {
   try {
@@ -145,6 +146,25 @@ function requestedEffortOfTrace(trace, phase, fallback) {
   return fallback;
 }
 
+function activityBlockOf(routingState) {
+  if (!routingState || typeof routingState !== 'object') return null;
+  const block = routingState.museActivity;
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return null;
+  return block;
+}
+
+/**
+ * Read the validated task-local Muse activity block from a routing state
+ * document. A missing block initializes to the empty activity state (legacy
+ * states predate Phase 2.2); a present-but-malformed block throws
+ * fail-closed rather than guessing.
+ */
+function museActivityStateOf(routingState) {
+  return activity.normalizeMuseActivityState(
+    routingState && typeof routingState === 'object' ? routingState.museActivity : null,
+  );
+}
+
 function blockFromState(state, lastResolution, processedSignalIds) {
   return {
     phase: state.phase,
@@ -214,16 +234,25 @@ function prepareMuseRequestEffort({ installRoot, binding, target } = {}) {
     throw error;
   }
   const reasoningState = museReasoningStateOf(routingState);
+  const activityState = museActivityStateOf(routingState);
+  // Phase 2.2: derive the EFFECTIVE compute phase from semantic state plus
+  // trusted operational evidence. The semantic phase is never rewritten here;
+  // the reducer selects which phase string enters the Governor. Governor
+  // policy (phase mappings, thresholds, MAX, clamping) is unchanged.
+  const effective = activity.reduceEffectiveState({ phase: reasoningState.phase, activity: activityState });
+  const effectiveState = effective.effectivePhase === reasoningState.phase
+    ? reasoningState
+    : governor.updateMuseReasoningState(reasoningState, { phase: effective.effectivePhase });
   const registryEntry = registryEntryFor(installRoot, target || routingState);
   const resolved = governor.resolveMuseReasoningEffortForRequest({
-    state: reasoningState,
+    state: effectiveState,
     registryEntry,
   });
   // The requested effort is the Governor trace's first step (always
   // 'phase:<phase>-><effort>' by the governor's contract). Parsed with
   // validation -- never duplicated policy: the runtime re-derives no phase
   // mapping, threshold, or ladder logic of its own.
-  const requested = requestedEffortOfTrace(resolved.trace, reasoningState.phase, resolved.effort);
+  const requested = requestedEffortOfTrace(resolved.trace, effectiveState.phase, resolved.effort);
   const nowUtc = new Date().toISOString();
   const next = {
     ...routingState,
@@ -232,6 +261,9 @@ function prepareMuseRequestEffort({ installRoot, binding, target } = {}) {
       { ...reasoningState, currentEffort: resolved.effort },
       {
         phase: reasoningState.phase,
+        effectivePhase: effective.effectivePhase,
+        effectiveSource: effective.source,
+        activityState: effective.activityState,
         requestedEffort: requested,
         resolvedEffort: resolved.effort,
         reason: resolved.reason,
@@ -248,6 +280,9 @@ function prepareMuseRequestEffort({ installRoot, binding, target } = {}) {
     reason: resolved.reason,
     trace: resolved.trace,
     requested,
+    effectivePhase: effective.effectivePhase,
+    effectiveSource: effective.source,
+    activityState: effective.activityState,
   };
 }
 
@@ -311,9 +346,21 @@ function transitionMuseReasoningState({ installRoot, binding, mutate, recordSign
   if (recordSignalId !== undefined) {
     signalIds = signalIds.filter((id) => id !== recordSignalId).concat([recordSignalId]).slice(-MAX_PROCESSED_SIGNAL_IDS);
   }
+  // Phase 2.2 ordering: an explicit semantic phase change re-baselines the
+  // activity frontier so older operational evidence no longer overrides the
+  // new phase. Non-phase transitions leave activity untouched. Semantic
+  // failure counters are never touched by activity and vice versa.
+  let nextActivity = museActivityStateOf(routingState);
+  if (typeof fullPatch.phase === 'string') {
+    // Every explicit phase signal re-baselines the frontier -- including a
+    // re-assertion of the current phase, which is how the model says "this
+    // phase is current again" and supersedes older operational evidence.
+    nextActivity = activity.markSemanticTransition(nextActivity, fullPatch.phase);
+  }
   const next = {
     ...routingState,
     museReasoning: blockFromState(nextState, preserved, signalIds),
+    museActivity: nextActivity,
   };
   writeAtomicJson(statePath, next);
   return nextState;
@@ -437,11 +484,70 @@ function resolveMuseConflictingEvidence({ installRoot, binding } = {}) {
   });
 }
 
+/**
+ * Record one trusted tool outcome (Phase 2.2 observer write path). The
+ * classification comes from the frozen DSH pipeline facts via
+ * Muse-ReasoningActivity.cjs -- never from model prose. Exactly one atomic
+ * routing-state write when the outcome is evidence; no write at all when the
+ * outcome is ignored (reads, searches, unrecognized shell, failed tools).
+ * Semantic state is never modified here; failure counters are never touched.
+ * Returns { classification, activity } (activity null when ignored).
+ */
+function recordMuseToolOutcome({ installRoot, binding, exec, result } = {}) {
+  if (typeof installRoot !== 'string' || installRoot === '') {
+    throw new TypeError('recordMuseToolOutcome requires installRoot.');
+  }
+  if (!binding || typeof binding !== 'object') {
+    throw new TypeError('recordMuseToolOutcome requires binding.');
+  }
+  const classification = activity.classifyToolOutcome(exec, result);
+  if (classification.kind === 'ignored') {
+    return { classification, activity: null };
+  }
+  if (binding.preset !== 'aih-muse') {
+    const error = new Error('Muse activity observation rejected (wrong-engine): observations apply to aih-muse sessions only.');
+    error.code = 'nexus-muse-engine-mismatch';
+    throw error;
+  }
+  const statePath = profiles.routingStatePath(installRoot, binding);
+  if (!statePath) throw new TypeError('recordMuseToolOutcome cannot address routing state.');
+  const routingState = readJson(statePath);
+  if (!routingState) {
+    const error = new Error('Muse activity observation refused: routing state is missing.');
+    error.code = 'nexus-execution-target-unavailable';
+    throw error;
+  }
+  const nextActivity = activity.applyClassification(museActivityStateOf(routingState), classification);
+  const block = stateBlockOf(routingState);
+  const preserved = block && block.lastResolution !== undefined ? block.lastResolution : null;
+  const next = {
+    ...routingState,
+    museActivity: nextActivity,
+    museReasoning: block
+      ? blockFromState(museReasoningStateOf(routingState), preserved, processedSignalIdsOf(block))
+      : routingState.museReasoning,
+  };
+  // Preserve absence: legacy states without a museReasoning block stay
+  // without one (resolution initializes it on the next request).
+  if (!block && !routingState.museReasoning) {
+    delete next.museReasoning;
+  }
+  writeAtomicJson(statePath, next);
+  return { classification, activity: nextActivity };
+}
+
 module.exports = {
   MAX_PROCESSED_SIGNAL_IDS,
   bindingForSession,
   processedSignalIdsOf,
   museReasoningStateOf,
+  museActivityStateOf,
+  activityBlockOf,
+  recordMuseToolOutcome,
+  effectiveMuseStateOf: (routingState) => {
+    const semantic = museReasoningStateOf(routingState);
+    return activity.reduceEffectiveState({ phase: semantic.phase, activity: museActivityStateOf(routingState) });
+  },
   registryEntryFor,
   prepareMuseRequestEffort,
   transitionMuseReasoningState,

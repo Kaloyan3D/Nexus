@@ -63,7 +63,7 @@ try {
     [System.IO.File]::WriteAllText((Join-Path $stage 'agent.cordis.yml'), $museText, $utf8)
 
     Copy-Item -LiteralPath (Join-Path $layout.Config 'preset-muse.yml') -Destination (Join-Path $stage 'preset.yml')
-    foreach ($managedFile in @('Muse-Isolation.cjs', 'Muse-ContributorProtection.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'AihController.cjs', 'Engineering-Profiles.cjs')) {
+    foreach ($managedFile in @('Muse-Isolation.cjs', 'Muse-ContributorProtection.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'Muse-ReasoningActivity.cjs', 'AihController.cjs', 'Engineering-Profiles.cjs')) {
         Copy-Item -LiteralPath (Join-Path $layout.Config $managedFile) -Destination (Join-Path $stage $managedFile)
     }
 
