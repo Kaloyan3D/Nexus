@@ -689,12 +689,17 @@ function createBindingGuard(deps) {
     return run
   }
 
-  async function recoverStaleBinding(agent, session, workspace, promptText, stale, reason) {
+  async function recoverStaleBinding(agent, session, workspace, promptText, stale, reason, authoritative) {
     // Part 10: structured detection event with the full identity context,
     // removal from memory, persisted removal, then a FRESH authoritative task
     // through the normal binding flow. The stale binding is never pointed at
     // another task that merely shares its taskId, and no task is ever
     // reconstructed from binding contents.
+    // TASK-0056: engine immutability survives recovery. The replacement task
+    // is created with the EXPLICIT authoritative engine/preset carried forward
+    // from the stale binding — never re-resolved from the mutable session
+    // preference. ensureBinding guarantees `authoritative` is present and that
+    // the requested engine already matched it before any invalidation runs.
     deps.log({
       event: 'stale-binding-detected',
       sessionId: session && session.id ? session.id : null,
@@ -705,7 +710,7 @@ function createBindingGuard(deps) {
       reason,
     })
     deps.invalidateBinding(stale)
-    const created = await deps.createBinding(agent, session, workspace, promptText)
+    const created = await deps.createBinding(agent, session, workspace, promptText, authoritative)
     return { binding: created, outcome: 'recovered', stale: { taskId: stale.taskId, reason } }
   }
 
@@ -730,13 +735,28 @@ function createBindingGuard(deps) {
         throw error
       }
       if (typeof deps.validateWorkspaceIdentity === 'function') await deps.validateWorkspaceIdentity(binding, workspace)
+      // TASK-0056: engine identity is immutable and is checked BEFORE any
+      // stale-binding invalidation/recovery. A stale/missing task must NEVER
+      // let the same session switch Muse <-> Dual during recovery. The
+      // requested engine comes from the current session preset; the bound
+      // engine comes from the persisted binding. Any mismatch — including a
+      // legacy binding WITHOUT an engine, which cannot prove its identity —
+      // fails closed with engine-binding-violation: no invalidation, no
+      // replacement task, no downstream/model call.
+      const staleEngine = deps.requestedPresetOf && typeof deps.requestedPresetOf === 'function'
+        ? deps.requestedPresetOf(session)
+        : binding.preset
+      assertEngineBinding(binding, staleEngine)
+      const authoritativeEngine = binding.engine
+      const authoritativePreset = binding.preset
       // Part 21: a legacy binding WITHOUT taskInstanceId can never prove its
       // lifecycle generation, so it must not silently attach to (possibly
       // different) current controller state. It is stale/ambiguous by
-      // definition and is safely rebound through the normal flow.
+      // definition and is safely rebound through the normal flow — with the
+      // SAME engine identity carried forward explicitly.
       const bindingInstance = typeof binding.taskInstanceId === 'string' ? binding.taskInstanceId : ''
       if (bindingInstance === '') {
-        return recoverStaleBinding(agent, session, workspace, promptText, binding, 'ambiguous-legacy-binding')
+        return recoverStaleBinding(agent, session, workspace, promptText, binding, 'ambiguous-legacy-binding', { engine: authoritativeEngine, preset: authoritativePreset })
       }
       // Part 5/8: the authoritative identity test. A TaskController failure
       // here THROWS (inconclusive) — it must never become 'task missing'.
@@ -756,7 +776,11 @@ function createBindingGuard(deps) {
       }
       const verdict = classifyBindingIdentity(binding, identity)
       if (verdict.verdict === 'stale') {
-        return recoverStaleBinding(agent, session, workspace, promptText, binding, verdict.reason)
+        // TASK-0056: the stale verdict is proven, but the engine check above
+        // already ran BEFORE any invalidation. Recovery still carries the
+        // original bound engine explicitly so createBinding cannot re-resolve
+        // it from the mutable profile preference.
+        return recoverStaleBinding(agent, session, workspace, promptText, binding, verdict.reason, { engine: authoritativeEngine, preset: authoritativePreset })
       }
       assertEngineBinding(binding, binding.preset, identity.boundEngine)
       return { binding, outcome: 'valid' }
@@ -1092,7 +1116,8 @@ function apply(ctx) {
   // other (no global lock).
   const bindingGuard = createBindingGuard({
     bindingFor: (session) => bindingFor(session),
-    createBinding: (agent, session, workspace, promptText) => bindSession(agent, session, workspace, promptText),
+    createBinding: (agent, session, workspace, promptText, authoritative) => bindSession(agent, session, workspace, promptText, authoritative),
+    requestedPresetOf: (session) => agentPresetOf(session),
     testTaskIdentity,
     validateWorkspaceIdentity: async (binding, workspace) => {
       const identity = await resolveWorkspaceIdentity(workspace)
@@ -1926,7 +1951,7 @@ function apply(ctx) {
     }
   }
 
-  async function bindSession(agent, session, workspace, promptText) {
+  async function bindSession(agent, session, workspace, promptText, authoritative) {
     const workspaceIdentity = await resolveWorkspaceIdentity(workspace)
     if (normalizeWorkspaceIdentity(workspaceIdentity.executionRoot) !== normalizeWorkspaceIdentity(workspace)) {
       const error = new Error(`session execution root mismatch: expected '${workspaceIdentity.executionRoot}', actual '${workspace}'`)
@@ -1934,8 +1959,17 @@ function apply(ctx) {
       throw error
     }
     const reviewRequested = isReviewCommand(promptText)
-    const preset = agentPresetOf(session)
-    const engine = engineForPreset(preset)
+    // TASK-0056: stale recovery carries the ORIGINAL bound engine forward
+    // explicitly. A fresh bind (no authoritative identity) selects once from
+    // the new session preset; a recovery bind MUST reuse the stale binding's
+    // engine/preset and never re-resolve from the mutable preference.
+    const preset = authoritative && typeof authoritative.preset === 'string' ? authoritative.preset : agentPresetOf(session)
+    const engine = authoritative && typeof authoritative.engine === 'string' ? authoritative.engine : engineForPreset(preset)
+    if (!['dual', 'muse'].includes(engine)) {
+      const error = new Error(`engine-binding-violation: bound='missing', task='missing', requested='${engineForPreset(preset)}'.`)
+      error.code = 'engine-binding-violation'
+      throw error
+    }
     const task = await createTask(workspace, reviewRequested ? reviewQuestionOf(promptText) : promptText, reviewRequested, engine)
     // TASK-0005 Part 1: every newly created task carries an immutable
     // taskInstanceId from the TaskController; the binding references it.

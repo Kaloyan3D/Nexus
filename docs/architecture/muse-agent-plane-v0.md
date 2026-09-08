@@ -22,7 +22,7 @@ Route.ps1 -> Invoke-AihRoutingDecision
 ```
 
 - The Muse branch never invokes `Get-AihRoutingInitialDecision` and never resolves Dual roles. There are no `primaryEngineer` / `deepEngineer` / `reviewer` / `solver` / `fallback` semantics, no step-routing epistemic roles, and no manual class/tier overrides on the Muse plane. Muse records use the Muse-owned `muse_main` execution marker and carry `role: null`.
-- Muse-native signal classification records neutral risk metadata. Authentication, authorization, security-boundary, migration, and concurrency work remains on `muse_main`; risk can strengthen the Muse Reasoning Governor, verification, retry, and evidence requirements without selecting a Dual role.
+- Muse-native signal classification records neutral risk metadata. Authentication, authorization, security-boundary, migration, and concurrency work remains on `muse_main` without selecting a Dual role. The `risk` field is metadata-only in V0: no code path wires it into the Muse Reasoning Governor (`config/Muse-ReasoningGovernor.cjs` takes no risk input), verification policy, retry, or evidence requirements.
 - A Dual preset with an active `engine: muse` Nexus profile can never execute: the Dual agent plane still carries Dual delegation tooling, so that combination is rejected with `Muse routing rejected: ... selects the muse engine but the session runs the '<preset>' agent plane`.
 - A missing/invalid catalog on the Dual side keeps its existing classification and role behavior; Dual records now explicitly persist `engine: dual`.
 - The Muse branch shares controller infrastructure with Dual: task identity, ledger, routing mutex, attempt lifecycle, state persistence, telemetry, and completion authority. It does not share decision semantics.
@@ -64,7 +64,7 @@ Muse never invokes Codex as reviewer, fallback, repair agent, or worker. Visual 
 `muse-profiles.json` sets `review.independent = false` and the routing plane enforces it:
 
 - `-ReviewRequested` on the muse branch fails closed (`Muse routing rejected: independent review is not available for the Muse engine`).
-- Muse risk signals (for example `critical-security-boundary`) remain on the Muse main-agent plane and can strengthen Muse reasoning/verification. The explicit `user-codex` signal and `/review` fail closed truthfully and start no model call.
+- Muse risk signals (for example `critical-security-boundary`) remain on the Muse main-agent plane as `risk: critical` record/state metadata; they do not change the target, effort, or verification behavior. The explicit `user-codex` signal and `/review` fail closed truthfully and start no model call.
 - `review-findings` cannot return to a muse task (no Muse reviewer exists).
 - Same-failure escalation NEVER routes to a reviewer on the muse plane.
 - Dual `reviewRequired` classifications are never evaluated on the Muse branch.
