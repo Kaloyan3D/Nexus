@@ -430,16 +430,58 @@ function museBindingForExec(installRoot, exec) {
  * evidence. Observe-only by contract: never throws for tool failures or
  * unrecognized tools (those are ignored), never modifies semantic state,
  * never touches failure counters, never influences the in-flight result.
- * Session-file errors are swallowed (best-effort observation must not break
- * tool execution); binding/preset violations fail closed inside the runtime.
+ * Unexpected persistence/runtime failures invoke onObserverFailure (bounded
+ * redacted diagnostic via emitObserverDiagnostic); binding/preset violations
+ * fail closed inside the runtime.
  */
-function observeMuseToolResult({ installRoot, binding, exec, result } = {}) {
+// Stable diagnostic code for unexpected observer/runtime failures. The
+// message is bounded and redacted: tool name only (known-safe enum), never
+// arguments, payloads, paths, or error internals (which could echo secrets).
+const MUSE_ACTIVITY_OBSERVER_DIAG_CODE = 'nexus-muse-activity-observe-failed';
+
+function observerWarnFn(ctx) {
+  try {
+    if (ctx && ctx.logger && typeof ctx.logger.warn === 'function') {
+      return (message) => ctx.logger.warn(message);
+    }
+  } catch {
+    /* fall through to console */
+  }
+  if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+    return (message) => console.warn(message);
+  }
+  return null;
+}
+
+function emitObserverDiagnostic(ctx, exec, code) {
+  try {
+    const warn = observerWarnFn(ctx);
+    if (warn === null) return false;
+    const toolName = exec && typeof exec.name === 'string' && exec.name !== '' ? exec.name : 'unknown-tool';
+    // Bounded + redacted: fixed prefix, stable code, tool-name enum only.
+    warn('Muse activity observation failed (' + code + '): tool=' + toolName + '. Semantic state unchanged.');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function observeMuseToolResult({ installRoot, binding, exec, result, onObserverFailure } = {}) {
   try {
     if (typeof installRoot !== 'string' || installRoot === '') return null;
     if (!binding || binding.preset !== MUSE_AGENT_PRESET) return null;
     const outcome = runtime.recordMuseToolOutcome({ installRoot, binding, exec, result });
     return outcome;
   } catch {
+    // Observe-only: report a bounded redacted diagnostic, never throw into
+    // the tool pipeline. Ignored-tool outcomes never reach here (the runtime
+    // returns before any write), so only unexpected persistence/runtime
+    // failures emit.
+    try {
+      if (typeof onObserverFailure === 'function') {
+        try { onObserverFailure({ code: MUSE_ACTIVITY_OBSERVER_DIAG_CODE, toolName: exec && exec.name }); } catch { /* diagnostic hook must not throw */ }
+      }
+    } catch { /* never break observation */ }
     return null;
   }
 }
@@ -469,7 +511,21 @@ function apply(ctx) {
         const root = profiles.installRootOf();
         const binding = museBindingForExec(root, exec);
         if (binding === null) return;
-        observeMuseToolResult({ installRoot: root, binding, exec, result });
+        let preKind = null;
+        try {
+          const pre = runtime.activityClassifyForObserver ? runtime.activityClassifyForObserver(exec, result) : null;
+          preKind = pre && pre.kind ? pre.kind : null;
+        } catch (e) { preKind = null; }
+        if (preKind === null || preKind === 'ignored') return;
+        let failed = false;
+        observeMuseToolResult({
+          installRoot: root,
+          binding: binding,
+          exec: exec,
+          result: result,
+          onObserverFailure: function () { failed = true; },
+        });
+        if (failed) emitObserverDiagnostic(ctx, exec, MUSE_ACTIVITY_OBSERVER_DIAG_CODE);
       } catch {
         // Observer errors must never break tool execution.
       }
@@ -493,4 +549,7 @@ module.exports = {
   sessionIdOf,
   museBindingForExec,
   observeMuseToolResult,
+  emitObserverDiagnostic,
+  observerWarnFn,
+  MUSE_ACTIVITY_OBSERVER_DIAG_CODE,
 };

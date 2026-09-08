@@ -28,6 +28,12 @@
  *  18. Dual/GLM/Codex unchanged. 19. existing suites pass (harness-level).
  *  20. benchmark pattern: design -> mutations -> many requests -> verify
  *  cannot pin high.
+ *
+ * Phase 2.2-F1 hardening: recency-correct reduction (failed verification
+ *  vs newer fix mutation, pairwise ordering, semantic supersede), a
+ *  boundary-aware verification classifier (positives per family plus
+ *  false-positive guards incl. look-alike nonzero exits), and bounded
+ *  redacted observer-failure diagnostics that never break tool execution.
  */
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
@@ -444,6 +450,203 @@ async function main() {
 
 
     console.log('PART-BENCH-OK');
+
+    // -- F1-RECENCY: verify -> fail -> recover -> fix mutation -> implement -> fail -> recover -> diagnose --
+    {
+      const installRoot = makeInstallRoot();
+      process.env.DSH_HOME = path.join(installRoot, 'data');
+      process.env.AIH_INSTALL_ROOT = installRoot;
+      const binding = testBinding(installRoot, 'TASK-7200', 'inst-recency');
+      writeState(installRoot, binding, museState('TASK-7200', 'inst-recency'));
+      writeBindings(installRoot, 'sess-recency', binding);
+      const requestCtx = makeRequestCtx();
+      isolation.apply(requestCtx);
+      const handler = requestCtx.handlers['agent/request'];
+      const session = museSession('sess-recency');
+      const request = () => handler({ agent: { session } }, async () => ({ provider: 'x', model: 'y' })).then((r) => r.reasoningEffort);
+      let seq = 0;
+      const signal = (s) => { seq += 1; return modelSignal(s, 'sess-recency', { rootCallId: 'sr-' + seq, callId: 'src-' + seq, token: Symbol('sr' + seq) }); };
+      const verFail = () => runtime.recordMuseToolOutcome({ installRoot, binding, exec: toolExec('pwsh', { command: 'npm test', description: 'Run test suite' }), result: fgResult(1) });
+      const fixMut = () => runtime.recordMuseToolOutcome({ installRoot, binding, exec: toolExec('edit', { file_path: 'fix.ts' }), result: okResult() });
+      await signal({ phase: 'verify' });
+      assert.equal(await request(), 'medium');
+      pass('F1-R1: semantic verify resolves medium');
+      const vf = verFail();
+      assert.equal(vf.classification.kind, 'verification');
+      assert.equal(vf.classification.outcome, 'failed');
+      let eff = runtime.effectiveMuseStateOf(readState(installRoot, binding));
+      assert.equal(eff.source, 'recovery-needed');
+      assert.equal(eff.effectivePhase, 'recover');
+      assert.equal(await request(), 'high');
+      pass('F1-R2: failed verification -> recover -> existing recover policy high');
+      const fm = fixMut();
+      assert.equal(fm.classification.kind, 'mutation');
+      eff = runtime.effectiveMuseStateOf(readState(installRoot, binding));
+      assert.equal(eff.source, 'implementation-active');
+      assert.equal(eff.effectivePhase, 'implement');
+      assert.equal(readState(installRoot, binding).museReasoning.phase, 'verify');
+      assert.equal(await request(), 'medium');
+      pass('F1-R3: newer fix mutation supersedes older failure -> implement/medium, semantic untouched');
+      verFail();
+      eff = runtime.effectiveMuseStateOf(readState(installRoot, binding));
+      assert.equal(eff.source, 'recovery-needed');
+      assert.equal(await request(), 'high');
+      pass('F1-R4: newer verification failure wins again -> recover/high');
+      await signal({ phase: 'diagnose' });
+      eff = runtime.effectiveMuseStateOf(readState(installRoot, binding));
+      assert.equal(eff.source, 'semantic');
+      assert.equal(eff.effectivePhase, 'diagnose');
+      assert.equal(await request(), 'high');
+      pass('F1-R5: explicit diagnose after both supersedes all activity');
+    }
+
+    console.log('PART-F1-RECENCY-OK');
+
+    // -- F1-ORDER: pairwise revision ordering without requests --
+    {
+      let a = activity.markSemanticTransition(activity.createMuseActivityState(), 'verify');
+      a = activity.applyClassification(a, { kind: 'mutation' });
+      a = activity.applyClassification(a, { kind: 'verification', family: 'node-test', outcome: 'failed' });
+      assert.equal(activity.reduceEffectiveState({ phase: 'verify', activity: a }).source, 'recovery-needed');
+      pass('F1-O1: older mutation + newer failure -> recover');
+      let b = activity.markSemanticTransition(activity.createMuseActivityState(), 'verify');
+      b = activity.applyClassification(b, { kind: 'verification', family: 'node-test', outcome: 'failed' });
+      b = activity.applyClassification(b, { kind: 'mutation' });
+      const rb = activity.reduceEffectiveState({ phase: 'verify', activity: b });
+      assert.equal(rb.source, 'implementation-active');
+      assert.equal(rb.effectivePhase, 'implement');
+      pass('F1-O2: older failure + newer mutation -> implement');
+      const c = activity.markSemanticTransition(b, 'diagnose');
+      const rc = activity.reduceEffectiveState({ phase: 'diagnose', activity: c });
+      assert.equal(rc.source, 'semantic');
+      assert.equal(rc.effectivePhase, 'diagnose');
+      pass('F1-O3: new semantic transition after both -> semantic wins');
+    }
+
+    console.log('PART-F1-ORDER-OK');
+
+    // -- F1-CLASSIFIER positives: every supported family --
+    {
+      const positives = [
+        ['npm test', 'node-test'],
+        ['npm run typecheck', 'typecheck'],
+        ['npm run verify', 'verify-script'],
+        ['pnpm test', 'node-test'],
+        ['pnpm run lint', 'lint'],
+        ['pnpm --filter @scope/pkg typecheck', 'typecheck'],
+        ['pnpm --filter ./apps/mobile build', 'build'],
+        ['pnpm --filter @openrank/mobile typecheck', 'typecheck'],
+        ['yarn test', 'node-test'],
+        ['yarn lint', 'lint'],
+        ['bun test', 'node-test'],
+        ['bun run build', 'build'],
+        ['npx vitest', 'node-test'],
+        ['npx jest', 'node-test'],
+        ['tsc --noEmit', 'typecheck'],
+        ['pytest', 'python-test'],
+        ['python -m pytest', 'python-test'],
+        ['python -m unittest discover', 'python-test'],
+        ['dotnet test', 'dotnet-test'],
+        ['dotnet build Foo.sln', 'dotnet-build'],
+        ['cargo test', 'rust-test'],
+        ['cargo build --release', 'rust-build'],
+        ['go test ./...', 'go-test'],
+      ];
+      for (const pair of positives) {
+        const got = activity.classifyVerificationCommand(pair[0]);
+        assert.equal(got, pair[1], 'positive: ' + pair[0]);
+      }
+      pass('F1-C1: representative supported verification forms recognized');
+    }
+
+    // -- F1-CLASSIFIER negatives: false-positive guards --
+    {
+      const negatives = [
+        'git grep Verify',
+        'git diff -- Verify-Project.ps1',
+        'Get-Content Verify-Project.ps1',
+        'rg test src',
+        'git status',
+        'echo run tests later',
+        'node scripts/build-manifest.js',
+        'node test.js',
+        'npm install',
+        'pnpm add foo',
+        'npm run tests',
+        'node scripts/verify-manifest.js',
+      ];
+      for (const cmd of negatives) {
+        assert.equal(activity.classifyVerificationCommand(cmd), null, 'negative: ' + cmd);
+      }
+      // A nonzero exit from a look-alike command must NOT imply recovery.
+      const installRoot = makeInstallRoot();
+      process.env.DSH_HOME = path.join(installRoot, 'data');
+      process.env.AIH_INSTALL_ROOT = installRoot;
+      const binding = testBinding(installRoot, 'TASK-7210', 'inst-falsepos');
+      writeState(installRoot, binding, museState('TASK-7210', 'inst-falsepos'));
+      writeBindings(installRoot, 'sess-falsepos', binding);
+      let seq = 0;
+      const signal = (s) => { seq += 1; return modelSignal(s, 'sess-falsepos', { rootCallId: 'sfp-' + seq, callId: 'sfpc-' + seq, token: Symbol('sfp' + seq) }); };
+      await signal({ phase: 'verify' });
+      const requestCtx = makeRequestCtx();
+      isolation.apply(requestCtx);
+      const handler = requestCtx.handlers['agent/request'];
+      const session = museSession('sess-falsepos');
+      const request = () => handler({ agent: { session } }, async () => ({ provider: 'x', model: 'y' })).then((r) => r.reasoningEffort);
+      for (const cmd of negatives) {
+        const o = runtime.recordMuseToolOutcome({ installRoot, binding, exec: toolExec('pwsh', { command: cmd, description: 'Probe command' }), result: fgResult(1) });
+        assert.equal(o.classification.kind, 'ignored', 'pipeline-ignore: ' + cmd);
+      }
+      assert.equal(runtime.effectiveMuseStateOf(readState(installRoot, binding)).source, 'semantic');
+      assert.equal(await request(), 'medium');
+      pass('F1-C2: look-alike failures never imply recovery (stays verify/medium)');
+    }
+
+    console.log('PART-F1-CLASSIFIER-OK');
+
+    // -- F1-DIAGNOSTIC: observer failures are visible but never break tools --
+    {
+      const installRoot = makeInstallRoot();
+      process.env.DSH_HOME = path.join(installRoot, 'data');
+      process.env.AIH_INSTALL_ROOT = installRoot;
+      const binding = testBinding(installRoot, 'TASK-7220', 'inst-diag');
+      writeState(installRoot, binding, museState('TASK-7220', 'inst-diag'));
+      writeBindings(installRoot, 'sess-diag', binding);
+      const warnings = [];
+      const diagCtx = { tools: { register: () => {} }, on: () => {}, logger: { warn: (m) => warnings.push(String(m)) } };
+      const execM = { name: 'edit', arguments: { file_path: 'secret-plan.ts' }, agent: { session: { id: 'sess-diag' } }, callId: 'c9', token: Symbol('diag') };
+      const resOk = { isError: false, value: { ok: true }, content: [{ type: 'text', text: 'ok' }] };
+      const execR = { name: 'read', arguments: { file_path: 'notes.md' }, agent: { session: { id: 'sess-diag' } }, callId: 'c10', token: Symbol('diag2') };
+      const realRecord = runtime.recordMuseToolOutcome;
+      let calls = 0;
+      runtime.recordMuseToolOutcome = function (args) { calls += 1; throw new Error('simulated persistence failure with TOP-SECRET payload'); };
+      let hook = null;
+      try {
+        const out = signals.observeMuseToolResult({ installRoot, binding, exec: execM, result: resOk, onObserverFailure: (d) => { hook = d; } });
+        assert.equal(out, null);
+      } finally { runtime.recordMuseToolOutcome = realRecord; }
+      assert.equal(calls, 1);
+      assert.ok(hook && hook.code === signals.MUSE_ACTIVITY_OBSERVER_DIAG_CODE);
+      pass('F1-D1: persistence failure returns null without throwing (tool outcome untouched)');
+      const emitted = signals.emitObserverDiagnostic(diagCtx, execM, signals.MUSE_ACTIVITY_OBSERVER_DIAG_CODE);
+      assert.equal(emitted, true);
+      assert.equal(warnings.length, 1);
+      assert.ok(warnings[0].indexOf('nexus-muse-activity-observe-failed') >= 0);
+      assert.ok(warnings[0].indexOf('tool=edit') >= 0);
+      assert.ok(warnings[0].indexOf('secret-plan.ts') < 0);
+      assert.ok(warnings[0].indexOf('TOP-SECRET') < 0);
+      pass('F1-D2: diagnostic is bounded, carries stable code + tool name, leaks no payload');
+      const w2 = [];
+      const silentCtx = { tools: { register: () => {} }, on: () => {}, logger: { warn: (m) => w2.push(String(m)) } };
+      const ignored = signals.observeMuseToolResult({ installRoot, binding, exec: execR, result: resOk });
+      assert.ok(ignored === null || ignored.classification.kind === 'ignored');
+      const okOut = signals.observeMuseToolResult({ installRoot, binding, exec: execM, result: resOk });
+      assert.equal(okOut.classification.kind, 'mutation');
+      assert.equal(w2.length, 0);
+      pass('F1-D3: ignored tools and successful observations emit no warning');
+    }
+
+    console.log('PART-F1-DIAGNOSTIC-OK');
     console.log('RESULT: ' + passed + ' MuseReasoningActivity assertions passed.');
   } finally {
     if (previousHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previousHome;
