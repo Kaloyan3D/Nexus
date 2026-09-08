@@ -65,6 +65,16 @@ async function main() {
   assert.equal(controller.isReviewClass('reviewer'), true)
   assert.equal(controller.isReviewClass('engineer_normal'), false)
 
+  // Engine is selected once from the new session preset and cannot change on
+  // an existing binding when the preferred/session preset changes later.
+  assert.equal(controller.engineForPreset('aih-muse'), 'muse')
+  assert.equal(controller.engineForPreset('aih-engineering'), 'dual')
+  assert.equal(controller.engineForPreset('aih-deepseek'), 'dual')
+  assert.equal(controller.assertEngineBinding({ engine: 'muse' }, 'aih-muse'), 'muse')
+  assert.equal(controller.assertEngineBinding({ engine: 'dual' }, 'aih-engineering'), 'dual')
+  assert.throws(() => controller.assertEngineBinding({ engine: 'muse' }, 'aih-engineering'), (error) => error.code === 'engine-binding-violation')
+  assert.throws(() => controller.assertEngineBinding({ engine: 'dual' }, 'aih-muse'), (error) => error.code === 'engine-binding-violation')
+
   // 5. Controller messages are plugin-owned user-role messages (visible, no model source)
   const message = controller.createControllerMessage('Controller: task bound', 'controller-binding')
   assert.equal(message.role, 'user')

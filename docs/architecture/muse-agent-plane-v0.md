@@ -6,23 +6,26 @@ Task reference: TASK-0040.
 
 ## What V0 is
 
-Muse V0 is a REAL third engine inside the user-facing Normal Engineering mode: exactly ONE main engineering agent running `muse-spark-1.3-contributor` (provider `meta-model-api`, reasoning `xhigh`), pinned to the same deterministic Nexus control plane as the Dual engine. It is not a Dual profile, not a persona text, and not a routing alias: `engine: muse` is a distinct production execution path with its own agent preset (`aih-muse`), its own request boundary (`config/Muse-Isolation.cjs`), and its own routing branch.
+Muse V0 is a distinct engine inside the user-facing Normal Engineering mode: exactly ONE main engineering agent running `muse-spark-1.3-contributor`, pinned to the same deterministic Nexus control infrastructure as the Dual engine. It is not a Dual profile, persona text, or routing alias: `engine: muse` is a production execution path with its own agent preset (`aih-muse`), request boundary (`config/Muse-Isolation.cjs`), and routing semantics.
+
+The engine is a session/task identity property, not a routing outcome. It is selected once for a new session, persisted as `binding.engine` and task `boundEngine`, and is authoritative for that task generation. Routing may choose behavior inside an engine. Routing may never choose another engine. A preference change applies only to a new session; any requested/resolved engine mismatch on an existing binding fails closed with `engine-binding-violation` before model resolution or execution.
 
 ## The engine dispatch seam (one authority)
 
-Exactly one place branches on the resolved engine: `Invoke-AihRoutingDecision` in `scripts/Routing.ps1`, immediately after the agent preset resolves.
+Exactly one place dispatches to engine-owned routing: `Invoke-AihRoutingDecision` in `scripts/Routing.ps1`, after validating the requested preset engine against the authoritative task binding.
 
 ```text
 Route.ps1 -> Invoke-AihRoutingDecision
-    |-- preset == 'aih-muse'      -> Invoke-AihMuseRoutingDecision  (Muse V0 plane)
-    |-- preset in {dual presets}  -> existing Dual path (byte-identical)
-    `-- muse profile on dual preset -> FAIL CLOSED (muse-engine/preset coupling)
+    |-- requested/resolved engine != task boundEngine -> FAIL CLOSED
+    |-- boundEngine == 'muse' -> Invoke-AihMuseRoutingDecision
+    `-- boundEngine == 'dual' -> Dual classifier and Dual role routing
 ```
 
-- The Muse branch never resolves Dual roles. There are no `primaryEngineer` / `deepEngineer` / `reviewer` / `solver` / `fallback` semantics, no step-routing epistemic roles, and no manual class/tier overrides on the muse plane. Execution classes keep their engine-independent meaning (`engineer_normal`, `deterministic`); the routing record carries `role: null`.
+- The Muse branch never invokes `Get-AihRoutingInitialDecision` and never resolves Dual roles. There are no `primaryEngineer` / `deepEngineer` / `reviewer` / `solver` / `fallback` semantics, no step-routing epistemic roles, and no manual class/tier overrides on the Muse plane. Muse records use the Muse-owned `muse_main` execution marker and carry `role: null`.
+- Muse-native signal classification records neutral risk metadata. Authentication, authorization, security-boundary, migration, and concurrency work remains on `muse_main`; risk can strengthen the Muse Reasoning Governor, verification, retry, and evidence requirements without selecting a Dual role.
 - A Dual preset with an active `engine: muse` Nexus profile can never execute: the Dual agent plane still carries Dual delegation tooling, so that combination is rejected with `Muse routing rejected: ... selects the muse engine but the session runs the '<preset>' agent plane`.
-- A missing/invalid catalog on the Dual side keeps the exact pre-M3 behavior (additive-only guarantee).
-- The Muse branch shares ONE controller plane with Dual: the same task-identity guard (`taskInstanceId` generation check), the same routing mutex, the same state/ledger persistence (`decisions.jsonl`, per-task routing state), and the same completion authority.
+- A missing/invalid catalog on the Dual side keeps its existing classification and role behavior; Dual records now explicitly persist `engine: dual`.
+- The Muse branch shares controller infrastructure with Dual: task identity, ledger, routing mutex, attempt lifecycle, state persistence, telemetry, and completion authority. It does not share decision semantics.
 
 ## Target authority (one chain, no fallback)
 
@@ -61,10 +64,10 @@ Muse never invokes Codex as reviewer, fallback, repair agent, or worker. Visual 
 `muse-profiles.json` sets `review.independent = false` and the routing plane enforces it:
 
 - `-ReviewRequested` on the muse branch fails closed (`Muse routing rejected: independent review is not available for the Muse engine`).
-- Immediate review signals (e.g. `critical-security-boundary`) and `user-codex` fail closed at routing; `/review` in a muse session returns a truthful controller rejection (`muse-review-unavailable`) and starts no model call.
+- Muse risk signals (for example `critical-security-boundary`) remain on the Muse main-agent plane and can strengthen Muse reasoning/verification. The explicit `user-codex` signal and `/review` fail closed truthfully and start no model call.
 - `review-findings` cannot return to a muse task (no Muse reviewer exists).
 - Same-failure escalation NEVER routes to a reviewer on the muse plane.
-- Risk-classified `reviewRequired` initial decisions are rejected before any model call (route through a Dual profile for independent review).
+- Dual `reviewRequired` classifications are never evaluated on the Muse branch.
 
 ## Bounded retry, bounded output, bounded loops
 
@@ -107,7 +110,7 @@ The mode selector remains the single owner of the new-session preset lifecycle a
 
 ## Telemetry
 
-Every muse routing decision persists a version-4 record with the full identity: `preset: aih-muse`, `engine: muse`, `profile`, `provider`, `model`, `modelDisplayName`, `vendor`, `reasoning`, `dataUseTier`, `contributorProtectionRequired`, task/instance id, execution class, signal, failure signature, and same-failure count — in `data/routing/decisions.jsonl` plus the per-task state file the request boundary reads. Attempts continue through the existing TaskController ledger (execution class `engineer_normal`, engine-independent), and the controller emits engine-aware attempt telemetry (`engine=muse`). Dual records carry none of the muse-only fields.
+Every Muse routing decision persists a version-4 record with the full identity: `preset: aih-muse`, `engine: muse`, `executionClass: muse_main`, `role: null`, target identity, task/instance id, neutral risk signal, failure signature, and same-failure count. The task ledger and run manifest persist `boundEngine: muse`. Dual tasks, routing state, and decision records likewise persist `boundEngine/engine: dual`, while retaining their existing execution-class and role behavior. Cross-engine mismatches produce `engine-binding-violation` and no decision/model target is executed.
 
 ## Verification
 
