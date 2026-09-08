@@ -493,6 +493,10 @@ function resolveMuseConflictingEvidence({ installRoot, binding } = {}) {
  * Semantic state is never modified here; failure counters are never touched.
  * Returns { classification, activity } (activity null when ignored).
  */
+function activityClassifyForObserver(exec, result) {
+  return activity.classifyToolOutcome(exec, result);
+}
+
 function recordMuseToolOutcome({ installRoot, binding, exec, result } = {}) {
   if (typeof installRoot !== 'string' || installRoot === '') {
     throw new TypeError('recordMuseToolOutcome requires installRoot.');
@@ -543,6 +547,7 @@ module.exports = {
   museReasoningStateOf,
   museActivityStateOf,
   activityBlockOf,
+  activityClassifyForObserver,
   recordMuseToolOutcome,
   effectiveMuseStateOf: (routingState) => {
     const semantic = museReasoningStateOf(routingState);

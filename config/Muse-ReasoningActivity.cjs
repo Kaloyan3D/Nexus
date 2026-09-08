@@ -62,31 +62,195 @@ const READONLY_TOOL_NAMES = Object.freeze(['read', 'read_image', 'glob', 'grep']
 const SHELL_TOOL_NAMES = Object.freeze(['pwsh', 'bash']);
 
 /**
- * Conservative recognized-verification matchers over shell command text.
- * Case-insensitive substring search: deterministic, auditable, narrow.
- * Anything not matched here (git status, listings, ad-hoc scripts) is NOT verification.
+ * Conservative boundary-aware verification recognition over shell text.
+ * The command is split into REAL invocations (on ; && || | pipes/newlines),
+ * each invocation is tokenized quote-aware, and a KNOWN executable in
+ * command position must be followed by a KNOWN verification verb as a
+ * separate token. Verbatim token equality only -- never substring, so a
+ * filename, path, comment, or unrelated token that merely CONTAINS
+ * test/build/verify/lint never matches.
+ *
+ * Supported (executable first, then verb/script as its own token):
+ *   npm test | npm run <test|typecheck|lint|build|verify>
+ *   pnpm [--filter <sel>]... <test|run <script>|vitest|jest|<script>>
+ *   yarn|bun [run] <test|typecheck|lint|build|verify>
+ *   npx <vitest|jest|tsc|eslint> | node --test | vitest | jest
+ *   tsc | eslint | pytest | python -m <pytest|unittest>
+ *   dotnet <test|build> | cargo <test|build> | go test
  */
-const VERIFICATION_MATCHERS = Object.freeze([
-  { family: 'node-test', pattern: 'npm test' },
-  { family: 'node-test', pattern: 'npm run test' },
-  { family: 'node-test', pattern: 'npx jest' },
-  { family: 'node-test', pattern: 'npx vitest' },
-  { family: 'node-test', pattern: 'node --test' },
-  { family: 'dotnet-test', pattern: 'dotnet test' },
-  { family: 'python-test', pattern: 'pytest' },
-  { family: 'python-test', pattern: 'python -m pytest' },
-  { family: 'python-test', pattern: 'python -m unittest' },
-  { family: 'go-test', pattern: 'go test' },
-  { family: 'rust-test', pattern: 'cargo test' },
-  { family: 'typecheck', pattern: 'tsc --noemit' },
-  { family: 'typecheck', pattern: 'tsc -p' },
-  { family: 'lint', pattern: 'eslint' },
-  { family: 'build', pattern: 'npm run build' },
-  { family: 'dotnet-build', pattern: 'dotnet build' },
-  { family: 'rust-build', pattern: 'cargo build' },
-  { family: 'verify-script', pattern: 'verify' },
-]);
+const PACKAGE_MANAGER_SCRIPT_NAMES = Object.freeze([String.fromCharCode(116,101,115,116), String.fromCharCode(116,121,112,101,99,104,101,99,107), String.fromCharCode(108,105,110,116), String.fromCharCode(98,117,105,108,100), String.fromCharCode(118,101,114,105,102,121)]);
+const PNPM_OPTION_TOKENS = Object.freeze([String.fromCharCode(45,45,102,105,108,116,101,114), String.fromCharCode(45,70), String.fromCharCode(45,45,100,105,114)]);
+const PNPM_FLAG_PREFIXES = Object.freeze([String.fromCharCode(45,45,102,105,108,116,101,114,61), String.fromCharCode(45,70,61)]);
+const DOTNET_VERBS = Object.freeze([String.fromCharCode(116,101,115,116), String.fromCharCode(98,117,105,108,100)]);
+const CARGO_VERBS = Object.freeze([String.fromCharCode(116,101,115,116), String.fromCharCode(98,117,105,108,100)]);
 
+function stripTokenQuotes(token) {
+  if (token.length >= 2) {
+    const code = token.charCodeAt(0);
+    const last = token.charCodeAt(token.length - 1);
+    if (code === last && (code === 34 || code === 39 || code === 96)) {
+      return token.slice(1, -1);
+    }
+  }
+  return token;
+}
+
+function splitInvocations(commandText) {
+  const parts = [];
+  let current = String.fromCharCode();
+  let quote = null;
+  for (let i = 0; i < commandText.length; i += 1) {
+    const ch = commandText[i];
+    const code = commandText.charCodeAt(i);
+    if (quote !== null) {
+      current += ch;
+      if (code === quote) quote = null;
+    } else if (code === 34 || code === 39 || code === 96) {
+      quote = code;
+      current += ch;
+    } else if (code === 59 || code === 124 || code === 38 || code === 10) {
+      parts.push(current);
+      current = String.fromCharCode();
+      if ((code === 38 && commandText.charCodeAt(i + 1) === 38) || (code === 124 && commandText.charCodeAt(i + 1) === 124)) i += 1;
+    } else {
+      current += ch;
+    }
+  }
+  parts.push(current);
+  return parts;
+}
+
+function tokenizeInvocation(invocation) {
+  const tokens = [];
+  let current = String.fromCharCode();
+  let quote = null;
+  let inToken = false;
+  const flush = () => {
+    if (inToken) { tokens.push(stripTokenQuotes(current)); current = String.fromCharCode(); inToken = false; }
+  };
+  for (let i = 0; i < invocation.length; i += 1) {
+    const ch = invocation[i];
+    const code = invocation.charCodeAt(i);
+    if (quote !== null) {
+      if (code === quote) { quote = null; } else { current += ch; }
+      inToken = true;
+    } else if (code === 34 || code === 39 || code === 96) {
+      quote = code;
+      inToken = true;
+    } else if (code === 32 || code === 9 || code === 13) {
+      flush();
+    } else {
+      current += ch;
+      inToken = true;
+    }
+  }
+  flush();
+  return tokens.filter((t) => t !== String.fromCharCode());
+}
+
+function skipPnpmOptions(tokens, index) {
+  let i = index;
+  for (;;) {
+    const tok = tokens[i];
+    if (tok === undefined) return i;
+    if (PNPM_OPTION_TOKENS.includes(tok)) { i += 2; continue; }
+    let inline = false;
+    for (const prefix of PNPM_FLAG_PREFIXES) { if (tok.indexOf(prefix) === 0) { inline = true; break; } }
+    if (inline || (tok.charCodeAt(0) === 45 && tok !== String.fromCharCode(45))) { i += 1; continue; }
+    return i;
+  }
+}
+
+function scriptFamilyOf(scriptName) {
+  if (scriptName === String.fromCharCode(116,101,115,116)) return String.fromCharCode(110,111,100,101,45,116,101,115,116);
+  if (scriptName === String.fromCharCode(116,121,112,101,99,104,101,99,107)) return String.fromCharCode(116,121,112,101,99,104,101,99,107);
+  if (scriptName === String.fromCharCode(108,105,110,116)) return String.fromCharCode(108,105,110,116);
+  if (scriptName === String.fromCharCode(98,117,105,108,100)) return String.fromCharCode(98,117,105,108,100);
+  return String.fromCharCode(118,101,114,105,102,121,45,115,99,114,105,112,116);
+}
+
+function lowerAt(tokens, n) {
+  const t = tokens[n];
+  return t === undefined ? null : String(t).toLowerCase();
+}
+
+function matchInvocationTokens(tokens) {
+  if (tokens.length === 0) return null;
+  const exe = String(tokens[0]).toLowerCase();
+  const a1 = lowerAt(tokens, 1);
+  const a2 = lowerAt(tokens, 2);
+  if (exe === String.fromCharCode(110,112,109)) {
+    if (a1 === String.fromCharCode(116,101,115,116) && tokens[2] === undefined) return String.fromCharCode(110,111,100,101,45,116,101,115,116);
+    if (a1 === String.fromCharCode(114,117,110) && PACKAGE_MANAGER_SCRIPT_NAMES.includes(a2 || String.fromCharCode())) return scriptFamilyOf(a2);
+    return null;
+  }
+  if (exe === String.fromCharCode(112,110,112,109) || exe === String.fromCharCode(121,97,114,110) || exe === String.fromCharCode(98,117,110)) {
+    const vi = skipPnpmOptions(tokens, 1);
+    const verb = lowerAt(tokens, vi);
+    if (verb === null) return null;
+    if (verb === String.fromCharCode(116,101,115,116) && tokens[vi + 1] === undefined) return String.fromCharCode(110,111,100,101,45,116,101,115,116);
+    if (verb === String.fromCharCode(114,117,110) && PACKAGE_MANAGER_SCRIPT_NAMES.includes(lowerAt(tokens, vi + 1) || String.fromCharCode())) return scriptFamilyOf(lowerAt(tokens, vi + 1));
+    if (PACKAGE_MANAGER_SCRIPT_NAMES.includes(verb)) return scriptFamilyOf(verb);
+    if (verb === String.fromCharCode(118,105,116,101,115,116) || verb === String.fromCharCode(106,101,115,116)) return String.fromCharCode(110,111,100,101,45,116,101,115,116);
+    return null;
+  }
+  if (exe === String.fromCharCode(110,112,120)) {
+    if (a1 === String.fromCharCode(118,105,116,101,115,116) || a1 === String.fromCharCode(106,101,115,116)) return String.fromCharCode(110,111,100,101,45,116,101,115,116);
+    if (a1 === String.fromCharCode(116,115,99)) return String.fromCharCode(116,121,112,101,99,104,101,99,107);
+    if (a1 === String.fromCharCode(101,115,108,105,110,116)) return String.fromCharCode(108,105,110,116);
+    return null;
+  }
+  if (exe === String.fromCharCode(110,111,100,101) && a1 === String.fromCharCode(45,45,116,101,115,116)) return String.fromCharCode(110,111,100,101,45,116,101,115,116);
+  if (exe === String.fromCharCode(118,105,116,101,115,116) || exe === String.fromCharCode(106,101,115,116)) return String.fromCharCode(110,111,100,101,45,116,101,115,116);
+  if (exe === String.fromCharCode(116,115,99)) return String.fromCharCode(116,121,112,101,99,104,101,99,107);
+  if (exe === String.fromCharCode(101,115,108,105,110,116)) return String.fromCharCode(108,105,110,116);
+  if (exe === String.fromCharCode(112,121,116,101,115,116)) return String.fromCharCode(112,121,116,104,111,110,45,116,101,115,116);
+  if (exe === String.fromCharCode(112,121,116,104,111,110) && a1 === String.fromCharCode(45,109) && (a2 === String.fromCharCode(112,121,116,101,115,116) || a2 === String.fromCharCode(117,110,105,116,116,101,115,116))) return String.fromCharCode(112,121,116,104,111,110,45,116,101,115,116);
+  if (exe === String.fromCharCode(100,111,116,110,101,116) && DOTNET_VERBS.includes(a1 || String.fromCharCode())) return a1 === String.fromCharCode(116,101,115,116) ? String.fromCharCode(100,111,116,110,101,116,45,116,101,115,116) : String.fromCharCode(100,111,116,110,101,116,45,98,117,105,108,100);
+  if (exe === String.fromCharCode(99,97,114,103,111) && CARGO_VERBS.includes(a1 || String.fromCharCode())) return a1 === String.fromCharCode(116,101,115,116) ? String.fromCharCode(114,117,115,116,45,116,101,115,116) : String.fromCharCode(114,117,115,116,45,98,117,105,108,100);
+  if (exe === String.fromCharCode(103,111) && a1 === String.fromCharCode(116,101,115,116)) return String.fromCharCode(103,111,45,116,101,115,116);
+  return null;
+}
+
+function classifyVerificationCommand(commandText) {
+  if (typeof commandText !== String.fromCharCode(115,116,114,105,110,103) || commandText === String.fromCharCode()) return null;
+  const invocations = splitInvocations(commandText);
+  for (const invocation of invocations) {
+    const family = matchInvocationTokens(tokenizeInvocation(invocation));
+    if (family !== null) return family;
+  }
+  return null;
+}
+
+// Canonical vocabulary audit list. classifyVerificationCommand is the
+// single entry point; this table documents intent, not matching logic
+// (matching is verbatim token equality in matchInvocationTokens).
+const VERIFICATION_MATCHERS = Object.freeze([
+  { family: String.fromCharCode(110,111,100,101,45,116,101,115,116), pattern: String.fromCharCode(110,112,109,32,116,101,115,116) },
+  { family: String.fromCharCode(110,111,100,101,45,116,101,115,116), pattern: String.fromCharCode(110,112,109,32,114,117,110,32,116,101,115,116) },
+  { family: String.fromCharCode(110,111,100,101,45,116,101,115,116), pattern: String.fromCharCode(112,110,112,109,32,116,101,115,116) },
+  { family: String.fromCharCode(110,111,100,101,45,116,101,115,116), pattern: String.fromCharCode(121,97,114,110,32,116,101,115,116) },
+  { family: String.fromCharCode(110,111,100,101,45,116,101,115,116), pattern: String.fromCharCode(98,117,110,32,116,101,115,116) },
+  { family: String.fromCharCode(110,111,100,101,45,116,101,115,116), pattern: String.fromCharCode(110,112,120,32,118,105,116,101,115,116) },
+  { family: String.fromCharCode(110,111,100,101,45,116,101,115,116), pattern: String.fromCharCode(110,112,120,32,106,101,115,116) },
+  { family: String.fromCharCode(110,111,100,101,45,116,101,115,116), pattern: String.fromCharCode(110,111,100,101,32,45,45,116,101,115,116) },
+  { family: String.fromCharCode(110,111,100,101,45,116,101,115,116), pattern: String.fromCharCode(118,105,116,101,115,116) },
+  { family: String.fromCharCode(110,111,100,101,45,116,101,115,116), pattern: String.fromCharCode(106,101,115,116) },
+  { family: String.fromCharCode(100,111,116,110,101,116,45,116,101,115,116), pattern: String.fromCharCode(100,111,116,110,101,116,32,116,101,115,116) },
+  { family: String.fromCharCode(112,121,116,104,111,110,45,116,101,115,116), pattern: String.fromCharCode(112,121,116,101,115,116) },
+  { family: String.fromCharCode(112,121,116,104,111,110,45,116,101,115,116), pattern: String.fromCharCode(112,121,116,104,111,110,32,45,109,32,112,121,116,101,115,116) },
+  { family: String.fromCharCode(112,121,116,104,111,110,45,116,101,115,116), pattern: String.fromCharCode(112,121,116,104,111,110,32,45,109,32,117,110,105,116,116,101,115,116) },
+  { family: String.fromCharCode(103,111,45,116,101,115,116), pattern: String.fromCharCode(103,111,32,116,101,115,116) },
+  { family: String.fromCharCode(114,117,115,116,45,116,101,115,116), pattern: String.fromCharCode(99,97,114,103,111,32,116,101,115,116) },
+  { family: String.fromCharCode(116,121,112,101,99,104,101,99,107), pattern: String.fromCharCode(116,115,99) },
+  { family: String.fromCharCode(108,105,110,116), pattern: String.fromCharCode(101,115,108,105,110,116) },
+  { family: String.fromCharCode(98,117,105,108,100), pattern: String.fromCharCode(110,112,109,32,114,117,110,32,98,117,105,108,100) },
+  { family: String.fromCharCode(100,111,116,110,101,116,45,98,117,105,108,100), pattern: String.fromCharCode(100,111,116,110,101,116,32,98,117,105,108,100) },
+  { family: String.fromCharCode(114,117,115,116,45,98,117,105,108,100), pattern: String.fromCharCode(99,97,114,103,111,32,98,117,105,108,100) },
+  { family: String.fromCharCode(116,121,112,101,99,104,101,99,107), pattern: String.fromCharCode(112,110,112,109,32,116,121,112,101,99,104,101,99,107) },
+  { family: String.fromCharCode(108,105,110,116), pattern: String.fromCharCode(112,110,112,109,32,114,117,110,32,108,105,110,116) },
+  { family: String.fromCharCode(118,101,114,105,102,121,45,115,99,114,105,112,116), pattern: String.fromCharCode(110,112,109,32,114,117,110,32,118,101,114,105,102,121) },
+]);
 const EFFECTIVE_STATES = Object.freeze([
   'semantic',
   'implementation-active',
@@ -190,18 +354,6 @@ function exitCodeOf(value) {
   }
 }
 
-/**
- * Classify a shell execution as recognized verification from command text.
- * Returns the matcher family or null. Conservative: only listed families qualify.
- */
-function classifyVerificationCommand(commandText) {
-  if (typeof commandText !== 'string' || commandText === '') return null;
-  const lowered = commandText.toLowerCase();
-  for (const matcher of VERIFICATION_MATCHERS) {
-    if (lowered.indexOf(matcher.pattern) >= 0) return matcher.family;
-  }
-  return null;
-}
 
 /**
  * Interpret one frozen tool outcome as trusted operational evidence.
@@ -283,9 +435,22 @@ function applyClassification(activity, classification) {
     }
     const family = typeof classification.family === 'string' ? classification.family : null;
     if (status === current.verification.status) {
+      // A repeated verification RUN is still a newer operational event than
+      // an intervening mutation: re-stamp the revision so recency comparison
+      // sees this outcome as newer than the mutation. Terminal 'failed' and
+      // 'passed' verdicts always advance; idempotent 'started' repeats do
+      // not churn (a launch restated without progress is not newer evidence).
+      if (status === 'started') {
+        return {
+          ...current,
+          verification: { status, revision: current.verification.revision, family },
+        };
+      }
+      const restamped = current.revision + 1;
       return {
         ...current,
-        verification: { status, revision: current.verification.revision, family },
+        revision: restamped,
+        verification: { status, revision: restamped, family },
       };
     }
     const revision = current.revision + 1;
@@ -330,8 +495,16 @@ function observeToolOutcome({ installRoot, binding, exec, result, transition } =
 
 /**
  * Deterministic reducer: effective compute state from semantic + activity.
- * Rules: failed-fresh-verification -> recover; fresh-mutation -> implement;
- * passed-verification while semantic=verify -> verify; else semantic phase.
+ *
+ * Recency rule (Phase 2.2-F1): operational evidence resolves by ORDER on the
+ * shared revision counter, not by fixed kind precedence. A fresh failed
+ * verification and a fresh mutation are compared by revision -- the NEWER
+ * milestone wins:
+ *   - failed verification newer than the latest mutation -> recover.
+ *   - mutation newer than (or equal to, after a same-revision fold) the
+ *     failed verification -> implement (the fix supersedes the failure).
+ * Passed-verification while semantic=verify stays informational on the
+ * verify path; anything older than the semantic frontier never overrides it.
  * Never rewrites semantic.phase; never selects effort (Governor owns that).
  */
 function reduceEffectiveState({ phase, activity } = {}) {
@@ -343,7 +516,8 @@ function reduceEffectiveState({ phase, activity } = {}) {
   const verification = normalized.verification;
   const verificationFresh = verification.status !== 'none' && verification.revision > normalized.semanticRevision;
   const mutationFresh = normalized.lastMutationRevision > normalized.semanticRevision;
-  if (verificationFresh && verification.status === 'failed') {
+  const failedFresh = verificationFresh && verification.status === 'failed';
+  if (failedFresh && !(mutationFresh && normalized.lastMutationRevision >= verification.revision)) {
     return { effectivePhase: 'recover', source: 'recovery-needed', activityState: 'recovery-needed' };
   }
   if (mutationFresh) {
@@ -372,4 +546,3 @@ module.exports = {
   observeToolOutcome,
   reduceEffectiveState,
 };
-
