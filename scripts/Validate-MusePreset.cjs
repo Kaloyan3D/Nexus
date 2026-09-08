@@ -77,6 +77,7 @@ async function main() {
     ['Muse-ReasoningGovernor.cjs', 'Muse-ReasoningGovernor.cjs'],
     ['Muse-ReasoningRuntime.cjs', 'Muse-ReasoningRuntime.cjs'],
     ['Muse-ReasoningSignals.cjs', 'Muse-ReasoningSignals.cjs'],
+    ['Muse-ReasoningActivity.cjs', 'Muse-ReasoningActivity.cjs'],
     ['AihController.cjs', 'AihController.cjs'],
     ['Engineering-Profiles.cjs', 'Engineering-Profiles.cjs'],
   ]

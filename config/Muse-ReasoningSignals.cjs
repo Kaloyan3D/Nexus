@@ -57,6 +57,8 @@ const SIGNAL_DESCRIPTION = [
   'failure (recover), or critically inspecting a candidate result (review).',
   'Also report a confirmed root cause, a confirmed solution, a ruled-out hypothesis, a failed implementation',
   'attempt, or conflicting observations.',
+  'Report implement before beginning established implementation work, verify before checking a candidate',
+  'implementation, and recover when an unexpected failure turns the task into failure investigation.',
   'Do not call before every ordinary read, edit, or test -- only on meaningful transitions.',
   'Fields are events, not settings: recordHypothesisFailure and recordImplementationFailure each record ONE',
   'event (Nexus counts them). You cannot select reasoning effort and there is no effort field; Nexus validates',
@@ -203,12 +205,14 @@ function dispatchKeyOf(exec, signal) {
     return null;
   }
 }
-function ackOf(state, duplicate, applied) {
+function ackOf(state, duplicate, applied, activityState) {
+  const safeActivity = typeof activityState === 'string' ? activityState : 'none';
   return {
     ok: true,
     duplicate: duplicate === true,
     applied: Array.from(applied || []),
     phase: state.phase,
+    activityState: safeActivity,
     rootCauseEstablished: state.rootCauseEstablished,
     solutionEstablished: state.solutionEstablished,
     failedHypotheses: state.failedHypotheses,
@@ -260,7 +264,7 @@ function applyReasoningSignal({ installRoot, binding, signal, dispatchKey } = {}
     const block = stored && stored.museReasoning;
     const seen = runtime.processedSignalIdsOf(block);
     if (seen.includes(key)) {
-      return ackOf(runtime.museReasoningStateOf(stored), true, []);
+      return ackOf(runtime.museReasoningStateOf(stored), true, [], runtime.effectiveMuseStateOf(stored).activityState);
     }
   }
 
@@ -295,7 +299,12 @@ function applyReasoningSignal({ installRoot, binding, signal, dispatchKey } = {}
       return patch;
     },
   });
-  return ackOf(nextState, false, plan.applied);
+  // Phase 2.2: report the deterministic effective activity derived from
+  // semantic + trusted operational evidence. Safe by design: a phase label,
+  // never effort. Lets Muse see that its implementation work was observed
+  // even when it forgot to report phase=implement.
+  const stored = readState();
+  return ackOf(nextState, false, plan.applied, runtime.effectiveMuseStateOf(stored).activityState);
 }
 
 function defineReasoningSignalTool(defineTool) {
@@ -357,6 +366,7 @@ function defineReasoningSignalTool(defineTool) {
           totalFailedHypotheses: { type: 'integer' },
           totalFailedImplementationAttempts: { type: 'integer' },
           conflictingEvidence: { type: 'boolean' },
+          activityState: { type: 'string' },
         },
       },
       render: (_args, value) => [{ type: 'text', text: renderAck(value) }],
@@ -390,9 +400,48 @@ function renderAck(value) {
     'totalFailedHypotheses: ' + String(value.totalFailedHypotheses),
     'totalFailedImplementationAttempts: ' + String(value.totalFailedImplementationAttempts),
     'conflictingEvidence: ' + String(value.conflictingEvidence),
+    'activityState: ' + String(value.activityState === undefined ? 'none' : value.activityState),
   ];
   if (Array.isArray(value.applied)) lines.push('applied: ' + (value.applied.length ? value.applied.join(', ') : '(none)'));
   return lines.join('\n');
+}
+
+/**
+ * Resolve the Muse session binding for a frozen tool execution. Returns the
+ * binding when the owning session is bound to preset aih-muse, else null
+ * (unbound sessions and Dual/GLM/Codex sessions never produce observations).
+ */
+function museBindingForExec(installRoot, exec) {
+  try {
+    const agent = exec && exec.agent;
+    const session = agent && agent.session;
+    const sessionId = session && typeof session.id === 'string' && session.id !== '' ? session.id : null;
+    if (sessionId === null) return null;
+    const binding = runtime.bindingForSession(installRoot, sessionId);
+    if (!binding || binding.preset !== MUSE_AGENT_PRESET) return null;
+    return binding;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Trusted observer: classify one frozen tool outcome and persist operational
+ * evidence. Observe-only by contract: never throws for tool failures or
+ * unrecognized tools (those are ignored), never modifies semantic state,
+ * never touches failure counters, never influences the in-flight result.
+ * Session-file errors are swallowed (best-effort observation must not break
+ * tool execution); binding/preset violations fail closed inside the runtime.
+ */
+function observeMuseToolResult({ installRoot, binding, exec, result } = {}) {
+  try {
+    if (typeof installRoot !== 'string' || installRoot === '') return null;
+    if (!binding || binding.preset !== MUSE_AGENT_PRESET) return null;
+    const outcome = runtime.recordMuseToolOutcome({ installRoot, binding, exec, result });
+    return outcome;
+  } catch {
+    return null;
+  }
 }
 
 function apply(ctx) {
@@ -407,6 +456,25 @@ function apply(ctx) {
   }
   const definition = defineReasoningSignalTool(dshTools.defineTool);
   tools.register(definition);
+  // Phase 2.2 trusted observer (Muse-only, observe-only): the DSH pipeline
+  // publishes every settled tool outcome as an immutable tools/result event
+  // (scoped to this preset's agent layer, like dsh-agent-instructions).
+  // Successful write/edit outcomes record implementation activity; recognized
+  // verification commands record verification outcomes. Reads, searches,
+  // generic shell, failed tools, and non-Muse sessions are ignored.
+  if (ctx && typeof ctx.on === 'function') {
+    ctx.on('tools/result', (exec, result) => {
+      try {
+        if (!exec || exec.agent === undefined) return;
+        const root = profiles.installRootOf();
+        const binding = museBindingForExec(root, exec);
+        if (binding === null) return;
+        observeMuseToolResult({ installRoot: root, binding, exec, result });
+      } catch {
+        // Observer errors must never break tool execution.
+      }
+    });
+  }
   return definition;
 }
 
@@ -423,4 +491,6 @@ module.exports = {
   defineReasoningSignalTool,
   dispatchKeyOf,
   sessionIdOf,
+  museBindingForExec,
+  observeMuseToolResult,
 };
