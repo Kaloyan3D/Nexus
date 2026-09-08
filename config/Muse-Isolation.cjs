@@ -138,6 +138,9 @@ function enforcementError(reason, binding, state, code) {
  */
 function controllerTargetFor(installRoot, binding) {
   if (!binding) throw enforcementError('missing-session-binding', binding, null)
+  if (binding.engine !== MUSE_ENGINE) {
+    throw enforcementError('session-binding-is-not-muse-engine', binding, null, 'engine-binding-violation')
+  }
   const state = routingStateFor(installRoot, binding)
   if (!state) throw enforcementError('missing-routing-state', binding, null)
   if (state.engine !== MUSE_ENGINE) {
@@ -177,10 +180,14 @@ function apply(ctx) {
   ctx.on('agent/request', async (payload, next) => {
     const session = payload && payload.agent && payload.agent.session
     if (!session) throw enforcementError('missing-session', null, null)
-    if (sessionPreset(session) !== MUSE_AGENT_PRESET) return next()
-
     const installRoot = profiles.installRootOf()
     const binding = bindingFor(installRoot, session.id)
+    const requestedEngine = sessionPreset(session) === MUSE_AGENT_PRESET ? 'muse' : 'dual'
+    if (binding && binding.engine !== requestedEngine) {
+      throw enforcementError('session-preset-does-not-match-bound-engine', binding, null, 'engine-binding-violation')
+    }
+    if (!binding && requestedEngine !== 'muse') return next()
+    if (binding && binding.engine !== MUSE_ENGINE) return next()
     const target = controllerTargetFor(installRoot, binding)
 
     // Phase 2: per-call adaptive effort from task-local reasoning state.

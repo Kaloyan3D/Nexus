@@ -67,7 +67,7 @@ try{
     Assert-Aih ($musePreset.rootExecutor.provider -eq 'meta-model-api' -and $musePreset.rootExecutor.model -eq 'muse-spark-1.3-contributor' -and $musePreset.rootExecutor.reasoning -eq 'xhigh') '1.5: rootExecutor pins the exact Muse target'
     Assert-Aih ($musePreset.profileOverrideAllowed -eq $false) '1.6: the muse preset locks its own profile binding'
     $dualPreset=$policy.presets.PSObject.Properties['aih-engineering'].Value
-    Assert-Aih ($dualPreset.allowCodexSubagent -eq $true -and $dualPreset.failurePolicy -ne 'fail-closed') '1.7: the Dual aih-engineering preset is byte-identical in policy'
+    Assert-Aih ($dualPreset.allowCodexSubagent -eq $true -and $dualPreset.failurePolicy -ne 'fail-closed') '1.7: the Dual aih-engineering policy remains unchanged'
 
     # -- 2. THE dispatch seam: muse preset routes through the Muse branch
     $muse=Invoke-AihRoutingDecision -Description 'Ordinary engineering work on the muse plane.' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot (Join-Path $fixture.Root 'data/routing') -Preset 'aih-muse' -DryRun -SettingsPath $fixture.Settings
@@ -77,19 +77,25 @@ try{
     Assert-Aih ($muse.reasoning -eq 'xhigh') '2.4: reasoning is the profile default xhigh'
     Assert-Aih ($muse.profile -eq 'muse-spark-1.3-contributor') '2.5: the record carries the muse Nexus profile id'
     Assert-Aih ($null-eq$muse.role) '2.6: NO Dual role exists on the muse plane (role is null)'
-    Assert-Aih ($muse.executionClass -eq 'engineer_normal') '2.7: execution class stays engine-independent (engineer_normal)'
+    Assert-Aih ($muse.executionClass -eq 'muse_main') '2.7: Muse owns its execution semantics (muse_main)'
     Assert-Aih ($muse.dataUseTier -eq 'contributor' -and $muse.contributorProtectionRequired -eq $true) '2.8: Contributor metadata survives end to end in the record'
     Assert-Aih ($muse.reviewRequired -eq $false -and $muse.writable -eq $true) '2.9: the muse main agent is the writable executor with no review requirement'
     Assert-Aih ($null-eq$muse.escalatedFrom -and $muse.manualOverride -eq $false) '2.10: no escalation/override semantics exist on the muse plane'
 
     # -- 3. Dual path unchanged: same call shape, byte-compatible record
     $dual=Invoke-AihRoutingDecision -Description 'Ordinary engineering work on the controller plane.' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot (Join-Path $fixture.Root 'data/routing') -Preset 'aih-engineering' -DryRun -SettingsPath $fixture.Settings
-    Assert-Aih ($null-eq$dual.PSObject.Properties['engine']) '3.1: the Dual record carries NO engine field (byte-compatible)'
+    Assert-Aih ($dual.engine -eq 'dual') '3.1: the Dual record carries its authoritative engine identity'
     Assert-Aih ($null-eq$dual.PSObject.Properties['dataUseTier'] -and $null-eq$dual.PSObject.Properties['contributorProtectionRequired']) '3.2: the Dual record carries no muse-only fields'
     Assert-Aih ($dual.executionClass -eq 'engineer_normal' -and $dual.role -eq 'primaryEngineer') '3.3: the Dual path keeps its role semantics'
     Assert-Aih ($dual.preset -eq 'aih-engineering') '3.4: the Dual record names its own preset'
     $mechanical=Invoke-AihRoutingDecision -Description 'run tests' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot (Join-Path $fixture.Root 'data/routing') -Preset 'aih-engineering' -DryRun -SettingsPath $fixture.Settings
     Assert-Aih ($mechanical.executionClass -eq 'deterministic' -and $mechanical.role -eq $null) '3.5: Dual deterministic routing is unchanged'
+
+    # -- 3b. Critical Muse work stays on the Muse main-agent plane
+    $criticalMuse=Invoke-AihRoutingDecision -Description 'Fix the authentication authorization security boundary, database migration, and concurrency correctness defects.' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot (Join-Path $fixture.Root 'data/routing') -Preset 'aih-muse' -DryRun -SettingsPath $fixture.Settings
+    Assert-Aih ($criticalMuse.engine -eq 'muse' -and $criticalMuse.executionClass -eq 'muse_main' -and $null-eq$criticalMuse.role) '3.6: critical/security Muse work remains Muse-native with no Dual role'
+    Assert-Aih ($criticalMuse.provider -eq 'meta-model-api' -and $criticalMuse.model -eq 'muse-spark-1.3-contributor') '3.7: critical/security Muse work keeps the Muse target'
+    Assert-Aih (-not [bool]$criticalMuse.reviewRequired -and $null-eq$criticalMuse.escalatedFrom) '3.8: critical/security Muse work does not request a Dual reviewer or fallback'
 
     # -- 4. Fail closed: a muse profile active on a Dual agent plane
     $env:DSH_AIH_PROFILE='muse-spark-1.3-contributor'
@@ -168,7 +174,6 @@ try{
     # -- 10. Review isolation: Muse never reaches a reviewer
     $reviewScenarios=@(
         @{Name='10.1: explicit review request fails closed on the muse plane';Key='ReviewRequested';Value=$true},
-        @{Name='10.2: immediate review signals fail closed on the muse plane';Key='Signal';Value='critical-security-boundary'},
         @{Name='10.3: the user-codex signal fails closed on the muse plane';Key='Signal';Value='user-codex'},
         @{Name='10.4: review findings cannot return to a muse task';Key='Signal';Value='review-findings'},
         @{Name='10.5: manual execution-class overrides are Dual semantics only';Key='ForceClass';Value='engineer_deep'},
@@ -181,6 +186,8 @@ try{
         try{ Invoke-AihMuseRoutingDecision @scenarioParams | Out-Null }catch{ $threw=($_.Exception.Message -like 'Muse routing rejected:*') }
         Assert-Aih $threw $scenario.Name
     }
+    $museEscalation=Invoke-AihMuseRoutingDecision -Description 'Harden this boundary.' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot (Join-Path $fixture.Root 'data/routing') -Preset 'aih-muse' -Signal 'critical-security-boundary' -DryRun -SettingsPath $fixture.Settings
+    Assert-Aih ($museEscalation.engine -eq 'muse' -and $museEscalation.executionClass -eq 'muse_main' -and $museEscalation.risk -eq 'critical' -and $null-eq$museEscalation.role) '10.2: Muse risk escalation remains on the Muse main-agent plane'
 
     # -- 11. Bounded retry: same failure NEVER escalates or changes the target
     $dataRoot=Join-Path $fixture.Root 'data/routing'
@@ -191,7 +198,7 @@ try{
     $second=Invoke-AihMuseRoutingDecision -Description 'Bounded retry fixture engineering task.' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot $dataRoot -TaskId 'TASK-4501' -Preset 'aih-muse' -Signal 'attempt-failure' -FailureReason 'tool boom 111' -SettingsPath $fixture.Settings
     $third=Invoke-AihMuseRoutingDecision -Description 'Bounded retry fixture engineering task.' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot $dataRoot -TaskId 'TASK-4501' -Preset 'aih-muse' -Signal 'attempt-failure' -FailureReason 'tool boom 222' -SettingsPath $fixture.Settings
     Assert-Aih ($third.sameFailureCount -eq 2) '11.3: the same-failure count is tracked by the deterministic signature'
-    Assert-Aih ($third.executionClass -eq 'engineer_normal' -and $third.provider -eq 'meta-model-api' -and $third.model -eq 'muse-spark-1.3-contributor' -and $third.reasoning -eq 'xhigh') '11.4: after repeated failures the target is UNCHANGED (no engine/provider/model/reasoning fallback)'
+    Assert-Aih ($third.engine -eq 'muse' -and $third.executionClass -eq 'muse_main' -and $third.provider -eq 'meta-model-api' -and $third.model -eq 'muse-spark-1.3-contributor' -and $third.reasoning -eq 'xhigh') '11.4: after repeated failures the engine and target are UNCHANGED'
     Assert-Aih ($null-eq$third.escalatedFrom -and $null-eq$third.role) '11.5: no escalation and no Dual role ever appear on the muse plane'
     Assert-Aih ($third.reason -like '*retries the same single main agent*') '11.6: the bounded-retry reason is truthful'
     Assert-Aih (Test-Path -LiteralPath (Join-Path $dataRoot 'decisions.jsonl')) '11.7: the decisions ledger records the muse attempts'
@@ -199,13 +206,34 @@ try{
     # -- 12. Identity guard parity with the Dual plane
     $tasksDir=Join-Path $fixture.Workspace '.ai-harness/state'
     New-Item -ItemType Directory -Force -Path $tasksDir|Out-Null
-    $ledger=@{schemaVersion=1;tasks=@(@{taskId='TASK-4502';taskInstanceId='inst-current';status='active'})}
+    $ledger=@{schemaVersion=1;tasks=@(@{taskId='TASK-4502';taskInstanceId='inst-current';boundEngine='muse';status='active'})}
     [IO.File]::WriteAllText((Join-Path $tasksDir 'tasks.json'),($ledger|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
     $threwIdentity=$false
     try{ Invoke-AihMuseRoutingDecision -Description 'x' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot $dataRoot -TaskId 'TASK-4502' -TaskInstanceId 'inst-stale' -Preset 'aih-muse' -DryRun -SettingsPath $fixture.Settings | Out-Null }catch{ $threwIdentity=($_.Exception.Message -like '*taskInstanceId*') }
     Assert-Aih $threwIdentity '12.1: a stale taskInstanceId fails closed on the muse plane (one identity contract)'
     $bound=Invoke-AihMuseRoutingDecision -Description 'x' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot $dataRoot -TaskId 'TASK-4502' -TaskInstanceId 'inst-current' -Preset 'aih-muse' -DryRun -SettingsPath $fixture.Settings
     Assert-Aih ($bound.engine -eq 'muse' -and $bound.taskInstanceId -eq 'inst-current') '12.2: the correct generation binds normally'
+
+    $bindingWorkspace=Join-Path $fixture.Root 'binding-ws'
+    $museTask=New-AihTask -Workspace $bindingWorkspace -Description 'new muse task' -Engine muse
+    $dualTask=New-AihTask -Workspace $bindingWorkspace -Description 'new dual task' -Engine dual
+    $persistedLedger=Read-AihTaskLedger $bindingWorkspace
+    $persistedMuse=@($persistedLedger.tasks|Where-Object taskId -eq $museTask.taskId)[0]
+    $persistedDual=@($persistedLedger.tasks|Where-Object taskId -eq $dualTask.taskId)[0]
+    Assert-Aih ($museTask.boundEngine -eq 'muse' -and $persistedMuse.boundEngine -eq 'muse') '12.2a: a new Muse task persists boundEngine=muse'
+    Assert-Aih ($dualTask.boundEngine -eq 'dual' -and $persistedDual.boundEngine -eq 'dual') '12.2b: a new Dual task persists boundEngine=dual'
+
+    # -- 12b. Authoritative task engine mismatch fails before target resolution
+    $ledger.tasks[0].boundEngine='muse'
+    [IO.File]::WriteAllText((Join-Path $tasksDir 'tasks.json'),($ledger|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
+    $museToDualViolation=$false
+    try{ Invoke-AihRoutingDecision -Description 'ordinary' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot $dataRoot -TaskId 'TASK-4502' -TaskInstanceId 'inst-current' -Preset 'aih-engineering' -RequestedEngine 'dual' -DryRun -SettingsPath $fixture.Settings | Out-Null }catch{ $museToDualViolation=($_.Exception.Message -like '*engine-binding-violation*') }
+    Assert-Aih $museToDualViolation '12.3: bound=muse requested=dual fails closed with engine-binding-violation'
+    $ledger.tasks[0].boundEngine='dual'
+    [IO.File]::WriteAllText((Join-Path $tasksDir 'tasks.json'),($ledger|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
+    $dualToMuseViolation=$false
+    try{ Invoke-AihRoutingDecision -Description 'ordinary' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot $dataRoot -TaskId 'TASK-4502' -TaskInstanceId 'inst-current' -Preset 'aih-muse' -RequestedEngine 'muse' -DryRun -SettingsPath $fixture.NoConsent | Out-Null }catch{ $dualToMuseViolation=($_.Exception.Message -like '*engine-binding-violation*') }
+    Assert-Aih $dualToMuseViolation '12.4: bound=dual requested=muse fails before Muse target/consent resolution'
 
     # -- 13. The dispatch seam is the ONLY branch point (structural check)
     $routingText=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'scripts/Routing.ps1')
@@ -223,7 +251,7 @@ try{
     $legacyFixture=New-AihMuseRoutingFixture
     Remove-Item -LiteralPath (Join-Path $legacyFixture.Root 'config/nexus-profiles.json') -Force
     $legacy=Invoke-AihRoutingDecision -Description 'Ordinary engineering work.' -Workspace $legacyFixture.Workspace -PolicyPath $legacyFixture.Policy -DataRoot (Join-Path $legacyFixture.Root 'data/routing') -Preset 'aih-engineering' -DryRun -SettingsPath $legacyFixture.Settings
-    Assert-Aih ($null-eq$legacy.PSObject.Properties['engine'] -and $legacy.role -eq 'primaryEngineer') '14.1: a missing catalog keeps the exact pre-M3 Dual behavior'
+    Assert-Aih ($legacy.engine -eq 'dual' -and $legacy.role -eq 'primaryEngineer') '14.1: a missing catalog keeps Dual behavior with explicit engine identity'
     Remove-Item -LiteralPath $legacyFixture.Root -Recurse -Force
 }catch{
     Write-Host $_

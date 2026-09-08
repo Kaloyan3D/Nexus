@@ -75,7 +75,7 @@ function readState(installRoot, binding) {
 function writeBindings(installRoot, sessionId, binding) {
   const bindingsPath = path.join(installRoot, 'data', 'routing', 'session-bindings.json');
   fs.mkdirSync(path.dirname(bindingsPath), { recursive: true });
-  fs.writeFileSync(bindingsPath, JSON.stringify({ schemaVersion: 1, bindings: { [sessionId]: binding } }), 'utf8');
+  fs.writeFileSync(bindingsPath, JSON.stringify({ schemaVersion: 1, bindings: { [sessionId]: Object.assign({ engine: 'muse' }, binding) } }), 'utf8');
 }
 
 function museState(overrides) {
@@ -84,7 +84,7 @@ function museState(overrides) {
     taskInstanceId: 'inst-p2',
     preset: 'aih-muse',
     engine: 'muse',
-    executionClass: 'engineer_normal',
+    executionClass: 'muse_main',
     role: null,
     profile: 'muse-spark-1.3-contributor',
     profileDisplayName: 'Muse Spark 1.3 Contributor',

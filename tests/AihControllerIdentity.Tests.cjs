@@ -45,6 +45,10 @@ function userMessage(text) {
 function makeHarness(initialBindings) {
   const ledger = new Map() // display id -> authoritative taskInstanceId
   const bindings = Object.assign({}, initialBindings)
+  for (const binding of Object.values(bindings)) {
+    if (binding && !binding.engine) binding.engine = 'dual'
+  }
+  const ledgerEngines = new Map()
   const calls = { createBinding: [], testTaskIdentity: 0, invalidate: 0, staleEvents: [] }
   let created = 100 // fresh instances must never collide with fixture instances
   const guard = controller.createBindingGuard({
@@ -56,12 +60,14 @@ function makeHarness(initialBindings) {
       const displayId = 'TASK-0004' // deliberately constant: identity != label
       const instance = 'task_' + String(created).padStart(32, '0')
       ledger.set(displayId, instance)
+      ledgerEngines.set(displayId, 'dual')
       const binding = {
         sessionId: session.id,
         taskInstanceId: instance,
         taskId: displayId,
         workspace,
         preset: 'aih-engineering',
+        engine: 'dual',
         description: promptText,
         executionClass: reviewRequested ? 'reviewer' : 'engineer_normal',
         reviewRequired: reviewRequested,
@@ -80,6 +86,7 @@ function makeHarness(initialBindings) {
         exists: actual !== null,
         taskId,
         taskInstanceId: actual,
+        boundEngine: actual === null ? null : (ledgerEngines.get(taskId) || 'dual'),
         instanceMatches: taskInstanceId ? actual === taskInstanceId : null,
       }
     },
@@ -91,7 +98,7 @@ function makeHarness(initialBindings) {
       delete bindings[stale.sessionId]
     },
   })
-  return { guard, bindings, calls, ledger }
+  return { guard, bindings, calls, ledger, ledgerEngines }
 }
 
 const instance = (n) => 'task_' + String(n).padStart(32, '0')
@@ -208,6 +215,20 @@ async function unitBindingGuard() {
     assert.equal(h.calls.createBinding.length, 1, 'one stale session + two simultaneous events = one replacement task')
     const outcomes = results.map((r) => r.outcome).sort()
     assert.deepEqual(outcomes, ['recovered', 'valid'])
+  }
+
+  // K. An existing task's engine is authoritative and cannot be repaired by
+  // replacing the binding or selecting another preset.
+  {
+    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\WS', preset: 'aih-engineering', engine: 'dual' } })
+    h.ledger.set('TASK-0004', instance(1))
+    h.ledgerEngines.set('TASK-0004', 'muse')
+    await assert.rejects(
+      () => h.guard.ensureBinding(null, session, 'C:\\WS', 'continue the work'),
+      (error) => error.code === 'engine-binding-violation',
+    )
+    assert.equal(h.calls.createBinding.length, 0, 'engine mismatch creates no fallback task')
+    assert.equal(h.calls.invalidate, 0, 'engine mismatch preserves the bound task for diagnosis')
   }
 
   // Part 21: legacy binding without taskInstanceId is stale/ambiguous.
@@ -454,6 +475,8 @@ async function runBridgeEndToEnd() {
     const bindingA = readBinding()
     assert.match(bindingA.taskInstanceId, /^task_[0-9a-f]{32}$/, 'the binding carries an immutable instance identity')
     assert.equal(bindingA.taskId, 'TASK-0001')
+    assert.equal(bindingA.engine, 'dual', 'the new session binding persists engine=dual')
+    assert.equal(readLedger().tasks.find((item) => item.taskInstanceId === bindingA.taskInstanceId).boundEngine, 'dual', 'the authoritative task persists the same boundEngine')
 
     // 2. Codex reviewer routing records for generation A (routing only; no model).
     const payloadDir = path.join(dataHome, 'tmp')
@@ -612,6 +635,44 @@ async function runBridgeEndToEnd() {
     assert.equal(ledgerFinal.tasks.length, 1, 'one stale session + two simultaneous events = one replacement task')
     const taskC = ledgerFinal.tasks[0]
     assert.notEqual(taskC.taskInstanceId, taskB.taskInstanceId, 'the replacement task has a fresh instance')
+
+    // A separately selected Muse session binds and persists Muse exactly
+    // once; it does not inherit the existing Dual session's engine.
+    const museWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-engine-muse-e2e-'))
+    try {
+      fs.writeFileSync(path.join(museWorkspace, 'package.json'), JSON.stringify({ private: true, scripts: { test: 'node -e "process.exit(0)"' } }))
+      const museSettings = fs.readFileSync(path.join(installRoot, 'config', 'settings.yaml'), 'utf8') + '\nmuse-contributor-execution:\n  acknowledgement: accepted-v1\n'
+      fs.writeFileSync(path.join(dataHome, 'settings.yaml'), museSettings)
+      const preStepMuse = boot()
+      const museSession = {
+        id: 'e2e-session-muse',
+        header: { cwd: museWorkspace, agentPreset: 'aih-muse' },
+        messages: [],
+        append(kind, message) { this.messages.push({ kind, message }) },
+      }
+      const museOutcome = await preStepMuse({ agent: { session: museSession }, messages: [userMessage('Fix the authentication concurrency bug and harden the security boundary.')], step: 1, turn: 'muse-1' }, () => 'next')
+      assert.equal(museOutcome, 'next', JSON.stringify(museSession.messages))
+      const museBinding = JSON.parse(fs.readFileSync(bindingsPath, 'utf8')).bindings[museSession.id]
+      const museLedger = JSON.parse(fs.readFileSync(path.join(museWorkspace, '.ai-harness', 'state', 'tasks.json'), 'utf8'))
+      assert.equal(museBinding.engine, 'muse', 'new Muse session persists engine=muse in its binding')
+      assert.equal(museLedger.tasks[0].boundEngine, 'muse', 'new Muse session persists boundEngine=muse in its task')
+      assert.equal(museBinding.executionClass, 'muse_main', 'complex/security Muse session remains on the Muse main-agent plane')
+
+      // Corrupting the authoritative ledger engine must fail closed at the
+      // controller boundary. The downstream model callback is never reached.
+      museLedger.tasks[0].boundEngine = 'dual'
+      fs.writeFileSync(path.join(museWorkspace, '.ai-harness', 'state', 'tasks.json'), JSON.stringify(museLedger, null, 2))
+      let mismatchNextCalls = 0
+      const mismatchOutcome = await preStepMuse(
+        { agent: { session: museSession }, messages: [userMessage('Continue the same task.')], step: 1, turn: 'muse-2' },
+        () => { mismatchNextCalls += 1; return 'next' },
+      )
+      assert.deepEqual(mismatchOutcome, { kind: 'reject' }, 'authoritative engine mismatch fails closed: ' + JSON.stringify(museSession.messages))
+      assert.equal(mismatchNextCalls, 0, 'authoritative engine mismatch makes no downstream model call')
+      assert.equal(museSession.messages.at(-1).message.source.form, 'engine-binding-violation')
+      } finally {
+      fs.rmSync(museWorkspace, { recursive: true, force: true })
+    }
 
     // 17. No manual deletion of session-bindings.json or routing state was
     //     required at any point; the same session id kept working throughout.

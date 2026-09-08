@@ -90,7 +90,7 @@ function writeBindings(installRoot, sessionId, binding) {
   let document = { schemaVersion: 1, bindings: {} };
   try { document = JSON.parse(fs.readFileSync(bindingsPath, 'utf8')); } catch { /* fresh fixture */ }
   document.bindings = document.bindings || {};
-  document.bindings[sessionId] = binding;
+  document.bindings[sessionId] = Object.assign({ engine: 'muse' }, binding);
   fs.writeFileSync(bindingsPath, JSON.stringify(document), 'utf8');
 }
 

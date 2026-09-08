@@ -130,7 +130,7 @@ function Test-AihTaskIdentity {
     $task = @($ledger.tasks | Where-Object taskId -eq $TaskId | Select-Object -First 1)
     if ($task.Count -eq 0) {
         return [pscustomobject]@{
-            exists = $false; taskId = $TaskId; taskInstanceId = $null
+            exists = $false; taskId = $TaskId; taskInstanceId = $null; boundEngine = $null
             instanceMatches = $false; expectedTaskInstanceId = $TaskInstanceId
         }
     }
@@ -142,6 +142,7 @@ function Test-AihTaskIdentity {
     if (-not [string]::IsNullOrWhiteSpace($TaskInstanceId)) { $isMatch = ($actualInstanceId -eq $TaskInstanceId) }
     return [pscustomobject]@{
         exists = $true; taskId = [string]$found.taskId; taskInstanceId = $actualInstanceId
+        boundEngine = if ($null -ne $found.PSObject.Properties['boundEngine']) { [string]$found.boundEngine } else { $null }
         instanceMatches = $isMatch; expectedTaskInstanceId = $TaskInstanceId
     }
 }
@@ -201,7 +202,8 @@ function New-AihTask {
         [string[]]$AcceptanceCriteria = @(), [string[]]$DependsOn = @(),
         [ValidateSet('low','normal','high','critical')][string]$Risk = 'normal', [string]$BaseCommit,
         [switch]$ReviewRequested,
-        [ValidateSet('deterministic','engineer_normal','engineer_deep','reviewer','solver','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClassOverride
+        [ValidateSet('dual','muse')][string]$Engine = 'dual',
+        [ValidateSet('deterministic','muse_main','engineer_normal','engineer_deep','reviewer','solver','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClassOverride
     )
     $layout = Initialize-AihTaskLedger $Workspace
     $mutex=[Threading.Mutex]::new($false,(Get-AihLedgerMutexName $Workspace));$taken=$false
@@ -217,7 +219,7 @@ function New-AihTask {
     $taskInstanceId = New-AihTaskInstanceId
     $initialExecutionClass = if (-not [string]::IsNullOrWhiteSpace($ExecutionClassOverride)) { ConvertTo-AihCanonicalExecutionClass $ExecutionClassOverride } else { 'engineer_normal' }
     $task = [ordered]@{
-        schemaVersion = 1; taskId = $taskId; taskInstanceId = $taskInstanceId; description = $Description; status = 'ready'; dependencies = @($DependsOn)
+        schemaVersion = 1; taskId = $taskId; taskInstanceId = $taskInstanceId; boundEngine = $Engine; description = $Description; status = 'ready'; dependencies = @($DependsOn)
         baseCommit = $BaseCommit; executionClass = $initialExecutionClass; executor = $initialExecutionClass; attempt = 0; maxAttempts = 3
         risk = $Risk; acceptanceCriteria = @($AcceptanceCriteria); verification = [ordered]@{ required = @(); outcomes = @() }
         reviewRequested = [bool]$ReviewRequested; executionClassOverride = $ExecutionClassOverride
@@ -238,7 +240,7 @@ function New-AihTask {
         New-Item -ItemType Directory -Force -Path $run | Out-Null
     }
     Write-AihAtomicJson (Join-Path $run 'manifest.json') $task
-    Add-AihJsonLine $layout.Decisions ([ordered]@{ timestampUtc = [DateTime]::UtcNow.ToString('o'); kind = 'task-created'; taskId = $taskId; taskInstanceId = $taskInstanceId; dependencies = @($DependsOn) })
+    Add-AihJsonLine $layout.Decisions ([ordered]@{ timestampUtc = [DateTime]::UtcNow.ToString('o'); kind = 'task-created'; taskId = $taskId; taskInstanceId = $taskInstanceId; boundEngine = $Engine; dependencies = @($DependsOn) })
     [pscustomobject]$task
     }finally{if($taken){$mutex.ReleaseMutex()};$mutex.Dispose()}
 }
@@ -297,7 +299,7 @@ function Get-AihLatestAttempt {
 }
 
 function Start-AihTaskAttempt {
-    param([string]$Workspace, [string]$TaskId, [ValidateSet('deterministic','engineer_normal','engineer_deep','reviewer','solver','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClass = 'engineer_normal', [switch]$RequireNoOpenAttempt, [string]$SessionId, [string]$StartedByTurn, [string]$TaskInstanceId)
+    param([string]$Workspace, [string]$TaskId, [ValidateSet('deterministic','muse_main','engineer_normal','engineer_deep','reviewer','solver','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClass = 'engineer_normal', [switch]$RequireNoOpenAttempt, [string]$SessionId, [string]$StartedByTurn, [string]$TaskInstanceId)
     $layout = Initialize-AihTaskLedger $Workspace
     $task = Update-AihTaskRecord $Workspace $TaskId -TaskInstanceId $TaskInstanceId {
         param($item)
@@ -358,7 +360,7 @@ function Add-AihTaskFailure {
 }
 
 function Set-AihTaskExecutionClass {
-    param([string]$Workspace,[string]$TaskId,[ValidateSet('deterministic','engineer_normal','engineer_deep','reviewer','solver','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClass,[string]$Reason,[string]$TaskInstanceId)
+    param([string]$Workspace,[string]$TaskId,[ValidateSet('deterministic','muse_main','engineer_normal','engineer_deep','reviewer','solver','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClass,[string]$Reason,[string]$TaskInstanceId)
     $layout=Initialize-AihTaskLedger $Workspace
     $task=Update-AihTaskRecord $Workspace $TaskId -TaskInstanceId $TaskInstanceId {param($item);$item.executionClass=(ConvertTo-AihCanonicalExecutionClass $ExecutionClass);$item.executor=(ConvertTo-AihCanonicalExecutionClass $ExecutionClass)}
     Add-AihJsonLine $layout.Decisions ([ordered]@{timestampUtc=[DateTime]::UtcNow.ToString('o');kind='execution-class-selected';taskId=$TaskId;taskInstanceId=$task.taskInstanceId;executionClass=$ExecutionClass;reason=$Reason;completionAuthority=$false})

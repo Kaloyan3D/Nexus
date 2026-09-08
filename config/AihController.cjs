@@ -433,6 +433,7 @@ function isWorkerAgent(header) {
 // (enforceLimits=true), which is not the shipped default.
 const EXECUTION_CLASS_LABELS = {
   deterministic: 'Deterministic',
+  muse_main: 'Muse · Main Agent',
   engineer_normal: 'Engineer \u00b7 Normal',
   engineer_deep: 'Engineer \u00b7 Deep',
   reviewer: 'Independent Review (read-only)',
@@ -651,6 +652,22 @@ function classifyBindingIdentity(binding, identity) {
   return { verdict: 'valid' }
 }
 
+function engineForPreset(preset) {
+  return preset === 'aih-muse' ? 'muse' : 'dual'
+}
+
+function assertEngineBinding(binding, requestedPreset, authoritativeEngine) {
+  const requestedEngine = engineForPreset(requestedPreset)
+  const boundEngine = binding && typeof binding.engine === 'string' ? binding.engine : ''
+  const taskEngine = typeof authoritativeEngine === 'string' ? authoritativeEngine : boundEngine
+  if (!['dual', 'muse'].includes(boundEngine) || !['dual', 'muse'].includes(taskEngine) || requestedEngine !== boundEngine || taskEngine !== boundEngine) {
+    const error = new Error(`engine-binding-violation: bound='${boundEngine || 'missing'}', task='${taskEngine || 'missing'}', requested='${requestedEngine}'.`)
+    error.code = 'engine-binding-violation'
+    throw error
+  }
+  return boundEngine
+}
+
 /**
  * Session-scoped binding validation/recovery lock (Part 13). One stale
  * session + two simultaneous controller events = ONE replacement task: the
@@ -741,6 +758,7 @@ function createBindingGuard(deps) {
       if (verdict.verdict === 'stale') {
         return recoverStaleBinding(agent, session, workspace, promptText, binding, verdict.reason)
       }
+      assertEngineBinding(binding, binding.preset, identity.boundEngine)
       return { binding, outcome: 'valid' }
     })
   }
@@ -899,6 +917,7 @@ function apply(ctx) {
           checkoutRootPath: binding.checkoutRootPath ?? null,
           executionRoot: binding.executionRoot ?? binding.workspace,
           preset: binding.preset,
+          engine: binding.engine,
           description: binding.description,
           executionClass: binding.executionClass,
           reviewRequired: binding.reviewRequired,
@@ -981,9 +1000,9 @@ function apply(ctx) {
     }
   }
 
-  async function createTask(workspace, description, reviewRequested) {
+  async function createTask(workspace, description, reviewRequested, engine) {
     const task = await invokePowerShell('Task.ps1', ['-Action', 'create-task'], {
-      payload: { workspace, description, reviewRequested: Boolean(reviewRequested) },
+      payload: { workspace, description, reviewRequested: Boolean(reviewRequested), engine },
     })
     if (!task || !task.taskId) throw new Error('aih-controller: task creation returned no taskId')
     return task
@@ -1009,6 +1028,7 @@ function apply(ctx) {
     // TASK-0005 Part 16: route requests carry the lifecycle instance; Route.ps1
     // re-validates it against the authoritative ledger (fail closed).
     if (options.taskInstanceId) payload.taskInstanceId = options.taskInstanceId
+    if (options.requestedEngine) payload.requestedEngine = options.requestedEngine
     const args = ['-TaskId', taskId, '-Preset', options.preset ?? 'aih-engineering', '-InstallRoot', installRoot]
     const decision = await invokePowerShell('Route.ps1', args, { payload })
     if (!decision || !decision.executionClass) throw new Error('aih-controller: routing returned no execution class')
@@ -1746,6 +1766,7 @@ function apply(ctx) {
       if (options.explicit) {
         const decision = await routeTask(workspace, taskId, question, {
           preset: binding.preset,
+          requestedEngine: binding.engine,
           reviewRequested: true,
           taskInstanceId,
         })
@@ -1913,11 +1934,12 @@ function apply(ctx) {
       throw error
     }
     const reviewRequested = isReviewCommand(promptText)
-    const task = await createTask(workspace, reviewRequested ? reviewQuestionOf(promptText) : promptText, reviewRequested)
+    const preset = agentPresetOf(session)
+    const engine = engineForPreset(preset)
+    const task = await createTask(workspace, reviewRequested ? reviewQuestionOf(promptText) : promptText, reviewRequested, engine)
     // TASK-0005 Part 1: every newly created task carries an immutable
     // taskInstanceId from the TaskController; the binding references it.
     const taskInstanceId = task.taskInstanceId ?? null
-    const preset = agentPresetOf(session)
     const binding = {
       sessionId: session.id,
       taskInstanceId,
@@ -1929,6 +1951,7 @@ function apply(ctx) {
       checkoutRootPath: workspaceIdentity.checkoutRootPath,
       executionRoot: workspaceIdentity.executionRoot,
       preset,
+      engine,
       description: task.description,
       executionClass: task.executionClass || 'engineer_normal',
       reviewRequired: Boolean(task.reviewRequested),
@@ -1942,6 +1965,7 @@ function apply(ctx) {
     persistBindings()
     const decision = await routeTask(workspace, task.taskId, task.description, {
       preset,
+      requestedEngine: engine,
       reviewRequested,
       taskInstanceId,
     })
@@ -1952,7 +1976,7 @@ function apply(ctx) {
     persistBindings()
     registerShellEnvironment()
     appendMessage(session, createControllerMessage(noticeText(binding), 'controller-binding'))
-    log({ event: 'session-bound', sessionId: session.id, taskId: task.taskId, taskInstanceId, executionClass: binding.executionClass })
+    log({ event: 'session-bound', sessionId: session.id, taskId: task.taskId, taskInstanceId, engine, executionClass: binding.executionClass })
     return binding
   }
 
@@ -2072,6 +2096,7 @@ function apply(ctx) {
         binding.needsRouteCheck = true
         routeTask(binding.workspace, binding.taskId, binding.description, {
           preset: binding.preset,
+          requestedEngine: binding.engine,
           signal: 'attempt-failure',
           failureReason: String(reason.error.message),
           taskInstanceId: binding.taskInstanceId || undefined,
@@ -2185,12 +2210,26 @@ function apply(ctx) {
         )
       }
 
+      try {
+        assertEngineBinding(binding, agentPresetOf(session))
+      } catch (error) {
+        appendMessage(
+          session,
+          createControllerMessage(
+            'Controller blocked execution: ' + String(error.message || error) + '\nThe existing task remains bound to engine=' + String(binding.engine || 'missing') + '. Start a new explicitly selected session to use another engine. No model call was made.',
+            'engine-binding-violation',
+          ),
+        )
+        log({ event: 'engine-binding-violation', sessionId: session.id, taskId: binding.taskId, boundEngine: binding.engine || null, requestedPreset: agentPresetOf(session) })
+        return { kind: 'reject' }
+      }
+
       if (explicitReview) {
         // Phase M3: the Muse engine has NO independent reviewer (profile
         // review.independent=false). The request fails closed truthfully:
         // Codex is never invoked from Muse as reviewer, fallback, repair
         // agent, or worker, and no Muse reviewer exists.
-        if (agentPresetOf(session) === 'aih-muse') {
+        if (binding.engine === 'muse') {
           appendMessage(
             session,
             createControllerMessage(
@@ -2228,6 +2267,7 @@ function apply(ctx) {
       if (isReviewClass(binding.executionClass)) {
         const decision = await routeTask(binding.workspace, binding.taskId, promptText, {
           preset: binding.preset,
+          requestedEngine: binding.engine,
           signal: 'review-findings',
           taskInstanceId: binding.taskInstanceId || undefined,
         })
@@ -2243,7 +2283,7 @@ function apply(ctx) {
       }
 
       if (binding.needsRouteCheck) {
-        const decision = await routeTask(binding.workspace, binding.taskId, promptText, { preset: binding.preset, taskInstanceId: binding.taskInstanceId || undefined })
+        const decision = await routeTask(binding.workspace, binding.taskId, promptText, { preset: binding.preset, requestedEngine: binding.engine, taskInstanceId: binding.taskInstanceId || undefined })
         if (isReviewClass(decision.executionClass)) {
           binding.executionClass = decision.executionClass
           appendMessage(
@@ -2275,8 +2315,8 @@ function apply(ctx) {
         // role semantics. The epistemic step router is a Dual-plane authority
         // (it selects engineer roles and step role targets) and never applies
         // to a muse session: stepRole stays null and the attempt runs on the
-        // task-level execution class (engineer_normal) resolved by routing.
-        const museEngine = agentPresetOf(session) === 'aih-muse'
+        // task-level execution class (muse_main) resolved by routing.
+        const museEngine = binding.engine === 'muse'
         try {
           const stepDecision = museEngine ? null : await selectEngineeringEpistemicStep(binding, payload.turn, promptText)
           if (stepDecision) {
@@ -2339,6 +2379,18 @@ function apply(ctx) {
         error: boundedControllerDiagnostic(message),
         ...(error && error.cliFailure ? { cliFailure: error.cliFailure } : {}),
       })
+      if (error && error.code === 'engine-binding-violation') {
+        if (session) {
+          appendMessage(
+            session,
+            createControllerMessage(
+              'Controller blocked execution: ' + message + '\nThe persisted session/task engine identity did not match the requested engine. Start a new explicitly selected session to use another engine. No model call was made.',
+              'engine-binding-violation',
+            ),
+          )
+        }
+        return { kind: 'reject' }
+      }
       if (error && (error.code === 'session-workspace-mismatch' || error.code === 'repository-identity-mismatch' || error.code === 'repository-identity-missing' || error.code === 'session-workspace-identity-unavailable')) {
         if (session) {
           appendMessage(
@@ -2427,6 +2479,8 @@ module.exports.normalizeWorkspaceIdentity = normalizeWorkspaceIdentity
 module.exports.classifyBindingWorkspace = classifyBindingWorkspace
 module.exports.classifyBindingRepositoryIdentity = classifyBindingRepositoryIdentity
 module.exports.classifyBindingIdentity = classifyBindingIdentity
+module.exports.engineForPreset = engineForPreset
+module.exports.assertEngineBinding = assertEngineBinding
 module.exports.createBindingGuard = createBindingGuard
 module.exports.structuredCliStdout = structuredCliStdout
 module.exports.verificationCliStdout = verificationCliStdout

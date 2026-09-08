@@ -58,7 +58,7 @@ function writeBindings(installRoot, sessionId, binding) {
   let document = { schemaVersion: 1, bindings: {} }
   try { document = JSON.parse(fs.readFileSync(bindingsPath, 'utf8')) } catch { /* fresh fixture */ }
   document.bindings = document.bindings || {}
-  document.bindings[sessionId] = binding
+  document.bindings[sessionId] = Object.assign({ engine: 'muse' }, binding)
   fs.mkdirSync(path.dirname(bindingsPath), { recursive: true })
   fs.writeFileSync(bindingsPath, JSON.stringify(document), 'utf8')
 }
@@ -68,7 +68,7 @@ function museState(overrides) {
     taskId: 'TASK-4001',
     preset: 'aih-muse',
     engine: 'muse',
-    executionClass: 'engineer_normal',
+    executionClass: 'muse_main',
     role: null,
     profile: 'muse-spark-1.3-contributor',
     profileDisplayName: 'Muse Spark 1.3 Contributor',
@@ -208,6 +208,12 @@ async function main() {
     assert.equal(untouched.provider, 'flash-high-direct')
     assert.equal(untouched.maxTokens, 4096)
     pass('8: a non-muse session is not modified by the muse boundary')
+    writeBindings(installRoot, 'sess-bound-dual', { workspace: path.join(installRoot, 'ws'), taskId: 'TASK-BOUND-DUAL', preset: 'aih-engineering', taskInstanceId: 'inst-dual', engine: 'dual' })
+    const changedToMuse = { id: 'sess-bound-dual', events: [{ type: 'agent-preset/selected', data: { agentPreset: 'aih-muse' } }], header: { agentPreset: 'aih-engineering' } }
+    await assert.rejects(() => runRequest(ctx, changedToMuse, {}), (error) => error.code === 'engine-binding-violation')
+    const changedToDual = { id: 'sess-muse', events: [{ type: 'agent-preset/selected', data: { agentPreset: 'aih-engineering' } }], header: { agentPreset: 'aih-muse' } }
+    await assert.rejects(() => runRequest(ctx, changedToDual, {}), (error) => error.code === 'engine-binding-violation')
+    pass('8b: changing either bound session to the other engine fails closed before request execution')
 
     // ── 9. Headerless/unknown session fails closed on the muse plane ────────
     await assert.rejects(() => runRequest(ctx, null, {}), (error) => error.code === 'nexus-execution-target-unavailable')
