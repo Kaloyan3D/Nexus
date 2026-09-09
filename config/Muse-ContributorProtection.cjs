@@ -11,7 +11,7 @@
  *   - exact target only: meta-model-api / muse-spark-1.3-contributor
  *   - deterministic, non-mutating sanitization
  *   - secrets are redacted, never logged
- *   - opaque/binary/cyclic/non-JSON payloads fail closed
+ *   - opaque/binary leaves are redacted; cyclic/non-JSON structures fail closed
  *   - a missing/replaced global guard fails closed at the patched adapter
  */
 
@@ -23,11 +23,13 @@ const MUSE_MODEL = 'muse-spark-1.3-contributor'
 
 const REDACTION = '<redacted:nexus-contributor-secret>'
 const REDACTION_JSON = JSON.stringify(REDACTION)
+const OPAQUE_REDACTION = '<redacted:nexus-contributor-opaque-payload;retryable=false>'
 
 const MAX_DEPTH = 64
 const MAX_NODES = 200000
 const OMIT_OBJECT_PROPERTY = Symbol('nexus.museContributor.omitObjectProperty')
 const IMAGE_DATA_URL_RE = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]+={0,2})$/
+const INLINE_BASE64_DATA_RE = /data:[^,\s]*;base64,[^\s]*/gi
 
 function protectionError(code, message) {
   const error = new Error('Nexus Muse contributor protection blocked outbound payload: ' + message)
@@ -225,22 +227,13 @@ function isProviderNativeImageUrlPath(root, path) {
 function sanitizeContributorText(value, options) {
   let text = String(value)
 
-  if (text.includes('\u0000')) {
-    throw protectionError(
-      'nexus-muse-contributor-opaque-payload',
-      'text contains NUL/binary data'
-    )
+  if (text.includes('\u0000')) return OPAQUE_REDACTION
+
+  if (options?.allowImageDataUrl === true && isValidatedImageDataUrl(text)) {
+    return text
   }
 
-  if (/data:[^,;\s]+;base64,/i.test(text)) {
-    if (options?.allowImageDataUrl === true && isValidatedImageDataUrl(text)) {
-      return text
-    }
-    throw protectionError(
-      'nexus-muse-contributor-opaque-payload',
-      'inline base64 data is not permitted on the Muse Contributor wire'
-    )
-  }
+  text = text.replace(INLINE_BASE64_DATA_RE, OPAQUE_REDACTION)
 
   text = text.replace(PRIVATE_KEY_RE, REDACTION)
   text = text.replace(BEARER_RE, 'Bearer ' + REDACTION)
@@ -308,10 +301,7 @@ function sanitizeContributorValue(value, state, depth, position, path) {
     value instanceof ArrayBuffer ||
     ArrayBuffer.isView(value)
   ) {
-    throw protectionError(
-      'nexus-muse-contributor-opaque-payload',
-      'binary payload material is not permitted'
-    )
+    return OPAQUE_REDACTION
   }
 
   if (state.seen.has(value)) {
@@ -424,6 +414,7 @@ module.exports = {
   MUSE_PROVIDER,
   MUSE_MODEL,
   REDACTION,
+  OPAQUE_REDACTION,
   isSecretFieldName,
   sanitizeContributorText,
   sanitizeContributorPayload,
