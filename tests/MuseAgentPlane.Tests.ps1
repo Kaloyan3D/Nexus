@@ -25,8 +25,6 @@ function Copy-AihConfigFile([string]$Name,[string]$FixtureRoot){
     Copy-Item (Join-Path $InstallRoot ('config/'+$Name)) $target
 }
 
-# A fixture install root whose ONLY difference from production is that the
-# Muse profile is runnable/selectable: production stays contributor-locked.
 function New-AihMuseRoutingFixture{
     $fixtureRoot=Join-Path ([IO.Path]::GetTempPath()) ('aih-muse-routing-'+[guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path (Join-Path $fixtureRoot 'data')|Out-Null
@@ -39,10 +37,8 @@ function New-AihMuseRoutingFixture{
     [IO.File]::WriteAllText($catalogPath,$catalogText,[Text.UTF8Encoding]::new($false))
     $settings=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'config/settings.yaml')
     $settingsPath=Join-Path (Join-Path $fixtureRoot 'data') 'settings.yaml'
-    [IO.File]::WriteAllText($settingsPath,($settings+"muse-contributor-execution:`r`n  acknowledgement: accepted-v1`r`n"),[Text.UTF8Encoding]::new($false))
-    $noConsentPath=Join-Path (Join-Path $fixtureRoot 'data') 'settings-no-consent.yaml'
-    [IO.File]::WriteAllText($noConsentPath,$settings,[Text.UTF8Encoding]::new($false))
-    [pscustomobject]@{ Root=$fixtureRoot; Settings=$settingsPath; NoConsent=$noConsentPath; Workspace=(Join-Path $fixtureRoot 'ws'); Policy=(Join-Path $fixtureRoot 'config/routing-policy.json'); Catalog=(Join-Path $fixtureRoot 'config/nexus-profiles.json'); Registry=(Join-Path $fixtureRoot 'config/model-registry.json'); MuseProfiles=(Join-Path $fixtureRoot 'config/muse-profiles.json') }
+    [IO.File]::WriteAllText($settingsPath,$settings,[Text.UTF8Encoding]::new($false))
+    [pscustomobject]@{ Root=$fixtureRoot; Settings=$settingsPath; Workspace=(Join-Path $fixtureRoot 'ws'); Policy=(Join-Path $fixtureRoot 'config/routing-policy.json'); Catalog=(Join-Path $fixtureRoot 'config/nexus-profiles.json'); Registry=(Join-Path $fixtureRoot 'config/model-registry.json'); MuseProfiles=(Join-Path $fixtureRoot 'config/muse-profiles.json') }
 }
 
 $savedProfileEnv=$env:DSH_AIH_PROFILE
@@ -78,14 +74,14 @@ try{
     Assert-Aih ($muse.profile -eq 'muse-spark-1.3-contributor') '2.5: the record carries the muse Nexus profile id'
     Assert-Aih ($null-eq$muse.role) '2.6: NO Dual role exists on the muse plane (role is null)'
     Assert-Aih ($muse.executionClass -eq 'muse_main') '2.7: Muse owns its execution semantics (muse_main)'
-    Assert-Aih ($muse.dataUseTier -eq 'contributor' -and $muse.contributorProtectionRequired -eq $true) '2.8: Contributor metadata survives end to end in the record'
+    Assert-Aih ($muse.dataUseTier -eq 'contributor' -and $null-eq$muse.PSObject.Properties['contributorProtectionRequired']) '2.8: provider data-use metadata survives without Contributor Protection state'
     Assert-Aih ($muse.reviewRequired -eq $false -and $muse.writable -eq $true) '2.9: the muse main agent is the writable executor with no review requirement'
     Assert-Aih ($null-eq$muse.escalatedFrom -and $muse.manualOverride -eq $false) '2.10: no escalation/override semantics exist on the muse plane'
 
     # -- 3. Dual path unchanged: same call shape, byte-compatible record
     $dual=Invoke-AihRoutingDecision -Description 'Ordinary engineering work on the controller plane.' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot (Join-Path $fixture.Root 'data/routing') -Preset 'aih-engineering' -DryRun -SettingsPath $fixture.Settings
     Assert-Aih ($dual.engine -eq 'dual') '3.1: the Dual record carries its authoritative engine identity'
-    Assert-Aih ($null-eq$dual.PSObject.Properties['dataUseTier'] -and $null-eq$dual.PSObject.Properties['contributorProtectionRequired']) '3.2: the Dual record carries no muse-only fields'
+    Assert-Aih ($null-eq$dual.PSObject.Properties['dataUseTier']) '3.2: the Dual record carries no muse-only fields'
     Assert-Aih ($dual.executionClass -eq 'engineer_normal' -and $dual.role -eq 'primaryEngineer') '3.3: the Dual path keeps its role semantics'
     Assert-Aih ($dual.preset -eq 'aih-engineering') '3.4: the Dual record names its own preset'
     $mechanical=Invoke-AihRoutingDecision -Description 'run tests' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot (Join-Path $fixture.Root 'data/routing') -Preset 'aih-engineering' -DryRun -SettingsPath $fixture.Settings
@@ -110,17 +106,6 @@ try{
     try{ Invoke-AihRoutingDecision -Description 'x' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot (Join-Path $fixture.Root 'data/routing') -Preset 'aih-engineering' -DryRun -SettingsPath $fixture.Settings | Out-Null }catch{ $threwMismatch=($_.Exception.Message -like 'Muse routing rejected:*muse engine*') }
     Assert-Aih $threwMismatch '4.1: a muse-engine profile on a Dual preset fails closed (engine/preset coupling)'
     $env:DSH_AIH_PROFILE=$null
-
-    # -- 5. Fail closed: contributor consent is required end to end
-    Assert-Aih (-not(Test-AihMuseContributorAcknowledgement -SettingsPath $fixture.NoConsent)) '5.1: no acknowledgement in settings means no consent'
-    Assert-Aih (Test-AihMuseContributorAcknowledgement -SettingsPath $fixture.Settings) '5.2: the exact versioned acknowledgement satisfies the gate'
-    $wrongConsent=Join-Path $fixture.Root 'data/settings-wrong-consent.yaml'
-    $wrongText=((Get-Content -Raw $fixture.Settings).Replace('accepted-v1','accepted-v0'))
-    [IO.File]::WriteAllText($wrongConsent,$wrongText,[Text.UTF8Encoding]::new($false))
-    Assert-Aih (-not(Test-AihMuseContributorAcknowledgement -SettingsPath $wrongConsent)) '5.3: a stale acknowledgement version fails closed'
-    $threwConsent=$false
-    try{ Invoke-AihMuseRoutingDecision -Description 'x' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot (Join-Path $fixture.Root 'data/routing') -Preset 'aih-muse' -DryRun -SettingsPath $fixture.NoConsent | Out-Null }catch{ $threwConsent=($_.Exception.Message -like '*contributorProtection.required*') }
-    Assert-Aih $threwConsent '5.4: without consent the muse branch fails closed naming the exact gate'
 
     # -- 6. Fail closed: incomplete target chains never fall back
     $noRoute=Join-Path $fixture.Root 'data/settings-no-route.yaml'
@@ -155,13 +140,13 @@ try{
     $museDoc.profiles[0].reasoning.escalation=$savedEscalation
     [IO.File]::WriteAllText($museProfilesPath,($museDoc|ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($false))
 
-    # -- 8. Production activation truth after M5
+    # -- 8. Production activation truth
     $readyTarget=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId 'muse-spark-1.3-contributor'
-    Assert-Aih ($readyTarget.runnable -eq $true -and $readyTarget.selectable -eq $true) '8.1: the production Muse profile is explicitly selectable/runnable after M5'
+    Assert-Aih ($readyTarget.runnable -eq $true -and $readyTarget.selectable -eq $true) '8.1: the production Muse profile is explicitly selectable/runnable'
     Assert-Aih ($readyTarget.engine -eq 'muse') '8.2: the ready profile still classifies as the muse engine'
-    Assert-Aih ($readyTarget.availability -eq 'ready') '8.3: profile availability agrees with the completed local Contributor gate'
+    Assert-Aih ($readyTarget.availability -eq 'ready') '8.3: profile availability is ready'
     $productionTarget=Resolve-AihMuseRoutingTarget -InstallRoot $InstallRoot -PresetId 'aih-muse' -SettingsPath (Join-Path $InstallRoot 'data/settings.yaml')
-    Assert-Aih ($productionTarget.provider -eq 'meta-model-api' -and $productionTarget.model -eq 'muse-spark-1.3-contributor' -and $productionTarget.reasoning -eq 'xhigh') '8.4: production activation resolves the exact protected Muse target'
+    Assert-Aih ($productionTarget.provider -eq 'meta-model-api' -and $productionTarget.model -eq 'muse-spark-1.3-contributor' -and $productionTarget.reasoning -eq 'xhigh') '8.4: production activation resolves the exact Muse target'
 
     # -- 9. Malformed catalog engine binding fails closed
     $badCatalogPath=Join-Path $fixture.Root 'config/nexus-profiles-bad.json'
@@ -239,8 +224,8 @@ try{
     $ledger.tasks[0].boundEngine='dual'
     [IO.File]::WriteAllText((Join-Path $tasksDir 'tasks.json'),($ledger|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
     $dualToMuseViolation=$false
-    try{ Invoke-AihRoutingDecision -Description 'ordinary' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot $dataRoot -TaskId 'TASK-4502' -TaskInstanceId 'inst-current' -Preset 'aih-muse' -RequestedEngine 'muse' -DryRun -SettingsPath $fixture.NoConsent | Out-Null }catch{ $dualToMuseViolation=($_.Exception.Message -like '*engine-binding-violation*') }
-    Assert-Aih $dualToMuseViolation '12.4: bound=dual requested=muse fails before Muse target/consent resolution'
+    try{ Invoke-AihRoutingDecision -Description 'ordinary' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot $dataRoot -TaskId 'TASK-4502' -TaskInstanceId 'inst-current' -Preset 'aih-muse' -RequestedEngine 'muse' -DryRun -SettingsPath $fixture.Settings | Out-Null }catch{ $dualToMuseViolation=($_.Exception.Message -like '*engine-binding-violation*') }
+    Assert-Aih $dualToMuseViolation '12.4: bound=dual requested=muse fails before Muse target resolution'
 
     # -- 13. The dispatch seam is the ONLY branch point (structural check)
     $routingText=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'scripts/Routing.ps1')

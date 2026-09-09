@@ -26,6 +26,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'FAIL: installed preset did not parse in the DSH YAML dialect.' }
     Pass 'generated Muse YAML parses with the installed DSH !!js schema and required/forbidden row checks'
 
+    if (Test-Path -LiteralPath (Join-Path $target 'Muse-ContributorProtection.cjs')) {
+        throw 'FAIL: obsolete Contributor Protection module remains in the Muse preset.'
+    }
+    Pass 'generated Muse preset contains no Contributor Protection module'
+
     $composition = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $target 'agent.cordis.yml')
     if (-not $composition.Contains('text: !!js >-')) { throw 'FAIL: Muse persona is not encoded as a YAML block scalar.' }
     Pass 'Muse persona uses a robust folded YAML scalar'

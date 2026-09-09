@@ -780,7 +780,6 @@ $museInstallerText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $In
 foreach ($museContract in @(
     'preset-muse.yml',
     'Muse-Isolation.cjs',
-    'Muse-ContributorProtection.cjs',
     'AIH_PERSONA_MUSE',
     "[regex]::Replace(`$museText, `$museDelegationPattern, '')",
     'Validate-MusePreset.cjs',
@@ -790,6 +789,9 @@ foreach ($museContract in @(
 )) {
     if (-not $museInstallerText.Contains($museContract)) { throw "FAIL: the staged aih-muse installer is missing contract: $museContract" }
 }
+if (-not $compositionText.Contains('Remove-MuseContributorEgressPatch.cjs')) {
+    throw 'FAIL: Complete-Install.ps1 does not remove the retired Muse provider-egress hook on upgrade.'
+}
 Write-Host 'PASS: Complete-Install atomically builds and validates the aih-muse plane with no delegation surface'
 
 $musePresetMetaPath = Join-Path $InstallRoot 'config/preset-muse.yml'
@@ -797,8 +799,8 @@ if (-not (Test-Path -LiteralPath $musePresetMetaPath)) { throw "FAIL: config/pre
 $musePresetMeta = Get-Content -Raw -Encoding UTF8 -LiteralPath $musePresetMetaPath
 if (-not $musePresetMeta.Contains('name: Muse Agent Plane')) { throw 'FAIL: preset-muse.yml must name the Muse Agent Plane.' }
 if ($musePresetMeta.Contains('contributor-gated')) { throw 'FAIL: preset-muse.yml still advertises the obsolete contributor-gated state.' }
-if (-not $musePresetMeta.Contains('provider-egress protection')) { throw 'FAIL: preset-muse.yml must state the protected runtime truth.' }
-Write-Host 'PASS: the aih-muse preset metadata agrees with the protected runnable state'
+if ($musePresetMeta.Contains('provider-egress protection')) { throw 'FAIL: preset-muse.yml still advertises the retired provider-egress protection layer.' }
+Write-Host 'PASS: the aih-muse preset metadata agrees with the runnable state'
 
 $museIsolationPath = Join-Path $InstallRoot 'config/Muse-Isolation.cjs'
 if (-not (Test-Path -LiteralPath $museIsolationPath)) { throw "FAIL: managed Muse isolation module missing at $museIsolationPath" }

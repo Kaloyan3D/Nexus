@@ -392,7 +392,7 @@ function New-AihMuseOutcomeView {
 function Invoke-AihMuseLiveChecks {
     # Opt-in live battery: a handful of tiny synthetic requests. Only harmless
     # synthetic prompts are sent (never repository source, credentials, or
-    # project data — Contributor protection is a later security phase).
+    # project data).
     # Records model/provider/status/TTFT/latency/usage; NEVER the key.
     param(
         [Parameter(Mandatory=$true)][object]$Config,

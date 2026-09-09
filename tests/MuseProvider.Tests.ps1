@@ -92,7 +92,7 @@ try{
     $museLevels=@($museEntry.supportedReasoningLevels)
     Assert-Aih (($museLevels-contains'minimal')-and($museLevels-contains'low')-and($museLevels-contains'medium')-and($museLevels-contains'high')-and($museLevels-contains'xhigh')) '1.13: every verified official Contributor reasoning level (minimal..xhigh) is supported'
     Assert-Aih ((-not($museLevels-contains'off'))-and(-not($museLevels-contains'max'))) '1.14: off and max are ABSENT (off returns HTTP 400 on Meta; max is Standard-tier only)'
-    Assert-Aih ([string]$museEntry.dataUseTier -eq 'contributor') '1.15: dataUseTier=contributor (Contributor-tier data terms, contributorProtection required)'
+    Assert-Aih ([string]$museEntry.dataUseTier -eq 'contributor') '1.15: dataUseTier=contributor records the provider data terms'
     Assert-Aih ((@($museEntry.agentEngines)-contains'muse')-and(@($museEntry.agentEngines).Count -eq 1)) '1.16: the entry is EXPLICITLY and EXCLUSIVELY scoped to the muse engine'
 
     # -- 2. Engine scope keeps Muse out of every Dual role list ---------------
@@ -219,11 +219,11 @@ try{
     }
     finally{ Remove-Item Env:NEXUS_META_LIVE_TEST -ErrorAction SilentlyContinue }
 
-    # -- 10. Muse profile activation truth after M5 ---------------------------
+    # -- 10. Muse profile activation truth ------------------------------------
     $resolved=Resolve-AihNexusProfile -InstallRoot $fixture -ProfileId 'muse-spark-1.3-contributor'
     Assert-Aih ($null-ne$resolved) '10.1: muse-spark-1.3-contributor resolves from the production catalog'
-    Assert-Aih ([bool]$resolved.Selectable -eq $true) '10.2: production Muse profile is selectable after M5'
-    Assert-Aih ([bool]$resolved.Runnable -eq $true) '10.3: production Muse profile is runnable after M5'
+    Assert-Aih ([bool]$resolved.Selectable -eq $true) '10.2: production Muse profile is selectable'
+    Assert-Aih ([bool]$resolved.Runnable -eq $true) '10.3: production Muse profile is runnable'
     Assert-Aih ([string]$resolved.Availability -eq 'ready') '10.4: production Muse availability is ready'
     Assert-Aih ([string]$resolved.Engine -eq 'muse') '10.5: engine remains muse'
 
@@ -234,7 +234,7 @@ try{
     Assert-Aih ([string]$modelBinding.Provider -eq 'meta-model-api') '11.3: binding chain reaches the meta-model-api provider route'
     Assert-Aih ([string]$modelBinding.Model -eq 'muse-spark-1.3-contributor') '11.4: binding chain resolves the Meta contributor model id'
     Assert-Aih ([string]$modelBinding.Reasoning -eq 'xhigh') '11.5: default reasoning comes from the Muse profile (xhigh, the Contributor ceiling)'
-    Assert-Aih ([string]$modelBinding.DataUseTier -eq 'contributor') '11.6: dataUseTier=contributor travels on the binding for the later security phase'
+    Assert-Aih ([string]$modelBinding.DataUseTier -eq 'contributor') '11.6: dataUseTier=contributor travels on the binding as provider metadata'
     # M2.1: requested reasoning levels outside the verified Contributor set
     # fail closed (max is Standard-tier only; off is not representable on the
     # direct Meta contract); the valid escalation level still resolves.

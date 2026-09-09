@@ -46,7 +46,7 @@
       "selectable": true,
       "runnable": true,
       "availability": "ready",
-      "description": "Muse Agent Plane V0 with Contributor outbound protection. M5 deterministic protection is locally verified; successful live provider execution remains unverified."
+      "description": "Muse Agent Plane V0 using the Contributor-tier model. Prompts and completions are subject to the provider's Contributor data-use terms."
     }
   ]
 }

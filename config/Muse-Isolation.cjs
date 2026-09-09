@@ -41,7 +41,6 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const profiles = require('./Engineering-Profiles.cjs')
-const contributorProtection = require('./Muse-ContributorProtection.cjs')
 const reasoningRuntime = require('./Muse-ReasoningRuntime.cjs')
 
 const MUSE_ENGINE = 'muse'
@@ -101,7 +100,6 @@ function targetShape(value) {
     profileDisplayName: typeof value.profileDisplayName === 'string' ? value.profileDisplayName : null,
     engine: typeof value.engine === 'string' && value.engine !== '' ? value.engine : MUSE_ENGINE,
     dataUseTier: typeof value.dataUseTier === 'string' && value.dataUseTier !== '' ? value.dataUseTier : null,
-    contributorProtectionRequired: value.contributorProtectionRequired === true,
   }
 }
 
@@ -149,14 +147,6 @@ function controllerTargetFor(installRoot, binding) {
   }
   const target = targetShape(state)
   if (!target) throw enforcementError('incomplete-routing-target', binding, state)
-  if (target.dataUseTier !== 'contributor' || target.contributorProtectionRequired !== true) {
-    throw enforcementError(
-      'contributor-protection-metadata-missing',
-      binding,
-      state,
-      'nexus-muse-contributor-protection-required',
-    )
-  }
   return {
     ...target,
     profile: target.profile || (typeof state.profile === 'string' ? state.profile : null),
@@ -166,8 +156,6 @@ function controllerTargetFor(installRoot, binding) {
 }
 
 function apply(ctx) {
-  contributorProtection.installPayloadGuard()
-
   ctx.shellEnv.register({
     name: 'aih-muse-preset',
     variables: { DSH_AIH_PRESET: { description: 'Active AI Harness engineering preset.' } },

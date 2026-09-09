@@ -31,8 +31,9 @@ try{
 
     $muse=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId 'muse-spark-1.3-contributor'
     Assert-AihEqual $muse.Engine 'muse' 'Muse resolves to a separate agent engine on controller plane'
-    Assert-AihTrue ([bool]$muse.Selectable) 'Muse is selectable after the Contributor protection gate'
-    Assert-AihTrue ([bool]$muse.Runnable) 'Muse is runnable after the Contributor protection gate'
+    Assert-AihTrue ([bool]$muse.Selectable) 'Muse is selectable'
+    Assert-AihTrue ([bool]$muse.Runnable) 'Muse is runnable'
+    Assert-AihTrue ($null-eq$muse.Config.PSObject.Properties['contributorProtection']) 'Muse has no Contributor Protection configuration'
     Assert-AihEqual $muse.Config.reasoning.default 'xhigh' 'Muse registry carries engine-specific reasoning metadata'
 
     $unknown=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId 'unknown-profile'
@@ -65,7 +66,7 @@ try{
     $env:DSH_AIH_PROFILE='muse-spark-1.3-contributor'
     $active=Resolve-AihActiveNexusProfile -InstallRoot $fixture -Preset 'aih-engineering'
     Assert-AihEqual $active.Engine 'muse' 'DSH_AIH_PROFILE can identify Muse without Dual fallback'
-    Assert-AihTrue ([bool]$active.Runnable) 'active Muse metadata exposes the completed Contributor protection gate'
+    Assert-AihTrue ([bool]$active.Runnable) 'active Muse metadata is runnable'
 
     $active=Resolve-AihActiveNexusProfile -InstallRoot $fixture -Preset 'aih-deepseek'
     Assert-AihEqual $active.Id 'deepseek-codex' 'DeepSeek-only preset remains locked against engine override'
@@ -91,21 +92,21 @@ try{
     Assert-AihEqual $customEntry.builtin $false 'dynamic Custom entry is marked non-builtin'
     $museEntry=@($editorState.nexusProfiles|Where-Object{$_.id -eq 'muse-spark-1.3-contributor'})[0]
     Assert-AihEqual $museEntry.engine 'muse' 'Muse Spark 1.3 is classified muse in editor state'
-    Assert-AihTrue ([bool]$museEntry.selectable) 'Muse is selectable in editor state after M5'
-    Assert-AihTrue ([bool]$museEntry.runnable) 'Muse is runnable in editor state after M5'
+    Assert-AihTrue ([bool]$museEntry.selectable) 'Muse is selectable in editor state'
+    Assert-AihTrue ([bool]$museEntry.runnable) 'Muse is runnable in editor state'
     Assert-AihEqual $museEntry.availability 'ready' 'Muse availability=ready in editor state'
     Assert-AihTrue ($null-eq$museEntry.roles) 'Muse entry is NOT coerced into Dual roles'
     Assert-AihEqual $museEntry.muse.reasoning.default 'xhigh' 'Muse metadata exposes reasoning.default=xhigh'
     Assert-AihEqual $museEntry.muse.reasoning.escalation 'xhigh' 'Muse metadata exposes reasoning.escalation=xhigh (the Contributor ceiling, not the Standard-only max)'
     Assert-AihEqual $museEntry.muse.subagents.enabled $false 'Muse metadata exposes subagents.enabled=false'
     Assert-AihEqual $museEntry.muse.review.independent $false 'Muse metadata exposes review.independent=false'
-    Assert-AihEqual $museEntry.muse.contributorProtection.required $true 'Muse metadata exposes contributorProtection.required=true'
+    Assert-AihTrue ($null-eq$museEntry.muse.PSObject.Properties['contributorProtection']) 'Muse metadata contains no Contributor Protection configuration'
     Assert-AihEqual $museEntry.muse.status 'ready' 'Muse metadata exposes status=ready'
 
     # Muse selection is now accepted through the same profile editor contract.
     $museSelectRaw=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action select -InstallRoot $fixture -ProfileId 'muse-spark-1.3-contributor'
     $museSelect=$museSelectRaw|ConvertFrom-Json
-    Assert-AihEqual $museSelect.ok $true 'select Muse succeeds after the M5 activation gate'
+    Assert-AihEqual $museSelect.ok $true 'select Muse succeeds'
     Assert-AihEqual $museSelect.profileId 'muse-spark-1.3-contributor' 'select Muse reports the persisted user-facing Profile preference'
     $settingsAfterMuseSelect=Get-Content -Raw (Join-Path $fixture 'data/settings.yaml')
     Assert-AihTrue ([regex]::IsMatch($settingsAfterMuseSelect,'(?m)^engineering-profile:\s*muse-spark-1\.3-contributor')) 'Muse selection writes the settings key'

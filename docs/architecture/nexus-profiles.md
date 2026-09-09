@@ -1,6 +1,6 @@
 # Nexus profiles and agent engines
 
-Status: Phase M5 — Muse Contributor protection installed and the Muse profile ready.
+Status: Muse profile ready; Contributor Protection is not part of the execution path.
 
 ## Decision
 
@@ -61,7 +61,7 @@ Phase M1 must not change the runtime behavior of `deepseek-codex`, `glm-codex`, 
 
 Muse does **not** implement the Dual role schema. Its engine-specific configuration lives in `config/muse-profiles.json` and is resolved only when a top-level Nexus profile selects `engine: muse`.
 
-Muse-specific concepts such as same-model specialists, context compaction, reasoning escalation, and Contributor protection are introduced inside the Muse agent plane in later phases. They must not alter Dual routing semantics.
+Muse-specific concepts such as same-model specialists, context compaction, and reasoning escalation are introduced inside the Muse agent plane in later phases. They must not alter Dual routing semantics.
 
 ## Top-level catalog
 
@@ -100,7 +100,7 @@ selectable = false
 runnable   = false
 ```
 
-This prevented a partially implemented Muse profile from reaching the production agent/request path. Phase M2 added Meta provider/model transport and Phase M3 installed the first real Muse Agent Plane. Phase M5 now satisfies `contributorProtection.required` at the provider-egress boundary, so the production profile is `selectable = true`, `runnable = true`, and `availability = ready`. Security truth still outranks selectability: unsupported adapter versions or hashes, a missing guard, target mismatches, and unsafe payload shapes fail closed. See [muse-agent-plane-v0.md](muse-agent-plane-v0.md).
+This prevented a partially implemented Muse profile from reaching the production agent/request path. Phase M2 added Meta provider/model transport and Phase M3 installed the first real Muse Agent Plane. The production profile is now `selectable = true`, `runnable = true`, and `availability = ready`. Controller binding, engine isolation, target completeness, reasoning capability, and provider-route checks remain fail closed. See [muse-agent-plane-v0.md](muse-agent-plane-v0.md).
 
 ## Phase M2: Meta Model API provider transport
 
@@ -150,9 +150,9 @@ Verified against the official **Meta Model API cookbook** (github.com/meta-model
 M2 could not verify the Contributor checkpoint on a direct Meta source and registered only the Standard checkpoint. **M2.1 resolved the open question against the official Meta model documentation (dev.meta.ai/docs): the two checkpoints are distinct registered products with distinct ids and distinct limits.**
 
 - `muse-spark-1.3` — Standard checkpoint. M2's registered target; retained as the documented Standard id.
-- `muse-spark-1.3-contributor` — Contributor checkpoint. Permits Meta to train on prompts/completions; carries a **131072-token hard output ceiling** (verified before registration) and requires contributor-grade outbound protection.
+- `muse-spark-1.3-contributor` — Contributor checkpoint. Permits Meta to train on prompts/completions and carries a **131072-token hard output ceiling** (verified before registration).
 
-M2.1 retargeted Nexus to the Contributor checkpoint: the registry entry is `muse-spark-1.3-contributor` with `dataUseTier: "contributor"` and `contributorProtection.required: true`. The tier is declared metadata (never inferred from the model-name string), so the later outbound-sanitization phase (M5) consumes the declaration. The `dataUseTier: "standard"` registration of M2 remains the documented prior state that the M2.1 settings migration upgrades in place.
+M2.1 retargeted Nexus to the Contributor checkpoint: the registry entry is `muse-spark-1.3-contributor` with `dataUseTier: "contributor"`. The tier is declared metadata (never inferred from the model-name string) and remains visible in routing records. The `dataUseTier: "standard"` registration of M2 remains the documented prior state that the M2.1 settings migration upgrades in place.
 
 ### Reasoning mapping (provider boundary)
 
@@ -209,7 +209,7 @@ $env:NEXUS_META_LIVE_TEST = '1'
 powershell -File scripts/MuseProvider.ps1 -Action probe -InstallRoot <root> -Live
 ```
 
-The probe resolves the provider route and credential REFERENCE from live configuration (never a hardcoded URL), then proves: config resolution, credentials detection, text round trip, streaming deltas + termination + usage chunk, tool-call contract, reasoning mapping on the wire, normalized 401/429/5xx/timeout/malformed-stream/interrupted-stream handling, and secret hygiene (no key material in any record). Live requests are a handful of tiny synthetic prompts ("Reply with exactly the word NEXUS.", a fake `get_test_temperature` tool); no repository source, user data, or credentials are ever sent — Contributor protection is a later security phase.
+The probe resolves the provider route and credential REFERENCE from live configuration (never a hardcoded URL), then proves: config resolution, credentials detection, text round trip, streaming deltas + termination + usage chunk, tool-call contract, reasoning mapping on the wire, normalized 401/429/5xx/timeout/malformed-stream/interrupted-stream handling, and secret hygiene (no key material in any record). Live requests are a handful of tiny synthetic prompts ("Reply with exactly the word NEXUS.", a fake `get_test_temperature` tool); no repository source, user data, or credentials are sent by the probe.
 
 The production Muse execution path (M3+) will ride the same settings.yaml route through the DSH substrate (dsh-llm-pi-ai); the probe validates that route's wire contract. The probe never executes tools, never builds agent history, and holds no completion authority.
 

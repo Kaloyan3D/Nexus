@@ -95,7 +95,7 @@ function museState(taskId, instanceId, overrides) {
     preset: 'aih-muse', engine: 'muse', executionClass: 'engineer_normal', role: null,
     profile: 'muse-spark-1.3-contributor', profileDisplayName: 'Muse Spark 1.3 Contributor',
     provider: 'meta-model-api', model: 'muse-spark-1.3-contributor', modelDisplayName: 'Muse Spark 1.3 Contributor',
-    reasoning: 'xhigh', dataUseTier: 'contributor', contributorProtectionRequired: true,
+    reasoning: 'xhigh', dataUseTier: 'contributor',
   }, overrides || {});
 }
 

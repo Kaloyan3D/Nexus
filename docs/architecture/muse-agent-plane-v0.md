@@ -1,6 +1,6 @@
 # Muse Agent Plane V0 (Muse Spark 1.3 Contributor)
 
-Status: Phase M5 — protected Muse execution plane. The profile is `selectable = true`, `runnable = true`, and `availability = ready`; see [Activation policy](#activation-policy).
+Status: Muse execution plane ready. The profile is `selectable = true`, `runnable = true`, and `availability = ready`; see [Activation policy](#activation-policy).
 
 Task reference: TASK-0040.
 
@@ -41,7 +41,6 @@ Nexus Profile (engine: muse)
 `Resolve-AihMuseRoutingTarget` (scripts/Routing.ps1) is the only Muse model-identity resolver. Every incomplete or unavailable input fails closed with a stable reason:
 
 - active profile unresolvable, not a muse profile, or not runnable;
-- `contributorProtection.required` set without the operator acknowledgement (see below);
 - registry entry missing, disabled, or not scoped to the muse engine;
 - profile reasoning default/escalation not in the model's `supportedReasoningLevels`;
 - provider route absent from the live settings document.
@@ -75,25 +74,13 @@ Muse never invokes Codex as reviewer, fallback, repair agent, or worker. Visual 
 - **Output bound**: `Muse-Isolation.cjs` caps every root request at `MUSE_V0_MAX_OUTPUT_TOKENS = 32768` completion tokens — the Nexus V0 effective maximum, deterministic and engine-owned. The vendor hard maximum for `muse-spark-1.3-contributor` (131072 completion tokens, configured in the managed settings route) is a separate, larger number and is NOT the Nexus budget. The bound is a ceiling: a smaller explicitly requested bound passes through; an absent one gets the 32768 default.
 - **Reasoning bound**: `xhigh` is the profile default AND the escalation ceiling in V0; the ceiling itself is validated against the registry at resolution time, so an unsupported ceiling fails closed before any execution.
 
-## Contributor safety (M5 truth)
+## Contributor data-use terms
 
-The Contributor checkpoint's terms permit Meta to train on prompts and completions. `muse-profiles.json` carries `contributorProtection.required: true` and the model registry carries `dataUseTier: contributor`; both survive end to end into the routing record (`dataUseTier`, `contributorProtectionRequired`) and the request boundary's target.
-
-Phase M5 installs outbound contributor protection immediately before the real pi-ai HTTP serialization boundary. The guard is scoped to the exact `meta-model-api` / `muse-spark-1.3-contributor` target, deep-clones and redacts the outgoing payload without mutating durable conversation state, preserves JSON serialization semantics for provider-native undefined/non-finite values, and rejects cyclic, binary, opaque, custom-prototype, or otherwise unsupported payloads. The adapter patch is pinned to the verified DSH/pi-ai versions and pristine hash; drift fails closed without modifying installed bytes.
-
-The runtime also retains the versioned operator acknowledgement gate:
-
-```yaml
-# operator-owned, versioned acknowledgement in data/settings.yaml
-muse-contributor-execution:
-  acknowledgement: accepted-v1
-```
-
-This is the minimal explicit operator-consent mechanism: Nexus never writes the key, the shipped template never contains it, a stale version (`accepted-v0`) fails closed, and the acknowledgement is checked on EVERY muse routing decision. Without it the plane is unreachable even with every other gate satisfied.
+The Contributor checkpoint's terms permit Meta to train on prompts and completions. The model registry retains `dataUseTier: contributor`, and that provider metadata survives into Muse routing records. Muse does not inspect, redact, reject, or transform conversation or tool-output payloads at egress; NUL, binary-like, and base64-like text therefore follows the normal provider transport path unchanged.
 
 ## Activation policy
 
-The Phase M5 activation decision is **ready with protection required**. `config/nexus-profiles.json` declares `selectable = true`, `runnable = true`, `availability = ready`; `muse-profiles.json` declares `status: ready`. This does not weaken `contributorProtection.required`: execution still requires the exact operator acknowledgement, a valid controller binding and target, the installed guard, and a verified provider adapter. Any failed gate rejects the request with no provider/model/engine fallback.
+`config/nexus-profiles.json` declares `selectable = true`, `runnable = true`, `availability = ready`; `muse-profiles.json` declares `status: ready`. Execution still requires a valid controller binding and complete Muse target. Invalid engine identity, missing routing state, unsupported reasoning, or a missing provider route continues to reject the request with no provider/model/engine fallback.
 
 ## Persona
 
@@ -114,5 +101,5 @@ Every Muse routing decision persists a version-4 record with the full identity: 
 
 ## Verification
 
-- `scripts/Test-Harness.ps1` suites `MuseAgentPlane` (routing: dispatch seam, target exactness, fail-closed chains, consent gate, review isolation, bounded retry, identity parity, single-seam structural check, dual byte-compat), `MuseIsolation` (request boundary: engine invariant, no-fallback, output bound, no worker exemption, shellEnv), `NexusEngineContract` (client engine mapping), `SetupUpgrade` (aih-muse build contract + built-artifact delegation scan), `NexusProfiles` (catalog agentPreset validation), plus all pre-existing Dual suites as regression.
+- `scripts/Test-Harness.ps1` suites `MuseAgentPlane` (routing: dispatch seam, target exactness, fail-closed chains, review isolation, bounded retry, identity parity, single-seam structural check, dual byte-compat), `MuseIsolation` (request boundary: engine invariant, no-fallback, output bound, no worker exemption, Git/tool-output pass-through, shellEnv), `MuseEgressCleanup` (retired adapter-hook removal), `NexusEngineContract` (client engine mapping), `SetupUpgrade` (aih-muse build contract + built-artifact delegation scan), `NexusProfiles` (catalog agentPreset validation), plus all pre-existing Dual suites as regression.
 - Live acceptance (when `MODEL_API_KEY` is available): provider probe with `NEXUS_META_LIVE_TEST=1`, then one bounded real M3 execution proving telemetry identity, the tool surface, a real tool call, and controller-owned verification/completion.

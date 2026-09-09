@@ -79,7 +79,8 @@ function main() {
     assert.equal(muse.availability, 'ready')
     assert.equal(muse.config.reasoning.default, 'xhigh')
     assert.equal(muse.config.subagents.enabled, false)
-    pass('Muse resolves to its own ready single-agent engine with Contributor protection required')
+    assert.equal('contributorProtection' in muse.config, false)
+    pass('Muse resolves to its own ready single-agent engine without Contributor Protection configuration')
 
     assert.equal(nexusProfiles.resolveNexusProfile(repoRoot, 'does-not-exist'), null)
     pass('unknown profile fails closed with no fallback')
@@ -189,9 +190,9 @@ function main() {
     assert.equal(adapterMuse.muse.reasoning.escalation, 'xhigh', 'escalation is the Contributor ceiling xhigh, not the Standard-only max')
     assert.equal(adapterMuse.muse.subagents.enabled, false)
     assert.equal(adapterMuse.muse.review.independent, false)
-    assert.equal(adapterMuse.muse.contributorProtection.required, true)
+    assert.equal('contributorProtection' in adapterMuse.muse, false)
     assert.equal(adapterMuse.muse.status, 'ready')
-    pass('Muse metadata is exposed from the ready protected Muse registry')
+    pass('Muse metadata is exposed from the ready Muse registry without Contributor Protection configuration')
 
     // 3. Custom save still classifies as Dual in the Nexus list
     writeJson(path.join(fixture, 'data', 'custom-engineering-profile.json'), {
@@ -311,7 +312,7 @@ function main() {
     ]
     const nexusEntries = [
       { id: 'glm-codex', displayName: 'GLM + Codex', engine: 'dual', selectable: true, runnable: true, availability: 'ready', source: { kind: 'engineering-profile', profileId: 'glm-codex' }, builtin: true, roles: glmRoles, muse: null },
-      { id: 'muse-spark-1.3-contributor', displayName: 'Muse Spark 1.3 Contributor', engine: 'muse', selectable: false, runnable: false, availability: 'contributor-gated', source: { kind: 'muse-profile', profileId: 'muse-spark-1.3-contributor' }, builtin: true, roles: null, muse: { id: 'muse-spark-1.3-contributor', displayName: 'Muse Spark 1.3 Contributor', status: 'contributor-gated', reasoning: { default: 'xhigh', escalation: 'xhigh' }, subagents: { enabled: false }, review: { independent: false }, contributorProtection: { required: true } } },
+      { id: 'muse-spark-1.3-contributor', displayName: 'Muse Spark 1.3 Contributor', engine: 'muse', selectable: false, runnable: false, availability: 'unavailable', source: { kind: 'muse-profile', profileId: 'muse-spark-1.3-contributor' }, builtin: true, roles: null, muse: { id: 'muse-spark-1.3-contributor', displayName: 'Muse Spark 1.3 Contributor', status: 'unavailable', reasoning: { default: 'xhigh', escalation: 'xhigh' }, subagents: { enabled: false }, review: { independent: false } } },
     ]
     function editorFixture(selectedProfile, selectedEngine, selectedSelectable, roles) {
       return {
@@ -340,13 +341,13 @@ function main() {
       assert.ok(!museHtml.includes(label), 'Muse renders no Dual role row: ' + label)
     }
     assert.equal((museHtml.match(/<select/g) || []).length, 1, 'Muse renders ONLY the profile dropdown (no empty role dropdowns)')
-    for (const text of ['>Engine<', '>Status<', 'Contributor-gated', '>Reasoning<', 'xhigh', '>Max Reasoning<', '>xhigh<', '>Subagents<', 'Disabled', '>Independent Review<', 'Not available', '>Execution<']) {
+    for (const text of ['>Engine<', '>Status<', 'Unavailable', '>Reasoning<', 'xhigh', '>Max Reasoning<', '>xhigh<', '>Subagents<', 'Disabled', '>Independent Review<', 'Not available', '>Execution<']) {
       assert.ok(museHtml.includes(text), 'Muse metadata rendered: ' + text)
     }
     assert.ok(museHtml.includes('disabled'), 'Muse Select button is disabled')
     assert.ok(museHtml.includes('profile-not-selectable'), 'Muse Select button names the deterministic rejection code')
     assert.ok(museHtml.includes('not selectable yet'), 'Muse renders the not-selectable hint')
-    assert.ok(museHtml.includes('Muse Spark 1.3 Contributor \u2014 contributor-gated'), 'Muse dropdown option visibly carries its contributor-gated state')
+    assert.ok(museHtml.includes('Muse Spark 1.3 Contributor \u2014 unavailable'), 'Muse dropdown option visibly carries its unavailable state')
     pass('client renders Muse as read-only foundation metadata without a Dual role editor')
 
     // 6b. Dual: the exact legacy editor surface (11 selects, role rows, enabled save)
@@ -455,12 +456,12 @@ function main() {
     assert.equal(selectableMuseAdapter.runnable, false, 'runnable stays independent of selectable')
     pass('hypothetical selectable Muse passes the adapter layer (fixture override only)')
 
-    // 11. production Muse activation truth after M5
+    // 11. production Muse activation truth
     const productionMuse = adapterState.nexusProfiles.find((p) => p.id === 'muse-spark-1.3-contributor')
-    assert.equal(productionMuse.selectable, true, 'production Muse is selectable after M5')
-    assert.equal(productionMuse.runnable, true, 'production Muse is runnable after M5')
+    assert.equal(productionMuse.selectable, true, 'production Muse is selectable')
+    assert.equal(productionMuse.runnable, true, 'production Muse is runnable')
     assert.equal(productionMuse.availability, 'ready', 'production Muse availability is ready')
-    pass('production Muse availability agrees with the completed Contributor gate')
+    pass('production Muse availability is ready')
 
     // 12. resolver parity: missing muse-profiles.json → the Muse entry is
     //     omitted entirely (never partially resolved with muse: null)

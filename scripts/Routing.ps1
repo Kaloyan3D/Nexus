@@ -378,23 +378,6 @@ function Get-AihMuseRoutingSignals {
 # provider/model/reasoning, NO Dual role semantics, and NO reviewer: every
 # incomplete or unavailable input fails closed with a stable reason.
 
-# The versioned operator acknowledgement that satisfies
-# contributorProtection.required in M3. Contributor outbound sanitization is
-# Phase M5; until it exists, executing the Contributor checkpoint requires
-# this EXPLICIT operator consent in the live settings document. Nexus never
-# writes this key itself and the shipped template never contains it.
-$script:MuseContributorAcknowledgement = 'accepted-v1'
-
-function Test-AihMuseContributorAcknowledgement {
-    # Fail closed: $false unless the live settings document carries the exact
-    # versioned acknowledgement. Never reads or logs any credential value.
-    param([string]$SettingsPath)
-    if([string]::IsNullOrWhiteSpace($SettingsPath)-or-not(Test-Path -LiteralPath $SettingsPath)){return $false}
-    $settingsText=Get-Content -Raw -Encoding UTF8 -LiteralPath $SettingsPath
-    $match=[regex]::Match($settingsText,'(?m)^muse-contributor-execution:[\t]*\r?\n[ \t]+acknowledgement:[ \t]*([^\s#\r\n]+)')
-    return ($match.Success -and $match.Groups[1].Value.Trim() -eq $script:MuseContributorAcknowledgement)
-}
-
 function Test-AihMuseProviderRouteConfigured {
     # Text-level structural check that the provider route exists as a
     # settings.yaml llm-pi-ai.providers entry (a column-4 key inside the
@@ -410,8 +393,8 @@ function Test-AihMuseProviderRouteConfigured {
 function Resolve-AihMuseRoutingTarget {
     # Muse-native target resolution for the ROUTING plane (the one place Muse
     # model identity is resolved). Fails CLOSED with a stable reason on every
-    # incomplete/unavailable input. Returns the complete target plus the
-    # Contributor metadata the routing record must carry end to end.
+    # incomplete/unavailable input. Returns the complete target plus its
+    # declared provider data-use tier.
     param(
         [Parameter(Mandatory=$true)][string]$InstallRoot,
         [Parameter(Mandatory=$true)][string]$PresetId,
@@ -423,21 +406,12 @@ function Resolve-AihMuseRoutingTarget {
     if($null-eq$active){throw "Muse routing rejected: the active Nexus profile could not be resolved (preset '$PresetId')."}
     if([string]$active.Engine -ne 'muse'){throw "Muse routing rejected: active profile '$($active.Id)' is not a muse-engine profile."}
     if(-not[bool]$active.Runnable){throw "Muse routing rejected: profile '$($active.Id)' is not runnable (runnable=false)."}
-    # 2. Contributor activation gate (M3 truth: protection is NOT implemented
-    #    in M3 — Phase M5 owns outbound sanitization — so execution requires
-    #    the explicit operator acknowledgement while contributorProtection
-    #    stays REQUIRED. The metadata is consumed, never erased or weakened).
-    $protectionRequired=$true
-    if($null-ne$active.Config-and$null-ne$active.Config.PSObject.Properties['contributorProtection']-and$null-ne$active.Config.contributorProtection.PSObject.Properties['required']){$protectionRequired=[bool]$active.Config.contributorProtection.required}
-    if($protectionRequired-and-not(Test-AihMuseContributorAcknowledgement -SettingsPath $SettingsPath)){
-        throw 'Muse routing rejected: contributorProtection.required is set and no operator acknowledgement exists (add the versioned muse-contributor-execution acknowledgement to data/settings.yaml). Contributor terms permit Meta to train on prompts and completions; outbound sanitization is Phase M5.'
-    }
-    # 3. Registry resolution: engine-scoped model, supported reasoning level.
+    # 2. Registry resolution: engine-scoped model, supported reasoning level.
     $registryPath=Join-Path $root 'config/model-registry.json'
     $registry=Get-AihModelRegistry $registryPath
     $target=Resolve-AihMuseProfileModel -MuseProfile $active.Config -Registry $registry
     if($null-eq$target){throw "Muse routing rejected: the Muse profile '$($active.Id)' target chain is incomplete (profile -> model registry -> provider)."}
-    # 4. Reasoning bound: the profile's escalation ceiling must itself be a
+    # 3. Reasoning bound: the profile's escalation ceiling must itself be a
     #    level the model supports (fail closed at resolution time, never at
     #    escalation time). V0 performs no dynamic escalation: the resolved
     #    reasoning IS the profile default, bounded by this ceiling.
@@ -451,7 +425,7 @@ function Resolve-AihMuseRoutingTarget {
             if(@($levels|Where-Object{$_-eq$escalation}).Count-eq0){throw "Muse routing rejected: profile escalation reasoning '$escalation' is not supported by model '$($target.ModelId)'."}
         }
     }
-    # 5. The provider route must be configured in the live settings document.
+    # 4. The provider route must be configured in the live settings document.
     if(-not(Test-AihMuseProviderRouteConfigured -SettingsPath $SettingsPath -ProviderId ([string]$target.Provider))){
         throw "Muse routing rejected: provider route '$($target.Provider)' is not configured in settings.yaml llm-pi-ai.providers."
     }
@@ -465,7 +439,6 @@ function Resolve-AihMuseRoutingTarget {
         Provider=[string]$target.Provider
         Reasoning=if([string]::IsNullOrWhiteSpace([string]$target.Reasoning)){$null}else{[string]$target.Reasoning}
         DataUseTier=$target.DataUseTier
-        ContributorProtectionRequired=$protectionRequired
     }
 }
 
@@ -511,10 +484,10 @@ function Invoke-AihMuseRoutingDecision {
         # engineering turn; no Dual execution-class decision is consulted.
         $installRoot=Split-Path -Parent (Split-Path -Parent $PolicyPath)
         $target=Resolve-AihMuseRoutingTarget -InstallRoot $installRoot -PresetId $resolved.Id -SettingsPath $SettingsPath
-        $record=[ordered]@{recordVersion=4;recordId=[guid]::NewGuid().ToString('N');timestampUtc=[DateTime]::UtcNow.ToString('o');taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;description=$Description;preset=$resolved.Id;engine='muse';selectedExecutionClass=$current;executionClass=$current;role=$null;profile=$target.ProfileId;profileDisplayName=$target.ProfileDisplayName;provider=$target.Provider;model=$target.Model;modelDisplayName=$target.ModelDisplayName;vendor=$target.Vendor;reasoning=$target.Reasoning;dataUseTier=$target.DataUseTier;contributorProtectionRequired=[bool]$target.ContributorProtectionRequired;writable=$true;risk=$risk;reviewRequired=$false;reviewRequested=[bool]$ReviewRequested;reason=$reason;escalatedFrom=$null;manualOverride=$false;signal=$Signal;failureSignature=$signature;sameFailureCount=$sameCount;matchedRule=$initial.RuleId;matchedPatterns=@($initial.MatchedPatterns);freshSession=$true;completionAuthority=$false;selectedTier=$null;legacyTierDeprecated=$true;dryRun=[bool]$DryRun}
+        $record=[ordered]@{recordVersion=4;recordId=[guid]::NewGuid().ToString('N');timestampUtc=[DateTime]::UtcNow.ToString('o');taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;description=$Description;preset=$resolved.Id;engine='muse';selectedExecutionClass=$current;executionClass=$current;role=$null;profile=$target.ProfileId;profileDisplayName=$target.ProfileDisplayName;provider=$target.Provider;model=$target.Model;modelDisplayName=$target.ModelDisplayName;vendor=$target.Vendor;reasoning=$target.Reasoning;dataUseTier=$target.DataUseTier;writable=$true;risk=$risk;reviewRequired=$false;reviewRequested=[bool]$ReviewRequested;reason=$reason;escalatedFrom=$null;manualOverride=$false;signal=$Signal;failureSignature=$signature;sameFailureCount=$sameCount;matchedRule=$initial.RuleId;matchedPatterns=@($initial.MatchedPatterns);freshSession=$true;completionAuthority=$false;selectedTier=$null;legacyTierDeprecated=$true;dryRun=[bool]$DryRun}
         if(-not$DryRun){
             New-Item -ItemType Directory -Force -Path (Join-Path $DataRoot 'states')|Out-Null
-            $newState=[ordered]@{taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;preset=$resolved.Id;engine='muse';executionClass=$current;selectedTier=$null;role=$null;profile=$target.ProfileId;profileDisplayName=$target.ProfileDisplayName;provider=$target.Provider;model=$target.Model;modelDisplayName=$target.ModelDisplayName;reasoning=$target.Reasoning;dataUseTier=$target.DataUseTier;contributorProtectionRequired=[bool]$target.ContributorProtectionRequired;risk=$risk;reviewRequired=$false;reviewRequested=[bool]$ReviewRequested;lastFailureSignature=$signature;sameFailureCount=$sameCount;updatedAtUtc=[DateTime]::UtcNow.ToString('o')}
+            $newState=[ordered]@{taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;preset=$resolved.Id;engine='muse';executionClass=$current;selectedTier=$null;role=$null;profile=$target.ProfileId;profileDisplayName=$target.ProfileDisplayName;provider=$target.Provider;model=$target.Model;modelDisplayName=$target.ModelDisplayName;reasoning=$target.Reasoning;dataUseTier=$target.DataUseTier;risk=$risk;reviewRequired=$false;reviewRequested=[bool]$ReviewRequested;lastFailureSignature=$signature;sameFailureCount=$sameCount;updatedAtUtc=[DateTime]::UtcNow.ToString('o')}
             Write-AihAtomicJson $statePath $newState
             Add-AihJsonLine (Join-Path $DataRoot 'decisions.jsonl') $record
         }
