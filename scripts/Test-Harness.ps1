@@ -70,7 +70,7 @@ $suites = @(
     [ordered]@{ name='MuseReasoningSignals'; script='tests/MuseReasoningSignals.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='MuseReasoningActivity'; script='tests/MuseReasoningActivity.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='MuseIsolation'; script='tests/MuseIsolation.Tests.cjs'; executable=$layout.Node; kind='node' },
-    [ordered]@{ name='MuseContributorProtection'; script='tests/MuseContributorProtection.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='MuseEgressCleanup'; script='tests/MuseEgressCleanup.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='NexusEngineContract'; script='tests/NexusEngineContract.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='EpistemicProductionHardening'; script='tests/EpistemicProductionHardening.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='AihControllerIdentity'; script='tests/AihControllerIdentity.Tests.cjs'; executable=$layout.Node; kind='node' },

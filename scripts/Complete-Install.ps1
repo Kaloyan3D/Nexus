@@ -38,10 +38,11 @@ if ($ResetManagedSettings -or -not (Test-Path -LiteralPath $layout.Settings)) {
 . (Join-Path $layout.Scripts 'SettingsMigration.ps1')
 $managedSettingsMigration = Sync-AihManagedSettings -TemplatePath (Join-Path $layout.Config 'settings.yaml') -SettingsPath $layout.Settings -ModelRegistryPath $layout.ModelRegistry
 
-# Phase M5: exact-version, exact-hash provider-egress protection for Muse Contributor.
-& $layout.Node (Join-Path $layout.Scripts 'Patch-MuseContributorEgress.cjs') $InstallRoot
+# Remove the retired Muse Contributor egress hook from installations upgraded
+# from versions that patched the provider adapter in place.
+& $layout.Node (Join-Path $layout.Scripts 'Remove-MuseContributorEgressPatch.cjs') $InstallRoot
 if ($LASTEXITCODE -ne 0) {
-    throw "Muse Contributor provider-egress protection could not be installed."
+    throw "The retired Muse Contributor provider-egress hook could not be removed."
 }
 
 # data/cordis.patch.yml is managed by the installer. Sync it before the Nexus

@@ -77,7 +77,6 @@ function museState(overrides) {
     modelDisplayName: 'Muse Spark 1.3 Contributor',
     reasoning: 'xhigh',
     dataUseTier: 'contributor',
-    contributorProtectionRequired: true,
   }, overrides || {})
 }
 
@@ -120,7 +119,7 @@ async function main() {
     assert.equal(target.profile, 'muse-spark-1.3-contributor')
     assert.equal(target.engine, 'muse')
     assert.equal(target.dataUseTier, 'contributor')
-    assert.equal(target.contributorProtectionRequired, true)
+    assert.equal('contributorProtectionRequired' in target, false)
     assert.equal(target.source, 'routing-state')
     pass('2: controllerTargetFor enforces the complete controller-produced muse target')
 
@@ -188,6 +187,19 @@ async function main() {
     assert.equal(enforced.maxTokens, 32768)
     assert.ok(Object.isFrozen(enforced))
     pass('6: request boundary enforces the muse target (adaptive medium) and caps vendor 131072 at the 32768 V0 bound')
+
+    const guardSymbol = Symbol.for('nexus.museContributorPayloadGuard.v1')
+    assert.equal(globalThis[guardSymbol], undefined)
+    const toolOutput = 'git diff --binary\0GIT binary patch\nliteral 3\nYWJj\nbase64-like: SGVsbG8gV29ybGQ='
+    const outputRequest = await runRequest(ctx, session, {
+      provider: 'x',
+      model: 'y',
+      reasoningEffort: 'max',
+      messages: [{ role: 'tool', content: toolOutput }],
+    })
+    assert.equal(outputRequest.messages[0].content, toolOutput)
+    assert.equal(globalThis[guardSymbol], undefined)
+    pass('6a: normal Git/tool output passes byte-for-byte without installing a contributor payload guard')
     const smaller = await runRequest(ctx, session, { provider: 'x', model: 'y', reasoningEffort: 'max', maxTokens: 1024 })
     assert.equal(smaller.maxTokens, 1024)
     pass('6b: the V0 bound is a ceiling — a smaller requested bound passes through')

@@ -93,7 +93,6 @@ function museState(overrides) {
     modelDisplayName: 'Muse Spark 1.3 Contributor',
     reasoning: 'xhigh',
     dataUseTier: 'contributor',
-    contributorProtectionRequired: true,
   }, overrides || {});
 }
 

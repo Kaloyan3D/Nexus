@@ -756,7 +756,7 @@ async function runBridgeEndToEnd() {
     const museWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-engine-muse-e2e-'))
     try {
       fs.writeFileSync(path.join(museWorkspace, 'package.json'), JSON.stringify({ private: true, scripts: { test: 'node -e "process.exit(0)"' } }))
-      const museSettings = fs.readFileSync(path.join(installRoot, 'config', 'settings.yaml'), 'utf8') + '\nmuse-contributor-execution:\n  acknowledgement: accepted-v1\n'
+      const museSettings = fs.readFileSync(path.join(installRoot, 'config', 'settings.yaml'), 'utf8')
       fs.writeFileSync(path.join(dataHome, 'settings.yaml'), museSettings)
       const preStepMuse = boot()
       const museSession = {
