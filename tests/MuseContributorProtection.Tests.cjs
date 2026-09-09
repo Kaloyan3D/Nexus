@@ -148,28 +148,47 @@ function main() {
     (error) => error.code === 'nexus-muse-contributor-cyclic-payload'
   )
 
-  assert.throws(
-    () =>
-      protection.sanitizeContributorPayload({
-        messages: [{ role: 'user', content: Buffer.from('secret') }],
-      }),
-    (error) => error.code === 'nexus-muse-contributor-opaque-payload'
+  const binaryResult = protection.payloadGuard({
+    messages: [{ role: 'user', content: Buffer.from('secret') }],
+  }, exactTarget)
+  assert.equal(
+    binaryResult.messages[0].content,
+    protection.OPAQUE_REDACTION
+  )
+  assert.equal(JSON.stringify(binaryResult).includes('secret'), false)
+
+  const nulResult = protection.payloadGuard({
+    messages: [{ role: 'user', content: 'before\u0000hidden-after' }],
+  }, exactTarget)
+  assert.equal(
+    nulResult.messages[0].content,
+    protection.OPAQUE_REDACTION
+  )
+  assert.equal(nulResult.messages[0].content.includes('\u0000'), false)
+  assert.equal(nulResult.messages[0].content.includes('hidden-after'), false)
+  assert.ok(nulResult.messages[0].content.includes('retryable=false'))
+
+  const base64Result = protection.payloadGuard({
+    messages: [
+      {
+        role: 'user',
+        content: 'before data:application/octet-stream;base64,c2VjcmV0 after',
+      },
+    ],
+  }, exactTarget)
+  assert.equal(
+    base64Result.messages[0].content,
+    'before ' + protection.OPAQUE_REDACTION + ' after'
+  )
+  assert.equal(JSON.stringify(base64Result).includes('c2VjcmV0'), false)
+  assert.ok(base64Result.messages[0].content.includes('retryable=false'))
+  assert.deepEqual(
+    protection.payloadGuard(base64Result, exactTarget),
+    base64Result,
+    'a repeated egress pass must be stable and must not create a retry cycle'
   )
 
-  assert.throws(
-    () =>
-      protection.sanitizeContributorPayload({
-        messages: [
-          {
-            role: 'user',
-            content: 'data:image/png;base64,AAAA',
-          },
-        ],
-      }),
-    (error) => error.code === 'nexus-muse-contributor-opaque-payload'
-  )
-
-  pass('6: cyclic, binary, and opaque base64 payloads fail closed')
+  pass('6: cyclic payloads fail closed while binary, NUL, and inline base64 leaves are safely redacted')
 
   const pngDataUrl =
     'data:image/png;base64,' +
@@ -201,48 +220,43 @@ function main() {
   }, exactTarget)
   assert.equal(imageAndSecret.messages[0].content[1].image_url.url, pngDataUrl)
   assert.equal(JSON.stringify(imageAndSecret).includes('abcdefghijklmnopqrstuvwxyz012345'), false)
-  assert.throws(
-    () => protection.sanitizeContributorPayload({
-      messages: [{ role: 'user', content: pngDataUrl }],
-    }),
-    (error) => error.code === 'nexus-muse-contributor-opaque-payload'
-  )
-  assert.throws(
-    () => protection.sanitizeContributorPayload({
-      messages: [{
-        role: 'user',
-        content: [{
-          type: 'image_url',
-          image_url: { url: pngDataUrl, detail: 'auto' },
-        }],
+  const misplacedImage = protection.sanitizeContributorPayload({
+    messages: [{ role: 'user', content: pngDataUrl }],
+  })
+  assert.equal(misplacedImage.messages[0].content, protection.OPAQUE_REDACTION)
+
+  const expandedImageBlock = protection.sanitizeContributorPayload({
+    messages: [{
+      role: 'user',
+      content: [{
+        type: 'image_url',
+        image_url: { url: pngDataUrl, detail: 'auto' },
       }],
-    }),
-    (error) => error.code === 'nexus-muse-contributor-opaque-payload'
-  )
-  assert.throws(
-    () => protection.sanitizeContributorPayload({
-      messages: [{
-        role: 'user',
-        content: [{
-          type: 'image_url',
-          image_url: { url: 'data:application/octet-stream;base64,AAAA' },
-        }],
+    }],
+  })
+  assert.equal(expandedImageBlock.messages[0].content[0].image_url.url, protection.OPAQUE_REDACTION)
+
+  const opaqueImage = protection.sanitizeContributorPayload({
+    messages: [{
+      role: 'user',
+      content: [{
+        type: 'image_url',
+        image_url: { url: 'data:application/octet-stream;base64,AAAA' },
       }],
-    }),
-    (error) => error.code === 'nexus-muse-contributor-opaque-payload'
-  )
-  assert.throws(
-    () => protection.sanitizeContributorPayload({
-      messages: [{
-        role: 'user',
-        content: [{
-          type: 'image_url',
-          image_url: { url: 'data:image/png;base64,AAAA' },
-        }],
+    }],
+  })
+  assert.equal(opaqueImage.messages[0].content[0].image_url.url, protection.OPAQUE_REDACTION)
+
+  const invalidImage = protection.sanitizeContributorPayload({
+    messages: [{
+      role: 'user',
+      content: [{
+        type: 'image_url',
+        image_url: { url: 'data:image/png;base64,AAAA' },
       }],
-    }),
-    (error) => error.code === 'nexus-muse-contributor-opaque-payload'
-  )
+    }],
+  })
+  assert.equal(invalidImage.messages[0].content[0].image_url.url, protection.OPAQUE_REDACTION)
 
   assert.equal(
     protection.payloadGuard(imagePayload, {
@@ -300,16 +314,16 @@ function main() {
     () => protection.sanitizeContributorPayload({ value: 1n }),
     (error) => error.code === 'nexus-muse-contributor-invalid-payload'
   )
-  assert.throws(
-    () => protection.sanitizeContributorPayload({ value: new Uint8Array([1, 2]) }),
-    (error) => error.code === 'nexus-muse-contributor-opaque-payload'
+  assert.equal(
+    protection.sanitizeContributorPayload({ value: new Uint8Array([1, 2]) }).value,
+    protection.OPAQUE_REDACTION
   )
   assert.throws(
     () => protection.sanitizeContributorPayload({ value: new Date(0) }),
     (error) => error.code === 'nexus-muse-contributor-invalid-payload'
   )
 
-  pass('8: unsupported BigInt, typed-array, and custom-prototype values fail closed')
+  pass('8: typed-array leaves are redacted while unsupported BigInt and custom-prototype values fail closed')
 
   const first = protection.installPayloadGuard()
   const second = protection.installPayloadGuard()
