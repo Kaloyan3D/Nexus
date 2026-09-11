@@ -72,23 +72,12 @@ if ($oauthAvailable) {
 }
 if (-not $oauthAvailable) { Write-Warning 'Normal Engineering is unavailable in this Control Room process until ChatGPT/Codex OAuth is configured.' }
 
-Write-Host 'AI Harness: checking DeepSeek API (timeout: 20 seconds) ...'
+# Direct-provider availability is intentionally not resolved at startup. The
+# selected request route owns credential, connectivity, and model-availability
+# failures, so an unavailable DeepSeek deployment cannot take down unrelated
+# OpenAI, Muse, or local Harness work.
 $deepSeekKey = Get-AihDeepSeekKey $InstallRoot
-if ([string]::IsNullOrWhiteSpace($deepSeekKey)) {
-    throw "DeepSeek API key is not configured. Run: $(Get-AihLayoutLauncherPath -Layout $layout -Name 'aih-key')"
-}
-$deepSeekHeaders = @{ Authorization = "Bearer $deepSeekKey" }
-try {
-    $deepSeekModels = Invoke-RestMethod -Uri 'https://api.deepseek.com/models' -Headers $deepSeekHeaders -TimeoutSec 20
-}
-catch {
-    throw "Direct DeepSeek connectivity check failed: $($_.Exception.Message)"
-}
-if (@($deepSeekModels.data | ForEach-Object { $_.id }) -notcontains 'deepseek-v4-flash') {
-    throw 'Direct DeepSeek API is reachable, but deepseek-v4-flash is not listed for this credential.'
-}
-$deepSeekHeaders = $null
-Write-Host 'AI Harness: provider checks passed; preparing Web UI ...'
+Write-Host 'AI Harness: preparing Web UI ...'
 
 Set-AihControlRoomDefault -SettingsPath $layout.Settings -Mode $mode
 
