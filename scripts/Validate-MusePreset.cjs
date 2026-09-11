@@ -46,6 +46,16 @@ async function main() {
     }
   }
 
+  const requireFromPreset = createRequire(compositionPath)
+  for (const row of allRows) {
+    if (!row.name.startsWith('./') && !row.name.startsWith('../')) continue
+    try {
+      requireFromPreset(row.name)
+    } catch (error) {
+      fail(`local plugin failed to load: ${row.id || '<missing-id>'} (${row.name}): ${error.message}`)
+    }
+  }
+
   const requiredIds = ['aih-muse-isolation', 'aih-controller']
   for (const id of requiredIds) {
     const count = allRows.filter((row) => row.id === id).length
@@ -93,7 +103,12 @@ async function main() {
   if (typeof expression !== 'string' || !expression.includes('single engineering agent')) {
     fail('Muse persona did not parse as the expected !!js expression')
   }
-  process.stdout.write(JSON.stringify({ ok: true, rows: allRows.length, managedFiles: managed.length }))
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    rows: allRows.length,
+    localPluginsLoaded: allRows.filter((row) => row.name.startsWith('./') || row.name.startsWith('../')).length,
+    managedFiles: managed.length,
+  }))
 }
 
 main().catch((error) => {
