@@ -269,6 +269,19 @@ async function fixtureSnapshot(overrides = {}) {
 }
 
 async function main() {
+  {
+    const plugin = await import(pathToFileURL(HOST).href)
+    const singleFlight = plugin.createSingleFlight((value) => value.toLowerCase())
+    let executions = 0
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const first = singleFlight('C:\\Repo', async () => { executions += 1; await gate; return 'shared' })
+    const second = singleFlight('c:\\repo', async () => { executions += 1; return 'duplicate' })
+    release()
+    assert.deepEqual(await Promise.all([first, second]), ['shared', 'shared'])
+    assert.equal(executions, 1, 'workspace registration handler single-flights equivalent paths')
+  }
+
   // ── 1. empty state: no binding → idle, task null ─────────────────────────
   {
     const dataRoot = tmpDir('nexus-ctr-')

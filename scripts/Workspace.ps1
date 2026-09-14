@@ -51,30 +51,117 @@ function Get-AihWorkspaceForRepository {
         [Parameter(Mandatory = $true)][string]$SuggestedName
     )
 
-    $links = @(Get-AihWorkspaceRepositoryList -StoreRoot $StoreRoot -RepositoryId $RepositoryId)
-    if ($links.Count -gt 0) {
-        # Workspace document order is authoritative and stable. Never choose by
-        # incidental path or recency.
-        foreach ($workspace in @(Get-AihWorkspaceList -StoreRoot $StoreRoot)) {
-            if (@($links | Where-Object { $_.workspaceId -eq $workspace.workspaceId }).Count -gt 0) {
-                return $workspace
+    $store = Get-AihIntelligenceStoreRoot $StoreRoot
+    return Use-AihIntelligenceLock -StoreRoot $store -Script {
+        $links = @(Get-AihWorkspaceRepositoryList -StoreRoot $store -RepositoryId $RepositoryId)
+        if ($links.Count -gt 0) {
+            # Workspace document order is authoritative and stable. Never choose by
+            # incidental path or recency.
+            foreach ($workspace in @(Get-AihWorkspaceList -StoreRoot $store)) {
+                if (@($links | Where-Object { $_.workspaceId -eq $workspace.workspaceId }).Count -gt 0) {
+                    return $workspace
+                }
+            }
+            throw "Repository '$RepositoryId' has a dangling WorkspaceRepository link."
+        }
+
+        $name = if ([string]::IsNullOrWhiteSpace($SuggestedName)) { 'Workspace' } else { $SuggestedName }
+        $baseSlug = Get-AihSlugFromName $name
+        $slug = $baseSlug
+        $suffix = 1
+        $existingSlugs = @(Get-AihWorkspaceList -StoreRoot $store | ForEach-Object { $_.slug })
+        while ($existingSlugs -contains $slug) {
+            $suffix++
+            $slug = "$baseSlug-$suffix"
+        }
+        $workspace = New-AihWorkspace -StoreRoot $store -Name $name -Slug $slug
+        $null = Add-AihRepositoryToWorkspace -StoreRoot $store -WorkspaceId $workspace.workspaceId -RepositoryId $RepositoryId -Role 'primary'
+        return $workspace
+    }
+}
+
+function Get-AihNexusWorkspaceResolveFlightIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string]$StoreRoot,
+        [Parameter(Mandatory = $true)][string]$ExecutionRoot
+    )
+    $identityKey = (Get-AihPathCaseKey ([IO.Path]::GetFullPath($StoreRoot))) + '|' + (Get-AihPathCaseKey ([IO.Path]::GetFullPath($ExecutionRoot)))
+    return Get-AihSha256Text -Text $identityKey
+}
+
+function Use-AihNexusWorkspaceResolveFlight {
+    # Cross-process single-flight for overlapping resolves of one canonical
+    # execution root. The registry remains authoritative: the small result
+    # document is accepted only by callers whose request began before that
+    # result completed, then is never reused by later requests.
+    param(
+        [Parameter(Mandatory = $true)][string]$StoreRoot,
+        [Parameter(Mandatory = $true)][string]$ExecutionRoot,
+        [Parameter(Mandatory = $true)][DateTime]$RequestStartedAtUtc,
+        [Parameter(Mandatory = $true)][scriptblock]$Script
+    )
+
+    $store = Get-AihIntelligenceStoreRoot $StoreRoot
+    $flightId = Get-AihNexusWorkspaceResolveFlightIdentity -StoreRoot $store -ExecutionRoot $ExecutionRoot
+    $mutex = [Threading.Mutex]::new($false, ('AihWorkspaceResolve-' + $flightId.Substring(0, 24)))
+    $taken = $false
+    try {
+        try {
+            # A resolve flight has no arbitrary deadline: the underlying
+            # operation owns cancellation/timeout semantics. Process death is
+            # recovered through the abandoned-mutex path below.
+            $taken = $mutex.WaitOne()
+        }
+        catch [Threading.AbandonedMutexException] {
+            $taken = $true
+        }
+
+        $flightDirectory = Join-Path $store 'resolve-flights'
+        $flightPath = Join-Path $flightDirectory ($flightId + '.json')
+        if (Test-Path -LiteralPath $flightPath) {
+            try {
+                $completed = Get-Content -Raw -Encoding UTF8 -LiteralPath $flightPath | ConvertFrom-Json
+                $completedAt = [DateTime]::Parse([string]$completed.completedAtUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+                $sharedIdentity = $completed.identity
+                $sharedRootMatches = (Get-AihPathCaseKey ([IO.Path]::GetFullPath([string]$sharedIdentity.executionRoot))) -eq (Get-AihPathCaseKey ([IO.Path]::GetFullPath($ExecutionRoot)))
+                if ($completed.schemaVersion -eq 1 -and
+                    $completed.flightId -eq $flightId -and
+                    $completedAt -ge $RequestStartedAtUtc -and
+                    $null -ne $sharedIdentity -and
+                    -not ([string]::IsNullOrWhiteSpace([string]$sharedIdentity.workspaceId)) -and
+                    -not ([string]::IsNullOrWhiteSpace([string]$sharedIdentity.repositoryId)) -and
+                    -not ([string]::IsNullOrWhiteSpace([string]$sharedIdentity.checkoutId)) -and
+                    $sharedRootMatches) {
+                    return $sharedIdentity
+                }
+            }
+            catch {
+                # A partial/stale coordination document is not identity state;
+                # recompute from the authoritative registry.
             }
         }
-        throw "Repository '$RepositoryId' has a dangling WorkspaceRepository link."
-    }
 
-    $name = if ([string]::IsNullOrWhiteSpace($SuggestedName)) { 'Workspace' } else { $SuggestedName }
-    $baseSlug = Get-AihSlugFromName $name
-    $slug = $baseSlug
-    $suffix = 1
-    $existingSlugs = @(Get-AihWorkspaceList -StoreRoot $StoreRoot | ForEach-Object { $_.slug })
-    while ($existingSlugs -contains $slug) {
-        $suffix++
-        $slug = "$baseSlug-$suffix"
+        $identity = & $Script
+        try {
+            New-Item -ItemType Directory -Force -Path $flightDirectory | Out-Null
+            Write-AihAtomicJson -Path $flightPath -Value ([pscustomobject][ordered]@{
+                schemaVersion = 1
+                flightId = $flightId
+                completedAtUtc = [DateTime]::UtcNow.ToString('o')
+                identity = $identity
+            })
+        }
+        catch {
+            # Coordination is derived from the authoritative registry. If its
+            # result cannot be published, this caller still succeeds and a
+            # waiter safely recomputes instead of receiving stale state.
+        }
+        return $identity
     }
-    $workspace = New-AihWorkspace -StoreRoot $StoreRoot -Name $name -Slug $slug
-    $null = Add-AihRepositoryToWorkspace -StoreRoot $StoreRoot -WorkspaceId $workspace.workspaceId -RepositoryId $RepositoryId -Role 'primary'
-    return $workspace
+    finally {
+        if ($taken) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
 }
 
 function Resolve-AihNexusWorkspaceIdentity {
@@ -86,11 +173,8 @@ function Resolve-AihNexusWorkspaceIdentity {
 
     $store = Get-AihIntelligenceStoreRoot $StoreRoot
     $executionRoot = Get-AihCanonicalExecutionRoot -Path $Path
-    # One store-wide critical section covers repository registration AND the
-    # WorkspaceRepository link. Inner Phase 3.1 services use the same
-    # re-entrant named mutex, so concurrent browser tabs/processes cannot
-    # manufacture duplicate logical workspaces for one repository.
-    return Use-AihIntelligenceLock -StoreRoot $store -Script {
+    $requestStartedAtUtc = [DateTime]::UtcNow
+    return Use-AihNexusWorkspaceResolveFlight -StoreRoot $store -ExecutionRoot $executionRoot -RequestStartedAtUtc $requestStartedAtUtc -Script {
         $registered = Register-AihRepository -StoreRoot $store -Path $executionRoot
         $repository = $registered.repository
         $checkout = $registered.checkout
