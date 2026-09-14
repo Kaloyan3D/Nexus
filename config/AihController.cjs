@@ -578,6 +578,21 @@ function normalizeWorkspaceIdentity(workspace) {
   return normalized.toLowerCase()
 }
 
+function createSingleFlight(keyOf = (value) => String(value)) {
+  const flights = new Map()
+  return function runSingleFlight(value, operation) {
+    const key = keyOf(value)
+    const existing = flights.get(key)
+    if (existing) return existing
+    const run = Promise.resolve().then(operation)
+    flights.set(key, run)
+    run.finally(() => {
+      if (flights.get(key) === run) flights.delete(key)
+    }).catch(() => {})
+    return run
+  }
+}
+
 /**
  * Compare the workspace recorded in a binding with the CURRENT session
  * workspace. Returns 'workspace-mismatch' when they differ, null otherwise.
@@ -907,6 +922,7 @@ function apply(ctx) {
     })
   }
   const bindings = loadBindings(bindingsPath)
+  const resolveWorkspaceSingleFlight = createSingleFlight(normalizeWorkspaceIdentity)
 
   function log(entry) {
     try {
@@ -1033,15 +1049,17 @@ function apply(ctx) {
   }
 
   async function resolveWorkspaceIdentity(workspace) {
-    const identity = await invokePowerShell('NexusWorkspace.ps1', ['-Action', 'resolve'], {
-      payload: { path: workspace },
+    return resolveWorkspaceSingleFlight(workspace, async () => {
+      const identity = await invokePowerShell('NexusWorkspace.ps1', ['-Action', 'resolve'], {
+        payload: { path: workspace },
+      })
+      if (!identity || !identity.workspaceId || !identity.repositoryId || !identity.checkoutId || !identity.executionRoot || !identity.checkoutRootPath) {
+        const error = new Error('aih-controller: Phase 3.1 workspace identity could not be resolved')
+        error.code = 'session-workspace-identity-unavailable'
+        throw error
+      }
+      return identity
     })
-    if (!identity || !identity.workspaceId || !identity.repositoryId || !identity.checkoutId || !identity.executionRoot || !identity.checkoutRootPath) {
-      const error = new Error('aih-controller: Phase 3.1 workspace identity could not be resolved')
-      error.code = 'session-workspace-identity-unavailable'
-      throw error
-    }
-    return identity
   }
 
   async function routeTask(workspace, taskId, description, options = {}) {
@@ -2510,6 +2528,7 @@ module.exports.isWorkerAgent = isWorkerAgent
 module.exports.createControllerMessage = createControllerMessage
 module.exports.parseCliJson = parseCliJson
 module.exports.normalizeWorkspaceIdentity = normalizeWorkspaceIdentity
+module.exports.createSingleFlight = createSingleFlight
 module.exports.classifyBindingWorkspace = classifyBindingWorkspace
 module.exports.classifyBindingRepositoryIdentity = classifyBindingRepositoryIdentity
 module.exports.classifyBindingIdentity = classifyBindingIdentity

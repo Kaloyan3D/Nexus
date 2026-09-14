@@ -31,6 +31,21 @@ const name = 'nexus-controller'
 const GIT_TTL_MS = 10000
 const SETTINGS_TTL_MS = 10000
 
+function createSingleFlight(keyOf = (value) => String(value)) {
+  const flights = new Map()
+  return function runSingleFlight(value, operation) {
+    const key = keyOf(value)
+    const existing = flights.get(key)
+    if (existing) return existing
+    const run = Promise.resolve().then(operation)
+    flights.set(key, run)
+    run.finally(() => {
+      if (flights.get(key) === run) flights.delete(key)
+    }).catch(() => {})
+    return run
+  }
+}
+
 function apply(ctx) {
   // Cordis lifecycle injection: starts this callback once the webServer
   // service is available (immediately, or later when the service appears).
@@ -49,6 +64,10 @@ function apply(ctx) {
     if (!configuredRoot) throw new Error('Nexus install root is unavailable; launch through the repo-local aih entrypoint.')
     const installRoot = resolve(configuredRoot)
     const dataRoot = process.env.DSH_HOME ? resolve(process.env.DSH_HOME) : join(installRoot, 'data')
+    const resolveWorkspaceSingleFlight = createSingleFlight((workspacePath) => {
+      const canonical = resolve(String(workspacePath || ''))
+      return process.platform === 'win32' ? canonical.toLowerCase() : canonical
+    })
     // Platform-aware PowerShell host (mirror of scripts/Platform.ps1
     // Get-AihPowerShellHost): Windows keeps powershell.exe; POSIX prefers the
     // AIH_PWSH_HOST override, the setup.sh-pinned runtime/pwsh/pwsh, then a
@@ -545,17 +564,24 @@ function apply(ctx) {
       }
       let payloadPath = null
       try {
-        payloadPath = writePayloadFile({ path: workspacePath })
-        const result = await new Promise((resolvePromise) => {
-          execFile(
-            pwshHost,
-            ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'NexusWorkspace.ps1'), '-Action', 'resolve', '-PayloadFile', payloadPath],
-            { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
-            (error, stdout) => {
-              if (error) { resolvePromise(null); return }
-              try { resolvePromise(JSON.parse((stdout || '').trim())) } catch { resolvePromise(null) }
-            },
-          )
+        const result = await resolveWorkspaceSingleFlight(workspacePath, async () => {
+          payloadPath = writePayloadFile({ path: workspacePath })
+          try {
+            return await new Promise((resolvePromise) => {
+              execFile(
+                pwshHost,
+                ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(installRoot, 'scripts', 'NexusWorkspace.ps1'), '-Action', 'resolve', '-PayloadFile', payloadPath],
+                { timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+                (error, stdout) => {
+                  if (error) { resolvePromise(null); return }
+                  try { resolvePromise(JSON.parse((stdout || '').trim())) } catch { resolvePromise(null) }
+                },
+              )
+            })
+          } finally {
+            try { unlinkSync(payloadPath) } catch { /* best-effort cleanup */ }
+            payloadPath = null
+          }
         })
         if (!result || !result.workspaceId || !result.repositoryId || !result.checkoutId || !result.executionRoot) {
           respond(422, { ok: false, error: 'workspace-resolution-failed' })
@@ -596,4 +622,4 @@ function apply(ctx) {
   })
 }
 
-export { apply, name }
+export { apply, name, createSingleFlight }

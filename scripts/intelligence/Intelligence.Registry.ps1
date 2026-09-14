@@ -226,6 +226,18 @@ function Register-AihRepository {
     $checkoutRoot = if ($null -ne $gitRoot) { $gitRoot } else { $canonical }
     $rootKey = Get-AihPathCaseKey $checkoutRoot
 
+    # Git status/branch/HEAD probes can block for seconds or minutes on a
+    # large or unhealthy checkout. They are observations, not store
+    # mutations, so compute them before entering the store-wide transaction.
+    # The transaction below validates the current registry documents before
+    # atomically applying this candidate observation.
+    $observation = Get-AihCheckoutObservation -CheckoutRoot $checkoutRoot -Vcs $(if ($isGit) { 'git' } else { 'none' })
+    $nameCandidate = $Name
+    if ([string]::IsNullOrWhiteSpace($nameCandidate)) { $nameCandidate = Get-AihNexusConfigName -CheckoutRoot $checkoutRoot }
+    if ([string]::IsNullOrWhiteSpace($nameCandidate) -and $isGit -and $null -ne $remote) { $nameCandidate = Get-AihRemoteNameCandidate -Url $remote.url }
+    if ([string]::IsNullOrWhiteSpace($nameCandidate)) { $nameCandidate = (Split-Path -Leaf $checkoutRoot) }
+    $defaultBranch = if ($isGit) { & $git.GetDefaultBranch $checkoutRoot } else { $null }
+
     return Use-AihIntelligenceLock -StoreRoot $layout.Root -Script {
         $machine = Get-AihMachineIdentity -StoreRoot $StoreRoot
         $checkoutDocument = Get-AihIntCheckoutDocument -StoreRoot $StoreRoot
@@ -239,7 +251,6 @@ function Register-AihRepository {
             $checkout.lastSeenAt = $now
             $repository = @($repositoryDocument.repositories | Where-Object { $_.repositoryId -eq $checkout.repositoryId } | Select-Object -First 1)
             if (@($repository).Count -eq 0) { throw "Checkout references a missing repository: $($checkout.repositoryId)" }
-            $observation = Get-AihCheckoutObservation -CheckoutRoot $checkoutRoot -Vcs $repository[0].vcs
             $checkout.lastObservation = $observation
             Save-AihIntCheckoutDocument -StoreRoot $StoreRoot -Document $checkoutDocument
             return [pscustomobject]@{ repository = $repository[0]; checkout = $checkout; createdRepository = $false; createdCheckout = $false }
@@ -257,10 +268,6 @@ function Register-AihRepository {
             # a potentially incorrect merge. Explicit linking remains possible.
         }
         if ($null -eq $repository) {
-            $nameCandidate = $Name
-            if ([string]::IsNullOrWhiteSpace($nameCandidate)) { $nameCandidate = Get-AihNexusConfigName -CheckoutRoot $checkoutRoot }
-            if ([string]::IsNullOrWhiteSpace($nameCandidate) -and $isGit -and $null -ne $remote) { $nameCandidate = Get-AihRemoteNameCandidate -Url $remote.url }
-            if ([string]::IsNullOrWhiteSpace($nameCandidate)) { $nameCandidate = (Split-Path -Leaf $checkoutRoot) }
             $repository = [pscustomobject][ordered]@{
                 schemaVersion     = 1
                 repositoryId      = (New-AihIntelligenceId 'repo')
@@ -268,7 +275,7 @@ function Register-AihRepository {
                 vcs               = $(if ($isGit) { 'git' } else { 'none' })
                 canonicalRemote   = $(if ($null -ne $remote) { $remote.url } else { $null })
                 canonicalRemoteKey = $remoteKey
-                defaultBranch     = $(if ($isGit) { & $git.GetDefaultBranch $checkoutRoot } else { $null })
+                defaultBranch     = $defaultBranch
                 createdAt         = $now
                 updatedAt         = $now
             }
@@ -284,7 +291,6 @@ function Register-AihRepository {
             $siblings = @($checkoutDocument.checkouts | Where-Object { $_.repositoryId -eq $repository.repositoryId -and $_.machineId -eq $machine.machineId })
             if (@($siblings).Count -gt 0) { $kind = 'clone' }
         }
-        $observation = Get-AihCheckoutObservation -CheckoutRoot $checkoutRoot -Vcs $repository.vcs
         $checkout = [pscustomobject][ordered]@{
             schemaVersion    = 1
             checkoutId       = (New-AihIntelligenceId 'checkout')

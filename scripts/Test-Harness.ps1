@@ -47,6 +47,7 @@ $suites = @(
     [ordered]@{ name='VisualReview'; script='tests/VisualReview.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='VisualLoop'; script='tests/VisualLoop.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='NexusWorkspace'; script='tests/NexusWorkspace.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='Intelligence.Concurrency'; script='tests/Intelligence.Concurrency.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='NexusSkills'; script='tests/NexusSkills.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='Intelligence.Registry'; script='tests/Intelligence.Registry.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='Intelligence.Scanning'; script='tests/Intelligence.Scanning.Tests.ps1'; executable=$powershell; kind='powershell' },

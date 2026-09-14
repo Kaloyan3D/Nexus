@@ -11,6 +11,20 @@ function pluginMessage(text, form) {
 }
 
 async function main() {
+  {
+    const singleFlight = controller.createSingleFlight((value) => value.toLowerCase())
+    let executions = 0
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const first = singleFlight('C:\\Repo', async () => { executions += 1; await gate; return { id: 1 } })
+    const second = singleFlight('c:\\repo', async () => { executions += 1; return { id: 2 } })
+    assert.equal(executions, 0, 'single-flight schedules its operation asynchronously')
+    release()
+    const values = await Promise.all([first, second])
+    assert.equal(executions, 1, 'equivalent workspace resolutions execute once in the controller')
+    assert.deepEqual(values, [{ id: 1 }, { id: 1 }], 'all controller consumers receive the shared result')
+  }
+
   // 1. Explicit review command detection is deterministic (exact prefix, not
   //    keyword sniffing). /codex-review remains a compatibility alias of /review.
   assert.equal(controller.isReviewCommand('/codex-review audit the boundary'), true)
