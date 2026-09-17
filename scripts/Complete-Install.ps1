@@ -88,6 +88,7 @@ Copy-Item -LiteralPath (Join-Path $layout.Config 'DeepSeek-Isolation.cjs') -Dest
 Copy-Item -LiteralPath (Join-Path $layout.Config 'Engineering-Isolation.cjs') -Destination (Join-Path $targetPreset 'Engineering-Isolation.cjs') -Force
 foreach ($presetDirectory in @($targetPreset, $deepSeekPreset)) {
     Copy-Item -LiteralPath (Join-Path $layout.Config 'AihController.cjs') -Destination (Join-Path $presetDirectory 'AihController.cjs') -Force
+    Copy-Item -LiteralPath (Join-Path $layout.Config 'ContextCompaction.cjs') -Destination (Join-Path $presetDirectory 'ContextCompaction.cjs') -Force
     Copy-Item -LiteralPath (Join-Path $layout.Config 'Engineering-Profiles.cjs') -Destination (Join-Path $presetDirectory 'Engineering-Profiles.cjs') -Force
     $presetFile = Join-Path $presetDirectory 'agent.cordis.yml'
     $presetText = Get-Content -Raw -Encoding UTF8 -LiteralPath $presetFile
