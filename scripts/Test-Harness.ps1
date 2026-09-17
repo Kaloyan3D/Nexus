@@ -74,6 +74,7 @@ $suites = @(
     [ordered]@{ name='MuseIsolation'; script='tests/MuseIsolation.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionBridge'; script='tests/ContextCompactionBridge.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionAcceptance'; script='tests/ContextCompactionAcceptance.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompactionCrash'; script='tests/ContextCompactionCrash.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='MuseEgressCleanup'; script='tests/MuseEgressCleanup.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='NexusEngineContract'; script='tests/NexusEngineContract.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='EpistemicProductionHardening'; script='tests/EpistemicProductionHardening.Tests.cjs'; executable=$layout.Node; kind='node' },

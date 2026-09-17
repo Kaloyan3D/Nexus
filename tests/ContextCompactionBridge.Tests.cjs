@@ -180,5 +180,64 @@ pass('controller bridge owns the apply seam');
 assert.ok(bridge.includes('recordContextRootUsage'));
 pass('controller bridge owns root pressure recording');
 
+// ── F1: owned runtime context is identified, never frozen ──────────────────
+function rtxMessage(text) {
+  return { type: 'user/message', data: { role: 'user', content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt', form: 'snapshot' } } };
+}
+const rtxSession = fakeSession([
+  userMessage('bulk task'),
+  rtxMessage('Current runtime context. policy: workspace-write'),
+  assistantText('done'),
+]);
+assert.deepEqual(compaction.runtimeContextSeqsOf(rtxSession), [1]);
+pass('owned runtime snapshot seq is identified');
+assert.ok(!compaction.isRuntimeContextMessage(rtxSession.events[0]));
+pass('ordinary user text is not an owned snapshot');
+const frozenMinusRtx = compaction.withoutSeqs([0, 1], [1]);
+assert.deepEqual(frozenMinusRtx, [0]);
+pass('freeze excludes the owned snapshot from the shadowed range');
+const splitSession = fakeSession([
+  userMessage('bulk-a'),
+  { type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: 'stale rtx' }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt', form: 'snapshot' } } },
+  assistantText('bulk-b'),
+]);
+const splitSegs = compaction.splitRangeAroundOwned(splitSession, [0, 1, 2], [1]);
+assert.ok(splitSegs && splitSegs.length === 2);
+assert.deepEqual(splitSegs[0], { start: 0, end: 0, sourceEventSeqs: [0] });
+assert.deepEqual(splitSegs[1], { start: 2, end: 2, sourceEventSeqs: [2] });
+pass('frozen boundary splits into contiguous segments around owned nodes');
+assert.equal(compaction.splitRangeAroundOwned(splitSession, [1], [1]), null);
+pass('all-owned range yields no segments (KEEP)');
+assert.equal(compaction.splitRangeAroundOwned(splitSession, [], []), null);
+pass('empty shadowed span yields no segments');
+const orphanSession = fakeSession([
+  { type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'tool-call', name: 'run', callId: 'orphan' }] } } },
+  { type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: 'stale rtx' }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt', form: 'snapshot' } } },
+  { type: 'tool/result', data: { message: { content: [{ type: 'tool-result', toolCallId: 'orphan' }] } } },
+]);
+assert.equal(compaction.splitRangeAroundOwned(orphanSession, [0, 1, 2], [1]), null);
+pass('split that would orphan a tool pair refuses (KEEP)');
+// ── F2/F5: replacement addressed by operationId ───────────────────────────
+function checkpointReplacement(seq, operationId) {
+  return { seq, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: 'cp' }], source: { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', operationId } } };
+}
+const opSession = {
+  events: [
+    userMessage('a'),
+    Object.assign({ seq: 1 }, checkpointReplacement(1, 'ccop_deadbeef')),
+    userMessage('Task B intent'),
+  ].map((event, index) => Object.assign({ seq: index }, event)),
+};
+const found = compaction.findReplacementByOperation(opSession, 'ccop_deadbeef');
+assert.ok(found && found.seq === 1);
+pass('landed replacement resolves by operationId');
+assert.equal(compaction.findReplacementByOperation(opSession, 'ccop_other'), null);
+pass('unknown operationId resolves to nothing (no false reconcile)');
+const foreignForm = {
+  events: [{ seq: 0, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: 'x' }], source: { kind: 'plugin', plugin: 'aih-controller', form: 'controller-binding', operationId: 'ccop_deadbeef' } } }],
+};
+assert.equal(compaction.findReplacementByOperation(foreignForm, 'ccop_deadbeef'), null);
+pass('non-checkpoint forms never reconcile as replacements');
+
 console.log('RESULT: ' + passed + ' context compaction bridge assertions passed.');
 

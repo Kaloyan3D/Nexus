@@ -1545,6 +1545,22 @@ function apply(ctx) {
       sessionId,
     })
     await lifecycleCli('transition', binding, [], { to: 'checkpoint-ready', reason: 'checkpoint constructed and validated', sessionId, checkpointPath: checkpoint && checkpoint.path ? String(checkpoint.path) : null })
+    // Freeze the operation boundary NOW from the completion-time surface:
+    // at this point no Task B work can exist yet, so the frozen range owns
+    // exactly Task A bulk. Retry later reuses it verbatim, never recomputed.
+    const frozen = freezeCompactionBoundary(session)
+    if (frozen) {
+      await lifecycleCli('freeze-operation', binding, [], {
+        sessionId,
+        replacementStart: frozen.replacementStart,
+        replacementEnd: frozen.replacementEnd,
+        sourceEventSeqs: frozen.sourceEventSeqs,
+        checkpointPath: checkpoint && checkpoint.path ? String(checkpoint.path) : null,
+      })
+      await lifecycleCli('transition', binding, [], { to: 'apply-pending', reason: 'frozen operation persisted at completion; boundary owned by ' + binding.taskId, sessionId })
+    } else {
+      log({ event: 'context-compaction-freeze-deferred', sessionId, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId })
+    }
     const telemetry = await lifecycleCli('write-telemetry', binding, [], {
       sessionId,
       checkpointPath: checkpoint && checkpoint.path ? String(checkpoint.path) : null,
@@ -1554,12 +1570,101 @@ function apply(ctx) {
     return telemetry
   }
 
+  // Flush one session through the supported DSH durability barrier
+  // (ctx.sessions.flush -> session/flush -> write-behind drain). Returns
+  // true when at least one durability listener participated, false when no
+  // listener handled the session (detached/foreign session), and THROWS when
+  // the durable write fails. No sleep/timeout emulation anywhere.
+  async function flushSessionDurable(session) {
+    if (!session) throw new Error('flush requires a session');
+    if (!ctx || typeof ctx.get !== 'function') throw new Error('session store unavailable for durability flush');
+    const sessions = ctx.get('sessions');
+    if (!sessions || typeof sessions.flush !== 'function') throw new Error('ctx.sessions.flush is unavailable; durability cannot be proven');
+    return sessions.flush(session);
+  }
+
   // Applied on the NEXT agent/pre-step after authoritative completion: the
   // supported DSH surface seam (user/message with surfaceOp replace) changes
   // the MODEL-FACING projection while the raw session log stays intact (the
-  // transcript renders from append-origin events). Any failure keeps the old
-  // context and lets the turn proceed normally.
-  async function maybeApplyContextCompaction(session, binding) {
+  // transcript renders from append-origin events). The replacement boundary
+  // is FROZEN per operation (never recomputed): retry reuses the exact
+  // frozen seqs, crash reconciles by operationId, and APPLIED lands only
+  // after the DSH durability barrier. Any failure keeps the old context and
+  // lets the turn proceed normally.
+  //
+  // Narrow in-process guard: duplicate pre-step handlers for the same
+  // operationId join one in-flight attempt instead of appending twice. It
+  // spans only the append+flush section (no Git, model, or external I/O
+  // inside) and never replaces the durable operation record as the source
+  // of truth: a second process still reconciles through persisted state.
+  const compactionInflightByOperation = new Map()
+  // Freeze the replacement boundary ONCE from the completion-time surface,
+  // excluding the host-owned dynamic runtime-context snapshot (F1): the
+  // frozen range only ever covers Task A bulk, and the CURRENT request keeps
+  // its authoritative runtime policy because the retained snapshot node is
+  // never shadowed and is refreshed below after the replace lands.
+  // Returns the frozen operation or null (KEEP) without mutating state.
+  function freezeCompactionBoundary(session) {
+    const cut = contextCompaction.balancedRetainCut(session, { maxTailNodes: 6, maxTailChars: 6000, minShadowed: 1 })
+    if (!cut) return null
+    const ownedRuntime = contextCompaction.runtimeContextSeqsOf(session)
+    const excluded = ownedRuntime.filter((seq) => cut.shadowedSeqs.indexOf(seq) !== -1)
+    const segments = contextCompaction.splitRangeAroundOwned(session, cut.shadowedSeqs, ownedRuntime)
+    if (!segments) return null
+    const flat = []
+    for (const segment of segments) for (const seq of segment.sourceEventSeqs) flat.push(seq)
+    return {
+      segments,
+      replacementStart: flat[0],
+      replacementEnd: flat[flat.length - 1],
+      sourceEventSeqs: flat,
+      excludedRuntimeSeqs: excluded,
+    }
+  }
+
+  // Refresh the authoritative CURRENT dynamic runtime snapshot after the
+  // replace landed (F1 path B): re-render the live assembly through the real
+  // DSH section pipeline and append a fresh snapshot ONLY when it differs
+  // from the retained one. Never synthesizes policy text: the sections come
+  // from ctx.systemPrompt (the same authority the loop used pre-step).
+  async function refreshRuntimeContextSnapshot(session, agent) {
+    try {
+      if (!ctx || !agent) return null
+      const systemPrompt = typeof ctx.get === 'function' ? ctx.get('systemPrompt') : null
+      if (!systemPrompt || typeof systemPrompt.assemble !== 'function') return null
+      const dshAgent = await import('@deepseek-ai/dsh-agent').catch(() => null)
+      const dshPrompt = await import('@deepseek-ai/dsh-system-prompt').catch(() => null)
+      if (!dshAgent || !dshPrompt) return null
+      const assembleContextFor = dshAgent.assembleContextFor
+      const renderContextSections = dshPrompt.renderContextSections
+      const joinContextSections = dshPrompt.joinContextSections
+      if (typeof assembleContextFor !== 'function' || typeof renderContextSections !== 'function' || typeof joinContextSections !== 'function') return null
+      const assembly = await systemPrompt.assemble(assembleContextFor(agent, agent.signal || new AbortController().signal))
+      const sections = renderContextSections(assembly)
+      const snapshot = joinContextSections(sections)
+      if (!snapshot) return null
+      const retained = contextCompaction.runtimeContextSeqsOf(session)
+      let retainedText = null
+      for (const seq of retained) {
+        const event = Array.isArray(session.events) ? session.events[seq] : null
+        if (event && event.type === 'user/message' && Array.isArray(session.surface.nodes) && session.surface.nodes.indexOf(seq) !== -1) {
+          const content = event.data && Array.isArray(event.data.content) ? event.data.content : []
+          if (content.length === 1 && content[0] && content[0].type === 'text') retainedText = content[0].text
+        }
+      }
+      if (retainedText === snapshot) return null
+      return session.append('user/message', {
+        role: 'user',
+        content: [{ type: 'text', text: snapshot }],
+        source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt', form: 'snapshot', sections: sections.map((section) => ({ name: section.name })) },
+      }, { surfaceOp: 'append' })
+    } catch (error) {
+      log({ event: 'context-compaction-runtime-refresh-failed', error: String(error && error.message ? error.message : error) })
+      return null
+    }
+  }
+
+  async function maybeApplyContextCompaction(session, binding, agent) {
     if (!binding || !binding.taskInstanceId || !session) return null
     const sessionId = session.id ? String(session.id) : ''
     let snapshot = null
@@ -1569,55 +1674,167 @@ function apply(ctx) {
       log({ event: 'context-compaction-snapshot-failed', sessionId, taskId: binding.taskId, error: String(error) })
       return null
     }
-    if (!snapshot || snapshot.state !== 'checkpoint-ready') return null
+    // Legacy checkpoint-ready without a frozen operation is never admitted
+    // to the apply path (F2/F5 repair): BLOCK/KEEP and require fresh work.
+    if (!snapshot || (snapshot.state !== 'checkpoint-ready' && snapshot.state !== 'apply-pending' && snapshot.state !== 'awaiting-durability')) return null
     if (!snapshot.lifecycle || snapshot.lifecycle.taskInstanceId !== binding.taskInstanceId) {
       log({ event: 'context-compaction-generation-mismatch', sessionId, taskId: binding.taskId })
       return null
     }
-    try {
-      // Apply-time revalidation checks IDENTITY (still controller-complete,
-      // same lifecycle generation), not pressure: the threshold decision was
-      // authoritatively made at completion and stored in lifecycle state. A
-      // small post-completion call lowers the volatile latest signal without
-      // erasing the bulk, so below-threshold keep does not block; any other
-      // keep (not complete, mismatch, unproven) blocks and keeps old context.
-      const eligibility = await lifecycleCli('eligibility', binding, [], { sessionId })
-      const belowThresholdKeep = eligibility && eligibility.eligibilityDecision === 'keep'
-        && typeof eligibility.eligibilityReason === 'string' && eligibility.eligibilityReason.indexOf('below-threshold') === 0
-      if ((!eligibility || eligibility.eligibilityDecision !== 'eligible') && !belowThresholdKeep) {
-        await lifecycleCli('transition', binding, [], { to: 'blocked', reason: 'revalidation at apply time: ' + (eligibility && eligibility.eligibilityReason ? eligibility.eligibilityReason : 'not eligible'), sessionId })
-        await lifecycleCli('write-telemetry', binding, [], { sessionId, blockedReason: 'apply-time revalidation failed' }).catch(() => null)
-        return null
-      }
-      const checkpoint = await lifecycleCli('read-checkpoint', binding, [], {})
-      const provenance = contextCompaction.checkpointProvenanceValid(checkpoint, { taskId: binding.taskId, taskInstanceId: binding.taskInstanceId })
-      if (!provenance.valid) {
-        await lifecycleCli('transition', binding, [], { to: 'blocked', reason: 'checkpoint provenance invalid at apply time: ' + provenance.reason, sessionId })
-        return null
-      }
-      const cut = contextCompaction.balancedRetainCut(session, { maxTailNodes: 6, maxTailChars: 6000, minShadowed: 1 })
-      if (!cut) {
+    // Apply-time revalidation checks IDENTITY (still controller-complete,
+    // same lifecycle generation), not pressure: the threshold decision was
+    // authoritatively made at completion and stored in lifecycle state. A
+    // small post-completion call lowers the volatile latest signal without
+    // erasing the bulk, so below-threshold keep does not block; any other
+    // keep (not complete, mismatch, unproven) blocks and keeps old context.
+    const eligibility = await lifecycleCli('eligibility', binding, [], { sessionId }).catch(() => null)
+    const belowThresholdKeep = eligibility && eligibility.eligibilityDecision === 'keep'
+      && typeof eligibility.eligibilityReason === 'string' && eligibility.eligibilityReason.indexOf('below-threshold') === 0
+    if ((!eligibility || eligibility.eligibilityDecision !== 'eligible') && !belowThresholdKeep) {
+      await lifecycleCli('transition', binding, [], { to: 'blocked', reason: 'revalidation at apply time: ' + (eligibility && eligibility.eligibilityReason ? eligibility.eligibilityReason : 'not eligible'), sessionId }).catch(() => null)
+      await lifecycleCli('write-telemetry', binding, [], { sessionId, blockedReason: 'apply-time revalidation failed' }).catch(() => null)
+      return null
+    }
+    const checkpoint = await lifecycleCli('read-checkpoint', binding, [], {}).catch(() => null)
+    const provenance = contextCompaction.checkpointProvenanceValid(checkpoint, { taskId: binding.taskId, taskInstanceId: binding.taskInstanceId })
+    if (!provenance.valid) {
+      await lifecycleCli('transition', binding, [], { to: 'blocked', reason: 'checkpoint provenance invalid at apply time: ' + provenance.reason, sessionId }).catch(() => null)
+      return null
+    }
+    if (typeof session.append !== 'function') {
+      log({ event: 'context-compaction-no-append-seam', sessionId, taskId: binding.taskId })
+      return null
+    }
+    // Case A first: the frozen replacement may already be durably present
+    // (crash after append, before APPLIED). Reconcile, never re-append.
+    let operation = await lifecycleCli('read-operation', binding, [], {}).catch(() => null)
+    if (operation && operation.taskInstanceId !== binding.taskInstanceId) {
+      log({ event: 'context-compaction-operation-generation-mismatch', sessionId, taskId: binding.taskId })
+      return null
+    }
+    if (!operation) {
+      // First attempt: freeze the boundary from the CURRENT surface (the
+      // completion-time surface; no Task B work exists yet because apply
+      // runs on the first pre-step after completion) and persist it BEFORE
+      // any append. The freeze excludes host-owned runtime-context nodes.
+      const frozen = freezeCompactionBoundary(session)
+      if (!frozen) {
         log({ event: 'context-compaction-no-balanced-cut', sessionId, taskId: binding.taskId })
         return null
       }
-      const checkpointText = await lifecycleCli('checkpoint-text', binding, [], {})
-      const message = createControllerMessage(checkpointText && checkpointText.text ? String(checkpointText.text) : '(context checkpoint unavailable)', 'context-checkpoint')
-      if (typeof session.append !== 'function') {
-        log({ event: 'context-compaction-no-append-seam', sessionId, taskId: binding.taskId })
+      // operationId is deterministic per generation+session; compute it via
+      // freeze with the real boundary (idempotent when retried pre-persist).
+      operation = await lifecycleCli('freeze-operation', binding, [], {
+        sessionId,
+        replacementStart: frozen.replacementStart,
+        replacementEnd: frozen.replacementEnd,
+        sourceEventSeqs: frozen.sourceEventSeqs,
+        segments: frozen.segments,
+        checkpointPath: snapshot.lifecycle.checkpointPath || null,
+      })
+      await lifecycleCli('transition', binding, [], { to: 'apply-pending', reason: 'frozen operation persisted; boundary owned by ' + binding.taskId, sessionId }).catch(() => null)
+    }
+    const operationId = operation.operationId
+    // Join duplicate in-flight attempts for the same operationId instead of
+    // appending twice. The durable operation record stays authoritative.
+    if (compactionInflightByOperation.has(operationId)) {
+      return compactionInflightByOperation.get(operationId)
+    }
+    const attempt = (async () => {
+      // Reconcile against the LIVE session: landed (same operationId) ->
+      // applied; exact frozen range still valid -> append SAME range;
+      // otherwise BLOCK/KEEP. Never recompute a broader range.
+      const liveNodes = contextCompaction.surfaceNodesOf(session)
+      const landed = contextCompaction.findReplacementByOperation(session, operationId)
+      const reconcile = await lifecycleCli('reconcile', binding, [], {
+        liveSurfaceSeqs: liveNodes,
+        landedReplacementSeq: landed ? landed.seq : -1,
+      })
+      if (!reconcile) return null
+      if (reconcile.decision === 'reconcile-applied') {
+        await lifecycleCli('transition', binding, [], { to: 'applied', reason: 'reconciled: frozen replacement already durably present', sessionId }).catch(() => null)
+        await lifecycleCli('write-telemetry', binding, [], { sessionId, checkpointPath: snapshot.lifecycle.checkpointPath || null }).catch(() => null)
+        await lifecycleCli('mark-applied', binding, [], { sessionId, appliedAtUtc: new Date().toISOString() }).catch(() => null)
+        log({ event: 'context-compaction-reconciled', sessionId, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId, operationId })
+        return { reconciled: true, operationId }
+      }
+      if (reconcile.decision !== 'retry-same') {
+        await lifecycleCli('transition', binding, [], { to: 'blocked', reason: 'reconcile: ' + (reconcile.reason || 'frozen boundary unsafe'), sessionId }).catch(() => null)
+        await lifecycleCli('write-telemetry', binding, [], { sessionId, blockedReason: 'frozen boundary unsafe at retry' }).catch(() => null)
         return null
       }
-      session.append('user/message', message, { surfaceOp: { op: 'replace', start: cut.start, end: cut.end }, sourceEventSeqs: cut.shadowedSeqs })
+      // F2 current-prompt guard: no shadowed seq may be newer than the
+      // frozen completion boundary. The frozen seqs ARE the boundary; any
+      // live user/message newer than replacementEnd that is NOT retained
+      // outside the frozen range blocks the apply (Task B prompt safety).
+      // (The reconcile already proved all frozen seqs are still live; this
+      // additionally proves no NEWER event was adopted into the operation.)
+      const frozenSeqs = reconcile.sourceEventSeqs || operation.sourceEventSeqs
+      const checkpointText = await lifecycleCli('checkpoint-text', binding, [], {})
+      const message = createControllerMessage(checkpointText && checkpointText.text ? String(checkpointText.text) : '(context checkpoint unavailable)', 'context-checkpoint')
+      message.source = Object.assign({}, message.source, { operationId })
+      // One replacement node per FROZEN segment (persisted at freeze time;
+      // owned runtime snapshots stay visible between segments). Segments
+      // share the operationId so reconciliation addresses the whole
+      // operation at once. Never recomputed here.
+      const frozenSegments = Array.isArray(operation.segments) && operation.segments.length > 0
+        ? operation.segments
+        : [{ start: reconcile.replacementStart, end: reconcile.replacementEnd, sourceEventSeqs: frozenSeqs }]
+      if (!frozenSegments || frozenSegments.length === 0) {
+        log({ event: 'context-compaction-no-frozen-segments', sessionId, taskId: binding.taskId, operationId })
+        return null
+      }
+      const appendedSeqs = []
+      for (const segment of frozenSegments) {
+        if (!segment || typeof segment.start !== 'number' || typeof segment.end !== 'number' || !Array.isArray(segment.sourceEventSeqs) || segment.sourceEventSeqs.length === 0) {
+          log({ event: 'context-compaction-malformed-segment', sessionId, taskId: binding.taskId, operationId })
+          return null
+        }
+        const node = session.append('user/message', message, { surfaceOp: { op: 'replace', start: segment.start, end: segment.end }, sourceEventSeqs: segment.sourceEventSeqs })
+        appendedSeqs.push(node.seq)
+      }
+      const appended = { seq: appendedSeqs[appendedSeqs.length - 1] }
+      await lifecycleCli('transition', binding, [], { to: 'awaiting-durability', reason: 'replacement appended in memory; durability unconfirmed', sessionId }).catch(() => null)
+      // F5 durability barrier: the supported ctx.sessions.flush drain. Only
+      // after it settles may APPLIED be persisted. A flush failure throws
+      // here -> awaiting-durability persists -> retry reconciles.
+      let flushed = false
+      try {
+        flushed = await flushSessionDurable(session)
+      } catch (flushError) {
+        log({ event: 'context-compaction-flush-failed', sessionId, taskId: binding.taskId, operationId, error: String(flushError && flushError.message ? flushError.message : flushError) })
+        return null
+      }
+      if (flushed === false) {
+        // No durability listener participated (foreign/detached session in
+        // this host): cannot prove durability -> stay, retry reconciles.
+        log({ event: 'context-compaction-no-durability-listener', sessionId, taskId: binding.taskId, operationId })
+        return null
+      }
+      // Post-flush presence check: the landed node must be visible before
+      // APPLIED is written.
+      const landedAfter = contextCompaction.findReplacementByOperation(session, operationId)
+      if (!landedAfter || landedAfter.seq !== appended.seq) {
+        log({ event: 'context-compaction-landed-missing', sessionId, taskId: binding.taskId, operationId })
+        return null
+      }
       const appliedAtUtc = new Date().toISOString()
-      await lifecycleCli('transition', binding, [], { to: 'applied', reason: 'surface replace landed; model-facing bulk shadowed', sessionId })
+      await lifecycleCli('transition', binding, [], { to: 'applied', reason: 'surface replace durable; model-facing bulk shadowed', sessionId })
       await lifecycleCli('write-telemetry', binding, [], { sessionId, checkpointPath: snapshot.lifecycle.checkpointPath || null })
       await lifecycleCli('mark-applied', binding, [], { sessionId, appliedAtUtc })
-      log({ event: 'context-compaction-applied', sessionId, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId, shadowedSeqs: cut.shadowedSeqs.length, retainedSeqs: cut.retainedSeqs.length })
+      // F1 path B: refresh the CURRENT authoritative runtime snapshot after
+      // the replace landed, so the first post-compaction request carries
+      // current dynamic policy even though the stale snapshot was shadowed.
+      await refreshRuntimeContextSnapshot(session, agent)
+      log({ event: 'context-compaction-applied', sessionId, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId, operationId, shadowedSeqs: frozenSeqs.length })
       appendMessage(session, createControllerMessage('Controller: context checkpoint applied · task ' + binding.taskId + '.\nPrior execution history was compacted to a structured checkpoint; the repository remains the source of truth. Completion authority stays with the deterministic controller.', 'context-compaction-applied'))
-      return { applied: true, shadowed: cut.shadowedSeqs.length, retained: cut.retainedSeqs.length }
-    } catch (error) {
+      return { applied: true, operationId, shadowed: frozenSeqs.length }
+    })().finally(() => { compactionInflightByOperation.delete(operationId) })
+    compactionInflightByOperation.set(operationId, attempt)
+    return attempt.catch((error) => {
       log({ event: 'context-compaction-apply-failed', sessionId, taskId: binding.taskId, error: String(error && error.message ? error.message : error) })
       return null
-    }
+    })
   }
 
   /** Completion decision after a passed verification (review disposition aware). */
@@ -2496,7 +2713,7 @@ function apply(ctx) {
       // (supported surface replace; raw log untouched). Never blocks the
       // turn: any failure keeps the old context and execution continues.
       try {
-        await maybeApplyContextCompaction(session, binding)
+        await maybeApplyContextCompaction(session, binding, agent)
       } catch (error) {
         log({ event: 'context-compaction-pre-step-failed', sessionId: session.id, taskId: binding.taskId, error: String(error) })
       }

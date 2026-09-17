@@ -137,12 +137,18 @@ function balancedRetainCut(session, options) {
   let tailChars = 0;
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     if (nodes.length - index > maxTailNodes) break;
-    if (!prefixBalanced[index]) break;
     const event = eventBySeq(session, nodes[index]);
     if (!event) return null;
-    const nextChars = tailChars + textLengthOfSurfaceEvent(event);
-    if (nextChars > maxTailChars && tailStart !== -1) break;
-    tailChars = nextChars;
+    tailChars += textLengthOfSurfaceEvent(event);
+    if (tailChars > maxTailChars && tailStart !== -1) break;
+    // An unbalanced cut cannot START the retained tail (it would orphan a
+    // tool call inside the shadowed span). With no candidate yet, keep
+    // scanning backward for an earlier balanced cut instead of giving up:
+    // a surface ending mid-tool-pair still has a valid earlier boundary.
+    if (!prefixBalanced[index]) {
+      if (tailStart !== -1) break;
+      continue;
+    }
     tailStart = index;
   }
   if (tailStart === -1) return null;
@@ -156,6 +162,89 @@ function balancedRetainCut(session, options) {
     retainedSeqs,
   };
 }
+const RUNTIME_CONTEXT_PLUGIN = '@deepseek-ai/dsh-system-prompt';
+
+function isRuntimeContextMessage(event) {
+  return Boolean(event && event.type === 'user/message' && event.data && event.data.source
+    && event.data.source.kind === 'plugin' && event.data.source.plugin === RUNTIME_CONTEXT_PLUGIN);
+}
+
+function runtimeContextSeqsOf(session) {
+  const seqs = [];
+  if (!session || !Array.isArray(session.events)) return seqs;
+  for (const event of session.events) {
+    if (isRuntimeContextMessage(event) && typeof event.seq === 'number') seqs.push(event.seq);
+  }
+  return seqs;
+}
+
+function withoutSeqs(seqs, excluded) {
+  const drop = new Set(excluded);
+  return seqs.filter((seq) => !drop.has(seq));
+}
+
+// Split one shadowed span around host-owned runtime-context nodes (F1): the
+// owned snapshots stay visible while the bulk on either side is replaced by
+// one replacement node per contiguous non-owned segment. Returns null when
+// no bulk remains OR when a split would orphan a tool call/result pair
+// (tool-pair checks are never weakened to make frozen operations easier).
+function splitRangeAroundOwned(session, shadowedSeqs, ownedSeqs) {
+  if (!Array.isArray(shadowedSeqs) || shadowedSeqs.length === 0) return null;
+  const owned = new Set(Array.isArray(ownedSeqs) ? ownedSeqs : []);
+  const segments = [];
+  let current = [];
+  for (const seq of shadowedSeqs) {
+    if (owned.has(seq)) {
+      if (current.length > 0) { segments.push(current); current = []; }
+      continue;
+    }
+    current.push(seq);
+  }
+  if (current.length > 0) segments.push(current);
+  if (segments.length === 0) return null;
+  // Per-segment tool-pair safety: fold the session surface from its start
+  // and require every segment to open and close at the same in-progress
+  // tool-call depth without dipping below it (no call orphaned inside the
+  // shadowed span, no result adopted from outside it).
+  const nodes = surfaceNodesOf(session);
+  const depthAt = new Map();
+  let depth = 0;
+  for (const node of nodes) {
+    const event = eventBySeq(session, node);
+    if (!event) return null;
+    depthAt.set(node, depth);
+    depth += toolCallDeltaOfSurfaceEvent(event);
+    if (depth < 0) return null;
+  }
+  const shaped = [];
+  for (const seqs of segments) {
+    const entry = depthAt.has(seqs[0]) ? depthAt.get(seqs[0]) : null;
+    if (entry === null) return null;
+    let running = entry;
+    for (const seq of seqs) {
+      running += toolCallDeltaOfSurfaceEvent(eventBySeq(session, seq));
+      if (running < entry) return null;
+    }
+    if (running !== entry) return null;
+    shaped.push({ start: seqs[0], end: seqs[seqs.length - 1], sourceEventSeqs: seqs });
+  }
+  return shaped;
+}
+
+function findReplacementByOperation(session, operationId) {
+  if (!session || !Array.isArray(session.events) || typeof operationId !== 'string' || operationId === '') return null;
+  for (let index = session.events.length - 1; index >= 0; index -= 1) {
+    const event = session.events[index];
+    if (!event || event.type !== 'user/message') continue;
+    const source = event.data && event.data.source;
+    if (!source || source.kind !== 'plugin' || source.plugin !== 'aih-controller') continue;
+    if (source.form !== 'context-checkpoint') continue;
+    if (source.operationId !== operationId) continue;
+    return event;
+  }
+  return null;
+}
+
 function checkpointProvenanceValid(checkpoint, binding) {
   if (!checkpoint || typeof checkpoint !== 'object') return { valid: false, reason: 'checkpoint-missing' };
   if (!binding || typeof binding !== 'object') return { valid: false, reason: 'binding-missing' };
@@ -198,6 +287,12 @@ function lastTextOfRole(session, role, maxChars) {
 }
 
 module.exports = {
+  RUNTIME_CONTEXT_PLUGIN,
+  isRuntimeContextMessage,
+  runtimeContextSeqsOf,
+  withoutSeqs,
+  splitRangeAroundOwned,
+  findReplacementByOperation,
   ROOT_ENGINE_ROLES,
   effectiveInputTokensOf,
   isWorkerSession,

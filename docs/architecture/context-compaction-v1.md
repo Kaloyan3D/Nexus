@@ -163,7 +163,51 @@ artifact cleanup.
 - Windows live acceptance is a follow-up gate; deterministic PS tests plus
   the Linux live projection proof ship in V1.
 
-## 15. Future V2 directions (not implemented)
+## 15. Transaction safety repair (F1/F2/F5)
+
+Adversarial audit found three defects in the first V1 slice; this section
+records the repair (same file, no redesign).
+
+- F1 (dynamic runtime policy removed): the loop assembles CURRENT dynamic
+  context BEFORE agent/pre-step and commits it as an owned snapshot node;
+  the old apply replaced the whole live surface including that node, and the
+  already-built request decision never regenerated it. Repair: (a) the freeze
+  EXCLUDES host-owned @deepseek-ai/dsh-system-prompt snapshot nodes from the
+  shadowed range (persisted segments split around them, proven necessary by
+  dsh-session assertProvenance which rejects exclusion from one span);
+  (b) after the replace lands, the bridge re-renders the CURRENT assembly
+  through the real systemPrompt.assemble + render/join pipeline and appends
+  a fresh snapshot when it differs (path B; never synthesized policy text).
+  The FIRST post-compaction request therefore carries checkpoint + tail +
+  current authoritative policy. No policy is copied into the checkpoint.
+- F2 (retry recompute swallows Task B): the old apply recomputed
+  balancedRetainCut from the live surface on every attempt. Repair: the
+  boundary is FROZEN once at completion into context-compaction-operation.json
+  (schemaVersion 1, deterministic operationId per task+instance+session,
+  exact start/end/sourceEventSeqs plus segments, session + workspace
+  provenance). Retry reuses it verbatim (idempotent freeze returns the same
+  record even for wider candidate input); reconcile decides
+  reconcile-applied / retry-same / block and NEVER widens. Legacy
+  checkpoint-ready states without a frozen operation cannot enter apply.
+- F5 (APPLIED before durability): Session.append is in-memory + queue;
+  durability comes from the write-behind drain via ctx.sessions.flush
+  (session/flush), the same barrier the host checkpoint policy and the
+  compaction backend use. Repair: persist frozen op -> append exact segments
+  -> transition awaiting-durability -> await ctx.sessions.flush -> verify
+  landed presence -> persist APPLIED. Flush failure or a non-participating
+  store leaves awaiting-durability; retry reconciles by operationId.
+- Ordering: agent/pre-step runs the host checkpoint-policy flush listener,
+  then Nexus apply; llm/stream checkpoints the full request prefix before
+  adapter dispatch, so the landed replacement stays durable before the model
+  call even if the process dies mid-apply.
+- Concurrency: duplicate pre-step attempts for one operationId join a narrow
+  in-flight guard (append+flush only); cross-process safety comes from the
+  durable operation record plus reconcile-by-operationId.
+- Current-prompt invariant: frozen seqs predate any Task B work by
+  construction (frozen at completion); reconcile proves all frozen seqs still
+  live before appending, so a newer user message survives exactly once.
+
+## 16. Future V2 directions (not implemented)
 
 Task-scope classification, semantic continuation detection, adaptive
 thresholds, multi-checkpoint lifecycle, smarter retention. None of this is in
