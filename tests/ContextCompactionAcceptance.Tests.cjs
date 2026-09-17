@@ -51,8 +51,14 @@ assert.ok(bridge.includes("surfaceOp: { op: 'replace'"));
 pass('bridge applies only the supported surface replace seam');
 assert.ok(!bridge.includes('session.jsonl') && !bridge.includes('.ai-harness/sessions'));
 pass('bridge never patches host session persistence directly');
-assert.ok(bridge.includes('sourceEventSeqs: cut.shadowedSeqs'));
-pass('replacement cites every shadowed seq (provenance coverage)');
+assert.ok(bridge.includes('sourceEventSeqs: segment.sourceEventSeqs'));
+pass('each replacement cites its frozen segment seqs (provenance coverage, never recomputed)');
+assert.ok(bridge.includes('ctx.sessions.flush') || bridge.includes('sessions.flush'));
+pass('bridge gates APPLIED on the supported sessions flush barrier');
+assert.ok(bridge.includes('findReplacementByOperation'));
+pass('bridge reconciles by operationId instead of recomputing a range');
+assert.ok(bridge.includes('refreshRuntimeContextSnapshot'));
+pass('bridge refreshes the current runtime snapshot after the replace lands');
 const lifecycle = fs.readFileSync(path.join(repoRoot, 'scripts', 'ContextLifecycle.ps1'), 'utf8');
 assert.ok(lifecycle.includes('$AihContextCompactionThresholdTokens = 120000'));
 pass('single 120000 threshold authority in the controller module');
@@ -83,6 +89,15 @@ append('user/message', {
   role: 'user',
   content: [{ type: 'text', text: 'Implement the long engineering task described in TASK-0004.' }],
   source: { kind: 'user' },
+}, { surfaceOp: 'append' });
+// The stale retained runtime snapshot sits INSIDE the historical bulk (as in
+// production: it was committed by the loop before completion). The freeze
+// must exclude it; the CURRENT snapshot is refreshed after landing (F1).
+const retainedRtx = 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nmode: workspace-write';
+append('user/message', {
+  role: 'user',
+  content: [{ type: 'text', text: retainedRtx }],
+  source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt', form: 'snapshot', sections: [{ name: 'sandbox' }] },
 }, { surfaceOp: 'append' });
 for (let round = 0; round < 12; round += 1) {
   append('assistant/message', {
@@ -122,11 +137,21 @@ assert.ok(observedEffectiveInput >= 120000);
 pass('BEFORE: observed root effective input is above the 120000 threshold');
 const rawLogLengthBefore = session.events.length;
 
-// AFTER: controller-owned checkpoint through the bridge cut helper plus the
-// supported replace seam (same call order as maybeApplyContextCompaction).
+// AFTER: controller-owned checkpoint through the bridge freeze helper plus
+// the supported replace seam (same call order as maybeApplyContextCompaction).
 const cut = compaction.balancedRetainCut(session, { maxTailNodes: 6, maxTailChars: 6000, minShadowed: 1 });
+assert.ok(cut.shadowedSeqs.includes(compaction.runtimeContextSeqsOf(session)[0]));
+pass('raw cut would shadow the stale snapshot (F1 failure proof: exclusion does real work)');
 assert.ok(cut && cut.shadowedSeqs.length > 10);
 pass('apply cut shadows the historical bulk (balanced, ' + cut.shadowedSeqs.length + ' seqs)');
+const ownedRtx = compaction.runtimeContextSeqsOf(session);
+assert.ok(ownedRtx.length === 1);
+pass('host-owned runtime snapshot is identified for exclusion');
+const frozenSeqs = compaction.withoutSeqs(cut.shadowedSeqs, ownedRtx);
+assert.ok(frozenSeqs.length > 10 && !frozenSeqs.includes(ownedRtx[0]));
+pass('frozen boundary excludes the owned runtime snapshot (F1 freeze)');
+const frozenStart = frozenSeqs[0];
+const frozenEnd = frozenSeqs[frozenSeqs.length - 1];
 const checkpointText = [
   '<nexus-context-checkpoint task="TASK-0004" instance="task_acceptance000000000000000001" schema="1">',
   'Task: Implement the long engineering task described in TASK-0004.',
@@ -142,11 +167,27 @@ const provenance = compaction.checkpointProvenanceValid(
 );
 assert.ok(provenance.valid);
 pass('checkpoint provenance validates for the compacted generation');
+const OPERATION_ID = 'ccop_acceptance000000000000000001';
+const frozenSegments = compaction.splitRangeAroundOwned(session, cut.shadowedSeqs, ownedRtx);
+assert.ok(frozenSegments && frozenSegments.length >= 1);
+pass('frozen boundary splits around the owned snapshot (' + frozenSegments.length + ' segment(s))');
+const appendedSeqs = [];
+for (const segment of frozenSegments) {
+  const node = session.append('user/message', {
+    role: 'user',
+    content: [{ type: 'text', text: checkpointText }],
+    source: { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', taskId: 'TASK-0004', operationId: OPERATION_ID },
+  }, { surfaceOp: { op: 'replace', start: segment.start, end: segment.end }, sourceEventSeqs: segment.sourceEventSeqs });
+  appendedSeqs.push(node.seq);
+}
+// F1 path B: the CURRENT authoritative snapshot is refreshed after the
+// replace lands (same render pipeline the loop uses: sections + join).
+const currentRtx = retainedRtx + '\n\napproval: never';
 session.append('user/message', {
   role: 'user',
-  content: [{ type: 'text', text: checkpointText }],
-  source: { kind: 'plugin', plugin: 'aih-controller', form: 'context-checkpoint', taskId: 'TASK-0004' },
-}, { surfaceOp: { op: 'replace', start: cut.start, end: cut.end }, sourceEventSeqs: cut.shadowedSeqs });
+  content: [{ type: 'text', text: currentRtx }],
+  source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt', form: 'snapshot', sections: [{ name: 'sandbox' }] },
+}, { surfaceOp: 'append' });
 const afterMessages = session.deriveMessages();
 const afterBytes = JSON.stringify(afterMessages).length;
 const afterText = JSON.stringify(afterMessages);
@@ -156,8 +197,20 @@ assert.ok(afterText.includes('nexus-context-checkpoint'));
 pass('AFTER: structured checkpoint is present in the projection');
 assert.ok(afterText.includes('Final report: TASK-0004 complete'));
 pass('AFTER: continuity tail survives alongside the checkpoint');
-assert.equal(session.events.length, rawLogLengthBefore + 1);
+assert.ok(afterText.includes('supersedes earlier runtime-context snapshots'));
+pass('FIRST request after compaction retains authoritative dynamic policy (F1)');
+assert.equal(session.events.length, rawLogLengthBefore + frozenSegments.length + 1);
 pass('user-visible session log remains intact (append-only, nothing deleted)');
+// F2/F5 reconciliation by operation identity: the landed node is found via
+// findReplacementByOperation; a retry must reconcile, never re-append.
+const landed = compaction.findReplacementByOperation(session, OPERATION_ID);
+assert.ok(landed && typeof landed.seq === 'number');
+pass('landed replacement is addressable by operationId (F5 reconcile key)');
+const liveNodes = session.surface.nodes.slice();
+assert.ok(!frozenSeqs.some((seq) => liveNodes.includes(seq)));
+pass('frozen source seqs are fully shadowed after landing (F2 boundary)');
+assert.ok(liveNodes.includes(landed.seq));
+pass('replacement node sits on the live surface (F5 presence)');
 const reduction = 1 - afterBytes / beforeBytes;
 console.log('BEFORE bytes: ' + beforeBytes + ' AFTER bytes: ' + afterBytes + ' reduction: ' + Math.round(reduction * 100) + '%');
 assert.ok(reduction >= 0.5);

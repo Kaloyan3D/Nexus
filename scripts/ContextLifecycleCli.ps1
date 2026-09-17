@@ -3,7 +3,7 @@
 # Every action is task-scoped and identity-guarded (TaskId plus TaskInstanceId).
 # User-derived free text travels through the UTF-8 payload file, never argv.
 param(
-    [ValidateSet('record-root-usage','eligibility','build-checkpoint','read-checkpoint','checkpoint-text','transition','snapshot','write-telemetry','mark-applied','record-post-compaction-usage','threshold')][string]$Action = 'snapshot',
+    [ValidateSet('record-root-usage','eligibility','build-checkpoint','read-checkpoint','checkpoint-text','transition','snapshot','write-telemetry','mark-applied','record-post-compaction-usage','threshold','freeze-operation','read-operation','reconcile')][string]$Action = 'snapshot',
     [string]$Workspace = (Get-Location).Path,
     [string]$TaskId,
     [string]$TaskInstanceId,
@@ -24,6 +24,12 @@ param(
     [string]$ContinuityAssistantText = '',
     [string]$PreviousUserText = '',
     [string]$PreviousAssistantText = '',
+    [int]$ReplacementStart = -1,
+    [int]$ReplacementEnd = -1,
+    [int[]]$SourceEventSeqs = @(),
+    [int[]]$LiveSurfaceSeqs = @(),
+    [int]$LandedReplacementSeq = -1,
+    [object[]]$Segments = @(),
     [string]$CheckpointPath = $null,
     [object]$CheckpointSizeBytes = $null,
     [bool]$CheckpointApplied = $false,
@@ -49,10 +55,18 @@ if ($PayloadFile) {
         $key = $name.ToLowerInvariant()
         if ($__aihPayloadMap.ContainsKey($key)) { Set-Variable -Name $name -Value ([string]$__aihPayloadMap[$key]) }
     }
-    foreach ($name in @('ThresholdOverride','UncachedInputTokens','CacheReadTokens','OutputTokens','PostCompactionEffectiveInputTokens')) {
+    foreach ($name in @('ThresholdOverride','UncachedInputTokens','CacheReadTokens','OutputTokens','PostCompactionEffectiveInputTokens','ReplacementStart','ReplacementEnd')) {
         $key = $name.ToLowerInvariant()
         if ($__aihPayloadMap.ContainsKey($key)) { Set-Variable -Name $name -Value ([int]$__aihPayloadMap[$key]) }
     }
+    $key = 'sourceeventseqs'
+    if ($__aihPayloadMap.ContainsKey($key)) { Set-Variable -Name 'SourceEventSeqs' -Value ([int[]]@($__aihPayloadMap[$key])) }
+    $key = 'livesurfaceseqs'
+    if ($__aihPayloadMap.ContainsKey($key)) { Set-Variable -Name 'LiveSurfaceSeqs' -Value ([int[]]@($__aihPayloadMap[$key])) }
+    $key = 'landedreplacementseq'
+    if ($__aihPayloadMap.ContainsKey($key)) { Set-Variable -Name 'LandedReplacementSeq' -Value ([int]$__aihPayloadMap[$key]) }
+    $key = 'segments'
+    if ($__aihPayloadMap.ContainsKey($key)) { Set-Variable -Name 'Segments' -Value ([object[]]@($__aihPayloadMap[$key])) }
     foreach ($name in @('UsageAvailable')) {
         $key = $name.ToLowerInvariant()
         if ($__aihPayloadMap.ContainsKey($key)) { Set-Variable -Name $name -Value ([bool]$__aihPayloadMap[$key]) }
@@ -99,6 +113,9 @@ $__aihLifecycleResult = $(switch ($Action) {
         Write-AihContextCompactionTelemetry -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -Eligibility $eligibility -SessionId $SessionId -CheckpointPath $CheckpointPath -CheckpointSizeBytes $CheckpointSizeBytes -CheckpointApplied $CheckpointApplied -AppliedAtUtc $AppliedAtUtc -BlockedReason $BlockedReason
     }
     'mark-applied' { Set-AihContextCompactionApplied -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -AppliedAtUtc $AppliedAtUtc -SessionId $SessionId }
+    'freeze-operation' { New-AihContextCompactionOperation -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -SessionId $SessionId -ReplacementStart $ReplacementStart -ReplacementEnd $ReplacementEnd -SourceEventSeqs $SourceEventSeqs -CheckpointPath $CheckpointPath -Segments $Segments }
+    'read-operation' { Read-AihContextCompactionOperation -Workspace $Workspace -TaskId $TaskId }
+    'reconcile' { Test-AihContextOperationReconcile -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -LiveSurfaceSeqs $LiveSurfaceSeqs -LandedReplacementSeq $LandedReplacementSeq }
     'record-post-compaction-usage' { Add-AihContextPostCompactionUsage -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -PostCompactionEffectiveInputTokens $PostCompactionEffectiveInputTokens -SessionId $SessionId }
 })
 if ($null -ne $__aihLifecycleResult) { ConvertTo-Json -InputObject (ConvertTo-AihJsonSafe $__aihLifecycleResult) -Depth 20 }

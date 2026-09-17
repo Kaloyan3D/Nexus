@@ -21,8 +21,15 @@ $AihContextCompactionThresholdTokens = 120000
 # Checkpoint schema version (persisted in every checkpoint plus state record).
 $AihContextCheckpointSchemaVersion = 1
 
+# Frozen compaction-operation schema version. Bumped independently of the
+# checkpoint content version so old checkpoint-ready states without a frozen
+# operation are never reinterpreted as new ones (see F2/F5 repair).
+$AihContextOperationSchemaVersion = 1
+
 # Context-lifecycle state machine states.
-$AihContextLifecycleStates = @('inactive', 'eligible', 'checkpoint-ready', 'applied', 'blocked')
+# apply-pending  = frozen operation persisted, replacement not yet appended.
+# awaiting-durability = replacement appended in memory, durability unconfirmed.
+$AihContextLifecycleStates = @('inactive', 'eligible', 'checkpoint-ready', 'apply-pending', 'awaiting-durability', 'applied', 'blocked')
 function Get-AihContextLifecycleThreshold {
     param([int]$Override = -1)
     if ($Override -ge 0) {
@@ -41,6 +48,7 @@ function Get-AihContextLifecyclePaths {
         Checkpoint = Join-Path $run 'context-checkpoint.json'
         Lifecycle = Join-Path $run 'context-lifecycle.json'
         Pressure = Join-Path $run 'context-pressure.json'
+        Operation = Join-Path $run 'context-compaction-operation.json'
     }
 }
 
@@ -440,7 +448,7 @@ function Set-AihContextLifecycleTransition {
         [Parameter(Mandatory = $true)][string]$Workspace,
         [Parameter(Mandatory = $true)][string]$TaskId,
         [Parameter(Mandatory = $true)][string]$TaskInstanceId,
-        [Parameter(Mandatory = $true)][ValidateSet('inactive', 'eligible', 'checkpoint-ready', 'applied', 'blocked')][string]$To,
+        [Parameter(Mandatory = $true)][ValidateSet('inactive', 'eligible', 'checkpoint-ready', 'apply-pending', 'awaiting-durability', 'applied', 'blocked')][string]$To,
         [string]$Reason = '',
         [string]$SessionId = '',
         [string]$CheckpointPath = $null
@@ -453,25 +461,43 @@ function Set-AihContextLifecycleTransition {
     if (($null -ne $current) -and ($null -ne $current.PSObject.Properties['taskInstanceId']) -and (-not [string]::IsNullOrWhiteSpace([string]$current.taskInstanceId)) -and ([string]$current.taskInstanceId -ne $actualInstance)) {
         throw "Lifecycle refused: persisted state belongs to another generation. (KEEP.)"
     }
+    # Legacy checkpoint-ready states (de34d52) carry NO frozen operation.
+    # They must never flow into the new apply path: fail safe and require a
+    # fresh freeze instead of reinterpreting them.
+    $operation = $null
+    try { $operation = Read-AihContextCompactionOperation -Workspace $Workspace -TaskId $TaskId } catch { throw }
+    $hasFrozenOperation = ($null -ne $operation) -and ([string]$operation.taskInstanceId -eq $actualInstance)
     $allowed = @{
-        'inactive'         = @('eligible', 'blocked')
-        'eligible'         = @('checkpoint-ready', 'blocked', 'eligible')
-        'checkpoint-ready' = @('applied', 'blocked', 'checkpoint-ready')
-        'applied'          = @('applied')
-        'blocked'          = @('eligible', 'blocked')
+        'inactive'            = @('eligible', 'blocked')
+        'eligible'            = @('checkpoint-ready', 'blocked', 'eligible')
+        'checkpoint-ready'    = @('apply-pending', 'blocked', 'checkpoint-ready')
+        'apply-pending'       = @('awaiting-durability', 'blocked', 'apply-pending')
+        'awaiting-durability' = @('applied', 'blocked', 'awaiting-durability')
+        'applied'             = @('applied')
+        'blocked'             = @('eligible', 'blocked')
     }
     if (-not (@($allowed[$from]) -contains $To)) {
         throw "Lifecycle refused: transition $from -> $To is not allowed. (KEEP.)"
     }
-    if (($from -eq $To) -and (($To -eq 'eligible') -or ($To -eq 'checkpoint-ready') -or ($To -eq 'applied'))) {
+    if (($from -eq $To) -and (($To -eq 'eligible') -or ($To -eq 'checkpoint-ready') -or ($To -eq 'apply-pending') -or ($To -eq 'awaiting-durability') -or ($To -eq 'applied'))) {
         return [pscustomobject]$current
     }
     if (($To -eq 'eligible') -and ([string]$task.status -ne 'complete')) {
         throw "Lifecycle refused: task $TaskId is not controller-complete. (KEEP.)"
     }
-    if (($To -eq 'checkpoint-ready') -or ($To -eq 'applied')) {
+    if ($To -eq 'checkpoint-ready') {
         $checkpoint = Read-AihContextCheckpoint -Workspace $Workspace -TaskId $TaskId -ExpectedTaskInstanceId $actualInstance
-        if ($null -eq $checkpoint) { throw 'Lifecycle refused: valid checkpoint is required before checkpoint-ready or applied. (KEEP.)' }
+        if ($null -eq $checkpoint) { throw 'Lifecycle refused: valid checkpoint is required before checkpoint-ready. (KEEP.)' }
+    }
+    if (($To -eq 'apply-pending') -or ($To -eq 'awaiting-durability') -or ($To -eq 'applied')) {
+        $checkpoint = Read-AihContextCheckpoint -Workspace $Workspace -TaskId $TaskId -ExpectedTaskInstanceId $actualInstance
+        if ($null -eq $checkpoint) { throw 'Lifecycle refused: valid checkpoint is required before apply. (KEEP.)' }
+        if (-not $hasFrozenOperation) {
+            throw 'Lifecycle refused: checkpoint-ready without a frozen compaction operation cannot enter the apply path (legacy state). BLOCK/KEEP; require fresh freeze. (KEEP.)'
+        }
+        if ([string]$operation.sessionId -ne [string]$SessionId -and -not [string]::IsNullOrWhiteSpace([string]$SessionId)) {
+            throw 'Lifecycle refused: frozen operation belongs to another session. (KEEP.)'
+        }
     }
     $state = [ordered]@{
         schemaVersion = 1; taskId = $TaskId; taskInstanceId = $actualInstance
@@ -482,6 +508,153 @@ function Set-AihContextLifecycleTransition {
     }
     Write-AihContextLifecycleState -Workspace $Workspace -TaskId $TaskId -State $state | Out-Null
     return [pscustomobject]$state
+}
+
+function New-AihContextCompactionOperationId {
+    # Deterministic per lifecycle generation: stable across retries/restarts
+    # (no randomness), unique per task generation plus session (no cross-talk).
+    param([Parameter(Mandatory = $true)][string]$TaskId, [Parameter(Mandatory = $true)][string]$TaskInstanceId, [Parameter(Mandatory = $true)][string]$SessionId)
+    $joined = [string]$TaskId + "`n" + [string]$TaskInstanceId + "`n" + [string]$SessionId
+    $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    return ('ccop_' + $digest.Substring(0, 32))
+}
+
+function Read-AihContextCompactionOperation {
+    param([Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$TaskId)
+    $paths = Get-AihContextLifecyclePaths -Workspace $Workspace -TaskId $TaskId
+    if (-not (Test-Path -LiteralPath $paths.Operation)) { return $null }
+    try { return Get-Content -Raw -Encoding UTF8 -LiteralPath $paths.Operation | ConvertFrom-Json }
+    catch { throw 'Compaction operation blocked: context-compaction-operation.json is malformed. (KEEP: old context retained.)' }
+}
+
+function New-AihContextCompactionOperation {
+    # Freeze ONE immutable application plan for the completed generation.
+    # The caller supplies the ALREADY-VALIDATED balanced cut (computed once
+    # from the completion-time surface); this function persists it verbatim
+    # and NEVER widens it. Retry reuses the frozen boundary exactly.
+    param(
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$TaskInstanceId,
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [Parameter(Mandatory = $true)][int]$ReplacementStart,
+        [Parameter(Mandatory = $true)][int[]]$SourceEventSeqs,
+        [Parameter(Mandatory = $true)][int]$ReplacementEnd,
+        [string]$CheckpointPath = $null,
+        [object[]]$Segments = @()
+    )
+    $task = Get-AihTask -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId
+    if ([string]$task.status -ne 'complete') { throw "Operation refused: task $TaskId status is '$($task.status)', not complete. (KEEP.)" }
+    $operationId = New-AihContextCompactionOperationId -TaskId $TaskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId $SessionId
+    $existing = $null
+    try { $existing = Read-AihContextCompactionOperation -Workspace $Workspace -TaskId $TaskId } catch { throw }
+    if (($null -ne $existing) -and ([string]$existing.taskInstanceId -eq [string]$task.taskInstanceId) -and ([string]$existing.operationId -eq $operationId)) {
+        # Idempotent retry: the frozen boundary is returned verbatim even when
+        # the caller recomputed a wider candidate range. Retry never widens.
+        return [pscustomobject]$existing
+    }
+    if ((@($SourceEventSeqs).Count -eq 0) -or ([int]$ReplacementStart -lt 0) -or ([int]$ReplacementEnd -lt 0)) {
+        throw 'Operation refused: empty replacement boundary. (KEEP.)'
+    }
+    if ([int]$SourceEventSeqs[0] -ne [int]$ReplacementStart -or [int]$SourceEventSeqs[-1] -ne [int]$ReplacementEnd) {
+        throw 'Operation refused: range must match the first and last source seqs. (KEEP.)'
+    }
+    if (($null -ne $existing) -and ([string]$existing.taskInstanceId -eq [string]$task.taskInstanceId) -and ([string]$existing.operationId -ne $operationId)) {
+        throw 'Operation refused: a different frozen operation already owns this generation. (KEEP: never adopt or widen.)'
+    }
+    $segmentRecords = @()
+    if (@($Segments).Count -gt 0) {
+        $flatCheck = [Collections.Generic.List[int]]::new()
+        foreach ($segment in @($Segments)) {
+            if (($null -eq $segment) -or ($null -eq $segment.start) -or ($null -eq $segment.end) -or ($null -eq $segment.sourceEventSeqs) -or (@($segment.sourceEventSeqs).Count -eq 0)) {
+                throw 'Operation refused: malformed frozen segment. (KEEP.)'
+            }
+            if ([int]$segment.sourceEventSeqs[0] -ne [int]$segment.start -or [int]$segment.sourceEventSeqs[-1] -ne [int]$segment.end) {
+                throw 'Operation refused: frozen segment range must match its seqs. (KEEP.)'
+            }
+            foreach ($seq in @($segment.sourceEventSeqs)) { [void]$flatCheck.Add([int]$seq) }
+            $segmentRecords += [ordered]@{ start = [int]$segment.start; end = [int]$segment.end; sourceEventSeqs = @([int[]]$segment.sourceEventSeqs) }
+        }
+        $expected = @([int[]]$SourceEventSeqs)
+        if ([int]$flatCheck.Count -ne [int]$expected.Count) { throw 'Operation refused: frozen segments must cover exactly the source seqs. (KEEP.)' }
+        for ($i = 0; $i -lt $expected.Count; $i++) {
+            if ([int]$flatCheck[$i] -ne [int]$expected[$i]) { throw 'Operation refused: frozen segments must cover exactly the source seqs. (KEEP.)' }
+        }
+    }
+    $operation = [ordered]@{
+        schemaVersion = [int]$AihContextOperationSchemaVersion
+        operationId = [string]$operationId
+        taskId = [string]$TaskId
+        taskInstanceId = [string]$task.taskInstanceId
+        sessionId = [string]$SessionId
+        workspace = [string]$Workspace
+        checkpointPath = $(if ($null -ne $CheckpointPath) { [string]$CheckpointPath } else { $null })
+        replacementStart = [int]$ReplacementStart
+        replacementEnd = [int]$ReplacementEnd
+        sourceEventSeqs = @([int[]]$SourceEventSeqs)
+        segments = @($segmentRecords)
+        createdAtUtc = [DateTime]::UtcNow.ToString('o')
+    }
+    $paths = Get-AihContextLifecyclePaths -Workspace $Workspace -TaskId $TaskId
+    Write-AihAtomicJson $paths.Operation $operation
+    $readBack = Read-AihContextCompactionOperation -Workspace $Workspace -TaskId $TaskId
+    if (($null -eq $readBack) -or ([string]$readBack.operationId -ne [string]$operationId)) {
+        throw 'Operation refused: read-back validation failed after atomic write. (KEEP.)'
+    }
+    return [pscustomobject]$readBack
+}
+
+function Test-AihContextOperationReconcile {
+    # Restart/retry reconciliation input: given the live surface seqs observed
+    # by the bridge plus whether the frozen replacement node is durably
+    # present, decide reconcile / retry-same / block. NEVER widens the range.
+    # LiveSurfaceSeqs: current session.surface.nodes (numbers, surface order).
+    # LandedReplacementSeq: seq of the frozen replacement node when durably
+    #   present, else -1.
+    param(
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$TaskInstanceId,
+        [int[]]$LiveSurfaceSeqs = @(),
+        [int]$LandedReplacementSeq = -1
+    )
+    $task = $null
+    try { $task = Get-AihTask -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId }
+    catch { return [pscustomobject][ordered]@{ decision = 'block'; reason = 'task identity unproven for this generation'; operationId = $null } }
+    $operation = Read-AihContextCompactionOperation -Workspace $Workspace -TaskId $TaskId
+    if (($null -eq $operation) -or ([string]$operation.taskInstanceId -ne [string]$task.taskInstanceId)) {
+        return [pscustomobject][ordered]@{ decision = 'block'; reason = 'no frozen operation for this generation'; operationId = $null }
+    }
+    if ([int]$operation.schemaVersion -ne [int]$AihContextOperationSchemaVersion) {
+        return [pscustomobject][ordered]@{ decision = 'block'; reason = 'operation schema mismatch'; operationId = [string]$operation.operationId }
+    }
+    $liveSet = [Collections.Generic.HashSet[int]]::new()
+    foreach ($seq in @($LiveSurfaceSeqs)) { [void]$liveSet.Add([int]$seq) }
+    if ([int]$LandedReplacementSeq -ge 0) {
+        if (-not $liveSet.Contains([int]$LandedReplacementSeq)) {
+            return [pscustomobject][ordered]@{ decision = 'block'; reason = 'landed replacement not on live surface'; operationId = [string]$operation.operationId }
+        }
+        foreach ($seq in @($operation.sourceEventSeqs)) {
+            if ($liveSet.Contains([int]$seq)) {
+                return [pscustomobject][ordered]@{ decision = 'block'; reason = 'shadowed source seq still visible after alleged landing'; operationId = [string]$operation.operationId }
+            }
+        }
+        return [pscustomobject][ordered]@{ decision = 'reconcile-applied'; reason = 'frozen replacement durably present'; operationId = [string]$operation.operationId }
+    }
+    foreach ($seq in @($operation.sourceEventSeqs)) {
+        if (-not $liveSet.Contains([int]$seq)) {
+            return [pscustomobject][ordered]@{ decision = 'block'; reason = 'frozen source seq missing from live surface'; operationId = [string]$operation.operationId }
+        }
+    }
+    return [pscustomobject][ordered]@{
+        decision = 'retry-same'; reason = 'exact frozen boundary still valid'
+        operationId = [string]$operation.operationId
+        replacementStart = [int]$operation.replacementStart; replacementEnd = [int]$operation.replacementEnd
+        sourceEventSeqs = @($operation.sourceEventSeqs)
+    }
 }
 
 function Get-AihContextLifecycleSnapshot {
