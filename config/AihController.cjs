@@ -47,6 +47,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const os = require('node:os')
 const crypto = require('node:crypto')
+const contextCompaction = require('./ContextCompaction.cjs')
 
 const REVIEW_COMMAND = /^\s*\/(?:codex-)?review\b/i
 const VERIFY_COMMAND = /^\s*\/verify\b/i
@@ -1510,6 +1511,115 @@ function apply(ctx) {
     return lines.join('\n')
   }
 
+  // ── Context Compaction V1: controller-owned checkpoint + apply ──────────
+  // The task text below is historical context for the NEXT request, never
+  // controller truth: routing and completion stay authoritative in
+  // TaskController state. Every uncertain boundary keeps old context (KEEP).
+  async function lifecycleCli(action, binding, extraArgs, extraPayload) {
+    const args = ['-Action', action, '-TaskId', binding.taskId]
+    if (Array.isArray(extraArgs)) args.push(...extraArgs)
+    return invokePowerShell('ContextLifecycleCli.ps1', args, {
+      payload: Object.assign({ workspace: binding.workspace, taskInstanceId: binding.taskInstanceId || undefined }, extraPayload || {}),
+    })
+  }
+
+  async function evaluateContextCompactionAtCompletion(binding, session) {
+    if (!binding || !binding.taskInstanceId) return null
+    const sessionId = session && session.id ? String(session.id) : ''
+    const eligibility = await lifecycleCli('eligibility', binding, [], { sessionId })
+    if (!eligibility || eligibility.eligibilityDecision !== 'eligible') {
+      // Never downgrade durable progress: a repeated completion check that
+      // now reads keep (e.g. a small follow-up call lowered the volatile
+      // latest signal) must not overwrite checkpoint-ready/applied telemetry.
+      const existing = await lifecycleCli('snapshot', binding, [], {}).catch(() => null)
+      if (!existing || existing.state === 'inactive' || existing.state === 'blocked') {
+        await lifecycleCli('write-telemetry', binding, [], { sessionId }).catch(() => null)
+      }
+      log({ event: 'context-compaction-not-eligible', sessionId, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId, reason: eligibility && eligibility.eligibilityReason })
+      return eligibility
+    }
+    await lifecycleCli('transition', binding, [], { to: 'eligible', reason: eligibility.eligibilityReason, sessionId })
+    const checkpoint = await lifecycleCli('build-checkpoint', binding, [], {
+      continuityUserText: (binding && typeof binding.lastUserPrompt === 'string' && binding.lastUserPrompt !== '') ? binding.lastUserPrompt : contextCompaction.lastTextOfRole(session, 'user', 2000),
+      continuityAssistantText: contextCompaction.lastTextOfRole(session, 'assistant', 4000),
+      sessionId,
+    })
+    await lifecycleCli('transition', binding, [], { to: 'checkpoint-ready', reason: 'checkpoint constructed and validated', sessionId, checkpointPath: checkpoint && checkpoint.path ? String(checkpoint.path) : null })
+    const telemetry = await lifecycleCli('write-telemetry', binding, [], {
+      sessionId,
+      checkpointPath: checkpoint && checkpoint.path ? String(checkpoint.path) : null,
+      checkpointSizeBytes: checkpoint && checkpoint.sizeBytes !== undefined ? checkpoint.sizeBytes : null,
+    })
+    log({ event: 'context-compaction-checkpoint-ready', sessionId, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId, checkpointSizeBytes: checkpoint && checkpoint.sizeBytes })
+    return telemetry
+  }
+
+  // Applied on the NEXT agent/pre-step after authoritative completion: the
+  // supported DSH surface seam (user/message with surfaceOp replace) changes
+  // the MODEL-FACING projection while the raw session log stays intact (the
+  // transcript renders from append-origin events). Any failure keeps the old
+  // context and lets the turn proceed normally.
+  async function maybeApplyContextCompaction(session, binding) {
+    if (!binding || !binding.taskInstanceId || !session) return null
+    const sessionId = session.id ? String(session.id) : ''
+    let snapshot = null
+    try {
+      snapshot = await lifecycleCli('snapshot', binding, [], {})
+    } catch (error) {
+      log({ event: 'context-compaction-snapshot-failed', sessionId, taskId: binding.taskId, error: String(error) })
+      return null
+    }
+    if (!snapshot || snapshot.state !== 'checkpoint-ready') return null
+    if (!snapshot.lifecycle || snapshot.lifecycle.taskInstanceId !== binding.taskInstanceId) {
+      log({ event: 'context-compaction-generation-mismatch', sessionId, taskId: binding.taskId })
+      return null
+    }
+    try {
+      // Apply-time revalidation checks IDENTITY (still controller-complete,
+      // same lifecycle generation), not pressure: the threshold decision was
+      // authoritatively made at completion and stored in lifecycle state. A
+      // small post-completion call lowers the volatile latest signal without
+      // erasing the bulk, so below-threshold keep does not block; any other
+      // keep (not complete, mismatch, unproven) blocks and keeps old context.
+      const eligibility = await lifecycleCli('eligibility', binding, [], { sessionId })
+      const belowThresholdKeep = eligibility && eligibility.eligibilityDecision === 'keep'
+        && typeof eligibility.eligibilityReason === 'string' && eligibility.eligibilityReason.indexOf('below-threshold') === 0
+      if ((!eligibility || eligibility.eligibilityDecision !== 'eligible') && !belowThresholdKeep) {
+        await lifecycleCli('transition', binding, [], { to: 'blocked', reason: 'revalidation at apply time: ' + (eligibility && eligibility.eligibilityReason ? eligibility.eligibilityReason : 'not eligible'), sessionId })
+        await lifecycleCli('write-telemetry', binding, [], { sessionId, blockedReason: 'apply-time revalidation failed' }).catch(() => null)
+        return null
+      }
+      const checkpoint = await lifecycleCli('read-checkpoint', binding, [], {})
+      const provenance = contextCompaction.checkpointProvenanceValid(checkpoint, { taskId: binding.taskId, taskInstanceId: binding.taskInstanceId })
+      if (!provenance.valid) {
+        await lifecycleCli('transition', binding, [], { to: 'blocked', reason: 'checkpoint provenance invalid at apply time: ' + provenance.reason, sessionId })
+        return null
+      }
+      const cut = contextCompaction.balancedRetainCut(session, { maxTailNodes: 6, maxTailChars: 6000, minShadowed: 1 })
+      if (!cut) {
+        log({ event: 'context-compaction-no-balanced-cut', sessionId, taskId: binding.taskId })
+        return null
+      }
+      const checkpointText = await lifecycleCli('checkpoint-text', binding, [], {})
+      const message = createControllerMessage(checkpointText && checkpointText.text ? String(checkpointText.text) : '(context checkpoint unavailable)', 'context-checkpoint')
+      if (typeof session.append !== 'function') {
+        log({ event: 'context-compaction-no-append-seam', sessionId, taskId: binding.taskId })
+        return null
+      }
+      session.append('user/message', message, { surfaceOp: { op: 'replace', start: cut.start, end: cut.end }, sourceEventSeqs: cut.shadowedSeqs })
+      const appliedAtUtc = new Date().toISOString()
+      await lifecycleCli('transition', binding, [], { to: 'applied', reason: 'surface replace landed; model-facing bulk shadowed', sessionId })
+      await lifecycleCli('write-telemetry', binding, [], { sessionId, checkpointPath: snapshot.lifecycle.checkpointPath || null })
+      await lifecycleCli('mark-applied', binding, [], { sessionId, appliedAtUtc })
+      log({ event: 'context-compaction-applied', sessionId, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId, shadowedSeqs: cut.shadowedSeqs.length, retainedSeqs: cut.retainedSeqs.length })
+      appendMessage(session, createControllerMessage('Controller: context checkpoint applied · task ' + binding.taskId + '.\nPrior execution history was compacted to a structured checkpoint; the repository remains the source of truth. Completion authority stays with the deterministic controller.', 'context-compaction-applied'))
+      return { applied: true, shadowed: cut.shadowedSeqs.length, retained: cut.retainedSeqs.length }
+    } catch (error) {
+      log({ event: 'context-compaction-apply-failed', sessionId, taskId: binding.taskId, error: String(error && error.message ? error.message : error) })
+      return null
+    }
+  }
+
   /** Completion decision after a passed verification (review disposition aware). */
   async function runCompletionTail(binding, session) {
     const review = readReviewResult(binding.workspace, binding.taskId)
@@ -1565,6 +1675,12 @@ function apply(ctx) {
           'controller-complete',
         ),
       )
+      // Context Compaction V1: authoritatively COMPLETE is the ONLY eligibility
+      // trigger. Evaluate pressure, persist checkpoint-ready state, and record
+      // telemetry. Every failure only logs: the session keeps working (KEEP).
+      // The model-facing projection change happens on the NEXT pre-step via
+      // maybeApplyContextCompaction (supported surface replace seam).
+      evaluateContextCompactionAtCompletion(binding, session).catch((error) => log({ event: 'context-compaction-evaluate-failed', sessionId: session && session.id, taskId: binding.taskId, error: String(error) }))
     } else if (binding.reviewRequired && review && String(review.verdict) === 'fail') {
       const latest = latestAttemptOf(binding.workspace, binding.taskId)
       ensureGateFor(binding, 'fail', latest ? latest.sequence : null)
@@ -2121,6 +2237,72 @@ function apply(ctx) {
     })
   }
 
+  // ── Context Compaction V1: controller-owned root pressure + post-compaction ──
+  // Root pressure counts ONLY root engineering calls (Dual engineer_normal /
+  // engineer_deep, Muse muse_main). Reviewer, visual-review, worker/subagent
+  // and ambiguous usage are excluded by rootUsageCandidateOf so they can
+  // never pollute the compaction metric. Failures here only log (KEEP).
+  function rootUsageViewOf(binding, session) {
+    const current = binding && binding.currentEngineeringStep
+    const role = current && typeof current.role === 'string' ? current.role : null
+    const roleTarget = current && current.roleTarget && typeof current.roleTarget === 'object' ? current.roleTarget : {}
+    return {
+      engine: binding && binding.engine,
+      role: binding && binding.engine === 'muse' ? 'muse_main' : role,
+      executionClass: binding && binding.executionClass,
+      isWorker: contextCompaction.isWorkerSession(session),
+      stepId: current && current.stepId ? String(current.stepId) : '',
+      model: typeof roleTarget.model === 'string' ? roleTarget.model : '',
+      provider: typeof roleTarget.provider === 'string' ? roleTarget.provider : '',
+    }
+  }
+
+  async function recordContextRootUsage(binding, session, event) {
+    const candidate = contextCompaction.rootUsageCandidateOf(event, rootUsageViewOf(binding, session))
+    if (!candidate) return null
+    const recorded = await invokePowerShell('ContextLifecycleCli.ps1', ['-Action', 'record-root-usage', '-TaskId', binding.taskId], {
+      payload: {
+        workspace: binding.workspace,
+        taskInstanceId: binding.taskInstanceId || undefined,
+        engineRole: candidate.engineRole,
+        engine: candidate.engine,
+        uncachedInputTokens: candidate.uncachedInputTokens,
+        cacheReadTokens: candidate.cacheReadTokens,
+        outputTokens: candidate.outputTokens,
+        usageAvailable: true,
+        model: candidate.model || '',
+        provider: candidate.provider || '',
+        stepId: candidate.stepId || '',
+        sessionId: session && session.id ? String(session.id) : '',
+      },
+    })
+    maybeRecordPostCompactionUsage(binding, session, candidate).catch((error) => log({ event: 'context-post-compaction-record-failed', sessionId: session && session.id, taskId: binding.taskId, error: String(error) }))
+    return recorded
+  }
+
+  const postCompactionRecordedGenerations = new Set()
+  async function maybeRecordPostCompactionUsage(binding, session, candidate) {
+    if (!binding || !binding.taskInstanceId) return null
+    const generationKey = String(binding.taskId) + '\n' + String(binding.taskInstanceId)
+    if (postCompactionRecordedGenerations.has(generationKey)) return null
+    const snapshot = await invokePowerShell('ContextLifecycleCli.ps1', ['-Action', 'snapshot', '-TaskId', binding.taskId], {
+      payload: { workspace: binding.workspace, taskInstanceId: binding.taskInstanceId || undefined },
+    })
+    if (!snapshot || snapshot.state !== 'applied') return null
+    if (!snapshot.lifecycle || snapshot.lifecycle.taskInstanceId !== binding.taskInstanceId) return null
+    const recorded = await invokePowerShell('ContextLifecycleCli.ps1', ['-Action', 'record-post-compaction-usage', '-TaskId', binding.taskId], {
+      payload: {
+        workspace: binding.workspace,
+        taskInstanceId: binding.taskInstanceId || undefined,
+        postCompactionEffectiveInputTokens: candidate.effectiveInputTokens,
+        sessionId: session && session.id ? String(session.id) : '',
+      },
+    })
+    postCompactionRecordedGenerations.add(generationKey)
+    log({ event: 'context-post-compaction-recorded', sessionId: session && session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId, postCompactionEffectiveInputTokens: candidate.effectiveInputTokens })
+    return recorded
+  }
+
   ctx.on('session/event', async (subject, event) => {
     if (!subject || !event) return
     const binding = bindings[subject.id]
@@ -2128,6 +2310,10 @@ function apply(ctx) {
     if (engineeringUsageOfEvent(event) && binding.currentEngineeringStep) {
       recordEngineeringModelUsage(binding, event)
         .catch((error) => log({ event: 'engineering-usage-record-failed', sessionId: subject.id, taskId: binding.taskId, error: String(error) }))
+    }
+    if (event && event.type === 'assistant/chunk') {
+      recordContextRootUsage(binding, subject, event)
+        .catch((error) => log({ event: 'context-root-usage-record-failed', sessionId: subject.id, taskId: binding.taskId, error: String(error) }))
     }
     if (event.type === 'turn/end' && event.data && event.data.reason) {
       const reason = event.data.reason
@@ -2304,6 +2490,18 @@ function apply(ctx) {
       if (isVerifyCommand(promptText)) {
         return executeVerifyTurn(agent, binding)
       }
+
+      // Context Compaction V1: if the bound generation completed earlier with
+      // a ready checkpoint, apply the model-facing projection change now
+      // (supported surface replace; raw log untouched). Never blocks the
+      // turn: any failure keeps the old context and execution continues.
+      try {
+        await maybeApplyContextCompaction(session, binding)
+      } catch (error) {
+        log({ event: 'context-compaction-pre-step-failed', sessionId: session.id, taskId: binding.taskId, error: String(error) })
+      }
+      // Track the latest user prompt for checkpoint continuity (bounded use).
+      binding.lastUserPrompt = String(promptText).slice(0, 2000)
 
       // TASK-0004: crash-safe reconciliation at the producer boundary. An
       // attempt left in 'verifying' by a dead process is closed from real
@@ -2524,6 +2722,7 @@ module.exports.userPromptMessages = userPromptMessages
 module.exports.executionClassLabel = executionClassLabel
 module.exports.canonicalExecutionClass = canonicalExecutionClass
 module.exports.isReviewClass = isReviewClass
+module.exports.contextCompactionForTest = contextCompaction
 module.exports.isWorkerAgent = isWorkerAgent
 module.exports.createControllerMessage = createControllerMessage
 module.exports.parseCliJson = parseCliJson
