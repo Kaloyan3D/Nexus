@@ -48,24 +48,6 @@ const path = require('node:path')
 const os = require('node:os')
 const crypto = require('node:crypto')
 const contextCompaction = require('./ContextCompaction.cjs')
-// Real DSH identified-message factory (createUserMessage mints a stable
-// crypto-random id exactly like the loop's own runtime-context projection).
-// Resolved through the install root's pinned host tree (same pattern as
-// loadGateModule); source checkouts without the runtime fail safe to null.
-const dshFactoryCache = new Map()
-function dshMessageFactory(installRoot) {
-  const key = String(installRoot || '')
-  if (dshFactoryCache.has(key)) return dshFactoryCache.get(key)
-  let factory = null
-  try {
-    const base = key ? path.resolve(key) : __dirname
-    const requireFromApp = createRequire(path.join(base, key ? 'app' : '', 'package.json'))
-    const mod = requireFromApp('@deepseek-ai/dsh-llm')
-    if (mod && typeof mod.createUserMessage === 'function') factory = mod.createUserMessage
-  } catch { factory = null }
-  dshFactoryCache.set(key, factory)
-  return factory
-}
 
 const REVIEW_COMMAND = /^\s*\/(?:codex-)?review\b/i
 const VERIFY_COMMAND = /^\s*\/verify\b/i
@@ -1644,7 +1626,7 @@ function apply(ctx) {
   }
 
   // Resolve the real pinned dsh-session module through the install root
-  // (same pattern as the message factory). Null when unavailable.
+  // (same pattern as loadGateModule). Null when unavailable.
   const dshSessionCache = new Map()
   function loadDshSessionModule() {
     const key = String((typeof installRoot !== 'undefined' && installRoot) ? installRoot : '')
@@ -1667,12 +1649,22 @@ function apply(ctx) {
   // and never held across Git/model/checkpoint work. Acquire may BLOCK or
   // time out (KEEP); it never launches a second writer. Returns an
   // { acquired, release } pair; release is best-effort and idempotent.
+  // Test-only short-lease injection (§19): AIH_COMPACTION_TEST_LEASE_S sets
+  // the production default lease for the lock/heartbeat path. Production
+  // default (unset) is 60s. The code path is identical in both cases.
+  function compactionLockLeaseSeconds() {
+    const raw = Number(process.env.AIH_COMPACTION_TEST_LEASE_S)
+    if (Number.isFinite(raw) && raw >= 1 && raw <= 600) return Math.trunc(raw)
+    return 60
+  }
+
   async function acquireCompactionApplyLock(binding, operation, sessionId) {
     const operationId = operation && operation.operationId ? String(operation.operationId) : ''
+    const leaseSeconds = compactionLockLeaseSeconds()
     const result = await lifecycleCli('acquire-apply-lock', binding, [], {
       sessionId,
       operationLockId: operationId,
-      lockLeaseSeconds: 60,
+      lockLeaseSeconds: leaseSeconds,
     }).catch(() => null)
     if (!result || result.acquired !== true || !result.ownerId) {
       return { acquired: false, reason: (result && result.reason) || 'lock-unavailable' }
@@ -1682,12 +1674,62 @@ function apply(ctx) {
     return {
       acquired: true,
       ownerId,
+      leaseSeconds,
       release: () => {
         if (released) return
         released = true
         lifecycleCli('release-apply-lock', binding, [], { lockOwnerId: ownerId }).catch(() => null)
       },
     }
+  }
+
+  // Owner-token heartbeat: renews the lease every lease/3 while the attempt
+  // runs, so a healthy live owner is never evicted by wall-clock expiry.
+  // Renewal is owner-guarded (only our ownerId extends our lease) and runs
+  // alongside awaited async persistence -- never inside synchronous blocks.
+  // If renewal fails, healthy=false: the holder must stop before APPLIED.
+  function startCompactionHeartbeat(binding, sessionId, operationId, ownerId, leaseSeconds) {
+    const intervalMs = Math.max(250, Math.floor(Number(leaseSeconds) * 1000 / 3))
+    const state = { healthy: true, stopped: false, failures: 0, beating: false, expiresAtUtc: null }
+    const beat = async () => {
+      if (state.stopped || state.beating) return
+      state.beating = true
+      try {
+        const res = await lifecycleCli('renew-apply-lock', binding, [], {
+          sessionId,
+          operationLockId: operationId,
+          lockOwnerId: ownerId,
+          lockLeaseSeconds: leaseSeconds,
+        }).catch(() => null)
+        if (res && res.renewed === true) {
+          state.failures = 0
+          state.expiresAtUtc = res.expiresAtUtc || state.expiresAtUtc
+        } else {
+          state.failures += 1
+          if (state.failures >= 2) state.healthy = false
+        }
+      } finally {
+        state.beating = false
+      }
+    }
+    state.timer = setInterval(() => { beat().catch(() => {}) }, intervalMs)
+    if (state.timer && typeof state.timer.unref === 'function') state.timer.unref()
+    state.stop = () => { state.stopped = true; if (state.timer) clearInterval(state.timer) }
+    state.beatNow = () => beat()
+    return state
+  }
+
+  // §14 ownership gate: prove this process still owns the lease before an
+  // irreversible/critical stage. Returns true only on a fresh successful
+  // renewal (which also extends the lease past the coming stage).
+  async function checkCompactionOwnership(binding, sessionId, operationId, ownerId, leaseSeconds) {
+    const res = await lifecycleCli('renew-apply-lock', binding, [], {
+      sessionId,
+      operationLockId: operationId,
+      lockOwnerId: ownerId,
+      lockLeaseSeconds: leaseSeconds,
+    }).catch(() => null)
+    return Boolean(res && res.renewed === true)
   }
 
   // Flush one session through the supported DSH durability barrier
@@ -1775,65 +1817,14 @@ function apply(ctx) {
     }
   }
 
-  // Refresh the authoritative CURRENT dynamic runtime snapshot after the
-  // replace landed (F1 path B): re-render the live assembly through the real
-  // DSH section pipeline and append a fresh snapshot ONLY when it differs
-  // from the retained one. Never synthesizes policy text: the sections come
-  // from ctx.systemPrompt (the same authority the loop used pre-step), and
-  // the message is built by the REAL dsh-llm createUserMessage factory so it
-  // carries a stable id and survives fresh-process resume. When the snapshot
-  // is unchanged, nothing is appended (no duplicate). When the factory is
-  // unavailable, KEEP: no anonymous message is ever persisted.
-  async function refreshRuntimeContextSnapshot(session, agent) {
-    try {
-      if (!ctx || !agent) return null
-      const createUserMessage = dshMessageFactory(installRoot)
-      if (typeof createUserMessage !== 'function') {
-        log({ event: 'context-compaction-runtime-factory-missing' })
-        return null
-      }
-      const systemPrompt = typeof ctx.get === 'function' ? ctx.get('systemPrompt') : null
-      if (!systemPrompt || typeof systemPrompt.assemble !== 'function') return null
-      // Anchored requires (same pattern as the message factory): resolvable
-      // in production and under harnessed pre-step tests, never bare
-      // specifiers that depend on ambient module paths.
-      let assembleContextFor = null
-      let renderContextSections = null
-      let joinContextSections = null
-      try {
-        const base = installRoot ? path.resolve(installRoot) : __dirname
-        const requireFromApp = createRequire(path.join(base, installRoot ? 'app' : '', 'package.json'))
-        const dshAgent = requireFromApp('@deepseek-ai/dsh-agent')
-        const dshPrompt = requireFromApp('@deepseek-ai/dsh-system-prompt')
-        assembleContextFor = dshAgent && dshAgent.assembleContextFor
-        renderContextSections = dshPrompt && dshPrompt.renderContextSections
-        joinContextSections = dshPrompt && dshPrompt.joinContextSections
-      } catch { assembleContextFor = null }
-      if (typeof assembleContextFor !== 'function' || typeof renderContextSections !== 'function' || typeof joinContextSections !== 'function') return null
-      const assembly = await systemPrompt.assemble(assembleContextFor(agent, agent.signal || new AbortController().signal))
-      const sections = renderContextSections(assembly)
-      const snapshot = joinContextSections(sections)
-      if (!snapshot) return null
-      const retained = contextCompaction.runtimeContextSeqsOf(session)
-      let retainedText = null
-      for (const seq of retained) {
-        const event = Array.isArray(session.events) ? session.events[seq] : null
-        if (event && event.type === 'user/message' && Array.isArray(session.surface.nodes) && session.surface.nodes.indexOf(seq) !== -1) {
-          const content = event.data && Array.isArray(event.data.content) ? event.data.content : []
-          if (content.length === 1 && content[0] && content[0].type === 'text') retainedText = content[0].text
-        }
-      }
-      if (retainedText === snapshot) return null
-      const message = createUserMessage({
-        content: [{ type: 'text', text: snapshot }],
-        source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt', form: 'snapshot', sections: sections.map((section) => ({ name: section.name })) },
-      })
-      return session.append('user/message', JSON.parse(JSON.stringify(message)), { surfaceOp: 'append' })
-    } catch (error) {
-      log({ event: 'context-compaction-runtime-refresh-failed', error: String(error && error.message ? error.message : error) })
-      return null
-    }
-  }
+  // F1 ownership rule (final): DSH owns runtime-policy projection, Nexus
+  // owns compaction. Nexus NEVER appends a runtime snapshot of its own: the
+  // frozen segmented plan already excludes DSH-owned runtime/system-prompt
+  // snapshot nodes, so the retained snapshot survives the replace; the
+  // loop's own projection then commits exactly one CURRENT candidate per
+  // its supersession semantics (unchanged -> retained; changed -> OLD
+  // superseded + one NEW). The redundant Nexus refresh path was removed
+  // because it raced the loop's already-built candidate and duplicated NEW.
 
   async function maybeApplyContextCompaction(session, binding, agent) {
     if (!binding || !binding.taskInstanceId || !session) return null
@@ -1925,6 +1916,11 @@ function apply(ctx) {
         log({ event: 'context-compaction-lock-contended', sessionId, taskId: binding.taskId, operationId, reason: applyLock.reason })
         return { awaitingDurability: true, operationId, reason: 'apply-lock-contended' }
       }
+      // Heartbeat starts immediately after acquisition and renews every
+      // lease/3, so a live owner is never evicted mid-transaction. Every
+      // critical stage below additionally re-proves ownership explicitly.
+      const heartbeat = startCompactionHeartbeat(binding, sessionId, operationId, applyLock.ownerId, applyLock.leaseSeconds)
+      const stopHeartbeat = () => { try { heartbeat.stop() } catch {} try { applyLock.release() } catch {} }
       try {
       // F5 MANDATORY: memory presence is not durability. When the landed
       // node is visible only in the live Session, first force the supported
@@ -1976,6 +1972,15 @@ function apply(ctx) {
       // (The reconcile already proved all frozen seqs are still live; this
       // additionally proves no NEWER event was adopted into the operation.)
       const frozenSeqs = reconcile.sourceEventSeqs || operation.sourceEventSeqs
+      // §14 gate 1 (before physical append): still the lease owner?
+      if (!heartbeat.healthy) {
+        log({ event: 'context-compaction-heartbeat-unhealthy', sessionId, taskId: binding.taskId, operationId })
+        return { awaitingDurability: true, operationId, reason: 'heartbeat-unhealthy' }
+      }
+      if (!(await checkCompactionOwnership(binding, sessionId, operationId, applyLock.ownerId, applyLock.leaseSeconds))) {
+        log({ event: 'context-compaction-ownership-lost-pre-append', sessionId, taskId: binding.taskId, operationId })
+        return { awaitingDurability: true, operationId, reason: 'ownership-lost-pre-append' }
+      }
       const checkpointText = await lifecycleCli('checkpoint-text', binding, [], {})
       const message = createControllerMessage(checkpointText && checkpointText.text ? String(checkpointText.text) : '(context checkpoint unavailable)', 'context-checkpoint')
       message.source = Object.assign({}, message.source, { operationId })
@@ -2004,8 +2009,14 @@ function apply(ctx) {
           log({ event: 'context-compaction-malformed-segment', sessionId, taskId: binding.taskId, operationId })
           return { blocked: true, reason: 'segment-malformed' }
         }
-        const alreadyShadowed = segment.sourceEventSeqs.every((seq) => !liveSetNow.has(seq))
-        if (!alreadyShadowed) remainingSegments.push(segment)
+        const liveCount = segment.sourceEventSeqs.filter((seq) => liveSetNow.has(seq)).length
+        if (liveCount === 0) continue
+        if (liveCount !== segment.sourceEventSeqs.length) {
+          await lifecycleCli('transition', binding, [], { to: 'blocked', reason: 'partially shadowed segment cannot be safely re-appended', sessionId }).catch(() => null)
+          log({ event: 'context-compaction-partial-segment-blocked', sessionId, taskId: binding.taskId, operationId })
+          return { blocked: true, reason: 'segment-partially-shadowed' }
+        }
+        remainingSegments.push(segment)
       }
       const appendedSeqs = []
       for (const segment of remainingSegments) {
@@ -2032,10 +2043,20 @@ function apply(ctx) {
         log({ event: 'context-compaction-no-durability-listener', sessionId, taskId: binding.taskId, operationId })
         return { awaitingDurability: true, operationId }
       }
-      // Persistence-backed proof: flush, then verify the replacement from
-      // DURABLE state (backend artifact or public restore). Memory presence
-      // alone never suffices.
+      // §14 gate 2 (around flush) + persistence-backed proof: flush, then
+      // verify the replacement from DURABLE state (backend artifact or
+      // public restore). Memory presence alone never suffices. The
+      // heartbeat keeps renewing across the awaited flush; an explicit
+      // ownership re-proof follows before finalization.
       const durablyProven = await verifyOperationDurable(session, operationId, sessionId)
+      if (!heartbeat.healthy) {
+        log({ event: 'context-compaction-heartbeat-unhealthy-post-flush', sessionId, taskId: binding.taskId, operationId })
+        return { awaitingDurability: true, operationId, reason: 'heartbeat-unhealthy-post-flush' }
+      }
+      if (!(await checkCompactionOwnership(binding, sessionId, operationId, applyLock.ownerId, applyLock.leaseSeconds))) {
+        log({ event: 'context-compaction-ownership-lost-pre-finalize', sessionId, taskId: binding.taskId, operationId })
+        return { awaitingDurability: true, operationId, reason: 'ownership-lost-pre-finalize' }
+      }
       if (!durablyProven) {
         log({ event: 'context-compaction-durable-proof-missing', sessionId, taskId: binding.taskId, operationId })
         return { awaitingDurability: true, operationId }
@@ -2048,15 +2069,14 @@ function apply(ctx) {
       if (!transitionedApplied) return { blocked: true, reason: 'applied-transition-failed' }
       await lifecycleCli('write-telemetry', binding, [], { sessionId, checkpointPath: snapshot.lifecycle.checkpointPath || null })
       await lifecycleCli('mark-applied', binding, [], { sessionId, appliedAtUtc })
-      // F1 path B: refresh the CURRENT authoritative runtime snapshot after
-      // the replace landed, so the first post-compaction request carries
-      // current dynamic policy even though the stale snapshot was shadowed.
-      await refreshRuntimeContextSnapshot(session, agent)
+      // F1: no Nexus runtime refresh here. The retained DSH-owned snapshot
+      // survives the segmented replace and the loop commits exactly one
+      // CURRENT candidate per its own supersession semantics.
       log({ event: 'context-compaction-applied', sessionId, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId, operationId, shadowedSeqs: frozenSeqs.length })
       appendMessage(session, createControllerMessage('Controller: context checkpoint applied · task ' + binding.taskId + '.\nPrior execution history was compacted to a structured checkpoint; the repository remains the source of truth. Completion authority stays with the deterministic controller.', 'context-compaction-applied'))
       return { applied: true, operationId, shadowed: frozenSeqs.length }
       } finally {
-        try { applyLock.release() } catch { /* best effort */ }
+        try { stopHeartbeat() } catch { /* best effort */ }
       }
     })().finally(() => { compactionInflightByOperation.delete(operationId) })
     compactionInflightByOperation.set(operationId, attempt)

@@ -392,6 +392,45 @@ try {
     Assert-Aih ([string]$wrongSession.decision -eq 'block') 'wrong sessionId reconciles to block'
 } finally { if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force } }
 
+# == 27b. OWNER TOKEN: renew/release fenced by unguessable ownerId =========
+$root = New-CompactionFixture 't27b'
+try {
+    $task = New-CompactionTask $root
+    $instance = [string]$task.taskInstanceId
+    $a = Invoke-AihCompactionApplyLockAcquire -Workspace $root -TaskId $task.taskId -TaskInstanceId $instance -SessionId 'sess-tok' -OperationId 'ccop_tok' -LeaseSeconds 60
+    Assert-Aih ([bool]$a.acquired) 'owner A acquires'
+    $stranger = Invoke-AihCompactionApplyLockRenew -Workspace $root -TaskId $task.taskId -TaskInstanceId $instance -SessionId 'sess-tok' -OperationId 'ccop_tok' -OwnerId 'not-the-owner' -LeaseSeconds 60
+    Assert-Aih (-not [bool]$stranger.renewed) 'non-owner cannot renew'
+    $mine = Invoke-AihCompactionApplyLockRenew -Workspace $root -TaskId $task.taskId -TaskInstanceId $instance -SessionId 'sess-tok' -OperationId 'ccop_tok' -OwnerId ([string]$a.ownerId) -LeaseSeconds 60
+    Assert-Aih ([bool]$mine.renewed) 'owner can renew'
+    $lockBefore = Get-Content -Raw -Encoding UTF8 -LiteralPath (Get-AihCompactionApplyLockPath -Workspace $root -TaskId $task.taskId) | ConvertFrom-Json
+    Start-Sleep -Milliseconds 1100
+    $mine2 = Invoke-AihCompactionApplyLockRenew -Workspace $root -TaskId $task.taskId -TaskInstanceId $instance -SessionId 'sess-tok' -OperationId 'ccop_tok' -OwnerId ([string]$a.ownerId) -LeaseSeconds 60
+    $lockAfter = Get-Content -Raw -Encoding UTF8 -LiteralPath (Get-AihCompactionApplyLockPath -Workspace $root -TaskId $task.taskId) | ConvertFrom-Json
+    Assert-Aih (([bool]$mine2.renewed) -and ([string]$lockAfter.expiresAtUtc -ge [string]$lockBefore.expiresAtUtc)) 'renewal extends expiry'
+    $strangerRelease = Invoke-AihCompactionApplyLockRelease -Workspace $root -TaskId $task.taskId -OwnerId 'not-the-owner'
+    Assert-Aih (-not [bool]$strangerRelease.released) 'old/non-owner cannot release the lock'
+    Assert-Aih (Test-Path -LiteralPath (Get-AihCompactionApplyLockPath -Workspace $root -TaskId $task.taskId)) 'lock survives stranger release'
+    $ownRelease = Invoke-AihCompactionApplyLockRelease -Workspace $root -TaskId $task.taskId -OwnerId ([string]$a.ownerId)
+    Assert-Aih ([bool]$ownRelease.released) 'owner releases'
+} finally { if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force } }
+
+# == 27c. HEARTBEAT FAILURE: holder stops, newcomer recovers safely ==========
+$root = New-CompactionFixture 't27c'
+try {
+    $task = New-CompactionTask $root
+    $instance = [string]$task.taskInstanceId
+    $a = Invoke-AihCompactionApplyLockAcquire -Workspace $root -TaskId $task.taskId -TaskInstanceId $instance -SessionId 'sess-hb' -OperationId 'ccop_hb' -LeaseSeconds 2
+    Assert-Aih ([bool]$a.acquired) 'heartbeat holder acquires short lease'
+    Remove-Item -LiteralPath (Get-AihCompactionApplyLockPath -Workspace $root -TaskId $task.taskId) -Force
+    $renewGone = Invoke-AihCompactionApplyLockRenew -Workspace $root -TaskId $task.taskId -TaskInstanceId $instance -SessionId 'sess-hb' -OperationId 'ccop_hb' -OwnerId ([string]$a.ownerId) -LeaseSeconds 2
+    Assert-Aih (-not [bool]$renewGone.renewed) 'renewal fails when the record is gone (holder must stop)'
+    $b = Invoke-AihCompactionApplyLockAcquire -Workspace $root -TaskId $task.taskId -TaskInstanceId $instance -SessionId 'sess-hb' -OperationId 'ccop_hb' -LeaseSeconds 60
+    Assert-Aih ([bool]$b.acquired) 'after failure one process can acquire safely'
+    Assert-Aih ([string]$b.ownerId -ne [string]$a.ownerId) 'new owner holds a fresh token'
+    [void](Invoke-AihCompactionApplyLockRelease -Workspace $root -TaskId $task.taskId -OwnerId ([string]$b.ownerId))
+} finally { if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force } }
+
 # == 28. THRESHOLD VALIDATION FAILS CLOSED =====================================
 $invalid = $false
 try { [void](Get-AihContextLifecycleThreshold -Override 0) } catch { $invalid = $true }

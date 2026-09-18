@@ -255,6 +255,14 @@ function validateOperationForApply(operation, expected) {
   if (!expected || typeof expected !== 'object') return fail('expectation-missing');
   if (Number(operation.schemaVersion) !== 1) return fail('operation-schema-mismatch');
   if (typeof operation.operationId !== 'string' || operation.operationId === '') return fail('operation-id-missing');
+  // Derived identity, not free text: recompute the canonical operationId
+  // from the bound task/session triple and require an exact match BEFORE
+  // any mutation. A merely nonempty string is never sufficient.
+  let expectedOperationId = null;
+  try {
+    expectedOperationId = deriveCanonicalOperationId(expected.taskId, expected.taskInstanceId, expected.sessionId);
+  } catch { return fail('operation-id-derivation-failed'); }
+  if (operation.operationId !== expectedOperationId) return fail('operation-id-mismatch');
   if (operation.taskId !== expected.taskId) return fail('task-id-mismatch');
   if (typeof operation.taskInstanceId !== 'string' || operation.taskInstanceId === '' || operation.taskInstanceId !== expected.taskInstanceId) {
     return fail('task-instance-mismatch');
@@ -305,7 +313,36 @@ function validateOperationForApply(operation, expected) {
   for (let i = 0; i < seqs.length; i += 1) {
     if (union[i] !== seqs[i]) return fail('segment-union-mismatch');
   }
+  // Closed-world ordering: segments strictly ordered, non-overlapping, and
+  // every frozen seq inside the completion boundary (no foreign adoption).
+  let previousEnd = -1;
+  for (const segment of segments) {
+    if (segment.start <= previousEnd) return fail('segment-overlap');
+    if (segment.end < segment.start) return fail('segment-endpoint-mismatch');
+    for (const seq of segment.sourceEventSeqs) {
+      if (seq < segment.start || seq > segment.end) return fail('segment-ownership-mismatch');
+      if (seq < 0 || seq > boundary) return fail('source-seq-beyond-completion-boundary');
+    }
+    previousEnd = segment.end;
+  }
+  for (let i = 1; i < seqs.length; i += 1) {
+    if (seqs[i] <= seqs[i - 1]) return fail('source-seqs-unordered');
+  }
   return { valid: true, reason: null };
+}
+
+// Canonical operation identity (mirrors New-AihContextCompactionOperationId
+// byte-for-byte: domain LF taskId LF taskInstanceId LF sessionId, UTF-8,
+// SHA-256 hex, first 32 chars, ccop_ prefix). The PS function is the
+// derivation authority; this twin exists so the bridge can recompute and
+// compare without spawning a CLI. Parity is proven by test.
+const OPERATION_ID_DOMAIN = 'nexus/context-compaction-operation/v1';
+
+function deriveCanonicalOperationId(taskId, taskInstanceId, sessionId) {
+  const crypto = require('node:crypto');
+  const joined = [OPERATION_ID_DOMAIN, String(taskId), String(taskInstanceId), String(sessionId)].join('\n');
+  const digest = crypto.createHash('sha256').update(joined, 'utf8').digest('hex');
+  return 'ccop_' + digest.slice(0, 32);
 }
 
 function checkpointProvenanceValid(checkpoint, binding) {
@@ -350,6 +387,8 @@ function lastTextOfRole(session, role, maxChars) {
 }
 
 module.exports = {
+  OPERATION_ID_DOMAIN,
+  deriveCanonicalOperationId,
   RUNTIME_CONTEXT_PLUGIN,
   isRuntimeContextMessage,
   runtimeContextSeqsOf,

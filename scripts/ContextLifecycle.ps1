@@ -463,10 +463,15 @@ function Set-AihContextLifecycleTransition {
     }
     # Legacy checkpoint-ready states (de34d52) carry NO frozen operation.
     # They must never flow into the new apply path: fail safe and require a
-    # fresh freeze instead of reinterpreting them.
+    # fresh freeze instead of reinterpreting them. The operation is read
+    # lazily ONLY for apply-path targets: the blocked sink must stay
+    # reachable even when the operation file is missing or corrupt.
     $operation = $null
-    try { $operation = Read-AihContextCompactionOperation -Workspace $Workspace -TaskId $TaskId } catch { throw }
-    $hasFrozenOperation = ($null -ne $operation) -and ([string]$operation.taskInstanceId -eq $actualInstance)
+    $hasFrozenOperation = $false
+    if (($To -eq 'apply-pending') -or ($To -eq 'awaiting-durability') -or ($To -eq 'applied')) {
+        try { $operation = Read-AihContextCompactionOperation -Workspace $Workspace -TaskId $TaskId } catch { throw }
+        $hasFrozenOperation = ($null -ne $operation) -and ([string]$operation.taskInstanceId -eq $actualInstance)
+    }
     $allowed = @{
         'inactive'            = @('eligible', 'blocked')
         'eligible'            = @('checkpoint-ready', 'blocked', 'eligible')
@@ -510,11 +515,16 @@ function Set-AihContextLifecycleTransition {
     return [pscustomobject]$state
 }
 
+$AihContextOperationIdDomain = 'nexus/context-compaction-operation/v1'
+
 function New-AihContextCompactionOperationId {
-    # Deterministic per lifecycle generation: stable across retries/restarts
-    # (no randomness), unique per task generation plus session (no cross-talk).
+    # CANONICAL deterministic operation identity (the ONE derivation
+    # authority; the JS helper mirrors it byte-for-byte, proven by the
+    # parity test). Serialization: domain separator plus taskId plus
+    # taskInstanceId plus sessionId, joined by LF, UTF-8, SHA-256 hex,
+    # first 32 chars prefixed ccop_. Stable across retries/restarts.
     param([Parameter(Mandatory = $true)][string]$TaskId, [Parameter(Mandatory = $true)][string]$TaskInstanceId, [Parameter(Mandatory = $true)][string]$SessionId)
-    $joined = [string]$TaskId + "`n" + [string]$TaskInstanceId + "`n" + [string]$SessionId
+    $joined = [string]$AihContextOperationIdDomain + "`n" + [string]$TaskId + "`n" + [string]$TaskInstanceId + "`n" + [string]$SessionId
     $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
@@ -670,18 +680,34 @@ function Test-AihContextOperationReconcile {
         if (-not $liveSet.Contains([int]$LandedReplacementSeq)) {
             return [pscustomobject][ordered]@{ decision = 'block'; reason = 'landed replacement not on live surface'; operationId = [string]$operation.operationId }
         }
-        foreach ($seq in @($operation.sourceEventSeqs)) {
-            if ($liveSet.Contains([int]$seq)) {
-                return [pscustomobject][ordered]@{ decision = 'block'; reason = 'shadowed source seq still visible after alleged landing'; operationId = [string]$operation.operationId }
+        # Contract A (partial-segment restart): every frozen segment must be
+        # EITHER fully live (still to append) OR fully shadowed (landed). A
+        # partially shadowed segment can never be safely re-appended.
+        $missingSegments = 0
+        foreach ($segment in @($operation.segments)) {
+            $liveCount = 0
+            foreach ($seq in @($segment.sourceEventSeqs)) { if ($liveSet.Contains([int]$seq)) { $liveCount++ } }
+            if ($liveCount -eq 0) { continue }
+            if ($liveCount -eq @($segment.sourceEventSeqs).Count) { $missingSegments++ ; continue }
+            return [pscustomobject][ordered]@{ decision = 'block'; reason = 'partially shadowed segment cannot be safely re-appended'; operationId = [string]$operation.operationId }
+        }
+        if ([int]$missingSegments -eq 0) {
+            # F5 MANDATORY: memory presence is not durability.
+            # reconcile-applied requires the caller to have verified the
+            # replacement from DURABLE persistence (flush + restore/proof),
+            # not merely the live object.
+            if (-not [bool]$DurablyVerified) {
+                return [pscustomobject][ordered]@{ decision = 'await-durability'; reason = 'landed in memory only; durable proof required'; operationId = [string]$operation.operationId }
             }
+            return [pscustomobject][ordered]@{ decision = 'reconcile-applied'; reason = 'frozen replacement durably verified'; operationId = [string]$operation.operationId }
         }
-        # F5 MANDATORY: memory presence is not durability. reconcile-applied
-        # requires the caller to have verified the replacement from DURABLE
-        # persistence (flush + restore/proof), not merely the live object.
-        if (-not [bool]$DurablyVerified) {
-            return [pscustomobject][ordered]@{ decision = 'await-durability'; reason = 'landed in memory only; durable proof required'; operationId = [string]$operation.operationId }
+        return [pscustomobject][ordered]@{
+            decision = 'retry-same'; reason = 'partial landing: only exact missing segments remain'
+            operationId = [string]$operation.operationId
+            replacementStart = [int]$operation.replacementStart; replacementEnd = [int]$operation.replacementEnd
+            sourceEventSeqs = @($operation.sourceEventSeqs)
+            segments = @($operation.segments)
         }
-        return [pscustomobject][ordered]@{ decision = 'reconcile-applied'; reason = 'frozen replacement durably verified'; operationId = [string]$operation.operationId }
     }
     foreach ($seq in @($operation.sourceEventSeqs)) {
         if (-not $liveSet.Contains([int]$seq)) {
@@ -729,17 +755,56 @@ function Invoke-AihCompactionApplyLockAcquire {
     $lockPath = Get-AihCompactionApplyLockPath -Workspace $Workspace -TaskId $TaskId
     $ownerId = [guid]::NewGuid().ToString('N')
     $now = [DateTime]::UtcNow
-    $lease = [Math]::Max(10, [int]$LeaseSeconds)
+    $lease = [Math]::Max(1, [int]$LeaseSeconds)
+    $ownerPid = 0
+    try { $ownerPid = [int]$PID } catch { $ownerPid = 0 }
+    $processStart = $null
+    try { $processStart = (Get-Process -Id $PID -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o') } catch { $processStart = $null }
     $payload = [ordered]@{
-        schemaVersion = 1; taskId = $TaskId; taskInstanceId = [string]$task.taskInstanceId
+        schemaVersion = 2; taskId = $TaskId; taskInstanceId = [string]$task.taskInstanceId
         sessionId = [string]$SessionId; operationId = [string]$OperationId
-        ownerId = [string]$ownerId; acquiredAtUtc = $now.ToString('o')
+        ownerId = [string]$ownerId; ownerPid = $ownerPid; ownerProcessStartUtc = $processStart
+        acquiredAtUtc = $now.ToString('o'); renewedAtUtc = $now.ToString('o')
         expiresAtUtc = $now.AddSeconds($lease).ToString('o')
     }
     $directory = Split-Path -Parent ([System.IO.Path]::GetFullPath($lockPath))
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
-    $takeover = $false
-    for ($round = 0; $round -lt 2; $round++) {
+    # The whole check-and-create sequence runs inside the mutation mutex so
+    # two contenders cannot both observe absence and both create.
+    return (Use-AihCompactionLockMutex -SessionId $SessionId -OperationId $OperationId {
+        if (Test-Path -LiteralPath $lockPath) {
+            $existing = $null
+            try { $existing = Get-Content -Raw -Encoding UTF8 -LiteralPath $lockPath | ConvertFrom-Json } catch { $existing = $null }
+            if ($null -ne $existing) {
+                if (([string]$existing.taskInstanceId -ne [string]$task.taskInstanceId) -or ([string]$existing.operationId -ne [string]$OperationId) -or ([string]$existing.sessionId -ne [string]$SessionId)) {
+                    return [pscustomobject][ordered]@{ acquired = $false; reason = 'held-by-other-operation' }
+                }
+                $expiry = [DateTime]::MinValue
+                if ($null -ne $existing.PSObject.Properties['expiresAtUtc']) { [void][DateTime]::TryParse([string]$existing.expiresAtUtc, [ref]$expiry) }
+                if ($expiry -gt [DateTime]::UtcNow) { return [pscustomobject][ordered]@{ acquired = $false; reason = 'held-by-live-owner' } }
+                $renewedAt = [DateTime]::MinValue
+                if ($null -ne $existing.PSObject.Properties['renewedAtUtc']) { [void][DateTime]::TryParse([string]$existing.renewedAtUtc, [ref]$renewedAt) }
+                $ownerPid = 0
+                if ($null -ne $existing.PSObject.Properties['ownerPid']) { [void][int]::TryParse([string]$existing.ownerPid, [ref]$ownerPid) }
+                $ownerAlive = $false
+                if ($ownerPid -gt 0) {
+                    try {
+                        $proc = Get-Process -Id $ownerPid -ErrorAction Stop
+                        $started = $proc.StartTime.ToUniversalTime().ToString('o')
+                        $recorded = $null
+                        if ($null -ne $existing.PSObject.Properties['ownerProcessStartUtc']) { $recorded = [string]$existing.ownerProcessStartUtc }
+                        $ownerAlive = ([string]::IsNullOrWhiteSpace($recorded) -or ($started -eq $recorded))
+                    } catch { $ownerAlive = $false }
+                }
+                # Takeover requires BOTH expiry AND no defensible liveness:
+                # a provably live owner process (same PID plus start time)
+                # fences takeover even past expiry -- its renew-gate stops it
+                # if it truly stalled, and renewal resumes when it wakes.
+                # Only a dead/unknown owner may be taken over.
+                if ($ownerAlive) { return [pscustomobject][ordered]@{ acquired = $false; reason = 'held-by-live-owner' } }
+            }
+            try { Remove-Item -LiteralPath $lockPath -Force } catch { return [pscustomobject][ordered]@{ acquired = $false; reason = 'takeover-raced' } }
+        }
         try {
             $stream = [IO.File]::Open($lockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
             try {
@@ -748,24 +813,65 @@ function Invoke-AihCompactionApplyLockAcquire {
                 $stream.Flush()
             } finally { $stream.Dispose() }
             return [pscustomobject][ordered]@{ acquired = $true; ownerId = [string]$ownerId; leaseSeconds = $lease }
-        } catch [IO.IOException] {
-            $existing = $null
-            try { $existing = Get-Content -Raw -Encoding UTF8 -LiteralPath $lockPath | ConvertFrom-Json } catch { $existing = $null }
-            $stale = $true
-            if ($null -ne $existing) {
-                if (([string]$existing.taskInstanceId -ne [string]$task.taskInstanceId) -or ([string]$existing.operationId -ne [string]$OperationId) -or ([string]$existing.sessionId -ne [string]$SessionId)) {
-                    return [pscustomobject][ordered]@{ acquired = $false; reason = 'held-by-other-operation' }
-                }
-                $expiry = [DateTime]::MinValue
-                if ($null -ne $existing.PSObject.Properties['expiresAtUtc']) { [void][DateTime]::TryParse([string]$existing.expiresAtUtc, [ref]$expiry) }
-                if ($expiry -gt [DateTime]::UtcNow) { return [pscustomobject][ordered]@{ acquired = $false; reason = 'held-by-live-owner' } }
-            }
-            if ($takeover) { return [pscustomobject][ordered]@{ acquired = $false; reason = 'takeover-raced' } }
-            try { Remove-Item -LiteralPath $lockPath -Force } catch { return [pscustomobject][ordered]@{ acquired = $false; reason = 'takeover-raced' } }
-            $takeover = $true
-        }
+        } catch [IO.IOException] { return [pscustomobject][ordered]@{ acquired = $false; reason = 'takeover-raced' } }
+    })
+}
+
+function Invoke-AihCompactionApplyLockRenew {
+    # Owner-token-guarded renewal: ONLY the current ownerId may extend the
+    # lease. A renewal both proves ownership (§14 stage gate) and extends
+    # expiry, so a healthy live owner is never evicted by wall-clock expiry.
+    # Renewal is a single atomic file replace performed under a short-lived
+    # process mutex (see Use-AihCompactionLockMutex); the ownerId check and
+    # the write happen inside the same critical section, so a concurrent
+    # takeover cannot interleave between check and write.
+    param(
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$TaskInstanceId,
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [Parameter(Mandatory = $true)][string]$OperationId,
+        [Parameter(Mandatory = $true)][string]$OwnerId,
+        [int]$LeaseSeconds = 60
+    )
+    $task = Get-AihTask -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId
+    $lockPath = Get-AihCompactionApplyLockPath -Workspace $Workspace -TaskId $TaskId
+    $lease = [Math]::Max(1, [int]$LeaseSeconds)
+    return (Use-AihCompactionLockMutex -SessionId $SessionId -OperationId $OperationId {
+        if (-not (Test-Path -LiteralPath $lockPath)) { return [pscustomobject][ordered]@{ renewed = $false; reason = 'lock-absent' } }
+        $existing = $null
+        try { $existing = Get-Content -Raw -Encoding UTF8 -LiteralPath $lockPath | ConvertFrom-Json } catch { $existing = $null }
+        if ($null -eq $existing) { return [pscustomobject][ordered]@{ renewed = $false; reason = 'lock-unreadable' } }
+        if ([string]$existing.taskInstanceId -ne [string]$task.taskInstanceId) { return [pscustomobject][ordered]@{ renewed = $false; reason = 'generation-mismatch' } }
+        if ([string]$existing.ownerId -ne [string]$OwnerId) { return [pscustomobject][ordered]@{ renewed = $false; reason = 'not-owner' } }
+        $now = [DateTime]::UtcNow
+        $existing.renewedAtUtc = $now.ToString('o')
+        $existing.expiresAtUtc = $now.AddSeconds($lease).ToString('o')
+        Write-AihAtomicJson $lockPath $existing
+        return [pscustomobject][ordered]@{ renewed = $true; expiresAtUtc = [string]$existing.expiresAtUtc }
+    })
+}
+
+function Use-AihCompactionLockMutex {
+    # Short-lived cross-process mutex serializing lock-FILE mutations only
+    # (acquire/takeover/renew/release decisions). Held for milliseconds,
+    # never across append/flush/verify. Abandoned owners are treated as
+    # releasable (the file content itself remains the authority).
+    param([Parameter(Mandatory = $true)][string]$SessionId, [Parameter(Mandatory = $true)][string]$OperationId, [Parameter(Mandatory = $true)][scriptblock]$Action)
+    $name = ConvertTo-AihSafeSyncName ('AIHarness.ContextCompaction.LockFile.' + [string]$SessionId + '.' + [string]$OperationId)
+    $mutex = $null
+    try { $mutex = [Threading.Mutex]::new($false, $name) }
+    catch { return (& $Action) }
+    $taken = $false
+    try {
+        try { $taken = $mutex.WaitOne(5000) }
+        catch [Threading.AbandonedMutexException] { $taken = $true }
+        catch { return (& $Action) }
+        return (& $Action)
+    } finally {
+        if ($taken) { try { $mutex.ReleaseMutex() } catch { } }
+        try { $mutex.Dispose() } catch { }
     }
-    return [pscustomobject][ordered]@{ acquired = $false; reason = 'lock-error' }
 }
 
 function Invoke-AihCompactionApplyLockRelease {

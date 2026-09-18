@@ -237,6 +237,38 @@ records the repair (same file, no redesign).
   exact remaining frozen segments (contract A) under the operation lock.
 - State machine: checkpoint-ready + valid op -> apply-pending ->
   awaiting-durability -> applied; checkpoint-ready without op -> blocked;
+  the blocked sink stays reachable even when the operation file is
+  missing/corrupt (operation is read lazily, only for apply-path targets).
+
+## 17. Final safety-core pass (re-audit of e2e9143)
+
+- F1 final: the Nexus runtime refresh is REMOVED entirely. DSH owns
+  runtime-policy projection; Nexus owns compaction and never appends a
+  runtime snapshot. The frozen plan already excludes DSH-owned snapshot
+  nodes, so the retained snapshot survives; the loop commits exactly one
+  CURRENT candidate (unchanged -> retained only; changed -> OLD superseded
+  + one NEW; next step -> still one). Proven against the actual installed
+  preStep order (assemble -> project -> prepended Nexus handler -> default
+  enter) with a source-pinned projection port plus a drift detector that
+  fails loudly if DSH changes the algorithm.
+- F2 final: operationId is canonical derived identity
+  (nexus/context-compaction-operation/v1 LF taskId LF taskInstanceId LF
+  sessionId, SHA-256, ccop_ prefix; PS authority, JS twin, parity-tested)
+  and is RECOMPUTED on every validation -- a nonempty string never
+  suffices. Closed-world checks add segment overlap/ownership, ordered
+  non-overlapping segments, and per-seq boundary caps. The 18-case
+  production tamper matrix drives the real pre-step per case; partial
+  landing completes only exact missing segments (a partially shadowed
+  segment blocks); completionBoundarySeq is rechecked at apply.
+- F5 final: renewable owner-token lease. The lock file carries schema v2
+  (ownerId, PID, process-start, acquired/renewed/expiry); the holder
+  heartbeats every lease/3 and re-proves ownership before append, around
+  flush, and before finalization; renewal is owner-guarded inside a
+  short-lived cross-process mutex (no check-then-write race); takeover
+  requires expiry plus no defensible liveness (PID+start match fences
+  takeover); unhealthy heartbeat or lost ownership stops the holder before
+  APPLIED. Test leases inject via AIH_COMPACTION_TEST_LEASE_S through the
+  identical production path.
   illegal transitions return structured blocked results, never silent.
 
 ## 16. Future V2 directions (not implemented)

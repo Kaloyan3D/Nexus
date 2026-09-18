@@ -19,12 +19,31 @@ function cli(action, taskId, payload) {
   }
 }
 async function main() {
-  const [workspace, taskId, taskInstanceId, sessionId, operationId, holdMs, tag] = process.argv.slice(2);
+  const [workspace, taskId, taskInstanceId, sessionId, operationId, holdMs, tag, leaseS, heartbeat] = process.argv.slice(2);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const acquired = cli('acquire-apply-lock', taskId, { workspace, taskInstanceId, sessionId, operationLockId: operationId, lockLeaseSeconds: 60 });
+  const leaseSeconds = Number(leaseS) > 0 ? Number(leaseS) : 60;
+  const acquired = cli('acquire-apply-lock', taskId, { workspace, taskInstanceId, sessionId, operationLockId: operationId, lockLeaseSeconds: leaseSeconds });
   console.log(JSON.stringify({ tag, acquired: acquired && acquired.acquired, reason: acquired && acquired.reason }));
   if (!acquired || acquired.acquired !== true) process.exit(2);
+  // Owner heartbeat: renew every lease/3 while holding (production parity
+  // with startCompactionHeartbeat). Disabled when heartbeat arg is 'off'.
+  let renewals = 0;
+  let renewFailed = false;
+  let timer = null;
+  if (heartbeat !== 'off') {
+    const intervalMs = Math.max(250, Math.floor(leaseSeconds * 1000 / 3));
+    timer = setInterval(() => {
+      try {
+        const res = cli('renew-apply-lock', taskId, { workspace, taskInstanceId, sessionId, operationLockId: operationId, lockOwnerId: acquired.ownerId, lockLeaseSeconds: leaseSeconds });
+        if (res && res.renewed === true) renewals += 1;
+        else renewFailed = true;
+      } catch { renewFailed = true; }
+    }, intervalMs);
+  }
   await sleep(Number(holdMs) || 0);
+  if (timer) clearInterval(timer);
+  console.log(JSON.stringify({ tag, renewals, renewFailed }));
+  if (renewFailed) { console.log(JSON.stringify({ tag, heartbeatUnhealthy: true })); process.exit(3); }
   cli('release-apply-lock', taskId, { workspace, lockOwnerId: acquired.ownerId });
   console.log(JSON.stringify({ tag, released: true }));
 }

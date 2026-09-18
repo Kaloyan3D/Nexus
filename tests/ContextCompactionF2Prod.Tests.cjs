@@ -208,6 +208,62 @@ async function main() {
     } finally { fs.rmSync(g.workspace, { recursive: true, force: true }); fs.rmSync(g.dataRoot, { recursive: true, force: true }); }
   }
 
+  await runTamperMatrix(dsh, prod);
+async function runTamperMatrix(dsh, prod) {
+  const cases = [];
+  const baseOp = (session) => {
+    const liveCut = prod.balancedRetainCut(session, { maxTailNodes: 6, maxTailChars: 6000, minShadowed: 1 });
+    const owned = prod.runtimeContextSeqsOf(session);
+    const segs = prod.splitRangeAroundOwned(session, liveCut.shadowedSeqs, owned);
+    const flat = [];
+    for (const sg of segs) for (const sq of sg.sourceEventSeqs) flat.push(sq);
+    return { flat, segs, boundary: session.events.length - 1 };
+  };
+  const freezeWith = (gg, sid, spec) => harness.pwshFile(gg.CLI, ['-Action', 'freeze-operation', '-TaskId', gg.taskId], Object.assign({ workspace: gg.workspace, taskInstanceId: gg.taskInstanceId, sessionId: sid, checkpointPath: 'cp.json', repositoryId: gg.wsIdentity.repositoryId, checkoutId: gg.wsIdentity.checkoutId }, spec));
+  const opPath = (gg) => path.join(gg.workspace, '.ai-harness', 'runs', gg.taskId, 'context-compaction-operation.json');
+  const rewriteOp = (gg, fn) => {
+    const doc = JSON.parse(fs.readFileSync(opPath(gg), 'utf8'));
+    fn(doc);
+    fs.writeFileSync(opPath(gg), JSON.stringify(doc));
+  };
+  async function runCase(name, mutateOp, sid) {
+    const gg = setupGeneration();
+    try {
+      const session = buildTaskASession(dsh, sid || 'sess-f2-matrix', gg.workspace, 'MX');
+      seedReadyGeneration(gg, session.id, session, null);
+      const { flat, segs, boundary } = baseOp(session);
+      const op = freezeWith(gg, session.id, { replacementStart: flat[0], replacementEnd: flat[flat.length - 1], sourceEventSeqs: flat, segments: segs, completionBoundarySeq: boundary });
+      harness.pwshFile(gg.CLI, ['-Action', 'transition', '-TaskId', gg.taskId], { workspace: gg.workspace, taskInstanceId: gg.taskInstanceId, to: 'apply-pending', reason: 'matrix', sessionId: session.id });
+      // Tamper AFTER the legal transition: the drive must still refuse.
+      if (mutateOp) mutateOp(gg, op, session);
+      const before = checkpointAppends(session).length;
+      const beforeMsgs = session.deriveMessages().length;
+      const { state } = await drivePreStep(gg, session, session.id, 'matrix prompt');
+      check(checkpointAppends(session).length === before, 'F2-matrix[' + name + ']: 0 replacement appends');
+      check(state !== 'applied', 'F2-matrix[' + name + ']: state != applied (got ' + state + ')');
+      check(session.deriveMessages().length >= beforeMsgs, 'F2-matrix[' + name + ']: work unchanged');
+    } finally { fs.rmSync(gg.workspace, { recursive: true, force: true }); fs.rmSync(gg.dataRoot, { recursive: true, force: true }); }
+  }
+  const sidOf = (s) => s;
+  await runCase('wrong-operationId', (gg) => rewriteOp(gg, (d) => { d.operationId = 'ccop_wrong_but_nonempty'; }));
+  await runCase('wrong-taskInstanceId', (gg) => rewriteOp(gg, (d) => { d.taskInstanceId = 'task_ffffffffffffffffffffffffffffffff'; }));
+  await runCase('wrong-taskId', (gg) => rewriteOp(gg, (d) => { d.taskId = 'TASK-9999'; }));
+  await runCase('wrong-workspace', (gg) => rewriteOp(gg, (d) => { d.workspace = '/elsewhere/workspace'; }));
+  await runCase('wrong-repository', (gg) => rewriteOp(gg, (d) => { d.repositoryId = 'repo_wrong'; }));
+  await runCase('wrong-checkout', (gg) => rewriteOp(gg, (d) => { d.checkoutId = 'checkout_wrong'; }));
+  await runCase('wrong-checkpoint', (gg) => rewriteOp(gg, (d) => { d.checkpointPath = ''; }));
+  await runCase('duplicate-seq', (gg) => rewriteOp(gg, (d) => { d.sourceEventSeqs = [d.sourceEventSeqs[0], d.sourceEventSeqs[0]].concat(d.sourceEventSeqs.slice(1)); }));
+  await runCase('unordered-seqs', (gg) => rewriteOp(gg, (d) => { d.sourceEventSeqs = d.sourceEventSeqs.slice().reverse(); d.replacementStart = d.sourceEventSeqs[0]; d.replacementEnd = d.sourceEventSeqs[d.sourceEventSeqs.length - 1]; }));
+  await runCase('beyond-boundary', (gg, op, session) => rewriteOp(gg, (d) => { d.sourceEventSeqs = d.sourceEventSeqs.concat([session.events.length + 50]); }));
+  await runCase('wrong-start', (gg) => rewriteOp(gg, (d) => { d.replacementStart = d.replacementStart + 1000; }));
+  await runCase('wrong-end', (gg) => rewriteOp(gg, (d) => { d.replacementEnd = d.replacementEnd + 1000; }));
+  await runCase('union-mismatch', (gg) => rewriteOp(gg, (d) => { const last = d.segments[d.segments.length - 1]; last.sourceEventSeqs = last.sourceEventSeqs.slice(0, -1); last.end = last.sourceEventSeqs[last.sourceEventSeqs.length - 1]; }));
+  await runCase('endpoint-mismatch', (gg) => rewriteOp(gg, (d) => { d.segments[0].end = d.segments[0].end + 1000; }));
+  await runCase('foreign-seq', (gg, op, session) => rewriteOp(gg, (d) => { d.segments[0].sourceEventSeqs = [session.events.length + 77].concat(d.segments[0].sourceEventSeqs.slice(1)); }));
+  await runCase('missing-segments', (gg) => rewriteOp(gg, (d) => { d.segments = []; }));
+  await runCase('malformed-json', (gg) => { fs.writeFileSync(opPath(gg), '{not json'); });
+  await runCase('operationId-mismatch-readable', (gg, op) => rewriteOp(gg, (d) => { d.operationId = String(d.operationId).replace(/^ccop_/, 'ccop_deadbeef'); }));
+}
   console.log('RESULT: ' + passed + ' F2 production assertions passed (' + assertions + ' total assertions).');
 }
 main().catch((e) => { console.error('FAIL: ' + (e && e.message ? e.message : e)); process.exit(1); });
