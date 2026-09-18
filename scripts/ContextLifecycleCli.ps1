@@ -3,7 +3,7 @@
 # Every action is task-scoped and identity-guarded (TaskId plus TaskInstanceId).
 # User-derived free text travels through the UTF-8 payload file, never argv.
 param(
-    [ValidateSet('record-root-usage','eligibility','build-checkpoint','read-checkpoint','checkpoint-text','transition','snapshot','write-telemetry','mark-applied','record-post-compaction-usage','threshold','freeze-operation','read-operation','reconcile')][string]$Action = 'snapshot',
+    [ValidateSet('record-root-usage','eligibility','build-checkpoint','read-checkpoint','checkpoint-text','transition','snapshot','write-telemetry','mark-applied','record-post-compaction-usage','threshold','freeze-operation','read-operation','reconcile','acquire-apply-lock','release-apply-lock')][string]$Action = 'snapshot',
     [string]$Workspace = (Get-Location).Path,
     [string]$TaskId,
     [string]$TaskInstanceId,
@@ -29,6 +29,14 @@ param(
     [int[]]$SourceEventSeqs = @(),
     [int[]]$LiveSurfaceSeqs = @(),
     [int]$LandedReplacementSeq = -1,
+    [bool]$DurablyVerified = $false,
+    [int]$CompletionBoundarySeq = -1,
+    [string]$RepositoryId = $null,
+    [string]$CheckoutId = $null,
+    [string]$OperationLockId = $null,
+    [string]$LockOwnerId = $null,
+    [int]$LockTimeoutMs = 15000,
+    [int]$LockLeaseSeconds = 60,
     [object[]]$Segments = @(),
     [string]$CheckpointPath = $null,
     [object]$CheckpointSizeBytes = $null,
@@ -67,6 +75,22 @@ if ($PayloadFile) {
     if ($__aihPayloadMap.ContainsKey($key)) { Set-Variable -Name 'LandedReplacementSeq' -Value ([int]$__aihPayloadMap[$key]) }
     $key = 'segments'
     if ($__aihPayloadMap.ContainsKey($key)) { Set-Variable -Name 'Segments' -Value ([object[]]@($__aihPayloadMap[$key])) }
+    foreach ($name in @('DurablyVerified')) {
+        $key = $name.ToLowerInvariant()
+        if ($__aihPayloadMap.ContainsKey($key)) { Set-Variable -Name $name -Value ([bool]$__aihPayloadMap[$key]) }
+    }
+    foreach ($name in @('CompletionBoundarySeq')) {
+        $key = $name.ToLowerInvariant()
+        if ($__aihPayloadMap.ContainsKey($key)) { Set-Variable -Name $name -Value ([int]$__aihPayloadMap[$key]) }
+    }
+    foreach ($name in @('RepositoryId','CheckoutId','OperationLockId','LockOwnerId')) {
+        $key = $name.ToLowerInvariant()
+        if ($__aihPayloadMap.ContainsKey($key)) { Set-Variable -Name $name -Value ([string]$__aihPayloadMap[$key]) }
+    }
+    foreach ($name in @('LockTimeoutMs','LockLeaseSeconds')) {
+        $key = $name.ToLowerInvariant()
+        if ($__aihPayloadMap.ContainsKey($key)) { Set-Variable -Name $name -Value ([int]$__aihPayloadMap[$key]) }
+    }
     foreach ($name in @('UsageAvailable')) {
         $key = $name.ToLowerInvariant()
         if ($__aihPayloadMap.ContainsKey($key)) { Set-Variable -Name $name -Value ([bool]$__aihPayloadMap[$key]) }
@@ -113,9 +137,11 @@ $__aihLifecycleResult = $(switch ($Action) {
         Write-AihContextCompactionTelemetry -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -Eligibility $eligibility -SessionId $SessionId -CheckpointPath $CheckpointPath -CheckpointSizeBytes $CheckpointSizeBytes -CheckpointApplied $CheckpointApplied -AppliedAtUtc $AppliedAtUtc -BlockedReason $BlockedReason
     }
     'mark-applied' { Set-AihContextCompactionApplied -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -AppliedAtUtc $AppliedAtUtc -SessionId $SessionId }
-    'freeze-operation' { New-AihContextCompactionOperation -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -SessionId $SessionId -ReplacementStart $ReplacementStart -ReplacementEnd $ReplacementEnd -SourceEventSeqs $SourceEventSeqs -CheckpointPath $CheckpointPath -Segments $Segments }
+    'freeze-operation' { New-AihContextCompactionOperation -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -SessionId $SessionId -ReplacementStart $ReplacementStart -ReplacementEnd $ReplacementEnd -SourceEventSeqs $SourceEventSeqs -CheckpointPath $CheckpointPath -Segments $Segments -CompletionBoundarySeq $CompletionBoundarySeq -RepositoryId $RepositoryId -CheckoutId $CheckoutId }
     'read-operation' { Read-AihContextCompactionOperation -Workspace $Workspace -TaskId $TaskId }
-    'reconcile' { Test-AihContextOperationReconcile -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -LiveSurfaceSeqs $LiveSurfaceSeqs -LandedReplacementSeq $LandedReplacementSeq }
+    'reconcile' { Test-AihContextOperationReconcile -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -LiveSurfaceSeqs $LiveSurfaceSeqs -LandedReplacementSeq $LandedReplacementSeq -SessionId $SessionId -DurablyVerified $DurablyVerified }
+    'acquire-apply-lock' { Invoke-AihCompactionApplyLockAcquire -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -SessionId $SessionId -OperationId $OperationLockId -LeaseSeconds $LockLeaseSeconds }
+    'release-apply-lock' { Invoke-AihCompactionApplyLockRelease -Workspace $Workspace -TaskId $TaskId -OwnerId $LockOwnerId }
     'record-post-compaction-usage' { Add-AihContextPostCompactionUsage -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -PostCompactionEffectiveInputTokens $PostCompactionEffectiveInputTokens -SessionId $SessionId }
 })
 if ($null -ne $__aihLifecycleResult) { ConvertTo-Json -InputObject (ConvertTo-AihJsonSafe $__aihLifecycleResult) -Depth 20 }

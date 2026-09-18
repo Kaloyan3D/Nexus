@@ -544,7 +544,10 @@ function New-AihContextCompactionOperation {
         [Parameter(Mandatory = $true)][int[]]$SourceEventSeqs,
         [Parameter(Mandatory = $true)][int]$ReplacementEnd,
         [string]$CheckpointPath = $null,
-        [object[]]$Segments = @()
+        [object[]]$Segments = @(),
+        [int]$CompletionBoundarySeq = -1,
+        [string]$RepositoryId = $null,
+        [string]$CheckoutId = $null
     )
     $task = Get-AihTask -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId
     if ([string]$task.status -ne 'complete') { throw "Operation refused: task $TaskId status is '$($task.status)', not complete. (KEEP.)" }
@@ -561,6 +564,18 @@ function New-AihContextCompactionOperation {
     }
     if ([int]$SourceEventSeqs[0] -ne [int]$ReplacementStart -or [int]$SourceEventSeqs[-1] -ne [int]$ReplacementEnd) {
         throw 'Operation refused: range must match the first and last source seqs. (KEEP.)'
+    }
+    if ([int]$CompletionBoundarySeq -lt 0) {
+        throw 'Operation refused: completionBoundarySeq is required (Task A ownership cap). (KEEP.)'
+    }
+    $sortedCheck = @([int[]]$SourceEventSeqs | Sort-Object -Unique)
+    if ([int]$sortedCheck.Count -ne [int]@($SourceEventSeqs).Count) {
+        throw 'Operation refused: duplicate sourceEventSeqs. (KEEP.)'
+    }
+    foreach ($seq in @($SourceEventSeqs)) {
+        if ([int]$seq -gt [int]$CompletionBoundarySeq) {
+            throw 'Operation refused: source seq newer than completionBoundarySeq (Task B adoption). (KEEP.)'
+        }
     }
     if (($null -ne $existing) -and ([string]$existing.taskInstanceId -eq [string]$task.taskInstanceId) -and ([string]$existing.operationId -ne $operationId)) {
         throw 'Operation refused: a different frozen operation already owns this generation. (KEEP: never adopt or widen.)'
@@ -596,7 +611,13 @@ function New-AihContextCompactionOperation {
         replacementEnd = [int]$ReplacementEnd
         sourceEventSeqs = @([int[]]$SourceEventSeqs)
         segments = @($segmentRecords)
+        completionBoundarySeq = [int]$CompletionBoundarySeq
+        repositoryId = $(if ($null -ne $RepositoryId) { [string]$RepositoryId } else { $null })
+        checkoutId = $(if ($null -ne $CheckoutId) { [string]$CheckoutId } else { $null })
         createdAtUtc = [DateTime]::UtcNow.ToString('o')
+    }
+    if (@($segmentRecords).Count -eq 0) {
+        throw 'Operation refused: the exact validated segment plan must be persisted (no silent single-span fallback). (KEEP.)'
     }
     $paths = Get-AihContextLifecyclePaths -Workspace $Workspace -TaskId $TaskId
     Write-AihAtomicJson $paths.Operation $operation
@@ -619,17 +640,29 @@ function Test-AihContextOperationReconcile {
         [Parameter(Mandatory = $true)][string]$TaskId,
         [Parameter(Mandatory = $true)][string]$TaskInstanceId,
         [int[]]$LiveSurfaceSeqs = @(),
-        [int]$LandedReplacementSeq = -1
+        [int]$LandedReplacementSeq = -1,
+        [string]$SessionId = '',
+        [bool]$DurablyVerified = $false
     )
     $task = $null
     try { $task = Get-AihTask -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId }
     catch { return [pscustomobject][ordered]@{ decision = 'block'; reason = 'task identity unproven for this generation'; operationId = $null } }
-    $operation = Read-AihContextCompactionOperation -Workspace $Workspace -TaskId $TaskId
+    $operation = $null
+    try { $operation = Read-AihContextCompactionOperation -Workspace $Workspace -TaskId $TaskId }
+    catch { return [pscustomobject][ordered]@{ decision = 'block'; reason = 'frozen operation unreadable'; operationId = $null } }
     if (($null -eq $operation) -or ([string]$operation.taskInstanceId -ne [string]$task.taskInstanceId)) {
         return [pscustomobject][ordered]@{ decision = 'block'; reason = 'no frozen operation for this generation'; operationId = $null }
     }
     if ([int]$operation.schemaVersion -ne [int]$AihContextOperationSchemaVersion) {
         return [pscustomobject][ordered]@{ decision = 'block'; reason = 'operation schema mismatch'; operationId = [string]$operation.operationId }
+    }
+    # F2 provenance gate: session + workspace must match BEFORE any other
+    # reasoning. Wrong-session or wrong-workspace callers get zero mutation.
+    if ([string]$operation.sessionId -ne [string]$SessionId) {
+        return [pscustomobject][ordered]@{ decision = 'block'; reason = 'operation belongs to another session'; operationId = [string]$operation.operationId }
+    }
+    if ([string]$operation.workspace -ne [string]$Workspace) {
+        return [pscustomobject][ordered]@{ decision = 'block'; reason = 'operation belongs to another workspace'; operationId = [string]$operation.operationId }
     }
     $liveSet = [Collections.Generic.HashSet[int]]::new()
     foreach ($seq in @($LiveSurfaceSeqs)) { [void]$liveSet.Add([int]$seq) }
@@ -642,19 +675,117 @@ function Test-AihContextOperationReconcile {
                 return [pscustomobject][ordered]@{ decision = 'block'; reason = 'shadowed source seq still visible after alleged landing'; operationId = [string]$operation.operationId }
             }
         }
-        return [pscustomobject][ordered]@{ decision = 'reconcile-applied'; reason = 'frozen replacement durably present'; operationId = [string]$operation.operationId }
+        # F5 MANDATORY: memory presence is not durability. reconcile-applied
+        # requires the caller to have verified the replacement from DURABLE
+        # persistence (flush + restore/proof), not merely the live object.
+        if (-not [bool]$DurablyVerified) {
+            return [pscustomobject][ordered]@{ decision = 'await-durability'; reason = 'landed in memory only; durable proof required'; operationId = [string]$operation.operationId }
+        }
+        return [pscustomobject][ordered]@{ decision = 'reconcile-applied'; reason = 'frozen replacement durably verified'; operationId = [string]$operation.operationId }
     }
     foreach ($seq in @($operation.sourceEventSeqs)) {
         if (-not $liveSet.Contains([int]$seq)) {
             return [pscustomobject][ordered]@{ decision = 'block'; reason = 'frozen source seq missing from live surface'; operationId = [string]$operation.operationId }
         }
     }
+    if ($null -eq $operation.PSObject.Properties['segments'] -or @($operation.segments).Count -eq 0) {
+        return [pscustomobject][ordered]@{ decision = 'block'; reason = 'frozen segment plan missing; refusing single-span fallback'; operationId = [string]$operation.operationId }
+    }
     return [pscustomobject][ordered]@{
         decision = 'retry-same'; reason = 'exact frozen boundary still valid'
         operationId = [string]$operation.operationId
         replacementStart = [int]$operation.replacementStart; replacementEnd = [int]$operation.replacementEnd
         sourceEventSeqs = @($operation.sourceEventSeqs)
+        segments = @($operation.segments)
     }
+}
+
+function Get-AihCompactionApplyLockPath {
+    # Cross-process application lock file, scoped to exactly one task run
+    # dir plus one operation. A lock FILE (not a Mutex handle) is used
+    # because acquire and release span separate CLI processes: exclusivity
+    # comes from atomic create-new (O_EXCL equivalent), abandonment recovery
+    # from a bounded lease. Never held across Git/model/checkpoint work --
+    # only the caller-guarded append/flush/verify section.
+    param([Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$TaskId)
+    $layout = Get-AihLedgerLayout $Workspace
+    return (Join-Path (Join-Path $layout.Runs $TaskId) 'context-compaction-apply.lock')
+}
+
+function Invoke-AihCompactionApplyLockAcquire {
+    # Acquire the cross-process apply lock via atomic create-new. Lease
+    # bounds abandonment: a stale holder (expired lease) may be taken over
+    # exactly once per acquire call; a live holder yields acquired=false so
+    # the caller KEEPs/BLOCKs instead of launching a second writer.
+    param(
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$TaskInstanceId,
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [Parameter(Mandatory = $true)][string]$OperationId,
+        [int]$LeaseSeconds = 60
+    )
+    $task = Get-AihTask -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId
+    $lockPath = Get-AihCompactionApplyLockPath -Workspace $Workspace -TaskId $TaskId
+    $ownerId = [guid]::NewGuid().ToString('N')
+    $now = [DateTime]::UtcNow
+    $lease = [Math]::Max(10, [int]$LeaseSeconds)
+    $payload = [ordered]@{
+        schemaVersion = 1; taskId = $TaskId; taskInstanceId = [string]$task.taskInstanceId
+        sessionId = [string]$SessionId; operationId = [string]$OperationId
+        ownerId = [string]$ownerId; acquiredAtUtc = $now.ToString('o')
+        expiresAtUtc = $now.AddSeconds($lease).ToString('o')
+    }
+    $directory = Split-Path -Parent ([System.IO.Path]::GetFullPath($lockPath))
+    New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    $takeover = $false
+    for ($round = 0; $round -lt 2; $round++) {
+        try {
+            $stream = [IO.File]::Open($lockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try {
+                $bytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject (ConvertTo-AihJsonSafe $payload) -Depth 10))
+                $stream.Write($bytes, 0, $bytes.Length)
+                $stream.Flush()
+            } finally { $stream.Dispose() }
+            return [pscustomobject][ordered]@{ acquired = $true; ownerId = [string]$ownerId; leaseSeconds = $lease }
+        } catch [IO.IOException] {
+            $existing = $null
+            try { $existing = Get-Content -Raw -Encoding UTF8 -LiteralPath $lockPath | ConvertFrom-Json } catch { $existing = $null }
+            $stale = $true
+            if ($null -ne $existing) {
+                if (([string]$existing.taskInstanceId -ne [string]$task.taskInstanceId) -or ([string]$existing.operationId -ne [string]$OperationId) -or ([string]$existing.sessionId -ne [string]$SessionId)) {
+                    return [pscustomobject][ordered]@{ acquired = $false; reason = 'held-by-other-operation' }
+                }
+                $expiry = [DateTime]::MinValue
+                if ($null -ne $existing.PSObject.Properties['expiresAtUtc']) { [void][DateTime]::TryParse([string]$existing.expiresAtUtc, [ref]$expiry) }
+                if ($expiry -gt [DateTime]::UtcNow) { return [pscustomobject][ordered]@{ acquired = $false; reason = 'held-by-live-owner' } }
+            }
+            if ($takeover) { return [pscustomobject][ordered]@{ acquired = $false; reason = 'takeover-raced' } }
+            try { Remove-Item -LiteralPath $lockPath -Force } catch { return [pscustomobject][ordered]@{ acquired = $false; reason = 'takeover-raced' } }
+            $takeover = $true
+        }
+    }
+    return [pscustomobject][ordered]@{ acquired = $false; reason = 'lock-error' }
+}
+
+function Invoke-AihCompactionApplyLockRelease {
+    # Release only when the caller still owns the lock (ownerId match).
+    # Best-effort and idempotent; never throws.
+    param(
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$OwnerId
+    )
+    $lockPath = Get-AihCompactionApplyLockPath -Workspace $Workspace -TaskId $TaskId
+    try {
+        if (-not (Test-Path -LiteralPath $lockPath)) { return [pscustomobject][ordered]@{ released = $true; reason = 'already-absent' } }
+        $existing = Get-Content -Raw -Encoding UTF8 -LiteralPath $lockPath | ConvertFrom-Json
+        if (($null -ne $existing) -and ($null -ne $existing.PSObject.Properties['ownerId']) -and ([string]$existing.ownerId -ne [string]$OwnerId)) {
+            return [pscustomobject][ordered]@{ released = $false; reason = 'not-owner' }
+        }
+        Remove-Item -LiteralPath $lockPath -Force
+        return [pscustomobject][ordered]@{ released = $true }
+    } catch { return [pscustomobject][ordered]@{ released = $false; reason = 'release-error' } }
 }
 
 function Get-AihContextLifecycleSnapshot {

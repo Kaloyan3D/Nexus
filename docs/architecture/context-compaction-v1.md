@@ -193,19 +193,51 @@ records the repair (same file, no redesign).
   durability comes from the write-behind drain via ctx.sessions.flush
   (session/flush), the same barrier the host checkpoint policy and the
   compaction backend use. Repair: persist frozen op -> append exact segments
-  -> transition awaiting-durability -> await ctx.sessions.flush -> verify
-  landed presence -> persist APPLIED. Flush failure or a non-participating
-  store leaves awaiting-durability; retry reconciles by operationId.
-- Ordering: agent/pre-step runs the host checkpoint-policy flush listener,
-  then Nexus apply; llm/stream checkpoints the full request prefix before
-  adapter dispatch, so the landed replacement stays durable before the model
-  call even if the process dies mid-apply.
+  -> transition awaiting-durability -> await ctx.sessions.flush -> prove the
+  replacement from DURABLE state -> persist APPLIED. Flush failure or a
+  non-participating store leaves awaiting-durability; retry reconciles by
+  operationId, never applies from memory presence.
+- Ordering: the Nexus pre-step listener is prepended (supported cordis
+  { prepend: true }) so compaction runs before the loop consumes its
+  runtime-context projection decision; llm/stream checkpoints the full
+  request prefix before adapter dispatch, so the landed replacement stays
+  durable before the model call even if the process dies mid-apply.
 - Concurrency: duplicate pre-step attempts for one operationId join a narrow
-  in-flight guard (append+flush only); cross-process safety comes from the
-  durable operation record plus reconcile-by-operationId.
-- Current-prompt invariant: frozen seqs predate any Task B work by
-  construction (frozen at completion); reconcile proves all frozen seqs still
-  live before appending, so a newer user message survives exactly once.
+  in-flight guard (append+flush only); cross-PROCESS safety comes from a
+  lock file scoped to session+operation (atomic create-new, 60s lease,
+  stale takeover, owner-match release) held only across append/flush/verify.
+  A contender KEEPs/BLOCKs and reconciles; abandoned owners recover by
+  lease expiry; timeout never launches a second writer.
+- Current-prompt invariant: frozen seqs are capped by completionBoundarySeq
+  (captured synchronously at COMPLETE, validated at freeze and at apply),
+  so a newer user message survives exactly once even under crash/retry.
+
+## 16. Second repair batch (re-audit of 5c49bdf)
+
+- F1 remainder: the refresh now builds its message with the REAL dsh-llm
+  createUserMessage factory (stable id, like the loop's own projection),
+  so the refreshed snapshot survives fresh-process resume; with prepend
+  ordering the loop sees the fresh snapshot as retained and appends no
+  duplicate -- exactly ONE CURRENT copy reaches the request. DSH authority:
+  the LAST runtime snapshot on the surface wins (supersede framing).
+- F2 remainder: the live-surface re-freeze fallback is DELETED (missing or
+  legacy-ready operation BLOCKs); full provenance (schema, operationId,
+  task, instance, session, workspace, repository/checkout identity,
+  checkpoint, boundary, seq uniqueness/order, segments, completion cap) is
+  validated before ANY mutation; the exact segment plan is persisted and
+  required at apply (no single-span fallback); the completion boundary is
+  captured synchronously at COMPLETE and every frozen seq must satisfy
+  seq <= completionBoundarySeq; reconcile returns structured
+  reconcile-applied / retry-same / await-durability / block (memory-only
+  landing yields await-durability, never applied).
+- F5 remainder: reconcile-to-APPLIED requires durable evidence -- backend
+  raw bytes containing the operationId where the surface exists, else
+  flush-participation plus public-restore validation; flush failure keeps
+  awaiting-durability across retries; partial segments finish only their
+  exact remaining frozen segments (contract A) under the operation lock.
+- State machine: checkpoint-ready + valid op -> apply-pending ->
+  awaiting-durability -> applied; checkpoint-ready without op -> blocked;
+  illegal transitions return structured blocked results, never silent.
 
 ## 16. Future V2 directions (not implemented)
 
