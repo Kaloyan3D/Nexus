@@ -74,6 +74,112 @@ function Read-AihContextPressure {
     catch { return $null }
 }
 
+function Get-AihContextUsageLockPath {
+    # F6: cross-process short-transaction lock for per-generation root-usage
+    # accounting. Scoped to exactly one task run dir (the pressure document
+    # identity); the generation (taskInstanceId) is validated INSIDE the
+    # transaction. Separate FILE from context-compaction-apply.lock: apply
+    # ownership and usage accounting are different resources and must never
+    # share owner state.
+    param([Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$TaskId)
+    $layout = Get-AihLedgerLayout $Workspace
+    return (Join-Path (Join-Path $layout.Runs $TaskId) 'context-pressure.lock')
+}
+function Compare-AihContextStepOrder {
+    # F6: authoritative usage-event order is the producer StepId 'turn:step'
+    # (AihController candidate.stepId). Returns 1/0/-1 or $null when either
+    # side has no parseable order (step-less events keep write order).
+    param([string]$A, [string]$B)
+    $aTurn = 0; $aStep = 0; $bTurn = 0; $bStep = 0
+    if ([string]::IsNullOrWhiteSpace($A) -or [string]::IsNullOrWhiteSpace($B)) { return $null }
+    $aParts = ([string]$A).Split(':'); $bParts = ([string]$B).Split(':')
+    if ($aParts.Count -ne 2 -or $bParts.Count -ne 2) { return $null }
+    if (-not [int]::TryParse($aParts[0], [ref]$aTurn)) { return $null }
+    if (-not [int]::TryParse($aParts[1], [ref]$aStep)) { return $null }
+    if (-not [int]::TryParse($bParts[0], [ref]$bTurn)) { return $null }
+    if (-not [int]::TryParse($bParts[1], [ref]$bStep)) { return $null }
+    if ($aTurn -ne $bTurn) { if ($aTurn -gt $bTurn) { return 1 } else { return -1 } }
+    if ($aStep -ne $bStep) { if ($aStep -gt $bStep) { return 1 } else { return -1 } }
+    return 0
+}
+function Invoke-AihContextUsageTransaction {
+    # F6: serialize the SHORT per-generation pressure read/modify/write
+    # transaction across OS processes. Acquire: atomic CreateNew spin with a
+    # bounded wait (~15s); a stale lock (age > 30s AND owner not provably
+    # live) may be taken over. Release: ownerId match only. Acquisition
+    # failure THROWS so a writer never reports success while dropping its
+    # record. The critical section covers ONLY local pressure state IO.
+    param(
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][scriptblock]$Action,
+        [int]$TimeoutMs = 15000,
+        [int]$StaleSeconds = 30
+    )
+    $lockPath = Get-AihContextUsageLockPath -Workspace $Workspace -TaskId $TaskId
+    $directory = Split-Path -Parent ([System.IO.Path]::GetFullPath($lockPath))
+    New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    $ownerId = [guid]::NewGuid().ToString('N')
+    $ownerPid = 0
+    try { $ownerPid = [int]$PID } catch { $ownerPid = 0 }
+    $ownerStart = $null
+    try { $ownerStart = (Get-Process -Id $PID -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o') } catch { $ownerStart = $null }
+    $payload = ConvertTo-Json -InputObject ([ordered]@{ ownerId = $ownerId; ownerPid = $ownerPid; ownerProcessStartUtc = $ownerStart; acquiredAtUtc = ([DateTime]::UtcNow.ToString('o')) }) -Depth 5
+    $deadline = [DateTime]::UtcNow.AddMilliseconds([Math]::Max(1000, [int]$TimeoutMs))
+    $acquired = $false
+    while (-not $acquired) {
+        try {
+            $stream = [IO.File]::Open($lockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try {
+                $bytes = [Text.Encoding]::UTF8.GetBytes($payload)
+                $stream.Write($bytes, 0, $bytes.Length)
+                $stream.Flush()
+            } finally { $stream.Dispose() }
+            $acquired = $true
+        } catch [IO.IOException] {
+            $takeover = $false
+            try {
+                $age = [DateTime]::UtcNow - (Get-Item -LiteralPath $lockPath -ErrorAction Stop).LastWriteTimeUtc
+                if ($age.TotalSeconds -gt [Math]::Max(5, [int]$StaleSeconds)) {
+                    $existing = $null
+                    try { $existing = Get-Content -Raw -Encoding UTF8 -LiteralPath $lockPath | ConvertFrom-Json } catch { $existing = $null }
+                    $ownerAlive = $false
+                    if (($null -ne $existing) -and ($null -ne $existing.PSObject.Properties['ownerPid'])) {
+                        $ePid = 0
+                        if ([int]::TryParse([string]$existing.ownerPid, [ref]$ePid) -and ($ePid -gt 0)) {
+                            try {
+                                $proc = Get-Process -Id $ePid -ErrorAction Stop
+                                $started = $proc.StartTime.ToUniversalTime().ToString('o')
+                                $recorded = $null
+                                if ($null -ne $existing.PSObject.Properties['ownerProcessStartUtc']) { $recorded = [string]$existing.ownerProcessStartUtc }
+                                $ownerAlive = ([string]::IsNullOrWhiteSpace($recorded) -or ($started -eq $recorded))
+                            } catch { $ownerAlive = $false }
+                        }
+                    }
+                    if (-not $ownerAlive) { $takeover = $true }
+                }
+            } catch { $takeover = $false }
+            if ($takeover) {
+                try { Remove-Item -LiteralPath $lockPath -Force; continue } catch { }
+            }
+            if ([DateTime]::UtcNow -ge $deadline) { throw "Context usage transaction refused: pressure lock busy for task $TaskId (KEEP: record not accepted, caller must surface failure, never silent drop.)" }
+            Start-Sleep -Milliseconds 25
+        }
+    }
+    try {
+        return (& $Action)
+    } finally {
+        try {
+            if (Test-Path -LiteralPath $lockPath) {
+                $current = $null
+                try { $current = Get-Content -Raw -Encoding UTF8 -LiteralPath $lockPath | ConvertFrom-Json } catch { $current = $null }
+                if (($null -eq $current) -or ($null -eq $current.PSObject.Properties['ownerId']) -or ([string]$current.ownerId -eq [string]$ownerId)) {
+                    Remove-Item -LiteralPath $lockPath -Force
+                }
+            }
+        } catch { }
+    }
+}
 function Add-AihContextRootUsage {
     param(
         [Parameter(Mandatory = $true)][string]$Workspace,
@@ -98,53 +204,72 @@ function Add-AihContextRootUsage {
     $task = Get-AihTask -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId
     $actualInstance = $null
     if ($null -ne $task.PSObject.Properties['taskInstanceId']) { $actualInstance = [string]$task.taskInstanceId }
-    $pressure = Read-AihContextPressure -Workspace $Workspace -TaskId $TaskId
-    $isFreshInstance = ($null -eq $pressure) -or ([string]$pressure.taskInstanceId -ne [string]$actualInstance)
-    if ($isFreshInstance) {
-        $pressure = [pscustomobject][ordered]@{
-            schemaVersion = 1; taskId = $TaskId; taskInstanceId = $actualInstance
-            latestEffectiveInputTokens = 0; peakEffectiveInputTokens = 0
-            cumulativeUncachedInputTokens = 0; cumulativeCacheReadTokens = 0
-            cumulativeOutputTokens = 0; rootModelCallCount = 0
-            callsByEngine = [pscustomobject][ordered]@{ muse = 0; dual = 0 }
-            callsByRole = [pscustomobject][ordered]@{ muse_main = 0; engineer_normal = 0; engineer_deep = 0 }
-            lastCallAtUtc = $null; lastModel = $null; lastProvider = $null
+    # F6: the identity reads above are ledger-only (no mutation) and stay
+    # outside the lock. The critical section below is EXACTLY: read pressure,
+    # generation check, dedupe decision, StepId-ordered latest/peak/counter
+    # update, atomic write. No Git, model, DSH, checkpoint, telemetry, or
+    # compaction work occurs inside Invoke-AihContextUsageTransaction.
+    return (Invoke-AihContextUsageTransaction -Workspace $Workspace -TaskId $TaskId -Action {
+        $pressure = Read-AihContextPressure -Workspace $Workspace -TaskId $TaskId
+        $isFreshInstance = ($null -eq $pressure) -or ([string]$pressure.taskInstanceId -ne [string]$actualInstance)
+        if ($isFreshInstance) {
+            $pressure = [pscustomobject][ordered]@{
+                schemaVersion = 1; taskId = $TaskId; taskInstanceId = $actualInstance
+                latestEffectiveInputTokens = 0; peakEffectiveInputTokens = 0
+                cumulativeUncachedInputTokens = 0; cumulativeCacheReadTokens = 0
+                cumulativeOutputTokens = 0; rootModelCallCount = 0
+                callsByEngine = [pscustomobject][ordered]@{ muse = 0; dual = 0 }
+                callsByRole = [pscustomobject][ordered]@{ muse_main = 0; engineer_normal = 0; engineer_deep = 0 }
+                lastCallAtUtc = $null; lastModel = $null; lastProvider = $null
+                lastStepId = $null; lastSessionId = $null
+            }
         }
-    }
-    $seenSteps = @()
-    if ($null -ne $pressure.PSObject.Properties['seenStepIds']) { $seenSteps = @($pressure.seenStepIds) }
-    if ((-not [string]::IsNullOrWhiteSpace($StepId)) -and (@($seenSteps | Where-Object { [string]$_ -eq $StepId }).Count -gt 0)) {
+        $seenSteps = @()
+        if ($null -ne $pressure.PSObject.Properties['seenStepIds']) { $seenSteps = @($pressure.seenStepIds) }
+        if ((-not [string]::IsNullOrWhiteSpace($StepId)) -and (@($seenSteps | Where-Object { [string]$_ -eq $StepId }).Count -gt 0)) {
+            return [pscustomobject]$pressure
+        }
+        $effective = 0
+        if ([bool]$UsageAvailable) { $effective = [int]$UncachedInputTokens + [int]$CacheReadTokens }
+        if ($effective -lt 0) { $effective = 0 }
+        # F6 authoritative order: lock acquisition order is NOT usage-event
+        # order. `latest` (+ last model/provider/session/time) follows the
+        # producer StepId 'turn:step'; step-less events keep write order.
+        $storedOrder = $null
+        if ($null -ne $pressure.PSObject.Properties['lastStepId']) { $storedOrder = [string]$pressure.lastStepId }
+        $orderCmp = Compare-AihContextStepOrder -A ([string]$StepId) -B $storedOrder
+        if (($null -eq $orderCmp) -or ($orderCmp -ge 0)) {
+            $pressure.latestEffectiveInputTokens = [int]$effective
+            $pressure.lastCallAtUtc = [DateTime]::UtcNow.ToString('o')
+            if (-not [string]::IsNullOrWhiteSpace($Model)) { $pressure.lastModel = [string]$Model }
+            if (-not [string]::IsNullOrWhiteSpace($Provider)) { $pressure.lastProvider = [string]$Provider }
+            if (-not [string]::IsNullOrWhiteSpace($StepId)) {
+                $pressure | Add-Member -NotePropertyName 'lastStepId' -NotePropertyValue ([string]$StepId) -Force
+            }
+            if (-not [string]::IsNullOrWhiteSpace($SessionId)) {
+                $pressure | Add-Member -NotePropertyName 'lastSessionId' -NotePropertyValue ([string]$SessionId) -Force
+            }
+        }
+        if ([int]$effective -gt [int]$pressure.peakEffectiveInputTokens) { $pressure.peakEffectiveInputTokens = [int]$effective }
+        if ([bool]$UsageAvailable) {
+            $pressure.cumulativeUncachedInputTokens = [int]$pressure.cumulativeUncachedInputTokens + [int]$UncachedInputTokens
+            $pressure.cumulativeCacheReadTokens = [int]$pressure.cumulativeCacheReadTokens + [int]$CacheReadTokens
+            $pressure.cumulativeOutputTokens = [int]$pressure.cumulativeOutputTokens + [int]$OutputTokens
+        }
+        $pressure.rootModelCallCount = [int]$pressure.rootModelCallCount + 1
+        if ($Engine -eq 'muse') { $pressure.callsByEngine.muse = [int]$pressure.callsByEngine.muse + 1 }
+        else { $pressure.callsByEngine.dual = [int]$pressure.callsByEngine.dual + 1 }
+        $roleKey = [string]$EngineRole
+        if ($roleKey -eq 'muse_main') { $pressure.callsByRole.muse_main = [int]$pressure.callsByRole.muse_main + 1 }
+        elseif ($roleKey -eq 'engineer_normal') { $pressure.callsByRole.engineer_normal = [int]$pressure.callsByRole.engineer_normal + 1 }
+        elseif ($roleKey -eq 'engineer_deep') { $pressure.callsByRole.engineer_deep = [int]$pressure.callsByRole.engineer_deep + 1 }
+        if (-not [string]::IsNullOrWhiteSpace($StepId)) {
+            $pressure | Add-Member -NotePropertyName 'seenStepIds' -NotePropertyValue (@($seenSteps) + @($StepId)) -Force
+        }
+        $paths = Get-AihContextLifecyclePaths -Workspace $Workspace -TaskId $TaskId
+        Write-AihAtomicJson $paths.Pressure $pressure
         return [pscustomobject]$pressure
-    }
-    $effective = 0
-    if ([bool]$UsageAvailable) { $effective = [int]$UncachedInputTokens + [int]$CacheReadTokens }
-    if ($effective -lt 0) { $effective = 0 }
-    $pressure.latestEffectiveInputTokens = [int]$effective
-    if ([int]$effective -gt [int]$pressure.peakEffectiveInputTokens) { $pressure.peakEffectiveInputTokens = [int]$effective }
-    if ([bool]$UsageAvailable) {
-        $pressure.cumulativeUncachedInputTokens = [int]$pressure.cumulativeUncachedInputTokens + [int]$UncachedInputTokens
-        $pressure.cumulativeCacheReadTokens = [int]$pressure.cumulativeCacheReadTokens + [int]$CacheReadTokens
-        $pressure.cumulativeOutputTokens = [int]$pressure.cumulativeOutputTokens + [int]$OutputTokens
-    }
-    $pressure.rootModelCallCount = [int]$pressure.rootModelCallCount + 1
-    if ($Engine -eq 'muse') { $pressure.callsByEngine.muse = [int]$pressure.callsByEngine.muse + 1 }
-    else { $pressure.callsByEngine.dual = [int]$pressure.callsByEngine.dual + 1 }
-    $roleKey = [string]$EngineRole
-    if ($roleKey -eq 'muse_main') { $pressure.callsByRole.muse_main = [int]$pressure.callsByRole.muse_main + 1 }
-    elseif ($roleKey -eq 'engineer_normal') { $pressure.callsByRole.engineer_normal = [int]$pressure.callsByRole.engineer_normal + 1 }
-    elseif ($roleKey -eq 'engineer_deep') { $pressure.callsByRole.engineer_deep = [int]$pressure.callsByRole.engineer_deep + 1 }
-    $pressure.lastCallAtUtc = [DateTime]::UtcNow.ToString('o')
-    if (-not [string]::IsNullOrWhiteSpace($Model)) { $pressure.lastModel = [string]$Model }
-    if (-not [string]::IsNullOrWhiteSpace($Provider)) { $pressure.lastProvider = [string]$Provider }
-    if (-not [string]::IsNullOrWhiteSpace($StepId)) {
-        $pressure | Add-Member -NotePropertyName 'seenStepIds' -NotePropertyValue (@($seenSteps) + @($StepId)) -Force
-    }
-    if (-not [string]::IsNullOrWhiteSpace($SessionId)) {
-        $pressure | Add-Member -NotePropertyName 'lastSessionId' -NotePropertyValue ([string]$SessionId) -Force
-    }
-    $paths = Get-AihContextLifecyclePaths -Workspace $Workspace -TaskId $TaskId
-    Write-AihAtomicJson $paths.Pressure $pressure
-    return [pscustomobject]$pressure
+    })
 }
 function Test-AihContextCompactionEligibility {
     param(
