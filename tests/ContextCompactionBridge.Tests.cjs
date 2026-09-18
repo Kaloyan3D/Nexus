@@ -174,6 +174,32 @@ pass('muse reasoning governor owns no compaction policy');
 const routing = fs.readFileSync(path.join(repoRoot, 'scripts', 'Routing.ps1'), 'utf8');
 assert.ok(!routing.includes('ompaction'));
 pass('dual routing carries no compaction branch');
+// Canonical operationId parity: the JS twin must derive byte-identical ids
+// to the PS authority (New-AihContextCompactionOperationId). Any drift
+// breaks cross-language validation.
+const { execFileSync } = require('node:child_process');
+const os = require('node:os');
+function psDerive(taskId, instanceId, sessionId) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opid-'));
+  const script = path.join(dir, 'opid.ps1');
+  fs.writeFileSync(script, ". '" + path.join(repoRoot, 'scripts', 'Common.ps1') + "'; . '" + path.join(repoRoot, 'scripts', 'TaskController.ps1') + "'; . '" + path.join(repoRoot, 'scripts', 'ContextLifecycle.ps1') + "'; New-AihContextCompactionOperationId -TaskId '" + taskId + "' -TaskInstanceId '" + instanceId + "' -SessionId '" + sessionId + "'\n");
+  return execFileSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', script], { encoding: 'utf8', timeout: 60000 }).trim();
+}
+for (const triple of [['TASK-0004', 'task_abc123', 'sess-9'], ['TASK-1', 'task_x', 's'], ['TASK-1234', 'task_00000000000000000000000000000001', 'session-abcdef']]) {
+  assert.equal(compaction.deriveCanonicalOperationId(triple[0], triple[1], triple[2]), psDerive(triple[0], triple[1], triple[2]));
+  pass('operationId parity for ' + triple[0] + '/' + triple[2]);
+}
+assert.ok(compaction.deriveCanonicalOperationId('A', 'b', 'c').startsWith('ccop_'));
+pass('operationId carries the ccop_ prefix');
+// Closed-world validation spot checks (full matrix runs in production).
+const goodOp = { schemaVersion: 1, operationId: compaction.deriveCanonicalOperationId('TASK-1', 'task_a', 'sess-1'), taskId: 'TASK-1', taskInstanceId: 'task_a', sessionId: 'sess-1', workspace: '/ws', checkpointPath: 'cp.json', replacementStart: 0, replacementEnd: 3, sourceEventSeqs: [0, 1, 3], segments: [{ start: 0, end: 1, sourceEventSeqs: [0, 1] }, { start: 3, end: 3, sourceEventSeqs: [3] }], completionBoundarySeq: 9 };
+const goodExp = { taskId: 'TASK-1', taskInstanceId: 'task_a', sessionId: 'sess-1', workspace: '/ws', repositoryId: null, checkoutId: null };
+assert.equal(compaction.validateOperationForApply(goodOp, goodExp).valid, true);
+pass('valid operation validates');
+assert.equal(compaction.validateOperationForApply(Object.assign({}, goodOp, { operationId: 'ccop_wrong_but_nonempty' }), goodExp).reason, 'operation-id-mismatch');
+pass('wrong-but-nonempty operationId is rejected');
+assert.equal(compaction.validateOperationForApply(Object.assign({}, goodOp, { sourceEventSeqs: [1, 0, 3] }), goodExp).reason, 'range-endpoint-mismatch');
+pass('unordered seqs fail endpoint match');
 const bridge = fs.readFileSync(path.join(repoRoot, 'config', 'AihController.cjs'), 'utf8');
 assert.ok(bridge.includes('maybeApplyContextCompaction'));
 pass('controller bridge owns the apply seam');

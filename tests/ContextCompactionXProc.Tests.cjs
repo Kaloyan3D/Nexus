@@ -51,8 +51,8 @@ async function main() {
     const op = cli(taskId, 'freeze-operation', { workspace, taskInstanceId, sessionId, replacementStart: 0, replacementEnd: 1, sourceEventSeqs: [0, 1], segments: [{ start: 0, end: 1, sourceEventSeqs: [0, 1] }], completionBoundarySeq: 5, checkpointPath: cp.path });
     assert.ok(op && op.operationId, 'production freeze persists the operation');
     pass('production freeze-operation persists one operation');
-    const runWorker = (tag, holdMs) => new Promise((resolve) => {
-      const child = spawn(process.execPath, [WORKER, workspace, taskId, taskInstanceId, sessionId, op.operationId, String(holdMs), tag], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const runWorker = (tag, holdMs, leaseS, heartbeat) => new Promise((resolve) => {
+      const child = spawn(process.execPath, [WORKER, workspace, taskId, taskInstanceId, sessionId, op.operationId, String(holdMs), tag, String(leaseS || 60), heartbeat || 'on'], { stdio: ['ignore', 'pipe', 'pipe'] });
       let out = '';
       child.stdout.on('data', (d) => { out += d; });
       child.stderr.on('data', (d) => { out += d; });
@@ -73,6 +73,19 @@ async function main() {
     const lockPath = path.join(workspace, '.ai-harness', 'runs', taskId, 'context-compaction-apply.lock');
     assert.ok(!fs.existsSync(lockPath), 'no lock residue after release');
     pass('lock leaves no residue on the happy path');
+    // Slow owner with heartbeat: lease 3s, heartbeat ~1s, hold 8s. Process
+    // B starts after the ORIGINAL expiry yet must still be refused while A
+    // renews (identical production lock/heartbeat code, test lease only).
+    const s = runWorker('SLOW-A', 8000, 3, 'on');
+    await new Promise((r) => setTimeout(r, 4500));
+    const f = await runWorker('FAST-B', 0, 60, 'on');
+    const rs = await s;
+    assert.equal(rs.code, 0, 'slow owner completes across renewals');
+    assert.ok(rs.out.includes('"renewals"') && !rs.out.includes('"renewals":0'), 'slow owner renewed at least once');
+    pass('healthy live owner renews past the original expiry');
+    assert.equal(f.code, 2, 'contender refused while slow owner renews');
+    assert.ok(f.out.includes('held-by-live-owner'), 'contender observes live-owner refusal past original expiry');
+    pass('no second writer while the slow owner heartbeat is healthy');
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }

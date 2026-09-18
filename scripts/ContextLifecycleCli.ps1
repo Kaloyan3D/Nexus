@@ -3,7 +3,7 @@
 # Every action is task-scoped and identity-guarded (TaskId plus TaskInstanceId).
 # User-derived free text travels through the UTF-8 payload file, never argv.
 param(
-    [ValidateSet('record-root-usage','eligibility','build-checkpoint','read-checkpoint','checkpoint-text','transition','snapshot','write-telemetry','mark-applied','record-post-compaction-usage','threshold','freeze-operation','read-operation','reconcile','acquire-apply-lock','release-apply-lock')][string]$Action = 'snapshot',
+    [ValidateSet('record-root-usage','eligibility','build-checkpoint','read-checkpoint','checkpoint-text','transition','snapshot','write-telemetry','mark-applied','record-post-compaction-usage','threshold','freeze-operation','read-operation','reconcile','acquire-apply-lock','renew-apply-lock','release-apply-lock')][string]$Action = 'snapshot',
     [string]$Workspace = (Get-Location).Path,
     [string]$TaskId,
     [string]$TaskInstanceId,
@@ -141,6 +141,7 @@ $__aihLifecycleResult = $(switch ($Action) {
     'read-operation' { Read-AihContextCompactionOperation -Workspace $Workspace -TaskId $TaskId }
     'reconcile' { Test-AihContextOperationReconcile -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -LiveSurfaceSeqs $LiveSurfaceSeqs -LandedReplacementSeq $LandedReplacementSeq -SessionId $SessionId -DurablyVerified $DurablyVerified }
     'acquire-apply-lock' { Invoke-AihCompactionApplyLockAcquire -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -SessionId $SessionId -OperationId $OperationLockId -LeaseSeconds $LockLeaseSeconds }
+    'renew-apply-lock' { Invoke-AihCompactionApplyLockRenew -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -SessionId $SessionId -OperationId $OperationLockId -OwnerId $LockOwnerId -LeaseSeconds $LockLeaseSeconds }
     'release-apply-lock' { Invoke-AihCompactionApplyLockRelease -Workspace $Workspace -TaskId $TaskId -OwnerId $LockOwnerId }
     'record-post-compaction-usage' { Add-AihContextPostCompactionUsage -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -PostCompactionEffectiveInputTokens $PostCompactionEffectiveInputTokens -SessionId $SessionId }
 })

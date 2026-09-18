@@ -57,8 +57,10 @@ assert.ok(bridge.includes('ctx.sessions.flush') || bridge.includes('sessions.flu
 pass('bridge gates APPLIED on the supported sessions flush barrier');
 assert.ok(bridge.includes('findReplacementByOperation'));
 pass('bridge reconciles by operationId instead of recomputing a range');
-assert.ok(bridge.includes('refreshRuntimeContextSnapshot'));
-pass('bridge refreshes the current runtime snapshot after the replace lands');
+assert.ok(!bridge.includes('refreshRuntimeContextSnapshot'));
+pass('bridge never appends its own runtime snapshot (DSH owns projection)');
+assert.ok(bridge.includes('{ prepend: true }'));
+pass('compaction runs before the loop consumes its projection decision');
 const lifecycle = fs.readFileSync(path.join(repoRoot, 'scripts', 'ContextLifecycle.ps1'), 'utf8');
 assert.ok(lifecycle.includes('$AihContextCompactionThresholdTokens = 120000'));
 pass('single 120000 threshold authority in the controller module');
