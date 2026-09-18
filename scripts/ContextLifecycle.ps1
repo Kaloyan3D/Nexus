@@ -247,13 +247,58 @@ function ConvertTo-AihContextRedactedText {
     param([string]$Text, [int]$MaxChars = 4000)
     if ([string]::IsNullOrEmpty($Text)) { return '' }
     $redacted = [string]$Text
+    # F4 checkpoint persistence boundary: secret material must never land in
+    # checkpoint storage. Order matters: PEM blocks first (multi-line), then
+    # URL credentials, then bearer/key formats, then key=value assignments,
+    # then JSON-style assignments. Every replacement emits the stable
+    # <redacted> marker; the matched secret value is never logged/persisted.
+    # PEM/private-key blocks (incl. RSA variant), DOTALL so embedded newlines match.
+    $redacted = [regex]::Replace($redacted, '(?si)-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----.*?-----END\s+(?:RSA\s+)?PRIVATE\s+KEY-----', '<redacted>')
+    # URL userinfo credentials: scheme://user:password@host -> scheme://<redacted>@host.
+    $redacted = [regex]::Replace($redacted, '([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s/@]+:[^\s/@]+@', '$1<redacted>@')
+    # URL query credentials: ?token=.. &access_token=.. (also ; and # fragments).
+    $redacted = [regex]::Replace($redacted, '(?i)([?&#;](?:token|access_token|api[_-]?key|client_secret|password|secret|auth)\s*=\s*)([^\s&#;]+)', '$1<redacted>')
     $redacted = [regex]::Replace($redacted, '(?i)\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}', '$1<redacted>')
-    $redacted = [regex]::Replace($redacted, '\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b', '<redacted>')
-    $redacted = [regex]::Replace($redacted, '(?i)((?:MODEL_API_KEY|API[_-]?KEY|ACCESS[_-]?TOKEN|CLIENT[_-]?SECRET|PASSWORD|AUTHORIZATION)\s*[:=]\s*)([^\s,;]+)', '$1<redacted>')
-    $redacted = [regex]::Replace($redacted, '(?i)("(?:apiKey|api_key|accessToken|access_token|clientSecret|client_secret|password|authorization)"\s*:\s*")[^"]*(")', '$1<redacted>$2')
+    $redacted = [regex]::Replace($redacted, '\b(sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[bpas]-[A-Za-z0-9-]{8,})\b', '<redacted>')
+    # Key/value assignments incl. env-style names (AWS_SECRET_ACCESS_KEY,
+    # GITHUB_TOKEN, OPENAI_API_KEY, DEEPSEEK_API_KEY, SERVICE_TOKEN,
+    # DB_PASSWORD, ...). Quoted values keep their quotes via $3/$5.
+    $redacted = [regex]::Replace($redacted, '(?i)\b([A-Za-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key|secret[_-]?key|client[_-]?secret|private[_-]?key|auth[_-]?token)[A-Za-z0-9_.-]*\s*[:=]\s*)(["\u0027]?)([^\s,;"\u0027]+)(["\u0027]?)', '$1$2<redacted>$4')
+    $redacted = [regex]::Replace($redacted, '(?i)("(?:apiKey|api_key|accessToken|access_token|clientSecret|client_secret|password|authorization|token|secret)"\s*:\s*")[^"]*(")', '$1<redacted>$2')
     $redacted = $redacted.Trim()
     if ($redacted.Length -gt $MaxChars) { $redacted = $redacted.Substring(0, $MaxChars) + '...<truncated>' }
     return $redacted
+}
+# F4: ONE authoritative checkpoint-safe projection boundary. Recurses through
+# strings, arrays, ordered dictionaries, and PSCustomObjects WITHOUT mutating
+# the caller source; non-string scalars pass through unchanged; output is
+# deterministic. Structural sanitization happens BEFORE serialization (never
+# JSON.stringify(...).replace(...) as the primary sanitizer).
+function ConvertTo-AihContextSafeCheckpointValue {
+    param($Value, [int]$MaxChars = 4000)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string]) { return (ConvertTo-AihContextRedactedText -Text ([string]$Value) -MaxChars $MaxChars) }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $safe = [ordered]@{}
+        foreach ($key in @($Value.Keys)) { $safe[[string]$key] = ConvertTo-AihContextSafeCheckpointValue -Value $Value[$key] -MaxChars $MaxChars }
+        return $safe
+    }
+    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [byte[]])) {
+        $items = @()
+        foreach ($entry in @($Value)) { $items += @(ConvertTo-AihContextSafeCheckpointValue -Value $entry -MaxChars $MaxChars) }
+        return $items
+    }
+    if ($null -ne $Value.PSObject -and ($Value -is [psobject]) -and ($Value.PSObject.Properties.Count -gt 0) -and -not ($Value -is [ValueType])) {
+        $safe = [ordered]@{}
+        foreach ($prop in @($Value.PSObject.Properties)) { $safe[[string]$prop.Name] = ConvertTo-AihContextSafeCheckpointValue -Value $prop.Value -MaxChars $MaxChars }
+        return $safe
+    }
+    return $Value
+}
+# F4: bounded per-item checkpoint string projection (minimize-then-redact).
+function ConvertTo-AihContextCheckpointField {
+    param([string]$Text, [int]$MaxChars = 500)
+    return (ConvertTo-AihContextRedactedText -Text ([string]$Text) -MaxChars $MaxChars)
 }
 function New-AihContextCheckpoint {
     param(
@@ -281,7 +326,7 @@ function New-AihContextCheckpoint {
         foreach ($check in @($evidence.verification)) {
             if ($null -eq $check) { continue }
             $verificationOutcomes += [ordered]@{
-                name = [string]$check.name; kind = [string]$check.kind
+                name = (ConvertTo-AihContextCheckpointField -Text ([string]$check.name) -MaxChars 500); kind = [string]$check.kind
                 status = ([string]$check.status).ToUpperInvariant()
                 exitCode = $(if ($null -ne $check.PSObject.Properties['exitCode']) { $check.exitCode } else { $null })
                 attempt = $(if ($null -ne $check.PSObject.Properties['attempt']) { [int]$check.attempt } else { $null })
@@ -329,7 +374,7 @@ function New-AihContextCheckpoint {
         executionClass = [string]$task.executionClass
         task = [ordered]@{
             description = (ConvertTo-AihContextRedactedText -Text ([string]$task.description) -MaxChars 4000)
-            acceptanceCriteria = @($task.acceptanceCriteria)
+            acceptanceCriteria = @(@($task.acceptanceCriteria) | ForEach-Object { ConvertTo-AihContextCheckpointField -Text ([string]$PSItem) -MaxChars 500 })
             status = [string]$task.status
             createdAtUtc = [string]$task.createdAtUtc; completedAtUtc = [string]$task.completedAtUtc
         }
@@ -344,7 +389,7 @@ function New-AihContextCheckpoint {
             baseCommit = $(if ($null -ne $task.PSObject.Properties['baseCommit']) { [string]$task.baseCommit } else { $null })
             headCommit = [string]$gitFacts.headCommit
             worktreeClean = $gitFacts.worktreeClean
-            changedFiles = @($gitFacts.changedFiles)
+            changedFiles = @(ConvertTo-AihContextSafeCheckpointValue -Value @($gitFacts.changedFiles) -MaxChars 500)
         }
         verification = [ordered]@{
             outcomes = @($verificationOutcomes)
@@ -413,29 +458,29 @@ function Get-AihContextCheckpointText {
     param([Parameter(Mandatory = $true)]$Checkpoint, [int]$MaxChars = 6000)
     $lines = [Collections.Generic.List[string]]::new()
     [void]$lines.Add(('<nexus-context-checkpoint task="' + [string]$Checkpoint.taskId + '" instance="' + [string]$Checkpoint.taskInstanceId + '" schema="' + [string]$Checkpoint.schemaVersion + '">'))
-    [void]$lines.Add(('Task: ' + [string]$Checkpoint.task.description))
+    [void]$lines.Add(('Task: ' + (ConvertTo-AihContextRedactedText -Text ([string]$Checkpoint.task.description) -MaxChars 4000)))
     [void]$lines.Add(('Status: ' + [string]$Checkpoint.task.status + ' · authority: deterministic-controller · engine: ' + [string]$Checkpoint.engine + ' · execution: ' + [string]$Checkpoint.executionClass))
     if ($null -ne $Checkpoint.task.acceptanceCriteria) {
-        foreach ($criterion in @($Checkpoint.task.acceptanceCriteria)) { [void]$lines.Add(('Criterion: ' + [string]$criterion)) }
+        foreach ($criterion in @($Checkpoint.task.acceptanceCriteria)) { [void]$lines.Add(('Criterion: ' + (ConvertTo-AihContextRedactedText -Text ([string]$criterion) -MaxChars 500))) }
     }
     foreach ($outcome in @($Checkpoint.verification.outcomes)) {
         if ($null -eq $outcome) { continue }
-        [void]$lines.Add(('Verify: ' + [string]$outcome.name + ' [' + [string]$outcome.status + ']'))
+        [void]$lines.Add(('Verify: ' + (ConvertTo-AihContextRedactedText -Text ([string]$outcome.name) -MaxChars 500) + ' [' + [string]$outcome.status + ']'))
     }
     foreach ($item in @($Checkpoint.verification.acceptanceEvidence)) {
         if ($null -eq $item) { continue }
-        [void]$lines.Add(('Evidence: ' + [string]$item.criterion + ' => ' + [string]$item.status))
+        [void]$lines.Add(('Evidence: ' + (ConvertTo-AihContextRedactedText -Text ([string]$item.criterion) -MaxChars 500) + ' => ' + [string]$item.status))
     }
     if ($null -ne $Checkpoint.repositoryState.headCommit) { [void]$lines.Add(('HEAD: ' + [string]$Checkpoint.repositoryState.headCommit + ' · worktreeClean: ' + [string]$Checkpoint.repositoryState.worktreeClean)) }
     foreach ($file in @($Checkpoint.repositoryState.changedFiles)) {
         if ($null -eq $file) { continue }
-        [void]$lines.Add(('File: ' + [string]$file.path + ' (' + [string]$file.status + ')'))
+        [void]$lines.Add(('File: ' + (ConvertTo-AihContextRedactedText -Text ([string]$file.path) -MaxChars 500) + ' (' + [string]$file.status + ')'))
     }
     if ($null -ne $Checkpoint.continuity -and -not [string]::IsNullOrWhiteSpace([string]$Checkpoint.continuity.finalAssistantReport)) {
-        [void]$lines.Add(('Final report: ' + [string]$Checkpoint.continuity.finalAssistantReport))
+        [void]$lines.Add(('Final report: ' + (ConvertTo-AihContextRedactedText -Text ([string]$Checkpoint.continuity.finalAssistantReport) -MaxChars 4000)))
     }
     if ($null -ne $Checkpoint.continuity -and -not [string]::IsNullOrWhiteSpace([string]$Checkpoint.continuity.finalUserRequest)) {
-        [void]$lines.Add(('Final request: ' + [string]$Checkpoint.continuity.finalUserRequest))
+        [void]$lines.Add(('Final request: ' + (ConvertTo-AihContextRedactedText -Text ([string]$Checkpoint.continuity.finalUserRequest) -MaxChars 2000)))
     }
     [void]$lines.Add('</nexus-context-checkpoint>')
     $text = [string]::Join("`n", $lines)
