@@ -245,6 +245,69 @@ function findReplacementByOperation(session, operationId) {
   return null;
 }
 
+// Full pre-mutation provenance validation for one frozen compaction
+// operation (F2). Every field is checked BEFORE any DSH mutation; any
+// mismatch returns { valid: false } (BLOCK/KEEP). No surface inspection is
+// used to reconstruct authority -- the persisted record must prove itself.
+function validateOperationForApply(operation, expected) {
+  const fail = (reason) => ({ valid: false, reason });
+  if (!operation || typeof operation !== 'object') return fail('operation-missing');
+  if (!expected || typeof expected !== 'object') return fail('expectation-missing');
+  if (Number(operation.schemaVersion) !== 1) return fail('operation-schema-mismatch');
+  if (typeof operation.operationId !== 'string' || operation.operationId === '') return fail('operation-id-missing');
+  if (operation.taskId !== expected.taskId) return fail('task-id-mismatch');
+  if (typeof operation.taskInstanceId !== 'string' || operation.taskInstanceId === '' || operation.taskInstanceId !== expected.taskInstanceId) {
+    return fail('task-instance-mismatch');
+  }
+  if (typeof operation.sessionId !== 'string' || operation.sessionId === '' || operation.sessionId !== expected.sessionId) {
+    return fail('session-id-mismatch');
+  }
+  if (typeof operation.workspace !== 'string' || operation.workspace === '' || operation.workspace !== expected.workspace) {
+    return fail('workspace-mismatch');
+  }
+  if (expected.repositoryId !== null && expected.repositoryId !== undefined && expected.repositoryId !== '') {
+    if (operation.repositoryId !== expected.repositoryId) return fail('repository-id-mismatch');
+  }
+  if (expected.checkoutId !== null && expected.checkoutId !== undefined && expected.checkoutId !== '') {
+    if (operation.checkoutId !== expected.checkoutId) return fail('checkout-id-mismatch');
+  }
+  if (typeof operation.checkpointPath !== 'string' || operation.checkpointPath === '') return fail('checkpoint-identity-missing');
+  const seqs = operation.sourceEventSeqs;
+  if (!Array.isArray(seqs) || seqs.length === 0) return fail('source-seqs-missing');
+  for (const seq of seqs) {
+    if (!Number.isInteger(seq) || seq < 0) return fail('source-seq-malformed');
+  }
+  const unique = new Set(seqs);
+  if (unique.size !== seqs.length) return fail('source-seqs-duplicate');
+  if (operation.replacementStart !== seqs[0] || operation.replacementEnd !== seqs[seqs.length - 1]) {
+    return fail('range-endpoint-mismatch');
+  }
+  const boundary = Number(operation.completionBoundarySeq);
+  if (!Number.isInteger(boundary) || boundary < 0) return fail('completion-boundary-missing');
+  for (const seq of seqs) {
+    if (seq > boundary) return fail('source-seq-beyond-completion-boundary');
+  }
+  const segments = operation.segments;
+  if (!Array.isArray(segments) || segments.length === 0) return fail('segments-missing');
+  const union = [];
+  for (const segment of segments) {
+    if (!segment || typeof segment !== 'object') return fail('segment-malformed');
+    if (segment.start !== segment.sourceEventSeqs[0] || segment.end !== segment.sourceEventSeqs[segment.sourceEventSeqs.length - 1]) {
+      return fail('segment-endpoint-mismatch');
+    }
+    if (!Array.isArray(segment.sourceEventSeqs) || segment.sourceEventSeqs.length === 0) return fail('segment-seqs-missing');
+    for (const seq of segment.sourceEventSeqs) {
+      if (!Number.isInteger(seq) || seq < 0) return fail('segment-seq-malformed');
+      union.push(seq);
+    }
+  }
+  if (union.length !== seqs.length) return fail('segment-union-mismatch');
+  for (let i = 0; i < seqs.length; i += 1) {
+    if (union[i] !== seqs[i]) return fail('segment-union-mismatch');
+  }
+  return { valid: true, reason: null };
+}
+
 function checkpointProvenanceValid(checkpoint, binding) {
   if (!checkpoint || typeof checkpoint !== 'object') return { valid: false, reason: 'checkpoint-missing' };
   if (!binding || typeof binding !== 'object') return { valid: false, reason: 'binding-missing' };
@@ -292,6 +355,7 @@ module.exports = {
   runtimeContextSeqsOf,
   withoutSeqs,
   splitRangeAroundOwned,
+  validateOperationForApply,
   findReplacementByOperation,
   ROOT_ENGINE_ROLES,
   effectiveInputTokensOf,

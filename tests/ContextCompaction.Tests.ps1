@@ -157,7 +157,7 @@ try {
     $legacyApply = $false
     try { [void](Set-AihContextLifecycleTransition -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -To 'applied' -Reason 'legacy direct probe') } catch { $legacyApply = $true }
     Assert-Aih $legacyApply 'legacy checkpoint-ready without a frozen operation cannot jump to applied'
-    $operation = New-AihContextCompactionOperation -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId 'sess-8' -ReplacementStart 0 -ReplacementEnd 2 -SourceEventSeqs @(0, 1, 2) -CheckpointPath 'checkpoint.json'
+    $operation = New-AihContextCompactionOperation -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId 'sess-8' -ReplacementStart 0 -ReplacementEnd 2 -SourceEventSeqs @(0, 1, 2) -CheckpointPath 'checkpoint.json' -Segments @([ordered]@{ start = 0; end = 2; sourceEventSeqs = @(0, 1, 2) }) -CompletionBoundarySeq 9
     Assert-Aih (-not [string]::IsNullOrWhiteSpace([string]$operation.operationId)) 'frozen operation carries a stable operationId'
     [void](Set-AihContextLifecycleTransition -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -To 'apply-pending' -Reason 'fixture' -SessionId 'sess-8')
     [void](Set-AihContextLifecycleTransition -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -To 'awaiting-durability' -Reason 'fixture' -SessionId 'sess-8')
@@ -303,7 +303,7 @@ try {
     [void](Set-AihContextLifecycleTransition -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -To 'checkpoint-ready' -Reason 'fixture')
     $elig = Test-AihContextCompactionEligibility -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId)
     [void](Write-AihContextCompactionTelemetry -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -Eligibility $elig -SessionId 'sess-25' -CheckpointPath ([string]$checkpoint.path) -CheckpointSizeBytes $checkpoint.sizeBytes)
-    [void](New-AihContextCompactionOperation -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId 'sess-25' -ReplacementStart 0 -ReplacementEnd 2 -SourceEventSeqs @(0, 1, 2) -CheckpointPath ([string]$checkpoint.path))
+    [void](New-AihContextCompactionOperation -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId 'sess-25' -ReplacementStart 0 -ReplacementEnd 2 -SourceEventSeqs @(0, 1, 2) -CheckpointPath ([string]$checkpoint.path) -Segments @([ordered]@{ start = 0; end = 2; sourceEventSeqs = @(0, 1, 2) }) -CompletionBoundarySeq 9)
     [void](Set-AihContextLifecycleTransition -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -To 'apply-pending' -Reason 'fixture' -SessionId 'sess-25')
     [void](Set-AihContextLifecycleTransition -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -To 'awaiting-durability' -Reason 'fixture' -SessionId 'sess-25')
     [void](Set-AihContextLifecycleTransition -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -To 'applied' -Reason 'fixture' -SessionId 'sess-25')
@@ -328,26 +328,71 @@ try {
     [void](Set-AihContextLifecycleTransition -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -To 'eligible' -Reason 'fixture')
     [void](New-AihContextCheckpoint -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId))
     [void](Set-AihContextLifecycleTransition -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -To 'checkpoint-ready' -Reason 'fixture')
-    $first = New-AihContextCompactionOperation -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId 'sess-26' -ReplacementStart 0 -ReplacementEnd 4 -SourceEventSeqs @(0, 1, 2, 3, 4) -CheckpointPath 'cp.json'
-    $retry = New-AihContextCompactionOperation -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId 'sess-26' -ReplacementStart 0 -ReplacementEnd 99 -SourceEventSeqs @(0, 1, 2, 3, 4, 5, 6) -CheckpointPath 'cp.json'
+    $segs26 = @([ordered]@{ start = 0; end = 4; sourceEventSeqs = @(0, 1, 2, 3, 4) })
+    $first = New-AihContextCompactionOperation -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId 'sess-26' -ReplacementStart 0 -ReplacementEnd 4 -SourceEventSeqs @(0, 1, 2, 3, 4) -CheckpointPath 'cp.json' -Segments $segs26 -CompletionBoundarySeq 9
+    $retry = New-AihContextCompactionOperation -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId 'sess-26' -ReplacementStart 0 -ReplacementEnd 99 -SourceEventSeqs @(0, 1, 2, 3, 4, 5, 6) -CheckpointPath 'cp.json' -Segments $segs26 -CompletionBoundarySeq 9
     Assert-Aih ([string]$retry.operationId -eq [string]$first.operationId) 'freeze retry returns the same operationId'
     Assert-Aih ([int]$retry.replacementEnd -eq 4) 'freeze retry never widens the boundary'
     Assert-Aih ([string]$retry.taskInstanceId -eq [string]$task.taskInstanceId) 'frozen operation owns the completed generation'
     $otherSession = $false
-    try { [void](New-AihContextCompactionOperation -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId 'sess-other' -ReplacementStart 0 -ReplacementEnd 4 -SourceEventSeqs @(0, 1, 2, 3, 4)) } catch { $otherSession = $true }
+    try { [void](New-AihContextCompactionOperation -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId 'sess-other' -ReplacementStart 0 -ReplacementEnd 4 -SourceEventSeqs @(0, 1, 2, 3, 4) -Segments $segs26 -CompletionBoundarySeq 9) } catch { $otherSession = $true }
     Assert-Aih $otherSession 'a second session cannot adopt the generation operation'
-    $reconciled = Test-AihContextOperationReconcile -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -LiveSurfaceSeqs @(5, 6, 7, 8) -LandedReplacementSeq 8
-    Assert-Aih ([string]$reconciled.decision -eq 'reconcile-applied') 'landed replacement reconciles to applied'
-    $retrySame = Test-AihContextOperationReconcile -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -LiveSurfaceSeqs @(0, 1, 2, 3, 4, 9, 10) -LandedReplacementSeq -1
+    $reconciledMemoryOnly = Test-AihContextOperationReconcile -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -LiveSurfaceSeqs @(5, 6, 7, 8) -LandedReplacementSeq 8 -SessionId 'sess-26'
+    Assert-Aih ([string]$reconciledMemoryOnly.decision -eq 'await-durability') 'memory-only landing stays awaiting-durability (never applied)'
+    $reconciled = Test-AihContextOperationReconcile -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -LiveSurfaceSeqs @(5, 6, 7, 8) -LandedReplacementSeq 8 -SessionId 'sess-26' -DurablyVerified $true
+    Assert-Aih ([string]$reconciled.decision -eq 'reconcile-applied') 'durably verified landing reconciles to applied'
+    $retrySame = Test-AihContextOperationReconcile -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -LiveSurfaceSeqs @(0, 1, 2, 3, 4, 9, 10) -LandedReplacementSeq -1 -SessionId 'sess-26'
     Assert-Aih ([string]$retrySame.decision -eq 'retry-same') 'intact frozen range retries the same operation'
     Assert-Aih ([int]$retrySame.replacementEnd -eq 4) 'retry carries the frozen end, never the live tail'
-    $blocked = Test-AihContextOperationReconcile -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -LiveSurfaceSeqs @(1, 2, 3, 4, 9, 10) -LandedReplacementSeq -1
+    $blocked = Test-AihContextOperationReconcile -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -LiveSurfaceSeqs @(1, 2, 3, 4, 9, 10) -LandedReplacementSeq -1 -SessionId 'sess-26'
     Assert-Aih ([string]$blocked.decision -eq 'block') 'missing frozen source seq blocks instead of widening'
     $wrongGen = Test-AihContextOperationReconcile -Workspace $root -TaskId $task.taskId -TaskInstanceId ('task_' + ('7' * 32)) -LiveSurfaceSeqs @(0, 1) -LandedReplacementSeq -1
     Assert-Aih ([string]$wrongGen.decision -eq 'block') 'another generation never reconciles this operation'
 } finally { if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force } }
 
-# == 27. THRESHOLD VALIDATION FAILS CLOSED =====================================
+# == 27. TAMPER MATRIX: every invalid operation is refused ====================
+$root = New-CompactionFixture 't27'
+try {
+    $task = New-CompactionTask $root
+    [void](Complete-CompactionTask $root $task)
+    [void](Add-CompactionUsage $root $task 'muse_main' 'muse' 100000 50000 '5:1')
+    $instance = [string]$task.taskInstanceId
+    $goodSegments = @([ordered]@{ start = 0; end = 1; sourceEventSeqs = @(0, 1) }, [ordered]@{ start = 3; end = 4; sourceEventSeqs = @(3, 4) })
+    $tamperCounter = 0
+    function New-TamperOperation([hashtable]$Override = @{}) {
+        # Fresh sessionId per case: identical operationIds return the frozen
+        # record idempotently WITHOUT revalidating the candidate range, so
+        # tamper validation only runs for genuinely new operations.
+        $script:tamperCounter++
+        $params = @{ Workspace = $root; TaskId = $task.taskId; TaskInstanceId = $instance; SessionId = ('sess-t27-' + $script:tamperCounter); ReplacementStart = 0; ReplacementEnd = 4; SourceEventSeqs = @(0, 1, 3, 4); CheckpointPath = 'cp.json'; Segments = $goodSegments; CompletionBoundarySeq = 9 }
+        foreach ($key in @($Override.Keys)) { $params[$key] = $Override[$key] }
+        New-AihContextCompactionOperation @params
+    }
+    $valid = New-TamperOperation
+    Assert-Aih (-not [string]::IsNullOrWhiteSpace([string]$valid.operationId)) 'valid operation persists'
+    foreach ($case in @(
+        @{ Name = 'duplicate sourceEventSeqs'; Override = @{ SourceEventSeqs = @(0, 1, 1, 4); Segments = @([ordered]@{ start = 0; end = 1; sourceEventSeqs = @(0, 1) }, [ordered]@{ start = 1; end = 4; sourceEventSeqs = @(1, 4) }) } },
+        @{ Name = 'seq beyond completion boundary'; Override = @{ SourceEventSeqs = @(0, 1, 3, 12); Segments = @([ordered]@{ start = 0; end = 1; sourceEventSeqs = @(0, 1) }, [ordered]@{ start = 3; end = 12; sourceEventSeqs = @(3, 12) }) } },
+        @{ Name = 'segment union mismatch'; Override = @{ Segments = @([ordered]@{ start = 0; end = 1; sourceEventSeqs = @(0, 1) }, [ordered]@{ start = 3; end = 3; sourceEventSeqs = @(3) }) } },
+        @{ Name = 'segment endpoint mismatch'; Override = @{ Segments = @([ordered]@{ start = 0; end = 2; sourceEventSeqs = @(0, 1) }, [ordered]@{ start = 3; end = 4; sourceEventSeqs = @(3, 4) }) } },
+        @{ Name = 'missing segments'; Override = @{ Segments = @() } }
+    )) {
+        $threw = $false
+        try { [void](New-TamperOperation $case.Override) } catch { $threw = $true }
+        Assert-Aih $threw ('tamper refused: ' + $case.Name)
+    }
+    $corruptPaths = Get-AihContextLifecyclePaths -Workspace $root -TaskId $task.taskId
+    Set-Content -Encoding UTF8 -LiteralPath $corruptPaths.Operation -Value '{corrupt json'
+    $threwCorrupt = $false
+    try { [void](Read-AihContextCompactionOperation -Workspace $root -TaskId $task.taskId) } catch { $threwCorrupt = $true }
+    Assert-Aih $threwCorrupt 'tamper refused: corrupted operation JSON'
+    $rec = Test-AihContextOperationReconcile -Workspace $root -TaskId $task.taskId -TaskInstanceId $instance -LiveSurfaceSeqs @(0, 1, 2) -LandedReplacementSeq -1 -SessionId 'sess-t27'
+    Assert-Aih ([string]$rec.decision -eq 'block') 'corrupted operation reconciles to block'
+    $wrongSession = Test-AihContextOperationReconcile -Workspace $root -TaskId $task.taskId -TaskInstanceId $instance -LiveSurfaceSeqs @(0, 1, 2) -LandedReplacementSeq -1 -SessionId 'sess-other'
+    Assert-Aih ([string]$wrongSession.decision -eq 'block') 'wrong sessionId reconciles to block'
+} finally { if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force } }
+
+# == 28. THRESHOLD VALIDATION FAILS CLOSED =====================================
 $invalid = $false
 try { [void](Get-AihContextLifecycleThreshold -Override 0) } catch { $invalid = $true }
 Assert-Aih $invalid 'zero threshold override throws'

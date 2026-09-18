@@ -188,11 +188,14 @@ function applyFrozen(session, frozen, operationId) {
   pass('F5: pinned host exposes the store surface carrying flush');
   const bridge = fs.readFileSync(path.join(repoRoot, 'config', 'AihController.cjs'), 'utf8');
   const flushAt = bridge.indexOf('await flushSessionDurable(session)');
-  const appliedAt = bridge.indexOf("to: 'applied', reason: 'surface replace durable");
+  const appliedAt = bridge.indexOf("to: 'applied', reason: 'surface replace proven durable");
   assert.ok(flushAt !== -1 && appliedAt !== -1 && flushAt < appliedAt, 'F5: bridge orders flush before APPLIED');
   pass('F5: APPLIED is written only after the durability barrier settles');
-  const awaitingAt = bridge.indexOf("to: 'awaiting-durability'");
-  assert.ok(awaitingAt !== -1 && awaitingAt < flushAt, 'F5: awaiting-durability brackets the flush');
+  assert.ok(bridge.includes('verifyOperationDurable(session, operationId, sessionId)'), 'F5: bridge proves durability from restored state');
+  pass('F5: durable proof gates APPLIED (not memory presence)');
+  const awaitingAt = bridge.indexOf("to: 'awaiting-durability', reason: 'replacement appended in memory");
+  const postAppendFlushAt = bridge.indexOf('await flushSessionDurable(session)', awaitingAt);
+  assert.ok(awaitingAt !== -1 && postAppendFlushAt !== -1 && awaitingAt < postAppendFlushAt, 'F5: in-memory append rests at awaiting-durability until flushed');
   pass('F5: in-memory append rests at awaiting-durability until flushed');
 }
 // ── Tool balance preserved across the frozen boundary ──────────────────────
