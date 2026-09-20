@@ -15,7 +15,7 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
 $passed = 0
 function Assert-Aih([bool]$Condition, [string]$Name) { if (-not $Condition) { throw "FAIL: $Name" }; $script:passed++; Write-Host "PASS: $Name" }
-function New-CompactionFixture([string]$Name) { $path = Join-Path ([IO.Path]::GetTempPath()) ("aih-compaction-$Name-" + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $path | Out-Null; $path }
+function New-CompactionFixture([string]$Name) { $path = Join-Path ([IO.Path]::GetTempPath()) ("aih-compaction-$Name-" + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $path | Out-Null; & git init -q $path | Out-Null; & git -C $path config user.email f8t@example.invalid | Out-Null; & git -C $path config user.name f8t | Out-Null; Set-Content -LiteralPath (Join-Path $path '.f8baseline') -Value 'baseline' | Out-Null; & git -C $path add .f8baseline | Out-Null; & git -C $path commit -qm baseline | Out-Null; $path }
 function New-CompactionTask([string]$Workspace, [string]$Description = 'compaction fixture task', [string[]]$Criteria = @('criterion one'), [string]$Engine = 'dual') {
     New-AihTask -Workspace $Workspace -Description $Description -AcceptanceCriteria $Criteria -Engine $Engine
 }
@@ -307,12 +307,12 @@ try {
     [void](Set-AihContextLifecycleTransition -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -To 'apply-pending' -Reason 'fixture' -SessionId 'sess-25')
     [void](Set-AihContextLifecycleTransition -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -To 'awaiting-durability' -Reason 'fixture' -SessionId 'sess-25')
     [void](Set-AihContextLifecycleTransition -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -To 'applied' -Reason 'fixture' -SessionId 'sess-25')
-    [void](Set-AihContextCompactionApplied -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -AppliedAtUtc ([DateTime]::UtcNow.ToString('o')) -SessionId 'sess-25')
-    $post = Add-AihContextPostCompactionUsage -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -PostCompactionEffectiveInputTokens 60000 -SessionId 'sess-25'
+    [void](Set-AihContextCompactionApplied -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -AppliedAtUtc ([DateTime]::UtcNow.ToString('o')) -SessionId 'sess-25' -AppliedAfterStepId '5:1')
+    $post = Add-AihContextPostCompactionUsage -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -PostCompactionEffectiveInputTokens 60000 -SessionId 'sess-25' -PostCompactionStepId '5:2'
     Assert-Aih ([int]$post.postCompactionEffectiveInputTokens -eq 60000) 'post-compaction input recorded'
     Assert-Aih ([int]$post.firstCallTokenReduction -eq 90000) 'token reduction is pre minus post (150000 - 60000)'
     Assert-Aih ([string]$post.taskInstanceId -eq [string]$task.taskInstanceId) 'post-compaction telemetry keys on the compacted generation'
-    $replay = Add-AihContextPostCompactionUsage -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -PostCompactionEffectiveInputTokens 60000 -SessionId 'sess-25'
+    $replay = Add-AihContextPostCompactionUsage -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -PostCompactionEffectiveInputTokens 60000 -SessionId 'sess-25' -PostCompactionStepId '5:2'
     Assert-Aih ([int]$replay.firstCallTokenReduction -eq 90000) 'post-compaction replay is idempotent'
     $wrongThrown = $false
     try { [void](Add-AihContextPostCompactionUsage -Workspace $root -TaskId $task.taskId -TaskInstanceId ('task_' + ('8' * 32)) -PostCompactionEffectiveInputTokens 10 -SessionId 'sess-x') } catch { $wrongThrown = $true }

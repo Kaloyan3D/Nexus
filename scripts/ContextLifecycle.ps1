@@ -340,14 +340,30 @@ function Test-AihContextCompactionEligibility {
     return (& $failDecision ('below-threshold: latest root effective input ' + [string]$signal + ' is below ' + [string]$threshold + '. KEEP.') $pressure $task)
 }
 function Get-AihContextGitFacts {
+    # F8: failure to establish repository truth yields UNKNOWN/KEEP, never a
+    # clean fact. BOTH required commands must exit 0 AND HEAD must be
+    # non-empty; otherwise gitKnown=$false with a machine-safe reason code.
+    # Empty stdout from a FAILED command is never cleanliness.
     param([Parameter(Mandatory = $true)][string]$Workspace)
-    $facts = [ordered]@{ baseCommit = $null; headCommit = $null; worktreeClean = $null; changedFiles = @() }
+    $facts = [ordered]@{ baseCommit = $null; headCommit = $null; worktreeClean = $null; changedFiles = @(); gitKnown = $false; gitReason = $null }
+    $headOk = $false
     try {
-        $head = (& git -C $Workspace rev-parse HEAD 2>$null | Select-Object -First 1)
-        if ($null -ne $head) { $facts.headCommit = ([string]$head).Trim() }
-    } catch { }
+        # NOTE: no terminating pipe (Select-Object -First) between the native
+        # call and $LASTEXITCODE: a short-circuiting pipeline does not
+        # populate the exit variable, and StrictMode reads would throw.
+        $headLines = @(& git -C $Workspace rev-parse HEAD 2>$null)
+        $headCode = [int](Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction SilentlyContinue)
+        $head = $(if (@($headLines).Count -gt 0) { $headLines[0] } else { $null })
+        if (($headCode -eq 0) -and ($null -ne $head) -and (-not [string]::IsNullOrWhiteSpace([string]$head))) {
+            $facts.headCommit = ([string]$head).Trim()
+            $headOk = $true
+        } else { $facts.gitReason = 'rev-parse-failed' }
+    } catch { $facts.gitReason = 'rev-parse-failed' }
+    if (-not $headOk) { return [pscustomobject]$facts }
     try {
         $porcelain = @(& git -C $Workspace status --porcelain=v1 --untracked-files=normal 2>$null)
+        $statusCode = [int](Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction SilentlyContinue)
+        if ($statusCode -ne 0) { $facts.gitReason = 'status-failed'; return [pscustomobject]$facts }
         $entries = @()
         foreach ($line in $porcelain) {
             $text = ([string]$line)
@@ -364,7 +380,9 @@ function Get-AihContextGitFacts {
         }
         $facts.changedFiles = @($entries)
         $facts.worktreeClean = (@($entries).Count -eq 0)
-    } catch { }
+        $facts.gitKnown = $true
+        $facts.gitReason = $null
+    } catch { $facts.gitReason = 'status-failed' }
     return [pscustomobject]$facts
 }
 
@@ -481,6 +499,12 @@ function New-AihContextCheckpoint {
         }
     }
     $gitFacts = Get-AihContextGitFacts -Workspace $Workspace
+    # F8: UNKNOWN repository truth blocks checkpoint preparation (KEEP).
+    # No READY/APPLYABLE operation may be created from unknown state;
+    # the controller evaluate path logs and keeps the live session.
+    if (-not [bool]$gitFacts.gitKnown) {
+        throw ("Checkpoint refused: repository truth is unknown (" + [string]$gitFacts.gitReason + "). (KEEP: ordinary session continues; no clean-worktree claim persisted.)")
+    }
     $pressure = Read-AihContextPressure -Workspace $Workspace -TaskId $TaskId
     $boundEngine = $null
     if ($null -ne $task.PSObject.Properties['boundEngine']) { $boundEngine = [string]$task.boundEngine }
@@ -597,6 +621,7 @@ function Get-AihContextCheckpointText {
         [void]$lines.Add(('Evidence: ' + (ConvertTo-AihContextRedactedText -Text ([string]$item.criterion) -MaxChars 500) + ' => ' + [string]$item.status))
     }
     if ($null -ne $Checkpoint.repositoryState.headCommit) { [void]$lines.Add(('HEAD: ' + [string]$Checkpoint.repositoryState.headCommit + ' · worktreeClean: ' + [string]$Checkpoint.repositoryState.worktreeClean)) }
+    else { [void]$lines.Add('Repository: unknown (Git inspection unavailable · KEEP)') }
     foreach ($file in @($Checkpoint.repositoryState.changedFiles)) {
         if ($null -eq $file) { continue }
         [void]$lines.Add(('File: ' + (ConvertTo-AihContextRedactedText -Text ([string]$file.path) -MaxChars 500) + ' (' + [string]$file.status + ')'))

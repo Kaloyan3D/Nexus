@@ -36,6 +36,12 @@ function cli(taskId, action, payload) { return pwsh(CLI, ['-Action', action, '-T
 
 async function main() {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'xproc-ws-'));
+  execFileSync('git', ['init', '-q', workspace]);
+  execFileSync('git', ['-C', workspace, 'config', 'user.email', 'f8t@example.invalid']);
+  execFileSync('git', ['-C', workspace, 'config', 'user.name', 'f8t']);
+  fs.writeFileSync(path.join(workspace, '.f8baseline'), 'baseline');
+  execFileSync('git', ['-C', workspace, 'add', '.f8baseline']);
+  execFileSync('git', ['-C', workspace, 'commit', '-qm', 'baseline']);
   try {
     const task = pwsh(TASK_CLI, ['-Action', 'create-task'], { workspace, description: 'xproc fixture', reviewRequested: false, engine: 'dual' });
     const taskId = task.taskId;
