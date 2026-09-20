@@ -41,6 +41,7 @@ function setupGeneration() {
   const WSCLI = path.join(repoRoot, 'scripts', 'NexusWorkspace.ps1');
   const pwsh = (script, args, payload) => harness.pwshFile(script, args, payload);
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'f2prod-ws-'));
+  harness.initGitRepo(workspace);
   const task = pwsh(TASK_CLI, ['-Action', 'create-task'], { workspace, description: 'f2 production fixture', reviewRequested: false, engine: 'muse' });
   pwsh(CLI, ['-Action', 'record-root-usage', '-TaskId', task.taskId], { workspace, taskInstanceId: task.taskInstanceId, engineRole: 'muse_main', engine: 'muse', uncachedInputTokens: 100000, cacheReadTokens: 50000, outputTokens: 1, usageAvailable: true, stepId: '1:1', sessionId: 'sess-f2' });
   const runDir = path.join(workspace, '.ai-harness', 'runs', task.taskId);

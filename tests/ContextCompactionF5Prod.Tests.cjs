@@ -42,6 +42,7 @@ async function main() {
   const WSCLI = path.join(repoRoot, 'scripts', 'NexusWorkspace.ps1');
   const pwsh = (script, args, payload) => harness.pwshFile(script, args, payload);
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'f5prod-ws-'));
+  harness.initGitRepo(workspace);
   try {
     const task = pwsh(TASK_CLI, ['-Action', 'create-task'], { workspace, description: 'f5 production fixture', reviewRequested: false, engine: 'muse' });
     const taskId = task.taskId;

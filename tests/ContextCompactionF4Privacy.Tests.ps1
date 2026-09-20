@@ -10,7 +10,7 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 . (Join-Path $InstallRoot 'scripts/ContextLifecycle.ps1')
 $passed = 0
 function Assert-Aih([bool]$Condition, [string]$Name) { if (-not $Condition) { throw "FAIL: $Name" }; $script:passed++; Write-Host "PASS: $Name" }
-function New-F4Fixture([string]$Name) { $p = Join-Path ([IO.Path]::GetTempPath()) ("aih-f4-" + $Name + "-" + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $p | Out-Null; $p }
+function New-F4Fixture([string]$Name) { $p = Join-Path ([IO.Path]::GetTempPath()) ("aih-f4-" + $Name + "-" + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $p | Out-Null; & git init -q $p | Out-Null; & git -C $p config user.email f8t@example.invalid | Out-Null; & git -C $p config user.name f8t | Out-Null; Set-Content -LiteralPath (Join-Path $p '.f8baseline') -Value 'baseline' | Out-Null; & git -C $p add .f8baseline | Out-Null; & git -C $p commit -qm baseline | Out-Null; $p }
 function Complete-F4Task([string]$Workspace, [string]$Description, [string[]]$Criteria, [array]$EvidenceCriteria, [array]$Verification, [string]$UserText, [string]$AssistantText) {
     $task = New-AihTask -Workspace $Workspace -Description $Description -AcceptanceCriteria $Criteria -Engine 'dual'
     $run = Join-Path (Join-Path $Workspace '.ai-harness/runs') $task.taskId

@@ -126,4 +126,17 @@ function seedBinding(dataRoot, sessionId, binding) {
   fs.writeFileSync(p, JSON.stringify(doc));
 }
 
-module.exports = { repoRoot, makeDataRoot, pwshFile, makeCtx, loadBridge, loadDshSession, seedBinding, identifiedUserMessage, identifiedAssistantMessage, identifiedToolResult, newMessageId };
+// F8: checkpoint preparation fails closed outside a KNOWN git repository.
+// Fixture workspaces must be real repos with a baseline commit (test-only;
+// production semantics unchanged).
+function initGitRepo(workspace) {
+  const { execFileSync } = require('node:child_process');
+  execFileSync('git', ['init', '-q', workspace]);
+  execFileSync('git', ['-C', workspace, 'config', 'user.email', 'f8t@example.invalid']);
+  execFileSync('git', ['-C', workspace, 'config', 'user.name', 'f8t']);
+  fs.writeFileSync(path.join(workspace, '.f8baseline'), 'baseline X');
+  execFileSync('git', ['-C', workspace, 'add', '.f8baseline']);
+  execFileSync('git', ['-C', workspace, 'commit', '-qm', 'baseline']);
+  return workspace;
+}
+module.exports = { repoRoot, makeDataRoot, pwshFile, makeCtx, loadBridge, loadDshSession, seedBinding, initGitRepo, identifiedUserMessage, identifiedAssistantMessage, identifiedToolResult, newMessageId };
