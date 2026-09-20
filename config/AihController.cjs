@@ -1956,7 +1956,7 @@ function apply(ctx) {
         })
         if (!transitioned) return { blocked: true, reason: 'applied-transition-failed' }
         await lifecycleCli('write-telemetry', binding, [], { sessionId, checkpointPath: snapshot.lifecycle.checkpointPath || null }).catch(() => null)
-        await lifecycleCli('mark-applied', binding, [], { sessionId, appliedAtUtc: new Date().toISOString() }).catch(() => null)
+        await lifecycleCli('mark-applied', binding, [], { sessionId, appliedAtUtc: new Date().toISOString(), appliedAfterStepId: contextCompaction.maxStepIdOfSession(session) || '' }).catch(() => null)
         log({ event: 'context-compaction-reconciled', sessionId, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId, operationId })
         return { reconciled: true, operationId }
       }
@@ -2068,7 +2068,7 @@ function apply(ctx) {
       })
       if (!transitionedApplied) return { blocked: true, reason: 'applied-transition-failed' }
       await lifecycleCli('write-telemetry', binding, [], { sessionId, checkpointPath: snapshot.lifecycle.checkpointPath || null })
-      await lifecycleCli('mark-applied', binding, [], { sessionId, appliedAtUtc })
+      await lifecycleCli('mark-applied', binding, [], { sessionId, appliedAtUtc, appliedAfterStepId: contextCompaction.maxStepIdOfSession(session) || '' })
       // F1: no Nexus runtime refresh here. The retained DSH-owned snapshot
       // survives the segmented replace and the loop commits exactly one
       // CURRENT candidate per its own supersession semantics.
@@ -2760,14 +2760,24 @@ function apply(ctx) {
     })
     if (!snapshot || snapshot.state !== 'applied') return null
     if (!snapshot.lifecycle || snapshot.lifecycle.taskInstanceId !== binding.taskInstanceId) return null
-    const recorded = await invokePowerShell('ContextLifecycleCli.ps1', ['-Action', 'record-post-compaction-usage', '-TaskId', binding.taskId], {
-      payload: {
-        workspace: binding.workspace,
-        taskInstanceId: binding.taskInstanceId || undefined,
-        postCompactionEffectiveInputTokens: candidate.effectiveInputTokens,
-        sessionId: session && session.id ? String(session.id) : '',
-      },
-    })
+    // F7 correlation: a delayed pre-apply candidate delivered after apply
+    // is NOT event-time AFTER. The lifecycle gate throws for those; only a
+    // genuinely correlated observation advances the per-generation marker.
+    let recorded = null
+    try {
+      recorded = await invokePowerShell('ContextLifecycleCli.ps1', ['-Action', 'record-post-compaction-usage', '-TaskId', binding.taskId], {
+        payload: {
+          workspace: binding.workspace,
+          taskInstanceId: binding.taskInstanceId || undefined,
+          postCompactionEffectiveInputTokens: candidate.effectiveInputTokens,
+          sessionId: session && session.id ? String(session.id) : '',
+          stepId: candidate.stepId || '',
+        },
+      })
+    } catch (error) {
+      log({ event: 'context-post-compaction-not-correlated', sessionId: session && session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId, reason: String(error && error.message ? error.message : error) })
+      return null
+    }
     postCompactionRecordedGenerations.add(generationKey)
     log({ event: 'context-post-compaction-recorded', sessionId: session && session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId, postCompactionEffectiveInputTokens: candidate.effectiveInputTokens })
     return recorded
