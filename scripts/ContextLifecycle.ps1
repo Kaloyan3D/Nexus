@@ -20,6 +20,12 @@ $AihContextCompactionThresholdTokens = 120000
 
 # Checkpoint schema version (persisted in every checkpoint plus state record).
 $AihContextCheckpointSchemaVersion = 1
+# F10: ONE authoritative checkpoint resource contract shared by builder AND
+# reader (never separate magic numbers that can drift). Bytes are UTF-8
+# serialized JSON bytes (no BOM, no trailing newline -- exactly what
+# Write-AihAtomicJson persists), so raw file bytes and payload bytes agree.
+$AihContextCheckpointMaxBytes = 65536
+$AihContextCheckpointMaxChangedFiles = 200
 
 # Frozen compaction-operation schema version. Bumped independently of the
 # checkpoint content version so old checkpoint-ready states without a frozen
@@ -376,7 +382,7 @@ function Get-AihContextGitFacts {
             elseif (($staged -eq 'R') -or ($unstaged -eq 'R')) { $state = 'renamed' }
             elseif ($unstaged -eq '?') { $state = 'untracked' }
             $entries += [ordered]@{ path = $pathPart; status = $state; staged = ($staged -ne ' ' -and $staged -ne '?' -and $staged -ne '!'); unstaged = ($unstaged -ne ' ') }
-            if (@($entries).Count -ge 200) { break }
+            if (@($entries).Count -ge $AihContextCheckpointMaxChangedFiles) { break }
         }
         $facts.changedFiles = @($entries)
         $facts.worktreeClean = (@($entries).Count -eq 0)
@@ -574,7 +580,7 @@ function New-AihContextCheckpoint {
     }
     $json = ConvertTo-Json -InputObject (ConvertTo-AihJsonSafe $checkpoint) -Depth 20
     $bytes = [Text.Encoding]::UTF8.GetByteCount($json)
-    if ($bytes -gt 65536) { throw "Checkpoint refused: serialized size $bytes exceeds the 64KiB V1 bound. (KEEP: checkpoint must stay compact.)" }
+    if ($bytes -gt $AihContextCheckpointMaxBytes) { throw "Checkpoint refused: serialized size $bytes exceeds the 64KiB V1 bound. (KEEP: checkpoint must stay compact.)" }
     Write-AihAtomicJson $paths.Checkpoint $checkpoint
     $actual = Get-Content -Raw -Encoding UTF8 -LiteralPath $paths.Checkpoint | ConvertFrom-Json
     if (($null -eq $actual) -or ([string]$actual.taskInstanceId -ne [string]$task.taskInstanceId) -or ([int]$actual.schemaVersion -ne [int]$AihContextCheckpointSchemaVersion)) {
@@ -586,7 +592,26 @@ function Read-AihContextCheckpoint {
     param([Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$TaskId, [string]$ExpectedTaskInstanceId = '')
     $paths = Get-AihContextLifecyclePaths -Workspace $Workspace -TaskId $TaskId
     if (-not (Test-Path -LiteralPath $paths.Checkpoint)) { return $null }
-    try { $checkpoint = Get-Content -Raw -Encoding UTF8 -LiteralPath $paths.Checkpoint | ConvertFrom-Json }
+    # F10: fail closed on checkpoints the builder would refuse to create.
+    # Cheap stat pre-check first (early refusal, no trust), then the
+    # authoritative decision on the ACTUAL loaded bytes (TOCTOU-safe: the
+    # stat value is never the acceptance criterion). No truncation, repair,
+    # or rewrite of the persisted artifact -- reject and KEEP/BLOCK.
+    try {
+        $statBytes = (Get-Item -LiteralPath $paths.Checkpoint -ErrorAction Stop).Length
+        if ([long]$statBytes -gt [long]$AihContextCheckpointMaxBytes) {
+            throw ("Checkpoint blocked: context-checkpoint.json is " + [string]$statBytes + " bytes, exceeding the " + [string]$AihContextCheckpointMaxBytes + "-byte V1 bound (checkpoint-too-large). (KEEP: old context retained.)")
+        }
+    } catch {
+        if ([string]$_.Exception.Message -like '*checkpoint-too-large*') { throw }
+    }
+    try { $rawText = Get-Content -Raw -Encoding UTF8 -LiteralPath $paths.Checkpoint }
+    catch { throw "Checkpoint blocked: context-checkpoint.json is unreadable. (KEEP: old context retained.)" }
+    $loadedBytes = [Text.Encoding]::UTF8.GetByteCount([string]$rawText)
+    if ($loadedBytes -gt $AihContextCheckpointMaxBytes) {
+        throw ("Checkpoint blocked: context-checkpoint.json is " + [string]$loadedBytes + " bytes, exceeding the " + [string]$AihContextCheckpointMaxBytes + "-byte V1 bound (checkpoint-too-large). (KEEP: old context retained.)")
+    }
+    try { $checkpoint = [string]$rawText | ConvertFrom-Json }
     catch { throw "Checkpoint blocked: context-checkpoint.json is malformed. (KEEP: old context retained.)" }
     if (($null -eq $checkpoint) -or ($null -eq $checkpoint.PSObject.Properties['schemaVersion']) -or ($null -eq $checkpoint.PSObject.Properties['taskId']) -or ($null -eq $checkpoint.PSObject.Properties['taskInstanceId'])) {
         throw 'Checkpoint blocked: required identity fields are missing. (KEEP: old context retained.)'
@@ -599,6 +624,19 @@ function Read-AihContextCheckpoint {
     }
     if ((-not [string]::IsNullOrWhiteSpace($ExpectedTaskInstanceId)) -and ([string]$checkpoint.taskInstanceId -ne $ExpectedTaskInstanceId)) {
         throw 'Checkpoint blocked: taskInstanceId mismatch. (KEEP: old context retained.)'
+    }
+    $changedFilesNode = $null
+    if (($null -ne $checkpoint.PSObject.Properties['repositoryState']) -and ($null -ne $checkpoint.repositoryState) -and ($null -ne $checkpoint.repositoryState.PSObject.Properties['changedFiles'])) {
+        $changedFilesNode = $checkpoint.repositoryState.changedFiles
+    }
+    if ($null -ne $changedFilesNode) {
+        if ($changedFilesNode -isnot [System.Collections.IEnumerable] -or ($changedFilesNode -is [string])) {
+            throw 'Checkpoint blocked: repositoryState.changedFiles is not an array. (KEEP: old context retained.)'
+        }
+        $changedCount = @($changedFilesNode).Count
+        if ($changedCount -gt $AihContextCheckpointMaxChangedFiles) {
+            throw ('Checkpoint blocked: repositoryState.changedFiles holds ' + [string]$changedCount + ' entries, exceeding the ' + [string]$AihContextCheckpointMaxChangedFiles + '-entry V1 bound (too-many-changed-files). (KEEP: old context retained.)')
+        }
     }
     return $checkpoint
 }
