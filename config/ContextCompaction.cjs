@@ -386,6 +386,38 @@ function lastTextOfRole(session, role, maxChars) {
   return '';
 }
 
+// F7 event-time apply boundary: the maximum turn:step the authoritative
+// live session has PRODUCED at apply, independent of whether usage
+// accounting has finished persisting it. Pressure lastStepId alone is NOT
+// sufficient (a produced-but-unpersisted pre-apply event would slip past).
+// Pure, engine-neutral, no I/O. Returns '' when no parseable order exists.
+function compareStepId(a, b) {
+  const pa = String(a || '').split(':');
+  const pb = String(b || '').split(':');
+  if (pa.length !== 2 || pb.length !== 2) return null;
+  const at = Number(pa[0]); const as = Number(pa[1]);
+  const bt = Number(pb[0]); const bs = Number(pb[1]);
+  if (!Number.isInteger(at) || !Number.isInteger(as) || !Number.isInteger(bt) || !Number.isInteger(bs)) return null;
+  if (at !== bt) return at > bt ? 1 : -1;
+  if (as !== bs) return as > bs ? 1 : -1;
+  return 0;
+}
+function maxStepIdOfSession(session) {
+  if (!session || !Array.isArray(session.events)) return '';
+  let best = '';
+  for (const event of session.events) {
+    if (!event || !event.data) continue;
+    const turn = event.data.turn;
+    const step = event.data.step;
+    if (turn === undefined || turn === null || step === undefined || step === null) continue;
+    if (String(turn).trim() === '' || String(step).trim() === '') continue;
+    const id = String(turn) + ':' + String(step);
+    if (best === '') { best = id; continue; }
+    const cmp = compareStepId(id, best);
+    if (cmp !== null && cmp > 0) best = id;
+  }
+  return best;
+}
 module.exports = {
   OPERATION_ID_DOMAIN,
   deriveCanonicalOperationId,
@@ -404,5 +436,5 @@ module.exports = {
   surfaceNodesOf,
   balancedRetainCut,
   checkpointProvenanceValid,
-  lastTextOfRole,
+  lastTextOfRole, compareStepId, maxStepIdOfSession,
 };

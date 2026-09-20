@@ -35,6 +35,7 @@ param(
     [string]$CheckoutId = $null,
     [string]$OperationLockId = $null,
     [string]$LockOwnerId = $null,
+    [string]$AppliedAfterStepId = '',
     [int]$LockTimeoutMs = 15000,
     [int]$LockLeaseSeconds = 60,
     [object[]]$Segments = @(),
@@ -83,7 +84,7 @@ if ($PayloadFile) {
         $key = $name.ToLowerInvariant()
         if ($__aihPayloadMap.ContainsKey($key)) { Set-Variable -Name $name -Value ([int]$__aihPayloadMap[$key]) }
     }
-    foreach ($name in @('RepositoryId','CheckoutId','OperationLockId','LockOwnerId')) {
+    foreach ($name in @('RepositoryId','CheckoutId','OperationLockId','LockOwnerId','AppliedAfterStepId')) {
         $key = $name.ToLowerInvariant()
         if ($__aihPayloadMap.ContainsKey($key)) { Set-Variable -Name $name -Value ([string]$__aihPayloadMap[$key]) }
     }
@@ -136,13 +137,13 @@ $__aihLifecycleResult = $(switch ($Action) {
         $eligibility = Test-AihContextCompactionEligibility -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -SessionId $SessionId -ThresholdOverride $ThresholdOverride
         Write-AihContextCompactionTelemetry -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -Eligibility $eligibility -SessionId $SessionId -CheckpointPath $CheckpointPath -CheckpointSizeBytes $CheckpointSizeBytes -CheckpointApplied $CheckpointApplied -AppliedAtUtc $AppliedAtUtc -BlockedReason $BlockedReason
     }
-    'mark-applied' { Set-AihContextCompactionApplied -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -AppliedAtUtc $AppliedAtUtc -SessionId $SessionId }
+    'mark-applied' { Set-AihContextCompactionApplied -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -AppliedAtUtc $AppliedAtUtc -SessionId $SessionId -AppliedAfterStepId $AppliedAfterStepId }
     'freeze-operation' { New-AihContextCompactionOperation -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -SessionId $SessionId -ReplacementStart $ReplacementStart -ReplacementEnd $ReplacementEnd -SourceEventSeqs $SourceEventSeqs -CheckpointPath $CheckpointPath -Segments $Segments -CompletionBoundarySeq $CompletionBoundarySeq -RepositoryId $RepositoryId -CheckoutId $CheckoutId }
     'read-operation' { Read-AihContextCompactionOperation -Workspace $Workspace -TaskId $TaskId }
     'reconcile' { Test-AihContextOperationReconcile -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -LiveSurfaceSeqs $LiveSurfaceSeqs -LandedReplacementSeq $LandedReplacementSeq -SessionId $SessionId -DurablyVerified $DurablyVerified }
     'acquire-apply-lock' { Invoke-AihCompactionApplyLockAcquire -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -SessionId $SessionId -OperationId $OperationLockId -LeaseSeconds $LockLeaseSeconds }
     'renew-apply-lock' { Invoke-AihCompactionApplyLockRenew -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -SessionId $SessionId -OperationId $OperationLockId -OwnerId $LockOwnerId -LeaseSeconds $LockLeaseSeconds }
     'release-apply-lock' { Invoke-AihCompactionApplyLockRelease -Workspace $Workspace -TaskId $TaskId -OwnerId $LockOwnerId }
-    'record-post-compaction-usage' { Add-AihContextPostCompactionUsage -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -PostCompactionEffectiveInputTokens $PostCompactionEffectiveInputTokens -SessionId $SessionId }
+    'record-post-compaction-usage' { Add-AihContextPostCompactionUsage -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -PostCompactionEffectiveInputTokens $PostCompactionEffectiveInputTokens -SessionId $SessionId -PostCompactionStepId $StepId }
 })
 if ($null -ne $__aihLifecycleResult) { ConvertTo-Json -InputObject (ConvertTo-AihJsonSafe $__aihLifecycleResult) -Depth 20 }

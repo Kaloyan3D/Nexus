@@ -1076,6 +1076,21 @@ function Get-AihContextLifecycleSnapshot {
         state = $stateName; lifecycle = $state; pressure = $pressure
     }
 }
+function ConvertTo-AihCanonicalUtcIso {
+    # F7: canonical ISO 8601 UTC timestamp contract. Parses any reasonable
+    # incoming representation (ISO with offset, round-trip 'o', or legacy
+    # locale text), normalizes to UTC, and serializes explicitly with the
+    # round-trip format. Never relies on implicit DateTime->string
+    # conversion, never emits locale-dependent forms like MM/DD/YYYY.
+    param([Parameter(Mandatory = $true)][string]$Value)
+    $parsed = [DateTime]::MinValue
+    $styles = [Globalization.DateTimeStyles]::RoundtripKind
+    if (-not [DateTime]::TryParse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$parsed)) {
+        if (-not [DateTime]::TryParse([string]$Value, [ref]$parsed)) { throw "Timestamp refused: cannot parse '$Value' as a date/time. (KEEP.)" }
+    }
+    if ($parsed.Kind -eq [DateTimeKind]::Unspecified) { $parsed = [DateTime]::SpecifyKind($parsed, [DateTimeKind]::Utc) }
+    return ($parsed.ToUniversalTime().ToString('o'))
+}
 function Write-AihContextCompactionTelemetry {
     param(
         [Parameter(Mandatory = $true)][string]$Workspace,
@@ -1092,6 +1107,34 @@ function Write-AihContextCompactionTelemetry {
     $task = Get-AihTask -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId
     $layout = Get-AihLedgerLayout $Workspace
     $run = Join-Path $layout.Runs $TaskId
+    $telemetryPath = Join-Path $run 'context-compaction-telemetry.json'
+    # F7 ownership model: completion establishes the immutable BEFORE baseline
+    # plus checkpoint metadata; apply/audit transitions MERGE (never
+    # reconstruct from current pressure). Read the existing same-generation
+    # document first; completion-owned fields are preserved once present.
+    $existing = $null
+    if (Test-Path -LiteralPath $telemetryPath) {
+        try { $existing = Get-Content -Raw -Encoding UTF8 -LiteralPath $telemetryPath | ConvertFrom-Json }
+        catch { throw 'Telemetry refused: context-compaction-telemetry.json is malformed. (KEEP: history never regenerated from current pressure.)' }
+    }
+    if (($null -ne $existing) -and ([string]$existing.taskInstanceId -ne [string]$task.taskInstanceId)) {
+        throw 'Telemetry refused: existing telemetry belongs to another generation. (KEEP.)'
+    }
+    $hasBaseline = (($null -ne $existing) -and ($null -ne $existing.PSObject.Properties['latestEffectiveInputTokens']))
+    if ($hasBaseline) {
+        # Merge: preserve completion baseline + checkpoint metadata; update
+        # only transition-owned fields.
+        $existing.sessionId = [string]$SessionId
+        if (-not [string]::IsNullOrWhiteSpace($BlockedReason)) { $existing.blockedReason = [string]$BlockedReason }
+        if ($null -ne $CheckpointPath) { $existing.checkpointPath = [string]$CheckpointPath }
+        if ($null -ne $CheckpointSizeBytes) { $existing.checkpointSizeBytes = [int]$CheckpointSizeBytes }
+        if ([bool]$CheckpointApplied) {
+            $existing.checkpointApplied = $true
+            if (-not [string]::IsNullOrWhiteSpace($AppliedAtUtc)) { $existing.appliedAtUtc = (ConvertTo-AihCanonicalUtcIso -Value ([string]$AppliedAtUtc)) }
+        }
+        Write-AihAtomicJson $telemetryPath $existing
+        return [pscustomobject]$existing
+    }
     $record = [ordered]@{
         schemaVersion = 1; taskId = $TaskId; taskInstanceId = [string]$task.taskInstanceId
         sessionId = [string]$SessionId
@@ -1108,10 +1151,10 @@ function Write-AihContextCompactionTelemetry {
         checkpointPath = $(if ($null -ne $CheckpointPath) { [string]$CheckpointPath } else { $null })
         checkpointSizeBytes = $CheckpointSizeBytes
         checkpointApplied = [bool]$CheckpointApplied
-        appliedAtUtc = $AppliedAtUtc; blockedReason = $BlockedReason
+        appliedAtUtc = $(if (-not [string]::IsNullOrWhiteSpace($AppliedAtUtc)) { ConvertTo-AihCanonicalUtcIso -Value ([string]$AppliedAtUtc) } else { $AppliedAtUtc }); blockedReason = $BlockedReason
         recordedAtUtc = [DateTime]::UtcNow.ToString('o')
     }
-    Write-AihAtomicJson (Join-Path $run 'context-compaction-telemetry.json') $record
+    Write-AihAtomicJson $telemetryPath $record
     return [pscustomobject]$record
 }
 
@@ -1121,7 +1164,8 @@ function Set-AihContextCompactionApplied {
         [Parameter(Mandatory = $true)][string]$TaskId,
         [Parameter(Mandatory = $true)][string]$TaskInstanceId,
         [Parameter(Mandatory = $true)][string]$AppliedAtUtc,
-        [string]$SessionId = ''
+        [string]$SessionId = '',
+        [string]$AppliedAfterStepId = ''
     )
     $task = Get-AihTask -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId
     $lifecycle = Read-AihContextLifecycleState -Workspace $Workspace -TaskId $TaskId
@@ -1136,8 +1180,33 @@ function Set-AihContextCompactionApplied {
     if ([string]$telemetry.taskInstanceId -ne [string]$task.taskInstanceId) { throw 'Mark-applied refused: generation mismatch. (KEEP.)' }
     if ([bool]$telemetry.checkpointApplied) { return [pscustomobject]$telemetry }
     $telemetry.checkpointApplied = $true
-    $telemetry.appliedAtUtc = [string]$AppliedAtUtc
+    $telemetry.appliedAtUtc = (ConvertTo-AihCanonicalUtcIso -Value ([string]$AppliedAtUtc))
     $telemetry | Add-Member -NotePropertyName 'appliedSessionId' -NotePropertyValue ([string]$SessionId) -Force
+    # F7 event-time boundary: the authoritative LIVE session max StepId
+    # at apply (supplied by the controller, which holds the session),
+    # maxed defensively with pressure lastStepId. Pressure alone is NOT
+    # sufficient: a produced-but-unpersisted pre-apply event would slip
+    # past. A post-apply candidate is AFTER only if strictly greater in
+    # the SAME session. Persisted once; retry never advances it.
+    $boundary = $null
+    $liveMax = [string]$AppliedAfterStepId
+    try {
+        $pressureAtApply = Read-AihContextPressure -Workspace $Workspace -TaskId $TaskId
+        if (($null -ne $pressureAtApply) -and ([string]$pressureAtApply.taskInstanceId -eq [string]$task.taskInstanceId) -and ($null -ne $pressureAtApply.PSObject.Properties['lastStepId'])) {
+            $pressureMax = [string]$pressureAtApply.lastStepId
+            if ([string]::IsNullOrWhiteSpace($liveMax)) { $boundary = $pressureMax }
+            elseif ([string]::IsNullOrWhiteSpace($pressureMax)) { $boundary = $liveMax }
+            else {
+                $cmpMax = Compare-AihContextStepOrder -A $liveMax -B $pressureMax
+                if ($null -eq $cmpMax) { $boundary = $liveMax }
+                elseif ($cmpMax -ge 0) { $boundary = $liveMax }
+                else { $boundary = $pressureMax }
+            }
+        } else { $boundary = $liveMax }
+    } catch { if ([string]::IsNullOrWhiteSpace($boundary)) { $boundary = $liveMax } }
+    if (-not [string]::IsNullOrWhiteSpace($boundary)) {
+        $telemetry | Add-Member -NotePropertyName 'appliedAfterStepId' -NotePropertyValue ([string]$boundary) -Force
+    }
     Write-AihAtomicJson $telemetryPath $telemetry
     return [pscustomobject]$telemetry
 }
@@ -1148,7 +1217,8 @@ function Add-AihContextPostCompactionUsage {
         [Parameter(Mandatory = $true)][string]$TaskId,
         [Parameter(Mandatory = $true)][string]$TaskInstanceId,
         [Parameter(Mandatory = $true)][int]$PostCompactionEffectiveInputTokens,
-        [string]$SessionId = ''
+        [string]$SessionId = '',
+        [string]$PostCompactionStepId = ''
     )
     $task = Get-AihTask -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId
     $layout = Get-AihLedgerLayout $Workspace
@@ -1159,11 +1229,39 @@ function Add-AihContextPostCompactionUsage {
     if ([string]$telemetry.taskInstanceId -ne [string]$task.taskInstanceId) { throw 'Post-compaction telemetry refused: generation mismatch. (KEEP.)' }
     if (-not [bool]$telemetry.checkpointApplied) { throw 'Post-compaction telemetry refused: checkpoint was not applied. (KEEP.)' }
     if ($null -ne $telemetry.PSObject.Properties['postCompactionEffectiveInputTokens']) { return [pscustomobject]$telemetry }
+    # F7 correlation gate: processing-time state (snapshot==applied) is NOT
+    # event-time proof. A delayed pre-apply event delivered after apply must
+    # never become AFTER. Require: same session as the apply session AND a
+    # strictly greater StepId than the persisted apply boundary. Step-less
+    # or cross-session candidates fail closed (no safe ordering exists).
+    # No wall-clock, no PID/mtime/lock-order inference.
+    $appliedSession = $null
+    if ($null -ne $telemetry.PSObject.Properties['appliedSessionId']) { $appliedSession = [string]$telemetry.appliedSessionId }
+    $appliedBoundary = $null
+    if ($null -ne $telemetry.PSObject.Properties['appliedAfterStepId']) { $appliedBoundary = [string]$telemetry.appliedAfterStepId }
+    if ([string]::IsNullOrWhiteSpace($PostCompactionStepId) -or [string]::IsNullOrWhiteSpace($appliedBoundary)) {
+        throw 'Post-compaction telemetry refused: no provable event-time order (step-less observation). (KEEP: AFTER stays unavailable, never fabricated.)'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($appliedSession) -and ([string]$SessionId -ne $appliedSession)) {
+        throw 'Post-compaction telemetry refused: observation session differs from the apply session (no safe cross-session StepId order). (KEEP.)'
+    }
+    $orderCmp = Compare-AihContextStepOrder -A ([string]$PostCompactionStepId) -B $appliedBoundary
+    if (($null -eq $orderCmp) -or ($orderCmp -le 0)) {
+        throw 'Post-compaction telemetry refused: candidate is not provably AFTER the apply boundary. (KEEP: delayed pre-apply event ignored.)'
+    }
+    # F7: reduction is completion-baseline minus the CORRELATED post-apply
+    # root observation (never current-pressure-derived, never a projection
+    # byte estimate). The baseline is the preserved completion latest; the
+    # after-value arrives only with a real correlated observation carrying
+    # the F6 StepId identity. No observation => fields stay absent.
     $pre = [int]$telemetry.latestEffectiveInputTokens
     $reduction = $pre - [int]$PostCompactionEffectiveInputTokens
     $telemetry | Add-Member -NotePropertyName 'postCompactionEffectiveInputTokens' -NotePropertyValue ([int]$PostCompactionEffectiveInputTokens) -Force
     $telemetry | Add-Member -NotePropertyName 'firstCallTokenReduction' -NotePropertyValue ([int]$reduction) -Force
     $telemetry | Add-Member -NotePropertyName 'postCompactionSessionId' -NotePropertyValue ([string]$SessionId) -Force
+    if (-not [string]::IsNullOrWhiteSpace($PostCompactionStepId)) {
+        $telemetry | Add-Member -NotePropertyName 'postCompactionStepId' -NotePropertyValue ([string]$PostCompactionStepId) -Force
+    }
     $telemetry | Add-Member -NotePropertyName 'postCompactionRecordedAtUtc' -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
     Write-AihAtomicJson $telemetryPath $telemetry
     return [pscustomobject]$telemetry
