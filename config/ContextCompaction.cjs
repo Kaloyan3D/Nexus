@@ -140,7 +140,11 @@ function balancedRetainCut(session, options) {
     const event = eventBySeq(session, nodes[index]);
     if (!event) return null;
     tailChars += textLengthOfSurfaceEvent(event);
-    if (tailChars > maxTailChars && tailStart !== -1) break;
+    // F9: hard whole-node continuity bound. NO first-node exception: if the
+    // mandatory newest node (or any required balanced group) exceeds
+    // maxTailChars, there is no safe bounded cut -- tailStart stays -1 and
+    // the caller KEEPs. Never truncate/split protocol structures to fit.
+    if (tailChars > maxTailChars) break;
     // An unbalanced cut cannot START the retained tail (it would orphan a
     // tool call inside the shadowed span). With no candidate yet, keep
     // scanning backward for an earlier balanced cut instead of giving up:
