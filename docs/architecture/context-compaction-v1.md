@@ -1,0 +1,279 @@
+# Context Compaction V1 - Controller-Owned Checkpointing plus Threshold-Gated Reset
+
+## 1. Problem
+
+Real Nexus/Muse engineering sessions accumulate hundreds of thousands of
+effective input tokens. The old transcript, tool results, intermediate
+exploration, and repeated repository reads are re-processed on every later
+root model call even after the logical task that produced them is complete.
+V1 stops carrying the full raw execution transcript forever: after a
+sufficiently large task is authoritatively COMPLETE, Nexus preserves durable
+controller state, a compact structured checkpoint, and a small continuity
+tail, while dropping the old raw execution history from MODEL-FACING context.
+The user-visible transcript stays intact (append-only log; see section 7).
+
+This is NOT a memory system, NOT semantic classification, NOT summarization
+(no LLM call exists anywhere in V1), and NOT permission to delete history.
+
+## 2. Ownership (one authority per decision)
+
+- Task lifecycle: TaskController.ps1 ONLY. ContextCompaction never mutates
+  task status and never overrides routing.
+- Completion signal: Test-AihTaskCompletion (deterministic controller gate:
+  evidence.json plus acceptance criteria plus verification PASS plus review
+  disposition plus requirements plus visual gates). The bridge reads it in
+  runCompletionTail; nothing else may declare COMPLETE.
+- Context-lifecycle decisions: scripts/ContextLifecycle.ps1 (threshold,
+  pressure, checkpoint, state machine, telemetry) surfaced through
+  scripts/ContextLifecycleCli.ps1. The bridge (config/AihController.cjs)
+  only orchestrates CLI calls plus one session append.
+- Root pressure signal: DSH assistant/chunk usage events
+  (engineeringUsageOfEvent): effectiveInputTokens =
+  uncachedInputTokens + cacheReadTokens. Filtered by
+  config/ContextCompaction.cjs rootUsageCandidateOf.
+- Routing/model selection: unchanged (Routing.ps1 plus isolation layers).
+  The checkpoint carries a routingProvenance disclaimer and no target.
+- Muse reasoning: untouched (no governor changes).
+
+## 3. Authoritative completion source
+
+A task is eligible ONLY after Test-AihTaskCompletion returns complete for
+that exact taskInstanceId (taskId alone is insufficient; a restored workspace
+may re-allocate a display id). Active, ready, failed, verifying, or
+review-gated tasks evaluate to keep. Unprovable completion keeps old context.
+
+## 4. Authoritative usage source
+
+Per root engineering call: effectiveInputTokens = uncachedInputTokens +
+cacheReadTokens from the DSH usage chunk. Tracked per task generation in
+.ai-harness/runs/<TASK>/context-pressure.json: latest and peak effective
+input, cumulative uncached/cache-read/output, rootModelCallCount, split by
+engine (muse/dual) and role (muse_main/engineer_normal/engineer_deep).
+Step-id replay is idempotent. Reviewer (rejected at the recorder boundary),
+visual-review (no recorder role), worker/subagent (unbound sessions plus
+isWorkerSession filter), and ambiguous usage never enter the metric. No cost
+is inferred. The LATEST context-bearing root call is the primary pressure
+signal: it represents what the next call would re-process without compaction.
+
+## 5. Threshold
+
+One authority: $AihContextCompactionThresholdTokens = 120000 in
+scripts/ContextLifecycle.ps1 (Get-AihContextLifecycleThreshold; invalid
+configuration throws). A controller-complete task MAY become eligible when
+latest root effective input >= 120000. No magic numbers elsewhere.
+
+## 6. State machine
+
+inactive -> eligible -> checkpoint-ready -> applied, plus blocked.
+Transitions are explicit, persisted in context-lifecycle.json, and idempotent
+(repeated eligible/checkpoint-ready/applied return the same state; applied
+never rolls back). checkpoint-ready and applied require a validated
+checkpoint for the same taskInstanceId. Any failure before applied keeps the
+original context; crash/restart is safe (eligible and checkpoint-ready reload
+deterministically).
+
+## 7. Supported model-context seam (exact)
+
+DSH session surface projection (packages dsh-session plus dsh-compaction in
+the pinned host):
+
+- session.append('user/message', message, { surfaceOp: { op: 'replace',
+  start, end }, sourceEventSeqs }) replaces one surface span with a single
+  node. deriveMessages() (the model-facing projection) then renders the
+  checkpoint plus the retained tail; the raw append-only log keeps every
+  event, so replay stays deterministic and the user transcript (rendered from
+  append-origin events) is untouched.
+- Nexus provenance is its own (source kind plugin / aih-controller / form
+  context-checkpoint), NOT the DSH compact-checkpoint marker, so the host
+  compaction invariant and backend lock never interact with controller
+  checkpoints; no compaction/* events are emitted and no history is deleted.
+- The cut is tool-pairing balanced (balancedRetainCut mirrors the DSH
+  boundary rule: no unanswered tool call crosses the cut) and keeps a bounded
+  tail (default 6 nodes / 6000 chars).
+- Applied on the next agent/pre-step after completion, revalidating
+  eligibility plus checkpoint provenance immediately before the append.
+
+## 8. Checkpoint schema (context-checkpoint.json, schemaVersion 1)
+
+Identity: schemaVersion, taskId, taskInstanceId (plus checkpointOf),
+workspace executionRoot, engine, executionClass. Task: redacted description,
+acceptance criteria, authoritative status, created/completed timestamps.
+Execution: attempt count plus timeline, risk, review request, completion
+authority. Repository state: base commit, HEAD, worktree clean flag, changed
+files with staged/unstaged flags (capped at 200, NO diffs). Verification:
+structured outcomes plus acceptance evidence (cross-generation evidence is
+excluded, never merged). Routing provenance: disclaimer only, no target.
+Pressure snapshot. Continuity: bounded final user request plus assistant
+report (historical context, not truth; no tool transcripts, no shell output,
+no reasoning). Hard size bound: 64 KiB serialized, else refused (KEEP).
+
+## 9. Context projection after compaction
+
+Next root request receives: normal system/persona/instructions, authoritative
+controller/task/routing state, the compact checkpoint, the small retained
+tail, the new user request, and normal repository/tool access. It no longer
+receives the shadowed tool outputs, repeated reads, failed hypotheses, and
+shell logs. The repository stays the source of truth for code detail.
+
+## 10. Failure semantics (KEEP everywhere)
+
+Unprovable completion, ambiguous usage, malformed checkpoint, write failure,
+instance mismatch, repository mismatch, missing append seam, unbalanced cut,
+empty surface, crash before apply: all keep the old context and let the
+session continue. No half-compacted state exists (the replace either lands
+atomically in the log or nothing changes). All lifecycle writes are atomic
+(Write-AihAtomicJson).
+
+## 11. Security and privacy
+
+Checkpoints are redacted (ConvertTo-AihContextRedactedText, mirroring the
+controller diagnostic redactor): bearer tokens, sk-/api-key shapes, codex and
+github token shapes, password/secret/authorization assignments, and sensitive
+JSON fields become <redacted>; texts are bounded. Never persisted: env dumps,
+raw provider requests, massive shell output, hidden reasoning.
+
+## 12. Telemetry (context-compaction-telemetry.json)
+
+sessionId, taskId, taskInstanceId, engine, thresholdTokens,
+latest/peakEffectiveInputTokens, cumulative uncached/cache-read/output,
+rootModelCallCount, eligibilityDecision plus reason, checkpoint path/size,
+checkpointApplied, appliedAtUtc, blockedReason. After apply, the first root
+call records postCompactionEffectiveInputTokens and the diagnostic
+firstCallTokenReduction = pre - post (a token-processing comparison, NOT
+monetary savings). Never fabricated when the usage signal is unavailable.
+
+## 13. Non-goals (explicit)
+
+No scope governor, no semantic classifier, no summarization LLM, no
+embeddings/vector stores, no continuation model, no cross-project or
+long-term memory, no dynamic thresholds, no cost estimation, no history
+deletion, no active-task compression, no subagent/reviewer/visual compaction,
+no provider switching, no reasoning changes, no new fallback model, no
+artifact cleanup.
+
+## 14. Known limitations
+
+- One checkpoint generation per task; a session that keeps working after
+  completion accumulates pressure on the completed generation (eligibility
+  was already decided; no re-compaction loop in V1).
+- Post-completion usage on the same binding is recorded but cannot trigger a
+  second compaction (applied never rolls back).
+- Replay without a step id counts twice (bounded, same as the existing
+  engineering usage path); replay with a step id is idempotent.
+- Windows live acceptance is a follow-up gate; deterministic PS tests plus
+  the Linux live projection proof ship in V1.
+
+## 15. Transaction safety repair (F1/F2/F5)
+
+Adversarial audit found three defects in the first V1 slice; this section
+records the repair (same file, no redesign).
+
+- F1 (dynamic runtime policy removed): the loop assembles CURRENT dynamic
+  context BEFORE agent/pre-step and commits it as an owned snapshot node;
+  the old apply replaced the whole live surface including that node, and the
+  already-built request decision never regenerated it. Repair: (a) the freeze
+  EXCLUDES host-owned @deepseek-ai/dsh-system-prompt snapshot nodes from the
+  shadowed range (persisted segments split around them, proven necessary by
+  dsh-session assertProvenance which rejects exclusion from one span);
+  (b) after the replace lands, the bridge re-renders the CURRENT assembly
+  through the real systemPrompt.assemble + render/join pipeline and appends
+  a fresh snapshot when it differs (path B; never synthesized policy text).
+  The FIRST post-compaction request therefore carries checkpoint + tail +
+  current authoritative policy. No policy is copied into the checkpoint.
+- F2 (retry recompute swallows Task B): the old apply recomputed
+  balancedRetainCut from the live surface on every attempt. Repair: the
+  boundary is FROZEN once at completion into context-compaction-operation.json
+  (schemaVersion 1, deterministic operationId per task+instance+session,
+  exact start/end/sourceEventSeqs plus segments, session + workspace
+  provenance). Retry reuses it verbatim (idempotent freeze returns the same
+  record even for wider candidate input); reconcile decides
+  reconcile-applied / retry-same / block and NEVER widens. Legacy
+  checkpoint-ready states without a frozen operation cannot enter apply.
+- F5 (APPLIED before durability): Session.append is in-memory + queue;
+  durability comes from the write-behind drain via ctx.sessions.flush
+  (session/flush), the same barrier the host checkpoint policy and the
+  compaction backend use. Repair: persist frozen op -> append exact segments
+  -> transition awaiting-durability -> await ctx.sessions.flush -> prove the
+  replacement from DURABLE state -> persist APPLIED. Flush failure or a
+  non-participating store leaves awaiting-durability; retry reconciles by
+  operationId, never applies from memory presence.
+- Ordering: the Nexus pre-step listener is prepended (supported cordis
+  { prepend: true }) so compaction runs before the loop consumes its
+  runtime-context projection decision; llm/stream checkpoints the full
+  request prefix before adapter dispatch, so the landed replacement stays
+  durable before the model call even if the process dies mid-apply.
+- Concurrency: duplicate pre-step attempts for one operationId join a narrow
+  in-flight guard (append+flush only); cross-PROCESS safety comes from a
+  lock file scoped to session+operation (atomic create-new, 60s lease,
+  stale takeover, owner-match release) held only across append/flush/verify.
+  A contender KEEPs/BLOCKs and reconciles; abandoned owners recover by
+  lease expiry; timeout never launches a second writer.
+- Current-prompt invariant: frozen seqs are capped by completionBoundarySeq
+  (captured synchronously at COMPLETE, validated at freeze and at apply),
+  so a newer user message survives exactly once even under crash/retry.
+
+## 16. Second repair batch (re-audit of 5c49bdf)
+
+- F1 remainder: the refresh now builds its message with the REAL dsh-llm
+  createUserMessage factory (stable id, like the loop's own projection),
+  so the refreshed snapshot survives fresh-process resume; with prepend
+  ordering the loop sees the fresh snapshot as retained and appends no
+  duplicate -- exactly ONE CURRENT copy reaches the request. DSH authority:
+  the LAST runtime snapshot on the surface wins (supersede framing).
+- F2 remainder: the live-surface re-freeze fallback is DELETED (missing or
+  legacy-ready operation BLOCKs); full provenance (schema, operationId,
+  task, instance, session, workspace, repository/checkout identity,
+  checkpoint, boundary, seq uniqueness/order, segments, completion cap) is
+  validated before ANY mutation; the exact segment plan is persisted and
+  required at apply (no single-span fallback); the completion boundary is
+  captured synchronously at COMPLETE and every frozen seq must satisfy
+  seq <= completionBoundarySeq; reconcile returns structured
+  reconcile-applied / retry-same / await-durability / block (memory-only
+  landing yields await-durability, never applied).
+- F5 remainder: reconcile-to-APPLIED requires durable evidence -- backend
+  raw bytes containing the operationId where the surface exists, else
+  flush-participation plus public-restore validation; flush failure keeps
+  awaiting-durability across retries; partial segments finish only their
+  exact remaining frozen segments (contract A) under the operation lock.
+- State machine: checkpoint-ready + valid op -> apply-pending ->
+  awaiting-durability -> applied; checkpoint-ready without op -> blocked;
+  the blocked sink stays reachable even when the operation file is
+  missing/corrupt (operation is read lazily, only for apply-path targets).
+
+## 17. Final safety-core pass (re-audit of e2e9143)
+
+- F1 final: the Nexus runtime refresh is REMOVED entirely. DSH owns
+  runtime-policy projection; Nexus owns compaction and never appends a
+  runtime snapshot. The frozen plan already excludes DSH-owned snapshot
+  nodes, so the retained snapshot survives; the loop commits exactly one
+  CURRENT candidate (unchanged -> retained only; changed -> OLD superseded
+  + one NEW; next step -> still one). Proven against the actual installed
+  preStep order (assemble -> project -> prepended Nexus handler -> default
+  enter) with a source-pinned projection port plus a drift detector that
+  fails loudly if DSH changes the algorithm.
+- F2 final: operationId is canonical derived identity
+  (nexus/context-compaction-operation/v1 LF taskId LF taskInstanceId LF
+  sessionId, SHA-256, ccop_ prefix; PS authority, JS twin, parity-tested)
+  and is RECOMPUTED on every validation -- a nonempty string never
+  suffices. Closed-world checks add segment overlap/ownership, ordered
+  non-overlapping segments, and per-seq boundary caps. The 18-case
+  production tamper matrix drives the real pre-step per case; partial
+  landing completes only exact missing segments (a partially shadowed
+  segment blocks); completionBoundarySeq is rechecked at apply.
+- F5 final: renewable owner-token lease. The lock file carries schema v2
+  (ownerId, PID, process-start, acquired/renewed/expiry); the holder
+  heartbeats every lease/3 and re-proves ownership before append, around
+  flush, and before finalization; renewal is owner-guarded inside a
+  short-lived cross-process mutex (no check-then-write race); takeover
+  requires expiry plus no defensible liveness (PID+start match fences
+  takeover); unhealthy heartbeat or lost ownership stops the holder before
+  APPLIED. Test leases inject via AIH_COMPACTION_TEST_LEASE_S through the
+  identical production path.
+  illegal transitions return structured blocked results, never silent.
+
+## 16. Future V2 directions (not implemented)
+
+Task-scope classification, semantic continuation detection, adaptive
+thresholds, multi-checkpoint lifecycle, smarter retention. None of this is in
+V1.
+

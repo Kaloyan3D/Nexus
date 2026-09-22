@@ -88,6 +88,7 @@ async function main() {
     ['Muse-ReasoningSignals.cjs', 'Muse-ReasoningSignals.cjs'],
     ['Muse-ReasoningActivity.cjs', 'Muse-ReasoningActivity.cjs'],
     ['AihController.cjs', 'AihController.cjs'],
+    ['ContextCompaction.cjs', 'ContextCompaction.cjs'],
     ['Engineering-Profiles.cjs', 'Engineering-Profiles.cjs'],
   ]
   for (const [runtimeName, sourceName] of managed) {
