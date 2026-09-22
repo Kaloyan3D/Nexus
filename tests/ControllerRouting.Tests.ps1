@@ -19,6 +19,10 @@ function New-InstallFixture([object]$SourceLayout,[string]$Name){
  Copy-Item -LiteralPath $SourceLayout.Config -Destination (Join-Path $root 'config') -Recurse
  New-Item -ItemType Directory -Path (Join-Path $root 'data/routing') -Force|Out-Null
  if(Test-Path -LiteralPath $SourceLayout.Settings){Copy-Item -LiteralPath $SourceLayout.Settings -Destination (Join-Path $root 'data/settings.yaml')}
+ $fixtureSettings=Join-Path $root 'data/settings.yaml'
+ $fixtureSettingsText=if(Test-Path -LiteralPath $fixtureSettings){Get-Content -Raw -LiteralPath $fixtureSettings}else{''}
+ if($fixtureSettingsText -match '(?m)^engineering-profile:'){$fixtureSettingsText=[regex]::Replace($fixtureSettingsText,'(?m)^engineering-profile:.*$','engineering-profile: deepseek-codex')}else{$fixtureSettingsText="engineering-profile: deepseek-codex`r`n"+$fixtureSettingsText}
+ Set-Content -LiteralPath $fixtureSettings -Value $fixtureSettingsText -Encoding UTF8
  return $root
 }
 # TASK-0007: a policy clone with the LEGACY hard budgets re-enabled, used to
@@ -307,4 +311,19 @@ try{
  Assert-Aih ($legacyDecision.executionClass -eq 'solver') 'legacy codex_solve force-class normalizes to solver'
 }finally{if(Test-Path $legacyRoot){Remove-Item -LiteralPath $legacyRoot -Recurse -Force}}
 
+# Phase M2.1 (TASK-0037): engine-scope enforcement in the REAL dual resolver.
+# Resolve-AihModelTarget is the production Dual routing path (StepRouting,
+# Review, VisualReview): a Muse-scoped registry entry must never resolve
+# through it, while every pre-M2 entry without agentEngines stays eligible.
+$m2ScopeRegistry=[pscustomobject]@{schemaVersion=1;models=@(
+    [pscustomobject]@{id='legacy-dual';displayName='Legacy';vendor='Z.ai';enabled=$true;supportsTools=$true;supportsReasoning=$true;supportedReasoningLevels=@('high');providers=[pscustomobject]@{default='zai-direct'}},
+    [pscustomobject]@{id='muse-scoped';displayName='Muse';vendor='Meta';enabled=$true;supportsTools=$true;supportsReasoning=$true;supportedReasoningLevels=@('xhigh');providers=[pscustomobject]@{default='meta-model-api'};agentEngines=@('muse')}
+)}
+$m2ScopeProfile=[pscustomobject]@{Id='scope-fixture';DisplayName='Scope Fixture';Config=[pscustomobject]@{roles=[pscustomobject]@{primaryEngineer=[pscustomobject]@{model='legacy-dual';reasoning='high'}}}}
+$legacyTarget=Resolve-AihModelTarget $m2ScopeRegistry $m2ScopeProfile 'primaryEngineer'
+Assert-Aih ($null-ne$legacyTarget-and$legacyTarget.Provider -eq 'zai-direct') 'M2.1: an unscoped pre-M2 entry resolves through the real Dual resolver unchanged'
+$museBoundProfile=[pscustomobject]@{Id='scope-fixture';DisplayName='Scope Fixture';Config=[pscustomobject]@{roles=[pscustomobject]@{primaryEngineer=[pscustomobject]@{model='muse-scoped';reasoning='xhigh'}}}}
+$museThrew=$false
+try{Resolve-AihModelTarget $m2ScopeRegistry $museBoundProfile 'primaryEngineer'|Out-Null}catch{$museThrew=$true}
+Assert-Aih $museThrew 'M2.1: a Muse-scoped entry can never resolve through the real Dual resolver (fails closed)'
 Write-Host "RESULT: $passed deterministic controller-routing assertions passed."

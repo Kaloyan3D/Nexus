@@ -1045,6 +1045,49 @@ function RoomFiles({ detail }) {
 	});
 }
 
+/**
+* Phase M1.1: ONE authoritative user-facing catalog rule, shared by the
+* dropdown, the initial profile choice, entry lookup, and readiness.
+*
+* CASE A — legacy host: the state has NO `nexusProfiles` property at all.
+*          The Nexus Profile contract is absent, so the legacy Dual-only
+*          `profiles` list stays the user-facing catalog.
+* CASE B — current host: the property EXISTS. An empty array is the host
+*          explicitly reporting an unavailable/invalid Nexus catalog —
+*          it is authoritative and must NEVER fall back to `profiles`
+*          (fail closed; the editor shows configuration unavailable).
+*/
+function hasNexusCatalogContract(state) {
+	return !!state && typeof state === "object" && Object.prototype.hasOwnProperty.call(state, "nexusProfiles");
+}
+
+function userFacingProfiles(state) {
+	if (!state || typeof state !== "object") return [];
+	if (hasNexusCatalogContract(state)) {
+		return Array.isArray(state.nexusProfiles) ? state.nexusProfiles : [];
+	}
+	return Array.isArray(state.profiles) ? state.profiles : [];
+}
+
+/** CASE B fail-closed signal: the Nexus contract exists but the catalog is empty. */
+function isCatalogUnavailable(state) {
+	return hasNexusCatalogContract(state) && userFacingProfiles(state).length === 0;
+}
+
+/**
+* Initial profile choice for the editor form: the preferred profile when
+* the authoritative user-facing catalog knows it, otherwise the FIRST
+* catalog entry. With the Nexus contract present this is the Nexus catalog
+* — never the legacy Dual list; legacy hosts keep the old behavior.
+*/
+function initialProfileChoice(state) {
+	const catalog = userFacingProfiles(state);
+	if (!Array.isArray(catalog) || catalog.length === 0) return null;
+	const preferred = state && state.preferredProfile && state.preferredProfile.id ? String(state.preferredProfile.id) : null;
+	const preferredKnown = catalog.some((p) => p && String(p.id) === preferred);
+	return preferredKnown ? preferred : String(catalog[0].id);
+}
+
 const ENGINEERING_ROLES = ["primaryEngineer", "deepEngineer", "reviewer", "solver", "fallback"];
 const ENGINEERING_ROLE_LABELS = {
 	primaryEngineer: "Primary Engineer",
@@ -1063,7 +1106,29 @@ const ENGINEERING_ROLE_LABELS = {
 * so the two surfaces always agree. No model compatibility logic lives here:
 * roleRequirements/roleModels arrive resolved from the controller.
 */
-function useEngineeringEditor(sessionId) {
+/**
+ * Phase M2.1 (TASK-0038): the editor's enable/load lifecycle is keyed on the
+ * ENGINEERING SURFACE being enabled — not on a session existing. GET
+ * /nexus/engineering-profile.json is GLOBAL Engineering Profile configuration
+ * (catalog, registry, preferred profile), so the composer editor loads while
+ * the user is still on the new-session hero screen (no sessionId yet). The
+ * session id stays optional: it only names the session on a save action and
+ * keeps the historical refetch-on-session-change behavior. Callers that pass
+ * no `enabled` (the Control Room tab) keep the always-enabled behavior.
+ */
+/**
+ * The load gate of the editor effect, exported for deterministic regression
+ * coverage: the global profile state loads exactly when the Engineering
+ * surface is enabled — session existence is never consulted (TASK-0038 G).
+ */
+function engineeringEditorLoadGate(surfaceEnabled, refresh) {
+	if (!surfaceEnabled) return false;
+	if (typeof refresh !== "function") return false;
+	refresh();
+	return true;
+}
+
+function useEngineeringEditor(sessionId, enabled) {
 	const [state, setState] = react.useState(null);
 	const [failed, setFailed] = react.useState(false);
 	const [profileId, setProfileId] = react.useState(null);
@@ -1076,27 +1141,35 @@ function useEngineeringEditor(sessionId) {
 
 	const refresh = react.useCallback((then) => {
 		fetch("./nexus/engineering-profile.json", { cache: "no-store" })
-			.then((response) => response.json().catch(() => null))
+			.then((response) => {
+				if (!response.ok) throw new Error("Engineering configuration unavailable");
+				return response.json();
+			})
 			.then((data) => {
+				if (!data || !Array.isArray(data.profiles)) throw new Error("Invalid engineering configuration");
 				setState(data);
 				setFailed(false);
 				setFetchedAt(Date.now());
+				// Phase M3: keep the shared engine mapping in lockstep with the
+				// authoritative editor document (same fetch, same truth).
+				publishNexusEngineState(data);
 				if (then) then(data);
 			})
 			.catch(() => setFailed(true));
 	}, []);
 
+	const surfaceEnabled = enabled !== false;
 	react.useEffect(() => {
-		if (!sessionId) return;
-		refresh();
-	}, [sessionId, refresh]);
+		engineeringEditorLoadGate(surfaceEnabled, refresh);
+	}, [surfaceEnabled, sessionId, refresh]);
 
 	// initialize the form once state arrives (or after a save refreshes it)
 	react.useEffect(() => {
-		if (!state || !Array.isArray(state.profiles) || state.profiles.length === 0) return;
-		const preferred = state.preferredProfile && state.preferredProfile.id;
-		const preferredKnown = state.profiles.some((p) => p && String(p.id) === preferred);
-		const initialId = preferredKnown ? preferred : String(state.profiles[0].id);
+		// Phase M1.1: the authoritative user-facing catalog (the Nexus Profile
+		// contract when present, the legacy Dual list only on old hosts) decides
+		// both the preferred-profile lookup and the initial fallback choice.
+		const initialId = initialProfileChoice(state);
+		if (!initialId) return;
 		setProfileId(initialId);
 		setRoles(bindingsFor(initialId));
 		// eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1132,6 +1205,17 @@ function useEngineeringEditor(sessionId) {
 		return state.registry.find((m) => m && String(m.id) === modelId) || null;
 	}
 
+	// Phase M1: the user-facing profile list is the top-level Nexus Profile
+	// catalog (engine classification). Phase M1.1: the Dual-list fallback
+	// happens ONLY when the host has no Nexus contract at all — a contract-
+	// present catalog (even empty) is authoritative and never falls back.
+	function nexusEntryFor(id) {
+		if (!state) return null;
+		const wanted = String(id || "").toLowerCase();
+		const catalog = userFacingProfiles(state);
+		return catalog.find((p) => p && String(p.id) === wanted) || null;
+	}
+
 	function selectProfile(nextId) {
 		setProfileId(nextId);
 		setDirty(false);
@@ -1156,6 +1240,12 @@ function useEngineeringEditor(sessionId) {
 
 	function save() {
 		if (saving) return;
+		// M1.1 gate mirrors the controller boundary: selection permission
+		// depends on `selectable` ONLY. The engine classifies WHICH execution
+		// architecture is used later; it never blocks the profile-preference
+		// layer. The backend rejects selectable=false with profile-not-selectable.
+		const entry = nexusEntryFor(profileId);
+		if (entry && entry.selectable === false) return;
 		setSaving(true);
 		setNotice(null);
 		const requestId = (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "req-" + Date.now() + "-" + Math.random().toString(36).slice(2));
@@ -1188,7 +1278,15 @@ function useEngineeringEditor(sessionId) {
 			.finally(() => setSaving(false));
 	}
 
-	return { state, failed, profileId, roles, notice, noticeTone, saving, dirty, fetchedAt, refresh, selectProfile, changeRole, save, bindingsFor, modelEntry };
+	const selectedProfile = profileId ? nexusEntryFor(profileId) : null;
+	const selectedEngine = selectedProfile && selectedProfile.engine ? String(selectedProfile.engine) : "dual";
+	const selectedSelectable = selectedProfile ? selectedProfile.selectable !== false : false;
+	// Readiness is engine-aware: Dual needs role bindings, a metadata-only
+	// engine (Muse in M1) is ready without them. The authoritative catalog
+	// (Nexus contract when present, legacy Dual list on old hosts) decides
+	// whether anything is user-facing at all.
+	const ready = !failed && !!state && userFacingProfiles(state).length > 0 && !!selectedProfile && (selectedEngine !== "dual" || !!roles);
+	return { state, failed, profileId, roles, notice, noticeTone, saving, dirty, fetchedAt, refresh, selectProfile, changeRole, save, bindingsFor, modelEntry, selectedProfile, selectedEngine, selectedSelectable, ready };
 }
 
 /**
@@ -1196,8 +1294,46 @@ function useEngineeringEditor(sessionId) {
 * renders the long PREFERRED PROFILE meta line; variant "composer" keeps
 * the popover compact. All state and verbs come from useEngineeringEditor.
 */
+/**
+* Phase M1: Muse (and any future non-Dual engine) renders READ-ONLY
+* foundation metadata instead of the Dual role editor. No role dropdowns,
+* no editable bindings — Muse is never coerced into the Dual role schema.
+*/
+function museEditorRows(selectedProfile) {
+	const muse = selectedProfile && selectedProfile.muse && typeof selectedProfile.muse === "object" ? selectedProfile.muse : null;
+	const reasoning = muse && muse.reasoning && typeof muse.reasoning === "object" ? muse.reasoning : null;
+	const statusText = selectedProfile && typeof selectedProfile.availability === "string" && selectedProfile.availability !== ""
+		? selectedProfile.availability
+		: (muse && typeof muse.status === "string" && muse.status !== "" ? muse.status : "unavailable");
+	const rows = [
+		["Engine", "Muse", "Muse-native agent plane — a separate engine, never Dual roles."],
+		["Status", statusText.charAt(0).toUpperCase() + statusText.slice(1), "Muse profile availability."],
+		["Reasoning", reasoning && reasoning.default ? String(reasoning.default) : "\u2014", "Default Muse reasoning effort."],
+		["Max Reasoning", reasoning && reasoning.escalation ? String(reasoning.escalation) : "\u2014", "Muse escalation reasoning ceiling."],
+		["Subagents", muse && muse.subagents && muse.subagents.enabled === false ? "Disabled" : "Enabled", "Muse subagent dispatch."],
+		["Independent Review", muse && muse.review && muse.review.independent === false ? "Not available" : "Independent", "Independent Muse review."],
+		["Execution", selectedProfile && selectedProfile.runnable === false ? "Contributor-gated" : "Available", "Muse runs on its own protected single-agent plane; provider egress is sanitized and exact-target enforced."],
+	];
+	return rows.map((row) => react_jsx_runtime.jsxs("div", {
+		className: "nx-eng-row",
+		children: [
+			react_jsx_runtime.jsx("span", { className: "nx-eng-label", title: row[2], children: row[0] }),
+			react_jsx_runtime.jsx("span", { className: "nx-eng-value", title: row[2], children: row[1] }),
+		],
+	}, "muse-" + row[0]));
+}
+
 function EngineeringEditorFields({ editor, variant }) {
 	const { state, profileId, roles, dirty, notice, noticeTone, saving, selectProfile, changeRole, save, modelEntry } = editor;
+	// Phase M1: engine-aware editor surface. Dual profiles keep the EXACT
+	// role editor; Muse renders foundation metadata only and cannot be
+	// selected. Legacy editor objects (no engine fields) stay Dual.
+	const selectedProfile = editor.selectedProfile || null;
+	const selectedEngine = editor.selectedEngine || (selectedProfile && selectedProfile.engine) || "dual";
+	const selectedSelectable = editor.selectedSelectable !== false;
+	// Phase M1.1: ONE catalog rule — Nexus contract authoritative (empty
+	// fails closed upstream), legacy Dual list only when the property is absent.
+	const catalog = userFacingProfiles(state);
 	return react_jsx_runtime.jsxs(react_jsx_runtime.Fragment, {
 		children: [
 			react_jsx_runtime.jsx("div", {
@@ -1209,11 +1345,11 @@ function EngineeringEditorFields({ editor, variant }) {
 						value: profileId || "",
 						onChange: (event) => selectProfile(event.target.value),
 						"aria-label": "Preferred engineering profile",
-						children: state.profiles.map((profile) => react_jsx_runtime.jsx("option", { value: String(profile.id), children: String(profile.displayName || profile.id) + (profile.id === "custom" ? " (operator-defined)" : "") }, String(profile.id))),
+						children: catalog.map((profile) => react_jsx_runtime.jsx("option", { value: String(profile.id), children: String(profile.displayName || profile.id) + (profile.engine === "muse" ? " \u2014 " + String(profile.availability || "gated") : profile.id === "custom" ? " (operator-defined)" : "") }, String(profile.id))),
 					}, "profile"),
 				],
 			}, "head"),
-			ENGINEERING_ROLES.map((role) => {
+			selectedEngine === "dual" ? ENGINEERING_ROLES.map((role) => {
 				const binding = roles[role] || { model: "", reasoning: "" };
 				const compatible = (state.roleModels && Array.isArray(state.roleModels[role]) ? state.roleModels[role] : []);
 				const entry = modelEntry(binding.model);
@@ -1244,16 +1380,19 @@ function EngineeringEditorFields({ editor, variant }) {
 						}),
 					],
 				}, role);
-			}),
+			}) : museEditorRows(selectedProfile),
 			(dirty || profileId === "custom") && react_jsx_runtime.jsx("div", {
 				className: "nx-eng-hint",
 				children: "Custom bindings apply to the selected role when the next task starts (or escalates). Built-in profiles are never modified.",
 			}, "hint"),
 			notice && react_jsx_runtime.jsx("div", { className: "nx-eng-notice " + (noticeTone === "ok" ? "nx-eng-notice-ok" : "nx-eng-notice-err"), children: notice }, "notice"),
+			!selectedSelectable && react_jsx_runtime.jsx("div", { className: "nx-eng-hint", children: "This profile is not selectable yet (profile-not-selectable). It unlocks when Nexus marks it selectable." }, "locked"),
+			selectedEngine === "muse" && react_jsx_runtime.jsx("div", { className: "nx-eng-hint", children: "Muse engine: new sessions run on the Muse agent plane (single agent, no subagents, no independent review). The current conversation keeps its existing plane." }, "muse-engine-hint"),
 			react_jsx_runtime.jsx("button", {
 				type: "button",
 				className: "nx-eng-save",
-				disabled: saving,
+				disabled: saving || !selectedSelectable,
+				title: selectedSelectable ? undefined : "profile-not-selectable \u2014 this profile is not selectable yet.",
 				onClick: () => save(),
 				children: saving ? "Saving…" : (profileId === "custom" ? "Save Custom Profile" : "Select Profile"),
 			}, "save"),
@@ -1270,7 +1409,16 @@ function EngineeringEditor({ sessionId }) {
 			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." }),
 		});
 	}
-	if (!editor.state || !Array.isArray(editor.state.profiles) || !editor.roles) {
+	// Phase M1.1 CASE B: a current host with an EMPTY Nexus catalog is
+	// explicitly reporting an unavailable/invalid catalog — fail closed
+	// (never fall back to the legacy Dual list).
+	if (isCatalogUnavailable(editor.state)) {
+		return react_jsx_runtime.jsx(Section, {
+			label: "Engineering Profile",
+			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." }),
+		});
+	}
+	if (!editor.ready) {
 		return react_jsx_runtime.jsx(Section, {
 			label: "Engineering Profile",
 			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading engineering configuration…" }),
@@ -1484,6 +1632,117 @@ function ControllerToggle({ sessionId }) {
 }
 //#endregion
 
+//#region nexus mode bridge (shared client-state contract, TASK-0038)
+/**
+ * Phase M2.1 mode ownership: the composer must classify the PRE-SESSION
+ * (hero / no-session) posture from the mode selector's authoritative client
+ * state — never from "no session == legacy", which is what let the upstream
+ * DSH model selector survive a restart on the hero screen while the mode
+ * picker already showed "Normal Engineering".
+ *
+ * The contract is a real shared client-state service, not DOM scraping:
+ * @nexus/mode-selector publishes its mode store as the `nexusModeState`
+ * cordis service; `current` carries the STABLE agent-preset id
+ * ("aih-engineering" / "aih-deepseek") — never a display label and never a
+ * model id. This bridge is the controller's late-binding consumer: the
+ * composition boots the controller row before the mode-selector row, so the
+ * service arrives through ctx.inject(["nexusModeState"], ...) after apply;
+ * the bridge re-announces both the attachment and every store patch to the
+ * React subscription below, which is what makes a hero mode change update
+ * the composer posture immediately (no session creation, no refresh, no
+ * polling). If the service never appears (mode selector absent), the bridge
+ * stays empty and the mode derivation fails closed — the controller still
+ * boots.
+ */
+let nexusModeFacade = null;
+let nexusModeFacadeDetach = null;
+let nexusModeVersion = 0;
+const nexusModeListeners = new Set();
+function announceNexusMode() {
+	nexusModeVersion += 1;
+	for (const listener of [...nexusModeListeners]) {
+		try { listener(); } catch { /* bridge observers must not break the composer */ }
+	}
+}
+/** Attach (or clear with null) the shared mode-state facade. Test-visible. */
+function attachNexusModeState(facade) {
+	const next = facade && typeof facade.getSnapshot === "function" && typeof facade.subscribe === "function" ? facade : null;
+	if (next === nexusModeFacade) return;
+	if (nexusModeFacadeDetach) {
+		const detach = nexusModeFacadeDetach;
+		nexusModeFacadeDetach = null;
+		try { detach(); } catch { /* a broken prior facade must not block a new one */ }
+	}
+	nexusModeFacade = next;
+	if (nexusModeFacade) {
+		nexusModeFacadeDetach = nexusModeFacade.subscribe(announceNexusMode);
+	}
+	announceNexusMode();
+}
+/** useSyncExternalStore-compatible subscription over the bridge. */
+function subscribeNexusMode(listener) {
+	nexusModeListeners.add(listener);
+	return () => nexusModeListeners.delete(listener);
+}
+/** The authoritative pre-session mode: a stable preset id, or "" when the
+ * shared state has not landed (the derivation then falls through). */
+function currentNexusModePreset() {
+	if (!nexusModeFacade) return "";
+	const snapshot = nexusModeFacade.getSnapshot();
+	return snapshot && typeof snapshot.current === "string" ? snapshot.current : "";
+}
+//#endregion
+
+//#region nexus engine bridge (shared client-state contract, Phase M3)
+/**
+* Phase M3 (TASK-0040): the ENGINE mapping of the preferred Nexus profile,
+* published as the shared `nexusEngineState` cordis service. The snapshot is
+* derived from the engineering editor's authoritative GET document — the same
+* state the profile seat renders — so the mode selector can map the user-facing
+* Normal Engineering mode onto the preferred engine's INTERNAL agent plane
+* (muse → 'aih-muse') for every NEW (blank) session. Dual preferences publish
+* engine:'dual' with a null agent preset (no mapping, pre-M3 behavior). A null
+* snapshot (no editor fetch yet, or a legacy host) also means no mapping —
+* consumers fail closed to the unmodified mode id.
+*/
+let nexusEngineSnapshot = null;
+const nexusEngineListeners = new Set();
+function announceNexusEngine() {
+	for (const listener of [...nexusEngineListeners]) {
+		try { listener(); } catch { /* bridge observers must not break the composer */ }
+	}
+}
+/** Publish (or clear with null) the engine mapping derived from editor state. Test-visible. */
+function publishNexusEngineState(editorState) {
+	let snapshot = null;
+	if (editorState && typeof editorState === "object") {
+		const preferred = editorState.preferredProfile && editorState.preferredProfile.id ? String(editorState.preferredProfile.id) : null;
+		let engine = "dual";
+		if (preferred && Array.isArray(editorState.nexusProfiles)) {
+			const wanted = preferred.toLowerCase();
+			const entry = editorState.nexusProfiles.find((p) => p && String(p.id || "").toLowerCase() === wanted);
+			if (entry && entry.engine) engine = String(entry.engine);
+		}
+		const presets = editorState.engineAgentPresets && typeof editorState.engineAgentPresets === "object" ? editorState.engineAgentPresets : {};
+		// Defense in depth: the catalog validator already omits malformed
+		// bindings; the publisher enforces the pinned agent-preset id grammar
+		// again so a malformed id can never cross the service boundary.
+		const agentPreset = typeof presets[engine] === "string" && /^[a-z0-9][a-z0-9-]*$/.test(presets[engine]) ? presets[engine] : null;
+		snapshot = { engine, engineAgentPreset: agentPreset, preferredProfileId: preferred };
+	}
+	const changed = JSON.stringify(snapshot) !== JSON.stringify(nexusEngineSnapshot);
+	nexusEngineSnapshot = snapshot;
+	if (changed) announceNexusEngine();
+}
+function subscribeNexusEngine(listener) {
+	nexusEngineListeners.add(listener);
+	return () => nexusEngineListeners.delete(listener);
+}
+function nexusEngineStateSnapshot() {
+	return nexusEngineSnapshot;
+}
+//#endregion
+
 //#region composer executor pill
 /**
 * Additive composer tool-row pills (conversation.input.right) that separate
@@ -1551,10 +1810,17 @@ function composerPreferredEngineer(snapshot, editor) {
 	return composer.preferredEngineer && typeof composer.preferredEngineer === "object" ? composer.preferredEngineer : null;
 }
 
-function executorChipContent(snapshot, editor) {
+function executorChipContent(snapshot, editor, composerMode) {
 	if (!snapshot || snapshot.error) return null;
 	const composer = snapshot.composer && typeof snapshot.composer === "object" ? snapshot.composer : null;
-	const engineeringMode = !!(composer && composer.mode === "engineering");
+	// TASK-0038: the pills obey the SAME authoritative mode the chip derived
+	// (snapshot -> session preset -> shared mode selection). The snapshot's
+	// own composer block is only the fallback when the caller has no derived
+	// mode — otherwise a hero Engineering posture (mode selection, no composer
+	// block yet) would still render the legacy agent-default-model preference.
+	const engineeringMode = composerMode !== undefined
+		? composerMode === "engineering"
+		: !!(composer && composer.mode === "engineering");
 	const modelName = snapshot.execution && typeof snapshot.execution.model === "string" && snapshot.execution.model ? snapshot.execution.model : null;
 	const effectiveReasoning = snapshot.execution && typeof snapshot.execution.reasoning === "string" && snapshot.execution.reasoning ? snapshot.execution.reasoning : null;
 	let preference = null;
@@ -1652,7 +1918,7 @@ function EngineeringSelector({ editor }) {
 			document.removeEventListener("keydown", closeEscape);
 		};
 	}, [open]);
-	const ready = !editor.failed && editor.state && Array.isArray(editor.state.profiles) && editor.roles;
+	const ready = !editor.failed && editor.ready;
 	return react_jsx_runtime.jsxs("span", {
 		className: "nx-eng-composer",
 		ref: rootRef,
@@ -1665,7 +1931,7 @@ function EngineeringSelector({ editor }) {
 				title: "Engineering profile — the PREFERRED engineer applies at the next safe execution boundary",
 				onClick: () => setOpen(!open),
 				children: [
-					react_jsx_runtime.jsx("span", { className: "nx-eng-trigger-label", children: "Engineering" }, "label"),
+					react_jsx_runtime.jsx("span", { className: "nx-eng-trigger-label", children: editor.failed || isCatalogUnavailable(editor.state) ? "Engineering configuration unavailable" : !ready ? "Profile · Loading" : "Profile" }, "label"),
 					react_jsx_runtime.jsx("span", { className: "nx-eng-trigger-caret", children: "▾" }, "caret"),
 				],
 			}),
@@ -1675,43 +1941,111 @@ function EngineeringSelector({ editor }) {
 				"aria-label": "Engineering profile",
 				children: editor.failed
 					? react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." })
-					: !ready
-						? react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading engineering configuration…" })
-						: react_jsx_runtime.jsx(EngineeringEditorFields, { editor, variant: "composer" }),
+					: editor.state && isCatalogUnavailable(editor.state)
+						? react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." })
+						: !ready
+							? react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading engineering configuration…" })
+							: react_jsx_runtime.jsx(EngineeringEditorFields, { editor, variant: "composer" }),
 			}),
 		],
 	});
 }
 
 /**
-* Composer seat (conversation.input.right): the read-only executor pills
-* plus — in Normal Engineering mode only — the Engineering selector that
-* replaces the legacy DSH model selector as the effective preference
-* control. Legacy presets keep the exact previous rendering.
+* Composer mode derivation shared by the preference owner and executor pills.
 */
-function ExecutorChip({ session }) {
-	const sessionId = session && typeof session.sessionId === "string" ? session.sessionId : null;
-	const { snapshot } = useControllerSnapshot(sessionId);
-	const composer = snapshot && snapshot.composer && typeof snapshot.composer === "object" ? snapshot.composer : null;
-	const engineeringMode = !!(composer && composer.mode === "engineering");
-	const editor = useEngineeringEditor(engineeringMode ? sessionId : null);
-	// Body-level mode flag: scoped CSS retires the upstream DSH model seat
-	// while the Engineering selector owns the composer preference. Legacy
-	// presets never set it, so the shipped selector stays untouched there.
-	react.useEffect(() => {
-		const body = typeof document !== "undefined" && document.body ? document.body : null;
-		if (!body) return;
-		if (!engineeringMode) {
-			delete body.dataset.nexusComposerMode;
-			return;
+/**
+ * The stable preset-id → composer-mode classification. The SAME ids the
+ * mode selector offers and a session carries for its whole life; display
+ * labels and model ids are deliberately never consulted.
+ */
+const NEXUS_COMPOSER_PRESET_MODES = Object.freeze({
+	"aih-engineering": "engineering",
+	"aih-muse": "engineering",
+	"aih-deepseek": "legacy",
+});
+/** Classify a preset id, or return null when it is not a known Nexus mode. */
+function classifyNexusPreset(preset) {
+	if (typeof preset !== "string" || preset === "") return null;
+	return Object.prototype.hasOwnProperty.call(NEXUS_COMPOSER_PRESET_MODES, preset)
+		? NEXUS_COMPOSER_PRESET_MODES[preset]
+		: null;
+}
+/**
+ * Phase M2.1 restart fix (TASK-0037) + mode-ownership fix (TASK-0038):
+ * derive the composer mode from the authoritative source for the CURRENT
+ * lifecycle state, before the first polled snapshot arrives and after it.
+ *
+ * Root cause of the hero bug (TASK-0038): the pre-session (hero / no-session)
+ * state was classified as legacy outright, so the mode picker could already
+ * show "Normal Engineering" while the composer still rendered the upstream
+ * DSH model seat and no Engineering Profile UI. A session-less scope is a
+ * lifecycle state with its OWN authority — the mode selector's client
+ * state — never a legacy verdict.
+ *
+ * Resolution order:
+ *   1. ACTIVE SESSION — the authoritative snapshot.composer.mode wins once
+ *      loaded (it folds the session binding, the preset, and the routing
+ *      policy into one server-side verdict);
+ *   2. ACTIVE SESSION — before that, the session's agent preset (client-side
+ *      ConversationSnapshot carries agentPreset / projectionValues.agentPreset,
+ *      and a composer-less snapshot still names the preset on its binding)
+ *      classifies the boot: aih-engineering/aih-muse -> engineering,
+ *      aih-deepseek -> legacy;
+ *   3. PRE-SESSION (hero, including a session object without a preset yet) —
+ *      the mode selector's authoritative client state (nexusPreset: the
+ *      staged selection or the persisted default) classifies the posture;
+ *      a staged hero mode change lands here synchronously;
+ *   4. anything else — including a failed/absent snapshot (endpoint
+ *      unavailable) and no mode state at all — fails CLOSED toward
+ *      engineering, keeping the Profile UI mounted with its loading states
+ *      until an authoritative mode lands.
+ *
+ * A session-less snapshot is deliberately NOT authoritative for the hero:
+ * it describes the persisted DEFAULT mode, which a staged hero selection
+ * outranks until a session is created.
+ */
+function composerModeOfSession(session, snapshot, nexusPreset) {
+	if (session) {
+		const composer = snapshot && snapshot.composer && typeof snapshot.composer === "object" ? snapshot.composer : null;
+		if (composer && composer.mode === "engineering") return { mode: "engineering", source: "snapshot" };
+		if (composer && composer.mode === "legacy") return { mode: "legacy", source: "snapshot" };
+		let preset = typeof session.agentPreset === "string" ? session.agentPreset : "";
+		if (preset === "" && session.projectionValues && typeof session.projectionValues === "object" && typeof session.projectionValues.agentPreset === "string") {
+			preset = session.projectionValues.agentPreset;
 		}
-		body.dataset.nexusComposerMode = "engineering";
-		return () => {
-			delete body.dataset.nexusComposerMode;
-		};
-	}, [engineeringMode]);
+		if (preset === "" && snapshot && snapshot.binding && typeof snapshot.binding.preset === "string") {
+			// A snapshot whose composer block has not landed yet still names the
+			// session's agent preset on its binding — a stronger signal than the
+			// client-side projection alone.
+			preset = snapshot.binding.preset;
+		}
+		const sessionMode = classifyNexusPreset(preset);
+		if (sessionMode) return { mode: sessionMode, source: "session-preset" };
+	}
+	// Pre-session (or a session whose preset is not known yet): the mode
+	// selector's client state is the authority for "which Nexus mode is
+	// currently selected/default".
+	const selectedMode = classifyNexusPreset(nexusPreset);
+	if (selectedMode) return { mode: selectedMode, source: "mode-selection" };
+	return { mode: "engineering", source: "boot-fail-closed" };
+}
+
+function useComposerState(session, explicitSessionId) {
+	const sessionId = explicitSessionId || (session && typeof session.sessionId === "string" ? session.sessionId : null);
+	const { snapshot } = useControllerSnapshot(sessionId);
+	// Phase M2.1 (TASK-0038): the pre-session posture rides the shared
+	// nexusModeState service (subscription re-renders synchronously with the
+	// mode picker's store, so a hero mode change updates immediately).
+	const nexusPreset = react.useSyncExternalStore(subscribeNexusMode, currentNexusModePreset, currentNexusModePreset);
+	const derivedMode = composerModeOfSession(session, snapshot, nexusPreset);
+	const engineeringMode = derivedMode.mode === "engineering";
+	// The global profile catalog loads whenever the Engineering surface is
+	// enabled — hero included (no sessionId gate; the endpoint is global).
+	const editor = useEngineeringEditor(sessionId, engineeringMode);
 	// Follow external preference changes (e.g. saved from the Control Room)
 	// without clobbering unsaved operator edits in the open popover.
+	const composer = snapshot && snapshot.composer && typeof snapshot.composer === "object" ? snapshot.composer : null;
 	const preferredProfileId = composer && composer.preferredEngineer && typeof composer.preferredEngineer === "object" ? String(composer.preferredEngineer.profileId || "") : "";
 	const dirtyRef = react.useRef(editor.dirty);
 	dirtyRef.current = editor.dirty;
@@ -1722,18 +2056,38 @@ function ExecutorChip({ session }) {
 		seenProfileRef.current = preferredProfileId;
 		if (!dirtyRef.current) editor.refresh();
 	}, [engineeringMode, preferredProfileId, editor.refresh]);
-	const content = executorChipContent(snapshot, engineeringMode ? editor : null);
-	if (!engineeringMode) {
-		// Legacy mode: unchanged rendering — pills only, no control chrome.
-		return react_jsx_runtime.jsx(ExecutorPill, { content });
-	}
-	return react_jsx_runtime.jsxs("span", {
-		className: "nx-executor-chip",
-		children: [
-			react_jsx_runtime.jsx(ExecutorPill, { content }, "pills"),
-			react_jsx_runtime.jsx(EngineeringSelector, { editor }, "selector"),
-		],
-	});
+    return { snapshot, editor, derivedMode, nexusPreset };
+}
+
+// Additive execution status has no responsibility for the preference control.
+function ExecutorChip({ session }) {
+    const { snapshot, editor, derivedMode } = useComposerState(session);
+    return react_jsx_runtime.jsx(ExecutorPill, {
+        content: executorChipContent(snapshot, derivedMode.mode === "engineering" ? editor : null, derivedMode.mode),
+    });
+}
+
+// Installed into the pinned model seat by Patch-NexusComposer.ps1. The original
+// upstream component is supplied as a React element, so its hooks run ONLY in
+// legacy mode. No DOM mutation, slot priority race, or copied Model/Effort UI.
+function ComposerPreference({ sessionId, useSession, useSessions, legacy }) {
+    const session = useSession ? useSession((value) => value) : null;
+    const sessions = useSessions ? useSessions((value) => value) : null;
+    const summary = sessions && sessions.byId ? sessions.byId[sessionId] : null;
+    // A blank session still displays the hero picker. Its staged selection
+    // outranks a polled snapshot of the previous preset during mode switching.
+    const current = !sessionId || (summary && summary.blank) ? null : session;
+    const { editor, derivedMode, nexusPreset } = useComposerState(current, sessionId);
+    if (derivedMode.mode === "legacy" && !legacy) return null;
+    return react_jsx_runtime.jsx("span", {
+        "data-nexus-preference-owner": derivedMode.mode === "engineering" ? "profiles" : "upstream-model",
+        "data-nexus-composer-mode": derivedMode.mode,
+        "data-nexus-mode-source": derivedMode.source,
+        "data-nexus-preset": nexusPreset,
+        children: derivedMode.mode === "engineering"
+            ? react_jsx_runtime.jsx(EngineeringSelector, { editor })
+            : legacy,
+    });
 }
 //#region styles
 /**
@@ -1873,6 +2227,7 @@ const PANEL_CSS = [
 ".nx-eng-select{flex:1;min-width:0;font-size:11px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);border:1px solid var(--dsw-alias-border-l1);border-radius:5px;padding:3px 4px;font-family:var(--ds-font-family-ui, inherit)}",
 ".nx-eng-select:disabled{opacity:.55;cursor:not-allowed}",
 ".nx-eng-reason{flex:none;width:82px;font-size:11px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);border:1px solid var(--dsw-alias-border-l1);border-radius:5px;padding:3px 4px;font-family:var(--ds-font-family-ui, inherit)}",
+".nx-eng-value{flex:1;min-width:0;font-size:11px;color:var(--dsw-alias-label-primary);padding:3px 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
 ".nx-eng-head{display:flex;align-items:center;gap:8px;margin-bottom:2px}",
 ".nx-eng-profile{flex:1;font-size:11.5px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover);border:1px solid var(--dsw-alias-border-l1);border-radius:5px;padding:4px 6px;font-family:var(--ds-font-family-ui, inherit)}",
 ".nx-eng-notice{font-size:10.5px;color:var(--dsw-alias-label-secondary);padding:4px 8px;border-radius:5px;background:var(--dsw-alias-interactive-bg-hover)}",
@@ -1890,13 +2245,6 @@ const PANEL_CSS = [
 ".nx-eng-popover{position:absolute;bottom:calc(100% + 8px);right:0;z-index:60;width:360px;max-width:min(92vw,420px);max-height:72vh;overflow:auto;display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-base);box-shadow:0 12px 30px rgba(0,0,0,.3);color:var(--dsw-alias-label-secondary);font-size:11px}",
 ".nx-eng-popover .nx-eng-profile{max-width:216px}",
 ".nx-eng-popover .nx-eng-save{margin-top:4px}",
-// Normal Engineering mode only: the upstream DSH model seat no longer
-// presents itself as the operator's model-preference control — the
-// Engineering selector owns that role. Legacy presets never set the body
-// flag and keep the shipped selector. Fail-open by design: if the upstream
-// build changes its scoped class names, the shipped seat simply reappears.
-"body[data-nexus-composer-mode='engineering'] [class*='_7KE1Ra_root']{display:none!important}",
-"body[data-nexus-composer-mode='engineering'] [class*='_7KE1Ra_menu']{display:none!important}",
 ].join("");
 //#endregion
 
@@ -1904,6 +2252,15 @@ const PANEL_CSS = [
 /** Required client service: the UI slot registry. */
 const inject = ["slots", "workspaces"];
 function apply(ctx) {
+	ctx.provide("nexusComposerPreference", { Component: ComposerPreference });
+	// Phase M3 (TASK-0040): the shared engine mapping service consumed by the
+	// mode selector (see the nexus engine bridge region). Published by this
+	// plugin because the engineering editor owns the authoritative GET state;
+	// the snapshot is null until the first editor fetch lands.
+	ctx.provide("nexusEngineState", {
+		getSnapshot: () => nexusEngineStateSnapshot(),
+		subscribe: subscribeNexusEngine,
+	});
 	if (ctx.workspaces && ctx.workspaces.list) {
 	// Keep the UI Workspace registry and Nexus Phase 3.1 repository foundation
 	// on one identity path. Existing/recent workspaces are reconciled once at
@@ -2021,6 +2378,16 @@ function apply(ctx) {
 		order: 90,
 		label: "Task executor",
 	}, ExecutorChip));
+	// Phase M2.1 (TASK-0038): consume the mode selector's authoritative client
+	// state (see the nexus mode bridge region). The nested inject is
+	// order-independent: the composition boots this plugin before
+	// @nexus/mode-selector, so the shared state arrives here whenever the
+	// service is provided; if it never is (mode selector absent from the
+	// composition), the composer keeps its fail-closed derivation and the
+	// controller still boots.
+	ctx.inject(["nexusModeState"], (scope) => {
+		attachNexusModeState(scope.nexusModeState);
+	});
 }
 //#endregion
 exports.apply = apply;
@@ -2034,14 +2401,28 @@ exports.ControllerBody = ControllerBody;
 exports.ControlRoom = ControlRoom;
 exports.ROOM_TABS = ROOM_TABS;
 exports.executorChipContent = executorChipContent;
+exports.composerModeOfSession = composerModeOfSession;
+exports.classifyNexusPreset = classifyNexusPreset;
+exports.ComposerPreference = ComposerPreference;
+exports.attachNexusModeState = attachNexusModeState;
+exports.subscribeNexusMode = subscribeNexusMode;
+exports.currentNexusModePreset = currentNexusModePreset;
+exports.publishNexusEngineState = publishNexusEngineState;
+exports.subscribeNexusEngine = subscribeNexusEngine;
+exports.nexusEngineStateSnapshot = nexusEngineStateSnapshot;
 exports.ExecutorPill = ExecutorPill;
 exports.ExecutorChip = ExecutorChip;
 exports.GateActions = GateActions;
 exports.EngineeringEditor = EngineeringEditor;
 exports.useEngineeringEditor = useEngineeringEditor;
+exports.engineeringEditorLoadGate = engineeringEditorLoadGate;
 exports.EngineeringEditorFields = EngineeringEditorFields;
 exports.EngineeringSelector = EngineeringSelector;
 exports.preferredEngineerFromEditorState = preferredEngineerFromEditorState;
+exports.hasNexusCatalogContract = hasNexusCatalogContract;
+exports.userFacingProfiles = userFacingProfiles;
+exports.isCatalogUnavailable = isCatalogUnavailable;
+exports.initialProfileChoice = initialProfileChoice;
 exports.activityKindTitle = activityKindTitle;
 return module.exports;
 }

@@ -55,6 +55,16 @@ function routingStateFor(installRoot, binding) {
   return statePath ? readJson(statePath) : null
 }
 
+function sessionPreset(session) {
+  if (Array.isArray(session && session.events)) {
+    for (let index = session.events.length - 1; index >= 0; index -= 1) {
+      const event = session.events[index]
+      if (event && event.type === 'agent-preset/selected' && event.data && event.data.agentPreset) return String(event.data.agentPreset)
+    }
+  }
+  return session && session.header ? session.header.agentPreset : null
+}
+
 function targetShape(value) {
   if (!value || typeof value !== 'object') return null
   const provider = typeof value.provider === 'string' ? value.provider.trim() : ''
@@ -111,7 +121,7 @@ function latestStepTargetFor(binding, expectedStepRole) {
   return latest
 }
 
-function enforcementError(reason, binding, state) {
+function enforcementError(reason, binding, state, code) {
   const task = binding && binding.taskId ? String(binding.taskId) : 'unbound'
   const preset = binding && binding.preset ? String(binding.preset) : 'unknown'
   const profile = state && state.profile ? String(state.profile) : 'unknown'
@@ -119,7 +129,7 @@ function enforcementError(reason, binding, state) {
     `Nexus execution target unavailable (${reason}) for task ${task}; preset=${preset}; profile=${profile}. ` +
     'Execution was blocked instead of silently falling back to another model.',
   )
-  error.code = 'nexus-execution-target-unavailable'
+  error.code = code || 'nexus-execution-target-unavailable'
   return error
 }
 
@@ -129,8 +139,10 @@ function enforcementError(reason, binding, state) {
  */
 function controllerTargetFor(installRoot, binding) {
   if (!binding) throw enforcementError('missing-session-binding', binding, null)
+  if (binding.engine !== 'dual') throw enforcementError('session-binding-is-not-dual-engine', binding, null, 'engine-binding-violation')
   const state = routingStateFor(installRoot, binding)
   if (!state) throw enforcementError('missing-routing-state', binding, null)
+  if (state.engine !== 'dual') throw enforcementError('routing-state-is-not-dual-engine', binding, state, 'engine-binding-violation')
 
   const stepRole = state.stepRole === 'engineer_normal' || state.stepRole === 'engineer_deep'
     ? state.stepRole
@@ -162,16 +174,18 @@ function controllerTargetFor(installRoot, binding) {
 
 function apply(ctx) {
   ctx.on('agent/request', async (payload, next) => {
-    const proposed = await next()
     const session = payload && payload.agent && payload.agent.session
     const header = session && session.header
-    if (!header) return proposed
+    if (!header) return next()
     const isWorker = header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0
-    if (isWorker) return proposed
+    if (isWorker) return next()
 
     const installRoot = profiles.installRootOf()
     const binding = bindingFor(installRoot, session.id)
+    if (binding && binding.engine !== 'dual') throw enforcementError('session-binding-is-not-dual-engine', binding, null, 'engine-binding-violation')
+    if (binding && sessionPreset(session) === 'aih-muse') throw enforcementError('session-preset-does-not-match-bound-engine', binding, null, 'engine-binding-violation')
     const target = controllerTargetFor(installRoot, binding)
+    const proposed = await next()
 
     return Object.freeze({
       ...proposed,
@@ -187,6 +201,7 @@ module.exports = {
   apply,
   bindingFor,
   routingStateFor,
+  sessionPreset,
   targetShape,
   latestStepTargetFor,
   controllerTargetFor,

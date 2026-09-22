@@ -26,12 +26,12 @@ function writeJson(filePath, value) {
 function writeBinding(root, binding) {
   writeJson(path.join(root, 'data', 'routing', 'session-bindings.json'), {
     schemaVersion: 1,
-    bindings: { [binding.sessionId]: binding },
+    bindings: { [binding.sessionId]: Object.assign({ engine: 'dual' }, binding) },
   })
 }
 
 function writeRoutingState(root, binding, value) {
-  writeJson(profiles.routingStatePath(root, binding), value)
+  writeJson(profiles.routingStatePath(root, binding), Object.assign({ engine: 'dual' }, value))
 }
 
 async function main() {

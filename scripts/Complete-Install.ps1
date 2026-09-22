@@ -27,6 +27,23 @@ $layout = Get-AihLayout $InstallRoot
 if ($ResetManagedSettings -or -not (Test-Path -LiteralPath $layout.Settings)) {
     Copy-Item -LiteralPath (Join-Path $layout.Config 'settings.yaml') -Destination $layout.Settings
 }
+# Phase M2.1 (TASK-0037): migrate additive managed provider configuration into
+# the runtime settings document. Fresh installs copied the template above, so
+# this is a verified no-op for them; an EXISTING install keeps every user
+# value and gains the managed provider routes it is missing (e.g. the Phase M2
+# meta-model-api route), and stale Nexus-managed routes upgrade deterministically
+# (the M2 standard muse-spark-1.3 route becomes the M2.1
+# muse-spark-1.3-contributor route). A structurally invalid Nexus-managed route
+# fails the install closed.
+. (Join-Path $layout.Scripts 'SettingsMigration.ps1')
+$managedSettingsMigration = Sync-AihManagedSettings -TemplatePath (Join-Path $layout.Config 'settings.yaml') -SettingsPath $layout.Settings -ModelRegistryPath $layout.ModelRegistry
+
+# Remove the retired Muse Contributor egress hook from installations upgraded
+# from versions that patched the provider adapter in place.
+& $layout.Node (Join-Path $layout.Scripts 'Remove-MuseContributorEgressPatch.cjs') $InstallRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "The retired Muse Contributor provider-egress hook could not be removed."
+}
 
 # data/cordis.patch.yml is managed by the installer. Sync it before the Nexus
 # patcher inspects composition so upgrades from pre-controller installs see the
@@ -71,6 +88,7 @@ Copy-Item -LiteralPath (Join-Path $layout.Config 'DeepSeek-Isolation.cjs') -Dest
 Copy-Item -LiteralPath (Join-Path $layout.Config 'Engineering-Isolation.cjs') -Destination (Join-Path $targetPreset 'Engineering-Isolation.cjs') -Force
 foreach ($presetDirectory in @($targetPreset, $deepSeekPreset)) {
     Copy-Item -LiteralPath (Join-Path $layout.Config 'AihController.cjs') -Destination (Join-Path $presetDirectory 'AihController.cjs') -Force
+    Copy-Item -LiteralPath (Join-Path $layout.Config 'ContextCompaction.cjs') -Destination (Join-Path $presetDirectory 'ContextCompaction.cjs') -Force
     Copy-Item -LiteralPath (Join-Path $layout.Config 'Engineering-Profiles.cjs') -Destination (Join-Path $presetDirectory 'Engineering-Profiles.cjs') -Force
     $presetFile = Join-Path $presetDirectory 'agent.cordis.yml'
     $presetText = Get-Content -Raw -Encoding UTF8 -LiteralPath $presetFile
@@ -86,6 +104,13 @@ foreach ($presetDirectory in @($targetPreset, $deepSeekPreset)) {
         [System.IO.File]::AppendAllText($presetFile, $controllerRow, [System.Text.UTF8Encoding]::new($false))
     }
 }
+
+# Build every managed Muse file in a staging directory, validate the generated
+# composition with DSH's actual !!js YAML schema, then swap the complete preset
+# into place with rollback. A failed update therefore cannot publish a mixed-
+# version Muse plane.
+& (Join-Path $layout.Scripts 'Install-MusePreset.ps1') -InstallRoot $InstallRoot
+if ($LASTEXITCODE -ne 0) { throw 'The managed Muse preset could not be installed.' }
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $layout.Credentials) | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $layout.RoutingData 'states') | Out-Null

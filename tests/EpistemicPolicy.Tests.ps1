@@ -9,6 +9,10 @@ function New-U($root,$task,$question,$kind,$subject='subject',$probe=$false,$ris
 $root=Join-Path ([IO.Path]::GetTempPath()) ('aih-epistemic-'+[guid]::NewGuid().ToString('N'));$installFixture=Join-Path $root 'install';$workspace=Join-Path $root 'workspace';New-Item -ItemType Directory -Force -Path $workspace,(Join-Path $installFixture 'config'),(Join-Path $installFixture 'data/routing')|Out-Null
 Copy-Item -LiteralPath (Join-Path $InstallRoot 'config/routing-policy.json'),(Join-Path $InstallRoot 'config/engineering-profiles.json'),(Join-Path $InstallRoot 'config/model-registry.json') -Destination (Join-Path $installFixture 'config')
 if(Test-Path -LiteralPath (Join-Path $InstallRoot 'data/settings.yaml')){New-Item -ItemType Directory -Force -Path (Join-Path $installFixture 'data')|Out-Null;Copy-Item -LiteralPath (Join-Path $InstallRoot 'data/settings.yaml') -Destination (Join-Path $installFixture 'data/settings.yaml')}
+$fixtureSettings=Join-Path $installFixture 'data/settings.yaml'
+$fixtureSettingsText=if(Test-Path -LiteralPath $fixtureSettings){Get-Content -Raw -LiteralPath $fixtureSettings}else{''}
+if($fixtureSettingsText -match '(?m)^engineering-profile:'){$fixtureSettingsText=[regex]::Replace($fixtureSettingsText,'(?m)^engineering-profile:.*$','engineering-profile: deepseek-codex')}else{$fixtureSettingsText="engineering-profile: deepseek-codex`r`n"+$fixtureSettingsText}
+Set-Content -LiteralPath $fixtureSettings -Value $fixtureSettingsText -Encoding UTF8
 $oldHome=$env:DSH_HOME;$env:DSH_HOME=(Join-Path $installFixture 'data')
 try{
  $task=New-TestTask $workspace

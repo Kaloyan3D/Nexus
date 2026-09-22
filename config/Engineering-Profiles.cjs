@@ -231,9 +231,39 @@ function modelResolvedProvider(entry, reasoning) {
   return null
 }
 
+/**
+ * Phase M2.1 engine-scope contract (TASK-0037): a registry entry MAY declare
+ * `agentEngines`. The semantics are ASYMMETRIC and both directions fail
+ * closed — the exact mirror of Routing.ps1 Test-AihModelEngineCompatible:
+ *   - 'dual': absence of the declaration keeps every pre-M2 registry entry
+ *     eligible for the Dual role architecture (backward compatible); a
+ *     declaration must list 'dual'.
+ *   - 'muse': the Muse engine plane requires an EXPLICIT muse scope — absence
+ *     of `agentEngines` (or a declaration without 'muse') is never eligible,
+ *     so a Muse profile can never resolve through an unscoped or Dual-only
+ *     model entry.
+ * Unknown engine names fail closed. Metadata driven — no model-id conditionals.
+ */
+function modelEngineCompatible(entry, engine) {
+  if (!entry || typeof engine !== 'string' || engine === '') return false
+  const declared = Array.isArray(entry.agentEngines) ? entry.agentEngines : null
+  if (engine === 'dual') {
+    if (declared === null) return true
+    return declared.includes('dual')
+  }
+  if (engine === 'muse') {
+    if (declared === null) return false
+    return declared.includes('muse')
+  }
+  return false
+}
+
 function modelCompatibleWithRole(entry, role, reasoning) {
   if (!entry) return false
   if (entry.enabled === false) return false
+  // Engine scope (Phase M2.1): the Dual role architecture never claims a
+  // Muse-scoped model. Delegates to the shared asymmetric engine contract.
+  if (!modelEngineCompatible(entry, 'dual')) return false
   const req = roleRequirementsOf(role)
   if (!req) return false
   if (req.requiresReasoning && entry.supportsReasoning === false) return false
@@ -318,6 +348,9 @@ function resolveTarget(installRoot, profileId, role) {
     if (candidate && String(candidate.id) === modelId) { entry = candidate; break }
   }
   if (!entry || entry.enabled === false) return null
+  // Phase M2.1 engine scope: the Dual role architecture never resolves a
+  // Muse-scoped model (backward compatible when agentEngines is absent).
+  if (!modelEngineCompatible(entry, 'dual')) return null
   const providers = entry.providers && typeof entry.providers === 'object' ? entry.providers : {}
   const provider = providers[reasoning] || providers.default || (typeof entry.provider === 'string' ? entry.provider : null)
   if (!provider) return null
@@ -406,6 +439,7 @@ module.exports = {
   OPTIONAL_ROLES,
   roleRequirementsOf,
   modelResolvedProvider,
+  modelEngineCompatible,
   modelCompatibleWithRole,
   compatibleModelsForRole,
   roleBindingTarget,

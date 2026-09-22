@@ -42,28 +42,49 @@ function userMessage(text) {
 }
 
 // -- fixture harness for the binding guard (Parts 8/10/12/13) ---------------
-function makeHarness(initialBindings) {
+// TASK-0056: the harness models production truth ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â bindings WITHOUT an engine
+// are legacy and must NOT be silently defaulted to dual. Callers that need an
+// engine pass it explicitly. makeHarness takes an optional session-preset map
+// so stale-recovery tests can model the *requested* engine independently of
+// the persisted bound engine.
+function makeHarness(initialBindings, options) {
   const ledger = new Map() // display id -> authoritative taskInstanceId
   const bindings = Object.assign({}, initialBindings)
+  const requestedPresets = (options && options.requestedPresets) || {}
+  const ledgerEngines = new Map()
   const calls = { createBinding: [], testTaskIdentity: 0, invalidate: 0, staleEvents: [] }
   let created = 100 // fresh instances must never collide with fixture instances
   const guard = controller.createBindingGuard({
     bindingFor: (session) => (bindings[session.id] ? bindings[session.id] : null),
-    createBinding: async (agent, session, workspace, promptText) => {
-      calls.createBinding.push({ promptText, workspace })
+    requestedPresetOf: (session) => {
+      if (session && Object.prototype.hasOwnProperty.call(requestedPresets, session.id)) return requestedPresets[session.id]
+      const existing = bindings[session.id]
+      return existing && typeof existing.preset === 'string' ? existing.preset : 'aih-engineering'
+    },
+    createBinding: async (agent, session, workspace, promptText, authoritative) => {
+      calls.createBinding.push({ promptText, workspace, authoritative: authoritative ? { engine: authoritative.engine, preset: authoritative.preset } : null })
       created += 1
       const reviewRequested = controller.isReviewCommand(promptText)
       const displayId = 'TASK-0004' // deliberately constant: identity != label
       const instance = 'task_' + String(created).padStart(32, '0')
+      // TASK-0056: recovery carries the ORIGINAL bound engine forward ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â the
+      // replacement task is created with the stale binding's engine, never
+      // re-resolved from the mutable session preference.
+      const engine = authoritative && typeof authoritative.engine === 'string' ? authoritative.engine : 'dual'
+      const preset = authoritative && typeof authoritative.preset === 'string'
+        ? authoritative.preset
+        : (engine === 'muse' ? 'aih-muse' : 'aih-engineering')
       ledger.set(displayId, instance)
+      ledgerEngines.set(displayId, engine)
       const binding = {
         sessionId: session.id,
         taskInstanceId: instance,
         taskId: displayId,
         workspace,
-        preset: 'aih-engineering',
+        preset,
+        engine,
         description: promptText,
-        executionClass: reviewRequested ? 'reviewer' : 'engineer_normal',
+        executionClass: reviewRequested ? 'reviewer' : (engine === 'muse' ? 'muse_main' : 'engineer_normal'),
         reviewRequired: reviewRequested,
         boundAtUtc: new Date().toISOString(),
       }
@@ -80,6 +101,7 @@ function makeHarness(initialBindings) {
         exists: actual !== null,
         taskId,
         taskInstanceId: actual,
+        boundEngine: actual === null ? null : (ledgerEngines.get(taskId) || 'dual'),
         instanceMatches: taskInstanceId ? actual === taskInstanceId : null,
       }
     },
@@ -91,7 +113,7 @@ function makeHarness(initialBindings) {
       delete bindings[stale.sessionId]
     },
   })
-  return { guard, bindings, calls, ledger }
+  return { guard, bindings, calls, ledger, ledgerEngines }
 }
 
 const instance = (n) => 'task_' + String(n).padStart(32, '0')
@@ -101,7 +123,7 @@ async function unitBindingGuard() {
 
   // A. Valid binding: exact instance exists -> reuse, no new task.
   {
-    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\WS' } })
+    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\WS', preset: 'aih-engineering', engine: 'dual' } })
     h.ledger.set('TASK-0004', instance(1))
     const result = await h.guard.ensureBinding(null, session, 'C:\\WS', 'continue the work')
     assert.equal(result.outcome, 'valid')
@@ -110,7 +132,7 @@ async function unitBindingGuard() {
 
   // B. Missing task: stale -> fresh task, fresh instance, binding replaced.
   {
-    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\WS' } })
+    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\WS', preset: 'aih-engineering', engine: 'dual' } })
     const result = await h.guard.ensureBinding(null, session, 'C:\\WS', 'continue the work')
     assert.equal(result.outcome, 'recovered')
     assert.equal(result.stale.reason, 'task-missing')
@@ -127,7 +149,7 @@ async function unitBindingGuard() {
 
   // C. Same display id, different generation: NEVER valid.
   {
-    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\WS' } })
+    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\WS', preset: 'aih-engineering', engine: 'dual' } })
     h.ledger.set('TASK-0004', instance(2))
     const result = await h.guard.ensureBinding(null, session, 'C:\\WS', 'continue the work')
     assert.equal(result.outcome, 'recovered')
@@ -136,7 +158,7 @@ async function unitBindingGuard() {
 
   // D. Explicit /review recovery reuses the normal explicit-review flow.
   {
-    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\WS' } })
+    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\WS', preset: 'aih-engineering', engine: 'dual' } })
     const result = await h.guard.ensureBinding(null, session, 'C:\\WS', '/review inspect Phase 3.2')
     assert.equal(result.outcome, 'recovered')
     assert.equal(h.calls.createBinding[0].promptText, '/review inspect Phase 3.2', 'the review question drives the fresh task')
@@ -146,7 +168,7 @@ async function unitBindingGuard() {
 
   // E. Workspace mismatch: fail closed even when the other workspace has the task.
   {
-    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\RepoA' } })
+    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\RepoA', preset: 'aih-engineering', engine: 'dual' } })
     h.ledger.set('TASK-0004', instance(1)) // RepoB even contains the same task
     await assert.rejects(
       () => h.guard.ensureBinding(null, session, 'C:\\RepoB', 'continue the work'),
@@ -159,7 +181,7 @@ async function unitBindingGuard() {
 
   // F. Equivalent Windows paths validate as the same workspace.
   {
-    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'c:\\ai-harness\\' } })
+    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'c:\\ai-harness\\', preset: 'aih-engineering', engine: 'dual' } })
     h.ledger.set('TASK-0004', instance(1))
     const result = await h.guard.ensureBinding(null, session, 'C:\\AI-Harness', 'continue the work')
     assert.equal(result.outcome, 'valid', 'C:\\AI-Harness == c:\\ai-harness\\')
@@ -168,7 +190,7 @@ async function unitBindingGuard() {
 
   // G. Invalid ledger: validation infrastructure failure -> fail safe.
   {
-    const binding = { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'infra-failure' }
+    const binding = { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'infra-failure', preset: 'aih-engineering', engine: 'dual' }
     const h = makeHarness({ s1: binding })
     await assert.rejects(
       () => h.guard.ensureBinding(null, session, 'infra-failure', 'continue the work'),
@@ -182,7 +204,7 @@ async function unitBindingGuard() {
   // H. Restart + valid binding: no duplicate task.
   // I. Restart + stale binding: self-heals exactly once.
   {
-    const persisted = { s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\WS' } }
+    const persisted = { s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\WS', preset: 'aih-engineering', engine: 'dual' } }
     const h = makeHarness(persisted) // a fresh plugin instance loads the persisted binding
     h.ledger.set('TASK-0004', instance(1))
     const valid = await h.guard.ensureBinding(null, session, 'C:\\WS', 'turn after restart')
@@ -200,7 +222,7 @@ async function unitBindingGuard() {
 
   // J. Concurrent stale recovery: exactly one replacement task.
   {
-    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\WS' } })
+    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\WS', preset: 'aih-engineering', engine: 'dual' } })
     const results = await Promise.all([
       h.guard.ensureBinding(null, session, 'C:\\WS', 'event one'),
       h.guard.ensureBinding(null, session, 'C:\\WS', 'event two'),
@@ -210,9 +232,123 @@ async function unitBindingGuard() {
     assert.deepEqual(outcomes, ['recovered', 'valid'])
   }
 
-  // Part 21: legacy binding without taskInstanceId is stale/ambiguous.
+  // K. An existing task's engine is authoritative and cannot be repaired by
+  // replacing the binding or selecting another preset.
   {
-    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', workspace: 'C:\\WS' } })
+    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\\WS', preset: 'aih-engineering', engine: 'dual' } })
+    h.ledger.set('TASK-0004', instance(1))
+    h.ledgerEngines.set('TASK-0004', 'muse')
+    await assert.rejects(
+      () => h.guard.ensureBinding(null, session, 'C:\\WS', 'continue the work'),
+      (error) => error.code === 'engine-binding-violation',
+    )
+    assert.equal(h.calls.createBinding.length, 0, 'engine mismatch creates no fallback task')
+    assert.equal(h.calls.invalidate, 0, 'engine mismatch preserves the bound task for diagnosis')
+  }
+
+  // Part 21: legacy binding WITH a proven engine recovers as the SAME engine.
+  {
+    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', workspace: 'C:\WS', preset: 'aih-engineering', engine: 'dual' } })
+    h.ledger.set('TASK-0004', instance(9)) // a NEW instance-aware generation exists
+    const result = await h.guard.ensureBinding(null, session, 'C:\WS', 'continue the work')
+    assert.equal(result.outcome, 'recovered')
+    assert.equal(result.stale.reason, 'ambiguous-legacy-binding')
+    assert.equal(h.bindings.s1.engine, 'dual', 'legacy Dual recovery preserves engine=dual')
+    assert.equal(h.calls.createBinding[0].authoritative.engine, 'dual', 'legacy recovery carries the bound engine explicitly')
+  }
+
+  // TASK-0056 A. Muse stale (task missing) + still Muse -> Muse recovery.
+  {
+    const h = makeHarness(
+      { s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\WS', preset: 'aih-muse', engine: 'muse' } },
+      { requestedPresets: { s1: 'aih-muse' } },
+    )
+    const result = await h.guard.ensureBinding(null, session, 'C:\WS', 'continue the muse work')
+    assert.equal(result.outcome, 'recovered')
+    assert.equal(result.stale.reason, 'task-missing')
+    assert.equal(h.bindings.s1.engine, 'muse', 'Muse stale recovery stays Muse')
+    assert.equal(h.bindings.s1.preset, 'aih-muse', 'Muse stale recovery keeps a Muse-compatible preset')
+    assert.equal(h.calls.createBinding[0].authoritative.engine, 'muse', 'recovery carries the original bound engine explicitly')
+    assert.equal(h.calls.invalidate, 1)
+  }
+
+  // TASK-0056 B. Dual stale (task missing) + still Dual -> Dual recovery.
+  {
+    const h = makeHarness(
+      { s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\WS', preset: 'aih-engineering', engine: 'dual' } },
+      { requestedPresets: { s1: 'aih-engineering' } },
+    )
+    const result = await h.guard.ensureBinding(null, session, 'C:\WS', 'continue the work')
+    assert.equal(result.outcome, 'recovered')
+    assert.equal(h.bindings.s1.engine, 'dual', 'Dual stale recovery stays Dual')
+    assert.equal(h.calls.createBinding[0].authoritative.engine, 'dual', 'recovery carries the original bound engine explicitly')
+  }
+
+  // TASK-0056 C. Muse stale + Dual requested: fail BEFORE any invalidation.
+  {
+    const before = { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\WS', preset: 'aih-muse', engine: 'muse' }
+    const h = makeHarness({ s1: { ...before } }, { requestedPresets: { s1: 'aih-engineering' } })
+    await assert.rejects(
+      () => h.guard.ensureBinding(null, session, 'C:\WS', 'continue the work'),
+      (error) => error.code === 'engine-binding-violation',
+    )
+    assert.equal(h.calls.invalidate, 0, 'engine mismatch invalidates nothing')
+    assert.equal(h.calls.createBinding.length, 0, 'engine mismatch creates no replacement task')
+    assert.deepEqual(h.bindings.s1, before, 'the old Muse binding remains intact')
+  }
+
+  // TASK-0056 D. Dual stale + Muse requested: symmetric fail-closed.
+  {
+    const before = { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\WS', preset: 'aih-engineering', engine: 'dual' }
+    const h = makeHarness({ s1: { ...before } }, { requestedPresets: { s1: 'aih-muse' } })
+    await assert.rejects(
+      () => h.guard.ensureBinding(null, session, 'C:\WS', 'continue the muse work'),
+      (error) => error.code === 'engine-binding-violation',
+    )
+    assert.equal(h.calls.invalidate, 0, 'engine mismatch invalidates nothing')
+    assert.equal(h.calls.createBinding.length, 0, 'engine mismatch creates no replacement task')
+    assert.deepEqual(h.bindings.s1, before, 'the old Dual binding remains intact')
+  }
+
+  // TASK-0056 restart/resume: Muse session persisted, preference now Dual.
+  {
+    const persisted = { s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\WS', preset: 'aih-muse', engine: 'muse' } }
+    const h = makeHarness(persisted, { requestedPresets: { s1: 'aih-engineering' } })
+    h.ledger.set('TASK-0004', instance(1))
+    h.ledgerEngines.set('TASK-0004', 'muse')
+    await assert.rejects(
+      () => h.guard.ensureBinding(null, session, 'C:\WS', 'turn after restart'),
+      (error) => error.code === 'engine-binding-violation',
+    )
+    assert.equal(h.calls.createBinding.length, 0, 'restart/resume never silently rebinds the session as Dual')
+    assert.equal(h.calls.invalidate, 0, 'restart/resume preserves the persisted Muse binding')
+    const persistedDual = { s1: { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\WS', preset: 'aih-engineering', engine: 'dual' } }
+    const h2 = makeHarness(persistedDual, { requestedPresets: { s1: 'aih-muse' } })
+    h2.ledger.set('TASK-0004', instance(1))
+    h2.ledgerEngines.set('TASK-0004', 'dual')
+    await assert.rejects(
+      () => h2.guard.ensureBinding(null, session, 'C:\WS', 'turn after restart'),
+      (error) => error.code === 'engine-binding-violation',
+    )
+    assert.equal(h2.calls.createBinding.length, 0, 'restart/resume never silently rebinds the session as Muse')
+  }
+
+  // TASK-0056 legacy bindings WITHOUT an engine fail closed (never inferred).
+  {
+    const before = { sessionId: 's1', taskId: 'TASK-0004', taskInstanceId: instance(1), workspace: 'C:\WS', preset: 'aih-engineering' }
+    const h = makeHarness({ s1: { ...before } })
+    await assert.rejects(
+      () => h.guard.ensureBinding(null, session, 'C:\WS', 'continue the work'),
+      (error) => error.code === 'engine-binding-violation',
+    )
+    assert.equal(h.calls.invalidate, 0, 'legacy binding without engine is never invalidated')
+    assert.equal(h.calls.createBinding.length, 0, 'legacy binding without engine creates no replacement task')
+    assert.deepEqual(h.bindings.s1, before, 'legacy binding without engine is preserved for a new session')
+  }
+
+  // Part 21 (original): legacy binding without taskInstanceId is stale/ambiguous.
+  {
+    const h = makeHarness({ s1: { sessionId: 's1', taskId: 'TASK-0004', workspace: 'C:\\WS', preset: 'aih-engineering', engine: 'dual' } })
     h.ledger.set('TASK-0004', instance(9)) // a NEW instance-aware generation exists
     const result = await h.guard.ensureBinding(null, session, 'C:\\WS', 'continue the work')
     assert.equal(result.outcome, 'recovered')
@@ -454,6 +590,8 @@ async function runBridgeEndToEnd() {
     const bindingA = readBinding()
     assert.match(bindingA.taskInstanceId, /^task_[0-9a-f]{32}$/, 'the binding carries an immutable instance identity')
     assert.equal(bindingA.taskId, 'TASK-0001')
+    assert.equal(bindingA.engine, 'dual', 'the new session binding persists engine=dual')
+    assert.equal(readLedger().tasks.find((item) => item.taskInstanceId === bindingA.taskInstanceId).boundEngine, 'dual', 'the authoritative task persists the same boundEngine')
 
     // 2. Codex reviewer routing records for generation A (routing only; no model).
     const payloadDir = path.join(dataHome, 'tmp')
@@ -541,7 +679,7 @@ async function runBridgeEndToEnd() {
     //     (the state-level regression lives in TaskIdentity.Tests.ps1): the
     //     expected targets are DERIVED from the fixture's copied glm-codex
     //     profile + model registry, so the configuration layer is validated
-    //     and no model identity is hardcoded here — Phase 3.2.5 remapped the
+    //     and no model identity is hardcoded here ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Phase 3.2.5 remapped the
     //     deep role with zero controller changes.
     assert.ok(deepTarget && reviewerTarget, 'deepEngineer and reviewer targets resolve through the active profile + registry')
 
@@ -612,6 +750,44 @@ async function runBridgeEndToEnd() {
     assert.equal(ledgerFinal.tasks.length, 1, 'one stale session + two simultaneous events = one replacement task')
     const taskC = ledgerFinal.tasks[0]
     assert.notEqual(taskC.taskInstanceId, taskB.taskInstanceId, 'the replacement task has a fresh instance')
+
+    // A separately selected Muse session binds and persists Muse exactly
+    // once; it does not inherit the existing Dual session's engine.
+    const museWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aih-engine-muse-e2e-'))
+    try {
+      fs.writeFileSync(path.join(museWorkspace, 'package.json'), JSON.stringify({ private: true, scripts: { test: 'node -e "process.exit(0)"' } }))
+      const museSettings = fs.readFileSync(path.join(installRoot, 'config', 'settings.yaml'), 'utf8')
+      fs.writeFileSync(path.join(dataHome, 'settings.yaml'), museSettings)
+      const preStepMuse = boot()
+      const museSession = {
+        id: 'e2e-session-muse',
+        header: { cwd: museWorkspace, agentPreset: 'aih-muse' },
+        messages: [],
+        append(kind, message) { this.messages.push({ kind, message }) },
+      }
+      const museOutcome = await preStepMuse({ agent: { session: museSession }, messages: [userMessage('Fix the authentication concurrency bug and harden the security boundary.')], step: 1, turn: 'muse-1' }, () => 'next')
+      assert.equal(museOutcome, 'next', JSON.stringify(museSession.messages))
+      const museBinding = JSON.parse(fs.readFileSync(bindingsPath, 'utf8')).bindings[museSession.id]
+      const museLedger = JSON.parse(fs.readFileSync(path.join(museWorkspace, '.ai-harness', 'state', 'tasks.json'), 'utf8'))
+      assert.equal(museBinding.engine, 'muse', 'new Muse session persists engine=muse in its binding')
+      assert.equal(museLedger.tasks[0].boundEngine, 'muse', 'new Muse session persists boundEngine=muse in its task')
+      assert.equal(museBinding.executionClass, 'muse_main', 'complex/security Muse session remains on the Muse main-agent plane')
+
+      // Corrupting the authoritative ledger engine must fail closed at the
+      // controller boundary. The downstream model callback is never reached.
+      museLedger.tasks[0].boundEngine = 'dual'
+      fs.writeFileSync(path.join(museWorkspace, '.ai-harness', 'state', 'tasks.json'), JSON.stringify(museLedger, null, 2))
+      let mismatchNextCalls = 0
+      const mismatchOutcome = await preStepMuse(
+        { agent: { session: museSession }, messages: [userMessage('Continue the same task.')], step: 1, turn: 'muse-2' },
+        () => { mismatchNextCalls += 1; return 'next' },
+      )
+      assert.deepEqual(mismatchOutcome, { kind: 'reject' }, 'authoritative engine mismatch fails closed: ' + JSON.stringify(museSession.messages))
+      assert.equal(mismatchNextCalls, 0, 'authoritative engine mismatch makes no downstream model call')
+      assert.equal(museSession.messages.at(-1).message.source.form, 'engine-binding-violation')
+      } finally {
+      fs.rmSync(museWorkspace, { recursive: true, force: true })
+    }
 
     // 17. No manual deletion of session-bindings.json or routing state was
     //     required at any point; the same session id kept working throughout.

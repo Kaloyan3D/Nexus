@@ -802,20 +802,29 @@ selector as the operator's effective preference control:
   GLM + Codex, `GLM-5.3 · HIGH` for a Custom profile) — never the legacy
   `agent-default-model` selection. RUNNING keeps naming the actually routed
   executor and is never rewritten by a preference change.
-- An **Engineering trigger** (`Engineering ▾`) opens a compact anchored
+- A **Profile trigger** (`Profile ▾`) opens a compact anchored
   popover with the SAME editor the Control Room Engineering tab uses (shared
   `useEngineeringEditor` state: profile dropdown, the five role rows, save).
   It closes on outside click/Escape, preserves unsaved edits while closed, and
-  refreshes the pill immediately after a successful save — no page refresh.
+  refreshes its configuration after a successful save — no page refresh.
   Both surfaces read/write the same endpoints, so they always agree.
-- Mode gate: the active preset (session binding, else the settings
-  `agent-presets.default`) is engineering mode iff its routing policy preset
-  does not set `profileOverrideAllowed: false`. Every other condition —
-  DeepSeek Only, unknown preset, missing/corrupt policy — fails safe to the
-  legacy composer (shipped model selector untouched).
-- The shipped DSH model seat is retired via a body-level mode flag plus a
-  scoped CSS rule keyed to the pinned frontend build's scoped class family;
-  it fails open if that build ever changes its class names.
+- Mode gate: for an ACTIVE session the authoritative controller snapshot
+  (`composer.mode`, derived by `status.cjs`: the session binding's preset,
+  else the settings `agent-presets.default`, is engineering mode iff its
+  routing policy preset does not set `profileOverrideAllowed: false`) wins;
+  before it loads, the session's own preset classifies the boot. On the
+  PRE-SESSION hero there is no session authority: the posture comes from the
+  mode selector's shared client state (`@nexus/mode-selector` publishes its
+  store as the `nexusModeState` service; stable preset ids only) and unknown
+  boot states fail closed toward Engineering/loading. A hero mode change
+  updates the composer posture immediately — no first message, no manual
+  session creation, no page refresh.
+- TASK-0039: the same `conversation.input.model` seat now delegates to a
+  Nexus mode-aware preference component. Engineering renders Profiles; legacy
+  renders the original upstream Model/Effort component. A pinned, fail-closed
+  integration patch broadens the seat to `session-maybe` for the hero surface.
+  No CSS hiding or right-slot lifecycle controls preference ownership.
+  RUNNING/PREFERRED remain independent read-only right-slot contributions.
 - The snapshot's `composer` block (`mode`, `preset`, `preferredEngineer`) is
   derived by `status.cjs` from the same resolver (`engineering.cjs`) the
   editor state uses; an unsatisfiable binding omits the PREFERRED chip
