@@ -12,6 +12,15 @@
  *   <installRoot>/config/model-registry.json          (model capabilities)
  *   <dataRoot>/custom-engineering-profile.json        (operator custom profile)
  *
+ * Phase M1 (Nexus Profiles): the user-facing PROFILE LIST is classified by
+ * the top-level Nexus Profile catalog
+ * (<installRoot>/config/nexus-profiles.json). Dual entries keep delegating
+ * their role details to this module's Engineering Profile state; Muse
+ * entries expose Muse registry metadata only
+ * (<installRoot>/config/muse-profiles.json) and are never shaped into Dual
+ * role semantics. A missing/invalid catalog degrades to an EMPTY list —
+ * the editor never guesses an engine classification.
+ *
  * The browser NEVER edits config files or ledgers directly. Every write for
  * the editor goes through the validated controller boundary
  * (scripts/EngineeringProfile.ps1 via the host POST route); this module only
@@ -99,6 +108,148 @@ function loadRegistryDocument(registryPath, readFile) {
   return readJson(registryPath, readFile)
 }
 
+/** Mirrors Nexus-Profiles.cjs SOURCE_KIND_BY_ENGINE (kept in lockstep by tests). */
+const NEXUS_SOURCE_KIND_BY_ENGINE = { dual: 'engineering-profile', muse: 'muse-profile' }
+
+function normalizeNexusId(value) {
+  return typeof value === 'string' ? value.trim().toLowerCase() : ''
+}
+
+/**
+ * Validate the top-level catalog contract only (same rules as
+ * Nexus-Profiles.cjs validateCatalogDocument). Engine-specific registries
+ * resolve separately so a missing provider-phase artifact fails closed.
+ */
+function validateNexusCatalog(catalog) {
+  if (!catalog || typeof catalog !== 'object') return false
+  if (catalog.schemaVersion !== 1 || !Array.isArray(catalog.profiles) || catalog.profiles.length === 0) return false
+  const seen = new Set()
+  for (const profile of catalog.profiles) {
+    if (!profile || typeof profile !== 'object') return false
+    const id = normalizeNexusId(profile.id)
+    if (id === '' || seen.has(id)) return false
+    seen.add(id)
+    const engine = normalizeNexusId(profile.engine)
+    if (engine !== 'dual' && engine !== 'muse') return false
+    const source = profile.source
+    if (!source || typeof source !== 'object') return false
+    if (source.kind !== NEXUS_SOURCE_KIND_BY_ENGINE[engine]) return false
+    if (normalizeNexusId(source.profileId) === '') return false
+  }
+  return true
+}
+
+function museProfileMetadataOf(museDocument, profileId) {
+  if (!museDocument || museDocument.schemaVersion !== 1 || !Array.isArray(museDocument.profiles)) return null
+  const wanted = normalizeNexusId(profileId)
+  for (const profile of museDocument.profiles) {
+    if (profile && normalizeNexusId(profile.id) === wanted) return profile
+  }
+  return null
+}
+
+/**
+ * Phase M3: the INTERNAL agent preset that runs an engine's agent plane
+ * (muse -> 'aih-muse'), derived from the catalog's engines map. Mirrors
+ * Nexus-Profiles.cjs engineAgentPresetOf; the binding is optional internal
+ * infrastructure — never a user-facing mode. A present but malformed binding
+ * is omitted (fail closed downstream: the session simply never maps to the
+ * engine plane instead of mapping to a malformed id).
+ */
+function engineAgentPresetOf(catalog) {
+  if (!catalog || typeof catalog !== 'object') return {}
+  const engines = catalog.engines
+  if (!engines || typeof engines !== 'object' || Array.isArray(engines)) return {}
+  const result = {}
+  for (const [name, value] of Object.entries(engines)) {
+    const engine = normalizeNexusId(name)
+    if (engine === '') continue
+    if (!value || typeof value !== 'object') continue
+    if (!Object.prototype.hasOwnProperty.call(value, 'agentPreset')) continue
+    const agentPreset = typeof value.agentPreset === 'string' ? value.agentPreset.trim() : ''
+    if (/^[a-z0-9][a-z0-9-]*$/.test(agentPreset)) result[engine] = agentPreset
+  }
+  return result
+}
+
+function cloneRoles(roles) {
+  return roles && typeof roles === 'object' ? JSON.parse(JSON.stringify(roles)) : null
+}
+
+/**
+ * Classify the user-facing profile list (Phase M1). The catalog decides the
+ * ENGINE; Dual role bindings come from the already-merged Dual registry
+ * (built-ins + operator Custom), Muse metadata comes from the Muse registry.
+ * An entry whose engine-specific source cannot be resolved (missing Dual
+ * registry config or missing Muse registry profile) is SKIPPED — never
+ * partially resolved. The operator
+ * Custom profile is dynamically classified Dual exactly like the catalog
+ * resolver does (never duplicated into the immutable catalog).
+ */
+function buildNexusProfileEntries(options) {
+  const { catalogDocument, museDocument, dualProfiles } = options || {}
+  if (!validateNexusCatalog(catalogDocument)) return []
+  const dualById = new Map()
+  for (const profile of Array.isArray(dualProfiles) ? dualProfiles : []) {
+    if (profile && profile.id !== undefined) dualById.set(normalizeNexusId(String(profile.id)), profile)
+  }
+  const entries = []
+  for (const profile of catalogDocument.profiles) {
+    const id = normalizeNexusId(profile.id)
+    const engine = normalizeNexusId(profile.engine)
+    const sourceProfileId = normalizeNexusId(profile.source.profileId)
+    const entry = {
+      id,
+      displayName: typeof profile.displayName === 'string' && profile.displayName !== '' ? profile.displayName : id,
+      engine,
+      selectable: engine === 'dual' ? profile.selectable !== false : profile.selectable === true,
+      runnable: engine === 'dual' ? profile.runnable !== false : profile.runnable === true,
+      availability: typeof profile.availability === 'string' && profile.availability !== '' ? profile.availability : null,
+      source: { kind: profile.source.kind, profileId: sourceProfileId },
+      builtin: profile.builtin === undefined ? true : profile.builtin !== false,
+      roles: null,
+      muse: null,
+    }
+    if (engine === 'dual') {
+      const dual = dualById.get(sourceProfileId)
+      if (!dual) continue
+      entry.displayName = typeof profile.displayName === 'string' && profile.displayName !== '' ? profile.displayName : String(dual.displayName || id)
+      entry.roles = cloneRoles(dual.roles)
+      if (entry.availability === null) entry.availability = 'ready'
+    } else {
+      // M1.1 parity with the PowerShell resolver: a Muse catalog entry is
+      // only user-facing together with its muse-profiles.json source. A
+      // missing engine-specific source is unresolved — the entry is skipped,
+      // never exposed partially resolved with muse: null.
+      const muse = museProfileMetadataOf(museDocument, sourceProfileId)
+      if (!muse) continue
+      entry.muse = JSON.parse(JSON.stringify(muse))
+      if (entry.availability === null) {
+        entry.availability = typeof muse.status === 'string' && muse.status !== '' ? muse.status : 'unavailable'
+      }
+    }
+    entries.push(entry)
+  }
+  if (!entries.some((entry) => entry.id === 'custom')) {
+    const custom = dualById.get('custom')
+    if (custom) {
+      entries.push({
+        id: 'custom',
+        displayName: String(custom.displayName || 'Custom'),
+        engine: 'dual',
+        selectable: true,
+        runnable: true,
+        availability: 'ready',
+        source: { kind: 'engineering-profile', profileId: 'custom' },
+        builtin: false,
+        roles: cloneRoles(custom.roles),
+        muse: null,
+      })
+    }
+  }
+  return entries
+}
+
 function modelResolvedProvider(entry, reasoning) {
   if (!entry) return null
   const providers = entry.providers && typeof entry.providers === 'object' ? entry.providers : null
@@ -110,9 +261,33 @@ function modelResolvedProvider(entry, reasoning) {
   return null
 }
 
+/**
+ * Phase M2.1 engine-scope contract (TASK-0037) — UI mirror of the shared
+ * asymmetric engine contract (Routing.ps1 Test-AihModelEngineCompatible /
+ * Engineering-Profiles.cjs modelEngineCompatible): 'dual' tolerates absence
+ * (backward compatible), 'muse' requires an EXPLICIT muse scope, unknown
+ * engines fail closed. Metadata driven — no model-id conditionals.
+ */
+function modelEngineCompatible(entry, engine) {
+  if (!entry || typeof engine !== 'string' || engine === '') return false
+  const declared = Array.isArray(entry.agentEngines) ? entry.agentEngines : null
+  if (engine === 'dual') {
+    if (declared === null) return true
+    return declared.includes('dual')
+  }
+  if (engine === 'muse') {
+    if (declared === null) return false
+    return declared.includes('muse')
+  }
+  return false
+}
+
 function modelCompatibleWithRole(entry, role, reasoning) {
   if (!entry) return false
   if (entry.enabled === false) return false
+  // Engine scope (Phase M2.1): the Dual role editor never offers a
+  // Muse-scoped model. Delegates to the shared asymmetric engine contract.
+  if (!modelEngineCompatible(entry, 'dual')) return false
   const req = ROLE_REQUIREMENTS[role]
   if (!req) return false
   if (req.requiresReasoning && entry.supportsReasoning === false) return false
@@ -191,6 +366,8 @@ function buildEngineeringProfileState(options) {
     profilesPath,
     registryPath,
     customProfilePath,
+    nexusProfilesPath,
+    museProfilesPath,
     readFile = defaultReadFile,
     nowUtc = () => new Date().toISOString(),
   } = options || {}
@@ -204,6 +381,22 @@ function buildEngineeringProfileState(options) {
     registryPath || (installRoot ? path.join(installRoot, 'config', 'model-registry.json') : null),
     readFile
   )
+  // Phase M1: top-level Nexus Profile classification for the editor list.
+  // The catalog decides the engine; Dual details stay in `profiles`/`roles`,
+  // Muse details stay in the Muse registry. Missing/invalid → empty list.
+  const nexusCatalog = readJson(
+    nexusProfilesPath || (installRoot ? path.join(installRoot, 'config', 'nexus-profiles.json') : null),
+    readFile
+  )
+  const museDocument = readJson(
+    museProfilesPath || (installRoot ? path.join(installRoot, 'config', 'muse-profiles.json') : null),
+    readFile
+  )
+  const nexusProfiles = buildNexusProfileEntries({
+    catalogDocument: nexusCatalog,
+    museDocument,
+    dualProfiles: profiles ? profiles.profiles : [],
+  })
   const roleRequirements = {}
   const roleModels = {}
   for (const role of ROLES.concat(OPTIONAL_ROLES)) {
@@ -222,6 +415,8 @@ function buildEngineeringProfileState(options) {
     schemaVersion: 1,
     generatedAtUtc: nowUtc(),
     profiles: profiles ? profiles.profiles : [],
+    nexusProfiles,
+    engineAgentPresets: engineAgentPresetOf(nexusCatalog),
     registry: registry ? registry.models : [],
     preferredProfile: settingsText ? preferredProfileOf(settingsText, profiles, readFile) : null,
     customRoles,
@@ -254,10 +449,17 @@ module.exports = {
   ROLE_REQUIREMENTS,
   ROLES,
   OPTIONAL_ROLES,
+  NEXUS_SOURCE_KIND_BY_ENGINE,
+  normalizeNexusId,
   parseEngineeringProfile,
   loadProfilesDocument,
   loadRegistryDocument,
+  validateNexusCatalog,
+  museProfileMetadataOf,
+  engineAgentPresetOf,
+  buildNexusProfileEntries,
   modelResolvedProvider,
+  modelEngineCompatible,
   modelCompatibleWithRole,
   compatibleModelsForRole,
   roleBindingTarget,

@@ -781,10 +781,11 @@ function composerPresetOf(binding, settingsText) {
 }
 
 /**
- * Composer mode gate: engineering mode iff the active preset's routing
- * policy allows profile overrides (profileOverrideAllowed !== false). Every
- * other condition — missing policy, unknown preset, corrupt policy — fails
- * safe to the legacy composer behavior (the preset owns the model choice).
+ * Composer ownership is a user-facing Mode contract, not a runtime model-
+ * override permission. Both internal planes selected by Normal Engineering
+ * (`aih-engineering` and `aih-muse`) remain Profile-owned for the complete
+ * session lifecycle. DeepSeek Only alone keeps the upstream model selector.
+ * Unknown/corrupt policy state fails safe to legacy.
  */
 function composerModeOf(activePreset, policyPath, readFile) {
   if (!policyPath || typeof activePreset !== 'string' || activePreset === '') return 'legacy'
@@ -792,7 +793,8 @@ function composerModeOf(activePreset, policyPath, readFile) {
   if (!policy || typeof policy !== 'object' || !policy.presets || typeof policy.presets !== 'object') return 'legacy'
   const preset = policy.presets[activePreset]
   if (!preset || typeof preset !== 'object') return 'legacy'
-  return preset.profileOverrideAllowed === false ? 'legacy' : 'engineering'
+  if (activePreset === 'aih-engineering' || activePreset === 'aih-muse') return 'engineering'
+  return 'legacy'
 }
 
 /**

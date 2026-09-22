@@ -2,7 +2,7 @@
 param(
  [ValidateSet('init','create-objective','create-task','test-task','set-review-requested','begin-attempt','attempt-event','evidence','failure','show','complete','learning')][string]$Action='show',
  [string]$Workspace=(Get-Location).Path,[string]$TaskId,[string]$Description,[string[]]$AcceptanceCriteria=@(),[string[]]$DependsOn=@(),
- [ValidateSet('low','normal','high','critical')][string]$Risk='normal',[ValidateSet('deterministic','engineer_normal','engineer_deep','reviewer','solver','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClass='engineer_normal',[switch]$ReviewRequested,[string]$FailureSignature,[string]$Evidence,
+ [ValidateSet('low','normal','high','critical')][string]$Risk='normal',[ValidateSet('deterministic','muse_main','engineer_normal','engineer_deep','reviewer','solver','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClass='engineer_normal',[switch]$ReviewRequested,[ValidateSet('dual','muse')][string]$Engine='dual',[string]$FailureSignature,[string]$Evidence,
  [string]$Classification,[switch]$CodexReviewPassed,[switch]$CodexFindingsResolved,
  [ValidateSet('verifying','passed','interrupted')][string]$Status,[string]$Reason,[string]$SessionId,[string]$StartedByTurn,[switch]$RequireNoOpenAttempt,[object]$EvidenceDoc,
  # TASK-0005: immutable lifecycle-instance guard. Supplied by the controller
@@ -34,11 +34,12 @@ if ($PayloadFile) {
     if ($null -ne $__aihPayload.PSObject.Properties['Evidence']) { $Evidence = [string]$__aihPayload.Evidence }
     if ($null -ne $__aihPayload.PSObject.Properties['EvidenceDoc']) { $EvidenceDoc = $__aihPayload.EvidenceDoc }
     if ($null -ne $__aihPayload.PSObject.Properties['TaskInstanceId']) { $TaskInstanceId = [string]$__aihPayload.TaskInstanceId }
+    if ($null -ne $__aihPayload.PSObject.Properties['Engine']) { $Engine = [string]$__aihPayload.Engine }
 }
 $(switch($Action){
  'init'{Initialize-AihTaskLedger $Workspace}
  'create-objective'{New-AihObjective $Workspace $Description $AcceptanceCriteria}
- 'create-task'{New-AihTask $Workspace $Description $AcceptanceCriteria $DependsOn $Risk $null -ReviewRequested:$ReviewRequested -ExecutionClassOverride $(if([string]::IsNullOrWhiteSpace($ExecutionClass)){$null}else{$ExecutionClass})}
+ 'create-task'{New-AihTask $Workspace $Description $AcceptanceCriteria $DependsOn $Risk $null -ReviewRequested:$ReviewRequested -Engine $Engine -ExecutionClassOverride $(if([string]::IsNullOrWhiteSpace($ExecutionClass)){$null}else{$ExecutionClass})}
  # TASK-0005: deterministic identity lookup. NEVER reports a missing task via
  # an exception: {exists=false} is emitted ONLY after the authoritative ledger
  # was successfully read. Malformed ledger / IO / parse failures still throw,

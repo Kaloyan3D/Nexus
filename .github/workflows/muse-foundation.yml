@@ -1,0 +1,25 @@
+name: Muse Foundation
+
+on:
+  push:
+    branches:
+      - feature/muse-integration
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  nexus-profile-foundation:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate JS profile engine contract
+        run: node tests/NexusProfiles.Tests.cjs
+      - name: Validate controller-plane profile engine contract
+        shell: pwsh
+        run: ./tests/NexusProfiles.Tests.ps1 -InstallRoot .

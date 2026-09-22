@@ -72,23 +72,12 @@ if ($oauthAvailable) {
 }
 if (-not $oauthAvailable) { Write-Warning 'Normal Engineering is unavailable in this Control Room process until ChatGPT/Codex OAuth is configured.' }
 
-Write-Host 'AI Harness: checking DeepSeek API (timeout: 20 seconds) ...'
+# Direct-provider availability is intentionally not resolved at startup. The
+# selected request route owns credential, connectivity, and model-availability
+# failures, so an unavailable DeepSeek deployment cannot take down unrelated
+# OpenAI, Muse, or local Harness work.
 $deepSeekKey = Get-AihDeepSeekKey $InstallRoot
-if ([string]::IsNullOrWhiteSpace($deepSeekKey)) {
-    throw "DeepSeek API key is not configured. Run: $(Get-AihLayoutLauncherPath -Layout $layout -Name 'aih-key')"
-}
-$deepSeekHeaders = @{ Authorization = "Bearer $deepSeekKey" }
-try {
-    $deepSeekModels = Invoke-RestMethod -Uri 'https://api.deepseek.com/models' -Headers $deepSeekHeaders -TimeoutSec 20
-}
-catch {
-    throw "Direct DeepSeek connectivity check failed: $($_.Exception.Message)"
-}
-if (@($deepSeekModels.data | ForEach-Object { $_.id }) -notcontains 'deepseek-v4-flash') {
-    throw 'Direct DeepSeek API is reachable, but deepseek-v4-flash is not listed for this credential.'
-}
-$deepSeekHeaders = $null
-Write-Host 'AI Harness: provider checks passed; preparing Web UI ...'
+Write-Host 'AI Harness: preparing Web UI ...'
 
 Set-AihControlRoomDefault -SettingsPath $layout.Settings -Mode $mode
 
@@ -152,6 +141,12 @@ You are the DeepSeek implementation agent for the workspace captured by the curr
 "@
 $env:AIH_PERSONA_DEEPSEEK = @"
 You are the DeepSeek implementation agent for the workspace captured by the current session. The immutable session cwd is the only execution-root authority; never infer a repository from the Nexus server process cwd or prompt text. Complete the supplied bounded task. Use repository-local instructions and relevant context. Respect scope, use targeted verification, and return structured evidence. The deterministic controller owns task state, routing, retries, budgets, escalation, completion, and automatic Visual Review. Never discover or invoke Visual Review through the skill catalog. Codex is unavailable in this preset. If blocked, return one scoped escalation with a stable failure signature.
+"@
+# Phase M3 (TASK-0040): the Muse Agent Plane persona. Minimal Muse-native
+# engineering identity — NOT the DeepSeek implementation agent, no routing
+# policy or completion authority, no subagents/reviewers.
+$env:AIH_PERSONA_MUSE = @"
+You are the Muse engineering agent. Complete the supplied bounded task: inspect the repository evidence first, follow repository-local instructions, use the available tools as required, and verify with a targeted check before reporting. Return concrete evidence for what you changed and verified. The deterministic controller owns routing, attempts, verification results, and task completion; you never declare completion or re-route yourself. You are a single engineering agent: there are no subagents, reviewers, or fallback engineers on this plane.
 "@
 
 $stdoutLog = Join-Path $layout.Logs 'dsh.out.log'

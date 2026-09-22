@@ -26,7 +26,18 @@ const DETAIL = path.join(ROOT, 'ui', 'nexus-controller', 'lib', 'detail.cjs')
 
 const status = require(ADAPTER)
 const detail = require(DETAIL)
-const pexec = promisify(execFile)
+// spawnSync-backed: a runner sandbox that denies child-process pipes surfaces
+// the denial as probe.error (a catchable rejection) instead of a process-level
+// throw, so git-backed sections degrade deterministically there.
+const { spawnSync } = require('node:child_process')
+function pexec(cmd, args, opts) {
+  return new Promise((resolve, reject) => {
+    const r = spawnSync(cmd, args, opts)
+    if (r.error) { reject(r.error); return }
+    if (r.status !== 0) { const e = new Error('exit ' + r.status); e.stdout = r.stdout; reject(e); return }
+    resolve({ stdout: r.stdout })
+  })
+}
 
 function tmpDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
@@ -258,6 +269,19 @@ async function fixtureSnapshot(overrides = {}) {
 }
 
 async function main() {
+  {
+    const plugin = await import(pathToFileURL(HOST).href)
+    const singleFlight = plugin.createSingleFlight((value) => value.toLowerCase())
+    let executions = 0
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const first = singleFlight('C:\\Repo', async () => { executions += 1; await gate; return 'shared' })
+    const second = singleFlight('c:\\repo', async () => { executions += 1; return 'duplicate' })
+    release()
+    assert.deepEqual(await Promise.all([first, second]), ['shared', 'shared'])
+    assert.equal(executions, 1, 'workspace registration handler single-flights equivalent paths')
+  }
+
   // ── 1. empty state: no binding → idle, task null ─────────────────────────
   {
     const dataRoot = tmpDir('nexus-ctr-')
@@ -416,9 +440,14 @@ async function main() {
   {
     const dir = tmpDir('nexus-git-')
     let gitBin = null
+    // spawnSync (not promisified execFile): a runner sandbox that denies
+    // child-process pipes surfaces the denial as probe.error instead of a
+    // process-level throw, so the git section degrades to a skip exactly
+    // like the git-absent case.
+    const { spawnSync } = require('node:child_process')
     for (const candidate of ['git', 'C:/Program Files/Git/cmd/git.exe', 'C:/Program Files (x86)/Git/cmd/git.exe']) {
-      const probe = await pexec(candidate, ['--version'], { encoding: 'utf8' }).catch(() => null)
-      if (probe !== null) { gitBin = candidate; break }
+      const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8', timeout: 10000 })
+      if (!probe.error && probe.status === 0) { gitBin = candidate; break }
     }
     if (gitBin !== null) {
       await pexec(gitBin, ['init', '-q', '-b', 'main'], { cwd: dir, encoding: 'utf8' })
@@ -635,8 +664,14 @@ async function main() {
     assert.ok(moduleExports, 'client bundle must export a module')
     assert.equal(JSON.stringify(moduleExports.inject), JSON.stringify(['slots', 'workspaces']), 'client services')
 
+    const injectedServices = []
     const fakeCtx = {
+      provide() {},
       effect(fn) { fn(); return () => {} },
+      // TASK-0038: the nested cordis inject that consumes the shared
+      // nexusModeState service (late-binding; recorded so the contract below
+      // can assert the dependency declaration).
+      inject(deps, callback) { for (const name of deps) injectedServices.push(name); },
       workspaces: {
         list: {
           getSnapshot() { return { phase: 'pending', items: [] } },
@@ -649,6 +684,7 @@ async function main() {
       },
     }
     moduleExports.apply(fakeCtx)
+    assert.deepEqual(injectedServices, ['nexusModeState'], 'composer mode ownership rides the shared nexusModeState service')
     assert.deepEqual(injected.map((i) => i.name), ['shell.overlay', 'conversation.session.header.actions', 'conversation.input.right'])
     assert.equal(registered.length, 3)
     assert.equal(registered[0].spec.name, 'shell.overlay')
@@ -712,10 +748,20 @@ async function main() {
     assert.match(pillHtml, />HIGH</, 'effort badge renders uppercase')
     assert.ok(!pillHtml.includes('High High'), 'never renders a duplicated effort')
     assert.equal(renderToStaticMarkup(react.createElement(ExecutorPill, { content: null })), '', 'no content renders no pill markup')
-    const ExecutorChip = moduleExports.ExecutorChip
+    // Exercise preference and status as independent composer children.
+    const ExecutorChip = ({session}) => react.createElement(react.Fragment, null,
+      react.createElement(moduleExports.ExecutorChip, {session}),
+      react.createElement(moduleExports.ComposerPreference, {sessionId:session?.sessionId,useSession:()=>session,legacy:null}))
     assert.equal(typeof ExecutorChip, 'function', 'ExecutorChip must be exported')
-    // SSR without a snapshot (poll has not landed yet) → no pill markup
-    assert.equal(renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-x' } })), '', 'empty snapshot renders no pill')
+    // Phase M2.1 (TASK-0037): SSR without a snapshot (poll has not landed yet)
+    // no longer collapses to the legacy posture — the boot heuristic fails
+    // CLOSED toward engineering, so the Profile UI (the Engineering trigger in
+    // its loading state) survives a restart, while the pills stay empty until
+    // real content exists. (Pre-M2.1 this asserted EMPTY markup; the restart
+    // fix intentionally supersedes that.)
+    const bootChipHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-x' } }))
+    assert.ok(bootChipHtml.includes('nx-eng-trigger'), 'unknown boot state keeps the Profile UI trigger mounted (fail closed)')
+    assert.ok(!bootChipHtml.includes('data-nexus-executor'), 'unknown boot state still renders no RUNNING/PREFERRED pill content')
 
     // ── display-state: UNAVAILABLE vs IDLE semantics ────────────────────────
     const resolve = moduleExports.resolveDisplayState
@@ -902,8 +948,12 @@ async function main() {
     }
     vm.createContext(sandbox)
     vm.runInContext(code, sandbox)
+    const injectedServices = []
     const controllerApply = () => moduleExports.apply({
-      effect(fn) { fn(); return () => {} },
+      provide() {},      effect(fn) { fn(); return () => {} },
+      // TASK-0038: the shared nexusModeState service is consumed through a
+      // nested cordis inject; the mini-composition records the dependency.
+      inject(deps, callback) { for (const name of deps) injectedServices.push(name); },
       slots: {
         inject(name, callback) { callback() },
         register(spec, component) { return core.register(spec, component) },
@@ -979,7 +1029,8 @@ async function main() {
     vm.runInContext(code, sandbox)
     const registered = []
     moduleExports.apply({
-      effect(fn) { fn(); return () => {} },
+      provide() {},      effect(fn) { fn(); return () => {} },
+      inject() { /* TASK-0038: the nested nexusModeState consumption is out of scope here */ },
       slots: {
         inject(name, callback) { registered.push(name); callback() },
         register(spec, component) { return { spec, component } },
@@ -1330,7 +1381,7 @@ async function main() {
   }
 
   // 18g. git files: merged porcelain + numstat for a REAL fixture repo.
-  {
+  if (spawnSync('git', ['--version'], { encoding: 'utf8', timeout: 10000 }).status === 0) {
     const repo = tmpDir('nexus-git-d-')
     await pexec('git', ['init', '-q', repo])
     await pexec('git', ['-C', repo, 'config', 'user.email', 'test@example.com'])
@@ -1600,7 +1651,10 @@ async function main() {
     }
     vm.createContext(sandbox)
     vm.runInContext(source, sandbox)
-    const ExecutorChip = moduleExports.ExecutorChip
+    // Exercise preference and status as independent composer children.
+    const ExecutorChip = ({session}) => react.createElement(react.Fragment, null,
+      react.createElement(moduleExports.ExecutorChip, {session}),
+      react.createElement(moduleExports.ComposerPreference, {sessionId:session?.sessionId,useSession:()=>session,legacy:null}))
     assert.equal(typeof ExecutorChip, 'function', 'ExecutorChip must be exported')
     assert.equal(typeof moduleExports.ExecutorPill, 'function')
     assert.equal(typeof moduleExports.executorChipContent, 'function')
@@ -1622,8 +1676,20 @@ async function main() {
     assert.match(boundHtml, /DeepSeek V4 Flash/, 'pill names the base model identity')
     assert.match(boundHtml, />HIGH</, 'effort renders as its own uppercase badge (TASK-0003.3a)')
     assert.ok(!boundHtml.includes('DeepSeek V4 Flash High'), 'tier is never embedded in the model label')
-    assert.ok(!boundHtml.includes('<button'), 'executor pill is read-only (no button/click target)')
-    assert.ok(!boundHtml.includes('PREFERRED'), 'no preference data means no PREFERRED chip')
+    // Phase M2.1: this fixture IS an engineering session (binding.preset
+    // 'aih-engineering', no composer block) — the boot heuristic classifies it
+    // engineering, so the Profile UI trigger mounts alongside the pill (the
+    // pre-M2.1 read-only-pill-only contract is superseded by design). The pill
+    // row itself stays read-only; the only button is the nx-eng-trigger.
+    assert.ok(boundHtml.includes('nx-eng-trigger'), 'engineering-session boot mounts the Profile UI trigger (fail closed)')
+    // The pills segment ends where the selector's composer span begins; the
+    // only button in the chip is the nx-eng-trigger inside that composer.
+    const pillSegment = boundHtml.slice(boundHtml.indexOf('data-nexus-executor'), boundHtml.indexOf('nx-eng-composer'))
+    assert.ok(!pillSegment.includes('<button'), 'the executor pill row stays read-only (no button/click target)')
+    assert.ok(boundHtml.indexOf('<button') > boundHtml.indexOf('nx-eng-composer'), 'the only chip button is the Profile UI trigger')
+    // The mounted selector's popover legitimately renders its PREFERRED
+    // PROFILE meta label — the assertion targets the PREFERENCE CHIP only.
+    assert.ok(!boundHtml.includes('nx-executor-pill-pref'), 'no preference data means no PREFERRED chip')
 
     // ── TASK-0003.3 / 3a states: RUNNING + PREFERRED pair, truthfully ─────
     // preferred MAX + effective High → same model identity, different effort:
@@ -1631,6 +1697,7 @@ async function main() {
     sandbox.window.__NX_TEST_SNAPSHOT__ = {
       schemaVersion: 1, generatedAtUtc: new Date().toISOString(), state: 'working',
       binding: { sessionId: 'session-0001', taskId: 'TASK-0042', workspace: 'C:\\ws', preset: 'aih-engineering', executionClass: 'deepseek_normal' },
+      composer: { mode: 'engineering', preset: 'aih-engineering', preferredEngineer: { profileId: 'glm-codex', profileDisplayName: 'GLM + Codex', modelId: 'deepseek-v4-flash', modelDisplayName: 'DeepSeek V4 Flash', reasoning: 'max' } },
       execution: { class: 'deepseek_normal', provider: 'flash-high-direct', model: 'DeepSeek V4 Flash', modelId: 'deepseek-v4-flash', reasoning: 'high' },
       preference: { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash' },
     }
@@ -1645,13 +1712,17 @@ async function main() {
     assert.ok(!pairHtml.includes('MAX Max') && !pairHtml.includes('High High'), 'never renders a duplicated effort')
     assert.ok(pairHtml.includes('Nexus may route individual tasks below this ceiling'), 'PREFERRED tooltip carries the ceiling explanation')
     assert.ok(pairHtml.includes('RUNNING — DeepSeek V4 Flash · HIGH'), 'RUNNING tooltip carries the full model identity + effort')
-    assert.ok(!pairHtml.includes('<button'), 'pair stays read-only')
+    // Phase M2.1: the pair fixture is an engineering session — the Profile UI
+    // trigger mounts beside it; the pill PAIR itself stays read-only.
+    const pairSegment = pairHtml.slice(pairHtml.indexOf('data-nexus-executor'), pairHtml.indexOf('nx-eng-composer'))
+    assert.ok(!pairSegment.includes('<button'), 'pair stays read-only')
 
     // preferred MAX + effective MAX (identical identity AND effort) → only
     // RUNNING (no redundant presentation)
     sandbox.window.__NX_TEST_SNAPSHOT__ = {
       schemaVersion: 1, generatedAtUtc: new Date().toISOString(), state: 'working',
       binding: { sessionId: 'session-0001', taskId: 'TASK-0042', workspace: 'C:\\ws', preset: 'aih-engineering', executionClass: 'deepseek_normal' },
+      composer: { mode: 'engineering', preset: 'aih-engineering', preferredEngineer: { profileId: 'glm-codex', profileDisplayName: 'GLM + Codex', modelId: 'deepseek-v4-flash', modelDisplayName: 'DeepSeek V4 Flash', reasoning: 'max' } },
       execution: { class: 'deepseek_normal', provider: 'flash-max-direct', model: 'DeepSeek V4 Flash', modelId: 'deepseek-v4-flash', reasoning: 'max' },
       preference: { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash' },
     }
@@ -1665,6 +1736,7 @@ async function main() {
     sandbox.window.__NX_TEST_SNAPSHOT__ = {
       schemaVersion: 1, generatedAtUtc: new Date().toISOString(), state: 'waiting',
       binding: { sessionId: 'session-0001', taskId: 'TASK-0042', workspace: 'C:\\ws', preset: 'aih-engineering', executionClass: 'deepseek_normal' },
+      composer: { mode: 'engineering', preset: 'aih-engineering', preferredEngineer: { profileId: 'glm-codex', profileDisplayName: 'GLM + Codex', modelId: 'deepseek-v4-flash', modelDisplayName: 'DeepSeek V4 Flash', reasoning: 'max' } },
       execution: null,
       preference: { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash' },
     }
@@ -1674,26 +1746,72 @@ async function main() {
     assert.match(noExecHtml, />PREFERRED</)
     assert.match(noExecHtml, />MAX</, 'PREFERRED effort badge survives without RUNNING')
 
-    // unbound session → preference stays usable (PREFERRED chip labels the selector)
+    // unbound session → preference stays usable (PREFERRED chip labels the selector).
+    // TASK-0038 spec change: a session object carrying NO preset and no shared
+    // mode state is an UNKNOWN boot state and fails CLOSED toward engineering —
+    // it no longer renders the legacy preference pill. An explicitly legacy
+    // unbound session keeps the exact pre-M2.1 preference behavior, so this
+    // fixture now names its preset (same pattern the M2.1 boot heuristic gave
+    // the legacy fixture in section 35a).
     sandbox.window.__NX_TEST_SNAPSHOT__ = {
       schemaVersion: 1, generatedAtUtc: new Date().toISOString(), state: 'idle',
       binding: null,
       execution: null,
       preference: { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash' },
     }
-    const unboundHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    const unboundHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001', agentPreset: 'aih-deepseek' } }))
     assert.ok(!unboundHtml.includes('data-nexus-executor'), 'unbound session never invents a RUNNING value')
-    assert.match(unboundHtml, /data-nexus-preferred/, 'unbound session keeps the preference labeled and usable')
+    assert.match(unboundHtml, /data-nexus-preferred/, 'unbound legacy session keeps the preference labeled and usable')
+    // An unbound session with NO preset anywhere is an unknown boot state:
+    // fail closed toward engineering/loading (Profile UI trigger mounted).
+    const unknownUnboundHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    assert.ok(!unknownUnboundHtml.includes('data-nexus-executor'), 'unknown unbound session never invents a RUNNING value')
+    assert.ok(unknownUnboundHtml.includes('nx-eng-trigger'), 'unknown unbound session fails closed toward the Engineering posture')
 
-    // transport failure / no snapshot → no pill (UNAVAILABLE is the drawer's face)
+    // transport failure / no snapshot (M2.1): the RUNNING/PREFERRED pills stay
+    // empty (UNAVAILABLE is the drawer's face), but the Profile UI trigger
+    // stays mounted — the restart fix fails CLOSED toward engineering instead
+    // of dropping the operator back into the legacy posture.
     sandbox.window.__NX_TEST_SNAPSHOT__ = null
     sandbox.window.__NX_TEST_SNAPSHOT_FAILED__ = true
-    assert.equal(renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } })), '', 'transport failure renders no pill')
+    const failHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    assert.ok(!failHtml.includes('data-nexus-executor'), 'transport failure renders no pill content')
+    assert.ok(failHtml.includes('nx-eng-trigger'), 'transport failure keeps the Profile UI trigger mounted (fail closed)')
     sandbox.window.__NX_TEST_SNAPSHOT__ = null
     sandbox.window.__NX_TEST_SNAPSHOT_FAILED__ = false
-    assert.equal(renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } })), '', 'no snapshot renders no pill')
-    // no session scope (hero phase) → no pill
-    assert.equal(renderToStaticMarkup(react.createElement(ExecutorChip, { session: null })), '', 'no session scope renders no pill')
+    const noSnapHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    assert.ok(!noSnapHtml.includes('data-nexus-executor'), 'no snapshot renders no pill content')
+    assert.ok(noSnapHtml.includes('nx-eng-trigger'), 'no snapshot keeps the Profile UI trigger mounted (fail closed)')
+    // no session scope (hero phase) — TASK-0038 mode ownership: the hero is a
+    // lifecycle state with its own authority (the shared mode state), NEVER a
+    // legacy verdict. The old assertion expected the pre-M2.1 legacy rendering
+    // for a null session, which encoded the production bug (the upstream DSH
+    // model selector survived an Engineering restart on the hero).
+    assert.ok(moduleExports.attachNexusModeState, 'hero contract: shared mode state bridge available')
+    // Without any mode state the hero fails CLOSED toward engineering/loading:
+    // no pill content, Profile UI trigger mounted (loading posture inside).
+    const heroClosedHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: null }))
+    assert.ok(!heroClosedHtml.includes('data-nexus-executor'), 'hero without pill data renders no executor pill')
+    assert.ok(heroClosedHtml.includes('nx-eng-trigger'), 'hero without mode state still fails closed toward the Engineering posture')
+    // Hero + selected legacy mode: BOTH the Nexus selector and the pill
+    // disappear — the pre-M2.1 upstream-selector posture is restored purely by
+    // the mode selection, with no session and no snapshot.
+    moduleExports.attachNexusModeState({
+      getSnapshot: () => ({ current: 'aih-deepseek' }),
+      subscribe: () => () => {},
+    })
+    const heroLegacyPillHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: null }))
+    assert.equal(heroLegacyPillHtml, '', 'hero legacy mode renders no Nexus pill and no Profile selector')
+    moduleExports.attachNexusModeState(null)
+    // Hero + selected Engineering mode (no session, no snapshot): the Nexus
+    // Profile selector IS the composer posture.
+    moduleExports.attachNexusModeState({
+      getSnapshot: () => ({ current: 'aih-engineering' }),
+      subscribe: () => () => {},
+    })
+    const heroEngPillHtml = renderToStaticMarkup(react.createElement(ExecutorChip, { session: null }))
+    assert.ok(heroEngPillHtml.includes('nx-eng-trigger'), 'hero Engineering renders the Profile selector before any session exists')
+    moduleExports.attachNexusModeState(null)
   }
 
   // ── 21. detail cache: mtime-keyed reuse + fail-closed missing files ──────
@@ -3003,7 +3121,7 @@ async function main() {
     const source = fs.readFileSync(CLIENT, 'utf8')
     // deterministic snapshot + editor-state injection (same pattern as §30)
     const hookHeader = 'function useControllerSnapshot(sessionId) {'
-    const editorHeader = 'function useEngineeringEditor(sessionId) {'
+    const editorHeader = 'function useEngineeringEditor(sessionId, enabled) {'
     assert.ok(source.includes(hookHeader) && source.includes(editorHeader), 'shared hooks exist in client.js')
     const patched = source
       .replace(hookHeader, hookHeader + '\n\tif (typeof window !== "undefined" && (window.__NX_TEST_SNAPSHOT__ !== undefined || window.__NX_TEST_SNAPSHOT_FAILED__)) return { snapshot: window.__NX_TEST_SNAPSHOT__ ?? null, failed: window.__NX_TEST_SNAPSHOT_FAILED__ === true };')
@@ -3029,13 +3147,24 @@ async function main() {
     }
     vm.createContext(sandbox)
     vm.runInContext(patched, sandbox)
+    function TestComposer({session}) {
+      return react.createElement(react.Fragment, null,
+        react.createElement(moduleExports.ExecutorChip, {session}),
+        react.createElement(moduleExports.ComposerPreference, {sessionId:session?.sessionId, useSession:()=>session, legacy:null}))
+    }
     assert.equal(typeof moduleExports.EngineeringSelector, 'function', 'EngineeringSelector exported')
+    assert.equal(moduleExports.initialProfileChoice(null), null, 'cold-start editor effect tolerates the initial null catalog')
+    assert.equal(moduleExports.userFacingProfiles(undefined).length, 0, 'unavailable catalog has no profile choices')
     assert.equal(typeof moduleExports.EngineeringEditorFields, 'function', 'EngineeringEditorFields exported')
     assert.equal(typeof moduleExports.useEngineeringEditor, 'function', 'useEngineeringEditor exported')
     assert.equal(typeof moduleExports.preferredEngineerFromEditorState, 'function', 'preferredEngineerFromEditorState exported')
 
-    // 35a. legacy snapshot (no composer block): unchanged pills-only render —
-    // no trigger button, and the legacy preference label still comes through
+    // 35a. EXPLICIT legacy session (aih-deepseek preset; snapshot has no
+    // composer block yet): unchanged pills-only render — no trigger button,
+    // and the legacy preference label still comes through. (Pre-M2.1 this
+    // fixture carried no preset at all; the M2.1 boot heuristic fails CLOSED
+    // toward engineering for unknown boot states, so an explicit legacy
+    // preset is what a legacy session now asserts.)
     sandbox.window.__NX_TEST_SNAPSHOT__ = {
       schemaVersion: 1, generatedAtUtc: new Date().toISOString(), state: 'working',
       preference: { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash MAX' },
@@ -3043,7 +3172,7 @@ async function main() {
     }
     sandbox.window.__NX_TEST_SNAPSHOT_FAILED__ = false
     sandbox.window.__NX_TEST_EDITOR__ = undefined
-    const legacyHtml = renderToStaticMarkup(react.createElement(moduleExports.ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    const legacyHtml = renderToStaticMarkup(react.createElement(TestComposer, { session: { sessionId: 'session-0001', agentPreset: 'aih-deepseek' } }))
     assert.match(legacyHtml, /data-nexus-preferred/, 'legacy mode still renders the preference pill')
     assert.match(legacyHtml, /DeepSeek V4 Flash MAX/, 'legacy preference label unchanged (agent-default-model)')
     assert.ok(!legacyHtml.includes('<button'), 'legacy mode renders no control chrome')
@@ -3061,11 +3190,11 @@ async function main() {
       preference: { provider: 'zai-direct', modelId: 'glm-5.3-flash', reasoning: 'high', label: 'GLM-5.3-Flash' },
       execution: { class: 'deepseek_normal', provider: 'flash-high-direct', model: 'DeepSeek V4 Flash', reasoning: 'high' },
     }
-    const engHtml = renderToStaticMarkup(react.createElement(moduleExports.ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    const engHtml = renderToStaticMarkup(react.createElement(TestComposer, { session: { sessionId: 'session-0001' } }))
     assert.match(engHtml, /GLM-5\.3-Flash/, 'PREFERRED names the profile primaryEngineer binding')
     assert.match(engHtml, />HIGH</, 'PREFERRED effort badge renders uppercase')
     assert.match(engHtml, /nx-eng-trigger/, 'Engineering trigger rendered in engineering mode')
-    assert.match(engHtml, />Engineering</, 'trigger is labeled Engineering')
+    assert.match(engHtml, /Profile/, 'trigger is labeled Profile')
     assert.ok(!engHtml.includes('DeepSeek V4 Flash MAX'), 'legacy agent-default-model label never leaks into engineering mode')
     assert.match(engHtml, /data-nexus-executor/, 'RUNNING pill still names the effective executor')
     assert.match(engHtml, /DeepSeek V4 Flash/, 'RUNNING identity unchanged by the preference swap')
@@ -3085,7 +3214,7 @@ async function main() {
       dirty: false,
       fetchedAt: Date.now(),
     }
-    const savedHtml = renderToStaticMarkup(react.createElement(moduleExports.ExecutorChip, { session: { sessionId: 'session-0001' } }))
+    const savedHtml = renderToStaticMarkup(react.createElement(TestComposer, { session: { sessionId: 'session-0001' } }))
     assert.match(savedHtml, /GLM-5\.3</, 'PREFERRED flips to the saved custom binding immediately')
     assert.ok(!savedHtml.includes('GLM-5.3-Flash ·'), 'stale snapshot preference no longer shown once the editor state is fresher')
 
@@ -3135,12 +3264,11 @@ async function main() {
     assert.ok(builtinHtml.includes('disabled'), 'built-in profile role selects are disabled')
     assert.ok(builtinHtml.includes('Select Profile'), 'built-in save labels as Select Profile')
 
-    // 35f. scoped CSS retires the upstream DSH model seat only in
-    // engineering mode; the anchor is the pinned frontend build's scoped
-    // class family and fails open if that build ever changes
-    assert.ok(source.includes("body[data-nexus-composer-mode='engineering']"), 'body mode flag CSS hook present')
-    assert.ok(source.includes('_7KE1Ra_root'), 'upstream model seat suppression rule present')
-    assert.ok(source.includes('nexusComposerMode'), 'body dataset flag wiring present')
+    // Ownership is structural; the old body marker and CSS suppression are gone.
+    assert.ok(!source.includes("body[data-nexus-composer-mode='engineering']"))
+    assert.ok(!source.includes("[data-slot='conversation.input.model']"))
+    assert.ok(!source.includes('_7KE1Ra'))
+    assert.ok(!source.includes('nexusComposerMode'))
     assert.ok(source.includes('nx-eng-popover'), 'popover styles present')
     assert.ok(source.includes('engineering-profile-action.json'), 'save posts to the shared action endpoint')
 
@@ -3179,8 +3307,138 @@ async function main() {
     assert.equal(derived.modelDisplayName, 'GLM-5.3')
     assert.equal(derived.vendor, 'Z.ai')
     assert.equal(derived.reasoning, 'high')
+
+    // 35i. Phase M2.1 (TASK-0037) restart fix: boot-mode derivation must not
+    // depend on the polled snapshot alone, and the body flag must exist
+    // before first paint (useLayoutEffect, not useEffect).
+    const modeOf = moduleExports.composerModeOfSession
+    assert.ok(modeOf, 'composerModeOfSession exported for the boot heuristic')
+
+    // Authoritative snapshot wins once loaded (both directions).
+    assert.equal(modeOf({ agentPreset: 'aih-deepseek' }, { composer: { mode: 'engineering' } }).mode, 'engineering', 'snapshot engineering beats the session preset')
+    assert.equal(modeOf({ agentPreset: 'aih-engineering' }, { composer: { mode: 'legacy' } }).mode, 'legacy', 'snapshot legacy beats the session preset')
+    assert.equal(modeOf({}, { composer: { mode: 'engineering' } }).source, 'snapshot')
+
+    // Client-side boot heuristic from the session preset.
+    assert.equal(modeOf({ agentPreset: 'aih-engineering' }, null).mode, 'engineering', 'aih-engineering session boots engineering before any snapshot')
+    assert.equal(modeOf({ agentPreset: 'aih-engineering' }, null).source, 'session-preset')
+    assert.equal(modeOf({ agentPreset: 'aih-muse' }, null).mode, 'engineering', 'aih-muse session remains Profile-owned before the first snapshot')
+    assert.equal(modeOf({ projectionValues: { agentPreset: 'aih-muse' } }, null).mode, 'engineering', 'restored aih-muse projection remains Profile-owned')
+    assert.equal(modeOf({ agentPreset: 'aih-deepseek' }, null).mode, 'legacy', 'aih-deepseek session boots legacy before any snapshot')
+    assert.equal(modeOf({ agentPreset: 'aih-deepseek' }, null).source, 'session-preset')
+
+    // projectionValues fallback when agentPreset is absent.
+    assert.equal(modeOf({ projectionValues: { agentPreset: 'aih-engineering' } }, null).mode, 'engineering', 'projectionValues.agentPreset is a boot source too')
+
+    // Endpoint unavailable (snapshot error) keeps the Profile UI: the preset
+    // heuristic still classifies an engineering session.
+    assert.equal(modeOf({ agentPreset: 'aih-engineering' }, { error: 'endpoint unavailable' }).mode, 'engineering', 'endpoint-unavailable restart keeps the Profile UI (fail closed)')
+    // Unknown/absent boot state fails closed toward engineering/loading.
+    assert.equal(modeOf({}, null).mode, 'engineering', 'unknown boot state fails closed toward engineering')
+    assert.equal(modeOf({}, null).source, 'boot-fail-closed')
+    // TASK-0038 MODE OWNERSHIP — pre-session (hero) contract. "No session" is
+    // a lifecycle state with its own authority (the mode selector's client
+    // state), NEVER a legacy verdict. The old assertion
+    // modeOf(null, undefined).mode === 'legacy' encoded the production bug
+    // (hero showed the upstream DSH model selector after an Engineering
+    // restart) and is deliberately removed.
+    // A. pre-session + selected aih-engineering -> engineering.
+    assert.equal(modeOf(null, undefined, 'aih-engineering').mode, 'engineering', 'pre-session + selected aih-engineering -> engineering')
+    assert.equal(modeOf(null, undefined, 'aih-engineering').source, 'mode-selection')
+    // B. pre-session + selected aih-deepseek -> legacy.
+    assert.equal(modeOf(null, undefined, 'aih-deepseek').mode, 'legacy', 'pre-session + selected aih-deepseek -> legacy')
+    assert.equal(modeOf(null, undefined, 'aih-deepseek').source, 'mode-selection')
+    // No mode state at all (service absent) still fails CLOSED toward
+    // engineering/loading — the hero is never legacy by default.
+    assert.equal(modeOf(null, undefined).mode, 'engineering', 'pre-session without mode state fails closed toward engineering/loading (TASK-0038)')
+    assert.equal(modeOf(null, undefined).source, 'boot-fail-closed')
+    // A session-less snapshot is NOT authoritative on the hero: it describes
+    // the persisted default, which a staged hero selection outranks.
+    assert.equal(modeOf(null, { composer: { mode: 'legacy' } }, 'aih-engineering').mode, 'engineering', 'staged hero Engineering outranks the session-less snapshot default')
+    assert.equal(modeOf(null, { composer: { mode: 'engineering' } }, 'aih-deepseek').mode, 'legacy', 'staged hero Legacy outranks the session-less snapshot default')
+    // F. controller endpoint unavailable during an Engineering restart -> the
+    // Profile UI stays in the Engineering/loading posture (session AND hero).
+    assert.equal(modeOf({ agentPreset: 'aih-engineering' }, { error: 'endpoint unavailable' }, 'aih-engineering').mode, 'engineering', 'endpoint-unavailable restart keeps the Profile UI (fail closed)')
+    assert.equal(modeOf(null, { error: 'endpoint unavailable' }, 'aih-engineering').mode, 'engineering', 'endpoint-unavailable HERO restart keeps the Profile UI (fail closed)')
+
+    const routingPolicyPath = path.join(ROOT, 'config', 'routing-policy.json')
+    assert.equal(status.composerModeOf('aih-engineering', routingPolicyPath), 'engineering', 'Dual Normal Engineering is Profile-owned server-side')
+    assert.equal(status.composerModeOf('aih-muse', routingPolicyPath), 'engineering', 'Muse Normal Engineering is Profile-owned server-side after binding/response/reload')
+    assert.equal(status.composerModeOf('aih-deepseek', routingPolicyPath), 'legacy', 'DeepSeek Only keeps upstream model ownership')
+
+    assert.ok(source.includes("composerModeOfSession(session, snapshot, nexusPreset)"), 'ExecutorChip derives its mode through the shared mode-ownership heuristic')
+    assert.ok(source.includes("react.useSyncExternalStore(subscribeNexusMode, currentNexusModePreset, currentNexusModePreset)"), 'ExecutorChip subscribes to the shared nexus mode state')
+    assert.ok(source.includes('ctx.inject(["nexusModeState"]'), 'controller consumes the shared nexusModeState service (late-binding)')
+    assert.ok(source.includes("useEngineeringEditor(sessionId, engineeringMode)"), 'composer editor loading follows the Engineering surface, not session existence')
+    assert.ok(!/if \(!sessionId\) return;\s*\n\s*refresh\(\);/.test(source), 'the profile endpoint is no longer gated on session existence')
+    assert.ok(source.includes("const surfaceEnabled = enabled !== false;"), 'editor surface enablement is the load gate')
+    assert.ok(!source.includes('_7KE1Ra'), 'no CSS-module hash dependency (guard, TASK-0038)')
+
+    // E. explicit: the authoritative snapshot overrides BOTH stale bootstrap
+    // sources (the session preset and the shared mode-selection state).
+    assert.equal(modeOf({ agentPreset: 'aih-deepseek' }, { composer: { mode: 'engineering' } }, 'aih-engineering').mode, 'engineering', 'authoritative snapshot overrides the session preset and the mode-selection state')
+    assert.equal(modeOf({ agentPreset: 'aih-engineering' }, { composer: { mode: 'legacy' } }, 'aih-deepseek').mode, 'legacy', 'authoritative snapshot legacy overrides engineering bootstrap sources')
+
+    // G. the global profile endpoint loads with NO session id exactly when
+    // the Engineering composer surface is enabled (the old gate was the
+    // literal sessionId check before refresh() — the hero never loaded).
+    const loadGate = moduleExports.engineeringEditorLoadGate
+    assert.ok(loadGate, 'engineeringEditorLoadGate exported for the surface-keyed load contract')
+    let profileLoads = 0
+    assert.equal(loadGate(true, () => { profileLoads += 1 }), true, 'enabled Engineering surface loads the global profile state')
+    assert.equal(profileLoads, 1, 'profile endpoint fetch fires without any session id')
+    assert.equal(loadGate(false, () => { profileLoads += 1 }), false, 'disabled Engineering surface never loads')
+    assert.equal(profileLoads, 1, 'no load while the surface is disabled')
+
+    // 35j. Phase M2.1 (TASK-0038) hero ownership: the shared nexusModeState
+    // bridge is late-bound and REACTIVE — a hero mode change re-announces
+    // synchronously, and the composer render flips without any session.
+    assert.ok(moduleExports.attachNexusModeState && moduleExports.subscribeNexusMode && moduleExports.currentNexusModePreset, 'nexus mode bridge surface exported')
+    // Observable double with the same shape @nexus/mode-selector publishes as
+    // the nexusModeState service (getSnapshot/subscribe; current = preset id).
+    function makeModeStore(initial) {
+      let snapshotValue = { current: initial }
+      const listeners = new Set()
+      return {
+        getSnapshot: () => snapshotValue,
+        subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn) },
+        patch(next) { snapshotValue = { current: next }; for (const fn of [...listeners]) fn() },
+      }
+    }
+    const heroModeStore = makeModeStore('aih-deepseek')
+    moduleExports.attachNexusModeState(heroModeStore)
+    assert.equal(moduleExports.currentNexusModePreset(), 'aih-deepseek', 'bridge exposes the shared mode state preset id')
+    let bridgeNotified = 0
+    const unsubscribeBridge = moduleExports.subscribeNexusMode(() => { bridgeNotified += 1 })
+    heroModeStore.patch('aih-engineering')
+    assert.equal(bridgeNotified, 1, 'a hero mode change re-announces through the bridge synchronously (no polling, no refresh)')
+    assert.equal(moduleExports.currentNexusModePreset(), 'aih-engineering', 'hero mode change updates the pre-session mode source of truth immediately')
+    // Hero render: Engineering shows the Nexus Profile selector and no legacy
+    // preference chip; Legacy flips BOTH surfaces back (trigger gone, upstream
+    // preference pill back) — K/L without any session or snapshot.
+    sandbox.window.__NX_TEST_SNAPSHOT__ = {
+      schemaVersion: 1, generatedAtUtc: new Date().toISOString(), state: 'working',
+      preference: { provider: 'flash-max-direct', modelId: 'deepseek-v4-flash', reasoning: 'max', label: 'DeepSeek V4 Flash MAX' },
+    }
+    sandbox.window.__NX_TEST_SNAPSHOT_FAILED__ = false
+    sandbox.window.__NX_TEST_EDITOR__ = undefined
+    const heroEngHtml = renderToStaticMarkup(react.createElement(TestComposer, { session: null }))
+    assert.match(heroEngHtml, /nx-eng-trigger/, 'hero Engineering renders the Nexus Profile selector (profile selector before the first session)')
+    assert.ok(!heroEngHtml.includes('DeepSeek V4 Flash MAX'), 'hero Engineering never shows the legacy agent-default-model preference')
+    heroModeStore.patch('aih-deepseek')
+    const heroLegacyHtml = renderToStaticMarkup(react.createElement(TestComposer, { session: null }))
+    assert.ok(!heroLegacyHtml.includes('nx-eng-trigger'), 'hero Legacy renders no Nexus Profile selector (selector flips back)')
+    assert.match(heroLegacyHtml, /data-nexus-preferred/, 'hero Legacy restores the upstream model-selector posture (legacy preference pill)')
+    assert.match(heroLegacyHtml, /DeepSeek V4 Flash MAX/, 'hero Legacy keeps the agent-default-model label')
+    unsubscribeBridge()
+    moduleExports.attachNexusModeState(null)
+    assert.equal(moduleExports.currentNexusModePreset(), '', 'bridge detaches cleanly')
+    // N. existing Dual/Custom profile behavior stays encoded above (35d/35e
+    // editor fields) and in NexusProfiles.Tests.cjs sections 6a/6b.
   }
 
+  require('./NexusComposerOwnership.Tests.cjs')()
+  await require('./NexusModeContract.Tests.cjs')()
   console.log('PASS: nexus controller panel state layer')
 }
 

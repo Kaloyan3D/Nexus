@@ -1,5 +1,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
+# Phase M3: the catalog-level Nexus profile resolver (engine classification).
+# Loaded here so the ONE engine dispatch seam below can classify the active
+# profile without duplicating catalog validation. NexusProfiles.ps1 only
+# defines functions at load time; its Routing.ps1 calls happen at runtime,
+# after this file finished loading, in every real load order.
+. (Join-Path $PSScriptRoot 'NexusProfiles.ps1')
 
 function Get-AihPropertyValue { param([object]$Object,[string]$Name,$Default=$null) if($null-ne $Object-and$null-ne $Object.PSObject.Properties[$Name]){return $Object.$Name};$Default }
 
@@ -148,6 +154,10 @@ function Resolve-AihModelTarget {
     foreach($candidate in @($Registry.models)){if([string]$candidate.id -eq $modelId){$entry=$candidate;break}}
     if($null-eq $entry){throw "Model registry has no entry for '$modelId' (profile $($ProfileDoc.Id), role $Role)."}
     if(-not[bool]$entry.enabled){throw "Model '$modelId' is disabled in the registry (profile $($ProfileDoc.Id), role $Role)."}
+    # Phase M2.1 engine scope: the Dual role architecture never resolves a
+    # Muse-scoped model. Absence of agentEngines stays backward compatible;
+    # a declaration without 'dual' fails closed here.
+    if(-not(Test-AihModelEngineCompatible $entry 'dual')){throw "Model '$modelId' is not scoped to the dual agent engine (profile $($ProfileDoc.Id), role $Role)."}
     $provider=$null
     $providerMap=if($null-ne $entry.PSObject.Properties['providers']){$entry.providers}else{$null}
     if($null-ne $providerMap){
@@ -195,10 +205,43 @@ function Get-AihModelResolvedProvider {
     return $null
 }
 
+function Test-AihModelEngineCompatible {
+    # Phase M2.1 engine-scope contract (TASK-0037): a registry entry MAY declare
+    # `agentEngines`. The semantics are ASYMMETRIC and both directions fail
+    # closed:
+    #   - 'dual': absence of the declaration keeps every pre-M2 registry entry
+    #     eligible for the Dual role architecture (backward compatible); a
+    #     declaration must list 'dual'.
+    #   - 'muse': the Muse engine plane requires an EXPLICIT muse scope —
+    #     absence of `agentEngines` (or a declaration without 'muse') is never
+    #     eligible, so a Muse profile can never resolve through an unscoped or
+    #     Dual-only model entry.
+    # Unknown engine names fail closed: nothing is compatible with an engine
+    # the registry contract does not define. The filter is metadata driven —
+    # there is no model-id conditional anywhere.
+    param([object]$Entry,[string]$Engine)
+    if($null-eq$Entry){return $false}
+    if([string]::IsNullOrWhiteSpace($Engine)){return $false}
+    $declaredEngines=$null
+    if($null-ne$Entry.PSObject.Properties['agentEngines']){$declaredEngines=@($Entry.agentEngines)}
+    if($Engine -eq 'dual'){
+        if($null-eq$declaredEngines){return $true}
+        return @($declaredEngines|Where-Object{$_-eq'dual'}).Count-gt0
+    }
+    if($Engine -eq 'muse'){
+        if($null-eq$declaredEngines){return $false}
+        return @($declaredEngines|Where-Object{$_-eq'muse'}).Count-gt0
+    }
+    return $false
+}
+
 function Test-AihModelRoleCompatible {
     param([object]$Entry,[string]$Role,[string]$Reasoning)
     if($null-eq$Entry){return $false}
     if($null-ne$Entry.PSObject.Properties['enabled']-and-not[bool]$Entry.enabled){return $false}
+    # Engine scope (Phase M2.1): the Dual role architecture never claims a
+    # Muse-scoped model. Delegates to the shared asymmetric engine contract.
+    if(-not(Test-AihModelEngineCompatible $Entry 'dual')){return $false}
     $req=Get-AihRoleRequirements $Role
     if($req.requiresReasoning-and$null-ne$Entry.PSObject.Properties['supportsReasoning']-and-not[bool]$Entry.supportsReasoning){return $false}
     if($req.requiresTools-and$null-ne$Entry.PSObject.Properties['supportsTools']-and-not[bool]$Entry.supportsTools){return $false}
@@ -282,16 +325,215 @@ function Get-AihRoutingInitialDecision {
 
 function Get-AihFailureSignature {param([string]$FailureReason)if([string]::IsNullOrWhiteSpace($FailureReason)){return ''};$normalized=($FailureReason.ToLowerInvariant()-replace '\b\d+\b','#'-replace '\s+',' ').Trim();$bytes=[Text.Encoding]::UTF8.GetBytes($normalized);$sha=[Security.Cryptography.SHA256]::Create();try{([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').Substring(0,16).ToLowerInvariant()}finally{$sha.Dispose()}}
 
+function Get-AihEngineForPreset {
+    param([Parameter(Mandatory=$true)][string]$PresetId)
+    if($PresetId-eq'aih-muse'){return 'muse'}
+    return 'dual'
+}
+
+function Assert-AihEngineBinding {
+    param([string]$Workspace,[string]$TaskId,[string]$TaskInstanceId,[string]$PresetId,[string]$RequestedEngine)
+    $presetEngine=Get-AihEngineForPreset $PresetId
+    $requested=if([string]::IsNullOrWhiteSpace($RequestedEngine)){$presetEngine}else{$RequestedEngine.Trim().ToLowerInvariant()}
+    if($requested-notin@('dual','muse')-or$requested-ne$presetEngine){throw "engine-binding-violation: requested engine '$requested' does not match preset '$PresetId' engine '$presetEngine'."}
+    $ledgerPath=Join-Path ([IO.Path]::GetFullPath($Workspace)) '.ai-harness/state/tasks.json'
+    # Instance-aware requests are authoritative bound-task operations. Legacy
+    # standalone callers without a lifecycle instance retain compatibility
+    # and do not claim an immutable session binding.
+    if(-not[string]::IsNullOrWhiteSpace($TaskId)-and-not[string]::IsNullOrWhiteSpace($TaskInstanceId)-and(Test-Path -LiteralPath $ledgerPath)){
+        $task=Get-AihTask -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId
+        $bound=if($null-ne$task.PSObject.Properties['boundEngine']){([string]$task.boundEngine).Trim().ToLowerInvariant()}else{''}
+        if($bound-notin@('dual','muse')){throw "engine-binding-violation: authoritative task '$TaskId' has no valid boundEngine."}
+        if($requested-ne$bound){throw "engine-binding-violation: task '$TaskId' is bound to '$bound' but routing requested '$requested'."}
+    }
+    return $requested
+}
+
+function Get-AihMuseRoutingSignals {
+    param([string]$Description,[string]$Signal='none')
+    $patterns=@('\b(auth|authentication|authorization|permission architecture|credential boundary|security boundary|cryptograph|encryption|database migration|migration safety|concurrency correctness)\b')
+    $matched=@($patterns|Where-Object{$Description-match$_})
+    $criticalSignals=@('critical-security-boundary','concurrency-uncertainty','migration-safety','auth-permission-architecture')
+    $critical=($matched.Count-gt0-or$Signal-in$criticalSignals)
+    [pscustomobject]@{
+        Risk=if($critical){'critical'}else{'normal'}
+        RuleId=if($critical){'muse-critical-signals'}else{'muse-default'}
+        MatchedPatterns=$matched
+        Reason=if($critical){'Muse-native security, migration, authentication, or concurrency signals recorded as risk metadata on the same Muse main-agent plane.'}else{'Muse-native routing selected the single Muse main-agent plane.'}
+    }
+}
+
+# ── Phase M3: Muse engine plane (routing-plane target authority) ────────────
+# Muse is a REAL engine, never a Dual profile. The controller resolves the
+# Muse target ONCE, on this deterministic plane, through the same chained
+# authorities the M2 transport established:
+#
+#   Nexus Profile (engine: muse)
+#     -> Muse profile (config/muse-profiles.json)
+#       -> Model Registry (config/model-registry.json, agentEngines: [muse])
+#         -> provider route (settings.yaml llm-pi-ai.providers)
+#
+# The DSH request boundary (config/Muse-Isolation.cjs) only ENFORCES the
+# controller-produced target; it never re-resolves it. There is NO fallback
+# provider/model/reasoning, NO Dual role semantics, and NO reviewer: every
+# incomplete or unavailable input fails closed with a stable reason.
+
+function Test-AihMuseProviderRouteConfigured {
+    # Text-level structural check that the provider route exists as a
+    # settings.yaml llm-pi-ai.providers entry (a column-4 key inside the
+    # managed block). Never reads credential values; the route declares a
+    # credential REFERENCE (apiKeyEnv), never a key.
+    param([string]$SettingsPath,[Parameter(Mandatory=$true)][string]$ProviderId)
+    if([string]::IsNullOrWhiteSpace($SettingsPath)-or-not(Test-Path -LiteralPath $SettingsPath)){return $false}
+    $settingsText=Get-Content -Raw -Encoding UTF8 -LiteralPath $SettingsPath
+    $pattern='(?ms)^llm-pi-ai:\s*$.*?^ {2}providers:\s*$.*?^ {4}'+([regex]::Escape($ProviderId))+':\s*$'
+    return [bool][regex]::IsMatch($settingsText,$pattern)
+}
+
+function Resolve-AihMuseRoutingTarget {
+    # Muse-native target resolution for the ROUTING plane (the one place Muse
+    # model identity is resolved). Fails CLOSED with a stable reason on every
+    # incomplete/unavailable input. Returns the complete target plus its
+    # declared provider data-use tier.
+    param(
+        [Parameter(Mandatory=$true)][string]$InstallRoot,
+        [Parameter(Mandatory=$true)][string]$PresetId,
+        [string]$SettingsPath
+    )
+    $root=[IO.Path]::GetFullPath($InstallRoot)
+    # 1. The active Nexus profile (the muse preset locks its own binding).
+    $active=Resolve-AihActiveNexusProfile -InstallRoot $root -Preset $PresetId
+    if($null-eq$active){throw "Muse routing rejected: the active Nexus profile could not be resolved (preset '$PresetId')."}
+    if([string]$active.Engine -ne 'muse'){throw "Muse routing rejected: active profile '$($active.Id)' is not a muse-engine profile."}
+    if(-not[bool]$active.Runnable){throw "Muse routing rejected: profile '$($active.Id)' is not runnable (runnable=false)."}
+    # 2. Registry resolution: engine-scoped model, supported reasoning level.
+    $registryPath=Join-Path $root 'config/model-registry.json'
+    $registry=Get-AihModelRegistry $registryPath
+    $target=Resolve-AihMuseProfileModel -MuseProfile $active.Config -Registry $registry
+    if($null-eq$target){throw "Muse routing rejected: the Muse profile '$($active.Id)' target chain is incomplete (profile -> model registry -> provider)."}
+    # 3. Reasoning bound: the profile's escalation ceiling must itself be a
+    #    level the model supports (fail closed at resolution time, never at
+    #    escalation time). V0 performs no dynamic escalation: the resolved
+    #    reasoning IS the profile default, bounded by this ceiling.
+    if($null-ne$active.Config.PSObject.Properties['reasoning']-and$null-ne$active.Config.reasoning.PSObject.Properties['escalation']){
+        $escalation=[string]$active.Config.reasoning.escalation
+        if(-not[string]::IsNullOrWhiteSpace($escalation)){
+            $entry=$null
+            foreach($candidate in @($registry.models)){if([string]$candidate.id -eq [string]$target.ModelId){$entry=$candidate;break}}
+            $levels=@()
+            if($null-ne$entry-and$null-ne$entry.PSObject.Properties['supportedReasoningLevels']){$levels=@($entry.supportedReasoningLevels)}
+            if(@($levels|Where-Object{$_-eq$escalation}).Count-eq0){throw "Muse routing rejected: profile escalation reasoning '$escalation' is not supported by model '$($target.ModelId)'."}
+        }
+    }
+    # 4. The provider route must be configured in the live settings document.
+    if(-not(Test-AihMuseProviderRouteConfigured -SettingsPath $SettingsPath -ProviderId ([string]$target.Provider))){
+        throw "Muse routing rejected: provider route '$($target.Provider)' is not configured in settings.yaml llm-pi-ai.providers."
+    }
+    [pscustomobject][ordered]@{
+        ProfileId=[string]$active.Id
+        ProfileDisplayName=[string]$active.DisplayName
+        ModelId=[string]$target.ModelId
+        Model=[string]$target.Model
+        ModelDisplayName=[string]$target.ModelDisplayName
+        Vendor=[string]$target.Vendor
+        Provider=[string]$target.Provider
+        Reasoning=if([string]::IsNullOrWhiteSpace([string]$target.Reasoning)){$null}else{[string]$target.Reasoning}
+        DataUseTier=$target.DataUseTier
+    }
+}
+
+function Invoke-AihMuseRoutingDecision {
+    # Phase M3: the Muse engine routing branch. Exactly ONE Muse main
+    # engineering agent; NO Dual roles, NO reviewer, NO provider/model
+    # fallback, NO manual class/tier override. Bounded controller retries may
+    # re-select the SAME muse target; unresolved failures terminate
+    # truthfully. Shares the identity guard, the routing mutex, and the
+    # record/state persistence with the Dual path (one controller plane).
+    param([Parameter(Mandatory=$true)][string]$Description,[Parameter(Mandatory=$true)][string]$Workspace,[Parameter(Mandatory=$true)][string]$PolicyPath,[Parameter(Mandatory=$true)][string]$DataRoot,[string]$TaskId,[string]$Preset,[string]$ForceTier,[string]$ForceClass,[string]$Signal='none',[string]$FailureReason,[switch]$UserApprovedCodexSolve,[switch]$ReviewRequested,[switch]$DryRun,[string]$SettingsPath,[string]$CustomProfilePath,[string]$TaskInstanceId,[string]$RequestedEngine)
+    $policy=Get-AihRoutingPolicy $PolicyPath
+    $resolved=Resolve-AihPreset $policy $Preset
+    if($resolved.Id -ne 'aih-muse'){throw "Muse routing requires the aih-muse agent plane (got '$($resolved.Id)')."}
+    [void](Assert-AihEngineBinding -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -PresetId $resolved.Id -RequestedEngine $RequestedEngine)
+    if(-not[string]::IsNullOrWhiteSpace($ForceClass)-or-not[string]::IsNullOrWhiteSpace($ForceTier)){throw 'Muse routing rejected: manual execution-class/tier overrides are Dual role semantics and are not available for the Muse engine.'}
+    if($ReviewRequested){throw 'Muse routing rejected: independent review is not available for the Muse engine (review.independent=false); Codex is never invoked from Muse.'}
+    if($Signal-eq'user-codex'){throw "Muse routing rejected: independent review is not available for the Muse engine (signal '$Signal' requests reviewer escalation)."}
+    if($Signal-eq'review-findings'){throw 'Muse routing rejected: independent review findings cannot return to a Muse task (no Muse reviewer exists).'}
+    $workspacePath=[IO.Path]::GetFullPath($Workspace)
+    if([string]::IsNullOrWhiteSpace($TaskId)){$TaskId=[guid]::NewGuid().ToString('N')};if($TaskId-notmatch'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'){throw 'TaskId is invalid.'}
+    $mutex=$null;$taken=$false;if(-not $DryRun){$mutex=[Threading.Mutex]::new($false,(Get-AihRoutingMutexName $DataRoot));try{$taken=$mutex.WaitOne(30000)}catch [Threading.AbandonedMutexException]{$taken=$true};if(-not $taken){throw 'Timed out waiting for routing lock.'}}
+    try{
+        # TASK-0005 identity guard: exactly the Dual path's instance semantics —
+        # one controller plane, one lifecycle identity contract.
+        if(-not[string]::IsNullOrWhiteSpace($TaskInstanceId)-and(Test-Path -LiteralPath (Join-Path $workspacePath '.ai-harness/state/tasks.json'))){
+            $identity=Test-AihTaskIdentity -Workspace $workspacePath -TaskId $TaskId -TaskInstanceId $TaskInstanceId
+            if(-not [bool]$identity.exists){throw "Routing rejected: task was not found in the authoritative ledger: $TaskId"}
+            if(-not [bool]$identity.instanceMatches){throw "Routing rejected: task $TaskId no longer holds the expected taskInstanceId '$TaskInstanceId' (generation mismatch)."}
+        }
+        $initial=Get-AihMuseRoutingSignals -Description $Description -Signal $Signal
+        $current='muse_main'
+        $statePath=Get-AihRoutingStatePath $DataRoot $workspacePath $TaskId $resolved.Id $TaskInstanceId;$state=Read-AihRoutingState $statePath
+        $signature=Get-AihFailureSignature $FailureReason;$sameCount=if($null-ne$state-and$state.lastFailureSignature-eq$signature-and-not[string]::IsNullOrWhiteSpace($signature)){[int]$state.sameFailureCount}else{0}
+        if($Signal-in@('attempt-failure','verification-failure')){if([string]::IsNullOrWhiteSpace($FailureReason)){throw '-FailureReason is required for failure signals.'};$sameCount++}elseif($Signal-eq'progress'){$sameCount=0;$signature=''}
+        $reason=[string]$initial.Reason;$risk=[string]$initial.Risk
+        if($null-ne$state-and$null-ne$state.PSObject.Properties['risk']-and[string]$state.risk-ne'normal'){$risk=[string]$state.risk}
+        # Bounded retry: the same failure at the configured threshold NEVER
+        # escalates and NEVER changes engine/provider/model. The controller may
+        # retry the same single Muse main agent; unresolved failure terminates.
+        if($sameCount-ge[int]$policy.escalation.sameFailureThreshold){$reason="The same meaningful failure repeated $($sameCount)x; the Muse engine retries the same single main agent (no escalation, no provider/model change)."}
+        # The Muse agent plane runs its one main agent for every supported
+        # engineering turn; no Dual execution-class decision is consulted.
+        $installRoot=Split-Path -Parent (Split-Path -Parent $PolicyPath)
+        $target=Resolve-AihMuseRoutingTarget -InstallRoot $installRoot -PresetId $resolved.Id -SettingsPath $SettingsPath
+        $record=[ordered]@{recordVersion=4;recordId=[guid]::NewGuid().ToString('N');timestampUtc=[DateTime]::UtcNow.ToString('o');taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;description=$Description;preset=$resolved.Id;engine='muse';selectedExecutionClass=$current;executionClass=$current;role=$null;profile=$target.ProfileId;profileDisplayName=$target.ProfileDisplayName;provider=$target.Provider;model=$target.Model;modelDisplayName=$target.ModelDisplayName;vendor=$target.Vendor;reasoning=$target.Reasoning;dataUseTier=$target.DataUseTier;writable=$true;risk=$risk;reviewRequired=$false;reviewRequested=[bool]$ReviewRequested;reason=$reason;escalatedFrom=$null;manualOverride=$false;signal=$Signal;failureSignature=$signature;sameFailureCount=$sameCount;matchedRule=$initial.RuleId;matchedPatterns=@($initial.MatchedPatterns);freshSession=$true;completionAuthority=$false;selectedTier=$null;legacyTierDeprecated=$true;dryRun=[bool]$DryRun}
+        if(-not$DryRun){
+            New-Item -ItemType Directory -Force -Path (Join-Path $DataRoot 'states')|Out-Null
+            $newState=[ordered]@{taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;preset=$resolved.Id;engine='muse';executionClass=$current;selectedTier=$null;role=$null;profile=$target.ProfileId;profileDisplayName=$target.ProfileDisplayName;provider=$target.Provider;model=$target.Model;modelDisplayName=$target.ModelDisplayName;reasoning=$target.Reasoning;dataUseTier=$target.DataUseTier;risk=$risk;reviewRequired=$false;reviewRequested=[bool]$ReviewRequested;lastFailureSignature=$signature;sameFailureCount=$sameCount;updatedAtUtc=[DateTime]::UtcNow.ToString('o')}
+            Write-AihAtomicJson $statePath $newState
+            Add-AihJsonLine (Join-Path $DataRoot 'decisions.jsonl') $record
+        }
+        [pscustomobject]$record
+    }finally{if($taken){$mutex.ReleaseMutex()};if($null-ne$mutex){$mutex.Dispose()}}
+}
+
 function Invoke-AihRoutingDecision {
     # TASK-0005 Part 16: when -TaskInstanceId is supplied the routing request
     # is instance-guarded (fail closed on mismatch against the authoritative
     # ledger) and the durable state/decision records carry the lifecycle
     # identity (Part 15). Legacy callers that omit it keep the exact old
     # behavior (explicit compatibility path).
-    param([Parameter(Mandatory=$true)][string]$Description,[Parameter(Mandatory=$true)][string]$Workspace,[Parameter(Mandatory=$true)][string]$PolicyPath,[Parameter(Mandatory=$true)][string]$DataRoot,[string]$TaskId,[string]$Preset,[string]$ForceTier,[string]$ForceClass,[string]$Signal='none',[string]$FailureReason,[switch]$UserApprovedCodexSolve,[switch]$ReviewRequested,[switch]$DryRun,[string]$SettingsPath,[string]$CustomProfilePath,[string]$TaskInstanceId)
-    $policy=Get-AihRoutingPolicy $PolicyPath;$profilesPath=Join-Path (Split-Path -Parent $PolicyPath) 'engineering-profiles.json';$registryPath=Join-Path (Split-Path -Parent $PolicyPath) 'model-registry.json'
+    param([Parameter(Mandatory=$true)][string]$Description,[Parameter(Mandatory=$true)][string]$Workspace,[Parameter(Mandatory=$true)][string]$PolicyPath,[Parameter(Mandatory=$true)][string]$DataRoot,[string]$TaskId,[string]$Preset,[string]$ForceTier,[string]$ForceClass,[string]$Signal='none',[string]$FailureReason,[switch]$UserApprovedCodexSolve,[switch]$ReviewRequested,[switch]$DryRun,[string]$SettingsPath,[string]$CustomProfilePath,[string]$TaskInstanceId,[string]$RequestedEngine)
+    $policy=Get-AihRoutingPolicy $PolicyPath
+    $resolved=Resolve-AihPreset $policy $Preset
+    [void](Assert-AihEngineBinding -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -PresetId $resolved.Id -RequestedEngine $RequestedEngine)
+    # ── Phase M3: THE engine dispatch seam (one authority) ──────────────────
+    # The session's agent-preset id selects the engine plane:
+    #   'aih-muse'      -> Muse V0 branch (Invoke-AihMuseRoutingDecision)
+    #   everything else -> the existing Dual semantic path
+    # There is exactly ONE seam; no other system branches on the engine.
+    if($resolved.Id-eq'aih-muse'){return (Invoke-AihMuseRoutingDecision @PSBoundParameters)}
+    $profilesPath=Join-Path (Split-Path -Parent $PolicyPath) 'engineering-profiles.json';$registryPath=Join-Path (Split-Path -Parent $PolicyPath) 'model-registry.json'
     $profiles=Get-AihEngineeringProfiles $profilesPath $CustomProfilePath;$registry=Get-AihModelRegistry $registryPath
-    $resolved=Resolve-AihPreset $policy $Preset;$resolvedProfile=Resolve-AihProfile $policy $resolved $profiles $SettingsPath
+    # Dual-side guard (fail closed, additive): the active Nexus profile must
+    # not select the muse engine while the session still runs a Dual agent
+    # plane — the Dual preset carries Dual delegation tooling, so that
+    # combination can never execute a Muse task truthfully. A missing or
+    # invalid catalog keeps the exact pre-M3 Dual behavior (the downstream
+    # profile resolver still fails closed on unknown ids).
+    $museEngineOnDualPreset=$false;$museGuardProfileId=$null
+    try{
+        $requestedNexusId=Get-AihRequestedNexusProfileId $policy $resolved $SettingsPath
+        if(-not[string]::IsNullOrWhiteSpace($requestedNexusId)){
+            $catalog=Get-AihNexusProfileCatalog (Join-Path (Split-Path -Parent $PolicyPath) 'nexus-profiles.json')
+            foreach($catalogProfile in @($catalog.profiles)){
+                if(([string]$catalogProfile.id).Trim().ToLowerInvariant()-eq$requestedNexusId){
+                    if(([string]$catalogProfile.engine).Trim().ToLowerInvariant()-eq'muse'){$museEngineOnDualPreset=$true;$museGuardProfileId=$requestedNexusId}
+                    break
+                }
+            }
+        }
+    }catch{$museEngineOnDualPreset=$false}
+    if($museEngineOnDualPreset){throw "Muse routing rejected: the active profile '$museGuardProfileId' selects the muse engine but the session runs the '$($resolved.Id)' agent plane. Start the session on the aih-muse agent plane (Normal Engineering + Muse profile)."}
+    $resolvedProfile=Resolve-AihProfile $policy $resolved $profiles $SettingsPath
     $workspacePath=[IO.Path]::GetFullPath($Workspace)
     if([string]::IsNullOrWhiteSpace($TaskId)){$TaskId=[guid]::NewGuid().ToString('N')};if($TaskId-notmatch'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'){throw 'TaskId is invalid.'}
     $mutex=$null;$taken=$false;if(-not $DryRun){$mutex=[Threading.Mutex]::new($false,(Get-AihRoutingMutexName $DataRoot));try{$taken=$mutex.WaitOne(30000)}catch [Threading.AbandonedMutexException]{$taken=$true};if(-not $taken){throw 'Timed out waiting for routing lock.'}}
@@ -323,8 +565,8 @@ function Invoke-AihRoutingDecision {
         $role=Get-AihRoleForExecutionClass $policy $current
         $target=$null;if(-not[string]::IsNullOrWhiteSpace($role)){$target=Resolve-AihModelTarget $registry $resolvedProfile $role}
         $provider=if($null-ne$target){$target.Provider}else{$null};$model=if($null-ne$target){$target.Model}else{$null};$modelDisplayName=if($null-ne$target){$target.ModelDisplayName}else{$null};$vendor=if($null-ne$target){$target.Vendor}else{$null};$reasoning=if($null-ne$target){$target.Reasoning}else{$null}
-        $record=[ordered]@{recordVersion=4;recordId=[guid]::NewGuid().ToString('N');timestampUtc=[DateTime]::UtcNow.ToString('o');taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;description=$Description;preset=$resolved.Id;selectedExecutionClass=$current;executionClass=$current;role=$role;profile=$resolvedProfile.Id;profileDisplayName=$resolvedProfile.DisplayName;provider=$provider;model=$model;modelDisplayName=$modelDisplayName;vendor=$vendor;reasoning=$reasoning;writable=[bool]$route.writable;risk=$risk;reviewRequired=$reviewRequired;reviewRequested=[bool]$ReviewRequested;reason=$reason;escalatedFrom=$escalatedFrom;manualOverride=$null-ne$forced;signal=$Signal;failureSignature=$signature;sameFailureCount=$sameCount;matchedRule=$initial.RuleId;matchedPatterns=@($initial.MatchedPatterns);freshSession=$true;completionAuthority=$false;selectedTier=(Get-AihLegacyTier $current);legacyTierDeprecated=$true;dryRun=[bool]$DryRun}
-        if(-not$DryRun){New-Item -ItemType Directory -Force -Path (Join-Path $DataRoot 'states')|Out-Null;$newState=[ordered]@{taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;preset=$resolved.Id;executionClass=$current;selectedTier=(Get-AihLegacyTier $current);role=$role;profile=$resolvedProfile.Id;profileDisplayName=$resolvedProfile.DisplayName;provider=$provider;model=$model;modelDisplayName=$modelDisplayName;reasoning=$reasoning;risk=$risk;reviewRequired=$reviewRequired;reviewRequested=[bool]$ReviewRequested;lastFailureSignature=$signature;sameFailureCount=$sameCount;updatedAtUtc=[DateTime]::UtcNow.ToString('o')};Write-AihAtomicJson $statePath $newState;Add-AihJsonLine (Join-Path $DataRoot 'decisions.jsonl') $record}
+        $record=[ordered]@{recordVersion=4;recordId=[guid]::NewGuid().ToString('N');timestampUtc=[DateTime]::UtcNow.ToString('o');taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;description=$Description;preset=$resolved.Id;engine='dual';selectedExecutionClass=$current;executionClass=$current;role=$role;profile=$resolvedProfile.Id;profileDisplayName=$resolvedProfile.DisplayName;provider=$provider;model=$model;modelDisplayName=$modelDisplayName;vendor=$vendor;reasoning=$reasoning;writable=[bool]$route.writable;risk=$risk;reviewRequired=$reviewRequired;reviewRequested=[bool]$ReviewRequested;reason=$reason;escalatedFrom=$escalatedFrom;manualOverride=$null-ne$forced;signal=$Signal;failureSignature=$signature;sameFailureCount=$sameCount;matchedRule=$initial.RuleId;matchedPatterns=@($initial.MatchedPatterns);freshSession=$true;completionAuthority=$false;selectedTier=(Get-AihLegacyTier $current);legacyTierDeprecated=$true;dryRun=[bool]$DryRun}
+        if(-not$DryRun){New-Item -ItemType Directory -Force -Path (Join-Path $DataRoot 'states')|Out-Null;$newState=[ordered]@{taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;preset=$resolved.Id;engine='dual';executionClass=$current;selectedTier=(Get-AihLegacyTier $current);role=$role;profile=$resolvedProfile.Id;profileDisplayName=$resolvedProfile.DisplayName;provider=$provider;model=$model;modelDisplayName=$modelDisplayName;reasoning=$reasoning;risk=$risk;reviewRequired=$reviewRequired;reviewRequested=[bool]$ReviewRequested;lastFailureSignature=$signature;sameFailureCount=$sameCount;updatedAtUtc=[DateTime]::UtcNow.ToString('o')};Write-AihAtomicJson $statePath $newState;Add-AihJsonLine (Join-Path $DataRoot 'decisions.jsonl') $record}
         [pscustomobject]$record
     }finally{if($taken){$mutex.ReleaseMutex()};if($null-ne$mutex){$mutex.Dispose()}}
 }

@@ -11,6 +11,20 @@ function pluginMessage(text, form) {
 }
 
 async function main() {
+  {
+    const singleFlight = controller.createSingleFlight((value) => value.toLowerCase())
+    let executions = 0
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const first = singleFlight('C:\\Repo', async () => { executions += 1; await gate; return { id: 1 } })
+    const second = singleFlight('c:\\repo', async () => { executions += 1; return { id: 2 } })
+    assert.equal(executions, 0, 'single-flight schedules its operation asynchronously')
+    release()
+    const values = await Promise.all([first, second])
+    assert.equal(executions, 1, 'equivalent workspace resolutions execute once in the controller')
+    assert.deepEqual(values, [{ id: 1 }, { id: 1 }], 'all controller consumers receive the shared result')
+  }
+
   // 1. Explicit review command detection is deterministic (exact prefix, not
   //    keyword sniffing). /codex-review remains a compatibility alias of /review.
   assert.equal(controller.isReviewCommand('/codex-review audit the boundary'), true)
@@ -64,6 +78,16 @@ async function main() {
   assert.equal(controller.isReviewClass('codex_review'), true)
   assert.equal(controller.isReviewClass('reviewer'), true)
   assert.equal(controller.isReviewClass('engineer_normal'), false)
+
+  // Engine is selected once from the new session preset and cannot change on
+  // an existing binding when the preferred/session preset changes later.
+  assert.equal(controller.engineForPreset('aih-muse'), 'muse')
+  assert.equal(controller.engineForPreset('aih-engineering'), 'dual')
+  assert.equal(controller.engineForPreset('aih-deepseek'), 'dual')
+  assert.equal(controller.assertEngineBinding({ engine: 'muse' }, 'aih-muse'), 'muse')
+  assert.equal(controller.assertEngineBinding({ engine: 'dual' }, 'aih-engineering'), 'dual')
+  assert.throws(() => controller.assertEngineBinding({ engine: 'muse' }, 'aih-engineering'), (error) => error.code === 'engine-binding-violation')
+  assert.throws(() => controller.assertEngineBinding({ engine: 'dual' }, 'aih-muse'), (error) => error.code === 'engine-binding-violation')
 
   // 5. Controller messages are plugin-owned user-role messages (visible, no model source)
   const message = controller.createControllerMessage('Controller: task bound', 'controller-binding')
@@ -124,6 +148,9 @@ async function main() {
   if (fs.existsSync(path.join(sourceRoot, 'data', 'settings.yaml'))) {
     fs.copyFileSync(path.join(sourceRoot, 'data', 'settings.yaml'), path.join(bridgeInstallRoot, 'data', 'settings.yaml'))
   }
+  const bridgeSettingsPath = path.join(bridgeInstallRoot, 'data', 'settings.yaml')
+  const bridgeSettings = fs.readFileSync(bridgeSettingsPath, 'utf8')
+  fs.writeFileSync(bridgeSettingsPath, bridgeSettings.replace(/^engineering-profile:\s*[^\r\n]+/m, 'engineering-profile: deepseek-codex'))
   process.once('exit', () => {
     fs.rmSync(bridgeInstallRoot, { recursive: true, force: true })
     fs.rmSync(bridgeWorkspace, { recursive: true, force: true })
@@ -170,6 +197,19 @@ async function main() {
   assert.equal(controller.structuredCliStdout({ code: 2, stdout: 'x' }), null)
   assert.equal(controller.structuredCliStdout({}), null)
   assert.equal(controller.structuredCliStdout(null), null)
+
+  const diagnostic = controller.controllerCliFailure('Route.ps1', ['-TaskId', 'TASK-0001', '-Preset', 'aih-muse'], {
+    code: 1,
+    signal: null,
+    stdout: '{"ok":false,"kind":"routing-rejected"}',
+    stderr: 'MODEL_API_KEY=must-not-log\nroute failed',
+  })
+  assert.equal(diagnostic.script, 'Route.ps1')
+  assert.equal(diagnostic.exitCode, 1)
+  assert.deepEqual(diagnostic.args, ['-TaskId', 'TASK-0001', '-Preset', 'aih-muse'])
+  assert.equal(diagnostic.structuredKind, 'routing-rejected')
+  assert.equal(diagnostic.stderr.includes('must-not-log'), false)
+  assert.equal(diagnostic.stderr.includes('route failed'), true)
 
   // 9. REAL Review.ps1 budget rejection (no Codex call): with the LEGACY
   //    hard budgets enabled in an explicit -PolicyPath (enforceLimits=true;

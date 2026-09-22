@@ -38,6 +38,40 @@
         }
       }
     },
+    "aih-muse": {
+      "displayName": "Muse Agent Plane (internal)",
+      "allowOpenAI": false,
+      "allowCodexSubagent": false,
+      "failurePolicy": "fail-closed",
+      "profile": "muse-spark-1.3-contributor",
+      "profileOverrideAllowed": false,
+      "rootExecutor": {
+        "name": "Muse Spark 1.3 Contributor",
+        "provider": "meta-model-api",
+        "model": "muse-spark-1.3-contributor",
+        "reasoning": "xhigh"
+      },
+      "tiers": {
+        "1": {
+          "name": "Muse (single agent plane)",
+          "provider": "meta-model-api",
+          "model": "muse-spark-1.3-contributor",
+          "reasoning": "xhigh"
+        },
+        "2": {
+          "name": "Muse (single agent plane)",
+          "provider": "meta-model-api",
+          "model": "muse-spark-1.3-contributor",
+          "reasoning": "xhigh"
+        },
+        "3": {
+          "name": "Muse (single agent plane)",
+          "provider": "meta-model-api",
+          "model": "muse-spark-1.3-contributor",
+          "reasoning": "xhigh"
+        }
+      }
+    },
     "aih-deepseek": {
       "displayName": "DeepSeek Only",
       "allowOpenAI": false,

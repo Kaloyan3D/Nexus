@@ -10,6 +10,11 @@ if([string]::IsNullOrWhiteSpace($InstallRoot)){$InstallRoot=Split-Path -Parent $
 $InstallRoot=[System.IO.Path]::GetFullPath($InstallRoot)
 . (Join-Path $PSScriptRoot 'Common.ps1')
 . (Join-Path $PSScriptRoot 'Routing.ps1')
+# Phase M1: the user-facing profile list is the top-level Nexus Profile
+# catalog (config/nexus-profiles.json). NexusProfiles.ps1 owns that
+# classification; Dual role details stay in Routing.ps1's Engineering
+# Profiles registry and Muse details stay in the Muse profile registry.
+. (Join-Path $PSScriptRoot 'NexusProfiles.ps1')
 
 # ── Phase 2.1: Engineering Profile editor backend contract ────────────────
 # The browser NEVER edits config files or ledgers directly. Every read/write
@@ -56,6 +61,43 @@ function Set-AihEngineeringProfileKey {
     }finally{ if($locked){$mutex.ReleaseMutex()};$mutex.Dispose() }
 }
 
+# Phase M1: resolve every top-level Nexus Profile catalog entry to its
+# engine-specific configuration for the editor. Dual entries keep their
+# Engineering Profile role bindings; Muse entries carry Muse registry
+# metadata ONLY (never Dual roles). A missing or invalid catalog degrades
+# to an EMPTY list — the state never guesses an engine classification.
+function Get-AihNexusEditorProfiles {
+    param([object]$Layout)
+    try{
+        $catalogPath=Join-Path $Layout.Root 'config/nexus-profiles.json'
+        $entries=Get-AihNexusProfiles -CatalogPath $catalogPath -EngineeringProfilesPath $Layout.EngineeringProfiles -CustomEngineeringProfilePath $Layout.CustomEngineeringProfile
+        $resolved=@()
+        foreach($entry in @($entries)){
+            # NOTE: never name this '$profile' — that is a PowerShell automatic variable.
+            # M1.1 parity: per-entry resolution — an engine-specific source that
+            # cannot be resolved (e.g. missing muse-profiles.json) skips ONLY that
+            # entry; a partially-resolved entry is never exposed.
+            $resolvedProfile=$null
+            try{$resolvedProfile=Resolve-AihNexusProfile -InstallRoot $Layout.Root -ProfileId ([string]$entry.id)}catch{$resolvedProfile=$null}
+            if($null-eq$resolvedProfile){continue}
+            $isDual=[string]$resolvedProfile.Engine -eq 'dual'
+            $resolved+=[pscustomobject][ordered]@{
+                id=[string]$resolvedProfile.Id
+                displayName=[string]$resolvedProfile.DisplayName
+                engine=[string]$resolvedProfile.Engine
+                selectable=[bool]$resolvedProfile.Selectable
+                runnable=[bool]$resolvedProfile.Runnable
+                availability=[string]$resolvedProfile.Availability
+                source=$resolvedProfile.Source
+                builtin=if($null-ne$entry.PSObject.Properties['builtin']){[bool]$entry.builtin}else{$true}
+                roles=if($isDual){$resolvedProfile.Config.roles}else{$null}
+                muse=if(-not$isDual){$resolvedProfile.Config}else{$null}
+            }
+        }
+        @($resolved)
+    }catch{ @() }
+}
+
 function Get-AihEditorState {
     param([object]$Layout,[object]$Policy)
     $profiles=Get-AihEngineeringProfiles $Layout.EngineeringProfiles $Layout.CustomEngineeringProfile
@@ -80,6 +122,7 @@ function Get-AihEditorState {
         schemaVersion=1
         generatedAtUtc=[DateTime]::UtcNow.ToString('o')
         profiles=@($profiles.profiles)
+        nexusProfiles=Get-AihNexusEditorProfiles $Layout
         registry=$registry.models
         preferredProfile=if([string]::IsNullOrWhiteSpace($preferredId)){$null}else{[pscustomobject]@{id=$preferredId;displayName=$preferredDisplayName}}
         customRoles=$customRoles
@@ -150,11 +193,36 @@ $(switch($Action){
     'get'{Get-AihEditorState $layout $policy}
     'select'{
         if([string]::IsNullOrWhiteSpace($ProfileId)){throw 'select requires -ProfileId.'}
-        $profiles=Get-AihEngineeringProfiles $layout.EngineeringProfiles $layout.CustomEngineeringProfile
-        $known=@($profiles.profiles|Where-Object{$_.id -eq $ProfileId.Trim().ToLowerInvariant()})
-        if($known.Count-eq0){throw "Unknown engineering profile '$ProfileId'."}
-        Set-AihEngineeringProfileKey $layout.Settings ($ProfileId.Trim().ToLowerInvariant())
-        [pscustomobject]@{ok=$true;profileId=$ProfileId.Trim().ToLowerInvariant()}
+        $selectId=$ProfileId.Trim().ToLowerInvariant()
+        # Phase M1.2: the top-level Nexus catalog is authoritative for this
+        # current backend. Selection permission depends on `selectable` only,
+        # but a missing/corrupt catalog must NEVER silently fall back to the
+        # legacy Dual registry. Engine-specific resolution failures also fail
+        # closed without writing the preferred-profile settings key.
+        $catalogPath=Join-Path $InstallRoot 'config/nexus-profiles.json'
+        $catalogAvailable=$true
+        try{$null=Get-AihNexusProfileCatalog $catalogPath}catch{$catalogAvailable=$false}
+        if(-not$catalogAvailable){
+            [pscustomobject][ordered]@{ok=$false;error='nexus-profile-catalog-unavailable';profileId=$selectId}
+        }
+        else{
+            $resolvedNexus=$null
+            $resolutionAvailable=$true
+            try{$resolvedNexus=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId $selectId}catch{$resolutionAvailable=$false}
+            if(-not$resolutionAvailable){
+                [pscustomobject][ordered]@{ok=$false;error='nexus-profile-resolution-unavailable';profileId=$selectId}
+            }
+            elseif($null-ne$resolvedNexus -and [bool]$resolvedNexus.Selectable){
+                Set-AihEngineeringProfileKey $layout.Settings $selectId
+                [pscustomobject]@{ok=$true;profileId=$selectId}
+            }
+            elseif($null-ne$resolvedNexus){
+                [pscustomobject][ordered]@{ok=$false;error='profile-not-selectable';profileId=$selectId;engine=[string]$resolvedNexus.Engine}
+            }
+            else{
+                throw "Unknown Nexus profile '$ProfileId'."
+            }
+        }
     }
     'save-custom'{Save-AihCustomProfile $layout $payload}
 })|ConvertTo-Json -Depth 20

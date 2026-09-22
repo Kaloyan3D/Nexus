@@ -21,13 +21,13 @@ function writeJson(filePath, value) {
 function writeBinding(root, binding) {
   writeJson(path.join(root, 'data', 'routing', 'session-bindings.json'), {
     schemaVersion: 1,
-    bindings: { [binding.sessionId]: binding },
+    bindings: { [binding.sessionId]: Object.assign({ engine: 'dual' }, binding) },
   })
 }
 
 function writeRoutingState(root, binding, value) {
   const statePath = profiles.routingStatePath(root, binding)
-  writeJson(statePath, value)
+  writeJson(statePath, Object.assign({ engine: 'dual' }, value))
   return statePath
 }
 
@@ -100,6 +100,15 @@ async function main() {
     assert.equal(routed.reasoningEffort, 'high')
     assert.equal(routed.temperature, 0)
     pass('controller routing target overrides the upstream DeepSeek default at the actual agent/request boundary')
+
+    let mismatchAdvanced = false
+    const changedToMuse = { ...session, events: [{ type: 'agent-preset/selected', data: { agentPreset: 'aih-muse' } }] }
+    await assert.rejects(
+      () => requestHandler({ agent: { session: changedToMuse } }, async () => { mismatchAdvanced = true; return upstreamDeepSeek }),
+      (error) => error && error.code === 'engine-binding-violation',
+    )
+    assert.equal(mismatchAdvanced, false)
+    pass('Dual binding cannot enter the Muse plane and fails before downstream request resolution')
 
     // Step routing is the current-turn authority. A Deep step may legitimately
     // differ from the task-level Normal target; the already-resolved roleTarget
