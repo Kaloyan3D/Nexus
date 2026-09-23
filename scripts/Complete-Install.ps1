@@ -45,6 +45,29 @@ if ($LASTEXITCODE -ne 0) {
     throw "The retired Muse Contributor provider-egress hook could not be removed."
 }
 
+# TASK-0009: the OpenCode Go Responses transport requires a stable
+# per-conversation x-opencode-session header (the pinned pi-ai transport
+# never emits it; without it the Go endpoint answers HTTP 400
+# MissingSessionID). Apply the repo-owned substrate patch AFTER the pinned
+# dependencies are installed, then verify the result. Every failure closes
+# the install: a missing substrate file, a changed anchor shape, a partial
+# edit, a failed apply, or a post-apply status other than `applied` aborts
+# here instead of shipping a broken OpenCode Go transport. The patch is
+# idempotent (re-apply keeps exactly one patch) and reversible (remove
+# restores the original bytes); it targets ONLY the Nexus-owned pinned
+# runtime substrate under this InstallRoot, never system/global node_modules.
+& $layout.Node (Join-Path $layout.Scripts 'Apply-OpenCodeSessionPatch.cjs') $InstallRoot apply
+if ($LASTEXITCODE -ne 0) {
+    throw "The OpenCode Go x-opencode-session substrate patch could not be applied."
+}
+$openCodeSessionPatchStatus = & $layout.Node (Join-Path $layout.Scripts 'Apply-OpenCodeSessionPatch.cjs') $InstallRoot status
+if ($LASTEXITCODE -ne 0) {
+    throw "The OpenCode Go x-opencode-session substrate patch status could not be verified."
+}
+if (($openCodeSessionPatchStatus | Out-String) -notmatch 'applied') {
+    throw "The OpenCode Go x-opencode-session substrate patch is not applied after installation. Refusing a broken transport."
+}
+
 # data/cordis.patch.yml is managed by the installer. Sync it before the Nexus
 # patcher inspects composition so upgrades from pre-controller installs see the
 # current nexus-controller row instead of failing against stale managed state.

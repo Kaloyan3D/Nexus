@@ -61,7 +61,7 @@ try{
     Assert-Aih ($musePreset.allowOpenAI -eq $false -and $musePreset.allowCodexSubagent -eq $false) '1.3: the muse plane carries no Codex/OpenAI permissions'
     Assert-Aih ($musePreset.failurePolicy -eq 'fail-closed') '1.4: the muse plane fails closed on failure'
     Assert-Aih ($musePreset.rootExecutor.provider -eq 'meta-model-api' -and $musePreset.rootExecutor.model -eq 'muse-spark-1.3-contributor' -and $musePreset.rootExecutor.reasoning -eq 'xhigh') '1.5: rootExecutor pins the exact Muse target'
-    Assert-Aih ($musePreset.profileOverrideAllowed -eq $false) '1.6: the muse preset locks its own profile binding'
+    Assert-Aih ($musePreset.profileOverrideAllowed -eq $true) '1.6: the muse preset allows manual profile selection between Meta Direct and OpenCode Go (default stays Meta)'
     $dualPreset=$policy.presets.PSObject.Properties['aih-engineering'].Value
     Assert-Aih ($dualPreset.allowCodexSubagent -eq $true -and $dualPreset.failurePolicy -ne 'fail-closed') '1.7: the Dual aih-engineering policy remains unchanged'
 

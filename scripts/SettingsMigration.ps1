@@ -123,6 +123,38 @@ $script:ManagedRoutePriorStates = @{
             max: high
 '@
     )
+    # TASK-0006 stale state: the first shipped opencode-go managed route
+    # carried compat.maxTokensField, which the pinned openai-responses
+    # substrate refuses (completions-only key). An install holding that
+    # exact route — with or without the explanatory comments (a DSH
+    # settings rewrite strips them) — is stale Nexus-managed content and
+    # must upgrade to the corrected route (field removed), never become
+    # user-owned by accident and never fail closed on a managed route.
+    'opencode-go' = @(
+        @'
+    opencode-go:
+      displayName: OpenCode Go (Muse Spark 1.3 Contributor over Responses)
+      apiKeyEnv: OPENCODE_API_KEY
+      api: openai-responses
+      baseURL: https://opencode.ai/zen/go/v1
+      reasoning: xhigh
+      compat:
+        supportsDeveloperRole: true
+        maxTokensField: max_completion_tokens
+      models:
+        - id: muse-spark-1.3-contributor
+          name: Muse Spark 1.3 Contributor (OpenCode Go)
+          input: [text, image]
+          contextWindow: 1048576
+          maxTokens: 131072
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+'@
+    )
 }
 
 function ConvertTo-AihMigrationNormalized {
@@ -233,19 +265,45 @@ function ConvertTo-AihCapabilityDerivedSettingsTemplate {
         [string]$_.provider -eq 'meta-model-api'
     })
     if ($entries.Count -ne 1) { throw 'The model registry must contain exactly one Meta Muse Contributor entry.' }
+    $ocEntries = @($registry.models | Where-Object { [string]$_.id -eq 'muse-spark-1.3-contributor-opencode' })
+    if ($ocEntries.Count -ne 1) { throw 'The model registry must contain exactly one OpenCode Go Muse Contributor entry.' }
+    if ([string]$ocEntries[0].provider -ne 'opencode-go') { throw 'The OpenCode Go registry entry must bind provider opencode-go.' }
+    if ([string]$ocEntries[0].model -ne 'muse-spark-1.3-contributor') { throw 'The OpenCode Go registry entry must bind remote model muse-spark-1.3-contributor.' }
     $visionProperty = $entries[0].PSObject.Properties['supportsVision']
     if ($null -eq $visionProperty -or $visionProperty.Value -isnot [bool]) { throw 'The Muse Contributor registry entry must declare boolean supportsVision.' }
 
     $newline = if ($TemplateText.Contains("`r`n")) { "`r`n" } else { "`n" }
-    $modelPattern = '(?m)^        - id: muse-spark-1\.3-contributor\r?\n          name: Muse Spark 1\.3 Contributor(?:\r?\n          input: \[[^\r\n]*\])?'
-    $modelMatches = [regex]::Matches($TemplateText, $modelPattern)
-    if ($modelMatches.Count -ne 1) { throw 'The managed settings template must contain exactly one Muse Contributor model declaration.' }
+    $ocVisionProperty = $ocEntries[0].PSObject.Properties['supportsVision']
+    if ($null -eq $ocVisionProperty -or $ocVisionProperty.Value -isnot [bool]) { throw 'The OpenCode Go registry entry must declare boolean supportsVision.' }
+    $ocDesiredInput = if ([bool]$ocVisionProperty.Value) { '[text, image]' } else { '[text]' }
+    # TASK-0010: provider identity is part of model identity. The same
+    # remote model id legitimately appears under both meta-model-api and
+    # opencode-go, so each pattern stays scoped to its own route by the
+    # display-name line (the Go entry carries the ' (OpenCode Go)' suffix).
+    # Each pattern also tolerates a MISSING input line: this helper exists
+    # to derive that line from the registry, so a template whose
+    # declarations predate it (scenario: prior managed route without the
+    # DSH image-input declaration) must gain the line, not fail closed.
+    # A genuinely duplicated declaration within one route still matches
+    # twice and fails closed below.
+    $derived = $TemplateText
+    $metaPattern = '(?m)^        - id: muse-spark-1\.3-contributor\r?\n          name: Muse Spark 1\.3 Contributor\r?\n(?:          input: \[[^\r\n]*\]\r?\n)?'
+    $metaMatches = [regex]::Matches($derived, $metaPattern)
+    if ($metaMatches.Count -ne 1) { throw 'The managed settings template must contain exactly one Meta Muse Contributor model declaration.' }
     $desiredInput = if ([bool]$visionProperty.Value) { '[text, image]' } else { '[text]' }
     $replacement = '        - id: muse-spark-1.3-contributor' + $newline +
                    '          name: Muse Spark 1.3 Contributor' + $newline +
-                   '          input: ' + $desiredInput
-    return $TemplateText.Substring(0, $modelMatches[0].Index) + $replacement +
-           $TemplateText.Substring($modelMatches[0].Index + $modelMatches[0].Length)
+                   '          input: ' + $desiredInput + $newline
+    $derived = $derived.Substring(0, $metaMatches[0].Index) + $replacement +
+               $derived.Substring($metaMatches[0].Index + $metaMatches[0].Length)
+    $ocPattern = '(?m)^        - id: muse-spark-1\.3-contributor\r?\n          name: Muse Spark 1\.3 Contributor \(OpenCode Go\)\r?\n(?:          input: \[[^\r\n]*\]\r?\n)?'
+    $ocMatches = [regex]::Matches($derived, $ocPattern)
+    if ($ocMatches.Count -ne 1) { throw 'The managed settings template must contain exactly one OpenCode Go model declaration.' }
+    $ocReplacement = '        - id: muse-spark-1.3-contributor' + $newline +
+                     '          name: Muse Spark 1.3 Contributor (OpenCode Go)' + $newline +
+                     '          input: ' + $ocDesiredInput + $newline
+    return $derived.Substring(0, $ocMatches[0].Index) + $ocReplacement +
+           $derived.Substring($ocMatches[0].Index + $ocMatches[0].Length)
 }
 
 function Sync-AihManagedSettings {
