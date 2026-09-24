@@ -102,7 +102,13 @@ function Wait-AihWebStartup {
         $child = & $ChildStatusProbe
         $lastProbe = & $ReadinessProbe
 
-        if ($lastProbe.HttpReady -or $lastProbe.TcpReachable) {
+        # The server may exit while the HTTP request is in flight. Recheck the
+        # tracked child before accepting the response from the port.
+        $child = & $ChildStatusProbe
+        if (-not $child.Alive) {
+            return [pscustomobject]@{ Status = 'FAILED'; ElapsedMilliseconds = $timer.ElapsedMilliseconds; ExitCode = $child.ExitCode; Probe = $lastProbe; Reason = 'The DSH child process exited during readiness probing.' }
+        }
+        if ($lastProbe.HttpReady) {
             return [pscustomobject]@{
                 Status = 'READY'; ElapsedMilliseconds = $timer.ElapsedMilliseconds
                 ExitCode = $null; Probe = $lastProbe

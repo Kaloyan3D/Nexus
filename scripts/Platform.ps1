@@ -373,16 +373,33 @@ function Start-AihDetachedProcess {
         [switch]$Wait
     )
 
-    # Detached child spawn with INDEPENDENT optional parameters. Every
-    # Start-Process parameter is forwarded only when actually supplied, via a
-    # parameter splat: callers that omit -WorkingDirectory (the aih.ps1 OAuth
-    # startup path) bind exactly as they did before this abstraction existed,
-    # and stdout/stderr redirection work independently (either, both, or
-    # neither). Null, empty, or whitespace values never reach Start-Process.
-    # Argument arrays are passed as arrays so arguments containing spaces
-    # stay intact; there is no cmd.exe hop and no shell-string reconstruction.
-    # -WindowStyle is a Windows-only UI concept that Start-Process rejects on
-    # Linux, so Linux never receives it.
+    if (-not (Test-AihIsWindows)) {
+        $helper = Join-Path $PSScriptRoot 'DetachedProcess.js'
+        $node = Get-AihNodeExecutable
+        if ([string]::IsNullOrWhiteSpace($node)) { throw 'Nexus Node runtime is unavailable for Linux process detachment.' }
+        $request = @{
+            file = $FilePath
+            args = @($ArgumentList)
+            wait = [bool]$Wait
+            cwd = if ([string]::IsNullOrWhiteSpace($WorkingDirectory)) { $null } else { $WorkingDirectory }
+            stdout = if ([string]::IsNullOrWhiteSpace($RedirectStandardOutput)) { $null } else { $RedirectStandardOutput }
+            stderr = if ([string]::IsNullOrWhiteSpace($RedirectStandardError)) { $null } else { $RedirectStandardError }
+        }
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($request | ConvertTo-Json -Compress -Depth 4)))
+        $output = & $node $helper $encoded
+        $lines = @($output)
+        if ($LASTEXITCODE -ne 0 -or $lines.Count -ne 1) {
+            throw "Linux detached process launch failed: $($output -join ' ')"
+        }
+        if ($Wait) {
+            $result = $lines[0] | ConvertFrom-Json
+            return [pscustomobject]@{ Id = [int]$result.pid; HasExited = $true; ExitCode = [int]$result.exitCode }
+        }
+        if ([string]$lines[0] -notmatch '^[0-9]+$') { throw "Linux detached process launch returned an invalid PID: $($lines[0])" }
+        return [Diagnostics.Process]::GetProcessById([int]$lines[0])
+    }
+
+    # Windows retains the existing Start-Process parameter contract.
     $startParams = @{
         FilePath     = $FilePath
         ArgumentList = $ArgumentList

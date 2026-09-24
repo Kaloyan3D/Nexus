@@ -5,8 +5,8 @@ $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Split-Path -Parent $PSScriptRoot }
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 . (Join-Path $InstallRoot 'scripts/Common.ps1')
+. (Join-Path $InstallRoot 'scripts/Startup.ps1')
 $aihPsHost = Get-AihPowerShellHost -InstallRoot $InstallRoot
-$sourceLayout = Get-AihLayout $InstallRoot
 $passed = 0
 
 function Assert-Aih([bool]$Condition, [string]$Message) {
@@ -31,7 +31,7 @@ function New-AihStartupFixture([string]$Name) {
     Copy-Item -LiteralPath (Join-Path $InstallRoot 'config/settings.yaml') -Destination (Join-Path $root 'data/settings.yaml')
     $fixtureNode = Join-Path (Join-Path $root 'runtime/node') (Get-AihNodeRelativeExecutable)
     New-Item -ItemType Directory -Path (Split-Path -Parent $fixtureNode) -Force | Out-Null
-    Copy-Item -LiteralPath $sourceLayout.Node -Destination $fixtureNode
+    Copy-Item -LiteralPath (Get-AihNodeExecutable -InstallRoot $InstallRoot) -Destination $fixtureNode
 
     $webPort = Get-AihFreeTcpPort
     $oauthPort = Get-AihFreeTcpPort
@@ -136,6 +136,10 @@ catch { Write-Error $_; exit 1 }
         Assert-Aih ($null -ne $state -and $state.Status -eq 'READY') "${Name}: aih starts when DeepSeek is $DeepSeekState ($($output -join ' | '))"
         Assert-Aih (-not (Test-Path -LiteralPath $probeMarker)) "${Name}: startup never calls the Direct DeepSeek model-list endpoint"
         Assert-Aih ($state.Status -eq 'READY') "${Name}: startup reaches READY"
+        Assert-Aih ($launcher.WaitForExit(5000)) "${Name}: launcher exits after readiness"
+        $server = Get-Process -Id ([int]$state.Pid) -ErrorAction SilentlyContinue
+        Assert-Aih ($null -ne $server -and (Test-AihTrackedProcessIdentity -Process $server -State $state -ExpectedExecutable (Get-AihLayout $fixture.Root).Node)) "${Name}: READY PID keeps the original Node identity after launcher exit"
+        Assert-Aih (Test-AihEndpoint -Uri $fixture.Url -TimeoutSec 2) "${Name}: HTTP remains available after launcher exit"
         $fixture | Add-Member -NotePropertyName LauncherProcess -NotePropertyValue $launcher
         return $fixture
     }
@@ -178,6 +182,16 @@ try {
     Assert-Aih ($null -ne $scopedError -and [int]$scopedError.Exception.Response.StatusCode -eq 404) 'selecting an unavailable DeepSeek model returns a scoped execution error'
     $health = Invoke-RestMethod -Uri $absent.Url
     Assert-Aih ($health.status -eq 'ready') 'the Harness remains alive after the unavailable DeepSeek execution'
+
+    $originalPid = [int](Get-Content -Raw (Join-Path $absent.Root 'data/aih-state.json') | ConvertFrom-Json).Pid
+    $reuseOutput = & $aihPsHost -NoProfile -File (Join-Path $absent.Root 'scripts/aih.ps1') -InstallRoot $absent.Root -Preset 'aih-engineering' 2>&1
+    $reusedState = Get-Content -Raw (Join-Path $absent.Root 'data/aih-state.json') | ConvertFrom-Json
+    Assert-Aih ($LASTEXITCODE -eq 0 -and $reusedState.Status -eq 'READY' -and [int]$reusedState.Pid -eq $originalPid) 'aih reuses the verified READY Web UI process'
+
+    Stop-AihFixtureProcess $absent.Root
+    $restartOutput = & $aihPsHost -NoProfile -File (Join-Path $absent.Root 'scripts/aih.ps1') -InstallRoot $absent.Root -Preset 'aih-engineering' 2>&1
+    $restartedState = Get-Content -Raw (Join-Path $absent.Root 'data/aih-state.json') | ConvertFrom-Json
+    Assert-Aih ($LASTEXITCODE -eq 0 -and $restartedState.Status -eq 'READY' -and [int]$restartedState.Pid -ne $originalPid -and (Test-AihEndpoint -Uri $absent.Url -TimeoutSec 2)) 'aih replaces stale READY state with a new live Web UI process'
 
     Write-Host "RESULT: $passed startup/provider isolation assertions passed."
 }
