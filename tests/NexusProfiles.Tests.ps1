@@ -19,7 +19,7 @@ $savedActive=$env:AIH_ACTIVE_PROFILE
 $fixture=Join-Path ([IO.Path]::GetTempPath()) ('nexus-profiles-'+[guid]::NewGuid().ToString('N'))
 try{
     $catalog=Get-AihNexusProfileCatalog (Join-Path $InstallRoot 'config/nexus-profiles.json')
-    Assert-AihEqual @($catalog.profiles).Count 3 'controller plane loads three immutable top-level profile entries'
+    Assert-AihEqual @($catalog.profiles).Count 4 'controller plane loads four immutable top-level profile entries (Dual x2 + Muse Meta + Muse OpenCode Go)'
 
     $deep=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId 'deepseek-codex'
     Assert-AihEqual $deep.Engine 'dual' 'DeepSeek + Codex resolves to Dual engine on controller plane'
@@ -35,6 +35,12 @@ try{
     Assert-AihTrue ([bool]$muse.Runnable) 'Muse is runnable'
     Assert-AihTrue ($null-eq$muse.Config.PSObject.Properties['contributorProtection']) 'Muse has no Contributor Protection configuration'
     Assert-AihEqual $muse.Config.reasoning.default 'xhigh' 'Muse registry carries engine-specific reasoning metadata'
+
+    $ocNexus=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId 'muse-spark-1.3-contributor-opencode'
+    Assert-AihEqual $ocNexus.Engine 'muse' 'OpenCode Go resolves to the muse engine on controller plane'
+    Assert-AihTrue ([bool]$ocNexus.Selectable) 'OpenCode Go is selectable'
+    Assert-AihTrue ([bool]$ocNexus.Runnable) 'OpenCode Go is runnable'
+    Assert-AihEqual $ocNexus.Config.model.primary 'muse-spark-1.3-contributor-opencode' 'OpenCode Go muse profile binds the OpenCode registry entry'
 
     $unknown=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId 'unknown-profile'
     Assert-AihTrue ($null-eq$unknown) 'unknown Nexus profile fails closed without engine fallback'
@@ -81,7 +87,7 @@ try{
     $stateScript=& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $fixture
     $editorState=$stateScript|ConvertFrom-Json
     $nexusIds=@($editorState.nexusProfiles|ForEach-Object{$_.id})
-    Assert-AihTrue (($nexusIds -contains 'deepseek-codex')-and($nexusIds -contains 'glm-codex')-and($nexusIds -contains 'muse-spark-1.3-contributor')-and($nexusIds -contains 'custom')) 'editor GET exposes the top-level Nexus profile catalog incl. dynamic Custom'
+    Assert-AihTrue (($nexusIds -contains 'deepseek-codex')-and($nexusIds -contains 'glm-codex')-and($nexusIds -contains 'muse-spark-1.3-contributor')-and($nexusIds -contains 'muse-spark-1.3-contributor-opencode')-and($nexusIds -contains 'custom')) 'editor GET exposes the top-level Nexus profile catalog incl. OpenCode Go and dynamic Custom'
     $glmEntry=@($editorState.nexusProfiles|Where-Object{$_.id -eq 'glm-codex'})[0]
     Assert-AihEqual $glmEntry.engine 'dual' 'GLM + Codex is classified dual in editor state'
     Assert-AihTrue ([bool]$glmEntry.selectable) 'GLM + Codex stays selectable in editor state'

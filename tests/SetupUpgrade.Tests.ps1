@@ -294,7 +294,7 @@ if ($runningOnWindows) {
         # NodeVersion explicitly null: the pinned-runtime block must be a no-op
         # (nothing installed, nothing to compare) so the probe never touches the network.
         [IO.File]::WriteAllText((Join-Path $probeSource 'config/versions.json'), '{"NodeVersion": null}' + [Environment]::NewLine)
-        foreach ($probeFile in @('settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'DeepSeek-Isolation.cjs', 'Engineering-Isolation.cjs', 'AihController.cjs', 'ContextCompaction.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json', 'engineering-profiles.json', 'model-registry.json', 'Engineering-Profiles.cjs')) {
+        foreach ($probeFile in @('settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'preset-muse.yml', 'DeepSeek-Isolation.cjs', 'Engineering-Isolation.cjs', 'Muse-Isolation.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'Muse-ReasoningActivity.cjs', 'AihController.cjs', 'ContextCompaction.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json', 'engineering-profiles.json', 'model-registry.json', 'nexus-profiles.json', 'muse-profiles.json', 'Engineering-Profiles.cjs', 'Nexus-Profiles.cjs')) {
             [IO.File]::WriteAllText((Join-Path $probeSource ('config/' + $probeFile)), 'TASK-0032 probe fixture' + [Environment]::NewLine)
         }
         foreach ($probeFile in @('package.json', 'package-lock.json')) {
@@ -574,6 +574,25 @@ try {
     if ((@($freshResult.AddedRoutes).Count -ne 0) -or (@($freshResult.UpgradedRoutes).Count -ne 0)) { throw 'FAIL: a fresh template copy must not add or upgrade routes.' }
     Write-Host 'PASS: fresh-install template copy migrates as a verified no-op (M2.1)'
 
+    # Scenario 1b (TASK-0010): provider identity is part of model identity.
+    # The same remote model id is legitimately declared under BOTH managed
+    # routes; exactly one declaration must live under each route, and the
+    # global occurrence count of 2 is valid (never a duplication bug).
+    $templateRouteLines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in ($migrationTemplateText -replace "`r`n", "`n") -split "`n") { $templateRouteLines.Add($line) }
+    $templateRouteBlocks = Get-AihSettingsProviderRouteBlocks -Lines $templateRouteLines
+    $templateMeta = $null; $templateOc = $null
+    foreach ($route in $templateRouteBlocks) {
+        if ($route.Id -eq 'meta-model-api') { $templateMeta = $route }
+        if ($route.Id -eq 'opencode-go') { $templateOc = $route }
+    }
+    if ($null -eq $templateMeta -or $null -eq $templateOc) { throw 'FAIL: the managed template must declare both meta-model-api and opencode-go routes.' }
+    if (@($templateMeta.ModelIds).Count -ne 1 -or [string]$templateMeta.ModelIds[0] -ne 'muse-spark-1.3-contributor') { throw 'FAIL: exactly one Muse Contributor must exist under meta-model-api.' }
+    if (@($templateOc.ModelIds).Count -ne 1 -or [string]$templateOc.ModelIds[0] -ne 'muse-spark-1.3-contributor') { throw 'FAIL: exactly one Muse Contributor must exist under opencode-go.' }
+    $globalContributorCount = ([regex]::Matches($migrationTemplateText, [regex]::Escape('- id: muse-spark-1.3-contributor') + '(?!-)')).Count
+    if ($globalContributorCount -ne 2) { throw ('FAIL: the global remote-model occurrence count must be exactly 2 (one per route), found: ' + $globalContributorCount) }
+    Write-Host 'PASS: provider identity scopes model identity (exactly one Contributor per route, global count 2 is valid)'
+
     # Scenario 2: pre-M2 install without the managed meta route gains it
     # verbatim while every user byte (values, comments, order) is preserved,
     # and the document's CRLF newline style survives the migration.
@@ -687,6 +706,42 @@ try {
     if ([regex]::IsMatch($driftedAfter, [regex]::Escape('- id: muse-spark-1.3') + '(?!-contributor)')) { throw 'FAIL: the drifted route must not keep the stale standard model id.' }
     Write-Host 'PASS: comment-stripped (settings-rewrite drifted) M2 route still upgrades to the contributor route'
 
+    # Scenario 4d (TASK-0010): a stale first-shipped opencode-go route (the
+    # invalid completions-only maxTokensField) upgrades to the corrected
+    # route while the Meta route stays byte-identical and neither route
+    # duplicates.
+    $staleOcPrior = $script:ManagedRoutePriorStates['opencode-go'][0]
+    if ([string]::IsNullOrWhiteSpace($staleOcPrior)) { throw 'FAIL: the stale opencode-go prior managed state must stay embedded in SettingsMigration.ps1.' }
+    $staleOcPath = Join-Path $migrationFixtureRoot 'stale-oc.yaml'
+    $staleOcLines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in ($migrationTemplateText -replace "`r`n", "`n") -split "`n") { $staleOcLines.Add($line) }
+    $staleOcRoutes = Get-AihSettingsProviderRouteBlocks -Lines $staleOcLines
+    $staleOcRoute = $null; $staleOcMetaBefore = $null
+    foreach ($route in $staleOcRoutes) {
+        if ($route.Id -eq 'opencode-go') { $staleOcRoute = $route }
+        if ($route.Id -eq 'meta-model-api') { $staleOcMetaBefore = [string]$route.Text }
+    }
+    if ($null -eq $staleOcRoute) { throw 'FAIL: test setup could not find the managed opencode-go route in the template.' }
+    $staleOcLines.RemoveRange($staleOcRoute.StartIndex, ($staleOcRoute.EndIndex - $staleOcRoute.StartIndex + 1))
+    $staleOcLines.InsertRange($staleOcRoute.StartIndex, (@($staleOcPrior -replace "`r`n", "`n") -split "`n"))
+    [System.IO.File]::WriteAllText($staleOcPath, (($staleOcLines -join "`r`n") + "`r`n"), $utf8NoBom)
+    $staleOcResult = Sync-AihManagedSettings -TemplatePath $migrationTemplatePath -SettingsPath $staleOcPath
+    $staleOcAfter = [System.IO.File]::ReadAllText($staleOcPath)
+    if (@($staleOcResult.UpgradedRoutes) -notcontains 'opencode-go') { throw 'FAIL: the stale opencode-go managed route must be reported as upgraded.' }
+    $staleOcAfterRoutes = Get-AihSettingsProviderRouteBlocks -Lines (($staleOcAfter -replace "`r`n", "`n") -split "`n")
+    $staleOcAfterOc = $null; $staleOcAfterMeta = $null
+    foreach ($route in $staleOcAfterRoutes) {
+        if ($route.Id -eq 'opencode-go') { $staleOcAfterOc = $route }
+        if ($route.Id -eq 'meta-model-api') { $staleOcAfterMeta = [string]$route.Text }
+    }
+    if ($null -eq $staleOcAfterOc) { throw 'FAIL: the upgraded document lost the opencode-go route.' }
+    if ([string]$staleOcAfterOc.Text -match '(?m)^\s*maxTokensField\s*:') { throw 'FAIL: the upgraded opencode-go route must drop the invalid completions-only maxTokensField.' }
+    if (@($staleOcAfterOc.ModelIds).Count -ne 1 -or [string]$staleOcAfterOc.ModelIds[0] -ne 'muse-spark-1.3-contributor') { throw 'FAIL: exactly one Muse Contributor must exist under opencode-go after upgrade.' }
+    if ($staleOcAfterMeta -ne $staleOcMetaBefore) { throw 'FAIL: the Meta route must survive an OpenCode upgrade byte-identical.' }
+    if (([regex]::Matches($staleOcAfter, [regex]::Escape('    opencode-go:'))).Count -ne 1) { throw 'FAIL: the managed opencode-go route must appear exactly once after upgrade.' }
+    if (([regex]::Matches($staleOcAfter, [regex]::Escape('    meta-model-api:'))).Count -ne 1) { throw 'FAIL: the managed meta route must appear exactly once after upgrade.' }
+    Write-Host 'PASS: stale opencode-go route upgrades to the corrected route with Meta byte-identical (TASK-0010)'
+
     # Scenario 4c (TASK-0040): the drifted shape must match the prior state
     # EXACTLY as it appears on a real upgraded install — assert the embedded
     # variant against the literal block this task observed in data/settings.yaml.
@@ -792,6 +847,23 @@ foreach ($museContract in @(
 if (-not $compositionText.Contains('Remove-MuseContributorEgressPatch.cjs')) {
     throw 'FAIL: Complete-Install.ps1 does not remove the retired Muse provider-egress hook on upgrade.'
 }
+# TASK-0009: the OpenCode Go x-opencode-session substrate patch is part of
+# the shared install composition (fresh install AND update/reinstall, both
+# platforms): apply after the pinned dependencies exist, then verify status
+# is `applied`, failing closed on any deviation.
+$sessionPatchApplyIndex = $compositionText.IndexOf("Apply-OpenCodeSessionPatch.cjs') `$InstallRoot apply")
+if ($sessionPatchApplyIndex -lt 0) { throw 'FAIL: Complete-Install.ps1 must apply the OpenCode Go x-opencode-session substrate patch.' }
+$sessionPatchStatusIndex = $compositionText.IndexOf("Apply-OpenCodeSessionPatch.cjs') `$InstallRoot status")
+if ($sessionPatchStatusIndex -lt $sessionPatchApplyIndex) { throw 'FAIL: Complete-Install.ps1 must verify the substrate patch status after applying it.' }
+if (-not $compositionText.Contains("is not applied after installation. Refusing a broken transport.")) { throw 'FAIL: Complete-Install.ps1 must fail closed when the patch status is not applied.' }
+$egressRemovalIndex = $compositionText.IndexOf('Remove-MuseContributorEgressPatch.cjs')
+if ($sessionPatchApplyIndex -lt $egressRemovalIndex -or $sessionPatchApplyIndex -gt $musePresetBlockIndex) { throw 'FAIL: the substrate patch must run after egress cleanup and before the Muse preset install.' }
+Write-Host 'PASS: Complete-Install applies and verifies the x-opencode-session substrate patch (fail closed)'
+# TASK-0009: Windows Setup.ps1 must publish top-level .cjs patch appliers
+# into the installed scripts tree (Linux setup.sh copies scripts/
+# recursively); otherwise Complete-Install cannot patch on Windows.
+if (-not $setupText.Contains("'.ps1', '.mjs', '.cjs'")) { throw 'FAIL: Setup.ps1 must publish top-level .cjs installer modules (substrate patch appliers) for Windows/Linux parity.' }
+Write-Host 'PASS: Setup.ps1 publishes .cjs installer modules for Windows/Linux install parity'
 Write-Host 'PASS: Complete-Install atomically builds and validates the aih-muse plane with no delegation surface'
 
 $musePresetMetaPath = Join-Path $InstallRoot 'config/preset-muse.yml'
@@ -839,4 +911,83 @@ foreach ($dualPresetRel in @('data/.agent-presets/aih-engineering/agent.cordis.y
 }
 if (Test-Path -LiteralPath (Join-Path $InstallRoot 'data/.agent-presets/aih-engineering/agent.cordis.yml')) {
     Write-Host 'PASS: the built Dual presets keep their delegation surfaces and controller rows'
+}
+
+# ── TASK-0006: installer publishes the Muse profile catalogs. The
+#    nexus-profiles.json / muse-profiles.json pair is runtime source of truth
+#    (resolution + UI), so both platform installers must publish them on
+#    fresh install AND on upgrade, exactly like model-registry.json. ──
+$installerManifests = @(
+    @{ Name = 'Linux setup.sh'; Path = (Join-Path $InstallRoot 'setup.sh'); Pattern = 'nexus-profiles.json' },
+    @{ Name = 'Linux setup.sh'; Path = (Join-Path $InstallRoot 'setup.sh'); Pattern = 'muse-profiles.json' },
+    @{ Name = 'Linux setup.sh'; Path = (Join-Path $InstallRoot 'setup.sh'); Pattern = 'Muse-Isolation.cjs' },
+    @{ Name = 'Linux setup.sh'; Path = (Join-Path $InstallRoot 'setup.sh'); Pattern = 'Nexus-Profiles.cjs' },
+    @{ Name = 'Linux setup.sh'; Path = (Join-Path $InstallRoot 'setup.sh'); Pattern = 'preset-muse.yml' }
+)
+$setupPs1Path = Join-Path $InstallRoot 'scripts/Setup.ps1'
+$setupPs1Text = Get-Content -Raw -Encoding UTF8 -LiteralPath $setupPs1Path
+foreach ($entry in $installerManifests) {
+    $manifestText = Get-Content -Raw -Encoding UTF8 -LiteralPath $entry.Path
+    if (-not $manifestText.Contains($entry.Pattern)) { throw ("FAIL: " + $entry.Name + ' does not publish ' + $entry.Pattern + ' (TASK-0006 install regression).') }
+}
+foreach ($winFile in @('nexus-profiles.json', 'muse-profiles.json', 'Muse-Isolation.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'Muse-ReasoningActivity.cjs', 'Nexus-Profiles.cjs', 'preset-muse.yml')) {
+    if (-not $setupPs1Text.Contains($winFile)) { throw ("FAIL: scripts/Setup.ps1 does not publish $winFile (TASK-0006 install regression).") }
+}
+Write-Host 'PASS: Linux and Windows install manifests publish both Muse profile catalogs and all Muse runtime modules (TASK-0006)'
+
+# Fresh-install semantics: copying the source config files publishes both
+# catalogs verbatim (opencode profile present, existing profiles intact).
+$pubFixture = Join-Path ([IO.Path]::GetTempPath()) ('aih-pub-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path (Join-Path $pubFixture 'config') | Out-Null
+try {
+    foreach ($pubFile in @('nexus-profiles.json', 'muse-profiles.json', 'model-registry.json', 'routing-policy.json')) {
+        Copy-Item -LiteralPath (Join-Path $InstallRoot ('config/' + $pubFile)) -Destination (Join-Path $pubFixture ('config/' + $pubFile)) -Force
+    }
+    $pubNexus = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $pubFixture 'config/nexus-profiles.json') | ConvertFrom-Json
+    $pubNexusIds = @($pubNexus.profiles | ForEach-Object { [string]$_.id })
+    foreach ($requiredId in @('deepseek-codex', 'glm-codex', 'muse-spark-1.3-contributor', 'muse-spark-1.3-contributor-opencode')) {
+        if ($pubNexusIds -notcontains $requiredId) { throw ("FAIL: published nexus-profiles.json is missing profile $requiredId.") }
+    }
+    $pubMuse = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $pubFixture 'config/muse-profiles.json') | ConvertFrom-Json
+    $pubMuseIds = @($pubMuse.profiles | ForEach-Object { [string]$_.id })
+    foreach ($requiredId in @('muse-spark-1.3-contributor', 'muse-spark-1.3-contributor-opencode')) {
+        if ($pubMuseIds -notcontains $requiredId) { throw ("FAIL: published muse-profiles.json is missing profile $requiredId.") }
+    }
+    Write-Host 'PASS: fresh install publishes both catalogs with the OpenCode Go profile and all existing profiles (TASK-0006)'
+
+    # Upgrade semantics: an install holding the OLD catalogs (no opencode
+    # entries) is replaced by the current source versions, byte-identical.
+    $staleNexus = ($pubNexus | ConvertTo-Json -Depth 10) -replace 'muse-spark-1.3-contributor-opencode', 'stale-placeholder'
+    $staleMuse = ($pubMuse | ConvertTo-Json -Depth 10) -replace 'muse-spark-1.3-contributor-opencode', 'stale-placeholder'
+    $staleNexusPath = Join-Path $pubFixture 'config/nexus-profiles.json'
+    $staleMusePath = Join-Path $pubFixture 'config/muse-profiles.json'
+    [System.IO.File]::WriteAllText($staleNexusPath, $staleNexus, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($staleMusePath, $staleMuse, [System.Text.UTF8Encoding]::new($false))
+    Copy-Item -LiteralPath (Join-Path $InstallRoot 'config/nexus-profiles.json') -Destination $staleNexusPath -Force
+    Copy-Item -LiteralPath (Join-Path $InstallRoot 'config/muse-profiles.json') -Destination $staleMusePath -Force
+    $upNexus = Get-Content -Raw -Encoding UTF8 -LiteralPath $staleNexusPath
+    $upMuse = Get-Content -Raw -Encoding UTF8 -LiteralPath $staleMusePath
+    if (-not $upNexus.Contains('muse-spark-1.3-contributor-opencode')) { throw 'FAIL: upgraded nexus-profiles.json lacks the OpenCode Go profile.' }
+    if (-not $upMuse.Contains('muse-spark-1.3-contributor-opencode')) { throw 'FAIL: upgraded muse-profiles.json lacks the OpenCode Go profile.' }
+    if ($upNexus.Contains('stale-placeholder') -or $upMuse.Contains('stale-placeholder')) { throw 'FAIL: upgrade left stale catalog content behind.' }
+    $srcNexus = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'config/nexus-profiles.json')
+    $srcMuse = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'config/muse-profiles.json')
+    if ($upNexus -ne $srcNexus) { throw 'FAIL: upgraded nexus-profiles.json differs from the source version.' }
+    if ($upMuse -ne $srcMuse) { throw 'FAIL: upgraded muse-profiles.json differs from the source version.' }
+    Write-Host 'PASS: upgrade from stale catalogs replaces both with the current source versions (TASK-0006)'
+
+    # Managed settings: an existing runtime document without opencode-go
+    # still gains the route additively (user bytes preserved).
+    $userSettingsPath = Join-Path $pubFixture 'user-settings.yaml'
+    $userDoc = @('engineering-profile: muse-spark-1.3-contributor', '', 'llm-pi-ai:', '  providers:', '    meta-model-api:', '      displayName: Meta', '      apiKeyEnv: MODEL_API_KEY', '      api: openai-completions', '      baseURL: https://api.meta.ai/v1', '      models:', '        - id: muse-spark-1.3-contributor', '', 'ui-theme:', '  preference: dark') -join "`n"
+    [System.IO.File]::WriteAllText($userSettingsPath, $userDoc + "`n", [System.Text.UTF8Encoding]::new($false))
+    $userMig = Sync-AihManagedSettings -TemplatePath (Join-Path $InstallRoot 'config/settings.yaml') -SettingsPath $userSettingsPath
+    $userAfter = Get-Content -Raw -Encoding UTF8 -LiteralPath $userSettingsPath
+    if (-not $userAfter.Contains('opencode-go:')) { throw 'FAIL: managed migration did not add opencode-go to the existing runtime document.' }
+    if (-not $userAfter.Contains('https://opencode.ai/zen/go/v1')) { throw 'FAIL: migrated opencode-go route lacks the Go baseURL.' }
+    if (-not $userAfter.Contains('engineering-profile: muse-spark-1.3-contributor')) { throw 'FAIL: migration clobbered the user engineering-profile key.' }
+    Write-Host 'PASS: existing data/settings.yaml gains opencode-go additively with user settings preserved (TASK-0006)'
+}
+finally {
+    if (Test-Path -LiteralPath $pubFixture) { Remove-Item -LiteralPath $pubFixture -Recurse -Force -ErrorAction SilentlyContinue }
 }

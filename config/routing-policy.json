@@ -44,7 +44,7 @@
       "allowCodexSubagent": false,
       "failurePolicy": "fail-closed",
       "profile": "muse-spark-1.3-contributor",
-      "profileOverrideAllowed": false,
+      "profileOverrideAllowed": true,
       "rootExecutor": {
         "name": "Muse Spark 1.3 Contributor",
         "provider": "meta-model-api",

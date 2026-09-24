@@ -37,7 +37,7 @@
     },
     {
       "id": "muse-spark-1.3-contributor",
-      "displayName": "Muse Spark 1.3 Contributor",
+      "displayName": "Muse Spark 1.3 \u2014 Meta",
       "engine": "muse",
       "source": {
         "kind": "muse-profile",
@@ -46,7 +46,20 @@
       "selectable": true,
       "runnable": true,
       "availability": "ready",
-      "description": "Muse Agent Plane V0 using the Contributor-tier model. Prompts and completions are subject to the provider's Contributor data-use terms."
+      "description": "Muse Agent Plane V0 using the Contributor-tier model over Meta Direct. Prompts and completions are subject to the provider's Contributor data-use terms."
+    },
+    {
+      "id": "muse-spark-1.3-contributor-opencode",
+      "displayName": "Muse Spark 1.3 \u2014 OpenCode Go",
+      "engine": "muse",
+      "source": {
+        "kind": "muse-profile",
+        "profileId": "muse-spark-1.3-contributor-opencode"
+      },
+      "selectable": true,
+      "runnable": true,
+      "availability": "ready",
+      "description": "Muse Agent Plane V0 using the Contributor-tier model over the OpenCode Go Responses transport. Prompts and completions are subject to the provider's Contributor data-use terms."
     }
   ]
 }

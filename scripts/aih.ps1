@@ -92,7 +92,17 @@ if ($null -ne $runningState -and $null -ne $runningState.Pid) {
     $existing = Get-Process -Id ([int]$runningState.Pid) -ErrorAction SilentlyContinue
     $existingIdentityMatches = $null -ne $existing -and (Test-AihTrackedProcessIdentity -Process $existing -State $runningState -ExpectedExecutable $layout.Node)
     if ($null -ne $existing -and -not $existingIdentityMatches) {
+        $runningState.Status = 'FAILED'
+        $runningState | Add-Member -NotePropertyName FailureReason -NotePropertyValue 'Saved PID belongs to a different process identity.' -Force
+        $runningState.UpdatedAtUtc = [DateTime]::UtcNow.ToString('o')
+        Write-AihState -Path $layout.State -State $runningState
         throw "Refusing to reuse or stop PID $($runningState.Pid): the saved process identity is stale or does not match DSH."
+    }
+    if ($null -eq $existing -and $runningState.Status -eq 'READY') {
+        $runningState.Status = 'STOPPED'
+        $runningState | Add-Member -NotePropertyName StopReason -NotePropertyValue 'Tracked Web UI process is absent.' -Force
+        $runningState.UpdatedAtUtc = [DateTime]::UtcNow.ToString('o')
+        Write-AihState -Path $layout.State -State $runningState
     }
     if ($null -ne $existing -and (Test-AihEndpoint -Uri $webUrl -TimeoutSec 2)) {
         if (Test-AihReusableUniversalRuntimeState -State $runningState -Restart:$Restart) {
@@ -224,6 +234,21 @@ if ($startup.Status -eq 'STARTING') {
     Write-Host "Run aih again to resume readiness checks. Logs: $stdoutLog and $stderrLog"
     Write-Host $webUrl
     exit 0
+}
+
+# Validate the exact process identity and the endpoint again at the commit
+# boundary. An HTTP response alone can come from another listener or a child
+# which exited during the final probe.
+$readyProcess = Get-Process -Id ([int]$state['Pid']) -ErrorAction SilentlyContinue
+$readyIdentity = $null -ne $readyProcess -and (Test-AihTrackedProcessIdentity -Process $readyProcess -State ([pscustomobject]$state) -ExpectedExecutable $layout.Node)
+$readyEndpoint = Test-AihEndpoint -Uri $webUrl -TimeoutSec 2
+if (-not $readyIdentity -or -not $readyEndpoint) {
+    $state['Status'] = 'FAILED'
+    $state['UpdatedAtUtc'] = [DateTime]::UtcNow.ToString('o')
+    $state['FailureReason'] = 'Tracked Web UI process identity or HTTP endpoint was lost before READY was committed.'
+    $state['StartupEvidence'] = [ordered]@{ TcpReachable = $startup.Probe.TcpReachable; HttpReady = $startup.Probe.HttpReady; HttpStatus = $startup.Probe.HttpStatus; StdoutMarker = $startup.Probe.StdoutMarker }
+    Write-AihState -Path $layout.State -State $state
+    throw "Nexus Web UI FAILED: $($state['FailureReason'])"
 }
 
 $state['Status'] = 'READY'

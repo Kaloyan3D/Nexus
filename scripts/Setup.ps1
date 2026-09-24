@@ -53,10 +53,15 @@ foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'docs') -Fil
     Copy-AihSourceFile -Source $file.FullName -Destination (Join-Path $layout.Root 'docs')
 }
 
-foreach ($name in @('versions.json', 'settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'DeepSeek-Isolation.cjs', 'Engineering-Isolation.cjs', 'AihController.cjs', 'ContextCompaction.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json', 'engineering-profiles.json', 'model-registry.json', 'Engineering-Profiles.cjs')) {
+foreach ($name in @('versions.json', 'settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'preset-muse.yml', 'DeepSeek-Isolation.cjs', 'Engineering-Isolation.cjs', 'Muse-Isolation.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'Muse-ReasoningActivity.cjs', 'AihController.cjs', 'ContextCompaction.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json', 'engineering-profiles.json', 'model-registry.json', 'nexus-profiles.json', 'muse-profiles.json', 'Engineering-Profiles.cjs', 'Nexus-Profiles.cjs')) {
     Copy-AihSourceFile -Source (Join-Path $sourceRoot "config\$name") -Destination (Join-Path $layout.Config $name)
 }
-foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'scripts') -File | Where-Object Extension -in @('.ps1', '.mjs')) {
+# TASK-0009: top-level provider-substrate patch appliers are .cjs modules
+# (Apply-OpenCodeSessionPatch.cjs, Remove-MuseContributorEgressPatch.cjs).
+# They must reach the installed scripts tree exactly like the Linux
+# installer copies them, or Complete-Install.ps1 cannot patch/verify the
+# pinned substrate on Windows installs.
+foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'scripts') -File | Where-Object Extension -in @('.ps1', '.mjs', '.cjs')) {
     Copy-AihSourceFile -Source $file.FullName -Destination $layout.Scripts
 }
 foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'bin') -Filter '*.cmd' -File) {
