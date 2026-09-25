@@ -237,7 +237,7 @@ function ConvertTo-AihCapabilityDerivedSettingsTemplate {
     if ($null -eq $visionProperty -or $visionProperty.Value -isnot [bool]) { throw 'The Muse Contributor registry entry must declare boolean supportsVision.' }
 
     $newline = if ($TemplateText.Contains("`r`n")) { "`r`n" } else { "`n" }
-    $modelPattern = '(?m)^        - id: muse-spark-1\.3-contributor\r?\n          name: Muse Spark 1\.3 Contributor(?:\r?\n          input: \[[^\r\n]*\])?'
+    $modelPattern = '(?m)^        - id: muse-spark-1\.3-contributor\r?\n          name: Muse Spark 1\.3 Contributor(?=\r?\n)(?:\r?\n          input: \[[^\r\n]*\])?'
     $modelMatches = [regex]::Matches($TemplateText, $modelPattern)
     if ($modelMatches.Count -ne 1) { throw 'The managed settings template must contain exactly one Muse Contributor model declaration.' }
     $desiredInput = if ([bool]$visionProperty.Value) { '[text, image]' } else { '[text]' }

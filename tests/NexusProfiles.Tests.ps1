@@ -19,7 +19,7 @@ $savedActive=$env:AIH_ACTIVE_PROFILE
 $fixture=Join-Path ([IO.Path]::GetTempPath()) ('nexus-profiles-'+[guid]::NewGuid().ToString('N'))
 try{
     $catalog=Get-AihNexusProfileCatalog (Join-Path $InstallRoot 'config/nexus-profiles.json')
-    Assert-AihEqual @($catalog.profiles).Count 3 'controller plane loads three immutable top-level profile entries'
+    Assert-AihEqual @($catalog.profiles).Count 4 'controller plane loads four immutable top-level profile entries'
 
     $deep=Resolve-AihNexusProfile -InstallRoot $InstallRoot -ProfileId 'deepseek-codex'
     Assert-AihEqual $deep.Engine 'dual' 'DeepSeek + Codex resolves to Dual engine on controller plane'
@@ -41,7 +41,7 @@ try{
 
     foreach($name in @('routing-policy.json','engineering-profiles.json','model-registry.json','nexus-profiles.json','muse-profiles.json')){Copy-AihConfigFile $name $fixture}
     New-Item -ItemType Directory -Force -Path (Join-Path $fixture 'data')|Out-Null
-    [IO.File]::WriteAllText((Join-Path $fixture 'data/settings.yaml'),"engineering-profile: glm-codex`n",[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $fixture 'data/settings.yaml'),"engineering-profile: glm-codex`nllm-pi-ai:`n  providers:`n    meta-model-api:`n",[Text.UTF8Encoding]::new($false))
     $custom=[ordered]@{
         schemaVersion=1;profileId='custom';displayName='Custom';roles=[ordered]@{
             primaryEngineer=[ordered]@{model='glm-5.3-flash';reasoning='high'}
@@ -110,6 +110,9 @@ try{
     Assert-AihEqual $museSelect.profileId 'muse-spark-1.3-contributor' 'select Muse reports the persisted user-facing Profile preference'
     $settingsAfterMuseSelect=Get-Content -Raw (Join-Path $fixture 'data/settings.yaml')
     Assert-AihTrue ([regex]::IsMatch($settingsAfterMuseSelect,'(?m)^engineering-profile:\s*muse-spark-1\.3-contributor')) 'Muse selection writes the settings key'
+    $museEditorState=(& (Join-Path $InstallRoot 'scripts/EngineeringProfile.ps1') -Action get -InstallRoot $fixture)|ConvertFrom-Json
+    Assert-AihEqual $museEditorState.preferredRoute.provider 'meta-model-api' 'preferred Muse route exposes the configured provider for session model synchronization'
+    Assert-AihEqual $museEditorState.preferredRoute.model 'muse-spark-1.3-contributor' 'preferred Muse route exposes the configured model for session model synchronization'
 
     # Unknown ids still fail closed (unchanged Dual-era behavior)
     $threw=$false

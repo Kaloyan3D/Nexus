@@ -398,11 +398,16 @@ function Resolve-AihMuseRoutingTarget {
     param(
         [Parameter(Mandatory=$true)][string]$InstallRoot,
         [Parameter(Mandatory=$true)][string]$PresetId,
-        [string]$SettingsPath
+        [string]$SettingsPath,
+        [string]$ProfileId
     )
     $root=[IO.Path]::GetFullPath($InstallRoot)
-    # 1. The active Nexus profile (the muse preset locks its own binding).
-    $active=Resolve-AihActiveNexusProfile -InstallRoot $root -Preset $PresetId
+    # 1. The selected Nexus profile is authoritative for the Muse plane. The
+    # preset supplies a default only when there is no operator preference.
+    $policy=Get-AihRoutingPolicy (Join-Path $root 'config/routing-policy.json')
+    $presetDoc=Resolve-AihPreset $policy $PresetId
+    $profileId=if(-not[string]::IsNullOrWhiteSpace($ProfileId)){$ProfileId}else{Get-AihRequestedNexusProfileId -Policy $policy -Preset $presetDoc -SettingsPath $SettingsPath -IgnorePresetLock}
+    $active=Resolve-AihNexusProfile -InstallRoot $root -ProfileId $profileId
     if($null-eq$active){throw "Muse routing rejected: the active Nexus profile could not be resolved (preset '$PresetId')."}
     if([string]$active.Engine -ne 'muse'){throw "Muse routing rejected: active profile '$($active.Id)' is not a muse-engine profile."}
     if(-not[bool]$active.Runnable){throw "Muse routing rejected: profile '$($active.Id)' is not runnable (runnable=false)."}

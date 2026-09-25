@@ -46,6 +46,7 @@ function makeModeScope(options) {
   }
   const subscribers = new Set()
   const selectCalls = []
+  const modelSelectCalls = []
   const defaultPatches = []
   let failSelection = false
   const scope = {
@@ -70,7 +71,7 @@ function makeModeScope(options) {
         for (const fn of subscribers) fn()
       },
     },
-    modelDirectories: { directoryFor() { return { load: async () => {}, select: async () => {}, store: { getSnapshot: () => ({ current: null }) } } } },
+    modelDirectories: { directoryFor() { return { load: async () => {}, select: async (value) => { modelSelectCalls.push(value) }, store: { getSnapshot: () => ({ current: null }) } } } },
     inject(names, fn) { if (names.every((name) => Object.hasOwn(this, name))) fn(this) },
     get(name) { return this[name] },
     provide(name, value) { this[name] = value },
@@ -79,6 +80,7 @@ function makeModeScope(options) {
     _registeredSeat: null,
     _state: state,
     _selectCalls: selectCalls,
+    _modelSelectCalls: modelSelectCalls,
     _defaultPatches: defaultPatches,
     _newSession(session) { state.byId[session.id] = session; state.current = session.id; for (const fn of subscribers) fn() },
   }
@@ -123,7 +125,7 @@ async function main() {
   const resolveEnginePreset = modePlugin.resolveEnginePreset
   assert.equal(typeof resolveEnginePreset, 'function')
 
-  const museSnapshot = { engine: 'muse', engineAgentPreset: 'aih-muse', preferredProfileId: 'muse-spark-1.3-contributor' }
+  const museSnapshot = { engine: 'muse', engineAgentPreset: 'aih-muse', preferredProfileId: 'muse-spark-1.3-contributor', preferredRoute: { provider: 'meta-model-api', model: 'muse-spark-1.3-contributor' } }
   const known = new Set(['aih-engineering', 'aih-deepseek', 'aih-muse'])
   const facade = engineFacade(museSnapshot)
 
@@ -137,6 +139,8 @@ async function main() {
   pass('A4: a null engine snapshot maps to the unmodified mode id')
   assert.equal(resolveEnginePreset(engineFacade({ engine: 'dual', engineAgentPreset: null }), known, 'aih-engineering'), 'aih-engineering')
   pass('A5: a dual preference maps to the unmodified mode id')
+  assert.equal(resolveEnginePreset(engineFacade({ engine: 'muse', engineAgentPreset: 'aih-muse', preferredRoute: null }), known, 'aih-engineering'), 'aih-engineering')
+  pass('A5a: a Muse preference without a resolved route cannot select the Muse preset')
   assert.equal(resolveEnginePreset(engineFacade({ engine: 'muse', engineAgentPreset: 'Muse Plane!' }), known, 'aih-engineering'), 'aih-engineering')
   pass('A6: a malformed agent preset id maps to the unmodified mode id (fail closed)')
   assert.equal(resolveEnginePreset(engineFacade(museSnapshot), new Set(['aih-engineering', 'aih-deepseek']), 'aih-engineering'), 'aih-engineering')
@@ -155,6 +159,8 @@ async function main() {
     pass('A9: the persisted default stays the user-facing mode id')
     assert.equal(scope._state.byId.s.agentPreset, 'aih-muse')
     pass('A10: the host-confirmed session summary carries the applied agent plane')
+    assert.deepEqual(scope._modelSelectCalls, [{ provider: 'meta-model-api', model: 'muse-spark-1.3-contributor' }])
+    pass('A10a: Muse mode synchronizes the configured Muse route instead of the legacy DeepSeek route')
     assert.equal(scope.nexusModeState.getSnapshot().current, 'aih-engineering')
     pass('A11: the visible mode remains Normal Engineering (display unchanged)')
   }
@@ -175,6 +181,18 @@ async function main() {
     await new Promise((resolve) => setImmediate(resolve))
     assert.equal(scope._selectCalls.length, 1)
     pass('A13: a non-blank session keeps its existing plane (the engine applies from the next session)')
+  }
+
+  {
+    const openCode = engineFacade({ ...museSnapshot, preferredProfileId: 'muse-spark-1.3-contributor-opencode', preferredRoute: { provider: 'opencode-go', model: 'muse-spark-1.3-contributor' } })
+    const scope = makeModeScope({})
+    scope.nexusEngineState = openCode
+    modePlugin.apply(scope)
+    const controls = seatControls(scope)
+    await controls.load()
+    await controls.select('aih-engineering')
+    assert.deepEqual(scope._modelSelectCalls, [{ provider: 'opencode-go', model: 'muse-spark-1.3-contributor' }])
+    pass('A13a: OpenCode Go Muse selection synchronizes the OpenCode Go session route')
   }
 
   {
@@ -241,7 +259,10 @@ async function main() {
   }
 
   // ── Part B: the controller's engine bridge ─────────────────────────────
-  const requireFromApp = require('node:module').createRequire(path.join(ROOT, 'app', 'package.json'))
+  const runtimeRoot = fs.existsSync(path.join(ROOT, 'app', 'node_modules', 'react'))
+    ? ROOT
+    : (process.env.NEXUS_RUNTIME_ROOT || path.join(require('node:os').homedir(), '.local', 'share', 'nexus'))
+  const requireFromApp = require('node:module').createRequire(path.join(runtimeRoot, 'app', 'package.json'))
   const controller = loadModule('ui/nexus-controller/lib/client.js', {
     react: requireFromApp('react'),
     'react/jsx-runtime': requireFromApp('react/jsx-runtime'),
@@ -261,15 +282,16 @@ async function main() {
       { id: 'muse-spark-1.3-contributor', engine: 'muse' },
     ],
     engineAgentPresets: { muse: 'aih-muse' },
+    preferredRoute: { provider: 'meta-model-api', model: 'muse-spark-1.3-contributor' },
   }
   let announced = 0
   const detach = controller.subscribeNexusEngine(() => { announced += 1 })
   controller.publishNexusEngineState(editorState)
-  assert.equal(JSON.stringify(controller.nexusEngineStateSnapshot()), JSON.stringify({ engine: 'muse', engineAgentPreset: 'aih-muse', preferredProfileId: 'muse-spark-1.3-contributor' }))
+  assert.equal(JSON.stringify(controller.nexusEngineStateSnapshot()), JSON.stringify({ engine: 'muse', engineAgentPreset: 'aih-muse', preferredProfileId: 'muse-spark-1.3-contributor', preferredRoute: { provider: 'meta-model-api', model: 'muse-spark-1.3-contributor' } }))
   assert.ok(announced >= 1)
   pass('B2: the muse preference publishes engine=muse with the catalog agent-preset binding')
   controller.publishNexusEngineState({ ...editorState, preferredProfile: { id: 'glm-codex', displayName: 'GLM Codex' } })
-  assert.equal(JSON.stringify(controller.nexusEngineStateSnapshot()), JSON.stringify({ engine: 'dual', engineAgentPreset: null, preferredProfileId: 'glm-codex' }))
+  assert.equal(JSON.stringify(controller.nexusEngineStateSnapshot()), JSON.stringify({ engine: 'dual', engineAgentPreset: null, preferredProfileId: 'glm-codex', preferredRoute: null }))
   pass('B3: a dual preference publishes engine=dual with NO agent-preset mapping')
   detach()
   controller.publishNexusEngineState({ ...editorState, engineAgentPresets: { muse: 'Bad Id!' } })
