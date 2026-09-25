@@ -37,6 +37,9 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+// A05: snapshot-identity shapes only (no minting here; SnapshotManager owns
+// capture/derivation/revalidation and this module never mints token ids).
+const snapshotV2 = require('./ContextSnapshotV2.cjs');
 
 const CHECKPOINT_SCHEMA_VERSION_V2 = 2;
 const CHECKPOINT_ID_DOMAIN_V2 = 'nexus/context-checkpoint/v2';
@@ -382,11 +385,30 @@ function validateCheckpointV2(checkpoint) {
   }
   if (continuation.recentUserIntent !== null && continuation.recentUserIntent !== undefined && !isBoundedString(String(continuation.recentUserIntent), BOUNDS.recentUserIntent, true)) return fail('checkpoint-continuation-invalid');
 
-  // A03 temporary pre-A05 snapshot semantics: both fields MUST be null.
-  // Any non-null value is a future-protocol claim this task must not invent.
+  // A05 snapshot semantics (additive, A03 legacy preserved): the snapshot
+  // slot is EITHER legacy pre-A05 (both null; never reinterpreted as
+  // bound) OR A05 snapshot-bound (both non-null token identity embedded
+  // verbatim from a real SnapshotManager capture). Mixed null/non-null
+  // FAILS CLOSED. Structural shape is enforced here; checkpoint<->token
+  // binding and freshness are owned by ContextSnapshotV2
+  // (validateCheckpointSnapshotBinding / revalidate) and never proven by
+  // this leg alone.
   const snapshot = checkpoint.snapshot;
   if (!snapshot || typeof snapshot !== 'object') return fail('checkpoint-snapshot-invalid');
-  if (snapshot.snapshotTokenId !== null || snapshot.revisionDigest !== null) return fail('checkpoint-snapshot-invalid');
+  if (snapshot.snapshotTokenId === null && snapshot.revisionDigest === null) {
+    // Legacy pre-A05 checkpoint: structurally accepted, NOT snapshot-bound.
+  } else if (
+    typeof snapshot.snapshotTokenId === 'string' &&
+    snapshotV2.TOKEN_ID_PATTERN.test(snapshot.snapshotTokenId) &&
+    typeof snapshot.revisionDigest === 'string' &&
+    /^[0-9a-f]{64}$/.test(snapshot.revisionDigest)
+  ) {
+    // A05 snapshot-bound checkpoint: shapes valid; digest/id legs below
+    // recompute over the payload INCLUDING this slot, so any snapshot
+    // reference change moves checkpointContentDigest/checkpointId.
+  } else {
+    return fail('checkpoint-snapshot-invalid');
+  }
 
   const provenance = checkpoint.provenance;
   if (provenance !== null && provenance !== undefined) {
@@ -530,6 +552,52 @@ function asNullableString(value) {
   if (value === null || value === undefined) return null;
   const text = String(value);
   return text === '' ? null : text;
+}
+
+// ---- A05 snapshot slot (embedding only; minting is SnapshotManager's) ----
+// Accepts, in order: input.snapshotToken (a full ContextSnapshotToken, whose
+// snapshotTokenId/revisionDigest are embedded verbatim after structural
+// validation), input.snapshot ({ snapshotTokenId, revisionDigest } from a
+// real capture), or nothing (legacy null/null). Anything else FAILS CLOSED.
+function buildSnapshotSlotV2(input) {
+  const fromToken = input.snapshotToken;
+  if (fromToken !== undefined && fromToken !== null) {
+    const check = snapshotV2.validateSnapshotToken(fromToken);
+    if (!check.valid) throw new Error('v2-checkpoint-build: snapshotToken refused (' + check.reason + ') (KEEP)');
+    if (Number(input.generation) !== Number(fromToken.generation)) {
+      throw new Error('v2-checkpoint-build: snapshotToken generation must equal checkpoint generation (KEEP)');
+    }
+    for (const key of ['taskId', 'taskInstanceId', 'sessionId']) {
+      if (String(input[key]) !== String(fromToken[key])) {
+        throw new Error('v2-checkpoint-build: snapshotToken ' + key + ' must equal checkpoint ' + key + ' (KEEP)');
+      }
+    }
+    return { snapshotTokenId: fromToken.snapshotTokenId, revisionDigest: fromToken.revisionDigest };
+  }
+  const slot = input.snapshot;
+  if (slot === undefined || slot === null) return { snapshotTokenId: null, revisionDigest: null };
+  if (typeof slot !== 'object') throw new Error('v2-checkpoint-build: snapshot must be an object or null (KEEP)');
+  if (slot.snapshotTokenId === null && slot.revisionDigest === null) return { snapshotTokenId: null, revisionDigest: null };
+  if (
+    typeof slot.snapshotTokenId === 'string' &&
+    snapshotV2.TOKEN_ID_PATTERN.test(slot.snapshotTokenId) &&
+    typeof slot.revisionDigest === 'string' &&
+    /^[0-9a-f]{64}$/.test(slot.revisionDigest)
+  ) {
+    return { snapshotTokenId: slot.snapshotTokenId, revisionDigest: slot.revisionDigest };
+  }
+  throw new Error('v2-checkpoint-build: snapshot must be null/null or a real captured token identity (KEEP)');
+}
+
+// Returns 'legacy' for pre-A05 null/null checkpoints and 'snapshot-bound'
+// for A05 checkpoints. Never reinterprets legacy checkpoints as bound.
+function snapshotModeOf(checkpoint) {
+  if (!checkpoint || typeof checkpoint !== 'object') return 'invalid';
+  const snapshot = checkpoint.snapshot;
+  if (!snapshot || typeof snapshot !== 'object') return 'invalid';
+  if (snapshot.snapshotTokenId === null && snapshot.revisionDigest === null) return 'legacy';
+  if (typeof snapshot.snapshotTokenId === 'string' && typeof snapshot.revisionDigest === 'string') return 'snapshot-bound';
+  return 'invalid';
 }
 
 function buildCheckpointV2(input) {
@@ -678,8 +746,12 @@ function buildCheckpointV2(input) {
       unresolvedQuestions: (input.continuation.unresolvedQuestions || []).map(String),
       recentUserIntent: input.continuation.recentUserIntent === undefined || input.continuation.recentUserIntent === null ? null : String(input.continuation.recentUserIntent),
     },
-    // A03 temporary pre-A05 semantics: null/null is the ONLY accepted value.
-    snapshot: { snapshotTokenId: null, revisionDigest: null },
+    // A05: snapshot identity embedded verbatim from a real SnapshotManager
+    // capture when input.snapshot / input.snapshotToken is supplied;
+    // legacy null/null when absent (pre-A05 fixtures stay constructible).
+    // The builder NEVER mints token identity: it only embeds what the
+    // caller captured via SnapshotManager.capture.
+    snapshot: buildSnapshotSlotV2(input),
     provenance: buildProvenanceFieldV2(input),
 
     pressure: input.pressure === undefined || input.pressure === null ? null : {
@@ -822,6 +894,8 @@ module.exports = {
   deriveCheckpointIdV2,
   validateCheckpointV2,
   buildCheckpointV2,
+  buildSnapshotSlotV2,
+  snapshotModeOf,
   checkpointV2FileName,
   checkpointV2FilePath,
   persistCheckpointV2,

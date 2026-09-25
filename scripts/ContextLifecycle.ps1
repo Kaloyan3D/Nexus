@@ -1259,6 +1259,60 @@ function Test-AihContextContentSealV2 {
     return @{ valid = $true; reason = $null }
 }
 
+# ══════════════════════════════════════════════════════════════════════
+# CCV2-A05 — ContextSnapshotToken identity parity (PS authority).
+#
+# SnapshotManager (config/ContextSnapshotV2.cjs) owns capture/derivation/
+# revalidation in JS. The PS twins below cover ONLY the two duplicated
+# identity formulas; PS never mints tokens (no capture/validation here).
+# Canonical formulas (JS twins: deriveRevisionDigest / deriveSnapshotTokenId):
+#   revisionDigest = sha256Hex(UTF-8('nexus/context-snapshot-revision/v1' LF
+#                              canonicalJson(revisionBody)))
+#   snapshotTokenId = 'cst_' + sha256Hex(UTF-8(
+#                       'nexus/context-snapshot-token/v1' LF taskId LF
+#                       taskInstanceId LF sessionId LF generation LF
+#                       revisionDigest))[0..32)
+# canonicalJson is ConvertTo-AihCanonicalJson (ordinally sorted keys,
+# recursive; arrays keep order) — byte-identical to the JS canonicalizer.
+# ══════════════════════════════════════════════════════════════════════
+
+$AihContextSnapshotRevisionDigestDomainV1 = 'nexus/context-snapshot-revision/v1'
+$AihContextSnapshotTokenIdDomainV1 = 'nexus/context-snapshot-token/v1'
+
+function Get-AihContextSnapshotRevisionDigestV2 {
+    # Domain-separated revision digest over canonical revision-body bytes.
+    # Pass the canonical JSON text (preferred: built with
+    # ConvertTo-AihCanonicalJson -Value $RevisionBody) so the hash input is
+    # byte-exact. JS twin: deriveRevisionDigest.
+    param([Parameter(Mandatory = $true)][string]$RevisionBodyJson)
+    $joined = [string]$AihContextSnapshotRevisionDigestDomainV1 + "`n" + [string]$RevisionBodyJson
+    $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    return $digest
+}
+
+function New-AihContextSnapshotTokenIdV2 {
+    # Deterministic generation-bound token identity. JS twin:
+    # deriveSnapshotTokenId in config/ContextSnapshotV2.cjs.
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$TaskInstanceId,
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [Parameter(Mandatory = $true)][int]$Generation,
+        [Parameter(Mandatory = $true)][string]$RevisionDigest
+    )
+    if ([int]$Generation -lt 1) { throw 'V2 snapshot token refused: generation must be a positive integer. (KEEP.)' }
+    if ([string]$RevisionDigest -notmatch '^[0-9a-f]{64}$') { throw 'V2 snapshot token refused: revisionDigest must be sha256 hex. (KEEP.)' }
+    $joined = [string]$AihContextSnapshotTokenIdDomainV1 + "`n" + [string]$TaskId + "`n" + [string]$TaskInstanceId + "`n" + [string]$SessionId + "`n" + [string][int]$Generation + "`n" + [string]$RevisionDigest
+    $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    return ('cst_' + $digest.Substring(0, 32))
+}
+
 function Read-AihContextCompactionOperation {
     param([Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$TaskId)
     $paths = Get-AihContextLifecyclePaths -Workspace $Workspace -TaskId $TaskId
