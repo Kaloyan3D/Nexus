@@ -49,16 +49,16 @@ decision and is a read-only consumer of every other decision.
 | `ContextLifecycle` | context lifecycle state machine, thresholds, telemetry | task status, routing, checkpoint content |
 | `SafePointDetector` | the operational checkpoint boundary (safe point) | cutting the surface, durability |
 | `CheckpointabilityGate` | active-state sufficiency (may this binding be compacted at all) | building or applying anything |
-| `SnapshotManager` | capture, versioning, and revalidation of the state a checkpoint is built against | what the checkpoint says |
+| `SnapshotManager` | capture, versioning, and revalidation of the state a checkpoint is built against — owns the snapshot validation rule and canonical token comparison semantics | what the checkpoint says |
 | `CheckpointBuilder` | structured checkpoint construction | trust assignment, sealing, projection |
 | `TrustNormalizer` | field provenance/trust classification | checkpoint content authorship, authority elevation |
 | `ContentSealer` | checkpoint integrity (identity ↔ content digest) | storage, retention |
 | `RetentionPlanner` | the exact projection plan (exact segments, exact payload-bearing node) | executing the plan |
-| `TransactionalApply` | projection mutation and durability | deciding the boundary, reconciling by re-planning |
+| `TransactionalApply` | projection mutation and durability — invokes the SnapshotManager validation rule verbatim at the final pre-mutation gate and does not redefine it | deciding the boundary, reconciling by re-planning |
 | `ContextCompiler` | **future** disposable `ContextView` assembly only | any authority; non-authoritative by construction |
 | `DecisionProvider` | **future** advisory recommendations only | any authority; advisory by construction |
 
-`TaskController` remains the sole task lifecycle/completion authority.
+`TaskController` remains the sole task lifecycle/completion authority. SnapshotManager owns the snapshot validation rule and canonical token comparison semantics. TransactionalApply invokes that rule verbatim at the final pre-mutation gate and does not redefine it.
 
 ### 2.1 No model receives authority over
 
@@ -175,6 +175,7 @@ Per-field provenance.
 
 ```text
 TrustProvenance {
+  schemaVersion : integer (1)
   field      : string   — JSON pointer into the checkpoint payload
   trust      : 'controller' | 'host' | 'repository' | 'tool' | 'model' | 'user'
   source     : string   — concrete origin (component, event seq, file, tool name)
@@ -195,6 +196,7 @@ A reference to verifiable evidence — never a truth claim.
 
 ```text
 EvidenceRef {
+  schemaVersion : integer (1)
   evidenceId  : string
   kind        : 'file' | 'command' | 'verification' | 'artifact' | 'event'
   locator     : string   — path, command id, or canonical event seq
@@ -218,6 +220,7 @@ Repository/workspace identity binding.
 
 ```text
 WorkspaceFingerprint {
+  schemaVersion     : integer (1)
   workspaceId     : string
   repositoryId    : string
   checkoutId      : string
@@ -275,22 +278,22 @@ The frozen projection plan for one generation.
 CompactionOperationV2 {
   schemaVersion         : integer (2)
   operationId           : string  — canonical derived identity (section 4.9)
+  attemptId             : string  — durable attempt identity (attempt ≠ generation)
   taskId                : string
   taskInstanceId        : string
   sessionId             : string
-  generation            : integer
+  checkpointId          : string
+  checkpointGeneration  : integer — 1-based monotonic generation per binding
   workspace             : string
   repositoryId          : string | null
   checkoutId            : string | null
-  checkpointPath        : string
-  checkpointContentDigest : string
-  snapshotTokenId       : string
+  checkpointPath        : string | null
+  checkpointContentDigest : string — sha256 of the exact payload text applied
+  snapshotTokenId       : string | null — null until ContextSnapshotToken exists (A02 temporary semantics)
   safePointBoundarySeq  : integer — highest canonical seq proven safe
   sourceEventSeqs       : integer[] — ascending, unique, every shadowed node
-  replacementStart      : integer
-  replacementEnd        : integer
-  segments              : OperationSegment[]
-  state                 : 'frozen' | 'applying' | 'landed' | 'blocked'
+  segments              : OperationSegment[] — canonical start-ascending order
+  lifecycle             : 'frozen' | 'applying' | 'awaiting-durability' | 'applied' | 'blocked'
 }
 
 OperationSegment {
@@ -306,14 +309,24 @@ OperationSegment {
 - Mutability: **frozen once persisted**. Retry reuses byte-identical values.
 - Persistence: persisted before any mutation, atomically.
 - Identity: `operationId` is **canonical derived identity**
-  (`nexus/context-compaction-operation/v1` LF taskId LF taskInstanceId LF
-  sessionId LF generation, SHA-256, `ccop_` prefix) and is **recomputed on
-  every validation**. Closed-world validation additionally requires: unique
-  ascending `sourceEventSeqs`, `replacementStart/End` equal to the first/last
-  frozen seq, segment union exactly equal to `sourceEventSeqs`, strictly
-  ordered non-overlapping segments, per-seq ownership inside its segment, and
-  every seq `<= safePointBoundarySeq`.
+  (`nexus/context-compaction-operation/v2` LF taskId LF taskInstanceId LF
+  sessionId LF checkpointGeneration LF checkpointId, SHA-256, `ccop_`
+  prefix) and is **recomputed on every validation**. The V1 domain
+  (`.../v1`, triple only) is unchanged; V1 and V2 IDs never collide.
+  Closed-world validation additionally requires: unique ascending
+  `sourceEventSeqs`; every segment endpoint equal to its own first/last
+  source seq; segments listed in strictly start-ascending canonical order;
+  pairwise-disjoint segment source sets whose union multiset, sorted,
+  exactly equals `sourceEventSeqs` (set-partition semantics: past
+  generations interleave replacement seqs with older live seqs on the
+  surface, so a segment keeps surface-application order inside);
+  and every seq `<= safePointBoundarySeq`.
 - Exactly one segment carries `role: 'payload'` (section 4.11).
+- `snapshotTokenId = null` is the explicit A02 temporary value: no
+  SnapshotToken is minted or validated yet (deferred to A05). A non-null
+  value must already be a non-empty token string.
+- One file per generation. `applied` requires durable evidence, never
+  in-memory presence alone.
 
 ### 3.9 `ContextPage`
 
@@ -737,3 +750,9 @@ Canonical log: 26 raw events -> 48 events, every raw event byte-identical
 throughout. Every generation and every restore kept exactly one full
 checkpoint payload model-facing, one authoritative runtime snapshot, a
 tool-balanced projection, and the current user message exactly once.
+
+A01 scope limit (no over-reading): A01 proved host projection behavior and
+reused the V1 balanced-cut safety core. Trust normalization
+(`TrustNormalizer`), content sealing (`ContentSealer`), and the
+`CheckpointabilityGate` production implementation were NOT executed in A01
+and remain deferred architecture contracts pending later tasks.
