@@ -86,34 +86,122 @@ These are the minimum contracts. Field names, authority, mutability,
 persistence and identity rules are normative; A02+ implements them. A contract
 may gain optional fields but may not change the semantics below.
 
-### 3.1 `ContextSnapshotToken`
+### 3.1 `ContextSnapshotToken` (frozen A05 — supersedes the pre-A05 draft below)
 
-The immutable identity of the captured state a checkpoint is built against.
+The immutable identity of the exact authoritative task/session/workspace
+revision a checkpoint was built from. A sealed checkpoint may be
+structurally valid, authentic, and untampered while still being STALE:
+integrity and freshness are different properties, proven by different
+components (`ContentSealer` vs `SnapshotManager`).
+
+> Supersession note: the pre-A05 draft of this section (tokenId over
+> sessionId/taskId/taskInstanceId/workspaceFingerprintId/captureSeq/
+> surfaceDigest) described intent before implementation and is superseded
+> in full by the frozen A05 contract that follows. No two normative
+> snapshot schemas remain: this section is the single definition.
 
 ```text
 ContextSnapshotToken {
   schemaVersion      : integer (1)
-  tokenId            : string  — derived: sha256(domain LF sessionId LF taskId
-                                 LF taskInstanceId LF workspaceFingerprintId
-                                 LF captureSeq LF surfaceDigest)
-  sessionId          : string
+  snapshotTokenId    : string  — 'cst_' + sha256('nexus/context-snapshot-token/v1'
+                                 LF taskId LF taskInstanceId LF sessionId
+                                 LF generation LF revisionDigest)[0..32)
+  revisionDigest     : string  — sha256('nexus/context-snapshot-revision/v1'
+                                 LF canonicalJson(revisionBody)); see below
   taskId             : string
   taskInstanceId     : string
-  workspaceFingerprintId : string
-  captureSeq         : integer — highest canonical event seq at capture
-  surfaceDigest      : string  — digest over the ordered live surface node seqs
-                                 plus each node's content digest
-  capturedAtUtc      : string  — ISO-8601 UTC
+  sessionId          : string
+  workspaceId        : string
+  repositoryId       : string | null
+  checkoutId         : string | null
+  generation         : integer — the checkpoint generation this token was
+                                 captured for (generation-bound)
+  safePointBoundarySeq : integer
+  sessionRevision    : integer — highest durable session event seq at capture
+                                 (monotonic append-only authority)
+  taskRevision       : string  — sha256 over the canonical normalized
+                                 task-state body (objective/requirements/
+                                 constraints/progress/decisions/failures/
+                                 verification/continuation), derived ONLY by
+                                 SnapshotManager.deriveTaskRevision
+  repositoryRevision : { headCommit: string | null,
+                         indexDigest: sha256-hex | null,      // staged state
+                         worktreeDigest: sha256-hex | null }  // unstaged state
+  runtimeRevision    : { runtimeSnapshotSeq: integer | null, // A01/A02 host seq
+                         runtimeSnapshotId: string | null,    // derived rss_<seq>
+                         runtimeSnapshotDigest: sha256-hex | null } // derived
+  capturedAtUtc      : string  — ISO-8601 UTC, AUDIT ONLY (never freshness)
 }
 ```
 
-- Authority: `SnapshotManager` creates it. Nobody else may mint or mutate one.
+`revisionBody` (the ONLY input to `revisionDigest`) is the normalized
+`{ taskId, taskInstanceId, sessionId, workspaceId, repositoryId,
+checkoutId, safePointBoundarySeq, sessionRevision, taskRevision,
+repositoryRevision, runtimeRevision }`. It EXCLUDES `snapshotTokenId`,
+`revisionDigest`, `capturedAtUtc`, AND `generation`: `revisionDigest` is
+pure authoritative-state identity (byte-identical state in another
+generation yields the SAME digest), while `snapshotTokenId` stays
+generation-bound through its own formula and `revalidate()` still compares
+generation explicitly (`snapshot-generation-mismatch`).
+
+- Authority: `SnapshotManager` (`config/ContextSnapshotV2.cjs`) creates it.
+  `CheckpointBuilder` embeds the captured ids verbatim and never mints
+  them. `TransactionalApply` invokes `revalidate()` verbatim at the final
+  pre-mutation gate and never redefines freshness. Nobody else may mint,
+  derive, compare, or mutate snapshot identity.
 - Mutability: **immutable** after creation.
-- Persistence: persisted with the attempt/operation that consumed it.
-- Identity: `tokenId` is **derived, never free text**, and is recomputed on
-  every validation. A merely nonempty string is never sufficient.
-- Revalidation rule: at apply time the live surface digest and capture bound
-  must reproduce the token. Mismatch → **KEEP** (no mutation).
+- Persistence: the checkpoint/operation embed ONLY the ids
+  (`snapshot.snapshotTokenId/revisionDigest`, `operation.snapshotTokenId`).
+  Ids alone cannot revalidate after restart, so the FULL token persists as
+  one immutable atomic file per token id (`snapshot-<tokenId>.json`, no
+  overwrite with different bytes, read-back validated, generation-scoped by
+  the bound generation inside). Embedded-only persistence is NOT sufficient.
+- Identity: `snapshotTokenId` and `revisionDigest` are **derived, never
+  free text**, recomputed on every validation. A merely nonempty string is
+  never sufficient. Token ids (`cst_…`) are distinct from checkpoint ids
+  (`ccp_…`) and operation ids (`ccop_…`); no digest is overloaded for
+  snapshot semantics.
+- Grounded primitives (nothing fabricated): session = durable event seq
+  (monotonic: any intervening append stays STALE forever); task = digest
+  over normalized task state (state-based: exact revert validates again);
+  repository = HEAD + staged + unstaged fingerprints (HEAD alone is NOT
+  freshness); runtime = current host-owned runtime snapshot seq (A01/A02
+  PINNED-current / shadowable-superseded policy: a changed current
+  snapshot BLOCKs).
+- Capture consistency: `capture()` is pure over one caller-supplied state
+  object; `captureConsistent(readStateFn, …)` reads before/after and fails
+  closed (`snapshot-capture-inconsistent`) when the revision projection
+  moved mid-capture. A mixed-revision token is never accepted.
+- Revalidation rule: immediately before model-facing mutation, re-read
+  authoritative state and call `revalidate(token, current)` (aka
+  `revalidateBeforeMutation`). `VALID` → mutation may proceed; any other
+  result → **KEEP/BLOCK** with a stable closed-world reason
+  (`snapshot-task-stale`, `snapshot-session-stale`, `snapshot-head-stale`,
+  `snapshot-index-stale`, `snapshot-worktree-stale`,
+  `snapshot-runtime-stale`, `snapshot-generation-mismatch`,
+  `snapshot-boundary-mismatch`, identity mismatches, …). Freshness is
+  revision-based; `capturedAtUtc` age is never consulted.
+- Mid-apply semantic (frozen, choice B): the host cannot lock repo + task +
+  session state across a whole multi-segment apply, so A05 revalidates at
+  the final pre-mutation boundary (before the FIRST new append) and the A02
+  reconciliation state machine governs every append already begun. Freshness
+  is required to BEGIN an operation; operation identity + durable segment
+  evidence governs an operation already begun. Zero landed + stale → BLOCK
+  all new mutation; durably landed segments still reconcile to completion.
+- Checkpoint binding: `checkpoint.snapshot` is `{ snapshotTokenId,
+  revisionDigest }` embedded verbatim from the real capture (legacy
+  pre-A05 `null/null` checkpoints remain structurally valid but are NEVER
+  reinterpreted as bound). The snapshot slot is part of the canonical
+  checkpoint payload, so any reference change moves
+  `checkpointContentDigest` → `checkpointId` → `sealDigest` naturally; no
+  new seal formula exists. Integrity (`validateSealedCheckpoint`) vs
+  freshness (`revalidate`) are proven separately.
+- Operation binding: `operation.snapshotTokenId ==
+  checkpoint.snapshot.snapshotTokenId == captured token.snapshotTokenId`
+  (revision digest bound transitively through the checkpoint). Any
+  mismatch → **BLOCK**. A02 durable-before-mutation ordering is unchanged;
+  freshness validation is inserted as the final gate before the first
+  mutation.
 
 ### 3.2 `CheckpointabilityResult`
 
@@ -379,9 +467,12 @@ OperationSegment {
   surface, so a segment keeps surface-application order inside);
   and every seq `<= safePointBoundarySeq`.
 - Exactly one segment carries `role: 'payload'` (section 4.11).
-- `snapshotTokenId = null` is the explicit A02 temporary value: no
-  SnapshotToken is minted or validated yet (deferred to A05). A non-null
-  value must already be a non-empty token string.
+- `snapshotTokenId = null` was the explicit A02 temporary value. Since A05
+  (frozen section 3.1), snapshot-bound operations carry the exact captured
+  `cst_…` token id, bound by `SnapshotManager.assertOperationBindsSnapshot`
+  (`operation.snapshotTokenId == checkpoint.snapshot.snapshotTokenId ==
+  captured token`); legacy `null` operations remain structurally valid but
+  are never treated as snapshot-bound.
 - One file per generation. `applied` requires durable evidence, never
   in-memory presence alone.
 
@@ -867,3 +958,36 @@ reused the V1 balanced-cut safety core. Trust normalization
 (`TrustNormalizer`), content sealing (`ContentSealer`), and the
 `CheckpointabilityGate` production implementation were NOT executed in A01
 and remain deferred architecture contracts pending later tasks.
+
+---
+
+## 12. A05 snapshot-token freeze record
+
+A05 proves TOCTOU safety: a sealed checkpoint that is structurally valid,
+authentic, and untampered may still be STALE, and stale state BLOCKs before
+any new mutation. A05 answers "is this still the same authoritative state?"
+only; safe-point detection (A06), the checkpointability gate (A07),
+pressure/retention (A08), shadow-mode triggering (A09), and active
+production compaction (A10) are NOT implemented here.
+
+Frozen: ContextSnapshotToken schema, SnapshotManager ownership,
+revisionDigest formula, snapshotTokenId formula, capture consistency,
+freshness semantics, checkpoint binding, operation binding, restart
+semantics, partial-apply interaction, and the TOCTOU validation location
+(section 3.1). Proof: tests/ContextSnapshotV2.Tests.cjs (118 assertions,
+0 failures). Authority: config/ContextSnapshotV2.cjs. PS twins for the two
+identity formulas: scripts/ContextLifecycle.ps1
+(Get-AihContextSnapshotRevisionDigestV2, New-AihContextSnapshotTokenIdV2;
+PS never mints tokens).
+
+Revert semantics: task state is state-based (exact revert validates again);
+session seq is monotonic append-only (any intervening append stays STALE
+forever). Restart: full token files (snapshot-<tokenId>.json, immutable,
+read-back validated); unchanged state resumes, changed state blocks;
+reconciliation of durably begun work is preserved. Mid-apply: choice B
+(revalidate before the FIRST new append; A02 reconciliation governs begun
+work). Bounds: token at most 8 KiB; ids/revisions/hashes bounded; digests
+only, never raw content.
+
+Regression: A01 DSH proof, A02 operation suite, A03 checkpoint suite, A04
+trust/seal suite, and the V1 gates remain green (see task report).
