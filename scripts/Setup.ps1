@@ -53,7 +53,7 @@ foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'docs') -Fil
     Copy-AihSourceFile -Source $file.FullName -Destination (Join-Path $layout.Root 'docs')
 }
 
-foreach ($name in @('versions.json', 'settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'DeepSeek-Isolation.cjs', 'Engineering-Isolation.cjs', 'AihController.cjs', 'ContextCompaction.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json', 'engineering-profiles.json', 'model-registry.json', 'Engineering-Profiles.cjs')) {
+foreach ($name in @('versions.json', 'settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'preset-muse.yml', 'DeepSeek-Isolation.cjs', 'Engineering-Isolation.cjs', 'Muse-Isolation.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'Muse-ReasoningActivity.cjs', 'Routing-Integrity.cjs', 'AihController.cjs', 'ContextCompaction.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json', 'engineering-profiles.json', 'nexus-profiles.json', 'muse-profiles.json', 'model-registry.json', 'Engineering-Profiles.cjs')) {
     Copy-AihSourceFile -Source (Join-Path $sourceRoot "config\$name") -Destination (Join-Path $layout.Config $name)
 }
 foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'scripts') -File | Where-Object Extension -in @('.ps1', '.mjs')) {
@@ -86,6 +86,12 @@ if (Test-Path -LiteralPath (Join-Path $sourceRoot 'skills')) {
 }
 Copy-AihSourceFile -Source (Join-Path $sourceRoot 'runtime/package.json') -Destination (Join-Path $layout.Runtime 'package.json')
 Copy-AihSourceFile -Source (Join-Path $sourceRoot 'runtime/package-lock.json') -Destination (Join-Path $layout.Runtime 'package-lock.json')
+if (Test-Path -LiteralPath (Join-Path $sourceRoot 'runtime/vendor')) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $layout.Runtime 'vendor') | Out-Null
+    foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'runtime/vendor') -File) {
+        Copy-AihSourceFile -Source $file.FullName -Destination (Join-Path $layout.Runtime 'vendor' $file.Name)
+    }
+}
 
 $nodeVersion = $sourceVersions.NodeVersion
 $nodeDir = Join-Path $layout.Runtime 'node'

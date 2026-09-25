@@ -185,6 +185,10 @@ function apply(ctx) {
     if (binding && binding.engine !== 'dual') throw enforcementError('session-binding-is-not-dual-engine', binding, null, 'engine-binding-violation')
     if (binding && sessionPreset(session) === 'aih-muse') throw enforcementError('session-preset-does-not-match-bound-engine', binding, null, 'engine-binding-violation')
     const target = controllerTargetFor(installRoot, binding)
+    payload.routingAuthority = {
+      source: 'controller',
+      target: { provider: target.provider, model: target.model },
+    }
     const proposed = await next()
 
     return Object.freeze({

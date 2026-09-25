@@ -184,6 +184,11 @@ function apply(ctx) {
     // never a fallback effort, never the stale profile default.
     const adaptive = reasoningRuntime.prepareMuseRequestEffort({ installRoot, binding, target })
 
+    payload.routingAuthority = {
+      source: 'controller',
+      target: { provider: target.provider, model: target.model },
+    }
+
     const proposed = await next()
 
     const proposedMaxTokens =

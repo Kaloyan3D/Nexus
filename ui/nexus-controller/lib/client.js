@@ -1728,7 +1728,11 @@ function publishNexusEngineState(editorState) {
 		// bindings; the publisher enforces the pinned agent-preset id grammar
 		// again so a malformed id can never cross the service boundary.
 		const agentPreset = typeof presets[engine] === "string" && /^[a-z0-9][a-z0-9-]*$/.test(presets[engine]) ? presets[engine] : null;
-		snapshot = { engine, engineAgentPreset: agentPreset, preferredProfileId: preferred };
+		const route = editorState.preferredRoute;
+		const preferredRoute = engine === "muse" && route && typeof route.provider === "string" && route.provider && typeof route.model === "string" && route.model
+			? { provider: route.provider, model: route.model }
+			: null;
+		snapshot = { engine, engineAgentPreset: agentPreset, preferredProfileId: preferred, preferredRoute };
 	}
 	const changed = JSON.stringify(snapshot) !== JSON.stringify(nexusEngineSnapshot);
 	nexusEngineSnapshot = snapshot;

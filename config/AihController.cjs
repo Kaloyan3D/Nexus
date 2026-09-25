@@ -2574,6 +2574,21 @@ function apply(ctx) {
       error.code = 'engine-binding-violation'
       throw error
     }
+    // Resolve the selected profile before creating a task. A late Web profile
+    // fetch must never let a Muse preference enter the Dual agent plane (or
+    // vice versa). DeepSeek-only is intentionally locked to its preset route.
+    if (preset !== 'aih-deepseek') {
+      const profileState = await invokePowerShell('EngineeringProfile.ps1', ['-Action', 'get', '-InstallRoot', installRoot])
+      const preferred = profileState && profileState.preferredProfile
+      const profileEngine = profileState && profileState.preferredEngine
+      const route = profileState && profileState.preferredRoute
+      if (!preferred || !preferred.id || profileEngine !== engine ||
+          (engine === 'muse' && (!route || route.profileId !== preferred.id || route.engine !== 'muse' || !route.provider || !route.model))) {
+        const error = new Error('Controller routing failed: selected agent plane does not have a matching, resolved preferred profile. Inference was not started.')
+        error.code = 'controller-routing-unavailable'
+        throw error
+      }
+    }
     const task = await createTask(workspace, reviewRequested ? reviewQuestionOf(promptText) : promptText, reviewRequested, engine)
     // TASK-0005 Part 1: every newly created task carries an immutable
     // taskInstanceId from the TaskController; the binding references it.
@@ -3165,14 +3180,14 @@ function apply(ctx) {
         appendMessage(
           session,
           createControllerMessage(
-            'Controller: task binding failed for this session.\n' + boundedControllerDiagnostic(message) + (musePlane
-              ? '\nMuse execution was blocked before model request; no fallback was attempted.'
-              : '\nThe session continues without controller routing; controller state was not recorded.'),
+              'Controller routing failed for this session.\n' + boundedControllerDiagnostic(message) +
+              '\nNo authoritative execution target was produced. Inference was not started.' +
+              (musePlane ? '\nNo Muse fallback was attempted.' : ''),
             'controller-error',
           ),
         )
       }
-      return musePlane ? { kind: 'reject' } : next()
+      return { kind: 'reject' }
     }
   }, { prepend: true })
 

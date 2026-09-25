@@ -1,6 +1,8 @@
 # Nexus product composition over the pinned DeepSeek Harness bundle layers.
 # Applied as the last patch layer (rows here override bundle rows by id).
 - insert:
+    - id: nexus-routing-integrity
+      name: '../../Routing-Integrity.cjs'
     - id: nexus-ui-brand
       name: '@nexus/ui-brand'
     - id: nexus-controller

@@ -49,8 +49,11 @@ if ($LASTEXITCODE -ne 0) {
 # patcher inspects composition so upgrades from pre-controller installs see the
 # current nexus-controller row instead of failing against stale managed state.
 Copy-Item -LiteralPath (Join-Path $layout.Config 'home.cordis.patch.yml') -Destination (Join-Path $layout.Data 'cordis.patch.yml') -Force
+Copy-Item -LiteralPath (Join-Path $layout.Config 'Routing-Integrity.cjs') -Destination (Join-Path $layout.Data 'Routing-Integrity.cjs') -Force
 & (Join-Path $layout.Scripts 'Patch-ControlRoomUi.ps1') -InstallRoot $InstallRoot
 & (Join-Path $layout.Scripts 'Patch-NexusUi.ps1') -InstallRoot $InstallRoot
+& $layout.Node (Join-Path $layout.Scripts 'Verify-RoutingIntegrityComposition.mjs') $InstallRoot
+if ($LASTEXITCODE -ne 0) { throw 'The composed Web routing-integrity plugin could not be imported.' }
 
 $shippedPreset = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh/config/agent-presets/code'
 $targetPreset = Join-Path $layout.Data '.agent-presets/aih-engineering'
