@@ -179,7 +179,10 @@ function serializeCheckpointCanonical(checkpoint) {
 function checkpointPayloadWithoutIdentity(checkpoint) {
   const copy = {};
   for (const key of Object.keys(checkpoint)) {
-    if (key === 'checkpointId' || key === 'checkpointContentDigest') continue;
+    // A04: the content seal binds the digest/identity but is NOT part of the
+    // digested payload (exactly like checkpointId/checkpointContentDigest).
+    // Provenance IS part of the payload: changing it changes the digest/id.
+    if (key === 'checkpointId' || key === 'checkpointContentDigest' || key === 'seal') continue;
     copy[key] = checkpoint[key];
   }
   return copy;
@@ -388,7 +391,62 @@ function validateCheckpointV2(checkpoint) {
   const provenance = checkpoint.provenance;
   if (provenance !== null && provenance !== undefined) {
     if (typeof provenance !== 'object') return fail('checkpoint-provenance-invalid');
-    if (provenance.sourceNotes !== undefined && provenance.sourceNotes !== null && !isBoundedString(String(provenance.sourceNotes), BOUNDS.provenanceNotes, true)) return fail('checkpoint-provenance-invalid');
+    if (provenance.fields !== undefined && provenance.fields !== null) {
+      // A04 provenance map shape: { schemaVersion: 1, fields: { path: TrustProvenance } }.
+      // Structural validation here (bounds + enums); closed-world authority
+      // (sourceKind/trust derivability) is enforced by ContextTrustV2, which
+      // owns the mapping. Legacy { sourceNotes } shape remains accepted below.
+      if (Number(provenance.schemaVersion) !== 1) return fail('checkpoint-provenance-invalid');
+      if (typeof provenance.fields !== 'object' || Array.isArray(provenance.fields)) return fail('checkpoint-provenance-invalid');
+      const fieldPaths = Object.keys(provenance.fields);
+      if (fieldPaths.length === 0) return fail('checkpoint-provenance-missing');
+      if (fieldPaths.length > 96) return fail('checkpoint-provenance-invalid');
+      const knownSources = ['controller', 'user', 'agent', 'repository', 'tool', 'verification', 'review'];
+      const knownTrusts = ['authoritative', 'user-intent', 'evidence', 'advisory', 'untrusted-data'];
+      for (const fieldPath of fieldPaths) {
+        if (typeof fieldPath !== 'string' || fieldPath === '' || fieldPath.length > 256) return fail('checkpoint-provenance-invalid');
+        const entry = provenance.fields[fieldPath];
+        if (!entry || typeof entry !== 'object') return fail('checkpoint-provenance-invalid');
+        if (Number(entry.schemaVersion) !== 1) return fail('checkpoint-provenance-invalid');
+        if (!knownSources.includes(entry.sourceKind)) return fail('checkpoint-provenance-invalid');
+        if (!knownTrusts.includes(entry.trust)) return fail('checkpoint-provenance-invalid');
+        if (!Array.isArray(entry.sourceRefs) || entry.sourceRefs.length === 0 || entry.sourceRefs.length > 8) {
+          return fail('checkpoint-provenance-source-ref-invalid');
+        }
+        for (const ref of entry.sourceRefs) {
+          if (typeof ref !== 'string' || ref === '' || ref.length > 256) return fail('checkpoint-provenance-source-ref-invalid');
+        }
+        if (entry.authorityScope !== null && entry.authorityScope !== undefined) {
+          if (typeof entry.authorityScope !== 'string' || entry.authorityScope === '' || entry.authorityScope.length > 128) {
+            return fail('checkpoint-provenance-invalid');
+          }
+        }
+      }
+    } else if (provenance.sourceNotes !== undefined && provenance.sourceNotes !== null && !isBoundedString(String(provenance.sourceNotes), BOUNDS.provenanceNotes, true)) {
+      return fail('checkpoint-provenance-invalid');
+    }
+  }
+
+  // A04 seal field: structural validation only. The seal is excluded from the
+  // digest (see checkpointPayloadWithoutIdentity); identity binding
+  // (seal <-> checkpointId/digest/generation/task/session) is enforced by
+  // ContextTrustV2.validateContentSeal, which owns seal semantics.
+  const seal = checkpoint.seal;
+  if (seal !== null && seal !== undefined) {
+    if (typeof seal !== 'object' || Array.isArray(seal)) return fail('checkpoint-seal-invalid');
+    if (Number(seal.schemaVersion) !== 1) return fail('checkpoint-seal-invalid');
+    if (seal.algorithm !== 'sha256') return fail('checkpoint-seal-invalid');
+    if (!isBoundedString(seal.checkpointId, 128, false)) return fail('checkpoint-seal-invalid');
+    if (typeof seal.checkpointContentDigest !== 'string' || !/^[0-9a-f]{64}$/.test(seal.checkpointContentDigest)) return fail('checkpoint-seal-invalid');
+    if (!Number.isInteger(seal.generation) || seal.generation < 1) return fail('checkpoint-seal-invalid');
+    if (!isBoundedString(seal.taskId, BOUNDS.taskId, false)) return fail('checkpoint-seal-invalid');
+    if (!isBoundedString(seal.taskInstanceId, BOUNDS.taskInstanceId, false)) return fail('checkpoint-seal-invalid');
+    if (!isBoundedString(seal.sessionId, BOUNDS.sessionId, false)) return fail('checkpoint-seal-invalid');
+    if (!isIsoUtc(seal.sealedAtUtc)) return fail('checkpoint-seal-invalid');
+    // A04R: the seal-record digest is structurally required on every sealed
+    // checkpoint; record-mismatch itself is reported by ContextTrustV2 with
+    // checkpoint-seal-record-digest-mismatch.
+    if (typeof seal.sealDigest !== 'string' || !/^[0-9a-f]{64}$/.test(seal.sealDigest)) return fail('checkpoint-seal-invalid');
   }
 
   const pressure = checkpoint.pressure;
@@ -428,6 +486,43 @@ function validateCheckpointV2(checkpoint) {
   if (bytes > CHECKPOINT_MAX_BYTES) return fail('checkpoint-size-limit');
 
   return { valid: true, reason: null, sizeBytes: bytes };
+}
+
+// A04: provenance source selection. Legacy { sourceNotes } (A03) and the
+// A04 provenance map { schemaVersion: 1, fields } are mutually exclusive;
+// supplying both FAILS CLOSED. The map is canonicalized (sorted field paths)
+// so identical inputs build byte-identical checkpoints.
+function buildProvenanceFieldV2(input) {
+  const hasLegacy = input.provenance !== undefined && input.provenance !== null;
+  const hasMap = input.provenanceMap !== undefined && input.provenanceMap !== null;
+  if (hasLegacy && hasMap) throw new Error('v2-checkpoint-build: provenance and provenanceMap are mutually exclusive (KEEP)');
+  if (hasMap) {
+    const map = input.provenanceMap;
+    if (typeof map !== 'object' || Array.isArray(map)) throw new Error('v2-checkpoint-build: provenanceMap must be an object (KEEP)');
+    if (Number(map.schemaVersion) !== 1) throw new Error('v2-checkpoint-build: provenanceMap.schemaVersion must be 1 (KEEP)');
+    if (!map.fields || typeof map.fields !== 'object' || Array.isArray(map.fields)) {
+      throw new Error('v2-checkpoint-build: provenanceMap.fields is required (KEEP)');
+    }
+    const fields = {};
+    for (const fieldPath of Object.keys(map.fields).sort()) {
+      const entry = map.fields[fieldPath];
+      if (!entry || typeof entry !== 'object') throw new Error('v2-checkpoint-build: provenance entry is required (KEEP)');
+      fields[fieldPath] = {
+        schemaVersion: 1,
+        sourceKind: String(entry.sourceKind),
+        trust: String(entry.trust),
+        sourceRefs: Array.isArray(entry.sourceRefs) ? entry.sourceRefs.map(String) : [],
+        authorityScope: entry.authorityScope === undefined ? null : entry.authorityScope,
+        fieldKind: String(entry.fieldKind),
+      };
+    }
+    return { schemaVersion: 1, fields };
+  }
+  if (!hasLegacy) return null;
+  return {
+    sourceNotes: input.provenance.sourceNotes === undefined || input.provenance.sourceNotes === null ? null : String(input.provenance.sourceNotes),
+    collectedAtUtc: input.provenance.collectedAtUtc === undefined || input.provenance.collectedAtUtc === null ? null : String(input.provenance.collectedAtUtc),
+  };
 }
 
 // ---- authoritative builder ----
@@ -585,10 +680,8 @@ function buildCheckpointV2(input) {
     },
     // A03 temporary pre-A05 semantics: null/null is the ONLY accepted value.
     snapshot: { snapshotTokenId: null, revisionDigest: null },
-    provenance: input.provenance === undefined || input.provenance === null ? null : {
-      sourceNotes: input.provenance.sourceNotes === undefined || input.provenance.sourceNotes === null ? null : String(input.provenance.sourceNotes),
-      collectedAtUtc: input.provenance.collectedAtUtc === undefined || input.provenance.collectedAtUtc === null ? null : String(input.provenance.collectedAtUtc),
-    },
+    provenance: buildProvenanceFieldV2(input),
+
     pressure: input.pressure === undefined || input.pressure === null ? null : {
       preCheckpointEffectiveInputTokens: input.pressure.preCheckpointEffectiveInputTokens === undefined ? null : input.pressure.preCheckpointEffectiveInputTokens,
       peakEffectiveInputTokens: input.pressure.peakEffectiveInputTokens === undefined ? null : input.pressure.peakEffectiveInputTokens,
