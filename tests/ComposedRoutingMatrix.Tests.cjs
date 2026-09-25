@@ -23,8 +23,10 @@ async function main() {
     process.env.DSH_HOME = path.join(installRoot, 'data')
     process.env.AIH_INSTALL_ROOT = installRoot
 
-    async function run(name, engine, target) {
-      const sessionTarget = { provider: 'flash-max-direct', model: 'deepseek-v4-flash' }
+    async function run(name, engine, target, options) {
+      const sessionTarget = (options && options.sessionTarget)
+        || { provider: 'flash-max-direct', model: 'deepseek-v4-flash' }
+      const modelSelectionFirst = !options || options.modelSelectionFirst !== false
       const sessionId = 'session-' + passed
       const preset = engine === 'muse' ? 'aih-muse' : 'aih-engineering'
       if (engine) {
@@ -57,9 +59,21 @@ async function main() {
         },
         shellEnv: { register() {} },
       }
-      installModelSelection(ctx, { current: { ...sessionTarget, reasoningEffort: 'max' }, assembled: undefined })
-      if (engine === 'muse') muse.apply(ctx)
-      if (engine === 'dual') engineering.apply(ctx)
+      const applyIsolation = () => {
+        if (engine === 'muse') muse.apply(ctx)
+        if (engine === 'dual') engineering.apply(ctx)
+      }
+      // TASK-0058: registration order must not change routing semantics.
+      // installModelSelection may run before (outer) or after (inner) the
+      // controller isolation middleware; both positions must converge on the
+      // controller target, with exact verification at the transport boundary.
+      if (modelSelectionFirst) {
+        installModelSelection(ctx, { current: { ...sessionTarget, reasoningEffort: 'max' }, assembled: undefined })
+        applyIsolation()
+      } else {
+        applyIsolation()
+        installModelSelection(ctx, { current: { ...sessionTarget, reasoningEffort: 'max' }, assembled: undefined })
+      }
       await hooks.get('system-prompt/assemble')[0]({}, {}, async () => ({ variables: {} }))
       const payload = { agent: { session: { id: sessionId, header: { agentPreset: preset }, events: [] } } }
       const handlers = hooks.get('agent/request')
@@ -76,9 +90,14 @@ async function main() {
       console.log(`PASS: ${name}: ${actual.provider} / ${actual.model}`)
     }
 
-    await run('Muse OpenCode Go beats DeepSeek session', 'muse', { provider: 'opencode-go', model: 'muse-spark-1.3-contributor' })
-    await run('Muse direct beats DeepSeek session', 'muse', { provider: 'meta-model-api', model: 'muse-spark-1.3-contributor' })
-    await run('Dual GLM beats DeepSeek session', 'dual', { provider: 'zai-direct', model: 'glm-5.3-flash' })
+    // TASK-0058: the three required controller/session pairs, each under BOTH
+    // middleware registration orders (modelSelection outer vs inner).
+    for (const modelSelectionFirst of [true, false]) {
+      const order = modelSelectionFirst ? 'MS-first' : 'CTL-first'
+      await run(`Muse OpenCode Go beats DeepSeek session [${order}]`, 'muse', { provider: 'opencode-go', model: 'muse-spark-1.3-contributor' }, { modelSelectionFirst })
+      await run(`Muse OpenCode Go beats Meta session [${order}]`, 'muse', { provider: 'opencode-go', model: 'muse-spark-1.3-contributor' }, { modelSelectionFirst, sessionTarget: { provider: 'meta-model-api', model: 'muse-spark-1.3-contributor' } })
+      await run(`Dual GLM beats DeepSeek session [${order}]`, 'dual', { provider: 'zai-direct', model: 'glm-5.3-flash' }, { modelSelectionFirst })
+    }
     await run('Matching DeepSeek controller', 'dual', { provider: 'flash-max-direct', model: 'deepseek-v4-flash' })
     await run('Session-only selection', null, null)
     console.log(`SUITE RESULT: PASS ${passed} | FAIL 0 | total ${passed}`)
