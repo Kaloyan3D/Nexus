@@ -1004,6 +1004,69 @@ function New-AihContextCompactionOperationV2 {
     return [pscustomobject]$readBack
 }
 
+# ══════════════════════════════════════════════════════════════════════
+# CCV2-A03 — Checkpoint Schema V2 identity parity (PS authority).
+#
+# V1 checkpoint files (context-checkpoint.json, schemaVersion 1) are
+# UNCHANGED. V2 checkpoints persist separately under
+# context-checkpoints/cp-NNNNNN.json with schemaVersion 2 and are never
+# reinterpreted as V1 (explicit schema branching).
+#
+# Canonical formulas (JS twins in config/ContextCheckpointV2.cjs;
+# proven byte-for-byte by the A03 parity test):
+#   contentDigest = sha256Hex(UTF-8(canonical payload bytes))
+#   checkpointId  = 'ccp_' + sha256Hex(domain LF taskId LF taskInstanceId
+#                   LF sessionId LF generation LF contentDigest)[0..32)
+# ══════════════════════════════════════════════════════════════════════
+
+$AihContextCheckpointV2SchemaVersion = 2
+$AihContextCheckpointIdDomainV2 = 'nexus/context-checkpoint/v2'
+$AihContextCheckpointV2DirName = 'context-checkpoints'
+$AihContextCheckpointV2FilePrefix = 'cp-'
+
+function Get-AihContextCheckpointDigestV2 {
+    # SHA-256 hex (lowercase) over the exact UTF-8 bytes of the supplied
+    # canonical payload text. JS twin: sha256HexUtf8.
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $bytes = [Text.Encoding]::UTF8.GetBytes([string]$Text)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    return $digest
+}
+
+function New-AihContextCheckpointIdV2 {
+    # Canonical deterministic V2 checkpoint identity (derivation authority;
+    # the JS twin deriveCheckpointIdV2 mirrors it byte-for-byte).
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$TaskInstanceId,
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [Parameter(Mandatory = $true)][int]$Generation,
+        [Parameter(Mandatory = $true)][string]$ContentDigest
+    )
+    if ([int]$Generation -lt 1) { throw 'V2 checkpoint identity refused: generation must be a positive integer. (KEEP.)' }
+    if ([string]$ContentDigest -notmatch '^[0-9a-f]{64}$') { throw 'V2 checkpoint identity refused: contentDigest must be sha256 hex. (KEEP.)' }
+    $joined = [string]$AihContextCheckpointIdDomainV2 + "`n" + [string]$TaskId + "`n" + [string]$TaskInstanceId + "`n" + [string]$SessionId + "`n" + [string][int]$Generation + "`n" + [string]$ContentDigest
+    $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    return ('ccp_' + $digest.Substring(0, 32))
+}
+
+function Get-AihContextCheckpointV2FileName {
+    param([Parameter(Mandatory = $true)][int]$Generation)
+    if ([int]$Generation -lt 1) { throw 'V2 checkpoint path refused: generation must be a positive integer. (KEEP.)' }
+    return ($AihContextCheckpointV2FilePrefix + ([string][int]$Generation).PadLeft(6, '0') + '.json')
+}
+
+function Get-AihContextCheckpointV2Path {
+    param([Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$TaskId, [Parameter(Mandatory = $true)][int]$Generation)
+    $layout = Get-AihLedgerLayout $Workspace
+    return (Join-Path (Join-Path (Join-Path $layout.Runs $TaskId) $AihContextCheckpointV2DirName) (Get-AihContextCheckpointV2FileName -Generation ([int]$Generation)))
+}
+
 function Read-AihContextCompactionOperation {
     param([Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$TaskId)
     $paths = Get-AihContextLifecyclePaths -Workspace $Workspace -TaskId $TaskId
