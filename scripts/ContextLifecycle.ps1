@@ -1067,6 +1067,198 @@ function Get-AihContextCheckpointV2Path {
     return (Join-Path (Join-Path (Join-Path $layout.Runs $TaskId) $AihContextCheckpointV2DirName) (Get-AihContextCheckpointV2FileName -Generation ([int]$Generation)))
 }
 
+# CCV2-A04 — Trust Provenance & Content Seal parity (PS authority).
+#
+# V1 checkpoint/operation functions above are UNCHANGED. Trust derivation
+# (sourceKind -> trust class) lives in config/ContextTrustV2.cjs (JS
+# authority); the PS twins below cover seal construction + validation
+# (field binding AND the A04R seal-record digest).
+# Canonical seal shape (JS twin: sealCheckpoint in config/ContextTrustV2.cjs):
+#   { schemaVersion: 1, checkpointId, checkpointContentDigest (sha256 hex),
+#     generation, taskId, taskInstanceId, sessionId, sealedAtUtc (ISO UTC),
+#     algorithm: 'sha256', sealDigest (sha256 hex) }
+# Frozen seal-record digest (JS twin: deriveSealDigestV1):
+#   sealDigest = sha256Hex(UTF-8('nexus/context-content-seal/v1' LF
+#                                canonicalJson(seal excluding sealDigest)))
+# where canonicalJson sorts object keys ordinally (recursive) and keeps
+# array order — byte-identical to the JS repository canonicalizer.
+# ══════════════════════════════════════════════════════════════════════
+
+$AihContextContentSealSchemaVersion = 1
+$AihContextContentSealAlgorithm = 'sha256'
+$AihContextContentSealDigestDomainV1 = 'nexus/context-content-seal/v1'
+
+function ConvertTo-AihJsonEscapedString {
+    # JSON string escaping with JS JSON.stringify semantics: quote,
+    # backslash, \b \f \n \r \t, and \u00XX (lowercase hex) for other
+    # controls below 0x20. All other characters (including non-ASCII and
+    # surrogate pairs) pass through verbatim in UTF-8.
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $sb = New-Object Text.StringBuilder
+    [void]$sb.Append('"')
+    foreach ($ch in ([string]$Text).ToCharArray()) {
+        $code = [int]$ch
+        if ($code -eq 34) { [void]$sb.Append('\"'); }
+        elseif ($code -eq 92) { [void]$sb.Append('\\'); }
+        elseif ($code -eq 8) { [void]$sb.Append('\b'); }
+        elseif ($code -eq 12) { [void]$sb.Append('\f'); }
+        elseif ($code -eq 10) { [void]$sb.Append('\n'); }
+        elseif ($code -eq 13) { [void]$sb.Append('\r'); }
+        elseif ($code -eq 9) { [void]$sb.Append('\t'); }
+        elseif ($code -lt 32) { [void]$sb.Append(('\u{0:x4}' -f $code)); }
+        else { [void]$sb.Append($ch); }
+    }
+    [void]$sb.Append('"')
+    return $sb.ToString()
+}
+
+function ConvertTo-AihCanonicalJson {
+    # Deterministic canonical JSON (JS twin: canonicalize +
+    # JSON.stringify in config/ContextCheckpointV2.cjs): plain objects and
+    # dictionaries serialize with ordinally sorted keys (recursive); arrays
+    # keep author order; no whitespace.
+    param($Value)
+    if ($null -eq $Value) { return 'null' }
+    if ($Value -is [string]) { return (ConvertTo-AihJsonEscapedString -Text ([string]$Value)) }
+    if ($Value -is [datetime]) {
+        # ConvertFrom-Json parses ISO-8601 timestamps into DateTime objects
+        # (whose .Date/.TimeOfDay graph would recurse forever). Sealed
+        # timestamps use canonical millisecond-precision UTC form, so format
+        # back to that exact lexical shape (JS twin hashes the raw string).
+        $utc = ([datetime]$Value).ToUniversalTime()
+        return (ConvertTo-AihJsonEscapedString -Text ($utc.ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture)))
+    }
+    if ($Value -is [bool]) {
+        if ([bool]$Value) { return 'true' }
+        return 'false'
+    }
+    if ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal]) {
+        return ([string]$Value.ToString([Globalization.CultureInfo]::InvariantCulture))
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $keys = @($Value.Keys | ForEach-Object { [string]$_ })
+        $sorted = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($k in $keys) { [void]$sorted.Add($k) }
+        $sorted.Sort([StringComparer]::Ordinal)
+        $parts = @()
+        foreach ($k in $sorted) { $parts += @((ConvertTo-AihJsonEscapedString -Text $k) + ':' + (ConvertTo-AihCanonicalJson -Value $Value[$k])) }
+        return ('{' + ($parts -join ',') + '}')
+    }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        $parts = @()
+        foreach ($entry in $Value) { $parts += @(ConvertTo-AihCanonicalJson -Value $entry) }
+        return ('[' + ($parts -join ',') + ']')
+    }
+    $props = @($Value.PSObject.Properties | Where-Object { $null -ne $_.Name } | ForEach-Object { [string]$_.Name })
+    $sorted = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($k in $props) { [void]$sorted.Add($k) }
+    $sorted.Sort([StringComparer]::Ordinal)
+    $parts = @()
+    foreach ($k in $sorted) { $parts += @((ConvertTo-AihJsonEscapedString -Text $k) + ':' + (ConvertTo-AihCanonicalJson -Value $Value.$k)) }
+    return ('{' + ($parts -join ',') + '}')
+}
+
+function Get-AihContextContentSealDigestV2 {
+    # Domain-separated seal-record digest over the seal body (the seal
+    # excluding sealDigest). JS twin: deriveSealDigestV1.
+    param([Parameter(Mandatory = $true)]$SealBody)
+    $body = @{}
+    foreach ($prop in @($SealBody.PSObject.Properties)) {
+        if ([string]$prop.Name -eq 'sealDigest') { continue }
+        $body[[string]$prop.Name] = $prop.Value
+    }
+    if ($SealBody -is [System.Collections.IDictionary]) {
+        $body = @{}
+        foreach ($key in @($SealBody.Keys)) {
+            if ([string]$key -eq 'sealDigest') { continue }
+            $body[[string]$key] = $SealBody[$key]
+        }
+    }
+    $bodyJson = ConvertTo-AihCanonicalJson -Value $body
+    $joined = [string]$AihContextContentSealDigestDomainV1 + "`n" + $bodyJson
+    $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    return $digest
+}
+
+
+function New-AihContextContentSealV2 {
+    # Mint the authoritative seal for one finalized checkpoint. sealedAtUtc is
+    # an explicit caller input (determinism: no clock reads inside).
+    # JS twin: sealCheckpoint.
+    param(
+        [Parameter(Mandatory = $true)][string]$CheckpointId,
+        [Parameter(Mandatory = $true)][string]$ContentDigest,
+        [Parameter(Mandatory = $true)][int]$Generation,
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$TaskInstanceId,
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [Parameter(Mandatory = $true)][string]$SealedAtUtc
+    )
+    if ([string]::IsNullOrWhiteSpace($CheckpointId)) { throw 'V2 content seal refused: checkpointId is required. (KEEP.)' }
+    if ([string]$ContentDigest -notmatch '^[0-9a-f]{64}$') { throw 'V2 content seal refused: contentDigest must be sha256 hex. (KEEP.)' }
+    if ([int]$Generation -lt 1) { throw 'V2 content seal refused: generation must be a positive integer. (KEEP.)' }
+    if ([string]::IsNullOrWhiteSpace($TaskId)) { throw 'V2 content seal refused: taskId is required. (KEEP.)' }
+    if ([string]::IsNullOrWhiteSpace($TaskInstanceId)) { throw 'V2 content seal refused: taskInstanceId is required. (KEEP.)' }
+    if ([string]::IsNullOrWhiteSpace($SessionId)) { throw 'V2 content seal refused: sessionId is required. (KEEP.)' }
+    try { $null = [DateTime]::Parse([string]$SealedAtUtc) } catch { throw 'V2 content seal refused: sealedAtUtc must be explicit ISO-8601 UTC input. (KEEP.)' }
+    $body = [pscustomobject]@{
+        schemaVersion           = [int]$AihContextContentSealSchemaVersion
+        checkpointId            = [string]$CheckpointId
+        checkpointContentDigest = [string]$ContentDigest
+        generation              = [int]$Generation
+        taskId                  = [string]$TaskId
+        taskInstanceId          = [string]$TaskInstanceId
+        sessionId               = [string]$SessionId
+        sealedAtUtc             = [string]$SealedAtUtc
+        algorithm               = [string]$AihContextContentSealAlgorithm
+    }
+    $sealDigest = Get-AihContextContentSealDigestV2 -SealBody $body
+    return [pscustomobject]@{
+        schemaVersion           = [int]$body.schemaVersion
+        checkpointId            = [string]$body.checkpointId
+        checkpointContentDigest = [string]$body.checkpointContentDigest
+        generation              = [int]$body.generation
+        taskId                  = [string]$body.taskId
+        taskInstanceId          = [string]$body.taskInstanceId
+        sessionId               = [string]$body.sessionId
+        sealedAtUtc             = [string]$body.sealedAtUtc
+        algorithm               = [string]$body.algorithm
+        sealDigest              = [string]$sealDigest
+    }
+}
+
+function Test-AihContextContentSealV2 {
+    # Validate one seal against its checkpoint identity legs. Any mismatch
+    # BLOCKS with a stable reason code (JS twin: validateContentSeal).
+    param(
+        [Parameter(Mandatory = $true)]$Seal,
+        [Parameter(Mandatory = $true)][string]$CheckpointId,
+        [Parameter(Mandatory = $true)][string]$ContentDigest,
+        [Parameter(Mandatory = $true)][int]$Generation,
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$TaskInstanceId,
+        [Parameter(Mandatory = $true)][string]$SessionId
+    )
+    $fail = { param($reason) return @{ valid = $false; reason = [string]$reason } }
+    if ($null -eq $Seal) { return (& $fail 'checkpoint-seal-missing') }
+    if ([int]$Seal.schemaVersion -ne [int]$AihContextContentSealSchemaVersion) { return (& $fail 'checkpoint-seal-invalid') }
+    if ([string]$Seal.algorithm -ne [string]$AihContextContentSealAlgorithm) { return (& $fail 'checkpoint-seal-invalid') }
+    try { $null = [DateTime]::Parse([string]$Seal.sealedAtUtc) } catch { return (& $fail 'checkpoint-seal-invalid') }
+    if ([string]$Seal.sealDigest -notmatch '^[0-9a-f]{64}$') { return (& $fail 'checkpoint-seal-invalid') }
+    if ([string]$Seal.checkpointId -ne [string]$CheckpointId) { return (& $fail 'checkpoint-seal-id-mismatch') }
+    if ([string]$Seal.checkpointContentDigest -ne [string]$ContentDigest) { return (& $fail 'checkpoint-seal-digest-mismatch') }
+    if ([int]$Seal.generation -ne [int]$Generation) { return (& $fail 'checkpoint-seal-generation-mismatch') }
+    if ([string]$Seal.taskId -ne [string]$TaskId) { return (& $fail 'checkpoint-seal-invalid') }
+    if ([string]$Seal.taskInstanceId -ne [string]$TaskInstanceId) { return (& $fail 'checkpoint-seal-invalid') }
+    if ([string]$Seal.sessionId -ne [string]$SessionId) { return (& $fail 'checkpoint-seal-invalid') }
+    $expected = Get-AihContextContentSealDigestV2 -SealBody $Seal
+    if ([string]$Seal.sealDigest -ne [string]$expected) { return (& $fail 'checkpoint-seal-record-digest-mismatch') }
+    return @{ valid = $true; reason = $null }
+}
+
 function Read-AihContextCompactionOperation {
     param([Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$TaskId)
     $paths = Get-AihContextLifecyclePaths -Workspace $Workspace -TaskId $TaskId

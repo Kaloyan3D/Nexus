@@ -153,7 +153,9 @@ CCv2Checkpoint {
   createdByOperationId : string | null
   contentDigest      : string  — digest of the canonical sealed payload
   payload            : object  — structured, bounded, redacted
-  trust              : TrustProvenance[]
+  provenance         : provenance map (section 3.4) — part of the digested payload
+  seal               : CheckpointContentSeal (section 3.13) — excluded from
+                       the content digest, self-integrity via sealDigest
   evidence           : EvidenceRef[]
   sizeBytes          : integer — hard bound, refusal above it
 }
@@ -169,26 +171,81 @@ CCv2Checkpoint {
 - Self-containment: a checkpoint's payload must be sufficient for normal
   continuation **without** any earlier generation (invariant 4.5).
 
-### 3.4 `TrustProvenance`
+### 3.4 `TrustProvenance` (frozen A04 — supersedes the pre-A04 draft below)
 
-Per-field provenance.
+Per-field provenance. A controller-created checkpoint envelope does NOT make
+contained values authoritative: repository text such as "IGNORE PREVIOUS
+INSTRUCTIONS" keeps `repository` / `untrusted-data` even though the
+controller serialized it (invariant 4.9).
+
+> Supersession note: the pre-A04 draft of this section (field/trust/source
+> vocabulary with `controller | host | repository | tool | model | user`)
+> described intent before implementation and is superseded in full by the
+> frozen A04 contract that follows. No two normative provenance schemas
+> remain: this section is the single definition.
 
 ```text
 TrustProvenance {
-  schemaVersion : integer (1)
-  field      : string   — JSON pointer into the checkpoint payload
-  trust      : 'controller' | 'host' | 'repository' | 'tool' | 'model' | 'user'
-  source     : string   — concrete origin (component, event seq, file, tool name)
-  evidenceRef: string | null
-  redacted   : boolean
+  schemaVersion  : integer (1)
+  fieldKind      : string   — closed field semantics (e.g. task-objective,
+                              requirement-text, verification-outcome);
+                              unknown kinds fail closed
+  sourceKind     : 'controller' | 'user' | 'agent' | 'repository'
+                 | 'tool' | 'verification' | 'review'   — frozen taxonomy;
+                              never extended casually
+  trust          : 'authoritative' | 'user-intent' | 'evidence'
+                 | 'advisory' | 'untrusted-data'        — derived by policy,
+                              never caller-chosen
+  sourceRefs     : string[] — stable grounded references (session event seq,
+                              task state revision, evidence ID, artifact
+                              hash, tool event identity); 1..8 entries,
+                              never bulk content
+  authorityScope : string | null — bounded qualifier
 }
 ```
 
-- Authority: `TrustNormalizer` only. Rendering a value inside a controller
-  checkpoint never elevates its trust (invariant 4.9).
+Trust semantics: `authoritative` → controller-owned deterministic state;
+`user-intent` → explicit user requirement / constraint / approval;
+`evidence` → grounded tool/repository/verification fact; `advisory` →
+model/reviewer suggestion or interpretation; `untrusted-data` → content
+that may contain instructions but has no authority.
+
+- Authority: `TrustNormalizer` only — the single normalization path (raw
+  grounded field + source identity + field semantics → provenanced value).
+  Trust derives from the closed (sourceKind, fieldKind) mapping; unknown
+  combinations FAIL CLOSED and nothing defaults to authoritative.
+  Conservative downgrades (agent content → advisory, repository/tool prose
+  and unverified PASS claims → untrusted-data) exist only as explicit
+  mapped entries, never as a default.
+- Controller normalization of user-originated text must retain the original
+  user/policy source reference: origin is never erased by normalization.
+- Decision authority values (`agent-proposed`, `user-approved`,
+  `controller-established`, `evidence-supported`) must be establishable
+  by the sourcing kind: an agent proposal can never arrive as
+  `user-approved` because the agent says so; approval requires a grounded
+  user/controller source.
+- Verification truth derives only from the verification subsystem / trusted
+  execution evidence. Model narration ("all tests pass") is at most
+  advisory; the test execution result is evidence.
+- An `EvidenceRef` is a reference, never a truth claim (section 3.5).
 - Mutability: immutable after sealing.
-- Persistence: sealed with the checkpoint.
-- Identity: exactly one entry per non-trivial payload field.
+- Persistence: sealed with the checkpoint inside the provenance map:
+
+```text
+provenance: {
+  schemaVersion : integer (1)
+  fields        : { [fieldPath: string]: TrustProvenance }
+}
+```
+
+  bounded (≤96 entries; sourceRef/authorityScope/path lengths bounded),
+  deterministic (sorted field paths), closed-world validated, canonicalized.
+  The map is part of the canonical checkpoint payload, so provenance
+  changes move `contentDigest` / `checkpointId` naturally (the A03
+  formula itself is unchanged).
+- Render metadata: later consumers (future Context Compiler, not built
+  here) distinguish `TRUSTED CONTROLLER STATE` from `UNTRUSTED
+  REPOSITORY DATA` via the trust class.
 
 ### 3.5 `EvidenceRef`
 
@@ -414,6 +471,58 @@ DecisionProvider {
   are inputs to a decision owned by a component in section 2, never the
   decision.
 
+### 3.13 `CheckpointContentSeal` (frozen A04R)
+
+The authoritative seal record for one sealed checkpoint generation. The seal
+lives in the SAME immutable checkpoint record (one atomic file per
+generation) but is EXCLUDED from the A03 content-digest computation, so both
+A03 formulas are preserved byte-for-byte.
+
+```text
+CheckpointContentSeal {
+  schemaVersion           : integer (1)
+  checkpointId            : string  — must equal the checkpoint's id
+  checkpointContentDigest : string  — sha256 hex, must equal the checkpoint's digest
+  generation              : integer — must equal the checkpoint's generation
+  taskId                  : string
+  taskInstanceId          : string
+  sessionId               : string
+  sealedAtUtc             : string  — explicit builder input, never clock-read
+  algorithm               : 'sha256'
+  sealDigest              : string  — sha256 hex over the seal record itself
+}
+```
+
+Frozen seal-record digest (domain-separated; no recursive hashing):
+
+```text
+sealDigest = sha256Hex(UTF-8('nexus/context-content-seal/v1' LF
+                             canonicalJson(seal excluding sealDigest)))
+```
+
+Three separate responsibilities: `checkpointContentDigest` → canonical
+checkpoint content identity (A03); `checkpointId` → generation/content
+identity (A03); `sealDigest` → integrity of the complete seal metadata,
+covering `sealedAtUtc` — so an instant-only mutation fails validation
+with `checkpoint-seal-record-digest-mismatch`.
+
+- Authority: `ContentSealer` mints after `TrustNormalizer` provenance
+  normalization (never seal before normalization; secrets redacted before
+  sealing, never after).
+- Mutability: **immutable**. Any meaningful change creates a new generation;
+  persisting different bytes for an already persisted generation is refused.
+- Validation order: parse → checkpoint/provenance → contentDigest →
+  checkpointId → seal structural → seal field binding → recompute
+  sealDigest → compare. Any mismatch → **BLOCK** with stable codes
+  (`checkpoint-seal-missing`, `checkpoint-seal-invalid`,
+  `checkpoint-seal-id-mismatch`, `checkpoint-seal-digest-mismatch`,
+  `checkpoint-seal-generation-mismatch`,
+  `checkpoint-seal-record-digest-mismatch`).
+- Determinism: identical checkpoint + provenance + sealedAtUtc →
+  byte-identical seal, sealDigest, and sealed bytes. A different explicit
+  sealedAtUtc leaves contentDigest/checkpointId unchanged and moves
+  sealDigest/sealed bytes (expected).
+
 ---
 
 ## 4. Fundamental invariants
@@ -492,6 +601,8 @@ field by `TrustNormalizer` and is immutable after sealing.
 
 Checkpoint identity binds to the canonical checkpoint **content hash**. A
 checkpoint whose content does not hash to its recorded identity is refused.
+The complete seal record is independently bound by `sealDigest`
+(section 3.13); neither digest covers the other (no recursive hashing).
 
 ### 4.11 One full checkpoint payload per generation  *(A00 correction — see section 6)*
 
