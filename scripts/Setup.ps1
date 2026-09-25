@@ -87,9 +87,14 @@ if (Test-Path -LiteralPath (Join-Path $sourceRoot 'skills')) {
 Copy-AihSourceFile -Source (Join-Path $sourceRoot 'runtime/package.json') -Destination (Join-Path $layout.Runtime 'package.json')
 Copy-AihSourceFile -Source (Join-Path $sourceRoot 'runtime/package-lock.json') -Destination (Join-Path $layout.Runtime 'package-lock.json')
 if (Test-Path -LiteralPath (Join-Path $sourceRoot 'runtime/vendor')) {
-    New-Item -ItemType Directory -Force -Path (Join-Path $layout.Runtime 'vendor') | Out-Null
+    $vendorDirectory = Join-Path $layout.Runtime 'vendor'
+
+    New-Item -ItemType Directory -Force -Path $vendorDirectory | Out-Null
+
     foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'runtime/vendor') -File) {
-        Copy-AihSourceFile -Source $file.FullName -Destination (Join-Path $layout.Runtime 'vendor' $file.Name)
+        Copy-AihSourceFile `
+            -Source $file.FullName `
+            -Destination (Join-Path $vendorDirectory $file.Name)
     }
 }
 

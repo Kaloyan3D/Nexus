@@ -2,7 +2,7 @@
 
 Nexus pins `@deepseek-ai/dsh-agent@0.1.1-rc.2-nexus.1` from
 `runtime/vendor/deepseek-ai-dsh-agent-0.1.1-rc.2-nexus.1.tgz`. Its SHA-256 is
-`a8106b298ed4c36a697bff7fa18c6754af723260c610aa6620764b5accf3e29a`.
+`30843a44a6b2aa03d6841559a97f5533572f480793d6e58087a220f6a7861f5d`.
 
 The source change is `dsh-agent-routing-authority.patch`, based on the upstream
 `dsh-v0.1.1-rc.2` tag at commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`.

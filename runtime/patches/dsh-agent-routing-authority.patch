@@ -86,21 +86,35 @@ index 2cb7e44..d0ffd15 100644
   * the selected model's provider/default behavior.
   *
   * @param agentCtx - The selected Agent's scoped context.
-@@ -53,8 +93,17 @@ export function installModelSelection(agentCtx: Context, selection: ModelSelecti
+@@ -53,8 +93,26 @@ export function installModelSelection(agentCtx: Context, selection: ModelSelecti
    })
    const disposeRequest = agentCtx.on(
      'agent/request',
 -    async (_payload, next): Promise<LlmCallConfig> => {
 +    async (payload, next): Promise<LlmCallConfig> => {
 +      protectRoutingAuthority(payload)
++      // Snapshot the declaration visible at this position. A controller/preset
++      // claim already present here is finalized by an OUTER layer, so this
++      // inner position must not assert provider/model equality against the
++      // intermediate downstream value; exact verification for every position
++      // happens at the transport boundary (Nexus Routing-Integrity). This
++      // layer only guarantees session/default selection never overrides the
++      // higher authority.
++      const declared = payload.routingAuthority === undefined
++        ? undefined
++        : { source: payload.routingAuthority.source, target: { ...payload.routingAuthority.target } }
        const resolved = await next()
 +      const authority = payload.routingAuthority
 +      if (authority !== undefined) {
 +        const { source, target } = authority
-+        if (resolved.provider !== target.provider || resolved.model !== target.model) {
-+          throw new Error('agent/request route differs from its declared routing authority')
++        if (source === 'controller' || source === 'preset') {
++          if (declared === undefined) {
++            if (resolved.provider !== target.provider || resolved.model !== target.model) {
++              throw new Error('agent/request route differs from its declared routing authority')
++            }
++          }
++          return resolved
 +        }
-+        if (source === 'controller' || source === 'preset') return resolved
 +      }
        const selected = selection.assembled
        if (selected === undefined) return resolved
@@ -248,6 +262,33 @@ index 3e61060..bd886dc 100644
 +    )
 +    expect(result).toMatchObject({ provider: 'controller', model: 'controller-model' })
 +    await ctx.fiber.dispose()
++  })
++
++  it('is order-invariant: controller isolation finalizes the route under both registration orders', async () => {
++    for (const modelSelectionFirst of [true, false]) {
++      const ctx = new Context()
++      await ctx.plugin(SystemPrompt)
++      const selection: ModelSelectionRef = {
++        current: { provider: 'session-provider', model: 'session-model', reasoningEffort: ReasoningEffortId('max') },
++        assembled: undefined,
++      }
++      const controller = async (payload: any, next: any) => {
++        payload.routingAuthority = {
++          source: 'controller',
++          target: { provider: 'controller-provider', model: 'controller-model' },
++        }
++        return { ...await next(), provider: 'controller-provider', model: 'controller-model' }
++      }
++      if (modelSelectionFirst) { installModelSelection(ctx, selection); ctx.on('agent/request', controller) }
++      else { ctx.on('agent/request', controller); installModelSelection(ctx, selection) }
++      await ctx.systemPrompt.assemble()
++      const result = await agentEvents(ctx, {} as Agent).waterfall(
++        'agent/request', { turn: 1, step: 0, signal: new AbortController().signal },
++        () => Promise.resolve({ provider: 'default-provider', model: 'default-model' }),
++      )
++      expect(result).toMatchObject({ provider: 'controller-provider', model: 'controller-model' })
++      await ctx.fiber.dispose()
++    }
 +  })
 +
 +  it('lets session selection replace a declared default route', async () => {
