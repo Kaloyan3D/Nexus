@@ -765,6 +765,245 @@ function New-AihContextCompactionOperationId {
     return ('ccop_' + $digest.Substring(0, 32))
 }
 
+# ══════════════════════════════════════════════════════════════════════
+# CCV2-A02 — durable multi-generation operation foundation (V2, PS authority).
+#
+# V1 functions above are UNCHANGED. V2 lives in an explicit separate domain:
+# schemaVersion 2, operation-ID domain .../v2, and a separate persistence
+# file (context-compaction-operation-v2.json). V1 stored operations are never
+# reinterpreted as V2 (schema branching).
+# ══════════════════════════════════════════════════════════════════════
+
+$AihContextOperationIdDomainV2 = 'nexus/context-compaction-operation/v2'
+$AihContextOperationV2SchemaVersion = 2
+$AihContextOperationV2FileName = 'context-compaction-operation-v2.json'
+
+function New-AihContextCompactionOperationIdV2 {
+    # CANONICAL generation-aware V2 operation identity (derivation authority;
+    # the JS twin deriveCanonicalOperationIdV2 mirrors it byte-for-byte,
+    # proven by parity test). Serialization: domain LF taskId LF
+    # taskInstanceId LF sessionId LF generation LF checkpointId, UTF-8,
+    # SHA-256 hex, first 32 chars, ccop_ prefix.
+    param([Parameter(Mandatory = $true)][string]$TaskId, [Parameter(Mandatory = $true)][string]$TaskInstanceId, [Parameter(Mandatory = $true)][string]$SessionId, [Parameter(Mandatory = $true)][int]$Generation, [Parameter(Mandatory = $true)][string]$CheckpointId)
+    if ([int]$Generation -lt 1) { throw 'V2 operation identity refused: generation must be a positive integer. (KEEP.)' }
+    if ([string]::IsNullOrWhiteSpace($CheckpointId)) { throw 'V2 operation identity refused: checkpointId is required. (KEEP.)' }
+    $joined = [string]$AihContextOperationIdDomainV2 + "`n" + [string]$TaskId + "`n" + [string]$TaskInstanceId + "`n" + [string]$SessionId + "`n" + [string][int]$Generation + "`n" + [string]$CheckpointId
+    $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    return ('ccop_' + $digest.Substring(0, 32))
+}
+
+function New-AihContextContinuationAnchor {
+    # Bounded identity-only continuation anchor (no payload of any kind).
+    param([Parameter(Mandatory = $true)][string]$OperationId, [Parameter(Mandatory = $true)][int]$Generation, [Parameter(Mandatory = $true)][int]$SegmentIndex, [Parameter(Mandatory = $true)][int]$SegmentCount)
+    if ([string]::IsNullOrWhiteSpace($OperationId) -or ($OperationId -match '["<>]')) { throw 'Continuation anchor refused: operationId must be a bounded identity token. (KEEP.)' }
+    if (([int]$SegmentIndex -lt 0) -or ([int]$SegmentIndex -ge [int]$SegmentCount) -or ([int]$SegmentCount -lt 1)) { throw 'Continuation anchor refused: segment index out of range. (KEEP.)' }
+    $oneBased = [int]$SegmentIndex + 1
+    return ('<nexus-context-continuation operation="' + [string]$OperationId + '" generation="' + [string][int]$Generation + '" segment="' + [string]$oneBased + '/' + [string][int]$SegmentCount + '"/>')
+}
+
+function Get-AihContextOperationV2Path {
+    param([Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$TaskId)
+    $layout = Get-AihLedgerLayout $Workspace
+    return (Join-Path (Join-Path $layout.Runs $TaskId) $AihContextOperationV2FileName)
+}
+
+function Read-AihContextCompactionOperationV2 {
+    param([Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$TaskId)
+    $opPath = Get-AihContextOperationV2Path -Workspace $Workspace -TaskId $TaskId
+    if (-not (Test-Path -LiteralPath $opPath)) { return $null }
+    try { $parsed = Get-Content -Raw -Encoding UTF8 -LiteralPath $opPath | ConvertFrom-Json }
+    catch { throw 'Compaction operation V2 blocked: context-compaction-operation-v2.json is malformed. (KEEP: old context retained.)' }
+    if (($null -eq $parsed) -or ([int]$parsed.schemaVersion -ne [int]$AihContextOperationV2SchemaVersion)) {
+        throw 'Compaction operation V2 blocked: stored record is not a V2 operation. (KEEP: old context retained.)'
+    }
+    return $parsed
+}
+
+function Test-AihContextCompactionOperationV2 {
+    # Closed-world V2 validation (JS twin: validateCompactionOperationV2).
+    # Any failure returns valid=false (BLOCK/KEEP) before any mutation.
+    param(
+        [Parameter(Mandatory = $true)]$Operation,
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$TaskInstanceId,
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [string]$CheckpointId = $null,
+        [int]$CheckpointGeneration = -1,
+        [string]$RepositoryId = $null,
+        [string]$CheckoutId = $null
+    )
+    $fail = { param([string]$Reason) return [pscustomobject][ordered]@{ valid = $false; reason = $Reason } }
+    if ($null -eq $Operation) { return (& $fail 'operation-missing') }
+    if ([int]$Operation.schemaVersion -ne [int]$AihContextOperationV2SchemaVersion) { return (& $fail 'operation-schema-mismatch') }
+    if ([string]::IsNullOrWhiteSpace([string]$Operation.operationId)) { return (& $fail 'operation-id-missing') }
+    if ([string]::IsNullOrWhiteSpace([string]$Operation.attemptId)) { return (& $fail 'attempt-id-missing') }
+    if ([string]$Operation.taskId -ne [string]$TaskId) { return (& $fail 'task-id-mismatch') }
+    if ([string]::IsNullOrWhiteSpace([string]$Operation.taskInstanceId) -or ([string]$Operation.taskInstanceId -ne [string]$TaskInstanceId)) { return (& $fail 'task-instance-mismatch') }
+    if ([string]::IsNullOrWhiteSpace([string]$Operation.sessionId) -or ([string]$Operation.sessionId -ne [string]$SessionId)) { return (& $fail 'session-id-mismatch') }
+    if ([string]::IsNullOrWhiteSpace([string]$Operation.workspace) -or ([string]$Operation.workspace -ne [string]$Workspace)) { return (& $fail 'workspace-mismatch') }
+    if ((-not [string]::IsNullOrWhiteSpace($RepositoryId)) -and ([string]$Operation.repositoryId -ne [string]$RepositoryId)) { return (& $fail 'repository-id-mismatch') }
+    if ((-not [string]::IsNullOrWhiteSpace($CheckoutId)) -and ([string]$Operation.checkoutId -ne [string]$CheckoutId)) { return (& $fail 'checkout-id-mismatch') }
+    if ([int]$Operation.checkpointGeneration -lt 1) { return (& $fail 'checkpoint-generation-invalid') }
+    if ([string]::IsNullOrWhiteSpace([string]$Operation.checkpointId)) { return (& $fail 'checkpoint-identity-missing') }
+    if (([int]$CheckpointGeneration -ge 1) -and ([int]$Operation.checkpointGeneration -ne [int]$CheckpointGeneration)) { return (& $fail 'checkpoint-generation-mismatch') }
+    if ((-not [string]::IsNullOrWhiteSpace($CheckpointId)) -and ([string]$Operation.checkpointId -ne [string]$CheckpointId)) { return (& $fail 'checkpoint-identity-mismatch') }
+    $expectedId = $null
+    try { $expectedId = New-AihContextCompactionOperationIdV2 -TaskId $TaskId -TaskInstanceId ([string]$Operation.taskInstanceId) -SessionId $SessionId -Generation ([int]$Operation.checkpointGeneration) -CheckpointId ([string]$Operation.checkpointId) }
+    catch { return (& $fail 'operation-id-derivation-failed') }
+    if ([string]$Operation.operationId -ne [string]$expectedId) { return (& $fail 'operation-id-mismatch') }
+    if (($null -ne $Operation.PSObject.Properties['snapshotTokenId']) -and ($null -ne $Operation.snapshotTokenId) -and ([string]::IsNullOrWhiteSpace([string]$Operation.snapshotTokenId))) { return (& $fail 'snapshot-token-invalid') }
+    if ([int]$Operation.safePointBoundarySeq -lt 0) { return (& $fail 'safe-point-boundary-missing') }
+    $seqs = @($Operation.sourceEventSeqs)
+    if ($seqs.Count -eq 0) { return (& $fail 'source-seqs-missing') }
+    $seen = [Collections.Generic.HashSet[int]]::new()
+    $prev = -1
+    foreach ($seq in $seqs) {
+        if ([int]$seq -lt 0) { return (& $fail 'source-seq-malformed') }
+        if (-not $seen.Add([int]$seq)) { return (& $fail 'source-seqs-duplicate') }
+        if ([int]$seq -le $prev) { return (& $fail 'source-seqs-unordered') }
+        if ([int]$seq -gt [int]$Operation.safePointBoundarySeq) { return (& $fail 'source-seq-beyond-safe-point-boundary') }
+        $prev = [int]$seq
+    }
+    $segments = @($Operation.segments)
+    if ($segments.Count -eq 0) { return (& $fail 'segments-missing') }
+    $payloadCount = 0
+    $flat = [Collections.Generic.List[int]]::new()
+    foreach ($segment in $segments) {
+        if ($null -eq $segment) { return (& $fail 'segment-malformed') }
+        # Role presence must work for both pscustomobject (post-read-back)
+        # and Hashtable (pre-persist draft): Hashtables do not expose entries
+        # through PSObject.Properties.
+        $rolePresent = $false
+        if ($segment -is [Collections.IDictionary]) { $rolePresent = $segment.Contains('role') }
+        else { $rolePresent = ($null -ne $segment.PSObject.Properties['role']) }
+        if (-not $rolePresent) { return (& $fail 'segment-role-missing') }
+        if (($null -eq $segment.start) -or ($null -eq $segment.end) -or ($null -eq $segment.sourceEventSeqs)) {
+            return (& $fail 'segment-malformed')
+        }
+        if ([string]$segment.role -ne 'payload' -and [string]$segment.role -ne 'continuation') { return (& $fail 'segment-role-unknown') }
+        if ([string]$segment.role -eq 'payload') { $payloadCount++ }
+        $sseqs = @($segment.sourceEventSeqs)
+        if ($sseqs.Count -eq 0) { return (& $fail 'segment-seqs-missing') }
+        if (([int]$segment.start -ne [int]$sseqs[0]) -or ([int]$segment.end -ne [int]$sseqs[-1])) { return (& $fail 'segment-endpoint-mismatch') }
+        foreach ($seq in $sseqs) {
+            if ([int]$seq -lt 0) { return (& $fail 'segment-seq-malformed') }
+            [void]$flat.Add([int]$seq)
+        }
+    }
+    if ([int]$payloadCount -eq 0) { return (& $fail 'payload-segment-missing') }
+    if ([int]$payloadCount -gt 1) { return (& $fail 'payload-segment-duplicate') }
+    # Canonical segment order: strictly ascending by start seq (deterministic
+    # frozen form; multi-generation surfaces interleave seqs, so segments are
+    # surface-application runs listed in start order). JS twin:
+    # validateCompactionOperationV2.
+    $previousStart = -1
+    foreach ($segment in $segments) {
+        if ([int]$segment.start -le $previousStart) { return (& $fail 'segments-unordered') }
+        $previousStart = [int]$segment.start
+    }
+    # Non-overlap: segment source sets are pairwise disjoint (set partition).
+    $seen = [Collections.Generic.HashSet[int]]::new()
+    foreach ($segment in $segments) {
+        foreach ($seq in @($segment.sourceEventSeqs)) {
+            if (-not $seen.Add([int]$seq)) { return (& $fail 'segment-overlap') }
+        }
+    }
+    # Exact coverage: the union multiset, ascending-sorted, equals the frozen
+    # sourceEventSeqs.
+    $sortedUnion = @([int[]]$flat.ToArray() | Sort-Object)
+    if ([int]$sortedUnion.Count -ne $seqs.Count) { return (& $fail 'segment-union-mismatch') }
+    for ($i = 0; $i -lt $seqs.Count; $i++) { if ([int]$sortedUnion[$i] -ne [int]$seqs[$i]) { return (& $fail 'segment-union-mismatch') } }
+    foreach ($segment in $segments) {
+        foreach ($seq in @($segment.sourceEventSeqs)) {
+            if ([int]$seq -gt [int]$Operation.safePointBoundarySeq) { return (& $fail 'source-seq-beyond-safe-point-boundary') }
+        }
+    }
+    $lifecycle = [string]$Operation.lifecycle
+    if ($lifecycle -ne 'frozen' -and $lifecycle -ne 'applying' -and $lifecycle -ne 'awaiting-durability' -and $lifecycle -ne 'applied' -and $lifecycle -ne 'blocked') { return (& $fail 'lifecycle-invalid') }
+    return [pscustomobject][ordered]@{ valid = $true; reason = $null }
+}
+
+function New-AihContextCompactionOperationV2 {
+    # Freeze ONE immutable V2 application plan: construct → validate → atomic
+    # persist → read-back proof. Retry reuses the frozen plan verbatim (never
+    # re-plans/widens). Any failure throws (KEEP) before any mutation.
+    param(
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$TaskInstanceId,
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [Parameter(Mandatory = $true)][int]$CheckpointGeneration,
+        [Parameter(Mandatory = $true)][string]$CheckpointId,
+        [Parameter(Mandatory = $true)][string]$AttemptId,
+        [Parameter(Mandatory = $true)][int]$SafePointBoundarySeq,
+        [Parameter(Mandatory = $true)][int[]]$SourceEventSeqs,
+        [Parameter(Mandatory = $true)][object[]]$Segments,
+        [Parameter(Mandatory = $true)][string]$CheckpointContentDigest,
+        [Parameter(Mandatory = $true)][string]$Lifecycle,
+        [string]$CheckpointPath = $null,
+        [string]$SnapshotTokenId = $null,
+        [string]$RepositoryId = $null,
+        [string]$CheckoutId = $null
+    )
+    $task = Get-AihTask -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId
+    if ([string]$task.status -ne 'complete') { throw "Operation V2 refused: task $TaskId status is '$($task.status)', not complete. (KEEP.)" }
+    $operationId = New-AihContextCompactionOperationIdV2 -TaskId $TaskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId $SessionId -Generation ([int]$CheckpointGeneration) -CheckpointId $CheckpointId
+    $existing = $null
+    try { $existing = Read-AihContextCompactionOperationV2 -Workspace $Workspace -TaskId $TaskId } catch { throw }
+    if (($null -ne $existing) -and ([string]$existing.taskInstanceId -eq [string]$task.taskInstanceId) -and ([string]$existing.operationId -eq [string]$operationId)) {
+        return [pscustomobject]$existing
+    }
+    if (($null -ne $existing) -and ([string]$existing.taskInstanceId -eq [string]$task.taskInstanceId) -and ([string]$existing.operationId -ne [string]$operationId)) {
+        throw 'Operation V2 refused: a different frozen operation already owns this generation. (KEEP: never adopt or widen.)'
+    }
+    $segmentRecords = @()
+    foreach ($segment in @($Segments)) {
+        if (($null -eq $segment) -or ($null -eq $segment.start) -or ($null -eq $segment.end) -or ($null -eq $segment.sourceEventSeqs) -or ($null -eq $segment.role)) {
+            throw 'Operation V2 refused: malformed frozen segment (role is required). (KEEP.)'
+        }
+        if ([string]$segment.role -ne 'payload' -and [string]$segment.role -ne 'continuation') {
+            throw 'Operation V2 refused: unknown frozen segment role. (KEEP.)'
+        }
+        $segmentRecords += [ordered]@{ start = [int]$segment.start; end = [int]$segment.end; sourceEventSeqs = @([int[]]$segment.sourceEventSeqs); role = [string]$segment.role }
+    }
+    $operation = [ordered]@{
+        schemaVersion = [int]$AihContextOperationV2SchemaVersion
+        operationId = [string]$operationId
+        attemptId = [string]$AttemptId
+        taskId = [string]$TaskId
+        taskInstanceId = [string]$task.taskInstanceId
+        sessionId = [string]$SessionId
+        checkpointId = [string]$CheckpointId
+        checkpointGeneration = [int]$CheckpointGeneration
+        checkpointContentDigest = [string]$CheckpointContentDigest
+        checkpointPath = $(if ([string]::IsNullOrWhiteSpace($CheckpointPath)) { $null } else { [string]$CheckpointPath })
+        snapshotTokenId = $(if ([string]::IsNullOrWhiteSpace($SnapshotTokenId)) { $null } else { [string]$SnapshotTokenId })
+        safePointBoundarySeq = [int]$SafePointBoundarySeq
+        sourceEventSeqs = @([int[]]$SourceEventSeqs)
+        segments = @($segmentRecords)
+        lifecycle = [string]$Lifecycle
+        workspace = [string]$Workspace
+        repositoryId = $(if ([string]::IsNullOrWhiteSpace($RepositoryId)) { $null } else { [string]$RepositoryId })
+        checkoutId = $(if ([string]::IsNullOrWhiteSpace($CheckoutId)) { $null } else { [string]$CheckoutId })
+        createdAtUtc = [DateTime]::UtcNow.ToString('o')
+    }
+    $check = Test-AihContextCompactionOperationV2 -Operation ([pscustomobject]$operation) -TaskId $TaskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId $SessionId -Workspace $Workspace -CheckpointId $CheckpointId -CheckpointGeneration ([int]$CheckpointGeneration) -RepositoryId $RepositoryId -CheckoutId $CheckoutId
+    if (-not [bool]$check.valid) { throw ('Operation V2 refused: ' + [string]$check.reason + '. (KEEP.)') }
+    $opPath = Get-AihContextOperationV2Path -Workspace $Workspace -TaskId $TaskId
+    Write-AihAtomicJson $opPath $operation
+    $readBack = Read-AihContextCompactionOperationV2 -Workspace $Workspace -TaskId $TaskId
+    if (($null -eq $readBack) -or ([string]$readBack.operationId -ne [string]$operationId)) {
+        throw 'Operation V2 refused: read-back validation failed after atomic write. (KEEP.)'
+    }
+    $recheck = Test-AihContextCompactionOperationV2 -Operation $readBack -TaskId $TaskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId $SessionId -Workspace $Workspace -CheckpointId $CheckpointId -CheckpointGeneration ([int]$CheckpointGeneration) -RepositoryId $RepositoryId -CheckoutId $CheckoutId
+    if (-not [bool]$recheck.valid) { throw ('Operation V2 refused: read-back invalid (' + [string]$recheck.reason + '). (KEEP.)') }
+    return [pscustomobject]$readBack
+}
+
 function Read-AihContextCompactionOperation {
     param([Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$TaskId)
     $paths = Get-AihContextLifecyclePaths -Workspace $Workspace -TaskId $TaskId
