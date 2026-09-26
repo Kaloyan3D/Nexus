@@ -1980,3 +1980,159 @@ pre-crash operation with prediction equality, Case B staleness); new
 two-process suite proves exclusion/recovery/conflict through the real
 lock authority. No A11/A12/A13 behavior is introduced.
 
+## 21. A11 multi-generation runtime record
+
+A11 introduces the one authoritative generation runtime,
+`config/ContextGenerationRuntimeV2.cjs` (`GenerationRuntimeV2`). It owns
+generation identity ONLY: allocation, committed-head tracking,
+parent-checkpoint lineage, reservation, abandoned-generation supersession,
+and restart reconstruction. It owns no safe-point policy, no
+checkpointability, no pressure/retention, no shadow projection, and no
+active apply (A06/A05/A07/A08/A09/A10 are reused verbatim and never
+redefined). No A01–A10H semantic, formula, or contract changes: the A03
+parent-id path (string lineage, no generation-1 object check), the A02
+single-file operation authority (reused per generation directory), and the
+frozen A10 input/result contracts are all untouched.
+
+### 21.1 Durable representation (minimal derived index)
+
+Sealed checkpoints (one `cp-NNNNNN.json` per generation in the shared
+checkpoint dir) and per-generation A02 operations (one
+`context-compaction-operation-v2.json` per
+`operationRoot/generation-NNNNNN/`, frozen A02 persist/read/freeze
+reused verbatim) remain the source of truth. A11 adds only a derived
+index under `runtimeDir`:
+
+```text
+context-generation-runtime-v2.json   - head (highestAllocated,
+  latestCommitted + checkpoint id, committed lineage[], superseded[])
+generations/<N>/reservation.json      - allocation + source binding
+generations/<N>/superseded.json       - terminal supersession marker
+```
+
+Records carry ids/digests/bindings/statuses only (never checkpoint
+contents, operation state, shadow artifacts, prompt text, or tool
+output). All writes are atomic temp+rename with read-back validation
+(process-crash recoverable scope, no fsync). Reservation, supersession,
+and head digests are deterministic domain-separated hashes
+(`nexus/context-generation-{runtime,reservation,supersession}/v1`);
+no clock or randomness enters semantic identity. Closed-world exact-key
+validation applies to every record and every input; unknown keys fail
+closed before any digest use.
+
+### 21.2 Allocation semantics (frozen)
+
+Generation numbers are durable identity: monotonic, never reused, even
+for abandoned/stale/superseded/failed generations. `highestAllocated`
+and `latestCommitted` are distinct concepts (G1 committed + G2
+allocated-stale-superseded leaves latest=G1 while highest=2). The parent
+of a new generation is the latest committed checkpoint, not
+generation-1 (G1 COMMITTED, G2 SUPERSEDED, G3 COMMITTED validates
+`G3.parentCheckpointId == G1.checkpointId`); G1 carries null. Callers
+never choose generation numbers (reserve takes no generation field;
+generation-typed inputs reject non-integers). Reservation runs under the
+same cross-process compaction lock family as A10 (CLI authority; fake
+client only in unit tests) plus an in-process per-session chain:
+acquire -> reconstruct(+repair) -> refuse on UNRESOLVED -> idempotent
+reuse on identical bindings (revisionDigest/boundary/token) -> allocate
+highest+1 -> bind source state -> persist/read-back -> release. Changed
+source state never rebinds (reservation-conflict); a lost race refuses
+with a stable code and converges on retry (two-process proof).
+
+### 21.3 Outcomes, supersession, and crash repair (frozen)
+
+Per-generation outcomes are RESERVED / COMMITTED / SUPERSEDED /
+UNRESOLVED. COMMITTED requires an A10 result with status
+committed/recovered, `applicationDurable`, and verified post-apply
+projection; the head advances atomically afterwards (never before) and
+repeated advancement is idempotent across processes. A commit-before-
+head crash repairs deterministically: reconstruction with session
+evidence finds the fully-landed generation (regime-2 payload citation
+proof) and advances the head without reapplying; a head without durable
+application fails closed. SUPERSEDED requires proving zero landed
+segments (no payload/anchor/partial/ambiguous state, session evidence
+mandatory), an actually stale source binding, and never touches
+committed history; artifacts stay immutable. Partial/ambiguous
+application is UNRESOLVED: supersession refused, newer allocation
+blocked, A02/A10 reconciliation must complete first. A02 recovery
+consults `checkOperationSupersededV2` before applying old intent, and
+A10 callers consult `assertGenerationEligibleForApplyV2` (the frozen
+A10 contract itself is unchanged). Forks (multiple non-terminal
+generations, conflicting markers/heads, lineage mismatch) and corrupt
+metadata fail closed with stable `generation-*` codes. Telemetry
+exposes only bounded facts (heads, active state, counts, outcomes,
+blockers). Nothing here auto-triggers compaction (A13 territory); no
+A12/A13/Phase-B/Phase-C behavior is introduced.
+
+Proof deltas: new unit suite (147 assertions: allocation, idempotency,
+G1->G2->G3 chained commits with latest-only surface, zero-landing
+supersession with skipped lineage, partial refusal + unresolved
+blocking + forward recovery, commit-before-head repair, crash matrix,
+corruption/fork, determinism, security, telemetry, eligibility,
+generation-aware entry, superseded non-applicability matrix,
+snapshot lifecycle matrix);
+new live-host suite (63 assertions on the pinned host: real G1->G2->G3
+applies with per-generation restart reconstruction, superseded-G2->G3
+skipped lineage, generation-aware entry, snapshot protection
+reconstruction, gated superseded recovery refusal); new two-process
+suite (27 assertions: reservation race convergence, conflict refusal,
+commit-head convergence, cross-process supersession refusal,
+stale-handle race, no lock residue). Harness registers all three after
+the A10 suites.
+
+### 21.4 A11H generation-aware active entry (frozen)
+
+Supersession safety is architectural, not conventional. The ONLY
+supported generation-aware active path is
+`applyCurrentGenerationV2({..., request})`, where `request` is the
+opaque A10 input (validated by A10 itself; the entry never duplicates
+A10 logic or keys). Layering is explicit and mechanically tested:
+
+```text
+A02 = transaction primitive (unguarded by design)
+A10 = single-generation transactional primitive (no generation ownership)
+A11 = authorization + lifecycle authority (owns WHETHER a generation may
+      use A10; the runtime module exports no raw apply)
+```
+
+Under ONE held cross-process lock acquisition (the generation's own
+operation identity; same lock file/owner, reentrant attribution into
+A10 so no second CLI acquisition occurs), the entry performs the FINAL
+observation: reconstruct (+ repair), active-generation validation,
+supersession refusal, unresolved gating (a different unresolved
+generation blocks; the same generation proceeds as A10 forward
+recovery), reservation/source binding validation (revision, snapshot,
+boundary, parent lineage), generation-owned operation-dir derivation
+(caller-supplied mismatches fail closed), then exactly one A10
+invocation. The in-process chain slot is released before invoking A10
+(A10 owns its inner chain; nesting would deadlock) while the
+cross-process lock stays held, so no supersession, commit, or rival
+apply can interleave the check->apply window. Stale pre-supersession
+handles refuse via the under-lock re-read even when an earlier
+observation saw the generation as active. Commit remains explicit: the
+entry never auto-advances the head. `reconcileGenerationV2` is the
+only supported generation-aware reconciliation path (read-only; refuses
+superseded generations as permanently non-applicable across restarts).
+
+### 21.5 A11H runtime-snapshot lifecycle policy (frozen)
+
+`snapshotProtectionOfV2` derives PINNED vs SHADOWABLE for every live
+host-owned runtime snapshot from durable runtime state plus the live
+session only (no in-memory pin state; restart reconstructs
+byte-identically, digest
+`nexus/context-snapshot-protection/v1`):
+
+- latest live runtime snapshot -> PINNED (current-state requirement);
+- any live snapshot while an UNRESOLVED generation exists, or cited in
+  an unresolved operation's frozen source set -> PINNED (a newer
+  reservation never unpins; G3 over unresolved G2 stays impossible);
+- non-current snapshots with no unresolved generation and no recovery
+  reference (superseded zero-landing generations, older committed
+  lineage behind a newer self-contained commit) -> SHADOWABLE.
+
+This is eligibility/protection policy only: no Phase-B tiers, no
+garbage collection, no deletion. A05/A02 pinning mechanics are reused,
+never redefined.
+
+
+
