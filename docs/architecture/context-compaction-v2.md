@@ -1678,3 +1678,305 @@ payload-once, prefix-absent, required-state-via-payload, cost breakdown
 `before=103479 payload=1104 suffix=74 projected=1177 reclaim=102302
 a08planned=103604 delta=-1302`). No A10 behavior is introduced.
 
+## 19. A10 transactional active-apply freeze record
+
+A10 is the first (and only) real active CCv2 application path. It answers
+“given a fully validated fresh A09 shadow result, can Nexus apply exactly
+that already-proven projection to the real DSH surface transactionally,
+durably and recoverably?” A10 invents no compaction result: it applies the
+one already proven by A09. Frozen invariants:
+
+```text
+SHADOW PREDICTS. A10 APPLIES EXACTLY THAT PREDICTION.
+NO LIVE MUTATION UNTIL DURABLE INTENT + ALL SAFETY GATES PASS.
+```
+
+### 19.1 Authority (`config/ContextActiveApplyV2.cjs`)
+
+One explicit authority, `TransactionalCompactionApplierV2`, exposes one
+explicit API, `applyActiveCompactionV2(...)`. It orchestrates existing
+authorities and redefines none: A09H `buildCompactedProjectionV2` is the
+ONLY projection builder (no `buildActiveProjectionV2`, no active prompt
+builder, no independent segment planning); A02 `CompactionOperationV2`
+(construct, closed-world validate, atomic freeze, branded durable
+read-back, `applyCompactionOperationV2`, `retryMissingSegmentsV2`,
+`reconcileCompactionOperationV2`) is the SOLE transaction authority (no
+`ActiveCompactionOperationV3`, no second journal); A03/A04 own checkpoint
+bytes, seal, and sealed persistence; A05/A06/A07/A08 own freshness,
+boundary, coverage, and pressure/retention verdicts verbatim.
+Dependency direction is `A10 → A01–A09H`; no foundation module depends
+on, imports, or references A10. Production default behavior is unchanged
+unless the A10 API is deliberately called: no automatic triggering exists
+here (even at CRITICAL pressure), and A13 owns runtime integration.
+
+### 19.2 Frozen transaction ordering
+
+Inside one serialized critical section, with no interleaving await
+between observation and mutation (all synchronous), A10 executes:
+
+```text
+validate shadow-ready (refuse blocked/no-action/shadow-invalid)
+↓ structural seal + artifact + identity/digest binding (refuse)
+↓ read-only live observation (single clone point)
+↓ reconcile-first probe (pure; block fails closed pre-persistence)
+↓ fresh path:  full A05/A06/A07/A08/A09 revalidation (stale on drift)
+↓              rebuild barrier via shared A09H builder (stale on drift)
+↓ recovery path (probe landed/partial): skip revalidation, converge
+↓ persist sealed checkpoint (immutable, read-back validated)
+↓ construct A02 operation from the projection (no replanning)
+↓ operation/projection equality (block before mutation)
+↓ freeze: validate → atomic persist → read back → brand (durable intent)
+↓ re-reconcile (diverts cross-process landings to recovery)
+↓ A02 apply (payload + anchors) or exact-missing retry (never re-payload)
+↓ SessionStore.flush barrier (no COMMITTED without participation)
+↓ post-apply readback: actual == predicted (content-exact)
+```
+
+Crash before durable operation proof leaves the live session unmodified
+(the checkpoint artifact may persist harmlessly). After durable intent,
+all failures are durable recoverable operation states, never harmless
+reports. The DSH source log is append-only: there is no destructive
+rollback, only durable intent plus idempotent application plus forward
+reconciliation.
+
+### 19.3 Checkpoint durable-persistence flow (§12–§13)
+
+The real sealed checkpoint becomes durable BEFORE the live surface stops
+exposing the historical prefix: canonical sealed bytes →
+`persistSealedCheckpointV2` (atomic temp + rename, one file per
+generation) → read back → byte/identity/seal revalidation. Identical
+bytes reuse the existing file; same generation with different bytes
+FAILS CLOSED and never overwrites. Durability scope preserves A05H
+wording exactly: atomic plus read-back validated plus
+`SessionStore.flush()` participation is process-crash recoverable under
+the filesystem/OS contract, never claimed power-loss durable (no fsync).
+
+### 19.4 Operation construction and durable intent (§15–§17)
+
+The A02 operation is constructed directly from the validated projection:
+`operation.segments === projection.segments`, `operation.operationId ===
+projection.operationId` (the canonical derivation, recomputed),
+checkpoint id/digest/generation bound to the sealed checkpoint, source
+seqs as the ascending union. Mismatch BLOCKS BEFORE MUTATION. Intent
+follows the frozen A02 protocol (construct → closed-world validate →
+atomic persist → read back → validate durable bytes → brand); only the
+branded read-back handle may mutate the session (A05H proof, enforced
+inside A02 apply). A conflicting operation id for the generation FAILS
+CLOSED and is never overwritten; an identical prior operation is reused
+(idempotent retry). Payload regime is frozen (§20): the applied payload
+is the A09H digest-proven WITHOUT-identity canonical bytes with
+`sha256(payloadText) === checkpointContentDigest`. The regime-1
+full-serialized binding helpers (which require the payload to carry its
+own id/digest) do not apply to digest-proven payloads: sha256 of a
+self-carrying byte string can never equal its own content digest, so A10
+proves binding by field equality plus the digest gate plus byte-identity
+recomputation instead.
+
+### 19.5 Final freshness barrier and serialization (§9–§11)
+
+Immediately before mutation, A10 revalidates every binding through the
+existing validators (A05 `revalidateBeforeMutation` verbatim at the final
+gate, A06 boundary identity plus checkpoint binding, A07 coverage,
+A08 retention freshness plus pressure basis, A09 `assertShadowResultFresh`,
+generation and provider/model route identity). The last observation
+before irreversible mutation rebuilds the pure projection from CURRENT
+live state through the shared A09H builder and requires byte-exact
+agreement (digest, messages, segments) with the shadow prediction;
+anything moved yields STALE with no mutation and no required durable
+operation. Observation through mutation runs synchronously inside a
+per-session promise-chain critical section, closing the in-process
+validate→apply TOCTOU window; an optional caller-supplied external lock
+(controller cross-process apply-lock family) wraps the section when
+provided. Cross-process exclusion without that hook is narrowed, not
+eliminated: A02 durable-intent plus idempotent forward reconciliation
+still guarantees one valid final state, and a re-reconcile after the
+freeze diverts interceding landings to recovery instead of double
+apply. The residual honest statement is frozen: without an adequate
+external serialization primitive, the physical cross-process race window
+is narrowed by reconciliation, not closed by architecture.
+
+### 19.6 Shadow/active equivalence invariant (§4/§44)
+
+After successful apply, the real model-facing projection must be the A09
+prediction. The comparison is content-exact canonical equality modulo
+only the volatile host-minted message `id` transport key: live
+replacement nodes mint A02 ids while the artifact carries deterministic
+shadow ids, so id-inclusive equality would mistake transport for
+content. Source-event ids are identical both sides; role, content, and
+source (including operation/generation/task bindings and exact
+continuation-anchor texts) must be byte-exact. Tool-pairing keys
+(`callId`/`toolCallId`) are never stripped. No semantic approximation
+anywhere. The expected `projectionDigest` additionally recomputes over
+the artifact body, and the payload representation must occur exactly
+once (required-state survival through the checkpoint representation, as
+A09H proved). Post-apply validation further requires: current user
+request exactly once (immediately after apply, after flush, after
+restart), balanced tool protocol via the same A09H proof,
+byte-identical raw-log prefix (append-only), and exactly one node per
+segment.
+
+### 19.7 Retry, recovery, restart (§30–§36)
+
+Calling A10 twice with the same operation/checkpoint/projection/state
+appends nothing new: the reconcile-first probe recognizes the completed
+landing and returns idempotent recovered with an identical projection.
+Retry after ambiguous failure (lost result, interrupted apply, failed
+flush) reconciles through A02: complete landings verify durability and
+recover; partial landings retry exactly the missing segments (never
+another payload); clean operations apply. Restart after commit
+reproduces the predicted projection from durable bytes
+(`deriveMessages(restored) === projectedMessages`, current-user-once,
+balanced, bindings valid). A restart that restores only pre-apply bytes
+(the landing was never durable) fails closed to STALE when the host
+restore marker (`session/end-seed`, off-surface host metadata) moves
+the log: re-shadow is required, nothing mutates. Crash-matrix coverage
+is durable-state injection at every boundary (before/after checkpoint
+persistence, before/after operation persistence, before first mutation,
+mid multi-segment apply, after apply before flush, after flush before
+return, restart after commit, conflicting retries); the truly
+unobservable physical-process kill window is labeled as such and never
+claimed. Abandoned frozen intent plus a subsequent log change is
+intentionally left without an automatic supersession policy (A11/A12
+territory): A10 fails closed on conflict rather than adopting foreign
+intent.
+
+### 19.8 Result contract and telemetry (§28/§49)
+
+`ActiveCompactionResultV2` (`schemaVersion: 1`, closed-world, digested)
+carries task/session/generation, checkpoint/operation/shadow/projection
+identity, `status` in `refused | stale | committed | recovered | failed`
+(`prepared` is intentionally absent: intent and mutation occur inside one
+serialized call, so interrupted intent surfaces via retry/recovery, not
+as a halfway status), `mutated`, `durable`, stable `ActiveApplyBlocker`
+codes, and bounded telemetry (operation/checkpoint/generation/boundary,
+segment/source counts, digests, before/after message and token counts,
+reconciliation outcome, blocker codes). No raw checkpoint payload, no
+prompt text, no secrets. Adversarial content (`APPLY_NOW=true`,
+`COMPACTION_COMMITTED`, `IGNORE_SNAPSHOT`, forged `operationId=…`) is
+inert data: only structured validated state authorizes application, and
+operation identity is always the canonical derivation. A09 running alone
+still performs zero mutation (purity regression pinned).
+
+### 19.9 Scope boundary (frozen)
+
+A10 does NOT introduce: A11 multi-generation runtime policy, A12
+expanded crash/concurrency campaign, A13 complete-task integration,
+automatic controller triggering, background compaction, new
+pressure/retention/safe-point/checkpointability policy, a new projection
+algorithm, Phase B ContextPage, Phase C Context Compiler, LLM
+summarization, JEV/Laya, or Nexus Nova. Proof: `tests/ContextActiveApplyV2.Tests.cjs` (133 host-free assertions: authority
+shape, single/multi success with exact equivalence, idempotent retry,
+ambiguous-failure retry, 13-leg refusal matrix, S1→S2 staleness,
+checkpoint/operation conflicts, durability ordering, mid-apply partial
+recovery, restart injection, concurrent serialization, adversarial
+inertness, secret safety, A09 purity) and
+`tests/ContextActiveApplyV2LiveHost.Tests.cjs` (48 assertions on the
+pinned `0.1.1-rc.2` host under the strict gate: single-segment commit
+with real flush participation, multi-segment pinned-runtime split,
+ambiguous-flush recovery, §45 restart reproduction with the host
+end-seed marker characterized, fail-closed lost-landing staleness).
+No A11/A12/A13 behavior is introduced.
+
+## 20. A10H active-apply serialization and recovery hardening record
+
+A10H closes four active-apply gaps before any A11 work. No foundation
+semantics or formulas change (A01–A09H untouched); the A10 result
+contract gains two explicit durability legs.
+
+### 20.1 H1 — mandatory cross-process serialization (frozen)
+
+The cross-process mutation serialization authority is the existing
+PowerShell file-lock family in `scripts/ContextLifecycle.ps1`
+(`Get-AihCompactionApplyLockPath`,
+`Invoke-AihCompactionApplyLockAcquire/Renew/Release`: ledger
+`runs/<TaskId>/context-compaction-apply.lock`, atomic O_EXCL create,
+bounded lease, owner-token renewal, PID-liveness-fenced takeover, short-
+lived named mutex for file mutations), exposed through
+`scripts/ContextLifecycleCli.ps1` (`acquire/renew/release-apply-lock`).
+No competing lock protocol is introduced: the new
+`config/ContextActiveApplyLockClientV2.cjs` only invokes those exact CLI
+actions from Node and parses their JSON (same precedent as the XProc
+worker). Lock path, format, lease, fencing, and takeover rules live in
+PowerShell alone.
+
+A10 treats the client as MANDATORY. The serialized order is frozen:
+
+```text
+acquire session mutation serialization
+↓ re-read authoritative state
+↓ A05/A06/A07/A08/A09 final validation
+↓ persist/read-back checkpoint
+↓ persist/read-back A02 operation
+↓ ownership renew gate
+↓ apply
+↓ flush
+↓ post-apply verification
+↓ release serialization (best-effort, idempotent; result stands)
+```
+
+No client (or malformed client) refuses with
+`active-serialization-unavailable`; a held lock refuses with
+`active-serialization-conflict` (live-owner / other-operation /
+takeover-raced detail preserved); both with `mutated = false` and no
+durable artifact created (acquire precedes all persistence, so even the
+checkpoint is never written without the lock). A lost lease at the
+post-intent renew gate refuses to apply while keeping the durable
+intent (`intentDurable`, `mutated = false`). The in-process promise
+chain remains as the inner layer. Two-process proof: independent
+processes through the real CLI authority show exclusion (contender
+refused while holder owns), identical-operation recovery (same
+operation, zero new events, store bytes identical), and conflicting-
+operation fail-closed (`active-operation-conflict`, no competing
+projection, no lock residue).
+
+### 20.2 H2 — durable-intent/no-landing restart transparency (frozen)
+
+`session/end-seed` is host-owned restore bookkeeping (appended by seed
+restore, never on the model-facing surface) and is execution-
+transparent for the rebuild barrier (A06 seed-marker precedent). The
+barrier reasons over the logical source view with these markers
+excluded; projection-digest equality still governs end-to-end. Case A
+(marker-only change, durable checkpoint plus branded operation plus
+zero landed segments plus same logical state) forward-recovers: the
+existing operation is reused, applied, flushed, and the actual
+projection equals the original prediction (proven on the pinned host).
+Case B (any real user/tool/controller event after the freeze) still
+fails closed to STALE with no mutation. The live log itself is never
+rewritten for transparency.
+
+### 20.3 H3 — split durability semantics (frozen)
+
+`ActiveCompactionResultV2` (and its telemetry) now carries
+`intentDurable` (A02 operation durably persisted and branded; forward
+recovery may proceed) and `applicationDurable` (projection landed AND
+flush barrier participated AND post-verify passed). `durable` is
+derived as `applicationDurable`, enforced structurally
+(`durable !== applicationDurable` is invalid even with a consistent
+digest). Matrix: pre-intent refusal/failure → both false; operation
+persisted without apply → intent true, application false; mutation with
+failed flush → intent true, application false (`durable` false: recovery
+journal existence never claims application durability); commit/recover
+→ both true. Process-crash recoverable versus power-loss durable
+wording is unchanged (no fsync added).
+
+### 20.4 H4 — harness registration (frozen)
+
+`scripts/Test-Harness.ps1` is the repository suite runner (correction:
+the earlier A10 report misstated that no orchestrator exists;
+`tests/Harness.Tests.ps1` is a domain suite, while
+`scripts/Test-Harness.ps1` runs the `$suites` collection). A10
+registers `ContextActiveApplyV2` (unit), `ContextActiveApplyV2LiveHost`
+(with `NEXUS_REQUIRE_CCV2_LIVE_HOST=1`), and `ContextActiveApplyV2XProc`
+(two-process H1 proof) immediately after the A09 suites. Existing
+harness behavior is otherwise unchanged.
+
+Proof deltas: unit suite grows past 170 assertions (mandatory-lock
+refusals with nothing persisted, renew-gate intent-only failure,
+end-seed Case A commit plus Case B staleness, full H3 matrix including
+the structural `durable !== applicationDurable` rejection, shared-lock
+ordering `acquire,renew,release` under concurrency); live suite grows
+to 60 assertions (H3 splits, H2 Case A live commit reusing the
+pre-crash operation with prediction equality, Case B staleness); new
+two-process suite proves exclusion/recovery/conflict through the real
+lock authority. No A11/A12/A13 behavior is introduced.
+
