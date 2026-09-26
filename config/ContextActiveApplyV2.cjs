@@ -889,7 +889,15 @@ async function executeActiveApplyCritical(n) {
       snapshotToken: JSON.parse(JSON.stringify(n.snapshotToken)),
       taskState: JSON.parse(JSON.stringify(n.taskState)),
       contextUnits: JSON.parse(JSON.stringify(n.contextUnits)),
-      sourceEvents: withoutRestoreMarkers(liveEvents),
+      // A12-4: pass the live events UNFILTERED. Host-only end-seed markers
+      // are unsurfaced and semantically neutral (zero tool delta, never a
+      // runtime snapshot, excluded from the shadowed set either way), so
+      // filtering them is a no-op for planning but FATAL for positional
+      // eventBySeq lookup: removing mid-log markers shifts array positions
+      // and every later lookup misses (false "no segments" stale). The
+      // build-time observation uses the same unfiltered log, so digest
+      // equality still governs end-to-end and real drift still fails closed.
+      sourceEvents: liveEvents,
       surfaceNodes: surfaceWithoutRestoreMarkers(liveSurface, liveEvents),
       protocolSpans: n.protocolSpans === undefined || n.protocolSpans === null
         ? [] : JSON.parse(JSON.stringify(n.protocolSpans)),

@@ -1051,7 +1051,12 @@ async function main() {
       // committed/recovered A10 result (impossible on drifted state) could
       // advance it. Safe stuck, never silent progress.
       check(stM.latestCommittedGeneration === null, 'failed recovery moves no head');
-      check(stM.generations.filter((g) => g.generation === 1)[0].outcome === 'COMMITTED', 'completed landing classifies as commit-pending (projection unverified)');
+      // A12-1 (frozen semantic change): fully-landed-but-unverified is
+      // UNRESOLVED/commit-pending-verification, never heuristic COMMITTED
+      // (segment presence alone never authorizes the head; §12/§14).
+      check(stM.generations.filter((g) => g.generation === 1)[0].outcome === 'UNRESOLVED', 'completed landing classifies as commit-pending (projection unverified)');
+      check(stM.generations.filter((g) => g.generation === 1)[0].activeState === 'commit-pending-verification', 'commit-pending state names verification');
+      check(stM.reconstructionOutcome === 'head-repair-pending', 'unverified landing defers head repair');
     }
   }
 

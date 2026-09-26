@@ -108,7 +108,9 @@ async function main() {
         request,
       });
       const after = JSON.parse(fs.readFileSync(spec.sessionFile, 'utf8'));
-      console.log(JSON.stringify({ ok: true, mode: 'apply-current', status: out.activeResult.status, mutated: out.activeResult.mutated, eventsLen: after.events.length }));
+      // A12: the full entry result is printed for cross-process commit races
+      // (additive field; older parents ignore it). Frozen active-result shape.
+      console.log(JSON.stringify({ ok: true, mode: 'apply-current', status: out.activeResult.status, mutated: out.activeResult.mutated, eventsLen: after.events.length, activeResult: out.activeResult }));
       return;
     }
     if (spec.mode === 'supersede') {
