@@ -1305,3 +1305,376 @@ assertions) and `tests/ContextCheckpointabilityV2LiveHost.Tests.cjs`
 assertions). Harness entries: `ContextCheckpointabilityV2`,
 `ContextCheckpointabilityV2LiveHost`. No A08 pressure/retention logic and
 no automatic checkpoint/compaction trigger are introduced.
+
+---
+
+## 15. A08 pressure + retention freeze record
+
+A08 is the deterministic CCv2 **policy/planning plane**. It answers two
+questions and NOTHING else: (1) how much usable context headroom remains,
+and (2) what existing context may leave the active prompt without violating
+the frozen A01-A07 safety contracts. A08 performs NO compaction: it never
+deletes context, never mutates the session projection, never triggers a
+checkpoint, and never performs automatic compaction. Pressure may REQUEST
+compaction; retention may PROPOSE what is eligible to leave; neither
+mutates the live session. A09 observes plans in shadow mode; A10 is the
+first stage allowed to apply one.
+
+Core rule (frozen): pressure NEVER overrides safety. Permission to compact
+requires A06 SAFE + A05 FRESH + A07 CHECKPOINTABLE + an A08 actionable plan.
+CRITICAL pressure with any safety leg refusing yields `blocked`, never
+`compact anyway`.
+
+Authorities (frozen, one decision each; no policy duplicated elsewhere):
+
+- `ContextPressureV2` (`config/ContextPressureV2.cjs`): provider-capacity
+  accounting, explicit reserves, headroom computation, frozen threshold
+  policy, deterministic level + recommendation.
+- `RetentionPlannerV2` (`config/ContextRetentionV2.cjs`): closed-world
+  retention classification, contiguous-prefix candidate boundary, retained
+  suffix planning, projected savings, plan identity, stale-plan validation.
+  A05/A06/A07 verdicts are consumed verbatim through their own validators
+  and never redefined here.
+
+Provider capacity (frozen): the ONLY grounded source is
+`config/model-registry.json` (`contextWindow` per model id) via
+`resolveProviderCapacity()`. Unknown model, missing registry, or missing
+`contextWindow` yields `known: false`, level `UNKNOWN`, recommendation
+`blocked` with `pressure-capacity-unknown`. Invented windows are
+FORBIDDEN. UNKNOWN is first-class: eligibility analysis may still be
+produced, but no HIGH / CRITICAL level and no token headroom may be
+claimed without grounded capacity.
+
+Context cost (frozen precedence): real provider tokenizer/count, then the
+existing Nexus deterministic estimator (none exists; reserved), then the
+explicit conservative estimate (`ceil(UTF-8 bytes / 4)`, always recorded
+with `method` and `exact: false`). Estimated counts are never represented
+as exact provider token counts.
+
+Frozen pressure formulas:
+
+```text
+usableCapacity = providerCapacity - reservedOutput - reservedProtocol - reservedSafety
+headroom       = usableCapacity - currentActiveContextCost
+usedFraction   = currentActiveContextCost / usableCapacity
+```
+
+Frozen default reserves (`nexus/context-reserve-policy/v1`): output 8192,
+protocol 4096, safety 4096. Callers SHOULD supply grounded per-route
+reserves; defaults apply only for null inputs and are always reported
+verbatim. Reserves that consume the whole window fail closed
+(`pressure-accounting-invalid`).
+
+Frozen threshold policy (`nexus/context-pressure-policy/v1`), evaluated on
+`usedFraction` (headroom-based, never age/message-count based): `>= 0.95`
+CRITICAL, `>= 0.85` HIGH, `>= 0.70` ELEVATED, else NORMAL. Recommendation
+mapping: NORMAL `none`, ELEVATED `prepare`, HIGH `compact-when-safe`,
+CRITICAL `compact-required`, UNKNOWN `blocked`. Hysteresis exits (0.90 /
+0.80 / 0.65) and `minimumReclaimTokens` (2048) are frozen alongside for A09
+thrash protection; the level itself is a pure enter-threshold function.
+Projected reclaim below 2048 yields `retention-insufficient-reclaim`, even
+under CRITICAL (honest block, never compact).
+
+Retention classes (frozen closed world): `ACTIVE_REQUIRED`,
+`CHECKPOINT_COVERED`, `REHYDRATABLE`, `DERIVED_DISCARDABLE`,
+`NOT_ELIGIBLE`. Eligibility derives ONLY from authority metadata
+(continuation requirements, A07 coverage, durability, reconstructibility,
+protocol position). Age alone never makes an event eligible; size alone
+never makes content eligible; prompt/repository/tool text has zero policy
+effect (content-bearing input fields FAIL CLOSED). Required uncovered
+state is `NOT_ELIGIBLE`; A07-covered historical state is
+`CHECKPOINT_COVERED` (releasable only after A07 post-build PASS plus
+persisted seal); validated durable references yield `REHYDRATABLE`
+(stale or dangling refs are `NOT_ELIGIBLE`); explicitly non-authoritative
+derived state is `DERIVED_DISCARDABLE`; the current user request is
+`ACTIVE_REQUIRED` and survives exactly once. A derived flag can never
+rescue uncovered required state.
+
+Boundary semantics (frozen): compaction is a contiguous eligible old prefix
+plus a retained suffix. The candidate boundary is a real authoritative DSH
+event seq at or before `safePointBoundarySeq` (never a message index,
+timestamp, or array guess). One non-eligible event inside the prefix moves
+the cut earlier or BLOCKS; the planner never skips around it. Declared
+protocol spans (tool request/result, stream, controller transition) are
+never split; the cut moves earlier or blocks with
+`retention-boundary-mismatch`. Units must tile `[0..maxSeq]` contiguously.
+
+Frozen plan identity (no timestamps in the digested body):
+
+```text
+retentionPlanDigest = SHA256(UTF8('nexus/context-retention-plan/v1' LF canonicalJson(planBodyWithoutDigestOrId)))
+retentionPlanId     = 'crp_' + SHA256('nexus/context-retention-plan-id/v1' LF taskId LF generation LF retentionPlanDigest)[0:32]
+```
+
+Every actionable plan binds `taskId`, `taskInstanceId`, `sessionId`,
+`generation`, `snapshotTokenId`, `revisionDigest`, `safePointBoundarySeq`,
+and the provider route/capacity. `assertRetentionPlanFresh()` BLOCKS with
+`retention-plan-stale` on ANY drift (snapshot, revision, boundary,
+generation, model route, capacity). Persisted plans reload validated but
+never auto-authorize: freshness plus live A05 revalidation gate every use.
+No cross-generation reuse (G1 plans are stale in G2).
+
+Projected savings (`projectedReclaimTokens`, `projectedRetainedTokens`,
+`projectedHeadroomAfterTokens`) are deterministic sums of declared unit
+costs with honest precision (`exact` only when every unit cost is exact,
+else `estimated`). Telemetry for A09 shadow comparison carries
+counts/digests/ids/levels/blocker codes only; secrets and raw contents
+never enter plans or telemetry.
+
+Scope limit (no over-reading): A08 introduces NO A09 shadow execution, NO
+A10 active apply, NO Phase B ContextPage/memory tiers, no
+`CompactionOperationV2`, no checkpoint-schema/seal change, no LLM
+judgment, no semantic retrieval, no summarization. A01 projection
+compatibility is proven read-only (the retained suffix references real DSH
+seqs; nothing is written).
+
+Proof: `tests/ContextPressureV2.Tests.cjs` (pressure matrix, 50
+assertions), `tests/ContextRetentionV2.Tests.cjs` (retention/safety/race/
+multi-generation/determinism/security/restart/large-context matrices, 108
+assertions), and
+`tests/ContextPressureRetentionV2LiveHost.Tests.cjs` (real pinned-host
+proof under `NEXUS_REQUIRE_CCV2_LIVE_HOST=1`, 49 assertions: multi-turn
+session with closed tool lifecycle, read-only planning, projection dry run,
+continued-work staleness, open-edge blocking). Harness entries:
+`ContextPressureV2`, `ContextRetentionV2`,
+`ContextPressureRetentionV2LiveHost`. No A09/A10 logic is introduced.
+
+---
+
+## 16. A08H pressure-authority + safe-cut hardening record
+
+A08H closes three authority/binding gaps before freezing A08. Frozen
+A01-A07 semantics are unchanged; A08 retention classes and the digest/id
+formula SHAPES are unchanged (the plan v1 body gains two bound fields,
+explicitly amended below; the branch is unreleased so no migration
+exists).
+
+H1 capacity authority (frozen): the discovered existing production
+authority is `Get-AihReviewerModelCapacity` in `scripts/CodexReview.ps1`
+(TASK-0012): provider `/models` metadata when it declares capacity, then
+the deterministic model-registry capability entry, then UNKNOWN (never
+fabricated). `resolveProviderCapacity(modelId, providerModelsMetadata)`
+in `config/ContextPressureV2.cjs` implements the SAME order on the
+Node side (no second competing resolver): declared provider metadata
+wins over any caller-asserted value; a claimed `model-registry` source
+is verified against the registry and refused on mismatch; otherwise the
+registry resolves automatically; nothing declaring anything yields
+UNKNOWN. Field scan order mirrors the PS lists verbatim
+(context_window first, truncation semantics included). Malformed
+capability containers fail closed; well-formed documents that declare
+nothing fall back per the existing policy. A08 never fetches provider
+metadata: the caller supplies the grounded document (or null). Every
+pressure decision records `capacitySource` (`provider-models-metadata` |
+`model-registry` | `caller-asserted` | `unknown`); null capacity implies
+`unknown` and vice versa (validated). The validator additionally
+recomputes `usableCapacityTokens` and `remainingHeadroomTokens` from
+capacity minus reserves (forgery-closed).
+
+H2 historical-cut authorization (frozen): A06 is the sole safe-boundary
+authority for historical candidate cuts. New A06-owned pure/read-only
+`classifyHistoricalBoundaryV2()` (plus
+`validateHistoricalBoundaryDecision()`) reuses the frozen
+`detectSafePointV2` state machine verbatim over the authoritative prefix
+`events[0..candidateSeq]` (durability must cover the candidate; current
+controller/runtime observations reused fail-closed). Retention computes
+the latest retention-eligible prefix end, then walks unit-aligned
+eligible ends backward (skipping span-splitting cuts) asking A06 about
+each exact seq; the first A06-safe end is the candidate. None yields
+`candidateCompactionBoundarySeq = null`, `actionable = false`, and the
+explicit blocker `retention-no-safe-boundary`. `eligiblePrefixEndSeq`
+stays informational (may exceed the authorized cut); projected reclaim
+counts only the A06-authorized cut. The plan validator enforces
+`candidate <= eligiblePrefix`, full eligibility of the cut prefix, and
+`retainedSuffixStartSeq == candidate + 1` (0 when null).
+
+H3 pressure-basis binding (frozen): one deterministic digest covers every
+pressure-policy assumption a persisted plan stays actionable under:
+
+```text
+pressureBasisDigest = SHA256(UTF8('nexus/context-pressure-basis/v1' LF canonicalJson({thresholdPolicyId, reservePolicyId, reserves, providerModelId, providerCapacityTokens, capacitySource, costMethod, costExact})))
+```
+
+Every retention plan embeds `pressureBasisDigest` (null only when the
+embedded pressure decision is itself invalid, in which case the plan is
+blocked and `actionable` must be false). Plan validation recomputes the
+basis from the embedded pressure decision (`retention-basis-mismatch` on
+drift/tamper). `assertRetentionPlanFresh()` BLOCKS with
+`retention-plan-stale` when the current basis differs (including when it
+is missing), so persisted plans never survive route, capacity, source,
+policy-id, reserve, or cost-honesty changes without replanning. No
+timestamps enter the basis. Telemetry on both authorities carries the
+new source/basis identities (counts/ids only).
+
+Proof deltas: `tests/ContextPressureV2.Tests.cjs` (77 assertions: H1
+precedence/fallback/UNKNOWN/malformed/claim/source-recording plus H3
+basis sensitivity); `tests/ContextRetentionV2.Tests.cjs` (133 assertions:
+H2 unsafe-intermediate-cut refusal with backward selection to the
+A06-safe seq, no-safe-cut blocking with zero reclaim, H3 basis
+recompute/tamper/drift/missing proofs);
+`tests/ContextPressureRetentionV2LiveHost.Tests.cjs` (54 assertions:
+A06 historical authorization of live seq 5 as `tool-result-committed`
+with plan-candidate equality, live seq-3 `tool-call-open` refusal,
+basis-bound freshness). No A09 logic is introduced.
+
+## 17. A09 core shadow-mode freeze record
+
+A09 introduces exactly one orchestration authority,
+`ShadowCompactionEvaluatorV2` in `config/ContextShadowV2.cjs`, and
+redefines no lower-level authority. The frozen invariant is:
+
+```text
+SHADOW MAY PREDICT. SHADOW MAY COMPARE. SHADOW MAY REPORT.
+SHADOW MUST NOT APPLY.
+```
+
+Dependency direction (frozen): `A09 -> A01-A08H` only. No frozen
+foundation module references Shadow Mode (proven by the A09 unit suite
+reading every foundation source). The evaluator never executes
+`CompactionOperationV2`, never persists checkpoints/snapshots/tokens,
+never mutates the session log, projection, controller state, or
+snapshots, performs no model call, and reads no clock: `createdAtUtc`
+and `sealedAtUtc` are explicit caller inputs, so repeated evaluation of
+identical state is byte-identical (same `shadowDigest`, same `shadowId`).
+
+Pipeline (frozen order; every lower-layer verdict consumed verbatim
+through its own validator, never redefined): A06 safe-point decision
+(`validateSafePointDecision`) -> A05 structural validity plus freshness
+(`validateSnapshotToken`, `revalidate` against caller-supplied current
+state) -> A07 (`validateCheckpointabilityDecision`) -> pressure
+(`validatePressureDecision`; UNKNOWN claims no headroom and blocks) ->
+retention (`validateRetentionPlan`; consumed verbatim including the
+`retention-insufficient-reclaim` no-action leg and the NONE-recommendation
+no-action leg) -> real A03 checkpoint build (mapped contract shapes;
+`parentCheckpointId` carries A03 lineage for generation > 1 and is null
+for generation 1; shadow lineage is never persisted as production
+lineage) -> real A04 seal (`buildSealedCheckpointV2`, revalidated by
+`validateSealedCheckpoint`) -> A07 post-build coverage
+(`assertCheckpointCoverageV2` over the sealed checkpoint) -> pure
+hypothetical projection (`buildProjectedContextV2`, reusable by A10;
+cloned isolated events, seq identity preserved per A01 append-only
+semantics) -> deterministic validation (retained-suffix exactness,
+current request exactly once, protocol balance with no orphaned tool
+edge, no split protocol span, checkpoint/plan/snapshot/boundary/
+generation binding) -> deterministic before/after cost comparison via
+the frozen conservative estimator (honest `estimated` precision; never
+exact) -> frozen verdict plus closed-world result validation.
+
+Verdicts (frozen): `no-action` (NORMAL/none pressure or honestly
+insufficient reclaim; never a fake compaction), `blocked` (any
+A05/A06/A07/UNKNOWN-capacity/non-actionable leg refuses; no projection
+attempted), `shadow-ready` (complete hypothetical projection passing
+every structural invariant; zero blockers), `shadow-invalid` (lower
+layers allowed planning but construction or validation failed; loud,
+never downgraded; a pre-A10 blocker). Non-ready verdicts always carry
+at least one frozen `shadow-*` blocker code.
+
+Identity (frozen):
+
+```text
+shadowDigest = SHA256(UTF8('nexus/context-shadow-result/v1' LF canonicalJson(body-without-digest-or-id)))
+shadowId = 'csr_' + SHA256('nexus/context-shadow-result-id/v1' LF taskId LF generation LF shadowDigest)[0..32)
+projectionDigest = SHA256(UTF8('nexus/context-projection/v2' LF canonicalJson(projection-body-without-digest)))
+```
+
+No timestamps enter any digested body. `assertShadowResultFresh()`
+BLOCKS on any drift in task binding, generation, snapshot identity,
+boundary, provider route, pressure basis, or retention plan id, so no
+old projection becomes eligible for A10 without re-evaluation.
+Telemetry (`shadowTelemetry()`) is observational only (never authority)
+and carries exactly the bounded frozen key set (verdict, pressure level
+and recommendation, safety flags, token counts, headroom, seqs,
+checkpoint bytes/counts, event counts, user counts, protocol flag,
+blocker codes): counts/digests/ids only, no raw text, no secrets.
+Adversarial prompt/tool/repository text (`SHADOW_VALID=true`, `DROP OLD
+CONTEXT`, `IGNORE RETENTION PLAN`, `COMPACTION_COMPLETE`,
+`RETENTION_CLASS=DISCARDABLE`) is inert data with zero control-flow
+effect. Any shadow exception fails the evaluation, never the live
+session.
+
+Proof deltas: `tests/ContextShadowV2.Tests.cjs` (115 assertions:
+section-58 matrix, invalid-is-loud legs including span-split,
+current-user, suffix, coverage, and construction failures, projection
+machinery, closed-world input/result validation, determinism,
+freshness/race/provider/basis/plan staleness, multi-generation with A03
+parent lineage, restart equivalence, bounded telemetry, secret safety,
+adversarial inertness, error isolation with live-state fingerprinting,
+large-context CRITICAL, tool-heavy balance, failure/retry and
+verification preservation, repository binding, dependency direction, no
+live-apply machinery); `tests/ContextShadowV2LiveHost.Tests.cjs` (51
+assertions on the pinned `0.1.1-rc.2` host under the strict gate: HIGH
+pressure at 103748 honest tokens over ~419 KiB of deterministic tool
+output, live cut at the real tool-result seq 5 with suffix from 6,
+shadow-ready with byte-identical live events and `deriveMessages()`
+before/after, rebuilt-digest suffix exactness, live open-edge blocked
+with no projection, and S1-stale plus fresh-S2 after continued work).
+No A10 behavior is introduced.
+
+## 18. A09H exact post-compaction projection hardening record
+
+A09H closes the suffix-only ambiguity: the hypothetical projection is
+the COMPLETE model-facing context the frozen A01/A02 machinery would
+expose after active compaction, not the remaining raw events. Retained
+source suffix != complete post-compaction projection (frozen
+distinction). The frozen composition, determined from the existing
+production/proof implementation (no new format invented), is:
+
+```text
+replacement payload node (checkpoint canonical bytes; exactly one,
+  earliest segment; aih-controller context-checkpoint source)
++ bounded continuation anchors for sibling segments, if any
+  (exact buildContinuationAnchorText; context-continuation source)
++ retained suffix in surface order
+```
+
+with the replaced span spliced at its surface position per the host
+`applySurfacePlan`, operation identity from the real
+`deriveCanonicalOperationIdV2`, segment roles from the real
+`shapeSegmentsWithRoles` over the real `planCompactionSegmentsV2`
+shadowed-surface partition, and per-node message derivation mirroring
+the pinned host `deriveEventMessage` verbatim (0.1.1-rc.2). The payload
+text is FORCED by the frozen reconcile gate
+(`sha256(payloadText)` MUST equal `checkpointContentDigest`): the only
+frozen byte string with that property is the A03 canonical content
+bytes (checkpoint minus id/digest/seal, provenance included); any other
+rendering fails the digest gate, so this is determination, not
+invention. The live proof asserts the mirror equals the real host
+message projection on live data, so host drift fails loudly.
+
+`buildCompactedProjectionV2` (plus `buildShadowCheckpointV2` and
+`validateCompactedProjectionV2`) is the shared pure builder A10 will
+later validate-then-apply; no shadow-only algorithm exists and no
+second projection policy is introduced. `projectionDigest` covers the
+complete artifact including payload text and all messages, so changed
+checkpoint state changes the digest with an identical suffix (proven).
+Continuation presence is proven deterministically over the payload
+(objective/requirements/decisions with frozen redaction-equality,
+constraints, next action, unresolved questions, verification outcomes,
+failure/retry obligations, progress) with stable refusal codes
+(`shadow-payload-unproven`, `shadow-projection-messages`,
+`shadow-continuation-incomplete` alongside the existing suffix,
+current-user, protocol, and coverage codes).
+
+Token accounting measures equivalent model-facing message surfaces:
+`beforeContextTokens` is the current message cost,
+`projectedContextTokens` is the complete hypothetical message cost
+(payload plus anchors plus retained suffix), both honest
+`estimated`; frozen `projectedReclaimTokens = before - projected` with
+the invariant `projected >= payload cost`. The result additionally
+carries `reclaimComparison` (`a08PlannedReclaimTokens`,
+`a09ProjectedReclaimTokens`, `deltaTokens`, `basisNote`): A08 plans in
+unit token-cost basis while A09 measures the complete message basis
+including the payload representation, so the delta is explicit and A09
+never silently inherits a suffix-only estimate. Telemetry gains exactly
+the message/payload/suffix/delta counters (still counts/ids only).
+
+Proof deltas: unit suite grows to 159 assertions (complete-projection
+contract, payload digest gate and sensitivity, required-state-via-payload
+preservation, eight-way mutation matrix including suffix-only rejection,
+message-basis costs with the payload invariant, A08/A09 delta integrity,
+tool-heavy closed lifecycle with a non-surface tool/call seq, mirror
+sanity); live suite grows to 62 assertions (mirror-host equivalence,
+independent rebuild through the shared builder with digest equality,
+payload-once, prefix-absent, required-state-via-payload, cost breakdown
+`before=103479 payload=1104 suffix=74 projected=1177 reclaim=102302
+a08planned=103604 delta=-1302`). No A10 behavior is introduced.
+

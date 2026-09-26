@@ -586,6 +586,82 @@ function validateSafePointDecision(decision) {
   return { valid: true, reason: null };
 }
 
+// ---- historical-boundary classification (A08H) ----
+// A06 remains the sole safe-boundary authority, including for HISTORICAL
+// candidate cuts: A08 may never decide on its own that an earlier seq looks
+// safe. classifyHistoricalBoundaryV2 reuses the frozen detectSafePointV2
+// state machine verbatim over the authoritative prefix events[0..candidateSeq]
+// (seqs stay index-aligned, so contiguity holds). Durability is enforced
+// against the same observation (flushedSeq must cover the candidate);
+// current controller/runtime observations are reused fail-closed. Pure and
+// read-only: no session, checkpoint, or projection state is touched.
+const HISTORICAL_BOUNDARY_INPUT_EXACT_KEYS = Object.freeze([
+  'schemaVersion',
+  'taskId',
+  'taskInstanceId',
+  'sessionId',
+  'sessionEvents',
+  'sessionDurable',
+  'controller',
+  'runtime',
+  'candidateSeq',
+]);
+const HISTORICAL_BOUNDARY_DECISION_EXACT_KEYS = Object.freeze([
+  'schemaVersion',
+  'candidateSeq',
+  'safe',
+  'boundaryKind',
+  'blockers',
+]);
+
+function classifyHistoricalBoundaryV2(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) failInput('historical boundary input is required');
+  const unknown = unknownKeyOf(input, HISTORICAL_BOUNDARY_INPUT_EXACT_KEYS);
+  if (unknown !== null) failInput('unknown field ' + unknown);
+  if (Number(input.schemaVersion) !== SAFEPOINT_SCHEMA_VERSION) failInput('schemaVersion must be 1');
+  if (!Array.isArray(input.sessionEvents)) failInput('sessionEvents must be an array');
+  if (!Number.isInteger(input.candidateSeq) || input.candidateSeq < 0 || input.candidateSeq > input.sessionEvents.length - 1) {
+    failInput('candidateSeq must be an event seq within the log');
+  }
+  const verdict = detectSafePointV2({
+    schemaVersion: input.schemaVersion,
+    taskId: input.taskId,
+    taskInstanceId: input.taskInstanceId,
+    sessionId: input.sessionId,
+    sessionEvents: input.sessionEvents.slice(0, input.candidateSeq + 1),
+    sessionDurable: input.sessionDurable,
+    controller: input.controller,
+    runtime: input.runtime,
+  });
+  if (verdict.safe) {
+    return Object.freeze({ schemaVersion: SAFEPOINT_SCHEMA_VERSION, candidateSeq: input.candidateSeq, safe: true, boundaryKind: verdict.boundaryKind, blockers: Object.freeze([]) });
+  }
+  return Object.freeze({ schemaVersion: SAFEPOINT_SCHEMA_VERSION, candidateSeq: input.candidateSeq, safe: false, boundaryKind: null, blockers: verdict.blockers });
+}
+
+function validateHistoricalBoundaryDecision(decision) {
+  const fail = (reason) => ({ valid: false, reason });
+  if (!decision || typeof decision !== 'object' || Array.isArray(decision)) return fail('historical-boundary-missing');
+  if (unknownKeyOf(decision, HISTORICAL_BOUNDARY_DECISION_EXACT_KEYS) !== null) return fail('historical-boundary-unknown-field');
+  if (Number(decision.schemaVersion) !== SAFEPOINT_SCHEMA_VERSION) return fail('historical-boundary-schema-mismatch');
+  if (!Number.isInteger(decision.candidateSeq) || decision.candidateSeq < 0) return fail('historical-boundary-seq-invalid');
+  if (typeof decision.safe !== 'boolean') return fail('historical-boundary-schema-mismatch');
+  if (!Array.isArray(decision.blockers)) return fail('historical-boundary-schema-mismatch');
+  for (const blocker of decision.blockers) {
+    if (!blocker || typeof blocker !== 'object') return fail('historical-boundary-schema-mismatch');
+    if (unknownKeyOf(blocker, SAFEPOINT_BLOCKER_EXACT_KEYS) !== null) return fail('historical-boundary-schema-mismatch');
+    if (!SAFEPOINT_BLOCKER_CODES.includes(blocker.code)) return fail('historical-boundary-schema-mismatch');
+  }
+  if (decision.safe) {
+    if (decision.blockers.length !== 0) return fail('historical-safe-with-blockers');
+    if (!SAFEPOINT_BOUNDARY_KINDS.includes(decision.boundaryKind)) return fail('historical-safe-without-kind');
+  } else {
+    if (decision.blockers.length === 0) return fail('historical-unsafe-without-blocker');
+    if (decision.boundaryKind !== null && decision.boundaryKind !== undefined) return fail('historical-unsafe-with-kind');
+  }
+  return { valid: true, reason: null };
+}
+
 // ---- A05 capture-race binding ----
 // A SAFE decision never authorizes a later capture by itself: the
 // capture-time revision MUST equal the decision revision. Any movement
@@ -640,8 +716,12 @@ module.exports = {
   SAFEPOINT_DECISION_EXACT_KEYS,
   SAFEPOINT_BLOCKER_EXACT_KEYS,
   SAFEPOINT_REVISION_EXACT_KEYS,
+  HISTORICAL_BOUNDARY_INPUT_EXACT_KEYS,
+  HISTORICAL_BOUNDARY_DECISION_EXACT_KEYS,
   SEED_MARKER_TYPE,
   detectSafePointV2,
+  classifyHistoricalBoundaryV2,
+  validateHistoricalBoundaryDecision,
   validateSafePointDecision,
   assertSafePointFresh,
   assertCheckpointBindsSafePoint,
