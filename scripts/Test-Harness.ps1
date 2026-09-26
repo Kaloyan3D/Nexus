@@ -95,6 +95,8 @@ $suites = @(
     [ordered]@{ name='ContextSnapshotV2'; script='tests/ContextSnapshotV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextSafePointV2'; script='tests/ContextSafePointV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextSafePointV2LiveHost'; script='tests/ContextSafePointV2LiveHost.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
+    [ordered]@{ name='ContextCheckpointabilityV2'; script='tests/ContextCheckpointabilityV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCheckpointabilityV2LiveHost'; script='tests/ContextCheckpointabilityV2LiveHost.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
     [ordered]@{ name='ContextCompactionV2DshGenerationProof'; script='tests/ContextCompactionV2DshGenerationProof.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
     [ordered]@{ name='ContextCompactionV2Operation'; script='tests/ContextCompactionV2Operation.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
     [ordered]@{ name='ContextCompactionV2FoundationHardening'; script='tests/ContextCompactionV2FoundationHardening.Tests.cjs'; executable=$layout.Node; kind='node' },

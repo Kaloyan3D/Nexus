@@ -1172,3 +1172,136 @@ under `NEXUS_REQUIRE_CCV2_LIVE_HOST=1`, 41 assertions). Harness entries:
 (UNVERIFIED, never simulated): a spontaneous host-driven transition
 landing mid-detect has no offline inducer; the architecture relies on the
 A05 capture-consistency retry for that window.
+---
+
+## 14. A07 checkpointability-gate freeze record
+
+Production module `config/ContextCheckpointabilityV2.cjs` is the sole V2
+checkpointability authority (`CheckpointabilityGate`). It answers exactly
+one question: can the current authoritative task state be represented by
+a CCv2 checkpoint completely enough to resume correctly without silently
+losing required task semantics? Core invariant: CCv2 may forget from the
+prompt; CCv2 must never forget from the task.
+
+### 14.1 `CheckpointabilityDecisionV2` (frozen)
+
+```text
+CheckpointabilityDecisionV2 {
+  schemaVersion         : integer (1)
+  checkpointable      : boolean (true iff blockers is empty)
+  taskId, taskInstanceId, sessionId : string (binding)
+  safePointBoundarySeq: integer (authorizing A06 boundary)
+  snapshotTokenId     : string (authorizing A05 token)
+  revisionDigest      : string (authorizing A05 revision)
+  requiredState       : { count: integer, digest: sha256 hex }
+  representableState  : { count: integer, digest: sha256 hex }
+  blockers            : [{ code: frozen code, detail: string|null }] (sorted)
+}
+```
+
+Closed-world validation applies to every A07 protocol object (task state,
+evaluate input, coverage input, decision): unknown keys FAIL CLOSED before
+any digest, comparison, or decision. No field is ever silently stripped.
+
+### 14.2 Required state, inventory, coverage (frozen)
+
+- Required authoritative state is every current authoritative fact whose
+  absence could change future execution (identity, objective, active
+  requirements, constraints, progress, decisions, repository references,
+  required evidence, failures, retry state, verification, continuation,
+  safe-point boundary, snapshot identity). Derived/cache/advisory state
+  never enters the contract; the explicit non-required classes (UI state,
+  render state, derived caches, temp indexes, derived summaries,
+  non-continuation telemetry, recomputable ranking data) are omitted only
+  as classes, never by judgment.
+- `AuthoritativeStateInventoryV2` items carry `{ stateKind, stateId,
+  sourceKind, authorityScope, requiredForContinuation, contentDigest }`
+  plus the A03 destination. Raw giant content and secrets never enter the
+  inventory: bounded identities and redacted (frozen A03 redaction)
+  digests only.
+- Coverage invariant: every `requiredForContinuation === true` item is
+  either represented in its A03 destination section or deterministically
+  reconstructible from a referenced authoritative durable source
+  (`durable-reference` with an accessible locator). No third category
+  exists; a stale (inaccessible) reference never counts as coverage.
+- Forward-safety: any authoritative state with no representation or
+  reconstruction rule (declared via `unsupportedState`) BLOCKS with
+  `checkpointability-unsupported-authoritative-state`. Schema evolution
+  can never silently drop new controller state.
+- Authority preservation uses A04 provenance semantics verbatim (the A04
+  `TrustNormalizer` is the oracle; derived trust must stay inside
+  authoritative/user-intent/evidence). Downgrade or elevation mismatches
+  BLOCK. A valid `ContentSeal` proves the bytes did not change
+  inconsistently; it never proves the bytes contain all required state.
+- Ephemeral state (open handles, callbacks, IPC, unpersisted handles,
+  volatile streams, model runtime refs) required for continuation BLOCKS
+  with `checkpointability-ephemeral-state-required`.
+- Size preflight enforces the frozen A03 bounds and the 64 KiB serialized
+  bound without truncation, summarization, or dropping required state
+  (`checkpointability-size-bound-exceeded`).
+
+### 14.3 Bindings, ordering, races (frozen)
+
+- A07 requires a valid A06 decision with `safe === true` whose
+  `boundarySeq` authorizes the evaluated state
+  (`checkpointability-safe-point-required`); A06 logic is consumed, never
+  duplicated.
+- A07 requires the matching A05 token (task/instance/session/generation/
+  boundary identity plus revision equality). Absent or mismatched tokens
+  BLOCK with `checkpointability-snapshot-required`; tokens that no longer
+  describe live reality BLOCK with `checkpointability-snapshot-stale`.
+  No timestamp freshness is introduced: revision semantics only.
+- Required order: A06 detect SAFE -> A05 capture -> A07 evaluate -> A05
+  freshness verification -> checkpoint construction. Revision movement
+  between capture and evaluation BLOCKS with
+  `checkpointability-state-changed` (retry).
+- Pre-build (`evaluateCheckpointabilityV2`) answers whether the state CAN
+  be represented. Post-build (`assertCheckpointCoverageV2`) answers
+  whether the produced checkpoint DOES represent everything required,
+  including authority preservation per mandatory A04 path. A03 structural
+  validity never implies semantic completeness. The A03 builder owns
+  construction; it never owns checkpointability.
+- Digests (frozen formulas): `requiredStateDigest = SHA256(UTF8(
+  'nexus/context-required-state/v1' LF
+  canonicalJson(normalizedRequiredStateInventory)))` and likewise
+  `representedStateDigest` under `'nexus/context-represented-state/v1'`.
+  No timestamps, no traversal-order dependence. Coverage is proven by the
+  explicit item mapping, not by digest equality.
+- No LLM or heuristic ever decides importance: classification is
+  deterministic over authority metadata. Repository/tool/model text is
+  inert data.
+
+### 14.4 Blocker codes and proofs (frozen)
+
+Stable codes: `checkpointability-safe-point-required`,
+`checkpointability-snapshot-required`, `checkpointability-snapshot-stale`,
+`checkpointability-unsupported-authoritative-state`,
+`checkpointability-required-state-uncovered`,
+`checkpointability-authority-mismatch`,
+`checkpointability-objective-incomplete`,
+`checkpointability-requirement-uncovered`,
+`checkpointability-constraint-uncovered`,
+`checkpointability-decision-uncovered`,
+`checkpointability-evidence-unavailable`,
+`checkpointability-failure-state-uncovered`,
+`checkpointability-verification-state-uncovered`,
+`checkpointability-continuation-incomplete`,
+`checkpointability-ephemeral-state-required`,
+`checkpointability-size-bound-exceeded`, `checkpointability-state-changed`,
+`checkpointability-checkpoint-coverage-mismatch`. Codes collapse only where
+the state model cannot distinguish them; `checkpointable === true` iff
+`blockers` is empty.
+
+Restart semantics (frozen): a persisted checkpoint plus its token file
+reload to byte-identical artifacts that still cover every required item;
+no required semantic depends on the old prompt. Multi-generation
+semantics (frozen): at every generation the current required state is a
+subset of checkpoint-covered or reconstructible state; each generation is
+self-contained; no retention policy is introduced here.
+
+Proof: `tests/ContextCheckpointabilityV2.Tests.cjs` (unit matrix, 104
+assertions) and `tests/ContextCheckpointabilityV2LiveHost.Tests.cjs`
+(real pinned-host proof under `NEXUS_REQUIRE_CCV2_LIVE_HOST=1`, 25
+assertions). Harness entries: `ContextCheckpointabilityV2`,
+`ContextCheckpointabilityV2LiveHost`. No A08 pressure/retention logic and
+no automatic checkpoint/compaction trigger are introduced.
