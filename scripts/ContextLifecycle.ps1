@@ -838,6 +838,19 @@ function Test-AihContextCompactionOperationV2 {
     )
     $fail = { param([string]$Reason) return [pscustomobject][ordered]@{ valid = $false; reason = $Reason } }
     if ($null -eq $Operation) { return (& $fail 'operation-missing') }
+    # A05H H1: exact-key validation (JS twin: OPERATION_V2_EXACT_KEYS).
+    # Unknown protocol fields FAIL CLOSED here, before any value check, so a
+    # recomputed operationId can never legalize an unknown schema field.
+    # Handles both pscustomobject (post-read-back) and Hashtable
+    # (pre-persist draft): Hashtables do not expose entries through
+    # PSObject.Properties.
+    $operationV2Keys = @('schemaVersion','operationId','attemptId','taskId','taskInstanceId','sessionId','workspace','repositoryId','checkoutId','checkpointGeneration','checkpointId','checkpointContentDigest','checkpointPath','snapshotTokenId','safePointBoundarySeq','sourceEventSeqs','segments','lifecycle','createdAtUtc')
+    $operationKeyNames = @()
+    if ($Operation -is [Collections.IDictionary]) { $operationKeyNames = @($Operation.Keys | ForEach-Object { [string]$_ }) }
+    else { $operationKeyNames = @($Operation.PSObject.Properties | ForEach-Object { $_.Name }) }
+    foreach ($operationKeyName in $operationKeyNames) {
+        if ($operationV2Keys -notcontains $operationKeyName) { return (& $fail 'operation-schema-mismatch') }
+    }
     if ([int]$Operation.schemaVersion -ne [int]$AihContextOperationV2SchemaVersion) { return (& $fail 'operation-schema-mismatch') }
     if ([string]::IsNullOrWhiteSpace([string]$Operation.operationId)) { return (& $fail 'operation-id-missing') }
     if ([string]::IsNullOrWhiteSpace([string]$Operation.attemptId)) { return (& $fail 'attempt-id-missing') }
@@ -874,6 +887,15 @@ function Test-AihContextCompactionOperationV2 {
     $flat = [Collections.Generic.List[int]]::new()
     foreach ($segment in $segments) {
         if ($null -eq $segment) { return (& $fail 'segment-malformed') }
+        # A05H H1: segments are exact-key validated (JS twin:
+        # OPERATION_V2_SEGMENT_EXACT_KEYS). Unknown segment fields FAIL CLOSED.
+        $segmentV2Keys = @('start','end','sourceEventSeqs','role')
+        $segmentKeyNames = @()
+        if ($segment -is [Collections.IDictionary]) { $segmentKeyNames = @($segment.Keys | ForEach-Object { [string]$_ }) }
+        else { $segmentKeyNames = @($segment.PSObject.Properties | ForEach-Object { $_.Name }) }
+        foreach ($segmentKeyName in $segmentKeyNames) {
+            if ($segmentV2Keys -notcontains $segmentKeyName) { return (& $fail 'operation-schema-mismatch') }
+        }
         # Role presence must work for both pscustomobject (post-read-back)
         # and Hashtable (pre-persist draft): Hashtables do not expose entries
         # through PSObject.Properties.

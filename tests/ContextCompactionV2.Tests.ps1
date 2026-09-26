@@ -95,6 +95,10 @@ try {
     Assert-Aih (Test-V2Draft $d 'lifecycle-invalid') 'PS: unknown lifecycle rejected'
     $d = New-V2Draft; $d.sessionId = 'other-session'
     Assert-Aih (Test-V2Draft $d 'session-id-mismatch') 'PS: session mismatch rejected'
+    $d = New-V2Draft; $d | Add-Member -NotePropertyName 'injectedField' -NotePropertyValue 'x'
+    Assert-Aih (Test-V2Draft $d 'operation-schema-mismatch') 'PS: unknown top-level field rejected closed-world (A05H H1)'
+    $d = New-V2Draft; $d.segments[0] | Add-Member -NotePropertyName 'injectedField' -NotePropertyValue 'x'
+    Assert-Aih (Test-V2Draft $d 'operation-schema-mismatch') 'PS: unknown segment field rejected closed-world (A05H H1)'
 } finally { Remove-Item -Recurse -Force -LiteralPath $root -ErrorAction SilentlyContinue }
 
 # == 4. Atomic freeze: persist → read-back → idempotent retry ==================

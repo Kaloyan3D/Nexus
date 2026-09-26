@@ -563,12 +563,47 @@ function planCompactionSegmentsV2(session, shadowedSeqs, options) {
   };
 }
 
+// A05H closed-world exact-key validation (H1). Protocol objects FAIL CLOSED
+// on unknown keys: an unknown field is never digested-and-accepted, never
+// stripped, and never ignored. The check runs FIRST so a recomputed
+// operationId can never legalize an unknown schema field.
+const OPERATION_V2_EXACT_KEYS = Object.freeze([
+  'schemaVersion', 'operationId', 'attemptId', 'taskId', 'taskInstanceId',
+  'sessionId', 'workspace', 'repositoryId', 'checkoutId',
+  'checkpointGeneration', 'checkpointId', 'checkpointContentDigest',
+  // checkpointPath is a frozen V1-compat carry field (null in V2 fixtures);
+  // it is known, never authoritative for V2 binding.
+  'checkpointPath',
+  'snapshotTokenId', 'safePointBoundarySeq', 'sourceEventSeqs',
+  'segments', 'lifecycle',
+  // createdAtUtc is PS-twin audit metadata (same shared operation file):
+  // known, never stripped, never part of operation/checkpoint identity.
+  'createdAtUtc',
+]);
+const OPERATION_V2_SEGMENT_EXACT_KEYS = Object.freeze([
+  'start', 'end', 'sourceEventSeqs', 'role',
+]);
+const ATTEMPT_V2_EXACT_KEYS = Object.freeze([
+  'schemaVersion', 'attemptId', 'operationId', 'taskId', 'taskInstanceId',
+  'sessionId', 'generation', 'state', 'snapshotTokenId', 'planId',
+  'startedAtUtc', 'finishedAtUtc', 'result', 'reason',
+]);
+
+function unknownKeyOf(value, allowedKeys) {
+  if (!value || typeof value !== 'object') return null;
+  for (const key of Object.keys(value)) {
+    if (!allowedKeys.includes(key)) return key;
+  }
+  return null;
+}
+
 // Closed-world V2 validation (task section 8 + architecture 3.8).
 // Any failure → { valid: false } (BLOCK/KEEP) before any mutation.
 function validateCompactionOperationV2(operation, expected) {
   const fail = (reason) => ({ valid: false, reason });
   if (!operation || typeof operation !== 'object') return fail('operation-missing');
   if (!expected || typeof expected !== 'object') return fail('expectation-missing');
+  if (unknownKeyOf(operation, OPERATION_V2_EXACT_KEYS) !== null) return fail('operation-schema-mismatch');
   if (Number(operation.schemaVersion) !== 2) return fail('operation-schema-mismatch');
   if (typeof operation.operationId !== 'string' || operation.operationId === '') return fail('operation-id-missing');
   if (typeof operation.attemptId !== 'string' || operation.attemptId === '') return fail('attempt-id-missing');
@@ -631,6 +666,7 @@ function validateCompactionOperationV2(operation, expected) {
   const union = [];
   for (const segment of segments) {
     if (!segment || typeof segment !== 'object') return fail('segment-malformed');
+    if (unknownKeyOf(segment, OPERATION_V2_SEGMENT_EXACT_KEYS) !== null) return fail('operation-schema-mismatch');
     if (typeof segment.role !== 'string' || !KNOWN_ROLES.has(segment.role)) {
       return segment.role === undefined ? fail('segment-role-missing') : fail('segment-role-unknown');
     }
@@ -808,9 +844,45 @@ function reconcileCompactionOperationV2(operation, session, options) {
   return { decision: 'applied', reason: 'durable-intended-projection-reconciled', segmentStatus, missingSegments };
 }
 
+// A05H H3 persisted-read-back proof. Module-owned brand set: the ONLY way
+// an object enters this set is by being produced from disk bytes by the A02
+// persistence authority below (persist/read/freeze return). The brand is a
+// non-serializable in-memory WeakSet membership: it is never written to
+// disk, never appears in JSON bytes, is not exported, and cannot be forged
+// by a caller (JSON.parse/stringify clones and hand-built equal objects are
+// unbranded). apply/retry require BOTH legs: (a) the durable handle is
+// branded (it really came from persisted read-back, not a caller clone) and
+// (b) it is byte-identical to the operation being applied (it is not stale
+// or foreign). Either leg alone is insufficient: durability never depends on
+// in-memory identity alone (leg b) nor on equality alone (leg a). Restart
+// re-reads through readCompactionOperationV2, which re-brands, so crash
+// recovery keeps working with unchanged JSON bytes and operation identity.
+const durableReadBackV2 = new WeakSet();
+
+function brandDurableReadBackV2(operation) {
+  if (operation && typeof operation === 'object') durableReadBackV2.add(operation);
+  return operation;
+}
+
+function requireDurableProofV2(operation, durableOp, seam) {
+  if (!durableOp || typeof durableOp !== 'object') {
+    throw new Error(seam + ': durable frozen operation required before mutation (KEEP)');
+  }
+  if (!durableReadBackV2.has(durableOp)) {
+    throw new Error(seam + ': durable proof missing: the handle was not read back through the persisted-operation authority (KEEP)');
+  }
+  if (JSON.stringify(durableOp) !== JSON.stringify(operation)) {
+    throw new Error(seam + ': durable frozen operation required before mutation (KEEP)');
+  }
+}
+
 // Atomic durable persistence (repository atomic-write discipline: temp file
 // in the same directory + rename). Freezes the exact operation plan.
 // Returns the read-back object; throws (KEEP) on any write/readback failure.
+// A05H H6 durability scope (frozen): atomic + read-back validated +
+// process-crash recoverable under the filesystem/OS contract. NOT claimed
+// power-loss durable (no fsync barrier); the authoritative session durability
+// barrier remains the real DSH SessionStore.flush() proven in A01/A02.
 function operationV2FilePath(dir) {
   const path = require('node:path');
   return path.join(dir, OPERATION_V2_FILENAME);
@@ -850,7 +922,7 @@ function readCompactionOperationV2(dir) {
   if (!parsed || typeof parsed !== 'object' || Number(parsed.schemaVersion) !== 2) {
     throw new Error('v2-read: operation file is not a V2 operation (BLOCK/KEEP)');
   }
-  return parsed;
+  return brandDurableReadBackV2(parsed);
 }
 
 // freezeCompactionOperationV2: construct → closed-world validate → atomic
@@ -881,9 +953,10 @@ function applyCompactionOperationV2(session, operation, payloadText, durableOp) 
   if (!session || typeof session.append !== 'function') throw new Error('v2-apply: session append seam is required');
   if (!operation || typeof operation !== 'object') throw new Error('v2-apply: operation is required');
   if (typeof payloadText !== 'string' || payloadText === '') throw new Error('v2-apply: payload text is required');
-  if (!durableOp || JSON.stringify(durableOp) !== JSON.stringify(operation)) {
-    throw new Error('v2-apply: durable frozen operation required before mutation (KEEP)');
-  }
+  // A05H H3: no first session.append may occur unless the exact operation
+  // was persisted and read back through the A02 authority (branded handle
+  // + byte identity). This check precedes every mutation below.
+  requireDurableProofV2(operation, durableOp, 'v2-apply');
   if (sha256HexUtf8(payloadText) !== operation.checkpointContentDigest) {
     throw new Error('v2-apply: payload digest mismatch (KEEP)');
   }
@@ -915,9 +988,8 @@ function applyCompactionOperationV2(session, operation, payloadText, durableOp) 
 // Never appends another payload when the payload already landed.
 function retryMissingSegmentsV2(session, operation, payloadText, durableOp, missingSegments) {
   if (!Array.isArray(missingSegments) || missingSegments.length === 0) throw new Error('v2-retry: missingSegments is required');
-  if (!durableOp || JSON.stringify(durableOp) !== JSON.stringify(operation)) {
-    throw new Error('v2-retry: durable frozen operation required before mutation (KEEP)');
-  }
+  // A05H H3: same persisted-read-back proof as apply (no append first).
+  requireDurableProofV2(operation, durableOp, 'v2-retry');
   const segments = operation.segments;
   const landed = [];
   for (const index of missingSegments) {
@@ -952,8 +1024,28 @@ const ATTEMPT_V2_TRANSITIONS = Object.freeze({
   blocked: [],
 });
 
+// A05H closed-world attempt validation (H1). The attempt record is a
+// protocol object: unknown keys FAIL CLOSED with the subsystem code.
+// Called by the persistence path before any write; exported for tests.
+function validateCompactionAttemptV2(attempt) {
+  const fail = (reason) => ({ valid: false, reason });
+  if (!attempt || typeof attempt !== 'object') return fail('operation-missing');
+  if (unknownKeyOf(attempt, ATTEMPT_V2_EXACT_KEYS) !== null) return fail('operation-schema-mismatch');
+  if (Number(attempt.schemaVersion) !== 1) return fail('operation-schema-mismatch');
+  for (const key of ['attemptId', 'operationId', 'taskId', 'taskInstanceId', 'sessionId']) {
+    if (typeof attempt[key] !== 'string' || attempt[key] === '') return fail('operation-schema-mismatch');
+  }
+  if (!Number.isInteger(attempt.generation) || attempt.generation < 1) return fail('operation-schema-mismatch');
+  if (!ATTEMPT_V2_STATES.includes(attempt.state)) return fail('operation-schema-mismatch');
+  return { valid: true, reason: null };
+}
+
 function createCompactionAttemptV2(fields) {
   const f = fields && typeof fields === 'object' ? fields : {};
+  // A05H H1: attempt input is closed-world; unknown input fields are
+  // refused, never silently stripped.
+  const ATTEMPT_V2_INPUT_KEYS = ['attemptId', 'operationId', 'taskId', 'taskInstanceId', 'sessionId', 'generation', 'snapshotTokenId', 'planId'];
+  if (unknownKeyOf(f, ATTEMPT_V2_INPUT_KEYS) !== null) throw new Error('v2-attempt: unknown field ' + unknownKeyOf(f, ATTEMPT_V2_INPUT_KEYS) + ' refused (KEEP)');
   for (const key of ['attemptId', 'operationId', 'taskId', 'taskInstanceId', 'sessionId']) {
     if (typeof f[key] !== 'string' || f[key] === '') throw new Error('v2-attempt: ' + key + ' is required');
   }
@@ -995,10 +1087,15 @@ function attemptV2FilePath(dir, attemptId) {
   return path.join(dir, ATTEMPT_V2_FILE_PREFIX + String(attemptId) + '.json');
 }
 
+// A05H H6 durability scope (frozen): same as operations above — atomic +
+// read-back validated + process-crash recoverable; NOT power-loss durable.
 function persistCompactionAttemptV2(dir, attempt) {
   const fs = require('node:fs');
   if (typeof dir !== 'string' || dir === '') throw new Error('v2-attempt-persist: dir is required');
   if (!attempt || typeof attempt !== 'object') throw new Error('v2-attempt-persist: attempt is required');
+  // A05H H1: closed-world record validation before any write.
+  const attemptCheck = validateCompactionAttemptV2(attempt);
+  if (!attemptCheck.valid) throw new Error('v2-attempt-persist: attempt refused (' + attemptCheck.reason + ') (KEEP)');
   fs.mkdirSync(dir, { recursive: true });
   const target = attemptV2FilePath(dir, attempt.attemptId);
   if (fs.existsSync(target)) {
@@ -1038,6 +1135,9 @@ module.exports = {
   checkpointProvenanceValid,
   lastTextOfRole, compareStepId, maxStepIdOfSession,
   OPERATION_ID_DOMAIN_V2,
+  OPERATION_V2_EXACT_KEYS,
+  OPERATION_V2_SEGMENT_EXACT_KEYS,
+  ATTEMPT_V2_EXACT_KEYS,
   OPERATION_V2_LIFECYCLES,
   OPERATION_V2_FILENAME,
   ATTEMPT_V2_STATES,
@@ -1059,6 +1159,7 @@ module.exports = {
   applyCompactionOperationV2,
   retryMissingSegmentsV2,
   createCompactionAttemptV2,
+  validateCompactionAttemptV2,
   transitionCompactionAttemptV2,
   attemptV2FilePath,
   persistCompactionAttemptV2,

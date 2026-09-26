@@ -78,11 +78,16 @@ function resolveHost() {
 }
 
 const host = resolveHost();
-if (!host || !host.session.Session || !host.session.SessionStore || !host.cordis.Context) {
+// A05H H4: optional developer mode vs strict release gate (never faked).
+const liveGate = require(path.join(__dirname, 'Ccv2LiveHostGate.cjs'));
+const liveHostFound = Boolean(host && host.session.Session && host.session.SessionStore && host.cordis.Context);
+if (!liveHostFound) {
+  liveGate.reportLiveHostGate('A01', liveGate.decideLiveHostGate(false, process.env));
   console.log('SKIP: pinned DSH host tree is absent; the multi-generation proof is PENDING (never faked).');
   console.log('RESULT: 0 context compaction V2 generation assertions passed (live host missing).');
   process.exit(0);
 }
+liveGate.reportLiveHostGate('A01', 'EXECUTED');
 const { Session, SessionStore } = host.session;
 const { Context } = host.cordis;
 

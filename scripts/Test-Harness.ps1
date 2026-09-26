@@ -89,7 +89,14 @@ $suites = @(
     [ordered]@{ name='PlatformSupport'; script='tests/PlatformSupport.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='StartupProviderIsolation'; script='tests/StartupProviderIsolation.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='PowerShellPortability'; script='tests/PowerShellPortability.Tests.ps1'; executable=$powershell; kind='powershell' },
-    [ordered]@{ name='AihControllerHost'; script='tests/AihControllerHost.Tests.cjs'; executable=$layout.Node; kind='node' }
+    [ordered]@{ name='AihControllerHost'; script='tests/AihControllerHost.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCheckpointV2'; script='tests/ContextCheckpointV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextTrustV2'; script='tests/ContextTrustV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextSnapshotV2'; script='tests/ContextSnapshotV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompactionV2DshGenerationProof'; script='tests/ContextCompactionV2DshGenerationProof.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
+    [ordered]@{ name='ContextCompactionV2Operation'; script='tests/ContextCompactionV2Operation.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
+    [ordered]@{ name='ContextCompactionV2FoundationHardening'; script='tests/ContextCompactionV2FoundationHardening.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompactionV2'; script='tests/ContextCompactionV2.Tests.ps1'; executable=$powershell; kind='powershell' }
 )
 
 $started = [DateTime]::UtcNow
@@ -117,10 +124,23 @@ foreach ($suite in $suites) {
     $commandText = '"' + $executable + '" ' + (($arguments | ForEach-Object { '"' + ([string]$_).Replace('"','\"') + '"' }) -join ' ')
     $rawLines.Add(('===== SUITE {0} =====' -f $suite.name)); $rawLines.Add($commandText)
     Write-Host ('===== SUITE {0} =====' -f $suite.name)
+    # A05H H4: optional per-suite process environment (e.g. the CCV2 live-host
+    # release gate). Applies process-scoped only and restores every variable
+    # afterwards; suites without 'env' behave exactly as before.
+    $suiteEnvPrior = @{}
+    if ($suite.Contains('env') -and $suite.env -is [System.Collections.IDictionary]) {
+        foreach ($envName in @($suite.env.Keys)) {
+            $suiteEnvPrior[$envName] = [System.Environment]::GetEnvironmentVariable([string]$envName)
+            [System.Environment]::SetEnvironmentVariable([string]$envName, [string]$suite.env[$envName])
+        }
+    }
     $savedPreference = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try { $output = @(& $executable @arguments 2>&1 | ForEach-Object { [string]$_ }); $suiteExitCode = [int]$LASTEXITCODE }
     catch { $output = @([string]$_); $suiteExitCode = 1 }
     finally { $ErrorActionPreference = $savedPreference }
+    foreach ($envName in @($suiteEnvPrior.Keys)) {
+        [System.Environment]::SetEnvironmentVariable([string]$envName, $suiteEnvPrior[$envName])
+    }
     foreach ($line in $output) { Write-Host $line; $rawLines.Add($line) }
     $suiteFinished = [DateTime]::UtcNow
     $suitePassed = Get-AihHarnessAssertionCount -Lines $output -Prefix 'PASS:'
