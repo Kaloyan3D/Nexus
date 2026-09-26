@@ -2134,5 +2134,190 @@ This is eligibility/protection policy only: no Phase-B tiers, no
 garbage collection, no deletion. A05/A02 pinning mechanics are reused,
 never redefined.
 
+## 22. A12 crash / concurrency / recovery hardening record
+
+A12 is a validation + hardening phase: no new feature, no A13
+integration, no policy change, no new projection semantics. Frozen
+A01-A11H behavior is unchanged except the two named semantic fixes
+below (A12-1, A12-2), each justified, regression-proven, and recorded
+here. Global rule: NO CRASH OR RACE MAY CREATE TWO VALID
+INTERPRETATIONS OF THE SAME TASK STATE.
+
+### 22.1 Deterministic fault injection (frozen)
+
+`config/ContextRecoveryFaultV2.cjs` is the TEST-ONLY injection registry.
+Every durable transition exposes precise named fault points
+(`reservation|head|supersession : before-temp-write / after-temp-write /
+before-rename / after-rename / before-read-back /
+after-read-back-before-return`, plus `checkpoint|operation|lock|segment|
+flush|post-verify` vocabulary), each default OFF with zero production
+behavior change unless a test explicitly arms it in-process. Modes:
+`throw`, `return-failure` (sentinel), `simulated-process-loss`
+(`ProcessLostV2`, no cleanup, temp leftovers retained). Armed faults are
+single-shot by default (retry observes clean state) or sticky with
+`{ persistent: true }` for churn tests. Fault errors carry ids/digests
+only, never task content. The runtime's `persistJsonAtomic` fires the
+scope-appropriate points, so reservation/head/supersession crash matrices
+address exact boundaries without timing sleeps.
+
+### 22.2 Frozen recovery-state taxonomy (A12-1 semantic fix)
+
+Per-generation outcomes stay `RESERVED | COMMITTED | SUPERSEDED |
+UNRESOLVED`; the transient active states gain
+`commit-pending-verification`. A12-1 (justification: A11 classified a
+fully-landed-but-head-missing generation as heuristic COMMITTED on
+segment presence alone, which §14 forbids because wrong payload,
+checkpoint mismatch, wrong anchors, or wrong surface also present all
+markers): a fully-landed generation whose committed head was never
+advanced is UNRESOLVED/`commit-pending-verification`, NEVER heuristic
+COMMITTED. Without the restored authoritative session the landing is
+unobservable and the frozen outcome is RESERVED/intent-durable (never a
+guess); with the session but without the verified repair pass the
+outcome is UNRESOLVED with `reconstructionOutcome=head-repair-pending`.
+The head advances ONLY through the rigorous flow. Two terminal paths
+exist. (1) Entry + explicit commit (the normal and flush-ambiguous
+path): the entry reconstructs WITHOUT repair, so a commit-pending
+generation proceeds to A10 forward recovery (reconcile, re-establish
+flush durability, re-run post-apply verification, yielding a
+recovered/committed result with `applicationDurable`), then
+`commitGenerationV2` (which requires `postApplyVerified`, identity
+agreement, and re-proven landing) advances the head. Neither the entry
+nor the reserve path ever heals: a pending generation blocks newer
+allocation until it reaches terminal state. (2) Explicit restart
+recovery: `reconstructGenerationRuntimeV2` with `repairHead:true` over a
+session RESTORED from durable flushed state advances the head with
+deterministic recovered-completion evidence (`buildRecoveredCompletionV2`:
+generation/checkpoint/operation ids and digests, landed counts; never
+payload/prompt/tool text) after the same evidence chain (durable
+checkpoint + durable operation + clean all-landed non-foreign landing +
+valid parent chain) plus head write + read-back. STRICT PRECONDITION:
+repair requires a restored session, because a live in-memory session may
+show landed segments whose flush never succeeded; healing from such a
+session would falsely commit unflushed application. Anything ambiguous
+fails closed. Regression: the A11 `completed landing classifies as
+commit-pending` assertion now expects UNRESOLVED, and
+`commit-before-head-crash repair` still heals with restored-session
+evidence. Lost-A10-result recovery is path (2): the head repairs from
+durable evidence without the lost in-memory result.
+
+### 22.3 A12-2 semantic fix: reservation-only supersession persists
+
+Justification: a generation superseded with no checkpoint ever persisted
+carries `checkpointId=null` in its marker (the marker authority permits
+null), but the head-index validator demanded a string checkpointId, so
+the marker persisted while the head update threw: a half-superseded
+state (§16 forbids). Fix at the smallest owning layer: the head
+superseded-entry validator mirrors the marker authority (null allowed).
+Once durable, a generation is permanently non-applicable through every
+supported route (fresh apply, retry, restart reconciliation,
+cross-process recovery). Regression: the supersession crash matrix
+retries every boundary to terminal SUPERSEDED and proves refusal of
+late apply.
+
+### 22.4 Concurrency serialization guarantees (frozen)
+
+One cross-process lock (PowerShell authority
+`Invoke-AihCompactionApplyLockAcquire/Renew/Release`, client
+`ContextActiveApplyLockClientV2.cjs`) serializes the check->apply
+window; the entry re-reads authoritative state under the held lock, so
+stale pre-lock observations (including `inspectFirst` handles) refuse.
+Proven races (unit ordering + true OS-process barriers, 3x stress):
+apply-vs-apply identical -> at most one mutation, others converge to
+recovered or idempotent already-committed (verified head healing);
+apply-vs-supersede -> exactly one terminal winner (landed refuses
+supersession with `generation-cannot-supersede`; zero-landing
+supersession makes late apply refuse); reserve-vs-recover -> partial
+landing blocks newer generations (`generation-unresolved-operation`);
+after entry + commit reach terminal state, the retried reservation
+parents from the committed head (never stale); commit-vs-supersede -> committed history
+can never be superseded; commit-head-vs-reserve-next -> the reserver
+either observes the committed parent or refuses with a stable code and
+converges on retry. Lock takeover is per-OPERATION binding: refused with
+`held-by-live-owner` while the owner renews its heartbeat; permitted
+after lease lapse with a dead/unknown owner (PID + start-time binding
+fences live owners even past nominal expiry); a different operationId is
+fenced as `held-by-other-operation`, never taken over. Liveness is
+proven by renewal heartbeat because the CLI owner process exits
+immediately by design.
+
+### 22.5 Artifact corruption behavior (frozen)
+
+Corrupt checkpoint bytes/ids/seals, corrupt operation bodies/identities,
+corrupt reservation digests, conflicting duplicate reservations,
+committed+superseded markers on one generation, and forked lineage all
+fail closed (`generation-runtime-corrupt` / `generation-runtime-fork` /
+`generation-head-conflict`); timestamps/mtimes never decide authority
+(proven by mtime-manipulation reconvergence); adversarial persisted
+task text (`RECOVERY=COMMITTED`, `SUPERSEDE=true`, `GENERATION=999`,
+`LOCK_OWNER=me`) is inert data. Missing reservations over committed
+lineage resolve via the lineage authority; every other missing artifact
+fails closed unless exactly one authoritative source yields one unique
+answer. A12-3 was investigated and deliberately NOT enforced:
+reservation source bindings are generation-bound observations captured at
+reservation time while the sealed snapshot is captured at build time,
+so frozen A11 flows legitimately carry different values (G3 reserved
+from a moved-state G2 observation, checkpoint built later for G3);
+cross-enforcing them contradicts A11. Rebinding stays contained by
+monotonic allocation, duplicate-binding fork refusal, digest-validated
+records, and commit-time identity agreement.
+
+### 22.5 A12-4 semantic fix: mid-log restore markers stay transparent
+
+Justification: the A10 apply barrier filtered host-only
+`session/end-seed` restore markers out of the rebuild event array for H2
+transparency, but `eventBySeq` is positional (`events[seq]` valid only
+when `event.seq === seq`). After any restart-then-continue flow the marker
+sits mid-log with later work after it; filtering shifts every later
+position and every lookup misses, so planning falsely yields "no
+segments" stale. End-position markers (the only H2-covered shape) were
+unaffected, which is why the campaign's true restart-then-continue live
+chain is the first flow to expose it. Fix at the smallest owning layers,
+preserving H2 intent: (a) A10 passes the live events unfiltered so
+positional lookups stay intact (markers are unsurfaced and semantically
+neutral: zero tool delta, never a runtime snapshot, excluded from the
+shadowed set either way); (b) the A09H projection builder anchors
+replacement seqs on the semantic log (markers never advance `maxSeq`)
+and excludes markers from the digest's retained-suffix input; (c) the
+retained-suffix validator excludes markers on the expectation side too.
+Digest equality still governs end-to-end and real drift still fails
+closed (Case B proven). Regression: new A12 unit coverage (mid-log
+marker applies and commits) plus the live restart-then-continue chain
+(G1->G3 across two restarts with markers in range).
+
+### 22.6 Recovery determinism and bounded convergence (frozen)
+
+`recoveryTraceV2` returns the bounded deterministic trace
+(observedState/decision/action/result; ids/digests/counts only; no
+wall-clock, no PID, no task content): identical durable state yields
+identical traces. Repeated reconstruct/reconcile/retry/restart reaches
+`COMMITTED`, `SUPERSEDED`, or stable UNRESOLVED within an explicit
+bound (3 passes in the campaign); no infinite retry loops. Consecutive
+restarts without state changes are byte-identical. The raw DSH log
+stays append-only on every path (positional seq invariant asserted per
+scenario); final surfaces keep the current user request exactly once,
+balanced protocol (`checkMessagesBalanced`), no duplicate payload
+segments or continuation anchors, and A07 required-state coverage.
+
+### 22.7 A12 suites and harness (frozen)
+
+`tests/ContextRecoveryV2.Tests.cjs` (unit: fault registry, reservation /
+head / supersession crash matrices, fully-landed classification,
+lost-result reconstruction, bad-projection fail-closed, apply/supersede
+and commit/supersede orderings, reserve-vs-recover blocking, stale
+matrix, full restart-state matrix, G1->G2->G4 multi-generation crash
+chain, repeated-restart convergence, corrupt/missing/conflicting
+campaigns, timestamps, security inertness, secret safety) and
+`tests/ContextRecoveryV2XProc.Tests.cjs` (true OS processes through the
+real lock CLI: identical apply x3, apply-wins x3, supersede-wins with
+stale pre-lock handle, commit-head-vs-reserve-next, dead-owner
+takeover), reusing the A11 XProc worker (additive `activeResult` output
+field only), and `tests/ContextRecoveryV2LiveHost.Tests.cjs` (pinned
+host real-Host crash campaign: flush-throw partial recovery,
+fully-landed lost-result repair, zero-landing supersession,
+G1->G3 multi-generation chain with restart after every step). Harness
+registers all three after the A11 suites; XProc/live suites skip
+ENVIRONMENTAL without pwsh/git or the host (never faked; live requires
+`NEXUS_REQUIRE_CCV2_LIVE_HOST=1` like other live suites).
+
 
 

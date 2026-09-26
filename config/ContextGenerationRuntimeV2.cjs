@@ -107,6 +107,14 @@ const compactionV2 = require('./ContextCompaction.cjs');
 const checkpointV2 = require('./ContextCheckpointV2.cjs');
 const trustV2 = require('./ContextTrustV2.cjs');
 const shadowV2 = require('./ContextShadowV2.cjs');
+// A12: deterministic test-only fault injection (defaults OFF; zero production
+// behavior change unless a test explicitly arms a named point in-process).
+let faultV2 = null;
+try { faultV2 = require('./ContextRecoveryFaultV2.cjs'); } catch { faultV2 = null; }
+function faultAt(point) {
+  if (!faultV2) return;
+  faultV2.maybeFaultV2(point);
+}
 
 const GENERATION_RUNTIME_SCHEMA_VERSION = 1;
 const RUNTIME_FILE_NAME = 'context-generation-runtime-v2.json';
@@ -122,10 +130,14 @@ const LF_JOIN = String.fromCharCode(10);
 
 // Active-generation lifecycle states (transient classification, never the
 // persisted outcome vocabulary). null when no generation is active.
+// A12 adds 'commit-pending-verification': fully landed but the committed
+// head was never advanced and no verified recovered-completion evidence has
+// been established yet (UNRESOLVED, never heuristic COMMITTED).
 const ACTIVE_GENERATION_STATES = Object.freeze([
   'reserved',
   'intent-durable',
   'application-pending',
+  'commit-pending-verification',
 ]);
 
 // Allowed terminal-per-generation outcomes (section 11).
@@ -334,20 +346,35 @@ function operationDirForGenerationV2(operationRoot, generation) {
 
 // ---- atomic persistence -----------------------------------------------------
 
+function faultScopeOf(targetPath) {
+  const base = path.basename(targetPath);
+  if (base === RESERVATION_FILE_NAME) return 'reservation';
+  if (base === SUPERSEDED_FILE_NAME) return 'supersession';
+  if (base === RUNTIME_FILE_NAME) return 'head';
+  return null;
+}
+
 function persistJsonAtomic(targetPath, value, serialize) {
+  const scope = faultScopeOf(targetPath);
   const dir = path.dirname(targetPath);
   fs.mkdirSync(dir, { recursive: true });
   const text = typeof serialize === 'function' ? serialize(value) : JSON.stringify(value, null, 2);
+  if (scope) faultAt(scope + ':before-temp-write');
   const tmp = targetPath + '.tmp-' + process.pid + '-' + Date.now();
   fs.writeFileSync(tmp, Buffer.from(text, 'utf8'));
+  if (scope) faultAt(scope + ':after-temp-write');
+  if (scope) faultAt(scope + ':before-rename');
   try {
     fs.renameSync(tmp, targetPath);
   } catch (error) {
     try { fs.unlinkSync(tmp); } catch { /* best effort */ }
     failRuntime('generation-runtime-unavailable: atomic rename failed for ' + path.basename(targetPath));
   }
+  if (scope) faultAt(scope + ':after-rename');
+  if (scope) faultAt(scope + ':before-read-back');
   const readBack = fs.readFileSync(targetPath, 'utf8');
   if (readBack !== text) failRuntime('generation-runtime-unavailable: read-back differs for ' + path.basename(targetPath));
+  if (scope) faultAt(scope + ':after-read-back-before-return');
   return { text, readBack };
 }
 
@@ -486,7 +513,11 @@ function validateGenerationRuntimeV2(head) {
     if (!entry || typeof entry !== 'object') return fail('generation-runtime-corrupt');
     if (unknownKeyOf(entry, RUNTIME_SUPERSEDED_EXACT_KEYS) !== null) return fail('generation-runtime-corrupt');
     if (!Number.isInteger(entry.generation) || entry.generation < 1) return fail('generation-runtime-corrupt');
-    if (typeof entry.checkpointId !== 'string') return fail('generation-runtime-corrupt');
+    // A12-2: reservation-only supersession carries checkpointId=null (no
+    // checkpoint was ever persisted). The marker authority already permits
+    // null; the head index mirrors the marker verbatim. Rejecting null here
+    // used to half-persist supersession (marker durable, head stale).
+    if (entry.checkpointId !== null && entry.checkpointId !== undefined && typeof entry.checkpointId !== 'string') return fail('generation-runtime-corrupt');
     if (typeof entry.supersessionDigest !== 'string' || entry.supersessionDigest.length !== 64) return fail('generation-runtime-corrupt');
     if (seenSuperseded.has(entry.generation)) return fail('generation-runtime-fork');
     seenSuperseded.add(entry.generation);
@@ -777,11 +808,16 @@ function classifyGenerationV2(evidence) {
       return out;
     }
     if (evidence.landing.allLanded) {
-      // Fully landed but the committed head was never advanced
-      // (commit-before-head crash): a commit candidate, never a silent
-      // reapply. Reserve/commit paths treat it as must-commit-first.
-      out.outcome = 'COMMITTED';
-      out.activeState = null;
+      // A12 §12: fully landed but the committed head was never advanced is
+      // NOT commit proof. Segment-count completeness never authorizes the
+      // head: the generation is UNRESOLVED (commit-pending-verification)
+      // until reconstruct re-runs verification against the restored
+      // authoritative session (sealed checkpoint + durable operation +
+      // clean landing) and promotes it through the explicit recovered-
+      // completion path. Without that evidence it stays UNRESOLVED.
+      out.outcome = 'UNRESOLVED';
+      out.activeState = 'commit-pending-verification';
+      out.commitPending = true;
       out.headAdvanced = false;
       return out;
     }
@@ -859,12 +895,70 @@ function writeHeadV2(runtimeDir, head) {
   return Object.freeze(JSON.parse(JSON.stringify(back)));
 }
 
+// ---- A12 recovered-completion evidence --------------------------------------------
+// buildRecoveredCompletionV2 produces the deterministic recovered-completion
+// record for a session-verified commit-pending generation: ids, digests,
+// bindings and landing counts only (never payload text, prompt text, or
+// tool output). It is the durable-authoritative equivalent of the lost
+// in-memory A10 result: commitGenerationV2 accepts status 'recovered'
+// results whose checkpoint/operation identity matches this evidence.
+function buildRecoveredCompletionV2(evidence, generation) {
+  if (!evidence || !evidence.sealed || !evidence.operation || !evidence.landing) return null;
+  return Object.freeze({
+    schemaVersion: GENERATION_RUNTIME_SCHEMA_VERSION,
+    kind: 'recovered-completion',
+    generation,
+    checkpointId: evidence.sealed.checkpointId,
+    checkpointContentDigest: evidence.sealed.checkpointContentDigest,
+    operationId: evidence.operation.operationId,
+    parentCheckpointId: evidence.sealed.parentCheckpointId,
+    landedSegments: evidence.landing.landedCount,
+    verification: 'session-landing-reverified',
+  });
+}
+
+// recoveryTraceV2 returns the bounded deterministic recovery trace for one
+// reconstruct pass: observed state, decision, action, result. Identical
+// durable state yields identical traces. No wall-clock, no PID, no raw
+// task content: ids/digests/counts/statuses only.
+function recoveryTraceV2(state) {
+  if (!state || typeof state !== 'object') failRuntime('generation-runtime-unavailable: runtime state is required');
+  const trace = [];
+  for (const gen of state.generations || []) {
+    let decision = 'steady';
+    if (gen.outcome === 'UNRESOLVED' && gen.activeState === 'commit-pending-verification') decision = 'reverify-then-repair-or-hold';
+    else if (gen.outcome === 'UNRESOLVED') decision = 'reconcile-before-newer-generation';
+    else if (gen.outcome === 'RESERVED') decision = 'await-intent-or-supersede';
+    else decision = 'terminal-' + String(gen.outcome).toLowerCase();
+    trace.push(Object.freeze({
+      generation: gen.generation,
+      observedState: gen.outcome + (gen.activeState ? '/' + gen.activeState : ''),
+      decision,
+      action: state.repairedHead && gen.generation === state.latestCommittedGeneration ? 'advance-head' : 'none',
+      result: state.reconstructionOutcome,
+    }));
+  }
+  return Object.freeze(trace);
+}
+
 // Reconstructs the full multi-generation runtime from authoritative durable
 // state. Deterministic: identical artifacts yield byte-identical state (the
 // returned object serializes canonically equal). When repairHead is true
-// (default), a provably fully-landed generation that the head lags is
-// advanced deterministically (commit-before-head crash repair); anything
-// ambiguous fails closed instead of guessing.
+// (default) AND the authoritative session is restored from durable flushed
+// state (restart recovery), a fully-landed generation that the head lags is
+// re-verified (sealed checkpoint + durable operation + clean landing
+// re-computed verbatim) and advanced deterministically (commit-before-head
+// crash repair with recovered-completion evidence); anything ambiguous fails
+// closed instead of guessing. STRICT PRECONDITION: repairHead:true requires
+// a restored (durable-flushed) session. A live in-memory session may show
+// landed segments whose flush never succeeded (flush ambiguity); healing
+// from such a session would falsely commit unflushed application. The
+// reserve and entry paths therefore always reconstruct with repairHead:false
+// and reach terminal state only via A10 forward recovery (re-flush +
+// re-verify) plus explicit commit. Without the restored session, a
+// fully-landed head-missing generation stays UNRESOLVED
+// (commit-pending-verification) and repair is deferred
+// (head-repair-pending). Segment presence alone NEVER advances the head.
 function reconstructGenerationRuntimeV2(rawInput) {
   const n = normalizeReconstructInput(rawInput);
   const binding = { taskId: n.taskId, taskInstanceId: n.taskInstanceId, sessionId: n.sessionId };
@@ -924,6 +1018,18 @@ function reconstructGenerationRuntimeV2(rawInput) {
       && sealed.checkpoint.generation === 1) {
       failRuntime('generation-runtime-corrupt: generation 1 must carry parentCheckpointId=null');
     }
+    // A12-3 note (investigated, NOT enforced here): reservation source
+    // bindings (revisionDigest/snapshotTokenId) are generation-bound
+    // observations captured at reservation time, while the sealed
+    // checkpoint snapshot is captured at build time for the checkpoint
+    // generation; frozen A11 flows legitimately carry different values
+    // across the two (e.g. G3 reserved from a moved-state G2 observation,
+    // checkpoint built later for G3). Cross-enforcing them contradicts
+    // A11. Rebinding is instead contained by: monotonic allocation (never
+    // reused), duplicate-binding fork refusal at reserve, digest-validated
+    // reservation records, and commit-time identity checks (reservation +
+    // sealed + operation + active-result generation/binding agreement).
+    void 0;
     let landing = null;
     let sessionCitations = 0;
     if (n.session && operation && sealed) {
@@ -1061,11 +1167,49 @@ function reconstructGenerationRuntimeV2(rawInput) {
     previousGeneration = generation;
   }
 
-  // Head conflict: durable evidence of a fully-landed generation NEWER than
-  // the claimed head means either a commit-before-head crash (repairable) or
-  // a conflicting head (fail closed when the newer landing is ambiguous).
+  // A12 §12-13 commit-before-head recovery (rigorous, never heuristic):
+  // fully-landed-but-head-missing generations (commit-pending-verification)
+  // are re-verified here against the RESTORED authoritative session only.
+  // Required evidence chain: durable sealed checkpoint + durable operation
+  // (identity/digest-bound, checked above) + clean all-landed landing
+  // re-computed verbatim from the restored session + valid parent lineage.
+  // Without the session the candidate stays UNRESOLVED and repair is
+  // deferred (head-repair-pending). With the session + clean evidence the
+  // repair writes the head and records deterministic recovered-completion
+  // evidence (see buildRecoveredCompletionV2); only then may the head
+  // advance. Corrupt/foreign/ambiguous landing fails closed.
+  const sessionPresent = n.session !== undefined && n.session !== null;
+  const commitPendingGens = [];
+  for (const [generation, cls] of classified) {
+    if (cls.commitPending === true) {
+      const ev = perGeneration.get(generation);
+      if (!ev || !ev.sealed || !ev.operation) {
+        failRuntime('generation-head-conflict: commit-pending generation ' + generation + ' lacks durable checkpoint/operation');
+      }
+      if (ev.supersession) {
+        failRuntime('generation-runtime-corrupt: commit-pending generation ' + generation + ' is marked superseded');
+      }
+      if (!ev.landing || !ev.landing.allLanded || ev.landing.foreign) {
+        failRuntime('generation-head-conflict: commit-pending generation ' + generation + ' landing is not clean');
+      }
+      commitPendingGens.push(generation);
+    }
+  }
+  commitPendingGens.sort((a, b) => a - b);
+  // A commit-pending candidate older than (or equal to) the claimed head is
+  // contradictory evidence: fail closed, never silently rewind or fork.
+  const headGenPre = committedHead ? committedHead.generation : 0;
+  for (const generation of commitPendingGens) {
+    if (Number(generation) <= Number(headGenPre)) {
+      failRuntime('generation-head-conflict: commit-pending generation ' + generation + ' contradicts the committed head');
+    }
+  }
   let repairedHead = false;
   let reconstructionOutcome = 'steady';
+  let recoveredCompletion = null;
+  if (commitPendingGens.length > 0 && !sessionPresent) {
+    reconstructionOutcome = 'head-repair-pending';
+  }
   const newestLanded = committedGens.length > 0 ? committedGens[committedGens.length - 1] : 0;
   const headGen = committedHead ? committedHead.generation : 0;
   if (newestLanded > headGen) {
@@ -1116,6 +1260,105 @@ function reconstructGenerationRuntimeV2(rawInput) {
       }
     } else {
       failRuntime('generation-head-conflict: durable evidence newer than the committed head is not a clean commit candidate');
+    }
+  }
+
+  // A12 verified commit-pending repair: advance the head over clean,
+  // session-verified commit-pending generations (parent chain validated).
+  // Without the session this block never runs (deferred above); with
+  // repairHead:false (inspect/commit paths) it reports pending only.
+  if (commitPendingGens.length > 0 && sessionPresent) {
+    // Parent-chain validation: each candidate's parent must equal the
+    // previous committed checkpoint (head lineage first, then repaired
+    // candidates in order). Skipped superseded generations are supported
+    // (their checkpoints are simply absent from the chain).
+    let expectedParent = committedHead ? committedHead.checkpointId : null;
+    const chainOk = commitPendingGens.every((generation) => {
+      const ev = perGeneration.get(generation);
+      const parentId = ev.sealed.parentCheckpointId;
+      if (expectedParent === null || expectedParent === undefined) {
+        if (generation === 1) return parentId === null;
+        // No committed lineage yet: a repaired candidate must either anchor
+        // at null (first-ever commit) or descend from a provably committed
+        // older candidate; a non-null parent with no committed lineage is
+        // unprovable -> chain broken.
+        if (parentId === null) return true;
+        return false;
+      }
+      return parentId === expectedParent;
+    }) && (() => {
+      // Sequentially advance the expectation across the candidate chain.
+      let parent = committedHead ? committedHead.checkpointId : null;
+      for (const generation of commitPendingGens) {
+        const ev = perGeneration.get(generation);
+        if (parent !== null && parent !== undefined && ev.sealed.parentCheckpointId !== parent) return false;
+        if ((parent === null || parent === undefined) && generation !== 1 && ev.sealed.parentCheckpointId !== null && commitPendingGens.indexOf(generation) === 0) return false;
+        parent = ev.sealed.checkpointId;
+      }
+      return true;
+    })();
+    if (!chainOk) {
+      failRuntime('generation-head-conflict: commit-pending parent lineage is unprovable');
+    }
+    if (!repairHead) {
+      if (reconstructionOutcome === 'steady') reconstructionOutcome = 'head-repair-pending';
+    } else {
+      const repairedLineageGens = [];
+      for (const [generation, cls] of classified) {
+        if (cls.outcome === 'COMMITTED') repairedLineageGens.push(generation);
+      }
+      for (const generation of commitPendingGens) repairedLineageGens.push(generation);
+      repairedLineageGens.sort((a, b) => a - b);
+      const lineage = [];
+      for (const generation of repairedLineageGens) {
+        const ev = perGeneration.get(generation);
+        lineage.push({
+          generation,
+          checkpointId: ev.sealed.checkpointId,
+          parentCheckpointId: ev.sealed.parentCheckpointId,
+        });
+      }
+      const superseded = [];
+      for (const [generation, cls] of classified) {
+        if (cls.outcome === 'SUPERSEDED') {
+          const ev = perGeneration.get(generation);
+          superseded.push({
+            generation,
+            checkpointId: ev.supersession.checkpointId,
+            supersessionDigest: ev.supersession.supersessionDigest,
+          });
+        }
+      }
+      superseded.sort((a, b) => a.generation - b.generation);
+      const newestRepaired = commitPendingGens[commitPendingGens.length - 1];
+      const newestEv = perGeneration.get(newestRepaired);
+      const repaired = {
+        schemaVersion: GENERATION_RUNTIME_SCHEMA_VERSION,
+        taskId: n.taskId,
+        taskInstanceId: n.taskInstanceId,
+        sessionId: n.sessionId,
+        highestAllocatedGeneration: Math.max(headHighest, newestRepaired),
+        latestCommittedGeneration: newestRepaired,
+        latestCommittedCheckpointId: newestEv.sealed.checkpointId,
+        lineage,
+        superseded,
+        headDigest: null,
+      };
+      repaired.headDigest = deriveRuntimeDigestV2(repaired);
+      writeHeadV2(n.runtimeDir, repaired);
+      head = repaired;
+      repairedHead = true;
+      reconstructionOutcome = 'repaired-commit-before-head-crash';
+      // Promote the repaired candidates so the returned state converges:
+      // they are COMMITTED history with the head advanced.
+      for (const generation of commitPendingGens) {
+        const cls = classified.get(generation);
+        cls.outcome = 'COMMITTED';
+        cls.activeState = null;
+        cls.headAdvanced = true;
+        delete cls.commitPending;
+      }
+      recoveredCompletion = buildRecoveredCompletionV2(perGeneration.get(newestRepaired), newestRepaired);
     }
   }
 
@@ -1178,6 +1421,7 @@ function reconstructGenerationRuntimeV2(rawInput) {
     unresolvedGeneration,
     reconstructionOutcome,
     repairedHead,
+    recoveredCompletion,
     blockerCodes: unresolvedGeneration !== null ? ['generation-unresolved-operation'] : [],
   };
   return Object.freeze(state);
@@ -1239,8 +1483,14 @@ async function reserveNextGenerationV2(rawInput) {
 }
 
 function executeReserveCritical(n) {
-  // Reconstruct WITH repair: a commit-before-head crash must heal before any
-  // newer generation may be considered.
+  // A12: reconstruct WITHOUT repair. The reserve path never heals the head:
+  // a fully-landed-but-head-missing generation may be landed-yet-unflushed
+  // (flush ambiguity), and segment presence alone never authorizes the
+  // head. A pending generation blocks newer allocation (refuse/retry); it
+  // reaches terminal state only through the entry (A10 forward recovery,
+  // re-flush + re-verify) followed by explicit commit. Explicit restart
+  // recovery uses reconstruct with repairHead:true under its documented
+  // restored-session precondition.
   const runtime = reconstructGenerationRuntimeV2({
     schemaVersion: 1,
     taskId: n.taskId,
@@ -1250,7 +1500,7 @@ function executeReserveCritical(n) {
     checkpointDir: n.checkpointDir,
     operationRoot: n.operationRoot,
     session: n.session === undefined ? null : n.session,
-    repairHead: true,
+    repairHead: false,
   });
   if (runtime.unresolvedGeneration !== null) {
     failRuntime('generation-unresolved-operation: generation ' + runtime.unresolvedGeneration + ' must reconcile before a newer generation may proceed');
@@ -1762,7 +2012,15 @@ function assertGenerationEligibleForApplyV2(options) {
     // generation is still gated below.
     return { eligible: true, code: null, detail: 'commit-pending-recovery-only', runtime };
   }
-  if (entry.outcome === 'UNRESOLVED') return fail('generation-unresolved-operation', 'generation ' + opts.generation + ' requires reconciliation');
+  if (entry.outcome === 'UNRESOLVED') {
+    // Same-generation commit-pending-verification proceeds as A10 forward
+    // recovery (it converges without new mutation once re-verified); any
+    // other generation stays blocked until the pending generation resolves.
+    if (entry.activeState === 'commit-pending-verification') {
+      return { eligible: true, code: null, detail: 'commit-pending-recovery-only', runtime };
+    }
+    return fail('generation-unresolved-operation', 'generation ' + opts.generation + ' requires reconciliation');
+  }
   if (Number(runtime.activeGeneration) !== Number(opts.generation)) {
     return fail('generation-not-active', 'generation ' + opts.generation + ' is not the active generation');
   }
@@ -1797,7 +2055,8 @@ function generationTelemetryV2(runtime) {
 // applyCurrentGenerationV2 is the ONLY supported generation-aware active
 // path. It performs, under ONE held cross-process lock acquisition:
 //
-//   reconstruct (+ deterministic repair)
+//   reconstruct (WITHOUT repair: the apply path never heals the head;
+//      commit-pending generations proceed to A10 forward recovery)
 //   -> active-generation validation
 //   -> supersession refusal (permanently non-applicable)
 //   -> unresolved gating (other-generation unresolved blocks; same-generation
@@ -2000,13 +2259,17 @@ async function acquireAndAuthorizeGeneration(n) {
   try {
     // FINAL observation under the held lock: anything superseded, committed,
     // or reassigned after an earlier read is observed here, never trusted
-    // from a stale handle.
+    // from a stale handle. A12: WITHOUT repair. The apply path never heals
+    // the head: a commit-pending generation proceeds to A10 forward recovery
+    // (reconcile, re-establish flush durability, re-run post-apply
+    // verification) instead of being auto-committed on segment presence.
+    // Only A10's proven result plus explicit commit may advance the head.
     const runtime = reconstructGenerationRuntimeV2({
       schemaVersion: 1,
       taskId: n.taskId, taskInstanceId: n.taskInstanceId, sessionId: n.sessionId,
       runtimeDir: n.runtimeDir, checkpointDir: n.checkpointDir, operationRoot: n.operationRoot,
       session: request.session,
-      repairHead: true,
+      repairHead: false,
     });
     if (runtime.unresolvedGeneration !== null && Number(runtime.unresolvedGeneration) !== Number(generation)) {
       failRuntime('generation-unresolved-operation: generation ' + runtime.unresolvedGeneration + ' must reconcile before generation ' + generation + ' may apply');
@@ -2290,4 +2553,6 @@ module.exports = {
   reconcileGenerationV2,
   snapshotProtectionOfV2,
   validateSnapshotProtectionV2,
+  buildRecoveredCompletionV2,
+  recoveryTraceV2,
 };

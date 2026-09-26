@@ -579,11 +579,16 @@ function buildCompactedProjectionV2(input) {
   // Clone + isolate: the source log is never touched.
   const sourceEvents = n.sourceEvents.map((e) => deepClone(e));
   const bySeq = Object.create(null);
+  // A12-4: replacement seqs anchor on the semantic log only. Host-only
+  // end-seed markers still resolve in bySeq (positional lookups stay
+  // intact) but never advance maxSeq: otherwise a restart marker shifts
+  // every replacement seq/id and falsely moves the projection digest.
   let maxSeq = -1;
   for (const event of sourceEvents) {
     const seq = eventSeqOf(event);
     if (seq === null) failShadow('compacted event without integer seq');
     bySeq[seq] = event;
+    if (event && event.type === 'session/end-seed') continue;
     if (seq > maxSeq) maxSeq = seq;
   }
   for (const seq of n.surfaceNodes) {
@@ -651,8 +656,15 @@ function buildCompactedProjectionV2(input) {
   }
   const replacementMessages = replacementEvents.map((event) => deriveProjectedMessageV2(event));
   // Retained suffix (source-true view, kept for exactness accounting).
+  // A12-4: host-only session/end-seed restore markers are excluded from the
+  // digest input (H2 execution transparency). Markers stay in sourceEvents
+  // for positional eventBySeq lookups (filtering the array shifts positions
+  // and falsely breaks planning for mid-log markers); they are unsurfaced
+  // and semantically neutral, so excluding them here loses no authority
+  // while keeping the digest stable across restarts.
+  const RESTORE_MARKER_TYPE_V2 = 'session/end-seed';
   const projectedEvents = sourceEvents
-    .filter((e) => e.seq >= retainedStart)
+    .filter((e) => e && e.type !== RESTORE_MARKER_TYPE_V2 && e.seq >= retainedStart)
     .sort((a, b) => a.seq - b.seq)
     .map((e) => deepClone(e));
   const segments = roled.map((seg) => ({
@@ -761,8 +773,10 @@ function validateCompactedProjectionV2(artifact, expectations) {
     return fail('shadow-projection-failed');
   }
   // Retained suffix leg: no invented, lost, rewritten, or reordered events.
+  // A12-4: host-only end-seed markers are excluded on both sides (the
+  // artifact's projectedEvents excludes them by construction).
   const expected = (exp.sourceEvents || [])
-    .filter((e) => Number.isInteger(e.seq) && e.seq >= exp.retainedSuffixStartSeq)
+    .filter((e) => e && e.type !== 'session/end-seed' && Number.isInteger(e.seq) && e.seq >= exp.retainedSuffixStartSeq)
     .slice()
     .sort((a, b) => a.seq - b.seq);
   if (!Array.isArray(artifact.projectedEvents) || artifact.projectedEvents.length !== expected.length) {
