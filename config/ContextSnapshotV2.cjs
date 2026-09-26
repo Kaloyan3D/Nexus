@@ -17,7 +17,7 @@
  * triggering/production compaction (A08-A10).
  *
  * Core invariant (frozen): a sealed checkpoint may be structurally valid,
- * authentic, and untampered while still being STALE. Freshness comes ONLY
+ * integrity-sealed, and untampered while still being STALE. Freshness comes ONLY
  * from SnapshotManager.revalidate(token, currentState); the checkpoint
  * itself proves "I was built from snapshot X", never "X is still current".
  *
@@ -397,9 +397,34 @@ function captureConsistent(readStateFn, capturedAtUtc, options) {
 }
 
 // ---- closed-world structural validation ----
+// A05H H1: the token and both revision sub-objects are exact-key validated.
+// Unknown fields FAIL CLOSED with snapshot-token-invalid BEFORE the
+// digest/id legs, so recomputation can never legalize unknown schema.
+const SNAPSHOT_TOKEN_EXACT_KEYS = Object.freeze([
+  'schemaVersion', 'snapshotTokenId', 'revisionDigest', 'taskId',
+  'taskInstanceId', 'sessionId', 'workspaceId', 'repositoryId', 'checkoutId',
+  'generation', 'safePointBoundarySeq', 'sessionRevision', 'taskRevision',
+  'repositoryRevision', 'runtimeRevision', 'capturedAtUtc',
+]);
+const SNAPSHOT_REPOSITORY_REVISION_EXACT_KEYS = Object.freeze([
+  'headCommit', 'indexDigest', 'worktreeDigest',
+]);
+const SNAPSHOT_RUNTIME_REVISION_EXACT_KEYS = Object.freeze([
+  'runtimeSnapshotSeq', 'runtimeSnapshotId', 'runtimeSnapshotDigest',
+]);
+
+function unknownSnapshotKeyOf(value, allowedKeys) {
+  if (!value || typeof value !== 'object') return null;
+  for (const key of Object.keys(value)) {
+    if (!allowedKeys.includes(key)) return key;
+  }
+  return null;
+}
+
 function validateSnapshotToken(token) {
   const fail = (reason) => ({ valid: false, reason });
   if (!token || typeof token !== 'object') return fail('snapshot-token-missing');
+  if (unknownSnapshotKeyOf(token, SNAPSHOT_TOKEN_EXACT_KEYS) !== null) return fail('snapshot-token-invalid');
   if (Number(token.schemaVersion) !== SNAPSHOT_SCHEMA_VERSION) return fail('snapshot-token-invalid');
   if (typeof token.snapshotTokenId !== 'string' || !TOKEN_ID_PATTERN.test(token.snapshotTokenId)) return fail('snapshot-token-invalid');
   if (typeof token.revisionDigest !== 'string' || !DIGEST_PATTERN.test(token.revisionDigest)) return fail('snapshot-token-invalid');
@@ -415,12 +440,14 @@ function validateSnapshotToken(token) {
   if (typeof token.taskRevision !== 'string' || !DIGEST_PATTERN.test(token.taskRevision)) return fail('snapshot-token-invalid');
   const repo = token.repositoryRevision;
   if (!repo || typeof repo !== 'object') return fail('snapshot-token-invalid');
+  if (unknownSnapshotKeyOf(repo, SNAPSHOT_REPOSITORY_REVISION_EXACT_KEYS) !== null) return fail('snapshot-token-invalid');
   if (repo.headCommit !== null && !isBoundedString(String(repo.headCommit), SNAPSHOT_BOUNDS.headCommit, true)) return fail('snapshot-token-invalid');
   for (const digest of [repo.indexDigest, repo.worktreeDigest]) {
     if (digest !== null && (typeof digest !== 'string' || !DIGEST_PATTERN.test(digest))) return fail('snapshot-token-invalid');
   }
   const runtime = token.runtimeRevision;
   if (!runtime || typeof runtime !== 'object') return fail('snapshot-token-invalid');
+  if (unknownSnapshotKeyOf(runtime, SNAPSHOT_RUNTIME_REVISION_EXACT_KEYS) !== null) return fail('snapshot-token-invalid');
   if (runtime.runtimeSnapshotSeq !== null && (!Number.isInteger(runtime.runtimeSnapshotSeq) || runtime.runtimeSnapshotSeq < 0)) {
     return fail('snapshot-token-invalid');
   }
@@ -583,6 +610,8 @@ function snapshotTokenFilePath(dir, tokenId) {
   return path.join(dir, snapshotTokenFileName(tokenId));
 }
 
+// A05H H6 durability scope (frozen): atomic + read-back validated +
+// process-crash recoverable; NOT claimed power-loss durable (no fsync).
 function persistSnapshotToken(dir, token) {
   if (typeof dir !== 'string' || dir === '') throw new Error('v2-snapshot-persist: dir is required (KEEP)');
   const check = validateSnapshotToken(token);
@@ -637,6 +666,9 @@ module.exports = {
   RUNTIME_DIGEST_DOMAIN_V1,
   TASK_REVISION_DOMAIN_V1,
   SNAPSHOT_MAX_BYTES,
+  SNAPSHOT_TOKEN_EXACT_KEYS,
+  SNAPSHOT_REPOSITORY_REVISION_EXACT_KEYS,
+  SNAPSHOT_RUNTIME_REVISION_EXACT_KEYS,
   SNAPSHOT_BOUNDS,
   TOKEN_ID_PATTERN,
   sha256HexUtf8,

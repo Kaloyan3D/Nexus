@@ -206,7 +206,11 @@ check(reasonOf((c) => { c.constraints = [{ type: 'branch' }]; }) === 'checkpoint
 check(reasonOf((c) => { c.verification = { outcomes: [{ scope: 'unit', status: 'PARTIAL-PASS' }] }; }) === 'checkpoint-verification-invalid', 'non-conservative verification rejected');
 check(reasonOf((c) => { c.repository = null; }) === 'checkpoint-repository-invalid', 'invalid repository rejected');
 check(reasonOf((c) => { c.snapshot = { snapshotTokenId: 'tok', revisionDigest: null }; }) === 'checkpoint-snapshot-invalid', 'non-null snapshot token rejected (pre-A05)');
-check(reasonOf((c) => { c.shellLog = 'huge'; }) === 'checkpoint-forbidden-content', 'forbidden bulk key rejected');
+// A05H H1: unknown top-level keys fail closed at the schema leg (before the
+// forbidden-content leg). Forbidden bulk keys are therefore refused as
+// unknown schema fields; the forbidden-content leg still guards smuggled
+// secret VALUES (see REDACTION AND SECURITY below).
+check(reasonOf((c) => { c.shellLog = 'huge'; }) === 'checkpoint-schema-version', 'unknown top-level key rejected closed-world');
 check(reasonOf((c) => { c.checkpointContentDigest = '0'.repeat(64); }) === 'checkpoint-content-digest-mismatch', 'digest tamper rejected');
 check(reasonOf((c) => { c.checkpointId = 'ccp_' + '0'.repeat(32); }) === 'checkpoint-id-mismatch', 'checkpointId tamper rejected');
 

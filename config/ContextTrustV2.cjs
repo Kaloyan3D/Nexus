@@ -48,6 +48,18 @@
  * canonical serialization -> checkpointContentDigest -> checkpointId ->
  * ContentSealer -> atomic persistence -> read-back validation.
  *
+ * Threat model (frozen, A05H hardening): the ContentSeal is an UNKEYED
+ * integrity seal (domain-separated SHA-256 over canonical metadata). It
+ * provides deterministic tamper detection / record-integrity binding and
+ * detects inconsistent/partial modification when the expected identities
+ * are trusted. It is NOT keyed authentication: not a signature, not a MAC,
+ * and sealDigest validation is NOT proof that data came from Nexus. A04
+ * does not defend against an attacker that can arbitrarily rewrite
+ * checkpoint files and recompute all public SHA-256 identities
+ * (checkpointContentDigest, checkpointId, sealDigest). Malicious
+ * local-writer resistance would require a separately designed keyed
+ * MAC/signature authority; no HMAC/key management is introduced here.
+ *
  * Determinism: no clock reads. sealedAtUtc and createdAtUtc are explicit
  * caller-supplied inputs; identical inputs rebuild byte-identical seals.
  */
@@ -251,9 +263,32 @@ function failTrust(reason, detail) {
 }
 
 // ---- TrustProvenance validation (frozen schema, section 5) ----
+// A05H H1: TrustProvenance, the provenance-map envelope, each provenance
+// entry, and the CheckpointContentSeal are exact-key validated. Dynamic
+// provenance.fields MAP keys (field paths) remain dynamic, but every entry
+// VALUE object is closed-world. Unknown keys FAIL CLOSED before any
+// authority/derivation check, so recomputation can never legalize them.
+const TRUST_PROVENANCE_EXACT_KEYS = Object.freeze([
+  'schemaVersion', 'sourceKind', 'trust', 'sourceRefs', 'authorityScope', 'fieldKind',
+]);
+const PROVENANCE_MAP_ENVELOPE_EXACT_KEYS = Object.freeze(['schemaVersion', 'fields']);
+const CONTENT_SEAL_EXACT_KEYS = Object.freeze([
+  'schemaVersion', 'checkpointId', 'checkpointContentDigest', 'generation',
+  'taskId', 'taskInstanceId', 'sessionId', 'sealedAtUtc', 'algorithm', 'sealDigest',
+]);
+
+function unknownTrustKeyOf(value, allowedKeys) {
+  if (!value || typeof value !== 'object') return null;
+  for (const key of Object.keys(value)) {
+    if (!allowedKeys.includes(key)) return key;
+  }
+  return null;
+}
+
 function validateTrustProvenance(entry) {
   const fail = (reason) => ({ valid: false, reason });
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return fail('checkpoint-provenance-invalid');
+  if (unknownTrustKeyOf(entry, TRUST_PROVENANCE_EXACT_KEYS) !== null) return fail('checkpoint-provenance-invalid');
   if (Number(entry.schemaVersion) !== TRUST_PROVENANCE_SCHEMA_VERSION) return fail('checkpoint-provenance-invalid');
   if (!SOURCE_KINDS.includes(entry.sourceKind)) return fail('checkpoint-provenance-invalid');
   if (!TRUST_CLASSES.includes(entry.trust)) return fail('checkpoint-provenance-invalid');
@@ -383,6 +418,7 @@ function validateProvenanceMap(map) {
   const fail = (reason) => ({ valid: false, reason });
   if (map === null || map === undefined) return fail('checkpoint-provenance-missing');
   if (typeof map !== 'object' || Array.isArray(map)) return fail('checkpoint-provenance-invalid');
+  if (unknownTrustKeyOf(map, PROVENANCE_MAP_ENVELOPE_EXACT_KEYS) !== null) return fail('checkpoint-provenance-invalid');
   if (Number(map.schemaVersion) !== PROVENANCE_MAP_SCHEMA_VERSION) return fail('checkpoint-provenance-invalid');
   if (!map.fields || typeof map.fields !== 'object' || Array.isArray(map.fields)) return fail('checkpoint-provenance-invalid');
   const paths = Object.keys(map.fields);
@@ -393,6 +429,7 @@ function validateProvenanceMap(map) {
       return fail('checkpoint-provenance-invalid');
     }
     const entry = map.fields[fieldPath];
+    if (unknownTrustKeyOf(entry, TRUST_PROVENANCE_EXACT_KEYS) !== null) return fail('checkpoint-provenance-invalid');
     const check = validateTrustProvenance(entry);
     if (!check.valid) return fail(check.reason);
   }
@@ -506,6 +543,7 @@ function validateContentSeal(seal, checkpoint) {
   const fail = (reason) => ({ valid: false, reason });
   if (seal === null || seal === undefined) return fail('checkpoint-seal-missing');
   if (typeof seal !== 'object' || Array.isArray(seal)) return fail('checkpoint-seal-invalid');
+  if (unknownTrustKeyOf(seal, CONTENT_SEAL_EXACT_KEYS) !== null) return fail('checkpoint-seal-invalid');
   // Seal structural leg: every bound field plus the record digest must be
   // present and well-formed. A missing/malformed sealDigest is structural.
   if (Number(seal.schemaVersion) !== CONTENT_SEAL_SCHEMA_VERSION) return fail('checkpoint-seal-invalid');
@@ -655,6 +693,9 @@ function buildSealedCheckpointV2(checkpointInput, provenanceInputs, options) {
   });
 }
 
+// A05H H6 durability scope (frozen): one atomic rename persists
+// checkpoint + provenance + seal together (process-crash recoverable via
+// read-back validation); NOT claimed power-loss durable (no fsync).
 function persistSealedCheckpointV2(dir, built) {
   if (typeof dir !== 'string' || dir === '') failTrust('checkpoint-missing', 'dir is required (KEEP)');
   if (!built || typeof built !== 'object' || !built.checkpoint || typeof built.serialized !== 'string') {
@@ -725,6 +766,9 @@ module.exports = {
   DECISION_AUTHORITIES,
   CLOSED_TRUST_RULES,
   ALWAYS_REJECT_COMBINATIONS,
+  TRUST_PROVENANCE_EXACT_KEYS,
+  PROVENANCE_MAP_ENVELOPE_EXACT_KEYS,
+  CONTENT_SEAL_EXACT_KEYS,
   validateTrustProvenance,
   validateProvenanceAuthority,
   normalizeField,

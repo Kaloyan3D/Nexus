@@ -90,7 +90,7 @@ may gain optional fields but may not change the semantics below.
 
 The immutable identity of the exact authoritative task/session/workspace
 revision a checkpoint was built from. A sealed checkpoint may be
-structurally valid, authentic, and untampered while still being STALE:
+structurally valid, integrity-sealed, and untampered while still being STALE:
 integrity and freshness are different properties, proven by different
 components (`ContentSealer` vs `SnapshotManager`).
 
@@ -613,6 +613,18 @@ with `checkpoint-seal-record-digest-mismatch`.
   byte-identical seal, sealDigest, and sealed bytes. A different explicit
   sealedAtUtc leaves contentDigest/checkpointId unchanged and moves
   sealDigest/sealed bytes (expected).
+- Threat model (frozen A05H): the seal is an unkeyed integrity seal —
+  domain-separated SHA-256 over canonical metadata providing deterministic
+  tamper detection and record-integrity binding. It detects
+  inconsistent/partial modification when the expected identities are
+  trusted. It is NOT keyed authentication: it is not a signature, not a
+  MAC, and sealDigest validation is not proof that data came from Nexus.
+  A04 does not defend against an attacker that can arbitrarily rewrite
+  checkpoint files and recompute all public SHA-256 identities
+  (`checkpointContentDigest`, `checkpointId`, `sealDigest`). Malicious
+  local-writer resistance, if ever required, needs a separately designed
+  keyed MAC/signature authority (explicitly out of scope for A05H; no
+  HMAC/key management is introduced here).
 
 ---
 
@@ -878,8 +890,9 @@ starts its own `inactive → …` cycle on the same binding.
 - `checkpoint-ready` requires a validated checkpoint for the same
   `taskInstanceId`; `apply-pending` requires a validated frozen operation.
 - `applied` requires durable evidence, never in-memory presence.
-- Save points are crash-safe: an attempt resumes by reconciling the frozen
-  operation, never by re-planning.
+- Save points are process-crash recoverable (atomic + read-back validated;
+  not claimed power-loss durable, see §8): an attempt resumes by reconciling
+  the frozen operation, never by re-planning.
 
 ---
 
@@ -892,6 +905,16 @@ without exactly one payload segment, crash before apply, flush failure, or a
 non-participating persistence listener: **all keep the old context and let the
 session continue.** No half-compacted state exists. All lifecycle writes are
 atomic.
+
+Frozen durability scope (A05H): metadata persistence (operations, attempts,
+checkpoints, sealed checkpoints, snapshot tokens) is atomic (temp file +
+rename) + read-back validated + process-crash recoverable under the
+filesystem/OS contract; power-loss durability is NOT claimed (no fsync
+barrier — the repository has no proven cross-platform fsync helper, and no
+new storage subsystem is introduced in this hardening pass; power-loss
+hardening is deferred as a separate future task). The authoritative session
+durability barrier remains the real DSH `SessionStore.flush()` contract
+proven in A01/A02.
 
 ---
 
@@ -964,7 +987,7 @@ and remain deferred architecture contracts pending later tasks.
 ## 12. A05 snapshot-token freeze record
 
 A05 proves TOCTOU safety: a sealed checkpoint that is structurally valid,
-authentic, and untampered may still be STALE, and stale state BLOCKs before
+integrity-sealed, and untampered may still be STALE, and stale state BLOCKs before
 any new mutation. A05 answers "is this still the same authoritative state?"
 only; safe-point detection (A06), the checkpointability gate (A07),
 pressure/retention (A08), shadow-mode triggering (A09), and active

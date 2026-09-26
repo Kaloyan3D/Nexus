@@ -119,6 +119,79 @@ const FORBIDDEN_KEYS = Object.freeze([
   'authorization',
 ]);
 
+// A05H H1 closed-world exact-key validation. Every protocol object below
+// FAILS CLOSED on unknown keys: unknown fields are never digested-and-
+// accepted, never stripped, never ignored. Each check runs BEFORE the
+// section's value checks (and always before the digest/id legs at the end),
+// so a recomputed digest/id can never legalize an unknown schema field.
+// Reason codes reuse the section's existing frozen code.
+const CHECKPOINT_TOP_EXACT_KEYS = Object.freeze([
+  'schemaVersion', 'generation', 'parentCheckpointId', 'kind',
+  'taskId', 'taskInstanceId', 'sessionId', 'workspaceId',
+  'repositoryId', 'checkoutId', 'safePointBoundarySeq', 'safePointStepId',
+  'createdAtUtc', 'objective', 'requirements', 'constraints', 'progress',
+  'decisions', 'repository', 'evidenceRefs', 'failures', 'verification',
+  'continuation', 'snapshot', 'provenance', 'pressure',
+  'checkpointContentDigest', 'checkpointId', 'seal',
+]);
+const CHECKPOINT_OBJECTIVE_EXACT_KEYS = Object.freeze(['text', 'status']);
+const CHECKPOINT_REQUIREMENT_EXACT_KEYS = Object.freeze(['id', 'text', 'status', 'evidenceRefs']);
+const CHECKPOINT_CONSTRAINT_EXACT_KEYS = Object.freeze(['type', 'text']);
+const CHECKPOINT_PROGRESS_EXACT_KEYS = Object.freeze([
+  'taskStatus', 'completedMilestones', 'currentMilestone', 'remainingMilestones',
+]);
+const CHECKPOINT_DECISION_EXACT_KEYS = Object.freeze([
+  'id', 'statement', 'authority', 'status', 'evidenceRefs',
+]);
+const CHECKPOINT_REPOSITORY_EXACT_KEYS = Object.freeze([
+  'repositoryId', 'checkoutId', 'headCommit', 'baseCommit', 'cleanWorktree',
+  'changedFiles', 'changedFileCount', 'changedFilesTruncated',
+  'stagedSummary', 'unstagedSummary',
+]);
+const CHECKPOINT_EVIDENCE_REF_EXACT_KEYS = Object.freeze([
+  'schemaVersion', 'evidenceId', 'kind', 'locator', 'digest',
+  'observedAtUtc', 'taskInstanceId',
+]);
+const CHECKPOINT_FAILURES_EXACT_KEYS = Object.freeze([
+  'activeFailures', 'rejectedHypotheses', 'retryState',
+]);
+const CHECKPOINT_ACTIVE_FAILURE_EXACT_KEYS = Object.freeze([
+  'id', 'status', 'detail', 'attemptCount', 'evidenceRefs',
+]);
+const CHECKPOINT_RETRY_STATE_EXACT_KEYS = Object.freeze([
+  'attemptCount', 'nextRetryAtUtc', 'note',
+]);
+const CHECKPOINT_VERIFICATION_EXACT_KEYS = Object.freeze(['outcomes', 'note']);
+const CHECKPOINT_VERIFICATION_OUTCOME_EXACT_KEYS = Object.freeze([
+  'scope', 'status', 'detail', 'evidenceRefs',
+]);
+const CHECKPOINT_CONTINUATION_EXACT_KEYS = Object.freeze([
+  'nextAction', 'unresolvedQuestions', 'recentUserIntent',
+]);
+const CHECKPOINT_SNAPSHOT_SLOT_EXACT_KEYS = Object.freeze([
+  'snapshotTokenId', 'revisionDigest',
+]);
+const CHECKPOINT_PRESSURE_EXACT_KEYS = Object.freeze([
+  'preCheckpointEffectiveInputTokens', 'peakEffectiveInputTokens',
+]);
+const CHECKPOINT_PROVENANCE_MAP_EXACT_KEYS = Object.freeze(['schemaVersion', 'fields']);
+const CHECKPOINT_PROVENANCE_LEGACY_EXACT_KEYS = Object.freeze(['sourceNotes', 'collectedAtUtc']);
+const CHECKPOINT_PROVENANCE_ENTRY_EXACT_KEYS = Object.freeze([
+  'schemaVersion', 'sourceKind', 'trust', 'sourceRefs', 'authorityScope', 'fieldKind',
+]);
+const CHECKPOINT_SEAL_EXACT_KEYS = Object.freeze([
+  'schemaVersion', 'checkpointId', 'checkpointContentDigest', 'generation',
+  'taskId', 'taskInstanceId', 'sessionId', 'sealedAtUtc', 'algorithm', 'sealDigest',
+]);
+
+function unknownCheckpointKeyOf(value, allowedKeys) {
+  if (!value || typeof value !== 'object') return null;
+  for (const key of Object.keys(value)) {
+    if (!allowedKeys.includes(key)) return key;
+  }
+  return null;
+}
+
 function sha256HexUtf8(text) {
   return crypto.createHash('sha256').update(String(text), 'utf8').digest('hex');
 }
@@ -226,6 +299,7 @@ function walkStrings(value, visit) {
 
 function validateEvidenceRef(ref, taskInstanceId) {
   if (!ref || typeof ref !== 'object') return 'checkpoint-evidence-invalid';
+  if (unknownCheckpointKeyOf(ref, CHECKPOINT_EVIDENCE_REF_EXACT_KEYS) !== null) return 'checkpoint-evidence-invalid';
   if (Number(ref.schemaVersion) !== 1) return 'checkpoint-evidence-invalid';
   if (!isBoundedString(ref.evidenceId, BOUNDS.evidenceId, false)) return 'checkpoint-evidence-invalid';
   if (!EVIDENCE_KINDS.includes(ref.kind)) return 'checkpoint-evidence-invalid';
@@ -240,6 +314,7 @@ function validateCheckpointV2(checkpoint) {
   const fail = (reason) => ({ valid: false, reason });
   if (!checkpoint || typeof checkpoint !== 'object') return fail('checkpoint-missing');
   if (Number(checkpoint.schemaVersion) !== CHECKPOINT_SCHEMA_VERSION_V2) return fail('checkpoint-schema-version');
+  if (unknownCheckpointKeyOf(checkpoint, CHECKPOINT_TOP_EXACT_KEYS) !== null) return fail('checkpoint-schema-version');
   if (!isBoundedString(checkpoint.checkpointId, 128, false)) return fail('checkpoint-identity-invalid');
   if (typeof checkpoint.checkpointContentDigest !== 'string' || !/^[0-9a-f]{64}$/.test(checkpoint.checkpointContentDigest)) return fail('checkpoint-identity-invalid');
   if (!Number.isInteger(checkpoint.generation) || checkpoint.generation < 1) return fail('checkpoint-generation-invalid');
@@ -259,6 +334,7 @@ function validateCheckpointV2(checkpoint) {
 
   const objective = checkpoint.objective;
   if (!objective || typeof objective !== 'object') return fail('checkpoint-objective-missing');
+  if (unknownCheckpointKeyOf(objective, CHECKPOINT_OBJECTIVE_EXACT_KEYS) !== null) return fail('checkpoint-objective-missing');
   if (!isBoundedString(objective.text, BOUNDS.objectiveText, false)) return fail('checkpoint-objective-missing');
   if (!isBoundedString(objective.status, BOUNDS.objectiveStatus, false)) return fail('checkpoint-objective-missing');
 
@@ -267,6 +343,7 @@ function validateCheckpointV2(checkpoint) {
   if (requirements.length > BOUNDS.requirementsMax) return fail('checkpoint-requirements-invalid');
   for (const req of requirements) {
     if (!req || typeof req !== 'object') return fail('checkpoint-requirements-invalid');
+    if (unknownCheckpointKeyOf(req, CHECKPOINT_REQUIREMENT_EXACT_KEYS) !== null) return fail('checkpoint-requirements-invalid');
     if (!isBoundedString(req.id, BOUNDS.requirementId, false)) return fail('checkpoint-requirements-invalid');
     if (!isBoundedString(req.text, BOUNDS.requirementText, false)) return fail('checkpoint-requirements-invalid');
     if (!REQUIREMENT_STATUSES.includes(req.status)) return fail('checkpoint-requirements-invalid');
@@ -282,12 +359,14 @@ function validateCheckpointV2(checkpoint) {
   if (constraints.length > BOUNDS.constraintsMax) return fail('checkpoint-constraints-invalid');
   for (const constraint of constraints) {
     if (!constraint || typeof constraint !== 'object') return fail('checkpoint-constraints-invalid');
+    if (unknownCheckpointKeyOf(constraint, CHECKPOINT_CONSTRAINT_EXACT_KEYS) !== null) return fail('checkpoint-constraints-invalid');
     if (!isBoundedString(constraint.type, BOUNDS.constraintType, false)) return fail('checkpoint-constraints-invalid');
     if (!isBoundedString(constraint.text, BOUNDS.constraintText, false)) return fail('checkpoint-constraints-invalid');
   }
 
   const progress = checkpoint.progress;
   if (!progress || typeof progress !== 'object') return fail('checkpoint-progress-invalid');
+  if (unknownCheckpointKeyOf(progress, CHECKPOINT_PROGRESS_EXACT_KEYS) !== null) return fail('checkpoint-progress-invalid');
   if (!isBoundedString(progress.taskStatus, 64, false)) return fail('checkpoint-progress-invalid');
   for (const listKey of ['completedMilestones', 'remainingMilestones']) {
     if (!Array.isArray(progress[listKey])) return fail('checkpoint-progress-invalid');
@@ -303,6 +382,7 @@ function validateCheckpointV2(checkpoint) {
   if (decisions.length > BOUNDS.decisionsMax) return fail('checkpoint-decisions-invalid');
   for (const decision of decisions) {
     if (!decision || typeof decision !== 'object') return fail('checkpoint-decisions-invalid');
+    if (unknownCheckpointKeyOf(decision, CHECKPOINT_DECISION_EXACT_KEYS) !== null) return fail('checkpoint-decisions-invalid');
     if (!isBoundedString(decision.id, BOUNDS.decisionId, false)) return fail('checkpoint-decisions-invalid');
     if (!isBoundedString(decision.statement, BOUNDS.decisionStatement, false)) return fail('checkpoint-decisions-invalid');
     if (!DECISION_AUTHORITIES.includes(decision.authority)) return fail('checkpoint-decisions-invalid');
@@ -314,6 +394,7 @@ function validateCheckpointV2(checkpoint) {
 
   const repository = checkpoint.repository;
   if (!repository || typeof repository !== 'object') return fail('checkpoint-repository-invalid');
+  if (unknownCheckpointKeyOf(repository, CHECKPOINT_REPOSITORY_EXACT_KEYS) !== null) return fail('checkpoint-repository-invalid');
   if (repository.repositoryId !== null && repository.repositoryId !== undefined && !isBoundedString(String(repository.repositoryId), BOUNDS.repositoryId, true)) return fail('checkpoint-repository-invalid');
   if (repository.checkoutId !== null && repository.checkoutId !== undefined && !isBoundedString(String(repository.checkoutId), BOUNDS.checkoutId, true)) return fail('checkpoint-repository-invalid');
   if (repository.headCommit !== null && repository.headCommit !== undefined && !isBoundedString(String(repository.headCommit), BOUNDS.repositoryCommit, true)) return fail('checkpoint-repository-invalid');
@@ -342,10 +423,12 @@ function validateCheckpointV2(checkpoint) {
 
   const failures = checkpoint.failures;
   if (!failures || typeof failures !== 'object') return fail('checkpoint-failures-invalid');
+  if (unknownCheckpointKeyOf(failures, CHECKPOINT_FAILURES_EXACT_KEYS) !== null) return fail('checkpoint-failures-invalid');
   if (!Array.isArray(failures.activeFailures) || !Array.isArray(failures.rejectedHypotheses)) return fail('checkpoint-failures-invalid');
   if (failures.activeFailures.length > BOUNDS.failureMax || failures.rejectedHypotheses.length > BOUNDS.failureMax) return fail('checkpoint-failures-invalid');
   for (const failure of failures.activeFailures) {
     if (!failure || typeof failure !== 'object') return fail('checkpoint-failures-invalid');
+    if (unknownCheckpointKeyOf(failure, CHECKPOINT_ACTIVE_FAILURE_EXACT_KEYS) !== null) return fail('checkpoint-failures-invalid');
     if (!isBoundedString(failure.id, BOUNDS.failureId, false)) return fail('checkpoint-failures-invalid');
     if (!isBoundedString(failure.status, BOUNDS.failureStatus, false)) return fail('checkpoint-failures-invalid');
     if (failure.detail !== undefined && failure.detail !== null && !isBoundedString(String(failure.detail), BOUNDS.failureDetail, true)) return fail('checkpoint-failures-invalid');
@@ -361,15 +444,18 @@ function validateCheckpointV2(checkpoint) {
   }
   if (failures.retryState !== null && failures.retryState !== undefined) {
     if (typeof failures.retryState !== 'object') return fail('checkpoint-failures-invalid');
+    if (unknownCheckpointKeyOf(failures.retryState, CHECKPOINT_RETRY_STATE_EXACT_KEYS) !== null) return fail('checkpoint-failures-invalid');
     if (failures.retryState.note !== undefined && failures.retryState.note !== null && !isBoundedString(String(failures.retryState.note), BOUNDS.retryNote, true)) return fail('checkpoint-failures-invalid');
   }
 
   const verification = checkpoint.verification;
   if (!verification || typeof verification !== 'object') return fail('checkpoint-verification-invalid');
+  if (unknownCheckpointKeyOf(verification, CHECKPOINT_VERIFICATION_EXACT_KEYS) !== null) return fail('checkpoint-verification-invalid');
   if (!Array.isArray(verification.outcomes)) return fail('checkpoint-verification-invalid');
   if (verification.outcomes.length > BOUNDS.verificationOutcomesMax) return fail('checkpoint-verification-invalid');
   for (const outcome of verification.outcomes) {
     if (!outcome || typeof outcome !== 'object') return fail('checkpoint-verification-invalid');
+    if (unknownCheckpointKeyOf(outcome, CHECKPOINT_VERIFICATION_OUTCOME_EXACT_KEYS) !== null) return fail('checkpoint-verification-invalid');
     if (!isBoundedString(outcome.scope, BOUNDS.verificationScope, false)) return fail('checkpoint-verification-invalid');
     if (!VERIFICATION_STATUSES.includes(outcome.status)) return fail('checkpoint-verification-invalid');
     if (outcome.detail !== undefined && outcome.detail !== null && !isBoundedString(String(outcome.detail), BOUNDS.verificationDetail, true)) return fail('checkpoint-verification-invalid');
@@ -377,6 +463,7 @@ function validateCheckpointV2(checkpoint) {
 
   const continuation = checkpoint.continuation;
   if (!continuation || typeof continuation !== 'object') return fail('checkpoint-continuation-invalid');
+  if (unknownCheckpointKeyOf(continuation, CHECKPOINT_CONTINUATION_EXACT_KEYS) !== null) return fail('checkpoint-continuation-invalid');
   if (continuation.nextAction !== null && continuation.nextAction !== undefined && !isBoundedString(String(continuation.nextAction), BOUNDS.nextAction, true)) return fail('checkpoint-continuation-invalid');
   if (!Array.isArray(continuation.unresolvedQuestions)) return fail('checkpoint-continuation-invalid');
   if (continuation.unresolvedQuestions.length > BOUNDS.unresolvedMax) return fail('checkpoint-continuation-invalid');
@@ -395,6 +482,7 @@ function validateCheckpointV2(checkpoint) {
   // this leg alone.
   const snapshot = checkpoint.snapshot;
   if (!snapshot || typeof snapshot !== 'object') return fail('checkpoint-snapshot-invalid');
+  if (unknownCheckpointKeyOf(snapshot, CHECKPOINT_SNAPSHOT_SLOT_EXACT_KEYS) !== null) return fail('checkpoint-snapshot-invalid');
   if (snapshot.snapshotTokenId === null && snapshot.revisionDigest === null) {
     // Legacy pre-A05 checkpoint: structurally accepted, NOT snapshot-bound.
   } else if (
@@ -413,6 +501,13 @@ function validateCheckpointV2(checkpoint) {
   const provenance = checkpoint.provenance;
   if (provenance !== null && provenance !== undefined) {
     if (typeof provenance !== 'object') return fail('checkpoint-provenance-invalid');
+    // A05H H1: the provenance envelope itself is closed-world. The map
+    // shape and the legacy shape are mutually exclusive (see builder).
+    if (provenance.fields !== undefined && provenance.fields !== null) {
+      if (unknownCheckpointKeyOf(provenance, CHECKPOINT_PROVENANCE_MAP_EXACT_KEYS) !== null) return fail('checkpoint-provenance-invalid');
+    } else if (unknownCheckpointKeyOf(provenance, CHECKPOINT_PROVENANCE_LEGACY_EXACT_KEYS) !== null) {
+      return fail('checkpoint-provenance-invalid');
+    }
     if (provenance.fields !== undefined && provenance.fields !== null) {
       // A04 provenance map shape: { schemaVersion: 1, fields: { path: TrustProvenance } }.
       // Structural validation here (bounds + enums); closed-world authority
@@ -429,6 +524,7 @@ function validateCheckpointV2(checkpoint) {
         if (typeof fieldPath !== 'string' || fieldPath === '' || fieldPath.length > 256) return fail('checkpoint-provenance-invalid');
         const entry = provenance.fields[fieldPath];
         if (!entry || typeof entry !== 'object') return fail('checkpoint-provenance-invalid');
+        if (unknownCheckpointKeyOf(entry, CHECKPOINT_PROVENANCE_ENTRY_EXACT_KEYS) !== null) return fail('checkpoint-provenance-invalid');
         if (Number(entry.schemaVersion) !== 1) return fail('checkpoint-provenance-invalid');
         if (!knownSources.includes(entry.sourceKind)) return fail('checkpoint-provenance-invalid');
         if (!knownTrusts.includes(entry.trust)) return fail('checkpoint-provenance-invalid');
@@ -456,6 +552,7 @@ function validateCheckpointV2(checkpoint) {
   const seal = checkpoint.seal;
   if (seal !== null && seal !== undefined) {
     if (typeof seal !== 'object' || Array.isArray(seal)) return fail('checkpoint-seal-invalid');
+    if (unknownCheckpointKeyOf(seal, CHECKPOINT_SEAL_EXACT_KEYS) !== null) return fail('checkpoint-seal-invalid');
     if (Number(seal.schemaVersion) !== 1) return fail('checkpoint-seal-invalid');
     if (seal.algorithm !== 'sha256') return fail('checkpoint-seal-invalid');
     if (!isBoundedString(seal.checkpointId, 128, false)) return fail('checkpoint-seal-invalid');
@@ -474,6 +571,7 @@ function validateCheckpointV2(checkpoint) {
   const pressure = checkpoint.pressure;
   if (pressure !== null && pressure !== undefined) {
     if (typeof pressure !== 'object') return fail('checkpoint-pressure-invalid');
+    if (unknownCheckpointKeyOf(pressure, CHECKPOINT_PRESSURE_EXACT_KEYS) !== null) return fail('checkpoint-pressure-invalid');
     for (const key of ['preCheckpointEffectiveInputTokens', 'peakEffectiveInputTokens']) {
       const tokens = pressure[key];
       if (tokens !== null && tokens !== undefined && (!Number.isInteger(tokens) || tokens < 0)) return fail('checkpoint-pressure-invalid');
@@ -555,10 +653,19 @@ function asNullableString(value) {
 }
 
 // ---- A05 snapshot slot (embedding only; minting is SnapshotManager's) ----
-// Accepts, in order: input.snapshotToken (a full ContextSnapshotToken, whose
-// snapshotTokenId/revisionDigest are embedded verbatim after structural
-// validation), input.snapshot ({ snapshotTokenId, revisionDigest } from a
-// real capture), or nothing (legacy null/null). Anything else FAILS CLOSED.
+// A05H H2 production contract (frozen): a snapshot-bound checkpoint can ONLY
+// be established from input.snapshotToken, a full ContextSnapshotToken that
+// passes ContextSnapshotV2.validateSnapshotToken() and matches the
+// checkpoint's taskId/taskInstanceId/sessionId/generation. The raw
+// input.snapshot identity-only path ({ snapshotTokenId, revisionDigest })
+// was a bypass: it could make a checkpoint appear snapshot-bound without
+// proving the identity came from a real SnapshotManager capture, so any
+// non-null raw slot now FAILS CLOSED. Legacy pre-A05 checkpoints remain
+// constructible by supplying NO token (snapshotToken absent/null AND
+// snapshot absent/null or explicit null/null) and stay structurally valid
+// but NOT bound (see snapshotModeOf / validateCheckpointSnapshotBinding).
+// There is NO internal/test-only raw path: production creation is the only
+// creation path.
 function buildSnapshotSlotV2(input) {
   const fromToken = input.snapshotToken;
   if (fromToken !== undefined && fromToken !== null) {
@@ -578,15 +685,7 @@ function buildSnapshotSlotV2(input) {
   if (slot === undefined || slot === null) return { snapshotTokenId: null, revisionDigest: null };
   if (typeof slot !== 'object') throw new Error('v2-checkpoint-build: snapshot must be an object or null (KEEP)');
   if (slot.snapshotTokenId === null && slot.revisionDigest === null) return { snapshotTokenId: null, revisionDigest: null };
-  if (
-    typeof slot.snapshotTokenId === 'string' &&
-    snapshotV2.TOKEN_ID_PATTERN.test(slot.snapshotTokenId) &&
-    typeof slot.revisionDigest === 'string' &&
-    /^[0-9a-f]{64}$/.test(slot.revisionDigest)
-  ) {
-    return { snapshotTokenId: slot.snapshotTokenId, revisionDigest: slot.revisionDigest };
-  }
-  throw new Error('v2-checkpoint-build: snapshot must be null/null or a real captured token identity (KEEP)');
+  throw new Error('v2-checkpoint-build: snapshot must be null/null or a real captured token identity via input.snapshotToken (raw snapshot slots are not accepted) (KEEP)');
 }
 
 // Returns 'legacy' for pre-A05 null/null checkpoints and 'snapshot-bound'
@@ -792,6 +891,10 @@ function checkpointV2FilePath(dir, generation) {
   return path.join(dir, checkpointV2FileName(generation));
 }
 
+// A05H H6 durability scope (frozen): atomic (temp file + rename) +
+// read-back validated + process-crash recoverable under the
+// filesystem/OS contract; NOT claimed power-loss durable (no fsync). The
+// authoritative session durability barrier is DSH SessionStore.flush().
 function persistCheckpointV2(dir, built) {
   if (typeof dir !== 'string' || dir === '') throw new Error('v2-checkpoint-persist: dir is required (KEEP)');
   if (!built || typeof built !== 'object' || !built.checkpoint || typeof built.serialized !== 'string') {
@@ -884,6 +987,26 @@ module.exports = {
   VERIFICATION_STATUSES,
   CHECKPOINT_KINDS,
   EVIDENCE_KINDS,
+  CHECKPOINT_TOP_EXACT_KEYS,
+  CHECKPOINT_OBJECTIVE_EXACT_KEYS,
+  CHECKPOINT_REQUIREMENT_EXACT_KEYS,
+  CHECKPOINT_CONSTRAINT_EXACT_KEYS,
+  CHECKPOINT_PROGRESS_EXACT_KEYS,
+  CHECKPOINT_DECISION_EXACT_KEYS,
+  CHECKPOINT_REPOSITORY_EXACT_KEYS,
+  CHECKPOINT_EVIDENCE_REF_EXACT_KEYS,
+  CHECKPOINT_FAILURES_EXACT_KEYS,
+  CHECKPOINT_ACTIVE_FAILURE_EXACT_KEYS,
+  CHECKPOINT_RETRY_STATE_EXACT_KEYS,
+  CHECKPOINT_VERIFICATION_EXACT_KEYS,
+  CHECKPOINT_VERIFICATION_OUTCOME_EXACT_KEYS,
+  CHECKPOINT_CONTINUATION_EXACT_KEYS,
+  CHECKPOINT_SNAPSHOT_SLOT_EXACT_KEYS,
+  CHECKPOINT_PRESSURE_EXACT_KEYS,
+  CHECKPOINT_PROVENANCE_MAP_EXACT_KEYS,
+  CHECKPOINT_PROVENANCE_LEGACY_EXACT_KEYS,
+  CHECKPOINT_PROVENANCE_ENTRY_EXACT_KEYS,
+  CHECKPOINT_SEAL_EXACT_KEYS,
   sha256HexUtf8,
   byteLengthUtf8,
   redactCheckpointTextV2,
