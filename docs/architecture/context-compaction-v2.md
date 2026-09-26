@@ -1014,3 +1014,161 @@ only, never raw content.
 
 Regression: A01 DSH proof, A02 operation suite, A03 checkpoint suite, A04
 trust/seal suite, and the V1 gates remain green (see task report).
+
+---
+
+## 13. A06 safe-point freeze record
+
+A06 answers ONE question and NOTHING else:
+
+```text
+Is the current execution boundary safe for checkpoint creation
+and future context compaction?
+```
+
+It does NOT decide whether compaction is needed, whether the task is
+checkpointable (A07), what should be retained, or how the prompt is
+rebuilt. Authority: `SafePointDetector`
+(`config/ContextSafePointV2.cjs`) is the SOLE V2 safe-boundary authority
+(boundary classification, open-edge detection, the safe-point decision,
+stable refusal reasons, boundary identity). No other CCv2 component
+redefines what "safe" means. The only production seam is
+`detectSafePointV2()` (plus the pure binding helpers); no triggers, no
+automatic checkpoint creation, no projection mutation.
+
+Core invariant (frozen): NO CHECKPOINT ACROSS AN OPEN EXECUTION EDGE.
+A checkpoint may only be created at an execution boundary where Nexus can
+produce a coherent authoritative state without cutting through an
+in-flight protocol interaction.
+
+### 13.1 `SafePointDecisionV2` (frozen)
+
+```text
+SafePointDecisionV2 {
+  schemaVersion     : integer (1)
+  safe              : boolean
+  boundarySeq       : integer | null   — exact durable session event seq
+  boundaryKind      : SafePointBoundaryKind | null
+  blockers          : SafePointBlocker[] — { code, detail }, code-sorted
+  inspectedRevision : { taskRevision, sessionRevision, runtimeSnapshotId }
+}
+```
+
+- `safe === true` requires empty `blockers` and a grounded boundary;
+  unsafe requires at least one blocker and carries a NULL boundary.
+- Closed world (A05H rule): input and decision objects are exact-key
+  validated BEFORE any derived logic; unknown fields FAIL CLOSED (throw,
+  never "safe"). `validateSafePointDecision()` additionally rejects
+  `safe`-with-blockers, `unsafe`-without-blocker, and unknown codes.
+- Determinism: pure over the input; no clock, no randomness, stable
+  code-sorted blockers. No timing heuristics anywhere (no "quiet for
+  Nms", no text-length inference): streaming state comes from unclosed
+  `assistant/chunk` runs, never from timing.
+- Security: classification derives ONLY from trusted protocol/controller/
+  runtime structure (event types/seqs/markers, controller flags, runtime
+  flags). Repository/tool/model TEXT (including "SAFE_POINT=true") is
+  inert data.
+
+### 13.2 Boundary taxonomy (frozen)
+
+Every category names a real production boundary:
+
+| Kind | Grounded meaning |
+| --- | --- |
+| `user-turn-committed` | tail message-producing event is `user/message` |
+| `assistant-turn-committed` | tail is a text-only `assistant/message` (a message still carrying `tool-call` blocks is NEVER safe) |
+| `tool-result-committed` | tail is `tool/result` with every requested call resolved |
+| `controller-step-committed` | tail is a `step/end` closing a committed DSH/controller step |
+| `task-complete` | controller completion committed plus every other safety leg |
+
+### 13.3 Unsafe-state taxonomy (frozen codes)
+
+`safe-point-assistant-stream-open` (unclosed chunk run),
+`safe-point-tool-call-open` (request with no recorded `tool/call` start),
+`safe-point-tool-result-pending` (started call with no committed result),
+`safe-point-tool-transaction-open` (open `step`),
+`safe-point-controller-transition-open` (controller mutation in progress,
+including uncommitted completion), `safe-point-session-not-durable`
+(boundary beyond the observed `flushedSeq` or no participating flush),
+`safe-point-runtime-transition`, `safe-point-protocol-unbalanced` (open
+`turn` per the `interruptedTurnClosers` rule), and
+`safe-point-boundary-unavailable` (empty log or no message-producing
+event). Two binding legs extend the code list: `safe-point-state-changed`
+(detect->capture race) and `safe-point-boundary-mismatch` (A03 binding).
+Codes are never weakened: the V1 open-tool protection
+(`balancedRetainCut`) stays intact, and A06 owns its V2 classification
+rather than proxying a boolean.
+
+Tool lifecycle rule (frozen): a `tool-call` request without its matching
+`tool/result` is UNSAFE; `call-open` vs `result-pending` stay separate
+because `tool/call` presence distinguishes them. One finished tool never
+covers an unresolved sibling: ALL obligations of the turn must close.
+Failure boundaries are explicit: a durably recorded error result closes
+its obligation (`failure != unsafe forever`).
+
+### 13.4 Durability, controller, runtime (frozen)
+
+- Durability: `boundarySeq` (the tail event seq) must be durably
+  established (`flushedSeq >= boundarySeq` with a participating
+  `SessionStore.flush()` barrier). Memory presence alone never suffices;
+  A02 durability semantics are unchanged and A06 duplicates none of them.
+- Controller: `transitionOpen`, or `taskStatus == complete` without
+  `completionCommitted`, blocks (milestone/completion/requirement
+  half-applies are never checkpointed through).
+- Runtime: `transitionOpen` blocks; the current snapshot seq follows the
+  A01/A02 host-owned rule (last host-owned runtime-context node on the
+  live surface) and is observed, never synthesized. A06 creates no
+  runtime snapshots.
+- `safePointBoundarySeq` is the pinned DSH canonical append-log ordinal
+  (Outcome A, hardened): the authoritative per-event `seq` field of the
+  last execution event. The host assigns `seq` equal to log length at
+  `append`, rejects any restore seed whose persisted `seq` differs from
+  its index, rejects non-contiguous surface transitions, and carries the
+  ordinal explicitly in storage (`seq0` chunk-row base). Position and
+  persisted field therefore agree by host contract, never by JS
+  coincidence; A06 additionally revalidates contiguity and fails closed
+  on absent or malformed seqs. The host `session/end-seed`
+  seed-boundary marker is transparent to boundary identity (storage
+  bookkeeping, no execution semantics), so a restore reports the exact
+  same boundary. No array indexes, message counts, surface counts,
+  prompt positions, or clocks are ever used as boundary authority.
+
+### 13.5 Ordering, races, bindings (frozen)
+
+Required future order: `SafePointDetector` -> safe boundary confirmed ->
+`SnapshotManager.capture()` -> `CheckpointBuilder`. A snapshot captured
+at an unsafe boundary must never become authoritative.
+
+Capture race (frozen): a SAFE decision is NOT a timeless capability.
+`assertSafePointFresh()` compares the decision `inspectedRevision`
+(`taskRevision`, `sessionRevision`, `runtimeSnapshotId`) plus the
+boundary against the capture-time observation; any movement -> BLOCK
+with `safe-point-state-changed` (retry). A05 capture consistency
+(`captureConsistent` / `revalidate`) remains the mechanism that rejects
+mixed/stale revisions.
+
+A03 binding (frozen): `checkpoint.safePointBoundarySeq` MUST equal the
+exact A06 `boundarySeq` used for capture (`assertCheckpointBindsSafePoint`;
+mismatch -> BLOCK). A02 compatibility (frozen): no A02 operation is ever
+created from an unsafe boundary; A06 precedes operation creation and
+changes no durable operation/reconciliation semantics.
+
+Restart (frozen): a committed boundary replays to the exact same
+boundary seq and kind and remains SAFE across restore with no renumbering
+(the seeded events are the durable bytes verbatim and the seed-boundary
+marker is transparent); reordered or gapped seeds are rejected by the host
+restore boundary itself, so restored ordering cannot move a previously
+valid boundary. Incomplete protocol state replays as incomplete and never
+becomes falsely safe. A05 relationship (frozen): A05 answers "is the state still
+the same state that was captured?"; A06 answers "is NOW a coherent
+boundary at which capture may occur?". Current-user-message invariant
+(A01 4.8) is preserved: the safe boundary is the tail seq, so the active
+request sits AT the boundary and survives exactly once.
+
+Proof: `tests/ContextSafePointV2.Tests.cjs` (unit matrix, 81 assertions)
+and `tests/ContextSafePointV2LiveHost.Tests.cjs` (real pinned-host proof
+under `NEXUS_REQUIRE_CCV2_LIVE_HOST=1`, 41 assertions). Harness entries:
+`ContextSafePointV2`, `ContextSafePointV2LiveHost`. Known limitation
+(UNVERIFIED, never simulated): a spontaneous host-driven transition
+landing mid-detect has no offline inducer; the architecture relies on the
+A05 capture-consistency retry for that window.
