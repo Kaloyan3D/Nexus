@@ -3442,3 +3442,134 @@ WARM, including cross-process where proofs cannot travel).
 B01, B02, B02H, B03, B03H, B04, and Phase-A regressions remain green
 (see task report). Next: CCV2-C01 (ContextView Contract) - not begun
 here.
+## 31. C01 ContextView Contract (Phase C)
+
+C01 freezes the disposable model-facing working set compiled from durable
+Nexus Task Memory for ONE inference. Production authority:
+config/ContextViewV2.cjs. No Phase-A/B source file was modified
+(additive-only); no compiler, retrieval, packing, compression,
+embeddings, DECIDE, or prompt rendering exists anywhere in C01.
+
+### 31.1 Authority boundary (frozen)
+
+Checkpoint = authoritative task state. ContextPage = durable exact
+historical evidence descriptor. MemoryTierDecision = deterministic memory
+policy. ContextView = disposable model-facing working set for ONE
+inference. A ContextView is NOT task truth, durability proof,
+verification/completion/retention authority, EvidenceRef authority, a
+checkpoint replacement, or canonical history. Deleting every ContextView
+loses zero durable task truth. The module persists NOTHING, queries NO
+live controller state, and performs NO search/packing/compression.
+Conceptual exports: createContextViewV2, validateContextViewV2,
+canonicalizeContextViewV2, deriveContextViewIdV2,
+deriveContextViewDigestV2, describeContextViewV2.
+
+### 31.2 Schemas (frozen)
+
+ContextViewV2 exact keys: schemaVersion(1), id, namespace (full 6-field
+frozen namespace), checkpointBinding, turnRef|null, pinned, hot, warm,
+materializedCold, referencedColdPages, tokenBudget,
+compilerPolicyRevision, compilationTrace, mandatoryRefs, viewDigest,
+disposable(true, invariant). The architecture baseline name
+retrievedPages is frozen as the canonical field materializedCold (exact
+COLD material already chosen by a future compiler; C01 performs no
+retrieval); a retrievedPages key fails closed with a rename pointer.
+
+MaterializedContextV2 exact keys: schemaVersion, id (derived cxm_, never
+caller-supplied), tier (PINNED/HOT/WARM/COLD; ARCHIVE absent), sourceType
+(checkpoint-state/current-turn/context-page/rehydrated-evidence/
+runtime-state), sourceId, contentHash (= sha256 of exactText, enforced),
+provenance (full frozen TrustProvenance), mediaType (text only; binary
+fails closed, never silently decoded), exactText (bounded), mandatory,
+tierDecision (validated B04 decision, binding below), evidence? (fresh
+B03 binding record for external COLD), toolTransaction? (balanced unit
+for protocol subjects).
+
+ContextReferenceV2 exact keys: pageId, contentHash, evidenceId?, kind,
+provenance, exactResolutionMode (any frozen B03H mode), namespace
+(task/instance/session triple), tierDecision (COLD, validated).
+Identity-only: no page text, no summary-as-evidence. Referenced-only
+COLD remains known but its exact bytes are NOT in the view.
+
+ContextMandatoryRefV2 exact keys: sourceId, kind (7-kind closed world),
+contentHash?. ContextDecision exact keys: pageId?, action
+(PIN/LOAD/EXTRACT/REFERENCE/SKIP), reasonCode, deterministic (must be
+true; no DecisionProvider exists), provider?, confidence?.
+
+### 31.3 Identity and integrity (frozen)
+
+entryId = cxm_ + sha256Hex(UTF-8(nexus/context-view-material/v1 LF
+section LF tier LF sourceType LF sourceId LF contentHash)).slice(0, 32).
+viewId = cxv_ + sha256Hex(UTF-8(nexus/context-view/v1 LF
+canonicalJson(identityBody))).slice(0, 32); identityBody binds namespace,
+checkpoint generation/id/contentHash, snapshot revision, turnRef, compiler
+policy revision, budget, mandatory refs (view order), ordered
+materialized contents (section/id/sourceId/contentHash/tier), and ordered
+referenced identities. No clock, UUID, PID, or mtime. The compilation
+trace is observability, NOT identity: trace-only differences share
+viewId. viewDigest = sha256Hex(UTF-8(nexus/context-view-digest/v1 LF
+canonicalJson(view WITHOUT id + viewDigest))) covers membership, order,
+content, references, budget, trace, checkpoint binding, namespace, and
+policy. Canonical serialization reuses frozen A03 canonicalize; equal
+inputs serialize byte-identically across calls, restarts, processes.
+
+### 31.4 Binding and preservation (frozen)
+
+Namespace: every tier decision, evidence record, and cold reference
+triple-must-match the view namespace; cross-task inclusion fails closed.
+Checkpoint binding: generation/id/contentHash plus A05 revisionDigest as
+snapshotRevision (explicit null for legacy checkpoints); binding only, no
+freshness authority. Tier preservation: entry.tier must equal its B04
+decision tier and its section tier; page-backed entries bind
+decision.pageId/contentHash to sourceId/contentHash; state-backed entries
+carry page-less decisions. Caller relabeling is impossible through the
+validated decision. Trust preservation: entry provenance must carry the
+decision trust class and pass authority-legality; rehydrated provenance
+must equal entry provenance; B03 verification never upgrades trust.
+Content never self-declares authority through prose.
+
+### 31.5 Membership invariants (frozen)
+
+One semantic source -> one materialized representation (plus the
+checkpoint:full marker carve-out owned by its own exactly-once rule).
+Current-turn at most once (source identity, not text equality). Latest
+full checkpoint (checkpoint:full) at most once. Balanced tool units: a
+protocol-subject entry without a call+result unit fails; one-sided units
+fail. Mandatory manifest: every ref accounted exactly once with hash
+agreement where given; missing/duplicate/drift fails closed. C01 never
+creates the manifest (C02 derives it). Budget is a validated contract
+(0 <= used <= target <= hardMax; used:null = explicit unknown, never
+guessed); C01 computes nothing (C04 owns allocation).
+
+### 31.6 External-COLD handoff (frozen)
+
+External-route COLD (exact-session/ repository/artifact-source) requires
+a fresh B03 evidence binding record: route/mode agreement, recomputed
+B03 resultDigest, namespace + provenance binding. The old B04 decision
+alone never counts as materialized evidence (stale-proof rule); C01
+validates binding agreement, never rehydrates, never vouches freshness
+(C02 rebuild responsibility). Durably self-backed COLD needs no external
+record; the exactText/contentHash equation is its check.
+Referenced-only COLD needs no fresh bytes.
+
+### 31.7 Bounds and safety (frozen)
+
+Structural schema-safety bounds only (per-section 256, references 512,
+trace 1024, mandatory 256, exactText 8192 chars, view 1 MiB); never the
+C04 model token budget. Closed-world exact keys at every level; unknown
+fields fail closed. describeContextViewV2 emits ids, hash prefixes,
+counts, tiers, budget metadata only: no prompts, blobs, or credentials.
+Creation/validation is pure and read-only; outputs deeply frozen.
+
+### 31.8 Suites (frozen)
+
+New suites tests/ContextViewV2.Tests.cjs (123 assertions) and
+tests/ContextViewV2XProc.Tests.cjs (+ worker, 16 assertions), registered
+after ContextMemoryTierV2H. Fixtures cover PINNED requirement/constraint,
+HOT current-user turn + active failure, WARM decision + verification,
+materialized COLD test log, referenced-only COLD repo page, ARCHIVE
+exclusion, mandatory refs, live B03 session-route proof binding, tool
+protocol units, hostile-evidence inertness, and cross-task isolation.
+Phase A, B01, B02(+H), B03(+H), B04(+H) regressions remain green (see
+task report). Next: CCV2-C02 (Deterministic Context Compiler) - not
+begun here.

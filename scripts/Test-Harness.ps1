@@ -132,6 +132,8 @@ $suites = @(
     [ordered]@{ name='ContextMemoryTierV2'; script='tests/ContextMemoryTierV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextMemoryTierV2XProc'; script='tests/ContextMemoryTierV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextMemoryTierV2H'; script='tests/ContextMemoryTierV2H.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextViewV2'; script='tests/ContextViewV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextViewV2XProc'; script='tests/ContextViewV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionV2'; script='tests/ContextCompactionV2.Tests.ps1'; executable=$powershell; kind='powershell' }
 )
 
