@@ -3401,7 +3401,7 @@ structurally COLD-eligible under frozen B01/B02 durable-store
 semantics; B02 stays physical durability authority and B03 still
 revalidates storage at materialization. External routes
 (exact-session-source, exact-repository-source, exact-artifact-source)
-require a B03-authenticated resolutionProof before tier COLD with
+require a B03-validated resolutionProof before tier COLD with
 reason tier-cold-source-resolvable. Structural adapter presence alone
 yields WARM with tier-keep-more-context-no-exact-resolution.
 
