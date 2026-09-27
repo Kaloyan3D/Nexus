@@ -2891,3 +2891,554 @@ CCV2-B03 (Exact Rehydration) — not begun here.
 
 
 
+## 27. B03 Exact Rehydration freeze record (Phase B)
+
+B03 implements identity-driven exact evidence rehydration over the frozen
+B01 ContextPage contract and the frozen B02 store. B03 answers "I already
+know exactly which evidence I need; give me that exact validated evidence"
+and NOTHING else. Relevance search, ranking, lexical/symbol/file lookup,
+BM25, embeddings, vector stores, reranking, ContextView, Context Compiler,
+budget packing, memory-tier policy, and JEV/Laya/DECIDE are explicitly out
+of scope (proven absent from the B03 production surface by source scan).
+B01 (section 24), B02 (section 25), and B02H (section 26) are unchanged;
+the B02H closing line naming B03 as "not begun" is superseded by this
+record alone.
+
+### 27.1 Production authority (frozen)
+
+Authority: `config/ContextEvidenceRehydrationV2.cjs` (sole rehydration
+authority). `rehydrateEvidenceRefV2`, `rehydrateContextPageV2`,
+`resolvePageBackingV2`, `validateRehydratedEvidenceV2`,
+`describeRehydrationV2`, `deriveRehydrationDigestV2`, plus the
+re-exported session-digest producers `deriveSessionEvidenceDigestV2` /
+`canonicalSessionEvidenceTextV2`. Two narrow adapters supply bytes/events
+and never declare verified:true:
+`config/ContextSessionEvidenceSourceV2.cjs` (canonical session source:
+`createMemorySessionSourceV2`, `wrapDshSessionV2`,
+`projectSessionEventV2`, digest producers) and
+`config/ContextRepositoryEvidenceSourceV2.cjs` (exact file/artifact
+supply: `createRepositoryExactSourceV2`,
+`createArtifactExactSourceV2`). No exact-rehydration policy lives in the
+store, compiler, or controller. The module holds no cache and no mutable
+state: reads are restart-safe by construction.
+
+### 27.2 RehydratedEvidence contract (frozen)
+
+`RehydratedEvidenceV2 { schemaVersion:1, evidenceId|null, pageId, kind,
+contentHash, namespace, provenance, sourceRoute, mediaType,
+exactText|null, exactBytes|null, sourceIdentity, resultDigest,
+verified:true }`, closed-world (unknown fields fail;
+`validateRehydratedEvidenceV2` recomputes content and result digests).
+`sourceRoute` is one of `inline-exact|blob|session|repository|artifact`;
+`mediaType` is `text|binary`. Text carries `exactText` only; binary
+carries `exactBytes` (Buffer) only, never a text projection.
+Manufacture of `verified:true` without the authority is impossible: the
+proof brand lives on a module-private unique symbol (B02H pattern), and
+validation rejects brand-less or extended objects. RehydratedEvidence is
+evidence transport, not task truth: B03 owns zero authority over task
+completion, verification truth, requirement status, permission state,
+checkpoint generation, retention, prompt inclusion, or memory tier.
+
+### 27.3 Resolution paths (frozen)
+
+EvidenceRef-first: a known `{taskInstanceId, evidenceId}` (optionally the
+full Phase-A ref as a hint) resolves directly through the durable B02
+binding (`readEvidenceV2`); no retrieval system rediscovers it. Page-ID
+resolution takes a known `pageId` without a fabricated EvidenceRef
+(`evidenceId` stays null). No query string, no relevance prompt, no
+candidate list exists anywhere in the authority. Backing priority is
+deterministic: `inline-exact > blob > sourceBinding > session`.
+Co-present routes must already agree (B01 creation + B02 read-time proof);
+B03 re-verifies each touched edge explicitly and never trusts caller-held
+objects: production flow re-reads durable state on every call.
+
+### 27.4 Binding chain (frozen)
+
+EvidenceRef -> durable binding -> ContextPage -> exact backing ->
+rehydrated bytes/text. Every edge must agree on evidenceId, pageId,
+contentHash, namespace, and source identity where applicable: hinted-ref
+fields diverging from the durable binding fail as binding-mismatch, a
+binding whose contentHash/namespace diverges from its page fails as
+binding-mismatch, and any backing digest divergence fails as
+content-mismatch or source-mismatch. Phase-A EvidenceRef semantics are
+reused verbatim (frozen checkpoint keys/kinds/bounds); no EvidenceRef V2
+semantics were introduced.
+
+### 27.5 Namespace-first validation (frozen)
+
+Every call requires an explicit `expectedNamespace` (absent/null fails
+as namespace-required); the frozen store/page authorities enforce it
+BEFORE any evidence returns. Cross-task reads fail closed even for
+byte-identical blobs/pages (proven); wrong workspace/repository/checkout
+fail closed (proven); ownership is never inferred from page contents.
+
+### 27.6 Backing routes (frozen)
+
+Inline exactText: durable page -> validate -> namespace -> recompute
+sha256(UTF-8 exactText) -> compare contentHash -> return persistable text.
+Blob: durable page -> namespace -> read via the B02 authority only (never
+direct store paths) -> recompute SHA-256 -> verify blobRef and page
+contentHash -> return text or binary per section 27.7. Text blobs must
+strictly decode as UTF-8 and already be in persistable redacted form;
+malformed text encodings fail closed as media-type-invalid. Large evidence
+travels the blob route unbounded by the B01 16 KiB page-metadata bound
+(proven: ~1 MiB log round-trips fully, never truncated); errors/telemetry
+stay bounded and carry no content.
+
+### 27.7 Text vs binary boundary (frozen)
+
+B02H branded binary stays opaque: non-UTF-8 or long-run blob bytes return
+as `exactBytes` with `mediaType:binary`, never decoded, never rendered
+into prompts, never executed or parsed as instructions (proven byte-exact).
+Text-blob bytes must equal the persisted redacted bytes exactly; B03 never
+re-runs lossy transforms, never unredacts, never guesses secrets:
+`<redacted>` stays `<redacted>`. The declared-artifact route
+(`sourceBinding.kind=artifact`) always returns opaque binary regardless
+of byte printability, preserving the boundary for UTF-8-valid artifact
+bytes. Binary evidence appears in telemetry only as byte count, digest,
+route, and mediaType.
+
+### 27.8 Session route (frozen)
+
+Canonical session identity:
+`projectEvent = {seq,type,data}` (all other host fields ignored);
+`canonicalText = canonicalJson({domain, sessionId, events})`;
+`sessionDigest = sha256HexUtf8(A03-redacted canonicalText)`.
+Lookup is by canonical seq identity (`event.seq === seq`, never array
+index); the DSH seed-boundary marker is transparent because it carries a
+non-requested seq. The sessionId must equal the page namespace sessionId.
+Pure-session pages (`rehydratable:false`) resolve iff a session source is
+supplied AND the attested contentHash equals this digest; the stored page
+is never rewritten (proven still `rehydratable:false` after rehydration).
+Without a provable route they are refused as not-rehydratable, never
+guessed. For byte-backed pages with seqs, the session linkage is
+supplementary provenance proof (seq identity + session binding, plus the
+tool-unit proof for tool-result pages); contentHash still binds the byte
+route. The DSH adapter (`wrapDshSessionV2`) resolves against the live
+session object and owns no persistence.
+
+### 27.9 Tool-transaction source proof (frozen)
+
+A `tool-result` page requires a session exact source (absent fails as
+source-missing) and proof that the exact resolved events form the claimed
+supported unit, reusing the frozen A06 field spellings and balance
+semantics: at least one assistant tool-call, at least one tool/result,
+every result closes a call opened earlier in the set, every call is closed
+later in the set, running balance never negative and ends at zero, no
+duplicate seq/call identity, no non-protocol event inside the claimed unit.
+The negative matrix fails closed as tool-protocol-invalid: call only,
+result only, wrong result for call, result before call, interleaved
+incompatible unit, mutated protocol identity; wrong session/seq fail as
+source-mismatch/source-missing; mutated session payload fails the digest
+as source-mismatch. A structurally valid B01 page whose source disproves
+the unit still fails. Proven live against the pinned host (call/result
+append, flush, destroy, seeded restore, rehydrate) and for pure-session
+tool pages through the digest route.
+
+### 27.10 Repository/artifact exact-source semantics (frozen)
+
+Resolution only from the already-known locator, never lookup: repository
+spans open EXACTLY the bound relative POSIX path under the adapter root
+(containment-proven, no absolute/escape/traversal), strict-UTF-8-decode,
+select lines startLine..endLine inclusive (1-based LF split), and compare
+sha256(span) to BOTH the binding contentDigest and the page contentHash.
+The frozen contentDigest binds THE EXACT SELECTED SPAN (not the whole
+file); a present symbol must occur in the span as an exact substring.
+Changed file bytes fail as source-mismatch: newer content is never served
+under the old identity (proven). Artifacts resolve EXACTLY by artifactId
+(file-backed form: `file:<relative-path>`); bytes are opaque binary and
+the digest must match binding and page (proven, including mutation
+refusal). No recency heuristic selects anything; no file/symbol search
+exists (proven absent by source scan). General lookup belongs to C03.
+
+### 27.11 Content identity chain (frozen)
+
+For every valid chain all applicable identities agree: EvidenceRef digest
+(when present), binding contentHash, page contentHash, blobRef digest,
+binding contentDigest, session digest, span/artifact digest. Any
+disagreement fails closed. Advisory metadata (semanticGloss, tags,
+entities, symbols, files, lastNeededAtGeneration, summary-shaped hints)
+never selects returned bytes; a tampered advisory record fails the B02
+record digest (proven), and a perfect gloss over missing backing still
+fails (proven). The deterministic result digest binds
+pageId/contentHash/sourceRoute/mediaType/namespace/sourceIdentity for
+integrity/telemetry/idempotency only; it creates no competing evidence
+identity.
+
+### 27.12 Failure semantics (frozen)
+
+Stable codes: `context-rehydration-evidence-not-found`,
+`context-rehydration-not-rehydratable`,
+`context-rehydration-namespace-required`,
+`context-rehydration-namespace-mismatch`,
+`context-rehydration-binding-mismatch`,
+`context-rehydration-content-mismatch`,
+`context-rehydration-source-missing`,
+`context-rehydration-source-mismatch`,
+`context-rehydration-tool-protocol-invalid`,
+`context-rehydration-media-type-invalid`,
+`context-rehydration-unknown-field`. Underlying B01/B02 causes are mapped
+(never leaked with content) and bounded to 240 chars. A failed
+rehydration mutates nothing: no task/prompt/store/session/repository
+change, no replacement page, no lastNeededAtGeneration or access-time
+write (proven: 100 reads leave byte-identical durable state; no temp
+files). Rehydrated hostile text keeps frozen provenance with zero trust
+promotion (proven: injection-shaped evidence stays advisory/untrusted).
+Secrets: only persistable redacted forms return on A03/B02H-owned routes;
+result, errors, telemetry, and describe paths are scanned secret-free
+(proven). Live repository spans return verbatim source bytes, so
+secret-bearing files should be snapshotted through the redacted blob route.
+
+### 27.13 Determinism, idempotency, read-only (frozen)
+
+Same known identity + same expectedNamespace -> byte-identical result
+(proven across entry shapes, 100 reads, six simultaneous OS processes, and
+process restart). No clocks, randomness, or process identity enter
+identity. Ordinary reads need no locks. Observational latencies only (no
+correctness thresholds; no latency enters identity).
+
+### 27.14 Scope boundary (frozen)
+
+B03 adds `rehydrateEvidenceRefV2` / `rehydrateContextPageV2` /
+`resolvePageBackingV2` / `validateRehydratedEvidenceV2` /
+`describeRehydrationV2` / `deriveRehydrationDigestV2` plus the two
+source adapters and three suites:
+`tests/ContextEvidenceRehydrationV2.Tests.cjs` (238 assertions),
+`tests/ContextEvidenceRehydrationV2LiveHost.Tests.cjs` (20, pinned
+`@deepseek-ai/dsh-session@0.1.1-rc.2`, gated REQUIRED-MISSING under
+`NEXUS_REQUIRE_CCV2_LIVE_HOST=1` when the host is absent),
+`tests/ContextEvidenceRehydrationV2XProc.Tests.cjs` (33, real OS
+processes) with `tests/ContextEvidenceRehydrationV2XProc.Worker.cjs`.
+Harness entries register after `ContextPageStoreV2Advisory`. No memory
+tier, ContextView, compiler, budget, embedding, or ranking behavior.
+
+B01, B02, B02H, and Phase-A regressions remain green (see task report). Next:
+CCV2-B04 (Memory Tier Mapping) - not begun here.
+## 28. B03H Rehydratability Semantics + Exact-Source Boundary Hardening (Phase B)
+
+B03H freezes two narrow B03 contract boundaries without redesigning B01,
+B02, or B03: (H1) the stored rehydratable flag vs runtime exact
+resolvability, with an explicit B04 handoff rule; (H2) the artifact (and
+shared repository-span) exact-source authorization boundary; (H3) the
+media-type determinism audit. Sections 24-27 are unchanged. All
+identities, digests, reason codes, and resolution paths from B03 hold
+verbatim; B03H is purely additive (one pure helper, two exports, realpath
+containment, exposed authority domain).
+
+### 28.1 Stored page.rehydratable is frozen (H1.1)
+
+The B01 derivation (byte-strong route present at mint: exactText,
+exactBlobRef, or digest-bearing sourceBinding) is preserved verbatim. No
+old page is mutated; no rehydratable:false is rewritten to true merely
+because a SessionSource, RepositorySource, or ArtifactSource exists at
+runtime. Proven: a pure-session page still reads back rehydratable:false
+from the store after successful exact rehydration.
+
+### 28.2 Runtime exact resolvability (H1.2)
+
+Separate deterministic concept: whether B03 can currently prove an exact
+route for a page PLUS the explicitly supplied exact-source authority. The
+pure capability helper inspectExactResolutionV2(page, sources) exposes it
+with no reads, no byte resolution, and no authority:
+
+inspectExactResolutionV2(page, { sessionSource?, repositorySource?,
+artifactSource? }) -> frozen { resolvable, mode, requiresExternalSource,
+storedRehydratable, durablySelfBacked }
+
+EXACT_RESOLUTION_MODES (frozen): durable-inline, durable-blob,
+exact-session-source, exact-repository-source, exact-artifact-source. The
+validated RehydratedEvidenceV2.sourceRoute already carries the sibling
+route vocabulary (inline-exact, blob, session, repository, artifact); the
+mode names are the pre-read capability view of the same routes.
+Resolvability comes ONLY from durable exact backing OR an explicit exact
+source authority whose shape is present (and, for session routes, bound to
+the page sessionId). It NEVER comes from semanticGloss, summaries, similar
+pages, or any match heuristic. The inspector is closed-world on its
+sources argument and returns resolvable:false with mode:null for invalid
+pages. Structural capability is not proof: a mutated source is
+capability-present but fails at proof time inside rehydration (proven),
+so effective resolvability is decided by the rehydration attempt.
+
+### 28.3 Resolution matrix (H1.4, proven)
+
+inline page: stored true, resolvable true, mode durable-inline, no
+external authority. Blob page: stored true, resolvable true, mode
+durable-blob. Pure-session page without source: stored false, mode
+exact-session-source, resolvable false (rehydration refused as
+not-rehydratable, never guessed). Pure-session page with valid bound
+session authority: stored false, resolvable true, proof verifies, stored
+flag untouched. Pure-session page with wrong-session authority:
+capability-absent (false) and proof fails closed. Repository binding
+page: exact-repository-source, resolvable iff the repository authority is
+supplied. Artifact binding page: exact-artifact-source, resolvable iff
+the artifact authority is supplied.
+
+### 28.4 B04 handoff rule (H1.3, frozen)
+
+B04 MUST NOT use ContextPage.rehydratable as the sole test for whether
+evidence can move to a rehydrate-on-demand tier. B04 must distinguish
+durably self-backed (durable-inline, durable-blob:
+requiresExternalSource false) vs exactly source-resolvable
+(exact-*-source with the authority supplied: requiresExternalSource true)
+vs not exactly resolvable. B03 owns proof of exact resolution; B04 owns
+tier policy. The inspector's requiresExternalSource/durablySelfBacked
+fields are the executable form of this partition.
+
+### 28.5 Artifact authority domain (H2.1, frozen)
+
+Every file-backed exact source is bound at construction to ONE explicit
+authorized domain: rootDir, exposed as authorityDomain. The domain is the
+strongest existing authority available (controller-provided adapter root);
+no broad filesystem authority is invented. A bespoke readArtifact function
+is an explicit controller-provided capability, not a filesystem
+authority: namespace-before-bytes and the content digest still apply to
+whatever it returns. The adapters are NOT a generic local-file read
+primitive: only exact bound locators resolve, and only inside the domain.
+
+### 28.6 Path containment (H2.2, frozen)
+
+Resolution order: normalize, resolve (realpath), containment check, read.
+Lexical checks (relative POSIX, printable ASCII, no empty/dot/dotdot
+segments, canonical form) reject spelling tricks; the resolved filesystem
+identity proves domain membership. File or directory symlinks resolving
+outside the domain fail closed before any byte is read, as do absolute
+outside-root paths and non-canonical spellings. Reads proceed through the
+verified real path.
+
+### 28.7 Namespace before bytes (H2.3, proven)
+
+Required order holds in the authority: expectedNamespace validation (via
+the frozen store read) precedes exact-identity validation, which precedes
+the adapter read, hash, and compare. Proven: a wrong-namespace artifact
+read refuses with namespace-mismatch while a counting adapter proves zero
+reads occurred, for both file-backed and capability-form sources.
+
+### 28.8 Negative artifact matrix (H2.4, proven)
+
+Valid artifact in the allowed root passes. Wrong namespace, ../
+traversal, absolute outside-root path, symlink file escape (even with a
+matching digest), symlink directory escape, and non-canonical spelling
+refuse. Correct path with wrong hash and mutated bytes refuse as
+source-mismatch; missing artifacts refuse as source-missing; non-file
+identities are not resolved by the file adapter. No file search, no
+latest-artifact heuristic (scope scan unchanged). The repository-span
+route shares the containment primitive (symlinked span proven to refuse).
+
+### 28.9 Media-type determinism (H3, frozen)
+
+Classification is a pure function of the frozen source contract: strict
+UTF-8 via TextDecoder fatal (no locale, no platform default encoding),
+fixed ASCII word-run classes (no filesystem metadata), and the frozen
+deterministic redaction pipeline (no mtime, no randomness). Same bytes
+yield the same mediaType on every host and restart. Text-to-binary
+conservative fallback (long word runs) is allowed and stable; binary is
+never coerced to model-facing text; decodable-but-not-persistable bytes
+fail closed as media-type-invalid. Proven: repeated binary reads,
+mtime-shift insensitivity, multibyte-text stays text, lone continuation
+and overlong encodings stay binary, fallback byte-exactness.
+
+### 28.10 Scope and suites (frozen)
+
+B03H adds inspectExactResolutionV2 / EXACT_RESOLUTION_MODES, realpath
+containment, and authorityDomain exposure. No change to B01 pageId,
+B01 contentHash, the stored rehydratable field, B02 blob identity, the
+page store, EvidenceRef bindings, EvidenceRef resolution, result
+identity, or Phase-A EvidenceRef semantics. New suite
+tests/ContextEvidenceRehydrationV2H.Tests.cjs (64 assertions) registered
+in the harness after ContextEvidenceRehydrationV2XProc. No tier, view,
+compiler, budget, embedding, or ranking behavior.
+
+B01, B02, B02H, B03, and Phase-A regressions remain green (see task
+report). Next: CCV2-B04 (Memory Tier Mapping) - not begun here.
+
+## 29. B04 Memory Tier Mapping (Phase B)
+
+B04 freezes the deterministic mapping between Nexus task-memory objects
+and the five CCv2 memory tiers. Production authority:
+config/ContextMemoryTierV2.cjs. B04 answers "what class of memory an
+object belongs to + what storage/materialization behavior that tier
+permits" and NOTHING else: it emits policy metadata (tier, reason code,
+storage/materialization descriptors, exact-resolution eligibility). It
+builds no ContextView and no Context Compiler (Phase C), and owns no
+token budget, retrieval ranking, search, embeddings, reranking, prompt
+assembly, compression ladder, or JEV/Laya/DECIDE behavior.
+
+### 29.1 Tier world (frozen)
+
+MemoryTier is closed-world: PINNED, HOT, WARM, COLD, ARCHIVE. Unknown
+tiers FAIL CLOSED. PINNED is correctness-critical current state
+(task identity, active constraints, unresolved approvals, runtime
+policy, current task binding, uncuttable tool protocol, latest
+applicable checkpoint): exact/structured, always materialized when
+applicable. HOT is immediate execution state (current user turn, recent
+failure, current edit target, short active tool interaction, immediate
+next action): usually exact, direct model-facing candidate. WARM is
+durable task knowledge (accepted decisions, repository discoveries,
+prior verification, milestone state, partly resolved failure):
+checkpoint + exact refs, selectively materialized later. COLD is
+historical evidence/execution bulk (large old logs, old file reads, old
+tool output, superseded hypotheses, historical diffs): exact
+ContentPage/blob, reference by default, exact rehydration on demand.
+ARCHIVE is the canonical append-only history: not normally
+model-facing, audit/disaster recovery. COLD is addressable exact
+evidence intended for potential rehydration; ARCHIVE is the canonical
+full record used primarily for audit/recovery. One canonical event may
+underlie both an ARCHIVE source and a derived COLD page without
+duplicating authority.
+
+### 29.2 Decision contract (frozen)
+
+MemoryTierDecisionV2 carries schemaVersion 1, tier, reasonCode,
+exactness (structured-authoritative / exact-inline / exact-source /
+exact-blob / canonical-history), storageBehavior (authoritative-state /
+active-working-set / durable-reference / content-addressed /
+canonical-archive), materializationPolicy (mandatory / normally-visible
+/ selective / reference-by-default / recovery-only), an optional
+materializationIntent (mandatory only for HOT current-user-turn with
+exact preservation), requiresExactResolution + exactResolutionMode for
+COLD, subject/page/contentHash/namespace/trust metadata, a resolution
+snapshot, and deterministic true. B04 defines the policy; it never
+constructs the model prompt. No ContextView, token list, or ordered
+messages leave this module.
+
+### 29.3 Authority order and PINNED hard rule (frozen)
+
+Classification respects: mandatory correctness state -> PINNED;
+immediate active execution state -> HOT; durable current task knowledge
+-> WARM; old exact evidence with safe exact recovery -> COLD; canonical
+historical transcript only -> ARCHIVE. Anything required for correctness
+of the next legal continuation is never classified below PINNED merely
+because it is old, large, rarely accessed, or semantically low
+relevance. Active requirements and constraints are authoritative
+structured state (PINNED), never COLD for lack of recent mention.
+Satisfied/superseded historical evidence may later rest WARM/COLD per
+exact policy. The current user instruction is HOT (plus mandatory
+materialization intent when correctness requires exact preservation).
+Unresolved/open tool protocol is PINNED (A06 continuity); completed
+balanced transactions rest HOT/WARM while still required. The actively
+investigated failure is HOT; failure identity still needed for
+continuation is WARM; large historical failure logs with safe exact
+backing are COLD; rejected/resolved hypotheses are COLD while the
+canonical source remains ARCHIVE. Accepted decisions are WARM (PINNED
+only as active correctness constraints); raw discussion leading to them
+is COLD/ARCHIVE. Current verification truth is WARM (PINNED only where
+a live gate requires it); large raw test output is COLD with proven
+exact backing. Tier classification never changes PASS/FAIL truth.
+
+### 29.4 B03 integration and COLD eligibility (frozen)
+
+COLD requires exact recoverability through a proven route: old /
+non-immediate evidence + exact resolution available + not correctness
+mandatory. B04 uses inspectExactResolutionV2 and distinguishes durably
+self-backed (durable-inline, durable-blob) vs source-resolvable
+(exact-*-source with authority supplied) vs not exactly resolvable. It
+never uses stored page.rehydratable alone. A pure-session page with a
+valid bound session authority is COLD-eligible with
+requiresExactResolution true and mode exact-session-source; the stored
+page is never mutated. Without exact recovery, classification fails
+toward WARM/HOT (more context), never toward DROP. Mutated, missing, or
+mismatched sources lose COLD eligibility (resolution loss moves toward
+WARM/HOT, never silent discard). Tier movement never changes trust
+(COLD->WARM evidence stays untrusted/evidence) or verification truth,
+and never deletes canonical history.
+
+### 29.5 Transitions, determinism, isolation (frozen)
+
+Legal transitions: PINNED<->HOT, HOT<->WARM, WARM<->COLD, COLD->WARM,
+COLD->HOT (explicit reactivation). ARCHIVE is immobile canonical
+substrate, never a working-tier endpoint. Transition causes are
+closed-world deterministic codes; no access-frequency, recency, size,
+LLM relevance, embedding, or model-judged cause decides anything.
+Classification is pure and read-only (no page/checkpoint/store/session
+mutation, no advisory write-back, no persistence: tier is derived from
+durable state, never stored). Same validated inputs yield the same tier,
+reason, capabilities, and policy across repeat calls, restarts, and
+independent processes. Cross-task isolation holds (expectedNamespace
+binding; foreign pages refuse even for identical bytes). Evidence text
+commands (MAKE ME PINNED) have zero policy effect; only typed
+metadata/rules decide. Tier metadata carries pageId/kind/hash/mode/
+namespace identifiers only - no raw evidence text or secrets.
+
+### 29.6 A08 compatibility and scope (frozen)
+
+ACTIVE_REQUIRED maps to PINNED/HOT; CHECKPOINT_COVERED and REHYDRATABLE
+to WARM/COLD; NOT_ELIGIBLE to PINNED/HOT/WARM (never COLD/ARCHIVE);
+DERIVED_DISCARDABLE holds no tier; ARCHIVE sits outside A08 planning.
+A08 is never modified. New suites tests/ContextMemoryTierV2.Tests.cjs
+(236 assertions) and tests/ContextMemoryTierV2XProc.Tests.cjs (32, real
+OS processes) with tests/ContextMemoryTierV2XProc.Worker.cjs, registered
+in the harness after ContextEvidenceRehydrationV2H. No second truth
+source for requirements/constraints/verification/task status is created.
+
+B01, B02, B02H, B03, B03H, and Phase-A regressions remain green (see
+task report). Next: CCV2-C01 (ContextView Contract) - not begun here.
+
+## 30. B04H Exact-Resolution Proof Authority Hardening (Phase B)
+
+B04H closes one authority ambiguity before the Phase-B freeze:
+exact-resolution CAPABILITY is not exact-resolution PROOF (B03H
+section 28). Audit result: the pre-hardening caller-supplied
+sourceStatus string (including "verified") combined with structural
+source capability could authorize externally-backed COLD with no B03
+proof. That was a blocker; it is removed.
+
+### 30.1 Proof authority (frozen)
+
+B03 owns exact-resolution proof: a live validated RehydratedEvidenceV2
+object carrying the module-private brand Symbol (unmintable by callers,
+lost in serialization), verified:true, content-hash agreement with the
+carried exact bytes, and a recomputed resultDigest. B04 owns tier
+policy and validates + binds the proof; it never reimplements source
+verification. The caller-supplied sourceStatus input is removed: any
+such field now fails closed as unknown. A forged verified:true object,
+a JSON-serialized copy of a real proof, and a bare
+{ sourceStatus: "verified" } can never authorize COLD.
+
+### 30.2 COLD rule (frozen)
+
+Durably self-backed pages (durable-inline, durable-blob) remain
+structurally COLD-eligible under frozen B01/B02 durable-store
+semantics; B02 stays physical durability authority and B03 still
+revalidates storage at materialization. External routes
+(exact-session-source, exact-repository-source, exact-artifact-source)
+require a B03-authenticated resolutionProof before tier COLD with
+reason tier-cold-source-resolvable. Structural adapter presence alone
+yields WARM with tier-keep-more-context-no-exact-resolution.
+
+### 30.3 Proof binding (frozen)
+
+Every proof binds pageId, contentHash, expected namespace, resolution
+mode (sourceRoute mapped to inspector mode, and the two must agree),
+and source identity. Mismatch in any field invalidates the proof
+ cross-page and cross-task replay refuse. Proofs are
+point-in-time for the bound source identity/revision, never a permanent
+availability guarantee: mutated/missing sources cannot mint fresh
+proofs, and stale decisions never bypass later B03 validation.
+
+### 30.4 Conservative authorities (frozen)
+
+mandatoryCorrectness stays a controller-asserted boolean; prose and
+string forms fail closed, so untrusted evidence text can never set it.
+Proofs are inapplicable to authoritative state subjects,
+settled transactions, durable routes, and ARCHIVE (fail closed).
+
+### 30.5 Phase-C handoff (frozen)
+
+A B04 decision never guarantees external evidence still resolves at
+future inference time. A COLD external page selected for
+materialization must run B03 exact rehydration again: success uses the
+exact evidence; failure takes conservative larger-context / KEEP
+behavior. An old B04 proof never skips B03 validation.
+
+### 30.6 Scope and suites (frozen)
+
+No change to B01 page identity/contentHash/rehydratable semantics, B02
+identity/durability, B03 verification/namespace/result identity, or A08
+retention. New suite tests/ContextMemoryTierV2H.Tests.cjs (49
+assertions) registered after ContextMemoryTierV2XProc. Existing B04
+suites consume the proof contract (capability-only sessions classify
+WARM, including cross-process where proofs cannot travel).
+
+B01, B02, B02H, B03, B03H, B04, and Phase-A regressions remain green
+(see task report). Next: CCV2-C01 (ContextView Contract) - not begun
+here.
