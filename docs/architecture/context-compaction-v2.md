@@ -2343,6 +2343,252 @@ Versioned selector compactionVersion / NEXUS_CONTEXT_COMPACTION_V2; the global d
 
 resumeTask is the single restart-recovery entry (async): reconstruct with repair, then durable-only recovery of an UNRESOLVED generation (or an active generation holding a frozen A02 operation) from reservation + sealed checkpoint + branded operation read-back + restored session: frozen A11 reconcile classifies, the frozen A02 retry lands only missing segments, the flush barrier is re-established exactly once, and frozen A11 repair advances the head with recovered completion. No new pressure, retention, shadow, or reservation is created (recovery, not re-planning); insufficient artifacts fail closed with integration-recovery-evidence-incomplete. Unknown/unreadable runtime fails closed everywhere (boundary, resume, completion health): taskMayContinue and mayResume are false and healthy is false unless a clean or terminal runtime is successfully reconstructed.
 
+---
+
+## 24. B01 ContextPage freeze record (Phase B — Durable Task Memory)
+
+B01 begins Phase B by freezing the production `ContextPage` contract: the
+bounded, structure-aware, exact/source-linked memory unit that later phases
+will persist (B02), rehydrate (B02/B03), retrieve (B03/C03/D05), and
+materialize (B04/C01). B01 mints and validates pages only; it creates no
+store, no index, and no view.
+
+```text
+Checkpoint  = authoritative current task state (TaskController/A03)
+ContextPage = bounded exact/source-linked historical evidence unit (B01)
+ContextView = future disposable model-facing working set (Phase C)
+```
+
+A `ContextPage` is NOT task completion authority, verification authority,
+checkpoint authority, permission authority, repository truth, retention
+authority, a model-facing prompt by itself, a semantic-search result, or
+summary-as-truth. Core invariant: CCv2 may forget from the prompt; CCv2
+must never forget from the task. Every valid page answers WHAT exact
+evidence, WHERE it came from, WHO/WHAT supplied it, WHICH
+task/security namespace owns it, and HOW mutation is detected.
+
+### 24.1 Production schema (frozen)
+
+Authority: `config/ContextPageV2.cjs` (sole mint/validate authority).
+`createContextPageV2`, `validateContextPageV2`,
+`canonicalizeContextPageV2`, `deriveContextPageIdV2`,
+`deriveContextPageDigestV2`, plus the pure read-only helpers
+`derivePageSourceFromEvidenceRef` and `describeContextPageV2`.
+
+```text
+ContextPageV2 {
+  schemaVersion           : integer (1)
+  id                      : string — 'cxp_' + 32 hex (section 24.5)
+  kind                    : 9 frozen kinds (section 24.3)
+  namespace               : { taskId, taskInstanceId, sessionId,
+                              workspaceId, repositoryId | null,
+                              checkoutId | null } (section 24.2)
+  provenance              : A04 TrustProvenance + fieldKind (section 24.4)
+  mutability              : 'immutable' | 'versioned' (section 24.6)
+  sourceSeqs              : integer[] ascending unique >= 0 (section 24.7)
+  sourceBinding           : null | repository-span | artifact (section 24.8)
+  contentHash             : sha256 hex of the exact backing (section 24.9)
+  exactText               : string | null — redacted persistable bytes
+  exactBlobRef            : 'blob:sha256:<hex>' | null (B02-resolvable)
+  extract                 : string | null — source-exact substring
+  semanticGloss           : string | null — advisory prose only
+  entities/symbols/files/tags : sorted deduplicated string sets
+  createdAtGeneration     : integer >= 1
+  lastNeededAtGeneration  : integer | null — metadata only
+  rehydratable            : boolean — derived (section 24.10)
+}
+```
+
+Differences from the illustrative v0.3 schema: (1) the six-value v0.3
+`trust` label is replaced by the full frozen A04 `provenance` record
+(sourceKind/trust/sourceRefs/authorityScope/fieldKind) with trust
+deterministically derived by the A04 TrustNormalizer — no competing trust
+model; (2) task binding is the explicit nested `namespace` object
+(taskId/taskInstanceId/sessionId/workspaceId/repositoryId/checkoutId)
+reusing Phase-A identity semantics, with the permission-domain dimension
+explicitly deferred (no first-class permission-domain authority exists in
+the repository; section 24.2); (3) `id` derivation, `contentHash`
+semantics, `rehydratable` derivation, extract-exactness, and advisory
+vs identity separation are frozen here (they were unspecified in v0.3);
+(4) generation 0/null does not exist: the earliest evidence binds
+generation 1.
+
+### 24.2 Namespace binding (frozen)
+
+The page carries the minimum explicit namespace that enforces retrieval
+isolation: `taskId`, `taskInstanceId`, `sessionId`, `workspaceId`,
+`repositoryId` (nullable), `checkoutId` (nullable) — reusing the frozen
+Phase-A identity authorities (A03/A05 shapes). Any mismatch between page
+namespace and authoritative task/repository identity is INVALID.
+`validateContextPageV2(page, { expectedNamespace })` enforces
+task/taskInstance/session/workspace/repository equality before any
+retrieval use, so a future index never infers ownership from page text.
+No cross-task sharing is invented. Permission/security domain: DEFERRED
+— no first-class permission-domain authority exists yet, so B01 freezes
+the strongest currently authoritative namespace and documents the gap
+rather than fabricating a domain. A future phase may add one explicit
+bound field; until then cross-domain isolation rides on task + instance
++ workspace/repository separation.
+
+### 24.3 Page kinds (frozen, closed world)
+
+`requirement | repo-span | diff | tool-result | verification | decision |
+failure | conversation | other`. Unknown kinds FAIL CLOSED; `other` must
+be explicitly supplied, never defaulted. `tool-result` pages claim a
+balanced protocol transaction and therefore require >= 2 `sourceSeqs`
+(call + result); a one-sided tool page is rejected
+(`context-page-tool-transaction-unbalanced`).
+
+### 24.4 Trust/provenance binding (frozen)
+
+B01 reuses the frozen A04 authority verbatim. The caller names
+`sourceKind` + grounded `sourceRefs`; the A04 `normalizeField` path
+derives `trust` from the closed (sourceKind, fieldKind) mapping, where
+`fieldKind` is fixed per page kind (`requirement→requirement-text`,
+`repo-span/diff→repository-fact`, `tool-result→tool-fact`,
+`verification→verification-outcome`, `decision→decision-statement`,
+`failure→failure-detail`, `conversation→user-intent`, `other→agent-text`).
+Callers MUST NOT supply trust. A04 origin-preservation rules apply
+(e.g. controller normalization of requirement text must retain the
+user/policy source ref). Repository/tool/model content never becomes
+authoritative because it is stored in a page: adversarial source text
+remains `evidence` or `untrusted-data` with zero control-flow effect.
+
+### 24.5 Page identity (frozen)
+
+```text
+pageId = 'cxp_' + sha256Hex(UTF-8('nexus/context-page/v1' LF taskId LF
+         taskInstanceId LF sessionId LF workspaceId LF repositoryId LF
+         checkoutId LF createdAtGeneration LF kind LF mutability LF
+         contentHash LF canonicalJson(sourceSeqs)
+         LF canonicalJson(sourceBinding) LF provenanceKey))[0..32)
+provenanceKey = sourceKind LF trust LF fieldKind LF
+                canonicalJson(sourceRefs) LF authorityScope
+```
+
+No timestamp, no randomness, no process identity, no mtime. The identity
+binds the task-bound semantic page identity strongly enough that the
+same id can never address different exact backing (contentHash is in the
+domain). Advisory metadata (`extract`, `semanticGloss`, `entities`,
+`symbols`, `files`, `tags`, `lastNeededAtGeneration`) and the derived
+`rehydratable` flag NEVER enter the identity: an LLM-generated gloss
+cannot change the identity of exact evidence. Validation recomputes the
+id; any stale id after a semantic change REJECTS
+(`context-page-id-mismatch`).
+
+### 24.6 Content vs page identity; mutability (frozen)
+
+`contentHash` is the identity of the exact backing bytes/content;
+`pageId` is the identity of the task-bound contract. Identical exact
+bytes in different tasks hash identically but yield different page ids
+(proven cross-task). `immutable` means the page identity/backing cannot
+change — changed evidence is a new page. `versioned` means the page
+binds one exact version/content hash of a versioned source; it MUST NOT
+be read as permission to edit the page in place. Historical page records
+are immutable representations of their bound version either way.
+
+### 24.7 Source sequences; structure-aware units (frozen)
+
+`sourceSeqs` are canonical DSH/session event seqs: integers >= 0,
+strictly ascending, unique (duplicates/unsorted/negatives fail with
+stable codes). Array indexes are never substitutes for event seqs.
+Empty `sourceSeqs` are allowed ONLY with an alternate exact source
+binding (`exactText`, `exactBlobRef`, or `sourceBinding`). Token ranges
+are NOT the page identity: B01 pages are structure-aware units (user
+request → complete instruction; tool protocol → balanced transaction;
+source file → symbol or contiguous exact line range; git → semantic
+hunk; test output → bounded error cluster + blob ref; decision → one
+decision; verification → operation + result; narration only for
+uncaptured task-relevant state). B01 provides the contract capable of
+representing these units exactly; no automatic chunk discovery exists.
+
+### 24.8 Exact backing; exactText; exactBlobRef (frozen)
+
+Every page has ONE provable exact backing route: inline redacted
+`exactText`, digest-bearing `exactBlobRef`, digest-bearing
+`sourceBinding` (`repository-span { path, contentDigest, startLine,
+endLine, symbol? }` or `artifact { artifactId, contentDigest }`), or
+canonical session events (`sourceSeqs`). No page exists on
+`semanticGloss`/tags/entities/summary/`extract` alone. `exactText` is
+exact persistable evidence, never free-form summarization: redaction
+(the frozen A03 pipeline) runs BEFORE identity, oversized exact
+evidence fails closed (`context-page-exact-too-large`; bulk belongs
+behind B02 `exactBlobRef`), and re-running redaction must be a fixed
+point. `exactBlobRef` is validated as `blob:sha256:<hex>` with NO
+storage lookup at B01 (B02 owns the store; no ad-hoc store is faked).
+`extract`, when present, requires present `exactText` and must be a
+source-exact substring of it (still exact after redaction);
+`semanticGloss` is advisory prose that MUST NOT replace exact evidence,
+change `contentHash`, change verification truth, or promote trust.
+
+### 24.9 contentHash; rehydration; revalidation (frozen)
+
+`contentHash` binds the exact backing: sha256 of the redacted exact
+bytes when `exactText` is present (derived, never caller-chosen);
+otherwise the digest embedded in `exactBlobRef`/`sourceBinding`; for
+pure session-seq pages the caller-attested sha256, structurally
+validated at B01 and resolved by B02/B03 (documented, not hidden).
+Co-present routes must agree. Validation recomputes the hash whenever
+exact bytes are available and rejects mismatch
+(`context-page-content-mismatch`); digest-bearing bindings are checked
+for agreement; trust-by-path alone (a path with no content digest) is
+never accepted. `rehydratable: true` means the contract contains a
+deterministic exact retrieval route verifiable NOW (`exactText`,
+`exactBlobRef`, or a digest-bearing `sourceBinding`); pure session-seq
+pages carry valid source-linked evidence with `rehydratable: false`
+until B02/B03 binds session resolution. The stored flag must equal the
+derivation in both directions.
+
+### 24.10 Canonical form; closed world; bounds; paths (frozen)
+
+Canonical serialization reuses the frozen A03 canonicalizer (sorted
+keys, arrays keep author order, no whitespace): equivalent pages are
+byte-identical; no clock/pid/randomness enters digests. All validators
+are closed-world (unknown top-level/namespace/provenance/binding keys,
+enum values, and scalar/array types fail closed), including an explicit
+ban on reasoning-store fields (`chainOfThought`, `hiddenReasoning`, …).
+Set-like metadata is canonically sorted + deduplicated at creation
+(`sourceSeqs` order is semantic and is validated, never reordered).
+Bounds: exactText 8192 chars; extract/semanticGloss 1000; metadata sets
+32 entries (128 chars; files 500); sourceSeqs 512; canonical page
+16384 bytes — each boundary tested ±1. Paths (`files[]`, span paths)
+follow the B01-frozen relative-POSIX rule (no absolute/escape/traversal/
+empty segments/backslash; 500 chars) since no existing authority owns
+page source paths. `files[]` and repo locators never resolve through
+host-global paths.
+
+### 24.11 Requirement/decision authority note (frozen)
+
+A requirement/decision page is historical evidence/material. The current
+authoritative requirement/decision remains owned by the
+checkpoint/TaskController structures: creating a page mutates no
+controller state and promotes no trust (proven by the A04 derivation
+legs in the B01 suite).
+
+### 24.12 EvidenceRef compatibility (frozen)
+
+`derivePageSourceFromEvidenceRef` is a pure read-only adapter from a
+frozen EvidenceRef to a page source fragment (`event` + numeric locator
+→ `sourceSeqs`; otherwise a digest-bearing `artifact` binding, digest
+mandatory; taskInstanceId must match). It redefines no EvidenceRef
+semantics and modifies no A03/A04/A07 authority.
+
+### 24.13 Scope boundary (frozen)
+
+B01 introduces NO blob/page store, NO content-addressed store, NO
+EvidenceIndex, NO rehydration, NO lexical/symbol/file/embedding/semantic
+retrieval, NO ContextView, NO Context Compiler, NO budget packing, NO
+memory-tier assignment, and NO JEV/Laya/DECIDE. Proof:
+`tests/ContextPageV2.Tests.cjs` (175 assertions, 0 failures) asserting
+the contract matrix plus the absence of persistence/retrieval/tier/view
+surface on the authority. Harness entry `ContextPageV2` registers after
+the A13 suites. No live-host suite exists: B01 defines a storage-free
+contract proven by deterministic fixtures, and no DSH-host behavior is
+consumed (B02/B03 will prove resolution against the pinned host).
+
+Phase-A regressions remain green (see task report). Next: CCV2-B02
+(Content-Addressed Evidence Store) — not begun here.
+
 
 
 

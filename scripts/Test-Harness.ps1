@@ -117,6 +117,7 @@ $suites = @(
     [ordered]@{ name='ContextCompleteTaskV2'; script='tests/ContextCompleteTaskV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompleteTaskV2LiveHost'; script='tests/ContextCompleteTaskV2LiveHost.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
     [ordered]@{ name='ContextCompleteTaskV2XProc'; script='tests/ContextCompleteTaskV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPageV2'; script='tests/ContextPageV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionV2'; script='tests/ContextCompactionV2.Tests.ps1'; executable=$powershell; kind='powershell' }
 )
 
