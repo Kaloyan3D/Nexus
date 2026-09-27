@@ -125,6 +125,13 @@ $suites = @(
     [ordered]@{ name='ContextPageStoreV2FallbackXProc'; script='tests/ContextPageStoreV2FallbackXProc.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextPageStoreV2Secrets'; script='tests/ContextPageStoreV2Secrets.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextPageStoreV2Advisory'; script='tests/ContextPageStoreV2Advisory.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextEvidenceRehydrationV2'; script='tests/ContextEvidenceRehydrationV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextEvidenceRehydrationV2LiveHost'; script='tests/ContextEvidenceRehydrationV2LiveHost.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
+    [ordered]@{ name='ContextEvidenceRehydrationV2XProc'; script='tests/ContextEvidenceRehydrationV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextEvidenceRehydrationV2H'; script='tests/ContextEvidenceRehydrationV2H.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextMemoryTierV2'; script='tests/ContextMemoryTierV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextMemoryTierV2XProc'; script='tests/ContextMemoryTierV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextMemoryTierV2H'; script='tests/ContextMemoryTierV2H.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionV2'; script='tests/ContextCompactionV2.Tests.ps1'; executable=$powershell; kind='powershell' }
 )
 
