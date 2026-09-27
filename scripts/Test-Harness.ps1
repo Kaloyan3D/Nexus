@@ -118,6 +118,13 @@ $suites = @(
     [ordered]@{ name='ContextCompleteTaskV2LiveHost'; script='tests/ContextCompleteTaskV2LiveHost.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
     [ordered]@{ name='ContextCompleteTaskV2XProc'; script='tests/ContextCompleteTaskV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextPageV2'; script='tests/ContextPageV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPageStoreV2'; script='tests/ContextPageStoreV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPageStoreV2Crash'; script='tests/ContextPageStoreV2Crash.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPageStoreV2XProc'; script='tests/ContextPageStoreV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPageStoreV2Fallback'; script='tests/ContextPageStoreV2Fallback.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPageStoreV2FallbackXProc'; script='tests/ContextPageStoreV2FallbackXProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPageStoreV2Secrets'; script='tests/ContextPageStoreV2Secrets.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPageStoreV2Advisory'; script='tests/ContextPageStoreV2Advisory.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionV2'; script='tests/ContextCompactionV2.Tests.ps1'; executable=$powershell; kind='powershell' }
 )
 

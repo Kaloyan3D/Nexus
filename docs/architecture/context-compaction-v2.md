@@ -2589,6 +2589,304 @@ consumed (B02/B03 will prove resolution against the pinned host).
 Phase-A regressions remain green (see task report). Next: CCV2-B02
 (Content-Addressed Evidence Store) — not begun here.
 
+## 25. B02 Content-Addressed Evidence Store freeze record (Phase B)
+
+B02 implements the durable storage layer for validated B01 pages and exact
+evidence. B02 persists and integrity-proves; it does NOT rank, retrieve by
+relevance, compile views, or rehydrate for a compiler (B03 owns resolution
+semantics across EvidenceRef/Page/Blob/repository/session source).
+
+### 25.1 Production authority (frozen)
+
+Authority: `config/ContextPageStoreV2.cjs` (sole durable-store authority).
+`putBlobV2`, `readBlobV2`, `hasBlobV2`, `putContextPageV2`,
+`readContextPageV2`, `hasContextPageV2`, `deriveContextPageRecordDigestV2`,
+`updatePageAdvisoryV2`, `readPageAdvisoryV2`, `deriveEvidenceBindingIdV2`,
+`putEvidenceV2`, `readEvidenceV2`, `persistEvidenceV2`,
+`validateContextPageStoreV2`, `inspectContextPageStoreV2`,
+`describeContextPageStoreV2`, `contextRootForV2`. No durable-store
+semantics live anywhere else. B01 (`config/ContextPageV2.cjs`) is consumed
+verbatim: storage validates pages, never repairs them, and the pageId
+formula is untouched.
+
+### 25.2 Storage layout (frozen)
+
+```text
+<workspace>/.ai-harness/runs/<taskId>/context/
+  blobs/<aa>/<digest>.blob
+  pages/<aa>/<pageId>.json
+  advisory/<aa>/<pageId>.<advisoryDigest>.json
+  evidence/<aa>/<bindingId>.json
+```
+
+`contextRootForV2(workspace, taskId)` derives the root from the Phase-A run
+layout (no second storage root). `<aa>` is a hash shard. Filenames derive
+ONLY from hex digests / frozen id patterns, never from page text, evidence
+text, or caller paths. Roots must be absolute + normalized; taskIds must
+match the safe run-identity pattern; every derived path is proven under the
+root (traversal / absolute-path injection rejected).
+
+### 25.3 Blob identity and bytes (frozen)
+
+`blobRef = 'blob:sha256:' + sha256Hex(persisted exact bytes)`, compatible
+with the B01 `exactBlobRef` form. String input travels the canonical
+persistable-text route: the frozen A03 redaction pipeline runs BEFORE
+identity over the WHOLE input verbatim, so a blob digest always equals the
+B01 `contentHash` of identical text. Buffer input is stored byte-exact with
+the caller attesting persistable/redacted bytes. Either way: stored bytes
+=== hashed bytes. Blobs are immutable: no update operation exists; one
+changed byte is a new digest and a new blob.
+
+Frozen string-route bounds (`BLOB_STRING_MAX_BYTES` = 2 MiB,
+`BLOB_MAX_WORD_RUN` = 4096): the reused pipeline costs quadratically in the
+longest continuous word run (measured 4K chars ~23ms, 16K ~330ms, 65K
+~4.7s; B01 is safe through its 8192-char exactText bound). Oversized or
+long-run string evidence FAILS CLOSED and directs the caller to the attested
+Buffer route. The bounds are linear-time enforced, so refusal is fast.
+
+### 25.4 Blob write/read protocol (frozen)
+
+Write order: canonicalize -> digest -> final path -> (exists? verify +
+reuse : temp + verify + exclusive claim + read-back + recompute). No caller
+receives a durable blob ref before read-back proof. Same path with
+verifying bytes reuses idempotently; same path with DIVERGING bytes FAILS
+CLOSED (corruption or identity conflict; never overwrite). Read order:
+validate ref syntax -> safe path -> read -> SHA-256 -> compare
+(`context-blob-content-mismatch` on divergence; `context-blob-missing` when
+absent). One mutated byte on disk is refused on every read path.
+
+### 25.5 Page persistence protocol (frozen)
+
+Only B01-valid pages persist (invalid pages are refused, never repaired).
+Blob-backed pages require PRE-EXISTING durable blob proof whose recomputed
+hash equals the page `contentHash` (page-before-blob is forbidden). The
+persisted record is the envelope `{ schemaVersion, page,
+pageRecordDigest }` with canonical bytes; writes claim exclusively, then
+read back and revalidate. Same page twice is idempotent (same identity,
+same bytes, dedup reported). Same `pageId` with different canonical bytes
+FAILS CLOSED and leaves the original record untouched (proven: advisory
+difference keeps the B01 pageId but the second write is refused).
+
+### 25.6 Full page-record integrity (frozen)
+
+`pageRecordDigest = sha256Hex(canonical JSON of the full page record)` via
+the frozen B01 canonicalizer (`deriveContextPageRecordDigestV2`). Evidence
+identity (`pageId`/`contentHash`, advisory-excluding by B01 design) is
+therefore distinct from stored-record integrity: `semanticGloss`/`tags`
+tampering on disk keeps a legitimate `pageId` but is detected through the
+record digest on every read and by store validation. The B01 pageId formula
+is unchanged.
+
+### 25.7 Advisory metadata versioning (frozen)
+
+Historical core page records are immutable representations even when source
+type is `versioned`. Advisory refreshes (`semanticGloss`, sets,
+`lastNeededAtGeneration`) NEVER rewrite the core file; they land as
+separate derived records under `advisory/` bound to (`pageId`,
+`contentHash`) by their own digest, and they cannot exist without their
+core. An LLM gloss cannot mutate durable evidence identity. Overlay
+semantics belong to B03.
+
+### 25.8 EvidenceRef durable binding (frozen)
+
+Phase-A EvidenceRef semantics are reused VERBATIM (closed-world keys, kinds,
+bounds from the frozen checkpoint authority; the ref round-trips byte-free
+of reinterpretation). B02 adds only the deterministic join: columns
+(`pageId`, `contentHash`, `exactBlobRef`, `namespace`) plus
+`evidenceBindingId = 'ev_' + sha256Hex('nexus/evidence-binding/v1' LF
+taskInstanceId LF evidenceId)[0..32)`. No UUID, no clock, no competing
+identity model. Write order blob -> page -> evidence: page durability (full
+revalidation incl. blob re-proof) precedes dependent EvidenceRef
+durability. A binding whose ref digest disagrees with its page contentHash
+is refused; bindings revalidate fully on every read.
+
+### 25.9 Namespace isolation; dedup vs ownership (frozen)
+
+Blob deduplication is content-driven and namespace-independent WITHIN one
+store domain (identical bytes converge on one blob file; proven: one 1 MiB
+blob backing two namespace-distinct page records with distinct pageIds).
+Page/evidence ownership is namespace-bound: every task-owned read REQUIRES
+an explicit expected namespace, and Task B reading Task A records FAILS
+CLOSED even for identical backing bytes. Separate task run roots hold
+separate blob copies (isolation dominates cross-filesystem sharing). The
+internal blob reader always re-hashes; it is not a namespace bypass because
+page/evidence reads re-prove namespace AND blob binding together.
+
+### 25.10 Atomicity, crash, orphan, restart (frozen)
+
+Every authority-bearing record: temp write -> validate -> exclusive claim
+(hard-link; rename fallback re-verifies read-back equality) -> read-back ->
+revalidate. Durability scope uses the A05H wording: process-crash
+recoverable under the filesystem/OS contract, NOT power-loss durable (no
+fsync). Temp files (`*.tmp-<pid>-*`) are never authoritative; readers open
+only exact deterministic filenames. Crash injection around every stage
+(temp creation/complete/claim/read-back for blob, page, evidence),
+including a real SIGKILL hammer on large blob writes, proves restart
+observes only absent-or-valid records, never half-valid authority. Orphan
+blobs (blob durable, page absent) are safe and reported; B02 implements NO
+garbage collection. Missing-blob pages fail closed without flipping
+`rehydratable`. Concurrent identical writers converge (link-claim +
+byte-compare); concurrent conflicting writers yield exactly one winner with
+every loser failing closed (proven across real OS processes).
+
+### 25.11 Evidence policies (frozen)
+
+Small exact evidence may stay inline (`INLINE_EXACT_MAX_BYTES` = 4096:
+`persistEvidenceV2` refuses oversized `exactText` without a blob route, so
+behavior never varies accidentally). Large evidence travels as blob +
+bounded page metadata (proven: 1 MiB log fixture, page record 861 bytes,
+well under the B01 16 KiB bound). `validateContextPageStoreV2` checks page
+records, record digests, namespace binding, blob references, content hashes,
+and evidence bindings (bounded; never relevance-ordered). Telemetry
+(`inspect`/`describe`) carries digests, byte counts, kinds, namespaces only
+— never evidence content, never secrets. Exact source bytes that are hostile
+or instruction-shaped are stored as inert bytes with derived untrusted
+provenance and zero control-flow effect.
+
+### 25.12 Tool-source deferred validation boundary (frozen)
+
+B01 structurally guarantees a `tool-result` page claims a balanced
+transaction (call + result seqs) but does not resolve DSH event types. B02
+stores such pages exactly as validated and DOES NOT fix this: B03 MUST
+perform source-resolution validation for session-backed pages and prove
+referenced seqs form the claimed canonical evidence unit.
+
+### 25.13 Scope boundary (frozen)
+
+B02 introduces NO lexical/symbol/file search, NO relevance ordering, NO
+numeric-closeness index, NO ContextView, NO Context Compiler, NO budget
+packing, NO memory-tier assignment, NO JEV/Laya/DECIDE, and NO
+user/compiler-facing rehydration pipeline (B03). Proof:
+`tests/ContextPageStoreV2.Tests.cjs` (134 assertions), plus
+`tests/ContextPageStoreV2Crash.Tests.cjs` (15) and
+`tests/ContextPageStoreV2XProc.Tests.cjs` (12, real OS processes)
+asserting the integrity matrix plus absence of retrieval/compiler/tier/view
+surface. Harness entries `ContextPageStoreV2`, `ContextPageStoreV2Crash`,
+`ContextPageStoreV2XProc` register after `ContextPageV2`.
+
+B01 and Phase-A regressions remain green (see task report). Next: CCV2-B03
+(Exact Rehydration) — not begun here.
+
+## 26. B02H Evidence Store hardening freeze record (Phase B)
+
+B02H closes three narrow durability/security ambiguities without redesigning
+B01 or B02. Section 25 stays frozen with one additive note: the B02 unit
+suite count moved 134 → 141 when the H2 brand boundary migrated the
+attested-bytes legs (same coverage, stricter contract). All identities,
+ordering, bounds, layout, and namespace semantics from B01/B02 are
+unchanged.
+
+### 26.1 Fallback exclusive-create claim (frozen)
+
+Audit result (H1.5): no overwrite-capable rename remains in the authority
+(the single fallback `renameSync` was removed; a source scan in the B02H
+suite asserts its absence). The claim ladder is now: exclusive hard-link
+claim first; any link failure other than EEXIST (EPERM/EXDEV/ENOSYS) falls
+through to an exclusive create-if-absent (`'wx'`) of the full verified
+content, then read-back verification. EEXIST on either path means a rival
+holds the identity: byte-identical rivals converge, diverging rivals fail
+closed with `context-store-conflict`. A rival-held file that fails
+integrity verification is crash debris (e.g. a torn fallback write) and is
+reported as `context-store-corrupt`: never adopted, never overwritten.
+Fallback crash semantics are degraded by physics, documented honestly: a
+crash mid-`'wx'`-write can leave a torn authoritative file; every read path
+fails closed on it, store validation reports it as a failure entry, and
+recovery is operator removal of the identified file (the primary link path
+is unaffected: its crash debris is temp-only and idempotent retry just
+works). No timestamp arbitration exists anywhere.
+
+### 26.2 Forced-fallback seam (frozen)
+
+`NEXUS_B02_FORCE_FALLBACK_CLAIM=1` in process environment skips the
+link attempt and exercises the fallback deterministically for the whole
+process. Default production behavior is unchanged (proven by a child
+without the variable), no timing oracle is used, and no task/user content
+can select the strategy. Forced-fallback proof: blob/page/evidence through
+the real fallback (unit, 16), identical + conflicting writers across real
+OS processes reusing the production worker (XProc, 11: exactly one winner,
+all losers `context-store-conflict`, restart identifies the same winner,
+aftermath validates).
+
+### 26.3 Buffer route classification (frozen)
+
+Every production entry reaching `putBlobV2` is classified: A.
+already-redacted exact bytes — the string route and branded text, both
+through the frozen A03 pipeline; B. opaque binary artifacts — branded
+binary only, with explicit artifact descriptor; C. arbitrary untrusted
+textual bytes — MUST travel route A (string/branded text, bounds enforced)
+and can never be relabeled. Treating C as A or B is rejected, not assumed.
+
+### 26.4 Raw Buffer rejection + proof boundary (frozen)
+
+`putBlobV2` accepts `string | PersistableExactBytes`; a raw arbitrary
+Buffer (textual or binary, including through `persistEvidenceV2.blobBytes`)
+FAILS CLOSED with `context-blob-attestation-required`. The brand lives on a
+module-private unique symbol (NOT the global registry): unforgable without
+module access, so no user-controlled boolean (`alreadyRedacted: true` or
+equivalent) can satisfy it. Factory `createPersistableExactBytesV2`: `{text}`
+runs the frozen pipeline (byte-identical digest to the string route,
+proven); `{binary, artifactId, note?}` enforces non-empty bytes within
+`PERSISTABLE_BINARY_MAX_BYTES` (64 MiB) and a redaction-stable descriptor.
+Predicate `isPersistableExactBytesV2` exposes the check for tests and later
+phases. `putBlobV2`/`persistEvidenceV2` report the bounded `kind`
+(`'text' | 'binary'`) in their results.
+
+### 26.5 Large text evidence outcome (frozen)
+
+No chunked/streamed redaction adapter was introduced: chunking cannot reduce
+the pipeline's total backtracking cost (the sum over runs is unchanged) and
+any newline-splitting adapter risks diverging from whole-input verbatim
+semantics (B01 digest compatibility) or leaking cross-line matches. The
+frozen outcome per input shape: large normal test/build logs (short runs)
+travel the whole-input pipeline fast (proven: 1 MiB secret-bearing log
+redacts in ~145ms with zero surviving secrets); long unbroken
+secret-bearing runs fail closed fast via the linear run scan (safe outcome,
+nothing persists); oversized strings fail closed. No secret persists in any
+case, and large evidence never needs an unchecked bytes route.
+
+### 26.6 Binary evidence semantics (frozen)
+
+Branded binary is byte-exact, digest-bound, and binds page identity exactly
+like text (proven: blob-backed `tool-result` page with an `artifact`
+sourceBinding over a binary blob). Descriptor (`artifactId`, optional
+`note`) is redaction-stable and safe to quote; the BYTES carry no secrecy
+guarantee (no text policy can apply to opaque bytes) and MUST NOT be
+materialized as controller/model text by later phases — recorded here as a
+B03 constraint. Textual logs must never be relabeled binary to skip
+redaction: genuine binary means non-textual bytes with a named artifact.
+
+### 26.7 A03 redaction reuse (frozen)
+
+A03 remains the sole redaction authority. The store carries no independent
+secret pattern (suite asserts absence of every A03-specific token) and
+calls `redactCheckpointTextV2` verbatim on the only text path.
+
+### 26.8 Advisory revision determinism (frozen)
+
+No `mtime`/`ctime`/directory-order heuristic selects advisory state
+(suite asserts absence); no current/latest/listing advisory API exists and
+none is introduced — B02 deliberately has no concept of "current advisory"
+(a future manifest/CAS pointer, if ever needed, belongs to a later phase).
+`readPageAdvisoryV2(pageId, advisoryDigest)` reads exactly the addressed
+immutable record. Proven with A1/A2/A3 on one page: core bytes, pageId,
+and contentHash unchanged; each revision distinctly digest-addressed and
+immutable; restart resolves identically; store validates core + three
+advisories.
+
+### 26.9 Scope boundary (frozen)
+
+B02H adds `createPersistableExactBytesV2` / `isPersistableExactBytesV2`
+(proof boundary, not retrieval), the internal claim seam, and four suites:
+`tests/ContextPageStoreV2Fallback.Tests.cjs` (16),
+`tests/ContextPageStoreV2FallbackXProc.Tests.cjs` (11, real OS processes),
+`tests/ContextPageStoreV2Secrets.Tests.cjs` (32),
+`tests/ContextPageStoreV2Advisory.Tests.cjs` (19). No B01/B02 identity,
+ordering, bound, layout, or namespace change. No retrieval, ranking,
+rehydration, or compiler surface.
+
+B01, B02, and Phase-A regressions remain green (see task report). Next:
+CCV2-B03 (Exact Rehydration) — not begun here.
+
 
 
 
