@@ -2319,5 +2319,31 @@ registers all three after the A11 suites; XProc/live suites skip
 ENVIRONMENTAL without pwsh/git or the host (never faked; live requires
 `NEXUS_REQUIRE_CCV2_LIVE_HOST=1` like other live suites).
 
+## 23. A13 Complete-Task integration (frozen)
+
+One narrow orchestration component (config/ContextCompleteTaskV2.cjs) consumes the proven Phase-A runtime from the real Nexus task lifecycle. It observes controller lifecycle state, invokes the frozen authorities verbatim, and returns a bounded integration outcome. It redefines no policy: no pressure, safe-point, checkpointability, retention, projection, generation, recovery, or completion rule lives in the integration layer.
+
+### 23.1 Production path and completion authority (frozen)
+
+Controller -> evaluateBoundary -> A11 generation-aware entry (applyCurrentGenerationV2, plus reserve/commit/supersede/reconcile/reconstruct/inspect) -> A10 active transaction -> A02 primitive. The controller never calls raw A10/A02 where the A11 lifecycle applies, and the integration module never calls raw A10/A02 itself. CCv2 never decides completion: the deterministic controller (scripts/TaskController.ps1 via scripts/Task.ps1) owns the Complete-Task lifecycle; checkCompletionHealth is a consistency gate (reconstructable runtime, no unresolved compaction, valid projection), never a decision. Pressure never decides completion.
+
+### 23.2 Boundaries, triggers, idempotency (frozen)
+
+Eligible boundaries are committed controller states attested by explicit open/closed flags (stream, tool edge, transition, durability barrier). Frozen A08 recommendations route the trigger: NORMAL/ELEVATED continue without compaction; HIGH/CRITICAL proceed through identical A06/A07 gates; UNKNOWN never invents capacity authorization. Repeated callbacks on one unchanged revision converge via a caller-held fingerprint cache and A11 same-binding convergence. taskMayContinue derives from A11/A12 runtime state: false only while unresolved compaction makes progress unsafe.
+
+### 23.3 Failure, recovery, terminal, restart (frozen)
+
+Pre-mutation failures leave task state untouched. Post-mutation ambiguity (UNRESOLVED) blocks new model/tool progress until recoverUnresolvedGeneration (same-process A11 forward recovery, then explicit commit) or the A12 restart operator converges; the bundle is never persisted. Terminal tasks start no new generations; unresolved state still blocks finalization. resumeTask runs before new work on restart: frozen reconstruct with repair over the restored session, projection validation, may-resume flag. Partial landing restarts to UNRESOLVED (A12 frozen outcome).
+
+### 23.4 Activation and suites (frozen)
+
+Versioned selector compactionVersion / NEXUS_CONTEXT_COMPACTION_V2; the global default stays v1 (zero V2 work, evaluated:false). tests/ContextCompleteTaskV2.Tests.cjs (incl. the real Task.ps1 controller traversal), tests/ContextCompleteTaskV2LiveHost.Tests.cjs (pinned-host proof), and tests/ContextCompleteTaskV2XProc.Tests.cjs + worker (true OS processes through the real CLI lock client) register in Test-Harness.ps1 after the A12 suites.
+
+### 23.5 A13H restart hardening (frozen)
+
+resumeTask is the single restart-recovery entry (async): reconstruct with repair, then durable-only recovery of an UNRESOLVED generation (or an active generation holding a frozen A02 operation) from reservation + sealed checkpoint + branded operation read-back + restored session: frozen A11 reconcile classifies, the frozen A02 retry lands only missing segments, the flush barrier is re-established exactly once, and frozen A11 repair advances the head with recovered completion. No new pressure, retention, shadow, or reservation is created (recovery, not re-planning); insufficient artifacts fail closed with integration-recovery-evidence-incomplete. Unknown/unreadable runtime fails closed everywhere (boundary, resume, completion health): taskMayContinue and mayResume are false and healthy is false unless a clean or terminal runtime is successfully reconstructed.
+
+
+
 
 
