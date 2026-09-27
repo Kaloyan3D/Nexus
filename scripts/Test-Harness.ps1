@@ -134,6 +134,12 @@ $suites = @(
     [ordered]@{ name='ContextMemoryTierV2H'; script='tests/ContextMemoryTierV2H.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextViewV2'; script='tests/ContextViewV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextViewV2XProc'; script='tests/ContextViewV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerV2'; script='tests/ContextCompilerV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerV2XProc'; script='tests/ContextCompilerV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerV2H'; script='tests/ContextCompilerV2H.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextRetrieverV2'; script='tests/ContextRetrieverV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextRetrieverV2XProc'; script='tests/ContextRetrieverV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextRetrieverV2H'; script='tests/ContextRetrieverV2H.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionV2'; script='tests/ContextCompactionV2.Tests.ps1'; executable=$powershell; kind='powershell' }
 )
 

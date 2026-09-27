@@ -3573,3 +3573,597 @@ protocol units, hostile-evidence inertness, and cross-task isolation.
 Phase A, B01, B02(+H), B03(+H), B04(+H) regressions remain green (see
 task report). Next: CCV2-C02 (Deterministic Context Compiler) - not
 begun here.
+
+## 32. C02 Deterministic Context Compiler (Phase C)
+
+C02 freezes the deterministic policy that decides what is
+mandatory / current / eligible for ONE inference. Production authority:
+config/ContextCompilerV2.cjs. No Phase-A/B/C01 source file was modified
+(additive-only); no retrieval, packing, compression, embeddings,
+reranking, semantic scoring, DECIDE, or prompt rendering exists anywhere
+in C02.
+
+### 32.1 Authority boundary (frozen)
+
+Checkpoint = authoritative task state. ContextPage = durable exact
+historical evidence descriptor. MemoryTierDecision = deterministic memory
+policy. CompileInput = closed-world caller-supplied known state.
+ContextCompilationPlan = disposable compiler state (candidates +
+deterministic decisions + mandatory manifest + plan digest).
+ContextView = disposable model-facing working set for ONE inference,
+constructed only through the C01 authority, which remains the final
+structural gate: a compiler output that C01 rejects fails the
+compilation closed. Deleting every plan and view loses zero durable
+task truth. The module persists NOTHING, queries NO live controller
+state, scans NO store / session / repository, and performs NO
+search / packing / compression.
+Conceptual exports: compileContextV2, buildContextCompilationPlanV2,
+deriveMandatoryManifestV2, enumerateContextCandidatesV2,
+applyDeterministicContextPolicyV2, validateContextCompilationPlanV2,
+describeContextCompilationPlanV2.
+
+### 32.2 CompileInput contract (frozen)
+
+CompileInputV2 exact keys: checkpoint (validated A03, never prose-mined),
+currentTurn|null (turnId/text/revision, verbatim exact preservation),
+namespace (full 6-field compile ownership), snapshotRevision (must equal
+the checkpoint snapshot slot, explicit null for legacy checkpoints),
+runtimeState (openProtocol|null with callId/recordText; one-sided units
+are never materialized - without a balanced unit compilation fails
+closed per A06 semantics), pages (explicit known ContextPages, never
+discovered), tierDecisions (explicit B04 decisions, tier truth),
+evidenceRefs (known identities with namespace triples; without a backing
+page they stay identity-only deferred candidates for C03),
+exactMaterial (already-supplied B03 results, brand-validated; never
+fetched), budget (hardMax/target contract only; used is caller-forbidden
+and always stored null), compilerPolicyRevision (must be
+context-compiler-v1). Unknown, scoring, advisory-authority, and
+provider keys (score, embeddingSimilarity, llmPriority, forcePinned,
+authority, confidence, provider, ranking, query, used, ...) fail closed
+as unknown input.
+
+### 32.3 Namespace-first ownership (frozen)
+
+Before candidate processing, the checkpoint triple, every page triple,
+every tier-decision triple (where present), every exact-material triple,
+every evidenceRef triple, and the snapshot binding must agree with the
+compile namespace. Foreign state fails closed before any output, even
+for byte-identical content: deduplication never confers access.
+
+### 32.4 Mandatory manifest derivation (frozen)
+
+C02 owns creation of the C01 mandatory manifest, derived
+deterministically from authoritative structured state (never prose):
+every active requirement (checkpoint:requirement:<id>), every active
+constraint (checkpoint:constraint:<index>), every unresolved approval
+(checkpoint:approval:<index>), the task objective
+(checkpoint:objective, the mandatory-checkpoint-state slice), the open
+tool protocol when present (runtime:open-protocol:<callId>), and the
+current user turn when B04 asserts materializationIntent = mandatory
+(current-turn:<turnId>). Every mandatory ref binds sourceId, C01 kind,
+and contentHash. Mandatory state cannot be filtered: a mandatory
+candidate without PIN/LOAD materialization, a missing B04 decision for
+mandatory state, or a missing mandatory turn fails the compilation
+closed; no trace action can waive it (C01 ignores the trace for
+membership).
+
+### 32.5 Candidate contract and identity (frozen)
+
+ContextCandidateV2 exact keys: schemaVersion(1), candidateId, subjectKind
+(frozen B04 vocabulary), sourceId, tier (PINNED/HOT/WARM/COLD, plus
+ARCHIVE observability only), mandatory, contentHash, pageId, evidenceId,
+provenance (frozen TrustProvenance), materializationState
+(exact-available / reference-only / requires-retrieval / archive-only),
+deterministicReasonCode (stable compiler-* vocabulary), deterministic
+(true; provider and confidence are omitted, never guessed). No score,
+no priority, no relevance, no confidence exists on a candidate.
+candidateId = ccx_ + sha256Hex(UTF-8(
+nexus/context-compiler-candidate/v1 LF taskId LF taskInstanceId LF
+sessionId LF subjectKind LF sourceId LF tier LF pageId LF
+contentHash)).slice(0, 32): namespace, subject kind, source identity,
+tier, page/evidence identity, and content identity bound; no clock, no
+UUID, no PID, no mtime. Unknown tier/subject/state/source fails closed.
+
+### 32.6 Deterministic policy and ordering (frozen)
+
+Policy inputs only: authority class, B04 tier, mandatory state,
+current-turn identity, exact availability, known structured task state.
+Never: semantic similarity, model scoring, model confidence, embedding
+scores, wall-clock recency, access frequency. Priority is
+classification, not packing: correctness (PINNED) > current execution
+(HOT) > durable task knowledge (WARM) > historical evidence (COLD),
+with ARCHIVE recorded as archive-only observability. Internal outcomes
+PIN/LOAD/REFERENCE/DEFER map onto the C01 trace vocabulary
+PIN/LOAD/REFERENCE/SKIP (DEFER -> SKIP as non-authoritative
+observability meaning not selected into this baseline view, never
+permanently discarded; EXTRACT is never emitted at C02).
+Ordering is identity-relevant and deterministic: PINNED, HOT, WARM
+state, WARM pages, materialized COLD, referenced COLD, deferred,
+archive; sequential checkpoint state preserves canonical array order;
+set-like page candidates sort by stable page identity; page input order
+never leaks into view identity. One semantic source yields one canonical
+candidate: duplicate enumeration, same source with conflicting tier /
+contentHash / namespace, or a mandatory source eligible for
+reference-only treatment fails closed.
+
+### 32.7 Materialization rules (frozen)
+
+PINNED state renders deterministically from frozen structured fields
+(requirement / constraint / approval / objective templates) with
+A04-legal provenance; bytes hash to the claimed content identity.
+Current user turn materializes verbatim exactly once (source identity,
+not text equality); a second representation of the same turn identity
+fails closed. Active failures render from typed failure state; no
+historical logs are pulled. WARM state (accepted active decisions,
+verification outcomes, continuation failure state) renders from the
+checkpoint; exact WARM pages with inline bytes are kept (conservative
+rule: no WARM is discarded for size before C04); WARM without available
+bytes defers as requires-retrieval for C03. COLD pages with
+durable-inline bytes materialize without proof; all other COLD without
+fresh supplied B03 evidence stays identity-only referenced. External
+COLD (exact-session/repository/artifact-source) materializes only when
+a live B03 result binds this page, this content revision, this
+namespace, the decision mode, and the entry provenance (route/mode
+agreement, recomputed resultDigest, text bytes hashing to contentHash);
+any mismatch, any brand-less clone, or any proof for an unknown page
+fails closed. The old B04 resolution proof alone yields reference-only,
+never materialization. Durable-blob COLD without supplied bytes stays
+referenced. Tool-protocol subjects (open protocol, completed
+transactions) materialize only with balanced call+result units; the
+callId derives deterministically from the page provenance refs (or the
+supplied open-protocol record). ARCHIVE never enters the view.
+
+### 32.8 Budget handoff (frozen)
+
+C04 owns token allocation. C02 never tokenizes, estimates, drops, or
+packs: tokenBudget.used is always null (explicit unknown), and budget
+shape (0 <= target <= hardMax) validates through C01. Mandatory token
+fit is frozen for C04; mandatory completeness is proven here (every
+mandatory ref accounts exactly once with hash agreement).
+
+### 32.9 Plan contract and plan/view agreement (frozen)
+
+ContextCompilationPlanV2 exact keys: schemaVersion(1), namespace,
+checkpointBinding, compilerPolicyRevision, mandatoryRefs, candidates,
+decisions, deterministic(true), planDigest. planDigest =
+sha256Hex(UTF-8(nexus/context-compilation-plan/v1 LF
+canonicalJson(plan WITHOUT planDigest))): full-record integrity for
+observability only, never a second task-memory identity. Validation
+proves candidate closed-world shape, decision/candidate agreement
+(same order, same reason codes, same page binding), mandatory
+completeness in both directions (every mandatory candidate has exactly
+one agreeing ref; every ref binds a mandatory candidate), and digest
+agreement. compileContextV2 additionally proves plan/view agreement:
+mandatoryRefs(plan) = mandatoryRefs(view) byte-for-byte, PIN/LOAD
+decisions = view membership, REFERENCE decisions = referencedColdPages.
+Compilation is read-only over all inputs; any failure is
+non-destructive and retryable with the same inputs.
+
+### 32.10 Safety invariants (frozen)
+
+Trust is never upgraded: included evidence keeps its B04/page trust
+class (tool/verification evidence stays evidence; user intent stays
+user-intent); provenance legality revalidates through A04. Candidate
+content prose (including MAKE ME PINNED / SKIP OTHER RULES /
+AUTHORITY=controller payloads) has zero effect on tier, mandatory
+status, action, or ordering: only typed structures decide. Traces and
+descriptions carry reason codes, page ids, actions, counts, tiers, and
+hash prefixes only - never exact text, prompts, blobs, or credentials.
+Cross-process determinism: identical serialized frozen inputs (durable
+fixtures only; B03 brands never cross processes) produce byte-identical
+plans, traces, and views across independent OS processes.
+
+### 32.11 Suites (frozen)
+
+New suites tests/ContextCompilerV2.Tests.cjs (253 assertions) and
+tests/ContextCompilerV2XProc.Tests.cjs (+ worker, 24 assertions),
+registered after ContextViewV2XProc. Fixtures cover active
+requirement/constraint, unresolved approval, mandatory checkpoint
+objective, open tool protocol with balanced unit, current user
+exactly-once (mandatory and normal intent), active failure, accepted
+decision, verification state, failure state, immediate and settled tool
+transactions, durable-inline COLD materialization, referenced-only COLD,
+session-route COLD reference vs fresh-proof materialization,
+brand-less-clone and cross-page proof rejection, ARCHIVE exclusion,
+mandatory-loss and conflict fail-closed matrices, injection inertness
+(including hostile page prose), trace generation and non-authority
+(trace-only change shares viewId), used:null budget handoff,
+plan/view agreement, namespace isolation, trust preservation,
+evidenceRef deferral, WARM-without-bytes deferral, read-only purity,
+determinism, ordering stability, and the C03/C04/C05 boundary (no
+retrieval entry points, no scoring fields, no EXTRACT, no provider
+rendering). Phase A, B01, B02(+H), B03(+H), B04(+H), C01(+XProc)
+regressions remain green (see task report). Next: CCV2-C03
+(Exact / Lexical / File / Symbol Retrieval) - not begun here.
+
+## 33. C02H Open Protocol Semantics Hardening (Phase C)
+
+C02H closes one semantic ambiguity in the C02 record above without
+reopening any frozen section: an OPEN/PENDING tool protocol (call
+emitted, result not committed) is continuation-critical runtime state
+and is NEVER a completed balanced historical transaction. The C02
+text that materialized `open-tool-protocol` as a PINNED entry with a
+balanced `callPresent:true/resultPresent:true` unit is superseded in
+full by this section: that construction risked presenting a pending
+result as completed, and no such entry is ever produced again. The
+retired vocabulary (`runtimeState.openProtocol`, its record text, and
+the `compiler-pin-open-protocol` reason code) no longer exists in the
+compiler authority. No Phase-A, B-series, or C01 file was modified.
+
+### 33.1 Frozen protocol ground truth (consumed, never redefined)
+
+A06 SafePointDetector owns the distinction: a request without a
+result is an open edge (`safe-point-tool-call-open` when the dispatch
+start was never recorded, `safe-point-tool-result-pending` when the
+call is recorded but no result is committed), and an assistant
+message that still carries tool-call blocks is NEVER a safe
+boundary; `tool-result-committed` is the boundary kind that closes
+tool execution. B03 owns the balance proof for evidence units: a
+result closes a call only when its callId matches an OPEN call and
+its seq follows the call seq; call-only, result-only, wrong-result,
+and result-before-call units are rejected, and balance must end at
+zero. B01 grounds it durably: a tool-result page requires call +
+result seqs, so pending protocol is unrepresentable as durable
+evidence. C02 consumes all three truths and redefines none of them.
+
+### 33.2 The inference-boundary answer (frozen)
+
+A ContextView is compiled for ONE root-model inference. While a tool
+call is unmatched, the mandatory next input to any new inference
+(the committed result) does not exist, and the open edge is never a
+boundary per A06. The compiler therefore treats a pending protocol
+as an illegal inference boundary: compilation fails closed with the
+stable code `context-compiler-protocol-open` and emits no plan, no
+candidates, and no view. The failure is non-destructive and
+retryable: callers retry at a legal boundary once the result
+commits. No synthetic balance, no placeholder result, and no
+"balanced for rendering" fiction exist anywhere in this path.
+
+### 33.3 Pending representation (frozen)
+
+`runtimeState.pendingProtocol` carries exactly the A06 pending
+identity: `{ callId, callSeq }`, where `callSeq: null` means the
+dispatch start was never recorded (call-open) and a recorded
+`callSeq` with no result means result-pending. Both block. Any
+non-null pending identity fails validated-input assembly itself, so
+every compiler entry point (enumerate, manifest, policy, plan,
+compile) refuses before any candidate exists. Pending protocol can
+therefore never reach a baseline view, a trace, or a mandatory
+manifest.
+
+### 33.4 Completed-transaction proof (frozen)
+
+A completed transaction materializes only with an explicit
+caller-supplied matched binding per tool-result page
+(`toolTransactions: [{ pageId, callId, callSeq, resultSeq }]`).
+Each binding is validated against the page's exact backing without
+resolving any session event (no reads, no discovery): the page must
+be a known `tool-result` page; `callId` must bind the page protocol
+identity (`tool-event:<callId>` provenance ref); both seqs must be
+inside the page's exact `sourceSeqs`; `callSeq` must strictly precede
+`resultSeq`. Wrong-result bindings (callId mismatch, seqs outside
+the backing), result-before-call bindings, bindings for
+non-transaction or unknown pages, and conflicting duplicate bindings
+all fail closed (`protocol-open` for balance violations,
+`input-invalid` for unknown shapes/pages, `content-conflict` for
+clashing duplicates). A protocol-subject page without a binding has
+no candidate at enumeration time: seq count alone never balances.
+The emitted C01 unit reuses the bound `callId` with a genuinely
+balanced `callPresent:true/resultPresent:true` claim.
+
+### 33.5 Mandatory vs materializable (frozen)
+
+An unmatched protocol remains mandatory B04 continuation state
+(`open-tool-protocol` still classifies PINNED), and a supplied B04
+decision for it is acknowledged (validated, namespace-checked). But
+mandatory-for-safe-continuation is not legal-model-facing-
+materialization: the decision yields no candidate, no mandatory ref,
+and no trace entry. No `tool-protocol` mandatory ref is ever emitted
+without a real result.
+
+### 33.6 C01 interaction (no modification, explicit justification)
+
+C01 is untouched. Its frozen rules are exactly the honesty property
+C02H relies on: protocol-subject entries require balanced units,
+one-sided units fail (`context-view-tool-protocol-unbalanced`),
+missing units fail (`context-view-tool-protocol-incomplete`), and
+C01 carries no pending-protocol vocabulary. Because the real runtime
+lifecycle never presents pending protocol as model-facing state (see
+33.2), no pending representation is needed in C01, so weakening it
+to admit one-sided units would only legalize the fiction this
+section forbids.
+
+### 33.7 Suites (frozen)
+
+New suite tests/ContextCompilerV2H.Tests.cjs (40 assertions),
+registered after ContextCompilerV2XProc: completed call/result
+materialization with matched bindings; result-pending and call-open
+blocking (compile, plan, and enumeration entry points) with input
+purity; wrong-result (callId mismatch, seqs outside backing,
+non-transaction and unknown pages); result-before-call (reversed and
+equal seqs); no balancing by seq count; duplicate/conflicting
+bindings; no-synthetic-result source proof; prompt-projection safety
+(pending wins over a same-call completed binding; every emitted unit
+genuinely balanced); the mandatory/materializable distinction; and
+the C01 unmodified gate (one-sided and missing units still rejected
+there). The C02 suite was updated to the honest shape (251
+assertions): steady-state fixtures carry explicit matched bindings,
+and the old balanced-open-protocol expectations are replaced by
+blocking expectations. Phase A, B01, B02(+H), B03(+H), B04(+H),
+C01(+XProc), C02(+XProc) regressions remain green (see task report).
+Next: CCV2-C03 (Exact / Lexical / File / Symbol Retrieval) - not
+begun here.
+
+## 34. C03 Exact / Lexical / File / Symbol Retrieval (Phase C)
+
+C03 implements the deterministic retrieval layer and NOTHING else: given
+the current compile request, which already-stored exact evidence should
+be returned. Retrieval cascade: exact EvidenceRef / Page ID, then exact
+file identity, then exact symbol identity, then deterministic lexical
+retrieval. Stop there. C03 implements no embeddings, no semantic
+retrieval, no learned ranking, no DECIDE, no budget packing, and no
+compression. Primary rules: exact references always win, and retrieval
+answers evidence relevance/access, never task truth. No Phase-A,
+B-series, C01, or C02 file was modified.
+
+### 34.1 Authority boundary (frozen)
+
+One retrieval authority: config/ContextRetrieverV2.cjs. One derived
+index authority: config/ContextEvidenceIndexV2.cjs. Responsibilities
+stay narrow: the retriever owns query validation, namespace-first
+orchestration, route priority, deterministic lexical scoring, duplicate
+merging, limit semantics, trace, and the C02 handoff adapter; the index
+owns derived namespace-scoped token binding over validated B01 pages.
+Frozen ownership is unchanged: TaskController/Checkpoint = task truth;
+B01/B02/B03 = exact evidence identity/storage/rehydration; B04 =
+memory tier policy; C02 = compiler candidate policy; C03 = retrieval
+of evidence; C04 = what fits in budget (not begun here). Retrieval
+changes no requirement status, verification truth, task status, tier,
+trust, or checkpoint state.
+
+### 34.2 Request contract (frozen)
+
+Closed-world ContextRetrievalRequestV2: namespace, exactEvidenceIds
+(evidenceId strings or { evidenceId, taskInstanceId?, evidenceRef? }
+objects defaulting to the request namespace), exactPageIds, fileIdentities
+({ path, contentHash?, repositoryId? }), symbolIdentities
+({ symbol, file?, repositoryId? }), lexicalTerms, optional
+candidatePageIds, integer limit (0-100), mode
+(identity-only | exact-materialized), contextRoot (required whenever an
+exact route is used), evidenceIndex + pages (required whenever a
+file/symbol/lexical route is used), and optional pass-through
+session/repository/artifact sources for materialized backings. Unknown
+keys, embedding/vector/semanticPrompt/LLM-query/confidence/model/
+provider fields, non-integer or out-of-range limits, and unknown modes
+fail closed with retrieval-request-invalid.
+
+### 34.3 Namespace before ranking (frozen)
+
+Ordering is fixed: validate the request namespace, constrain the
+index/store namespace, then resolve/rank, then return evidence. Every
+supplied page is revalidated under the request namespace before any
+ranking; the derived index namespace must equal the request namespace;
+exact routes pass expectedNamespace into the frozen B02/B03
+authorities. Cross-task and cross-repository pages fail closed before
+ranking (retrieval-namespace-mismatch); search-then-filter never occurs.
+
+### 34.4 Exact routes (frozen)
+
+Known EvidenceRef and known pageId resolve directly through the frozen
+B03/store authorities (identity-only mode reads binding + page headers;
+exact-materialized mode calls rehydrateEvidenceRefV2 /
+rehydrateContextPageV2 and returns B03-verified bytes). Exact failures
+(missing, corrupt, namespace mismatch, source mismatch) are returned as
+error entries with stable reasons (retrieval-exact-not-found,
+retrieval-exact-content-mismatch, retrieval-namespace-mismatch) and are
+NEVER silently replaced by a lexical/file/symbol near-match. Optional
+unrelated results may accompany the errors, but no result ever claims
+to satisfy the failed exact identity.
+
+### 34.5 Exact-first ordering (frozen)
+
+Categorical route priority: exact-evidence (1) > exact-page (2) >
+file (3) > symbol (4) > lexical (5). A lexical match cannot outrank a
+known exact ref regardless of numeric score. Exact routes use
+score:null with scoreClass exact-v1; file/symbol use score:null with
+identity scoreClasses; only lexical carries a numeric score
+(scoreClass lexical-v1).
+
+### 34.6 File identity semantics (frozen)
+
+File retrieval means known exact normalized file identity to pages
+referring to that file, never fuzzy filename search. Normalization
+mirrors frozen B01 path rules (relative POSIX, no absolute escape, no
+backslash, no traversal, no empty/dot segments). Priority: path +
+contentHash > path only; a claimed contentHash admits only pages whose
+contentHash equals that exact revision, so an old revision query never
+silently returns newer bytes. repositoryId claims must equal the
+request namespace repositoryId (retrieval-file-repository-mismatch).
+Bare filenames never match across directories.
+
+### 34.7 Symbol identity semantics (frozen)
+
+Symbol retrieval means known symbol identity within the request
+namespace to exact pages carrying it. Matching is byte-exact and
+case-sensitive (Parse != parse); no embeddings, no fuzzy expansion.
+An unqualified ambiguous symbol returns all carriers deterministically
+(pageId ascending); symbol + file narrows to the matching file
+identity. Unknown symbols are clean no-matches; foreign-repository
+claims fail closed (retrieval-symbol-repository-mismatch).
+
+### 34.7b Lexical contract (frozen)
+
+Lexical retrieval is deterministic textual matching over bounded
+indexed fields (kind, files, symbols, entities, tags, extract,
+semanticGloss, inline-bounded exactText when present on the validated
+page object; blob/session backings contribute metadata only, so a 1 MiB
+blob is never scanned per request). semanticGloss may aid relevance but
+is never evidence truth. Normalization is frozen: NFKC, locale-free
+lowercase, maximal [a-z0-9] runs, 64-char cap, sorted deduplicated
+token sets. No synonym expansion: a query matches only literal indexed
+terms. Scoring is transparent and frozen: per-token best-field weights
+(files/symbols 50, tags/entities 30, extract/exactText 20, kind 10,
+semanticGloss 5) plus a 15-point exact-phrase bonus; ties break by
+pageId ascending. No recency, mtime, access-count, filesystem-order,
+or random ranking exists.
+
+### 34.8 Result contract (frozen)
+
+RetrievedEvidenceV2 entries carry pageId, evidenceId (exact-evidence
+route only), contentHash, route, scoreClass, score (numeric for
+lexical, null otherwise), matchedFields, frozen provenance verbatim,
+namespace, optional B03 rehydratedEvidence (materialized exact routes
+only), and deterministic:true. Results add a namespace-bound
+resultDigest over identities/routes/scores/matched fields plus an
+errors array (exact failures) and a bounded trace (pageId, route,
+matchedFields, scoreClass, score, stable reasonCode; no evidence
+content). validateRetrievalResultV2 enforces the closed world, single
+occurrence per pageId, route-priority order, score shape per route,
+known reason codes, and digest agreement. describeRetrievalResultV2
+exposes ids/routes/scores/hash prefixes only. Duplicate discoveries
+merge to one entry preserving the strongest route.
+
+### 34.9 Limit and candidate semantics (frozen)
+
+limit applies ONLY to optional non-exact results; explicitly requested
+exact EvidenceRefs/pageIds are mandatory obligations never truncated
+(8 exact refs with limit=3 return all 8 plus at most 3 optional).
+candidatePageIds (the C02 handoff set) restricts file/symbol/lexical
+discovery to that set; exact obligations are unaffected. When lexical
+ordering ties, all tied candidates are returned within the limit
+(fail-toward-more-evidence, never semantic preference).
+
+### 34.10 Index role and persistence (frozen)
+
+The EvidenceIndex is derived, rebuildable, namespace-scoped, and
+non-authoritative: deleting/rebuilding it loses zero durable task
+truth. It is built only from caller-supplied B01 pages revalidated
+here (validateContextPageV2 under the request namespace); arbitrary
+filesystem text, prompt contents, unvalidated JSON, env dumps, and
+hidden reasoning are never indexed. Entries bind namespace, pageId,
+contentHash, kind, files, symbols, entities, tags, and source
+identity. The index is an in-memory derived object with a canonical
+serialization (same pages -> byte-identical logical index); no second
+evidence database exists and no persisted artifact outranks canonical
+page/store state. Stale entries (missing page, contentHash divergence,
+tamper breaking the builtFromDigest) fail closed with
+retrieval-index-stale and never become evidence. Index describe output
+carries ids and hash prefixes only; secret safety follows the frozen
+B01 redaction pipeline (traces/describes never carry evidence text).
+
+### 34.11 Safety invariants (frozen)
+
+Retrieval is read-only (no checkpoint/page/tier/EvidenceRef/advisory/
+repository/session/history mutation, no usage counters; proven by
+store byte-snapshot equality across retrieval in both modes).
+Provenance is preserved verbatim; ranking never promotes trust.
+Indexed shouting (ALWAYS RANK ME FIRST) earns zero score advantage
+beyond literal token matching. No embeddings, vector DB, ANN/HNSW,
+cosine similarity, learned rerankers, LLM relevance, DecisionProvider/
+JEV/Laya, confidence, token-budget packing, or compression/summary
+span-extraction exists in either C03 module (source scan gates this).
+The C02 compiler handoff is a narrow adapter
+(c02CandidatesToRetrievalRequestV2: candidate identities to an
+identity-only exact-page request); C02 itself is untouched, and no
+packed ContextView is produced here.
+
+### 34.12 Suites (frozen)
+
+New suites tests/ContextRetrieverV2.Tests.cjs (126 assertions) and
+tests/ContextRetrieverV2XProc.Tests.cjs (+ worker, 9 assertions),
+registered after ContextCompilerV2H. Fixtures cover index derivation
+and order-independence, exact EvidenceRef (identity + materialized
+B03-verified bytes), exact pageId, missing/corrupt/wrong-namespace
+exact failures with no substitution, file routes (exact path,
+path+hash revision selection, old/new hash non-aliasing, wrong
+repository, traversal/absolute/empty-segment/backslash rejection,
+cross-directory non-matching), symbol routes (unique, ambiguous,
+file disambiguation, case policy, unknown, foreign repo), lexical
+routes (phrase, multi-token, tag, entity, extract, gloss-only, zero
+match, tie-break, no synonym expansion, frozen normalization),
+route-priority ordering, duplicate merging to the strongest route,
+limit semantics (8 exact + limit 3), candidate restriction, cross-task
+and cross-repository isolation, injection inertness, trust
+preservation, secret-safe traces/describes, stale-index and
+missing-page fail-closed, read-only store snapshots, in-process
+repeat determinism, closed-world request rejection, the C02 handoff
+seam, the no-embeddings/reranker/packing/compression source scan, and
+a deterministic quality baseline (exact-ref/file/symbol hit rates and
+lexical recall@6, all 1.000 on the fixture; cross-task leaks 0).
+XProc proves two simultaneous independent processes return
+byte-identical retrieval results and agree with in-process retrieval.
+Phase A, B01, B02(+H), B03(+H), B04(+H), C01(+XProc), C02(+H+XProc)
+regressions remain green (see task report).
+
+### 34.13 C03H Unicode lexical retrieval hardening (frozen)
+
+C03H closes one retrieval-correctness defect without reopening any
+frozen section: the C03 lexical tokenizer split on ASCII-only
+[^a-z0-9], silently discarding every non-ASCII letter and number
+(Bulgarian/Greek/CJK evidence tokenized to zero tokens; café
+fragmented to caf; Straße fragmented to stra + e). Exact EvidenceRef /
+Page-ID / file / symbol routes, B03 rehydration, route priority,
+scoring weights, and all upstream semantics are unchanged.
+
+Frozen Unicode normalization (unicode-lexical-v1): NFKC, then
+locale-independent String.prototype.toLowerCase (never
+toLocaleLowerCase, never Intl, never locale segmentation), then
+maximal [\p{L}\p{N}]+ runs with the u flag (Unicode letters plus
+Unicode decimal/numeric characters, including ASCII). Different
+scripts stay different tokens: no transliteration (грешка never
+becomes greshka), no translation, no synonyms, no stemming, no
+diacritic stripping (café != cafe, frozen). Identifier policy is
+frozen: '_' and '$' (and all punctuation/symbols/emoji/controls)
+split tokens, so get_user -> get + user and $user -> user; exact
+symbol identity remains a separate byte-exact case-sensitive route
+never derived from lexical tokens. Case folding is ECMAScript
+default mapping, not linguistic: ß stays ß (frozen token [straße]);
+U+0130 İ folds to i + combining dot (token [i]); Σ/σ/ς fold to
+σ/σ/ς (final sigma ς preserved). Punctuation/emoji-only input
+tokenizes to zero tokens: explicit zero lexical match, never an
+exception. Length bound unit is frozen as Unicode code points
+(Array.from length, cap 64), so surrogate pairs are never split or
+corrupted (40 astral letters kept, 65 dropped). Phrase matching reuses
+the same NFKC + case-folded text, so Unicode phrases (грешка при
+вход) behave deterministically with the frozen phrase bonus.
+Token-gated scoring is unchanged: a contiguous substring that is not
+a token (e.g. user inside userId, 日本語 inside a longer CJK run)
+does not score; CJK segmentation stays coarse by design (no
+language-specific segmenter; literal Unicode runs are preserved and
+retrievable on run equality). Prompt-injection and secret-safety
+posture is unchanged (Unicode shouting earns zero advantage;
+traces/describes carry no evidence text in any script).
+
+Index identity: the derived index now carries lexicalRevision
+(unicode-lexical-v1) bound into builtFromDigest and indexId, so an
+ASCII-token index and a Unicode-token index over identical pages have
+different identities; pre-revision indexes fail validation
+(context-evidence-index-revision-mismatch). No durable task-truth
+migration exists because the index is derived/rebuildable/
+non-authoritative.
+
+Permission-domain boundary (documentation clarification, no new
+system): the frozen namespace model is exactly six keys (taskId,
+taskInstanceId, sessionId, workspaceId, repositoryId, checkoutId);
+no independent permissionDomain field exists in B01/C03, and none is
+invented here. The enforced boundary is full six-key namespace
+equality before ranking for pages, index, and exact B03/store reads;
+no broader cross-domain retrieval is permitted, and any hypothetical
+frozen permission field would be enforced pre-ranking (none is
+currently ignored).
+
+Suites: new tests/ContextRetrieverV2H.Tests.cjs (99 assertions)
+covering the normalization audit matrix, Bulgarian hits/no-match,
+German ß, accented Latin (whole tokens, café != cafe frozen),
+Greek, CJK (exact-run retrieval, coarse-sub-run documented
+no-match), mixed identifiers, numerics (including Arabic-Indic
+٢٠٢٦), Unicode phrase matching, empty-token and code-point bounds,
+no-transliteration, no-translation, unchanged weights/priority,
+Unicode injection inertness, Unicode secret safety, revision
+identity, and the permission-boundary assertion; XProc now carries
+Bulgarian/accented-Latin/Greek/CJK/mixed fixtures with
+byte-identical cross-process results. C03 (126), C03 XProc, and all
+Phase-A/B/C01/C02 regressions remain green (see task report).
+Next: CCV2-C04 (Budgeted Packing) - not begun here.
+
+
