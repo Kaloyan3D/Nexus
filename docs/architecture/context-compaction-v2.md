@@ -4397,6 +4397,217 @@ hardMax=150), digest-bound target, and metrics honesty; C01 suite
 gains honest-overflow structural vectors (100/120/150 valid,
 used>hardMax/target>hardMax/negative invalid, null valid).
 
+## 36. C05 Deterministic Compression Ladder (Phase C)
+
+C05 derives least-lossy deterministic model-facing representations of
+OPTIONAL context under a fixed budget:
+
+  EXACT -> EXTRACTIVE -> STRUCTURED -> REFERENCE
+
+Guiding rule: use the least-lossy legal representation that satisfies
+the context budget. C05 changes what the model sees; it MUST NOT
+change what Nexus remembers. Durable ContextPage / EvidenceRef /
+Evidence Store / Checkpoint / MemoryTierDecision / transcript state is
+never mutated (read-only inputs, new ephemeral outputs only).
+Abstractive compression is NOT part of this baseline. C04 budget
+semantics (target = preferred target, hardMax = absolute ceiling,
+target <= hardMax, used <= hardMax, mandatory may exceed target but
+never hardMax, optional may exceed neither) are consumed verbatim.
+
+### 36.1 Authority boundary (frozen)
+
+Authority: config/ContextCompressionLadderV2.cjs
+(compression-policy revision context-compression-ladder-v1). C05 owns
+representation derivation for optional material: eligibility,
+extractive derivation from the frozen B01 extract authority,
+structured derivation from validated typed/source-bound fields, the
+monotonic ladder walk, and the disposable compression plan/trace. C05
+owns NO packing, NO budget, NO retrieval, NO rehydration, NO tier
+policy, NO trust derivation. C04 remains the sole packing authority:
+C05 supplies smaller candidate representations, recounts them through
+the frozen C04 token counter, and re-runs the SAME C04 packing policy
+(packContextBudgetV2); every fit decision in the output belongs to a
+C04 plan. The greedy selection is never copied into C05.
+
+Out of scope on purpose (future Phase-D D06 lane, removable without
+affecting this baseline): LLMLingua, RECOMP, embedding-based
+compression, learned token selection, DECIDE, JEV/Laya, LLM
+summarization, semantic reranking, abstractive generation,
+probability/confidence-weighted choice. Policy reads typed metadata
+only, never evidence prose.
+
+### 36.2 Representation contract (frozen)
+
+A C01 materialized entry WITHOUT 'representation' is legacy EXACT:
+contentHash binds the shown source bytes and the B04 decision binds
+the same hash. A C01 materialized entry WITH 'representation' is a
+lossy deterministic projection carrying {kind, sourcePageId,
+sourceContentHash, representationHash} where contentHash ==
+representationHash == sha256(exact shown bytes) binds the shown bytes
+and sourceContentHash binds the canonical exact backing evidence (and
+agrees with the B04 tier decision). Lossy kinds (EXTRACTIVE,
+STRUCTURED) MUST diverge from the source hash; kind EXACT requires
+hash equality. A compressed representation therefore can never claim
+source bytes. The entry id still derives from shown bytes, and the
+view id additionally binds (representationKind, sourceContentHash) for
+representation-bearing entries; representation-free views keep
+byte-identical ids/digests to before. One new trace verb, STRUCTURE,
+records structured projections (EXTRACT stays reserved for
+source-exact substrings; reason codes stay open vocabulary).
+
+### 36.3 Eligibility matrix (frozen)
+
+PINNED -> EXACT only. Mandatory (any tier) -> EXACT only. Current
+user turn (sourceType current-turn) -> EXACT only. Balanced tool
+protocol (live toolTransaction unit, B04 open/settled transaction
+subjects, tool-result page kind) -> EXACT only. State-backed renders
+(checkpoint-state, runtime-state) -> EXACT only (already minimal typed
+truth). Optional HOT -> EXACT only (conservative default; no
+aggressive compression without frozen structural proof). Optional
+WARM page-backed (non-tool) -> EXACT, EXTRACTIVE (source-exact
+extract exists), STRUCTURED (typed lossless form exists). Optional
+COLD materialized page-backed (non-tool) -> EXACT, EXTRACTIVE,
+STRUCTURED, REFERENCE (frozen C04 COLD fallback). ARCHIVE is never
+materialized. Provenance finding: the frozen B04+C02 pipeline
+materializes page-backed entries as COLD (byte-bearing history) or HOT
+(immediate tool); non-tool page-backed WARM entries do not occur in
+compiler output (byte-bearing pages classify COLD; byte-less WARM
+pages defer retrieval), so the WARM rungs are implemented, unit-proven
+(eligibility, derivation, C01 contract on real WARM tool decisions for
+the negative side), and ready, while end-to-end ladder proof runs on
+COLD. WARM has no legal reference form: unfitting WARM omits (no tier
+demotion to COLD is ever performed to obtain one).
+
+### 36.4 EXTRACTIVE (frozen)
+
+Only the frozen B01 extract authority: a bounded source-exact
+substring proven by exactText.includes at page validation, re-proven
+against the live model-facing bytes at derivation time. No model
+salience, no semantic scoring, no truncation, no first/last-N spans.
+If linkage cannot be proven on both sides, EXTRACTIVE is unavailable,
+never guessed. A derived form hashing to the source bytes, or not
+strictly smaller in real counted tokens than the current form, is
+skipped (anti-laundering, least-lossy guard).
+
+### 36.5 STRUCTURED (frozen)
+
+Deterministic canonical serialization of validated typed/source-bound
+fields only: page identity, kind, source binding, source seqs,
+files/symbols/entities/tags arrays, bounded exact extract when
+present, typed provenance triple, and the exact rehydration reference
+(pageId, source hash, namespace triple) that keeps backing
+recoverable. No gloss (semanticGloss never participates), no prose
+inference, no new authoritative structure. Forms exceeding the C01
+text bound are unavailable (never clipped). Canonical JSON makes
+repeats byte-identical.
+
+### 36.6 REFERENCE (frozen)
+
+REFERENCE is the frozen C04 COLD fallback (referencedColdPages),
+unchanged in policy: exact backing exists, resolution is provable,
+namespace is valid, tier contract supports reference form. C05 never
+constructs references itself; the REFERENCE rung is reached by
+accepting C04's disposition once richer legal rungs are exhausted or
+unavailable. C04 fallback resolves the source hash through the entry
+representation binding (see 36.9), so compressed COLD entries keep
+their reference eligibility with source-identity references.
+
+### 36.7 Mandatory, current-user, tool-protocol exclusions (frozen)
+
+Mandatory state (mandatoryRefs, PINNED correctness, mandatory HOT
+intent, requirements, constraints, approvals, lifecycle, repo
+identity, verification truth, checkpoint state) is outside the ladder:
+mandatoryUsed > hardMax still fails closed with
+compiler-mandatory-over-budget; C05 never solves mandatory overflow.
+The exact current user turn survives byte-identical. Balanced tool
+transactions stay exact with intact call/result units; settled tool
+history stays exact by the same conservative rule.
+
+### 36.8 Fixpoint, least-lossy, priority (frozen)
+
+Integration shape: exact candidate set -> C04 packing attempt ->
+highest-priority blocked optional source advances exactly one
+available rung (packing class, then view order) -> recount through the
+frozen counter -> re-run the SAME C04 policy, until no advanceable
+blocked source remains. Kept material is never touched; transitions
+move only toward less information-rich rungs with explicit reason
+codes (compression-extractive-budget / compression-structured-budget);
+unavailable rungs are skipped, never recorded, so plans prove strict
+EXACT -> ... -> selected walks. Priority is structural: C04 packs
+mandatory > HOT > WARM > COLD on every pass, and only blocked sources
+compress, so a compressed lower-priority page can never displace
+higher-priority material. Termination is bounded (2 rungs per source);
+the final view is C04-packed with appended EXTRACT/STRUCTURE trace
+entries for kept lossy forms (observability only; packing agreement
+re-verified after tracing).
+
+### 36.9 Minimal pre-freeze extensions (explicitly documented)
+
+C01 (config/ContextViewV2.cjs): optional 'representation' member on
+materialized entries (absent, never null, on legacy EXACT, so frozen
+bytes/ids/digests are untouched); REPRESENTATION_KINDS and
+REPRESENTATION_EXACT_KEYS; binding validation with the anti-laundering
+rule; tier-decision and external-proof checks resolving the source
+hash through the binding; conditional view-id participation; one new
+trace action STRUCTURE. Nothing else changes: namespace, checkpoint
+binding, mandatory manifest, tier/provenance authority, disposable,
+tool-protocol, and view-identity formulas for representation-free
+views are frozen.
+
+C04 (config/ContextBudgetAllocatorV2.cjs): representation travels
+through packing enumeration and packed-view assembly untouched, and
+COLD fallback resolves the source identity through the binding when
+present. Greedy selection, priority classes, reason codes, budget
+arithmetic, plan contract, and policy revision
+(context-budget-packer-v1) are unchanged; the frozen stem scan stays
+clean.
+
+### 36.10 Token accounting, determinism, safety (frozen)
+
+Every representation is counted from its exact shown bytes through
+ContextTokenCounterV2 with the actual fingerprint; caller counts are
+never trusted; changing bytes changes cost; unknown tokenizers fail
+closed. Same (checkpoint, view, pages, budget, tokenizer, policy
+revision) yields byte-identical representations, hashes, packing,
+view id/digest, and plan digest across repeats, fresh processes, and
+restarts (XProc-proven). Unicode bytes are preserved exactly (no
+normalization); injection prose has zero policy effect (typed metadata
+only). Integrity failures (forged source/representation hashes,
+identity mismatch, foreign namespace, stale identity, forged tier or
+mandatory flag, forged counts or plans) reject with no partial view.
+Diagnostic plans expose source identity, rungs, hashes, counted
+costs, reason codes, and deterministic=true - never source text - and
+are observability only.
+
+### 36.11 Suites (frozen)
+
+New suites tests/ContextCompressionLadderV2.Tests.cjs (129
+assertions), tests/ContextCompressionLadderV2H.Tests.cjs (98
+assertions), and tests/ContextCompressionLadderV2XProc.Tests.cjs (+
+worker, 12 assertions). Fixtures compile through the REAL C02
+compiler (inline COLD pages incl. Unicode/injection/gloss/log pages,
+settled + immediate tool pages, a live B03 session proof for
+external-COLD evidence) plus hand-built C01-valid exact views for
+contract boundaries; the counter is the REAL contract with the
+deterministic reference adapter. Coverage: the required scenarios
+(EXACT retention, EXTRACTIVE, STRUCTURED, REFERENCE, OMIT exhaustion,
+mandatory/current-user/tool preservation, missing-backing
+unavailability, forged-extract fail-closed, gloss exclusion,
+priority preservation, exact-fit/one-over boundaries, target=0,
+Unicode, injection, namespace/source/representation tamper, repeat
+determinism, XProc determinism, read-only purity), the losslessness
+classes, the C01 representation battery (equations,
+anti-laundering, tier/mandatory/tool/state gates, identity/digest
+participation), structured-too-large fall-through, input-shape
+fail-closed vectors, plan-validation forgery battery, C04 sole
+authority (policy revision, target/hardMax semantics, view/plan
+agreement), monotonicity, recount accounting, and the D06 static
+boundary (comment-stripped scan; D06 removable without effect).
+Lane C01, C02(+H), C03(+H), C04(+H), B01, B02(+variants), B03(+H),
+B04(+H), all XProc variants, FoundationHardening, AihControllerHost
+green; broader harness per task report. Next: CCV2-C06 (Cache-Aware
+Prompt Layout) - not begun here.
+
 
 
 

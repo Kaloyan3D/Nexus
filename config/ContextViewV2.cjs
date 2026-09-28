@@ -56,6 +56,12 @@
  *   retrieval, reranking, budget allocation, compression, prompt layout,
  *   DECIDE, JEV/Laya, root-model prompt rendering. This module performs
  *   NO search, NO packing, NO compression, and persists NOTHING.
+ *   Pre-freeze C05 representation extension (section 36): a materialized
+ *   entry may carry ONE optional 'representation' binding separating
+ *   source identity (sourcePageId/sourceContentHash, bound to the B04
+ *   decision) from shown identity (representationHash/contentHash, bound
+ *   to the exact shown bytes). Entries without it are legacy EXACT with
+ *   byte-identical identity semantics to before.
  *   The architecture baseline names this section 'retrievedPages'; C01
  *   freezes the canonical field name 'materializedCold' with that exact
  *   meaning: exact COLD material already chosen by a future compiler.
@@ -134,9 +140,16 @@ const MANDATORY_REF_KINDS = Object.freeze([
   'page-evidence',
 ]);
 
-// Closed-world trace actions (frozen). The trace records what a future
-// compiler claims it did; it authorizes nothing.
-const TRACE_ACTIONS = Object.freeze(['PIN', 'LOAD', 'EXTRACT', 'REFERENCE', 'SKIP']);
+// Closed-world trace actions (frozen, plus one C05 extension). The trace
+// records what a future compiler claims it did; it authorizes nothing.
+// C05 (CCV2-C05 compression ladder) adds exactly one action, 'STRUCTURE',
+// for deterministic typed structured projections. EXTRACT remains reserved
+// for source-exact substrings, LOAD for exact materialization, REFERENCE
+// for COLD reference fallback, SKIP for omission, PIN for mandatory
+// pinning. A STRUCTURED projection recorded as EXTRACT would falsely
+// claim source-substring semantics, so the honest minimal extension is
+// one new verb (see docs/architecture/context-compaction-v2.md section 36).
+const TRACE_ACTIONS = Object.freeze(['PIN', 'LOAD', 'EXTRACT', 'STRUCTURE', 'REFERENCE', 'SKIP']);
 
 // External exact-resolution modes (frozen B03H taxonomy): COLD entries
 // with one of these modes were NOT durably self-backed and must carry a
@@ -203,7 +216,23 @@ const VIEW_TURN_REF_EXACT_KEYS = Object.freeze(['turnId', 'revision']);
 const MATERIAL_ENTRY_EXACT_KEYS = Object.freeze([
   'schemaVersion', 'id', 'tier', 'sourceType', 'sourceId', 'contentHash',
   'provenance', 'mediaType', 'exactText', 'mandatory', 'tierDecision',
-  'evidence', 'toolTransaction',
+  'evidence', 'toolTransaction', 'representation',
+]);
+
+// C05 model-facing representation contract (CCV2-C05 compression ladder).
+// An entry WITHOUT 'representation' is legacy EXACT: contentHash binds the
+// source bytes shown to the model and the B04 tier decision binds the same
+// hash. An entry WITH 'representation' is a lossy deterministic projection:
+// contentHash binds the exact representation bytes shown to the model
+// (representationHash), while sourceContentHash binds the canonical exact
+// backing evidence (and agrees with the B04 tier decision). The two hashes
+// MUST differ for lossy kinds, so a compressed representation can never
+// claim the source hash (see section 36). 'representation' is absent
+// (not null) on legacy EXACT entries, so frozen canonical bytes, view ids,
+// and digests of representation-free views are byte-identical to before.
+const REPRESENTATION_KINDS = Object.freeze(['EXACT', 'EXTRACTIVE', 'STRUCTURED']);
+const REPRESENTATION_EXACT_KEYS = Object.freeze([
+  'kind', 'sourcePageId', 'sourceContentHash', 'representationHash',
 ]);
 const MATERIAL_EVIDENCE_EXACT_KEYS = Object.freeze([
   'pageId', 'contentHash', 'sourceRoute', 'mediaType', 'sourceIdentity',
@@ -293,13 +322,21 @@ function identityBodyOf(viewWithoutIdentity) {
   const materialized = [];
   for (const section of VIEW_SECTIONS) {
     for (const entry of viewWithoutIdentity[section]) {
-      materialized.push({
+      const record = {
         section,
         id: entry.id,
         sourceId: entry.sourceId,
         contentHash: entry.contentHash,
         tier: entry.tier,
-      });
+      };
+      // C05: a lossy representation binds its source identity into the
+      // view id explicitly. Representation-free (EXACT) entries produce
+      // byte-identical identity bodies to before (frozen view ids kept).
+      if (entry.representation !== null && entry.representation !== undefined) {
+        record.representationKind = entry.representation.kind;
+        record.sourceContentHash = entry.representation.sourceContentHash;
+      }
+      materialized.push(record);
     }
   }
   return {
@@ -453,7 +490,17 @@ function checkTierDecisionBinding(entry, section, viewNamespace) {
   if (pageBacked) {
     if (decision.pageId === null || decision.pageId === undefined) return 'context-view-tier-binding-mismatch';
     if (decision.pageId !== entry.sourceId) return 'context-view-tier-binding-mismatch';
-    if (decision.contentHash !== entry.contentHash) return 'context-view-tier-binding-mismatch';
+    // C05: a lossy representation keeps the B04 decision bound to the
+    // canonical source bytes, not to the shown representation bytes.
+    // checkRepresentationBinding proves the representation side; here the
+    // decision side must agree with the source hash exactly.
+    if (entry.representation !== null && entry.representation !== undefined) {
+      if (decision.contentHash !== entry.representation.sourceContentHash) {
+        return 'context-view-tier-binding-mismatch';
+      }
+    } else if (decision.contentHash !== entry.contentHash) {
+      return 'context-view-tier-binding-mismatch';
+    }
   }
   if (stateBacked) {
     // State subjects are authoritative structured state and carry no
@@ -491,6 +538,74 @@ function checkProvenance(entry) {
   return null;
 }
 
+// ---- C05 representation binding (source vs shown identity) ----
+
+function checkRepresentationBinding(entry, section) {
+  const representation = entry.representation === undefined ? null : entry.representation;
+  if (representation === null) return null;
+  if (!isPlainObject(representation)) return 'context-view-representation-invalid';
+  if (unknownKeyOf(representation, REPRESENTATION_EXACT_KEYS) !== null) {
+    return 'context-view-unknown-field';
+  }
+  if (!REPRESENTATION_KINDS.includes(representation.kind)) {
+    return 'context-view-representation-invalid';
+  }
+  if (typeof representation.sourcePageId !== 'string'
+    || !PAGE_ID_PATTERN.test(representation.sourcePageId)) {
+    return 'context-view-representation-invalid';
+  }
+  if (typeof representation.sourceContentHash !== 'string'
+    || !CONTENT_HASH_PATTERN.test(representation.sourceContentHash)) {
+    return 'context-view-representation-invalid';
+  }
+  if (typeof representation.representationHash !== 'string'
+    || !CONTENT_HASH_PATTERN.test(representation.representationHash)) {
+    return 'context-view-representation-invalid';
+  }
+  // The representation hash binds the exact shown bytes (the exactness
+  // equation above already proved shown bytes hash to contentHash).
+  if (representation.representationHash !== entry.contentHash) {
+    return 'context-view-representation-mismatch';
+  }
+  // Source identity travels on sourceId; the representation must agree.
+  if (representation.sourcePageId !== entry.sourceId) {
+    return 'context-view-representation-mismatch';
+  }
+  // Anti-laundering rule: lossy kinds MUST differ from the source hash
+  // (a projection must never claim source bytes), and EXACT must not
+  // claim a divergent hash. Hash equality is the exactness proof.
+  if (representation.kind === 'EXACT') {
+    if (representation.sourceContentHash !== representation.representationHash) {
+      return 'context-view-representation-mismatch';
+    }
+  } else if (representation.sourceContentHash === representation.representationHash) {
+    return 'context-view-representation-mismatch';
+  }
+  // Only page-backed optional WARM/COLD memory may carry a lossy form:
+  // state-backed truth, PINNED correctness, HOT working set, mandatory
+  // material, and balanced tool transactions stay exact by construction.
+  if (!PAGE_BACKED_SOURCES.includes(entry.sourceType)) {
+    return 'context-view-representation-invalid';
+  }
+  if (entry.tier !== 'WARM' && entry.tier !== 'COLD') {
+    return 'context-view-representation-invalid';
+  }
+  if (SECTION_TIERS[section] !== entry.tier) return 'context-view-section-tier-mismatch';
+  if (entry.mandatory === true) return 'context-view-representation-invalid';
+  const unit = entry.toolTransaction === undefined ? null : entry.toolTransaction;
+  if (unit !== null) return 'context-view-representation-invalid';
+  // The B04 decision stays bound to the canonical source bytes.
+  const decision = entry.tierDecision;
+  if (!isPlainObject(decision)) return 'context-view-tier-proof-invalid';
+  if (decision.pageId !== representation.sourcePageId) {
+    return 'context-view-tier-binding-mismatch';
+  }
+  if (decision.contentHash !== representation.sourceContentHash) {
+    return 'context-view-tier-binding-mismatch';
+  }
+  return null;
+}
+
 // ---- fresh-proof binding for external COLD (B03 handoff) ----
 
 function checkMaterialEvidence(entry, viewNamespace) {
@@ -519,7 +634,12 @@ function checkMaterialEvidence(entry, viewNamespace) {
     return 'context-view-cold-proof-invalid';
   }
   if (evidence.pageId !== entry.sourceId) return 'context-view-cold-proof-binding-mismatch';
-  if (evidence.contentHash !== entry.contentHash) return 'context-view-cold-proof-binding-mismatch';
+  // C05: external proof binds the canonical source bytes. For a lossy
+  // representation that is sourceContentHash, not the shown bytes.
+  const sourceHash = (entry.representation !== null && entry.representation !== undefined)
+    ? entry.representation.sourceContentHash
+    : entry.contentHash;
+  if (evidence.contentHash !== sourceHash) return 'context-view-cold-proof-binding-mismatch';
   if (!rehydrationV2.SOURCE_ROUTES.includes(evidence.sourceRoute)) {
     return 'context-view-cold-proof-invalid';
   }
@@ -631,10 +751,14 @@ function validateMaterialEntry(entry, section, viewNamespace) {
   if (entry.exactText.length > VIEW_BOUNDS.exactTextMaxChars) return 'context-view-material-too-large';
   // Exactness equation: the model-facing text must hash to the claimed
   // content identity. Same bytes do not imply same ownership (namespace
-  // is bound separately), but differing bytes always fail.
+  // is bound separately), but differing bytes always fail. For C05 lossy
+  // entries this proves representationHash binds the shown bytes; the
+  // source binding is proven separately below (never the same hash).
   if (sha256HexUtf8(entry.exactText) !== entry.contentHash) {
     return 'context-view-content-mismatch';
   }
+  const representationFailure = checkRepresentationBinding(entry, section);
+  if (representationFailure !== null) return representationFailure;
   if (typeof entry.mandatory !== 'boolean') return 'context-view-material-invalid';
   // PINNED is mandatory by construction: correctness-critical current
   // state with mandatory=false is rejected.
@@ -962,6 +1086,12 @@ function buildMaterialEntry(raw, section) {
       ? null
       : deepClone(raw.toolTransaction),
   };
+  // C05: the representation binding travels only when supplied. Legacy
+  // EXACT inputs carry no such key, so their canonical bytes, entry ids,
+  // view ids, and digests are byte-identical to before this extension.
+  if (raw.representation !== undefined && raw.representation !== null) {
+    entry.representation = deepClone(raw.representation);
+  }
   return entry;
 }
 
@@ -1114,6 +1244,8 @@ module.exports = {
   VIEW_NAMESPACE_EXACT_KEYS,
   VIEW_CHECKPOINT_BINDING_EXACT_KEYS,
   MATERIAL_ENTRY_EXACT_KEYS,
+  REPRESENTATION_KINDS,
+  REPRESENTATION_EXACT_KEYS,
   COLD_REFERENCE_EXACT_KEYS,
   BUDGET_EXACT_KEYS,
   TRACE_ENTRY_EXACT_KEYS,

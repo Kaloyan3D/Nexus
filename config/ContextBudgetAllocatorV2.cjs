@@ -361,6 +361,9 @@ function enumeratePackingEntries(view) {
         exactText: entry.exactText,
         provenance: entry.provenance,
         tierDecision: entry.tierDecision,
+        // C05: the representation binding travels with the enumerated
+        // entry so COLD fallback resolves the source identity it names.
+        representation: entry.representation === undefined ? null : entry.representation,
         orderIndex,
         packingClass: priority.class,
       });
@@ -436,12 +439,19 @@ function buildColdFallbackReference(entry, viewNamespace) {
   if (typeof decision.exactResolutionMode !== 'string'
     || !PACKING_COLD_REFERENCE_MODES.includes(decision.exactResolutionMode)) return null;
   if (decision.pageId !== entry.sourceId) return null;
-  if (decision.contentHash !== entry.contentHash) return null;
+  // C05: a representation-bearing entry shows projection bytes while the
+  // tier binding still names the canonical source bytes. The reference
+  // must name the source bytes (the rehydratable identity), resolved
+  // through the entry representation binding when one is present.
+  const sourceHash = (entry.representation !== null && entry.representation !== undefined)
+    ? entry.representation.sourceContentHash
+    : entry.contentHash;
+  if (typeof sourceHash !== 'string' || decision.contentHash !== sourceHash) return null;
   const kind = decision.pageKind;
   if (typeof kind !== 'string' || kind === '') return null;
   return {
     pageId: entry.sourceId,
-    contentHash: entry.contentHash,
+    contentHash: sourceHash,
     evidenceId: null,
     kind,
     provenance: deepClone(entry.provenance),
@@ -747,7 +757,7 @@ function validateContextPackingPlanV2(plan, options) {
 // ---- packed ContextView assembly (C01 remains the final gate) ----
 
 function rawEntryOf(viewEntry) {
-  return {
+  const raw = {
     tier: deepClone(viewEntry.tier),
     sourceType: deepClone(viewEntry.sourceType),
     sourceId: deepClone(viewEntry.sourceId),
@@ -762,6 +772,14 @@ function rawEntryOf(viewEntry) {
     toolTransaction: viewEntry.toolTransaction === null || viewEntry.toolTransaction === undefined
       ? null : deepClone(viewEntry.toolTransaction),
   };
+  // C05: a model-facing representation binding on the kept entry travels
+  // into the packed view untouched, so the packed entry keeps the same
+  // source/shown identity the plan accounted for. Entries without one
+  // pack byte-identically to before.
+  if (viewEntry.representation !== null && viewEntry.representation !== undefined) {
+    raw.representation = deepClone(viewEntry.representation);
+  }
+  return raw;
 }
 
 /**
