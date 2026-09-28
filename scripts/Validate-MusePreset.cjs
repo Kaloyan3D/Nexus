@@ -83,6 +83,7 @@ async function main() {
   const managed = [
     ['preset.yml', 'preset-muse.yml'],
     ['Muse-Isolation.cjs', 'Muse-Isolation.cjs'],
+    ['Controller-RequestBoundary.cjs', 'Controller-RequestBoundary.cjs'],
     ['Muse-ReasoningGovernor.cjs', 'Muse-ReasoningGovernor.cjs'],
     ['Muse-ReasoningRuntime.cjs', 'Muse-ReasoningRuntime.cjs'],
     ['Muse-ReasoningSignals.cjs', 'Muse-ReasoningSignals.cjs'],

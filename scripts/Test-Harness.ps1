@@ -72,6 +72,7 @@ $suites = @(
     [ordered]@{ name='MuseReasoningSignals'; script='tests/MuseReasoningSignals.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='MuseReasoningActivity'; script='tests/MuseReasoningActivity.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='MuseIsolation'; script='tests/MuseIsolation.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='MuseRoutingAuthorityOrdering'; script='tests/MuseRoutingAuthorityOrdering.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionBridge'; script='tests/ContextCompactionBridge.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionAcceptance'; script='tests/ContextCompactionAcceptance.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionCrash'; script='tests/ContextCompactionCrash.Tests.cjs'; executable=$layout.Node; kind='node' },
@@ -140,6 +141,8 @@ $suites = @(
     [ordered]@{ name='ContextRetrieverV2'; script='tests/ContextRetrieverV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextRetrieverV2XProc'; script='tests/ContextRetrieverV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextRetrieverV2H'; script='tests/ContextRetrieverV2H.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextBudgetAllocatorV2'; script='tests/ContextBudgetAllocatorV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextBudgetAllocatorV2XProc'; script='tests/ContextBudgetAllocatorV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionV2'; script='tests/ContextCompactionV2.Tests.ps1'; executable=$powershell; kind='powershell' }
 )
 

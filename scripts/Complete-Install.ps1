@@ -89,6 +89,7 @@ Copy-Item -LiteralPath (Join-Path $layout.Config 'preset-deepseek.yml') -Destina
 Copy-Item -LiteralPath (Join-Path $layout.Config 'DeepSeek-Isolation.cjs') -Destination (Join-Path $deepSeekPreset 'DeepSeek-Isolation.cjs') -Force
 & (Join-Path $layout.Scripts 'Enable-EngineeringIsolation.ps1') -PresetDirectory $targetPreset
 Copy-Item -LiteralPath (Join-Path $layout.Config 'Engineering-Isolation.cjs') -Destination (Join-Path $targetPreset 'Engineering-Isolation.cjs') -Force
+Copy-Item -LiteralPath (Join-Path $layout.Config 'Controller-RequestBoundary.cjs') -Destination (Join-Path $targetPreset 'Controller-RequestBoundary.cjs') -Force
 foreach ($presetDirectory in @($targetPreset, $deepSeekPreset)) {
     Copy-Item -LiteralPath (Join-Path $layout.Config 'AihController.cjs') -Destination (Join-Path $presetDirectory 'AihController.cjs') -Force
     Copy-Item -LiteralPath (Join-Path $layout.Config 'ContextCompaction.cjs') -Destination (Join-Path $presetDirectory 'ContextCompaction.cjs') -Force

@@ -42,6 +42,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const profiles = require('./Engineering-Profiles.cjs')
 const reasoningRuntime = require('./Muse-ReasoningRuntime.cjs')
+const requestBoundary = require('./Controller-RequestBoundary.cjs')
 
 const MUSE_ENGINE = 'muse'
 const MUSE_AGENT_PRESET = 'aih-muse'
@@ -165,43 +166,46 @@ function apply(ctx) {
         : { DSH_AIH_PRESET: MUSE_AGENT_PRESET },
   })
 
-  ctx.on('agent/request', async (payload, next) => {
-    const session = payload && payload.agent && payload.agent.session
-    if (!session) throw enforcementError('missing-session', null, null)
-    const installRoot = profiles.installRootOf()
-    const binding = bindingFor(installRoot, session.id)
-    const requestedEngine = sessionPreset(session) === MUSE_AGENT_PRESET ? 'muse' : 'dual'
-    if (binding && binding.engine !== requestedEngine) {
-      throw enforcementError('session-preset-does-not-match-bound-engine', binding, null, 'engine-binding-violation')
-    }
-    if (!binding && requestedEngine !== 'muse') return next()
-    if (binding && binding.engine !== MUSE_ENGINE) return next()
-    const target = controllerTargetFor(installRoot, binding)
-
+  // The controller route is applied through the shared request boundary so
+  // it is in place INSIDE DSH model-selection for every session, not only
+  // the first one to mount this standing preset (Controller-RequestBoundary.cjs).
+  requestBoundary.installControllerRequestBoundary(ctx, {
+    targetFor(payload) {
+      const session = payload && payload.agent && payload.agent.session
+      if (!session) throw enforcementError('missing-session', null, null)
+      const installRoot = profiles.installRootOf()
+      const binding = bindingFor(installRoot, session.id)
+      const requestedEngine = sessionPreset(session) === MUSE_AGENT_PRESET ? 'muse' : 'dual'
+      if (binding && binding.engine !== requestedEngine) {
+        throw enforcementError('session-preset-does-not-match-bound-engine', binding, null, 'engine-binding-violation')
+      }
+      if (!binding && requestedEngine !== 'muse') return null
+      if (binding && binding.engine !== MUSE_ENGINE) return null
+      return { ...controllerTargetFor(installRoot, binding), installRoot, binding }
+    },
     // Phase 2: per-call adaptive effort from task-local reasoning state.
     // Resolved BEFORE the downstream pipeline runs, so a capability refusal
     // (MuseReasoningCapabilityError) means no request is produced at all --
     // never a fallback effort, never the stale profile default.
-    const adaptive = reasoningRuntime.prepareMuseRequestEffort({ installRoot, binding, target })
-
-    payload.routingAuthority = {
-      source: 'controller',
-      target: { provider: target.provider, model: target.model },
-    }
-
-    const proposed = await next()
-
-    const proposedMaxTokens =
-      typeof proposed.maxTokens === 'number' && Number.isFinite(proposed.maxTokens) && proposed.maxTokens > 0
-        ? proposed.maxTokens
-        : MUSE_V0_MAX_OUTPUT_TOKENS
-    return Object.freeze({
-      ...proposed,
-      provider: target.provider,
-      model: target.model,
-      reasoningEffort: adaptive.effort,
-      maxTokens: Math.min(proposedMaxTokens, MUSE_V0_MAX_OUTPUT_TOKENS),
-    })
+    prepare(_payload, target) {
+      return reasoningRuntime.prepareMuseRequestEffort({ installRoot: target.installRoot, binding: target.binding, target })
+    },
+    finalize(proposed, target, adaptive) {
+      const proposedMaxTokens =
+        typeof proposed.maxTokens === 'number' && Number.isFinite(proposed.maxTokens) && proposed.maxTokens > 0
+          ? proposed.maxTokens
+          : MUSE_V0_MAX_OUTPUT_TOKENS
+      return {
+        ...proposed,
+        provider: target.provider,
+        model: target.model,
+        reasoningEffort: adaptive.effort,
+        maxTokens: Math.min(proposedMaxTokens, MUSE_V0_MAX_OUTPUT_TOKENS),
+      }
+    },
+    fail(reason, target) {
+      return enforcementError(reason, target.binding, target.state)
+    },
   })
 }
 

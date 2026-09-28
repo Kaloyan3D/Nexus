@@ -26,6 +26,7 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const profiles = require('./Engineering-Profiles.cjs')
+const requestBoundary = require('./Controller-RequestBoundary.cjs')
 
 /** Read the persisted session binding (workspace/taskId/preset) for a session. */
 function bindingFor(installRoot, sessionId) {
@@ -173,30 +174,34 @@ function controllerTargetFor(installRoot, binding) {
 }
 
 function apply(ctx) {
-  ctx.on('agent/request', async (payload, next) => {
-    const session = payload && payload.agent && payload.agent.session
-    const header = session && session.header
-    if (!header) return next()
-    const isWorker = header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0
-    if (isWorker) return next()
+  // The controller route is applied through the shared request boundary so
+  // it is in place INSIDE DSH model-selection for every session, not only
+  // the first one to mount this standing preset (Controller-RequestBoundary.cjs).
+  requestBoundary.installControllerRequestBoundary(ctx, {
+    targetFor(payload) {
+      const session = payload && payload.agent && payload.agent.session
+      const header = session && session.header
+      if (!header) return null
+      const isWorker = header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0
+      if (isWorker) return null
 
-    const installRoot = profiles.installRootOf()
-    const binding = bindingFor(installRoot, session.id)
-    if (binding && binding.engine !== 'dual') throw enforcementError('session-binding-is-not-dual-engine', binding, null, 'engine-binding-violation')
-    if (binding && sessionPreset(session) === 'aih-muse') throw enforcementError('session-preset-does-not-match-bound-engine', binding, null, 'engine-binding-violation')
-    const target = controllerTargetFor(installRoot, binding)
-    payload.routingAuthority = {
-      source: 'controller',
-      target: { provider: target.provider, model: target.model },
-    }
-    const proposed = await next()
-
-    return Object.freeze({
-      ...proposed,
-      provider: target.provider,
-      model: target.model,
-      reasoningEffort: target.reasoning,
-    })
+      const installRoot = profiles.installRootOf()
+      const binding = bindingFor(installRoot, session.id)
+      if (binding && binding.engine !== 'dual') throw enforcementError('session-binding-is-not-dual-engine', binding, null, 'engine-binding-violation')
+      if (binding && sessionPreset(session) === 'aih-muse') throw enforcementError('session-preset-does-not-match-bound-engine', binding, null, 'engine-binding-violation')
+      return { ...controllerTargetFor(installRoot, binding), binding }
+    },
+    finalize(proposed, target) {
+      return {
+        ...proposed,
+        provider: target.provider,
+        model: target.model,
+        reasoningEffort: target.reasoning,
+      }
+    },
+    fail(reason, target) {
+      return enforcementError(reason, target.binding, target.state)
+    },
   })
 }
 
