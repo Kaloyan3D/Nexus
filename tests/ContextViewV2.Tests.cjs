@@ -488,10 +488,18 @@ section('C01 MANDATORY MANIFEST');
 }
 section('C01 BUDGET CONTRACT');
 {
-  const u1 = buildValidInput(); u1.tokenBudget.used = 7000;
-  throwsWith(() => view.createContextViewV2(u1), 'context-view-budget-invalid', 'used above target rejected');
+  const u0 = buildValidInput(); u0.tokenBudget = { hardMax: 150, target: 100, used: 120 };
+  const H0 = view.createContextViewV2(u0);
+  check(H0.tokenBudget.target === 100 && H0.tokenBudget.used === 120 && H0.tokenBudget.hardMax === 150
+    && view.validateContextViewV2(H0).valid === true, 'honest mandatory overflow (used > target) is structurally valid');
+  const u1 = buildValidInput(); u1.tokenBudget.used = 8001;
+  throwsWith(() => view.createContextViewV2(u1), 'context-view-budget-invalid', 'used above hardMax rejected');
+  const u1b = buildValidInput(); u1b.tokenBudget.used = -1;
+  throwsWith(() => view.createContextViewV2(u1b), 'context-view-budget-invalid', 'negative used rejected');
   const u2 = buildValidInput(); u2.tokenBudget.target = 9000;
   throwsWith(() => view.createContextViewV2(u2), 'context-view-budget-invalid', 'target above hardMax rejected');
+  const u2b = buildValidInput(); u2b.tokenBudget.target = -1;
+  throwsWith(() => view.createContextViewV2(u2b), 'context-view-budget-invalid', 'negative target rejected');
   const u3 = buildValidInput(); u3.tokenBudget.used = null;
   const UN = view.createContextViewV2(u3);
   check(UN.tokenBudget.used === null && view.validateContextViewV2(UN).valid === true, 'used:null explicit unknown accepted');

@@ -3538,8 +3538,12 @@ protocol-subject entry without a call+result unit fails; one-sided units
 fail. Mandatory manifest: every ref accounted exactly once with hash
 agreement where given; missing/duplicate/drift fails closed. C01 never
 creates the manifest (C02 derives it). Budget is a validated contract
-(0 <= used <= target <= hardMax; used:null = explicit unknown, never
-guessed); C01 computes nothing (C04 owns allocation).
+(0 <= target <= hardMax; when used is known, 0 <= used <= hardMax;
+used:null = explicit unknown, never guessed); target is the preferred
+materialization target and hardMax the absolute ceiling, so a known
+used may honestly exceed target but never hardMax (C04H correction).
+C01 computes nothing and never decides WHY used exceeds target (C04
+owns allocation and packing-policy correctness).
 
 ### 31.6 External-COLD handoff (frozen)
 
@@ -4164,6 +4168,235 @@ identity, and the permission-boundary assertion; XProc now carries
 Bulgarian/accented-Latin/Greek/CJK/mixed fixtures with
 byte-identical cross-process results. C03 (126), C03 XProc, and all
 Phase-A/B/C01/C02 regressions remain green (see task report).
-Next: CCV2-C04 (Budgeted Packing) - not begun here.
+## 35. C04 Budgeted Packing (Phase C)
+
+C04 freezes deterministic token-budget accounting and packing for the
+already-safe Context Compiler working set. Production authorities:
+config/ContextBudgetAllocatorV2.cjs (packing) plus the narrow counter
+contract config/ContextTokenCounterV2.cjs. No Phase-A/B/C01/C02/C03
+source file was modified (additive-only); no shortening, no
+re-representation, no similarity search, no scoring, no DECIDE, no
+prompt rendering exists anywhere in C04.
+
+### 35.1 Authority boundary (frozen)
+
+C02 decides what is structurally eligible. C03 decides which exact
+evidence is retrievable/relevant. C04 decides which already-safe
+material fits (here). C05 will own representation reduction, C06
+cache-aware layout. Packing never changes truth: it chooses
+materialized vs reference/omitted view membership only. Tier,
+requirement status, verification truth, provenance, retrieval route,
+and durable evidence are untouched. Deleting every plan and packed
+view loses zero durable task truth. C04 performs no lexical/file/
+symbol search, no store reads, no session/repository access, and no
+rehydration: it consumes supplied C03 results as already-materialized
+view membership. If material is missing, C04 discovers no
+replacements.
+
+### 35.2 Token-counter authority (frozen)
+
+A budget claim requires an explicit counting authority. C04 never
+divides characters, multiplies words, reads model names, or consults
+historical averages, and the core hard-codes no provider or model
+family. Contract: { tokenizerFingerprint: string,
+countText(text: string): number }. The same text under the same
+fingerprint must return the same non-negative integer; negative, NaN,
+Infinity, fractional, or disagreeing counts fail closed, as do
+counter exceptions (no heuristic fallback, ever). Ordinary caller
+metadata (tokenCount fields, prior used values) is never authoritative
+and never silently accepted: unknown budget keys fail closed, and
+every packed count is computed in-operation through the validated
+counter, verified twice per unique text, bound to (materialId,
+contentHash). No persistent count cache exists in C04; per-operation
+memoization is performance-only and keyed by exact material identity,
+so changed text/contentHash always recounts. Without a valid counter,
+packing fails closed with context-budget-tokenizer-unavailable; C04
+cannot certify the packed view and does not guess.
+
+### 35.3 Tokenizer fingerprint (frozen)
+
+Every packed result binds tokenizerFingerprint. Changing the
+tokenizer means a different packing authority/result identity: plan
+validation under a foreign fingerprint fails closed with
+context-budget-fingerprint-mismatch. Counters carrying closures are
+never serialized; cross-process packing rebuilds the authority from
+its fingerprint string only (deterministic test adapter
+test-codepoint-v1, one token per Unicode code point, TEST ONLY and
+never a model tokenizer or production fallback). No real-model
+hard-budget safety may be claimed until a runtime supplies a counter
+matching that model's tokenization contract (C08 boundary).
+
+### 35.4 Usable budget (frozen)
+
+C04 consumes an already-derived usable input budget { hardMax, target }
+with 0 <= target <= hardMax. hardMax is the absolute correctness
+boundary; target is the preferred packed size. Upstream owns usable
+budget derivation (contextWindow - reservedOutput -
+fixedRuntimeReserve - toolProtocolReserve - safetyMargin); C04 never
+derives model limits from model names and never treats a provider
+advertised window as hardMax. Provider/system/tool framing overhead is
+owned upstream of hardMax: C04 measures logical model-facing text
+only and claims no final wire-level provider token use.
+
+### 35.5 Mandatory survival (frozen)
+
+Every C01 mandatory entry (PINNED authoritative state, mandatory HOT
+current user, other mandatory manifest entries) is kept before any
+optional packing; mandatoryUsed is the exact sum of mandatory token
+costs. mandatoryUsed > hardMax fails closed with
+compiler-mandatory-over-budget and emits no view: mandatory truth is
+never shortened, omitted, or converted to a reference, and C05 is
+never invoked to rescue it. mandatoryUsed == hardMax is valid with
+mandatory material only. target < mandatoryUsed <= hardMax is valid
+with optional material omitted/referenced and used == mandatoryUsed;
+packing never fails merely because mandatory exceeds target.
+
+### 35.6 Target vs hardMax (frozen)
+
+Optional packing stops at the requested target and never causes
+target overflow: an optional entry is kept only while the running
+total stays within target, so target overflow is legal ONLY because
+of mandatory material (plan validation proves used <= max(target,
+mandatoryUsed) and no non-mandatory KEEP carries tokens while used
+exceeds target). Non-mandatory HOT may not overflow target:
+correctness material that may exceed target means mandatory
+material. Requested-target honesty (C04H): the plan and the packed
+view carry the caller-requested target even when used > target; hardMax
+is never adjusted and no derived target value is ever called target.
+58k of meaningful deterministic context stays preferable to 60k filled
+with noise: correctness outranks utilization.
+
+### 35.7 Packing priority (frozen)
+
+Classes: 0 mandatory correctness (every mandatory entry, any tier) >
+1 non-mandatory HOT > 2 selected WARM > 3 exact materialized COLD.
+No model scoring, no per-token value arithmetic, no retrieval
+reranking: within a class the deterministic C02/C03 view order is
+reused verbatim with the view order index as the frozen tie-break.
+Greedy baseline as context-budget-packer-v1: keep all mandatory, walk
+optional entries in (class, view-order) sequence, keep a whole entry
+when it fits the requested target, otherwise leave it unmaterialized.
+Within one class a blocked entry is skipped and the class continues
+(whole-entry first-fit); once any entry of class N is blocked, every
+lower class is gated with packing-blocked-by-higher-priority, so
+lower-priority evidence never fills budget while higher-priority
+material waits. Each materialized entry is atomic: KEEP the exact
+entry or leave it unmaterialized (REFERENCE/OMIT); truncation,
+slicing, rewriting, and re-representation belong to C05.
+
+### 35.8 COLD and WARM behavior (frozen)
+
+Materialized COLD that fits stays materialized; COLD that does not
+fit falls back to referencedColdPages with pageId, contentHash,
+EvidenceRef identity where available, exact resolution route
+(B03-mode-bound), and provenance preserved (model-view decision only;
+no evidence is deleted). Dropped COLD that cannot form a valid COLD
+reference stays observable as OMIT. Dropped WARM is never deleted
+from durable task memory; it records REFERENCE/SKIP-from-view as the
+frozen representation allows, otherwise an observable OMIT in the
+plan (no identity-only WARM reference representation exists in C01).
+Referenced-only COLD identity metadata is NOT counted as evidence
+text: the plan records referenceMetadataCount separately and C04
+never labels it as provider cost.
+
+### 35.9 Plan, cost, and view contracts (frozen)
+
+ContextTokenCostV2 exact keys: sourceId, materialId, tier, mandatory,
+tokens, tokenizerFingerprint, contentHash (bound to the live entry's
+exact bytes). ContextPackingPlanV2 exact keys: schemaVersion (1),
+tokenizerFingerprint, packingPolicyRevision, compilerPolicyRevision,
+hardMax, target (caller-requested preferred target, never rewritten),
+mandatoryUsed, optionalUsed, used, referenceMetadataCount,
+keptMaterialIds, referencedPageIds, omittedMaterialIds, decisions,
+deterministic (true), planDigest (sha256 over
+nexus/context-packing-plan/v1 LF canonical JSON without the digest).
+Decision exact keys: materialId, tier, mandatory,
+action (KEEP/REFERENCE/OMIT), tokens, reasonCode (frozen
+packing-* vocabulary), deterministic (true). Plan validation proves
+digest agreement, binding agreement, and arithmetic
+(mandatory + optional = used, used <= hardMax,
+used <= max(target, mandatoryUsed), overflow only from mandatory). The trace explains ephemeral view decisions only: it
+cannot change tier, requirement status, verification truth, or delete
+evidence. C04 outputs a new C01-valid view with tokenBudget.used =
+exact packed logical-token count; C01 remains the final structural
+gate (fresh viewId/viewDigest via the frozen derivation), C02 keeps
+emitting used:null, and C03 route/score/provenance/identity pass
+through byte-identical.
+
+### 35.10 Safety invariants (frozen)
+
+Exact Unicode exactText reaches the counter byte-for-byte (no case
+folding, transliteration, or normalization; retrieval normalization
+never leaks into accounting); raw binary never reaches accounting
+(C01 rejects it first). Evidence prose (KEEP ME / I AM MANDATORY /
+PRIORITY=MAX) cannot influence packing: only typed mandatory, tier,
+frozen order, and token cost govern. Diagnostics carry ids, tiers,
+counts, reason codes, hash prefixes, and totals only. Packing is
+read-only over checkpoint/pages/store/decisions/results/history and
+deterministic across calls, restarts, and processes (byte-identical
+plan/view proven cross-process). Namespace is preserved; provenance
+is never upgraded.
+
+### 35.11 Suites (frozen)
+
+New suites tests/ContextBudgetAllocatorV2.Tests.cjs (181 assertions)
+and tests/ContextBudgetAllocatorV2XProc.Tests.cjs (+ worker, 27
+assertions), registered after ContextRetrieverV2H. Fixtures compile
+through the REAL C02 compiler (inline pages incl. Bulgarian/Greek/
+CJK/emoji Unicode and injection prose, tool transactions as plain
+data); the counter is the REAL contract with the deterministic
+reference adapter. Coverage: counter contract, usable-budget shape,
+priority classes, exact cost binding + stale recount, happy-path
+packing, mandatory overflow/at-limit/above-target/zero-target,
+optional exact-fit/plus-one, within-class first-fit, cross-class
+gating, HOT>WARM>COLD priority, COLD fallback binding for every
+dropped identity, atomicity, injection inertness incl. benign-twin
+order equality, fingerprint/budget/tamper rejection, flaky/throwing/
+malformed counters, Unicode byte-exact accounting, binary rejection
+before accounting, secret safety, trust preservation, plan/view
+agreement across four pack shapes, target sweep invariants,
+determinism, C01-compat, C02/C03 seam absence, no-retrieval and
+no-shortening source scans, metrics arithmetic, and simultaneous +
+restart-fresh XProc byte identity with fail-closed unknown
+fingerprints. Phase A, B01, B02(+H), B03(+H), B04(+H), C01(+XProc),
+C02(+H+XProc), C03(+H+XProc) regressions remain green (see task
+report). Next: CCV2-C05 (Compression Ladder) - not begun here.
+
+### 35.12 C04H target/hardMax correction (frozen)
+
+C04 exposed that C01's original used<=target structural invariant
+incorrectly conflated preferred target with absolute limit: honest
+mandatory overflow (target < mandatoryUsed <= hardMax) could not be
+represented without rewriting target to max(target, mandatoryUsed),
+a semantic masking C04H removes. Minimal corrections, nothing else:
+
+C01 validates 0 <= target <= hardMax and, when known,
+0 <= used <= hardMax; used:null stays valid pre-C04. Membership,
+mandatory manifest, tier, provenance, identity, digest, disposable,
+trace, and external-COLD proof semantics are unchanged.
+
+C04 packs KEEP-all-mandatory then optional-only-within-requested-target
+(optional capacity zero once mandatoryUsed reaches target),
+independently requiring mandatoryUsed <= hardMax
+(compiler-mandatory-over-budget otherwise). The plan carries one
+authoritative requested target (no effectiveTarget field); validation
+enforces used = mandatoryUsed + optionalUsed, used <= hardMax, and
+used <= max(target, mandatoryUsed), so exactly two legal cases exist:
+mandatoryUsed <= target with used <= target, or mandatoryUsed > target
+with optionalUsed = 0 and used = mandatoryUsed. Metrics use the real
+requested target (utilization may honestly exceed 1.0) with
+mandatoryTargetOverflowTokens = max(0, mandatoryUsed - target) exposed
+separately. Policy revision stays context-budget-packer-v1: this is a
+pre-freeze schema correction (same greedy selection, honest carriage),
+not a new algorithm.
+
+New suite tests/ContextBudgetAllocatorV2H.Tests.cjs (33 assertions):
+honest overflow, zero target, optional-overflow sweep, mandatory
+limits, literal forged/legitimate plan vectors (target=100,
+hardMax=150), digest-bound target, and metrics honesty; C01 suite
+gains honest-overflow structural vectors (100/120/150 valid,
+used>hardMax/target>hardMax/negative invalid, null valid).
+
+
 
 

@@ -730,8 +730,14 @@ function validateBudget(budget) {
   // Unknown token counts are explicit, never guessed: used:null means
   // exact tokenizer accounting is not yet available (pre-C04
   // construction/shadow use). Fabricated counts are worse than null.
+  // C04H correction: target is the preferred materialization target and
+  // hardMax is the absolute logical-context ceiling. A known used count
+  // may honestly exceed target (mandatory truth above the preferred
+  // target) but never hardMax. C01 validates this structural shape
+  // only; it never decides WHY used exceeds target (no cost provenance
+  // here) - packing-policy correctness belongs to C04 and its plan.
   if (budget.used !== null && budget.used !== undefined) {
-    if (!Number.isInteger(budget.used) || budget.used < 0 || budget.used > budget.target) {
+    if (!Number.isInteger(budget.used) || budget.used < 0 || budget.used > budget.hardMax) {
       return 'context-view-budget-invalid';
     }
   }
