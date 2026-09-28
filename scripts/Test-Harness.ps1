@@ -144,6 +144,11 @@ $suites = @(
     [ordered]@{ name='ContextBudgetAllocatorV2'; script='tests/ContextBudgetAllocatorV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextBudgetAllocatorV2XProc'; script='tests/ContextBudgetAllocatorV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextBudgetAllocatorV2H'; script='tests/ContextBudgetAllocatorV2H.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompressionLadderV2'; script='tests/ContextCompressionLadderV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompressionLadderV2XProc'; script='tests/ContextCompressionLadderV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompressionLadderV2H'; script='tests/ContextCompressionLadderV2H.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPromptLayoutV2'; script='tests/ContextPromptLayoutV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPromptLayoutV2XProc'; script='tests/ContextPromptLayoutV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionV2'; script='tests/ContextCompactionV2.Tests.ps1'; executable=$powershell; kind='powershell' }
 )
 

@@ -4629,6 +4629,140 @@ applies to COLD only. C06 must not optimize for a nonexistent WARM
 page path. Next: CCV2-C06 (Cache-Aware Prompt Layout) - not begun
 here.
 
+## 37. C06 Cache-Aware Prompt Layout (Phase C)
+
+C06 owns only the deterministic presentation (model-facing) order of an
+already-finalized C05 ContextView. Primary objective: maximize the
+reusable logical prefix WITHOUT changing correctness or ContextView
+semantics. Cache optimization changes presentation only: never truth,
+never membership, never priority, never representation.
+
+### 37.1 Authority boundary (frozen)
+
+Authority: config/ContextPromptLayoutV2.cjs (layout-policy revision
+context-prompt-layout-v1). C06 owns layout classification, layout
+ordering, layout validation, layout identity/digest, and logical-prefix
+observability. C06 owns NO membership, NO tier classification, NO
+retrieval, NO packing, NO compression, NO token-budget decisions, NO
+rehydration, NO trust/provenance, NO task truth, NO provider routing,
+and NO inference. Frozen posture: C02 chooses candidates, C03
+retrieves, C04 packs, C05 chooses representation, C06 orders final
+presentation. Expected changes to frozen C01-C05 production modules:
+ZERO (proven: no C01-C05 production file modified by C06).
+
+### 37.2 ContextView vs PromptLayout distinction (frozen)
+
+ContextView order != Prompt layout order. C01 owns the ContextView
+canonical structure and identity; its section order (PINNED -> HOT ->
+WARM -> materialized COLD -> referenced COLD) is identity-relevant and
+is never reordered. C06 never mutates the source view (deep-snapshot
+proof: canonical bytes, viewId, viewDigest, tokenBudget byte-identical
+before/after). Instead final-C05-view -> C06 layout planner ->
+disposable ContextPromptLayout: reference blocks binding back to
+exactly one ContextView member each. The ContextView remains the byte
+authority; the layout duplicates no exactText.
+
+### 37.3 Host-owned stable-prefix seam (frozen)
+
+DSH owns the system/controller bytes and assembles them at the live
+prompt boundary (system-prompt/assemble handling); CCv2 never copies or
+imports them and creates no second authority for the system prompt.
+Evidence: the host-owned runtime-context node is identified by
+projection ownership/provenance only (a user/message whose source is
+the DSH system-prompt plugin, config/ContextCompaction.cjs
+RUNTIME_CONTEXT_PLUGIN and config/ContextSafePointV2.cjs
+isRuntimeContextMessage), never by text matching; Nexus compaction
+planning already excludes DSH-owned runtime/system-prompt snapshot
+nodes (config/AihController.cjs F1 ownership rule). The C06 layout
+therefore carries an externalPrefix slot descriptor
+(owner dsh-host, slot system-prompt-assemble, memberCount 0,
+attachPoint before-ccv2-suffix) and scopes itself explicitly as
+scope ccv2-suffix. No live prompt delivery is modified by C06; where
+the host prefix attaches is a C08 integration decision. Next: CCV2-C07
+(Compiler Shadow Mode) - not begun here.
+
+### 37.4 Stability-zone contract (frozen)
+
+Zones derive ONLY from typed frozen metadata (section, tier,
+sourceType, sourceId, mandatory flag, tierDecision.subjectKind,
+toolTransaction presence). Evidence prose is never read; prompt
+injection in content has zero effect. Conceptual model-facing order:
+HOST_STABLE_CONTRACT (external, zero CCv2 members) -> TASK_IDENTITY ->
+CHECKPOINT_STATE -> STABLE_WARM -> HOT_EXECUTION -> QUERY_EVIDENCE ->
+CURRENT_INTERACTION. Stable zones (TASK_IDENTITY, CHECKPOINT_STATE,
+STABLE_WARM) precede the stable-prefix boundary; volatile zones
+(HOT_EXECUTION, QUERY_EVIDENCE, CURRENT_INTERACTION) follow it. Within
+the same zone the frozen ContextView relative order is preserved
+exactly (no hash/pageId/text/token/path/relevance sorting); tool
+transactions sharing a callId form one atomic group that is never
+split, never interleaved, and never straddles zones (mixed-zone groups
+fail closed at plan time).
+
+### 37.5 Placement rules (frozen)
+
+Task/security identity (active-requirement, active-constraint,
+unresolved-approval subjects; checkpoint:requirement:/constraint:/
+approval: source vocabulary): TASK_IDENTITY, stable. Checkpoint-backed
+continuation state (checkpoint:full/objective renders, checkpoint-state
+sourceType, mandatory-checkpoint-state/accepted-decision/
+verification-state/failure-state subjects): CHECKPOINT_STATE, stable.
+PINNED remnants that are neither prove stable and join the checkpoint
+milestone (conservative catch-all). WARM after C05H (settled exact
+tool transactions; state-backed renders; the unreachable non-tool page
+case stays stable-exact by conservative default): STABLE_WARM, stable;
+C06 never compresses, demotes, or references WARM. HOT section
+(active failure renders, immediate tool interaction, HOT working set):
+HOT_EXECUTION, volatile - the HOT section reflects the frozen C02 tier
+judgment, so it wins over checkpoint-state sourcing (C06 never
+re-tiers). COLD materialized/reference membership (query/retrieval
+dependent; no frozen typed contract proves stability): QUERY_EVIDENCE,
+volatile by default, never in the stable prefix. Current-turn
+sourceType (exact user bytes) and only it: CURRENT_INTERACTION, last;
+causal order preserved.
+
+### 37.6 Layout contract, identity, observability (frozen)
+
+ContextPromptLayoutV2 { schemaVersion 1, sourceViewId,
+sourceViewDigest, namespace triple, checkpointBinding (generation,
+checkpointId), scope, externalPrefix, layoutPolicyRevision, blocks,
+stablePrefixBoundary, stablePrefixDigest, prefixMilestones (cumulative
+task/checkpoint/stable-WARM digests), zoneCounts, layoutDigest,
+disposable true }. Each block binds exactly one member { ordinal,
+zone, memberKind, sourceSection, memberId, sourceId, contentHash,
+representationKind/sourceContentHash (when lossy), toolCallId,
+stabilityClass, reasonCode } with one closed-world reason code per
+zone. Identity: layoutDigest = sha256('nexus/context-prompt-layout/v1'
+LF canonicalJson(layout without digest)); stablePrefixDigest =
+sha256('nexus/context-prompt-logical-prefix/v1' LF canonicalJson(
+ordered stable bindings)). No clock, UUID, PID, mtime, or randomness.
+describeContextPromptLayoutV2 exposes IDs, hashes, zones, reason
+codes, counts, and digests only - never source prose. C06 reports no
+hit rates, saved tokens/dollars/latency, or KV reuse (no provider
+request has exercised the layout). Token accounting invariant: C06
+adds no bytes and drops none, so ContextView.tokenBudget.used is
+unchanged and recounts through ContextTokenCounterV2 equal the frozen
+C04/C05 accounting. Provider neutrality: no cache_control fields, no
+provider keys/markers, no TTL, no billing assumptions (comment-
+stripped static scan).
+
+### 37.7 Suites (frozen)
+
+New suites tests/ContextPromptLayoutV2.Tests.cjs (96 assertions:
+real-pipeline fixtures through C02/C04/C05 proving zone placement,
+membership equality, immutability, identity compatibility, boundary,
+prefix digest, two-turn stability A/B/C, cold-only churn, tool
+atomicity incl. synthetic shared-call groups and cross-zone plan-time
+refusal, order preservation, injection, the tamper battery,
+secret safety, provider neutrality, determinism, unicode, D-phase
+boundary) and tests/ContextPromptLayoutV2XProc.Tests.cjs (+ worker,
+27 assertions: simultaneous and restart-fresh cross-process
+byte-identity, input untouched, forged-view fail-closed). Registered
+in scripts/Test-Harness.ps1. Lane C06, C06-XProc green; C05H, C05,
+C05-XProc, C04H, C04, C04-XProc, C03H, C03, C03-XProc, C02H, C02,
+C02-XProc, C01, C01-XProc, B04H, B04, B04-XProc, B03H, B03, B02
+family, B01, FoundationHardening, AihControllerHost per task report.
+
+
 
 
 
