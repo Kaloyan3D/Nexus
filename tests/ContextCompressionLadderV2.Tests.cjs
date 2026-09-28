@@ -217,7 +217,7 @@ section('C05 ELIGIBILITY MATRIX');
   check(coldElig.eligible === true && coldElig.ladder.join(',') === 'EXACT,EXTRACTIVE,STRUCTURED', 'optional COLD walks the full ladder');
   const warmSynthetic = Object.assign(clone(bigEntry), { tier: 'WARM' });
   const warmElig = ladder.representationEligibilityV2({ entry: warmSynthetic, section: 'warm', page: BIG_PAGE });
-  check(warmElig.eligible === true, 'optional WARM walks the ladder (synthetic tier; pipeline materializes page-backed WARM only via settled-tool subjects)');
+  check(warmElig.eligible === false && warmElig.exactOnlyReason === 'compression-exact-warm-conservative', 'non-tool WARM page holds EXACT (C05H: no compressible WARM page path exists in the frozen pipeline)');
   const settledEntry = entryBySource(BASE_VIEW, TOOL_SETTLED_PAGE.id).entry;
   const settledElig = ladder.representationEligibilityV2({ entry: settledEntry, section: 'warm', page: TOOL_SETTLED_PAGE });
   check(settledElig.eligible === false && settledElig.exactOnlyReason === 'compression-exact-tool-protocol', 'settled tool page stays exact');
@@ -249,6 +249,40 @@ section('C05 ELIGIBILITY MATRIX');
   throwsWith(function () {
     ladder.representationEligibilityV2({ entry: already, section: 'materializedCold', page: BIG_PAGE });
   }, 'context-compression-already-compressed', 'already-compressed input rejected');
+}
+section('C05 REAL WARM END-TO-END');
+{
+  // C05H outcome-B proof through the REAL frozen pipeline (no synthetic
+  // tiers): a settled tool page classifies B04 WARM, C02 materializes it
+  // as a WARM page entry, C04 packs it as WARM, and C05 holds it EXACT.
+  // Non-tool WARM pages with bytes do not occur (B04 maps byte-bearing
+  // history to COLD; byte-less WARM history defers to C03 retrieval).
+  check(D_TOOL_SETTLED.tier === 'WARM' && D_TOOL_SETTLED.reasonCode === 'tier-warm-settled-transaction', 'B04 classifies the settled page WARM (real decision)');
+  const settledSlot = entryBySource(BASE_VIEW, TOOL_SETTLED_PAGE.id);
+  check(settledSlot !== null && settledSlot.section === 'warm', 'C02 materializes a real WARM page entry');
+  const warmPack = allocator.packContextBudgetV2({ view: BASE_VIEW, budget: { hardMax: MATERIALIZED_TOTAL + 500, target: MATERIALIZED_TOTAL }, counter: testCounter() });
+  let warmKept = false;
+  for (const decision of warmPack.plan.decisions) {
+    if (decision.materialId === settledSlot.entry.id && decision.tier === 'WARM' && decision.action === 'KEEP') warmKept = true;
+  }
+  check(warmKept, 'C04 packs the real WARM page as WARM');
+  const res = compress(BASE_VIEW, ALLPAGES, MATERIALIZED_TOTAL + 500, MATERIALIZED_TOTAL, testCounter());
+  const settledSrc = planSource(res.compressionPlan, TOOL_SETTLED_PAGE.id);
+  check(settledSrc.selectedKind === 'EXACT' && settledSrc.reasonCode === 'compression-exact-tool-protocol' && settledSrc.finalDisposition === 'KEPT', 'C05 holds the real WARM page EXACT');
+  const tight = compress(BASE_VIEW, ALLPAGES, MATERIALIZED_TOTAL + 500, MANDATORY_USED, testCounter());
+  const tightSettled = planSource(tight.compressionPlan, TOOL_SETTLED_PAGE.id);
+  check(tightSettled.selectedKind === 'EXACT' && tightSettled.finalDisposition === 'OMIT' && tightSettled.reasonCode === 'compression-omitted', 'pressured WARM omits exactly (no lossy rung, no COLD demotion)');
+  let warmReferenced = false;
+  for (const ref of tight.compressedView.referencedColdPages) {
+    if (ref.pageId === TOOL_SETTLED_PAGE.id) warmReferenced = true;
+  }
+  check(warmReferenced === false, 'WARM never appears as a COLD reference');
+  for (const sid of ['checkpoint:decision:D1', 'checkpoint:verification:0', 'checkpoint:failure:F1']) {
+    const s = planSource(tight.compressionPlan, sid);
+    check(s !== null && s.selectedKind === 'EXACT', 'state WARM survives exact under pressure: ' + sid);
+  }
+  const tightShown = entryBySource(tight.compressedView, TOOL_SETTLED_PAGE.id);
+  check(tightShown === null, 'omitted WARM shows no bytes model-facing');
 }
 section('C05 EXACT FITS');
 {

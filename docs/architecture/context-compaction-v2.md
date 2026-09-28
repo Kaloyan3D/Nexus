@@ -4464,19 +4464,15 @@ subjects, tool-result page kind) -> EXACT only. State-backed renders
 (checkpoint-state, runtime-state) -> EXACT only (already minimal typed
 truth). Optional HOT -> EXACT only (conservative default; no
 aggressive compression without frozen structural proof). Optional
-WARM page-backed (non-tool) -> EXACT, EXTRACTIVE (source-exact
-extract exists), STRUCTURED (typed lossless form exists). Optional
-COLD materialized page-backed (non-tool) -> EXACT, EXTRACTIVE,
-STRUCTURED, REFERENCE (frozen C04 COLD fallback). ARCHIVE is never
-materialized. Provenance finding: the frozen B04+C02 pipeline
-materializes page-backed entries as COLD (byte-bearing history) or HOT
-(immediate tool); non-tool page-backed WARM entries do not occur in
-compiler output (byte-bearing pages classify COLD; byte-less WARM
-pages defer retrieval), so the WARM rungs are implemented, unit-proven
-(eligibility, derivation, C01 contract on real WARM tool decisions for
-the negative side), and ready, while end-to-end ladder proof runs on
-COLD. WARM has no legal reference form: unfitting WARM omits (no tier
-demotion to COLD is ever performed to obtain one).
+WARM page-backed -> EXACT only (C05H resolution, section 36.12: no
+compressible non-tool WARM page path exists in the frozen pipeline;
+the reachable WARM pages are settled tool transactions, already held
+exact above). Optional COLD materialized page-backed (non-tool) ->
+EXACT, EXTRACTIVE (source-exact extract exists), STRUCTURED (typed
+lossless form exists), REFERENCE (frozen C04 COLD fallback). ARCHIVE
+is never materialized. WARM has no legal reference form: unfitting
+WARM omits (no tier demotion to COLD is ever performed to obtain
+one).
 
 ### 36.4 EXTRACTIVE (frozen)
 
@@ -4581,8 +4577,8 @@ are observability only.
 
 ### 36.11 Suites (frozen)
 
-New suites tests/ContextCompressionLadderV2.Tests.cjs (129
-assertions), tests/ContextCompressionLadderV2H.Tests.cjs (98
+New suites tests/ContextCompressionLadderV2.Tests.cjs (139
+assertions, incl. the C05H real-WARM section), tests/ContextCompressionLadderV2H.Tests.cjs (98
 assertions), and tests/ContextCompressionLadderV2XProc.Tests.cjs (+
 worker, 12 assertions). Fixtures compile through the REAL C02
 compiler (inline COLD pages incl. Unicode/injection/gloss/log pages,
@@ -4605,8 +4601,33 @@ agreement), monotonicity, recount accounting, and the D06 static
 boundary (comment-stripped scan; D06 removable without effect).
 Lane C01, C02(+H), C03(+H), C04(+H), B01, B02(+variants), B03(+H),
 B04(+H), all XProc variants, FoundationHardening, AihControllerHost
-green; broader harness per task report. Next: CCV2-C06 (Cache-Aware
-Prompt Layout) - not begun here.
+green; broader harness per task report.
+
+### 36.12 C05H WARM materialization reachability resolution (frozen)
+
+Outcome B (proven): page-backed non-tool WARM materialization is
+intentionally unreachable by frozen design, not an integration
+defect. Trace: a byte-bearing non-tool page is durably self-backed
+(B03 inspector), so B04 maps it to COLD (tier-cold-exact-history);
+WARM requires no durably self-backed route and no live proof, hence
+no inline bytes, hence C02 defers it as requires-retrieval to C03 and
+never materializes it. The only with-bytes WARM pages the pipeline
+emits are settled tool transactions (tier-warm-settled-transaction),
+which C02 materializes as WARM, C04 packs as WARM, and C05 holds EXACT
+(tool-protocol rule); under pressure they omit exactly, never lossy,
+never demoted to COLD for REFERENCE. No owning-layer fix exists:
+recency/freshness as a tier cause is explicitly banned (section 29.5),
+B01 defines pages as historical evidence units, the frozen B04 corpus
+asserts with-bytes history goes COLD, and COLD reference-by-default is
+the safer home for recoverable history (WARM would omit without a
+recovery record). C02 sections 32.6 (WARM pages ordering) and 32.7
+(exact WARM pages kept) are populated by settled tool transactions:
+no dead code. Accordingly C05 holds every WARM page-backed entry
+EXACT (reason compression-exact-warm-conservative; settled tool pages
+keep the tool-protocol reason by precedence) and the lossy ladder
+applies to COLD only. C06 must not optimize for a nonexistent WARM
+page path. Next: CCV2-C06 (Cache-Aware Prompt Layout) - not begun
+here.
 
 
 

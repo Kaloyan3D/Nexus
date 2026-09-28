@@ -81,6 +81,7 @@ const COMPRESSION_REASON_CODES = Object.freeze([
   'compression-exact-tool-protocol',
   'compression-exact-state-backed',
   'compression-exact-hot-conservative',
+  'compression-exact-warm-conservative',
   'compression-extractive-budget',
   'compression-structured-budget',
   'compression-extractive-unavailable',
@@ -271,8 +272,9 @@ function representationEligibilityV2(input) {
   }
   // Conservative tier policy: optional HOT stays EXACT by default.
   if (entry.tier === 'HOT') return exactOnly('compression-exact-hot-conservative');
-  // Page-backed optional WARM/COLD: bind the source page before any lossy
+  // Page-backed optional COLD: bind the source page before any lossy
   // rung is allowed, so derivation below can prove source linkage.
+  // (WARM binds here too, then holds EXACT per the posture below.)
   if (page === null || !isPlainObject(page)) {
     failCompression('context-compression-source-missing', 'page-backed entry without a bound source page: ' + entry.sourceId.slice(0, 64));
   }
@@ -289,7 +291,14 @@ function representationEligibilityV2(input) {
   // Settled tool-result pages keep balanced exact semantics even as
   // history: their prose jointly narrates a call and its result.
   if (page.kind === 'tool-result') return exactOnly('compression-exact-tool-protocol');
-  if (entry.tier === 'WARM') return { eligible: true, ladder: ['EXACT', 'EXTRACTIVE', 'STRUCTURED'], exactOnlyReason: null };
+  // C05H resolution (frozen): the B04+C02 pipeline never emits a
+  // compressible non-tool WARM page (byte-bearing non-tool pages classify
+  // COLD; byte-less WARM pages defer to C03 retrieval and never
+  // materialize; the reachable WARM pages are settled tool transactions,
+  // already held exact above). WARM therefore stays EXACT by conservative
+  // posture: no lossy WARM rung exists on the production path, and WARM
+  // never demotes to COLD to obtain a reference form.
+  if (entry.tier === 'WARM') return exactOnly('compression-exact-warm-conservative');
   if (entry.tier === 'COLD') return { eligible: true, ladder: ['EXACT', 'EXTRACTIVE', 'STRUCTURED'], exactOnlyReason: null };
   failCompression('context-compression-tier-unknown', 'tier ' + String(entry.tier).slice(0, 64) + ' admits no ladder');
   return exactOnly('compression-exact-state-backed');
