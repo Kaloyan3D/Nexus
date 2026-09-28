@@ -8,6 +8,7 @@ const { pathToFileURL } = require('node:url')
 const profiles = require('../config/Engineering-Profiles.cjs')
 const muse = require('../config/Muse-Isolation.cjs')
 const engineering = require('../config/Engineering-Isolation.cjs')
+const { createPresetCtx, runAgentStep } = require('./lib/AgentRequestComposition.cjs')
 
 async function main() {
   const runtimeRoot = process.env.NEXUS_RUNTIME_ROOT || path.join(os.homedir(), '.local', 'share', 'nexus')
@@ -49,16 +50,7 @@ async function main() {
           ...target, reasoning: 'high',
         }))
       }
-      const hooks = new Map()
-      const ctx = {
-        on(event, handler) {
-          const entries = hooks.get(event) || []
-          entries.push(handler)
-          hooks.set(event, entries)
-          return () => {}
-        },
-        shellEnv: { register() {} },
-      }
+      const ctx = createPresetCtx()
       const applyIsolation = () => {
         if (engine === 'muse') muse.apply(ctx)
         if (engine === 'dual') engineering.apply(ctx)
@@ -74,15 +66,10 @@ async function main() {
         applyIsolation()
         installModelSelection(ctx, { current: { ...sessionTarget, reasoningEffort: 'max' }, assembled: undefined })
       }
-      await hooks.get('system-prompt/assemble')[0]({}, {}, async () => ({ variables: {} }))
+      await ctx.hooks.get('system-prompt/assemble')[0].listener({}, {}, async () => ({ variables: {} }))
       const payload = { agent: { session: { id: sessionId, header: { agentPreset: preset }, events: [] } } }
-      const handlers = hooks.get('agent/request')
-      async function next(index) {
-        return index === handlers.length
-          ? { provider: 'default', model: 'default-model', reasoningEffort: 'low', maxTokens: 32768 }
-          : handlers[index](payload, () => next(index + 1))
-      }
-      const actual = await next(0)
+      const actual = await runAgentStep(ctx, payload,
+        async () => ({ provider: 'default', model: 'default-model', reasoningEffort: 'low', maxTokens: 32768 }))
       const expected = target || sessionTarget
       assert.equal(actual.provider, expected.provider)
       assert.equal(actual.model, expected.model)

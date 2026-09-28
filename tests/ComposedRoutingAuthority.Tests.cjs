@@ -7,6 +7,7 @@ const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const profiles = require('../config/Engineering-Profiles.cjs')
 const muse = require('../config/Muse-Isolation.cjs')
+const { createPresetCtx, runAgentStep } = require('./lib/AgentRequestComposition.cjs')
 
 async function main() {
   const runtimeRoot = process.env.NEXUS_RUNTIME_ROOT || path.join(os.homedir(), '.local', 'share', 'nexus')
@@ -37,32 +38,19 @@ async function main() {
     process.env.DSH_HOME = path.join(installRoot, 'data')
     process.env.AIH_INSTALL_ROOT = installRoot
 
-    const hooks = new Map()
-    const ctx = {
-      on(name, listener) {
-        const entries = hooks.get(name) || []
-        entries.push(listener)
-        hooks.set(name, entries)
-        return () => {}
-      },
-      shellEnv: { register() {} },
-    }
+    const ctx = createPresetCtx()
     const selection = {
       current: { provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoningEffort: 'max' },
       assembled: undefined,
     }
     installModelSelection(ctx, selection)
     muse.apply(ctx)
-    await hooks.get('system-prompt/assemble')[0]({}, {}, async () => ({ variables: {} }))
+    await ctx.hooks.get('system-prompt/assemble')[0].listener({}, {}, async () => ({ variables: {} }))
     const session = { id: 'session-muse', header: { agentPreset: 'aih-muse' }, events: [] }
-    let payload = { agent: { session } }
-    const handlers = hooks.get('agent/request')
-    async function next(index) {
-      return index === handlers.length
-        ? { provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoningEffort: 'max', maxTokens: 32768 }
-        : handlers[index](payload, () => next(index + 1))
-    }
-    const finalRequest = await next(0)
+    // One live agent across both steps, as in the running loop.
+    const agent = { session }
+    const seed = async () => ({ provider: 'flash-max-direct', model: 'deepseek-v4-flash', reasoningEffort: 'max', maxTokens: 32768 })
+    const finalRequest = await runAgentStep(ctx, { agent }, seed)
     assert.equal(finalRequest.provider, 'opencode-go')
     assert.equal(finalRequest.model, 'muse-spark-1.3-contributor')
     console.log('PASS: composed DSH session selection preserves the Muse controller target')
@@ -73,8 +61,7 @@ async function main() {
       }
       return laterNext()
     })
-    payload = { agent: { session } }
-    await assert.rejects(next(0), /lower routing authority cannot replace a higher route/)
+    await assert.rejects(runAgentStep(ctx, { agent }, seed), /lower routing authority cannot replace a higher route/)
     console.log('PASS: installed DSH rejects a later lower-authority route claim')
   } finally {
     if (previousHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previousHome
