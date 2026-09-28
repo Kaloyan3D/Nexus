@@ -48,6 +48,7 @@ const path = require('node:path')
 const os = require('node:os')
 const crypto = require('node:crypto')
 const contextCompaction = require('./ContextCompaction.cjs')
+const compilerShadowHost = require('./ContextCompilerShadowHostV2.cjs')
 
 const REVIEW_COMMAND = /^\s*\/(?:codex-)?review\b/i
 const VERIFY_COMMAND = /^\s*\/verify\b/i
@@ -2864,6 +2865,12 @@ function apply(ctx) {
       }
     }
   })
+
+  // CCV2-C07H production shadow installation: the ONE production call
+  // site for Compiler Shadow Mode. Observes the final llm/stream request
+  // read-only (observe only, never authority); default off means zero
+  // behavioral change. Never throws into controller startup.
+  compilerShadowHost.installCompilerShadowObserver(ctx, { installRoot, bindingsPath, log })
 
   // F1 ORDERING: prepended so compaction runs BEFORE the loop's
   // runtime-context projection decision for this request is consumed.

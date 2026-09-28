@@ -4762,7 +4762,253 @@ C05-XProc, C04H, C04, C04-XProc, C03H, C03, C03-XProc, C02H, C02,
 C02-XProc, C01, C01-XProc, B04H, B04, B04-XProc, B03H, B03, B02
 family, B01, FoundationHardening, AihControllerHost per task report.
 
+## 38. C07 Compiler Shadow Mode (Phase C)
+
+C07 integrates C01->C06 with the real Nexus/DSH request path in strict
+passive shadow mode. The authoritative inference path stays exactly:
+existing Nexus/DSH projection -> existing prompt assembly -> existing
+provider request -> root model. In parallel, C07 computes the same
+authoritative task/session state -> C01->C06 candidate pipeline ->
+candidate ContextView + ContextPromptLayout -> shadow comparison +
+telemetry. THE CANDIDATE NEVER AFFECTS THE MODEL REQUEST.
+
+### 38.1 Rollout boundary (frozen)
+
+C07 = observe only. C08 = authority/production enablement. C07 never
+replaces prompt bytes, modifies messages/system prompt/provider
+payload, changes model/provider/routing/token limits, drops or adds
+context, applies ContextPromptLayout to inference, inserts cache
+controls, or falls back to a compiled prompt. No automatic promotion
+exists: no green-counter, no threshold, no auto-enable path.
+
+### 38.2 Proven request seam
+
+A. The authoritative live prompt/projection becomes final inside the
+DSH agent/request waterfall: the isolation finalize step
+(Muse-Isolation.cjs / Engineering-Isolation.cjs via
+Controller-RequestBoundary.cjs arm/guard/rewrite) returns the frozen
+proposed request, DSH model-selection validates it, and the final
+immutable assertion runs at llm/stream (Routing-Integrity.cjs,
+global prepend). B. CCv2 inputs are captured consistently from the
+same session binding plus the controller-owned checkpoint/snapshot
+revision. C. The provider request is immutable/final for inference
+at the llm/stream assertion; agent/request finalize already returns
+it Object.freeze-d. The thin adapter
+(config/ContextCompilerShadowAdapterV2.cjs) observes at this seam and
+returns the SAME request reference it received.
+
+### 38.3 Host ownership and comparable region
+
+DSH/host owns the system/controller contract bytes; CCv2 owns the
+disposable suffix projection (layout scope ccv2-suffix; the
+HOST_STABLE_CONTRACT zone always carries zero CCv2 members; the
+external prefix is owned by dsh-host at attach point
+before-ccv2-suffix). C07 never compares the whole provider prompt
+against the ContextView. Host-owned members are flagged by the caller
+from typed ownership/provenance (never by text matching) and classify
+as HOST_EXTERNAL/UNCOMPARABLE, excluded from comparison.
+
+### 38.4 Logical comparison (no physical parity claim)
+
+C06 is a logical layout plan with no renderer, so C07 performs a
+LOGICAL shadow comparison: source identity, membership, exact
+materialized bytes where available (local hash/equality, byte-exact,
+no normalization), representation identity, mandatory coverage,
+tool/current-turn coverage, COLD reference identity, token
+accounting, logical ordering. No "byte-identical provider prompt"
+claim exists.
+
+### 38.5 Two layers
+
+Pure authority config/ContextCompilerShadowV2.cjs owns comparison,
+classification, discrepancy detection, the sanitized shadow report,
+report validation, and the deterministic comparison digest; it has no
+host side effects, reads no clocks, and contains no second compiler
+(no selection/retrieval/scoring/packing/compression/layout logic --
+it consumes the frozen C01->C06 authorities: compileContextV2,
+retrieveContextEvidenceV2 (observational digest only), the C04
+packer as re-run inside compressContextViewV2 plus read-only usage
+metrics, compressContextViewV2, planContextPromptLayoutV2). Thin host
+adapter config/ContextCompilerShadowAdapterV2.cjs captures live
+projection metadata, snapshots the request canonically before/after,
+invokes the candidate pipeline + comparator, and emits sanitized
+telemetry through a failure-bounded sink.
+
+### 38.6 State binding and fail-open shell
+
+A comparison is valid only on one logical state boundary: namespace
+triple + checkpoint generation/id + A05 snapshot revisionDigest
+(real captured ContextSnapshotToken identity; raw snapshot slots
+stay rejected per A05H) + turn identity. Capture vs complete
+revision movement yields shadow-state-changed/shadow-snapshot-stale
+(STATE_CHANGED), discarding the comparison. ANY shadow failure
+discards the candidate/report and continues the existing prompt
+unchanged; C01->C06 keep failing closed internally (invalid
+candidates are rejected, never salvaged). No new mutation safe point
+is acquired: nothing pauses, blocks, or mutates.
+
+### 38.7 Discrepancies, blockers, metrics
+
+Closed-world codes: MATCHED_EXACT, MATCHED_SOURCE,
+ACTUAL_ONLY_OPTIONAL, CANDIDATE_ONLY_OPTIONAL, CANDIDATE_REFERENCE,
+CANDIDATE_COMPRESSED, MANDATORY_MISSING, CURRENT_TURN_MISSING,
+TOOL_PROTOCOL_MISSING, VERIFICATION_TRUTH_MISSING,
+SOURCE_HASH_MISMATCH, REPRESENTATION_HASH_MISMATCH, HOST_EXTERNAL,
+UNCOMPARABLE, STATE_CHANGED, CANDIDATE_FAILED. Severities:
+CRITICAL, INFORMATIONAL, EXPECTED_TRANSFORMATION, UNCOMPARABLE
+(valid C05 compression/reference and optional deltas never block;
+mandatory/current-turn/tool/verification/hash/state/namespace losses
+set promotionBlocker). Two independent questions are answered:
+candidate completeness vs authoritative truth, and candidate vs live
+baseline deltas. Token metrics split mandatory/HOT/WARM/COLD
+materialized/referenced-only; cross-fingerprint counts are marked
+unavailable, never estimated; logicalContextReduction =
+1 - candidate/actual is labeled LOGICAL only. comparisonDigest binds
+inputs, member bindings, discrepancies, classification, and candidate
+ids/digests -- never wall-clock, timestamps, PIDs, or random ids
+(durations live in a separate non-authoritative envelope). Reports
+carry IDs/hashes/counts/tiers/zones/reason codes/token counts/
+booleans only (disposable:true; never checkpoint/ContextPage/
+EvidenceRef/tier/task/continuation truth). Enablement is the single
+setting contextCompiler.shadowMode (closed world off|observe,
+default off, one env binding NEXUS_CCV2_SHADOW_MODE); no
+active/production mode exists before C08.
+
+### 38.8 Suites (frozen)
+
+New suites tests/ContextCompilerShadowV2.Tests.cjs (197 assertions:
+mode resolution, OFF byte-identity/no-work/no-telemetry, ON happy
+path, OFF==ON canonical snapshot + stub-provider identity, optional
+deltas both directions, mandatory/current-turn/tool/verification
+critical proofs, C05 expected transformations incl. real EXTRACTIVE
+and REFERENCE rungs, host-external exclusion, token metrics +
+logical reduction, state-change race, namespace isolation, the
+11-case shadow-error matrix + probe/sink/tamper cases, prompt
+injection, mutation detection, secret safety, determinism,
+three-turn corpus, real host-path proof through the actual
+Controller-RequestBoundary triple + Routing-Integrity assertion,
+Phase-D/C08 absence scan, durable-memory immutability, layout
+observation) and tests/ContextCompilerShadowV2XProc.Tests.cjs (+
+worker, 31 assertions: simultaneous and restart-fresh cross-process
+byte-identity of view/layout/prefix/comparison digests and canonical
+report bytes, input untouched, forged-input fail-closed).
+Registered in scripts/Test-Harness.ps1. Lane C07, C07-XProc green;
+C06, C06-XProc, C05, C05H, C05-XProc, C04, C04H, C04-XProc, C03,
+C03H, C03-XProc, C02, C02H, C02-XProc, C01, C01-XProc, B04, B04H,
+B04-XProc, B03, B03H, B03-XProc, B02 family, B01,
+FoundationHardening, AihControllerHost, and the
+routing/request-boundary suites per task report (AihController
+PRE-EXISTING-FAIL, proven identical on the clean tree). Next:
+CCV2-C08 -- Production Compiler Enablement (not begun).
 
 
 
 
+
+
+## 39. C07H Production Shadow Wiring (Phase C)
+
+C07 proved the shadow mechanism trustworthy but installed no production
+call site: the only C07 references in the production tree were the two
+modules themselves. C07H wires exactly one production observer so a
+normal Nexus session with shadow enabled automatically invokes
+ContextCompilerShadowAdapterV2. C08 is not begun.
+
+### 39.1 Proven seam (read, not assumed)
+
+The agent/request waterfall resolves ONLY the route config
+(provider/model/reasoningEffort/maxTokens); messages/system/tools are
+merged after it in the loop buildRequest, and the full final request
+reaches transport through exactly one llm/stream waterfall (both via
+preparedCall.stream and loopCtx.llm.stream). The C07H observer is an
+llm/stream listener (global, normal order): always inside
+Routing-Integrity global-prepend check, always outside the terminal
+adapter. Routing/model selection is therefore already authoritative,
+the request is coherently session-bound (request/header +
+request/context events are appended in the same buildRequest), and
+C07 cannot influence downstream composition (the loop deepFreezes
+the request; the listener returns the identical stream reference).
+The agent/request hook was rejected as the observation point: it
+never sees messages.
+
+### 39.2 Installation and ownership
+
+config/ContextCompilerShadowHostV2.cjs is the one production
+installation point, owned by the controller layer: AihController
+apply() calls installCompilerShadowObserver(ctx, { installRoot,
+bindingsPath, log }) and nothing else changed in the controller.
+Isolation semantics (Muse/Engineering/DeepSeek), the request-boundary
+routing rules, and all frozen C01-C06 files are untouched (ZERO
+changes). Installation is idempotent per ctx (HMR safety) and never
+throws into startup. One request object yields at most one shadow
+operation (per-payload WeakSet guard); retries build fresh request
+objects and legitimately observe once each.
+
+### 39.3 Config ownership (single source)
+
+<installRoot>/config/routing-policy.json -> contextCompiler section
+is the only source: { shadowMode: off|observe, budget:{hardMax,
+target}, tokenizer }. Closed world, default off, read fresh per
+request (no stale-policy cache). No new env vars, no duplicate
+flags. The shipped policy file is unchanged, so the default install
+behaves byte-identically (proven by the OFF suites).
+
+### 39.4 Input assembly without policy duplication
+
+The hook reads already-persisted frozen artifacts and the live
+request payload, and derives no compiler policy (no selection,
+retrieval, scoring, packing, compression, tier mapping, or layout):
+latest checkpoint generation under
+<workspace>/.ai-harness/ccv2/<taskId>/checkpoints/ (sealed builds
+preferred through frozen seal validation; schema-valid unsealed
+builds accepted through frozen read+validate; absent/invalid/legacy
+skip), staged pages/decisions/tool-transactions (each
+frozen-validated; decisions required, pages/tx optional-empty),
+current turn text from the live last user text message (typed blocks
+only), open-protocol tail scan (typed blocks only), tool pairing by
+call identity, budget from config, and the closed-world
+logical-codepoint-v1 counter. Namespace triples are verified at the
+hook (checkpoint/pages/decisions vs live binding); any mismatch
+skips closed. Missing memory skips silently: a session without CCv2
+durable memory has no candidate to compare, and inventing one would
+be dishonest. All assembly failures skip; all compile/compare
+failures report CANDIDATE_FAILED through the adapter; the request
+always proceeds.
+
+### 39.5 State binding and telemetry
+
+Actual and candidate share the sealed checkpoint boundary
+(generation/id/snapshot revisionDigest) by construction; the
+adapter re-reads the sealed revision at completion, so mid-request
+replacement discards the comparison. No new freshness authority.
+Telemetry is one controller-log line per observation carrying the
+sanitized summary only (secret-safe by C07 proof) plus the
+non-authoritative envelope; the log channel and the adapter both
+isolate sink failures. Live members are never marked mandatory
+(mandatory status is never inferred from prose).
+
+### 39.6 Tokenizer caveat (explicit)
+
+C07H runs with logical/test tokenizer telemetry
+(logical-codepoint-v1). C08 production enablement requires a
+verified runtime tokenizerFingerprint/tokenizer authority for the
+target model. No model-tokenizer claim exists anywhere in C07H;
+any other tokenizer value fails the observation closed.
+
+### 39.7 Suites
+
+tests/ContextCompilerShadowHostV2.Tests.cjs (83 assertions): real
+AihController.apply installs exactly one observer (HMR-safe) with
+OFF passthrough (identical stream, identical bytes, zero adapter
+calls, zero telemetry); real apply + ON emits one bounded MATCHED
+telemetry line through the real controller log with secret safety
+and re-entry/auxiliary skips; host units (policy closed world,
+readers, sealed-preferred branch, live derivation, installer
+validation); composition waterfall with installed DSH model
+selection + real isolation + real integrity (observe/equality/
+exactly-once, OFF==ON canonical + stub equality, 11-case failure
+matrix, routing compat, durable immutability, no-C08 scan); real
+pinned DSH loop both modes (dispatch scope, one observation per
+turn, MATCHED, masked OFF==ON equality, route preserved).
+Registered in scripts/Test-Harness.ps1. Next:
+CCV2-C08 -- Production Compiler Enablement (not begun).

@@ -149,6 +149,9 @@ $suites = @(
     [ordered]@{ name='ContextCompressionLadderV2H'; script='tests/ContextCompressionLadderV2H.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextPromptLayoutV2'; script='tests/ContextPromptLayoutV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextPromptLayoutV2XProc'; script='tests/ContextPromptLayoutV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerShadowV2'; script='tests/ContextCompilerShadowV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerShadowV2XProc'; script='tests/ContextCompilerShadowV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerShadowHostV2'; script='tests/ContextCompilerShadowHostV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionV2'; script='tests/ContextCompactionV2.Tests.ps1'; executable=$powershell; kind='powershell' }
 )
 
