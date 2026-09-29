@@ -295,6 +295,7 @@ fi
 
 # Shared install composition (settings, UI patches, agent presets, data dirs,
 # private-path permissions) - the SAME code the Windows installer runs.
+"$AIH_NODE_DIR/bin/node" "$AIH_INSTALL_ROOT/scripts/MusePresetDependencyClosure.cjs" prepare "$AIH_SOURCE_ROOT" "$AIH_INSTALL_ROOT" >/dev/null
 if [ "$AIH_RESET_MANAGED_SETTINGS" -eq 1 ]; then
   "$AIH_PWSH_DIR/pwsh" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$AIH_INSTALL_ROOT/scripts/Complete-Install.ps1" -InstallRoot "$AIH_INSTALL_ROOT" -ResetManagedSettings
 else

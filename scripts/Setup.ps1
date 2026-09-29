@@ -59,6 +59,7 @@ foreach ($name in @('versions.json', 'settings.yaml', 'home.cordis.patch.yml', '
 foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'scripts') -File | Where-Object Extension -in @('.ps1', '.mjs')) {
     Copy-AihSourceFile -Source $file.FullName -Destination $layout.Scripts
 }
+Copy-AihSourceFile -Source (Join-Path $sourceRoot 'scripts/MusePresetDependencyClosure.cjs') -Destination (Join-Path $layout.Scripts 'MusePresetDependencyClosure.cjs')
 foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'bin') -Filter '*.cmd' -File) {
     Copy-AihSourceFile -Source $file.FullName -Destination $layout.Bin
 }
@@ -151,6 +152,10 @@ if (-not $SkipDependencyInstall) {
 elseif (-not (Test-Path -LiteralPath $layout.Dsh)) {
     throw '-SkipDependencyInstall requires an existing installed DSH runtime.'
 }
+
+# Complete-Install.ps1 is a PowerShell script, not a native executable: it
+& $layout.Node (Join-Path $layout.Scripts 'MusePresetDependencyClosure.cjs') prepare $sourceRoot $InstallRoot | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Muse preset source dependency closure failed.' }
 
 # Complete-Install.ps1 is a PowerShell script, not a native executable: it
 # defines no process exit code, and its failures are terminating errors that

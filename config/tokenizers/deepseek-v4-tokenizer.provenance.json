@@ -1,0 +1,23 @@
+{
+  "artifact": "deepseek-v4-tokenizer.json",
+  "sourceUrl": "https://cdn.deepseek.com/api-docs/deepseek_v4_tokenizer.zip",
+  "documentationPage": "https://api-docs.deepseek.com/quick_start/token_usage/",
+  "documentationNote": "Calculate token usage offline: run the demo tokenizer code to calculate token usage for your input/output",
+  "zipSha256": "e7310d1dafe0a86d8a5629fe78a7c763760f651db9b8682718a1781dcd6fe495",
+  "tokenizerJsonSha256": "89085f12ef79460ac5f66d1119325ddfc694b4ab209d80bbd81d35f081dc9614",
+  "tokenizerConfigSha256": "841f8cf146e3f0ad1082594a31f68ecf7608c20467ef355081333d85bbaeb1cb",
+  "retrievedUtc": "2026-09-28",
+  "zipContents": ["deepseek_v4_tokenizer/deepseek_tokenizer.py", "deepseek_v4_tokenizer/tokenizer_config.json", "deepseek_v4_tokenizer/tokenizer.json"],
+  "referenceImplementation": "python transformers AutoTokenizer (demo) / tokenizers Tokenizer.from_file (verification ground truth: transformers 5.17.0, tokenizers 0.23.2)",
+  "modelFacts": {
+    "type": "BPE",
+    "vocabSize": 128000,
+    "mergeCount": 127741,
+    "addedTokenCount": 1283,
+    "normalizer": "empty sequence (no Unicode normalization)",
+    "tokenizerClass": "LlamaTokenizerFast",
+    "configModelMaxLength": 16384
+  },
+  "configModelMaxLengthNote": "tokenizer_config.json model_max_length (16384) is NOT the route context window; route windows come from config/model-registry.json per exact provider/model pair",
+  "companionConfig": "deepseek-v4-tokenizer-config.json (vendored; carries the official chat_template used by the framing adapter)"
+}

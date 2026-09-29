@@ -45,6 +45,9 @@ $suites = @(
     [ordered]@{ name='MuseProvider'; script='tests/MuseProvider.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='MuseAgentPlane'; script='tests/MuseAgentPlane.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='MuseInstall'; script='tests/MuseInstall.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='SourceCompleteness'; script='tests/SourceCompleteness.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='MusePresetDependencyClosure'; script='tests/MusePresetDependencyClosure.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='MusePresetCleanInstall'; script='tests/MusePresetCleanInstall.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='VisualReview'; script='tests/VisualReview.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='VisualLoop'; script='tests/VisualLoop.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='NexusWorkspace'; script='tests/NexusWorkspace.Tests.ps1'; executable=$powershell; kind='powershell' },
@@ -152,6 +155,17 @@ $suites = @(
     [ordered]@{ name='ContextCompilerShadowV2'; script='tests/ContextCompilerShadowV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompilerShadowV2XProc'; script='tests/ContextCompilerShadowV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompilerShadowHostV2'; script='tests/ContextCompilerShadowHostV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextModelCapabilityV2'; script='tests/ContextModelCapabilityV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPromptRendererV2'; script='tests/ContextPromptRendererV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerActiveV2'; script='tests/ContextCompilerActiveV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerActiveV2XProc'; script='tests/ContextCompilerActiveV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerActiveHostV2'; script='tests/ContextCompilerActiveHostV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextTokenizerDeepseekV4'; script='tests/ContextTokenizerDeepseekV4.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextTokenizerDeepseekV4XProc'; script='tests/ContextTokenizerDeepseekV4XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerActiveDeepseekV4'; script='tests/ContextCompilerActiveDeepseekV4.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerActiveMuseRoutesV2'; script='tests/ContextCompilerActiveMuseRoutesV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextRemoteCounterMuseV2'; script='tests/ContextRemoteCounterMuseV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerActiveMuseV2'; script='tests/ContextCompilerActiveMuseV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionV2'; script='tests/ContextCompactionV2.Tests.ps1'; executable=$powershell; kind='powershell' }
 )
 

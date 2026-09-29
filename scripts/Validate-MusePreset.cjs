@@ -5,6 +5,7 @@ const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
 const { createRequire } = require('node:module')
+const { validate: validateClosure } = require('./MusePresetDependencyClosure.cjs')
 
 function digest(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
@@ -80,24 +81,9 @@ async function main() {
     if (serializedRows.includes(name)) fail(`forbidden delegation/workflow surface remains: ${name}`)
   }
 
-  const managed = [
-    ['preset.yml', 'preset-muse.yml'],
-    ['Muse-Isolation.cjs', 'Muse-Isolation.cjs'],
-    ['Controller-RequestBoundary.cjs', 'Controller-RequestBoundary.cjs'],
-    ['Muse-ReasoningGovernor.cjs', 'Muse-ReasoningGovernor.cjs'],
-    ['Muse-ReasoningRuntime.cjs', 'Muse-ReasoningRuntime.cjs'],
-    ['Muse-ReasoningSignals.cjs', 'Muse-ReasoningSignals.cjs'],
-    ['Muse-ReasoningActivity.cjs', 'Muse-ReasoningActivity.cjs'],
-    ['AihController.cjs', 'AihController.cjs'],
-    ['ContextCompaction.cjs', 'ContextCompaction.cjs'],
-    ['Engineering-Profiles.cjs', 'Engineering-Profiles.cjs'],
-  ]
-  for (const [runtimeName, sourceName] of managed) {
-    const runtime = path.join(presetRoot, runtimeName)
-    const source = path.join(installRoot, 'config', sourceName)
-    if (!fs.existsSync(runtime)) fail(`managed runtime file is missing: ${runtimeName}`)
-    if (digest(runtime) !== digest(source)) fail(`managed runtime file differs from source: ${runtimeName}`)
-  }
+  const presetMeta = path.join(presetRoot, 'preset.yml')
+  if (!fs.existsSync(presetMeta) || digest(presetMeta) !== digest(path.join(installRoot, 'config', 'preset-muse.yml'))) fail('preset metadata differs from source')
+  const managed = validateClosure(installRoot, presetRoot)
 
   const persona = allRows.find((row) => row.id === 'persona')
   assert.ok(persona && persona.config && persona.config.text && typeof persona.config.text === 'object')

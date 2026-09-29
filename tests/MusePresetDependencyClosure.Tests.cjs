@@ -1,0 +1,38 @@
+'use strict'
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+const { execFileSync } = require('node:child_process')
+const { closure, requires } = require('../scripts/MusePresetDependencyClosure.cjs')
+
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'muse-closure-test-'))
+const config = path.join(root, 'config')
+fs.mkdirSync(config)
+function write(name, text) { fs.writeFileSync(path.join(config, name), text) }
+function add(name) { execFileSync('git', ['-C', root, 'add', '--', 'config/' + name]) }
+function graph() { return closure(root, { entries: ['Entry.cjs'], assets: [] }) }
+try {
+  execFileSync('git', ['-C', root, 'init', '-q'])
+  write('Entry.cjs', "require('./A.cjs')\n")
+  write('A.cjs', "require('./B.cjs')\n")
+  write('B.cjs', 'module.exports = 1\n')
+  for (const name of ['Entry.cjs', 'A.cjs', 'B.cjs']) add(name)
+  assert.deepEqual(graph(), ['A.cjs', 'B.cjs', 'Entry.cjs'])
+  write('C.cjs', 'module.exports = 2\n')
+  add('C.cjs')
+  write('B.cjs', "require('./C.cjs')\n")
+  assert.deepEqual(graph(), ['A.cjs', 'B.cjs', 'C.cjs', 'Entry.cjs'])
+  assert.deepEqual(graph(), graph())
+  write('A.cjs', "require('./Untracked.cjs')\n")
+  write('Untracked.cjs', 'module.exports = 1\n')
+  assert.throws(graph, /muse-closure-untracked/)
+  write('A.cjs', "require('./Deleted.cjs')\n")
+  assert.throws(graph, /muse-closure-missing/)
+  write('A.cjs', "require('./providers/' + provider + '.cjs')\n")
+  assert.throws(graph, /muse-closure-dynamic/)
+  write('A.cjs', "require('../../outside.cjs')\n")
+  assert.throws(graph, /muse-closure-boundary/)
+  assert.deepEqual(requires("// require('./Ignored.cjs')\nconst x = \"require('./AlsoIgnored.cjs')\"; require('./Real.cjs')", 'fixture'), ['./Real.cjs'])
+  console.log('SUITE RESULT: PASS 8 | FAIL 0 | total 8')
+} finally { fs.rmSync(root, { recursive: true, force: true }) }

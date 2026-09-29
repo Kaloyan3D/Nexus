@@ -49,6 +49,7 @@ const os = require('node:os')
 const crypto = require('node:crypto')
 const contextCompaction = require('./ContextCompaction.cjs')
 const compilerShadowHost = require('./ContextCompilerShadowHostV2.cjs')
+const compilerActiveHost = require('./ContextCompilerActiveHostV2.cjs')
 
 const REVIEW_COMMAND = /^\s*\/(?:codex-)?review\b/i
 const VERIFY_COMMAND = /^\s*\/verify\b/i
@@ -2871,6 +2872,13 @@ function apply(ctx) {
   // read-only (observe only, never authority); default off means zero
   // behavioral change. Never throws into controller startup.
   compilerShadowHost.installCompilerShadowObserver(ctx, { installRoot, bindingsPath, log })
+
+  // CCV2-C08 production active installation: the ONE production call
+  // site for active compiled projection. OFF/OBSERVE modes return every
+  // request verbatim (zero behavioral change; C07 keeps its own
+  // observer); ACTIVE attempts one validated compiled projection with
+  // deterministic legacy fallback. Never throws into startup.
+  compilerActiveHost.installCompilerActiveProjection(ctx, { installRoot, bindingsPath, log })
 
   // F1 ORDERING: prepended so compaction runs BEFORE the loop's
   // runtime-context projection decision for this request is consumed.

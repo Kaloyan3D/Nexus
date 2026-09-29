@@ -5010,5 +5010,371 @@ exactly-once, OFF==ON canonical + stub equality, 11-case failure
 matrix, routing compat, durable immutability, no-C08 scan); real
 pinned DSH loop both modes (dispatch scope, one observation per
 turn, MATCHED, masked OFF==ON equality, route preserved).
-Registered in scripts/Test-Harness.ps1. Next:
-CCV2-C08 -- Production Compiler Enablement (not begun).
+Registered in scripts/Test-Harness.ps1.
+
+## 40. C08 Production Compiler Enablement (Phase C)
+
+C08 is the first phase allowed to send CCv2-compiled context to the
+root model. Frozen activation boundary: C07 = observe, C08 =
+model-facing activation. The only new authority is which validated
+context projection reaches the root model; task truth, checkpoint
+truth, tier truth, retrieval, packing, compression, routing,
+provider/model selection, approvals, and tool lifecycle are
+untouched.
+
+### 40.1 Production tokenizer authority (the C07 caveat, resolved)
+
+logical-codepoint-v1 is never a production counting authority.
+config/ContextModelCapabilityV2.cjs binds an already-selected
+provider/model route to a verified ModelContextCapabilityV2
+{ provider, model, maxContextTokens, tokenizerFingerprint,
+tokenCounter, source, verified, capabilityRevision } by exact
+closed-world lookup only (routeKey = provider LF model against
+config/model-registry.json capacity plus an explicit
+verified-tokenizer table). Unknown routes, unknown windows, and
+routes without a verified tokenizer resolve invalid and fall back;
+nothing is guessed (no chars/4, no codepoints-as-model-tokens, no
+cross-model reuse, no name-sniffing branches anywhere, including
+inside this adapter). The only production counter shipped is the
+stub-transport tokenizer (nexus-stub-tokenizer-v1, exact UTF-8
+bytes defined by the stub transport itself, known vectors
+verified); every real registry route resolves
+active-tokenizer-unavailable with its authoritative window still
+attached for diagnostics, so production stays on the legacy
+projection until vendor-verified tokenizers are registered.
+
+### 40.2 Provider-neutral core (frozen C01--C06 untouched)
+
+No provider/model conditional lives in ContextCompilerV2,
+ContextBudgetAllocatorV2, ContextCompressionLadderV2, or
+ContextPromptLayoutV2. Provider adaptation lives strictly below
+and around the compiler boundary (capability adapter + active
+orchestrator + host wiring).
+
+### 40.3 Physical renderer
+
+config/ContextPromptRendererV2.cjs turns a validated final
+ContextView + ContextPromptLayout into physical model-facing bytes:
+serialization of already-selected members in layout order, host
+attachment contract (message plan), render validation, render
+digest. It invents no prose: materialized bytes are frozen
+entry.exactText verbatim; referenced COLD pages render through the
+typed versioned marker contract [ccv2-ref:pageId:hash16]; the
+separator (single LF) is a typed versioned framing contract.
+Overhead follows option B: count(joinedText) === segmentTokens +
+separatorOverhead through the production counter (zero-hidden-bytes
+proof), and the render binds source view/layout digests, ordered
+segment identities, role contract, renderer revision, and tokenizer
+fingerprint. Role contract render-roles-system-current-turn-v1:
+current-turn entries render as the single user message (byte-exact,
+exactly once); all history renders as system context (never
+impersonates the user).
+
+### 40.4 Context-window accounting
+
+The model window is shared, never granted whole to CCv2:
+modelMax - hostPrefix - toolSchema - framing - reservedOutput -
+safetyReserve = CCv2 hardMax (config/ContextCompilerActiveV2.cjs
+deriveActiveBudgetV2; every term measured through the production
+counter or authoritative; no hidden percentage reserves). Output
+reservation binds the final selected maxTokens (capped by the
+capability maxOutputTokens where published); drift after budgeting
+stales the render. Final proof after rendering: finalInput +
+reservedOutput <= modelMax and rendered <= hardMax, else fallback
+(no post-compilation truncation exists).
+
+### 40.5 Projection replacement (atomic, immutable source)
+
+config/ContextCompilerActiveHostV2.cjs owns the unified
+contextCompiler policy (off | observe | active; legacy shadowMode
+honored; upgrades never activate), authoritative count inputs,
+immutable replacement, and TOCTOU revalidation. Each request has
+exactly one mode (LEGACY or CCV2_COMPILED, typed marker in
+metadata + diagnostics). The derived request is built and fully
+validated before return (route, output allowance, host system,
+tools, routing authority byte-identical; bulk messages replaced
+whole; current turn exactly once byte-exact); any failure returns
+the original reference untouched. The C08 installer wraps
+agent/request (preset-row, outside the routing rewrite so
+route/authority guards keep passing); OFF/OBSERVE return next()
+verbatim with zero compiler work. Under mode:active the C07 shadow
+resolves off, so an active request runs exactly one compiler
+execution; observe requests run exactly one shadow.
+
+### 40.6 Eligibility, fallback, revalidation
+
+Active send requires: frozen route, verified capability and
+tokenizer, valid window, coherent snapshot, valid view +
+compression + layout + render, physical tokens fit, mandatory
+coverage, current-turn-once, balanced tool protocol, namespace
+valid, binding still current. Closed-world fallback reasons:
+active-tokenizer-unavailable, active-model-capability-unknown,
+active-budget-unrepresentable, active-snapshot-stale,
+active-compiler-failed, active-render-invalid,
+active-render-over-budget, active-mandatory-coverage-failed,
+active-current-turn-invalid, active-tool-protocol-invalid,
+active-request-binding-changed. C01--C06 stay fail-closed (invalid
+candidates rejected whole, never stripped); the outer layer fails
+open to the proven legacy projection. The sealed revision is
+re-read at completion; any checkpoint/turn/route/capability drift
+discards the render. Telemetry is secret-safe (modes, reasons,
+ids, digests, counts, tokens) and never blocks a validated send.
+
+### 40.7 Suites (frozen)
+
+tests/ContextModelCapabilityV2.Tests.cjs (42): stub vectors exact
+(U+00E9/U+1F600/CJK), cross-process vector stability, production
+rejection of test/logical/foreign fingerprints, exact-pair stub
+registration (near-miss and vendor-name probes unknown), real
+registry routes tokenizer-unavailable with authoritative windows,
+validation hardening (window, fingerprint, verified flag, flaky
+counter liveness), determinism.
+tests/ContextPromptRendererV2.Tests.cjs (33): layout-order
+realization, verbatim exactText, no invented prose, option-B
+overhead with fresh-counter recount, role contract + turn-once +
+no user-impersonation under injection, digest determinism +
+tamper rejection, tight-budget reference markers counted, unbalanced
+tool / dropped mandatory refusal, counter-fingerprint binding, compressed-rung rendering
+(STRUCTURED kinds preserved verbatim with exact accounting).
+tests/ContextCompilerActiveV2.Tests.cjs (47): active success with
+full accounting, 7-case fallback matrix, mandatory-over-budget
+refusal (no partial artifacts), exact-fit framing
+overflow, 5-race revalidation + forged-digest rejection, mode +
+budget derivation, determinism + injection neutrality.
+tests/ContextCompilerActiveHostV2.Tests.cjs (46): policy matrix +
+shadow interplay, atomic bulk replacement (identity, marker, no
+duplication, turn-once, physical fit), 10-case host fallback
+matrix, waterfall install + dedupe, real AihController.apply path
+with default-OFF invariance.
+tests/ContextCompilerActiveV2XProc.Tests.cjs (+ Worker) (8): two
+barrier-raced processes reproduce view/layout/render digests,
+counts, and decision bytes, matching the in-process attempt.
+
+## 41. C08H Real Provider Activation Acceptance (Phase C)
+
+C08H closes the C07-caveat gap for one real route: the Nexus
+default flash-max-direct / deepseek-v4-flash (also its
+flash-high-direct binding of the same model id), selected as the
+repo-default root route with an official provider tokenizer
+artifact. All other routes (deepseek-v4-pro, meta, sol-local,
+zai) stay capability-unknown/tokenizer-unavailable and fall back.
+
+### 41.1 Production tokenizer authority
+
+config/ContextTokenizerRegistryV2.cjs resolves EXACT
+provider/model pairs to a verified contract (fingerprint, BPE
+counter, source deepseek-official-tokenizer, engine + framing
+revisions). The artifact is the official DeepSeek v4 tokenizer
+package (api-docs Token and Token Usage offline-count zip),
+vendored at config/tokenizers/ with provenance + pinned shas
+(tokenizer.json 89085f12, 128k vocab / 127741 merges / 1283
+added / empty normalizer). The dependency-free engine reimplements
+added-token isolation, the 3 ordered Splits (Rust-White_Space
+semantics, proven by whitespace-soup fuzz), ByteLevel, and merge
+ranks; differential proof vs the reference tokenizers-Rust engine
+on the same file: 16 known vectors + 135-case id-for-id fuzz with
+0 mismatches + XProc. Fingerprint
+deepseek-v4-official-bpe-r1-89085f12ef79 binds artifact bytes +
+engine revision; any behavior change mints a new fingerprint.
+No-normalization is proven (precomposed vs decomposed differ);
+lone surrogates count deterministically via U+FFFD.
+
+### 41.2 Framing honesty (template-evidence)
+
+The official tokenizer_config.json chat_template is the framing
+contract: BOS + systems (first raw, rest joined) + User + turn +
+Assistant priming (counted input). frameDeepseekChatV2 reproduces
+it for the C08 shape; 6 template ground-truth cases (jinja2 render
++ reference ids) reproduce string- and id-exact. Historical
+settled tool material stays plain system text (never tool_calls
+control structures); live tool protocol stays native DSH
+transport. The host recounts the FULL framed string as one unit
+after a successful attempt (markers + joins can never hide);
+framed + reserve over window falls back (defense in depth: the
+stub-terms pre-gate is strictly more conservative). Tool schemas
+travel provider-native; the acceptance path is tool-free and the
+canonical-form limitation is documented with the safety-reserve
+mechanism (never guessed).
+
+### 41.3 Renderer boundary-merge correction (C08 narrow fix)
+
+Real BPE tokenization is not compositional: joined recounts may
+differ from segments + separator framing (observed 270 vs 263+9).
+The renderer now reports measured boundaryDeltaTokens with the
+joined recount AUTHORITATIVE (rendered = segments + overhead +
+delta by construction, digest-bound, validator-enforced); message
+plans prove byte-exact reconstruction. The active window check
+consumes the recount, so budgets stay exact. C08 suites updated
+to the measured equation (stub delta is 0).
+
+### 41.4 Capability and host integration (narrow C08 corrections)
+
+ModelCapabilityV2 gains the optional framing descriptor
+(revision + templateDigest, validated, digest-pinned) and resolves
+production pairs through the registry with the SAME exact route
+model-registry window/output (never mixed across models). XProc
+counter rebuild supports the production fingerprint. The host
+performs the framed final proof only for framed capabilities;
+stub behavior is byte-identical to before (all C08 suites green
+unchanged, except two expectation updates recording the intended
+registration).
+
+### 41.5 Acceptance evidence (deterministic, offline)
+
+tests/ContextTokenizerDeepseekV4.Tests.cjs (71): artifact pins,
+16 ground-truth vectors + exact id arrays, markers, framing
+(template strings + ids), registry exactness incl. same-provider
+-v4-pro rejection, capability binding, counter contract,
+robustness (lone surrogates, 100KB vs ground truth).
+tests/ContextTokenizerDeepseekV4XProc.Tests.cjs (+ Worker) (9):
+cross-process counts/ids/frames/fingerprint/binding.
+tests/ContextCompilerActiveDeepseekV4.Tests.cjs (32): ACTIVE
+CCV2_COMPILED on flash-max-direct with framed proof (433 + 512
+reserve far below 131072), openai-completions schema validity,
+OFF/OBSERVE/ACTIVE parity, 4 deterministic fallbacks
+(registry-stripped, near-miss model, overflow, stale revision),
+shadow-off-under-active, secret safety.
+scripts/C08H-LiveAcceptance.cjs: builds the live request, prints
+the sanitized acceptance record, and -- with DEEPSEEK_API_KEY
+absent -- exits BLOCKED(2) without any network call or faked
+success (verified behavior this session).
+
+### 41.6 Live status
+
+LIVE ACCEPTANCE = BLOCKED on missing DEEPSEEK_API_KEY (exact
+external blocker, not a CCv2 defect). Provider-vs-local usage
+parity is therefore UNVERIFIED pending a keyed call; the script
+compares prompt_tokens against the framed local count when it
+runs. No Phase D / E01 work was begun.
+Next (blocked, in order): provision DEEPSEEK_API_KEY, run
+scripts/C08H-LiveAcceptance.cjs, then CCV2-E01 -- Full Telemetry.
+
+## 42. C08H-EMv2 Muse Acceptance Retarget (Phase C)
+
+Production target corrected to Engineering Mode v2: Muse Spark
+1.3 via opencode-go (priority 1, openai-responses) and
+meta-model-api (priority 2, openai-completions). The completed
+DeepSeek tokenizer stays as an additional supported provider
+capability (untouched, still green); it was never substituted for
+the EMv2 gate and no unrelated tokenizer is used anywhere near
+the Muse routes.
+
+### 42.1 Mechanism determination (evidence, not assumption)
+
+Checked for a pre-send Muse counting authority: Meta dev docs
+(no published Muse Spark tokenizer), OpenCode Zen docs (usage +
+quota endpoints only, both post-hoc), repo transport
+(Invoke-MetaProbe.mjs proves post-hoc usage.prompt_tokens via
+stream_options.include_usage; MuseProvider.ps1 mocks the same
+shape), DSH substrate (pi-ai has counting only in its faux
+provider; SDK tokenizer mentions are doc comments). Strongest
+available mechanism: provider-reported post-hoc
+usage.prompt_tokens (parity validation only, never pre-send
+budget enforcement). No published tokenizer and no pre-send
+count endpoint exist for muse-spark-1.3; tiktoken/Llama/
+heuristic substitutes are forbidden and unused.
+
+### 42.2 Consequence (frozen C08 behavior, tested)
+
+Without a verified pre-send tokenizer both EMv2 routes resolve
+active-tokenizer-unavailable (windows still authoritative:
+1048576/131072) and ACTIVE deterministically serves LEGACY:
+tests/ContextCompilerActiveMuseRoutesV2.Tests.cjs (30) proves
+OFF/OBSERVE/ACTIVE parity, exact fallback reasons, near-miss +
+foreign-session + revision-race fallbacks, no cross-route counter
+borrowing, shadow-off-under-active, secret safety on both
+routes. scripts/C08H-MuseLiveAcceptance.cjs (--route
+opencode|meta) exits BLOCKED(2) with the exact technical
+blocker and proceeds to a keyed usage-parity call only after a
+tokenizer registers and a key exists.
+
+### 42.3 Transport reachability (no key, synthetic text)
+
+opencode.ai/zen/go/v1/responses and api.meta.ai/v1/chat/
+completions both answer 401 AuthError/invalid_api_key to keyless
+minimal-shape probes: endpoints live, TLS fine, requests reach
+the auth gate. This is reachability evidence only, never
+acceptance.
+
+### 42.4 Unblock requirements (external, in order)
+
+1. A provider-published Muse Spark 1.3 tokenizer or pre-send
+count endpoint (recheck dev.meta.ai + opencode zen docs).
+2. OPENCODE_API_KEY and/or MODEL_API_KEY provisioning
+(data/.credentials.yaml store is absent; all key env vars
+absent). Then: register the exact pairs, re-run the EMv2
+suites + live script (which compares prompt_tokens), then
+CCV2-E01. Phase C remains HOLD.
+
+## 43. C08H-REMOTE Muse Remote Counting (Phase C)
+
+The §42 correction stands corrected in turn: the official Meta
+API reference documents POST /v1/responses/input_tokens ("count
+tokens in the fully rendered input ... without generating or
+storing a response"; count covers resolved history,
+instructions, tools, media, server scaffolding; example model
+muse-spark-1.3; MODEL_API_KEY). Keyless probes confirm both
+Meta paths exist behind auth (input_tokens 401
+invalid_api_key; messages/count_tokens 401 on retry) while
+opencode.ai/zen/go/v1/responses/input_tokens answers 404
+(no registered opencode authority; UNVERIFIED pending a keyed
+probe, evidence suggesting UNSUPPORTED).
+
+### 43.1 Remote authority design
+
+config/ContextRemoteCounterMuseV2.cjs: exact-pair descriptor
+for meta-model-api/muse-spark-1.3-contributor (fingerprint
+meta-muse-input-tokens-api-v1 = the remote counting contract,
+not a local artifact), keyed HTTPS transport (injectable),
+strict response validation (200 + integer input_tokens),
+classified failures (auth/unsupported/model/rate/transport/
+malformed), parallel deduped per-text counts, whole-payload
+count, and a fail-closed memo-counter face carrying the remote
+fingerprint for exactly the provider-counted bytes.
+Production authority may be LOCAL_EXACT or REMOTE_EXACT; all
+remote failures map to the frozen active-tokenizer-unavailable
+(model rejection maps to active-model-capability-unknown).
+
+### 43.2 Two-pass exact integration (no frozen changes)
+
+config/ContextCompilerActiveMuseV2.cjs runs the frozen pipeline
+twice: Pass 1 with a planning byte counter (never reported as
+authority), provider-count of every Pass-1 text, Pass 2 through
+the seeded memo-counter, and a structural-identity proof
+(members/refs/blocks, token counts excluded) that packing was
+counter-independent -- divergence or memo miss falls back.
+The EXACT inference body (model/instructions/input/tools/
+max_output_tokens) is counted once pre-send; counted bytes must
+equal sent bytes (canonical compare at the send boundary with a
+fresh binding recheck). No local approximation, no sync
+network inside frozen modules, no duplicate inference (count
+calls never generate). C04 certification is preserved: Pass 2
+values are provider-exact; the equality proof rejects any
+counter-sensitive selection.
+
+### 43.3 Evidence
+
+tests/ContextRemoteCounterMuseV2.Tests.cjs (33): descriptor
+exactness, 12-case response classification, mocked count calls
+(dedupe, endpoint + contributor id binding, structured shape),
+auth/timeout/key failures, memo fail-closed.
+tests/ContextCompilerActiveMuseV2.Tests.cjs (38): two-pass
+eligible success with pre-count, exactly-once final count,
+counted==sent bytes, repeat determinism, send boundary (match,
+stale/forged/auth/drift handling), 7 fallbacks (auth, timeout,
+malformed, model-unsupported, over-window, tiny window, route
+mismatch, telemetry failure).
+scripts/C08H-MuseLiveAcceptance.cjs: keyed opencode endpoint
+probe with SUPPORTED/UNSUPPORTED/AUTH/UNVERIFIED classification;
+keyed Meta flow (attempt, send, usage-vs-precount compare).
+Without keys both routes exit BLOCKED(2) with exact blockers
+(verified this session: meta blocked on MODEL_API_KEY only).
+
+### 43.4 Live status
+
+LIVE remains BLOCKED on credentials (MODEL_API_KEY and
+OPENCODE_API_KEY absent; credential store absent). Contributor
+model-id acceptance is implemented but unprovable keyless (a
+400 model rejection maps to active-model-capability-unknown
+and is reported distinctly). Provider-vs-local usage parity and
+the opencode classification stay UNVERIFIED. No Phase D / E01.
