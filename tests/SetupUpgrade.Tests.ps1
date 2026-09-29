@@ -785,9 +785,18 @@ foreach ($museContract in @(
     'Validate-MusePreset.cjs',
     'text: !!js >-',
     'aih-muse-isolation',
-    'Engineering-Profiles.cjs'
+    'MusePresetDependencyClosure.cjs',
+    'copy $InstallRoot $stage'
 )) {
     if (-not $museInstallerText.Contains($museContract)) { throw "FAIL: the staged aih-muse installer is missing contract: $museContract" }
+}
+$museClosureTool = Join-Path $InstallRoot 'scripts/MusePresetDependencyClosure.cjs'
+if (-not (Test-Path -LiteralPath $museClosureTool)) { throw 'FAIL: Muse dependency closure tool is missing from the installed scripts.' }
+$museClosureManifest = Join-Path $InstallRoot 'config/.muse-preset-closure.json'
+if (-not (Test-Path -LiteralPath $museClosureManifest)) { throw 'FAIL: Muse dependency closure manifest is missing from the installed config.' }
+$museClosureNames = @((Get-Content -Raw -LiteralPath $museClosureManifest | ConvertFrom-Json).files | ForEach-Object { $_.name })
+foreach ($requiredMuseFile in @('Engineering-Profiles.cjs', 'ContextCompilerActiveHostV2.cjs', 'ContextCompilerShadowAdapterV2.cjs')) {
+    if ($museClosureNames -notcontains $requiredMuseFile) { throw "FAIL: Muse closure omits $requiredMuseFile" }
 }
 if (-not $compositionText.Contains('Remove-MuseContributorEgressPatch.cjs')) {
     throw 'FAIL: Complete-Install.ps1 does not remove the retired Muse provider-egress hook on upgrade.'
