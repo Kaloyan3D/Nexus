@@ -17,6 +17,17 @@ const ASSETS = Object.freeze([
   'tokenizers/deepseek-v4-tokenizer.provenance.json',
 ])
 const MANIFEST = '.muse-preset-closure.json'
+const PROFILES = Object.freeze({
+  muse: { entries: ENTRIES, assets: ASSETS, manifest: MANIFEST },
+  controller: { entries: Object.freeze(['AihController.cjs']), assets: Object.freeze([]), manifest: '.controller-preset-closure.json' },
+  engineering: { entries: Object.freeze(['AihController.cjs', 'Engineering-Isolation.cjs']), assets: Object.freeze([]), manifest: '.engineering-preset-closure.json' },
+  deepseek: { entries: Object.freeze(['AihController.cjs', 'DeepSeek-Isolation.cjs']), assets: Object.freeze([]), manifest: '.deepseek-preset-closure.json' },
+})
+function profile(options = {}) {
+  const name = options.profile || 'muse'
+  if (!Object.hasOwn(PROFILES, name)) fail('profile', name)
+  return PROFILES[name]
+}
 
 function fail(code, detail) { throw new Error(`muse-closure-${code}: ${detail}`) }
 function sha(file) { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') }
@@ -85,6 +96,7 @@ function tracked(repo, relative) {
   catch { fail('untracked', 'config/' + relative) }
 }
 function closure(repo, options = {}) {
+  const spec = profile(options)
   const root = options.rootIsConfig ? path.resolve(repo) : path.resolve(repo, 'config')
   const seen = new Set()
   function visit(relative) {
@@ -101,12 +113,13 @@ function closure(repo, options = {}) {
       visit(path.relative(root, resolved))
     }
   }
-  for (const entry of options.entries || ENTRIES) visit(entry)
-  for (const asset of options.assets || ASSETS) visit(asset)
+  for (const entry of options.entries || spec.entries) visit(entry)
+  for (const asset of options.assets || spec.assets) visit(asset)
   return [...seen].sort((a, b) => a < b ? -1 : a > b ? 1 : 0)
 }
-function prepare(source, install) {
-  const files = closure(source)
+function prepare(source, install, options = {}) {
+  const spec = profile(options)
+  const files = closure(source, options)
   const rows = files.map(name => ({ name, sha256: sha(safeFile(path.join(source, 'config'), name)) }))
   const destination = path.join(install, 'config')
   fs.mkdirSync(destination, { recursive: true })
@@ -115,43 +128,46 @@ function prepare(source, install) {
     fs.mkdirSync(path.dirname(target), { recursive: true })
     fs.copyFileSync(path.join(source, 'config', row.name), target)
   }
-  fs.writeFileSync(path.join(destination, MANIFEST), JSON.stringify({ version: 1, entrypoints: ENTRIES, files: rows }, null, 2) + '\n')
+  fs.writeFileSync(path.join(destination, spec.manifest), JSON.stringify({ version: 1, entrypoints: spec.entries, files: rows }, null, 2) + '\n')
   return rows
 }
-function installed(install) {
+function installed(install, options = {}) {
+  const spec = profile(options)
   const config = path.join(install, 'config')
-  const manifest = JSON.parse(fs.readFileSync(path.join(config, MANIFEST), 'utf8'))
-  if (manifest.version !== 1 || JSON.stringify(manifest.entrypoints) !== JSON.stringify(ENTRIES)) fail('manifest', 'entrypoints/version changed')
-  const names = closure(install, { requireTracked: false })
+  const manifest = JSON.parse(fs.readFileSync(path.join(config, spec.manifest), 'utf8'))
+  if (manifest.version !== 1 || JSON.stringify(manifest.entrypoints) !== JSON.stringify(spec.entries)) fail('manifest', 'entrypoints/version changed')
+  const names = closure(install, { ...options, requireTracked: false })
   if (JSON.stringify(manifest.files.map(row => row.name)) !== JSON.stringify(names)) fail('manifest', 'dependency graph differs from source manifest')
   for (const row of manifest.files) if (sha(safeFile(config, row.name)) !== row.sha256) fail('hash', row.name)
   return manifest.files
 }
-function copy(install, preset) {
-  const rows = installed(install)
+function copy(install, preset, options = {}) {
+  const rows = installed(install, options)
   for (const row of rows) {
     const target = path.join(preset, row.name)
     fs.mkdirSync(path.dirname(target), { recursive: true })
     fs.copyFileSync(path.join(install, 'config', row.name), target)
   }
-  validate(install, preset)
+  validate(install, preset, options)
   return rows
 }
-function validate(install, preset) {
-  const rows = installed(install)
+function validate(install, preset, options = {}) {
+  const spec = profile(options)
+  const rows = installed(install, options)
   for (const row of rows) if (sha(safeFile(preset, row.name)) !== row.sha256) fail('installed', row.name)
-  const actual = closure(preset, { requireTracked: false, rootIsConfig: true })
+  const actual = closure(preset, { ...options, requireTracked: false, rootIsConfig: true })
   if (JSON.stringify(actual) !== JSON.stringify(rows.map(row => row.name))) fail('installed', 'dependency graph differs from manifest')
-  for (const entry of ENTRIES) require(path.join(preset, entry))
+  for (const entry of spec.entries) require(path.join(preset, entry))
   return rows
 }
 function main() {
-  const [action, a, b] = process.argv.slice(2)
+  const [action, a, b, profileName] = process.argv.slice(2)
+  const options = { profile: profileName || 'muse' }
   let rows
-  if (action === 'plan') rows = closure(path.resolve(a)).map(name => ({ name }))
-  else if (action === 'prepare') rows = prepare(path.resolve(a), path.resolve(b))
-  else if (action === 'copy') rows = copy(path.resolve(a), path.resolve(b))
-  else if (action === 'validate') rows = validate(path.resolve(a), path.resolve(b))
+  if (action === 'plan') rows = closure(path.resolve(a), { profile: b || 'muse' }).map(name => ({ name }))
+  else if (action === 'prepare') rows = prepare(path.resolve(a), path.resolve(b), options)
+  else if (action === 'copy') rows = copy(path.resolve(a), path.resolve(b), options)
+  else if (action === 'validate') rows = validate(path.resolve(a), path.resolve(b), options)
   else fail('usage', 'expected plan|prepare|copy|validate')
   process.stdout.write(JSON.stringify({ dependencyClosure: rows.map(row => row.name) }) + '\n')
 }

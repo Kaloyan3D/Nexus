@@ -155,6 +155,10 @@ elseif (-not (Test-Path -LiteralPath $layout.Dsh)) {
 # Complete-Install.ps1 is a PowerShell script, not a native executable: it
 & $layout.Node (Join-Path $layout.Scripts 'MusePresetDependencyClosure.cjs') prepare $sourceRoot $InstallRoot | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Muse preset source dependency closure failed.' }
+foreach ($profile in @('engineering', 'deepseek')) {
+    & $layout.Node (Join-Path $layout.Scripts 'MusePresetDependencyClosure.cjs') prepare $sourceRoot $InstallRoot $profile | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "$profile preset source dependency closure failed." }
+}
 
 # Complete-Install.ps1 is a PowerShell script, not a native executable: it
 # defines no process exit code, and its failures are terminating errors that

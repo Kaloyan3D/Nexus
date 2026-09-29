@@ -55,59 +55,7 @@ Copy-Item -LiteralPath (Join-Path $layout.Config 'Routing-Integrity.cjs') -Desti
 & $layout.Node (Join-Path $layout.Scripts 'Verify-RoutingIntegrityComposition.mjs') $InstallRoot
 if ($LASTEXITCODE -ne 0) { throw 'The composed Web routing-integrity plugin could not be imported.' }
 
-$shippedPreset = Join-Path $layout.App 'node_modules/@deepseek-ai/dsh/config/agent-presets/code'
-$targetPreset = Join-Path $layout.Data '.agent-presets/aih-engineering'
-if (-not (Test-Path -LiteralPath (Join-Path $shippedPreset 'agent.cordis.yml'))) {
-    throw "Pinned Harness does not contain the expected Code Mode preset: $shippedPreset"
-}
-New-Item -ItemType Directory -Force -Path $targetPreset | Out-Null
-$presetText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $shippedPreset 'agent.cordis.yml')
-$personaPattern = '(?ms)^- id: persona\r?\n.*?(?=^- id: agent-instructions)'
-$personaReplacement = @'
-- id: persona
-  name: '@deepseek-ai/dsh-persona'
-  config:
-    text: !!js process.env.AIH_PERSONA ?? 'You are the DeepSeek implementation agent. Complete the supplied bounded task using repository-local instructions and relevant context. Use targeted verification and return structured evidence. The deterministic controller owns routing, retries, budgets, escalation, completion, and automatic Visual Review. Never discover or invoke Visual Review through the skill catalog. If blocked, return one scoped escalation with a stable failure signature.'
-
-'@
-$delegationPattern = '(?ms)^# [^\r\n]*delegation and workflows[^\r\n]*\r?\n.*?(?=^# [^\r\n]*remaining model-facing rows)'
-$delegationReplacement = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $layout.Config 'delegation-block.yml')
-$personaMatches = [regex]::Matches($presetText, $personaPattern).Count
-$delegationMatches = [regex]::Matches($presetText, $delegationPattern).Count
-if ($personaMatches -ne 1 -or $delegationMatches -ne 1) {
-    throw "Pinned Code Mode preset structure changed (persona matches: $personaMatches; delegation matches: $delegationMatches). Refusing an unsafe transform."
-}
-$presetText = [regex]::Replace($presetText, $personaPattern, $personaReplacement)
-$presetText = [regex]::Replace($presetText, $delegationPattern, $delegationReplacement)
-[System.IO.File]::WriteAllText((Join-Path $targetPreset 'agent.cordis.yml'), $presetText, [System.Text.UTF8Encoding]::new($false))
-Copy-Item -LiteralPath (Join-Path $layout.Config 'preset.yml') -Destination (Join-Path $targetPreset 'preset.yml') -Force
-
-$deepSeekPreset = Join-Path $layout.Data '.agent-presets/aih-deepseek'
-New-Item -ItemType Directory -Force -Path $deepSeekPreset | Out-Null
-& (Join-Path $layout.Scripts 'Build-DeepSeekPreset.ps1') -EngineeringPresetPath (Join-Path $targetPreset 'agent.cordis.yml') -DeepSeekPresetPath (Join-Path $deepSeekPreset 'agent.cordis.yml')
-Copy-Item -LiteralPath (Join-Path $layout.Config 'preset-deepseek.yml') -Destination (Join-Path $deepSeekPreset 'preset.yml') -Force
-Copy-Item -LiteralPath (Join-Path $layout.Config 'DeepSeek-Isolation.cjs') -Destination (Join-Path $deepSeekPreset 'DeepSeek-Isolation.cjs') -Force
-& (Join-Path $layout.Scripts 'Enable-EngineeringIsolation.ps1') -PresetDirectory $targetPreset
-Copy-Item -LiteralPath (Join-Path $layout.Config 'Engineering-Isolation.cjs') -Destination (Join-Path $targetPreset 'Engineering-Isolation.cjs') -Force
-Copy-Item -LiteralPath (Join-Path $layout.Config 'Controller-RequestBoundary.cjs') -Destination (Join-Path $targetPreset 'Controller-RequestBoundary.cjs') -Force
-foreach ($presetDirectory in @($targetPreset, $deepSeekPreset)) {
-    Copy-Item -LiteralPath (Join-Path $layout.Config 'AihController.cjs') -Destination (Join-Path $presetDirectory 'AihController.cjs') -Force
-    Copy-Item -LiteralPath (Join-Path $layout.Config 'ContextCompaction.cjs') -Destination (Join-Path $presetDirectory 'ContextCompaction.cjs') -Force
-    Copy-Item -LiteralPath (Join-Path $layout.Config 'Engineering-Profiles.cjs') -Destination (Join-Path $presetDirectory 'Engineering-Profiles.cjs') -Force
-    $presetFile = Join-Path $presetDirectory 'agent.cordis.yml'
-    $presetText = Get-Content -Raw -Encoding UTF8 -LiteralPath $presetFile
-    if (-not $presetText.Contains('- id: aih-controller')) {
-        $controllerRow = @"
-
-- id: aih-controller
-  name: './AihController.cjs'
-"@
-        # Append the exact same bytes Add-Content wrote historically (UTF-8
-        # without BOM on append), now via an explicit encoding so Windows
-        # PowerShell 5.1 and pwsh 7 produce identical files.
-        [System.IO.File]::AppendAllText($presetFile, $controllerRow, [System.Text.UTF8Encoding]::new($false))
-    }
-}
+& (Join-Path $layout.Scripts 'Install-ControllerPresets.ps1') -InstallRoot $InstallRoot
 
 # Build every managed Muse file in a staging directory, validate the generated
 # composition with DSH's actual !!js YAML schema, then swap the complete preset

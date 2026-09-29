@@ -48,6 +48,8 @@ $suites = @(
     [ordered]@{ name='SourceCompleteness'; script='tests/SourceCompleteness.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='MusePresetDependencyClosure'; script='tests/MusePresetDependencyClosure.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='MusePresetCleanInstall'; script='tests/MusePresetCleanInstall.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ControllerPresetCleanInstall'; script='tests/ControllerPresetCleanInstall.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ControllerPresetInstalled'; script='tests/ControllerPresetInstalled.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='VisualReview'; script='tests/VisualReview.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='VisualLoop'; script='tests/VisualLoop.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='NexusWorkspace'; script='tests/NexusWorkspace.Tests.ps1'; executable=$powershell; kind='powershell' },
