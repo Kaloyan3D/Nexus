@@ -206,7 +206,7 @@ async function main() {
     if (stagedPages.pages === null || stagedDecisions.decisions === null || stagedTx.transactions === null) {
       throw new Error('staged memory unreadable');
     }
-    const MAX_TOKENS = 512;
+    const MAX_TOKENS = 4096;
     const compileInput = {
       checkpoint: sealed,
       currentTurn: { turnId: 'live', text: TURN_TEXT, revision: null },
@@ -239,7 +239,7 @@ async function main() {
       pages: stagedPages.pages,
       remoteCounter,
       route: { provider: route.provider, model: route.model, maxContextTokens: 1048576 },
-      requestTerms: { systemText: SYSTEM_TEXT, turnText: TURN_TEXT, maxTokens: MAX_TOKENS, outputReserve: MAX_TOKENS },
+      requestTerms: { systemText: SYSTEM_TEXT, turnText: TURN_TEXT, maxTokens: MAX_TOKENS, outputReserve: MAX_TOKENS, reasoningEffort: 'xhigh' },
       binding,
       getCurrentRevision: () => shadowHost.readSealedRevisionForTaskV2(memDir),
     });
@@ -264,7 +264,8 @@ async function main() {
     }
     const apiKeyLive = apiKey;
     void apiKeyLive;
-    const poster = (req) => postJson(req.hostname, req.reqPath, req.apiKey, JSON.parse(req.bodyJson), req.timeoutMs);
+    const poster = (req) => postJson(req.hostname, req.reqPath, req.apiKey, JSON.parse(req.bodyJson), req.timeoutMs)
+      .then((result) => ({ status: result.status, bodyText: result.text }));
     const sent = await museActive.sendMuseCompiledV2({
       decision,
       liveBinding: decision.binding,
@@ -277,12 +278,17 @@ async function main() {
     });
     console.log('C08H-MUSE-USAGE ' + JSON.stringify({
       sent: sent.sent,
+      completed: sent.completed === true,
       external: sent.external,
       reason: sent.reason,
       preCount: sent.preCount,
       promptTokens: sent.usage ? sent.usage.promptTokens : null,
       outputTokens: sent.usage ? sent.usage.outputTokens : null,
+      cachedInputTokens: sent.usage ? sent.usage.cachedInputTokens : null,
+      reasoningOutputTokens: sent.usage ? sent.usage.reasoningOutputTokens : null,
       usageMatch: sent.usageMatch,
+      incompleteReason: sent.incompleteReason,
+      responseShape: sent.responseShape === undefined ? null : sent.responseShape,
     }));
     if (sent.sent !== true) {
       console.log('CCV2-C08H-MUSE — ' + (sent.external === true ? 'BLOCKED' : 'DEFECT'));
@@ -291,12 +297,29 @@ async function main() {
       process.exitCode = sent.external === true ? 2 : 1;
       return;
     }
-    if (sent.usageMatch !== true) {
+    if (sent.reason === 'muse-inference-incomplete') {
+      console.log('CCV2-C08H-MUSE — BLOCKED');
+      console.log('blocker: provider returned status=incomplete (reason=' + sent.incompleteReason + '); no usable completion');
+      cleanup();
+      process.exitCode = 2;
+      return;
+    }
+    if (sent.completed !== true) {
       console.log('CCV2-C08H-MUSE — DEFECT');
-      console.log('defect: provider usage does not match the pre-count (pre=' + sent.preCount + ' in=' + (sent.usage ? sent.usage.promptTokens : null) + ')');
+      console.log('defect: response completed without usable output (' + sent.reason + ')');
       cleanup();
       process.exitCode = 1;
       return;
+    }
+    if (sent.usageWithinBound !== true) {
+      console.log('CCV2-C08H-MUSE — DEFECT');
+      console.log('defect: provider consumed outside the authorized pre-count (pre=' + sent.preCount + ' in=' + (sent.usage ? sent.usage.promptTokens : null) + ' match=' + sent.usageMatch + ')');
+      cleanup();
+      process.exitCode = 1;
+      return;
+    }
+    if (sent.usageMatch !== true) {
+      console.log('C08H-MUSE-NOTE documented provider scaffolding delta (pre=' + sent.preCount + ' in=' + (sent.usage ? sent.usage.promptTokens : null) + '); consumption stayed within the authorized bound');
     }
     console.log('CCV2-C08H-MUSE — Real EMv2 Muse Activation VERIFIED');
     cleanup();

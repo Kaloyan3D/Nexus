@@ -260,9 +260,9 @@ function applyWithCtx(fx, shared) {
   resetSpy();
   const first = applyWithCtx(fx);
   const listeners = first.listeners;
-  check(Array.isArray(listeners['llm/stream']) && listeners['llm/stream'].length === 1, 'real apply installs exactly one llm/stream observer');
+  check(Array.isArray(listeners['llm/stream']) && listeners['llm/stream'].length === 2, 'real apply installs shadow + opencode observers (OC01H)');
   applyWithCtx(fx, first);
-  check(listeners['llm/stream'].length === 1, 're-apply on the same ctx stays single (HMR safety)');
+  check(listeners['llm/stream'].length === 2, 're-apply on the same ctx stays stable (HMR safety, no duplicates)');
   // OFF passthrough through the REAL installed listener.
   const hook = listeners['llm/stream'][0];
   const canned = { chunks: ['ok'] };

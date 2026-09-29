@@ -50,6 +50,7 @@ const crypto = require('node:crypto')
 const contextCompaction = require('./ContextCompaction.cjs')
 const compilerShadowHost = require('./ContextCompilerShadowHostV2.cjs')
 const compilerActiveHost = require('./ContextCompilerActiveHostV2.cjs')
+const opencodeActiveHost = require('./ContextCompilerActiveOpencodeHostV2.cjs')
 
 const REVIEW_COMMAND = /^\s*\/(?:codex-)?review\b/i
 const VERIFY_COMMAND = /^\s*\/verify\b/i
@@ -2879,6 +2880,13 @@ function apply(ctx) {
   // observer); ACTIVE attempts one validated compiled projection with
   // deterministic legacy fallback. Never throws into startup.
   compilerActiveHost.installCompilerActiveProjection(ctx, { installRoot, bindingsPath, log })
+
+  // CCV2-OC01H production OpenCode installation: the ONE production call
+  // site for certified OpenCode Muse projection. Startup loads the
+  // durable authority certification (fail-closed to QUARANTINED when
+  // absent/invalid/stale); OFF/OBSERVE/uncertified modes return every
+  // request verbatim. Never throws into controller startup.
+  opencodeActiveHost.installOpencodeActiveProjection(ctx, { installRoot, bindingsPath, log })
 
   // F1 ORDERING: prepended so compaction runs BEFORE the loop's
   // runtime-context projection decision for this request is consumed.

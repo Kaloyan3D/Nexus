@@ -71,6 +71,9 @@ section('C08M-RC-3 COUNT CALLS (mocked protocol)');
     check(payload.tokens === 7, 'whole-payload count');
     const payloadSent = JSON.parse(transport.calls[2].bodyJson);
     check(payloadSent.instructions === 'sys' && Array.isArray(payloadSent.input) && payloadSent.tools === undefined, 'structured shape counted (no text flattening)');
+    const withReasoning = await ctr.countPayloadV2({ instructions: 'sys', input: 'hi', reasoning: { effort: 'xhigh' } });
+    check(withReasoning.tokens === 7, 'reasoning-bearing payload counts');
+    check(JSON.parse(transport.calls[3].bodyJson).reasoning.effort === 'xhigh', 'reasoning forwarded to the count endpoint');
     let threw = false;
     try {
       await remote.createMuseRemoteCounterV2({ descriptor: DESCRIPTOR, apiKey: 'k', transport: mockTransport(() => ({ status: 401, bodyText: '{}' })) }).countTextsV2(['x']);

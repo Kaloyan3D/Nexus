@@ -90,6 +90,10 @@ function checkAttemptShapeV2(input) {
   if (!isPlainObject(terms) || typeof terms.systemText !== 'string' || typeof terms.turnText !== 'string') return 'requestTerms systemText/turnText required';
   if (!Number.isInteger(terms.maxTokens) || terms.maxTokens <= 0) return 'requestTerms maxTokens required';
   if (!Number.isInteger(terms.outputReserve) || terms.outputReserve < 0) return 'requestTerms outputReserve required';
+  if (terms.reasoningEffort !== undefined && terms.reasoningEffort !== null
+    && (typeof terms.reasoningEffort !== 'string' || terms.reasoningEffort === '')) {
+    return 'requestTerms reasoningEffort must be a non-empty string or omitted';
+  }
   if (terms.toolsJson !== undefined && terms.toolsJson !== null && typeof terms.toolsJson !== 'string') return 'toolsJson must be a string or omitted';
   if (!isPlainObject(input.binding)) return 'binding required';
   return null;
@@ -114,9 +118,12 @@ function mapRemoteErrorV2(error) {
   if (text.indexOf('context-render-mandatory-missing') !== -1) return 'active-mandatory-coverage-failed';
   return 'active-tokenizer-unavailable';
 }
-function buildInferenceBodyV2(route, systemJoined, turnText, toolsJsonOrNull, maxOutputTokens) {
+function buildInferenceBodyV2(route, systemJoined, turnText, toolsJsonOrNull, maxOutputTokens, reasoningEffort) {
   const input = [{ role: 'user', content: turnText }];
   const body = { model: route.model, instructions: systemJoined, input };
+  if (typeof reasoningEffort === 'string' && reasoningEffort !== '') {
+    body.reasoning = { effort: reasoningEffort };
+  }
   if (toolsJsonOrNull !== null && toolsJsonOrNull !== undefined) {
     let tools = null;
     try {
@@ -271,7 +278,8 @@ async function attemptMuseActiveV2(input) {
     let inferenceBody = null;
     try {
       inferenceBody = buildInferenceBodyV2(route, systemJoined, terms.turnText,
-        typeof terms.toolsJson === 'string' ? terms.toolsJson : null, terms.maxTokens);
+        typeof terms.toolsJson === 'string' ? terms.toolsJson : null, terms.maxTokens,
+        typeof terms.reasoningEffort === 'string' ? terms.reasoningEffort : null);
     } catch (error) {
       return ineligibleMuse('active-compiler-failed');
     }
@@ -396,10 +404,185 @@ function checkSendBindingV2(stored, live) {
   }
   return null;
 }
+function safeProviderErrorV2(error) {
+  if (!isPlainObject(error)) return Object.freeze({ type: 'unspecified', code: 'unspecified' });
+  const type = typeof error.type === 'string' && error.type !== '' ? error.type.slice(0, 128) : 'unspecified';
+  const code = typeof error.code === 'string' && error.code !== '' ? error.code.slice(0, 128) : 'unspecified';
+  return Object.freeze({ type, code });
+}
+function validUsageOrNullV2(usage) {
+  if (!isPlainObject(usage)) return null;
+  const firstDefined = (...values) => {
+    for (const value of values) {
+      if (value !== undefined) return value;
+    }
+    return undefined;
+  };
+  const inputTokens = firstDefined(usage.input_tokens, usage.prompt_tokens);
+  if (!Number.isInteger(inputTokens) || inputTokens < 0) return null;
+  const outputTokens = firstDefined(usage.output_tokens, usage.completion_tokens);
+  const totalTokens = firstDefined(usage.total_tokens);
+  const optional = (value) => (Number.isInteger(value) && value >= 0 ? value : null);
+  const detailsOf = (container, key, alias) => {
+    if (!isPlainObject(container)) return null;
+    const details = container[key] !== undefined ? container[key] : container[alias];
+    if (!isPlainObject(details)) return null;
+    return details;
+  };
+  const inputDetails = detailsOf(usage, 'input_tokens_details', 'prompt_tokens_details');
+  const outputDetails = detailsOf(usage, 'output_tokens_details', 'completion_tokens_details');
+  return Object.freeze({
+    promptTokens: inputTokens,
+    outputTokens: optional(outputTokens),
+    totalTokens: optional(totalTokens),
+    cachedInputTokens: inputDetails !== null && Number.isInteger(inputDetails.cached_tokens) && inputDetails.cached_tokens >= 0
+      ? inputDetails.cached_tokens : null,
+    reasoningOutputTokens: outputDetails !== null && Number.isInteger(outputDetails.reasoning_tokens) && outputDetails.reasoning_tokens >= 0
+      ? outputDetails.reasoning_tokens : null,
+  });
+}
+function responseItemTypesV2(output) {
+  const types = [];
+  for (const item of output) {
+    if (item !== null && typeof item === 'object' && typeof item.type === 'string' && types.indexOf(item.type) === -1) {
+      types.push(item.type);
+    }
+  }
+  return types;
+}
+function extractResponsesTextV2(output) {
+  const parts = [];
+  for (const item of output) {
+    if (item === null || typeof item !== 'object') return { ok: false };
+    if (typeof item.type !== 'string') return { ok: false };
+    if (item.type !== 'message') continue;
+    if (item.content === undefined || item.content === null) continue;
+    if (!Array.isArray(item.content)) return { ok: false };
+    for (const content of item.content) {
+      if (content === null || content === undefined) continue;
+      if (typeof content !== 'object') return { ok: false };
+      if (content.type !== 'output_text') continue;
+      if (typeof content.text !== 'string') return { ok: false };
+      parts.push(content.text);
+    }
+  }
+  return { ok: true, text: parts.join(String.fromCharCode(10)), types: responseItemTypesV2(output) };
+}
+function responseShapeOfV2(body) {
+  try {
+    if (!isPlainObject(body)) return null;
+    const types = [];
+    if (Array.isArray(body.output)) {
+      for (const item of body.output) {
+        if (item !== null && typeof item === 'object' && typeof item.type === 'string' && types.indexOf(item.type) === -1) {
+          types.push(item.type);
+        }
+      }
+    }
+    return Object.freeze({
+      object: typeof body.object === 'string' ? body.object : null,
+      status: typeof body.status === 'string' ? body.status : null,
+      hasError: body.error !== undefined && body.error !== null,
+      hasUsage: isPlainObject(body.usage),
+      outputIsArray: Array.isArray(body.output),
+      outputTypes: Object.freeze(types),
+    });
+  } catch (error) {
+    void error;
+    return null;
+  }
+}
+function classifyResponsesBodyV2(body) {
+  if (!isPlainObject(body)) return { kind: 'malformed' };
+  if (body.error !== undefined && body.error !== null) {
+    return { kind: 'failed', providerError: safeProviderErrorV2(body.error) };
+  }
+  if (body.object !== 'response') return { kind: 'malformed' };
+  const status = body.status;
+  if (status === 'failed') {
+    return { kind: 'failed', providerError: safeProviderErrorV2(body.error) };
+  }
+  const usage = validUsageOrNullV2(body.usage);
+  if (status === 'incomplete') {
+    if (usage === null) return { kind: 'malformed' };
+    let reason = 'unspecified';
+    if (isPlainObject(body.incomplete_details) && typeof body.incomplete_details.reason === 'string' && body.incomplete_details.reason !== '') {
+      reason = body.incomplete_details.reason.slice(0, 128);
+    }
+    return { kind: 'incomplete', usage, incompleteReason: reason };
+  }
+  if (status !== 'completed') return { kind: 'malformed' };
+  if (!Array.isArray(body.output)) return { kind: 'malformed' };
+  if (usage === null) return { kind: 'malformed' };
+  const extracted = extractResponsesTextV2(body.output);
+  if (extracted.ok !== true) return { kind: 'malformed' };
+  if (extracted.text === '') return { kind: 'no-text', usage, types: extracted.types };
+  return { kind: 'completed', usage, outputText: extracted.text, types: extracted.types };
+}
+function finishMuseSendV2(fail, decision, body, shape) {
+  const classified = classifyResponsesBodyV2(body);
+  const withShape = (result) => Object.freeze(Object.assign({}, result, { responseShape: shape === undefined ? null : shape }));
+  if (classified.kind === 'malformed') return withShape(fail('muse-inference-malformed', true));
+  const modelName = typeof body.model === 'string' ? body.model : null;
+  const packUsage = (usage) => Object.freeze({
+    promptTokens: usage.promptTokens, outputTokens: usage.outputTokens,
+    totalTokens: usage.totalTokens, model: modelName,
+    cachedInputTokens: usage.cachedInputTokens, reasoningOutputTokens: usage.reasoningOutputTokens,
+  });
+  const withinBound = (usageOrNull) => {
+    if (usageOrNull === null) return null;
+    if (usageOrNull.promptTokens === null || usageOrNull.promptTokens <= 0) return false;
+    return usageOrNull.promptTokens <= decision.preCount;
+  };
+  if (classified.kind === 'failed') {
+    const usage = validUsageOrNullV2(body.usage);
+    return withShape(Object.freeze({
+      sent: false, completed: false, reason: 'muse-inference-failed', external: true,
+      preCount: decision.preCount, outputText: '',
+      usage: usage === null ? null : packUsage(usage),
+      usageMatch: usage === null ? null : usage.promptTokens === decision.preCount,
+      usageWithinBound: usage === null ? null : withinBound(usage),
+      incompleteReason: null,
+      providerError: classified.providerError,
+    }));
+  }
+  if (classified.kind === 'incomplete') {
+    return withShape(Object.freeze({
+      sent: true, completed: false, reason: 'muse-inference-incomplete', external: true,
+      preCount: decision.preCount, outputText: '',
+      usage: packUsage(classified.usage),
+      usageMatch: classified.usage.promptTokens === decision.preCount,
+      usageWithinBound: withinBound(classified.usage),
+      incompleteReason: classified.incompleteReason,
+      providerError: null,
+    }));
+  }
+  if (classified.kind === 'no-text') {
+    return withShape(Object.freeze({
+      sent: true, completed: false, reason: 'muse-inference-no-text', external: false,
+      preCount: decision.preCount, outputText: '',
+      usage: packUsage(classified.usage),
+      usageMatch: classified.usage.promptTokens === decision.preCount,
+      usageWithinBound: withinBound(classified.usage),
+      incompleteReason: null,
+      providerError: null,
+    }));
+  }
+  return withShape(Object.freeze({
+    sent: true, completed: true, reason: null, external: false,
+    usageWithinBound: withinBound(classified.usage),
+    preCount: decision.preCount, outputText: classified.outputText,
+    usage: packUsage(classified.usage),
+    usageMatch: classified.usage.promptTokens === decision.preCount,
+    incompleteReason: null,
+    providerError: null,
+  }));
+}
 async function sendMuseCompiledV2(input) {
   const fail = (reason, external) => Object.freeze({
-    sent: false, reason, external: external === true,
-    usage: null, preCount: null, usageMatch: null,
+    sent: false, completed: false, reason, external: external === true,
+    usage: null, preCount: null, usageMatch: null, usageWithinBound: null,
+    outputText: '', incompleteReason: null, providerError: null,
   });
   try {
     if (!isPlainObject(input) || !isPlainObject(input.decision) || !isPlainObject(input.liveBinding)) {
@@ -427,9 +610,32 @@ async function sendMuseCompiledV2(input) {
       return fail('muse-inference-transport', true);
     }
     if (!isPlainObject(outcome) || typeof outcome.status !== 'number') return fail('muse-inference-transport', true);
-    if (outcome.status === 401 || outcome.status === 403) return fail('muse-inference-auth', true);
-    if (outcome.status === 429) return fail('muse-inference-rate-limited', true);
-    if (outcome.status !== 200) return fail('muse-inference-rejected', true);
+    const withStatus = (result) => Object.freeze(Object.assign({}, result, { httpStatus: outcome.status }));
+    if (outcome.status === 401 || outcome.status === 403) return withStatus(fail('muse-inference-auth', true));
+    if (outcome.status === 429) return withStatus(fail('muse-inference-rate-limited', true));
+    if (outcome.status !== 200) {
+      let rejection = null;
+      try {
+        const parsed = JSON.parse(outcome.bodyText);
+        if (isPlainObject(parsed)) {
+          rejection = Object.freeze({
+            bodyKind: isPlainObject(parsed.error) ? 'json-error' : 'json-other',
+            errorType: isPlainObject(parsed.error) && typeof parsed.error.type === 'string' ? parsed.error.type.slice(0, 128) : null,
+            errorCode: isPlainObject(parsed.error) && typeof parsed.error.code === 'string' ? parsed.error.code.slice(0, 128) : null,
+          });
+        } else {
+          rejection = Object.freeze({ bodyKind: 'json-other', errorType: null, errorCode: null });
+        }
+      } catch (error) {
+        void error;
+        rejection = Object.freeze({
+          bodyKind: typeof outcome.bodyText === 'string' && outcome.bodyText.trim().startsWith('<') ? 'html' : 'text',
+          errorType: null, errorCode: null,
+        });
+      }
+      const rejected = fail('muse-inference-rejected', true);
+      return withStatus(Object.freeze(Object.assign({}, rejected, { rejection })));
+    }
     let body = null;
     try {
       body = JSON.parse(outcome.bodyText);
@@ -437,22 +643,7 @@ async function sendMuseCompiledV2(input) {
       void error;
       return fail('muse-inference-malformed', true);
     }
-    const usage = isPlainObject(body) && isPlainObject(body.usage) ? body.usage : null;
-    const promptTokens = usage !== null && Number.isInteger(usage.input_tokens) ? usage.input_tokens : null;
-    const usageMatch = promptTokens === null ? null : promptTokens === decision.preCount;
-    return Object.freeze({
-      sent: true,
-      reason: null,
-      external: false,
-      preCount: decision.preCount,
-      usage: usage === null ? null : Object.freeze({
-        promptTokens,
-        outputTokens: Number.isInteger(usage.output_tokens) ? usage.output_tokens : null,
-        totalTokens: Number.isInteger(usage.total_tokens) ? usage.total_tokens : null,
-        model: typeof body.model === 'string' ? body.model : null,
-      }),
-      usageMatch,
-    });
+    return finishMuseSendV2(fail, decision, body, responseShapeOfV2(body));
   } catch (error) {
     void error;
     return fail('muse-inference-transport', true);
@@ -463,6 +654,8 @@ module.exports = {
   PLANNING_FINGERPRINT_V1,
   createPlanningCounterV2,
   candidateIdentityV2,
+  extractResponsesTextV2,
+  classifyResponsesBodyV2,
   attemptMuseActiveV2,
   sendMuseCompiledV2,
 };

@@ -169,6 +169,7 @@ function createMuseRemoteCounterV2(input) {
     if (shape.instructions !== undefined) body.instructions = shape.instructions;
     if (shape.tools !== undefined) body.tools = shape.tools;
     if (shape.max_output_tokens !== undefined) body.max_output_tokens = shape.max_output_tokens;
+    if (shape.reasoning !== undefined) body.reasoning = shape.reasoning;
     const counted = await postCountV2(body);
     return { tokens: counted.tokens, object: counted.object };
   }

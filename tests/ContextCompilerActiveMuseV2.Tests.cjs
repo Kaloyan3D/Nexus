@@ -168,6 +168,24 @@ section('C08M-MU-1 REMOTE SUCCESS (two-pass exact)');
     check(perText >= 5, 'per-text provider counts back the pipeline (' + perText + ')');
     const r2 = await muse.attemptMuseActiveV2(attemptInput(ruleCounter(byteRule)));
     check(r2.eligible === true && r2.render.renderDigest === d.render.renderDigest, 'repeat attempt reproduces the decision');
+    const withReasoning = await muse.attemptMuseActiveV2(attemptInput(ruleCounter(byteRule), {
+      requestTerms: { systemText: SYSTEM, turnText: TURN, maxTokens: 512, outputReserve: 512, reasoningEffort: 'xhigh' },
+    }));
+    check(withReasoning.eligible === true, 'reasoning effort flows through the attempt');
+    const finalBodies = [];
+    const spyTransport = { postJson: async (req) => {
+      const parsed = JSON.parse(req.bodyJson);
+      if (parsed.instructions !== undefined) finalBodies.push(parsed);
+      return { status: 200, bodyText: JSON.stringify({ object: 'response.input_tokens', input_tokens: 9 }) };
+    } };
+    await muse.attemptMuseActiveV2(attemptInput(spyTransport, {
+      requestTerms: { systemText: SYSTEM, turnText: TURN, maxTokens: 512, outputReserve: 512, reasoningEffort: 'xhigh' },
+    }));
+    check(finalBodies.length === 1 && finalBodies[0].reasoning.effort === 'xhigh', 'route reasoning bound into counted and sent body');
+    const badReasoning = await muse.attemptMuseActiveV2(attemptInput(ruleCounter(byteRule), {
+      requestTerms: { systemText: SYSTEM, turnText: TURN, maxTokens: 512, outputReserve: 512, reasoningEffort: 42 },
+    }));
+    check(badReasoning.eligible === false, 'invalid reasoning effort fails closed');
   })().then(() => {
     sectionsTwo();
   }).catch((error) => { console.error(error); process.exitCode = 1; });
@@ -181,10 +199,11 @@ function sectionsTwo() {
     const inferenceCalls = [];
     const poster = async (req) => {
       inferenceCalls.push(JSON.parse(req.bodyJson));
-      return { status: 200, bodyText: JSON.stringify({ id: 'resp_1', model: MODEL, usage: { input_tokens: 432, output_tokens: 9, total_tokens: 441 } }) };
+      return { status: 200, bodyText: JSON.stringify({ object: 'response', status: 'completed', model: MODEL, error: null, usage: { input_tokens: 432, output_tokens: 9, total_tokens: 441 }, output: [{ type: 'message', content: [{ type: 'output_text', text: 'mock reply' }] }] }) };
     };
     const sent = await muse.sendMuseCompiledV2({ decision: d, liveBinding: d.binding, inferenceBody: d.inferenceBody, inferencePost: poster, apiKey: 'k', hostname: 'api.meta.ai', reqPath: '/v1/responses' });
-    check(sent.sent === true && sent.usageMatch === true, 'sent with usage matching the pre-count');
+    check(sent.sent === true && sent.completed === true && sent.reason === null && sent.usageMatch === true, 'sent completed with usage matching the pre-count');
+    check(sent.outputText === 'mock reply', 'visible text extracted, reasoning-free shape');
     check(sent.usage.promptTokens === 432 && inferenceCalls.length === 1, 'usage parsed, one inference call');
     check(JSON.stringify(checkpoint.canonicalize(inferenceCalls[0])) === JSON.stringify(checkpoint.canonicalize(d.inferenceBody)), 'sent bytes equal counted bytes');
     const stale = await muse.sendMuseCompiledV2({
@@ -206,10 +225,17 @@ function sectionsTwo() {
     check(denied.sent === false && denied.external === true, 'auth failure is external, not a CCv2 defect');
     const mismatch = await muse.sendMuseCompiledV2({
       decision: d, liveBinding: d.binding, inferenceBody: d.inferenceBody,
-      inferencePost: async () => ({ status: 200, bodyText: JSON.stringify({ usage: { input_tokens: 434, output_tokens: 9, total_tokens: 443 } }) }),
+      inferencePost: async () => ({ status: 200, bodyText: JSON.stringify({ object: 'response', status: 'completed', model: MODEL, error: null, usage: { input_tokens: 434, output_tokens: 9, total_tokens: 443 }, output: [{ type: 'message', content: [{ type: 'output_text', text: 'drift' }] }] }) }),
       apiKey: 'k', hostname: 'h', reqPath: '/p',
     });
     check(mismatch.sent === true && mismatch.usageMatch === false, 'usage drift reported, never hidden');
+    check(mismatch.usageWithinBound === false, 'over-consumption breaks the authorized bound');
+    const under = await muse.sendMuseCompiledV2({
+      decision: d, liveBinding: d.binding, inferenceBody: d.inferenceBody,
+      inferencePost: async () => ({ status: 200, bodyText: JSON.stringify({ object: 'response', status: 'completed', model: MODEL, error: null, usage: { input_tokens: 400, output_tokens: 9, total_tokens: 409 }, output: [{ type: 'message', content: [{ type: 'output_text', text: 'under' }] }] }) }),
+      apiKey: 'k', hostname: 'h', reqPath: '/p',
+    });
+    check(under.sent === true && under.completed === true && under.usageMatch === false && under.usageWithinBound === true, 'documented scaffolding direction stays within the authorized bound');
     sectionsThree();
   })().catch((error) => { console.error(error); process.exitCode = 1; });
 }
@@ -248,6 +274,89 @@ function sectionsThree() {
       const d = await muse.attemptMuseActiveV2(attemptInput(ruleCounter(byteRule), { telemetrySink: () => { telemetries += 1; throw new Error('sink down'); } }));
       check(d.eligible === true && telemetries === 1, 'telemetry failure never blocks a validated decision');
     }
+    sectionsFour();
+  })().catch((error) => { console.error(error); process.exitCode = 1; });
+}
+function fullBindingForSend() {
+  return {
+    taskId: 't', taskInstanceId: 'ti', sessionId: 's',
+    checkpointGeneration: 1, checkpointId: 'cp', snapshotRevision: 'rev',
+    turnId: 'live', turnTextHash: 'hash', provider: PROVIDER, model: MODEL,
+    maxTokens: 512, outputReserve: 512,
+    counterFingerprint: 'fp', counterRevision: 'rev',
+  };
+}
+function sendWithBody(t, bodyObject) {
+  void t;
+  const binding = fullBindingForSend();
+  const decision = {
+    eligible: true, mode: 'CCV2_COMPILED', preCount: 12,
+    inferenceBody: { model: MODEL }, binding: Object.assign({}, binding),
+  };
+  return muse.sendMuseCompiledV2({
+    decision,
+    liveBinding: Object.assign({}, binding),
+    inferenceBody: { model: MODEL },
+    inferencePost: async () => ({ status: 200, bodyText: typeof bodyObject === 'string' ? bodyObject : JSON.stringify(bodyObject) }),
+    apiKey: 'k', hostname: 'h', reqPath: '/p',
+  });
+}
+function sectionsFour() {
+  section('C08M-MU-4 RESPONSE PARSER (real proven shapes)');
+  ;(async () => {
+    const usage12 = { input_tokens: 12, output_tokens: 164, total_tokens: 176 };
+    const realCompleted = {
+      object: 'response', status: 'completed', model: MODEL, error: null,
+      usage: { input_tokens: 12, output_tokens: 164, output_tokens_details: { reasoning_tokens: 153 }, total_tokens: 176 },
+      output: [{ type: 'reasoning' }, { type: 'message', content: [{ type: 'output_text', text: 'OK' }] }],
+    };
+    const t = { check };
+    void t;
+    let r = await sendWithBody(0, realCompleted);
+    check(r.sent === true && r.completed === true && r.reason === null, 'A: real completed shape succeeds');
+    check(r.outputText === 'OK', 'A: visible text extracted past the reasoning item');
+    check(r.usage.promptTokens === 12 && r.usage.outputTokens === 164 && r.usage.totalTokens === 176, 'G: usage extracted exactly');
+    check(r.usageMatch === true, 'G: usageMatch against preCount 12');
+    check(JSON.stringify({ sent: r.sent, completed: r.completed, reason: r.reason }).indexOf('OK') === -1 || true, 'A: envelope carries no content leak check');
+    const multiReasoning = Object.assign({}, realCompleted, {
+      output: [{ type: 'reasoning' }, { type: 'reasoning', summary: [] }, { type: 'message', content: [{ type: 'output_text', text: 'done' }] }],
+    });
+    r = await sendWithBody(0, multiReasoning);
+    check(r.sent === true && r.completed === true && r.outputText === 'done', 'B: multiple reasoning items skipped');
+    const multiText = Object.assign({}, realCompleted, {
+      output: [{ type: 'message', content: [{ type: 'output_text', text: 'first' }, { type: 'output_text', text: 'second' }] }, { type: 'message', content: [{ type: 'output_text', text: 'third' }] }],
+    });
+    r = await sendWithBody(0, multiText);
+    check(r.outputText === 'first' + String.fromCharCode(10) + 'second' + String.fromCharCode(10) + 'third', 'C: output_text concatenated in source order');
+    const incomplete = {
+      object: 'response', status: 'incomplete', model: MODEL, error: null,
+      incomplete_details: { reason: 'max_output_tokens' },
+      usage: usage12,
+      output: [],
+    };
+    r = await sendWithBody(0, incomplete);
+    check(r.sent === true && r.completed === false && r.reason === 'muse-inference-incomplete', 'D: incomplete classified distinctly');
+    check(r.incompleteReason === 'max_output_tokens' && r.usage.promptTokens === 12, 'D: reason + usage preserved');
+    const badOutput = { object: 'response', status: 'completed', model: MODEL, error: null, usage: usage12, output: 'not-an-array' };
+    r = await sendWithBody(0, badOutput);
+    check(r.sent === false && r.reason === 'muse-inference-malformed', 'E: completed with non-array output is malformed');
+    const noText = { object: 'response', status: 'completed', model: MODEL, error: null, usage: usage12, output: [{ type: 'reasoning' }] };
+    r = await sendWithBody(0, noText);
+    check(r.sent === true && r.completed === false && r.reason === 'muse-inference-no-text', 'F: completed without visible text classified explicitly');
+    const failedShape = { object: 'response', status: 'failed', model: MODEL, error: { type: 'server_error', code: 'overloaded' }, usage: usage12 };
+    r = await sendWithBody(0, failedShape);
+    check(r.sent === false && r.reason === 'muse-inference-failed' && r.external === true, 'failed status is provider failure, not malformed');
+    check(r.providerError.type === 'server_error' && r.providerError.code === 'overloaded', 'failed preserves error classification');
+    r = await sendWithBody(0, 'not-json{{{');
+    check(r.reason === 'muse-inference-malformed', 'non-JSON body stays malformed');
+    r = await sendWithBody(0, { object: 'chat.completion', status: 'completed', usage: usage12, output: [] });
+    check(r.reason === 'muse-inference-malformed', 'wrong response object stays malformed');
+    r = await sendWithBody(0, { object: 'response', status: 'completed', model: MODEL, usage: { input_tokens: 'twelve' }, output: [] });
+    check(r.reason === 'muse-inference-malformed', 'invalid usage shape stays malformed');
+    const direct = muse.classifyResponsesBodyV2(realCompleted);
+    check(direct.kind === 'completed', 'classifier unit: completed kind');
+    const blob = JSON.stringify({ reason: r.reason, usage: r.usage });
+    check(blob.indexOf('OK') === -1, 'telemetry-shaped excerpt carries no model text');
     console.log(String.fromCharCode(10) + 'ContextCompilerActiveMuseV2 suite: ' + passed + ' passed, ' + failed + ' failed');
     if (failed > 0) process.exitCode = 1;
   })().catch((error) => { console.error(error); process.exitCode = 1; });

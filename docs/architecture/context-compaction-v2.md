@@ -5358,12 +5358,19 @@ tests/ContextRemoteCounterMuseV2.Tests.cjs (33): descriptor
 exactness, 12-case response classification, mocked count calls
 (dedupe, endpoint + contributor id binding, structured shape),
 auth/timeout/key failures, memo fail-closed.
-tests/ContextCompilerActiveMuseV2.Tests.cjs (38): two-pass
+tests/ContextCompilerActiveMuseV2.Tests.cjs (62): two-pass
 eligible success with pre-count, exactly-once final count,
-counted==sent bytes, repeat determinism, send boundary (match,
-stale/forged/auth/drift handling), 7 fallbacks (auth, timeout,
-malformed, model-unsupported, over-window, tiny window, route
-mismatch, telemetry failure).
+counted==sent bytes, repeat determinism, reasoning-effort
+binding, send boundary (match, stale/forged/auth/drift/bound
+handling), 7 fallbacks (auth, timeout, malformed,
+model-unsupported, over-window, tiny window, route mismatch,
+telemetry failure), plus the MU-4 response-parser family (real
+completed/incomplete/failed/no-text/malformed shapes per the
+CodexReview precedent taxonomy: reasoning items skipped,
+output_text concatenated in order, incomplete distinct with
+reason, failed distinct with error classification).
+The send classifier also returns secret-safe responseShape
+diagnostics and usageWithinBound alongside strict usageMatch.
 scripts/C08H-MuseLiveAcceptance.cjs: keyed opencode endpoint
 probe with SUPPORTED/UNSUPPORTED/AUTH/UNVERIFIED classification;
 keyed Meta flow (attempt, send, usage-vs-precount compare).
@@ -5372,9 +5379,276 @@ Without keys both routes exit BLOCKED(2) with exact blockers
 
 ### 43.4 Live status
 
-LIVE remains BLOCKED on credentials (MODEL_API_KEY and
-OPENCODE_API_KEY absent; credential store absent). Contributor
-model-id acceptance is implemented but unprovable keyless (a
-400 model rejection maps to active-model-capability-unknown
-and is reported distinctly). Provider-vs-local usage parity and
-the opencode classification stay UNVERIFIED. No Phase D / E01.
+LIVE VERIFIED on meta-model-api/muse-spark-1.3-contributor with
+the operator-provisioned MODEL_API_KEY (credential store
+present, key injected into the live child process only, never
+printed or committed). Acceptance record: CCV2_COMPILED,
+fallback false, remote fingerprint
+meta-muse-input-tokens-api-v1, preCount 574 (remote-exact;
+contributor model id accepted by the count endpoint),
+completed response with reasoning+message items, output text
+extracted past reasoning, promptTokens 431 with output 1642
+(reasoning 1452, inside the 4096 output reserve).
+
+### 43.5 Compatibility rule (documented provider scaffolding)
+
+Strict pre-count equality does NOT hold: the count endpoint
+reports fully-rendered input including server-injected prompt
+scaffolding (per the official docs), while inference usage
+reports actual input consumption. Measured: 574 vs 431 (gap
+143), reproduced deterministically (same body counts 162 x3;
+probe payloads show gaps 157/157/143/143, always
+conservative). Acceptance compatibility is therefore
+usageWithinBound (0 < usage.input_tokens <= preCount): the
+provider consumed within the authorized pre-count, which is
+the fail-safe direction for window enforcement. Strict
+usageMatch stays informational. Over-consumption fails the
+gate as a defect. No Phase D / E01.
+
+## 44. CCV2-OC01 OpenCode Go Activation (Phase C)
+
+Production ACTIVE for the primary EMv2 route (opencode-go /
+muse-spark-1.3-contributor, inference opencode.ai/zen/go/v1/
+responses) using Meta's native count endpoint as a
+REMOTE_MUSE_PRECOUNT authority (same Muse model identity;
+uncertainty is server wrapping, mitigated by margin + canary +
+anomaly detection). Meta direct stays REMOTE_EXACT; the
+distinction is visible in telemetry. The DeepSeek local
+tokenizer is untouched.
+
+### 44.1 Margin, quarantine, anomaly (design)
+
+config/ContextCompilerActiveOpencodeV2.cjs reuses the Meta
+counter and the frozen pipeline (two-pass attempt shared with
+the Muse orchestrator): providerSafetyMargin = max(8192,
+ceil(preCount * 1%)) kept separate from preCount; eligibility
+requires preCount + margin + reserve <= window (1,048,576).
+In-memory route health defaults QUARANTINED (fail-closed) and
+becomes HEALTHY only on canary evidence; any reported input
+over preCount + margin records an anomaly, quarantines the
+route, and forces LEGACY afterwards (the completed request is
+never retro-failed). Transport requires the documented
+x-opencode-session (stable per-conversation id) plus an
+identifying user agent; headers never enter token accounting.
+
+### 44.2 Canary evidence (live)
+
+scripts/OC01-OpenCodeMuseCanary.cjs: 10 fixtures (ascii,
+Cyrillic, emoji, code, JSON, instructions+history, 1 tool,
+40-tool schema, long context, stable-prefix variant), each
+Meta-counted then OpenCode-inferred with recorded preCount,
+margin, usage, cached/reasoning tokens, status, anomaly.
+All 10 completed with usage far inside preCount + margin
+(e.g. 2743 vs 2600, 168 vs 11; cached 0 throughout) and no
+anomalies: authority HEALTHY. Minimal reasoning keeps canary
+outputs small; production fidelity (xhigh) is proven by the
+CCV2 run itself.
+
+### 44.3 Live CCV2 verification (real)
+
+OC01-ACTIVE-RECORD: CCV2_COMPILED, fallback false, preCount
+584, margin 8192, reserve 4096, hardMaxCheck PASS.
+OC01-ACTIVE-USAGE: sent true, completed true, provider input
+441 (within bound), output 1733, HEALTHY, no anomaly.
+Failures fixed en route (documented): missing session header
+(400), harness bodyText mapping, output exhaustion (4096
+reserve with xhigh reasoning). Telemetry carries
+preflightContextTokens, provider counts, cache/reasoning
+tokens, margin, authority, health -- never keys or prompts.
+Tests: ContextCompilerActiveOpencodeV2 (31) covering
+ordering, margin gate, quarantine, anomaly, secrecy, and
+Meta/DeepSeek/legacy invariance.
+
+## 45. CCV2-M01A Materialization Authority Addendum (approved clarification)
+
+Intentional architecture clarification, approved by the operator,
+required to make production durable-memory materialization (CCV2-M01)
+possible. It adds definitions; it does not silently rewrite earlier
+wording. Clauses clarified or superseded are listed in 45.6.
+
+### 45.1 Requiredness Authority
+
+A durable historical unit is STILL REQUIRED iff at least one holds:
+
+1. it belongs to the current unsealed generation;
+2. it belongs to the current user/assistant turn;
+3. it is part of an open or incomplete tool transaction;
+4. it is directly referenced by the current authoritative checkpoint
+   taskState;
+5. it is transitively required by an EvidenceRef reachable from the
+   current authoritative checkpoint taskState;
+6. it is required to reconstruct an unresolved failure, verification
+   item, continuation item, active requirement, active constraint,
+   active decision, or current progress state;
+7. an authority category it could belong to is marked
+   unrecorded/unsupported in taskState, so it cannot be proven
+   historical.
+
+No model judgment participates. `immediateRelevance` (B04) is defined
+as: true iff the unit is reachable from an active root (1-6) or belongs
+to the current generation/turn; false only when authority completeness
+(45.4) permits that conclusion. No LLM may set it.
+
+### 45.2 Structural Historical Transition
+
+A balanced, settled tool transaction may transition
+`completed-tool-transaction -> historical-evidence` (then COLD-eligible
+under unchanged C05/C05H rules) only at a successfully sealed checkpoint
+boundary, and only when: it belongs to a generation older than the newly
+sealed generation; it is not reachable from any active root; it is not
+required by an unresolved tool/protocol dependency; and the relevant
+authority categories are complete enough to prove it is no longer
+required. The transaction moves as a whole (call and result never split
+across lifecycle states); open/incomplete transactions stay
+non-compactable and SafePoint V2 remains final. Historical user/assistant
+conversation units follow the same rule. The current user intent and the
+current turn never become COLD. The transition records deterministic
+provenance (`transitionReason = checkpoint-superseded-unreferenced`,
+`supersededByGeneration = G`); no timestamp or score participates.
+
+Still forbidden as demotion causes: age, wall-clock time, turn number
+alone, step count alone, byte size, token size, access frequency, LRU,
+model judgment, embedding similarity, semantic relevance score. A sealed
+generation boundary is allowed: it is a structural lifecycle boundary,
+not a recency heuristic.
+
+### 45.3 Controller Task-State Authority
+
+The Nexus controller is the sole authoritative owner of production CCv2
+task state (conceptually `taskStateV2`: objective, requirements,
+constraints, progress, decisions, repository state, evidence refs,
+failures, verification, continuation). Existing controller fields are
+mapped only where semantics are exact and documented; authoritative
+state is never derived from conversation summaries or assistant prose.
+New sessions mutate it only through explicit typed controller lifecycle
+operations carrying provenance/source authority; a model may propose
+state, which becomes authoritative only when accepted through that path.
+Explicit user instructions received through the normal
+controller/conversation pipeline may become typed state with
+`sourceKind = user` through deterministic controller handling (no
+summarizer inference).
+
+### 45.4 Unsupported Historical State
+
+A category the controller never recorded is UNKNOWN, not empty truth:
+`[]` never means "there were none". Unrecorded categories are
+represented explicitly as unrecorded/unsupported. Tier classification
+consumes both active-root reachability (45.1) and authority
+completeness: a historical unit becomes COLD only when both suffice to
+prove it is not actively required. Cannot prove historical -> retain
+WARM. Reduced compaction for legacy sessions is accepted; correctness
+wins.
+
+### 45.5 Legacy Bootstrap Semantics
+
+Pre-M01 sessions bootstrap deterministically from the persisted session
+event log plus the existing controller record, reconstructing only what
+those authoritative sources support; missing categories are marked
+unrecorded (45.4), never inferred. Replay must equal incremental
+ingestion for identity-relevant durable output. Legacy sessions may
+therefore legitimately retain more WARM material than native
+post-M01 sessions; that is an honest result and rules are never tuned to
+a benchmark outcome.
+
+### 45.6 Clauses clarified or superseded
+
+- 29.3 "completed balanced transactions rest HOT/WARM while still
+  required": "still required" is now defined by 45.1.
+- 29.3/29.5 transitions: `completed-tool-transaction ->
+  historical-evidence` at a sealed generation boundary (45.2) is a new
+  closed-world deterministic cause; 29.5's banned causes are unchanged.
+- B04 `immediateRelevance`: defined by 45.1 (no longer caller judgment).
+- 24.7 "no automatic chunk discovery exists": production materialization
+  uses the already frozen structure-aware units (one user request, one
+  balanced tool transaction, and other 24.7 unit types); no chunk sizes
+  are invented.
+
+### 45.7 Open conflicts found while applying 45.1-45.5 (NOT resolved here)
+
+Recorded so the addendum is not mistaken for sufficient. Each is a
+frozen contract this addendum does not amend:
+
+1. 14.2 / ContextCheckpointabilityV2: `unsupportedState` entries ALWAYS
+   BLOCK checkpointability (`checkpointability-unsupported-authoritative-
+   state`). Using it for 45.4 makes every legacy session
+   un-checkpointable. 45.4 needs a non-blocking typed "unrecorded
+   category" representation, which does not exist in A03/A07.
+2. 36.12 (C05H): page-backed non-tool WARM materialization is
+   unreachable by frozen design (byte-bearing non-tool pages classify
+   COLD; WARM non-tool pages defer to retrieval and never materialize).
+   A still-required conversation unit (45.1) therefore has no
+   representation that keeps its bytes in the compiled view.
+3. Cardinality bounds: C07H `pagesMax` 256, C01 `sectionEntriesMax` 256,
+   `referencedColdMax` 512, `viewMaxBytes` 1 MiB, C05 `planSourcesMax`
+   1024. A real 690-step session has 684 balanced tool transactions
+   plus its conversation units; it exceeds these regardless of tier, so
+   C07H skips and C01 fails closed (LEGACY fallback).
+
+## 46. CCV2-OC01H Persistent OpenCode Authority (Phase C)
+
+OC01 activation was verified but its HEALTHY state lived only in
+memory (QUARANTINED after every restart). OC01H persists the
+certification evidence so a certified route restores HEALTHY
+across restarts with no manual trust step, while fail-closed
+semantics hold throughout.
+
+### 46.1 Certification record (evidence, not a boolean)
+
+config/ContextAuthorityCertificationV2.cjs owns a small durable
+record: schemaVersion, authorityKind REMOTE_MUSE_PRECOUNT,
+inference/counter provider + base URL + model, counter
+fingerprint, context window, safety-margin / output-reserve /
+request-shape / canary-suite policy revisions, canary evidence
+digest, certifiedAtUtc/expiresAtUtc (7-day TTL), status
+CERTIFIED|REVOKED with revokedAtUtc/revokeReason. No keys,
+headers, prompts, or outputs are stored (asserted on file
+bytes). Atomic temp-file + rename + read-back write path
+mirroring the checkpoint primitive; strict schema with
+unknown-key rejection and field bounds; corruption fails
+closed. Credentials are not identity: rotation alone never
+invalidates.
+
+### 46.2 Identity, revisions, startup
+
+Startup loads with zero network: schema, identity match (all
+11 fields incl. base URLs from settings.yaml, window from
+model-registry, fingerprints and the four policy revisions),
+revocation, expiry. Valid certification derives HEALTHY and
+marks the in-memory map; anything else (missing, malformed,
+mismatch, expired, revoked, unresolvable config) derives
+QUARANTINED. Request-shape revision
+opencode-muse-request-shape-v1 is owned by the request
+contract; a contract change without a bump is a review defect
+the identity test pins by field-set. A fresh canary atomically
+replaces missing/invalid/revoked/expired records, and only
+after the durable write succeeds does health become HEALTHY.
+
+### 46.3 Production runtime path
+
+config/ContextCompilerActiveOpencodeHostV2.cjs installs from
+AihController.apply: startup certification load, an
+agent/request wrapper (active policy + opencode route +
+HEALTHY + staged memory + Meta-keyed attempt, immutable
+replacement marked with authority/preCount/margin), and an
+llm/stream observer that forwards chunks byte-identical while
+watching provider usage: over-margin input revokes the
+durable certification plus in-memory health and logs without
+content, so restart stays revoked until re-canary. The
+observer never throws into the loop and ignores non-compiled
+or non-async-iterable streams.
+
+### 46.4 Restart acceptance (live)
+
+scripts/OC01-OpenCodeMuseCanary.cjs persists certification
+after canary (--store-root, defaulting to DSH data) and runs
+--restart-acceptance: stage fixture, canary, persist, spawn a
+fresh process running --runtime-step-d through the real
+AihController.apply waterfall with no trust flag. Verified
+this session: CERTIFIED with 7-day expiry, child process
+HEALTHY, agent/request resolves CCV2_COMPILED with
+REMOTE_MUSE_PRECOUNT. Suites: ContextAuthorityCertificationV2
+(30, incl. true cross-process restart) and
+ContextCompilerActiveOpencodeHostV2 (24: wrapper, observer
+revoke/restart, install, secrecy). C07H/C08H count assertions
+updated for the additional installed observer (behavior
+unchanged).
