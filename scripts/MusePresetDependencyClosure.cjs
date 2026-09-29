@@ -59,12 +59,19 @@ function requires(source, caller) {
       if (quote !== "'" && quote !== '"') fail('dynamic', caller)
       let value = ''; j++
       while (j < source.length && source[j] !== quote) {
-        if (source[j] === '\\') fail('dynamic', caller)
+        if (source[j] === '\\') {
+          const escaped = source[++j]
+          if (escaped !== '\\' && escaped !== '/') fail('dynamic', caller)
+          value += escaped
+          j++
+          continue
+        }
         value += source[j++]
       }
       if (source[j++] !== quote) fail('syntax', caller)
       while (/\s/.test(source[j] || '')) j++
       if (source[j] !== ')') fail('dynamic', caller)
+      if (value.startsWith('/') || value.startsWith('\\') || /^[A-Za-z]:[\\/]/.test(value)) fail('boundary', `${caller} -> ${value}`)
       if (value.startsWith('.')) found.push(value)
       i = j + 1
       continue
@@ -89,7 +96,7 @@ function closure(repo, options = {}) {
     seen.add(relative)
     if (!relative.endsWith('.cjs')) return
     for (const request of requires(fs.readFileSync(file, 'utf8'), relative)) {
-      const resolved = path.resolve(path.dirname(file), request)
+      const resolved = path.resolve(path.dirname(file), request.replace(/\\/g, '/'))
       if (!within(root, resolved)) fail('boundary', `${relative} -> ${request}`)
       visit(path.relative(root, resolved))
     }
