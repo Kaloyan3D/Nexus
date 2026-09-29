@@ -103,6 +103,9 @@ const compilerV2 = require('./ContextCompilerV2.cjs');
 const counterV2 = require('./ContextTokenCounterV2.cjs');
 const allocatorV2 = require('./ContextBudgetAllocatorV2.cjs');
 const shadowV2 = require('./ContextCompilerShadowV2.cjs');
+const storeV2 = require('./ContextPageStoreV2.cjs');
+const rehydrationV2 = require('./ContextEvidenceRehydrationV2.cjs');
+const sessionSourceV2 = require('./ContextSessionEvidenceSourceV2.cjs');
 
 const HOST_SCHEMA_VERSION = 1;
 const SHADOW_POLICY_SECTION = 'contextCompiler';
@@ -133,17 +136,25 @@ const AUXILIARY_PURPOSES = Object.freeze(['compaction', 'session-title']);
 // Bounded reads: every staged input is capped before parsing so a
 // hostile/oversized memory dir fails open (skip) instead of stalling
 // the request path.
+//
+// CCV2-R1 (supersedes pagesMax 256 / 1 MiB decisions / 64 KiB + 512
+// tool transactions / 8192-char turn): C07H observes the same real-session
+// scale C08 can legally compile (C01 sectionEntriesMax 8192 per section,
+// ~1.5k durable units for a 735-step session). Bounds stay finite and
+// fail open (skip), never Infinity.
 const READ_BOUNDS = Object.freeze({
   policyFileBytes: 1048576,
   bindingsFileBytes: 1048576,
   checkpointEntriesMax: 4096,
-  pagesMax: 256,
+  pagesMax: 8192,
   pageFileBytes: 262144,
-  decisionsFileBytes: 1048576,
-  toolTxFileBytes: 65536,
-  requestMessagesMax: 10000,
+  decisionsMax: 16384,
+  decisionsFileBytes: 33554432,
+  toolTxMax: 8192,
+  toolTxFileBytes: 4194304,
+  requestMessagesMax: 16384,
   tailScanMessagesMax: 20,
-  currentTurnTextMax: 8192,
+  currentTurnTextMax: 2097152,
 });
 
 // One installation per ctx (HMR/plugin reload safety): exactly one
@@ -422,7 +433,7 @@ function readStagedDecisionsV2(memoryDir, bindingTriple) {
     if (loaded.oversize === true || loaded.malformed === true || !Array.isArray(loaded.value)) {
       return skip('shadow-tier-decisions-invalid');
     }
-    if (loaded.value.length === 0 || loaded.value.length > 2048) return skip('shadow-tier-decisions-invalid');
+    if (loaded.value.length === 0 || loaded.value.length > READ_BOUNDS.decisionsMax) return skip('shadow-tier-decisions-invalid');
     const decisions = [];
     for (const entry of loaded.value) {
       const check = tierV2.validateMemoryTierDecisionV2(entry);
@@ -451,7 +462,7 @@ function readStagedToolTransactionsV2(memoryDir) {
     if (loaded.oversize === true || loaded.malformed === true || !Array.isArray(loaded.value)) {
       return skip('shadow-tool-transactions-invalid');
     }
-    if (loaded.value.length > 512) return skip('shadow-tool-transactions-invalid');
+    if (loaded.value.length > READ_BOUNDS.toolTxMax) return skip('shadow-tool-transactions-invalid');
     const transactions = [];
     for (const entry of loaded.value) {
       if (!isPlainObject(entry)
@@ -470,6 +481,93 @@ function readStagedToolTransactionsV2(memoryDir) {
   } catch {
     return skip('shadow-tool-transactions-failed');
   }
+}
+
+// ---- CCV2-M01 staged exact material + lossless-replacement coverage ----
+
+/**
+ * B03 exact material for blob-backed HOT/WARM staged pages (R1 WARM_EXACT):
+ * each is rehydrated through the frozen B03 authority from the task's B02
+ * store, with the live session exact source proving tool-unit balance.
+ * Returns { material } or { material:null, skipped } (never partial).
+ */
+function readStagedExactMaterialV2(input) {
+  const skip = (reason) => ({ material: null, skipped: reason });
+  try {
+    if (!isPlainObject(input) || typeof input.workspace !== 'string' || input.workspace === '') return skip('shadow-exact-material-invalid');
+    const sealed = input.sealed;
+    const namespace = {
+      taskId: sealed.taskId, taskInstanceId: sealed.taskInstanceId, sessionId: sealed.sessionId,
+      workspaceId: sealed.workspaceId, repositoryId: sealed.repositoryId, checkoutId: sealed.checkoutId,
+    };
+    const tierByPage = new Map();
+    for (const decision of input.decisions) {
+      if (typeof decision.pageId === 'string') tierByPage.set(decision.pageId, decision.tier);
+    }
+    const needs = input.pages.filter((page) => typeof page.exactBlobRef === 'string'
+      && (tierByPage.get(page.id) === 'HOT' || tierByPage.get(page.id) === 'WARM'));
+    if (needs.length === 0) return { material: [], skipped: null };
+    const contextRoot = storeV2.contextRootForV2(path.resolve(input.workspace), namespace.taskId);
+    const sessionSource = sessionSourceV2.isSessionExactSourceV2(input.sessionSource) ? input.sessionSource : null;
+    const material = [];
+    for (const page of needs) {
+      if (page.kind === 'tool-result' && sessionSource === null) return skip('shadow-exact-material-session-unavailable');
+      material.push(rehydrationV2.rehydrateContextPageV2({
+        contextRoot, pageId: page.id, expectedNamespace: namespace,
+        sessionSource: page.kind === 'tool-result' ? sessionSource : undefined,
+      }));
+    }
+    return { material, skipped: null };
+  } catch {
+    return skip('shadow-exact-material-unavailable');
+  }
+}
+
+const COVERAGE_FILENAME = 'coverage.json';
+
+/** Producer-written coverage of model-visible messages (null when absent). */
+function readStagedCoverageV2(memoryDir) {
+  try {
+    const loaded = readBoundedJsonFileV2(path.join(memoryDir, COVERAGE_FILENAME), READ_BOUNDS.decisionsFileBytes);
+    if (!loaded.present) return { coverage: null, skipped: null };
+    const value = loaded.value;
+    if (!isPlainObject(value) || value.schemaVersion !== 1 || !Array.isArray(value.messageHashes)
+      || value.messageHashes.length > READ_BOUNDS.requestMessagesMax
+      || !value.messageHashes.every((hash) => typeof hash === 'string' && HEX64_PATTERN.test(hash))
+      || (value.currentTurnMessageHash !== null && !(typeof value.currentTurnMessageHash === 'string' && HEX64_PATTERN.test(value.currentTurnMessageHash)))) {
+      return { coverage: null, skipped: 'shadow-coverage-invalid' };
+    }
+    return { coverage: { hashes: new Set(value.messageHashes), currentTurnMessageHash: value.currentTurnMessageHash }, skipped: null };
+  } catch {
+    return { coverage: null, skipped: 'shadow-coverage-invalid' };
+  }
+}
+
+/**
+ * CCV2-M01 lossless-replacement proof (supersedes the fixture-era
+ * "exactly one live user-text message" rule WHEN producer coverage exists):
+ * the last live user-text message must be the current turn, and every
+ * OTHER live message must hash-match a message the staged memory
+ * represents. Any uncovered live message fails safe (null = proven).
+ */
+function checkLiveCoverageV2(messages, coverage, liveTurnText) {
+  if (!Array.isArray(messages) || coverage === null) return 'coverage-unavailable';
+  let turnIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const texts = messages[index] && messages[index].role === 'user' ? textBlocksOf(messages[index]) : null;
+    if (texts !== null && texts.length > 0) { turnIndex = index; break; }
+  }
+  if (turnIndex === -1) return 'current-turn-missing';
+  if (textBlocksOf(messages[turnIndex]).join('\n') !== liveTurnText) return 'current-turn-mismatch';
+  if (coverage.currentTurnMessageHash !== null
+    && sha256HexUtf8(canonicalJsonOf(messages[turnIndex])) !== coverage.currentTurnMessageHash) {
+    return 'current-turn-not-staged-turn';
+  }
+  for (let index = 0; index < messages.length; index += 1) {
+    if (index === turnIndex) continue;
+    if (!coverage.hashes.has(sha256HexUtf8(canonicalJsonOf(messages[index])))) return 'live-message-uncovered';
+  }
+  return null;
 }
 
 // ---- live request projection (typed structure only) ----
@@ -696,6 +794,11 @@ function assembleShadowInputsV2(input) {
     if (stagedDecisions.decisions === null) return skipResult(stagedDecisions.skipped);
     const stagedTx = readStagedToolTransactionsV2(memoryDir);
     if (stagedTx.transactions === null) return skipResult(stagedTx.skipped);
+    const exact = readStagedExactMaterialV2({
+      workspace: binding.workspace, sealed, pages: stagedPages.pages, decisions: stagedDecisions.decisions,
+      sessionSource: typeof input.sessionSourceFor === 'function' ? input.sessionSourceFor(request.sessionId) : null,
+    });
+    if (exact.material === null) return skipResult(exact.skipped);
 
     const messages = Array.isArray(request.messages) ? request.messages : null;
     if (messages === null) return skipResult('shadow-no-live-messages');
@@ -760,7 +863,7 @@ function assembleShadowInputsV2(input) {
       pages: stagedPages.pages,
       tierDecisions: stagedDecisions.decisions,
       evidenceRefs: [],
-      exactMaterial: [],
+      exactMaterial: exact.material,
       toolTransactions: stagedTx.transactions,
       budget: { hardMax: policy.budget.hardMax, target: policy.budget.target },
       compilerPolicyRevision: compilerV2.COMPILER_POLICY_REVISION_V2,
@@ -832,6 +935,7 @@ function createShadowStreamListenerV2(deps) {
         request,
         policy,
         bindingsPath: safeDeps.bindingsPath,
+        sessionSourceFor: safeDeps.sessionSourceFor,
       });
       if (assembled.skipped !== null || assembled.actual === null || assembled.candidateFactory === null) return stream;
       const memoryDir = assembled.memoryDir;
@@ -899,6 +1003,9 @@ module.exports = {
   readStagedPagesV2,
   readStagedDecisionsV2,
   readStagedToolTransactionsV2,
+  readStagedExactMaterialV2,
+  readStagedCoverageV2,
+  checkLiveCoverageV2,
   textBlocksOf,
   pairLiveToolTransactionsV2,
   derivePendingProtocolV2,

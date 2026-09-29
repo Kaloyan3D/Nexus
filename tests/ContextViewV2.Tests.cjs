@@ -547,7 +547,9 @@ section('C01 RESIDUAL CODES');
   const q2 = buildValidInput();
   q2.warm[1].provenance = prov('verification', 'authoritative', ['test-run:c01:1'], 'verification-outcome');
   throwsWith(() => view.createContextViewV2(q2), 'context-view-provenance-authority-invalid', 'forged provenance pair rejected');
-  const big = 'a'.repeat(9000);
+  // CCV2-R1: the per-entry bound moved from 8192 chars to the C01
+  // exactTextMaxChars ceiling; one char over still fails closed.
+  const big = 'a'.repeat(view.VIEW_BOUNDS.exactTextMaxChars + 1);
   const q3 = buildValidInput();
   q3.warm.push(stateEntry('WARM', 'checkpoint-state', 'checkpoint:big', big, false, D_DEC, prov('controller', 'authoritative', ['controller:D1'], 'decision-statement')));
   throwsWith(() => view.createContextViewV2(q3), 'context-view-material-too-large', 'oversize exact text rejected');

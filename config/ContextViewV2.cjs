@@ -170,6 +170,15 @@ const TOOL_PROTOCOL_SUBJECTS = Object.freeze(['open-tool-protocol', 'completed-t
 // Structural bounds (frozen schema-safety bounds, NOT the C04 model
 // token budget). Large exact evidence belongs behind COLD/reference
 // backing, never in unbounded inline fields.
+//
+// CCV2-R1 (supersedes the C01 fixture-scale bounds 256/512/1024/256/
+// 8192 chars/1 MiB): a real 735-step / ~745k-token Nexus session holds
+// ~1.5k durable units, so the bounds target ~1M-token model windows while
+// staying finite and fail-closed. exactTextMaxChars follows the largest
+// exact-text route (B02 BLOB_STRING_MAX_BYTES = 2 MiB): a blob-backed page
+// or a long current user turn materializes exactly or not at all.
+// viewMaxBytes is a STRUCTURAL serialization cap, never the model token
+// budget (C04/C08 own model-window eligibility).
 const VIEW_BOUNDS = Object.freeze({
   taskId: 256,
   taskInstanceId: 256,
@@ -177,11 +186,11 @@ const VIEW_BOUNDS = Object.freeze({
   workspaceId: 512,
   repositoryId: 256,
   checkoutId: 256,
-  sectionEntriesMax: 256,
-  referencedColdMax: 512,
-  traceEntriesMax: 1024,
-  mandatoryRefsMax: 256,
-  exactTextMaxChars: 8192,
+  sectionEntriesMax: 8192,
+  referencedColdMax: 8192,
+  traceEntriesMax: 16384,
+  mandatoryRefsMax: 8192,
+  exactTextMaxChars: 2097152,
   sourceIdMaxChars: 512,
   compilerPolicyRevisionMaxChars: 128,
   turnIdMaxChars: 256,
@@ -189,7 +198,7 @@ const VIEW_BOUNDS = Object.freeze({
   providerMaxChars: 128,
   callIdMaxChars: 256,
   sourceIdentityMaxChars: 600,
-  viewMaxBytes: 1048576,
+  viewMaxBytes: 16777216,
 });
 
 const VIEW_ID_PATTERN = /^cxv_[0-9a-f]{32}$/;

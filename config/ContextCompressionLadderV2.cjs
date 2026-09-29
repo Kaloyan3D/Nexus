@@ -64,13 +64,18 @@ const PAGE_BACKED_SOURCES = Object.freeze(['context-page', 'rehydrated-evidence'
 const TOOL_PROTOCOL_SUBJECTS = Object.freeze(['open-tool-protocol', 'completed-tool-transaction']);
 
 // Structured-text safety bound: a STRUCTURED projection must remain a
-// C01-valid materialized text (frozen VIEW exactTextMaxChars, in chars).
+// C01-valid materialized text. CCV2-R1 raised the C01 per-entry bound for
+// exact blob-backed material; the lossy STRUCTURED form keeps its original
+// 8192-char ceiling (a projection larger than that is not a reduction worth
+// a lossy rung and stays unavailable, never clipped).
 const STRUCTURED_TEXT_MAX_CHARS = 8192;
 
 const COMPRESSION_BOUNDS = Object.freeze({
   hardMaxMin: 1,
   hardMaxMax: 10000000,
-  planSourcesMax: 1024,
+  // CCV2-R1 (supersedes 1024): one plan source per materialized entry of a
+  // real ~1.5k-unit session, with headroom for 1M-token windows.
+  planSourcesMax: 16384,
 });
 
 const COMPRESSION_REASON_CODES = Object.freeze([
@@ -82,6 +87,8 @@ const COMPRESSION_REASON_CODES = Object.freeze([
   'compression-exact-state-backed',
   'compression-exact-hot-conservative',
   'compression-exact-warm-conservative',
+  // CCV2-R1: retention-required HOT/WARM material stays EXACT.
+  'compression-exact-retention-required',
   'compression-extractive-budget',
   'compression-structured-budget',
   'compression-extractive-unavailable',
@@ -92,6 +99,7 @@ const COMPRESSION_REASON_CODES = Object.freeze([
 ]);
 
 const COMPRESSION_FAILURE_MANDATORY_OVER_BUDGET = 'compiler-mandatory-over-budget';
+const COMPRESSION_FAILURE_REQUIRED_OVER_BUDGET = 'compiler-required-over-budget';
 
 const COMPRESSION_PLAN_EXACT_KEYS = Object.freeze([
   'schemaVersion', 'compressionPolicyRevision', 'tokenizerFingerprint',
@@ -253,6 +261,11 @@ function representationEligibilityV2(input) {
   if (entry.mandatory === true) return exactOnly('compression-exact-mandatory');
   // PINNED correctness state is EXACT-only.
   if (entry.tier === 'PINNED') return exactOnly('compression-exact-pinned');
+  // CCV2-R1: required retained WARM/HOT bytes never enter EXTRACTIVE,
+  // STRUCTURED, or REFERENCE (current production posture: EXACT only).
+  if (isPlainObject(entry.tierDecision) && entry.tierDecision.retentionRequired === true) {
+    return exactOnly('compression-exact-retention-required');
+  }
   // The exact current user turn survives untouched.
   if (entry.sourceType === 'current-turn') return exactOnly('compression-exact-current-turn');
   // Balanced tool protocol stays exact: neither half of a transaction is
@@ -701,12 +714,21 @@ function compressContextViewV2(input) {
   // Mandatory overflow is never solved by compression: same failure code
   // as C04, no view emitted.
   let mandatoryUsed = 0;
+  let requiredUsed = 0;
   for (const slot of slots) {
     if (slot.original.mandatory === true) mandatoryUsed += slot.originalTokens;
+    else if (isPlainObject(slot.original.tierDecision) && slot.original.tierDecision.retentionRequired === true) {
+      requiredUsed += slot.originalTokens;
+    }
   }
   if (mandatoryUsed > budget.hardMax) {
     failCompression(COMPRESSION_FAILURE_MANDATORY_OVER_BUDGET,
       'mandatory ' + mandatoryUsed + ' tokens exceed hardMax ' + budget.hardMax);
+  }
+  // CCV2-R1: compression never rescues required retained material either.
+  if (mandatoryUsed + requiredUsed > budget.hardMax) {
+    failCompression(COMPRESSION_FAILURE_REQUIRED_OVER_BUDGET,
+      'mandatory ' + mandatoryUsed + ' + required ' + requiredUsed + ' tokens exceed hardMax ' + budget.hardMax);
   }
 
   const buildCandidateView = (trace) => {
@@ -949,6 +971,7 @@ module.exports = {
   COMPRESSION_BOUNDS,
   COMPRESSION_REASON_CODES,
   COMPRESSION_FAILURE_MANDATORY_OVER_BUDGET,
+  COMPRESSION_FAILURE_REQUIRED_OVER_BUDGET,
   COMPRESSION_PLAN_EXACT_KEYS,
   COMPRESSION_SOURCE_EXACT_KEYS,
   representationEligibilityV2,

@@ -175,11 +175,17 @@ const PACKING_REASON_CODES = Object.freeze([
   'packing-cold-referenced',
   'packing-cold-reference-unavailable',
   'packing-blocked-by-higher-priority',
+  // CCV2-R1: retention-required HOT/WARM material kept with correctness
+  // precedence (may exceed target, never hardMax).
+  'packing-required-kept',
 ]);
 
 // ---- frozen failure codes (closed world) ----
 
 const PACKING_FAILURE_MANDATORY_OVER_BUDGET = 'compiler-mandatory-over-budget';
+// CCV2-R1: mandatory + retention-required material exceeds hardMax. Required
+// WARM/HOT bytes are never silently omitted: packing fails closed.
+const PACKING_FAILURE_REQUIRED_OVER_BUDGET = 'compiler-required-over-budget';
 
 // Exact C01 COLD-reference modes, mirrored from the frozen B03 authority
 // (B03 EXACT_RESOLUTION_MODES). The list is mirrored rather than
@@ -203,6 +209,9 @@ const PACKING_PLAN_EXACT_KEYS = Object.freeze([
   'mandatoryUsed', 'optionalUsed', 'used', 'referenceMetadataCount',
   'keptMaterialIds', 'referencedPageIds', 'omittedMaterialIds',
   'decisions', 'deterministic', 'planDigest',
+  // CCV2-R1 optional member: present only when the view carries
+  // retention-required material (legacy plans keep byte-identical shape).
+  'requiredUsed',
 ]);
 
 const PACKING_DECISION_EXACT_KEYS = Object.freeze([
@@ -338,6 +347,16 @@ function derivePackingPriorityV2(input) {
   return Object.freeze({ class: PACKING_CLASSES.cold, className: PACKING_CLASS_NAMES[3], orderIndex: input.orderIndex });
 }
 
+// CCV2-R1: requiredness is read from the validated B04 decision the C01
+// entry carries (controller/reachability authority), never from prose.
+// It stays distinct from mandatory in the plan and telemetry.
+function isRetentionRequiredEntry(entry) {
+  return entry.mandatory !== true
+    && isPlainObject(entry.tierDecision)
+    && entry.tierDecision.retentionRequired === true
+    && (entry.tier === 'HOT' || entry.tier === 'WARM');
+}
+
 // ---- entry enumeration (frozen view order) ----
 
 function enumeratePackingEntries(view) {
@@ -366,6 +385,7 @@ function enumeratePackingEntries(view) {
         representation: entry.representation === undefined ? null : entry.representation,
         orderIndex,
         packingClass: priority.class,
+        retentionRequired: isRetentionRequiredEntry(entry),
       });
       orderIndex += 1;
     }
@@ -391,6 +411,8 @@ function calculateContextTokenUsageV2(input) {
   const seen = new Map();
   const costs = [];
   let mandatoryUsed = 0;
+  let requiredUsed = 0;
+  let requiredCount = 0;
   for (const entry of entries) {
     if (seen.has(entry.materialId)) failPacking('context-budget-invalid', 'duplicate material identity');
     // Per-operation memoization is performance-only and keyed by exact
@@ -404,6 +426,10 @@ function calculateContextTokenUsageV2(input) {
       seen.set(memoKey, tokens);
     }
     if (entry.mandatory === true) mandatoryUsed += tokens;
+    if (entry.retentionRequired === true) {
+      requiredUsed += tokens;
+      requiredCount += 1;
+    }
     costs.push({
       sourceId: entry.sourceId,
       materialId: entry.materialId,
@@ -419,6 +445,8 @@ function calculateContextTokenUsageV2(input) {
     tokenizerFingerprint: fingerprint,
     costs,
     mandatoryUsed,
+    requiredUsed,
+    requiredCount,
     materializedTotal,
     materializedCount: costs.length,
   });
@@ -496,6 +524,13 @@ function buildContextPackingPlanV2(input) {
     failPacking(PACKING_FAILURE_MANDATORY_OVER_BUDGET,
       'mandatory ' + usage.mandatoryUsed + ' tokens exceed hardMax ' + budget.hardMax);
   }
+  if (usage.mandatoryUsed + usage.requiredUsed > budget.hardMax) {
+    // CCV2-R1: required retained material has correctness precedence up to
+    // hardMax and never beyond: it may not be omitted, so packing fails.
+    failPacking(PACKING_FAILURE_REQUIRED_OVER_BUDGET,
+      'mandatory ' + usage.mandatoryUsed + ' + required ' + usage.requiredUsed
+      + ' tokens exceed hardMax ' + budget.hardMax);
+  }
 
   // Requested-target control flow (C04H): all mandatory entries are
   // already kept above, so used >= mandatoryUsed here. Optional entries
@@ -509,7 +544,7 @@ function buildContextPackingPlanV2(input) {
   }
 
   const optional = entries
-    .filter((entry) => entry.mandatory !== true)
+    .filter((entry) => entry.mandatory !== true && entry.retentionRequired !== true)
     .sort((a, b) => (a.packingClass - b.packingClass) || (a.orderIndex - b.orderIndex));
 
   const decisions = [];
@@ -537,6 +572,23 @@ function buildContextPackingPlanV2(input) {
   for (const entry of entries) {
     if (entry.mandatory === true) {
       recordKeep(entry, tokensByMaterial.get(entry.materialId));
+    }
+  }
+  // CCV2-R1: every retention-required entry is kept next, in view order.
+  for (const entry of entries) {
+    if (entry.retentionRequired === true) {
+      const tokens = tokensByMaterial.get(entry.materialId);
+      used += tokens;
+      keptMaterialIds.push(entry.materialId);
+      decisions.push({
+        materialId: entry.materialId,
+        tier: entry.tier,
+        mandatory: false,
+        action: 'KEEP',
+        tokens,
+        reasonCode: 'packing-required-kept',
+        deterministic: true,
+      });
     }
   }
 
@@ -624,6 +676,7 @@ function buildContextPackingPlanV2(input) {
     deterministic: true,
     planDigest: null,
   };
+  if (usage.requiredCount > 0) plan.requiredUsed = usage.requiredUsed;
   plan.planDigest = derivePackingPlanDigestV2(plan);
   const frozenPlan = freezeDeep(plan);
   const validation = validateContextPackingPlanV2(frozenPlan);
@@ -671,10 +724,20 @@ function validateContextPackingPlanV2(plan, options) {
   if (plan.target > plan.hardMax) return fail('context-budget-plan-invalid');
   if (plan.mandatoryUsed + plan.optionalUsed !== plan.used) return fail('context-budget-plan-invalid');
   if (plan.used > plan.hardMax) return fail('context-budget-plan-invalid');
-  // Strong target invariant (C04H): used <= max(target, mandatoryUsed).
-  // Either the pack stayed within the preferred target, or mandatory
-  // truth alone exceeded it with zero optional contribution.
-  if (plan.used > Math.max(plan.target, plan.mandatoryUsed)) return fail('context-budget-plan-invalid');
+  // CCV2-R1: requiredUsed (optional member) is part of optionalUsed and
+  // shares mandatory's correctness precedence for the target invariant.
+  const hasRequired = Object.prototype.hasOwnProperty.call(plan, 'requiredUsed');
+  if (hasRequired && (!Number.isInteger(plan.requiredUsed) || plan.requiredUsed < 0
+    || plan.requiredUsed > plan.optionalUsed)) {
+    return fail('context-budget-plan-invalid');
+  }
+  const requiredUsed = hasRequired ? plan.requiredUsed : 0;
+  const correctnessUsed = plan.mandatoryUsed + requiredUsed;
+  // Strong target invariant (C04H, extended by R1): used <=
+  // max(target, mandatoryUsed + requiredUsed). Either the pack stayed within
+  // the preferred target, or correctness material (mandatory + retention
+  // required) alone exceeded it with zero other optional contribution.
+  if (plan.used > Math.max(plan.target, correctnessUsed)) return fail('context-budget-plan-invalid');
   if (!Array.isArray(plan.keptMaterialIds) || !Array.isArray(plan.referencedPageIds)
     || !Array.isArray(plan.omittedMaterialIds) || !Array.isArray(plan.decisions)) {
     return fail('context-budget-plan-invalid');
@@ -689,6 +752,7 @@ function validateContextPackingPlanV2(plan, options) {
   let referenceDecisionCount = 0;
   let recomputedUsed = 0;
   let recomputedOptional = 0;
+  let recomputedRequired = 0;
   for (const decision of plan.decisions) {
     if (!isPlainObject(decision)) return fail('context-budget-plan-invalid');
     if (unknownKeyOf(decision, PACKING_DECISION_EXACT_KEYS) !== null) return fail('context-budget-plan-invalid');
@@ -702,26 +766,34 @@ function validateContextPackingPlanV2(plan, options) {
     if (!isReasonCode(decision.reasonCode)) return fail('context-budget-plan-invalid');
     if (decision.deterministic !== true) return fail('context-budget-plan-invalid');
     if (decision.mandatory === true && decision.action !== 'KEEP') return fail('context-budget-plan-invalid');
+    if (decision.reasonCode === 'packing-required-kept'
+      && (decision.action !== 'KEEP' || decision.mandatory === true || (decision.tier !== 'HOT' && decision.tier !== 'WARM'))) {
+      return fail('context-budget-plan-invalid');
+    }
     if (decision.action === 'KEEP') {
       keptFromDecisions.push(decision.materialId);
       recomputedUsed += decision.tokens;
       if (decision.mandatory !== true) recomputedOptional += decision.tokens;
+      if (decision.reasonCode === 'packing-required-kept') recomputedRequired += decision.tokens;
     } else if (decision.action === 'REFERENCE') {
       referenceDecisionCount += 1;
       if (decision.mandatory === true) return fail('context-budget-plan-invalid');
     } else {
       omittedFromDecisions.push(decision.materialId);
     }
-    // Target-overflow rule: only mandatory material may push used past
-    // target. Any non-mandatory KEEP carrying tokens while used exceeds
-    // target invalidates the plan.
+    // Target-overflow rule: only correctness material (mandatory, or R1
+    // retention-required) may push used past target. Any other KEEP
+    // carrying tokens while used exceeds target invalidates the plan.
     if (plan.used > plan.target && decision.mandatory !== true
+      && decision.reasonCode !== 'packing-required-kept'
       && decision.action === 'KEEP' && decision.tokens > 0) {
       return fail('context-budget-plan-invalid');
     }
   }
   if (recomputedUsed !== plan.used) return fail('context-budget-plan-invalid');
   if (recomputedOptional !== plan.optionalUsed) return fail('context-budget-plan-invalid');
+  if (recomputedRequired !== requiredUsed) return fail('context-budget-plan-invalid');
+  if (!hasRequired && recomputedRequired !== 0) return fail('context-budget-plan-invalid');
   if (JSON.stringify(keptFromDecisions) !== JSON.stringify(plan.keptMaterialIds)) {
     return fail('context-budget-plan-invalid');
   }
@@ -871,6 +943,7 @@ function describeContextPackingPlanV2(plan) {
       omittedCount += 1;
     }
   }
+  const requiredTokens = Object.prototype.hasOwnProperty.call(plan, 'requiredUsed') ? plan.requiredUsed : 0;
   return Object.freeze({
     planDigestPrefix: String(plan.planDigest).slice(0, 16),
     tokenizerFingerprint: plan.tokenizerFingerprint,
@@ -880,6 +953,9 @@ function describeContextPackingPlanV2(plan) {
     target: plan.target,
     mandatoryTokens: plan.mandatoryUsed,
     mandatoryTargetOverflowTokens: Math.max(0, plan.mandatoryUsed - plan.target),
+    // CCV2-R1: retention-required tokens reported apart from mandatory.
+    requiredTokens,
+    requiredTargetOverflowTokens: Math.max(0, plan.mandatoryUsed + requiredTokens - Math.max(plan.target, plan.mandatoryUsed)),
     hotTokens,
     warmTokens,
     coldMaterializedTokens,
@@ -904,6 +980,7 @@ module.exports = {
   PACKING_ACTIONS,
   PACKING_REASON_CODES,
   PACKING_FAILURE_MANDATORY_OVER_BUDGET,
+  PACKING_FAILURE_REQUIRED_OVER_BUDGET,
   PACKING_COLD_REFERENCE_MODES,
   PACKING_PLAN_EXACT_KEYS,
   PACKING_DECISION_EXACT_KEYS,

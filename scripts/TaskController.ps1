@@ -240,6 +240,20 @@ function New-AihTask {
         New-Item -ItemType Directory -Force -Path $run | Out-Null
     }
     Write-AihAtomicJson (Join-Path $run 'manifest.json') $task
+    # CCV2-M01 (R1.3): a task created by this controller is NATIVE from
+    # inception. Its CCv2 authority record starts with every category
+    # authoritative-and-empty (COMPLETE) and changes only through typed
+    # controller mutations (config/ContextTaskAuthorityV2.cjs). Tasks without
+    # this record are pre-M01 and bootstrap as LEGACY_BOOTSTRAP.
+    $ccv2Authority = [ordered]@{
+        schemaVersion = 1; origin = 'NATIVE'; taskId = $taskId; taskInstanceId = $taskInstanceId
+        createdAtUtc = $task.createdAtUtc; revision = 0; constraints = @(); decisions = @()
+        progress = [ordered]@{ completedMilestones = @(); currentMilestone = $null; remainingMilestones = @() }
+        continuation = [ordered]@{ nextAction = $null; unresolvedQuestions = @(); recentUserIntent = $null }
+        failures = [ordered]@{ activeFailures = @(); rejectedHypotheses = @() }
+        verification = [ordered]@{ outcomes = @() }; mutations = @()
+    }
+    Write-AihAtomicJson (Join-Path $run 'ccv2-authority.json') $ccv2Authority
     Add-AihJsonLine $layout.Decisions ([ordered]@{ timestampUtc = [DateTime]::UtcNow.ToString('o'); kind = 'task-created'; taskId = $taskId; taskInstanceId = $taskInstanceId; boundEngine = $Engine; dependencies = @($DependsOn) })
     [pscustomobject]$task
     }finally{if($taken){$mutex.ReleaseMutex()};$mutex.Dispose()}

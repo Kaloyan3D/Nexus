@@ -5652,3 +5652,246 @@ ContextCompilerActiveOpencodeHostV2 (24: wrapper, observer
 revoke/restart, install, secrecy). C07H/C08H count assertions
 updated for the additional installed observer (behavior
 unchanged).
+
+## 47. CCV2-R1 Real-Session Contract Revision (re-freeze)
+
+Why: the real 7-turn / 735-step / ~745k-token Nexus session
+`session-00a577d3…` (TASK-0044: 15,014 events, 747 durable units, 728
+balanced tool transactions, tool results up to 52 KB, user turns up to
+30 KB) exposed fixture-scale assumptions that made every real session
+un-checkpointable, unable to keep required history bytes, or silently
+skipped. This section amends the listed frozen clauses explicitly; the
+older text stays in place and is superseded ONLY where named here. It
+also resolves the three open conflicts recorded in 45.7.
+
+### 47.1 A03 authority completeness (supersedes the 45.4 use of unsupportedState)
+
+`CCv2Checkpoint.authorityCompleteness` (optional top-level member, absent
+on pre-R1 checkpoints, which therefore serialize byte-identically):
+
+```text
+{ origin: NATIVE | LEGACY_BOOTSTRAP,
+  objective: COMPLETE, requirements: COMPLETE,
+  constraints | progress | decisions | failures | verification |
+  continuation: COMPLETE | UNRECORDED_LEGACY }
+```
+
+Closed world: unknown keys/values, a missing category, a non-COMPLETE
+objective/requirements category, and NATIVE carrying UNRECORDED_LEGACY
+fail closed (`checkpoint-authority-completeness-invalid`), before the
+digest legs. COMPLETE means the controller is authoritative for the
+category at this checkpoint, including the assertion that it is empty
+(`decisions = []` + COMPLETE = no active recorded decisions).
+UNRECORDED_LEGACY means historical authority may have existed but was
+never persisted. Absence is never read as completeness
+(`authorityCategoryCompleteV2` returns false for absent metadata). The
+member participates in the content digest.
+
+### 47.2 A07 checkpointability (amends 14.2/14.4)
+
+`taskState.authorityCompleteness` (optional, closed-world shape) is
+inventoried as required state (`authority-completeness` ->
+`authorityCompleteness` destination) so the digests bind it, and
+post-build coverage requires the sealed checkpoint to carry exactly the
+evaluated value. New blocker `checkpointability-authority-incomplete`:
+a NATIVE task with any non-COMPLETE category, or any task whose
+objective/requirements are not COMPLETE. A LEGACY_BOOTSTRAP state with
+`continuation = UNRECORDED_LEGACY` is exempt from
+`checkpointability-continuation-incomplete` (the unknown is explicit and
+forces conservative retention); native and pre-R1 states keep the frozen
+blocker. `unsupportedState` keeps its hard-blocking semantics unchanged.
+
+### 47.3 B04 retentionRequired + structural historical transition (supersedes 36.12 outcome for required units)
+
+Classify input `retentionRequired` (controller/reachability boolean,
+distinct from `mandatoryCorrectness`; both set fails closed) for page
+subjects only. `completed-tool-transaction` keeps HOT/WARM and carries
+the flag; `historical-evidence|resolved-failure|superseded-hypothesis`
+with the flag rests WARM (`tier-warm-retention-required`) instead of
+COLD. Classify input `historicalTransition` { reason:
+checkpoint-superseded-unreferenced, supersededByGeneration } records the
+45.2 transition on the resulting COLD decision. Both decision members are
+optional (present only when set), closed-world validated; new transition
+cause `WARM>COLD: checkpoint-superseded-unreferenced`.
+
+### 47.4 C01 bounds (supersede 31.7)
+
+| bound | was | R1 |
+|---|---|---|
+| sectionEntriesMax | 256 | 8192 per section |
+| referencedColdMax | 512 | 8192 |
+| mandatoryRefsMax | 256 | 8192 |
+| traceEntriesMax | 1024 | 16384 |
+| exactTextMaxChars (per entry) | 8192 | 2,097,152 (= B02 string blob route) |
+| viewMaxBytes | 1 MiB | 16 MiB |
+
+`viewMaxBytes` is a structural serialization cap, never the model token
+budget (C04/C08 own model-window eligibility). The per-entry exact-text
+bound had to move with the others: a required blob-backed unit or a real
+30 KB current turn otherwise could not materialize at all.
+
+### 47.5 C02 WARM_EXACT (supersedes 32.7 "WARM without bytes defers" and 36.12 for required units)
+
+HOT/WARM page bytes come from inline `exactText` or from a supplied live
+B03 blob-route result bound to this page, content hash, blob ref,
+namespace, and provenance. A retention-required WARM page without bytes
+fails closed (`context-compiler-required-unavailable`); it is never
+deferred. Retention-required pages enumerate first in canonical session
+order (first source seq, then page id; seqs are page identity, so no
+input order leaks); legacy pages keep page-id order. The current-turn
+bound is the C01 exact-text bound (was 8192).
+
+### 47.6 C04 retentionRequired hardMax behavior (amends 35.5-35.7, 35.12)
+
+After mandatory material, every retention-required entry is kept
+(`packing-required-kept`), may exceed target, and fails closed when
+`mandatoryUsed + requiredUsed > hardMax` (`compiler-required-over-budget`);
+optional capacity is what remains within target. Plans carry the
+optional member `requiredUsed` only when required material exists
+(legacy plans keep the frozen key set); validation proves
+`used <= max(target, mandatoryUsed + requiredUsed)` and that only
+mandatory/required KEEPs carry tokens past target. Telemetry reports
+`requiredTokens` separately from `mandatoryTokens`.
+
+### 47.7 C05H WARM exact byte-bearing path (supersedes 36.12 "unreachable")
+
+Byte-bearing required WARM pages are now reachable (47.3/47.5). C05 holds
+them EXACT (`compression-exact-retention-required`): never EXTRACTIVE,
+STRUCTURED, or REFERENCE while WARM; C05 never rescues required overflow
+(`compiler-required-over-budget`). `planSourcesMax` 1024 -> 16384. The
+STRUCTURED text ceiling stays 8192 (lossy form, not a scale bound).
+
+### 47.8 C07H page discovery bounds (supersede 39.4 READ_BOUNDS)
+
+pagesMax 256 -> 8192; tier decisions 2048 -> 16384 entries (32 MiB file);
+tool transactions 512 / 64 KiB -> 8192 / 4 MiB; live current turn 8192
+-> C01 exact-text bound; live request messages 10000 -> 16384; C07
+comparator actual members 2048 -> 16384. Every bound stays finite and
+skips closed at limit+1. C07H now supplies B03 blob material for
+blob-backed HOT/WARM staged pages (live session exact source from the
+M01 producer registry) so C07 never silently skips what C08 can compile.
+
+### 47.9 Proof
+
+`tests/ContextR1RealSessionContracts.Tests.cjs` (128): A03/A07 matrices,
+B04 flags, every changed bound at limit-1/limit/limit+1 (the 16 MiB view
+bound is hit byte-exactly), WARM_EXACT inline + blob, C04/C05 required
+precedence and over-hardMax refusal, C07H bounds, and a session-scale
+end-to-end fixture: 1,800 units, 700 tool transactions, >256 WARM, >512
+referenced COLD, >1024 plan sources, 3 MB view, determinism and
+order-independence (compile x3 + compress + layout in ~4 s). Superseded
+single assertions in the C01/C04/B04 suites were updated in place.
+
+## 48. CCV2-M01 Production Durable Memory Materialization
+
+### 48.1 Ownership
+
+- `config/ContextTaskAuthorityV2.cjs`: the one controller -> CCv2 task
+  state mapping. LEGACY_BOOTSTRAP (no native record): objective from the
+  manifest description (verbatim when it fits A03; otherwise an exact
+  durable reference -- sha256 + EvidenceRef to the session event whose
+  user text is byte-identical), requirements from acceptance criteria,
+  progress.taskStatus from manifest.status, failures COMPLETE only when the
+  controller recorded no failure entries, verification when exactly mappable;
+  constraints/decisions/continuation/progress milestones
+  UNRECORDED_LEGACY. NATIVE: `runs/<taskId>/ccv2-authority.json`, written
+  by `New-AihTask` at inception with every category authoritative-empty,
+  changed only through typed mutations (constraint/decision/progress/
+  continuation/failure/verification) whose log must replay to the stored
+  categories; agent proposals never become authority directly.
+- `config/ContextMemoryProducerV2.cjs`: units (one user request; one
+  balanced tool unit = opening assistant message + call(s) + result(s),
+  the frozen B03 proof shape; one assistant narration), pages (inline or
+  B02 blob, never truncated; long-run text fails closed), sealing at
+  every A06-safe turn boundary (A06 -> A05 -> A07 -> A03/A04 -> A07
+  coverage; all timestamps are recorded event times), R1 tiering, staged
+  layout, append-only unit ledger + atomic state, replay.
+- `config/ContextMemoryProducerHostV2.cjs`: the one production install
+  (`AihController.apply`): per-session serial queue, synchronous
+  per-event ingestion (a completed unit is staged before the next root
+  request), DSH durability barrier before each seal, bootstrap of
+  sessions first seen mid-log, live B03 session source for the hosts.
+  Kill switch `NEXUS_CCV2_PRODUCER=off`.
+
+### 48.2 Requiredness (R1.8 applied)
+
+Required: current (unsealed) generation; the most recently sealed
+generation (45.2: only units older than the newly sealed generation
+transition); units reachable from active checkpoint EvidenceRefs; and
+every unit whenever any authority category is not COMPLETE (legacy ->
+retain). Otherwise `historical-evidence` -> COLD with
+`checkpoint-superseded-unreferenced`. Current-generation transactions are
+HOT. No age, size, LRU, access, embedding, or model judgment.
+
+### 48.3 Layout and lossless replacement
+
+`.ai-harness/ccv2/<taskId>/`: checkpoints/, pages/ (the live current-turn
+message is never staged: the request carries it once), tier-decisions,
+tool-transactions, staged.json, coverage.json (canonical hashes of every
+model-visible message the staged memory represents), producer/.
+Amendment to the C08 hosts (40.5 "exactly one live user-text message"):
+when producer coverage exists, the stronger per-message proof applies --
+the last live user text is the current turn and every other live message
+must hash-match covered memory, else LEGACY; without coverage the frozen
+rule is unchanged. Both C08 hosts supply B03 blob material.
+
+### 48.4 C08 two-pass planning fix
+
+Pass 1 counts UTF-8 bytes (planning only) and previously planned against
+the real token hardMax, so any real session with >~1 MB of required
+history fell back before the authoritative pass. Pass 1 now plans
+against the structural packing ceiling (enumeration only); pass 2 keeps
+the real hardMax and the unchanged identity check (budget is not part of
+candidate identity) still refuses any selection difference.
+
+### 48.5 Real acceptance (scripts/M01-RealSessionAcceptance.cjs)
+
+TASK-0044 replay: 15,014 events -> 747 units (12 conversation, 728 tool
+transactions, 7 narration), 39 blobs, 7 sealed generations, no blocker,
+~4 s; incremental (one event at a time) in ~23 s produces the identical
+1,545-file durable tree (digest equal). Final state: 746 staged pages all
+WARM (legacy completeness cannot prove irrelevance -- honest, reduced
+compaction). At the last physical request (seq 14665): sealed generation
+6, 77 HOT, 668 WARM, 0 COLD. C07 MATCHED with no critical discrepancy;
+C08 candidate available (747 layout blocks, coverage proof holds for all
+1,474 live messages). Session log 5.0 MB (17.3 MB decoded) vs CCv2 durable
+memory 6.3 MB.
+
+### 48.6 Suites
+
+`tests/ContextMemoryProducerV2.Tests.cjs` (69): units/pages/blobs,
+legacy sealing, native requiredness + historical transition, HOT current
+generation, incremental == replay, restart + crash debris convergence,
+namespace isolation, surface-replacement / gap / long-run / open-protocol
+/ non-durable blockers, staged C02 compilation with B03 blob material,
+coverage proof, live host (sync staging, flush-before-seal, bootstrap,
+equality with replay, session source), task-authority mutations and
+derivation.
+
+### 48.7 First real-session measurement (NOT a valid A/B result)
+
+At the last physical request of TASK-0044 (seq 14665, turn 7 step 78):
+
+- Meta /v1/responses/input_tokens, full CCv2 physical body: 607,439.
+- Meta, legacy body with the 610 OpenCode-issued encrypted reasoning items
+  removed (Meta refuses them: "not issued to this caller"): 565,693. This is
+  a LOWER BOUND, not the legacy request.
+- OpenCode provider-reported usage for that same request: 745,680
+  (607 uncached + 745,073 cache-read). Provider usage is not Meta context
+  occupancy; the two are not apples-to-apples.
+- No exact route-faithful count of the full legacy body exists: OpenCode
+  exposes no count endpoint (404), and the encrypted reasoning cannot be
+  reconstructed. No percentage between these numbers is authoritative.
+
+Diagnosis of the 607,439 (per-section exact Meta counts, standalone):
+WARM tool transactions 512,457 (651); HOT current-turn transactions 57,496
+(77); WARM conversation 16,216 (11); WARM narration 12,676 (6); host system
+6,240; current turn 2,387; tools ~690; rendered context as a whole 598,444
+(sum of parts differs by ~400: tokenization is non-compositional). Units
+retained ONLY because legacy authority is UNRECORDED_LEGACY: 531 (517 tool
+transactions, 9 conversation, 5 narration) = 1.54 MB = 448,654 tokens.
+Seven sealed generations exist (one per turn); one EvidenceRef pins one
+unit; no duplicate material (every live message maps to exactly one unit).
+Unit headers alone: 1,473 lines, 146,760 bytes, 75,137 tokens (hex call
+ids at ~2 chars/token). Root cause: expected legacy conservatism, plus
+render-header serialization overhead.

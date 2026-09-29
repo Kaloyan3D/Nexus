@@ -83,6 +83,10 @@ const CHECKPOINTABILITY_BLOCKER_CODES = Object.freeze([
   'checkpointability-size-bound-exceeded',
   'checkpointability-state-changed',
   'checkpointability-checkpoint-coverage-mismatch',
+  // CCV2-R1: a NATIVE task (or any objective/requirements category) whose
+  // authority completeness is not COMPLETE. Distinct from
+  // unsupported-authoritative-state, which keeps its hard-blocking meaning.
+  'checkpointability-authority-incomplete',
 ]);
 
 // Frozen authoritative-state kinds (closed world). Every current
@@ -105,6 +109,8 @@ const AUTHORITATIVE_STATE_KINDS = Object.freeze([
   'continuation',
   'snapshot-binding',
   'safe-point-boundary',
+  // CCV2-R1: inventoried only when the task state declares completeness.
+  'authority-completeness',
 ]);
 
 // Frozen A03 destinations. A required item is covered exactly when it is
@@ -124,6 +130,8 @@ const COVERAGE_DESTINATIONS = Object.freeze([
   'continuation',
   'binding',
   'durable-reference',
+  // CCV2-R1 authority-completeness destination (checkpoint top level).
+  'authorityCompleteness',
 ]);
 
 // Frozen ephemeral kinds: state that cannot survive restart. A06 removes
@@ -172,6 +180,7 @@ const TASK_STATE_EXACT_KEYS = Object.freeze([
   'objective', 'requirements', 'constraints', 'progress', 'decisions',
   'repository', 'evidenceRefs', 'failures', 'verification', 'continuation',
   'provenance', 'ephemeralState', 'unsupportedState', 'reconstructionRefs',
+  'authorityCompleteness',
 ]);
 const TASK_STATE_REPOSITORY_REVISION_EXACT_KEYS = Object.freeze([
   'headCommit', 'indexDigest', 'worktreeDigest',
@@ -621,6 +630,27 @@ function normalizeTaskState(input) {
     };
   });
 
+  // CCV2-R1 authority completeness: closed-world SHAPE here (unknown
+  // keys/values fail closed); semantic legality (NATIVE must be COMPLETE,
+  // objective/requirements always COMPLETE) is an evaluate-time blocker.
+  let authorityCompleteness = null;
+  if (input.authorityCompleteness !== undefined && input.authorityCompleteness !== null) {
+    const raw = input.authorityCompleteness;
+    if (typeof raw !== 'object' || Array.isArray(raw)) failGate('taskState.authorityCompleteness must be an object');
+    if (unknownKeyOf(raw, checkpointV2.CHECKPOINT_AUTHORITY_COMPLETENESS_EXACT_KEYS) !== null) {
+      failGate('unknown taskState.authorityCompleteness field');
+    }
+    if (!checkpointV2.AUTHORITY_ORIGINS.includes(raw.origin)) failGate('taskState.authorityCompleteness.origin must be a frozen origin');
+    const normalizedCompleteness = { origin: String(raw.origin) };
+    for (const category of checkpointV2.AUTHORITY_CATEGORIES) {
+      if (!checkpointV2.AUTHORITY_COMPLETENESS_VALUES.includes(raw[category])) {
+        failGate('taskState.authorityCompleteness.' + category + ' must be a frozen completeness value');
+      }
+      normalizedCompleteness[category] = String(raw[category]);
+    }
+    authorityCompleteness = Object.freeze(normalizedCompleteness);
+  }
+
   return Object.freeze({
     schemaVersion: CHECKPOINTABILITY_SCHEMA_VERSION,
     taskId: String(input.taskId),
@@ -653,6 +683,7 @@ function normalizeTaskState(input) {
     ephemeralState: Object.freeze(ephemeralState),
     unsupportedState: Object.freeze(unsupportedState),
     reconstructionRefs: Object.freeze(reconstructionRefs),
+    authorityCompleteness,
   });
 }
 // ---- deterministic inventory (AuthoritativeStateInventoryV2) ----
@@ -798,6 +829,13 @@ function buildAuthoritativeInventory(taskState) {
   items.push(inventoryItem('safe-point-boundary', 'safe-point-boundary', 'controller', null, 'binding', {
     safePointBoundarySeq: state.safePointBoundarySeq,
   }));
+
+  // CCV2-R1: declared completeness is required state (it governs historical
+  // demotion), so the digests bind it. Absent -> no item (pre-R1 digests
+  // unchanged).
+  if (state.authorityCompleteness !== null) {
+    items.push(inventoryItem('authority-completeness', 'authority-completeness', 'controller', null, 'authorityCompleteness', state.authorityCompleteness));
+  }
 
   // Unknown future controller state is inventoried explicitly so the
   // digests bind it, and it ALWAYS blocks (see evaluate).
@@ -1015,6 +1053,22 @@ function evaluateCheckpointabilityV2(input) {
     block('checkpointability-unsupported-authoritative-state', entry.stateKind + ':' + entry.stateId);
   }
 
+  // CCV2-R1 authority completeness. UNRECORDED_LEGACY is legal only for
+  // LEGACY_BOOTSTRAP replay; a NATIVE task never silently degrades a missing
+  // current category, and objective/requirements are always authoritative.
+  const completeness = state.authorityCompleteness;
+  if (completeness !== null) {
+    for (const category of checkpointV2.AUTHORITY_CATEGORIES) {
+      const value = completeness[category];
+      if (value === 'COMPLETE') continue;
+      if (completeness.origin === 'NATIVE') {
+        block('checkpointability-authority-incomplete', 'native task category ' + category + ' is ' + value);
+      } else if (checkpointV2.ALWAYS_COMPLETE_CATEGORIES.includes(category)) {
+        block('checkpointability-authority-incomplete', 'category ' + category + ' must be COMPLETE');
+      }
+    }
+  }
+
   // Ephemeral state required for continuation cannot survive restart.
   for (const entry of state.ephemeralState) {
     if (entry.requiredForContinuation) {
@@ -1030,8 +1084,16 @@ function evaluateCheckpointabilityV2(input) {
   // Continuation must let a resumed agent determine what was done, what
   // remains, what happens next, and what must not repeat, without
   // prompt-only information.
+  // CCV2-R1: a LEGACY_BOOTSTRAP checkpoint that declares continuation
+  // UNRECORDED_LEGACY does not claim an empty continuation; the unknown is
+  // explicit (and forces conservative historical retention downstream), so
+  // the empty-continuation blocker does not apply to it.
   const taskComplete = state.progress.taskStatus.toLowerCase() === 'complete';
-  if (!taskComplete && (state.continuation.nextAction === null || state.continuation.nextAction === '')
+  const continuationUnrecorded = completeness !== null
+    && completeness.origin === 'LEGACY_BOOTSTRAP'
+    && completeness.continuation === 'UNRECORDED_LEGACY';
+  if (!taskComplete && !continuationUnrecorded
+    && (state.continuation.nextAction === null || state.continuation.nextAction === '')
     && state.continuation.unresolvedQuestions.length === 0) {
     block('checkpointability-continuation-incomplete', 'no next action and no open questions for an incomplete task');
   }
@@ -1289,6 +1351,17 @@ function assertCheckpointCoverageV2(input) {
     || JSON.stringify(checkpoint.continuation.unresolvedQuestions) !== JSON.stringify(state.continuation.unresolvedQuestions)
     || (checkpoint.continuation.recentUserIntent === undefined ? null : checkpoint.continuation.recentUserIntent) !== state.continuation.recentUserIntent) {
     missing.push('continuation');
+  }
+
+  // CCV2-R1: the built checkpoint must carry exactly the evaluated
+  // authority completeness (absent on both sides for pre-R1 state).
+  const builtCompleteness = Object.prototype.hasOwnProperty.call(checkpoint, 'authorityCompleteness')
+    ? checkpoint.authorityCompleteness : null;
+  if (state.authorityCompleteness === null) {
+    if (builtCompleteness !== null) missing.push('authority-completeness');
+  } else if (builtCompleteness === null
+    || JSON.stringify(checkpointV2.canonicalize(builtCompleteness)) !== JSON.stringify(checkpointV2.canonicalize(state.authorityCompleteness))) {
+    missing.push('authority-completeness');
   }
 
   // Authority preservation in the built artifact: every mandatory A04 path

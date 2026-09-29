@@ -337,12 +337,29 @@ function applyActiveProjectionV2(input) {
     // Lossless-replacement rule: exactly one live user-text message
     // (the current turn). Anything else is unaccounted live state and
     // fails safe instead of being silently dropped.
-    const liveUserTexts = liveUserTextMessages(request.messages);
-    if (liveUserTexts.length !== 1) return legacyResult(request, 'active-current-turn-invalid');
     const liveTurnHash = sha256HexUtf8(liveTurn.turn.text);
-    if (sha256HexUtf8(liveUserTexts[0].text) !== liveTurnHash) {
-      return legacyResult(request, 'active-current-turn-invalid');
+    // CCV2-M01: with producer coverage, the lossless-replacement rule is the
+    // stronger per-message proof (every non-current live message is
+    // represented by staged memory); without it, the frozen single
+    // user-text rule applies unchanged.
+    const stagedCoverage = shadowHostV2.readStagedCoverageV2(memoryDir);
+    if (stagedCoverage.skipped !== null) return legacyResult(request, 'active-current-turn-invalid');
+    if (stagedCoverage.coverage !== null) {
+      if (shadowHostV2.checkLiveCoverageV2(request.messages, stagedCoverage.coverage, liveTurn.turn.text) !== null) {
+        return legacyResult(request, 'active-current-turn-invalid');
+      }
+    } else {
+      const liveUserTexts = liveUserTextMessages(request.messages);
+      if (liveUserTexts.length !== 1) return legacyResult(request, 'active-current-turn-invalid');
+      if (sha256HexUtf8(liveUserTexts[0].text) !== liveTurnHash) {
+        return legacyResult(request, 'active-current-turn-invalid');
+      }
     }
+    const exact = shadowHostV2.readStagedExactMaterialV2({
+      workspace: binding.workspace, sealed, pages: stagedPages.pages, decisions: stagedDecisions.decisions,
+      sessionSource: typeof input.sessionSourceFor === 'function' ? input.sessionSourceFor(request.sessionId) : null,
+    });
+    if (exact.material === null) return legacyResult(request, 'active-compiler-failed');
 
     const compileInput = {
       checkpoint: sealed,
@@ -360,7 +377,7 @@ function applyActiveProjectionV2(input) {
       pages: stagedPages.pages,
       tierDecisions: stagedDecisions.decisions,
       evidenceRefs: [],
-      exactMaterial: [],
+      exactMaterial: exact.material,
       toolTransactions: stagedTx.transactions,
       budget: { hardMax: derived.ccv2HardMax, target: derived.ccv2Target },
       compilerPolicyRevision: compilerV2.COMPILER_POLICY_REVISION_V2,
@@ -573,6 +590,7 @@ function createActiveRequestListenerV2(deps) {
         policy,
         installRoot: safeDeps.installRoot,
         bindingsPath: safeDeps.bindingsPath,
+        sessionSourceFor: safeDeps.sessionSourceFor,
         capability: safeDeps.capability === undefined ? null : safeDeps.capability,
         supportedRoutes: safeDeps.supportedRoutes,
         getCurrentRevision: safeDeps.getCurrentRevision,

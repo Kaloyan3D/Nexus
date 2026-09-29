@@ -1,6 +1,7 @@
 'use strict';
 const checkpointV2 = require('./ContextCheckpointV2.cjs');
 const viewV2 = require('./ContextViewV2.cjs');
+const allocatorV2 = require('./ContextBudgetAllocatorV2.cjs');
 const shadowV2 = require('./ContextCompilerShadowV2.cjs');
 const counterV2 = require('./ContextTokenCounterV2.cjs');
 const rendererV2 = require('./ContextPromptRendererV2.cjs');
@@ -179,11 +180,20 @@ async function attemptMuseActiveV2(input) {
     effectiveCompileInput.budget = { hardMax, target: hardMax };
     const planning = createPlanningCounterV2();
     // Pass 1 (planning only, never authoritative): full pipeline + render.
+    // CCV2-M01: the planning counter counts UTF-8 BYTES, so planning against
+    // the real token hardMax rejected every real session whose required
+    // history exceeds ~1M bytes. Pass 1 only ENUMERATES the texts pass 2 may
+    // count, so it plans against the structural packing ceiling; the budget
+    // is not part of the candidate identity, and any selection difference
+    // under the authoritative pass-2 counts still fails the identity check.
+    const planningBudget = { hardMax: allocatorV2.PACKING_BOUNDS.hardMaxMax, target: allocatorV2.PACKING_BOUNDS.hardMaxMax };
+    const planningCompileInput = deepClone(compileInput);
+    planningCompileInput.budget = { hardMax: planningBudget.hardMax, target: planningBudget.target };
     let candidate1 = null;
     let render1 = null;
     try {
       candidate1 = shadowV2.buildCandidateV2({
-        compileInput: effectiveCompileInput, pages, budget, counter: planning,
+        compileInput: planningCompileInput, pages, budget: planningBudget, counter: planning,
         retrievalRequest: input.retrievalRequest === undefined ? null : input.retrievalRequest,
         compressionPolicyRevision: input.compressionPolicyRevision,
         packingPolicyRevision: input.packingPolicyRevision,

@@ -130,7 +130,8 @@ check(JSON.stringify(tier.MEMORY_TIERS) === JSON.stringify(['PINNED', 'HOT', 'WA
 check(Object.isFrozen(tier.MEMORY_TIERS), 'tier world frozen');
 check(tier.MEMORY_TIER_SCHEMA_VERSION === 1, 'schema version 1');
 const exportKeys = Object.keys(tier).sort();
-check(JSON.stringify(exportKeys) === JSON.stringify(['EXACTNESS_VALUES', 'MATERIALIZATION_POLICIES', 'MEMORY_TIERS', 'MEMORY_TIER_SCHEMA_VERSION', 'REASON_CODES', 'RETENTION_CLASSES', 'STORAGE_BEHAVIORS', 'SUBJECT_KINDS', 'TRANSITION_CAUSES', 'checkRetentionCompatibilityV2', 'classifyMemoryTierV2', 'deriveTierCapabilitiesV2', 'describeMemoryTierDecisionV2', 'validateMemoryTierDecisionV2', 'validateTierTransitionV2']), 'narrow export surface: ' + exportKeys.join(','));
+// CCV2-R1: HISTORICAL_TRANSITION_REASONS joins the closed export surface.
+check(JSON.stringify(exportKeys) === JSON.stringify(['EXACTNESS_VALUES', 'HISTORICAL_TRANSITION_REASONS', 'MATERIALIZATION_POLICIES', 'MEMORY_TIERS', 'MEMORY_TIER_SCHEMA_VERSION', 'REASON_CODES', 'RETENTION_CLASSES', 'STORAGE_BEHAVIORS', 'SUBJECT_KINDS', 'TRANSITION_CAUSES', 'checkRetentionCompatibilityV2', 'classifyMemoryTierV2', 'deriveTierCapabilitiesV2', 'describeMemoryTierDecisionV2', 'validateMemoryTierDecisionV2', 'validateTierTransitionV2']), 'narrow export surface: ' + exportKeys.join(','));
 for (const banned of ['ContextView', 'Compiler', 'Budget', 'Ranking', 'Search', 'Embedding', 'Rerank', 'Prompt', 'Token', 'Retriev']) {
   check(!Object.keys(tier).some((k) => k.includes(banned)), 'no Phase-C surface: ' + banned);
 }

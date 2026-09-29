@@ -49,6 +49,7 @@ const os = require('node:os')
 const crypto = require('node:crypto')
 const contextCompaction = require('./ContextCompaction.cjs')
 const compilerShadowHost = require('./ContextCompilerShadowHostV2.cjs')
+const memoryProducerHost = require('./ContextMemoryProducerHostV2.cjs')
 const compilerActiveHost = require('./ContextCompilerActiveHostV2.cjs')
 const opencodeActiveHost = require('./ContextCompilerActiveOpencodeHostV2.cjs')
 
@@ -2872,21 +2873,31 @@ function apply(ctx) {
   // site for Compiler Shadow Mode. Observes the final llm/stream request
   // read-only (observe only, never authority); default off means zero
   // behavioral change. Never throws into controller startup.
-  compilerShadowHost.installCompilerShadowObserver(ctx, { installRoot, bindingsPath, log })
+  // CCV2-M01 production memory producer: every task-bound session
+  // maintains <workspace>/.ai-harness/ccv2/<taskId>/ automatically. The
+  // registry also serves the live B03 session exact source to the hosts.
+  const memoryProducer = memoryProducerHost.installMemoryProducer(ctx, {
+    bindingFor: (sessionId) => bindings[sessionId] || null,
+    flush: (session) => flushSessionDurable(session),
+    log,
+  })
+  const sessionSourceFor = memoryProducer.registry ? memoryProducer.registry.sessionSourceFor : undefined
+
+  compilerShadowHost.installCompilerShadowObserver(ctx, { installRoot, bindingsPath, log, sessionSourceFor })
 
   // CCV2-C08 production active installation: the ONE production call
   // site for active compiled projection. OFF/OBSERVE modes return every
   // request verbatim (zero behavioral change; C07 keeps its own
   // observer); ACTIVE attempts one validated compiled projection with
   // deterministic legacy fallback. Never throws into startup.
-  compilerActiveHost.installCompilerActiveProjection(ctx, { installRoot, bindingsPath, log })
+  compilerActiveHost.installCompilerActiveProjection(ctx, { installRoot, bindingsPath, log, sessionSourceFor })
 
   // CCV2-OC01H production OpenCode installation: the ONE production call
   // site for certified OpenCode Muse projection. Startup loads the
   // durable authority certification (fail-closed to QUARANTINED when
   // absent/invalid/stale); OFF/OBSERVE/uncertified modes return every
   // request verbatim. Never throws into controller startup.
-  opencodeActiveHost.installOpencodeActiveProjection(ctx, { installRoot, bindingsPath, log })
+  opencodeActiveHost.installOpencodeActiveProjection(ctx, { installRoot, bindingsPath, log, sessionSourceFor })
 
   // F1 ORDERING: prepended so compaction runs BEFORE the loop's
   // runtime-context projection decision for this request is consumed.

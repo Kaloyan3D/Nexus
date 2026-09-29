@@ -525,7 +525,7 @@ section('C04 ATTACKS + TRUST');
   check(planJson.indexOf(INJ_TEXT) === -1, 'plan carries no injection prose');
   const describedA = allocator.describeContextPackingPlanV2(packA.plan);
   check(JSON.stringify(describedA).indexOf('exactText') === -1, 'description carries no text fields');
-  check(Object.keys(describedA).sort().join(',') === 'coldMaterializedTokens,compilerPolicyRevision,deterministic,hardMax,hardMaxUtilization,hotTokens,keptCount,mandatoryTargetOverflowTokens,mandatoryTokens,omittedCount,packingPolicyRevision,planDigestPrefix,referenceMetadataCount,referencedCount,target,targetUtilization,tokenizerFingerprint,totalUsedTokens,warmTokens', 'description is a closed metric set');
+  check(Object.keys(describedA).sort().join(',') === 'coldMaterializedTokens,compilerPolicyRevision,deterministic,hardMax,hardMaxUtilization,hotTokens,keptCount,mandatoryTargetOverflowTokens,mandatoryTokens,omittedCount,packingPolicyRevision,planDigestPrefix,referenceMetadataCount,referencedCount,requiredTargetOverflowTokens,requiredTokens,target,targetUtilization,tokenizerFingerprint,totalUsedTokens,warmTokens', 'description is a closed metric set (CCV2-R1 adds required metrics)');
   let trustOk = true;
   for (const materialId of packA.plan.keptMaterialIds) {
     const live = materialById(BASE_VIEW, materialId);

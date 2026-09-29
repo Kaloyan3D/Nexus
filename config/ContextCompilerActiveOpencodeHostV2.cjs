@@ -174,12 +174,29 @@ function applyOpencodeProjectionV2(input) {
     if (stagedTx.transactions === null) return legacyHostResult(request, 'active-compiler-failed');
     const liveTurn = shadowHostV2.extractLiveCurrentTurnV2(request.messages);
     if (liveTurn.turn === null) return legacyHostResult(request, 'active-current-turn-invalid');
-    const liveUserTexts = liveUserTextMessages(request.messages);
-    if (liveUserTexts.length !== 1) return legacyHostResult(request, 'active-current-turn-invalid');
     const liveTurnHash = sha256HexUtf8(liveTurn.turn.text);
-    if (sha256HexUtf8(liveUserTexts[0].text) !== liveTurnHash) {
-      return legacyHostResult(request, 'active-current-turn-invalid');
+    // CCV2-M01: with producer coverage, the lossless-replacement rule is the
+    // stronger per-message proof (every non-current live message is
+    // represented by staged memory); without it, the frozen single
+    // user-text rule applies unchanged.
+    const stagedCoverage = shadowHostV2.readStagedCoverageV2(memoryDir);
+    if (stagedCoverage.skipped !== null) return legacyHostResult(request, 'active-current-turn-invalid');
+    if (stagedCoverage.coverage !== null) {
+      if (shadowHostV2.checkLiveCoverageV2(request.messages, stagedCoverage.coverage, liveTurn.turn.text) !== null) {
+        return legacyHostResult(request, 'active-current-turn-invalid');
+      }
+    } else {
+      const liveUserTexts = liveUserTextMessages(request.messages);
+      if (liveUserTexts.length !== 1) return legacyHostResult(request, 'active-current-turn-invalid');
+      if (sha256HexUtf8(liveUserTexts[0].text) !== liveTurnHash) {
+        return legacyHostResult(request, 'active-current-turn-invalid');
+      }
     }
+    const exact = shadowHostV2.readStagedExactMaterialV2({
+      workspace: binding.workspace, sealed, pages: stagedPages.pages, decisions: stagedDecisions.decisions,
+      sessionSource: typeof input.sessionSourceFor === 'function' ? input.sessionSourceFor(request.sessionId) : null,
+    });
+    if (exact.material === null) return legacyHostResult(request, 'active-compiler-failed');
     let descriptor = null;
     try {
       const found = remoteV2.resolveMuseRemoteV2({ provider: 'meta-model-api', model: 'muse-spark-1.3-contributor' });
@@ -220,7 +237,7 @@ function applyOpencodeProjectionV2(input) {
       pages: stagedPages.pages,
       tierDecisions: stagedDecisions.decisions,
       evidenceRefs: [],
-      exactMaterial: [],
+      exactMaterial: exact.material,
       toolTransactions: stagedTx.transactions,
       budget: { hardMax: 60000, target: 50000 },
       compilerPolicyRevision: compilerV2.COMPILER_POLICY_REVISION_V2,
@@ -374,6 +391,7 @@ function createOpencodeRequestListenerV2(deps) {
         request: resolved,
         policy: { mode: 'active', valid: true },
         bindingsPath: safeDeps.bindingsPath,
+        sessionSourceFor: safeDeps.sessionSourceFor,
         metaApiKey: safeDeps.metaApiKey,
         metaRemoteCounter: safeDeps.metaRemoteCounter === undefined ? null : safeDeps.metaRemoteCounter,
         countTimeoutMs: safeDeps.countTimeoutMs,

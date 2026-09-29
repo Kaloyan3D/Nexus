@@ -342,7 +342,12 @@ function validateCurrentTurn(currentTurn) {
   if (typeof currentTurn.text !== 'string' || currentTurn.text === '') {
     failCompiler('input-invalid', 'currentTurn.text is required');
   }
-  if (currentTurn.text.length > 8192) failCompiler('input-invalid', 'currentTurn.text exceeds the exact-text bound');
+  // CCV2-R1: the current turn is bounded by the C01 exact-text bound (a
+  // real turn may exceed the old 8192-char fixture bound; it materializes
+  // exactly or the compile fails closed, never truncated).
+  if (currentTurn.text.length > viewV2.VIEW_BOUNDS.exactTextMaxChars) {
+    failCompiler('input-invalid', 'currentTurn.text exceeds the exact-text bound');
+  }
   const revision = currentTurn.revision === undefined ? null : currentTurn.revision;
   if (revision !== null && !isBoundedString(String(revision), 256, false)) {
     failCompiler('input-invalid', 'currentTurn.revision is invalid');
@@ -889,6 +894,62 @@ function findProofForPage(exactMaterial, page) {
   return exactMaterial.filter((result) => result.pageId === page.id);
 }
 
+// CCV2-R1 (WARM_EXACT / HOT blob bytes): a HOT/WARM page whose exact bytes
+// live behind its durable exactBlobRef materializes only from a supplied,
+// live B03 blob-route result bound to this page, content revision,
+// namespace, and provenance. Anything less fails closed.
+function blobProofForPage(exactMaterial, page, expected) {
+  if (page.exactBlobRef === null || page.exactBlobRef === undefined) return null;
+  const proofs = findProofForPage(exactMaterial, page).filter((proof) => proof.sourceRoute === 'blob');
+  if (proofs.length === 0) return null;
+  const proof = proofs[0];
+  if (proof.contentHash !== page.contentHash) {
+    failCompiler('evidence-binding-mismatch', 'blob proof binds another content revision for ' + page.id);
+  }
+  if (proof.sourceIdentity !== page.exactBlobRef) {
+    failCompiler('evidence-binding-mismatch', 'blob proof names another blob for ' + page.id);
+  }
+  if (proof.mediaType !== 'text' || typeof proof.exactText !== 'string' || proof.exactText === '') {
+    failCompiler('evidence-binding-mismatch', 'binary blob proof cannot materialize model-facing text for ' + page.id);
+  }
+  if (sha256HexUtf8(proof.exactText) !== page.contentHash) {
+    failCompiler('evidence-binding-mismatch', 'blob proof bytes disagree with page content for ' + page.id);
+  }
+  if (!isPlainObject(proof.provenance)
+    || canonicalJsonOf(proof.provenance) !== canonicalJsonOf(page.provenance)) {
+    failCompiler('evidence-binding-mismatch', 'blob proof provenance drifted for ' + page.id);
+  }
+  assertTripleMatches(expected, proof.namespace, 'blob proof ' + page.id);
+  return proof;
+}
+
+function exactBytesAvailableFor(input, page) {
+  if (pageBytesAvailable(page)) return true;
+  return blobProofForPage(input.exactMaterial, page, input.namespace) !== null;
+}
+
+// Set-like page candidates sort by stable page identity (frozen C02).
+// CCV2-R1: retention-required pages are structural conversation/tool
+// history and enumerate FIRST in canonical source order (first session
+// seq, then page id): seqs are part of page identity, so no caller input
+// order leaks. Legacy (non-required) pages keep the frozen page-id order.
+function requiredPageIdsOf(input) {
+  return new Set(input.tierDecisions
+    .filter((decision) => decision.retentionRequired === true && typeof decision.pageId === 'string')
+    .map((decision) => decision.pageId));
+}
+
+function pagesInEnumerationOrder(input) {
+  const requiredPageIds = requiredPageIdsOf(input);
+  const firstSeqOf = (page) => (Array.isArray(page.sourceSeqs) && page.sourceSeqs.length > 0
+    ? page.sourceSeqs[0] : Number.MAX_SAFE_INTEGER);
+  const byId = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const requiredPages = input.pages.filter((page) => requiredPageIds.has(page.id))
+    .sort((a, b) => (firstSeqOf(a) - firstSeqOf(b)) || byId(a, b));
+  const otherPages = input.pages.filter((page) => !requiredPageIds.has(page.id)).sort(byId);
+  return requiredPages.concat(otherPages);
+}
+
 function enumeratePageCandidate(enumerated, input, decisions, page) {
   const decision = decisions.byPage.get(page.id);
   if (decision === undefined) {
@@ -924,7 +985,7 @@ function enumeratePageCandidate(enumerated, input, decisions, page) {
     failCompiler('protocol-open', 'completed transaction without matched binding: ' + page.id);
   }
   if (decision.tier === 'HOT') {
-    if (!pageBytesAvailable(page)) {
+    if (!exactBytesAvailableFor(input, page)) {
       failCompiler('content-conflict', 'immediate transaction page carries no exact bytes: ' + page.id);
     }
     enumerated.push(makeCandidate(input.namespace, {
@@ -941,7 +1002,11 @@ function enumeratePageCandidate(enumerated, input, decisions, page) {
     return;
   }
   if (decision.tier === 'WARM') {
-    if (pageBytesAvailable(page)) {
+    // CCV2-R1: required WARM bytes are never silently deferred.
+    if (decision.retentionRequired === true && !exactBytesAvailableFor(input, page)) {
+      failCompiler('required-unavailable', 'retention-required page carries no exact bytes: ' + page.id);
+    }
+    if (exactBytesAvailableFor(input, page)) {
       enumerated.push(makeCandidate(input.namespace, {
         subjectKind: decision.subjectKind,
         sourceId: page.id,
@@ -1162,7 +1227,8 @@ function enumerateEvidenceRefCandidates(enumerated, input, decisions, knownPageI
 // Sequential checkpoint state preserves canonical array order; set-like
 // page candidates sort by stable page identity. No clock, no filesystem
 // iteration order, no relevance ranking.
-function orderCandidates(candidates) {
+function orderCandidates(candidates, requiredPageIds) {
+  const required = requiredPageIds instanceof Set ? requiredPageIds : new Set();
   const pinned = [];
   const hot = [];
   const warmState = [];
@@ -1184,7 +1250,12 @@ function orderCandidates(candidates) {
     else archive.push(candidate);
   }
   const bySource = (a, b) => (a.sourceId < b.sourceId ? -1 : a.sourceId > b.sourceId ? 1 : 0);
-  warmPages.sort(bySource);
+  // CCV2-R1: required WARM pages keep their canonical source order (set at
+  // enumeration) ahead of legacy WARM pages, which keep page-id order.
+  const warmRequired = warmPages.filter((candidate) => required.has(candidate.pageId));
+  const warmLegacy = warmPages.filter((candidate) => !required.has(candidate.pageId)).sort(bySource);
+  warmPages.length = 0;
+  for (const candidate of warmRequired.concat(warmLegacy)) warmPages.push(candidate);
   coldExact.sort(bySource);
   coldRef.sort(bySource);
   deferred.sort(bySource);
@@ -1304,7 +1375,7 @@ function enumerateContextCandidatesV2(rawInput) {
   enumeratePinnedCandidates(enumerated, input, decisions);
   enumerateHotCandidates(enumerated, input, decisions);
   enumerateWarmStateCandidates(enumerated, input, decisions);
-  const pagesSorted = input.pages.slice().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const pagesSorted = pagesInEnumerationOrder(input);
   for (const page of pagesSorted) {
     if (page.contentHash === null || page.contentHash === undefined) {
       failCompiler('content-conflict', 'known page carries no content identity: ' + page.id);
@@ -1319,7 +1390,7 @@ function enumerateContextCandidatesV2(rawInput) {
   }
   enumerateEvidenceRefCandidates(enumerated, input, decisions, knownPageIds);
   checkCandidateDuplicates(enumerated);
-  return Object.freeze(orderCandidates(enumerated).map((candidate) => candidate));
+  return Object.freeze(orderCandidates(enumerated, requiredPageIdsOf(input)).map((candidate) => candidate));
 }
 
 function deriveMandatoryManifestV2(rawInput) {
@@ -1358,7 +1429,7 @@ function buildContextCompilationPlanV2(rawInput) {
   enumeratePinnedCandidates(enumerated, input, decisions);
   enumerateHotCandidates(enumerated, input, decisions);
   enumerateWarmStateCandidates(enumerated, input, decisions);
-  const pagesSorted = input.pages.slice().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const pagesSorted = pagesInEnumerationOrder(input);
   for (const page of pagesSorted) {
     if (page.contentHash === null || page.contentHash === undefined) {
       failCompiler('content-conflict', 'known page carries no content identity: ' + page.id);
@@ -1373,7 +1444,7 @@ function buildContextCompilationPlanV2(rawInput) {
   }
   enumerateEvidenceRefCandidates(enumerated, input, decisions, knownPageIds);
   checkCandidateDuplicates(enumerated);
-  const candidates = orderCandidates(enumerated);
+  const candidates = orderCandidates(enumerated, requiredPageIdsOf(input));
   const policyDecisions = applyPolicyToCandidates(candidates);
   const mandatoryRefs = deriveMandatoryRefs(candidates);
   const planWithoutDigest = {
@@ -1622,7 +1693,12 @@ function compileToViewInput(plan, input) {
     if (candidate.deterministicReasonCode === 'compiler-materialize-exact-cold') {
       return String(proofByPage.get(candidate.pageId).exactText);
     }
-    return String(byId.get(candidate.pageId).exactText);
+    const page = byId.get(candidate.pageId);
+    if (page.exactText !== null && page.exactText !== undefined) return String(page.exactText);
+    // CCV2-R1: HOT/WARM blob-backed bytes from the bound B03 blob proof.
+    const blobProof = blobProofForPage(input.exactMaterial, page, input.namespace);
+    if (blobProof === null) failCompiler('required-unavailable', 'no exact bytes for ' + candidate.sourceId);
+    return String(blobProof.exactText);
   };
 
   const sourceTypeFor = (candidate) => {

@@ -116,6 +116,7 @@ const DISCREPANCY_SEVERITIES = Object.freeze([
 
 const HEX64_PATTERN = /^[0-9a-f]{64}$/;
 const ID256_PATTERN = /^.{1,256}$/;
+const SHADOW_ACTUAL_MEMBERS_MAX = 16384;
 
 const ACTUAL_TOP_EXACT_KEYS = Object.freeze([
   'schemaVersion', 'namespace', 'checkpointBinding', 'turnRef', 'members',
@@ -320,7 +321,10 @@ function observeActualV2(rawActual) {
     }
   }
   if (!Array.isArray(rawActual.members)) failShadow('actual-invalid', 'actual members must be an array');
-  if (rawActual.members.length > 2048) failShadow('actual-invalid', 'actual members exceed the observation bound');
+  // CCV2-R1 (supersedes 2048): one member per live message plus the host
+  // system contract; bounded to the R1 plan-source ceiling so a session C08
+  // can compile is never silently unobservable.
+  if (rawActual.members.length > SHADOW_ACTUAL_MEMBERS_MAX) failShadow('actual-invalid', 'actual members exceed the observation bound');
   const seen = new Set();
   rawActual.members.forEach((member, index) => {
     const problem = checkActualMember(member, index);
@@ -1328,6 +1332,7 @@ function buildFailedShadowReportV2(input) {
 }
 
 module.exports = {
+  SHADOW_ACTUAL_MEMBERS_MAX,
   SHADOW_SCHEMA_VERSION,
   SHADOW_POLICY_REVISION_V2,
   SHADOW_DIGEST_DOMAIN_V1,

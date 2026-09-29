@@ -119,6 +119,9 @@ const REASON_CODES = Object.freeze([
   'tier-warm-verification-state',
   'tier-warm-failure-state',
   'tier-warm-settled-transaction',
+  // CCV2-R1: a byte-bearing historical page that controller reachability
+  // proves STILL REQUIRED rests WARM (exact) instead of COLD.
+  'tier-warm-retention-required',
   'tier-cold-exact-history',
   'tier-cold-source-resolvable',
   'tier-keep-more-context-no-exact-resolution',
@@ -185,7 +188,10 @@ const TIER_TRANSITIONS = Object.freeze({
   'HOT>PINNED': Object.freeze(['constraint-activated', 'approval-opened', 'protocol-opened', 'gate-armed', 'new-user-turn']),
   'HOT>WARM': Object.freeze(['transaction-settled', 'failure-partly-resolved', 'decision-accepted', 'verification-recorded', 'turn-superseded']),
   'WARM>HOT': Object.freeze(['evidence-reactivated', 'failure-raised', 'new-user-turn', 'gate-armed']),
-  'WARM>COLD': Object.freeze(['exact-backing-established', 'failure-resolved', 'decision-superseded', 'transaction-aged']),
+  // CCV2-R1 (M01A 45.2): checkpoint-superseded-unreferenced is the one
+  // structural historical-transition cause (sealed generation boundary +
+  // not active-root reachable + authority sufficiently complete).
+  'WARM>COLD': Object.freeze(['exact-backing-established', 'failure-resolved', 'decision-superseded', 'transaction-aged', 'checkpoint-superseded-unreferenced']),
   'COLD>WARM': Object.freeze(['evidence-reactivated', 'resolution-weakened', 'failure-raised']),
   'COLD>HOT': Object.freeze(['evidence-reactivated']),
 });
@@ -248,7 +254,15 @@ const CLASSIFY_EXACT_KEYS = Object.freeze([
   'exactPreservationRequired',
   'advisory',
   'archiveRef',
+  // CCV2-R1: controller/reachability-owned requiredness (never relevance)
+  // and the structural historical-transition provenance.
+  'retentionRequired',
+  'historicalTransition',
 ]);
+
+// CCV2-R1 historical transition provenance (closed world).
+const HISTORICAL_TRANSITION_REASONS = Object.freeze(['checkpoint-superseded-unreferenced']);
+const HISTORICAL_TRANSITION_EXACT_KEYS = Object.freeze(['reason', 'supersededByGeneration']);
 
 const ELEMENT_SECTIONS = Object.freeze([
   'requirement',
@@ -288,6 +302,11 @@ const DECISION_EXACT_KEYS = Object.freeze([
   'trust',
   'resolution',
   'deterministic',
+  // CCV2-R1 optional members: present only when set (legacy decisions keep
+  // byte-identical shape). retentionRequired is literal true on HOT/WARM
+  // page decisions; historicalTransition rides only on COLD page decisions.
+  'retentionRequired',
+  'historicalTransition',
 ]);
 
 const RESOLUTION_EXACT_KEYS = Object.freeze([
@@ -463,7 +482,25 @@ function brandDecision(fields) {
     resolution: fields.resolution === undefined ? null : fields.resolution,
     deterministic: true,
   };
+  if (fields.retentionRequired === true) decision.retentionRequired = true;
+  if (fields.historicalTransition !== undefined && fields.historicalTransition !== null) {
+    decision.historicalTransition = Object.freeze({
+      reason: fields.historicalTransition.reason,
+      supersededByGeneration: fields.historicalTransition.supersededByGeneration,
+    });
+  }
   return Object.freeze(decision);
+}
+
+function validateHistoricalTransitionInput(value) {
+  if (!isPlainObject(value)) failTier('unknown-field', 'historicalTransition must be an object');
+  const unknown = unknownKeyOf(value, HISTORICAL_TRANSITION_EXACT_KEYS);
+  if (unknown !== null) failTier('unknown-field', 'historicalTransition.' + unknown);
+  if (!HISTORICAL_TRANSITION_REASONS.includes(value.reason)) failTier('unknown-cause', String(value.reason));
+  if (!Number.isInteger(value.supersededByGeneration) || value.supersededByGeneration < 1) {
+    failTier('unknown-field', 'historicalTransition.supersededByGeneration must be a positive integer');
+  }
+  return { reason: value.reason, supersededByGeneration: value.supersededByGeneration };
 }
 
 function namespaceEcho(ns) {
@@ -495,6 +532,21 @@ function classifyMemoryTierV2(input) {
   if (typeof immediateRelevance !== 'boolean') failTier('unknown-field', 'immediateRelevance must be boolean');
   const exactPreservationRequired = input.exactPreservationRequired === undefined ? false : input.exactPreservationRequired;
   if (typeof exactPreservationRequired !== 'boolean') failTier('unknown-field', 'exactPreservationRequired must be boolean');
+  // CCV2-R1: requiredness is a controller/reachability boolean, distinct
+  // from mandatoryCorrectness (prose/strings fail closed, never inferred).
+  const retentionRequired = input.retentionRequired === undefined ? false : input.retentionRequired;
+  if (typeof retentionRequired !== 'boolean') failTier('unknown-field', 'retentionRequired must be boolean');
+  const hasTransition = input.historicalTransition !== undefined && input.historicalTransition !== null;
+  const historicalTransition = hasTransition ? validateHistoricalTransitionInput(input.historicalTransition) : null;
+  if (retentionRequired && !PAGE_SUBJECTS.includes(subjectKind)) {
+    failTier('required-not-applicable', subjectKind + ' is not a historical page unit');
+  }
+  if (retentionRequired && mandatoryCorrectness) {
+    failTier('required-mandatory-conflict', 'mandatory and retention-required are distinct authorities');
+  }
+  if (hasTransition && (retentionRequired || !PAGE_SUBJECTS.includes(subjectKind) || subjectKind === 'completed-tool-transaction')) {
+    failTier('transition-not-applicable', 'historical transition applies only to unrequired historical page units');
+  }
   // B04H: no caller-held status may claim exact-resolution authority.
   // mandatoryCorrectness stays a controller-asserted boolean (checked
   // above): any prose or string form already fails closed, so untrusted
@@ -666,12 +718,32 @@ function classifyMemoryTierV2(input) {
         tier: 'HOT', reasonCode: 'tier-hot-immediate-transaction', subjectKind,
         pageId: page.id, pageKind: page.kind, contentHash: page.contentHash,
         namespace: pageNamespace, trust: page.provenance.trust, resolution,
+        retentionRequired,
       });
     }
     return brandDecision({
       tier: 'WARM', reasonCode: 'tier-warm-settled-transaction', subjectKind,
       pageId: page.id, pageKind: page.kind, contentHash: page.contentHash,
       namespace: pageNamespace, trust: page.provenance.trust, resolution,
+      retentionRequired,
+    });
+  }
+
+  // CCV2-R1 (supersedes the C05H "byte-bearing non-tool history -> COLD"
+  // outcome for REQUIRED units): a historical page that controller
+  // reachability proves still required rests WARM with its exact bytes.
+  if (retentionRequired) {
+    return brandDecision({
+      tier: 'WARM',
+      reasonCode: 'tier-warm-retention-required',
+      subjectKind,
+      pageId: page.id,
+      pageKind: page.kind,
+      contentHash: page.contentHash,
+      namespace: pageNamespace,
+      trust: page.provenance.trust,
+      resolution,
+      retentionRequired: true,
     });
   }
 
@@ -696,6 +768,7 @@ function classifyMemoryTierV2(input) {
       namespace: pageNamespace,
       trust: page.provenance.trust,
       resolution,
+      historicalTransition,
     });
   }
   if (proofMode !== null) {
@@ -711,8 +784,11 @@ function classifyMemoryTierV2(input) {
       namespace: pageNamespace,
       trust: page.provenance.trust,
       resolution,
+      historicalTransition,
     });
   }
+  // A transition is recorded only when the unit actually reaches COLD; a
+  // unit without exact recovery stays WARM and carries no transition.
   return brandDecision({
     tier: 'WARM',
     reasonCode: 'tier-keep-more-context-no-exact-resolution',
@@ -801,6 +877,29 @@ function validateMemoryTierDecisionV2(decision) {
     }
   }
   if (decision.deterministic !== true) return { valid: false, reasonCode: 'context-memory-tier-determinism-invalid' };
+  // CCV2-R1 optional members (present only when set).
+  if (Object.prototype.hasOwnProperty.call(decision, 'retentionRequired')) {
+    if (decision.retentionRequired !== true
+      || (decision.tier !== 'HOT' && decision.tier !== 'WARM')
+      || !PAGE_SUBJECTS.includes(decision.subjectKind)
+      || decision.pageId === null) {
+      return { valid: false, reasonCode: 'context-memory-tier-retention-required-invalid' };
+    }
+  }
+  if (decision.reasonCode === 'tier-warm-retention-required' && decision.retentionRequired !== true) {
+    return { valid: false, reasonCode: 'context-memory-tier-retention-required-invalid' };
+  }
+  if (Object.prototype.hasOwnProperty.call(decision, 'historicalTransition')) {
+    const transition = decision.historicalTransition;
+    if (!isPlainObject(transition)
+      || unknownKeyOf(transition, HISTORICAL_TRANSITION_EXACT_KEYS) !== null
+      || !HISTORICAL_TRANSITION_REASONS.includes(transition.reason)
+      || !Number.isInteger(transition.supersededByGeneration) || transition.supersededByGeneration < 1
+      || decision.tier !== 'COLD'
+      || !PAGE_SUBJECTS.includes(decision.subjectKind)) {
+      return { valid: false, reasonCode: 'context-memory-tier-historical-transition-invalid' };
+    }
+  }
   return { valid: true, reasonCode: 'context-memory-tier-decision-valid' };
 }
 
@@ -907,6 +1006,7 @@ module.exports = {
   MATERIALIZATION_POLICIES,
   TRANSITION_CAUSES,
   RETENTION_CLASSES,
+  HISTORICAL_TRANSITION_REASONS,
   classifyMemoryTierV2,
   validateMemoryTierDecisionV2,
   describeMemoryTierDecisionV2,

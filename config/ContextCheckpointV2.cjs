@@ -96,6 +96,26 @@ const BOUNDS = Object.freeze({
   redactMaxChars: 4000,
 });
 
+// CCV2-R1 authority completeness (R1.1-R1.4). A closed, typed statement of
+// which controller categories this checkpoint is AUTHORITATIVE for. It is a
+// separate concept from A07 unsupportedState (which keeps its hard-blocking
+// semantics): COMPLETE means the controller is authoritative for the
+// category at this checkpoint, INCLUDING the assertion that it is empty;
+// UNRECORDED_LEGACY means historical authoritative state may have existed
+// but was never persisted (legal only for LEGACY_BOOTSTRAP replay of
+// pre-M01 sessions). The field is optional: absent means a pre-R1
+// checkpoint whose completeness is UNKNOWN (never read as complete), and
+// absent checkpoints serialize byte-identically to before.
+const AUTHORITY_COMPLETENESS_VALUES = Object.freeze(['COMPLETE', 'UNRECORDED_LEGACY']);
+const AUTHORITY_ORIGINS = Object.freeze(['NATIVE', 'LEGACY_BOOTSTRAP']);
+const AUTHORITY_CATEGORIES = Object.freeze([
+  'objective', 'requirements', 'constraints', 'progress',
+  'decisions', 'failures', 'verification', 'continuation',
+]);
+// Categories every checkpoint must hold authoritatively, legacy or not.
+const ALWAYS_COMPLETE_CATEGORIES = Object.freeze(['objective', 'requirements']);
+const CHECKPOINT_AUTHORITY_COMPLETENESS_EXACT_KEYS = Object.freeze(['origin'].concat(AUTHORITY_CATEGORIES));
+
 const REQUIREMENT_STATUSES = Object.freeze(['active', 'satisfied', 'superseded']);
 const DECISION_AUTHORITIES = Object.freeze([
   'agent-proposed',
@@ -132,7 +152,7 @@ const CHECKPOINT_TOP_EXACT_KEYS = Object.freeze([
   'createdAtUtc', 'objective', 'requirements', 'constraints', 'progress',
   'decisions', 'repository', 'evidenceRefs', 'failures', 'verification',
   'continuation', 'snapshot', 'provenance', 'pressure',
-  'checkpointContentDigest', 'checkpointId', 'seal',
+  'checkpointContentDigest', 'checkpointId', 'seal', 'authorityCompleteness',
 ]);
 const CHECKPOINT_OBJECTIVE_EXACT_KEYS = Object.freeze(['text', 'status']);
 const CHECKPOINT_REQUIREMENT_EXACT_KEYS = Object.freeze(['id', 'text', 'status', 'evidenceRefs']);
@@ -308,6 +328,47 @@ function validateEvidenceRef(ref, taskInstanceId) {
   if (!isIsoUtc(ref.observedAtUtc)) return 'checkpoint-evidence-invalid';
   if (typeof ref.taskInstanceId !== 'string' || ref.taskInstanceId === '' || ref.taskInstanceId !== taskInstanceId) return 'checkpoint-evidence-invalid';
   return null;
+}
+
+// CCV2-R1: closed-world authority-completeness validation. Unknown keys,
+// unknown values, a missing category, an incomplete objective/requirements
+// category, and a NATIVE origin carrying UNRECORDED_LEGACY all fail closed.
+function validateAuthorityCompletenessV2(value) {
+  const fail = (reason) => ({ valid: false, reason });
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return fail('checkpoint-authority-completeness-invalid');
+  if (unknownCheckpointKeyOf(value, CHECKPOINT_AUTHORITY_COMPLETENESS_EXACT_KEYS) !== null) {
+    return fail('checkpoint-authority-completeness-invalid');
+  }
+  if (!AUTHORITY_ORIGINS.includes(value.origin)) return fail('checkpoint-authority-completeness-invalid');
+  for (const category of AUTHORITY_CATEGORIES) {
+    if (!AUTHORITY_COMPLETENESS_VALUES.includes(value[category])) return fail('checkpoint-authority-completeness-invalid');
+  }
+  for (const category of ALWAYS_COMPLETE_CATEGORIES) {
+    if (value[category] !== 'COMPLETE') return fail('checkpoint-authority-completeness-invalid');
+  }
+  if (value.origin === 'NATIVE') {
+    for (const category of AUTHORITY_CATEGORIES) {
+      if (value[category] !== 'COMPLETE') return fail('checkpoint-authority-completeness-invalid');
+    }
+  }
+  return { valid: true, reason: null };
+}
+
+function normalizeAuthorityCompletenessV2(value) {
+  const out = { origin: String(value.origin) };
+  for (const category of AUTHORITY_CATEGORIES) out[category] = String(value[category]);
+  return out;
+}
+
+// True only when the checkpoint carries R1 completeness metadata AND names
+// the category COMPLETE. Absence is never read as completeness.
+function authorityCategoryCompleteV2(checkpoint, category) {
+  if (!AUTHORITY_CATEGORIES.includes(category)) throw new Error('v2-checkpoint: unknown authority category ' + String(category));
+  if (!checkpoint || typeof checkpoint !== 'object') return false;
+  const completeness = checkpoint.authorityCompleteness;
+  if (completeness === undefined || completeness === null) return false;
+  if (!validateAuthorityCompletenessV2(completeness).valid) return false;
+  return completeness[category] === 'COMPLETE';
 }
 
 function validateCheckpointV2(checkpoint) {
@@ -566,6 +627,12 @@ function validateCheckpointV2(checkpoint) {
     // checkpoint; record-mismatch itself is reported by ContextTrustV2 with
     // checkpoint-seal-record-digest-mismatch.
     if (typeof seal.sealDigest !== 'string' || !/^[0-9a-f]{64}$/.test(seal.sealDigest)) return fail('checkpoint-seal-invalid');
+  }
+
+  // CCV2-R1: optional authority completeness (absent = pre-R1 checkpoint).
+  if (Object.prototype.hasOwnProperty.call(checkpoint, 'authorityCompleteness')) {
+    const completeness = validateAuthorityCompletenessV2(checkpoint.authorityCompleteness);
+    if (!completeness.valid) return fail(completeness.reason);
   }
 
   const pressure = checkpoint.pressure;
@@ -859,6 +926,14 @@ function buildCheckpointV2(input) {
     },
   };
 
+  // CCV2-R1: authority completeness travels verbatim when supplied; when
+  // absent the key is omitted entirely so pre-R1 bytes stay identical.
+  if (input.authorityCompleteness !== undefined && input.authorityCompleteness !== null) {
+    const completeness = validateAuthorityCompletenessV2(input.authorityCompleteness);
+    if (!completeness.valid) fail('authorityCompleteness refused (' + completeness.reason + ')');
+    candidate.authorityCompleteness = normalizeAuthorityCompletenessV2(input.authorityCompleteness);
+  }
+
   // Redaction BEFORE validation/persistence (deterministic, no LLM).
   const redacted = redactCheckpointValueV2(candidate, BOUNDS.redactMaxChars);
 
@@ -1007,6 +1082,13 @@ module.exports = {
   CHECKPOINT_PROVENANCE_LEGACY_EXACT_KEYS,
   CHECKPOINT_PROVENANCE_ENTRY_EXACT_KEYS,
   CHECKPOINT_SEAL_EXACT_KEYS,
+  AUTHORITY_COMPLETENESS_VALUES,
+  AUTHORITY_ORIGINS,
+  AUTHORITY_CATEGORIES,
+  ALWAYS_COMPLETE_CATEGORIES,
+  CHECKPOINT_AUTHORITY_COMPLETENESS_EXACT_KEYS,
+  validateAuthorityCompletenessV2,
+  authorityCategoryCompleteV2,
   sha256HexUtf8,
   byteLengthUtf8,
   redactCheckpointTextV2,
