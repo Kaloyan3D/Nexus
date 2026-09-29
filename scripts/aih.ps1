@@ -84,17 +84,31 @@ Set-AihControlRoomDefault -SettingsPath $layout.Settings -Mode $mode
 $runningState = $null
 $process = $null
 $resumingStartup = $false
+$hasTrackedPid = $false
+$staleIdentityMismatch = $false
 if (Test-Path -LiteralPath $layout.State) {
     try { $runningState = Get-Content -Raw -LiteralPath $layout.State | ConvertFrom-Json } catch { $runningState = $null }
 }
-if ($null -ne $runningState -and $null -ne $runningState.Pid) {
+$hasTrackedPid = $null -ne $runningState -and $null -ne $runningState.Pid
+if ($hasTrackedPid) {
     $controlRoomSchema = if ($null -ne $runningState.PSObject.Properties['SchemaVersion']) { [int]$runningState.SchemaVersion } else { 1 }
     $existing = Get-Process -Id ([int]$runningState.Pid) -ErrorAction SilentlyContinue
     $existingIdentityMatches = $null -ne $existing -and (Test-AihTrackedProcessIdentity -Process $existing -State $runningState -ExpectedExecutable $layout.Node)
-    if ($null -ne $existing -and -not $existingIdentityMatches) {
-        throw "Refusing to reuse or stop PID $($runningState.Pid): the saved process identity is stale or does not match DSH."
+    if ($null -eq $existing) {
+        Write-Warning "Discarding stale AI Harness state for PID $($runningState.Pid): the tracked process no longer exists."
+        Remove-Item -LiteralPath $layout.State -Force -ErrorAction SilentlyContinue
+        $runningState = $null
+        $hasTrackedPid = $false
     }
-    if ($null -ne $existing -and (Test-AihEndpoint -Uri $webUrl -TimeoutSec 2)) {
+    elseif (-not $existingIdentityMatches) {
+        Write-Warning "Discarding stale AI Harness state for PID $($runningState.Pid): process identity no longer matches the tracked DSH instance. The process will not be stopped."
+        Remove-Item -LiteralPath $layout.State -Force -ErrorAction SilentlyContinue
+        $runningState = $null
+        $hasTrackedPid = $false
+        $staleIdentityMismatch = $true
+        $existing = $null
+    }
+    elseif (Test-AihEndpoint -Uri $webUrl -TimeoutSec 2) {
         if (Test-AihReusableUniversalRuntimeState -State $runningState -Restart:$Restart) {
             $runningState.Status = 'READY'
             $runningState.Preset = $Preset
@@ -116,17 +130,22 @@ if ($null -ne $runningState -and $null -ne $runningState.Pid) {
         }
         $null = Stop-AihTrackedProcess -Process $existing
     }
-    elseif ($null -ne $existing -and (Test-AihReusableUniversalRuntimeState -State $runningState -Restart:$Restart)) {
+    elseif (Test-AihReusableUniversalRuntimeState -State $runningState -Restart:$Restart) {
         $process = $existing
         $resumingStartup = $true
         Write-Host "AI Harness status: STARTING (resuming readiness checks for PID $($process.Id))"
     }
-    elseif ($null -ne $existing) {
+    else {
         $null = Stop-AihTrackedProcess -Process $existing
     }
 }
-elseif ((Test-AihEndpoint -Uri $webUrl -TimeoutSec 2) -and -not $Restart) {
-    throw "$webUrl is already in use by an untracked process. Stop it or rerun with -Restart after confirming ownership."
+if (-not $hasTrackedPid -and (Test-AihEndpoint -Uri $webUrl -TimeoutSec 2)) {
+    if ($staleIdentityMismatch) {
+        throw "$webUrl is already in use by a process that does not match the saved DSH identity. Refusing to stop or replace that process."
+    }
+    if (-not $Restart) {
+        throw "$webUrl is already in use by an untracked process. Stop it or rerun with -Restart after confirming ownership."
+    }
 }
 
 $env:DSH_HOME = $layout.Data
