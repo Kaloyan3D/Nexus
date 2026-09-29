@@ -30,10 +30,11 @@ $launcherSource=Get-Content -Raw -LiteralPath (Join-Path $InstallRoot 'scripts/a
 $staleIdentityBranch=[regex]::Match($launcherSource,'(?s)elseif \(-not \$existingIdentityMatches\) \{(?<body>.*?)\r?\n\s*\}')
 Assert-Aih $staleIdentityBranch.Success 'launcher has an explicit stale tracked-process identity recovery branch'
 $staleIdentityBody=$staleIdentityBranch.Groups['body'].Value
-Assert-Aih ($staleIdentityBody-match'Remove-Item\s+-LiteralPath\s+\$layout\.State') 'stale tracked-process identity discards stale launcher state'
-Assert-Aih ($staleIdentityBody-notmatch'\bthrow\b|Stop-AihTrackedProcess|Stop-Process') 'stale tracked-process identity never throws immediately or stops the foreign PID'
-Assert-Aih ($launcherSource-match'if \(-not \$hasTrackedPid -and \(Test-AihEndpoint -Uri \$webUrl -TimeoutSec 2\)\)') 'launcher re-checks Web UI ownership after stale state is discarded'
+Assert-Aih ($staleIdentityBody-match'\$discardStaleState\s*=\s*\$true') 'stale tracked-process identity schedules stale state for safe discard'
+Assert-Aih ($staleIdentityBody-notmatch'\bthrow\b|Stop-AihTrackedProcess|Stop-Process|Remove-Item') 'stale tracked-process identity neither stops the foreign PID nor discards evidence before the port check'
+Assert-Aih ($launcherSource-match'(?s)if \(-not \$hasTrackedPid\) \{.*?\$endpointInUse\s*=\s*Test-AihEndpoint -Uri \$webUrl -TimeoutSec 2') 'launcher re-checks Web UI ownership before stale state is discarded'
 Assert-Aih ($launcherSource-match'(?s)if \(\$staleIdentityMismatch\).*?Refusing to stop or replace that process') 'known stale identity on the Web UI port fails closed even during restart'
+Assert-Aih ($launcherSource-match'(?s)if \(\$discardStaleState\) \{\s*Remove-Item\s+-LiteralPath\s+\$layout\.State') 'stale launcher state is discarded only after the Web UI ownership guard passes'
 Assert-Aih ($launcherSource-notmatch'Refusing to reuse or stop PID .*saved process identity is stale') 'legacy fatal stale-PID launcher path is removed'
 Assert-Aih ($policy.version-eq3) 'routing policy v3 loads (Phase 2 generalized classes)'
 Assert-Aih ($policy.defaultExecutionClass-eq'engineer_normal') 'engineer_normal is the default execution class'

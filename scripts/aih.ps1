@@ -86,6 +86,7 @@ $process = $null
 $resumingStartup = $false
 $hasTrackedPid = $false
 $staleIdentityMismatch = $false
+$discardStaleState = $false
 if (Test-Path -LiteralPath $layout.State) {
     try { $runningState = Get-Content -Raw -LiteralPath $layout.State | ConvertFrom-Json } catch { $runningState = $null }
 }
@@ -96,16 +97,14 @@ if ($hasTrackedPid) {
     $existingIdentityMatches = $null -ne $existing -and (Test-AihTrackedProcessIdentity -Process $existing -State $runningState -ExpectedExecutable $layout.Node)
     if ($null -eq $existing) {
         Write-Warning "Discarding stale AI Harness state for PID $($runningState.Pid): the tracked process no longer exists."
-        Remove-Item -LiteralPath $layout.State -Force -ErrorAction SilentlyContinue
-        $runningState = $null
         $hasTrackedPid = $false
+        $discardStaleState = $true
     }
     elseif (-not $existingIdentityMatches) {
         Write-Warning "Discarding stale AI Harness state for PID $($runningState.Pid): process identity no longer matches the tracked DSH instance. The process will not be stopped."
-        Remove-Item -LiteralPath $layout.State -Force -ErrorAction SilentlyContinue
-        $runningState = $null
         $hasTrackedPid = $false
         $staleIdentityMismatch = $true
+        $discardStaleState = $true
         $existing = $null
     }
     elseif (Test-AihEndpoint -Uri $webUrl -TimeoutSec 2) {
@@ -139,12 +138,19 @@ if ($hasTrackedPid) {
         $null = Stop-AihTrackedProcess -Process $existing
     }
 }
-if (-not $hasTrackedPid -and (Test-AihEndpoint -Uri $webUrl -TimeoutSec 2)) {
-    if ($staleIdentityMismatch) {
-        throw "$webUrl is already in use by a process that does not match the saved DSH identity. Refusing to stop or replace that process."
+if (-not $hasTrackedPid) {
+    $endpointInUse = Test-AihEndpoint -Uri $webUrl -TimeoutSec 2
+    if ($endpointInUse) {
+        if ($staleIdentityMismatch) {
+            throw "$webUrl is already in use by a process that does not match the saved DSH identity. Refusing to stop or replace that process."
+        }
+        if (-not $Restart) {
+            throw "$webUrl is already in use by an untracked process. Stop it or rerun with -Restart after confirming ownership."
+        }
     }
-    if (-not $Restart) {
-        throw "$webUrl is already in use by an untracked process. Stop it or rerun with -Restart after confirming ownership."
+    if ($discardStaleState) {
+        Remove-Item -LiteralPath $layout.State -Force -ErrorAction SilentlyContinue
+        $runningState = $null
     }
 }
 
