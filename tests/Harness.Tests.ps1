@@ -33,7 +33,7 @@ $staleIdentityBody=$staleIdentityBranch.Groups['body'].Value
 Assert-Aih ($staleIdentityBody-match'Remove-Item\s+-LiteralPath\s+\$layout\.State') 'stale tracked-process identity discards stale launcher state'
 Assert-Aih ($staleIdentityBody-notmatch'\bthrow\b|Stop-AihTrackedProcess|Stop-Process') 'stale tracked-process identity never throws immediately or stops the foreign PID'
 Assert-Aih ($launcherSource-match'if \(-not \$hasTrackedPid -and \(Test-AihEndpoint -Uri \$webUrl -TimeoutSec 2\)\)') 'launcher re-checks Web UI ownership after stale state is discarded'
-Assert-Aih ($launcherSource-match'if \(\$staleIdentityMismatch\).*?Refusing to stop or replace that process') 'known stale identity on the Web UI port fails closed even during restart'
+Assert-Aih ($launcherSource-match'(?s)if \(\$staleIdentityMismatch\).*?Refusing to stop or replace that process') 'known stale identity on the Web UI port fails closed even during restart'
 Assert-Aih ($launcherSource-notmatch'Refusing to reuse or stop PID .*saved process identity is stale') 'legacy fatal stale-PID launcher path is removed'
 Assert-Aih ($policy.version-eq3) 'routing policy v3 loads (Phase 2 generalized classes)'
 Assert-Aih ($policy.defaultExecutionClass-eq'engineer_normal') 'engineer_normal is the default execution class'
