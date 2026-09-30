@@ -200,8 +200,16 @@ const nativeAuthority = () => ({ manifest: NATIVE_MANIFEST, authorityRecord: nat
   const coldTool = gen1Other.find((u) => u.kind === 'tool-transaction');
   check(coldTool !== undefined && decisionOf(coldTool).subjectKind === 'historical-evidence', 'a balanced transaction transitions whole (one page, one decision)');
   const prefixDecisions = JSON.parse(fs.readFileSync(path.join(producerV2.memoryDirForV2(path.join(TMP, 'native-prefix'), 'TASK-M01N'), 'tier-decisions.json'), 'utf8'));
-  const hot = prefixDecisions.filter((d) => d.tier === 'HOT' && typeof d.pageId === 'string');
-  check(hot.length === 1 && hot[0].retentionRequired === true && hot[0].subjectKind === 'completed-tool-transaction', 'current-generation transaction is HOT and retention-required', JSON.stringify(prefixDecisions.filter((d) => d.pageId).map((d) => d.tier + ':' + d.reasonCode)));
+  // ACTIVE-TURN boundary: the open turn's completed transaction is produced
+  // and ledgered (it seals at turn/end) and still classifies HOT, but it
+  // stays provider-native in the live request, so it never enters the
+  // staged historical set.
+  const prefixActive = prefixRun.producer.describe().activeTurn;
+  const openTx = prefixRun.producer.units().filter((u) => prefixActive !== null && u.firstSeq > prefixActive.turnStartSeq && u.kind === 'tool-transaction');
+  check(openTx.length === 1 && prefixDecisions.every((d) => d.pageId !== openTx[0].pageId), 'open-turn transaction is ledgered but excluded from the staged historical set');
+  const openTier = producerV2.decideUnitTierV2({ unit: openTx[0], page: prefixRun.producer.pageOf(openTx[0].pageId), sealed: prefixRun.producer.sealedCheckpoint(), requiredSeqs: new Set(), authorityComplete: true });
+  check(openTier.tier === 'HOT' && openTier.retentionRequired === true && openTier.subjectKind === 'completed-tool-transaction', 'current-generation transaction still classifies HOT and retention-required');
+  check(prefixDecisions.filter((d) => d.tier === 'HOT' && typeof d.pageId === 'string').length === 0, 'no open-turn page is staged HOT');
   const bogusSize = decideForBigUnit();
   check(bogusSize === 'COLD', 'unit size never keeps history HOT/WARM (no size heuristic)');
 }
@@ -423,6 +431,152 @@ section('CONTROLLER TASK AUTHORITY');
   check(authorityV2.readTaskAuthorityRecordV2(ws, 'TASK-Z', 'tz').progress.currentMilestone === 'M01', 'durable typed mutation round-trips');
   throwsWith(() => authorityV2.readTaskAuthorityRecordV2(ws, 'TASK-Z', 'other'), 'namespace-mismatch', 'authority record is instance-bound');
   check(authorityV2.readTaskAuthorityRecordV2(ws, 'TASK-NONE', 'x') === null, 'absent record means legacy (never assumed native)');
+}
+
+// ============================================================================
+section('ACTIVE TURN BOUNDARY (producer-owned anchor, verified against the request)');
+{
+  // The DSH derived history: one model-visible message per surface event,
+  // in log order (user/message -> data; assistant/message, tool/result ->
+  // data.message), the rule surfaceMessageHashV2 hashes.
+  const surfaceOf = (event) => (event.type === 'user/message' ? event.data : event.data.message);
+  const requestOf = (events) => events.filter((e) => ['user/message', 'assistant/message', 'tool/result'].indexOf(e.type) !== -1).map(surfaceOf);
+  let wsCounter = 0;
+  const replayAt = (events) => {
+    wsCounter += 1;
+    const ws = path.join(TMP, 'active-turn-' + wsCounter);
+    const run = producerV2.replaySessionV2({ workspace: ws, namespace: nsFor('TASK-M01T', 'task_m01_t', 'sess-m01-t', ws), events, controllerAuthority: () => ({ manifest: manifestFor('TASK-M01T', 'task_m01_t'), authorityRecord: null }) });
+    const memDir = producerV2.memoryDirForV2(ws, 'TASK-M01T');
+    const coverage = shadowHost.readStagedCoverageV2(memDir);
+    const txs = shadowHost.readStagedToolTransactionsV2(memDir).transactions;
+    return { run, memDir, coverage: coverage.coverage, skipped: coverage.skipped, txs };
+  };
+  const extract = (messages, at) => shadowHost.extractActiveTailV2({ messages, coverage: at.coverage, toolTransactions: at.txs });
+  const hashOf = (message) => sha(JSON.stringify(checkpointV2.canonicalize(message)));
+
+  // Normal multi-step turn: turn 1 closed, turn 2 open after two tool steps.
+  const s = sessionBuilder();
+  s.turnStart();
+  s.user('Turn one request.');
+  s.tool('exit 0 one');
+  s.turnEnd();
+  const turn2Start = s.turnStart();
+  const anchorSeq = s.user('Turn two request.');
+  s.tool('loaded');
+  s.tool('exit 0 two', { narration: 'Continuing.' });
+  const normal = replayAt(s.events);
+  const at = normal.coverage.activeTurn;
+  check(normal.skipped === null && at !== null && at.turn === 2 && at.turnStartSeq === turn2Start && at.anchorSeq === anchorSeq
+    && at.anchorMessageHash === hashOf(surfaceOf(s.events[anchorSeq])) && at.processedThroughSeq === s.events.length - 1,
+    'normal turn: durable activeTurn { turn, anchorSeq, anchorMessageHash, processedThroughSeq } from DSH turn/start', JSON.stringify(at));
+  const staged = JSON.parse(fs.readFileSync(path.join(normal.memDir, 'staged.json'), 'utf8'));
+  check(staged.excludedActiveTurnUnitCount === 2 && staged.activeTurn.anchorSeq === anchorSeq, 'normal turn: open-turn units are excluded from the staged historical set');
+  const openUnits = normal.run.producer.units().filter((u) => u.firstSeq > turn2Start);
+  check(openUnits.length === 3 && openUnits.filter((u) => u.kind === 'tool-transaction').length === 2, 'normal turn: open-turn units are still produced and ledgered');
+  check(openUnits.every((u) => u.messageHashes.every((h) => !normal.coverage.hashes.has(h))), 'normal turn: no open-turn message hash is in historical coverage');
+  check(normal.txs.every((tx) => openUnits.every((u) => u.callIds.indexOf(tx.callId) === -1)), 'normal turn: no open-turn call id is in staged tool transactions');
+  const request = requestOf(s.events);
+  const found = extract(request, normal);
+  const anchorIndex = request.indexOf(surfaceOf(s.events[anchorSeq]));
+  check(found.skipped === null && found.boundary.anchorIndex === anchorIndex && found.boundary.tail.length === request.length - anchorIndex
+    && found.boundary.tail.every((m, i) => m === request[anchorIndex + i]), 'normal turn: tail = messages[anchor..] by reference, in order', found.skipped);
+  check(found.boundary.tailCallIds.join(',') === 'call_2,call_3', 'normal turn: tail tool protocol closed inside the tail');
+
+  // Plugin user-role injection mid-turn never moves the anchor.
+  const p = sessionBuilder();
+  p.turnStart(); p.user('History.'); p.tool('exit 0'); p.turnEnd();
+  p.turnStart();
+  const pAnchor = p.user('Real request.');
+  p.tool('loaded');
+  const pluginSeq = p.user('Runtime context snapshot.', 'plugin');
+  p.tool('exit 0 after snapshot');
+  const plugin = replayAt(p.events);
+  check(plugin.coverage.activeTurn.anchorSeq === pAnchor, 'plugin injection: anchor stays the turn-opening message');
+  const pRequest = requestOf(p.events);
+  const pFound = extract(pRequest, plugin);
+  check(pFound.skipped === null && pFound.boundary.tail[0] === surfaceOf(p.events[pAnchor]) && pFound.boundary.tail.indexOf(surfaceOf(p.events[pluginSeq])) !== -1,
+    'plugin injection: injected message stays inside the native tail', pFound.skipped);
+  check(shadowHost.extractLiveCurrentTurnV2(pRequest).turn.text === 'Runtime context snapshot.',
+    'plugin injection: the retired "latest user text" rule would have moved the boundary (why it is never used)');
+
+  // Human follow-up claimed mid-turn never moves the anchor.
+  const h = sessionBuilder();
+  h.turnStart(); h.user('History.'); h.turnEnd();
+  h.turnStart();
+  const hAnchor = h.user('First ask.');
+  h.tool('exit 0');
+  const followSeq = h.user('Also do this.');
+  h.tool('exit 0 again');
+  const human = replayAt(h.events);
+  check(human.coverage.activeTurn.anchorSeq === hAnchor && human.run.producer.describe().latestUserMessageSeq === followSeq,
+    'human follow-up: anchor stays, even though the latest user message moved');
+  const hFound = extract(requestOf(h.events), human);
+  check(hFound.skipped === null && hFound.boundary.tail.length === 6 && hFound.boundary.tail.indexOf(surfaceOf(h.events[followSeq])) === 3, 'human follow-up: follow-up stays inside the native tail', hFound.skipped);
+
+  // Missing anchor: the request does not carry the producer's anchor.
+  const withoutAnchor = request.filter((m) => m !== surfaceOf(s.events[anchorSeq]));
+  check(extract(withoutAnchor, normal).skipped === 'active-turn-anchor-missing', 'missing anchor fails closed');
+  // Duplicate anchor hash: the anchor occurs twice.
+  const doubled = request.slice(0, anchorIndex).concat([JSON.parse(JSON.stringify(surfaceOf(s.events[anchorSeq])))], request.slice(anchorIndex));
+  check(extract(doubled, normal).skipped === 'active-turn-anchor-ambiguous', 'duplicate anchor hash fails closed');
+  // Unanchored: turn/start processed, no model-visible message yet.
+  const u = sessionBuilder();
+  u.turnStart(); u.user('History.'); u.turnEnd(); u.turnStart();
+  const unanchored = replayAt(u.events);
+  check(unanchored.coverage.activeTurn !== null && unanchored.coverage.activeTurn.anchorSeq === null
+    && extract(requestOf(u.events), unanchored).skipped === 'active-turn-unanchored', 'unanchored open turn fails closed');
+
+  // Stale activeTurn state.
+  const closedEvents = s.events.concat([{ type: 'turn/end', seq: s.events.length, time: s.events[s.events.length - 1].time + 1000, data: { turn: 2, reason: { kind: 'completed' } } }]);
+  const closed = replayAt(closedEvents);
+  check(closed.coverage.activeTurn === null && closed.run.producer.describe().activeTurn === null, 'turn/end clears the durable active turn');
+  check(extract(request, closed).skipped === 'active-turn-missing', 'stale: a request of a turn the producer already closed (or has not opened) fails closed');
+  const torn = { coverage: Object.assign({}, closed.coverage, { activeTurn: normal.coverage.activeTurn }), txs: closed.txs };
+  check(extract(request, torn).skipped === 'active-tail-overlap', 'stale: an old anchor whose units are now historical is caught as tail overlap');
+  const staleTx = { coverage: normal.coverage, txs: normal.txs.concat([{ pageId: 'x', callId: 'call_3', callSeq: 1, resultSeq: 2 }]) };
+  check(extract(request, staleTx).skipped === 'active-tail-overlap', 'stale: a tail call id already staged historically fails closed');
+  const uncovered = { coverage: Object.assign({}, normal.coverage, { hashes: new Set() }), txs: normal.txs };
+  check(extract(request, uncovered).skipped === 'active-tail-prefix-uncovered', 'uncovered historical prefix fails closed');
+  const straddle = request.slice(0, anchorIndex).concat([request[anchorIndex], request[request.length - 1]]);
+  check(extract(straddle, normal).skipped === 'active-tail-protocol-open', 'a tail result without its tail call fails closed');
+  check(extract(request, { coverage: null, txs: [] }).skipped === 'active-tail-input-invalid', 'no coverage fails closed');
+
+  // Coverage file shape: pre-boundary files read as "no open turn"; a
+  // malformed activeTurn invalidates coverage.
+  const covPath = path.join(normal.memDir, 'coverage.json');
+  const covDoc = JSON.parse(fs.readFileSync(covPath, 'utf8'));
+  fs.writeFileSync(covPath, JSON.stringify(Object.assign({}, covDoc, { activeTurn: undefined })));
+  check(shadowHost.readStagedCoverageV2(normal.memDir).coverage.activeTurn === null, 'coverage without activeTurn reads as no open turn');
+  fs.writeFileSync(covPath, JSON.stringify(Object.assign({}, covDoc, { activeTurn: Object.assign({}, covDoc.activeTurn, { anchorSeq: covDoc.activeTurn.turnStartSeq }) })));
+  check(shadowHost.readStagedCoverageV2(normal.memDir).skipped === 'shadow-coverage-invalid', 'malformed activeTurn invalidates coverage');
+
+  // Sealing invariant: the closed turn's units seal and become historical.
+  check(closed.run.producer.describe().sealedGeneration === 2 && closed.coverage.hashes.has(hashOf(surfaceOf(s.events[anchorSeq + 2]))),
+    'turn/end seals and the former open-turn units join historical coverage');
+  // Incremental == replay for the active-turn record.
+  const incWs = path.join(TMP, 'active-turn-inc');
+  const replayNs = nsFor('TASK-M01T', 'task_m01_t', 'sess-m01-t', path.join(TMP, 'active-turn-1'));
+  const inc = producerV2.openMemoryProducerV2({ workspace: incWs, namespace: replayNs, controllerAuthority: () => ({ manifest: manifestFor('TASK-M01T', 'task_m01_t'), authorityRecord: null }) });
+  for (const event of s.events) {
+    inc.ingest([event], { eventsThrough: (seq) => s.events.slice(0, seq + 1), durability: { flushedSeq: s.events.length - 1, flushParticipated: true } });
+  }
+  // processedThroughSeq is "as of the last staging" (staging rewrites only
+  // when units, seals or the turn move; trailing step/* events do not).
+  const withoutCursor = (doc) => JSON.stringify(Object.assign({}, doc, { processedThroughSeq: null, activeTurn: Object.assign({}, doc.activeTurn, { processedThroughSeq: null }) }));
+  const incCoverage = JSON.parse(fs.readFileSync(path.join(producerV2.memoryDirForV2(incWs, 'TASK-M01T'), 'coverage.json'), 'utf8'));
+  check(withoutCursor(incCoverage) === withoutCursor(covDoc) && incCoverage.activeTurn.processedThroughSeq >= incCoverage.activeTurn.anchorSeq,
+    'incremental ingestion == replay for coverage + activeTurn');
+  // Restart resumes the open turn from durable state.
+  const resumed = producerV2.openMemoryProducerV2({ workspace: incWs, namespace: replayNs, controllerAuthority: () => ({ manifest: manifestFor('TASK-M01T', 'task_m01_t'), authorityRecord: null }) });
+  const resumedTurn = resumed.describe().activeTurn;
+  check(resumedTurn !== null && resumedTurn.anchorSeq === covDoc.activeTurn.anchorSeq && resumedTurn.anchorMessageHash === covDoc.activeTurn.anchorMessageHash
+    && resumedTurn.processedThroughSeq === s.events.length - 1, 'restart resumes the durable active turn');
+  const statePath = path.join(producerV2.memoryDirForV2(incWs, 'TASK-M01T'), 'producer', 'state.json');
+  const oldState = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  delete oldState.openTurn;
+  fs.writeFileSync(statePath, JSON.stringify(oldState));
+  const legacyResume = producerV2.openMemoryProducerV2({ workspace: incWs, namespace: replayNs, controllerAuthority: () => ({ manifest: manifestFor('TASK-M01T', 'task_m01_t'), authorityRecord: null }) });
+  check(legacyResume.describe().activeTurn === null, 'pre-boundary state resumes with no open turn (fail closed, never guessed)');
 }
 
 hostSuite().then(() => {

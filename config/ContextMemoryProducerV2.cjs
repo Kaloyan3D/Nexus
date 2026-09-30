@@ -22,6 +22,14 @@
  *     -> B04 tier decisions under the R1 requiredness contract
  *     -> staged C07H/C08 layout under <workspace>/.ai-harness/ccv2/<taskId>/
  *
+ * Active turn (ACTIVE-TAIL boundary): the DSH turn/start lifecycle opens a
+ * turn; its anchor is the first model-visible message appended after it and
+ * never moves (plugin context, skill instructions and claimed follow-ups
+ * land after it). While the turn is open its units are produced, ledgered
+ * and sealable at turn/end, but excluded from the staged historical set;
+ * coverage.json carries the durable activeTurn record hosts verify against
+ * the live request.
+ *
  * Requiredness (R1.8, no recency/size/LRU/embedding/LLM input): a unit is
  * required when it belongs to the unsealed generation (current turn), to
  * the most recently sealed generation (M01A 45.2: only units OLDER than the
@@ -280,6 +288,7 @@ function initialStateV2(namespace) {
     openGroups: {},
     latestUserMessageSeq: null,
     currentTurn: null,
+    openTurn: null,
     unitCount: 0,
     blocker: null,
     sealFailures: [],
@@ -294,7 +303,45 @@ function validateStateV2(state, namespace) {
   if (canonicalJsonOf(state.namespace) !== canonicalJsonOf(namespace)) {
     failProducer('namespace-mismatch', 'memory belongs to another session namespace');
   }
+  // State written before the active-turn boundary existed carries no
+  // openTurn: it resumes as "no open turn known" (hosts fail closed until
+  // the next DSH turn/start re-anchors), never as a guessed boundary.
+  if (state.openTurn === undefined) state.openTurn = null;
+  if (state.openTurn !== null && !validOpenTurnV2(state.openTurn)) failProducer('state-corrupt', 'openTurn');
   return state;
+}
+
+// ---- active turn (DSH turn/start lifecycle; never "latest user text") ----
+
+function validOpenTurnV2(openTurn) {
+  if (!isPlainObject(openTurn) || !Number.isInteger(openTurn.turnStartSeq) || openTurn.turnStartSeq < 0) return false;
+  if (openTurn.turn !== null && !Number.isInteger(openTurn.turn)) return false;
+  if (openTurn.anchorSeq === null) return openTurn.anchorMessageHash === null;
+  return Number.isInteger(openTurn.anchorSeq) && openTurn.anchorSeq > openTurn.turnStartSeq
+    && typeof openTurn.anchorMessageHash === 'string' && /^[0-9a-f]{64}$/.test(openTurn.anchorMessageHash);
+}
+
+// A unit belongs to the open turn when it starts after that turn's
+// turn/start event (seq order is the canonical log order).
+function unitInOpenTurnV2(state, unit) {
+  return state.openTurn !== null && unit.firstSeq > state.openTurn.turnStartSeq;
+}
+
+/**
+ * Durable active-turn identity: the anchor is the FIRST model-visible
+ * message appended after the DSH turn/start of the open turn. Later
+ * user-role injections (plugin context, skill instructions, human
+ * follow-ups claimed mid-turn) never move it. null when no turn is open.
+ */
+function activeTurnRecordV2(state) {
+  if (state.openTurn === null) return null;
+  return {
+    turn: state.openTurn.turn,
+    turnStartSeq: state.openTurn.turnStartSeq,
+    anchorSeq: state.openTurn.anchorSeq,
+    anchorMessageHash: state.openTurn.anchorMessageHash,
+    processedThroughSeq: state.processedThroughSeq,
+  };
 }
 
 // ---- tier decisions (R1 requiredness) ----
@@ -486,9 +533,16 @@ function step(ctx, state, event, sink) {
     state.blocker = { code: 'producer-surface-replacement-unsupported', atSeq: event.seq };
     return;
   }
+  if (SURFACE_TYPES.includes(event.type) && state.openTurn !== null && state.openTurn.anchorSeq === null) {
+    state.openTurn.anchorSeq = event.seq;
+    state.openTurn.anchorMessageHash = surfaceMessageHashV2(event);
+    sink.turnMoved();
+  }
   switch (event.type) {
     case 'turn/start':
       state.currentTurn = Number.isInteger(event.data && event.data.turn) ? event.data.turn : null;
+      state.openTurn = { turn: state.currentTurn, turnStartSeq: event.seq, anchorSeq: null, anchorMessageHash: null };
+      sink.turnMoved();
       return;
     case 'user/message': {
       const unit = unitOfConversation(state, event);
@@ -567,6 +621,9 @@ function step(ctx, state, event, sink) {
     }
     case 'turn/end':
       sink.boundary(event);
+      // Sealed or not, the turn is closed: its units join the historical set.
+      state.openTurn = null;
+      sink.turnMoved();
       return;
     default:
       return;
@@ -584,11 +641,19 @@ function computeStagedSetV2(state, units, pagesById, sealed, decisionCache) {
   const tiers = { HOT: 0, WARM: 0, COLD: 0 };
   const covered = new Set();
   let currentTurnMessageHash = null;
+  let activeTurnUnits = 0;
   for (const unit of units) {
     // The latest user message is the LIVE current turn: the request itself
     // carries it exactly once, so it is never also staged as a page.
     if (unit.kind === 'conversation' && unit.firstSeq === state.latestUserMessageSeq) {
       currentTurnMessageHash = unit.messageHashes[0];
+      continue;
+    }
+    // Open-turn units stay provider-native in the live request: they are
+    // produced and ledgered (and seal at turn/end) but never enter the
+    // staged historical set active compilation reads.
+    if (unitInOpenTurnV2(state, unit)) {
+      activeTurnUnits += 1;
       continue;
     }
     for (const hash of unit.messageHashes) covered.add(hash);
@@ -610,7 +675,8 @@ function computeStagedSetV2(state, units, pagesById, sealed, decisionCache) {
     }
   }
   return {
-    pages, decisions, toolTransactions, tiers,
+    pages, decisions, toolTransactions, tiers, activeTurnUnits,
+    activeTurn: activeTurnRecordV2(state),
     coverage: { hashes: Array.from(covered).sort(), currentTurnMessageHash },
   };
 }
@@ -636,6 +702,7 @@ function writeStagedV2(layout, state, staged, sealed) {
     sealedCheckpointId: sealed === null ? null : sealed.checkpointId,
     currentTurnMessageHash: staged.coverage.currentTurnMessageHash,
     messageHashes: staged.coverage.hashes,
+    activeTurn: staged.activeTurn,
   }));
   atomicWriteText(layout.stagedPath, canonicalJsonOf({
     schemaVersion: PRODUCER_SCHEMA_VERSION,
@@ -648,6 +715,8 @@ function writeStagedV2(layout, state, staged, sealed) {
     tierCounts: staged.tiers,
     decisionsDigest: sha256HexUtf8(canonicalJsonOf(staged.decisions)),
     excludedCurrentTurnSeq: state.latestUserMessageSeq,
+    activeTurn: staged.activeTurn,
+    excludedActiveTurnUnitCount: staged.activeTurnUnits,
     blocker: state.blocker,
   }));
 }
@@ -729,7 +798,11 @@ function openMemoryProducerV2(deps) {
     const pendingLines = [];
     let unitsAdded = 0;
     let sealsAdded = 0;
+    let turnMoves = 0;
     const sink = {
+      turnMoved() {
+        turnMoves += 1;
+      },
       eventAt(seq) {
         const event = eventAtFn(seq);
         if (!event || event.seq !== seq) failProducer('source-mismatch', 'event ' + seq + ' is not canonical');
@@ -790,7 +863,7 @@ function openMemoryProducerV2(deps) {
     commit(pendingLines);
     // Staging is a pure projection of (units, sealed checkpoint, current
     // turn): rewrite only when one of them moved (or when asked).
-    if (opts.stage === true || (opts.stage !== false && (unitsAdded > 0 || sealsAdded > 0))) stage();
+    if (opts.stage === true || (opts.stage !== false && (unitsAdded > 0 || sealsAdded > 0 || turnMoves > 0))) stage();
     return Object.freeze({
       unitsAdded,
       sealsAdded,
@@ -824,6 +897,7 @@ function openMemoryProducerV2(deps) {
       blobCount: blobs,
       openGroups: Object.keys(state.openGroups).length,
       latestUserMessageSeq: state.latestUserMessageSeq,
+      activeTurn: activeTurnRecordV2(state),
       blocker: state.blocker,
       sealFailures: clone(state.sealFailures),
     });
@@ -890,6 +964,7 @@ module.exports = {
   decideUnitTierV2,
   stateDecisionsForV2,
   computeStagedSetV2,
+  activeTurnRecordV2,
   openMemoryProducerV2,
   replaySessionV2,
   controllerAuthorityReaderV2,

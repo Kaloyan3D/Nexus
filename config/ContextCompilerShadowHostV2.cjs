@@ -537,9 +537,109 @@ function readStagedCoverageV2(memoryDir) {
       || (value.currentTurnMessageHash !== null && !(typeof value.currentTurnMessageHash === 'string' && HEX64_PATTERN.test(value.currentTurnMessageHash)))) {
       return { coverage: null, skipped: 'shadow-coverage-invalid' };
     }
-    return { coverage: { hashes: new Set(value.messageHashes), currentTurnMessageHash: value.currentTurnMessageHash }, skipped: null };
+    // activeTurn: absent in coverage written before the active-turn
+    // boundary (null = no open turn known); present -> typed, else invalid.
+    const activeTurn = value.activeTurn === undefined ? null : value.activeTurn;
+    if (activeTurn !== null && !validActiveTurnRecordV2(activeTurn)) return { coverage: null, skipped: 'shadow-coverage-invalid' };
+    return {
+      coverage: {
+        hashes: new Set(value.messageHashes),
+        currentTurnMessageHash: value.currentTurnMessageHash,
+        activeTurn: activeTurn === null ? null : Object.freeze(Object.assign({}, activeTurn)),
+      },
+      skipped: null,
+    };
   } catch {
     return { coverage: null, skipped: 'shadow-coverage-invalid' };
+  }
+}
+
+function validActiveTurnRecordV2(record) {
+  if (!isPlainObject(record)) return false;
+  const keys = ['turn', 'turnStartSeq', 'anchorSeq', 'anchorMessageHash', 'processedThroughSeq'];
+  if (Object.keys(record).length !== keys.length || !keys.every((key) => Object.prototype.hasOwnProperty.call(record, key))) return false;
+  if (record.turn !== null && !Number.isInteger(record.turn)) return false;
+  if (!Number.isInteger(record.turnStartSeq) || record.turnStartSeq < 0) return false;
+  if (!Number.isInteger(record.processedThroughSeq) || record.processedThroughSeq < record.turnStartSeq) return false;
+  if (record.anchorSeq === null) return record.anchorMessageHash === null;
+  return Number.isInteger(record.anchorSeq) && record.anchorSeq > record.turnStartSeq
+    && record.anchorSeq <= record.processedThroughSeq
+    && typeof record.anchorMessageHash === 'string' && HEX64_PATTERN.test(record.anchorMessageHash);
+}
+
+/**
+ * ACTIVE-TAIL boundary (producer-owned, verified against the request):
+ * the open turn's anchor (the first model-visible message after the DSH
+ * turn/start) must occur EXACTLY ONCE in the live messages, by canonical
+ * message hash. prefix = messages[0..anchor) must be fully represented by
+ * staged historical memory; tail = messages[anchor..] must share no
+ * message hash and no tool-call id with it (a stale activeTurn - e.g. a
+ * closed turn's anchor whose units are now historical - shows up as that
+ * overlap), and its tool protocol must be closed inside the tail.
+ * Returns { boundary, skipped:null } or { boundary:null, skipped:<reason> };
+ * never guesses, never throws. The tail is returned by REFERENCE.
+ */
+const ACTIVE_TAIL_SKIP_REASONS = Object.freeze([
+  'active-tail-input-invalid', 'active-turn-missing', 'active-turn-unanchored', 'active-turn-anchor-missing',
+  'active-turn-anchor-ambiguous', 'active-tail-overlap', 'active-tail-prefix-uncovered', 'active-tail-protocol-open',
+  'active-tail-failed',
+]);
+function extractActiveTailV2(input) {
+  const skip = (reason) => ({ boundary: null, skipped: reason });
+  try {
+    if (!isPlainObject(input) || !Array.isArray(input.messages) || input.messages.length === 0
+      || input.messages.length > READ_BOUNDS.requestMessagesMax || !isPlainObject(input.coverage)
+      || !(input.coverage.hashes instanceof Set)) {
+      return skip('active-tail-input-invalid');
+    }
+    const messages = input.messages;
+    const activeTurn = input.coverage.activeTurn === undefined ? null : input.coverage.activeTurn;
+    if (activeTurn === null) return skip('active-turn-missing');
+    if (activeTurn.anchorMessageHash === null) return skip('active-turn-unanchored');
+    const hashes = messages.map((message) => sha256HexUtf8(canonicalJsonOf(message)));
+    let anchorIndex = -1;
+    for (let index = 0; index < hashes.length; index += 1) {
+      if (hashes[index] !== activeTurn.anchorMessageHash) continue;
+      if (anchorIndex !== -1) return skip('active-turn-anchor-ambiguous');
+      anchorIndex = index;
+    }
+    if (anchorIndex === -1) return skip('active-turn-anchor-missing');
+    const covered = input.coverage.hashes;
+    for (let index = anchorIndex; index < hashes.length; index += 1) {
+      if (covered.has(hashes[index])) return skip('active-tail-overlap');
+    }
+    const stagedCallIds = new Set();
+    for (const tx of Array.isArray(input.toolTransactions) ? input.toolTransactions : []) {
+      if (isPlainObject(tx) && typeof tx.callId === 'string') stagedCallIds.add(tx.callId);
+    }
+    const tail = messages.slice(anchorIndex);
+    const tailCalls = new Map();
+    const tailResults = new Map();
+    for (const message of tail) {
+      const { calls, results } = callIdsOfMessage(message);
+      for (const callId of calls) tailCalls.set(callId, (tailCalls.get(callId) || 0) + 1);
+      for (const callId of results) tailResults.set(callId, (tailResults.get(callId) || 0) + 1);
+    }
+    for (const callId of new Set([...tailCalls.keys(), ...tailResults.keys()])) {
+      if (stagedCallIds.has(callId)) return skip('active-tail-overlap');
+      if (tailCalls.get(callId) !== 1 || tailResults.get(callId) !== 1) return skip('active-tail-protocol-open');
+    }
+    for (let index = 0; index < anchorIndex; index += 1) {
+      if (!covered.has(hashes[index])) return skip('active-tail-prefix-uncovered');
+    }
+    return {
+      boundary: Object.freeze({
+        anchorIndex,
+        prefixLength: anchorIndex,
+        tail: Object.freeze(tail),
+        tailMessageHashes: Object.freeze(hashes.slice(anchorIndex)),
+        tailCallIds: Object.freeze(Array.from(tailCalls.keys())),
+        activeTurn,
+      }),
+      skipped: null,
+    };
+  } catch {
+    return skip('active-tail-failed');
   }
 }
 
@@ -1019,6 +1119,8 @@ module.exports = {
   textBlocksOf,
   pairLiveToolTransactionsV2,
   derivePendingProtocolV2,
+  ACTIVE_TAIL_SKIP_REASONS,
+  extractActiveTailV2,
   extractLiveCurrentTurnV2,
   deriveActualMembersV2,
   assembleShadowInputsV2,
