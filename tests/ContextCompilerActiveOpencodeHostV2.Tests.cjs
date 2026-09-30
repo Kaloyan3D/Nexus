@@ -477,6 +477,7 @@ function sectionsOCH3() {
     await sectionOCH5();
     await sectionOCH6();
     await sectionNativeTailMatrix();
+    await sectionMetaCredential();
     console.log(String.fromCharCode(10) + 'ContextCompilerActiveOpencodeHostV2 suite: ' + passed + ' passed, ' + failed + ' failed');
     if (failed > 0) process.exitCode = 1;
   })().catch((error) => { console.error(error); process.exitCode = 1; });
@@ -1251,4 +1252,68 @@ async function sectionNativeTailMatrix() {
   }
   opencode.resetOpencodeHealthV2();
   wipe(fx);
+}
+
+// ---------------------------------------------------------------------------
+// OCH-7: Meta counter credential. Staging is synchronous and never resolves
+// a credential; the key is resolved in the async completion phase just
+// before remote counting (explicit > MODEL_API_KEY env > managed store).
+async function sectionMetaCredential() {
+  section('C08H-OCH-7 META COUNTER CREDENTIAL (managed store, env precedence, fail closed)');
+  const fx = makeFixtureRoot({ mode: 'active' });
+  seedBindingH(fx, NSH.sessionId);
+  stageMemoryH(fx);
+  cert.certifyOpencodeV2(storeRootOf(fx), host.currentOpencodeIdentityV2({ installRoot: fx.root }).identity, 'f'.repeat(64));
+  host.startupOpencodeAuthorityV2({ storeRoot: storeRootOf(fx), installRoot: fx.root });
+  const savedEnv = process.env.MODEL_API_KEY;
+  delete process.env.MODEL_API_KEY;
+  const STORE_KEY = 'store-only-meta-key-OCH7';
+  const ENV_KEY = 'env-meta-key-OCH7';
+  try {
+    const run = async (resolver) => {
+      const logs = [];
+      const created = [];
+      const calls = { resolver: 0 };
+      const deps = {
+        installRoot: fx.root, bindingsPath: bindingsPathOf(fx), log: (entry) => logs.push(entry), prewarm: false,
+        createMetaCounter: (input) => { created.push(input.apiKey); return mockRemoteCounter(byteRule); },
+      };
+      if (resolver !== undefined) deps.resolveMetaApiKey = async () => { calls.resolver += 1; return resolver(); };
+      const listener = host.createOpencodeProjectionStreamListenerV2(deps);
+      const result = await runProjectionH(listener, prodRequestH(NSH.sessionId));
+      const decided = logs.find((entry) => entry && entry.event === 'ccv2-opencode-active-decided') || {};
+      return { result, decided, created, calls, logs };
+    };
+    // Staging alone never calls the resolver.
+    let stagingCalls = 0;
+    const request = prodRequestH(NSH.sessionId);
+    coverRequestH(path.join(fx.workspace, '.ai-harness', 'ccv2', NSH.taskId), request);
+    const staged = host.applyOpencodeProjectionV2({
+      request, policy: { mode: 'active', valid: true }, installRoot: fx.root, bindingsPath: bindingsPathOf(fx),
+      resolveMetaApiKey: async () => { stagingCalls += 1; return STORE_KEY; },
+    });
+    check(staged.pending === true && stagingCalls === 0 && staged.metaRemoteCounter === null, 'staging is synchronous and resolves no credential');
+    const storeOnly = await run(() => STORE_KEY);
+    check(storeOnly.decided.projectionMode === 'CCV2_COMPILED' && storeOnly.created.length === 1 && storeOnly.created[0] === STORE_KEY && storeOnly.calls.resolver === 1,
+      'credential-store-only MODEL_API_KEY compiles (resolved once, at completion)', JSON.stringify([storeOnly.decided.fallbackReason, storeOnly.decided.fallbackStage]));
+    process.env.MODEL_API_KEY = ENV_KEY;
+    const envWins = await run(() => STORE_KEY);
+    check(envWins.decided.projectionMode === 'CCV2_COMPILED' && envWins.created[0] === ENV_KEY && envWins.calls.resolver === 0, 'MODEL_API_KEY environment keeps precedence');
+    delete process.env.MODEL_API_KEY;
+    const missing = await run(() => undefined);
+    check(missing.decided.projectionMode === 'LEGACY' && missing.decided.fallbackReason === 'active-tokenizer-unavailable' && missing.decided.fallbackStage === 'counter-credential'
+      && missing.decided.compilerExecutions === 0 && missing.created.length === 0 && missing.result.dispatched.length === 0 && missing.result.nextCalls() === 1,
+      'missing key -> typed counter-credential LEGACY fallback (legacy stream, no counter)');
+    const throwing = await run(() => { throw new Error('credential store unavailable ' + STORE_KEY); });
+    check(throwing.decided.fallbackStage === 'counter-credential' && throwing.result.dispatched.length === 0, 'a throwing resolver fails closed the same way');
+    const none = await run(undefined);
+    check(none.decided.fallbackStage === 'counter-credential' && none.result.returned === none.result.nextStream && none.calls.resolver === 0,
+      'no key source at all -> staging-level counter-credential fallback, next() verbatim');
+    const all = JSON.stringify([storeOnly.logs, envWins.logs, missing.logs, throwing.logs, none.logs]);
+    check(all.indexOf(STORE_KEY) === -1 && all.indexOf(ENV_KEY) === -1, 'the key never appears in any log line');
+  } finally {
+    if (savedEnv === undefined) delete process.env.MODEL_API_KEY; else process.env.MODEL_API_KEY = savedEnv;
+    opencode.resetOpencodeHealthV2();
+    wipe(fx);
+  }
 }

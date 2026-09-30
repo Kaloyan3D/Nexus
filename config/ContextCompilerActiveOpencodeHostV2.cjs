@@ -299,10 +299,13 @@ function applyOpencodeProjectionV2(input) {
       && typeof input.metaRemoteCounter.countPayloadV2 === 'function'
       && typeof input.metaRemoteCounter.buildMemoCounterV2 === 'function'
       && input.metaRemoteCounter.fingerprint === remoteV2.REMOTE_FINGERPRINT_V1;
-    const metaKey = input.metaApiKey !== undefined && input.metaApiKey !== null
-      ? input.metaApiKey
-      : (typeof process !== 'undefined' && process.env ? process.env[MODEL_API_KEY_ENV] : undefined);
-    if (hasMockCounter !== true && (typeof metaKey !== 'string' || metaKey === '')) {
+    // Staging stays synchronous and never resolves a credential: it only
+    // requires that SOME key source exists (explicit, environment, or the
+    // managed-credential resolver). The key itself is resolved in the async
+    // completion phase, immediately before remote counting.
+    const explicitMetaKey = typeof input.metaApiKey === 'string' && input.metaApiKey !== '' ? input.metaApiKey : null;
+    const resolveMetaApiKey = typeof input.resolveMetaApiKey === 'function' ? input.resolveMetaApiKey : null;
+    if (hasMockCounter !== true && explicitMetaKey === null && envMetaKeyV2() === null && resolveMetaApiKey === null) {
       return fallback(request, 'active-tokenizer-unavailable', 'counter-credential');
     }
     const bindingsPath = typeof input.bindingsPath === 'string' ? input.bindingsPath : null;
@@ -379,23 +382,14 @@ function applyOpencodeProjectionV2(input) {
       descriptor = null;
     }
     if (descriptor === null) return fallback(request, 'active-tokenizer-unavailable', 'counter');
-    let metaRemoteCounter = null;
-    try {
-      if (isPlainObject(input.metaRemoteCounter)
-        && typeof input.metaRemoteCounter.countTextsV2 === 'function'
-        && typeof input.metaRemoteCounter.countPayloadV2 === 'function'
-        && typeof input.metaRemoteCounter.buildMemoCounterV2 === 'function'
-        && input.metaRemoteCounter.fingerprint === remoteV2.REMOTE_FINGERPRINT_V1) {
-        metaRemoteCounter = input.metaRemoteCounter;
-      } else {
-        metaRemoteCounter = remoteV2.createMuseRemoteCounterV2({
-          descriptor, apiKey: metaKey, timeoutMs: input.countTimeoutMs, deadlineMs: input.countDeadlineMs,
-        });
-      }
-    } catch (error) {
-      void error;
-      return fallback(request, 'active-tokenizer-unavailable', 'counter');
-    }
+    // A supplied counter (tests, pre-warm re-staging) is used as-is; the
+    // production counter is created at completion from the resolved key.
+    const metaRemoteCounter = hasMockCounter === true ? input.metaRemoteCounter : null;
+    const counterPlan = Object.freeze({
+      descriptor, explicitMetaKey, resolveMetaApiKey,
+      createMetaCounter: typeof input.createMetaCounter === 'function' ? input.createMetaCounter : remoteV2.createMuseRemoteCounterV2,
+      timeoutMs: input.countTimeoutMs, deadlineMs: input.countDeadlineMs,
+    });
     const compileInput = {
       checkpoint: sealed,
       currentTurn: { turnId: 'live', text: liveTurn.turn.text, revision: null },
@@ -439,7 +433,7 @@ function applyOpencodeProjectionV2(input) {
     return Object.freeze({
       pending: true, request, policy, compileInput,
       pages: stagedPages.pages, outputReserve, attemptBinding,
-      liveTurnHash, liveTurn, memoryDir, metaRemoteCounter, boundary, wireRoute,
+      liveTurnHash, liveTurn, memoryDir, metaRemoteCounter, counterPlan, boundary, wireRoute,
       bindingFound: diag.bindingFound, checkpointFound: diag.checkpointFound,
       sessionSourceAvailable: diag.sessionSourceAvailable,
       nativeTailMessages: diag.nativeTailMessages, nativePrefixMessages: diag.nativePrefixMessages,
@@ -501,6 +495,33 @@ function nativeTailPreservedV2(request, derived, boundary, route) {
     return true;
   });
 }
+function envMetaKeyV2() {
+  const value = typeof process !== 'undefined' && process.env ? process.env[MODEL_API_KEY_ENV] : undefined;
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+// Precedence: explicit dependency > process environment > managed
+// credential store (its own resolver also honours the inherited
+// environment). A throwing or empty resolver is "no key". Never logged.
+async function resolveMetaKeyV2(plan) {
+  if (plan.explicitMetaKey !== null) return plan.explicitMetaKey;
+  const fromEnv = envMetaKeyV2();
+  if (fromEnv !== null) return fromEnv;
+  if (plan.resolveMetaApiKey === null) return null;
+  try {
+    const resolved = await plan.resolveMetaApiKey();
+    return typeof resolved === 'string' && resolved !== '' ? resolved : null;
+  } catch (error) {
+    void error;
+    return null;
+  }
+}
+// Counter actually used for a staged request (pre-warm reuses it).
+const resolvedCounters = new WeakMap();
+function counterOfStagedV2(staged) {
+  if (isPlainObject(staged.metaRemoteCounter)) return staged.metaRemoteCounter;
+  const found = resolvedCounters.get(staged);
+  return found === undefined ? null : found;
+}
 async function completeOpencodeProjectionV2(staged) {
   const request = staged.request;
   const diag = {
@@ -510,6 +531,19 @@ async function completeOpencodeProjectionV2(staged) {
   };
   const fallback = (reason, stage) => legacyHostResult(request, reason, stage, diag);
   try {
+    let metaRemoteCounter = staged.metaRemoteCounter;
+    if (metaRemoteCounter === null) {
+      const plan = staged.counterPlan;
+      const metaKey = await resolveMetaKeyV2(plan);
+      if (metaKey === null) return fallback('active-tokenizer-unavailable', 'counter-credential');
+      try {
+        metaRemoteCounter = plan.createMetaCounter({ descriptor: plan.descriptor, apiKey: metaKey, timeoutMs: plan.timeoutMs, deadlineMs: plan.deadlineMs });
+      } catch (error) {
+        void error;
+        return fallback('active-tokenizer-unavailable', 'counter');
+      }
+      resolvedCounters.set(staged, metaRemoteCounter);
+    }
     const boundary = staged.boundary;
     // The exact-count authority: the pinned Responses wire projection of
     // the FINAL hybrid request (built by the same builder that builds the
@@ -524,7 +558,7 @@ async function completeOpencodeProjectionV2(staged) {
     const decision = await opencodeV2.attemptOpencodeActiveV2({
       compileInput: staged.compileInput,
       pages: staged.pages,
-      metaRemoteCounter: staged.metaRemoteCounter,
+      metaRemoteCounter,
       requestTerms: {
         systemText: typeof request.system === 'string' ? request.system : '',
         turnText: staged.liveTurn.turn.text,
@@ -698,7 +732,7 @@ const prewarmTimers = new Map();
 function schedulePrewarmV2(safeDeps, staged) {
   try {
     if (safeDeps.prewarm === false) return;
-    const counter = staged.metaRemoteCounter;
+    const counter = counterOfStagedV2(staged);
     if (!isPlainObject(counter) || typeof counter.prewarmTextsV2 !== 'function') return;
     const sessionId = staged.request.sessionId;
     const previous = prewarmTimers.get(sessionId);
@@ -730,7 +764,8 @@ async function runPrewarmV2(safeDeps, staged) {
         bindingsPath: safeDeps.bindingsPath,
         sessionSourceFor: safeDeps.sessionSourceFor,
         metaApiKey: safeDeps.metaApiKey,
-        metaRemoteCounter: staged.metaRemoteCounter,
+        resolveMetaApiKey: safeDeps.resolveMetaApiKey,
+        metaRemoteCounter: counterOfStagedV2(staged),
         countTimeoutMs: safeDeps.countTimeoutMs,
         countDeadlineMs: safeDeps.countDeadlineMs,
       });
@@ -755,7 +790,7 @@ async function runPrewarmV2(safeDeps, staged) {
     });
     summary = texts === null
       ? { attempted: 0, cached: 0, counted: 0, skipped: 'enumeration' }
-      : await source.metaRemoteCounter.prewarmTextsV2(texts);
+      : await counterOfStagedV2(source).prewarmTextsV2(texts);
   } catch (error) {
     void error;
     summary = { attempted: 0, cached: 0, counted: 0, skipped: 'failed' };
@@ -839,6 +874,8 @@ function createOpencodeProjectionStreamListenerV2(deps) {
         sessionSourceFor: safeDeps.sessionSourceFor,
         metaApiKey: safeDeps.metaApiKey,
         metaRemoteCounter: safeDeps.metaRemoteCounter === undefined ? null : safeDeps.metaRemoteCounter,
+        resolveMetaApiKey: safeDeps.resolveMetaApiKey,
+        createMetaCounter: safeDeps.createMetaCounter,
         countTimeoutMs: safeDeps.countTimeoutMs,
         countDeadlineMs: safeDeps.countDeadlineMs,
       });

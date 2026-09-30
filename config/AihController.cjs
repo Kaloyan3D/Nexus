@@ -2897,7 +2897,16 @@ function apply(ctx) {
   // durable authority certification (fail-closed to QUARANTINED when
   // absent/invalid/stale); OFF/OBSERVE/uncertified modes return every
   // request verbatim. Never throws into controller startup.
-  opencodeActiveHost.installOpencodeActiveProjection(ctx, { installRoot, bindingsPath, log, sessionSourceFor })
+  // The Meta counter credential comes from the managed DSH credential store
+  // (data/.credentials.yaml; its resolver honours the inherited
+  // environment first), resolved per request just before remote counting.
+  const resolveMetaApiKey = async () => {
+    const credentials = typeof ctx.get === 'function' ? ctx.get('credentials') : undefined
+    if (!credentials || typeof credentials.resolve !== 'function') return undefined
+    const found = await credentials.resolve('MODEL_API_KEY')
+    return found && typeof found.value === 'string' && found.value !== '' ? found.value : undefined
+  }
+  opencodeActiveHost.installOpencodeActiveProjection(ctx, { installRoot, bindingsPath, log, sessionSourceFor, resolveMetaApiKey })
 
   // F1 ORDERING: prepended so compaction runs BEFORE the loop's
   // runtime-context projection decision for this request is consumed.

@@ -304,20 +304,18 @@ async function runNativeTailLive(input) {
       env: {},
     });
     if (producer.installed !== true) fail('producer-not-installed');
-    // The real Meta counter; every whole-payload count is recorded (the
-    // exact object the counter serializes) without changing behavior.
-    let metaKey = 'dry-run-local-key';
-    if (!opts.dryRun) {
-      const resolved = await ctx.credentials.resolve('MODEL_API_KEY');
-      metaKey = resolved && typeof resolved.value === 'string' ? resolved.value : '';
-      if (metaKey === '') {
-        fail('meta-credential-unavailable');
-        return { ok: false, failures, report };
-      }
-    }
-    const descriptor = remote.resolveMuseRemoteV2({ provider: 'meta-model-api', model: MODEL });
-    const realCounter = remote.createMuseRemoteCounterV2(Object.assign({ descriptor, apiKey: metaKey }, opts.dryRun ? { transport: dryMetaTransport() } : {}));
-    metaKey = null;
+    // The real Meta counter, created by the HOST from the key it resolves at
+    // completion through the production resolver (managed credential store,
+    // exactly as AihController wires it). Every whole-payload count is
+    // recorded (the exact object the counter serializes) without changing
+    // behavior. The key never leaves the host/counter.
+    const resolveMetaApiKey = opts.dryRun
+      ? async () => 'dry-run-local-key'
+      : async () => {
+        const found = await ctx.credentials.resolve('MODEL_API_KEY');
+        return found && typeof found.value === 'string' && found.value !== '' ? found.value : undefined;
+      };
+    report.metaKeySource = opts.dryRun ? 'dry-run' : (typeof process.env.MODEL_API_KEY === 'string' && process.env.MODEL_API_KEY !== '' ? 'env' : 'managed-credential-store');
     const recordPayload = async (fn, shape) => {
       const entry = { shapeCanon: canon(shape), tokens: null, error: null };
       counted.push(entry);
@@ -331,18 +329,23 @@ async function runNativeTailLive(input) {
         throw error;
       }
     };
-    const counter = Object.assign({}, realCounter, {
-      countPayloadV2: (shape) => recordPayload(realCounter.countPayloadV2, shape),
-      beginCountOperationV2: (options) => {
-        const op = realCounter.beginCountOperationV2(options);
-        return Object.assign({}, op, { countPayloadV2: (shape) => recordPayload(op.countPayloadV2, shape) });
-      },
-    });
+    let countersCreated = 0;
+    const createMetaCounter = (input) => {
+      countersCreated += 1;
+      const realCounter = remote.createMuseRemoteCounterV2(Object.assign({}, input, opts.dryRun ? { transport: dryMetaTransport() } : {}));
+      return Object.assign({}, realCounter, {
+        countPayloadV2: (shape) => recordPayload(realCounter.countPayloadV2, shape),
+        beginCountOperationV2: (options) => {
+          const op = realCounter.beginCountOperationV2(options);
+          return Object.assign({}, op, { countPayloadV2: (shape) => recordPayload(op.countPayloadV2, shape) });
+        },
+      });
+    };
     ctx.on('llm/stream', (options, next) => { entered.push(options); return next(); }, { global: true });
     const installed = host.installOpencodeActiveProjection(ctx, {
       installRoot: fxRoot, bindingsPath, log: (entry) => logs.push(entry),
       sessionSourceFor: producer.registry.sessionSourceFor,
-      metaRemoteCounter: counter, prewarm: false,
+      resolveMetaApiKey, createMetaCounter, prewarm: false,
     });
     if (installed.installed !== true) fail('projection-not-installed', installed.reason);
     report.healthAtStart = opencode.opencodeHealthV2({ provider: PROVIDER, model: MODEL });
@@ -480,6 +483,8 @@ async function runNativeTailLive(input) {
     if (usageLines.length !== report.compiled.length) fail('usage-not-observed', usageLines.length + '/' + report.compiled.length);
     if (usageLines.some((u) => u.withinMargin !== true)) fail('usage-over-margin');
     if (report.anomalies > 0) fail('anomaly-revoked');
+    report.countersCreatedByHost = countersCreated;
+    if (countersCreated < report.compiled.length) fail('host-did-not-create-counter');
     report.cacheEpochBefore = epochBefore;
     report.cacheEpochAfter = remote.processCounterResilienceV2().cacheEpochV2();
     report.healthAtEnd = opencode.opencodeHealthV2({ provider: PROVIDER, model: MODEL });
