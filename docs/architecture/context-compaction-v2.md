@@ -6338,3 +6338,10 @@ none on every compiled step, zero historical reasoning items on the wire,
 fresh reasoning in every response, Meta acceptance of every counted body,
 counted == posted, usage within margin, unchanged cache epoch, no
 quarantine, one workflow load.
+
+Canary suite revision `oc01-canary-suite-v2` names the suite that
+certifies request shape v3 (static count/bill fixtures, the no-replay
+continuation fixture, and the live native-tail phase at xhigh:
+ACTIVE-TAIL-NATIVE, reasoningReplay:none, count/send payload parity, real
+DSH usage observation, multi-step tool progression). Certification binds
+it, so v1-suite (and v2-shape) certifications derive QUARANTINED.

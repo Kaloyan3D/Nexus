@@ -28,6 +28,13 @@ const CCV2_SYSTEM_SEPARATOR_V1 = String.fromCharCode(10, 10);
 const MARGIN_POLICY_REVISION_V1 = 'opencode-margin-policy-v1';
 const OUTPUT_RESERVE_POLICY_REVISION_V1 = 'opencode-output-reserve-policy-v1';
 const CANARY_SUITE_REVISION_V1 = 'oc01-canary-suite-v1';
+// The OC01 suite certifying request shape v3: static count/bill fixtures,
+// the native-tail no-replay continuation fixture, and the live native-tail
+// phase (real DSH loop + pinned pi-ai adapter at xhigh: ACTIVE-TAIL-NATIVE,
+// reasoningReplay:none validation, count/send payload parity, real DSH
+// usage observation, multi-step tool progression). Certification binds
+// this revision, so evidence from the v1 suite never authorizes a route.
+const CANARY_SUITE_REVISION_V2 = 'oc01-canary-suite-v2';
 const MODEL_API_KEY_ENV = 'MODEL_API_KEY';
 const AUXILIARY_PURPOSES = Object.freeze(['compaction', 'session-title']);
 const DECISION_TELEMETRY_EVENT = 'ccv2-opencode-active-decided';
@@ -159,7 +166,7 @@ function currentOpencodeIdentityV2(input) {
       safetyMarginPolicyRevision: MARGIN_POLICY_REVISION_V1,
       outputReservePolicyRevision: OUTPUT_RESERVE_POLICY_REVISION_V1,
       requestShapeRevision: OPENCODE_REQUEST_SHAPE_V3,
-      canarySuiteRevision: CANARY_SUITE_REVISION_V1,
+      canarySuiteRevision: CANARY_SUITE_REVISION_V2,
     });
   } catch (error) {
     void error;
@@ -1093,6 +1100,7 @@ module.exports = {
   MARGIN_POLICY_REVISION_V1,
   OUTPUT_RESERVE_POLICY_REVISION_V1,
   CANARY_SUITE_REVISION_V1,
+  CANARY_SUITE_REVISION_V2,
   MODEL_API_KEY_ENV,
   resolveOpencodeStoreRootV2,
   currentOpencodeIdentityV2,

@@ -26,8 +26,8 @@ function identityFixture(overrides) {
     contextWindow: 1048576,
     safetyMarginPolicyRevision: host.MARGIN_POLICY_REVISION_V1,
     outputReservePolicyRevision: host.OUTPUT_RESERVE_POLICY_REVISION_V1,
-    requestShapeRevision: host.OPENCODE_REQUEST_SHAPE_V1,
-    canarySuiteRevision: host.CANARY_SUITE_REVISION_V1,
+    requestShapeRevision: host.OPENCODE_REQUEST_SHAPE_V3,
+    canarySuiteRevision: host.CANARY_SUITE_REVISION_V2,
   }, overrides || {});
 }
 function tempDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'oc01h-')); }
@@ -72,6 +72,31 @@ section('C08H-OC01H-2 CORRUPTION + IDENTITY CHANGES');
     const loaded = host.startupOpencodeAuthorityV2({ storeRoot: dir, expectedIdentity: identityFixture(pair[0]) });
     check(loaded.state === 'identity-mismatch' && loaded.health === 'QUARANTINED', pair[1] + ' invalidates');
   }
+  wipe(dir);
+}
+section('C08H-OC01H-2b SUPERSEDED REVISIONS NEVER AUTHORIZE (canary suite v2, request shape v3)');
+{
+  const dir = tempDir();
+  fs.mkdirSync(path.join(dir, 'config'), { recursive: true });
+  fs.copyFileSync(path.join(repoRoot, 'config', 'settings.yaml'), path.join(dir, 'config', 'settings.yaml'));
+  fs.copyFileSync(path.join(repoRoot, 'config', 'model-registry.json'), path.join(dir, 'config', 'model-registry.json'));
+  const current = host.currentOpencodeIdentityV2({ installRoot: dir });
+  check(current.known === true && current.identity.canarySuiteRevision === 'oc01-canary-suite-v2'
+    && current.identity.requestShapeRevision === 'opencode-muse-request-shape-v3-native-tail-no-replay',
+    'the installed identity binds canary suite v2 and request shape v3');
+  const store = path.join(dir, 'store');
+  const superseded = [
+    [{ canarySuiteRevision: host.CANARY_SUITE_REVISION_V1 }, 'a v1-suite certification'],
+    [{ requestShapeRevision: host.OPENCODE_REQUEST_SHAPE_V2 }, 'a v2-shape (replay) certification'],
+    [{ requestShapeRevision: host.OPENCODE_REQUEST_SHAPE_V1, canarySuiteRevision: host.CANARY_SUITE_REVISION_V1 }, 'the original v1/v1 certification'],
+  ];
+  for (const [overrides, label] of superseded) {
+    cert.certifyOpencodeV2(store, Object.assign({}, current.identity, overrides), DIGEST);
+    const loaded = host.startupOpencodeAuthorityV2({ storeRoot: store, installRoot: dir });
+    check(loaded.state === 'identity-mismatch' && loaded.health === 'QUARANTINED', label + ' is invalidated (QUARANTINED) under the current identity');
+  }
+  cert.certifyOpencodeV2(store, current.identity, DIGEST);
+  check(host.startupOpencodeAuthorityV2({ storeRoot: store, installRoot: dir }).health === 'HEALTHY', 'only a certification of the current v2 suite / v3 shape derives HEALTHY');
   wipe(dir);
 }
 section('C08H-OC01H-3 EXPIRY + DURABLE ANOMALY + RECERTIFY');
