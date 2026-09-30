@@ -6345,3 +6345,101 @@ continuation fixture, and the live native-tail phase at xhigh:
 ACTIVE-TAIL-NATIVE, reasoningReplay:none, count/send payload parity, real
 DSH usage observation, multi-step tool progression). Certification binds
 it, so v1-suite (and v2-shape) certifications derive QUARANTINED.
+
+## 54. CCv2 RC1 — live validated (frozen contract)
+
+Status: **RC1, live validated** on OpenCode Go / Muse Spark 1.3
+Contributor. RC1 is a release candidate, not a final production-maturity
+claim; see 54.5 for what the evidence does not yet cover.
+
+- Request shape: `opencode-muse-request-shape-v3-native-tail-no-replay`
+- Canary suite: `oc01-canary-suite-v2`
+- Commit chain: bc7c5fd (DSH usage + tool-call ids), c1ffac7 (active-turn
+  boundary), e0d6176 (Responses wire projector), 47aa952
+  (ACTIVE-TAIL-NATIVE), 0fe603f (OC01 native-tail phase), 83cdd0c
+  (reasoningReplay capability), 09d2751 (managed-store counter key),
+  6754021 (canary suite v2 identity).
+
+### 54.1 Live-validated capabilities
+
+Validated live (OC01 suite v2 at xhigh, installed build byte-identical to
+the committed tree) for:
+
+- durable checkpointed context (M01 producer, sealed generations);
+- ACTIVE-TAIL-NATIVE (the open turn stays provider-native from the
+  producer-owned anchor);
+- native function_call / function_call_output continuity with call-id
+  correlation;
+- reasoningReplay `none` for `opencode-go` / `muse-spark-1.3-contributor`,
+  with fresh provider reasoning still enabled and returned on every step;
+- exact count/send payload identity (counted canonical body == posted
+  counted subset on every compiled step);
+- Meta conservative preflight (REMOTE_MUSE_PRECOUNT);
+- managed credential-store counter key resolution (no MODEL_API_KEY in the
+  environment);
+- real DSH usage observation (disjoint TokenUsage, cache-read aware);
+- fail-closed quarantine and certification (certification written only
+  after every phase passes; superseded identities derive QUARANTINED);
+- restart restoration to HEALTHY (fresh process, no trust flag);
+- xhigh multi-step live canary (tool A -> result A -> tool B -> result B ->
+  final response; workflow skill loaded once);
+- one extended real engineering canary (54.3).
+
+### 54.2 REMOTE_MUSE_PRECOUNT semantics
+
+REMOTE_MUSE_PRECOUNT is an authoritative conservative input preflight. It
+guarantees that the counted canonical payload is the payload sent. It does
+NOT guarantee numerical equality with OpenCode billing usage. Observed
+validated live drift: Meta preCount exceeded OpenCode reported input by 143
+tokens on each tested step and remained inside the safety margin
+(max(8192, 1% of preCount)).
+
+### 54.3 Extended engineering canary (disposable repository)
+
+One live run at xhigh on a disposable Node repository (fix three bugs, add
+two missing functions, keep tests unchanged):
+
+- 5 CCV2_COMPILED inference steps after the turn-1 bootstrap (the only
+  LEGACY decision was the expected bootstrap checkpoint fallback);
+- 7 tool calls (list, 4 reads, 1 write, 1 test run); parallel tool usage
+  occurred (4 calls in one step);
+- real edits and a real test run; the final task result was correct (tests
+  pass independently, test file unchanged);
+- no loop or repeated identical action;
+- no unexpected LEGACY fallback, no anomaly, no revocation, cache epoch
+  unchanged, route HEALTHY throughout;
+- count/send equality and projector == posted body held on every step;
+  historical reasoning items sent: 0; drift -143 on every step.
+
+This run did not reach the planned 10–20 steps (the model completed the
+task in 5).
+
+### 54.4 Frozen RC1 invariants
+
+1. Historical completed context may be compacted.
+2. The open active turn remains native.
+3. Native tool-call causality is preserved.
+4. The reasoningReplay capability transforms the payload exactly once,
+   before both count and send.
+5. For the certified OpenCode Muse pair, historical reasoning replay is
+   `none`.
+6. Fresh provider reasoning remains enabled.
+7. Counted payload and sent payload must be structurally identical.
+8. Ambiguity or inability to count/project => LEGACY, fail closed.
+9. Certification identity binds request shape + canary suite revision.
+10. No uncertified request shape may activate CCv2.
+
+### 54.5 Known limitations / remaining hardening evidence
+
+- Long 10–20 inference-step xhigh engineering turns have not yet been
+  live-tested.
+- Intra-turn compaction does not exist: a very long open turn stays fully
+  native and falls back to LEGACY (DSH compaction) when it cannot fit.
+- Live evidence covers one certified pair only; any other route/model needs
+  its own capability entry and certification.
+- A Meta count rejection whose message mentions "model" latches the counter
+  contract for the process (resilience unchanged by design).
+- Certification expires after 7 days; OC01 must re-run to renew.
+- The generic DeepSeek active host (ContextCompilerActiveHostV2) still uses
+  the pre-RC1 text-flattening projection; it is latent (its seam carries no
+  messages) and is outside RC1.
