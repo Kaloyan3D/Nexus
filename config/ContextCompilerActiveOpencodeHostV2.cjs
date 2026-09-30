@@ -22,14 +22,62 @@ const DECISION_TELEMETRY_EVENT = 'ccv2-opencode-active-decided';
 const FALLBACK_STAGES = Object.freeze([
   'request-shape', 'authority-health', 'counter-credential', 'binding', 'checkpoint',
   'staged-memory', 'current-turn', 'coverage', 'exact-material', 'counter', 'budget',
-  'attempt', 'compiled-turn', 'envelope', 'dispatch-surface', 'exception',
+  'attempt', 'compiled-turn', 'envelope', 'dispatch-surface', 'ownership', 'exception',
 ]);
 const installedCtxs = new WeakSet();
-// Derived CCV2_COMPILED requests this module re-dispatched through the
-// llm/stream waterfall; their re-entry is never projected again.
-const derivedRequests = new WeakSet();
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+// Process-global diagnostics registry, shared by EVERY copy of this module
+// (each agent preset ships its own controller closure, so one process can
+// load several). A request object gets one monotonic sequence number no
+// matter which copy sees it first, so two decision lines carrying the same
+// requestSeq provably concern the same request object. Ids only; never
+// content or content hashes.
+//
+// The same registry carries the process-wide projection guards, because one
+// provider request passes EVERY installed copy's global llm/stream listener:
+//   derived  - CCV2_COMPILED requests re-dispatched by any copy (never
+//              projected again, by any copy);
+//   claimed  - request objects an owning listener already decided (exactly
+//              one authoritative decision per request object);
+//   owners   - sessionId -> installation id of the composition whose scoped
+//              session/event stream carries that session (the one the agent
+//              joined); only that installation may project it;
+//   unowned  - request objects already reported as having no owner.
+const DIAGNOSTICS_KEY = Symbol.for('nexus.ccv2.opencode-active.diagnostics.v1');
+function processDiagnosticsV2() {
+  const existing = globalThis[DIAGNOSTICS_KEY];
+  if (isPlainObject(existing) && existing.version === 1) return existing;
+  const created = {
+    version: 1, requestIds: new WeakMap(), nextRequestSeq: 1, nextModuleInstanceId: 1, nextListenerId: 1,
+    nextInstallationId: 1, derived: new WeakSet(), claimed: new WeakSet(), owners: new Map(), unowned: new WeakSet(),
+  };
+  Object.defineProperty(globalThis, DIAGNOSTICS_KEY, { value: created, enumerable: false, configurable: false, writable: false });
+  return created;
+}
+const MODULE_INSTANCE_ID = processDiagnosticsV2().nextModuleInstanceId++;
+// The directory this copy was loaded from ('config' in the repo, the preset
+// id in an installed preset closure). Structural path segment only.
+const MODULE_ORIGIN = (() => {
+  const name = path.basename(path.dirname(__filename));
+  return /^[A-Za-z0-9._-]{1,64}$/.test(name) ? name : 'unknown';
+})();
+function requestSeqOfV2(request) {
+  try {
+    if (request === null || typeof request !== 'object') return null;
+    const registry = processDiagnosticsV2();
+    let seq = registry.requestIds.get(request);
+    if (seq === undefined) {
+      seq = registry.nextRequestSeq;
+      registry.nextRequestSeq += 1;
+      registry.requestIds.set(request, seq);
+    }
+    return seq;
+  } catch (error) {
+    void error;
+    return null;
+  }
 }
 function sha256HexUtf8(text) {
   return checkpointV2.sha256HexUtf8(String(text));
@@ -138,6 +186,10 @@ function legacyHostResult(request, reason, stage, diag) {
       compilerExecutions: Number.isInteger(found.compilerExecutions) ? found.compilerExecutions : 0,
       bindingFound: found.bindingFound === true,
       checkpointFound: found.checkpointFound === true,
+      sessionSourceAvailable: typeof found.sessionSourceAvailable === 'boolean' ? found.sessionSourceAvailable : null,
+      exactMaterialSkipped: typeof found.exactMaterialSkipped === 'string' ? found.exactMaterialSkipped : null,
+      attemptFailureStage: typeof found.attemptFailureStage === 'string' ? found.attemptFailureStage : null,
+      attemptErrorClass: isPlainObject(found.attemptErrorClass) ? found.attemptErrorClass : null,
     }),
   });
 }
@@ -221,11 +273,16 @@ function applyOpencodeProjectionV2(input) {
         return fallback(request, 'active-current-turn-invalid', 'current-turn');
       }
     }
+    const sessionSource = typeof input.sessionSourceFor === 'function' ? input.sessionSourceFor(request.sessionId) : null;
+    diag.sessionSourceAvailable = sessionSource !== null && sessionSource !== undefined;
     const exact = shadowHostV2.readStagedExactMaterialV2({
       workspace: binding.workspace, sealed, pages: stagedPages.pages, decisions: stagedDecisions.decisions,
-      sessionSource: typeof input.sessionSourceFor === 'function' ? input.sessionSourceFor(request.sessionId) : null,
+      sessionSource,
     });
-    if (exact.material === null) return fallback(request, 'active-compiler-failed', 'exact-material');
+    if (exact.material === null) {
+      diag.exactMaterialSkipped = typeof exact.skipped === 'string' ? exact.skipped : 'unknown';
+      return fallback(request, 'active-compiler-failed', 'exact-material');
+    }
     let descriptor = null;
     try {
       const found = remoteV2.resolveMuseRemoteV2({ provider: 'meta-model-api', model: 'muse-spark-1.3-contributor' });
@@ -295,6 +352,7 @@ function applyOpencodeProjectionV2(input) {
       pages: stagedPages.pages, outputReserve, attemptBinding,
       liveTurnHash, liveTurn, memoryDir, metaRemoteCounter,
       bindingFound: diag.bindingFound, checkpointFound: diag.checkpointFound,
+      sessionSourceAvailable: diag.sessionSourceAvailable,
     });
   } catch (error) {
     void error;
@@ -325,7 +383,10 @@ function envelopeUnchangedV2(request, derived) {
 }
 async function completeOpencodeProjectionV2(staged) {
   const request = staged.request;
-  const diag = { bindingFound: staged.bindingFound === true, checkpointFound: staged.checkpointFound === true, compilerExecutions: 0 };
+  const diag = {
+    bindingFound: staged.bindingFound === true, checkpointFound: staged.checkpointFound === true,
+    sessionSourceAvailable: staged.sessionSourceAvailable, compilerExecutions: 0,
+  };
   const fallback = (reason, stage) => legacyHostResult(request, reason, stage, diag);
   try {
     const decision = await opencodeV2.attemptOpencodeActiveV2({
@@ -362,7 +423,11 @@ async function completeOpencodeProjectionV2(staged) {
       telemetrySink: null,
     });
     diag.compilerExecutions = decision.compilerExecutions === 1 ? 1 : 0;
-    if (decision.eligible !== true) return fallback(decision.fallbackReason, 'attempt');
+    if (decision.eligible !== true) {
+      diag.attemptFailureStage = typeof decision.failureStage === 'string' ? decision.failureStage : 'unknown';
+      diag.attemptErrorClass = isPlainObject(decision.errorClass) ? decision.errorClass : null;
+      return fallback(decision.fallbackReason, 'attempt');
+    }
     const compiledUserText = decision.render.messagePlan
       .filter((message) => message.role === 'user')
       .map((message) => message.text)
@@ -427,6 +492,11 @@ function emitOpencodeDecisionV2(log, outcome, context) {
   try {
     const request = isPlainObject(context) && isPlainObject(context.request) ? context.request : {};
     log(Object.assign({ event: DECISION_TELEMETRY_EVENT }, outcome.telemetry, {
+      requestSeq: requestSeqOfV2(context.request),
+      derivedRequestSeq: outcome.mode === 'CCV2_COMPILED' ? requestSeqOfV2(outcome.request) : null,
+      listenerId: Number.isInteger(context.listenerId) ? context.listenerId : null,
+      moduleInstanceId: MODULE_INSTANCE_ID,
+      moduleOrigin: MODULE_ORIGIN,
       seam: 'llm/stream',
       policyMode: context.policy.mode,
       policyOrigin: typeof context.policy.origin === 'string' ? context.policy.origin : null,
@@ -440,7 +510,7 @@ function emitOpencodeDecisionV2(log, outcome, context) {
     void error;
   }
 }
-async function* compiledOrLegacyStreamV2(runtime, staged, next, safeDeps, policy) {
+async function* compiledOrLegacyStreamV2(runtime, staged, next, safeDeps, policy, listenerId) {
   let outcome = null;
   try {
     outcome = await completeOpencodeProjectionV2(staged);
@@ -448,13 +518,13 @@ async function* compiledOrLegacyStreamV2(runtime, staged, next, safeDeps, policy
     void error;
     outcome = legacyHostResult(staged.request, 'active-compiler-failed', 'exception', staged);
   }
-  emitOpencodeDecisionV2(safeDeps.log, outcome, { request: staged.request, policy });
+  emitOpencodeDecisionV2(safeDeps.log, outcome, { request: staged.request, policy, listenerId });
   if (outcome.mode === 'CCV2_COMPILED') {
     // Re-dispatch the derived request through the SAME llm/stream waterfall
     // so every transport guard (Routing-Integrity, invariants, the usage
     // observer) sees exactly what is sent. The original stream is never
     // created, so the adapter is dispatched once.
-    derivedRequests.add(outcome.request);
+    processDiagnosticsV2().derived.add(outcome.request);
     yield* runtime.stream(outcome.request);
     return;
   }
@@ -471,23 +541,47 @@ async function* compiledOrLegacyStreamV2(runtime, staged, next, safeDeps, policy
  * dispatching LlmRuntime (`this`); every fallback returns next() verbatim.
  * OFF/OBSERVE/other routes/auxiliary calls: next() with zero compiler work.
  */
+// deps.ownsSession(sessionId) is supplied by installOpencodeActiveProjection;
+// a listener created without it (standalone use) owns every session.
+function ownsSessionV2(deps, sessionId) {
+  if (typeof deps.ownsSession !== 'function') return true;
+  try {
+    return deps.ownsSession(sessionId) === true;
+  } catch (error) {
+    void error;
+    return false;
+  }
+}
 function createOpencodeProjectionStreamListenerV2(deps) {
   const seen = new WeakSet();
   const safeDeps = isPlainObject(deps) ? deps : {};
+  const listenerId = processDiagnosticsV2().nextListenerId++;
   return function opencodeProjectionStreamListener(request, next) {
     let staged = null;
     let policy = null;
     try {
-      if (!isPlainObject(request) || derivedRequests.has(request)) return next();
+      if (!isPlainObject(request) || processDiagnosticsV2().derived.has(request)) return next();
       if (request.provider !== opencodeV2.OPENCODE_PROVIDER_V1 || request.model !== opencodeV2.OPENCODE_MODEL_V1) return next();
       if (typeof request.purpose === 'string' && AUXILIARY_PURPOSES.indexOf(request.purpose) !== -1) return next();
       policy = activeV2.resolveCompilerModeV2({ config: readPolicyConfigV2(safeDeps.installRoot) });
       if (policy.mode !== 'active' || policy.valid !== true) return next();
       if (seen.has(request)) return next();
+      const registry = processDiagnosticsV2();
+      if (registry.claimed.has(request)) return next();
+      if (!ownsSessionV2(safeDeps, request.sessionId)) {
+        // Another composition's session: its own installation decides it.
+        if (typeof request.sessionId === 'string' && registry.owners.has(request.sessionId)) return next();
+        // No installation owns it: report ONE typed decision, never silence.
+        if (registry.unowned.has(request)) return next();
+        registry.unowned.add(request);
+        emitOpencodeDecisionV2(safeDeps.log, legacyHostResult(request, 'active-request-binding-changed', 'ownership'), { request, policy, listenerId });
+        return next();
+      }
       seen.add(request);
+      registry.claimed.add(request);
       const runtime = this;
       if (runtime === null || runtime === undefined || typeof runtime.stream !== 'function') {
-        emitOpencodeDecisionV2(safeDeps.log, legacyHostResult(request, 'active-compiler-failed', 'dispatch-surface'), { request, policy });
+        emitOpencodeDecisionV2(safeDeps.log, legacyHostResult(request, 'active-compiler-failed', 'dispatch-surface'), { request, policy, listenerId });
         return next();
       }
       staged = applyOpencodeProjectionV2({
@@ -500,14 +594,14 @@ function createOpencodeProjectionStreamListenerV2(deps) {
         countTimeoutMs: safeDeps.countTimeoutMs,
       });
       if (staged.pending !== true) {
-        emitOpencodeDecisionV2(safeDeps.log, staged, { request, policy });
+        emitOpencodeDecisionV2(safeDeps.log, staged, { request, policy, listenerId });
         return next();
       }
-      return compiledOrLegacyStreamV2(runtime, staged, next, safeDeps, policy);
+      return compiledOrLegacyStreamV2(runtime, staged, next, safeDeps, policy, listenerId);
     } catch (error) {
       void error;
       if (policy !== null && policy.mode === 'active' && staged === null) {
-        emitOpencodeDecisionV2(safeDeps.log, legacyHostResult(request, 'active-compiler-failed', 'exception'), { request, policy });
+        emitOpencodeDecisionV2(safeDeps.log, legacyHostResult(request, 'active-compiler-failed', 'exception'), { request, policy, listenerId });
       }
       return next();
     }
@@ -562,6 +656,7 @@ function createOpencodeStreamListenerV2(deps) {
     try {
       if (!isPlainObject(request)) return stream;
       if (request.provider !== opencodeV2.OPENCODE_PROVIDER_V1 || request.model !== opencodeV2.OPENCODE_MODEL_V1) return stream;
+      if (!ownsSessionV2(safeDeps, request.sessionId)) return stream;
       const metadata = isPlainObject(request.metadata) ? request.metadata : null;
       if (metadata === null || metadata.projectionMode !== 'CCV2_COMPILED') return stream;
       if (metadata.ccv2Authority !== undefined && metadata.ccv2Authority !== null
@@ -628,8 +723,27 @@ function installOpencodeActiveProjection(ctx, deps) {
     if (typeof safeDeps.log !== 'function') return { installed: false, reason: 'no-log-channel' };
     const started = startupOpencodeAuthorityV2(safeDeps);
     void started;
-    ctx.on('llm/stream', createOpencodeProjectionStreamListenerV2(safeDeps), { global: true });
-    ctx.on('llm/stream', createOpencodeStreamListenerV2(safeDeps), { global: true });
+    // Ownership: llm/stream must be observed globally (the dispatching
+    // LlmRuntime is host-plane), so every mounted composition's listener sees
+    // every request. session/event is scope-routed: this NON-global listener
+    // receives only the sessions of agents joined to THIS composition (or
+    // every session when the controller sits in the unscoped host plane).
+    const registry = processDiagnosticsV2();
+    const installationId = registry.nextInstallationId++;
+    const owned = new Set();
+    ctx.on('session/event', (subject) => {
+      try {
+        const sessionId = subject && typeof subject.id === 'string' ? subject.id : null;
+        if (sessionId === null || owned.has(sessionId)) return;
+        owned.add(sessionId);
+        if (!registry.owners.has(sessionId)) registry.owners.set(sessionId, installationId);
+      } catch (error) {
+        void error;
+      }
+    });
+    const ownedDeps = Object.assign({}, safeDeps, { ownsSession: (sessionId) => owned.has(sessionId) });
+    ctx.on('llm/stream', createOpencodeProjectionStreamListenerV2(ownedDeps), { global: true });
+    ctx.on('llm/stream', createOpencodeStreamListenerV2(ownedDeps), { global: true });
     installedCtxs.add(ctx);
     return { installed: true, reason: null };
   } catch (error) {

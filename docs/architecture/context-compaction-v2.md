@@ -5977,3 +5977,92 @@ runs two turns:
 Against the pre-correction host the same section fails, with zero decision
 events and the legacy request sent. §46.4 Step D now drives the installed
 `llm/stream` listeners with the production request shape.
+
+## 50. CCV2-OC01H-D Duplicate Decisions and the Owner Attempt Failure
+
+Symptom (live, after §49): every provider request produced TWO
+`ccv2-opencode-active-decided` lines with the same messageCount. Turn 1
+gave two `checkpoint` lines per request. Turn 2 gave `attempt`
+(active-compiler-failed, compilerExecutions 1) followed by
+`exact-material`. Nothing compiled. The counts reconcile exactly:
+
+- Turn 1: 83 steps + 6 LLM retries = 89 requests, x2 = 178 lines.
+- Turn 2: 21 steps, x2 = 42 lines.
+- Total 220: exactly two listener executions per provider request.
+
+Two independent root causes, both reproduced offline.
+
+1. Duplicate execution (multiple mounted compositions).
+   dsh-agent-presets mounts one standing composition per preset, and
+   keeps superseded generations alive for the life of the process. Each
+   mount loads its own copy of the controller closure. `installedCtxs`
+   is keyed per ctx, so every mount installs the OpenCode listeners, and
+   `llm/stream` listeners are global, so every mount sees every request.
+   `session/event`, however, is scope-routed: a mount receives only the
+   sessions of agents joined to it. The non-owning mount's M01 producer
+   therefore never opens the session, its `sessionSourceFor` is null,
+   and it falls back at `exact-material`
+   (`shadow-exact-material-session-unavailable`). It reads bindings from
+   the file, so it still reports `bindingFound=true`.
+
+   Proven on the real runtime (C08H-OCH-5: cordis, dsh-scope
+   createScope and bindScopeParent, AgentLoop, and two module copies).
+   Both copies decide the same request object (same requestSeq). A
+   compiled request is also re-projected by the other copy, whose
+   module-level derived set does not know it.
+
+2. Owner attempt failure (JSON clone strips the B03 brand).
+   attemptMuseActiveV2 built both compile inputs with
+   `JSON.parse(JSON.stringify(compileInput))`. B03 marks rehydrated
+   evidence with a module-private Symbol property, which JSON drops.
+   The C02 gate then rejected every exact-material result as
+   `context-compiler-evidence-binding-mismatch`, so planning-build threw
+   and the attempt returned active-compiler-failed. This is
+   deterministic for any request with a blob-backed HOT/WARM page; the
+   live session had 17 of them. No fixture had any. It was proven by
+   replaying the live session's own log (restored through SessionStore)
+   and a copy of its M01 memory:
+
+   - with the JSON clone, the 211-message request reproduced the live
+     `attempt` line;
+   - with the brand-preserving copy, all 21 turn-2 steps compile
+     (CCV2_COMPILED, 211 live messages -> 2 compiled).
+
+Fixes:
+
+- attemptMuseActiveV2 uses shallow copies with a fresh budget. The
+  compile pipeline never mutates its input.
+- The OpenCode host decides only for sessions its own composition owns.
+  Ownership is recorded by a NON-global `session/event` observer on the
+  mount ctx; an unscoped host-plane mount owns every session.
+- A process-global registry (`Symbol.for`, shared by every module copy)
+  holds the derived-request set, a per-request claim (one decision per
+  request object), and the session owner map.
+- A request whose session no composition owns yields exactly one typed
+  `ownership` fallback, never silence and never two lines.
+- The usage observer is ownership-gated as well.
+
+Diagnostics added to each decision line: requestSeq (a process-global
+WeakMap plus a monotonic integer), derivedRequestSeq, listenerId,
+moduleInstanceId, moduleOrigin (the closure directory name),
+sessionSourceAvailable, exactMaterialSkipped (the B03 skip reason),
+attemptFailureStage, and attemptErrorClass. The failure stage comes from
+a closed-world set now carried by every ineligible Muse and OpenCode
+attempt result. The error class is the constructor name, a string
+`code`, and a leading kebab-case module error code only; the free-text
+message is never logged. Muse attempt compilerExecutions is now 0 for
+stages that run before the compiler pipeline (shape, binding, reserve
+count, budget).
+
+Regression: C08H-OCH-1b (blob-backed WARM exact material compiles and
+reaches the projection) and C08H-OCH-5, which covers:
+
+- owner registered first, and owner registered second;
+- an owner attempt failure;
+- no owner.
+
+In every case there is exactly one decision per request and the provider
+is called once per turn. Turn 2 is CCV2_COMPILED / null /
+REMOTE_MUSE_PRECOUNT / HEALTHY / 1. Restoring the JSON clone fails
+OCH-1b with the live signature (attempt -> planning-build ->
+candidate-compile-failed). Disabling the ownership gate fails OCH-5.

@@ -383,7 +383,9 @@ function sectionsOCH3() {
     check(certBytes.indexOf(TURN_TEXT) === -1 && certBytes.indexOf('sk-') === -1 && certBytes.indexOf('Bearer') === -1, 'certification file carries no prompts or credentials');
     wipe(fxCert);
     wipe(fx);
+    await sectionOCH1b();
     await sectionOCH4();
+    await sectionOCH5();
     console.log(String.fromCharCode(10) + 'ContextCompilerActiveOpencodeHostV2 suite: ' + passed + ' passed, ' + failed + ' failed');
     if (failed > 0) process.exitCode = 1;
   })().catch((error) => { console.error(error); process.exitCode = 1; });
@@ -553,4 +555,196 @@ async function sectionOCH4() {
     opencode.resetOpencodeHealthV2();
     wipe(fx);
   }
+}
+
+// ---------------------------------------------------------------------------
+// OCH-1b: blob-backed HOT/WARM exact material (B03 rehydrated evidence). The
+// B03 proof brand is a module-private SYMBOL property; a JSON clone of the
+// compile input drops it and the C02 gate rejects the material
+// (context-compiler-evidence-binding-mismatch at planning-build). Every real
+// session with a large tool result has such pages; the fixtures above had none.
+async function sectionOCH1b() {
+  section('C08H-OCH-1b BLOB-BACKED EXACT MATERIAL (B03 brand survives the attempt)');
+  const store = require(path.join(repoRoot, 'config', 'ContextPageStoreV2.cjs'));
+  const fx = makeFixtureRoot({ mode: 'active' });
+  seedBindingH(fx, NSH.sessionId);
+  const { CP, memDir } = stageMemoryH(fx);
+  const namespace = {
+    taskId: NSH.taskId, taskInstanceId: NSH.taskInstanceId, sessionId: NSH.sessionId,
+    workspaceId: fx.workspace, repositoryId: NSH.repositoryId, checkoutId: NSH.checkoutId,
+  };
+  const contextRoot = store.contextRootForV2(fx.workspace, NSH.taskId);
+  const blob = store.putBlobV2(contextRoot, 'build step ok\ntests passed: 42\nBLOB-EXACT-EVIDENCE-MARKER\n');
+  const blobPage = page.createContextPageV2({
+    kind: 'verification', namespace, sourceKind: 'verification', sourceRefs: ['test-run:och1b:1'],
+    mutability: 'immutable', sourceSeqs: [30], exactBlobRef: blob.blobRef, createdAtGeneration: 1,
+  });
+  store.putContextPageV2(contextRoot, blobPage, { expectedNamespace: namespace });
+  fs.writeFileSync(path.join(memDir, 'pages', blobPage.id + '.json'), JSON.stringify(blobPage));
+  const decisionsPath = path.join(memDir, 'tier-decisions.json');
+  const decisions = JSON.parse(fs.readFileSync(decisionsPath, 'utf8'));
+  const blobDecision = tier.classifyMemoryTierV2({ subjectKind: 'historical-evidence', page: blobPage, retentionRequired: true });
+  check(blobDecision.tier === 'WARM', 'fixture: blob-backed page rests WARM (exact material required)');
+  decisions.push(blobDecision);
+  fs.writeFileSync(decisionsPath, JSON.stringify(decisions));
+  void CP;
+  cert.certifyOpencodeV2(storeRootOf(fx), host.currentOpencodeIdentityV2({ installRoot: fx.root }).identity, 'f'.repeat(64));
+  host.startupOpencodeAuthorityV2({ storeRoot: storeRootOf(fx), installRoot: fx.root });
+  const logs = [];
+  const listener = host.createOpencodeProjectionStreamListenerV2({
+    installRoot: fx.root, bindingsPath: bindingsPathOf(fx), log: (entry) => logs.push(entry),
+    metaRemoteCounter: mockRemoteCounter(byteRule),
+  });
+  const run = await runProjectionH(listener, prodRequestH(NSH.sessionId));
+  const decided = logs[0] || {};
+  check(decided.projectionMode === 'CCV2_COMPILED' && decided.fallbackReason === null && decided.compilerExecutions === 1,
+    'request with blob-backed WARM exact material compiles', JSON.stringify({ stage: decided.fallbackStage, attempt: decided.attemptFailureStage, error: decided.attemptErrorClass }));
+  check(run.dispatched.length === 1 && JSON.stringify(run.dispatched[0].messages).indexOf('BLOB-EXACT-EVIDENCE-MARKER') !== -1,
+    'the blob page reaches the compiled projection with its exact bytes');
+  check(JSON.stringify(logs).indexOf('BLOB-EXACT-EVIDENCE-MARKER') === -1, 'exact evidence bytes never reach the decision log');
+  opencode.resetOpencodeHealthV2();
+  wipe(fx);
+}
+// ---------------------------------------------------------------------------
+// OCH-5: several mounted compositions in ONE real runtime. dsh-agent-presets
+// mounts one standing composition per preset (and keeps superseded
+// generations alive), each loading its OWN copy of the controller closure.
+// llm/stream listeners are global (every copy sees every request) while
+// session/event is scope-routed (only the joined composition sees a
+// session). Exactly one decision per provider request, by the owner.
+async function sectionOCH5() {
+  section('C08H-OCH-5 MULTIPLE MOUNTED COMPOSITIONS (real dsh-scope routing, separate module copies)');
+  const liveGate = require(path.join(__dirname, 'Ccv2LiveHostGate.cjs'));
+  const found = resolveLoopHostH();
+  if (found === null) {
+    liveGate.reportLiveHostGate('OCH-5', liveGate.decideLiveHostGate(false, process.env));
+    console.log('SKIP: pinned DSH host tree is absent; the multi-mount proof is PENDING (never faked).');
+    return;
+  }
+  liveGate.reportLiveHostGate('OCH-5', 'EXECUTED');
+  const { appRequire } = found;
+  const { pathToFileURL } = require('node:url');
+  const { Context } = appRequire('@deepseek-ai/cordis');
+  const llmMod = appRequire('@deepseek-ai/dsh-llm');
+  const scope = await import(pathToFileURL(path.join(found.root, 'app', 'node_modules', '@deepseek-ai', 'dsh-scope', 'lib', 'index.js')).href);
+  // A second, independent copy of the controller closure (what a second
+  // preset directory or composition generation loads).
+  const copyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'c08oh-closure-'));
+  for (const name of fs.readdirSync(path.join(repoRoot, 'config'))) {
+    if (name.endsWith('.cjs') || name.endsWith('.json')) fs.copyFileSync(path.join(repoRoot, 'config', name), path.join(copyDir, name));
+  }
+  const copies = {
+    A: { host, producer: require(path.join(repoRoot, 'config', 'ContextMemoryProducerHostV2.cjs')) },
+    B: { host: require(path.join(copyDir, 'ContextCompilerActiveOpencodeHostV2.cjs')), producer: require(path.join(copyDir, 'ContextMemoryProducerHostV2.cjs')) },
+  };
+  const failingCounter = Object.assign({}, mockRemoteCounter(byteRule), {
+    countTextsV2: async () => { throw new Error('remote-counter-http-503: upstream unavailable'); },
+  });
+  async function runTwoMounts(sessionId, joinKey, counterFor) {
+    const fx = makeFixtureRoot({ mode: 'active' });
+    seedBindingH(fx, sessionId);
+    const binding = JSON.parse(fs.readFileSync(bindingsPathOf(fx), 'utf8')).bindings[sessionId];
+    cert.certifyOpencodeV2(storeRootOf(fx), host.currentOpencodeIdentityV2({ installRoot: fx.root }).identity, 'f'.repeat(64));
+    const logs = [];
+    const sent = [];
+    const ctx = new Context();
+    try {
+      await ctx.plugin(llmMod.default);
+      await ctx.plugin(appRequire('@deepseek-ai/dsh-session').default);
+      await ctx.plugin(appRequire('@deepseek-ai/dsh-system-prompt').default, { persona: 'OCH-5 probe' });
+      await ctx.plugin(appRequire('@deepseek-ai/dsh-tools').default);
+      await ctx.plugin(appRequire('@deepseek-ai/dsh-agent').default);
+      await ctx.plugin(appRequire('@deepseek-ai/dsh-agent-loop').default, { agents: [] });
+      const keys = { A: { agentPreset: 'aih-muse', generation: 1 }, B: { agentPreset: 'aih-muse', generation: 2 } };
+      const registries = {};
+      for (const label of ['A', 'B']) {
+        const mount = scope.createScope(ctx, keys[label]);
+        const produced = copies[label].producer.installMemoryProducer(mount.ctx, {
+          bindingFor: (id) => (id === sessionId ? binding : null), flush: async () => true,
+          authorityFor: () => () => ({
+            manifest: {
+              schemaVersion: 1, taskId: NSH.taskId, taskInstanceId: NSH.taskInstanceId, description: 'OCH-5 objective.',
+              status: 'implementing', acceptanceCriteria: ['One decision.'], verification: { required: [], outcomes: [] },
+              failureSignatures: [], baseCommit: 'abc123',
+            },
+            authorityRecord: null,
+          }),
+          log: (entry) => logs.push(Object.assign({ mount: label }, entry)), env: {},
+        });
+        registries[label] = produced.registry;
+        copies[label].host.installOpencodeActiveProjection(mount.ctx, {
+          installRoot: fx.root, bindingsPath: bindingsPathOf(fx), log: (entry) => logs.push(Object.assign({ mount: label }, entry)),
+          sessionSourceFor: produced.registry.sessionSourceFor, metaRemoteCounter: counterFor(),
+        });
+      }
+      ctx.on('llm/stream', (options) => {
+        sent.push(options);
+        return (async function* () {
+          yield { type: 'block-start', index: 0, blockType: 'text' };
+          yield { type: 'text-delta', index: 0, text: 'Acknowledged.' };
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Acknowledged.' } };
+          yield { type: 'finish', reason: { kind: 'stop' } };
+        })();
+      }, { global: true });
+      const agent = ctx.agentLoop.create(sessionId, { provider: PROVIDER, model: MODEL, maxTokens: 2048 });
+      if (joinKey !== null) scope.bindScopeParent(scope.scopeOf(agent.ctx), keys[joinKey]);
+      for (const text of ['OCH-5 turn one.', 'OCH-5 turn two.']) {
+        const idle = new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('OCH-5 turn timed out')), 45000);
+          const dispose = ctx.on('agent/status', ({ agent: subject, status }) => {
+            if (subject === agent && status === 'idle') { clearTimeout(timer); dispose(); resolve(); }
+          });
+        });
+        agent.followup(llmMod.createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }));
+        await idle;
+        for (const label of ['A', 'B']) await registries[label].idle(sessionId);
+      }
+      return { decisions: logs.filter((entry) => entry.event === 'ccv2-opencode-active-decided'), sent, logs };
+    } finally {
+      await ctx.fiber.dispose().catch(() => {});
+      wipe(fx);
+    }
+  }
+  const perRequest = (decisions) => {
+    const counts = new Map();
+    for (const decision of decisions) counts.set(decision.requestSeq, (counts.get(decision.requestSeq) || 0) + 1);
+    return Array.from(counts.values());
+  };
+  for (const [owner, other] of [['A', 'B'], ['B', 'A']]) {
+    const run = await runTwoMounts('sess-och5-owner-' + owner, owner, () => mockRemoteCounter(byteRule));
+    const d = run.decisions;
+    check(run.sent.length === 2, 'owner ' + owner + ': provider called exactly once per turn', String(run.sent.length));
+    check(d.length === 2 && perRequest(d).every((n) => n === 1), 'owner ' + owner + ': exactly one decision per provider request', JSON.stringify(d.map((x) => [x.mount, x.requestSeq, x.fallbackStage])));
+    check(d.every((x) => x.mount === owner), 'owner ' + owner + ': only the joined composition decides; ' + other + ' stays silent');
+    check(new Set(d.map((x) => x.moduleInstanceId)).size === 1, 'owner ' + owner + ': decisions come from one module instance');
+    check(d[0] && d[0].fallbackStage === 'checkpoint', 'owner ' + owner + ': turn 1 bootstrap is a typed checkpoint fallback');
+    const t2 = d[1] || {};
+    check(t2.projectionMode === 'CCV2_COMPILED' && t2.fallbackReason === null && t2.authority === 'REMOTE_MUSE_PRECOUNT'
+      && t2.authorityHealth === 'HEALTHY' && t2.compilerExecutions === 1, 'owner ' + owner + ': turn 2 CCV2_COMPILED / null / REMOTE_MUSE_PRECOUNT / HEALTHY / 1', JSON.stringify(t2));
+    check(run.sent[1] && run.sent[1].metadata && run.sent[1].metadata.projectionMode === 'CCV2_COMPILED', 'owner ' + owner + ': the ONE provider send in turn 2 is the compiled request');
+    check(Number.isInteger(t2.derivedRequestSeq) && t2.derivedRequestSeq !== t2.requestSeq, 'owner ' + owner + ': derived request correlated, never re-decided by the other copy');
+  }
+  {
+    // The live shape: the owner's attempt fails and falls through next();
+    // the other composition must not produce a second decision.
+    const run = await runTwoMounts('sess-och5-owner-fails', 'A', () => failingCounter);
+    const d = run.decisions;
+    check(run.sent.length === 2 && d.length === 2 && d.every((x) => x.mount === 'A'), 'owner attempt failure: still one decision per request, other copy silent', JSON.stringify(d.map((x) => [x.mount, x.requestSeq, x.fallbackStage])));
+    const t2 = d[1] || {};
+    check(t2.fallbackStage === 'attempt' && t2.attemptFailureStage === 'reserve-count' && t2.fallbackReason === 'active-tokenizer-unavailable',
+      'owner attempt failure is typed down to the inner attempt stage', JSON.stringify(t2));
+    check(t2.attemptErrorClass && t2.attemptErrorClass.messageCode === 'remote-counter-http-503' && t2.compilerExecutions === 0,
+      'inner failure carries a structural error code and honest compilerExecutions');
+    check(JSON.stringify(run.logs).indexOf('upstream unavailable') === -1 && JSON.stringify(run.logs).indexOf('OCH-5 turn') === -1,
+      'no exception free text or message content in any log line');
+    check(run.sent[1] && llmMod.isAgentLoopRequest(run.sent[1]), 'owner attempt failure sends the loop-built request verbatim');
+  }
+  {
+    const run = await runTwoMounts('sess-och5-unowned', null, () => mockRemoteCounter(byteRule));
+    const d = run.decisions;
+    check(run.sent.length === 2 && d.length === 2 && perRequest(d).every((n) => n === 1) && d.every((x) => x.fallbackStage === 'ownership'),
+      'no owning composition: exactly one typed ownership fallback per request (never silence, never two)', JSON.stringify(d.map((x) => [x.mount, x.requestSeq, x.fallbackStage])));
+  }
+  opencode.resetOpencodeHealthV2();
+  fs.rmSync(copyDir, { recursive: true, force: true });
 }

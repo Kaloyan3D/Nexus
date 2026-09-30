@@ -57,18 +57,54 @@ function candidateIdentityV2(view, layout) {
     })),
   };
 }
-function ineligibleMuse(reason) {
+// Closed-world attempt stages: WHERE an ineligible attempt stopped. Stages
+// before 'planning-build' ran no compiler pipeline (compilerExecutions 0).
+const ATTEMPT_STAGES = Object.freeze([
+  'attempt-shape', 'binding-shape', 'binding-route', 'binding-counter', 'binding-turn', 'binding-budget',
+  'reserve-count', 'budget', 'planning-build', 'planning-turn', 'planning-snapshot', 'enumeration-count',
+  'memo-build', 'authoritative-build', 'counter-independence', 'render-turn', 'render-budget',
+  'tool-protocol', 'inference-body', 'payload-count', 'payload-budget', 'revision-read', 'revision-stale',
+  'render-validate', 'unexpected',
+]);
+const PRE_COMPILE_STAGES = Object.freeze(['attempt-shape', 'binding-shape', 'binding-route', 'binding-counter',
+  'binding-turn', 'binding-budget', 'reserve-count', 'budget']);
+const SAFE_ERROR_CODE_PREFIXES = Object.freeze(['context-', 'remote-counter-', 'counter-', 'muse-', 'opencode-', 'ccv2-']);
+/**
+ * Structural, content-free classification of a caught error: its class
+ * name, a string `code` property, and a leading kebab-case module error
+ * code (e.g. 'remote-counter-memo-miss'). The free-text message is NEVER
+ * returned (it may quote user content).
+ */
+function classifyErrorV2(error) {
+  if (error === null || error === undefined) return null;
+  const safeName = (value) => (typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(value) ? value : null);
+  const name = safeName(error && error.constructor ? error.constructor.name : null) || safeName(error && error.name) || typeof error;
+  const code = error && typeof error.code === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(error.code) ? error.code : null;
+  let messageCode = null;
+  const message = error && typeof error.message === 'string' ? error.message : '';
+  const match = /^([a-z][a-z0-9]*(?:-[a-z0-9]+)+)(?=$|[:\s(])/.exec(message);
+  if (match !== null && match[1].length <= 80 && SAFE_ERROR_CODE_PREFIXES.some((prefix) => match[1].startsWith(prefix))) {
+    messageCode = match[1];
+  }
+  return Object.freeze({ name, code, messageCode });
+}
+function ineligibleMuse(reason, stage, error) {
+  const failureStage = ATTEMPT_STAGES.indexOf(stage) !== -1 ? stage : 'unexpected';
+  const compilerExecutions = PRE_COMPILE_STAGES.indexOf(failureStage) !== -1 ? 0 : 1;
+  const errorClass = arguments.length >= 3 ? classifyErrorV2(error) : null;
   return Object.freeze({
     eligible: false,
     mode: 'LEGACY',
     fallbackReason: reason,
+    failureStage,
+    errorClass,
     view: null,
     layout: null,
     render: null,
     preCount: null,
     inferenceBody: null,
-    compilerExecutions: 1,
-    telemetry: Object.freeze({ projectionMode: 'LEGACY', fallbackReason: reason, compilerExecutions: 1 }),
+    compilerExecutions,
+    telemetry: Object.freeze({ projectionMode: 'LEGACY', fallbackReason: reason, failureStage, errorClass, compilerExecutions }),
   });
 }
 function checkAttemptShapeV2(input) {
@@ -140,7 +176,7 @@ function buildInferenceBodyV2(route, systemJoined, turnText, toolsJsonOrNull, ma
 }
 async function attemptMuseActiveV2(input) {
   const shapeError = checkAttemptShapeV2(input);
-  if (shapeError !== null) return ineligibleMuse('active-compiler-failed');
+  if (shapeError !== null) return ineligibleMuse('active-compiler-failed', 'attempt-shape');
   try {
     const compileInput = input.compileInput;
     const pages = input.pages;
@@ -148,14 +184,14 @@ async function attemptMuseActiveV2(input) {
     const route = input.route;
     const terms = input.requestTerms;
     const binding = input.binding;
-    if (checkBindingShapeV2(binding) !== true) return ineligibleMuse('active-request-binding-changed');
-    if (binding.provider !== route.provider || binding.model !== route.model) return ineligibleMuse('active-request-binding-changed');
+    if (checkBindingShapeV2(binding) !== true) return ineligibleMuse('active-request-binding-changed', 'binding-shape');
+    if (binding.provider !== route.provider || binding.model !== route.model) return ineligibleMuse('active-request-binding-changed', 'binding-route');
     if (binding.counterFingerprint !== remoteV2.REMOTE_FINGERPRINT_V1 || binding.counterRevision !== remoteV2.REMOTE_REVISION_V1) {
-      return ineligibleMuse('active-request-binding-changed');
+      return ineligibleMuse('active-request-binding-changed', 'binding-counter');
     }
-    if (binding.turnTextHash !== sha256HexUtf8(terms.turnText)) return ineligibleMuse('active-current-turn-invalid');
+    if (binding.turnTextHash !== sha256HexUtf8(terms.turnText)) return ineligibleMuse('active-current-turn-invalid', 'binding-turn');
     if (binding.maxTokens !== terms.maxTokens || binding.outputReserve !== terms.outputReserve) {
-      return ineligibleMuse('active-request-binding-changed');
+      return ineligibleMuse('active-request-binding-changed', 'binding-budget');
     }
     let remoteCalls = 0;
     const countedRemote = async (texts) => {
@@ -169,15 +205,18 @@ async function attemptMuseActiveV2(input) {
     try {
       reserveCounts = await countedRemote(reserveTexts);
     } catch (error) {
-      return ineligibleMuse(mapRemoteErrorV2(error));
+      return ineligibleMuse(mapRemoteErrorV2(error), 'reserve-count', error);
     }
     let reserveTokens = 0;
     for (const count of reserveCounts) reserveTokens += count;
     const hardMax = route.maxContextTokens - terms.outputReserve - reserveTokens;
-    if (!Number.isInteger(hardMax) || hardMax < 1) return ineligibleMuse('active-budget-unrepresentable');
+    if (!Number.isInteger(hardMax) || hardMax < 1) return ineligibleMuse('active-budget-unrepresentable', 'budget');
     const budget = { hardMax, target: hardMax };
-    const effectiveCompileInput = deepClone(compileInput);
-    effectiveCompileInput.budget = { hardMax, target: hardMax };
+    // Shallow copies with a fresh budget: the compile pipeline never mutates
+    // its input, and a JSON clone would drop B03's module-private symbol
+    // brand from every exactMaterial result (the C02 gate then rejects the
+    // material as evidence-binding-mismatch for any blob-backed HOT/WARM page).
+    const effectiveCompileInput = Object.assign({}, compileInput, { budget: { hardMax, target: hardMax } });
     const planning = createPlanningCounterV2();
     // Pass 1 (planning only, never authoritative): full pipeline + render.
     // CCV2-M01: the planning counter counts UTF-8 BYTES, so planning against
@@ -187,8 +226,7 @@ async function attemptMuseActiveV2(input) {
     // is not part of the candidate identity, and any selection difference
     // under the authoritative pass-2 counts still fails the identity check.
     const planningBudget = { hardMax: allocatorV2.PACKING_BOUNDS.hardMaxMax, target: allocatorV2.PACKING_BOUNDS.hardMaxMax };
-    const planningCompileInput = deepClone(compileInput);
-    planningCompileInput.budget = { hardMax: planningBudget.hardMax, target: planningBudget.target };
+    const planningCompileInput = Object.assign({}, compileInput, { budget: { hardMax: planningBudget.hardMax, target: planningBudget.target } });
     let candidate1 = null;
     let render1 = null;
     try {
@@ -201,12 +239,12 @@ async function attemptMuseActiveV2(input) {
       });
       render1 = rendererV2.renderContextPromptV2({ view: candidate1.view, layout: candidate1.layout, counter: planning });
     } catch (error) {
-      return ineligibleMuse('active-compiler-failed');
+      return ineligibleMuse('active-compiler-failed', 'planning-build', error);
     }
     // Binding coherence of the planned candidate.
     const view1 = candidate1.view;
-    if (view1.turnRef.turnId !== binding.turnId) return ineligibleMuse('active-current-turn-invalid');
-    if (view1.checkpointBinding.snapshotRevision !== binding.snapshotRevision) return ineligibleMuse('active-snapshot-stale');
+    if (view1.turnRef.turnId !== binding.turnId) return ineligibleMuse('active-current-turn-invalid', 'planning-turn');
+    if (view1.checkpointBinding.snapshotRevision !== binding.snapshotRevision) return ineligibleMuse('active-snapshot-stale', 'planning-snapshot');
     // Enumerate every text the authoritative pass may count.
     const enumeration = [];
     const seen = new Set();
@@ -229,7 +267,7 @@ async function attemptMuseActiveV2(input) {
     try {
       entryCounts = await countedRemote(enumeration);
     } catch (error) {
-      return ineligibleMuse(mapRemoteErrorV2(error));
+      return ineligibleMuse(mapRemoteErrorV2(error), 'enumeration-count', error);
     }
     const table = new Map();
     for (let index = 0; index < enumeration.length; index += 1) table.set(enumeration[index], entryCounts[index]);
@@ -237,7 +275,7 @@ async function attemptMuseActiveV2(input) {
     try {
       memo = remoteCounter.buildMemoCounterV2(table);
     } catch (error) {
-      return ineligibleMuse('active-compiler-failed');
+      return ineligibleMuse('active-compiler-failed', 'memo-build', error);
     }
     // Pass 2 (authoritative): identical pipeline through provider counts.
     let candidate2 = null;
@@ -252,27 +290,27 @@ async function attemptMuseActiveV2(input) {
       });
       render2 = rendererV2.renderContextPromptV2({ view: candidate2.view, layout: candidate2.layout, counter: memo });
     } catch (error) {
-      return ineligibleMuse(mapRemoteErrorV2(error));
+      return ineligibleMuse(mapRemoteErrorV2(error), 'authoritative-build', error);
     }
     // Counter-independence proof: identical selection under both
     // authorities, or no compiled send.
     if (canonicalJsonOf(candidateIdentityV2(candidate1.view, candidate1.layout))
       !== canonicalJsonOf(candidateIdentityV2(candidate2.view, candidate2.layout))) {
-      return ineligibleMuse('active-compiler-failed');
+      return ineligibleMuse('active-compiler-failed', 'counter-independence');
     }
     // Current turn exactly once, byte-exact, in the authoritative render.
     const userTexts = render2.messagePlan.filter((message) => message.role === 'user').map((message) => message.text);
     if (userTexts.length !== 1 || sha256HexUtf8(userTexts[0]) !== sha256HexUtf8(terms.turnText)) {
-      return ineligibleMuse('active-current-turn-invalid');
+      return ineligibleMuse('active-current-turn-invalid', 'render-turn');
     }
-    if (render2.renderedTokens > hardMax) return ineligibleMuse('active-render-over-budget');
+    if (render2.renderedTokens > hardMax) return ineligibleMuse('active-render-over-budget', 'render-budget');
     // Balanced tool protocol in the authoritative view.
     let balancedTools = 0;
     for (const section of viewV2.VIEW_SECTIONS) {
       for (const entry of candidate2.view[section]) {
         if (entry.toolTransaction !== null && entry.toolTransaction !== undefined) {
           if (entry.toolTransaction.callPresent !== true || entry.toolTransaction.resultPresent !== true) {
-            return ineligibleMuse('active-tool-protocol-invalid');
+            return ineligibleMuse('active-tool-protocol-invalid', 'tool-protocol');
           }
           balancedTools += 1;
         }
@@ -291,7 +329,7 @@ async function attemptMuseActiveV2(input) {
         typeof terms.toolsJson === 'string' ? terms.toolsJson : null, terms.maxTokens,
         typeof terms.reasoningEffort === 'string' ? terms.reasoningEffort : null);
     } catch (error) {
-      return ineligibleMuse('active-compiler-failed');
+      return ineligibleMuse('active-compiler-failed', 'inference-body', error);
     }
     // FINAL authoritative pre-count: exactly one whole-payload count.
     let preCount = null;
@@ -300,9 +338,9 @@ async function attemptMuseActiveV2(input) {
       preCount = counted.tokens;
       remoteCalls += 1;
     } catch (error) {
-      return ineligibleMuse(mapRemoteErrorV2(error));
+      return ineligibleMuse(mapRemoteErrorV2(error), 'payload-count', error);
     }
-    if (preCount + terms.outputReserve > route.maxContextTokens) return ineligibleMuse('active-render-over-budget');
+    if (preCount + terms.outputReserve > route.maxContextTokens) return ineligibleMuse('active-render-over-budget', 'payload-budget');
     // Final TOCTOU revalidation before the send boundary.
     let completeRevision = binding.snapshotRevision;
     if (typeof input.getCurrentRevision === 'function') {
@@ -310,13 +348,12 @@ async function attemptMuseActiveV2(input) {
         const observed = input.getCurrentRevision();
         if (typeof observed === 'string' && observed !== '') completeRevision = observed;
       } catch (error) {
-        void error;
-        return ineligibleMuse('active-snapshot-stale');
+        return ineligibleMuse('active-snapshot-stale', 'revision-read', error);
       }
     }
-    if (completeRevision !== binding.snapshotRevision) return ineligibleMuse('active-snapshot-stale');
+    if (completeRevision !== binding.snapshotRevision) return ineligibleMuse('active-snapshot-stale', 'revision-stale');
     const renderCheck = rendererV2.validateContextRenderV2(render2);
-    if (!renderCheck.valid) return ineligibleMuse('active-render-invalid');
+    if (!renderCheck.valid) return ineligibleMuse('active-render-invalid', 'render-validate');
     let memoDigest = '';
     try {
       const sortedKeys = Array.from(table.keys()).sort();
@@ -369,7 +406,7 @@ async function attemptMuseActiveV2(input) {
       telemetry,
     });
   } catch (error) {
-    return ineligibleMuse(mapRemoteErrorV2(error));
+    return ineligibleMuse(mapRemoteErrorV2(error), 'unexpected', error);
   }
 }
 function httpsPostInferenceV2(input) {
@@ -661,6 +698,8 @@ async function sendMuseCompiledV2(input) {
 }
 module.exports = {
   MUSE_ACTIVE_REVISION_V1,
+  ATTEMPT_STAGES,
+  classifyErrorV2,
   PLANNING_FINGERPRINT_V1,
   createPlanningCounterV2,
   candidateIdentityV2,

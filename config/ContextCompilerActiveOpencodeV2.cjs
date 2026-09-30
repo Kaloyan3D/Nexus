@@ -115,11 +115,20 @@ function postOpencodeInferenceV2(input) {
     }
   });
 }
-function ineligibleOpencode(reason, health, extra) {
+// OpenCode-level attempt stages; Muse-level stages pass through unchanged
+// (museActiveV2.ATTEMPT_STAGES).
+const OPENCODE_ATTEMPT_STAGES = Object.freeze(['opencode-attempt-shape', 'opencode-health', 'opencode-binding-route',
+  'opencode-margin-budget', 'opencode-unexpected']);
+function ineligibleOpencode(reason, health, extra, failure) {
+  const detail = isPlainObject(failure) ? failure : {};
+  const failureStage = typeof detail.failureStage === 'string' ? detail.failureStage : null;
+  const errorClass = isPlainObject(detail.errorClass) ? detail.errorClass : null;
   return Object.freeze(Object.assign({
     eligible: false,
     mode: 'LEGACY',
     fallbackReason: reason,
+    failureStage,
+    errorClass,
     view: null,
     layout: null,
     render: null,
@@ -131,6 +140,8 @@ function ineligibleOpencode(reason, health, extra) {
     telemetry: Object.freeze({
       projectionMode: 'LEGACY',
       fallbackReason: reason,
+      failureStage,
+      errorClass,
       authority: OPENCODE_AUTHORITY_V1,
       authorityHealth: health,
       compilerExecutions: 0,
@@ -169,14 +180,14 @@ function countBindingOfV2(binding) {
 }
 async function attemptOpencodeActiveV2(input) {
   const shapeError = checkAttemptShapeV2(input);
-  if (shapeError !== null) return ineligibleOpencode('active-compiler-failed', HEALTH_QUARANTINED);
+  if (shapeError !== null) return ineligibleOpencode('active-compiler-failed', HEALTH_QUARANTINED, null, { failureStage: 'opencode-attempt-shape' });
   const health = opencodeHealthV2({ provider: OPENCODE_PROVIDER_V1, model: OPENCODE_MODEL_V1 });
-  if (health !== HEALTH_HEALTHY) return ineligibleOpencode('active-tokenizer-unavailable', health);
+  if (health !== HEALTH_HEALTHY) return ineligibleOpencode('active-tokenizer-unavailable', health, null, { failureStage: 'opencode-health' });
   try {
     const terms = input.requestTerms;
     const binding = input.binding;
     if (binding.provider !== OPENCODE_PROVIDER_V1 || binding.model !== OPENCODE_MODEL_V1) {
-      return ineligibleOpencode('active-request-binding-changed', health);
+      return ineligibleOpencode('active-request-binding-changed', health, null, { failureStage: 'opencode-binding-route' });
     }
     const inner = await museActiveV2.attemptMuseActiveV2({
       compileInput: input.compileInput,
@@ -193,16 +204,20 @@ async function attemptOpencodeActiveV2(input) {
       telemetrySink: null,
     });
     if (inner.eligible !== true) {
+      const failureStage = typeof inner.failureStage === 'string' ? inner.failureStage : 'unexpected';
+      const errorClass = isPlainObject(inner.errorClass) ? inner.errorClass : null;
       return ineligibleOpencode(inner.fallbackReason, health, {
         compilerExecutions: inner.compilerExecutions === 1 ? 1 : 0,
         telemetry: Object.freeze({
           projectionMode: 'LEGACY',
           fallbackReason: inner.fallbackReason,
+          failureStage,
+          errorClass,
           authority: OPENCODE_AUTHORITY_V1,
           authorityHealth: health,
           compilerExecutions: inner.compilerExecutions === 1 ? 1 : 0,
         }),
-      });
+      }, { failureStage, errorClass });
     }
     const margin = providerSafetyMarginV2(inner.preCount);
     const reserve = Number.isInteger(terms.outputReserve) ? terms.outputReserve : 0;
@@ -212,6 +227,8 @@ async function attemptOpencodeActiveV2(input) {
         telemetry: Object.freeze({
           projectionMode: 'LEGACY',
           fallbackReason: 'active-render-over-budget',
+          failureStage: 'opencode-margin-budget',
+          errorClass: null,
           authority: OPENCODE_AUTHORITY_V1,
           authorityHealth: health,
           compilerExecutions: 1,
@@ -219,7 +236,7 @@ async function attemptOpencodeActiveV2(input) {
           providerSafetyMargin: margin,
           outputReserve: reserve,
         }),
-      });
+      }, { failureStage: 'opencode-margin-budget' });
     }
     const telemetry = Object.freeze(Object.assign({}, inner.telemetry, {
       authority: OPENCODE_AUTHORITY_V1,
@@ -251,8 +268,8 @@ async function attemptOpencodeActiveV2(input) {
       telemetry,
     });
   } catch (error) {
-    void error;
-    return ineligibleOpencode('active-compiler-failed', HEALTH_QUARANTINED);
+    return ineligibleOpencode('active-compiler-failed', HEALTH_QUARANTINED, null,
+      { failureStage: 'opencode-unexpected', errorClass: museActiveV2.classifyErrorV2(error) });
   }
 }
 async function sendOpencodeCompiledV2(input) {
