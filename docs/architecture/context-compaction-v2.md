@@ -6280,3 +6280,61 @@ Open: live multi-step canary; Meta acceptance of replayed encrypted
 reasoning; a count 400 whose message mentions "model" latches the counter
 contract (resilience unchanged by design); long single turns get no
 intra-turn compaction (Phase 2).
+
+## 53. CCV2-NT-R reasoningReplay provider capability (request shape v3)
+
+### 53.1 Evidence
+
+Live OC01 (v2): the Meta count endpoint rejects OpenCode-issued
+`reasoning.encrypted_content` (HTTP 400 `invalid_request_error`, message on
+reasoning/encrypted_content): encrypted reasoning is bound to the issuing
+caller, and the counter is a different caller. OpenCode Go accepted the
+replay once, but serves Muse from pooled upstream callers and public
+reports show the same "not issued to this caller" failure on tool
+continuations. Probe 3 (live, pinned DSH/pi-ai path, historical reasoning
+items removed, nothing else changed): human -> workflow skill -> loaded ->
+spec-reader -> loaded -> DONE, workflow loaded once, fresh reasoning on
+every response.
+
+### 53.2 Capability
+
+`reasoningReplay: native | none` controls ONLY whether provider-issued
+reasoning from earlier responses is sent again. It never disables
+reasoning generation or changes `{ effort, summary }` / `include`.
+Frozen table in ContextWireProjectorResponsesV2 bound to exact certified
+(provider, model) pairs: `opencode-go` + `muse-spark-1.3-contributor` ->
+`none`; every other pair -> `native`; a descriptor without a known mode
+fails closed. A new Muse model on the route needs its own entry.
+
+### 53.3 One transformed request
+
+The transform is applied to the derived DSH request (the one builder in
+the host), before it branches into the wire projection that is counted and
+the pi-ai adapter send: assistant messages with `reasoning` blocks become
+copies without them (surviving blocks are the same objects; the pi-ai
+replay envelope drops exactly the matching entries so text signatures and
+fc_* ids survive); every other message stays by reference. The projector
+refuses (`context-wire-reasoning-replay-forbidden`) to project an
+untransformed request on a `none` route, so a count-side-only filter cannot
+be introduced silently. ACTIVE-TAIL-NATIVE's lossless proof accepts exactly
+these copies. Conformance (T-NT-3) runs every case under both modes against
+the real adapter: `none` body == `native` body minus exactly its reasoning
+items.
+
+### 53.4 Authority semantics
+
+REMOTE_MUSE_PRECOUNT is an authoritative conservative model-input
+preflight of the exact payload that is sent (payload identity:
+canonicalJson(counted) === canonicalJson(posted counted subset)). It is not
+OpenCode's billing count; billing drift is bounded by the safety margin and
+observed by the usage observer, never required to be equal.
+
+Request-shape revision: `opencode-muse-request-shape-v3-native-tail-no-replay`
+(v2 evidence never authorizes it). OC01 v3: the static
+`native-no-replay-continuation` fixture replaces the replay fixture; the
+live native-tail phase runs at the production effort (`xhigh`) and requires
+tool A -> result A -> tool B -> result B -> final response, reasoningReplay
+none on every compiled step, zero historical reasoning items on the wire,
+fresh reasoning in every response, Meta acceptance of every counted body,
+counted == posted, usage within margin, unchanged cache epoch, no
+quarantine, one workflow load.

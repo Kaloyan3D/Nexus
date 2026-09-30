@@ -69,7 +69,7 @@ function scriptedResponseItems(body, scenario) {
   const text = JSON.stringify(input);
   const reasoning = (id) => ({ type: 'reasoning', id, summary: [], encrypted_content: 'DRY-ENC-' + id });
   if (text.indexOf('Canary turn two') === -1) {
-    return [{ type: 'message', id: 'msg_dry_1', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'Acknowledged.', annotations: [] }] }];
+    return [reasoning('rs_dry_0'), { type: 'message', id: 'msg_dry_1', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'Acknowledged.', annotations: [] }] }];
   }
   // Fault scenario: the model keeps reloading the workflow skill.
   if (scenario === 'reload-loop' && last.type === 'function_call_output') {
@@ -79,7 +79,7 @@ function scriptedResponseItems(body, scenario) {
     return [reasoning('rs_dry_2'), { type: 'function_call', id: 'fc_dry_2', call_id: 'call_dry_2', name: 'load_skill', arguments: JSON.stringify({ name: SECOND_SKILL }), status: 'completed' }];
   }
   if (last.type === 'function_call_output') {
-    return [{ type: 'message', id: 'msg_dry_3', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'DONE', annotations: [] }] }];
+    return [reasoning('rs_dry_3'), { type: 'message', id: 'msg_dry_3', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'DONE', annotations: [] }] }];
   }
   return [reasoning('rs_dry_1'), { type: 'function_call', id: 'fc_dry_1', call_id: 'call_dry_1', name: 'load_skill', arguments: JSON.stringify({ name: SKILL }), status: 'completed' }];
 }
@@ -100,6 +100,27 @@ function dryMetaTransport() {
   };
 }
 
+// Content-free summary of a Responses SSE stream: output item kinds + usage.
+function responseSummary(text) {
+  const out = { completed: false, outputKinds: [], usage: null };
+  for (const block of String(text || '').split('\n\n')) {
+    const line = block.split('\n').find((l) => l.startsWith('data: '));
+    if (!line) continue;
+    let event = null;
+    try { event = JSON.parse(line.slice(6)); } catch { continue; }
+    if (event.type === 'response.completed') {
+      const response = event.response || {};
+      out.completed = true;
+      out.outputKinds = Array.isArray(response.output) ? response.output.map(itemKind) : [];
+      if (response.usage) {
+        out.usage = { inputTokens: response.usage.input_tokens, cachedTokens: response.usage.input_tokens_details ? response.usage.input_tokens_details.cached_tokens : null,
+          outputTokens: response.usage.output_tokens, reasoningTokens: response.usage.output_tokens_details ? response.usage.output_tokens_details.reasoning_tokens : null };
+      }
+    }
+  }
+  return out;
+}
+
 // ---- recording proxy ----
 function startProxy(options) {
   const posted = [];
@@ -109,7 +130,8 @@ function startProxy(options) {
     req.on('data', (chunk) => chunks.push(chunk));
     req.on('end', () => {
       const bodyText = Buffer.concat(chunks).toString('utf8');
-      posted.push({ path: req.url, bodyText });
+      const record = { path: req.url, bodyText, responseText: '' };
+      posted.push(record);
       const index = posted.length;
       if (index > options.maxRequests) {
         upstreamStatus.push('capped');
@@ -120,7 +142,8 @@ function startProxy(options) {
       if (options.dryRun) {
         upstreamStatus.push(200);
         res.writeHead(200, { 'content-type': 'text/event-stream' });
-        res.end(scriptedSse(JSON.parse(bodyText), index, options.dryScenario));
+        record.responseText = scriptedSse(JSON.parse(bodyText), index, options.dryScenario);
+        res.end(record.responseText);
         return;
       }
       const headers = {};
@@ -137,7 +160,8 @@ function startProxy(options) {
           passHeaders[key] = value;
         }
         res.writeHead(up.statusCode, passHeaders);
-        up.pipe(res);
+        up.on('data', (chunk) => { record.responseText += chunk; res.write(chunk); });
+        up.on('end', () => res.end());
       });
       upstream.on('timeout', () => upstream.destroy(new Error('canary-upstream-timeout')));
       upstream.on('error', (error) => {
@@ -157,7 +181,8 @@ function startProxy(options) {
  * returns { ok, failures: [..typed..], report }
  */
 async function runNativeTailLive(input) {
-  const opts = Object.assign({ dryRun: false, maxRequests: 10, reasoningEffort: 'low', turnTimeoutMs: 300000 }, input);
+  // Production reasoning effort (settings.yaml opencode-go `reasoning: xhigh`).
+  const opts = Object.assign({ dryRun: false, maxRequests: 10, reasoningEffort: 'xhigh', turnTimeoutMs: 900000 }, input);
   const repoRoot = opts.repoRoot;
   const cfg = (name) => require(path.join(repoRoot, 'config', name));
   const host = cfg('ContextCompilerActiveOpencodeHostV2.cjs');
@@ -362,6 +387,9 @@ async function runNativeTailLive(input) {
         fallbackStage: decision.fallbackStage === undefined ? null : decision.fallbackStage,
         attemptFailureStage: decision.attemptFailureStage || null, nativeTailSkip: decision.nativeTailSkip || null,
         inputItems: body ? body.input.map(itemKind) : null,
+        reasoningReplay: decision.reasoningReplay === undefined ? null : decision.reasoningReplay,
+        replayedReasoningBlocksOmitted: decision.replayedReasoningBlocksOmitted === undefined ? null : decision.replayedReasoningBlocksOmitted,
+        response: proxy.posted[index] ? responseSummary(proxy.posted[index].responseText) : null,
       };
       report.requests.push(row);
       if (row.turn === 2 && row.projectionMode !== 'CCV2_COMPILED') fail('turn2-not-compiled', index + ':' + row.fallbackReason + '@' + row.fallbackStage + '/' + row.attemptFailureStage + '/' + row.nativeTailSkip);
@@ -373,8 +401,15 @@ async function runNativeTailLive(input) {
       const postedCounted = canon(countedSubset(body));
       const original = entered[entered.indexOf(derived) - 1];
       const anchor = original.messages.findIndex((m) => m.role === 'user' && JSON.stringify(m.content).indexOf('Canary turn two') !== -1);
+      // Lossless tail under reasoningReplay=none: non-reasoning objects by
+      // reference; an assistant copy keeps its surviving blocks by reference.
       const tailByReference = anchor > 0 && derived.messages.length === original.messages.length - anchor
-        && derived.messages.every((m, i) => m === original.messages[anchor + i]);
+        && derived.messages.every((m, i) => {
+          const o = original.messages[anchor + i];
+          if (m === o) return true;
+          const kept = o.role === 'assistant' ? o.content.filter((b) => b.type !== 'reasoning') : null;
+          return kept !== null && m.id === o.id && m.content.length === kept.length && kept.every((b, j) => m.content[j] === b);
+        });
       const developerFirst = body.input[0] && body.input[0].role === 'developer';
       const noUserTranscript = body.input.every((item) => !(item.role === 'user' && JSON.stringify(item.content).indexOf('[tool-call') !== -1));
       const turnOnce = proxy.posted[index].bodyText.split('Canary turn two').length === 2 && derived.system.indexOf('Canary turn two') === -1;
@@ -397,12 +432,17 @@ async function runNativeTailLive(input) {
         functionCalls: calls.length,
         functionCallOutputs: outputs.length,
         correlated,
-        reasoningItems: body.input.filter((item) => item.type === 'reasoning').length,
-        encryptedReasoningItems: body.input.filter((item) => item.type === 'reasoning' && typeof item.encrypted_content === 'string').length,
+        historicalReasoningItems: body.input.filter((item) => item.type === 'reasoning').length,
+        reasoningSettings: body.reasoning ? { effort: body.reasoning.effort, summary: body.reasoning.summary } : null,
+        metaAccepted: reserve !== undefined && reserve.error === null && final !== undefined && final.error === null,
+        freshReasoningReturned: row.response !== null && row.response.outputKinds.indexOf('reasoning') !== -1,
         signalPreserved: derived.signal === original.signal,
       };
       report.compiled.push(compiled);
-      for (const key of ['countedEqualsPosted', 'reserveCounted', 'tailByReference', 'systemPrefix', 'developerFirst', 'noUserTranscript', 'currentTurnOnce', 'correlated', 'signalPreserved']) {
+      if (compiled.historicalReasoningItems !== 0) fail('historical-reasoning-replayed', String(index));
+      if (row.reasoningReplay !== 'none') fail('reasoning-replay-not-none', String(index));
+      if (compiled.reasoningSettings === null || compiled.reasoningSettings.effort !== opts.reasoningEffort) fail('reasoning-settings-changed', String(index));
+      for (const key of ['countedEqualsPosted', 'reserveCounted', 'metaAccepted', 'freshReasoningReturned', 'systemPrefix', 'developerFirst', 'noUserTranscript', 'currentTurnOnce', 'correlated', 'signalPreserved']) {
         if (compiled[key] !== true) fail('compiled-proof-' + key, String(index));
       }
       const projection = wire.projectResponsesWireV2({ request: derived, route: wire.readResponsesRouteFromSettingsV2(fs.readFileSync(path.join(fxRoot, 'config', 'settings.yaml'), 'utf8'), PROVIDER, MODEL) });
@@ -429,7 +469,8 @@ async function runNativeTailLive(input) {
       nativeCausalAfterSkill: nativeCausal,
       capped: proxy.upstreamStatus.indexOf('capped') !== -1,
     };
-    if (report.progression.turn2Requests < 2) fail('no-multi-step');
+    if (report.progression.turn2Requests < 3) fail('no-multi-step');
+    if (report.progression.skillLoads.join(',') !== 'workflow,second') fail('unexpected-tool-sequence', report.progression.skillLoads.join(','));
     if (!nativeCausal) fail('skill-not-native-causal');
     if (report.progression.workflowLoads !== 1) fail('workflow-skill-reloaded', String(report.progression.workflowLoads));
     if (report.progression.capped) fail('request-cap-reached');
@@ -444,7 +485,12 @@ async function runNativeTailLive(input) {
     report.healthAtEnd = opencode.opencodeHealthV2({ provider: PROVIDER, model: MODEL });
     if (report.healthAtEnd !== 'HEALTHY') fail('route-quarantined-during-run');
     if (report.compiled.length === 0) fail('nothing-compiled');
-    if (!report.compiled.some((c) => c.functionCalls >= 1 && c.encryptedReasoningItems >= 1)) fail('no-native-reasoning-replay-compiled');
+    if (!report.compiled.some((c) => c.functionCalls >= 2 && c.functionCallOutputs >= 2)) fail('no-two-tool-native-continuation-compiled');
+    if (report.cacheEpochAfter !== report.cacheEpochBefore) fail('cache-epoch-bumped');
+    const finalRow = report.requests[report.requests.length - 1];
+    if (!finalRow || !finalRow.response || finalRow.response.outputKinds.indexOf('function_call') !== -1 || finalRow.response.outputKinds.indexOf('message') === -1) {
+      fail('no-final-response-after-tools');
+    }
   } catch (error) {
     // Typed only: an error message may quote request content.
     fail('exception', (error && typeof error.code === 'string' && error.code) || (error && error.name) || 'unknown');

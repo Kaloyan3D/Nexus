@@ -96,14 +96,16 @@ function countedSubset(body) {
   return out;
 }
 /**
- * Live reasoning-replay fixture: step 1 asks OpenCode for a tool call and
- * captures its output items (reasoning with encrypted_content + the
- * function_call); step 2 replays them natively with the tool result. The
- * record answers whether the Meta count endpoint accepts replayed
- * encrypted reasoning and whether its count bounds OpenCode's billed input.
+ * Live no-replay continuation fixture (request shape v3): step 1 asks
+ * OpenCode for a tool call (fresh reasoning is returned); step 2 continues
+ * natively with the function_call and its output but WITHOUT the historical
+ * reasoning items (reasoningReplay=none on this route: OpenCode-issued
+ * encrypted_content is caller-bound, the Meta count endpoint rejects it).
+ * The exact step-2 counted subset is counted by Meta and posted to
+ * OpenCode; billed input must stay within preCount + margin.
  */
-async function nativeReasoningReplayFixture(counter, opencodeKey) {
-  const record = { fixtureId: 'native-reasoning-replay' };
+async function nativeNoReplayContinuationFixture(counter, opencodeKey) {
+  const record = { fixtureId: 'native-no-replay-continuation' };
   const headers = { 'x-opencode-session': 'sess-oc01-canary-native-replay', 'user-agent': 'nexus-ai-harness/1.0' };
   const step1 = Object.assign(nativeTailBody([]), { include: ['reasoning.encrypted_content'], store: false });
   const first = await postJson(OPENCODE_HOST, OPENCODE_PATH, opencodeKey, step1, 120000, headers);
@@ -119,18 +121,16 @@ async function nativeReasoningReplayFixture(counter, opencodeKey) {
     record.anomaly = true;
     return record;
   }
-  const replayed = output.filter((item) => item && (item.type === 'reasoning' || item.type === 'function_call'))
-    .map((item) => (item.type === 'function_call'
-      ? { type: 'function_call', id: item.id, call_id: item.call_id, name: item.name, arguments: item.arguments }
-      : item));
-  record.reasoningItemsReplayed = replayed.filter((item) => item.type === 'reasoning').length;
-  record.encryptedReasoningReplayed = replayed.some((item) => item.type === 'reasoning' && typeof item.encrypted_content === 'string');
-  const step2 = Object.assign(nativeTailBody(replayed.concat([{ type: 'function_call_output', call_id: call.call_id, output: 'loaded' }])), { include: ['reasoning.encrypted_content'], store: false });
+  record.freshReasoningReturned = output.some((item) => item && item.type === 'reasoning');
+  const continued = [{ type: 'function_call', id: call.id, call_id: call.call_id, name: call.name, arguments: call.arguments },
+    { type: 'function_call_output', call_id: call.call_id, output: 'loaded' }];
+  const step2 = Object.assign(nativeTailBody(continued), { include: ['reasoning.encrypted_content'], store: false });
+  record.historicalReasoningItemsSent = step2.input.filter((item) => item.type === 'reasoning').length;
   try {
     record.preCount = (await counter.countPayloadV2(countedSubset(step2))).tokens;
-    record.metaCountAcceptsReasoningReplay = true;
+    record.metaCountAccepted = true;
   } catch (error) {
-    record.metaCountAcceptsReasoningReplay = false;
+    record.metaCountAccepted = false;
     record.status = 'count-rejected:' + String((error && error.code) || 'unknown').slice(0, 64);
     record.anomaly = true;
     return record;
@@ -146,7 +146,14 @@ async function nativeReasoningReplayFixture(counter, opencodeKey) {
   record.status = 'completed';
   record.providerReportedInputTokens = parsed.inputTokens;
   record.cachedTokens = parsed.cachedTokens;
-  record.anomaly = parsed.inputTokens > record.preCount + record.margin;
+  let nextKinds = [];
+  try {
+    nextKinds = JSON.parse(second.bodyText).output.map((item) => item.type);
+  } catch (error) {
+    void error;
+  }
+  record.nextOutputKinds = nextKinds;
+  record.anomaly = parsed.inputTokens > record.preCount + record.margin || record.freshReasoningReturned !== true;
   return record;
 }
 function parseResponsesUsage(bodyText) {
@@ -234,13 +241,13 @@ async function runCanary(metaKey, opencodeKey) {
     results.push(record);
     console.log('OC01-CANARY ' + JSON.stringify(record));
   }
-  // Request-shape v2 certification requires live evidence for the native
-  // reasoning-replay tail (never faked; any failure quarantines).
+  // Request-shape v3 certification requires live evidence for the native
+  // no-replay continuation (never faked; any failure quarantines).
   let replayRecord = null;
   try {
-    replayRecord = await nativeReasoningReplayFixture(counter, opencodeKey);
+    replayRecord = await nativeNoReplayContinuationFixture(counter, opencodeKey);
   } catch (error) {
-    replayRecord = { fixtureId: 'native-reasoning-replay', status: 'transport-failure', anomaly: true };
+    replayRecord = { fixtureId: 'native-no-replay-continuation', status: 'transport-failure', anomaly: true };
   }
   if (replayRecord.anomaly === true) failed += 1;
   results.push(replayRecord);

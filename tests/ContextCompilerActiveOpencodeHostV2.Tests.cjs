@@ -259,6 +259,27 @@ async function runProjectionH(listener, request) {
   const chunks = await drainH(returned);
   return { dispatched, nextCalls: () => nextCalls, returned, nextStream, chunks };
 }
+// ACTIVE-TAIL-NATIVE under reasoningReplay=none: every tail message is the
+// original object, except an assistant message with historical reasoning,
+// which is a copy whose surviving blocks (and replay envelope entries) are
+// the SAME objects in the same order, with identical id/role/source route.
+function tailLosslessNoReplay(originalTail, derivedTail) {
+  if (originalTail.length !== derivedTail.length) return false;
+  return originalTail.every((message, index) => {
+    const got = derivedTail[index];
+    const hasReasoning = message.role === 'assistant' && message.content.some((b) => b.type === 'reasoning');
+    if (!hasReasoning) return got === message;
+    if (got === message || got.id !== message.id || got.role !== message.role) return false;
+    const kept = message.content.filter((b) => b.type !== 'reasoning');
+    if (got.content.length !== kept.length || !kept.every((b, i) => got.content[i] === b)) return false;
+    if (got.source.provider !== message.source.provider || got.source.model !== message.source.model || got.source.kind !== message.source.kind) return false;
+    const rs = message.source.replayState;
+    if (rs === undefined) return got.source.replayState === undefined;
+    const keptEntries = rs.blocks.filter((b, i) => message.content[i].type !== 'reasoning');
+    return got.source.replayState.response === rs.response && got.source.replayState.blocks.length === keptEntries.length
+      && keptEntries.every((b, i) => got.source.replayState.blocks[i] === b);
+  });
+}
 function userTurnCount(messages, text) {
   let count = 0;
   for (const message of messages) {
@@ -671,9 +692,10 @@ async function sectionOCH4() {
       const { derived, original } = step;
       const anchor = original.messages.findIndex((m) => m.role === 'user' && JSON.stringify(m.content).indexOf(TURN2) !== -1);
       check(llmMod.isAgentLoopRequest(original) && !llmMod.isAgentLoopRequest(derived), tag + 'loop-built original replaced by one derived request');
-      check(anchor > 0 && derived.messages.length === original.messages.length - anchor
-        && derived.messages.every((m, i) => m === original.messages[anchor + i]),
-        tag + 'no historical legacy bulk survives, while the native active tail survives losslessly (same objects, same order)');
+      check(anchor > 0 && tailLosslessNoReplay(original.messages.slice(anchor), derived.messages),
+        tag + 'no historical legacy bulk survives, while the native active tail survives losslessly (non-reasoning objects by reference; historical reasoning omitted)');
+      check(step.decision.reasoningReplay === 'none' && step.body.input.every((item) => item.type !== 'reasoning'),
+        tag + 'reasoningReplay=none active: no historical reasoning item on the wire');
       check(['provider', 'model', 'reasoningEffort', 'maxTokens', 'tools', 'sessionId', 'signal', 'temperature', 'stop'].every((key) => derived[key] === original[key]),
         tag + 'route/model/tools/reasoning/maxTokens/session/signal preserved by reference');
       check(derived.signal instanceof AbortSignal && derived.signal === original.signal, tag + 'AbortSignal identity preserved');
@@ -686,16 +708,21 @@ async function sectionOCH4() {
     const s3 = steps[2];
     const anchorItem = s3.body.input.findIndex((item) => item.role === 'user' && JSON.stringify(item.content).indexOf(TURN2) !== -1);
     const after = s3.body.input.slice(anchorItem + 1).map((item) => item.type || item.role);
-    check(JSON.stringify(after.filter((t) => t !== 'user')) === JSON.stringify(['reasoning', 'function_call', 'function_call_output', 'reasoning', 'message', 'function_call', 'function_call_output']),
+    check(JSON.stringify(after.filter((t) => t !== 'user')) === JSON.stringify(['function_call', 'function_call_output', 'message', 'function_call', 'function_call_output']),
       'T-NT-1: native tool_call A, result A, continuation, tool_call B, result B in exact order after the current user', JSON.stringify(after));
     const calls = s3.body.input.filter((item) => item.type === 'function_call');
     const outputs = s3.body.input.filter((item) => item.type === 'function_call_output');
     check(calls.map((c) => c.call_id + '/' + c.id).join(',') === 'call_1/fc_1,call_2/fc_2' && outputs.map((o) => o.call_id + '=' + o.output).join(',') === 'call_1=loaded,call_2=spec text',
       'T-NT-1: call ids and tool-result correlation survive unchanged');
-    check(s3.body.input.some((item) => item.type === 'reasoning' && item.encrypted_content === 'ENC-rs_1'), 'T-NT-1: provider reasoning replay (encrypted_content) survives');
-    const replayed = s3.derived.messages.find((m) => m.role === 'assistant');
-    check(replayed !== undefined && replayed.source.replayState !== undefined && replayed.source.replayState === s3.original.messages[s3.original.messages.indexOf(replayed)].source.replayState,
-      'T-NT-1: replayState survives by reference');
+    const s3Anchor = s3.original.messages.findIndex((m) => m.role === 'user' && JSON.stringify(m.content).indexOf(TURN2) !== -1);
+    const originalAssistants = s3.original.messages.slice(s3Anchor).filter((m) => m.role === 'assistant' && m.source && m.source.replayState);
+    check(originalAssistants.length >= 2 && originalAssistants.every((m) => m.content.some((b) => b.type === 'reasoning')),
+      'T-NT-1: fresh reasoning keeps arriving from the provider (loop history carries it)');
+    check(s3.bodyText.indexOf('ENC-rs_') === -1 && s3.body.input.every((item) => item.type !== 'reasoning'),
+      'T-NT-1: historical encrypted reasoning is never replayed (reasoningReplay=none)');
+    check(s3.body.reasoning && s3.body.reasoning.summary === 'auto' && typeof s3.body.reasoning.effort === 'string' && JSON.stringify(s3.body.include) === '["reasoning.encrypted_content"]',
+      'T-NT-1: reasoning request settings stay on the wire');
+    check(d[2].replayedReasoningBlocksOmitted >= 2, 'T-NT-1: decision telemetry counts omitted historical reasoning blocks');
     check(s3.derived.system.indexOf('id=call_1]') === -1 && s3.derived.system.indexOf('id=call_2]') === -1 && s3.bodyText.indexOf('[tool-call load_skill id=call_') === -1,
       'T-NT-1: no native tail transaction is duplicated inside the synthetic context');
     // T-NT-2: production skill-load loop regression. The request after the
@@ -712,6 +739,9 @@ async function sectionOCH4() {
     check(s2.body.input.filter((item) => item.role === 'developer').length === 1 && s2.body.input[0].role === 'developer'
       && s2.body.input.every((item) => !(item.role === 'user' && JSON.stringify(item.content).indexOf('[tool-call') !== -1)),
       'T-NT-2: compiled context travels in the developer slot, never as a user-role transcript');
+    const workflowCalls = (body) => body.input.filter((item) => item.type === 'function_call' && item.arguments.indexOf('nexus-engineering-workflow') !== -1).length;
+    check(workflowCalls(s2.body) === 1 && workflowCalls(s3.body) === 1 && s3.body.input.filter((item) => item.type === 'function_call' && item.call_id === 'call_2').length === 1,
+      'T-NT-2: workflow call and second tool call stay native, and projection never duplicates the workflow call');
     const usage = logs.filter((entry) => entry && entry.event === 'ccv2-opencode-usage-observed');
     check(usage.length === 3 && usage.every((u) => u.inputTokens === 40 && u.withinMargin === true), 'T-USAGE: real DSH usage observed for every compiled step (pi-ai disjoint counts)', JSON.stringify(usage));
     const text = JSON.stringify(logs);
@@ -1150,9 +1180,9 @@ async function sectionNativeTailMatrix() {
     check(r.decided.projectionMode === 'CCV2_COMPILED' && r.run.dispatched.length === 1 && r.run.nextCalls() === 0,
       'T-NT-1: multi-step active turn compiles; provider transport exactly once', JSON.stringify([r.decided.fallbackReason, r.decided.fallbackStage, r.decided.nativeTailSkip, r.decided.attemptFailureStage]));
     if (derived !== undefined) {
-      check(derived.messages.length === 5 && derived.messages.every((m, i) => m === r.req.messages[1 + i]), 'T-NT-1: tail = messages[anchor..] by reference and order; historical bulk removed');
-      check(derived.messages[1].source.replayState === CA.source.replayState && derived.messages[1].content[1].id === 'call_A|fc_A' && derived.messages[2].content[0].toolCallId === 'call_A|fc_A',
-        'T-NT-1: tool-call ids, result correlation and replayState survive by reference');
+      check(derived.messages.length === 5 && tailLosslessNoReplay(r.req.messages.slice(1), derived.messages), 'T-NT-1: tail = messages[anchor..] losslessly (historical reasoning omitted); historical bulk removed');
+      check(derived.messages[1].content[0].id === 'call_A|fc_A' && derived.messages[1].content[0] === CA.content[1] && derived.messages[2] === RA && derived.messages[2].content[0].toolCallId === 'call_A|fc_A',
+        'T-NT-1: tool-call ids and result correlation survive (same block objects)');
       check(derived.signal === r.req.signal && ['provider', 'model', 'reasoningEffort', 'maxTokens', 'tools', 'sessionId'].every((k) => derived[k] === r.req[k]),
         'T-NT-1: signal/route/model/reasoning/maxTokens/tools/session preserved by reference');
       check(derived.system.startsWith(SYSTEM_TEXT + host.CCV2_SYSTEM_SEPARATOR_V1) && derived.system.indexOf(TURN_TEXT) === -1 && derived.system.indexOf(BULK_MARKER) === -1,

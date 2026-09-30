@@ -18,6 +18,10 @@ const OPENCODE_REQUEST_SHAPE_V1 = 'opencode-muse-request-shape-v1';
 // native tail, counted as the pinned wire body). Certification binds this
 // revision, so evidence gathered for the v1 text shape never authorizes it.
 const OPENCODE_REQUEST_SHAPE_V2 = 'opencode-muse-request-shape-v2-native-tail';
+// reasoningReplay=none on this route changes the provider wire again
+// (historical reasoning items are never sent or counted), so evidence for
+// the replay-enabled v2 shape never authorizes it.
+const OPENCODE_REQUEST_SHAPE_V3 = 'opencode-muse-request-shape-v3-native-tail-no-replay';
 // Deterministic separator between the DSH-owned system bytes (a strict
 // prefix of the derived system) and the compiled CCv2 context.
 const CCV2_SYSTEM_SEPARATOR_V1 = String.fromCharCode(10, 10);
@@ -154,7 +158,7 @@ function currentOpencodeIdentityV2(input) {
       counterFingerprint: remoteV2.REMOTE_FINGERPRINT_V1,
       safetyMarginPolicyRevision: MARGIN_POLICY_REVISION_V1,
       outputReservePolicyRevision: OUTPUT_RESERVE_POLICY_REVISION_V1,
-      requestShapeRevision: OPENCODE_REQUEST_SHAPE_V2,
+      requestShapeRevision: OPENCODE_REQUEST_SHAPE_V3,
       canarySuiteRevision: CANARY_SUITE_REVISION_V1,
     });
   } catch (error) {
@@ -208,14 +212,17 @@ function anchorTurnTextV2(message) {
 }
 /**
  * The ONE derived-request builder (used for counting AND sending): every
- * non-owned key by reference; messages = the native tail (same objects,
- * same order); system = original system bytes + separator + compiled
- * context (the original is a strict byte prefix); metadata = markers.
+ * non-owned key by reference; messages = the native tail after the route's
+ * reasoningReplay capability (native: same objects, same order; none: an
+ * assistant message with historical reasoning becomes a copy without those
+ * blocks, everything else by reference); system = original system bytes +
+ * separator + compiled context (the original is a strict byte prefix);
+ * metadata = markers.
  */
-function buildDerivedRequestV2(request, tail, contextText, markers) {
+function buildDerivedRequestV2(request, tail, contextText, markers, route) {
   const derived = {};
   for (const key of Object.keys(request)) derived[key] = request[key];
-  derived.messages = Object.freeze(tail.slice());
+  derived.messages = Object.freeze(wireV2.applyReasoningReplayV2(tail.slice(), route));
   const base = typeof request.system === 'string' ? request.system : '';
   if (typeof contextText === 'string' && contextText !== '') {
     derived.system = base === '' ? contextText : base + CCV2_SYSTEM_SEPARATOR_V1 + contextText;
@@ -468,11 +475,31 @@ function systemPrefixProvenV2(request, derived, contextText) {
   const expected = base === '' ? contextText : base + CCV2_SYSTEM_SEPARATOR_V1 + contextText;
   return derived.system === expected && derived.system.length > base.length && derived.system.startsWith(base);
 }
-// The native tail survives by reference, in order, nothing added.
-function nativeTailPreservedV2(request, derived, boundary) {
+// The native tail survives in order with nothing added: each message is
+// the original object, or (reasoningReplay=none) a copy of an assistant
+// message whose non-reasoning blocks are the SAME objects in the same order
+// and whose identity/role/other source fields are unchanged.
+function nativeTailPreservedV2(request, derived, boundary, route) {
   const expected = request.messages.slice(boundary.anchorIndex);
   if (!Array.isArray(derived.messages) || derived.messages.length !== expected.length) return false;
-  return expected.every((message, index) => derived.messages[index] === message);
+  return expected.every((message, index) => {
+    const got = derived.messages[index];
+    if (got === message) return true;
+    if (route.reasoningReplay !== wireV2.REASONING_REPLAY_NONE || message.role !== 'assistant' || got.role !== 'assistant') return false;
+    if (got.id !== message.id || !Array.isArray(got.content) || got.content.some((block) => block.type === 'reasoning')) return false;
+    const kept = message.content.filter((block) => block.type !== 'reasoning');
+    if (kept.length !== got.content.length || !kept.every((block, i) => got.content[i] === block)) return false;
+    const keys = new Set(Object.keys(message).concat(Object.keys(got)));
+    for (const key of keys) {
+      if (key === 'content' || key === 'source') continue;
+      if (got[key] !== message[key]) return false;
+    }
+    for (const key of new Set(Object.keys(message.source || {}).concat(Object.keys(got.source || {})))) {
+      if (key === 'replayState') continue;
+      if (got.source[key] !== message.source[key]) return false;
+    }
+    return true;
+  });
 }
 async function completeOpencodeProjectionV2(staged) {
   const request = staged.request;
@@ -490,7 +517,7 @@ async function completeOpencodeProjectionV2(staged) {
     // impossible by construction.
     const wire = Object.freeze({
       project: (contextText) => wireV2.projectResponsesWireV2({
-        request: buildDerivedRequestV2(request, boundary.tail, contextText, null),
+        request: buildDerivedRequestV2(request, boundary.tail, contextText, null, staged.wireRoute),
         route: staged.wireRoute,
       }),
     });
@@ -559,10 +586,11 @@ async function completeOpencodeProjectionV2(staged) {
       ccv2Margin: decision.providerSafetyMargin,
       ccv2WireRevision: wireV2.RESPONSES_WIRE_REVISION_V1,
       ccv2NativeTailMessages: boundary.tail.length,
-    });
+      ccv2ReasoningReplay: staged.wireRoute.reasoningReplay,
+    }, staged.wireRoute);
     if (!envelopeUnchangedV2(request, derived)) return fallback('active-request-binding-changed', 'envelope');
     if (!systemPrefixProvenV2(request, derived, decision.contextText)) return fallback('active-request-binding-changed', 'envelope');
-    if (!nativeTailPreservedV2(request, derived, boundary)) return fallback('active-native-tail-invalid', 'native-tail');
+    if (!nativeTailPreservedV2(request, derived, boundary, staged.wireRoute)) return fallback('active-native-tail-invalid', 'native-tail');
     // Counted == sent: the final derived request (markers included)
     // projects to exactly the body that was counted.
     let finalProjection = null;
@@ -586,6 +614,9 @@ async function completeOpencodeProjectionV2(staged) {
       nativeTailMessages: boundary.tail.length,
       nativePrefixMessages: boundary.prefixLength,
       nativeTailSkip: null,
+      reasoningReplay: staged.wireRoute.reasoningReplay,
+      replayedReasoningBlocksOmitted: boundary.tail.reduce((sum, message, index) => sum + (derived.messages[index] === message ? 0
+        : message.content.filter((block) => block.type === 'reasoning').length), 0),
     }));
     return Object.freeze({
       mode: 'CCV2_COMPILED',
@@ -1019,6 +1050,7 @@ module.exports = {
   HOST_SCHEMA_VERSION,
   OPENCODE_REQUEST_SHAPE_V1,
   OPENCODE_REQUEST_SHAPE_V2,
+  OPENCODE_REQUEST_SHAPE_V3,
   CCV2_SYSTEM_SEPARATOR_V1,
   PROJECTION_OWNED_KEYS,
   MARGIN_POLICY_REVISION_V1,

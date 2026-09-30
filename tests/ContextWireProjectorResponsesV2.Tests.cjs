@@ -38,6 +38,9 @@ const PROVIDER = 'opencode-go';
 const MODEL = 'muse-spark-1.3-contributor';
 const SETTINGS_TEXT = fs.readFileSync(path.join(repoRoot, 'config', 'settings.yaml'), 'utf8');
 const ROUTE = wire.readResponsesRouteFromSettingsV2(SETTINGS_TEXT, PROVIDER, MODEL);
+// The same route with historical reasoning replay (the pinned adapter's own
+// behaviour); ROUTE itself carries the frozen capability (none).
+const NATIVE_ROUTE = Object.freeze(Object.assign({}, ROUTE, { reasoningReplay: 'native' }));
 
 section('WP-1 ROUTE DESCRIPTOR FROM settings.yaml (closed world)');
 {
@@ -107,9 +110,9 @@ function multiStepMessages() {
   ];
 }
 
-section('WP-2 PROJECTION SHAPE + REFUSALS (unit)');
+section('WP-2 PROJECTION SHAPE + REFUSALS (unit, reasoningReplay=native)');
 {
-  const projected = wire.projectResponsesWireV2({ request: baseRequest(multiStepMessages()), route: ROUTE, env: {} });
+  const projected = wire.projectResponsesWireV2({ request: baseRequest(multiStepMessages()), route: NATIVE_ROUTE, env: {} });
   const input = projected.wireBody.input;
   check(input[0].role === 'developer' && input[0].content === SYSTEM, 'system travels as the developer item');
   const types = input.map((item) => item.type || item.role);
@@ -123,7 +126,7 @@ section('WP-2 PROJECTION SHAPE + REFUSALS (unit)');
   check(JSON.stringify(Object.keys(projected.countedBody)) === JSON.stringify(['model', 'input', 'tools', 'reasoning', 'max_output_tokens']), 'counted subset keys');
   check(projected.countedBody.input === projected.wireBody.input, 'counted input IS the wire input');
   check(projected.wireBody.reasoning.effort === 'xhigh' && projected.wireBody.reasoning.summary === 'auto', 'profile default effort applies when the request names none');
-  const again = wire.projectResponsesWireV2({ request: baseRequest(multiStepMessages().map((m) => JSON.parse(JSON.stringify(m)))), route: ROUTE, env: {} });
+  const again = wire.projectResponsesWireV2({ request: baseRequest(multiStepMessages().map((m) => JSON.parse(JSON.stringify(m)))), route: NATIVE_ROUTE, env: {} });
   check(JSON.stringify(again.wireBody) !== undefined && JSON.stringify(again.wireBody).length === JSON.stringify(projected.wireBody).length, 'projection is deterministic over equal input');
   check(Object.isFrozen(projected.wireBody) && Object.isFrozen(projected.wireBody.input[1]), 'projection is deep-frozen');
   const img = baseRequest([{ id: 'i', role: 'user', content: [{ type: 'image', attachment: {} }], source: { kind: 'user' } }]);
@@ -133,6 +136,49 @@ section('WP-2 PROJECTION SHAPE + REFUSALS (unit)');
   throwsCode(() => wire.projectResponsesWireV2({ request: baseRequest([userMsg('x')], { reasoningEffort: 'max' }), route: ROUTE }), 'reasoning-unsupported', 'unsupported effort refused');
   throwsCode(() => wire.projectResponsesWireV2({ request: baseRequest([userMsg('x')], { model: 'other' }), route: ROUTE }), 'route-mismatch', 'route mismatch refused');
   throwsCode(() => wire.projectResponsesWireV2({ request: baseRequest([userMsg('x')]), route: null }), 'route-invalid', 'missing route refused');
+}
+
+section('WP-3 reasoningReplay CAPABILITY (provider-scoped, one transformed request)');
+{
+  check(ROUTE.reasoningReplay === 'none', 'opencode-go / muse-spark-1.3-contributor resolves reasoningReplay=none from the frozen capability table');
+  check(wire.reasoningReplayOfV2('opencode-go', 'other-model') === 'native' && wire.reasoningReplayOfV2('openai', MODEL) === 'native'
+    && wire.reasoningReplayOfV2('meta-model-api', MODEL) === 'native' && wire.reasoningReplayOfV2('opencode', MODEL) === 'native',
+    'T7: no Muse-specific filtering leaks to other providers/models (default native)');
+  throwsCode(() => wire.projectResponsesWireV2({ request: baseRequest([userMsg('x')]), route: Object.assign({}, ROUTE, { reasoningReplay: 'bogus' }) }), 'route-invalid', 'unknown capability fails closed');
+  throwsCode(() => wire.projectResponsesWireV2({ request: baseRequest([userMsg('x')]), route: Object.assign({}, ROUTE, { reasoningReplay: undefined }) }), 'route-invalid', 'missing capability fails closed');
+  // T1: native keeps replay untouched.
+  const messages = multiStepMessages();
+  check(wire.applyReasoningReplayV2(messages, NATIVE_ROUTE) === messages, 'T1: native returns the same messages array (replay untouched)');
+  const nativeBody = wire.projectResponsesWireV2({ request: baseRequest(messages), route: NATIVE_ROUTE, env: {} }).wireBody;
+  check(nativeBody.input.filter((i) => i.type === 'reasoning').length === 2, 'T1: native projection carries both historical reasoning items');
+  // T2: none removes historical reasoning only.
+  const stripped = wire.applyReasoningReplayV2(messages, ROUTE);
+  check(stripped.every((m, i) => (messages[i].role === 'assistant' && messages[i].content.some((b) => b.type === 'reasoning')) ? m !== messages[i] : m === messages[i]),
+    'T2: only assistant messages with reasoning are copied; every other message is the same object');
+  check(stripped.every((m) => !(m.role === 'assistant' && m.content.some((b) => b.type === 'reasoning'))), 'T2: no reasoning block remains in the transformed request');
+  check(stripped.every((m, i) => m.id === messages[i].id && m.role === messages[i].role
+    && m.content.every((b) => messages[i].content.indexOf(b) !== -1)), 'T2: ids, roles and surviving blocks (same objects) preserved');
+  check(stripped[5].source.replayState.blocks.length === stripped[5].content.length && stripped[5].source.replayState.blocks.every((b) => b.type !== 'reasoning'),
+    'T2: replay envelope drops exactly the reasoning entries (replay stays valid)');
+  check(Object.isFrozen(messages[3]) === false && messages[3].content.some((b) => b.type === 'reasoning'), 'T2: input messages are never mutated');
+  const noneProjection = wire.projectResponsesWireV2({ request: baseRequest(stripped), route: ROUTE, env: {} });
+  const noneBody = noneProjection.wireBody;
+  const expected = Object.assign({}, nativeBody, { input: nativeBody.input.filter((i) => i.type !== 'reasoning') });
+  check(JSON.stringify(noneBody) === JSON.stringify(expected), 'T2: none body == native body minus exactly its reasoning items (everything else byte-identical)');
+  check(noneBody.input.filter((i) => i.type === 'function_call').map((c) => c.call_id + '/' + c.id).join(',') === 'call_A/fc_A,call_B/fc_B'
+    && noneBody.input.filter((i) => i.type === 'function_call_output').map((o) => o.call_id).join(',') === 'call_A,call_B',
+    'T2: function_call / function_call_output and call ids survive');
+  check(noneBody.input.some((i) => i.role === 'user' && JSON.stringify(i.content).indexOf('Implement the feature.') !== -1)
+    && noneBody.input.some((i) => i.type === 'message' && JSON.stringify(i.content).indexOf('Workflow loaded; reading the spec.') !== -1),
+    'T2: user anchor and visible assistant text survive');
+  check(JSON.stringify(noneBody.input.map((i) => i.type || i.role)) === JSON.stringify(['developer', 'user', 'message', 'user', 'function_call', 'function_call_output', 'message', 'function_call', 'function_call_output']),
+    'T2: tool order survives');
+  check(noneBody.reasoning.effort === 'xhigh' && noneBody.reasoning.summary === 'auto' && JSON.stringify(noneBody.include) === '["reasoning.encrypted_content"]',
+    'T2: reasoning request SETTINGS stay (fresh reasoning is still generated and returned)');
+  check(noneProjection.facts.reasoningItems === 0 && noneProjection.facts.reasoningReplay === 'none', 'T2: projection facts report no replayed reasoning');
+  throwsCode(() => wire.projectResponsesWireV2({ request: baseRequest(messages), route: ROUTE, env: {} }), 'reasoning-replay-forbidden',
+    'T6: an untransformed request on a none route is refused (a count-side-only filter can never be introduced silently)');
+  check(wire.applyReasoningReplayV2(stripped, ROUTE).every((m, i) => m === stripped[i]), 'T2: transform is idempotent');
 }
 
 // ---- T-NT-3: real pinned chain conformance ----
@@ -211,8 +257,16 @@ async function conformance() {
       ['maxTokens clamped by the context estimate', Object.assign(baseRequest([userMsg(long)]), { provider: 'opencode-go-small', maxTokens: 8000 }), smallRoute],
       ['PI_CACHE_RETENTION=long', baseRequest([userMsg('q')]), ROUTE, { PI_CACHE_RETENTION: 'long' }],
     ];
+    const matrix = [];
     for (const [name, request, routeOverride, env] of cases) {
-      const route = routeOverride || ROUTE;
+      const baseRoute = routeOverride || ROUTE;
+      matrix.push([name + ' [replay=native]', request, Object.assign({}, baseRoute, { reasoningReplay: 'native' }), env]);
+      // reasoningReplay=none: the ONE transformed request goes to the real
+      // adapter AND to the projector.
+      const noneRoute = Object.assign({}, baseRoute, { reasoningReplay: 'none' });
+      matrix.push([name + ' [replay=none]', Object.assign({}, request, { messages: wire.applyReasoningReplayV2(request.messages, noneRoute) }), noneRoute, env]);
+    }
+    for (const [name, request, route, env] of matrix) {
       if (env && env.PI_CACHE_RETENTION) process.env.PI_CACHE_RETENTION = env.PI_CACHE_RETENTION;
       else delete process.env.PI_CACHE_RETENTION;
       const before = bodies.length;

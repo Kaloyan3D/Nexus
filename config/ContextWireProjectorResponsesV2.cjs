@@ -30,7 +30,7 @@
  * (it only affects prompt_cache_retention, never the counted subset).
  */
 
-const RESPONSES_WIRE_REVISION_V1 = 'responses-wire-pi-ai-0.82-dsh-0.1.1-rc.2-v1';
+const RESPONSES_WIRE_REVISION_V1 = 'responses-wire-pi-ai-0.82-dsh-0.1.1-rc.2-v2-reasoning-replay';
 const RESPONSES_API = 'openai-responses';
 // pi-ai constants (dist/api/openai-responses.js, simple-options.js,
 // openai-prompt-cache.js, utils/estimate.js, models.js).
@@ -42,6 +42,40 @@ const PROMPT_CACHE_KEY_MAX_LENGTH = 64;
 const THINKING_LEVELS = Object.freeze(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 // The counted subset REMOTE_MUSE_PRECOUNT forwards (countPayloadV2).
 const COUNTED_KEYS = Object.freeze(['model', 'input', 'tools', 'reasoning', 'max_output_tokens']);
+
+// ---- provider capability: historical reasoning replay ----
+//
+// reasoningReplay controls ONLY whether provider-issued reasoning from
+// earlier responses (DSH `reasoning` blocks, replayed by pi-ai as Responses
+// `reasoning` items with rs_* ids / encrypted_content / summaries) is sent
+// again. It never disables reasoning generation and never touches the
+// request's reasoning settings ({ effort, summary }).
+//
+//   native - replay as the pinned adapter does (default for every route)
+//   none   - replayed reasoning is removed from the DSH request itself, so
+//            the ONE transformed request feeds both the exact count
+//            projection and the provider send
+//
+// Bound to exact certified (provider, model) pairs, the same identity the
+// OpenCode authority certification binds. OpenCode Go serves Muse Spark
+// from pooled upstream callers and the Meta count endpoint cannot decrypt
+// OpenCode-issued encrypted_content (live OC01: HTTP 400
+// invalid_request_error), so replay is uncountable there; a no-replay
+// continuation was proven live to progress (human -> tool A -> tool B ->
+// final). A new Muse model on the route needs its own entry (and its own
+// certification).
+const REASONING_REPLAY_NATIVE = 'native';
+const REASONING_REPLAY_NONE = 'none';
+const REASONING_REPLAY_MODES = Object.freeze([REASONING_REPLAY_NATIVE, REASONING_REPLAY_NONE]);
+const REASONING_REPLAY_CAPABILITIES_V1 = Object.freeze({
+  'opencode-go\nmuse-spark-1.3-contributor': REASONING_REPLAY_NONE,
+});
+function reasoningReplayOfV2(provider, modelId) {
+  const key = String(provider) + '\n' + String(modelId);
+  return Object.prototype.hasOwnProperty.call(REASONING_REPLAY_CAPABILITIES_V1, key)
+    ? REASONING_REPLAY_CAPABILITIES_V1[key]
+    : REASONING_REPLAY_NATIVE;
+}
 
 function failWire(code, detail) {
   throw new Error('context-wire-' + code + (detail === undefined ? '' : ': ' + detail) + ' (DISCARDABLE)');
@@ -247,6 +281,7 @@ function readResponsesRouteFromSettingsV2(settingsText, providerId, modelId) {
       supportsDeveloperRole: profile.compat.supportsDeveloperRole === undefined ? true : profile.compat.supportsDeveloperRole,
       supportsLongCacheRetention: true,
       cacheRetention: null,
+      reasoningReplay: reasoningReplayOfV2(providerId, modelId),
     });
   } catch {
     return null;
@@ -261,6 +296,54 @@ function checkRouteV2(route) {
     failWire('route-invalid', 'route window/maxTokens required');
   }
   if (typeof route.reasoning !== 'boolean' || !Array.isArray(route.input)) failWire('route-invalid', 'route reasoning/input required');
+  // Unknown capability fails closed: a route that does not state one of the
+  // frozen modes is never projected.
+  if (REASONING_REPLAY_MODES.indexOf(route.reasoningReplay) === -1) failWire('route-invalid', 'route reasoningReplay capability unknown');
+}
+
+function assistantHasReasoningV2(message) {
+  return isPlainObject(message) && message.role === 'assistant' && Array.isArray(message.content)
+    && message.content.some((block) => isPlainObject(block) && block.type === 'reasoning');
+}
+
+/**
+ * Apply the route's reasoningReplay capability to DSH request messages.
+ * native: the same array. none: every assistant message carrying
+ * `reasoning` blocks is replaced by a copy without them - the remaining
+ * content blocks are the SAME objects in the same order, and a pi-ai replay
+ * envelope drops exactly the matching block entries (replay stays valid,
+ * so text signatures and fc_* item ids survive). Every other message is
+ * returned by reference. Pure; never mutates its input.
+ */
+function applyReasoningReplayV2(messages, route) {
+  if (!Array.isArray(messages)) failWire('input-invalid', 'messages required');
+  if (!isPlainObject(route) || REASONING_REPLAY_MODES.indexOf(route.reasoningReplay) === -1) {
+    failWire('route-invalid', 'route reasoningReplay capability unknown');
+  }
+  if (route.reasoningReplay === REASONING_REPLAY_NATIVE) return messages;
+  return messages.map((message) => {
+    if (!assistantHasReasoningV2(message)) return message;
+    const keep = [];
+    message.content.forEach((block, index) => {
+      if (!(isPlainObject(block) && block.type === 'reasoning')) keep.push(index);
+    });
+    const source = message.source;
+    let nextSource = source;
+    if (isPlainObject(source) && source.replayState !== undefined) {
+      const state = source.replayState;
+      const blocks = isPlainObject(state) && Array.isArray(state.blocks) && state.blocks.length === message.content.length
+        ? keep.map((index) => state.blocks[index])
+        : null;
+      // An envelope that no longer lines up with the content degrades to
+      // foreign history in the adapter either way; keep it untouched so the
+      // projector and the adapter take the same degraded path.
+      nextSource = Object.freeze(Object.assign({}, source, blocks === null ? {} : { replayState: Object.freeze(Object.assign({}, state, { blocks: Object.freeze(blocks) })) }));
+    }
+    return Object.freeze(Object.assign({}, message, {
+      content: Object.freeze(keep.map((index) => message.content[index])),
+      source: nextSource,
+    }));
+  });
 }
 
 function supportedThinkingLevelsV2(route) {
@@ -653,6 +736,13 @@ function projectResponsesWireV2(input) {
   if (level !== undefined && supported.indexOf(level) === -1) failWire('reasoning-unsupported', 'route does not support the requested effort');
   const reasoningEffort = level === undefined || level === 'off' ? undefined : level;
   const facts = { reasoningItems: 0, functionCalls: 0, functionCallOutputs: 0, syntheticToolResults: 0 };
+  // reasoningReplay=none: the request must already be the transformed one
+  // (applyReasoningReplayV2). Filtering here would change the counted body
+  // but not the adapter's send, so a request still carrying replayable
+  // reasoning is refused instead.
+  if (route.reasoningReplay === REASONING_REPLAY_NONE && request.messages.some(assistantHasReasoningV2)) {
+    failWire('reasoning-replay-forbidden', 'route forbids historical reasoning replay');
+  }
   const piMessages = toPiMessagesV2(request.messages);
   const systemPrompt = request.system;
   const tools = Array.isArray(request.tools) && request.tools.length > 0
@@ -717,6 +807,7 @@ function projectResponsesWireV2(input) {
       estimateTokens,
       maxOutputTokens: wireBody.max_output_tokens === undefined ? null : wireBody.max_output_tokens,
       maxTokensClamped: maxTokens !== requestedMax,
+      reasoningReplay: route.reasoningReplay,
     })),
   });
 }
@@ -730,6 +821,12 @@ function deepFreezeV2(value) {
 }
 
 module.exports = {
+  REASONING_REPLAY_NATIVE,
+  REASONING_REPLAY_NONE,
+  REASONING_REPLAY_MODES,
+  REASONING_REPLAY_CAPABILITIES_V1,
+  reasoningReplayOfV2,
+  applyReasoningReplayV2,
   RESPONSES_WIRE_REVISION_V1,
   RESPONSES_API,
   COUNTED_KEYS,
