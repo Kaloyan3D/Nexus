@@ -461,7 +461,64 @@ async function runActivation(metaKey, opencodeKey) {
     return { ok: false, reason: 'harness-failure:' + String((error && error.message) || error).slice(0, 200) };
   }
 }
+// The pinned DSH app tree that runs this build (installed layout first).
+function appRootV2() {
+  const candidates = [process.env.NEXUS_RUNTIME_ROOT ? path.join(process.env.NEXUS_RUNTIME_ROOT, 'app') : null,
+    path.join(repoRoot, 'app'), path.join(os.homedir(), '.local', 'share', 'nexus', 'app')];
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(path.join(candidate, 'node_modules', '@deepseek-ai', 'dsh-llm-pi-ai'))) return candidate;
+  }
+  return null;
+}
+// Credentials through the production DSH credential store
+// (<installRoot>/data/.credentials.yaml, dsh-credentials-local), never
+// printed; environment variables win as they do for the store itself.
+async function resolveCredentialsV2(appRoot) {
+  const out = { metaKey: process.env.MODEL_API_KEY, opencodeKey: process.env.OPENCODE_API_KEY, source: 'env' };
+  if (typeof out.metaKey === 'string' && out.metaKey !== '' && typeof out.opencodeKey === 'string' && out.opencodeKey !== '') return out;
+  const store = path.join(repoRoot, 'data', '.credentials.yaml');
+  if (appRoot === null || !fs.existsSync(store)) return out;
+  const { createRequire } = require('node:module');
+  const appRequire = createRequire(path.join(appRoot, 'package.json'));
+  const { Context } = appRequire('@deepseek-ai/cordis');
+  const Credentials = appRequire('@deepseek-ai/dsh-credentials-local').default;
+  const ctx = new Context();
+  try {
+    await ctx.plugin(Credentials, { path: store, watch: false });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const meta = await ctx.credentials.resolve('MODEL_API_KEY');
+    const oc = await ctx.credentials.resolve('OPENCODE_API_KEY');
+    if (!(typeof out.metaKey === 'string' && out.metaKey !== '') && meta && typeof meta.value === 'string') out.metaKey = meta.value;
+    if (!(typeof out.opencodeKey === 'string' && out.opencodeKey !== '') && oc && typeof oc.value === 'string') out.opencodeKey = oc.value;
+    out.source = 'dsh-credentials-store';
+  } finally {
+    await ctx.fiber.dispose().catch(() => {});
+  }
+  return out;
+}
+async function runNativeTailPhaseV2(canaryDigest, dryRun, dryScenario) {
+  const appRoot = appRootV2();
+  if (appRoot === null) {
+    console.log('OC01-NATIVE-TAIL blocker: pinned DSH app tree not found');
+    return { ok: false, failures: ['app-missing'], report: null };
+  }
+  const live = require(path.join(__dirname, 'OC01-NativeTailLive.cjs'));
+  const result = await live.runNativeTailLive({
+    installRoot: repoRoot, appRoot, repoRoot, canaryDigest, dryRun: dryRun === true,
+    dryScenario: dryRun === true && typeof dryScenario === 'string' ? dryScenario : null,
+  });
+  console.log('OC01-NATIVE-TAIL ' + JSON.stringify({ ok: result.ok, failures: result.failures, report: result.report }));
+  return result;
+}
 async function main() {
+  if (arg('--dry-run-native-tail') !== null) {
+    // Plumbing check against a scripted local upstream + local counter
+    // transport: no network, never certifies.
+    const dry = await runNativeTailPhaseV2('d'.repeat(64), true, arg('--dry-scenario'));
+    console.log(dry.ok ? 'CCV2-OC01 native-tail DRY RUN — PASS (no certification written)' : 'CCV2-OC01 native-tail DRY RUN — FAIL');
+    process.exitCode = dry.ok ? 0 : 1;
+    return;
+  }
   const onlyCanary = arg('--canary-only') !== null;
   const trustedDigest = arg('--trust-canary');
   const runtimeStepD = arg('--runtime-step-d') !== null;
@@ -471,11 +528,12 @@ async function main() {
     await runtimeStepDMain(fixtureRoot, storeRootArg);
     return;
   }
-  const metaKey = process.env.MODEL_API_KEY;
-  const opencodeKey = process.env.OPENCODE_API_KEY;
+  const credentials = await resolveCredentialsV2(appRootV2());
+  const metaKey = credentials.metaKey;
+  const opencodeKey = credentials.opencodeKey;
   if (typeof metaKey !== 'string' || metaKey === '' || typeof opencodeKey !== 'string' || opencodeKey === '') {
     console.log('CCV2-OC01 — BLOCKED');
-    console.log('blocker: MODEL_API_KEY and OPENCODE_API_KEY are both required (no network calls attempted, nothing faked)');
+    console.log('blocker: MODEL_API_KEY and OPENCODE_API_KEY are both required (environment or the DSH credential store; no network calls attempted, nothing faked)');
     process.exitCode = 2;
     return;
   }
@@ -499,6 +557,20 @@ async function main() {
   }
     canaryDigest = canary.digest;
   }
+  console.log('OC01-CREDENTIALS source=' + credentials.source);
+  if (onlyCanary === true) {
+    // Request-shape v2 certification requires the live native-tail phase.
+    console.log('OC01-CANARY-PASSED digest=' + canaryDigest + ' (report only; no certification without the native-tail phase)');
+    process.exitCode = 0;
+    return;
+  }
+  const nativeTail = await runNativeTailPhaseV2(canaryDigest, false);
+  if (nativeTail.ok !== true) {
+    console.log('CCV2-OC01 — QUARANTINED');
+    console.log('native-tail live phase failed: ' + nativeTail.failures.join(', ') + '; no certification written, OpenCode CCV2 stays LEGACY');
+    process.exitCode = 2;
+    return;
+  }
   opencode.markOpencodeHealthyV2(
     { provider: 'opencode-go', model: MODEL },
     { canaryDigest },
@@ -519,12 +591,24 @@ async function main() {
     fixturePaths !== null ? path.join(fixturePaths.dataRoot, 'ccv2-authority') : undefined,
   );
   console.log('OC01-CANARY-HEALTHY digest=' + canaryDigest);
-  if (onlyCanary === true) {
-    process.exitCode = 0;
-    return;
-  }
   if (restartAcceptance === true) {
     await restartAcceptanceMain(fixturePaths);
+    return;
+  }
+  if (arg('--legacy-activation') === null) {
+    // Startup proof on the store just written (no trust flag, no network).
+    const hostModule = require(path.join(repoRoot, 'config', 'ContextCompilerActiveOpencodeHostV2.cjs'));
+    opencode.resetOpencodeHealthV2();
+    const started = hostModule.startupOpencodeAuthorityV2({ installRoot: repoRoot, storeRoot: storeRootOfV2(arg('--store-root')) });
+    const identity = hostModule.currentOpencodeIdentityV2({ installRoot: repoRoot });
+    console.log('OC01-STARTUP ' + JSON.stringify({
+      state: started.state, health: started.health,
+      requestShapeRevision: identity.known ? identity.identity.requestShapeRevision : null,
+    }));
+    console.log(started.health === 'HEALTHY'
+      ? 'CCV2-OC01 — native-tail request shape CERTIFIED (startup HEALTHY)'
+      : 'CCV2-OC01 — HOLD (certification written but startup is not HEALTHY)');
+    process.exitCode = started.health === 'HEALTHY' ? 0 : 1;
     return;
   }
   const active = await runActivation(metaKey, opencodeKey);
