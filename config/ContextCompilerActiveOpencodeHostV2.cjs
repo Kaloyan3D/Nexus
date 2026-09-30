@@ -699,22 +699,32 @@ function createOpencodeProjectionStreamListenerV2(deps) {
     }
   };
 }
+// The llm/stream seam carries DSH StreamChunks only: { type: 'usage',
+// usage: TokenUsage }. TokenUsage counts are DISJOINT (dsh-llm types.d.ts):
+// the pinned pi-ai Responses adapter reports inputTokens = wire
+// input_tokens - cached_tokens - cache_write_tokens and omits a cache
+// field when it is zero, so the provider-billed input the pre-count
+// bounds is inputTokens + cacheReadTokens + cacheWriteTokens. Provider
+// wire shapes (input_tokens / prompt_tokens) never reach this seam and
+// are not accepted. A malformed usage chunk is no observation (null).
 function readUsageFromChunkV2(chunk) {
   try {
-    if (chunk === null || chunk === undefined) return null;
-    const candidates = [chunk];
-    if (isPlainObject(chunk)) {
-      if (chunk.data !== undefined) candidates.push(chunk.data);
-      if (isPlainObject(chunk.data) && chunk.data.chunk !== undefined) candidates.push(chunk.data.chunk);
-    }
-    for (const candidate of candidates) {
-      if (!isPlainObject(candidate)) continue;
-      const usage = candidate.usage;
-      if (!isPlainObject(usage)) continue;
-      const inputTokens = usage.input_tokens !== undefined ? usage.input_tokens : usage.prompt_tokens;
-      if (Number.isInteger(inputTokens) && inputTokens >= 0) return { inputTokens };
-    }
-    return null;
+    if (!isPlainObject(chunk) || chunk.type !== 'usage' || !isPlainObject(chunk.usage)) return null;
+    const usage = chunk.usage;
+    if (!Number.isInteger(usage.inputTokens) || usage.inputTokens < 0) return null;
+    const optional = (value) => {
+      if (value === undefined) return 0;
+      return Number.isInteger(value) && value >= 0 ? value : null;
+    };
+    const cacheReadTokens = optional(usage.cacheReadTokens);
+    const cacheWriteTokens = optional(usage.cacheWriteTokens);
+    if (cacheReadTokens === null || cacheWriteTokens === null) return null;
+    return {
+      inputTokens: usage.inputTokens + cacheReadTokens + cacheWriteTokens,
+      uncachedInputTokens: usage.inputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+    };
   } catch (error) {
     void error;
     return null;
@@ -797,6 +807,9 @@ function createOpencodeStreamListenerV2(deps) {
               preCount: metadata.ccv2PreCount,
               margin: metadata.ccv2Margin,
               inputTokens: found.inputTokens,
+              uncachedInputTokens: found.uncachedInputTokens,
+              cacheReadTokens: found.cacheReadTokens,
+              cacheWriteTokens: found.cacheWriteTokens,
               preCountDrift: found.inputTokens - metadata.ccv2PreCount,
               withinMargin: found.inputTokens <= limit,
             });

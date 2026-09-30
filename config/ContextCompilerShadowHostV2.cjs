@@ -583,15 +583,25 @@ function textBlocksOf(message) {
   return texts;
 }
 
+// DSH ToolCallBlock identity is `id` (dsh-llm types.d.ts); `callId` is
+// accepted only as the frozen A06 legacy alias (ContextShadowV2 /
+// EvidenceRehydration precedence). ToolResultBlock identity is
+// `toolCallId`; ToolMessageSource carries `callId`.
+function toolCallBlockIdOf(block) {
+  if (!isPlainObject(block) || block.type !== 'tool-call') return null;
+  if (typeof block.id === 'string' && block.id !== '') return block.id;
+  if (typeof block.callId === 'string' && block.callId !== '') return block.callId;
+  return null;
+}
+
 function callIdsOfMessage(message) {
   const calls = [];
   const results = [];
   if (!isPlainObject(message) || !Array.isArray(message.content)) return { calls, results };
   for (const block of message.content) {
     if (!isPlainObject(block)) continue;
-    if (block.type === 'tool-call' && typeof block.callId === 'string' && block.callId !== '') {
-      calls.push(block.callId);
-    }
+    const callId = toolCallBlockIdOf(block);
+    if (callId !== null) calls.push(callId);
     if (block.type === 'tool-result') {
       const bound = typeof block.toolCallId === 'string' && block.toolCallId !== ''
         ? block.toolCallId

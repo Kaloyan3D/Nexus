@@ -211,7 +211,7 @@ function liveRequestH(sessionId, turnText) {
     system: 'You are the Nexus host-contract system prompt.',
     messages: Object.freeze([
       Object.freeze({ id: 'msg-h-u1', role: 'user', content: Object.freeze([{ type: 'text', text: turnText || TURN_TEXT }]), source: Object.freeze({ kind: 'user' }) }),
-      Object.freeze({ id: 'msg-h-a1', role: 'assistant', content: Object.freeze([{ type: 'tool-call', name: 'run-tests', callId: 'call-h7' }]), source: Object.freeze({ kind: 'model', provider: 'meta-model-api', model: 'muse-spark-1.3-contributor' }) }),
+      Object.freeze({ id: 'msg-h-a1', role: 'assistant', content: Object.freeze([{ type: 'tool-call', id: 'call-h7', name: 'run-tests', arguments: '{}' }]), source: Object.freeze({ kind: 'model', provider: 'meta-model-api', model: 'muse-spark-1.3-contributor' }) }),
       Object.freeze({ id: 'msg-h-t1', role: 'user', content: Object.freeze([{ type: 'tool-result', toolCallId: 'call-h7', content: Object.freeze([{ type: 'text', text: 'exit 0' }]) }]), source: Object.freeze({ kind: 'tool', callId: 'call-h7' }) }),
     ]),
     tools: Object.freeze([Object.freeze({ name: 'run-tests', description: 'Run the harness.' })]),
@@ -424,6 +424,25 @@ section('C07H-U HOST UNIT (policy, readers, live derivation)');
   const openMsgs = [clone(msgs[0]), clone(msgs[1])];
   const pending = host.derivePendingProtocolV2(openMsgs);
   check(pending !== null && pending.callId === 'call-h7', 'dangling tail call detected as open protocol');
+  // Production DSH schema (dsh-llm ToolCallBlock { type, id, name, arguments };
+  // ToolResultBlock { type, toolCallId, content }; ToolMessageSource.callId).
+  const dshCall = (id) => ({ id: 'm-a-' + id, role: 'assistant', content: [{ type: 'reasoning', text: 'r' }, { type: 'tool-call', id, name: 'run_code', arguments: '{"code":"1"}' }], source: { kind: 'model', provider: 'opencode-go', model: 'muse-spark-1.3-contributor', replayState: { v: 1 } } });
+  const dshResult = (id) => ({ id: 'm-t-' + id, role: 'user', content: [{ type: 'tool-result', toolCallId: id, content: [{ type: 'text', text: 'loaded' }] }], source: { kind: 'tool', callId: id } });
+  const dshUser = { id: 'm-u', role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } };
+  const prodPairs = host.pairLiveToolTransactionsV2([dshUser, dshCall('call_A|fc_a'), dshResult('call_A|fc_a'), dshCall('call_B|fc_b'), dshResult('call_B|fc_b')]);
+  check(prodPairs.length === 2 && prodPairs.every((tx) => tx.balanced === true) && prodPairs[0].callId === 'call_A|fc_a' && prodPairs[1].callId === 'call_B|fc_b',
+    'production ToolCallBlock.id pairs balanced with ToolResultBlock.toolCallId, in call order');
+  check(host.derivePendingProtocolV2([dshUser, dshCall('call_A'), dshResult('call_A')]) === null, 'production settled tail: no open protocol');
+  const prodOpen = host.derivePendingProtocolV2([dshUser, dshCall('call_A'), dshResult('call_A'), dshCall('call_B')]);
+  check(prodOpen !== null && prodOpen.callId === 'call_B', 'production dangling ToolCallBlock.id detected as open protocol');
+  const resultBySourceOnly = { id: 'm-t-s', role: 'user', content: [{ type: 'tool-result', content: [{ type: 'text', text: 'x' }] }], source: { kind: 'tool', callId: 'call_S' } };
+  check(host.pairLiveToolTransactionsV2([dshCall('call_S'), resultBySourceOnly])[0].balanced === true, 'result correlated through ToolMessageSource.callId');
+  const dup = host.pairLiveToolTransactionsV2([dshCall('call_D'), dshCall('call_D'), dshResult('call_D')]);
+  check(dup.length === 1 && dup[0].balanced === false, 'duplicate production call id resolves unbalanced (never trusted)');
+  const both = { id: 'm-a-both', role: 'assistant', content: [{ type: 'tool-call', id: 'call_real', callId: 'call_alias', name: 'x', arguments: '{}' }], source: { kind: 'model', provider: 'p', model: 'm' } };
+  check(host.pairLiveToolTransactionsV2([both, dshResult('call_real')])[0].callId === 'call_real', 'ToolCallBlock.id takes precedence over the legacy callId alias');
+  const legacy = { id: 'm-a-leg', role: 'assistant', content: [{ type: 'tool-call', callId: 'call_leg', name: 'x' }], source: { kind: 'model', provider: 'p', model: 'm' } };
+  check(host.derivePendingProtocolV2([legacy]).callId === 'call_leg', 'frozen A06 legacy callId alias still detected');
   const turn = host.extractLiveCurrentTurnV2(clone(msgs));
   check(turn.turn !== null && turn.turn.text === TURN_TEXT, 'current turn extracted from typed text blocks');
   check(host.extractLiveCurrentTurnV2([]).turn === null, 'empty messages skip the turn');

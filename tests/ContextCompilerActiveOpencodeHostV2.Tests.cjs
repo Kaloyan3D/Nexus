@@ -341,20 +341,53 @@ function sectionsOCH2() {
       for await (const chunk of stream) out.push(chunk);
       return out;
     }
-    const chunks = [{ type: 'text', text: 'a' }, { usage: { input_tokens: 100 } }, { type: 'text', text: 'b' }];
+    // T-USAGE: the llm/stream seam carries DSH StreamChunks. TokenUsage is
+    // DISJOINT (pinned pi-ai: inputTokens = wire input_tokens - cached -
+    // cacheWrite; zero cache fields omitted), so the bounded provider input
+    // is inputTokens + cacheReadTokens + cacheWriteTokens.
+    const usageChunk = (usage) => ({ type: 'usage', usage });
+    const read = host.readUsageFromChunkV2;
+    check(read(usageChunk({ inputTokens: 100, outputTokens: 2 })).inputTokens === 100, 'T-USAGE: DSH usage without cache fields = inputTokens');
+    const cached = read(usageChunk({ inputTokens: 100, outputTokens: 2, cacheReadTokens: 250, cacheWriteTokens: 50 }));
+    check(cached.inputTokens === 400 && cached.uncachedInputTokens === 100 && cached.cacheReadTokens === 250 && cached.cacheWriteTokens === 50,
+      'T-USAGE: total input = inputTokens + cacheReadTokens + cacheWriteTokens');
+    check(read(usageChunk({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 7 })).inputTokens === 7, 'T-USAGE: fully cached input still bounded');
+    check(read({ usage: { input_tokens: 100 } }) === null && read({ type: 'usage', usage: { prompt_tokens: 100 } }) === null,
+      'T-USAGE: provider wire shapes never reach the seam and are not observations');
+    check(read(usageChunk({ inputTokens: -1 })) === null && read(usageChunk({ inputTokens: 1.5 })) === null
+      && read(usageChunk({ inputTokens: 5, cacheReadTokens: 'x' })) === null && read(usageChunk({ inputTokens: 5, cacheWriteTokens: -2 })) === null,
+      'T-USAGE: malformed usage is no observation');
+    check(read({ type: 'text-delta', index: 0, text: 'x' }) === null && read(null) === null, 'T-USAGE: non-usage chunks ignored');
+
+    const chunks = [
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'text-delta', index: 0, text: 'a' },
+      usageChunk({ inputTokens: 100, outputTokens: 2, cacheReadTokens: 300 }),
+      { type: 'finish', reason: { kind: 'stop' } },
+    ];
     const reqOk = compiledRequest(400, 8192);
     const wrapped = listener(reqOk, () => fakeStream(chunks));
     const seen = await collect(wrapped);
     check(JSON.stringify(seen) === JSON.stringify(chunks), 'chunks pass through byte-identical');
+    const observed = logged.find((entry) => entry && entry.event === 'ccv2-opencode-usage-observed');
+    check(observed !== undefined && observed.inputTokens === 400 && observed.uncachedInputTokens === 100 && observed.cacheReadTokens === 300
+      && observed.cacheWriteTokens === 0 && observed.preCountDrift === 0 && observed.withinMargin === true,
+      'T-USAGE drift in-bound: real DSH usage observed with the cache-inclusive total', JSON.stringify(observed || null));
     check(host.startupOpencodeAuthorityV2({ storeRoot, installRoot: fx.root }).state === 'valid', 'in-bound usage does not revoke');
+    const wireShaped = listener(compiledRequest(400, 8192), () => fakeStream([{ usage: { input_tokens: 400 + 8192 + 1 } }]));
+    await collect(wireShaped);
+    check(host.startupOpencodeAuthorityV2({ storeRoot, installRoot: fx.root }).state === 'valid', 'a non-DSH usage shape is no observation (never revokes)');
+    // Revoke: uncached input alone is in bound; the cache-inclusive total
+    // exceeds preCount + margin, so the drift is real and must revoke.
     const reqBad = compiledRequest(400, 8192);
-    const badStream = listener(reqBad, () => fakeStream([{ usage: { input_tokens: 400 + 8192 + 1 } }]));
+    const badStream = listener(reqBad, () => fakeStream([usageChunk({ inputTokens: 100, outputTokens: 1, cacheReadTokens: 8400, cacheWriteTokens: 93 })]));
     await collect(badStream);
     const after = cert.readCertificationFileV2(storeRoot);
-    check(after.present === true && after.certification !== null && after.certification.status === 'REVOKED', 'over-margin usage revokes durably');
+    check(after.present === true && after.certification !== null && after.certification.status === 'REVOKED', 'T-USAGE drift revoke: cache-inclusive over-margin usage revokes durably');
     check(opencode.opencodeHealthV2({ provider: PROVIDER, model: MODEL }) === 'QUARANTINED', 'runtime health quarantined');
     check(host.startupOpencodeAuthorityV2({ storeRoot, installRoot: fx.root }).state === 'revoked', 'restart stays revoked');
-    check(logged.some((entry) => entry && entry.event === 'ccv2-opencode-anomaly-revoked'), 'revocation logged without content');
+    const revoked = logged.find((entry) => entry && entry.event === 'ccv2-opencode-anomaly-revoked');
+    check(revoked !== undefined && revoked.preCountDrift === 8593 - 400, 'revocation logged with the cache-inclusive drift, without content');
     const legacyReq = liveRequestH(NSH.sessionId);
     const untouched = listener(legacyReq, () => fakeStream(chunks));
     check(untouched !== null, 'legacy requests bypass the observer');
@@ -875,7 +908,8 @@ async function sectionOCH6() {
     provider: PROVIDER, model: MODEL, sessionId: NSH.sessionId,
     metadata: Object.freeze({ projectionMode: 'CCV2_COMPILED', ccv2Authority: 'REMOTE_MUSE_PRECOUNT', ccv2PreCount: preCount, ccv2Margin: 8192 }),
   });
-  async function* usageStream(inputTokens) { yield { usage: { input_tokens: inputTokens } }; yield { usage: { input_tokens: inputTokens } }; }
+  // Real DSH usage chunks (disjoint counts; cache-inclusive total = inputTokens).
+  async function* usageStream(inputTokens) { yield { type: 'usage', usage: { inputTokens, outputTokens: 1 } }; yield { type: 'usage', usage: { inputTokens, outputTokens: 1 } }; }
   await drainH(observer(compiledRequest(500), () => usageStream(480)));
   const observed = usageLogs.filter((entry) => entry.event === host.USAGE_TELEMETRY_EVENT);
   check(observed.length === 1 && observed[0].preCountDrift === -20 && observed[0].withinMargin === true, 'usage observed once per request with preCountDrift');

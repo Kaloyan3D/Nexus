@@ -265,6 +265,12 @@ section('COMPLETE PROJECTION CONTRACT (A09H CORE)');
   check(shadow.checkMessagesBalanced(artifact.projectedMessages) === true, 'complete view is message-balanced');
   const orphanMsg = [{ role: 'assistant', content: [{ type: 'tool-call', name: 'run_command', callId: 'orphan-9' }] }];
   check(shadow.checkMessagesBalanced(orphanMsg) === false, 'orphaned tool call fails message balance');
+  // Production DSH schema: ToolCallBlock { id }, ToolResultBlock { toolCallId }.
+  const dshCall = (id) => ({ role: 'assistant', content: [{ type: 'tool-call', id, name: 'run_code', arguments: '{}' }] });
+  const dshResult = (id) => ({ role: 'user', content: [{ type: 'tool-result', toolCallId: id, content: [{ type: 'text', text: 'ok' }] }], source: { kind: 'tool', callId: id } });
+  check(shadow.checkMessagesBalanced([dshCall('call_A'), dshResult('call_A'), dshCall('call_B'), dshResult('call_B')]) === true, 'production ToolCallBlock.id transactions are message-balanced');
+  check(shadow.checkMessagesBalanced([dshCall('call_A'), dshResult('call_A'), dshCall('call_B')]) === false, 'production orphaned ToolCallBlock.id fails message balance');
+  check(shadow.checkMessagesBalanced([dshResult('call_Z')]) === false, 'production orphaned tool result fails message balance');
   throwsWith(() => shadow.buildCompactedProjectionV2({ schemaVersion: 1, taskId: 'x', generation: 1, sealedCheckpoint: {}, retentionPlan: {}, snapshotToken: {}, taskState: {}, contextUnits: [], sourceEvents: [], surfaceNodes: [], protocolSpans: [], extraKey: 1 }), 'unknown field', 'compacted builder fails closed on unknown keys');
 }
 

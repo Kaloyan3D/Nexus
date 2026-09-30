@@ -495,13 +495,22 @@ function deriveProjectedMessageV2(event) {
 // Message-level tool balance over the FINAL model-facing projection,
 // folding message content blocks exactly like the A01 generation proof:
 // every tool-call block needs exactly one tool-result block and vice versa.
+// A tool-call block's identity follows the frozen A06 spelling precedence
+// (DSH ToolCallBlock `id` first; `callId` only as the legacy alias).
+function toolCallBlockIdV2(block) {
+  if (!block || block.type !== 'tool-call') return null;
+  if (typeof block.id === 'string' && block.id !== '') return block.id;
+  if (typeof block.callId === 'string' && block.callId !== '') return block.callId;
+  return null;
+}
 function messageToolBlocks(messages) {
   const calls = [];
   const results = [];
   for (const message of messages) {
     const blocks = message && Array.isArray(message.content) ? message.content : [];
     for (const block of blocks) {
-      if (block && block.type === 'tool-call' && typeof block.callId === 'string') calls.push(block.callId);
+      const callId = toolCallBlockIdV2(block);
+      if (callId !== null) calls.push(callId);
       if (block && block.type === 'tool-result' && typeof block.toolCallId === 'string') results.push(block.toolCallId);
     }
   }
