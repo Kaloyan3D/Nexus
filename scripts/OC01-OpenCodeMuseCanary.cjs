@@ -591,27 +591,41 @@ async function runtimeStepDMain(fixtureRoot, storeRootArg) {
     if (previousRoot === undefined) delete process.env.AIH_INSTALL_ROOT; else process.env.AIH_INSTALL_ROOT = previousRoot;
     if (previousToolchain === undefined) delete process.env.AIH_TOOLCHAIN_ROOT; else process.env.AIH_TOOLCHAIN_ROOT = previousToolchain;
   }
-  const fns = listeners['agent/request'] || [];
+  // The production seam: agent/request only resolves {provider, model,
+  // maxTokens}; the complete frozen, session-bound request reaches the
+  // installed listeners through the llm/stream waterfall (cordis semantics:
+  // `this` is the dispatching LlmRuntime, next() takes no argument).
+  const fns = listeners['llm/stream'] || [];
   if (fns.length === 0) {
-    console.log('OC01H-STEPD conclusion: no agent/request listeners installed');
+    console.log('OC01H-STEPD conclusion: no llm/stream listeners installed');
     process.exitCode = 1;
     return;
   }
-  const request = {
-    provider: 'opencode-go', model: 'muse-spark-1.3-contributor', reasoningEffort: 'xhigh', maxTokens: 2048,
-    system: 'You are the Nexus host-contract system prompt.',
-    messages: [{ id: 'msg-u1', role: 'user', content: [{ type: 'text', text: 'Confirm the restart acceptance turn.' }], source: { kind: 'user' } }],
-    tools: [],
-    routingAuthority: { source: 'controller', target: { provider: 'opencode-go', model: 'muse-spark-1.3-contributor' } },
-    sessionId: 'sess-oc01h-stepd',
-    metadata: { taskId: 'TASK-OC01H-STEPD', turnId: 'live' },
+  const deepFreeze = (value) => {
+    if (value !== null && typeof value === 'object' && !(value instanceof AbortSignal) && !Object.isFrozen(value)) {
+      Object.freeze(value);
+      for (const key of Object.keys(value)) deepFreeze(value[key]);
+    }
+    return value;
   };
-  let current = request;
-  for (const fn of fns) {
-    const payload = {};
-    const next = async () => current;
-    current = await fn(payload, next);
-  }
+  const request = deepFreeze({
+    provider: 'opencode-go', model: 'muse-spark-1.3-contributor', reasoningEffort: 'xhigh', maxTokens: 2048,
+    messages: [{ id: 'msg-u1', role: 'user', content: [{ type: 'text', text: 'Confirm the restart acceptance turn.' }], source: { kind: 'user' } }],
+    system: 'You are the Nexus host-contract system prompt.',
+    tools: [],
+    sessionId: 'sess-oc01h-stepd',
+    signal: new AbortController().signal,
+  });
+  const dispatched = [];
+  const empty = () => (async function* () {})();
+  const runtime = { stream: (derived) => { dispatched.push(derived); return empty(); } };
+  const chain = fns.slice();
+  const next = () => {
+    const fn = chain.shift();
+    return fn === undefined ? empty() : fn.call(runtime, request, next);
+  };
+  for await (const chunk of next()) void chunk;
+  const current = dispatched.length === 1 ? dispatched[0] : request;
   const metadata = current && current.metadata ? current.metadata : {};
   console.log('OC01H-STEPD-RECORD ' + JSON.stringify({
     provider: current.provider,

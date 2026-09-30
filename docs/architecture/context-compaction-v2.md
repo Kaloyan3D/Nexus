@@ -5895,3 +5895,85 @@ unit; no duplicate material (every live message maps to exactly one unit).
 Unit headers alone: 1,473 lines, 146,760 bytes, 75,137 tokens (hex call
 ids at ~2 chars/token). Root cause: expected legacy conservatism, plus
 render-header serialization overhead.
+
+## 49. CCV2-OC01H-S Active Projection Seam Correction (production defect)
+
+Symptom (real live run, TASK-0001, `opencode-go` /
+`muse-spark-1.3-contributor`, `NEXUS_CCV2_COMPILER_MODE=active`, usable
+NATIVE generation-1 checkpoint, HEALTHY certification): turn 2 made real
+Muse calls, and zero `ccv2-opencode-active-decided` or other CCv2 active
+events were logged.
+
+Root cause (reproduced on the pinned DSH loop): §46.3 installed the
+OpenCode wrapper on `agent/request`. That contradicts §39.1: the DSH
+`agent/request` waterfall resolves ONLY the frozen route config
+`{provider, model, maxTokens, reasoningEffort?}`. `messages`, `system`,
+`tools`, `sessionId` and `signal` are merged later, in the loop's
+buildRequest. The wrapper's first eligibility gate
+(`typeof resolved.sessionId !== 'string'`) therefore returned verbatim on
+every real request, before policy resolution, binding lookup or
+telemetry. Every host test and the §46.4 Step D acceptance hand-fed
+`agent/request` a fully assembled request that the real waterfall never
+produces. A second latent defect sat behind it: the derived request was
+built with a JSON deep clone, which turns the live `AbortSignal` into
+`{}`. The pi-ai adapter's `AbortSignal.any([options.signal, ...])` then
+throws a TypeError at transport.
+
+Correction (ContextCompilerActiveOpencodeHostV2):
+
+- The projection is an `llm/stream` listener (global, normal order:
+  inside Routing-Integrity and the package invariants). That is the one
+  place the complete, frozen, session-bound request exists.
+- cordis `next()` takes no replacement argument. An eligible request is
+  therefore re-dispatched ONCE through the dispatching LlmRuntime
+  (`this.stream(derived)`), so every transport guard re-checks exactly
+  what is sent. The legacy stream is never created, so the adapter
+  dispatches once.
+- A derived request is never projected again (module WeakSet), so there
+  is no duplicate compiler execution.
+- Every fallback returns `next()` verbatim: synchronous stages return
+  before any async work, and async stages yield the untouched legacy
+  stream.
+- OFF/OBSERVE, other routes and auxiliary purposes return `next()` with
+  zero compiler work and no telemetry.
+- The derived request copies every non-projection key BY REFERENCE:
+  route, reasoning effort, output cap, system, tools, session id and
+  signal. Only `messages` and `metadata` differ, and this is verified by
+  key set and identity before dispatch.
+- No listener remains on `agent/request`. The generic C08 wrapper keeps
+  its `agent/request` placement; it has the same seam limitation and is
+  out of scope here.
+
+Observability: exactly ONE `ccv2-opencode-active-decided` line is logged
+per active-mode OpenCode root request, whether compiled or fallback. It
+carries:
+
+- projectionMode, fallbackReason, and a closed-world fallbackStage
+  (request-shape, authority-health, counter-credential, binding,
+  checkpoint, staged-memory, current-turn, coverage, exact-material,
+  counter, budget, attempt, compiled-turn, envelope, dispatch-surface,
+  exception);
+- authority, authorityHealth, compilerExecutions;
+- bindingFound and checkpointFound;
+- seam, policyMode and policyOrigin;
+- shape flags (hasSessionId, hasMaxTokens, messagesIsArray,
+  messageCount, compiledMessageCount).
+
+Content, prompts, tool payloads and credentials are never logged. The
+attempt-level sink is no longer used, so a host-side rejection can never
+follow a "compiled" line.
+
+Regression proof: the C08H-OCH-4 real DSH loop (cordis, LlmRuntime,
+SessionStore, AgentLoop, dsh-llm and agent-loop invariants,
+Routing-Integrity, the real M01 producer and the production installer)
+runs two turns:
+
+- Turn 1 is LEGACY at stage `checkpoint` (bootstrap safe).
+- Turn 2 is CCV2_COMPILED with fallbackReason null, REMOTE_MUSE_PRECOUNT,
+  HEALTHY and compilerExecutions 1. The adapter is dispatched once, the
+  envelope is identical by reference, the current turn appears exactly
+  once, and no legacy message survives.
+
+Against the pre-correction host the same section fails, with zero decision
+events and the legacy request sent. §46.4 Step D now drives the installed
+`llm/stream` listeners with the production request shape.

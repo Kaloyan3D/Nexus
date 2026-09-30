@@ -16,18 +16,23 @@ const OUTPUT_RESERVE_POLICY_REVISION_V1 = 'opencode-output-reserve-policy-v1';
 const CANARY_SUITE_REVISION_V1 = 'oc01-canary-suite-v1';
 const MODEL_API_KEY_ENV = 'MODEL_API_KEY';
 const AUXILIARY_PURPOSES = Object.freeze(['compaction', 'session-title']);
+const DECISION_TELEMETRY_EVENT = 'ccv2-opencode-active-decided';
+// Closed-world fallback stages: WHERE a diagnosable active-mode request fell
+// back (the reason says WHY). Never carries content.
+const FALLBACK_STAGES = Object.freeze([
+  'request-shape', 'authority-health', 'counter-credential', 'binding', 'checkpoint',
+  'staged-memory', 'current-turn', 'coverage', 'exact-material', 'counter', 'budget',
+  'attempt', 'compiled-turn', 'envelope', 'dispatch-surface', 'exception',
+]);
 const installedCtxs = new WeakSet();
+// Derived CCV2_COMPILED requests this module re-dispatched through the
+// llm/stream waterfall; their re-entry is never projected again.
+const derivedRequests = new WeakSet();
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 function sha256HexUtf8(text) {
   return checkpointV2.sha256HexUtf8(String(text));
-}
-function canonicalJsonOf(value) {
-  return JSON.stringify(checkpointV2.canonicalize(value));
-}
-function deepClone(value) {
-  return JSON.parse(JSON.stringify(value));
 }
 function tripleOf(ns) {
   if (!isPlainObject(ns)) return null;
@@ -106,21 +111,43 @@ function liveUserTextMessages(messages) {
   });
   return found;
 }
-function legacyHostResult(request, reason) {
+function currentOpencodeHealthV2() {
+  try {
+    return opencodeV2.opencodeHealthV2({ provider: opencodeV2.OPENCODE_PROVIDER_V1, model: opencodeV2.OPENCODE_MODEL_V1 });
+  } catch (error) {
+    void error;
+    return opencodeV2.HEALTH_QUARANTINED;
+  }
+}
+function legacyHostResult(request, reason, stage, diag) {
+  const fallbackStage = reason === null ? null : (FALLBACK_STAGES.indexOf(stage) !== -1 ? stage : 'exception');
+  const found = isPlainObject(diag) ? diag : {};
   return Object.freeze({
     mode: 'LEGACY',
     request,
     fallbackReason: reason,
+    fallbackStage,
     performed: false,
     decision: null,
-    telemetry: Object.freeze({ projectionMode: 'LEGACY', fallbackReason: reason, authority: 'REMOTE_MUSE_PRECOUNT' }),
+    telemetry: Object.freeze({
+      projectionMode: 'LEGACY',
+      fallbackReason: reason,
+      fallbackStage,
+      authority: 'REMOTE_MUSE_PRECOUNT',
+      authorityHealth: currentOpencodeHealthV2(),
+      compilerExecutions: Number.isInteger(found.compilerExecutions) ? found.compilerExecutions : 0,
+      bindingFound: found.bindingFound === true,
+      checkpointFound: found.checkpointFound === true,
+    }),
   });
 }
 function applyOpencodeProjectionV2(input) {
+  const diag = { bindingFound: false, checkpointFound: false };
+  const fallback = (request, reason, stage) => legacyHostResult(request, reason, stage, diag);
   try {
-    if (!isPlainObject(input)) return legacyHostResult(null, 'active-compiler-failed');
+    if (!isPlainObject(input)) return fallback(null, 'active-compiler-failed', 'request-shape');
     const request = isPlainObject(input.request) ? input.request : null;
-    if (request === null) return legacyHostResult(input.request, 'active-compiler-failed');
+    if (request === null) return fallback(input.request, 'active-compiler-failed', 'request-shape');
     const policy = isPlainObject(input.policy) ? input.policy : null;
     if (policy === null || policy.mode !== 'active' || policy.valid !== true) {
       return legacyHostResult(request, null);
@@ -129,14 +156,14 @@ function applyOpencodeProjectionV2(input) {
       return legacyHostResult(request, null);
     }
     if (typeof request.sessionId !== 'string' || request.sessionId === '') {
-      return legacyHostResult(request, 'active-request-binding-changed');
+      return fallback(request, 'active-request-binding-changed', 'request-shape');
     }
     if (!Number.isInteger(request.maxTokens) || request.maxTokens <= 0) {
-      return legacyHostResult(request, 'active-budget-unrepresentable');
+      return fallback(request, 'active-budget-unrepresentable', 'request-shape');
     }
-    if (!Array.isArray(request.messages)) return legacyHostResult(request, 'active-request-binding-changed');
-    if (opencodeV2.opencodeHealthV2({ provider: opencodeV2.OPENCODE_PROVIDER_V1, model: opencodeV2.OPENCODE_MODEL_V1 }) !== opencodeV2.HEALTH_HEALTHY) {
-      return legacyHostResult(request, 'active-tokenizer-unavailable');
+    if (!Array.isArray(request.messages)) return fallback(request, 'active-request-binding-changed', 'request-shape');
+    if (currentOpencodeHealthV2() !== opencodeV2.HEALTH_HEALTHY) {
+      return fallback(request, 'active-tokenizer-unavailable', 'authority-health');
     }
     const hasMockCounter = isPlainObject(input.metaRemoteCounter)
       && typeof input.metaRemoteCounter.countTextsV2 === 'function'
@@ -147,56 +174,58 @@ function applyOpencodeProjectionV2(input) {
       ? input.metaApiKey
       : (typeof process !== 'undefined' && process.env ? process.env[MODEL_API_KEY_ENV] : undefined);
     if (hasMockCounter !== true && (typeof metaKey !== 'string' || metaKey === '')) {
-      return legacyHostResult(request, 'active-tokenizer-unavailable');
+      return fallback(request, 'active-tokenizer-unavailable', 'counter-credential');
     }
     const bindingsPath = typeof input.bindingsPath === 'string' ? input.bindingsPath : null;
-    if (bindingsPath === null) return legacyHostResult(request, 'active-request-binding-changed');
+    if (bindingsPath === null) return fallback(request, 'active-request-binding-changed', 'binding');
     const binding = shadowHostV2.readSessionBindingV2({ bindingsPath, sessionId: request.sessionId });
-    if (binding === null) return legacyHostResult(request, 'active-request-binding-changed');
+    if (binding === null) return fallback(request, 'active-request-binding-changed', 'binding');
+    diag.bindingFound = true;
     const bindingTriple = tripleOf({
       taskId: binding.taskId,
       taskInstanceId: typeof binding.taskInstanceId === 'string' ? binding.taskInstanceId : null,
       sessionId: typeof binding.sessionId === 'string' && binding.sessionId !== '' ? binding.sessionId : request.sessionId,
     });
     if (bindingTriple === null || bindingTriple.taskInstanceId === null) {
-      return legacyHostResult(request, 'active-request-binding-changed');
+      return fallback(request, 'active-request-binding-changed', 'binding');
     }
     const memoryDir = shadowHostV2.shadowMemoryDirForV2(binding.workspace, bindingTriple.taskId);
-    if (memoryDir === null) return legacyHostResult(request, 'active-request-binding-changed');
+    if (memoryDir === null) return fallback(request, 'active-request-binding-changed', 'binding');
     const checkpointFound = shadowHostV2.readSealedCheckpointForTaskV2(memoryDir);
-    if (checkpointFound.sealed === null) return legacyHostResult(request, 'active-compiler-failed');
+    if (checkpointFound.sealed === null) return fallback(request, 'active-compiler-failed', 'checkpoint');
+    diag.checkpointFound = true;
     const sealed = checkpointFound.sealed;
     const stagedPages = shadowHostV2.readStagedPagesV2(memoryDir, bindingTriple);
-    if (stagedPages.pages === null) return legacyHostResult(request, 'active-compiler-failed');
+    if (stagedPages.pages === null) return fallback(request, 'active-compiler-failed', 'staged-memory');
     const stagedDecisions = shadowHostV2.readStagedDecisionsV2(memoryDir, bindingTriple);
-    if (stagedDecisions.decisions === null) return legacyHostResult(request, 'active-compiler-failed');
+    if (stagedDecisions.decisions === null) return fallback(request, 'active-compiler-failed', 'staged-memory');
     const stagedTx = shadowHostV2.readStagedToolTransactionsV2(memoryDir);
-    if (stagedTx.transactions === null) return legacyHostResult(request, 'active-compiler-failed');
+    if (stagedTx.transactions === null) return fallback(request, 'active-compiler-failed', 'staged-memory');
     const liveTurn = shadowHostV2.extractLiveCurrentTurnV2(request.messages);
-    if (liveTurn.turn === null) return legacyHostResult(request, 'active-current-turn-invalid');
+    if (liveTurn.turn === null) return fallback(request, 'active-current-turn-invalid', 'current-turn');
     const liveTurnHash = sha256HexUtf8(liveTurn.turn.text);
     // CCV2-M01: with producer coverage, the lossless-replacement rule is the
     // stronger per-message proof (every non-current live message is
     // represented by staged memory); without it, the frozen single
     // user-text rule applies unchanged.
     const stagedCoverage = shadowHostV2.readStagedCoverageV2(memoryDir);
-    if (stagedCoverage.skipped !== null) return legacyHostResult(request, 'active-current-turn-invalid');
+    if (stagedCoverage.skipped !== null) return fallback(request, 'active-current-turn-invalid', 'coverage');
     if (stagedCoverage.coverage !== null) {
       if (shadowHostV2.checkLiveCoverageV2(request.messages, stagedCoverage.coverage, liveTurn.turn.text) !== null) {
-        return legacyHostResult(request, 'active-current-turn-invalid');
+        return fallback(request, 'active-current-turn-invalid', 'coverage');
       }
     } else {
       const liveUserTexts = liveUserTextMessages(request.messages);
-      if (liveUserTexts.length !== 1) return legacyHostResult(request, 'active-current-turn-invalid');
+      if (liveUserTexts.length !== 1) return fallback(request, 'active-current-turn-invalid', 'current-turn');
       if (sha256HexUtf8(liveUserTexts[0].text) !== liveTurnHash) {
-        return legacyHostResult(request, 'active-current-turn-invalid');
+        return fallback(request, 'active-current-turn-invalid', 'current-turn');
       }
     }
     const exact = shadowHostV2.readStagedExactMaterialV2({
       workspace: binding.workspace, sealed, pages: stagedPages.pages, decisions: stagedDecisions.decisions,
       sessionSource: typeof input.sessionSourceFor === 'function' ? input.sessionSourceFor(request.sessionId) : null,
     });
-    if (exact.material === null) return legacyHostResult(request, 'active-compiler-failed');
+    if (exact.material === null) return fallback(request, 'active-compiler-failed', 'exact-material');
     let descriptor = null;
     try {
       const found = remoteV2.resolveMuseRemoteV2({ provider: 'meta-model-api', model: 'muse-spark-1.3-contributor' });
@@ -205,7 +234,7 @@ function applyOpencodeProjectionV2(input) {
       void error;
       descriptor = null;
     }
-    if (descriptor === null) return legacyHostResult(request, 'active-tokenizer-unavailable');
+    if (descriptor === null) return fallback(request, 'active-tokenizer-unavailable', 'counter');
     let metaRemoteCounter = null;
     try {
       if (isPlainObject(input.metaRemoteCounter)
@@ -219,7 +248,7 @@ function applyOpencodeProjectionV2(input) {
       }
     } catch (error) {
       void error;
-      return legacyHostResult(request, 'active-tokenizer-unavailable');
+      return fallback(request, 'active-tokenizer-unavailable', 'counter');
     }
     const compileInput = {
       checkpoint: sealed,
@@ -243,7 +272,7 @@ function applyOpencodeProjectionV2(input) {
       compilerPolicyRevision: compilerV2.COMPILER_POLICY_REVISION_V2,
     };
     const outputReserve = request.maxTokens;
-    if (outputReserve > 131072) return legacyHostResult(request, 'active-budget-unrepresentable');
+    if (outputReserve > 131072) return fallback(request, 'active-budget-unrepresentable', 'budget');
     const attemptBinding = {
       taskId: bindingTriple.taskId,
       taskInstanceId: bindingTriple.taskInstanceId,
@@ -265,19 +294,39 @@ function applyOpencodeProjectionV2(input) {
       pending: true, request, policy, compileInput,
       pages: stagedPages.pages, outputReserve, attemptBinding,
       liveTurnHash, liveTurn, memoryDir, metaRemoteCounter,
+      bindingFound: diag.bindingFound, checkpointFound: diag.checkpointFound,
     });
   } catch (error) {
     void error;
     try {
-      return legacyHostResult(isPlainObject(input) ? input.request : null, 'active-compiler-failed');
+      return fallback(isPlainObject(input) ? input.request : null, 'active-compiler-failed', 'exception');
     } catch (ignored) {
       void ignored;
-      return legacyHostResult(null, 'active-compiler-failed');
+      return fallback(null, 'active-compiler-failed', 'exception');
     }
   }
 }
-async function completeOpencodeProjectionV2(staged, input) {
+// Keys the compiled projection owns; every other request key (route,
+// reasoning effort, output cap, system, tools, routing authority, session
+// id, abort signal, ...) is carried by REFERENCE and verified identical.
+const PROJECTION_OWNED_KEYS = Object.freeze(['messages', 'metadata']);
+function deriveCompiledRequestV2(request, compiledMessages, markers) {
+  const derived = {};
+  for (const key of Object.keys(request)) derived[key] = request[key];
+  derived.messages = Object.freeze(compiledMessages);
+  derived.metadata = Object.freeze(Object.assign({}, isPlainObject(request.metadata) ? request.metadata : {}, markers));
+  return derived;
+}
+function envelopeUnchangedV2(request, derived) {
+  const sourceKeys = Object.keys(request).filter((key) => PROJECTION_OWNED_KEYS.indexOf(key) === -1).sort();
+  const derivedKeys = Object.keys(derived).filter((key) => PROJECTION_OWNED_KEYS.indexOf(key) === -1).sort();
+  if (sourceKeys.join(',') !== derivedKeys.join(',')) return false;
+  return sourceKeys.every((key) => derived[key] === request[key]);
+}
+async function completeOpencodeProjectionV2(staged) {
   const request = staged.request;
+  const diag = { bindingFound: staged.bindingFound === true, checkpointFound: staged.checkpointFound === true, compilerExecutions: 0 };
+  const fallback = (reason, stage) => legacyHostResult(request, reason, stage, diag);
   try {
     const decision = await opencodeV2.attemptOpencodeActiveV2({
       compileInput: staged.compileInput,
@@ -308,105 +357,55 @@ async function completeOpencodeProjectionV2(staged, input) {
         capabilityRevision: remoteV2.REMOTE_REVISION_V1,
       },
       getCurrentRevision: () => shadowHostV2.readSealedRevisionForTaskV2(staged.memoryDir),
-      telemetrySink: isPlainObject(input) && typeof input.telemetrySink === 'function' ? input.telemetrySink : null,
+      // The host reports ONE final decision per request (below), so a
+      // later host-side rejection can never follow a "compiled" event.
+      telemetrySink: null,
     });
-    if (decision.eligible !== true) return legacyHostResult(request, decision.fallbackReason);
+    diag.compilerExecutions = decision.compilerExecutions === 1 ? 1 : 0;
+    if (decision.eligible !== true) return fallback(decision.fallbackReason, 'attempt');
     const compiledUserText = decision.render.messagePlan
       .filter((message) => message.role === 'user')
       .map((message) => message.text)
       .join(String.fromCharCode(10));
     if (sha256HexUtf8(compiledUserText) !== staged.liveTurnHash) {
-      return legacyHostResult(request, 'active-current-turn-invalid');
+      return fallback('active-current-turn-invalid', 'compiled-turn');
     }
     const compiledMessages = decision.render.messagePlan.map((message, ordinal) => Object.freeze({
       id: 'ccv2-c' + ordinal,
       role: message.role,
-      content: Object.freeze([{ type: 'text', text: message.text }]),
+      content: Object.freeze([Object.freeze({ type: 'text', text: message.text })]),
       source: Object.freeze({ kind: 'ccv2-compiled', viewId: decision.view.id }),
     }));
-    const cloned = deepClone(request);
-    cloned.messages = compiledMessages.map((message) => JSON.parse(JSON.stringify(message)));
-    cloned.metadata = Object.assign(
-      {},
-      isPlainObject(request.metadata) ? JSON.parse(JSON.stringify(request.metadata)) : {},
-      {
-        projectionMode: 'CCV2_COMPILED',
-        ccv2ViewId: decision.view.id,
-        ccv2RenderDigest: decision.render.renderDigest,
-        ccv2Authority: 'REMOTE_MUSE_PRECOUNT',
-        ccv2PreCount: decision.preCount,
-        ccv2Margin: decision.providerSafetyMargin,
-      },
-    );
-    const sourceEnvelope = canonicalJsonOf({
-      provider: request.provider, model: request.model,
-      reasoningEffort: request.reasoningEffort === undefined ? null : request.reasoningEffort,
-      maxTokens: request.maxTokens, system: request.system === undefined ? null : request.system,
-      tools: request.tools === undefined ? null : request.tools,
-      routingAuthority: request.routingAuthority === undefined ? null : request.routingAuthority,
-      sessionId: request.sessionId,
+    const derived = deriveCompiledRequestV2(request, compiledMessages, {
+      projectionMode: 'CCV2_COMPILED',
+      ccv2ViewId: decision.view.id,
+      ccv2RenderDigest: decision.render.renderDigest,
+      ccv2Authority: 'REMOTE_MUSE_PRECOUNT',
+      ccv2PreCount: decision.preCount,
+      ccv2Margin: decision.providerSafetyMargin,
     });
-    const derivedEnvelope = canonicalJsonOf({
-      provider: cloned.provider, model: cloned.model,
-      reasoningEffort: cloned.reasoningEffort === undefined ? null : cloned.reasoningEffort,
-      maxTokens: cloned.maxTokens, system: cloned.system === undefined ? null : cloned.system,
-      tools: cloned.tools === undefined ? null : cloned.tools,
-      routingAuthority: cloned.routingAuthority === undefined ? null : cloned.routingAuthority,
-      sessionId: cloned.sessionId,
-    });
-    if (sourceEnvelope !== derivedEnvelope) return legacyHostResult(request, 'active-request-binding-changed');
-    const telemetry = Object.freeze(Object.assign({}, decision.telemetry));
+    if (!envelopeUnchangedV2(request, derived)) return fallback('active-request-binding-changed', 'envelope');
+    const telemetry = Object.freeze(Object.assign({}, decision.telemetry, {
+      projectionMode: 'CCV2_COMPILED',
+      fallbackReason: null,
+      fallbackStage: null,
+      compilerExecutions: 1,
+      bindingFound: true,
+      checkpointFound: true,
+    }));
     return Object.freeze({
       mode: 'CCV2_COMPILED',
-      request: Object.freeze(cloned),
+      request: Object.freeze(derived),
       fallbackReason: null,
+      fallbackStage: null,
       performed: true,
       decision,
       telemetry,
     });
   } catch (error) {
     void error;
-    return legacyHostResult(request, 'active-compiler-failed');
+    return fallback('active-compiler-failed', 'exception');
   }
-}
-function createOpencodeRequestListenerV2(deps) {
-  const seen = new WeakSet();
-  const safeDeps = isPlainObject(deps) ? deps : {};
-  return async function opencodeActiveRequestListener(payload, next) {
-    let resolved = null;
-    try {
-      resolved = await next();
-    } catch (error) {
-      throw error;
-    }
-    try {
-      if (!isPlainObject(payload) || !isPlainObject(resolved)) return resolved;
-      if (typeof resolved.purpose === 'string' && AUXILIARY_PURPOSES.indexOf(resolved.purpose) !== -1) return resolved;
-      if (typeof resolved.sessionId !== 'string' || resolved.sessionId === '') return resolved;
-      const policy = activeV2.resolveCompilerModeV2({ config: readPolicyConfigV2(safeDeps.installRoot) });
-      if (policy.mode !== 'active' || policy.valid !== true) return resolved;
-      if (seen.has(resolved)) return resolved;
-      seen.add(resolved);
-      const staged = applyOpencodeProjectionV2({
-        request: resolved,
-        policy: { mode: 'active', valid: true },
-        bindingsPath: safeDeps.bindingsPath,
-        sessionSourceFor: safeDeps.sessionSourceFor,
-        metaApiKey: safeDeps.metaApiKey,
-        metaRemoteCounter: safeDeps.metaRemoteCounter === undefined ? null : safeDeps.metaRemoteCounter,
-        countTimeoutMs: safeDeps.countTimeoutMs,
-      });
-      if (staged.pending !== true) return staged.request;
-      const outcome = await completeOpencodeProjectionV2(staged, {
-        telemetrySink: defaultOpencodeTelemetrySinkV2(safeDeps.log),
-      });
-      if (outcome.mode === 'CCV2_COMPILED') return outcome.request;
-      return resolved;
-    } catch (error) {
-      void error;
-      return resolved;
-    }
-  };
 }
 function readPolicyConfigV2(installRoot) {
   try {
@@ -420,13 +419,97 @@ function readPolicyConfigV2(installRoot) {
     return {};
   }
 }
-function defaultOpencodeTelemetrySinkV2(log) {
-  if (typeof log !== 'function') return null;
-  return (telemetry) => {
+// One secret-safe decision line per active-mode OpenCode root request:
+// ids, digests, counts, typed reason/stage and shape flags only. Never
+// prompts, message content, tool payloads, or credentials.
+function emitOpencodeDecisionV2(log, outcome, context) {
+  if (typeof log !== 'function') return;
+  try {
+    const request = isPlainObject(context) && isPlainObject(context.request) ? context.request : {};
+    log(Object.assign({ event: DECISION_TELEMETRY_EVENT }, outcome.telemetry, {
+      seam: 'llm/stream',
+      policyMode: context.policy.mode,
+      policyOrigin: typeof context.policy.origin === 'string' ? context.policy.origin : null,
+      hasSessionId: typeof request.sessionId === 'string' && request.sessionId !== '',
+      hasMaxTokens: Number.isInteger(request.maxTokens),
+      messagesIsArray: Array.isArray(request.messages),
+      messageCount: Array.isArray(request.messages) ? request.messages.length : null,
+      compiledMessageCount: outcome.mode === 'CCV2_COMPILED' ? outcome.request.messages.length : null,
+    }));
+  } catch (error) {
+    void error;
+  }
+}
+async function* compiledOrLegacyStreamV2(runtime, staged, next, safeDeps, policy) {
+  let outcome = null;
+  try {
+    outcome = await completeOpencodeProjectionV2(staged);
+  } catch (error) {
+    void error;
+    outcome = legacyHostResult(staged.request, 'active-compiler-failed', 'exception', staged);
+  }
+  emitOpencodeDecisionV2(safeDeps.log, outcome, { request: staged.request, policy });
+  if (outcome.mode === 'CCV2_COMPILED') {
+    // Re-dispatch the derived request through the SAME llm/stream waterfall
+    // so every transport guard (Routing-Integrity, invariants, the usage
+    // observer) sees exactly what is sent. The original stream is never
+    // created, so the adapter is dispatched once.
+    derivedRequests.add(outcome.request);
+    yield* runtime.stream(outcome.request);
+    return;
+  }
+  yield* next();
+}
+/**
+ * CCV2-OC01H active projection at the llm/stream seam. The DSH agent/request
+ * waterfall resolves ONLY the route config ({provider, model, maxTokens,
+ * reasoningEffort}); messages/system/tools/sessionId are attached after it in
+ * the loop's buildRequest, so the projection must run where the complete,
+ * frozen, session-bound request exists: llm/stream (global, normal order,
+ * inside Routing-Integrity's prepend check). cordis waterfall next() takes no
+ * replacement argument, so an eligible request is re-dispatched via the
+ * dispatching LlmRuntime (`this`); every fallback returns next() verbatim.
+ * OFF/OBSERVE/other routes/auxiliary calls: next() with zero compiler work.
+ */
+function createOpencodeProjectionStreamListenerV2(deps) {
+  const seen = new WeakSet();
+  const safeDeps = isPlainObject(deps) ? deps : {};
+  return function opencodeProjectionStreamListener(request, next) {
+    let staged = null;
+    let policy = null;
     try {
-      log(Object.assign({ event: 'ccv2-opencode-active-decided' }, telemetry));
+      if (!isPlainObject(request) || derivedRequests.has(request)) return next();
+      if (request.provider !== opencodeV2.OPENCODE_PROVIDER_V1 || request.model !== opencodeV2.OPENCODE_MODEL_V1) return next();
+      if (typeof request.purpose === 'string' && AUXILIARY_PURPOSES.indexOf(request.purpose) !== -1) return next();
+      policy = activeV2.resolveCompilerModeV2({ config: readPolicyConfigV2(safeDeps.installRoot) });
+      if (policy.mode !== 'active' || policy.valid !== true) return next();
+      if (seen.has(request)) return next();
+      seen.add(request);
+      const runtime = this;
+      if (runtime === null || runtime === undefined || typeof runtime.stream !== 'function') {
+        emitOpencodeDecisionV2(safeDeps.log, legacyHostResult(request, 'active-compiler-failed', 'dispatch-surface'), { request, policy });
+        return next();
+      }
+      staged = applyOpencodeProjectionV2({
+        request,
+        policy: { mode: 'active', valid: true },
+        bindingsPath: safeDeps.bindingsPath,
+        sessionSourceFor: safeDeps.sessionSourceFor,
+        metaApiKey: safeDeps.metaApiKey,
+        metaRemoteCounter: safeDeps.metaRemoteCounter === undefined ? null : safeDeps.metaRemoteCounter,
+        countTimeoutMs: safeDeps.countTimeoutMs,
+      });
+      if (staged.pending !== true) {
+        emitOpencodeDecisionV2(safeDeps.log, staged, { request, policy });
+        return next();
+      }
+      return compiledOrLegacyStreamV2(runtime, staged, next, safeDeps, policy);
     } catch (error) {
       void error;
+      if (policy !== null && policy.mode === 'active' && staged === null) {
+        emitOpencodeDecisionV2(safeDeps.log, legacyHostResult(request, 'active-compiler-failed', 'exception'), { request, policy });
+      }
+      return next();
     }
   };
 }
@@ -545,7 +628,7 @@ function installOpencodeActiveProjection(ctx, deps) {
     if (typeof safeDeps.log !== 'function') return { installed: false, reason: 'no-log-channel' };
     const started = startupOpencodeAuthorityV2(safeDeps);
     void started;
-    ctx.on('agent/request', createOpencodeRequestListenerV2(safeDeps));
+    ctx.on('llm/stream', createOpencodeProjectionStreamListenerV2(safeDeps), { global: true });
     ctx.on('llm/stream', createOpencodeStreamListenerV2(safeDeps), { global: true });
     installedCtxs.add(ctx);
     return { installed: true, reason: null };
@@ -566,7 +649,9 @@ module.exports = {
   startupOpencodeAuthorityV2,
   applyOpencodeProjectionV2,
   completeOpencodeProjectionV2,
-  createOpencodeRequestListenerV2,
+  DECISION_TELEMETRY_EVENT,
+  FALLBACK_STAGES,
+  createOpencodeProjectionStreamListenerV2,
   readUsageFromChunkV2,
   createOpencodeStreamListenerV2,
   installOpencodeActiveProjection,

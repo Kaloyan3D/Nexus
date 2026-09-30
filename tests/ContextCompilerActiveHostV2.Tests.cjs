@@ -418,7 +418,7 @@ function realApplySection() {
     if (prev.root === undefined) delete process.env.AIH_INSTALL_ROOT; else process.env.AIH_INSTALL_ROOT = prev.root;
     if (prev.toolchain === undefined) delete process.env.AIH_TOOLCHAIN_ROOT; else process.env.AIH_TOOLCHAIN_ROOT = prev.toolchain;
   }
-  check(Array.isArray(listeners['llm/stream']) && listeners['llm/stream'].length === 2, 'real apply keeps shadow + opencode observers (OC01H)');
+  check(Array.isArray(listeners['llm/stream']) && listeners['llm/stream'].length === 3, 'real apply keeps shadow + opencode projection + opencode usage observer (OC01H)');
   check(Array.isArray(listeners['agent/request']) && listeners['agent/request'].length >= 1, 'real apply installs the active projection wrapper');
   // Default policy: both inert (legacy request flows byte-identical).
   seedBindingH(fx, NSH.sessionId);
