@@ -78,9 +78,10 @@ section('C08M-RC-3 COUNT CALLS (mocked protocol)');
     try {
       await remote.createMuseRemoteCounterV2({ descriptor: DESCRIPTOR, apiKey: 'k', transport: mockTransport(() => ({ status: 401, bodyText: '{}' })) }).countTextsV2(['x']);
     } catch (error) {
-      threw = String((error && error.message) || error).indexOf('counter-unavailable') !== -1;
+      threw = String((error && error.message) || error).indexOf('remote-counter-counter-auth') !== -1
+        && error.counterFailure.kind === 'counter-auth' && error.counterFailure.httpStatus === 401;
     }
-    check(threw === true, 'auth failure maps to counter-unavailable');
+    check(threw === true, 'auth failure is a typed counter-auth failure (not collapsed into counter-unavailable)');
     let threwTimeout = false;
     try {
       await remote.createMuseRemoteCounterV2({ descriptor: DESCRIPTOR, apiKey: 'k', transport: { postJson: async () => { throw new Error('socket hang up'); } } }).countTextsV2(['x']);

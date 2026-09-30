@@ -386,6 +386,7 @@ function sectionsOCH3() {
     await sectionOCH1b();
     await sectionOCH4();
     await sectionOCH5();
+    await sectionOCH6();
     console.log(String.fromCharCode(10) + 'ContextCompilerActiveOpencodeHostV2 suite: ' + passed + ' passed, ' + failed + ' failed');
     if (failed > 0) process.exitCode = 1;
   })().catch((error) => { console.error(error); process.exitCode = 1; });
@@ -747,4 +748,145 @@ async function sectionOCH5() {
   }
   opencode.resetOpencodeHealthV2();
   fs.rmSync(copyDir, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// OCH-6 (CCV2-RC2): counter availability at the production seam. A REAL
+// remote counter over a fault-injected transport replays the live sequence:
+// compiled -> counter outage -> fast LEGACY -> cooldown -> exact cache hit ->
+// recovery. LEGACY is always the verbatim original request.
+async function sectionOCH6() {
+  section('C08H-OCH-6 COUNTER RESILIENCE AT THE PRODUCTION SEAM');
+  const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const fx = makeFixtureRoot({ mode: 'active' });
+  seedBindingH(fx, NSH.sessionId);
+  stageMemoryH(fx);
+  const storeRoot = storeRootOf(fx);
+  cert.certifyOpencodeV2(storeRoot, host.currentOpencodeIdentityV2({ installRoot: fx.root }).identity, 'f'.repeat(64));
+  host.startupOpencodeAuthorityV2({ storeRoot, installRoot: fx.root });
+  const state = remote.createCounterResilienceV2({
+    policy: { transientBackoffBaseMs: 2, rateLimitBackoffBaseMs: 2, backoffCapMs: 8, exhaustedCooldownMs: 150, operationDeadlineMs: 1500, payloadReserveMs: 400 },
+    random: () => 0.5,
+  });
+  const COUNTER_KEY = 'meta-key-och6-SECRET-91c';
+  let mode = 'ok';
+  const httpCalls = [];
+  const transport = {
+    postJson: async (req) => {
+      httpCalls.push(req.bodyJson);
+      if (mode === 'down') return { status: 503, bodyText: '{"error":{"message":"overloaded ' + TURN_TEXT + '"}}' };
+      const body = JSON.parse(req.bodyJson);
+      const tokens = body.instructions !== undefined ? 432 : 1 + (Buffer.byteLength(String(body.input), 'utf8') % 11);
+      return { status: 200, bodyText: JSON.stringify({ object: 'response.input_tokens', input_tokens: tokens }) };
+    },
+  };
+  const descriptor = remote.resolveMuseRemoteV2({ provider: 'meta-model-api', model: MODEL });
+  const counter = remote.createMuseRemoteCounterV2({ descriptor, apiKey: COUNTER_KEY, transport, resilience: state });
+  const logs = [];
+  const listener = host.createOpencodeProjectionStreamListenerV2({
+    installRoot: fx.root, bindingsPath: bindingsPathOf(fx), log: (entry) => logs.push(entry),
+    metaRemoteCounter: counter, prewarmDelayMs: 0,
+  });
+  const turnRequest = (turn) => prodRequestH(NSH.sessionId, {
+    messages: [
+      { id: 'msg-a0', role: 'assistant', content: [{ type: 'text', text: BULK_MARKER + ' history.' }], source: { kind: 'model', provider: PROVIDER, model: MODEL } },
+      { id: 'msg-u1', role: 'user', content: [{ type: 'text', text: turn }], source: { kind: 'user' } },
+    ],
+  });
+  const decisionsOf = () => logs.filter((entry) => entry.event === host.DECISION_TELEMETRY_EVENT);
+  const lastDecision = () => decisionsOf()[decisionsOf().length - 1] || {};
+  const legacyChecks = (run, request, before, label) => {
+    // next() takes no argument: the waterfall continues with the ORIGINAL
+    // request object; the caller consumes exactly the legacy stream.
+    check(run.dispatched.length === 0 && run.nextCalls() === 1 && run.chunks.length === 4 && run.chunks.some((c) => c.text === 'legacy') && !run.chunks.some((c) => c.text === 'compiled'), label + ': LEGACY continues next() once with the original request; no derived dispatch');
+    check(snapshotOf(request) === before && Object.isFrozen(request), label + ': original request byte/structure-identical and still frozen');
+  };
+
+  // Live turn 2: compiled.
+  const r1 = turnRequest('OCH-6 turn two.');
+  const run1 = await runProjectionH(listener, r1);
+  const d1 = lastDecision();
+  check(run1.dispatched.length === 1 && d1.projectionMode === 'CCV2_COMPILED' && d1.authority === 'REMOTE_MUSE_PRECOUNT' && d1.authorityHealth === 'HEALTHY', 'healthy counter: CCV2_COMPILED / REMOTE_MUSE_PRECOUNT / HEALTHY');
+  check(d1.counterSource === 'live' && d1.counterHttpRequests === httpCalls.length && d1.counterHttpRequests > d1.remoteCalls, 'decision line reports real HTTP requests (' + d1.counterHttpRequests + ') beside remoteCalls phases (' + d1.remoteCalls + ')');
+  check(d1.counterConcurrencyLimit >= 1 && d1.counterGateState === 'CLEAR' && d1.cacheEpoch === 0 && Number.isInteger(d1.counterElapsedMs), 'decision line: limiter, gate, epoch, elapsed');
+  await sleepMs(40);
+  const prewarm1 = logs.filter((entry) => entry.event === host.PREWARM_TELEMETRY_EVENT);
+  check(prewarm1.length === 1 && prewarm1[0].restaged === true && prewarm1[0].prewarmSkipped === null && prewarm1[0].prewarmCacheHits > 0, 'completed response schedules one background pre-warm (re-staged, mostly cached)');
+
+  // Counter outage: reserve-count fails, fast LEGACY.
+  mode = 'down';
+  const r2 = turnRequest('OCH-6 turn three.');
+  const before2 = snapshotOf(r2);
+  const t2 = Date.now();
+  const run2 = await runProjectionH(listener, r2);
+  const d2 = lastDecision();
+  legacyChecks(run2, r2, before2, 'outage');
+  check(d2.fallbackReason === 'active-tokenizer-unavailable' && d2.fallbackStage === 'attempt' && d2.attemptFailureStage === 'reserve-count', 'outage: compatible fallbackReason at reserve-count');
+  check(d2.counterFailureKind === 'counter-transient' && d2.counterHttpStatus === 503 && d2.counterAttempts === 3 && d2.counterExhaustReason === 'attempts', 'outage: safe class retained (transient/503/3 attempts)');
+  check(Date.now() - t2 < 1500, 'outage: bounded by the counting deadline (' + (Date.now() - t2) + 'ms)');
+  await sleepMs(40);
+  const r3 = turnRequest('OCH-6 turn four.');
+  const before3 = snapshotOf(r3);
+  const run3 = await runProjectionH(listener, r3);
+  legacyChecks(run3, r3, before3, 'second outage');
+  check(lastDecision().counterGateState === 'COOLING', 'two exhausted compilations cool the counter gate');
+  await sleepMs(40);
+  const callsCooling = httpCalls.length;
+  const r4 = turnRequest('OCH-6 turn five.');
+  const before4 = snapshotOf(r4);
+  const t4 = Date.now();
+  const run4 = await runProjectionH(listener, r4);
+  const d4 = lastDecision();
+  legacyChecks(run4, r4, before4, 'cooling');
+  check(d4.counterFailureKind === 'counter-gate-open' && d4.counterHttpRequests === 0 && httpCalls.length === callsCooling && Date.now() - t4 < 200, 'cooling + cache miss: immediate LEGACY with zero HTTP requests');
+  // Identical content as turn 2 (a new request object): every count is an
+  // exact cache hit, so the modified request is still exactly counted.
+  const r1b = turnRequest('OCH-6 turn two.');
+  const run1b = await runProjectionH(listener, r1b);
+  const d1b = lastDecision();
+  check(run1b.dispatched.length === 1 && d1b.projectionMode === 'CCV2_COMPILED' && d1b.counterSource === 'cache' && d1b.counterHttpRequests === 0 && httpCalls.length === callsCooling, 'cooling + exact cache hit: CCV2_COMPILED with zero HTTP (source cache)');
+  check(run1b.dispatched[0].metadata.ccv2PreCount === run1.dispatched[0].metadata.ccv2PreCount && d1b.counterKind === 'REMOTE_EXACT', 'cache hit keeps REMOTE_EXACT and the identical authoritative pre-count');
+  const prewarmSkips = logs.filter((entry) => entry.event === host.PREWARM_TELEMETRY_EVENT).map((entry) => entry.prewarmSkipped);
+  check(prewarmSkips.indexOf('gate') !== -1, 'pre-warm is skipped while the gate cools (' + prewarmSkips.join(',') + ')');
+
+  // Recovery: the probe after the cooldown resumes CCv2.
+  mode = 'ok';
+  await sleepMs(170);
+  const r5 = turnRequest('OCH-6 turn six.');
+  const run5 = await runProjectionH(listener, r5);
+  const d5 = lastDecision();
+  check(run5.dispatched.length === 1 && d5.projectionMode === 'CCV2_COMPILED' && d5.counterGateState === 'CLEAR', 'counter recovers: probe compiles, gate CLEAR');
+  const allLogs = JSON.stringify(logs);
+  check(allLogs.indexOf(COUNTER_KEY) === -1 && allLogs.indexOf('OCH-6 turn') === -1 && allLogs.indexOf(SYSTEM_TEXT) === -1
+    && allLogs.indexOf(BULK_MARKER) === -1 && allLogs.indexOf('overloaded') === -1 && allLogs.indexOf('Bearer') === -1, 'decision + pre-warm lines carry no credential, prompt, evidence or response body');
+
+  // Drift: provider usage above preCount + margin bumps the PROCESS epoch and
+  // flushes every exact count (the certification revoke path is unchanged).
+  const globalState = remote.processCounterResilienceV2();
+  const driftTransport = { calls: 0, postJson: async () => { driftTransport.calls += 1; return { status: 200, bodyText: JSON.stringify({ input_tokens: 3 }) }; } };
+  const globalCounter = remote.createMuseRemoteCounterV2({ descriptor, apiKey: COUNTER_KEY, transport: driftTransport });
+  await globalCounter.countTextsV2(['drift-probe']);
+  await globalCounter.countTextsV2(['drift-probe']);
+  check(driftTransport.calls === 1, 'drift setup: count cached in the process state');
+  const epochBefore = globalState.snapshotV2().cacheEpoch;
+  const usageLogs = [];
+  const observer = host.createOpencodeStreamListenerV2({ installRoot: fx.root, bindingsPath: bindingsPathOf(fx), log: (entry) => usageLogs.push(entry) });
+  const compiledRequest = (preCount) => Object.freeze({
+    provider: PROVIDER, model: MODEL, sessionId: NSH.sessionId,
+    metadata: Object.freeze({ projectionMode: 'CCV2_COMPILED', ccv2Authority: 'REMOTE_MUSE_PRECOUNT', ccv2PreCount: preCount, ccv2Margin: 8192 }),
+  });
+  async function* usageStream(inputTokens) { yield { usage: { input_tokens: inputTokens } }; yield { usage: { input_tokens: inputTokens } }; }
+  await drainH(observer(compiledRequest(500), () => usageStream(480)));
+  const observed = usageLogs.filter((entry) => entry.event === host.USAGE_TELEMETRY_EVENT);
+  check(observed.length === 1 && observed[0].preCountDrift === -20 && observed[0].withinMargin === true, 'usage observed once per request with preCountDrift');
+  check(globalState.snapshotV2().cacheEpoch === epochBefore, 'in-bound usage never invalidates the cache');
+  await drainH(observer(compiledRequest(500), () => usageStream(500 + 8192 + 1)));
+  const anomaly = usageLogs.filter((entry) => entry.event === 'ccv2-opencode-anomaly-revoked');
+  check(globalState.snapshotV2().cacheEpoch === epochBefore + 1, 'drift beyond the margin bumps cacheEpoch exactly once per request');
+  check(anomaly.length >= 1 && anomaly[0].preCountDrift === 8193 && anomaly[0].cacheEpoch === epochBefore + 1, 'anomaly line carries preCountDrift and the new cacheEpoch');
+  await globalCounter.countTextsV2(['drift-probe']);
+  check(driftTransport.calls === 2, 'after drift the old cached count is not reused as authority');
+  check(opencode.opencodeHealthV2({ provider: PROVIDER, model: MODEL }) === 'QUARANTINED', 'existing anomaly quarantine still fires');
+  opencode.resetOpencodeHealthV2();
+  wipe(fx);
 }

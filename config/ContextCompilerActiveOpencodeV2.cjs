@@ -1,6 +1,7 @@
 'use strict';
 const checkpointV2 = require('./ContextCheckpointV2.cjs');
 const museActiveV2 = require('./ContextCompilerActiveMuseV2.cjs');
+const remoteV2 = require('./ContextRemoteCounterMuseV2.cjs');
 const OPENCODE_AUTHORITY_V1 = 'REMOTE_MUSE_PRECOUNT';
 const OPENCODE_PROVIDER_V1 = 'opencode-go';
 const OPENCODE_MODEL_V1 = 'muse-spark-1.3-contributor';
@@ -206,9 +207,11 @@ async function attemptOpencodeActiveV2(input) {
     if (inner.eligible !== true) {
       const failureStage = typeof inner.failureStage === 'string' ? inner.failureStage : 'unexpected';
       const errorClass = isPlainObject(inner.errorClass) ? inner.errorClass : null;
+      const counterTelemetry = isPlainObject(inner.counterTelemetry) ? inner.counterTelemetry : null;
       return ineligibleOpencode(inner.fallbackReason, health, {
         compilerExecutions: inner.compilerExecutions === 1 ? 1 : 0,
-        telemetry: Object.freeze({
+        counterTelemetry,
+        telemetry: Object.freeze(Object.assign({}, counterTelemetry, {
           projectionMode: 'LEGACY',
           fallbackReason: inner.fallbackReason,
           failureStage,
@@ -216,7 +219,7 @@ async function attemptOpencodeActiveV2(input) {
           authority: OPENCODE_AUTHORITY_V1,
           authorityHealth: health,
           compilerExecutions: inner.compilerExecutions === 1 ? 1 : 0,
-        }),
+        })),
       }, { failureStage, errorClass });
     }
     const margin = providerSafetyMarginV2(inner.preCount);
@@ -224,7 +227,8 @@ async function attemptOpencodeActiveV2(input) {
     if (inner.preCount + margin + reserve > COUNT_WINDOW_V1) {
       return ineligibleOpencode('active-render-over-budget', health, {
         compilerExecutions: 1,
-        telemetry: Object.freeze({
+        counterTelemetry: isPlainObject(inner.counterTelemetry) ? inner.counterTelemetry : null,
+        telemetry: Object.freeze(Object.assign({}, inner.counterTelemetry, {
           projectionMode: 'LEGACY',
           fallbackReason: 'active-render-over-budget',
           failureStage: 'opencode-margin-budget',
@@ -235,7 +239,7 @@ async function attemptOpencodeActiveV2(input) {
           preCount: inner.preCount,
           providerSafetyMargin: margin,
           outputReserve: reserve,
-        }),
+        })),
       }, { failureStage: 'opencode-margin-budget' });
     }
     const telemetry = Object.freeze(Object.assign({}, inner.telemetry, {
@@ -265,6 +269,7 @@ async function attemptOpencodeActiveV2(input) {
       binding: Object.freeze(deepClone(binding)),
       compilerExecutions: 1,
       authorityHealth: health,
+      counterTelemetry: isPlainObject(inner.counterTelemetry) ? inner.counterTelemetry : null,
       telemetry,
     });
   } catch (error) {
@@ -322,6 +327,12 @@ async function sendOpencodeCompiledV2(input) {
     if (reported !== null && reported > decision.preCount + margin) {
       anomaly = true;
       quarantineOpencodeV2({ provider: OPENCODE_PROVIDER_V1, model: OPENCODE_MODEL_V1 }, 'input-over-margin');
+      // Unexplained drift: no exact count observed before it stays authority.
+      try {
+        remoteV2.invalidateExactCountCacheV2();
+      } catch (error) {
+        void error;
+      }
     }
     return Object.freeze(Object.assign({}, inner, {
       authority: OPENCODE_AUTHORITY_V1,

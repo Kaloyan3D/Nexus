@@ -167,6 +167,7 @@ $suites = @(
     [ordered]@{ name='ContextCompilerActiveDeepseekV4'; script='tests/ContextCompilerActiveDeepseekV4.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompilerActiveMuseRoutesV2'; script='tests/ContextCompilerActiveMuseRoutesV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextRemoteCounterMuseV2'; script='tests/ContextRemoteCounterMuseV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextRemoteCounterResilienceV2'; script='tests/ContextRemoteCounterResilienceV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompilerActiveMuseV2'; script='tests/ContextCompilerActiveMuseV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompilerActiveOpencodeV2'; script='tests/ContextCompilerActiveOpencodeV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextAuthorityCertificationV2'; script='tests/ContextAuthorityCertificationV2.Tests.cjs'; executable=$layout.Node; kind='node' },

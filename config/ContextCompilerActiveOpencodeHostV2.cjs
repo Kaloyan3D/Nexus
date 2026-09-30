@@ -8,6 +8,7 @@ const activeV2 = require('./ContextCompilerActiveV2.cjs');
 const shadowHostV2 = require('./ContextCompilerShadowHostV2.cjs');
 const remoteV2 = require('./ContextRemoteCounterMuseV2.cjs');
 const opencodeV2 = require('./ContextCompilerActiveOpencodeV2.cjs');
+const museV2 = require('./ContextCompilerActiveMuseV2.cjs');
 const certV2 = require('./ContextAuthorityCertificationV2.cjs');
 const HOST_SCHEMA_VERSION = 1;
 const OPENCODE_REQUEST_SHAPE_V1 = 'opencode-muse-request-shape-v1';
@@ -17,6 +18,11 @@ const CANARY_SUITE_REVISION_V1 = 'oc01-canary-suite-v1';
 const MODEL_API_KEY_ENV = 'MODEL_API_KEY';
 const AUXILIARY_PURPOSES = Object.freeze(['compaction', 'session-title']);
 const DECISION_TELEMETRY_EVENT = 'ccv2-opencode-active-decided';
+const USAGE_TELEMETRY_EVENT = 'ccv2-opencode-usage-observed';
+const PREWARM_TELEMETRY_EVENT = 'ccv2-opencode-counter-prewarm';
+// Pre-warm waits briefly after a response so the memory producer can stage
+// the step that just finished.
+const PREWARM_DELAY_MS = 750;
 // Closed-world fallback stages: WHERE a diagnosable active-mode request fell
 // back (the reason says WHY). Never carries content.
 const FALLBACK_STAGES = Object.freeze([
@@ -177,7 +183,7 @@ function legacyHostResult(request, reason, stage, diag) {
     fallbackStage,
     performed: false,
     decision: null,
-    telemetry: Object.freeze({
+    telemetry: Object.freeze(Object.assign({
       projectionMode: 'LEGACY',
       fallbackReason: reason,
       fallbackStage,
@@ -190,7 +196,7 @@ function legacyHostResult(request, reason, stage, diag) {
       exactMaterialSkipped: typeof found.exactMaterialSkipped === 'string' ? found.exactMaterialSkipped : null,
       attemptFailureStage: typeof found.attemptFailureStage === 'string' ? found.attemptFailureStage : null,
       attemptErrorClass: isPlainObject(found.attemptErrorClass) ? found.attemptErrorClass : null,
-    }),
+    }, museV2.pickCounterTelemetryV2(found.counterTelemetry))),
   });
 }
 function applyOpencodeProjectionV2(input) {
@@ -301,7 +307,9 @@ function applyOpencodeProjectionV2(input) {
         && input.metaRemoteCounter.fingerprint === remoteV2.REMOTE_FINGERPRINT_V1) {
         metaRemoteCounter = input.metaRemoteCounter;
       } else {
-        metaRemoteCounter = remoteV2.createMuseRemoteCounterV2({ descriptor, apiKey: metaKey, timeoutMs: input.countTimeoutMs });
+        metaRemoteCounter = remoteV2.createMuseRemoteCounterV2({
+          descriptor, apiKey: metaKey, timeoutMs: input.countTimeoutMs, deadlineMs: input.countDeadlineMs,
+        });
       }
     } catch (error) {
       void error;
@@ -426,6 +434,7 @@ async function completeOpencodeProjectionV2(staged) {
     if (decision.eligible !== true) {
       diag.attemptFailureStage = typeof decision.failureStage === 'string' ? decision.failureStage : 'unknown';
       diag.attemptErrorClass = isPlainObject(decision.errorClass) ? decision.errorClass : null;
+      diag.counterTelemetry = isPlainObject(decision.counterTelemetry) ? decision.counterTelemetry : null;
       return fallback(decision.fallbackReason, 'attempt');
     }
     const compiledUserText = decision.render.messagePlan
@@ -526,9 +535,91 @@ async function* compiledOrLegacyStreamV2(runtime, staged, next, safeDeps, policy
     // created, so the adapter is dispatched once.
     processDiagnosticsV2().derived.add(outcome.request);
     yield* runtime.stream(outcome.request);
-    return;
+  } else {
+    yield* next();
   }
-  yield* next();
+  // Only a response that completed reaches here (an abandoned or failed
+  // stream never pre-warms).
+  schedulePrewarmV2(safeDeps, staged);
+}
+// ---- background exact-count pre-warm (never a correctness input) ----
+const prewarmTimers = new Map();
+function schedulePrewarmV2(safeDeps, staged) {
+  try {
+    if (safeDeps.prewarm === false) return;
+    const counter = staged.metaRemoteCounter;
+    if (!isPlainObject(counter) || typeof counter.prewarmTextsV2 !== 'function') return;
+    const sessionId = staged.request.sessionId;
+    const previous = prewarmTimers.get(sessionId);
+    if (previous !== undefined) clearTimeout(previous);
+    const delay = Number.isInteger(safeDeps.prewarmDelayMs) && safeDeps.prewarmDelayMs >= 0 ? safeDeps.prewarmDelayMs : PREWARM_DELAY_MS;
+    const timer = setTimeout(() => {
+      prewarmTimers.delete(sessionId);
+      runPrewarmV2(safeDeps, staged).catch((error) => { void error; });
+    }, delay);
+    if (typeof timer.unref === 'function') timer.unref();
+    prewarmTimers.set(sessionId, timer);
+  } catch (error) {
+    void error;
+  }
+}
+async function runPrewarmV2(safeDeps, staged) {
+  let summary = null;
+  let restaged = false;
+  try {
+    // Re-stage from the CURRENT durable memory (read-only): the producer
+    // has usually appended the finished step by now. If the old request no
+    // longer stages (e.g. a new user turn), the original staging is used.
+    let source = staged;
+    try {
+      const fresh = applyOpencodeProjectionV2({
+        request: staged.request,
+        policy: { mode: 'active', valid: true },
+        bindingsPath: safeDeps.bindingsPath,
+        sessionSourceFor: safeDeps.sessionSourceFor,
+        metaApiKey: safeDeps.metaApiKey,
+        metaRemoteCounter: staged.metaRemoteCounter,
+        countTimeoutMs: safeDeps.countTimeoutMs,
+        countDeadlineMs: safeDeps.countDeadlineMs,
+      });
+      if (fresh.pending === true) {
+        source = fresh;
+        restaged = true;
+      }
+    } catch (error) {
+      void error;
+    }
+    const texts = museV2.enumerateMusePrewarmTextsV2({
+      compileInput: source.compileInput,
+      pages: source.pages,
+      requestTerms: {
+        systemText: typeof source.request.system === 'string' ? source.request.system : '',
+        turnText: source.liveTurn.turn.text,
+      },
+    });
+    summary = texts === null
+      ? { attempted: 0, cached: 0, counted: 0, skipped: 'enumeration' }
+      : await source.metaRemoteCounter.prewarmTextsV2(texts);
+  } catch (error) {
+    void error;
+    summary = { attempted: 0, cached: 0, counted: 0, skipped: 'failed' };
+  }
+  if (typeof safeDeps.log === 'function') {
+    try {
+      safeDeps.log({
+        event: PREWARM_TELEMETRY_EVENT,
+        requestSeq: requestSeqOfV2(staged.request),
+        restaged,
+        prewarmAttempted: Number.isInteger(summary.attempted) ? summary.attempted : 0,
+        prewarmCacheHits: Number.isInteger(summary.cached) ? summary.cached : 0,
+        prewarmHttpRequests: Number.isInteger(summary.counted) ? summary.counted : 0,
+        prewarmSkipped: typeof summary.skipped === 'string' ? summary.skipped : null,
+      });
+    } catch (error) {
+      void error;
+    }
+  }
+  return summary;
 }
 /**
  * CCV2-OC01H active projection at the llm/stream seam. The DSH agent/request
@@ -592,6 +683,7 @@ function createOpencodeProjectionStreamListenerV2(deps) {
         metaApiKey: safeDeps.metaApiKey,
         metaRemoteCounter: safeDeps.metaRemoteCounter === undefined ? null : safeDeps.metaRemoteCounter,
         countTimeoutMs: safeDeps.countTimeoutMs,
+        countDeadlineMs: safeDeps.countDeadlineMs,
       });
       if (staged.pending !== true) {
         emitOpencodeDecisionV2(safeDeps.log, staged, { request, policy, listenerId });
@@ -666,12 +758,28 @@ function createOpencodeStreamListenerV2(deps) {
       seen.add(request);
       const limit = metadata.ccv2PreCount + metadata.ccv2Margin;
       const log = typeof safeDeps.log === 'function' ? safeDeps.log : null;
-      const revoke = () => {
+      let driftHandled = false;
+      let usageLogged = false;
+      const revoke = (inputTokens) => {
+        let cacheEpoch = null;
+        if (!driftHandled) {
+          driftHandled = true;
+          // Unexplained drift: every exact count observed so far stops being
+          // reusable authority (the epoch moves on and the cache is flushed).
+          try {
+            cacheEpoch = remoteV2.invalidateExactCountCacheV2();
+          } catch (error) {
+            void error;
+          }
+        }
         try {
           certV2.revokeCertificationV2(storeRoot, 'input-over-margin');
           quarantineOpencodeLocalV2();
           if (log !== null) {
-            log({ event: 'ccv2-opencode-anomaly-revoked', preCount: metadata.ccv2PreCount, margin: metadata.ccv2Margin });
+            log({
+              event: 'ccv2-opencode-anomaly-revoked', preCount: metadata.ccv2PreCount, margin: metadata.ccv2Margin,
+              preCountDrift: inputTokens - metadata.ccv2PreCount, cacheEpoch,
+            });
           }
         } catch (error) {
           void error;
@@ -679,7 +787,24 @@ function createOpencodeStreamListenerV2(deps) {
       };
       const onUsage = (chunk) => {
         const found = readUsageFromChunkV2(chunk);
-        if (found !== null && found.inputTokens > limit) revoke();
+        if (found === null) return;
+        if (!usageLogged && log !== null) {
+          usageLogged = true;
+          try {
+            log({
+              event: USAGE_TELEMETRY_EVENT,
+              requestSeq: requestSeqOfV2(request),
+              preCount: metadata.ccv2PreCount,
+              margin: metadata.ccv2Margin,
+              inputTokens: found.inputTokens,
+              preCountDrift: found.inputTokens - metadata.ccv2PreCount,
+              withinMargin: found.inputTokens <= limit,
+            });
+          } catch (error) {
+            void error;
+          }
+        }
+        if (found.inputTokens > limit) revoke(found.inputTokens);
       };
       if (stream !== null && stream !== undefined && typeof stream[Symbol.asyncIterator] === 'function') {
         return forwardStreamV2(stream, onUsage, log);
@@ -764,7 +889,10 @@ module.exports = {
   applyOpencodeProjectionV2,
   completeOpencodeProjectionV2,
   DECISION_TELEMETRY_EVENT,
+  USAGE_TELEMETRY_EVENT,
+  PREWARM_TELEMETRY_EVENT,
   FALLBACK_STAGES,
+  runPrewarmV2,
   createOpencodeProjectionStreamListenerV2,
   readUsageFromChunkV2,
   createOpencodeStreamListenerV2,

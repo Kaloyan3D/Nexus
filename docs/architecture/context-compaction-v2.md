@@ -6066,3 +6066,121 @@ is called once per turn. Turn 2 is CCV2_COMPILED / null /
 REMOTE_MUSE_PRECOUNT / HEALTHY / 1. Restoring the JSON clone fails
 OCH-1b with the live signature (attempt -> planning-build ->
 candidate-compile-failed). Disabling the ownership gate fails OCH-5.
+
+## 51. CCV2-RC2 Remote Counter Availability (Meta input-token authority)
+
+Live evidence: turn 2 compiled twice (requests 46->47, 48->49;
+REMOTE_MUSE_PRECOUNT / HEALTHY, preCount ~74k, remoteCalls 3). Every later
+request fell back with active-tokenizer-unavailable /
+remote-counter-counter-unavailable at payload-count and reserve-count.
+`remoteCalls` counts count PHASES. The enumeration phase alone sent one POST
+per unique text through an unbounded Promise.all, with no retry and a 30s
+timeout, and every 429/5xx/reset collapsed into counter-unavailable.
+
+Invariant (unchanged): Nexus never sends a request modified by CCv2 unless
+that exact request has an exact authoritative count. LEGACY is the original
+request and is sent uncounted. No approximate or local count is ever
+authoritative.
+
+### 51.1 Process-global state
+
+All state lives in `ContextRemoteCounterMuseV2.cjs`, shared through
+`Symbol.for('nexus.ccv2.remote-counter.resilience.v1')` by every loaded
+module copy (preset closures). It is in memory only, so a restart resets it.
+
+- **Scope** = host + model + credScope + transport. credScope is an HMAC of
+  the key under a per-process random secret; the key is never stored. An
+  injected test transport is its own scope.
+- **Limiter** (per scope): AIMD. Starts at 4, range 1..8. Halves on 429 or
+  503, grows by 1 after 20 consecutive successes. Queue priority is
+  foreground first. Background work runs at most 1 in flight and always
+  leaves one slot free.
+- **Exact-count LRU**: 50,000 entries, 24h guard TTL. Key = sha256 of
+  {sha256(exact canonical POSTed body), contract identity (schema version,
+  fingerprint, revision, host, count path, model), credScope, transport
+  scope, cacheEpoch}. Value = {tokens, observedAt}. A hit keeps
+  REMOTE_EXACT; provenance is reported separately as counterSource
+  live|cache.
+- **Gate** (per scope): {notBefore, consecutiveExhausted}. Retry-After
+  cools it for up to 120s. Two consecutive exhausted operations cool it for
+  30s, doubling to 120s. After notBefore exactly one operation probes:
+  success clears the gate, a transient failure re-cools it with the doubled
+  period. While cooling, cache hits are still served and misses fail
+  immediately (counter-gate-open): no HTTP, no limiter queueing. A deadline
+  reached while counts were succeeding (a slow cold enumeration) never cools
+  the gate. The gate never touches authority certification.
+- **Latches**: auth (401/403) per base scope; it clears when the credential
+  identity changes. unsupported (404 / model-unsupported) per contract key;
+  it clears when the contract revision changes. Neither is ever retried on a
+  timer.
+- **Retry budget**: a process-wide token bucket. Each first attempt earns
+  0.15 of a retry; capacity is 10.
+
+### 51.2 One compilation = one counting operation
+
+`beginCountOperationV2()` provides one wall-clock deadline (8s), one
+AbortController and one availability outcome for the gate. Text phases stop
+3s early, so the final payload count always has its reserved tail.
+Per-attempt timeouts are 5s for texts and 10s for the payload, always cut
+to the remaining deadline. countTextsV2 runs at most 8 local workers, each
+through the global limiter, and writes results by index. The first terminal
+failure aborts queued and in-flight siblings.
+
+Retry policy (per call, at most 3 attempts, never past the deadline):
+
+| Failure | Retry |
+|---|---|
+| 429 | Retry-After honoured exactly (+5ms slack) if it fits the deadline, else fail now; otherwise full jitter from 500ms, cap 2s |
+| 502/503/504/other 5xx, 408, ETIMEDOUT, ECONNREFUSED, EAI_AGAIN | Full jitter, 250ms*2^n, cap 2s |
+| 500 | One retry |
+| ECONNRESET/EPIPE on a reused keep-alive socket | One immediate retry, then backoff |
+| 401/403, 404, model-unsupported, 400/413, malformed 200, 501/505, unknown network codes | Never |
+
+An ETIMEDOUT whose timeout was cut to the deadline and expired with it is
+counter-deadline.
+
+Safe kinds: counter-auth, counter-rate-limited, counter-transient,
+counter-deadline, counter-gate-open, counter-malformed, counter-unsupported,
+counter-request-invalid, counter-cancelled. They are thrown as
+`remote-counter-<kind>` with `error.counterFailure`
+{kind, httpStatus, netErrorCode (allow-listed), attempts, exhaustReason}.
+No server text and no raw exception message is ever carried.
+`fallbackReason` stays active-tokenizer-unavailable for availability
+failures, and unsupported still maps to active-model-capability-unknown.
+
+### 51.3 Drift, pre-warm, telemetry
+
+- **Drift**: usage above preCount + margin, on either the host observer or
+  sendOpencodeCompiledV2, runs `invalidateExactCountCacheV2()`: the epoch
+  moves on and the cache is flushed. Revocation and quarantine are
+  unchanged.
+- **Pre-warm**: after a response completes, the host re-stages durable
+  memory (read-only; falls back to the request's own staging) and runs the
+  planning pass only (`enumerateMusePrewarmTextsV2`). Cache misses are
+  counted at background priority. Pre-warm never retries, never spends
+  budget, never probes a cooling or latched gate, is cancellable, and is
+  never a correctness input.
+- **Decision lines** gain counterHttpRequests, counterCacheHits/Misses,
+  counterConcurrencyLimit, counterGateState, counterAttempts,
+  counterFailureKind, counterHttpStatus, counterNetErrorCode,
+  counterExhaustReason, counterDeadlineMs, counterElapsedMs, counterSource,
+  retryAfterApplied and cacheEpoch.
+- **New events**: `ccv2-opencode-usage-observed` (preCountDrift,
+  withinMargin, once per compiled request) and
+  `ccv2-opencode-counter-prewarm`. The anomaly line adds preCountDrift and
+  cacheEpoch.
+
+### 51.4 Evidence
+
+- tests/ContextRemoteCounterResilienceV2.Tests.cjs (124): retry
+  classification, latches, cache identity, TTL, LRU, epoch, limiter
+  (single and cross-session), ordering, cancellation, AIMD, gate/probe,
+  retry budget, deadlines, pre-warm, a Muse live-sequence regression, and
+  telemetry safety.
+- C08H-OCH-6: the same sequence at the production llm/stream seam with a
+  real counter, plus drift -> epoch.
+- 16 mutations disabling one protection each were all caught.
+
+Constants are starting points. Meta count latency for ~74k-token payloads
+has not been measured, so counterElapsedMs in live decision lines must
+confirm the 8s budget.

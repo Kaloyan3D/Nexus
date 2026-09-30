@@ -148,7 +148,9 @@ function checkBindingShapeV2(binding) {
 }
 function mapRemoteErrorV2(error) {
   const text = String((error && error.message) || error);
-  if (text.indexOf('counter-model-unsupported') !== -1) return 'active-model-capability-unknown';
+  if (text.indexOf('counter-model-unsupported') !== -1 || text.indexOf('remote-counter-counter-unsupported') !== -1) {
+    return 'active-model-capability-unknown';
+  }
   if (text.indexOf('remote-counter-memo-miss') !== -1 || text.indexOf('remote-counter-memo-invalid') !== -1) return 'active-compiler-failed';
   if (text.indexOf('context-render-current-turn-invalid') !== -1) return 'active-current-turn-invalid';
   if (text.indexOf('context-render-tool-protocol-invalid') !== -1) return 'active-tool-protocol-invalid';
@@ -174,9 +176,133 @@ function buildInferenceBodyV2(route, systemJoined, turnText, toolsJsonOrNull, ma
   if (Number.isInteger(maxOutputTokens) && maxOutputTokens > 0) body.max_output_tokens = maxOutputTokens;
   return body;
 }
+// Pass 1 (planning only, never authoritative): full pipeline + render.
+// CCV2-M01: the planning counter counts UTF-8 BYTES, so planning against
+// the real token hardMax rejected every real session whose required
+// history exceeds ~1M bytes. Pass 1 only ENUMERATES the texts pass 2 may
+// count, so it plans against the structural packing ceiling; the budget
+// is not part of the candidate identity, and any selection difference
+// under the authoritative pass-2 counts still fails the identity check.
+function planMuseCandidateV2(input, compileInput, pages) {
+  const planning = createPlanningCounterV2();
+  const planningBudget = { hardMax: allocatorV2.PACKING_BOUNDS.hardMaxMax, target: allocatorV2.PACKING_BOUNDS.hardMaxMax };
+  const planningCompileInput = Object.assign({}, compileInput, { budget: { hardMax: planningBudget.hardMax, target: planningBudget.target } });
+  const candidate = shadowV2.buildCandidateV2({
+    compileInput: planningCompileInput, pages, budget: planningBudget, counter: planning,
+    retrievalRequest: input.retrievalRequest === undefined ? null : input.retrievalRequest,
+    compressionPolicyRevision: input.compressionPolicyRevision,
+    packingPolicyRevision: input.packingPolicyRevision,
+    layoutPolicyRevision: input.layoutPolicyRevision,
+  });
+  const render = rendererV2.renderContextPromptV2({ view: candidate.view, layout: candidate.layout, counter: planning });
+  return { candidate, render };
+}
+// Every text the authoritative pass may count.
+function enumerateCountTextsV2(view, render, terms) {
+  const enumeration = [];
+  const seen = new Set();
+  const addText = (text) => {
+    if (typeof text !== 'string' || seen.has(text)) return;
+    seen.add(text);
+    enumeration.push(text);
+  };
+  for (const section of viewV2.VIEW_SECTIONS) {
+    for (const entry of view[section]) addText(entry.exactText);
+  }
+  for (const segment of render.segments) addText(segment.text);
+  addText(render.joinedText);
+  for (const message of render.messagePlan) addText(message.text);
+  addText(rendererV2.RENDER_SEPARATOR_V1);
+  addText(terms.systemText);
+  addText(terms.turnText);
+  if (typeof terms.toolsJson === 'string' && terms.toolsJson !== '') addText(terms.toolsJson);
+  return enumeration;
+}
+/**
+ * Pre-warm enumeration: the planning pass only (no counting, no budget, no
+ * send). Returns the texts a compilation of this memory would count, or
+ * null. Never throws. The texts only seed the exact-count cache, so no
+ * correctness gate depends on them.
+ */
+function enumerateMusePrewarmTextsV2(input) {
+  try {
+    if (!isPlainObject(input) || !isPlainObject(input.compileInput) || !Array.isArray(input.pages)) return null;
+    const terms = input.requestTerms;
+    if (!isPlainObject(terms) || typeof terms.systemText !== 'string' || typeof terms.turnText !== 'string') return null;
+    const planned = planMuseCandidateV2(input, input.compileInput, input.pages);
+    return enumerateCountTextsV2(planned.candidate.view, planned.render, terms);
+  } catch (error) {
+    void error;
+    return null;
+  }
+}
+// Counter availability telemetry keys (content-free; see the remote counter).
+const COUNTER_TELEMETRY_KEYS = Object.freeze([
+  'counterHttpRequests', 'counterCacheHits', 'counterCacheMisses', 'counterConcurrencyLimit', 'counterGateState',
+  'counterAttempts', 'counterFailureKind', 'counterHttpStatus', 'counterNetErrorCode', 'counterExhaustReason',
+  'counterDeadlineMs', 'counterElapsedMs', 'counterSource', 'retryAfterApplied', 'cacheEpoch',
+]);
+function pickCounterTelemetryV2(source) {
+  if (!isPlainObject(source)) return null;
+  const picked = {};
+  for (const key of COUNTER_TELEMETRY_KEYS) {
+    const value = source[key];
+    if (value === null || typeof value === 'number' || typeof value === 'boolean'
+      || (typeof value === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(value))) {
+      picked[key] = value === undefined ? null : value;
+    } else {
+      picked[key] = null;
+    }
+  }
+  return Object.freeze(picked);
+}
+function withCounterTelemetryV2(result, counterTelemetry) {
+  if (counterTelemetry === null) return result;
+  return Object.freeze(Object.assign({}, result, {
+    counterTelemetry,
+    telemetry: Object.freeze(Object.assign({}, result.telemetry, counterTelemetry)),
+  }));
+}
+/**
+ * One compilation = one counting operation: a single wall-clock deadline,
+ * one cancellation scope, and one availability outcome for the counter's
+ * cooldown gate. A counter without operations (test doubles) is used as-is.
+ */
 async function attemptMuseActiveV2(input) {
   const shapeError = checkAttemptShapeV2(input);
   if (shapeError !== null) return ineligibleMuse('active-compiler-failed', 'attempt-shape');
+  let operation = null;
+  if (typeof input.remoteCounter.beginCountOperationV2 === 'function') {
+    try {
+      operation = input.remoteCounter.beginCountOperationV2({ priority: 'foreground' });
+    } catch (error) {
+      return ineligibleMuse(mapRemoteErrorV2(error), 'reserve-count', error);
+    }
+  }
+  let result = null;
+  let counterTelemetry = null;
+  try {
+    result = await attemptMuseCountedV2(input, operation === null ? input.remoteCounter : operation);
+  } finally {
+    if (operation !== null) {
+      try {
+        counterTelemetry = pickCounterTelemetryV2(operation.finish());
+      } catch (error) {
+        void error;
+      }
+    }
+  }
+  const final = withCounterTelemetryV2(result, counterTelemetry);
+  if (final.eligible === true && typeof input.telemetrySink === 'function') {
+    try {
+      input.telemetrySink(final.telemetry, { policyRevision: MUSE_ACTIVE_REVISION_V1, authoritative: false });
+    } catch (error) {
+      void error;
+    }
+  }
+  return final;
+}
+async function attemptMuseCountedV2(input, counting) {
   try {
     const compileInput = input.compileInput;
     const pages = input.pages;
@@ -196,7 +322,7 @@ async function attemptMuseActiveV2(input) {
     let remoteCalls = 0;
     const countedRemote = async (texts) => {
       remoteCalls += 1;
-      return remoteCounter.countTextsV2(texts);
+      return counting.countTextsV2(texts);
     };
     // Reserve terms through the provider authority (parallel, exact).
     const reserveTexts = [terms.systemText, terms.turnText];
@@ -217,27 +343,12 @@ async function attemptMuseActiveV2(input) {
     // brand from every exactMaterial result (the C02 gate then rejects the
     // material as evidence-binding-mismatch for any blob-backed HOT/WARM page).
     const effectiveCompileInput = Object.assign({}, compileInput, { budget: { hardMax, target: hardMax } });
-    const planning = createPlanningCounterV2();
-    // Pass 1 (planning only, never authoritative): full pipeline + render.
-    // CCV2-M01: the planning counter counts UTF-8 BYTES, so planning against
-    // the real token hardMax rejected every real session whose required
-    // history exceeds ~1M bytes. Pass 1 only ENUMERATES the texts pass 2 may
-    // count, so it plans against the structural packing ceiling; the budget
-    // is not part of the candidate identity, and any selection difference
-    // under the authoritative pass-2 counts still fails the identity check.
-    const planningBudget = { hardMax: allocatorV2.PACKING_BOUNDS.hardMaxMax, target: allocatorV2.PACKING_BOUNDS.hardMaxMax };
-    const planningCompileInput = Object.assign({}, compileInput, { budget: { hardMax: planningBudget.hardMax, target: planningBudget.target } });
     let candidate1 = null;
     let render1 = null;
     try {
-      candidate1 = shadowV2.buildCandidateV2({
-        compileInput: planningCompileInput, pages, budget: planningBudget, counter: planning,
-        retrievalRequest: input.retrievalRequest === undefined ? null : input.retrievalRequest,
-        compressionPolicyRevision: input.compressionPolicyRevision,
-        packingPolicyRevision: input.packingPolicyRevision,
-        layoutPolicyRevision: input.layoutPolicyRevision,
-      });
-      render1 = rendererV2.renderContextPromptV2({ view: candidate1.view, layout: candidate1.layout, counter: planning });
+      const planned = planMuseCandidateV2(input, compileInput, pages);
+      candidate1 = planned.candidate;
+      render1 = planned.render;
     } catch (error) {
       return ineligibleMuse('active-compiler-failed', 'planning-build', error);
     }
@@ -245,24 +356,7 @@ async function attemptMuseActiveV2(input) {
     const view1 = candidate1.view;
     if (view1.turnRef.turnId !== binding.turnId) return ineligibleMuse('active-current-turn-invalid', 'planning-turn');
     if (view1.checkpointBinding.snapshotRevision !== binding.snapshotRevision) return ineligibleMuse('active-snapshot-stale', 'planning-snapshot');
-    // Enumerate every text the authoritative pass may count.
-    const enumeration = [];
-    const seen = new Set();
-    const addText = (text) => {
-      if (typeof text !== 'string' || seen.has(text)) return;
-      seen.add(text);
-      enumeration.push(text);
-    };
-    for (const section of viewV2.VIEW_SECTIONS) {
-      for (const entry of view1[section]) addText(entry.exactText);
-    }
-    for (const segment of render1.segments) addText(segment.text);
-    addText(render1.joinedText);
-    for (const message of render1.messagePlan) addText(message.text);
-    addText(rendererV2.RENDER_SEPARATOR_V1);
-    addText(terms.systemText);
-    addText(terms.turnText);
-    if (typeof terms.toolsJson === 'string' && terms.toolsJson !== '') addText(terms.toolsJson);
+    const enumeration = enumerateCountTextsV2(view1, render1, terms);
     let entryCounts = null;
     try {
       entryCounts = await countedRemote(enumeration);
@@ -333,9 +427,11 @@ async function attemptMuseActiveV2(input) {
     }
     // FINAL authoritative pre-count: exactly one whole-payload count.
     let preCount = null;
+    let counterSource = null;
     try {
-      const counted = await remoteCounter.countPayloadV2(inferenceBody);
+      const counted = await counting.countPayloadV2(inferenceBody);
       preCount = counted.tokens;
+      counterSource = counted.source === 'cache' ? 'cache' : 'live';
       remoteCalls += 1;
     } catch (error) {
       return ineligibleMuse(mapRemoteErrorV2(error), 'payload-count', error);
@@ -371,6 +467,7 @@ async function attemptMuseActiveV2(input) {
       counterFingerprint: remoteV2.REMOTE_FINGERPRINT_V1,
       counterRevision: remoteV2.REMOTE_REVISION_V1,
       counterKind: 'REMOTE_EXACT',
+      counterSource,
       modelMax: route.maxContextTokens,
       ccv2HardMax: hardMax,
       reserveTokens: reserveTokens,
@@ -385,13 +482,6 @@ async function attemptMuseActiveV2(input) {
       balancedToolTransactions: balancedTools,
       compilerExecutions: 1,
     });
-    if (typeof input.telemetrySink === 'function') {
-      try {
-        input.telemetrySink(telemetry, { policyRevision: MUSE_ACTIVE_REVISION_V1, authoritative: false });
-      } catch (error) {
-        void error;
-      }
-    }
     return Object.freeze({
       eligible: true,
       mode: 'CCV2_COMPILED',
@@ -706,5 +796,8 @@ module.exports = {
   extractResponsesTextV2,
   classifyResponsesBodyV2,
   attemptMuseActiveV2,
+  enumerateMusePrewarmTextsV2,
+  COUNTER_TELEMETRY_KEYS,
+  pickCounterTelemetryV2,
   sendMuseCompiledV2,
 };
