@@ -64,7 +64,90 @@ function fixtures() {
     { id: 'large-tool-schema', body: withReasoning({ model: MODEL, instructions: 'Use tools when asked.', input: 'Pick a tool.', tools: toolSchema(40) }) },
     { id: 'longer-context', body: withReasoning({ model: MODEL, instructions: PREFIX, input: 'Summarize the context in one short sentence.' }) },
     { id: 'stable-prefix-variant', body: withReasoning({ model: MODEL, instructions: PREFIX, input: 'Ask a different short question here.' }) },
+    // ACTIVE-TAIL-NATIVE wire shape (request-shape v2): the DSH system as a
+    // developer item, compiled context appended to it, and a provider-native
+    // tool tail (function_call + function_call_output) with the pinned pi-ai
+    // reasoning fields.
+    { id: 'native-tail-tools', body: nativeTailBody([
+      { type: 'function_call', call_id: 'call_canary_1', name: 'load_skill', arguments: '{"name":"nexus-engineering-workflow"}' },
+      { type: 'function_call_output', call_id: 'call_canary_1', output: 'loaded' },
+      { type: 'function_call', call_id: 'call_canary_2', name: 'load_skill', arguments: '{"name":"spec-reader"}' },
+      { type: 'function_call_output', call_id: 'call_canary_2', output: 'spec text' },
+    ]) },
   ];
+}
+const NATIVE_TAIL_TOOLS = [{ type: 'function', name: 'load_skill', description: 'Load a named skill.', parameters: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } }];
+function nativeTailBody(tailItems) {
+  return {
+    model: MODEL,
+    input: [
+      { role: 'developer', content: 'You are the Nexus canary.' + String.fromCharCode(10, 10) + '[user-message source=user]' + String.fromCharCode(10) + 'Earlier compiled request.' },
+      { role: 'user', content: [{ type: 'input_text', text: 'Load the nexus-engineering-workflow skill, then continue.' }] },
+    ].concat(tailItems),
+    tools: NATIVE_TAIL_TOOLS,
+    reasoning: { effort: 'minimal', summary: 'auto' },
+    max_output_tokens: 512,
+  };
+}
+// The counted subset REMOTE_MUSE_PRECOUNT forwards (projector COUNTED_KEYS).
+function countedSubset(body) {
+  const out = {};
+  for (const key of ['model', 'input', 'tools', 'reasoning', 'max_output_tokens']) if (body[key] !== undefined) out[key] = body[key];
+  return out;
+}
+/**
+ * Live reasoning-replay fixture: step 1 asks OpenCode for a tool call and
+ * captures its output items (reasoning with encrypted_content + the
+ * function_call); step 2 replays them natively with the tool result. The
+ * record answers whether the Meta count endpoint accepts replayed
+ * encrypted reasoning and whether its count bounds OpenCode's billed input.
+ */
+async function nativeReasoningReplayFixture(counter, opencodeKey) {
+  const record = { fixtureId: 'native-reasoning-replay' };
+  const headers = { 'x-opencode-session': 'sess-oc01-canary-native-replay', 'user-agent': 'nexus-ai-harness/1.0' };
+  const step1 = Object.assign(nativeTailBody([]), { include: ['reasoning.encrypted_content'], store: false });
+  const first = await postJson(OPENCODE_HOST, OPENCODE_PATH, opencodeKey, step1, 120000, headers);
+  let output = null;
+  try {
+    output = first.status === 200 ? JSON.parse(first.bodyText).output : null;
+  } catch (error) {
+    void error;
+  }
+  const call = Array.isArray(output) ? output.find((item) => item && item.type === 'function_call') : undefined;
+  if (call === undefined) {
+    record.status = first.status === 200 ? 'no-tool-call' : 'http-' + first.status;
+    record.anomaly = true;
+    return record;
+  }
+  const replayed = output.filter((item) => item && (item.type === 'reasoning' || item.type === 'function_call'))
+    .map((item) => (item.type === 'function_call'
+      ? { type: 'function_call', id: item.id, call_id: item.call_id, name: item.name, arguments: item.arguments }
+      : item));
+  record.reasoningItemsReplayed = replayed.filter((item) => item.type === 'reasoning').length;
+  record.encryptedReasoningReplayed = replayed.some((item) => item.type === 'reasoning' && typeof item.encrypted_content === 'string');
+  const step2 = Object.assign(nativeTailBody(replayed.concat([{ type: 'function_call_output', call_id: call.call_id, output: 'loaded' }])), { include: ['reasoning.encrypted_content'], store: false });
+  try {
+    record.preCount = (await counter.countPayloadV2(countedSubset(step2))).tokens;
+    record.metaCountAcceptsReasoningReplay = true;
+  } catch (error) {
+    record.metaCountAcceptsReasoningReplay = false;
+    record.status = 'count-rejected:' + String((error && error.code) || 'unknown').slice(0, 64);
+    record.anomaly = true;
+    return record;
+  }
+  record.margin = opencode.providerSafetyMarginV2(record.preCount);
+  const second = await postJson(OPENCODE_HOST, OPENCODE_PATH, opencodeKey, step2, 120000, headers);
+  const parsed = second.status === 200 ? parseResponsesUsage(second.bodyText) : { ok: false };
+  if (parsed.ok !== true || parsed.status !== 'completed') {
+    record.status = second.status === 200 ? 'unparsable' : 'http-' + second.status;
+    record.anomaly = true;
+    return record;
+  }
+  record.status = 'completed';
+  record.providerReportedInputTokens = parsed.inputTokens;
+  record.cachedTokens = parsed.cachedTokens;
+  record.anomaly = parsed.inputTokens > record.preCount + record.margin;
+  return record;
 }
 function parseResponsesUsage(bodyText) {
   let body = null;
@@ -151,6 +234,17 @@ async function runCanary(metaKey, opencodeKey) {
     results.push(record);
     console.log('OC01-CANARY ' + JSON.stringify(record));
   }
+  // Request-shape v2 certification requires live evidence for the native
+  // reasoning-replay tail (never faked; any failure quarantines).
+  let replayRecord = null;
+  try {
+    replayRecord = await nativeReasoningReplayFixture(counter, opencodeKey);
+  } catch (error) {
+    replayRecord = { fixtureId: 'native-reasoning-replay', status: 'transport-failure', anomaly: true };
+  }
+  if (replayRecord.anomaly === true) failed += 1;
+  results.push(replayRecord);
+  console.log('OC01-CANARY ' + JSON.stringify(replayRecord));
   const digest = sha(JSON.stringify(results.map((r) => [r.fixtureId, r.preCount, r.providerReportedInputTokens, r.status, r.anomaly])));
   return { results, failed, digest };
 }

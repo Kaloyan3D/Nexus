@@ -61,13 +61,13 @@ function candidateIdentityV2(view, layout) {
 // before 'planning-build' ran no compiler pipeline (compilerExecutions 0).
 const ATTEMPT_STAGES = Object.freeze([
   'attempt-shape', 'binding-shape', 'binding-route', 'binding-counter', 'binding-turn', 'binding-budget',
-  'reserve-count', 'budget', 'planning-build', 'planning-turn', 'planning-snapshot', 'enumeration-count',
+  'wire-projection', 'reserve-count', 'budget', 'planning-build', 'planning-turn', 'planning-snapshot', 'enumeration-count',
   'memo-build', 'authoritative-build', 'counter-independence', 'render-turn', 'render-budget',
-  'tool-protocol', 'inference-body', 'payload-count', 'payload-budget', 'revision-read', 'revision-stale',
+  'tool-protocol', 'native-turn', 'inference-body', 'payload-count', 'payload-budget', 'revision-read', 'revision-stale',
   'render-validate', 'unexpected',
 ]);
 const PRE_COMPILE_STAGES = Object.freeze(['attempt-shape', 'binding-shape', 'binding-route', 'binding-counter',
-  'binding-turn', 'binding-budget', 'reserve-count', 'budget']);
+  'binding-turn', 'binding-budget', 'wire-projection', 'reserve-count', 'budget']);
 const SAFE_ERROR_CODE_PREFIXES = Object.freeze(['context-', 'remote-counter-', 'counter-', 'muse-', 'opencode-', 'ccv2-']);
 /**
  * Structural, content-free classification of a caught error: its class
@@ -109,7 +109,7 @@ function ineligibleMuse(reason, stage, error) {
 }
 function checkAttemptShapeV2(input) {
   if (!isPlainObject(input)) return 'input must be an object';
-  const allowed = ['compileInput', 'pages', 'remoteCounter', 'route', 'requestTerms', 'binding', 'retrievalRequest', 'compressionPolicyRevision', 'packingPolicyRevision', 'layoutPolicyRevision', 'getCurrentRevision', 'telemetrySink'];
+  const allowed = ['compileInput', 'pages', 'remoteCounter', 'route', 'requestTerms', 'binding', 'retrievalRequest', 'compressionPolicyRevision', 'packingPolicyRevision', 'layoutPolicyRevision', 'getCurrentRevision', 'telemetrySink', 'wire'];
   for (const key of Object.keys(input)) {
     if (allowed.indexOf(key) === -1) return 'unknown key ' + String(key).slice(0, 64);
   }
@@ -133,6 +133,12 @@ function checkAttemptShapeV2(input) {
   }
   if (terms.toolsJson !== undefined && terms.toolsJson !== null && typeof terms.toolsJson !== 'string') return 'toolsJson must be a string or omitted';
   if (!isPlainObject(input.binding)) return 'binding required';
+  if (input.wire !== undefined && input.wire !== null) {
+    if (!isPlainObject(input.wire) || typeof input.wire.project !== 'function') return 'wire.project required';
+    // ACTIVE-TAIL-NATIVE: tools/system/tail travel inside the projected
+    // wire body; a second tool term would count them twice.
+    if (typeof terms.toolsJson === 'string') return 'toolsJson is owned by the wire projection';
+  }
   return null;
 }
 function checkBindingShapeV2(binding) {
@@ -145,6 +151,23 @@ function checkBindingShapeV2(binding) {
     if (keys.indexOf(key) === -1) return false;
   }
   return true;
+}
+// ACTIVE-TAIL-NATIVE: the counter refusing a payload that carries the native
+// tail (a 400/422 request-invalid, or an unsupported item) is a typed tail
+// fallback, never a generic tokenizer outage.
+function mapTailCountErrorV2(error) {
+  const failure = error && isPlainObject(error.counterFailure) ? error.counterFailure : null;
+  const code = error && typeof error.code === 'string' ? error.code : null;
+  if (code === 'counter-request-invalid') return 'active-native-tail-uncountable';
+  if (code === 'counter-unsupported' && failure !== null && failure.httpStatus !== 404) return 'active-native-tail-uncountable';
+  return mapRemoteErrorV2(error);
+}
+function projectWireV2(wire, contextText) {
+  const projected = wire.project(contextText);
+  if (!isPlainObject(projected) || !isPlainObject(projected.countedBody) || !isPlainObject(projected.wireBody)) {
+    failMuse('wire-invalid', 'wire projection must return countedBody and wireBody');
+  }
+  return projected;
 }
 function mapRemoteErrorV2(error) {
   const text = String((error && error.message) || error);
@@ -194,8 +217,14 @@ function planMuseCandidateV2(input, compileInput, pages) {
     packingPolicyRevision: input.packingPolicyRevision,
     layoutPolicyRevision: input.layoutPolicyRevision,
   });
-  const render = rendererV2.renderContextPromptV2({ view: candidate.view, layout: candidate.layout, counter: planning });
+  const render = rendererV2.renderContextPromptV2(Object.assign({ view: candidate.view, layout: candidate.layout, counter: planning }, renderContractOfV2(input)));
   return { candidate, render };
+}
+function contextOnlyOfV2(input) {
+  return (isPlainObject(input.wire) && typeof input.wire.project === 'function') || input.contextOnly === true;
+}
+function renderContractOfV2(input) {
+  return contextOnlyOfV2(input) ? { roleContract: rendererV2.RENDER_ROLE_CONTRACT_CONTEXT_ONLY_V2 } : {};
 }
 // Every text the authoritative pass may count.
 function enumerateCountTextsV2(view, render, terms) {
@@ -229,7 +258,7 @@ function enumerateMusePrewarmTextsV2(input) {
     if (!isPlainObject(input) || !isPlainObject(input.compileInput) || !Array.isArray(input.pages)) return null;
     const terms = input.requestTerms;
     if (!isPlainObject(terms) || typeof terms.systemText !== 'string' || typeof terms.turnText !== 'string') return null;
-    const planned = planMuseCandidateV2(input, input.compileInput, input.pages);
+    const planned = planMuseCandidateV2({ contextOnly: input.contextOnly === true }, input.compileInput, input.pages);
     return enumerateCountTextsV2(planned.candidate.view, planned.render, terms);
   } catch (error) {
     void error;
@@ -324,17 +353,36 @@ async function attemptMuseCountedV2(input, counting) {
       remoteCalls += 1;
       return counting.countTextsV2(texts);
     };
-    // Reserve terms through the provider authority (parallel, exact).
-    const reserveTexts = [terms.systemText, terms.turnText];
-    if (typeof terms.toolsJson === 'string' && terms.toolsJson !== '') reserveTexts.push(terms.toolsJson);
-    let reserveCounts = null;
-    try {
-      reserveCounts = await countedRemote(reserveTexts);
-    } catch (error) {
-      return ineligibleMuse(mapRemoteErrorV2(error), 'reserve-count', error);
-    }
+    const tailMode = contextOnlyOfV2(input) && isPlainObject(input.wire);
     let reserveTokens = 0;
-    for (const count of reserveCounts) reserveTokens += count;
+    if (tailMode) {
+      // Reserve = the exact wire payload WITHOUT CCv2 context (host system,
+      // tools, reasoning route, output cap and the native tail), counted
+      // whole by the provider authority.
+      let reserveProjection = null;
+      try {
+        reserveProjection = projectWireV2(input.wire, '');
+      } catch (error) {
+        return ineligibleMuse('active-native-tail-unprojectable', 'wire-projection', error);
+      }
+      try {
+        remoteCalls += 1;
+        reserveTokens = (await counting.countPayloadV2(reserveProjection.countedBody)).tokens;
+      } catch (error) {
+        return ineligibleMuse(mapTailCountErrorV2(error), 'reserve-count', error);
+      }
+    } else {
+      // Reserve terms through the provider authority (parallel, exact).
+      const reserveTexts = [terms.systemText, terms.turnText];
+      if (typeof terms.toolsJson === 'string' && terms.toolsJson !== '') reserveTexts.push(terms.toolsJson);
+      let reserveCounts = null;
+      try {
+        reserveCounts = await countedRemote(reserveTexts);
+      } catch (error) {
+        return ineligibleMuse(mapRemoteErrorV2(error), 'reserve-count', error);
+      }
+      for (const count of reserveCounts) reserveTokens += count;
+    }
     const hardMax = route.maxContextTokens - terms.outputReserve - reserveTokens;
     if (!Number.isInteger(hardMax) || hardMax < 1) return ineligibleMuse('active-budget-unrepresentable', 'budget');
     const budget = { hardMax, target: hardMax };
@@ -382,7 +430,7 @@ async function attemptMuseCountedV2(input, counting) {
         packingPolicyRevision: input.packingPolicyRevision,
         layoutPolicyRevision: input.layoutPolicyRevision,
       });
-      render2 = rendererV2.renderContextPromptV2({ view: candidate2.view, layout: candidate2.layout, counter: memo });
+      render2 = rendererV2.renderContextPromptV2(Object.assign({ view: candidate2.view, layout: candidate2.layout, counter: memo }, renderContractOfV2(input)));
     } catch (error) {
       return ineligibleMuse(mapRemoteErrorV2(error), 'authoritative-build', error);
     }
@@ -392,9 +440,16 @@ async function attemptMuseCountedV2(input, counting) {
       !== canonicalJsonOf(candidateIdentityV2(candidate2.view, candidate2.layout))) {
       return ineligibleMuse('active-compiler-failed', 'counter-independence');
     }
-    // Current turn exactly once, byte-exact, in the authoritative render.
+    // Current turn exactly once, byte-exact: rendered as the single user
+    // message, or (context-only) bound as the natively carried turn and
+    // absent from every rendered message.
     const userTexts = render2.messagePlan.filter((message) => message.role === 'user').map((message) => message.text);
-    if (userTexts.length !== 1 || sha256HexUtf8(userTexts[0]) !== sha256HexUtf8(terms.turnText)) {
+    if (tailMode) {
+      if (userTexts.length !== 0 || render2.messagePlan.length !== 1 || !isPlainObject(render2.nativeTurn)
+        || render2.nativeTurn.contentHash !== sha256HexUtf8(terms.turnText)) {
+        return ineligibleMuse('active-current-turn-invalid', 'native-turn');
+      }
+    } else if (userTexts.length !== 1 || sha256HexUtf8(userTexts[0]) !== sha256HexUtf8(terms.turnText)) {
       return ineligibleMuse('active-current-turn-invalid', 'render-turn');
     }
     if (render2.renderedTokens > hardMax) return ineligibleMuse('active-render-over-budget', 'render-budget');
@@ -411,19 +466,29 @@ async function attemptMuseCountedV2(input, counting) {
       }
     }
     // EXACT inference body (this object is counted, then sent verbatim).
-    const systemMessages = render2.messagePlan.filter((message) => message.role === 'system').map((message) => message.text);
-    const systems = [terms.systemText].concat(systemMessages).filter((text) => text !== '');
-    let systemJoined = '';
-    for (let index = 0; index < systems.length; index += 1) {
-      systemJoined += (index === 0 ? '' : LF + LF) + systems[index];
-    }
+    // Context-only: the host-owned wire projection of the FINAL hybrid
+    // request (system + compiled context, native tail, tools, route) is
+    // both the counted body and the provider body.
     let inferenceBody = null;
+    let wireProjection = null;
+    const contextText = tailMode ? render2.messagePlan[0].text : null;
     try {
-      inferenceBody = buildInferenceBodyV2(route, systemJoined, terms.turnText,
-        typeof terms.toolsJson === 'string' ? terms.toolsJson : null, terms.maxTokens,
-        typeof terms.reasoningEffort === 'string' ? terms.reasoningEffort : null);
+      if (tailMode) {
+        wireProjection = projectWireV2(input.wire, contextText);
+        inferenceBody = wireProjection.countedBody;
+      } else {
+        const systemMessages = render2.messagePlan.filter((message) => message.role === 'system').map((message) => message.text);
+        const systems = [terms.systemText].concat(systemMessages).filter((text) => text !== '');
+        let systemJoined = '';
+        for (let index = 0; index < systems.length; index += 1) {
+          systemJoined += (index === 0 ? '' : LF + LF) + systems[index];
+        }
+        inferenceBody = buildInferenceBodyV2(route, systemJoined, terms.turnText,
+          typeof terms.toolsJson === 'string' ? terms.toolsJson : null, terms.maxTokens,
+          typeof terms.reasoningEffort === 'string' ? terms.reasoningEffort : null);
+      }
     } catch (error) {
-      return ineligibleMuse('active-compiler-failed', 'inference-body', error);
+      return ineligibleMuse(tailMode ? 'active-native-tail-unprojectable' : 'active-compiler-failed', 'inference-body', error);
     }
     // FINAL authoritative pre-count: exactly one whole-payload count.
     let preCount = null;
@@ -434,7 +499,7 @@ async function attemptMuseCountedV2(input, counting) {
       counterSource = counted.source === 'cache' ? 'cache' : 'live';
       remoteCalls += 1;
     } catch (error) {
-      return ineligibleMuse(mapRemoteErrorV2(error), 'payload-count', error);
+      return ineligibleMuse(tailMode ? mapTailCountErrorV2(error) : mapRemoteErrorV2(error), 'payload-count', error);
     }
     if (preCount + terms.outputReserve > route.maxContextTokens) return ineligibleMuse('active-render-over-budget', 'payload-budget');
     // Final TOCTOU revalidation before the send boundary.
@@ -481,6 +546,10 @@ async function attemptMuseCountedV2(input, counting) {
       mandatoryTotal: candidate2.view.mandatoryRefs.length,
       balancedToolTransactions: balancedTools,
       compilerExecutions: 1,
+      roleContract: render2.roleContract,
+      wireInputItems: wireProjection === null ? null : wireProjection.wireBody.input.length,
+      wireFunctionCalls: wireProjection === null || !isPlainObject(wireProjection.facts) ? null : wireProjection.facts.functionCalls,
+      wireReasoningItems: wireProjection === null || !isPlainObject(wireProjection.facts) ? null : wireProjection.facts.reasoningItems,
     });
     return Object.freeze({
       eligible: true,
@@ -491,6 +560,8 @@ async function attemptMuseCountedV2(input, counting) {
       render: render2,
       preCount,
       inferenceBody: Object.freeze(deepClone(inferenceBody)),
+      wireBody: wireProjection === null ? null : wireProjection.wireBody,
+      contextText,
       binding: Object.freeze(deepClone(binding)),
       compilerExecutions: 1,
       telemetry,

@@ -9,9 +9,18 @@ const shadowHostV2 = require('./ContextCompilerShadowHostV2.cjs');
 const remoteV2 = require('./ContextRemoteCounterMuseV2.cjs');
 const opencodeV2 = require('./ContextCompilerActiveOpencodeV2.cjs');
 const museV2 = require('./ContextCompilerActiveMuseV2.cjs');
+const rendererV2 = require('./ContextPromptRendererV2.cjs');
 const certV2 = require('./ContextAuthorityCertificationV2.cjs');
+const wireV2 = require('./ContextWireProjectorResponsesV2.cjs');
 const HOST_SCHEMA_VERSION = 1;
 const OPENCODE_REQUEST_SHAPE_V1 = 'opencode-muse-request-shape-v1';
+// ACTIVE-TAIL-NATIVE changed the provider request shape (system slot +
+// native tail, counted as the pinned wire body). Certification binds this
+// revision, so evidence gathered for the v1 text shape never authorizes it.
+const OPENCODE_REQUEST_SHAPE_V2 = 'opencode-muse-request-shape-v2-native-tail';
+// Deterministic separator between the DSH-owned system bytes (a strict
+// prefix of the derived system) and the compiled CCv2 context.
+const CCV2_SYSTEM_SEPARATOR_V1 = String.fromCharCode(10, 10);
 const MARGIN_POLICY_REVISION_V1 = 'opencode-margin-policy-v1';
 const OUTPUT_RESERVE_POLICY_REVISION_V1 = 'opencode-output-reserve-policy-v1';
 const CANARY_SUITE_REVISION_V1 = 'oc01-canary-suite-v1';
@@ -27,7 +36,7 @@ const PREWARM_DELAY_MS = 750;
 // back (the reason says WHY). Never carries content.
 const FALLBACK_STAGES = Object.freeze([
   'request-shape', 'authority-health', 'counter-credential', 'binding', 'checkpoint',
-  'staged-memory', 'current-turn', 'coverage', 'exact-material', 'counter', 'budget',
+  'staged-memory', 'current-turn', 'coverage', 'native-tail', 'wire-route', 'exact-material', 'counter', 'budget',
   'attempt', 'compiled-turn', 'envelope', 'dispatch-surface', 'ownership', 'exception',
 ]);
 const installedCtxs = new WeakSet();
@@ -145,7 +154,7 @@ function currentOpencodeIdentityV2(input) {
       counterFingerprint: remoteV2.REMOTE_FINGERPRINT_V1,
       safetyMarginPolicyRevision: MARGIN_POLICY_REVISION_V1,
       outputReservePolicyRevision: OUTPUT_RESERVE_POLICY_REVISION_V1,
-      requestShapeRevision: OPENCODE_REQUEST_SHAPE_V1,
+      requestShapeRevision: OPENCODE_REQUEST_SHAPE_V2,
       canarySuiteRevision: CANARY_SUITE_REVISION_V1,
     });
   } catch (error) {
@@ -153,17 +162,68 @@ function currentOpencodeIdentityV2(input) {
     return { known: false, identity: null };
   }
 }
-function liveUserTextMessages(messages) {
-  const found = [];
-  messages.forEach((message, index) => {
-    if (!isPlainObject(message) || message.role !== 'user' || !Array.isArray(message.content)) return;
-    const texts = [];
-    for (const block of message.content) {
-      if (isPlainObject(block) && block.type === 'text' && typeof block.text === 'string') texts.push(block.text);
-    }
-    if (texts.length > 0) found.push({ index, text: texts.join(String.fromCharCode(10)) });
-  });
-  return found;
+// Install root of this composition: explicit, else derived from the
+// bindings file (<root>/data/routing/session-bindings.json).
+function installRootOfV2(input) {
+  if (isPlainObject(input) && typeof input.installRoot === 'string' && input.installRoot !== '') return path.resolve(String(input.installRoot));
+  if (isPlainObject(input) && typeof input.bindingsPath === 'string' && input.bindingsPath !== '') {
+    return path.resolve(path.dirname(path.resolve(String(input.bindingsPath))), '..', '..');
+  }
+  return null;
+}
+/**
+ * The Responses wire route of the approved OpenCode pair, resolved from the
+ * installed settings.yaml llm-pi-ai profile (closed world; null = unknown).
+ */
+function opencodeWireRouteV2(input) {
+  try {
+    const root = installRootOfV2(input);
+    if (root === null) return null;
+    const settingsText = readTextFileV2(path.join(root, 'config', 'settings.yaml'), 1048576);
+    if (settingsText === null) return null;
+    return wireV2.readResponsesRouteFromSettingsV2(settingsText, opencodeV2.OPENCODE_PROVIDER_V1, opencodeV2.OPENCODE_MODEL_V1);
+  } catch (error) {
+    void error;
+    return null;
+  }
+}
+// Extractor skip -> typed fallback reason (the skip code itself travels as
+// the content-free nativeTailSkip diagnostic).
+function nativeTailReasonOfV2(skipped) {
+  if (skipped === 'active-tail-overlap') return 'active-native-tail-overlap';
+  if (skipped === 'active-turn-missing' || skipped === 'active-turn-unanchored'
+    || skipped === 'active-turn-anchor-missing' || skipped === 'active-turn-anchor-ambiguous') {
+    return 'active-native-tail-ambiguous';
+  }
+  return 'active-native-tail-invalid';
+}
+function anchorTurnTextV2(message) {
+  if (!isPlainObject(message) || message.role !== 'user' || !Array.isArray(message.content)) return null;
+  const texts = [];
+  for (const block of message.content) {
+    if (isPlainObject(block) && block.type === 'text' && typeof block.text === 'string') texts.push(block.text);
+  }
+  const text = texts.join(String.fromCharCode(10));
+  return text === '' ? null : text;
+}
+/**
+ * The ONE derived-request builder (used for counting AND sending): every
+ * non-owned key by reference; messages = the native tail (same objects,
+ * same order); system = original system bytes + separator + compiled
+ * context (the original is a strict byte prefix); metadata = markers.
+ */
+function buildDerivedRequestV2(request, tail, contextText, markers) {
+  const derived = {};
+  for (const key of Object.keys(request)) derived[key] = request[key];
+  derived.messages = Object.freeze(tail.slice());
+  const base = typeof request.system === 'string' ? request.system : '';
+  if (typeof contextText === 'string' && contextText !== '') {
+    derived.system = base === '' ? contextText : base + CCV2_SYSTEM_SEPARATOR_V1 + contextText;
+  } else if (request.system !== undefined) {
+    derived.system = request.system;
+  }
+  derived.metadata = Object.freeze(Object.assign({}, isPlainObject(request.metadata) ? request.metadata : {}, markers || {}));
+  return derived;
 }
 function currentOpencodeHealthV2() {
   try {
@@ -196,6 +256,10 @@ function legacyHostResult(request, reason, stage, diag) {
       exactMaterialSkipped: typeof found.exactMaterialSkipped === 'string' ? found.exactMaterialSkipped : null,
       attemptFailureStage: typeof found.attemptFailureStage === 'string' ? found.attemptFailureStage : null,
       attemptErrorClass: isPlainObject(found.attemptErrorClass) ? found.attemptErrorClass : null,
+      nativeTailSkip: typeof found.nativeTailSkip === 'string' && shadowHostV2.ACTIVE_TAIL_SKIP_REASONS.concat(['active-turn-coverage-missing', 'active-turn-anchor-textless']).indexOf(found.nativeTailSkip) !== -1
+        ? found.nativeTailSkip : null,
+      nativeTailMessages: Number.isInteger(found.nativeTailMessages) ? found.nativeTailMessages : null,
+      nativePrefixMessages: Number.isInteger(found.nativePrefixMessages) ? found.nativePrefixMessages : null,
     }, museV2.pickCounterTelemetryV2(found.counterTelemetry))),
   });
 }
@@ -259,26 +323,36 @@ function applyOpencodeProjectionV2(input) {
     if (stagedDecisions.decisions === null) return fallback(request, 'active-compiler-failed', 'staged-memory');
     const stagedTx = shadowHostV2.readStagedToolTransactionsV2(memoryDir);
     if (stagedTx.transactions === null) return fallback(request, 'active-compiler-failed', 'staged-memory');
-    const liveTurn = shadowHostV2.extractLiveCurrentTurnV2(request.messages);
-    if (liveTurn.turn === null) return fallback(request, 'active-current-turn-invalid', 'current-turn');
-    const liveTurnHash = sha256HexUtf8(liveTurn.turn.text);
-    // CCV2-M01: with producer coverage, the lossless-replacement rule is the
-    // stronger per-message proof (every non-current live message is
-    // represented by staged memory); without it, the frozen single
-    // user-text rule applies unchanged.
+    // ACTIVE-TAIL-NATIVE boundary: the producer-owned anchor of the open
+    // DSH turn, verified against the live request. prefix = messages
+    // [0..anchor) must be historically covered; tail = messages[anchor..]
+    // travels provider-native and must share nothing with staged memory.
+    // Ambiguity or overlap is a typed LEGACY fallback, never a guess.
     const stagedCoverage = shadowHostV2.readStagedCoverageV2(memoryDir);
     if (stagedCoverage.skipped !== null) return fallback(request, 'active-current-turn-invalid', 'coverage');
-    if (stagedCoverage.coverage !== null) {
-      if (shadowHostV2.checkLiveCoverageV2(request.messages, stagedCoverage.coverage, liveTurn.turn.text) !== null) {
-        return fallback(request, 'active-current-turn-invalid', 'coverage');
-      }
-    } else {
-      const liveUserTexts = liveUserTextMessages(request.messages);
-      if (liveUserTexts.length !== 1) return fallback(request, 'active-current-turn-invalid', 'current-turn');
-      if (sha256HexUtf8(liveUserTexts[0].text) !== liveTurnHash) {
-        return fallback(request, 'active-current-turn-invalid', 'current-turn');
-      }
+    if (stagedCoverage.coverage === null) {
+      diag.nativeTailSkip = 'active-turn-coverage-missing';
+      return fallback(request, 'active-native-tail-ambiguous', 'native-tail');
     }
+    const extracted = shadowHostV2.extractActiveTailV2({
+      messages: request.messages, coverage: stagedCoverage.coverage, toolTransactions: stagedTx.transactions,
+    });
+    if (extracted.boundary === null) {
+      diag.nativeTailSkip = extracted.skipped;
+      return fallback(request, nativeTailReasonOfV2(extracted.skipped), 'native-tail');
+    }
+    const boundary = extracted.boundary;
+    diag.nativeTailMessages = boundary.tail.length;
+    diag.nativePrefixMessages = boundary.prefixLength;
+    const anchorText = anchorTurnTextV2(boundary.tail[0]);
+    if (anchorText === null) {
+      diag.nativeTailSkip = 'active-turn-anchor-textless';
+      return fallback(request, 'active-native-tail-ambiguous', 'native-tail');
+    }
+    const liveTurn = { turn: { turnId: 'live', text: anchorText, revision: null }, skipped: null };
+    const liveTurnHash = sha256HexUtf8(anchorText);
+    const wireRoute = opencodeWireRouteV2(input);
+    if (wireRoute === null) return fallback(request, 'active-native-tail-unprojectable', 'wire-route');
     const sessionSource = typeof input.sessionSourceFor === 'function' ? input.sessionSourceFor(request.sessionId) : null;
     diag.sessionSourceAvailable = sessionSource !== null && sessionSource !== undefined;
     const exact = shadowHostV2.readStagedExactMaterialV2({
@@ -327,7 +401,7 @@ function applyOpencodeProjectionV2(input) {
         checkoutId: sealed.checkoutId,
       },
       snapshotRevision: sealed.snapshot.revisionDigest,
-      runtimeState: { pendingProtocol: shadowHostV2.derivePendingProtocolV2(request.messages) },
+      runtimeState: { pendingProtocol: shadowHostV2.derivePendingProtocolV2(request.messages.slice(0, boundary.anchorIndex)) },
       pages: stagedPages.pages,
       tierDecisions: stagedDecisions.decisions,
       evidenceRefs: [],
@@ -358,9 +432,10 @@ function applyOpencodeProjectionV2(input) {
     return Object.freeze({
       pending: true, request, policy, compileInput,
       pages: stagedPages.pages, outputReserve, attemptBinding,
-      liveTurnHash, liveTurn, memoryDir, metaRemoteCounter,
+      liveTurnHash, liveTurn, memoryDir, metaRemoteCounter, boundary, wireRoute,
       bindingFound: diag.bindingFound, checkpointFound: diag.checkpointFound,
       sessionSourceAvailable: diag.sessionSourceAvailable,
+      nativeTailMessages: diag.nativeTailMessages, nativePrefixMessages: diag.nativePrefixMessages,
     });
   } catch (error) {
     void error;
@@ -373,30 +448,52 @@ function applyOpencodeProjectionV2(input) {
   }
 }
 // Keys the compiled projection owns; every other request key (route,
-// reasoning effort, output cap, system, tools, routing authority, session
-// id, abort signal, ...) is carried by REFERENCE and verified identical.
-const PROJECTION_OWNED_KEYS = Object.freeze(['messages', 'metadata']);
-function deriveCompiledRequestV2(request, compiledMessages, markers) {
-  const derived = {};
-  for (const key of Object.keys(request)) derived[key] = request[key];
-  derived.messages = Object.freeze(compiledMessages);
-  derived.metadata = Object.freeze(Object.assign({}, isPlainObject(request.metadata) ? request.metadata : {}, markers));
-  return derived;
-}
+// reasoning effort, output cap, tools, routing authority, session id,
+// abort signal, ...) is carried by REFERENCE and verified identical.
+// `system` is owned only as an append: the original bytes stay a strict
+// prefix (proven below), the compiled context follows the separator.
+const PROJECTION_OWNED_KEYS = Object.freeze(['messages', 'metadata', 'system']);
 function envelopeUnchangedV2(request, derived) {
   const sourceKeys = Object.keys(request).filter((key) => PROJECTION_OWNED_KEYS.indexOf(key) === -1).sort();
   const derivedKeys = Object.keys(derived).filter((key) => PROJECTION_OWNED_KEYS.indexOf(key) === -1).sort();
   if (sourceKeys.join(',') !== derivedKeys.join(',')) return false;
   return sourceKeys.every((key) => derived[key] === request[key]);
 }
+// Original system bytes are a strict prefix of the derived system, joined
+// by exactly the separator, followed by exactly the compiled context.
+function systemPrefixProvenV2(request, derived, contextText) {
+  if (typeof contextText !== 'string' || contextText === '' || typeof derived.system !== 'string') return false;
+  if (request.system !== undefined && typeof request.system !== 'string') return false;
+  const base = typeof request.system === 'string' ? request.system : '';
+  const expected = base === '' ? contextText : base + CCV2_SYSTEM_SEPARATOR_V1 + contextText;
+  return derived.system === expected && derived.system.length > base.length && derived.system.startsWith(base);
+}
+// The native tail survives by reference, in order, nothing added.
+function nativeTailPreservedV2(request, derived, boundary) {
+  const expected = request.messages.slice(boundary.anchorIndex);
+  if (!Array.isArray(derived.messages) || derived.messages.length !== expected.length) return false;
+  return expected.every((message, index) => derived.messages[index] === message);
+}
 async function completeOpencodeProjectionV2(staged) {
   const request = staged.request;
   const diag = {
     bindingFound: staged.bindingFound === true, checkpointFound: staged.checkpointFound === true,
     sessionSourceAvailable: staged.sessionSourceAvailable, compilerExecutions: 0,
+    nativeTailMessages: staged.nativeTailMessages, nativePrefixMessages: staged.nativePrefixMessages,
   };
   const fallback = (reason, stage) => legacyHostResult(request, reason, stage, diag);
   try {
+    const boundary = staged.boundary;
+    // The exact-count authority: the pinned Responses wire projection of
+    // the FINAL hybrid request (built by the same builder that builds the
+    // sent request). Counting context and appending the tail later is
+    // impossible by construction.
+    const wire = Object.freeze({
+      project: (contextText) => wireV2.projectResponsesWireV2({
+        request: buildDerivedRequestV2(request, boundary.tail, contextText, null),
+        route: staged.wireRoute,
+      }),
+    });
     const decision = await opencodeV2.attemptOpencodeActiveV2({
       compileInput: staged.compileInput,
       pages: staged.pages,
@@ -429,6 +526,7 @@ async function completeOpencodeProjectionV2(staged) {
       // The host reports ONE final decision per request (below), so a
       // later host-side rejection can never follow a "compiled" event.
       telemetrySink: null,
+      wire,
     });
     diag.compilerExecutions = decision.compilerExecutions === 1 ? 1 : 0;
     if (decision.eligible !== true) {
@@ -437,28 +535,47 @@ async function completeOpencodeProjectionV2(staged) {
       diag.counterTelemetry = isPlainObject(decision.counterTelemetry) ? decision.counterTelemetry : null;
       return fallback(decision.fallbackReason, 'attempt');
     }
-    const compiledUserText = decision.render.messagePlan
-      .filter((message) => message.role === 'user')
-      .map((message) => message.text)
-      .join(String.fromCharCode(10));
-    if (sha256HexUtf8(compiledUserText) !== staged.liveTurnHash) {
+    // Current turn exactly once: natively in the tail (anchor), never in
+    // the compiled context.
+    const render = decision.render;
+    if (render.roleContract !== rendererV2.RENDER_ROLE_CONTRACT_CONTEXT_ONLY_V2
+      || render.messagePlan.some((message) => message.role !== 'system')
+      || !isPlainObject(render.nativeTurn) || render.nativeTurn.contentHash !== staged.liveTurnHash
+      || typeof decision.contextText !== 'string' || decision.contextText === '') {
       return fallback('active-current-turn-invalid', 'compiled-turn');
     }
-    const compiledMessages = decision.render.messagePlan.map((message, ordinal) => Object.freeze({
-      id: 'ccv2-c' + ordinal,
-      role: message.role,
-      content: Object.freeze([Object.freeze({ type: 'text', text: message.text })]),
-      source: Object.freeze({ kind: 'ccv2-compiled', viewId: decision.view.id }),
-    }));
-    const derived = deriveCompiledRequestV2(request, compiledMessages, {
+    // Defense in depth over the structural overlap proof (staged call ids
+    // and message hashes, extractActiveTailV2): no tail call id may appear
+    // in a producer tool-call header inside the compiled context.
+    for (const callId of boundary.tailCallIds) {
+      if (decision.contextText.indexOf('id=' + callId + ']') !== -1) return fallback('active-native-tail-overlap', 'native-tail');
+    }
+    const derived = buildDerivedRequestV2(request, boundary.tail, decision.contextText, {
       projectionMode: 'CCV2_COMPILED',
       ccv2ViewId: decision.view.id,
-      ccv2RenderDigest: decision.render.renderDigest,
+      ccv2RenderDigest: render.renderDigest,
       ccv2Authority: 'REMOTE_MUSE_PRECOUNT',
       ccv2PreCount: decision.preCount,
       ccv2Margin: decision.providerSafetyMargin,
+      ccv2WireRevision: wireV2.RESPONSES_WIRE_REVISION_V1,
+      ccv2NativeTailMessages: boundary.tail.length,
     });
     if (!envelopeUnchangedV2(request, derived)) return fallback('active-request-binding-changed', 'envelope');
+    if (!systemPrefixProvenV2(request, derived, decision.contextText)) return fallback('active-request-binding-changed', 'envelope');
+    if (!nativeTailPreservedV2(request, derived, boundary)) return fallback('active-native-tail-invalid', 'native-tail');
+    // Counted == sent: the final derived request (markers included)
+    // projects to exactly the body that was counted.
+    let finalProjection = null;
+    try {
+      finalProjection = wireV2.projectResponsesWireV2({ request: derived, route: staged.wireRoute });
+    } catch (error) {
+      void error;
+      return fallback('active-native-tail-unprojectable', 'native-tail');
+    }
+    if (JSON.stringify(finalProjection.countedBody) !== JSON.stringify(decision.inferenceBody)
+      || JSON.stringify(finalProjection.wireBody) !== JSON.stringify(decision.wireBody)) {
+      return fallback('active-request-binding-changed', 'envelope');
+    }
     const telemetry = Object.freeze(Object.assign({}, decision.telemetry, {
       projectionMode: 'CCV2_COMPILED',
       fallbackReason: null,
@@ -466,6 +583,9 @@ async function completeOpencodeProjectionV2(staged) {
       compilerExecutions: 1,
       bindingFound: true,
       checkpointFound: true,
+      nativeTailMessages: boundary.tail.length,
+      nativePrefixMessages: boundary.prefixLength,
+      nativeTailSkip: null,
     }));
     return Object.freeze({
       mode: 'CCV2_COMPILED',
@@ -575,6 +695,7 @@ async function runPrewarmV2(safeDeps, staged) {
       const fresh = applyOpencodeProjectionV2({
         request: staged.request,
         policy: { mode: 'active', valid: true },
+        installRoot: safeDeps.installRoot,
         bindingsPath: safeDeps.bindingsPath,
         sessionSourceFor: safeDeps.sessionSourceFor,
         metaApiKey: safeDeps.metaApiKey,
@@ -589,7 +710,11 @@ async function runPrewarmV2(safeDeps, staged) {
     } catch (error) {
       void error;
     }
+    // Pre-warm seeds only the per-text memo counts of the context-only
+    // compilation; the whole-payload counts (reserve + final) carry the
+    // live native tail and are always counted at request time.
     const texts = museV2.enumerateMusePrewarmTextsV2({
+      contextOnly: true,
       compileInput: source.compileInput,
       pages: source.pages,
       requestTerms: {
@@ -678,6 +803,7 @@ function createOpencodeProjectionStreamListenerV2(deps) {
       staged = applyOpencodeProjectionV2({
         request,
         policy: { mode: 'active', valid: true },
+        installRoot: safeDeps.installRoot,
         bindingsPath: safeDeps.bindingsPath,
         sessionSourceFor: safeDeps.sessionSourceFor,
         metaApiKey: safeDeps.metaApiKey,
@@ -892,6 +1018,9 @@ function installOpencodeActiveProjection(ctx, deps) {
 module.exports = {
   HOST_SCHEMA_VERSION,
   OPENCODE_REQUEST_SHAPE_V1,
+  OPENCODE_REQUEST_SHAPE_V2,
+  CCV2_SYSTEM_SEPARATOR_V1,
+  PROJECTION_OWNED_KEYS,
   MARGIN_POLICY_REVISION_V1,
   OUTPUT_RESERVE_POLICY_REVISION_V1,
   CANARY_SUITE_REVISION_V1,

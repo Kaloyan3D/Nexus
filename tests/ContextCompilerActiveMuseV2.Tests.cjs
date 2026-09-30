@@ -186,6 +186,37 @@ section('C08M-MU-1 REMOTE SUCCESS (two-pass exact)');
       requestTerms: { systemText: SYSTEM, turnText: TURN, maxTokens: 512, outputReserve: 512, reasoningEffort: 42 },
     }));
     check(badReasoning.eligible === false, 'invalid reasoning effort fails closed');
+    // ACTIVE-TAIL-NATIVE mode: the host wire projection is the counted body.
+    const projectedWith = [];
+    const fakeWire = { project: (contextText) => {
+      projectedWith.push(contextText);
+      const body = { model: MODEL, input: [{ role: 'developer', content: SYSTEM + (contextText === '' ? '' : '\n\n' + contextText) }, { role: 'user', content: [{ type: 'input_text', text: TURN }] }], max_output_tokens: 512 };
+      return { countedBody: body, wireBody: Object.assign({ stream: true }, body), facts: { functionCalls: 0, reasoningItems: 0 } };
+    } };
+    const payloadBodies = [];
+    const tailTransport = { postJson: async (req) => {
+      const parsed = JSON.parse(req.bodyJson);
+      if (Array.isArray(parsed.input)) payloadBodies.push(parsed);
+      return { status: 200, bodyText: JSON.stringify({ object: 'response.input_tokens', input_tokens: 1 + (Buffer.byteLength(req.bodyJson) % 97) }) };
+    } };
+    const tail = await muse.attemptMuseActiveV2(attemptInput(tailTransport, { wire: fakeWire }));
+    check(tail.eligible === true && tail.render.roleContract === 'render-roles-context-only-native-tail-v2' && typeof tail.contextText === 'string'
+      && tail.contextText !== '' && tail.contextText.indexOf(TURN) === -1, 'tail mode: context-only render, current turn never in context', JSON.stringify([tail.fallbackReason, tail.failureStage]));
+    check(projectedWith.length === 2 && projectedWith[0] === '' && projectedWith[1] === tail.contextText, 'tail mode: reserve projects without context, final projects the exact rendered context');
+    // The counter transport serializes canonically (sorted keys); compare the
+    // same way (JSON object key order carries no tokens).
+    const canon = (value) => JSON.stringify(checkpoint.canonicalize(value));
+    check(payloadBodies.length === 2 && canon(payloadBodies[1].input) === canon(tail.inferenceBody.input) && canon(payloadBodies[0].input) !== canon(payloadBodies[1].input),
+      'tail mode: the final whole-payload count IS the projected hybrid body');
+    const withTools = await muse.attemptMuseActiveV2(attemptInput(ruleCounter(byteRule), {
+      wire: fakeWire, requestTerms: { systemText: SYSTEM, turnText: TURN, maxTokens: 512, outputReserve: 512, toolsJson: '[]' },
+    }));
+    check(withTools.eligible === false && withTools.failureStage === 'attempt-shape', 'tail mode: a second tool term is rejected (tools live in the wire body)');
+    const noProject = await muse.attemptMuseActiveV2(attemptInput(ruleCounter(byteRule), { wire: {} }));
+    check(noProject.eligible === false && noProject.failureStage === 'attempt-shape', 'tail mode: wire without project() is rejected');
+    const refusing = await muse.attemptMuseActiveV2(attemptInput(ruleCounter(byteRule), { wire: { project: () => { throw new Error('context-wire-unsupported-content: image'); } } }));
+    check(refusing.eligible === false && refusing.fallbackReason === 'active-native-tail-unprojectable' && refusing.failureStage === 'wire-projection' && refusing.compilerExecutions === 0,
+      'tail mode: projector refusal is a typed pre-compile fallback');
   })().then(() => {
     sectionsTwo();
   }).catch((error) => { console.error(error); process.exitCode = 1; });

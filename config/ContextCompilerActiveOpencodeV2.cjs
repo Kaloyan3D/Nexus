@@ -151,7 +151,7 @@ function ineligibleOpencode(reason, health, extra, failure) {
 }
 function checkAttemptShapeV2(input) {
   if (!isPlainObject(input)) return 'input must be an object';
-  const allowed = ['compileInput', 'pages', 'metaRemoteCounter', 'requestTerms', 'binding', 'retrievalRequest', 'compressionPolicyRevision', 'packingPolicyRevision', 'layoutPolicyRevision', 'getCurrentRevision', 'telemetrySink'];
+  const allowed = ['compileInput', 'pages', 'metaRemoteCounter', 'requestTerms', 'binding', 'retrievalRequest', 'compressionPolicyRevision', 'packingPolicyRevision', 'layoutPolicyRevision', 'getCurrentRevision', 'telemetrySink', 'wire'];
   for (const key of Object.keys(input)) {
     if (allowed.indexOf(key) === -1) return 'unknown key ' + String(key).slice(0, 64);
   }
@@ -203,6 +203,9 @@ async function attemptOpencodeActiveV2(input) {
       layoutPolicyRevision: input.layoutPolicyRevision,
       getCurrentRevision: input.getCurrentRevision === undefined ? null : input.getCurrentRevision,
       telemetrySink: null,
+      // ACTIVE-TAIL-NATIVE: the host-owned wire projection of the final
+      // hybrid request is the counted body (absent = legacy text body).
+      wire: input.wire === undefined ? null : input.wire,
     });
     if (inner.eligible !== true) {
       const failureStage = typeof inner.failureStage === 'string' ? inner.failureStage : 'unexpected';
@@ -266,6 +269,8 @@ async function attemptOpencodeActiveV2(input) {
       preCount: inner.preCount,
       providerSafetyMargin: margin,
       inferenceBody: inner.inferenceBody,
+      wireBody: inner.wireBody === undefined ? null : inner.wireBody,
+      contextText: inner.contextText === undefined ? null : inner.contextText,
       binding: Object.freeze(deepClone(binding)),
       compilerExecutions: 1,
       authorityHealth: health,

@@ -35,6 +35,13 @@
  *     historical/state context; never impersonates the user)
  *   referenced COLD markers             -> role 'system'
  * Historical user content therefore never reaches a user-role message.
+ *
+ * Role contract RENDER_ROLE_CONTRACT_CONTEXT_ONLY_V2 (ACTIVE-TAIL-NATIVE):
+ * the render is context-only. The current-turn entry is carried by the
+ * live request's native tail, so it is bound (nativeTurn: sourceId +
+ * contentHash, exactly one) but never rendered, and its mandatory ref is
+ * satisfied by that binding; every rendered segment is role 'system'. The
+ * host appends the single context message to the DSH system slot.
  * The host places these messages after the DSH-owned stable
  * system/controller prefix and before/around no other context: the
  * compiled projection replaces the legacy bulk region atomically.
@@ -67,6 +74,12 @@ const RENDER_SEGMENT_DIGEST_DOMAIN_V1 = 'nexus/context-prompt-segment/v1';
 // model-facing bytes and are counted into renderOverheadTokens.
 const RENDER_SEPARATOR_V1 = String.fromCharCode(10);
 const RENDER_ROLE_CONTRACT_V1 = 'render-roles-system-current-turn-v1';
+const RENDER_REVISION_CONTEXT_ONLY_V2 = 'context-prompt-render-v2-context-only';
+const RENDER_ROLE_CONTRACT_CONTEXT_ONLY_V2 = 'render-roles-context-only-native-tail-v2';
+const RENDER_CONTRACTS = Object.freeze({
+  [RENDER_ROLE_CONTRACT_V1]: RENDER_REVISION_V1,
+  [RENDER_ROLE_CONTRACT_CONTEXT_ONLY_V2]: RENDER_REVISION_CONTEXT_ONLY_V2,
+});
 
 // Reference-marker contract for referenced-only COLD pages:
 // '[ccv2-ref:<pageId>:<contentHash[0..16)>]'. Deterministic, typed,
@@ -97,6 +110,8 @@ const RENDER_EXACT_KEYS = Object.freeze([
   'renderDigest',
   'disposable',
 ]);
+// Context-only (v2) renders additionally bind the natively carried turn.
+const RENDER_EXACT_KEYS_CONTEXT_ONLY_V2 = Object.freeze(RENDER_EXACT_KEYS.concat(['nativeTurn']));
 
 const SEGMENT_EXACT_KEYS = Object.freeze([
   'ordinal',
@@ -193,10 +208,17 @@ function indexViewEntriesV2(view) {
 function renderContextPromptV2(input) {
   if (!isPlainObject(input)) failRender('render-input-invalid', 'render input must be an object');
   for (const key of Object.keys(input)) {
-    if (['view', 'layout', 'counter', 'rendererPolicyRevision'].indexOf(key) === -1) {
+    if (['view', 'layout', 'counter', 'rendererPolicyRevision', 'roleContract'].indexOf(key) === -1) {
       failRender('render-input-invalid', 'unknown render input key ' + String(key).slice(0, 64));
     }
   }
+  const roleContract = input.roleContract === undefined ? RENDER_ROLE_CONTRACT_V1 : input.roleContract;
+  if (!Object.prototype.hasOwnProperty.call(RENDER_CONTRACTS, roleContract)) {
+    failRender('render-input-invalid', 'unknown role contract');
+  }
+  const contextOnly = roleContract === RENDER_ROLE_CONTRACT_CONTEXT_ONLY_V2;
+  const rendererRevision = RENDER_CONTRACTS[roleContract];
+  const nativeTurns = [];
   const view = input.view;
   const layout = input.layout;
   const counter = input.counter;
@@ -219,10 +241,13 @@ function renderContextPromptV2(input) {
   const evidenceMap = [];
   let currentTurnSegments = 0;
 
-  layout.blocks.forEach((block, index) => {
-    if (!isPlainObject(block) || block.ordinal !== index) {
+  layout.blocks.forEach((block, blockIndex) => {
+    if (!isPlainObject(block) || block.ordinal !== blockIndex) {
       failRender('layout-order-invalid', 'layout block ordinals must be dense from zero');
     }
+    // Segment ordinals stay dense over EMITTED segments (context-only
+    // renders skip the natively carried turn).
+    const index = segments.length;
     let text = null;
     let role = 'system';
     if (block.memberKind === 'materialized') {
@@ -248,6 +273,10 @@ function renderContextPromptV2(input) {
       if (entry.sourceType === 'current-turn') {
         role = 'user';
         currentTurnSegments += 1;
+        if (contextOnly) {
+          nativeTurns.push(Object.freeze({ sourceId: entry.sourceId, contentHash: entry.contentHash }));
+          return;
+        }
       }
     } else if (block.memberKind === 'reference') {
       const ref = indexed.referencesByPage.get(block.sourceId);
@@ -277,7 +306,7 @@ function renderContextPromptV2(input) {
       contentHash: block.contentHash,
       representationKind: block.representationKind,
       textHash,
-      rendererRevision: RENDER_REVISION_V1,
+      rendererRevision,
     });
     segments.push(Object.freeze({
       ordinal: index,
@@ -310,6 +339,10 @@ function renderContextPromptV2(input) {
   if (currentTurnSegments !== 1) {
     failRender('current-turn-invalid', 'render carries ' + currentTurnSegments + ' current-turn segments, exactly one required');
   }
+  if (contextOnly && segments.length === 0) {
+    failRender('context-empty', 'context-only render carries no context segment');
+  }
+  const nativeTurn = contextOnly ? nativeTurns[0] : null;
 
   // Mandatory preservation: every C01 mandatoryRef must be bound by a
   // rendered segment with the same source identity and shown hash.
@@ -318,6 +351,7 @@ function renderContextPromptV2(input) {
     if (!isPlainObject(ref) || typeof ref.sourceId !== 'string' || typeof ref.contentHash !== 'string') {
       failRender('mandatory-invalid', 'mandatory manifest entry is malformed');
     }
+    if (nativeTurn !== null && ref.sourceId === nativeTurn.sourceId && ref.contentHash === nativeTurn.contentHash) continue;
     if (!segmentKeys.has(ref.sourceId + '\n' + ref.contentHash)) {
       failRender('mandatory-missing', 'mandatory member absent from the physical render');
     }
@@ -406,9 +440,9 @@ function renderContextPromptV2(input) {
     failRender('accounting-mismatch', 'message plan does not reconstruct the joined render');
   }
 
-  const renderDigest = deriveRenderDigestV2({
-    rendererRevision: RENDER_REVISION_V1,
-    roleContract: RENDER_ROLE_CONTRACT_V1,
+  const digestFields = {
+    rendererRevision,
+    roleContract,
     separatorContract: RENDER_SEPARATOR_V1,
     sourceViewId: view.id,
     sourceViewDigest: view.viewDigest,
@@ -425,12 +459,14 @@ function renderContextPromptV2(input) {
       contentHash: segment.contentHash,
       segmentDigest: segment.segmentDigest,
     })),
-  });
+  };
+  if (contextOnly) digestFields.nativeTurn = nativeTurn;
+  const renderDigest = deriveRenderDigestV2(digestFields);
 
-  return Object.freeze({
+  const render = {
     schemaVersion: RENDER_SCHEMA_VERSION,
-    rendererRevision: RENDER_REVISION_V1,
-    roleContract: RENDER_ROLE_CONTRACT_V1,
+    rendererRevision,
+    roleContract,
     separatorContract: RENDER_SEPARATOR_V1,
     sourceViewId: view.id,
     sourceViewDigest: view.viewDigest,
@@ -447,7 +483,9 @@ function renderContextPromptV2(input) {
     evidenceMap: Object.freeze(evidenceMap),
     renderDigest,
     disposable: true,
-  });
+  };
+  if (contextOnly) render.nativeTurn = nativeTurn;
+  return Object.freeze(render);
 }
 
 /**
@@ -459,12 +497,21 @@ function validateContextRenderV2(render) {
   const invalid = (reason) => ({ valid: false, reason });
   try {
     if (!isPlainObject(render)) return invalid('context-render-invalid');
+    if (!Object.prototype.hasOwnProperty.call(RENDER_CONTRACTS, render.roleContract)) return invalid('context-render-invalid');
+    const contextOnly = render.roleContract === RENDER_ROLE_CONTRACT_CONTEXT_ONLY_V2;
+    const exactKeys = contextOnly ? RENDER_EXACT_KEYS_CONTEXT_ONLY_V2 : RENDER_EXACT_KEYS;
     for (const key of Object.keys(render)) {
-      if (RENDER_EXACT_KEYS.indexOf(key) === -1) return invalid('context-render-invalid');
+      if (exactKeys.indexOf(key) === -1) return invalid('context-render-invalid');
     }
     if (render.schemaVersion !== RENDER_SCHEMA_VERSION) return invalid('context-render-invalid');
-    if (render.rendererRevision !== RENDER_REVISION_V1) return invalid('context-render-invalid');
-    if (render.roleContract !== RENDER_ROLE_CONTRACT_V1) return invalid('context-render-invalid');
+    if (render.rendererRevision !== RENDER_CONTRACTS[render.roleContract]) return invalid('context-render-invalid');
+    if (contextOnly) {
+      const native = render.nativeTurn;
+      if (!isPlainObject(native) || typeof native.sourceId !== 'string' || typeof native.contentHash !== 'string'
+        || !HEX64_PATTERN.test(native.contentHash)) {
+        return invalid('context-render-invalid');
+      }
+    }
     if (render.separatorContract !== RENDER_SEPARATOR_V1) return invalid('context-render-invalid');
     if (typeof render.sourceViewId !== 'string' || typeof render.sourceViewDigest !== 'string'
       || typeof render.layoutDigest !== 'string' || typeof render.tokenizerFingerprint !== 'string') {
@@ -488,8 +535,9 @@ function validateContextRenderV2(render) {
         contentHash: segment.contentHash,
         representationKind: segment.representationKind,
         textHash: segment.textHash,
-        rendererRevision: RENDER_REVISION_V1,
+        rendererRevision: render.rendererRevision,
       });
+      if (contextOnly && segment.role !== 'system') return invalid('context-render-invalid');
       if (recomputed !== segment.segmentDigest) return invalid('context-render-digest-mismatch');
       if (sha256HexUtf8(segment.text) !== segment.textHash) return invalid('context-render-digest-mismatch');
       if (sha256HexUtf8(segment.text) !== segment.contentHash && segment.memberKind === 'materialized') {
@@ -506,7 +554,7 @@ function validateContextRenderV2(render) {
     if (!Array.isArray(render.evidenceMap) || render.evidenceMap.length !== render.segments.length) {
       return invalid('context-render-invalid');
     }
-    const recomputed = deriveRenderDigestV2({
+    const digestFields = {
       rendererRevision: render.rendererRevision,
       roleContract: render.roleContract,
       separatorContract: render.separatorContract,
@@ -525,7 +573,9 @@ function validateContextRenderV2(render) {
         contentHash: segment.contentHash,
         segmentDigest: segment.segmentDigest,
       })),
-    });
+    };
+    if (contextOnly) digestFields.nativeTurn = { sourceId: render.nativeTurn.sourceId, contentHash: render.nativeTurn.contentHash };
+    const recomputed = deriveRenderDigestV2(digestFields);
     if (recomputed !== render.renderDigest) return invalid('context-render-digest-mismatch');
     if (typeof render.joinedText !== 'string') return invalid('context-render-invalid');
     for (const field of ['segmentTokens', 'separatorOverheadTokens', 'referenceMarkerTokens', 'renderedTokens']) {
@@ -573,6 +623,8 @@ module.exports = {
   RENDER_SEGMENT_DIGEST_DOMAIN_V1,
   RENDER_SEPARATOR_V1,
   RENDER_ROLE_CONTRACT_V1,
+  RENDER_REVISION_CONTEXT_ONLY_V2,
+  RENDER_ROLE_CONTRACT_CONTEXT_ONLY_V2,
   REFERENCE_MARKER_PREFIX_V1,
   REFERENCE_MARKER_SUFFIX_V1,
   RENDER_EXACT_KEYS,

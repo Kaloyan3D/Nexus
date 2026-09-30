@@ -323,5 +323,32 @@ section('C08-RENDER-7 COMPRESSED RUNGS RENDER (EXTRACTIVE/STRUCTURED)');
   check(render.renderedTokens === render.segmentTokens + render.separatorOverheadTokens + render.boundaryDeltaTokens, 'accounting exact on compressed rungs');
 }
 
+section('C08-RENDER-8 CONTEXT-ONLY CONTRACT (ACTIVE-TAIL-NATIVE)');
+{
+  const { view, layout } = pipeline({ hardMax: 60000, target: 50000 });
+  const v1 = renderer.renderContextPromptV2({ view, layout, counter: CTR() });
+  const v2 = renderer.renderContextPromptV2({ view, layout, counter: CTR(), roleContract: renderer.RENDER_ROLE_CONTRACT_CONTEXT_ONLY_V2 });
+  check(v2.roleContract === renderer.RENDER_ROLE_CONTRACT_CONTEXT_ONLY_V2 && v2.rendererRevision === renderer.RENDER_REVISION_CONTEXT_ONLY_V2, 'context-only render carries its own contract + revision');
+  check(v2.segments.every((seg) => seg.role === 'system') && v2.segments.every((seg) => seg.text !== TURN) && v2.joinedText.indexOf(TURN) === -1,
+    'current turn is never rendered into context (it travels in the native tail)');
+  check(v2.messagePlan.length === 1 && v2.messagePlan[0].role === 'system', 'context-only plan is exactly one system context message');
+  const turnSeg = v1.segments.find((seg) => seg.role === 'user');
+  check(v2.nativeTurn !== undefined && v2.nativeTurn.sourceId === turnSeg.sourceId && v2.nativeTurn.contentHash === turnSeg.contentHash,
+    'the natively carried turn is bound by source identity + content hash');
+  check(v2.segments.length === v1.segments.length - 1 && v2.segments.every((seg, i) => seg.ordinal === i), 'segment ordinals stay dense over emitted segments');
+  check(v2.joinedText === v1.segments.filter((seg) => seg.role !== 'user').map((seg) => seg.text).join(renderer.RENDER_SEPARATOR_V1),
+    'context bytes are exactly the v1 context segments (no invented bytes)');
+  check(renderer.validateContextRenderV2(v2).valid === true && renderer.validateContextRenderV2(v1).valid === true, 'both contracts validate');
+  check(v1.nativeTurn === undefined && renderer.RENDER_EXACT_KEYS.indexOf('nativeTurn') === -1, 'v1 renders are unchanged (no nativeTurn key)');
+  check(v2.renderDigest !== v1.renderDigest, 'contract is digest-bound');
+  const tamperedTurn = Object.assign({}, v2, { nativeTurn: { sourceId: v2.nativeTurn.sourceId, contentHash: '0'.repeat(64) } });
+  check(renderer.validateContextRenderV2(tamperedTurn).valid === false, 'a forged native-turn binding fails validation');
+  const userSeg = Object.assign({}, v2, { segments: v2.segments.map((seg, i) => (i === 0 ? Object.assign({}, seg, { role: 'user' }) : seg)) });
+  check(renderer.validateContextRenderV2(userSeg).valid === false, 'a user-role segment in a context-only render fails validation');
+  let unknown = false;
+  try { renderer.renderContextPromptV2({ view, layout, counter: CTR(), roleContract: 'bogus' }); } catch (e) { unknown = /render-input-invalid/.test(e.message); }
+  check(unknown === true, 'unknown role contract fails closed');
+}
+
 console.log(String.fromCharCode(10) + 'ContextPromptRendererV2 suite: ' + passed + ' passed, ' + failed + ' failed');
 if (failed > 0) process.exitCode = 1;

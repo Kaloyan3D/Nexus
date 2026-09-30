@@ -3,6 +3,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
 const crypto = require('node:crypto');
+const http = require('node:http');
 const repoRoot = path.resolve(__dirname, '..');
 const checkpoint = require(path.join(repoRoot, 'config', 'ContextCheckpointV2.cjs'));
 const snapshotMod = require(path.join(repoRoot, 'config', 'ContextSnapshotV2.cjs'));
@@ -27,6 +28,16 @@ const TURN_TEXT = 'Run the OpenCode host turn.';
 const SYSTEM_TEXT = 'You are the Nexus host-contract system prompt.';
 const PROVIDER = 'opencode-go';
 const MODEL = 'muse-spark-1.3-contributor';
+// The production opencode-go llm-pi-ai profile, verbatim from this repo's
+// settings.yaml (the host resolves the Responses wire route from it).
+const OPENCODE_PROFILE_BLOCK = (() => {
+  const lines = fs.readFileSync(path.join(repoRoot, 'config', 'settings.yaml'), 'utf8').split(String.fromCharCode(10));
+  const start = lines.indexOf('    opencode-go:');
+  const out = [lines[start]];
+  for (let index = start + 1; index < lines.length && (lines[index].startsWith('      ') || lines[index].trim() === ''); index += 1) out.push(lines[index]);
+  while (out[out.length - 1].trim() === '') out.pop();
+  return out.join(String.fromCharCode(10));
+})();
 function makeFixtureRoot(policySection) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'c08oh-root-'));
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'c08oh-ws-'));
@@ -38,9 +49,7 @@ function makeFixtureRoot(policySection) {
   fs.writeFileSync(path.join(root, 'config', 'routing-policy.json'), JSON.stringify(policy));
   fs.writeFileSync(path.join(root, 'data', 'routing', 'session-bindings.json'), JSON.stringify({ schemaVersion: 1, bindings: {} }));
   fs.writeFileSync(path.join(root, 'config', 'settings.yaml'), [
-    'llm-pi-ai:', '  providers:', '    opencode-go:',
-    '      apiKeyEnv: OPENCODE_API_KEY', '      api: openai-responses',
-    '      baseURL: https://opencode.ai/zen/go/v1', '    meta-model-api:',
+    'llm-pi-ai:', '  providers:', OPENCODE_PROFILE_BLOCK, '    meta-model-api:',
     '      apiKeyEnv: MODEL_API_KEY', '      api: openai-completions',
     '      baseURL: https://api.meta.ai/v1', '',
   ].join(String.fromCharCode(10)));
@@ -134,7 +143,25 @@ function stageMemoryH(fx) {
   ];
   fs.writeFileSync(path.join(memDir, 'tier-decisions.json'), JSON.stringify(decisions));
   fs.writeFileSync(path.join(memDir, 'tool-transactions.json'), JSON.stringify([{ pageId: TOOL.id, callId: 'call-h7', callSeq: 7, resultSeq: 8 }]));
+  COVER_DIR = memDir;
   return { CP, memDir };
+}
+// Producer coverage for one live request (what M01 stages): every message
+// before the anchor is historically covered; the open turn's activeTurn is
+// anchored on `anchorIndex` (default: the last message, i.e. the turn's
+// first model-visible message with nothing after it yet).
+const messageHashH = (message) => sha(JSON.stringify(checkpoint.canonicalize(clone(message))));
+let COVER_DIR = null;
+function coverRequestH(memDir, request, anchorIndex) {
+  const messages = request.messages;
+  const at = anchorIndex === undefined ? messages.length - 1 : anchorIndex;
+  const anchorHash = messageHashH(messages[at]);
+  fs.writeFileSync(path.join(memDir, 'coverage.json'), JSON.stringify({
+    schemaVersion: 1, processedThroughSeq: 100 + messages.length, sealedCheckpointId: null,
+    currentTurnMessageHash: anchorHash,
+    messageHashes: messages.slice(0, at).map(messageHashH).sort(),
+    activeTurn: { turn: 2, turnStartSeq: 100, anchorSeq: 101, anchorMessageHash: anchorHash, processedThroughSeq: 100 + messages.length },
+  }));
 }
 function liveRequestH(sessionId, turnText, extra) {
   const base = {
@@ -152,7 +179,7 @@ function liveRequestH(sessionId, turnText, extra) {
 function bindingsPathOf(fx) { return path.join(fx.root, 'data', 'routing', 'session-bindings.json'); }
 function storeRootOf(fx) { return path.join(fx.root, 'data', 'ccv2-authority'); }
 function snapshotOf(request) { return JSON.stringify(checkpoint.canonicalize(clone(request))); }
-function wipe(fx) { fs.rmSync(fx.root, { recursive: true, force: true }); fs.rmSync(fx.workspace, { recursive: true, force: true }); }
+function wipe(fx) { COVER_DIR = null; fs.rmSync(fx.root, { recursive: true, force: true }); fs.rmSync(fx.workspace, { recursive: true, force: true }); }
 function mockRemoteCounter(rule) {
   return {
     fingerprint: remote.REMOTE_FINGERPRINT_V1,
@@ -224,6 +251,10 @@ async function runProjectionH(listener, request) {
   let nextCalls = 0;
   const nextStream = fakeChunks('legacy');
   const runtime = { stream: (derived) => { dispatched.push(derived); return fakeChunks('compiled'); } };
+  if (COVER_DIR !== null && request !== null && typeof request === 'object' && Array.isArray(request.messages) && request.messages.length > 0
+    && !(request.metadata && request.metadata.projectionMode === 'CCV2_COMPILED')) {
+    coverRequestH(COVER_DIR, request);
+  }
   const returned = listener.call(runtime, request, () => { nextCalls += 1; return nextStream; });
   const chunks = await drainH(returned);
   return { dispatched, nextCalls: () => nextCalls, returned, nextStream, chunks };
@@ -281,12 +312,16 @@ section('C08H-OCH-1 STARTUP + llm/stream PROJECTION (production request shape)')
     check(derived.metadata.projectionMode === 'CCV2_COMPILED', 'projectionMode = CCV2_COMPILED');
     check(derived.metadata.ccv2Authority === 'REMOTE_MUSE_PRECOUNT', 'authority marker present');
     check(Number.isInteger(derived.metadata.ccv2PreCount) && Number.isInteger(derived.metadata.ccv2Margin), 'pre-count + margin travel for the usage observer');
-    check(['provider', 'model', 'reasoningEffort', 'maxTokens', 'system', 'tools', 'sessionId', 'signal'].every((key) => derived[key] === request[key]), 'route/reasoning/output cap/system/tools/session/signal carried by reference');
+    check(['provider', 'model', 'reasoningEffort', 'maxTokens', 'tools', 'sessionId', 'signal'].every((key) => derived[key] === request[key]), 'route/reasoning/output cap/tools/session/signal carried by reference');
     check(derived.signal instanceof AbortSignal, 'derived request keeps the live AbortSignal (not a JSON husk)');
     check(Object.keys(derived).filter((k) => k !== 'metadata').sort().join(',') === Object.keys(request).sort().join(','), 'no request key added or dropped besides metadata');
+    check(host.PROJECTION_OWNED_KEYS.join(',') === 'messages,metadata,system', 'projection owns exactly messages, metadata and (append-only) system');
+    check(typeof derived.system === 'string' && derived.system.startsWith(SYSTEM_TEXT + host.CCV2_SYSTEM_SEPARATOR_V1) && derived.system.length > SYSTEM_TEXT.length + 2,
+      'system slot: original system bytes are a strict prefix, then the separator, then compiled context');
     check(Object.isFrozen(derived) && Object.isFrozen(derived.messages), 'derived request is frozen');
-    check(userTurnCount(derived.messages, TURN_TEXT) === 1, 'current user turn exists exactly once');
-    check(JSON.stringify(derived.messages).indexOf(BULK_MARKER) === -1, 'legacy bulk does not survive in the compiled projection');
+    check(derived.messages.length === 1 && derived.messages[0] === request.messages[1], 'native tail (the anchored turn) is the original message object');
+    check(userTurnCount(derived.messages, TURN_TEXT) === 1 && derived.system.indexOf(TURN_TEXT) === -1, 'current user turn exists exactly once (native), never in compiled context');
+    check(JSON.stringify(derived.messages).indexOf(BULK_MARKER) === -1 && derived.system.indexOf(BULK_MARKER) === -1, 'legacy bulk does not survive in the compiled projection');
     check(logs.length === 1, 'exactly one decision event per request');
     const decided = logs[0] || {};
     check(decided.event === 'ccv2-opencode-active-decided' && decided.projectionMode === 'CCV2_COMPILED' && decided.fallbackReason === null, 'decision event: CCV2_COMPILED, fallbackReason null');
@@ -420,6 +455,7 @@ function sectionsOCH3() {
     await sectionOCH4();
     await sectionOCH5();
     await sectionOCH6();
+    await sectionNativeTailMatrix();
     console.log(String.fromCharCode(10) + 'ContextCompilerActiveOpencodeHostV2 suite: ' + passed + ' passed, ' + failed + ' failed');
     if (failed > 0) process.exitCode = 1;
   })().catch((error) => { console.error(error); process.exitCode = 1; });
@@ -443,8 +479,31 @@ function resolveLoopHostH() {
   }
   return null;
 }
+// Minimal OpenAI Responses SSE stream (the events pi-ai 0.82
+// processResponsesStream consumes): one output_item.done per item, then
+// response.completed with usage.
+function responsesSseH(id, items) {
+  const events = [{ type: 'response.created', response: { id, status: 'in_progress', output: [] } }];
+  items.forEach((item, index) => events.push({ type: 'response.output_item.done', output_index: index, item }));
+  events.push({ type: 'response.completed', response: { id, status: 'completed', output: items, usage: { input_tokens: 40, output_tokens: 5, total_tokens: 45 } } });
+  return events.map((event) => 'event: ' + event.type + '\ndata: ' + JSON.stringify(event) + '\n\n').join('');
+}
+const SKILL_ARGS = '{"name":"nexus-engineering-workflow"}';
+const OCH4_SCRIPT = [
+  // turn 1
+  [{ type: 'message', id: 'msg_t1', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'Acknowledged.', annotations: [] }] }],
+  // turn 2, step 1: load the workflow skill (the production loop's first action)
+  [{ type: 'reasoning', id: 'rs_1', summary: [{ type: 'summary_text', text: 'Load the workflow first.' }], encrypted_content: 'ENC-rs_1' },
+    { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'load_skill', arguments: SKILL_ARGS, status: 'completed' }],
+  // turn 2, step 2: continuation + a second tool call
+  [{ type: 'reasoning', id: 'rs_2', summary: [], encrypted_content: 'ENC-rs_2' },
+    { type: 'message', id: 'msg_2', role: 'assistant', phase: 'commentary', status: 'completed', content: [{ type: 'output_text', text: 'Workflow loaded; reading the spec.', annotations: [] }] },
+    { type: 'function_call', id: 'fc_2', call_id: 'call_2', name: 'load_skill', arguments: '{"name":"spec-reader"}', status: 'completed' }],
+  // turn 2, step 3: final answer
+  [{ type: 'message', id: 'msg_3', role: 'assistant', phase: 'final_answer', status: 'completed', content: [{ type: 'output_text', text: 'Implementation plan ready.', annotations: [] }] }],
+];
 async function sectionOCH4() {
-  section('C08H-OCH-4 REAL DSH LOOP (production llm/stream seam, M01 producer, two turns)');
+  section('C08H-OCH-4 REAL DSH LOOP + REAL pi-ai ADAPTER (multi-step active turn, native tail, counted == posted)');
   const liveGate = require(path.join(__dirname, 'Ccv2LiveHostGate.cjs'));
   const found = resolveLoopHostH();
   if (found === null) {
@@ -458,10 +517,12 @@ async function sectionOCH4() {
   const llmMod = appRequire('@deepseek-ai/dsh-llm');
   const SessionStore = appRequire('@deepseek-ai/dsh-session').default;
   const SystemPrompt = appRequire('@deepseek-ai/dsh-system-prompt').default;
-  const ToolRuntime = appRequire('@deepseek-ai/dsh-tools').default;
+  const toolsPackage = appRequire('@deepseek-ai/dsh-tools');
   const agentPackage = appRequire('@deepseek-ai/dsh-agent');
   const AgentLoop = appRequire('@deepseek-ai/dsh-agent-loop').default;
   const Invariants = appRequire('@deepseek-ai/dsh-invariants').default;
+  const piAi = appRequire('@deepseek-ai/dsh-llm-pi-ai');
+  const YAML = appRequire('yaml');
   const { pathToFileURL } = require('node:url');
   const appModules = path.join(found.root, 'app', 'node_modules', '@deepseek-ai');
   const llmInvariant = await import(pathToFileURL(path.join(appModules, 'dsh-llm', 'lib', 'invariant.js')).href);
@@ -469,6 +530,27 @@ async function sectionOCH4() {
   const integrity = require(path.join(repoRoot, 'config', 'Routing-Integrity.cjs'));
   const profiles = require(path.join(repoRoot, 'config', 'Engineering-Profiles.cjs'));
   const producerHost = require(path.join(repoRoot, 'config', 'ContextMemoryProducerHostV2.cjs'));
+  const wire = require(path.join(repoRoot, 'config', 'ContextWireProjectorResponsesV2.cjs'));
+
+  // Local Responses endpoint: captures every posted body, answers the
+  // scripted SSE stream. Nothing leaves the host.
+  const posted = [];
+  const server = http.createServer((req, res) => {
+    let text = '';
+    req.on('data', (chunk) => { text += chunk; });
+    req.on('end', () => {
+      posted.push(text);
+      const items = OCH4_SCRIPT[posted.length - 1] || OCH4_SCRIPT[OCH4_SCRIPT.length - 1];
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(responsesSseH('resp_' + posted.length, items));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const KEY_ENV = 'NEXUS_OCH4_LOCAL_TEST_KEY';
+  process.env[KEY_ENV] = 'och4-local-test-key';
+  const profile = Object.assign({}, YAML.parse(fs.readFileSync(path.join(repoRoot, 'config', 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers[PROVIDER], {
+    baseURL: 'http://127.0.0.1:' + server.address().port + '/v1', apiKeyEnv: KEY_ENV,
+  });
 
   const fx = makeFixtureRoot({ mode: 'active' });
   seedBindingH(fx, NSH.sessionId);
@@ -484,18 +566,31 @@ async function sectionOCH4() {
   const logs = [];
   const entered = [];
   const sent = [];
+  const payloads = [];
+  const counter = mockRemoteCounter(byteRule);
+  const recordingCounter = Object.assign({}, counter, {
+    countPayloadV2: async (shape) => { payloads.push(JSON.stringify(shape)); return counter.countPayloadV2(shape); },
+  });
   let ctx = null;
   try {
     ctx = new Context();
     await ctx.plugin(Invariants);
     await ctx.plugin(llmMod.default);
     await ctx.plugin(llmInvariant);
+    await ctx.plugin(piAi, { providers: { [PROVIDER]: profile } });
     await ctx.plugin(SessionStore);
     await ctx.plugin(SystemPrompt, { persona: 'OCH-4 real loop' });
-    await ctx.plugin(ToolRuntime);
+    await ctx.plugin(toolsPackage.default);
     await ctx.plugin(agentPackage.default);
     await ctx.plugin(AgentLoop, { agents: [] });
     await ctx.plugin(loopInvariant);
+    ctx.tools.register(toolsPackage.defineTool({
+      name: 'load_skill',
+      description: 'Load a named skill.',
+      parameters: { name: { type: 'string', required: true, description: 'Skill name.' } },
+      output: { schema: { type: 'string' }, render: (args, value) => [{ type: 'text', text: value }] },
+      execute: async (args) => (args.name === 'nexus-engineering-workflow' ? 'loaded' : 'spec text'),
+    }));
     integrity.apply(ctx);
     const producer = producerHost.installMemoryProducer(ctx, {
       bindingFor: (id) => (id === NSH.sessionId ? binding : null),
@@ -518,24 +613,15 @@ async function sectionOCH4() {
     const installed = host.installOpencodeActiveProjection(ctx, {
       installRoot: fx.root, bindingsPath: bindingsPathOf(fx), log: (entry) => logs.push(entry),
       sessionSourceFor: producer.registry.sessionSourceFor,
-      metaRemoteCounter: mockRemoteCounter(byteRule),
+      metaRemoteCounter: recordingCounter, prewarm: false,
     });
     check(installed.installed === true, 'production OpenCode installer ran on the real ctx');
     check(opencode.opencodeHealthV2({ provider: PROVIDER, model: MODEL }) === 'HEALTHY', 'startup certification load marks the route HEALTHY');
-    // Terminal transport stub: the adapter boundary (what is actually sent).
-    ctx.on('llm/stream', (options) => {
-      sent.push(options);
-      return (async function* () {
-        yield { type: 'block-start', index: 0, blockType: 'text' };
-        yield { type: 'text-delta', index: 0, text: 'Acknowledged.' };
-        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Acknowledged.' } };
-        yield { type: 'usage', usage: { inputTokens: 5, outputTokens: 2 } };
-        yield { type: 'finish', reason: { kind: 'stop' } };
-      })();
-    }, { global: true });
+    // Records every request reaching the pinned pi-ai adapter.
+    ctx.on('llm/stream', (options, next) => { sent.push(options); return next(); }, { global: true });
     const agent = ctx.agentLoop.create(NSH.sessionId, { provider: PROVIDER, model: MODEL, maxTokens: 2048 });
     const errors = [];
-    ctx.on('agent/error', ({ error }) => { errors.push(String(error && error.message).slice(0, 200)); });
+    ctx.on('agent/error', ({ error }) => { errors.push(String(error && error.message).slice(0, 300)); });
     async function turn(text) {
       const idle = new Promise((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error('OCH-4 loop turn timed out')), 45000);
@@ -548,49 +634,99 @@ async function sectionOCH4() {
       await producer.registry.idle(NSH.sessionId);
     }
     const decisions = () => logs.filter((entry) => entry && entry.event === 'ccv2-opencode-active-decided');
+    const TURN2 = 'OCH-4 turn two: implement the feature.';
 
     // Turn 1: bootstrap. No sealed checkpoint yet -> typed LEGACY, verbatim.
     await turn('OCH-4 turn one: establish the task.');
     check(errors.length === 0, 'turn 1 completes without loop/invariant errors', errors.join(' | '));
-    check(sent.length === 1 && entered.length === 1 && sent[0] === entered[0], 'turn 1 sends the loop-built request verbatim (bootstrap safe)');
+    check(sent.length === 1 && entered.length === 1 && sent[0] === entered[0] && posted.length === 1, 'turn 1 sends the loop-built request verbatim (bootstrap safe)');
     check(llmMod.isAgentLoopRequest(sent[0]), 'turn 1 transport request is the loop-built original');
     check(decisions().length === 1 && decisions()[0].projectionMode === 'LEGACY' && decisions()[0].fallbackStage === 'checkpoint'
       && decisions()[0].bindingFound === true && decisions()[0].checkpointFound === false, 'turn 1 emits a typed checkpoint fallback (not silence)', JSON.stringify(decisions()[0] || null));
     check(producer.registry.describe(NSH.sessionId).sealedGeneration === 1, 'M01 seals native generation 1 at turn/end');
 
-    // Turn 2: usable sealed checkpoint + M01 coverage -> CCV2_COMPILED.
-    await turn('OCH-4 turn two: continue the task.');
-    check(errors.length === 0, 'turn 2 completes without loop/invariant errors', errors.join(' | '));
-    const d2 = decisions()[1] || {};
-    check(d2.projectionMode === 'CCV2_COMPILED', 'turn 2 projectionMode = CCV2_COMPILED', JSON.stringify(d2));
-    check(d2.fallbackReason === null && d2.authority === 'REMOTE_MUSE_PRECOUNT' && d2.authorityHealth === 'HEALTHY' && d2.compilerExecutions === 1,
-      'turn 2 fallbackReason null / REMOTE_MUSE_PRECOUNT / HEALTHY / compilerExecutions 1');
-    check(decisions().length === 2, 'exactly one decision per root request (no duplicate compiler execution)');
-    check(sent.length === 2, 'turn 2 dispatches the adapter exactly once');
-    const original = entered[1];
-    const derived = sent[1];
-    check(entered.length === 3 && entered[2] === derived, 'derived request re-entered the waterfall below every transport guard');
-    check(llmMod.isAgentLoopRequest(original) && !llmMod.isAgentLoopRequest(derived), 'loop-built original replaced by one derived request');
-    check(derived.metadata && derived.metadata.projectionMode === 'CCV2_COMPILED' && derived.metadata.ccv2Authority === 'REMOTE_MUSE_PRECOUNT', 'transport request carries the compiled marker');
-    check(['provider', 'model', 'reasoningEffort', 'maxTokens', 'system', 'tools', 'sessionId', 'signal'].every((key) => derived[key] === original[key]),
-      'provider/model/reasoning/output cap/system/tools/session/signal unchanged (by reference)');
-    check(derived.provider === PROVIDER && derived.model === MODEL && derived.sessionId === NSH.sessionId, 'route and session identity unchanged');
-    check(derived.signal instanceof AbortSignal, 'live AbortSignal reaches the adapter');
-    check(userTurnCount(derived.messages, 'OCH-4 turn two: continue the task.') === 1, 'current user turn exists exactly once');
-    const originalIds = new Set(original.messages.map((m) => m.id));
-    check(derived.messages.every((m) => !originalIds.has(m.id) && m.source && m.source.kind === 'ccv2-compiled'), 'no legacy message survives in the compiled projection');
-    check(original.messages.length >= 3, 'turn 2 legacy request carried the turn-1 bulk', String(original.messages.length));
+    // Turn 2: genuinely multi-step (tool call -> result -> continuation +
+    // tool call -> result -> final answer). Every step compiles.
+    await turn(TURN2);
+    check(errors.length === 0, 'turn 2 completes without loop/invariant errors (real DSH invariants accept the derived system)', errors.join(' | '));
+    const d = decisions().slice(1);
+    check(d.length === 3 && d.every((x) => x.projectionMode === 'CCV2_COMPILED' && x.fallbackReason === null && x.compilerExecutions === 1
+      && x.authority === 'REMOTE_MUSE_PRECOUNT' && x.authorityHealth === 'HEALTHY'),
+      'every step of the multi-step turn compiles (CCV2_COMPILED / REMOTE_MUSE_PRECOUNT / HEALTHY / one execution)', JSON.stringify(d.map((x) => [x.projectionMode, x.fallbackStage, x.nativeTailSkip, x.attemptFailureStage])));
+    check(sent.length === 4 && posted.length === 4, 'one provider send per root request (no duplicate transport)', sent.length + '/' + posted.length);
+    check(entered.length === 7 && decisions().length === 4, 're-entry of each derived request is a no-op (one decision per root request)');
+    check(payloads.length === 6, 'two whole-payload counts per compilation (reserve without context, final hybrid)', String(payloads.length));
+    const steps = [1, 2, 3].map((k) => {
+      const derived = sent[k];
+      const original = entered[entered.indexOf(derived) - 1];
+      return { derived, original, body: JSON.parse(posted[k]), bodyText: posted[k], finalCount: payloads[2 * (k - 1) + 1], decision: d[k - 1] };
+    });
+    const pick = (body) => {
+      const out = {};
+      for (const key of wire.COUNTED_KEYS) if (body[key] !== undefined) out[key] = body[key];
+      return out;
+    };
+    steps.forEach((step, index) => {
+      const tag = 'T-NT-1 step ' + (index + 1) + ': ';
+      const { derived, original } = step;
+      const anchor = original.messages.findIndex((m) => m.role === 'user' && JSON.stringify(m.content).indexOf(TURN2) !== -1);
+      check(llmMod.isAgentLoopRequest(original) && !llmMod.isAgentLoopRequest(derived), tag + 'loop-built original replaced by one derived request');
+      check(anchor > 0 && derived.messages.length === original.messages.length - anchor
+        && derived.messages.every((m, i) => m === original.messages[anchor + i]),
+        tag + 'no historical legacy bulk survives, while the native active tail survives losslessly (same objects, same order)');
+      check(['provider', 'model', 'reasoningEffort', 'maxTokens', 'tools', 'sessionId', 'signal', 'temperature', 'stop'].every((key) => derived[key] === original[key]),
+        tag + 'route/model/tools/reasoning/maxTokens/session/signal preserved by reference');
+      check(derived.signal instanceof AbortSignal && derived.signal === original.signal, tag + 'AbortSignal identity preserved');
+      check(typeof derived.system === 'string' && derived.system.startsWith(original.system + host.CCV2_SYSTEM_SEPARATOR_V1), tag + 'original system bytes are a strict prefix of the derived system');
+      check(step.bodyText.split(TURN2).length === 2 && derived.system.indexOf(TURN2) === -1, tag + 'current user occurs exactly once on the wire, natively');
+      check(step.finalCount === JSON.stringify(pick(step.body)), tag + 'counter input equals the real sent wire body (counted subset, byte-exact)');
+      check(step.decision.nativeTailMessages === derived.messages.length && step.decision.nativePrefixMessages === anchor, tag + 'decision telemetry reports the native tail boundary');
+    });
+    // Step 3 (after two tool steps): full native causal sequence on the wire.
+    const s3 = steps[2];
+    const anchorItem = s3.body.input.findIndex((item) => item.role === 'user' && JSON.stringify(item.content).indexOf(TURN2) !== -1);
+    const after = s3.body.input.slice(anchorItem + 1).map((item) => item.type || item.role);
+    check(JSON.stringify(after.filter((t) => t !== 'user')) === JSON.stringify(['reasoning', 'function_call', 'function_call_output', 'reasoning', 'message', 'function_call', 'function_call_output']),
+      'T-NT-1: native tool_call A, result A, continuation, tool_call B, result B in exact order after the current user', JSON.stringify(after));
+    const calls = s3.body.input.filter((item) => item.type === 'function_call');
+    const outputs = s3.body.input.filter((item) => item.type === 'function_call_output');
+    check(calls.map((c) => c.call_id + '/' + c.id).join(',') === 'call_1/fc_1,call_2/fc_2' && outputs.map((o) => o.call_id + '=' + o.output).join(',') === 'call_1=loaded,call_2=spec text',
+      'T-NT-1: call ids and tool-result correlation survive unchanged');
+    check(s3.body.input.some((item) => item.type === 'reasoning' && item.encrypted_content === 'ENC-rs_1'), 'T-NT-1: provider reasoning replay (encrypted_content) survives');
+    const replayed = s3.derived.messages.find((m) => m.role === 'assistant');
+    check(replayed !== undefined && replayed.source.replayState !== undefined && replayed.source.replayState === s3.original.messages[s3.original.messages.indexOf(replayed)].source.replayState,
+      'T-NT-1: replayState survives by reference');
+    check(s3.derived.system.indexOf('id=call_1]') === -1 && s3.derived.system.indexOf('id=call_2]') === -1 && s3.bodyText.indexOf('[tool-call load_skill id=call_') === -1,
+      'T-NT-1: no native tail transaction is duplicated inside the synthetic context');
+    // T-NT-2: production skill-load loop regression. The request after the
+    // skill load must END with the native call and its "loaded" result.
+    const s2 = steps[1];
+    const tailItems = s2.body.input.slice(s2.body.input.findIndex((item) => item.role === 'user' && JSON.stringify(item.content).indexOf(TURN2) !== -1));
+    const lastCall = tailItems[tailItems.length - 2];
+    const lastOut = tailItems[tailItems.length - 1];
+    check(lastCall.type === 'function_call' && lastCall.call_id === 'call_1' && lastCall.name === 'load_skill' && lastCall.arguments.indexOf('nexus-engineering-workflow') !== -1
+      && lastOut.type === 'function_call_output' && lastOut.call_id === 'call_1' && lastOut.output === 'loaded',
+      'T-NT-2: the skill call and its "loaded" result are the last provider-native items of the next request', JSON.stringify(tailItems.map((i) => i.type || i.role)));
+    check(tailItems.filter((item) => item.role === 'user').length >= 1 && tailItems.findIndex((item) => item.type === 'function_call_output') > tailItems.findIndex((item) => item.role === 'user'),
+      'T-NT-2: the current user precedes the native tool interaction (causal order, not inverted)');
+    check(s2.body.input.filter((item) => item.role === 'developer').length === 1 && s2.body.input[0].role === 'developer'
+      && s2.body.input.every((item) => !(item.role === 'user' && JSON.stringify(item.content).indexOf('[tool-call') !== -1)),
+      'T-NT-2: compiled context travels in the developer slot, never as a user-role transcript');
+    const usage = logs.filter((entry) => entry && entry.event === 'ccv2-opencode-usage-observed');
+    check(usage.length === 3 && usage.every((u) => u.inputTokens === 40 && u.withinMargin === true), 'T-USAGE: real DSH usage observed for every compiled step (pi-ai disjoint counts)', JSON.stringify(usage));
     const text = JSON.stringify(logs);
-    check(text.indexOf('OCH-4 turn one') === -1 && text.indexOf('OCH-4 turn two') === -1 && text.indexOf('Acknowledged.') === -1, 'no prompt or message content in any log line');
+    check(text.indexOf('OCH-4 turn one') === -1 && text.indexOf(TURN2) === -1 && text.indexOf('Acknowledged.') === -1 && text.indexOf('loaded') === -1,
+      'no prompt, message or tool content in any log line');
   } finally {
     if (ctx) await ctx.fiber.dispose().catch(() => {});
+    server.close();
+    delete process.env[KEY_ENV];
     if (previous.home === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous.home;
     if (previous.root === undefined) delete process.env.AIH_INSTALL_ROOT; else process.env.AIH_INSTALL_ROOT = previous.root;
     opencode.resetOpencodeHealthV2();
     wipe(fx);
   }
 }
-
 // ---------------------------------------------------------------------------
 // OCH-1b: blob-backed HOT/WARM exact material (B03 rehydrated evidence). The
 // B03 proof brand is a module-private SYMBOL property; a JSON clone of the
@@ -633,8 +769,9 @@ async function sectionOCH1b() {
   const decided = logs[0] || {};
   check(decided.projectionMode === 'CCV2_COMPILED' && decided.fallbackReason === null && decided.compilerExecutions === 1,
     'request with blob-backed WARM exact material compiles', JSON.stringify({ stage: decided.fallbackStage, attempt: decided.attemptFailureStage, error: decided.attemptErrorClass }));
-  check(run.dispatched.length === 1 && JSON.stringify(run.dispatched[0].messages).indexOf('BLOB-EXACT-EVIDENCE-MARKER') !== -1,
-    'the blob page reaches the compiled projection with its exact bytes');
+  check(run.dispatched.length === 1 && run.dispatched[0].system.indexOf('BLOB-EXACT-EVIDENCE-MARKER') !== -1
+    && JSON.stringify(run.dispatched[0].messages).indexOf('BLOB-EXACT-EVIDENCE-MARKER') === -1,
+    'the blob page reaches the compiled context (system slot) with its exact bytes, never the native tail');
   check(JSON.stringify(logs).indexOf('BLOB-EXACT-EVIDENCE-MARKER') === -1, 'exact evidence bytes never reach the decision log');
   opencode.resetOpencodeHealthV2();
   wipe(fx);
@@ -765,9 +902,12 @@ async function sectionOCH5() {
     const d = run.decisions;
     check(run.sent.length === 2 && d.length === 2 && d.every((x) => x.mount === 'A'), 'owner attempt failure: still one decision per request, other copy silent', JSON.stringify(d.map((x) => [x.mount, x.requestSeq, x.fallbackStage])));
     const t2 = d[1] || {};
-    check(t2.fallbackStage === 'attempt' && t2.attemptFailureStage === 'reserve-count' && t2.fallbackReason === 'active-tokenizer-unavailable',
+    // ACTIVE-TAIL-NATIVE: the reserve is ONE whole-payload count (the mock
+    // serves it); the first per-text count is the enumeration after the
+    // planning pass, so the failure is typed there with one execution.
+    check(t2.fallbackStage === 'attempt' && t2.attemptFailureStage === 'enumeration-count' && t2.fallbackReason === 'active-tokenizer-unavailable',
       'owner attempt failure is typed down to the inner attempt stage', JSON.stringify(t2));
-    check(t2.attemptErrorClass && t2.attemptErrorClass.messageCode === 'remote-counter-http-503' && t2.compilerExecutions === 0,
+    check(t2.attemptErrorClass && t2.attemptErrorClass.messageCode === 'remote-counter-http-503' && t2.compilerExecutions === 1,
       'inner failure carries a structural error code and honest compilerExecutions');
     check(JSON.stringify(run.logs).indexOf('upstream unavailable') === -1 && JSON.stringify(run.logs).indexOf('OCH-5 turn') === -1,
       'no exception free text or message content in any log line');
@@ -921,6 +1061,164 @@ async function sectionOCH6() {
   await globalCounter.countTextsV2(['drift-probe']);
   check(driftTransport.calls === 2, 'after drift the old cached count is not reused as authority');
   check(opencode.opencodeHealthV2({ provider: PROVIDER, model: MODEL }) === 'QUARANTINED', 'existing anomaly quarantine still fires');
+  opencode.resetOpencodeHealthV2();
+  wipe(fx);
+}
+
+// ---------------------------------------------------------------------------
+// T-NT-1 (hermetic) / T-NT-4 fail-closed matrix / T-NT-5 anchor robustness
+// at the production llm/stream seam with fixture memory. Every ambiguity or
+// overlap is a typed LEGACY fallback that returns next() verbatim.
+async function sectionNativeTailMatrix() {
+  section('T-NT-1/T-NT-4/T-NT-5 NATIVE TAIL: hermetic multi-step, fail-closed matrix, anchor robustness');
+  const wire = require(path.join(repoRoot, 'config', 'ContextWireProjectorResponsesV2.cjs'));
+  const fx = makeFixtureRoot({ mode: 'active' });
+  seedBindingH(fx, NSH.sessionId);
+  const { memDir } = stageMemoryH(fx);
+  COVER_DIR = null;
+  cert.certifyOpencodeV2(storeRootOf(fx), host.currentOpencodeIdentityV2({ installRoot: fx.root }).identity, 'f'.repeat(64));
+  host.startupOpencodeAuthorityV2({ storeRoot: storeRootOf(fx), installRoot: fx.root });
+  const route = wire.readResponsesRouteFromSettingsV2(fs.readFileSync(path.join(fx.root, 'config', 'settings.yaml'), 'utf8'), PROVIDER, MODEL);
+  check(route !== null, 'fixture settings resolve the production Responses route');
+  const replay = (blocks, stopReason) => ({ response: { kind: 'pi-ai', version: 2, api: 'openai-responses', provider: PROVIDER, model: MODEL, responseId: 'resp_m', stopReason }, blocks });
+  const src = { kind: 'model', provider: PROVIDER, model: MODEL };
+  const A0 = { id: 'msg-a0', role: 'assistant', content: [{ type: 'text', text: BULK_MARKER + ' history.' }], source: src };
+  const U1 = { id: 'msg-u1', role: 'user', content: [{ type: 'text', text: TURN_TEXT }], source: { kind: 'user' } };
+  const call = (id, name, args, withReasoning) => ({
+    id: 'msg-c-' + id.split('|')[0], role: 'assistant',
+    content: (withReasoning ? [{ type: 'reasoning', text: 'plan' }] : []).concat([{ type: 'tool-call', id, name, arguments: args }]),
+    source: Object.assign({}, src, { replayState: replay((withReasoning ? [{ type: 'reasoning', thinkingSignature: JSON.stringify({ type: 'reasoning', id: 'rs_' + id.split('|')[0], summary: [], encrypted_content: 'ENC' }) }] : []).concat([{ type: 'tool-call' }]), 'toolUse') }),
+  });
+  const result = (id, text) => ({ id: 'msg-r-' + id.split('|')[0], role: 'user', content: [{ type: 'tool-result', toolCallId: id, content: [{ type: 'text', text }] }], source: { kind: 'tool', callId: id } });
+  const CA = call('call_A|fc_A', 'load_skill', '{"name":"nexus-engineering-workflow"}', true);
+  const RA = result('call_A|fc_A', 'loaded');
+  const CB = call('call_B|fc_B', 'load_skill', '{"name":"spec-reader"}', false);
+  const RB = result('call_B|fc_B', 'spec text');
+  const request = (messages, extra) => {
+    const base = Object.assign({
+      provider: PROVIDER, model: MODEL, reasoningEffort: 'xhigh', maxTokens: 2048, messages: messages.slice(), system: SYSTEM_TEXT,
+      tools: [{ name: 'load_skill', description: 'Load a named skill.', parameters: { type: 'object', properties: { name: { type: 'string' } } } }],
+      sessionId: NSH.sessionId,
+    }, extra || {});
+    base.signal = new AbortController().signal;
+    return deepFreeze(base);
+  };
+  const writeCoverage = (doc) => fs.writeFileSync(path.join(memDir, 'coverage.json'), JSON.stringify(doc));
+  const standardCoverage = (messages, anchorIndex, patch) => Object.assign({
+    schemaVersion: 1, processedThroughSeq: 150, sealedCheckpointId: null,
+    currentTurnMessageHash: messageHashH(messages[anchorIndex]),
+    messageHashes: messages.slice(0, anchorIndex).map(messageHashH).sort(),
+    activeTurn: { turn: 2, turnStartSeq: 100, anchorSeq: 101, anchorMessageHash: messageHashH(messages[anchorIndex]), processedThroughSeq: 150 },
+  }, patch || {});
+  const toolTxPath = path.join(memDir, 'tool-transactions.json');
+  const baseToolTx = fs.readFileSync(toolTxPath, 'utf8');
+  async function attempt(messages, coverageDoc, options) {
+    const opts = options || {};
+    if (coverageDoc === null) fs.rmSync(path.join(memDir, 'coverage.json'), { force: true }); else writeCoverage(coverageDoc);
+    fs.writeFileSync(toolTxPath, opts.toolTx === undefined ? baseToolTx : JSON.stringify(opts.toolTx));
+    const logs = [];
+    const payloads = [];
+    const base = mockRemoteCounter(byteRule);
+    let payloadCalls = 0;
+    const counterStub = Object.assign({}, base, {
+      countPayloadV2: async (shape) => {
+        payloadCalls += 1;
+        payloads.push(JSON.stringify(shape));
+        if (opts.rejectPayloadAt === payloadCalls) {
+          const error = new Error('remote-counter-counter-request-invalid (DISCARDABLE)');
+          error.code = 'counter-request-invalid';
+          error.counterFailure = { kind: 'counter-request-invalid', httpStatus: 400, netErrorCode: null, attempts: 1, exhaustReason: null };
+          throw error;
+        }
+        return base.countPayloadV2(shape);
+      },
+    });
+    const listener = host.createOpencodeProjectionStreamListenerV2({
+      installRoot: fx.root, bindingsPath: bindingsPathOf(fx), log: (entry) => logs.push(entry), metaRemoteCounter: counterStub, prewarm: false,
+    });
+    const req = request(messages, opts.extra);
+    const run = await runProjectionH(listener, req);
+    const decided = logs.find((entry) => entry && entry.event === 'ccv2-opencode-active-decided') || {};
+    return { run, req, decided, payloads, logs };
+  }
+  const MSGS = [A0, U1, CA, RA, CB, RB];
+
+  // T-NT-1 (hermetic): the multi-step active turn compiles to a hybrid.
+  {
+    const r = await attempt(MSGS, standardCoverage(MSGS, 1));
+    const derived = r.run.dispatched[0];
+    check(r.decided.projectionMode === 'CCV2_COMPILED' && r.run.dispatched.length === 1 && r.run.nextCalls() === 0,
+      'T-NT-1: multi-step active turn compiles; provider transport exactly once', JSON.stringify([r.decided.fallbackReason, r.decided.fallbackStage, r.decided.nativeTailSkip, r.decided.attemptFailureStage]));
+    if (derived !== undefined) {
+      check(derived.messages.length === 5 && derived.messages.every((m, i) => m === r.req.messages[1 + i]), 'T-NT-1: tail = messages[anchor..] by reference and order; historical bulk removed');
+      check(derived.messages[1].source.replayState === CA.source.replayState && derived.messages[1].content[1].id === 'call_A|fc_A' && derived.messages[2].content[0].toolCallId === 'call_A|fc_A',
+        'T-NT-1: tool-call ids, result correlation and replayState survive by reference');
+      check(derived.signal === r.req.signal && ['provider', 'model', 'reasoningEffort', 'maxTokens', 'tools', 'sessionId'].every((k) => derived[k] === r.req[k]),
+        'T-NT-1: signal/route/model/reasoning/maxTokens/tools/session preserved by reference');
+      check(derived.system.startsWith(SYSTEM_TEXT + host.CCV2_SYSTEM_SEPARATOR_V1) && derived.system.indexOf(TURN_TEXT) === -1 && derived.system.indexOf(BULK_MARKER) === -1,
+        'T-NT-1: compiled context appended after the original system bytes; current user and bulk absent from it');
+      const projected = wire.projectResponsesWireV2({ request: derived, route });
+      check(r.payloads.length === 2 && r.payloads[1] === JSON.stringify(projected.countedBody), 'T-NT-1: the final count is the exact wire projection of the final hybrid request');
+      const reserve = JSON.parse(r.payloads[0]);
+      check(reserve.input[0].content === SYSTEM_TEXT && JSON.stringify(reserve.input.slice(1)) === JSON.stringify(projected.countedBody.input.slice(1)),
+        'T-NT-1: the reserve count is the same wire body without compiled context (tail counted, never appended later)');
+      check(projected.wireBody.input.filter((item) => item.type === 'function_call').length === 2 && projected.facts.syntheticToolResults === 0, 'T-NT-1: both native calls reach the wire, no synthetic repair');
+      const reentry = await runProjectionH(host.createOpencodeProjectionStreamListenerV2({ installRoot: fx.root, bindingsPath: bindingsPathOf(fx), metaRemoteCounter: mockRemoteCounter(byteRule), log: () => {} }), derived);
+      check(reentry.returned === reentry.nextStream && reentry.dispatched.length === 0, 'T-NT-1: the derived request is never recompiled');
+    }
+  }
+
+  // T-NT-4: fail-closed matrix.
+  const legacyCase = async (name, messages, coverageDoc, options, reason, stage, skip) => {
+    const r = await attempt(messages, coverageDoc, options);
+    // Staging fallbacks return next() by reference; attempt-stage fallbacks
+    // (after the async compile) stream the untouched next() exactly once.
+    const legacyStreamed = stage === 'attempt'
+      ? r.run.chunks.some((chunk) => chunk.text === 'legacy') && !r.run.chunks.some((chunk) => chunk.text === 'compiled')
+      : r.run.returned === r.run.nextStream;
+    check(legacyStreamed && r.run.dispatched.length === 0 && r.run.nextCalls() === 1
+      && r.decided.projectionMode === 'LEGACY' && r.decided.fallbackReason === reason && r.decided.fallbackStage === stage
+      && (skip === undefined || r.decided.nativeTailSkip === skip || r.decided.attemptFailureStage === skip),
+      'T-NT-4 ' + name + ' -> LEGACY ' + reason + ' @' + stage + ' (legacy stream, no dispatch)', JSON.stringify([r.decided.fallbackReason, r.decided.fallbackStage, r.decided.nativeTailSkip, r.decided.attemptFailureStage]));
+  };
+  await legacyCase('anchor missing', MSGS, standardCoverage(MSGS, 1, { activeTurn: { turn: 2, turnStartSeq: 100, anchorSeq: 101, anchorMessageHash: sha('absent'), processedThroughSeq: 150 } }), {}, 'active-native-tail-ambiguous', 'native-tail', 'active-turn-anchor-missing');
+  const DUP = [A0, U1, clone(U1), CA, RA];
+  await legacyCase('duplicate anchor hash', DUP, standardCoverage(DUP, 1), {}, 'active-native-tail-ambiguous', 'native-tail', 'active-turn-anchor-ambiguous');
+  await legacyCase('no active turn (stale / between turns)', MSGS, standardCoverage(MSGS, 1, { activeTurn: null }), {}, 'active-native-tail-ambiguous', 'native-tail', 'active-turn-missing');
+  await legacyCase('unanchored open turn', MSGS, standardCoverage(MSGS, 1, { activeTurn: { turn: 2, turnStartSeq: 100, anchorSeq: null, anchorMessageHash: null, processedThroughSeq: 150 } }), {}, 'active-native-tail-ambiguous', 'native-tail', 'active-turn-unanchored');
+  await legacyCase('no producer coverage', MSGS, null, {}, 'active-native-tail-ambiguous', 'native-tail', 'active-turn-coverage-missing');
+  const overlapDoc = standardCoverage(MSGS, 1);
+  overlapDoc.messageHashes = overlapDoc.messageHashes.concat([messageHashH(RA)]).sort();
+  await legacyCase('tail message already historical (unsafe overlap)', MSGS, overlapDoc, {}, 'active-native-tail-overlap', 'native-tail', 'active-tail-overlap');
+  await legacyCase('tail call id already staged (unsafe overlap)', MSGS, standardCoverage(MSGS, 1), { toolTx: JSON.parse(baseToolTx).concat([{ pageId: JSON.parse(baseToolTx)[0].pageId, callId: 'call_B|fc_B', callSeq: 7, resultSeq: 8 }]) },
+    'active-native-tail-overlap', 'native-tail', 'active-tail-overlap');
+  await legacyCase('historical prefix uncovered', MSGS, standardCoverage(MSGS, 1, { messageHashes: [] }), {}, 'active-native-tail-invalid', 'native-tail', 'active-tail-prefix-uncovered');
+  const OPEN = [A0, U1, CA, RA, CB];
+  await legacyCase('open tool protocol in the tail', OPEN, standardCoverage(OPEN, 1), {}, 'active-native-tail-invalid', 'native-tail', 'active-tail-protocol-open');
+  const TEXTLESS = [A0, U1, CA, RA];
+  const textlessDoc = standardCoverage(TEXTLESS, 2);
+  await legacyCase('textless anchor', TEXTLESS, textlessDoc, {}, 'active-native-tail-ambiguous', 'native-tail', 'active-turn-anchor-textless');
+  const IMG = [A0, U1, CA, { id: 'msg-img', role: 'user', content: [{ type: 'tool-result', toolCallId: 'call_A|fc_A', content: [{ type: 'image', attachment: { attachmentId: 'a' } }] }], source: { kind: 'tool', callId: 'call_A|fc_A' } }];
+  await legacyCase('tail the pinned projector cannot reproduce (image)', IMG, standardCoverage(IMG, 1), {}, 'active-native-tail-unprojectable', 'attempt', 'wire-projection');
+  await legacyCase('counter rejects the tail payload (reserve)', MSGS, standardCoverage(MSGS, 1), { rejectPayloadAt: 1 }, 'active-native-tail-uncountable', 'attempt', 'reserve-count');
+  await legacyCase('counter rejects the final hybrid payload', MSGS, standardCoverage(MSGS, 1), { rejectPayloadAt: 2 }, 'active-native-tail-uncountable', 'attempt', 'payload-count');
+  const settingsPath = path.join(fx.root, 'config', 'settings.yaml');
+  const settingsText = fs.readFileSync(settingsPath, 'utf8');
+  fs.writeFileSync(settingsPath, settingsText.replace('      apiKeyEnv: OPENCODE_API_KEY\n', '      apiKeyEnv: OPENCODE_API_KEY\n      cacheRetention: long\n'));
+  await legacyCase('wire route outside the traced profile', MSGS, standardCoverage(MSGS, 1), {}, 'active-native-tail-unprojectable', 'wire-route');
+  fs.writeFileSync(settingsPath, settingsText);
+
+  // T-NT-5: anchor robustness (injections after the anchor stay native).
+  const PLUGIN = { id: 'msg-plugin', role: 'user', content: [{ type: 'text', text: 'Runtime context snapshot.' }], source: { kind: 'plugin', plugin: 'runtime-context', form: 'snapshot', sections: [] } };
+  const FOLLOW = { id: 'msg-follow', role: 'user', content: [{ type: 'text', text: 'Also cover the edge case.' }], source: { kind: 'user' } };
+  for (const [name, injected] of [['plugin user-role injection', PLUGIN], ['human follow-up injection', FOLLOW]]) {
+    const messages = [A0, U1, CA, RA, injected, CB, RB];
+    const r = await attempt(messages, standardCoverage(messages, 1));
+    const derived = r.run.dispatched[0];
+    check(r.decided.projectionMode === 'CCV2_COMPILED' && derived !== undefined && derived.messages.length === 6 && derived.messages[3] === injected
+      && derived.messages[0] === r.req.messages[1] && derived.system.indexOf(injected.content[0].text) === -1 && derived.system.indexOf(TURN_TEXT) === -1,
+      'T-NT-5 ' + name + ': anchor unchanged, injection stays in the native tail, nothing duplicated into context', JSON.stringify([r.decided.fallbackReason, r.decided.nativeTailSkip]));
+  }
   opencode.resetOpencodeHealthV2();
   wipe(fx);
 }

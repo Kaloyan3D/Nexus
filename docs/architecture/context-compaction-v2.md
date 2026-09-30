@@ -5617,7 +5617,7 @@ revocation, expiry. Valid certification derives HEALTHY and
 marks the in-memory map; anything else (missing, malformed,
 mismatch, expired, revoked, unresolvable config) derives
 QUARANTINED. Request-shape revision
-opencode-muse-request-shape-v1 is owned by the request
+opencode-muse-request-shape-v1 (v2-native-tail since §52) is owned by the request
 contract; a contract change without a bump is a review defect
 the identity test pins by field-set. A fresh canary atomically
 replaces missing/invalid/revoked/expired records, and only
@@ -6184,3 +6184,99 @@ failures, and unsupported still maps to active-model-capability-unknown.
 Constants are starting points. Meta count latency for ~74k-token payloads
 has not been measured, so counterElapsedMs in live decision lines must
 confirm the 8s budget.
+
+## 52. CCV2-NT ACTIVE-TAIL-NATIVE (production agent-loop defect)
+
+### 52.1 Defect
+
+A live OpenCode Go / Muse canary looped on its first workflow action
+("load the engineering workflow skill") once turn 2 compiled on every step.
+The compiled wire request was `[developer: DSH system, user: all CCv2
+context, user: current prompt]`: the open turn's completed tool
+transactions were HOT pages laid out in HOT_EXECUTION, which precedes
+CURRENT_INTERACTION, so they appeared *before* the prompt that caused them;
+the renderer could only emit system/user text; the host rebuilt every
+message as text; and the pinned pi-ai adapter re-roles `system` messages to
+`user`. The model saw an untouched prompt as the last item and restarted.
+Separately, the counted body (`{instructions, input:[turn]}`, no tools) was
+not the sent body, and the usage observer could not read DSH usage chunks,
+so drift was never detected. §41.2 already required "live tool protocol
+stays native DSH transport"; the multi-step turn never honoured it.
+
+### 52.2 Invariant
+
+CCv2 compacts completed history only. The open turn stays provider-native
+from its producer-owned anchor through the end of `request.messages`:
+
+- **Anchor** (M01 producer, durable `activeTurn` in coverage.json and
+  staged.json): the first model-visible message after the DSH `turn/start`
+  of the open turn. Plugin context, skill instructions and claimed
+  follow-ups never move it. `turn/end` clears it. Open-turn units are
+  produced, ledgered and sealed as before but never enter the staged
+  historical set.
+- **Split** (`extractActiveTailV2`): the anchor hash must occur exactly
+  once; prefix = messages[0..anchor) must be historically covered; tail =
+  messages[anchor..] must share no message hash and no call id with staged
+  memory and must close its tool protocol. Anything else is a typed LEGACY
+  fallback (`active-native-tail-ambiguous|overlap|invalid`, stage
+  `native-tail`, content-free `nativeTailSkip`).
+- **Render**: role contract `render-roles-context-only-native-tail-v2`
+  (renderer revision `context-prompt-render-v2-context-only`). The current
+  turn is bound (`nativeTurn`: sourceId + contentHash) and never rendered;
+  every segment is system context; exactly one context message.
+- **Derived request** (one builder for counting and sending): every
+  non-owned key by reference (route, tools, reasoning, output cap, session,
+  AbortSignal); `messages` = the tail, same objects, same order;
+  `system` = original bytes + LF LF + compiled context (original bytes a
+  strict prefix, proven); `metadata` = markers. PROJECTION_OWNED_KEYS =
+  messages, metadata, system. Gate: the dsh-agent-loop request-header
+  invariant runs only for `isAgentLoopRequest` requests (the derived request
+  is not one); dsh-llm invariants check stream grammar; Routing-Integrity
+  checks provider/model; no other listener reads `system`. OCH-4 proves it
+  under the real invariants.
+
+### 52.3 Exact count
+
+`ContextWireProjectorResponsesV2` reproduces the pinned chain
+(dsh-llm-pi-ai textOnlyContext + replay v2, pi-ai 0.82 buildBaseOptions
+clamp, buildParams, transformMessages, convertResponsesMessages/Tools) and
+returns the exact posted body plus the counted subset {model, input, tools,
+reasoning, max_output_tokens}. The route comes from the settings.yaml
+llm-pi-ai profile through a closed-world parser (unknown keys fail closed).
+Per compilation: one reserve count of the wire body without context, the
+unchanged planning/memo passes, and one final count of the projection of
+the final hybrid request; the host re-projects the final derived request
+and requires equality with what was counted. A counter refusal of a tail
+payload is `active-native-tail-uncountable`; a projector refusal is
+`active-native-tail-unprojectable`. The usage observer reads DSH
+`TokenUsage` (disjoint: inputTokens + cacheReadTokens + cacheWriteTokens).
+Pre-warm seeds only per-text memo counts; whole-payload counts always run at
+request time.
+
+Request-shape revision is now `opencode-muse-request-shape-v2-native-tail`:
+existing certifications no longer match and the route stays QUARANTINED
+until OC01 re-certifies. OC01 adds a static native-tail fixture and a live
+two-step reasoning-replay fixture (encrypted reasoning + function_call
+replayed with its output); it answers whether the Meta count accepts
+replayed reasoning and bounds OpenCode's billed input.
+
+### 52.4 Evidence
+
+- ContextWireProjectorResponsesV2 (T-NT-3): 14 byte-exact cases against
+  the real pinned adapter chain posting to a local capture server.
+- OCH-4: real DSH loop + real pi-ai adapter + local Responses SSE server,
+  multi-step turn 2 (skill load -> "loaded" -> continuation + second call ->
+  final); every step compiles, the tail survives by reference, the counter
+  input equals the posted body, the skill result is the last native item
+  of the next request (T-NT-2).
+- Native-tail matrix (T-NT-1 hermetic, T-NT-4 fail-closed, T-NT-5 anchor
+  robustness), producer active-turn suite, renderer context-only contract,
+  DSH usage (T-USAGE).
+- Mutations (anchor dropped, tail cloned, context counted out, overlap and
+  ambiguity checks disabled, turn rendered into context, context prepended,
+  extra owned key) are all caught.
+
+Open: live multi-step canary; Meta acceptance of replayed encrypted
+reasoning; a count 400 whose message mentions "model" latches the counter
+contract (resilience unchanged by design); long single turns get no
+intra-turn compaction (Phase 2).
