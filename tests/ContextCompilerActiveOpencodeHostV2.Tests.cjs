@@ -45,7 +45,14 @@ function makeFixtureRoot(policySection) {
   fs.mkdirSync(path.join(root, 'data', 'routing'), { recursive: true });
   fs.mkdirSync(path.join(root, 'data', 'logs'), { recursive: true });
   const policy = { version: 3 };
-  if (policySection !== undefined) policy.contextCompiler = policySection;
+  // RC1.1: the compile-mechanics sections below pin activation explicitly
+  // ('always', exactly as the OC01 canary does): their tiny fixture contexts
+  // never reach the context-pressure gate. The gate's own sections pass
+  // activation 'pressure' (or omit it) and drive real usage samples.
+  if (policySection !== undefined) {
+    policy.contextCompiler = policySection.mode === 'active' && !Object.prototype.hasOwnProperty.call(policySection, 'activation')
+      ? Object.assign({}, policySection, { activation: 'always' }) : policySection;
+  }
   fs.writeFileSync(path.join(root, 'config', 'routing-policy.json'), JSON.stringify(policy));
   fs.writeFileSync(path.join(root, 'data', 'routing', 'session-bindings.json'), JSON.stringify({ schemaVersion: 1, bindings: {} }));
   fs.writeFileSync(path.join(root, 'config', 'settings.yaml'), [

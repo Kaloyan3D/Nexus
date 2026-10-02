@@ -2882,6 +2882,9 @@ function apply(ctx) {
     log,
   })
   const sessionSourceFor = memoryProducer.registry ? memoryProducer.registry.sessionSourceFor : undefined
+  // CCv2 RC1.1: the same registry serves the OpenCode projection's activation
+  // gate its durable usage samples (read-only event snapshot).
+  const liveSessionFor = memoryProducer.registry ? memoryProducer.registry.liveSessionFor : undefined
 
   compilerShadowHost.installCompilerShadowObserver(ctx, { installRoot, bindingsPath, log, sessionSourceFor })
 
@@ -2906,7 +2909,7 @@ function apply(ctx) {
     const found = await credentials.resolve('MODEL_API_KEY')
     return found && typeof found.value === 'string' && found.value !== '' ? found.value : undefined
   }
-  opencodeActiveHost.installOpencodeActiveProjection(ctx, { installRoot, bindingsPath, log, sessionSourceFor, resolveMetaApiKey })
+  opencodeActiveHost.installOpencodeActiveProjection(ctx, { installRoot, bindingsPath, log, sessionSourceFor, liveSessionFor, resolveMetaApiKey })
 
   // F1 ORDERING: prepended so compaction runs BEFORE the loop's
   // runtime-context projection decision for this request is consumed.

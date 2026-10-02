@@ -193,6 +193,17 @@ function createProducerRegistryV2(deps) {
     }
   }
 
+  /**
+   * Read-only live-session accessor for the OpenCode projection's CCv2
+   * RC1.1 activation gate. null when unknown. events() is a snapshot copy of
+   * the durable event log (later appends never race a decision).
+   */
+  function liveSessionFor(sessionId) {
+    const entry = sessions.get(sessionId);
+    if (!entry || !entry.session) return null;
+    return Object.freeze({ sessionId, events: () => liveEvents(entry).slice() });
+  }
+
   /** Test/diagnostic hook: resolves when the session queue is idle. */
   async function idle(sessionId) {
     for (let spin = 0; spin < 10000; spin += 1) {
@@ -207,7 +218,7 @@ function createProducerRegistryV2(deps) {
     return entry && entry.producer ? entry.producer.describe() : null;
   }
 
-  return Object.freeze({ onSessionEvent, sessionSourceFor, idle, describe });
+  return Object.freeze({ onSessionEvent, sessionSourceFor, liveSessionFor, idle, describe });
 }
 
 /**

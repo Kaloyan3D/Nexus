@@ -640,7 +640,10 @@ function stageFixtureV2(fixtureRoot, dataRoot, workspace) {
   fs.mkdirSync(path.join(fixtureRoot, 'config'), { recursive: true });
   fs.mkdirSync(path.join(dataRoot, 'routing'), { recursive: true });
   fs.mkdirSync(path.join(dataRoot, 'logs'), { recursive: true });
-  fs.writeFileSync(path.join(fixtureRoot, 'config', 'routing-policy.json'), JSON.stringify({ version: 3, contextCompiler: { mode: 'active' } }));
+  // RC1.1: canary contexts are tiny and never reach the context-pressure
+  // gate, so certification pins activation explicitly (observable in every
+  // decision line as activation-forced-by-policy).
+  fs.writeFileSync(path.join(fixtureRoot, 'config', 'routing-policy.json'), JSON.stringify({ version: 3, contextCompiler: { mode: 'active', activation: 'always' } }));
   fs.writeFileSync(path.join(dataRoot, 'routing', 'session-bindings.json'), JSON.stringify({ schemaVersion: 1, bindings: {} }));
   copyRepoConfigV2(fixtureRoot);
   const sessionId = 'sess-oc01h-stepd';
