@@ -389,6 +389,15 @@ async function hostSuite() {
   const src = install.registry.sessionSourceFor('sess-host');
   check(src !== null && src.readEvent(0).seq === 0, 'hosts receive the live B03 session exact source');
   check(install.registry.sessionSourceFor('unknown') === null, 'unknown sessions have no source');
+  // CCv2 RC1.1: read-only live-session accessor for the activation gate.
+  const live = install.registry.liveSessionFor('sess-host');
+  check(install.registry.liveSessionFor('unknown') === null, 'RC1.1: unknown sessions have no live accessor');
+  const snapshot = live.events();
+  check(Array.isArray(snapshot) && snapshot.length === session.events.length && snapshot !== session.events && snapshot[0] === session.events[0]
+    && Object.keys(live).sort().join(',') === 'events,sessionId', 'RC1.1: events() is a snapshot copy of the durable log; the accessor exposes nothing else');
+  session.events.push({ seq: session.events.length, type: 'session/meta', data: {} });
+  check(snapshot.length === session.events.length - 1 && live.events().length === session.events.length, 'RC1.1: a snapshot never moves with later appends; a new call sees them');
+  session.events.pop();
   listeners[0]({ id: 'unbound', events: [] }, { seq: 0, type: 'turn/start', data: {} });
   check(install.registry.describe('unbound') === null, 'unbound sessions are ignored');
 }

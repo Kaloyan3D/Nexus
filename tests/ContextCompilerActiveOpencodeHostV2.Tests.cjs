@@ -287,6 +287,44 @@ function tailLosslessNoReplay(originalTail, derivedTail) {
       && keptEntries.every((b, i) => got.source.replayState.blocks[i] === b);
   });
 }
+// RC1.1: a DSH-shaped durable event log for a live request (contiguous seqs
+// from 0): one committed step per assistant message after the anchor
+// (step/start, assistant/message [+usage], tool/call, tool/result,
+// step/end), the in-flight step/start last. Returned as the producer
+// registry's liveSessionFor shape.
+function syntheticEventsH(messages, anchorIndex, usage) {
+  const events = [];
+  const push = (type, data) => events.push({ seq: events.length, type, time: 1700000000000 + events.length, data });
+  while (events.length < 100) push('session/meta', {});
+  push('turn/start', { turn: 2 });
+  push('user/message', clone(messages[anchorIndex]));
+  let step = 0;
+  let open = false;
+  const close = () => { if (open) { push('step/end', { turn: 2, step }); open = false; } };
+  for (const message of messages.slice(anchorIndex + 1)) {
+    if (message.role === 'assistant') {
+      close();
+      step += 1;
+      push('step/start', { turn: 2, step });
+      open = true;
+      push('assistant/message', Object.assign({ turn: 2, step, message: clone(message) }, usage ? { usage: usage(step) } : {}));
+      for (const block of message.content) {
+        if (block.type === 'tool-call') push('tool/call', { turn: 2, step, callId: block.id, name: block.name, arguments: block.arguments });
+      }
+    } else if (message.source && message.source.kind === 'tool') {
+      push('tool/result', { turn: 2, step, message: clone(message) });
+    } else {
+      close();
+      push('user/message', clone(message));
+    }
+  }
+  close();
+  push('step/start', { turn: 2, step: step + 1 });
+  return events;
+}
+function liveSessionH(events) {
+  return { sessionId: NSH.sessionId, events: () => events.slice() };
+}
 function userTurnCount(messages, text) {
   let count = 0;
   for (const message of messages) {
@@ -485,6 +523,8 @@ function sectionsOCH3() {
     await sectionOCH6();
     await sectionNativeTailMatrix();
     await sectionMetaCredential();
+    await sectionRC11Seam();
+    await sectionOCH8();
     console.log(String.fromCharCode(10) + 'ContextCompilerActiveOpencodeHostV2 suite: ' + passed + ' passed, ' + failed + ' failed');
     if (failed > 0) process.exitCode = 1;
   })().catch((error) => { console.error(error); process.exitCode = 1; });
@@ -1320,6 +1360,307 @@ async function sectionMetaCredential() {
     check(all.indexOf(STORE_KEY) === -1 && all.indexOf(ENV_KEY) === -1, 'the key never appears in any log line');
   } finally {
     if (savedEnv === undefined) delete process.env.MODEL_API_KEY; else process.env.MODEL_API_KEY = savedEnv;
+    opencode.resetOpencodeHealthV2();
+    wipe(fx);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// RC1.1: the context-pressure activation gate at the production llm/stream
+// seam, with the production policy ('pressure', the default), real usage
+// samples and the continuity-aware basis of the certified route.
+async function sectionRC11Seam() {
+  section('RC1.1 ACTIVATION GATE AT THE llm/stream SEAM (production policy, continuity-aware basis)');
+  const activation = require(path.join(repoRoot, 'config', 'ContextActivationPressureV2.cjs'));
+  const wire = require(path.join(repoRoot, 'config', 'ContextWireProjectorResponsesV2.cjs'));
+  const fx = makeFixtureRoot({ mode: 'active', activation: 'pressure' });
+  seedBindingH(fx, NSH.sessionId);
+  const { memDir } = stageMemoryH(fx);
+  COVER_DIR = null;
+  cert.certifyOpencodeV2(storeRootOf(fx), host.currentOpencodeIdentityV2({ installRoot: fx.root }).identity, 'f'.repeat(64));
+  host.startupOpencodeAuthorityV2({ storeRoot: storeRootOf(fx), installRoot: fx.root });
+  const route = wire.readResponsesRouteFromSettingsV2(fs.readFileSync(path.join(fx.root, 'config', 'settings.yaml'), 'utf8'), PROVIDER, MODEL);
+  const thresholds = activation.deriveActivationThresholdsV2(route);
+  const T = thresholds.activationTokens;
+  const src = { kind: 'model', provider: PROVIDER, model: MODEL };
+  const replay = (blocks) => ({ response: { kind: 'pi-ai', version: 2, api: 'openai-responses', provider: PROVIDER, model: MODEL, responseId: 'resp_s', stopReason: 'toolUse' }, blocks });
+  const call = (id, args) => ({
+    id: 'msg-c-' + id.split('|')[0], role: 'assistant',
+    content: [{ type: 'reasoning', text: 'PRIVATE-PLAN-REASONING' }, { type: 'tool-call', id, name: 'load_skill', arguments: args }],
+    source: Object.assign({}, src, { replayState: replay([{ type: 'reasoning', thinkingSignature: JSON.stringify({ type: 'reasoning', id: 'rs_' + id.split('|')[0], summary: [], encrypted_content: 'ENC' }) }, { type: 'tool-call' }]) }),
+  });
+  const result = (id, text) => ({ id: 'msg-r-' + id.split('|')[0], role: 'user', content: [{ type: 'tool-result', toolCallId: id, content: [{ type: 'text', text }] }], source: { kind: 'tool', callId: id } });
+  const A0 = { id: 'msg-a0', role: 'assistant', content: [{ type: 'text', text: BULK_MARKER + ' history.' }], source: src };
+  const U1 = { id: 'msg-u1', role: 'user', content: [{ type: 'text', text: TURN_TEXT }], source: { kind: 'user' } };
+  const MSGS = [A0, U1, call('call_A|fc_A', '{"name":"nexus-engineering-workflow"}'), result('call_A|fc_A', 'loaded'), call('call_B|fc_B', '{"name":"spec-reader"}'), result('call_B|fc_B', 'spec text')];
+  const request = (messages, extra) => {
+    const base = Object.assign({
+      provider: PROVIDER, model: MODEL, reasoningEffort: 'medium', maxTokens: 32768, messages: messages.slice(), system: SYSTEM_TEXT,
+      tools: [{ name: 'load_skill', description: 'Load a named skill.', parameters: { type: 'object', properties: { name: { type: 'string' } } } }],
+      sessionId: NSH.sessionId,
+    }, extra || {});
+    base.signal = new AbortController().signal;
+    return deepFreeze(base);
+  };
+  const coverage = (messages) => ({
+    schemaVersion: 1, processedThroughSeq: 150, sealedCheckpointId: null,
+    currentTurnMessageHash: messageHashH(messages[1]),
+    messageHashes: messages.slice(0, 1).map(messageHashH).sort(),
+    activeTurn: { turn: 2, turnStartSeq: 100, anchorSeq: 101, anchorMessageHash: messageHashH(messages[1]), processedThroughSeq: 150 },
+  });
+  const delta = MSGS.slice(5).reduce((sum, m) => sum + activation.messageBoundTokensV2(m), 0);
+  const usageSeq = (values) => (step) => ({ inputTokens: values[Math.min(step, values.length) - 1], outputTokens: 0 });
+  const calls = { texts: 0, payload: 0 };
+  const countingCounter = (failure) => {
+    const base = mockRemoteCounter(byteRule);
+    return Object.assign({}, base, {
+      countTextsV2: async (texts) => { calls.texts += 1; return base.countTextsV2(texts); },
+      countPayloadV2: async (shape) => {
+        calls.payload += 1;
+        if (failure) {
+          const error = new Error('remote-counter-counter-transient (DISCARDABLE)');
+          error.code = 'counter-transient';
+          error.counterFailure = { kind: 'counter-transient', httpStatus: 503, netErrorCode: null, attempts: 3, exhaustReason: 'attempts' };
+          throw error;
+        }
+        return base.countPayloadV2(shape);
+      },
+    });
+  };
+  async function run(liveFor, opts) {
+    const o = opts || {};
+    fs.writeFileSync(path.join(memDir, 'coverage.json'), JSON.stringify(coverage(MSGS)));
+    calls.texts = 0;
+    calls.payload = 0;
+    const logs = [];
+    const deps = { installRoot: fx.root, bindingsPath: bindingsPathOf(fx), log: (entry) => logs.push(entry), metaRemoteCounter: countingCounter(o.counterFailure), prewarm: false };
+    if (liveFor !== undefined) deps.liveSessionFor = liveFor;
+    const req = request(MSGS, o.extra);
+    const r = await runProjectionH(host.createOpencodeProjectionStreamListenerV2(deps), req);
+    const decided = logs.filter((entry) => entry && entry.event === 'ccv2-opencode-active-decided');
+    return { r, req, decided: decided[0] || {}, decisions: decided.length, logs, counterCalls: calls.texts + calls.payload };
+  }
+  const live = (values) => { const events = syntheticEventsH(MSGS, 1, usageSeq(values)); return () => liveSessionH(events); };
+  try {
+    check(thresholds.basis === 'native-unsendable' && T === 907018, 'certified route (reasoningReplay none): activation basis native-unsendable at 907,018');
+    const below = await run(live([1000, T - delta - 1]));
+    check(below.decided.activationDecision === 'NATIVE' && below.decided.activationReason === 'pressure-below-threshold' && below.decided.pressureTokens === T - 1
+      && below.decided.activationTokens === T && below.decided.activationBasis === 'native-unsendable', 'activationTokens - 1 -> NATIVE pressure-below-threshold',
+      JSON.stringify([below.decided.activationReason, below.decided.pressureTokens, T]));
+    check(below.r.returned === below.r.nextStream && below.r.dispatched.length === 0 && below.r.nextCalls() === 1,
+      'NATIVE returns next() by reference: the original request (native reasoning replay) is sent verbatim');
+    check(below.counterCalls === 0 && below.decided.compilerExecutions === 0 && below.decided.bindingFound === false && below.decided.checkpointFound === false,
+      'NATIVE costs zero counter calls, zero compilation, no binding/checkpoint reads (the gate runs first)');
+    check(below.decided.projectionMode === 'LEGACY' && below.decided.fallbackReason === null && below.decided.fallbackStage === null && below.decisions === 1,
+      'NATIVE is a policy outcome, not a failure: LEGACY with fallbackReason null; exactly one decision line');
+    const band = await run(live([1000, 750000]));
+    check(band.decided.activationDecision === 'NATIVE' && band.r.returned === band.r.nextStream && band.counterCalls === 0,
+      '750k (past the before-DSH point, below native-unsendable): in-turn reasoning is kept; DSH compaction stays the relief');
+    const at = await run(live([1000, T - delta]));
+    check(at.decided.activationDecision === 'ACTIVATE' && at.decided.activationReason === 'pressure-at-or-above-threshold' && at.decided.pressureTokens === T
+      && at.decided.projectionMode === 'CCV2_COMPILED' && at.r.dispatched.length === 1 && at.r.nextCalls() === 0, 'exactly activationTokens -> ACTIVATE -> CCV2_COMPILED (overflow safety net)',
+      JSON.stringify([at.decided.activationReason, at.decided.projectionMode, at.decided.fallbackReason, at.decided.fallbackStage]));
+    const derived = at.r.dispatched[0];
+    check(derived !== undefined && derived.messages.every((m) => !m.content.some((b) => b.type === 'reasoning')) && derived.system.startsWith(SYSTEM_TEXT + host.CCV2_SYSTEM_SEPARATOR_V1),
+      'the safety-net compiled request is the unchanged RC1 v3 shape (no historical reasoning, compiled context after the system bytes)');
+    const regression = await run(live([70000, 77000]));
+    check(regression.decided.activationDecision === 'NATIVE' && regression.r.returned === regression.r.nextStream,
+      'the OpenRank RC1 turn-2 regime (~77k) now stays native: no reasoning is stripped');
+    const latched = await run(live([T + 5, 300000]));
+    check(latched.decided.activationReason === 'pressure-latched' && latched.decided.pressureLatchTokens === T + 5 && latched.decided.projectionMode === 'CCV2_COMPILED',
+      'compiled-size usage after a crossing stays compiled (latched, no thrash)');
+    const events = syntheticEventsH(MSGS, 1, usageSeq([T + 5, 300000]));
+    const afterRestart = await run(() => liveSessionH(JSON.parse(JSON.stringify(events))));
+    check(afterRestart.decided.activationReason === latched.decided.activationReason && afterRestart.decided.pressureTokens === latched.decided.pressureTokens
+      && afterRestart.decided.projectionMode === 'CCV2_COMPILED', 'restart: a fresh listener over the restored durable log reproduces the decision');
+    const noLive = await run(undefined);
+    check(noLive.decided.activationDecision === 'NATIVE' && noLive.decided.activationReason === 'pressure-unmeasured' && noLive.decided.activationDetail === 'session-unavailable'
+      && noLive.counterCalls === 0 && noLive.r.returned === noLive.r.nextStream, 'no live session (foreign mount / producer off) -> NATIVE, zero counter work');
+    const throwingLive = await run(() => { throw new Error('registry failure'); });
+    check(throwingLive.decided.activationDecision === 'NATIVE' && throwingLive.r.returned === throwingLive.r.nextStream, 'a throwing live-session accessor -> NATIVE');
+    opencode.resetOpencodeHealthV2();
+    const quarantinedBelow = await run(live([1000, 2000]));
+    check(quarantinedBelow.decided.activationDecision === 'NATIVE' && quarantinedBelow.decided.fallbackStage === null,
+      'quarantined route below threshold: NATIVE by the gate (health is never consulted when compaction is not needed)');
+    const quarantinedAbove = await run(live([1000, 950000]));
+    check(quarantinedAbove.decided.activationDecision === 'ACTIVATE' && quarantinedAbove.decided.projectionMode === 'LEGACY'
+      && quarantinedAbove.decided.fallbackReason === 'active-tokenizer-unavailable' && quarantinedAbove.decided.fallbackStage === 'authority-health',
+      'quarantined route above threshold: ACTIVATE then RC1 fail-closed authority-health LEGACY');
+    host.startupOpencodeAuthorityV2({ storeRoot: storeRootOf(fx), installRoot: fx.root });
+    const counterDown = await run(live([1000, 950000]), { counterFailure: true });
+    check(counterDown.decided.activationDecision === 'ACTIVATE' && counterDown.decided.projectionMode === 'LEGACY' && counterDown.decided.fallbackReason === 'active-tokenizer-unavailable'
+      && counterDown.decided.fallbackStage === 'attempt' && counterDown.r.dispatched.length === 0 && counterDown.r.chunks.some((c) => c.text === 'legacy'),
+      'counter unavailable after activation -> RC1 typed LEGACY (legacy stream, nothing compiled)', JSON.stringify([counterDown.decided.fallbackReason, counterDown.decided.fallbackStage]));
+    const other = await run(live([1000, 950000]), { extra: { model: 'some-other-model' } });
+    check(other.decisions === 0 && other.r.returned === other.r.nextStream && other.counterCalls === 0, 'provider/model fallback route: untouched, no decision, no gate');
+    fs.writeFileSync(path.join(fx.root, 'config', 'routing-policy.json'), JSON.stringify({ version: 3, contextCompiler: { mode: 'active', activation: 'always' } }));
+    const forced = await run(undefined);
+    check(forced.decided.activationReason === 'activation-forced-by-policy' && forced.decided.projectionMode === 'CCV2_COMPILED',
+      "explicit 'always' policy (canaries) activates without pressure and says so in the decision line");
+    fs.writeFileSync(path.join(fx.root, 'config', 'routing-policy.json'), JSON.stringify({ version: 3, contextCompiler: { mode: 'active', activation: 'bogus' } }));
+    const bogus = await run(live([1000, 950000]));
+    check(bogus.decided.activationDecision === 'NATIVE' && bogus.decided.activationReason === 'activation-policy-invalid' && bogus.r.returned === bogus.r.nextStream,
+      'an invalid activation policy fails closed to NATIVE (even under pressure)');
+    const allLogs = JSON.stringify([below.logs, band.logs, at.logs, latched.logs]);
+    check(allLogs.indexOf(TURN_TEXT) === -1 && allLogs.indexOf('PRIVATE-PLAN-REASONING') === -1 && allLogs.indexOf('spec text') === -1,
+      'decision lines carry no prompt, reasoning or tool content');
+    const identity = host.currentOpencodeIdentityV2({ installRoot: fx.root }).identity;
+    check(identity.requestShapeRevision === host.OPENCODE_REQUEST_SHAPE_V3 && identity.canarySuiteRevision === host.CANARY_SUITE_REVISION_V2,
+      'compiled requests keep the RC1 v3 shape: the existing v3 / suite v2 certification stays the authority');
+  } finally {
+    opencode.resetOpencodeHealthV2();
+    wipe(fx);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// OCH-8: the REAL DSH loop + real pi-ai adapter under the production
+// activation policy. Small contexts stay NATIVE on every request: the
+// loop-built request is sent verbatim and the provider's in-turn reasoning
+// is replayed natively (arm B behaviour), with zero counter work.
+async function sectionOCH8() {
+  section('C08H-OCH-8 REAL DSH LOOP UNDER THE PRODUCTION ACTIVATION POLICY (native reasoning replay preserved)');
+  const liveGate = require(path.join(__dirname, 'Ccv2LiveHostGate.cjs'));
+  const found = resolveLoopHostH();
+  if (found === null) {
+    liveGate.reportLiveHostGate('OCH-8', liveGate.decideLiveHostGate(false, process.env));
+    console.log('SKIP: pinned DSH host tree is absent; the real-loop proof is PENDING (never faked).');
+    return;
+  }
+  liveGate.reportLiveHostGate('OCH-8', 'EXECUTED');
+  const { appRequire } = found;
+  const { Context } = appRequire('@deepseek-ai/cordis');
+  const llmMod = appRequire('@deepseek-ai/dsh-llm');
+  const SessionStore = appRequire('@deepseek-ai/dsh-session').default;
+  const SystemPrompt = appRequire('@deepseek-ai/dsh-system-prompt').default;
+  const toolsPackage = appRequire('@deepseek-ai/dsh-tools');
+  const agentPackage = appRequire('@deepseek-ai/dsh-agent');
+  const AgentLoop = appRequire('@deepseek-ai/dsh-agent-loop').default;
+  const Invariants = appRequire('@deepseek-ai/dsh-invariants').default;
+  const piAi = appRequire('@deepseek-ai/dsh-llm-pi-ai');
+  const YAML = appRequire('yaml');
+  const { pathToFileURL } = require('node:url');
+  const appModules = path.join(found.root, 'app', 'node_modules', '@deepseek-ai');
+  const llmInvariant = await import(pathToFileURL(path.join(appModules, 'dsh-llm', 'lib', 'invariant.js')).href);
+  const loopInvariant = await import(pathToFileURL(path.join(appModules, 'dsh-agent-loop', 'lib', 'invariant.js')).href);
+  const integrity = require(path.join(repoRoot, 'config', 'Routing-Integrity.cjs'));
+  const profiles = require(path.join(repoRoot, 'config', 'Engineering-Profiles.cjs'));
+  const producerHost = require(path.join(repoRoot, 'config', 'ContextMemoryProducerHostV2.cjs'));
+  const posted = [];
+  const server = http.createServer((req, res) => {
+    let text = '';
+    req.on('data', (chunk) => { text += chunk; });
+    req.on('end', () => {
+      posted.push(text);
+      const items = OCH4_SCRIPT[posted.length - 1] || OCH4_SCRIPT[OCH4_SCRIPT.length - 1];
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(responsesSseH('resp_' + posted.length, items));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const KEY_ENV = 'NEXUS_OCH8_LOCAL_TEST_KEY';
+  process.env[KEY_ENV] = 'och8-local-test-key';
+  const profile = Object.assign({}, YAML.parse(fs.readFileSync(path.join(repoRoot, 'config', 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers[PROVIDER], {
+    baseURL: 'http://127.0.0.1:' + server.address().port + '/v1', apiKeyEnv: KEY_ENV,
+  });
+  const fx = makeFixtureRoot({ mode: 'active', activation: 'pressure' });
+  seedBindingH(fx, NSH.sessionId);
+  const binding = JSON.parse(fs.readFileSync(bindingsPathOf(fx), 'utf8')).bindings[NSH.sessionId];
+  const stateFile = profiles.routingStatePath(fx.root, binding);
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  fs.writeFileSync(stateFile, JSON.stringify(Object.assign({}, binding, { profile: 'muse-spark-1.3-contributor', provider: PROVIDER, model: MODEL, reasoning: 'xhigh' })));
+  cert.certifyOpencodeV2(storeRootOf(fx), host.currentOpencodeIdentityV2({ installRoot: fx.root }).identity, 'f'.repeat(64));
+  opencode.resetOpencodeHealthV2();
+  const previous = { home: process.env.DSH_HOME, root: process.env.AIH_INSTALL_ROOT };
+  process.env.DSH_HOME = path.join(fx.root, 'data');
+  process.env.AIH_INSTALL_ROOT = fx.root;
+  const logs = [];
+  const entered = [];
+  const sent = [];
+  let counterCalls = 0;
+  const counter = mockRemoteCounter(byteRule);
+  const countingCounter = Object.assign({}, counter, {
+    countTextsV2: async (t) => { counterCalls += 1; return counter.countTextsV2(t); },
+    countPayloadV2: async (shape) => { counterCalls += 1; return counter.countPayloadV2(shape); },
+  });
+  let ctx = null;
+  try {
+    ctx = new Context();
+    await ctx.plugin(Invariants);
+    await ctx.plugin(llmMod.default);
+    await ctx.plugin(llmInvariant);
+    await ctx.plugin(piAi, { providers: { [PROVIDER]: profile } });
+    await ctx.plugin(SessionStore);
+    await ctx.plugin(SystemPrompt, { persona: 'OCH-8 real loop' });
+    await ctx.plugin(toolsPackage.default);
+    await ctx.plugin(agentPackage.default);
+    await ctx.plugin(AgentLoop, { agents: [] });
+    await ctx.plugin(loopInvariant);
+    ctx.tools.register(toolsPackage.defineTool({
+      name: 'load_skill',
+      description: 'Load a named skill.',
+      parameters: { name: { type: 'string', required: true, description: 'Skill name.' } },
+      output: { schema: { type: 'string' }, render: (args, value) => [{ type: 'text', text: value }] },
+      execute: async (args) => (args.name === 'nexus-engineering-workflow' ? 'loaded' : 'spec text'),
+    }));
+    integrity.apply(ctx);
+    const producer = producerHost.installMemoryProducer(ctx, {
+      bindingFor: (id) => (id === NSH.sessionId ? binding : null),
+      flush: async () => true,
+      authorityFor: () => () => ({
+        manifest: {
+          schemaVersion: 1, taskId: NSH.taskId, taskInstanceId: NSH.taskInstanceId, description: 'OCH-8 objective.',
+          status: 'implementing', acceptanceCriteria: ['Stay native.'], verification: { required: [], outcomes: [] },
+          failureSignatures: [], baseCommit: 'abc123',
+        },
+        authorityRecord: null,
+      }),
+      log: (entry) => logs.push(entry),
+      env: {},
+    });
+    ctx.on('llm/stream', (options, next) => { entered.push(options); return next(); }, { global: true });
+    const installed = host.installOpencodeActiveProjection(ctx, {
+      installRoot: fx.root, bindingsPath: bindingsPathOf(fx), log: (entry) => logs.push(entry),
+      sessionSourceFor: producer.registry.sessionSourceFor, liveSessionFor: producer.registry.liveSessionFor,
+      metaRemoteCounter: countingCounter, prewarm: false,
+    });
+    check(installed.installed === true && opencode.opencodeHealthV2({ provider: PROVIDER, model: MODEL }) === 'HEALTHY', 'production installer on the real ctx, route HEALTHY');
+    ctx.on('llm/stream', (options, next) => { sent.push(options); return next(); }, { global: true });
+    const agent = ctx.agentLoop.create(NSH.sessionId, { provider: PROVIDER, model: MODEL, maxTokens: 2048 });
+    const errors = [];
+    ctx.on('agent/error', ({ error }) => { errors.push(String(error && error.message).slice(0, 300)); });
+    async function turn(text) {
+      const idle = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('OCH-8 loop turn timed out')), 45000);
+        const dispose = ctx.on('agent/status', ({ agent: subject, status }) => {
+          if (subject === agent && status === 'idle') { clearTimeout(timer); dispose(); resolve(); }
+        });
+      });
+      agent.followup(llmMod.createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }));
+      await idle;
+      await producer.registry.idle(NSH.sessionId);
+    }
+    await turn('OCH-8 turn one: establish the task.');
+    await turn('OCH-8 turn two: implement the feature.');
+    const decisions = logs.filter((entry) => entry && entry.event === 'ccv2-opencode-active-decided');
+    check(errors.length === 0 && posted.length === 4 && sent.length === 4 && entered.length === 4, 'four root requests, one transport each, no re-dispatch', errors.join(' | '));
+    check(sent.every((request, index) => request === entered[index] && llmMod.isAgentLoopRequest(request)), 'every request is the loop-built original, sent verbatim');
+    check(decisions.length === 4 && decisions.every((d) => d.projectionMode === 'LEGACY' && d.fallbackReason === null && d.activationDecision === 'NATIVE'
+      && d.activationBasis === 'native-unsendable' && d.activationTokens === 907018),
+      'one NATIVE decision per request with the basis and threshold', JSON.stringify(decisions.map((d) => [d.activationReason, d.activationDetail, d.pressureTokens])));
+    check(decisions[0].activationReason === 'pressure-unmeasured' && decisions[0].activationDetail === 'no-usage-sample'
+      && decisions.slice(1).every((d) => d.activationReason === 'pressure-below-threshold' && Number.isInteger(d.pressureTokens) && d.pressureUsageSamples >= 1),
+      'first request unmeasured, later requests measured from the real DSH usage samples');
+    const step3 = JSON.parse(posted[3]);
+    check(step3.input.filter((item) => item.type === 'reasoning').length === 2 && posted[3].indexOf('ENC-rs_1') !== -1 && posted[3].indexOf('ENC-rs_2') !== -1,
+      'in-turn reasoning from both earlier steps is replayed natively on the wire (arm B behaviour)');
+    check(counterCalls === 0 && decisions.every((d) => d.compilerExecutions === 0), 'zero counter calls and zero compiler executions');
+  } finally {
+    if (ctx) await ctx.fiber.dispose().catch(() => {});
+    server.close();
+    delete process.env[KEY_ENV];
+    if (previous.home === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous.home;
+    if (previous.root === undefined) delete process.env.AIH_INSTALL_ROOT; else process.env.AIH_INSTALL_ROOT = previous.root;
     opencode.resetOpencodeHealthV2();
     wipe(fx);
   }
