@@ -6443,3 +6443,84 @@ task in 5).
 - The generic DeepSeek active host (ContextCompilerActiveHostV2) still uses
   the pre-RC1 text-flattening projection; it is latent (its seam carries no
   messages) and is outside RC1.
+
+## 55. CCv2 RC1.1 — reasoning continuity (context-pressure activation)
+
+Evidence, rejected designs and rationale:
+`docs/architecture/ccv2-rc1.1-reasoning-continuity.md`. RC1 invariants 54.4
+(1–10) hold unchanged for every compiled request.
+
+### 55.1 Root cause (frozen finding)
+
+A compiled OpenCode Muse request is counted exactly by Meta, which cannot
+count OpenCode-issued encrypted reasoning (53.1); compiled requests therefore
+drop the reasoning of every earlier step of the open turn. RC1 compiled every
+request after the bootstrap checkpoint whatever its size. Controlled B/C
+replay: T2/step 9 B implements 5/5, C re-inspects 5/5.
+
+### 55.2 Rejected: continuation capsule (falsified by arm D)
+
+A deterministic, non-reasoning ContinuationState (disclosure + latest todo
+plan + modified files, SafePoint-classified, from the durable log) appended to
+compiled requests was tested live as arm D = C + capsule: step 9 implement
+0/5 (B 5/5), step 14 3/5 (C 4/5) with more re-reasoning, step 5 more
+re-reasoning. Not shipped; preserved on `research/rc1.1-capsule-attempt`.
+
+### 55.3 Activation gate (frozen)
+
+`config/ContextActivationPressureV2.cjs`, policy revision
+`ccv2-pressure-activation-v2-continuity-basis`, evaluated inside
+`applyOpencodeProjectionV2` right after the request-shape checks and before
+any health, credential, file, counter or compiler work.
+
+- Signal: durable DSH `TokenUsage` on `assistant/message` events. anchor =
+  latest valid sample of the surface epoch; pressure = sample(anchor) +
+  Σ(utf8 bytes of JSON content + 32) over the request messages after the
+  anchor message; latch = max sample of the epoch; the epoch restarts after
+  a DSH surface replacement.
+- Basis from the wire `reasoningReplay` capability:
+  `native` → `before-dsh-compaction`: floor(window × 0.8) − maxOutput −
+  65,536 − margin = 633,863; `none` → `native-unsendable`: window −
+  maxOutput − margin(window) = **907,018** (the certified OpenCode Muse
+  route). 0.8 is the pinned `dsh-compaction-basic` default (no override,
+  tested).
+- Decision: `pressure-at-or-above-threshold` / `pressure-latched` /
+  `activation-forced-by-policy` → ACTIVATE (unchanged RC1 pipeline);
+  `pressure-below-threshold` / `pressure-unmeasured` (`session-unavailable`,
+  `no-usage-sample`, `anchor-unmatched`) / `activation-policy-invalid` →
+  NATIVE = the original request verbatim, `projectionMode LEGACY`,
+  `fallbackReason null`.
+- Policy: `routing-policy.json` `contextCompiler.activation` = `pressure`
+  (default) | `always` (canaries); anything else → NATIVE.
+- `ContextMemoryProducerHostV2.liveSessionFor(sessionId)` → { events() }
+  (read-only snapshot), wired by `AihController`.
+
+Evidence (`scripts/CCv2-ActivationReplay.cjs`): the frozen Legacy OpenRank
+session (451 requests, peak 505,050) and all 8 recorded RC1 OpenRank CCv2
+sessions stay NATIVE on every request; the pressure bound covered the
+provider prompt on every natively sent request (Legacy 450/450, minimum
+slack +189); the 2 shortfalls are RC1 mixed-mode requests anchored on a
+compiled sample.
+
+### 55.4 Certification
+
+Compiled requests are the unchanged v3 shape; the existing
+`oc01-canary-suite-v2` certification stays the authority. OC01 fixtures pin
+`activation: always`.
+
+### 55.5 Frozen RC1.1 invariants
+
+11. A compiled request is sent only when the gate returned ACTIVATE.
+12. The gate reads only durable provider usage, the live request, the route
+    capability and the activation policy.
+13. The activation latch is monotone within a DSH surface epoch.
+14. On a route whose compiled requests cannot carry in-turn reasoning, the
+    gate activates only when the native request cannot be sent.
+15. One decision line per root request; never content.
+
+### 55.6 Known limits
+
+On OpenCode Muse, long sessions are relieved by DSH compaction (lossy for
+older history; the producer then blocks for that session) and CCv2 is the
+overflow safety net. A continuity-safe compiled mode on this route requires a
+counting authority for the issuing caller's reasoning.
