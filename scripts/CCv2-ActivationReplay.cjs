@@ -84,6 +84,7 @@ function summarize(rows, thresholds) {
   for (const row of rows) reasons[row.reason + (row.detail ? '/' + row.detail : '')] = (reasons[row.reason + (row.detail ? '/' + row.detail : '')] || 0) + 1;
   const slack = measured.map((row) => row.pressureTokens - row.actualPrompt).sort((a, b) => a - b);
   return {
+    activationBasis: thresholds.basis,
     activationTokens: thresholds.activationTokens,
     requests: rows.length,
     native: rows.filter((row) => row.decision === 'NATIVE').length,

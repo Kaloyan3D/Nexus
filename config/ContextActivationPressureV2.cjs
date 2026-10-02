@@ -27,13 +27,27 @@
  * allowance covers framing). The Muse tokenizer is not public; the bound is
  * verified against provider usage by scripts/CCv2-ActivationReplay.cjs.
  *
- * Threshold (every term authoritative or documented):
- *   dshThreshold     = floor(window x DSH_COMPACTION_THRESHOLD_RATIO_V1)
- *   activationTokens = dshThreshold - maxOutput - STEP_GROWTH_RESERVE
- *                      - providerSafetyMargin(dshThreshold)
- * DSH step-pressure compaction fires at dshThreshold (pre-step). CCv2 must
- * take over at least one whole step (max output + growth reserve) earlier,
- * or DSH's lossy summary runs first and blocks the M01 producer for good.
+ * Threshold: the basis depends on whether a compiled request on the route
+ * can carry the open turn's provider reasoning (the wire reasoningReplay
+ * capability). Every term is authoritative or documented.
+ *
+ *   reasoningReplay native  -> basis 'before-dsh-compaction':
+ *     dshThreshold     = floor(window x DSH_COMPACTION_THRESHOLD_RATIO_V1)
+ *     activationTokens = dshThreshold - maxOutput - STEP_GROWTH_RESERVE
+ *                        - providerSafetyMargin(dshThreshold)
+ *     Compiled requests lose nothing, so CCv2 takes over one whole step
+ *     before DSH's lossy step-pressure summary would run.
+ *
+ *   reasoningReplay none    -> basis 'native-unsendable':
+ *     activationTokens = window - maxOutput - providerSafetyMargin(window)
+ *     A compiled request must drop the open turn's reasoning, and the
+ *     controlled B/C/D replay showed nothing deterministic restores it (a
+ *     reasoning-stripped request re-inspected 5/5 at a mature planning
+ *     state, with or without a recorded-state capsule). In-turn continuity
+ *     is therefore never traded for compaction while the native request can
+ *     still be sent: DSH compaction (which keeps the open turn native) stays
+ *     the pressure relief, and CCv2 compiles only when the native request
+ *     itself would no longer fit the window (overflow safety net).
  *
  * Hysteresis: native context never shrinks inside a DSH surface epoch, so
  * activation is a monotone latch over the durable samples of the epoch.
@@ -46,7 +60,7 @@
  */
 const opencodeV2 = require('./ContextCompilerActiveOpencodeV2.cjs');
 
-const ACTIVATION_POLICY_REVISION_V1 = 'ccv2-pressure-activation-v1';
+const ACTIVATION_POLICY_REVISION_V1 = 'ccv2-pressure-activation-v2-continuity-basis';
 const ACTIVATION_MODE_PRESSURE = 'pressure';
 const ACTIVATION_MODE_ALWAYS = 'always';
 const ACTIVATION_MODES = Object.freeze([ACTIVATION_MODE_PRESSURE, ACTIVATION_MODE_ALWAYS]);
@@ -58,6 +72,9 @@ const DSH_COMPACTION_THRESHOLD_RATIO_V1 = 0.8;
 // <= 52,444 tokens under the byte bound. 2^16 covers every observed step.
 const STEP_GROWTH_RESERVE_TOKENS_V1 = 65536;
 const MESSAGE_FRAMING_ALLOWANCE_TOKENS_V1 = 32;
+const BASIS_BEFORE_DSH_COMPACTION = 'before-dsh-compaction';
+const BASIS_NATIVE_UNSENDABLE = 'native-unsendable';
+const ACTIVATION_BASES = Object.freeze([BASIS_BEFORE_DSH_COMPACTION, BASIS_NATIVE_UNSENDABLE]);
 const DECISION_NATIVE = 'NATIVE';
 const DECISION_ACTIVATE = 'ACTIVATE';
 const ACTIVATION_REASONS = Object.freeze([
@@ -96,10 +113,11 @@ function resolveActivationModeV2(config) {
 }
 
 /**
- * Thresholds from the route capability. Invalid (never guessed) when the
+ * Thresholds from the route capability (window, output ceiling and the
+ * reasoningReplay mode of the wire route). Invalid (never guessed) when the
  * window or the output ceiling is not a positive integer, when the window
- * is not the counting window the OpenCode authority is certified for, or
- * when the derived activation point is not positive.
+ * is not the counting window the OpenCode authority is certified for, when
+ * the replay mode is unknown, or when an activation point is not positive.
  */
 function deriveActivationThresholdsV2(route) {
   const invalid = Object.freeze({ valid: false });
@@ -108,18 +126,23 @@ function deriveActivationThresholdsV2(route) {
   const maxOutputTokens = route.maxTokens;
   if (!Number.isInteger(windowTokens) || windowTokens <= 0 || windowTokens !== opencodeV2.COUNT_WINDOW_V1) return invalid;
   if (!Number.isInteger(maxOutputTokens) || maxOutputTokens <= 0 || maxOutputTokens >= windowTokens) return invalid;
+  if (route.reasoningReplay !== 'native' && route.reasoningReplay !== 'none') return invalid;
   const dshThresholdTokens = Math.floor(windowTokens * DSH_COMPACTION_THRESHOLD_RATIO_V1);
-  const marginTokens = opencodeV2.providerSafetyMarginV2(dshThresholdTokens);
-  const activationTokens = dshThresholdTokens - maxOutputTokens - STEP_GROWTH_RESERVE_TOKENS_V1 - marginTokens;
-  if (!Number.isInteger(activationTokens) || activationTokens <= 0) return invalid;
+  const beforeDshTokens = dshThresholdTokens - maxOutputTokens - STEP_GROWTH_RESERVE_TOKENS_V1 - opencodeV2.providerSafetyMarginV2(dshThresholdTokens);
+  const nativeUnsendableTokens = windowTokens - maxOutputTokens - opencodeV2.providerSafetyMarginV2(windowTokens);
+  if (!Number.isInteger(beforeDshTokens) || beforeDshTokens <= 0 || !Number.isInteger(nativeUnsendableTokens) || nativeUnsendableTokens <= 0) return invalid;
+  const basis = route.reasoningReplay === 'native' ? BASIS_BEFORE_DSH_COMPACTION : BASIS_NATIVE_UNSENDABLE;
   return Object.freeze({
     valid: true,
+    basis,
+    reasoningReplay: route.reasoningReplay,
     windowTokens,
     dshThresholdTokens,
     maxOutputTokens,
     stepGrowthReserveTokens: STEP_GROWTH_RESERVE_TOKENS_V1,
-    marginTokens,
-    activationTokens,
+    beforeDshTokens,
+    nativeUnsendableTokens,
+    activationTokens: basis === BASIS_BEFORE_DSH_COMPACTION ? beforeDshTokens : nativeUnsendableTokens,
   });
 }
 
@@ -215,6 +238,7 @@ function decisionOf(decision, reason, detail, mode, thresholds, measurement) {
     detail: detail === undefined ? null : detail,
     mode: mode === undefined ? null : mode,
     policyRevision: ACTIVATION_POLICY_REVISION_V1,
+    basis: t === null ? null : t.basis,
     activationTokens: t === null ? null : t.activationTokens,
     dshThresholdTokens: t === null ? null : t.dshThresholdTokens,
     windowTokens: t === null ? null : t.windowTokens,
@@ -274,6 +298,7 @@ function activationTelemetryV2(decision) {
     activationDetail: d === null ? null : d.detail,
     activationMode: d === null ? null : d.mode,
     activationPolicyRevision: ACTIVATION_POLICY_REVISION_V1,
+    activationBasis: d === null ? null : d.basis,
     activationTokens: d === null ? null : d.activationTokens,
     pressureTokens: d === null ? null : d.pressureTokens,
     pressureAnchorTokens: d === null ? null : d.anchorTokens,
@@ -291,6 +316,9 @@ module.exports = {
   DSH_COMPACTION_THRESHOLD_RATIO_V1,
   STEP_GROWTH_RESERVE_TOKENS_V1,
   MESSAGE_FRAMING_ALLOWANCE_TOKENS_V1,
+  BASIS_BEFORE_DSH_COMPACTION,
+  BASIS_NATIVE_UNSENDABLE,
+  ACTIVATION_BASES,
   DECISION_NATIVE,
   DECISION_ACTIVATE,
   ACTIVATION_REASONS,
