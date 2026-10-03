@@ -15,6 +15,8 @@ function restore(root,id,options={}) {
   if(S.hash(S.fs.readFileSync(S.inside(root,'nexus-root/config/routing-policy.json')))!==meta.policyHash)S.fail('restore-policy-mismatch');
   S.write(S.inside(root,'state/binding.json'),meta.binding);S.write(S.inside(root,'state/stages.json'),meta.stages);Session.binding(root);
   S.write(S.inside(root,'state/current.json'),{checkpoint:id,snapshotSeal:S.hash(S.json(meta)),arm:null,runId:null});
+  // File inventories do not encode empty directories; recreate the canonical launch scaffolding.
+  require('./init.cjs').createLaunchDirectories(S.inside(root,'nexus-root'));
   S.fs.unlinkSync(S.inside(root,'state/restore-lock.json'));return {restored:id,verified:true};
 }
 module.exports={restore};

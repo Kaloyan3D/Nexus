@@ -35,6 +35,9 @@ function certification(root) {
   const installRoot=S.inside(root,'nexus-root');
   const v=host.startupOpencodeAuthorityV2({installRoot});return {health:v.health,state:v.state};
 }
+// Empty mutable launch layout from frozen Common.ps1, platform installers and Complete-Install.ps1.
+const requiredLaunchDirectories=Object.freeze(['data','logs','data/routing','data/routing/states','data/completion','data/completion/records','data/evaluation']);
+function missingLaunchDirectories(install){return requiredLaunchDirectories.filter(p=>{try{return !S.fs.statSync(S.inside(install,p)).isDirectory();}catch{return true;}});}
 // Resolve from app/package.json and import ESM without executing provider requests or plugins.
 const runtimePackages=Object.freeze(['@deepseek-ai/cordis','@deepseek-ai/dsh-session','@deepseek-ai/dsh-credentials','@deepseek-ai/dsh-credentials-local','@deepseek-ai/dsh-llm-pi-ai','@deepseek-ai/dsh-llm','@deepseek-ai/dsh-system-prompt','@deepseek-ai/dsh-tools','@deepseek-ai/dsh-agent','@deepseek-ai/dsh-agent-loop','@deepseek-ai/dsh-invariants','yaml']);
 function runtimeImports(install){
@@ -56,9 +59,10 @@ function doctor(root) {
   const guard=sourceGuard(S.REPO,initialized?S.inside(root,'nexus-root'):null);
   let runtime={ready:false,reason:'init-required'},thresholds=null,cert=null;
   if(initialized){S.ready(root); thresholds=gate.deriveActivationThresholdsV2(route(root)); cert=certification(root);
-    runtime=runtimeImports(S.inside(root,'nexus-root'));
+    const missingDirectories=missingLaunchDirectories(S.inside(root,'nexus-root'));
+    runtime=missingDirectories.length?{ready:false,reason:'required-launch-directories-missing',missingDirectories}:runtimeImports(S.inside(root,'nexus-root'));
     if(runtime.ready&&(!S.fs.existsSync(S.inside(root,'nexus-root/runtime/pwsh/pwsh'))||!S.fs.existsSync(S.inside(root,'state/runtime.json'))))runtime={...runtime,ready:false,reason:'runtime-composition-incomplete'};
   }
   return {benchmarkId:S.manifest.benchmarkId,sourceGuard:guard,initialized,runtime,thresholds,certification:cert,liveReady:guard.pass&&runtime.ready&&cert?.health==='HEALTHY'};
 }
-module.exports={runtimeImports,runtimePackages,immutableRuntimeFiles,sourceGuard,route,identity,certification,doctor};
+module.exports={requiredLaunchDirectories,missingLaunchDirectories,runtimeImports,runtimePackages,immutableRuntimeFiles,sourceGuard,route,identity,certification,doctor};

@@ -9,7 +9,7 @@ function init(root,options={}) {
   const install=S.inside(root,'nexus-root');
   const tracked=S.git(S.REPO,['ls-tree','-r','--name-only',S.manifest.baseSha]).split('\n').filter(p=>/^(config|scripts|bin|runtime|ui|skills|docs)\//.test(p)&&!p.startsWith('runtime/node/')&&!p.startsWith('runtime/pwsh/'));
   for(const p of tracked){if(S.secretName(p))continue;const bytes=execFileSync('git',['show',S.manifest.baseSha+':'+p],{cwd:S.REPO,maxBuffer:64*1024*1024,stdio:['ignore','pipe','pipe']});const dest=S.inside(install,p);S.fs.mkdirSync(S.path.dirname(dest),{recursive:true});S.fs.writeFileSync(dest,bytes);}
-  S.fs.mkdirSync(S.inside(install,'data'),{recursive:true});
+  createLaunchDirectories(install);
   const policyFile=S.inside(install,'config/routing-policy.json');S.write(policyFile,require('./arms.cjs').configure(S.read(policyFile),'production'));
   S.fs.copyFileSync(S.inside(install,'config/settings.yaml'),S.inside(install,'data/settings.yaml'));
   const fixture=require('../../../benchmarks/ccv2-lhcb-01/fixture/create-fixture.cjs').createFixture(S.inside(root,'workspace'));S.write(S.inside(root,'state/fixture.json'),fixture);
@@ -32,7 +32,7 @@ function stageRuntime(root,source) {
   execFileSync(node,[S.inside(install,'scripts/Remove-MuseContributorEgressPatch.cjs'),install],{env,stdio:['ignore','pipe','pipe'],timeout:15000});
   for(const script of ['Patch-ControlRoomUi.ps1','Patch-NexusUi.ps1','Install-ControllerPresets.ps1','Install-MusePreset.ps1'])execFileSync(pwsh,['-NoLogo','-NoProfile','-File',S.inside(install,'scripts/'+script),'-InstallRoot',install],{env,stdio:['ignore','pipe','pipe'],maxBuffer:4*1024*1024,timeout:30000});
   execFileSync(node,[S.inside(install,'scripts/Verify-RoutingIntegrityComposition.mjs'),install],{env,stdio:['ignore','pipe','pipe'],timeout:15000});
-  for(const p of ['data/routing/states','data/completion/records','data/evaluation'])S.fs.mkdirSync(S.inside(install,p),{recursive:true});
+  createLaunchDirectories(install);
   function restrict(dir){S.fs.chmodSync(dir,0o700);for(const e of S.fs.readdirSync(dir,{withFileTypes:true})){const f=S.path.join(dir,e.name);if(e.isSymbolicLink()){if(!S.fs.realpathSync(f).startsWith(install+S.path.sep))S.fail('runtime-link-escape');continue;}if(e.isDirectory())restrict(f);else S.fs.chmodSync(f,0o600);}}restrict(S.inside(install,'data'));
   // Install the canonical Linux launchers into the expected bin location.
   for(const p of S.fs.readdirSync(S.inside(install,'bin/linux')).filter(x=>x.endsWith('.sh'))){const dest=S.inside(install,'bin/'+p.slice(0,-3));S.fs.copyFileSync(S.inside(install,'bin/linux/'+p),dest);S.fs.chmodSync(dest,0o755);}
@@ -55,4 +55,5 @@ function copyRuntimeDependencies(source,install) {
     S.fs.cpSync(from,to,{recursive:true,dereference:true,filter:f=>{if(S.fs.lstatSync(f).isSymbolicLink()){const target=S.fs.realpathSync(f);if(!['app/node_modules','runtime/node','runtime/pwsh'].some(p=>target===S.path.join(source,p)||target.startsWith(S.path.join(source,p)+S.path.sep)))S.fail('runtime-source-link-escape');}return true;}});
   }
 }
-module.exports={init,stageRuntime,copyRuntimeDependencies};
+function createLaunchDirectories(install){for(const p of D.requiredLaunchDirectories)S.fs.mkdirSync(S.inside(install,p),{recursive:true,mode:0o700});}
+module.exports={init,stageRuntime,copyRuntimeDependencies,createLaunchDirectories};
