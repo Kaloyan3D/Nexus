@@ -1,4 +1,6 @@
-# Task 2 adversarial audit
+# Task 2 adversarial audit (historical)
+
+This records commit b98a3d6. Task 3 supersedes the missing full-workload/final-grader statements; live pressure, runtime checkpoint/restore and tool confinement remain blocked.
 
 LHCB-02 is not currently a valid measurement of CCv2 benefit. Its offline calibration harness is hardened, but native pressure growth, progressive checkpoint/restore, full causal coverage and agent-tool isolation remain unverified or unimplemented. Official eligibility always fails closed. No provider/network calls, live calibration, official benchmark, production changes, threshold changes, push or merge were performed.
 

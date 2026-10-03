@@ -8,7 +8,7 @@ const definition=require(path.join(BENCH,'manifest.json'));
 const manifest={...definition,baseSha:definition.productionBaseSha,protectedPaths:legacy.manifest.protectedPaths,
   stages:['T00',...definition.calibration.phases],checkpoints:Object.keys(definition.checkpoints)};
 function contractHash(){
-  const files=['manifest.json','phase-manifest.json','obligations.json','CONTRACT.md','fixture/create-fixture.cjs',...fs.readdirSync(path.join(BENCH,'grader')).sort().map(f=>'grader/'+f),
+  const files=['manifest.json','phase-manifest.json','obligations.json','CONTRACT.md',...fs.readdirSync(path.join(BENCH,'fixture')).sort().map(f=>'fixture/'+f),...fs.readdirSync(path.join(BENCH,'grader')).sort().map(f=>'grader/'+f),
     ...fs.readdirSync(path.join(BENCH,'prompts')).sort().map(f=>'prompts/'+f)];
   const code=fs.readdirSync(__dirname).filter(f=>f.endsWith('.cjs')).sort();
   const reused=fs.readdirSync(path.resolve(__dirname,'../ccv2-lhcb')).filter(f=>f.endsWith('.cjs')).sort().map(f=>f+'\0'+fs.readFileSync(path.resolve(__dirname,'../ccv2-lhcb',f),'utf8')).join('\0');
@@ -24,7 +24,7 @@ S.rootOf=raw=>{
 S.owned=root=>{root=S.rootOf(root);const m=S.read(S.inside(root,'state/identity.json'));
   if(m.benchmarkId!==manifest.benchmarkId||m.root!==root||m.baseSha!==manifest.baseSha||m.contractHash!==contractHash())S.fail('lhcb02-unowned-root');return root;};
 S.ready=root=>{S.owned(root);if(fs.existsSync(S.inside(root,'state/restore-lock.json')))S.fail('restore-incomplete');};
-S.validateManifest=m=>{if(m.benchmarkId!=='CCV2-LHCB-02'||m.officialExecutionEnabled!==false||m.nodeVersion!=='v24.18.1'||
+S.validateManifest=m=>{if(m.benchmarkId!=='CCV2-LHCB-02'||m.status!=='UNFROZEN'||m.liveCalibration!=='LIVE_CALIBRATION_REQUIRED'||m.officialExecutionEnabled!==false||m.nodeVersion!=='v24.18.1'||
   legacy.json(m.arms)!==legacy.json(legacy.manifest.arms)||legacy.json(m.acceptance)!==legacy.json(legacy.manifest.acceptance)||
   m.baseSha!==legacy.manifest.baseSha||m.productionBaseSha!==legacy.manifest.baseSha||m.provider!==legacy.manifest.provider||m.model!==legacy.manifest.model||legacy.json(definition.checkpoints['CP-500'])!==legacy.json([480000,550000])||legacy.json(definition.checkpoints['CP-750'])!==legacy.json([720000,790000])||m.calibration.mode!=='off'||m.calibration.activation!=='pressure'||m.calibration.compilerExecutions!==0||m.calibration.compaction!==false||
   m.calibration.minimumPhaseGrowth!==10000||m.calibration.maximumPhaseShare!==0.4||m.calibration.diagnosticExampleLimit!==8||legacy.json(m.calibration.phases)!==legacy.json(['E01','E02','E03','E04','E05','E06']))S.fail('lhcb02-manifest-invalid');return true;};

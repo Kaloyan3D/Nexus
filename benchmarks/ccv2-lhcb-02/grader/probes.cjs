@@ -69,6 +69,7 @@ function grade(dir,ids){
       return {restored:restore(store,document,actor),revoked:restore(store,document,{...actor,revoked:true}),future:restore(store,{...document,version:97},actor),history:store.history()};
     `);assert.equal(r.restored.status,200);assert.equal(r.restored.state.revision,1);assert.equal(r.restored.state.balance,23);assert.equal(r.restored.state.auditSuccess,true);assert.equal(r.revoked.status,403);assert.equal(r.future.status,422);assert.equal(r.history.length,1);
   });
+  results.push(...require('./late-probes.cjs').grade(dir,ids).probes);
   return {pass:results.length>0&&results.every(x=>x.pass),probes:results};
 }
 if(require.main===module)process.stdout.write(JSON.stringify(grade(path.resolve(process.argv[2]),JSON.parse(process.argv[3])))+'\n');

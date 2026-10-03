@@ -6,9 +6,30 @@
       "title": "Durable engineering contract",
       "dependsOn": [],
       "status": "implemented",
-      "evidence": [],
+      "evidence": [
+        "src/service.ts",
+        "src/persistence.ts",
+        "README.md",
+        "tools/verify.cjs"
+      ],
       "acceptance": "turn completed with exact prompt provenance",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "dependencyClaim": "Executable early cases and integration probes; no live pressure claim.",
+      "mode": "implementation",
+      "obligations": [
+        "tenant-ownership",
+        "injected-clock"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/T00-engineering.md"
     },
     {
       "id": "E01",
@@ -30,7 +51,23 @@
       "acceptance": "node tools/verify.cjs E01",
       "newFact": "Resolve signed integer and currency boundary behavior in imported posting batches.",
       "laterConsumer": "E02",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "dependencyClaim": "Executable early cases and integration probes; no live pressure claim.",
+      "mode": "implementation",
+      "obligations": [
+        "integer-money",
+        "currency-scale"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E01-engineering.md"
     },
     {
       "id": "E02",
@@ -49,7 +86,23 @@
       "acceptance": "node tools/verify.cjs E02",
       "newFact": "Migrate legacy cents without losing identifiers; reject unknown schemas before any write.",
       "laterConsumer": "E03",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "dependencyClaim": "Executable early cases and integration probes; no live pressure claim.",
+      "mode": "implementation",
+      "obligations": [
+        "immutable-import",
+        "unknown-schema"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E02-engineering.md"
     },
     {
       "id": "E03",
@@ -75,10 +128,25 @@
         "src/persistence.ts",
         "cli.cjs"
       ],
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes",
+      "dependencyClaim": "Executable early cases and integration probes; no live pressure claim.",
       "causalProbeIds": [
         "migration-api-causal-bridge"
-      ]
+      ],
+      "mode": "implementation",
+      "obligations": [
+        "idempotency-before-revision"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E03-engineering.md"
     },
     {
       "id": "E04",
@@ -98,7 +166,23 @@
       "acceptance": "node tools/verify.cjs E04",
       "newFact": "Repair duplicate key and compare-and-swap outcomes across interleavings.",
       "laterConsumer": "E05",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "dependencyClaim": "Executable early cases and integration probes; no live pressure claim.",
+      "mode": "implementation",
+      "obligations": [
+        "tenant-scoped-keys",
+        "single-commit"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E04-engineering.md"
     },
     {
       "id": "E05",
@@ -123,7 +207,23 @@
         "src/persistence.ts",
         "cli.cjs"
       ],
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "dependencyClaim": "Executable early cases and integration probes; no live pressure claim.",
+      "mode": "implementation",
+      "obligations": [
+        "deny-cross-tenant",
+        "redact-audit"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E05-engineering.md"
     },
     {
       "id": "E06",
@@ -145,369 +245,719 @@
       "acceptance": "node tools/verify.cjs E06",
       "newFact": "Choose committed state at each journal crash cut; audit only durable transactions.",
       "laterConsumer": "E10",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes",
+      "dependencyClaim": "Executable early cases and integration probes; no live pressure claim.",
       "causalProbeIds": [
         "recovery-causal-bridge"
-      ]
+      ],
+      "mode": "implementation",
+      "obligations": [
+        "durable-prefix",
+        "no-success-before-commit"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E06-engineering.md"
     },
     {
       "id": "E07",
-      "title": "CLI machine contract",
+      "title": "CLI machine output",
       "dependsOn": [
         "E03"
       ],
-      "subsystem": "cli",
-      "status": "design",
-      "challenge": "Add JSON streams and stable exit codes with parser transcripts.",
+      "subsystem": "cli-adapter",
+      "status": "implemented",
+      "mode": "implementation",
       "evidence": [
-        "planned/E07/cli-evidence-set"
+        "src/cli-adapter.ts",
+        "evidence/E07/cases.jsonl",
+        "evidence/E07/incident.json",
+        "evidence/E07/contract.md",
+        "evidence/E07/trace.json"
       ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Add JSON streams and stable exit codes with parser transcripts.",
-      "laterConsumer": "E08",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "cli-json"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E07-engineering.md"
     },
     {
       "id": "E08",
-      "title": "Legacy adapter round trips",
+      "title": "Opaque legacy import",
       "dependsOn": [
         "E02",
         "E07"
       ],
-      "subsystem": "legacy-adapters",
-      "status": "design",
-      "challenge": "Integrate legacy date and identifier encodings from independent vendor fixtures.",
+      "subsystem": "legacy",
+      "status": "implemented",
+      "mode": "implementation",
       "evidence": [
-        "planned/E08/legacy-adapters-evidence-set"
+        "src/legacy.ts",
+        "evidence/E08/cases.jsonl",
+        "evidence/E08/incident.json",
+        "evidence/E08/contract.md",
+        "evidence/E08/trace.json"
       ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Integrate legacy date and identifier encodings from independent vendor fixtures.",
-      "laterConsumer": "E13",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "identifier-roundtrip"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E08-engineering.md"
     },
     {
       "id": "E09",
-      "title": "Service ownership split",
+      "title": "Corrupt segment quarantine",
       "dependsOn": [
-        "E01",
-        "E05"
+        "E06",
+        "E08"
       ],
-      "subsystem": "services",
-      "status": "design",
-      "challenge": "Move transaction orchestration behind a service boundary; prevent direct API store writes.",
+      "subsystem": "segments",
+      "status": "implemented",
+      "mode": "implementation",
       "evidence": [
-        "planned/E09/services-evidence-set"
+        "src/segments.ts",
+        "evidence/E09/cases.jsonl",
+        "evidence/E09/incident.json",
+        "evidence/E09/contract.md",
+        "evidence/E09/trace.json"
       ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Move transaction orchestration behind a service boundary; prevent direct API store writes.",
-      "laterConsumer": "E11",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "quarantine-original"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E09-engineering.md"
     },
     {
       "id": "E10",
-      "title": "Corrupt segment quarantine",
+      "title": "Audit and observability",
       "dependsOn": [
-        "E02",
-        "E06"
+        "E05",
+        "E09"
       ],
-      "subsystem": "persistence",
-      "status": "design",
-      "challenge": "Handle checksum, partial-write and unknown-format evidence without overwriting originals.",
+      "subsystem": "observability",
+      "status": "implemented",
+      "mode": "implementation",
       "evidence": [
-        "planned/E10/persistence-evidence-set"
+        "src/observability.ts",
+        "evidence/E10/cases.jsonl",
+        "evidence/E10/incident.json",
+        "evidence/E10/contract.md",
+        "evidence/E10/trace.json"
       ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Handle checksum, partial-write and unknown-format evidence without overwriting originals.",
-      "laterConsumer": "E13",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "bounded-observability"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E10-engineering.md"
     },
     {
       "id": "E11",
       "title": "Partial implementation review",
       "dependsOn": [
-        "E04",
-        "E09"
+        "E01",
+        "E03",
+        "E06",
+        "E10"
       ],
-      "subsystem": "tests",
-      "status": "design",
-      "challenge": "Apply an independently supplied candidate diff and locate regression-causing assumptions.",
+      "subsystem": "review",
+      "status": "implemented",
+      "mode": "implementation",
       "evidence": [
-        "planned/E11/tests-evidence-set"
+        "src/review.ts",
+        "evidence/E11/cases.jsonl",
+        "evidence/E11/incident.json",
+        "evidence/E11/contract.md",
+        "evidence/E11/trace.json"
       ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Apply an independently supplied candidate diff and locate regression-causing assumptions.",
-      "laterConsumer": "E18",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "review-commit-evidence"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E11-engineering.md"
     },
     {
       "id": "E12",
-      "title": "Reserved balance requirement",
+      "title": "Reservations and available balance",
       "dependsOn": [
-        "E01",
-        "E03",
-        "E09"
+        "E04",
+        "E05"
       ],
-      "subsystem": "domain",
-      "status": "design",
-      "challenge": "Introduce reservations that invalidate the assumption that all stored balance is spendable.",
+      "subsystem": "reservations",
+      "status": "implemented",
+      "mode": "implementation",
       "evidence": [
-        "planned/E12/domain-evidence-set"
+        "src/reservations.ts",
+        "evidence/E12/cases.jsonl",
+        "evidence/E12/incident.json",
+        "evidence/E12/contract.md",
+        "evidence/E12/trace.json"
       ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Introduce reservations that invalidate the assumption that all stored balance is spendable.",
-      "laterConsumer": "E13",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "available-balance"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E12-engineering.md"
     },
     {
       "id": "E13",
-      "title": "Index performance regression",
+      "title": "Indexed history performance",
       "dependsOn": [
-        "E08",
-        "E10",
+        "E02",
+        "E06",
         "E12"
       ],
-      "subsystem": "performance",
-      "status": "design",
-      "challenge": "Diagnose measured query plans on deterministic skewed account distribution.",
+      "subsystem": "history-index",
+      "status": "implemented",
+      "mode": "implementation",
       "evidence": [
-        "planned/E13/performance-evidence-set"
+        "src/history-index.ts",
+        "evidence/E13/cases.jsonl",
+        "evidence/E13/incident.json",
+        "evidence/E13/contract.md",
+        "evidence/E13/trace.json"
       ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Diagnose measured query plans on deterministic skewed account distribution.",
-      "laterConsumer": "E21",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "bounded-history-query"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E13-engineering.md"
     },
     {
       "id": "E14",
-      "title": "Retry taxonomy",
+      "title": "Ambiguous commit retry",
       "dependsOn": [
         "E02",
+        "E03",
         "E04",
         "E06"
       ],
-      "subsystem": "recovery",
-      "status": "design",
-      "challenge": "Use crash and lock traces to distinguish replayable and terminal failures.",
+      "subsystem": "retry",
+      "status": "implemented",
+      "mode": "implementation",
       "evidence": [
-        "planned/E14/recovery-evidence-set"
+        "src/retry.ts",
+        "evidence/E14/cases.jsonl",
+        "evidence/E14/incident.json",
+        "evidence/E14/contract.md",
+        "evidence/E14/trace.json"
       ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Use crash and lock traces to distinguish replayable and terminal failures.",
-      "laterConsumer": "E21",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "retry-taxonomy"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E14-engineering.md"
     },
     {
       "id": "E15",
-      "title": "Delegated grants",
-      "dependsOn": [
-        "E05",
-        "E09"
-      ],
-      "subsystem": "authorization",
-      "status": "design",
-      "challenge": "Integrate expiring grants and revocation evidence with injected time.",
-      "evidence": [
-        "planned/E15/authorization-evidence-set"
-      ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Integrate expiring grants and revocation evidence with injected time.",
-      "laterConsumer": "E18",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
-    },
-    {
-      "id": "E16",
-      "title": "Rollback under mixed readers",
-      "dependsOn": [
-        "E02",
-        "E08",
-        "E10"
-      ],
-      "subsystem": "migrations",
-      "status": "design",
-      "challenge": "Use reader compatibility matrix to design non-destructive rollback.",
-      "evidence": [
-        "planned/E16/migrations-evidence-set"
-      ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Use reader compatibility matrix to design non-destructive rollback.",
-      "laterConsumer": "E19",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
-    },
-    {
-      "id": "E17",
-      "title": "Repository interface refactor",
-      "dependsOn": [
-        "E02",
-        "E07",
-        "E12"
-      ],
-      "subsystem": "services",
-      "status": "design",
-      "challenge": "Unify CLI and API repository seams without flattening reserved balance semantics.",
-      "evidence": [
-        "planned/E17/services-evidence-set"
-      ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Unify CLI and API repository seams without flattening reserved balance semantics.",
-      "laterConsumer": "E18",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
-    },
-    {
-      "id": "E18",
-      "title": "Integration failure triage",
-      "dependsOn": [
-        "E11",
-        "E15",
-        "E17"
-      ],
-      "subsystem": "tests",
-      "status": "design",
-      "challenge": "Repair newly supplied end-to-end cases crossing grants, reservations and migration.",
-      "evidence": [
-        "planned/E18/tests-evidence-set"
-      ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Repair newly supplied end-to-end cases crossing grants, reservations and migration.",
-      "laterConsumer": "E24",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
-    },
-    {
-      "id": "E19",
-      "title": "Export backward compatibility",
-      "dependsOn": [
-        "E08",
-        "E16",
-        "E17"
-      ],
-      "subsystem": "compatibility",
-      "status": "design",
-      "challenge": "Integrate consumer-specific export contracts and binary-safe newline rules.",
-      "evidence": [
-        "planned/E19/compatibility-evidence-set"
-      ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Integrate consumer-specific export contracts and binary-safe newline rules.",
-      "laterConsumer": "E24",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
-    },
-    {
-      "id": "E20",
-      "title": "Incident reconstruction",
+      "title": "Grant revocation boundary",
       "dependsOn": [
         "E03",
         "E05",
+        "E14"
+      ],
+      "subsystem": "grants",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/grants.ts",
+        "evidence/E15/cases.jsonl",
+        "evidence/E15/incident.json",
+        "evidence/E15/contract.md",
+        "evidence/E15/trace.json"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "grant-revocation"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E15-engineering.md"
+    },
+    {
+      "id": "E16",
+      "title": "Mixed-reader rollback",
+      "dependsOn": [
+        "E02",
+        "E08",
+        "E09"
+      ],
+      "subsystem": "rollback",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/rollback.ts",
+        "evidence/E16/cases.jsonl",
+        "evidence/E16/incident.json",
+        "evidence/E16/contract.md",
+        "evidence/E16/trace.json"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "rollback-readers"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E16-engineering.md"
+    },
+    {
+      "id": "E17",
+      "title": "Shared service refactor",
+      "dependsOn": [
+        "E02",
+        "E07",
+        "E12",
         "E15"
       ],
-      "subsystem": "audit",
-      "status": "design",
-      "challenge": "Reconcile request, grant and journal traces to explain a denied replay incident.",
+      "subsystem": "gateway",
+      "status": "implemented",
+      "mode": "implementation",
       "evidence": [
-        "planned/E20/audit-evidence-set"
+        "src/gateway.ts",
+        "evidence/E17/cases.jsonl",
+        "evidence/E17/incident.json",
+        "evidence/E17/contract.md",
+        "evidence/E17/trace.json"
       ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Reconcile request, grant and journal traces to explain a denied replay incident.",
-      "laterConsumer": "E21",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "service-boundary"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E17-engineering.md"
+    },
+    {
+      "id": "E18",
+      "title": "Reconciliation investigation",
+      "dependsOn": [
+        "E06",
+        "E11",
+        "E13",
+        "E17"
+      ],
+      "subsystem": "reconcile",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/reconcile.ts",
+        "evidence/E18/cases.jsonl",
+        "evidence/E18/incident.json",
+        "evidence/E18/contract.md",
+        "evidence/E18/trace.json"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "reconciled-audit"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E18-engineering.md"
+    },
+    {
+      "id": "E19",
+      "title": "Compatible export",
+      "dependsOn": [
+        "E08",
+        "E12",
+        "E16",
+        "E17"
+      ],
+      "subsystem": "exporter",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/exporter.ts",
+        "evidence/E19/cases.jsonl",
+        "evidence/E19/incident.json",
+        "evidence/E19/contract.md",
+        "evidence/E19/trace.json"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "export-format"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E19-engineering.md"
+    },
+    {
+      "id": "E20",
+      "title": "Operational incident",
+      "dependsOn": [
+        "E03",
+        "E05",
+        "E10",
+        "E15",
+        "E18"
+      ],
+      "subsystem": "operations",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/operations.ts",
+        "evidence/E20/cases.jsonl",
+        "evidence/E20/incident.json",
+        "evidence/E20/contract.md",
+        "evidence/E20/trace.json"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "incident-taxonomy"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E20-engineering.md"
     },
     {
       "id": "E21",
-      "title": "Backpressure and cancellation",
+      "title": "Cancellation edge case",
       "dependsOn": [
-        "E13",
-        "E14",
-        "E20"
+        "E04",
+        "E06",
+        "E12",
+        "E14"
       ],
-      "subsystem": "performance",
-      "status": "design",
-      "challenge": "Use queue traces to prevent abandoned requests from committing mutations.",
+      "subsystem": "cancellation",
+      "status": "implemented",
+      "mode": "implementation",
       "evidence": [
-        "planned/E21/performance-evidence-set"
+        "src/cancellation.ts",
+        "evidence/E21/cases.jsonl",
+        "evidence/E21/incident.json",
+        "evidence/E21/contract.md",
+        "evidence/E21/trace.json"
       ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Use queue traces to prevent abandoned requests from committing mutations.",
-      "laterConsumer": "E23",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "cancel-before-commit"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E21-engineering.md"
     },
     {
       "id": "E22",
-      "title": "Snapshot restore protocol",
+      "title": "API client compatibility",
       "dependsOn": [
-        "E06",
-        "E10",
-        "E16"
+        "E03",
+        "E07",
+        "E16",
+        "E19"
       ],
-      "subsystem": "recovery",
-      "status": "design",
-      "challenge": "Reconcile committed prefix and checkpoints against recovery manifests.",
+      "subsystem": "client",
+      "status": "implemented",
+      "mode": "implementation",
       "evidence": [
-        "planned/E22/recovery-evidence-set"
+        "src/client.ts",
+        "evidence/E22/cases.jsonl",
+        "evidence/E22/incident.json",
+        "evidence/E22/contract.md",
+        "evidence/E22/trace.json"
       ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Reconcile committed prefix and checkpoints against recovery manifests.",
-      "laterConsumer": "E24",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "client-response-identity"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E22-engineering.md"
     },
     {
       "id": "E23",
-      "title": "Batch atomicity",
+      "title": "Atomic secure batch",
       "dependsOn": [
-        "E04",
+        "E01",
+        "E05",
         "E12",
-        "E21"
+        "E15",
+        "E21",
+        "E22"
       ],
-      "subsystem": "concurrency",
-      "status": "design",
-      "challenge": "Handle multi-account reservations and partial authorization failures atomically.",
+      "subsystem": "batch",
+      "status": "implemented",
+      "mode": "implementation",
       "evidence": [
-        "planned/E23/concurrency-evidence-set"
+        "src/batch.ts",
+        "evidence/E23/cases.jsonl",
+        "evidence/E23/incident.json",
+        "evidence/E23/contract.md",
+        "evidence/E23/trace.json"
       ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Handle multi-account reservations and partial authorization failures atomically.",
-      "laterConsumer": "E24",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "batch-atomicity"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E23-engineering.md"
     },
     {
       "id": "E24",
-      "title": "Operational verification",
+      "title": "Release evidence review",
       "dependsOn": [
+        "E09",
+        "E11",
+        "E16",
         "E18",
-        "E19",
-        "E22",
+        "E20",
         "E23"
       ],
-      "subsystem": "tests",
-      "status": "design",
-      "challenge": "Validate deterministic operator commands against the integrated fixture.",
+      "subsystem": "readiness",
+      "status": "implemented",
+      "mode": "implementation",
       "evidence": [
-        "planned/E24/tests-evidence-set"
+        "src/readiness.ts",
+        "evidence/E24/cases.jsonl",
+        "evidence/E24/incident.json",
+        "evidence/E24/contract.md",
+        "evidence/E24/trace.json"
       ],
-      "acceptance": "independent hidden regression cases plus integration tests",
-      "newFact": "Validate deterministic operator commands against the integrated fixture.",
-      "laterConsumer": "T99",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Dependencies describe earlier contracts or consumed artifacts; concrete multi-module bridges are separately probed.",
+      "obligations": [
+        "release-evidence"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E24-engineering.md"
     },
     {
       "id": "T99",
-      "title": "Final integration release candidate",
+      "title": "Integrated release candidate",
       "dependsOn": [
         "E01",
         "E02",
+        "E03",
         "E04",
         "E05",
         "E06",
+        "E07",
         "E08",
+        "E09",
+        "E10",
+        "E11",
         "E12",
+        "E13",
+        "E14",
         "E15",
         "E16",
+        "E17",
+        "E18",
         "E19",
+        "E20",
+        "E21",
         "E22",
+        "E23",
         "E24"
       ],
-      "status": "design",
-      "evidence": [],
-      "acceptance": "hidden grader: tests pass; critical 100%; total >=95%; violations zero",
-      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+      "status": "implemented",
+      "mode": "implementation",
+      "subsystem": "application",
+      "evidence": [
+        "src/application.ts",
+        "evidence/T99/cases.jsonl",
+        "evidence/T99/incident.json"
+      ],
+      "acceptance": "full objective correctness and hidden obligation grader",
+      "obligations": [
+        "integrated-release"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/T99-engineering.md"
     }
   ],
-  "scopeNote": "Edges are design obligations, not certified memory continuity. E07-E24/T99 remain design only; calibration cannot authorize benefit scoring."
+  "scopeNote": "Full offline candidate. UNFROZEN / LIVE_CALIBRATION_REQUIRED. Meaningful native pressure is not inferred from phase count or bytes."
 }

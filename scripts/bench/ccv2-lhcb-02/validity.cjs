@@ -44,7 +44,7 @@ function calibration(phases,requests){
   return {status:reasons.length?'FAIL':'PASS',averagePressureGrowth:average,medianPressureGrowth:median,minimumPressureGrowth:growth[0]??null,targetPhaseGrowth:[15000,25000],reasons:[...new Set(reasons)]};
 }
 function workload(evidence){
-  // This delivery has no verified progressive snapshot/restore or final grader.
+  // This delivery has no verified progressive runtime snapshot/restore or live pressure.
   // A boolean certificate or caller-supplied pressure must never enable scoring.
   const reasons=['official-implementation-disabled','natural-CP-500-not-proven','arm-fairness-not-proven','hidden-grader-isolation-not-proven'];
   return {verdict:'WORKLOAD_INADEQUATE',outcome:'INSUFFICIENT_DATA',ccv2BenefitVerdict:'NOT_MEASURED',officialBenefitEligible:false,reasons};

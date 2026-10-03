@@ -69,9 +69,13 @@ function oracle(id,x){
     const committed=[];for(const r of x.journal){if(r.state!=='committed'||r.checksum!=='valid')break;committed.push(r);}const last=committed.at(-1);
     return {revision:last?.revision??0,balance:last?.balance??0,retry:['lock','timeout'].includes(x.failure),auditSuccess:!!last,quarantined:x.journal.some(r=>r.checksum==='invalid')};
   }
+  if(id==='T99')return require('./final.cjs').cases().find(r=>JSON.stringify(r.input)===JSON.stringify(x))?.expected;
+  const name=require('./late.cjs').specs.find(r=>r[0]===id)?.[1];if(name)return require('./late.cjs').expected(name,x);
   throw Error('unknown-phase');
 }
 function cases(id){
+  if(id==='T99')return require('./final.cjs').cases();
+  if(/^E(?:0[7-9]|1[0-9]|2[0-4])$/.test(id))return require('./late.cjs').cases(id);
   const rows=[];const add=x=>rows.push({caseId:id+'-'+String(rows.length+1).padStart(4,'0'),input:x,expected:oracle(id,x)});
   if(id==='E01')for(const currency of [...Object.keys(scales),'XXX'])for(const amount of amounts)for(const kind of ['transfer','adjustment','reversal','withdrawal'])for(const account of ['', '001'])add({id:account,currency,amount,kind});
   if(id==='E02')for(const version of [1,2,3,4])for(const account of ids)for(const amount of amounts){const row={id:account,currency:account==='é'?'JPY':'USD',kind:amount<0?'adjustment':'transfer',[version===1?'cents':'amount']:amount};add({document:{version,[version===1?'entries':'records']:[row],writerRevision:17},readerVersion:3,originalBackup:'retained'});}
@@ -84,7 +88,7 @@ function cases(id){
   }
   return [...new Map(rows.map(r=>[JSON.stringify(r.input),r])).values()].map((r,i)=>({...r,caseId:id+'-'+String(i+1).padStart(4,'0')}));
 }
-const modules={E01:'domain',E02:'migrations',E03:'api',E04:'concurrency',E05:'authorization',E06:'recovery'};
+const modules={E01:'domain',E02:'migrations',E03:'api',E04:'concurrency',E05:'authorization',E06:'recovery',...Object.fromEntries(require('./late.cjs').specs.map(r=>[r[0],r[1]])),T99:'application'};
 const verifier=`'use strict';
 const fs=require('node:fs'),assert=require('node:assert/strict'),path=require('node:path');
 const phase=process.argv[2];
@@ -92,7 +96,7 @@ const mapping=${JSON.stringify(modules)};
 if(!Object.hasOwn(mapping,phase))throw Error('unknown-phase');
 const rows=fs.readFileSync(path.join(__dirname,'../evidence',phase,'cases.jsonl'),'utf8').trim().split('\\n').map(JSON.parse);
 const impl=require(path.join(__dirname,'../src',mapping[phase]+'.ts'));
-let failures=0;const diagnostics=new Set();for(const row of rows){let actual;const original=JSON.stringify(row.input);try{actual=impl.evaluate(row.input);assert.deepEqual(actual,row.expected);assert.equal(JSON.stringify(row.input),original);}catch{failures++;const signature=JSON.stringify([row.expected,actual??null,JSON.stringify(row.input)!==original]);if(process.argv.includes('--diagnose')&&diagnostics.size<8&&!diagnostics.has(signature)){diagnostics.add(signature);process.stdout.write(JSON.stringify({caseId:row.caseId,input:row.input,expected:row.expected,actual:actual??null,inputMutated:JSON.stringify(row.input)!==original})+'\\n');}}}
+let failures=0;const diagnostics=new Set();for(const row of rows){let actual;const original=JSON.stringify(row.input);try{actual=impl.evaluate(row.input);if(phase==='T99'){assert.equal(actual.status,row.expected.status);assert.equal(Array.isArray(actual.history)&&actual.history.length>0,row.expected.hasCommit);}else assert.deepEqual(actual,row.expected);assert.equal(JSON.stringify(row.input),original);}catch{failures++;const signature=JSON.stringify([row.expected,actual??null,JSON.stringify(row.input)!==original]);if(process.argv.includes('--diagnose')&&diagnostics.size<8&&!diagnostics.has(signature)){diagnostics.add(signature);process.stdout.write(JSON.stringify({caseId:row.caseId,input:row.input,expected:row.expected,actual:actual??null,inputMutated:JSON.stringify(row.input)!==original})+'\\n');}}}
 process.stdout.write(JSON.stringify({phase,cases:rows.length,failures,status:failures?'FAIL':'PASS'})+'\\n');process.exitCode=failures?1:0;
 `;
 const persistence=`type Account = {id:string,balance:number,revision:number};
@@ -116,6 +120,18 @@ function createStore(seed:Account[]=[]){
       const result={status:201,transactionId:'txn-'+(journal.length+1),revision:next.revision};
       journal.push({tenant,key,state:'committed',checksum:'valid',revision:next.revision,balance});
       accounts(tenant).set(posting.id,next);replays(tenant).set(key,{fingerprint,result});return {...result};
+    },
+    applyBatch(tenant:string,commands:any[]){
+      // Preflight all writes on staged revisions; no publication can precede validation.
+      const staged=new Map<string,Account>();const stagedKeys=new Set<string>();
+      for(const c of commands){
+        if(stagedKeys.has(c.key)||replays(tenant).has(c.key))throw Error('duplicate-commit');
+        stagedKeys.add(c.key);const p=c.posting,current=staged.get(p.id)||this.read(tenant,p.id);
+        if(current.revision!==c.expectedRevision)throw Error('revision-conflict');
+        if(!Number.isSafeInteger(p.amount)||!Number.isSafeInteger(current.balance+p.amount))throw Error('balance-overflow');
+        staged.set(p.id,{id:p.id,balance:current.balance+p.amount,revision:current.revision+1});
+      }
+      return commands.map(c=>this.commit(tenant,c.key,JSON.stringify(c.posting),c.posting,c.expectedRevision));
     },
     history(){return journal.map(row=>({...row}));}
   };
@@ -170,7 +186,7 @@ module.exports={restore};
 `};
   return {};
 }
-function phaseFiles(id){if(!modules[id])throw Error('unknown-phase');const rows=cases(id);return {...integrationFiles(id),[`src/${modules[id]}.ts`]:sources[modules[id]],[`evidence/${id}/cases.jsonl`]:rows.map(JSON.stringify).join('\n')+'\n',[`evidence/${id}/incident.json`]:JSON.stringify({phase:id,component:modules[id],symptom:{E01:'fractional and unsafe postings accepted',E02:'future schema coerced and legacy identifiers altered',E03:'successful replay rejected by newer revision',E04:'same-key racing writers commit twice',E05:'cross-tenant writer accepted; sensitive request fields logged',E06:'prepared suffix treated as committed after restart'}[id],axes:'See distinct inputs and expected business outcomes in cases.jsonl',caseCount:rows.length,source:`src/${modules[id]}.ts`,reproduce:`node tools/verify.cjs ${id} --diagnose`},null,2)+'\n'};}
+function phaseFiles(id){if(id==='T99')return require('./final.cjs').phaseFiles();if(/^E(?:0[7-9]|1[0-9]|2[0-4])$/.test(id))return require('./late.cjs').phaseFiles(id);if(!modules[id])throw Error('unknown-phase');const rows=cases(id);return {...integrationFiles(id),[`src/${modules[id]}.ts`]:sources[modules[id]],[`evidence/${id}/cases.jsonl`]:rows.map(JSON.stringify).join('\n')+'\n',[`evidence/${id}/incident.json`]:JSON.stringify({phase:id,component:modules[id],symptom:{E01:'fractional and unsafe postings accepted',E02:'future schema coerced and legacy identifiers altered',E03:'successful replay rejected by newer revision',E04:'same-key racing writers commit twice',E05:'cross-tenant writer accepted; sensitive request fields logged',E06:'prepared suffix treated as committed after restart'}[id],axes:'See distinct inputs and expected business outcomes in cases.jsonl',caseCount:rows.length,source:`src/${modules[id]}.ts`,reproduce:`node tools/verify.cjs ${id} --diagnose`},null,2)+'\n'};}
 function writeFiles(dir,files,{exclusive=false}={}){for(const [p,content] of Object.entries(files)){const target=S.inside(dir,p);S.fs.mkdirSync(S.path.dirname(target),{recursive:true});if(exclusive&&S.fs.existsSync(target)){if(S.hash(S.fs.readFileSync(target))!==S.hash(content))throw Error('fixture-generation-conflict');continue;}const pending=target+'.pending';S.fs.writeFileSync(pending,content);S.fs.renameSync(pending,target);}}
 function createFixture(dir){writeFiles(dir,baseFiles(),{exclusive:true});return {revision:'ledger-lab-v2'};}
 function release(dir,id){writeFiles(dir,phaseFiles(id),{exclusive:true});}

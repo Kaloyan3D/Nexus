@@ -8,7 +8,7 @@ function grade(dir,ids){
  for(const phase of ids){let failures=0;const cases=fixture.cases(phase);
   // Expected values are owned by the host fixture contract, never candidate stdout.
   const file=path.join(dir,'evidence',phase,'cases.jsonl');
-  try{assert.equal(fs.readFileSync(file,'utf8'),cases.map(JSON.stringify).join('\n')+'\n');}catch{failures++;}
+  try{assert.equal(fs.readFileSync(file,'utf8'),fixture.phaseFiles(phase)['evidence/'+phase+'/cases.jsonl']);}catch{failures++;}
   for(const row of cases){try{const result=sandbox.evaluate(fixture.modules[phase],row.input);assert.deepEqual(result.output,row.expected);assert.deepEqual(result.input,row.input);}catch{failures++;}}
   rows.push({phase,pass:failures===0,cases:cases.length});
  }

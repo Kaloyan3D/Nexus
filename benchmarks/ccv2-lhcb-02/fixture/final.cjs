@@ -1,0 +1,44 @@
+'use strict';
+const inputs=[
+ {document:{version:1,entries:[{id:'001',cents:17,currency:'JPY',kind:'transfer'}]},tenant:'alpha',actor:{tenant:'alpha',role:'writer',revoked:false},grant:{tenant:'alpha',scopes:['post'],revoked:false},surface:'cli',key:'release-command',failures:['timeout','none'],cancelAt:'none',reader:1},
+ {document:{version:3,records:[{id:'e\u0301',amount:23,currency:'KWD',kind:'transfer'}]},tenant:'alpha',actor:{tenant:'alpha',role:'writer',revoked:false},grant:{tenant:'alpha',scopes:['post'],revoked:false},surface:'api',key:'release-command',failures:['lock','none'],cancelAt:'none',reader:3}
+];
+function scenarios(hidden=false){const rows=inputs.map(x=>structuredClone(x));for(const [key,value] of [['revoked',true],['tenant','beta'],['role','reader']]){const x=structuredClone(inputs[0]);x.actor[key]=value;rows.push(x);}const future=structuredClone(inputs[1]);future.document.version=97;rows.push(future);const cancelled=structuredClone(inputs[0]);cancelled.cancelAt='before-commit';rows.push(cancelled);const permanent=structuredClone(inputs[0]);permanent.failures=['unknown-schema','none'];rows.push(permanent);const grant=structuredClone(inputs[0]);grant.grant.revoked=true;rows.push(grant);
+ if(hidden){const x=structuredClone(inputs[0]);x.document.entries[0]={id:'holdout/__proto__',cents:43,currency:'USD',kind:'transfer'};x.key='hidden-key';rows.push(x);const bad=structuredClone(x);bad.document.entries[0].cents=0.5;rows.push(bad);}const incomplete=structuredClone(inputs[0]);incomplete.release={checks:{migration:true,integration:false,security:true},quarantine:['seg-b'],originals:['seg-b'],violations:0};rows.push(incomplete);for(const row of rows)row.release||={checks:{migration:true,integration:true,security:true},quarantine:[],originals:[],violations:0};return rows;}
+// Reference exists outside the released tree, for positive-control tests only.
+function evaluate(x){
+ const migration=require('./migrations.ts'),grants=require('./grants.ts'),retry=require('./retry.ts'),cancel=require('./cancellation.ts');
+ const m=migration.evaluate({document:x.document});const g=grants.evaluate({actor:x.actor,tenant:x.tenant,scope:'post',grant:x.grant});
+ const r=retry.evaluate({key:x.key,failures:x.failures,limit:3});const c=cancel.evaluate({cancelAt:x.cancelAt,state:'prepared',key:x.key});
+ if(!g.allowed)return {status:403,history:[],results:[]};
+ if(m.rejected)return {status:422,history:[],results:[]};
+ const release=require('./readiness.ts').evaluate(x.release);if(!release.ready)return {status:503,history:[],results:[]};
+ if(!c.commit)return {status:499,history:[],results:[]};
+ if(r.terminal!=='success')return {status:r.terminal==='permanent'?422:503,history:[],results:[]};
+ const plan=require('./batch.ts').evaluate({balance:0,available:Number.MAX_SAFE_INTEGER,allowed:g.allowed,cancelled:!c.commit,postings:m.records});if(!plan.commit)return {status:422,history:[],results:[]};
+ const store=require('./persistence.ts').createStore();const gateway=require('./gateway.ts');const results=[];
+ for(const [i,posting] of m.records.entries()){
+  const command={tenant:x.tenant,key:x.key+'-'+i,posting,expectedRevision:0,requestId:'release-'+i};
+  results.push(gateway.dispatch(store,command,x.actor,()=>123,x.surface));
+  results.push(gateway.dispatch(store,command,x.actor,()=>456,x.surface));
+ }
+ const history=store.history();const recovered=require('./recovery.ts').evaluate({journal:history,failure:'none'});
+ const index=require('./history-index.ts').evaluate({rows:history.map((h,i)=>({...h,id:m.records[i]?.id})),tenant:x.tenant,id:m.records[0]?.id});
+ const exported=require('./exporter.ts').evaluate({records:m.records,format:x.reader===1?'v1':'v3'});
+ const rollback=require('./rollback.ts').evaluate({document:{version:3,records:m.records},reader:x.reader});
+ const ops=require('./operations.ts').evaluate({events:results.map(s=>({status:s.status,decision:s.status===403?'deny':'allow',operation:'post'}))});
+ const audit=require('./observability.ts').evaluate({event:{operation:'post',tenant:x.tenant,decision:'allow',requestId:'release',authorization:'secret'},failures:x.failures.filter(f=>f!=='none')});
+ const check=require('./reconcile.ts').evaluate({opening:0,postings:m.records.map(p=>p.amount),closing:history.reduce((a,h)=>a+h.balance,0),journalCount:history.length,auditCount:history.length});
+ const clients=results.map(response=>require('./client.ts').evaluate({version:x.reader,response}));
+ return {status:results.every(s=>[200,201].includes(s.status))?200:422,results,history,recovered,index,exported,rollback,ops,audit,check,clients,release};
+}
+function reference(){return evaluate.toString()+'\nmodule.exports={evaluate};\n';}
+function source(){return `// Final integration coordinator. Existing modules own the contracts.\nfunction evaluate(input:any){\n  // Current release path returns a report without exercising the ledger.\n  return {status:200,history:[],results:[]};\n}\nmodule.exports={evaluate};\n`;}
+function expected(x){const f=require('./create-fixture.cjs'),L=require('./late.cjs');const migrated=f.oracle('E02',{document:x.document});const allowed=L.expected('grants',{actor:x.actor,tenant:x.tenant,scope:'post',grant:x.grant}).allowed;const retry=L.expected('retry',{key:x.key,failures:x.failures,limit:3});if(!allowed)return {status:403,history:[],results:[]};if(migrated.rejected)return {status:422,history:[],results:[]};if(!L.expected('readiness',x.release).ready)return {status:503,history:[],results:[]};if(x.cancelAt==='before-commit')return {status:499,history:[],results:[]};if(retry.terminal!=='success')return {status:retry.terminal==='permanent'?422:503,history:[],results:[]};
+ const records=migrated.records,results=[],history=[];for(const [i,p] of records.entries()){const transactionId='txn-'+(i+1);results.push({status:201,transactionId,revision:1,committedAt:123},{status:200,transactionId,revision:1});history.push({tenant:x.tenant,key:x.key+'-'+i,state:'committed',checksum:'valid',revision:1,balance:p.amount});}
+ const document={version:3,records};return {status:200,results,history,recovered:f.oracle('E06',{journal:history,failure:'none'}),index:L.expected('history-index',{rows:history.map((h,i)=>({...h,id:records[i]?.id})),tenant:x.tenant,id:records[0]?.id}),exported:L.expected('exporter',{records,format:x.reader===1?'v1':'v3'}),rollback:L.expected('rollback',{document,reader:x.reader}),ops:{success:results.length,denied:0,transient:0},audit:L.expected('observability',{event:{operation:'post',tenant:x.tenant,decision:'allow',requestId:'release'},failures:x.failures.filter(f=>f!=='none')}),check:{expected:records.reduce((a,p)=>a+p.amount,0),balanced:true,auditAligned:true},clients:results.map(response=>L.expected('client',{version:x.reader,response})),release:L.expected('readiness',x.release)};
+}
+function cases(hidden=false){return scenarios(hidden).map((input,i)=>({caseId:'T99-'+(hidden?'holdout-':'')+(i+1),input,expected:expected(input)}));}
+function publicCases(){return ['api','cli'].map((surface,i)=>({caseId:'T99-smoke-'+(i+1),input:{document:{version:3,records:[{id:'release-account',amount:9,currency:'USD',kind:'transfer'}]},tenant:'alpha',actor:{tenant:'alpha',role:'writer',revoked:false},grant:{tenant:'alpha',scopes:['post'],revoked:false},surface,key:'release-smoke-'+i,failures:['none'],cancelAt:'none',reader:3,release:{checks:{migration:true,integration:true,security:true},quarantine:[],originals:[],violations:0}},expected:{status:200,hasCommit:true}}));}
+function phaseFiles(){return {'src/application.ts':source(),'evidence/T99/cases.jsonl':publicCases().map(JSON.stringify).join('\n')+'\n','evidence/T99/incident.json':JSON.stringify({phase:'T99',symptom:'Release coordinator reports success without running established subsystem paths',entry:'src/application.ts',reproduce:'node tools/verify.cjs T99 --diagnose',instruction:'Implement the integrated coordinator against the established contracts. Retain all prior acceptance behavior.'},null,2)+'\n'};}
+module.exports={cases,publicCases,reference,source,phaseFiles};

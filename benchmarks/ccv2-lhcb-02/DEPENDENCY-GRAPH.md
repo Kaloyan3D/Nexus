@@ -1,4 +1,6 @@
-# Causal phase graph
+# Candidate dependency graph
+
+UNFROZEN / LIVE_CALIBRATION_REQUIRED.
 
 ```mermaid
 graph TD
@@ -16,63 +18,90 @@ graph TD
   E03 --> E07
   E02 --> E08
   E07 --> E08
-  E01 --> E09
-  E05 --> E09
-  E02 --> E10
-  E06 --> E10
-  E04 --> E11
-  E09 --> E11
-  E01 --> E12
-  E03 --> E12
-  E09 --> E12
-  E08 --> E13
-  E10 --> E13
+  E06 --> E09
+  E08 --> E09
+  E05 --> E10
+  E09 --> E10
+  E01 --> E11
+  E03 --> E11
+  E06 --> E11
+  E10 --> E11
+  E04 --> E12
+  E05 --> E12
+  E02 --> E13
+  E06 --> E13
   E12 --> E13
   E02 --> E14
+  E03 --> E14
   E04 --> E14
   E06 --> E14
+  E03 --> E15
   E05 --> E15
-  E09 --> E15
+  E14 --> E15
   E02 --> E16
   E08 --> E16
-  E10 --> E16
+  E09 --> E16
   E02 --> E17
   E07 --> E17
   E12 --> E17
+  E15 --> E17
+  E06 --> E18
   E11 --> E18
-  E15 --> E18
+  E13 --> E18
   E17 --> E18
   E08 --> E19
+  E12 --> E19
   E16 --> E19
   E17 --> E19
   E03 --> E20
   E05 --> E20
+  E10 --> E20
   E15 --> E20
-  E13 --> E21
+  E18 --> E20
+  E04 --> E21
+  E06 --> E21
+  E12 --> E21
   E14 --> E21
-  E20 --> E21
-  E06 --> E22
-  E10 --> E22
+  E03 --> E22
+  E07 --> E22
   E16 --> E22
-  E04 --> E23
+  E19 --> E22
+  E01 --> E23
+  E05 --> E23
   E12 --> E23
+  E15 --> E23
   E21 --> E23
+  E22 --> E23
+  E09 --> E24
+  E11 --> E24
+  E16 --> E24
   E18 --> E24
-  E19 --> E24
-  E22 --> E24
+  E20 --> E24
   E23 --> E24
   E01 --> T99
   E02 --> T99
+  E03 --> T99
   E04 --> T99
   E05 --> T99
   E06 --> T99
+  E07 --> T99
   E08 --> T99
+  E09 --> T99
+  E10 --> T99
+  E11 --> T99
   E12 --> T99
+  E13 --> T99
+  E14 --> T99
   E15 --> T99
   E16 --> T99
+  E17 --> T99
+  E18 --> T99
   E19 --> T99
+  E20 --> T99
+  E21 --> T99
   E22 --> T99
+  E23 --> T99
   E24 --> T99
 ```
 
-The manifest defines proposed dependencies, not verified continuity. Executable consumer probes cover migration → API import and migration/authorization/prior commit → recovery; the complete graph remains a freeze requirement. E07–E24 and T99 are design only. Calibration executes T00 and E01–E06 once each. Far-distance edges include E02 → E14/E16/E17, E03/E05 → E20, E06 → E22. T99 refers to the established contract, without enumerating old facts. Hidden tests will check early/middle/late obligations independently; the official grader is not enabled in this delivery.
+All 26 nodes have deterministic executable artifacts. Edges express consumed contract/data provenance; concrete consumer paths are verified separately by migration/API, recovery, retry/service, gateway and atomic-store probes. T99 runs all prior suites and integrates early, middle and late consumers. Graph validity is not proof of useful pressure or of an independently necessary effect for every edge.

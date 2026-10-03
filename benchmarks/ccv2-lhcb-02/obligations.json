@@ -7,262 +7,437 @@
     {
       "id": "integer-money",
       "introducedBy": "E01",
-      "category": "implementation",
+      "category": "implementation behavior",
       "critical": true,
       "rule": "Accept only safe signed integer minor units.",
       "grader": "behavior:integer-money",
-      "status": "calibration-probe",
-      "calibrationProbeIds": [
+      "status": "implemented",
+      "probeIds": [
         "integer-money"
-      ]
+      ],
+      "t99": true
     },
     {
       "id": "currency-scale",
       "introducedBy": "E01",
-      "category": "compatibility",
+      "category": "compatibility guarantees",
       "critical": true,
       "rule": "USD/EUR use scale 2; JPY uses scale 0; KWD uses scale 3.",
       "grader": "behavior:currency-scale",
-      "status": "calibration-probe",
-      "calibrationProbeIds": [
+      "status": "implemented",
+      "probeIds": [
         "currency-scale"
-      ]
+      ],
+      "t99": true
     },
     {
       "id": "tenant-ownership",
       "introducedBy": "T00",
-      "category": "architecture",
+      "category": "architecture ownership",
       "critical": true,
       "rule": "Tenant owns account namespace; API must never write persistence directly.",
       "grader": "behavior:tenant-ownership",
-      "status": "calibration-probe",
-      "calibrationProbeIds": [
-        "tenant-scoped-keys",
-        "deny-cross-tenant"
-      ]
+      "status": "implemented",
+      "probeIds": [
+        "deny-cross-tenant",
+        "tenant-scoped-keys"
+      ],
+      "t99": true
     },
     {
       "id": "immutable-import",
       "introducedBy": "E02",
-      "category": "forbidden",
+      "category": "forbidden behaviors",
       "critical": true,
       "rule": "Never mutate or overwrite a migration input on rejection.",
       "grader": "behavior:immutable-import",
-      "status": "calibration-probe",
-      "calibrationProbeIds": [
+      "status": "implemented",
+      "probeIds": [
         "immutable-import"
-      ]
+      ],
+      "t99": true
     },
     {
       "id": "unknown-schema",
       "introducedBy": "E02",
-      "category": "compatibility",
+      "category": "migration rules",
       "critical": true,
       "rule": "Unknown future schemas are rejected, not coerced.",
       "grader": "behavior:unknown-schema",
-      "status": "calibration-probe",
-      "calibrationProbeIds": [
-        "immutable-import"
-      ]
+      "status": "implemented",
+      "probeIds": [
+        "immutable-import",
+        "migration-api-causal-bridge"
+      ],
+      "t99": true
     },
     {
       "id": "idempotency-before-revision",
       "introducedBy": "E03",
-      "category": "implementation",
+      "category": "API guarantees",
       "critical": true,
       "rule": "A matching replay returns original result before testing current revision.",
       "grader": "behavior:idempotency-before-revision",
-      "status": "calibration-probe",
-      "calibrationProbeIds": [
+      "status": "implemented",
+      "probeIds": [
         "idempotency-before-revision",
         "service-replay-preserves-commit"
-      ]
+      ],
+      "t99": true
     },
     {
       "id": "tenant-scoped-keys",
       "introducedBy": "E04",
-      "category": "security",
+      "category": "security invariants",
       "critical": true,
       "rule": "Idempotency keys are scoped by tenant.",
       "grader": "behavior:tenant-scoped-keys",
-      "status": "calibration-probe",
-      "calibrationProbeIds": [
+      "status": "implemented",
+      "probeIds": [
         "tenant-scoped-keys"
-      ]
+      ],
+      "t99": true
     },
     {
       "id": "single-commit",
       "introducedBy": "E04",
-      "category": "implementation",
+      "category": "implementation behavior",
       "critical": true,
       "rule": "Same-key contenders cause one commit and one audit.",
       "grader": "behavior:single-commit",
-      "status": "calibration-probe",
-      "calibrationProbeIds": [
-        "single-commit",
-        "service-replay-preserves-commit"
-      ]
+      "status": "implemented",
+      "probeIds": [
+        "single-commit"
+      ],
+      "t99": true
     },
     {
       "id": "deny-cross-tenant",
       "introducedBy": "E05",
-      "category": "security",
+      "category": "security invariants",
       "critical": true,
       "rule": "Cross-tenant actors cannot mutate another tenant.",
       "grader": "behavior:deny-cross-tenant",
-      "status": "calibration-probe",
-      "calibrationProbeIds": [
-        "deny-cross-tenant",
-        "authorization-precedes-replay"
-      ]
+      "status": "implemented",
+      "probeIds": [
+        "deny-cross-tenant"
+      ],
+      "t99": true
     },
     {
       "id": "redact-audit",
       "introducedBy": "E05",
-      "category": "security",
+      "category": "security invariants",
       "critical": true,
       "rule": "Audit is an allowlist; credentials and request bodies never appear.",
       "grader": "behavior:redact-audit",
-      "status": "calibration-probe",
-      "calibrationProbeIds": [
+      "status": "implemented",
+      "probeIds": [
         "redact-audit"
-      ]
+      ],
+      "t99": true
     },
     {
       "id": "durable-prefix",
       "introducedBy": "E06",
-      "category": "recovery",
+      "category": "recovery semantics",
       "critical": true,
       "rule": "Recovery chooses committed journal prefix, never a prepared transaction.",
       "grader": "behavior:durable-prefix",
-      "status": "calibration-probe",
-      "calibrationProbeIds": [
+      "status": "implemented",
+      "probeIds": [
         "durable-prefix"
-      ]
+      ],
+      "t99": true
     },
     {
       "id": "no-success-before-commit",
       "introducedBy": "E06",
-      "category": "recovery",
+      "category": "recovery semantics",
       "critical": true,
       "rule": "Success audit follows durable commit.",
       "grader": "behavior:no-success-before-commit",
-      "status": "calibration-probe",
-      "calibrationProbeIds": [
+      "status": "implemented",
+      "probeIds": [
         "no-success-before-commit"
-      ]
+      ],
+      "t99": true
     },
     {
       "id": "injected-clock",
       "introducedBy": "T00",
-      "category": "architecture",
+      "category": "architecture ownership",
       "critical": false,
       "rule": "Time and I/O are injected; no sleeps or network access.",
       "grader": "behavior:injected-clock",
-      "status": "calibration-probe",
-      "calibrationProbeIds": [
+      "status": "implemented",
+      "probeIds": [
         "injected-clock"
-      ]
+      ],
+      "t99": true
     },
     {
       "id": "cli-json",
       "introducedBy": "E07",
-      "category": "compatibility",
+      "category": "compatibility guarantees",
       "critical": false,
       "rule": "Machine JSON goes to stdout; diagnostic output goes to stderr.",
       "grader": "behavior:cli-json",
-      "status": "design"
+      "status": "implemented",
+      "probeIds": [
+        "contract-cli-adapter"
+      ],
+      "t99": true
     },
     {
       "id": "identifier-roundtrip",
       "introducedBy": "E08",
-      "category": "compatibility",
+      "category": "compatibility guarantees",
       "critical": false,
       "rule": "Keep opaque legacy identifiers byte-exact.",
       "grader": "behavior:identifier-roundtrip",
-      "status": "design"
+      "status": "implemented",
+      "probeIds": [
+        "contract-legacy"
+      ],
+      "t99": true
     },
     {
       "id": "quarantine-original",
-      "introducedBy": "E10",
-      "category": "forbidden",
+      "introducedBy": "E09",
+      "category": "forbidden behaviors",
       "critical": false,
       "rule": "Quarantined original segments are retained.",
       "grader": "behavior:quarantine-original",
-      "status": "design"
+      "status": "implemented",
+      "probeIds": [
+        "contract-segments"
+      ],
+      "t99": true
     },
     {
       "id": "available-balance",
       "introducedBy": "E12",
-      "category": "implementation",
+      "category": "implementation behavior",
       "critical": false,
       "rule": "Reservations reduce spendable balance but not total balance.",
       "grader": "behavior:available-balance",
-      "status": "design"
+      "status": "implemented",
+      "probeIds": [
+        "contract-reservations"
+      ],
+      "t99": true
     },
     {
       "id": "retry-taxonomy",
       "introducedBy": "E14",
-      "category": "recovery",
+      "category": "recovery semantics",
       "critical": false,
       "rule": "Retry only classified transient failures with bounded attempts.",
       "grader": "behavior:retry-taxonomy",
-      "status": "design"
+      "status": "implemented",
+      "probeIds": [
+        "contract-retry",
+        "retry-commit-bridge"
+      ],
+      "t99": true
     },
     {
       "id": "grant-revocation",
       "introducedBy": "E15",
-      "category": "security",
+      "category": "security invariants",
       "critical": true,
       "rule": "Revoked grants do not authorize cached replays.",
       "grader": "behavior:grant-revocation",
-      "status": "design"
+      "status": "implemented",
+      "probeIds": [
+        "contract-grants",
+        "authorization-precedes-replay"
+      ],
+      "t99": true
     },
     {
       "id": "rollback-readers",
       "introducedBy": "E16",
-      "category": "compatibility",
+      "category": "compatibility guarantees",
       "critical": false,
       "rule": "Rollback must preserve data required by mixed version readers.",
       "grader": "behavior:rollback-readers",
-      "status": "design"
+      "status": "implemented",
+      "probeIds": [
+        "contract-rollback"
+      ],
+      "t99": true
     },
     {
       "id": "service-boundary",
       "introducedBy": "E17",
-      "category": "architecture",
+      "category": "architecture ownership",
       "critical": false,
       "rule": "CLI and API route mutations through the same service.",
       "grader": "behavior:service-boundary",
-      "status": "design"
+      "status": "implemented",
+      "probeIds": [
+        "contract-gateway",
+        "gateway-contract-bridge"
+      ],
+      "t99": true
     },
     {
       "id": "export-format",
       "introducedBy": "E19",
-      "category": "compatibility",
+      "category": "compatibility guarantees",
       "critical": false,
       "rule": "Export keeps consumer contract and opaque identifier encoding.",
       "grader": "behavior:export-format",
-      "status": "design"
+      "status": "implemented",
+      "probeIds": [
+        "contract-exporter"
+      ],
+      "t99": true
     },
     {
       "id": "cancel-before-commit",
       "introducedBy": "E21",
-      "category": "implementation",
+      "category": "implementation behavior",
       "critical": false,
       "rule": "Cancellation before commit prevents mutation.",
       "grader": "behavior:cancel-before-commit",
-      "status": "design"
+      "status": "implemented",
+      "probeIds": [
+        "contract-cancellation"
+      ],
+      "t99": true
     },
     {
       "id": "batch-atomicity",
       "introducedBy": "E23",
-      "category": "implementation",
-      "critical": false,
+      "category": "persistence invariants",
+      "critical": true,
       "rule": "Batch commits all validated mutations or none.",
       "grader": "behavior:batch-atomicity",
-      "status": "design"
+      "status": "implemented",
+      "probeIds": [
+        "contract-batch",
+        "atomic-store-bridge"
+      ],
+      "t99": true
+    },
+    {
+      "id": "bounded-observability",
+      "introducedBy": "E10",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Metrics have bounded labels and allowlisted audit fields.",
+      "grader": "behavior:contract-observability",
+      "status": "implemented",
+      "probeIds": [
+        "contract-observability"
+      ],
+      "t99": true
+    },
+    {
+      "id": "review-commit-evidence",
+      "introducedBy": "E11",
+      "category": "forbidden behaviors",
+      "critical": true,
+      "rule": "Prepared success does not constitute release evidence.",
+      "grader": "behavior:contract-review",
+      "status": "implemented",
+      "probeIds": [
+        "contract-review"
+      ],
+      "t99": true
+    },
+    {
+      "id": "bounded-history-query",
+      "introducedBy": "E13",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Indexed lookup examines only matching tenant/account rows.",
+      "grader": "behavior:contract-history-index",
+      "status": "implemented",
+      "probeIds": [
+        "contract-history-index"
+      ],
+      "t99": true
+    },
+    {
+      "id": "reconciled-audit",
+      "introducedBy": "E18",
+      "category": "persistence invariants",
+      "critical": true,
+      "rule": "Balance and audit records must reconcile with committed postings.",
+      "grader": "behavior:contract-reconcile",
+      "status": "implemented",
+      "probeIds": [
+        "contract-reconcile"
+      ],
+      "t99": true
+    },
+    {
+      "id": "incident-taxonomy",
+      "introducedBy": "E20",
+      "category": "recovery semantics",
+      "critical": false,
+      "rule": "Denial and transient provider status are separated.",
+      "grader": "behavior:contract-operations",
+      "status": "implemented",
+      "probeIds": [
+        "contract-operations"
+      ],
+      "t99": true
+    },
+    {
+      "id": "client-response-identity",
+      "introducedBy": "E22",
+      "category": "API guarantees",
+      "critical": true,
+      "rule": "Clients retain committed response identity and never retry conflicts.",
+      "grader": "behavior:contract-client",
+      "status": "implemented",
+      "probeIds": [
+        "contract-client"
+      ],
+      "t99": true
+    },
+    {
+      "id": "release-evidence",
+      "introducedBy": "E24",
+      "category": "forbidden behaviors",
+      "critical": true,
+      "rule": "Every required gate passes and quarantine originals remain available.",
+      "grader": "behavior:contract-readiness",
+      "status": "implemented",
+      "probeIds": [
+        "contract-readiness"
+      ],
+      "t99": true
+    },
+    {
+      "id": "integrated-release",
+      "introducedBy": "T99",
+      "category": "architecture ownership",
+      "critical": true,
+      "rule": "Release coordinator executes existing modules and commits through the service.",
+      "grader": "behavior:final-coordinator",
+      "status": "implemented",
+      "probeIds": [
+        "final-coordinator"
+      ],
+      "t99": true
     }
   ],
-  "scopeNote": "Calibration probes cover selected early behaviors only; official obligation completeness and T99 safety remain unverified until the final integration grader is implemented."
+  "scopeNote": "All obligations map to executable probes; T99 reruns all prior suites plus hidden coordinator and integration probes. Candidate correctness is not official workload validity.",
+  "categories": [
+    "API guarantees",
+    "architecture ownership",
+    "compatibility guarantees",
+    "forbidden behaviors",
+    "implementation behavior",
+    "migration rules",
+    "persistence invariants",
+    "recovery semantics",
+    "security invariants"
+  ]
 }

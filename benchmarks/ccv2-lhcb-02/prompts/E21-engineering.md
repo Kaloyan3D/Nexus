@@ -1,0 +1,1 @@
+Investigate the new cancellation incident in evidence/E21/incident.json and its trace. Inspect the affected source and focused cases, implement the correction or automated review check, and preserve the established contracts. Run the relevant verifier and prior tests. Report concise verification evidence.
