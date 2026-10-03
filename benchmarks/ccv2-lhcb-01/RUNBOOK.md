@@ -5,6 +5,19 @@ implementation checks use temporary fixtures, local codecs and fake transports.
 The staged default root has no copied credentials, live session or certification.
 The commands below describe future operator work after contract review.
 
+## AutoRunner
+
+Two workflows are supported: AutoRunner and the manual/operator-assisted
+fallback described below. Both use the same frozen prompts and existing
+benchmark authorities.
+
+The optional deterministic runner is documented in [AUTORUNNER.md](AUTORUNNER.md).
+It resumes a proven bound session, submits exact frozen bank prompts through the
+installed DSH API, verifies idle/session/memory durability, and orchestrates the
+existing checkpoint and three-arm authorities. Use `run-status` for read-only
+inspection; live runner commands require both environment keys and current
+HEALTHY certification. Implementation tests use injected transport only.
+
 ## Prepare and inspect
 
 Use Node 24.18.1 or a newer compatible Node with built-in zstd and TypeScript
@@ -87,7 +100,7 @@ installation. Its expected final line is
 It is not the real OC01 provider canary.
 
 
-## Build real read-only history
+## Manual/operator-assisted fallback: build real read-only history
 
 1. Start the isolated runtime using its canonical launcher and the fixture as
    working directory. For example, from `~/nexus-bench/ccv2-lhcb-01/workspace`,
@@ -125,12 +138,13 @@ do not ask for verbosity or padding. Resume the same session after each stop.
    Actual DSH compaction is permitted. Never lower its pressure boundary or
    change the CCv2 gate to reach a checkpoint. CP-OVERFLOW may remain absent.
 
-## Capture and run matched arms
+## Manual/operator-assisted fallback: capture and run matched arms
 
-Snapshot only a stopped, flushed runtime with all tools settled. `--stopped`
-is an operator assertion; the harness cannot prove that another process has
-stopped. It rejects out-of-band captures, unexpected mutable layouts, links or
-recognizable secrets. A capture must still contain the unmodified fixture.
+Snapshot only a stopped, flushed runtime with all tools settled. For the manual
+commands below, `--stopped` is an operator assertion; these commands cannot prove
+that another process has stopped. They reject out-of-band captures, unexpected
+mutable layouts, links or recognizable secrets. A capture must still contain
+the unmodified fixture.
 Each named snapshot is immutable and cannot be overwritten.
 
 ```sh
@@ -159,9 +173,12 @@ checks durable provider/model headers and production decisions, not operator
 assertions alone. It excludes the inherited pressure-building work from run
 accounting. Never collect one trial twice or grade a different workspace.
 
-The harness submits no prompts or provider calls. No suitable proven
-session-submission interface is used here: prompt delivery and runtime start,
-stop and durability flush remain operator-assisted.
+In this manual fallback, `prompt` prints the frozen prompt for the operator to
+deliver; runtime start, stop and durability flush are also operator-assisted.
+The AutoRunner workflow instead submits exact frozen prompts through the
+installed DSH API and manages runtime lifecycle and durable completion checks.
+Live prompt execution can make provider calls in either workflow; implementation
+verification uses offline fixtures and injected transports only.
 
 ## Review outcomes
 

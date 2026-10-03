@@ -1,0 +1,23 @@
+{
+  "benchmarkId": "CCV2-LHCB-01",
+  "benchmarkVersion": 1,
+  "benchmarkSourceSha": "7da9befe48e696917ef570966fb5f214dfc61e85",
+  "contractHash": "6f8ce214677e2cea9710258497735e018c5d4f49c5e4acf65b3d3ec738294067",
+  "promptHashes": {
+    "T00": "f4331708d9b4a451407af944b1c11b5c156084f6738b6c877d8504f94de737d5",
+    "P01": "fc332280b4c6f3ba214e42365808aa1a4a14eb3b878a009af03f618ce9ecd3d0",
+    "P02": "6528cb02a8858548823a3a9c4a70a17ec79cafa5837360c007e2e5af6b14e5d8",
+    "P03": "52e03c5aa06573dbc32c507cb1cc86a69ad10c6c50f9ab762d8af51e48c8b322",
+    "P04": "5fda72a1b7783682cdd48a1614205da59b3f782faace1af0468f7970e409bf47",
+    "P05": "2182a23dc73ea0a11364540515192101e030bf2fc1092043ded88224833a42b5",
+    "P06": "7a1e29023e83fa91d38092bb8367162de1169599ca25340b1a4c1ba8120c637e",
+    "P07": "49ebe43070f355db8b3516dad4d38047abfe4a64c17679ce46b4e13315f510ed",
+    "T99": "172f5ced2d4e2f2238aa346d991f7eab56e844cfd98eb54a18856faced37e58a"
+  },
+  "thresholds": {
+    "windowTokens": 1048576,
+    "dshThresholdTokens": 838860,
+    "activationTokens": 907018,
+    "basis": "native-unsendable"
+  }
+}
