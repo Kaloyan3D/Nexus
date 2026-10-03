@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ccv2-lhcb-01:snapshot:v1",
+  "type": "object",
+  "required": [
+    "benchmarkId",
+    "baseSha",
+    "checkpointId",
+    "createdAt",
+    "provider",
+    "model",
+    "sessionId",
+    "taskId",
+    "taskInstanceId",
+    "activationBasis",
+    "workspaceTree",
+    "fixtureRevision",
+    "sessionLog",
+    "workspaceHash",
+    "sessionLogHash",
+    "ccv2StateHash",
+    "policyHash",
+    "settingsIdentityHash",
+    "pressureTokens",
+    "activationTokens",
+    "benchmarkVersion",
+    "inventories",
+    "binding",
+    "stages",
+    "stateFiles",
+    "contractHash"
+  ],
+  "properties": {
+    "benchmarkId": {
+      "type": "string"
+    },
+    "baseSha": {
+      "type": "string"
+    },
+    "checkpointId": {
+      "type": "string"
+    },
+    "createdAt": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "model": {
+      "type": "string"
+    },
+    "sessionId": {
+      "type": "string"
+    },
+    "taskId": {
+      "type": "string"
+    },
+    "taskInstanceId": {
+      "type": "string"
+    },
+    "activationBasis": {
+      "type": "string"
+    },
+    "workspaceTree": {
+      "type": "string"
+    },
+    "fixtureRevision": {
+      "type": "string"
+    },
+    "sessionLog": {
+      "type": "string"
+    },
+    "workspaceHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "sessionLogHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "ccv2StateHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "policyHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "settingsIdentityHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "pressureTokens": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "activationTokens": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "benchmarkVersion": {
+      "enum": [
+        1
+      ]
+    },
+    "inventories": {
+      "type": "object"
+    },
+    "binding": {
+      "type": "object",
+      "required": [
+        "sessionId",
+        "taskId",
+        "taskInstanceId",
+        "sessionLog"
+      ]
+    },
+    "stages": {
+      "type": "array"
+    },
+    "stateFiles": {
+      "type": "object"
+    },
+    "contractHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  },
+  "additionalProperties": true
+}

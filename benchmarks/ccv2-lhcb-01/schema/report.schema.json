@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ccv2-lhcb-01:report:v1",
+  "type": "object",
+  "required": [
+    "benchmarkId",
+    "benchmarkVersion",
+    "baseSha",
+    "runs",
+    "comparisons",
+    "verdicts"
+  ],
+  "properties": {
+    "benchmarkId": {
+      "enum": [
+        "CCV2-LHCB-01"
+      ]
+    },
+    "benchmarkVersion": {
+      "enum": [
+        1
+      ]
+    },
+    "baseSha": {
+      "type": "string"
+    },
+    "runs": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "comparisons": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "verdicts": {
+      "type": "object",
+      "required": [
+        "compilerCapability",
+        "productionBenefit",
+        "reasoningContinuitySafety"
+      ],
+      "properties": {
+        "compilerCapability": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "INSUFFICIENT_DATA"
+          ]
+        },
+        "productionBenefit": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "NOT_TRIGGERED",
+            "INSUFFICIENT_DATA"
+          ]
+        },
+        "reasoningContinuitySafety": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "INSUFFICIENT_DATA"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

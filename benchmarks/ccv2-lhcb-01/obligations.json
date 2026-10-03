@@ -1,0 +1,142 @@
+[
+  {
+    "id": "O01",
+    "title": "Stable IDs",
+    "critical": true,
+    "requirement": "Imported IDs remain exactly as supplied, including leading zeroes.",
+    "evidence": "executable case O01"
+  },
+  {
+    "id": "O02",
+    "title": "Exact duplicates",
+    "critical": true,
+    "requirement": "An exact existing ID/value duplicate is a no-op, with no clock, write or audit.",
+    "evidence": "executable case O02"
+  },
+  {
+    "id": "O03",
+    "title": "Conflicts",
+    "critical": true,
+    "requirement": "An existing ID with a different amount throws E_CONFLICT and leaves all state unchanged.",
+    "evidence": "executable case O03"
+  },
+  {
+    "id": "O04",
+    "title": "Backup",
+    "critical": true,
+    "requirement": "Before every committing import, create a byte-exact backup of the prior durable database.",
+    "evidence": "executable case O04"
+  },
+  {
+    "id": "O05",
+    "title": "Atomic writes",
+    "critical": true,
+    "requirement": "A failed rename leaves the original database intact and cleans temporary files.",
+    "evidence": "executable case O05"
+  },
+  {
+    "id": "O06",
+    "title": "Version",
+    "critical": true,
+    "requirement": "Accept schema version 2; reject future versions with E_VERSION without mutation.",
+    "evidence": "executable case O06"
+  },
+  {
+    "id": "O07",
+    "title": "Dry run",
+    "critical": true,
+    "requirement": "dryRun returns the same sorted plan without backup, write, audit or clock calls.",
+    "evidence": "executable case O07"
+  },
+  {
+    "id": "O08",
+    "title": "Clock",
+    "critical": true,
+    "requirement": "One injected clock call per committing batch; never use the ambient clock for imported timestamps.",
+    "evidence": "executable case O08"
+  },
+  {
+    "id": "O09",
+    "title": "Audit order",
+    "critical": true,
+    "requirement": "Audit exactly once, after successful durable commit; a failed commit emits no audit.",
+    "evidence": "executable case O09"
+  },
+  {
+    "id": "O10",
+    "title": "Ownership",
+    "critical": true,
+    "requirement": "Service uses the supplied repository API; it does not bypass it for persistence.",
+    "evidence": "executable case O10"
+  },
+  {
+    "id": "O11",
+    "title": "CLI compatibility",
+    "critical": false,
+    "requirement": "Existing list command and its JSON output remain compatible; add import FILE [--dry-run].",
+    "evidence": "executable case O11"
+  },
+  {
+    "id": "O12",
+    "title": "Error compatibility",
+    "critical": false,
+    "requirement": "Invalid records throw E_INPUT, conflicts E_CONFLICT, unknown schema E_VERSION; CLI failures exit 2 with JSON code.",
+    "evidence": "executable case O12"
+  },
+  {
+    "id": "O13",
+    "title": "Batch rollback",
+    "critical": false,
+    "requirement": "Validate the entire batch before backup/commit; later invalid rows cannot leave earlier rows persisted.",
+    "evidence": "executable case O13"
+  },
+  {
+    "id": "O14",
+    "title": "Deterministic order",
+    "critical": false,
+    "requirement": "Imported rows and returned inserted IDs are sorted by ID independent of input order.",
+    "evidence": "executable case O14"
+  },
+  {
+    "id": "O15",
+    "title": "In-batch duplicates",
+    "critical": false,
+    "requirement": "Identical duplicates within a batch coalesce; differing duplicates throw E_CONFLICT atomically.",
+    "evidence": "executable case O15"
+  },
+  {
+    "id": "O16",
+    "title": "Empty batch",
+    "critical": false,
+    "requirement": "Empty imports are no-ops with no clock, audit, backup or write.",
+    "evidence": "executable case O16"
+  },
+  {
+    "id": "O17",
+    "title": "Migration",
+    "critical": false,
+    "requirement": "Existing version-1 migration preserves original IDs/amounts, produces version 2, and does not modify its input.",
+    "evidence": "executable case O17"
+  },
+  {
+    "id": "O18",
+    "title": "Amount validation",
+    "critical": false,
+    "requirement": "Amounts are safe integer cents, including zero and negative amounts; fractions and unsafe integers are rejected.",
+    "evidence": "executable case O18"
+  },
+  {
+    "id": "O19",
+    "title": "Audit privacy",
+    "critical": false,
+    "requirement": "Audit contains only action, sorted inserted IDs and timestamp; never amounts or complete records.",
+    "evidence": "executable case O19"
+  },
+  {
+    "id": "O20",
+    "title": "Regression",
+    "critical": false,
+    "requirement": "The original public regression suite remains byte-identical and passes; imports retain existing records.",
+    "evidence": "executable case O20"
+  }
+]

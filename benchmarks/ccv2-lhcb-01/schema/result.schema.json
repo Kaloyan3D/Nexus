@@ -1,0 +1,359 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ccv2-lhcb-01:result:v1",
+  "type": "object",
+  "required": [
+    "benchmarkId",
+    "runId",
+    "checkpoint",
+    "baseSha",
+    "fixtureRevision",
+    "provider",
+    "model",
+    "sessionId",
+    "taskId",
+    "taskInstanceId",
+    "arm",
+    "runStatus",
+    "snapshotSeal",
+    "settingsIdentityHash",
+    "criticalObligationsPassed",
+    "criticalObligationsTotal",
+    "obligationsPassed",
+    "obligationsTotal",
+    "toolProtocolViolations",
+    "requests",
+    "steps",
+    "toolCalls",
+    "exactRepeatedToolCalls",
+    "wallClockMs",
+    "firstUsefulEditStep",
+    "providerInputTokensTotal",
+    "providerOutputTokensTotal",
+    "reasoningTokensTotal",
+    "cacheReadTokensTotal",
+    "cacheWriteTokensTotal",
+    "peakProviderPromptTokens",
+    "nativeRequests",
+    "compiledRequests",
+    "compilerExecutions",
+    "fallbacks",
+    "activationThreshold",
+    "firstActivationRequest",
+    "surfaceReplacementCount",
+    "providerRetries",
+    "rateLimitFailures",
+    "transportFailures",
+    "taskSuccess",
+    "finalTestsPass",
+    "correctnessGate",
+    "pressurePolicyMatches",
+    "activationBasis",
+    "infrastructureInvalid",
+    "infrastructureReasons",
+    "availability",
+    "telemetryComplete",
+    "activationCount",
+    "contractHash"
+  ],
+  "properties": {
+    "benchmarkId": {
+      "type": "string"
+    },
+    "runId": {
+      "type": "string"
+    },
+    "checkpoint": {
+      "type": "string"
+    },
+    "baseSha": {
+      "type": "string"
+    },
+    "fixtureRevision": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "model": {
+      "type": "string"
+    },
+    "sessionId": {
+      "type": "string"
+    },
+    "taskId": {
+      "type": "string"
+    },
+    "taskInstanceId": {
+      "type": "string"
+    },
+    "arm": {
+      "enum": [
+        "native",
+        "production",
+        "forced"
+      ]
+    },
+    "runStatus": {
+      "enum": [
+        "VALID",
+        "INVALID",
+        "INFRA_INVALID"
+      ]
+    },
+    "snapshotSeal": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "settingsIdentityHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "criticalObligationsPassed": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "criticalObligationsTotal": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "obligationsPassed": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "obligationsTotal": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "toolProtocolViolations": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "requests": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "steps": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "toolCalls": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "exactRepeatedToolCalls": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "wallClockMs": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "firstUsefulEditStep": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "providerInputTokensTotal": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "providerOutputTokensTotal": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "reasoningTokensTotal": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "cacheReadTokensTotal": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "cacheWriteTokensTotal": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "peakProviderPromptTokens": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "nativeRequests": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "compiledRequests": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "compilerExecutions": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "fallbacks": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "activationThreshold": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "firstActivationRequest": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "surfaceReplacementCount": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "providerRetries": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "rateLimitFailures": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "transportFailures": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "taskSuccess": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "finalTestsPass": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "correctnessGate": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "pressurePolicyMatches": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "activationBasis": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "infrastructureInvalid": {
+      "type": "boolean"
+    },
+    "infrastructureReasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "availability": {
+      "type": "object"
+    },
+    "telemetryComplete": {
+      "type": "boolean"
+    },
+    "activationCount": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "contractHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  },
+  "additionalProperties": true
+}
