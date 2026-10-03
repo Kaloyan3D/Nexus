@@ -34,6 +34,30 @@ test('safe roots reject dangerous, ambiguous, relative and symlink paths',()=>{f
 test('manifest frozen arms, criteria and protected paths validate',()=>{assert(S.validateManifest(S.manifest));assert.throws(()=>S.validateManifest({...S.manifest,baseSha:'bad'}));assert.throws(()=>S.validateManifest({...S.manifest,acceptance:{}}));});
 test('source guard proves frozen base and detects exact changed paths in a local clone',()=>{assert.deepEqual(D.sourceGuard().differingPaths,[]);const clone=S.path.join(tmp,'clone');S.git(S.REPO,['clone','--shared','--quiet',S.REPO,clone]);S.fs.appendFileSync(S.path.join(clone,'config/ContextActivationPressureV2.cjs'),'\n// drift\n');const guard=D.sourceGuard(clone);assert.equal(guard.pass,false);assert.deepEqual(guard.differingPaths,['config/ContextActivationPressureV2.cjs']);});
 test('init stages frozen source in isolated root; fixture deterministic and hidden grader absent',()=>{const initialized=Init.init(root,{noRuntime:true});const other=S.path.join(tmp,'fixture-two');const second=fixture.createFixture(other);assert.equal(initialized.fixture.tree,second.tree);assert.equal(initialized.fixture.commit,second.commit);assert.deepEqual(initialized.fixture.fileHashes,second.fileHashes);assert(!Object.keys(S.inventory(S.inside(root,'workspace'))).some(p=>/grader|obligations|T00/.test(p)));assert(!S.fs.existsSync(S.inside(root,'nexus-root/scripts/bench')));});
+test('offline staging preserves credential-named code and imports the Muse stack; doctor rejects missing dependency',()=>{
+  const staged=S.path.join(tmp,'runtime-regression');Init.init(staged,{noRuntime:true});
+  const install=S.inside(staged,'nexus-root');Init.copyRuntimeDependencies(real,install);
+  const cp=require('node:child_process');const node=S.inside(install,'runtime/node/bin/node');
+  const packages=['@deepseek-ai/cordis','@deepseek-ai/dsh-session','@deepseek-ai/dsh-credentials','@deepseek-ai/dsh-credentials-local','@deepseek-ai/dsh-llm-pi-ai'];
+  const smoke=`const {createRequire}=require('node:module'),{pathToFileURL}=require('node:url');const r=createRequire(process.argv[1]);(async()=>{for(const p of ${JSON.stringify(packages)})await import(pathToFileURL(r.resolve(p)).href);})().catch(()=>{process.exitCode=1;});`;
+  const args=['--require',S.path.join(S.BENCH,'grader/offline.cjs'),'-e',smoke,S.inside(install,'app/package.json')];
+  assert.doesNotThrow(()=>cp.execFileSync(node,args,{env:{PATH:process.env.PATH},stdio:['ignore','pipe','pipe']}),'staged Muse dependency imports must succeed');
+  S.write(S.inside(staged,'state/runtime.json'),{staged:true,immutableFiles:D.immutableRuntimeFiles(install)});
+  assert.equal(D.doctor(staged).runtime.ready,true);
+  S.fs.rmSync(S.inside(install,'app/node_modules/@deepseek-ai/dsh-credentials'),{recursive:true});
+  const runtime=D.doctor(staged).runtime;assert.equal(runtime.ready,false);assert.equal(runtime.reason,'dependency-import-failed');assert(runtime.missingPackages.includes('@deepseek-ai/dsh-credentials'));assert(runtime.missingPackages.includes('@deepseek-ai/dsh-llm-pi-ai'));
+});
+test('dependency staging preserves code names and bounded links; rejects escapes, cycles and manifest drift',()=>{
+  const staged=S.path.join(tmp,'link-regression');Init.init(staged,{noRuntime:true});const install=S.inside(staged,'nexus-root'),source=S.path.join(tmp,'offline-source');
+  for(const p of ['app/node_modules/secrets-code','runtime/node','runtime/pwsh','data'])S.fs.mkdirSync(S.path.join(source,p),{recursive:true});
+  for(const p of ['package.json','package-lock.json'])S.fs.copyFileSync(S.inside(install,'runtime/'+p),S.path.join(source,'app',p));
+  S.fs.writeFileSync(S.path.join(source,'app/node_modules/secrets-code/index.js'),'module.exports=1;');S.fs.symlinkSync('secrets-code',S.path.join(source,'app/node_modules/alias'));
+  S.fs.writeFileSync(S.path.join(source,'data/.credentials.yaml'),'do not copy user data');Init.copyRuntimeDependencies(source,install);
+  assert.equal(S.fs.readFileSync(S.inside(install,'app/node_modules/alias/index.js'),'utf8'),'module.exports=1;');assert(!S.fs.lstatSync(S.inside(install,'app/node_modules/alias')).isSymbolicLink());assert(!S.fs.existsSync(S.inside(install,'data/.credentials.yaml')));
+  const link=S.path.join(source,'app/node_modules/bad');S.fs.symlinkSync(S.path.join(source,'data'),link);assert.throws(()=>Init.copyRuntimeDependencies(source,install),/runtime-source-link-escape/);S.fs.unlinkSync(link);
+  S.fs.symlinkSync('.',link);assert.throws(()=>Init.copyRuntimeDependencies(source,install),/runtime-source-link-cycle/);S.fs.unlinkSync(link);
+  S.fs.writeFileSync(S.path.join(source,'app/package.json'),'{}');assert.throws(()=>Init.copyRuntimeDependencies(source,install),/runtime-source-manifest-mismatch/);
+});
 test('DSH durable decoding uses existing pinned codec, including packed chunk records',()=>{S.fs.mkdirSync(S.inside(root,'nexus-root/app'),{recursive:true});S.fs.writeFileSync(S.inside(root,'nexus-root/app/package.json'),'{}');S.fs.symlinkSync(S.path.join(real,'app/node_modules'),S.inside(root,'nexus-root/app/node_modules'));seed=seedSession();assert.deepEqual(Session.decode(root,seed.relative).events,seed.events);const codec=require('../scripts/lib/Ccv2SessionLog.cjs').loadDshSessionModule(S.inside(root,'nexus-root'));const chunks=[event('assistant/chunk',{turn:1,step:1,chunk:{type:'text',text:'hello'}},0),event('assistant/chunk',{turn:1,step:1,chunk:{type:'text',text:' world'}},1)];const packed=codec.packChunkRuns(chunks);assert.deepEqual(packed.flatMap(codec.decodeStorageRecord),chunks);});
 test('activation replay fixture uses real production gate thresholds and native decision',()=>{const a=Session.activation(seed.events,root);assert.equal(a.rows.length,1);assert.equal(a.rows[0].decision,'NATIVE');assert.equal(a.summary.activationTokens,907018);assert.equal(D.doctor(root).thresholds.dshThresholdTokens,838860);assert.equal(Session.currentPressure(root).pressureTokens,500000);});
 test('offline preflight uses real identity/certification authorities with a temporary fake runtime',()=>{
@@ -41,6 +65,7 @@ test('offline preflight uses real identity/certification authorities with a temp
   for(const p of ['package.json','package-lock.json'])S.fs.copyFileSync(S.inside(install,'runtime/'+p),S.inside(install,'app/'+p));
   const closure=require('../scripts/MusePresetDependencyClosure.cjs');
   for(const plane of ['muse','engineering','deepseek']){const rows=closure.prepare(S.REPO,install,{profile:plane});for(const row of rows){const dest=S.inside(install,'data/.agent-presets/aih-'+plane+'/'+row.name);S.fs.mkdirSync(S.path.dirname(dest),{recursive:true});S.fs.copyFileSync(S.inside(install,'config/'+row.name),dest);}}
+  S.fs.mkdirSync(S.inside(install,'runtime/node/bin'),{recursive:true});S.fs.copyFileSync(process.execPath,S.inside(install,'runtime/node/bin/node'));S.fs.chmodSync(S.inside(install,'runtime/node/bin/node'),0o755);
   S.fs.mkdirSync(S.inside(install,'runtime/pwsh'),{recursive:true});S.fs.writeFileSync(S.inside(install,'runtime/pwsh/pwsh'),'offline fake, never executed');
   for(const plane of ['muse','engineering','deepseek'])S.fs.writeFileSync(S.inside(install,'data/.agent-presets/aih-'+plane+'/agent.cordis.yml'),'offline fixture composition');
   S.write(S.inside(root,'state/runtime.json'),{staged:true,nodeVersion:'v24.18.1',dshSessionVersion:'0.1.1-rc.2',immutableFiles:D.immutableRuntimeFiles(install)});

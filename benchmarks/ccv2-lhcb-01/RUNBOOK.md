@@ -32,6 +32,21 @@ permission walker, benchmark permissions do not follow dependency symlinks.
 No source or CCv2 behavior is patched. Linux is the currently exercised
 runtime-staging platform.
 
+Staging copies the complete approved `app/node_modules` tree, including packages
+whose code names contain `credentials` or `secrets`. The mutable-state secret
+filename filter is not used for immutable code. Both app manifests must match
+the frozen runtime manifests before copying. Links are dereferenced only within
+approved dependency boundaries; escapes and cycles fail before copying. Existing
+approved destinations are replaced so restaging cannot retain stale modules.
+
+Runtime readiness executes imports with the isolated pinned Node, resolving from
+its own `app/package.json`. It checks the Muse provider stack and OC01 runtime
+imports with network APIs blocked and an environment without credential values.
+Import failures report `dependency-import-failed` and safe package identifiers;
+a codec-only filesystem check is not sufficient. Use the pinned Node for the
+offline test suite as well.
+
+
 An alternative dependency source is supported:
 
 ```sh
@@ -57,6 +72,20 @@ this **isolated** installation and obtain current, identity-matching HEALTHY
 certification. Consult the OC01 script's actual interface; it makes provider
 calls and is deliberately not run by this harness. Do not copy certification
 or credentials from the normal installation. Check doctor again afterward.
+
+A separate plumbing-only check is safe before live certification:
+
+```sh
+ROOT="$HOME/nexus-bench/ccv2-lhcb-01/nexus-root"
+"$ROOT/runtime/node/bin/node" "$ROOT/scripts/OC01-OpenCodeMuseCanary.cjs" --dry-run-native-tail 1
+```
+
+This existing production dry-run uses a scripted localhost upstream and local
+counter, needs no credential store, and writes no certification to the isolated
+installation. Its expected final line is
+`CCV2-OC01 native-tail DRY RUN — PASS (no certification written)`.
+It is not the real OC01 provider canary.
+
 
 ## Build real read-only history
 

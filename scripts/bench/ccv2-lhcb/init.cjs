@@ -20,11 +20,7 @@ function init(root,options={}) {
 function stageRuntime(root,source) {
   S.ready(root);if(S.fs.readdirSync(S.inside(root,'runs')).length||S.fs.readdirSync(S.inside(root,'snapshots')).length)S.fail('runtime-staging-before-experiments-only');if(!D.sourceGuard().pass)S.fail('production-drift');S.noLinks(source);source=S.path.resolve(source);
   const install=S.inside(root,'nexus-root');if(S.fs.existsSync(S.inside(root,'state/runtime.json')))S.fs.unlinkSync(S.inside(root,'state/runtime.json'));if(source===install||source.startsWith(root+S.path.sep))S.fail('runtime-source-invalid');
-  // Only installed immutable dependencies, never data, settings or credentials.
-  for(const p of ['app/package.json','app/package-lock.json','app/node_modules','runtime/node','runtime/pwsh']){
-    const from=S.inside(source,p),to=S.inside(install,p);if(!S.fs.existsSync(from))S.fail('runtime-source-incomplete');
-    S.fs.cpSync(from,to,{recursive:true,dereference:true,filter:f=>{if(S.secretName(S.path.relative(source,f)))return false;if(S.fs.lstatSync(f).isSymbolicLink()){const target=S.fs.realpathSync(f);if(!['app/node_modules','runtime/node','runtime/pwsh'].some(p=>target===S.path.join(source,p)||target.startsWith(S.path.join(source,p)+S.path.sep)))S.fail('runtime-source-link-escape');}return true;}});
-  }
+  copyRuntimeDependencies(source,install);
   const node=S.inside(install,'runtime/node/bin/node'), pwsh=S.inside(install,'runtime/pwsh/pwsh');
   const versions=S.read(S.inside(install,'config/versions.json'));
   const actual=execFileSync(node,['--version'],{encoding:'utf8'}).trim();if(actual!=='v'+versions.NodeVersion)S.fail('node-version-mismatch');
@@ -40,7 +36,23 @@ function stageRuntime(root,source) {
   function restrict(dir){S.fs.chmodSync(dir,0o700);for(const e of S.fs.readdirSync(dir,{withFileTypes:true})){const f=S.path.join(dir,e.name);if(e.isSymbolicLink()){if(!S.fs.realpathSync(f).startsWith(install+S.path.sep))S.fail('runtime-link-escape');continue;}if(e.isDirectory())restrict(f);else S.fs.chmodSync(f,0o600);}}restrict(S.inside(install,'data'));
   // Install the canonical Linux launchers into the expected bin location.
   for(const p of S.fs.readdirSync(S.inside(install,'bin/linux')).filter(x=>x.endsWith('.sh'))){const dest=S.inside(install,'bin/'+p.slice(0,-3));S.fs.copyFileSync(S.inside(install,'bin/linux/'+p),dest);S.fs.chmodSync(dest,0o755);}
+  const imports=D.runtimeImports(install);if(!imports.ready)S.fail('dependency-import-failed:'+imports.missingPackages.join(','));
   S.write(S.inside(root,'state/runtime.json'),{nodeVersion:actual,dshSessionVersion:S.read(S.inside(install,'app/node_modules/@deepseek-ai/dsh-session/package.json')).version,staged:true,immutableFiles:D.immutableRuntimeFiles(install)});
   return {staged:true};
 }
-module.exports={init,stageRuntime};
+function copyRuntimeDependencies(source,install) {
+  S.ready(S.path.dirname(install));if(install!==S.inside(S.path.dirname(install),'nexus-root'))S.fail('runtime-target-invalid');
+  S.noLinks(source);source=S.path.resolve(source);S.noLinks(install);if(source===install||source.startsWith(S.path.dirname(install)+S.path.sep)||install.startsWith(source+S.path.sep))S.fail('runtime-source-invalid');
+  for(const p of ['package.json','package-lock.json'])if(S.hash(S.fs.readFileSync(S.inside(source,'app/'+p)))!==S.hash(S.fs.readFileSync(S.inside(install,'runtime/'+p))))S.fail('runtime-source-manifest-mismatch');
+  const boundaries=['app/node_modules','runtime/node','runtime/pwsh'].map(p=>S.path.join(source,p));
+  function checkTree(file,ancestors=new Set()){const stat=S.fs.lstatSync(file);const resolved=S.fs.realpathSync(file);if(!boundaries.some(p=>resolved===p||resolved.startsWith(p+S.path.sep)))S.fail('runtime-source-link-escape');if(stat.isSymbolicLink()&&!S.fs.existsSync(resolved))S.fail('runtime-source-link-broken');if(S.fs.statSync(file).isDirectory()){if(ancestors.has(resolved))S.fail('runtime-source-link-cycle');const next=new Set([...ancestors,resolved]);for(const name of S.fs.readdirSync(file).sort())checkTree(S.path.join(file,name),next);}else if(!S.fs.statSync(file).isFile())S.fail('runtime-source-unsupported-file');}
+  for(const boundary of boundaries)checkTree(boundary);
+  // Faithfully copy immutable code trees. Credential-named packages are code, not user stores.
+  // Isolation is enforced by these approved source boundaries, not the mutable-state secret filter.
+  for(const p of ['app/package.json','app/package-lock.json','app/node_modules','runtime/node','runtime/pwsh']){
+    const from=S.inside(source,p),to=S.inside(install,p);if(!S.fs.existsSync(from))S.fail('runtime-source-incomplete');
+    S.fs.rmSync(to,{recursive:true,force:true});
+    S.fs.cpSync(from,to,{recursive:true,dereference:true,filter:f=>{if(S.fs.lstatSync(f).isSymbolicLink()){const target=S.fs.realpathSync(f);if(!['app/node_modules','runtime/node','runtime/pwsh'].some(p=>target===S.path.join(source,p)||target.startsWith(S.path.join(source,p)+S.path.sep)))S.fail('runtime-source-link-escape');}return true;}});
+  }
+}
+module.exports={init,stageRuntime,copyRuntimeDependencies};

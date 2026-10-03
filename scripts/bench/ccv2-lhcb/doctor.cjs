@@ -35,14 +35,30 @@ function certification(root) {
   const installRoot=S.inside(root,'nexus-root');
   const v=host.startupOpencodeAuthorityV2({installRoot});return {health:v.health,state:v.state};
 }
+// Resolve from app/package.json and import ESM without executing provider requests or plugins.
+const runtimePackages=Object.freeze(['@deepseek-ai/cordis','@deepseek-ai/dsh-session','@deepseek-ai/dsh-credentials','@deepseek-ai/dsh-credentials-local','@deepseek-ai/dsh-llm-pi-ai','@deepseek-ai/dsh-llm','@deepseek-ai/dsh-system-prompt','@deepseek-ai/dsh-tools','@deepseek-ai/dsh-agent','@deepseek-ai/dsh-agent-loop','@deepseek-ai/dsh-invariants','yaml']);
+function runtimeImports(install){
+  const node=S.inside(install,'runtime/node/bin/node');
+  if(!S.fs.existsSync(node))return {ready:false,reason:'offline-runtime-staging-required',missingPackages:[]};
+  const preload=S.path.join(S.BENCH,'grader/offline.cjs');
+  const script=`const {createRequire}=require('node:module'),{pathToFileURL}=require('node:url');const r=createRequire(process.argv[1]);const packages=JSON.parse(process.argv[2]);(async()=>{const missing=[];for(const p of packages){try{const mod=await import(pathToFileURL(r.resolve(p)).href);if(p==='@deepseek-ai/dsh-session'&&typeof mod.decodeStorageRecord!=='function')throw new Error('codec');}catch{missing.push(p);}}process.stdout.write(JSON.stringify({missing,nodeVersion:process.version,networkAttempts:global.lhcbOfflineAudit.attempts()}));})().catch(()=>{process.exitCode=1;});`;
+  try{
+    const output=require('node:child_process').execFileSync(node,['--require',preload,'-e',script,S.inside(install,'app/package.json'),JSON.stringify(runtimePackages)],{env:{PATH:process.env.PATH,HOME:S.path.dirname(install),AIH_INSTALL_ROOT:install,NEXUS_INSTALL_ROOT:install,DSH_HOME:S.inside(install,'data')},encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:30000,maxBuffer:64*1024});
+    const result=JSON.parse(output),pinned='v'+S.read(S.inside(install,'config/versions.json')).NodeVersion;
+    if(result.nodeVersion!==pinned)return {ready:false,reason:'node-version-mismatch',missingPackages:[]};
+    if(result.networkAttempts!==0||!Array.isArray(result.missing))throw new Error('invalid-import-probe');
+    return {ready:result.missing.length===0,reason:result.missing.length?'dependency-import-failed':null,missingPackages:result.missing};
+  }catch{return {ready:false,reason:'dependency-import-failed',missingPackages:[...runtimePackages]};}
+}
 function doctor(root) {
   S.validateManifest(S.manifest); root=S.rootOf(root);
   const initialized=S.fs.existsSync(S.inside(root,'state/identity.json'));
   const guard=sourceGuard(S.REPO,initialized?S.inside(root,'nexus-root'):null);
   let runtime={ready:false,reason:'init-required'},thresholds=null,cert=null;
   if(initialized){S.ready(root); thresholds=gate.deriveActivationThresholdsV2(route(root)); cert=certification(root);
-    try {const codec=require('../../lib/Ccv2SessionLog.cjs').loadDshSessionModule(S.inside(root,'nexus-root')); runtime={ready:typeof codec.decodeStorageRecord==='function'&&S.fs.existsSync(S.inside(root,'nexus-root/runtime/pwsh/pwsh'))&&S.fs.existsSync(S.inside(root,'state/runtime.json')),reason:S.fs.existsSync(S.inside(root,'state/runtime.json'))?null:'runtime-composition-incomplete'};}catch{runtime={ready:false,reason:'offline-runtime-staging-required'};}
+    runtime=runtimeImports(S.inside(root,'nexus-root'));
+    if(runtime.ready&&(!S.fs.existsSync(S.inside(root,'nexus-root/runtime/pwsh/pwsh'))||!S.fs.existsSync(S.inside(root,'state/runtime.json'))))runtime={...runtime,ready:false,reason:'runtime-composition-incomplete'};
   }
   return {benchmarkId:S.manifest.benchmarkId,sourceGuard:guard,initialized,runtime,thresholds,certification:cert,liveReady:guard.pass&&runtime.ready&&cert?.health==='HEALTHY'};
 }
-module.exports={immutableRuntimeFiles,sourceGuard,route,identity,certification,doctor};
+module.exports={runtimeImports,runtimePackages,immutableRuntimeFiles,sourceGuard,route,identity,certification,doctor};

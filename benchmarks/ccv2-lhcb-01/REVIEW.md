@@ -2,6 +2,11 @@
 
 CCV2-LHCB-01 environment ready for review and dry-run.
 
+The initial codec-only runtime-readiness check missed a staging defect.
+See [STAGING-FIX.md](STAGING-FIX.md) for the subsequent dependency-closure fix,
+behavioral readiness evidence and OC01 plumbing dry-run. The initial results
+below describe the original infrastructure handoff.
+
 The isolated installation is staged at `/home/kaloyan/nexus-bench/ccv2-lhcb-01`.
 No real Muse/OpenCode benchmark, live provider call, push or commit was performed.
 The fixture remains intentionally unsolved. There are no live runs or snapshots;
