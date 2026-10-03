@@ -65,6 +65,20 @@ class AutoRunner {
   timestamp(){return new Date(this.now()).toISOString();}
   save(phase){if(phase)this.journal.phase=phase;this.journal.updatedAt=this.timestamp();S.write(this.file,this.journal);}
   checkContract(){if(S.contractHash()!==authority.contractHash)S.fail('runner-contract-drift');for(const stage of S.manifest.stages)exactPrompt(stage);}
+  assertStageOrder(id,options={}){
+    const initial=S.manifest.stages.slice(0,8);if(!S.manifest.stages.includes(id))S.fail('runner-stage-order');
+    let completed;
+    if(this.journal)completed=this.journal.stages.filter(r=>r.phase==='FLUSHED').map(r=>r.promptId);
+    else{
+      const file=S.inside(this.root,'state/stages.json'),rows=S.fs.existsSync(file)?S.read(file):[];
+      const b=rows.length?Session.binding(this.root):null;
+      completed=rows.filter((r,index)=>evidence(b.events.slice(0,rows[index+1]?.startSeq??b.events.length),{promptId:r.stage,startSeq:r.startSeq})?.kind==='completed').map(r=>r.stage);
+    }
+    const seen=[];for(const stage of completed)if(initial.includes(stage)&&!seen.includes(stage)){if(stage!==initial[seen.length])S.fail('runner-stage-order');seen.push(stage);}
+    const required=id==='T99'||options.repeat?initial:initial.slice(0,initial.indexOf(id));
+    if(required.some(stage=>!seen.includes(stage)))S.fail('runner-stage-order');
+    if(this.journal&&seen.length){const b=this.binding();for(const stage of seen){const r=this.journal.stages.find(r=>r.promptId===stage&&r.phase==='FLUSHED'),e=evidence(b.events,r);if(e?.kind!=='completed'||e.endSeq!==r.endSeq||S.hash(S.json(b.events.slice(0,r.endSeq+1)))!==r.durableEventsHash)S.fail('runner-completed-stage-evidence-drift');}}
+  }
   preflight(){this.checkContract();validateCredentials(this.env);assertPreflight((this.options.doctor||D.doctor)(this.root));}
   binding(){const b=Session.binding(this.root);if(this.journal?.identity&&!equal(identity(b),this.journal.identity))S.fail('runner-session-task-identity-drift');observeRoute(b.events,b);return b;}
   telemetry(){const b=this.binding(),p=Session.currentPressure(this.root);return {pressureTokens:p.pressureTokens,usageSamples:b.events.filter(e=>e.type==='assistant/message'&&e.data.usage&&Number.isFinite(e.data.usage.inputTokens)).length,dshThresholdTokens:p.dshThresholdTokens,activationTokens:p.activationTokens,...identity(b)};}
@@ -148,7 +162,7 @@ class AutoRunner {
     const sid=this.journal.creation.sessionId,candidates=this.sessionArtifacts(sid);if(candidates.length!==1)S.fail('runner-new-session-artifact-ambiguous');Session.bind(this.root,candidates[0]);const b=Session.binding(this.root);if(b.sessionId!==sid)S.fail('runner-session-task-identity-drift');this.journal.identity=identity(b);this.save();return b;
   }
   async runStage(id,options={}){
-    this.preflight();const bank=exactPrompt(id);if(!this.journal)await this.bootstrap(options);
+    this.assertStageOrder(id,options);this.preflight();const bank=exactPrompt(id);if(!this.journal)await this.bootstrap(options);
     if(options.stageId!==undefined&&!/^stage-[A-Za-z0-9_-]{1,80}$/.test(options.stageId))S.fail('runner-stage-id-invalid');
     let record=options.record||this.journal.stages.find(r=>r.key===options.stageId);
     const unresolved=this.journal.stages.find(r=>r.origin!=='manual'&&r.phase!=='FLUSHED');
@@ -262,7 +276,7 @@ class AutoRunner {
   }
   status(){let pressure=null;try{pressure=this.telemetry();}catch{}return {benchmarkId:S.manifest.benchmarkId,phase:this.journal?.phase||'READY',identity:this.journal?.identity||null,pressure,journal:this.journal};}
   async execute(command,arg,options={}){
-    if(command==='run-status')return this.status();const lock=S.inside(this.root,'state/autorunner.lock.json');
+    if(command==='run-status')return this.status();if(command==='run-stage')this.assertStageOrder(arg,options);const lock=S.inside(this.root,'state/autorunner.lock.json');
     if(S.fs.existsSync(lock)){const prior=S.read(lock);if(prior.root!==this.root||prior.contractHash!==authority.contractHash||!Number.isSafeInteger(prior.pid))S.fail('runner-lock-invalid');const token=processToken(prior.pid);if(token&&token===prior.processToken)S.fail('runner-busy');if(token)S.fail('runner-lock-ambiguous');S.fs.unlinkSync(lock);}
     const fd=S.fs.openSync(lock,'wx',0o600);S.fs.writeFileSync(fd,S.json({root:this.root,contractHash:authority.contractHash,pid:process.pid,processToken:processToken(process.pid)}));S.fs.closeSync(fd);
     try{
@@ -272,7 +286,7 @@ class AutoRunner {
       if(command==='run-all')return await this.runAll(options);
       S.fail('runner-command-invalid');
     }catch(e){const code=/^lhcb-[a-z0-9-]+$/.test(e?.message)?e.message:'lhcb-runner-operation-failed';if(this.journal){this.journal.failure={code,at:this.timestamp()};this.save('FAILED');}throw new Error(code);}
-    finally{try{await this.transport.close?.();}catch{if(this.journal){this.journal.cleanup={code:'lhcb-runner-runtime-cleanup-failed',at:this.timestamp()};this.save();}}finally{S.fs.unlinkSync(lock);}}
+    finally{try{await this.transport.close?.();}catch(e){if(this.journal){this.journal.cleanup={code:/^lhcb-[a-z0-9-]+$/.test(e?.message)?e.message:'lhcb-runner-runtime-cleanup-failed',at:this.timestamp()};this.save();}}finally{S.fs.unlinkSync(lock);}}
   }
 }
 module.exports={AutoRunner,authority,PHASES,exactPrompt,validateCredentials,assertPreflight,evidence,checkpointBand,workspace,identity};
