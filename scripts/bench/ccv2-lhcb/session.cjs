@@ -3,7 +3,7 @@ const S=require('./state.cjs'), D=require('./doctor.cjs');
 const log=require('../../lib/Ccv2SessionLog.cjs');
 const replay=require('../../CCv2-ActivationReplay.cjs');
 const gate=require('../../../config/ContextActivationPressureV2.cjs');
-function decode(root,relative) {const parsed=log.readSessionLog(S.inside(root,relative),{installRoot:S.inside(root,'nexus-root')});if(!Number.isInteger(parsed.header.version)||!Number.isSafeInteger(parsed.header.createdAt)||parsed.events.some(e=>typeof e.type!=='string'||!Number.isSafeInteger(e.time)||e.time<0||!e.data||typeof e.data!=='object'))S.fail('session-envelope-invalid');surfaceMessages(parsed.events,root);return parsed;}
+function decode(root,relative) {const parsed=require('./session-log.cjs').readSessionLog(S.inside(root,relative),{installRoot:S.inside(root,'nexus-root')});if(!Number.isInteger(parsed.header.version)||!Number.isSafeInteger(parsed.header.createdAt)||parsed.events.some(e=>typeof e.type!=='string'||!Number.isSafeInteger(e.time)||e.time<0||!e.data||typeof e.data!=='object'))S.fail('session-envelope-invalid');surfaceMessages(parsed.events,root);return parsed;}
 function binding(root) {
   const expected=S.read(S.inside(root,'state/binding.json'));
   const raw=S.read(S.inside(root,'nexus-root/data/routing/session-bindings.json'));
@@ -13,7 +13,7 @@ function binding(root) {
   if(parsed.header.id!==expected.sessionId || parsed.header.cwd!==S.inside(root,'workspace'))S.fail('session-mismatch');
   const task=S.read(S.inside(root,'workspace/.ai-harness/runs/'+expected.taskId+'/manifest.json'));
   if(task.taskId!==expected.taskId||task.taskInstanceId!==expected.taskInstanceId)S.fail('task-mismatch');
-  return {...expected,events:parsed.events};
+  return {...expected,events:parsed.events,sessionLogHash:parsed.sourceHash,storageFrames:parsed.storageFrames};
 }
 function bind(root,relative) {
   S.ready(root);

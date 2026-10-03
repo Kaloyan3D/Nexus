@@ -1,6 +1,7 @@
 'use strict';
 const S=require('./state.cjs'),D=require('./doctor.cjs'),Session=require('./session.cjs');
 const Snap=require('./snapshot.cjs'),Restore=require('./restore.cjs'),Arms=require('./arms.cjs'),Collect=require('./collect.cjs'),Report=require('./report.cjs');
+const {observeRoute}=require('./route-observation.cjs');
 const {validateCredentials}=require('./agent-transport.cjs');
 const authority=require('../../../benchmarks/ccv2-lhcb-01/autorunner-authority.json');
 const PHASES=['READY','SUBMITTED','AGENT_IDLE','FLUSHED','COLLECTED','CHECKPOINTING','CHECKPOINTED','RESTORING','RUNNING','GRADED','COMPLETE','FAILED'];
@@ -19,10 +20,6 @@ function assertPreflight(d){
   if(!d.runtime?.ready)S.fail('runner-runtime-not-ready');
   if(d.certification?.health!=='HEALTHY'||d.certification?.state!=='valid'||d.liveReady!==true)S.fail('runner-certification-invalid');
   for(const [key,value] of Object.entries(authority.thresholds))if(d.thresholds?.[key]!==value)S.fail('runner-threshold-mismatch');
-}
-function routeOf(events){
-  let observed=null;for(const e of events){const c=e.type==='request/context'?e.data:e.type==='request/header'?e.data.header?.config:null;if(c){if(c.provider!==S.manifest.provider||c.model!==S.manifest.model)S.fail('runner-provider-model-mismatch');observed={provider:c.provider,model:c.model};}}
-  return observed;
 }
 function evidence(events,r){
   const users=events.filter(e=>e.seq>=r.startSeq&&(r.endSeq==null||e.seq<=r.endSeq)&&e.type==='user/message'&&e.surfaceOp!=='replace'&&(!e.data.source||e.data.source.kind==='user'));
@@ -69,7 +66,7 @@ class AutoRunner {
   save(phase){if(phase)this.journal.phase=phase;this.journal.updatedAt=this.timestamp();S.write(this.file,this.journal);}
   checkContract(){if(S.contractHash()!==authority.contractHash)S.fail('runner-contract-drift');for(const stage of S.manifest.stages)exactPrompt(stage);}
   preflight(){this.checkContract();validateCredentials(this.env);assertPreflight((this.options.doctor||D.doctor)(this.root));}
-  binding(){const b=Session.binding(this.root);if(this.journal?.identity&&!equal(identity(b),this.journal.identity))S.fail('runner-session-task-identity-drift');if(!routeOf(b.events))S.fail('runner-provider-model-unobserved');return b;}
+  binding(){const b=Session.binding(this.root);if(this.journal?.identity&&!equal(identity(b),this.journal.identity))S.fail('runner-session-task-identity-drift');observeRoute(b.events,b);return b;}
   telemetry(){const b=this.binding(),p=Session.currentPressure(this.root);return {pressureTokens:p.pressureTokens,usageSamples:b.events.filter(e=>e.type==='assistant/message'&&e.data.usage&&Number.isFinite(e.data.usage.inputTokens)).length,dshThresholdTokens:p.dshThresholdTokens,activationTokens:p.activationTokens,...identity(b)};}
   async wait(predicate,timeout,code){const deadline=this.now()+timeout;for(;;){const result=await predicate();if(result)return result;if(this.now()>=deadline)S.fail(code);await this.pause(this.pollMs);}}
   async agentStatus(){const b=this.binding(),r=await this.transport.status(b.sessionId);if(!r||r.sessionId!==b.sessionId||r.cwd!==S.inside(this.root,'workspace')||!['idle','running'].includes(r.status))S.fail('runner-status-malformed');return r;}
@@ -95,17 +92,37 @@ class AutoRunner {
     if(record.readOnly){const after=workspace(this.root);if(after.gitStatus||!equal(after,record.workspaceBefore))S.fail('runner-read-only-workspace-mutated');}
     record.after=this.telemetry();record.durableCompletionAt=this.timestamp();record.sessionLogHash=S.hash(S.fs.readFileSync(S.inside(this.root,this.binding().sessionLog)));record.phase='FLUSHED';if(Number.isSafeInteger(record.auditCursorBefore))this.journal.auditCursor=record.auditCursorBefore+1;this.save('FLUSHED');
   }
+  prepareManualAdoption(){
+    S.ready(this.root);this.checkContract();
+    const prior=this.journal;
+    const emptyFailure=prior?.phase==='FAILED'&&prior.failure?.code==='lhcb-runner-provider-model-unobserved'&&!prior.identity&&!prior.creation&&!prior.stages.length&&!Object.keys(prior.checkpoints).length&&!Object.keys(prior.arms).length;
+    const readyManual=prior?.phase==='READY'&&prior.identity&&!prior.creation&&prior.stages.every(r=>r.origin==='manual'&&r.phase==='FLUSHED')&&!Object.keys(prior.checkpoints).length&&!Object.keys(prior.arms).length;
+    if(prior&&!emptyFailure&&!readyManual)S.fail('runner-manual-adoption-ambiguous');
+    const ws=workspace(this.root),fixture=S.read(S.inside(this.root,'state/fixture.json'));
+    if(ws.gitStatus||ws.head!==fixture.commit||ws.tree!==fixture.tree)S.fail('runner-workspace-not-pristine');
+    const b=Session.binding(this.root),routeAdoption=observeRoute(b.events,b);
+    if(prior?.identity&&!equal(prior.identity,identity(b)))S.fail('runner-session-task-identity-drift');
+    const file=S.inside(this.root,'state/stages.json'),stages=S.fs.existsSync(file)?S.read(file):[];Session.verifyStages(this.root,b,stages);
+    const receipts=[];
+    for(const [index,stage] of stages.entries()){
+      const events=b.events.slice(0,stages[index+1]?.startSeq??b.events.length),e=evidence(events,{promptId:stage.stage,startSeq:stage.startSeq});
+      if(e?.kind!=='completed')S.fail('runner-manual-stage-incomplete');
+      receipts.push({key:'manual-'+index,promptId:stage.stage,promptHash:stage.promptHash,...identity(b),phase:'FLUSHED',startSeq:stage.startSeq,endSeq:e.endSeq,durableEventsHash:S.hash(S.json(b.events.slice(0,e.endSeq+1))),origin:'manual',submitAt:null,durableCompletionAt:null,availability:{timestamps:'Manual stages predate runner receipts; timestamps were not recorded',telemetry:'Before/after samples were not recorded by manual prompt issuance'}});
+    }
+    if(readyManual&&!equal(prior.stages,receipts))S.fail('runner-completed-stage-evidence-drift');
+    const journal=prior?JSON.parse(S.json(prior)):{version:1,root:this.root,contractHash:authority.contractHash,workspacePath:ws.path,fixtureCommit:fixture.commit,checkpoints:{},arms:{},createdAt:this.timestamp()};
+    if(journal.workspacePath!==ws.path||journal.fixtureCommit!==fixture.commit)S.fail('runner-workspace-identity-drift');
+    journal.phase='READY';journal.identity=identity(b);journal.stages=receipts;journal.routeAdoption=routeAdoption;delete journal.failure;
+    return journal;
+  }
   async bootstrap(options={}){
     this.preflight();
+    if(S.fs.existsSync(S.inside(this.root,'state/binding.json'))&&(!this.journal||(this.journal.phase==='FAILED'&&this.journal.failure?.code==='lhcb-runner-provider-model-unobserved'&&!this.journal.identity))){this.journal=this.prepareManualAdoption();this.save('READY');}
     if(!this.journal){
       const ws=workspace(this.root),f=S.read(S.inside(this.root,'state/fixture.json'));if(ws.gitStatus||ws.head!==f.commit||ws.tree!==f.tree)S.fail('runner-workspace-not-pristine');
       this.journal={version:1,root:this.root,contractHash:authority.contractHash,phase:'READY',identity:null,workspacePath:ws.path,fixtureCommit:f.commit,stages:[],checkpoints:{},arms:{},createdAt:this.timestamp()};
       const file=S.inside(this.root,'state/binding.json');
-      if(S.fs.existsSync(file)){
-        const b=Session.binding(this.root);if(!routeOf(b.events))S.fail('runner-provider-model-unobserved');this.journal.identity=identity(b);
-        const stagesFile=S.inside(this.root,'state/stages.json'),stages=S.fs.existsSync(stagesFile)?S.read(stagesFile):[];Session.verifyStages(this.root,b,stages);
-        for(const [index,s] of stages.entries()){const stageEvents=b.events.slice(0,stages[index+1]?.startSeq??b.events.length);const e=evidence(stageEvents,{promptId:s.stage,startSeq:s.startSeq});if(e?.kind!=='completed')S.fail('runner-manual-stage-incomplete');this.journal.stages.push({key:'manual-'+this.journal.stages.length,promptId:s.stage,promptHash:s.promptHash,...identity(b),phase:'FLUSHED',startSeq:s.startSeq,endSeq:e.endSeq,durableEventsHash:S.hash(S.json(b.events.slice(0,e.endSeq+1))),origin:'manual',submitAt:null,durableCompletionAt:null,availability:{timestamps:'Manual stages predate runner receipts; timestamps were not recorded',telemetry:'Before/after samples were not recorded by manual prompt issuance'}});}
-      }else{
+      if(!S.fs.existsSync(file)){
         if(!options.newSession)S.fail('runner-bind-session-first');
         if(S.fs.readdirSync(S.inside(this.root,'runs')).length||S.fs.readdirSync(S.inside(this.root,'snapshots')).length||S.fs.existsSync(S.inside(this.root,'state/stages.json')))S.fail('runner-new-session-refused');
         this.journal.creation={sessionId:'session-'+S.crypto.randomUUID(),phase:'READY'};

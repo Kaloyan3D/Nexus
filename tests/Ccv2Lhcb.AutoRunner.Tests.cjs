@@ -51,6 +51,73 @@ function setup({stages=['T00','P01'],pressure=16000,full=false}={}){
   return {root,install,flags,trace,options,setSession(sid){header.id=sid;relative='nexus-root/data/sessions/workspace/'+sid+'/session.jsonl';persist();S.write(S.path.join(install,'data/routing/session-bindings.json'),{schemaVersion:1,bindings:{[sid]:{sessionId:sid,taskId:'TASK-0001',taskInstanceId:'instance-one',workspace:header.cwd}}});},runner:()=>new AutoRunner(root,options),append,persist,memory,events:()=>events,relative};
 }
 
+test('historical header-only first Zstd frame must not hide durable route or manual stages',async()=>{
+  const s=setup(),p=S.path.join(s.root,s.relative),records=S.fs.readFileSync(p,'utf8').trimEnd().split('\n');
+  const compressed=s.relative+'.zstd';
+  S.fs.writeFileSync(S.path.join(s.root,compressed),Buffer.concat(records.map(line=>require('node:zlib').zstdCompressSync(Buffer.from(line+'\n')))));
+  const bFile=S.path.join(s.root,'state/binding.json'),b=S.read(bFile);b.sessionLog=compressed;S.write(bFile,b);
+  assert.equal(Session.binding(s.root).events.length,s.events().length,'read all appended frames using pinned storage codec');
+  const r=s.runner();await r.bootstrap();assert.equal(r.journal.phase,'READY');assert.equal(r.journal.identity.sessionId,'session-one');assert.equal(r.journal.identity.taskInstanceId,'instance-one');assert.deepEqual(r.journal.stages.map(x=>x.promptId),['T00','P01']);assert(!s.trace.some(x=>x.startsWith('submit:')));assert.equal(global.lhcbOfflineAudit.attempts(),0);
+});
+
+// Content-free fixtures mirror the historical decoded seq 14/15 shape. The
+// literal observed pair is evidence; the manifest is only its validation rule.
+const {observeRoute}=require('../scripts/bench/ccv2-lhcb/route-observation.cjs');
+const historicalRoute=[
+  event('request/header',{header:{config:{provider:'opencode-go',model:'muse-spark-1.3-contributor',reasoningEffort:'high',maxTokens:2048},system:[],tools:[]},reason:'fixture'},14),
+  event('request/context',{provider:'opencode-go',model:'muse-spark-1.3-contributor',contextWindow:1000000},15)
+];
+for(const [index,kind] of ['request/header','request/context'].entries())test(kind+' route authority retains observed values and safe event provenance',()=>{
+  const route=observeRoute([historicalRoute[index]],{sessionLog:'session.jsonl.zstd',sessionLogHash:'a'.repeat(64)});
+  assert.equal(route.provider,'opencode-go');assert.equal(route.model,'muse-spark-1.3-contributor');
+  assert.deepEqual(Object.keys(route).sort(),['evidence','model','provider']);assert.equal(route.evidence[0].kind,kind);assert.equal(route.evidence[0].seq,14+index);assert.equal(route.evidence[0].index,0);assert.match(route.evidence[0].eventHash,/^[a-f0-9]{64}$/);assert.equal(route.evidence[0].locator,'session.jsonl.zstd#event/'+(14+index));
+  assert.deepEqual(Object.keys(route.evidence[0]).sort(),['eventHash','index','kind','locator','seq','sessionLogHash']);
+});
+test('no route and auxiliary title/settings/UI metadata cannot substitute historical request provenance',()=>{
+  for(const events of [[],[event('session/title-llm-request',{route:{provider:'opencode-go',model:'muse-spark-1.3-contributor'}},0)],[event('settings',{provider:'opencode-go',model:'muse-spark-1.3-contributor'},0)],[event('session',{provider:'opencode-go',model:'muse-spark-1.3-contributor'},0)]])assert.throws(()=>observeRoute(events),/lhcb-runner-provider-model-unobserved/);
+});
+for(const field of ['provider','model'])test('wrong '+field+' remains a route mismatch in each authoritative form',()=>{
+  for(const original of historicalRoute){const row=structuredClone(original);(row.type==='request/header'?row.data.header.config:row.data)[field]='wrong';assert.throws(()=>observeRoute([row]),/lhcb-runner-provider-model-mismatch/);}
+});
+test('conflicting route observations fail regardless of ordering',()=>{
+  const wrong=structuredClone(historicalRoute[0]);wrong.data.header.config.model='wrong';
+  for(const events of [[wrong,historicalRoute[1]],[historicalRoute[1],wrong]])assert.throws(()=>observeRoute(events),/lhcb-runner-provider-model-mismatch/);
+});
+test('multiple identical route observations preserve each durable locator',()=>{
+  const route=observeRoute([...historicalRoute,historicalRoute[1]]);assert.equal(route.evidence.length,3);assert.deepEqual(route.evidence.map(x=>x.index),[0,1,2]);assert.equal(route.provider,'opencode-go');
+});
+test('historical nested header survives appended frames and storage codec projection',()=>{
+  const s=setup(),header=JSON.parse(S.fs.readFileSync(S.path.join(s.root,s.relative),'utf8').split('\n')[0]);
+  const rows=historicalRoute.map((e,index)=>({...e,seq:index})),relative=s.relative+'.zstd';
+  S.fs.writeFileSync(S.path.join(s.root,relative),Buffer.concat([header,...rows].map(x=>require('node:zlib').zstdCompressSync(Buffer.from(JSON.stringify(x)+'\n')))));
+  const parsed=Session.decode(s.root,relative);assert.equal(parsed.storageFrames,3);assert.deepEqual(parsed.events,rows);assert.equal(observeRoute(parsed.events).evidence.length,2);
+});
+test('truncated trailing frame fails closed instead of returning a decoded prefix',()=>{
+  const s=setup(),raw=S.fs.readFileSync(S.path.join(s.root,s.relative)),relative=s.relative+'.zstd',z=require('node:zlib');
+  S.fs.writeFileSync(S.path.join(s.root,relative),Buffer.concat([z.zstdCompressSync(raw),z.zstdCompressSync(Buffer.from('\n')).subarray(0,-1)]));assert.throws(()=>Session.decode(s.root,relative),/session-compressed-frame-invalid/);
+});
+test('corrupt checksummed frame and noncontiguous decoded events fail closed',()=>{
+  const s=setup(),z=require('node:zlib'),raw=S.fs.readFileSync(S.path.join(s.root,s.relative)),relative=s.relative+'.zstd';
+  const compressed=z.zstdCompressSync(raw,{params:{[z.constants.ZSTD_c_checksumFlag]:1}});compressed[compressed.length-1]^=1;S.fs.writeFileSync(S.path.join(s.root,relative),compressed);assert.throws(()=>Session.decode(s.root,relative),/session-compressed-frame-invalid/);
+  const lines=raw.toString('utf8').trimEnd().split('\n'),row=JSON.parse(lines[1]);row.seq=20;lines[1]=JSON.stringify(row);S.fs.writeFileSync(S.path.join(s.root,relative),z.zstdCompressSync(Buffer.from(lines.join('\n')+'\n')));assert.throws(()=>Session.decode(s.root,relative),/session-sequence-invalid/);
+});
+test('frame boundary inside UTF8 preserves bytes before installed codec decoding',()=>{
+  const s=setup(),z=require('node:zlib'),rows=S.fs.readFileSync(S.path.join(s.root,s.relative),'utf8').trimEnd().split('\n');
+  const header=JSON.parse(rows[0]);header.fixtureLabel='α';rows[0]=JSON.stringify(header);const raw=Buffer.from(rows.join('\n')+'\n'),cut=raw.indexOf(Buffer.from('α'))+1,relative=s.relative+'.zstd';
+  S.fs.writeFileSync(S.path.join(s.root,relative),Buffer.concat([z.zstdCompressSync(raw.subarray(0,cut)),z.zstdCompressSync(raw.subarray(cut))]));const parsed=Session.decode(s.root,relative);assert.equal(parsed.header.fixtureLabel,'α');assert.equal(parsed.events.length,s.events().length);
+});
+test('manual adoption preparation preserves identity and makes no writes or transport/provider calls',()=>{
+  const s=setup();s.options.transport=new Proxy({}, {get(){assert.fail('read-only adoption must never access transport');}});
+  function hashes(dir){const out={};for(const entry of S.fs.readdirSync(dir,{withFileTypes:true})){const path=S.path.join(dir,entry.name);out[path]=entry.isSymbolicLink()?S.fs.readlinkSync(path):entry.isDirectory()?hashes(path):S.hash(S.fs.readFileSync(path));}return out;}
+  const before=hashes(s.root),r=s.runner(),journal=r.prepareManualAdoption();assert.deepEqual(hashes(s.root),before);assert.equal(r.journal,null);assert.equal(journal.phase,'READY');assert.deepEqual(journal.identity,{sessionId:'session-one',taskId:'TASK-0001',taskInstanceId:'instance-one'});assert.deepEqual(journal.stages.map(x=>x.promptId),['T00','P01']);assert(journal.stages.every(x=>x.phase==='FLUSHED'&&x.origin==='manual'));assert.equal(journal.routeAdoption.provider,'opencode-go');assert.equal(global.lhcbOfflineAudit.attempts(),0);
+});
+test('only empty pre-submission unobserved failure can reconcile manual adoption',async()=>{
+  const s=setup(),r=s.runner();r.journal=r.prepareManualAdoption();r.journal.identity=null;r.journal.stages=[];r.journal.failure={code:'lhcb-runner-provider-model-unobserved'};r.save('FAILED');
+  const failed=S.read(r.file),readOnly=s.runner(),ready=readOnly.prepareManualAdoption();assert.equal(ready.phase,'READY');assert.deepEqual(S.read(r.file),failed);assert.equal(ready.identity.sessionId,'session-one');assert.equal(ready.identity.taskInstanceId,'instance-one');
+  for(const change of [j=>{j.failure.code='lhcb-runner-operation-failed';},j=>{j.creation={phase:'READY',sessionId:'session-other'};},j=>{j.stages=ready.stages;}]){const j=structuredClone(failed);change(j);S.write(r.file,j);assert.throws(()=>s.runner().prepareManualAdoption(),/runner-manual-adoption-ambiguous/);}
+  S.write(r.file,failed);const recovered=s.runner();await recovered.bootstrap();assert.equal(S.read(r.file).phase,'READY');assert.equal(S.read(r.file).failure,undefined);assert.deepEqual(recovered.journal.identity,ready.identity);assert(!s.trace.some(x=>x.startsWith('submit:')));
+});
+
 test('installed DSH API client preserves exact payload and RPC identity with an in-process fetch',async()=>{
   const {createApiClient}=require('../scripts/bench/ccv2-lhcb/agent-transport.cjs');const calls=[];
   const client=await createApiClient(normal,async(url,init)=>{assert.equal(new URL(url).origin,'http://127.0.0.1:3080');assert.equal(init.redirect,'error');const request=JSON.parse(init.body);calls.push(request);const value=request.method==='session.create'?{sessionId:'session-one'}:request.method==='session.prompt'?{accepted:true}:{items:[{sessionId:'session-one',cwd:'/isolated/workspace',running:false,blank:false,updatedAt:1000}]};return new Response(JSON.stringify({type:'server-response',rpcId:request.rpcId,result:{ok:true,value}}),{headers:{'content-type':'application/json'}});});
