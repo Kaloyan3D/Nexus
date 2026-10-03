@@ -1,0 +1,268 @@
+{
+  "version": 1,
+  "hiddenFromWorkspace": true,
+  "criticalRequired": 1.0,
+  "totalRequired": 0.95,
+  "obligations": [
+    {
+      "id": "integer-money",
+      "introducedBy": "E01",
+      "category": "implementation",
+      "critical": true,
+      "rule": "Accept only safe signed integer minor units.",
+      "grader": "behavior:integer-money",
+      "status": "calibration-probe",
+      "calibrationProbeIds": [
+        "integer-money"
+      ]
+    },
+    {
+      "id": "currency-scale",
+      "introducedBy": "E01",
+      "category": "compatibility",
+      "critical": true,
+      "rule": "USD/EUR use scale 2; JPY uses scale 0; KWD uses scale 3.",
+      "grader": "behavior:currency-scale",
+      "status": "calibration-probe",
+      "calibrationProbeIds": [
+        "currency-scale"
+      ]
+    },
+    {
+      "id": "tenant-ownership",
+      "introducedBy": "T00",
+      "category": "architecture",
+      "critical": true,
+      "rule": "Tenant owns account namespace; API must never write persistence directly.",
+      "grader": "behavior:tenant-ownership",
+      "status": "calibration-probe",
+      "calibrationProbeIds": [
+        "tenant-scoped-keys",
+        "deny-cross-tenant"
+      ]
+    },
+    {
+      "id": "immutable-import",
+      "introducedBy": "E02",
+      "category": "forbidden",
+      "critical": true,
+      "rule": "Never mutate or overwrite a migration input on rejection.",
+      "grader": "behavior:immutable-import",
+      "status": "calibration-probe",
+      "calibrationProbeIds": [
+        "immutable-import"
+      ]
+    },
+    {
+      "id": "unknown-schema",
+      "introducedBy": "E02",
+      "category": "compatibility",
+      "critical": true,
+      "rule": "Unknown future schemas are rejected, not coerced.",
+      "grader": "behavior:unknown-schema",
+      "status": "calibration-probe",
+      "calibrationProbeIds": [
+        "immutable-import"
+      ]
+    },
+    {
+      "id": "idempotency-before-revision",
+      "introducedBy": "E03",
+      "category": "implementation",
+      "critical": true,
+      "rule": "A matching replay returns original result before testing current revision.",
+      "grader": "behavior:idempotency-before-revision",
+      "status": "calibration-probe",
+      "calibrationProbeIds": [
+        "idempotency-before-revision",
+        "service-replay-preserves-commit"
+      ]
+    },
+    {
+      "id": "tenant-scoped-keys",
+      "introducedBy": "E04",
+      "category": "security",
+      "critical": true,
+      "rule": "Idempotency keys are scoped by tenant.",
+      "grader": "behavior:tenant-scoped-keys",
+      "status": "calibration-probe",
+      "calibrationProbeIds": [
+        "tenant-scoped-keys"
+      ]
+    },
+    {
+      "id": "single-commit",
+      "introducedBy": "E04",
+      "category": "implementation",
+      "critical": true,
+      "rule": "Same-key contenders cause one commit and one audit.",
+      "grader": "behavior:single-commit",
+      "status": "calibration-probe",
+      "calibrationProbeIds": [
+        "single-commit",
+        "service-replay-preserves-commit"
+      ]
+    },
+    {
+      "id": "deny-cross-tenant",
+      "introducedBy": "E05",
+      "category": "security",
+      "critical": true,
+      "rule": "Cross-tenant actors cannot mutate another tenant.",
+      "grader": "behavior:deny-cross-tenant",
+      "status": "calibration-probe",
+      "calibrationProbeIds": [
+        "deny-cross-tenant",
+        "authorization-precedes-replay"
+      ]
+    },
+    {
+      "id": "redact-audit",
+      "introducedBy": "E05",
+      "category": "security",
+      "critical": true,
+      "rule": "Audit is an allowlist; credentials and request bodies never appear.",
+      "grader": "behavior:redact-audit",
+      "status": "calibration-probe",
+      "calibrationProbeIds": [
+        "redact-audit"
+      ]
+    },
+    {
+      "id": "durable-prefix",
+      "introducedBy": "E06",
+      "category": "recovery",
+      "critical": true,
+      "rule": "Recovery chooses committed journal prefix, never a prepared transaction.",
+      "grader": "behavior:durable-prefix",
+      "status": "calibration-probe",
+      "calibrationProbeIds": [
+        "durable-prefix"
+      ]
+    },
+    {
+      "id": "no-success-before-commit",
+      "introducedBy": "E06",
+      "category": "recovery",
+      "critical": true,
+      "rule": "Success audit follows durable commit.",
+      "grader": "behavior:no-success-before-commit",
+      "status": "calibration-probe",
+      "calibrationProbeIds": [
+        "no-success-before-commit"
+      ]
+    },
+    {
+      "id": "injected-clock",
+      "introducedBy": "T00",
+      "category": "architecture",
+      "critical": false,
+      "rule": "Time and I/O are injected; no sleeps or network access.",
+      "grader": "behavior:injected-clock",
+      "status": "calibration-probe",
+      "calibrationProbeIds": [
+        "injected-clock"
+      ]
+    },
+    {
+      "id": "cli-json",
+      "introducedBy": "E07",
+      "category": "compatibility",
+      "critical": false,
+      "rule": "Machine JSON goes to stdout; diagnostic output goes to stderr.",
+      "grader": "behavior:cli-json",
+      "status": "design"
+    },
+    {
+      "id": "identifier-roundtrip",
+      "introducedBy": "E08",
+      "category": "compatibility",
+      "critical": false,
+      "rule": "Keep opaque legacy identifiers byte-exact.",
+      "grader": "behavior:identifier-roundtrip",
+      "status": "design"
+    },
+    {
+      "id": "quarantine-original",
+      "introducedBy": "E10",
+      "category": "forbidden",
+      "critical": false,
+      "rule": "Quarantined original segments are retained.",
+      "grader": "behavior:quarantine-original",
+      "status": "design"
+    },
+    {
+      "id": "available-balance",
+      "introducedBy": "E12",
+      "category": "implementation",
+      "critical": false,
+      "rule": "Reservations reduce spendable balance but not total balance.",
+      "grader": "behavior:available-balance",
+      "status": "design"
+    },
+    {
+      "id": "retry-taxonomy",
+      "introducedBy": "E14",
+      "category": "recovery",
+      "critical": false,
+      "rule": "Retry only classified transient failures with bounded attempts.",
+      "grader": "behavior:retry-taxonomy",
+      "status": "design"
+    },
+    {
+      "id": "grant-revocation",
+      "introducedBy": "E15",
+      "category": "security",
+      "critical": true,
+      "rule": "Revoked grants do not authorize cached replays.",
+      "grader": "behavior:grant-revocation",
+      "status": "design"
+    },
+    {
+      "id": "rollback-readers",
+      "introducedBy": "E16",
+      "category": "compatibility",
+      "critical": false,
+      "rule": "Rollback must preserve data required by mixed version readers.",
+      "grader": "behavior:rollback-readers",
+      "status": "design"
+    },
+    {
+      "id": "service-boundary",
+      "introducedBy": "E17",
+      "category": "architecture",
+      "critical": false,
+      "rule": "CLI and API route mutations through the same service.",
+      "grader": "behavior:service-boundary",
+      "status": "design"
+    },
+    {
+      "id": "export-format",
+      "introducedBy": "E19",
+      "category": "compatibility",
+      "critical": false,
+      "rule": "Export keeps consumer contract and opaque identifier encoding.",
+      "grader": "behavior:export-format",
+      "status": "design"
+    },
+    {
+      "id": "cancel-before-commit",
+      "introducedBy": "E21",
+      "category": "implementation",
+      "critical": false,
+      "rule": "Cancellation before commit prevents mutation.",
+      "grader": "behavior:cancel-before-commit",
+      "status": "design"
+    },
+    {
+      "id": "batch-atomicity",
+      "introducedBy": "E23",
+      "category": "implementation",
+      "critical": false,
+      "rule": "Batch commits all validated mutations or none.",
+      "grader": "behavior:batch-atomicity",
+      "status": "design"
+    }
+  ],
+  "scopeNote": "Calibration probes cover selected early behaviors only; official obligation completeness and T99 safety remain unverified until the final integration grader is implemented."
+}

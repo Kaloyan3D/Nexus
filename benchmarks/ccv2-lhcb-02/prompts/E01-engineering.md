@@ -1,0 +1,2 @@
+Investigate the imported posting incident.
+Inspect src/domain.ts and its consumers, then evidence/E01/incident.json. Reproduce the failures with node tools/verify.cjs E01 --diagnose; diagnostics show a bounded sample. Inspect additional source or cases only as needed to explain the defect. Repair src/, run node tools/verify.cjs E01, and run previously released verifiers to check regressions. Apply the contract and earlier decisions already established. Leave tools and evidence unchanged. Report the decision and verification concisely.

@@ -1,0 +1,71 @@
+{
+  "benchmarkId": "CCV2-LHCB-02",
+  "version": 1,
+  "status": "DESIGN_CALIBRATION_ONLY",
+  "nodeVersion": "v24.18.1",
+  "fixtureRevision": "ledger-lab-v2",
+  "infrastructure": "scripts/bench/ccv2-lhcb",
+  "productionBaseSha": "081c54070ee0ae62a8ae303bbcde9f930174cbed",
+  "provider": "opencode-go",
+  "model": "muse-spark-1.3-contributor",
+  "arms": {
+    "native": {
+      "mode": "off",
+      "activation": "pressure"
+    },
+    "production": {
+      "mode": "active",
+      "activation": "pressure"
+    },
+    "forced": {
+      "mode": "active",
+      "activation": "always"
+    }
+  },
+  "checkpoints": {
+    "CP-500": [
+      480000,
+      550000
+    ],
+    "CP-750": [
+      720000,
+      790000
+    ],
+    "CP-PRE-DSH": "[dshThreshold-65536, dshThreshold)",
+    "CP-OVERFLOW": "natural activation pressure only"
+  },
+  "calibration": {
+    "phases": [
+      "E01",
+      "E02",
+      "E03",
+      "E04",
+      "E05",
+      "E06"
+    ],
+    "minimumPhaseGrowth": 10000,
+    "targetPhaseGrowth": [
+      15000,
+      25000
+    ],
+    "mode": "off",
+    "activation": "pressure",
+    "compilerExecutions": 0,
+    "compaction": false,
+    "maximumPhaseShare": 0.4,
+    "diagnosticExampleLimit": 8
+  },
+  "acceptance": {
+    "obligationRatio": 0.95,
+    "meaningfulReduction": 0.3,
+    "headlineReduction": 0.5,
+    "maxStepIncrease": 0.25
+  },
+  "officialExecutionEnabled": false,
+  "officialBlockers": [
+    "progressive-checkpoint-restore-unimplemented",
+    "final-integration-grader-unimplemented",
+    "grader-tool-isolation-unproven",
+    "native-pressure-unmeasured"
+  ]
+}

@@ -1,0 +1,2 @@
+Investigate the supplied concurrent-writer schedules.
+Inspect src/concurrency.ts and its consumers, then evidence/E04/incident.json. Reproduce the failures with node tools/verify.cjs E04 --diagnose; diagnostics show a bounded sample. Inspect additional source or cases only as needed to explain the defect. Repair src/, run node tools/verify.cjs E04, and run previously released verifiers to check regressions. Apply the contract and earlier decisions already established. Leave tools and evidence unchanged. Report the decision and verification concisely.

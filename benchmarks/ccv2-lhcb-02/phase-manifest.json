@@ -1,0 +1,513 @@
+{
+  "version": 1,
+  "phases": [
+    {
+      "id": "T00",
+      "title": "Durable engineering contract",
+      "dependsOn": [],
+      "status": "implemented",
+      "evidence": [],
+      "acceptance": "turn completed with exact prompt provenance",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E01",
+      "title": "Money and posting ownership",
+      "dependsOn": [
+        "T00"
+      ],
+      "subsystem": "domain",
+      "status": "implemented",
+      "challenge": "Resolve signed integer and currency boundary behavior in imported posting batches.",
+      "evidence": [
+        "evidence/E01/cases.jsonl",
+        "src/domain.ts",
+        "evidence/E01/incident.json",
+        "src/service.ts",
+        "src/persistence.ts",
+        "cli.cjs"
+      ],
+      "acceptance": "node tools/verify.cjs E01",
+      "newFact": "Resolve signed integer and currency boundary behavior in imported posting batches.",
+      "laterConsumer": "E02",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E02",
+      "title": "Versioned migration and quarantine",
+      "dependsOn": [
+        "E01"
+      ],
+      "subsystem": "migrations",
+      "status": "implemented",
+      "challenge": "Migrate legacy cents without losing identifiers; reject unknown schemas before any write.",
+      "evidence": [
+        "evidence/E02/cases.jsonl",
+        "src/migrations.ts",
+        "evidence/E02/incident.json"
+      ],
+      "acceptance": "node tools/verify.cjs E02",
+      "newFact": "Migrate legacy cents without losing identifiers; reject unknown schemas before any write.",
+      "laterConsumer": "E03",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E03",
+      "title": "Conditional API and idempotency",
+      "dependsOn": [
+        "E01",
+        "E02"
+      ],
+      "subsystem": "api",
+      "status": "implemented",
+      "challenge": "Resolve replay versus stale revision precedence against transport captures.",
+      "evidence": [
+        "evidence/E03/cases.jsonl",
+        "src/api.ts",
+        "evidence/E03/incident.json",
+        "src/import-service.ts"
+      ],
+      "acceptance": "node tools/verify.cjs E03 plus independent service/store holdout probes",
+      "newFact": "Resolve replay versus stale revision precedence against transport captures.",
+      "laterConsumer": "E04",
+      "sourceConsumers": [
+        "src/service.ts",
+        "src/persistence.ts",
+        "cli.cjs"
+      ],
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes",
+      "causalProbeIds": [
+        "migration-api-causal-bridge"
+      ]
+    },
+    {
+      "id": "E04",
+      "title": "Serializable transfer schedules",
+      "dependsOn": [
+        "E01",
+        "E03"
+      ],
+      "subsystem": "concurrency",
+      "status": "implemented",
+      "challenge": "Repair duplicate key and compare-and-swap outcomes across interleavings.",
+      "evidence": [
+        "evidence/E04/cases.jsonl",
+        "src/concurrency.ts",
+        "evidence/E04/incident.json"
+      ],
+      "acceptance": "node tools/verify.cjs E04",
+      "newFact": "Repair duplicate key and compare-and-swap outcomes across interleavings.",
+      "laterConsumer": "E05",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E05",
+      "title": "Tenant authorization and audit",
+      "dependsOn": [
+        "E03",
+        "E04"
+      ],
+      "subsystem": "authorization",
+      "status": "implemented",
+      "challenge": "Reject cross-tenant operations and preserve denial audit without recording secrets.",
+      "evidence": [
+        "evidence/E05/cases.jsonl",
+        "src/authorization.ts",
+        "evidence/E05/incident.json"
+      ],
+      "acceptance": "node tools/verify.cjs E05 plus independent service/store holdout probes",
+      "newFact": "Reject cross-tenant operations and preserve denial audit without recording secrets.",
+      "laterConsumer": "E06",
+      "sourceConsumers": [
+        "src/service.ts",
+        "src/persistence.ts",
+        "cli.cjs"
+      ],
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E06",
+      "title": "Crash recovery and retry",
+      "dependsOn": [
+        "E02",
+        "E04",
+        "E05"
+      ],
+      "subsystem": "recovery",
+      "status": "implemented",
+      "challenge": "Choose committed state at each journal crash cut; audit only durable transactions.",
+      "evidence": [
+        "evidence/E06/cases.jsonl",
+        "src/recovery.ts",
+        "evidence/E06/incident.json",
+        "src/recovery-service.ts"
+      ],
+      "acceptance": "node tools/verify.cjs E06",
+      "newFact": "Choose committed state at each journal crash cut; audit only durable transactions.",
+      "laterConsumer": "E10",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes",
+      "causalProbeIds": [
+        "recovery-causal-bridge"
+      ]
+    },
+    {
+      "id": "E07",
+      "title": "CLI machine contract",
+      "dependsOn": [
+        "E03"
+      ],
+      "subsystem": "cli",
+      "status": "design",
+      "challenge": "Add JSON streams and stable exit codes with parser transcripts.",
+      "evidence": [
+        "planned/E07/cli-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Add JSON streams and stable exit codes with parser transcripts.",
+      "laterConsumer": "E08",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E08",
+      "title": "Legacy adapter round trips",
+      "dependsOn": [
+        "E02",
+        "E07"
+      ],
+      "subsystem": "legacy-adapters",
+      "status": "design",
+      "challenge": "Integrate legacy date and identifier encodings from independent vendor fixtures.",
+      "evidence": [
+        "planned/E08/legacy-adapters-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Integrate legacy date and identifier encodings from independent vendor fixtures.",
+      "laterConsumer": "E13",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E09",
+      "title": "Service ownership split",
+      "dependsOn": [
+        "E01",
+        "E05"
+      ],
+      "subsystem": "services",
+      "status": "design",
+      "challenge": "Move transaction orchestration behind a service boundary; prevent direct API store writes.",
+      "evidence": [
+        "planned/E09/services-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Move transaction orchestration behind a service boundary; prevent direct API store writes.",
+      "laterConsumer": "E11",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E10",
+      "title": "Corrupt segment quarantine",
+      "dependsOn": [
+        "E02",
+        "E06"
+      ],
+      "subsystem": "persistence",
+      "status": "design",
+      "challenge": "Handle checksum, partial-write and unknown-format evidence without overwriting originals.",
+      "evidence": [
+        "planned/E10/persistence-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Handle checksum, partial-write and unknown-format evidence without overwriting originals.",
+      "laterConsumer": "E13",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E11",
+      "title": "Partial implementation review",
+      "dependsOn": [
+        "E04",
+        "E09"
+      ],
+      "subsystem": "tests",
+      "status": "design",
+      "challenge": "Apply an independently supplied candidate diff and locate regression-causing assumptions.",
+      "evidence": [
+        "planned/E11/tests-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Apply an independently supplied candidate diff and locate regression-causing assumptions.",
+      "laterConsumer": "E18",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E12",
+      "title": "Reserved balance requirement",
+      "dependsOn": [
+        "E01",
+        "E03",
+        "E09"
+      ],
+      "subsystem": "domain",
+      "status": "design",
+      "challenge": "Introduce reservations that invalidate the assumption that all stored balance is spendable.",
+      "evidence": [
+        "planned/E12/domain-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Introduce reservations that invalidate the assumption that all stored balance is spendable.",
+      "laterConsumer": "E13",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E13",
+      "title": "Index performance regression",
+      "dependsOn": [
+        "E08",
+        "E10",
+        "E12"
+      ],
+      "subsystem": "performance",
+      "status": "design",
+      "challenge": "Diagnose measured query plans on deterministic skewed account distribution.",
+      "evidence": [
+        "planned/E13/performance-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Diagnose measured query plans on deterministic skewed account distribution.",
+      "laterConsumer": "E21",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E14",
+      "title": "Retry taxonomy",
+      "dependsOn": [
+        "E02",
+        "E04",
+        "E06"
+      ],
+      "subsystem": "recovery",
+      "status": "design",
+      "challenge": "Use crash and lock traces to distinguish replayable and terminal failures.",
+      "evidence": [
+        "planned/E14/recovery-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Use crash and lock traces to distinguish replayable and terminal failures.",
+      "laterConsumer": "E21",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E15",
+      "title": "Delegated grants",
+      "dependsOn": [
+        "E05",
+        "E09"
+      ],
+      "subsystem": "authorization",
+      "status": "design",
+      "challenge": "Integrate expiring grants and revocation evidence with injected time.",
+      "evidence": [
+        "planned/E15/authorization-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Integrate expiring grants and revocation evidence with injected time.",
+      "laterConsumer": "E18",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E16",
+      "title": "Rollback under mixed readers",
+      "dependsOn": [
+        "E02",
+        "E08",
+        "E10"
+      ],
+      "subsystem": "migrations",
+      "status": "design",
+      "challenge": "Use reader compatibility matrix to design non-destructive rollback.",
+      "evidence": [
+        "planned/E16/migrations-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Use reader compatibility matrix to design non-destructive rollback.",
+      "laterConsumer": "E19",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E17",
+      "title": "Repository interface refactor",
+      "dependsOn": [
+        "E02",
+        "E07",
+        "E12"
+      ],
+      "subsystem": "services",
+      "status": "design",
+      "challenge": "Unify CLI and API repository seams without flattening reserved balance semantics.",
+      "evidence": [
+        "planned/E17/services-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Unify CLI and API repository seams without flattening reserved balance semantics.",
+      "laterConsumer": "E18",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E18",
+      "title": "Integration failure triage",
+      "dependsOn": [
+        "E11",
+        "E15",
+        "E17"
+      ],
+      "subsystem": "tests",
+      "status": "design",
+      "challenge": "Repair newly supplied end-to-end cases crossing grants, reservations and migration.",
+      "evidence": [
+        "planned/E18/tests-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Repair newly supplied end-to-end cases crossing grants, reservations and migration.",
+      "laterConsumer": "E24",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E19",
+      "title": "Export backward compatibility",
+      "dependsOn": [
+        "E08",
+        "E16",
+        "E17"
+      ],
+      "subsystem": "compatibility",
+      "status": "design",
+      "challenge": "Integrate consumer-specific export contracts and binary-safe newline rules.",
+      "evidence": [
+        "planned/E19/compatibility-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Integrate consumer-specific export contracts and binary-safe newline rules.",
+      "laterConsumer": "E24",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E20",
+      "title": "Incident reconstruction",
+      "dependsOn": [
+        "E03",
+        "E05",
+        "E15"
+      ],
+      "subsystem": "audit",
+      "status": "design",
+      "challenge": "Reconcile request, grant and journal traces to explain a denied replay incident.",
+      "evidence": [
+        "planned/E20/audit-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Reconcile request, grant and journal traces to explain a denied replay incident.",
+      "laterConsumer": "E21",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E21",
+      "title": "Backpressure and cancellation",
+      "dependsOn": [
+        "E13",
+        "E14",
+        "E20"
+      ],
+      "subsystem": "performance",
+      "status": "design",
+      "challenge": "Use queue traces to prevent abandoned requests from committing mutations.",
+      "evidence": [
+        "planned/E21/performance-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Use queue traces to prevent abandoned requests from committing mutations.",
+      "laterConsumer": "E23",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E22",
+      "title": "Snapshot restore protocol",
+      "dependsOn": [
+        "E06",
+        "E10",
+        "E16"
+      ],
+      "subsystem": "recovery",
+      "status": "design",
+      "challenge": "Reconcile committed prefix and checkpoints against recovery manifests.",
+      "evidence": [
+        "planned/E22/recovery-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Reconcile committed prefix and checkpoints against recovery manifests.",
+      "laterConsumer": "E24",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E23",
+      "title": "Batch atomicity",
+      "dependsOn": [
+        "E04",
+        "E12",
+        "E21"
+      ],
+      "subsystem": "concurrency",
+      "status": "design",
+      "challenge": "Handle multi-account reservations and partial authorization failures atomically.",
+      "evidence": [
+        "planned/E23/concurrency-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Handle multi-account reservations and partial authorization failures atomically.",
+      "laterConsumer": "E24",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "E24",
+      "title": "Operational verification",
+      "dependsOn": [
+        "E18",
+        "E19",
+        "E22",
+        "E23"
+      ],
+      "subsystem": "tests",
+      "status": "design",
+      "challenge": "Validate deterministic operator commands against the integrated fixture.",
+      "evidence": [
+        "planned/E24/tests-evidence-set"
+      ],
+      "acceptance": "independent hidden regression cases plus integration tests",
+      "newFact": "Validate deterministic operator commands against the integrated fixture.",
+      "laterConsumer": "T99",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    },
+    {
+      "id": "T99",
+      "title": "Final integration release candidate",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E04",
+        "E05",
+        "E06",
+        "E08",
+        "E12",
+        "E15",
+        "E16",
+        "E19",
+        "E22",
+        "E24"
+      ],
+      "status": "design",
+      "evidence": [],
+      "acceptance": "hidden grader: tests pass; critical 100%; total >=95%; violations zero",
+      "dependencyClaim": "proposed causal graph; executable coverage is limited to the named calibration probes"
+    }
+  ],
+  "scopeNote": "Edges are design obligations, not certified memory continuity. E07-E24/T99 remain design only; calibration cannot authorize benefit scoring."
+}

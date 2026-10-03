@@ -1,0 +1,1 @@
+Complete the integrated Ledger Lab v2 release candidate. Resolve remaining cross-module failures, run the full integration suite, and provide the resulting implementation and concise verification evidence. Apply the engineering contract and decisions already established in this session.

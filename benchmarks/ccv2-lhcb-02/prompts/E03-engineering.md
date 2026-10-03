@@ -1,0 +1,2 @@
+Resolve the conditional request incident and inspect the new import consumer.
+Inspect src/api.ts and its consumers, then evidence/E03/incident.json. Reproduce the failures with node tools/verify.cjs E03 --diagnose; diagnostics show a bounded sample. Inspect additional source or cases only as needed to explain the defect. Repair src/, run node tools/verify.cjs E03, and run previously released verifiers to check regressions. Apply the contract and earlier decisions already established. Leave tools and evidence unchanged. Report the decision and verification concisely.
