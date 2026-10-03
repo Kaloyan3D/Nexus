@@ -12,6 +12,7 @@ const museV2 = require('./ContextCompilerActiveMuseV2.cjs');
 const rendererV2 = require('./ContextPromptRendererV2.cjs');
 const certV2 = require('./ContextAuthorityCertificationV2.cjs');
 const wireV2 = require('./ContextWireProjectorResponsesV2.cjs');
+const activationV2 = require('./ContextActivationPressureV2.cjs');
 const HOST_SCHEMA_VERSION = 1;
 const OPENCODE_REQUEST_SHAPE_V1 = 'opencode-muse-request-shape-v1';
 // ACTIVE-TAIL-NATIVE changed the provider request shape (system slot +
@@ -274,7 +275,8 @@ function legacyHostResult(request, reason, stage, diag) {
         ? found.nativeTailSkip : null,
       nativeTailMessages: Number.isInteger(found.nativeTailMessages) ? found.nativeTailMessages : null,
       nativePrefixMessages: Number.isInteger(found.nativePrefixMessages) ? found.nativePrefixMessages : null,
-    }, museV2.pickCounterTelemetryV2(found.counterTelemetry))),
+    }, activationV2.activationTelemetryV2(found.activation),
+    museV2.pickCounterTelemetryV2(found.counterTelemetry))),
   });
 }
 function applyOpencodeProjectionV2(input) {
@@ -298,6 +300,24 @@ function applyOpencodeProjectionV2(input) {
       return fallback(request, 'active-budget-unrepresentable', 'request-shape');
     }
     if (!Array.isArray(request.messages)) return fallback(request, 'active-request-binding-changed', 'request-shape');
+    // RC1.1 Layer A: the context-pressure activation gate, before any
+    // authority, counter, file or compiler work. NATIVE is the original
+    // request verbatim (native reasoning replay): a policy outcome, not a
+    // failure (fallbackReason null), always reported with its reason code.
+    const wireRoute = opencodeWireRouteV2(input);
+    const liveSession = isPlainObject(input.liveSession) && typeof input.liveSession.events === 'function' ? input.liveSession : null;
+    let liveEvents = null;
+    try {
+      liveEvents = liveSession === null ? null : liveSession.events();
+    } catch (error) {
+      void error;
+      liveEvents = null;
+    }
+    const activationMode = isPlainObject(input.activation) ? input.activation
+      : activationV2.resolveActivationModeV2(readPolicyConfigV2(installRootOfV2(input)));
+    const gate = activationV2.decideActivationV2({ mode: activationMode, route: wireRoute, events: liveEvents, messages: request.messages });
+    diag.activation = gate;
+    if (gate.decision !== activationV2.DECISION_ACTIVATE) return legacyHostResult(request, null, null, diag);
     if (currentOpencodeHealthV2() !== opencodeV2.HEALTH_HEALTHY) {
       return fallback(request, 'active-tokenizer-unavailable', 'authority-health');
     }
@@ -368,7 +388,6 @@ function applyOpencodeProjectionV2(input) {
     }
     const liveTurn = { turn: { turnId: 'live', text: anchorText, revision: null }, skipped: null };
     const liveTurnHash = sha256HexUtf8(anchorText);
-    const wireRoute = opencodeWireRouteV2(input);
     if (wireRoute === null) return fallback(request, 'active-native-tail-unprojectable', 'wire-route');
     const sessionSource = typeof input.sessionSourceFor === 'function' ? input.sessionSourceFor(request.sessionId) : null;
     diag.sessionSourceAvailable = sessionSource !== null && sessionSource !== undefined;
@@ -444,6 +463,7 @@ function applyOpencodeProjectionV2(input) {
       bindingFound: diag.bindingFound, checkpointFound: diag.checkpointFound,
       sessionSourceAvailable: diag.sessionSourceAvailable,
       nativeTailMessages: diag.nativeTailMessages, nativePrefixMessages: diag.nativePrefixMessages,
+      activation: gate, liveSession,
     });
   } catch (error) {
     void error;
@@ -535,6 +555,7 @@ async function completeOpencodeProjectionV2(staged) {
     bindingFound: staged.bindingFound === true, checkpointFound: staged.checkpointFound === true,
     sessionSourceAvailable: staged.sessionSourceAvailable, compilerExecutions: 0,
     nativeTailMessages: staged.nativeTailMessages, nativePrefixMessages: staged.nativePrefixMessages,
+    activation: staged.activation,
   };
   const fallback = (reason, stage) => legacyHostResult(request, reason, stage, diag);
   try {
@@ -658,7 +679,7 @@ async function completeOpencodeProjectionV2(staged) {
       reasoningReplay: staged.wireRoute.reasoningReplay,
       replayedReasoningBlocksOmitted: boundary.tail.reduce((sum, message, index) => sum + (derived.messages[index] === message ? 0
         : message.content.filter((block) => block.type === 'reasoning').length), 0),
-    }));
+    }, activationV2.activationTelemetryV2(staged.activation)));
     return Object.freeze({
       mode: 'CCV2_COMPILED',
       request: Object.freeze(derived),
@@ -767,6 +788,7 @@ async function runPrewarmV2(safeDeps, staged) {
       const fresh = applyOpencodeProjectionV2({
         request: staged.request,
         policy: { mode: 'active', valid: true },
+        liveSession: liveSessionOfV2(safeDeps, staged.request.sessionId),
         installRoot: safeDeps.installRoot,
         bindingsPath: safeDeps.bindingsPath,
         sessionSourceFor: safeDeps.sessionSourceFor,
@@ -830,6 +852,19 @@ async function runPrewarmV2(safeDeps, staged) {
  * dispatching LlmRuntime (`this`); every fallback returns next() verbatim.
  * OFF/OBSERVE/other routes/auxiliary calls: next() with zero compiler work.
  */
+// deps.liveSessionFor(sessionId) (the M01 producer registry accessor) gives
+// the gate its durable usage samples. Absent or throwing: null (the gate then
+// measures nothing and stays NATIVE).
+function liveSessionOfV2(deps, sessionId) {
+  if (typeof deps.liveSessionFor !== 'function') return null;
+  try {
+    const found = deps.liveSessionFor(sessionId);
+    return isPlainObject(found) ? found : null;
+  } catch (error) {
+    void error;
+    return null;
+  }
+}
 // deps.ownsSession(sessionId) is supplied by installOpencodeActiveProjection;
 // a listener created without it (standalone use) owns every session.
 function ownsSessionV2(deps, sessionId) {
@@ -852,8 +887,12 @@ function createOpencodeProjectionStreamListenerV2(deps) {
       if (!isPlainObject(request) || processDiagnosticsV2().derived.has(request)) return next();
       if (request.provider !== opencodeV2.OPENCODE_PROVIDER_V1 || request.model !== opencodeV2.OPENCODE_MODEL_V1) return next();
       if (typeof request.purpose === 'string' && AUXILIARY_PURPOSES.indexOf(request.purpose) !== -1) return next();
-      policy = activeV2.resolveCompilerModeV2({ config: readPolicyConfigV2(safeDeps.installRoot) });
+      // One read of the single config authority: compiler mode and the RC1.1
+      // activation policy come from the same routing-policy.json section.
+      const policyConfig = readPolicyConfigV2(safeDeps.installRoot);
+      policy = activeV2.resolveCompilerModeV2({ config: policyConfig });
       if (policy.mode !== 'active' || policy.valid !== true) return next();
+      const activation = activationV2.resolveActivationModeV2(policyConfig);
       if (seen.has(request)) return next();
       const registry = processDiagnosticsV2();
       if (registry.claimed.has(request)) return next();
@@ -876,6 +915,8 @@ function createOpencodeProjectionStreamListenerV2(deps) {
       staged = applyOpencodeProjectionV2({
         request,
         policy: { mode: 'active', valid: true },
+        activation,
+        liveSession: liveSessionOfV2(safeDeps, request.sessionId),
         installRoot: safeDeps.installRoot,
         bindingsPath: safeDeps.bindingsPath,
         sessionSourceFor: safeDeps.sessionSourceFor,

@@ -224,7 +224,9 @@ async function runNativeTailLive(input) {
   for (const name of ['settings.yaml', 'model-registry.json']) {
     fs.copyFileSync(path.join(opts.installRoot, 'config', name), path.join(fxRoot, 'config', name));
   }
-  fs.writeFileSync(path.join(fxRoot, 'config', 'routing-policy.json'), JSON.stringify({ version: 3, contextCompiler: { mode: 'active' } }));
+  // RC1.1: the canary context never reaches the pressure gate; certification
+  // pins activation explicitly (activation-forced-by-policy on every line).
+  fs.writeFileSync(path.join(fxRoot, 'config', 'routing-policy.json'), JSON.stringify({ version: 3, contextCompiler: { mode: 'active', activation: 'always' } }));
   const sessionId = 'sess-oc01-native-tail-' + crypto.randomBytes(4).toString('hex');
   const binding = {
     sessionId, taskInstanceId: 'task_oc01_nt_0001', taskId: 'TASK-OC01-NT',
@@ -344,7 +346,7 @@ async function runNativeTailLive(input) {
     ctx.on('llm/stream', (options, next) => { entered.push(options); return next(); }, { global: true });
     const installed = host.installOpencodeActiveProjection(ctx, {
       installRoot: fxRoot, bindingsPath, log: (entry) => logs.push(entry),
-      sessionSourceFor: producer.registry.sessionSourceFor,
+      sessionSourceFor: producer.registry.sessionSourceFor, liveSessionFor: producer.registry.liveSessionFor,
       resolveMetaApiKey, createMetaCounter, prewarm: false,
     });
     if (installed.installed !== true) fail('projection-not-installed', installed.reason);
