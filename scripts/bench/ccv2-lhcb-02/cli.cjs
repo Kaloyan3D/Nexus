@@ -5,8 +5,11 @@ async function main(args){
   if(process.version!=='v24.18.1')S.fail('lhcb02-node-version');
   if(args.length===1&&args[0]==='inspect')return require('./candidate.cjs').inspect();
   if(args.length!==2)S.fail('lhcb02-command-arguments');
-  const [command,raw]=args;if(!['calibrate','prepare','status','command','reconstruct','grade-candidate'].includes(command))S.fail('lhcb02-calibration-only');
+  const [command,raw]=args;if(!['calibrate','prepare','status','command','reconstruct','grade-candidate','rehearse','calibrate-fresh'].includes(command))S.fail('lhcb02-calibration-only');
   const root=S.rootOf(raw);
+  if(command==='rehearse')return new (require('./rehearsal.cjs').Rehearsal)(root).run();
+  if(command==='calibrate'&&S.fs.existsSync(S.inside(root,'state/simulation.json')))S.fail('lhcb02-simulation-live-forbidden');
+  if(command==='calibrate-fresh'&&S.fs.existsSync(root))S.fail('lhcb02-calibration-root-exists');
   if(command==='reconstruct')return require('./candidate.cjs').reconstruct(root);
   if(command==='grade-candidate'){
     const result=require('node:child_process').spawnSync(process.execPath,['--require',S.path.join(S.BENCH,'grader/offline.cjs'),S.path.join(S.BENCH,'grader/final.cjs'),root],{encoding:'utf8',timeout:30000,maxBuffer:1024*1024,env:{PATH:process.env.PATH,NODE_OPTIONS:''}});

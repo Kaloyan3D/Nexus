@@ -34,7 +34,7 @@ function acceptance(root,ids){
 class CalibrationRunner {
   constructor(root,options={}){
     if(process.version!=='v24.18.1')S.fail('lhcb02-node-version');
-    this.root=S.owned(root);this.options=options;this.env=options.env||process.env;
+    this.root=S.owned(root);if(S.fs.existsSync(S.inside(root,'state/simulation.json')))S.fail('lhcb02-simulation-live-forbidden');this.options=options;this.env=options.env||process.env;
     this.now=options.now||Date.now;this.pause=options.pause||(ms=>new Promise(r=>setTimeout(r,ms)));
     this.pollMs=options.pollMs??250;this.turnTimeout=options.turnTimeoutMs??900000;this.flushTimeout=options.flushTimeoutMs??60000;
     this.transport=options.transport||load('agent-transport').createTransport(this.root,this.env);

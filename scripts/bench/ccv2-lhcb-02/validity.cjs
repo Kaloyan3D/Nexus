@@ -5,6 +5,7 @@ const digest=x=>typeof x==='string'&&/^[a-f0-9]{64}$/.test(x);
 function calibration(phases,requests){
   const reasons=[];const ids=definition.calibration.phases;
   if(!Array.isArray(phases)||!Array.isArray(requests)||phases.some(p=>!p||typeof p!=='object')||requests.some(r=>!r||typeof r!=='object'))return {status:'FAIL',reasons:['evidence-malformed']};
+  if(phases.some(p=>p.measurementOrigin==='SIMULATED')||requests.some(r=>r.measurementOrigin==='SIMULATED'||r.authoritativeForCalibration===false))reasons.push('simulated-evidence');
   if(phases.length!==ids.length||phases.some((p,i)=>p.phase!==ids[i]))reasons.push('representative-phase-set-incomplete');
   const terminal=new Set(),evidence=new Set(),sets=new Set();
   if(!Array.isArray(phases)||!Array.isArray(requests))return {status:'FAIL',reasons:['evidence-malformed']};
