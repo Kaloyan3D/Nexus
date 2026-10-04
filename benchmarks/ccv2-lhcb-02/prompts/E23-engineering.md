@@ -1,1 +1,3 @@
 Investigate the new batch incident in evidence/E23/incident.json and its trace. Inspect the affected source and focused cases, implement the correction or automated review check, and preserve the established contracts. Run the relevant verifier and prior tests. Report concise verification evidence.
+
+Repair both batch.evaluate and the batch.apply caller path. Inspect evidence/E23/apply-contract.json and batch-boundary.json; run node tools/verify-batch.cjs --diagnose, then node tools/verify-batch.cjs after repair. A later stale revision or duplicate key must throw without publishing an earlier command. Preserve the shared service/store ownership boundary.

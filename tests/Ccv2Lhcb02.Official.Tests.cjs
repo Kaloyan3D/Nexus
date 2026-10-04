@@ -40,3 +40,12 @@ test('progressive physical snapshot preserves edited source and durable state; c
 test('corrupt snapshot refuses restore before touching the active workspace',()=>{
  const file=S.path.join(root,'snapshots/CP-500/payload/workspace/src/progressive.ts');S.fs.chmodSync(file,0o600);S.fs.writeFileSync(file,'corrupt');const before=S.fs.readFileSync(S.path.join(root,'workspace/src/progressive.ts'));assert.throws(()=>Snap.restore(root),/snapshot-content/);assert.deepEqual(S.fs.readFileSync(S.path.join(root,'workspace/src/progressive.ts')),before);assert(!S.fs.existsSync(S.path.join(root,'state/restore-lock.json')));
 });
+
+test('finite workload completes after failed stage quality and diagnostic T99 cannot enable checkpoint',async()=>{
+ const F=require('../benchmarks/ccv2-lhcb-02/fixture/create-fixture.cjs'),L=require('../benchmarks/ccv2-lhcb-02/fixture/late.cjs'),Final=require('../benchmarks/ccv2-lhcb-02/fixture/final.cjs');const dir=S.path.join(tmp,'diagnostic-only');S.fs.mkdirSync(S.path.join(dir,'workspace'),{recursive:true});F.createFixture(S.path.join(dir,'workspace'));
+ for(const id of S.manifest.candidatePhases.slice(1)){F.release(S.path.join(dir,'workspace'),id);const code=id==='T99'?Final.reference():S.manifest.calibration.phases.includes(id)?'const scales={USD:2,EUR:2,JPY:0,KWD:3};const oracle='+F.oracle.toString()+';module.exports={evaluate:x=>oracle('+JSON.stringify(id)+',x)};':L.reference(F.modules[id]);S.fs.writeFileSync(S.path.join(dir,'workspace/src/'+F.modules[id]+'.ts'),code);for(const [p,text] of Object.entries(F.referenceIntegrationFiles(id)))S.fs.writeFileSync(S.path.join(dir,'workspace',p),text);}
+ const runner=Object.create(R.OfficialRunner.prototype);runner.root=dir;runner.journal={stages:[]};runner.prepare=async()=>{};runner.save=()=>{};runner.transport={close:async()=>{}};
+ // Synthetic unit pressure is never provider evidence. A late T99 value is ineligible.
+ runner.stage=async(id,records)=>{const r={promptId:id,pressure:id==='T99'?500000:100000,acceptance:id!=='E23',agentLatencyMs:1};records.push(r);return r;};
+ assert.equal(await runner.accumulate(),null);assert.deepEqual(runner.journal.stages.map(r=>r.promptId),S.manifest.candidatePhases);assert.equal(runner.journal.nativeDiagnostic.eligibleForComparison,false);assert.equal(runner.journal.nativeDiagnostic.grade.pass,true);assert.equal(runner.journal.phase,'WORKLOAD_INADEQUATE');assert(!S.fs.existsSync(S.path.join(dir,'snapshots')));
+});

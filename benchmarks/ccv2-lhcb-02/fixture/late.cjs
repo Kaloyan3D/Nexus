@@ -180,7 +180,7 @@ function inputs(id,hidden=false){
 }
 function cases(id,hidden=false){const name=specs.find(s=>s[0]===id)?.[1];return inputs(id,hidden).map((input,i)=>({caseId:id+'-'+(hidden?'holdout-':'')+(i+1),input,expected:expected(name,input)}));}
 function phaseFiles(id){const spec=specs.find(s=>s[0]===id);if(!spec)throw Error('unknown-phase');const [,name,title,dependsOn,symptom]=spec;
- return {[`src/${name}.ts`]:source(name),[`evidence/${id}/cases.jsonl`]:cases(id).map(JSON.stringify).join('\n')+'\n',
+ return {...(id==='E23'?require('./batch-boundary.cjs').files():{}),[`src/${name}.ts`]:source(name),[`evidence/${id}/cases.jsonl`]:cases(id).map(JSON.stringify).join('\n')+'\n',
  [`evidence/${id}/incident.json`]:JSON.stringify({phase:id,title,component:name,symptom,dependsOn,reproduce:`node tools/verify.cjs ${id} --diagnose`,acceptance:'immutable inputs; previous suites preserved; fix the indicated path'},null,2)+'\n',
  [`evidence/${id}/contract.md`]:`# ${title}\nThis incident belongs to the ${name} subsystem.\nThe JSON examples define observable outcomes. Prior phase contracts remain in force.\nUse the existing service/store boundary where this component initiates mutations.\n`,
  [`evidence/${id}/trace.json`]:JSON.stringify({incident:id,entry:name,upstream:dependsOn,observed:cases(id).slice(0,2).map(r=>({input:r.input,expected:r.expected})),diagnosticLimit:8},null,2)+'\n'};

@@ -60,3 +60,8 @@ test('E04 public callers distinguish optional metadata and arbitrary supported a
 test('T99 declares its coordinator response interface and deterministic caller defaults',()=>{
  const incident=JSON.parse(F.phaseFiles('T99')['evidence/T99/incident.json']);assert.equal(incident.inputContract.defaults.clock,123);assert.equal(incident.inputContract.defaults.requestId,'release');assert.deepEqual(Object.keys(incident.inputContract.successFields).sort(),['status','results','history','recovered','index','exported','rollback','ops','audit','check','clients','release'].sort());
 });
+
+test('public batch caller catches partial publication even when evaluate is correct',()=>{
+ const dir=make(true),file=S.path.join(dir,'tools/verify-batch.cjs'),source=S.path.join(dir,'src/batch.ts');const run=()=>cp.spawnSync(process.execPath,['--require',S.path.join(S.BENCH,'grader/offline.cjs'),file],{encoding:'utf8'});assert.equal(run().status,0);
+ const broken=L.reference('batch').replace('const results=store.applyBatch(context.tenant,commands)',"const results=commands.map(c=>require('./service.ts').post(store,{...c,tenant:context.tenant},actor,clock))");S.fs.writeFileSync(source,broken);assert.equal(run().status,1);assert.equal(G.grade(dir).pass,false);
+});

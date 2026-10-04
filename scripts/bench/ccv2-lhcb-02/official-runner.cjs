@@ -68,11 +68,15 @@ class OfficialRunner{
  async accumulate(){
   await this.prepare();this.journal.phase='ACCUMULATING';this.save();
   for(const id of ids.slice(0,-1)){
-   const r=await this.stage(id,this.journal.stages);if(!r.acceptance)S.fail('lhcb02-official-accumulation-correctness');
-   if(r.pressure>=480000&&r.pressure<=550000&&this.journal.stages.length>=7){const until=Date.now()+60000;while(!Snapshots.memoryReady(this.root)){if(Date.now()>until)S.fail('lhcb02-official-memory-timeout');await new Promise(resolve=>setTimeout(resolve,250));}await this.transport.close();const meta=Snapshots.seal(this.root,{identity:this.journal.identity,completedStages:this.journal.stages.map(r=>r.promptId),pressureTokens:r.pressure,protocolHash:protocolHash()});this.journal.snapshotHash=S.hash(S.json(meta));this.journal.phase='CHECKPOINTED';this.save();return meta;}
+   const r=await this.stage(id,this.journal.stages);
+   if(r.acceptance&&r.pressure>=480000&&r.pressure<=550000&&this.journal.stages.length>=7){const until=Date.now()+60000;while(!Snapshots.memoryReady(this.root)){if(Date.now()>until)S.fail('lhcb02-official-memory-timeout');await new Promise(resolve=>setTimeout(resolve,250));}await this.transport.close();const meta=Snapshots.seal(this.root,{identity:this.journal.identity,completedStages:this.journal.stages.map(r=>r.promptId),pressureTokens:r.pressure,protocolHash:protocolHash()});this.journal.snapshotHash=S.hash(S.json(meta));this.journal.phase='CHECKPOINTED';this.save();return meta;}
    if(r.pressure>550000)S.fail('lhcb02-official-natural-checkpoint-skipped');
   }
-  await this.transport.close();this.journal.phase='WORKLOAD_INADEQUATE';this.save();return null;
+  // T99 is diagnostic only after the finite pre-checkpoint workload is exhausted.
+  // Its solution and pressure can never enable a checkpoint or a comparison.
+  const final=await this.stage('T99',this.journal.stages);await this.transport.close();
+  this.journal.nativeDiagnostic={eligibleForComparison:false,grade:finalGrade(this.root),finalPressure:final.pressure,agentLatencyMs:this.journal.stages.reduce((sum,r)=>sum+r.agentLatencyMs,0),stages:this.journal.stages.map(r=>({phase:r.promptId,pressure:r.pressure,acceptance:r.acceptance}))};
+  this.journal.phase='WORKLOAD_INADEQUATE';this.save();return null;
  }
  async arm(arm,meta){
   const restored=Snapshots.restore(this.root);if(S.hash(S.json(restored))!==this.journal.snapshotHash||Snapshots.selected(this.root).files&&S.treeHash(Snapshots.selected(this.root).files)!==meta.baselineHash)S.fail('lhcb02-official-arm-baseline');
@@ -87,7 +91,7 @@ class OfficialRunner{
  }
  async execute(){
   const unlock=require('./lease.cjs').acquire(S.inside(this.root,'state/official-lock.json'),this.root);
-  try{const meta=await this.accumulate();if(!meta){const report={kind:'LIVE_OFFICIAL_ATTEMPT',scientificallyValid:false,checkpoint:null,calibration:this.calibration,workloadValidity:'WORKLOAD_INADEQUATE',reason:'finite-workload-did-not-reach-natural-CP500',lastPressure:this.journal.stages.at(-1)?.pressure,arms:[],compilerCapability:'INSUFFICIENT_DATA',productionBenefit:'NOT_MEASURED',reasoningContinuitySafety:'NOT_MEASURED'};S.write(S.inside(this.root,'reports/benchmark.json'),report);return report;}
+  try{const meta=await this.accumulate();if(!meta){const report={kind:'LIVE_OFFICIAL_ATTEMPT',scientificallyValid:false,checkpoint:null,calibration:this.calibration,workloadValidity:'WORKLOAD_INADEQUATE',reason:'finite-workload-did-not-reach-natural-CP500',lastPreCheckpointPressure:this.journal.stages.findLast(r=>r.promptId!=='T99')?.pressure,nativeDiagnostic:this.journal.nativeDiagnostic,arms:[],compilerCapability:'INSUFFICIENT_DATA',productionBenefit:'NOT_MEASURED',reasoningContinuitySafety:'NOT_MEASURED'};S.write(S.inside(this.root,'reports/benchmark.json'),report);return report;}
    for(const arm of arms)await this.arm(arm,meta);
    const results=this.journal.arms,baselineEqual=results.every(r=>r.baselineHash===meta.baselineHash&&r.sessionLogHash===meta.sessionLogHash&&r.snapshotSeal===this.journal.snapshotHash&&r.promptHash===prompt('T99').hash&&same(r.identity,this.journal.identity));
    const report={kind:'LIVE_OFFICIAL_BENCHMARK',workloadHash:S.workloadHash(),protocolHash:protocolHash(),frozenAcceptance:S.manifest.acceptance,calibration:this.calibration,checkpoint:{id:'CP-500',pressureTokens:meta.pressureTokens,afterPhase:meta.completedStages.at(-1),seal:this.journal.snapshotHash},armBaselineEquality:baselineEqual,scientificallyValid:baselineEqual&&results.length===3&&results.every(r=>r.valid),workloadValidity:baselineEqual&&results.length===3&&results.every(r=>r.valid)?'WORKLOAD_VALID':'WORKLOAD_INADEQUATE',arms:results,...compare(results)};S.write(S.inside(this.root,'reports/benchmark.json'),report);this.journal.phase='COMPLETE';this.save();return report;
