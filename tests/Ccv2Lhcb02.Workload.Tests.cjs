@@ -47,3 +47,8 @@ test('new import consumer defect is observable through public callers without ch
  S.fs.writeFileSync(S.path.join(dir,'src/import-service.ts'),F.phaseFiles('E03')['src/import-service.ts']);assert.equal(run().status,1);assert.equal(G.grade(dir).pass,false);
  S.fs.writeFileSync(S.path.join(dir,'src/import-service.ts'),F.referenceIntegrationFiles('E03')['src/import-service.ts']);assert.equal(run().status,0);assert.equal(G.grade(dir).pass,true);
 });
+
+test('public import boundary covers distinct caller contracts and catches metadata mutation',()=>{
+ const dir=make(true),file=S.path.join(dir,'tools/verify-import.cjs');const run=()=>cp.spawnSync(process.execPath,['--require',S.path.join(S.BENCH,'grader/offline.cjs'),file],{encoding:'utf8'});
+ assert.equal(run().status,0);const source=S.path.join(dir,'src/import-service.ts');S.fs.appendFileSync(source,"\nconst original=module.exports.postImported;module.exports.postImported=(store,doc,...rest)=>{delete doc.writerRevision;return original(store,doc,...rest);};\n");assert.equal(run().status,1);assert.equal(G.grade(dir).pass,false);
+});

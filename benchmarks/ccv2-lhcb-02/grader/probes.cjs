@@ -51,12 +51,12 @@ function grade(dir,ids){
     for(const [id,amount,currency] of [['001',31,'JPY'],['account/child',47,'KWD'],['e\u0301',19,'USD']]){
       const r=sandbox.run(`
         const store=__load('persistence.ts').createStore();const imported=__load('import-service.ts');
-        const document={version:1,entries:[{id:${JSON.stringify(id)},cents:${amount},currency:${JSON.stringify(currency)},kind:'transfer'}]};
+        const document={version:1,entries:[{id:${JSON.stringify(id)},cents:${amount},currency:${JSON.stringify(currency)},kind:'transfer'}],writerRevision:17};const original=JSON.stringify(document);
         const command={tenant:'alpha',key:'migrated',expectedRevision:0,requestId:'r'};const actor={tenant:'alpha',role:'writer',revoked:false};
         const first=imported.postImported(store,document,command,actor,()=>1),replay=imported.postImported(store,document,command,actor,()=>2);
         const future=imported.postImported(store,{...document,version:97},{...command,key:'future'},actor,()=>3);
-        return {first,replay,future,history:store.history(),account:store.read('alpha',${JSON.stringify(id)})};
-      `);assert.equal(r.first.status,201);assert.equal(r.replay.status,200);assert.equal(r.future.status,422);assert.equal(r.history.length,1);assert.equal(r.account.id,id);assert.equal(r.account.balance,amount);
+        return {first,replay,future,inputPreserved:JSON.stringify(document)===original,history:store.history(),account:store.read('alpha',${JSON.stringify(id)})};
+      `);assert.equal(r.inputPreserved,true);assert.equal(r.first.status,201);assert.equal(r.replay.status,200);assert.equal(r.future.status,422);assert.equal(r.history.length,1);assert.equal(r.account.id,id);assert.equal(r.account.balance,amount);
     }
   });
   probe('recovery-causal-bridge','E06',()=>{
