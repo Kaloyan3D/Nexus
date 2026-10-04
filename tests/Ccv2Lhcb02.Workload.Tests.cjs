@@ -52,3 +52,11 @@ test('public import boundary covers distinct caller contracts and catches metada
  const dir=make(true),file=S.path.join(dir,'tools/verify-import.cjs');const run=()=>cp.spawnSync(process.execPath,['--require',S.path.join(S.BENCH,'grader/offline.cjs'),file],{encoding:'utf8'});
  assert.equal(run().status,0);const source=S.path.join(dir,'src/import-service.ts');S.fs.appendFileSync(source,"\nconst original=module.exports.postImported;module.exports.postImported=(store,doc,...rest)=>{delete doc.writerRevision;return original(store,doc,...rest);};\n");assert.equal(run().status,1);assert.equal(G.grade(dir).pass,false);
 });
+
+test('E04 public callers distinguish optional metadata and arbitrary supported amount limits',()=>{
+ const rows=F.cases('E04');assert(rows.some(r=>r.input.amount===101&&r.expected.commits>0));assert(rows.some(r=>!Object.hasOwn(r.input,'isolation')&&r.expected.commits===1));
+ const contract=JSON.parse(F.phaseFiles('E04')['evidence/E04/input-contract.json']);assert(contract.optionalMetadata.includes('isolation'));assert(!contract.required.includes('isolation'));
+});
+test('T99 declares its coordinator response interface and deterministic caller defaults',()=>{
+ const incident=JSON.parse(F.phaseFiles('T99')['evidence/T99/incident.json']);assert.equal(incident.inputContract.defaults.clock,123);assert.equal(incident.inputContract.defaults.requestId,'release');assert.deepEqual(Object.keys(incident.inputContract.successFields).sort(),['status','results','history','recovered','index','exported','rollback','ops','audit','check','clients','release'].sort());
+});
