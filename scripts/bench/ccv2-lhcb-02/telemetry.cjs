@@ -4,12 +4,14 @@ const gate=require('../../../config/ContextActivationPressureV2.cjs'),wire=requi
 const Session=load('session'),D=load('doctor');
 const count=(events,type)=>events.filter(e=>e.type===type).length;
 const optional=(u,k)=>Number.isSafeInteger(u?.[k])&&u[k]>=0?u[k]:null;
-function compilerObservation(root,requestOrdinal=0){
+function compilerObservation(root){
  const policy=S.read(S.inside(root,'nexus-root/config/routing-policy.json')).contextCompiler;
  const file=S.inside(root,'nexus-root/data/logs/aih-controller.log');
  let rows=[];try{if(S.fs.existsSync(file))rows=S.fs.readFileSync(file,'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(r=>r.event==='ccv2-opencode-active-decided');}catch{return {mode:null,compilerExecutionCount:null};}
- if(!rows[requestOrdinal]||rows.some((r,i)=>r.compilerExecutions!==0||r.projectionMode!=='LEGACY'||r.policyMode!=='off'||r.activationDecision!=='NATIVE'||!Number.isSafeInteger(r.requestSeq)||r.requestSeq<1||(i>0&&r.requestSeq<=rows[i-1].requestSeq)))return {mode:null,compilerExecutionCount:null};
- return policy.mode==='off'&&policy.activation==='pressure'?{mode:'NATIVE',compilerExecutionCount:0}:{mode:null,compilerExecutionCount:null};
+ // Production bypasses the active listener when mode is off. Absence of active
+ // decisions is expected, not missing evidence. Contradictory decisions fail.
+ if(policy.mode!=='off'||policy.activation!=='pressure'||rows.some(r=>r.compilerExecutions!==0||r.projectionMode!=='LEGACY'||r.policyMode!=='off'))return {mode:null,compilerExecutionCount:null};
+ return {mode:'NATIVE',compilerExecutionCount:0};
 }
 function pressure(root,events){return gate.decideActivationV2({events,messages:Session.surfaceMessages(events,root),route:D.route(root),mode:gate.resolveActivationModeV2({contextCompiler:S.manifest.arms.native})}).pressureTokens;}
 function collectRequests(root,b,record){
@@ -30,9 +32,9 @@ function collectRequests(root,b,record){
    const boundary=prefix;let requestHash=null,canonicalRequestBytes=null,wireItemCount=null,messageCount=null;
    const availability={};
    try{
-    if(!header)throw Error('missing-header');const messages=Session.surfaceMessages(boundary,root);messageCount=messages.length;
+    if(!header)throw Error('missing-header');const route=D.route(root),messages=wire.applyReasoningReplayV2(Session.surfaceMessages(boundary,root),route);messageCount=messages.length;
     const request={...header.config,messages,system:header.system,tools:header.tools,sessionId:b.sessionId};
-    const body=wire.projectResponsesWireV2({request,route:D.route(root)}).wireBody;
+    const body=wire.projectResponsesWireV2({request,route}).wireBody;
     const bytes=S.json(body);requestHash=S.hash(bytes);canonicalRequestBytes=Buffer.byteLength(bytes);wireItemCount=body.input.length;
    }catch(e){availability.requestProjection=(e.message||'').match(/^context-wire-[a-z0-9-]+/)?.[0]??'durable-request-unobservable';}
    const usage=response?.data.usage,total=gate.sampleTokensOfV2(usage);
@@ -41,7 +43,7 @@ function collectRequests(root,b,record){
     requestIdentity:S.hash(S.json([b.sessionId,b.taskId,b.taskInstanceId,step.seq,attempt])),attempt,
     durableSequenceRange:[start.seq,response?.seq??Math.max(start.seq,end-1)],requestHash,promptHash:record.promptHash,
     requestOutcome:response?(response.data.interrupted?'INTERRUPTED':'OBSERVED'):(segment.some(e=>e.type==='llm/retry')?'FAILED':'UNOBSERVED'),
-    providerInputTokens:total===null?null:total-usage.outputTokens,uncachedInputTokens:optional(usage,'inputTokens'),cacheReadTokens:optional(usage,'cacheReadTokens'),cacheWriteTokens:optional(usage,'cacheWriteTokens'),outputTokens:optional(usage,'outputTokens'),reasoningTokens:optional(usage,'reasoningTokens'),
+    providerInputTokens:total===null?null:total-usage.outputTokens,uncachedInputTokens:optional(usage,'inputTokens'),cacheReadTokens:total===null?null:usage.cacheReadTokens??0,cacheWriteTokens:total===null?null:usage.cacheWriteTokens??0,outputTokens:optional(usage,'outputTokens'),reasoningTokens:optional(usage,'reasoningTokens'),
     pressureBefore,pressureAfter,pressureDelta:pressureBefore===null||pressureAfter===null?null:pressureAfter-pressureBefore,
     messageCount,reconstructedWireItemCount:wireItemCount,historicalToolCallCount:count(boundary,'tool/call'),historicalToolResultCount:count(boundary,'tool/result'),canonicalRequestByteCount:canonicalRequestBytes,
     historyCompactionCount:through.filter(e=>e.type.startsWith('compaction/')).length,historyReplacementCount:through.filter(e=>e.surfaceOp&&e.surfaceOp!=='append').length,...compiler,availability};

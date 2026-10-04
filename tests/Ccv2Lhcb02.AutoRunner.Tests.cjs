@@ -17,7 +17,7 @@ function setup(){
  let sid,events=[],clock=1000;const flags={},trace=[];
  const add=(type,data)=>{
   events.push({seq:events.length,type,time:clock++,data,...(['user/message','assistant/message','tool/result'].includes(type)?{surfaceOp:'append'}:{})});
-  if(type==='step/start'){const file=S.path.join(root,'nexus-root/data/logs/aih-controller.log');S.fs.mkdirSync(S.path.dirname(file),{recursive:true});S.fs.appendFileSync(file,JSON.stringify({event:'ccv2-opencode-active-decided',projectionMode:'LEGACY',compilerExecutions:0,policyMode:'off',activationDecision:'NATIVE',requestSeq:events.filter(e=>e.type==='step/start').length})+'\n');}
+
  };
  const relative=()=> 'nexus-root/data/sessions/workspace/'+sid+'/session.jsonl';
  function persist(){const file=S.inside(root,relative());S.fs.mkdirSync(S.path.dirname(file),{recursive:true});const header={type:'session',id:sid,version:3,createdAt:1000,cwd:S.path.join(root,'workspace')};S.fs.writeFileSync(file,[header,...events].map(JSON.stringify).join('\n')+'\n');}
@@ -40,8 +40,8 @@ function setup(){
  const options={transport,controllerBootstrap,env:{OPENCODE_API_KEY:'offline-sentinel',MODEL_API_KEY:'offline-sentinel'},doctor:()=>({sourceGuard:{pass:true,baseSha:S.manifest.baseSha},runtime:{ready:true},certification:{health:'HEALTHY',state:'valid'},liveReady:true,thresholds:authority.thresholds}),acceptance:(_root,ids)=>[...ids.map(phase=>({phase,pass:true})),{phase:'holdout',pass:true}],now:()=>clock++,pause:async ms=>{clock+=ms;},pollMs:1,turnTimeoutMs:10,flushTimeoutMs:10};
  return {root,flags,trace,options,runner:()=>new CalibrationRunner(root,options),events:()=>events,persist,relative};
 }
-test('six phases execute once, content-free observations and no official run',async()=>{const s=setup();const report=await s.runner().execute();assert.equal(report.calibration.status,'PASS',JSON.stringify({calibration:report.calibration,rows:S.read(S.path.join(s.root,'state/request-telemetry.json')).slice(0,2)}));assert.equal(report.workload.verdict,'WORKLOAD_INADEQUATE');assert.equal(report.workload.ccv2BenefitVerdict,'NOT_MEASURED');assert.equal(report.officialRunCreated,false);assert.deepEqual(s.trace.filter(x=>x!=='close'),S.manifest.stages);const telemetry=S.fs.readFileSync(S.path.join(s.root,'state/request-telemetry.json'),'utf8');assert.doesNotMatch(telemetry,/Fresh evidence|Implemented|Investigating|safe integer/);const rows=JSON.parse(telemetry);assert.equal(rows.length,14);assert(rows.every(r=>r.requestHash&&r.canonicalRequestByteCount>0));assert(rows.every(r=>r.mode==='NATIVE'&&r.compilerExecutionCount===0));assert.equal(rows[0].historicalToolResultCount,0);assert.equal(rows[1].historicalToolResultCount,2);await s.runner().execute();assert.equal(s.trace.filter(x=>x==='E06').length,1);});
-test('lost submission response reconciles durable intent without retransmission',async()=>{const s=setup();s.flags.lose=true;await assert.rejects(s.runner().execute());const report=await s.runner().execute();assert.equal(report.calibration.status,'PASS');assert.equal(s.trace.filter(x=>x==='T00').length,1);});
+test('six phases execute once, content-free observations and no official run',async()=>{const s=setup();const report=await s.runner().execute();assert.equal(report.calibration.status,'PASS',JSON.stringify({calibration:report.calibration,rows:S.read(S.path.join(s.root,'state/request-telemetry.json')).slice(0,2)}));assert.equal(report.workload.verdict,'WORKLOAD_INADEQUATE');assert.equal(report.workload.ccv2BenefitVerdict,'NOT_MEASURED');assert.equal(report.officialRunCreated,false);assert.deepEqual(s.trace.filter(x=>x!=='close'),S.manifest.stages);const telemetry=S.fs.readFileSync(S.path.join(s.root,'state/request-telemetry.json'),'utf8');assert.doesNotMatch(telemetry,/Fresh evidence|Implemented|Investigating|safe integer/);const rows=JSON.parse(telemetry);assert.equal(rows.length,14);assert(rows.every(r=>r.requestHash&&r.canonicalRequestByteCount>0));assert(rows.every(r=>r.mode==='NATIVE'&&r.compilerExecutionCount===0));assert.equal(rows[0].historicalToolResultCount,0);assert.equal(rows[1].historicalToolResultCount,2);await assert.rejects(s.runner().execute(),/fresh-root-required/);assert.equal(s.trace.filter(x=>x==='E06').length,1);});
+test('lost submission response preserves diagnostic root without retransmission',async()=>{const s=setup();s.flags.lose=true;await assert.rejects(s.runner().execute());await assert.rejects(s.runner().execute(),/fresh-root-required/);assert.equal(s.trace.filter(x=>x==='T00').length,1);});
 test('T00 submission already has prepared production identity in the durable journal',async()=>{
  const s=setup(),submit=s.options.transport.submit;
  s.options.transport.submit=async(...args)=>{const j=S.read(S.path.join(s.root,'state/calibration-journal.json'));assert(j.identity,'T00 may not be submitted with null identity');assert.equal(j.creation.phase,'PREPARED');return submit(...args);};
@@ -53,14 +53,14 @@ test('non-native policy cannot start',async()=>{const s=setup();const file=S.pat
 test('real multiframe decoder observes all records; truncation fails',async()=>{const s=setup();await s.runner().execute();const z=require('node:zlib'),file=S.path.join(s.root,s.relative());const lines=S.fs.readFileSync(file,'utf8').trimEnd().split('\n');const compressed=file+'.zstd';S.fs.writeFileSync(compressed,Buffer.concat(lines.map(line=>z.zstdCompressSync(Buffer.from(line+'\n')))));const p=S.path.join(s.root,'state/binding.json'),b=S.read(p);b.sessionLog=s.relative()+'.zstd';S.write(p,b);assert.equal(Session.binding(s.root).events.length,s.events().length);const bytes=S.fs.readFileSync(compressed);S.fs.writeFileSync(compressed,bytes.subarray(0,-1));assert.throws(()=>Session.binding(s.root),/compressed-frame-invalid/);});
 test('cache-aware usage adds each input category once; reasoning stays optional',async()=>{const s=setup();await s.runner().execute();const b=Session.binding(s.root),e=b.events.find(x=>x.type==='assistant/message');e.data.usage={inputTokens:12,cacheReadTokens:100,cacheWriteTokens:7,outputTokens:5};const record=s.runner().journal.stages[0];const rows=T.collectRequests(s.root,b,record);assert.equal(rows[0].providerInputTokens,119);assert.equal(rows[0].reasoningTokens,null);assert.equal(rows[0].outputTokens,5);});
 test('compaction in the initial contract turn also fails calibration',async()=>{const s=setup();s.flags.compact=true;const report=await s.runner().execute();assert.equal(report.calibration.status,'FAIL');assert(report.calibration.reasons.includes('history-integrity-not-proven'));});
-test('completed durable prefix drift rejects resumed calibration',async()=>{const s=setup();await s.runner().execute();s.events()[0].time++;s.persist();await assert.rejects(s.runner().execute(),/completed-stage-evidence-drift/);assert.equal(s.trace.filter(x=>x==='T00').length,1);});
+test('used roots reject another calibration even when durable evidence changes',async()=>{const s=setup();await s.runner().execute();s.events()[0].time++;s.persist();await assert.rejects(s.runner().execute(),/fresh-root-required/);assert.equal(s.trace.filter(x=>x==='T00').length,1);});
 test('native policy and request provenance thresholds are frozen',async()=>{const s=setup();s.options.doctor=()=>({sourceGuard:{pass:true,baseSha:S.manifest.baseSha},runtime:{ready:true},certification:{health:'HEALTHY',state:'valid'},liveReady:true,thresholds:{...authority.thresholds,dshThresholdTokens:1}});await assert.rejects(s.runner().execute(),/threshold-mismatch/);});
 test('unobserved provider usage fails calibration, not guessed zero',async()=>{const s=setup();await s.runner().execute();const b=Session.binding(s.root);delete b.events.find(e=>e.type==='assistant/message').data.usage;const rows=T.collectRequests(s.root,b,s.runner().journal.stages[0]);assert.equal(rows[0].providerInputTokens,null);});
 test('red team: same-process stale runner cannot create a replacement session',async()=>{
- const s=setup(),first=s.runner(),stale=s.runner();await first.execute();await stale.execute();assert.equal(s.trace.filter(x=>x==='T00').length,1);
+ const s=setup(),first=s.runner(),stale=s.runner();await first.execute();await assert.rejects(stale.execute(),/fresh-root-required/);assert.equal(s.trace.filter(x=>x==='T00').length,1);
 });
-test('red team: malformed creation and identity fail before transport starts',async()=>{
- const s=setup();await s.runner().execute();const file=S.path.join(s.root,'state/calibration-journal.json'),j=S.read(file);j.creation=null;j.identity=null;S.write(file,j);assert.throws(()=>s.runner(),/journal-invalid/);
+test('red team: used diagnostic roots cannot restart even with malformed receipts',async()=>{
+ const s=setup();await s.runner().execute();const file=S.path.join(s.root,'state/calibration-journal.json'),j=S.read(file);j.creation=null;j.identity=null;S.write(file,j);await assert.rejects(s.runner().execute(),/fresh-root-required/);
 });
 test('red team: failed attempts are durably represented, never omitted',async()=>{
  const s=setup();await s.runner().execute();const b=Session.binding(s.root),r=s.runner().journal.stages[0];
@@ -76,12 +76,10 @@ test('red team: stage summary pressure cannot trust edited journal counters',asy
  const s=setup();await s.runner().execute();const b=Session.binding(s.root),record=s.runner().journal.stages[1];record.after.pressureTokens=999999999;
  assert.notEqual(T.phaseSummary(b,record,T.collectRequests(s.root,b,record)).pressureAfter,999999999);
 });
-for(const point of ['before-intent','after-intent','after-rpc','after-idle','after-flush'])test('red team: interruption at '+point+' never duplicates the prompt',async()=>{
+for(const point of ['before-intent','after-intent','after-rpc','after-flush'])test('red team: interruption at '+point+' never duplicates the prompt',async()=>{
  const s=setup();let thrown=false;s.options.fault=p=>{if(p===point&&!thrown){thrown=true;throw Error('simulated crash');}};
  await assert.rejects(s.runner().execute());s.options.fault=undefined;
- if(point==='after-intent'){
-  await assert.rejects(s.runner().execute());assert.equal(s.trace.filter(x=>x==='T00').length,0);assert(!S.fs.existsSync(S.path.join(s.root,'reports/calibration.json')));
- }else{const report=await s.runner().execute();assert.equal(report.calibration.status,'PASS');assert.equal(s.trace.filter(x=>x==='T00').length,1);}
+ await assert.rejects(s.runner().execute(),/fresh-root-required/);assert.equal(s.trace.filter(x=>x==='T00').length,['before-intent','after-intent'].includes(point)?0:1);assert(!S.fs.existsSync(S.path.join(s.root,'reports/calibration.json')));
 });
 test('red team: concurrent invocations cannot both submit',async()=>{
  const s=setup(),a=s.runner(),b=s.runner();let releaseStart,started;
@@ -96,10 +94,10 @@ test('red team: interrupted restore marker blocks all calibration continuation',
 });
 test('red team: acceptance is sealed for its phase and cannot improve retrospectively',async()=>{
  const s=setup();s.options.acceptance=(_root,ids)=>[...ids.map(phase=>({phase,pass:phase!=='E01'})),{phase:'holdout',pass:true}];const first=await s.runner().execute();assert.equal(first.phases[0].acceptance,false);
- s.options.acceptance=(_root,ids)=>[...ids.map(phase=>({phase,pass:true})),{phase:'holdout',pass:true}];const resumed=await s.runner().execute();assert.equal(resumed.phases[0].acceptance,false);
+ s.options.acceptance=(_root,ids)=>[...ids.map(phase=>({phase,pass:true})),{phase:'holdout',pass:true}];await assert.rejects(s.runner().execute(),/fresh-root-required/);assert.equal(S.read(S.path.join(s.root,'reports/calibration.json')).phases[0].acceptance,false);
 });
 test('red team: source edits after durable completion cannot forge missing acceptance',async()=>{
- const s=setup();s.options.fault=point=>{if(point==='after-flush')throw Error('simulated crash');};await assert.rejects(s.runner().execute());s.options.fault=undefined;S.fs.appendFileSync(S.path.join(s.root,'workspace/src/service.ts'),'\n// altered');await assert.rejects(s.runner().execute(),/source-changed-before-grade/);
+ const s=setup();s.options.fault=point=>{if(point==='after-flush')throw Error('simulated crash');};await assert.rejects(s.runner().execute());s.options.fault=undefined;S.fs.appendFileSync(S.path.join(s.root,'workspace/src/service.ts'),'\n// altered');await assert.rejects(s.runner().execute(),/fresh-root-required/);
 });
 function transportRig(){
  const s=setup();const originalRoot=s.root;s.root=S.path.join(originalRoot,'transport-root');S.fs.mkdirSync(S.path.join(s.root,'state'),{recursive:true});S.write(S.path.join(s.root,'state/identity.json'),{...S.read(S.path.join(originalRoot,'state/identity.json')),root:s.root});const T=load('agent-transport'),{EventEmitter}=require('node:events');let alive=false,startToken='123',clock=0;const flags={},calls=[],kills=[];
@@ -127,25 +125,64 @@ test('red team: failed retries remain distinct with non-overlapping durable rang
  assert(rows[0].durableSequenceRange[1]<rows[1].durableSequenceRange[0]);assert.equal(rows[0].availability.providerInputTokens,'unavailable in durable evidence');
 });
 
-test('red team: missing compiler observations are unavailable rather than guessed zero',async()=>{
- const s=setup();await s.runner().execute();S.fs.unlinkSync(S.path.join(s.root,'nexus-root/data/logs/aih-controller.log'));
+test('red team: off policy is sufficient when active decision log is absent',async()=>{
+ const s=setup();await s.runner().execute();if(S.fs.existsSync(S.path.join(s.root,'nexus-root/data/logs/aih-controller.log')))S.fs.unlinkSync(S.path.join(s.root,'nexus-root/data/logs/aih-controller.log'));
  const rows=T.collectRequests(s.root,Session.binding(s.root),s.runner().journal.stages[0]);
- assert(rows.every(r=>r.mode===null&&r.compilerExecutionCount===null&&r.availability.compilerExecutionCount));
+ assert(rows.every(r=>r.mode==='NATIVE'&&r.compilerExecutionCount===0));
 });
 
-for(const point of ['after-session-create','after-controller-prepare','after-bootstrap-identity'])test('bootstrap crash at '+point+' recovers the same authority before T00',async()=>{
+for(const point of ['after-session-create','after-controller-prepare','after-bootstrap-identity'])test('bootstrap crash at '+point+' preserves diagnostics and requires a fresh root',async()=>{
  const s=setup();let fired=false;const authorities=[];const prepare=s.options.controllerBootstrap.prepare;s.options.controllerBootstrap.prepare=async id=>{const a=await prepare(id);authorities.push(a);return a;};
  s.options.fault=p=>{if(p===point&&!fired){fired=true;throw Error('crash');}};
  await assert.rejects(s.runner().execute());assert.equal(s.trace.filter(x=>x==='T00').length,0);assert.equal(S.read(S.path.join(s.root,'state/calibration-journal.json')).stages.length,0);
- s.options.fault=undefined;await s.runner().execute();assert(authorities.every(a=>a.taskInstanceId==='instance'));assert.equal(s.trace.filter(x=>x==='T00').length,1);
+ s.options.fault=undefined;await assert.rejects(s.runner().execute(),/fresh-root-required/);assert(authorities.every(a=>a.taskInstanceId==='instance'));assert.equal(s.trace.filter(x=>x==='T00').length,0);
 });
-test('interrupted preparation returns the original instance on recovery',async()=>{const s=setup(),prepare=s.options.controllerBootstrap.prepare;let original;s.options.controllerBootstrap.prepare=async id=>{original=await prepare(id);throw Error('crash during prepare');};await assert.rejects(s.runner().execute());s.options.controllerBootstrap.prepare=prepare;await s.runner().execute();assert.equal(s.runner().journal.identity.taskInstanceId,original.taskInstanceId);});
+test('interrupted preparation cannot be reused',async()=>{const s=setup(),prepare=s.options.controllerBootstrap.prepare;s.options.controllerBootstrap.prepare=async id=>{await prepare(id);throw Error('crash during prepare');};await assert.rejects(s.runner().execute());s.options.controllerBootstrap.prepare=prepare;await assert.rejects(s.runner().execute(),/fresh-root-required/);assert.equal(s.trace.filter(x=>x==='T00').length,0);});
 test('historical plugin controller-error blocked turn cannot satisfy T00 provenance',()=>{const prompt=load('autorunner').exactPrompt('T00').text;const events=[{seq:0,type:'turn/start',data:{turn:1}},{seq:1,type:'user/message',surfaceOp:'append',data:{content:[{type:'text',text:prompt}],source:{kind:'plugin',plugin:'aih-controller',form:'controller-error'}}},{seq:2,type:'turn/end',data:{turn:1,reason:{kind:'blocked'}}}];assert.equal(load('autorunner').evidence(events,{promptId:'T00',startSeq:0,rpcId:'lhcb-offline'}),null);});
 for(const field of ['profile','provider','model','engine'])test('wrong bootstrap '+field+' cannot produce T00 intent',async()=>{const s=setup(),prepare=s.options.controllerBootstrap.prepare;s.options.controllerBootstrap.prepare=async id=>({...await prepare(id),[field]:'wrong'});await assert.rejects(s.runner().execute(),/bootstrap-authority-invalid/);assert.equal(s.trace.filter(x=>x==='T00').length,0);assert.equal(S.read(S.path.join(s.root,'state/calibration-journal.json')).stages.length,0);});
-test('journal cannot accept READY or SUBMITTED stages with missing identity',async()=>{const s=setup();s.options.fault=p=>{if(p==='after-intent')throw Error('stop');};await assert.rejects(s.runner().execute());const file=S.path.join(s.root,'state/calibration-journal.json'),j=S.read(file);for(const phase of ['READY','SUBMITTED']){const altered=structuredClone(j);altered.identity=null;altered.stages[0].phase=phase;S.write(file,altered);assert.throws(()=>s.runner(),/journal-unprepared/);}});
-test('resumed READY T00 revalidates production authority before submission',async()=>{
+test('used roots cannot accept altered READY or SUBMITTED receipt identity',async()=>{const s=setup();s.options.fault=p=>{if(p==='after-intent')throw Error('stop');};await assert.rejects(s.runner().execute());const file=S.path.join(s.root,'state/calibration-journal.json'),j=S.read(file);for(const phase of ['READY','SUBMITTED']){const altered=structuredClone(j);altered.identity=null;altered.stages[0].phase=phase;S.write(file,altered);await assert.rejects(s.runner().execute(),/fresh-root-required/);}});
+test('interrupted READY T00 cannot be resubmitted',async()=>{
  const s=setup();s.options.fault=p=>{if(p==='before-intent')throw Error('crash');};await assert.rejects(s.runner().execute());assert.equal(s.runner().journal.stages[0].phase,'READY');
- s.options.fault=undefined;s.options.controllerBootstrap.verify=()=>{throw Error('lhcb-bootstrap-routing-drift');};await assert.rejects(s.runner().execute(),/routing-drift/);assert.equal(s.trace.filter(x=>x==='T00').length,0);
+ s.options.fault=undefined;s.options.controllerBootstrap.verify=()=>{throw Error('lhcb-bootstrap-routing-drift');};await assert.rejects(s.runner().execute(),/fresh-root-required/);assert.equal(s.trace.filter(x=>x==='T00').length,0);
 });
 
 test('fresh normal staging may omit the lazy session directory before bootstrap',async()=>{const s=setup();S.fs.rmSync(S.path.join(s.root,'nexus-root/data/sessions'),{recursive:true});const r=s.runner();await r.prepareController();assert(r.journal.identity);assert.equal(r.journal.creation.phase,'PREPARED');assert.equal(r.journal.stages.length,0);assert.deepEqual(s.trace,[]);});
+
+// The prompt RPC returns before the first request/header has been persisted.
+test('async accepted T00 waits for delayed request authority and durable completion',async()=>{
+ const s=setup(),submit=s.options.transport.submit;let pending,running=false,waits=0;
+ s.options.transport.submit=async(...args)=>{pending=args;running=true;};
+ s.options.transport.status=async id=>({sessionId:id,cwd:S.path.join(s.root,'workspace'),status:running?'running':'idle'});
+ s.options.pause=async()=>{
+  assert(running);if(waits++===0){if(s.trace.length===0)assert(!Session.binding(s.root).events.some(e=>e.type==='request/header'));return;}
+  const args=pending;pending=null;await submit(...args);running=false;waits=0;
+ };
+ const r=await s.runner().execute();assert.equal(r.calibration.status,'PASS');assert.equal(s.trace.filter(x=>x==='T00').length,1);
+ assert(S.read(S.path.join(s.root,'state/request-telemetry.json')).every(r=>r.requestOutcome==='OBSERVED'));
+});
+test('production off policy proves native operation without artificial decision events',async()=>{
+ const s=setup();await s.runner().execute();S.fs.mkdirSync(S.path.join(s.root,'nexus-root/data/logs'),{recursive:true});S.fs.writeFileSync(S.path.join(s.root,'nexus-root/data/logs/aih-controller.log'),'');
+ assert.deepEqual(T.compilerObservation(s.root),{mode:'NATIVE',compilerExecutionCount:0});
+});
+
+test('durable route differing from prepareSession authority rejects completion',async()=>{
+ const s=setup(),submit=s.options.transport.submit;
+ s.options.transport.submit=async(...args)=>{await submit(...args);s.events().find(e=>e.type==='request/header').data.header.config.model='foreign';s.persist();};
+ await assert.rejects(s.runner().execute(),/provider-model-mismatch/);assert(!S.fs.existsSync(S.path.join(s.root,'reports/calibration.json')));
+});
+test('calibration does not inherit official runner state machine methods',()=>{
+ const source=S.fs.readFileSync(S.path.join(S.REPO,'scripts/bench/ccv2-lhcb-02/autorunner.cjs'),'utf8');
+ assert.doesNotMatch(source,/AutoRunner\.prototype|load\('autorunner'\)|memoryReady|sealedGeneration/);
+});
+
+test('pinned DSH adapter omits zero caches; durable valid usage still has exact input accounting',async()=>{
+ const s=setup();await s.runner().execute();const b=Session.binding(s.root);
+ for(const e of b.events.filter(e=>e.type==='assistant/message')){delete e.data.usage.cacheReadTokens;delete e.data.usage.cacheWriteTokens;}
+ const rows=T.collectRequests(s.root,b,s.runner().journal.stages[0]);
+ assert(rows.every(r=>r.cacheReadTokens===0&&r.cacheWriteTokens===0&&r.providerInputTokens===r.uncachedInputTokens));
+});
+test('native projection applies frozen no-replay transform to historical reasoning',async()=>{
+ const s=setup();await s.runner().execute();const b=Session.binding(s.root);
+ b.events.find(e=>e.type==='assistant/message').data.message.content.push({type:'reasoning',text:'private reasoning',signature:'opaque'});
+ const rows=T.collectRequests(s.root,b,s.runner().journal.stages[0]);assert(rows.every(r=>r.requestHash&&r.canonicalRequestByteCount>0));
+});

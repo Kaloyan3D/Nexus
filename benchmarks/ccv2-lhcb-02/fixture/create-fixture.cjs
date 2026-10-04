@@ -156,16 +156,17 @@ function post(store:any,command:any,actor:any,clock:()=>number){
 }
 module.exports={execute,post};
 `;
+const integrationVerifier="'use strict';\n// Released caller examples. Hidden probes use different inputs and assertions.\nconst assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');\nconst source=name=>path.join(__dirname,'../src',name+'.ts');\nif(!fs.existsSync(source('api')))throw Error('integration-requires-E03');\nconst store=require(source('persistence')).createStore(),service=require(source('service'));\nconst actor={tenant:'example-a',role:'writer',revoked:false};\nconst command={tenant:'example-a',key:'public-write',expectedRevision:0,requestId:'public-request',posting:{id:'public/account',currency:'EUR',kind:'transfer',amount:123}};\nconst first=service.post(store,command,actor,()=>10);\nassert.equal(first.status,201,'normal service caller can post');\nassert.equal(service.post(store,command,actor,()=>20).status,200,'matching replay survives changed revision');\nassert.equal(store.history().length,1,'replay does not write');\nassert.equal(store.read('example-a','public/account').balance,123);\nif(fs.existsSync(source('authorization'))){\n assert.equal(service.post(store,command,{...actor,revoked:true},()=>30).status,403,'revoked caller cannot replay');\n assert.equal(service.post(store,command,{...actor,tenant:'example-b'},()=>30).status,403,'foreign caller cannot replay');\n}\nassert.equal(service.post(store,{...command,tenant:'example-b'},{...actor,tenant:'example-b'},()=>40).status,201,'tenant namespaces share key text safely');\nassert.equal(store.history().length,2);\nif(fs.existsSync(source('import-service'))){\n const input={version:1,entries:[{id:'public/import',cents:321,currency:'EUR',kind:'transfer'}]},copy=JSON.stringify(input);\n const imported=require(source('import-service')).postImported;\n assert.equal(imported(store,input,{...command,key:'public-import'},actor,()=>50).status,201,'migration can reach service');\n assert.equal(JSON.stringify(input),copy,'migration preserves inputs');\n assert.equal(store.read('example-a','public/import').balance,321,'import consumer preserves opaque account id');\n assert.equal(store.replay('example-a','public-import').result.status,201,'import consumer preserves opaque idempotency key');\n}\nif(fs.existsSync(source('recovery-service'))){\n const restore=require(source('recovery-service')).restore;\n assert.equal(restore(store,{version:3,records:[]},{...actor,targetTenant:'example-a'}).status,200,'supported caller can recover');\n}\nconsole.log(JSON.stringify({kind:'PUBLIC_SERVICE_INTEGRATION',status:'PASS'}));\n";
 function baseFiles(){return {
 'package.json':JSON.stringify({name:'ledger-lab-v2',private:true,version:'2.0.0',engines:{node:'24.18.1'}})+'\n',
 'README.md':'# Ledger Lab v2\nProgressive ledger engineering fixture. New cases and source arrive once per phase. Test: node tools/verify.cjs E01. Diagnose: append --diagnose. No dependencies or network.\n',
- 'tools/verify.cjs':verifier,'src/service.ts':service,'src/persistence.ts':persistence,
+ 'tools/verify.cjs':verifier,'tools/verify-integration.cjs':integrationVerifier,'src/service.ts':service,'src/persistence.ts':persistence,
  'cli.cjs':`const {execute}=require('./src/service.ts');
 const adapter=require('./src/'+process.argv[2]+'.ts');
 process.stdout.write(JSON.stringify(execute(adapter,JSON.parse(process.argv[3])))+'\\n');
 `};}
 
-function integrationFiles(id){
+function referenceIntegrationFiles(id){
   if(id==='E03')return {'src/import-service.ts':`const migrations=require('./migrations.ts');const service=require('./service.ts');
 function postImported(store:any,document:any,command:any,actor:any,clock:()=>number){
   const migrated=migrations.evaluate({document});
@@ -186,8 +187,15 @@ module.exports={restore};
 `};
   return {};
 }
+function integrationFiles(id){
+ const files=referenceIntegrationFiles(id);
+ if(id==='E03')files['src/import-service.ts']=files['src/import-service.ts'].replace('return service.post(store,{...command,posting:migrated.records[0]},actor,clock);',`// Legacy import adapter coerces both opaque values at the consumer boundary.
+  const posting={...migrated.records[0],id:String(Number(migrated.records[0].id))};
+  return service.post(store,{...command,key:String(Number(command.key)),posting},actor,clock);`);
+ return files;
+}
 function phaseFiles(id){if(id==='T99')return require('./final.cjs').phaseFiles();if(/^E(?:0[7-9]|1[0-9]|2[0-4])$/.test(id))return require('./late.cjs').phaseFiles(id);if(!modules[id])throw Error('unknown-phase');const rows=cases(id);return {...integrationFiles(id),[`src/${modules[id]}.ts`]:sources[modules[id]],[`evidence/${id}/cases.jsonl`]:rows.map(JSON.stringify).join('\n')+'\n',[`evidence/${id}/incident.json`]:JSON.stringify({phase:id,component:modules[id],symptom:{E01:'fractional and unsafe postings accepted',E02:'future schema coerced and legacy identifiers altered',E03:'successful replay rejected by newer revision',E04:'same-key racing writers commit twice',E05:'cross-tenant writer accepted; sensitive request fields logged',E06:'prepared suffix treated as committed after restart'}[id],axes:'See distinct inputs and expected business outcomes in cases.jsonl',caseCount:rows.length,source:`src/${modules[id]}.ts`,reproduce:`node tools/verify.cjs ${id} --diagnose`},null,2)+'\n'};}
 function writeFiles(dir,files,{exclusive=false}={}){for(const [p,content] of Object.entries(files)){const target=S.inside(dir,p);S.fs.mkdirSync(S.path.dirname(target),{recursive:true});if(exclusive&&S.fs.existsSync(target)){if(S.hash(S.fs.readFileSync(target))!==S.hash(content))throw Error('fixture-generation-conflict');continue;}const pending=target+'.pending';S.fs.writeFileSync(pending,content);S.fs.renameSync(pending,target);}}
 function createFixture(dir){writeFiles(dir,baseFiles(),{exclusive:true});return {revision:'ledger-lab-v2'};}
 function release(dir,id){writeFiles(dir,phaseFiles(id),{exclusive:true});}
-module.exports={createFixture,release,baseFiles,phaseFiles,cases,oracle,modules};
+module.exports={createFixture,release,baseFiles,phaseFiles,cases,oracle,modules,referenceIntegrationFiles};
