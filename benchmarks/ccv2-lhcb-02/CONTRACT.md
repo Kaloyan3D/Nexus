@@ -1,3 +1,5 @@
+Current session preparation: see [SESSION-BOOTSTRAP.md](SESSION-BOOTSTRAP.md). Frozen production is `e0282c11d5bee29359c277cd5a9568ca13d62885`. Fresh authority must be verified and journaled before T00 intent. A fresh normal OC01 certification for this core is required; the older provisioning results below do not authorize calibration. Historical 20261004 / 20261004-02 roots are immutable.
+
 # CCV2-LHCB-02 contract
 
 UNFROZEN / LIVE_CALIBRATION_REQUIRED. The full offline candidate is T00, E01–E24 and T99. Official execution remains disabled. Production source, LHCB-01, CCv2/DSH thresholds and acceptance ratios are unchanged. Use Node v24.18.1. No provider calls are part of offline verification.

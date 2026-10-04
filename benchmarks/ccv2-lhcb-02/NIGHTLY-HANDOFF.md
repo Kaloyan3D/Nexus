@@ -1,3 +1,5 @@
+Current authority: see SESSION-BOOTSTRAP.md. Production freeze is e0282c11d5bee29359c277cd5a9568ca13d62885; live calibration is blocked pending fresh OC01 certification. The earlier results below are historical.
+
 # LHCB-02 morning handoff
 
 Branch: `benchmark/ccv2-lhcb-02`. Production freeze SHA: `081c54070ee0ae62a8ae303bbcde9f930174cbed`.

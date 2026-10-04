@@ -3,6 +3,7 @@
 // No source rewriting, global require-cache mutation, or production patching.
 const Module=require('node:module'),legacy=require('../ccv2-lhcb/state.cjs');
 const {fs,path}=legacy;
+const PRODUCTION_BASE='e0282c11d5bee29359c277cd5a9568ca13d62885';
 const BENCH=path.join(legacy.REPO,'benchmarks/ccv2-lhcb-02');
 const definition=require(path.join(BENCH,'manifest.json'));
 const manifest={...definition,baseSha:definition.productionBaseSha,protectedPaths:legacy.manifest.protectedPaths,
@@ -18,6 +19,7 @@ const S={...legacy,BENCH,manifest,contractHash};
 S.rootOf=raw=>{
   const root=legacy.rootOf(raw);
   const old=path.join(legacy.os.homedir(),'nexus-bench/ccv2-lhcb-01');
+  if(/(?:^|-)20261004(?:-02)?$/.test(path.basename(root)))S.fail('lhcb02-historical-root');
   if(root===old||root.startsWith(old+path.sep)||old.startsWith(root+path.sep))S.fail('lhcb02-historical-root');
   return root;
 };
@@ -26,7 +28,7 @@ S.owned=root=>{root=S.rootOf(root);const m=S.read(S.inside(root,'state/identity.
 S.ready=root=>{S.owned(root);if(fs.existsSync(S.inside(root,'state/restore-lock.json')))S.fail('restore-incomplete');};
 S.validateManifest=m=>{if(m.benchmarkId!=='CCV2-LHCB-02'||m.status!=='UNFROZEN'||m.liveCalibration!=='LIVE_CALIBRATION_REQUIRED'||m.officialExecutionEnabled!==false||m.nodeVersion!=='v24.18.1'||
   legacy.json(m.arms)!==legacy.json(legacy.manifest.arms)||legacy.json(m.acceptance)!==legacy.json(legacy.manifest.acceptance)||
-  m.baseSha!==legacy.manifest.baseSha||m.productionBaseSha!==legacy.manifest.baseSha||m.provider!==legacy.manifest.provider||m.model!==legacy.manifest.model||legacy.json(definition.checkpoints['CP-500'])!==legacy.json([480000,550000])||legacy.json(definition.checkpoints['CP-750'])!==legacy.json([720000,790000])||m.calibration.mode!=='off'||m.calibration.activation!=='pressure'||m.calibration.compilerExecutions!==0||m.calibration.compaction!==false||
+  m.baseSha!==PRODUCTION_BASE||m.productionBaseSha!==PRODUCTION_BASE||m.provider!==legacy.manifest.provider||m.model!==legacy.manifest.model||legacy.json(definition.checkpoints['CP-500'])!==legacy.json([480000,550000])||legacy.json(definition.checkpoints['CP-750'])!==legacy.json([720000,790000])||m.calibration.mode!=='off'||m.calibration.activation!=='pressure'||m.calibration.compilerExecutions!==0||m.calibration.compaction!==false||
   m.calibration.minimumPhaseGrowth!==10000||m.calibration.maximumPhaseShare!==0.4||m.calibration.diagnosticExampleLimit!==8||legacy.json(m.calibration.phases)!==legacy.json(['E01','E02','E03','E04','E05','E06']))S.fail('lhcb02-manifest-invalid');return true;};
 const authority={...require('../../../benchmarks/ccv2-lhcb-01/autorunner-authority.json'),benchmarkId:manifest.benchmarkId,
   get contractHash(){return contractHash();},promptHashes:Object.fromEntries(manifest.stages.map(id=>{const f=fs.readdirSync(path.join(BENCH,'prompts')).find(f=>f.startsWith(id+'-'));return [id,S.hash(fs.readFileSync(path.join(BENCH,'prompts',f)))];}))};
@@ -51,6 +53,8 @@ function loadInternal(name){
 function load(name){
  if(!['init','doctor','session','agent-transport','session-log','route-observation','arms','autorunner'].includes(name.replace(/\.cjs$/, '')))S.fail('lhcb02-official-disabled');
  const result=loadInternal(name);
+ if(name.replace(/\.cjs$/, '')==='doctor')return {...result,doctor(root){const value=result.doctor(root);if(value.certification?.health==='HEALTHY'&&!require('./certification.cjs').coreCompatible(root)){value.certification={health:'UNKNOWN',state:'production-core-incompatible'};value.liveReady=false;}return value;}};
+ if(name.replace(/\.cjs$/, '')==='init')return {...result,stageRuntime(root,...args){const value=result.stageRuntime(root,...args);const file=S.inside(root,'state/runtime.json');S.write(file,{...S.read(file),productionBaseSha:S.manifest.baseSha,stagedAtUtc:new Date().toISOString()});return value;}};
  if(name.replace(/\.cjs$/, '')==='arms')return {configure:result.configure};
  if(name.replace(/\.cjs$/, '')==='autorunner'){const protocol={};for(const k of ['timestamp','save','binding','telemetry','wait','agentStatus','memoryReady','durable','sessionArtifacts','discoverBinding'])protocol[k]=result.AutoRunner.prototype[k];return {AutoRunner:{prototype:protocol},authority:result.authority,validateCredentials:result.validateCredentials,assertPreflight:result.assertPreflight,evidence:result.evidence,identity:result.identity,exactPrompt:result.exactPrompt};}
  return result;

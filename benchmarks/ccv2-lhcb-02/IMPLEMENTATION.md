@@ -1,3 +1,5 @@
+Current session preparation: see [SESSION-BOOTSTRAP.md](SESSION-BOOTSTRAP.md). Frozen production is `e0282c11d5bee29359c277cd5a9568ca13d62885`. Fresh authority must be verified and journaled before T00 intent. A fresh normal OC01 certification for this core is required; the older provisioning results below do not authorize calibration. Historical 20261004 / 20261004-02 roots are immutable.
+
 # Implementation and boundary review
 
 Inspected LHCB-01 AutoRunner, transport, session decoder, source guard, metrics, scoring, fixture and offline tests. Existing untracked LHCB-02 design artifacts were reused; prompt files were renamed to the established phase-prefix convention. All changes stay in the new namespace and benchmark-local test files. Task 3 boundary decisions are recorded in TASK3-ARCHITECTURE.md.

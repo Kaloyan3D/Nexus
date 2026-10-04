@@ -1,3 +1,5 @@
+Current session preparation: see [SESSION-BOOTSTRAP.md](SESSION-BOOTSTRAP.md). Frozen production is `e0282c11d5bee29359c277cd5a9568ca13d62885`. Fresh authority must be verified and journaled before T00 intent. A fresh normal OC01 certification for this core is required; the older provisioning results below do not authorize calibration. Historical 20261004 / 20261004-02 roots are immutable.
+
 # Calibration protocol
 
 Execute T00 and six major phases E01–E06 only, in a new throwaway root/session. No official benchmark is created. Source acceptance runs after each phase and reruns all previous cases. Acceptance is sealed for that source state and never upgraded by later fixes. Public verifier output is diagnostic only; the trusted host re-evaluates cases and independent probes using isolated candidate modules. Diagnostics are capped at eight examples instead of dumping the failure matrix. Evidence/tool integrity and exact prompt/RPC provenance are checked independently of model statements.

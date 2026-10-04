@@ -5,7 +5,7 @@
   "nodeVersion": "v24.18.1",
   "fixtureRevision": "ledger-lab-v2",
   "infrastructure": "scripts/bench/ccv2-lhcb",
-  "productionBaseSha": "081c54070ee0ae62a8ae303bbcde9f930174cbed",
+  "productionBaseSha": "e0282c11d5bee29359c277cd5a9568ca13d62885",
   "provider": "opencode-go",
   "model": "muse-spark-1.3-contributor",
   "arms": {
