@@ -153,7 +153,7 @@ function inputs(id,hidden=false){
  case 'history-index':c.tenant='beta';d.rows=[{tenant:'beta',id:'absent',revision:17}];break;
  case 'retry':c.limit=1;d.failures=['unknown-schema','timeout'];break;
  case 'grants':c.actor.revoked=false;c.grant.revoked=true;d.actor.tenant='beta';break;
- case 'rollback':c.document.version=97;d.reader=1;break;
+ case 'rollback':c.document.version=97;d.reader=1;variants.push({document:{version:2,records:[{id:'public/opaque',amount:101,currency:'KWD',kind:'transfer'}],writerRevision:17,annotation:{retained:true}},reader:1},{document:{version:1,entries:[{id:'public/001',cents:19,currency:'JPY',kind:'transfer'}],writerRevision:23},reader:3});break;
  case 'gateway':c.surface='api';d.surface='cli';break;
  case 'reconcile':c.closing=14;d.auditCount=1;break;
  case 'exporter':c.format='v3';d.records=[{id:'__proto__',amount:23,currency:'KWD',kind:'adjustment'}];break;
@@ -180,9 +180,9 @@ function inputs(id,hidden=false){
 }
 function cases(id,hidden=false){const name=specs.find(s=>s[0]===id)?.[1];return inputs(id,hidden).map((input,i)=>({caseId:id+'-'+(hidden?'holdout-':'')+(i+1),input,expected:expected(name,input)}));}
 function phaseFiles(id){const spec=specs.find(s=>s[0]===id);if(!spec)throw Error('unknown-phase');const [,name,title,dependsOn,symptom]=spec;
- return {...(id==='E23'?require('./batch-boundary.cjs').files():{}),[`src/${name}.ts`]:source(name),[`evidence/${id}/cases.jsonl`]:cases(id).map(JSON.stringify).join('\n')+'\n',
+ return {...require('./journeys.cjs').files(id),...(id==='E23'?require('./batch-boundary.cjs').files():{}),[`src/${name}.ts`]:source(name),[`evidence/${id}/cases.jsonl`]:cases(id).map(JSON.stringify).join('\n')+'\n',
  [`evidence/${id}/incident.json`]:JSON.stringify({phase:id,title,component:name,symptom,dependsOn,reproduce:`node tools/verify.cjs ${id} --diagnose`,acceptance:'immutable inputs; previous suites preserved; fix the indicated path'},null,2)+'\n',
- [`evidence/${id}/contract.md`]:`# ${title}\nThis incident belongs to the ${name} subsystem.\nThe JSON examples define observable outcomes. Prior phase contracts remain in force.\nUse the existing service/store boundary where this component initiates mutations.\n`,
+ [`evidence/${id}/contract.md`]:`# ${title}\nThis incident belongs to the ${name} subsystem.\nThe JSON examples define observable outcomes. Prior phase contracts remain in force.\n${name==='rollback'?'Canonical must equal the complete original document, including its version, metadata and opaque identifiers. Only view is migrated or downgraded; neither input nor canonical is normalized.':''}\nImplement the supported integration consumer in journey-contract.json and run tools/verify-journey.cjs for this phase.\nUse the existing service/store boundary where this component initiates mutations.\n`,
  [`evidence/${id}/trace.json`]:JSON.stringify({incident:id,entry:name,upstream:dependsOn,observed:cases(id).slice(0,2).map(r=>({input:r.input,expected:r.expected})),diagnosticLimit:8},null,2)+'\n'};
 }
 module.exports={specs,functions,reference,source,expected,cases,phaseFiles};

@@ -168,6 +168,7 @@ process.stdout.write(JSON.stringify(execute(adapter,JSON.parse(process.argv[3]))
 `};}
 
 function referenceIntegrationFiles(id){
+  const late=require('./late.cjs').specs.find(s=>s[0]===id);if(late)return {['src/'+late[1]+'-journey.ts']:require('./journeys.cjs').reference()};
   if(id==='E03')return {'src/import-service.ts':`const migrations=require('./migrations.ts');const service=require('./service.ts');
 function postImported(store:any,document:any,command:any,actor:any,clock:()=>number){
   const migrated=migrations.evaluate({document});
