@@ -97,7 +97,11 @@ async function main() {
     fs.writeFileSync(path.join(workspace, '.ai-harness', 'visual-scenarios.json'), JSON.stringify({ id: 'history', platform: 'android', captures: [{ name: 'history', mode: 'file', sourceFile: shot }] }))
 
     const handlers = {}
-    controller.apply({ on(event, handler) { handlers[event] = handler }, shellEnv: { register() {} } })
+    const sessionEventHandlers = []
+    controller.apply({ on(event, handler) {
+      if (event === 'session/event') sessionEventHandlers.push(handler)
+      handlers[event] = handler
+    }, shellEnv: { register() {} } })
     assert.equal(typeof handlers['agent/pre-step'], 'function')
     assert.equal(typeof handlers['session/event'], 'function')
     const session = {
@@ -108,7 +112,11 @@ async function main() {
     }
     const agent = { session }
     const turn = (text, turnId) => handlers['agent/pre-step']({ agent, messages: [userMessage(text)], step: 1, turn: turnId }, () => 'next')
-    const endTurn = () => handlers['session/event'](session, { type: 'turn/end', data: { reason: { kind: 'complete' } } })
+    const endTurn = async () => {
+      for (const handler of sessionEventHandlers) {
+        await handler(session, { type: 'turn/end', data: { reason: { kind: 'complete' } } })
+      }
+    }
 
     await turn('Implement the History timeline UI.', '1')
     fs.writeFileSync(path.join(workspace, 'apps', 'mobile', 'src', 'app', 'index.tsx'), 'export default function Screen(){ return <HistoryTimeline spacing={4} /> }\n')

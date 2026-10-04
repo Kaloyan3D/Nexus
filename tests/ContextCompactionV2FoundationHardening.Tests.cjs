@@ -426,7 +426,18 @@ section('H5 CONTENT-SEAL THREAT MODEL');
 {
   const squashed = (text) => String(text).replace(/\s+/g, ' ').toLowerCase();
   const archPath = path.join(repoRoot, 'docs', 'architecture', 'context-compaction-v2.md');
-  const arch = squashed(fs.readFileSync(archPath, 'utf8'));
+  const archDocument = fs.readFileSync(archPath, 'utf8');
+  // H5 specifies the checkpoint seal's threat model. Counter credential
+  // HMACs and replay/text signatures in later sections describe other
+  // mechanisms and must not be mistaken for checkpoint authenticity claims.
+  const sealSectionOf = (document) => {
+    const start = document.indexOf('### 3.13 `CheckpointContentSeal`');
+    const end = document.indexOf('\n### ', start + 1);
+    assert.ok(start >= 0 && end > start, 'checkpoint seal documentation section must exist');
+    return document.slice(start, end);
+  };
+  const sealDocument = sealSectionOf(archDocument);
+  const arch = squashed(sealDocument);
   const trustSrc = squashed(String(fs.readFileSync(path.join(repoRoot, 'config', 'ContextTrustV2.cjs'), 'utf8')).split('*').join(' '));
   for (const phrase of ['unkeyed integrity seal', 'deterministic tamper detection', 'record-integrity binding', 'does not defend against an attacker that can arbitrarily rewrite']) {
     check(arch.includes(phrase), '22 arch doc states "' + phrase + '"');
@@ -434,9 +445,16 @@ section('H5 CONTENT-SEAL THREAT MODEL');
   check(trustSrc.includes('unkeyed integrity seal') && trustSrc.includes('does not defend against an attacker that can arbitrarily rewrite'), '22 trust authority states the unkeyed-integrity threat model');
   check(!arch.includes('cryptographic authenticity'), '22 arch doc never claims cryptographic authenticity');
   const overclaimLines = (text) => String(text).split('\n').filter((line) => /signature|\bMAC\b|\bHMAC\b/i.test(line) && !/not a|NOT |out of scope|separately designed|HMAC\/key management is introduced/i.test(line));
-  check(overclaimLines(fs.readFileSync(archPath, 'utf8')).length === 0, '22 no bare signature/MAC claim in the arch doc', overclaimLines(fs.readFileSync(archPath, 'utf8')).join(' | ').slice(0, 200));
-  const authenticLines = String(fs.readFileSync(archPath, 'utf8')).split('\n').filter((line) => /authentic/i.test(line) && !/NOT/i.test(line));
-  check(authenticLines.length === 0, '22 no positive authenticity claim remains in the arch doc', authenticLines.join(' | ').slice(0, 200));
+  check(overclaimLines(sealDocument).length === 0, '22 no bare signature/MAC claim in the seal section', overclaimLines(sealDocument).join(' | ').slice(0, 200));
+  const authenticityClaims = (text) => String(text).split('\n').filter((line) => /authentic/i.test(line) && !/NOT/i.test(line));
+  const authenticLines = authenticityClaims(sealDocument);
+  check(authenticLines.length === 0, '22 no positive authenticity claim remains in the seal section', authenticLines.join(' | ').slice(0, 200));
+  check(overclaimLines(sealDocument + '\nThe checkpoint seal is a cryptographic signature.').length === 1,
+    '22 seal signature overclaim mutation is still detected');
+  check(authenticityClaims(sealDocument + '\nThe checkpoint seal guarantees authenticity.').length === 1,
+    '22 seal authenticity overclaim mutation is still detected');
+  check(sealSectionOf(archDocument + '\nA separate credential scope uses HMAC.\nReplay uses text signatures.\n') === sealDocument,
+    '22 unrelated HMAC and replay signatures do not alter the seal threat-model subject');
 }
 
 // ── H6: durability scope ───────────────────────────────────────────────────

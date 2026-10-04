@@ -92,6 +92,7 @@ $suites = @(
     [ordered]@{ name='NexusEngineContract'; script='tests/NexusEngineContract.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='EpistemicProductionHardening'; script='tests/EpistemicProductionHardening.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='AihControllerIdentity'; script='tests/AihControllerIdentity.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ControllerSessionBootstrap'; script='tests/ControllerSessionBootstrap.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='PlatformSupport'; script='tests/PlatformSupport.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='StartupProviderIsolation'; script='tests/StartupProviderIsolation.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='PowerShellPortability'; script='tests/PowerShellPortability.Tests.ps1'; executable=$powershell; kind='powershell' },
