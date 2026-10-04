@@ -444,6 +444,258 @@
         "final-coordinator"
       ],
       "t99": true
+    },
+    {
+      "id": "extension-netting",
+      "introducedBy": "E25",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the netting public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-netting",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-netting",
+        "extension-integration-netting"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-allocations",
+      "introducedBy": "E26",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the allocations public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-allocations",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-allocations",
+        "extension-integration-allocations"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-fee-schedule",
+      "introducedBy": "E27",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the fee-schedule public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-fee-schedule",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-fee-schedule",
+        "extension-integration-fee-schedule"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-scheduler",
+      "introducedBy": "E28",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the scheduler public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-scheduler",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-scheduler",
+        "extension-integration-scheduler"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-outbox",
+      "introducedBy": "E29",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the outbox public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-outbox",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-outbox",
+        "extension-integration-outbox"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-leases",
+      "introducedBy": "E30",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the leases public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-leases",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-leases",
+        "extension-integration-leases"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-statement-pages",
+      "introducedBy": "E31",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the statement-pages public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-statement-pages",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-statement-pages",
+        "extension-integration-statement-pages"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-retention",
+      "introducedBy": "E32",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the retention public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-retention",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-retention",
+        "extension-integration-retention"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-forex",
+      "introducedBy": "E33",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the forex public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-forex",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-forex",
+        "extension-integration-forex"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-reconciliation",
+      "introducedBy": "E34",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the reconciliation public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-reconciliation",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-reconciliation",
+        "extension-integration-reconciliation"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-closing-state",
+      "introducedBy": "E35",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the closing-state public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-closing-state",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-closing-state",
+        "extension-integration-closing-state"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-rollout",
+      "introducedBy": "E36",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the rollout public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-rollout",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-rollout",
+        "extension-integration-rollout"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-import-merge",
+      "introducedBy": "E37",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the import-merge public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-import-merge",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-import-merge",
+        "extension-integration-import-merge"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-change-feed",
+      "introducedBy": "E38",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the change-feed public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-change-feed",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-change-feed",
+        "extension-integration-change-feed"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-replica-prefix",
+      "introducedBy": "E39",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the replica-prefix public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-replica-prefix",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-replica-prefix",
+        "extension-integration-replica-prefix"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-access-policy",
+      "introducedBy": "E40",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the access-policy public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-access-policy",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-access-policy",
+        "extension-integration-access-policy"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-repair-plan",
+      "introducedBy": "E41",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the repair-plan public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-repair-plan",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-repair-plan",
+        "extension-integration-repair-plan"
+      ],
+      "t99": true
+    },
+    {
+      "id": "extension-release-matrix",
+      "introducedBy": "E42",
+      "category": "implementation behavior",
+      "critical": false,
+      "rule": "Implement the release-matrix public contract and preserve callable earlier consumer interfaces without input mutation.",
+      "grader": "behavior:extension-release-matrix",
+      "status": "implemented",
+      "probeIds": [
+        "extension-contract-release-matrix",
+        "extension-integration-release-matrix"
+      ],
+      "t99": true
     }
   ],
   "scopeNote": "All obligations map to executable probes; T99 reruns all prior suites plus hidden coordinator and integration probes. Candidate correctness is not official workload validity.",

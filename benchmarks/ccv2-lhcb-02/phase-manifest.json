@@ -906,6 +906,684 @@
       "promptFile": "prompts/E24-engineering.md"
     },
     {
+      "id": "E25",
+      "title": "Netting supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E24"
+      ],
+      "subsystem": "netting",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/netting.ts",
+        "evidence/E25/cases.jsonl",
+        "evidence/E25/integration.jsonl",
+        "evidence/E25/incident.json",
+        "evidence/E25/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-netting"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E25-engineering.md"
+    },
+    {
+      "id": "E26",
+      "title": "Allocations supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E25"
+      ],
+      "subsystem": "allocations",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/allocations.ts",
+        "evidence/E26/cases.jsonl",
+        "evidence/E26/integration.jsonl",
+        "evidence/E26/incident.json",
+        "evidence/E26/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-allocations"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E26-engineering.md"
+    },
+    {
+      "id": "E27",
+      "title": "Fee schedule supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E26"
+      ],
+      "subsystem": "fee-schedule",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/fee-schedule.ts",
+        "evidence/E27/cases.jsonl",
+        "evidence/E27/integration.jsonl",
+        "evidence/E27/incident.json",
+        "evidence/E27/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-fee-schedule"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E27-engineering.md"
+    },
+    {
+      "id": "E28",
+      "title": "Scheduler supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E27"
+      ],
+      "subsystem": "scheduler",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/scheduler.ts",
+        "evidence/E28/cases.jsonl",
+        "evidence/E28/integration.jsonl",
+        "evidence/E28/incident.json",
+        "evidence/E28/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-scheduler"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E28-engineering.md"
+    },
+    {
+      "id": "E29",
+      "title": "Outbox supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E28"
+      ],
+      "subsystem": "outbox",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/outbox.ts",
+        "evidence/E29/cases.jsonl",
+        "evidence/E29/integration.jsonl",
+        "evidence/E29/incident.json",
+        "evidence/E29/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-outbox"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E29-engineering.md"
+    },
+    {
+      "id": "E30",
+      "title": "Leases supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E29"
+      ],
+      "subsystem": "leases",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/leases.ts",
+        "evidence/E30/cases.jsonl",
+        "evidence/E30/integration.jsonl",
+        "evidence/E30/incident.json",
+        "evidence/E30/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-leases"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E30-engineering.md"
+    },
+    {
+      "id": "E31",
+      "title": "Statement pages supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E30",
+        "E25"
+      ],
+      "subsystem": "statement-pages",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/statement-pages.ts",
+        "evidence/E31/cases.jsonl",
+        "evidence/E31/integration.jsonl",
+        "evidence/E31/incident.json",
+        "evidence/E31/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-statement-pages"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E31-engineering.md"
+    },
+    {
+      "id": "E32",
+      "title": "Retention supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E31",
+        "E26"
+      ],
+      "subsystem": "retention",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/retention.ts",
+        "evidence/E32/cases.jsonl",
+        "evidence/E32/integration.jsonl",
+        "evidence/E32/incident.json",
+        "evidence/E32/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-retention"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E32-engineering.md"
+    },
+    {
+      "id": "E33",
+      "title": "Forex supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E32",
+        "E27"
+      ],
+      "subsystem": "forex",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/forex.ts",
+        "evidence/E33/cases.jsonl",
+        "evidence/E33/integration.jsonl",
+        "evidence/E33/incident.json",
+        "evidence/E33/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-forex"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E33-engineering.md"
+    },
+    {
+      "id": "E34",
+      "title": "Reconciliation supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E33",
+        "E28"
+      ],
+      "subsystem": "reconciliation",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/reconciliation.ts",
+        "evidence/E34/cases.jsonl",
+        "evidence/E34/integration.jsonl",
+        "evidence/E34/incident.json",
+        "evidence/E34/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-reconciliation"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E34-engineering.md"
+    },
+    {
+      "id": "E35",
+      "title": "Closing state supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E34",
+        "E29"
+      ],
+      "subsystem": "closing-state",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/closing-state.ts",
+        "evidence/E35/cases.jsonl",
+        "evidence/E35/integration.jsonl",
+        "evidence/E35/incident.json",
+        "evidence/E35/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-closing-state"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E35-engineering.md"
+    },
+    {
+      "id": "E36",
+      "title": "Rollout supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E35",
+        "E30"
+      ],
+      "subsystem": "rollout",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/rollout.ts",
+        "evidence/E36/cases.jsonl",
+        "evidence/E36/integration.jsonl",
+        "evidence/E36/incident.json",
+        "evidence/E36/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-rollout"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E36-engineering.md"
+    },
+    {
+      "id": "E37",
+      "title": "Import merge supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E36",
+        "E31"
+      ],
+      "subsystem": "import-merge",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/import-merge.ts",
+        "evidence/E37/cases.jsonl",
+        "evidence/E37/integration.jsonl",
+        "evidence/E37/incident.json",
+        "evidence/E37/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-import-merge"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E37-engineering.md"
+    },
+    {
+      "id": "E38",
+      "title": "Change feed supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E37",
+        "E32"
+      ],
+      "subsystem": "change-feed",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/change-feed.ts",
+        "evidence/E38/cases.jsonl",
+        "evidence/E38/integration.jsonl",
+        "evidence/E38/incident.json",
+        "evidence/E38/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-change-feed"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E38-engineering.md"
+    },
+    {
+      "id": "E39",
+      "title": "Replica prefix supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E38",
+        "E33"
+      ],
+      "subsystem": "replica-prefix",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/replica-prefix.ts",
+        "evidence/E39/cases.jsonl",
+        "evidence/E39/integration.jsonl",
+        "evidence/E39/incident.json",
+        "evidence/E39/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-replica-prefix"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E39-engineering.md"
+    },
+    {
+      "id": "E40",
+      "title": "Access policy supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E39",
+        "E34"
+      ],
+      "subsystem": "access-policy",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/access-policy.ts",
+        "evidence/E40/cases.jsonl",
+        "evidence/E40/integration.jsonl",
+        "evidence/E40/incident.json",
+        "evidence/E40/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-access-policy"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E40-engineering.md"
+    },
+    {
+      "id": "E41",
+      "title": "Repair plan supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E40",
+        "E35"
+      ],
+      "subsystem": "repair-plan",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/repair-plan.ts",
+        "evidence/E41/cases.jsonl",
+        "evidence/E41/integration.jsonl",
+        "evidence/E41/incident.json",
+        "evidence/E41/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-repair-plan"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E41-engineering.md"
+    },
+    {
+      "id": "E42",
+      "title": "Release matrix supported consumer",
+      "dependsOn": [
+        "E01",
+        "E02",
+        "E05",
+        "E16",
+        "E41",
+        "E36"
+      ],
+      "subsystem": "release-matrix",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/release-matrix.ts",
+        "evidence/E42/cases.jsonl",
+        "evidence/E42/integration.jsonl",
+        "evidence/E42/incident.json",
+        "evidence/E42/contract.md"
+      ],
+      "acceptance": "trusted previous/current cases + independent probes + durable inspections + immutable evidence",
+      "dependencyClaim": "Callable earlier feature interfaces and distant integrations are independently exercised.",
+      "obligations": [
+        "extension-release-matrix"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E42-engineering.md"
+    },
+    {
       "id": "T99",
       "title": "Integrated release candidate",
       "dependsOn": [
@@ -932,7 +1610,25 @@
         "E21",
         "E22",
         "E23",
-        "E24"
+        "E24",
+        "E25",
+        "E26",
+        "E27",
+        "E28",
+        "E29",
+        "E30",
+        "E31",
+        "E32",
+        "E33",
+        "E34",
+        "E35",
+        "E36",
+        "E37",
+        "E38",
+        "E39",
+        "E40",
+        "E41",
+        "E42"
       ],
       "status": "implemented",
       "mode": "implementation",

@@ -11,6 +11,7 @@ function grade(dir,ids){
   try{assert.equal(fs.readFileSync(file,'utf8'),fixture.phaseFiles(phase)['evidence/'+phase+'/cases.jsonl']);}catch{failures++;}
   for(const row of cases){try{const result=sandbox.evaluate(fixture.modules[phase],row.input);assert.deepEqual(result.output,row.expected);assert.deepEqual(result.input,row.input);}catch{failures++;}}
   const journey=require('../fixture/journeys.cjs'),name=fixture.modules[phase];for(const input of journey.inputs(phase)){try{const result=sandbox.evaluate(name+'-journey',input);assert.deepEqual(result.output,journey.expected(input));assert.deepEqual(result.input,input);}catch{failures++;}}
+  const extension=require('../fixture/extensions.cjs');if(extension.specs.some(s=>s[0]===phase))for(const row of extension.integrations(phase)){try{const result=require('./extension-probes.cjs').integrate(sandbox,name,row.input);assert.deepEqual(result.output,row.expected);assert.deepEqual(result.input,row.input);}catch{failures++;}}
   rows.push({phase,pass:failures===0,cases:cases.length});
  }
  const holdout=require('./probes.cjs').grade(dir,ids);rows.push({phase:'holdout',pass:holdout.pass,probes:holdout.probes});return rows;
