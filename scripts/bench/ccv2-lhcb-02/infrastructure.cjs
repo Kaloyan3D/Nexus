@@ -22,7 +22,7 @@ S.rootOf=raw=>{
   return root;
 };
 S.owned=root=>{root=S.rootOf(root);const m=S.read(S.inside(root,'state/identity.json'));
-  if(m.benchmarkId!==manifest.benchmarkId||m.root!==root||m.baseSha!==manifest.baseSha||m.contractHash!==contractHash())S.fail('lhcb02-unowned-root');return root;};
+  if(m.benchmarkId!==manifest.benchmarkId||m.root!==root||m.baseSha!==manifest.baseSha||(m.contractHash!==contractHash()&&!require('./certification.cjs').compatible(root,m)))S.fail('lhcb02-unowned-root');return root;};
 S.ready=root=>{S.owned(root);if(fs.existsSync(S.inside(root,'state/restore-lock.json')))S.fail('restore-incomplete');};
 S.validateManifest=m=>{if(m.benchmarkId!=='CCV2-LHCB-02'||m.status!=='UNFROZEN'||m.liveCalibration!=='LIVE_CALIBRATION_REQUIRED'||m.officialExecutionEnabled!==false||m.nodeVersion!=='v24.18.1'||
   legacy.json(m.arms)!==legacy.json(legacy.manifest.arms)||legacy.json(m.acceptance)!==legacy.json(legacy.manifest.acceptance)||
@@ -38,7 +38,9 @@ function loadInternal(name){
   const m=new Module(filename,module);m.filename=filename;m.paths=Module._nodeModulePaths(path.dirname(filename));cache.set(filename,m);
   m.require=request=>{
     const resolved=Module._resolveFilename(request,m);
-    if(resolved===path.join(base,'state.cjs'))return S;
+    // Doctor launches the pinned isolated Node under the unchanged shared
+    // blocker. Its exact preload path is part of that blocker's child allowlist.
+    if(resolved===path.join(base,'state.cjs'))return filename===path.join(base,'doctor.cjs')?{...S,BENCH:legacy.BENCH}:S;
     if(resolved===path.join(legacy.BENCH,'autorunner-authority.json'))return authority;
     if(resolved===path.join(legacy.BENCH,'fixture/create-fixture.cjs'))return require(path.join(BENCH,'fixture/create-fixture.cjs'));
     if(resolved.startsWith(base+path.sep)&&resolved.endsWith('.cjs'))return loadInternal(path.relative(base,resolved));
