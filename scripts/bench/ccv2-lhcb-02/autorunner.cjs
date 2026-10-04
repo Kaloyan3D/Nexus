@@ -20,7 +20,17 @@ function release(root,id){
   receipt.complete=true;S.write(receiptFile,receipt);return receipt.hash;
 }
 function protectedHashes(root){
-  const out={};for(const [p,h] of Object.entries(S.inventory(S.inside(root,'workspace'))))if(!p.startsWith('src/')&&!p.startsWith('.ai-harness/')&&!p.startsWith('.git/'))out[p]=h.hash;
+  const workspace=S.inside(root,'workspace'),out={};S.noLinks(workspace);
+  // Runtime-owned files were already outside the immutable evidence contract.
+  // Exclude that directory before traversal: its short-lived pressure locks may
+  // disappear between readdir and read even after durable turn completion.
+  for(const entry of S.fs.readdirSync(workspace,{withFileTypes:true}).sort((a,b)=>a.name.localeCompare(b.name,'en'))){
+    if(entry.isSymbolicLink()||!entry.isDirectory()&&!entry.isFile())S.fail('unsupported-file');
+    if(entry.name==='.ai-harness'&&entry.isDirectory()||S.secretName(entry.name))continue;
+    const full=S.inside(workspace,entry.name);let files;
+    if(entry.isDirectory())files=S.inventory(full,entry.name+'/');else{const bytes=S.fs.readFileSync(full);S.safeBytes(bytes);files={[entry.name]:{hash:S.hash(bytes)}};}
+    for(const [p,h] of Object.entries(files))if(!p.startsWith('src/')&&!p.startsWith('.git/'))out[p]=h.hash;
+  }
   return out;
 }
 function acceptance(root,ids){

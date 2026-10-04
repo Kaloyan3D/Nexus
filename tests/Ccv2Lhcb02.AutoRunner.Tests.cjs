@@ -186,3 +186,19 @@ test('native projection applies frozen no-replay transform to historical reasoni
  b.events.find(e=>e.type==='assistant/message').data.message.content.push({type:'reasoning',text:'private reasoning',signature:'opaque'});
  const rows=T.collectRequests(s.root,b,s.runner().journal.stages[0]);assert(rows.every(r=>r.requestHash&&r.canonicalRequestByteCount>0));
 });
+
+test('protected evidence inventory never opens transient runtime-owned pressure locks',()=>{
+ const s=setup(),workspace=S.path.join(s.root,'workspace'),lock=S.path.join(workspace,'.ai-harness/runs/TASK-0001/context-pressure.lock');S.fs.mkdirSync(S.path.dirname(lock),{recursive:true});S.fs.writeFileSync(lock,'ephemeral runtime lock');
+ const read=S.fs.readFileSync;let observed=0;S.fs.readFileSync=function(file,...args){if(String(file)===lock){observed++;S.fs.unlinkSync(lock);}return read.call(this,file,...args);};
+ try{const hashes=require('../scripts/bench/ccv2-lhcb-02/autorunner.cjs').protectedHashes(s.root);assert.equal(observed,0);assert.equal(hashes['README.md'],S.hash(read.call(S.fs,S.path.join(workspace,'README.md'))));assert(!Object.keys(hashes).some(p=>p.startsWith('.ai-harness/')));}finally{S.fs.readFileSync=read;}
+});
+test('protected evidence inventory still fails closed on vanished fixture files and runtime-root links',()=>{
+ const s=setup(),workspace=S.path.join(s.root,'workspace'),file=S.path.join(workspace,'README.md'),read=S.fs.readFileSync;
+ S.fs.readFileSync=function(target,...args){if(String(target)===file)S.fs.unlinkSync(file);return read.call(this,target,...args);};try{assert.throws(()=>require('../scripts/bench/ccv2-lhcb-02/autorunner.cjs').protectedHashes(s.root),e=>e.code==='ENOENT');}finally{S.fs.readFileSync=read;}
+ const other=setup();S.fs.symlinkSync(tmp,S.path.join(other.root,'workspace/.ai-harness'));assert.throws(()=>require('../scripts/bench/ccv2-lhcb-02/autorunner.cjs').protectedHashes(other.root),/unsupported-file|symlink/);
+});
+test('protected inventory retains root-file secret guards and ordinary harness-named files',()=>{
+ const s=setup(),workspace=S.path.join(s.root,'workspace'),hashes=require('../scripts/bench/ccv2-lhcb-02/autorunner.cjs').protectedHashes;
+ S.fs.writeFileSync(S.path.join(workspace,'.ai-harness'),'ordinary file');assert.equal(hashes(s.root)['.ai-harness'],S.hash('ordinary file'));
+ S.fs.writeFileSync(S.path.join(workspace,'README.md'),'password="fixture-unredacted-marker"');assert.throws(()=>hashes(s.root),/secret-content/);
+});
