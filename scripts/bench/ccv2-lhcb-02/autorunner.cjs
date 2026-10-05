@@ -34,9 +34,9 @@ function protectedHashes(root){
   return out;
 }
 function acceptance(root,ids){
-  const result=require('node:child_process').spawnSync(process.execPath,['--require',S.path.join(S.BENCH,'grader/offline.cjs'),S.path.join(S.BENCH,'grader/grade.cjs'),S.inside(root,'workspace'),JSON.stringify(ids)],{encoding:'utf8',timeout:30000,maxBuffer:1024*1024,env:{PATH:process.env.PATH,NODE_OPTIONS:''}});
+  const result=require('node:child_process').spawnSync(process.execPath,['--require',S.path.join(S.BENCH,'grader/offline.cjs'),S.path.join(S.BENCH,'grader/grade.cjs'),S.inside(root,'workspace'),JSON.stringify(ids)],{encoding:'utf8',timeout:300000,maxBuffer:1024*1024,env:{PATH:process.env.PATH,NODE_OPTIONS:''}});
   let rows;try{rows=JSON.parse(result.stdout.trim());}catch{}
-  if(result.status!==0||!Array.isArray(rows)||rows.length!==ids.length+1||rows.some((r,i)=>r.phase!==(ids[i]??'holdout')||typeof r.pass!=='boolean'))return [{phase:'grading-failure',pass:false}];
+  if(result.status!==0||!Array.isArray(rows)||rows.length!==ids.length+1||rows.some((r,i)=>r.phase!==(ids[i]??'holdout')||typeof r.pass!=='boolean'))return [{phase:'grading-failure',pass:false,exitCode:result.status??null,signal:result.signal??null,errorCode:result.error?.code??null}];
   return rows;
 }
 

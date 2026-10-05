@@ -34,7 +34,7 @@ function decisions(root,start){
  const file=S.inside(root,'nexus-root/data/logs/aih-controller.log');if(!S.fs.existsSync(file))return [];
  return S.fs.readFileSync(file).subarray(start).toString('utf8').split('\n').filter(Boolean).map(JSON.parse).filter(r=>r.event==='ccv2-opencode-active-decided').map(r=>Object.fromEntries(['projectionMode','compilerExecutions','fallbackReason','activationDecision','activationReason','activationBasis','activationTokens','pressureTokens','authorityHealth','policyMode','requestSeq'].map(k=>[k,r[k]??null])));
 }
-function finalGrade(root){const r=cp.spawnSync(process.execPath,['--require',S.path.join(S.BENCH,'grader/offline.cjs'),S.path.join(S.BENCH,'grader/final.cjs'),S.inside(root,'workspace')],{encoding:'utf8',timeout:60000,maxBuffer:1024*1024,env:{PATH:process.env.PATH,NODE_OPTIONS:''}});let g;try{g=JSON.parse(r.stdout);}catch{}if(r.status!==0||g?.kind!=='OFFLINE_CANDIDATE_CORRECTNESS'||typeof g.pass!=='boolean')S.fail('lhcb02-official-grader-unavailable');return g;}
+function finalGrade(root){const r=cp.spawnSync(process.execPath,['--require',S.path.join(S.BENCH,'grader/offline.cjs'),S.path.join(S.BENCH,'grader/final.cjs'),S.inside(root,'workspace')],{encoding:'utf8',timeout:300000,maxBuffer:1024*1024,env:{PATH:process.env.PATH,NODE_OPTIONS:''}});let g;try{g=JSON.parse(r.stdout);}catch{}if(r.status!==0||g?.kind!=='OFFLINE_CANDIDATE_CORRECTNESS'||typeof g.pass!=='boolean')S.fail('lhcb02-official-grader-unavailable');return g;}
 function compare(results){
  const a=results.find(r=>r.arm==='native'),comparisons={};
  for(const arm of ['production','forced']){const b=results.find(r=>r.arm===arm),available=a?.valid===true&&b?.valid===true&&a.metrics.providerInputTokensTotal>0&&a.metrics.steps>0;

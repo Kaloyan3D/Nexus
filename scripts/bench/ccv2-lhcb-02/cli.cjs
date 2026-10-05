@@ -14,7 +14,7 @@ async function main(args){
   if(['calibrate-fresh','bootstrap-probe'].includes(command)&&S.fs.existsSync(root))S.fail('lhcb02-calibration-root-exists');
   if(command==='reconstruct')return require('./candidate.cjs').reconstruct(root);
   if(command==='grade-candidate'){
-    const result=require('node:child_process').spawnSync(process.execPath,['--require',S.path.join(S.BENCH,'grader/offline.cjs'),S.path.join(S.BENCH,'grader/final.cjs'),root],{encoding:'utf8',timeout:30000,maxBuffer:1024*1024,env:{PATH:process.env.PATH,NODE_OPTIONS:''}});
+    const result=require('node:child_process').spawnSync(process.execPath,['--require',S.path.join(S.BENCH,'grader/offline.cjs'),S.path.join(S.BENCH,'grader/final.cjs'),root],{encoding:'utf8',timeout:300000,maxBuffer:1024*1024,env:{PATH:process.env.PATH,NODE_OPTIONS:''}});
     let report;try{report=JSON.parse(result.stdout);}catch{}
     return result.status===0&&report?.kind==='OFFLINE_CANDIDATE_CORRECTNESS'&&typeof report.pass==='boolean'?report:{status:'UNFROZEN',calibration:'LIVE_CALIBRATION_REQUIRED',kind:'OFFLINE_CANDIDATE_CORRECTNESS',pass:false,tests:'UNAVAILABLE',task:'UNAVAILABLE',reason:'trusted-grader-unavailable',officialBenefitEligible:false};
   }

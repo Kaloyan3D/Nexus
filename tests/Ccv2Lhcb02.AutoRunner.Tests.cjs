@@ -6,6 +6,13 @@ const fixture=require('../benchmarks/ccv2-lhcb-02/fixture/create-fixture.cjs');
 const {CalibrationRunner}=require('../scripts/bench/ccv2-lhcb-02/autorunner.cjs');
 const Session=load('session'),T=require('../scripts/bench/ccv2-lhcb-02/telemetry.cjs');
 const tmp=S.fs.mkdtempSync(S.path.join(S.os.tmpdir(),'lhcb02-runner-'));let serial=0;
+test('cumulative grading can finish beyond the former deadline without weakening results',()=>{
+ const cp=require('node:child_process'),spawn=cp.spawnSync,ids=['E01','E02'],rows=[...ids,'holdout'].map(phase=>({phase,pass:true}));
+ try{cp.spawnSync=(_node,_args,options)=>{assert.equal(options.env.OPENCODE_API_KEY,undefined);return options.timeout<39201?{status:null,stdout:'',signal:'SIGTERM',error:{code:'ETIMEDOUT'}}:{status:0,stdout:JSON.stringify(rows)};};assert.deepEqual(require('../scripts/bench/ccv2-lhcb-02/autorunner.cjs').acceptance(tmp,ids),rows);}finally{cp.spawnSync=spawn;}
+});
+test('cumulative grading preserves timeout diagnostics and fails closed',()=>{
+ const cp=require('node:child_process'),spawn=cp.spawnSync;try{cp.spawnSync=()=>({status:null,stdout:'',signal:'SIGTERM',error:{code:'ETIMEDOUT'}});assert.deepEqual(require('../scripts/bench/ccv2-lhcb-02/autorunner.cjs').acceptance(tmp,['E01']),[{phase:'grading-failure',pass:false,exitCode:null,signal:'SIGTERM',errorCode:'ETIMEDOUT'}]);}finally{cp.spawnSync=spawn;}
+});
 after(()=>{assert.equal(global.lhcbOfflineAudit.attempts(),0);S.fs.rmSync(tmp,{recursive:true,force:true});});
 function setup(){
  const root=S.path.join(tmp,'root-'+(++serial));for(const p of ['state','reports','workspace','nexus-root/config','nexus-root/app','nexus-root/data/sessions'])S.fs.mkdirSync(S.path.join(root,p),{recursive:true});
