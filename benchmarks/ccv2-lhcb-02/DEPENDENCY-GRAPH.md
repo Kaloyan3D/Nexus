@@ -1,6 +1,6 @@
 # Candidate dependency graph
 
-UNFROZEN / LIVE_CALIBRATION_REQUIRED.
+The frozen candidate contains T00, 45 engineering phases and T99. Calibration validates the unchanged E01–E06 slice; eligible official comparisons additionally require a completed Native workflow, valid durable telemetry and an actual CP-500 snapshot.
 
 ```mermaid
 graph TD
@@ -78,6 +78,131 @@ graph TD
   E18 --> E24
   E20 --> E24
   E23 --> E24
+  E01 --> E25
+  E02 --> E25
+  E05 --> E25
+  E16 --> E25
+  E24 --> E25
+  E01 --> E26
+  E02 --> E26
+  E05 --> E26
+  E16 --> E26
+  E25 --> E26
+  E01 --> E27
+  E02 --> E27
+  E05 --> E27
+  E16 --> E27
+  E26 --> E27
+  E01 --> E28
+  E02 --> E28
+  E05 --> E28
+  E16 --> E28
+  E27 --> E28
+  E01 --> E29
+  E02 --> E29
+  E05 --> E29
+  E16 --> E29
+  E28 --> E29
+  E01 --> E30
+  E02 --> E30
+  E05 --> E30
+  E16 --> E30
+  E29 --> E30
+  E01 --> E31
+  E02 --> E31
+  E05 --> E31
+  E16 --> E31
+  E30 --> E31
+  E25 --> E31
+  E01 --> E32
+  E02 --> E32
+  E05 --> E32
+  E16 --> E32
+  E31 --> E32
+  E26 --> E32
+  E01 --> E33
+  E02 --> E33
+  E05 --> E33
+  E16 --> E33
+  E32 --> E33
+  E27 --> E33
+  E01 --> E34
+  E02 --> E34
+  E05 --> E34
+  E16 --> E34
+  E33 --> E34
+  E28 --> E34
+  E01 --> E35
+  E02 --> E35
+  E05 --> E35
+  E16 --> E35
+  E34 --> E35
+  E29 --> E35
+  E01 --> E36
+  E02 --> E36
+  E05 --> E36
+  E16 --> E36
+  E35 --> E36
+  E30 --> E36
+  E01 --> E37
+  E02 --> E37
+  E05 --> E37
+  E16 --> E37
+  E36 --> E37
+  E31 --> E37
+  E01 --> E38
+  E02 --> E38
+  E05 --> E38
+  E16 --> E38
+  E37 --> E38
+  E32 --> E38
+  E01 --> E39
+  E02 --> E39
+  E05 --> E39
+  E16 --> E39
+  E38 --> E39
+  E33 --> E39
+  E01 --> E40
+  E02 --> E40
+  E05 --> E40
+  E16 --> E40
+  E39 --> E40
+  E34 --> E40
+  E01 --> E41
+  E02 --> E41
+  E05 --> E41
+  E16 --> E41
+  E40 --> E41
+  E35 --> E41
+  E01 --> E42
+  E02 --> E42
+  E05 --> E42
+  E16 --> E42
+  E41 --> E42
+  E36 --> E42
+  E02 --> E43
+  E03 --> E43
+  E12 --> E43
+  E15 --> E43
+  E23 --> E43
+  E26 --> E43
+  E27 --> E43
+  E42 --> E43
+  E01 --> E44
+  E03 --> E44
+  E12 --> E44
+  E15 --> E44
+  E23 --> E44
+  E43 --> E44
+  E03 --> E45
+  E06 --> E45
+  E13 --> E45
+  E16 --> E45
+  E18 --> E45
+  E19 --> E45
+  E35 --> E45
+  E43 --> E45
+  E44 --> E45
   E01 --> T99
   E02 --> T99
   E03 --> T99
@@ -102,6 +227,31 @@ graph TD
   E22 --> T99
   E23 --> T99
   E24 --> T99
+  E25 --> T99
+  E26 --> T99
+  E27 --> T99
+  E28 --> T99
+  E29 --> T99
+  E30 --> T99
+  E31 --> T99
+  E32 --> T99
+  E33 --> T99
+  E34 --> T99
+  E35 --> T99
+  E36 --> T99
+  E37 --> T99
+  E38 --> T99
+  E39 --> T99
+  E40 --> T99
+  E41 --> T99
+  E42 --> T99
+  E43 --> T99
+  E44 --> T99
+  E45 --> T99
 ```
 
-All 26 nodes have deterministic executable artifacts. Edges express consumed contract/data provenance; concrete consumer paths are verified separately by migration/API, recovery, retry/service, gateway and atomic-store probes. T99 runs all prior suites and integrates early, middle and late consumers. Graph validity is not proof of useful pressure or of an independently necessary effect for every edge.
+All 47 nodes have deterministic executable artifacts. E07–E24 exercise actual ledger journeys across service, persistence, replay and authorization. E25–E42 introduce distinct financial and state-machine algorithms; their integration callers evaluate domain, migration, authorization and rollback results alongside the previous feature and a feature six stages earlier. T99 reruns every prior suite and the integrated release coordinator.
+
+Edges describe consumed interfaces or contract provenance. Independent caller probes establish concrete interactions; graph validity alone does not establish an independently necessary causal effect for every edge or useful context pressure.
+
+E43–E45 add actual atomic settlement, compensating reversal and statement closure with separate canonical state observations. They retain all previous50 obligations and19 critical requirements; three noncritical workflow obligations are required uniformly. Public and withheld callers verify actual writes/replays/revocations/failed preparation, original receipt preservation and read-only mixed-reader closure. The extension requires fresh live calibration and a new complete Native run; pressure is not inferred from source size.

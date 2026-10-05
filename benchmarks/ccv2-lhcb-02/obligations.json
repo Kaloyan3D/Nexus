@@ -696,6 +696,48 @@
         "extension-integration-release-matrix"
       ],
       "t99": true
+    },
+    {
+      "id": "workflow-settlement",
+      "introducedBy": "E43",
+      "category": "persistence invariants",
+      "critical": false,
+      "rule": "Preserve the settlement plan and actual canonical store execution, response identity, tenant denial and immutable original inputs.",
+      "grader": "behavior:workflow-settlement",
+      "status": "implemented",
+      "probeIds": [
+        "workflow-contract-settlement",
+        "workflow-execution-settlement"
+      ],
+      "t99": true
+    },
+    {
+      "id": "workflow-reversal",
+      "introducedBy": "E44",
+      "category": "persistence invariants",
+      "critical": false,
+      "rule": "Preserve the reversal plan and actual canonical store execution, response identity, tenant denial and immutable original inputs.",
+      "grader": "behavior:workflow-reversal",
+      "status": "implemented",
+      "probeIds": [
+        "workflow-contract-reversal",
+        "workflow-execution-reversal"
+      ],
+      "t99": true
+    },
+    {
+      "id": "workflow-statement-close",
+      "introducedBy": "E45",
+      "category": "persistence invariants",
+      "critical": false,
+      "rule": "Preserve the statement-close plan and actual canonical store execution, response identity, tenant denial and immutable original inputs.",
+      "grader": "behavior:workflow-statement-close",
+      "status": "implemented",
+      "probeIds": [
+        "workflow-contract-statement-close",
+        "workflow-execution-statement-close"
+      ],
+      "t99": true
     }
   ],
   "scopeNote": "All obligations map to executable probes; T99 reruns all prior suites plus hidden coordinator and integration probes. Candidate correctness is not official workload validity.",

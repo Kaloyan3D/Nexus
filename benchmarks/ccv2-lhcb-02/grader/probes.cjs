@@ -71,6 +71,7 @@ function grade(dir,ids){
   });
   results.push(...require('./late-probes.cjs').grade(dir,ids).probes);
   results.push(...require('./extension-probes.cjs').grade(dir,ids).probes);
+  results.push(...require('./workflow-probes.cjs').grade(dir,ids).probes);
   return {pass:results.length>0&&results.every(x=>x.pass),probes:results};
 }
 if(require.main===module)process.stdout.write(JSON.stringify(grade(path.resolve(process.argv[2]),JSON.parse(process.argv[3])))+'\n');

@@ -1584,6 +1584,125 @@
       "promptFile": "prompts/E42-engineering.md"
     },
     {
+      "id": "E43",
+      "title": "Atomic fee-bearing merchant settlement",
+      "dependsOn": [
+        "E02",
+        "E03",
+        "E12",
+        "E15",
+        "E23",
+        "E26",
+        "E27",
+        "E42"
+      ],
+      "subsystem": "settlement",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/settlement.ts",
+        "evidence/E43/cases.jsonl",
+        "evidence/E43/execution.jsonl",
+        "evidence/E43/contract.md",
+        "evidence/E43/incident.json"
+      ],
+      "acceptance": "trusted public/withheld plans and canonical store execution, immutable evidence and actual inspections",
+      "dependencyClaim": "Executable workflow calls existing batch/store and earlier business consumers; actual ledger state independently observed.",
+      "obligations": [
+        "workflow-settlement"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E43-engineering.md"
+    },
+    {
+      "id": "E44",
+      "title": "Durable compensating reversal",
+      "dependsOn": [
+        "E01",
+        "E03",
+        "E12",
+        "E15",
+        "E23",
+        "E43"
+      ],
+      "subsystem": "reversal",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/reversal.ts",
+        "evidence/E44/cases.jsonl",
+        "evidence/E44/execution.jsonl",
+        "evidence/E44/contract.md",
+        "evidence/E44/incident.json"
+      ],
+      "acceptance": "trusted public/withheld plans and canonical store execution, immutable evidence and actual inspections",
+      "dependencyClaim": "Executable workflow calls existing batch/store and earlier business consumers; actual ledger state independently observed.",
+      "obligations": [
+        "workflow-reversal"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E44-engineering.md"
+    },
+    {
+      "id": "E45",
+      "title": "Reconciled mixed-reader statement closure",
+      "dependsOn": [
+        "E03",
+        "E06",
+        "E13",
+        "E16",
+        "E18",
+        "E19",
+        "E35",
+        "E43",
+        "E44"
+      ],
+      "subsystem": "statement-close",
+      "status": "implemented",
+      "mode": "implementation",
+      "evidence": [
+        "src/statement-close.ts",
+        "evidence/E45/cases.jsonl",
+        "evidence/E45/execution.jsonl",
+        "evidence/E45/contract.md",
+        "evidence/E45/incident.json"
+      ],
+      "acceptance": "trusted public/withheld plans and canonical store execution, immutable evidence and actual inspections",
+      "dependencyClaim": "Executable workflow calls existing batch/store and earlier business consumers; actual ledger state independently observed.",
+      "obligations": [
+        "workflow-statement-close"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E45-engineering.md"
+    },
+    {
       "id": "T99",
       "title": "Integrated release candidate",
       "dependsOn": [
@@ -1628,7 +1747,10 @@
         "E39",
         "E40",
         "E41",
-        "E42"
+        "E42",
+        "E43",
+        "E44",
+        "E45"
       ],
       "status": "implemented",
       "mode": "implementation",
