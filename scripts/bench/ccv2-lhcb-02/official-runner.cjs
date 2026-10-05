@@ -54,13 +54,16 @@ class OfficialRunner{
   this.preflight('native');const adapter=B.createAdapter(this.root),sid='session-'+S.crypto.randomUUID();await adapter.create(sid);this.journal.identity=B.exact(await adapter.prepare(sid),sid);await adapter.verify(this.journal.identity);
   const dir=S.inside(this.root,'nexus-root/data/sessions'),files=[];for(const w of S.fs.readdirSync(dir))for(const leaf of ['session.jsonl','session.jsonl.zstd']){const rel='nexus-root/data/sessions/'+w+'/'+sid+'/'+leaf;if(S.fs.existsSync(S.inside(this.root,rel)))files.push(rel);}if(files.length!==1)S.fail('runner-new-session-artifact-ambiguous');Session.bind(this.root,files[0]);if(!B.blankEvents(this.binding().events))S.fail('lhcb02-official-new-session');this.save();await this.transport.start();await this.transport.resume(sid);
  }
+ async waitCompletion(b,r){
+  const now=this.options.now||Date.now,pause=this.options.pause||(()=>new Promise(resolve=>setTimeout(resolve,250)));const until=now()+(this.options.turnTimeoutMs??900000);
+  for(;;){let status;try{status=await this.transport.status(b.sessionId);}catch(e){if(e.message!=='lhcb-runner-rpc-endpoint-unavailable')throw e;(r.statusObservationFailures??=[]).push({at:now(),code:e.message});}if(status&&(status.sessionId!==b.sessionId||status.cwd!==S.inside(this.root,'workspace')))S.fail('runner-status-malformed');if(status?.status==='idle'&&await this.transport.flush(b.sessionId)===true){const after=this.binding(),done=completion(after.events,r);if(done){routeEvidence(after,this.journal.identity,true);if(S.hash(S.json(after.events.slice(0,r.startSeq)))!==r.prefixHash)S.fail('runner-session-prefix-drift');Object.assign(r,done,{phase:'FLUSHED',durableEventsHash:S.hash(S.json(after.events.slice(0,done.endSeq+1)))});break;}}
+   if(now()>until)S.fail('runner-durable-completion-timeout');await pause();
+  }
+ }
  async stage(id,records,arm='native'){
   this.preflight(arm);const set=release(this.root,id),b=this.binding(),bank=prompt(id),r={promptId:id,promptHash:bank.hash,rpcId:'lhcb-'+S.crypto.randomUUID(),...identity(b),startSeq:b.events.length,prefixHash:S.hash(S.json(b.events)),evidenceSetHash:set,protectedHashes:protectedHashes(this.root),phase:'SUBMITTED',submitAt:Date.now()};records.push(r);this.save();
   await this.transport.submit(b.sessionId,bank.text,r.rpcId);
-  const until=Date.now()+(this.options.turnTimeoutMs??900000);
-  for(;;){const status=await this.transport.status(b.sessionId);if(status.sessionId!==b.sessionId||status.cwd!==S.inside(this.root,'workspace'))S.fail('runner-status-malformed');if(status.status==='idle'&&await this.transport.flush(b.sessionId)===true){const after=this.binding(),done=completion(after.events,r);if(done){routeEvidence(after,this.journal.identity,true);if(S.hash(S.json(after.events.slice(0,r.startSeq)))!==r.prefixHash)S.fail('runner-session-prefix-drift');Object.assign(r,done,{phase:'FLUSHED',durableEventsHash:S.hash(S.json(after.events.slice(0,done.endSeq+1)))});break;}}
-   if(Date.now()>until)S.fail('runner-durable-completion-timeout');await new Promise(resolve=>setTimeout(resolve,250));
-  }
+  await this.waitCompletion(b,r);
   if(!same(protectedHashes(this.root),r.protectedHashes))S.fail('lhcb02-evidence-modified');
   const cumulative=ids.slice(1,ids.indexOf(id)+1);r.acceptanceResults=id==='T00'?[]:acceptance(this.root,cumulative);r.acceptance=id==='T00'||r.acceptanceResults.length===cumulative.length+1&&r.acceptanceResults.every(x=>x.pass);
   r.pressure=Session.currentPressure(this.root).pressureTokens;const rows=T.collectRequests(this.root,this.binding(true),r);S.write(S.inside(this.root,'reports/stage-'+(arm||'accumulation')+'-'+id+'.json'),{record:r,requests:rows});this.save();return r;

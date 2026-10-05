@@ -49,3 +49,22 @@ test('finite workload completes after failed stage quality and diagnostic T99 ca
  runner.stage=async(id,records)=>{const r={promptId:id,pressure:id==='T99'?500000:100000,acceptance:id!=='E23',agentLatencyMs:1};records.push(r);return r;};
  assert.equal(await runner.accumulate(),null);assert.deepEqual(runner.journal.stages.map(r=>r.promptId),S.manifest.candidatePhases);assert.equal(runner.journal.nativeDiagnostic.eligibleForComparison,false);assert.equal(runner.journal.nativeDiagnostic.grade.pass,true);assert.equal(runner.journal.phase,'WORKLOAD_INADEQUATE');assert(!S.fs.existsSync(S.path.join(dir,'snapshots')));
 });
+
+function waitingRunner(status,options={}){
+ const runner=Object.create(R.OfficialRunner.prototype),dir=S.path.join(tmp,'status-observer');runner.root=dir;runner.options=options;
+ const b={sessionId:'session-poll',taskId:'TASK-0001',taskInstanceId:'poll-instance',events:[]};
+ const text=R.prompt('E01').text,r={promptId:'E01',promptHash:S.hash(text),rpcId:'poll-unit',startSeq:0,prefixHash:S.hash(S.json([]))};
+ const events=[{seq:0,time:100,type:'turn/start',data:{turn:1}},{seq:1,time:101,type:'user/message',data:{content:[{type:'text',text}],source:{kind:'user',rpcId:r.rpcId}}},{seq:2,time:102,type:'request/header',data:{header:{config:{provider:S.manifest.provider,model:S.manifest.model}}}},{seq:3,time:150,type:'turn/end',data:{turn:1,reason:{kind:'completed'}}}];
+ runner.journal={identity:{provider:S.manifest.provider,model:S.manifest.model}};runner.binding=()=>({...b,events});runner.transport={status,flush:async()=>true};return {runner,b,r,dir};
+}
+test('accepted prompt survives a temporary status RPC outage without resubmission',async()=>{
+ let polls=0,submissions=0,now=0;const x=waitingRunner(async()=>{if(++polls===1)throw Error('lhcb-runner-rpc-endpoint-unavailable');return {sessionId:x.b.sessionId,cwd:S.path.join(x.dir,'workspace'),status:polls===2?'running':'idle'};},{now:()=>now,pause:async()=>{now+=1;},turnTimeoutMs:10});
+ x.runner.transport.submit=async()=>{submissions++;};await x.runner.transport.submit();await x.runner.waitCompletion(x.b,x.r);assert.equal(submissions,1);assert.equal(polls,3);assert.equal(x.r.phase,'FLUSHED');assert.equal(x.r.endSeq,3);assert.equal(x.r.agentLatencyMs,50);assert.equal(x.r.statusObservationFailures.length,1);
+});
+test('temporary status RPC outages remain bounded by the existing turn deadline',async()=>{
+ let now=0;const x=waitingRunner(async()=>{throw Error('lhcb-runner-rpc-endpoint-unavailable');},{now:()=>now,pause:async()=>{now+=10;},turnTimeoutMs:5});await assert.rejects(x.runner.waitCompletion(x.b,x.r),/durable-completion-timeout/);assert.equal(x.r.phase,undefined);assert.equal(x.r.acceptance,undefined);
+});
+test('status observer still rejects identity drift and nontransient RPC failures',async()=>{
+ const bad=waitingRunner(async()=>{throw Error('lhcb-runner-rpc-schema-rejected');});await assert.rejects(bad.runner.waitCompletion(bad.b,bad.r),/schema-rejected/);
+ const drift=waitingRunner(async()=>({sessionId:'foreign',cwd:S.path.join(tmp,'workspace'),status:'idle'}));await assert.rejects(drift.runner.waitCompletion(drift.b,drift.r),/status-malformed/);
+});
