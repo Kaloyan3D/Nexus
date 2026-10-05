@@ -4,11 +4,15 @@ The official protocol hashes `official-provider-policy.cjs` together with the ru
 physical snapshot implementation and frozen workload. E01–E45, grading,
 thresholds and production source remain unchanged.
 
-All three arms use the same supported provider configuration: normal retry mode,
-zero automatic request retries. This prevents unbounded retries across the
-multiple model steps of one phase and preserves complete compiler/request
-telemetry for the measured successful attempt. Only mutable runtime settings
-contain this override; normal OC-01 authority and route verification still run.
+All three arms retain byte-identical runtime settings and normal OC-01 authority.
+Automatic SDK retries are not accepted into measured attempts. The runner flushes
+and observes durable generation retry events once per second while the accepted
+request runs. A transient retry without a committed failed-request result aborts
+only the ownership-verified runtime and uses the same fresh-attempt budget below.
+If a retry-containing turn completes before observation/stop, it exhausts the
+zero allowed automatic-retry measurement budget and stops with
+`EXTERNAL_BLOCKER_PROVIDER_INSTABILITY`; it is never re-submitted or measured.
+No production parser, runtime package, immutable preset or route is modified.
 
 A failed durable turn may trigger recovery only for HTTP 408/425/429/5xx,
 `server_error`, response generation failure, TRANSPORT or TIMEOUT. Authentication,
@@ -32,9 +36,11 @@ bounded phase deadline (15 minutes engineering, 45 minutes T99). They never
 resubmit. Identity/schema/prefix/route failures remain fatal.
 
 Completed clean attempts provide successful model execution latency from durable
-turn boundaries. Provider-aborted attempt count, provider retry delay (zero:
-there is no scheduled backoff), observer RPC retries and raw total arm duration
-are reported separately. Aborted attempt wall time and restart/host time cannot
+turn boundaries. Provider-aborted attempt count, started SDK retry count, scheduled provider delay,
+observed backoff delay, observer RPC retries and raw total arm duration
+are reported separately. An interrupted backoff without a durable retry-start
+has unknown actual delay (null), never fabricated zero. Fresh attempts have no
+extra harness backoff. Aborted attempt wall time and restart/host time cannot
 enter the CCv2 latency ratio. Native prefix retry evidence is supplemental to
 the equivalent continuation comparison. A hidden SDK retry violates this policy
 and invalidates the measurement rather than silently removing telemetry.
