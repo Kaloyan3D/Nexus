@@ -11,6 +11,31 @@ function create(dir){
   wrappers.push(JSON.stringify(name)+':function(module,exports,require){"use strict";\n'+code+'\n}');
  }
  const context=vm.createContext(Object.create(null),{codeGeneration:{strings:false,wasm:false}});
+ // Clone supported JSON caller values inside the candidate realm. No host
+ // function, value or exception crosses this boundary. Graph/collection support
+ // also permits ordinary internal cloning; ownership transfer is not a JSON API.
+ new vm.Script(`(()=>{
+ const MapCtor=Map,SetCtor=Set,DateCtor=Date,RegExpCtor=RegExp,ErrorCtor=Error;
+ const keys=Object.keys.bind(Object),define=Object.defineProperty.bind(Object),isArray=Array.isArray.bind(Array),isView=ArrayBuffer.isView.bind(ArrayBuffer);
+ const arrayBufferSlice=ArrayBuffer.prototype.slice,ArrayBufferCtor=ArrayBuffer,DataViewCtor=DataView;
+ const typed=[Int8Array,Uint8Array,Uint8ClampedArray,Int16Array,Uint16Array,Int32Array,Uint32Array,Float32Array,Float64Array,BigInt64Array,BigUint64Array];
+ function invalid(){const e=new ErrorCtor('Value cannot be cloned in the JSON caller contract');e.name='DataCloneError';throw e;}
+ function clone(value,options){
+  if(options?.transfer?.length)invalid();const seen=new MapCtor();
+  function copy(v){
+   if(typeof v==='function'||typeof v==='symbol')invalid();if(v===null||typeof v!=='object')return v;if(seen.has(v))return seen.get(v);
+   let out;
+   if(v instanceof DateCtor){out=new DateCtor(v.getTime());seen.set(v,out);return out;}
+   if(v instanceof RegExpCtor){out=new RegExpCtor(v.source,v.flags);seen.set(v,out);return out;}
+   if(v instanceof ArrayBufferCtor){out=arrayBufferSlice.call(v,0);seen.set(v,out);return out;}
+   if(isView(v)){const buffer=copy(v.buffer);out=v instanceof DataViewCtor?new DataViewCtor(buffer,v.byteOffset,v.byteLength):new (typed.find(T=>v instanceof T))(buffer,v.byteOffset,v.length);seen.set(v,out);return out;}
+   if(v instanceof MapCtor){out=new MapCtor();seen.set(v,out);for(const [k,item] of v)out.set(copy(k),copy(item));return out;}
+   if(v instanceof SetCtor){out=new SetCtor();seen.set(v,out);for(const item of v)out.add(copy(item));return out;}
+   out=isArray(v)?new Array(v.length):{};seen.set(v,out);for(const key of keys(v))define(out,key,{value:copy(v[key]),enumerable:true,writable:true,configurable:true});return out;
+  }return copy(value);
+ }
+ define(globalThis,'structuredClone',{value:clone,writable:true,configurable:true});
+ })();`).runInContext(context,{timeout:1000});
  // Compile candidate factories outside the trusted closure. They cannot see its
  // lexical bindings, even though both execute in the same restricted realm.
  new vm.Script('globalThis.__candidateFactories={'+wrappers.join(',')+'};').runInContext(context,{timeout:1000});

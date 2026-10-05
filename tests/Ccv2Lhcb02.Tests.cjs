@@ -108,3 +108,18 @@ test('red team: candidate cannot replace trusted serialization helpers',()=>{
  S.fs.writeFileSync(S.path.join(root,'src/migrations.ts'),`module.exports={evaluate:input=>{const before=JSON.parse(JSON.stringify(input));__snapshot=x=>x;input.document.version=1;input.toJSON=()=>before;return {rejected:true};}};`);
  assert.throws(()=>require('../benchmarks/ccv2-lhcb-02/grader/sandbox.cjs').create(root).evaluate('migrations',{document:{version:19,records:[]}}));
 });
+
+test('grader supports Node structuredClone for immutable JSON documents and opaque keys',()=>{
+ const root=S.path.join(tmp,'clone-json');fixture.createFixture(root);S.fs.writeFileSync(S.path.join(root,'src/clone.ts'),`module.exports={evaluate:input=>{const copy=structuredClone(input);copy.metadata.notes.push('cloned');return copy;}};`);
+ const input=JSON.parse('{"version":2,"records":[{"id":"001","amount":17}],"metadata":{"notes":[],"__proto__":{"opaque":true}}}');const expected=structuredClone(input);expected.metadata.notes.push('cloned');
+ const result=require('../benchmarks/ccv2-lhcb-02/grader/sandbox.cjs').create(root).evaluate('clone',input);assert.deepEqual(result.output,expected);assert.deepEqual(result.input,input);
+});
+test('grader clone retains internal aliases, cycles, collection values and clone errors',()=>{
+ const root=S.path.join(tmp,'clone-graph');fixture.createFixture(root);S.fs.writeFileSync(S.path.join(root,'src/clone.ts'),`module.exports={evaluate:()=>{const shared={value:3},input={a:shared,b:shared,map:new Map([['opaque',shared]]),set:new Set([shared]),date:new Date(1234),bytes:new Uint8Array([1,2])};input.self=input;const copy=structuredClone(input);copy.a.value=7;let rejected=false;try{structuredClone(()=>0);}catch(e){rejected=e.name==='DataCloneError';}return {alias:copy.a===copy.b,self:copy.self===copy,distinct:copy.a!==input.a,original:input.a.value,map:copy.map.get('opaque')===copy.a,set:copy.set.has(copy.a),time:copy.date.getTime(),bytes:Array.from(copy.bytes),rejected};}};`);
+ assert.deepEqual(require('../benchmarks/ccv2-lhcb-02/grader/sandbox.cjs').create(root).evaluate('clone',{}).output,{alias:true,self:true,distinct:true,original:3,map:true,set:true,time:1234,bytes:[1,2],rejected:true});
+});
+test('grader clone function and clone exceptions expose no grading host constructors',()=>{
+ for(const [i,source] of [`module.exports={evaluate:()=>structuredClone.constructor.constructor('return process')()};`,`module.exports={evaluate:()=>{try{structuredClone(()=>0);}catch(e){return e.constructor.constructor('return process')();}}};`].entries()){
+  const root=S.path.join(tmp,'clone-escape-'+i);fixture.createFixture(root);S.fs.writeFileSync(S.path.join(root,'src/clone.ts'),source);assert.throws(()=>require('../benchmarks/ccv2-lhcb-02/grader/sandbox.cjs').create(root).evaluate('clone',{}),/Code generation from strings disallowed/);
+ }
+});
