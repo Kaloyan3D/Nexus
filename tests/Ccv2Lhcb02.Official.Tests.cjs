@@ -75,3 +75,45 @@ test('full-workload integration has a bounded budget beyond the ordinary enginee
 test('ordinary engineering turns retain their original default deadline',async()=>{
  let now=0;const x=waitingRunner(async()=>({sessionId:x.b.sessionId,cwd:S.path.join(x.dir,'workspace'),status:'running'}),{now:()=>now,pause:async()=>{now+=1000000;}});await assert.rejects(x.runner.waitCompletion(x.b,x.r),/durable-completion-timeout/);assert.equal(now,1000000);
 });
+
+const Provider=require('../scripts/bench/ccv2-lhcb-02/official-provider-policy.cjs');
+test('transient generation failures require a failed request without durable result; quality and auth never retry',()=>{
+ const text=R.prompt('E01').text,r={startSeq:0,rpcId:'failure',promptHash:S.hash(text)};
+ const events=[{seq:0,time:1,type:'turn/start',data:{turn:1}},{seq:1,time:2,type:'user/message',data:{source:{kind:'user',rpcId:'failure'},content:[{type:'text',text}]}},{seq:2,time:3,type:'step/start',data:{turn:1,step:1}},{seq:3,time:4,type:'turn/end',data:{turn:1,reason:{kind:'error',error:{code:'PI_AI_ERROR',message:'server_error: The model failed to generate a response.'}}}}];
+ assert.throws(()=>R.completion(events,r),Provider.ProviderFailure);
+ for(const message of ['fetch failed','ECONNRESET','upstream temporarily unavailable'])assert.equal(Provider.transient({code:'PI_AI_ERROR',message}),true);
+ for(const status of [408,425,429,500,503,599])assert.equal(Provider.transient({status}),true);
+ for(const message of ['quota exhausted','authentication failed','context length exceeded','invalid request'])assert.equal(Provider.transient({status:429,message}),false);
+ assert.equal(Provider.transient({code:'PI_AI_ERROR',message:'unsupported request shape'}),false);
+ const committed=[...events.slice(0,3),{seq:3,time:4,type:'assistant/message',data:{turn:1,step:1}}, {...events[3],seq:4}];assert.throws(()=>R.completion(committed,r),/runner-turn-failed/);
+ const completed=structuredClone(events);completed[3].data.reason={kind:'completed'};assert.equal(R.completion(completed,r).agentLatencyMs,3);
+});
+test('identical fixed budget stops the third provider-aborted arm and excludes failures from successful latency',()=>{
+ Provider.budget(0);Provider.budget(1);Provider.budget(2);assert.throws(()=>Provider.budget(3),/EXTERNAL_BLOCKER_PROVIDER_INSTABILITY/);
+ const timing=Provider.summary([{agentLatencyMs:100,statusObservationFailures:[{}]},{agentLatencyMs:200}],9000,[{wallClockMs:5000}]);assert.equal(timing.successfulModelExecutionLatencyMs,300);assert.equal(timing.providerRetryCount,1);assert.equal(timing.providerRetryDelayMs,0);assert.equal(timing.observerStatusRpcRetries,1);assert.equal(timing.totalWallClockArmDurationMs,9000);
+});
+test('provider settings disable hidden step retries without changing route or normal authority identity',()=>{
+ const YAML=require(S.os.homedir()+'/.local/share/nexus/app/node_modules/yaml'),host=require('../config/ContextCompilerActiveOpencodeHostV2.cjs'),cert=require('../config/ContextAuthorityCertificationV2.cjs');
+ const original=S.fs.readFileSync(S.path.join(S.REPO,'config/settings.yaml'),'utf8'),configured=Provider.settings(original),old=YAML.parse(original),next=YAML.parse(configured);
+ assert.deepEqual(next['llm-pi-ai'].providers['opencode-go'].retryPolicy,{mode:'normal',maxRetries:0});delete next['llm-pi-ai'].providers['opencode-go'].retryPolicy;assert.deepEqual(next,old);
+ const identity=host.currentOpencodeIdentityV2({installRoot:S.os.homedir()+'/.local/share/nexus'});assert.equal(identity.known,true);const options={...identity.identity,registryDocument:S.read(S.path.join(S.REPO,'config/model-registry.json'))};assert.deepEqual(cert.currentIdentityV2({...options,settingsText:configured}),cert.currentIdentityV2({...options,settingsText:original}));
+});
+test('all arms archive provider-aborted candidates and retry clean attempts; correctness exceptions propagate',async()=>{
+ for(const arm of ['native','production','forced']){
+  const runner=Object.create(R.OfficialRunner.prototype);runner.root=S.path.join(tmp,'provider-'+arm);for(const dir of ['workspace','reports','nexus-root/data/sessions','nexus-root/data/logs'])S.fs.mkdirSync(S.path.join(runner.root,dir),{recursive:true});S.fs.writeFileSync(S.path.join(runner.root,'workspace/candidate'),'partial failed candidate');S.fs.writeFileSync(S.path.join(runner.root,'nexus-root/data/logs/aih-controller.log'),'observed controller log');
+  runner.journal={arms:[],providerAborts:[]};runner.save=()=>{};runner.transport={close:async()=>{}};let attempts=0;
+  runner.armAttempt=async()=>{const run={arm,startedAt:Date.now(),stages:[{agentLatencyMs:10}],valid:true};runner.journal.arms.push(run);if(++attempts===1)throw new Provider.ProviderFailure({failedRequestHasCommittedResult:false});return run;};
+  const run=await runner.arm(arm,{});assert.equal(attempts,2);assert.equal(runner.journal.arms.length,1);assert.equal(run.timing.providerRetryCount,1);assert.equal(run.timing.successfulModelExecutionLatencyMs,10);assert.equal(S.fs.readFileSync(S.path.join(runner.root,'reports/provider-aborted-'+arm+'-1/workspace/candidate'),'utf8'),'partial failed candidate');
+  runner.armAttempt=async()=>{throw Error('genuine-correctness-or-protocol-failure');};await assert.rejects(runner.arm(arm,{}),/genuine-correctness-or-protocol-failure/);
+ }
+});
+test('fresh prefix retries exhaust after three roots and never repeat a successful or nonprovider result',async()=>{
+ const root=S.path.join(tmp,'bounded-prefix'),args=[root,'calibration','certificate'];let roots=[];
+ await assert.rejects(R.boundedMain(args,async(next,options)=>{roots.push(next[0]);assert.equal(options.prefixAborts.length,roots.length-1);throw new Provider.ProviderFailure({failedRequestHasCommittedResult:false});}),/EXTERNAL_BLOCKER_PROVIDER_INSTABILITY/);
+ assert.deepEqual(roots,[root,root+'-provider-retry-1',root+'-provider-retry-2']);assert.equal(S.read(root+'-provider-attempts.json').verdict,'EXTERNAL_BLOCKER_PROVIDER_INSTABILITY');
+ let calls=0;await assert.rejects(R.boundedMain([root+'-other'],async()=>{calls++;throw Error('nonprovider-failure');}),/nonprovider-failure/);assert.equal(calls,1);
+ const successRoot=root+'-success';S.fs.mkdirSync(S.path.join(successRoot,'reports'),{recursive:true});calls=0;const result=await R.boundedMain([successRoot],async()=>{calls++;return {scientificallyValid:true};});assert.equal(calls,1);assert.equal(result.nativePrefixProviderAttempts.providerRetryCount,0);
+});
+test('Native prefix aborts and continuation aborts consume one shared per-arm budget',async()=>{
+ const runner=Object.create(R.OfficialRunner.prototype);runner.root=S.path.join(tmp,'shared-native-budget');for(const dir of ['workspace','reports','nexus-root/data/sessions','nexus-root/data/logs'])S.fs.mkdirSync(S.path.join(runner.root,dir),{recursive:true});S.fs.writeFileSync(S.path.join(runner.root,'nexus-root/data/logs/aih-controller.log'),'log');runner.journal={arms:[],providerAborts:[{arm:'native',root:'prior-root-1'},{arm:'native',root:'prior-root-2'}]};runner.save=()=>{};runner.transport={close:async()=>{}};let calls=0;runner.armAttempt=async()=>{calls++;runner.journal.arms.push({arm:'native',startedAt:Date.now(),stages:[]});throw new Provider.ProviderFailure({failedRequestHasCommittedResult:false});};await assert.rejects(runner.arm('native',{}),/EXTERNAL_BLOCKER_PROVIDER_INSTABILITY/);assert.equal(calls,1);assert.equal(runner.journal.providerAborts.length,3);assert.equal(runner.journal.arms.length,0);
+});
