@@ -738,6 +738,20 @@
         "workflow-execution-statement-close"
       ],
       "t99": true
+    },
+    {
+      "id": "canonical-statement-delivery",
+      "introducedBy": "E46",
+      "category": "persistence invariants",
+      "critical": false,
+      "rule": "Read actual canonical tenant journal and replay proofs, preserve stable cursor cuts, grant precedence, response identity and detached immutable state.",
+      "grader": "behavior:canonical-statement-delivery",
+      "status": "implemented",
+      "probeIds": [
+        "statement-page-contract",
+        "statement-page-execution"
+      ],
+      "t99": true
     }
   ],
   "scopeNote": "All obligations map to executable probes; T99 reruns all prior suites plus hidden coordinator and integration probes. Candidate correctness is not official workload validity.",

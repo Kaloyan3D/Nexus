@@ -2,7 +2,7 @@ Current session preparation: see [SESSION-BOOTSTRAP.md](SESSION-BOOTSTRAP.md). F
 
 # CCV2-LHCB-02 contract
 
-UNFROZEN / LIVE_CALIBRATION_REQUIRED. The full offline candidate is T00, E01–E24 and T99. Legacy official commands remain disabled for progressive fixtures. The dedicated official-runner entry point requires verified live calibration and physical checkpoint/restore evidence. Production source, LHCB-01, CCv2/DSH thresholds and acceptance ratios are unchanged. Use Node v24.18.1. No provider calls are part of offline verification.
+UNFROZEN / LIVE_CALIBRATION_REQUIRED. The full offline candidate is T00, E01–E46 and T99. Legacy official commands remain disabled for progressive fixtures. The dedicated official-runner entry point requires verified live calibration and physical checkpoint/restore evidence. Production source, LHCB-01, CCv2/DSH thresholds and acceptance ratios are unchanged. Use Node v24.18.1. No provider calls are part of offline verification.
 
 Evidence releases are deterministic and ordered by phase-manifest.json. The agent edits src only; package, CLI entry point, verifier and evidence are immutable. Each phase has source and new incident/case artifacts. Acceptance checks intended inspection hashes, pre/post source changes, protected evidence and all prior/current behavioral tests. Complete original source/incident tool-result bytes are the current supported inspection receipt; partial or decorated outputs are not silently guessed. This is an offline receipt validator, not a claim that the live runner instruments every filesystem read. Candidate acceptance requires a supplied pre-work inventory; production durability/provenance checks remain necessary in live use.
 
