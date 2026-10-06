@@ -15,12 +15,12 @@ function inputs(hidden=false){return (hidden?['__proto__','e\u0301']:['001','acc
 function exercise(createStore,postAudited,x){
  const store=createStore(),audits=[],actor={tenant:x.tenant,role:'writer',revoked:false,credential:'fixture-private'},command={tenant:x.tenant,key:x.key,expectedRevision:0,requestId:x.requestId,posting:{id:x.id,currency:'JPY',kind:'transfer',amount:x.amount}};
  const attempts=[ [command,actor], [command,actor], [command,{...actor,revoked:true}], [command,{...actor,tenant:x.foreign}], [{...command,posting:{...command.posting,amount:x.amount+1}},actor], [{...command,key:'invalid',expectedRevision:1,posting:{...command.posting,amount:0.5}},actor], [{...command,key:'stale'},actor], [{...command,tenant:x.foreign},{...actor,tenant:x.foreign}] ];
- let ticks=0;const results=[],states=[];let inputPreserved=true;
- for(const [c,a] of attempts){const before=JSON.stringify([c,a]);results.push(postAudited(store,c,a,audits,()=>++ticks).status);inputPreserved&&=JSON.stringify([c,a])===before;states.push({writes:store.history().length,balance:store.read(x.tenant,x.id).balance,revision:store.read(x.tenant,x.id).revision,otherBalance:store.read(x.foreign,x.id).balance});}
+ let ticks=0;const results=[],responses=[],states=[];let inputPreserved=true;
+ for(const [c,a] of attempts){const before=JSON.stringify([c,a]);const response=postAudited(store,c,a,audits,()=>++ticks);responses.push(response);results.push(response.status);inputPreserved&&=JSON.stringify([c,a])===before;states.push({writes:store.history().length,balance:store.read(x.tenant,x.id).balance,revision:store.read(x.tenant,x.id).revision,otherBalance:store.read(x.foreign,x.id).balance});}
  const snapshot=JSON.stringify(audits);command.requestId='changed';command.posting.amount=999;actor.credential='changed';
- return {results,states,audits,ticks,inputPreserved,detached:JSON.stringify(audits)===snapshot};
+ return {results,responses,states,audits,ticks,inputPreserved,detached:JSON.stringify(audits)===snapshot};
 }
-function expected(x){return {results:[201,200,403,403,409,422,409,201],states:[1,1,1,1,1,1,1,2].map((writes,i)=>({writes,balance:x.amount,revision:1,otherBalance:i===7?x.amount:0})),audits:[true,true,false,false,true,true,true,true].map((allowed,i)=>({operation:'post',tenant:i===7?x.foreign:x.tenant,decision:allowed?'allow':'deny',requestId:x.requestId})),ticks:2,inputPreserved:true,detached:true};}
+function expected(x){return {results:[201,200,403,403,409,422,409,201],responses:[{status:201,transactionId:'txn-1',revision:1,committedAt:1},{status:200,transactionId:'txn-1',revision:1},{status:403},{status:403},{status:409},{status:422},{status:409},{status:201,transactionId:'txn-2',revision:1,committedAt:2}],states:[1,1,1,1,1,1,1,2].map((writes,i)=>({writes,balance:x.amount,revision:1,otherBalance:i===7?x.amount:0})),audits:[true,true,false,false,true,true,true,true].map((allowed,i)=>({operation:'post',tenant:i===7?x.foreign:x.tenant,decision:allowed?'allow':'deny',requestId:x.requestId})),ticks:2,inputPreserved:true,detached:true};}
 function scenarioCode(x){return 'return ('+exercise.toString()+")(__load('persistence.ts').createStore,__load('audited-service.ts').postAudited,"+JSON.stringify(x)+');';}
 const verifier=`'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
