@@ -1,1 +1,3 @@
 Complete the integrated Ledger Lab v2 release candidate. Resolve remaining cross-module failures, run the full integration suite, and provide the resulting implementation and concise verification evidence. Apply the engineering contract and decisions already established in this session.
+
+Scratch protocol revision 1: persistent implementation edits belong only in src/. Create temporary probes, scripts and diagnostic input/output only in $LHCB_SCRATCH, supplied by the benchmark environment outside the repository. Repository-root probe files are forbidden. Scratch is reset before and after every phase and between arms; never depend on it later or move/link its artifacts into persistent candidate output. Do not use symlinks, hardlinks or path traversal to escape scratch.

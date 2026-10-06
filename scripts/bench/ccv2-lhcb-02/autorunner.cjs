@@ -5,6 +5,7 @@ const Telemetry=require('./telemetry.cjs'),Validity=require('./validity.cjs');
 const Session=load('session'),D=load('doctor'),Bootstrap=require('./controller-bootstrap.cjs');
 const identity=b=>Object.fromEntries(['sessionId','taskId','taskInstanceId'].map(k=>[k,b[k]]));
 const same=(a,b)=>S.json(a)===S.json(b);
+const Scratch=require('./scratch.cjs');
 function release(root,id){
   if(id==='T00')return null;
   const files=fixture.phaseFiles(id),receiptFile=S.inside(root,'state/release-'+id+'.json');
@@ -26,9 +27,9 @@ function protectedHashes(root){
   // disappear between readdir and read even after durable turn completion.
   for(const entry of S.fs.readdirSync(workspace,{withFileTypes:true}).sort((a,b)=>a.name.localeCompare(b.name,'en'))){
     if(entry.isSymbolicLink()||!entry.isDirectory()&&!entry.isFile())S.fail('unsupported-file');
-    if(entry.name==='.ai-harness'&&entry.isDirectory()||S.secretName(entry.name))continue;
+    if(entry.name==='.ai-harness'&&entry.isDirectory()||entry.name==='.git'&&entry.isDirectory())continue;
     const full=S.inside(workspace,entry.name);let files;
-    if(entry.isDirectory())files=S.inventory(full,entry.name+'/');else{const bytes=S.fs.readFileSync(full);S.safeBytes(bytes);files={[entry.name]:{hash:S.hash(bytes)}};}
+    if(entry.isDirectory()){files={};function walk(dir,prefix){for(const e of S.fs.readdirSync(dir,{withFileTypes:true})){const p=prefix+e.name,f=S.inside(dir,e.name);if(e.isSymbolicLink()||!e.isDirectory()&&!e.isFile())S.fail('unsupported-file');if(e.isDirectory())walk(f,p+'/');else{const bytes=S.fs.readFileSync(f);S.safeBytes(bytes);files[p]={hash:S.hash(bytes)};}}}walk(full,entry.name+'/');}else{const bytes=S.fs.readFileSync(full);S.safeBytes(bytes);files={[entry.name]:{hash:S.hash(bytes)}};}
     for(const [p,h] of Object.entries(files))if(!p.startsWith('src/')&&!p.startsWith('.git/'))out[p]=h.hash;
   }
   return out;
@@ -90,7 +91,7 @@ class CalibrationRunner {
   const sessions=S.inside(this.root,'nexus-root/data/sessions');if(S.fs.existsSync(sessions)&&Object.keys(S.inventory(sessions)).length)S.fail('lhcb02-calibration-new-session-required');
   const bindings=S.inside(this.root,'nexus-root/data/routing/session-bindings.json');if(S.fs.existsSync(bindings)&&Object.keys(S.read(bindings).bindings||{}).length)S.fail('lhcb02-nonexclusive-session');
   const sessionId='session-'+S.crypto.randomUUID();
-  this.journal={version:2,root:this.root,contractHash:S.contractHash(),identity:null,stages:[],phase:'PREPARING',creation:{sessionId,phase:'CREATING'}};this.save();
+  this.journal={version:2,protocolRevision:S.manifest.protocolRevision,scratchPolicy:Scratch.POLICY,root:this.root,contractHash:S.contractHash(),identity:null,stages:[],phase:'PREPARING',creation:{sessionId,phase:'CREATING'}};this.save();
   await this.controllerBootstrap.create(sessionId);this.options.fault?.('after-session-create');
   this.journal.creation.phase='CREATED';this.save();
   const a=Bootstrap.exact(await this.controllerBootstrap.prepare(sessionId),sessionId);this.options.fault?.('after-controller-prepare');
@@ -124,7 +125,7 @@ class CalibrationRunner {
  }
  finishAcceptance(r){
   if(r.completionSourceHash&&r.completionSourceHash!==S.treeHash(S.inventory(S.inside(this.root,'workspace/src'))))S.fail('lhcb02-source-changed-before-grade');
-  const current=protectedHashes(this.root);if(Object.entries(r.protectedHashes).some(([p,h])=>current[p]!==h))S.fail('lhcb02-evidence-modified');
+  const current=protectedHashes(this.root);if(!same(current,r.protectedHashes))S.fail('lhcb02-evidence-modified');
   const ids=S.manifest.calibration.phases.filter(x=>S.manifest.stages.indexOf(x)<=S.manifest.stages.indexOf(r.promptId));
   r.acceptanceResults=r.promptId==='T00'?[]:(this.options.acceptance||acceptance)(this.root,ids);
   r.acceptance=r.promptId==='T00'||(r.acceptanceResults.length===ids.length+1&&r.acceptanceResults.every((x,i)=>x.phase===(ids[i]??'holdout')&&x.pass===true));this.save();
@@ -132,14 +133,15 @@ class CalibrationRunner {
  observe(){const b=this.binding({requireRequest:true});this.requestCache=this.journal.stages.flatMap(r=>Telemetry.collectRequests(this.root,b,r));S.write(S.inside(this.root,'state/request-telemetry.json'),this.requestCache);}
  async runStage(id){
   this.preflight();if(id!==S.manifest.stages[this.journal.stages.length])S.fail('runner-stage-order');
+  const scratchBefore=Scratch.reset(this.root);
   const evidenceSetHash=release(this.root,id),b=this.binding(),bank=exactPrompt(id);
   if(id==='T00')await this.controllerBootstrap.verify(this.journal.creation.authority);
   if((await this.agentStatus()).status!=='idle'||await this.transport.flush(b.sessionId)!==true)S.fail('runner-agent-busy');
-  const r={key:id,rpcId:'lhcb-'+S.crypto.randomUUID(),promptId:id,promptHash:bank.hash,...identity(b),phase:'READY',startSeq:b.events.length,prefixHash:S.hash(S.json(b.events)),evidenceSetHash,protectedHashes:protectedHashes(this.root),before:this.telemetry()};
+  const r={key:id,rpcId:'lhcb-'+S.crypto.randomUUID(),promptId:id,promptHash:bank.hash,...identity(b),phase:'READY',scratchBefore,startSeq:b.events.length,prefixHash:S.hash(S.json(b.events)),evidenceSetHash,protectedHashes:protectedHashes(this.root),before:this.telemetry()};
   this.journal.stages.push(r);this.save('READY');this.options.fault?.('before-intent');
   r.phase='SUBMITTED';r.submitAt=this.timestamp();this.save('SUBMITTED');this.options.fault?.('after-intent');
   await this.transport.submit(r.sessionId,bank.text,r.rpcId);this.options.fault?.('after-rpc');
-  await this.durable(r);this.finishAcceptance(r);this.observe();return r;
+  await this.durable(r);Scratch.assertCandidate(this.root);r.scratchAfter=Scratch.reset(this.root);this.save();this.finishAcceptance(r);this.observe();return r;
  }
  async execute(){
   const releaseLease=require('./lease.cjs').acquire(S.inside(this.root,'state/calibration-lock.json'),this.root,this.options);
@@ -150,7 +152,7 @@ class CalibrationRunner {
    for(const id of S.manifest.stages)await this.runStage(id);
    const b=this.binding({requireRequest:true}),requests=this.requestCache;
    const phases=this.journal.stages.filter(r=>r.promptId!=='T00').map(r=>Telemetry.phaseSummary(b,r,requests.filter(x=>x.phase===r.promptId)));
-   const report={benchmarkId:S.manifest.benchmarkId,kind:'CALIBRATION_ONLY',contractHash:S.contractHash(),workloadHash:S.workloadHash(),phases,calibration:Validity.calibration(phases,requests),workload:Validity.workload(null),officialRunCreated:false};
+   const report={benchmarkId:S.manifest.benchmarkId,protocolRevision:S.manifest.protocolRevision,scratchPolicy:Scratch.POLICY,kind:'CALIBRATION_ONLY',contractHash:S.contractHash(),workloadHash:S.workloadHash(),phases,calibration:Validity.calibration(phases,requests),workload:Validity.workload(null),officialRunCreated:false};
    S.write(S.inside(this.root,'reports/calibration.json'),report);this.save('COMPLETE');return report;
   }catch(e){
    if(this.journal){this.journal.failure={code:e.message};this.save('FAILED');}throw e;

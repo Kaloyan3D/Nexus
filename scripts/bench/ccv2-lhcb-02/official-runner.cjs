@@ -3,7 +3,7 @@
 const {S,load,authority}=require('./infrastructure.cjs'),B=require('./controller-bootstrap.cjs');
 const T=require('./telemetry.cjs'),V=require('./validity.cjs'),Snapshots=require('./official-snapshot.cjs');
 const {release,acceptance,protectedHashes}=require('./autorunner.cjs');
-const P=require('./official-provider-policy.cjs');
+const P=require('./official-provider-policy.cjs'),Scratch=require('./scratch.cjs');
 const M=require('../ccv2-lhcb/metrics.cjs'),cp=require('node:child_process');
 const Session=load('session'),D=load('doctor'),ids=S.manifest.candidatePhases,arms=['native','production','forced'];
 const same=(a,b)=>S.json(a)===S.json(b),identity=b=>Object.fromEntries(['sessionId','taskId','taskInstanceId'].map(k=>[k,b[k]]));
@@ -20,10 +20,10 @@ function completion(events,r){
 }
 function verifyCalibration(raw){
  const root=S.rootOf(raw),marker=S.read(S.inside(root,'state/identity.json')),report=S.read(S.inside(root,'reports/calibration.json')),journal=S.read(S.inside(root,'state/calibration-journal.json'));
- if(marker.benchmarkId!==S.manifest.benchmarkId||marker.baseSha!==S.manifest.baseSha||marker.root!==root||marker.contractHash!==report.contractHash||journal.contractHash!==report.contractHash||journal.phase!=='COMPLETE'||report.workloadHash!==S.workloadHash()||report.calibration?.status!=='PASS'||S.fs.existsSync(S.inside(root,'state/simulation.json'))||journal.stages.length!==S.manifest.stages.length)S.fail('lhcb02-official-calibration-required');
- const b=Session.binding(root);routeEvidence(b,journal.creation.authority,true);
+ if(report.protocolRevision!==S.manifest.protocolRevision||!same(report.scratchPolicy,Scratch.POLICY)||marker.benchmarkId!==S.manifest.benchmarkId||marker.baseSha!==S.manifest.baseSha||marker.root!==root||marker.contractHash!==report.contractHash||journal.contractHash!==report.contractHash||journal.phase!=='COMPLETE'||report.workloadHash!==S.workloadHash()||report.calibration?.status!=='PASS'||S.fs.existsSync(S.inside(root,'state/simulation.json'))||journal.stages.length!==S.manifest.stages.length)S.fail('lhcb02-official-calibration-required');
+ Scratch.assertEmpty(root);const b=Session.binding(root);routeEvidence(b,journal.creation.authority,true);
  for(const [i,r] of journal.stages.entries()){
-  if(r.promptId!==S.manifest.stages[i]||r.phase!=='FLUSHED'||r.acceptance!==true||r.promptHash!==prompt(r.promptId).hash||!same(identity(r),identity(b))||!same(identity(b),journal.identity)||S.hash(S.json(b.events.slice(0,r.startSeq)))!==r.prefixHash||S.hash(S.json(b.events.slice(0,r.endSeq+1)))!==r.durableEventsHash||completion(b.events.slice(0,r.endSeq+1),r)?.endSeq!==r.endSeq)S.fail('lhcb02-official-calibration-evidence');
+  if(r.scratchBefore?.emptyAfterReset!==true||r.scratchAfter?.emptyAfterReset!==true||r.scratchBefore?.policyRevision!==Scratch.POLICY.revision||r.scratchAfter?.policyRevision!==Scratch.POLICY.revision||r.promptId!==S.manifest.stages[i]||r.phase!=='FLUSHED'||r.acceptance!==true||r.promptHash!==prompt(r.promptId).hash||!same(identity(r),identity(b))||!same(identity(b),journal.identity)||S.hash(S.json(b.events.slice(0,r.startSeq)))!==r.prefixHash||S.hash(S.json(b.events.slice(0,r.endSeq+1)))!==r.durableEventsHash||completion(b.events.slice(0,r.endSeq+1),r)?.endSeq!==r.endSeq)S.fail('lhcb02-official-calibration-evidence');
  }
  if(T.compilerObservation(root).mode!=='NATIVE'||!D.sourceGuard(S.REPO,S.inside(root,'nexus-root')).pass)S.fail('lhcb02-official-calibration-source');
  const requests=journal.stages.flatMap(r=>T.collectRequests(root,b,r));
@@ -47,7 +47,7 @@ function compare(results){
  return {comparisons,compilerCapability:f?.valid&&f.metrics.compiledRequests>0?(comparisons.forced.meaningful?'PASS':'FAIL'):'INSUFFICIENT_DATA',productionBenefit:p?.valid?(p.metrics.compiledRequests===0?'NOT_TRIGGERED':comparisons.production.meaningful?'PASS':'FAIL'):'INSUFFICIENT_DATA',reasoningContinuitySafety:p?.valid&&a?.valid?(p.metrics.pressurePolicyMatches&&p.grade.pass&&a.grade.pass?'PASS':'FAIL'):'INSUFFICIENT_DATA',forcedContinuity:f?.valid&&a?.valid?(f.grade.pass&&a.grade.pass?'PASS':'FAIL'):'INSUFFICIENT_DATA'};
 }
 class OfficialRunner{
- constructor(root,calibration,options={}){this.root=S.owned(root);this.calibration=calibration;this.options=options;this.env=options.env||process.env;this.transport=options.transport||load('agent-transport').createTransport(root,this.env,{spawn:require('./isolation.cjs').spawnIsolated});this.journal={kind:'LIVE_OFFICIAL',protocolHash:protocolHash(),workloadHash:S.workloadHash(),calibration,stages:[],arms:[],phase:'PREPARING',providerFailurePolicy:P.POLICY,providerAborts:[...(options.prefixAborts||[])]};}
+ constructor(root,calibration,options={}){this.root=S.owned(root);this.calibration=calibration;this.options=options;this.env=options.env||process.env;this.transport=options.transport||load('agent-transport').createTransport(root,this.env,{spawn:require('./isolation.cjs').spawnIsolated});this.journal={kind:'LIVE_OFFICIAL',protocolRevision:S.manifest.protocolRevision,scratchPolicy:Scratch.POLICY,protocolHash:protocolHash(),workloadHash:S.workloadHash(),calibration,stages:[],arms:[],phase:'PREPARING',providerFailurePolicy:P.POLICY,providerAborts:[...(options.prefixAborts||[])]};}
  save(){S.write(S.inside(this.root,'state/official-journal.json'),this.journal);}
  preflight(arm){S.ready(this.root);const d=D.doctor(this.root);if(!d.sourceGuard.pass||!d.runtime.ready||!d.liveReady||d.certification.state!=='valid')S.fail('lhcb02-official-preflight');for(const [k,v] of Object.entries(authority.thresholds))if(d.thresholds?.[k]!==v)S.fail('runner-threshold-mismatch');const policy=S.read(S.inside(this.root,'nexus-root/config/routing-policy.json'));if(!same(policy.contextCompiler,S.manifest.arms[arm]))S.fail('lhcb02-official-policy');}
  binding(required=false){const b=Session.binding(this.root);if(!same(identity(b),identity(this.journal.identity)))S.fail('runner-session-task-identity-drift');routeEvidence(b,this.journal.identity,required);return b;}
@@ -64,10 +64,11 @@ class OfficialRunner{
   }
  }
  async stage(id,records,arm='native'){
-  this.preflight(arm);const set=release(this.root,id),b=this.binding(),bank=prompt(id),r={promptId:id,promptHash:bank.hash,rpcId:'lhcb-'+S.crypto.randomUUID(),...identity(b),startSeq:b.events.length,prefixHash:S.hash(S.json(b.events)),evidenceSetHash:set,protectedHashes:protectedHashes(this.root),phase:'SUBMITTED',submitAt:Date.now()};records.push(r);this.save();
+  this.preflight(arm);const scratchBefore=Scratch.reset(this.root);const set=release(this.root,id),b=this.binding(),bank=prompt(id),r={promptId:id,promptHash:bank.hash,rpcId:'lhcb-'+S.crypto.randomUUID(),...identity(b),startSeq:b.events.length,prefixHash:S.hash(S.json(b.events)),evidenceSetHash:set,protectedHashes:protectedHashes(this.root),scratchBefore,phase:'SUBMITTED',submitAt:Date.now()};records.push(r);this.save();
   await this.transport.submit(b.sessionId,bank.text,r.rpcId);
   await this.waitCompletion(b,r);
   if(this.binding().events.slice(r.startSeq,r.endSeq+1).some(e=>e.type==='llm/retry'||e.type==='llm/retry-started'))S.fail('EXTERNAL_BLOCKER_PROVIDER_INSTABILITY');
+  Scratch.assertCandidate(this.root);r.scratchAfter=Scratch.reset(this.root);
   if(!same(protectedHashes(this.root),r.protectedHashes))S.fail('lhcb02-evidence-modified');
   const cumulative=ids.slice(1,ids.indexOf(id)+1);r.acceptanceResults=id==='T00'?[]:acceptance(this.root,cumulative);r.acceptance=id==='T00'||r.acceptanceResults.length===cumulative.length+1&&r.acceptanceResults.every(x=>x.pass);
   r.pressure=Session.currentPressure(this.root).pressureTokens;const rows=T.collectRequests(this.root,this.binding(true),r);S.write(S.inside(this.root,'reports/stage-'+(arm||'accumulation')+'-'+id+'.json'),{record:r,requests:rows});this.save();return r;
@@ -111,7 +112,7 @@ class OfficialRunner{
    S.write(S.inside(this.root,'reports/native-candidate-validation.json'),nativeValidation);if(!nativeValidation.pass)S.fail('lhcb02-official-native-candidate-invalid');
    for(const arm of arms.slice(1))await this.arm(arm,meta);
    const results=this.journal.arms,baselineEqual=results.every(r=>r.baselineHash===meta.baselineHash&&r.sessionLogHash===meta.sessionLogHash&&r.snapshotSeal===this.journal.snapshotHash&&r.promptHash===prompt('T99').hash&&same(r.identity,this.journal.identity));
-   const report={kind:'LIVE_OFFICIAL_BENCHMARK',providerFailurePolicy:P.POLICY,providerFailurePolicyHash:S.hash(S.json(P.POLICY)),providerAborts:this.journal.providerAborts,workloadHash:S.workloadHash(),protocolHash:protocolHash(),frozenAcceptance:S.manifest.acceptance,calibration:this.calibration,checkpoint:{id:'CP-500',pressureTokens:meta.pressureTokens,afterPhase:meta.completedStages.at(-1),seal:this.journal.snapshotHash},armBaselineEquality:baselineEqual,scientificallyValid:baselineEqual&&results.length===3&&results.every(r=>r.valid),workloadValidity:baselineEqual&&results.length===3&&results.every(r=>r.valid)?'WORKLOAD_VALID':'WORKLOAD_INADEQUATE',arms:results,...compare(results)};S.write(S.inside(this.root,'reports/benchmark.json'),report);this.journal.phase='COMPLETE';this.save();return report;
+   const report={kind:'LIVE_OFFICIAL_BENCHMARK',protocolRevision:S.manifest.protocolRevision,scratchPolicy:Scratch.POLICY,providerFailurePolicy:P.POLICY,providerFailurePolicyHash:S.hash(S.json(P.POLICY)),providerAborts:this.journal.providerAborts,workloadHash:S.workloadHash(),protocolHash:protocolHash(),frozenAcceptance:S.manifest.acceptance,calibration:this.calibration,checkpoint:{id:'CP-500',pressureTokens:meta.pressureTokens,afterPhase:meta.completedStages.at(-1),seal:this.journal.snapshotHash},armBaselineEquality:baselineEqual,scientificallyValid:baselineEqual&&results.length===3&&results.every(r=>r.valid),workloadValidity:baselineEqual&&results.length===3&&results.every(r=>r.valid)?'WORKLOAD_VALID':'WORKLOAD_INADEQUATE',arms:results,...compare(results)};S.write(S.inside(this.root,'reports/benchmark.json'),report);this.journal.phase='COMPLETE';this.save();return report;
   }catch(e){this.journal.phase='FAILED';this.journal.failure=e.message;this.save();S.write(S.inside(this.root,'reports/benchmark-failure.json'),{kind:'LIVE_OFFICIAL_ATTEMPT',scientificallyValid:false,failureCode:e.message,stages:this.journal.stages.map(r=>({phase:r.promptId,pressure:r.pressure,acceptance:r.acceptance})),providerFailurePolicy:P.POLICY,providerAborts:this.journal.providerAborts,providerEvidence:e.evidence??null,completedArms:this.journal.arms.filter(r=>r.metrics),calibration:this.calibration});throw e;}
   finally{try{await this.transport.close?.();}finally{unlock();}}
  }

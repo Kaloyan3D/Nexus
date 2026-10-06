@@ -117,5 +117,13 @@
     "E45",
     "E46",
     "T99"
-  ]
+  ],
+  "protocolRevision": "scratch-v1",
+  "scratch": {
+    "directory": "scratch",
+    "environment": "LHCB_SCRATCH",
+    "reset": "before-and-after-every-phase",
+    "snapshot": "excluded-and-empty",
+    "links": "forbidden"
+  }
 }
