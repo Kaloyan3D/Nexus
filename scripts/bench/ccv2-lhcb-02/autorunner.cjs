@@ -27,7 +27,7 @@ function protectedHashes(root){
   // disappear between readdir and read even after durable turn completion.
   for(const entry of S.fs.readdirSync(workspace,{withFileTypes:true}).sort((a,b)=>a.name.localeCompare(b.name,'en'))){
     if(entry.isSymbolicLink()||!entry.isDirectory()&&!entry.isFile())S.fail('unsupported-file');
-    if(entry.name==='.ai-harness'&&entry.isDirectory()||entry.name==='.git'&&entry.isDirectory())continue;
+    if(entry.name==='.ai-harness'&&entry.isDirectory())continue;
     const full=S.inside(workspace,entry.name);let files;
     if(entry.isDirectory()){files={};function walk(dir,prefix){for(const e of S.fs.readdirSync(dir,{withFileTypes:true})){const p=prefix+e.name,f=S.inside(dir,e.name);if(e.isSymbolicLink()||!e.isDirectory()&&!e.isFile())S.fail('unsupported-file');if(e.isDirectory())walk(f,p+'/');else{const bytes=S.fs.readFileSync(f);S.safeBytes(bytes);files[p]={hash:S.hash(bytes)};}}}walk(full,entry.name+'/');}else{const bytes=S.fs.readFileSync(full);S.safeBytes(bytes);files={[entry.name]:{hash:S.hash(bytes)}};}
     for(const [p,h] of Object.entries(files))if(!p.startsWith('src/')&&!p.startsWith('.git/'))out[p]=h.hash;
