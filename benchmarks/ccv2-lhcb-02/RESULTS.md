@@ -1,165 +1,113 @@
-# CCv2 LHCB-02 outcome — 2026-10-06
+# CCv2 LHCB-02 scratch revision qualification — 2026-10-06
 
-**INFRASTRUCTURE_INVALID.** The frozen 46-phase workload reached the first natural CP-500 after E43 at **480,825 tokens**. Native continuation then completed E44–E46, but E46 created eight Python probe files outside `src/`. The frozen official guard rejected that successful durable turn with `lhcb-lhcb02-evidence-modified`. Full Native validation and the three-arm comparison did not complete. No CCv2 benefit, reduction, or continuity claim is supported.
+**WORKLOAD_INADEQUATE for the required representative-calibration qualification.** The new scratch protocol passed all eight regression suites (290/290) but its first fresh real calibration failed the unchanged per-phase pressure-growth floor: **E05 = 9,864 < 10,000**, a 136-token shortfall. All six functional phases passed; no provider retry, unauthorized persistent mutation, compilation or durable compaction occurred. New official execution was not started, so the requested three-arm result remains incomplete.
 
-This classification means an invalid benchmark execution, not a proven production infrastructure defect. The observed cause is **CANDIDATE_PROTOCOL_VIOLATION**. All original protected files retain their hashes; the rejected change is file addition outside the allowed source directory. Independent diagnostic grading after the stop passes all E01–E46 plus holdout checks, 47/47. That diagnostic cannot override the live protocol failure.
+This verdict is scoped to the calibration eligibility gate. Full 46-phase length on this new revision is UNVERIFIED. Official15 had already proved the old workload naturally reached CP-500; that historical observation remains intact and cannot replace a passing calibration under the new hashes. No conclusion about CCv2 benefit or failure follows from this pre-comparison qualification result.
 
-## Frozen execution
+## Frozen identity
 
-Branch: `benchmark/ccv2-lhcb-02`. Executed source: `2612a767098e2dda2f7bff96452eb50d44e2b4fb`. This report is a later documentation-only change; its containing commit must not be represented as the source used by the live runs.
+Branch `benchmark/ccv2-lhcb-02`; executed implementation **`3fbbd38b087b5491c7212046fac1ad0f49737446`**. This report is a later documentation-only commit, not the implementation executed by tests/calibration.
 
-| Identity | Frozen value |
+| Item | Frozen identity |
 | --- | --- |
-| Production source | `e0282c11d5bee29359c277cd5a9568ca13d62885` |
-| Harness / contract hash | `fbd25650963c7b94e8556c5a17ecd3a390e09e897fe1cf77afadf4eb7bb27ff9` |
-| Workload hash | `1be00777f80eca08804f24cfe481d91f5a773351b3b5d48d76febe65e93cbf98` |
-| Official protocol hash | `a929880038c4e09f4261d5a1aec0758e7d738b5d5b798ff461648c3f181ebf1d` |
+| Protocol revision | `scratch-v1` |
+| Frozen production | `e0282c11d5bee29359c277cd5a9568ca13d62885` |
+| Harness / contract hash | `587989f5911a14c3e133733e048448ccd7918159fbecd33856ab105099a05abe` |
+| Workload hash | `ca7b35b8d6427ea6008ab89816a3bab21d9e75f91d07e41c45aa1a5091e604db` |
+| Official protocol hash | `7f1477e1d0915e4a353ad7ff369ec96df9d97e5fc1a4aba426301a1dfd9fbae0` |
 | Provider / model | `opencode-go` / `muse-spark-1.3-contributor` |
-| Runtime | Node 24.18.1, normally certified OC-01 authority |
-| Workload | 46 engineering phases; 48 prompts including T00 and T99; 54 obligations, 19 critical |
+| Node | 24.18.1 |
+| Workload | 46 engineering phases, 48 prompts including T00/T99 |
+| Correctness obligations | 54 total, 19 critical; unchanged |
+| Calibration root | `/home/kaloyan/nexus-bench/ccv2-lhcb-02-observer-20261006-run19` |
+| New CP-500 pressure / phase | NOT MEASURED; no new official execution |
 
-E46 was added only after the previous actual E45 completed below the checkpoint minimum at 473,747 tokens. It implements canonical journal pagination with grants, replay proof validation, tenant cuts, cursor consistency, and stateful caller checks. All 47 prior released artifact sets and prompts remain byte-identical. Source, graders, thresholds, workload and provider policy were frozen before calibration18 and official15, and unchanged after the first checkpoint. No additional phases or pressure were added to trigger Production.
+Production code, provider failure policy, fixture/case algorithms, grader set, obligations, phase graph, acceptance ratios and CP thresholds are byte-identical to the preceding revision. Each of the 48 prompts appends exactly the same scratch contract; all previous functional bodies remain unchanged. New prompt/workload hashes are intentional and no old prompt-byte identity is claimed. No E47+ was added.
 
-## Fresh calibration — PASS
+## Scratch boundary and lifecycle
 
-Root: `/home/kaloyan/nexus-bench/ccv2-lhcb-02-observer-20261006-run18`. Actual CLI exit 0. All six phases passed cumulative acceptance, with zero compilation, durable history compaction, or surface replacement.
+See [the scratch protocol and ten architecture answers](/home/kaloyan/Projects/Nexus/benchmarks/ccv2-lhcb-02/SCRATCH-PROTOCOL.md).
 
-| Phase | Pressure growth |
-| --- | ---: |
-| E01 | 13,088 |
-| E02 | 20,744 |
-| E03 | 18,620 |
-| E04 | 38,227 |
-| E05 | 10,270 |
-| E06 | 18,835 |
+The benchmark owns `ROOT/scratch`, outside `workspace`, mounts it into the isolated namespace and supplies `$LHCB_SCRATCH`. Persistent implementation edits remain `src/` only. Scratch contents are validated/reset before and after every phase, including T00/T99, and at arm restore. Scratch is absent from candidate grading and physical snapshot payload; seal requires it empty. Symlinks, hardlinks, special files and path traversal are rejected. Source aliases to scratch fail before inventory. Repository-root probes, protected additions/deletions/mutations and moving scratch to unauthorized persistent paths remain protocol failures. Runtime-owned `.ai-harness` and Git metadata retain existing treatment, including traversal rejection of nested Git symlinks.
 
-Mean **19,964**, median **18,727.5**, minimum **10,270** tokens. Frozen calibration status PASS, reasons `[]`; the aspirational 15k–25k range is not substituted for the unchanged acceptance rules.
+Executed tests cover actual namespace scratch creation and Python execution, deterministic reset without candidate changes, root probes, protected mutation, unauthorized moves, traversal, symlink/hardlink escapes, candidate aliases, snapshot exclusion/empty seal, and no carryover at physical restore. Focused result: **84/84 PASS**. The calibration records an empty scratch reset before/after all seven prompts; the model did not retain any temporary artifact in these six early tasks. Tests prove the scratch behavior; no claim is made that late-phase model behavior has been observed on this revision.
 
-## Checkpoint and terminal failure
+## Fresh calibration19 — FAIL
 
-Official root: `/home/kaloyan/nexus-bench/ccv2-lhcb-02-official-20261006-run15`. Actual driver exit **1**; journal state FAILED. First eligible engineering boundary: **E43, 480,825 tokens**, all T00/E01–E43 cumulative acceptance PASS. CP snapshot contains **1,781 files** and independently verifies without restore or candidate changes.
+Actual CLI exit **2**, journal COMPLETE, all T00/E01–E06 cumulative acceptance PASS. The failed eligibility condition is pressure growth, not an incomplete turn or provider error.
 
-- Snapshot seal: `04a742a59ad8df2fede71051c0d3b87eafa0207d6e6d851b64d95ccbe6ec0554`.
-- Physical baseline hash: `29ab87517a9bb149862de830bab5d19769ea65444829957dcc9062ea53a03eda`.
-- Durable session hash at CP: `49267862f0b2904a433b5d41700a7094eaa460268d22f2b1d62efe52dd78ac6a`.
-- Native E44: PASS, pressure 495,517; E45: PASS, pressure 519,293.
-- E46: durable turn 47 completed at sequence 13,654; protected-file equality failed before official grading/pressure publication. Read-only terminal pressure is 554,375, diagnostic only.
-- T99: NOT RUN. Native final correctness and final critical ratio: UNVERIFIED.
+| Phase | Final pressure | Pressure growth | Functional acceptance | Growth floor |
+| --- | ---: | ---: | --- | --- |
+| E01 | 32,306 | 19,334 | PASS | PASS |
+| E02 | 53,351 | 21,045 | PASS | PASS |
+| E03 | 72,296 | 18,945 | PASS | PASS |
+| E04 | 97,838 | 25,542 | PASS | PASS |
+| E05 | 107,702 | 9,864 | PASS | FAIL |
+| E06 | 123,281 | 15,579 | PASS | PASS |
 
-The eight added files are `probe_cs_a.py` and `probe_cs2_a.py` through `probe_cs2_g.py`. Durable `run_code` tool calls beginning at sequence 13,072 show candidate creation. No existing protected file was removed or changed. The exact hashes, tool calls, successful turn/end, and zero retry evidence are in the [terminal audit](/home/kaloyan/nexus-bench/ccv2-lhcb-02-official-20261006-run15/reports/terminal-protocol-violation-audit.json).
+Mean **18,384.833333**, median **19,139.5**, minimum **9,864** tokens. Exact failure reasons: `['E05:growth-below-10000']`. The target 15k–25k range and overall mean do not override the mandatory per-phase minimum. Growth uses authoritative durable provider pressure boundaries; first E05 before = 97,838 and last after = 107,702. No 136-token rounding allowance exists in the frozen criteria.
 
-The [E46 prompt](/home/kaloyan/Projects/Nexus/benchmarks/ccv2-lhcb-02/prompts/E46-engineering.md) explicitly says “Edit src only”; the [contract](/home/kaloyan/Projects/Nexus/benchmarks/ccv2-lhcb-02/CONTRACT.md) defines the same boundary. The [frozen policy](/home/kaloyan/Projects/Nexus/benchmarks/ccv2-lhcb-02/PROVIDER-FAILURE-POLICY.md) states: “Successful turns, grading failures, protocol errors and source drift never retry.” This was a successful provider turn with a candidate protocol error. There is no authorized transient-provider retry, and no candidate repair, file removal, ignored guard, new prompt, or arm-specific exception was used. Production/Forced execution requires full Native validation under the frozen runner and therefore did not start. The requested full comparison remains incomplete.
+The official runner requires `calibration.status === PASS` with matching new workload/harness identity and scratch receipts. Running official16 from this FAIL report or using old calibration18 would violate that requirement. Repeating this unchanged revision to select a chance PASS, removing the failed phase, modifying pressure telemetry, adding pressure-only work, or lowering the floor was not performed. The fresh calibration result is preserved as the actual qualification outcome. The remaining three-arm work cannot be scientifically executed under this failed qualification.
 
-## Arm evidence and timing
+Calibration-only supplemental metrics: **65 steps**, **4,463,026 provider input tokens**, peak provider prompt **123,019**; successful model/agent execution **380,308 ms** from durable turn boundaries. Submitted calibration wall interval **438,703 ms**, from first T00 submission to report publication, excluding preparation/bootstrap. Provider retries **0**, observer status failures **0**, compiler executions **0**, durable compaction events **0**, surface replacements **0**. These are calibration observations, not a full Native arm or comparative CCv2 latency/token result. Input includes uncached plus cache read/write once; unavailable reasoning metrics remain null.
 
-| Measurement | Native | Production CCv2 | Forced CCv2 |
+## Three-arm status
+
+| Required result | Native | Production CCv2 | Forced CCv2 |
 | --- | --- | --- | --- |
-| Completed valid full arm | NO; T99 absent, protocol failure | UNVERIFIED; not run | UNVERIFIED; not run |
+| Full arm executed | NO | NO | NO |
 | Final correctness / critical ratio | UNVERIFIED | UNVERIFIED | UNVERIFIED |
-| Rollback | contract-rollback and journey-rollback PASS in incomplete Native diagnostic | UNVERIFIED | UNVERIFIED |
-| Input tokens | 37,910,933, partial E44–E46 only | UNVERIFIED | UNVERIFIED |
-| Peak provider prompt | 553,963, partial only | UNVERIFIED | UNVERIFIED |
-| Output tokens | 33,556, partial only | UNVERIFIED | UNVERIFIED |
-| Model steps | 73, partial only | UNVERIFIED | UNVERIFIED |
-| Successful agent execution | 617,385 ms, partial only | UNVERIFIED | UNVERIFIED |
-| Raw arm elapsed until terminal report | 702,763 ms, partial only | UNVERIFIED | UNVERIFIED |
-| Provider retries / aborted attempts | 0 / 0 | UNVERIFIED | UNVERIFIED |
-| Provider retry delay / observer errors | 0 ms / 0 | UNVERIFIED | UNVERIFIED |
-| CCv2 compiled requests / compiler executions | 0 / 0 | UNVERIFIED | UNVERIFIED |
-| Durable history compaction events / surface replacements | 0 / 0 | UNVERIFIED | UNVERIFIED |
-| Reduction / comparative latency / continuity | NOT MEASURED | NOT MEASURED | NOT MEASURED |
+| New revision rollback result | UNVERIFIED | UNVERIFIED | UNVERIFIED |
+| Compiler executions / compiled requests | UNVERIFIED | UNVERIFIED | UNVERIFIED |
+| Durable compaction count | UNVERIFIED | UNVERIFIED | UNVERIFIED |
+| Effective context / total input tokens | NOT MEASURED | NOT MEASURED | NOT MEASURED |
+| Successful model latency / full wall latency | NOT MEASURED | NOT MEASURED | NOT MEASURED |
+| Provider retries for full arm | UNVERIFIED | UNVERIFIED | UNVERIFIED |
+| Absolute / percentage reduction | NOT MEASURED | NOT MEASURED | NOT MEASURED |
+| Critical reasoning / continuity after CCv2 | UNVERIFIED | UNVERIFIED | UNVERIFIED |
 
-Input includes uncached input plus cache-read and cache-write tokens once per observed request. Partial Native cache read: 37,832,505; cache write: 0. Reasoning-token usage is unavailable, not zero. Clean agent execution sums durable turn boundaries; raw wall includes host grading, startup and observation. Prefix successful execution is 3,766,629 ms and is excluded from continuation metrics. No provider outage is attributed to CCv2. Compiler execution and durable history compaction are separate quantities.
+No full-arm zero or PASS is inferred from calibration. No old/partial Native evidence is paired with an unexecuted CCv2 arm.
 
-## Explicit scientific answers
+## Ten scientific answers
 
-1. **Does CCv2 reduce context/token usage?** UNVERIFIED; no completed paired comparison.
+1. **Does CCv2 reduce effective context/token usage?** UNVERIFIED; no new three-arm comparison.
 2. **By how many tokens?** UNVERIFIED; no paired absolute delta.
 3. **By what percentage?** UNVERIFIED; no paired percentage.
-4. **Production preserves all critical obligations?** UNVERIFIED; Production did not run.
-5. **Forced preserves all critical obligations?** UNVERIFIED; Forced did not run.
-6. **Rollback survives compaction?** UNVERIFIED. Native rollback probes pass before any compaction; this does not prove the after-compaction claim.
-7. **Latency cost or benefit?** UNVERIFIED comparatively. The partial Native execution and wall timings above are diagnostic only.
-8. **Reasoning continuity preserved?** UNVERIFIED for CCv2. All 46 engineering behavioral checks pass on the preserved Native candidate, but T99 and both CCv2 arms are absent.
-9. **Did an arm fail because of CCv2 rather than provider instability?** No observed CCv2 failure; neither CCv2 arm ran. Native violated the source-only protocol, with zero provider retry events or aborted runs.
-10. **Scientifically valid under frozen criteria?** **No: INFRASTRUCTURE_INVALID.** A natural valid checkpoint exists, but full Native validation, three valid arms and baseline equality across three runs are missing.
+4. **Does Production preserve all critical obligations?** UNVERIFIED; not run.
+5. **Does Forced preserve them?** UNVERIFIED; not run.
+6. **Does rollback survive compaction?** UNVERIFIED on this revision; E16/full arms and compaction comparison were not executed.
+7. **Measurable latency cost or benefit?** UNVERIFIED comparatively. Calibration-only clean and wall intervals above are supplemental.
+8. **Reasoning continuity preserved?** UNVERIFIED across CCv2; neither CCv2 arm ran.
+9. **Did an arm fail because of CCv2 rather than provider instability?** No observed CCv2 failure or provider instability. The new attempt stopped at the frozen calibration growth gate, before any arm.
+10. **Scientifically valid under frozen criteria?** **No.** Verdict **WORKLOAD_INADEQUATE**, scoped to failed representative qualification; mandatory calibration PASS, new CP-500 and three completed valid arms are absent.
 
-## Executed gates
+## Gates and evidence
 
-| Gate | Status | Evidence |
+| Gate | Actual result | Evidence |
 | --- | --- | --- |
-| Eight benchmark/regression suites | PASS with recheck: 280/280 unique tests | [gate ledger](/home/kaloyan/nexus-bench/ccv2-lhcb-02-official-20261006-run15/reports/lhcb02-e46-frozen-gates.json) and archived raw logs |
-| Original E31 anchor and new E46 focused checks | PASS: 8/8 | `lhcb02-e46-original-regression-restored.log` |
-| Fresh real calibration18 | PASS | [calibration](/home/kaloyan/nexus-bench/ccv2-lhcb-02-observer-20261006-run18/reports/calibration.json) |
-| Normal OC-01/source/route preparation | PASS for executed Native | `certification-bootstrap.json`, execution-source archive and durable records |
-| Natural live CP-500 and physical seal verification | PASS | `snapshots/CP-500/snapshot.json`, verified 1,781 files |
-| Live source-only protocol in E46 | FAIL | terminal audit and immutable pre-work hashes |
-| Full Native T99 / concentration validation | UNVERIFIED | T99 not submitted; no `native-candidate-validation.json` |
-| Production/Forced/equal three-arm baseline/benefit | UNVERIFIED | neither CCv2 arm started |
-| Read-only diagnostic engineering grade | PASS: 47/47 | [diagnostic](/home/kaloyan/nexus-bench/ccv2-lhcb-02-official-20261006-run15/reports/post-failure-engineering-grade.json), ineligible for comparison |
+| Tests + Workload | PASS: 138/138, exit 0 | `lhcb02-scratch-reviewed-full-workload.log`, 942,196.724957 ms |
+| AutoRunner + Bootstrap + Certification + Isolation + Official + Rehearsal | PASS: 152/152, exit 0 | `lhcb02-scratch-reviewed-full-observers.log`, 810,752.598562 ms |
+| Focused scratch/runtime/official checks | PASS: 84/84, exit 0 | `lhcb02-scratch-boundary-reviewed-focused.log` |
+| Fresh real calibration19 | **FAIL**, exit 2 | `reports/calibration.json`, `state/calibration-journal.json` |
+| Normal OC-01 / source / route preparation | PASS for calibration | certification bootstrap and durable request records |
+| New natural CP-500 / full Native validation | UNVERIFIED | new official run not started |
+| Three equal-baseline completed arms / benefit | UNVERIFIED | no new arm reports |
+| Official15 immutable history | PASS: 2,214 unchanged file hashes | `lhcb02-scratch-official15-history-integrity.json` |
 
-The suites are `Ccv2Lhcb02.Tests`, `Workload`, `AutoRunner`, `Bootstrap`, `Certification`, `Isolation`, `Official`, and `Rehearsal`, executed with pinned Node `--test` in groups of two (138 tests) and six (142 tests). The final 138-test group ran on 2612a76; the 142-test group ran on e3d6d7 with byte-proven unchanged runtime and six suites. A previous 137/138 result exposed an accidental E31 test target rename; the original target, input and expected result were restored before the final passing recheck. Interrupted earlier checks and raw red diagnostics remain archived; this is not a clean-first-pass claim. Frozen production did not change, so a new production build/migration/release was not part of this benchmark-only task. No release-readiness claim is made.
+Raw commands and log hashes for all eight suites are in [the gate ledger](/home/kaloyan/nexus-bench/ccv2-lhcb-02-observer-20261006-run19/reports/lhcb02-scratch-frozen-gates.json). No required FAIL/UNVERIFIED gate is presented as ready. Production source did not change; production build/release/migration work is outside this benchmark-only revision.
 
-## Per-phase pressure and concentration
+The first pre-live implementation `76bcdd2` briefly started full gates but self-review found a dropped nested Git symlink traversal check. Its owned test processes were stopped and logs classified **CANCELLED_UNVERIFIED**, before any live call. A permanent regression test demonstrated RED before restoring the original traversal; final `3fbbd38` then passed focused checks and all eight complete suites. Cancelled logs are retained and do not count toward the 290 passes. The T99 functional-body hash anchor remains unchanged; its new scratch addendum is explicitly tested rather than replacing the old correctness oracle.
 
-Shares below use the **observed incomplete** Native total of 554,375 tokens. E46 pressure is a read-only post-failure diagnostic; T99 is missing. Observed maximum share is 6.3282%; the mandatory full Native concentration gate remains UNVERIFIED.
+## Official15 stays permanently invalid
 
-| Phase | Pressure | Growth | Observed share | Official acceptance |
-| --- | ---: | ---: | ---: | --- |
-| T00 | 7,587 | 7,587 | 1.369% | PASS |
-| E01 | 41,332 | 33,745 | 6.087% | PASS |
-| E02 | 55,793 | 14,461 | 2.609% | PASS |
-| E03 | 73,402 | 17,609 | 3.176% | PASS |
-| E04 | 97,669 | 24,267 | 4.377% | PASS |
-| E05 | 113,294 | 15,625 | 2.818% | PASS |
-| E06 | 125,812 | 12,518 | 2.258% | PASS |
-| E07 | 139,619 | 13,807 | 2.491% | PASS |
-| E08 | 144,554 | 4,935 | 0.890% | PASS |
-| E09 | 149,419 | 4,865 | 0.878% | PASS |
-| E10 | 154,591 | 5,172 | 0.933% | PASS |
-| E11 | 159,310 | 4,719 | 0.851% | PASS |
-| E12 | 164,331 | 5,021 | 0.906% | PASS |
-| E13 | 169,639 | 5,308 | 0.957% | PASS |
-| E14 | 175,404 | 5,765 | 1.040% | PASS |
-| E15 | 180,624 | 5,220 | 0.942% | PASS |
-| E16 | 187,768 | 7,144 | 1.289% | PASS |
-| E17 | 194,616 | 6,848 | 1.235% | PASS |
-| E18 | 199,478 | 4,862 | 0.877% | PASS |
-| E19 | 204,848 | 5,370 | 0.969% | PASS |
-| E20 | 210,687 | 5,839 | 1.053% | PASS |
-| E21 | 215,702 | 5,015 | 0.905% | PASS |
-| E22 | 220,978 | 5,276 | 0.952% | PASS |
-| E23 | 234,949 | 13,971 | 2.520% | PASS |
-| E24 | 240,627 | 5,678 | 1.024% | PASS |
-| E25 | 258,411 | 17,784 | 3.208% | PASS |
-| E26 | 268,814 | 10,403 | 1.877% | PASS |
-| E27 | 285,138 | 16,324 | 2.945% | PASS |
-| E28 | 298,019 | 12,881 | 2.324% | PASS |
-| E29 | 310,023 | 12,004 | 2.165% | PASS |
-| E30 | 324,921 | 14,898 | 2.687% | PASS |
-| E31 | 339,573 | 14,652 | 2.643% | PASS |
-| E32 | 349,840 | 10,267 | 1.852% | PASS |
-| E33 | 358,823 | 8,983 | 1.620% | PASS |
-| E34 | 370,043 | 11,220 | 2.024% | PASS |
-| E35 | 382,279 | 12,236 | 2.207% | PASS |
-| E36 | 389,978 | 7,699 | 1.389% | PASS |
-| E37 | 404,593 | 14,615 | 2.636% | PASS |
-| E38 | 413,228 | 8,635 | 1.558% | PASS |
-| E39 | 425,641 | 12,413 | 2.239% | PASS |
-| E40 | 435,865 | 10,224 | 1.844% | PASS |
-| E41 | 450,725 | 14,860 | 2.680% | PASS |
-| E42 | 461,384 | 10,659 | 1.923% | PASS |
-| E43 | 480,825 | 19,441 | 3.507% | PASS |
-| E44 | 495,517 | 14,692 | 2.650% | PASS |
-| E45 | 519,293 | 23,776 | 4.289% | PASS |
-| E46 | 554,375 | 35,082 | 6.328% | PROTOCOL FAIL; diagnostic behavior PASS |
-| T99 | — | — | — | NOT RUN |
+Official15, `/home/kaloyan/nexus-bench/ccv2-lhcb-02-official-20261006-run15`, remains **INFRASTRUCTURE_INVALID / CANDIDATE_PROTOCOL_VIOLATION** under the old frozen protocol. E43 reached the first natural CP-500 at **480,825**; E44 and E45 passed at **495,517** and **519,293**. E46 had a durable completed turn and diagnostic pressure **554,375**; independent post-stop E01–E46/holdout grading passed **47/47**, but it created eight Python probes outside `src/`, so the old strict guard correctly stopped. That result is neither repaired nor reinterpreted.
 
-## Preserved reports and changes
+The new revision was created to give temporary diagnostics a distinct ephemeral boundary. Its source and calibration identity differ honestly from official15. The old physical checkpoint, session, source archive, candidate and reports remain untouched; 2,214 stored file hashes were verified unchanged. Old rollback/pressure/diagnostic evidence is historical only. All future CCv2 claims must come solely from a new-qualified frozen revision and its three completed arms; no such claims are made here.
 
-- [Machine-readable terminal result](/home/kaloyan/nexus-bench/ccv2-lhcb-02-official-20261006-run15/reports/final-scientific-report.json), [raw runner failure](/home/kaloyan/nexus-bench/ccv2-lhcb-02-official-20261006-run15/reports/benchmark-failure.json), [full journal](/home/kaloyan/nexus-bench/ccv2-lhcb-02-official-20261006-run15/state/official-journal.json).
-- [Execution source and test proof](/home/kaloyan/nexus-bench/ccv2-lhcb-02-official-20261006-run15/reports/execution-source.json); `harness-source.tar.gz` preserves executed source rather than this later report commit.
-- [Per-phase observations](/home/kaloyan/nexus-bench/ccv2-lhcb-02-official-20261006-run15/reports/per-phase-pressure.json), [terminal protocol audit](/home/kaloyan/nexus-bench/ccv2-lhcb-02-official-20261006-run15/reports/terminal-protocol-violation-audit.json), [terminal candidate/session archive](/home/kaloyan/nexus-bench/ccv2-lhcb-02-official-20261006-run15/reports/terminal-native-evidence/capture.json).
-- Earlier results and failed attempts remain separate: `historical-results-20261004.md`, `prior-attempts.json`, old official14 below-CP proof, and all raw diagnostic logs. They are not mixed into this comparison.
+## Reports and at most five changes
 
-At most five substantive changes in this completion sequence: one authorized E46 canonical pagination workflow; independent public/withheld stateful probes and malformed-proof regression; permanent preservation checks for all prior artifacts; restoration of the original E31 regression target; final evidence/report archival. The source-only guard, provider policy, frozen production and scientific thresholds were not changed after checkpoint. No source repair or measurement retry was performed after the candidate protocol violation.
+- [Machine-readable qualification outcome](/home/kaloyan/nexus-bench/ccv2-lhcb-02-observer-20261006-run19/reports/scratch-revision-qualification-outcome.json), [actual calibration](/home/kaloyan/nexus-bench/ccv2-lhcb-02-observer-20261006-run19/reports/calibration.json), [calibration-only metrics](/home/kaloyan/nexus-bench/ccv2-lhcb-02-observer-20261006-run19/reports/calibration-only-metrics.json).
+- [Executed source and archived gates](/home/kaloyan/nexus-bench/ccv2-lhcb-02-observer-20261006-run19/reports/execution-source.json), `harness-source.tar.gz`; [preservation proof](/home/kaloyan/nexus-bench/ccv2-lhcb-02-observer-20261006-run19/reports/lhcb02-scratch-preservation-proof.json).
+- [Official15's original report](/home/kaloyan/nexus-bench/ccv2-lhcb-02-official-20261006-run15/reports/RESULTS.md); its candidate/probe/session evidence remains at that original root.
+
+Changes: explicit isolated scratch directory/environment; deterministic phase/arm reset and empty-snapshot rules; uniform prompt addendum/new revision hashes; strict persistent guard with preserved Git link rejection; deterministic boundary regressions and immutable-history archival. No production, CCv2, functional task, obligation, grader, threshold, provider/model or provider-retry-policy change.
