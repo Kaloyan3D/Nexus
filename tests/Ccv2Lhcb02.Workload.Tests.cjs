@@ -232,7 +232,7 @@ test('E05 audit boundary rejects released consumer defect and preserves all prio
 });
 test('E05 audit negative controls detect missing replay, false deny labels and input mutation',()=>{
  const A=require('../benchmarks/ccv2-lhcb-02/fixture/audit-boundary.cjs'),dir=make(true),file=S.path.join(dir,'src/audited-service.ts');
- for(const code of [A.reference.replace('audits.push(', 'if(result.status!==200)audits.push('),A.reference.replace('decision:access,requestId','decision:result.status===201?access:\'deny\',requestId'),A.reference.replace('return result;',"command.requestId='changed';return result;")]){
+ for(const code of [A.reference.replace('audits.push(', 'if(result.status!==200)audits.push('),A.reference.replace('audits.push({operation,tenant,decision:access,requestId});',"audits.push({operation,tenant,decision:result.status===201?access:'deny',requestId});"),A.reference.replace('return result;',"command.requestId='changed';return result;")]){
   S.fs.writeFileSync(file,code);const probes=require('../benchmarks/ccv2-lhcb-02/grader/probes.cjs').grade(dir,['E05']);assert.equal(probes.probes.find(p=>p.id==='audit-service-consistency').pass,false);
  }
  S.fs.writeFileSync(file,A.reference);assert.equal(require('../benchmarks/ccv2-lhcb-02/grader/probes.cjs').grade(dir,['E05']).pass,true);
