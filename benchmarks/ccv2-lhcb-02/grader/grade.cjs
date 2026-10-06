@@ -14,6 +14,7 @@ function grade(dir,ids){
   const extension=require('../fixture/extensions.cjs');if(extension.specs.some(s=>s[0]===phase))for(const row of extension.integrations(phase)){try{const result=require('./extension-probes.cjs').integrate(sandbox,name,row.input);assert.deepEqual(result.output,row.expected);assert.deepEqual(result.input,row.input);}catch{failures++;}}
   const workflow=require('../fixture/workflows.cjs');if(workflow.specs.some(s=>s[0]===phase))for(const row of workflow.executions(phase)){try{assert.deepEqual(sandbox.run(workflow.scenarioCode(row.input)),row.expected);}catch{failures++;}}
   if(phase==='E46'){const pages=require('../fixture/canonical-statements.cjs');for(const row of pages.executions(phase)){try{assert.deepEqual(sandbox.run(pages.scenarioCode(row.input)),row.expected);}catch{failures++;}}}
+  if(phase==='E05'){const audit=require('../fixture/audit-boundary.cjs');for(const x of audit.inputs()){try{assert.deepEqual(sandbox.run(audit.scenarioCode(x)),audit.expected(x));}catch{failures++;}}}
   rows.push({phase,pass:failures===0,cases:cases.length});
  }
  const holdout=require('./probes.cjs').grade(dir,ids);rows.push({phase:'holdout',pass:holdout.pass,probes:holdout.probes});return rows;

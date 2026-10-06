@@ -9,7 +9,7 @@ const definition=require(path.join(BENCH,'manifest.json'));
 const manifest={...definition,baseSha:definition.productionBaseSha,protectedPaths:legacy.manifest.protectedPaths,
   stages:['T00',...definition.calibration.phases],checkpoints:Object.keys(definition.checkpoints)};
 function contractHash(){
-  const files=['manifest.json','phase-manifest.json','obligations.json','CONTRACT.md','SCRATCH-PROTOCOL.md',...fs.readdirSync(path.join(BENCH,'fixture')).sort().map(f=>'fixture/'+f),...fs.readdirSync(path.join(BENCH,'grader')).sort().map(f=>'grader/'+f),
+  const files=['manifest.json','phase-manifest.json','obligations.json','CONTRACT.md','SCRATCH-PROTOCOL.md','E05-REVISION.md',...fs.readdirSync(path.join(BENCH,'fixture')).sort().map(f=>'fixture/'+f),...fs.readdirSync(path.join(BENCH,'grader')).sort().map(f=>'grader/'+f),
     ...fs.readdirSync(path.join(BENCH,'prompts')).sort().map(f=>'prompts/'+f)];
   const code=fs.readdirSync(__dirname).filter(f=>f.endsWith('.cjs')&&!f.startsWith('official-')).sort();
   const reused=fs.readdirSync(path.resolve(__dirname,'../ccv2-lhcb')).filter(f=>f.endsWith('.cjs')).sort().map(f=>f+'\0'+fs.readFileSync(path.resolve(__dirname,'../ccv2-lhcb',f),'utf8')).join('\0');
@@ -17,7 +17,7 @@ function contractHash(){
 }
 // The calibrated scientific workload is independent of later official orchestration.
 function workloadHash(){
- const policy={protocolRevision:definition.protocolRevision,scratch:definition.scratch,productionBaseSha:definition.productionBaseSha,provider:definition.provider,model:definition.model,arms:definition.arms,checkpoints:definition.checkpoints,calibration:definition.calibration,acceptance:definition.acceptance};
+ const policy={workloadRevision:definition.workloadRevision,protocolRevision:definition.protocolRevision,scratch:definition.scratch,productionBaseSha:definition.productionBaseSha,provider:definition.provider,model:definition.model,arms:definition.arms,checkpoints:definition.checkpoints,calibration:definition.calibration,acceptance:definition.acceptance};
  const files=['phase-manifest.json','obligations.json',...['fixture','grader','prompts'].flatMap(dir=>fs.readdirSync(path.join(BENCH,dir)).sort().map(f=>dir+'/'+f))];
  return legacy.hash(legacy.json(policy)+files.map(f=>f+'\0'+fs.readFileSync(path.join(BENCH,f),'utf8')).join('\0'));
 }

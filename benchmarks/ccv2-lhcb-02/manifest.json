@@ -119,6 +119,7 @@
     "T99"
   ],
   "protocolRevision": "scratch-v1",
+  "workloadRevision": "e05-audit-v1",
   "scratch": {
     "directory": "scratch",
     "environment": "LHCB_SCRATCH",

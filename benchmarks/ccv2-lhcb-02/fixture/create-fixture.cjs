@@ -183,6 +183,7 @@ function postImported(store:any,document:any,command:any,actor:any,clock:()=>num
 }
 module.exports={postImported};
 `};
+  if(id==='E05')return {'src/audited-service.ts':require('./audit-boundary.cjs').reference};
   if(id==='E06')return {'src/recovery-service.ts':`const migration=require('./migrations.ts');const authorization=require('./authorization.ts');const recovery=require('./recovery.ts');
 function restore(store:any,document:any,actor:any){
   const migrated=migration.evaluate({document});
@@ -201,6 +202,7 @@ function integrationFiles(id){
   delete document.writerRevision;
   const posting={...migrated.records[0],id:String(Number(migrated.records[0].id))};
   return service.post(store,{...command,key:String(Number(command.key)),posting},actor,clock);`);
+ if(id==='E05')Object.assign(files,require('./audit-boundary.cjs').files());
  return files;
 }
 function phaseFiles(id){if(id==='E46')return require('./canonical-statements.cjs').phaseFiles(id);if(require('./workflows.cjs').specs.some(s=>s[0]===id))return require('./workflows.cjs').phaseFiles(id);if(require('./extensions.cjs').specs.some(s=>s[0]===id))return require('./extensions.cjs').phaseFiles(id);if(id==='T99')return require('./final.cjs').phaseFiles();if(/^E(?:0[7-9]|1[0-9]|2[0-4])$/.test(id))return require('./late.cjs').phaseFiles(id);if(!modules[id])throw Error('unknown-phase');const rows=cases(id);return {...(id==='E04'?{'evidence/E04/input-contract.json':JSON.stringify({required:['schedule','tenantScope','keyScope','balance','amount'],optionalMetadata:['steps','isolation'],amountContract:'positive safe integer, limited by available balance and safe destination arithmetic; no fixed 100-unit cap',supportedCallers:[{schedule:'retry-after-commit',tenantScope:'same',keyScope:'same',balance:79,amount:13},{schedule:'serial',tenantScope:'same',keyScope:'different',balance:1000,amount:101}]},null,2)+'\n'}:{}),...(id==='E03'?require('./import-boundary.cjs').files():{}),...integrationFiles(id),[`src/${modules[id]}.ts`]:sources[modules[id]],[`evidence/${id}/cases.jsonl`]:rows.map(JSON.stringify).join('\n')+'\n',[`evidence/${id}/incident.json`]:JSON.stringify({phase:id,component:modules[id],symptom:{E01:'fractional and unsafe postings accepted',E02:'future schema coerced and legacy identifiers altered',E03:'successful replay rejected by newer revision',E04:'same-key racing writers commit twice',E05:'cross-tenant writer accepted; sensitive request fields logged',E06:'prepared suffix treated as committed after restart'}[id],axes:'See distinct inputs and expected business outcomes in cases.jsonl',caseCount:rows.length,source:`src/${modules[id]}.ts`,reproduce:`node tools/verify.cjs ${id} --diagnose`},null,2)+'\n'};}

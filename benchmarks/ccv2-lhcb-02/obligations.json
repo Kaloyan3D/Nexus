@@ -129,11 +129,12 @@
       "introducedBy": "E05",
       "category": "security invariants",
       "critical": true,
-      "rule": "Audit is an allowlist; credentials and request bodies never appear.",
+      "rule": "Audit is an allowlist; credentials and request bodies never appear. Audited service calls record each access decision once without extra ledger writes or input mutation.",
       "grader": "behavior:redact-audit",
       "status": "implemented",
       "probeIds": [
-        "redact-audit"
+        "redact-audit",
+        "audit-service-consistency"
       ],
       "t99": true
     },
