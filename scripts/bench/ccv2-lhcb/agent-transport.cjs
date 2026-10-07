@@ -70,7 +70,8 @@ function createTransport(root,env,options={}){
     // Required provider/counter keys resolve from inherited environment, which
     // wins in the frozen credentials authority. No store is read or copied here.
     const probeEnv=options.readOnlyProbe?{NODE_OPTIONS:'--require='+S.path.join(__dirname,'read-only-network.cjs'),LHCB_READ_ONLY_AUDIT_FILE:S.inside(root,'state/autorunner-probe-network.json')}:{};
-    const child=ops.spawn(S.inside(install,'runtime/node/bin/node'),[S.inside(install,'app/node_modules/@deepseek-ai/dsh/lib/bin.js'),'web','--no-open','--port','3080'],{cwd:S.inside(install,'data'),detached:true,stdio:['ignore','pipe','pipe'],env:{PATH:S.inside(install,'runtime/node/bin')+':/usr/bin:/bin',HOME:root,DSH_HOME:S.inside(install,'data'),AIH_INSTALL_ROOT:install,...keys,NEXUS_INSTALL_ROOT:install,...probeEnv}});
+    const observerEnv=options.readOnlyProbe?{}:require('./provider-observability-stage.cjs').stage(S,root);
+    const child=ops.spawn(S.inside(install,'runtime/node/bin/node'),[S.inside(install,'app/node_modules/@deepseek-ai/dsh/lib/bin.js'),'web','--no-open','--port','3080'],{cwd:S.inside(install,'data'),detached:true,stdio:['ignore','pipe','pipe'],env:{PATH:S.inside(install,'runtime/node/bin')+':/usr/bin:/bin',HOME:root,DSH_HOME:S.inside(install,'data'),AIH_INSTALL_ROOT:install,...keys,NEXUS_INSTALL_ROOT:install,...observerEnv,...probeEnv}});
     const startup={stdoutBytes:0,stderrBytes:0};for(const name of ['stdout','stderr']){child[name]?.on('data',bytes=>{startup[name+'Bytes']+=bytes.length;startup[name+'Hash']=S.hash((startup[name+'Hash']||'')+S.hash(bytes));});child[name]?.unref?.();}
     await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',()=>reject(new Error('lhcb-runner-runtime-start-failed')));});child.unref();
     await wait(()=>ops.token(child.pid)!==null,1000,'runner-runtime-start-failed');
@@ -87,7 +88,7 @@ function createTransport(root,env,options={}){
   }
   return {
     start,stop,resume,create:resume,
-    async submit(sessionId,text,rpcId){if(options.readOnlyProbe)S.fail('runner-read-only-probe-method-forbidden');submitted=true;const r=await rpc('session.prompt',{sessionId,mode:'queue',content:[{type:'text',text}]},rpcId);if(r.accepted!==true||r.command)S.fail('runner-prompt-not-accepted');},
+    async submit(sessionId,text,rpcId){if(options.readOnlyProbe)S.fail('runner-read-only-probe-method-forbidden');require('./provider-observability-stage.cjs').phaseContext(S,root,sessionId,rpcId);submitted=true;const r=await rpc('session.prompt',{sessionId,mode:'queue',content:[{type:'text',text}]},rpcId);if(r.accepted!==true||r.command)S.fail('runner-prompt-not-accepted');},
     async status(sessionId){const matches=(await list()).filter(x=>x.sessionId===sessionId);if(matches.length!==1||typeof matches[0].running!=='boolean')S.fail('runner-status-malformed');return {sessionId,cwd:matches[0].cwd,status:matches[0].running?'running':'idle'};},
     flush:rawFlush,
     async close(){
