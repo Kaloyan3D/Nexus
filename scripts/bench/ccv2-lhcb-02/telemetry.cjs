@@ -2,6 +2,7 @@
 const {S,load}=require('./infrastructure.cjs');
 const gate=require('../../../config/ContextActivationPressureV2.cjs'),wire=require('../../../config/ContextWireProjectorResponsesV2.cjs');
 const Session=load('session'),D=load('doctor');
+const Provider=require('./provider-accounting.cjs');
 const count=(events,type)=>events.filter(e=>e.type===type).length;
 const optional=(u,k)=>Number.isSafeInteger(u?.[k])&&u[k]>=0?u[k]:null;
 function compilerObservation(root){
@@ -39,7 +40,7 @@ function collectRequests(root,b,record){
    }catch(e){availability.requestProjection=(e.message||'').match(/^context-wire-[a-z0-9-]+/)?.[0]??'durable-request-unobservable';}
    const usage=response?.data.usage,total=gate.sampleTokensOfV2(usage);
    const pressureBefore=pressure(root,boundary),through=events.slice(0,(response?.seq??Math.max(start.seq,end-1))+1),pressureAfter=pressure(root,through);
-   const row={phase:record.promptId,sessionId:b.sessionId,taskId:b.taskId,taskInstanceId:b.taskInstanceId,
+   const row={phase:record.promptId,sessionId:b.sessionId,taskId:b.taskId,taskInstanceId:b.taskInstanceId,provider:header?.config.provider??null,model:header?.config.model??null,
     requestIdentity:S.hash(S.json([b.sessionId,b.taskId,b.taskInstanceId,step.seq,attempt])),attempt,
     durableSequenceRange:[start.seq,response?.seq??Math.max(start.seq,end-1)],requestHash,promptHash:record.promptHash,
     requestOutcome:response?(response.data.interrupted?'INTERRUPTED':'OBSERVED'):(segment.some(e=>e.type==='llm/retry')?'FAILED':'UNOBSERVED'),
@@ -51,7 +52,9 @@ function collectRequests(root,b,record){
    rows.push(row);
   }
  }
- return rows;
+ let sourceIdentityVerified=false;
+ try{sourceIdentityVerified=S.read(S.inside(root,'state/identity.json')).contractHash===S.contractHash();}catch{}
+ return Provider.attach(rows,events,record,Provider.readEvidence(root),Provider.resolvedPolicy(root),sourceIdentityVerified);
 }
 function evidenceHashes(events){
  const hashes=[];
@@ -65,10 +68,11 @@ function evidenceHashes(events){
 function phaseSummary(b,record,requests){
  const events=b.events.slice(record.startSeq,record.endSeq+1);
  // Counters in mutable journals are receipts, not pressure authority.
- const before=requests[0]?.pressureBefore??null,after=requests.at(-1)?.pressureAfter??null;
+ const accepted=requests.filter(r=>r.requestOutcome==='OBSERVED');
+ const before=accepted[0]?.pressureBefore??null,after=accepted.at(-1)?.pressureAfter??null;
  const terminal=events.filter(e=>e.type==='assistant/message').at(-1)?.data.message?.content?.filter(x=>x.type==='text');
  return {phase:record.promptId,pressureBefore:before,pressureAfter:after,pressureGrowth:before===null||after===null?null:after-before,
-  firstProviderInput:requests[0]?.providerInputTokens??null,lastProviderInput:requests.at(-1)?.providerInputTokens??null,requests:requests.length,toolCalls:count(events,'tool/call'),
+  firstProviderInput:accepted[0]?.providerInputTokens??null,lastProviderInput:accepted.at(-1)?.providerInputTokens??null,requests:requests.length,acceptedRequests:accepted.length,providerAccounting:Provider.accounting(requests),toolCalls:count(events,'tool/call'),
   newToolEvidenceHashes:evidenceHashes(events),terminalContentHash:terminal?.length?S.hash(S.json(terminal)):null,evidenceSetHash:record.evidenceSetHash,acceptance:record.acceptance??null,
   compactionEvents:events.filter(e=>e.type.startsWith('compaction/')).length,historyReplacements:events.filter(e=>e.surfaceOp&&e.surfaceOp!=='append').length};
 }

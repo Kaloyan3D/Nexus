@@ -9,9 +9,74 @@ const tmp=S.fs.mkdtempSync(S.path.join(S.os.tmpdir(),'lhcb02-offline-'));
 after(()=>{assert.equal(global.lhcbOfflineAudit.attempts(),0);S.fs.rmSync(tmp,{recursive:true,force:true});});
 function good(){
  const phases=S.manifest.calibration.phases.map((phase,i)=>({phase,pressureBefore:20000*i,pressureAfter:20000*(i+1),pressureGrowth:20000,acceptance:true,terminalContentHash:S.hash('terminal'+i),evidenceSetHash:S.hash('set'+i),toolCalls:3,newToolEvidenceHashes:[S.hash('evidence'+i)],compactionEvents:0,historyReplacements:0}));
- const requests=phases.map((p,i)=>({phase:p.phase,sessionId:'session-offline',taskId:'TASK-0001',taskInstanceId:'instance',requestIdentity:S.hash('identity'+i),promptHash:require('../scripts/bench/ccv2-lhcb-02/infrastructure.cjs').authority.promptHashes[p.phase],durableSequenceRange:[i*10,i*10+3],requestOutcome:'OBSERVED',uncachedInputTokens:20000*(i+1),cacheReadTokens:0,cacheWriteTokens:0,outputTokens:25,historicalToolCallCount:2,historicalToolResultCount:2,historyCompactionCount:0,historyReplacementCount:0,providerInputTokens:20000*(i+1),mode:'NATIVE',compilerExecutionCount:0,requestHash:S.hash('request'+i),canonicalRequestByteCount:1234,messageCount:4,reconstructedWireItemCount:4,pressureBefore:p.pressureBefore,pressureAfter:p.pressureAfter,pressureDelta:20000}));return {phases,requests};
+ const requests=phases.map((p,i)=>({phase:p.phase,sessionId:'session-offline',taskId:'TASK-0001',taskInstanceId:'instance',requestIdentity:S.hash('identity'+i),promptHash:require('../scripts/bench/ccv2-lhcb-02/infrastructure.cjs').authority.promptHashes[p.phase],durableSequenceRange:[i*10,i*10+3],requestOutcome:'OBSERVED',provider:S.manifest.provider,model:S.manifest.model,uncachedInputTokens:20000*(i+1),cacheReadTokens:0,cacheWriteTokens:0,outputTokens:25,historicalToolCallCount:2,historicalToolResultCount:2,historyCompactionCount:0,historyReplacementCount:0,providerInputTokens:20000*(i+1),mode:'NATIVE',compilerExecutionCount:0,requestHash:S.hash('request'+i),canonicalRequestByteCount:1234,messageCount:4,reconstructedWireItemCount:4,pressureBefore:p.pressureBefore,pressureAfter:p.pressureAfter,pressureDelta:20000}));return {phases,requests};
 }
+function recovered(){
+ const x=good(),replacement=x.requests[4];
+ Object.assign(replacement,{attempt:1,provider:S.manifest.provider,model:S.manifest.model});
+ const raw={observationId:'failed-sdk',sessionId:replacement.sessionId,benchmarkPhase:replacement.phase,benchmarkRpcId:'rpc',turn:6,step:10,provider:S.manifest.provider,model:S.manifest.model,harnessRetryNumber:0};
+ const failed={...replacement,attempt:0,requestIdentity:S.hash('failed-identity'),durableSequenceRange:[40,42],requestOutcome:'FAILED',pressureAfter:replacement.pressureBefore,pressureDelta:0,providerInputTokens:null,uncachedInputTokens:null,cacheReadTokens:null,cacheWriteTokens:null,outputTokens:null};
+ replacement.durableSequenceRange=[43,45];
+ failed.failureEvidence={rawInvocation:{...raw,kind:'provider_request_start',timestamp:new Date(1000).toISOString()},rawFailure:{...raw,kind:'provider_raw_failure',timestamp:new Date(1100).toISOString(),sdkAttemptNumber:1,error:{name:'APIConnectionError',cause:{name:'TypeError',message:'fetch failed',cause:{code:'ECONNRESET'}}}},rawEnd:{...raw,kind:'provider_request_end',timestamp:new Date(1100).toISOString(),outcome:'FAILURE',sdkAttempts:1,providerReportedInputTokens:null},failedRequestHasCommittedResult:false,acceptedMutation:false,
+  retryPolicy:{mode:'normal',maxRetries:5,retryableCodes:['EMPTY_RESPONSE','RATE_LIMIT','SERVER','TIMEOUT','TRANSPORT'],initialDelayMs:500,maxDelayMs:10000,jitterRatio:0.1},
+  scheduled:{seq:42,time:1101,data:{provider:S.manifest.provider,mode:'normal',retryId:'retry',turn:6,step:10,retry:1,maxRetries:5,delayMs:500,policyKey:'["normal",5,["EMPTY_RESPONSE","RATE_LIMIT","SERVER","TIMEOUT","TRANSPORT"],500,10000,0.1]',failure:{code:'TRANSPORT'}}},started:{seq:43,time:1601,data:{retryId:'retry',turn:6,step:10,retry:1}},
+  replacementRequestIdentity:replacement.requestIdentity,replacementRawEnd:{...raw,observationId:'replacement-sdk',harnessRetryNumber:1,kind:'provider_request_end',timestamp:new Date(1700).toISOString(),outcome:'SUCCESS',sdkAttempts:1},sourceIdentityVerified:true};
+ x.requests.splice(4,0,failed);return x;
+}
+test('recovered ECONNRESET without Response may qualify with complete accepted pressure',()=>{const x=recovered(),r=calibration(x.phases,x.requests);assert.equal(r.status,'PASS',JSON.stringify(r));});
+test('unknown failed usage stays null and billing remains incomplete',()=>{const x=recovered(),r=calibration(x.phases,x.requests);assert.equal(x.requests[4].providerInputTokens,null);assert.equal(r.providerAccounting.failedAttempts[0].providerInputTokens,null);assert.equal(r.providerAccounting.failedAttemptUsageUnavailableCount,1);assert.equal(r.providerAccounting.billingUsageComplete,false);assert(r.diagnostics.includes('provider-failed-attempt-usage-unavailable'));});
+for(const [name,mutate] of [
+ ['committed result',x=>{x.requests[4].failureEvidence.failedRequestHasCommittedResult=true;}],
+ ['no successful replacement',x=>{x.requests[5].requestOutcome='UNOBSERVED';}],
+ ['missing accepted pressure',x=>{x.requests[5].pressureAfter=null;}],
+ ['unobserved request',x=>{x.requests[4].requestOutcome='UNOBSERVED';}],
+ ['illegal retry',x=>{x.requests[4].failureEvidence.scheduled.data.retry=6;}],
+ ['provider mismatch',x=>{x.requests[4].failureEvidence.rawFailure.provider='other';}],
+ ['unverified identity',x=>{x.requests[4].failureEvidence.sourceIdentityVerified=false;}],
+ ['accepted mutation',x=>{x.requests[4].failureEvidence.acceptedMutation=true;}],
+ ['missing raw invocation',x=>{x.requests[4].failureEvidence.rawInvocation=null;}],
+ ['missing accepted usage',x=>{x.requests[5].providerInputTokens=null;}],
+])test('recovery still rejects '+name,()=>{const x=recovered();mutate(x);assert.equal(calibration(x.phases,x.requests).status,'FAIL');});
+test('scientific totals exclude failed usage while accounting retains known failed input',()=>{const x=recovered();x.requests[4].failureEvidence.rawEnd.providerReportedInputTokens=123456;const r=calibration(x.phases,x.requests);assert.equal(r.status,'PASS');assert.equal(r.providerAccounting.successfulAcceptedProviderInputTokens,420000);assert.equal(r.providerAccounting.knownFailedAttemptProviderInputTokens,123456);assert.equal(r.providerAccounting.totalKnownProviderInputTokens,543456);assert.equal(r.providerAccounting.failedAttempts.length,1);assert.equal(r.scientificPressure.totalAcceptedProviderInputTokens,420000);assert.equal(r.providerAccounting.failedAttempts[0].retry.actualBackoffMs,500);});
+function joined(){
+ const x=recovered(),r=x.requests[4],f=r.failureEvidence,events=Array.from({length:46},(_,seq)=>({seq,type:'noop',time:1000,data:{}}));
+ events[40]={seq:40,time:1000,type:'step/start',data:{turn:6,step:10}};
+ events[41]={seq:41,time:1100,type:'assistant/chunk',data:{chunk:{type:'finish'}}};
+ events[42]={...f.scheduled,type:'llm/retry'};events[43]={...f.started,type:'llm/retry-started'};events[45]={seq:45,time:1701,type:'assistant/message',data:{}};
+ const raw=[f.rawInvocation,f.rawFailure,f.rawEnd,f.replacementRawEnd];delete r.failureEvidence;
+ return {x,events,raw,record:{rpcId:'rpc'},policy:f.retryPolicy};
+}
+test('read-only join binds raw failure and successful replacement to durable retry receipts',()=>{
+ const A=require('../scripts/bench/ccv2-lhcb-02/provider-accounting.cjs'),{x,events,raw,record,policy}=joined();
+ const originals=JSON.stringify({events,raw,record,policy});A.attach(x.requests,events,record,raw,policy,true);
+ assert.equal(calibration(x.phases,x.requests).status,'PASS');assert.equal(JSON.stringify({events,raw,record,policy}),originals);
+});
+for(const [name,mutate] of [
+ ['ambiguous raw starts',q=>q.raw.push({...q.raw[0],observationId:'other'})],
+ ['wrong RPC',q=>{q.record.rpcId='other';}],
+ ['committed tool mutation',q=>{q.events[41].type='tool/call';}],
+ ['partial output',q=>{q.events[41].data.chunk.type='text-delta';}],
+ ['wrong raw replacement model',q=>{q.raw[3].model='other';}],
+ ['wrong policy',q=>{q.policy.initialDelayMs=800;}],
+ ['raw failure absent',q=>{q.raw.splice(1,1);}],
+])test('telemetry join rejects '+name,()=>{const A=require('../scripts/bench/ccv2-lhcb-02/provider-accounting.cjs'),q=joined();mutate(q);A.attach(q.x.requests,q.events,q.record,q.raw,q.policy,true);assert.equal(calibration(q.x.phases,q.x.requests).status,'FAIL');});
+test('raw reader fails closed for missing or malformed capture without creating files',()=>{
+ const A=require('../scripts/bench/ccv2-lhcb-02/provider-accounting.cjs'),root=S.path.join(tmp,'raw-reader'),file=S.path.join(root,'nexus-root/logs/provider-observability.jsonl');
+ assert.deepEqual(A.readEvidence(root),[]);assert(!S.fs.existsSync(root));S.fs.mkdirSync(S.path.dirname(file),{recursive:true});S.fs.writeFileSync(file,'{"truncated":');assert.deepEqual(A.readEvidence(root),[]);assert.equal(S.fs.readFileSync(file,'utf8'),'{"truncated":');
+});
+test('accounting reads the pinned provider resolver without configuring or calling it',()=>{
+ const A=require('../scripts/bench/ccv2-lhcb-02/provider-accounting.cjs'),root=S.path.join(tmp,'policy-reader'),install=S.path.join(root,'nexus-root');
+ for(const dir of ['app','config','data'])S.fs.mkdirSync(S.path.join(install,dir),{recursive:true});
+ S.fs.cpSync(S.path.join(S.os.homedir(),'.local/share/nexus/app/node_modules'),S.path.join(install,'app/node_modules'),{recursive:true});
+ const config=S.path.join(install,'config/settings.yaml'),data=S.path.join(install,'data/settings.yaml');
+ S.fs.writeFileSync(config,'llm-pi-ai:\n  providers:\n    opencode-go: {}\n');S.fs.writeFileSync(data,'{}\n');
+ const originals=[config,data].map(p=>S.fs.readFileSync(p,'utf8'));
+ assert.equal(A.policyKey(A.resolvedPolicy(root)),'["normal",5,["EMPTY_RESPONSE","RATE_LIMIT","SERVER","TIMEOUT","TRANSPORT"],500,10000,0.1]');
+ assert.deepEqual([config,data].map(p=>S.fs.readFileSync(p,'utf8')),originals);
+ S.fs.writeFileSync(config,'{}\n');assert.equal(A.resolvedPolicy(root),null);
+});
 test('calibration requires all six stages, >=10k each, and monotonic total input',()=>{let x=good();assert.equal(calibration(x.phases,x.requests).status,'PASS');x.phases[0].pressureGrowth=9999;assert.equal(calibration(x.phases,x.requests).status,'FAIL');x=good();x.requests[2].providerInputTokens=1;assert(calibration(x.phases,x.requests).reasons.includes('provider-input-not-monotonic'));assert.equal(calibration([],[]).status,'FAIL');});
+test('unverifiable accepted provider or model identity stays fatal',()=>{for(const key of ['provider','model']){const x=good();delete x.requests[2][key];assert.equal(calibration(x.phases,x.requests).status,'FAIL');}});
 for(const [key,value] of [['compactionEvents',1],['historyReplacements',1],['acceptance',false],['toolCalls',1],['terminalContentHash',null],['evidenceSetHash',null]])test('calibration rejects '+key,()=>{const x=good();x.phases[1][key]=value;assert.equal(calibration(x.phases,x.requests).status,'FAIL');});
 test('repeated evidence and terminal hashes cannot pass',()=>{const x=good();x.phases[1].newToolEvidenceHashes=x.phases[0].newToolEvidenceHashes;x.phases[1].terminalContentHash=x.phases[0].terminalContentHash;assert.equal(calibration(x.phases,x.requests).status,'FAIL');});
 test('compiled requests and missing wire observation cannot pass',()=>{for(const patch of [{mode:'COMPILED'},{compilerExecutionCount:1},{requestHash:null},{providerInputTokens:null}]){const x=good();Object.assign(x.requests[2],patch);assert.equal(calibration(x.phases,x.requests).status,'FAIL');}});

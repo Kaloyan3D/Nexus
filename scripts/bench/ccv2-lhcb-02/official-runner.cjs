@@ -5,6 +5,7 @@ const T=require('./telemetry.cjs'),V=require('./validity.cjs'),Snapshots=require
 const {release,acceptance,protectedHashes}=require('./autorunner.cjs');
 const P=require('./official-provider-policy.cjs'),Scratch=require('./scratch.cjs');
 const M=require('../ccv2-lhcb/metrics.cjs'),cp=require('node:child_process');
+const Provider=require('./provider-accounting.cjs');
 const Session=load('session'),D=load('doctor'),ids=S.manifest.candidatePhases,arms=['native','production','forced'];
 const same=(a,b)=>S.json(a)===S.json(b),identity=b=>Object.fromEntries(['sessionId','taskId','taskInstanceId'].map(k=>[k,b[k]]));
 function protocolHash(){return S.hash(S.workloadHash()+['official-runner.cjs','official-snapshot.cjs','official-provider-policy.cjs'].map(f=>S.fs.readFileSync(S.path.join(__dirname,f),'utf8')).join('\0'));}
@@ -20,6 +21,7 @@ function completion(events,r){
 }
 function verifyCalibration(raw){
  const root=S.rootOf(raw),marker=S.read(S.inside(root,'state/identity.json')),report=S.read(S.inside(root,'reports/calibration.json')),journal=S.read(S.inside(root,'state/calibration-journal.json'));
+ if(marker.contractHash!==S.contractHash())S.fail('lhcb02-official-calibration-required');
  if(report.protocolRevision!==S.manifest.protocolRevision||!same(report.scratchPolicy,Scratch.POLICY)||marker.benchmarkId!==S.manifest.benchmarkId||marker.baseSha!==S.manifest.baseSha||marker.root!==root||marker.contractHash!==report.contractHash||journal.contractHash!==report.contractHash||journal.phase!=='COMPLETE'||report.workloadHash!==S.workloadHash()||report.calibration?.status!=='PASS'||S.fs.existsSync(S.inside(root,'state/simulation.json'))||journal.stages.length!==S.manifest.stages.length)S.fail('lhcb02-official-calibration-required');
  Scratch.assertEmpty(root);const b=Session.binding(root);routeEvidence(b,journal.creation.authority,true);
  for(const [i,r] of journal.stages.entries()){
@@ -95,6 +97,8 @@ class OfficialRunner{
   for(const id of ids.slice(meta.completedStages.length))await this.stage(id,run.stages,arm);
   await this.transport.close();const b=this.binding(true),events=b.events.slice(startSeq),ds=decisions(this.root,startLogBytes),activation=Session.activation(b.events,this.root,arm).rows.filter(row=>events.some(e=>e.type==='assistant/message'&&e.data.turn===row.turn&&e.data.step===row.step));
   const metrics=M.collectMetrics(events,ds,arm,{telemetryComplete:arm==='native'?ds.length===0:ds.length===events.filter(e=>e.type==='assistant/message').length,replayRows:activation,wallClockMs:run.stages.reduce((sum,r)=>sum+r.agentLatencyMs,0)});
+  metrics.providerAccounting=Provider.accounting(run.stages.flatMap(r=>T.collectRequests(this.root,b,r)));
+  metrics.scientificPressure={totalAcceptedProviderInputTokens:metrics.providerAccounting.successfulAcceptedProviderInputTokens,phaseBoundaries:run.stages.map(r=>({phase:r.promptId,pressureAfter:r.pressure}))};
   const validation=M.validateArm(metrics,arm);run.grade=finalGrade(this.root);run.metrics=metrics;run.decisions=ds;run.agentLatencyMs=metrics.wallClockMs;run.timing=P.summary(run.stages,Date.now()-run.startedAt);run.valid=validation.status==='VALID'&&Number.isFinite(metrics.providerInputTokensTotal)&&metrics.steps>0&&!metrics.infrastructureInvalid&&metrics.toolProtocolViolations===0;run.invalidReason=validation.reason;run.finalWorkspaceHash=S.treeHash(S.inventory(S.inside(this.root,'workspace')));this.save();S.write(S.inside(this.root,'reports/arm-'+arm+'.json'),run);return run;
  }
  async arm(arm,meta){
