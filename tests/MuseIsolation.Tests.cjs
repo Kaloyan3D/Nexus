@@ -21,6 +21,7 @@ const os = require('node:os')
 const path = require('node:path')
 
 const repoRoot = path.resolve(__dirname, '..')
+const { createPresetCtx } = require('./lib/AgentRequestComposition.cjs')
 const isolation = require(path.join(repoRoot, 'config', 'Muse-Isolation.cjs'))
 
 let passed = 0
@@ -81,14 +82,11 @@ function museState(overrides) {
 }
 
 function makeCtx() {
-  const handlers = {}
   const registrations = []
-  return {
-    handlers,
+  return createPresetCtx({
     registrations,
-    on: (name, handler) => { handlers[name] = handler },
     shellEnv: { register: (definition) => { registrations.push(definition) } },
-  }
+  })
 }
 
 async function runRequest(ctx, session, proposed, nextImpl) {

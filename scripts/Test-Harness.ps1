@@ -45,6 +45,11 @@ $suites = @(
     [ordered]@{ name='MuseProvider'; script='tests/MuseProvider.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='MuseAgentPlane'; script='tests/MuseAgentPlane.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='MuseInstall'; script='tests/MuseInstall.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='SourceCompleteness'; script='tests/SourceCompleteness.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='MusePresetDependencyClosure'; script='tests/MusePresetDependencyClosure.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='MusePresetCleanInstall'; script='tests/MusePresetCleanInstall.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ControllerPresetCleanInstall'; script='tests/ControllerPresetCleanInstall.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ControllerPresetInstalled'; script='tests/ControllerPresetInstalled.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='VisualReview'; script='tests/VisualReview.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='VisualLoop'; script='tests/VisualLoop.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='NexusWorkspace'; script='tests/NexusWorkspace.Tests.ps1'; executable=$powershell; kind='powershell' },
@@ -72,6 +77,7 @@ $suites = @(
     [ordered]@{ name='MuseReasoningSignals'; script='tests/MuseReasoningSignals.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='MuseReasoningActivity'; script='tests/MuseReasoningActivity.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='MuseIsolation'; script='tests/MuseIsolation.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='MuseRoutingAuthorityOrdering'; script='tests/MuseRoutingAuthorityOrdering.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionBridge'; script='tests/ContextCompactionBridge.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionAcceptance'; script='tests/ContextCompactionAcceptance.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCompactionCrash'; script='tests/ContextCompactionCrash.Tests.cjs'; executable=$layout.Node; kind='node' },
@@ -89,7 +95,112 @@ $suites = @(
     [ordered]@{ name='PlatformSupport'; script='tests/PlatformSupport.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='StartupProviderIsolation'; script='tests/StartupProviderIsolation.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='PowerShellPortability'; script='tests/PowerShellPortability.Tests.ps1'; executable=$powershell; kind='powershell' },
-    [ordered]@{ name='AihControllerHost'; script='tests/AihControllerHost.Tests.cjs'; executable=$layout.Node; kind='node' }
+    [ordered]@{ name='AihControllerHost'; script='tests/AihControllerHost.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCheckpointV2'; script='tests/ContextCheckpointV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextTrustV2'; script='tests/ContextTrustV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextSnapshotV2'; script='tests/ContextSnapshotV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextSafePointV2'; script='tests/ContextSafePointV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextSafePointV2LiveHost'; script='tests/ContextSafePointV2LiveHost.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
+    [ordered]@{ name='ContextCheckpointabilityV2'; script='tests/ContextCheckpointabilityV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCheckpointabilityV2LiveHost'; script='tests/ContextCheckpointabilityV2LiveHost.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
+    [ordered]@{ name='ContextPressureV2'; script='tests/ContextPressureV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextRetentionV2'; script='tests/ContextRetentionV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPressureRetentionV2LiveHost'; script='tests/ContextPressureRetentionV2LiveHost.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
+    [ordered]@{ name='ContextShadowV2'; script='tests/ContextShadowV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextShadowV2LiveHost'; script='tests/ContextShadowV2LiveHost.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
+    [ordered]@{ name='ContextActiveApplyV2'; script='tests/ContextActiveApplyV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextActiveApplyV2LiveHost'; script='tests/ContextActiveApplyV2LiveHost.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
+    [ordered]@{ name='ContextActiveApplyV2XProc'; script='tests/ContextActiveApplyV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextGenerationRuntimeV2'; script='tests/ContextGenerationRuntimeV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextGenerationRuntimeV2LiveHost'; script='tests/ContextGenerationRuntimeV2LiveHost.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
+    [ordered]@{ name='ContextGenerationRuntimeV2XProc'; script='tests/ContextGenerationRuntimeV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextRecoveryV2'; script='tests/ContextRecoveryV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextRecoveryV2XProc'; script='tests/ContextRecoveryV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextRecoveryV2LiveHost'; script='tests/ContextRecoveryV2LiveHost.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
+    [ordered]@{ name='ContextCompactionV2DshGenerationProof'; script='tests/ContextCompactionV2DshGenerationProof.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
+    [ordered]@{ name='ContextCompactionV2Operation'; script='tests/ContextCompactionV2Operation.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
+    [ordered]@{ name='ContextCompactionV2FoundationHardening'; script='tests/ContextCompactionV2FoundationHardening.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompleteTaskV2'; script='tests/ContextCompleteTaskV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompleteTaskV2LiveHost'; script='tests/ContextCompleteTaskV2LiveHost.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
+    [ordered]@{ name='ContextCompleteTaskV2XProc'; script='tests/ContextCompleteTaskV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPageV2'; script='tests/ContextPageV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPageStoreV2'; script='tests/ContextPageStoreV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPageStoreV2Crash'; script='tests/ContextPageStoreV2Crash.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPageStoreV2XProc'; script='tests/ContextPageStoreV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPageStoreV2Fallback'; script='tests/ContextPageStoreV2Fallback.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPageStoreV2FallbackXProc'; script='tests/ContextPageStoreV2FallbackXProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPageStoreV2Secrets'; script='tests/ContextPageStoreV2Secrets.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPageStoreV2Advisory'; script='tests/ContextPageStoreV2Advisory.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextEvidenceRehydrationV2'; script='tests/ContextEvidenceRehydrationV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextEvidenceRehydrationV2LiveHost'; script='tests/ContextEvidenceRehydrationV2LiveHost.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
+    [ordered]@{ name='ContextEvidenceRehydrationV2XProc'; script='tests/ContextEvidenceRehydrationV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextEvidenceRehydrationV2H'; script='tests/ContextEvidenceRehydrationV2H.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextMemoryTierV2'; script='tests/ContextMemoryTierV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextMemoryTierV2XProc'; script='tests/ContextMemoryTierV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextMemoryTierV2H'; script='tests/ContextMemoryTierV2H.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextViewV2'; script='tests/ContextViewV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextViewV2XProc'; script='tests/ContextViewV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerV2'; script='tests/ContextCompilerV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerV2XProc'; script='tests/ContextCompilerV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerV2H'; script='tests/ContextCompilerV2H.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextRetrieverV2'; script='tests/ContextRetrieverV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextRetrieverV2XProc'; script='tests/ContextRetrieverV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextRetrieverV2H'; script='tests/ContextRetrieverV2H.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextBudgetAllocatorV2'; script='tests/ContextBudgetAllocatorV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextBudgetAllocatorV2XProc'; script='tests/ContextBudgetAllocatorV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextBudgetAllocatorV2H'; script='tests/ContextBudgetAllocatorV2H.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompressionLadderV2'; script='tests/ContextCompressionLadderV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompressionLadderV2XProc'; script='tests/ContextCompressionLadderV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompressionLadderV2H'; script='tests/ContextCompressionLadderV2H.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPromptLayoutV2'; script='tests/ContextPromptLayoutV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPromptLayoutV2XProc'; script='tests/ContextPromptLayoutV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerShadowV2'; script='tests/ContextCompilerShadowV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerShadowV2XProc'; script='tests/ContextCompilerShadowV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerShadowHostV2'; script='tests/ContextCompilerShadowHostV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextModelCapabilityV2'; script='tests/ContextModelCapabilityV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextPromptRendererV2'; script='tests/ContextPromptRendererV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerActiveV2'; script='tests/ContextCompilerActiveV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerActiveV2XProc'; script='tests/ContextCompilerActiveV2XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerActiveHostV2'; script='tests/ContextCompilerActiveHostV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextTokenizerDeepseekV4'; script='tests/ContextTokenizerDeepseekV4.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextTokenizerDeepseekV4XProc'; script='tests/ContextTokenizerDeepseekV4XProc.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerActiveDeepseekV4'; script='tests/ContextCompilerActiveDeepseekV4.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerActiveMuseRoutesV2'; script='tests/ContextCompilerActiveMuseRoutesV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextRemoteCounterMuseV2'; script='tests/ContextRemoteCounterMuseV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextRemoteCounterResilienceV2'; script='tests/ContextRemoteCounterResilienceV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerActiveMuseV2'; script='tests/ContextCompilerActiveMuseV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerActiveOpencodeV2'; script='tests/ContextCompilerActiveOpencodeV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextAuthorityCertificationV2'; script='tests/ContextAuthorityCertificationV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompilerActiveOpencodeHostV2'; script='tests/ContextCompilerActiveOpencodeHostV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextActivationPressureV2'; script='tests/ContextActivationPressureV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextR1RealSessionContracts'; script='tests/ContextR1RealSessionContracts.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextMemoryProducerV2'; script='tests/ContextMemoryProducerV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompactionV2'; script='tests/ContextCompactionV2.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='ComposedRoutingAuthority'; script='tests/ComposedRoutingAuthority.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ComposedRoutingMatrix'; script='tests/ComposedRoutingMatrix.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompactionF10ReaderBounds'; script='tests/ContextCompactionF10ReaderBounds.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompactionF4Privacy'; script='tests/ContextCompactionF4Privacy.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='ContextCompactionF6UsageRace'; script='tests/ContextCompactionF6UsageRace.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompactionF7Telemetry'; script='tests/ContextCompactionF7Telemetry.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompactionF8GitFacts'; script='tests/ContextCompactionF8GitFacts.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextCompactionF9TailBound'; script='tests/ContextCompactionF9TailBound.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextWireProjectorResponsesV2'; script='tests/ContextWireProjectorResponsesV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ControllerSessionBootstrap'; script='tests/ControllerSessionBootstrap.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='DeepSeekIsolation'; script='tests/DeepSeekIsolation.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='EngineeringIsolation'; script='tests/EngineeringIsolation.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='MuseOpenCodeGoRuntime'; script='tests/MuseOpenCodeGo.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='MuseOpenCodeGo'; script='tests/MuseOpenCodeGo.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='MuseOpenCodeSession'; script='tests/MuseOpenCodeSession.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusComposerOwnership'; script='tests/NexusComposerOwnership.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusControllerPanel'; script='tests/NexusControllerPanel.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusModeContract'; script='tests/NexusModeContract.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='PlatformDetachedLifecycle'; script='tests/PlatformDetachedLifecycle.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='PreferredRouteContract'; script='tests/PreferredRouteContract.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='RoutingIntegrity'; script='tests/RoutingIntegrity.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='RuntimeRoutingTrace'; script='tests/RuntimeRoutingTrace.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='StartupLifecycle'; script='tests/StartupLifecycle.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='VisualCaptureTarget'; script='tests/VisualCaptureTarget.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='VisualPacketIntegrity'; script='tests/VisualPacketIntegrity.Tests.ps1'; executable=$powershell; kind='powershell' }
 )
 
 $started = [DateTime]::UtcNow
@@ -102,6 +213,10 @@ $harnessExitCode = 0
 # and PowerShell runtimes. Process-scoped; never persisted, never a shell
 # profile change, and the pre-existing PATH stays behind the pinned prefix.
 $env:AIH_TOOLCHAIN_ROOT = $InstallRoot
+# Actual DSH composition proofs must load this installation's pinned substrate
+# on either platform, rather than a developer's unrelated default install.
+$env:NEXUS_RUNTIME_ROOT = $InstallRoot
+$env:AIH_HOST_APP = $layout.App
 foreach ($suite in $suites) {
     $suiteStarted = [DateTime]::UtcNow
     $scriptPath = Join-Path $InstallRoot $suite.script
@@ -117,10 +232,23 @@ foreach ($suite in $suites) {
     $commandText = '"' + $executable + '" ' + (($arguments | ForEach-Object { '"' + ([string]$_).Replace('"','\"') + '"' }) -join ' ')
     $rawLines.Add(('===== SUITE {0} =====' -f $suite.name)); $rawLines.Add($commandText)
     Write-Host ('===== SUITE {0} =====' -f $suite.name)
+    # A05H H4: optional per-suite process environment (e.g. the CCV2 live-host
+    # release gate). Applies process-scoped only and restores every variable
+    # afterwards; suites without 'env' behave exactly as before.
+    $suiteEnvPrior = @{}
+    if ($suite.Contains('env') -and $suite.env -is [System.Collections.IDictionary]) {
+        foreach ($envName in @($suite.env.Keys)) {
+            $suiteEnvPrior[$envName] = [System.Environment]::GetEnvironmentVariable([string]$envName)
+            [System.Environment]::SetEnvironmentVariable([string]$envName, [string]$suite.env[$envName])
+        }
+    }
     $savedPreference = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try { $output = @(& $executable @arguments 2>&1 | ForEach-Object { [string]$_ }); $suiteExitCode = [int]$LASTEXITCODE }
     catch { $output = @([string]$_); $suiteExitCode = 1 }
     finally { $ErrorActionPreference = $savedPreference }
+    foreach ($envName in @($suiteEnvPrior.Keys)) {
+        [System.Environment]::SetEnvironmentVariable([string]$envName, $suiteEnvPrior[$envName])
+    }
     foreach ($line in $output) { Write-Host $line; $rawLines.Add($line) }
     $suiteFinished = [DateTime]::UtcNow
     $suitePassed = Get-AihHarnessAssertionCount -Lines $output -Prefix 'PASS:'

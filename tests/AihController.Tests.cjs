@@ -147,6 +147,8 @@ async function main() {
   fs.mkdirSync(path.join(bridgeInstallRoot, 'data', 'routing'), { recursive: true })
   if (fs.existsSync(path.join(sourceRoot, 'data', 'settings.yaml'))) {
     fs.copyFileSync(path.join(sourceRoot, 'data', 'settings.yaml'), path.join(bridgeInstallRoot, 'data', 'settings.yaml'))
+  } else {
+    fs.copyFileSync(path.join(sourceRoot, 'config', 'settings.yaml'), path.join(bridgeInstallRoot, 'data', 'settings.yaml'))
   }
   const bridgeSettingsPath = path.join(bridgeInstallRoot, 'data', 'settings.yaml')
   const bridgeSettings = fs.readFileSync(bridgeSettingsPath, 'utf8')

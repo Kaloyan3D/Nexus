@@ -53,7 +53,7 @@ foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'docs') -Fil
     Copy-AihSourceFile -Source $file.FullName -Destination (Join-Path $layout.Root 'docs')
 }
 
-foreach ($name in @('versions.json', 'settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'preset-muse.yml', 'DeepSeek-Isolation.cjs', 'Engineering-Isolation.cjs', 'Muse-Isolation.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'Muse-ReasoningActivity.cjs', 'AihController.cjs', 'ContextCompaction.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json', 'engineering-profiles.json', 'model-registry.json', 'nexus-profiles.json', 'muse-profiles.json', 'Engineering-Profiles.cjs', 'Nexus-Profiles.cjs')) {
+foreach ($name in @('versions.json', 'settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'preset-muse.yml', 'DeepSeek-Isolation.cjs', 'Engineering-Isolation.cjs', 'Muse-Isolation.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'Muse-ReasoningActivity.cjs', 'Controller-RequestBoundary.cjs', 'Routing-Integrity.cjs', 'AihController.cjs', 'ContextCompaction.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json', 'engineering-profiles.json', 'model-registry.json', 'nexus-profiles.json', 'muse-profiles.json', 'Engineering-Profiles.cjs', 'Nexus-Profiles.cjs')) {
     Copy-AihSourceFile -Source (Join-Path $sourceRoot "config\$name") -Destination (Join-Path $layout.Config $name)
 }
 # TASK-0009: top-level provider-substrate patch appliers are .cjs modules
@@ -91,6 +91,18 @@ if (Test-Path -LiteralPath (Join-Path $sourceRoot 'skills')) {
 }
 Copy-AihSourceFile -Source (Join-Path $sourceRoot 'runtime/package.json') -Destination (Join-Path $layout.Runtime 'package.json')
 Copy-AihSourceFile -Source (Join-Path $sourceRoot 'runtime/package-lock.json') -Destination (Join-Path $layout.Runtime 'package-lock.json')
+
+if (Test-Path -LiteralPath (Join-Path $sourceRoot 'runtime/vendor')) {
+    $vendorDirectory = Join-Path $layout.Runtime 'vendor'
+
+    New-Item -ItemType Directory -Force -Path $vendorDirectory | Out-Null
+
+    foreach ($file in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'runtime/vendor') -File) {
+        Copy-AihSourceFile `
+            -Source $file.FullName `
+            -Destination (Join-Path $vendorDirectory $file.Name)
+    }
+}
 
 $nodeVersion = $sourceVersions.NodeVersion
 $nodeDir = Join-Path $layout.Runtime 'node'
@@ -144,6 +156,13 @@ if (-not $SkipDependencyInstall) {
 }
 elseif (-not (Test-Path -LiteralPath $layout.Dsh)) {
     throw '-SkipDependencyInstall requires an existing installed DSH runtime.'
+}
+
+& $layout.Node (Join-Path $layout.Scripts 'MusePresetDependencyClosure.cjs') prepare $sourceRoot $InstallRoot | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Muse preset source dependency closure failed.' }
+foreach ($closureProfile in @('engineering', 'deepseek')) {
+    & $layout.Node (Join-Path $layout.Scripts 'MusePresetDependencyClosure.cjs') prepare $sourceRoot $InstallRoot $closureProfile | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "$closureProfile preset source dependency closure failed." }
 }
 
 # Complete-Install.ps1 is a PowerShell script, not a native executable: it

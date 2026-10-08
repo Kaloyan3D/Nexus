@@ -6,6 +6,7 @@ const os = require('node:os')
 const path = require('node:path')
 const isolation = require('../config/Engineering-Isolation.cjs')
 const profiles = require('../config/Engineering-Profiles.cjs')
+const { createPresetCtx } = require('./lib/AgentRequestComposition.cjs')
 
 let passed = 0
 function pass(name) {
@@ -73,13 +74,9 @@ async function main() {
       reasoning: 'high',
     })
 
-    let requestHandler = null
-    const ctx = {
-      on(name, handler) {
-        if (name === 'agent/request') requestHandler = handler
-      },
-    }
+    const ctx = createPresetCtx()
     isolation.apply(ctx)
+    const requestHandler = ctx.handlers['agent/request']
     assert.equal(typeof requestHandler, 'function')
 
     const session = {

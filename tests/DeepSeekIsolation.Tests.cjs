@@ -7,6 +7,7 @@ const path = require('node:path')
 const isolation = require('../config/DeepSeek-Isolation.cjs')
 const engineeringIsolation = require('../config/Engineering-Isolation.cjs')
 const profiles = require('../config/Engineering-Profiles.cjs')
+const { createPresetCtx } = require('./lib/AgentRequestComposition.cjs')
 
 let passed = 0
 function pass(name) {
@@ -65,10 +66,10 @@ async function main() {
   const retainedWorker = await handlers['agent/request'](worker, async () => flashMax)
   assert.equal(retainedWorker.provider, 'flash-max-direct')
 
-  const engineeringHandlers = {}
-  engineeringIsolation.apply({
-    on(name, handler) { engineeringHandlers[name] = handler },
-  })
+  const engineeringCtx = createPresetCtx()
+  delete engineeringCtx.shellEnv
+  engineeringIsolation.apply(engineeringCtx)
+  const engineeringHandlers = engineeringCtx.handlers
   assert.equal(engineeringIsolation.inject, undefined)
 
   // ── Engineering enforcement: controller-owned targets, fail-closed ───────
