@@ -31,6 +31,7 @@ if (-not [string]::IsNullOrWhiteSpace($PowerShellExecutable)) {
 $suites = @(
     [ordered]@{ name='SetupUpgrade'; script='tests/SetupUpgrade.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='UpdateRootResolution'; script='tests/UpdateRootResolution.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='SourceCredentialGuard'; script='tests/SourceCredentialGuard.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='Harness'; script='tests/Harness.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='TestHarness.Reporting'; script='tests/TestHarness.Reporting.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='JsonSerialization'; script='tests/JsonSerialization.Tests.ps1'; executable=$powershell; kind='powershell' },
@@ -86,6 +87,7 @@ $suites = @(
     [ordered]@{ name='NexusEngineContract'; script='tests/NexusEngineContract.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='EpistemicProductionHardening'; script='tests/EpistemicProductionHardening.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='AihControllerIdentity'; script='tests/AihControllerIdentity.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='NexusControllerPanel'; script='tests/NexusControllerPanel.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='PlatformSupport'; script='tests/PlatformSupport.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='StartupProviderIsolation'; script='tests/StartupProviderIsolation.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='PowerShellPortability'; script='tests/PowerShellPortability.Tests.ps1'; executable=$powershell; kind='powershell' },

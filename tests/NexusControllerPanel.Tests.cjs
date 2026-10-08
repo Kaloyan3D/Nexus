@@ -386,12 +386,32 @@ async function main() {
 
   // ── 7. routing-state file name matches the PowerShell contract ───────────
   {
-    // Cross-validated against a real file written by Routing.ps1 in the live
-    // install (data/routing/states/5b4c223a91aeb7a3623942f56a75bb2994554ed6e86b7e539f21748d203a58f1.json).
-    assert.equal(
-      status.routingStateFileName('C:\\AI-Harness', 'aih-engineering', 'TASK-0002'),
-      '5b4c223a91aeb7a3623942f56a75bb2994554ed6e86b7e539f21748d203a58f1.json',
-    )
+    const workspace = path.join(os.tmpdir(), 'Nexus MixedCase', 'Repo')
+    const pinnedHost = path.join(process.env.AIH_TOOLCHAIN_ROOT || ROOT, 'runtime', 'pwsh', 'pwsh')
+    const host = process.platform === 'win32' ? 'powershell.exe'
+      : (process.env.AIH_PWSH_HOST || (fs.existsSync(pinnedHost) ? pinnedHost : 'pwsh'))
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      ". (Join-Path $env:NEXUS_TEST_ROOT 'scripts/Platform.ps1')",
+      ". (Join-Path $env:NEXUS_TEST_ROOT 'scripts/Routing.ps1')",
+      "$p = Get-AihRoutingStatePath -DataRoot $env:NEXUS_TEST_DATA -Workspace $env:NEXUS_TEST_WORKSPACE -TaskId 'TASK-0002' -Preset 'AIH-ENGINEERING' -TaskInstanceId $env:NEXUS_TEST_INSTANCE",
+      '[IO.Path]::GetFileName($p)',
+    ].join('; ')
+    for (const instance of ['', 'instance-generation-A']) {
+      const result = spawnSync(host, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
+        encoding: 'utf8',
+        env: { ...process.env, NEXUS_TEST_ROOT: ROOT, NEXUS_TEST_DATA: os.tmpdir(), NEXUS_TEST_WORKSPACE: workspace, NEXUS_TEST_INSTANCE: instance },
+      })
+      assert.ifError(result.error)
+      assert.equal(result.status, 0, result.stderr)
+      assert.equal(status.routingStateFileName(workspace, 'AIH-ENGINEERING', 'TASK-0002', instance), result.stdout.trim(), 'UI hash must match the native PowerShell routing writer')
+    }
+    const original = status.routingStateFileName(workspace, 'aih-engineering', 'TASK-0002')
+    const lower = status.routingStateFileName(workspace.toLowerCase(), 'aih-engineering', 'TASK-0002')
+    if (process.platform === 'win32') assert.equal(original, lower, 'Windows routing identity folds case')
+    else assert.notEqual(original, lower, 'POSIX routing identity preserves case')
+    assert.equal(original, status.routingStateFileName(path.join(workspace, '..', 'Repo'), 'aih-engineering', 'TASK-0002'), 'normalized equivalent native paths share a state file')
+    assert.notEqual(original, status.routingStateFileName(workspace, 'aih-engineering', 'TASK-0002', 'instance-generation-A'), 'task generations do not alias legacy display identity')
   }
 
   // ── 8. corrupt / missing state degrades safely ───────────────────────────
@@ -1985,9 +2005,9 @@ async function main() {
     assert.equal(norm(''), '', 'empty normalizes to empty')
     assert.equal(norm(null), '', 'null normalizes to empty')
 
-    const dataRoot = 'C:\\aih-fixture-data'
-    const repoA = 'C:\\RepoA'
-    const repoB = 'D:\\RepoB'
+    const dataRoot = path.join(os.tmpdir(), 'aih-fixture-data')
+    const repoA = path.join(os.tmpdir(), 'RepoA')
+    const repoB = path.join(os.tmpdir(), 'RepoB')
     const taskId = 'TASK-0003'
     const modelNames = {
       'flash-high-direct/deepseek-v4-flash': 'DeepSeek V4 Flash',
@@ -1999,7 +2019,7 @@ async function main() {
       kind: 'routed', risk: 'normal',
     }, extra))
     const decisionsText = [
-      decision('2026-08-29T10:00:00.000Z', 'C:/RepoA/', { selectedExecutionClass: 'deepseek_normal', executionClass: 'deepseek_normal', provider: 'flash-high-direct', model: 'deepseek-v4-flash', reasoning: 'high', reason: 'A primary' }),
+      decision('2026-08-29T10:00:00.000Z', repoA.replace(/\\/g, '/') + '/', { selectedExecutionClass: 'deepseek_normal', executionClass: 'deepseek_normal', provider: 'flash-high-direct', model: 'deepseek-v4-flash', reasoning: 'high', reason: 'A primary' }),
       decision('2026-08-29T10:05:00.000Z', repoA, { selectedExecutionClass: 'codex_review', executionClass: 'codex_review', provider: 'sol-local', model: 'gpt-5.6-sol', escalatedFrom: 'deepseek_normal', reviewRequired: true, reason: 'A review' }),
       decision('2026-08-29T10:06:00.000Z', repoA, { selectedExecutionClass: 'deepseek_deep', executionClass: 'deepseek_deep', provider: 'flash-high-direct', model: 'deepseek-v4-flash', escalatedFrom: 'codex_review', reason: 'A escalation' }),
       decision('2026-08-29T11:00:00.000Z', repoB, { selectedExecutionClass: 'deepseek_deep', executionClass: 'deepseek_deep', provider: 'flash-high-direct', model: 'deepseek-v4-flash', reasoning: 'max', reason: 'B primary (NEWER than every A record)' }),
@@ -2056,7 +2076,7 @@ async function main() {
     const records = status.jsonLinesOf(decisionsText)
     assert.equal(status.lastDecisionOf(records, taskId, repoA).provider, 'flash-high-direct', 'A decision resolves inside RepoA')
     assert.equal(status.lastDecisionOf(records, taskId, repoA).escalatedFrom == null, true, 'A root is the primary, not the newer review/escalation')
-    assert.equal(status.lastDecisionOf(records, taskId, 'c:/repoa/').timestampUtc, '2026-08-29T10:00:00.000Z', 'normalized spelling of RepoA matches')
+    assert.equal(status.lastDecisionOf(records, taskId, repoA.toLowerCase().replace(/\\/g, '/') + '/').timestampUtc, '2026-08-29T10:00:00.000Z', 'normalized spelling of RepoA matches')
     assert.equal(status.lastDecisionOf(records, taskId, repoB).executionClass, 'deepseek_deep', 'B decision resolves inside RepoB')
     assert.equal(status.lastDecisionOf(records, taskId, 'C:\\SomewhereElse'), null, 'unknown workspace never joins')
     assert.equal(status.lastDecisionOf(records, taskId, ''), null, 'empty workspace never joins (fail-closed)')
@@ -2111,9 +2131,9 @@ async function main() {
 
   // ── 23f. corruption behavior: fail-closed, no cross-workspace fallback ──
   {
-    const dataRoot = 'C:\\aih-fixture-data-2'
-    const repoA = 'C:\\RepoA'
-    const repoB = 'D:\\RepoB'
+    const dataRoot = path.join(os.tmpdir(), 'aih-fixture-data-2')
+    const repoA = path.join(os.tmpdir(), 'RepoA')
+    const repoB = path.join(os.tmpdir(), 'RepoB')
     const taskId = 'TASK-0003'
     const decision = (ts, workspace, extra) => JSON.stringify(Object.assign({ recordVersion: 1, timestampUtc: ts, taskId, workspace, kind: 'routed' }, extra))
     const decisionsText = [

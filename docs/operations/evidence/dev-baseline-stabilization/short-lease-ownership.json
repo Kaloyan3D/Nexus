@@ -1,0 +1,60 @@
+{
+  "ccv2Head": "390af181c79df08e4da1ee91a408238767d70d81",
+  "files": {
+    "config/ContextActiveApplyV2.cjs": "2284ea705e34916c2ddfa8a849d8adc4b5c81c803c1a26bdc2bc129924d12312",
+    "config/ContextActiveApplyLockClientV2.cjs": "62f40b5d19d28331eb8345cf2cbb219a55b52deee61f6daf6fd7d1b884fd4cf5",
+    "scripts/ContextLifecycle.ps1": "2bb12c1ce3065acbee79ff5847523d7bbd6d7690ba94bbef426e428ba362f7c2",
+    "tests/ContextActiveApplyV2.Tests.cjs": "4b10755d613a0a55984956b3d3394a755173b4751bfe1acae7e2886d8ef856e5"
+  },
+  "result": "FAIL",
+  "assertion": "An owner that lost its lease before resuming must not mutate the session",
+  "observations": [
+    {
+      "name": "renew-authority-succeeded",
+      "at": "2026-10-08T14:56:15.038Z",
+      "result": {
+        "renewed": true,
+        "expiresAtUtc": "2026-10-08T14:56:18.7812504Z",
+        "reason": null
+      },
+      "lock": {
+        "schemaVersion": 2,
+        "taskId": "TASK-0001",
+        "taskInstanceId": "task_87b8d65be8124986bd0b162ca38507a6",
+        "sessionId": "sess-a10",
+        "operationId": "ccop_bd8d881decf7a6ac65818c3464556abe",
+        "ownerId": "6cec6d97f4964c59b5fd4d7bbe442f68",
+        "ownerPid": 54031,
+        "ownerProcessStartUtc": "2026-10-08T14:56:12.4920162Z",
+        "acquiredAtUtc": "2026-10-08T14:56:13.5483075Z",
+        "renewedAtUtc": "2026-10-08T14:56:14.7812504Z",
+        "expiresAtUtc": "2026-10-08T14:56:18.7812504Z"
+      }
+    },
+    {
+      "name": "other-owner-took-over-before-caller-resumed",
+      "at": "2026-10-08T14:56:20.227Z",
+      "result": {
+        "acquired": true,
+        "ownerId": "6adbd834c4ab4b31a0b5b625289e874c",
+        "leaseSeconds": 60,
+        "reason": null
+      }
+    },
+    {
+      "name": "post-renew-resume-result",
+      "at": "2026-10-08T14:56:21.299Z",
+      "status": "committed",
+      "mutated": true,
+      "eventCountBefore": 7,
+      "eventCountAfter": 8,
+      "lockOwnerIsTaker": true
+    },
+    {
+      "name": "verdict",
+      "at": "2026-10-08T14:56:21.300Z",
+      "demonstratedStaleOwnerMutation": true,
+      "concurrentCorruptionTested": false
+    }
+  ]
+}

@@ -406,16 +406,39 @@ Get-AihPowerShellHost -InstallRoot $InstallRoot
     $bound = Get-AihLastStartProcessBound
     Assert-Aih (-not $bound.Contains('WorkingDirectory')) 'F: whitespace WorkingDirectory is omitted'
 
-    # G/H: LINUX branch (explicitly simulated) - no WindowStyle,
-    # WorkingDirectory only when supplied.
+    # G/H: the POSIX transport uses DetachedProcess.js, not Start-Process.
+    # Capture the encoded helper request without spawning fake paths. Real
+    # process detachment is verified below and in PlatformDetachedLifecycle.
     ${function:Test-AihIsWindows} = { return $false }
-    $null = Start-AihDetachedProcess -FilePath 'node' -ArgumentList @('x')
-    $bound = Get-AihLastStartProcessBound
-    Assert-Aih (-not $bound.Contains('WindowStyle')) 'G: Linux never receives WindowStyle'
-    Assert-Aih (-not $bound.Contains('WorkingDirectory')) 'G: Linux omitted WorkingDirectory is never forwarded'
-    $null = Start-AihDetachedProcess -FilePath 'node' -ArgumentList @('x') -WorkingDirectory '/home/user/nexus data'
-    $bound = Get-AihLastStartProcessBound
-    Assert-Aih ($bound.Contains('WorkingDirectory') -and [string]$bound.WorkingDirectory -eq '/home/user/nexus data') 'H: Linux explicit WorkingDirectory forwarded exactly'
+    $realGetAihNodeExecutable = ${function:Get-AihNodeExecutable}
+    $script:aihDetachedProbeNode = Get-AihNodeExecutable
+    $script:aihHelperRequests = [Collections.Generic.List[object]]::new()
+    $startProcessCount = $script:aihStartProcessCaptures.Count
+    function script:Invoke-AihTestDetachedNode {
+        param([string]$Helper, [string]$Encoded)
+        Assert-Aih ($Helper -eq (Join-Path $InstallRoot 'scripts/DetachedProcess.js')) 'Linux selects the real detached helper'
+        $request = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Encoded)) | ConvertFrom-Json
+        $script:aihHelperRequests.Add($request)
+        # Native execution establishes the real exit-status contract; tests
+        # must not assign PowerShell automatic variables.
+        & $script:aihDetachedProbeNode -e 'process.exit(0)'
+        return [string]$PID
+    }
+    try {
+        ${function:Get-AihNodeExecutable} = { return 'Invoke-AihTestDetachedNode' }
+        $null = Start-AihDetachedProcess -FilePath 'node' -ArgumentList @('x')
+        $request = $script:aihHelperRequests[0]
+        Assert-Aih ($request.PSObject.Properties.Name -notcontains 'WindowStyle') 'G: Linux helper request has no WindowStyle'
+        Assert-Aih ($null -eq $request.cwd) 'G: Linux omitted WorkingDirectory is represented as null'
+        Assert-Aih ($request.file -eq 'node' -and @($request.args).Count -eq 1 -and $request.args[0] -eq 'x' -and -not $request.wait) 'G: Linux preserves file, argument and non-wait semantics'
+        $null = Start-AihDetachedProcess -FilePath 'node' -ArgumentList @('x') -WorkingDirectory '/home/user/nexus data'
+        $request = $script:aihHelperRequests[1]
+        Assert-Aih ($request.cwd -eq '/home/user/nexus data') 'H: Linux explicit WorkingDirectory forwarded exactly'
+        Assert-Aih ($script:aihStartProcessCaptures.Count -eq $startProcessCount) 'G/H: Linux never invokes the Windows Start-Process transport'
+    } finally {
+        ${function:Get-AihNodeExecutable} = $realGetAihNodeExecutable
+        Remove-Item function:Invoke-AihTestDetachedNode -ErrorAction SilentlyContinue
+    }
 
     # I/J: -Wait forwarding is exact, not a behavioral change (Windows shape).
     ${function:Test-AihIsWindows} = { return $true }
