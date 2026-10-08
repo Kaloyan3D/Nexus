@@ -1664,12 +1664,13 @@ function Use-AihCompactionLockMutex {
     $name = ConvertTo-AihSafeSyncName ('AIHarness.ContextCompaction.LockFile.' + [string]$SessionId + '.' + [string]$OperationId)
     $mutex = $null
     try { $mutex = [Threading.Mutex]::new($false, $name) }
-    catch { return (& $Action) }
+    catch { throw "Compaction lock mutex unavailable: refusing unlocked action (KEEP)." }
     $taken = $false
     try {
         try { $taken = $mutex.WaitOne(5000) }
         catch [Threading.AbandonedMutexException] { $taken = $true }
-        catch { return (& $Action) }
+        catch { throw "Compaction lock mutex unavailable: refusing unlocked action (KEEP)." }
+        if (-not $taken) { throw "Compaction lock mutex busy: refusing unlocked action (KEEP)." }
         return (& $Action)
     } finally {
         if ($taken) { try { $mutex.ReleaseMutex() } catch { } }
@@ -1678,8 +1679,9 @@ function Use-AihCompactionLockMutex {
 }
 
 function Invoke-AihCompactionApplyLockRelease {
-    # Release only when the caller still owns the lock (ownerId match).
-    # Best-effort and idempotent; never throws.
+    # Release is serialized with acquire/takeover/renew. The initial read only
+    # selects the mutex scope; authorization is re-read under the mutex.
+    # Best-effort and idempotent; an unavailable mutex never permits unlink.
     param(
         [Parameter(Mandatory = $true)][string]$Workspace,
         [Parameter(Mandatory = $true)][string]$TaskId,
@@ -1688,12 +1690,22 @@ function Invoke-AihCompactionApplyLockRelease {
     $lockPath = Get-AihCompactionApplyLockPath -Workspace $Workspace -TaskId $TaskId
     try {
         if (-not (Test-Path -LiteralPath $lockPath)) { return [pscustomobject][ordered]@{ released = $true; reason = 'already-absent' } }
-        $existing = Get-Content -Raw -Encoding UTF8 -LiteralPath $lockPath | ConvertFrom-Json
-        if (($null -ne $existing) -and ($null -ne $existing.PSObject.Properties['ownerId']) -and ([string]$existing.ownerId -ne [string]$OwnerId)) {
-            return [pscustomobject][ordered]@{ released = $false; reason = 'not-owner' }
+        $scope = Get-Content -Raw -Encoding UTF8 -LiteralPath $lockPath | ConvertFrom-Json
+        if (($null -eq $scope) -or [string]::IsNullOrWhiteSpace([string]$scope.sessionId) -or [string]::IsNullOrWhiteSpace([string]$scope.operationId)) {
+            return [pscustomobject][ordered]@{ released = $false; reason = 'lock-unreadable' }
         }
-        Remove-Item -LiteralPath $lockPath -Force
-        return [pscustomobject][ordered]@{ released = $true }
+        return (Use-AihCompactionLockMutex -SessionId ([string]$scope.sessionId) -OperationId ([string]$scope.operationId) {
+            if (-not (Test-Path -LiteralPath $lockPath)) { return [pscustomobject][ordered]@{ released = $true; reason = 'already-absent' } }
+            $existing = Get-Content -Raw -Encoding UTF8 -LiteralPath $lockPath | ConvertFrom-Json
+            if (($null -eq $existing) -or ($null -eq $existing.PSObject.Properties['ownerId'])) {
+                return [pscustomobject][ordered]@{ released = $false; reason = 'lock-unreadable' }
+            }
+            if ([string]$existing.ownerId -ne [string]$OwnerId) {
+                return [pscustomobject][ordered]@{ released = $false; reason = 'not-owner' }
+            }
+            Remove-Item -LiteralPath $lockPath -Force
+            return [pscustomobject][ordered]@{ released = $true }
+        })
     } catch { return [pscustomobject][ordered]@{ released = $false; reason = 'release-error' } }
 }
 

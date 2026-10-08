@@ -1,0 +1,87 @@
+{
+  "ContextActiveApplyV2.Tests.cjs": {
+    "exitCode": 0,
+    "assertionsPassed": 171,
+    "liveHostExecuted": false
+  },
+  "ContextActiveApplyV2LiveHost.Tests.cjs": {
+    "exitCode": 0,
+    "assertionsPassed": 60,
+    "liveHostExecuted": true
+  },
+  "ContextCompactionV2Operation.Tests.cjs": {
+    "exitCode": 0,
+    "assertionsPassed": 141,
+    "liveHostExecuted": true
+  },
+  "ContextCompactionV2FoundationHardening.Tests.cjs": {
+    "exitCode": 0,
+    "assertionsPassed": 112,
+    "liveHostExecuted": false
+  },
+  "ContextRecoveryV2.Tests.cjs": {
+    "exitCode": 0,
+    "assertionsPassed": 213,
+    "liveHostExecuted": false
+  },
+  "ContextRecoveryV2LiveHost.Tests.cjs": {
+    "exitCode": 0,
+    "assertionsPassed": 19,
+    "liveHostExecuted": true
+  },
+  "ContextGenerationRuntimeV2.Tests.cjs": {
+    "exitCode": 0,
+    "assertionsPassed": 155,
+    "liveHostExecuted": false
+  },
+  "ContextGenerationRuntimeV2LiveHost.Tests.cjs": {
+    "exitCode": 0,
+    "assertionsPassed": 63,
+    "liveHostExecuted": true
+  },
+  "ContextCompleteTaskV2.Tests.cjs": {
+    "exitCode": 0,
+    "assertionsPassed": 207,
+    "liveHostExecuted": false
+  },
+  "ContextCompleteTaskV2LiveHost.Tests.cjs": {
+    "exitCode": 0,
+    "assertionsPassed": 19,
+    "liveHostExecuted": true
+  },
+  "ContextCompaction.Tests.ps1": {
+    "exitCode": 0,
+    "assertionsPassed": 99,
+    "liveHostExecuted": false
+  },
+  "ContextCompactionV2.Tests.ps1": {
+    "exitCode": 0,
+    "assertionsPassed": 30,
+    "liveHostExecuted": false
+  },
+  "ContextApplyLockAuthority.Tests.cjs": {
+    "exitCode": 0,
+    "assertionsPassed": 4,
+    "liveHostExecuted": false
+  },
+  "ContextActiveApplyV2XProc.Tests.cjs": {
+    "exitCode": 0,
+    "assertionsPassed": 16,
+    "liveHostExecuted": false
+  },
+  "ContextGenerationRuntimeV2XProc.Tests.cjs": {
+    "exitCode": 0,
+    "assertionsPassed": 27,
+    "liveHostExecuted": false
+  },
+  "ContextRecoveryV2XProc.Tests.cjs": {
+    "exitCode": 0,
+    "assertionsPassed": 41,
+    "liveHostExecuted": false
+  },
+  "ContextCompleteTaskV2XProc.Tests.cjs": {
+    "exitCode": 0,
+    "assertionsPassed": 22,
+    "liveHostExecuted": false
+  }
+}
