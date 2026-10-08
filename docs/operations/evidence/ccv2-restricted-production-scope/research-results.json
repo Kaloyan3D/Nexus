@@ -1,0 +1,218 @@
+[
+  {
+    "suite": "ContextCheckpointV2",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 107,
+    "failed": 0,
+    "seconds": 4.27
+  },
+  {
+    "suite": "ContextTrustV2",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 185,
+    "failed": 0,
+    "seconds": 10.19
+  },
+  {
+    "suite": "ContextSnapshotV2",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 118,
+    "failed": 0,
+    "seconds": 7.33
+  },
+  {
+    "suite": "ContextCheckpointabilityV2",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 104,
+    "failed": 0,
+    "seconds": 0.57
+  },
+  {
+    "suite": "ContextCheckpointabilityV2LiveHost",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 25,
+    "failed": 0,
+    "seconds": 0.57
+  },
+  {
+    "suite": "ContextShadowV2",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 162,
+    "failed": 0,
+    "seconds": 0.62
+  },
+  {
+    "suite": "ContextShadowV2LiveHost",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 62,
+    "failed": 0,
+    "seconds": 0.57
+  },
+  {
+    "suite": "ContextCompactionV2Operation",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 141,
+    "failed": 0,
+    "seconds": 3.67
+  },
+  {
+    "suite": "ContextCompactionV2FoundationHardening",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 112,
+    "failed": 0,
+    "seconds": 0.57
+  },
+  {
+    "suite": "ContextActiveApplyV2",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 171,
+    "failed": 0,
+    "seconds": 0.92
+  },
+  {
+    "suite": "ContextActiveApplyV2LiveHost",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 60,
+    "failed": 0,
+    "seconds": 0.77
+  },
+  {
+    "suite": "ContextActiveApplyV2XProc",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 16,
+    "failed": 0,
+    "seconds": 13.35
+  },
+  {
+    "suite": "ContextGenerationRuntimeV2",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 155,
+    "failed": 0,
+    "seconds": 1.27
+  },
+  {
+    "suite": "ContextGenerationRuntimeV2LiveHost",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 63,
+    "failed": 0,
+    "seconds": 0.97
+  },
+  {
+    "suite": "ContextGenerationRuntimeV2XProc",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 27,
+    "failed": 0,
+    "seconds": 31.94
+  },
+  {
+    "suite": "ContextRecoveryV2",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 213,
+    "failed": 0,
+    "seconds": 1.82
+  },
+  {
+    "suite": "ContextRecoveryV2LiveHost",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 19,
+    "failed": 0,
+    "seconds": 1.17
+  },
+  {
+    "suite": "ContextRecoveryV2XProc",
+    "scope": "research-only",
+    "exit": 1,
+    "passed": 19,
+    "failed": 1,
+    "seconds": 41.57
+  },
+  {
+    "suite": "ContextCompleteTaskV2",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 207,
+    "failed": 0,
+    "seconds": 13.44
+  },
+  {
+    "suite": "ContextCompleteTaskV2LiveHost",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 19,
+    "failed": 0,
+    "seconds": 0.57
+  },
+  {
+    "suite": "ContextCompleteTaskV2XProc",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 22,
+    "failed": 0,
+    "seconds": 34.64
+  },
+  {
+    "suite": "ContextCompilerShadowHostV2",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 93,
+    "failed": 0,
+    "seconds": 0.97
+  },
+  {
+    "suite": "ContextCompilerActiveHostV2",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 46,
+    "failed": 0,
+    "seconds": 0.67
+  },
+  {
+    "suite": "ContextCompilerActiveDeepseekV4",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 32,
+    "failed": 0,
+    "seconds": 1.17
+  },
+  {
+    "suite": "ContextCompilerActiveMuseRoutesV2",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 30,
+    "failed": 0,
+    "seconds": 0.82
+  },
+  {
+    "suite": "ContextCompilerActiveOpencodeHostV2",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 221,
+    "failed": 0,
+    "seconds": 3.22
+  },
+  {
+    "suite": "ContextMemoryProducerV2",
+    "scope": "research-only",
+    "exit": 0,
+    "passed": 102,
+    "failed": 0,
+    "seconds": 0.92
+  }
+]

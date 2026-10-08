@@ -1,0 +1,304 @@
+{
+  "platform": "linux",
+  "sourceHashes": {
+    "config/ContextActiveApplyV2.cjs": "be6652484df0bd04200e374d1bf89fb52436bbef21882638d7ef7b6178e09c2c",
+    "config/ContextActiveApplyLockClientV2.cjs": "62f40b5d19d28331eb8345cf2cbb219a55b52deee61f6daf6fd7d1b884fd4cf5",
+    "config/ContextCompaction.cjs": "8192b622c8691dbe117012411a7898488e5a29a10c18c1e696c059d6cad6683f",
+    "config/ContextGenerationRuntimeV2.cjs": "8022bd645bc780ceeb236f2673463a396c3e26b694b9aa2cc889ddf60fee54d5",
+    "config/ContextCompleteTaskV2.cjs": "b346f3cbbb01a6fbdb2f06d4627e8af1ab8853437802b7d1ab3b19935c2f8076",
+    "scripts/ContextLifecycle.ps1": "672475103d9884745d1dea71c1ef98a12d552223b3d04b5330e920c67c0dec60"
+  },
+  "cases": [
+    {
+      "boundary": "valid-owner",
+      "result": {
+        "status": "committed",
+        "mutated": true,
+        "applicationDurable": true,
+        "countBefore": 8,
+        "countAfter": 9,
+        "writes": 1,
+        "replacements": 1,
+        "segmentCount": 1,
+        "stopped": false,
+        "hostVersion": "0.1.1-rc.2"
+      }
+    },
+    {
+      "boundary": "after-renew",
+      "multi": false,
+      "stoppedWriterPid": 106133,
+      "predecessor": "371f00792c944d4ba2b8bf25eb280e2c",
+      "successor": "f87d7a93d26f44aaaa2422b88032dbb2",
+      "expiresAtUtc": "2026-10-08T16:34:24.0530309Z",
+      "countAtStop": 8,
+      "writesAtStop": 0,
+      "result": {
+        "status": "committed",
+        "mutated": true,
+        "applicationDurable": true,
+        "countBefore": 8,
+        "countAfter": 9,
+        "writes": 1,
+        "replacements": 1,
+        "segmentCount": 1,
+        "stopped": true,
+        "hostVersion": "0.1.1-rc.2"
+      }
+    },
+    {
+      "boundary": "before-first-append",
+      "multi": false,
+      "stoppedWriterPid": 107799,
+      "predecessor": "23cb0c8f90134f25be4c69952ec38ab0",
+      "successor": "7b11bc3538a14616b32cf7caf6bd7afd",
+      "expiresAtUtc": "2026-10-08T16:34:41.0812221Z",
+      "countAtStop": 8,
+      "writesAtStop": 0,
+      "result": {
+        "status": "committed",
+        "mutated": true,
+        "applicationDurable": true,
+        "countBefore": 8,
+        "countAfter": 9,
+        "writes": 1,
+        "replacements": 1,
+        "segmentCount": 1,
+        "stopped": true,
+        "hostVersion": "0.1.1-rc.2"
+      }
+    },
+    {
+      "boundary": "before-second-append",
+      "multi": true,
+      "stoppedWriterPid": 108467,
+      "predecessor": "1575b5993e714c268782ab9ad491eab0",
+      "successor": "546fe3b459024e69bf1bdd8f0d33ec03",
+      "expiresAtUtc": "2026-10-08T16:34:58.1721337Z",
+      "countAtStop": 10,
+      "writesAtStop": 0,
+      "result": {
+        "status": "committed",
+        "mutated": true,
+        "applicationDurable": true,
+        "countBefore": 9,
+        "countAfter": 11,
+        "writes": 1,
+        "replacements": 2,
+        "segmentCount": 2,
+        "stopped": true,
+        "hostVersion": "0.1.1-rc.2"
+      }
+    },
+    {
+      "boundary": "before-flush",
+      "multi": false,
+      "stoppedWriterPid": 109132,
+      "predecessor": "4fdba2760d804879ad4c08008b98ac02",
+      "successor": "b4a25a75274e492f86ab81d1c8b1552c",
+      "expiresAtUtc": "2026-10-08T16:35:15.0671441Z",
+      "countAtStop": 9,
+      "writesAtStop": 0,
+      "result": {
+        "status": "committed",
+        "mutated": true,
+        "applicationDurable": true,
+        "countBefore": 8,
+        "countAfter": 9,
+        "writes": 1,
+        "replacements": 1,
+        "segmentCount": 1,
+        "stopped": true,
+        "hostVersion": "0.1.1-rc.2"
+      }
+    },
+    {
+      "boundary": "after-flush",
+      "multi": false,
+      "stoppedWriterPid": 110487,
+      "predecessor": "b7bf86cef5314c1cb4244e90713c4b1d",
+      "successor": "f09310d4410141ad88c0f1370fc0c429",
+      "expiresAtUtc": "2026-10-08T16:35:31.0366154Z",
+      "countAtStop": 9,
+      "writesAtStop": 1,
+      "result": {
+        "status": "committed",
+        "mutated": true,
+        "applicationDurable": true,
+        "countBefore": 8,
+        "countAfter": 9,
+        "writes": 1,
+        "replacements": 1,
+        "segmentCount": 1,
+        "stopped": true,
+        "hostVersion": "0.1.1-rc.2"
+      }
+    }
+  ],
+  "checks": [
+    {
+      "name": "valid owner still commits on real DSH",
+      "pass": true
+    },
+    {
+      "name": "after-renew: stale renewal refuses",
+      "pass": true
+    },
+    {
+      "name": "after-renew: sequential stale release refuses",
+      "pass": true
+    },
+    {
+      "name": "after-renew: successor token survives A10 finally",
+      "pass": true
+    },
+    {
+      "name": "after-renew: no append after takeover",
+      "pass": false
+    },
+    {
+      "name": "after-renew: no durable write after takeover",
+      "pass": false
+    },
+    {
+      "name": "after-renew: no stale successful commit",
+      "pass": false
+    },
+    {
+      "name": "after-renew: fresh ownership recovery",
+      "pass": true
+    },
+    {
+      "name": "after-renew: recovered owner releases",
+      "pass": true
+    },
+    {
+      "name": "before-first-append: stale renewal refuses",
+      "pass": true
+    },
+    {
+      "name": "before-first-append: sequential stale release refuses",
+      "pass": true
+    },
+    {
+      "name": "before-first-append: successor token survives A10 finally",
+      "pass": true
+    },
+    {
+      "name": "before-first-append: no append after takeover",
+      "pass": false
+    },
+    {
+      "name": "before-first-append: no durable write after takeover",
+      "pass": false
+    },
+    {
+      "name": "before-first-append: no stale successful commit",
+      "pass": false
+    },
+    {
+      "name": "before-first-append: fresh ownership recovery",
+      "pass": true
+    },
+    {
+      "name": "before-first-append: recovered owner releases",
+      "pass": true
+    },
+    {
+      "name": "before-second-append: stale renewal refuses",
+      "pass": true
+    },
+    {
+      "name": "before-second-append: sequential stale release refuses",
+      "pass": true
+    },
+    {
+      "name": "before-second-append: successor token survives A10 finally",
+      "pass": true
+    },
+    {
+      "name": "before-second-append: no append after takeover",
+      "pass": false
+    },
+    {
+      "name": "before-second-append: no durable write after takeover",
+      "pass": false
+    },
+    {
+      "name": "before-second-append: no stale successful commit",
+      "pass": false
+    },
+    {
+      "name": "before-second-append: fresh ownership recovery",
+      "pass": true
+    },
+    {
+      "name": "before-second-append: recovered owner releases",
+      "pass": true
+    },
+    {
+      "name": "before-flush: stale renewal refuses",
+      "pass": true
+    },
+    {
+      "name": "before-flush: sequential stale release refuses",
+      "pass": true
+    },
+    {
+      "name": "before-flush: successor token survives A10 finally",
+      "pass": true
+    },
+    {
+      "name": "before-flush: no append after takeover",
+      "pass": true
+    },
+    {
+      "name": "before-flush: no durable write after takeover",
+      "pass": false
+    },
+    {
+      "name": "before-flush: no stale successful commit",
+      "pass": false
+    },
+    {
+      "name": "before-flush: fresh ownership recovery",
+      "pass": true
+    },
+    {
+      "name": "before-flush: recovered owner releases",
+      "pass": true
+    },
+    {
+      "name": "after-flush: stale renewal refuses",
+      "pass": true
+    },
+    {
+      "name": "after-flush: sequential stale release refuses",
+      "pass": true
+    },
+    {
+      "name": "after-flush: successor token survives A10 finally",
+      "pass": true
+    },
+    {
+      "name": "after-flush: no append after takeover",
+      "pass": true
+    },
+    {
+      "name": "after-flush: no durable write after takeover",
+      "pass": true
+    },
+    {
+      "name": "after-flush: no stale successful commit",
+      "pass": false
+    },
+    {
+      "name": "after-flush: fresh ownership recovery",
+      "pass": true
+    },
+    {
+      "name": "after-flush: recovered owner releases",
+      "pass": true
+    }
+  ]
+}

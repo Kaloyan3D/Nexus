@@ -99,6 +99,8 @@
  * the filesystem/OS contract. NOT claimed power-loss durable (no fsync).
  */
 
+const durablePolicyV2 = require('./ContextDurableMutationPolicyV2.cjs');
+
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -960,6 +962,7 @@ function recoveryTraceV2(state) {
 // (commit-pending-verification) and repair is deferred
 // (head-repair-pending). Segment presence alone NEVER advances the head.
 function reconstructGenerationRuntimeV2(rawInput) {
+  if (!rawInput || rawInput.repairHead !== false) durablePolicyV2.assertDurableMutationAllowedV2();
   const n = normalizeReconstructInput(rawInput);
   const binding = { taskId: n.taskId, taskInstanceId: n.taskInstanceId, sessionId: n.sessionId };
   const repairHead = n.repairHead === undefined || n.repairHead === null ? true : n.repairHead === true;
@@ -1473,6 +1476,7 @@ function bindingsEqual(a, b) {
 }
 
 async function reserveNextGenerationV2(rawInput) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   const n = normalizeReserveInput(rawInput);
   const serialKey = String(n.sessionId);
   return runSerializedGeneration(serialKey, () => withGenerationLockV2(
@@ -1628,6 +1632,7 @@ function normalizeCommitInput(rawInput) {
 // and post-apply projection verified. Head advancement is atomic + read-back
 // validated + idempotent (repeated advancement converges on the same head).
 async function commitGenerationV2(rawInput) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   const n = normalizeCommitInput(rawInput);
   const serialKey = String(n.sessionId);
   return runSerializedGeneration(serialKey, () => withGenerationLockV2(
@@ -1808,6 +1813,7 @@ function normalizeSupersedeInput(rawInput) {
 // state), and (c) its source binding is stale. G2 artifacts remain immutable
 // historical evidence: NOTHING is deleted.
 async function supersedeGenerationV2(rawInput) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   const n = normalizeSupersedeInput(rawInput);
   const serialKey = String(n.sessionId);
   return runSerializedGeneration(serialKey, () => withGenerationLockV2(
@@ -2212,6 +2218,7 @@ async function lockReleaseV2(serialization, taskId, ownerId) {
 }
 
 function applyCurrentGenerationV2(rawInput) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   const n = normalizeApplyCurrentInput(rawInput);
   const serialKey = String(n.sessionId);
   // Phase 1 (chain + lock): final under-lock eligibility observation.

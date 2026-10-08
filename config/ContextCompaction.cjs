@@ -19,6 +19,8 @@
  * Fail-closed bias: ambiguous usage is NOT a root candidate (KEEP).
  */
 
+const durablePolicyV2 = require('./ContextDurableMutationPolicyV2.cjs');
+
 const ROOT_ENGINE_ROLES = Object.freeze(['muse_main', 'engineer_normal', 'engineer_deep']);
 
 function toNonNegativeInt(value) {
@@ -889,6 +891,7 @@ function operationV2FilePath(dir) {
 }
 
 function persistCompactionOperationV2(dir, operation) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   const fs = require('node:fs');
   const path = require('node:path');
   if (typeof dir !== 'string' || dir === '') throw new Error('v2-persist: dir is required');
@@ -930,6 +933,7 @@ function readCompactionOperationV2(dir) {
 // read-back. The mutation path MUST call this (or prove an identical prior
 // call) before the first session.append.
 function freezeCompactionOperationV2(dir, draft, expected) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   const check = validateCompactionOperationV2(draft, expected);
   if (!check.valid) throw new Error('v2-freeze: operation refused (' + check.reason + ') (KEEP)');
   const durable = persistCompactionOperationV2(dir, draft);
@@ -950,6 +954,7 @@ function v2UserMessageNode(text, source) {
 // Requires the durable read-back (byte-identical) to prove
 // durable-before-mutation; throws otherwise (no append happens first).
 function applyCompactionOperationV2(session, operation, payloadText, durableOp) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   if (!session || typeof session.append !== 'function') throw new Error('v2-apply: session append seam is required');
   if (!operation || typeof operation !== 'object') throw new Error('v2-apply: operation is required');
   if (typeof payloadText !== 'string' || payloadText === '') throw new Error('v2-apply: payload text is required');
@@ -987,6 +992,7 @@ function applyCompactionOperationV2(session, operation, payloadText, durableOp) 
 // Apply ONLY the exact missing segments of a reconciled partial landing.
 // Never appends another payload when the payload already landed.
 function retryMissingSegmentsV2(session, operation, payloadText, durableOp, missingSegments) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   if (!Array.isArray(missingSegments) || missingSegments.length === 0) throw new Error('v2-retry: missingSegments is required');
   // A05H H3: same persisted-read-back proof as apply (no append first).
   requireDurableProofV2(operation, durableOp, 'v2-retry');
@@ -1090,6 +1096,7 @@ function attemptV2FilePath(dir, attemptId) {
 // A05H H6 durability scope (frozen): same as operations above — atomic +
 // read-back validated + process-crash recoverable; NOT power-loss durable.
 function persistCompactionAttemptV2(dir, attempt) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   const fs = require('node:fs');
   if (typeof dir !== 'string' || dir === '') throw new Error('v2-attempt-persist: dir is required');
   if (!attempt || typeof attempt !== 'object') throw new Error('v2-attempt-persist: attempt is required');

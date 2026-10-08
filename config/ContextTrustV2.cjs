@@ -64,6 +64,8 @@
  * caller-supplied inputs; identical inputs rebuild byte-identical seals.
  */
 
+const durablePolicyV2 = require('./ContextDurableMutationPolicyV2.cjs');
+
 const TRUST_PROVENANCE_SCHEMA_VERSION = 1;
 const PROVENANCE_MAP_SCHEMA_VERSION = 1;
 const CONTENT_SEAL_SCHEMA_VERSION = 1;
@@ -697,6 +699,7 @@ function buildSealedCheckpointV2(checkpointInput, provenanceInputs, options) {
 // checkpoint + provenance + seal together (process-crash recoverable via
 // read-back validation); NOT claimed power-loss durable (no fsync).
 function persistSealedCheckpointV2(dir, built) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   if (typeof dir !== 'string' || dir === '') failTrust('checkpoint-missing', 'dir is required (KEEP)');
   if (!built || typeof built !== 'object' || !built.checkpoint || typeof built.serialized !== 'string') {
     failTrust('checkpoint-missing', 'sealed build output is required (KEEP)');

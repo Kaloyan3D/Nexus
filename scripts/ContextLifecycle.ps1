@@ -949,6 +949,11 @@ function Test-AihContextCompactionOperationV2 {
     return [pscustomobject][ordered]@{ valid = $true; reason = $null }
 }
 
+function Assert-AihCcv2DurableMutationAllowed {
+    # Fixed source-level restriction; no environment or payload opt-in.
+    throw 'ccv2-durable-mutation-disabled: active durable CCv2 is unavailable until mutation-time fencing is verified'
+}
+
 function New-AihContextCompactionOperationV2 {
     # Freeze ONE immutable V2 application plan: construct → validate → atomic
     # persist → read-back proof. Retry reuses the frozen plan verbatim (never
@@ -971,6 +976,7 @@ function New-AihContextCompactionOperationV2 {
         [string]$RepositoryId = $null,
         [string]$CheckoutId = $null
     )
+    Assert-AihCcv2DurableMutationAllowed
     $task = Get-AihTask -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId
     if ([string]$task.status -ne 'complete') { throw "Operation V2 refused: task $TaskId status is '$($task.status)', not complete. (KEEP.)" }
     $operationId = New-AihContextCompactionOperationIdV2 -TaskId $TaskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId $SessionId -Generation ([int]$CheckpointGeneration) -CheckpointId $CheckpointId
