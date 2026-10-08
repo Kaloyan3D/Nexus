@@ -791,7 +791,7 @@ finally {
 # around every excluded component, so on Linux NO tree was ever excluded
 # and runtime state with credential-shaped task text entered the scan).
 $sourceFiles=Get-AihSourceScanFiles -Root $InstallRoot
-$secretLeak=$sourceFiles|Select-String -Pattern '(?i)(sk-[A-Za-z0-9_-]{16,}|DEEPSEEK_API_KEY\s*:\s*[^\s''"]+)'|Select-Object -First 1
+$secretLeak=$sourceFiles | Where-Object { Test-AihSourceCredentialValue (Get-Content -Raw -LiteralPath $_.FullName) } | Select-Object -First 1
 Assert-Aih ($null-eq$secretLeak) 'source contains no credential values'
 
 # Separator-agnostic exclusion regression: runtime/state components are

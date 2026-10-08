@@ -1,0 +1,138 @@
+{
+  "baselineHead": "9f5f109e0f651bc5007bb8670202477b688ba26c",
+  "runtime": {
+    "node": "24.18.1",
+    "powershell": "7.5.3",
+    "platform": "Linux"
+  },
+  "failures": [
+    {
+      "suite": "Harness",
+      "exitCode": 1,
+      "passedBeforeFailure": 257,
+      "error": "FAIL: source contains no credential values"
+    },
+    {
+      "suite": "Intelligence.Concurrency",
+      "exitCode": 1,
+      "error": "The named version of this synchronization primitive is not supported on this platform."
+    },
+    {
+      "suite": "PlatformSupport",
+      "exitCode": 1,
+      "passedBeforeFailure": 127,
+      "error": "FAIL: G: Linux never receives WindowStyle"
+    },
+    {
+      "suite": "NexusControllerPanel",
+      "exitCode": 1,
+      "error": "Windows-path SHA expectation differs on Linux at original test line 391"
+    }
+  ],
+  "sourceGuardMatches": [
+    {
+      "file": "config/ContextCompaction.cjs",
+      "line": 272
+    },
+    {
+      "file": "config/ContextCompaction.cjs",
+      "line": 362
+    },
+    {
+      "file": "scripts/ContextLifecycle.ps1",
+      "line": 310
+    },
+    {
+      "file": "scripts/ContextLifecycle.ps1",
+      "line": 315
+    },
+    {
+      "file": "scripts/ContextLifecycle.ps1",
+      "line": 319
+    },
+    {
+      "file": "tests/ContextCompaction.Tests.ps1",
+      "line": 88
+    },
+    {
+      "file": "tests/ContextCompaction.Tests.ps1",
+      "line": 254
+    },
+    {
+      "file": "tests/ContextCompactionF4Privacy.Tests.ps1",
+      "line": 30
+    },
+    {
+      "file": "tests/ContextCompactionF4Privacy.Tests.ps1",
+      "line": 35
+    },
+    {
+      "file": "tests/ContextCompactionF4Privacy.Tests.ps1",
+      "line": 37
+    },
+    {
+      "file": "tests/ContextCompactionF4Privacy.Tests.ps1",
+      "line": 38
+    },
+    {
+      "file": "tests/ContextCompactionF4Privacy.Tests.ps1",
+      "line": 51
+    }
+  ],
+  "logs": {
+    "before-Harness.log": {
+      "sha256": "d6d16c0290393e2b5f02a47d52321030a6d18723629e9888fd5def3f2dd91425",
+      "bytes": 16738
+    },
+    "before-concurrency.log": {
+      "sha256": "20d4ccf4532d0929d796b469a0508d525904b999addbf8892b4725ae935b97a5",
+      "bytes": 173
+    },
+    "before-PlatformSupport.log": {
+      "sha256": "9a9d550e5f8684e822149f4414bea147c080a1278496bb047637b36b1a648fe7",
+      "bytes": 10105
+    },
+    "before-panel.log": {
+      "sha256": "8046d3f013a0084126bb41d6453204b8502319131d3bf4489383eedefe785836",
+      "bytes": 636
+    },
+    "red-guard.log": {
+      "sha256": "23483ab15aa8ced0c7930853c1707e7a9cd72f51e9308ed381ce4cd6eeb34afa",
+      "bytes": 710
+    },
+    "red-panel.log": {
+      "sha256": "0b277d67825c0c7b4b1c53cf5bc8ff4d82bc092328f724d5b884f40f216d00d6",
+      "bytes": 640
+    }
+  },
+  "additionalPristineFailures": {
+    "MuseAgentPlane": {
+      "command": [
+        "/home/kaloyan/.local/share/nexus/runtime/pwsh/pwsh",
+        "-NoProfile",
+        "-File",
+        "/home/kaloyan/nexus-bench/dev-baseline-stabilization-20261008/baseline-installed/tests/MuseAgentPlane.Tests.ps1",
+        "-InstallRoot",
+        "/home/kaloyan/nexus-bench/dev-baseline-stabilization-20261008/baseline-installed"
+      ],
+      "exit": 1
+    },
+    "AihControllerIdentity": {
+      "command": [
+        "/home/kaloyan/.local/share/nexus/runtime/node/bin/node",
+        "/home/kaloyan/nexus-bench/dev-baseline-stabilization-20261008/baseline-installed/tests/AihControllerIdentity.Tests.cjs"
+      ],
+      "exit": 1
+    }
+  },
+  "additionalRawLogs": {
+    "before-additional-MuseAgentPlane.log": {
+      "sha256": "30996255727552a9cf18395d4e475df6fba5d81baec54f28f9ef8cc6be1efd72",
+      "bytes": 598
+    },
+    "before-additional-AihControllerIdentity.log": {
+      "sha256": "4fea08253002330bdb4f74995f763e914d1a99b338890eaa970a1ea566f37bec",
+      "bytes": 1790
+    }
+  }
+}

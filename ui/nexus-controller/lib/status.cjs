@@ -134,7 +134,9 @@ function normalizeWorkspacePath(workspace) {
  * keep the workspace+taskId compatibility key.
  */
 function routingStateFileName(workspace, preset, taskId, taskInstanceId) {
-  const normalized = path.resolve(String(workspace || '')).toLowerCase()
+  const resolved = path.resolve(String(workspace || ''))
+  // Match Get-AihRoutingStatePath: Windows folds case; POSIX paths retain it.
+  const normalized = process.platform === 'win32' ? resolved.toLowerCase() : resolved
   const identity = (typeof taskInstanceId === 'string' && taskInstanceId !== '') ? taskInstanceId : String(taskId || '')
   const key = normalized + '\n' + String(preset || 'aih-engineering').toLowerCase() + '\n' + identity
   const hash = crypto.createHash('sha256').update(key, 'utf8').digest('hex')

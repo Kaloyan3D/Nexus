@@ -1,0 +1,56 @@
+{
+  "runtime": {
+    "node": "24.18.1",
+    "powershell": "7.5.3",
+    "platform": "Linux"
+  },
+  "focused": {
+    "Harness": {
+      "exitCode": 0,
+      "durationSeconds": 78.76
+    },
+    "SourceCredentialGuard": {
+      "exitCode": 0,
+      "durationSeconds": 0.86
+    },
+    "PlatformSupport": {
+      "exitCode": 0,
+      "durationSeconds": 9.36
+    },
+    "PowerShellPortability": {
+      "exitCode": 0,
+      "durationSeconds": 41.68
+    },
+    "TestHarness.Reporting": {
+      "exitCode": 0,
+      "durationSeconds": 1.76
+    },
+    "Panel": {
+      "exitCode": 0,
+      "durationSeconds": 5.14
+    }
+  },
+  "concurrency": {
+    "exitCode": 0,
+    "assertionsPassed": 15,
+    "logSha256": "3b1b574e0c0f44b0569bf966c27a0606e4ac2b9714749f90eab48e139c9378f5"
+  },
+  "assertions": {
+    "Harness": 267,
+    "SourceCredentialGuard": 14,
+    "PlatformSupport": 149,
+    "PowerShellPortability": 22
+  },
+  "surrounding": {
+    "PlatformDetachedLifecycle": "PASS",
+    "StartupLifecycle": "PASS",
+    "ContextCompactionF4Privacy": "PASS",
+    "SetupUpgradeAfterFixtureModeCorrection": "PASS",
+    "NodeSyntaxFilesChecked": 78,
+    "ShellSyntax": "PASS",
+    "ShellSuites": "3 PASS"
+  },
+  "fullOmnibus": "FAIL; see standard-harness-summary.json; no clean 63-suite omnibus claimed",
+  "nativeWindows": "UNVERIFIED",
+  "ccv2OwnershipRegression": "FAIL; separate read-only diagnostic against unchanged integration HEAD; see short-lease-ownership.json"
+}

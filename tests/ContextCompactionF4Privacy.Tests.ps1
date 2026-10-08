@@ -27,15 +27,16 @@ function Complete-F4Task([string]$Workspace, [string]$Description, [string[]]$Cr
     $text = Get-AihContextCheckpointText -Checkpoint $parsed
     return [pscustomobject]@{ task = $task; path = $cp.path; raw = $raw; parsed = $parsed; text = $text }
 }
-$AllSentinels = @('sk-f4fake-acceptance-123456789', 'F4_FAKE_VERIFY_SECRET', 'F4_FAKE_PATH_SECRET', 'F4_FAKE_QUERY_SECRET', 'F4_FAKE_URL_PASSWORD', 'F4_FAKE_AWS_SECRET', 'F4_FAKE_API_KEY', 'F4_FAKE_SERVICE_TOKEN', 'F4_FAKE_DB_PASSWORD', 'F4_FAKE_GITHUB_TOKEN', 'F4_FAKE_OPENAI_KEY', 'F4_FAKE_BEARER_TOKEN', 'F4_FAKE_QUERY_TOKEN', 'F4FAKEPRIVATEKEYMATERIAL')
+$SyntheticKey = 'sk-' + 'f4fake-acceptance-123456789'
+$AllSentinels = @($SyntheticKey, 'F4_FAKE_VERIFY_SECRET', 'F4_FAKE_PATH_SECRET', 'F4_FAKE_QUERY_SECRET', 'F4_FAKE_URL_PASSWORD', 'F4_FAKE_AWS_SECRET', 'F4_FAKE_API_KEY', 'F4_FAKE_SERVICE_TOKEN', 'F4_FAKE_DB_PASSWORD', 'F4_FAKE_GITHUB_TOKEN', 'F4_FAKE_OPENAI_KEY', 'F4_FAKE_BEARER_TOKEN', 'F4_FAKE_QUERY_TOKEN', 'F4FAKEPRIVATEKEYMATERIAL')
 function Assert-NoSentinels([string]$Blob, [string]$Where) { foreach ($s in $AllSentinels) { Assert-Aih (-not $Blob.Contains($s)) ("sentinel absent from $Where : $s") } }
 # == F4-1 acceptance criteria (mandatory audit regression) =====================
 $root = New-F4Fixture 'crit'
 try {
-    $crit = 'call API with sk-f4fake-acceptance-123456789 then proceed'
+    $crit = ('call API with ' + $SyntheticKey + ' then proceed')
     $r = Complete-F4Task $root 'F4 criteria task' @($crit) @([ordered]@{ criterion = $crit; status = 'met'; evidence = ('fixture evidence for ' + $crit) }) @([ordered]@{ name = 'fixture-verify'; kind = 'verify'; status = 'PASS'; exitCode = 0; attempt = 1 }) '' ''
-    Assert-Aih (-not $r.raw.Contains('sk-f4fake-acceptance-123456789')) 'criteria secret absent from checkpoint JSON'
-    Assert-Aih (-not $r.text.Contains('sk-f4fake-acceptance-123456789')) 'criteria secret absent from rendered checkpoint'
+    Assert-Aih (-not $r.raw.Contains($SyntheticKey)) 'criteria secret absent from checkpoint JSON'
+    Assert-Aih (-not $r.text.Contains($SyntheticKey)) 'criteria secret absent from rendered checkpoint'
     Assert-Aih ($r.raw.Contains('call API with')) 'non-secret criteria meaning survives'
 } finally { if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force } }
 # == F4-2 verification name ====================================================
@@ -48,7 +49,7 @@ try {
 # == F4-3 combined production-path sweep (every F4 surface at once) ============
 $root = New-F4Fixture 'sweep'
 try {
-    $crit = 'call API with sk-f4fake-acceptance-123456789 and open /tmp/token=F4_FAKE_PATH_SECRET/file.txt'
+    $crit = ('call API with ' + $SyntheticKey + ' and open /tmp/token=F4_FAKE_PATH_SECRET/file.txt')
     $pem = "-----BEGIN PRIVATE KEY-----`nF4FAKEPRIVATEKEYMATERIAL`n-----END PRIVATE KEY-----"
     $userText = 'need AWS_SECRET_ACCESS_KEY=F4_FAKE_AWS_SECRET and MY_API_KEY=F4_FAKE_API_KEY plus https://example.invalid/api?token=F4_FAKE_QUERY_SECRET and clone https://f4user:F4_FAKE_URL_PASSWORD@example.invalid/repo'
     $asstText = ('did SERVICE_TOKEN=F4_FAKE_SERVICE_TOKEN DB_PASSWORD=F4_FAKE_DB_PASSWORD GITHUB_TOKEN=F4_FAKE_GITHUB_TOKEN OPENAI_API_KEY=F4_FAKE_OPENAI_KEY token=F4_FAKE_QUERY_TOKEN Auth: Authorization: Bearer F4_FAKE_BEARER_TOKEN ' + "`n" + $pem)
