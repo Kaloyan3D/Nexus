@@ -145,6 +145,10 @@ async function main() {
   await blocked(() => integration.evaluateBoundary({ compactionVersion: 'v2' }), 'A13 explicit v2 selection');
 
   const binding = { schemaVersion: 1, taskId: 'TASK-SAFE', taskInstanceId: 'task_safe', sessionId: 'sess-safe', runtimeDir: path.join(area, 'runtime'), checkpointDir: path.join(area, 'checkpoints'), operationRoot: path.join(area, 'operations') };
+  let repairReads = 0;
+  const changingRepair = { ...binding };
+  Object.defineProperty(changingRepair, 'repairHead', { enumerable: true, get() { return ++repairReads === 1 ? false : undefined; } });
+  await blocked(() => runtime.reconstructGenerationRuntimeV2(changingRepair), 'changing repair selector cannot authorize head mutation');
   try { runtime.inspectGenerationRuntimeV2(binding); check(true, 'read-only generation inspection remains callable'); }
   catch (error) { check(false, 'read-only inspection: ' + error.message); }
   check(!fs.existsSync(binding.runtimeDir), 'read-only inspect does not initialize a head');

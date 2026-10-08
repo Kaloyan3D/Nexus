@@ -97,7 +97,9 @@ restriction must not be described as a fencing repair or a DSH rewrite.
 configurable flag. Refusal is `ccv2-durable-mutation-disabled`. The PowerShell V2
 writer has the equivalent fixed first-entry refusal. All guarded exported writers
 refuse before normalizing inputs or performing callbacks/IO. Reconstruct requires
-explicit `repairHead:false`; inspect supplies it. Active attempts cannot return
+explicit `repairHead:false`; inspect supplies it. The captured local repair decision is checked again before artifact reads; an
+accessor that changes from false to repair cannot bypass refusal. Its new regression
+first failed (49 PASS / 1 FAIL) and now passes. Active attempts cannot return
 `committed` or `recovered` because they throw before executing work. Read-only
 inspection may describe a previously committed artifact; it does not commit it.
 
@@ -123,7 +125,7 @@ source manifest records actual file hashes, not an old benchmark qualification.
 
 | Gate / command | Result |
 | --- | --- |
-| `node tests/ContextRestrictedProductionV2.Tests.cjs` | PASS 49/49; original pre-guard test version was 5 PASS / 28 FAIL on unchanged PR #31 |
+| `node tests/ContextRestrictedProductionV2.Tests.cjs` | PASS 50/50; original pre-guard test version was 5 PASS / 28 FAIL on unchanged PR #31 |
 | `node tests/ContextRestrictedProjectionV2.Tests.cjs` | PASS 13/13 on actual shipped policy, including request immutability, route/signal preservation, zero artifact writes, restart, stale/missing fallback and DSH auxiliary bypass |
 | `node tests/ContextRestrictedDshCompaction.Tests.cjs` | PASS 7/7; real pinned BasicCompactionEngine and SessionStore, deterministic meter/summarizer, replacement/flush/restore, no inference |
 | `node tests/ContextRestrictedInstallV2.Tests.cjs` | PASS 11/11; four installed dependency closures, real installed controller compositions, policy refusal, real three-suite harness dispatch/report subset; Linux fixture only |

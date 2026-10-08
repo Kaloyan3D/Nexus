@@ -27,7 +27,7 @@
     },
     {
       "file": "config/ContextGenerationRuntimeV2.cjs",
-      "sha256": "8022bd645bc780ceeb236f2673463a396c3e26b694b9aa2cc889ddf60fee54d5"
+      "sha256": "410289ea1c38008470389fa1aaa403fe060d33a2f29bd89bb927e2e5200eb0e6"
     },
     {
       "file": "config/ContextMemoryProducerHostV2.cjs",

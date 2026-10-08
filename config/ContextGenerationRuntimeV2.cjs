@@ -966,6 +966,7 @@ function reconstructGenerationRuntimeV2(rawInput) {
   const n = normalizeReconstructInput(rawInput);
   const binding = { taskId: n.taskId, taskInstanceId: n.taskInstanceId, sessionId: n.sessionId };
   const repairHead = n.repairHead === undefined || n.repairHead === null ? true : n.repairHead === true;
+  if (repairHead) durablePolicyV2.assertDurableMutationAllowedV2();
 
   const storedHead = readJsonFile(runtimeFilePath(n.runtimeDir));
   let head = storedHead;

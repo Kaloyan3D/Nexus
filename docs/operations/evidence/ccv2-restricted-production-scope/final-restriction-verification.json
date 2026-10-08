@@ -1,0 +1,29 @@
+{
+  "note": "Final source after captured repair-decision guard; source hash recorded in production-source-identity.json",
+  "suites": [
+    {
+      "suite": "ContextRestrictedProductionV2",
+      "exit": 0,
+      "passed": 50,
+      "failed": 0
+    },
+    {
+      "suite": "ContextRestrictedProjectionV2",
+      "exit": 0,
+      "passed": 13,
+      "failed": 0
+    },
+    {
+      "suite": "ContextRestrictedDshCompaction",
+      "exit": 0,
+      "passed": 7,
+      "failed": 0
+    },
+    {
+      "suite": "ContextRestrictedInstallV2",
+      "exit": 0,
+      "passed": 11,
+      "failed": 0
+    }
+  ]
+}
