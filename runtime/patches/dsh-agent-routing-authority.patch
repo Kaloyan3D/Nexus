@@ -1,0 +1,315 @@
+diff --git a/packages/core/agent/README.md b/packages/core/agent/README.md
+index f6b698e..ed8307d 100644
+--- a/packages/core/agent/README.md
++++ b/packages/core/agent/README.md
+@@ -12,7 +12,9 @@ Tracks live agents and carries the initiating Agent through asynchronous driver
+ 
+ ### Public API
+ 
+-The scoped-registration surface: `Agent.ctx` is the agent's scope context (`dsh-scope`, key = the agent) — register tools/sections/variables/listeners through it for that agent alone, all unwound on disposal. `agentEvents(ctx, agent)` is the fused dispatcher for ordinary agent-subject operations (carrier + injected subject in one move); its notification mode invokes every listener and contains both synchronous throws and returned-promise rejections. The registry lifecycle pair reuses one stable routing carrier. `assembleContextFor(agent)` builds the per-agent assembly context (`agent` + `scope` together). `installModelSelection(agentCtx, selection)` snapshots a mutable provider/model/reasoning-effort selection during prompt assembly, applies its provider and model to prompt variables, and applies the complete selection to request routing for one step; an absent selected effort clears an inherited effort so adapter/provider defaults apply. `CreateAgentOptions.setup(agentCtx)` and `ResumeAgentOptions.setup(agentCtx)` compose a fresh or resumed agent's scoped world while both objects remain unpublished. Setup is trusted, composition-only same-process code: drive the agent only after creation resolves.
++The scoped-registration surface: `Agent.ctx` is the agent's scope context (`dsh-scope`, key = the agent) — register tools/sections/variables/listeners through it for that agent alone, all unwound on disposal. `agentEvents(ctx, agent)` is the fused dispatcher for ordinary agent-subject operations (carrier + injected subject in one move); its notification mode invokes every listener and contains both synchronous throws and returned-promise rejections. The registry lifecycle pair reuses one stable routing carrier. `assembleContextFor(agent)` builds the per-agent assembly context (`agent` + `scope` together). `installModelSelection(agentCtx, selection)` snapshots a mutable provider/model/reasoning-effort selection during prompt assembly. A request listener may set `payload.routingAuthority` to `{ source, target: { provider, model } }`; the source order is controller > preset > session > default. A controller or preset route must match the returned request and survives session selection, including its explicit reasoning effort. This declaration exists only for one `agent/request` dispatch and is not stored in the session header. Without it, session selection retains its existing behavior, including clearing an inherited effort when the selection has none. `CreateAgentOptions.setup(agentCtx)` and `ResumeAgentOptions.setup(agentCtx)` compose a fresh or resumed agent's scoped world while both objects remain unpublished. Setup is trusted, composition-only same-process code: drive the agent only after creation resolves.
++
++The request payload protects `routingAuthority` while model selection runs. A later lower-authority or conflicting same-authority claim throws before inference.
+ 
+ `AgentOptions` supplies the initial provider/model route and an optional positive `maxTokens` output cap. The concrete loop resolves any exact-model adapter default, records the effective cap in the request header, and applies it to each conversation-model request; an explicit Agent option wins, while omission leaves the adapter or provider route default in control.
+ 
+diff --git a/packages/core/agent/package.json b/packages/core/agent/package.json
+index 115feb1..4e0dd6e 100644
+--- a/packages/core/agent/package.json
++++ b/packages/core/agent/package.json
+@@ -1,7 +1,7 @@
+ {
+   "name": "@deepseek-ai/dsh-agent",
+   "description": "Agent interface, registry, initiator scope, and event vocabulary for the DeepSeek Harness",
+-  "version": "0.1.1-rc.2",
++  "version": "0.1.1-rc.2-nexus.1",
+   "publishConfig": {
+     "access": "public"
+   },
+diff --git a/packages/core/agent/src/model-selection.ts b/packages/core/agent/src/model-selection.ts
+index 2cb7e44..d0ffd15 100644
+--- a/packages/core/agent/src/model-selection.ts
++++ b/packages/core/agent/src/model-selection.ts
+@@ -5,6 +5,44 @@
+ 
+ import type { Context } from '@deepseek-ai/cordis'
+ import type { LlmCallConfig, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
++import type { RequestRoutingAuthority } from './runtime-types.ts'
++
++const ROUTING_RANK = { default: 0, session: 1, preset: 2, controller: 3 } as const
++
++function validateAuthority(authority: RequestRoutingAuthority): void {
++  if (!authority || !Object.hasOwn(ROUTING_RANK, authority.source)
++    || !authority.target || !authority.target.provider || !authority.target.model) {
++    throw new Error('agent/request routing authority is invalid')
++  }
++}
++
++/** Protect one request payload so a later lower-priority declaration cannot replace its route. */
++function protectRoutingAuthority(payload: { routingAuthority?: RequestRoutingAuthority }): void {
++  let current = payload.routingAuthority
++  if (current !== undefined) validateAuthority(current)
++  Object.defineProperty(payload, 'routingAuthority', {
++    enumerable: true,
++    configurable: false,
++    get: () => current,
++    set: (candidate: RequestRoutingAuthority) => {
++      validateAuthority(candidate)
++      if (current !== undefined) {
++        const oldRank = ROUTING_RANK[current.source]
++        const newRank = ROUTING_RANK[candidate.source]
++        const sameTarget = current.target.provider === candidate.target.provider
++          && current.target.model === candidate.target.model
++        if (newRank < oldRank) {
++          if (!sameTarget) throw new Error('agent/request lower routing authority cannot replace a higher route')
++          return
++        }
++        if (newRank === oldRank && !sameTarget) {
++          throw new Error('agent/request conflicting routing targets at the same authority')
++        }
++      }
++      current = candidate
++    },
++  })
++}
+ 
+ /** Complete provider, model, and optional reasoning effort selected for one live Agent. */
+ export interface ModelSelection {
+@@ -29,7 +67,9 @@ export interface ModelSelectionRef {
+  * Prompt assembly snapshots the selected model before delegating, then applies
+  * its provider/model pair and effort to request config so a
+  * concurrent switch takes effect on a later step instead of splitting the two
+- * surfaces. An absent selected effort clears any inherited effort, restoring
++ * surfaces. A request-local preset or controller route takes precedence over
++ * the session selection; its provider, model, and explicit effort survive.
++ * An absent session-selected effort clears any inherited effort, restoring
+  * the selected model's provider/default behavior.
+  *
+  * @param agentCtx - The selected Agent's scoped context.
+@@ -53,8 +93,26 @@ export function installModelSelection(agentCtx: Context, selection: ModelSelecti
+   })
+   const disposeRequest = agentCtx.on(
+     'agent/request',
+-    async (_payload, next): Promise<LlmCallConfig> => {
++    async (payload, next): Promise<LlmCallConfig> => {
++      protectRoutingAuthority(payload)
++      // Snapshot the declaration visible at this position. A controller/preset
++      // claim already present here is finalized by an OUTER layer, so this
++      // inner position must not assert provider/model equality against the
++      // intermediate downstream value; exact verification for every position
++      // happens at the transport boundary (Nexus Routing-Integrity). This
++      // layer only guarantees session/default selection never overrides the
++      // higher authority.
++      const declared = payload.routingAuthority === undefined
++        ? undefined
++        : { source: payload.routingAuthority.source, target: { ...payload.routingAuthority.target } }
+       const resolved = await next()
++      const authority = payload.routingAuthority
++      if (authority !== undefined) {
++        const { source, target } = authority
++        if (source === 'controller' || source === 'preset') {
++          if (declared === undefined) {
++            if (resolved.provider !== target.provider || resolved.model !== target.model) {
++              throw new Error('agent/request route differs from its declared routing authority')
++            }
++          }
++          return resolved
++        }
++      }
+       const selected = selection.assembled
+       if (selected === undefined) return resolved
+       const { reasoningEffort: _inheritedEffort, ...withoutInheritedEffort } = resolved
+diff --git a/packages/core/agent/src/runtime-types.ts b/packages/core/agent/src/runtime-types.ts
+index 7d713f8..8360726 100644
+--- a/packages/core/agent/src/runtime-types.ts
++++ b/packages/core/agent/src/runtime-types.ts
+@@ -57,6 +57,14 @@ export type PreStepDecision =
+ /** Action returned by a listener that owns model-request recovery. */
+ export type RequestErrorAction = { kind: 'retry' } | undefined
+ 
++/** Request-local route declaration consumed before session model selection. */
++export interface RequestRoutingAuthority {
++  /** The producer of the provider/model target, ordered above default routing. */
++  source: 'default' | 'session' | 'preset' | 'controller'
++  /** The exact provider and model selected by that producer. */
++  target: { provider: string; model: string }
++}
++
+ /** Why a session lifecycle began; seeded creates are `startup`, while persisted loads are `resume`. */
+ export type SessionStartSource = 'startup' | 'resume' | 'clear' | 'compact'
+ 
+@@ -241,7 +249,7 @@ declare module '@deepseek-ai/cordis' {
+      * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.
+      * @mode waterfall
+     */
+-    'agent/request'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; signal: AbortSignal }, next: () => Promise<LlmCallConfig>): Promise<LlmCallConfig>
++    'agent/request'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; signal: AbortSignal; routingAuthority?: RequestRoutingAuthority }, next: () => Promise<LlmCallConfig>): Promise<LlmCallConfig>
+     /**
+      * Handle one failed model-request attempt before the loop retries or closes
+      * its step. A listener returns `{ kind: 'retry' }` without calling `next()`
+diff --git a/packages/core/agent/tests/model-selection.spec.ts b/packages/core/agent/tests/model-selection.spec.ts
+index 3e61060..bd886dc 100644
+--- a/packages/core/agent/tests/model-selection.spec.ts
++++ b/packages/core/agent/tests/model-selection.spec.ts
+@@ -10,6 +10,134 @@ import {
+ import { ReasoningEffortId, type LlmCallConfig } from '@deepseek-ai/dsh-llm'
+ 
+ describe('installModelSelection()', () => {
++  it('preserves a controller route returned by later request middleware', async () => {
++    const ctx = new Context()
++    await ctx.plugin(SystemPrompt)
++    const selection: ModelSelectionRef = {
++      current: { provider: 'session-provider', model: 'session-model', reasoningEffort: ReasoningEffortId('max') },
++      assembled: undefined,
++    }
++    installModelSelection(ctx, selection)
++    ctx.on('agent/request', async (payload, next) => {
++      payload.routingAuthority = {
++        source: 'controller',
++        target: { provider: 'controller-provider', model: 'controller-model' },
++      }
++      return {
++        ...await next(),
++        provider: 'controller-provider',
++        model: 'controller-model',
++        reasoningEffort: ReasoningEffortId('high'),
++      }
++    })
++    await ctx.systemPrompt.assemble()
++    const result = await agentEvents(ctx, {} as Agent).waterfall(
++      'agent/request', { turn: 1, step: 0, signal: new AbortController().signal },
++      () => Promise.resolve({ provider: 'default-provider', model: 'default-model' }),
++    )
++    expect(result).toMatchObject({ provider: 'controller-provider', model: 'controller-model' })
++    expect(result.reasoningEffort).toBe(ReasoningEffortId('high'))
++    await ctx.fiber.dispose()
++  })
++
++  it.each(['preset', 'controller'] as const)('preserves a %s route over session selection', async (source) => {
++    const ctx = new Context()
++    await ctx.plugin(SystemPrompt)
++    installModelSelection(ctx, {
++      current: { provider: 'session', model: 'session-model' }, assembled: undefined,
++    })
++    ctx.on('agent/request', async (payload, next) => {
++      payload.routingAuthority = { source, target: { provider: 'chosen', model: 'chosen-model' } }
++      return { ...await next(), provider: 'chosen', model: 'chosen-model' }
++    })
++    await ctx.systemPrompt.assemble()
++    const result = await agentEvents(ctx, {} as Agent).waterfall(
++      'agent/request', { turn: 1, step: 0, signal: new AbortController().signal },
++      () => Promise.resolve({ provider: 'default', model: 'default-model' }),
++    )
++    expect(result).toMatchObject({ provider: 'chosen', model: 'chosen-model' })
++    await ctx.fiber.dispose()
++  })
++
++  it('rejects a route that disagrees with its higher-authority declaration', async () => {
++    const ctx = new Context()
++    await ctx.plugin(SystemPrompt)
++    installModelSelection(ctx, {
++      current: { provider: 'session', model: 'session-model' }, assembled: undefined,
++    })
++    ctx.on('agent/request', async (payload, next) => {
++      payload.routingAuthority = { source: 'controller', target: { provider: 'chosen', model: 'chosen-model' } }
++      return { ...await next(), provider: 'corrupt', model: 'other-model' }
++    })
++    await ctx.systemPrompt.assemble()
++    await expect(agentEvents(ctx, {} as Agent).waterfall(
++      'agent/request', { turn: 1, step: 0, signal: new AbortController().signal },
++      () => Promise.resolve({ provider: 'default', model: 'default-model' }),
++    )).rejects.toThrow('differs from its declared routing authority')
++    await ctx.fiber.dispose()
++  })
++
++  it('rejects a later lower-authority overwrite of a controller claim', async () => {
++    const ctx = new Context()
++    await ctx.plugin(SystemPrompt)
++    installModelSelection(ctx, {
++      current: { provider: 'session', model: 'session-model' }, assembled: undefined,
++    })
++    ctx.on('agent/request', async (payload, next) => {
++      payload.routingAuthority = { source: 'controller', target: { provider: 'chosen', model: 'chosen-model' } }
++      return { ...await next(), provider: 'chosen', model: 'chosen-model' }
++    })
++    ctx.on('agent/request', async (payload, next) => {
++      payload.routingAuthority = { source: 'session', target: { provider: 'corrupt', model: 'other-model' } }
++      return next()
++    })
++    await ctx.systemPrompt.assemble()
++    await expect(agentEvents(ctx, {} as Agent).waterfall(
++      'agent/request', { turn: 1, step: 0, signal: new AbortController().signal },
++      () => Promise.resolve({ provider: 'default', model: 'default-model' }),
++    )).rejects.toThrow('lower routing authority cannot replace a higher route')
++    await ctx.fiber.dispose()
++  })
++
++  it('allows a controller to replace a prior preset claim', async () => {
++    const ctx = new Context()
++    await ctx.plugin(SystemPrompt)
++    installModelSelection(ctx, { current: undefined, assembled: undefined })
++    ctx.on('agent/request', async (payload, next) => {
++      payload.routingAuthority = { source: 'preset', target: { provider: 'preset', model: 'preset-model' } }
++      return next()
++    })
++    ctx.on('agent/request', async (payload, next) => {
++      payload.routingAuthority = { source: 'controller', target: { provider: 'controller', model: 'controller-model' } }
++      return { ...await next(), provider: 'controller', model: 'controller-model' }
++    })
++    const result = await agentEvents(ctx, {} as Agent).waterfall(
++      'agent/request', { turn: 1, step: 0, signal: new AbortController().signal },
++      () => Promise.resolve({ provider: 'default', model: 'default-model' }),
++    )
++    expect(result).toMatchObject({ provider: 'controller', model: 'controller-model' })
++    await ctx.fiber.dispose()
++  })
++
++  it('is order-invariant: controller isolation finalizes the route under both registration orders', async () => {
++    for (const modelSelectionFirst of [true, false]) {
++      const ctx = new Context()
++      await ctx.plugin(SystemPrompt)
++      const selection: ModelSelectionRef = {
++        current: { provider: 'session-provider', model: 'session-model', reasoningEffort: ReasoningEffortId('max') },
++        assembled: undefined,
++      }
++      const controller = async (payload: any, next: any) => {
++        payload.routingAuthority = {
++          source: 'controller',
++          target: { provider: 'controller-provider', model: 'controller-model' },
++        }
++        return { ...await next(), provider: 'controller-provider', model: 'controller-model' }
++      }
++      if (modelSelectionFirst) { installModelSelection(ctx, selection); ctx.on('agent/request', controller) }
++      else { ctx.on('agent/request', controller); installModelSelection(ctx, selection) }
++      await ctx.systemPrompt.assemble()
++      const result = await agentEvents(ctx, {} as Agent).waterfall(
++        'agent/request', { turn: 1, step: 0, signal: new AbortController().signal },
++        () => Promise.resolve({ provider: 'default-provider', model: 'default-model' }),
++      )
++      expect(result).toMatchObject({ provider: 'controller-provider', model: 'controller-model' })
++      await ctx.fiber.dispose()
++    }
++  })
++
++  it('lets session selection replace a declared default route', async () => {
++    const ctx = new Context()
++    await ctx.plugin(SystemPrompt)
++    installModelSelection(ctx, {
++      current: { provider: 'session', model: 'session-model' }, assembled: undefined,
++    })
++    ctx.on('agent/request', async (payload, next) => {
++      payload.routingAuthority = { source: 'default', target: { provider: 'default', model: 'default-model' } }
++      return next()
++    })
++    await ctx.systemPrompt.assemble()
++    const result = await agentEvents(ctx, {} as Agent).waterfall(
++      'agent/request', { turn: 1, step: 0, signal: new AbortController().signal },
++      () => Promise.resolve({ provider: 'default', model: 'default-model' }),
++    )
++    expect(result).toMatchObject({ provider: 'session', model: 'session-model' })
++    await ctx.fiber.dispose()
++  })
++
+   it('snapshots prompt variables and request routing together, then disposes both listeners', async () => {
+     const ctx = new Context()
+     await ctx.plugin(SystemPrompt)

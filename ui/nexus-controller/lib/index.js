@@ -395,6 +395,11 @@ function apply(ctx) {
         return
       }
       try {
+        const profileContract = await execEngineeringProfile(['-Action', 'get', '-InstallRoot', installRoot])
+        if (!profileContract || profileContract.schemaVersion !== 1 || !profileContract.engineAgentPresets || !Object.hasOwn(profileContract, 'preferredRoute')) {
+          respond(503, { ok: false, error: 'engineering-route-contract-unavailable' })
+          return
+        }
         const state = engineering.buildEngineeringProfileState({
           installRoot,
           dataRoot,
@@ -402,6 +407,7 @@ function apply(ctx) {
           profilesPath: join(installRoot, 'config', 'engineering-profiles.json'),
           registryPath: join(installRoot, 'config', 'model-registry.json'),
           customProfilePath: join(dataRoot, 'custom-engineering-profile.json'),
+          profileContract,
           nowUtc: () => new Date().toISOString(),
         })
         respond(200, state)

@@ -47,7 +47,12 @@ const fs = require('node:fs')
 const path = require('node:path')
 const os = require('node:os')
 const crypto = require('node:crypto')
+const engineeringProfiles = require('./Engineering-Profiles.cjs')
 const contextCompaction = require('./ContextCompaction.cjs')
+const compilerShadowHost = require('./ContextCompilerShadowHostV2.cjs')
+const memoryProducerHost = require('./ContextMemoryProducerHostV2.cjs')
+const compilerActiveHost = require('./ContextCompilerActiveHostV2.cjs')
+const opencodeActiveHost = require('./ContextCompilerActiveOpencodeHostV2.cjs')
 
 const REVIEW_COMMAND = /^\s*\/(?:codex-)?review\b/i
 const VERIFY_COMMAND = /^\s*\/verify\b/i
@@ -806,6 +811,9 @@ function createBindingGuard(deps) {
   return { ensureBinding, withSessionBindingLock, locks }
 }
 
+// Serialize preparation across standing preset mounts that share one data root.
+const preparationLocks = createBindingGuard({})
+
 // ── plugin ──────────────────────────────────────────────────────────────────
 
 function resolveInstallRoot(env) {
@@ -936,8 +944,14 @@ function apply(ctx) {
     }
   }
 
-  function persistBindings() {
+  function persistBindings(strict = false, removedSessionId = null) {
     try {
+      // Standing preset mounts have separate caches. Preserve preparation
+      // records committed by another mount when persisting this one's turns.
+      const durable = loadBindings(bindingsPath)
+      for (const [id, binding] of Object.entries(durable)) {
+        if (id !== removedSessionId && binding.preparationAuthority && !bindings[id]) bindings[id] = binding
+      }
       fs.mkdirSync(path.dirname(bindingsPath), { recursive: true })
       // Persist ONLY the durable binding fields (whitelist): the live
       // `_session` reference (assigned per turn for completion notices) and
@@ -964,13 +978,23 @@ function apply(ctx) {
           reviewRequired: binding.reviewRequired,
           needsRouteCheck: binding.needsRouteCheck,
           boundAtUtc: binding.boundAtUtc,
+          ...(binding.preparationAuthority ? { preparationAuthority: binding.preparationAuthority } : {}),
         }
       }
       const temporary = bindingsPath + '.' + crypto.randomUUID() + '.tmp'
-      fs.writeFileSync(temporary, JSON.stringify({ schemaVersion: 1, bindings: serializable }, null, 2))
+      const fd = fs.openSync(temporary, 'w')
+      try {
+        fs.writeFileSync(fd, JSON.stringify({ schemaVersion: 1, bindings: serializable }, null, 2))
+        fs.fsyncSync(fd)
+      } finally { fs.closeSync(fd) }
       fs.renameSync(temporary, bindingsPath)
+      if (process.platform !== 'win32') {
+        const directory = fs.openSync(path.dirname(bindingsPath), 'r')
+        try { fs.fsyncSync(directory) } finally { fs.closeSync(directory) }
+      }
     } catch (error) {
       log({ event: 'bindings-persist-failed', error: String(error) })
+      if (strict) throw error
     }
   }
 
@@ -999,10 +1023,18 @@ function apply(ctx) {
       args = [...args, '-PayloadFile', payloadPath]
     }
     try {
+      // The existing resolver honors DSH_AIH_PROFILE. Scope that input to
+      // this child only, deriving it from committed controller authority;
+      // global preferences and ordinary callers retain their old behavior.
+      const taskBinding = payload && payload.taskInstanceId
+        ? Object.values(bindings).find((item) => item.taskInstanceId === payload.taskInstanceId)
+        : null
+      const selectedProfile = taskBinding && taskBinding.preparationAuthority && taskBinding.preparationAuthority.profile
+      const invocationEnv = selectedProfile ? { ...childCliEnv, DSH_AIH_PROFILE: selectedProfile } : childCliEnv
       const result = await spawnCaptured(
         pwshHost,
         ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scriptsRoot, script), ...args],
-        { timeout: CLI_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, windowsHide: true, env: childCliEnv },
+        { timeout: CLI_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, windowsHide: true, env: invocationEnv },
       ).catch((error) => {
         // PowerShell CLIs report STRUCTURED failures (hard budget rejection,
         // e.g. packet-too-large) by emitting JSON on stdout and exiting 3.
@@ -1041,9 +1073,9 @@ function apply(ctx) {
     }
   }
 
-  async function createTask(workspace, description, reviewRequested, engine) {
+  async function createTask(workspace, description, reviewRequested, engine, preparation) {
     const task = await invokePowerShell('Task.ps1', ['-Action', 'create-task'], {
-      payload: { workspace, description, reviewRequested: Boolean(reviewRequested), engine },
+      payload: { workspace, description, reviewRequested: Boolean(reviewRequested), engine, ...(preparation || {}) },
     })
     if (!task || !task.taskId) throw new Error('aih-controller: task creation returned no taskId')
     return task
@@ -1072,7 +1104,12 @@ function apply(ctx) {
     // re-validates it against the authoritative ledger (fail closed).
     if (options.taskInstanceId) payload.taskInstanceId = options.taskInstanceId
     if (options.requestedEngine) payload.requestedEngine = options.requestedEngine
-    const args = ['-TaskId', taskId, '-Preset', options.preset ?? 'aih-engineering', '-InstallRoot', installRoot]
+    const args = ['-Preset', options.preset ?? 'aih-engineering', '-InstallRoot', installRoot]
+    if (taskId) args.push('-TaskId', taskId)
+    const bound = Object.values(bindings).find((item) => item.taskInstanceId && item.taskInstanceId === options.taskInstanceId)
+    const profileId = options.profileId || (bound && bound.preparationAuthority && bound.preparationAuthority.profile)
+    if (profileId) args.push('-ProfileId', profileId)
+    if (options.dryRun) args.push('-DryRun')
     const decision = await invokePowerShell('Route.ps1', args, { payload })
     if (!decision || !decision.executionClass) throw new Error('aih-controller: routing returned no execution class')
     return decision
@@ -1160,7 +1197,7 @@ function apply(ctx) {
       const key = stale && stale.sessionId ? stale.sessionId : null
       if (key && bindings[key]) {
         delete bindings[key]
-        persistBindings()
+        persistBindings(false, key)
       }
     },
   })
@@ -2574,7 +2611,28 @@ function apply(ctx) {
       error.code = 'engine-binding-violation'
       throw error
     }
-    const task = await createTask(workspace, reviewRequested ? reviewQuestionOf(promptText) : promptText, reviewRequested, engine)
+    // Resolve the selected profile before creating a task. A late Web profile
+    // fetch must never let a Muse preference enter the Dual agent plane (or
+    // vice versa). DeepSeek-only is intentionally locked to its preset route.
+    const preparation = authoritative && authoritative.preparation
+    if (!preparation && preset !== 'aih-deepseek') {
+      const profileState = await invokePowerShell('EngineeringProfile.ps1', ['-Action', 'get', '-InstallRoot', installRoot])
+      const preferred = profileState && profileState.preferredProfile
+      const profileEngine = profileState && profileState.preferredEngine
+      const route = profileState && profileState.preferredRoute
+      if (!preferred || !preferred.id || profileEngine !== engine ||
+          (engine === 'muse' && (!route || route.profileId !== preferred.id || route.engine !== 'muse' || !route.provider || !route.model))) {
+        const error = new Error('Controller routing failed: selected agent plane does not have a matching, resolved preferred profile. Inference was not started.')
+        error.code = 'controller-routing-unavailable'
+        throw error
+      }
+    }
+    const task = await createTask(workspace, reviewRequested ? reviewQuestionOf(promptText) : promptText, reviewRequested, engine,
+      preparation ? {
+        controllerSessionKey: crypto.createHash('sha256').update(bindingsPath + '\n' + session.id).digest('hex'),
+        controllerProfileId: preparation.profile,
+        controllerPreparationAuthority: preparation,
+      } : undefined)
     // TASK-0005 Part 1: every newly created task carries an immutable
     // taskInstanceId from the TaskController; the binding references it.
     const taskInstanceId = task.taskInstanceId ?? null
@@ -2595,12 +2653,25 @@ function apply(ctx) {
       reviewRequired: Boolean(task.reviewRequested),
       needsRouteCheck: true,
       boundAtUtc: new Date().toISOString(),
+      ...(preparation ? { preparationAuthority: preparation } : {}),
     }
     // Persist the generation-safe identity before routing. If Route.ps1 fails,
     // the next prompt/restart validates and resumes this same task instead of
     // creating an orphan plus a duplicate replacement task.
+    if (preparation) {
+      const previousRoutePath = engineeringProfiles.routingStatePath(installRoot, binding)
+      if (fs.existsSync(previousRoutePath)) {
+        const state = JSON.parse(fs.readFileSync(previousRoutePath, 'utf8'))
+        if (state.taskId !== binding.taskId || state.taskInstanceId !== binding.taskInstanceId ||
+            state.preset !== binding.preset || Object.keys(preparation).some((key) => state[key] !== preparation[key])) {
+          const error = new Error('Interrupted allocation has conflicting routing authority.')
+          error.code = 'session-prepare-conflict'
+          throw error
+        }
+      }
+    }
     bindings[session.id] = binding
-    persistBindings()
+    persistBindings(Boolean(preparation))
     const decision = await routeTask(workspace, task.taskId, task.description, {
       preset,
       requestedEngine: engine,
@@ -2611,12 +2682,143 @@ function apply(ctx) {
     binding.reviewRequired = Boolean(decision.reviewRequired)
     binding.needsRouteCheck = false
     await initializeEngineeringLifecycle(binding)
-    persistBindings()
+    persistBindings(Boolean(preparation))
     registerShellEnvironment()
-    appendMessage(session, createControllerMessage(noticeText(binding), 'controller-binding'))
+    if (!preparation) appendMessage(session, createControllerMessage(noticeText(binding), 'controller-binding'))
     log({ event: 'session-bound', sessionId: session.id, taskId: task.taskId, taskInstanceId, engine, executionClass: binding.executionClass })
     return binding
   }
+
+  /** Host extension: no agent construction, prompt submission or inference. */
+  async function prepareSession(request) {
+    const fail = (code, message) => { const error = new Error(message); error.code = code; throw error }
+    const allowed = ['sessionId', 'cwd', 'preset', 'profileId']
+    if (!request || typeof request !== 'object' || Array.isArray(request) ||
+        Object.keys(request).some((key) => !allowed.includes(key)) ||
+        allowed.some((key) => typeof request[key] !== 'string' || !request[key].trim()) ||
+        !['aih-engineering', 'aih-deepseek', 'aih-muse'].includes(request.preset) ||
+        !path.isAbsolute(request.cwd)) fail('session-prepare-invalid', 'Expected sessionId, absolute cwd, supported preset and profileId only.')
+    request = Object.freeze({ ...request })
+    const sessions = typeof ctx.get === 'function' ? ctx.get('sessions') : ctx.sessions
+    const session = sessions && sessions.get(request.sessionId)
+    if (!session || isWorkerAgent(session.header)) fail('session-prepare-invalid', 'An existing root host session is required.')
+    // On POSIX the immutable cwd is case-sensitive (the legacy comparison
+    // helper intentionally retains its ordinary first-turn semantics).
+    const sameCwd = (left, right) => process.platform === 'win32'
+      ? normalizeWorkspaceIdentity(left) === normalizeWorkspaceIdentity(right)
+      : path.resolve(left) === path.resolve(right)
+    if (!session.header || !session.header.cwd || !sameCwd(session.header.cwd, request.cwd)) fail('session-workspace-mismatch', 'Requested cwd differs from the immutable session cwd.')
+    if (agentPresetOf(session) !== request.preset) fail('engine-binding-violation', 'Requested preset differs from the host session preset.')
+    return preparationLocks.withSessionBindingLock(bindingsPath, () => bindingGuard.withSessionBindingLock(session.id, async () => {
+      // Validate the durable document rather than treating corrupt state as
+      // a blank install. In-memory recovery remains unchanged for lazy turns.
+      if (fs.existsSync(bindingsPath)) {
+        const durable = JSON.parse(fs.readFileSync(bindingsPath, 'utf8'))
+        if (!durable || durable.schemaVersion !== 1 || !durable.bindings || typeof durable.bindings !== 'object' || Array.isArray(durable.bindings)) fail('session-prepare-conflict', 'Binding document is invalid.')
+        for (const [id, persisted] of Object.entries(durable.bindings)) {
+          bindings[id] = { ...(bindings[id] || {}), ...persisted }
+        }
+      }
+      const existing = bindingFor(session)
+      // Dry-run uses the normal production resolver and performs no writes.
+      const selected = await routeTask(request.cwd, null, 'Prepare engineering session', {
+        preset: request.preset, requestedEngine: engineForPreset(request.preset), profileId: request.profileId, dryRun: true,
+      })
+      const authority = { profile: selected.profile, engine: selected.engine, provider: selected.provider, model: selected.model }
+      if (authority.profile !== request.profileId || authority.engine !== engineForPreset(request.preset) || !authority.provider || !authority.model) fail('session-prepare-conflict', 'Requested engineering profile did not resolve exactly.')
+      let binding = existing
+      if (binding) {
+        if (binding.sessionId !== session.id) fail('session-prepare-conflict', 'Existing binding belongs to another session.')
+        if (!sameCwd(binding.workspace, request.cwd)) fail('session-workspace-mismatch', 'Existing binding has a different cwd.')
+        assertEngineBinding(binding, request.preset)
+        if (binding.preset !== request.preset) fail('session-prepare-conflict', 'Existing binding has a different preset.')
+        const identity = await resolveWorkspaceIdentity(request.cwd)
+        const mismatch = classifyBindingRepositoryIdentity(binding, identity)
+        if (mismatch) fail(mismatch, 'Existing binding has conflicting repository authority.')
+        if (!binding.repositoryId) Object.assign(binding, identity)
+        const task = await testTaskIdentity(binding.workspace, binding.taskId, binding.taskInstanceId)
+        if (classifyBindingIdentity(binding, task).verdict !== 'valid') fail('session-prepare-conflict', 'Existing task authority is incompatible; preparation cannot replace it.')
+        assertEngineBinding(binding, request.preset, task.boundEngine)
+        if (task.preparationAuthority && Object.keys(authority).some((key) => task.preparationAuthority[key] !== authority[key])) fail('session-prepare-conflict', 'Task allocation authority conflicts with selection.')
+        const statePath = engineeringProfiles.routingStatePath(installRoot, binding)
+        const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : null
+        if (binding.preparationAuthority && Object.keys(authority).some((key) => binding.preparationAuthority[key] !== authority[key])) fail('session-prepare-conflict', 'Prepared profile or target has drifted.')
+        if (state) {
+          if (state.taskId !== binding.taskId || state.taskInstanceId !== binding.taskInstanceId ||
+              state.preset !== binding.preset || state.executionClass !== selected.executionClass || !sameCwd(state.workspace, binding.workspace) ||
+              Object.keys(authority).some((key) => state[key] !== authority[key])) fail('session-prepare-conflict', 'Routing state conflicts with requested authority.')
+        } else if (!binding.preparationAuthority || !binding.needsRouteCheck) {
+          fail('session-prepare-conflict', 'Existing binding lacks compatible routing authority.')
+        }
+        // Only an interrupted preparation may finish its missing route.
+        if (binding.needsRouteCheck) {
+          if (!binding.preparationAuthority) fail('session-prepare-conflict', 'Incomplete ordinary binding cannot be asserted by preparation.')
+          const decision = await routeTask(binding.workspace, binding.taskId, binding.description, {
+            preset: binding.preset, requestedEngine: binding.engine, taskInstanceId: binding.taskInstanceId,
+          })
+          binding.executionClass = decision.executionClass
+          binding.reviewRequired = Boolean(decision.reviewRequired)
+          await initializeEngineeringLifecycle(binding)
+          binding.needsRouteCheck = false
+        }
+        binding.preparationAuthority = authority
+        persistBindings(true)
+      } else {
+        binding = await bindSession(null, session, request.cwd, 'Prepare engineering session', {
+          preset: request.preset, engine: authority.engine, preparation: authority,
+        })
+      }
+      // Verify committed production state, including the exact resolved target.
+      const state = JSON.parse(fs.readFileSync(engineeringProfiles.routingStatePath(installRoot, binding), 'utf8'))
+      if (state.taskId !== binding.taskId || state.taskInstanceId !== binding.taskInstanceId || state.preset !== binding.preset ||
+          state.executionClass !== selected.executionClass || !sameCwd(state.workspace, binding.workspace) ||
+          Object.keys(authority).some((key) => state[key] !== authority[key])) fail('session-prepare-conflict', 'Persisted routing authority differs from selection.')
+      // Flush production identity and route files before acknowledging the
+      // preparation, even though their writers already use atomic replacement.
+      const authorityFiles = [bindingsPath, engineeringProfiles.routingStatePath(installRoot, binding),
+        path.join(binding.workspace, '.ai-harness', 'state', 'tasks.json'),
+        path.join(binding.workspace, '.ai-harness', 'runs', binding.taskId, 'manifest.json'),
+        path.join(binding.workspace, '.ai-harness', 'runs', binding.taskId, 'ccv2-authority.json')]
+      const authorityDirectories = new Set()
+      for (const file of authorityFiles) {
+        // Windows FlushFileBuffers requires a writable file handle.
+        const fd = fs.openSync(file, 'r+')
+        try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+        if (process.platform !== 'win32') {
+          let directory = path.dirname(file)
+          while (directory !== path.dirname(directory)) {
+            authorityDirectories.add(directory)
+            if (directory === dataRoot || directory === binding.workspace) break
+            directory = path.dirname(directory)
+          }
+        }
+      }
+      for (const directory of authorityDirectories) {
+        const fd = fs.openSync(directory, 'r')
+        try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+      }
+      persistBindings(true)
+      const result = { sessionId: session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId, ...authority }
+      const logDir = path.join(dataRoot, 'logs')
+      fs.mkdirSync(logDir, { recursive: true })
+      const fd = fs.openSync(path.join(logDir, 'aih-controller.log'), 'a')
+      try {
+        fs.writeSync(fd, JSON.stringify({ ts: new Date().toISOString(), plugin: 'aih-controller', event: 'nexus-session-prepared', ...result, status: existing ? 'reused' : 'new' }) + '\n')
+        fs.fsyncSync(fd)
+      } finally { fs.closeSync(fd) }
+      if (process.platform !== 'win32') {
+        for (const directory of [logDir, dataRoot]) {
+          const fd = fs.openSync(directory, 'r')
+          try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+        }
+      }
+      return Object.freeze(result)
+    }))
+  }
+
+  // Cordis host extension, scoped alongside the controller preset. No DSH
+  // session.create semantics or host RPC schema is changed.
+  ctx.on('nexus/session-prepare', (request) => prepareSession(request))
 
   // Phase M3: the effective agent preset is resolved from the newest
   // agent-preset/selected event (the same authority the isolation layer uses),
@@ -2644,6 +2846,18 @@ function apply(ctx) {
   }
 
   function bindingFor(session) {
+    const cached = bindings[session.id]
+    if (!cached || !cached.preparationAuthority) {
+      const durable = loadBindings(bindingsPath)[session.id]
+      if (durable && durable.preparationAuthority) {
+        if (cached && (cached.taskId !== durable.taskId || cached.taskInstanceId !== durable.taskInstanceId || cached.engine !== durable.engine)) {
+          const error = new Error('Prepared authority conflicts with the mounted controller binding.')
+          error.code = 'session-prepare-conflict'
+          throw error
+        }
+        bindings[session.id] = cached ? Object.assign(cached, durable) : durable
+      }
+    }
     return bindings[session.id] || null
   }
 
@@ -2849,6 +3063,47 @@ function apply(ctx) {
       }
     }
   })
+
+  // CCV2-C07H production shadow installation: the ONE production call
+  // site for Compiler Shadow Mode. Observes the final llm/stream request
+  // read-only (observe only, never authority); default off means zero
+  // behavioral change. Never throws into controller startup.
+  // Restricted CCv2 scope: retain the live B03/pressure read registry.
+  // The durable memory writer is source-disabled until fencing is verified.
+  const memoryProducer = memoryProducerHost.installMemoryProducer(ctx, {
+    bindingFor: (sessionId) => bindings[sessionId] || null,
+    flush: (session) => flushSessionDurable(session),
+    log,
+  })
+  const sessionSourceFor = memoryProducer.registry ? memoryProducer.registry.sessionSourceFor : undefined
+  // CCv2 RC1.1: the same registry serves the OpenCode projection's activation
+  // gate its durable usage samples (read-only event snapshot).
+  const liveSessionFor = memoryProducer.registry ? memoryProducer.registry.liveSessionFor : undefined
+
+  compilerShadowHost.installCompilerShadowObserver(ctx, { installRoot, bindingsPath, log, sessionSourceFor })
+
+  // CCV2-C08 production active installation: the ONE production call
+  // site for active compiled projection. OFF/OBSERVE modes return every
+  // request verbatim (zero behavioral change; C07 keeps its own
+  // observer); ACTIVE attempts one validated compiled projection with
+  // deterministic legacy fallback. Never throws into startup.
+  compilerActiveHost.installCompilerActiveProjection(ctx, { installRoot, bindingsPath, log, sessionSourceFor })
+
+  // CCV2-OC01H production OpenCode installation: the ONE production call
+  // site for certified OpenCode Muse projection. Startup loads the
+  // durable authority certification (fail-closed to QUARANTINED when
+  // absent/invalid/stale); OFF/OBSERVE/uncertified modes return every
+  // request verbatim. Never throws into controller startup.
+  // The Meta counter credential comes from the managed DSH credential store
+  // (data/.credentials.yaml; its resolver honours the inherited
+  // environment first), resolved per request just before remote counting.
+  const resolveMetaApiKey = async () => {
+    const credentials = typeof ctx.get === 'function' ? ctx.get('credentials') : undefined
+    if (!credentials || typeof credentials.resolve !== 'function') return undefined
+    const found = await credentials.resolve('MODEL_API_KEY')
+    return found && typeof found.value === 'string' && found.value !== '' ? found.value : undefined
+  }
+  opencodeActiveHost.installOpencodeActiveProjection(ctx, { installRoot, bindingsPath, log, sessionSourceFor, liveSessionFor, resolveMetaApiKey })
 
   // F1 ORDERING: prepended so compaction runs BEFORE the loop's
   // runtime-context projection decision for this request is consumed.
@@ -3165,14 +3420,14 @@ function apply(ctx) {
         appendMessage(
           session,
           createControllerMessage(
-            'Controller: task binding failed for this session.\n' + boundedControllerDiagnostic(message) + (musePlane
-              ? '\nMuse execution was blocked before model request; no fallback was attempted.'
-              : '\nThe session continues without controller routing; controller state was not recorded.'),
+              'Controller routing failed for this session.\n' + boundedControllerDiagnostic(message) +
+              '\nNo authoritative execution target was produced. Inference was not started.' +
+              (musePlane ? '\nNo Muse fallback was attempted.' : ''),
             'controller-error',
           ),
         )
       }
-      return musePlane ? { kind: 'reject' } : next()
+      return { kind: 'reject' }
     }
   }, { prepend: true })
 
@@ -3180,7 +3435,7 @@ function apply(ctx) {
     const session = agent && agent.session
     if (session && bindings[session.id]) {
       delete bindings[session.id]
-      persistBindings()
+      persistBindings(false, session.id)
     }
   })
 }
@@ -3198,7 +3453,25 @@ function loadBindings(bindingsPath) {
   return {}
 }
 
+/**
+ * Supported host API. Dispatches to the mounted production controller through
+ * Cordis' scoped extension mechanism; never creates an agent or submits a turn.
+ */
+async function prepareSession(ctx, request) {
+  if (!ctx || typeof ctx.waterfall !== 'function') {
+    const error = new Error('A Nexus host context is required for session preparation.')
+    error.code = 'session-prepare-unavailable'
+    throw error
+  }
+  return ctx.waterfall('nexus/session-prepare', request, () => {
+    const error = new Error('The production Nexus controller is not mounted in this host context.')
+    error.code = 'session-prepare-unavailable'
+    throw error
+  })
+}
+
 module.exports = { name: 'aih-controller', inject: ['shellEnv'], apply }
+module.exports.prepareSession = prepareSession
 module.exports.isReviewCommand = isReviewCommand
 module.exports.reviewQuestionOf = reviewQuestionOf
 module.exports.isVisualReviewCommand = isVisualReviewCommand

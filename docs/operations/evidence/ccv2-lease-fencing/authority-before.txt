@@ -1,0 +1,4 @@
+PASS: fixture keeps real mutex held until explicit release
+FAIL: timeout must fail closed without executing critical section
+FAIL: mutex construction failure must fail closed
+FAIL: stale release cannot unlink successor after takeover

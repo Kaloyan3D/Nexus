@@ -291,10 +291,15 @@ if ($runningOnWindows) {
         foreach ($probeFile in @('setup.ps1', 'README.md', 'SECURITY.md', '.gitignore', '.gitattributes', '.env.example')) {
             [IO.File]::WriteAllText((Join-Path $probeSource $probeFile), 'TASK-0032 probe fixture' + [Environment]::NewLine)
         }
-        # NodeVersion explicitly null: the pinned-runtime block must be a no-op
-        # (nothing installed, nothing to compare) so the probe never touches the network.
-        [IO.File]::WriteAllText((Join-Path $probeSource 'config/versions.json'), '{"NodeVersion": null}' + [Environment]::NewLine)
-        foreach ($probeFile in @('settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'preset-muse.yml', 'DeepSeek-Isolation.cjs', 'Engineering-Isolation.cjs', 'Muse-Isolation.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'Muse-ReasoningActivity.cjs', 'AihController.cjs', 'ContextCompaction.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json', 'engineering-profiles.json', 'model-registry.json', 'nexus-profiles.json', 'muse-profiles.json', 'Engineering-Profiles.cjs', 'Nexus-Profiles.cjs')) {
+        # Use the existing pinned Node for the closure CLI stub; provisioning
+        # remains a verified no-op and the probe never downloads a runtime.
+        $probeNode = Get-AihNodeExecutable -InstallRoot $InstallRoot
+        $probeNodeVersion = (& $probeNode --version).TrimStart('v')
+        New-Item -ItemType Directory -Force -Path (Join-Path $probeInstall 'runtime/node') | Out-Null
+        Copy-Item -LiteralPath $probeNode -Destination (Join-Path $probeInstall 'runtime/node/node.exe')
+        [IO.File]::WriteAllText((Join-Path $probeSource 'config/versions.json'), (@{ NodeVersion=$probeNodeVersion } | ConvertTo-Json))
+        [IO.File]::WriteAllText((Join-Path $probeSource 'scripts/MusePresetDependencyClosure.cjs'), 'process.exit(0);')
+        foreach ($probeFile in @('settings.yaml', 'home.cordis.patch.yml', 'delegation-block.yml', 'preset.yml', 'preset-deepseek.yml', 'preset-muse.yml', 'DeepSeek-Isolation.cjs', 'Engineering-Isolation.cjs', 'Muse-Isolation.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'Muse-ReasoningActivity.cjs', 'Controller-RequestBoundary.cjs', 'Routing-Integrity.cjs', 'AihController.cjs', 'ContextCompaction.cjs', 'deepseek-agent.cordis.yml', 'routing-policy.json', 'engineering-profiles.json', 'model-registry.json', 'nexus-profiles.json', 'muse-profiles.json', 'Engineering-Profiles.cjs', 'Nexus-Profiles.cjs')) {
             [IO.File]::WriteAllText((Join-Path $probeSource ('config/' + $probeFile)), 'TASK-0032 probe fixture' + [Environment]::NewLine)
         }
         foreach ($probeFile in @('package.json', 'package-lock.json')) {
@@ -840,9 +845,22 @@ foreach ($museContract in @(
     'Validate-MusePreset.cjs',
     'text: !!js >-',
     'aih-muse-isolation',
-    'Engineering-Profiles.cjs'
+    'MusePresetDependencyClosure.cjs',
+    'copy $InstallRoot $stage'
 )) {
     if (-not $museInstallerText.Contains($museContract)) { throw "FAIL: the staged aih-muse installer is missing contract: $museContract" }
+}
+$museClosureManifest = Join-Path $InstallRoot 'config/.muse-preset-closure.json'
+if (Test-Path -LiteralPath $museClosureManifest) {
+    $museClosureNames = @((Get-Content -Raw -LiteralPath $museClosureManifest | ConvertFrom-Json).files | ForEach-Object { $_.name })
+} else {
+    # Source-checkout verification uses the same tracked dependency planner.
+    $closurePlan = & (Get-AihNodeExecutable -InstallRoot $InstallRoot) (Join-Path $InstallRoot 'scripts/MusePresetDependencyClosure.cjs') plan $InstallRoot
+    if ($LASTEXITCODE -ne 0) { throw 'FAIL: Muse source dependency planner failed.' }
+    $museClosureNames = @(($closurePlan | ConvertFrom-Json).dependencyClosure)
+}
+foreach ($requiredMuseFile in @('Engineering-Profiles.cjs', 'ContextCompilerActiveHostV2.cjs', 'ContextCompilerShadowAdapterV2.cjs')) {
+    if ($museClosureNames -notcontains $requiredMuseFile) { throw "FAIL: Muse closure omits $requiredMuseFile" }
 }
 if (-not $compositionText.Contains('Remove-MuseContributorEgressPatch.cjs')) {
     throw 'FAIL: Complete-Install.ps1 does not remove the retired Muse provider-egress hook on upgrade.'

@@ -1,0 +1,54 @@
+[
+  {
+    "name": "renew-authority-succeeded",
+    "at": "2026-10-08T16:36:31.349Z",
+    "result": {
+      "renewed": true,
+      "expiresAtUtc": "2026-10-08T16:36:35.0993750Z",
+      "reason": null
+    },
+    "lock": {
+      "schemaVersion": 2,
+      "taskId": "TASK-0001",
+      "taskInstanceId": "task_28a86a1860b14db5a851c595c870acf5",
+      "sessionId": "sess-a10",
+      "operationId": "ccop_a1d3487c4247df27a0b8c282ec9a1081",
+      "ownerId": "3281af63a6094a69a22a572dfb0c5aca",
+      "ownerPid": 113167,
+      "ownerProcessStartUtc": "2026-10-08T16:36:29.2212466Z",
+      "acquiredAtUtc": "2026-10-08T16:36:30.0280351Z",
+      "renewedAtUtc": "2026-10-08T16:36:31.0993750Z",
+      "expiresAtUtc": "2026-10-08T16:36:35.0993750Z"
+    }
+  },
+  {
+    "name": "other-owner-took-over-before-caller-resumed",
+    "at": "2026-10-08T16:36:36.539Z",
+    "result": {
+      "acquired": true,
+      "ownerId": "0da449e4352d460280d14e68d17cabb4",
+      "leaseSeconds": 60,
+      "reason": null
+    }
+  },
+  {
+    "name": "post-renew-resume-result",
+    "at": "2026-10-08T16:36:37.493Z",
+    "status": "committed",
+    "mutated": true,
+    "eventCountBefore": 7,
+    "eventCountAfter": 8,
+    "lockOwnerIsTaker": true
+  },
+  {
+    "name": "verdict",
+    "at": "2026-10-08T16:36:37.493Z",
+    "demonstratedStaleOwnerMutation": true,
+    "concurrentCorruptionTested": false
+  },
+  {
+    "name": "diagnostic-error",
+    "at": "2026-10-08T16:36:38.345Z",
+    "error": "AssertionError [ERR_ASSERTION]: An owner that lost its lease before resuming must not mutate the session\n\ntrue !== false\n\n    at main (/tmp/ccv2-research-only-OIA3ve/tests/diagnostics/ShortLeaseOwnership.cjs:87:10)"
+  }
+]

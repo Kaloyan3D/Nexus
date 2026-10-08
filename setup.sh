@@ -163,7 +163,7 @@ AIH_PWSH_VERSION=$(aih_read_version PowerShellVersion "$AIH_SOURCE_ROOT/config/v
 [ -n "$AIH_PWSH_VERSION" ] || { echo "Nexus installer: could not read PowerShellVersion from config/versions.json" >&2; exit 1; }
 
 # Fail closed when the source tree is not a complete Nexus checkout.
-for _required in config/versions.json config/settings.yaml scripts/Common.ps1 scripts/aih.ps1 runtime/package.json runtime/package-lock.json; do
+for _required in config/versions.json config/settings.yaml config/nexus-profiles.json config/muse-profiles.json config/preset-muse.yml config/Muse-Isolation.cjs config/Controller-RequestBoundary.cjs config/Routing-Integrity.cjs scripts/Common.ps1 scripts/aih.ps1 scripts/Verify-RoutingIntegrityComposition.mjs runtime/package.json runtime/package-lock.json; do
   AIH_FAIL_UNLESS "$AIH_SOURCE_ROOT/$_required" "The source tree is incomplete; clone the Nexus repository and run ./setup.sh from its root."
 done
 
@@ -183,7 +183,7 @@ for _name in setup.sh setup.ps1 README.md SECURITY.md .gitignore .gitattributes 
   if [ -f "$AIH_SOURCE_ROOT/$_name" ]; then cp -f "$AIH_SOURCE_ROOT/$_name" "$AIH_INSTALL_ROOT/$_name"; fi
 done
 
-AIH_CONFIG_FILES='versions.json settings.yaml home.cordis.patch.yml delegation-block.yml preset.yml preset-deepseek.yml preset-muse.yml DeepSeek-Isolation.cjs Engineering-Isolation.cjs Muse-Isolation.cjs Muse-ReasoningGovernor.cjs Muse-ReasoningRuntime.cjs Muse-ReasoningSignals.cjs Muse-ReasoningActivity.cjs AihController.cjs ContextCompaction.cjs deepseek-agent.cordis.yml routing-policy.json engineering-profiles.json model-registry.json nexus-profiles.json muse-profiles.json Engineering-Profiles.cjs Nexus-Profiles.cjs'
+AIH_CONFIG_FILES='versions.json settings.yaml home.cordis.patch.yml delegation-block.yml preset.yml preset-deepseek.yml preset-muse.yml DeepSeek-Isolation.cjs Engineering-Isolation.cjs Muse-Isolation.cjs Muse-ReasoningGovernor.cjs Muse-ReasoningRuntime.cjs Muse-ReasoningSignals.cjs Muse-ReasoningActivity.cjs Controller-RequestBoundary.cjs Routing-Integrity.cjs AihController.cjs ContextCompaction.cjs deepseek-agent.cordis.yml routing-policy.json engineering-profiles.json model-registry.json nexus-profiles.json muse-profiles.json Engineering-Profiles.cjs Nexus-Profiles.cjs'
 for _name in $AIH_CONFIG_FILES; do
   if [ -f "$AIH_SOURCE_ROOT/config/$_name" ]; then cp -f "$AIH_SOURCE_ROOT/config/$_name" "$AIH_INSTALL_ROOT/config/$_name"; fi
 done
@@ -206,6 +206,7 @@ copy_tree "$AIH_SOURCE_ROOT/scripts" "$AIH_INSTALL_ROOT/scripts"
 copy_tree "$AIH_SOURCE_ROOT/tests" "$AIH_INSTALL_ROOT/tests"
 copy_tree "$AIH_SOURCE_ROOT/ui" "$AIH_INSTALL_ROOT/ui"
 copy_tree "$AIH_SOURCE_ROOT/skills" "$AIH_INSTALL_ROOT/skills"
+copy_tree "$AIH_SOURCE_ROOT/runtime/vendor" "$AIH_INSTALL_ROOT/runtime/vendor"
 cp -f "$AIH_SOURCE_ROOT/runtime/package.json" "$AIH_INSTALL_ROOT/runtime/package.json"
 cp -f "$AIH_SOURCE_ROOT/runtime/package-lock.json" "$AIH_INSTALL_ROOT/runtime/package-lock.json"
 
@@ -294,6 +295,9 @@ fi
 
 # Shared install composition (settings, UI patches, agent presets, data dirs,
 # private-path permissions) - the SAME code the Windows installer runs.
+"$AIH_NODE_DIR/bin/node" "$AIH_INSTALL_ROOT/scripts/MusePresetDependencyClosure.cjs" prepare "$AIH_SOURCE_ROOT" "$AIH_INSTALL_ROOT" >/dev/null
+"$AIH_NODE_DIR/bin/node" "$AIH_INSTALL_ROOT/scripts/MusePresetDependencyClosure.cjs" prepare "$AIH_SOURCE_ROOT" "$AIH_INSTALL_ROOT" engineering >/dev/null
+"$AIH_NODE_DIR/bin/node" "$AIH_INSTALL_ROOT/scripts/MusePresetDependencyClosure.cjs" prepare "$AIH_SOURCE_ROOT" "$AIH_INSTALL_ROOT" deepseek >/dev/null
 if [ "$AIH_RESET_MANAGED_SETTINGS" -eq 1 ]; then
   "$AIH_PWSH_DIR/pwsh" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$AIH_INSTALL_ROOT/scripts/Complete-Install.ps1" -InstallRoot "$AIH_INSTALL_ROOT" -ResetManagedSettings
 else

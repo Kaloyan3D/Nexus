@@ -1,0 +1,9 @@
+PASS: fixture keeps real mutex held until explicit release
+PASS: timeout must fail closed without executing critical section
+PASS: mutex construction failure must fail closed
+Exception: /home/kaloyan/Projects/Nexus-ccv2-lease-fencing/scripts/ContextLifecycle.ps1:1673
+Line |
+1673 |  … t $taken) { throw "Compaction lock mutex busy: refusing unlocked acti …
+     |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | Compaction lock mutex busy: refusing unlocked action (KEEP).
+PASS: stale release cannot unlink successor after takeover

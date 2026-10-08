@@ -1,0 +1,53 @@
+{
+  "base": "7a79294638b4aba22fa7e3130be7aca90a013360",
+  "files": [
+    {
+      "file": "config/AihController.cjs",
+      "sha256": "f4bbd1333d8ed47beb57759831448f4b3c9b587aa54ef7e1953ce5f5c07b893a"
+    },
+    {
+      "file": "config/ContextActiveApplyV2.cjs",
+      "sha256": "be6652484df0bd04200e374d1bf89fb52436bbef21882638d7ef7b6178e09c2c"
+    },
+    {
+      "file": "config/ContextCheckpointV2.cjs",
+      "sha256": "d52c20f69eee84f41bdb59b521d339d316303d2203c803b3973346bf3b67b78a"
+    },
+    {
+      "file": "config/ContextCompaction.cjs",
+      "sha256": "8192b622c8691dbe117012411a7898488e5a29a10c18c1e696c059d6cad6683f"
+    },
+    {
+      "file": "config/ContextCompleteTaskV2.cjs",
+      "sha256": "b346f3cbbb01a6fbdb2f06d4627e8af1ab8853437802b7d1ab3b19935c2f8076"
+    },
+    {
+      "file": "config/ContextDurableMutationPolicyV2.cjs",
+      "sha256": "8f0553ecfa0ff4fe53e29cc9fea83c85763750d656109d93b409b58186c09c05"
+    },
+    {
+      "file": "config/ContextGenerationRuntimeV2.cjs",
+      "sha256": "410289ea1c38008470389fa1aaa403fe060d33a2f29bd89bb927e2e5200eb0e6"
+    },
+    {
+      "file": "config/ContextMemoryProducerHostV2.cjs",
+      "sha256": "2183a82447630870c8a2da6131a7f0556268a05bd7e62a082a81e249ed16d66c"
+    },
+    {
+      "file": "config/ContextMemoryProducerV2.cjs",
+      "sha256": "2efb2102ba7f054926777b3ab7f18e9a593bff86250d8fa045404a62973ce606"
+    },
+    {
+      "file": "config/ContextTrustV2.cjs",
+      "sha256": "179f44108e58e1012485839d95a72135fa497c52a5af21048a621ef1c353232f"
+    },
+    {
+      "file": "scripts/ContextLifecycle.ps1",
+      "sha256": "8ba82a51449a813df37f4b73ef18014e21c7128da2d014f5bf92169510cff415"
+    },
+    {
+      "file": "scripts/Test-Harness.ps1",
+      "sha256": "99ddf4c90eed8a0cd42989cd85a99b6e15cb47c2f15a26b51d3104567bb4df19"
+    }
+  ]
+}

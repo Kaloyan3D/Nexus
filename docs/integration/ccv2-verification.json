@@ -1,0 +1,1397 @@
+{
+  "scope": "Full 172-suite initial installed harness plus focused corrections; not a new full harness execution",
+  "initial": {
+    "pass": 164,
+    "fail": 8
+  },
+  "reconciled": {
+    "pass": 168,
+    "fail": 4
+  },
+  "suites": [
+    {
+      "name": "SetupUpgrade",
+      "script": "tests/SetupUpgrade.Tests.ps1",
+      "initialResult": "FAIL",
+      "initialExitCode": 1,
+      "finalResult": "PASS",
+      "evidence": "SetupUpgrade-final.log"
+    },
+    {
+      "name": "UpdateRootResolution",
+      "script": "tests/UpdateRootResolution.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "Harness",
+      "script": "tests/Harness.Tests.ps1",
+      "initialResult": "FAIL",
+      "initialExitCode": 1,
+      "finalResult": "FAIL",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "TestHarness.Reporting",
+      "script": "tests/TestHarness.Reporting.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "JsonSerialization",
+      "script": "tests/JsonSerialization.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "EpistemicPolicy",
+      "script": "tests/EpistemicPolicy.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "EngineeringTelemetry",
+      "script": "tests/EngineeringTelemetry.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompaction",
+      "script": "tests/ContextCompaction.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ControllerRouting",
+      "script": "tests/ControllerRouting.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "TaskIdentity",
+      "script": "tests/TaskIdentity.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "EngineeringProfiles",
+      "script": "tests/EngineeringProfiles.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "EngineeringProfileEditor",
+      "script": "tests/EngineeringProfileEditor.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "NexusProfiles",
+      "script": "tests/NexusProfiles.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "MuseProvider",
+      "script": "tests/MuseProvider.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "MuseAgentPlane",
+      "script": "tests/MuseAgentPlane.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "MuseInstall",
+      "script": "tests/MuseInstall.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "SourceCompleteness",
+      "script": "tests/SourceCompleteness.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "MusePresetDependencyClosure",
+      "script": "tests/MusePresetDependencyClosure.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "MusePresetCleanInstall",
+      "script": "tests/MusePresetCleanInstall.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ControllerPresetCleanInstall",
+      "script": "tests/ControllerPresetCleanInstall.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ControllerPresetInstalled",
+      "script": "tests/ControllerPresetInstalled.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "VisualReview",
+      "script": "tests/VisualReview.Tests.ps1",
+      "initialResult": "FAIL",
+      "initialExitCode": 1,
+      "finalResult": "PASS",
+      "evidence": "visual-review-green.log"
+    },
+    {
+      "name": "VisualLoop",
+      "script": "tests/VisualLoop.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "NexusWorkspace",
+      "script": "tests/NexusWorkspace.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "Intelligence.Concurrency",
+      "script": "tests/Intelligence.Concurrency.Tests.ps1",
+      "initialResult": "FAIL",
+      "initialExitCode": 1,
+      "finalResult": "FAIL",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "NexusSkills",
+      "script": "tests/NexusSkills.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "Intelligence.Registry",
+      "script": "tests/Intelligence.Registry.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "Intelligence.Scanning",
+      "script": "tests/Intelligence.Scanning.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "Intelligence.Snapshots",
+      "script": "tests/Intelligence.Snapshots.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "Intelligence.EndToEnd",
+      "script": "tests/Intelligence.EndToEnd.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "Intelligence.IgnoreRegression",
+      "script": "tests/Intelligence.IgnoreRegression.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "Intelligence.SnapshotModules",
+      "script": "tests/Intelligence.SnapshotModules.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "Intelligence.CodeFoundation",
+      "script": "tests/Intelligence.CodeFoundation.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "Intelligence.CodeParsing",
+      "script": "tests/Intelligence.CodeParsing.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "Intelligence.CodeIntelligence",
+      "script": "tests/Intelligence.CodeIntelligence.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "Intelligence.CodeScale",
+      "script": "tests/Intelligence.CodeScale.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "AihController",
+      "script": "tests/AihController.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "VisualControllerLifecycle",
+      "script": "tests/VisualControllerLifecycle.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "VisualReviewBridge",
+      "script": "tests/VisualReviewBridge.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "VisualStructuredOutput",
+      "script": "tests/VisualStructuredOutput.Tests.mjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "NexusSkillsRuntime",
+      "script": "tests/NexusSkills.Runtime.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "NexusProfilesRuntime",
+      "script": "tests/NexusProfiles.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "MuseProviderRuntime",
+      "script": "tests/MuseProvider.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "MuseReasoningGovernor",
+      "script": "tests/MuseReasoningGovernor.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "MuseReasoningRuntime",
+      "script": "tests/MuseReasoningRuntime.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "MuseReasoningSignals",
+      "script": "tests/MuseReasoningSignals.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "MuseReasoningActivity",
+      "script": "tests/MuseReasoningActivity.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "MuseIsolation",
+      "script": "tests/MuseIsolation.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "MuseRoutingAuthorityOrdering",
+      "script": "tests/MuseRoutingAuthorityOrdering.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionBridge",
+      "script": "tests/ContextCompactionBridge.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionAcceptance",
+      "script": "tests/ContextCompactionAcceptance.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionCrash",
+      "script": "tests/ContextCompactionCrash.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionF1Loop",
+      "script": "tests/ContextCompactionF1Loop.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionF2Prod",
+      "script": "tests/ContextCompactionF2Prod.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionF5Prod",
+      "script": "tests/ContextCompactionF5Prod.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionXProc",
+      "script": "tests/ContextCompactionXProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionF1Loop",
+      "script": "tests/ContextCompactionF1Loop.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionPartial",
+      "script": "tests/ContextCompactionPartial.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionF5Slow",
+      "script": "tests/ContextCompactionF5Slow.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "MuseEgressCleanup",
+      "script": "tests/MuseEgressCleanup.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "NexusEngineContract",
+      "script": "tests/NexusEngineContract.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "EpistemicProductionHardening",
+      "script": "tests/EpistemicProductionHardening.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "AihControllerIdentity",
+      "script": "tests/AihControllerIdentity.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "PlatformSupport",
+      "script": "tests/PlatformSupport.Tests.ps1",
+      "initialResult": "FAIL",
+      "initialExitCode": 1,
+      "finalResult": "FAIL",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "StartupProviderIsolation",
+      "script": "tests/StartupProviderIsolation.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "PowerShellPortability",
+      "script": "tests/PowerShellPortability.Tests.ps1",
+      "initialResult": "FAIL",
+      "initialExitCode": 1,
+      "finalResult": "PASS",
+      "evidence": "portability-after-classification.log"
+    },
+    {
+      "name": "AihControllerHost",
+      "script": "tests/AihControllerHost.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCheckpointV2",
+      "script": "tests/ContextCheckpointV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextTrustV2",
+      "script": "tests/ContextTrustV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextSnapshotV2",
+      "script": "tests/ContextSnapshotV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextSafePointV2",
+      "script": "tests/ContextSafePointV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextSafePointV2LiveHost",
+      "script": "tests/ContextSafePointV2LiveHost.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCheckpointabilityV2",
+      "script": "tests/ContextCheckpointabilityV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCheckpointabilityV2LiveHost",
+      "script": "tests/ContextCheckpointabilityV2LiveHost.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextPressureV2",
+      "script": "tests/ContextPressureV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextRetentionV2",
+      "script": "tests/ContextRetentionV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextPressureRetentionV2LiveHost",
+      "script": "tests/ContextPressureRetentionV2LiveHost.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextShadowV2",
+      "script": "tests/ContextShadowV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextShadowV2LiveHost",
+      "script": "tests/ContextShadowV2LiveHost.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextActiveApplyV2",
+      "script": "tests/ContextActiveApplyV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextActiveApplyV2LiveHost",
+      "script": "tests/ContextActiveApplyV2LiveHost.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextActiveApplyV2XProc",
+      "script": "tests/ContextActiveApplyV2XProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextGenerationRuntimeV2",
+      "script": "tests/ContextGenerationRuntimeV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextGenerationRuntimeV2LiveHost",
+      "script": "tests/ContextGenerationRuntimeV2LiveHost.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextGenerationRuntimeV2XProc",
+      "script": "tests/ContextGenerationRuntimeV2XProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextRecoveryV2",
+      "script": "tests/ContextRecoveryV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextRecoveryV2XProc",
+      "script": "tests/ContextRecoveryV2XProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextRecoveryV2LiveHost",
+      "script": "tests/ContextRecoveryV2LiveHost.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionV2DshGenerationProof",
+      "script": "tests/ContextCompactionV2DshGenerationProof.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionV2Operation",
+      "script": "tests/ContextCompactionV2Operation.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionV2FoundationHardening",
+      "script": "tests/ContextCompactionV2FoundationHardening.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompleteTaskV2",
+      "script": "tests/ContextCompleteTaskV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompleteTaskV2LiveHost",
+      "script": "tests/ContextCompleteTaskV2LiveHost.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompleteTaskV2XProc",
+      "script": "tests/ContextCompleteTaskV2XProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextPageV2",
+      "script": "tests/ContextPageV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextPageStoreV2",
+      "script": "tests/ContextPageStoreV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextPageStoreV2Crash",
+      "script": "tests/ContextPageStoreV2Crash.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextPageStoreV2XProc",
+      "script": "tests/ContextPageStoreV2XProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextPageStoreV2Fallback",
+      "script": "tests/ContextPageStoreV2Fallback.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextPageStoreV2FallbackXProc",
+      "script": "tests/ContextPageStoreV2FallbackXProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextPageStoreV2Secrets",
+      "script": "tests/ContextPageStoreV2Secrets.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextPageStoreV2Advisory",
+      "script": "tests/ContextPageStoreV2Advisory.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextEvidenceRehydrationV2",
+      "script": "tests/ContextEvidenceRehydrationV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextEvidenceRehydrationV2LiveHost",
+      "script": "tests/ContextEvidenceRehydrationV2LiveHost.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextEvidenceRehydrationV2XProc",
+      "script": "tests/ContextEvidenceRehydrationV2XProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextEvidenceRehydrationV2H",
+      "script": "tests/ContextEvidenceRehydrationV2H.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextMemoryTierV2",
+      "script": "tests/ContextMemoryTierV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextMemoryTierV2XProc",
+      "script": "tests/ContextMemoryTierV2XProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextMemoryTierV2H",
+      "script": "tests/ContextMemoryTierV2H.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextViewV2",
+      "script": "tests/ContextViewV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextViewV2XProc",
+      "script": "tests/ContextViewV2XProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompilerV2",
+      "script": "tests/ContextCompilerV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompilerV2XProc",
+      "script": "tests/ContextCompilerV2XProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompilerV2H",
+      "script": "tests/ContextCompilerV2H.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextRetrieverV2",
+      "script": "tests/ContextRetrieverV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextRetrieverV2XProc",
+      "script": "tests/ContextRetrieverV2XProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextRetrieverV2H",
+      "script": "tests/ContextRetrieverV2H.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextBudgetAllocatorV2",
+      "script": "tests/ContextBudgetAllocatorV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextBudgetAllocatorV2XProc",
+      "script": "tests/ContextBudgetAllocatorV2XProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextBudgetAllocatorV2H",
+      "script": "tests/ContextBudgetAllocatorV2H.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompressionLadderV2",
+      "script": "tests/ContextCompressionLadderV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompressionLadderV2XProc",
+      "script": "tests/ContextCompressionLadderV2XProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompressionLadderV2H",
+      "script": "tests/ContextCompressionLadderV2H.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextPromptLayoutV2",
+      "script": "tests/ContextPromptLayoutV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextPromptLayoutV2XProc",
+      "script": "tests/ContextPromptLayoutV2XProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompilerShadowV2",
+      "script": "tests/ContextCompilerShadowV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompilerShadowV2XProc",
+      "script": "tests/ContextCompilerShadowV2XProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompilerShadowHostV2",
+      "script": "tests/ContextCompilerShadowHostV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextModelCapabilityV2",
+      "script": "tests/ContextModelCapabilityV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextPromptRendererV2",
+      "script": "tests/ContextPromptRendererV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompilerActiveV2",
+      "script": "tests/ContextCompilerActiveV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompilerActiveV2XProc",
+      "script": "tests/ContextCompilerActiveV2XProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompilerActiveHostV2",
+      "script": "tests/ContextCompilerActiveHostV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextTokenizerDeepseekV4",
+      "script": "tests/ContextTokenizerDeepseekV4.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextTokenizerDeepseekV4XProc",
+      "script": "tests/ContextTokenizerDeepseekV4XProc.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompilerActiveDeepseekV4",
+      "script": "tests/ContextCompilerActiveDeepseekV4.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompilerActiveMuseRoutesV2",
+      "script": "tests/ContextCompilerActiveMuseRoutesV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextRemoteCounterMuseV2",
+      "script": "tests/ContextRemoteCounterMuseV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextRemoteCounterResilienceV2",
+      "script": "tests/ContextRemoteCounterResilienceV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompilerActiveMuseV2",
+      "script": "tests/ContextCompilerActiveMuseV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompilerActiveOpencodeV2",
+      "script": "tests/ContextCompilerActiveOpencodeV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextAuthorityCertificationV2",
+      "script": "tests/ContextAuthorityCertificationV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompilerActiveOpencodeHostV2",
+      "script": "tests/ContextCompilerActiveOpencodeHostV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextActivationPressureV2",
+      "script": "tests/ContextActivationPressureV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextR1RealSessionContracts",
+      "script": "tests/ContextR1RealSessionContracts.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextMemoryProducerV2",
+      "script": "tests/ContextMemoryProducerV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionV2",
+      "script": "tests/ContextCompactionV2.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ComposedRoutingAuthority",
+      "script": "tests/ComposedRoutingAuthority.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ComposedRoutingMatrix",
+      "script": "tests/ComposedRoutingMatrix.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionF10ReaderBounds",
+      "script": "tests/ContextCompactionF10ReaderBounds.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionF4Privacy",
+      "script": "tests/ContextCompactionF4Privacy.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionF6UsageRace",
+      "script": "tests/ContextCompactionF6UsageRace.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionF7Telemetry",
+      "script": "tests/ContextCompactionF7Telemetry.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionF8GitFacts",
+      "script": "tests/ContextCompactionF8GitFacts.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextCompactionF9TailBound",
+      "script": "tests/ContextCompactionF9TailBound.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ContextWireProjectorResponsesV2",
+      "script": "tests/ContextWireProjectorResponsesV2.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "ControllerSessionBootstrap",
+      "script": "tests/ControllerSessionBootstrap.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "DeepSeekIsolation",
+      "script": "tests/DeepSeekIsolation.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "EngineeringIsolation",
+      "script": "tests/EngineeringIsolation.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "MuseOpenCodeGo",
+      "script": "tests/MuseOpenCodeGo.Tests.cjs",
+      "initialResult": "FAIL",
+      "initialExitCode": 1,
+      "finalResult": "PASS",
+      "evidence": "MuseOpenCodeGo-final.log"
+    },
+    {
+      "name": "MuseOpenCodeGo",
+      "script": "tests/MuseOpenCodeGo.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "MuseOpenCodeSession",
+      "script": "tests/MuseOpenCodeSession.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "NexusComposerOwnership",
+      "script": "tests/NexusComposerOwnership.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "NexusControllerPanel",
+      "script": "tests/NexusControllerPanel.Tests.cjs",
+      "initialResult": "FAIL",
+      "initialExitCode": 1,
+      "finalResult": "FAIL",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "NexusModeContract",
+      "script": "tests/NexusModeContract.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "PlatformDetachedLifecycle",
+      "script": "tests/PlatformDetachedLifecycle.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "PreferredRouteContract",
+      "script": "tests/PreferredRouteContract.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "RoutingIntegrity",
+      "script": "tests/RoutingIntegrity.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "RuntimeRoutingTrace",
+      "script": "tests/RuntimeRoutingTrace.Tests.cjs",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "StartupLifecycle",
+      "script": "tests/StartupLifecycle.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "VisualCaptureTarget",
+      "script": "tests/VisualCaptureTarget.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    },
+    {
+      "name": "VisualPacketIntegrity",
+      "script": "tests/VisualPacketIntegrity.Tests.ps1",
+      "initialResult": "PASS",
+      "initialExitCode": 0,
+      "finalResult": "PASS",
+      "evidence": "harness-1.json"
+    }
+  ],
+  "windows": "UNVERIFIED",
+  "inference": "NOT_RUN",
+  "verifiedProductionCommit": "a9ebd2fa692846973b27d70bd04040c1e4fc03ef",
+  "baseCommit": "9f5f109e0f651bc5007bb8670202477b688ba26c",
+  "bootstrapFinalAssertions": 32,
+  "portabilityFinalAssertions": 25,
+  "frozenTag": "ccv2-lhcb02-frozen-20261008",
+  "frozenCommit": "c221afad9e5a69c2b50fb69d619eac26ba710bc8"
+}

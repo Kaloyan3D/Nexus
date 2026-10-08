@@ -197,9 +197,9 @@ function Resolve-AihNexusProfile {
 }
 
 function Get-AihRequestedNexusProfileId {
-    param([object]$Policy,[object]$Preset,[string]$SettingsPath)
+    param([object]$Policy,[object]$Preset,[string]$SettingsPath,[switch]$IgnorePresetLock)
     $overrideAllowed=$true
-    if($null-ne$Preset-and$null-ne$Preset.Config.PSObject.Properties['profileOverrideAllowed']){$overrideAllowed=[bool]$Preset.Config.profileOverrideAllowed}
+    if($null-ne$Preset-and$null-ne$Preset.Config.PSObject.Properties['profileOverrideAllowed']-and-not$IgnorePresetLock){$overrideAllowed=[bool]$Preset.Config.profileOverrideAllowed}
     $requested=$null
     if($overrideAllowed){
         if(-not[string]::IsNullOrWhiteSpace($env:DSH_AIH_PROFILE)){$requested=$env:DSH_AIH_PROFILE}

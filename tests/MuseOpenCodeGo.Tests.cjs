@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
+const { createPresetCtx } = require('./lib/AgentRequestComposition.cjs');
 const { pathToFileURL } = require('node:url');
 const repoRoot = path.resolve(__dirname, '..');
 const nexusProfiles = require(path.join(repoRoot, 'config', 'Nexus-Profiles.cjs'));
@@ -65,9 +66,8 @@ function opencodeState(overrides) {
   return Object.assign({ taskId: 'TASK-OC-1', preset: 'aih-muse', engine: 'muse', executionClass: 'muse_main', role: null, profile: 'muse-spark-1.3-contributor-opencode', profileDisplayName: 'Muse Spark 1.3 OpenCode Go', provider: 'opencode-go', model: 'muse-spark-1.3-contributor', modelDisplayName: 'Muse Spark 1.3 Contributor OpenCode Go', reasoning: 'xhigh', dataUseTier: 'contributor' }, overrides || {});
 }
 function makeCtx() {
-  const handlers = {};
   const registrations = [];
-  return { handlers: handlers, registrations: registrations, on: function(name, handler) { handlers[name] = handler; }, shellEnv: { register: function(d) { registrations.push(d); } } };
+  return createPresetCtx({ registrations, shellEnv: { register: function(d) { registrations.push(d); } } });
 }
 function runRequest(ctx, session, proposed) {
   const handler = ctx.handlers['agent/request'];

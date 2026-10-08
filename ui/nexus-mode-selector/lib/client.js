@@ -65,6 +65,7 @@ window.__ModuleLoader__.load({
       let snapshot;
       try { snapshot = engineState.getSnapshot(); } catch { return modeId; }
       if (!snapshot || snapshot.engine !== "muse") return modeId;
+      if (!snapshot.preferredRoute || typeof snapshot.preferredRoute.provider !== "string" || !snapshot.preferredRoute.provider || typeof snapshot.preferredRoute.model !== "string" || !snapshot.preferredRoute.model) return modeId;
       const agentPreset = typeof snapshot.engineAgentPreset === "string" ? snapshot.engineAgentPreset : "";
       if (!/^[a-z0-9][a-z0-9-]*$/.test(agentPreset)) return modeId;
       if (!knownPresetIds || !knownPresetIds.has(agentPreset)) return modeId;
@@ -136,8 +137,9 @@ window.__ModuleLoader__.load({
         if (!result.ok) throw new Error(result.error.message || "Failed to persist the Nexus mode.");
       }
 
-      async function syncModel(sessionId, id) {
-        const selection = MODE_SELECTIONS[id];
+      async function syncModel(sessionId, id, effectiveId) {
+        const engine = engineState && typeof engineState.getSnapshot === "function" ? engineState.getSnapshot() : null;
+        const selection = effectiveId === "aih-muse" ? engine && engine.preferredRoute : MODE_SELECTIONS[id];
         if (!selection) return;
         const directory = scope.modelDirectories.directoryFor(sessionId);
         try { await directory.load(); } catch { /* select below carries the authoritative failure */ }
@@ -145,8 +147,8 @@ window.__ModuleLoader__.load({
         await directory.select(selection);
       }
 
-      async function settleAppliedMode(session, id) {
-        await syncModel(session.id, id);
+      async function settleAppliedMode(session, id, effectiveId) {
+        await syncModel(session.id, id, effectiveId);
         staged = void 0;
         fallback = id;
         try {
@@ -214,7 +216,7 @@ window.__ModuleLoader__.load({
             scope.sessions.noteAgentPreset(session.id, result.value.agentPreset);
           }
           engineAutoApplyFailed = false;
-          await settleAppliedMode(session, id);
+          await settleAppliedMode(session, id, effectiveId);
         } catch (error) {
           engineAutoApplyFailed = true;
           if (!disposed) {

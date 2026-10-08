@@ -18,6 +18,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const repoRoot = path.resolve(__dirname, '..');
+const { createPresetCtx } = require('./lib/AgentRequestComposition.cjs');
 const isolation = require(path.join(repoRoot, 'config', 'Muse-Isolation.cjs'));
 const runtime = require(path.join(repoRoot, 'config', 'Muse-ReasoningRuntime.cjs'));
 const signals = require(path.join(repoRoot, 'config', 'Muse-ReasoningSignals.cjs'));
@@ -99,8 +100,7 @@ function museSession(id) {
 }
 
 function makeRequestCtx() {
-  const handlers = {};
-  return { handlers, on: (n, h) => { handlers[n] = h; }, shellEnv: { register: () => {} } };
+  return createPresetCtx();
 }
 
 // Model-facing invocation through the REAL tool definition: identity comes

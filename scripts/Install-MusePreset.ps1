@@ -22,6 +22,12 @@ $backup = Join-Path $targetParent ('.aih-muse.backup.' + $token)
 $published = $false
 $backupCreated = $false
 $utf8 = [System.Text.UTF8Encoding]::new($false)
+$closureTool = Join-Path $layout.Scripts 'MusePresetDependencyClosure.cjs'
+if (Test-Path -LiteralPath (Join-Path $InstallRoot '.git')) {
+    & $layout.Node $closureTool prepare $InstallRoot $InstallRoot | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Muse preset source dependency closure failed.' }
+}
+elseif (-not (Test-Path -LiteralPath (Join-Path $layout.Config '.muse-preset-closure.json'))) { throw 'Muse preset closure manifest is missing; reinstall from a tracked source checkout.' }
 
 try {
     New-Item -ItemType Directory -Path $stage | Out-Null
@@ -63,9 +69,8 @@ try {
     [System.IO.File]::WriteAllText((Join-Path $stage 'agent.cordis.yml'), $museText, $utf8)
 
     Copy-Item -LiteralPath (Join-Path $layout.Config 'preset-muse.yml') -Destination (Join-Path $stage 'preset.yml')
-    foreach ($managedFile in @('Muse-Isolation.cjs', 'Muse-ReasoningGovernor.cjs', 'Muse-ReasoningRuntime.cjs', 'Muse-ReasoningSignals.cjs', 'Muse-ReasoningActivity.cjs', 'AihController.cjs', 'ContextCompaction.cjs', 'Engineering-Profiles.cjs')) {
-        Copy-Item -LiteralPath (Join-Path $layout.Config $managedFile) -Destination (Join-Path $stage $managedFile)
-    }
+    & $layout.Node $closureTool copy $InstallRoot $stage | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Muse preset dependency closure copy failed.' }
 
     & $layout.Node (Join-Path $layout.Scripts 'Validate-MusePreset.cjs') $InstallRoot $stage | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'The staged Muse preset failed structural validation.' }
