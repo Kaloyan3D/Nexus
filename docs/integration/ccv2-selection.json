@@ -1,0 +1,2644 @@
+[
+  {
+    "path": "config/ContextActivationPressureV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextActiveApplyLockClientV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextActiveApplyV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextAuthorityCertificationV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextBudgetAllocatorV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextCheckpointV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextCheckpointabilityV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextCompilerActiveHostV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextCompilerActiveMuseV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextCompilerActiveOpencodeHostV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextCompilerActiveOpencodeV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextCompilerActiveV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextCompilerShadowAdapterV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextCompilerShadowHostV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextCompilerShadowV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextCompilerV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextCompleteTaskV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextCompressionLadderV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextEvidenceIndexV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextEvidenceRehydrationV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextGenerationRuntimeV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextMemoryProducerHostV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextMemoryProducerV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextMemoryTierV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextModelCapabilityV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextPageStoreV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextPageV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextPressureV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextPromptLayoutV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextPromptRendererV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextRecoveryFaultV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextRemoteCounterMuseV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextRepositoryEvidenceSourceV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextRetentionV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextRetrieverV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextSafePointV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextSessionEvidenceSourceV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextShadowV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextSnapshotV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextTaskAuthorityV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextTokenCounterV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextTokenizerRegistryV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextTrustV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextViewV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/ContextWireProjectorResponsesV2.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/Controller-RequestBoundary.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/Routing-Integrity.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "config/tokenizers/deepseek-v4-tokenizer-config.json",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_DEPENDENCY"
+  },
+  {
+    "path": "config/tokenizers/deepseek-v4-tokenizer.json",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_DEPENDENCY"
+  },
+  {
+    "path": "config/tokenizers/deepseek-v4-tokenizer.provenance.json",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_DEPENDENCY"
+  },
+  {
+    "path": "docs/architecture/ccv2-rc1.1-reasoning-continuity.md",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "docs/architecture/context-compaction-v2.md",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "runtime/patches/README.md",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_DEPENDENCY"
+  },
+  {
+    "path": "runtime/patches/dsh-agent-routing-authority.patch",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_DEPENDENCY"
+  },
+  {
+    "path": "runtime/vendor/deepseek-ai-dsh-agent-0.1.1-rc.2-nexus.1.tgz",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_DEPENDENCY"
+  },
+  {
+    "path": "scripts/C08H-LiveAcceptance.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "BENCHMARK_ONLY",
+    "action": "excluded live acceptance experiment"
+  },
+  {
+    "path": "scripts/C08H-MuseLiveAcceptance.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "BENCHMARK_ONLY",
+    "action": "excluded live acceptance experiment"
+  },
+  {
+    "path": "scripts/CCv2-ActivationReplay.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "scripts/Install-ControllerPresets.ps1",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "scripts/M01-RealSessionAcceptance.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "BENCHMARK_ONLY",
+    "action": "excluded live acceptance experiment"
+  },
+  {
+    "path": "scripts/MusePresetDependencyClosure.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "Port closure; include production tokenizer assets for engineering and deepseek presets, with failing/passing regression proof"
+  },
+  {
+    "path": "scripts/OC01-NativeTailLive.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "BENCHMARK_ONLY",
+    "action": "excluded live acceptance experiment"
+  },
+  {
+    "path": "scripts/OC01-OpenCodeMuseCanary.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "BENCHMARK_ONLY",
+    "action": "excluded live acceptance experiment"
+  },
+  {
+    "path": "scripts/Validate-ControllerPreset.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "scripts/Verify-RoutingIntegrityComposition.mjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "scripts/lib/Ccv2SessionLog.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX"
+  },
+  {
+    "path": "tests/Ccv2LiveHostGate.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ComposedRoutingAuthority.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ComposedRoutingMatrix.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextActivationPressureV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextActiveApplyV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextActiveApplyV2LiveHost.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextActiveApplyV2XProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextActiveApplyV2XProc.Worker.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextAuthorityCertificationV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextAuthorityCertificationV2XProc.Worker.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextBudgetAllocatorV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextBudgetAllocatorV2H.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextBudgetAllocatorV2XProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextBudgetAllocatorV2XProc.Worker.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCheckpointV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCheckpointabilityV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCheckpointabilityV2LiveHost.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompactionV2.Tests.ps1",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompactionV2DshGenerationProof.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompactionV2FoundationHardening.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompactionV2Operation.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerActiveDeepseekV4.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerActiveHostV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerActiveMuseRoutesV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerActiveMuseV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerActiveOpencodeHostV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerActiveOpencodeV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerActiveV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerActiveV2XProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerActiveV2XProc.Worker.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerShadowHostV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerShadowV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerShadowV2XProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerShadowV2XProc.Worker.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerV2H.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerV2XProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompilerV2XProc.Worker.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompleteTaskV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompleteTaskV2LiveHost.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompleteTaskV2XProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompleteTaskV2XProc.Worker.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompressionLadderV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompressionLadderV2H.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompressionLadderV2XProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextCompressionLadderV2XProc.Worker.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextEvidenceRehydrationV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextEvidenceRehydrationV2H.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextEvidenceRehydrationV2LiveHost.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextEvidenceRehydrationV2XProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextEvidenceRehydrationV2XProc.Worker.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextGenerationRuntimeV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextGenerationRuntimeV2LiveHost.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextGenerationRuntimeV2XProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextGenerationRuntimeV2XProc.Worker.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextMemoryProducerV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextMemoryTierV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextMemoryTierV2H.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextMemoryTierV2XProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextMemoryTierV2XProc.Worker.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextModelCapabilityV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextPageStoreV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextPageStoreV2Advisory.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextPageStoreV2Crash.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextPageStoreV2Fallback.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextPageStoreV2FallbackXProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextPageStoreV2Secrets.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextPageStoreV2XProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextPageStoreV2XProc.Worker.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextPageV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextPressureRetentionV2LiveHost.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextPressureV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextPromptLayoutV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextPromptLayoutV2XProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextPromptLayoutV2XProc.Worker.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextPromptRendererV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextR1RealSessionContracts.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextRecoveryV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextRecoveryV2LiveHost.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextRecoveryV2XProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextRemoteCounterMuseV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextRemoteCounterResilienceV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextRetentionV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextRetrieverV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextRetrieverV2H.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextRetrieverV2XProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextRetrieverV2XProc.Worker.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextSafePointV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextSafePointV2LiveHost.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextShadowV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextShadowV2LiveHost.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextSnapshotV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextTokenizerDeepseekV4.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextTokenizerDeepseekV4XProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextTokenizerDeepseekV4XProc.Worker.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextTrustV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextViewV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextViewV2XProc.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextViewV2XProc.Worker.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ContextWireProjectorResponsesV2.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ControllerPresetCleanInstall.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/ControllerPresetInstalled.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/MusePresetCleanInstall.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/MusePresetDependencyClosure.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/MuseRoutingAuthorityOrdering.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/PreferredRouteContract.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/RoutingIntegrity.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/RuntimeRoutingTrace.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/SourceCompleteness.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "tests/lib/AgentRequestComposition.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST"
+  },
+  {
+    "path": "config/AihController.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "config/ContextCompaction.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "config/Engineering-Isolation.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "config/Muse-Isolation.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "config/home.cordis.patch.yml",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "runtime/package.json",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "runtime/package-lock.json",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "scripts/ContextLifecycle.ps1",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "scripts/EngineeringProfile.ps1",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "Port preferred route contract; retain legacy role editor when Nexus catalog is absent, with failing/passing regression proof"
+  },
+  {
+    "path": "scripts/Install-MusePreset.ps1",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "scripts/NexusProfiles.ps1",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "scripts/Routing.ps1",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "scripts/TaskController.ps1",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "scripts/Test-Harness.ps1",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "scripts/Validate-MusePreset.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "ui/nexus-controller/lib/client.js",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "ui/nexus-controller/lib/engineering.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "ui/nexus-controller/lib/index.js",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "ui/nexus-mode-selector/lib/client.js",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "tests/AihController.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "tests/AihControllerIdentity.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "tests/DeepSeekIsolation.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "tests/EngineeringIsolation.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "tests/MuseIsolation.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "tests/MuseReasoningActivity.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "tests/MuseReasoningRuntime.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "tests/MuseReasoningSignals.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "tests/NexusEngineContract.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "reviewed production delta only"
+  },
+  {
+    "path": "config/AihController.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "commit": "71ea5ac (bootstrap); scoped seal/test composition corrections"
+  },
+  {
+    "path": "scripts/Route.ps1",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "commit": "71ea5ac (bootstrap); scoped seal/test composition corrections"
+  },
+  {
+    "path": "scripts/Routing.ps1",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "commit": "71ea5ac (bootstrap); scoped seal/test composition corrections"
+  },
+  {
+    "path": "scripts/Task.ps1",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "commit": "71ea5ac (bootstrap); scoped seal/test composition corrections"
+  },
+  {
+    "path": "scripts/TaskController.ps1",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "commit": "71ea5ac (bootstrap); scoped seal/test composition corrections"
+  },
+  {
+    "path": "tests/ContextCompactionV2FoundationHardening.Tests.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "category": "USEFUL_REGRESSION_TEST",
+    "commit": "71ea5ac (bootstrap); scoped seal/test composition corrections"
+  },
+  {
+    "path": "tests/VisualControllerLifecycle.Tests.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "category": "USEFUL_REGRESSION_TEST",
+    "commit": "71ea5ac (bootstrap); scoped seal/test composition corrections"
+  },
+  {
+    "path": "tests/ControllerSessionBootstrap.Tests.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "category": "USEFUL_REGRESSION_TEST",
+    "commit": "71ea5ac (bootstrap); scoped seal/test composition corrections"
+  },
+  {
+    "path": "docs/architecture/controller.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "category": "REQUIRED_PRODUCTION_FIX",
+    "commit": "71ea5ac (bootstrap); scoped seal/test composition corrections"
+  },
+  {
+    "path": ".env.example",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "config/model-registry.json",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "config/muse-profiles.json",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "config/nexus-profiles.json",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "config/routing-policy.json",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "config/settings.yaml",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "scripts/SettingsMigration.ps1",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "scripts/Platform.ps1",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "scripts/Startup.ps1",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "scripts/aih.ps1",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "scripts/Apply-OpenCodeSessionPatch.cjs",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "scripts/DetachedProcess.js",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "tests/MuseOpenCodeGo.Tests.cjs",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "Preserve 19 dev assertions; upgrade fake context to the actual per-agent request lifecycle"
+  },
+  {
+    "path": "tests/MuseOpenCodeGo.Tests.ps1",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "tests/MuseOpenCodeSession.Tests.cjs",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "tests/PlatformDetachedLifecycle.Tests.ps1",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "tests/StartupLifecycle.Tests.ps1",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "tests/SetupUpgrade.Tests.ps1",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "Keep all dev Go coverage; adapt closure assertions and Windows fixture to explicit closure stage"
+  },
+  {
+    "path": "tests/NexusProfiles.Tests.ps1",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "tests/StartupProviderIsolation.Tests.ps1",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "tests/Harness.Tests.ps1",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "keep current dev unchanged; feature contains older/reverted implementation or coverage"
+  },
+  {
+    "path": "LHCB workload, scripts/runners/fixtures/tests",
+    "category": "BENCHMARK_ONLY",
+    "action": "excluded; no production dependencies"
+  },
+  {
+    "path": "raw provider observability and fixture worker",
+    "category": "OBSERVABILITY_ONLY",
+    "action": "excluded; benchmark SDK evidence boundary only"
+  },
+  {
+    "path": "docs/architecture/muse-agent-plane-v0.md",
+    "source": "origin/feature/content-compaction-v2",
+    "sourceChange": "M",
+    "category": "INCOMPATIBLE_OR_UNNECESSARY",
+    "action": "Retain newer dev implementation/coverage; no required production delta"
+  },
+  {
+    "path": "scripts/Complete-Install.ps1",
+    "source": "origin/feature/content-compaction-v2",
+    "sourceChange": "M",
+    "category": "REQUIRED_DEPENDENCY",
+    "action": "Semantic installer merge retains dev behavior and installs complete CCv2 dependency closure"
+  },
+  {
+    "path": "scripts/Setup.ps1",
+    "source": "origin/feature/content-compaction-v2",
+    "sourceChange": "M",
+    "category": "REQUIRED_DEPENDENCY",
+    "action": "Semantic installer merge retains dev behavior and installs complete CCv2 dependency closure"
+  },
+  {
+    "path": "setup.sh",
+    "source": "origin/feature/content-compaction-v2",
+    "sourceChange": "M",
+    "category": "REQUIRED_DEPENDENCY",
+    "action": "Semantic installer merge retains dev behavior and installs complete CCv2 dependency closure"
+  },
+  {
+    "path": "tests/MuseAgentPlane.Tests.ps1",
+    "source": "origin/feature/content-compaction-v2",
+    "sourceChange": "M",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "Explicit isolated profile fixtures only; preserve dev profile override policy"
+  },
+  {
+    "path": "tests/MuseOpenCodeGo.Tests.cjs",
+    "source": "origin/feature/content-compaction-v2",
+    "sourceChange": "D",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "Retain newer dev implementation/coverage; no required production delta"
+  },
+  {
+    "path": "tests/SetupUpgrade.Tests.ps1",
+    "source": "origin/feature/content-compaction-v2",
+    "sourceChange": "M",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "Retain newer dev implementation/coverage; no required production delta"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/AUTORUNNER.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/CONTRACT.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/IMPLEMENTATION.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/REVIEW.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/RUNBOOK.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/STAGING-FIX.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/autorunner-authority.json",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/fixture/create-fixture.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/grader/cases.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/grader/grade.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/grader/offline.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/manifest.json",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/obligations.json",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/prompts/P01-architecture-audit.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/prompts/P02-storage-audit.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/prompts/P03-api-audit.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/prompts/P04-test-audit.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/prompts/P05-failure-audit.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/prompts/P06-security-audit.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/prompts/P07-regression-audit.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/prompts/T00-contract.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/prompts/T99-final-challenge.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/schema/report.schema.json",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/schema/result.schema.json",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-01/schema/snapshot.schema.json",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/AUDIT.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/CALIBRATION-ARCHITECTURE.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/CALIBRATION.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/CERTIFICATION-BOOTSTRAP.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/CLONE-GRADER.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/CONTRACT.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/DEPENDENCY-GRAPH.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/E05-REVISION.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/GRADING-BUDGET.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/IMPLEMENTATION.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/INVENTORY-RACE.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/NIGHTLY-HANDOFF.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/OFFICIAL-ARCHITECTURE.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/PROJECTION-REVISION.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/PROVIDER-FAILURE-POLICY.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/RESULTS.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/RUNBOOK.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/SCRATCH-PROTOCOL.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/SESSION-BOOTSTRAP.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/STATUS-OBSERVATION.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/TASK3-ARCHITECTURE.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/TASK3-REPORT.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/TASK4-ARCHITECTURE.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/WORKLOAD-REDESIGN.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/WORKLOAD.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/fixture/audit-boundary.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/fixture/batch-boundary.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/fixture/canonical-statements.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/fixture/continuation.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/fixture/create-fixture.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/fixture/extensions.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/fixture/final.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/fixture/import-boundary.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/fixture/journeys.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/fixture/late.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/fixture/workflows.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/grader/continuation-probes.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/grader/diagnostics.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/grader/extension-probes.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/grader/final.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/grader/grade.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/grader/late-probes.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/grader/offline.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/grader/probes.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/grader/sandbox.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/grader/statement-page-probes.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/grader/workflow-probes.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/manifest.json",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/obligations.json",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/phase-manifest.json",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E01-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E02-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E03-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E04-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E05-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E06-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E07-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E08-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E09-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E10-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E11-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E12-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E13-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E14-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E15-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E16-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E17-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E18-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E19-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E20-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E21-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E22-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E23-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E24-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E25-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E26-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E27-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E28-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E29-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E30-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E31-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E32-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E33-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E34-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E35-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E36-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E37-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E38-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E39-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E40-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E41-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E42-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E43-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E44-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E45-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E46-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E47-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E48-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E49-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E50-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E51-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E52-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E53-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/E54-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/T00-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "benchmarks/ccv2-lhcb-02/prompts/T99-engineering.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/Test-Harness.ps1",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "M",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "Register ControllerSessionBootstrap; exclude live benchmark runners"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/PROVIDER-METRIC-SEMANTICS.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/autorunner.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/bootstrap-network.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/bootstrap-probe.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/candidate-snapshot.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/candidate.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/certification.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/checkpoint-policy.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/cli.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/completed-evidence.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/controller-bootstrap.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/fairness.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/fake-transport.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/infrastructure.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/isolation.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/lease.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/official-provider-policy.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/official-runner.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/official-snapshot.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/prepare.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/projection-metrics.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/provider-accounting.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/rehearsal.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/scratch.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/telemetry.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/tokenizer-audit.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb-02/validity.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/agent-transport.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/arms.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/autorunner.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/cli.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/collect.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/doctor.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/init.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/metrics.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/provider-observability-preload.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "OBSERVABILITY_ONLY",
+    "action": "Excluded benchmark-only SDK diagnostic boundary and fixtures"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/provider-observability-stage.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "OBSERVABILITY_ONLY",
+    "action": "Excluded benchmark-only SDK diagnostic boundary and fixtures"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/provider-observability.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "OBSERVABILITY_ONLY",
+    "action": "Excluded benchmark-only SDK diagnostic boundary and fixtures"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/provider-observability.md",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "OBSERVABILITY_ONLY",
+    "action": "Excluded benchmark-only SDK diagnostic boundary and fixtures"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/read-only-network.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/report.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/restore.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/route-observation.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/score.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/session-log.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/session.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/snapshot.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "scripts/bench/ccv2-lhcb/state.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "tests/Ccv2Lhcb.AutoRunner.Tests.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "tests/Ccv2Lhcb.Tests.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "tests/Ccv2Lhcb02.AutoRunner.Tests.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "tests/Ccv2Lhcb02.Bootstrap.Tests.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "tests/Ccv2Lhcb02.Certification.Tests.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "tests/Ccv2Lhcb02.Continuation.Tests.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "tests/Ccv2Lhcb02.Evidence.Tests.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "tests/Ccv2Lhcb02.Isolation.Tests.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "tests/Ccv2Lhcb02.Official.Tests.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "tests/Ccv2Lhcb02.Rehearsal.Tests.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "tests/Ccv2Lhcb02.Tests.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "tests/Ccv2Lhcb02.Workload.Tests.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "BENCHMARK_ONLY",
+    "action": "Excluded; no production runtime dependency"
+  },
+  {
+    "path": "tests/ProviderObservability.Tests.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "OBSERVABILITY_ONLY",
+    "action": "Excluded benchmark-only SDK diagnostic boundary and fixtures"
+  },
+  {
+    "path": "tests/fixtures/provider-observability/worker.cjs",
+    "source": "c221afad9e5a69c2b50fb69d619eac26ba710bc8",
+    "sourceChange": "A",
+    "category": "OBSERVABILITY_ONLY",
+    "action": "Excluded benchmark-only SDK diagnostic boundary and fixtures"
+  },
+  {
+    "path": "tests/Aih.PortabilityAudit.psm1",
+    "source": "integration on origin/dev",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "Preserve dev audit; classify the exact canonical JSON Unicode escape as serialization data, with bounded file/value allowance."
+  },
+  {
+    "path": "tests/PowerShellPortability.Tests.ps1",
+    "source": "integration on origin/dev",
+    "category": "USEFUL_REGRESSION_TEST",
+    "action": "Preserve dev portability gates; add positive/negative coverage for the canonical serializer exception."
+  }
+]
