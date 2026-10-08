@@ -30,8 +30,8 @@
     "exit": 0,
     "passed": 69,
     "failed": 0,
-    "seconds": 100.01,
-    "note": "Initial 100-second runner deadline retained in production-results.json; complete rerun PASS without source/assertion changes."
+    "seconds": null,
+    "note": "Initial 100-second runner deadline retained in production-results.json; complete rerun PASS without source/assertion changes. Complete-rerun duration was not instrumented; the initial attempt duration is not reused."
   },
   {
     "suite": "ContextCompactionF5Prod",
