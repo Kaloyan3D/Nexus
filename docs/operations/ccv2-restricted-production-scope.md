@@ -129,7 +129,7 @@ source manifest records actual file hashes, not an old benchmark qualification.
 | `node tests/ContextRestrictedProjectionV2.Tests.cjs` | PASS 13/13 on actual shipped policy, including request immutability, route/signal preservation, zero artifact writes, restart, stale/missing fallback and DSH auxiliary bypass |
 | `node tests/ContextRestrictedDshCompaction.Tests.cjs` | PASS 7/7; real pinned BasicCompactionEngine and SessionStore, deterministic meter/summarizer, replacement/flush/restore, no inference |
 | `node tests/ContextRestrictedInstallV2.Tests.cjs` | PASS 11/11; four installed dependency closures, real installed controller compositions, policy refusal, real three-suite harness dispatch/report subset; Linux fixture only |
-| 24 retained production suites in `production-final-results.json` | PASS, 1644 `PASS:` assertions; compiler, renderer, activation, immutable store, rehydration, real-session contracts and DSH/v1 regression suites |
+| 24 retained production suites in `production-final-results.json` | PASS before final repair-selector guard, 1644 `PASS:` assertions; compiler, renderer, activation, immutable store, rehydration, real-session contracts and DSH/v1 regression suites |
 | V1 F2 provenance/production matrix | PASS 69/69 complete; first runner deadline stopped it at 100 seconds with 18 PASS/no assertion FAIL, and is preserved separately |
 | `ContextApplyLockAuthority.Tests.cjs` | PASS 4/4, included in production suite total; both independent PR #31 authority fixes remain effective |
 | `TestHarness.Reporting.Tests.ps1` | PASS 9/9 |
@@ -140,6 +140,11 @@ source manifest records actual file hashes, not an old benchmark qualification.
 | Complete repository harness on final revision | UNVERIFIED; only affected suites and explicit harness-dispatch subset executed |
 | Native Windows install/upgrade/startup and Windows PowerShell 5.1 | UNVERIFIED; no Windows runner |
 | Live inference / LHCB | NOT RUN, explicitly excluded |
+
+The four production restriction/projection/DSH/install gates were rerun on committed
+source `8489538c9c37b8b5f3402030dbbd9be70cfa7aa0` after the repair-selector correction
+(50/13/7/11 PASS); the A11 laboratory unit suite also remained 155/155 PASS.
+The broader 24-suite run preceded that final guard-only change.
 
 The additional legacy A12 cross-process failure is apply-versus-supersede: an
 applier reports committed while the supposedly late superseder reports SUPERSEDED.

@@ -1,5 +1,5 @@
 {
-  "note": "Final source after captured repair-decision guard; source hash recorded in production-source-identity.json",
+  "executedSourceHead": "8489538c9c37b8b5f3402030dbbd9be70cfa7aa0",
   "suites": [
     {
       "suite": "ContextRestrictedProductionV2",
