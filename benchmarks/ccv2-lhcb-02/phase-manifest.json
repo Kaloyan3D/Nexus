@@ -1742,6 +1742,285 @@
       "promptFile": "prompts/E46-engineering.md"
     },
     {
+      "id": "E47",
+      "title": "Balance Proof",
+      "dependsOn": [
+        "E01",
+        "E03",
+        "E46"
+      ],
+      "status": "implemented",
+      "mode": "implementation",
+      "subsystem": "balance-proof",
+      "evidence": [
+        "src/balance-proof.ts",
+        "evidence/E47/contract.md",
+        "evidence/E47/cases.jsonl",
+        "evidence/E47/execution.jsonl",
+        "evidence/E47/incident.json"
+      ],
+      "acceptance": "node tools/verify-continuation.cjs E47",
+      "obligations": [
+        "continuation-balance-proof"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E47-engineering.md",
+      "dependencyClaim": "Actual earlier candidate interfaces and canonical-store execution; no inferred pressure claim."
+    },
+    {
+      "id": "E48",
+      "title": "Settlement Preview",
+      "dependsOn": [
+        "E01",
+        "E12",
+        "E43"
+      ],
+      "status": "implemented",
+      "mode": "implementation",
+      "subsystem": "settlement-preview",
+      "evidence": [
+        "src/settlement-preview.ts",
+        "evidence/E48/contract.md",
+        "evidence/E48/cases.jsonl",
+        "evidence/E48/execution.jsonl",
+        "evidence/E48/incident.json"
+      ],
+      "acceptance": "node tools/verify-continuation.cjs E48",
+      "obligations": [
+        "continuation-settlement-preview"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E48-engineering.md",
+      "dependencyClaim": "Actual earlier candidate interfaces and canonical-store execution; no inferred pressure claim."
+    },
+    {
+      "id": "E49",
+      "title": "Dispute Proof",
+      "dependsOn": [
+        "E03",
+        "E44",
+        "E46"
+      ],
+      "status": "implemented",
+      "mode": "implementation",
+      "subsystem": "dispute-proof",
+      "evidence": [
+        "src/dispute-proof.ts",
+        "evidence/E49/contract.md",
+        "evidence/E49/cases.jsonl",
+        "evidence/E49/execution.jsonl",
+        "evidence/E49/incident.json"
+      ],
+      "acceptance": "node tools/verify-continuation.cjs E49",
+      "obligations": [
+        "continuation-dispute-proof"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E49-engineering.md",
+      "dependencyClaim": "Actual earlier candidate interfaces and canonical-store execution; no inferred pressure claim."
+    },
+    {
+      "id": "E50",
+      "title": "Statement Cut",
+      "dependsOn": [
+        "E46",
+        "E47"
+      ],
+      "status": "implemented",
+      "mode": "implementation",
+      "subsystem": "statement-cut",
+      "evidence": [
+        "src/statement-cut.ts",
+        "evidence/E50/contract.md",
+        "evidence/E50/cases.jsonl",
+        "evidence/E50/execution.jsonl",
+        "evidence/E50/incident.json"
+      ],
+      "acceptance": "node tools/verify-continuation.cjs E50",
+      "obligations": [
+        "continuation-statement-cut"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E50-engineering.md",
+      "dependencyClaim": "Actual earlier candidate interfaces and canonical-store execution; no inferred pressure claim."
+    },
+    {
+      "id": "E51",
+      "title": "Scheduled Preview",
+      "dependsOn": [
+        "E28",
+        "E48"
+      ],
+      "status": "implemented",
+      "mode": "implementation",
+      "subsystem": "scheduled-preview",
+      "evidence": [
+        "src/scheduled-preview.ts",
+        "evidence/E51/contract.md",
+        "evidence/E51/cases.jsonl",
+        "evidence/E51/execution.jsonl",
+        "evidence/E51/incident.json"
+      ],
+      "acceptance": "node tools/verify-continuation.cjs E51",
+      "obligations": [
+        "continuation-scheduled-preview"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E51-engineering.md",
+      "dependencyClaim": "Actual earlier candidate interfaces and canonical-store execution; no inferred pressure claim."
+    },
+    {
+      "id": "E52",
+      "title": "Recovery Export",
+      "dependsOn": [
+        "E02",
+        "E06",
+        "E16",
+        "E19",
+        "E47"
+      ],
+      "status": "implemented",
+      "mode": "implementation",
+      "subsystem": "recovery-export",
+      "evidence": [
+        "src/recovery-export.ts",
+        "evidence/E52/contract.md",
+        "evidence/E52/cases.jsonl",
+        "evidence/E52/execution.jsonl",
+        "evidence/E52/incident.json"
+      ],
+      "acceptance": "node tools/verify-continuation.cjs E52",
+      "obligations": [
+        "continuation-recovery-export"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E52-engineering.md",
+      "dependencyClaim": "Actual earlier candidate interfaces and canonical-store execution; no inferred pressure claim."
+    },
+    {
+      "id": "E53",
+      "title": "Closing Evidence",
+      "dependsOn": [
+        "E45",
+        "E52"
+      ],
+      "status": "implemented",
+      "mode": "implementation",
+      "subsystem": "closing-evidence",
+      "evidence": [
+        "src/closing-evidence.ts",
+        "evidence/E53/contract.md",
+        "evidence/E53/cases.jsonl",
+        "evidence/E53/execution.jsonl",
+        "evidence/E53/incident.json"
+      ],
+      "acceptance": "node tools/verify-continuation.cjs E53",
+      "obligations": [
+        "continuation-closing-evidence"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E53-engineering.md",
+      "dependencyClaim": "Actual earlier candidate interfaces and canonical-store execution; no inferred pressure claim."
+    },
+    {
+      "id": "E54",
+      "title": "Release Proof",
+      "dependsOn": [
+        "E49",
+        "E50",
+        "E53"
+      ],
+      "status": "implemented",
+      "mode": "implementation",
+      "subsystem": "release-proof",
+      "evidence": [
+        "src/release-proof.ts",
+        "evidence/E54/contract.md",
+        "evidence/E54/cases.jsonl",
+        "evidence/E54/execution.jsonl",
+        "evidence/E54/incident.json"
+      ],
+      "acceptance": "node tools/verify-continuation.cjs E54",
+      "obligations": [
+        "continuation-release-proof"
+      ],
+      "readOnlyPaths": [
+        "evidence/**",
+        "tools/**",
+        "package.json",
+        "README.md",
+        "cli.cjs"
+      ],
+      "editablePaths": [
+        "src/**"
+      ],
+      "promptFile": "prompts/E54-engineering.md",
+      "dependencyClaim": "Actual earlier candidate interfaces and canonical-store execution; no inferred pressure claim."
+    },
+    {
       "id": "T99",
       "title": "Integrated release candidate",
       "dependsOn": [
@@ -1790,7 +2069,15 @@
         "E43",
         "E44",
         "E45",
-        "E46"
+        "E46",
+        "E47",
+        "E48",
+        "E49",
+        "E50",
+        "E51",
+        "E52",
+        "E53",
+        "E54"
       ],
       "status": "implemented",
       "mode": "implementation",

@@ -1,0 +1,17 @@
+'use strict';
+// Projection, provider usage and durable mutation are separate observations.
+function collect(events,decisions,projectionRows=[]){
+ const compilerAttempts=decisions.reduce((n,d)=>n+(d.compilerExecutions??0),0),compiledRequests=decisions.filter(d=>d.projectionMode==='CCV2_COMPILED').length;
+ const fallbackReasons={},fallbackStages={},counterFailureKinds={};for(const d of decisions)if(d.fallbackReason){fallbackReasons[d.fallbackReason]=(fallbackReasons[d.fallbackReason]??0)+1;const stage=d.attemptFailureStage??d.fallbackStage??'unknown';fallbackStages[stage]=(fallbackStages[stage]??0)+1;const kind=d.counterFailureKind??'unknown';counterFailureKinds[kind]=(counterFailureKinds[kind]??0)+1;}
+ const compiledAttemptsRejected=decisions.filter(d=>d.compilerExecutions===1&&d.projectionMode!=='CCV2_COMPILED').length;
+ const firstCrossing=decisions.findIndex(d=>Number.isFinite(d.pressureTokens)&&Number.isFinite(d.activationTokens)&&d.pressureTokens>=d.activationTokens);
+ const trace=(d,i)=>d?{armRequest:i+1,requestSeq:d.requestSeq,pressureTokens:d.pressureTokens,activationTokens:d.activationTokens,activationDecision:d.activationDecision,activationReason:d.activationReason,pressureLatchTokens:d.pressureLatchTokens??null,projectionMode:d.projectionMode}:null;
+ const firstCompiled=decisions.findIndex(d=>d.projectionMode==='CCV2_COMPILED');
+ // requestSeq is allocated by the host. Reject duplicate/unmatched sidecars;
+ // unavailable measurements stay unavailable rather than becoming zero savings.
+ const rows=decisions.filter(d=>d.projectionMode==='CCV2_COMPILED').map(d=>{const found=projectionRows.filter(r=>r.kind==='compiled_projection_size'&&r.requestSeq===d.requestSeq);return found.length===1?found[0]:{requestSeq:d.requestSeq,available:false};});
+ const known=rows.length>0&&rows.every(r=>Number.isSafeInteger(r.beforeBytes)&&r.beforeBytes>0&&Number.isSafeInteger(r.afterBytes)&&r.afterBytes>=0);
+ const beforeBytes=known?rows.reduce((n,r)=>n+r.beforeBytes,0):null,afterBytes=known?rows.reduce((n,r)=>n+r.afterBytes,0):null;
+ return {compilerAttempts,compiledRequests,compilationFallbackReasons:fallbackReasons,compilationFallbackStages:fallbackStages,counterFailureKinds,successfulProjectionRate:compilerAttempts>0?compiledRequests/compilerAttempts:null,compiledAttemptsRejected,compilerFallbackRatio:compilerAttempts>0?compiledAttemptsRejected/compilerAttempts:null,tokenizerUnavailableRatio:decisions.length>0?(fallbackReasons['active-tokenizer-unavailable']??0)/decisions.length:null,durableCompactions:events.filter(e=>e.type.startsWith('compaction/')).length,surfaceReplacements:events.filter(e=>['user/message','assistant/message','tool/result'].includes(e.type)&&e.surfaceOp&&e.surfaceOp!=='append').length,projectionReduction:{available:known,measurement:'UTF8 JSON of request system/messages/tools; not SDK wire bytes or tokens',beforeBytes,afterBytes,bytesSaved:known?beforeBytes-afterBytes:null,reduction:known?1-afterBytes/beforeBytes:null,requests:rows},observabilityMeasurementOverheadMs:known?rows.reduce((n,r)=>n+(r.measurementOverheadMs??0),0):null,activation:{firstThresholdCrossing:trace(decisions[firstCrossing],firstCrossing),beforeCrossing:firstCrossing>0?trace(decisions[firstCrossing-1],firstCrossing-1):null,afterCrossing:firstCrossing>=0?trace(decisions[firstCrossing+1],firstCrossing+1):null,firstSuccessfulCompiledRequest:trace(decisions[firstCompiled],firstCompiled),latchedRequests:decisions.filter(d=>d.activationReason==='pressure-latched').length}};
+}
+module.exports={collect};

@@ -10,7 +10,7 @@ function grade(dir){
  const tests=rows.length===ids.length+1&&rows.every(r=>r.pass===true)?'PASS':'FAIL';const critical=obligations.filter(o=>o.critical),passed=obligations.filter(o=>o.pass).length,criticalPassed=critical.filter(o=>o.pass).length;
  const task=byProbe.get('final-coordinator')?.pass===true&&byPhase.get('T99')?.pass===true?'SUCCESS':'FAIL';
  const pass=criticalPassed===critical.length&&passed/obligations.length>=0.95&&violations===0&&tests==='PASS'&&task==='SUCCESS';
- return {status:'UNFROZEN',calibration:'LIVE_CALIBRATION_REQUIRED',kind:'OFFLINE_CANDIDATE_CORRECTNESS',pass,tests,task,violations,obligationCount:obligations.length,obligationsPassed:passed,criticalCount:critical.length,criticalPassed,totalRatio:passed/obligations.length,criticalRatio:criticalPassed/critical.length,obligations,phases:rows.map(r=>({phase:r.phase,pass:r.pass,cases:r.cases??null})),officialBenefitEligible:false,ccv2BenefitVerdict:'NOT_MEASURED'};
+ return {status:'UNFROZEN',calibration:'LIVE_CALIBRATION_REQUIRED',kind:'OFFLINE_CANDIDATE_CORRECTNESS',pass,tests,task,violations,obligationCount:obligations.length,obligationsPassed:passed,criticalCount:critical.length,criticalPassed,totalRatio:passed/obligations.length,criticalRatio:criticalPassed/critical.length,obligations,phases:rows.map(r=>({phase:r.phase,pass:r.pass,cases:r.cases??null})),officialBenefitEligible:false,ccv2BenefitVerdict:'NOT_MEASURED',caseDiagnostics:require('./diagnostics.cjs').integrated(dir),completeGraderOutput:rows};
 }
 if(require.main===module)process.stdout.write(JSON.stringify(grade(path.resolve(process.argv[2])))+'\n');
 module.exports={grade};

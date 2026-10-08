@@ -116,15 +116,25 @@
     "E44",
     "E45",
     "E46",
+    "E47",
+    "E48",
+    "E49",
+    "E50",
+    "E51",
+    "E52",
+    "E53",
+    "E54",
     "T99"
   ],
   "protocolRevision": "scratch-v1",
-  "workloadRevision": "e05-audit-v1",
+  "workloadRevision": "projection-continuation-v1",
   "scratch": {
     "directory": "scratch",
     "environment": "LHCB_SCRATCH",
     "reset": "before-and-after-every-phase",
     "snapshot": "excluded-and-empty",
     "links": "forbidden"
-  }
+  },
+  "officialCheckpoint": "CP-750",
+  "minimumContinuationPhases": 4
 }

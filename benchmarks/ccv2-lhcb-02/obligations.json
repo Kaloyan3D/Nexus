@@ -753,6 +753,118 @@
         "statement-page-execution"
       ],
       "t99": true
+    },
+    {
+      "id": "continuation-balance-proof",
+      "introducedBy": "E47",
+      "category": "persistence invariants",
+      "critical": false,
+      "rule": "Preserve balance-proof business evidence from actual canonical state, ordered dependencies, authorization and immutable inputs.",
+      "grader": "behavior:continuation-balance-proof",
+      "status": "implemented",
+      "probeIds": [
+        "continuation-contract-balance-proof",
+        "continuation-execution-balance-proof"
+      ],
+      "t99": true
+    },
+    {
+      "id": "continuation-settlement-preview",
+      "introducedBy": "E48",
+      "category": "persistence invariants",
+      "critical": false,
+      "rule": "Preserve settlement-preview business evidence from actual canonical state, ordered dependencies, authorization and immutable inputs.",
+      "grader": "behavior:continuation-settlement-preview",
+      "status": "implemented",
+      "probeIds": [
+        "continuation-contract-settlement-preview",
+        "continuation-execution-settlement-preview"
+      ],
+      "t99": true
+    },
+    {
+      "id": "continuation-dispute-proof",
+      "introducedBy": "E49",
+      "category": "persistence invariants",
+      "critical": false,
+      "rule": "Preserve dispute-proof business evidence from actual canonical state, ordered dependencies, authorization and immutable inputs.",
+      "grader": "behavior:continuation-dispute-proof",
+      "status": "implemented",
+      "probeIds": [
+        "continuation-contract-dispute-proof",
+        "continuation-execution-dispute-proof"
+      ],
+      "t99": true
+    },
+    {
+      "id": "continuation-statement-cut",
+      "introducedBy": "E50",
+      "category": "persistence invariants",
+      "critical": false,
+      "rule": "Preserve statement-cut business evidence from actual canonical state, ordered dependencies, authorization and immutable inputs.",
+      "grader": "behavior:continuation-statement-cut",
+      "status": "implemented",
+      "probeIds": [
+        "continuation-contract-statement-cut",
+        "continuation-execution-statement-cut"
+      ],
+      "t99": true
+    },
+    {
+      "id": "continuation-scheduled-preview",
+      "introducedBy": "E51",
+      "category": "persistence invariants",
+      "critical": false,
+      "rule": "Preserve scheduled-preview business evidence from actual canonical state, ordered dependencies, authorization and immutable inputs.",
+      "grader": "behavior:continuation-scheduled-preview",
+      "status": "implemented",
+      "probeIds": [
+        "continuation-contract-scheduled-preview",
+        "continuation-execution-scheduled-preview"
+      ],
+      "t99": true
+    },
+    {
+      "id": "continuation-recovery-export",
+      "introducedBy": "E52",
+      "category": "persistence invariants",
+      "critical": false,
+      "rule": "Preserve recovery-export business evidence from actual canonical state, ordered dependencies, authorization and immutable inputs.",
+      "grader": "behavior:continuation-recovery-export",
+      "status": "implemented",
+      "probeIds": [
+        "continuation-contract-recovery-export",
+        "continuation-execution-recovery-export"
+      ],
+      "t99": true
+    },
+    {
+      "id": "continuation-closing-evidence",
+      "introducedBy": "E53",
+      "category": "persistence invariants",
+      "critical": false,
+      "rule": "Preserve closing-evidence business evidence from actual canonical state, ordered dependencies, authorization and immutable inputs.",
+      "grader": "behavior:continuation-closing-evidence",
+      "status": "implemented",
+      "probeIds": [
+        "continuation-contract-closing-evidence",
+        "continuation-execution-closing-evidence"
+      ],
+      "t99": true
+    },
+    {
+      "id": "continuation-release-proof",
+      "introducedBy": "E54",
+      "category": "persistence invariants",
+      "critical": false,
+      "rule": "Preserve release-proof business evidence from actual canonical state, ordered dependencies, authorization and immutable inputs.",
+      "grader": "behavior:continuation-release-proof",
+      "status": "implemented",
+      "probeIds": [
+        "continuation-contract-release-proof",
+        "continuation-execution-release-proof"
+      ],
+      "t99": true
     }
   ],
   "scopeNote": "All obligations map to executable probes; T99 reruns all prior suites plus hidden coordinator and integration probes. Candidate correctness is not official workload validity.",
