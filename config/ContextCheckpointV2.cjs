@@ -34,6 +34,8 @@
  * createdAtUtc is NEVER read from the clock inside canonicalization.
  */
 
+const durablePolicyV2 = require('./ContextDurableMutationPolicyV2.cjs');
+
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -971,6 +973,7 @@ function checkpointV2FilePath(dir, generation) {
 // filesystem/OS contract; NOT claimed power-loss durable (no fsync). The
 // authoritative session durability barrier is DSH SessionStore.flush().
 function persistCheckpointV2(dir, built) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   if (typeof dir !== 'string' || dir === '') throw new Error('v2-checkpoint-persist: dir is required (KEEP)');
   if (!built || typeof built !== 'object' || !built.checkpoint || typeof built.serialized !== 'string') {
     throw new Error('v2-checkpoint-persist: build output is required (KEEP)');

@@ -1,0 +1,54 @@
+{
+  "checks": [
+    {
+      "name": "fixture keeps real mutex held until explicit release",
+      "pass": true
+    },
+    {
+      "name": "timeout must fail closed without executing critical section",
+      "pass": true
+    },
+    {
+      "name": "mutex construction failure must fail closed",
+      "pass": true
+    },
+    {
+      "name": "stale release cannot unlink successor after takeover",
+      "pass": true
+    }
+  ],
+  "observations": [
+    {
+      "name": "mutex-timeout",
+      "holderAlive": true,
+      "contender": {
+        "code": 1,
+        "stdout": "",
+        "stderr": "Exception: /home/kaloyan/Projects/Nexus-ccv2-lease-fencing/scripts/ContextLifecycle.ps1:1673\nLine |\n1673 |  … t $taken) { throw \"Compaction lock mutex busy: refusing unlocked acti …\n     |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n     | Compaction lock mutex busy: refusing unlocked action (KEEP).\n"
+      },
+      "actionEnteredWhileHeld": false
+    },
+    {
+      "name": "mutex-construction-failure",
+      "contender": {
+        "code": 1,
+        "stdout": "",
+        "stderr": "Exception: /home/kaloyan/Projects/Nexus-ccv2-lease-fencing/scripts/ContextLifecycle.ps1:1667\nLine |\n1667 |      catch { throw \"Compaction lock mutex unavailable: refusing unlock …\n     |              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n     | Compaction lock mutex unavailable: refusing unlocked action (KEEP).\n"
+      },
+      "actionEntered": false
+    },
+    {
+      "name": "release-after-check",
+      "takeoverBlockedDuringRelease": true,
+      "releaseLine": 1706,
+      "predecessor": "57f6dce119b44b82bfc04a6c98b9c385",
+      "successor": "650040d3cf754bfdaca0c062d6af2efe",
+      "successorSurvived": true,
+      "releaser": {
+        "code": 0,
+        "stdout": "{\n  \"released\": true\n}\n",
+        "stderr": ""
+      }
+    }
+  ]
+}

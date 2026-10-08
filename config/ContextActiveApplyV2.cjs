@@ -98,6 +98,8 @@
  * telemetry carries ids/digests/counts only).
  */
 
+const durablePolicyV2 = require('./ContextDurableMutationPolicyV2.cjs');
+
 const crypto = require('node:crypto');
 
 const compactionV2 = require('./ContextCompaction.cjs');
@@ -512,6 +514,7 @@ function deriveLiveMessages(session) {
 // ---- main application --------------------------------------------------------
 
 async function applyActiveCompactionV2(rawInput) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   let n = null;
   try {
     n = normalizeActiveInput(rawInput);

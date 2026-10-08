@@ -1,0 +1,22 @@
+[
+  {
+    "test": "ContextActiveApplyV2XProc.Tests.cjs",
+    "exitCode": 0,
+    "adapter": "only fixture identity writes omitted"
+  },
+  {
+    "test": "ContextGenerationRuntimeV2XProc.Tests.cjs",
+    "exitCode": 0,
+    "adapter": "only fixture identity writes omitted"
+  },
+  {
+    "test": "ContextRecoveryV2XProc.Tests.cjs",
+    "exitCode": 0,
+    "adapter": "only fixture identity writes omitted"
+  },
+  {
+    "test": "ContextCompleteTaskV2XProc.Tests.cjs",
+    "exitCode": 0,
+    "adapter": "only fixture identity writes omitted"
+  }
+]

@@ -1,0 +1,1734 @@
+COMMAND: ContextActiveApplyV2.Tests.cjs
+
+--- A10 AUTHORITY SHAPE (explicit API only, no auto-trigger) ---
+PASS: explicit applyActiveCompactionV2 API exists
+PASS: bounded result statuses (no prepared, no auto states)
+PASS: A09 shadow authority carries no active behavior
+PASS: result validation rejects malformed input
+
+--- SUCCESS: single segment commits exactly the shadow prediction ---
+PASS: single-segment apply commits (got committed [])
+PASS: commit reports mutated + durable
+PASS: result binds operation + checkpoint identity
+PASS: result binds shadow + projection identity
+PASS: committed result validates closed-world
+PASS: actual deriveMessages() equals A09 projectedMessages (content-exact)
+PASS: expected projection digest recomputes (structural proof)
+PASS: current user request occurs exactly once
+PASS: actual tool protocol is balanced
+PASS: checkpoint payload representation occurs exactly once
+PASS: historical requirement survives exactly once via the payload
+PASS: log grew by exactly one replacement node
+PASS: raw-log prefix is byte-identical (append-only)
+PASS: surface is payload plus retained suffix (got 4)
+PASS: durable A02 operation is readable after commit
+PASS: operation segments equal projection segments
+PASS: durable operation validates against the binding
+PASS: sealed checkpoint is durable + readable before history hides
+PASS: telemetry carries no raw checkpoint payload
+PASS: result is bounded telemetry (no prompt text)
+
+--- SUCCESS: multi segment (pinned runtime split) commits exactly ---
+PASS: fixture splits into two segments (got 2)
+PASS: exactly one earliest payload plus continuation
+PASS: multi-segment apply commits (got committed [])
+PASS: multi actual equals multi shadow prediction
+PASS: one payload across segments (no duplicate payload)
+PASS: one identity-only continuation anchor
+PASS: current user exactly once (multi)
+PASS: multi protocol balanced
+PASS: log grew by exactly one node per segment
+PASS: multi raw prefix append-only
+
+--- IDEMPOTENT RETRY: second call recovers without new mutation ---
+PASS: first call commits
+PASS: second call recovers (got recovered)
+PASS: retry reports no new mutation + durable
+PASS: retry appended nothing
+PASS: retry leaves the projection identical
+PASS: retry binds the same operation
+
+--- AMBIGUOUS FAILURE: flush fails after apply, retry recovers ---
+PASS: flush failure is a recoverable failure (never harmless)
+PASS: H3: intent durable, application NOT durable, durable follows application
+PASS: failure names active-flush-failed
+PASS: retry after ambiguous failure recovers (got recovered)
+PASS: recovered projection equals the prediction
+
+--- H1 MANDATORY SERIALIZATION: no lock, no apply ---
+PASS: absent lock client refuses (got refused)
+PASS: unavailable lock proves no durability of any kind
+PASS: refused apply touches nothing
+PASS: refused apply persists nothing (lock precedes all durable work)
+PASS: malformed lock client refuses
+PASS: held lock refuses with conflict (got refused)
+PASS: conflict refusal mutates nothing
+PASS: conflict refusal touches nothing
+PASS: conflict refusal persists nothing (freshness never observed without the lock)
+PASS: failed acquire performs no further lock steps
+PASS: renew loss fails closed (got failed)
+PASS: renew loss applies nothing
+PASS: H3: renew loss proves intent only
+PASS: renew loss touches nothing
+PASS: renew loss keeps the durable intent for recovery
+PASS: ownership gate renews before any append; release always runs
+PASS: locked apply commits
+PASS: lock order is acquire,renew,release (got acquire,renew,release)
+
+--- H2 END-SEED TRANSPARENCY: marker-only restart forward-recovers ---
+PASS: pre-landing crash keeps durable intent only
+PASS: nothing landed before the crash
+PASS: intent is durably frozen before the crash
+PASS: marker-only restart forward-recovers to commit (got committed [])
+PASS: H3: forward recovery proves both legs
+PASS: post-recovery surface equals the original prediction
+PASS: exactly one payload after marker-tolerant recovery
+PASS: current user exactly once after recovery
+PASS: protocol balanced after recovery
+
+--- H2 CASE B: real semantic change after intent still fails closed ---
+PASS: Case B setup keeps durable intent
+PASS: real semantic change after intent fails closed (got stale)
+PASS: Case B mutates and appends nothing
+
+--- H3 DURABILITY SPLIT MATRIX ---
+PASS: committed proves both legs; durable follows application
+PASS: telemetry carries the split
+PASS: recovered proves both legs
+PASS: refused proves neither leg
+PASS: durable=true with applicationDurable=false is structurally invalid even with a consistent digest
+
+--- REFUSAL MATRIX: non-ready and drifted inputs never mutate ---
+PASS: shadow verdict not ready -> active-shadow-not-ready (got refused [{"code":"active-shadow-not-ready","detail":"shadow verdict is no-action (only shadow-ready may apply)"}])
+PASS: shadow verdict not ready: mutated=false
+PASS: shadow verdict not ready: session untouched
+PASS: shadow verdict not ready: no durable operation created
+PASS: unknown input key fails closed -> active-input-invalid (got refused [{"code":"active-input-invalid","detail":"ccv2-active-apply-v2: unknown field injectedKey"}])
+PASS: unknown input key fails closed: mutated=false
+PASS: unknown input key fails closed: session untouched
+PASS: unknown input key fails closed: no durable operation created
+PASS: stale snapshot (session moved) -> active-snapshot-stale (got stale [{"code":"active-snapshot-stale","detail":"snapshot is stale (snapshot-session-stale)"}])
+PASS: stale snapshot (session moved): mutated=false
+PASS: stale snapshot (session moved): session untouched
+PASS: stale snapshot (session moved): no durable operation created
+PASS: revision mismatch (task moved) -> active-snapshot-stale (got stale [{"code":"active-snapshot-stale","detail":"snapshot is stale (snapshot-token-invalid)"}])
+PASS: revision mismatch (task moved): mutated=false
+PASS: revision mismatch (task moved): session untouched
+PASS: revision mismatch (task moved): no durable operation created
+PASS: generation drift -> active-shadow-unproven (got refused [{"code":"active-shadow-unproven","detail":"shadow result binds another task binding or generation"}])
+PASS: generation drift: mutated=false
+PASS: generation drift: session untouched
+PASS: generation drift: no durable operation created
+PASS: boundary moved -> active-boundary-mismatch (got stale [{"code":"active-boundary-mismatch","detail":"live boundary moved since the shadow observation"}])
+PASS: boundary moved: mutated=false
+PASS: boundary moved: session untouched
+PASS: boundary moved: no durable operation created
+PASS: provider route drift -> active-route-drift (got stale [{"code":"active-route-drift","detail":"provider/model route moved since the shadow observation"}])
+PASS: provider route drift: mutated=false
+PASS: provider route drift: session untouched
+PASS: provider route drift: no durable operation created
+PASS: pressure basis drift -> active-retention-stale (got stale [{"code":"active-retention-stale","detail":"pressure basis moved since the shadow observation"}])
+PASS: pressure basis drift: mutated=false
+PASS: pressure basis drift: session untouched
+PASS: pressure basis drift: no durable operation created
+PASS: retention plan identity drift -> active-retention-stale (got stale [{"code":"active-retention-stale","detail":"retention plan refused (retention-id-mismatch)"}])
+PASS: retention plan identity drift: mutated=false
+PASS: retention plan identity drift: session untouched
+PASS: retention plan identity drift: no durable operation created
+PASS: projection digest mismatch -> active-projection-mismatch (got refused [{"code":"active-projection-mismatch","detail":"artifact digest differs from the shadow projection digest"}])
+PASS: projection digest mismatch: mutated=false
+PASS: projection digest mismatch: session untouched
+PASS: projection digest mismatch: no durable operation created
+PASS: artifact payload tamper -> active-projection-mismatch (got refused [{"code":"active-projection-mismatch","detail":"artifact payload bytes differ from the sealed checkpoint bytes"}])
+PASS: artifact payload tamper: mutated=false
+PASS: artifact payload tamper: session untouched
+PASS: artifact payload tamper: no durable operation created
+PASS: checkpoint identity mismatch -> active-checkpoint-mismatch (got refused [{"code":"active-checkpoint-mismatch","detail":"sealed checkpoint does not match the shadow descriptor"}])
+PASS: checkpoint identity mismatch: mutated=false
+PASS: checkpoint identity mismatch: session untouched
+PASS: checkpoint identity mismatch: no durable operation created
+PASS: operation/projection segment tamper (block before mutation) -> active-projection-mismatch (got refused [{"code":"active-projection-mismatch","detail":"artifact segments differ from the shadow segments"}])
+PASS: operation/projection segment tamper (block before mutation): mutated=false
+PASS: operation/projection segment tamper (block before mutation): session untouched
+PASS: operation/projection segment tamper (block before mutation): no durable operation created
+
+--- STALE SHADOW S1->S2: continued work blocks without mutation ---
+PASS: S2 session with S1 shadow is stale (got stale)
+PASS: stale path never mutates
+PASS: stale path requires no durable operation
+
+--- CONFLICTS FAIL CLOSED ---
+PASS: same generation + different bytes fails closed (got failed [{"code":"active-checkpoint-conflict","detail":"same generation persists different bytes (BLOCK/KEEP)"}])
+PASS: checkpoint conflict never touches the live session
+PASS: conflict-operation fixture validates structurally
+PASS: foreign operation id fails closed (got failed [{"code":"active-operation-conflict","detail":"another operation owns this generation (BLOCK/KEEP)"}])
+PASS: operation conflict never touches the live session
+
+--- DURABILITY ORDERING: checkpoint and operation precede mutation ---
+PASS: checkpoint persistence failure blocks before mutation (got failed)
+PASS: crashed-before-checkpoint leaves the session unmodified
+PASS: no operation persisted without a checkpoint
+PASS: operation persistence failure blocks (got failed [{"code":"active-persist-failed","detail":"operation freeze failed (EEXIST: file already exists, mkdir '/tmp/a10file-sbrk8u/not-a-dir')"}])
+PASS: crashed-before-durable-intent leaves the session unmodified
+
+--- PARTIAL APPLY RECOVERY: mid-apply crash converges (multi) ---
+PASS: mid-apply crash is recoverable (never harmless)
+PASS: H3: mid-apply crash proves intent only
+PASS: partial landing forward-recovers to commit (got committed [])
+PASS: recovered surface equals the prediction
+PASS: no duplicated payload after partial recovery
+PASS: no duplicated continuation anchor
+PASS: exactly one node per segment after recovery
+
+--- RESTART: durable-state injection converges to the prediction ---
+PASS: initial apply commits
+PASS: post-restart retry recognizes the completed operation (got recovered)
+PASS: restored projection equals the prediction
+PASS: restored current user exactly once
+PASS: restored protocol balanced
+PASS: restart re-reads the durable operation (A02 re-brand path)
+
+--- SERIALIZATION: concurrent duplicate applies converge to one payload ---
+PASS: concurrent duplicates serialize to committed + recovered (got committed,recovered)
+PASS: shared lock serializes both calls acquire->renew->release in order (got acquire,renew,release,acquire,renew,release)
+PASS: exactly one replacement node under concurrency
+PASS: serialized projection equals the prediction
+
+--- SECURITY: adversarial content is inert data ---
+PASS: adversarial text does not disturb the pipeline verdict
+PASS: adversarial session still commits through structured state
+PASS: content cannot spoof the operation identity
+PASS: operation identity is the canonical derivation only
+
+--- SECRET SAFETY: credential-shaped fixtures stay out of results ---
+PASS: secret-shaped fixture stays shadow-ready (redaction, not refusal)
+PASS: secret-shaped session commits
+PASS: A10 result carries no raw secrets
+PASS: A10 telemetry carries no raw secrets
+
+--- A09 PURITY: shadow stays observe-only after A10 exists ---
+PASS: A09 evaluation + shared builder mutate nothing
+
+A10 unit: passed=171 failed=0
+
+COMMAND: ContextActiveApplyV2LiveHost.Tests.cjs
+A10 LIVE HOST PROOF: EXECUTED
+PASS: pinned DSH host is 0.1.1-rc.2 (got 0.1.1-rc.2)
+PASS: pinned host still states the flush barrier contract
+PASS: pinned host still states the restore contract
+
+--- live: single-segment apply equals the shadow prediction ---
+PASS: live single-segment fixture reaches shadow-ready
+PASS: live single-segment composition (got 1)
+PASS: live single-segment commits (got committed [])
+PASS: live commit reports mutated + durable
+PASS: live commit proves both durability legs
+PASS: live result validates closed-world
+PASS: live actual deriveMessages() equals A09 projectedMessages
+PASS: live current user exactly once
+PASS: live protocol balanced
+PASS: live compacted prefix leaves the model-facing view
+PASS: live raw log prefix is historically present (append-only)
+PASS: live log grew by exactly one replacement node
+PASS: live SessionStore.flush participated (durability barrier)
+PASS: live retry recovers (got recovered)
+PASS: live retry appends nothing
+PASS: live retry projection is identical
+
+--- live: multi-segment apply (pinned runtime split) ---
+PASS: live multi-segment fixture reaches shadow-ready
+PASS: live composition splits into two segments (got 2)
+PASS: one payload plus continuation anchors
+PASS: live multi-segment commits (got committed [])
+PASS: live multi actual equals multi prediction
+PASS: live multi carries one continuation anchor
+PASS: live multi current user exactly once
+PASS: live multi raw prefix append-only
+PASS: live multi log grew by exactly one node per segment
+
+--- live: ambiguous flush failure recovers on retry ---
+PASS: live recovery fixture reaches shadow-ready
+PASS: live ambiguous failure stays recoverable (never harmless)
+PASS: H3: live flush failure proves intent only
+PASS: live ambiguous failure names the flush cause
+PASS: live retry after ambiguous failure recovers (got recovered)
+PASS: live recovered projection equals the prediction
+
+--- live: restart after commit reproduces the prediction (§45) ---
+PASS: live restart fixture reaches shadow-ready
+PASS: live pre-restart apply commits
+PASS: post-apply flush made the replacement durable
+PASS: restore adds exactly the host end-seed marker
+PASS: restore keeps the compacted surface
+PASS: restored live projection equals the A09 prediction
+PASS: restored current user exactly once
+PASS: restored protocol balanced
+PASS: restored operation binding is valid
+PASS: live post-restart retry recovers (got recovered [])
+PASS: live post-restart recovery proves both legs
+PASS: live post-restart retry appends nothing
+PASS: post-retry restored projection is still the prediction
+
+--- live H2 Case A: durable intent plus no landing forward-recovers ---
+PASS: live lost-apply fixture reaches shadow-ready
+PASS: setup freezes intent without durable application
+PASS: durable bytes are pre-apply (landing never flushed)
+PASS: marker-only restart applies the existing operation (got committed [])
+PASS: H2 recovery proves both legs
+PASS: live H2 actual equals the original prediction
+PASS: live H2 current user exactly once
+PASS: live H2 protocol balanced
+PASS: live H2 reuses the pre-crash durable operation
+
+--- live H2 Case B: real change after intent fails closed ---
+PASS: live changed-state fixture reaches shadow-ready
+PASS: Case B setup freezes intent
+PASS: real semantic change after intent fails closed (got stale)
+PASS: Case B mutates and appends nothing
+
+A10 live-host: passed=60 failed=0
+
+COMMAND: ContextCompactionV2Operation.Tests.cjs
+A02 LIVE HOST PROOF: EXECUTED
+
+--- V2 IDENTITY BASICS (pure) ---
+PASS: V2 operationId carries ccop_ prefix and 32 hex chars
+PASS: same task/session/checkpoint: generation 1 != generation 2
+PASS: same generation: checkpoint X != checkpoint Y
+PASS: V1 and V2 IDs are never ambiguously interchangeable (separate domain)
+PASS: V2 derivation is deterministic across calls
+PASS: Unicode/path-like identity values derive deterministically
+PASS: Unicode identity values actually discriminate
+PASS: invalid V2 identity input is refused (1/"C")
+PASS: invalid V2 identity input is refused (0/"C")
+PASS: invalid V2 identity input is refused (1/"")
+
+--- JS/POWERSHELL V2 ID PARITY (real pwsh authority) ---
+PASS: V2 ID parity for gen=1 ckpt=CKPT-G1
+PASS: V2 ID parity for gen=2 ckpt=CKPT-G1
+PASS: V2 ID parity for gen=1 ckpt=CKPT-G2
+PASS: V2 ID parity for gen=3 ckpt=CKPT-✓-🎯
+PASS: V2 ID parity for gen=12 ckpt=checkpoint-with-dashes_01
+
+--- FROZEN SEGMENT VALIDATION MATRIX (pure, closed-world) ---
+PASS: 1 payload + 1 continuation is valid
+PASS: 1 payload only is valid
+PASS: 1 payload + N continuations is valid
+PASS: surface-ordered multi-generation segment is valid
+PASS: 0 payload segments rejected (payload-segment-missing)
+PASS: 2 payload segments rejected (payload-segment-duplicate)
+PASS: unknown role rejected (segment-role-unknown)
+PASS: missing role rejected (segment-role-missing)
+PASS: unordered segments rejected (segments-unordered)
+PASS: segment endpoints must agree with source seqs (segment-endpoint-mismatch)
+PASS: overlapping source sets rejected (segment-overlap)
+PASS: source mismatch rejected (segment-union-mismatch)
+PASS: boundary violation rejected (source-seq-beyond-safe-point-boundary)
+PASS: duplicate seqs rejected (source-seqs-duplicate)
+PASS: tampered operationId rejected (operation-id-mismatch)
+PASS: V1 schemaVersion rejected as V2 (operation-schema-mismatch)
+PASS: missing attemptId rejected (attempt-id-missing)
+PASS: task mismatch rejected (task-id-mismatch)
+PASS: instance mismatch rejected (task-instance-mismatch)
+PASS: session mismatch rejected (session-id-mismatch)
+PASS: workspace mismatch rejected (workspace-mismatch)
+PASS: generation invalid rejected (checkpoint-generation-invalid)
+PASS: checkpoint identity missing rejected (checkpoint-identity-missing)
+PASS: lifecycle invalid rejected (lifecycle-invalid)
+
+--- PROJECTION: 1 / 2 / 3 SEGMENTS CARRY EXACTLY ONE PAYLOAD (real host) ---
+PASS: one-segment: frozen operation has 1 segment(s)
+PASS: one-segment: exactly one payload role persisted
+PASS: one-segment: canonical log grew by exactly one node per segment
+PASS: one-segment: full checkpoint payload appears exactly once
+PASS: one-segment: exactly one checkpoint element is model-facing
+PASS: one-segment: 0 identity-only continuation anchor(s)
+PASS: one-segment: Nexus authored zero runtime-policy snapshots
+PASS: two-segment: frozen operation has 2 segment(s)
+PASS: two-segment: exactly one payload role persisted
+PASS: two-segment: canonical log grew by exactly one node per segment
+PASS: two-segment: full checkpoint payload appears exactly once
+PASS: two-segment: exactly one checkpoint element is model-facing
+PASS: two-segment: 1 identity-only continuation anchor(s)
+PASS: two-segment: anchor is identity-only
+PASS: two-segment: Nexus authored zero runtime-policy snapshots
+PASS: three-segment: frozen operation has 3 segment(s)
+PASS: three-segment: exactly one payload role persisted
+PASS: three-segment: canonical log grew by exactly one node per segment
+PASS: three-segment: full checkpoint payload appears exactly once
+PASS: three-segment: exactly one checkpoint element is model-facing
+PASS: three-segment: 2 identity-only continuation anchor(s)
+PASS: three-segment: anchor is identity-only
+PASS: three-segment: anchor is identity-only
+PASS: three-segment: Nexus authored zero runtime-policy snapshots
+
+--- DURABLE-BEFORE-MUTATION (hard invariant, real host) ---
+PASS: mutation without a durable frozen operation is refused
+PASS: refused mutation appended nothing
+PASS: mutation with a non-identical operation copy is refused
+PASS: refused mutation appended nothing (copy)
+PASS: frozen operation is durably readable before mutation
+PASS: durable plan is immutable (byte-identical to draft)
+PASS: apply lands in awaiting-durability, never applied
+PASS: every frozen segment applied exactly once
+
+--- RECONCILIATION MATRIX (real host, deterministic) ---
+PASS: none landed → apply exact frozen operation
+PASS: payload landed, continuation missing → append missing continuation only
+PASS: retry appended no second payload
+PASS: retry appended exactly the missing segment
+PASS: continuation landed, payload missing → append exact missing payload once
+PASS: payload appended exactly once after continuation-first landing
+PASS: all landed but unflushed → awaiting-durability (NOT applied)
+PASS: all landed + durable → applied
+PASS: foreign replacement → BLOCK (do not improvise)
+PASS: corrupt (duplicate payload citation) → BLOCK
+PASS: payload digest mismatch → BLOCK
+PASS: payload + subset → append only the exact missing continuation
+PASS: subset retry kept exactly one payload
+
+--- CRASH / DURABILITY MATRIX (real host + file-backed frozen ops) ---
+PASS: C1: frozen operation survives the crash byte-identical (never re-planned)
+PASS: C3: crash before first append reconciles to apply
+PASS: C3: retried operation lands exactly one payload
+PASS: C4a: append-without-flush crash leaves replacement absent durably → retry exact frozen segments
+PASS: C4a: dead-process memory is never mistaken for durability
+PASS: C4b: crash after payload → complete exact missing continuation only
+PASS: C4b: payload appears exactly once after partial crash recovery
+PASS: C5: continuation-first crash → append exact missing payload once
+PASS: C5: exactly one payload after inverse-order recovery
+PASS: C6: crash after final append but before flush → safe original, retry same frozen op
+PASS: C7: flush reports a NON-participating durability listener
+PASS: C7: flush failure keeps awaiting-durability (never APPLIED)
+PASS: C7: flush failure cannot become APPLIED
+PASS: C8: crash after flush before finalize → durable-state reconciliation to APPLIED
+PASS: C8: finalization appended nothing (only the host restore marker is new)
+PASS: C8: exactly one payload in the finalized projection
+PASS: C2: retry uses the same frozen operation (never re-plans/widens)
+PASS: C2: attempt lock state survives the crash bound to the same operation
+
+--- MULTI-GENERATION DURABILITY (gen1 → restart → gen2, real host) ---
+PASS: gen1 payload model-facing exactly once
+PASS: gen1 survives restore exactly once
+PASS: generation-aware identity: gen2 operation differs from gen1
+PASS: gen2 payload model-facing exactly once
+PASS: gen1 payload superseded (latest-only projection)
+PASS: exactly one authoritative runtime snapshot after gen2
+PASS: multi-generation state survives restore
+
+--- ATTEMPT IDENTITY (attempt ≠ generation) ---
+PASS: attempt starts inactive/in-progress (no generation fabricated)
+PASS: illegal transition inactive → applied is refused
+PASS: attempt persists mid-lifecycle without fabricating a generation
+PASS: a finished attempt is immutable (never edited)
+PASS: blocked attempt records result without a generation
+
+--- B2 RUNTIME-SNAPSHOT POLICY EXPERIMENT (real host, Option A proof) ---
+PASS: Option A splits ONLY around the current snapshot (stale snapshots shadowed)
+PASS: stale snapshot(s) fall inside the shadowed bulk
+PASS: the current snapshot is pinned (excluded), never cited as a source seq
+PASS: pinned current snapshot is not in the frozen source set
+PASS: superseded snapshot A is shadowed out of the projection
+PASS: current snapshot B remains the single authority
+PASS: payload still exactly once under Option A
+PASS: restore preserves the same current policy (B)
+PASS: stale snapshot stays shadowed after restore
+PASS: Option A ceiling: normal projection retains <= 1 applicable runtime snapshot
+PASS: apply-gate passes while the pinned snapshot is still current
+PASS: a newer host policy snapshot between plan and apply BLOCKS the frozen plan (never shadows a new current)
+
+--- F-03 REAL DSH RUNTIME-POLICY INTERPLAY (honest separation) ---
+PASS: real host owns a RuntimeContextProjection (last-wins, non-owning)
+PASS: real restore path re-derives retained from the last LIVE owned node
+PASS: real cadence is project-on-diff (uncommitted candidate, not a session append)
+PASS: real commit path stages the candidate through agent/pre-step, committed at the step boundary
+PASS: real projection drops retained when its seq is shadowed by a replacement
+PASS: real last-wins scan: newest live owned snapshot (B) is authoritative before compaction
+PASS: shadowing stale A does not move authority: B still last live owned node
+PASS: after restore the same current policy (B) is authoritative
+PASS: LIMITATION (recorded, not hidden): full pre-step waterfall not exercised offline — synthetic snapshots model provenance + ordering only
+INFO: F-03 conclusion — Option A is proven against the real session surface + pinned projection source contract; genuine project-on-diff cadence remains UNVERIFIED offline (no supported trigger without a live agent loop).
+
+--- V1 BACKWARD COMPATIBILITY (production baseline untouched) ---
+PASS: V1 operation identity derivation is unchanged and deterministic
+PASS: V1 IDs keep the ccop_ prefix in the V1 domain
+PASS: V1 operation validation is unchanged
+PASS: V1 schemaVersion: 1 is never reinterpreted as V2
+PASS: V1 operation is refused by the V2 persistence path (explicit schema branching)
+PASS: absent V2 operation reads as null (never as corrupt)
+
+--- SUMMARY ---
+host: @deepseek-ai/dsh-session 0.1.1-rc.2 (real SessionStore + real session/flush barrier + real restore)
+RESULT: 141 A02 operation assertions passed, 0 failed (live pinned DSH host).
+
+COMMAND: ContextCompactionV2FoundationHardening.Tests.cjs
+
+--- H1 CLOSED-WORLD SCHEMA VALIDATION ---
+PASS: H1 baseline: real token validates
+PASS: H1 baseline: real checkpoint validates
+PASS: H1 baseline: real sealed checkpoint validates
+PASS: 1 unknown token field BLOCKs (snapshot-token-invalid)
+PASS: 2 unknown repositoryRevision field BLOCKs
+PASS: 3 unknown runtimeRevision field BLOCKs
+PASS: 4 unknown checkpoint top-level field BLOCKs
+PASS: 5 unknown checkpoint nested field BLOCKs
+PASS: 6 unknown operation field BLOCKs
+PASS: 7 unknown segment field BLOCKs
+PASS: 7b unknown attempt field BLOCKs
+PASS: 7b attempt create refuses unknown input (never stripped)
+PASS: 7b attempt persist refuses unknown field before write
+PASS: 8 unknown TrustProvenance field BLOCKs
+PASS: 8 unknown provenance entry field BLOCKs the map
+PASS: 8 unknown provenance envelope field BLOCKs the map
+PASS: 9 unknown ContentSeal field BLOCKs (checkpoint-seal-invalid)
+PASS: 10 recomputed id/digest does not legalize unknown top-level field
+PASS: 10 recomputed id/digest does not legalize unknown nested field
+PASS: 10 recomputed token identities do not legalize unknown token field
+PASS: 10 recomputed operationId does not legalize unknown operation field
+PASS: secret-bearing operation extra BLOCKs before persistence
+PASS: secret-bearing token extra BLOCKs before persistence
+PASS: secret-bearing token never persisted (absent read)
+PASS: secret-bearing checkpoint extra BLOCKs before persistence
+PASS: H1 PS twin enforces exact operation keys (shared-file compatible)
+PASS: H1 PS twin enforces exact segment keys
+PASS: canonical checkpoint build is byte-identical and green
+PASS: canonical token capture is byte-identical and green
+PASS: checkpoint serialized bytes are canonical read-back identity
+
+--- H2 SNAPSHOT IDENTITY BYPASS REMOVED ---
+PASS: 11 forged tokenId+revisionDigest pair without full token BLOCKs
+PASS: 12 full real token builds a snapshot-bound checkpoint
+PASS: 12 bound checkpoint <-> token binding VALID
+PASS: 12 token/task mismatch BLOCKs
+PASS: 12 token/session mismatch BLOCKs
+PASS: 12 token/generation mismatch BLOCKs
+PASS: 12 tampered token BLOCKs at build
+PASS: 13 legacy no-token checkpoint reports legacy mode
+PASS: 13 legacy checkpoint remains structurally valid
+PASS: 13 legacy checkpoint is never bound (validateCheckpointSnapshotBinding rejects)
+PASS: 13 explicit null/null slot stays legacy
+
+--- H3 PERSISTED READ-BACK PROOF ---
+PASS: 14 precondition: clone is byte-identical
+PASS: 14 raw equal clone BLOCKs (no first append without read-back proof)
+PASS: 14 BLOCKed apply lands zero appends
+PASS: 15 precondition: read-back is byte-identical
+PASS: 15 persisted read-back applies exactly once
+PASS: 15 retry path also requires the read-back proof
+PASS: 15 retry with read-back proof applies the missing segment
+PASS: 16 precondition: restart read is a new object identity
+PASS: 16 restart read-back can apply
+PASS: 16 restart read-back reconciles (A02 reconciliation unchanged)
+PASS: 16 stale/different persisted handle BLOCKs
+PASS: 17 stale live state BLOCKs at the pre-mutation gate
+PASS: 17 BLOCKed operation lands no payload before the first new append
+PASS: 17 fresh state still passes the pre-mutation gate
+
+--- H4 LIVE-HOST STRICT GATE ---
+PASS: 18 host missing + strict unset -> SKIPPED
+PASS: 18 host missing + strict=0 -> SKIPPED
+PASS: 18 host missing + strict=false -> SKIPPED
+PASS: 18 host missing + strict empty -> SKIPPED
+A99 LIVE HOST PROOF: SKIPPED
+PASS: 18 SKIPPED report returns without exiting
+PASS: 19 host missing + strict=1 -> REQUIRED-MISSING
+PASS: 19 host missing + strict=true -> REQUIRED-MISSING
+PASS: 19 host missing + strict=YES -> REQUIRED-MISSING
+PASS: 19 REQUIRED-MISSING exits non-zero
+PASS: 20 host present -> EXECUTED (optional mode)
+PASS: 20 host present + strict -> EXECUTED
+PASS: A01 proof requires the shared gate helper
+PASS: A01 proof reports A01 LIVE HOST PROOF
+PASS: A01 proof wires the strict env contract
+PASS: A02 proof requires the shared gate helper
+PASS: A02 proof reports A02 LIVE HOST PROOF
+PASS: A02 proof wires the strict env contract
+PASS: 20 pinned host present in this env -> EXECUTED
+
+--- H5 CONTENT-SEAL THREAT MODEL ---
+PASS: 21 seal metadata tamper BLOCKs (checkpoint-seal-record-digest-mismatch)
+PASS: 21 seal leg reports the record-digest code (never content-digest)
+PASS: 22 arch doc states "unkeyed integrity seal"
+PASS: 22 arch doc states "deterministic tamper detection"
+PASS: 22 arch doc states "record-integrity binding"
+PASS: 22 arch doc states "does not defend against an attacker that can arbitrarily rewrite"
+PASS: 22 trust authority states the unkeyed-integrity threat model
+PASS: 22 arch doc never claims cryptographic authenticity
+PASS: 22 no bare signature/MAC claim in the seal section
+PASS: 22 no positive authenticity claim remains in the seal section
+PASS: 22 seal signature overclaim mutation is still detected
+PASS: 22 seal authenticity overclaim mutation is still detected
+PASS: 22 unrelated HMAC and replay signatures do not alter the seal threat-model subject
+
+--- H6 DURABILITY SCOPE ---
+PASS: H6 arch doc freezes the power-loss exclusion
+PASS: H6 arch doc names the DSH flush barrier as authoritative
+PASS: H6 power-loss hardening explicitly deferred
+PASS: H6 operation/attempt persistence states the frozen scope (config/ContextCompaction.cjs)
+PASS: H6 checkpoint persistence states the frozen scope (config/ContextCheckpointV2.cjs)
+PASS: H6 token persistence states the frozen scope (config/ContextSnapshotV2.cjs)
+PASS: H6 sealed persistence states the frozen scope (config/ContextTrustV2.cjs)
+PASS: H6 no bare crash-safe claim remains in CCV2 authorities
+PASS: H6 no bare crash-safe claim remains in the arch doc
+
+--- OWNERSHIP AND SEMANTICS PRESERVED ---
+PASS: 23 A01 proof still exercises SessionStore
+PASS: 23 A01 proof still exercises deriveMessages
+PASS: 23 A01 proof still exercises surfaceOp
+PASS: 23 A01 proof still exercises fromRestore
+PASS: 23 A01 proof still exercises session/flush
+PASS: 24 1 payload + frozen lifecycle still validates
+PASS: 24 zero-landed reconciliation still says apply (semantics unchanged)
+PASS: 24 A02 decision vocabulary unchanged
+PASS: H8 A03 checkpoint id domain frozen
+PASS: H8 A04 seal digest domain frozen
+PASS: H8 A05 revision digest domain frozen
+PASS: H8 A05 token id domain frozen
+PASS: 25 A03 checkpointId vector unchanged
+PASS: 25 A03 content-digest vector unchanged
+PASS: 26 A04 sealDigest vector unchanged
+PASS: 27 A05 revisionDigest vector unchanged
+PASS: 28 A05 snapshotTokenId vector unchanged
+
+--- SUMMARY ---
+A05H foundation hardening suite: 112 passed, 0 failed.
+
+COMMAND: ContextRecoveryV2.Tests.cjs
+
+--- A12 FAULT REGISTRY: named points, single-shot, disarm ---
+PASS: registry starts disarmed
+PASS: armed throw fault fires at the named point
+PASS: single-shot fault fires exactly once
+PASS: simulated process loss throws ProcessLost
+PASS: injected errors are recognizable
+PASS: unknown fault point fails closed
+PASS: unknown fault mode fails closed
+PASS: disarm restores zero production behavior change
+
+--- A12 RESERVATION CRASH MATRIX (throw + process-loss at every boundary) ---
+PASS: reserve fault fires at reservation:before-temp-write [throw]
+PASS: restart converges to no-reservation at reservation:before-temp-write
+PASS: retry converges to G1 at reservation:before-temp-write [throw]
+PASS: identical retry is idempotent at reservation:before-temp-write
+PASS: different source never rebinds G1 at reservation:before-temp-write
+PASS: reserve fault fires at reservation:before-temp-write [simulated-process-loss]
+PASS: restart converges to no-reservation at reservation:before-temp-write
+PASS: retry converges to G1 at reservation:before-temp-write [simulated-process-loss]
+PASS: identical retry is idempotent at reservation:before-temp-write
+PASS: different source never rebinds G1 at reservation:before-temp-write
+PASS: reserve fault fires at reservation:after-temp-write [throw]
+PASS: restart converges to no-reservation at reservation:after-temp-write
+PASS: retry converges to G1 at reservation:after-temp-write [throw]
+PASS: identical retry is idempotent at reservation:after-temp-write
+PASS: different source never rebinds G1 at reservation:after-temp-write
+PASS: reserve fault fires at reservation:after-temp-write [simulated-process-loss]
+PASS: restart converges to no-reservation at reservation:after-temp-write
+PASS: retry converges to G1 at reservation:after-temp-write [simulated-process-loss]
+PASS: identical retry is idempotent at reservation:after-temp-write
+PASS: different source never rebinds G1 at reservation:after-temp-write
+PASS: reserve fault fires at reservation:before-rename [throw]
+PASS: restart converges to no-reservation at reservation:before-rename
+PASS: retry converges to G1 at reservation:before-rename [throw]
+PASS: identical retry is idempotent at reservation:before-rename
+PASS: different source never rebinds G1 at reservation:before-rename
+PASS: reserve fault fires at reservation:before-rename [simulated-process-loss]
+PASS: restart converges to no-reservation at reservation:before-rename
+PASS: retry converges to G1 at reservation:before-rename [simulated-process-loss]
+PASS: identical retry is idempotent at reservation:before-rename
+PASS: different source never rebinds G1 at reservation:before-rename
+PASS: reserve fault fires at reservation:after-rename [throw]
+PASS: half-valid reservation never survives at reservation:after-rename
+PASS: restart converges with reservation at reservation:after-rename
+PASS: retry converges to G1 at reservation:after-rename [throw]
+PASS: identical retry is idempotent at reservation:after-rename
+PASS: different source never rebinds G1 at reservation:after-rename
+PASS: reserve fault fires at reservation:after-rename [simulated-process-loss]
+PASS: half-valid reservation never survives at reservation:after-rename
+PASS: restart converges with reservation at reservation:after-rename
+PASS: retry converges to G1 at reservation:after-rename [simulated-process-loss]
+PASS: identical retry is idempotent at reservation:after-rename
+PASS: different source never rebinds G1 at reservation:after-rename
+PASS: reserve fault fires at reservation:before-read-back [throw]
+PASS: half-valid reservation never survives at reservation:before-read-back
+PASS: restart converges with reservation at reservation:before-read-back
+PASS: retry converges to G1 at reservation:before-read-back [throw]
+PASS: identical retry is idempotent at reservation:before-read-back
+PASS: different source never rebinds G1 at reservation:before-read-back
+PASS: reserve fault fires at reservation:before-read-back [simulated-process-loss]
+PASS: half-valid reservation never survives at reservation:before-read-back
+PASS: restart converges with reservation at reservation:before-read-back
+PASS: retry converges to G1 at reservation:before-read-back [simulated-process-loss]
+PASS: identical retry is idempotent at reservation:before-read-back
+PASS: different source never rebinds G1 at reservation:before-read-back
+PASS: reserve fault fires at reservation:after-read-back-before-return [throw]
+PASS: half-valid reservation never survives at reservation:after-read-back-before-return
+PASS: restart converges with reservation at reservation:after-read-back-before-return
+PASS: retry converges to G1 at reservation:after-read-back-before-return [throw]
+PASS: identical retry is idempotent at reservation:after-read-back-before-return
+PASS: different source never rebinds G1 at reservation:after-read-back-before-return
+PASS: reserve fault fires at reservation:after-read-back-before-return [simulated-process-loss]
+PASS: half-valid reservation never survives at reservation:after-read-back-before-return
+PASS: restart converges with reservation at reservation:after-read-back-before-return
+PASS: retry converges to G1 at reservation:after-read-back-before-return [simulated-process-loss]
+PASS: identical retry is idempotent at reservation:after-read-back-before-return
+PASS: different source never rebinds G1 at reservation:after-read-back-before-return
+PASS: stale temp files never shadow the valid reservation
+
+--- A12 HEAD CRASH MATRIX (head write fails closed, read-back enforced) ---
+PASS: head crash converges uniquely at head:before-temp-write (got 1)
+PASS: retry converges after head crash at head:before-temp-write
+PASS: fault attribution holds at head:before-temp-write
+PASS: head crash converges uniquely at head:after-temp-write (got 1)
+PASS: retry converges after head crash at head:after-temp-write
+PASS: fault attribution holds at head:after-temp-write
+PASS: head crash converges uniquely at head:before-rename (got 1)
+PASS: retry converges after head crash at head:before-rename
+PASS: fault attribution holds at head:before-rename
+PASS: head crash converges uniquely at head:after-rename (got 1)
+PASS: retry converges after head crash at head:after-rename
+PASS: fault attribution holds at head:after-rename
+PASS: head crash converges uniquely at head:before-read-back (got 1)
+PASS: retry converges after head crash at head:before-read-back
+PASS: fault attribution holds at head:before-read-back
+PASS: head crash converges uniquely at head:after-read-back-before-return (got 1)
+PASS: retry converges after head crash at head:after-read-back-before-return
+PASS: fault attribution holds at head:after-read-back-before-return
+PASS: one checkpoint file per generation
+PASS: conflicting checkpoint bytes fail closed
+
+--- A12 SUPERSESSION PERSISTENCE CRASH (never half-superseded) ---
+PASS: supersede fault fires at supersession:before-temp-write
+PASS: absent marker means not-yet-superseded at supersession:before-temp-write
+PASS: retry converges to superseded at supersession:before-temp-write
+PASS: superseded generation is permanently non-applicable at supersession:before-temp-write
+PASS: supersede fault fires at supersession:after-temp-write
+PASS: absent marker means not-yet-superseded at supersession:after-temp-write
+PASS: retry converges to superseded at supersession:after-temp-write
+PASS: superseded generation is permanently non-applicable at supersession:after-temp-write
+PASS: supersede fault fires at supersession:before-rename
+PASS: absent marker means not-yet-superseded at supersession:before-rename
+PASS: retry converges to superseded at supersession:before-rename
+PASS: superseded generation is permanently non-applicable at supersession:before-rename
+PASS: supersede fault fires at supersession:after-rename
+PASS: durable supersession is valid at supersession:after-rename
+PASS: durable supersession is terminal at supersession:after-rename
+PASS: retry converges to superseded at supersession:after-rename
+PASS: superseded generation is permanently non-applicable at supersession:after-rename
+PASS: supersede fault fires at supersession:before-read-back
+PASS: durable supersession is valid at supersession:before-read-back
+PASS: durable supersession is terminal at supersession:before-read-back
+PASS: retry converges to superseded at supersession:before-read-back
+PASS: superseded generation is permanently non-applicable at supersession:before-read-back
+PASS: supersede fault fires at supersession:after-read-back-before-return
+PASS: durable supersession is valid at supersession:after-read-back-before-return
+PASS: durable supersession is terminal at supersession:after-read-back-before-return
+PASS: retry converges to superseded at supersession:after-read-back-before-return
+PASS: superseded generation is permanently non-applicable at supersession:after-read-back-before-return
+
+--- A12 FULLY-LANDED RECOVERY CLASSIFICATION (A12-1: never heuristic COMMITTED) ---
+PASS: no-session fully-landed is RESERVED (landing unobservable)
+PASS: head never advances from segment presence alone
+PASS: no-session G2 reserve conflicts (active G1, no rebind)
+PASS: session-visible fully-landed is UNRESOLVED
+PASS: session-visible names verification
+PASS: repair defers without the verified pass
+PASS: G2 refuses over commit-pending G1 (reserve never heals)
+PASS: entry forward-recovers the pending G1 (got recovered)
+PASS: recovery re-establishes application durability (never inferred)
+PASS: G2 reserves after G1 reaches terminal state
+PASS: G2 parents from committed G1 (never stale)
+PASS: recovered surface keeps current user once (a current user request exists)
+PASS: recovered surface keeps current user once (current user exactly once, got 1)
+PASS: recovered surface stays balanced (protocol balanced)
+PASS: recovery never rewrites the raw log (raw log never shrinks: 8 -> 10)
+PASS: recovery never rewrites the raw log (positional log seq 0)
+PASS: recovery never rewrites the raw log (positional log seq 1)
+PASS: recovery never rewrites the raw log (positional log seq 2)
+PASS: recovery never rewrites the raw log (positional log seq 3)
+PASS: recovery never rewrites the raw log (positional log seq 4)
+PASS: recovery never rewrites the raw log (positional log seq 5)
+PASS: recovery never rewrites the raw log (positional log seq 6)
+PASS: recovery never rewrites the raw log (positional log seq 7)
+PASS: recovery never rewrites the raw log (positional log seq 8)
+PASS: recovery never rewrites the raw log (positional log seq 9)
+PASS: recovered surface (payload multiplicity<=1, got 1)
+PASS: recovered surface (anchor[1] multiplicity<=1, got 1)
+
+--- A12 EXPLICIT RESTART-RECOVERY OPERATOR (restored session + repair) ---
+PASS: restored-session repair advances the head
+PASS: repair outcome is explicit
+PASS: recovered-completion evidence is produced
+PASS: recovered evidence binds the checkpoint
+PASS: recovered evidence binds the operation
+PASS: repair trace records the head advancement
+PASS: identical durable state yields identical recovery trace
+PASS: recovery trace carries no task content
+
+--- A12 RESERVE-vs-RECOVER: partial landing blocks newer generations ---
+PASS: G2 reserve refuses over partially-landed G1
+PASS: reconciliation classifies the partial (got retry-missing)
+PASS: forward recovery converges (got recovered)
+PASS: G2 reserves after G1 reaches terminal state
+
+--- A12 LOST-A10-RESULT: durable evidence reconstructs completion ---
+PASS: A10 fully commits before the loss
+PASS: head advances without the lost in-memory result
+PASS: equivalent recovered completion is reconstructed
+PASS: lost-result surface keeps current user once (a current user request exists)
+PASS: lost-result surface keeps current user once (current user exactly once, got 1)
+PASS: lost-result surface stays balanced (protocol balanced)
+
+--- A12-4 MID-LOG RESTORE MARKERS STAY EXECUTION-TRANSPARENT ---
+PASS: fixture carries a mid-log restore marker
+PASS: mid-log marker stays transparent (got committed [])
+PASS: head advances over marker-bearing history
+
+--- A12 FULL LANDING BUT BAD PROJECTION FAILS CLOSED ---
+PASS: adversary corrupts exactly one landed marker
+PASS: corrupt landing is UNRESOLVED, never committed (got UNRESOLVED)
+PASS: bad projection never advances the head
+PASS: corrupt landing repair fails closed
+
+--- A12 APPLY-vs-SUPERSEDE ORDERINGS (exactly one terminal winner) ---
+PASS: supersession wins on zero landing
+PASS: late apply refuses after durable supersession
+PASS: supersession refuses after landing (apply wins)
+PASS: landed generation is never superseded
+
+--- A12 COMMIT-vs-SUPERSEDE: committed history can never be superseded ---
+PASS: committed history refuses supersession
+
+--- A12 STALE-HANDLE MATRIX (every layer fails closed) ---
+PASS: stale reservation binding refuses
+PASS: cross-generation result never commits
+PASS: unverified commit refuses
+PASS: unallocated generation never commits
+PASS: control reservation stands
+
+--- A12 RESTART MATRIX: every lifecycle state has one frozen outcome ---
+PASS: no-generation restarts to empty
+PASS: reserved restarts to RESERVED
+PASS: intent-durable/zero-landing restarts to RESERVED/intent-durable
+PASS: partial landing restarts to UNRESOLVED (got UNRESOLVED/application-pending)
+PASS: superseded restarts to SUPERSEDED
+
+--- A12 MULTI-GENERATION CRASH CHAIN: G1->G2->G4 with G3 superseded ---
+PASS: chain head is G2 before G4
+PASS: final lineage is G1->G2->G4 (got 1->2->4)
+PASS: G3 stays consumed-but-superseded
+PASS: chain surface keeps current user once (a current user request exists)
+PASS: chain surface keeps current user once (current user exactly once, got 1)
+PASS: chain surface stays balanced (protocol balanced)
+PASS: chain final surface (payload multiplicity<=1, got 1)
+PASS: chain final surface (anchor[1] multiplicity<=1, got 1)
+
+--- A12 REPEATED RESTART + BOUNDED CONVERGENCE ---
+PASS: consecutive restarts are byte-identical (no churn)
+PASS: recovery converges within the bound (passes=0)
+
+--- A12 CORRUPT / MISSING / CONFLICTING ARTIFACTS FAIL CLOSED ---
+PASS: corrupt reservation digest fails closed
+PASS: corrupt operation body fails closed
+PASS: conflicting operation identity fails closed
+PASS: missing reservation over committed lineage still resolves via lineage
+PASS: two active generations fail closed
+PASS: committed lineage resolves via lineage authority
+PASS: digest-tampered reservation fails closed
+PASS: committed+superseded fails closed
+
+--- A12 TIMESTAMPS NEVER DECIDE AUTHORITY ---
+PASS: manipulated mtimes change nothing
+
+--- A12 SECURITY: persisted adversarial content is inert ---
+PASS: adversarial text changes no decision
+PASS: adversarial text commits nothing
+
+--- A12 SECRET SAFETY: errors and telemetry never leak credentials ---
+PASS: validation errors never echo task content
+PASS: telemetry carries ids only
+PASS: recovery trace carries no secrets
+
+A12 unit: passed=213 failed=0
+
+COMMAND: ContextRecoveryV2LiveHost.Tests.cjs
+A12 LIVE HOST PROOF: EXECUTED
+PASS: pinned DSH host is 0.1.1-rc.2 (got 0.1.1-rc.2)
+
+--- live: flush-throw partial recovery (segments landed, flush failed) ---
+PASS: live G1 fixture is shadow-ready (blocked=undefined)
+PASS: flush failure fails the apply (got failed)
+PASS: flush failure never claims application durability
+PASS: live partial restarts to UNRESOLVED
+PASS: live forward recovery converges (got recovered)
+PASS: live head advances after recovery
+
+--- live: fully-landed lost-result + commit-before-head repair ---
+PASS: live G1 fixture is shadow-ready
+PASS: live A10 commits (got committed)
+PASS: live head repairs without the lost result
+PASS: live recovered completion binds the checkpoint
+PASS: live surface readable after restart
+
+--- live: zero-landing supersession + multi-generation chain with restarts ---
+PASS: live G1 chain fixture ready
+PASS: live G1 survives restart as committed
+PASS: live G2 fixture ready
+PASS: live G2 stays superseded across restart
+PASS: live G3 fixture ready
+PASS: live G3 applies (got committed [])
+PASS: live final lineage is G1->G3 (got 1->3)
+
+A12 live-host: passed=19 failed=0
+
+COMMAND: ContextGenerationRuntimeV2.Tests.cjs
+
+--- A11 AUTHORITY SHAPE (identity only, no auto-trigger) ---
+PASS: explicit reserveNextGenerationV2 API exists
+PASS: explicit commitGenerationV2 API exists
+PASS: explicit supersedeGenerationV2 API exists
+PASS: explicit reconstructGenerationRuntimeV2 API exists
+PASS: superseded-operation guard exists
+PASS: generation eligibility guard exists
+PASS: runtime schema version is 1
+PASS: bounded outcome vocabulary
+PASS: A11 carries no apply behavior (A10 frozen)
+
+--- RESERVATION: G1 null parent, monotonic, idempotent ---
+PASS: first reservation allocates G1
+PASS: G1 parent is null (frozen A03 rule)
+PASS: G1 reservation validates closed-world
+PASS: identical retry returns the same G1 reservation (no new generation consumed)
+PASS: changed source state never rebinds G1 (conflict, not silent rebind)
+PASS: allocated (1) vs committed (null) are distinct concepts
+PASS: active G1 is reserved
+
+--- RESERVATION: no caller-chosen generation ---
+PASS: reserve input carries no generation field
+PASS: caller-provided generation identity is refused as an unknown field
+
+--- G1 COMMIT: full A10 flow then head advancement ---
+PASS: A10 G1 commits (got committed)
+PASS: head advances to G1 only after proven durability
+PASS: head checkpoint binds the proven result
+PASS: highest allocated stays 1
+PASS: no active generation after commit
+PASS: actual equals the G1 A09 prediction
+PASS: refused A10 result cannot advance the head
+PASS: result without application durability cannot advance the head
+PASS: repeated head advancement is idempotent
+
+--- G1->G2->G3 chained commits with latest-only surface ---
+PASS: chain reserves G1
+PASS: chain A10 G1 commits
+PASS: chain head is G1
+PASS: chain reserves G2 (never reuses G1)
+PASS: G2 parent is the latest committed checkpoint
+PASS: G2 is eligible for apply
+PASS: chain A10 G2 commits (got committed [])
+PASS: chain head is G2
+PASS: chain reserves G3
+PASS: G3 parent is the G2 checkpoint
+PASS: chain A10 G3 commits (got committed [])
+PASS: chain head is G3
+PASS: highest allocated is 3
+PASS: final surface equals the G3 A09 prediction exactly
+PASS: latest payload is active exactly once
+PASS: G1 payload no longer accumulates on the active surface
+PASS: G2 payload no longer accumulates on the active surface
+PASS: current user remains exactly once (got 1)
+PASS: protocol remains balanced after G3
+PASS: G2 retention plan is fresh (never G1 reuse)
+PASS: G3 retention plan is fresh (never G2 reuse)
+PASS: G2 snapshot binding is fresh
+PASS: restart reconstruction is byte-identical
+PASS: steady reconstruction outcome on healthy state
+
+--- ZERO-LANDING SUPERSESSION + SKIPPED LINEAGE (G1 committed, G2 superseded, G3 from G1) ---
+PASS: supersede-chain G1 commits
+PASS: G2 checkpoint persists as immutable evidence
+PASS: G2 operation persists as immutable evidence
+PASS: moved state yields a new revision digest (staleness is real)
+PASS: G2 becomes SUPERSEDED after proving zero landing + staleness
+PASS: no active generation after supersession
+PASS: allocated (2) vs committed (1) stay distinct
+PASS: A02 recovery guard reports the G2 intent superseded (must not apply)
+PASS: superseded G2 is never eligible for apply
+PASS: committed G1 cannot be superseded
+PASS: next generation is G3 (G2 number never reused)
+PASS: G3 parent is the G1 checkpoint (skipped lineage, not G2)
+PASS: G3 commits (got committed [])
+PASS: head is G3 with skipped lineage
+PASS: G3.parentCheckpointId == G1.checkpointId (proven skipped lineage)
+PASS: final surface equals the G3 prediction
+PASS: old G2 intent never landed (zero citations)
+PASS: abandoned G2 payload never appears on the surface
+PASS: G4 reserves for continued work
+PASS: unchanged source refuses supersession (recover instead)
+
+--- PARTIAL LANDING: refuse supersede, block G3, reconcile then commit ---
+PASS: injected crash interrupts the multi-segment apply
+PASS: partial G1 is UNRESOLVED (got UNRESOLVED)
+PASS: unresolved generation reported with blocker
+PASS: stable unresolved blocker code
+PASS: partial application cannot be superseded (reconcile first)
+PASS: G2 reservation blocks across UNRESOLVED G1
+PASS: partial G1 is not eligible for fresh apply
+PASS: reconciliation demands retry of exactly the missing segments (got retry-missing)
+PASS: retry lands exactly the missing segments
+PASS: A10 converges after partial recovery (got recovered)
+PASS: head advances after reconciliation completes
+PASS: current runtime snapshot remains pinned on the surface
+
+--- COMMIT-BEFORE-HEAD CRASH: reconstruct repairs without reapply ---
+PASS: G2 commits before the simulated crash
+PASS: restart repairs the head to G2 (no reapply, no G1 stall)
+PASS: repair outcome is explicit
+PASS: repair appends nothing (G2 is not reapplied)
+PASS: head without durable checkpoint fails closed
+
+--- CRASH MATRIX: reservation / shadow / checkpoint-only / intent-only restarts ---
+PASS: restart recovers the same G2 reservation (state reserved)
+PASS: unchanged source resumes the same G2 (no rebinding, no new generation)
+PASS: shadow-crash G2 remains reserved and eligible (no mutation occurred)
+PASS: checkpoint-only G2 may resume the same generation (got RESERVED/reserved)
+PASS: intent-only restart still owns G2 (never silently dropped)
+PASS: moved-state intent-only G2 supersedes after restart
+PASS: supersession survives restart (durable, identity-bound)
+PASS: raw reconcile still sees zero landing (the guard, not luck, blocks application)
+
+--- CORRUPTION / FORK: fail closed, never heuristic ---
+PASS: unknown keys in durable metadata fail closed
+PASS: conflicting supersession markers fail closed as fork
+PASS: operation/checkpoint identity mismatch fails closed
+
+--- DETERMINISM / SECURITY / SECRET-SAFETY / TELEMETRY ---
+PASS: identical artifacts reconstruct byte-identical state
+PASS: string generation identity fails closed
+PASS: prompt-style supersede marker has zero effect
+PASS: prompt-style reservation field has zero effect
+PASS: runtime records carry no prompt/checkpoint text
+PASS: runtime records carry no injected text
+PASS: telemetry exposes exactly the bounded fact set
+PASS: telemetry values are correct
+PASS: telemetry carries no task content
+PASS: committed head is not eligible for re-apply
+PASS: unallocated generation is never eligible
+
+--- A11H ENTRY: one generation-aware active path, explicit commit stays separate ---
+PASS: generation-aware entry applyCurrentGenerationV2 exists
+PASS: runtime module carries no raw active primitive (layering is mechanical)
+PASS: gated generation recovery reconcileGenerationV2 exists
+PASS: snapshot lifecycle policy snapshotProtectionOfV2 exists
+PASS: entry applies G1 through the gate (got committed)
+PASS: entry result proves application durability
+PASS: entry actual equals the A09 prediction
+PASS: entry never auto-advances the head (explicit commit stays separate)
+PASS: explicit commit advances after entry apply
+PASS: stale fixture really moved revisions
+PASS: entry refuses a request that moved past its reservation (got ccv2-generation-runtime-v2: generation-source-stale: request revision moved since generation 1 was reserved)
+PASS: stale refusal mutates nothing
+
+--- A11H SUPERSEDED MATRIX: permanently non-applicable on every route ---
+PASS: stale handle observes G2 as active before supersession
+PASS: restart preserves supersession
+PASS: stale-handle entry refuses after supersession (got ccv2-generation-runtime-v2: generation-cannot-supersede: generation 2 is superseded and permanently non-applicable)
+PASS: entry retry refuses again (got ccv2-generation-runtime-v2: generation-cannot-supersede: generation 2 is superseded and permanently non-applicable)
+PASS: gated reconcile refuses superseded recovery (got ccv2-generation-runtime-v2: generation-cannot-supersede: generation 2 is superseded and permanently non-applicable)
+PASS: every refused route appends zero events
+PASS: zero payload and zero anchors from refused routes
+PASS: raw A02 primitive would land (unguarded by design; entry-only discipline required)
+PASS: live session untouched by the layering probe (scratch copy only)
+
+--- A11H SNAPSHOT MATRIX: pinned vs shadowable per generation state ---
+PASS: snapshot-matrix G1 commits through the entry
+PASS: protection record validates closed-world
+PASS: current runtime snapshot identified
+PASS: current committed snapshot is PINNED
+PASS: older snapshot with no recovery dependency is shadowable
+PASS: protection classification is deterministic
+PASS: two live runtime snapshots during UNRESOLVED (got 2)
+PASS: UNRESOLVED generation pins every live snapshot (newer reservation cannot unpin)
+PASS: non-current pins cite the recovery dependency
+PASS: G2 reservation over UNRESOLVED G1 is impossible
+PASS: superseded zero-landing snapshot may become shadowable
+PASS: new current snapshot stays PINNED
+PASS: superseded-state protection reconstructs identically (no in-memory pins)
+PASS: newest committed snapshot is PINNED
+PASS: older committed snapshot shadowable after self-contained successor (no recovery dependency)
+PASS: committed-state protection reconstructs identically
+
+--- A11H ENTRY RECOVERY: unchanged partial recovers; moved partial refuses cleanly ---
+PASS: entry recovers unchanged partial (got committed)
+PASS: head advances after entry-driven recovery
+PASS: moved partial fails at the frozen post-verify (got failed)
+PASS: drift names the post-apply cause
+PASS: failed recovery moves no head
+PASS: completed landing classifies as commit-pending (projection unverified)
+PASS: commit-pending state names verification
+PASS: unverified landing defers head repair
+
+A11 unit: passed=155 failed=0
+
+COMMAND: ContextGenerationRuntimeV2LiveHost.Tests.cjs
+A11 LIVE HOST PROOF: EXECUTED
+PASS: pinned DSH host is 0.1.1-rc.2 (got 0.1.1-rc.2)
+PASS: pinned host still states the flush barrier contract
+
+--- live: G1 -> G2 -> G3 real active compaction with restart after every generation ---
+PASS: live G1 reaches shadow-ready
+PASS: live G1 checkpoint is self-contained under A07
+PASS: live reserves G1 (got G1)
+PASS: live G1 parent is null
+PASS: live G1 actually applies (got committed [])
+PASS: live G1 proves application durability
+PASS: live G1 actual == its A09 prediction
+PASS: live head advances to G1
+PASS: restart after G1 reconstructs the committed head
+PASS: restart after G1 reconstructs allocation
+PASS: restart after G1 reproduces the exact messages
+PASS: live G2 reaches shadow-ready
+PASS: live G2 checkpoint is self-contained under A07
+PASS: live reserves G2 (got G2)
+PASS: live G2 parent is the latest committed checkpoint
+PASS: live G2 actually applies (got committed [])
+PASS: live G2 proves application durability
+PASS: live G2 actual == its A09 prediction
+PASS: live head advances to G2
+PASS: restart after G2 reconstructs the committed head
+PASS: restart after G2 reconstructs allocation
+PASS: restart after G2 reproduces the exact messages
+PASS: live G3 reaches shadow-ready
+PASS: live G3 checkpoint is self-contained under A07
+PASS: live reserves G3 (got G3)
+PASS: live G3 parent is the latest committed checkpoint
+PASS: live G3 actually applies (got committed [])
+PASS: live G3 proves application durability
+PASS: live G3 actual == its A09 prediction
+PASS: live head advances to G3
+PASS: restart after G3 reconstructs the committed head
+PASS: restart after G3 reconstructs allocation
+PASS: restart after G3 reproduces the exact messages
+PASS: live current user exactly once after G3
+PASS: live protocol balanced after G3
+PASS: live latest payload active exactly once
+PASS: live G1 payload superseded on the active surface
+PASS: live G2 payload superseded on the active surface
+
+--- live: superseded G2 -> G3 skipped lineage, old intent never lands ---
+PASS: live supersede-chain G1 reaches shadow-ready
+PASS: live supersede-chain G1 commits
+PASS: live G2 reaches shadow-ready
+PASS: live interrupt moves the revision (staleness is real)
+PASS: live G2 supersedes after the interrupt
+PASS: live allocates G3 (G2 never reused)
+PASS: live G3 parent is the G1 checkpoint
+PASS: live G3 reaches shadow-ready
+PASS: live G3 commits (got committed [])
+PASS: live head is G3 with skipped lineage
+PASS: live G3.parentCheckpointId == G1.checkpointId
+PASS: live G3 actual == its A09 prediction
+PASS: live old G2 intent never landed
+PASS: live abandoned G2 payload never surfaces
+
+--- live: generation-aware entry applies; snapshot protection reconstructs ---
+PASS: live entry G1 reaches shadow-ready
+PASS: live entry applies G1 (got committed)
+PASS: live entry actual == its A09 prediction
+PASS: live protection record validates
+PASS: live current runtime snapshot identified
+PASS: live current snapshot is PINNED
+PASS: live protection reconstructs identically after restore
+PASS: live entry G2 reaches shadow-ready
+PASS: live gated recovery refuses superseded G2 (got ccv2-generation-runtime-v2: generation-cannot-supersede: generation 2 is superseded and permanently non-applicable)
+
+A11 live-host: passed=63 failed=0
+
+COMMAND: ContextCompleteTaskV2.Tests.cjs
+
+--- A13 VERSION SELECTION (CCv1 path unchanged when V2 not selected) ---
+PASS: v1 passthrough evaluates nothing
+PASS: v1 passthrough creates zero V2 durable work
+PASS: global default stays v1 (no unreviewed rollout)
+PASS: explicit v2 selects the integrated path
+PASS: env activation selects v2
+
+--- A13 LOW-PRESSURE PATH (NORMAL cheap no-op, ELEVATED observes) ---
+PASS: NORMAL continues normally
+PASS: NORMAL allocates nothing
+PASS: NORMAL creates no checkpoint persist, no generation, no A10 operation
+PASS: NORMAL leaves model-facing state untouched
+PASS: ELEVATED prepares without active compaction
+PASS: ELEVATED allocates no generation
+PASS: low-pressure surface keeps current user once (a current user request exists)
+PASS: low-pressure surface keeps current user once (current user exactly once, got 1)
+PASS: low-pressure surface stays balanced (protocol balanced)
+
+--- A13 UNKNOWN PRESSURE (never invent capacity authorization) ---
+PASS: unknown capacity reports UNKNOWN (got UNKNOWN)
+PASS: UNKNOWN blocks active work but the task continues
+PASS: UNKNOWN allocates no generation
+
+--- A13 UNSAFE BOUNDARIES (A06 authority: open stream/edge/transition/unflushed) ---
+PASS: open stream flag reports blocked, task continues
+PASS: open stream flag blames safe-point-unsafe (got safe-point-unsafe)
+PASS: open stream flag leaves live task state unchanged
+PASS: open stream flag allocates no generation
+PASS: open tool edge flag reports blocked, task continues
+PASS: open tool edge flag blames safe-point-unsafe (got safe-point-unsafe)
+PASS: open tool edge flag leaves live task state unchanged
+PASS: open tool edge flag allocates no generation
+PASS: open controller transition reports blocked, task continues
+PASS: open controller transition blames safe-point-unsafe (got safe-point-unsafe)
+PASS: open controller transition leaves live task state unchanged
+PASS: open controller transition allocates no generation
+PASS: unflushed state reports blocked, task continues
+PASS: unflushed state blames safe-point-unsafe (got safe-point-unsafe)
+PASS: unflushed state leaves live task state unchanged
+PASS: unflushed state allocates no generation
+PASS: no durability barrier reports blocked, task continues
+PASS: no durability barrier blames safe-point-unsafe (got safe-point-unsafe)
+PASS: no durability barrier leaves live task state unchanged
+PASS: no durability barrier allocates no generation
+PASS: open assistant stream never compacts
+PASS: committed close re-enables the integrated path
+
+--- A13 NON-CHECKPOINTABLE STATE (A07 refuses, task untouched) ---
+PASS: non-checkpointable reports blocked, task continues
+PASS: A07 refusal is explicit (got checkpoint-not-checkpointable)
+PASS: blocked compaction mutates nothing
+
+--- A13 HIGH single compaction (Controller -> A11 -> A10 -> A02) ---
+PASS: HIGH compacts G1 through all gates
+PASS: bounded result carries checkpoint/operation identity
+PASS: bounded result carries the A09 projection digest
+PASS: telemetry carries the pressure level
+PASS: telemetry carries before/after token estimates (186->1208)
+PASS: explicit head advancement lands on G1
+PASS: post-G1 surface keeps current user once (a current user request exists)
+PASS: post-G1 surface keeps current user once (current user exactly once, got 1)
+PASS: post-G1 surface stays balanced (protocol balanced)
+PASS: post-G1 actual equals its A09 prediction (payload multiplicity<=1, got 0)
+PASS: settled revision evaluates none
+PASS: repeated callback converges without new work
+PASS: repeat allocates no duplicate generation
+
+--- A13 CRITICAL follows the same gates (safety still wins) ---
+PASS: CRITICAL never bypasses A06/A07
+PASS: CRITICAL compacts through the same safety gates
+
+--- A13 TOOL-HEAVY lifecycle (never split an open tool edge) ---
+PASS: open tool lifecycle blocks compaction
+PASS: closed tool lifecycle compacts through the integrated path
+PASS: post-compaction tool protocol stays balanced (protocol balanced)
+PASS: tool-heavy surface keeps current user once (a current user request exists)
+PASS: tool-heavy surface keeps current user once (current user exactly once, got 1)
+
+--- A13 REPEATED COMPACTION in one task (G1 -> work -> G2 -> work -> G3) ---
+PASS: G1 compacts
+PASS: G2 compacts after real work
+PASS: G3 compacts after more work
+PASS: head is G3
+PASS: lineage is G1->G2->G3
+PASS: no duplicate model/tool invocation by the integration
+PASS: three-generation surface keeps current user once (a current user request exists)
+PASS: three-generation surface keeps current user once (current user exactly once, got 1)
+PASS: three-generation surface stays balanced (protocol balanced)
+PASS: G3 actual equals its A09 prediction (payload multiplicity<=1, got 0)
+PASS: A07 required state survives three compactions
+
+--- A13 SUPERSEDED generation through the lifecycle (G1 -> G2-stale -> G3) ---
+PASS: G1 commits
+PASS: G2 intent reserved with zero landing
+PASS: moved state closes stale G2 without applying it
+PASS: G2 is durably superseded
+PASS: G3 commits after supersession
+PASS: lineage is G1->G3
+PASS: G2 is never revived
+PASS: superseded-lineage surface keeps current user once (a current user request exists)
+PASS: superseded-lineage surface keeps current user once (current user exactly once, got 1)
+PASS: superseded-lineage surface stays balanced (protocol balanced)
+
+--- A13 PROVIDER ROUTE CHANGE invalidates stale planning ---
+PASS: G1 compacts under model A
+PASS: route change re-evaluates; unknown capacity blocks
+PASS: no projection applies across the route change
+PASS: fresh generation compacts under the new route
+
+--- A13 PARTIAL APPLY blocks progression; A12 recovery converges ---
+PASS: partial apply forbids new model/tool progress (got failed)
+PASS: post-mutation ambiguity reports failed, not success
+PASS: in-hand bundle retained for forward recovery
+PASS: controller cannot continue on ambiguous compaction state
+PASS: forward recovery reaches terminal COMMITTED (got recovered)
+PASS: recovered G1 is the committed head
+PASS: recovered surface keeps current user once (a current user request exists)
+PASS: recovered surface keeps current user once (current user exactly once, got 1)
+PASS: recovered surface stays balanced (protocol balanced)
+PASS: recovered actual equals its A09 prediction (payload multiplicity<=1, got 0)
+PASS: recovered actual equals its A09 prediction (anchor[1] multiplicity<=1, got 0)
+PASS: task resumes normally after recovery
+
+--- A13 PRE-MUTATION failure leaves task state untouched (error isolation) ---
+PASS: pre-mutation failure keeps the task safe (got blocked)
+PASS: pre-mutation failure mutates nothing
+PASS: pre-mutation failure persists no operation
+
+--- A13 COMPLETION authority stays with the controller (pressure never completes) ---
+PASS: CCv2 never marks the task terminal
+PASS: controller refuses completion without evidence
+PASS: pressure drives compaction only, never completion
+PASS: zero-compaction baseline is non-invasive
+PASS: controller completes on evidence alone
+PASS: health gate passes with zero generations
+PASS: health gate passes after G1 (no mandatory final compaction)
+PASS: unresolved compaction holds the completion transition
+PASS: terminal state with unresolved compaction does not finalize
+PASS: recovery converges before finalization
+PASS: existing completion authority may finish after recovery
+
+--- A13 TERMINAL tasks refuse new generations; restart reconstructs ---
+PASS: G1 commits before completion
+PASS: terminal task takes no new generation
+PASS: no G2 after completion
+PASS: terminal failed refuses new generations
+PASS: terminal cancelled refuses new generations
+PASS: restart reconstructs the committed head
+PASS: restart validates lineage + projection, allocates nothing
+PASS: restart after completion attempts no new generation
+
+--- A13 COMMIT-HEAD repair on resume (A10 done, head update lost) ---
+PASS: G1 commits
+PASS: head index exists before the simulated loss
+PASS: head repair converges before task continuation (got repaired-commit-before-head-crash)
+PASS: repaired head is G1 with no duplicate application
+PASS: repaired surface keeps current user once (a current user request exists)
+PASS: repaired surface keeps current user once (current user exactly once, got 1)
+PASS: repaired surface stays balanced (protocol balanced)
+
+--- A13 SECURITY (prompt/tool content is inert) and SECRET SAFETY ---
+PASS: hostile content changes no authority (got compacted)
+PASS: telemetry stays secret-safe
+PASS: no raw prompt leaks into the result
+PASS: unknown fields fail closed
+PASS: errors stay secret-safe
+PASS: hostile surface keeps current user once (a current user request exists)
+PASS: hostile surface keeps current user once (current user exactly once, got 1)
+PASS: hostile surface stays balanced (protocol balanced)
+
+--- A13 REAL-CONTROLLER E2E (Task.ps1 TaskController lifecycle drives completion) ---
+PASS: production controller creates the task
+PASS: production controller binds lifecycle identity
+PASS: production controller opens the attempt
+PASS: controller work continues under NORMAL pressure
+PASS: CCv2 G1 compacts mid-task through the real controller task
+PASS: CCv2 G2 compacts mid-task
+PASS: health gate passes before controller finalization
+PASS: deterministic controller owns completion (COMPLETE)
+PASS: completion authority is the deterministic controller
+PASS: terminal task state persists in the production ledger
+PASS: latest committed generation correct after controller completion
+PASS: controller-E2E surface keeps current user once (a current user request exists)
+PASS: controller-E2E surface keeps current user once (current user exactly once, got 1)
+PASS: controller-E2E surface stays balanced (protocol balanced)
+PASS: restart reconstructs terminal task + generation state
+
+--- A13H D durable helpers (crash/restart simulation without smuggled state) ---
+PASS: A13H crash helpers available
+
+--- A13H H1.4 partial-apply cross-restart recovery (bundle destroyed) ---
+PASS: twin G1 commits (oracle)
+PASS: partial apply blocks before restart
+PASS: durable session holds the landed payload (H1.4 shape)
+PASS: resumeTask recovers G1 from durable state alone (recovery=retry-missing)
+PASS: recovery path engaged (no silent steady)
+PASS: only missing segments retried (got retry-missing)
+PASS: missing segments landed (1)
+PASS: H1.1 no re-plan: no new reservation
+PASS: H1.1 no re-plan: no new checkpoint
+PASS: recovered actual == original A09 prediction (twin byte-exact)
+PASS: recovered surface keeps current user once (a current user request exists)
+PASS: recovered surface keeps current user once (current user exactly once, got 1)
+PASS: recovered surface stays balanced (protocol balanced)
+PASS: recovered actual matches prediction structurally (payload multiplicity<=1, got 0)
+PASS: recovered actual matches prediction structurally (anchor[1] multiplicity<=1, got 0)
+PASS: recovered raw log (raw log positional seq invariant)
+PASS: second resume is steady (got steady)
+PASS: recovery never replays: zero new events
+PASS: same committed head after second resume
+
+--- A13H H1.5 flush-failure cross-restart recovery (all landed, flush died) ---
+PASS: flush death blocks before restart (got failed)
+PASS: flush-failure recovery converges (recovery=apply)
+PASS: durability re-established, not inferred
+PASS: flush-recovered surface keeps current user once (a current user request exists)
+PASS: flush-recovered surface keeps current user once (current user exactly once, got 1)
+PASS: flush-recovered surface stays balanced (protocol balanced)
+PASS: flush-recovered actual matches prediction (payload multiplicity<=1, got 0)
+PASS: flush-recovered actual matches prediction (anchor[1] multiplicity<=1, got 0)
+
+--- A13H H1.6 lost-result cross-restart recovery (no reapply) ---
+PASS: G1 applies, flushes, verifies (result in hand)
+PASS: lost-result recovery advances the head
+PASS: no reapply: event count unchanged
+PASS: no reapply: projection identical
+PASS: post-repair resume is steady
+
+--- A13H H2 unknown runtime blocks everything (corrupt generation state) ---
+PASS: G1 commits before corruption
+PASS: unreadable runtime blocks task progress (got failed)
+PASS: H2.2 no new events after reconstruction failure
+PASS: resume refuses while runtime is unreadable
+PASS: H2.1 completion health agrees: unhealthy while unreadable
+PASS: terminal state cannot finalize through unreadable runtime
+
+--- A13H H8 recovery errors and telemetry stay secret-safe ---
+PASS: partial result carries no secret
+PASS: resume result carries no secret
+PASS: recovery telemetry stays secret-safe
+PASS: missing operation fails closed (H1.3, got integration-recovery-evidence-incomplete)
+PASS: evidence-incomplete detail stays secret-safe
+
+--- A13H H5 controller crash/restart E2E (Task.ps1 owns lifecycle, no manual repair) ---
+PASS: H5 crash leaves the task blocked (no manual repair yet)
+PASS: H5 restart recovers G1 automatically
+PASS: H5 task continues with G2 after recovery
+PASS: H5 health gate passes before finalization
+PASS: H5 task COMPLETE by deterministic-controller
+PASS: H5 restart after completion is steady
+PASS: H5 lineage valid
+PASS: H5 no duplicate model/tool action
+PASS: H5 final surface keeps current user once (a current user request exists)
+PASS: H5 final surface keeps current user once (current user exactly once, got 1)
+PASS: H5 final surface stays balanced (protocol balanced)
+
+--- A13 INTEGRATION OVERHEAD (observational telemetry only) ---
+PASS: overhead probe compacts
+OVERHEAD noopMs=1 compactMs=17 resumeMs=1
+
+A13 SUMMARY passed=207 failed=0
+
+COMMAND: ContextCompleteTaskV2LiveHost.Tests.cjs
+A13 LIVE HOST PROOF: EXECUTED
+HOST: dsh-session@0.1.1-rc.2
+
+--- A13 LIVE integrated task (START -> G1 -> work -> G2 -> COMPLETE -> restart) ---
+PASS: live NORMAL boundary continues the task
+PASS: live G1 compacts through the integrated path (got compacted)
+PASS: live result carries the projection digest
+PASS: live post-G1 projection valid
+PASS: live G2 compacts through the integrated path (got compacted)
+PASS: live head is G2
+PASS: live health gate passes before finalization
+PASS: live restart resumes with the committed head (got steady)
+PASS: restart reproduces the exact live messages
+PASS: live restarted protocol balanced
+PASS: live restarted current user exactly once
+PASS: live lineage is G1->G2
+
+--- A13H LIVE H1.4 partial-apply crash, durable-only resume recovery ---
+PASS: live partial apply blocks (got failed)
+PASS: live resume recovers G1 from durable state (recovery=apply)
+PASS: live recovery engaged (no silent steady)
+PASS: live recovered projection valid
+PASS: live recovered protocol balanced on the host
+PASS: live second resume is steady
+PASS: live recovery never replays
+
+A13L SUMMARY passed=19 failed=0
+
+COMMAND: ContextCompaction.Tests.ps1
+PASS: incomplete task with huge context is KEEP
+PASS: KEEP reason names the incomplete status
+PASS: pressure signal is uncached plus cache-read
+PASS: complete task below threshold is KEEP
+PASS: KEEP reason names the threshold
+PASS: threshold authority is the single 120000 constant
+PASS: below-threshold session lifecycle stays inactive
+PASS: complete task above threshold is eligible
+PASS: latest root call is the primary pressure signal
+PASS: root call count is recorded
+PASS: wrong taskInstanceId is KEEP, never eligible
+PASS: mismatch reason is explicit
+PASS: lifecycle transition with a mismatched instance throws
+PASS: eligible transition lands
+PASS: checkpoint file exists
+PASS: stale generation checkpoint read throws (blocked)
+PASS: malformed checkpoint read throws
+PASS: checkpoint-ready without a valid checkpoint throws
+PASS: failed preparation never reaches applied
+PASS: task record survives checkpoint failure
+PASS: no temp files survive checkpoint persistence
+PASS: checkpoint round-trips its lifecycle identity
+PASS: checkpoint carries schema version 1
+PASS: repeated eligibility evaluates identically
+PASS: repeated eligible transition is idempotent
+PASS: legacy checkpoint-ready without a frozen operation cannot jump to applied
+PASS: frozen operation carries a stable operationId
+PASS: repeated apply is idempotent
+PASS: applied never rolls back to eligible
+PASS: crash point rests at eligible, not applied
+PASS: no checkpoint exists before preparation
+PASS: reload after crash is deterministic
+PASS: task completion survives the crash point
+PASS: muse root call counted under muse
+PASS: muse_main role counted
+PASS: muse effective input is uncached plus cache-read
+PASS: dual normal plus deep calls counted under dual
+PASS: engineer_normal role counted
+PASS: engineer_deep role counted
+PASS: peak tracks the largest root call
+PASS: reviewer role is rejected at the recorder boundary
+PASS: unknown (visual-style) role is rejected
+PASS: rejected roles leave zero root calls
+PASS: replayed step id is idempotent
+PASS: distinct steps count distinctly
+PASS: cumulative uncached aggregates
+PASS: cumulative cache-read aggregates
+PASS: checkpoint build never rewrites the task manifest
+PASS: checkpoint disclaims routing authority
+PASS: checkpoint records (never overrides) the execution class
+PASS: checkpoint carries no model target override
+PASS: checkpoint text is framed
+PASS: checkpoint text names controller authority
+PASS: api-key-shaped secret never lands in the checkpoint
+PASS: password-shaped secret never lands in the checkpoint
+PASS: redaction marker survives
+PASS: linux workspace serializes without backslashes
+PASS: lifecycle layout resolves for windows-style roots
+PASS: windows-style paths round-trip byte-identically through JSON
+PASS: checkpoint-ready survives reload
+PASS: reloaded state keeps the lifecycle identity
+PASS: checkpoint-ready replay is idempotent
+PASS: post-compaction input recorded
+PASS: token reduction is pre minus post (150000 - 60000)
+PASS: post-compaction telemetry keys on the compacted generation
+PASS: post-compaction replay is idempotent
+PASS: post-compaction telemetry for another generation throws
+PASS: freeze retry returns the same operationId
+PASS: freeze retry never widens the boundary
+PASS: frozen operation owns the completed generation
+PASS: a second session cannot adopt the generation operation
+PASS: memory-only landing stays awaiting-durability (never applied)
+PASS: durably verified landing reconciles to applied
+PASS: intact frozen range retries the same operation
+PASS: retry carries the frozen end, never the live tail
+PASS: missing frozen source seq blocks instead of widening
+PASS: another generation never reconciles this operation
+PASS: valid operation persists
+PASS: tamper refused: duplicate sourceEventSeqs
+PASS: tamper refused: seq beyond completion boundary
+PASS: tamper refused: segment union mismatch
+PASS: tamper refused: segment endpoint mismatch
+PASS: tamper refused: missing segments
+PASS: tamper refused: corrupted operation JSON
+PASS: corrupted operation reconciles to block
+PASS: wrong sessionId reconciles to block
+PASS: owner A acquires
+PASS: non-owner cannot renew
+PASS: owner can renew
+PASS: renewal extends expiry
+PASS: old/non-owner cannot release the lock
+PASS: lock survives stranger release
+PASS: owner releases
+PASS: heartbeat holder acquires short lease
+PASS: renewal fails when the record is gone (holder must stop)
+PASS: after failure one process can acquire safely
+PASS: new owner holds a fresh token
+PASS: zero threshold override throws
+PASS: default threshold reads from the single authority
+RESULT: 99 context compaction assertions passed.
+
+COMMAND: ContextCompactionV2.Tests.ps1
+PASS: V2 operationId carries the ccop_ prefix
+PASS: same checkpoint: generation 1 != generation 2
+PASS: same generation: checkpoint A != checkpoint B
+PASS: V2 derivation is deterministic
+PASS: V1 and V2 IDs never collide (separate domain)
+PASS: Unicode/path-like V2 identity is deterministic
+PASS: anchor binds operation, generation, and segment position
+PASS: anchor carries no payload of any kind
+PASS: PS: 1 payload + 1 continuation is valid
+PASS: PS: 1 payload only is valid
+PASS: PS: 0 payload rejected
+PASS: PS: 2 payloads rejected
+PASS: PS: unknown role rejected
+PASS: PS: unordered segments rejected
+PASS: PS: overlapping source sets rejected
+PASS: PS: boundary violation rejected
+PASS: PS: tampered operationId rejected (derived identity, not free text)
+PASS: PS: V1 schemaVersion never reinterpreted as V2
+PASS: PS: unknown lifecycle rejected
+PASS: PS: session mismatch rejected
+PASS: PS: unknown top-level field rejected closed-world (A05H H1)
+PASS: PS: unknown segment field rejected closed-world (A05H H1)
+PASS: PS: frozen operation persists schemaVersion 2
+PASS: PS: frozen operationId is the derived identity
+PASS: PS: frozen operation is durably readable (read-back proof)
+PASS: PS: frozen roles persist verbatim
+PASS: PS: retry reuses the same frozen operation
+PASS: PS: retry never widens the frozen source set
+PASS: PS: a different generation cannot adopt the frozen file (KEEP)
+PASS: PS: V2 freeze never writes the V1 operation file
+RESULT: 30 CCV2-A02 PowerShell assertions passed.
+
+COMMAND: ContextActiveApplyV2XProc.Tests.cjs
+Verification adapter: omitted 2 fixture Git identity assignments; all assertions unchanged.
+
+--- H1 two-process exclusion (real lock authority) ---
+PASS: process A acquires the real cross-process lock (lock file appears)
+PASS: process B refused while A holds (got refused ["active-serialization-conflict"])
+PASS: refused contender mutates nothing and proves no intent
+PASS: process A commits under the lock (got committed [])
+PASS: A proves both durability legs
+PASS: exactly one replacement node across processes
+PASS: zero duplicate payloads across processes
+
+--- H1 identical operation recovers across processes ---
+PASS: post-commit process recovers (got recovered [])
+PASS: recovery binds the same operation with no new mutation
+PASS: recovery writes nothing new (durable bytes identical; flush only re-confirms)
+PASS: recovery appends zero events across processes
+
+--- H1 conflicting operation fails closed across processes ---
+PASS: O2 is a genuinely incompatible operation
+PASS: incompatible O2 fails closed (got failed ["active-operation-conflict"])
+PASS: conflicting attempt mutates nothing
+PASS: no competing projection lands
+PASS: no lock residue after the matrix
+A10H xproc: passed=16 failed=0
+
+COMMAND: ContextGenerationRuntimeV2XProc.Tests.cjs
+Verification adapter: omitted 2 fixture Git identity assignments; all assertions unchanged.
+
+--- XPROC concurrent identical reservations converge on one generation ---
+PASS: at least one contender reserves (A={"ok":true,"mode":"reserve","generation":1,"reservationDigest":"01f46130ec0dde3e875a4e212e74fdca3cf28274f8ae02c7b4e55898c9a51182","parentCommittedCheckpointId": B={"ok":false,"error":"ccv2-generation-runtime-v2: generation-reservation-conflict: compaction lock is held by a live owner"})
+PASS: loser refuses with a stable code (got {"ok":false,"error":"ccv2-generation-runtime-v2: generation-reservation-conflict: compaction lock is held by a live owner"})
+PASS: refused contender converges on retry (got {"ok":true,"mode":"reserve","generation":1,"reservationDigest":"01f46130ec0dde3e875a4e212e74fdca3cf28274f8ae02c7b4e55898c9a51182","parentCommittedCheckpointId":)
+PASS: retry observes the same reservation
+PASS: one allocation consumed exactly one generation (highest=1)
+PASS: no lock residue after the reservation race
+
+--- XPROC conflicting contender refuses (never a second incompatible G1) ---
+PASS: conflicting reservation refuses (got {"ok":false,"error":"ccv2-generation-runtime-v2: generation-reservation-conflict: generation 1 is already active for different source state (supersede or commit it first)"})
+PASS: conflict consumes no new generation
+
+--- XPROC concurrent commit-head advancement converges idempotently ---
+PASS: parent A10 G1 commits (got committed)
+PASS: at least one committer advances the head (C1={"ok":false,"error":"ccv2-generation-runtime-v2: generation-reservation-conflict: compaction lock is held by a live owner"} C2={"ok":true,"mode":"commit","head":1,"checkpointId":"ccp_0336adf09dfb82977b07d6618e91fdef","highest":1})
+PASS: head-race loser refuses with a stable code
+PASS: head-race loser converges on retry (got {"ok":true,"mode":"commit","head":1,"checkpointId":"ccp_0336adf09dfb82977b07d6618e91fdef","highest":1})
+PASS: both processes converge on the same committed head
+PASS: converged head binds the proven checkpoint
+PASS: durable head is coherent (no fork, no corrupt head)
+PASS: no lock residue after head convergence
+
+--- XPROC supersession is architectural: old handles never apply (H1.4/H1.5) ---
+PASS: xproc supersede-chain G1 commits
+PASS: xproc interrupt really moves the revision
+PASS: process A supersedes G2 (got {"ok":true,"mode":"supersede","outcome":"SUPERSEDED"})
+PASS: process B entry refuses the superseded handle (got {"ok":false,"error":"ccv2-generation-runtime-v2: generation-cannot-supersede: generation 2 is superseded and permanently non-applicable"})
+PASS: refused cross-process attempt mutates nothing (0 new events)
+PASS: post-restart attempt still refuses (got {"ok":false,"error":"ccv2-generation-runtime-v2: generation-cannot-supersede: generation 2 is superseded and permanently non-applicable"})
+PASS: post-restart attempt appends zero events
+PASS: xproc G3 reserves past superseded G2 (got G3)
+PASS: stale pre-supersession handle refuses via the under-lock re-read (got {"ok":false,"error":"ccv2-generation-runtime-v2: generation-cannot-supersede: generation 3 is superseded and permanently non-applicable"})
+PASS: stale-handle race appends zero events (no resurrection)
+PASS: no lock residue after the supersession race
+A11 xproc: passed=27 failed=0
+
+COMMAND: ContextRecoveryV2XProc.Tests.cjs
+Verification adapter: omitted 2 fixture Git identity assignments; all assertions unchanged.
+
+--- XPROC iter 1: concurrent identical apply converges (one mutation) ---
+PASS: iter 1: G1 reserved
+PASS: iter 1: both appliers converge (A={"ok":true,"mode":"apply-current","status":"committed","mutated":true,"eventsLen":8,"activeResult":{"schemaVersion":1,"taskId":"TASK-0001","taskInstanceId":"task_b2b617d20e734890843044c07f929e8b","ses B={"ok":true,"mode":"apply-current","status":"recovered","mutated":false,"eventsLen":8,"activeResult":{"schemaVersion":1,"taskId":"TASK-0001","taskInstanceId":"task_b2b617d20e734890843044c07f929e8b","se)
+PASS: iter 1: at most one actual mutation (got 1)
+PASS: iter 1: one generation identity consumed
+PASS: iter 1: no duplicate application surface (op citations<=2, got 1)
+PASS: iter 1: no lock residue
+
+--- XPROC iter 2: concurrent identical apply converges (one mutation) ---
+PASS: iter 2: G1 reserved
+PASS: iter 2: both appliers converge (A={"ok":true,"mode":"apply-current","status":"committed","mutated":true,"eventsLen":8,"activeResult":{"schemaVersion":1,"taskId":"TASK-0001","taskInstanceId":"task_b2b617d20e734890843044c07f929e8b","ses B={"ok":true,"mode":"apply-current","status":"recovered","mutated":false,"eventsLen":8,"activeResult":{"schemaVersion":1,"taskId":"TASK-0001","taskInstanceId":"task_b2b617d20e734890843044c07f929e8b","se)
+PASS: iter 2: at most one actual mutation (got 1)
+PASS: iter 2: one generation identity consumed
+PASS: iter 2: no duplicate application surface (op citations<=2, got 1)
+PASS: iter 2: no lock residue
+
+--- XPROC iter 3: concurrent identical apply converges (one mutation) ---
+PASS: iter 3: G1 reserved
+PASS: iter 3: both appliers converge (A={"ok":true,"mode":"apply-current","status":"committed","mutated":true,"eventsLen":8,"activeResult":{"schemaVersion":1,"taskId":"TASK-0001","taskInstanceId":"task_b2b617d20e734890843044c07f929e8b","ses B={"ok":true,"mode":"apply-current","status":"recovered","mutated":false,"eventsLen":8,"activeResult":{"schemaVersion":1,"taskId":"TASK-0001","taskInstanceId":"task_b2b617d20e734890843044c07f929e8b","se)
+PASS: iter 3: at most one actual mutation (got 1)
+PASS: iter 3: one generation identity consumed
+PASS: iter 3: no duplicate application surface (op citations<=2, got 1)
+PASS: iter 3: no lock residue
+
+--- XPROC iter 1: apply-vs-supersede, apply wins (supersede refuses) ---
+PASS: iter 1: apply wins (got committed)
+PASS: iter 1: late supersede refuses (got {"ok":false,"error":"ccv2-generation-runtime-v2: generation-cannot-supersede: generation 1 shows landed or ambiguous application (reconcile first)"})
+PASS: iter 1: never SUPERSEDED+applied
+
+--- XPROC iter 2: apply-vs-supersede, apply wins (supersede refuses) ---
+PASS: iter 2: apply wins (got committed)
+PASS: iter 2: late supersede refuses (got {"ok":false,"error":"ccv2-generation-runtime-v2: generation-cannot-supersede: generation 1 shows landed or ambiguous application (reconcile first)"})
+PASS: iter 2: never SUPERSEDED+applied
+
+--- XPROC iter 3: apply-vs-supersede, apply wins (supersede refuses) ---
+PASS: iter 3: apply wins (got committed)
+PASS: iter 3: late supersede refuses (got {"ok":false,"error":"ccv2-generation-runtime-v2: generation-cannot-supersede: generation 1 shows landed or ambiguous application (reconcile first)"})
+PASS: iter 3: never SUPERSEDED+applied
+
+--- XPROC: apply-vs-supersede, supersede wins (stale pre-lock apply refuses) ---
+PASS: supersede wins on zero landing (got {"ok":true,"mode":"supersede","outcome":"SUPERSEDED"})
+PASS: stale pre-lock apply refuses (got {"ok":false,"error":"ccv2-generation-runtime-v2: generation-cannot-supersede: generation 1 is superseded and permanently non-applicable"})
+PASS: no lock residue after the supersede race
+
+--- XPROC: commit-head vs next-reservation (no stale parent) ---
+PASS: G1 applied before the head race (got committed)
+PASS: worker result is commit-grade
+PASS: commit advances the head (got {"ok":true,"mode":"commit","head":1,"checkpointId":"ccp_397cb79e1e59092ac144d93d4de80c18","highest":1})
+PASS: early reserver refuses with a stable code (got {"ok":false,"error":"ccv2-generation-runtime-v2: generation-reservation-conflict: compaction lock is held by a live owner"})
+PASS: retry parents from committed G1
+
+--- XPROC: dead-owner lock takeover (refused live, permitted after rules allow) ---
+PASS: contender is refused while the owner lives ({"acquired":false,"ownerId":null,"leaseSeconds":60,"reason":"held-by-live-owner"})
+PASS: refusal is explicit, never silent ({"acquired":false,"ownerId":null,"leaseSeconds":60,"reason":"held-by-live-owner"})
+PASS: live holder owns the lock
+PASS: contender is refused while the owner lives
+PASS: takeover succeeds after lease lapse + dead owner (got {"acquired":true,"ownerId":"192c165119f844b0883f646c7a836389","leaseSeconds":60,"reason":null})
+PASS: no lock residue after takeover
+
+A12 xproc: passed=41 failed=0
+
+COMMAND: ContextCompleteTaskV2XProc.Tests.cjs
+Verification adapter: omitted 2 fixture Git identity assignments; all assertions unchanged.
+
+--- A13X CONCURRENT RACE (two processes, one task identity, one source state) ---
+PASS: process A compacts G1 (got {"ok":true,"mode":"evaluate","result":{"schemaVersion":1,"evaluated":true,"compactionVersion":"v2","taskId":"TASK-0001","taskInstanceId":"task_95e3453f38d14dd6a3d58b7580f4f03f","sessionId":"sess-a13x")
+PASS: H2 stale-view loser fails closed (no masked corruption)
+PASS: stale loser reserves no competing generation
+PASS: refreshed process B commits G2 (got compacted)
+PASS: single committed head after contention
+PASS: no forked lineage
+
+--- A13X TRUE PARALLEL RACE (simultaneous processes, real lock arbitrates) ---
+PASS: both parallel processes terminate with results
+PASS: at least one parallel winner compacts (got 1)
+PASS: every parallel process returns a bounded result
+PASS: parallel race yields one committed head
+PASS: parallel race reserves no competing generation
+PASS: parallel race forks no lineage
+
+--- A13X H6/H7 cross-process restart recovery (fresh processes, no bundles) ---
+PASS: crashed process reports blocked progression (got {"ok":true,"mode":"evaluate","result":{"schemaVersion":1,"evaluated":true,"compactionVersion":"v2","taskId":"TASK-0001","taskInstanceId":"task_b4ef6007c32b4ed3bba4e8a219159587","sessionId":"sess-a13x")
+PASS: fresh process cannot progress across UNRESOLVED state
+PASS: completion health gate fails while unresolved
+PASS: fresh-process resume recovers G1 from durable state (got {"ok":true,"mode":"resume","result":{"schemaVersion":1,"mayResume":true,"reconstructionOutcome":"repaired-commit-before-head-crash","latestCommittedGeneration":1,"lineage":[1],"projectionValid":true,"unresolvedGeneration":null,"recoveryAttempted":tru)
+PASS: fresh-process recovery engaged durable path
+PASS: recovered task continues with G2 (got compacted)
+PASS: third-process resume is steady
+PASS: recovery never replays across processes
+PASS: same committed head after every restart
+PASS: cross-process lineage stays valid
+
+A13X SUMMARY passed=22 failed=0

@@ -1,0 +1,37 @@
+[
+  {
+    "file": "config/ContextActiveApplyV2.cjs",
+    "priorSha256": "2284ea705e34916c2ddfa8a849d8adc4b5c81c803c1a26bdc2bc129924d12312",
+    "onlyRestrictionInsertions": true
+  },
+  {
+    "file": "config/ContextCheckpointV2.cjs",
+    "priorSha256": "d29bb51f7d92de1b440bf99bff801ce1beae0243968c03b7b3c8ff027e4691b5",
+    "onlyRestrictionInsertions": true
+  },
+  {
+    "file": "config/ContextCompaction.cjs",
+    "priorSha256": "8c943d89415b1e596273e6bc2b8ab97987da5219c2ae7a3792ade19785ea7782",
+    "onlyRestrictionInsertions": true
+  },
+  {
+    "file": "config/ContextCompleteTaskV2.cjs",
+    "priorSha256": "b510794ab25a151edc14e923eb54476543170cca0f1a2413fbc7161f2a990c40",
+    "onlyRestrictionInsertions": true
+  },
+  {
+    "file": "config/ContextGenerationRuntimeV2.cjs",
+    "priorSha256": "296eb2331c5126e1d2d12e0cbcf010e2d31f8acfe3afbac6732a92fdb0050a40",
+    "onlyRestrictionInsertions": true
+  },
+  {
+    "file": "config/ContextMemoryProducerV2.cjs",
+    "priorSha256": "8ec8744be13db1421f4c82f9b5b6f2c762f8f2b8e8939703214f068e9ef6b18e",
+    "onlyRestrictionInsertions": true
+  },
+  {
+    "file": "config/ContextTrustV2.cjs",
+    "priorSha256": "420abcb460daeb34d565c213085709ff57c6b16645c6b62b03f60fac2a6cc5fb",
+    "onlyRestrictionInsertions": true
+  }
+]

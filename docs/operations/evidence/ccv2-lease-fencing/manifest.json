@@ -1,0 +1,31 @@
+{
+  "baselineProductionRevision": "390af181c79df08e4da1ee91a408238767d70d81",
+  "completeFencingFix": false,
+  "pr29MergeReadiness": "BLOCKED",
+  "node": "24.18.1",
+  "powershell": "7.5.3",
+  "hostSessionVersion": "0.1.1-rc.2",
+  "finalSourceSha256": {
+    "scripts/ContextLifecycle.ps1": "b667497e4286b699bec84cfa6f8bb5d2adc9c69aa5a8cbf4d348fb60bd0b8989",
+    "config/ContextActiveApplyV2.cjs": "2284ea705e34916c2ddfa8a849d8adc4b5c81c803c1a26bdc2bc129924d12312",
+    "config/ContextActiveApplyLockClientV2.cjs": "62f40b5d19d28331eb8345cf2cbb219a55b52deee61f6daf6fd7d1b884fd4cf5",
+    "config/ContextCompaction.cjs": "8c943d89415b1e596273e6bc2b8ab97987da5219c2ae7a3792ade19785ea7782",
+    "config/ContextGenerationRuntimeV2.cjs": "296eb2331c5126e1d2d12e0cbcf010e2d31f8acfe3afbac6732a92fdb0050a40",
+    "config/ContextCompleteTaskV2.cjs": "b510794ab25a151edc14e923eb54476543170cca0f1a2413fbc7161f2a990c40",
+    "tests/ContextLeaseFencing.Tests.cjs": "35550c0ecbea2d18a97fd90dc3b955f38ed073addc4b3af006045148789e1992",
+    "tests/ContextLeaseFencing.Worker.cjs": "f649d50f76af8759ca8e855503080826c00d7cd834371e5daa05cb38726d8b67",
+    "tests/ContextApplyLockAuthority.Tests.cjs": "8694fa36ca54d6c817110e8fb559ebb2e4138dfd5161ecb3c85b4b5c21f91f42",
+    "tests/diagnostics/ShortLeaseOwnership.cjs": "d6ed27718a21084870872e5524627af0b5c8201c361eb82f89e758961fea17ca"
+  },
+  "hostSessionLibSha256": "dc14c845b915a9faaeb867499966e7b1991af3b6285f314bf353417e939d9c36",
+  "existingGateAssertionsPassed": 1395,
+  "authorityAssertionsPassed": 4,
+  "suspensionSafetyChecks": {
+    "pass": 29,
+    "fail": 12
+  },
+  "fullRepositorySuite": "UNVERIFIED",
+  "nativeWindows": "UNVERIFIED",
+  "liveInference": "NOT_RUN",
+  "LHCB": "NOT_RUN"
+}

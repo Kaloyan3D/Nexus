@@ -3068,9 +3068,8 @@ function apply(ctx) {
   // site for Compiler Shadow Mode. Observes the final llm/stream request
   // read-only (observe only, never authority); default off means zero
   // behavioral change. Never throws into controller startup.
-  // CCV2-M01 production memory producer: every task-bound session
-  // maintains <workspace>/.ai-harness/ccv2/<taskId>/ automatically. The
-  // registry also serves the live B03 session exact source to the hosts.
+  // Restricted CCv2 scope: retain the live B03/pressure read registry.
+  // The durable memory writer is source-disabled until fencing is verified.
   const memoryProducer = memoryProducerHost.installMemoryProducer(ctx, {
     bindingFor: (sessionId) => bindings[sessionId] || null,
     flush: (session) => flushSessionDurable(session),

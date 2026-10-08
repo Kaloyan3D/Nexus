@@ -1,0 +1,42 @@
+[
+  {
+    "suite": "SourceCompleteness",
+    "scope": "production-install",
+    "exit": 0,
+    "passed": 0,
+    "failed": 0,
+    "seconds": 1.42
+  },
+  {
+    "suite": "MusePresetDependencyClosure",
+    "scope": "production-install",
+    "exit": 0,
+    "passed": 0,
+    "failed": 0,
+    "seconds": 0.32
+  },
+  {
+    "suite": "MusePresetCleanInstall",
+    "scope": "production-install",
+    "exit": 0,
+    "passed": 0,
+    "failed": 0,
+    "seconds": 2.32
+  },
+  {
+    "suite": "ControllerPresetCleanInstall",
+    "scope": "production-install",
+    "exit": 0,
+    "passed": 0,
+    "failed": 0,
+    "seconds": 4.57
+  },
+  {
+    "suite": "ControllerPresetInstalled",
+    "scope": "production-install",
+    "exit": 1,
+    "passed": 0,
+    "failed": 0,
+    "seconds": 0.11
+  }
+]

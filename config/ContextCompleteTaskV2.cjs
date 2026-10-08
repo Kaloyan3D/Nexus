@@ -46,6 +46,8 @@
  * observation is authoritative: assistant turn committed, tool result
  * committed, controller step committed, task completion committed.
  */
+const durablePolicyV2 = require('./ContextDurableMutationPolicyV2.cjs');
+
 const crypto = require('node:crypto');
 const safepoint = require('./ContextSafePointV2.cjs');
 const snapshotV2 = require('./ContextSnapshotV2.cjs');
@@ -361,6 +363,7 @@ function evaluationFingerprint(n, st) {
 // but ANY failure to establish runtime truth inside becomes a bounded
 // failed/taskMayContinue=false result (never an exception, never continue).
 async function evaluateBoundary(rawInput) {
+  if (selectCompactionVersion(rawInput && rawInput.compactionVersion, process.env) === 'v2') durablePolicyV2.assertDurableMutationAllowedV2();
   const n = normalizeEvaluateInput(rawInput);
   try {
     return await evaluateBoundaryInner(n);
@@ -379,6 +382,7 @@ async function evaluateBoundaryInner(n) {
       telemetry: telemetryOf(n, { action: 'none', taskMayContinue: true }),
     });
   }
+  durablePolicyV2.assertDurableMutationAllowedV2();
   const tokensBefore = n.tokenObservation.currentContextTokens;
   // Terminal tasks never start new generations (section 18): no fresh
   // reservation, no new active compaction. The health gate still observes
@@ -1064,6 +1068,7 @@ async function handleActiveResult(n, level, token, safe, targetGeneration, reque
 // UNRESOLVED and the task stays blocked. This operation never starts a new
 // generation and never touches task completion.
 async function recoverUnresolvedGeneration(rawInput) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) failIntegration('complete-task-unavailable: input is required');
   const unknown = unknownKeyOf(rawInput, RECOVER_INPUT_EXACT_KEYS);
   if (unknown !== null) failIntegration('complete-task-unavailable: unknown field ' + redactDetail(unknown));
@@ -1224,6 +1229,7 @@ function checkCompletionHealth(rawInput) {
 // unique recovery, resume fails closed (mayResume=false) with
 // integration-recovery-evidence-incomplete (H1.3).
 async function resumeTask(rawInput) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) failIntegration('complete-task-unavailable: input is required');
   const unknown = unknownKeyOf(rawInput, RESUME_INPUT_EXACT_KEYS);
   if (unknown !== null) failIntegration('complete-task-unavailable: unknown field ' + redactDetail(unknown));
@@ -1364,6 +1370,7 @@ function pendingDurableIntentGen(n, st) {
 // the live restored session; creates no plans, pressures, shadows, or
 // reservations. Returns { ok, decision, retriedSegments, flushed, ... }.
 async function recoverUnresolvedFromDurable(n, gen) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   const fail = (blockerCode, detail, extra) => Object.assign({
     ok: false, decision: null, retriedSegments: [], flushed: null,
     blockerCode, detail: detail === null || detail === undefined ? null : redactDetail(detail),

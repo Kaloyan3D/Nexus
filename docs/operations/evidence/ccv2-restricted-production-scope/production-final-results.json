@@ -1,0 +1,196 @@
+[
+  {
+    "suite": "ContextRestrictedProjectionV2",
+    "scope": "production",
+    "exit": 0,
+    "passed": 13,
+    "failed": 0,
+    "seconds": 0.47,
+    "note": "Final auxiliary DSH bypass regression included; see restricted-projection.log."
+  },
+  {
+    "suite": "ContextApplyLockAuthority",
+    "scope": "production",
+    "exit": 0,
+    "passed": 4,
+    "failed": 0,
+    "seconds": 20.16
+  },
+  {
+    "suite": "ContextCompactionF1Loop",
+    "scope": "production",
+    "exit": 0,
+    "passed": 14,
+    "failed": 0,
+    "seconds": 22.56
+  },
+  {
+    "suite": "ContextCompactionF2Prod",
+    "scope": "production",
+    "exit": 0,
+    "passed": 69,
+    "failed": 0,
+    "seconds": null,
+    "note": "Initial 100-second runner deadline retained in production-results.json; complete rerun PASS without source/assertion changes. Complete-rerun duration was not instrumented; the initial attempt duration is not reused."
+  },
+  {
+    "suite": "ContextCompactionF5Prod",
+    "scope": "production",
+    "exit": 0,
+    "passed": 12,
+    "failed": 0,
+    "seconds": 58.65
+  },
+  {
+    "suite": "ContextCompactionAcceptance",
+    "scope": "production",
+    "exit": 0,
+    "passed": 27,
+    "failed": 0,
+    "seconds": 0.12
+  },
+  {
+    "suite": "ContextCompactionCrash",
+    "scope": "production",
+    "exit": 0,
+    "passed": 16,
+    "failed": 0,
+    "seconds": 0.12
+  },
+  {
+    "suite": "ContextCompactionPartial",
+    "scope": "production",
+    "exit": 0,
+    "passed": 8,
+    "failed": 0,
+    "seconds": 31.94
+  },
+  {
+    "suite": "ContextCompactionV2DshGenerationProof",
+    "scope": "production",
+    "exit": 0,
+    "passed": 114,
+    "failed": 0,
+    "seconds": 0.17
+  },
+  {
+    "suite": "ContextCompilerV2",
+    "scope": "production",
+    "exit": 0,
+    "passed": 251,
+    "failed": 0,
+    "seconds": 0.57
+  },
+  {
+    "suite": "ContextCompilerV2XProc",
+    "scope": "production",
+    "exit": 0,
+    "passed": 24,
+    "failed": 0,
+    "seconds": 0.42
+  },
+  {
+    "suite": "ContextCompilerV2H",
+    "scope": "production",
+    "exit": 0,
+    "passed": 40,
+    "failed": 0,
+    "seconds": 0.17
+  },
+  {
+    "suite": "ContextCompilerActiveV2",
+    "scope": "production",
+    "exit": 0,
+    "passed": 47,
+    "failed": 0,
+    "seconds": 0.52
+  },
+  {
+    "suite": "ContextCompilerActiveOpencodeV2",
+    "scope": "production",
+    "exit": 0,
+    "passed": 31,
+    "failed": 0,
+    "seconds": 0.92
+  },
+  {
+    "suite": "ContextModelCapabilityV2",
+    "scope": "production",
+    "exit": 0,
+    "passed": 48,
+    "failed": 0,
+    "seconds": 0.62
+  },
+  {
+    "suite": "ContextPromptRendererV2",
+    "scope": "production",
+    "exit": 0,
+    "passed": 46,
+    "failed": 0,
+    "seconds": 0.52
+  },
+  {
+    "suite": "ContextActivationPressureV2",
+    "scope": "production",
+    "exit": 0,
+    "passed": 74,
+    "failed": 0,
+    "seconds": 0.12
+  },
+  {
+    "suite": "ContextR1RealSessionContracts",
+    "scope": "production",
+    "exit": 0,
+    "passed": 128,
+    "failed": 0,
+    "seconds": 29.88
+  },
+  {
+    "suite": "ContextPageStoreV2",
+    "scope": "production",
+    "exit": 0,
+    "passed": 141,
+    "failed": 0,
+    "seconds": 0.32
+  },
+  {
+    "suite": "ContextPageStoreV2Crash",
+    "scope": "production",
+    "exit": 0,
+    "passed": 15,
+    "failed": 0,
+    "seconds": 4.53
+  },
+  {
+    "suite": "ContextPageStoreV2XProc",
+    "scope": "production",
+    "exit": 0,
+    "passed": 12,
+    "failed": 0,
+    "seconds": 0.47
+  },
+  {
+    "suite": "ContextEvidenceRehydrationV2",
+    "scope": "production",
+    "exit": 0,
+    "passed": 240,
+    "failed": 0,
+    "seconds": 0.57
+  },
+  {
+    "suite": "ContextMemoryTierV2",
+    "scope": "production",
+    "exit": 0,
+    "passed": 235,
+    "failed": 0,
+    "seconds": 0.22
+  },
+  {
+    "suite": "ContextAuthorityCertificationV2",
+    "scope": "production",
+    "exit": 0,
+    "passed": 35,
+    "failed": 0,
+    "seconds": 0.47
+  }
+]

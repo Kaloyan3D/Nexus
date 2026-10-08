@@ -47,6 +47,8 @@
  * replay(1..N) byte-for-byte for identity-relevant durable state.
  */
 
+const durablePolicyV2 = require('./ContextDurableMutationPolicyV2.cjs');
+
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -751,6 +753,7 @@ function latestSealedCheckpointV2(layout, generation) {
  *         authorityRecord }), log? }
  */
 function openMemoryProducerV2(deps) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   if (!isPlainObject(deps)) failProducer('invalid', 'deps are required');
   const namespace = normalizeNamespace(deps.namespace);
   if (typeof deps.controllerAuthority !== 'function') failProducer('invalid', 'controllerAuthority is required');
@@ -922,6 +925,7 @@ function openMemoryProducerV2(deps) {
  * per-event step. The persisted log is durable by construction.
  */
 function replaySessionV2(deps) {
+  durablePolicyV2.assertDurableMutationAllowedV2();
   if (!isPlainObject(deps) || !Array.isArray(deps.events)) failProducer('invalid', 'events are required');
   const events = deps.events;
   for (let index = 0; index < events.length; index += 1) {

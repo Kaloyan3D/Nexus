@@ -2,10 +2,10 @@
 /**
  * ContextMemoryProducerHostV2.cjs - CCV2-M01 production producer wiring.
  *
- * The ONE production installation point for durable-memory production:
+ * The ONE installation point for the CCv2 session reader/legacy producer:
  * AihController.apply() calls installMemoryProducer(ctx, deps) and every
- * task-bound session then maintains <workspace>/.ai-harness/ccv2/<taskId>/
- * automatically (no script, no hand-written fixture, no manual pages).
+ * task-bound session supplies read-only live evidence. The legacy writer below
+ * is unavailable under the fixed production restriction.
  *
  * Per session a strictly serial queue drives ContextMemoryProducerV2:
  *   - ordinary events ingest SYNCHRONOUSLY inside the session/event
@@ -19,9 +19,11 @@
  * Never throws into the loop: a producer failure records a durable blocker
  * in producer state (hosts then skip/fall back) and logs once.
  *
- * Kill switch: NEXUS_CCV2_PRODUCER=off disables production (default on).
+ * Restricted production: writer disabled; read-only session observer retained.
+ * NEXUS_CCV2_PRODUCER cannot enable durable writes in this revision.
  */
 
+const durablePolicyV2 = require('./ContextDurableMutationPolicyV2.cjs');
 const producerV2 = require('./ContextMemoryProducerV2.cjs');
 const sessionSourceV2 = require('./ContextSessionEvidenceSourceV2.cjs');
 
@@ -33,9 +35,35 @@ function isPlainObject(value) {
 }
 
 function producerEnabledV2(env) {
+  if (!durablePolicyV2.durableMutationEnabledV2()) return false;
   const source = isPlainObject(env) ? env : process.env;
   const raw = String(source[PRODUCER_ENV] === undefined || source[PRODUCER_ENV] === null ? '' : source[PRODUCER_ENV]).trim().toLowerCase();
   return !(raw === 'off' || raw === '0' || raw === 'false' || raw === 'no');
+}
+
+// Preserve the source/pressure read seams without opening a producer, replaying
+// a session, flushing DSH or touching any artifact. Captures live objects only.
+function createReadOnlySessionRegistryV2(deps) {
+  const safeDeps = isPlainObject(deps) ? deps : {};
+  const sessions = new Map();
+  function onSessionEvent(session) {
+    try {
+      if (!session || typeof session.id !== 'string') return;
+      const binding = typeof safeDeps.bindingFor === 'function' ? safeDeps.bindingFor(session.id) : null;
+      if (!isPlainObject(binding) || typeof binding.workspace !== 'string'
+        || typeof binding.taskId !== 'string' || typeof binding.taskInstanceId !== 'string') return;
+      sessions.set(session.id, session);
+    } catch { /* no authority, no read seam */ }
+  }
+  function liveSessionFor(sessionId) {
+    const session = sessions.get(sessionId);
+    return session ? Object.freeze({ sessionId, events: () => Array.from(session.events || []) }) : null;
+  }
+  function sessionSourceFor(sessionId) {
+    try { const session = sessions.get(sessionId); return session ? sessionSourceV2.wrapDshSessionV2(session) : null; }
+    catch { return null; }
+  }
+  return Object.freeze({ onSessionEvent, liveSessionFor, sessionSourceFor, async idle() {}, describe() { return null; } });
 }
 
 /**
@@ -46,6 +74,7 @@ function producerEnabledV2(env) {
  *   authorityFor?(binding)-> controller authority reader (tests)
  */
 function createProducerRegistryV2(deps) {
+  if (!durablePolicyV2.durableMutationEnabledV2()) return createReadOnlySessionRegistryV2(deps);
   const safeDeps = isPlainObject(deps) ? deps : {};
   const sessions = new Map();
   const log = typeof safeDeps.log === 'function' ? safeDeps.log : () => {};
@@ -228,6 +257,13 @@ function createProducerRegistryV2(deps) {
 function installMemoryProducer(ctx, deps) {
   try {
     if (!ctx || typeof ctx.on !== 'function') return { installed: false, reason: 'no-hook-surface', registry: null };
+    if (!durablePolicyV2.durableMutationEnabledV2()) {
+      if (installedCtxs.has(ctx)) return { installed: true, reason: 'ccv2-read-only-session-observer', registry: installedCtxs.get(ctx) };
+      const registry = createReadOnlySessionRegistryV2(deps);
+      ctx.on('session/event', (session) => registry.onSessionEvent(session));
+      installedCtxs.set(ctx, registry);
+      return { installed: true, reason: 'ccv2-read-only-session-observer', registry };
+    }
     if (!producerEnabledV2(isPlainObject(deps) ? deps.env : undefined)) {
       return { installed: false, reason: 'producer-disabled', registry: null };
     }

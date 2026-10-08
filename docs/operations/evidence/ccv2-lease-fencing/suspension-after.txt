@@ -1,0 +1,42 @@
+PASS: valid owner still commits on real DSH
+PASS: after-renew: stale renewal refuses
+PASS: after-renew: sequential stale release refuses
+PASS: after-renew: successor token survives A10 finally
+FAIL: after-renew: no append after takeover
+FAIL: after-renew: no durable write after takeover
+FAIL: after-renew: no stale successful commit
+PASS: after-renew: fresh ownership recovery
+PASS: after-renew: recovered owner releases
+PASS: before-first-append: stale renewal refuses
+PASS: before-first-append: sequential stale release refuses
+PASS: before-first-append: successor token survives A10 finally
+FAIL: before-first-append: no append after takeover
+FAIL: before-first-append: no durable write after takeover
+FAIL: before-first-append: no stale successful commit
+PASS: before-first-append: fresh ownership recovery
+PASS: before-first-append: recovered owner releases
+PASS: before-second-append: stale renewal refuses
+PASS: before-second-append: sequential stale release refuses
+PASS: before-second-append: successor token survives A10 finally
+FAIL: before-second-append: no append after takeover
+FAIL: before-second-append: no durable write after takeover
+FAIL: before-second-append: no stale successful commit
+PASS: before-second-append: fresh ownership recovery
+PASS: before-second-append: recovered owner releases
+PASS: before-flush: stale renewal refuses
+PASS: before-flush: sequential stale release refuses
+PASS: before-flush: successor token survives A10 finally
+PASS: before-flush: no append after takeover
+FAIL: before-flush: no durable write after takeover
+FAIL: before-flush: no stale successful commit
+PASS: before-flush: fresh ownership recovery
+PASS: before-flush: recovered owner releases
+PASS: after-flush: stale renewal refuses
+PASS: after-flush: sequential stale release refuses
+PASS: after-flush: successor token survives A10 finally
+PASS: after-flush: no append after takeover
+PASS: after-flush: no durable write after takeover
+FAIL: after-flush: no stale successful commit
+PASS: after-flush: fresh ownership recovery
+PASS: after-flush: recovered owner releases
+Safety checks: 29 PASS, 12 FAIL

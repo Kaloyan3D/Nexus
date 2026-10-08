@@ -29,6 +29,9 @@ if (-not [string]::IsNullOrWhiteSpace($PowerShellExecutable)) {
     $powershell = [System.IO.Path]::GetFullPath($PowerShellExecutable)
 }
 $suites = @(
+    [ordered]@{ name='ContextRestrictedProductionV2'; script='tests/ContextRestrictedProductionV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextRestrictedProjectionV2'; script='tests/ContextRestrictedProjectionV2.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='ContextRestrictedDshCompaction'; script='tests/ContextRestrictedDshCompaction.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_REQUIRE_CCV2_LIVE_HOST'='1' } },
     [ordered]@{ name='SetupUpgrade'; script='tests/SetupUpgrade.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='UpdateRootResolution'; script='tests/UpdateRootResolution.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='Harness'; script='tests/Harness.Tests.ps1'; executable=$powershell; kind='powershell' },
@@ -203,6 +206,14 @@ $suites = @(
     [ordered]@{ name='VisualPacketIntegrity'; script='tests/VisualPacketIntegrity.Tests.ps1'; executable=$powershell; kind='powershell' }
 )
 
+# Active durable CCv2 is deliberately disabled in shipped production. Retain
+# the original algorithm assertions in a private, explicitly labelled fixture;
+# they cannot establish production fencing/readiness. Never adapt the production
+# restriction proofs. The unfinished red fencing campaign remains separate.
+$researchRunner = Join-Path $InstallRoot 'tests/Ccv2ResearchRunner.cjs'
+$researchNode = [string]$layout.Node
+$researchSuites = @(& $researchNode $researchRunner '--list' | ConvertFrom-Json)
+if ($LASTEXITCODE -ne 0) { throw 'Cannot classify CCv2 research suites' }
 $started = [DateTime]::UtcNow
 $suiteResults = [Collections.Generic.List[object]]::new()
 $rawLines = [Collections.Generic.List[string]]::new()
@@ -225,6 +236,12 @@ foreach ($suite in $suites) {
     # member-like argument and can truncate a drive-qualified path to `C`.
     $executable = [string]$suite.executable
     $arguments = if ($suite.kind -eq 'powershell') { @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$scriptPath,'-InstallRoot',$InstallRoot) } else { @($scriptPath) }
+    $verificationScope = 'production'
+    if ($researchSuites -contains [IO.Path]::GetFileName($scriptPath)) {
+        $verificationScope = 'research-only-active-algorithms'
+        $executable = [string]$layout.Node
+        $arguments = @($researchRunner, [IO.Path]::GetFileName($scriptPath))
+    }
     # An if-expression unwraps a one-item array in Windows PowerShell 5.1.
     # Re-wrap it before splatting or the Node script path is enumerated into
     # characters and Node receives only the drive letter (`C`) as argv[1].
@@ -236,6 +253,10 @@ foreach ($suite in $suites) {
     # release gate). Applies process-scoped only and restores every variable
     # afterwards; suites without 'env' behave exactly as before.
     $suiteEnvPrior = @{}
+    if ($verificationScope -eq 'research-only-active-algorithms') {
+        $suiteEnvPrior['AIH_TEST_PWSH'] = [System.Environment]::GetEnvironmentVariable('AIH_TEST_PWSH')
+        [System.Environment]::SetEnvironmentVariable('AIH_TEST_PWSH', [string]$powershell)
+    }
     if ($suite.Contains('env') -and $suite.env -is [System.Collections.IDictionary]) {
         foreach ($envName in @($suite.env.Keys)) {
             $suiteEnvPrior[$envName] = [System.Environment]::GetEnvironmentVariable([string]$envName)
@@ -254,7 +275,7 @@ foreach ($suite in $suites) {
     $suitePassed = Get-AihHarnessAssertionCount -Lines $output -Prefix 'PASS:'
     $explicitFailed = Get-AihHarnessAssertionCount -Lines $output -Prefix 'FAIL:'
     $suiteFailed = if ($suiteExitCode -eq 0) { $explicitFailed } else { [Math]::Max(1, $explicitFailed) }
-    $suiteResults.Add([ordered]@{name=$suite.name;command=$commandText;script=$suite.script.Replace('\','/');startedAtUtc=$suiteStarted.ToString('o');finishedAtUtc=$suiteFinished.ToString('o');durationMs=[Math]::Max(0,[int64]($suiteFinished-$suiteStarted).TotalMilliseconds);exitCode=$suiteExitCode;passed=$suitePassed;failed=$suiteFailed;result=if($suiteExitCode-eq 0){'PASS'}else{'FAIL'}})
+    $suiteResults.Add([ordered]@{name=$suite.name;verificationScope=$verificationScope;command=$commandText;script=$suite.script.Replace('\','/');startedAtUtc=$suiteStarted.ToString('o');finishedAtUtc=$suiteFinished.ToString('o');durationMs=[Math]::Max(0,[int64]($suiteFinished-$suiteStarted).TotalMilliseconds);exitCode=$suiteExitCode;passed=$suitePassed;failed=$suiteFailed;result=if($suiteExitCode-eq 0){'PASS'}else{'FAIL'}})
     $rawLines.Add(('===== RESULT {0}: {1} (exit {2}) =====' -f $suite.name, $(if ($suiteExitCode -eq 0) { 'PASS' } else { 'FAIL' }), $suiteExitCode))
     if ($suiteExitCode -ne 0) {
         if ($harnessExitCode -eq 0) { $harnessExitCode = $suiteExitCode }
@@ -279,6 +300,7 @@ if ($suiteResults.Count -lt $suites.Count) {
 $finished = [DateTime]::UtcNow
 $rawLogPath = if ([string]::IsNullOrWhiteSpace($ReportPath)) { $null } else { [IO.Path]::ChangeExtension([IO.Path]::GetFullPath($ReportPath), '.log') }
 $report = New-AihHarnessReport -StartedAtUtc $started -FinishedAtUtc $finished -ExitCode $harnessExitCode -Suites @($suiteResults) -RawLogPath $rawLogPath
+$report['ccv2DurableProductionStatus'] = 'DISABLED_UNSAFE_FENCING_UNRESOLVED'
 if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
     try {
         $artifacts = Write-AihHarnessArtifacts -ReportPath $ReportPath -Report $report -RawLog (($rawLines -join [Environment]::NewLine)+[Environment]::NewLine)

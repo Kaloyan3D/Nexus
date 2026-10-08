@@ -1,0 +1,297 @@
+{
+  "archivePath": "/home/kaloyan/nexus-bench/ccv2-safe-scope-20261008",
+  "logs": [
+    {
+      "file": "ContextActivationPressureV2.log",
+      "sha256": "02d98ffe47e584f65d3d838fd560cfd45030698943168f4347d34db3729284fc"
+    },
+    {
+      "file": "ContextApplyLockAuthority.log",
+      "sha256": "90c70fff98fbdf431219720308926dd629bab34bea52a1e6d7e1424a46904b7d"
+    },
+    {
+      "file": "ContextAuthorityCertificationV2.log",
+      "sha256": "6576f6a57eb60ba0db635bcd4c86f5aa43a19cce81b7fad7493860e6ccfe6859"
+    },
+    {
+      "file": "ContextCompactionAcceptance.log",
+      "sha256": "ff0e2d86fe5c3d72378f8735c80e7c67ee6b2ff0a98161a27302b1a435a6f36b"
+    },
+    {
+      "file": "ContextCompactionCrash.log",
+      "sha256": "a2fbe85ca9307a2cad1fdf8d1b9b60ca71a4c61c655e8bb56493b8878efe2f44"
+    },
+    {
+      "file": "ContextCompactionF1Loop.log",
+      "sha256": "40ef228f282cba85d801d7bfad3025d4d172790f248f954cdf7f74fa967451ed"
+    },
+    {
+      "file": "ContextCompactionF2Prod-complete.log",
+      "sha256": "39f7ae2cc8da03a835ec77fe7046179b77d3c69ca0e777b92593a0f185fa6d72"
+    },
+    {
+      "file": "ContextCompactionF2Prod.log",
+      "sha256": "c3d03d0528ada59d1a578ceb3b7dacf10ad042a03dabeaf1544f57da11cf05f9"
+    },
+    {
+      "file": "ContextCompactionF5Prod.log",
+      "sha256": "da82a91b011f87d4befbd0cbfbcd70926659f310cbd79a9146aee6ce18847f73"
+    },
+    {
+      "file": "ContextCompactionPartial.log",
+      "sha256": "ce6e740d791a178c7466b099d58e04b9b0f4b4ad2a4e27885d1a6ed7c8e78080"
+    },
+    {
+      "file": "ContextCompactionV2DshGenerationProof.log",
+      "sha256": "ed1d02794fa99263e3cd27127e2cbfae87ab30667eccc565afb0f454375b28eb"
+    },
+    {
+      "file": "ContextCompilerActiveOpencodeV2.log",
+      "sha256": "3e571ee92af9e49e13609a2865f8c64ea26930d2970eb4cc9b459d85b6d79c7b"
+    },
+    {
+      "file": "ContextCompilerActiveV2.log",
+      "sha256": "b7e76ab025790968fd7c01fec1c44f3914a2b5b2199391d0b6c9b0a52baf24cf"
+    },
+    {
+      "file": "ContextCompilerV2.log",
+      "sha256": "01adad95e6c8d9c2d0d0d4e292a8d708ee1b1111d59944f4300a9a1c65c936d8"
+    },
+    {
+      "file": "ContextCompilerV2H.log",
+      "sha256": "4bc5630b66e94041e53bae7f75ced9c586a8553ffef7b73e152bbc09e8812678"
+    },
+    {
+      "file": "ContextCompilerV2XProc.log",
+      "sha256": "df33fa98c6534abe45056155af5649d706c820e8c73c411a0f16cb51b14f57e4"
+    },
+    {
+      "file": "ContextEvidenceRehydrationV2.log",
+      "sha256": "858adf037496009d8b0dd4bac7ef98bde18129eff79dbee5e05b27f41b22ff76"
+    },
+    {
+      "file": "ContextMemoryTierV2.log",
+      "sha256": "b78b02bccc794e84a25b24b2ddb1e9ebede89d1d4de90405f9abd652779d7909"
+    },
+    {
+      "file": "ContextModelCapabilityV2.log",
+      "sha256": "0f6b8b11168a6ab020ee3a08c4cc71702c385063b0b3a9f312a908067b00bd5f"
+    },
+    {
+      "file": "ContextPageStoreV2.log",
+      "sha256": "289658ff96f61caa14d05fe874cea45951b5015d520c56a28ccd46504a5d8e12"
+    },
+    {
+      "file": "ContextPageStoreV2Crash.log",
+      "sha256": "205c1fd1e5faf6bc1f228159a92f73eef81e5cc85d12aa2cc3e28148bdfac9f6"
+    },
+    {
+      "file": "ContextPageStoreV2XProc.log",
+      "sha256": "59bc8e939313184b515a4debf1ad94d5c9aa74fd76e2f4080c7eab4c3589b5c7"
+    },
+    {
+      "file": "ContextPromptRendererV2.log",
+      "sha256": "bd5f54ea26542e5bde245a1bde6dd755a31742663f5fca0d5e2f12a34bae1ee1"
+    },
+    {
+      "file": "ContextR1RealSessionContracts.log",
+      "sha256": "4d26b8d4bd25943b2c33e50f0b844e9508ccbe4a309b1120340d994d619d75fb"
+    },
+    {
+      "file": "ContextRestrictedProjectionV2.log",
+      "sha256": "62c11ea9baee5ad03a955c895b027bec94d162a70f64afa9d62af66814de0a9f"
+    },
+    {
+      "file": "ControllerPresetCleanInstall.log",
+      "sha256": "1f8304604c1d845ab02f6dc6cfb7ab5c66f8616af0d9a6007f21f3d232d5bb07"
+    },
+    {
+      "file": "ControllerPresetInstalled.log",
+      "sha256": "d55574509b46a395b16368f29ddac66fcd0646919e6d6b1ee4fa1fdead0f7eea"
+    },
+    {
+      "file": "MusePresetCleanInstall.log",
+      "sha256": "20d48b87fa84cbb5c835f7d748b69c95b99ca361a7843d2ef674dc9ddb0dc5d8"
+    },
+    {
+      "file": "MusePresetDependencyClosure.log",
+      "sha256": "a75024db5c21502cbf6a722f69f254d0f916d288ff84fafa88d3b5098a39db4b"
+    },
+    {
+      "file": "SourceCompleteness.log",
+      "sha256": "bd7b5fc4fcd0b514a2027533a3577386f29c64a09b76c779ed346be87d03090d"
+    },
+    {
+      "file": "harness-reporting.log",
+      "sha256": "602dc91f66241310028a2c11b2b3e79847c6376a6fbee7b36273cea9fd8779c5"
+    },
+    {
+      "file": "install-results.json",
+      "sha256": "74a12088f0d250f4bbe3a99d911a58068996660649c9da797d8ab1738166c15a"
+    },
+    {
+      "file": "known-red-fencing.json",
+      "sha256": "68ee2417fb730d69761ab6430789f02ea69aa89a8c96949ad8c0d478b7660552"
+    },
+    {
+      "file": "known-red-fencing.log",
+      "sha256": "a10b5c232e75faa4e63ad6a2357a72124aaab01393829ff9caf434ed880aded8"
+    },
+    {
+      "file": "known-red-short-lease.json",
+      "sha256": "346acac367823ebcab67a361a5ac0ebb25da043033d7fd9e7b855ef66167770e"
+    },
+    {
+      "file": "known-red-short-lease.log",
+      "sha256": "369556ade9cfaf0116f5a634115d24ea8ab7ed2bc1e8471c92de3454cc53ce86"
+    },
+    {
+      "file": "production-results.json",
+      "sha256": "a4e86a16009eeb79c5484c55272b35bfbbe11a9105b7bc9c5596382b5cd51907"
+    },
+    {
+      "file": "research-A10.log",
+      "sha256": "28c27eb8afd14f1c55b213b66137d50ed5a3250514cf025e16e9b7a4647e8769"
+    },
+    {
+      "file": "research-ContextActiveApplyV2.log",
+      "sha256": "bda09aeb014cafd18005cae10a53c20c26b3b0cb33e3d90ed248e157579aa1fd"
+    },
+    {
+      "file": "research-ContextActiveApplyV2LiveHost.log",
+      "sha256": "ff2b538821e4a8214bf59a21f2c93f439de4230a1067c4a91eb216bbcd94fafa"
+    },
+    {
+      "file": "research-ContextActiveApplyV2XProc.log",
+      "sha256": "a1c32247496a08da632477a9c92c2f9920eef27aa320937894b0dde5b039a357"
+    },
+    {
+      "file": "research-ContextCheckpointV2.log",
+      "sha256": "7c1617afe48732d24af8c07e073b1cedf8de71ebf93e1bc798d40db2db23512a"
+    },
+    {
+      "file": "research-ContextCheckpointabilityV2.log",
+      "sha256": "8ce0bba4016651c0ed246889572e3074f0382a0a884e3aeac449fdab5b1a5e51"
+    },
+    {
+      "file": "research-ContextCheckpointabilityV2LiveHost.log",
+      "sha256": "3050fa065f7855ac8bfa20df1a067b732d4cccf29bf0ee941ca5501cfb123f17"
+    },
+    {
+      "file": "research-ContextCompactionV2FoundationHardening.log",
+      "sha256": "81f569cf578dc46615dd2e986c66e08543a6d57c654c2c22d55970fb905d7e7f"
+    },
+    {
+      "file": "research-ContextCompactionV2Operation.log",
+      "sha256": "929846ad219842ca38193a3257f9711426653273cdfec2e364c9fbbb2b354344"
+    },
+    {
+      "file": "research-ContextCompilerActiveDeepseekV4.log",
+      "sha256": "29ea1a8138308a18ad5470dcc7ff82ead138c0f698a6870af14410ffcbba316c"
+    },
+    {
+      "file": "research-ContextCompilerActiveHostV2.log",
+      "sha256": "d3ca7e9bba435626fd6311e02ed9c654977b1ac97fbcf630ed2cb0ce6a25ab40"
+    },
+    {
+      "file": "research-ContextCompilerActiveMuseRoutesV2.log",
+      "sha256": "1e27792f562a6563e4b056295028c82cb7f300d7cfe2f84a232d9269d1ced62a"
+    },
+    {
+      "file": "research-ContextCompilerActiveOpencodeHostV2.log",
+      "sha256": "63479aa312637d017682e216de634cdc8c340629d7f6066ef8be9e8798edb90b"
+    },
+    {
+      "file": "research-ContextCompilerShadowHostV2.log",
+      "sha256": "2c5395c4e65ad8a461877d51fe84aa3e69e6ccb416751ba8151eaafcae436b15"
+    },
+    {
+      "file": "research-ContextCompleteTaskV2.log",
+      "sha256": "2d6ae9d7148d8074d6abf422feba9ea0cf0d58359e51a29a9098318c5334f475"
+    },
+    {
+      "file": "research-ContextCompleteTaskV2LiveHost.log",
+      "sha256": "13ef1f311033d0bcff1789ad0b89bf3e0aa180cc671b39b31007db7c10db42de"
+    },
+    {
+      "file": "research-ContextCompleteTaskV2XProc.log",
+      "sha256": "b8c24bc5b1c71fc566f8287736f9623b32cdc551ea6399b5a37063ae561f84bd"
+    },
+    {
+      "file": "research-ContextGenerationRuntimeV2.log",
+      "sha256": "c9919e9e184bef0257236a3ade546d5d6085695bfc4a9c728a368883ebab44fd"
+    },
+    {
+      "file": "research-ContextGenerationRuntimeV2LiveHost.log",
+      "sha256": "67bedc2f821c5726259895c906632740e9bf7e75a7667078d7967c5ef26ecf79"
+    },
+    {
+      "file": "research-ContextGenerationRuntimeV2XProc.log",
+      "sha256": "6a79e4fc0405f8ff03f73d392cebe005d410a1b65120e3e44d92f8f5f6507380"
+    },
+    {
+      "file": "research-ContextMemoryProducerV2.log",
+      "sha256": "5f36558487f702143c6b2fb27f53b0ff65c59dea23f1062989a6c45ac229574e"
+    },
+    {
+      "file": "research-ContextRecoveryV2.log",
+      "sha256": "bbc49c32e134031094534a88aa59d4b4f30afb50b2841d76963717aeddb8ba88"
+    },
+    {
+      "file": "research-ContextRecoveryV2LiveHost.log",
+      "sha256": "972de020bc2e76316393b97ff3d10f7b35ea235bf011cfd3722b15a2600de956"
+    },
+    {
+      "file": "research-ContextRecoveryV2XProc.log",
+      "sha256": "f234c0838c04dea36524d34b71e493e5050309105a6f992aa60e76226a587f83"
+    },
+    {
+      "file": "research-ContextShadowV2.log",
+      "sha256": "883e4d6aad910375a5314f2453e8f519b7023d50f33c33b9dea75a5a5dccb6ee"
+    },
+    {
+      "file": "research-ContextShadowV2LiveHost.log",
+      "sha256": "287d332da240ebda7b223aca5cebe8ee1c77863133e33ef0bdee1335e1bb52b3"
+    },
+    {
+      "file": "research-ContextSnapshotV2.log",
+      "sha256": "3beef3b5bfb603528fb0257626e9967cb035fb50d6da74ff8d483150fc0d4fc3"
+    },
+    {
+      "file": "research-ContextTrustV2.log",
+      "sha256": "83fa23d08495d8e2cabd584ab38f9bac4a0bddf1e5f3650fd8ef5b51ea170e36"
+    },
+    {
+      "file": "research-ps-v2.log",
+      "sha256": "c6a410103d6e06911397a45622ce3126be1b5276d884556e8e0e868b8784d426"
+    },
+    {
+      "file": "research-results.json",
+      "sha256": "303028cb5634eb510a8fa7f255d7a3e6eb07d6b3e2fdb80c411a99b29f849b4b"
+    },
+    {
+      "file": "restricted-dsh.log",
+      "sha256": "c64d379ccd8693e442f184224fb4e74a8600157bdd04a84b07ba1216e74eb53a"
+    },
+    {
+      "file": "restricted-install.log",
+      "sha256": "2ba935776df84839507a0789a1e7f5a646dbbc72c7110dcd4a69e9b0d7ff06ab"
+    },
+    {
+      "file": "restricted-projection.log",
+      "sha256": "b801692d6a34c6b99f43a7b4bc703da1e84a77ce8cb8398f31955a10d9713372"
+    },
+    {
+      "file": "restriction-after.log",
+      "sha256": "41eb3194b9cb2f466776c3b6e1fb0bc872c281c7a8675e3d385d550dfd76e3a7"
+    },
+    {
+      "file": "restriction-before.log",
+      "sha256": "8ad21f38cb4e6bea9e1af7ea5cafea11313841bf1bdd6fa3d87ed3f045747183"
+    },
+    {
+      "file": "unchanged-algorithm-proof.json",
+      "sha256": "9454b6b4eb9735a26b46afdc8c646cdfdcead054765a3b0d2a5064ced13cc933"
+    }
+  ]
+}
