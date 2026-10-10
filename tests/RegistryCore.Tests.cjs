@@ -415,7 +415,7 @@ check('runtime capability matrix: eligible host binds, incompatible host fails c
   cfg.slots.engineer = { logicalModelId: 'probe-model', routeId: 'probe-provider/probe-model', reasoning: 'high' }
   cfg.roleOverrides.deepEngineer = { logicalModelId: 'probe-model', routeId: 'probe-provider/probe-model', reasoning: 'high' }
   cfg.roleOverrides.fallback = { logicalModelId: 'probe-model', routeId: 'probe-provider/probe-model', reasoning: 'high' }
-  const goodHost = { adapterId: 'mock-a', executionKinds: ['raw-model'], protocols: ['openai-responses'] }
+  const goodHost = { adapterId: 'mock-a', executionKinds: ['raw-model'], protocols: ['openai-responses', 'openai-chat-completions', 'local-openai-compatible'] }
   const badHost = { adapterId: 'mock-b', executionKinds: ['raw-model'], protocols: ['anthropic-messages'] }
   assert.equal(resolver.compileModeConfig(cfg, snapshot, { runtime: goodHost }).ok, true)
   const denied = resolver.compileModeConfig(cfg, snapshot, { runtime: badHost })

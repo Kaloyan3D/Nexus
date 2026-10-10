@@ -34,6 +34,7 @@ const configStore = require('./config-store.cjs')
 const catalog = require('./operator-catalog.cjs')
 const probes = require('./probes.cjs')
 const runtimeProjection = require('./runtime-projection.cjs')
+const subscriptions = require('./subscription-connections.cjs')
 
 const SERVICE_SCHEMA_VERSION = 1
 const SUPPORTED_MODES = ['engineering-v1', 'engineering-v2', 'engineering-v3']
@@ -69,7 +70,9 @@ function createService(options) {
     if (!normalized.snapshot) {
       return { snapshot: null, aliases: null, errors: built.errors.map((e) => err('snapshot-note', 'registry', String(e))).concat(normalized.errors.map((e) => err('snapshot-unavailable', 'registry', String(e)))) }
     }
-    return { snapshot: normalized.snapshot, aliases: normalized.aliases, errors: [] }
+    const withClaude = subscriptions.appendClaudeBuiltins(normalized.snapshot)
+    const snapshotErrors = withClaude.added.length === 4 ? [] : [err('snapshot-note', 'registry', 'claude subscription built-ins already present; merge skipped duplicates')]
+    return { snapshot: withClaude.snapshot, aliases: normalized.aliases, errors: snapshotErrors }
   }
 
   function modeById(snapshot, modeId) {
@@ -197,6 +200,74 @@ function createService(options) {
     return { result: null, errors: previewed.errors }
   }
 
+  // R5: built-in connection status overlay (non-secret persistence).
+  // Built-in connections are immutable records, but their live STATUS must
+  // persist across restarts without storing credentials. statuses live in
+  // <dataRoot>/registry/connection-status.json as { status, updatedAtUtc,
+  // provenance } per built-in id. Only the five schema statuses are kept;
+  // anything else fails closed. Operator connections keep the R4 path.
+  const CONNECTION_STATUS_FILE = 'connection-status.json';
+  const OVERLAY_STATUSES = ['connected', 'not-connected', 'unknown', 'revoked', 'disabled'];
+
+  function statusOverlayPath() {
+    const path = require('node:path');
+    return path.join(String(dataRoot), 'registry', CONNECTION_STATUS_FILE);
+  }
+
+  function defaultFileHooks() {
+    if (fsHooks) return fsHooks;
+    const fs = require('node:fs');
+    return {
+      readFileSync: (f, enc) => fs.readFileSync(f, enc),
+      writeFileSync: (f, data, opts) => fs.writeFileSync(f, data, opts),
+      renameSync: (a, b) => fs.renameSync(a, b),
+      mkdirSync: (f, opts) => fs.mkdirSync(f, opts),
+      unlinkSync: (f) => fs.unlinkSync(f),
+      statSync: (f) => fs.statSync(f),
+    };
+  }
+
+  function loadStatusOverlay() {
+    const hooks = defaultFileHooks();
+    try {
+      const raw = hooks.readFileSync(statusOverlayPath(), 'utf8');
+      const doc = JSON.parse(raw);
+      if (!doc || typeof doc !== 'object' || doc.schemaVersion !== 1 || !doc.statuses || typeof doc.statuses !== 'object') {
+        return { statuses: {}, errors: [err('snapshot-note', 'registry.connection-status', 'connection status overlay is unreadable; live statuses degrade to built-in defaults')] };
+      }
+      const clean = {};
+      for (const id of Object.keys(doc.statuses)) {
+        const entry = doc.statuses[id];
+        if (entry && typeof entry === 'object' && OVERLAY_STATUSES.indexOf(entry.status) !== -1) clean[id] = { status: entry.status, updatedAtUtc: entry.updatedAtUtc || null, provenance: entry.provenance || null };
+      }
+      return { statuses: clean, errors: [] };
+    } catch (e) {
+      if (e && (e.code === 'ENOENT' || (e.message && e.message.indexOf('ENOENT') !== -1))) return { statuses: {}, errors: [] };
+      return { statuses: {}, errors: [err('snapshot-note', 'registry.connection-status', 'connection status overlay is unreadable; live statuses degrade to built-in defaults')] };
+    }
+  }
+
+  function writeStatusOverlay(statuses) {
+    const hooks = defaultFileHooks();
+    const path = require('node:path');
+    const target = statusOverlayPath();
+    try { hooks.mkdirSync(path.dirname(target), { recursive: true }); } catch (e) {}
+    const doc = { schemaVersion: 1, updatedAtUtc: nowUtc(), statuses };
+    let text = null;
+    try { text = JSON.stringify(doc, null, 2) + '\n'; } catch (e) {
+      return { ok: false, errors: [err('registry-store-unwritable', 'registry.connection-status', 'connection status overlay cannot be serialized')] };
+    }
+    const tmp = target + '.tmp-' + process.pid + '-' + Date.now().toString(36);
+    try {
+      hooks.writeFileSync(tmp, text, { encoding: 'utf8', mode: 0o600 });
+      hooks.renameSync(tmp, target);
+    } catch (e) {
+      try { hooks.unlinkSync(tmp); } catch (e2) {}
+      return { ok: false, errors: [err('registry-store-unwritable', 'registry.connection-status', 'connection status overlay cannot be written')] };
+    }
+    return { ok: true };
+  }
+
   function builtInIdsOf(snapshot) {
     const idsOf = (items) => (items || []).map((e) => e && e.id).filter((id) => typeof id === 'string')
     return {
@@ -251,6 +322,21 @@ function createService(options) {
     for (const id of Object.keys(op.docs.connections.disabledBuiltins)) {
       const c = findById(snap.connections, id)
       if (c) c.status = 'disabled'
+    }
+    // R5: apply the non-secret live-status overlay to built-in connections
+    // only (operator connections keep their stored status). Unknown overlay
+    // ids are ignored so a stale overlay can never invent a connection.
+    try {
+      const overlay = loadStatusOverlay()
+      const disabledConns = op.docs.connections.disabledBuiltins || {}
+      for (const id of Object.keys(overlay.statuses)) {
+        if (Object.prototype.hasOwnProperty.call(disabledConns, id)) continue
+        const c = findById(snap.connections, id)
+        if (c) c.status = overlay.statuses[id].status
+      }
+      for (const e of overlay.errors) notes.push(e)
+    } catch (e) {
+      notes.push(err('snapshot-note', 'registry.connection-status', 'connection status overlay merge skipped'))
     }
     const ev = catalog.loadEvidence(dataRoot, fsHooks)
     // H3/R4.2: an operator route whose stored availability says 'verified'
@@ -449,6 +535,9 @@ function createService(options) {
       baseUrl: src.baseUrl,
       discovery: { strategy: 'provider-models-endpoint' },
       status: src.status || 'enabled',
+    }
+    if (src.authType === 'subscription-agent' || src.authType === 'subscription-delegated') {
+      return { ok: false, errors: [err('provider-invalid', 'provider.authType', 'subscription lifecycles are native built-ins (Claude CLI session, Codex OAuth); operator manual providers use api-key, local-server or manual-unknown')] }
     }
     if (src.authType !== undefined) record.authType = src.authType
     if (src.metadata !== undefined) record.metadata = src.metadata
@@ -723,6 +812,117 @@ function createService(options) {
     return runtimeProjection.prepareProjection(route, provider, runtime || null)
   }
 
+  // R5: unified Connections surface (non-secret).
+  // getConnections enriches every connection with billing source, execution
+  // kinds and connect/disconnect guidance. checkConnection / discoverModels
+  // run the native-lifecycle checks for the built-in subscription
+  // connections (Codex OAuth, Claude CLI session); other ids fail closed
+  // toward the R4 probe endpoints (credential-gated, offline only).
+
+  function readOAuthBaseUrl() {
+    try {
+      const path = require('node:path')
+      const fs = require('node:fs')
+      const doc = JSON.parse(fs.readFileSync(path.join(String(installRoot), 'config', 'versions.json'), 'utf8'))
+      if (doc && typeof doc.OAuthBaseUrl === 'string' && doc.OAuthBaseUrl !== '') return doc.OAuthBaseUrl
+    } catch (e) {}
+    return 'http://127.0.0.1:10531/v1'
+  }
+
+  function setBuiltInConnectionStatus(id, status, opts) {
+    const eff = snapshotOrErrors()
+    if (!eff.snapshot) return { ok: false, errors: eff.errors }
+    if (OVERLAY_STATUSES.indexOf(status) === -1) {
+      return { ok: false, errors: [err('connection-invalid', 'connection.status', 'status must be one of ' + OVERLAY_STATUSES.join(', '))] }
+    }
+    const canon = buildCanonical()
+    const builtinConns = canon.snapshot ? builtInIdsOf(canon.snapshot).connections : []
+    if (builtinConns.indexOf(id) === -1) {
+      return { ok: false, errors: [err('unknown-reference', 'connection.' + String(id), 'built-in connection overlay applies to built-in connections only: ' + String(id))] }
+    }
+    const overlay = loadStatusOverlay()
+    const next = Object.assign({}, overlay.statuses)
+    next[id] = { status, updatedAtUtc: nowUtc(), provenance: (opts && opts.provenance) || 'operator-attested' }
+    const written = writeStatusOverlay(next)
+    if (!written.ok) return written
+    return { ok: true, status }
+  }
+
+  function getConnections() {
+    const eff = snapshotOrErrors()
+    if (!eff.snapshot) return { connections: null, errors: eff.errors }
+    const providersById = new Map(eff.snapshot.providers.map((x) => [x.id, x]))
+    const routesByConn = new Map()
+    for (const r of eff.snapshot.routes || []) {
+      if (!r || !r.connectionId) continue
+      if (!routesByConn.has(r.connectionId)) routesByConn.set(r.connectionId, [])
+      routesByConn.get(r.connectionId).push(r.id)
+    }
+    const out = eff.snapshot.connections.map((c) => {
+      const described = subscriptions.describeConnection(c.id)
+      const provider = providersById.get(c.providerId) || null
+      return {
+        id: c.id,
+        providerId: c.providerId,
+        providerName: provider ? (provider.name || provider.id) : c.providerId,
+        connectionKind: c.connectionKind,
+        authMethod: c.authMethod || null,
+        credentialRef: c.credentialRef || null,
+        status: c.status,
+        provenance: c.provenance || null,
+        billingSource: described.billingSource,
+        executionKinds: described.executionKinds,
+        accountSource: described.accountSource,
+        connectKind: described.connectKind,
+        connectCommand: described.connectCommand,
+        disconnectCommand: described.disconnectCommand,
+        supportsCheck: described.supportsCheck,
+        supportsDiscover: described.supportsDiscover,
+        capabilitiesNote: described.capabilitiesNote,
+        routes: routesByConn.get(c.id) || [],
+      }
+    })
+    return { connections: out, errors: eff.errors }
+  }
+
+  async function checkConnection(id, opts) {
+    const o = opts || {}
+    const eff = snapshotOrErrors()
+    if (!eff.snapshot) return { ok: false, errors: eff.errors }
+    const conn = findIn(eff.snapshot, 'connections', id)
+    if (!conn) return { ok: false, errors: [err('unknown-reference', 'connection.id', 'unknown connection: ' + String(id))] }
+    const hooks = o.hooks || subscriptions.defaultHooks()
+    if (id === subscriptions.CODEX_CONNECTION_ID) {
+      const out = await subscriptions.checkCodexConnection({ hooks, userHome: o.userHome, env: o.env, oauthBaseUrl: o.oauthBaseUrl || readOAuthBaseUrl(), timeoutMs: o.timeoutMs, signal: o.signal })
+      setBuiltInConnectionStatus(id, out.status, { provenance: 'live-check' })
+      return out
+    }
+    if (id === subscriptions.CLAUDE_CONNECTION_ID) {
+      const out = await subscriptions.checkClaudeConnection({ hooks, userHome: o.userHome, claudeBin: o.claudeBin, timeoutMs: o.timeoutMs, signal: o.signal })
+      setBuiltInConnectionStatus(id, out.status, { provenance: 'live-check' })
+      return out
+    }
+    return { ok: false, errors: [err('connection-check-unsupported', 'connection.' + String(id), 'live checks cover the native subscription connections (conn-sol-local, conn-claude-code-subscription); probe api-key providers through the Models and Providers endpoints with an explicit credential')] }
+  }
+
+  async function discoverConnectionModels(id, opts) {
+    const o = opts || {}
+    const eff = snapshotOrErrors()
+    if (!eff.snapshot) return { ok: false, errors: eff.errors }
+    const conn = findIn(eff.snapshot, 'connections', id)
+    if (!conn) return { ok: false, errors: [err('unknown-reference', 'connection.id', 'unknown connection: ' + String(id))] }
+    const hooks = o.hooks || subscriptions.defaultHooks()
+    if (id === subscriptions.CODEX_CONNECTION_ID) {
+      const checked = await subscriptions.checkCodexConnection({ hooks, userHome: o.userHome, env: o.env, oauthBaseUrl: o.oauthBaseUrl || readOAuthBaseUrl(), timeoutMs: o.timeoutMs, signal: o.signal })
+      setBuiltInConnectionStatus(id, checked.status, { provenance: 'live-check' })
+      return { ok: checked.ok, advertised: checked.detail.models, errors: checked.errors }
+    }
+    if (id === subscriptions.CLAUDE_CONNECTION_ID) {
+      return subscriptions.discoverClaudeCapabilities({ hooks, claudeBin: o.claudeBin, timeoutMs: o.timeoutMs, signal: o.signal })
+    }
+    return { ok: false, errors: [err('connection-check-unsupported', 'connection.' + String(id), 'model discovery covers the native subscription connections; probe api-key providers through the Models and Providers endpoints with an explicit credential')] }
+  }
+
 
   function enrichRoute(snapshot, route) {
     const models = new Map((snapshot.models || []).map((m) => [m && m.id, m]))
@@ -859,6 +1059,10 @@ function createService(options) {
     verifyProviderRoute,
     getRouteEvidence,
     projectRoute,
+    getConnections,
+    checkConnection,
+    discoverConnectionModels,
+    setBuiltInConnectionStatus,
   }
 }
 

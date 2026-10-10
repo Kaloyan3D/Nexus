@@ -23,6 +23,7 @@ const operatorCatalog = require('./operator-catalog.cjs')
 const providerConfig = require('./provider-config.cjs')
 const probes = require('./probes.cjs')
 const runtimeProjection = require('./runtime-projection.cjs')
+const subscriptions = require('./subscription-connections.cjs')
 
 module.exports = {
   schemas,
@@ -39,4 +40,5 @@ module.exports = {
   providerConfig,
   probes,
   runtimeProjection,
+  subscriptions,
 }

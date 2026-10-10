@@ -269,8 +269,15 @@ function errorStatusOf(errors) {
   return 422
 }
 
-function createRegistryHandlers(service) {
+function createRegistryHandlers(service, host) {
   if (!service) throw new Error('registry-adapter: service is required')
+  // R5: server-side user home for native-lifecycle checks (Codex auth file,
+  // Claude CLI session). Resolved on the host via os.homedir() or an
+  // explicitly injected host value - never from caller input, so no client
+  // can steer the check at another user's files.
+  const hostUserHome = (host && typeof host.userHome === 'string' && host.userHome !== '')
+    ? host.userHome
+    : (() => { try { return require('node:os').homedir() } catch (e) { return '' } })()
 
   const modesHandler = async (req, res) => {
     if (req.method !== 'GET') {
@@ -670,6 +677,77 @@ function createRegistryHandlers(service) {
     }
   }
 
+  // --- Registry R5 (unified Connections) --------------------------------
+  // Same trusted caller boundary as R3/R4 (loopback host webServer, full
+  // origin-tuple check, 64 KiB body cap). No endpoint accepts secret
+  // VALUES: check/discover run native-lifecycle probes server-side (auth
+  // file metadata, CLI stdout) and return non-secret status only. Connect
+  // and disconnect stay terminal-assisted (see connectCommand /
+  // disconnectCommand in the payload): an interactive OAuth/login flow
+  // cannot run inside a loopback POST, and credentials must never cross
+  // unauthenticated loopback HTTP.
+
+  const connectionsHandler = async (req, res) => {
+    if (req.method !== 'GET') {
+      methodNotAllowed(res)
+      return
+    }
+    const originError = checkSameOrigin(req)
+    if (originError) {
+      respond(res, 403, { ok: false, error: originError })
+      return
+    }
+    try {
+      const { connections, errors } = service.getConnections()
+      if (!connections) {
+        respond(res, errorStatusOf(errors), { ok: false, error: (errors[0] && errors[0].code) || 'registry-connections-unavailable', details: errors })
+        return
+      }
+      respond(res, 200, { ok: true, schemaVersion: 1, generatedAtUtc: new Date().toISOString(), connections, warnings: errors })
+    } catch (e) {
+      respond(res, 500, { ok: false, error: 'registry-connections-failed' })
+    }
+  }
+
+  const connectionIdHandler = (operation) => async (req, res) => {
+    if (req.method !== 'POST') {
+      methodNotAllowed(res)
+      return
+    }
+    const originError = checkSameOrigin(req)
+    if (originError) {
+      respond(res, 403, { ok: false, error: originError })
+      return
+    }
+    const read = await readBoundedJson(req, MAX_BODY_BYTES)
+    if (read.error) {
+      respond(res, read.error === 'payload-too-large' ? 413 : 400, { ok: false, error: read.error })
+      return
+    }
+    const id = read.body && typeof read.body.id === 'string' ? read.body.id.trim() : ''
+    if (id === '') {
+      respond(res, 400, { ok: false, error: 'invalid-connections-payload' })
+      return
+    }
+    // Secret-shaped fields are rejected outright - the R5 checks need no
+    // caller credential of any kind.
+    if (read.body && (read.body.testBearer !== undefined || read.body.apiKey !== undefined || read.body.secret !== undefined || read.body.token !== undefined || read.body.password !== undefined || read.body.userHome !== undefined || read.body.claudeBin !== undefined)) {
+      respond(res, 400, { ok: false, error: 'secret-material-rejected' })
+      return
+    }
+    try {
+      if (operation === 'check') {
+        const out = await service.checkConnection(id, { userHome: hostUserHome })
+        respond(res, 200, { ok: out.ok, status: out.status || null, detail: out.detail || null, errors: out.errors || [] })
+        return
+      }
+      const out = await service.discoverConnectionModels(id, { userHome: hostUserHome })
+      respond(res, 200, { ok: out.ok, advertised: out.advertised || null, capabilities: out.capabilities || null, errors: out.errors || [] })
+    } catch (e) {
+      respond(res, 500, { ok: false, error: 'registry-connections-failed' })
+    }
+  }
+
   return {
     modesHandler,
     configurationHandler,
@@ -690,6 +768,9 @@ function createRegistryHandlers(service) {
     routeDeleteHandler: catalogIdHandler('routes', 'delete'),
     connectionDeleteHandler: catalogIdHandler('connections', 'delete'),
     connectionStatusHandler,
+    connectionsHandler,
+    connectionCheckHandler: connectionIdHandler('check'),
+    connectionDiscoverHandler: connectionIdHandler('discover'),
     providerTestHandler: providerProbeHandler('test'),
     providerDiscoverHandler: providerProbeHandler('discover'),
     routeVerifyHandler: providerProbeHandler('verify'),

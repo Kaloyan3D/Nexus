@@ -391,7 +391,7 @@ async function main() {
     assert.equal(found.ok, true);
     assert.ok(found.advertised.indexOf('acme-1-large') !== -1, JSON.stringify(found.advertised));
     // Listing alone created no routes and verified nothing.
-    assert.equal(svc.getCatalog().catalog.routes.length, 9, 'only built-in routes exist after discovery');
+    assert.equal(svc.getCatalog().catalog.routes.length, 10, 'only built-in routes exist after discovery (9 legacy plus the R5 Claude subscription agent route)');
     const imported = svc.saveRoute(Object.assign({}, acmeRoute(), { availability: 'discovered' }), {});
     assert.equal(imported.ok, true);
     const route = svc.getCatalog().catalog.routes.find((r) => r.routeId === 'acme-direct/acme-1');

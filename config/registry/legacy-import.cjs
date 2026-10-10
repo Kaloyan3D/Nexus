@@ -134,18 +134,43 @@ function providerKeysOf(entry) {
  * lives exclusively in the adapter-private map in dsh-adapter.cjs.
  * Canonical lookups use `id` only.
  */
+// R5: known providers describe their real substrate (transport, auth type,
+// non-secret base URL). Ids and status are unchanged, so saved
+// configurations and resolver eligibility behave exactly as before.
+const R5_PROVIDER_SPECIALIZATION = {
+  'sol-local': { transportId: 'local-openai-compatible', authType: 'local-server', baseUrl: 'http://127.0.0.1:10531/v1' },
+  'opencode-go': { transportId: 'openai-responses', authType: 'api-key', baseUrl: 'https://opencode.ai/zen/go/v1' },
+  'meta-model-api': { transportId: 'openai-chat-completions', authType: 'api-key', baseUrl: 'https://api.meta.ai/v1' },
+};
+
 function normalizeProvider(providerId) {
-  return {
+  const record = {
     schemaVersion: 1,
     id: providerId,
     name: providerId,
     transportId: 'unknown',
     status: 'enabled',
+  };
+  const spec = R5_PROVIDER_SPECIALIZATION[providerId];
+  if (spec) {
+    record.transportId = spec.transportId;
+    record.authType = spec.authType;
+    record.baseUrl = spec.baseUrl;
   }
+  return record;
 }
 
+// R5: the Codex OAuth connection is a third-party subscription-delegated
+// integration (NOT official Sign in with ChatGPT); API-key providers keep
+// their kind. Ids, credential refs, status and provenance are unchanged.
+const R5_CONNECTION_SPECIALIZATION = {
+  'sol-local': { connectionKind: 'subscription-delegated', authMethod: 'codex-oauth (third-party openai-oauth package: PKCE loopback flow, Codex-compatible auth file, local service on 127.0.0.1:10531; Nexus holds no token; NOT official Sign in with ChatGPT delegation)' },
+  'opencode-go': { connectionKind: 'api-key', authMethod: 'api-key (OPENCODE_API_KEY; OpenCode Go API billing, not a subscription)' },
+  'meta-model-api': { connectionKind: 'api-key', authMethod: 'api-key (MODEL_API_KEY; Meta direct API billing, not a subscription)' },
+};
+
 function normalizeConnection(providerId) {
-  return {
+  const record = {
     schemaVersion: 1,
     id: 'conn-' + providerId,
     providerId,
@@ -154,7 +179,13 @@ function normalizeConnection(providerId) {
     credentialRef: 'credential://connections/conn-' + providerId,
     status: 'unknown',
     provenance: 'legacy-production-use',
+  };
+  const spec = R5_CONNECTION_SPECIALIZATION[providerId];
+  if (spec) {
+    record.connectionKind = spec.connectionKind;
+    record.authMethod = spec.authMethod;
   }
+  return record;
 }
 
 /**
@@ -184,12 +215,12 @@ function normalizeRoutes(entry) {
       providerId,
       logicalModelId: String(entry.id),
       remoteModelId: typeof entry.model === 'string' && entry.model !== '' ? entry.model : String(entry.id),
-      accessType: 'api-key',
+      accessType: providerId === 'sol-local' ? 'subscription-delegated' : 'api-key',
       connectionId: 'conn-' + providerId,
       executionKind: 'raw-model',
       reasoningLevels,
       compatibility: {
-        transport: 'unknown',
+        transport: providerId === 'sol-local' ? 'local-openai-compatible' : (providerId === 'opencode-go' ? 'openai-responses' : (providerId === 'meta-model-api' ? 'openai-chat-completions' : 'unknown')),
         toolRoundTrip: 'declared',
         streaming: 'declared',
         vision: entry.supportsVision === true ? 'declared' : 'unknown',

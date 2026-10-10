@@ -72,7 +72,8 @@ async function main() {
     const verify = async routes => {
       const prefix = '/nexus/registry/v1/'
       // R4 (TASK-0048) extends the pinned route contract with the operator
-      // catalog + explicit probe endpoints; the R3 five-route pin is
+      // catalog + explicit probe endpoints, plus the R5 unified Connections
+      // endpoints; the R3 five-route pin is
       // superseded by this list (spec change, not a regression).
       assert.deepEqual([...routes.keys()].filter(p => p.startsWith(prefix)).sort(),
         ['configuration', 'eligible', 'modes', 'preview', 'validate',
@@ -82,7 +83,8 @@ async function main() {
           'providers/delete', 'models/delete', 'routes/delete', 'connections/delete',
           'connections/status',
           'providers/test', 'providers/discover', 'routes/verify',
-          'routes/evidence', 'routes/project'].map(p => prefix + p).sort())
+          'routes/evidence', 'routes/project',
+          'connections/list', 'connections/check', 'connections/discover'].map(p => prefix + p).sort())
       let status, body
       await routes.get(prefix + 'modes')({ method: 'GET', url: prefix + 'modes', headers: {} }, {
         writeHead(code) { status = code }, end(text) { body = JSON.parse(text) }

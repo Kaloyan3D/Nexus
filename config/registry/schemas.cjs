@@ -275,7 +275,11 @@ function validateLogicalModel(doc, path) {
  * adapter-private map in dsh-adapter.cjs; a Provider carrying it is rejected
  * as an unknown field so DSH coupling can never re-enter the domain. */
 const PROVIDER_FIELDS = new Set(['schemaVersion', 'id', 'name', 'transportId', 'baseUrl', 'discovery', 'status', 'authType', 'metadata'])
-const PROVIDER_AUTH_TYPES = ['api-key', 'local-server', 'manual-unknown']
+// R5: subscription-agent / subscription-delegated describe Nexus-known native
+// subscription lifecycles (Claude CLI session, Codex OAuth). Built-ins may
+// carry them; operator manual providers may not (service.saveProvider refuses
+// them: a manual record has no native lifecycle bound to it).
+const PROVIDER_AUTH_TYPES = ['api-key', 'local-server', 'manual-unknown', 'subscription-agent', 'subscription-delegated']
 
 function validateProvider(doc, path) {
   const errors = []

@@ -241,3 +241,95 @@ function Wait-AihEndpoint {
     } while ([DateTime]::UtcNow -lt $deadline)
     return $false
 }
+
+# --- Claude Pro/Max subscription helpers (Registry R5) ---
+# The official Claude Code CLI owns login/session/refresh. These helpers
+# resolve the executable and observe session METADATA ONLY (exists, size,
+# mtime). They NEVER read the credentials file content, NEVER emit token
+# material, and NEVER start an OAuth flow. Interactive login lives in
+# scripts/Set-ClaudeSubscription.ps1; status checks in Test-ClaudeConnection.
+
+function Get-AihClaudeHome {
+    # User-profile Claude directory. Windows keeps USERPROFILE; other
+    # platforms use HOME (the CLI resolves it the same way).
+    $userHome = if (Test-AihIsWindows) { $env:USERPROFILE } else { $env:HOME }
+    if ([string]::IsNullOrWhiteSpace($userHome)) { return $null }
+    return (Join-Path $userHome '.claude')
+}
+
+function Get-AihClaudeExecutable {
+    # PATH first (user-installed official CLI wins), then well-known npm
+    # global locations per platform. Returns $null when absent (fail closed).
+    $names = if (Test-AihIsWindows) { @('claude.exe', 'claude.cmd', 'claude') } else { @('claude') }
+    foreach ($name in $names) {
+        $command = Get-Command $name -ErrorAction SilentlyContinue
+        if ($null -ne $command -and -not [string]::IsNullOrWhiteSpace($command.Source)) { return $command.Source }
+    }
+    $candidates = @()
+    if (Test-AihIsWindows) {
+        if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
+            $candidates += (Join-Path (Join-Path $env:APPDATA 'npm') 'claude.cmd')
+            $candidates += (Join-Path (Join-Path $env:APPDATA 'npm') 'claude.exe')
+        }
+    }
+    else {
+        foreach ($prefix in @('/usr/local', $env:HOME)) {
+            if ([string]::IsNullOrWhiteSpace($prefix)) { continue }
+            $candidates += (Join-Path (Join-Path $prefix 'bin') 'claude')
+            $candidates += (Join-Path (Join-Path (Join-Path $prefix '.npm-global') 'bin') 'claude')
+        }
+    }
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    return $null
+}
+
+function Get-AihClaudeSessionMeta {
+    # Session METADATA ONLY. The returned object carries Exists, SizeBytes
+    # and ModifiedUtc - never file content. $null when no session file.
+    param([string]$ClaudeHome)
+    if ([string]::IsNullOrWhiteSpace($ClaudeHome)) { $ClaudeHome = Get-AihClaudeHome }
+    if ([string]::IsNullOrWhiteSpace($ClaudeHome)) { return $null }
+    $credFile = Join-Path $ClaudeHome '.credentials.json'
+    try { $item = Get-Item -LiteralPath $credFile -ErrorAction Stop }
+    catch { return $null }
+    if ($item.PSIsContainer) { return $null }
+    return [pscustomobject]@{
+        Exists      = $true
+        Path        = $credFile
+        SizeBytes   = [int64]$item.Length
+        ModifiedUtc = $item.LastWriteTimeUtc.ToString('o')
+    }
+}
+
+function Get-AihClaudeStatus {
+    # Non-secret connection summary: Installed, Version, SessionPresent,
+    # SessionSizeBytes, SessionModifiedUtc. Emits NO credential material.
+    # When ANTHROPIC_API_KEY is set, reports ApiBillingRisk = $true so
+    # callers can refuse silent API billing (subscription boundary).
+    $exe = Get-AihClaudeExecutable
+    $installed = -not [string]::IsNullOrWhiteSpace($exe)
+    $version = $null
+    if ($installed) {
+        try {
+            $out = & $exe --version 2>&1 | Out-String
+            if ($LASTEXITCODE -eq 0 -and $out -match '(?i)claude') { $version = ([string]$out).Trim().Split("`n")[0].Trim() }
+        }
+        catch { $version = $null }
+        if ([string]::IsNullOrWhiteSpace($version)) { $installed = $false }
+    }
+    $session = Get-AihClaudeSessionMeta
+    $sessionPresent = ($null -ne $session) -and ($session.SizeBytes -gt 0)
+    $apiKey = [Environment]::GetEnvironmentVariable('ANTHROPIC_API_KEY')
+    return [pscustomobject]@{
+        Installed           = $installed
+        Executable          = $exe
+        Version             = $version
+        SessionPresent      = $sessionPresent
+        SessionSizeBytes    = $(if ($null -ne $session) { $session.SizeBytes } else { $null })
+        SessionModifiedUtc  = $(if ($null -ne $session) { $session.ModifiedUtc } else { $null })
+        ApiBillingRisk      = -not [string]::IsNullOrWhiteSpace($apiKey)
+        Connected           = $installed -and $sessionPresent
+    }
+}

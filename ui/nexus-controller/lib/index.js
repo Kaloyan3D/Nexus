@@ -679,6 +679,9 @@ function apply(ctx) {
       ['/nexus/registry/v1/routes/verify', 'routeVerifyHandler', 'registry R4 route verify route'],
       ['/nexus/registry/v1/routes/evidence', 'routeEvidenceHandler', 'registry R4 route evidence route'],
       ['/nexus/registry/v1/routes/project', 'routeProjectHandler', 'registry R4 route projection route'],
+      ['/nexus/registry/v1/connections/list', 'connectionsHandler', 'registry R5 connections list route'],
+      ['/nexus/registry/v1/connections/check', 'connectionCheckHandler', 'registry R5 connection check route'],
+      ['/nexus/registry/v1/connections/discover', 'connectionDiscoverHandler', 'registry R5 connection discover route'],
     ]
     for (const [routePath, handlerName, label] of r4Routes) {
       const handler = registryHandlers[handlerName]

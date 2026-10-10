@@ -2626,6 +2626,83 @@ function ModelsProvidersPanel() {
 }
 //#endregion
 
+//#region Registry R5 - Unified Connections (TASK R5)
+function useRegistryConnections() {
+	const seam = registrySeam("__NX_TEST_REGISTRY_CONNECTIONS__");
+	const [doc, setDoc] = react.useState(seam);
+	const [failed, setFailed] = react.useState(false);
+	const [loading, setLoading] = react.useState(seam === null);
+	const refresh = react.useCallback(() => {
+		const test = registrySeam("__NX_TEST_REGISTRY_CONNECTIONS__");
+		if (test !== null) { setDoc(test); setFailed(false); setLoading(false); return; }
+		if (typeof fetch === "undefined") { setFailed(true); setLoading(false); return; }
+		setLoading(true);
+		fetch(REGISTRY_API + "/connections/list", { cache: "no-store" })
+			.then((res) => registryJson(res).then((body) => {
+				if (!res.ok || !body || body.ok !== true || !Array.isArray(body.connections)) throw new Error("registry connections unavailable");
+				setDoc(body.connections);
+				setFailed(false);
+			}))
+			.catch(() => setFailed(true))
+			.finally(() => setLoading(false));
+	}, []);
+	react.useEffect(() => { if (seam === null) refresh(); }, [refresh, seam]);
+	return { doc, failed, loading, refresh };
+}
+function connDetailsText(details) {
+	if (!details || details.length === 0) return "";
+	return " (" + details.map((d) => ((d && d.code) || "error") + ": " + ((d && d.message) || "")).join(" | ") + ")";
+}
+function ConnectionsPanel() {
+	const conns = useRegistryConnections();
+	const [notice, setNotice] = react.useState(null);
+	const [busy, setBusy] = react.useState(false);
+	function say(tone, text) { setNotice({ tone, text }); }
+	function post(id, operation) {
+		if (typeof fetch === "undefined") { say("err", "Fetch is unavailable in this host."); return; }
+		setBusy(true);
+		fetch(REGISTRY_API + "/connections/" + operation, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) })
+			.then((res) => registryJson(res).then((body) => ({ res, body })))
+			.then(({ res, body }) => {
+				if (!res.ok || !body || body.ok !== true) { say("err", (operation === "check" ? "Check " : "Discover ") + id + " did not complete" + connDetailsText((body && body.errors) || [])); return; }
+				if (operation === "check") { say("ok", "Check " + id + ": " + String((body && body.status) || "unknown") + connDetailsText((body && body.errors) || [])); }
+				else if (body && body.capabilities) { say("ok", "Capabilities for " + id + ": execution " + String(body.capabilities.executionKind) + " - billing " + String(body.capabilities.billingSource)); }
+				else { say("ok", "Advertised by " + id + ": " + (((body && body.advertised) || []).slice(0, 12).join(", ") || "none") + ". Listing alone verifies nothing."); }
+				conns.refresh();
+			})
+			.catch(() => say("err", (operation === "check" ? "Check " : "Discover ") + id + " failed to reach the host."))
+			.finally(() => setBusy(false));
+	}
+	const list = conns.doc || [];
+	return react_jsx_runtime.jsx(Section, {
+		label: "Connections (Registry)",
+		children: conns.failed ? react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Connections are unavailable right now." })
+		: conns.loading || !conns.doc ? react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading connections…" })
+		: react_jsx_runtime.jsxs("div", {
+			children: [
+				react_jsx_runtime.jsx("div", { className: "nx-reg-banner", children: "Unified connections (R5): the existing ChatGPT/Codex OAuth integration is reused as-is, Claude Pro/Max connects through the official CLI login, and OpenCode Go stays API-key. Checks run server-side and return status only - no key values are ever collected or displayed." }),
+				notice ? react_jsx_runtime.jsx("div", { className: "nx-eng-notice " + (notice.tone === "err" ? "nx-eng-notice-err" : "nx-eng-notice-ok"), children: notice.text }) : null,
+				list.map((c) => react_jsx_runtime.jsxs("div", {
+					className: "nx-eng-row",
+					children: [
+						react_jsx_runtime.jsx("div", { children: [
+							react_jsx_runtime.jsx("span", { className: "nx-value", children: (c.providerName || c.providerId) + " - " + String(c.status) + " - billing: " + String(c.billingSource || "unknown") }),
+							react_jsx_runtime.jsx("div", { className: "nx-eng-meta", children: String(c.accountSource || "") }),
+							c.connectCommand ? react_jsx_runtime.jsx("div", { className: "nx-eng-meta", children: "Connect: " + c.connectCommand }) : null,
+							c.disconnectCommand ? react_jsx_runtime.jsx("div", { className: "nx-eng-meta", children: "Disconnect: " + c.disconnectCommand }) : null,
+							c.capabilitiesNote ? react_jsx_runtime.jsx("div", { className: "nx-eng-hint", children: String(c.capabilitiesNote) }) : null,
+						] }),
+						c.supportsCheck ? react_jsx_runtime.jsx(R4Button, { onClick: () => post(c.id, "check"), disabled: busy, title: "Run the native-lifecycle connection check for " + c.id, children: "Check Connection" }) : null,
+						c.supportsDiscover ? react_jsx_runtime.jsx(R4Button, { onClick: () => post(c.id, "discover"), disabled: busy, title: "Discover models or agent capabilities for " + c.id, children: "Discover Models" }) : null,
+					],
+				}, "r5-conn-" + c.id)),
+				react_jsx_runtime.jsx("div", { className: "nx-eng-hint", children: "Subscription-agent execution (Claude) and raw-model API access stay distinct: no silent billing switch, no OpenAI-compatible proxy. Claude as an Engineering orchestrator is pending R6 controller work." }),
+			],
+		}),
+	});
+}
+//#endregion
+
 function EngineeringEditor({ sessionId }) {
 	const editor = useEngineeringEditor(sessionId);
 	// R3: the Registry panel is independent of the legacy editor state, so it
@@ -2652,6 +2729,7 @@ function EngineeringEditor({ sessionId }) {
 		children: [
 			react_jsx_runtime.jsx(RegistryPanel, { sessionId, legacyRuntimeName: legacyPreferred }),
 		react_jsx_runtime.jsx(ModelsProvidersPanel, {}), 
+		react_jsx_runtime.jsx(ConnectionsPanel, {}),
 			react_jsx_runtime.jsx(Section, {
 				label: "Engineering Profile",
 				children: legacyBody,
@@ -3673,6 +3751,8 @@ exports.engineeringEditorLoadGate = engineeringEditorLoadGate;
 exports.EngineeringEditorFields = EngineeringEditorFields;
 exports.RegistryPanel = RegistryPanel;
 exports.ModelsProvidersPanel = ModelsProvidersPanel;
+exports.ConnectionsPanel = ConnectionsPanel;
+exports.useRegistryConnections = useRegistryConnections;
 exports.useRegistryCatalog = useRegistryCatalog;
 exports.RegistrySlotCard = RegistrySlotCard;
 exports.RegistryAdvanced = RegistryAdvanced;
