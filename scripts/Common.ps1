@@ -304,8 +304,8 @@ function Get-AihClaudeSessionMeta {
 }
 
 function Invoke-AihClaudeAuthStatus {
-    # Runs the native (auth status --output json) probe with a bounded wait
-    # and bounded output. Returns the parsed object, or $null when the CLI
+    # Runs the native auth status probe (JSON output is the documented CLI
+    # default) with a bounded wait and bounded output. Returns the parsed object, or $null when the CLI
     # is missing, the call times out, or the output is not strict JSON.
     # Callers must select non-secret fields only; the raw object is never
     # echoed (it may carry account identifiers).
@@ -314,7 +314,7 @@ function Invoke-AihClaudeAuthStatus {
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $Executable
-        $psi.Arguments = 'auth status --output json'
+        $psi.Arguments = 'auth status'
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $psi.UseShellExecute = $false
@@ -330,31 +330,46 @@ function Invoke-AihClaudeAuthStatus {
     catch { return $null }
 }
 
+function Test-AihHasProp {
+    param($Object, [string]$Name)
+    if ($null -eq $Object) { return $false }
+    return ($null -ne $Object.PSObject.Properties[$Name])
+}
 function Get-AihClaudeAuthState {
     # Classifies native auth status into a non-secret state label. Mirrors
-    # the Registry classifier (config/registry/subscription-connections.cjs):
-    # only an explicit subscription signal confirms a subscription.
+    # the Registry classifier (config/registry/subscription-connections.cjs)
+    # field for field: loggedIn, authMethod, subscriptionType, apiProvider.
+    # Only an explicit native subscription signal confirms a subscription;
+    # oauth_token alone never implies Pro/Max. No ternary or other
+    # PowerShell 7-only syntax: Windows PowerShell 5.1 compatible.
     param($AuthStatus)
     if ($null -eq $AuthStatus) { return 'unknown' }
+    if (((Test-AihHasProp $AuthStatus 'loggedIn') -and (-not [bool]$AuthStatus.loggedIn)) -or ((Test-AihHasProp $AuthStatus 'authenticated') -and (-not [bool]$AuthStatus.authenticated))) { return 'not-logged-in' }
     $statusNorm = ''
-    if ($null -ne $AuthStatus.status) { $statusNorm = ([string]$AuthStatus.status).Trim().ToLowerInvariant() }
-    if (($null -ne $AuthStatus.authenticated -and -not [bool]$AuthStatus.authenticated) -or ($statusNorm -in @('logged_out', 'logged out', 'not_logged_in', 'not logged in', 'signed_out', 'signed out'))) { return 'not-logged-in' }
-    if (($statusNorm -in @('expired', 'invalid', 'revoked')) -or (($null -ne $AuthStatus.expired) -and [bool]$AuthStatus.expired)) { return $statusNorm -eq 'revoked' ? 'revoked' : 'expired' }
+    if (Test-AihHasProp $AuthStatus 'status') { $statusNorm = ([string]$AuthStatus.status).Trim().ToLowerInvariant() }
+    if (($statusNorm -in @('expired', 'invalid', 'revoked')) -or ((Test-AihHasProp $AuthStatus 'expired') -and [bool]$AuthStatus.expired)) {
+        if ($statusNorm -eq 'revoked') { return 'revoked' }
+        return 'expired'
+    }
     $methodLabel = $null
-    foreach ($field in @('method', 'type', 'provider', 'auth_type', 'authType', 'kind', 'plan', 'tier', 'subscription', 'account_type', 'accountType')) {
-        try { $candidate = $AuthStatus.$field } catch { $candidate = $null }
+    foreach ($field in @('authMethod', 'auth_method', 'method', 'type', 'provider', 'kind')) {
+        if (Test-AihHasProp $AuthStatus $field) { $candidate = $AuthStatus.$field } else { $candidate = $null }
         if ($candidate -is [string] -and -not [string]::IsNullOrWhiteSpace($candidate)) { $methodLabel = $candidate.Trim(); break }
     }
-    $hay = (([string]$methodLabel) + ' ' + $statusNorm).ToLowerInvariant()
-    if ($hay -match 'api[-_ ]?key|access[-_ ]?token|bearer|personal[-_ ]?token|setup[-_ ]?token') { return 'api-key-identity' }
-    if ($hay -match 'bedrock|vertex|proxy|custom|endpoint|third[-_ ]?party|gateway|byok') { return 'alternate-provider-identity' }
-    $planLabel = $null
-    foreach ($field in @('plan', 'tier', 'subscription')) {
-        try { $candidate = $AuthStatus.$field } catch { $candidate = $null }
-        if ($candidate -is [string] -and -not [string]::IsNullOrWhiteSpace($candidate)) { $planLabel = $candidate.Trim(); break }
-    }
-    $planHit = ($null -ne $planLabel) -and ($planLabel -match '^(?i)(pro|max|plus|team|enterprise|business|subscriber)$')
-    if (($hay -match 'subscri|oauth') -or $planHit) { return 'subscription-confirmed' }
+    $methodNorm = ''
+    if ($null -ne $methodLabel) { $methodNorm = $methodLabel.ToLowerInvariant() }
+    if ($methodNorm -eq 'none') { return 'not-logged-in' }
+    if (($methodNorm -in @('api_key', 'api-key', 'api_key_helper', 'api-key-helper')) -or ($methodNorm -match 'api[-_ ]?key|access[-_ ]?token|bearer|personal[-_ ]?token|setup[-_ ]?token')) { return 'api-key-identity' }
+    if (($methodNorm -in @('third_party', 'third-party')) -or ($methodNorm -match 'bedrock|vertex|proxy|custom|endpoint|gateway|byok')) { return 'alternate-provider-identity' }
+    $subTypeLabel = $null
+    if ((Test-AihHasProp $AuthStatus 'subscriptionType') -and ($AuthStatus.subscriptionType -is [string]) -and -not [string]::IsNullOrWhiteSpace($AuthStatus.subscriptionType)) { $subTypeLabel = ([string]$AuthStatus.subscriptionType).Trim() }
+    $subTypeHit = ($null -ne $subTypeLabel) -and ($subTypeLabel -match '^(?i)(pro|max|plus|team|enterprise|business|subscriber)$')
+    $loggedInTrue = (Test-AihHasProp $AuthStatus 'loggedIn') -and ([bool]$AuthStatus.loggedIn)
+    if ((($methodNorm -eq 'claude.ai') -or ($methodNorm -eq 'claude_ai') -or ($methodNorm -eq 'claudeai')) -and $loggedInTrue) { return 'subscription-confirmed' }
+    if ($subTypeHit) { return 'subscription-confirmed' }
+    $apiProviderLabel = $null
+    if ((Test-AihHasProp $AuthStatus 'apiProvider') -and ($AuthStatus.apiProvider -is [string]) -and -not [string]::IsNullOrWhiteSpace($AuthStatus.apiProvider)) { $apiProviderLabel = ([string]$AuthStatus.apiProvider).Trim().ToLowerInvariant() }
+    if (($null -ne $apiProviderLabel) -and ($apiProviderLabel -match 'bedrock|vertex|proxy|custom|endpoint|gateway|byok|third')) { return 'alternate-provider-identity' }
     return 'source-unestablished'
 }
 
@@ -382,7 +397,7 @@ function Get-AihClaudeStatus {
     if ($installed) {
         $native = Invoke-AihClaudeAuthStatus -Executable $exe
         $authState = Get-AihClaudeAuthState -AuthStatus $native
-        if (($null -ne $native) -and ($native.method -is [string]) -and -not [string]::IsNullOrWhiteSpace($native.method)) { $authMethod = ([string]$native.method).Trim() }
+        if ((Test-AihHasProp $native 'method') -and ($native.method -is [string]) -and -not [string]::IsNullOrWhiteSpace($native.method)) { $authMethod = ([string]$native.method).Trim() }
     }
     $session = Get-AihClaudeSessionMeta
     $sessionObserved = ($null -ne $session) -and ($session.SizeBytes -gt 0)

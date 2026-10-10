@@ -182,7 +182,7 @@ injected CLI shapes; no credentials, no model requests).
 1. `connected` was reported from CLI `--version` plus credentials-file
    metadata. A stale file (expired login) connected; a valid login without
    the assumed file path did not. Detection now uses the native
-   `claude auth status --output json` result with strict validation and a
+   `claude auth status` result (bare native vector; JSON is the documented default) with strict validation and a
    64 KiB bound; the file is supplementary metadata only.
 2. `claude login/logout` assumptions replaced with the native `claude auth
    login`, `claude auth status`, `claude auth logout` commands (scripts,
@@ -223,3 +223,54 @@ R5.1 16/16, R5 14/14, R0 21/21, R1 45/45, R2 41/41, R3 UI 29/29, R3 hardening 19
 16/16, installed runtime 3/3, MuseProvider 33/33, MuseOpenCodeGo 19/19,
 credential guard 14/14, PowerShell syntax 4/4. OpenAI OAuth integration
 unchanged (no diff in `Set-OpenAiOAuth.ps1` / `aih.ps1`).
+
+---
+
+# R5.1.1 — Claude CLI Contract Compatibility (targeted correction)
+
+**Baseline:** `05273d43f28dbe8c291a989461c603c2787a4a20`.
+**Suites:** `tests/RegistryR511CliContract.Tests.cjs` (10 checks, new) +
+`tests/RegistryR51Auth.Tests.cjs` (16 checks, migrated to native
+vocabulary). No execution change, no R6.
+
+## Defects corrected (red tests first, then fixes)
+
+1. The adapter sent `claude auth status --output json`. The documented
+   reference returns JSON from `claude auth status` by default, and the
+   subcommand must not be assumed to accept `--output`. Both the Registry
+   adapter (`buildClaudeAuthArgv('status')` is now `['auth', 'status']`)
+   and `Invoke-AihClaudeAuthStatus` (`'auth status'`) use the bare native
+   vector. (`--output-format stream-json` on the separate `--print`
+   execution path is unaffected.)
+2. Classification inferred subscriptions from substrings (`oauth`, `pro`)
+   and plan labels. It now uses the native fields only: explicit
+   `loggedIn: false` always rejects; `authMethod: claude.ai` plus
+   `loggedIn: true` is the primary positive case; `api_key`,
+   `api_key_helper`, `third_party`, `none` and Bedrock/Vertex-style
+   providers are never subscriptions; `oauth_token` alone never implies
+   Pro/Max (only an explicit `subscriptionType` promotes it);
+   `apiProvider` disambiguates hosted routing. Bounds, secret withholding
+   and fail-closed unknown states are unchanged. JS and PowerShell
+   classifiers were executed against the same 11-case matrix with
+   identical results.
+3. `Common.ps1` carried a PowerShell 7 ternary plus strict-mode-unsafe
+   property reads (missing fields threw instead of yielding unknown).
+   Both are fixed (`Test-AihHasProp` guard, `if/else`), and a syntax gate
+   now rejects `?` outside string literals in all four R5.1 scripts.
+   Native Windows PowerShell 5.1 execution remains unavailable in this
+   environment (Linux pwsh only); the gate asserts 5.1-compatible syntax,
+   not native 5.1 execution.
+
+## Verification status delta
+
+Exact vendor JSON vocabulary remains UNVERIFIED against a live CLI (none
+installed here; no web documentation budget either) — ambiguous shapes
+stay `unknown` by design. Native `auth login/logout` round-trips and
+Windows execution are likewise UNVERIFIED here. No paid model request was
+issued (only `--version` and `auth status` shapes through fakes).
+
+## Gates (R5.1.1 run)
+
+R5.1.1 10/10, R5.1 16/16, R5 14/14, R0 21/21, R1 45/45, R2 41/41, R3 UI
+29/29, R3 hardening 19/19, R4 providers 27/27, R4 transport 19/19, R4 probe
+security 16/16, installed runtime 3/3. OpenAI OAuth integration unchanged.

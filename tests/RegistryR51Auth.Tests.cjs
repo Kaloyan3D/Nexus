@@ -65,7 +65,7 @@ function fakeAuthHooks(o) {
   };
 }
 
-const SUBSCRIPTION_JSON = JSON.stringify({ authenticated: true, method: 'oauth', plan: 'max' });
+const SUBSCRIPTION_JSON = JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', subscriptionType: 'max' });
 (async () => {
 await check('R5.1 valid subscription login reports connected', async () => {
   const svc = svcOn(tmpDir('r51-sub-'));
@@ -75,13 +75,13 @@ await check('R5.1 valid subscription login reports connected', async () => {
   assert.equal(out.status, 'connected');
   assert.equal(out.detail.authState, 'subscription-confirmed');
   assert.ok(out.detail.billingSource.indexOf('claude-subscription') !== -1);
-  assert.equal(out.detail.authSource, 'native-cli-status (claude auth status --output json)');
+  assert.equal(out.detail.authSource, 'native-cli-status (claude auth status, JSON by default)');
   const again = svc.getConnections().connections.find((c) => c.id === 'conn-claude-code-subscription');
   assert.equal(again.status, 'connected');
 });
 
 await check('R5.1 whole-value plan signal confirms subscription', async () => {
-  const out = await sub.checkClaudeConnection({ hooks: fakeAuthHooks({ statusStdout: JSON.stringify({ authenticated: true, plan: 'pro' }) }), userHome: '/fake-home' });
+  const out = await sub.checkClaudeConnection({ hooks: fakeAuthHooks({ statusStdout: JSON.stringify({ loggedIn: true, subscriptionType: 'pro' }) }), userHome: '/fake-home' });
   assert.equal(out.ok, true);
   assert.equal(out.detail.authState, 'subscription-confirmed');
 });
@@ -96,7 +96,7 @@ await check('R5.1 missing CLI skips status probe and reports cli-missing', async
 });
 
 await check('R5.1 expired login is expired, never connected', async () => {
-  for (const payload of [JSON.stringify({ status: 'expired' }), JSON.stringify({ authenticated: true, expired: true })]) {
+  for (const payload of [JSON.stringify({ status: 'expired' }), JSON.stringify({ loggedIn: true, expired: true })]) {
     const out = await sub.checkClaudeConnection({ hooks: fakeAuthHooks({ filePresent: true, statusStdout: payload }), userHome: '/fake-home' });
     assert.equal(out.ok, false);
     assert.equal(out.detail.authState, 'expired');
@@ -129,7 +129,7 @@ await check('R5.1 valid login without the assumed file still connects', async ()
 });
 
 await check('R5.1 API-key identity is not a subscription', async () => {
-  const out = await sub.checkClaudeConnection({ hooks: fakeAuthHooks({ statusStdout: JSON.stringify({ authenticated: true, method: 'api_key' }) }), userHome: '/fake-home' });
+  const out = await sub.checkClaudeConnection({ hooks: fakeAuthHooks({ statusStdout: JSON.stringify({ loggedIn: true, authMethod: 'api_key' }) }), userHome: '/fake-home' });
   assert.equal(out.ok, false);
   assert.equal(out.detail.authState, 'api-key-identity');
   assert.ok(codes(out.errors).indexOf('claude-apikey-identity') !== -1);
@@ -170,13 +170,13 @@ await check('R5.1 malformed and oversize status JSON stay unknown', async () => 
 });
 
 await check('R5.1 secret-bearing status output is withheld', async () => {
-  const out = await sub.checkClaudeConnection({ hooks: fakeAuthHooks({ statusStdout: JSON.stringify({ authenticated: true, method: 'oauth', token: 'sk-ant-abc123XYZ' }) }), userHome: '/fake-home' });
+  const out = await sub.checkClaudeConnection({ hooks: fakeAuthHooks({ statusStdout: JSON.stringify({ loggedIn: true, authMethod: 'oauth_token', token: 'sk-ant-abc123XYZ' }) }), userHome: '/fake-home' });
   assert.equal(out.ok, false);
   assert.ok(codes(out.errors).indexOf('secret-material-rejected') !== -1);
 });
 
 await check('R5.1 ambiguous authenticated session stays source-unestablished', async () => {
-  const out = await sub.checkClaudeConnection({ hooks: fakeAuthHooks({ statusStdout: JSON.stringify({ authenticated: true }) }), userHome: '/fake-home' });
+  const out = await sub.checkClaudeConnection({ hooks: fakeAuthHooks({ statusStdout: JSON.stringify({ loggedIn: true }) }), userHome: '/fake-home' });
   assert.equal(out.ok, false);
   assert.equal(out.detail.authState, 'source-unestablished');
   assert.ok(codes(out.errors).indexOf('claude-auth-source-unknown') !== -1);
@@ -185,8 +185,8 @@ await check('R5.1 ambiguous authenticated session stays source-unestablished', a
 await check('R5.1 login/logout/status argv compatibility', () => {
   assert.deepEqual(sub.buildClaudeAuthArgv('login'), ['auth', 'login']);
   assert.deepEqual(sub.buildClaudeAuthArgv('logout'), ['auth', 'logout']);
-  assert.deepEqual(sub.buildClaudeAuthArgv('status'), ['auth', 'status', '--output', 'json']);
-  assert.deepEqual(sub.buildClaudeAuthArgv('other'), ['auth', 'status', '--output', 'json']);
+  assert.deepEqual(sub.buildClaudeAuthArgv('status'), ['auth', 'status']);
+  assert.deepEqual(sub.buildClaudeAuthArgv('other'), ['auth', 'status']);
 });
 
 await check('R5.1 adapter uses the real child env, refuses when unestablished', async () => {
@@ -222,7 +222,8 @@ await check('R5.1 Linux and Windows CLI detection parity in helpers', () => {
   assert.ok(ps.indexOf('APPDATA') !== -1, 'windows npm global location');
   assert.ok(ps.indexOf('.npm-global') !== -1, 'posix npm global location');
   assert.ok(ps.indexOf('Get-Command') !== -1, 'PATH fallback on every OS');
-  assert.ok(ps.indexOf('auth status --output json') !== -1, 'native status probe');
+  assert.ok(ps.indexOf('auth status') !== -1, 'native status probe');
+  assert.ok(ps.indexOf('--output json') === -1, 'no assumed output flag');
   assert.ok(ps.indexOf('auth login') === -1 && ps.indexOf('auth logout') === -1, 'helpers never trigger login/logout themselves (read-only probes)');
   const setPs = fs.readFileSync(path.join(repoRoot, 'scripts', 'Set-ClaudeSubscription.ps1'), 'utf8');
   assert.ok(setPs.indexOf('auth login') !== -1, 'connect uses native login');

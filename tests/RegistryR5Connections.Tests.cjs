@@ -57,7 +57,7 @@ function fakeHooks(o) {
         return Promise.resolve({ code: 0, stdout: '2.1.0 (Claude Code)', stderr: '' });
       }
       if (opts.claudePresent && cmd === 'claude' && args[0] === 'auth' && args[1] === 'status') {
-        return Promise.resolve({ code: 0, stdout: JSON.stringify({ authenticated: true, method: 'oauth', plan: 'max' }), stderr: '' });
+        return Promise.resolve({ code: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', subscriptionType: 'max' }), stderr: '' });
       }
       if (opts.claudePresent && cmd === 'claude' && args[0] === '--help') {
         return Promise.resolve({ code: 0, stdout: 'Usage: claude [options]\n  --model <name>  Model choice: "sonnet" or "opus"\n', stderr: '' });

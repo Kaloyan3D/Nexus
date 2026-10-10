@@ -343,7 +343,7 @@ const CLAUDE_AUTH_STATUS_MAX_BYTES = 65536;
 function buildClaudeAuthArgv(action) {
   if (action === 'login') return ['auth', 'login'];
   if (action === 'logout') return ['auth', 'logout'];
-  return ['auth', 'status', '--output', 'json'];
+  return ['auth', 'status'];
 }
 
 function safeStatusLabel(value, maxLen) {
@@ -351,6 +351,16 @@ function safeStatusLabel(value, maxLen) {
   const t = value.trim();
   if (t === '') return null;
   return t.slice(0, maxLen > 0 ? maxLen : 80);
+}
+
+function nativeMethodLabel(doc) {
+  const fields = [doc.authMethod, doc.auth_method, doc.method, doc.type, doc.provider, doc.kind];
+  for (const c of fields) { const l = safeStatusLabel(c, 80); if (l) return l; }
+  return null;
+}
+
+function nativeSubscriptionType(doc) {
+  return safeStatusLabel(doc.subscriptionType, 40);
 }
 
 function parseClaudeAuthStatus(stdout) {
@@ -372,31 +382,37 @@ function parseClaudeAuthStatus(stdout) {
   }
   const statusLabel = safeStatusLabel(doc.status, 40);
   const statusNorm = statusLabel ? statusLabel.toLowerCase() : '';
-  if (doc.authenticated === false || statusNorm === 'logged_out' || statusNorm === 'logged out' || statusNorm === 'not_logged_in' || statusNorm === 'not logged in' || statusNorm === 'signed_out' || statusNorm === 'signed out') {
+  if (doc.loggedIn === false || doc.authenticated === false) {
     return { outcome: 'unauthenticated', authState: 'not-logged-in', errors: [err('claude-session-missing', where, 'CLI reports no login; connect with the native login (claude auth login) - Nexus never handles the token')] };
   }
   if (statusNorm === 'expired' || statusNorm === 'invalid' || statusNorm === 'revoked' || doc.expired === true) {
     const revoked = statusNorm === 'revoked';
     return { outcome: 'expired', authState: revoked ? 'revoked' : 'expired', errors: [err(revoked ? 'claude-session-revoked' : 'claude-session-expired', where, 'CLI reports an expired, revoked or invalid login; reconnect with the native login (claude auth login)')] };
   }
-  const methodFields = [doc.method, doc.type, doc.provider, doc.auth_type, doc.authType, doc.kind, doc.plan, doc.tier, doc.subscription, doc.account_type, doc.accountType];
-  let methodLabel = null;
-  for (const c of methodFields) { const l = safeStatusLabel(c, 80); if (l) { methodLabel = l; break; } }
-  const hay = ((methodLabel || '') + ' ' + statusNorm).toLowerCase();
-  const apiKeyHit = /api[-_ ]?key|access[-_ ]?token|bearer|personal[-_ ]?token|setup[-_ ]?token/.test(hay);
-  const alternateHit = /bedrock|vertex|proxy|custom|endpoint|third[-_ ]?party|gateway|byok/.test(hay);
-  if (apiKeyHit || alternateHit) {
-    const isAlternate = alternateHit && !apiKeyHit;
-    return { outcome: isAlternate ? 'alternate' : 'api-key', authState: isAlternate ? 'alternate-provider-identity' : 'api-key-identity', method: methodLabel, errors: [err(isAlternate ? 'claude-alternate-identity' : 'claude-apikey-identity', where, 'CLI reports a ' + (isAlternate ? 'non-subscription provider' : 'key-based') + ' identity (' + String(methodLabel || 'unlabeled') + '); subscription billing is not established, so this connection is not eligible')] };
+  const methodLabel = nativeMethodLabel(doc);
+  const methodNorm = methodLabel ? methodLabel.toLowerCase() : '';
+  if (methodNorm === 'none') {
+    return { outcome: 'unauthenticated', authState: 'not-logged-in', errors: [err('claude-session-missing', where, 'CLI reports no authentication method; connect with the native login (claude auth login)')] };
   }
-  let planLabel = null;
-  for (const pc of [doc.plan, doc.tier, doc.subscription]) { const pl = safeStatusLabel(pc, 40); if (pl) { planLabel = pl; break; } }
-  const planHit = planLabel ? /^(pro|max|plus|team|enterprise|business|subscriber)$/i.test(planLabel) : false;
-  const subscriptionHit = /subscri|oauth/.test(hay) || planHit;
-  if (subscriptionHit) {
+  if (methodNorm === 'api_key' || methodNorm === 'api-key' || methodNorm === 'api_key_helper' || methodNorm === 'api-key-helper' || /api[-_ ]?key|access[-_ ]?token|bearer|personal[-_ ]?token|setup[-_ ]?token/.test(methodNorm)) {
+    return { outcome: 'api-key', authState: 'api-key-identity', method: methodLabel, errors: [err('claude-apikey-identity', where, 'CLI reports a key-based identity (' + String(methodLabel || 'unlabeled') + '); subscription billing is not established, so this connection is not eligible')] };
+  }
+  if (methodNorm === 'third_party' || methodNorm === 'third-party' || /bedrock|vertex|proxy|custom|endpoint|gateway|byok/.test(methodNorm)) {
+    return { outcome: 'alternate', authState: 'alternate-provider-identity', method: methodLabel, errors: [err('claude-alternate-identity', where, 'CLI reports a non-subscription provider identity (' + String(methodLabel || 'unlabeled') + '); subscription billing is not established, so this connection is not eligible')] };
+  }
+  const subTypeLabel = nativeSubscriptionType(doc);
+  const subTypeHit = subTypeLabel ? /^(pro|max|plus|team|enterprise|business|subscriber)$/i.test(subTypeLabel) : false;
+  if ((methodNorm === 'claude.ai' || methodNorm === 'claude_ai' || methodNorm === 'claudeai') && doc.loggedIn === true) {
     return { outcome: 'subscription', authState: 'subscription-confirmed', method: methodLabel, errors: [] };
   }
-  if (doc.authenticated === true) {
+  if (subTypeHit && doc.loggedIn !== false) {
+    return { outcome: 'subscription', authState: 'subscription-confirmed', method: methodLabel, errors: [] };
+  }
+  const apiProviderLabel = safeStatusLabel(doc.apiProvider, 40);
+  if (apiProviderLabel && /bedrock|vertex|proxy|custom|endpoint|gateway|byok|third/.test(apiProviderLabel.toLowerCase())) {
+    return { outcome: 'alternate', authState: 'alternate-provider-identity', method: methodLabel, errors: [err('claude-alternate-identity', where, 'CLI reports alternate hosted routing (' + String(apiProviderLabel) + '); subscription billing is not established, so this connection is not eligible')] };
+  }
+  if (doc.loggedIn === true || doc.authenticated === true) {
     return { outcome: 'unknown', authState: 'source-unestablished', method: methodLabel, errors: [err('claude-auth-source-unknown', where, 'CLI reports an authenticated session but no recognizable subscription signal; refusing to infer billing source')] };
   }
   return { outcome: 'unknown', authState: 'source-unestablished', method: methodLabel, errors: [err('claude-auth-source-unknown', where, 'auth status is ambiguous; refusing to infer authentication or billing source')] };
@@ -463,7 +479,7 @@ function checkBillingSeparation(envInput, opts) {
 }
 
 // checkClaudeConnection (R5.1): CLI presence via --version, authentication
-// via native (auth status --output json). The legacy credentials file is
+// via the native auth status command (JSON output is the documented CLI
 // observed as SUPPLEMENTARY metadata only: a stale file never reports
 // connected, and a valid login without the assumed file still connects.
 // connected requires an explicit subscription outcome from the CLI.
@@ -538,7 +554,7 @@ async function checkClaudeConnection(input) {
     version,
     authState,
     authMethod,
-    authSource: installed ? 'native-cli-status (claude auth status --output json)' : null,
+    authSource: installed ? 'native-cli-status (claude auth status, JSON by default)' : null,
     sessionFileObserved,
     sessionFileSize,
     billingSource: connected ? 'claude-subscription (Pro/Max account verified via native CLI auth status; never Anthropic API billing)' : null,
