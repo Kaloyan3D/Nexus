@@ -270,7 +270,11 @@ function validateLogicalModel(doc, path) {
 
 /* ── Provider ───────────────────────────────────────────────────────── */
 
-const PROVIDER_FIELDS = new Set(['schemaVersion', 'id', 'name', 'transportId', 'baseUrl', 'discovery', 'status', 'legacyDshProviderId'])
+/* R2: canonical Provider records carry no DSH-specific identifiers. The
+ * retired R1 `legacyDshProviderId` alias now lives exclusively in the
+ * adapter-private map in dsh-adapter.cjs; a Provider carrying it is rejected
+ * as an unknown field so DSH coupling can never re-enter the domain. */
+const PROVIDER_FIELDS = new Set(['schemaVersion', 'id', 'name', 'transportId', 'baseUrl', 'discovery', 'status'])
 
 function validateProvider(doc, path) {
   const errors = []
@@ -295,9 +299,6 @@ function validateProvider(doc, path) {
     }
   }
   if (!PROVIDER_STATUSES.includes(doc.status)) errors.push(err('provider-invalid', where + '.status', 'status must be one of ' + PROVIDER_STATUSES.join(', ')))
-  if (doc.legacyDshProviderId !== undefined && (typeof doc.legacyDshProviderId !== 'string' || doc.legacyDshProviderId === '')) {
-    errors.push(err('provider-invalid', where + '.legacyDshProviderId', 'legacyDshProviderId must be a non-empty string'))
-  }
   return errors
 }
 

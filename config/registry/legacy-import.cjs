@@ -129,11 +129,10 @@ function providerKeysOf(entry) {
 }
 
 /**
- * NOTE (A1): legacyDshProviderId is a TEMPORARY compatibility alias kept so
- * R2 can project canonical provider ids onto installed DSH provider keys.
- * Canonical lookups use `id`; the DSH alias must move into the R2 DSH
- * adapter's private map and leave the canonical Provider record.
- * Do not add new consumers of this field.
+ * R2: canonical Provider records carry no DSH-specific identifiers.
+ * Projection of a canonical provider id onto an installed DSH provider key
+ * lives exclusively in the adapter-private map in dsh-adapter.cjs.
+ * Canonical lookups use `id` only.
  */
 function normalizeProvider(providerId) {
   return {
@@ -142,7 +141,6 @@ function normalizeProvider(providerId) {
     name: providerId,
     transportId: 'unknown',
     status: 'enabled',
-    legacyDshProviderId: providerId,
   }
 }
 
