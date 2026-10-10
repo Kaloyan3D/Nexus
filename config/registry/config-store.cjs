@@ -27,16 +27,17 @@
  * - Monotonic revisions + optimistic concurrency: every write carries the
  *   expected revision (null only for create). A mismatch fails closed with
  *   'stale-revision' and the file is left untouched. Under concurrent
- *   writers (same or other processes), an exclusive per-(mode, revision)
- *   claim file decides the single winner; the loser reports
- *   'stale-revision' (rival already committed) or 'write-conflict' (live
- *   contender), and a stale claim from a crashed writer is reaped after
- *   CLAIM_STALE_MS with one bounded retry — no locks, no spinning.
+ *   writers (same or other processes, any mode), a single store-wide
+ *   exclusive lock file serializes mutations while per-mode revisions
+ *   stay independent; the loser reports 'stale-revision' (rival already
+ *   committed) or 'write-conflict' (live contender), and a stale lock is
+ *   reclaimed only when provably inactive — never stolen from an alive
+ *   owner merely for lasting past CLAIM_STALE_MS. Bounded retries only.
  * - Atomic replacement: uniquely-named temp file (pid + timestamp +
  *   counter + crypto randomness, so concurrent writers cannot collide)
  *   in the same directory + rename, so a crash or failed validation never
  *   leaves a half-written document. Failed attempts remove their own temp
- *   and claim files.
+ *   and lock files.
  * - No partial save: schema validation, secret scan and revision checks all
  *   run BEFORE any filesystem mutation.
  * - Secret-free: values that look like real credentials fail the write with
@@ -59,11 +60,16 @@ const STORE_SCHEMA_VERSION = 1
 const STORE_DIR = 'registry'
 const STORE_FILE = 'mode-configurations.json'
 const STORE_SOURCES = ['operator-save', 'legacy-adopt']
-// R3.1 H2: cross-process write arbitration. Claim files are created with
-// exclusive ('wx') semantics so exactly one contender wins a given next
-// revision; stale claims (crashed writers) age out and are reaped.
-// Bounded: at most CLAIM_MAX_ATTEMPTS claim rounds, no spinning, no locks.
+// R3.1.1: store-wide exclusive mutation ownership. All mode entries share
+// one physical document, so per-(mode, revision) claims cannot serialize
+// writers: two modes' claims could both win and the later rename would
+// discard the first writer's update. A single lock file serializes EVERY
+// mutation while per-mode revisions stay independent. The lock is created
+// with exclusive ('wx') semantics; stale locks are reclaimed only when
+// safe (see readLockOwner/isPidAlive). Bounded: CLAIM_MAX_ATTEMPTS rounds,
+// no spinning, no blocking locks.
 const CLAIM_STALE_MS = 30000
+const LOCK_HARD_STALE_MS = 600000
 const CLAIM_MAX_ATTEMPTS = 2
 let tempCounter = 0
 
@@ -84,13 +90,32 @@ function defaultFsHooks() {
   }
 }
 
-function sanitizeForFile(name) {
-  const clean = String(name).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80)
-  return clean === '' ? 'mode' : clean
+function lockFilePath(target) {
+  return target + '.lock'
 }
 
-function claimFilePath(target, modeId, nextRevision) {
-  return target + '.claim-' + sanitizeForFile(modeId) + '-r' + nextRevision
+function readLockOwner(hooks, lockPath) {
+  try {
+    const raw = hooks.readFileSync(lockPath, 'utf8')
+    const doc = JSON.parse(raw)
+    if (doc && typeof doc === 'object') return doc
+    return null
+  } catch {
+    return null
+  }
+}
+
+// Conservative liveness: only a definitive ESRCH means dead. Any other
+// outcome (including EPERM and platform quirks) counts as alive, so an
+// active writer is never mistaken for a crashed one.
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    return !e || e.code !== 'ESRCH'
+  }
 }
 
 function nextTempPath(target) {
@@ -216,20 +241,24 @@ function loadModeEntry(dataRoot, modeId, fsHooks) {
  * processes (the host is single-process today, but operator tooling and
  * future workers share the same data root):
  *
- * 1. Win an exclusive claim file for (mode, nextRevision) via atomic
- *    'wx' creation. A competing live claim fails closed here with
- *    'write-conflict' — two writers on the same revision can never both
- *    succeed. A claim older than CLAIM_STALE_MS is a crashed writer and
- *    is reaped once before a single bounded retry.
- * 2. Re-read the store UNDER the claim and re-check the revision, closing
- *    the load-then-write race: a writer that loaded stale bytes fails with
- *    'stale-revision' and never overwrites the winner.
+ * 1. Win the store-wide exclusive lock via atomic 'wx' creation. A live
+ *    contender fails closed here with 'write-conflict' — concurrent
+ *    mutations of the shared document are serialized, on any mode. A lock
+ *    is reclaimed only when it is provably not active: unreadable past a
+ *    hard age, or older than CLAIM_STALE_MS with a dead/invalid owner pid
+ *    (liveness is conservative — an alive pid is never stolen, however
+ *    long the operation runs). One bounded retry, then fail closed.
+ * 2. Re-read the LATEST complete store UNDER the lock, re-validate our
+ *    mode's revision against it, and build the new document FROM that
+ *    re-read (preserving unrelated mode entries committed meanwhile). A
+ *    writer that loaded stale bytes fails with 'stale-revision' and never
+ *    overwrites the winner — on any mode.
  * 3. Write a uniquely-named temp file (pid + timestamp + counter +
  *    crypto randomness, so names cannot collide) + atomic rename, then
- *    remove the claim. Any failure removes what this attempt created and
+ *    release our lock. Any failure removes what this attempt created and
  *    leaves the previous file (or its absence) intact.
  *
- * No cross-process locks, no retries beyond one bounded claim round.
+ * No blocking locks, no retries beyond one bounded lock round.
  * Returns { ok: true, revision } or { ok: false, errors }.
  */
 function saveModeConfig(dataRoot, modeId, config, expectedRevision, options) {
@@ -268,45 +297,42 @@ function saveModeConfig(dataRoot, modeId, config, expectedRevision, options) {
   const nextRevision = current === null ? 0 : currentRevision + 1
   const storedConfig = JSON.parse(JSON.stringify(config))
   storedConfig.revision = nextRevision
-  const next = {
-    schemaVersion: STORE_SCHEMA_VERSION,
-    updatedAtUtc: nowUtc(),
-    modes: Object.assign({}, loaded.store.modes),
-  }
-  next.modes[modeId] = {
+  const storedEntry = {
     revision: nextRevision,
     config: storedConfig,
     savedAtUtc: nowUtc(),
     source,
     adoptedFrom,
   }
-  let text = null
-  try {
-    text = JSON.stringify(next, null, 2) + '\n'
-  } catch {
-    return { ok: false, errors: [err('registry-store-unwritable', 'store', 'mode configuration cannot be serialized')] }
-  }
   const dir = path.join(String(dataRoot), STORE_DIR)
   const target = storeFilePath(dataRoot)
-  const claimPath = claimFilePath(target, modeId, nextRevision)
-  const claimPayload = JSON.stringify({ pid: process.pid, at: new Date().toISOString() })
+  const lockPath = lockFilePath(target)
+  const lockToken = process.pid + '-' + crypto.randomBytes(8).toString('hex')
+  const lockPayload = JSON.stringify({ pid: process.pid, token: lockToken, modeId, nextRevision, at: new Date().toISOString() })
   const conflict = () => ({
     ok: false,
-    errors: [err('write-conflict', 'expectedRevision', 'a concurrent writer holds the write claim for mode ' + modeId + '; reload and retry with the current revision')],
+    errors: [err('write-conflict', 'expectedRevision', 'a concurrent writer holds the store mutation lock; reload and retry with the current revision')],
   })
+  // Release ONLY our own lock: verify the token first so a reap-and-replace
+  // by another writer can never make us delete a lock we do not own.
+  const releaseOwnLock = () => {
+    try {
+      const owner = readLockOwner(hooks, lockPath)
+      if (owner && owner.token === lockToken) hooks.unlinkSync(lockPath)
+    } catch { /* best-effort lock cleanup */ }
+  }
   for (let attempt = 1; attempt <= CLAIM_MAX_ATTEMPTS; attempt += 1) {
-    let claimed = false
+    let held = false
     try {
       hooks.mkdirSync(dir, { recursive: true })
-      hooks.writeFileExclusive(claimPath, claimPayload, { encoding: 'utf8', mode: 0o600 })
-      claimed = true
+      hooks.writeFileExclusive(lockPath, lockPayload, { encoding: 'utf8', mode: 0o600 })
+      held = true
     } catch (e) {
       if (!e || e.code !== 'EEXIST') {
         return { ok: false, errors: [err('registry-store-unwritable', 'store', 'mode configuration store cannot be written')] }
       }
-      // A claim already exists: decide between a completed rival, a live
-      // contender, and a crashed writer's leftover — from a fresh read,
-      // never from our possibly stale view.
+      // A lock already exists. A completed rival on OUR mode shows up as a
+      // moved revision — report it precisely instead of a generic conflict.
       const fresh = loadStore(dataRoot, hooks)
       if (!fresh.store) return { ok: false, errors: fresh.errors }
       const freshEntry = fresh.store.modes[modeId] || null
@@ -314,30 +340,62 @@ function saveModeConfig(dataRoot, modeId, config, expectedRevision, options) {
       if (freshRevision !== currentRevision) {
         return { ok: false, errors: [err('stale-revision', 'expectedRevision', 'stale revision for mode ' + modeId + ': stored revision moved to ' + String(freshRevision))] }
       }
-      const age = claimAgeMs(hooks, claimPath)
-      if (age === null) continue // claim vanished mid-race; one bounded retry
-      if (age > CLAIM_STALE_MS) {
+      const age = claimAgeMs(hooks, lockPath)
+      if (age === null) continue // lock vanished mid-race; one bounded retry
+      if (age > LOCK_HARD_STALE_MS) {
+        // Older than any legitimate operation by orders of magnitude:
+        // reclaim even if the pid looks alive (covers pid reuse after a
+        // crash). Legitimate saves finish in milliseconds.
         try {
-          hooks.unlinkSync(claimPath)
+          hooks.unlinkSync(lockPath)
         } catch {
           return conflict()
         }
-        continue // seized back from a crashed writer; retry the claim
+        continue
       }
-      return conflict() // live contender owns this revision
+      if (age > CLAIM_STALE_MS) {
+        const owner = readLockOwner(hooks, lockPath)
+        // Reclaim ONLY from a provably inactive owner. An alive pid is
+        // never stolen, however long its operation runs; neither is an
+        // unreadable lock whose owner cannot be checked.
+        if (owner && (owner.pid === undefined || !isPidAlive(owner.pid))) {
+          try {
+            hooks.unlinkSync(lockPath)
+          } catch {
+            return conflict()
+          }
+          continue // seized back from a crashed writer; retry the lock
+        }
+        return conflict()
+      }
+      return conflict() // live contender owns the mutation lock
     }
-    if (!claimed) return conflict()
-    // Re-validate under the claim: our load may predate a rival's commit.
+    if (!held) return conflict()
+    // Re-read the LATEST complete store under the lock and build the new
+    // document FROM it: unrelated entries committed meanwhile survive.
     const guarded = loadStore(dataRoot, hooks)
     if (!guarded.store) {
-      try { hooks.unlinkSync(claimPath) } catch { /* best-effort claim cleanup */ }
+      releaseOwnLock()
       return { ok: false, errors: guarded.errors }
     }
     const guardedEntry = guarded.store.modes[modeId] || null
     const guardedRevision = guardedEntry ? guardedEntry.revision : null
     if (guardedRevision !== currentRevision) {
-      try { hooks.unlinkSync(claimPath) } catch { /* best-effort claim cleanup */ }
+      releaseOwnLock()
       return { ok: false, errors: [err('stale-revision', 'expectedRevision', 'stale revision for mode ' + modeId + ': stored revision moved to ' + String(guardedRevision))] }
+    }
+    const next = {
+      schemaVersion: STORE_SCHEMA_VERSION,
+      updatedAtUtc: nowUtc(),
+      modes: Object.assign({}, guarded.store.modes),
+    }
+    next.modes[modeId] = JSON.parse(JSON.stringify(storedEntry))
+    let text = null
+    try {
+      text = JSON.stringify(next, null, 2) + '\n'
+    } catch {
+      releaseOwnLock()
+      return { ok: false, errors: [err('registry-store-unwritable', 'store', 'mode configuration cannot be serialized')] }
     }
     const tmp = nextTempPath(target)
     try {
@@ -346,10 +404,10 @@ function saveModeConfig(dataRoot, modeId, config, expectedRevision, options) {
       hooks.renameSync(tmp, target)
     } catch {
       try { hooks.unlinkSync(tmp) } catch { /* best-effort temp cleanup */ }
-      try { hooks.unlinkSync(claimPath) } catch { /* best-effort claim cleanup */ }
+      releaseOwnLock()
       return { ok: false, errors: [err('registry-store-unwritable', 'store', 'mode configuration store cannot be written')] }
     }
-    try { hooks.unlinkSync(claimPath) } catch { /* best-effort claim cleanup */ }
+    releaseOwnLock()
     return { ok: true, revision: nextRevision }
   }
   return conflict()

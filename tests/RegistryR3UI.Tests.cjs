@@ -308,7 +308,7 @@ async function main() {
     assert.equal(r.ok, false)
     assert.ok(codes(r.errors).includes('registry-store-unwritable'))
     assert.equal(fs.readFileSync(configStore.storeFilePath(dir), 'utf8'), bytesBefore)
-    assert.ok(!walkFiles(dir).some((f) => f.includes('.tmp-') || f.includes('.claim-')), 'no temp or claim leftovers')
+    assert.ok(!walkFiles(dir).some((f) => f.includes('.tmp-') || f.endsWith('.lock')), 'no temp or lock leftovers')
   })
 
   await check('R3 invalid configs never reach disk (no partial save)', () => {

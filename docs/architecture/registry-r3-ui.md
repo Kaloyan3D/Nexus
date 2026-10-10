@@ -2,7 +2,7 @@
 
 **Phase:** R3 (configuration experience, not execution cutover). **Not a production cutover.**
 **Branch:** `feature/model-registry-v1`. **Spec:** `NEXUS_REGISTRY_ARCHITECTURE.md` v0.2 §5–7, §10–11, §13 Phase R3, §14, §20.
-**Suites:** `tests/RegistryR3UI.Tests.cjs` (29 checks, offline) + updated route-contract pins in `tests/NexusControllerPanel.Tests.cjs` + `tests/RegistryR3Hardening.Tests.cjs` (16 checks, R3.1 H1/H2, offline).
+**Suites:** `tests/RegistryR3UI.Tests.cjs` (29 checks, offline) + updated route-contract pins in `tests/NexusControllerPanel.Tests.cjs` + `tests/RegistryR3Hardening.Tests.cjs` (19 checks, R3.1 H1/H2 + R3.1.1, offline).
 **Predecessors:** R1 core 45/45, R0 frozen baseline 21/21, R2/R2.1 compat 41/41, composed routing matrix 8/8 — all still passing (see §7).
 
 ## 1. Implemented UI architecture and verified visual description
@@ -287,3 +287,25 @@ isolation suites all still green (see final report for the full table).
   table re-run after host reload. The offline VM static-markup smoke
   (v1/v2/v3 markup, tier notice, staged banner, no `aih-*`) remains the
   executed visual evidence to date.
+
+## 10. R3.1.1 — shared-store concurrency and live verification
+
+**Suite:** `tests/RegistryR3Hardening.Tests.cjs` 19/19 PASS (3 new). Targeted correction only (`config-store.cjs` + tests + docs); public Registry contract unchanged.
+
+### The defect (reproduced pre-fix)
+
+Per-(mode, revision) claims could not serialize writers because all modes share one physical `mode-configurations.json`: writer A (v1) and writer B (v2) each won their distinct claim, A built its document from a stale view, and the later rename discarded the committed v2 entry. The new cross-mode interleave test failed exactly this way — final modes were `engineering-v1` only, v2 gone.
+
+### The fix
+
+- ONE store-wide exclusive lock (`mode-configurations.json.lock`, atomic `wx` creation) serializes every mutation on any mode; per-mode revisions stay independent and monotonic.
+- Under the lock the writer re-reads the LATEST complete store, re-checks its own mode revision (moved to stale-revision), and builds the new document FROM that re-read, preserving unrelated entries committed meanwhile. Same-mode races still fail closed; cross-mode races now both succeed with nothing lost (two deterministic stale-view interleaves, same-mode and cross-mode, timing-free).
+- Stale reclamation never steals an active owner: past 30 s a lock is reaped ONLY with a dead, invalid, or unreadable owner pid (liveness via signal-0 probe, conservative — permission errors and platform quirks count as alive). An aged-but-live lock reports `write-conflict` and is left untouched (dedicated test). A 10-minute hard age covers pid reuse after a crash. One bounded retry, no infinite waits; release unlinks only on token match, so a reap-and-replace can never delete a lock the releaser does not own.
+- Real multi-process proof: a lock owned by a live sleeper process blocks with `write-conflict` (spawn/exit synchronised, no sleeps); after the owner exits and the lock ages out, the same save succeeds and the lock is reaped.
+- Stale, conflicting and failed writes leave the correct committed state: every failure path removes only its own temp/lock files and the previous document (or its absence) stays byte-identical.
+
+### Live verification status (H1 fix deployment)
+
+- Repo to installed sync is automatic: at 16:51 EEST both changed runtime files were observed published into the local installed Nexus tree (`diff -q` clean for `config-store.cjs`, `registry.cjs`, `service.cjs`). One targeted copy of the same two files was also performed earlier under task authorization; harmless.
+- The running host still serves PRE-fix behavior (cross-port/null/malformed to 200, verified 16:52+ EEST) because the loaded modules need a process reload; file sync alone cannot activate them.
+- Restart NOT performed by this task: the only server process is the harness GUI itself, which carries this very session; no safe reload handle is exposed and blind lifecycle action is forbidden. Live H1 matrix re-verification (expected: 200 same-origin/absent, 403 cross-port/null/malformed/foreign) is PENDING an operator host restart — then re-run the section 9 probe table. No routing, sessions, or credentials were touched; all live probes were read-only (GETs and invalid-payload PUTs that reject before any write).
