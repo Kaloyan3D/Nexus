@@ -155,7 +155,7 @@ function normalizeMuseSnapshot(snapshot) {
     for (const route of list) {
       const canonicalRouteId = providerId + '/' + CANONICAL_MUSE_MODEL_ID
       legacyRouteIdMap[route.id] = canonicalRouteId
-      canonicalRoutes.push({
+      const nextRoute = {
         schemaVersion: 1,
         id: canonicalRouteId,
         providerId: route.providerId,
@@ -168,8 +168,10 @@ function normalizeMuseSnapshot(snapshot) {
         compatibility: JSON.parse(JSON.stringify(route.compatibility || {})),
         availability: route.availability,
         enabled: route.enabled,
-        provenance: route.provenance || 'legacy-production-use',
-      })
+      }
+      if (route.provenance !== undefined) nextRoute.provenance = route.provenance
+      if (route.capacityConstraints !== undefined) nextRoute.capacityConstraints = JSON.parse(JSON.stringify(route.capacityConstraints))
+      canonicalRoutes.push(nextRoute)
     }
   }
   const nextModels = models.filter((m) => m && !isMuseLegacyModelId(m.id)).concat([canonicalModel])

@@ -54,6 +54,12 @@ but ride different providers. They unify into one logical model:
 - Route-specific reasoning levels and compatibility metadata are preserved verbatim
   per route. The two routes are **not** treated as interchangeable: compilations
   against each produce distinct `routeId`/`providerId`/`connectionId` bindings.
+- Optional route constraints (`capacityConstraints`) and `provenance` round-trip
+  exactly when present and stay absent when absent; missing provenance is never
+  invented.
+- Strict engine isolation uses exact orchestration-engine identities
+  (`dual-v1`, `muse-v0`); any other expected or actual engine id fails closed
+  (`parity-unknown-engine`, `parity-engine-crossover`).
 - Unification is fail-closed: any checkpoint, capability, tier, engine-scope,
   capacity, or enabled mismatch between the legacy entries aborts normalization
   with `muse-canonical-mismatch:*` and no snapshot (proven by test).
@@ -124,8 +130,16 @@ no credential material. Registry Core files import only `node:fs`/`node:path`/
   (`canonical-id-change` for Muse, `adopted-verbatim` for Dual),
   incompatibilities, the captured legacy source, and a deterministic `planHash`.
 - `verifyPlanIdempotent` proves byte-identical repeated planning.
-- `restoreLegacySource` rebuilds a lossless copy in an isolated directory;
-  re-planning the restored copy yields the identical `planHash` (rollback demo).
+- `createLegacyBackup` (explicit, separate from previews) captures raw file bytes
+  with a per-file sha256 manifest; restored files are written with mode 0600
+  and hash-verified. A preview can never leak secrets because it structurally
+  cannot contain file bytes (see `describeLegacyFiles`).
+- `restoreLegacySource` rebuilds a byte-exact copy in a guarded isolated
+  directory: protected roots (including the backup source root), symlink
+  aliases, path traversal, unexpected file keys, and unsafe overwrites are
+  refused; absent files stay absent. Re-planning the restored copy yields the
+  identical `planHash` (semantic proof); per-file sha256 equality is the
+  byte-exactness proof (`planHash` alone is not claimed as one).
 - `applyPlanToIsolatedRoot` materializes previews for review and **refuses** the
   source root (`migration-refuses-production-target`).
 - R2 never overwrites operator `settings.yaml`, custom profiles, provider
@@ -163,7 +177,7 @@ this stricter direction is intentional hardening, not substitution.
 
 ## 8. Deterministic parity verification (this commit)
 
-- R2 suite: 33/33 pass (`node tests/RegistryR2Compatibility.Tests.cjs`).
+- R2/R2.1 suite: 38/38 pass (`node tests/RegistryR2Compatibility.Tests.cjs`).
 - R1 core: 45/45 pass. R0 frozen baseline: 21/21 pass (fixtures unmodified).
 - Composed routing matrix: 8/8 pass. Routing authority: pass.
 - Dual parity: 2 profiles x 6 roles exact match; custom 6-role matrix exact match.

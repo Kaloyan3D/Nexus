@@ -93,15 +93,24 @@ function checkRoleAuthorization(role, binding, executionClasses) {
   return mismatches
 }
 
-/** Dual and Muse engine scopes must stay disjoint on every binding. */
+/**
+ * Strict engine isolation on explicit orchestration-engine identities.
+ *
+ * Only the two known engine ids pass: 'dual-v1' and 'muse-v0'. Any other
+ * expectation (legacy aliases, typos, empty, null, case variants) fails
+ * closed, and any binding whose engine id is not exactly the expected one
+ * fails closed. Substring matching is deliberately not used: an arbitrary
+ * engine id must never satisfy Dual/Muse isolation.
+ */
+const KNOWN_ORCHESTRATION_ENGINES = Object.freeze(['dual-v1', 'muse-v0']);
 function checkEngineIsolation(expectedEngine, binding) {
-  if (!binding || typeof binding !== 'object') return [mismatch('parity-missing-binding', 'no binding for engine check')]
-  const engineOf = (binding.orchestrationEngineId || '').toLowerCase()
-  if (expectedEngine === 'dual' && engineOf.indexOf('muse') !== -1) {
-    return [mismatch('parity-engine-crossover', 'dual role entered Muse runtime')]
+  if (expectedEngine !== 'dual-v1' && expectedEngine !== 'muse-v0') {
+    return [mismatch('parity-unknown-engine', 'unknown expected engine: ' + String(expectedEngine) + '; isolation fails closed')]
   }
-  if (expectedEngine === 'muse' && engineOf.indexOf('dual') !== -1) {
-    return [mismatch('parity-engine-crossover', 'muse role entered Dual runtime')]
+  if (!binding || typeof binding !== 'object') return [mismatch('parity-missing-binding', 'no binding for engine check')]
+  const actual = binding.orchestrationEngineId
+  if (actual !== expectedEngine) {
+    return [mismatch('parity-engine-crossover', 'expected orchestration engine ' + expectedEngine + ' but binding carries ' + String(actual))]
   }
   return []
 }
@@ -139,6 +148,7 @@ function summarizeComparisons(results) {
 module.exports = {
   PARITY_SCHEMA_VERSION,
   EXPECTED_EXECUTION_KIND,
+  KNOWN_ORCHESTRATION_ENGINES,
   compareExecutionTarget,
   checkRoleAuthorization,
   checkEngineIsolation,

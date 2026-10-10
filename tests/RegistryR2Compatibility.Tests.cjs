@@ -182,7 +182,7 @@ try {
       assert.equal(res.ok, true)
       assert.deepEqual(parity.checkRoleAuthorization('reviewer', res.snapshot.roles.reviewer, policy.executionClasses), [])
       assert.deepEqual(parity.checkRoleAuthorization('solver', res.snapshot.roles.solver, policy.executionClasses), [])
-      assert.deepEqual(parity.checkEngineIsolation('dual', res.snapshot.roles.primaryEngineer), [])
+      assert.deepEqual(parity.checkEngineIsolation('dual-v1', res.snapshot.roles.primaryEngineer), [])
     }
   })
 
@@ -203,7 +203,7 @@ try {
       assert.equal(res.ok, true, profileId + ': ' + JSON.stringify(res.errors))
       assert.deepEqual(Object.keys(res.snapshot.roles), ['muse_main'])
       assert.equal(res.snapshot.roles.muse_main.dataUseTier, 'contributor')
-      assert.deepEqual(parity.checkEngineIsolation('muse', res.snapshot.roles.muse_main), [])
+      assert.deepEqual(parity.checkEngineIsolation('muse-v0', res.snapshot.roles.muse_main), [])
     }
   })
 
@@ -403,7 +403,7 @@ try {
       assert.ok(text.indexOf('AIH_INSTALL_ROOT') === -1, name + ' must not reference AIH_INSTALL_ROOT')
       assert.ok(text.toLowerCase().indexOf('powershell') === -1, name + ' must not reference PowerShell')
       assert.ok(text.indexOf('.ps1') === -1, name + ' must not reference PowerShell scripts')
-      const blessed = ['node:fs', 'node:path', 'node:crypto', './schemas.cjs', './resolver.cjs', './legacy-import.cjs', './muse-canonical.cjs', './dsh-adapter.cjs', './profile-compat.cjs', './parity.cjs', './migration.cjs']
+      const blessed = ['node:fs', 'node:path', 'node:crypto', 'node:os', './schemas.cjs', './resolver.cjs', './legacy-import.cjs', './muse-canonical.cjs', './dsh-adapter.cjs', './profile-compat.cjs', './parity.cjs', './migration.cjs']
       const found = Array.from(text.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)).map((m) => m[1])
       for (const dep of found) assert.ok(blessed.indexOf(dep) !== -1, name + ' requires unblessed module ' + dep)
     }
@@ -441,7 +441,7 @@ try {
         const compared = parity.compareExecutionTarget(oracle, res.snapshot.roles[role], null)
         results.push(Object.assign({ profile: profileId, role }, compared))
         results.push({ profile: profileId, role: role + ':auth', match: parity.checkRoleAuthorization(role, res.snapshot.roles[role], policy.executionClasses).length === 0, canonicalIdChangeOnly: false, mismatches: parity.checkRoleAuthorization(role, res.snapshot.roles[role], policy.executionClasses) })
-        results.push({ profile: profileId, role: role + ':engine', match: parity.checkEngineIsolation('dual', res.snapshot.roles[role]).length === 0, canonicalIdChangeOnly: false, mismatches: parity.checkEngineIsolation('dual', res.snapshot.roles[role]) })
+        results.push({ profile: profileId, role: role + ':engine', match: parity.checkEngineIsolation('dual-v1', res.snapshot.roles[role]).length === 0, canonicalIdChangeOnly: false, mismatches: parity.checkEngineIsolation('dual-v1', res.snapshot.roles[role]) })
       }
     }
     const summary = parity.summarizeComparisons(results)
@@ -611,13 +611,24 @@ try {
     assert.deepEqual(migration.verifyPlanIdempotent(repoRoot), { idempotent: true, errors: [] })
   })
 
-  check('R2.5: rollback restores a lossless isolated copy', () => {
+  check('R2.5: rollback restores a byte-exact isolated copy', () => {
     const first = migration.planMigration(repoRoot)
+    const made = migration.createLegacyBackup(repoRoot)
+    assert.deepEqual(made.errors, [])
+    assert.ok(made.backup)
+    assert.equal(made.backup.sourceRoot, path.resolve(repoRoot))
     const target = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-registry-r2-rollback-'))
     fixtureRoots.push(target)
-    const restored = migration.restoreLegacySource(first.preview.legacySource, target)
+    const restored = migration.restoreLegacySource(made.backup, target)
     assert.deepEqual(restored.errors, [])
     assert.equal(restored.restored, true)
+    for (const rel of migration.KNOWN_LEGACY_FILES) {
+      const entry = made.backup.files[rel]
+      assert.ok(entry && entry.present, rel + ' must be backed up')
+      const srcHash = shaOfFile(path.join(repoRoot, rel))
+      assert.equal(srcHash, entry.sha256)
+      assert.equal(shaOfFile(path.join(target, rel)), srcHash, rel + ' must restore byte-exact')
+    }
     const replanned = migration.planMigration(target)
     assert.ok(replanned.preview, JSON.stringify(replanned.errors))
     assert.equal(replanned.preview.planHash, first.preview.planHash)
@@ -683,6 +694,159 @@ try {
     assert.equal(profileCompat.pinnedBindingPreserved(activeTask.binding, res.snapshot.roles.muse_main), true)
   })
 
+  check('R2.1: previews never contain secret-bearing settings content', () => {
+    const root = makeFixture({ settingsProfile: 'deepseek-codex' })
+    const fakeA = 'sk-live-R2TEST-FAKE-AAA111'
+    const fakeB = 'xoxb-R2TEST-FAKE-BBB222'
+    const settingsBody = '# operator settings (fixture only)' + String.fromCharCode(10) + 'engineering-profile: deepseek-codex' + String.fromCharCode(10) + 'llm-pi-ai:' + String.fromCharCode(10) + '  providers:' + String.fromCharCode(10) + '    zai-direct:' + String.fromCharCode(10) + '      apiKey: ' + fakeA + String.fromCharCode(10) + '      token: ' + fakeB + String.fromCharCode(10)
+    fs.writeFileSync(path.join(root, 'data', 'settings.yaml'), settingsBody)
+    const planned = migration.planMigration(root)
+    assert.ok(planned.preview, JSON.stringify(planned.errors))
+    const previewText = JSON.stringify(planned.preview)
+    assert.ok(previewText.indexOf(fakeA) === -1, 'preview must not embed raw API keys')
+    assert.ok(previewText.indexOf(fakeB) === -1, 'preview must not embed raw tokens')
+    assert.equal(planned.preview.legacyDigest.settings.present, true)
+    assert.equal(planned.preview.legacyDigest.settings.engineeringProfile, 'deepseek-codex')
+    assert.ok(!('settingsYaml' in planned.preview.legacyDigest.settings), 'no settings body field may exist on the digest')
+    const made = migration.createLegacyBackup(root)
+    assert.deepEqual(made.errors, [])
+    assert.ok(made.backup.files['data/settings.yaml'].content.indexOf(fakeA) !== -1, 'explicit backup must stay complete for restore')
+    const isolated = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-registry-r2-secret-'))
+    fixtureRoots.push(isolated)
+    const applied = migration.applyPlanToIsolatedRoot(planned.preview, root, path.join(isolated, 'review'))
+    assert.deepEqual(applied.errors, [])
+    const onDisk = fs.readFileSync(path.join(isolated, 'review', 'migration-preview.json'), 'utf8')
+    assert.ok(onDisk.indexOf(fakeA) === -1 && onDisk.indexOf(fakeB) === -1, 'preview artifact on disk must stay secret-free')
+    const target = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-registry-r2-secret-rb-'))
+    fixtureRoots.push(target)
+    assert.deepEqual(migration.restoreLegacySource(made.backup, target).errors, [])
+    assert.equal(fs.readFileSync(path.join(target, 'data', 'settings.yaml'), 'utf8'), settingsBody)
+  }),
+
+  check('R2.5: adversarial destinations and file keys are refused', () => {
+    const src = makeFixture({ custom: CUSTOM_ROLES })
+    const made = migration.createLegacyBackup(src)
+    assert.deepEqual(made.errors, [])
+    const nested = migration.restoreLegacySource(made.backup, path.join(src, 'nested-evil'))
+    assert.equal(nested.restored, false)
+    assert.ok(nested.errors.some((e) => e.indexOf('migration-refuses-production-target') !== -1))
+    const selfHit = migration.restoreLegacySource(made.backup, src)
+    assert.equal(selfHit.restored, false)
+    const probe = path.join(repoRoot, 'tmp-r21-adversarial-probe')
+    const outside = migration.restoreLegacySource(made.backup, probe)
+    assert.equal(outside.restored, false)
+    assert.ok(outside.errors.some((e) => e.indexOf('migration-outside-isolated-tmp') !== -1), JSON.stringify(outside.errors))
+    assert.ok(!fs.existsSync(probe), 'refused destinations must stay untouched')
+    const linkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-registry-r2-link-'))
+    fixtureRoots.push(linkDir)
+    fs.symlinkSync(src, path.join(linkDir, 'alias'))
+    const viaLink = migration.restoreLegacySource(made.backup, path.join(linkDir, 'alias', 'sub'))
+    assert.equal(viaLink.restored, false)
+    assert.ok(viaLink.errors.some((e) => e.indexOf('migration-symlink-alias-refused') !== -1), JSON.stringify(viaLink.errors))
+    const evilParent = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-registry-r2-evil-'))
+    fixtureRoots.push(evilParent)
+    const evilTarget = path.join(evilParent, 'target')
+    for (const badKey of ['../evil-escape.json', '/tmp/abs-evil.json', 'config/extra.json', '..']) {
+      const evil = JSON.parse(JSON.stringify(made.backup))
+      evil.files[badKey] = { present: true, sha256: 'dead', content: '{}' }
+      const attempt = migration.restoreLegacySource(evil, evilTarget)
+      assert.equal(attempt.restored, false, badKey)
+      assert.ok(attempt.errors.some((e) => e.indexOf('migration-unexpected-file') !== -1), badKey + ': ' + JSON.stringify(attempt.errors))
+    }
+    assert.ok(!fs.existsSync(path.join(evilParent, 'evil-escape.json')))
+    assert.ok(!fs.existsSync('/tmp/abs-evil.json'))
+    const okTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-registry-r2-overwrite-'))
+    fixtureRoots.push(okTarget)
+    assert.deepEqual(migration.restoreLegacySource(made.backup, okTarget).errors, [])
+    assert.deepEqual(migration.restoreLegacySource(made.backup, okTarget).errors, [], 'identical re-restore is not an overwrite')
+    const victim = path.join(okTarget, 'config', 'model-registry.json')
+    fs.writeFileSync(victim, '{tampered}')
+    const refused = migration.restoreLegacySource(made.backup, okTarget)
+    assert.equal(refused.restored, false)
+    assert.ok(refused.errors.some((e) => e.indexOf('migration-refuses-overwrite') !== -1))
+    assert.equal(fs.readFileSync(victim, 'utf8'), '{tampered}')
+    const forced = migration.restoreLegacySource(made.backup, okTarget, { overwrite: true })
+    assert.deepEqual(forced.errors, [])
+    assert.equal(shaOfFile(victim), made.backup.files['config/model-registry.json'].sha256.replace(/^/, ''))
+  }),
+
+  check('R2.5: rollback preserves formatting, comments, YAML and absence byte-exact', () => {
+    const root = makeFixture({ custom: CUSTOM_ROLES, settingsProfile: 'glm-codex' })
+    const engPath = path.join(root, 'config', 'engineering-profiles.json')
+    const funky = JSON.stringify(JSON.parse(fs.readFileSync(engPath, 'utf8')), null, 4) + String.fromCharCode(10) + String.fromCharCode(10)
+    fs.writeFileSync(engPath, funky)
+    const hash = '# operator header comment, keep me' + String.fromCharCode(10) + 'engineering-profile: glm-codex   # trailing comment' + String.fromCharCode(10) + 'llm-pi-ai:' + String.fromCharCode(10) + '  providers: {}' + String.fromCharCode(10)
+    fs.writeFileSync(path.join(root, 'data', 'settings.yaml'), hash)
+    fs.rmSync(path.join(root, 'data', 'custom-engineering-profile.json'))
+    const planned = migration.planMigration(root)
+    assert.ok(planned.preview, JSON.stringify(planned.errors))
+    assert.equal(planned.preview.legacyDigest.settings.engineeringProfile, 'glm-codex')
+    assert.equal(planned.preview.legacyDigest.customProfile.present, false)
+    const made = migration.createLegacyBackup(root)
+    assert.deepEqual(made.errors, [])
+    assert.equal(made.backup.files['data/custom-engineering-profile.json'].present, false)
+    const target = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-registry-r2-bytes-'))
+    fixtureRoots.push(target)
+    assert.deepEqual(migration.restoreLegacySource(made.backup, target).errors, [])
+    for (const rel of migration.KNOWN_LEGACY_FILES.concat(['data/settings.yaml'])) {
+      const entry = made.backup.files[rel]
+      assert.ok(entry && entry.present, rel)
+      assert.equal(shaOfFile(path.join(target, rel)), entry.sha256, rel + ' byte-exact')
+      assert.equal(fs.readFileSync(path.join(target, rel), 'utf8'), fs.readFileSync(path.join(root, rel), 'utf8'))
+    }
+    assert.ok(!fs.existsSync(path.join(target, 'data', 'custom-engineering-profile.json')), 'absent files stay absent')
+    assert.ok(fs.readFileSync(path.join(target, 'data', 'settings.yaml'), 'utf8').indexOf('# operator header comment, keep me') !== -1, 'YAML comments survive')
+    const replanned = migration.planMigration(target)
+    assert.ok(replanned.preview)
+    assert.equal(replanned.preview.planHash, planned.preview.planHash)
+  }),
+
+  check('R2.4: arbitrary engine ids fail isolation closed', () => {
+    assert.deepEqual(parity.KNOWN_ORCHESTRATION_ENGINES, ['dual-v1', 'muse-v0'])
+    assert.deepEqual(parity.checkEngineIsolation('muse-v0', { orchestrationEngineId: 'muse-v0' }), [])
+    assert.deepEqual(parity.checkEngineIsolation('dual-v1', { orchestrationEngineId: 'dual-v1' }), [])
+    for (const weird of ['dual', 'muse', 'dual-v1-evil', 'muse-v0x', 'MUSE-V0', 'DUAL-V1', '', 'dual-v1,muse-v0']) {
+      const got = parity.checkEngineIsolation(weird, { orchestrationEngineId: 'muse-v0' })
+      assert.ok(got.length > 0 && got[0].code === 'parity-unknown-engine', String(weird))
+    }
+    for (const missing of [null, undefined, 42]) {
+      assert.ok(parity.checkEngineIsolation(missing, { orchestrationEngineId: 'muse-v0' }).length > 0)
+    }
+    for (const badActual of ['dual-v1', 'dual', 'muse', 'muse-v0-x', '', null]) {
+      const got = parity.checkEngineIsolation('muse-v0', { orchestrationEngineId: badActual })
+      assert.ok(got.length > 0 && got[0].code === 'parity-engine-crossover', String(badActual))
+    }
+    assert.equal(parity.checkEngineIsolation('muse-v0', null)[0].code, 'parity-missing-binding')
+  }),
+
+  check('R2.2: canonical routes preserve capacityConstraints and provenance exactly', () => {
+    const rawDoc = legacyImport.buildRegistrySnapshot(repoRoot)
+    assert.deepEqual(rawDoc.errors, [])
+    const withMeta = JSON.parse(JSON.stringify(rawDoc.snapshot))
+    for (const r of withMeta.routes) {
+      if (r.logicalModelId === 'muse-spark-1.3-contributor-opencode') {
+        r.capacityConstraints = { maxOutputTokens: 4096 }
+        r.provenance = 'vendor-docs-2026-10'
+      }
+    }
+    const n = museCanonical.normalizeMuseSnapshot(withMeta)
+    assert.deepEqual(n.errors, [])
+    const open = n.snapshot.routes.find((x) => x.id === 'opencode-go/' + museCanonical.CANONICAL_MUSE_MODEL_ID)
+    assert.deepEqual(open.capacityConstraints, { maxOutputTokens: 4096 })
+    assert.equal(open.provenance, 'vendor-docs-2026-10')
+    const meta = n.snapshot.routes.find((x) => x.id === 'meta-model-api/' + museCanonical.CANONICAL_MUSE_MODEL_ID)
+    assert.equal(meta.provenance, 'legacy-production-use')
+    assert.ok(!('capacityConstraints' in meta), 'absent constraints stay absent, never invented')
+    assert.deepEqual(schemas.validateRegistrySnapshot(n.snapshot, 'registry'), [])
+    const noProv = JSON.parse(JSON.stringify(rawDoc.snapshot))
+    for (const r of noProv.routes) delete r.provenance
+    const n2 = museCanonical.normalizeMuseSnapshot(noProv)
+    assert.deepEqual(n2.errors, [])
+    for (const r of n2.snapshot.routes.filter((x) => x.logicalModelId === museCanonical.CANONICAL_MUSE_MODEL_ID)) {
+      assert.ok(!('provenance' in r), 'absent provenance stays absent, never invented')
+    }
+    assert.deepEqual(schemas.validateRegistrySnapshot(n2.snapshot, 'registry'), [])
+  }),
   check('R2: no legacy production file was modified', () => {
     const after = PROD_INPUTS.map((rel) => shaOfFile(path.join(repoRoot, rel)))
     assert.deepEqual(after, prodHashesBefore)
