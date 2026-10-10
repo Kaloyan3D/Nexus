@@ -126,14 +126,22 @@ function checkRequestTarget(host, addresses, transportId, endpointOptions) {
     return [err('endpoint-forbidden-ssrf', where, 'host ' + String(host) + ' did not resolve; refusing to probe an unresolvable target')]
   }
   if (transportId === 'local-openai-compatible') {
-    const loopbackSeen = list.some((a) => isLoopbackHost(a && a.address))
-    const privateSeen = list.some((a) => {
-      const v4 = a && typeof a.address === 'string' ? parseIpv4(bracketless(a.address.toLowerCase())) : null
-      return !!v4 && (isRfc1918V4(v4) || isLinkLocalV4(v4))
-    })
-    if (loopbackSeen) return []
-    if (privateSeen && allowPrivateLocal) return []
-    return [err('endpoint-forbidden-ssrf', where, 'local dialect resolves only to loopback (explicitly trusted private LAN when configured); refusing ' + String(host))]
+    // R4.2.1: EVERY resolved address must satisfy the local policy, because
+    // the pinned transport connects to the first validated address. An
+    // any-match lets a mixed set pass while the selected destination
+    // violates the policy, regardless of ordering.
+    for (const entry of list) {
+      const address = entry && typeof entry.address === 'string' ? entry.address : ''
+      if (address === '') {
+        return [err('endpoint-forbidden-ssrf', where, 'local dialect resolved an invalid address entry; refusing ' + String(host))]
+      }
+      if (isLoopbackHost(address)) continue
+      const v4 = parseIpv4(bracketless(address.toLowerCase()))
+      const privateV4 = !!v4 && (isRfc1918V4(v4) || isLinkLocalV4(v4))
+      if (privateV4 && allowPrivateLocal) continue
+      return [err('endpoint-forbidden-ssrf', where, 'local dialect requires every resolved address to be loopback' + (allowPrivateLocal ? ' or explicitly trusted private-LAN' : '') + '; refusing ' + String(host))]
+    }
+    return []
   }
   const bad = list.filter((a) => isRestrictedAddress(a && a.address))
   if (bad.length > 0 && !trusted) {

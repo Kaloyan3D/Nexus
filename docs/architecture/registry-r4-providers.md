@@ -193,6 +193,17 @@ route is narrowed to it, so unchecked levels never compile. The
 test-only streaming skip is removed from the promotion path. Evidence
 contract is v3, and v2 evidence no longer grants eligibility.
 
+### 5.3 R4.2.1 local address-set rule
+
+The pinned transport connects to the first validated address, so the
+local-endpoint policy holds for every resolved address, not just any
+one. By default every address must be loopback; with explicitly
+authorized private-LAN access every address must be loopback or
+private-LAN. Mixed allowed and disallowed sets are refused regardless
+of ordering, malformed entries never reach the transport, and the
+selected destination is always a member of the validated set.
+Remote-provider rules are unchanged.
+
 ## 6. Credential ownership and the R4.3 integration blocker
 
 Credentials are separated from public records: connections carry
@@ -280,7 +291,7 @@ safe migration (re-stage without the route), proven by test.
 
 ## 9. Test results
 
-`tests/RegistryR4TransportBinding.Tests.cjs`: **11/11 PASS**
+`tests/RegistryR4TransportBinding.Tests.cjs`: **19/19 PASS**
 (offline, adversarial, real loopback servers). Ten checks failed on the
 R4.1 build and pass after the correction; one mixed-DNS guard passed
 before and after. Coverage: validated-IP connection for unresolvable
@@ -289,7 +300,10 @@ rebinding answers; mixed-result refusal; SNI plus hostname-verification
 defaults; DNS inside the deadline; socket destruction for stalled
 connections; streaming-skip inertness; per-level reasoning grants with
 narrowed eligibility; stale-contract demotion; exact-set evidence;
-full-set eligibility.
+full-set eligibility; local address-set validation (mixed public,
+loopback-first and private-mixed orderings refused regardless of order;
+all-loopback, all-permitted-private and mixed loopback-plus-private pass;
+invalid entries refused with nothing leaving).
 
 `tests/RegistryR4ProbeSecurity.Tests.cjs`: **16/16 PASS** (offline,
 adversarial). Every check was run against the unfixed R4 build first and

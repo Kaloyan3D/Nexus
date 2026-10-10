@@ -16,6 +16,7 @@ const repoRoot = path.resolve(__dirname, '..');
 const registry = require('../config/registry/index.cjs');
 const serviceModule = registry.service;
 const probes = registry.probes;
+const providerConfig = registry.providerConfig;
 
 delete process.env.DSH_HOME;
 delete process.env.AIH_INSTALL_ROOT;
@@ -334,6 +335,123 @@ async function main() {
     assert.deepEqual(route.reasoningLevels.slice().sort(), ['high', 'low']);
     const elig = svc.listEligible('engineering-v1', 'engineer').routes.map((r) => r.routeId);
     assert.ok(elig.indexOf('pin-direct/local-1') !== -1, 'fully checked route is eligible');
+  });
+
+  // ── L: local endpoint address-set validation (R4.2.1) ────────────────────
+  // The pinned transport connects to the FIRST validated address, so the
+  // local-endpoint policy must hold for EVERY resolved address. An ANY-match
+  // lets a mixed set pass while the selected destination violates policy.
+  function localProbeProvider(port) {
+    return { id: 'loc', transportId: 'local-openai-compatible', baseUrl: 'http://probe-test.invalid:' + port + '/v1' };
+  }
+  function localProbeConnection() {
+    return { id: 'c-loc', connectionKind: 'local-server', status: 'not-connected' };
+  }
+  await check('L1 public address first, loopback second is refused', async () => {
+    const srv = await startServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' }); res.end(modelsBody());
+    });
+    try {
+      const out = await probes.testConnection(localProbeProvider(srv.port), localProbeConnection(), null, {
+        lookup: async () => [{ address: '93.184.216.34', family: 4 }, { address: '127.0.0.1', family: 4 }],
+        timeoutMs: 400,
+      });
+      assert.equal(out.ok, false);
+      assert.ok(codes(out.errors).indexOf('endpoint-forbidden-ssrf') !== -1, JSON.stringify(out.errors));
+      assert.equal(srv.requests.length, 0, 'no request may leave for a mixed set');
+    } finally { await srv.close(); }
+  });
+  await check('L2 loopback first, public address second is refused', async () => {
+    const srv = await startServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' }); res.end(modelsBody());
+    });
+    try {
+      const out = await probes.testConnection(localProbeProvider(srv.port), localProbeConnection(), null, {
+        lookup: async () => [{ address: '127.0.0.1', family: 4 }, { address: '93.184.216.34', family: 4 }],
+        timeoutMs: 400,
+      });
+      assert.equal(out.ok, false);
+      assert.ok(codes(out.errors).indexOf('endpoint-forbidden-ssrf') !== -1, JSON.stringify(out.errors));
+      assert.equal(srv.requests.length, 0, 'order must not matter: mixed sets are refused');
+    } finally { await srv.close(); }
+  });
+  await check('L3 private address mixed with public address is refused', async () => {
+    const srv = await startServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' }); res.end(modelsBody());
+    });
+    try {
+      const out = await probes.testConnection(localProbeProvider(srv.port), localProbeConnection(), null, {
+        lookup: async () => [{ address: '192.168.1.20', family: 4 }, { address: '93.184.216.34', family: 4 }],
+        endpointOptions: { allowPrivateLocal: true },
+        timeoutMs: 400,
+      });
+      assert.equal(out.ok, false);
+      assert.ok(codes(out.errors).indexOf('endpoint-forbidden-ssrf') !== -1, JSON.stringify(out.errors));
+      assert.equal(srv.requests.length, 0, 'explicit LAN trust never admits public addresses');
+    } finally { await srv.close(); }
+  });
+  await check('L4 all-loopback addresses pass and select within the validated set', async () => {
+    const srv = await startServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' }); res.end(modelsBody());
+    });
+    try {
+      const out = await probes.testConnection(localProbeProvider(srv.port), localProbeConnection(), null, {
+        lookup: async () => [{ address: '127.0.0.1', family: 4 }, { address: '127.0.0.2', family: 4 }],
+        timeoutMs: 2000,
+      });
+      assert.equal(out.ok, true, JSON.stringify(out.errors));
+      assert.equal(srv.requests.length, 1, 'first validated address is selected and reached');
+      assert.ok(srv.requests[0].host.indexOf('probe-test.invalid') === 0, 'hostname preserved, got ' + srv.requests[0].host);
+    } finally { await srv.close(); }
+  });
+  await check('L5 all explicitly permitted private-LAN addresses pass', async () => {
+    const addrs = [{ address: '192.168.1.20', family: 4 }, { address: '10.0.0.5', family: 4 }];
+    assert.deepEqual(providerConfig.checkRequestTarget('h', addrs, 'local-openai-compatible', { allowPrivateLocal: true }), []);
+    const out = await probes.testConnection(localProbeProvider(9), localProbeConnection(), null, {
+      lookup: async () => addrs,
+      endpointOptions: { allowPrivateLocal: true },
+      timeoutMs: 400,
+    });
+    assert.equal(out.ok, false);
+    assert.ok(codes(out.errors).indexOf('endpoint-forbidden-ssrf') === -1, 'policy accepts; only transport may fail, got ' + JSON.stringify(out.errors));
+  });
+  await check('L6 mixed loopback and permitted private-LAN addresses pass', async () => {
+    const srv = await startServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' }); res.end(modelsBody());
+    });
+    try {
+      assert.deepEqual(providerConfig.checkRequestTarget('h', [{ address: '127.0.0.1', family: 4 }, { address: '192.168.1.20', family: 4 }], 'local-openai-compatible', { allowPrivateLocal: true }), []);
+      const out = await probes.testConnection(localProbeProvider(srv.port), localProbeConnection(), null, {
+        lookup: async () => [{ address: '127.0.0.1', family: 4 }, { address: '192.168.1.20', family: 4 }],
+        endpointOptions: { allowPrivateLocal: true },
+        timeoutMs: 2000,
+      });
+      assert.equal(out.ok, true, JSON.stringify(out.errors));
+      assert.equal(srv.requests.length, 1);
+    } finally { await srv.close(); }
+  });
+  await check('L7 invalid leading entry is refused with nothing leaving', async () => {
+    const srv = await startServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' }); res.end(modelsBody());
+    });
+    try {
+      const out = await probes.testConnection(localProbeProvider(srv.port), localProbeConnection(), null, {
+        lookup: async () => [{ address: '', family: 4 }, { address: '127.0.0.1', family: 4 }],
+        timeoutMs: 400,
+      });
+      assert.equal(out.ok, false);
+      assert.ok(codes(out.errors).indexOf('endpoint-forbidden-ssrf') !== -1, JSON.stringify(out.errors));
+      assert.equal(srv.requests.length, 0, 'invalid entries never reach the transport');
+    } finally { await srv.close(); }
+  });
+  await check('L8 missing and malformed address entries are refused', () => {
+    const kinds = [[], [null], [{}], [{ address: '' }], [{ address: 123 }], [{ address: null }]];
+    for (const addrs of kinds) {
+      const errs = providerConfig.checkRequestTarget('h', addrs, 'local-openai-compatible', {});
+      assert.ok(errs.length > 0 && errs[0].code === 'endpoint-forbidden-ssrf', JSON.stringify(addrs) + ' refused');
+    }
+    const withFlag = providerConfig.checkRequestTarget('h', [null], 'local-openai-compatible', { allowPrivateLocal: true });
+    assert.ok(withFlag.length > 0, 'trust flags never rescue malformed entries');
   });
 
   console.log('SUITE RESULT: PASS ' + passed + ' | FAIL ' + failed + ' | total ' + (passed + failed));
