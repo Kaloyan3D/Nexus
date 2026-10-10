@@ -1401,32 +1401,835 @@ function EngineeringEditorFields({ editor, variant }) {
 	});
 }
 
+//#region Registry R3 — staged Engineering Mode configuration (TASK-0047)
+/**
+* Registry-backed Engineering Mode UI (R3 of NEXUS_REGISTRY_ARCHITECTURE.md).
+*
+* The selector is populated from Registry ModeDefinition manifests
+* (GET ./nexus/registry/v1/modes): Engineering v1 (Deprecated / Legacy),
+* v2 (Active / Legacy) and v3 (Planned / Preview). No legacy profile
+* combination and no internal agent-preset id ever appears here.
+*
+* R3 is the configuration experience, NOT the execution cutover: every save
+* stages a versioned preference under data/registry/ for future activation.
+* The running session keeps its legacy bindings; the legacy editor below
+* stays the authoritative runtime control until R6. v3 renders its slot
+* manifest read-only with all execution controls disabled.
+*/
+const REGISTRY_API = "./nexus/registry/v1";
+const REGISTRY_PREF_KEY = "nexus.registry.mode";
+const REGISTRY_MODE_ORDER = ["engineering-v1", "engineering-v2", "engineering-v3"];
+const REGISTRY_MODE_STATUS_LABEL = {
+	deprecated: "Deprecated / Legacy",
+	"active-legacy": "Active / Legacy",
+	active: "Active",
+	planned: "Planned / Preview",
+};
+const REGISTRY_ROLE_LABELS = {
+	primaryEngineer: "Primary Engineer",
+	deepEngineer: "Deep Engineer",
+	fallback: "Fallback",
+	reviewer: "Reviewer",
+	solver: "Solver",
+	visualReviewer: "Visual Reviewer (optional)",
+};
+
+function registryStatusLabel(status) {
+	return REGISTRY_MODE_STATUS_LABEL[status] || String(status || "unknown");
+}
+function registrySeam(name) {
+	try {
+		const w = typeof window !== "undefined" ? window : null;
+		if (!w) return null;
+		const v = w[name];
+		return v === undefined ? null : v;
+	} catch { return null; }
+}
+function registryReadPref() {
+	try {
+		if (typeof window === "undefined" || !window.localStorage) return "engineering-v2";
+		const v = window.localStorage.getItem(REGISTRY_PREF_KEY);
+		if (v && REGISTRY_MODE_ORDER.indexOf(v) !== -1) return v;
+	} catch { /* storage unavailable: fall through */ }
+	return "engineering-v2";
+}
+function registryWritePref(value) {
+	try { window.localStorage.setItem(REGISTRY_PREF_KEY, value); } catch { /* best effort */ }
+}
+function registryJson(response) {
+	return response.json().catch(() => null);
+}
+function registryClone(value) {
+	return value === null || value === undefined ? value : JSON.parse(JSON.stringify(value));
+}
+function registryModeById(doc, modeId) {
+	const modes = doc && Array.isArray(doc.modes) ? doc.modes : [];
+	return modes.find((m) => m && m.id === modeId) || null;
+}
+function registrySlotOfRole(mode, role) {
+	for (const slot of (mode && mode.slots) || []) {
+		if (slot && Array.isArray(slot.internalRoles) && slot.internalRoles.indexOf(role) !== -1) return slot;
+	}
+	return null;
+}
+function registryRouteById(list, id) {
+	return (list || []).find((r) => r && r.routeId === id) || null;
+}
+function registryCapacityText(cap) {
+	if (!cap || cap.value === null || cap.value === undefined) return "unknown";
+	return formatTokens(cap.value) + " (" + (cap.provenance || "declared") + ")";
+}
+function registryModelsOfSlot(eligible, ineligible) {
+	const map = new Map();
+	const mark = (r, isEligible) => {
+		if (!r) return;
+		if (!map.has(r.logicalModelId)) {
+			map.set(r.logicalModelId, { id: r.logicalModelId, display: r.modelDisplayName || r.logicalModelId, eligible: 0, reasons: [] });
+		}
+		const entry = map.get(r.logicalModelId);
+		if (isEligible) entry.eligible += 1;
+		else if (r.ineligibleReason) entry.reasons.push(r.ineligibleReason);
+	};
+	for (const r of eligible || []) mark(r, true);
+	for (const r of ineligible || []) mark(r, false);
+	return [...map.values()];
+}
+
+function useRegistryModes() {
+	const seam = registrySeam("__NX_TEST_REGISTRY_MODES__");
+	const [doc, setDoc] = react.useState(seam);
+	const [failed, setFailed] = react.useState(false);
+	const [loading, setLoading] = react.useState(seam === null);
+	const refresh = react.useCallback(() => {
+		const test = registrySeam("__NX_TEST_REGISTRY_MODES__");
+		if (test !== null) {
+			setDoc(test);
+			setFailed(false);
+			setLoading(false);
+			return;
+		}
+		if (typeof fetch === "undefined") {
+			setFailed(true);
+			setLoading(false);
+			return;
+		}
+		setLoading(true);
+		fetch(REGISTRY_API + "/modes", { cache: "no-store" })
+			.then((res) => registryJson(res).then((body) => {
+				if (!res.ok || !body || body.ok !== true || !Array.isArray(body.modes)) throw new Error("registry modes unavailable");
+				setDoc(body);
+				setFailed(false);
+			}))
+			.catch(() => setFailed(true))
+			.finally(() => setLoading(false));
+	}, []);
+	react.useEffect(() => {
+		if (seam === null) refresh();
+	}, [refresh, seam]);
+	return { doc, failed, loading, refresh };
+}
+
+function registrySeamedConfig(seamAll, m, a) {
+	if (!seamAll || typeof seamAll !== "object") return null;
+	const key = m + "|" + (a || "");
+	if (seamAll[key] !== undefined) return seamAll[key];
+	if (seamAll[m] !== undefined) return seamAll[m];
+	return null;
+}
+
+function useRegistryConfiguration(modeId, adopt) {
+	const [doc, setDoc] = react.useState(() => registrySeamedConfig(registrySeam("__NX_TEST_REGISTRY_CONFIG__"), modeId, adopt));
+	const [failed, setFailed] = react.useState(false);
+	const [loading, setLoading] = react.useState(() => registrySeamedConfig(registrySeam("__NX_TEST_REGISTRY_CONFIG__"), modeId, adopt) === null);
+	const refresh = react.useCallback(() => {
+		const test = registrySeamedConfig(registrySeam("__NX_TEST_REGISTRY_CONFIG__"), modeId, adopt);
+		if (test !== null) {
+			setDoc(test);
+			setFailed(false);
+			setLoading(false);
+			return;
+		}
+		if (!modeId || typeof fetch === "undefined") {
+			setFailed(!!modeId);
+			setLoading(false);
+			return;
+		}
+		setLoading(true);
+		const url = REGISTRY_API + "/configuration?mode=" + encodeURIComponent(modeId) + (adopt ? "&adopt=" + encodeURIComponent(adopt) : "");
+		fetch(url, { cache: "no-store" })
+			.then((res) => registryJson(res).then((body) => {
+				if (!res.ok || !body || body.ok !== true || !body.result) throw new Error("registry configuration unavailable");
+				setDoc(body.result);
+				setFailed(false);
+			}))
+			.catch(() => setFailed(true))
+			.finally(() => setLoading(false));
+	}, [modeId, adopt]);
+	react.useEffect(() => {
+		const test = registrySeamedConfig(registrySeam("__NX_TEST_REGISTRY_CONFIG__"), modeId, adopt);
+		setDoc(test);
+		setFailed(false);
+		setLoading(test === null);
+		if (test === null) refresh();
+	}, [modeId, adopt, refresh]);
+	return { doc, failed, loading, refresh };
+}
+
+function registrySeamedEligible(modeId, slotIds) {
+	const testAll = registrySeam("__NX_TEST_REGISTRY_ELIGIBLE__");
+	if (!modeId || !testAll || typeof testAll !== "object") return null;
+	const next = {};
+	for (const slotId of slotIds || []) {
+		const t = testAll[modeId + "/" + slotId];
+		if (t === undefined) return null;
+		next[slotId] = t;
+	}
+	return next;
+}
+
+function useRegistryEligible(modeId, slotIds) {
+	const key = (slotIds || []).join(",");
+	const [bySlot, setBySlot] = react.useState(() => registrySeamedEligible(modeId, slotIds) || {});
+	const [loading, setLoading] = react.useState(() => registrySeamedEligible(modeId, slotIds) === null);
+	const refresh = react.useCallback(() => {
+		const testAll = registrySeam("__NX_TEST_REGISTRY_ELIGIBLE__");
+		const next = {};
+		let allSeamed = !!modeId;
+		for (const slotId of slotIds || []) {
+			const t = testAll && typeof testAll === "object" ? testAll[modeId + "/" + slotId] : undefined;
+			if (t === undefined) {
+				allSeamed = false;
+				break;
+			}
+			next[slotId] = t;
+		}
+		if (allSeamed) {
+			setBySlot(next);
+			setLoading(false);
+			return;
+		}
+		if (!modeId || (slotIds || []).length === 0 || typeof fetch === "undefined") {
+			setBySlot({});
+			setLoading(false);
+			return;
+		}
+		setLoading(true);
+		Promise.all((slotIds || []).map((slotId) =>
+			fetch(REGISTRY_API + "/eligible?mode=" + encodeURIComponent(modeId) + "&slot=" + encodeURIComponent(slotId), { cache: "no-store" })
+				.then((res) => registryJson(res).then((body) => [slotId, res.ok && body && body.ok === true ? body : null]))
+				.catch(() => [slotId, null])
+		)).then((pairs) => {
+			const mapped = {};
+			for (const [slotId, body] of pairs) {
+				mapped[slotId] = body
+					? { eligible: body.eligible || [], ineligible: body.ineligible || [] }
+					: { eligible: [], ineligible: [], failed: true };
+			}
+			setBySlot(mapped);
+			setLoading(false);
+		});
+	}, [modeId, key]);
+	react.useEffect(() => {
+		refresh();
+	}, [refresh]);
+	return { bySlot, loading, refresh };
+}
+
+function registryDraftFromDoc(doc) {
+	if (!doc) return null;
+	if (!doc.config) {
+		return {
+			previewOnly: true,
+			reason: doc.reason || "mode-not-runnable",
+			dirty: false,
+			notice: null,
+			noticeTone: "ok",
+			validation: [],
+			resolutionId: null,
+			baseRevision: null,
+			config: null,
+			adoptedFrom: null,
+		};
+	}
+	return {
+		previewOnly: false,
+		config: registryClone(doc.config),
+		baseRevision: doc.persisted ? doc.revision : null,
+		dirty: false,
+		notice: null,
+		noticeTone: "ok",
+		validation: Array.isArray(doc.validation) ? doc.validation : [],
+		resolutionId: null,
+		adoptedFrom: doc.adoptedFrom || null,
+	};
+}
+
+function registryAssignmentOf(draft, slotId) {
+	return draft && draft.config && draft.config.slots ? draft.config.slots[slotId] || null : null;
+}
+
+function RegistrySlotCard({ slot, assignment, eligible, ineligible, disabled, onAssign }) {
+	const models = registryModelsOfSlot(eligible, ineligible);
+	const eligibleList = eligible || [];
+	const chosenRoute = (assignment && registryRouteById(eligibleList, assignment.routeId)) || null;
+	const chosenIneligible = !chosenRoute && assignment ? (ineligible || []).find((r) => r && r.routeId === assignment.routeId) || null : null;
+	const tier = chosenRoute ? chosenRoute.dataUseTier : null;
+
+	function pickModel(modelId) {
+		const routes = eligibleList.filter((r) => r.logicalModelId === modelId);
+		if (routes.length === 0) return;
+		const keep = assignment && routes.some((r) => r.routeId === assignment.routeId) ? assignment.routeId : routes[0].routeId;
+		const route = registryRouteById(routes, keep) || routes[0];
+		const reasoning = assignment && route.reasoningLevels.indexOf(assignment.reasoning) !== -1 ? assignment.reasoning : route.reasoningLevels[0];
+		onAssign({ logicalModelId: modelId, routeId: route.routeId, reasoning }, "Model changed to " + (route.modelDisplayName || modelId) + "; provider reset to " + (route.providerName || route.providerId) + " with reasoning " + reasoning + ".");
+	}
+	function pickRoute(routeId) {
+		const route = registryRouteById(eligibleList, routeId);
+		if (!route || !assignment) return;
+		const reasoning = route.reasoningLevels.indexOf(assignment.reasoning) !== -1 ? assignment.reasoning : route.reasoningLevels[0];
+		const note = reasoning === assignment.reasoning
+			? "Provider changed to " + (route.providerName || route.providerId) + "; model kept as " + (route.modelDisplayName || route.logicalModelId) + "."
+			: "Provider changed to " + (route.providerName || route.providerId) + "; reasoning reset to " + reasoning + " (the previous level is not supported on this route).";
+		onAssign({ logicalModelId: route.logicalModelId, routeId: route.routeId, reasoning }, note);
+	}
+	function pickReasoning(reasoning) {
+		if (!assignment) return;
+		onAssign({ logicalModelId: assignment.logicalModelId, routeId: assignment.routeId, reasoning }, null);
+	}
+
+	const reasoningLevels = chosenRoute ? chosenRoute.reasoningLevels : [];
+	return react_jsx_runtime.jsxs("div", {
+		className: "nx-reg-slot",
+		children: [
+			react_jsx_runtime.jsx("div", { className: "nx-reg-slot-head", children: (slot && slot.label) || slot.id }),
+			react_jsx_runtime.jsxs("div", {
+				className: "nx-eng-row",
+				children: [
+					react_jsx_runtime.jsx("span", { className: "nx-eng-label", children: "Model" }),
+					react_jsx_runtime.jsx("select", {
+						className: "nx-eng-select",
+						value: assignment ? assignment.logicalModelId : "",
+						disabled: disabled || models.length === 0,
+						"aria-label": slot.id + " model",
+						onChange: (event) => pickModel(event.target.value),
+						children: models.map((m) => react_jsx_runtime.jsx("option", {
+							value: m.id,
+							disabled: m.eligible === 0,
+							title: m.eligible === 0 ? "No eligible route: " + (m.reasons[0] || "incompatible with this slot") : m.id,
+							children: m.display + (m.eligible === 0 ? " (no eligible route)" : ""),
+						}, m.id)),
+					}),
+				],
+			}),
+			react_jsx_runtime.jsxs("fieldset", {
+				className: "nx-reg-routes",
+				children: [
+					react_jsx_runtime.jsx("legend", { className: "nx-eng-label", children: "Provider" }),
+					eligibleList.filter((r) => assignment && r.logicalModelId === assignment.logicalModelId).map((r) => react_jsx_runtime.jsxs("label", {
+						className: "nx-reg-radio",
+						title: "Connection " + (r.connectionStatus || "unknown") + " · " + (r.accessType || "unknown") + " access",
+						children: [
+							react_jsx_runtime.jsx("input", {
+								type: "radio",
+								name: "nx-reg-" + slot.id,
+								checked: !!assignment && assignment.routeId === r.routeId,
+								disabled,
+								onChange: () => pickRoute(r.routeId),
+							}),
+							react_jsx_runtime.jsx("span", { children: (r.providerName || r.providerId) + " · " + (r.connectionStatus || "unknown") }),
+						],
+					}, r.routeId)),
+					(ineligible || []).filter((r) => assignment && r.logicalModelId === assignment.logicalModelId).map((r) => react_jsx_runtime.jsxs("label", {
+						className: "nx-reg-radio nx-reg-radio-off",
+						title: r.ineligibleReason || "not eligible for this slot",
+						children: [
+							react_jsx_runtime.jsx("input", { type: "radio", disabled: true }),
+							react_jsx_runtime.jsx("span", { children: (r.providerName || r.providerId) + " — unavailable (" + (r.ineligibleReason || "incompatible") + ")" }),
+						],
+					}, "off-" + r.routeId)),
+				],
+			}),
+			react_jsx_runtime.jsxs("div", {
+				className: "nx-eng-row",
+				children: [
+					react_jsx_runtime.jsx("span", { className: "nx-eng-label", children: "Reasoning" }),
+					react_jsx_runtime.jsx("select", {
+						className: "nx-eng-reason",
+						value: assignment ? assignment.reasoning : "",
+						disabled: disabled || reasoningLevels.length === 0,
+						"aria-label": slot.id + " reasoning",
+						title: reasoningLevels.length === 0 ? "No eligible route selected" : "Levels supported by the chosen route",
+						onChange: (event) => pickReasoning(event.target.value),
+						children: reasoningLevels.map((level) => react_jsx_runtime.jsx("option", { value: level, children: level }, level)),
+					}),
+				],
+			}),
+			chosenRoute ? react_jsx_runtime.jsx("div", {
+				className: "nx-eng-meta",
+				children: "Connection " + (chosenRoute.connectionStatus || "unknown") + " · " + (chosenRoute.accessType || "unknown") + " · transport " + (chosenRoute.transport || "unknown") + " · context " + registryCapacityText(chosenRoute.contextWindow) + " · output " + registryCapacityText(chosenRoute.maxOutputTokens),
+			}) : null,
+			chosenIneligible ? react_jsx_runtime.jsx("div", {
+				className: "nx-eng-notice nx-eng-notice-err",
+				children: "Saved route is not runnable: " + (chosenIneligible.ineligibleReason || "incompatible") + ". Choose an eligible provider above.",
+			}) : null,
+			!chosenRoute && !chosenIneligible ? react_jsx_runtime.jsx("div", {
+				className: "nx-eng-notice nx-eng-notice-err",
+				children: "No route selected for this slot.",
+			}) : null,
+			tier === "contributor" ? react_jsx_runtime.jsx("div", {
+				className: "nx-reg-tier",
+				children: "Contributor data-use tier: repository content shared through this route is governed by the provider's contributor policy. Routes never fall back across tiers silently.",
+			}) : null,
+		],
+	}, slot.id);
+}
+
+function RegistryAdvanced({ mode, draft, bySlot, disabled, onOverride, onClearOverride }) {
+	const roles = ((mode && mode.internalRoles) || []).concat(((mode && mode.optionalCapabilities) || []).filter((c) => ((mode && mode.internalRoles) || []).indexOf(c) === -1));
+	if (roles.length === 0) return null;
+	return react_jsx_runtime.jsxs("div", {
+		className: "nx-reg-adv",
+		children: [
+			react_jsx_runtime.jsx("div", { className: "nx-reg-adv-head", children: "Advanced role overrides" }),
+			roles.map((role) => {
+				const slot = registrySlotOfRole(mode, role);
+				const slotId = slot ? slot.id : null;
+				const base = slotId && draft.config.slots[slotId] ? draft.config.slots[slotId] : null;
+				const overrides = draft.config.roleOverrides || {};
+				const override = overrides[role] || null;
+				const effective = override || base;
+				const differs = !!override && !!base && JSON.stringify(override) !== JSON.stringify(base);
+				let pool = [];
+				if (role === "visualReviewer") {
+					pool = Object.values(bySlot || {}).reduce((acc, s) => acc.concat((s && s.eligible) || []), []).filter((r) => r && r.capabilities && r.capabilities.imageInput === true);
+				} else if (slotId && bySlot && bySlot[slotId]) {
+					pool = bySlot[slotId].eligible || [];
+				}
+				const models = registryModelsOfSlot(pool, []);
+				const routePool = effective ? pool.filter((r) => r.logicalModelId === effective.logicalModelId) : [];
+				const chosenRoute = effective ? registryRouteById(pool, effective.routeId) : null;
+				const levels = chosenRoute ? chosenRoute.reasoningLevels : [];
+				return react_jsx_runtime.jsxs("div", {
+					className: "nx-reg-adv-row",
+					children: [
+						react_jsx_runtime.jsxs("div", {
+							className: "nx-reg-adv-title",
+							children: [
+								react_jsx_runtime.jsx("span", { children: REGISTRY_ROLE_LABELS[role] || role }),
+								!slotId ? react_jsx_runtime.jsx("span", { className: "nx-reg-tag", children: "optional" }) : null,
+								override ? react_jsx_runtime.jsx("span", { className: "nx-reg-tag", children: differs ? "differs from " + (slot ? slot.label : "slot") : "override = slot value" }) : react_jsx_runtime.jsx("span", { className: "nx-reg-tag nx-reg-tag-dim", children: slot ? "follows " + slot.label + " slot" : "unset" }),
+							],
+						}),
+						react_jsx_runtime.jsxs("div", {
+							className: "nx-eng-row",
+							children: [
+								react_jsx_runtime.jsx("select", {
+									className: "nx-eng-select",
+									value: effective ? effective.logicalModelId : "",
+									disabled: disabled || models.length === 0,
+									"aria-label": role + " model override",
+									title: slot ? "Independent override; the " + slot.label + " slot is untouched" : "Independent optional-role binding",
+									onChange: (event) => {
+										const modelId = event.target.value;
+										const routes = pool.filter((r) => r.logicalModelId === modelId);
+										if (routes.length === 0 || modelId === "") return;
+										const route = routes[0];
+										onOverride(role, { logicalModelId: modelId, routeId: route.routeId, reasoning: route.reasoningLevels[0] });
+									},
+									children: [react_jsx_runtime.jsx("option", { value: "", children: "—" }, "_empty")].concat(models.map((m) => react_jsx_runtime.jsx("option", { value: m.id, children: m.display }, m.id))),
+								}),
+								react_jsx_runtime.jsx("select", {
+									className: "nx-eng-select",
+									value: effective ? effective.routeId : "",
+									disabled: disabled || routePool.length === 0,
+									"aria-label": role + " route override",
+									onChange: (event) => {
+										const route = registryRouteById(pool, event.target.value);
+										if (!route || !effective || event.target.value === "") return;
+										onOverride(role, { logicalModelId: route.logicalModelId, routeId: route.routeId, reasoning: route.reasoningLevels.indexOf(effective.reasoning) !== -1 ? effective.reasoning : route.reasoningLevels[0] });
+									},
+									children: [react_jsx_runtime.jsx("option", { value: "", children: "—" }, "_empty")].concat(routePool.map((r) => react_jsx_runtime.jsx("option", { value: r.routeId, children: r.providerName || r.providerId }, r.routeId))),
+								}),
+								react_jsx_runtime.jsx("select", {
+									className: "nx-eng-reason",
+									value: effective ? effective.reasoning : "",
+									disabled: disabled || levels.length === 0,
+									"aria-label": role + " reasoning override",
+									onChange: (event) => {
+										if (!effective || event.target.value === "") return;
+										onOverride(role, { logicalModelId: effective.logicalModelId, routeId: effective.routeId, reasoning: event.target.value });
+									},
+									children: [react_jsx_runtime.jsx("option", { value: "", children: "—" }, "_empty")].concat(levels.map((level) => react_jsx_runtime.jsx("option", { value: level, children: level }, level))),
+								}),
+								override ? react_jsx_runtime.jsx("button", {
+									type: "button",
+									className: "nx-reg-clear",
+									disabled,
+									title: "Clear override and follow the slot again",
+									"aria-label": "Clear " + role + " override",
+									onClick: () => onClearOverride(role),
+									children: "Clear",
+								}) : null,
+							],
+						}),
+					],
+				}, role);
+			}),
+		],
+	});
+}
+
+function RegistryValidationList({ validation }) {
+	if (!validation || validation.length === 0) return null;
+	return react_jsx_runtime.jsx("div", {
+		className: "nx-reg-errors",
+		role: "alert",
+		children: validation.map((e, i) => react_jsx_runtime.jsx("div", {
+			className: "nx-eng-notice nx-eng-notice-err",
+			children: (e.code || "invalid") + " · " + (e.path || "") + " — " + (e.message || ""),
+		}, String(i) + "-" + (e.code || "e"))),
+	});
+}
+
+function RegistryConfigBody({ mode, doc, bySlot, draft, onAssign, onOverride, onClearOverride, onSave, saving, onReload, adopt, onAdoptChange }) {
+	if (!mode) return null;
+	if ((draft && draft.previewOnly) || mode.executable === false) {
+		const slots = (mode && mode.slots) || (doc && doc.slotsManifest) || [];
+		return react_jsx_runtime.jsxs("div", {
+			children: [
+				react_jsx_runtime.jsx("div", {
+					className: "nx-eng-notice",
+					children: "Planned / Preview — " + ((draft && draft.reason) || (mode && mode.executableReason) || "not runnable") + ". Orchestration is not implemented in R3; slot assignments are shown for review only and cannot be saved or executed.",
+				}),
+				slots.map((slot) => react_jsx_runtime.jsxs("div", {
+					className: "nx-reg-slot",
+					children: [
+						react_jsx_runtime.jsx("div", { className: "nx-reg-slot-head", children: (slot && slot.label) || (slot && slot.id) }),
+						react_jsx_runtime.jsx("div", {
+							className: "nx-eng-meta",
+							children: "Roles: " + ((slot && slot.internalRoles) || []).join(", ") + (slot && slot.required === false ? " · optional" : " · required"),
+						}),
+						react_jsx_runtime.jsx("select", { className: "nx-eng-select", disabled: true, value: "", "aria-label": slot.id + " (preview only)", onChange: () => {}, children: react_jsx_runtime.jsx("option", { value: "", children: "Preview only — unavailable" }) }),
+					],
+				}, slot.id)),
+			],
+		});
+	}
+	if (!draft || !draft.config) {
+		return react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading mode configuration…" });
+	}
+	const validation = draft.validation || [];
+	const valid = validation.length === 0;
+	return react_jsx_runtime.jsxs("div", {
+		children: [
+			!doc.persisted && doc.adoptable ? react_jsx_runtime.jsxs("div", {
+				className: "nx-eng-row",
+				children: [
+					react_jsx_runtime.jsx("span", { className: "nx-eng-label", title: "Adopting a legacy profile seeds a reviewable draft; nothing is saved until you choose Save, and legacy files are never rewritten.", children: "Seed from" }),
+					react_jsx_runtime.jsx("select", {
+						className: "nx-eng-select",
+						value: adopt || doc.adoptedFrom || "",
+						disabled: draft.dirty || saving,
+						"aria-label": "Legacy profile to seed this mode",
+						title: draft.dirty ? "Save or reload before changing the seed" : "Adopting is deliberate and reviewable",
+						onChange: (event) => onAdoptChange(event.target.value),
+						children: doc.adoptable.map((id) => react_jsx_runtime.jsx("option", { value: id, children: id }, id)),
+					}),
+				],
+			}) : null,
+			!doc.persisted ? react_jsx_runtime.jsx("div", {
+				className: "nx-eng-hint",
+				children: "Preview seeded from legacy profile " + (doc.adoptedFrom || "unknown") + " — reviewable, not yet saved. Adopting never rewrites legacy profiles.",
+			}) : null,
+			(mode.slots || []).map((slot) => react_jsx_runtime.jsx(RegistrySlotCard, {
+				slot,
+				assignment: registryAssignmentOf(draft, slot.id),
+				eligible: bySlot && bySlot[slot.id] ? bySlot[slot.id].eligible || [] : [],
+				ineligible: bySlot && bySlot[slot.id] ? bySlot[slot.id].ineligible || [] : [],
+				disabled: saving,
+				onAssign: (patch, announcement) => onAssign(slot.id, patch, announcement),
+			}, slot.id)),
+			mode.id === "engineering-v1" ? react_jsx_runtime.jsx(RegistryAdvanced, {
+				mode,
+				draft,
+				bySlot,
+				disabled: saving,
+				onOverride,
+				onClearOverride,
+			}) : null,
+			react_jsx_runtime.jsx(RegistryValidationList, { validation }),
+			valid ? react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-ok", children: "Valid staged configuration." }) : null,
+			draft.notice ? react_jsx_runtime.jsx("div", {
+				className: "nx-eng-notice " + (draft.noticeTone === "err" ? "nx-eng-notice-err" : "nx-eng-notice-ok"),
+				children: draft.notice,
+			}) : null,
+			react_jsx_runtime.jsxs("div", {
+				className: "nx-reg-save-row",
+				children: [
+					react_jsx_runtime.jsx("button", {
+						type: "button",
+						className: "nx-eng-save",
+						disabled: saving || !valid,
+						title: !valid ? "Resolve validation errors before saving" : "Stage this configuration for future activation",
+						onClick: onSave,
+						children: saving ? "Saving…" : (doc.persisted ? "Save staged configuration" : "Adopt & save staged configuration"),
+					}),
+					react_jsx_runtime.jsx("span", {
+						className: "nx-eng-meta",
+						children: doc.persisted ? "Saved revision " + doc.revision + (doc.savedAtUtc ? " · " + doc.savedAtUtc : "") : "Not saved yet",
+					}),
+					draft.resolutionId ? react_jsx_runtime.jsx("span", { className: "nx-eng-meta", title: "Compiled resolution id", children: "· " + String(draft.resolutionId).slice(0, 12) + "…" }) : null,
+					draft.noticeTone === "err" && draft.stale ? react_jsx_runtime.jsx("button", {
+						type: "button",
+						className: "nx-reg-clear",
+						onClick: onReload,
+						children: "Reload saved configuration",
+					}) : null,
+				],
+			}),
+		],
+	});
+}
+
+function RegistryPanel({ sessionId, legacyRuntimeName }) {
+	const modes = useRegistryModes();
+	const [selected, setSelected] = react.useState(registryReadPref);
+	const [adopts, setAdopts] = react.useState({});
+	const [drafts, setDrafts] = react.useState({});
+	const [saving, setSaving] = react.useState(false);
+	const mode = registryModeById(modes.doc, selected);
+	const adopt = adopts[selected] || null;
+	const config = useRegistryConfiguration(selected, adopt);
+	const slotIds = mode && mode.slots ? mode.slots.map((s) => s.id) : [];
+	const eligible = useRegistryEligible(mode && mode.executable === false ? null : selected, mode && mode.executable === false ? [] : slotIds);
+	// The stored draft wins; otherwise derive a transient draft from the loaded
+	// document so the configuration paints (and static smoke renders) without
+	// waiting for the init effect. First edits materialize it via baseDraft().
+	const freshBase = !config.loading && config.doc && !drafts[selected] ? registryDraftFromDoc(config.doc) : null;
+	const draft = drafts[selected] || freshBase || null;
+
+	react.useEffect(() => {
+		if (!selected || !config.doc || config.loading) return;
+		setDrafts((prev) => {
+			if (prev[selected]) return prev;
+			const next = registryDraftFromDoc(config.doc);
+			if (!next) return prev;
+			return { ...prev, [selected]: next };
+		});
+	}, [selected, config.doc, config.loading]);
+
+	const draftConfigJson = draft && draft.dirty && !draft.previewOnly ? JSON.stringify(draft.config) : null;
+	react.useEffect(() => {
+		if (!draftConfigJson || !selected) return;
+		if (registrySeam("__NX_TEST_REGISTRY_CONFIG__") !== null || typeof fetch === "undefined") return;
+		if (typeof window === "undefined" || typeof window.setTimeout !== "function") return;
+		const timer = window.setTimeout(() => {
+			let parsed = null;
+			try { parsed = JSON.parse(draftConfigJson); } catch { return; }
+			fetch(REGISTRY_API + "/validate", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ config: parsed }),
+				cache: "no-store",
+			}).then((res) => registryJson(res).then((body) => {
+				const errors = body && body.ok === true ? [] : (body && Array.isArray(body.details) ? body.details : [{ code: "validation-unavailable", path: "", message: "Validation is unavailable right now." }]);
+				setDrafts((prev) => {
+					if (!prev[selected] || JSON.stringify(prev[selected].config) !== draftConfigJson) return prev;
+					return { ...prev, [selected]: { ...prev[selected], validation: errors } };
+				});
+			})).catch(() => {});
+		}, 400);
+		return () => { try { window.clearTimeout(timer); } catch {} };
+	}, [selected, draftConfigJson]);
+
+	function selectMode(next) {
+		setSelected(next);
+		registryWritePref(next);
+	}
+	function patchDraft(next, announcement) {
+		setDrafts((prev) => {
+			const current = prev[selected] || freshBase;
+			if (!current || current.previewOnly) return prev;
+			return { ...prev, [selected]: { ...current, config: next, dirty: true, notice: announcement || current.notice, noticeTone: "ok", stale: false } };
+		});
+	}
+	function assignSlot(slotId, patch, announcement) {
+		if (!draft || draft.previewOnly) return;
+		const next = registryClone(draft.config);
+		next.slots = { ...(next.slots || {}), [slotId]: patch };
+		patchDraft(next, announcement);
+	}
+	function overrideRole(role, assignment) {
+		if (!draft || draft.previewOnly) return;
+		const next = registryClone(draft.config);
+		next.roleOverrides = { ...(next.roleOverrides || {}), [role]: assignment };
+		patchDraft(next, "Override set for " + (REGISTRY_ROLE_LABELS[role] || role) + "; the slot assignment is untouched.");
+	}
+	function clearOverride(role) {
+		if (!draft || draft.previewOnly) return;
+		const next = registryClone(draft.config);
+		if (next.roleOverrides) delete next.roleOverrides[role];
+		patchDraft(next, "Override cleared for " + (REGISTRY_ROLE_LABELS[role] || role) + "; it follows the slot again.");
+	}
+	function reloadSaved() {
+		setDrafts((prev) => {
+			const next = { ...prev };
+			delete next[selected];
+			return next;
+		});
+		config.refresh();
+		eligible.refresh();
+	}
+	function changeAdopt(profileId) {
+		setAdopts((prev) => ({ ...prev, [selected]: profileId }));
+		setDrafts((prev) => {
+			const next = { ...prev };
+			delete next[selected];
+			return next;
+		});
+	}
+	function save() {
+		const current = drafts[selected] || freshBase;
+		if (!current || current.previewOnly || saving) return;
+		if (typeof fetch === "undefined") return;
+		setSaving(true);
+		const payload = {
+			modeId: selected,
+			config: current.config,
+			expectedRevision: current.baseRevision,
+			source: current.baseRevision === null && current.adoptedFrom ? "legacy-adopt" : "operator-save",
+			adoptedFrom: current.baseRevision === null ? current.adoptedFrom : null,
+		};
+		fetch(REGISTRY_API + "/configuration", {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(payload),
+			cache: "no-store",
+		}).then((res) => registryJson(res).then((body) => {
+			if (res.ok && body && body.ok === true) {
+				setDrafts((prev) => ({
+					...prev,
+					[selected]: { ...(prev[selected] || current), config: registryClone(current.config), dirty: false, previewOnly: false, baseRevision: body.revision, notice: "Saved as a staged preference (revision " + body.revision + "). Running sessions are unchanged — activation lands with R6.", noticeTone: "ok", stale: false, resolutionId: body.resolutionId || null, validation: (prev[selected] && prev[selected].validation) || current.validation || [] },
+				}));
+				config.refresh();
+				modes.refresh();
+			} else if (res.status === 409) {
+				setDrafts((prev) => ({
+					...prev,
+					[selected]: { ...(prev[selected] || current), notice: "Save rejected: the saved configuration changed elsewhere (stale revision). Reload and re-apply your edits.", noticeTone: "err", stale: true },
+				}));
+			} else {
+				const details = body && Array.isArray(body.details) ? body.details : [];
+				setDrafts((prev) => {
+					const prior = prev[selected] || current;
+					return {
+						...prev,
+						[selected]: { ...prior, notice: "Save rejected: " + ((body && body.error) || "validation failed") + ".", noticeTone: "err", stale: false, validation: details.length > 0 ? details : prior.validation },
+					};
+				});
+			}
+		})).catch(() => {
+			setDrafts((prev) => ({
+				...prev,
+				[selected]: { ...(prev[selected] || current), notice: "Could not save the staged configuration. Try again.", noticeTone: "err", stale: false },
+			}));
+		}).finally(() => setSaving(false));
+	}
+
+	const pendingModes = REGISTRY_MODE_ORDER.filter((id) => drafts[id] && drafts[id].dirty);
+	const savedEntry = mode && mode.persisted ? "revision " + mode.savedRevision + (mode.savedValid ? " · valid" : " · INVALID — review below") : "none yet";
+	const validationState = !draft ? "—" : draft.previewOnly ? "not applicable (preview only)" : (draft.validation || []).length === 0 ? "valid" : "invalid (" + draft.validation.length + ")";
+	const optionList = REGISTRY_MODE_ORDER.map((id) => registryModeById(modes.doc, id)).filter(Boolean);
+
+	return react_jsx_runtime.jsx(Section, {
+		label: "Engineering Modes (Registry)",
+		children: modes.failed ? react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Registry mode catalog is unavailable right now." })
+		: modes.loading || !modes.doc ? react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading Registry modes…" })
+		: react_jsx_runtime.jsxs("div", {
+			children: [
+				react_jsx_runtime.jsx("div", {
+					className: "nx-reg-banner",
+					children: "Staged configuration (R3 preview): saves here are versioned preferences for future activation. They never modify the running session — the legacy controls below stay authoritative until R6.",
+				}),
+				react_jsx_runtime.jsxs("div", {
+					className: "nx-eng-row",
+					children: [
+						react_jsx_runtime.jsx("span", { className: "nx-eng-label", children: "Mode" }),
+						react_jsx_runtime.jsx("select", {
+							className: "nx-eng-profile",
+							value: selected,
+							disabled: saving,
+							"aria-label": "Registry Engineering Mode",
+							onChange: (event) => selectMode(event.target.value),
+							children: optionList.map((m) => react_jsx_runtime.jsx("option", {
+								value: m.id,
+								title: (m.displayName || m.id) + " — " + registryStatusLabel(m.status),
+								children: (m.displayName || m.id) + " — " + registryStatusLabel(m.status) + (m.executable === false ? " · preview only" : "") + (drafts[m.id] && drafts[m.id].dirty ? " · ● unsaved" : ""),
+							}, m.id)),
+						}),
+					],
+				}),
+				react_jsx_runtime.jsxs("div", {
+					className: "nx-reg-status",
+					children: [
+						react_jsx_runtime.jsx("div", { className: "nx-eng-meta", children: "Saved Registry preference: " + (mode ? (mode.displayName || mode.id) + " · " + savedEntry : "—") }),
+						react_jsx_runtime.jsx("div", { className: "nx-eng-meta", children: "Current legacy runtime: " + (legacyRuntimeName || "none") + " (unchanged by Registry saves)" }),
+						react_jsx_runtime.jsx("div", { className: "nx-eng-meta", children: "Pending staged changes: " + (pendingModes.length > 0 ? pendingModes.join(", ") + " (kept while switching modes)" : "none") }),
+						react_jsx_runtime.jsx("div", { className: "nx-eng-meta", children: "Validation: " + validationState }),
+					],
+				}),
+				config.failed ? react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Mode configuration is unavailable right now." })
+				: config.loading || !config.doc ? react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading mode configuration…" })
+				: react_jsx_runtime.jsx(RegistryConfigBody, {
+					mode,
+					doc: config.doc,
+					bySlot: eligible.bySlot,
+					draft,
+					onAssign: assignSlot,
+					onOverride: overrideRole,
+					onClearOverride: clearOverride,
+					onSave: save,
+					saving,
+					onReload: reloadSaved,
+					adopt,
+					onAdoptChange: changeAdopt,
+				}),
+			],
+		}),
+	});
+}
+//#endregion
+
 function EngineeringEditor({ sessionId }) {
 	const editor = useEngineeringEditor(sessionId);
+	// R3: the Registry panel is independent of the legacy editor state, so it
+	// renders in every branch below. The legacy editor keeps its exact
+	// previous states (unavailable / loading / fields) as the second section:
+	// it stays the authoritative runtime control until R6.
+	const legacyPreferred = editor.state && editor.state.preferredProfile
+		? String(editor.state.preferredProfile.displayName || editor.state.preferredProfile.id || "none")
+		: "none";
+	let legacyBody;
 	if (editor.failed) {
-		return react_jsx_runtime.jsx(Section, {
-			label: "Engineering Profile",
-			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." }),
-		});
+		legacyBody = react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." });
+	} else if (isCatalogUnavailable(editor.state)) {
+		// Phase M1.1 CASE B: a current host with an EMPTY Nexus catalog is
+		// explicitly reporting an unavailable/invalid catalog — fail closed
+		// (never fall back to the legacy Dual list).
+		legacyBody = react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." });
+	} else if (!editor.ready) {
+		legacyBody = react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading engineering configuration…" });
+	} else {
+		legacyBody = react_jsx_runtime.jsx(EngineeringEditorFields, { editor, variant: "room" });
 	}
-	// Phase M1.1 CASE B: a current host with an EMPTY Nexus catalog is
-	// explicitly reporting an unavailable/invalid catalog — fail closed
-	// (never fall back to the legacy Dual list).
-	if (isCatalogUnavailable(editor.state)) {
-		return react_jsx_runtime.jsx(Section, {
-			label: "Engineering Profile",
-			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Engineering configuration is unavailable right now." }),
-		});
-	}
-	if (!editor.ready) {
-		return react_jsx_runtime.jsx(Section, {
-			label: "Engineering Profile",
-			children: react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading engineering configuration…" }),
-		});
-	}
-	return react_jsx_runtime.jsx(Section, {
-		label: "Engineering Profile",
-		children: react_jsx_runtime.jsx(EngineeringEditorFields, { editor, variant: "room" }),
+	return react_jsx_runtime.jsxs(react.Fragment, {
+		children: [
+			react_jsx_runtime.jsx(RegistryPanel, { sessionId, legacyRuntimeName: legacyPreferred }),
+			react_jsx_runtime.jsx(Section, {
+				label: "Engineering Profile",
+				children: legacyBody,
+			}),
+		],
 	});
 }
 
@@ -2241,6 +3044,26 @@ const PANEL_CSS = [
 ".nx-eng-save:disabled{opacity:.5;cursor:wait}",
 ".nx-eng-meta{font-size:10px;color:var(--dsw-alias-label-tertiary);line-height:1.45}",
 ".nx-eng-hint{font-size:10px;color:var(--dsw-alias-label-tertiary)}",
+".nx-reg-banner{font-size:10.5px;line-height:1.5;color:var(--dsw-alias-label-secondary);padding:6px 8px;border-radius:6px;background:var(--dsw-alias-interactive-bg-hover);border:1px solid var(--dsw-alias-border-l1);margin-bottom:6px}",
+".nx-reg-status{display:flex;flex-direction:column;gap:2px;margin:6px 0;padding:6px 8px;border-radius:6px;background:var(--dsw-alias-bg-layer-3, transparent)}",
+".nx-reg-slot{display:flex;flex-direction:column;gap:5px;padding:8px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;margin:6px 0;min-width:0}",
+".nx-reg-slot-head{font-size:11px;font-weight:700;color:var(--dsw-alias-label-primary);letter-spacing:.02em}",
+".nx-reg-routes{border:none;margin:0;padding:0;min-width:0;display:flex;flex-direction:column;gap:3px}",
+".nx-reg-routes legend{padding:0;margin-bottom:2px}",
+".nx-reg-radio{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--dsw-alias-label-primary);cursor:pointer;min-width:0}",
+".nx-reg-radio input{flex:none}",
+".nx-reg-radio span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+".nx-reg-radio-off{color:var(--dsw-alias-label-tertiary);cursor:not-allowed}",
+".nx-reg-tier{font-size:10.5px;font-weight:600;color:var(--dsw-alias-state-warn-primary);line-height:1.45}",
+".nx-reg-adv{margin:8px 0;padding:8px;border:1px dashed var(--dsw-alias-border-l1);border-radius:8px;display:flex;flex-direction:column;gap:6px;min-width:0}",
+".nx-reg-adv-head{font-size:10.5px;font-weight:700;color:var(--dsw-alias-label-secondary);letter-spacing:.04em}",
+".nx-reg-adv-row{display:flex;flex-direction:column;gap:3px;min-width:0}",
+".nx-reg-adv-title{display:flex;align-items:center;gap:6px;font-size:10.5px;font-weight:600;color:var(--dsw-alias-label-primary)}",
+".nx-reg-tag{font-size:9px;font-weight:600;padding:1px 6px;border-radius:8px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}",
+".nx-reg-tag-dim{opacity:.7}",
+".nx-reg-clear{align-self:flex-start;font-size:10px;color:var(--dsw-alias-label-secondary);background:transparent;border:1px solid var(--dsw-alias-border-l1);border-radius:5px;padding:2px 8px;cursor:pointer}",
+".nx-reg-errors{display:flex;flex-direction:column;gap:3px;margin:4px 0}",
+".nx-reg-save-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:4px}",
 ".nx-executor-chip{display:inline-flex;align-items:center;gap:8px;min-width:0}",
 ".nx-eng-composer{position:relative;display:inline-flex;align-items:center}",
 ".nx-eng-trigger{display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-elevated);color:var(--dsw-alias-label-primary);font-size:11px;font-weight:600;white-space:nowrap;cursor:pointer}",
@@ -2421,6 +3244,15 @@ exports.EngineeringEditor = EngineeringEditor;
 exports.useEngineeringEditor = useEngineeringEditor;
 exports.engineeringEditorLoadGate = engineeringEditorLoadGate;
 exports.EngineeringEditorFields = EngineeringEditorFields;
+exports.RegistryPanel = RegistryPanel;
+exports.RegistrySlotCard = RegistrySlotCard;
+exports.RegistryAdvanced = RegistryAdvanced;
+exports.RegistryConfigBody = RegistryConfigBody;
+exports.useRegistryModes = useRegistryModes;
+exports.useRegistryConfiguration = useRegistryConfiguration;
+exports.useRegistryEligible = useRegistryEligible;
+exports.registryDraftFromDoc = registryDraftFromDoc;
+exports.registryModelsOfSlot = registryModelsOfSlot;
 exports.EngineeringSelector = EngineeringSelector;
 exports.preferredEngineerFromEditorState = preferredEngineerFromEditorState;
 exports.hasNexusCatalogContract = hasNexusCatalogContract;

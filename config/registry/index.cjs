@@ -17,6 +17,8 @@ const dshAdapter = require('./dsh-adapter.cjs')
 const profileCompat = require('./profile-compat.cjs')
 const parity = require('./parity.cjs')
 const migration = require('./migration.cjs')
+const configStore = require('./config-store.cjs')
+const service = require('./service.cjs')
 
 module.exports = {
   schemas,
@@ -27,4 +29,6 @@ module.exports = {
   profileCompat,
   parity,
   migration,
+  configStore,
+  service,
 }

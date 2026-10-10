@@ -25,6 +25,8 @@ import status from './status.cjs'
 import detail from './detail.cjs'
 import gate from './gate.cjs'
 import engineering from './engineering.cjs'
+import registryAdapter from './registry.cjs'
+import registryServiceModule from '../../../config/registry/service.cjs'
 
 const name = 'nexus-controller'
 
@@ -624,6 +626,33 @@ function apply(ctx) {
     webCtx.effect(
       () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/workspace-registration.json', handler: workspaceRegistrationHandler }),
       'nexus-controller: Phase 3.1 workspace registration route',
+    )
+
+    // ── Registry R3 (TASK-0047): Nexus-owned staged configuration API ──
+    // Read/validate/compile plus revision-checked staged saves under
+    // data/registry/. Never touches session bindings, presets,
+    // settings.yaml or routing ledgers (session-pinning boundary).
+    const registryService = registryServiceModule.createService({ installRoot, dataRoot })
+    const registryHandlers = registryAdapter.createRegistryHandlers(registryService)
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/modes', handler: registryHandlers.modesHandler }),
+      'nexus-controller: registry R3 mode list route',
+    )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/configuration', handler: registryHandlers.configurationHandler }),
+      'nexus-controller: registry R3 configuration route',
+    )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/eligible', handler: registryHandlers.eligibleHandler }),
+      'nexus-controller: registry R3 eligible-routes route',
+    )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/validate', handler: registryHandlers.validateHandler }),
+      'nexus-controller: registry R3 validation route',
+    )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/preview', handler: registryHandlers.previewHandler }),
+      'nexus-controller: registry R3 compile-preview route',
     )
   })
 }
