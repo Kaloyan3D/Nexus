@@ -20,6 +20,25 @@
  *                                                  expectedRevision?,
  *                                                  source?, adoptedFrom? }
  *
+ * R4 endpoint contract (Models & Providers management):
+ *
+ *   GET  /nexus/registry/v1/catalog
+ *   PUT  /nexus/registry/v1/providers           { provider, expectedRevision?, endpointOptions? }
+ *   PUT  /nexus/registry/v1/models              { model, expectedRevision? }
+ *   PUT  /nexus/registry/v1/routes              { route, expectedRevision? }
+ *   PUT  /nexus/registry/v1/connections         { connection, expectedRevision? }
+ *   POST /nexus/registry/v1/providers/disable   { id, expectedRevision? }  (same for models/routes/connections)
+ *   POST /nexus/registry/v1/providers/delete    { id }                     (same for models/routes/connections)
+ *   POST /nexus/registry/v1/connections/status  { id, status, attested? }
+ *   POST /nexus/registry/v1/providers/test      { id, connectionId? }
+ *   POST /nexus/registry/v1/providers/discover  { id, connectionId? }
+ *   POST /nexus/registry/v1/routes/verify       { id }
+ *   GET  /nexus/registry/v1/routes/evidence?route=<routeId>
+ *   POST /nexus/registry/v1/routes/project      { id, runtime? }
+ *
+ * R4 secrets rule: no endpoint accepts or returns credential VALUES.
+ * Connections carry opaque credential:// references + status only.
+ *
  * Write boundary (R3.4, hardened R3.1 H1): mutations reuse the exact trust
  * boundary of the existing engineering-profile-action route (loopback host
  * webServer serving the local GUI; no new network surface), plus
@@ -244,7 +263,7 @@ function readBoundedJson(req, limit) {
 
 function errorStatusOf(errors) {
   const codes = (errors || []).map((e) => (e && e.code) || '')
-  if (codes.indexOf('stale-revision') !== -1 || codes.indexOf('write-conflict') !== -1) return 409
+  if (codes.indexOf('stale-revision') !== -1 || codes.indexOf('write-conflict') !== -1 || codes.indexOf('dependency-blocked') !== -1 || codes.indexOf('duplicate-id') !== -1) return 409
   if (codes.indexOf('snapshot-unavailable') !== -1) return 503
   if (codes.indexOf('registry-store-corrupt') !== -1 || codes.indexOf('registry-store-unreadable') !== -1 || codes.indexOf('registry-store-unwritable') !== -1) return 500
   return 422
@@ -398,12 +417,273 @@ function createRegistryHandlers(service) {
     }
   }
 
+  // ── Registry R4 (provider/model/route catalog + probes) ──────────────
+  // Same trusted caller boundary as R3 (loopback host webServer + full
+  // origin-tuple check + 64 KiB body cap). R4.3: NO endpoint here accepts
+  // secret VALUES — connections carry opaque credential:// references and
+  // non-secret status only. There is deliberately no secret-write route on
+  // this host (see docs/architecture/registry-r4-providers.md blocker).
+
+  const catalogHandler = async (req, res) => {
+    if (req.method !== 'GET') {
+      methodNotAllowed(res)
+      return
+    }
+    const originError = checkSameOrigin(req)
+    if (originError) {
+      respond(res, 403, { ok: false, error: originError })
+      return
+    }
+    try {
+      const { catalog, errors } = service.getCatalog()
+      if (!catalog) {
+        respond(res, errorStatusOf(errors), { ok: false, error: (errors[0] && errors[0].code) || 'registry-catalog-unavailable', details: errors })
+        return
+      }
+      respond(res, 200, { ok: true, schemaVersion: 1, generatedAtUtc: new Date().toISOString(), catalog, warnings: errors })
+    } catch {
+      respond(res, 500, { ok: false, error: 'registry-catalog-failed' })
+    }
+  }
+
+  const catalogSaveHandler = (kind, field, saver) => async (req, res) => {
+    if (req.method !== 'PUT') {
+      methodNotAllowed(res)
+      return
+    }
+    const originError = checkSameOrigin(req)
+    if (originError) {
+      respond(res, 403, { ok: false, error: originError })
+      return
+    }
+    const read = await readBoundedJson(req, MAX_BODY_BYTES)
+    if (read.error) {
+      respond(res, read.error === 'payload-too-large' ? 413 : 400, { ok: false, error: read.error })
+      return
+    }
+    const record = read.body ? read.body[field] : null
+    if (!record || typeof record !== 'object') {
+      respond(res, 400, { ok: false, error: 'invalid-catalog-payload' })
+      return
+    }
+    const hasExpected = read.body && Object.prototype.hasOwnProperty.call(read.body, 'expectedRevision')
+    const opts = { expectedRevision: hasExpected ? read.body.expectedRevision : null }
+    if (read.body && read.body.endpointOptions && typeof read.body.endpointOptions === 'object') {
+      opts.endpointOptions = {
+        trustedPrivateNetwork: read.body.endpointOptions.trustedPrivateNetwork === true,
+        allowPrivateLocal: read.body.endpointOptions.allowPrivateLocal === true,
+      }
+    }
+    try {
+      const saved = saver(record, opts)
+      if (!saved.ok) {
+        respond(res, errorStatusOf(saved.errors), { ok: false, error: (saved.errors[0] && saved.errors[0].code) || 'registry-save-rejected', details: saved.errors })
+        return
+      }
+      respond(res, 200, { ok: true, revision: saved.revision, recordVersion: saved.recordVersion === undefined ? null : saved.recordVersion })
+    } catch {
+      respond(res, 500, { ok: false, error: 'registry-save-failed' })
+    }
+  }
+
+  const catalogIdHandler = (kind, operation) => async (req, res) => {
+    if (req.method !== 'POST') {
+      methodNotAllowed(res)
+      return
+    }
+    const originError = checkSameOrigin(req)
+    if (originError) {
+      respond(res, 403, { ok: false, error: originError })
+      return
+    }
+    const read = await readBoundedJson(req, MAX_BODY_BYTES)
+    if (read.error) {
+      respond(res, read.error === 'payload-too-large' ? 413 : 400, { ok: false, error: read.error })
+      return
+    }
+    const id = read.body && typeof read.body.id === 'string' ? read.body.id.trim() : ''
+    if (id === '') {
+      respond(res, 400, { ok: false, error: 'invalid-catalog-payload' })
+      return
+    }
+    const hasExpected = read.body && Object.prototype.hasOwnProperty.call(read.body, 'expectedRevision')
+    const opts = { expectedRevision: hasExpected ? read.body.expectedRevision : null }
+    try {
+      const out = operation === 'disable'
+        ? service.disableCatalogRecord(kind, id, opts)
+        : service.deleteCatalogRecord(kind, id, opts)
+      if (!out.ok) {
+        respond(res, errorStatusOf(out.errors), { ok: false, error: (out.errors[0] && out.errors[0].code) || 'registry-save-rejected', details: out.errors })
+        return
+      }
+      respond(res, 200, { ok: true, revision: out.revision })
+    } catch {
+      respond(res, 500, { ok: false, error: 'registry-save-failed' })
+    }
+  }
+
+  const connectionStatusHandler = async (req, res) => {
+    if (req.method !== 'POST') {
+      methodNotAllowed(res)
+      return
+    }
+    const originError = checkSameOrigin(req)
+    if (originError) {
+      respond(res, 403, { ok: false, error: originError })
+      return
+    }
+    const read = await readBoundedJson(req, MAX_BODY_BYTES)
+    if (read.error) {
+      respond(res, read.error === 'payload-too-large' ? 413 : 400, { ok: false, error: read.error })
+      return
+    }
+    const id = read.body && typeof read.body.id === 'string' ? read.body.id.trim() : ''
+    const status = read.body && typeof read.body.status === 'string' ? read.body.status.trim() : ''
+    const attested = read.body ? read.body.attested === true : false
+    if (id === '' || status === '') {
+      respond(res, 400, { ok: false, error: 'invalid-catalog-payload' })
+      return
+    }
+    try {
+      const out = service.setConnectionStatus(id, status, { attested })
+      if (!out.ok) {
+        respond(res, errorStatusOf(out.errors), { ok: false, error: (out.errors[0] && out.errors[0].code) || 'registry-save-rejected', details: out.errors })
+        return
+      }
+      respond(res, 200, { ok: true, revision: out.revision, attested: out.attested === true })
+    } catch {
+      respond(res, 500, { ok: false, error: 'registry-save-failed' })
+    }
+  }
+
+  // Explicit user-triggered probes (R4.4): bounded synthetic requests, no
+  // startup probing, redacted diagnostics. Probe failures are honest 200
+  // diagnostic envelopes ({ ok: false, checks/evidence, errors }), never a
+  // transport error — the probe ran, the provider did not satisfy it.
+  const providerProbeHandler = (operation) => async (req, res) => {
+    if (req.method !== 'POST') {
+      methodNotAllowed(res)
+      return
+    }
+    const originError = checkSameOrigin(req)
+    if (originError) {
+      respond(res, 403, { ok: false, error: originError })
+      return
+    }
+    const read = await readBoundedJson(req, MAX_BODY_BYTES)
+    if (read.error) {
+      respond(res, read.error === 'payload-too-large' ? 413 : 400, { ok: false, error: read.error })
+      return
+    }
+    const id = read.body && typeof read.body.id === 'string' ? read.body.id.trim() : ''
+    if (id === '') {
+      respond(res, 400, { ok: false, error: 'invalid-probe-payload' })
+      return
+    }
+    const connectionId = read.body && typeof read.body.connectionId === 'string' ? read.body.connectionId : undefined
+    try {
+      if (operation === 'test') {
+        const out = await service.testProviderConnection(id, { connectionId })
+        respond(res, 200, { ok: out.ok, evidence: out.evidence || null, errors: out.errors || [] })
+        return
+      }
+      if (operation === 'discover') {
+        const out = await service.discoverProviderModels(id, { connectionId })
+        respond(res, 200, { ok: out.ok, advertised: out.advertised || [], errors: out.errors || [] })
+        return
+      }
+      const out = await service.verifyProviderRoute(id, {})
+      respond(res, 200, { ok: out.ok, checks: out.checks || [], evidence: out.evidence || null, errors: out.errors || [] })
+    } catch {
+      respond(res, 500, { ok: false, error: 'registry-probe-failed' })
+    }
+  }
+
+  const routeEvidenceHandler = async (req, res) => {
+    if (req.method !== 'GET') {
+      methodNotAllowed(res)
+      return
+    }
+    const originError = checkSameOrigin(req)
+    if (originError) {
+      respond(res, 403, { ok: false, error: originError })
+      return
+    }
+    try {
+      const url = new URL(req.url || '/', 'http://x')
+      const routeId = (url.searchParams.get('route') || '').trim()
+      if (routeId === '') {
+        respond(res, 400, { ok: false, error: 'missing-route' })
+        return
+      }
+      const { evidence, errors } = service.getRouteEvidence(routeId)
+      if (errors.length > 0) {
+        respond(res, errorStatusOf(errors), { ok: false, error: errors[0].code, details: errors })
+        return
+      }
+      respond(res, 200, { ok: true, routeId, evidence })
+    } catch {
+      respond(res, 500, { ok: false, error: 'registry-evidence-failed' })
+    }
+  }
+
+  const routeProjectHandler = async (req, res) => {
+    if (req.method !== 'POST') {
+      methodNotAllowed(res)
+      return
+    }
+    const originError = checkSameOrigin(req)
+    if (originError) {
+      respond(res, 403, { ok: false, error: originError })
+      return
+    }
+    const read = await readBoundedJson(req, MAX_BODY_BYTES)
+    if (read.error) {
+      respond(res, read.error === 'payload-too-large' ? 413 : 400, { ok: false, error: read.error })
+      return
+    }
+    const id = read.body && typeof read.body.id === 'string' ? read.body.id.trim() : ''
+    if (id === '') {
+      respond(res, 400, { ok: false, error: 'invalid-probe-payload' })
+      return
+    }
+    try {
+      const out = service.projectRoute(id, read.body && read.body.runtime !== undefined ? read.body.runtime : null)
+      if (!out.ok) {
+        respond(res, errorStatusOf(out.errors), { ok: false, error: (out.errors[0] && out.errors[0].code) || 'registry-projection-rejected', details: out.errors })
+        return
+      }
+      respond(res, 200, { ok: true, projection: out.projection })
+    } catch {
+      respond(res, 500, { ok: false, error: 'registry-projection-failed' })
+    }
+  }
+
   return {
     modesHandler,
     configurationHandler,
     eligibleHandler,
     validateHandler: bodyConfigHandler('validate'),
     previewHandler: bodyConfigHandler('preview'),
+    catalogHandler,
+    providerSaveHandler: catalogSaveHandler('providers', 'provider', (record, opts) => service.saveProvider(record, opts)),
+    modelSaveHandler: catalogSaveHandler('models', 'model', (record, opts) => service.saveModel(record, opts)),
+    routeSaveHandler: catalogSaveHandler('routes', 'route', (record, opts) => service.saveRoute(record, opts)),
+    connectionSaveHandler: catalogSaveHandler('connections', 'connection', (record, opts) => service.saveConnection(record, opts)),
+    providerDisableHandler: catalogIdHandler('providers', 'disable'),
+    modelDisableHandler: catalogIdHandler('models', 'disable'),
+    routeDisableHandler: catalogIdHandler('routes', 'disable'),
+    connectionDisableHandler: catalogIdHandler('connections', 'disable'),
+    providerDeleteHandler: catalogIdHandler('providers', 'delete'),
+    modelDeleteHandler: catalogIdHandler('models', 'delete'),
+    routeDeleteHandler: catalogIdHandler('routes', 'delete'),
+    connectionDeleteHandler: catalogIdHandler('connections', 'delete'),
+    connectionStatusHandler,
+    providerTestHandler: providerProbeHandler('test'),
+    providerDiscoverHandler: providerProbeHandler('discover'),
+    routeVerifyHandler: providerProbeHandler('verify'),
+    routeEvidenceHandler,
+    routeProjectHandler,
   }
 }
 

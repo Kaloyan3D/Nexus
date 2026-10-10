@@ -274,7 +274,8 @@ function validateLogicalModel(doc, path) {
  * retired R1 `legacyDshProviderId` alias now lives exclusively in the
  * adapter-private map in dsh-adapter.cjs; a Provider carrying it is rejected
  * as an unknown field so DSH coupling can never re-enter the domain. */
-const PROVIDER_FIELDS = new Set(['schemaVersion', 'id', 'name', 'transportId', 'baseUrl', 'discovery', 'status'])
+const PROVIDER_FIELDS = new Set(['schemaVersion', 'id', 'name', 'transportId', 'baseUrl', 'discovery', 'status', 'authType', 'metadata'])
+const PROVIDER_AUTH_TYPES = ['api-key', 'local-server', 'manual-unknown']
 
 function validateProvider(doc, path) {
   const errors = []
@@ -299,6 +300,23 @@ function validateProvider(doc, path) {
     }
   }
   if (!PROVIDER_STATUSES.includes(doc.status)) errors.push(err('provider-invalid', where + '.status', 'status must be one of ' + PROVIDER_STATUSES.join(', ')))
+  // R4: optional authentication type + non-secret protocol metadata.
+  // Credential VALUES are never allowed here (see config-store secret scan);
+  // the connection record carries only an opaque credential:// reference.
+  if (doc.authType !== undefined && PROVIDER_AUTH_TYPES.indexOf(doc.authType) === -1) {
+    errors.push(err('provider-invalid', where + '.authType', 'authType must be one of ' + PROVIDER_AUTH_TYPES.join(', ')))
+  }
+  if (doc.metadata !== undefined) {
+    if (!isPlainObject(doc.metadata)) {
+      errors.push(err('provider-invalid', where + '.metadata', 'metadata must be an object of non-secret values when present'))
+    } else {
+      for (const key of Object.keys(doc.metadata)) {
+        if (/^(api[_-]?key|secret|token|password|cookie|authorization)$/i.test(key)) {
+          errors.push(err('secret-material-rejected', where + '.metadata.' + key, 'metadata key carries credential semantics and is forbidden'))
+        }
+      }
+    }
+  }
   return errors
 }
 

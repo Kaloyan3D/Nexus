@@ -656,6 +656,38 @@ function apply(ctx) {
       () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/preview', handler: registryHandlers.previewHandler }),
       'nexus-controller: registry R3 compile-preview route',
     )
+    // ── Registry R4 (TASK-0048): Models & Providers management API ──
+    // Operator catalog CRUD + explicit probes under data/registry/. Same
+    // trusted caller boundary as R3. No secret values cross these routes.
+    const r4Routes = [
+      ['/nexus/registry/v1/catalog', 'catalogHandler', 'registry R4 catalog route'],
+      ['/nexus/registry/v1/providers', 'providerSaveHandler', 'registry R4 provider save route'],
+      ['/nexus/registry/v1/models', 'modelSaveHandler', 'registry R4 model save route'],
+      ['/nexus/registry/v1/routes', 'routeSaveHandler', 'registry R4 route save route'],
+      ['/nexus/registry/v1/connections', 'connectionSaveHandler', 'registry R4 connection save route'],
+      ['/nexus/registry/v1/providers/disable', 'providerDisableHandler', 'registry R4 provider disable route'],
+      ['/nexus/registry/v1/models/disable', 'modelDisableHandler', 'registry R4 model disable route'],
+      ['/nexus/registry/v1/routes/disable', 'routeDisableHandler', 'registry R4 route disable route'],
+      ['/nexus/registry/v1/connections/disable', 'connectionDisableHandler', 'registry R4 connection disable route'],
+      ['/nexus/registry/v1/providers/delete', 'providerDeleteHandler', 'registry R4 provider delete route'],
+      ['/nexus/registry/v1/models/delete', 'modelDeleteHandler', 'registry R4 model delete route'],
+      ['/nexus/registry/v1/routes/delete', 'routeDeleteHandler', 'registry R4 route delete route'],
+      ['/nexus/registry/v1/connections/delete', 'connectionDeleteHandler', 'registry R4 connection delete route'],
+      ['/nexus/registry/v1/connections/status', 'connectionStatusHandler', 'registry R4 connection status route'],
+      ['/nexus/registry/v1/providers/test', 'providerTestHandler', 'registry R4 provider test route'],
+      ['/nexus/registry/v1/providers/discover', 'providerDiscoverHandler', 'registry R4 provider discover route'],
+      ['/nexus/registry/v1/routes/verify', 'routeVerifyHandler', 'registry R4 route verify route'],
+      ['/nexus/registry/v1/routes/evidence', 'routeEvidenceHandler', 'registry R4 route evidence route'],
+      ['/nexus/registry/v1/routes/project', 'routeProjectHandler', 'registry R4 route projection route'],
+    ]
+    for (const [routePath, handlerName, label] of r4Routes) {
+      const handler = registryHandlers[handlerName]
+      if (typeof handler !== 'function') throw new Error('nexus-controller: missing registry R4 handler ' + handlerName)
+      webCtx.effect(
+        () => webCtx.webServer.register({ kind: 'exact', path: routePath, handler }),
+        'nexus-controller: ' + label,
+      )
+    }
   })
 }
 

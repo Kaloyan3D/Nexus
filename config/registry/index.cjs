@@ -19,6 +19,10 @@ const parity = require('./parity.cjs')
 const migration = require('./migration.cjs')
 const configStore = require('./config-store.cjs')
 const service = require('./service.cjs')
+const operatorCatalog = require('./operator-catalog.cjs')
+const providerConfig = require('./provider-config.cjs')
+const probes = require('./probes.cjs')
+const runtimeProjection = require('./runtime-projection.cjs')
 
 module.exports = {
   schemas,
@@ -31,4 +35,8 @@ module.exports = {
   migration,
   configStore,
   service,
+  operatorCatalog,
+  providerConfig,
+  probes,
+  runtimeProjection,
 }

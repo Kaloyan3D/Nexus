@@ -529,9 +529,9 @@ async function main() {
       // 11b. webServer becomes available later → the injection callback
       // applies and BOTH routes register (Cordis lifecycle semantics).
       assert.doesNotThrow(() => injectCallback({ webServer: fakeWebServer, effect(fn) { fn(); return () => {} } }), 'injection callback must apply cleanly once the service exists')
-      assert.equal(captured.length, 11, 'all routes must register after webServer becomes available')
+      assert.equal(captured.length, 30, 'all routes must register after webServer becomes available')
       const paths = captured.map((spec) => spec.path).sort()
-      assert.deepEqual(paths, ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/registry/v1/configuration', '/nexus/registry/v1/eligible', '/nexus/registry/v1/modes', '/nexus/registry/v1/preview', '/nexus/registry/v1/validate', '/nexus/workspace-registration.json'])
+      assert.deepEqual(paths, ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/registry/v1/catalog', '/nexus/registry/v1/configuration', '/nexus/registry/v1/connections', '/nexus/registry/v1/connections/delete', '/nexus/registry/v1/connections/disable', '/nexus/registry/v1/connections/status', '/nexus/registry/v1/eligible', '/nexus/registry/v1/models', '/nexus/registry/v1/models/delete', '/nexus/registry/v1/models/disable', '/nexus/registry/v1/modes', '/nexus/registry/v1/preview', '/nexus/registry/v1/providers', '/nexus/registry/v1/providers/delete', '/nexus/registry/v1/providers/disable', '/nexus/registry/v1/providers/discover', '/nexus/registry/v1/providers/test', '/nexus/registry/v1/routes', '/nexus/registry/v1/routes/delete', '/nexus/registry/v1/routes/disable', '/nexus/registry/v1/routes/evidence', '/nexus/registry/v1/routes/project', '/nexus/registry/v1/routes/verify', '/nexus/registry/v1/validate', '/nexus/workspace-registration.json'])
       const route = captured.find((spec) => spec.path === '/nexus/controller.json')
       assert.equal(route.kind, 'exact')
       const roomRoute = captured.find((spec) => spec.path === '/nexus/control-room.json')
@@ -545,7 +545,8 @@ async function main() {
       const workspaceRegistrationRoute = captured.find((spec) => spec.path === '/nexus/workspace-registration.json')
       assert.equal(workspaceRegistrationRoute.kind, 'exact')
       // R3 (TASK-0047): the five Nexus-owned staged-configuration routes.
-      for (const registryPath of ['/nexus/registry/v1/modes', '/nexus/registry/v1/configuration', '/nexus/registry/v1/eligible', '/nexus/registry/v1/validate', '/nexus/registry/v1/preview']) {
+      // R4 (TASK-0048): plus the nineteen Models & Providers catalog/probe routes.
+      for (const registryPath of ['/nexus/registry/v1/modes', '/nexus/registry/v1/configuration', '/nexus/registry/v1/eligible', '/nexus/registry/v1/validate', '/nexus/registry/v1/preview', '/nexus/registry/v1/catalog', '/nexus/registry/v1/providers', '/nexus/registry/v1/models', '/nexus/registry/v1/routes', '/nexus/registry/v1/connections', '/nexus/registry/v1/providers/disable', '/nexus/registry/v1/models/disable', '/nexus/registry/v1/routes/disable', '/nexus/registry/v1/connections/disable', '/nexus/registry/v1/providers/delete', '/nexus/registry/v1/models/delete', '/nexus/registry/v1/routes/delete', '/nexus/registry/v1/connections/delete', '/nexus/registry/v1/connections/status', '/nexus/registry/v1/providers/test', '/nexus/registry/v1/providers/discover', '/nexus/registry/v1/routes/verify', '/nexus/registry/v1/routes/evidence', '/nexus/registry/v1/routes/project']) {
         const registryRoute = captured.find((spec) => spec.path === registryPath)
         assert.ok(registryRoute, 'registry route registers: ' + registryPath)
         assert.equal(registryRoute.kind, 'exact')
@@ -629,8 +630,8 @@ async function main() {
       // injection resolves and the route registers.
       root.provide('webServer', fakeWebServer)
       for (let i = 0; i < 60 && registered.length < 5; i++) await tick(50)
-      assert.equal(registered.length, 11, 'real cordis: all routes register after webServer becomes available')
-      assert.deepEqual(registered.map((spec) => spec.path).sort(), ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/registry/v1/configuration', '/nexus/registry/v1/eligible', '/nexus/registry/v1/modes', '/nexus/registry/v1/preview', '/nexus/registry/v1/validate', '/nexus/workspace-registration.json'])
+      assert.equal(registered.length, 30, 'real cordis: all routes register after webServer becomes available')
+      assert.deepEqual(registered.map((spec) => spec.path).sort(), ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/registry/v1/catalog', '/nexus/registry/v1/configuration', '/nexus/registry/v1/connections', '/nexus/registry/v1/connections/delete', '/nexus/registry/v1/connections/disable', '/nexus/registry/v1/connections/status', '/nexus/registry/v1/eligible', '/nexus/registry/v1/models', '/nexus/registry/v1/models/delete', '/nexus/registry/v1/models/disable', '/nexus/registry/v1/modes', '/nexus/registry/v1/preview', '/nexus/registry/v1/providers', '/nexus/registry/v1/providers/delete', '/nexus/registry/v1/providers/disable', '/nexus/registry/v1/providers/discover', '/nexus/registry/v1/providers/test', '/nexus/registry/v1/routes', '/nexus/registry/v1/routes/delete', '/nexus/registry/v1/routes/disable', '/nexus/registry/v1/routes/evidence', '/nexus/registry/v1/routes/project', '/nexus/registry/v1/routes/verify', '/nexus/registry/v1/validate', '/nexus/workspace-registration.json'])
       assert.ok(registered.every((spec) => spec.kind === 'exact'))
 
       // the registered handler keeps the existing semantics.

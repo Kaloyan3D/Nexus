@@ -2200,6 +2200,432 @@ function RegistryPanel({ sessionId, legacyRuntimeName }) {
 }
 //#endregion
 
+//#region Registry R4 — Models & Providers management (TASK-0048)
+/**
+* Models & Providers management (R4 of NEXUS_REGISTRY_ARCHITECTURE.md).
+*
+* Operator catalog CRUD plus explicit Test Connection / Discover Models /
+* Verify Capabilities probes. Every control below is wired to a real
+* ./nexus/registry/v1/* endpoint; there are no placeholder buttons.
+* Display names come from provider/model records (never raw ids alone);
+* raw-model and agent-sdk execution contracts render as distinct badges;
+* disabled or unverified routes render in the not-runnable group with their
+* resolver reason and never as runnable choices. Saves here stage
+* versioned operator preferences under data/registry/ and never touch the
+* running session. Credential VALUES are never collected: connections carry
+* opaque credential:// references plus status only.
+*/
+const R4_TRANSPORT_OPTIONS = ["openai-responses", "openai-chat-completions", "local-openai-compatible"];
+const R4_AUTH_OPTIONS = ["api-key", "local-server", "manual-unknown"];
+
+function useRegistryCatalog() {
+	const seam = registrySeam("__NX_TEST_REGISTRY_CATALOG__");
+	const [doc, setDoc] = react.useState(seam);
+	const [failed, setFailed] = react.useState(false);
+	const [loading, setLoading] = react.useState(seam === null);
+	const [warnings, setWarnings] = react.useState([]);
+	const refresh = react.useCallback(() => {
+		const test = registrySeam("__NX_TEST_REGISTRY_CATALOG__");
+		if (test !== null) {
+			setDoc(test);
+			setFailed(false);
+			setLoading(false);
+			setWarnings([]);
+			return;
+		}
+		if (typeof fetch === "undefined") {
+			setFailed(true);
+			setLoading(false);
+			return;
+		}
+		setLoading(true);
+		fetch(REGISTRY_API + "/catalog", { cache: "no-store" })
+			.then((res) => registryJson(res).then((body) => {
+				if (!res.ok || !body || body.ok !== true || !body.catalog) throw new Error("registry catalog unavailable");
+				setDoc(body.catalog);
+				setWarnings(Array.isArray(body.warnings) ? body.warnings : []);
+				setFailed(false);
+			}))
+			.catch(() => setFailed(true))
+			.finally(() => setLoading(false));
+	}, []);
+	react.useEffect(() => {
+		if (seam === null) refresh();
+	}, [refresh, seam]);
+	return { doc, failed, loading, warnings, refresh };
+}
+
+function r4DetailsText(details) {
+	if (!details || details.length === 0) return "";
+	return details.map((d) => ((d && d.code) || "error") + ": " + ((d && d.message) || "")).join(" | ");
+}
+
+function R4Button({ onClick, disabled, title, children }) {
+	return react_jsx_runtime.jsx("button", {
+		type: "button",
+		className: "nx-eng-save",
+		disabled: !!disabled,
+		title: title || undefined,
+		onClick,
+		children,
+	});
+}
+
+function R4Text({ value, onChange, placeholder }) {
+	return react_jsx_runtime.jsx("input", {
+		className: "nx-eng-select",
+		style: { minWidth: "180px" },
+		value: value || "",
+		placeholder: placeholder || "",
+		onChange: (event) => onChange(event.target.value),
+	});
+}
+
+function R4Select({ value, onChange, options, ariaLabel }) {
+	return react_jsx_runtime.jsx("select", {
+		className: "nx-eng-select",
+		value: value || "",
+		"aria-label": ariaLabel || "select",
+		onChange: (event) => onChange(event.target.value),
+		children: (options || []).map((o) => react_jsx_runtime.jsx("option", { value: o, children: o }, o)),
+	});
+}
+
+function ModelsProvidersPanel() {
+	const catalog = useRegistryCatalog();
+	const [notice, setNotice] = react.useState(null);
+	const [busy, setBusy] = react.useState(false);
+	const [providerDraft, setProviderDraft] = react.useState(null);
+	const [modelDraft, setModelDraft] = react.useState(null);
+	const [routeDraft, setRouteDraft] = react.useState(null);
+	const [connDraft, setConnDraft] = react.useState(null);
+	const [probeOut, setProbeOut] = react.useState(null);
+	const [discovered, setDiscovered] = react.useState(null);
+
+	function say(tone, text) {
+		setNotice({ tone, text });
+	}
+	function callApi(method, path, body) {
+		if (typeof fetch === "undefined") {
+			say("err", "Network API is unavailable in this context.");
+			return Promise.resolve(null);
+		}
+		setBusy(true);
+		return fetch(REGISTRY_API + path, {
+			method,
+			headers: { "content-type": "application/json" },
+			body: body === undefined ? undefined : JSON.stringify(body),
+			cache: "no-store",
+		}).then((res) => registryJson(res).then((parsed) => ({ res, body: parsed })))
+			.catch(() => ({ res: null, body: null }))
+			.finally(() => setBusy(false));
+	}
+	function failOf(result, fallback) {
+		if (!result || !result.res || !result.body) return fallback || "Request failed. Try again.";
+		if (result.body.ok === true) return null;
+		const details = Array.isArray(result.body.details) ? r4DetailsText(result.body.details) : "";
+		const errors = Array.isArray(result.body.errors) ? r4DetailsText(result.body.errors) : "";
+		return ((result.body.error || fallback || "Request rejected") + (details ? " — " + details : "") + (errors ? " — " + errors : ""));
+	}
+	function openAddProvider() {
+		setProviderDraft({ id: "", name: "", transportId: "openai-responses", baseUrl: "", authType: "api-key", trustedPrivateNetwork: false, allowPrivateLocal: false });
+	}
+	function openEditProvider(p) {
+		setProviderDraft({ id: p.id, name: p.name === p.id ? "" : p.name, transportId: p.transportId, baseUrl: p.baseUrl || "", authType: p.authType || "api-key", trustedPrivateNetwork: false, allowPrivateLocal: false, editing: true });
+	}
+	function saveProviderDraft() {
+		const d = providerDraft;
+		if (!d || !d.id || !d.name || !d.baseUrl) {
+			say("err", "Provider needs an id, a display name and an endpoint.");
+			return;
+		}
+		callApi("PUT", "/providers", {
+			provider: { id: d.id.trim(), name: d.name.trim(), transportId: d.transportId, baseUrl: d.baseUrl.trim(), authType: d.authType },
+			endpointOptions: { trustedPrivateNetwork: d.trustedPrivateNetwork === true, allowPrivateLocal: d.allowPrivateLocal === true },
+		}).then((result) => {
+			const failed = failOf(result, "Provider save rejected");
+			if (failed) { say("err", failed); return; }
+			setProviderDraft(null);
+			say("ok", "Provider staged (revision " + result.body.revision + "). Add a connection, then Test Connection.");
+			catalog.refresh();
+		});
+	}
+	function disableProvider(id) {
+		callApi("POST", "/providers/disable", { id }).then((result) => {
+			const failed = failOf(result, "Disable rejected");
+			if (failed) { say("err", failed); return; }
+			say("ok", "Provider disabled. It no longer offers runnable routes.");
+			catalog.refresh();
+		});
+	}
+	function testProvider(id) {
+		callApi("POST", "/providers/test", { id }).then((result) => {
+			if (!result || !result.res || !result.body) { say("err", "Connection test failed to run."); return; }
+			setProbeOut({ kind: "connection", target: id, body: result.body });
+			say(result.body.ok ? "ok" : "err", result.body.ok ? "Connection reachable and authenticated." : "Connection test did not pass — " + r4DetailsText(result.body.errors));
+		});
+	}
+	function discoverProvider(id) {
+		callApi("POST", "/providers/discover", { id }).then((result) => {
+			if (!result || !result.res || !result.body) { say("err", "Discovery failed to run."); return; }
+			if (!result.body.ok) { say("err", "Discovery did not pass — " + r4DetailsText(result.body.errors)); return; }
+			setDiscovered({ providerId: id, advertised: result.body.advertised || [] });
+			say("ok", "Discovered " + (result.body.advertised || []).length + " advertised model id(s). Listing alone verifies nothing — add a route and Verify Capabilities.");
+		});
+	}
+	function openAddModel() {
+		setModelDraft({ id: "", vendor: "", displayName: "", checkpoint: "", engines: "dual-v1", dataUseTier: "standard", toolCalling: true, streaming: true, reasoning: true, imageInput: false });
+	}
+	function saveModelDraft() {
+		const d = modelDraft;
+		if (!d || !d.id || !d.displayName || !d.checkpoint) {
+			say("err", "Model needs an id, a display name and a checkpoint.");
+			return;
+		}
+		callApi("PUT", "/models", {
+			model: {
+				id: d.id.trim(), vendor: (d.vendor || "").trim() || "operator", displayName: d.displayName.trim(), checkpoint: d.checkpoint.trim(),
+				capabilities: { textInput: true, imageInput: d.imageInput === true, toolCalling: d.toolCalling === true, streaming: d.streaming === true, reasoning: d.reasoning === true },
+				dataUseTier: d.dataUseTier, enabled: true, engines: String(d.engines || "").split(",").map((s) => s.trim()).filter(Boolean),
+			},
+		}).then((result) => {
+			const failed = failOf(result, "Model save rejected");
+			if (failed) { say("err", failed); return; }
+			setModelDraft(null);
+			say("ok", "Logical model staged (revision " + result.body.revision + "). Add a route for it next.");
+			catalog.refresh();
+		});
+	}
+	function openAddRoute(preset) {
+		setRouteDraft({
+			id: "", providerId: (preset && preset.providerId) || "", logicalModelId: (preset && preset.logicalModelId) || "",
+			remoteModelId: (preset && preset.remoteModelId) || "", connectionId: "", reasoningLevels: "high", availability: "probe-required", editing: !!(preset && preset.editing),
+		});
+	}
+	function saveRouteDraft() {
+		const d = routeDraft;
+		if (!d || !d.id || !d.providerId || !d.logicalModelId || !d.remoteModelId || !d.connectionId) {
+			say("err", "Route needs an id, provider, logical model, remote model id and connection.");
+			return;
+		}
+		callApi("PUT", "/routes", {
+			route: {
+				id: d.id.trim(), providerId: d.providerId.trim(), logicalModelId: d.logicalModelId.trim(), remoteModelId: d.remoteModelId.trim(),
+				connectionId: d.connectionId.trim(), reasoningLevels: String(d.reasoningLevels || "").split(",").map((s) => s.trim()).filter(Boolean),
+				availability: d.availability || "probe-required",
+			},
+		}).then((result) => {
+			const failed = failOf(result, "Route save rejected");
+			if (failed) { say("err", failed); return; }
+			setRouteDraft(null);
+			say("ok", "Route validated and saved (revision " + result.body.revision + "). Verify its capabilities before it becomes runnable.");
+			catalog.refresh();
+		});
+	}
+	function verifyRoute(id) {
+		callApi("POST", "/routes/verify", { id }).then((result) => {
+			if (!result || !result.res || !result.body) { say("err", "Verification failed to run."); return; }
+			setProbeOut({ kind: "verify", target: id, body: result.body });
+			if (result.body.ok) { say("ok", "Route verified. It is now eligible for compatible Registry slots (staged only — no assignments changed)."); catalog.refresh(); return; }
+			say("err", "Verification did not pass — " + r4DetailsText(result.body.errors) + " The route stays unverified and unrunnable.");
+		});
+	}
+	function disableRoute(id) {
+		callApi("POST", "/routes/disable", { id }).then((result) => {
+			const failed = failOf(result, "Disable rejected");
+			if (failed) { say("err", failed); return; }
+			say("ok", "Route disabled.");
+			catalog.refresh();
+		});
+	}
+	function openAddConnection(providerId) {
+		setConnDraft({ id: "", providerId: providerId || "", credentialRef: "", authMethod: "api-key" });
+	}
+	function saveConnDraft() {
+		const d = connDraft;
+		if (!d || !d.id || !d.providerId || !d.credentialRef) {
+			say("err", "Connection needs an id, a provider and an opaque credential reference (never a key value).");
+			return;
+		}
+		callApi("PUT", "/connections", {
+			connection: { id: d.id.trim(), providerId: d.providerId.trim(), connectionKind: "api-key", authMethod: d.authMethod || "api-key", credentialRef: d.credentialRef.trim(), status: "not-connected" },
+		}).then((result) => {
+			const failed = failOf(result, "Connection save rejected");
+			if (failed) { say("err", failed); return; }
+			setConnDraft(null);
+			say("ok", "Connection reference staged. Actual key values are never stored here — only the opaque reference.");
+			catalog.refresh();
+		});
+	}
+	function markConnected(id) {
+		callApi("POST", "/connections/status", { id, status: "connected", attested: true }).then((result) => {
+			const failed = failOf(result, "Status change rejected");
+			if (failed) { say("err", failed); return; }
+			say("ok", "Connection marked connected (operator-attested). Verification probes still decide route eligibility.");
+			catalog.refresh();
+		});
+	}
+
+	const doc = catalog.doc;
+	const providers = (doc && doc.providers) || [];
+	const models = (doc && doc.models) || [];
+	const routes = (doc && doc.routes) || [];
+	const connections = (doc && doc.connections) || [];
+	const runnable = routes.filter((r) => r && r.runnable);
+	const notRunnable = routes.filter((r) => r && !r.runnable);
+
+	return react_jsx_runtime.jsx(Section, {
+		label: "Models & Providers (Registry)",
+		children: catalog.failed ? react_jsx_runtime.jsx("div", { className: "nx-eng-notice nx-eng-notice-err", children: "Provider catalog is unavailable right now." })
+		: catalog.loading || !doc ? react_jsx_runtime.jsx("div", { className: "nx-eng-notice", children: "Loading provider catalog…" })
+		: react_jsx_runtime.jsxs("div", {
+			children: [
+				react_jsx_runtime.jsx("div", {
+					className: "nx-reg-banner",
+					children: "Operator catalog (R4): add a supported compatible API provider, add or discover a model, verify its capabilities, then stage it in an Engineering Mode above. Saves here never modify the running session. Secrets are never collected — connections hold opaque references only.",
+				}),
+				notice ? react_jsx_runtime.jsx("div", {
+					className: "nx-eng-notice " + (notice.tone === "err" ? "nx-eng-notice-err" : "nx-eng-notice-ok"),
+					children: notice.text,
+				}) : null,
+				(catalog.warnings || []).length > 0 ? react_jsx_runtime.jsx("div", {
+					className: "nx-eng-notice nx-eng-notice-err",
+					children: "Catalog warnings: " + r4DetailsText(catalog.warnings),
+				}) : null,
+				react_jsx_runtime.jsxs("div", {
+					className: "nx-eng-row",
+					children: [
+						react_jsx_runtime.jsx("span", { className: "nx-eng-label", children: "Providers (" + providers.length + ")" }),
+						react_jsx_runtime.jsx(R4Button, { onClick: openAddProvider, disabled: busy, title: "Add a supported compatible API provider", children: "Add Provider" }),
+						react_jsx_runtime.jsx(R4Button, { onClick: () => { catalog.refresh(); say("ok", "Catalog refreshed. Saved assignments are untouched."); }, disabled: busy, title: "Reload the operator catalog", children: "Refresh" }),
+					],
+				}),
+				providers.map((p) => react_jsx_runtime.jsxs("div", {
+					className: "nx-eng-row",
+					children: [
+						react_jsx_runtime.jsx("span", { className: "nx-value", children: (p.name || p.id) + " · " + p.transportId + " · " + p.status + (p.provenance === "operator" ? " · operator" : " · built-in") }),
+						react_jsx_runtime.jsx("span", { className: "nx-eng-meta", children: p.id }),
+						react_jsx_runtime.jsx(R4Button, { onClick: () => openEditProvider(p), disabled: busy, title: "Edit provider " + p.id, children: "Edit Provider" }),
+						p.status !== "disabled" ? react_jsx_runtime.jsx(R4Button, { onClick: () => disableProvider(p.id), disabled: busy, title: "Disable provider " + p.id, children: "Disable Provider" }) : null,
+						react_jsx_runtime.jsx(R4Button, { onClick: () => testProvider(p.id), disabled: busy, title: "Test reachability and authentication for " + p.id, children: "Test Connection" }),
+						react_jsx_runtime.jsx(R4Button, { onClick: () => discoverProvider(p.id), disabled: busy, title: "List advertised models for " + p.id + " (never verifies)", children: "Discover Models" }),
+						react_jsx_runtime.jsx(R4Button, { onClick: () => openAddConnection(p.id), disabled: busy, title: "Add a credential reference for " + p.id, children: "Add Connection" }),
+					],
+				}, "prov-" + p.id)),
+				discovered ? react_jsx_runtime.jsxs("div", {
+					className: "nx-eng-notice",
+					children: [
+						"Advertised by " + discovered.providerId + " (" + discovered.advertised.length + "): " + discovered.advertised.slice(0, 12).join(", ") + (discovered.advertised.length > 12 ? "…" : ""),
+						" Listing alone verifies nothing.",
+					],
+				}) : null,
+				providerDraft ? react_jsx_runtime.jsxs("div", {
+					className: "nx-eng-row",
+					children: [
+						react_jsx_runtime.jsx("span", { className: "nx-eng-label", children: providerDraft.editing ? "Edit Provider" : "Add Provider" }),
+						react_jsx_runtime.jsx(R4Text, { value: providerDraft.id, onChange: (v) => setProviderDraft({ ...providerDraft, id: v }), placeholder: "provider id (e.g. acme-direct)" }),
+						react_jsx_runtime.jsx(R4Text, { value: providerDraft.name, onChange: (v) => setProviderDraft({ ...providerDraft, name: v }), placeholder: "Display name (e.g. Acme AI)" }),
+						react_jsx_runtime.jsx(R4Select, { value: providerDraft.transportId, onChange: (v) => setProviderDraft({ ...providerDraft, transportId: v }), options: R4_TRANSPORT_OPTIONS, ariaLabel: "Protocol" }),
+						react_jsx_runtime.jsx(R4Text, { value: providerDraft.baseUrl, onChange: (v) => setProviderDraft({ ...providerDraft, baseUrl: v }), placeholder: "https://api.example.com/v1" }),
+						react_jsx_runtime.jsx(R4Select, { value: providerDraft.authType, onChange: (v) => setProviderDraft({ ...providerDraft, authType: v }), options: R4_AUTH_OPTIONS, ariaLabel: "Authentication type" }),
+						react_jsx_runtime.jsx(R4Button, { onClick: saveProviderDraft, disabled: busy, title: "Validate and save this provider", children: "Validate & Save" }),
+						react_jsx_runtime.jsx(R4Button, { onClick: () => setProviderDraft(null), disabled: busy, children: "Cancel" }),
+					],
+				}) : null,
+				react_jsx_runtime.jsxs("div", {
+					className: "nx-eng-row",
+					children: [
+						react_jsx_runtime.jsx("span", { className: "nx-eng-label", children: "Models (" + models.length + ")" }),
+						react_jsx_runtime.jsx(R4Button, { onClick: openAddModel, disabled: busy, title: "Add a logical model manually", children: "Add Model Manually" }),
+					],
+				}),
+				models.map((m) => react_jsx_runtime.jsx("div", {
+					className: "nx-eng-row",
+					children: react_jsx_runtime.jsx("span", { className: "nx-value", children: (m.displayName || m.id) + " · " + (m.enabled === false ? "disabled" : "enabled") + " · " + (m.provenance || "built-in") }),
+				}, "model-" + m.id)),
+				modelDraft ? react_jsx_runtime.jsxs("div", {
+					className: "nx-eng-row",
+					children: [
+						react_jsx_runtime.jsx("span", { className: "nx-eng-label", children: "Add Model Manually" }),
+						react_jsx_runtime.jsx(R4Text, { value: modelDraft.id, onChange: (v) => setModelDraft({ ...modelDraft, id: v }), placeholder: "model id (e.g. acme/acme-1)" }),
+						react_jsx_runtime.jsx(R4Text, { value: modelDraft.displayName, onChange: (v) => setModelDraft({ ...modelDraft, displayName: v }), placeholder: "Display name" }),
+						react_jsx_runtime.jsx(R4Text, { value: modelDraft.checkpoint, onChange: (v) => setModelDraft({ ...modelDraft, checkpoint: v }), placeholder: "Checkpoint" }),
+						react_jsx_runtime.jsx(R4Button, { onClick: saveModelDraft, disabled: busy, title: "Validate and save this model", children: "Validate & Save" }),
+						react_jsx_runtime.jsx(R4Button, { onClick: () => setModelDraft(null), disabled: busy, children: "Cancel" }),
+					],
+				}) : null,
+				react_jsx_runtime.jsxs("div", {
+					className: "nx-eng-row",
+					children: [
+						react_jsx_runtime.jsx("span", { className: "nx-eng-label", children: "Routes — runnable (" + runnable.length + ")" }),
+						react_jsx_runtime.jsx(R4Button, { onClick: () => openAddRoute(null), disabled: busy, title: "Add a model route manually", children: "Add/Edit Route" }),
+					],
+				}),
+				runnable.map((r) => react_jsx_runtime.jsxs("div", {
+					className: "nx-eng-row",
+					children: [
+						react_jsx_runtime.jsx("span", { className: "nx-reg-tag", children: r.executionKind || "raw-model" }),
+						react_jsx_runtime.jsx("span", { className: "nx-value", children: (r.modelDisplayName || r.logicalModelId) + " via " + (r.providerName || r.providerId) + " · reasoning: " + (r.reasoningLevels || []).join("/") + " · connection " + (r.connectionStatus || "missing") }),
+						react_jsx_runtime.jsx(R4Button, { onClick: () => verifyRoute(r.routeId), disabled: busy, title: "Re-run capability probes for " + r.routeId, children: "Verify Capabilities" }),
+						react_jsx_runtime.jsx(R4Button, { onClick: () => disableRoute(r.routeId), disabled: busy, title: "Disable route " + r.routeId, children: "Disable" }),
+					],
+				}, "route-" + r.routeId)),
+				react_jsx_runtime.jsx("div", {
+					className: "nx-eng-meta",
+					children: "Not runnable (" + notRunnable.length + "): disabled or unverified routes never appear as runnable choices. " + notRunnable.slice(0, 8).map((r) => (r.modelDisplayName || r.logicalModelId) + " via " + (r.providerName || r.providerId) + " [" + (r.executionKind || "raw-model") + "/" + (r.availability || "unknown") + "] — " + (r.runnableReason || "not eligible")).join(" · ") + (notRunnable.length > 8 ? " …" : ""),
+				}),
+				routeDraft ? react_jsx_runtime.jsxs("div", {
+					className: "nx-eng-row",
+					children: [
+						react_jsx_runtime.jsx("span", { className: "nx-eng-label", children: "Add/Edit Route" }),
+						react_jsx_runtime.jsx(R4Text, { value: routeDraft.id, onChange: (v) => setRouteDraft({ ...routeDraft, id: v }), placeholder: "route id (e.g. acme-direct/acme-1)" }),
+						react_jsx_runtime.jsx(R4Text, { value: routeDraft.providerId, onChange: (v) => setRouteDraft({ ...routeDraft, providerId: v }), placeholder: "provider id" }),
+						react_jsx_runtime.jsx(R4Text, { value: routeDraft.logicalModelId, onChange: (v) => setRouteDraft({ ...routeDraft, logicalModelId: v }), placeholder: "logical model id" }),
+						react_jsx_runtime.jsx(R4Text, { value: routeDraft.remoteModelId, onChange: (v) => setRouteDraft({ ...routeDraft, remoteModelId: v }), placeholder: "remote model id" }),
+						react_jsx_runtime.jsx(R4Text, { value: routeDraft.connectionId, onChange: (v) => setRouteDraft({ ...routeDraft, connectionId: v }), placeholder: "connection id" }),
+						react_jsx_runtime.jsx(R4Button, { onClick: saveRouteDraft, disabled: busy, title: "Validate and save this route", children: "Validate & Save" }),
+						react_jsx_runtime.jsx(R4Button, { onClick: () => setRouteDraft(null), disabled: busy, children: "Cancel" }),
+					],
+				}) : null,
+				probeOut ? react_jsx_runtime.jsx("div", {
+					className: "nx-eng-notice",
+					children: (probeOut.kind === "verify" ? "Verification " + probeOut.target + ": " : "Connection " + probeOut.target + ": ") + JSON.stringify(probeOut.body && (probeOut.body.checks || probeOut.body.evidence || probeOut.body)).slice(0, 1200),
+				}) : null,
+				react_jsx_runtime.jsxs("div", {
+					className: "nx-eng-row",
+					children: [
+						react_jsx_runtime.jsx("span", { className: "nx-eng-label", children: "Connections (" + connections.length + ")" }),
+						react_jsx_runtime.jsx(R4Button, { onClick: () => openAddConnection(""), disabled: busy, title: "Add a credential reference (never a key value)", children: "Add Connection" }),
+					],
+				}),
+				connections.map((c) => react_jsx_runtime.jsxs("div", {
+					className: "nx-eng-row",
+					children: [
+						react_jsx_runtime.jsx("span", { className: "nx-value", children: c.id + " → " + c.providerId + " · " + c.status + (c.credentialRef ? " · ref set" : " · no ref") + " · " + (c.provenance || "built-in") }),
+						c.status !== "connected" ? react_jsx_runtime.jsx(R4Button, { onClick: () => markConnected(c.id), disabled: busy, title: "Attest that the key is stored via the trusted boundary (R4 has no secret-write endpoint)", children: "Mark Connected (attested)" }) : null,
+					],
+				}, "conn-" + c.id)),
+				connDraft ? react_jsx_runtime.jsxs("div", {
+					className: "nx-eng-row",
+					children: [
+						react_jsx_runtime.jsx("span", { className: "nx-eng-label", children: "Add Connection (reference only — never paste a key)" }),
+						react_jsx_runtime.jsx(R4Text, { value: connDraft.id, onChange: (v) => setConnDraft({ ...connDraft, id: v }), placeholder: "connection id (e.g. conn-acme-1)" }),
+						react_jsx_runtime.jsx(R4Text, { value: connDraft.providerId, onChange: (v) => setConnDraft({ ...connDraft, providerId: v }), placeholder: "provider id" }),
+						react_jsx_runtime.jsx(R4Text, { value: connDraft.credentialRef, onChange: (v) => setConnDraft({ ...connDraft, credentialRef: v }), placeholder: "credential://connections/conn-acme-1" }),
+						react_jsx_runtime.jsx(R4Button, { onClick: saveConnDraft, disabled: busy, title: "Validate and save this credential reference", children: "Validate & Save" }),
+						react_jsx_runtime.jsx(R4Button, { onClick: () => setConnDraft(null), disabled: busy, children: "Cancel" }),
+					],
+				}) : null,
+				react_jsx_runtime.jsx("div", {
+					className: "nx-eng-hint",
+					children: "Execution contracts stay distinct: raw-model routes carry tool/result continuations; agent-sdk integrations are a separate kind and are never offered as raw models. Verification evidence, connection state and compatibility reasons above explain every non-runnable route.",
+				}),
+			],
+		}),
+	});
+}
+//#endregion
+
 function EngineeringEditor({ sessionId }) {
 	const editor = useEngineeringEditor(sessionId);
 	// R3: the Registry panel is independent of the legacy editor state, so it
@@ -2225,6 +2651,7 @@ function EngineeringEditor({ sessionId }) {
 	return react_jsx_runtime.jsxs(react.Fragment, {
 		children: [
 			react_jsx_runtime.jsx(RegistryPanel, { sessionId, legacyRuntimeName: legacyPreferred }),
+		react_jsx_runtime.jsx(ModelsProvidersPanel, {}), 
 			react_jsx_runtime.jsx(Section, {
 				label: "Engineering Profile",
 				children: legacyBody,
@@ -3245,6 +3672,8 @@ exports.useEngineeringEditor = useEngineeringEditor;
 exports.engineeringEditorLoadGate = engineeringEditorLoadGate;
 exports.EngineeringEditorFields = EngineeringEditorFields;
 exports.RegistryPanel = RegistryPanel;
+exports.ModelsProvidersPanel = ModelsProvidersPanel;
+exports.useRegistryCatalog = useRegistryCatalog;
 exports.RegistrySlotCard = RegistrySlotCard;
 exports.RegistryAdvanced = RegistryAdvanced;
 exports.RegistryConfigBody = RegistryConfigBody;

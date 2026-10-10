@@ -32,7 +32,8 @@
  *   stay independent; the loser reports 'stale-revision' (rival already
  *   committed) or 'write-conflict' (live contender), and a stale lock is
  *   reclaimed only when provably inactive — never stolen from an alive
- *   owner merely for lasting past CLAIM_STALE_MS. Bounded retries only.
+ *   owner merely for lasting past CLAIM_STALE_MS or LOCK_HARD_STALE_MS.
+ *   Bounded retries only.
  * - Atomic replacement: uniquely-named temp file (pid + timestamp +
  *   counter + crypto randomness, so concurrent writers cannot collide)
  *   in the same directory + rename, so a crash or failed validation never
@@ -244,8 +245,9 @@ function loadModeEntry(dataRoot, modeId, fsHooks) {
  * 1. Win the store-wide exclusive lock via atomic 'wx' creation. A live
  *    contender fails closed here with 'write-conflict' — concurrent
  *    mutations of the shared document are serialized, on any mode. A lock
- *    is reclaimed only when it is provably not active: unreadable past a
- *    hard age, or older than CLAIM_STALE_MS with a dead/invalid owner pid
+ *    is reclaimed only when it is provably not active: unreadable past the
+ *    hard age, or older than CLAIM_STALE_MS (or the hard age) with a
+ *    dead/invalid owner pid. A live pid is never reclaimed at any age.
  *    (liveness is conservative — an alive pid is never stolen, however
  *    long the operation runs). One bounded retry, then fail closed.
  * 2. Re-read the LATEST complete store UNDER the lock, re-validate our
@@ -343,15 +345,23 @@ function saveModeConfig(dataRoot, modeId, config, expectedRevision, options) {
       const age = claimAgeMs(hooks, lockPath)
       if (age === null) continue // lock vanished mid-race; one bounded retry
       if (age > LOCK_HARD_STALE_MS) {
-        // Older than any legitimate operation by orders of magnitude:
-        // reclaim even if the pid looks alive (covers pid reuse after a
-        // crash). Legitimate saves finish in milliseconds.
-        try {
-          hooks.unlinkSync(lockPath)
-        } catch {
-          return conflict()
+        // R4 fix: a live owner never loses its lock merely for exceeding
+        // the hard age. Reclaim past the hard age only from a provably
+        // inactive owner (dead/invalid pid) or an unreadable lock whose
+        // owner cannot be checked; an alive pid keeps the lock however
+        // long its operation runs (pid-reuse recovery is NOT worth
+        // stealing a live writer). Unreadable past the hard age is
+        // treated as provably inactive (crash without a parseable claim).
+        const owner = readLockOwner(hooks, lockPath)
+        if (!owner || owner.pid === undefined || !isPidAlive(owner.pid)) {
+          try {
+            hooks.unlinkSync(lockPath)
+          } catch {
+            return conflict()
+          }
+          continue
         }
-        continue
+        return conflict()
       }
       if (age > CLAIM_STALE_MS) {
         const owner = readLockOwner(hooks, lockPath)

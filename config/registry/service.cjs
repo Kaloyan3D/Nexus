@@ -31,6 +31,9 @@ const profileCompat = require('./profile-compat.cjs')
 const resolver = require('./resolver.cjs')
 const schemas = require('./schemas.cjs')
 const configStore = require('./config-store.cjs')
+const catalog = require('./operator-catalog.cjs')
+const probes = require('./probes.cjs')
+const runtimeProjection = require('./runtime-projection.cjs')
 
 const SERVICE_SCHEMA_VERSION = 1
 const SUPPORTED_MODES = ['engineering-v1', 'engineering-v2', 'engineering-v3']
@@ -171,7 +174,8 @@ function createService(options) {
     if (!config) {
       return { preview: null, errors: [err('legacy-profile-unavailable', 'adopt', 'legacy profile ' + wanted + ' cannot be imported here')] }
     }
-    const validation = resolver.validateModeConfig(config, canonical.snapshot)
+    const eff = effectiveSnapshot()
+    const validation = resolver.validateModeConfig(config, (eff.snapshot || canonical.snapshot))
     return { preview: { modeId, persisted: false, source: 'legacy-preview', adoptedFrom: wanted, canonicalIds, config, validation, adoptable }, errors: [] }
   }
 
@@ -183,8 +187,8 @@ function createService(options) {
     if (!loaded.store) return { result: null, errors: loaded.errors }
     const entry = loaded.store.modes[modeId] || null
     if (entry) {
-      const canonical = buildCanonical()
-      const validation = canonical.snapshot ? resolver.validateModeConfig(entry.config, canonical.snapshot) : canonical.errors
+      const eff = snapshotOrErrors()
+      const validation = eff.snapshot ? resolver.validateModeConfig(entry.config, eff.snapshot) : eff.errors
       return { result: { modeId, persisted: true, revision: entry.revision, source: entry.source, adoptedFrom: entry.adoptedFrom, savedAtUtc: entry.savedAtUtc, config: entry.config, validation }, errors: [] }
     }
     const adopt = opts && opts.adopt ? String(opts.adopt) : null
@@ -193,11 +197,443 @@ function createService(options) {
     return { result: null, errors: previewed.errors }
   }
 
-  function snapshotOrErrors() {
-    const canonical = buildCanonical()
-    if (!canonical.snapshot) return { snapshot: null, errors: canonical.errors }
-    return { snapshot: canonical.snapshot, errors: [] }
+  function builtInIdsOf(snapshot) {
+    const idsOf = (items) => (items || []).map((e) => e && e.id).filter((id) => typeof id === 'string')
+    return {
+      providers: idsOf(snapshot.providers),
+      models: idsOf(snapshot.models),
+      routes: idsOf(snapshot.routes),
+      connections: idsOf(snapshot.connections),
+    }
   }
+
+  // R4.1: effective snapshot = built-ins (immutable, derived) + operator
+  // overlays. Operator records that collide with built-in ids are excluded
+  // with an actionable duplicate-id note; built-in disable overlays flip
+  // status without mutating built-in identity.
+  function effectiveSnapshot() {
+    const canonical = buildCanonical()
+    if (!canonical.snapshot) return { snapshot: null, aliases: null, errors: canonical.errors }
+    const op = catalog.loadOperatorDocs(dataRoot, fsHooks)
+    if (!op.docs) return { snapshot: null, aliases: canonical.aliases, errors: canonical.errors.concat(op.errors) }
+    const snap = JSON.parse(JSON.stringify(canonical.snapshot))
+    const notes = []
+    function addItems(kind, key) {
+      const items = op.docs[kind].items
+      for (const id of Object.keys(items)) {
+        if (snap[key].some((e) => e && e.id === id)) {
+          notes.push(err('duplicate-id', 'catalog.' + kind + '.' + id, 'operator ' + kind.slice(0, -1) + ' ' + id + ' collides with a built-in record and is excluded; built-in identity is preserved'))
+          continue
+        }
+        snap[key].push(items[id].record)
+      }
+    }
+    addItems('providers', 'providers')
+    addItems('models', 'models')
+    addItems('routes', 'routes')
+    addItems('connections', 'connections')
+    function findById(list, id) {
+      for (const e of list) if (e && e.id === id) return e
+      return null
+    }
+    for (const id of Object.keys(op.docs.providers.disabledBuiltins)) {
+      const p = findById(snap.providers, id)
+      if (p) p.status = 'disabled'
+    }
+    for (const id of Object.keys(op.docs.models.disabledBuiltins)) {
+      const m = findById(snap.models, id)
+      if (m) m.enabled = false
+    }
+    for (const id of Object.keys(op.docs.routes.disabledBuiltins)) {
+      const r = findById(snap.routes, id)
+      if (r) { r.availability = 'disabled'; r.enabled = false }
+    }
+    for (const id of Object.keys(op.docs.connections.disabledBuiltins)) {
+      const c = findById(snap.connections, id)
+      if (c) c.status = 'disabled'
+    }
+    const ev = catalog.loadEvidence(dataRoot, fsHooks)
+    return { snapshot: snap, aliases: canonical.aliases, errors: canonical.errors.concat(notes), evidence: ev.evidence || {} }
+  }
+
+  function snapshotOrErrors() {
+    const eff = effectiveSnapshot()
+    if (!eff.snapshot) return { snapshot: null, errors: eff.errors }
+    return { snapshot: eff.snapshot, errors: eff.errors }
+  }
+
+  function defaultFetchImpl(url, init) {
+    if (typeof fetch !== 'function') {
+      return Promise.reject(Object.assign(new Error('no fetch substrate in this host'), { code: 'probe-timeout' }))
+    }
+    return fetch(url, init)
+  }
+
+  // References held by saved mode configurations (dependency guard input).
+  function savedRefsOf(effective) {
+    const refs = { routeIds: new Set(), modelIds: new Set(), providerIds: new Set(), connectionIds: new Set(), routeProviders: {} }
+    const loaded = configStore.loadStore(dataRoot, fsHooks)
+    if (!loaded.store) return refs
+    const routesById = new Map((effective.routes || []).map((r) => [r && r.id, r]))
+    function absorb(a) {
+      if (!a || typeof a !== 'object') return
+      if (typeof a.routeId === 'string') refs.routeIds.add(a.routeId)
+      if (typeof a.logicalModelId === 'string') refs.modelIds.add(a.logicalModelId)
+      const r = routesById.get(a.routeId)
+      if (r) {
+        refs.providerIds.add(r.providerId)
+        refs.modelIds.add(r.logicalModelId)
+        if (r.connectionId) refs.connectionIds.add(r.connectionId)
+        refs.routeProviders[r.providerId] = (refs.routeProviders[r.providerId] || []).concat(r.id)
+      }
+    }
+    for (const modeId of Object.keys(loaded.store.modes)) {
+      const cfg = loaded.store.modes[modeId] && loaded.store.modes[modeId].config
+      if (!cfg) continue
+      for (const s of Object.values(cfg.slots || {})) absorb(s)
+      for (const o of Object.values(cfg.roleOverrides || {})) absorb(o)
+    }
+    return refs
+  }
+
+  // Built-in identity comes from the CANONICAL snapshot only: the
+  // effective snapshot already contains operator records, so deriving
+  // built-in ids from it would misclassify operator work as built-in
+  // (blocking verification/deletion of operator-owned records).
+  function catalogOptions(effective, extra) {
+    const canonical = buildCanonical()
+    const ids = canonical.snapshot ? builtInIdsOf(canonical.snapshot) : builtInIdsOf(effective)
+    return Object.assign({
+      fsHooks,
+      nowUtc,
+      builtInIds: ids,
+      savedRefs: savedRefsOf(effective),
+    }, extra || {})
+  }
+
+  // R4.6 listing: effective catalog with display names, provenance,
+  // verification evidence, connection state and compatibility explanations.
+  function getCatalog() {
+    const eff = effectiveSnapshot()
+    if (!eff.snapshot) return { catalog: null, errors: eff.errors }
+    const op = catalog.loadOperatorDocs(dataRoot, fsHooks)
+    const opDocs = op.docs || { providers: { revision: 0, items: {} }, models: { revision: 0, items: {} }, routes: { revision: 0, items: {} }, connections: { revision: 0, items: {} } }
+    const evidence = eff.evidence || {}
+    const providersById = new Map(eff.snapshot.providers.map((p) => [p.id, p]))
+    const modelsById = new Map(eff.snapshot.models.map((m) => [m.id, m]))
+    const connectionsById = new Map(eff.snapshot.connections.map((c) => [c.id, c]))
+    const routes = eff.snapshot.routes.map((r) => {
+      const provider = providersById.get(r.providerId) || null
+      const model = modelsById.get(r.logicalModelId) || null
+      const connection = r.connectionId ? connectionsById.get(r.connectionId) || null : null
+      const gate = resolver.routeEligibility(r)
+      return {
+        routeId: r.id,
+        providerId: r.providerId,
+        providerName: provider ? (provider.name || provider.id) : r.providerId,
+        logicalModelId: r.logicalModelId,
+        modelDisplayName: model ? (model.displayName || model.id) : r.logicalModelId,
+        remoteModelId: r.remoteModelId,
+        executionKind: r.executionKind,
+        availability: r.availability,
+        enabled: r.enabled !== false,
+        reasoningLevels: (r.reasoningLevels || []).slice(),
+        transport: (r.compatibility && r.compatibility.transport) || 'unknown',
+        connectionId: r.connectionId || null,
+        connectionStatus: connection ? connection.status : 'missing',
+        provenance: opDocs.routes.items[r.id] ? 'operator' : 'built-in',
+        runnable: !gate,
+        runnableReason: gate ? gate.code + ': ' + gate.message : 'verified route with an authorized connection',
+        evidence: evidence[r.id] || null,
+      }
+    })
+    const providers = eff.snapshot.providers.map((p) => ({
+      id: p.id,
+      name: p.name || p.id,
+      transportId: p.transportId,
+      baseUrl: p.baseUrl || null,
+      authType: p.authType || null,
+      status: p.status,
+      provenance: opDocs.providers.items[p.id] ? 'operator' : 'built-in',
+      recordVersion: opDocs.providers.items[p.id] ? opDocs.providers.items[p.id].recordVersion : null,
+    }))
+    const models = eff.snapshot.models.map((m) => ({
+      id: m.id,
+      displayName: m.displayName || m.id,
+      vendor: m.vendor,
+      checkpoint: m.checkpoint,
+      capabilities: Object.assign({}, m.capabilities),
+      dataUseTier: m.dataUseTier || null,
+      enabled: m.enabled !== false,
+      engines: (m.engines || []).slice(),
+      provenance: opDocs.models.items[m.id] ? 'operator' : 'built-in',
+    }))
+    const connections = eff.snapshot.connections.map((c) => ({
+      id: c.id,
+      providerId: c.providerId,
+      connectionKind: c.connectionKind,
+      authMethod: c.authMethod || null,
+      credentialRef: c.credentialRef || null,
+      status: c.status,
+      provenance: opDocs.connections.items[c.id] ? 'operator' : 'built-in',
+    }))
+    return {
+      catalog: {
+        providers,
+        models,
+        routes,
+        connections,
+        revisions: {
+          providers: opDocs.providers.revision,
+          models: opDocs.models.revision,
+          routes: opDocs.routes.revision,
+          connections: opDocs.connections.revision,
+        },
+      },
+      errors: eff.errors,
+    }
+  }
+
+  function findIn(effective, key, id) {
+    for (const e of effective[key] || []) if (e && e.id === id) return e
+    return null
+  }
+
+  // R4.1 provider save: canonical record only (no DSH ids, no secrets).
+  function saveProvider(input, opts) {
+    const eff = snapshotOrErrors()
+    if (!eff.snapshot) return { ok: false, errors: eff.errors }
+    const src = input || {}
+    const record = {
+      schemaVersion: 1,
+      id: src.id,
+      name: src.name,
+      transportId: src.transportId,
+      baseUrl: src.baseUrl,
+      discovery: { strategy: 'provider-models-endpoint' },
+      status: src.status || 'enabled',
+    }
+    if (src.authType !== undefined) record.authType = src.authType
+    if (src.metadata !== undefined) record.metadata = src.metadata
+    return catalog.saveRecord(dataRoot, 'providers', record, catalogOptions(eff.snapshot, opts))
+  }
+
+  function saveModel(input, opts) {
+    const eff = snapshotOrErrors()
+    if (!eff.snapshot) return { ok: false, errors: eff.errors }
+    const src = input || {}
+    const record = {
+      schemaVersion: 1,
+      id: src.id,
+      vendor: src.vendor,
+      displayName: src.displayName,
+      checkpoint: src.checkpoint,
+      capabilities: src.capabilities,
+      enabled: src.enabled !== undefined ? src.enabled : true,
+      engines: src.engines,
+    }
+    for (const k of ['dataUseTier', 'contextWindow', 'maxOutputTokens', 'capacityProvenance', 'readOnlyDefault']) {
+      if (src[k] !== undefined) record[k] = src[k]
+    }
+    if (Array.isArray(record.engines) && record.engines.length === 0) {
+      return { ok: false, errors: [err('model-invalid', 'model.engines', 'engines must scope the model to at least one orchestration engine (dual-v1 and/or muse-v0); an empty scope is eligible nowhere')] }
+    }
+    return catalog.saveRecord(dataRoot, 'models', record, catalogOptions(eff.snapshot, opts))
+  }
+
+  // R4.1 route save: raw-model manual routes only (agent-sdk belongs to R5);
+  // availability can only start as discovered/probe-required — 'verified' is
+  // granted exclusively by verifyRoute after successful probes.
+  function saveRoute(input, opts) {
+    const eff = snapshotOrErrors()
+    if (!eff.snapshot) return { ok: false, errors: eff.errors }
+    const src = input || {}
+    if (src.executionKind !== undefined && src.executionKind !== 'raw-model') {
+      return { ok: false, errors: [err('route-invalid', 'route.executionKind', 'R4 manual routes are raw-model execution only (agent-sdk/agent-tool onboarding belongs to R5); failing closed')] }
+    }
+    if (src.availability !== undefined && src.availability !== 'discovered' && src.availability !== 'probe-required') {
+      return { ok: false, errors: [err('route-not-verified', 'route.availability', 'routes become verified only through capability probes; save as discovered or probe-required first')] }
+    }
+    if (!findIn(eff.snapshot, 'providers', src.providerId)) {
+      return { ok: false, errors: [err('unknown-reference', 'route.providerId', 'unknown provider: ' + String(src.providerId))] }
+    }
+    if (!findIn(eff.snapshot, 'models', src.logicalModelId)) {
+      return { ok: false, errors: [err('unknown-reference', 'route.logicalModelId', 'unknown logical model: ' + String(src.logicalModelId))] }
+    }
+    if (src.connectionId !== undefined && src.connectionId !== null && !findIn(eff.snapshot, 'connections', src.connectionId)) {
+      return { ok: false, errors: [err('unknown-reference', 'route.connectionId', 'unknown connection: ' + String(src.connectionId))] }
+    }
+    const provider = findIn(eff.snapshot, 'providers', src.providerId)
+    const record = {
+      schemaVersion: 1,
+      id: src.id,
+      providerId: src.providerId,
+      logicalModelId: src.logicalModelId,
+      remoteModelId: src.remoteModelId,
+      accessType: src.accessType || 'api-key',
+      connectionId: src.connectionId === undefined ? null : src.connectionId,
+      executionKind: 'raw-model',
+      reasoningLevels: src.reasoningLevels,
+      compatibility: { transport: provider ? provider.transportId : 'unknown' },
+      availability: src.availability || 'probe-required',
+      enabled: src.enabled !== undefined ? src.enabled : true,
+      provenance: 'operator-manual',
+    }
+    const conn = src.connectionId ? findIn(eff.snapshot, 'connections', src.connectionId) : null
+    if (conn && conn.providerId !== src.providerId) {
+      return { ok: false, errors: [err('connection-provider-mismatch', 'route.connectionId', 'connection ' + conn.id + ' belongs to provider ' + conn.providerId + ', not ' + src.providerId)] }
+    }
+    return catalog.saveRecord(dataRoot, 'routes', record, catalogOptions(eff.snapshot, opts))
+  }
+
+  // R4.3: credential references only. Initial status is never 'connected':
+  // the operator transitions explicitly via setConnectionStatus (attested)
+  // until the R5 authenticated credential boundary exists.
+  function saveConnection(input, opts) {
+    const eff = snapshotOrErrors()
+    if (!eff.snapshot) return { ok: false, errors: eff.errors }
+    const src = input || {}
+    if (!findIn(eff.snapshot, 'providers', src.providerId)) {
+      return { ok: false, errors: [err('unknown-reference', 'connection.providerId', 'unknown provider: ' + String(src.providerId))] }
+    }
+    if (src.status !== undefined && src.status !== 'not-connected' && src.status !== 'unknown') {
+      return { ok: false, errors: [err('connection-invalid', 'connection.status', 'new connections start as not-connected (or unknown); transition to connected explicitly via attestation')] }
+    }
+    const record = {
+      schemaVersion: 1,
+      id: src.id,
+      providerId: src.providerId,
+      connectionKind: src.connectionKind || 'api-key',
+      credentialRef: src.credentialRef,
+      status: src.status || 'not-connected',
+      provenance: 'operator-manual',
+    }
+    if (src.authMethod !== undefined) record.authMethod = src.authMethod
+    return catalog.saveRecord(dataRoot, 'connections', record, catalogOptions(eff.snapshot, opts))
+  }
+
+  function setConnectionStatus(id, status, opts) {
+    const eff = snapshotOrErrors()
+    if (!eff.snapshot) return { ok: false, errors: eff.errors }
+    const allowed = ['connected', 'not-connected', 'revoked', 'disabled', 'unknown']
+    if (allowed.indexOf(status) === -1) {
+      return { ok: false, errors: [err('connection-invalid', 'connection.status', 'status must be one of ' + allowed.join(', '))] }
+    }
+    if (status === 'connected' && !(opts && opts.attested === true)) {
+      return { ok: false, errors: [err('connection-auth-required', 'connection.status', 'marking a connection connected requires explicit operator attestation (the host provides no authenticated credential-write boundary in R4; see R4.3 blocker)')] }
+    }
+    const current = findIn(eff.snapshot, 'connections', id)
+    if (!current) return { ok: false, errors: [err('unknown-reference', 'connection.id', 'unknown connection: ' + String(id))] }
+    const canonForConn = buildCanonical()
+    const builtinConns = canonForConn.snapshot ? builtInIdsOf(canonForConn.snapshot).connections : []
+    if (builtinConns.indexOf(id) !== -1) {
+      return { ok: false, errors: [err('dependency-blocked', 'connection.' + id, 'built-in connections are immutable; create an operator connection for the custom provider instead')] }
+    }
+    const updated = JSON.parse(JSON.stringify(current))
+    updated.status = status
+    const saved = catalog.saveRecord(dataRoot, 'connections', updated, catalogOptions(eff.snapshot, opts))
+    if (!saved.ok) return saved
+    return { ok: true, revision: saved.revision, attested: status === 'connected' ? true : undefined }
+  }
+
+  function disableCatalogRecord(kind, id, opts) {
+    const eff = snapshotOrErrors()
+    if (!eff.snapshot) return { ok: false, errors: eff.errors }
+    return catalog.disableRecord(dataRoot, kind, id, catalogOptions(eff.snapshot, opts))
+  }
+
+  function deleteCatalogRecord(kind, id, opts) {
+    const eff = snapshotOrErrors()
+    if (!eff.snapshot) return { ok: false, errors: eff.errors }
+    const out = catalog.deleteRecord(dataRoot, kind, id, catalogOptions(eff.snapshot, opts))
+    return out
+  }
+
+  function providerConnectionOf(effective, providerId, connectionId) {
+    if (connectionId) return findIn(effective, 'connections', connectionId) || null
+    for (const c of effective.connections || []) {
+      if (c && c.providerId === providerId) return c
+    }
+    return null
+  }
+
+  // R4.4: explicit user-triggered probes. Server-side fetch carries NO
+  // secret values (see R4.3 blocker); outcomes are honest reachability/auth
+  // evidence. fetchImpl/timeoutMs are injectable for credential-gated tests.
+  async function testProviderConnection(providerId, opts) {
+    const eff = snapshotOrErrors()
+    if (!eff.snapshot) return { ok: false, errors: eff.errors }
+    const provider = findIn(eff.snapshot, 'providers', providerId)
+    if (!provider) return { ok: false, errors: [err('unknown-reference', 'provider.id', 'unknown provider: ' + String(providerId))] }
+    const connection = providerConnectionOf(eff.snapshot, providerId, opts && opts.connectionId)
+    const fetchImpl = (opts && opts.fetchImpl) || defaultFetchImpl
+    return probes.testConnection(provider, connection, fetchImpl, opts)
+  }
+
+  async function discoverProviderModels(providerId, opts) {
+    const eff = snapshotOrErrors()
+    if (!eff.snapshot) return { ok: false, advertised: [], errors: eff.errors }
+    const provider = findIn(eff.snapshot, 'providers', providerId)
+    if (!provider) return { ok: false, advertised: [], errors: [err('unknown-reference', 'provider.id', 'unknown provider: ' + String(providerId))] }
+    if (provider.status !== 'enabled') {
+      return { ok: false, advertised: [], errors: [err('provider-disabled', 'provider.id', 'provider is not enabled: ' + providerId)] }
+    }
+    const connection = providerConnectionOf(eff.snapshot, providerId, opts && opts.connectionId)
+    const fetchImpl = (opts && opts.fetchImpl) || defaultFetchImpl
+    return probes.discoverModels(provider, connection, fetchImpl, opts)
+  }
+
+  async function verifyProviderRoute(routeId, opts) {
+    const eff = snapshotOrErrors()
+    if (!eff.snapshot) return { ok: false, errors: eff.errors }
+    const route = findIn(eff.snapshot, 'routes', routeId)
+    if (!route) return { ok: false, errors: [err('unknown-reference', 'route.id', 'unknown route: ' + String(routeId))] }
+    const canonForVerify = buildCanonical()
+    const builtinRoutes = canonForVerify.snapshot ? builtInIdsOf(canonForVerify.snapshot).routes : []
+    if (builtinRoutes.indexOf(routeId) !== -1) {
+      return { ok: false, errors: [err('dependency-blocked', 'route.' + routeId, 'built-in routes keep their shipped verification state; verify operator routes instead')] }
+    }
+    const provider = findIn(eff.snapshot, 'providers', route.providerId)
+    const model = findIn(eff.snapshot, 'models', route.logicalModelId)
+    const connection = route.connectionId ? findIn(eff.snapshot, 'connections', route.connectionId) : null
+    if (!provider || !model) {
+      return { ok: false, errors: [err('unknown-reference', 'route', 'route references a missing provider or model')] }
+    }
+    const fetchImpl = (opts && opts.fetchImpl) || defaultFetchImpl
+    const result = await probes.verifyRoute(provider, model, route, connection, fetchImpl, opts)
+    // Persist redacted evidence either way; promote to verified ONLY when
+    // every required probe passed. A model-list response alone never lands
+    // here (verifyRoute always runs the synthetic round-trips).
+    const toStore = result.evidence || { kind: 'capability-verification', routeId, providerId: provider.id, transport: provider.transportId, checks: result.checks, verifiedAtUtc: new Date().toISOString(), note: 'verification FAILED; route stays unverified', failed: true }
+    const stored = catalog.saveEvidence(dataRoot, routeId, toStore, { fsHooks, nowUtc })
+    if (!stored.ok) return { ok: false, checks: result.checks, errors: stored.errors }
+    if (!result.ok) {
+      return { ok: false, checks: result.checks, errors: result.errors }
+    }
+    const updated = JSON.parse(JSON.stringify(route))
+    updated.availability = 'verified'
+    const saved = catalog.saveRecord(dataRoot, 'routes', updated, catalogOptions(eff.snapshot, opts))
+    if (!saved.ok) return { ok: false, checks: result.checks, errors: saved.errors }
+    return { ok: true, checks: result.checks, evidence: result.evidence, errors: [] }
+  }
+
+  function getRouteEvidence(routeId) {
+    const loaded = catalog.loadEvidence(dataRoot, fsHooks)
+    if (!loaded.evidence) return { evidence: null, errors: loaded.errors }
+    return { evidence: loaded.evidence[routeId] || null, errors: [] }
+  }
+
+  // R4.5: future runtime projection without executing anything.
+  function projectRoute(routeId, runtime) {
+    const eff = snapshotOrErrors()
+    if (!eff.snapshot) return { ok: false, errors: eff.errors }
+    const route = findIn(eff.snapshot, 'routes', routeId)
+    if (!route) return { ok: false, errors: [err('unknown-reference', 'route.id', 'unknown route: ' + String(routeId))] }
+    const provider = findIn(eff.snapshot, 'providers', route.providerId)
+    if (!provider) return { ok: false, errors: [err('unknown-reference', 'route.providerId', 'unknown provider: ' + String(route.providerId))] }
+    return runtimeProjection.prepareProjection(route, provider, runtime || null)
+  }
+
 
   function enrichRoute(snapshot, route) {
     const models = new Map((snapshot.models || []).map((m) => [m && m.id, m]))
@@ -320,6 +756,20 @@ function createService(options) {
     compilePreview,
     save,
     buildCanonical,
+    effectiveSnapshot,
+    getCatalog,
+    saveProvider,
+    saveModel,
+    saveRoute,
+    saveConnection,
+    setConnectionStatus,
+    disableCatalogRecord,
+    deleteCatalogRecord,
+    testProviderConnection,
+    discoverProviderModels,
+    verifyProviderRoute,
+    getRouteEvidence,
+    projectRoute,
   }
 }
 
