@@ -77,6 +77,62 @@ function isLoopbackHost(host) {
   if (v4) return isLoopbackV4(v4)
   return false
 }
+// True for a resolved IP address a remote provider must never be contacted
+// at without explicit trust. Covers IPv4 (loopback, RFC1918, link-local,
+// carrier-grade NAT, 0/8, multicast/reserved) and IPv6 (loopback, unspecified,
+// unique-local fc00::/7, link-local fe80::/10, IPv4-mapped private/loopback).
+function isRestrictedAddress(ip) {
+  if (typeof ip !== 'string' || ip === '') return true
+  const low = ip.toLowerCase()
+  // IPv4-mapped IPv6 (::ffff:a.b.c.d): judge the embedded IPv4 address.
+  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(low)
+  if (mapped) {
+    const v4 = parseIpv4(mapped[1])
+    if (!v4) return true
+    return isLoopbackV4(v4) || isRfc1918V4(v4) || isLinkLocalV4(v4) || isSpecialV4(v4) || (v4[0] === 100 && v4[1] >= 64 && v4[1] <= 127)
+  }
+  if (low === '::1' || low === '::') return true
+  if (low === 'localhost') return true
+  if (low.indexOf(':') !== -1) {
+    // Any other IPv6 literal is restricted for remote dialects:ULA/link-local
+    // cannot be proven public, and global unicast cannot be proven to stay
+    // non-internal after NAT64/DNS64 handling offline.
+    return true
+  }
+  const v4 = parseIpv4(low)
+  if (!v4) return true // unparseable: fail closed, never contacted
+  return isLoopbackV4(v4) || isRfc1918V4(v4) || isLinkLocalV4(v4) || isSpecialV4(v4) || (v4[0] === 100 && v4[1] >= 64 && v4[1] <= 127)
+}
+
+// Request-time connection-target check (H1). Validates the ALREADY-RESOLVED
+// addresses for one outbound probe request — the creation-time literal test
+// above cannot see DNS results, so every probe revalidates here.
+// Returns an errors array (empty = target may be contacted).
+function checkRequestTarget(host, addresses, transportId, endpointOptions) {
+  const where = 'probe.target'
+  const trusted = !!(endpointOptions && endpointOptions.trustedPrivateNetwork)
+  const allowPrivateLocal = !!(endpointOptions && endpointOptions.allowPrivateLocal)
+  const list = Array.isArray(addresses) ? addresses : []
+  if (list.length === 0) {
+    return [err('endpoint-forbidden-ssrf', where, 'host ' + String(host) + ' did not resolve; refusing to probe an unresolvable target')]
+  }
+  if (transportId === 'local-openai-compatible') {
+    const loopbackSeen = list.some((a) => isLoopbackHost(a && a.address))
+    const privateSeen = list.some((a) => {
+      const v4 = a && typeof a.address === 'string' ? parseIpv4(bracketless(a.address.toLowerCase())) : null
+      return !!v4 && (isRfc1918V4(v4) || isLinkLocalV4(v4))
+    })
+    if (loopbackSeen) return []
+    if (privateSeen && allowPrivateLocal) return []
+    return [err('endpoint-forbidden-ssrf', where, 'local dialect resolves only to loopback (explicitly trusted private LAN when configured); refusing ' + String(host))]
+  }
+  const bad = list.filter((a) => isRestrictedAddress(a && a.address))
+  if (bad.length > 0 && !trusted) {
+    return [err('endpoint-forbidden-ssrf', where, 'host ' + String(host) + ' resolves to a restricted target (' + bad.length + ' of ' + list.length + ' addresses); refusing without explicit trusted configuration')]
+  }
+  return []
+}
+
 function isRestrictedLiteral(host) {
   // True for literals a remote provider must never target without explicit trust.
   const h = bracketless(String(host).toLowerCase())
@@ -220,4 +276,10 @@ module.exports = {
   isSupportedTransport,
   validateEndpoint,
   validateProviderInput,
+  parseIpv4,
+  bracketless,
+  isLoopbackHost,
+  isRestrictedLiteral,
+  isRestrictedAddress,
+  checkRequestTarget,
 }

@@ -213,10 +213,26 @@ function scanRecord(kind, record) {
 }
 
 /**
+ * Normalize a stored evidence envelope. R4 stored the evidence object
+ * directly; R4.1 stores { current, attempts } so failed re-probes preserve
+ * history for diagnostics while only the current attempt decides anything.
+ */
+function normalizeEvidenceEnvelope(record) {
+  if (record && typeof record === 'object' && Array.isArray(record.attempts)) {
+    return { current: record.current !== undefined ? record.current : null, attempts: record.attempts }
+  }
+  if (record && typeof record === 'object') return { current: record, attempts: [] }
+  return { current: null, attempts: [] }
+}
+
+/**
  * Persist redacted verification evidence for a route. Evidence is
  * operator-owned diagnostics (checks, transport, timestamps) and never
  * carries secret material — scan enforced. Stored outside the canonical
  * route record so catalog data stays free of run-specific metadata.
+ * History is preserved: each save appends the previous current attempt
+ * (bounded to the last 10) so a failed re-probe never erases the
+ * diagnostic trail — while eligibility only ever reads the current one.
  */
 function saveEvidence(dataRoot, routeId, evidence, options) {
   const opts = options || {}
@@ -239,7 +255,11 @@ function saveEvidence(dataRoot, routeId, evidence, options) {
       items: Object.assign({}, loaded.doc.items),
       disabledBuiltins: {},
     }
-    next.items[routeId] = { record: JSON.parse(JSON.stringify(evidence)), provenance: 'operator', recordVersion: (next.items[routeId] ? next.items[routeId].recordVersion + 1 : 1), updatedAtUtc: nowUtc() }
+    const prevEnvelope = next.items[routeId] ? normalizeEvidenceEnvelope(next.items[routeId].record) : { current: null, attempts: [] }
+    const attempts = prevEnvelope.attempts.slice()
+    if (prevEnvelope.current) attempts.push(prevEnvelope.current)
+    const record = { current: JSON.parse(JSON.stringify(evidence)), attempts: attempts.slice(-10) }
+    next.items[routeId] = { record, provenance: 'operator', recordVersion: (next.items[routeId] ? next.items[routeId].recordVersion + 1 : 1), updatedAtUtc: nowUtc() }
     if (!writeDocAtomic(dataRoot, 'evidence', hooks, next, nowUtc)) {
       return { ok: false, errors: [err('registry-store-unwritable', 'catalog.evidence', 'verification evidence cannot be written')] }
     }
@@ -256,6 +276,14 @@ function loadEvidence(dataRoot, fsHooks) {
     out[id] = loaded.doc.items[id].record
   }
   return { evidence: out, errors: [] }
+}
+
+function currentEvidence(envelope) {
+  return normalizeEvidenceEnvelope(envelope).current
+}
+
+function evidenceAttempts(envelope) {
+  return normalizeEvidenceEnvelope(envelope).attempts
 }
 
 // --- dependency guard ------------------------------------------------------
@@ -508,6 +536,9 @@ module.exports = {
   FILES,
   saveEvidence,
   loadEvidence,
+  normalizeEvidenceEnvelope,
+  currentEvidence,
+  evidenceAttempts,
   CLAIM_STALE_MS,
   LOCK_HARD_STALE_MS,
   docPath,

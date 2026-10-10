@@ -580,19 +580,30 @@ function createRegistryHandlers(service) {
       respond(res, 400, { ok: false, error: 'invalid-probe-payload' })
       return
     }
+    // R4.1/R4.3: probe requests never carry secret values. Any credential-ish
+    // field is rejected outright — credentials cross only the future R5
+    // authenticated boundary, never this loopback UI API.
+    if (read.body && (read.body.testBearer !== undefined || read.body.apiKey !== undefined || read.body.secret !== undefined || read.body.token !== undefined || read.body.password !== undefined)) {
+      respond(res, 400, { ok: false, error: 'secret-material-rejected' })
+      return
+    }
     const connectionId = read.body && typeof read.body.connectionId === 'string' ? read.body.connectionId : undefined
+    const endpointOptions = read.body && read.body.endpointOptions && typeof read.body.endpointOptions === 'object' ? {
+      trustedPrivateNetwork: read.body.endpointOptions.trustedPrivateNetwork === true,
+      allowPrivateLocal: read.body.endpointOptions.allowPrivateLocal === true,
+    } : undefined
     try {
       if (operation === 'test') {
-        const out = await service.testProviderConnection(id, { connectionId })
+        const out = await service.testProviderConnection(id, { connectionId, endpointOptions })
         respond(res, 200, { ok: out.ok, evidence: out.evidence || null, errors: out.errors || [] })
         return
       }
       if (operation === 'discover') {
-        const out = await service.discoverProviderModels(id, { connectionId })
+        const out = await service.discoverProviderModels(id, { connectionId, endpointOptions })
         respond(res, 200, { ok: out.ok, advertised: out.advertised || [], errors: out.errors || [] })
         return
       }
-      const out = await service.verifyProviderRoute(id, {})
+      const out = await service.verifyProviderRoute(id, { endpointOptions })
       respond(res, 200, { ok: out.ok, checks: out.checks || [], evidence: out.evidence || null, errors: out.errors || [] })
     } catch {
       respond(res, 500, { ok: false, error: 'registry-probe-failed' })
@@ -616,12 +627,12 @@ function createRegistryHandlers(service) {
         respond(res, 400, { ok: false, error: 'missing-route' })
         return
       }
-      const { evidence, errors } = service.getRouteEvidence(routeId)
+      const { evidence, attempts, errors } = service.getRouteEvidence(routeId)
       if (errors.length > 0) {
         respond(res, errorStatusOf(errors), { ok: false, error: errors[0].code, details: errors })
         return
       }
-      respond(res, 200, { ok: true, routeId, evidence })
+      respond(res, 200, { ok: true, routeId, evidence, attempts: attempts || [] })
     } catch {
       respond(res, 500, { ok: false, error: 'registry-evidence-failed' })
     }

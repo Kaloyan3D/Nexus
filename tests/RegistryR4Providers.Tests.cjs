@@ -62,19 +62,35 @@ function jsonRes(status, obj) {
   const text = JSON.stringify(obj);
   return { status, text: async () => text };
 }
+const R4_BEARER = 'probe-bearer-acme-1';
+function r4Lookup() { return async () => [{ address: '93.184.216.34', family: 4 }]; }
+function r4SseText() {
+  const L = String.fromCharCode(10);
+  const Q = String.fromCharCode(34);
+  const payload = JSON.stringify({ output: [{ type: 'message', content: [{ type: 'output_text', text: 'probe' }] }] });
+  void Q;
+  return 'event: message' + L + 'data: ' + payload + L + L + 'data: [DONE]' + L + L;
+}
 function fakeHealthy() {
   return async (url, init) => {
     const u = String(url);
     const method = (init && init.method) || 'GET';
+    const auth = init && init.headers && init.headers.authorization;
+    if (auth !== 'Bearer ' + R4_BEARER) return jsonRes(401, { error: 'invalid key' });
     if (method === 'GET' && /\/models$/.test(u)) {
       return jsonRes(200, { data: [{ id: 'acme-1-large' }, { id: 'acme-1-small' }] });
     }
     if (method === 'POST' && (/\/responses$/.test(u) || /\/chat\/completions$/.test(u))) {
-      const body = JSON.parse(String((init && init.body) || '{}'));
+      const body = JSON.parse(String((init && init.body) || '{}' ));
+      const effort = body.reasoning && body.reasoning.effort;
+      if (body.stream === true) return { status: 200, text: async () => r4SseText() };
       if (body.tools) {
-        return jsonRes(200, { output: [{ type: 'function_call', name: 'probe_echo', call_id: 'call_1', arguments: '{\"word\":\"probe-ok\"}' }] });
+        return jsonRes(200, { status: 'completed', reasoning: effort ? { effort } : undefined, output: [{ type: 'function_call', name: 'probe_echo', call_id: 'call_1', arguments: '{\"word\":\"probe-ok\"}' }] });
       }
-      return jsonRes(200, { output: [{ type: 'message', content: [{ text: 'probe-ok' }] }] });
+      if (Array.isArray(body.input) && body.input.some((e) => e && e.type === 'function_call_output')) {
+        return jsonRes(200, { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'probe-ok acknowledged' }] }] });
+      }
+      return jsonRes(200, { status: 'completed', reasoning: effort ? { effort } : undefined, output: [{ type: 'message', content: [{ type: 'output_text', text: 'probe-ok' }] }] });
     }
     return jsonRes(404, { error: 'not found' });
   };
@@ -89,15 +105,26 @@ function fakeAuthFail() {
 function fakeTextFail() {
   return async (url, init) => {
     const method = (init && init.method) || 'GET';
+    const auth = init && init.headers && init.headers.authorization;
+    if (auth !== 'Bearer ' + R4_BEARER) return jsonRes(401, { error: 'invalid key' });
     if (method === 'GET') return jsonRes(200, { data: [{ id: 'acme-1-large' }] });
+    const body = JSON.parse(String((init && init.body) || '{}'));
+    if (body.stream === true) return { status: 200, text: async () => r4SseText() };
+    if (body.tools) return jsonRes(200, { status: 'completed', output: [{ type: 'function_call', name: 'probe_echo', call_id: 'call_9', arguments: '{"word":"probe-ok"}' }] });
     return jsonRes(500, { error: 'inference exploded' });
   };
 }
 function fakeNoTools() {
   return async (url, init) => {
     const method = (init && init.method) || 'GET';
+    const auth = init && init.headers && init.headers.authorization;
+    if (auth !== 'Bearer ' + R4_BEARER) return jsonRes(401, { error: 'invalid key' });
     if (method === 'GET') return jsonRes(200, { data: [{ id: 'acme-1-large' }] });
-    return jsonRes(200, { output: [{ type: 'message', content: [{ text: 'probe-ok but no tool call' }] }] });
+    const body = JSON.parse(String((init && init.body) || '{}'));
+    const effort = body.reasoning && body.reasoning.effort;
+    if (body.stream === true) return { status: 200, text: async () => r4SseText() };
+    if (body.tools) return jsonRes(200, { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'answered without calling' }] }] });
+    return jsonRes(200, { status: 'completed', reasoning: effort ? { effort } : undefined, output: [{ type: 'message', content: [{ type: 'output_text', text: 'probe-ok' }] }] });
   };
 }
 function fakeUnreachable() {
@@ -126,15 +153,18 @@ function acmeRoute() {
   };
 }
 async function provisionVerifiedAcme(svc) {
-  // Full operator flow: provider + model + connection(ref) + attest + route + probe-verify.
+  // Full operator flow: provider + model + connection(ref) + attest + route
+  // + probe-verify. R4.1: verification presents an injected test credential
+  // (service layer only, never HTTP) and a pinned DNS answer so the hardened
+  // request-time checks run deterministically offline.
   assert.equal(svc.saveProvider(acmeProvider(), {}).ok, true);
   assert.equal(svc.saveModel(acmeModel(), {}).ok, true);
   assert.equal(svc.saveConnection(acmeConnection(), {}).ok, true);
   const attested = svc.setConnectionStatus('conn-acme-1', 'connected', { attested: true });
   assert.equal(attested.ok, true);
   assert.equal(svc.saveRoute(acmeRoute(), {}).ok, true);
-  const verified = await svc.verifyProviderRoute('acme-direct/acme-1', { fetchImpl: fakeHealthy() });
-  assert.equal(verified.ok, true);
+  const verified = await svc.verifyProviderRoute('acme-direct/acme-1', { fetchImpl: fakeHealthy(), lookup: r4Lookup(), testBearer: R4_BEARER });
+  assert.equal(verified.ok, true, 'provision verify: ' + JSON.stringify(verified.errors));
   return verified;
 }
 function hashFiles(files) {
@@ -357,7 +387,7 @@ async function main() {
     assert.equal(svc.saveProvider(acmeProvider(), {}).ok, true);
     assert.equal(svc.saveModel(acmeModel(), {}).ok, true);
     assert.equal(svc.saveConnection(acmeConnection(), {}).ok, true);
-    const found = await svc.discoverProviderModels('acme-direct', { fetchImpl: fakeHealthy() });
+    const found = await svc.discoverProviderModels('acme-direct', { fetchImpl: fakeHealthy(), lookup: r4Lookup(), testBearer: R4_BEARER });
     assert.equal(found.ok, true);
     assert.ok(found.advertised.indexOf('acme-1-large') !== -1, JSON.stringify(found.advertised));
     // Listing alone created no routes and verified nothing.
@@ -377,10 +407,10 @@ async function main() {
     assert.equal(svc.saveModel(acmeModel(), {}).ok, true);
     assert.equal(svc.saveConnection(acmeConnection(), {}).ok, true);
     assert.equal(svc.saveRoute(acmeRoute(), {}).ok, true);
-    const test = await svc.testProviderConnection('acme-direct', { fetchImpl: fakeAuthFail() });
+    const test = await svc.testProviderConnection('acme-direct', { fetchImpl: fakeAuthFail(), lookup: r4Lookup() });
     assert.equal(test.ok, false);
     assert.equal(test.evidence.authenticated, false);
-    const verified = await svc.verifyProviderRoute('acme-direct/acme-1', { fetchImpl: fakeAuthFail() });
+    const verified = await svc.verifyProviderRoute('acme-direct/acme-1', { fetchImpl: fakeAuthFail(), lookup: r4Lookup() });
     assert.equal(verified.ok, false);
     assert.ok(codes(verified.errors).indexOf('probe-auth-failed') !== -1, JSON.stringify(verified.errors));
     const route = svc.getCatalog().catalog.routes.find((r) => r.routeId === 'acme-direct/acme-1');
@@ -397,7 +427,7 @@ async function main() {
       assert.equal(svc.saveModel(acmeModel(), {}).ok, true);
       assert.equal(svc.saveConnection(acmeConnection(), {}).ok, true);
       assert.equal(svc.saveRoute(acmeRoute(), {}).ok, true);
-      const verified = await svc.verifyProviderRoute('acme-direct/acme-1', { fetchImpl: fake });
+      const verified = await svc.verifyProviderRoute('acme-direct/acme-1', { fetchImpl: fake, lookup: r4Lookup(), testBearer: R4_BEARER });
       assert.equal(verified.ok, false, name + ' failure must not verify');
       const route = svc.getCatalog().catalog.routes.find((r) => r.routeId === 'acme-direct/acme-1');
       assert.equal(route.runnable, false, name);
@@ -407,7 +437,7 @@ async function main() {
   await check('R4.4 unreachable provider yields normalized timeout evidence, never a throw', async () => {
     const svc = svcOn(tmpDir('r4-unreach-'));
     assert.equal(svc.saveProvider(acmeProvider(), {}).ok, true);
-    const test = await svc.testProviderConnection('acme-direct', { fetchImpl: fakeUnreachable() });
+    const test = await svc.testProviderConnection('acme-direct', { fetchImpl: fakeUnreachable(), lookup: r4Lookup() });
     assert.equal(test.ok, false);
     assert.equal(test.evidence.reachable, false);
     assert.ok(test.errors.length > 0 && test.errors[0].code, 'normalized error code present');

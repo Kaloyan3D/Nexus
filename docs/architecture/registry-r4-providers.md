@@ -137,14 +137,38 @@ Three levels, kept distinct end to end: **discovered** (advertised id only —
 never execution access), **declared** (configuration/documentation
 provenance), **verified** (required probes succeeded for this specific
 route — the only level the resolver treats as executable). Minimum probes:
-reachability + authentication, synthetic text request, streaming where the
-model declares it, tool-call emission + tool-result continuation where
-toolCalling is declared, reasoning mapping for the route's levels, transport
-compatibility, normalized errors/timeouts. Probes use synthetic content
-(`probe-ok` round-trips), bounded requests (15 s default, 256 KiB cap),
-cancellation and redacted diagnostics. Nothing probes on startup. Evidence
-records persist (redacted) under `data/registry/route-evidence.json`,
+authenticated access, structural text completion, genuine SSE streaming where
+the model declares it, real tool-call emission plus continuation with the
+actual emitted call id where toolCalling is declared, reasoning-effort
+acknowledgment for the route's levels, transport compatibility, normalized
+errors and timeouts. Probes use synthetic content
+(`probe-ok` round-trips) with a single deadline covering connection,
+headers and body; the 256 KiB cap is enforced while streaming, before the
+full body is ever buffered. Redirects are denied by default (the Location
+target is never fetched); every request re-resolves DNS and revalidates the
+connection target, so a public hostname resolving to a restricted address is
+refused. Concurrency is bounded (4 inflight probe requests) with caller
+cancellation, response cleanup and redacted diagnostics. Nothing probes on
+startup. Evidence records persist (redacted) under `data/registry/route-evidence.json`,
 outside canonical route records.
+
+### 5.1 R4.1 binding guarantees
+
+Every granted verification carries a probe contract version plus a sha256
+fingerprint over the verified tuple: provider endpoint and transport,
+logical model id and checkpoint, capability set, remote model id and route
+id, reasoning levels, execution kind, and connection id, kind, status and
+credential reference. An operator route whose stored availability says
+verified is executable-eligible only while its current evidence still binds
+the live tuple: missing evidence, a failed latest attempt, a contract
+mismatch, or any change to a security-relevant field demotes the effective
+record to probe-required (fail closed, with a diagnostic note). A failed
+re-probe additionally demotes the stored record, so no stale verified flag
+survives; the attempt history (bounded to the last 10) is preserved for
+diagnostics while only the current attempt decides. Revocation is covered
+twice: the resolver already fails closed on revoked or disabled connections,
+and the status change also breaks the fingerprint. Built-in shipped
+verification state is never altered by this machinery.
 
 ## 6. Credential ownership and the R4.3 integration blocker
 
@@ -158,15 +182,21 @@ authenticated credential-write boundary — the registry routes share the R3
 loopback + origin-tuple CSRF boundary, under which any local process can
 call them exactly like the pre-existing Nexus routes. Per the task, R4 adds
 **no insecure HTTP endpoint for secrets**: the service accepts only opaque
-references, server-side probes carry no secret values, and reaching
-`connected` requires explicit operator attestation
+references, and the HTTP probe API rejects secret-bearing bodies outright.
+A credential may be presented only at the service layer (offline calls and
+credential-gated tests); server-side UI probes run without secret values.
+Reaching `connected` still requires explicit operator attestation
 (`POST /connections/status { attested: true }`, surfaced in the UI as
-“connected (operator-attested)”). Live credential-gated probes (real
+“connected (operator-attested)”).
+R4.1 hardening: attestation alone never verifies. Verification demands a
+presented credential that the provider accepted; an unauthenticated 200 is
+reported as reachability only, and a key-required connection without a
+presented credential fails closed. Live credential-gated probes (real
 authenticated text/streaming/tool round-trips against a commercial endpoint)
 could not run without explicit credentials and are documented as not run;
-the offline suite injects fake transports instead. The authenticated
-credential boundary (secure storage writes, subscription OAuth, browser-token
-handling) belongs to R5.
+the offline suites inject fake transports (and pinned test bearers at the
+service layer only) instead. The authenticated credential boundary (secure
+storage writes, subscription OAuth, browser-token handling) belongs to R5.
 
 ## 7. Storage
 
@@ -198,12 +228,26 @@ configuration fails with `dependency-blocked` naming the dependents
 (`saved-configuration route …`); removal proceeds only after a separate
 safe migration (re-stage without the route), proven by test.
 
-## 8. Limitations
+## 8. Limitations (R4.1 actual guarantees)
 
-- Live provider verification needs the R5 credential boundary; R4 probes run
-  unauthenticated server-side and report honest auth states.
-- DNS rebinding cannot be proven offline: non-IP hostnames are accepted as
-  explicitly trusted operator configuration and revalidated at probe time.
+- Live provider verification needs the R5 credential boundary. UI-driven
+  server-side probes run without secret values and report honest
+  reachability/auth states; only service-layer calls with an explicitly
+  presented credential can produce authenticated evidence.
+- Request-time DNS is resolved and revalidated per probe (default resolver
+  is node:dns; tests pin answers), but DNS rebinding between validation and
+  connection cannot be eliminated without connection-level pinning — a
+  documented residual risk, mitigated by the single-deadline race and the
+  trusted-local policy.
+- Redirects are denied rather than revalidated: providers that answer API
+  calls with 3xx stay unverified until they serve the endpoint directly.
+- Reasoning acknowledgment requires a structural echo (effort value under
+  reasoning keys, or consumed reasoning tokens). Vendors whose wire shape
+  carries neither stay reasoning-unverified rather than being guessed.
+- Continuation semantics outside the two supported dialects stay unverified
+  rather than being guessed.
+- Evidence has no wall-clock expiry policy: staleness is defined as
+  fingerprint, contract or authorization drift, not age.
 - Provider-specific continuity (session headers, request ids, tool-handshake
   state) stays runtime/adapter-owned and never enters Registry snapshots.
 - The UI has no live-GUI screenshot harness in this task; visual verification
@@ -211,7 +255,24 @@ safe migration (re-stage without the route), proven by test.
 
 ## 9. Test results
 
-`tests/RegistryR4Providers.Tests.cjs`: **27/27 PASS** (offline). Coverage:
+`tests/RegistryR4ProbeSecurity.Tests.cjs`: **16/16 PASS** (offline,
+adversarial). Every check was run against the unfixed R4 build first and
+failed there (0/16), then passes after the correction. Coverage: loopback
+redirect refusal without requesting the target; private-IP DNS refusal with
+no request leaving; oversized streaming bodies stopped before full
+buffering; stalled-body deadline settlement; bounded concurrency (4 max)
+with response cleanup; caller cancellation; legitimate public endpoints
+still passing; arbitrary-JSON, string tool-call and non-SSE rejections;
+emitted call-id round-trip; unauthenticated-200 separation; no attestation
+substitution; endpoint/model/route/revocation invalidation; failed re-probe
+demotion with preserved history; versioned evidence fingerprints.
+
+`tests/RegistryR4Providers.Tests.cjs`: **27/27 PASS** (offline) on
+the hardened build. Its fakes were tightened to the new contract
+(auth-aware, protocol-accurate payloads, genuine SSE, reasoning echo,
+injected bearer plus pinned DNS at the service layer only) — a specified
+contract change, with the prior permissive expectations preserved in
+history. Coverage:
 lock-reclamation fix (live/dead owners past the hard age); CRUD +
 restart + record versions; built-in vs operator identity; duplicate/conflict
 ids; SSRF/endpoint matrix; local-dialect policy; secret rejection;
@@ -242,5 +303,8 @@ An operator can add a supported compatible API provider through Nexus, add or
 discover a model, verify required capabilities, save an eligible route and
 select it in a staged Engineering Mode configuration — all without modifying
 production DSH routing (proven by the R4.7 end-to-end test and the
-byte-identical production hashes). No merge to `dev`, no production
+byte-identical production hashes). R4.1 adds that executable-eligibility
+holds only for the genuinely validated binding (hardened transport,
+structural protocol checks, fingerprinted evidence with fail-closed drift
+handling). No merge to `dev`, no production
 cutover, no R5 auto-start. PR #33 stays Draft (no merge performed here).

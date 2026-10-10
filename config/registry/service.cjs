@@ -253,6 +253,38 @@ function createService(options) {
       if (c) c.status = 'disabled'
     }
     const ev = catalog.loadEvidence(dataRoot, fsHooks)
+    // H3: an operator route whose stored availability says 'verified' is
+    // executable-eligible ONLY while its current evidence still binds the
+    // exact verified tuple (endpoint, transport, model/checkpoint, remote
+    // model, route, connection identity/status, capabilities, reasoning
+    // levels, probe contract). Anything else demotes the EFFECTIVE copy to
+    // probe-required — fail closed, without rewriting history. Built-in
+    // shipped state is never touched here.
+    const operatorRouteIds = Object.keys(op.docs.routes.items)
+    if (ev.evidence) {
+      for (const id of operatorRouteIds) {
+        const r = findById(snap.routes, id)
+        if (!r || r.availability !== 'verified') continue
+        const current = catalog.currentEvidence(ev.evidence[id])
+        const provider = findById(snap.providers, r.providerId) || null
+        const model = findById(snap.models, r.logicalModelId) || null
+        const connection = r.connectionId ? findById(snap.connections, r.connectionId) || null : null
+        let cause = null
+        if (!current) cause = 'no verification evidence is stored for this route'
+        else if (current.failed === true) cause = 'the latest verification attempt failed'
+        else if (current.contractVersion !== probes.PROBE_CONTRACT_VERSION) cause = 'evidence uses probe contract v' + String(current.contractVersion) + '; v' + String(probes.PROBE_CONTRACT_VERSION) + ' is required'
+        else if (!provider || !model) cause = 'the verified provider or model is missing'
+        else if (!connection || connection.status === 'revoked' || connection.status === 'disabled') cause = 'the verified connection is not authorized'
+        else {
+          const recomputed = probes.fingerprintOf(probes.fingerprintInputOf({ provider, model, route: r, connection }))
+          if (current.fingerprint !== recomputed) cause = 'a security-relevant field changed since verification (endpoint, transport, model, remote model, connection or reasoning levels)'
+        }
+        if (cause) {
+          r.availability = 'probe-required'
+          notes.push(err('evidence-stale', 'catalog.routes.' + id, 'route ' + id + ' is not executable-eligible: ' + cause + '; re-verify to restore eligibility'))
+        }
+      }
+    }
     return { snapshot: snap, aliases: canonical.aliases, errors: canonical.errors.concat(notes), evidence: ev.evidence || {} }
   }
 
@@ -344,7 +376,7 @@ function createService(options) {
         provenance: opDocs.routes.items[r.id] ? 'operator' : 'built-in',
         runnable: !gate,
         runnableReason: gate ? gate.code + ': ' + gate.message : 'verified route with an authorized connection',
-        evidence: evidence[r.id] || null,
+        evidence: evidence[r.id] ? catalog.currentEvidence(evidence[r.id]) : null,
       }
     })
     const providers = eff.snapshot.providers.map((p) => ({
@@ -557,6 +589,35 @@ function createService(options) {
     return null
   }
 
+  // R4.1: probe option threading. fetchImpl/lookup/timeoutMs/signal are
+  // injectable (tests use fakes; production uses platform fetch + node:dns).
+  // testBearer is accepted ONLY at this service layer (offline calls and
+  // credential-gated tests) — the HTTP host boundary never forwards secret
+  // values (see R4.3). endpointOptions carries the explicit trusted-local
+  // policy without widening remote-provider access.
+  function probeOptions(opts) {
+    const o = opts || {}
+    const out = {}
+    if (o.fetchImpl) out.fetchImpl = o.fetchImpl
+    if (o.lookup) out.lookup = o.lookup
+    if (typeof o.timeoutMs === 'number') out.timeoutMs = o.timeoutMs
+    if (o.signal) out.signal = o.signal
+    if (typeof o.skipStreaming === 'boolean') out.skipStreaming = o.skipStreaming
+    if (o.endpointOptions && typeof o.endpointOptions === 'object') {
+      out.endpointOptions = {
+        trustedPrivateNetwork: o.endpointOptions.trustedPrivateNetwork === true,
+        allowPrivateLocal: o.endpointOptions.allowPrivateLocal === true,
+      }
+    }
+    return out
+  }
+  function connectionForProbes(connection, opts) {
+    const bearer = opts && typeof opts.testBearer === 'string' && opts.testBearer !== '' ? opts.testBearer : null
+    if (!connection) return bearer ? { testBearer: bearer } : null
+    if (!bearer) return connection
+    return Object.assign({}, connection, { testBearer: bearer })
+  }
+
   // R4.4: explicit user-triggered probes. Server-side fetch carries NO
   // secret values (see R4.3 blocker); outcomes are honest reachability/auth
   // evidence. fetchImpl/timeoutMs are injectable for credential-gated tests.
@@ -567,7 +628,7 @@ function createService(options) {
     if (!provider) return { ok: false, errors: [err('unknown-reference', 'provider.id', 'unknown provider: ' + String(providerId))] }
     const connection = providerConnectionOf(eff.snapshot, providerId, opts && opts.connectionId)
     const fetchImpl = (opts && opts.fetchImpl) || defaultFetchImpl
-    return probes.testConnection(provider, connection, fetchImpl, opts)
+    return probes.testConnection(provider, connectionForProbes(connection, opts), fetchImpl, probeOptions(opts))
   }
 
   async function discoverProviderModels(providerId, opts) {
@@ -580,7 +641,7 @@ function createService(options) {
     }
     const connection = providerConnectionOf(eff.snapshot, providerId, opts && opts.connectionId)
     const fetchImpl = (opts && opts.fetchImpl) || defaultFetchImpl
-    return probes.discoverModels(provider, connection, fetchImpl, opts)
+    return probes.discoverModels(provider, connectionForProbes(connection, opts), fetchImpl, probeOptions(opts))
   }
 
   async function verifyProviderRoute(routeId, opts) {
@@ -600,14 +661,32 @@ function createService(options) {
       return { ok: false, errors: [err('unknown-reference', 'route', 'route references a missing provider or model')] }
     }
     const fetchImpl = (opts && opts.fetchImpl) || defaultFetchImpl
-    const result = await probes.verifyRoute(provider, model, route, connection, fetchImpl, opts)
-    // Persist redacted evidence either way; promote to verified ONLY when
-    // every required probe passed. A model-list response alone never lands
-    // here (verifyRoute always runs the synthetic round-trips).
-    const toStore = result.evidence || { kind: 'capability-verification', routeId, providerId: provider.id, transport: provider.transportId, checks: result.checks, verifiedAtUtc: new Date().toISOString(), note: 'verification FAILED; route stays unverified', failed: true }
+    const result = await probes.verifyRoute(provider, model, route, connectionForProbes(connection, opts), fetchImpl, probeOptions(opts))
+    // Persist redacted evidence either way (history-preserving); promote to
+    // verified ONLY when every required probe passed. A model-list response
+    // alone never lands here (verifyRoute always runs the synthetic
+    // round-trips).
+    const failedEvidence = {
+      kind: 'capability-verification',
+      contractVersion: probes.PROBE_CONTRACT_VERSION,
+      routeId, providerId: provider.id, transport: provider.transportId,
+      checks: result.checks, verifiedAtUtc: new Date().toISOString(),
+      fingerprint: probes.fingerprintOf(probes.fingerprintInputOf({ provider, model, route, connection })),
+      note: 'verification FAILED; route stays unverified', failed: true,
+    }
+    const toStore = result.evidence || failedEvidence
     const stored = catalog.saveEvidence(dataRoot, routeId, toStore, { fsHooks, nowUtc })
     if (!stored.ok) return { ok: false, checks: result.checks, errors: stored.errors }
     if (!result.ok) {
+      // H3: a failed re-probe must not leave a previously verified operator
+      // route eligible on its old availability field — demote the stored
+      // record (history keeps the earlier pass for diagnostics).
+      if (route.availability === 'verified') {
+        const demoted = JSON.parse(JSON.stringify(route))
+        demoted.availability = 'probe-required'
+        const rolled = catalog.saveRecord(dataRoot, 'routes', demoted, catalogOptions(eff.snapshot, opts))
+        if (!rolled.ok) return { ok: false, checks: result.checks, errors: result.errors.concat(rolled.errors) }
+      }
       return { ok: false, checks: result.checks, errors: result.errors }
     }
     const updated = JSON.parse(JSON.stringify(route))
@@ -619,8 +698,10 @@ function createService(options) {
 
   function getRouteEvidence(routeId) {
     const loaded = catalog.loadEvidence(dataRoot, fsHooks)
-    if (!loaded.evidence) return { evidence: null, errors: loaded.errors }
-    return { evidence: loaded.evidence[routeId] || null, errors: [] }
+    if (!loaded.evidence) return { evidence: null, attempts: [], errors: loaded.errors }
+    const envelope = loaded.evidence[routeId]
+    if (!envelope) return { evidence: null, attempts: [], errors: [] }
+    return { evidence: catalog.currentEvidence(envelope), attempts: catalog.evidenceAttempts(envelope), errors: [] }
   }
 
   // R4.5: future runtime projection without executing anything.
