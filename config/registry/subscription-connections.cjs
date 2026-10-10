@@ -21,7 +21,7 @@ const CODEX_BUILTIN_PROVENANCE = 'r5-builtin-codex-oauth';
 const CLAUDE_BUILTIN_PROVENANCE = 'r5-builtin-claude-subscription';
 
 const CODEX_AUTH_METHOD = 'codex-oauth (third-party openai-oauth package: PKCE loopback flow, Codex-compatible auth file, local service on 127.0.0.1:10531; Nexus holds no token; NOT official Sign in with ChatGPT delegation)';
-const CLAUDE_AUTH_METHOD = 'claude-cli-session (official Claude Code CLI native login: Pro/Max session under the user profile; Nexus never reads or copies token bytes)';
+const CLAUDE_AUTH_METHOD = 'claude-cli-session (official Claude Code CLI native auth: claude auth login/status/logout; Pro/Max subscription verified via claude auth status JSON; Nexus never reads, exports or copies token bytes)';
 
 const CODEX_PROVIDER_ID = 'sol-local';
 const CODEX_CONNECTION_ID = 'conn-sol-local';
@@ -109,8 +109,8 @@ function claudeBuiltinRecords() {
     metadata: {
       billingSource: 'claude-subscription',
       executionKind: 'agent-sdk',
-      loginCommand: 'claude login',
-      logoutCommand: 'claude logout',
+      loginCommand: 'claude auth login',
+      logoutCommand: 'claude auth logout',
       tokenHandling: 'nexus-never-handles-tokens',
     },
   };
@@ -225,6 +225,9 @@ function defaultHooks() {
         return { exists: true, size: st.size, mtimeMs: st.mtimeMs };
       } catch (e) { return null; }
     },
+    execEnv() {
+      try { return Object.assign({}, process.env); } catch (e) { return null; }
+    },
     execFile(cmd, args, opts) {
       const timeoutMs = opts && typeof opts.timeoutMs === 'number' ? opts.timeoutMs : 15000;
       return new Promise((resolve) => {
@@ -329,12 +332,145 @@ async function checkCodexConnection(input) {
   return { ok: connected, status, detail, errors: errors.concat(assertNoSecrets(detail, 'connection.conn-sol-local')) };
 }
 
-// checkClaudeConnection: CLI presence/version plus session metadata.
-// The credentials FILE IS NEVER READ - only stat metadata is observed.
+// --- R5.1 native authentication (claude auth status) ---
+// Primary machine-readable source for the Claude connection. The CLI owns
+// credential storage on every OS; Nexus parses the bounded JSON status with
+// strict validation and never reads, exports or copies credential bytes.
+// Classification is conservative: only an explicit subscription signal
+// reports connected. Anything ambiguous is unknown (never eligible).
+const CLAUDE_AUTH_STATUS_MAX_BYTES = 65536;
 
+function buildClaudeAuthArgv(action) {
+  if (action === 'login') return ['auth', 'login'];
+  if (action === 'logout') return ['auth', 'logout'];
+  return ['auth', 'status', '--output', 'json'];
+}
+
+function safeStatusLabel(value, maxLen) {
+  if (typeof value !== 'string') return null;
+  const t = value.trim();
+  if (t === '') return null;
+  return t.slice(0, maxLen > 0 ? maxLen : 80);
+}
+
+function parseClaudeAuthStatus(stdout) {
+  const where = 'connection.' + CLAUDE_CONNECTION_ID;
+  const text = String(stdout === undefined || stdout === null ? '' : stdout);
+  if (text.length > CLAUDE_AUTH_STATUS_MAX_BYTES) {
+    return { outcome: 'unknown', authState: 'unparseable', errors: [err('claude-status-oversize', where, 'auth status output exceeded the bounded budget; withheld')] };
+  }
+  let doc = null;
+  try { doc = JSON.parse(text); } catch (e) {
+    return { outcome: 'unknown', authState: 'unparseable', errors: [err('claude-status-unparseable', where, 'auth status did not return strict JSON; refusing to infer authentication')] };
+  }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+    return { outcome: 'unknown', authState: 'unparseable', errors: [err('claude-status-unparseable', where, 'auth status JSON must be an object; refusing to infer authentication')] };
+  }
+  const secretHit = assertNoSecrets(doc, where);
+  if (secretHit.length > 0) {
+    return { outcome: 'unknown', authState: 'withheld', errors: [err('secret-material-rejected', where, 'auth status carried secret-shaped material; withheld, never stored')] };
+  }
+  const statusLabel = safeStatusLabel(doc.status, 40);
+  const statusNorm = statusLabel ? statusLabel.toLowerCase() : '';
+  if (doc.authenticated === false || statusNorm === 'logged_out' || statusNorm === 'logged out' || statusNorm === 'not_logged_in' || statusNorm === 'not logged in' || statusNorm === 'signed_out' || statusNorm === 'signed out') {
+    return { outcome: 'unauthenticated', authState: 'not-logged-in', errors: [err('claude-session-missing', where, 'CLI reports no login; connect with the native login (claude auth login) - Nexus never handles the token')] };
+  }
+  if (statusNorm === 'expired' || statusNorm === 'invalid' || statusNorm === 'revoked' || doc.expired === true) {
+    const revoked = statusNorm === 'revoked';
+    return { outcome: 'expired', authState: revoked ? 'revoked' : 'expired', errors: [err(revoked ? 'claude-session-revoked' : 'claude-session-expired', where, 'CLI reports an expired, revoked or invalid login; reconnect with the native login (claude auth login)')] };
+  }
+  const methodFields = [doc.method, doc.type, doc.provider, doc.auth_type, doc.authType, doc.kind, doc.plan, doc.tier, doc.subscription, doc.account_type, doc.accountType];
+  let methodLabel = null;
+  for (const c of methodFields) { const l = safeStatusLabel(c, 80); if (l) { methodLabel = l; break; } }
+  const hay = ((methodLabel || '') + ' ' + statusNorm).toLowerCase();
+  const apiKeyHit = /api[-_ ]?key|access[-_ ]?token|bearer|personal[-_ ]?token|setup[-_ ]?token/.test(hay);
+  const alternateHit = /bedrock|vertex|proxy|custom|endpoint|third[-_ ]?party|gateway|byok/.test(hay);
+  if (apiKeyHit || alternateHit) {
+    const isAlternate = alternateHit && !apiKeyHit;
+    return { outcome: isAlternate ? 'alternate' : 'api-key', authState: isAlternate ? 'alternate-provider-identity' : 'api-key-identity', method: methodLabel, errors: [err(isAlternate ? 'claude-alternate-identity' : 'claude-apikey-identity', where, 'CLI reports a ' + (isAlternate ? 'non-subscription provider' : 'key-based') + ' identity (' + String(methodLabel || 'unlabeled') + '); subscription billing is not established, so this connection is not eligible')] };
+  }
+  let planLabel = null;
+  for (const pc of [doc.plan, doc.tier, doc.subscription]) { const pl = safeStatusLabel(pc, 40); if (pl) { planLabel = pl; break; } }
+  const planHit = planLabel ? /^(pro|max|plus|team|enterprise|business|subscriber)$/i.test(planLabel) : false;
+  const subscriptionHit = /subscri|oauth/.test(hay) || planHit;
+  if (subscriptionHit) {
+    return { outcome: 'subscription', authState: 'subscription-confirmed', method: methodLabel, errors: [] };
+  }
+  if (doc.authenticated === true) {
+    return { outcome: 'unknown', authState: 'source-unestablished', method: methodLabel, errors: [err('claude-auth-source-unknown', where, 'CLI reports an authenticated session but no recognizable subscription signal; refusing to infer billing source')] };
+  }
+  return { outcome: 'unknown', authState: 'source-unestablished', method: methodLabel, errors: [err('claude-auth-source-unknown', where, 'auth status is ambiguous; refusing to infer authentication or billing source')] };
+}
+
+// --- R5.1 billing source resolution (actual child-process environment) ---
+// Audited Claude Code credential precedence (highest billing impact first):
+// explicit API keys/tokens, custom endpoints, cloud-provider routing
+// (Bedrock/Vertex), then the native CLI subscription session. The adapter
+// inspects the REAL spawn environment via hooks.execEnv() (default: a live
+// process.env snapshot taken in the spawning host) - never an unrelated
+// caller-provided object. When no environment can be established the
+// adapter fails closed. Stored user credentials are never read, cleared
+// or modified by any path here.
+const BILLING_OVERRIDE_SOURCES = [
+  { key: 'ANTHROPIC_API_KEY', kind: 'api-key' },
+  { key: 'ANTHROPIC_AUTH_TOKEN', kind: 'api-key' },
+  { key: 'ANTHROPIC_BASE_URL', kind: 'custom-endpoint' },
+  { key: 'ANTHROPIC_BEDROCK_BASE_URL', kind: 'bedrock' },
+  { key: 'CLAUDE_CODE_USE_BEDROCK', kind: 'bedrock' },
+  { key: 'CLAUDE_CODE_USE_VERTEX', kind: 'vertex' },
+];
+
+function billingOverrideActive(kind, rawValue) {
+  const v = String(rawValue === undefined || rawValue === null ? '' : rawValue).trim();
+  if (v === '') return false;
+  if (kind === 'bedrock' || kind === 'vertex') {
+    const low = v.toLowerCase();
+    if (low === '1' || low === 'true' || low === 'yes') return true;
+    return v.indexOf('http') === 0 || v.indexOf('/') !== -1;
+  }
+  return true;
+}
+
+function resolveBillingEnv(envInput) {
+  if (!envInput || typeof envInput !== 'object' || Array.isArray(envInput)) {
+    return { ok: false, sources: [], errors: [err('billing-unverifiable', 'claude.execution', 'no execution environment is available, so the billing source cannot be established; refusing to run')] };
+  }
+  const sources = [];
+  for (const spec of BILLING_OVERRIDE_SOURCES) {
+    let present = false;
+    try { present = billingOverrideActive(spec.kind, envInput[spec.key]); } catch (e) { present = false; }
+    if (present) sources.push({ key: spec.key, kind: spec.kind });
+  }
+  return { ok: true, sources, errors: [] };
+}
+
+function checkBillingSeparation(envInput, opts) {
+  const resolved = resolveBillingEnv(envInput);
+  if (!resolved.ok) return { ok: false, billingSource: null, envSource: null, errors: resolved.errors };
+  const o = opts || {};
+  const blocking = [];
+  for (const s of resolved.sources) {
+    if ((s.kind === 'api-key' || s.kind === 'custom-endpoint') && o.allowApiBilling !== true) blocking.push(s);
+    else if ((s.kind === 'bedrock' || s.kind === 'vertex') && o.allowAlternateProvider !== true) blocking.push(s);
+  }
+  if (blocking.length > 0) {
+    const names = blocking.map((s) => s.key + ':' + s.kind).join(', ');
+    return { ok: false, billingSource: null, envSource: null, errors: [err('billing-boundary', 'claude.execution', 'non-subscription billing sources are active (' + names + '). Subscription-agent execution would silently inherit them. Unset them or pass an explicit per-call opt-in (allowApiBilling for key/endpoint sources, allowAlternateProvider for Bedrock/Vertex); refusing to proceed')] };
+  }
+  if (resolved.sources.length === 0) return { ok: true, billingSource: 'claude-subscription', envSource: null, errors: [] };
+  const onlyApi = resolved.sources.every((s) => s.kind === 'api-key' || s.kind === 'custom-endpoint');
+  return { ok: true, billingSource: onlyApi ? 'anthropic-api (explicit opt-in)' : 'alternate-provider (explicit opt-in)', envSource: null, errors: [] };
+}
+
+// checkClaudeConnection (R5.1): CLI presence via --version, authentication
+// via native (auth status --output json). The legacy credentials file is
+// observed as SUPPLEMENTARY metadata only: a stale file never reports
+// connected, and a valid login without the assumed file still connects.
+// connected requires an explicit subscription outcome from the CLI.
 async function checkClaudeConnection(input) {
   const o = input || {};
   const hooks = o.hooks || defaultHooks();
+  const where = 'connection.' + CLAUDE_CONNECTION_ID;
   const errors = [];
   let installed = false;
   let version = null;
@@ -343,42 +479,72 @@ async function checkClaudeConnection(input) {
     if (res && !res.cancelled && typeof res.stdout === 'string') {
       const text = (res.stdout + ' ' + (res.stderr || '')).trim();
       if (res.code === 0 && /claude/i.test(text)) { installed = true; version = text.split('\n')[0].slice(0, 120); }
-      else if (res.code !== 0 && text === '') errors.push(err('claude-cli-missing', 'connection.' + CLAUDE_CONNECTION_ID, 'Claude Code CLI is not installed or not on PATH (install the official CLI, then run: claude login)'));
-      else errors.push(err('claude-cli-unusable', 'connection.' + CLAUDE_CONNECTION_ID, 'claude --version did not report a usable CLI'));
+      else if (res.code !== 0 && text === '') errors.push(err('claude-cli-missing', where, 'Claude Code CLI is not installed or not on PATH (install the official CLI, then run: claude auth login)'));
+      else errors.push(err('claude-cli-unusable', where, 'claude --version did not report a usable CLI'));
     } else if (res && res.cancelled) {
-      errors.push(err('probe-cancelled', 'connection.' + CLAUDE_CONNECTION_ID, 'Claude CLI check cancelled by the caller'));
+      errors.push(err('probe-cancelled', where, 'Claude CLI check cancelled by the caller'));
     } else {
-      errors.push(err('claude-cli-missing', 'connection.' + CLAUDE_CONNECTION_ID, 'Claude Code CLI is not installed or not on PATH (install the official CLI, then run: claude login)'));
+      errors.push(err('claude-cli-missing', where, 'Claude Code CLI is not installed or not on PATH (install the official CLI, then run: claude auth login)'));
     }
   } catch (e) {
-    errors.push(err('claude-cli-missing', 'connection.' + CLAUDE_CONNECTION_ID, 'Claude Code CLI probe failed: ' + String((e && e.message) || e)));
+    errors.push(err('claude-cli-missing', where, 'Claude Code CLI probe failed: ' + String((e && e.message) || e)));
   }
-  let sessionPresent = false;
-  let sessionMeta = null;
+  let authOutcome = 'skipped';
+  let authState = installed ? 'unchecked' : 'cli-missing';
+  let authMethod = null;
+  if (installed) {
+    try {
+      const res = await hooks.execFile(o.claudeBin || 'claude', buildClaudeAuthArgv('status'), { timeoutMs: o.timeoutMs || 15000, signal: o.signal });
+      if (res && res.cancelled) {
+        errors.push(err('probe-cancelled', where, 'Claude auth status check cancelled by the caller'));
+        authOutcome = 'unknown';
+        authState = 'cancelled';
+      } else if (!res || res.code !== 0) {
+        authOutcome = 'unknown';
+        authState = 'status-unavailable';
+        errors.push(err('claude-status-unavailable', where, 'native auth status exited with code ' + String(res && res.code) + '; refusing to infer authentication'));
+      } else {
+        const parsed = parseClaudeAuthStatus(res.stdout);
+        authOutcome = parsed.outcome;
+        authState = parsed.authState;
+        authMethod = parsed.method || null;
+        for (const e of parsed.errors) errors.push(e);
+      }
+    } catch (e) {
+      authOutcome = 'unknown';
+      authState = 'status-unavailable';
+      errors.push(err('claude-status-unavailable', where, 'native auth status probe failed: ' + String((e && e.message) || e)));
+    }
+  }
+  let sessionFileObserved = false;
+  let sessionFileSize = null;
   if (o.userHome) {
     try {
-      sessionMeta = hooks.statMeta(claudeCredentialsMetaPath(o.userHome));
-      sessionPresent = !!(sessionMeta && sessionMeta.exists && sessionMeta.size > 0);
-    } catch (e) { sessionPresent = false; }
+      const meta = hooks.statMeta(claudeCredentialsMetaPath(o.userHome));
+      sessionFileObserved = !!(meta && meta.exists && meta.size > 0);
+      sessionFileSize = meta && typeof meta.size === 'number' ? meta.size : null;
+    } catch (e) { sessionFileObserved = false; }
   }
-  if (installed && !sessionPresent) {
-    errors.push(err('claude-session-missing', 'connection.' + CLAUDE_CONNECTION_ID, 'no Claude CLI session found; connect with the native login (claude login) - Nexus never handles the token'));
-  }
-  const connected = installed && sessionPresent;
-  const status = connected ? 'connected' : (!installed ? 'not-connected' : 'unknown');
+  const connected = installed && authOutcome === 'subscription';
+  let status = 'not-connected';
+  if (connected) status = 'connected';
+  else if (authState === 'revoked') status = 'revoked';
+  else if (installed) status = 'unknown';
   const detail = {
     connectionId: CLAUDE_CONNECTION_ID,
     providerId: CLAUDE_PROVIDER_ID,
     status,
     installed,
     version,
-    sessionPresent,
-    sessionFileSize: sessionMeta && typeof sessionMeta.size === 'number' ? sessionMeta.size : null,
-    billingSource: 'claude-subscription (Pro/Max account via native CLI login; never Anthropic API billing)',
-    authMethod: CLAUDE_AUTH_METHOD,
-    apiBillingDetected: false,
+    authState,
+    authMethod,
+    authSource: installed ? 'native-cli-status (claude auth status --output json)' : null,
+    sessionFileObserved,
+    sessionFileSize,
+    billingSource: connected ? 'claude-subscription (Pro/Max account verified via native CLI auth status; never Anthropic API billing)' : null,
+    authMethodNote: CLAUDE_AUTH_METHOD,
   };
-  return { ok: connected, status, detail, errors: errors.concat(assertNoSecrets(detail, 'connection.' + CLAUDE_CONNECTION_ID)) };
+  return { ok: connected, status, detail, errors: errors.concat(assertNoSecrets(detail, where)) };
 }
 
 // discoverClaudeCapabilities: model hints through the native interface where
@@ -435,14 +601,6 @@ async function discoverClaudeCapabilities(input) {
 // the adapter fails closed unless the caller explicitly passes
 // allowApiBilling true (an auditable, per-call opt-in; never the default).
 
-function checkBillingSeparation(env, opts) {
-  const raw = env && typeof env.ANTHROPIC_API_KEY === 'string' ? env.ANTHROPIC_API_KEY.trim() : '';
-  const key = raw !== '' ? raw : null;
-  if (key && !(opts && opts.allowApiBilling === true)) {
-    return { ok: false, errors: [err('billing-boundary', 'claude.execution', 'ANTHROPIC_API_KEY is set in this environment: subscription-agent execution would risk API billing. Unset it or pass an explicit per-call allowApiBilling opt-in; refusing to proceed silently')] };
-  }
-  return { ok: true, billingSource: key ? 'anthropic-api (explicit opt-in)' : 'claude-subscription', errors: [] };
-}
 
 // --- Narrow Claude execution adapter ---
 // Builds the supported CLI contract (print with stream-json output) with
@@ -504,7 +662,11 @@ function parseClaudeStreamEvents(text, taskId) {
 async function runClaudeAgent(task, deps) {
   const d = deps || {};
   const hooks = d.hooks || defaultHooks();
-  const billing = checkBillingSeparation(d.env || {}, { allowApiBilling: d.allowApiBilling === true });
+  let billingEnv = null;
+  let billingEnvSource = 'unavailable';
+  if (hooks.execEnv) { try { billingEnv = hooks.execEnv(); billingEnvSource = 'child-process'; } catch (e) { billingEnv = null; } }
+  if (!billingEnv && d.env) { billingEnv = d.env; billingEnvSource = 'caller-provided'; }
+  const billing = checkBillingSeparation(billingEnv, { allowApiBilling: d.allowApiBilling === true, allowAlternateProvider: d.allowAlternateProvider === true });
   if (!billing.ok) return { ok: false, events: [], errors: billing.errors };
   if (!task || typeof task.prompt !== 'string' || task.prompt.trim() === '') {
     return { ok: false, events: [], errors: [err('claude-prompt-required', 'claude.execution', 'a non-empty prompt is required')] };
@@ -530,7 +692,7 @@ async function runClaudeAgent(task, deps) {
     return { ok: false, events: [], errors: [err('claude-exit-' + String(outcome.code), 'claude.execution', 'CLI exited with code ' + String(outcome.code) + ': ' + String(outcome.stderr || '').slice(0, 500))] };
   }
   const parsed = parseClaudeStreamEvents(outcome.stdout, task.taskId);
-  return { ok: parsed.errors.length === 0, events: parsed.events, sessionId: parsed.sessionId, billingSource: billing.billingSource, errors: parsed.errors };
+  return { ok: parsed.errors.length === 0, events: parsed.events, sessionId: parsed.sessionId, billingSource: billing.billingSource, billingEnvSource, errors: parsed.errors };
 }
 
 // --- Unified Connections presentation (non-secret, UI-facing) ---
@@ -564,8 +726,8 @@ function describeConnection(connectionId) {
   if (connectionId === CLAUDE_CONNECTION_ID) {
     return Object.assign(base, {
       connectKind: 'terminal-login',
-      connectCommand: 'claude login (official Claude Code CLI native login for Pro/Max; Nexus never handles the token)',
-      disconnectCommand: 'claude logout',
+      connectCommand: 'claude auth login (official Claude Code CLI native login for Pro/Max; Nexus never handles the token)',
+      disconnectCommand: 'claude auth logout',
       supportsCheck: true,
       supportsDiscover: true,
       billingSource: 'claude-subscription',
@@ -624,6 +786,10 @@ module.exports = {
   checkClaudeConnection,
   discoverClaudeCapabilities,
   checkBillingSeparation,
+  resolveBillingEnv,
+  parseClaudeAuthStatus,
+  buildClaudeAuthArgv,
+  safeStatusLabel,
   buildClaudeArgv,
   parseClaudeStreamEvents,
   runClaudeAgent,

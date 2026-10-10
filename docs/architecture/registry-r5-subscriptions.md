@@ -167,3 +167,59 @@ inside the repo. Real-CLI paths are UNVERIFIED here per §4.
 | PowerShell syntax (3 files) | PASS |
 | `Set-OpenAiOAuth.ps1` / `aih.ps1` unchanged | PASS (`git status` clean for both) |
 | PR #33 | stays Draft; no merge, no R6, no R7 |
+
+---
+
+# R5.1 — Claude Native Authentication & Billing Safety (targeted fix)
+
+**Baseline:** `28484a2e87c0c157d45e1983a7402400ffc47423`.
+**Suite:** `tests/RegistryR51Auth.Tests.cjs` (16 checks, offline,
+injected CLI shapes; no credentials, no model requests).
+**Production execution:** unchanged (no R6, no activation).
+
+## Defects corrected
+
+1. `connected` was reported from CLI `--version` plus credentials-file
+   metadata. A stale file (expired login) connected; a valid login without
+   the assumed file path did not. Detection now uses the native
+   `claude auth status --output json` result with strict validation and a
+   64 KiB bound; the file is supplementary metadata only.
+2. `claude login/logout` assumptions replaced with the native `claude auth
+   login`, `claude auth status`, `claude auth logout` commands (scripts,
+   descriptors, provider metadata, UI guidance).
+3. Billing checked a caller-provided env object for one variable. The
+   adapter now resolves the real child-process environment
+   (`hooks.execEnv()`, default: live `process.env` snapshot) against an
+   audited precedence list (API keys/token, custom endpoint, Bedrock and
+   Vertex routing) and fails closed when no environment can be established
+   (`billing-unverifiable`). Stored credentials are never read, cleared
+   or modified.
+
+## Connection states (H2)
+
+`subscription-confirmed` → `connected` (and only then). Everything else is
+non-eligible: `not-logged-in`, `expired`, `revoked` (maps to Registry
+`revoked`), `api-key-identity`, `alternate-provider-identity`,
+`source-unestablished`/`unparseable`/`withheld` → `unknown`, missing CLI →
+`not-connected`. API-key and alternate identities additionally fail the
+billing guard, so a key-billed session can never run as a subscription.
+
+## Verified vs unverified (R5.1 delta)
+
+| Behavior | Status |
+|---|---|
+| `auth status` JSON classification (subscription/expired/revoked/api-key/alternate/malformed/oversize/secret-bearing) | Verified via synthetic CLI shapes (16/16) |
+| Stale-file-must-not-connect; no-file-may-connect | Verified (deterministic fakes) |
+| Env precedence (key/token/endpoint/Bedrock/Vertex) + per-source opt-ins | Verified (deterministic) |
+| Real-env provenance (`child-process`) + unverifiable refusal | Verified (default hooks + fakes) |
+| Missing-CLI path against reality | Verified live read-only (`claude` absent: `claude-cli-missing`, no side effects) |
+| Exact vendor JSON vocabulary of `claude auth status` | **UNVERIFIED** (no CLI/subscription here); unknown shapes stay `unknown` by design, never connected |
+| Real `auth login/logout` round-trip; Windows execution paths | **UNVERIFIED** here (Linux executed; Windows branches static-parity only) |
+| Paid model requests | Never issued (only `--version` + `auth status`; adapter spawn covered by fakes) |
+
+## Gates (R5.1 run)
+
+R5.1 16/16, R5 14/14, R0 21/21, R1 45/45, R2 41/41, R3 UI 29/29, R3 hardening 19/19, R4 providers 27/27, R4 transport 19/19, R4 probe security
+16/16, installed runtime 3/3, MuseProvider 33/33, MuseOpenCodeGo 19/19,
+credential guard 14/14, PowerShell syntax 4/4. OpenAI OAuth integration
+unchanged (no diff in `Set-OpenAiOAuth.ps1` / `aih.ps1`).

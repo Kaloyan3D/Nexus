@@ -56,6 +56,9 @@ function fakeHooks(o) {
       if (opts.claudePresent && cmd === 'claude' && args[0] === '--version') {
         return Promise.resolve({ code: 0, stdout: '2.1.0 (Claude Code)', stderr: '' });
       }
+      if (opts.claudePresent && cmd === 'claude' && args[0] === 'auth' && args[1] === 'status') {
+        return Promise.resolve({ code: 0, stdout: JSON.stringify({ authenticated: true, method: 'oauth', plan: 'max' }), stderr: '' });
+      }
       if (opts.claudePresent && cmd === 'claude' && args[0] === '--help') {
         return Promise.resolve({ code: 0, stdout: 'Usage: claude [options]\n  --model <name>  Model choice: "sonnet" or "opus"\n', stderr: '' });
       }
@@ -153,7 +156,8 @@ await check('R5 Claude check: installed plus session metadata, tokens never read
   assert.equal(out.ok, true);
   assert.equal(out.status, 'connected');
   assert.equal(out.detail.version, '2.1.0 (Claude Code)');
-  assert.equal(out.detail.sessionPresent, true);
+  assert.equal(out.detail.authState, 'subscription-confirmed');
+  assert.equal(out.detail.sessionFileObserved, true);
   assert.ok(!('token' in out.detail), 'no token field exists on the hook surface');
   const again = svc.getConnections().connections.find((c) => c.id === 'conn-claude-code-subscription');
   assert.equal(again.status, 'connected');
@@ -271,7 +275,7 @@ await check('R5 host endpoints: list, check, discover, secret rejection', async 
   assert.ok(ids.indexOf('conn-sol-local') !== -1 && ids.indexOf('conn-claude-code-subscription') !== -1 && ids.indexOf('conn-opencode-go') !== -1);
   const claude = list.connections.find((c) => c.id === 'conn-claude-code-subscription');
   assert.equal(claude.billingSource, 'claude-subscription');
-  assert.ok(claude.connectCommand.indexOf('claude login') !== -1);
+  assert.ok(claude.connectCommand.indexOf('claude auth login') !== -1);
   // Secret-shaped caller fields are rejected; userHome/claudeBin never come from the caller.
   const r2 = res();
   await handlers.connectionCheckHandler(req('POST', '/x', { id: 'conn-sol-local', apiKey: 'sk-live-abc' }), r2);
@@ -289,7 +293,7 @@ await check('R5 UI smoke: Connections panel renders check/discover guidance', ()
   for (const label of ['Connections (Registry)', 'Check Connection', 'Discover Models', 'Connect: ', 'Disconnect: ']) {
     assert.ok(source.indexOf(label) !== -1, 'connections panel content present: ' + label);
   }
-  assert.ok(sub.describeConnection('conn-claude-code-subscription').connectCommand.indexOf('claude login') !== -1, 'claude connect guidance present');
+  assert.ok(sub.describeConnection('conn-claude-code-subscription').connectCommand.indexOf('claude auth login') !== -1, 'claude connect guidance present');
   assert.ok(sub.describeConnection('conn-sol-local').capabilitiesNote.indexOf('NOT the official Sign in with ChatGPT delegation') !== -1, 'codex distinction present');
 });
 

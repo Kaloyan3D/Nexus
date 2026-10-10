@@ -12,29 +12,30 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Common.ps1')
 $layout = Get-AihLayout $InstallRoot
 
-# The official Claude Code CLI owns the entire login lifecycle. Nexus never
-# receives, stores, or forwards any Claude OAuth token: the CLI writes its
-# Pro/Max session under the user profile directory itself.
+# The official Claude Code CLI owns the entire login lifecycle through its
+# native auth commands. Nexus never receives, stores, or forwards any
+# Claude credential: the CLI keeps its Pro/Max session itself on every OS.
 $claudeExe = Get-AihClaudeExecutable
 if ([string]::IsNullOrWhiteSpace($claudeExe)) {
     throw 'Claude Code CLI is not installed. Install the official Claude Code CLI first (your package manager or the official installer), verify `claude --version`, then rerun this script.'
 }
 
-$apiKey = [Environment]::GetEnvironmentVariable('ANTHROPIC_API_KEY')
-if (-not [string]::IsNullOrWhiteSpace($apiKey)) {
-    Write-Warning 'ANTHROPIC_API_KEY is set in this environment. The subscription adapter refuses silent API billing: unset it before connecting, or pass an explicit per-call opt-in at execution time.'
+foreach ($override in @('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX')) {
+    if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($override))) {
+        Write-Warning ("Environment override is set: $override. The subscription adapter refuses silent non-subscription billing: unset it before connecting, or pass an explicit per-call opt-in at execution time.")
+    }
 }
 
 Write-Host 'Sign in with your own Claude Pro/Max account in the browser session started below.'
-Write-Host 'The repository never receives or stores your Claude token.'
-Write-Host 'The official Claude Code CLI writes its session under your user profile directory.'
-& $claudeExe login
+Write-Host 'The repository never receives or stores your Claude credentials.'
+Write-Host 'The official Claude Code CLI keeps its session itself (native auth storage on your OS).'
+& $claudeExe auth login
 if ($LASTEXITCODE -ne 0) {
     throw 'Claude subscription login did not complete successfully.'
 }
 
-$session = Get-AihClaudeSessionMeta
-if (($null -eq $session) -or ($session.SizeBytes -le 0)) {
-    throw 'Login completed without creating the expected Claude CLI session file.'
+$status = Get-AihClaudeStatus
+if (-not $status.Connected) {
+    throw ("Login finished but native auth status does not confirm a subscription (state: $($status.AuthState)). Reconnect with 'claude auth login', or run Test-ClaudeConnection.ps1 for diagnostics.")
 }
-Write-Host 'Claude Pro/Max subscription is connected for this user account (session metadata observed; no token handled).'
+Write-Host 'Claude Pro/Max subscription is connected for this user account (verified via native auth status; no credentials handled).'

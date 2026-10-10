@@ -303,11 +303,69 @@ function Get-AihClaudeSessionMeta {
     }
 }
 
+function Invoke-AihClaudeAuthStatus {
+    # Runs the native (auth status --output json) probe with a bounded wait
+    # and bounded output. Returns the parsed object, or $null when the CLI
+    # is missing, the call times out, or the output is not strict JSON.
+    # Callers must select non-secret fields only; the raw object is never
+    # echoed (it may carry account identifiers).
+    param([string]$Executable, [int]$TimeoutMs = 15000)
+    if ([string]::IsNullOrWhiteSpace($Executable)) { return $null }
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $Executable
+        $psi.Arguments = 'auth status --output json'
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        if ($null -eq $proc) { return $null }
+        if (-not $proc.WaitForExit($TimeoutMs)) { try { $proc.Kill() } catch { }; return $null }
+        if ($proc.ExitCode -ne 0) { return $null }
+        $text = $proc.StandardOutput.ReadToEnd()
+        if ([string]::IsNullOrWhiteSpace($text) -or ($text.Length -gt 65536)) { return $null }
+        try { return ($text | ConvertFrom-Json) } catch { return $null }
+    }
+    catch { return $null }
+}
+
+function Get-AihClaudeAuthState {
+    # Classifies native auth status into a non-secret state label. Mirrors
+    # the Registry classifier (config/registry/subscription-connections.cjs):
+    # only an explicit subscription signal confirms a subscription.
+    param($AuthStatus)
+    if ($null -eq $AuthStatus) { return 'unknown' }
+    $statusNorm = ''
+    if ($null -ne $AuthStatus.status) { $statusNorm = ([string]$AuthStatus.status).Trim().ToLowerInvariant() }
+    if (($null -ne $AuthStatus.authenticated -and -not [bool]$AuthStatus.authenticated) -or ($statusNorm -in @('logged_out', 'logged out', 'not_logged_in', 'not logged in', 'signed_out', 'signed out'))) { return 'not-logged-in' }
+    if (($statusNorm -in @('expired', 'invalid', 'revoked')) -or (($null -ne $AuthStatus.expired) -and [bool]$AuthStatus.expired)) { return $statusNorm -eq 'revoked' ? 'revoked' : 'expired' }
+    $methodLabel = $null
+    foreach ($field in @('method', 'type', 'provider', 'auth_type', 'authType', 'kind', 'plan', 'tier', 'subscription', 'account_type', 'accountType')) {
+        try { $candidate = $AuthStatus.$field } catch { $candidate = $null }
+        if ($candidate -is [string] -and -not [string]::IsNullOrWhiteSpace($candidate)) { $methodLabel = $candidate.Trim(); break }
+    }
+    $hay = (([string]$methodLabel) + ' ' + $statusNorm).ToLowerInvariant()
+    if ($hay -match 'api[-_ ]?key|access[-_ ]?token|bearer|personal[-_ ]?token|setup[-_ ]?token') { return 'api-key-identity' }
+    if ($hay -match 'bedrock|vertex|proxy|custom|endpoint|third[-_ ]?party|gateway|byok') { return 'alternate-provider-identity' }
+    $planLabel = $null
+    foreach ($field in @('plan', 'tier', 'subscription')) {
+        try { $candidate = $AuthStatus.$field } catch { $candidate = $null }
+        if ($candidate -is [string] -and -not [string]::IsNullOrWhiteSpace($candidate)) { $planLabel = $candidate.Trim(); break }
+    }
+    $planHit = ($null -ne $planLabel) -and ($planLabel -match '^(?i)(pro|max|plus|team|enterprise|business|subscriber)$')
+    if (($hay -match 'subscri|oauth') -or $planHit) { return 'subscription-confirmed' }
+    return 'source-unestablished'
+}
+
 function Get-AihClaudeStatus {
-    # Non-secret connection summary: Installed, Version, SessionPresent,
-    # SessionSizeBytes, SessionModifiedUtc. Emits NO credential material.
-    # When ANTHROPIC_API_KEY is set, reports ApiBillingRisk = $true so
-    # callers can refuse silent API billing (subscription boundary).
+    # Non-secret connection summary. AuthState comes from the native
+    # (auth status) probe; the legacy session file is supplementary
+    # metadata only (a stale file never connects; a login without the
+    # assumed file still connects). Connected requires an explicit
+    # subscription-confirmed state. Emits NO credential material.
+    # ApiBillingRisk covers key/endpoint overrides; cloud-provider routing
+    # (Bedrock/Vertex) is reported separately so callers fail closed.
     $exe = Get-AihClaudeExecutable
     $installed = -not [string]::IsNullOrWhiteSpace($exe)
     $version = $null
@@ -319,17 +377,32 @@ function Get-AihClaudeStatus {
         catch { $version = $null }
         if ([string]::IsNullOrWhiteSpace($version)) { $installed = $false }
     }
+    $authState = 'unknown'
+    $authMethod = $null
+    if ($installed) {
+        $native = Invoke-AihClaudeAuthStatus -Executable $exe
+        $authState = Get-AihClaudeAuthState -AuthStatus $native
+        if (($null -ne $native) -and ($native.method -is [string]) -and -not [string]::IsNullOrWhiteSpace($native.method)) { $authMethod = ([string]$native.method).Trim() }
+    }
     $session = Get-AihClaudeSessionMeta
-    $sessionPresent = ($null -ne $session) -and ($session.SizeBytes -gt 0)
+    $sessionObserved = ($null -ne $session) -and ($session.SizeBytes -gt 0)
     $apiKey = [Environment]::GetEnvironmentVariable('ANTHROPIC_API_KEY')
+    $authToken = [Environment]::GetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN')
+    $baseUrl = [Environment]::GetEnvironmentVariable('ANTHROPIC_BASE_URL')
+    $bedrock = [Environment]::GetEnvironmentVariable('CLAUDE_CODE_USE_BEDROCK')
+    $vertex = [Environment]::GetEnvironmentVariable('CLAUDE_CODE_USE_VERTEX')
+    $alternate = -not [string]::IsNullOrWhiteSpace($bedrock) -or -not [string]::IsNullOrWhiteSpace($vertex)
     return [pscustomobject]@{
         Installed           = $installed
         Executable          = $exe
         Version             = $version
-        SessionPresent      = $sessionPresent
+        AuthState           = $authState
+        AuthMethod          = $authMethod
+        SessionObserved     = $sessionObserved
         SessionSizeBytes    = $(if ($null -ne $session) { $session.SizeBytes } else { $null })
         SessionModifiedUtc  = $(if ($null -ne $session) { $session.ModifiedUtc } else { $null })
-        ApiBillingRisk      = -not [string]::IsNullOrWhiteSpace($apiKey)
-        Connected           = $installed -and $sessionPresent
+        ApiBillingRisk      = (-not [string]::IsNullOrWhiteSpace($apiKey)) -or (-not [string]::IsNullOrWhiteSpace($authToken)) -or (-not [string]::IsNullOrWhiteSpace($baseUrl))
+        AlternateProvider   = $alternate
+        Connected           = $installed -and ($authState -eq 'subscription-confirmed')
     }
 }
