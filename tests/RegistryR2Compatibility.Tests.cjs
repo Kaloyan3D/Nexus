@@ -117,6 +117,29 @@ function bindingSubset(binding) {
   return { modelId: binding.logicalModelId, model: binding.remoteModelId, provider: binding.providerId, reasoning: binding.reasoning }
 }
 const DUAL_ROLES = ['primaryEngineer', 'deepEngineer', 'reviewer', 'solver', 'fallback', 'visualReviewer']
+function snapshotSourceFiles(root) {
+  const snap = {}
+  for (const rel of ['config/nexus-profiles.json', 'config/engineering-profiles.json', 'config/muse-profiles.json', 'config/model-registry.json', 'config/routing-policy.json', 'data/settings.yaml', 'data/custom-engineering-profile.json']) {
+    const p = path.join(root, rel)
+    try {
+      snap[rel] = { hash: shaOfFile(p), mode: fs.statSync(p).mode & 511 }
+    } catch {
+      snap[rel] = null
+    }
+  }
+  return snap
+}
+function assertSourceUnchanged(root, snap) {
+  for (const rel of Object.keys(snap)) {
+    const p = path.join(root, rel)
+    if (snap[rel] === null) {
+      assert.ok(!fs.existsSync(p), rel + ' must stay absent')
+    } else {
+      assert.equal(shaOfFile(p), snap[rel].hash, rel + ' content must be untouched')
+      assert.equal(fs.statSync(p).mode & 511, snap[rel].mode, rel + ' permissions must be untouched')
+    }
+  }
+}
 const CUSTOM_ROLES = {
   primaryEngineer: { model: 'glm-5.3', reasoning: 'high' },
   deepEngineer: { model: 'deepseek-v4-pro', reasoning: 'max' },
@@ -846,6 +869,64 @@ try {
       assert.ok(!('provenance' in r), 'absent provenance stays absent, never invented')
     }
     assert.deepEqual(schemas.validateRegistrySnapshot(n2.snapshot, 'registry'), [])
+  }),
+  check('R2.1.1: nested directory symlinks cannot redirect restore writes', () => {
+    const src = makeFixture({ custom: CUSTOM_ROLES })
+    const before = snapshotSourceFiles(src)
+    const made = migration.createLegacyBackup(src)
+    assert.deepEqual(made.errors, [])
+    const target = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-registry-r211-nested-'))
+    fixtureRoots.push(target)
+    fs.symlinkSync(path.join(src, 'config'), path.join(target, 'config'))
+    const attempt = migration.restoreLegacySource(made.backup, target)
+    assert.equal(attempt.restored, false)
+    assert.ok(attempt.errors.some((e) => e.indexOf('migration-symlink-escape:') !== -1), JSON.stringify(attempt.errors))
+    assert.ok(!fs.existsSync(path.join(target, 'data')), 'nothing may be written through the escape')
+    assertSourceUnchanged(src, before)
+  }),
+
+  check('R2.1.1: destination-file symlinks are refused without touching link targets', () => {
+    const src = makeFixture({ custom: CUSTOM_ROLES })
+    const before = snapshotSourceFiles(src)
+    const made = migration.createLegacyBackup(src)
+    assert.deepEqual(made.errors, [])
+    const target = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-registry-r211-filelink-'))
+    fixtureRoots.push(target)
+    fs.mkdirSync(path.join(target, 'data'), { recursive: true })
+    const linkSrc = path.join(src, 'data', 'settings.yaml')
+    const linkDst = path.join(target, 'data', 'settings.yaml')
+    fs.symlinkSync(linkSrc, linkDst)
+    const attempt = migration.restoreLegacySource(made.backup, target)
+    assert.equal(attempt.restored, false)
+    assert.ok(attempt.errors.some((e) => e.indexOf('migration-symlink-escape:data/settings.yaml') !== -1), JSON.stringify(attempt.errors))
+    assert.ok(fs.lstatSync(linkDst).isSymbolicLink(), 'the link itself must survive, never be replaced')
+    assertSourceUnchanged(src, before)
+  }),
+
+  check('R2.1.1: preview apply refuses symlinked destinations and honors authorized roots', () => {
+    const src = makeFixture({ settingsProfile: 'deepseek-codex' })
+    const before = snapshotSourceFiles(src)
+    const planned = migration.planMigration(src)
+    assert.ok(planned.preview)
+    const target = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-registry-r211-previewlink-'))
+    fixtureRoots.push(target)
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-registry-r211-outside-'))
+    fixtureRoots.push(outside)
+    fs.symlinkSync(path.join(src, 'data', 'settings.yaml'), path.join(target, 'migration-preview.json'))
+    const attempt = migration.applyPlanToIsolatedRoot(planned.preview, src, target)
+    assert.equal(attempt.applied, false)
+    assert.ok(attempt.errors.some((e) => e.indexOf('migration-symlink-escape:migration-preview.json') !== -1), JSON.stringify(attempt.errors))
+    assertSourceUnchanged(src, before)
+    const linkAlias = path.join(target, 'alias')
+    fs.symlinkSync(outside, linkAlias)
+    const viaAlias = migration.applyPlanToIsolatedRoot(planned.preview, src, path.join(linkAlias, 'review'))
+    assert.equal(viaAlias.applied, true, 'non-protected aliases stay usable: ' + JSON.stringify(viaAlias.errors))
+    const denied = migration.restoreLegacySource(migration.createLegacyBackup(src).backup, path.join(outside, 'x'), { authorizedRoots: [target] })
+    assert.equal(denied.restored, false)
+    assert.ok(denied.errors.some((e) => e.indexOf('migration-unauthorized-destination') !== -1))
+    const allowed = migration.restoreLegacySource(migration.createLegacyBackup(src).backup, path.join(target, 'ok'), { authorizedRoots: [target] })
+    assert.deepEqual(allowed.errors, [])
+    assert.equal(allowed.restored, true)
   }),
   check('R2: no legacy production file was modified', () => {
     const after = PROD_INPUTS.map((rel) => shaOfFile(path.join(repoRoot, rel)))

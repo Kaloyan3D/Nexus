@@ -354,11 +354,179 @@ function safeDestination(resolvedTarget, rel) {
   return dest
 }
 
+function lstatOrNull(p) {
+  try {
+    return fs.lstatSync(p)
+  } catch {
+    return null
+  }
+}
+
+/** Refuse any symlink at or below the isolated root along one destination.
+ *
+ * Uses lstat (never follows). Every component strictly below the vetted root
+ * down to and including the destination itself must not be a symlink: a
+ * symlinked config/ or data/ directory or a symlinked destination file would
+ * otherwise redirect writes outside the authorized destination, including
+ * back into the original installation. Internal (non-escaping) symlinks are
+ * refused as well: writes never follow links. Returns an error string or null.
+ */
+function checkNoSymlinkBelowRoot(resolvedTarget, dest, rel) {
+  const r = path.relative(resolvedTarget, dest)
+  const parts = r.split(path.sep)
+  let cur = resolvedTarget
+  for (const part of parts) {
+    if (part === '' || part === '.') continue
+    cur = path.join(cur, part)
+    const st = lstatOrNull(cur)
+    if (st && st.isSymbolicLink()) return 'migration-symlink-escape:' + rel
+  }
+  return null
+}
+
+/** Create a directory chain without following symlinks.
+ *
+ * Each missing level is created individually; every existing component must
+ * be a real directory, never a symlink or a file. Racers that plant a symlink
+ * between the check and the creation hit either the EEXIST re-validation or
+ * the post-write verification in guardedWriteFile. Returns error or null.
+ */
+function mkdirNoFollow(resolvedTarget, dir, rel, ioError) {
+  const rootSt = lstatOrNull(resolvedTarget)
+  if (!rootSt) {
+    try {
+      fs.mkdirSync(resolvedTarget, { recursive: true, mode: RESTRICTED_DIR_MODE })
+    } catch (err) {
+      return ioError + String((err && err.message) || err)
+    }
+  } else if (!rootSt.isDirectory() && !rootSt.isSymbolicLink()) {
+    return 'migration-unexpected-file:' + rel
+  }
+  const r = path.relative(resolvedTarget, dir)
+  if (r === '') return null
+  const parts = r.split(path.sep)
+  if (parts.indexOf('..') !== -1) return 'migration-unexpected-file:' + rel
+  let cur = resolvedTarget
+  for (const part of parts) {
+    if (part === '' || part === '.') continue
+    cur = path.join(cur, part)
+    let st = lstatOrNull(cur)
+    if (!st) {
+      try {
+        fs.mkdirSync(cur, { mode: RESTRICTED_DIR_MODE })
+      } catch (err) {
+        if (!err || err.code !== 'EEXIST') return ioError + String((err && err.message) || err)
+      }
+      st = lstatOrNull(cur)
+      if (!st) return ioError + 'race-lost:' + rel
+    }
+    if (st.isSymbolicLink()) return 'migration-symlink-escape:' + rel
+    if (!st.isDirectory()) return 'migration-unexpected-file:' + rel
+  }
+  return null
+}
+
+/** Post-write verification: the written path is still the intended one.
+ *
+ * Re-checks via lstat that the destination is a real file (not a planted
+ * symlink), that its fully resolved location equals the resolved target plus
+ * the allowlisted relative path, and that it did not land inside a protected
+ * root. Returns an error string or null.
+ */
+function verifyWrittenFile(resolvedTarget, norm, dest, rel, protectedRoots) {
+  const st = lstatOrNull(dest)
+  if (!st || st.isSymbolicLink() || !st.isFile()) return 'migration-symlink-escape:' + rel
+  let actual = null
+  let expectedBase = null
+  try {
+    actual = fs.realpathSync(dest)
+    expectedBase = fs.realpathSync(resolvedTarget)
+  } catch {
+    return 'migration-restore-verify-failed:' + rel
+  }
+  if (actual !== path.join(expectedBase, norm)) return 'migration-symlink-escape:' + rel
+  for (const p of protectedRoots) {
+    if (isWithinDir(actual, p)) return 'migration-symlink-alias-refused:' + p
+  }
+  return null
+}
+
+/** Write one allowlisted file without ever following symlinks.
+ *
+ * Creation uses exclusive (O_EXCL) semantics so a symlinked destination can
+ * never be traversed: EEXIST re-validates and reports a symlink escape or an
+ * overwrite refusal. Overwrites only touch verified regular files and only
+ * with options.overwrite; identical content is a no-op success. Every write
+ * ends with verifyWrittenFile; on failure the path is unlinked best-effort
+ * (removing a file or a link, never a link target) and an error is returned.
+ */
+function guardedWriteFile(resolvedTarget, rel, content, opts) {
+  const dest = safeDestination(resolvedTarget, rel)
+  if (!dest) return { ok: false, error: 'migration-unexpected-file:' + String(rel) }
+  const norm = path.normalize(rel)
+  const protectedRoots = Array.isArray(opts.protectedRoots) ? opts.protectedRoots : []
+  const pre = checkNoSymlinkBelowRoot(resolvedTarget, dest, rel)
+  if (pre) return { ok: false, error: pre }
+  const mk = mkdirNoFollow(resolvedTarget, path.dirname(dest), rel, opts.ioError)
+  if (mk) return { ok: false, error: mk }
+  const repre = checkNoSymlinkBelowRoot(resolvedTarget, dest, rel)
+  if (repre) return { ok: false, error: repre }
+  const st = lstatOrNull(dest)
+  if (st && st.isSymbolicLink()) return { ok: false, error: 'migration-symlink-escape:' + rel }
+  if (st && st.isFile()) {
+    let current = null
+    try {
+      current = fs.readFileSync(dest, 'utf8')
+    } catch (err) {
+      return { ok: false, error: opts.ioError + String((err && err.message) || err) }
+    }
+    if (current === content) {
+      const same = verifyWrittenFile(resolvedTarget, norm, dest, rel, protectedRoots)
+      if (same) return { ok: false, error: same }
+      return { ok: true, wrote: false }
+    }
+    if (!opts.overwrite) return { ok: false, error: 'migration-refuses-overwrite:' + rel }
+    try {
+      const args = { encoding: 'utf8' }
+      if (opts.mode !== undefined) args.mode = opts.mode
+      fs.writeFileSync(dest, content, args)
+    } catch (err) {
+      return { ok: false, error: opts.ioError + String((err && err.message) || err) }
+    }
+  } else if (st) {
+    return { ok: false, error: 'migration-unexpected-file:' + rel }
+  } else {
+    try {
+      const args = { encoding: 'utf8', flag: 'wx' }
+      if (opts.mode !== undefined) args.mode = opts.mode
+      fs.writeFileSync(dest, content, args)
+    } catch (err) {
+      if (err && err.code === 'EEXIST') {
+        const raced = lstatOrNull(dest)
+        if (raced && raced.isSymbolicLink()) return { ok: false, error: 'migration-symlink-escape:' + rel }
+        return { ok: false, error: 'migration-refuses-overwrite:' + rel }
+      }
+      return { ok: false, error: opts.ioError + String((err && err.message) || err) }
+    }
+  }
+  const post = verifyWrittenFile(resolvedTarget, norm, dest, rel, protectedRoots)
+  if (post) {
+    try {
+      fs.unlinkSync(dest)
+    } catch {
+      // best-effort cleanup of the unverified path (file or link only)
+    }
+    return { ok: false, error: post }
+  }
+  return { ok: true, wrote: true }
+}
+
 /** Restore an explicit backup byte-exact into an isolated directory.
  *
  * Guards: the backup source root and any caller-protected roots are refused
  * (including symlink aliases resolving into them); file keys outside the
- * allowlist, absolute paths, and parent traversal are refused; existing files
+ * allowlist, absolute paths, and parent traversal are refused; symlinks at or
+ * below the destination are refused without ever being followed; existing files
  * are never overwritten unless options.overwrite is true; every restored file
  * is hash-verified and written with restrictive permissions. Absent files
  * stay absent. Returns { restored, errors }.
@@ -375,26 +543,23 @@ function restoreLegacySource(backup, targetRoot, options) {
   const overwrite = opts.overwrite === true
   try {
     for (const rel of Object.keys(backup.files)) {
-      const dest = safeDestination(gate.resolved, rel)
-      if (!dest) return { restored: false, errors: ['migration-unexpected-file:' + String(rel)] }
       const entry = backup.files[rel]
       if (!entry || entry.present !== true) continue
       if (typeof entry.content !== 'string' || typeof entry.sha256 !== 'string') {
         return { restored: false, errors: ['migration-backup-entry-invalid:' + rel] }
       }
-      let existing = null
-      try {
-        existing = fs.readFileSync(dest, 'utf8')
-      } catch {
-        existing = null
-      }
-      if (existing !== null && existing !== entry.content && !overwrite) {
-        return { restored: false, errors: ['migration-refuses-overwrite:' + rel] }
-      }
-      fs.mkdirSync(path.dirname(dest), { recursive: true, mode: RESTRICTED_DIR_MODE })
-      fs.writeFileSync(dest, entry.content, { encoding: 'utf8', mode: RESTRICTED_FILE_MODE })
+      const w = guardedWriteFile(gate.resolved, rel, entry.content, { overwrite, mode: RESTRICTED_FILE_MODE, protectedRoots, ioError: 'migration-restore-failed:' })
+      if (!w.ok) return { restored: false, errors: [w.error] }
+      const dest = safeDestination(gate.resolved, rel)
       const written = fs.readFileSync(dest, 'utf8')
-      if (sha256Text(written) !== entry.sha256) return { restored: false, errors: ['migration-restore-verify-failed:' + rel] }
+      if (sha256Text(written) !== entry.sha256) {
+        try {
+          fs.unlinkSync(dest)
+        } catch {
+          // best-effort cleanup of the unverified path
+        }
+        return { restored: false, errors: ['migration-restore-verify-failed:' + rel] }
+      }
     }
   } catch (err) {
     return { restored: false, errors: ['migration-restore-failed:' + String((err && err.message) || err)] }
@@ -408,29 +573,15 @@ function restoreLegacySource(backup, targetRoot, options) {
  * protected roots, symlink aliases, traversal, unexpected files, and unsafe
  * overwrites are refused. Returns { applied, errors }.
  */
-function applyPlanToIsolatedRoot(preview, sourceRoot, targetRoot, options) {
+function applyPlanToIsolatedRoot(preview, sourceRootArg, targetRoot, options) {
   const opts = options || {}
   if (!preview || typeof preview !== 'object') return { applied: false, errors: ['migration-invalid-preview'] }
+  const sourceRoot = typeof sourceRootArg === 'string' ? sourceRootArg : ''
   const gate = assertIsolatedTarget(targetRoot, { protectedRoots: [sourceRoot], authorizedRoots: opts.authorizedRoots, allowNonTmp: opts.allowNonTmp })
   if (gate.errors.length > 0) return { applied: false, errors: gate.errors }
-  const dest = safeDestination(gate.resolved, PREVIEW_FILE_NAME)
-  if (!dest) return { applied: false, errors: ['migration-unexpected-file:' + PREVIEW_FILE_NAME] }
-  try {
-    let existing = null
-    try {
-      existing = fs.readFileSync(dest, 'utf8')
-    } catch {
-      existing = null
-    }
-    const body = JSON.stringify(preview, null, 2) + String.fromCharCode(10)
-    if (existing !== null && existing !== body && opts.overwrite !== true) {
-      return { applied: false, errors: ['migration-refuses-overwrite:' + PREVIEW_FILE_NAME] }
-    }
-    fs.mkdirSync(path.dirname(dest), { recursive: true })
-    fs.writeFileSync(dest, body, 'utf8')
-  } catch (err) {
-    return { applied: false, errors: ['migration-apply-failed:' + String((err && err.message) || err)] }
-  }
+  const body = JSON.stringify(preview, null, 2) + String.fromCharCode(10)
+  const w = guardedWriteFile(gate.resolved, PREVIEW_FILE_NAME, body, { overwrite: opts.overwrite === true, mode: undefined, protectedRoots: sourceRoot === '' ? [] : [sourceRoot], ioError: 'migration-apply-failed:' })
+  if (!w.ok) return { applied: false, errors: [w.error] }
   return { applied: true, errors: [] }
 }
 /** Re-run planning and verify byte-identical determinism (idempotency). */

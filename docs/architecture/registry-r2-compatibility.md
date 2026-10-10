@@ -137,7 +137,11 @@ no credential material. Registry Core files import only `node:fs`/`node:path`/
 - `restoreLegacySource` rebuilds a byte-exact copy in a guarded isolated
   directory: protected roots (including the backup source root), symlink
   aliases, path traversal, unexpected file keys, and unsafe overwrites are
-  refused; absent files stay absent. Re-planning the restored copy yields the
+  refused; absent files stay absent. Every destination is validated below the
+  vetted root as well: symlinked config/ or data/ directories and symlinked
+  destination files are refused without ever being followed (exclusive-create
+  writes plus lstat/realpath post-verification mitigate check-then-write
+  races); refused operations leave source files and permissions untouched. Re-planning the restored copy yields the
   identical `planHash` (semantic proof); per-file sha256 equality is the
   byte-exactness proof (`planHash` alone is not claimed as one).
 - `applyPlanToIsolatedRoot` materializes previews for review and **refuses** the
@@ -177,7 +181,7 @@ this stricter direction is intentional hardening, not substitution.
 
 ## 8. Deterministic parity verification (this commit)
 
-- R2/R2.1 suite: 38/38 pass (`node tests/RegistryR2Compatibility.Tests.cjs`).
+- R2/R2.1/R2.1.1 suite: 41/41 pass (`node tests/RegistryR2Compatibility.Tests.cjs`).
 - R1 core: 45/45 pass. R0 frozen baseline: 21/21 pass (fixtures unmodified).
 - Composed routing matrix: 8/8 pass. Routing authority: pass.
 - Dual parity: 2 profiles x 6 roles exact match; custom 6-role matrix exact match.
