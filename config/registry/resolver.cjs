@@ -147,8 +147,16 @@ function checkRoleCapability(slot, role, model, route) {
 }
 
 function checkEngineScope(mode, model, role) {
-  if (model && Array.isArray(model.engines) && !model.engines.includes(mode.orchestrationEngineId)) {
-    return [err('engine-scope-mismatch', 'roles.' + role, 'model ' + model.id + ' is not scoped to orchestration engine ' + mode.orchestrationEngineId + '; Dual/Muse isolation fails closed')]
+  const engineId = mode && mode.orchestrationEngineId
+  const engines = model && model.engines
+  if (!model || typeof engineId !== 'string' || engineId === '') {
+    return [err('engine-scope-mismatch', 'roles.' + role, 'engine scope cannot be established; Dual/Muse isolation fails closed')]
+  }
+  if (!Array.isArray(engines)) {
+    return [err('engine-scope-mismatch', 'roles.' + role, 'model ' + model.id + ' declares no explicit engine scope and never implicitly qualifies; Dual/Muse isolation fails closed')]
+  }
+  if (!engines.includes(engineId)) {
+    return [err('engine-scope-mismatch', 'roles.' + role, 'model ' + model.id + ' is not scoped to orchestration engine ' + engineId + '; Dual/Muse isolation fails closed')]
   }
   return []
 }
@@ -209,7 +217,9 @@ function resolveRoleBinding(registry, mode, role, assignment, runtime) {
     errors.push(err('provider-disabled', 'roles.' + role + '.providerId', 'provider is not enabled: ' + provider.id))
   }
   let connectionId = null
-  if (route.connectionId !== undefined && route.connectionId !== null) {
+  if (route.connectionId === undefined || route.connectionId === null) {
+    errors.push(err('connection-auth-required', 'roles.' + role + '.connectionId', 'route ' + route.id + ' declares no connection; authenticated routes require an explicit connection and never compile connectionless'))
+  } else {
     const connection = connections.get(route.connectionId)
     if (!connection) {
       errors.push(err('connection-auth-required', 'roles.' + role + '.connectionId', 'unknown connection: ' + route.connectionId))
@@ -400,7 +410,8 @@ function listEligibleRoutes(modeId, slotId, registry, runtime) {
     if (!model || model.enabled === false) continue
     const provider = providers.get(route.providerId)
     if (!provider || provider.status !== 'enabled') continue
-    if (route.connectionId !== undefined && route.connectionId !== null) {
+    if (route.connectionId === undefined || route.connectionId === null) continue
+    {
       const connection = connections.get(route.connectionId)
       if (!connection || connectionEligibility(connection)) continue
       if (connection.providerId !== route.providerId) continue

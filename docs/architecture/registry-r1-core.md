@@ -192,3 +192,24 @@ Root causes and fixes:
   `requiredCapabilities` entries, `dataUseTier`, and `slotRequirements`;
   new `validateRuntimeCapabilities()` fails closed on malformed descriptors
   (compile errors; listing returns empty).
+
+## R1.1.1 — Final fail-closed corrections (on `feature/model-registry-r1`)
+
+Three edge cases closed on top of R1.1; no production behavior change.
+
+1. **Connectionless routes never execute.** A route with absent or null
+   `connectionId` previously skipped the connection check entirely and could
+   compile. Now both `compileModeConfig()` (via `resolveRoleBinding()`) and
+   `listEligibleRoutes()` require an explicit, eligible connection and fail
+   closed with `connection-auth-required`. All legacy normalized routes carry
+   connections, so frozen parity is unaffected.
+2. **Explicit engine scoping is mandatory on canonical models.** `engines`
+   is now a required `LogicalModel` field, and `checkEngineScope()` fails
+   closed when the scope array is missing — a scopeless model qualifies for
+   no engine, Dual or Muse. The absent → `dual-v1` default lives ONLY in the
+   legacy importer (backward compatibility for pre-scope entries), never in
+   the universal Core.
+3. **Explicit `null` legacy `agentEngines` is malformed.** Only a genuinely
+  absent (`undefined`) declaration inherits Dual scope; `null` normalizes to
+  an empty scope plus a `legacy-engine-scope-malformed` import error instead
+  of silently assuming Dual compatibility.

@@ -49,7 +49,8 @@ const KNOWN_LEGACY_ENGINES = { dual: 'dual-v1', muse: 'muse-v0' }
  */
 function engineScopeOfLegacyEntry(entry) {
   const declared = entry.agentEngines
-  if (declared === undefined || declared === null) return { scope: ['dual-v1'], error: null }
+  if (declared === undefined) return { scope: ['dual-v1'], error: null }
+  if (declared === null) return { scope: [], error: 'legacy-engine-scope-malformed:' + String(entry.id) }
   if (!Array.isArray(declared)) {
     return { scope: [], error: 'legacy-engine-scope-malformed:' + String(entry.id) }
   }

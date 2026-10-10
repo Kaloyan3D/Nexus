@@ -258,9 +258,10 @@ function validateLogicalModel(doc, path) {
     errors.push(err('model-invalid', where + '.dataUseTier', 'dataUseTier must be one of ' + DATA_USE_TIERS.join(', ')))
   }
   if (typeof doc.enabled !== 'boolean') errors.push(err('model-invalid', where + '.enabled', 'enabled must be boolean'))
-  if (doc.engines !== undefined) {
-    if (!Array.isArray(doc.engines)) errors.push(err('model-invalid', where + '.engines', 'engines must be an array when present; an empty array scopes the model to no engine (fail-closed)'))
-    else for (let i = 0; i < doc.engines.length; i += 1) {
+  if (!Array.isArray(doc.engines)) {
+    errors.push(err('model-invalid', where + '.engines', 'engines must be an explicit array of orchestration engine ids; absent scopes never implicitly qualify (an empty array scopes the model to no engine)'))
+  } else {
+    for (let i = 0; i < doc.engines.length; i += 1) {
       if (typeof doc.engines[i] !== 'string' || doc.engines[i] === '') errors.push(err('model-invalid', where + '.engines[' + i + ']', 'engine id must be a non-empty string'))
     }
   }

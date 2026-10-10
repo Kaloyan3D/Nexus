@@ -674,4 +674,66 @@ check('A3: connection/provider mismatch and invalid runtime descriptors fail clo
   assert.deepEqual(resolver.listEligibleRoutes('engineering-v1', 'engineer', snapshot, { adapterId: '' }), [])
 })
 
+
+// ── R1.1.1: connectionless routes never execute ────────────────────────
+
+check('R1.1.1: routes with absent or null connectionId fail closed everywhere', () => {
+  const snapshot = buildTestSnapshot()
+  const configs = importAll(snapshot)
+  for (const variant of ['absent', 'null']) {
+    const mutated = JSON.parse(JSON.stringify(snapshot))
+    const route = mutated.routes.find((r) => r.id === configs['deepseek-codex'].slots.engineer.routeId)
+    if (variant === 'absent') delete route.connectionId
+    else route.connectionId = null
+    const result = resolver.compileModeConfig(configs['deepseek-codex'], mutated, {})
+    assert.equal(result.ok, false, variant + ' connectionId must not compile')
+    assert.ok(codes(result).includes('connection-auth-required'), variant + ' must report connection-auth-required, got ' + JSON.stringify(codes(result)))
+    assert.ok(
+      !resolver.listEligibleRoutes('engineering-v1', 'engineer', mutated, null).some((r) => r.id === route.id),
+      variant + ' connectionId must not appear eligible',
+    )
+  }
+})
+
+// ── R1.1.1: explicit engine scoping on canonical models ─────────────────
+
+check('R1.1.1: canonical models without engines fail schema and both engines', () => {
+  const snapshot = JSON.parse(JSON.stringify(buildTestSnapshot()))
+  const ghost = {
+    schemaVersion: 1, id: 'scope-ghost', vendor: 'Ghost', displayName: 'Ghost', checkpoint: 'ghost-1',
+    capabilities: { textInput: true, imageInput: false, toolCalling: true, streaming: true, reasoning: true },
+    dataUseTier: 'contributor', enabled: true,
+  }
+  assert.ok(schemas.validateLogicalModel(ghost, 'ghost').some((e) => e.code === 'model-invalid'))
+  snapshot.models.push({ ...ghost, engines: undefined })
+  delete snapshot.models[snapshot.models.length - 1].engines
+  snapshot.providers.push({ schemaVersion: 1, id: 'ghost-p', name: 'Ghost', transportId: 'unknown', status: 'enabled' })
+  snapshot.connections.push({ schemaVersion: 1, id: 'conn-ghost-p', providerId: 'ghost-p', connectionKind: 'api-key', authMethod: 'api-key', credentialRef: 'credential://connections/conn-ghost-p', status: 'connected' })
+  snapshot.routes.push({
+    schemaVersion: 1, id: 'ghost-p/scope-ghost', providerId: 'ghost-p', logicalModelId: 'scope-ghost',
+    remoteModelId: 'ghost-1', accessType: 'api-key', connectionId: 'conn-ghost-p', executionKind: 'raw-model',
+    reasoningLevels: ['high', 'xhigh'], compatibility: { transport: 'unknown' }, availability: 'verified', enabled: true,
+  })
+  const v1mode = snapshot.modes.find((m) => m.id === 'engineering-v1')
+  const v2mode = snapshot.modes.find((m) => m.id === 'engineering-v2')
+  const v1denied = resolver.resolveRoleBinding(snapshot, v1mode, 'primaryEngineer', { logicalModelId: 'scope-ghost', routeId: 'ghost-p/scope-ghost', reasoning: 'high' }, null)
+  assert.ok(v1denied.errors.some((e) => e.code === 'engine-scope-mismatch'), 'scopeless model must not qualify for Dual')
+  const v2denied = resolver.resolveRoleBinding(snapshot, v2mode, 'muse_main', { logicalModelId: 'scope-ghost', routeId: 'ghost-p/scope-ghost', reasoning: 'xhigh' }, null)
+  assert.ok(v2denied.errors.some((e) => e.code === 'engine-scope-mismatch'), 'scopeless model must never implicitly qualify for Muse')
+  assert.ok(!resolver.listEligibleRoutes('engineering-v1', 'engineer', snapshot, null).some((r) => r.id === 'ghost-p/scope-ghost'))
+  assert.ok(!resolver.listEligibleRoutes('engineering-v2', 'main', snapshot, null).some((r) => r.id === 'ghost-p/scope-ghost'))
+})
+
+// ── R1.1.1: explicit null agentEngines is malformed ─────────────────────
+
+check('R1.1.1: null legacy agentEngines is rejected, never assumed Dual', () => {
+  const { model, errors } = legacyImport.normalizeLogicalModel({ id: 'm', model: 'm', agentEngines: null })
+  assert.deepEqual(model.engines, [], 'null scope must qualify for no engine')
+  assert.equal(errors.length, 1)
+  assert.ok(errors[0].startsWith('legacy-engine-scope-malformed'), 'actionable error, got ' + errors[0])
+  const { model: absent, errors: noErrors } = legacyImport.normalizeLogicalModel({ id: 'm', model: 'm' })
+  assert.deepEqual(absent.engines, ['dual-v1'])
+  assert.deepEqual(noErrors, [])
+})
+
 console.log('SUITE RESULT: PASS ' + passed + ' | FAIL 0 | total ' + passed)
