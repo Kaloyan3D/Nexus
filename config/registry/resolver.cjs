@@ -19,8 +19,49 @@
 const crypto = require('node:crypto')
 const schemas = require('./schemas.cjs')
 
-const BLOCKED_ROUTE_AVAILABILITY = new Set(['unavailable', 'disabled'])
+const LEGACY_PROVENANCE = 'legacy-production-use'
+
+/**
+ * Explicit route eligibility (H1). Only 'verified' routes are executable.
+ * Legacy production descriptors arrive as 'verified' with legacy provenance
+ * (see legacy-import.cjs); every other state fails closed with an
+ * actionable code. A merely 'discovered' route is never execution access.
+ */
+const NON_EXECUTABLE_AVAILABILITY = {
+  unavailable: 'route-unavailable',
+  disabled: 'route-unavailable',
+  'auth-required': 'route-not-verified',
+  'probe-required': 'route-not-verified',
+  'policy-blocked': 'route-not-verified',
+  discovered: 'route-not-verified',
+  unknown: 'route-not-verified',
+}
 const BLOCKED_CONNECTION_STATUS = new Set(['revoked', 'disabled'])
+
+function routeEligibility(route) {
+  if (!route) return { code: 'unknown-reference', message: 'unknown route' }
+  if (route.enabled === false) return { code: 'route-unavailable', message: 'route is disabled: ' + route.id }
+  if (route.availability === 'verified') return null
+  const code = NON_EXECUTABLE_AVAILABILITY[route.availability] || 'route-not-verified'
+  return { code, message: 'route is not executable (' + route.availability + '): ' + route.id }
+}
+
+/**
+ * Connection eligibility, applied identically at compile and listing time.
+ * Live 'connected' Jewelry always qualifies. Offline legacy descriptors
+ * (status 'unknown' + legacy provenance) are accepted as runnable
+ * descriptors only: the runtime adapter must still revalidate the underlying
+ * credential reference at request time. Anything else fails closed.
+ */
+function connectionEligibility(connection) {
+  if (!connection) return { code: 'connection-auth-required', message: 'unknown connection' }
+  if (BLOCKED_CONNECTION_STATUS.has(connection.status)) {
+    return { code: 'connection-auth-required', message: 'connection is ' + connection.status + ': ' + connection.id }
+  }
+  if (connection.status === 'connected') return null
+  if (connection.status === 'unknown' && connection.provenance === LEGACY_PROVENANCE) return null
+  return { code: 'connection-auth-required', message: 'connection is not authorized (' + connection.status + '): ' + connection.id }
+}
 
 function err(code, path, message) {
   return { code, path, message }
@@ -94,6 +135,11 @@ function checkRoleCapability(slot, role, model, route) {
   if (requirements.singleAgent === true && route && route.executionKind !== 'raw-model') {
     errors.push(err('slot-capability-not-satisfied', 'roles.' + role, 'single-agent slot requires a raw-model route, not ' + route.executionKind))
   }
+  if (typeof requirements.pinnedProvider === 'string' && requirements.pinnedProvider !== '' && route) {
+    if (route.providerId !== requirements.pinnedProvider) {
+      errors.push(err('slot-capability-not-satisfied', 'roles.' + role, 'slot ' + ((slot && slot.id) || role) + ' pins provider ' + requirements.pinnedProvider + '; route ' + route.id + ' uses ' + route.providerId))
+    }
+  }
   if (capabilities.reasoning !== true) {
     errors.push(err('slot-capability-not-satisfied', 'roles.' + role, 'role ' + role + ' requires reasoning support'))
   }
@@ -149,8 +195,9 @@ function resolveRoleBinding(registry, mode, role, assignment, runtime) {
   if (!route) {
     return { errors: [err('unknown-reference', 'roles.' + role + '.routeId', 'unknown route: ' + assignment.routeId)], binding: null }
   }
-  if (route.enabled === false || BLOCKED_ROUTE_AVAILABILITY.has(route.availability)) {
-    errors.push(err('route-unavailable', 'roles.' + role + '.routeId', 'route is not available (' + route.availability + '): ' + route.id))
+  const eligibility = routeEligibility(route)
+  if (eligibility) {
+    errors.push(err(eligibility.code, 'roles.' + role + '.routeId', eligibility.message))
   }
   if (route.logicalModelId !== model.id) {
     errors.push(err('route-model-identity-mismatch', 'roles.' + role + '.routeId', 'route ' + route.id + ' offers ' + route.logicalModelId + ', not ' + model.id))
@@ -167,9 +214,8 @@ function resolveRoleBinding(registry, mode, role, assignment, runtime) {
     if (!connection) {
       errors.push(err('connection-auth-required', 'roles.' + role + '.connectionId', 'unknown connection: ' + route.connectionId))
     } else {
-      if (BLOCKED_CONNECTION_STATUS.has(connection.status)) {
-        errors.push(err('connection-auth-required', 'roles.' + role + '.connectionId', 'connection is ' + connection.status + ': ' + connection.id))
-      }
+      const access = connectionEligibility(connection)
+      if (access) errors.push(err(access.code, 'roles.' + role + '.connectionId', access.message))
       if (connection.providerId !== route.providerId) {
         errors.push(err('connection-provider-mismatch', 'roles.' + role + '.connectionId', 'connection provider mismatch for route ' + route.id))
       }
@@ -197,9 +243,11 @@ function resolveRoleBinding(registry, mode, role, assignment, runtime) {
     remoteModelId: route.remoteModelId,
     connectionId,
     executionKind: route.executionKind,
+    accessType: route.accessType,
     protocolId: (route.compatibility && route.compatibility.transport) || 'unknown',
     reasoning: assignment.reasoning,
     requiredCapabilities: Object.keys((slot && slot.requirements) || {}).sort(),
+    slotRequirements: { ...((slot && slot.requirements) || {}) },
     dataUseTier: model.dataUseTier || null,
   }
   return { errors: [], binding }
@@ -215,6 +263,7 @@ function compileModeConfig(modeConfig, registry, options) {
   let errors = []
   errors.push(...schemas.validateModeConfiguration(modeConfig, 'modeConfiguration'))
   errors.push(...schemas.validateRegistrySnapshot(registry, 'registry'))
+  if (runtime) errors.push(...schemas.validateRuntimeCapabilities(runtime, 'runtime'))
   if (errors.length > 0) return { ok: false, errors }
 
   const mode = findMode(registry, modeConfig.modeId)
@@ -296,8 +345,12 @@ function compileModeConfig(modeConfig, registry, options) {
         remoteModelId: b.remoteModelId,
         connectionId: b.connectionId,
         executionKind: b.executionKind,
+        accessType: b.accessType,
         protocolId: b.protocolId,
         reasoning: b.reasoning,
+        requiredCapabilities: b.requiredCapabilities,
+        slotRequirements: b.slotRequirements,
+        dataUseTier: b.dataUseTier,
       }]
     })),
   }
@@ -336,15 +389,22 @@ function listEligibleRoutes(modeId, slotId, registry, runtime) {
   if (!mode) return []
   const slot = (mode.slots || []).find((s) => s && s.id === slotId)
   if (!slot) return []
+  if (runtime && schemas.validateRuntimeCapabilities(runtime, 'runtime').length > 0) return []
   const models = indexById(registry.models)
   const providers = indexById(registry.providers)
+  const connections = indexById(registry.connections)
   const out = []
   for (const route of registry.routes) {
-    if (!route || route.enabled === false || BLOCKED_ROUTE_AVAILABILITY.has(route.availability)) continue
+    if (!route || routeEligibility(route)) continue
     const model = models.get(route.logicalModelId)
     if (!model || model.enabled === false) continue
     const provider = providers.get(route.providerId)
     if (!provider || provider.status !== 'enabled') continue
+    if (route.connectionId !== undefined && route.connectionId !== null) {
+      const connection = connections.get(route.connectionId)
+      if (!connection || connectionEligibility(connection)) continue
+      if (connection.providerId !== route.providerId) continue
+    }
     if (checkEngineScope(mode, model, slotId).length > 0) continue
     if (checkRoleCapability(slot, slotId, model, route).length > 0) continue
     if (checkRuntimeCompatibility(route, runtime || null, slotId).length > 0) continue
@@ -358,6 +418,8 @@ module.exports = {
   validateModeConfig,
   listEligibleRoutes,
   resolveRoleBinding,
+  routeEligibility,
+  connectionEligibility,
   deepFreeze,
   canonicalize,
 }

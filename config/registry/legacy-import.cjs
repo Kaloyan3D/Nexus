@@ -38,17 +38,51 @@ function loadModeDefinitions() {
   return modes
 }
 
+const KNOWN_LEGACY_ENGINES = { dual: 'dual-v1', muse: 'muse-v0' }
+
+/**
+ * Fail-closed engine scope (H2). A genuinely absent declaration keeps the
+ * backward-compatible Dual scope. Any explicit declaration that is empty,
+ * malformed, or names an unknown engine is NEVER guessed as Dual: the model
+ * normalizes with an empty scope (eligible for no engine) and an actionable
+ * import error is reported.
+ */
 function engineScopeOfLegacyEntry(entry) {
-  const declared = Array.isArray(entry.agentEngines) ? entry.agentEngines : null
-  if (declared === null) return ['dual-v1']
+  const declared = entry.agentEngines
+  if (declared === undefined || declared === null) return { scope: ['dual-v1'], error: null }
+  if (!Array.isArray(declared)) {
+    return { scope: [], error: 'legacy-engine-scope-malformed:' + String(entry.id) }
+  }
+  if (declared.length === 0) {
+    return { scope: [], error: 'legacy-engine-scope-empty:' + String(entry.id) }
+  }
   const scope = []
-  if (declared.includes('dual')) scope.push('dual-v1')
-  if (declared.includes('muse')) scope.push('muse-v0')
-  return scope.length > 0 ? scope : ['dual-v1']
+  for (const name of declared) {
+    if (typeof name !== 'string' || !KNOWN_LEGACY_ENGINES[name]) {
+      return { scope: [], error: 'legacy-engine-scope-unknown:' + String(entry.id) + ':' + String(name) }
+    }
+    const mapped = KNOWN_LEGACY_ENGINES[name]
+    if (!scope.includes(mapped)) scope.push(mapped)
+  }
+  return { scope, error: null }
 }
 
+function validCapacity(value) {
+  return Number.isInteger(value) && value > 0 ? value : null
+}
+
+/**
+ * Preserve legacy capacity metadata (H3) without inventing limits: valid
+ * positive integers round-trip with 'declared' provenance; present-but-
+ * invalid values are omitted and reported, never coerced; absent values
+ * stay absent (unknown capacity, never infinite). Security-relevant
+ * declarations (dataUseTier, readOnlyDefault) survive alongside.
+ */
 function normalizeLogicalModel(entry) {
-  return {
+  const errors = []
+  const { scope, error } = engineScopeOfLegacyEntry(entry)
+  if (error) errors.push(error)
+  const model = {
     schemaVersion: 1,
     id: String(entry.id),
     vendor: typeof entry.vendor === 'string' && entry.vendor !== '' ? entry.vendor : 'unknown',
@@ -63,8 +97,24 @@ function normalizeLogicalModel(entry) {
     },
     ...(typeof entry.dataUseTier === 'string' ? { dataUseTier: entry.dataUseTier } : {}),
     enabled: entry.enabled !== false,
-    engines: engineScopeOfLegacyEntry(entry),
+    engines: scope,
   }
+  let capacityDeclared = false
+  for (const key of ['contextWindow', 'maxOutputTokens']) {
+    if (entry[key] === undefined) continue
+    const valid = validCapacity(entry[key])
+    if (valid === null) errors.push('legacy-model-capacity-invalid:' + String(entry.id) + ':' + key)
+    else {
+      model[key] = valid
+      capacityDeclared = true
+    }
+  }
+  if (capacityDeclared) model.capacityProvenance = 'declared'
+  if (entry.readOnlyDefault !== undefined) {
+    if (typeof entry.readOnlyDefault !== 'boolean') errors.push('legacy-model-capacity-invalid:' + String(entry.id) + ':readOnlyDefault')
+    else model.readOnlyDefault = entry.readOnlyDefault
+  }
+  return { model, errors }
 }
 
 function providerKeysOf(entry) {
@@ -77,6 +127,13 @@ function providerKeysOf(entry) {
   return [...keys]
 }
 
+/**
+ * NOTE (A1): legacyDshProviderId is a TEMPORARY compatibility alias kept so
+ * R2 can project canonical provider ids onto installed DSH provider keys.
+ * Canonical lookups use `id`; the DSH alias must move into the R2 DSH
+ * adapter's private map and leave the canonical Provider record.
+ * Do not add new consumers of this field.
+ */
 function normalizeProvider(providerId) {
   return {
     schemaVersion: 1,
@@ -97,6 +154,7 @@ function normalizeConnection(providerId) {
     authMethod: 'api-key',
     credentialRef: 'credential://connections/conn-' + providerId,
     status: 'unknown',
+    provenance: 'legacy-production-use',
   }
 }
 
@@ -139,6 +197,7 @@ function normalizeRoutes(entry) {
       },
       availability: 'verified',
       enabled: entry.enabled !== false,
+      provenance: 'legacy-production-use',
     })
   }
   return routes
@@ -150,7 +209,12 @@ function buildRegistrySnapshot(installRoot) {
   if (!legacy || legacy.schemaVersion !== 1 || !Array.isArray(legacy.models)) {
     return { snapshot: null, errors: ['legacy-model-registry-unavailable'] }
   }
-  const models = legacy.models.map(normalizeLogicalModel)
+  const models = []
+  for (const entry of legacy.models) {
+    const { model, errors: modelErrors } = normalizeLogicalModel(entry)
+    errors.push(...modelErrors)
+    models.push(model)
+  }
   const providerIds = []
   const seenProviders = new Set()
   for (const entry of legacy.models) {

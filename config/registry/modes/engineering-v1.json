@@ -28,7 +28,8 @@
         "reviewer"
       ],
       "requirements": {
-        "readOnlyEnforced": true
+        "readOnlyEnforced": true,
+        "pinnedProvider": "sol-local"
       }
     },
     {

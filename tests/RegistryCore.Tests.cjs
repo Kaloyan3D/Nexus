@@ -398,7 +398,7 @@ check('Core compiles with DSH runtime variables absent', () => {
 check('runtime capability matrix: eligible host binds, incompatible host fails closed', () => {
   const snapshot = JSON.parse(JSON.stringify(buildTestSnapshot()))
   snapshot.providers.push({ schemaVersion: 1, id: 'probe-provider', name: 'Probe', transportId: 'openai-responses', status: 'enabled' })
-  snapshot.connections.push({ schemaVersion: 1, id: 'conn-probe-provider', providerId: 'probe-provider', connectionKind: 'api-key', authMethod: 'api-key', credentialRef: 'credential://connections/conn-probe-provider', status: 'unknown' })
+  snapshot.connections.push({ schemaVersion: 1, id: 'conn-probe-provider', providerId: 'probe-provider', connectionKind: 'api-key', authMethod: 'api-key', credentialRef: 'credential://connections/conn-probe-provider', status: 'connected' })
   snapshot.models.push({
     schemaVersion: 1, id: 'probe-model', vendor: 'Probe', displayName: 'Probe', checkpoint: 'probe-1',
     capabilities: { textInput: true, imageInput: false, toolCalling: true, streaming: true, reasoning: true },
@@ -423,6 +423,255 @@ check('runtime capability matrix: eligible host binds, incompatible host fails c
   assert.ok(codes(denied).includes('runtime-capability-unsatisfied'))
   assert.ok(resolver.listEligibleRoutes('engineering-v1', 'engineer', snapshot, goodHost).some((r) => r.id === 'probe-provider/probe-model'))
   assert.ok(!resolver.listEligibleRoutes('engineering-v1', 'engineer', snapshot, badHost).some((r) => r.id === 'probe-provider/probe-model'))
+})
+
+
+// ── H1: strict route availability enforcement ──────────────────────────
+
+check('H1: every non-verified route status fails closed at compile time', () => {
+  const snapshot = buildTestSnapshot()
+  const configs = importAll(snapshot)
+  const expectations = {
+    unavailable: 'route-unavailable',
+    disabled: 'route-unavailable',
+    'auth-required': 'route-not-verified',
+    'probe-required': 'route-not-verified',
+    'policy-blocked': 'route-not-verified',
+    discovered: 'route-not-verified',
+    unknown: 'route-not-verified',
+  }
+  for (const [availability, code] of Object.entries(expectations)) {
+    const mutated = JSON.parse(JSON.stringify(snapshot))
+    mutated.routes.find((r) => r.id === configs['deepseek-codex'].slots.engineer.routeId).availability = availability
+    const result = resolver.compileModeConfig(configs['deepseek-codex'], mutated, {})
+    assert.equal(result.ok, false, 'availability ' + availability + ' must not compile')
+    assert.ok(codes(result).includes(code), 'availability ' + availability + ' must report ' + code + ', got ' + JSON.stringify(codes(result)))
+  }
+})
+
+check('H1: discovered-only routes are never execution access, including listing', () => {
+  const snapshot = JSON.parse(JSON.stringify(buildTestSnapshot()))
+  const probe = snapshot.routes.find((r) => r.logicalModelId === 'deepseek-v4-flash')
+  probe.availability = 'discovered'
+  delete probe.provenance
+  const configs = importAll(buildTestSnapshot())
+  const cfg = JSON.parse(JSON.stringify(configs['deepseek-codex']))
+  cfg.slots.engineer = { logicalModelId: probe.logicalModelId, routeId: probe.id, reasoning: probe.reasoningLevels[0] }
+  cfg.roleOverrides.deepEngineer = { logicalModelId: probe.logicalModelId, routeId: probe.id, reasoning: probe.reasoningLevels[0] }
+  cfg.roleOverrides.fallback = { logicalModelId: probe.logicalModelId, routeId: probe.id, reasoning: probe.reasoningLevels[0] }
+  const result = resolver.compileModeConfig(cfg, snapshot, {})
+  assert.equal(result.ok, false)
+  assert.ok(codes(result).includes('route-not-verified'))
+  assert.ok(!resolver.listEligibleRoutes('engineering-v1', 'engineer', snapshot, null).some((r) => r.id === probe.id))
+})
+
+check('H1: missing, not-connected, and unverified connections fail closed', () => {
+  const snapshot = buildTestSnapshot()
+  const configs = importAll(snapshot)
+  const routeId = configs['deepseek-codex'].slots.engineer.routeId
+  const connId = snapshot.routes.find((r) => r.id === routeId).connectionId
+  const ghost = JSON.parse(JSON.stringify(snapshot))
+  ghost.routes.find((r) => r.id === routeId).connectionId = 'conn-ghost'
+  const ghostResult = resolver.compileModeConfig(configs['deepseek-codex'], ghost, {})
+  assert.equal(ghostResult.ok, false, 'dangling connection reference must fail closed')
+  assert.ok(
+    codes(ghostResult).includes('unknown-reference') || codes(ghostResult).includes('connection-auth-required'),
+    'dangling connection must be rejected, got ' + JSON.stringify(codes(ghostResult)),
+  )
+  for (const status of ['not-connected', 'revoked', 'disabled']) {
+    const mutated = JSON.parse(JSON.stringify(snapshot))
+    mutated.connections.find((c) => c.id === connId).status = status
+    const result = resolver.compileModeConfig(configs['deepseek-codex'], mutated, {})
+    assert.equal(result.ok, false, 'connection ' + status + ' must not compile')
+    assert.ok(codes(result).includes('connection-auth-required'))
+  }
+  const naked = JSON.parse(JSON.stringify(snapshot))
+  const nakedConn = naked.connections.find((c) => c.id === connId)
+  nakedConn.status = 'unknown'
+  delete nakedConn.provenance
+  assert.ok(codes(resolver.compileModeConfig(configs['deepseek-codex'], naked, {})).includes('connection-auth-required'))
+})
+
+check('H1: legacy-provenance descriptors stay eligible in compile and listing', () => {
+  const snapshot = buildTestSnapshot()
+  const configs = importAll(snapshot)
+  assert.equal(resolver.compileModeConfig(configs['deepseek-codex'], snapshot, {}).ok, true)
+  const eligible = resolver.listEligibleRoutes('engineering-v1', 'engineer', snapshot, null)
+  assert.ok(eligible.some((r) => r.id === configs['deepseek-codex'].slots.engineer.routeId))
+})
+
+// ── H2: fail-closed legacy engine scope ────────────────────────────────
+
+check('H2: absent scope stays Dual; explicit bad scopes fail closed', () => {
+  const { model: absent } = legacyImport.normalizeLogicalModel({ id: 'm', model: 'm' })
+  assert.deepEqual(absent.engines, ['dual-v1'])
+  for (const bad of [[], ['bogus-engine'], ['dual', 'bogus-engine'], 'muse', 42, ['']]) {
+    const { model, errors } = legacyImport.normalizeLogicalModel({ id: 'm', model: 'm', agentEngines: bad })
+    assert.deepEqual(model.engines, [], 'declaration ' + JSON.stringify(bad) + ' must scope to no engine')
+    assert.equal(errors.length, 1, 'declaration ' + JSON.stringify(bad) + ' must report an import error')
+    assert.ok(errors[0].startsWith('legacy-engine-scope-'), 'actionable error, got ' + errors[0])
+  }
+  assert.deepEqual(legacyImport.normalizeLogicalModel({ id: 'm', model: 'm', agentEngines: ['dual'] }).model.engines, ['dual-v1'])
+  assert.deepEqual(legacyImport.normalizeLogicalModel({ id: 'm', model: 'm', agentEngines: ['muse'] }).model.engines, ['muse-v0'])
+})
+
+check('H2: invalid-scope models compile on no engine and surface import errors', () => {
+  const snapshot = JSON.parse(JSON.stringify(buildTestSnapshot()))
+  snapshot.models.push({
+    schemaVersion: 1, id: 'scope-orphan', vendor: 'X', displayName: 'Orphan', checkpoint: 'orphan-1',
+    capabilities: { textInput: true, imageInput: false, toolCalling: true, streaming: true, reasoning: true },
+    enabled: true, engines: [],
+  })
+  snapshot.providers.push({ schemaVersion: 1, id: 'orphan-p', name: 'Orphan', transportId: 'unknown', status: 'enabled' })
+  snapshot.connections.push({ schemaVersion: 1, id: 'conn-orphan-p', providerId: 'orphan-p', connectionKind: 'api-key', authMethod: 'api-key', credentialRef: 'credential://connections/conn-orphan-p', status: 'connected' })
+  snapshot.routes.push({
+    schemaVersion: 1, id: 'orphan-p/scope-orphan', providerId: 'orphan-p', logicalModelId: 'scope-orphan',
+    remoteModelId: 'orphan-1', accessType: 'api-key', connectionId: 'conn-orphan-p', executionKind: 'raw-model',
+    reasoningLevels: ['high'], compatibility: { transport: 'unknown' }, availability: 'verified', enabled: true,
+  })
+  const configs = importAll(buildTestSnapshot())
+  for (const [modeId, slotId] of [['engineering-v1', 'engineer'], ['engineering-v2', 'main']]) {
+    const cfg = modeId === 'engineering-v1'
+      ? { schemaVersion: 1, modeId, revision: 0, slots: { engineer: { logicalModelId: 'scope-orphan', routeId: 'orphan-p/scope-orphan', reasoning: 'high' }, reviewer: configs['deepseek-codex'].slots.reviewer, solver: configs['deepseek-codex'].slots.solver } }
+      : { schemaVersion: 1, modeId, revision: 0, slots: { main: { logicalModelId: 'scope-orphan', routeId: 'orphan-p/scope-orphan', reasoning: 'high' } } }
+    const result = resolver.compileModeConfig(cfg, snapshot, {})
+    assert.equal(result.ok, false)
+    assert.ok(codes(result).includes('engine-scope-mismatch'))
+  }
+})
+
+// ── H3: capacity metadata preservation ─────────────────────────────────
+
+check('H3: legacy capacity metadata round-trips without invention', () => {
+  const snapshot = buildTestSnapshot()
+  const byId = new Map(snapshot.models.map((m) => [m.id, m]))
+  assert.equal(byId.get('deepseek-v4-flash').contextWindow, 131072)
+  assert.equal(byId.get('deepseek-v4-flash').maxOutputTokens, 8192)
+  assert.equal(byId.get('gpt-5.6-sol').contextWindow, 400000)
+  assert.equal(byId.get('gpt-5.6-sol').maxOutputTokens, 2500)
+  assert.equal(byId.get('gpt-5.6-sol').readOnlyDefault, true)
+  assert.equal(byId.get('deepseek-v4-flash-vision-exp').maxOutputTokens, 4096)
+  assert.equal(byId.get('muse-spark-1.3-contributor').contextWindow, 1048576)
+  for (const model of snapshot.models) {
+    assert.equal(model.capacityProvenance, 'declared')
+  }
+})
+
+check('H3: malformed capacity is omitted and reported, never coerced', () => {
+  for (const bad of ['131072', -5, 0, 3.5, NaN]) {
+    const { model, errors } = legacyImport.normalizeLogicalModel({ id: 'm', model: 'm', contextWindow: bad, maxOutputTokens: 8 })
+    assert.equal(model.contextWindow, undefined, 'invalid contextWindow ' + String(bad) + ' must be omitted')
+    assert.ok(errors.some((e) => e === 'legacy-model-capacity-invalid:m:contextWindow'))
+    assert.equal(model.maxOutputTokens, 8)
+  }
+  const { model, errors } = legacyImport.normalizeLogicalModel({ id: 'm', model: 'm' })
+  assert.equal(model.contextWindow, undefined)
+  assert.equal(model.maxOutputTokens, undefined)
+  assert.equal(model.capacityProvenance, undefined)
+  assert.deepEqual(errors, [])
+  assert.ok(schemas.validateLogicalModel({ schemaVersion: 1, id: 'm', vendor: 'V', displayName: 'M', checkpoint: 'm', capabilities: { textInput: true, imageInput: false, toolCalling: true, streaming: true, reasoning: true }, enabled: true, contextWindow: -1 }, 'm').some((e) => e.code === 'model-invalid'))
+})
+
+// ── H4: legacy reviewer compatibility ──────────────────────────────────
+
+check('H4: reviewer pin preserves legacy contract without universal coupling', () => {
+  const snapshot = buildTestSnapshot()
+  const configs = importAll(snapshot)
+  assert.equal(resolver.compileModeConfig(configs['deepseek-codex'], snapshot, {}).ok, true)
+  const deepRoute = snapshot.routes.find((r) => r.logicalModelId === 'deepseek-v4-flash')
+  const badReviewer = JSON.parse(JSON.stringify(configs['deepseek-codex']))
+  badReviewer.slots.reviewer = { logicalModelId: 'deepseek-v4-flash', routeId: deepRoute.id, reasoning: 'high' }
+  const denied = resolver.compileModeConfig(badReviewer, snapshot, {})
+  assert.equal(denied.ok, false)
+  assert.ok(codes(denied).includes('slot-capability-not-satisfied'))
+  assert.ok(denied.errors.some((e) => e.message.includes('sol-local')))
+  const v1 = snapshot.modes.find((m) => m.id === 'engineering-v1')
+  assert.equal(v1.slots.find((s) => s.id === 'reviewer').requirements.pinnedProvider, 'sol-local')
+  const v2 = snapshot.modes.find((m) => m.id === 'engineering-v2')
+  assert.equal(v2.slots[0].requirements.pinnedProvider, undefined)
+})
+
+check('H4: solver stays approval-gated but provider-open', () => {
+  const snapshot = buildTestSnapshot()
+  const configs = importAll(snapshot)
+  const deepRoute = snapshot.routes.find((r) => r.logicalModelId === 'deepseek-v4-flash' && r.reasoningLevels.includes('high'))
+  const openSolver = JSON.parse(JSON.stringify(configs['deepseek-codex']))
+  openSolver.slots.solver = { logicalModelId: 'deepseek-v4-flash', routeId: deepRoute.id, reasoning: 'high' }
+  const result = resolver.compileModeConfig(openSolver, snapshot, {})
+  assert.equal(result.ok, true, JSON.stringify(result.errors))
+  assert.ok(result.snapshot.roles.solver.requiredCapabilities.includes('writeRequiresApproval'))
+  assert.ok(result.snapshot.roles.reviewer.requiredCapabilities.includes('readOnlyEnforced'))
+})
+
+// ── H5: security-relevant resolution fingerprint ───────────────────────
+
+check('H5: fingerprint covers security semantics, ignores display names', () => {
+  const snapshot = buildTestSnapshot()
+  const configs = importAll(snapshot)
+  const base = resolver.compileModeConfig(configs['deepseek-codex'], snapshot, {}).snapshot
+  const renamed = JSON.parse(JSON.stringify(snapshot))
+  renamed.models.find((m) => m.id === 'deepseek-v4-flash').displayName = 'Renamed Display'
+  const same = resolver.compileModeConfig(configs['deepseek-codex'], renamed, {}).snapshot
+  assert.equal(base.resolutionId, same.resolutionId)
+  const retiered = JSON.parse(JSON.stringify(snapshot))
+  retiered.models.find((m) => m.id === 'deepseek-v4-flash').dataUseTier = 'contributor'
+  const changed = resolver.compileModeConfig(configs['deepseek-codex'], retiered, {}).snapshot
+  assert.notEqual(base.resolutionId, changed.resolutionId)
+  const recapped = JSON.parse(JSON.stringify(snapshot))
+  recapped.modes.find((m) => m.id === 'engineering-v1').slots.find((s) => s.id === 'engineer').requirements.toolCalling = false
+  const changedCaps = resolver.compileModeConfig(configs['deepseek-codex'], recapped, {}).snapshot
+  assert.notEqual(base.resolutionId, changedCaps.resolutionId)
+  const reReasoned = JSON.parse(JSON.stringify(configs['deepseek-codex']))
+  const highRoute = snapshot.routes.find((r) => r.logicalModelId === 'deepseek-v4-flash' && r.reasoningLevels.includes('high'))
+  reReasoned.roleOverrides.deepEngineer = { logicalModelId: 'deepseek-v4-flash', routeId: highRoute.id, reasoning: 'high' }
+  const changedReasoning = resolver.compileModeConfig(reReasoned, snapshot, {})
+  assert.equal(changedReasoning.ok, true, JSON.stringify(changedReasoning.errors))
+  assert.notEqual(base.resolutionId, changedReasoning.snapshot.resolutionId)
+  const text = JSON.stringify(base)
+  assert.ok(!text.includes('credential://'), 'snapshots must not embed credential references')
+  for (const binding of Object.values(base.roles)) {
+    assert.ok(Array.isArray(binding.requiredCapabilities))
+    assert.ok('dataUseTier' in binding && 'accessType' in binding && 'slotRequirements' in binding)
+  }
+})
+
+// ── A3: schema validation completeness ─────────────────────────────────
+
+check('A3: unknown capability/requirement keys are rejected', () => {
+  const snapshot = buildTestSnapshot()
+  const badCaps = JSON.parse(JSON.stringify(snapshot.models[0]))
+  badCaps.capabilities.dshSessionAffinity = true
+  assert.ok(schemas.validateLogicalModel(badCaps, 'm').some((e) => e.code === 'unknown-field'))
+  const badReq = JSON.parse(JSON.stringify(snapshot.modes[0]))
+  badReq.slots[0].requirements.preferredVendor = 'x'
+  assert.ok(schemas.validateModeDefinition(badReq, 'm').some((e) => e.code === 'unknown-field'))
+})
+
+check('A3: ambiguous slot-to-role maps and uncovered roles are rejected', () => {
+  const snapshot = buildTestSnapshot()
+  const ambiguous = JSON.parse(JSON.stringify(snapshot.modes[0]))
+  ambiguous.slots[2].internalRoles.push('primaryEngineer')
+  assert.ok(schemas.validateModeDefinition(ambiguous, 'm').some((e) => e.code === 'mode-invalid'))
+  const uncovered = JSON.parse(JSON.stringify(snapshot.modes[0]))
+  uncovered.internalRoles.push('ghostRole')
+  assert.ok(schemas.validateModeDefinition(uncovered, 'm').some((e) => e.code === 'mode-invalid'))
+  assert.deepEqual(schemas.validateModeDefinition(snapshot.modes.find((m) => m.id === 'engineering-v1'), 'v1'), [])
+  assert.deepEqual(schemas.validateModeDefinition(snapshot.modes.find((m) => m.id === 'engineering-v2'), 'v2'), [])
+  assert.deepEqual(schemas.validateModeDefinition(snapshot.modes.find((m) => m.id === 'engineering-v3'), 'v3'), [])
+})
+
+check('A3: connection/provider mismatch and invalid runtime descriptors fail closed', () => {
+  const snapshot = buildTestSnapshot()
+  const badConn = JSON.parse(JSON.stringify(snapshot))
+  badConn.connections[0].providerId = 'ghost-provider'
+  assert.ok(schemas.validateRegistrySnapshot(badConn, 'registry').some((e) => e.code === 'unknown-reference'))
+  assert.ok(schemas.validateRuntimeCapabilities(null, 'r').some((e) => e.code === 'runtime-invalid'))
+  assert.ok(schemas.validateRuntimeCapabilities({ adapterId: '', executionKinds: ['telepathy'], protocols: ['carrier-pigeon'] }, 'r').some((e) => e.code === 'runtime-invalid'))
+  const configs = importAll(snapshot)
+  const badRuntime = resolver.compileModeConfig(configs['deepseek-codex'], snapshot, { runtime: { adapterId: 'x', executionKinds: ['telepathy'] } })
+  assert.equal(badRuntime.ok, false)
+  assert.ok(codes(badRuntime).includes('runtime-invalid'))
+  assert.deepEqual(resolver.listEligibleRoutes('engineering-v1', 'engineer', snapshot, { adapterId: '' }), [])
 })
 
 console.log('SUITE RESULT: PASS ' + passed + ' | FAIL 0 | total ' + passed)

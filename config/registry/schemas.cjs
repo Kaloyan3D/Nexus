@@ -22,6 +22,8 @@ const ROUTE_AVAILABILITY = ['discovered', 'auth-required', 'probe-required', 've
 const DATA_USE_TIERS = ['standard', 'contributor']
 const CONNECTION_KINDS = ['api-key', 'subscription-agent', 'subscription-delegated', 'local-server', 'manual-unknown']
 const CONNECTION_STATUSES = ['connected', 'not-connected', 'unknown', 'revoked', 'disabled']
+const CAPACITY_PROVENANCE = ['declared', 'verified']
+const REQUIREMENT_KEYS = new Set(['toolCalling', 'readOnlyEnforced', 'writeRequiresApproval', 'adaptiveReasoningContract', 'singleAgent', 'pinnedProvider'])
 
 function err(code, path, message) {
   return { code, path, message }
@@ -78,8 +80,23 @@ function validateAgentSlot(slot, path) {
       }
     }
   }
-  if (slot.requirements !== undefined && !isPlainObject(slot.requirements)) {
-    errors.push(err('slot-invalid', path + '.requirements', 'slot requirements must be an object'))
+  if (slot.requirements !== undefined) {
+    if (!isPlainObject(slot.requirements)) {
+      errors.push(err('slot-invalid', path + '.requirements', 'slot requirements must be an object'))
+    } else {
+      for (const key of Object.keys(slot.requirements)) {
+        if (!REQUIREMENT_KEYS.has(key)) {
+          errors.push(err('unknown-field', path + '.requirements.' + key, 'unknown slot requirement is rejected by strict schema'))
+          continue
+        }
+        const value = slot.requirements[key]
+        if (key === 'adaptiveReasoningContract' || key === 'pinnedProvider') {
+          if (typeof value !== 'string' || value === '') errors.push(err('slot-invalid', path + '.requirements.' + key, key + ' must be a non-empty string'))
+        } else if (typeof value !== 'boolean') {
+          errors.push(err('slot-invalid', path + '.requirements.' + key, key + ' must be boolean'))
+        }
+      }
+    }
   }
   return errors
 }
@@ -115,12 +132,23 @@ function validateModeDefinition(doc, path) {
   if (!Array.isArray(doc.internalRoles) || doc.internalRoles.length === 0) {
     errors.push(err('mode-invalid', where + '.internalRoles', 'mode must declare internal roles'))
   } else {
-    const covered = new Set()
+    const coveredBy = new Map()
     for (const slot of doc.slots || []) {
-      if (slot && Array.isArray(slot.internalRoles)) for (const r of slot.internalRoles) covered.add(r)
+      if (slot && Array.isArray(slot.internalRoles)) {
+        for (const r of slot.internalRoles) {
+          if (typeof r === 'string' && r !== '') coveredBy.set(r, (coveredBy.get(r) || []).concat(typeof slot.id === 'string' ? slot.id : '?'))
+        }
+      }
     }
+    for (const [role, slotIds] of coveredBy) {
+      if (slotIds.length > 1) errors.push(err('mode-invalid', where + '.slots', 'internal role ' + role + ' is mapped by multiple slots (' + slotIds.join(', ') + '); slot-to-role mapping is ambiguous'))
+    }
+    const optional = new Set(Array.isArray(doc.optionalCapabilities) ? doc.optionalCapabilities : [])
     for (const role of doc.internalRoles) {
       if (typeof role !== 'string' || role === '') errors.push(err('mode-invalid', where + '.internalRoles', 'internal role must be a non-empty string'))
+      else if (!coveredBy.has(role) && !optional.has(role)) {
+        errors.push(err('mode-invalid', where + '.internalRoles', 'internal role ' + role + ' is covered by no slot and no optional capability'))
+      }
     }
   }
   if (doc.optionalCapabilities !== undefined) {
@@ -192,7 +220,7 @@ function validateModeConfiguration(doc, path) {
 
 /* ── LogicalModel ───────────────────────────────────────────────────── */
 
-const LOGICAL_MODEL_FIELDS = new Set(['schemaVersion', 'id', 'vendor', 'displayName', 'checkpoint', 'capabilities', 'dataUseTier', 'enabled', 'engines'])
+const LOGICAL_MODEL_FIELDS = new Set(['schemaVersion', 'id', 'vendor', 'displayName', 'checkpoint', 'capabilities', 'dataUseTier', 'enabled', 'engines', 'contextWindow', 'maxOutputTokens', 'capacityProvenance', 'readOnlyDefault'])
 const CAPABILITY_KEYS = ['textInput', 'imageInput', 'toolCalling', 'streaming', 'reasoning']
 
 function validateLogicalModel(doc, path) {
@@ -207,16 +235,31 @@ function validateLogicalModel(doc, path) {
   if (!isPlainObject(doc.capabilities)) {
     errors.push(err('model-invalid', where + '.capabilities', 'capabilities must be an object'))
   } else {
+    for (const key of Object.keys(doc.capabilities)) {
+      if (!CAPABILITY_KEYS.includes(key)) errors.push(err('unknown-field', where + '.capabilities.' + key, 'unknown capability is rejected by strict schema'))
+    }
     for (const key of CAPABILITY_KEYS) {
       if (typeof doc.capabilities[key] !== 'boolean') errors.push(err('model-invalid', where + '.capabilities.' + key, key + ' must be boolean'))
     }
+  }
+  if (doc.contextWindow !== undefined && (!Number.isInteger(doc.contextWindow) || doc.contextWindow <= 0)) {
+    errors.push(err('model-invalid', where + '.contextWindow', 'contextWindow must be a positive integer when present; absence means unknown, never infinite'))
+  }
+  if (doc.maxOutputTokens !== undefined && (!Number.isInteger(doc.maxOutputTokens) || doc.maxOutputTokens <= 0)) {
+    errors.push(err('model-invalid', where + '.maxOutputTokens', 'maxOutputTokens must be a positive integer when present; absence means unknown, never infinite'))
+  }
+  if (doc.capacityProvenance !== undefined && !CAPACITY_PROVENANCE.includes(doc.capacityProvenance)) {
+    errors.push(err('model-invalid', where + '.capacityProvenance', 'capacityProvenance must be one of ' + CAPACITY_PROVENANCE.join(', ')))
+  }
+  if (doc.readOnlyDefault !== undefined && typeof doc.readOnlyDefault !== 'boolean') {
+    errors.push(err('model-invalid', where + '.readOnlyDefault', 'readOnlyDefault must be boolean'))
   }
   if (doc.dataUseTier !== undefined && !DATA_USE_TIERS.includes(doc.dataUseTier)) {
     errors.push(err('model-invalid', where + '.dataUseTier', 'dataUseTier must be one of ' + DATA_USE_TIERS.join(', ')))
   }
   if (typeof doc.enabled !== 'boolean') errors.push(err('model-invalid', where + '.enabled', 'enabled must be boolean'))
   if (doc.engines !== undefined) {
-    if (!Array.isArray(doc.engines) || doc.engines.length === 0) errors.push(err('model-invalid', where + '.engines', 'engines must be a non-empty array when present'))
+    if (!Array.isArray(doc.engines)) errors.push(err('model-invalid', where + '.engines', 'engines must be an array when present; an empty array scopes the model to no engine (fail-closed)'))
     else for (let i = 0; i < doc.engines.length; i += 1) {
       if (typeof doc.engines[i] !== 'string' || doc.engines[i] === '') errors.push(err('model-invalid', where + '.engines[' + i + ']', 'engine id must be a non-empty string'))
     }
@@ -259,7 +302,7 @@ function validateProvider(doc, path) {
 
 /* ── ModelRoute ─────────────────────────────────────────────────────── */
 
-const ROUTE_FIELDS = new Set(['schemaVersion', 'id', 'providerId', 'logicalModelId', 'remoteModelId', 'accessType', 'connectionId', 'executionKind', 'reasoningLevels', 'compatibility', 'availability', 'enabled'])
+const ROUTE_FIELDS = new Set(['schemaVersion', 'id', 'providerId', 'logicalModelId', 'remoteModelId', 'accessType', 'connectionId', 'executionKind', 'reasoningLevels', 'compatibility', 'availability', 'enabled', 'provenance', 'capacityConstraints'])
 
 function validateModelRoute(doc, path) {
   const errors = []
@@ -289,12 +332,22 @@ function validateModelRoute(doc, path) {
   }
   if (!ROUTE_AVAILABILITY.includes(doc.availability)) errors.push(err('route-invalid', where + '.availability', 'availability must be one of ' + ROUTE_AVAILABILITY.join(', ')))
   if (doc.enabled !== undefined && typeof doc.enabled !== 'boolean') errors.push(err('route-invalid', where + '.enabled', 'enabled must be boolean'))
+  if (doc.provenance !== undefined && (typeof doc.provenance !== 'string' || doc.provenance === '')) {
+    errors.push(err('route-invalid', where + '.provenance', 'provenance must be a non-empty string when present'))
+  }
+  if (doc.capacityConstraints !== undefined) {
+    if (!isPlainObject(doc.capacityConstraints)) {
+      errors.push(err('route-invalid', where + '.capacityConstraints', 'capacityConstraints must be an object'))
+    } else if (doc.capacityConstraints.maxOutputTokens !== undefined && (!Number.isInteger(doc.capacityConstraints.maxOutputTokens) || doc.capacityConstraints.maxOutputTokens <= 0)) {
+      errors.push(err('route-invalid', where + '.capacityConstraints.maxOutputTokens', 'route maxOutputTokens must be a positive integer when present'))
+    }
+  }
   return errors
 }
 
 /* ── Connection ─────────────────────────────────────────────────────── */
 
-const CONNECTION_FIELDS = new Set(['schemaVersion', 'id', 'providerId', 'connectionKind', 'authMethod', 'credentialRef', 'status'])
+const CONNECTION_FIELDS = new Set(['schemaVersion', 'id', 'providerId', 'connectionKind', 'authMethod', 'credentialRef', 'status', 'provenance'])
 
 function validateConnection(doc, path) {
   const errors = []
@@ -313,13 +366,16 @@ function validateConnection(doc, path) {
     }
   }
   if (!CONNECTION_STATUSES.includes(doc.status)) errors.push(err('connection-invalid', where + '.status', 'status must be one of ' + CONNECTION_STATUSES.join(', ')))
+  if (doc.provenance !== undefined && (typeof doc.provenance !== 'string' || doc.provenance === '')) {
+    errors.push(err('connection-invalid', where + '.provenance', 'provenance must be a non-empty string when present'))
+  }
   return errors
 }
 
 /* ── ResolvedModeConfiguration / RuntimeModelBinding ─────────────────── */
 
 const SNAPSHOT_FIELDS = new Set(['schemaVersion', 'modeId', 'orchestrationEngineId', 'configurationRevision', 'resolutionId', 'roles'])
-const BINDING_FIELDS = new Set(['schemaVersion', 'resolutionId', 'modeId', 'orchestrationEngineId', 'modeConfigRevision', 'roleId', 'logicalModelId', 'routeId', 'providerId', 'remoteModelId', 'connectionId', 'executionKind', 'protocolId', 'reasoning', 'requiredCapabilities', 'dataUseTier'])
+const BINDING_FIELDS = new Set(['schemaVersion', 'resolutionId', 'modeId', 'orchestrationEngineId', 'modeConfigRevision', 'roleId', 'logicalModelId', 'routeId', 'providerId', 'remoteModelId', 'connectionId', 'executionKind', 'accessType', 'protocolId', 'reasoning', 'requiredCapabilities', 'slotRequirements', 'dataUseTier'])
 
 function validateRuntimeModelBinding(doc, path) {
   const errors = []
@@ -334,7 +390,24 @@ function validateRuntimeModelBinding(doc, path) {
   if (doc.connectionId !== undefined && doc.connectionId !== null && (typeof doc.connectionId !== 'string' || doc.connectionId === '')) {
     errors.push(err('binding-invalid', where + '.connectionId', 'connectionId must be a non-empty string or null'))
   }
-  if (!Array.isArray(doc.requiredCapabilities)) errors.push(err('binding-invalid', where + '.requiredCapabilities', 'requiredCapabilities must be an array'))
+  if (!Array.isArray(doc.requiredCapabilities)) {
+    errors.push(err('binding-invalid', where + '.requiredCapabilities', 'requiredCapabilities must be an array'))
+  } else {
+    for (let i = 0; i < doc.requiredCapabilities.length; i += 1) {
+      if (typeof doc.requiredCapabilities[i] !== 'string' || doc.requiredCapabilities[i] === '') {
+        errors.push(err('binding-invalid', where + '.requiredCapabilities[' + i + ']', 'capability must be a non-empty string'))
+      }
+    }
+  }
+  if (doc.accessType !== undefined && !ACCESS_TYPES.includes(doc.accessType)) {
+    errors.push(err('binding-invalid', where + '.accessType', 'accessType must be one of ' + ACCESS_TYPES.join(', ')))
+  }
+  if (!isPlainObject(doc.slotRequirements)) {
+    errors.push(err('binding-invalid', where + '.slotRequirements', 'slotRequirements must be the effective slot requirement map'))
+  }
+  if (doc.dataUseTier !== undefined && doc.dataUseTier !== null && !DATA_USE_TIERS.includes(doc.dataUseTier)) {
+    errors.push(err('binding-invalid', where + '.dataUseTier', 'dataUseTier must be one of ' + DATA_USE_TIERS.join(', ')))
+  }
   return errors
 }
 
@@ -398,6 +471,11 @@ function validateRegistrySnapshot(doc, path) {
   const models = new Set(doc.models.map((m) => m.id))
   const providers = new Set(doc.providers.map((p) => p.id))
   const connections = new Map(doc.connections.map((c) => [c.id, c]))
+  doc.connections.forEach((c, i) => {
+    if (c && typeof c.providerId === 'string' && c.providerId !== '' && !providers.has(c.providerId)) {
+      errors.push(err('unknown-reference', where + '.connections[' + i + '].providerId', 'unknown provider: ' + c.providerId))
+    }
+  })
   doc.routes.forEach((r, i) => {
     if (!models.has(r.logicalModelId)) errors.push(err('unknown-reference', where + '.routes[' + i + '].logicalModelId', 'unknown logical model: ' + r.logicalModelId))
     if (!providers.has(r.providerId)) errors.push(err('unknown-reference', where + '.routes[' + i + '].providerId', 'unknown provider: ' + r.providerId))
@@ -407,6 +485,42 @@ function validateRegistrySnapshot(doc, path) {
       else if (conn.providerId !== r.providerId) errors.push(err('connection-provider-mismatch', where + '.routes[' + i + '].connectionId', 'connection provider mismatch for route ' + r.id))
     }
   })
+  return errors
+}
+
+/* ── Runtime capabilities descriptor ──────────────────────────────── */
+
+function validateRuntimeCapabilities(runtime, path) {
+  const errors = []
+  const where = path || 'runtime'
+  if (!runtime || typeof runtime !== 'object' || Array.isArray(runtime)) {
+    return [err('runtime-invalid', where, 'runtime descriptor must be an object')]
+  }
+  if (typeof runtime.adapterId !== 'string' || runtime.adapterId === '') {
+    errors.push(err('runtime-invalid', where + '.adapterId', 'adapterId must be a non-empty string'))
+  }
+  if (runtime.executionKinds !== undefined) {
+    if (!Array.isArray(runtime.executionKinds)) {
+      errors.push(err('runtime-invalid', where + '.executionKinds', 'executionKinds must be an array'))
+    } else {
+      for (let i = 0; i < runtime.executionKinds.length; i += 1) {
+        if (!EXECUTION_KINDS.includes(runtime.executionKinds[i])) {
+          errors.push(err('runtime-invalid', where + '.executionKinds[' + i + ']', 'unsupported execution kind: ' + String(runtime.executionKinds[i])))
+        }
+      }
+    }
+  }
+  if (runtime.protocols !== undefined) {
+    if (!Array.isArray(runtime.protocols)) {
+      errors.push(err('runtime-invalid', where + '.protocols', 'protocols must be an array'))
+    } else {
+      for (let i = 0; i < runtime.protocols.length; i += 1) {
+        if (!TRANSPORT_IDS.includes(runtime.protocols[i])) {
+          errors.push(err('runtime-invalid', where + '.protocols[' + i + ']', 'unsupported protocol: ' + String(runtime.protocols[i])))
+        }
+      }
+    }
+  }
   return errors
 }
 
@@ -422,4 +536,5 @@ module.exports = {
   validateRuntimeModelBinding,
   validateResolvedModeConfiguration,
   validateRegistrySnapshot,
+  validateRuntimeCapabilities,
 }

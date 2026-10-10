@@ -126,8 +126,69 @@ falls back, or downshifts reasoning. The snapshot is deep-frozen; its
 
 ## Verification
 
-- `node tests/RegistryCore.Tests.cjs` — 28/28 pass (offline).
+- `node tests/RegistryCore.Tests.cjs` — 42/42 pass (offline).
 - `node tests/RegistryLegacyBaseline.Tests.cjs` — 21/21 pass (unchanged).
 - `node --check` on all new/edited `.cjs` files.
-- `git status --short` shows only the nine new files; zero modifications to
+- `git status --short` shows only Registry files; zero modifications to
   protected components or existing configs.
+
+## R1.1 — Contract hardening (on `feature/model-registry-r1`)
+
+Targeted hardening pass; no redesign, no production behavior change.
+Root causes and fixes:
+
+- **H1 route availability was a denylist.** `resolver.cjs` blocked only
+  `unavailable`/`disabled`, so `auth-required`, `probe-required`,
+  `policy-blocked`, `discovered`, and `unknown` compiled silently. Now an
+  explicit allowlist: only `availability: 'verified'` is executable
+  (`routeEligibility()`); other states report `route-unavailable` or the new
+  `route-not-verified`. Connections use `connectionEligibility()` with the
+  same rule in `compileModeConfig()` and `listEligibleRoutes()`: live
+  `connected` qualifies; offline legacy descriptors (`status: 'unknown'` +
+  `provenance: 'legacy-production-use'`) are accepted as runnable
+  descriptors only, with request-time credential revalidation owned by the
+  runtime adapter; `not-connected`/revoked/disabled/missing fail closed.
+  Legacy routes/connections carry the provenance marker from
+  `legacy-import.cjs`, so frozen R0 parity is preserved without a global
+  fail-open exception.
+- **H2 engine scope guessed Dual for explicit garbage.**
+  `engineScopeOfLegacyEntry()` fell through to `['dual-v1']` for empty,
+  malformed, or unknown-only `agentEngines`. Now: absent stays Dual
+  (backward compatible); any explicit invalid declaration normalizes to an
+  empty scope (eligible for no engine) plus an actionable
+  `legacy-engine-scope-*` import error surfaced via `buildRegistrySnapshot`.
+- **H3 capacity metadata was dropped.** `normalizeLogicalModel()` now
+  preserves valid `contextWindow`/`maxOutputTokens` with
+  `capacityProvenance: 'declared'`, plus `readOnlyDefault` and `dataUseTier`.
+  Present-but-invalid numerics are omitted and reported, never coerced;
+  absent stays absent (unknown, never infinite). Routes accept optional
+  `capacityConstraints` for future provider-specific ceilings without
+  changing logical model identity.
+- **H4 reviewer lost the `requiresSolLocal` contract.** The legacy reviewer
+  resolves only via `sol-local`. The pin lives in mode *data*
+  (`engineering-v1.json` reviewer `requirements.pinnedProvider`), enforced by
+  the generic Core mechanism — no vendor coupling in universal Core logic,
+  no effect on other modes/Nova. Read-only enforcement and solver
+  approval-gating remain controller-owned; bindings record them via
+  `requiredCapabilities`/`slotRequirements`.
+- **H5 fingerprint omitted security semantics.** `resolutionId` now hashes
+  per role: identities, `executionKind`, new `accessType`, `protocolId`,
+  `reasoning`, `requiredCapabilities`, new `slotRequirements` (values, not
+  just names), `dataUseTier`, and `connectionId`, plus mode/engine/revision.
+  Display names, descriptions, and credential references are excluded.
+  Compatibility note: R1.1 ids supersede R1 ids; safe because R1 never cut
+  over to production (no persisted R1 bindings exist).
+- **A1 `legacyDshProviderId`:** kept as a documented TEMPORARY alias;
+  canonical lookups use `id`. R2 must move the alias into the DSH adapter's
+  private projection map. No new consumers.
+- **A2 Muse identity: DEFERRED to R2.** Meta Direct and OpenCode Go stay
+  separate logical models in R1.1 (fixtures, aliases, and bindings key on
+  the legacy ids). R2 plan: single `meta/muse-spark-1.3-contributor` model,
+  two routes, legacy-id alias map, golden-fixture review before cutover.
+- **A3 schema gaps closed:** unknown capability/requirement keys rejected;
+  duplicate internal role across slots rejected; `internalRoles` entries must
+  be covered by a slot or optional capability (fixes dead `covered` code);
+  `connection.providerId` must exist; bindings validate `accessType`,
+  `requiredCapabilities` entries, `dataUseTier`, and `slotRequirements`;
+  new `validateRuntimeCapabilities()` fails closed on malformed descriptors
+  (compile errors; listing returns empty).
