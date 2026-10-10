@@ -100,6 +100,7 @@ $suites = @(
     [ordered]@{ name='PlatformSupport'; script='tests/PlatformSupport.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='StartupProviderIsolation'; script='tests/StartupProviderIsolation.Tests.ps1'; executable=$powershell; kind='powershell' },
     [ordered]@{ name='PowerShellPortability'; script='tests/PowerShellPortability.Tests.ps1'; executable=$powershell; kind='powershell' },
+    [ordered]@{ name='RegistryInstalledRuntime'; script='tests/RegistryInstalledRuntime.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='AihControllerHost'; script='tests/AihControllerHost.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextCheckpointV2'; script='tests/ContextCheckpointV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextTrustV2'; script='tests/ContextTrustV2.Tests.cjs'; executable=$layout.Node; kind='node' },

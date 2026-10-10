@@ -26,7 +26,6 @@ import detail from './detail.cjs'
 import gate from './gate.cjs'
 import engineering from './engineering.cjs'
 import registryAdapter from './registry.cjs'
-import registryServiceModule from '../../../config/registry/service.cjs'
 
 const name = 'nexus-controller'
 
@@ -632,6 +631,9 @@ function apply(ctx) {
     // Read/validate/compile plus revision-checked staged saves under
     // data/registry/. Never touches session bindings, presets,
     // settings.yaml or routing ledgers (session-pinning boundary).
+    const registryServiceModule = createRequire(import.meta.url)(
+      join(installRoot, 'config', 'registry', 'service.cjs'),
+    )
     const registryService = registryServiceModule.createService({ installRoot, dataRoot })
     const registryHandlers = registryAdapter.createRegistryHandlers(registryService)
     webCtx.effect(

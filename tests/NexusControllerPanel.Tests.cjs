@@ -43,6 +43,16 @@ function tmpDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
 }
 
+function hostDataRoot(prefix) {
+  const installRoot = tmpDir(prefix)
+  // The host now loads Registry runtime code from its authoritative install
+  // root, so lifecycle fixtures must carry the same installed config closure.
+  fs.cpSync(path.join(ROOT, 'config', 'registry'), path.join(installRoot, 'config', 'registry'), { recursive: true })
+  const dataRoot = path.join(installRoot, 'data')
+  fs.mkdirSync(dataRoot)
+  return dataRoot
+}
+
 /** In-memory file map reader for buildControllerSnapshot. Keys must be absolute. */
 function memoryReader(files) {
   return (filePath) => {
@@ -491,7 +501,7 @@ async function main() {
 
   // ── 11. host plugin: route registration + endpoint handler ───────────────
   {
-    const dataRoot = tmpDir('nexus-ctr-')
+    const dataRoot = hostDataRoot('nexus-ctr-')
     const workspace = path.join(dataRoot, 'ws')
     const files = fixtureFileMap(dataRoot, workspace, {})
     writeTree(dataRoot, files)
@@ -597,7 +607,7 @@ async function main() {
   // ── 11b. REAL-cordis regression: plugin activates before webServer, the
   //         service is provided later, and the route registers then ────────
   {
-    const dataRoot = tmpDir('nexus-ctr-cordis-')
+    const dataRoot = hostDataRoot('nexus-ctr-cordis-')
     const workspace = path.join(dataRoot, 'ws')
     writeTree(dataRoot, fixtureFileMap(dataRoot, workspace, {}))
 
@@ -1842,7 +1852,7 @@ async function main() {
 
   // ── 21. detail cache: mtime-keyed reuse + fail-closed missing files ──────
   {
-    const dataRoot = tmpDir('nexus-ctr-cache-')
+    const dataRoot = hostDataRoot('nexus-ctr-cache-')
     const workspace = path.join(dataRoot, 'ws')
     const sessionId = 'session-cache-01'
     const decision = {
@@ -2892,7 +2902,12 @@ async function main() {
 
   // ── 32. PHASE 2.1: host GET route — engineering profile state ───────────
   {
-    const dataRoot = tmpDir('nexus-ctr-engr-')
+    const dataRoot = hostDataRoot('nexus-ctr-engr-')
+    // Exercise the real installed CLI boundary: it requires valid profile
+    // and model catalogs, as well as its scripts, under the host install root.
+    const installRoot = path.dirname(dataRoot)
+    fs.cpSync(path.join(ROOT, 'scripts'), path.join(installRoot, 'scripts'), { recursive: true })
+    fs.cpSync(path.join(ROOT, 'config'), path.join(installRoot, 'config'), { recursive: true })
     writeTree(dataRoot, {
       [path.join(dataRoot, 'settings.yaml')]: 'engineering-profile: glm-codex\n',
     })
@@ -2918,12 +2933,20 @@ async function main() {
       assert.equal(res.code, 200)
       assert.equal(payload.schemaVersion, 1)
       assert.equal(payload.preferredProfile.id, 'glm-codex')
-      // DSH_HOME points at an isolated tmp root without config profiles: the
-      // route fails closed and falls back to the id as displayName.
-      assert.equal(payload.preferredProfile.displayName, 'glm-codex')
-      // isolated tmp DSH_HOME has no config files → fail-closed empty state
-      assert.ok(Array.isArray(payload.profiles) && payload.profiles.length === 0, 'isolated root: no profiles exposed, state degrades safely')
-      assert.ok(payload.roleModels && Array.isArray(payload.roleModels.primaryEngineer) && payload.roleModels.primaryEngineer.length === 0, 'isolated root: role models degrade to empty lists')
+      assert.equal(payload.preferredProfile.displayName, 'GLM + Codex')
+      assert.deepEqual(payload.profiles.map(profile => profile.id), ['deepseek-codex', 'glm-codex'], 'installed catalogs expose the two built-in Dual profiles')
+      assert.ok(payload.roleModels && Array.isArray(payload.roleModels.primaryEngineer) && payload.roleModels.primaryEngineer.length > 0, 'installed model catalog supplies primary engineer choices')
+      // Missing CLI catalogs fail closed at the host boundary; they cannot
+      // produce a successful editor response with an invented empty contract.
+      const profilesFile = path.join(installRoot, 'config', 'engineering-profiles.json')
+      fs.renameSync(profilesFile, profilesFile + '.held')
+      try {
+        await engineeringRoute.handler({ method: 'GET', url: '/nexus/engineering-profile.json' }, res)
+        assert.equal(res.code, 503)
+        assert.equal(JSON.parse(res.body).error, 'engineering-route-contract-unavailable')
+      } finally {
+        fs.renameSync(profilesFile + '.held', profilesFile)
+      }
       // GET with POST verb → 405
       await engineeringRoute.handler({ method: 'POST', url: '/nexus/engineering-profile.json' }, res)
       assert.equal(res.code, 405)

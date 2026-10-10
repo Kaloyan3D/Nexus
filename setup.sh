@@ -201,6 +201,9 @@ copy_tree() {
     cp -f "$_src/$_rel" "$_dst/$_rel"
   done
 }
+# Registry code and mode manifests are managed runtime assets. Operator-owned
+# staged configurations remain under data/registry/ and are never copied here.
+copy_tree "$AIH_SOURCE_ROOT/config/registry" "$AIH_INSTALL_ROOT/config/registry"
 copy_tree "$AIH_SOURCE_ROOT/docs" "$AIH_INSTALL_ROOT/docs"
 copy_tree "$AIH_SOURCE_ROOT/scripts" "$AIH_INSTALL_ROOT/scripts"
 copy_tree "$AIH_SOURCE_ROOT/tests" "$AIH_INSTALL_ROOT/tests"
