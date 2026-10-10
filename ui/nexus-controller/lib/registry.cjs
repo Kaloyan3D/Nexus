@@ -20,14 +20,21 @@
  *                                                  expectedRevision?,
  *                                                  source?, adoptedFrom? }
  *
- * Write boundary (R3.4): mutations reuse the exact trust boundary of the
- * existing engineering-profile-action route (loopback host webServer serving
- * the local GUI; no new network surface), plus per-request hardening that
- * the legacy route lacks: 64 KiB body cap (413), strict schema validation
- * (422), optimistic-concurrency revisions (409 on stale), and a
- * same-origin-when-present check (403). Responses are secret-free by
- * construction (service layer asserts it); error details carry stable codes
- * and non-secret ids only.
+ * Write boundary (R3.4, hardened R3.1 H1): mutations reuse the exact trust
+ * boundary of the existing engineering-profile-action route (loopback host
+ * webServer serving the local GUI; no new network surface), plus
+ * per-request hardening that the legacy route lacks: 64 KiB body cap
+ * (413), strict schema validation (422), optimistic-concurrency revisions
+ * (409 on stale / write-conflict), and a full origin-tuple check (403).
+ * The check compares scheme, hostname and effective port of the declared
+ * Origin (else Referer) against the Host header and socket scheme — no
+ * loopback exemption, no localhost/127.0.0.1 equivalence, opaque and
+ * malformed origins fail closed. Absent Origin/Referer still passes for
+ * non-browser callers. This is a CSRF boundary, NOT authentication: the
+ * host issues no caller credential (verified live), so any local process
+ * can call these endpoints exactly like the pre-existing Nexus routes.
+ * Responses are secret-free by construction (service layer asserts it);
+ * error details carry stable codes and non-secret ids only.
  *
  * Session pinning (R3.6): no handler reads or writes session bindings,
  * presets, settings.yaml, or routing ledgers. Saves stage preferences for
@@ -49,38 +56,146 @@ function methodNotAllowed(res) {
   respond(res, 405, { ok: false, error: 'method-not-allowed' })
 }
 
-function hostOf(value) {
-  if (typeof value !== 'string' || value === '') return null
-  try {
-    const parsed = new URL(value, 'http://x')
-    // Absolute URL with a foreign scheme/host -> its hostname; a bare path
-    // (Referer sent as origin+path is absolute in practice) falls through.
-    if (parsed.host && parsed.host !== 'x') return parsed.hostname.toLowerCase()
-    return null
-  } catch {
-    return null
-  }
+function defaultPortForScheme(scheme) {
+  if (scheme === 'http') return '80'
+  if (scheme === 'https') return '443'
+  return null
 }
 
 /**
- * Same-origin check for browser callers. Non-browser callers (no Origin /
- * Referer headers, e.g. the existing UI fetch paths) are allowed through —
- * the check only constrains callers that DECLARE a foreign origin, which a
- * cross-site form/fetch always does. Loopback and same-host origins pass.
+ * Split a Host header into { hostname, port }. Hostname is lowercased;
+ * port is the declared string or null when absent. Returns null when the
+ * header is missing or malformed. IPv6 literals keep their brackets on
+ * both sides of every comparison, matching WHATWG URL parsing.
+ */
+function splitHostPort(hostHeader) {
+  if (typeof hostHeader !== 'string') return null
+  const text = hostHeader.trim()
+  if (text === '') return null
+  let hostname = null
+  let port = null
+  if (text[0] === '[') {
+    const close = text.indexOf(']')
+    if (close === -1) return null
+    hostname = text.slice(0, close + 1).toLowerCase()
+    const rest = text.slice(close + 1)
+    if (rest !== '') {
+      if (rest[0] !== ':') return null
+      port = rest.slice(1)
+    }
+  } else {
+    const idx = text.lastIndexOf(':')
+    if (idx !== -1) {
+      if (!/^[0-9]+$/.test(text.slice(idx + 1))) return null
+      hostname = text.slice(0, idx).toLowerCase()
+      port = text.slice(idx + 1)
+    } else {
+      hostname = text.toLowerCase()
+    }
+  }
+  if (!hostname || /\s/.test(hostname)) return null
+  if (port !== null && !/^[0-9]+$/.test(port)) return null
+  return { hostname, port }
+}
+
+/**
+ * Parse one Origin header value into { scheme, hostname, port }. Only
+ * origin-shaped http(s) values qualify; anything else (opaque 'null',
+ * malformed text, merged duplicates, non-http schemes, paths or userinfo)
+ * returns null and the caller fails closed. An empty value is NOT an
+ * origin at all — callers treat it as absent.
+ */
+function parseOriginValue(value) {
+  if (typeof value !== 'string') return null
+  const text = value.trim()
+  if (text === '') return null
+  if (text === 'null') return { opaque: true }
+  if (text.indexOf(',') !== -1) return null
+  let url = null
+  try {
+    url = new URL(text)
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+  if (url.pathname !== '/' || url.search !== '' || url.hash !== '' || url.username !== '' || url.password !== '') return null
+  const scheme = url.protocol.slice(0, -1)
+  const port = url.port !== '' ? url.port : defaultPortForScheme(scheme)
+  if (port === null) return null
+  return { scheme, hostname: url.hostname.toLowerCase(), port }
+}
+
+function parseRefererOrigin(value) {
+  if (typeof value !== 'string' || value.trim() === '') return null
+  let url = null
+  try {
+    url = new URL(value.trim())
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+  const scheme = url.protocol.slice(0, -1)
+  const port = url.port !== '' ? url.port : defaultPortForScheme(scheme)
+  if (port === null) return null
+  return { scheme, hostname: url.hostname.toLowerCase(), port }
+}
+
+function sameTuple(a, b) {
+  return !!a && !!b && !a.opaque && !b.opaque
+    && a.scheme === b.scheme && a.hostname === b.hostname && a.port === b.port
+}
+
+/**
+ * Full origin-tuple check (R3.1 H1). The declared caller origin (Origin,
+ * else Referer) must equal the server tuple (scheme from the socket, host
+ * and effective port from the Host header) on ALL three components.
+ *
+ * Deliberately strict where the R3 check was loose:
+ * - every loopback origin is NOT same-origin: a page served from
+ *   127.0.0.1:9999 (or localhost:9999) is a different origin from the
+ *   127.0.0.1:3080 GUI and is rejected;
+ * - 'localhost' and '127.0.0.1' are different hostnames and never equated;
+ * - opaque ('null'), malformed, merged-duplicate and non-http origins fail
+ *   closed, as do conflicting Origin/Referer pairs and declared origins
+ *   without a parseable server Host tuple.
+ *
+ * Absent Origin AND Referer still passes: non-browser callers (the shipped
+ * UI fetch paths, curl, host tooling) declare no origin. This check is a
+ * CSRF boundary, NOT authentication: any local process can send requests
+ * without an Origin header, exactly like every pre-existing Nexus route.
+ * Real authentication would require a host-issued caller credential, which
+ * this host does not provide (verified live: bare loopback requests with
+ * no cookies or tokens receive 200; the host emits no CORS policy
+ * headers and answers preflights with 405).
  */
 function checkSameOrigin(req) {
   const headers = (req && req.headers) || {}
-  const declared = typeof headers.origin === 'string' && headers.origin !== ''
-    ? headers.origin
-    : (typeof headers.referer === 'string' ? headers.referer : (typeof headers.referrer === 'string' ? headers.referrer : ''))
-  if (!declared) return null
-  const originHost = hostOf(declared)
-  if (!originHost) return null
-  const loopback = originHost === 'localhost' || originHost === '127.0.0.1' || originHost === '::1' || originHost === '[::1]'
-  if (loopback) return null
-  const hostHeader = typeof headers.host === 'string' ? headers.host.split(':')[0].toLowerCase() : null
-  if (hostHeader && originHost === hostHeader) return null
-  return 'origin-forbidden'
+  const hasOrigin = typeof headers.origin === 'string' && headers.origin.trim() !== ''
+  const refererRaw = typeof headers.referer === 'string' ? headers.referer
+    : (typeof headers.referrer === 'string' ? headers.referrer : undefined)
+  const hasReferer = typeof refererRaw === 'string' && refererRaw.trim() !== ''
+  if (!hasOrigin && !hasReferer) return null
+  let caller = null
+  if (hasOrigin) {
+    const parsed = parseOriginValue(headers.origin)
+    if (!parsed || parsed.opaque) return 'origin-forbidden'
+    caller = parsed
+  }
+  if (hasReferer) {
+    const parsed = parseRefererOrigin(refererRaw)
+    if (!parsed) return 'origin-forbidden'
+    if (caller && !sameTuple(caller, parsed)) return 'origin-forbidden'
+    if (!caller) caller = parsed
+  }
+  const server = splitHostPort(headers.host)
+  if (!server) return 'origin-forbidden'
+  const scheme = req && req.socket && req.socket.encrypted ? 'https' : 'http'
+  const serverPort = server.port !== null ? server.port : defaultPortForScheme(scheme)
+  if (serverPort === null) return 'origin-forbidden'
+  if (caller.scheme !== scheme || caller.hostname !== server.hostname || caller.port !== serverPort) {
+    return 'origin-forbidden'
+  }
+  return null
 }
 
 /**
@@ -129,7 +244,7 @@ function readBoundedJson(req, limit) {
 
 function errorStatusOf(errors) {
   const codes = (errors || []).map((e) => (e && e.code) || '')
-  if (codes.indexOf('stale-revision') !== -1) return 409
+  if (codes.indexOf('stale-revision') !== -1 || codes.indexOf('write-conflict') !== -1) return 409
   if (codes.indexOf('snapshot-unavailable') !== -1) return 503
   if (codes.indexOf('registry-store-corrupt') !== -1 || codes.indexOf('registry-store-unreadable') !== -1 || codes.indexOf('registry-store-unwritable') !== -1) return 500
   return 422

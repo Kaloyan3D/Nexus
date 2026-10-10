@@ -295,7 +295,8 @@ async function main() {
     const bytesBefore = fs.readFileSync(configStore.storeFilePath(dir), 'utf8')
     const hooks = {
       readFileSync: (p, e) => fs.readFileSync(p, e),
-      writeFileSync: () => { throw new Error('disk full') },
+      writeFileSync: () => { throw new Error('disk full at temp stage') },
+      writeFileExclusive: (p, data, opts) => fs.writeFileSync(p, data, opts),
       renameSync: (a, b) => fs.renameSync(a, b),
       mkdirSync: (p, o) => fs.mkdirSync(p, o),
       unlinkSync: (p) => fs.unlinkSync(p),
@@ -307,7 +308,7 @@ async function main() {
     assert.equal(r.ok, false)
     assert.ok(codes(r.errors).includes('registry-store-unwritable'))
     assert.equal(fs.readFileSync(configStore.storeFilePath(dir), 'utf8'), bytesBefore)
-    assert.ok(!walkFiles(dir).some((f) => f.includes('.tmp-')), 'no temp leftovers')
+    assert.ok(!walkFiles(dir).some((f) => f.includes('.tmp-') || f.includes('.claim-')), 'no temp or claim leftovers')
   })
 
   await check('R3 invalid configs never reach disk (no partial save)', () => {
@@ -397,12 +398,15 @@ async function main() {
     assert.deepEqual(good.body, { a: 1 })
   })
 
-  await check('R3 same-origin gate: foreign blocked, absent/loopback/same-host pass', () => {
+  // R3.1 H1 supersedes the old loopback exemption: only the full tuple
+  // (scheme+host+port) passes; the matrix lives in RegistryR3Hardening.
+  await check('R3 same-origin gate: absent passes, exact tuple passes, rest blocked', () => {
     assert.equal(registryAdapter.checkSameOrigin({ headers: {} }), null)
     assert.equal(registryAdapter.checkSameOrigin({ headers: { origin: 'https://evil.example' } }), 'origin-forbidden')
-    assert.equal(registryAdapter.checkSameOrigin({ headers: { origin: 'http://localhost:3080' } }), null)
-    assert.equal(registryAdapter.checkSameOrigin({ headers: { origin: 'http://127.0.0.1:3080' } }), null)
+    assert.equal(registryAdapter.checkSameOrigin({ headers: { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' } }), null)
     assert.equal(registryAdapter.checkSameOrigin({ headers: { host: 'app.internal:3080', origin: 'http://app.internal:3080' } }), null)
+    assert.equal(registryAdapter.checkSameOrigin({ headers: { origin: 'http://localhost:3080' } }), 'origin-forbidden')
+    assert.equal(registryAdapter.checkSameOrigin({ headers: { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:9999' } }), 'origin-forbidden')
   })
 
   const dataH = tmpDir('r3-host-')

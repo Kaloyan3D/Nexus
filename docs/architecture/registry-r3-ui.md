@@ -2,7 +2,7 @@
 
 **Phase:** R3 (configuration experience, not execution cutover). **Not a production cutover.**
 **Branch:** `feature/model-registry-v1`. **Spec:** `NEXUS_REGISTRY_ARCHITECTURE.md` v0.2 §5–7, §10–11, §13 Phase R3, §14, §20.
-**Suites:** `tests/RegistryR3UI.Tests.cjs` (29 checks, offline) + updated route-contract pins in `tests/NexusControllerPanel.Tests.cjs`.
+**Suites:** `tests/RegistryR3UI.Tests.cjs` (29 checks, offline) + updated route-contract pins in `tests/NexusControllerPanel.Tests.cjs` + `tests/RegistryR3Hardening.Tests.cjs` (16 checks, R3.1 H1/H2, offline).
 **Predecessors:** R1 core 45/45, R0 frozen baseline 21/21, R2/R2.1 compat 41/41, composed routing matrix 8/8 — all still passing (see §7).
 
 ## 1. Implemented UI architecture and verified visual description
@@ -222,3 +222,68 @@ test expectation was touched.
 - Also open: friendly provider display names from a Nexus-owned source (not
   string-guessed), per-mode config history beyond latest revision, and
   live-GUI visual sign-off.
+
+## 9. R3.1 hardening — guarantees, limitations, sign-off
+
+**Suite:** `tests/RegistryR3Hardening.Tests.cjs` 16/16 PASS. R3/R2/R1/R0,
+routing matrix (8/8), installed-runtime (3/3), engine/preset/route and
+isolation suites all still green (see final report for the full table).
+
+### H1 — exact guarantees
+
+- Every registry route now enforces the FULL origin tuple: the declared
+  caller origin (Origin, else Referer) must equal scheme + hostname +
+  effective port derived from the Host header and socket scheme.
+- Verified live against the running host (read-only probes, pre-fix):
+  cross-port `127.0.0.1:9999` → 200, `localhost:9999` → 200, `Origin: null`
+  → 200, malformed Origin → 200, foreign origin → 403, preflight → 405
+  with no CORS headers. The first four 200s were the defect; the suite
+  pins them to 403 now (`origin-forbidden`).
+- Rejected classes: cross-port loopback, `localhost` vs `127.0.0.1`
+  aliasing, scheme mismatch, opaque/malformed/merged-duplicate origins,
+  conflicting Origin+Referer pairs, declared origins without a parseable
+  Host tuple. Absent Origin AND Referer still passes (non-browser
+  callers, including the shipped UI fetches — verified live at 200).
+- Default ports normalize (http 80 / https 443); IPv6 bracket forms
+  compare consistently; header casing is normalized.
+
+### H1 — explicit limitations (not authentication)
+
+- The host issues NO caller credential: bare loopback requests with no
+  cookies or tokens receive 200, the DSH checkout exposes no CORS/auth
+  transport source to audit, and no `Access-Control-Allow-Origin` is ever
+  emitted. The tuple check is therefore a CSRF boundary only — any local
+  process can call these endpoints header-free, exactly like the
+  pre-existing `gate-action` and `engineering-profile-action` routes.
+- Mitigating transport facts (verified live): no CORS reflection, and
+  non-simple browser writes (`content-type: application/json`) are
+  preflighted and answered 405 — but simple/request-mode writes can still
+  land, which is why the Origin gate exists and stays.
+- **Live re-verification of the fix is PENDING host reload:** the running
+  GUI serves the pre-fix bundle from its installed copy, so post-fix live
+  probes still return the old 200s. The unit + mocked-transport matrix
+  carries the guarantee until a host reload; re-run the §9 probe table
+  then (expected: 403 cross-port/null/malformed, 200 absent/same-origin).
+
+### H2 — exact guarantees
+
+- One winner per (mode, nextRevision): exclusive `wx` claim files decide
+  between same- and cross-process writers. Proven by a deterministic
+  stale-view interleave test (no timing dependence): the loser reports
+  `stale-revision` (rival committed) or `write-conflict` (live contender,
+  HTTP 409 like stale) and the winner's update survives byte-exact.
+- Temp files are unique per attempt (pid + timestamp + counter + crypto
+  randomness; asserted distinct across rapid saves) and every failure
+  path removes its own temp and claim files.
+- Stale claims (crashed writers, age > 30 s) are reaped with one bounded
+  retry; live foreign claims are never touched; attempts are capped at
+  two — no locks, no spinning, no unbounded retries.
+
+### Remaining visual sign-off
+
+- Still required before any R6 activation discussion: a live-GUI session
+  showing the Registry panel (mode selector, slot cards, staged-save
+  flow, v3 preview-disabled) via screenshot, plus the §9 live probe
+  table re-run after host reload. The offline VM static-markup smoke
+  (v1/v2/v3 markup, tier notice, staged banner, no `aih-*`) remains the
+  executed visual evidence to date.

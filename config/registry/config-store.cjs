@@ -26,9 +26,17 @@
  *   touches another entry.
  * - Monotonic revisions + optimistic concurrency: every write carries the
  *   expected revision (null only for create). A mismatch fails closed with
- *   'stale-revision' and the file is left untouched.
- * - Atomic replacement: write temp file in the same directory + rename, so a
- *   crash or failed validation never leaves a half-written document.
+ *   'stale-revision' and the file is left untouched. Under concurrent
+ *   writers (same or other processes), an exclusive per-(mode, revision)
+ *   claim file decides the single winner; the loser reports
+ *   'stale-revision' (rival already committed) or 'write-conflict' (live
+ *   contender), and a stale claim from a crashed writer is reaped after
+ *   CLAIM_STALE_MS with one bounded retry — no locks, no spinning.
+ * - Atomic replacement: uniquely-named temp file (pid + timestamp +
+ *   counter + crypto randomness, so concurrent writers cannot collide)
+ *   in the same directory + rename, so a crash or failed validation never
+ *   leaves a half-written document. Failed attempts remove their own temp
+ *   and claim files.
  * - No partial save: schema validation, secret scan and revision checks all
  *   run BEFORE any filesystem mutation.
  * - Secret-free: values that look like real credentials fail the write with
@@ -42,6 +50,7 @@
  * filesystem access is injectable (fsHooks) so tests run fully offline.
  */
 
+const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
 const schemas = require('./schemas.cjs')
@@ -50,6 +59,13 @@ const STORE_SCHEMA_VERSION = 1
 const STORE_DIR = 'registry'
 const STORE_FILE = 'mode-configurations.json'
 const STORE_SOURCES = ['operator-save', 'legacy-adopt']
+// R3.1 H2: cross-process write arbitration. Claim files are created with
+// exclusive ('wx') semantics so exactly one contender wins a given next
+// revision; stale claims (crashed writers) age out and are reaped.
+// Bounded: at most CLAIM_MAX_ATTEMPTS claim rounds, no spinning, no locks.
+const CLAIM_STALE_MS = 30000
+const CLAIM_MAX_ATTEMPTS = 2
+let tempCounter = 0
 
 function storeFilePath(dataRoot) {
   return path.join(String(dataRoot), STORE_DIR, STORE_FILE)
@@ -59,11 +75,34 @@ function defaultFsHooks() {
   return {
     readFileSync: (p, enc) => fs.readFileSync(p, enc),
     writeFileSync: (p, data, opts) => fs.writeFileSync(p, data, opts),
+    writeFileExclusive: (p, data, opts) => fs.writeFileSync(p, data, { ...(opts || {}), flag: 'wx' }),
     renameSync: (a, b) => fs.renameSync(a, b),
     mkdirSync: (p, opts) => fs.mkdirSync(p, opts),
     unlinkSync: (p) => fs.unlinkSync(p),
     chmodSync: (p, mode) => fs.chmodSync(p, mode),
     statSync: (p) => fs.statSync(p),
+  }
+}
+
+function sanitizeForFile(name) {
+  const clean = String(name).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80)
+  return clean === '' ? 'mode' : clean
+}
+
+function claimFilePath(target, modeId, nextRevision) {
+  return target + '.claim-' + sanitizeForFile(modeId) + '-r' + nextRevision
+}
+
+function nextTempPath(target) {
+  tempCounter = (tempCounter + 1) % 1000000
+  return target + '.tmp-' + process.pid + '-' + Date.now().toString(36) + '-' + tempCounter + '-' + crypto.randomBytes(8).toString('hex')
+}
+
+function claimAgeMs(hooks, claimPath) {
+  try {
+    return Date.now() - hooks.statSync(claimPath).mtimeMs
+  } catch {
+    return null
   }
 }
 
@@ -173,9 +212,25 @@ function loadModeEntry(dataRoot, modeId, fsHooks) {
 /**
  * Persist one mode configuration. All checks run before any write:
  * schema, mode-id match, secret scan, revision match. The write itself is
- * temp-file + atomic rename; a mid-write failure leaves the previous file
- * (or its absence) intact. Returns { ok: true, revision } or
- * { ok: false, errors }.
+ * a three-phase commit safe under concurrent writers in THIS or OTHER
+ * processes (the host is single-process today, but operator tooling and
+ * future workers share the same data root):
+ *
+ * 1. Win an exclusive claim file for (mode, nextRevision) via atomic
+ *    'wx' creation. A competing live claim fails closed here with
+ *    'write-conflict' — two writers on the same revision can never both
+ *    succeed. A claim older than CLAIM_STALE_MS is a crashed writer and
+ *    is reaped once before a single bounded retry.
+ * 2. Re-read the store UNDER the claim and re-check the revision, closing
+ *    the load-then-write race: a writer that loaded stale bytes fails with
+ *    'stale-revision' and never overwrites the winner.
+ * 3. Write a uniquely-named temp file (pid + timestamp + counter +
+ *    crypto randomness, so names cannot collide) + atomic rename, then
+ *    remove the claim. Any failure removes what this attempt created and
+ *    leaves the previous file (or its absence) intact.
+ *
+ * No cross-process locks, no retries beyond one bounded claim round.
+ * Returns { ok: true, revision } or { ok: false, errors }.
  */
 function saveModeConfig(dataRoot, modeId, config, expectedRevision, options) {
   const opts = options || {}
@@ -233,17 +288,71 @@ function saveModeConfig(dataRoot, modeId, config, expectedRevision, options) {
   }
   const dir = path.join(String(dataRoot), STORE_DIR)
   const target = storeFilePath(dataRoot)
-  const tmp = target + '.tmp-' + process.pid + '-' + Date.now()
-  try {
-    hooks.mkdirSync(dir, { recursive: true })
-    hooks.writeFileSync(tmp, text, { encoding: 'utf8', mode: 0o600 })
-    try { hooks.chmodSync(tmp, 0o600) } catch { /* best effort; Windows ACLs differ */ }
-    hooks.renameSync(tmp, target)
-  } catch {
-    try { hooks.unlinkSync(tmp) } catch { /* best-effort temp cleanup */ }
-    return { ok: false, errors: [err('registry-store-unwritable', 'store', 'mode configuration store cannot be written')] }
+  const claimPath = claimFilePath(target, modeId, nextRevision)
+  const claimPayload = JSON.stringify({ pid: process.pid, at: new Date().toISOString() })
+  const conflict = () => ({
+    ok: false,
+    errors: [err('write-conflict', 'expectedRevision', 'a concurrent writer holds the write claim for mode ' + modeId + '; reload and retry with the current revision')],
+  })
+  for (let attempt = 1; attempt <= CLAIM_MAX_ATTEMPTS; attempt += 1) {
+    let claimed = false
+    try {
+      hooks.mkdirSync(dir, { recursive: true })
+      hooks.writeFileExclusive(claimPath, claimPayload, { encoding: 'utf8', mode: 0o600 })
+      claimed = true
+    } catch (e) {
+      if (!e || e.code !== 'EEXIST') {
+        return { ok: false, errors: [err('registry-store-unwritable', 'store', 'mode configuration store cannot be written')] }
+      }
+      // A claim already exists: decide between a completed rival, a live
+      // contender, and a crashed writer's leftover — from a fresh read,
+      // never from our possibly stale view.
+      const fresh = loadStore(dataRoot, hooks)
+      if (!fresh.store) return { ok: false, errors: fresh.errors }
+      const freshEntry = fresh.store.modes[modeId] || null
+      const freshRevision = freshEntry ? freshEntry.revision : null
+      if (freshRevision !== currentRevision) {
+        return { ok: false, errors: [err('stale-revision', 'expectedRevision', 'stale revision for mode ' + modeId + ': stored revision moved to ' + String(freshRevision))] }
+      }
+      const age = claimAgeMs(hooks, claimPath)
+      if (age === null) continue // claim vanished mid-race; one bounded retry
+      if (age > CLAIM_STALE_MS) {
+        try {
+          hooks.unlinkSync(claimPath)
+        } catch {
+          return conflict()
+        }
+        continue // seized back from a crashed writer; retry the claim
+      }
+      return conflict() // live contender owns this revision
+    }
+    if (!claimed) return conflict()
+    // Re-validate under the claim: our load may predate a rival's commit.
+    const guarded = loadStore(dataRoot, hooks)
+    if (!guarded.store) {
+      try { hooks.unlinkSync(claimPath) } catch { /* best-effort claim cleanup */ }
+      return { ok: false, errors: guarded.errors }
+    }
+    const guardedEntry = guarded.store.modes[modeId] || null
+    const guardedRevision = guardedEntry ? guardedEntry.revision : null
+    if (guardedRevision !== currentRevision) {
+      try { hooks.unlinkSync(claimPath) } catch { /* best-effort claim cleanup */ }
+      return { ok: false, errors: [err('stale-revision', 'expectedRevision', 'stale revision for mode ' + modeId + ': stored revision moved to ' + String(guardedRevision))] }
+    }
+    const tmp = nextTempPath(target)
+    try {
+      hooks.writeFileSync(tmp, text, { encoding: 'utf8', mode: 0o600 })
+      try { hooks.chmodSync(tmp, 0o600) } catch { /* best effort; Windows ACLs differ */ }
+      hooks.renameSync(tmp, target)
+    } catch {
+      try { hooks.unlinkSync(tmp) } catch { /* best-effort temp cleanup */ }
+      try { hooks.unlinkSync(claimPath) } catch { /* best-effort claim cleanup */ }
+      return { ok: false, errors: [err('registry-store-unwritable', 'store', 'mode configuration store cannot be written')] }
+    }
+    try { hooks.unlinkSync(claimPath) } catch { /* best-effort claim cleanup */ }
+    return { ok: true, revision: nextRevision }
   }
-  return { ok: true, revision: nextRevision }
+  return conflict()
 }
 
 module.exports = {
