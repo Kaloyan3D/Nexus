@@ -35,11 +35,12 @@
 
 const crypto = require('node:crypto')
 const providerConfig = require('./provider-config.cjs')
+const pinnedTransport = require('./pinned-transport.cjs')
 
 const DEFAULT_TIMEOUT_MS = 15000
 const MAX_RESPONSE_BYTES = 262144
 const MAX_PROBE_INFLIGHT = 4
-const PROBE_CONTRACT_VERSION = 2
+const PROBE_CONTRACT_VERSION = 3
 const PROBE_USER_AGENT = 'nexus-registry-probe/1 (synthetic capability check; no user content)'
 
 function err(code, p, message) {
@@ -206,25 +207,14 @@ async function secureFetch(fetchImpl, url, opts) {
     throw err('endpoint-forbidden-ssrf', 'probe.target', 'probe URL must not embed userinfo/credentials')
   }
   const host = parsed.hostname
-  let addresses = []
-  if (providerConfig.isRestrictedAddress(host) && /^(\d{1,3}\.){3}\d{1,3}$/.test(providerConfig.bracketless(host.toLowerCase())) === false && host.indexOf(':') === -1 && host !== 'localhost') {
-    // DNS name (not a literal): resolve every address for target checks.
-    const lookup = typeof o.lookup === 'function' ? o.lookup : defaultLookup
-    try {
-      addresses = (await lookup(host)) || []
-    } catch {
-      addresses = []
-    }
-  } else {
-    addresses = [{ address: host, family: host.indexOf(':') !== -1 ? 6 : 4 }]
-  }
-  const targetErrors = providerConfig.checkRequestTarget(host, addresses, o.transportId, o.endpointOptions)
-  if (targetErrors.length > 0) throw targetErrors[0]
   const bodyText = o.body !== undefined ? String(o.body) : undefined
   const syntheticError = bodyText !== undefined ? checkSyntheticBody(bodyText) : null
   if (syntheticError) throw syntheticError
-
   const release = await acquireProbeSlot(outerSignal)
+  if (outerSignal && outerSignal.aborted) {
+    try { release(); } catch {}
+    throw err('probe-cancelled', 'probe', 'probe cancelled while queued')
+  }
   const internal = new AbortController()
   let timedOut = false
   const timer = setTimeout(() => { timedOut = true; try { internal.abort(); } catch {} }, timeoutMs)
@@ -233,16 +223,42 @@ async function secureFetch(fetchImpl, url, opts) {
     forwardAbort = () => { try { internal.abort(); } catch {} }
     outerSignal.addEventListener('abort', forwardAbort, { once: true })
   }
+  function packInit() {
+    return {
+      method: o.method || 'GET',
+      headers: Object.assign({ 'user-agent': PROBE_USER_AGENT, accept: (o.accept || 'application/json') }, o.headers || {}),
+      body: o.body !== undefined ? o.body : undefined,
+      signal: internal.signal,
+      redirect: 'manual',
+    }
+  }
+  async function resolveValidated() {
+    let addresses = []
+    if (providerConfig.isIpLiteral(host)) {
+      addresses = [{ address: host, family: host.indexOf(':') !== -1 ? 6 : 4 }]
+    } else {
+      const lookup = typeof o.lookup === 'function' ? o.lookup : defaultLookup
+      try {
+        addresses = (await lookup(host)) || []
+      } catch (e) {
+        if (outerSignal && outerSignal.aborted) throw err('probe-cancelled', 'probe', 'probe cancelled during DNS resolution')
+        if (timedOut) throw err('probe-timeout', 'probe', 'probe timed out (bounded request; DNS resolution stalled past the deadline)')
+        throw err('endpoint-forbidden-ssrf', 'probe.target', 'host ' + host + ' could not be resolved; refusing an unvalidated target')
+      }
+    }
+    const targetErrors = providerConfig.checkRequestTarget(host, addresses, o.transportId, o.endpointOptions)
+    if (targetErrors.length > 0) throw targetErrors[0]
+    return addresses
+  }
   async function doWork() {
+    const addresses = await resolveValidated()
     let res = null
     try {
-      res = await fetchImpl(String(url), {
-        method: o.method || 'GET',
-        headers: Object.assign({ 'user-agent': PROBE_USER_AGENT, accept: (o.accept || 'application/json') }, o.headers || {}),
-        body: o.body !== undefined ? o.body : undefined,
-        signal: internal.signal,
-        redirect: 'manual',
-      })
+      if (typeof fetchImpl === 'function') {
+        res = await fetchImpl(String(url), packInit())
+      } else {
+        res = await pinnedTransport.requestPinned(String(url), packInit(), { addresses: addresses }, {})
+      }
     } catch (e) {
       if (outerSignal && outerSignal.aborted) throw err('probe-cancelled', 'probe', 'probe cancelled while contacting the provider')
       if (timedOut) throw err('probe-timeout', 'probe', 'probe timed out (bounded request; provider did not answer in time)')
@@ -289,10 +305,14 @@ async function secureFetch(fetchImpl, url, opts) {
   try {
     const work = doWork()
     work.catch(() => {})
+    let raceTimer = null
     const outcome = await Promise.race([
       work.then((v) => ({ ok: true, v })),
-      new Promise((resolve) => setTimeout(() => resolve({ ok: false }), Math.max(0, timeoutMs))),
+      new Promise((resolve) => { raceTimer = setTimeout(() => resolve({ ok: false }), Math.max(0, timeoutMs)) }),
     ])
+    if (raceTimer !== null) {
+      try { clearTimeout(raceTimer); } catch {}
+    }
     if (outcome.ok) return outcome.v
     try { internal.abort(); } catch {}
     cleanupResponse({ body: null })
@@ -564,6 +584,7 @@ function fingerprintInputOf(parts) {
     remoteModel: route.remoteModelId || null,
     route: route.id || null,
     reasoningLevels: Array.isArray(route.reasoningLevels) ? route.reasoningLevels.slice().sort() : [],
+    verifiedLevels: parts && Array.isArray(parts.verifiedLevels) ? parts.verifiedLevels.slice().sort() : [],
     executionKind: route.executionKind || null,
     connection: connection ? (connection.id || null) : null,
     connectionKind: connection ? (connection.connectionKind || null) : null,
@@ -738,19 +759,34 @@ async function verifyRoute(provider, model, route, connection, fetchImpl, option
   if (opts.signal && opts.signal.aborted) {
     return { ok: false, checks, evidence: null, errors: [err('probe-cancelled', where, 'verification cancelled')] }
   }
-  const text = await postCheck('text-completion' + (reasoning ? ' (reasoning:' + reasoning + ')' : ''), textPayload(provider.transportId, route.remoteModelId, reasoning), (json) => {
-    const shaped = validateTextCompletion(provider.transportId, json)
-    if (!shaped.ok) return shaped
-    if (reasoning && !findReasoningEvidence(json, reasoning)) {
-      return { ok: false, detail: 'completion is structurally valid but carries no acknowledgment of reasoning effort ' + JSON.stringify(reasoning) + '; mapping stays unverified' }
-    }
-    return { ok: true, detail: shaped.detail + (reasoning ? ' + reasoning effort ' + reasoning + ' acknowledged' : '') }
-  })
-  if (!text.ok) {
-    const cancelled = text.error && text.error.code === 'probe-cancelled'
-    return { ok: false, checks, evidence: null, errors: [cancelled ? err('probe-cancelled', where, 'verification cancelled') : err('probe-failed', where, 'text probe failed; route stays unverified')] }
+  const levels = Array.isArray(route.reasoningLevels) ? route.reasoningLevels.slice() : []
+  if (levels.length === 0) {
+    return { ok: false, checks, evidence: null, errors: [err('probe-failed', where, 'route declares no reasoning levels; nothing verifiable')] }
   }
-  if (needsStreaming && !opts.skipStreaming) {
+  const levelsChecked = []
+  for (const level of levels) {
+    if (opts.signal && opts.signal.aborted) {
+      return { ok: false, checks, evidence: null, errors: [err('probe-cancelled', where, 'verification cancelled')] }
+    }
+    const probe = await postCheck('text-completion (reasoning:' + level + ')', textPayload(provider.transportId, route.remoteModelId, level), (json) => {
+      const shaped = validateTextCompletion(provider.transportId, json)
+      if (!shaped.ok) return shaped
+      if (!findReasoningEvidence(json, level)) {
+        return { ok: false, detail: 'completion is structurally valid but carries no acknowledgment of reasoning effort ' + JSON.stringify(level) + '; mapping stays unverified' }
+      }
+      return { ok: true, detail: shaped.detail + ' + reasoning effort ' + level + ' acknowledged' }
+    })
+    levelsChecked.push({ level, ok: probe.ok })
+    if (!probe.ok && (probe.fatal || (probe.error && (probe.error.code === 'probe-cancelled' || probe.error.code === 'probe-timeout')))) {
+      const cancelled = probe.error && probe.error.code === 'probe-cancelled'
+      return { ok: false, checks, evidence: null, errors: [cancelled ? err('probe-cancelled', where, 'verification cancelled') : err('probe-failed', where, 'text probe failed for reasoning level ' + level + '; route stays unverified')] }
+    }
+  }
+  const levelsVerified = levelsChecked.filter((e) => e.ok).map((e) => e.level)
+  if (levelsVerified.length === 0) {
+    return { ok: false, checks, evidence: null, errors: [err('probe-failed', where, 'no advertised reasoning level verified; route stays unverified')] }
+  }
+  if (needsStreaming) {
     const started = Date.now()
     try {
       const streamPayload = Object.assign(textPayload(provider.transportId, route.remoteModelId, reasoning), { stream: true })
@@ -775,7 +811,7 @@ async function verifyRoute(provider, model, route, connection, fetchImpl, option
       return { ok: false, checks, evidence: null, errors: [item.code === 'probe-cancelled' ? err('probe-cancelled', where, 'verification cancelled') : err('probe-failed', where, 'streaming probe failed; route stays unverified')] }
     }
   } else {
-    checks.push({ name: 'streaming', ok: true, ms: 0, detail: 'not required by model capabilities (skipped)' })
+    checks.push({ name: 'streaming', ok: true, ms: 0, detail: 'not declared by model capabilities' })
   }
   if (needsTools) {
     const emission = await postCheck('tool-call-emission', toolPayload(provider.transportId, route.remoteModelId), (json) => validateToolEmission(provider.transportId, json, 'probe_echo'))
@@ -789,8 +825,8 @@ async function verifyRoute(provider, model, route, connection, fetchImpl, option
     const emitted = checks.find((c) => c.name === 'tool-call-emission')
     if (emitted) emitted.detail += ' (call id ' + emission.callId + ' reused for the continuation)'
   } else {
-    checks.push({ name: 'tool-call-emission', ok: true, ms: 0, detail: 'not required by model capabilities (skipped)' })
-    checks.push({ name: 'tool-result-continuation', ok: true, ms: 0, detail: 'not required by model capabilities (skipped)' })
+    checks.push({ name: 'tool-call-emission', ok: true, ms: 0, detail: 'not declared by model capabilities' })
+    checks.push({ name: 'tool-result-continuation', ok: true, ms: 0, detail: 'not declared by model capabilities' })
   }
   const bearer = presentedBearer(connection)
   const authReq = authRequirement(connection)
@@ -801,13 +837,15 @@ async function verifyRoute(provider, model, route, connection, fetchImpl, option
     providerId: provider.id,
     transport: provider.transportId,
     reasoning: reasoning,
+    levelsChecked: levelsChecked.map((e) => ({ level: e.level, ok: e.ok })),
+    levelsVerified: levelsVerified.slice(),
     streamingRequired: needsStreaming,
     toolsRequired: needsTools,
     checks: checks.map((c) => ({ name: c.name, ok: c.ok, ms: c.ms, detail: redact(c.detail) })),
     verifiedAtUtc: new Date().toISOString(),
     credentialPresented: !!bearer,
     authRequired: authReq.required,
-    fingerprint: fingerprintOf(fingerprintInputOf({ provider, model, route, connection })),
+    fingerprint: fingerprintOf(fingerprintInputOf({ provider, model, route, connection, verifiedLevels: levelsVerified })),
     note: 'synthetic bounded probes only; no user workspace content was transmitted',
   }
   return { ok: true, checks, evidence, errors: [] }

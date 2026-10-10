@@ -67,6 +67,15 @@ function bracketless(host) {
   if (host.length >= 2 && host[0] === '[' && host[host.length - 1] === ']') return host.slice(1, -1)
   return host
 }
+// True when the hostname is an IP literal (or localhost) that needs no
+// DNS resolution. Everything else must be resolved per request and every
+// resolved address revalidated before contact.
+function isIpLiteral(host) {
+  const h = bracketless(String(host).toLowerCase())
+  if (h === 'localhost') return true
+  if (h.indexOf(':') !== -1) return true
+  return parseIpv4(h) !== null
+}
 function isLoopbackHost(host) {
   const h = String(host).toLowerCase()
   if (h === 'localhost') return true
@@ -278,6 +287,7 @@ module.exports = {
   validateProviderInput,
   parseIpv4,
   bracketless,
+  isIpLiteral,
   isLoopbackHost,
   isRestrictedLiteral,
   isRestrictedAddress,

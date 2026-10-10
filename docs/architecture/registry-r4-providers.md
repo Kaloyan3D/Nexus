@@ -170,6 +170,29 @@ twice: the resolver already fails closed on revoked or disabled connections,
 and the status change also breaks the fingerprint. Built-in shipped
 verification state is never altered by this machinery.
 
+### 5.2 R4.2 transport binding and completeness
+
+DNS validation alone is not the boundary. The default probe transport
+resolves the hostname once, validates every address, then connects the
+socket to the validated address without re-resolving, so rebinding
+between validation and connect cannot redirect the probe. For https
+targets the original hostname is sent as SNI and default hostname
+verification applies. Redirects are never followed and mixed
+restricted/public answer sets are refused with nothing leaving. The
+single deadline covers resolution, connection, headers and body, and
+abort destroys the socket, so uncooperative endpoints leave no
+lingering connection behind the 4-wide limiter. An injected fetch
+transport is a test seam only and carries no binding guarantee.
+Production UI calls never inject one. Without a DNS resolver for a
+hostname target, probing fails closed.
+
+Capability evidence is per level. Every advertised reasoning level is
+probed individually, evidence records the checked set and the verified
+subset, the fingerprint binds the verified subset, and the effective
+route is narrowed to it, so unchecked levels never compile. The
+test-only streaming skip is removed from the promotion path. Evidence
+contract is v3, and v2 evidence no longer grants eligibility.
+
 ## 6. Credential ownership and the R4.3 integration blocker
 
 Credentials are separated from public records: connections carry
@@ -228,17 +251,19 @@ configuration fails with `dependency-blocked` naming the dependents
 (`saved-configuration route …`); removal proceeds only after a separate
 safe migration (re-stage without the route), proven by test.
 
-## 8. Limitations (R4.1 actual guarantees)
+## 8. Limitations (R4.2 actual guarantees)
 
 - Live provider verification needs the R5 credential boundary. UI-driven
   server-side probes run without secret values and report honest
   reachability/auth states; only service-layer calls with an explicitly
   presented credential can produce authenticated evidence.
-- Request-time DNS is resolved and revalidated per probe (default resolver
-  is node:dns; tests pin answers), but DNS rebinding between validation and
-  connection cannot be eliminated without connection-level pinning — a
-  documented residual risk, mitigated by the single-deadline race and the
-  trusted-local policy.
+- Request-time DNS is resolved once per probe (default resolver is
+  node:dns; tests pin answers) and the socket binds the validated
+  address with SNI and hostname verification intact. Rebinding between
+  validation and connect is eliminated on the default transport; the
+  residual risk is confined to injected test transports, which carry no
+  binding guarantee, and to exotic resolver middleboxes outside the
+  probe's control.
 - Redirects are denied rather than revalidated: providers that answer API
   calls with 3xx stay unverified until they serve the endpoint directly.
 - Reasoning acknowledgment requires a structural echo (effort value under
@@ -254,6 +279,17 @@ safe migration (re-stage without the route), proven by test.
   is the VM static-markup smoke plus control-wiring assertions.
 
 ## 9. Test results
+
+`tests/RegistryR4TransportBinding.Tests.cjs`: **11/11 PASS**
+(offline, adversarial, real loopback servers). Ten checks failed on the
+R4.1 build and pass after the correction; one mixed-DNS guard passed
+before and after. Coverage: validated-IP connection for unresolvable
+hostnames with Host preservation; single-resolution pinning against
+rebinding answers; mixed-result refusal; SNI plus hostname-verification
+defaults; DNS inside the deadline; socket destruction for stalled
+connections; streaming-skip inertness; per-level reasoning grants with
+narrowed eligibility; stale-contract demotion; exact-set evidence;
+full-set eligibility.
 
 `tests/RegistryR4ProbeSecurity.Tests.cjs`: **16/16 PASS** (offline,
 adversarial). Every check was run against the unfixed R4 build first and
@@ -306,5 +342,8 @@ production DSH routing (proven by the R4.7 end-to-end test and the
 byte-identical production hashes). R4.1 adds that executable-eligibility
 holds only for the genuinely validated binding (hardened transport,
 structural protocol checks, fingerprinted evidence with fail-closed drift
-handling). No merge to `dev`, no production
+handling). R4.2 closes the binding to the validated destination
+address, checks every advertised reasoning level individually with
+narrowed eligibility, and removes test-only shortcuts from the
+promotion path. No merge to `dev`, no production
 cutover, no R5 auto-start. PR #33 stays Draft (no merge performed here).

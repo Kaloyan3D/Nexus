@@ -132,9 +132,9 @@ async function provisionOpen(svc, bearer) {
   assert.equal(svc.saveConnection(acmeConnection(), {}).ok, true);
   assert.equal(svc.setConnectionStatus('conn-acme-1', 'connected', { attested: true }).ok, true);
   assert.equal(svc.saveRoute(acmeRoute(), {}).ok, true);
-  // skipStreaming: the dedicated SSE tests cover streaming; setup needs a
-  // verified start state on both the permissive and hardened builds.
-  const opts = { fetchImpl: openFake(), lookup: publicLookup(), skipStreaming: true };
+  // R4.2: no streaming shortcut remains; the open fake serves genuine SSE
+  // plus per-level reasoning echoes, so setup verifies on the full path.
+  const opts = { fetchImpl: openFake(), lookup: publicLookup() };
   if (bearer) opts.testBearer = bearer;
   const verified = await svc.verifyProviderRoute('acme-direct/acme-1', opts);
   assert.equal(verified.ok, true, 'setup must reach verified, got ' + JSON.stringify(verified.errors));
@@ -315,7 +315,7 @@ async function main() {
       { id: 'r', remoteModelId: 'acme-1-large', reasoningLevels: ['low'] },
       { credentialRef: 'credential://x', connectionKind: 'api-key', testBearer: BEARER },
       strictFake,
-      { lookup: publicLookup(), skipStreaming: true });
+      { lookup: publicLookup() });
     assert.equal(direct.ok, true, 'emitted id must round-trip, got ' + JSON.stringify(direct.errors));
   });
 
@@ -395,7 +395,7 @@ async function main() {
     const svc = svcOn(tmpDir('h3-fp-'));
     const verified = await provisionOpen(svc, BEARER);
     assert.ok(verified.evidence.fingerprint, 'fingerprint present');
-    assert.equal(verified.evidence.contractVersion, 2, 'probe contract version pinned');
+    assert.equal(verified.evidence.contractVersion, 3, 'probe contract version pinned');
     assert.ok(verified.evidence.fingerprint !== verified.evidence.routeId, 'fingerprint is a digest, not an id');
     const stored = svc.getRouteEvidence('acme-direct/acme-1');
     assert.equal(stored.evidence.fingerprint, verified.evidence.fingerprint, 'stored evidence matches the granted binding');

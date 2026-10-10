@@ -253,13 +253,16 @@ function createService(options) {
       if (c) c.status = 'disabled'
     }
     const ev = catalog.loadEvidence(dataRoot, fsHooks)
-    // H3: an operator route whose stored availability says 'verified' is
-    // executable-eligible ONLY while its current evidence still binds the
-    // exact verified tuple (endpoint, transport, model/checkpoint, remote
-    // model, route, connection identity/status, capabilities, reasoning
-    // levels, probe contract). Anything else demotes the EFFECTIVE copy to
-    // probe-required — fail closed, without rewriting history. Built-in
-    // shipped state is never touched here.
+    // H3/R4.2: an operator route whose stored availability says 'verified'
+    // is executable-eligible ONLY while its current evidence still binds
+    // the exact verified tuple (endpoint, transport, model/checkpoint,
+    // remote model, route, connection identity/status, capabilities,
+    // declared plus VERIFIED reasoning levels, probe contract). Anything
+    // else demotes the EFFECTIVE copy to probe-required — fail closed,
+    // without rewriting history. Eligibility is further restricted to the
+    // verified level subset: the effective copy carries only checked
+    // levels, so unchecked reasoning never compiles. Built-in shipped
+    // state is never touched here.
     const operatorRouteIds = Object.keys(op.docs.routes.items)
     if (ev.evidence) {
       for (const id of operatorRouteIds) {
@@ -275,13 +278,16 @@ function createService(options) {
         else if (current.contractVersion !== probes.PROBE_CONTRACT_VERSION) cause = 'evidence uses probe contract v' + String(current.contractVersion) + '; v' + String(probes.PROBE_CONTRACT_VERSION) + ' is required'
         else if (!provider || !model) cause = 'the verified provider or model is missing'
         else if (!connection || connection.status === 'revoked' || connection.status === 'disabled') cause = 'the verified connection is not authorized'
+        else if (!Array.isArray(current.levelsVerified)) cause = 'evidence predates per-level verification; re-verify to restore eligibility'
         else {
-          const recomputed = probes.fingerprintOf(probes.fingerprintInputOf({ provider, model, route: r, connection }))
-          if (current.fingerprint !== recomputed) cause = 'a security-relevant field changed since verification (endpoint, transport, model, remote model, connection or reasoning levels)'
+          const recomputed = probes.fingerprintOf(probes.fingerprintInputOf({ provider, model, route: r, connection, verifiedLevels: current.levelsVerified }))
+          if (current.fingerprint !== recomputed) cause = 'a security-relevant field changed since verification (endpoint, transport, model, remote model, connection, reasoning levels or verified set)'
         }
         if (cause) {
           r.availability = 'probe-required'
           notes.push(err('evidence-stale', 'catalog.routes.' + id, 'route ' + id + ' is not executable-eligible: ' + cause + '; re-verify to restore eligibility'))
+        } else {
+          r.reasoningLevels = current.levelsVerified.slice()
         }
       }
     }
@@ -294,12 +300,11 @@ function createService(options) {
     return { snapshot: eff.snapshot, errors: eff.errors }
   }
 
-  function defaultFetchImpl(url, init) {
-    if (typeof fetch !== 'function') {
-      return Promise.reject(Object.assign(new Error('no fetch substrate in this host'), { code: 'probe-timeout' }))
-    }
-    return fetch(url, init)
-  }
+  // R4.2: no platform-fetch default. Callers pass their injected fetchImpl
+  // or null; null selects the pinned IP-bound transport in the probe layer
+  // (DNS resolved once, validated, then connected without re-resolution,
+  // with SNI/TLS intact). An injected fetchImpl is a test seam only and
+  // carries no binding guarantee — production UI calls never inject one.
 
   // References held by saved mode configurations (dependency guard input).
   function savedRefsOf(effective) {
@@ -590,7 +595,10 @@ function createService(options) {
   }
 
   // R4.1: probe option threading. fetchImpl/lookup/timeoutMs/signal are
-  // injectable (tests use fakes; production uses platform fetch + node:dns).
+  // injectable (tests use fakes; production uses the pinned transport +
+  // node:dns). There is intentionally no test-only eligibility shortcut:
+  // R4.2 removed skipStreaming, so every declared capability is checked on
+  // the promotion path.
   // testBearer is accepted ONLY at this service layer (offline calls and
   // credential-gated tests) — the HTTP host boundary never forwards secret
   // values (see R4.3). endpointOptions carries the explicit trusted-local
@@ -602,7 +610,6 @@ function createService(options) {
     if (o.lookup) out.lookup = o.lookup
     if (typeof o.timeoutMs === 'number') out.timeoutMs = o.timeoutMs
     if (o.signal) out.signal = o.signal
-    if (typeof o.skipStreaming === 'boolean') out.skipStreaming = o.skipStreaming
     if (o.endpointOptions && typeof o.endpointOptions === 'object') {
       out.endpointOptions = {
         trustedPrivateNetwork: o.endpointOptions.trustedPrivateNetwork === true,
@@ -627,7 +634,7 @@ function createService(options) {
     const provider = findIn(eff.snapshot, 'providers', providerId)
     if (!provider) return { ok: false, errors: [err('unknown-reference', 'provider.id', 'unknown provider: ' + String(providerId))] }
     const connection = providerConnectionOf(eff.snapshot, providerId, opts && opts.connectionId)
-    const fetchImpl = (opts && opts.fetchImpl) || defaultFetchImpl
+    const fetchImpl = (opts && opts.fetchImpl) || null
     return probes.testConnection(provider, connectionForProbes(connection, opts), fetchImpl, probeOptions(opts))
   }
 
@@ -640,7 +647,7 @@ function createService(options) {
       return { ok: false, advertised: [], errors: [err('provider-disabled', 'provider.id', 'provider is not enabled: ' + providerId)] }
     }
     const connection = providerConnectionOf(eff.snapshot, providerId, opts && opts.connectionId)
-    const fetchImpl = (opts && opts.fetchImpl) || defaultFetchImpl
+    const fetchImpl = (opts && opts.fetchImpl) || null
     return probes.discoverModels(provider, connectionForProbes(connection, opts), fetchImpl, probeOptions(opts))
   }
 
@@ -660,7 +667,7 @@ function createService(options) {
     if (!provider || !model) {
       return { ok: false, errors: [err('unknown-reference', 'route', 'route references a missing provider or model')] }
     }
-    const fetchImpl = (opts && opts.fetchImpl) || defaultFetchImpl
+    const fetchImpl = (opts && opts.fetchImpl) || null
     const result = await probes.verifyRoute(provider, model, route, connectionForProbes(connection, opts), fetchImpl, probeOptions(opts))
     // Persist redacted evidence either way (history-preserving); promote to
     // verified ONLY when every required probe passed. A model-list response
@@ -671,7 +678,8 @@ function createService(options) {
       contractVersion: probes.PROBE_CONTRACT_VERSION,
       routeId, providerId: provider.id, transport: provider.transportId,
       checks: result.checks, verifiedAtUtc: new Date().toISOString(),
-      fingerprint: probes.fingerprintOf(probes.fingerprintInputOf({ provider, model, route, connection })),
+      levelsChecked: [], levelsVerified: [],
+      fingerprint: probes.fingerprintOf(probes.fingerprintInputOf({ provider, model, route, connection, verifiedLevels: [] })),
       note: 'verification FAILED; route stays unverified', failed: true,
     }
     const toStore = result.evidence || failedEvidence
