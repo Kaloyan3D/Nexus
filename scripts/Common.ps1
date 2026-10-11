@@ -356,20 +356,31 @@ function Get-AihClaudeAuthState {
         if (Test-AihHasProp $AuthStatus $field) { $candidate = $AuthStatus.$field } else { $candidate = $null }
         if ($candidate -is [string] -and -not [string]::IsNullOrWhiteSpace($candidate)) { $methodLabel = $candidate.Trim(); break }
     }
+    # R6.0: conflicting logged-out status never confirms a subscription, even
+    # when a positive subscription signal is also present. Evaluated here,
+    # before any positive subscription signal.
+    if ($statusNorm -in @('logged-out', 'logged_out', 'loggedout', 'signed-out', 'signed_out', 'signedout', 'logged off', 'loggedoff', 'signed out', 'unauthenticated', 'not-logged-in', 'not_logged_in')) { return 'not-logged-in' }
     $methodNorm = ''
     if ($null -ne $methodLabel) { $methodNorm = $methodLabel.ToLowerInvariant() }
     if ($methodNorm -eq 'none') { return 'not-logged-in' }
     if (($methodNorm -in @('api_key', 'api-key', 'api_key_helper', 'api-key-helper')) -or ($methodNorm -match 'api[-_ ]?key|access[-_ ]?token|bearer|personal[-_ ]?token|setup[-_ ]?token')) { return 'api-key-identity' }
     if (($methodNorm -in @('third_party', 'third-party')) -or ($methodNorm -match 'bedrock|vertex|proxy|custom|endpoint|gateway|byok')) { return 'alternate-provider-identity' }
-    $subTypeLabel = $null
-    if ((Test-AihHasProp $AuthStatus 'subscriptionType') -and ($AuthStatus.subscriptionType -is [string]) -and -not [string]::IsNullOrWhiteSpace($AuthStatus.subscriptionType)) { $subTypeLabel = ([string]$AuthStatus.subscriptionType).Trim() }
-    $subTypeHit = ($null -ne $subTypeLabel) -and ($subTypeLabel -match '^(?i)(pro|max|plus|team|enterprise|business|subscriber)$')
-    $loggedInTrue = (Test-AihHasProp $AuthStatus 'loggedIn') -and ([bool]$AuthStatus.loggedIn)
-    if ((($methodNorm -eq 'claude.ai') -or ($methodNorm -eq 'claude_ai') -or ($methodNorm -eq 'claudeai')) -and $loggedInTrue) { return 'subscription-confirmed' }
-    if ($subTypeHit) { return 'subscription-confirmed' }
+    # R6.0: an alternate billing source (apiProvider) overrides any positive
+    # subscription signal. Evaluated BEFORE the subscription positives so a
+    # bedrock/vertex/proxy route can never report connected on subscription
+    # billing, even when authMethod is claude.ai or subscriptionType is max.
     $apiProviderLabel = $null
     if ((Test-AihHasProp $AuthStatus 'apiProvider') -and ($AuthStatus.apiProvider -is [string]) -and -not [string]::IsNullOrWhiteSpace($AuthStatus.apiProvider)) { $apiProviderLabel = ([string]$AuthStatus.apiProvider).Trim().ToLowerInvariant() }
     if (($null -ne $apiProviderLabel) -and ($apiProviderLabel -match 'bedrock|vertex|proxy|custom|endpoint|gateway|byok|third')) { return 'alternate-provider-identity' }
+    # R6.0: subscription access requires an explicitly confirmed login.
+    # Missing or ambiguous login flags stay unknown (never eligible), even
+    # when a subscription-shaped method or plan signal is present.
+    $subTypeLabel = $null
+    if ((Test-AihHasProp $AuthStatus 'subscriptionType') -and ($AuthStatus.subscriptionType -is [string]) -and -not [string]::IsNullOrWhiteSpace($AuthStatus.subscriptionType)) { $subTypeLabel = ([string]$AuthStatus.subscriptionType).Trim() }
+    $subTypeHit = ($null -ne $subTypeLabel) -and ($subTypeLabel -match '^(?i)(pro|max|plus|team|enterprise|business|subscriber)$')
+    $loginConfirmed = (((Test-AihHasProp $AuthStatus 'loggedIn') -and ([bool]$AuthStatus.loggedIn)) -or ((Test-AihHasProp $AuthStatus 'authenticated') -and ([bool]$AuthStatus.authenticated)))
+    if ((($methodNorm -eq 'claude.ai') -or ($methodNorm -eq 'claude_ai') -or ($methodNorm -eq 'claudeai')) -and $loginConfirmed) { return 'subscription-confirmed' }
+    if ($subTypeHit -and $loginConfirmed) { return 'subscription-confirmed' }
     return 'source-unestablished'
 }
 

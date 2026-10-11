@@ -389,6 +389,12 @@ function parseClaudeAuthStatus(stdout) {
     const revoked = statusNorm === 'revoked';
     return { outcome: 'expired', authState: revoked ? 'revoked' : 'expired', errors: [err(revoked ? 'claude-session-revoked' : 'claude-session-expired', where, 'CLI reports an expired, revoked or invalid login; reconnect with the native login (claude auth login)')] };
   }
+  // R6.0: conflicting logged-out status never confirms a subscription, even
+  // when a positive subscription signal is also present. Evaluated here,
+  // before any positive subscription signal.
+  if (statusNorm === 'logged-out' || statusNorm === 'logged_out' || statusNorm === 'loggedout' || statusNorm === 'signed-out' || statusNorm === 'signed_out' || statusNorm === 'signedout' || statusNorm === 'logged off' || statusNorm === 'loggedoff' || statusNorm === 'signed out' || statusNorm === 'signedout' || statusNorm === 'unauthenticated' || statusNorm === 'not-logged-in' || statusNorm === 'not_logged_in' || statusNorm === 'logged out' || statusNorm === 'signed_out') {
+    return { outcome: 'unauthenticated', authState: 'not-logged-in', errors: [err('claude-session-missing', where, 'CLI reports a logged-out session (status ' + String(statusLabel || 'unlabeled') + '); connect with the native login (claude auth login)')] };
+  }
   const methodLabel = nativeMethodLabel(doc);
   const methodNorm = methodLabel ? methodLabel.toLowerCase() : '';
   if (methodNorm === 'none') {
@@ -400,17 +406,25 @@ function parseClaudeAuthStatus(stdout) {
   if (methodNorm === 'third_party' || methodNorm === 'third-party' || /bedrock|vertex|proxy|custom|endpoint|gateway|byok/.test(methodNorm)) {
     return { outcome: 'alternate', authState: 'alternate-provider-identity', method: methodLabel, errors: [err('claude-alternate-identity', where, 'CLI reports a non-subscription provider identity (' + String(methodLabel || 'unlabeled') + '); subscription billing is not established, so this connection is not eligible')] };
   }
-  const subTypeLabel = nativeSubscriptionType(doc);
-  const subTypeHit = subTypeLabel ? /^(pro|max|plus|team|enterprise|business|subscriber)$/i.test(subTypeLabel) : false;
-  if ((methodNorm === 'claude.ai' || methodNorm === 'claude_ai' || methodNorm === 'claudeai') && doc.loggedIn === true) {
-    return { outcome: 'subscription', authState: 'subscription-confirmed', method: methodLabel, errors: [] };
-  }
-  if (subTypeHit && doc.loggedIn !== false) {
-    return { outcome: 'subscription', authState: 'subscription-confirmed', method: methodLabel, errors: [] };
-  }
+  // R6.0: an alternate billing source (apiProvider) overrides any positive
+  // subscription signal. Evaluated BEFORE the subscription positives so a
+  // bedrock/vertex/proxy route can never report connected on subscription
+  // billing, even when authMethod is claude.ai or subscriptionType is max.
   const apiProviderLabel = safeStatusLabel(doc.apiProvider, 40);
   if (apiProviderLabel && /bedrock|vertex|proxy|custom|endpoint|gateway|byok|third/.test(apiProviderLabel.toLowerCase())) {
     return { outcome: 'alternate', authState: 'alternate-provider-identity', method: methodLabel, errors: [err('claude-alternate-identity', where, 'CLI reports alternate hosted routing (' + String(apiProviderLabel) + '); subscription billing is not established, so this connection is not eligible')] };
+  }
+  // R6.0: subscription access requires an explicitly confirmed login.
+  // Missing or ambiguous login flags stay unknown (never eligible), even
+  // when a subscription-shaped method or plan signal is present.
+  const loginConfirmed = (doc.loggedIn === true || doc.authenticated === true);
+  const subTypeLabel = nativeSubscriptionType(doc);
+  const subTypeHit = subTypeLabel ? /^(pro|max|plus|team|enterprise|business|subscriber)$/i.test(subTypeLabel) : false;
+  if ((methodNorm === 'claude.ai' || methodNorm === 'claude_ai' || methodNorm === 'claudeai') && loginConfirmed) {
+    return { outcome: 'subscription', authState: 'subscription-confirmed', method: methodLabel, errors: [] };
+  }
+  if (subTypeHit && loginConfirmed) {
+    return { outcome: 'subscription', authState: 'subscription-confirmed', method: methodLabel, errors: [] };
   }
   if (doc.loggedIn === true || doc.authenticated === true) {
     return { outcome: 'unknown', authState: 'source-unestablished', method: methodLabel, errors: [err('claude-auth-source-unknown', where, 'CLI reports an authenticated session but no recognizable subscription signal; refusing to infer billing source')] };

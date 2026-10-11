@@ -216,6 +216,73 @@ await check('R5.1 adapter uses the real child env, refuses when unestablished', 
   assert.equal(legacy.billingEnvSource, 'caller-provided');
 });
 
+await check('R6.0 missing or ambiguous login never confirms a subscription', async () => {
+  const vectors = [
+    { subscriptionType: 'max' },
+    { authMethod: 'claude.ai' },
+    { authMethod: 'claude.ai', subscriptionType: 'max' },
+    {},
+    { loggedIn: 1, subscriptionType: 'max' },
+    { loggedIn: 'true', authMethod: 'claude.ai' },
+  ];
+  for (const doc of vectors) {
+    const out = await sub.checkClaudeConnection({ hooks: fakeAuthHooks({ filePresent: true, statusStdout: JSON.stringify(doc) }), userHome: '/fake-home' });
+    assert.equal(out.ok, false, 'must not connect: ' + JSON.stringify(doc));
+    assert.equal(out.detail.authState, 'source-unestablished', 'missing login stays unknown: ' + JSON.stringify(doc));
+    assert.equal(out.status, 'unknown');
+  }
+});
+
+await check('R6.0 alternate billing source overrides subscription signals', async () => {
+  const vectors = [
+    { loggedIn: true, authMethod: 'claude.ai', subscriptionType: 'max', apiProvider: 'bedrock' },
+    { loggedIn: true, subscriptionType: 'max', apiProvider: 'bedrock' },
+    { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'vertex' },
+    { authenticated: true, subscriptionType: 'pro', apiProvider: 'custom-endpoint' },
+    { loggedIn: true, subscriptionType: 'team', apiProvider: 'third-party-gateway' },
+  ];
+  for (const doc of vectors) {
+    const out = await sub.checkClaudeConnection({ hooks: fakeAuthHooks({ filePresent: true, statusStdout: JSON.stringify(doc) }), userHome: '/fake-home' });
+    assert.equal(out.ok, false, 'alternate billing must not connect: ' + JSON.stringify(doc));
+    assert.equal(out.detail.authState, 'alternate-provider-identity', 'apiProvider overrides: ' + JSON.stringify(doc));
+    assert.ok(codes(out.errors).indexOf('claude-alternate-identity') !== -1);
+  }
+});
+
+await check('R6.0 revoked and logged-out states never become connected', async () => {
+  const revoked = await sub.checkClaudeConnection({ hooks: fakeAuthHooks({ filePresent: true, statusStdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', subscriptionType: 'max', status: 'revoked' }) }), userHome: '/fake-home' });
+  assert.equal(revoked.ok, false);
+  assert.equal(revoked.status, 'revoked');
+  assert.equal(revoked.detail.authState, 'revoked');
+  const loggedOutVariants = ['logged-out', 'logged_out', 'signed-out', 'unauthenticated'];
+  for (const status of loggedOutVariants) {
+    const out = await sub.checkClaudeConnection({ hooks: fakeAuthHooks({ filePresent: true, statusStdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', subscriptionType: 'max', status }) }), userHome: '/fake-home' });
+    assert.equal(out.ok, false, 'logged-out variant must not connect: ' + status);
+    assert.equal(out.detail.authState, 'not-logged-in', 'conflicting status wins: ' + status);
+  }
+  const conflict = await sub.checkClaudeConnection({ hooks: fakeAuthHooks({ filePresent: true, statusStdout: JSON.stringify({ loggedIn: true, authenticated: false, subscriptionType: 'max' }) }), userHome: '/fake-home' });
+  assert.equal(conflict.ok, false, 'conflicting login flags must not connect');
+  assert.equal(conflict.detail.authState, 'not-logged-in');
+});
+
+await check('R6.0 explicit authenticated flag confirms, JS/PS rules stay in parity', async () => {
+  const out = await sub.checkClaudeConnection({ hooks: fakeAuthHooks({ statusStdout: JSON.stringify({ authenticated: true, subscriptionType: 'max' }) }), userHome: '/fake-home' });
+  assert.equal(out.ok, true, 'explicit authenticated:true is a confirmed login');
+  assert.equal(out.detail.authState, 'subscription-confirmed');
+  const ps = fs.readFileSync(path.join(repoRoot, 'scripts', 'Common.ps1'), 'utf8');
+  const js = fs.readFileSync(path.join(repoRoot, 'config', 'registry', 'subscription-connections.cjs'), 'utf8');
+  assert.ok(ps.indexOf('loginConfirmed') !== -1 && js.indexOf('loginConfirmed') !== -1, 'explicit-login gate present in both');
+  assert.ok(ps.indexOf('logged-out') !== -1 && js.indexOf('logged-out') !== -1, 'logged-out conflict parity');
+  const jsFn = js.slice(js.indexOf('function parseClaudeAuthStatus'));
+  const psFn = ps.slice(ps.indexOf('function Get-AihClaudeAuthState'));
+  const pairs = [['js', jsFn], ['ps', psFn]];
+  for (const pair of pairs) {
+    const altIdx = pair[1].indexOf('apiProvider');
+    const subIdx = pair[1].indexOf('subscription-confirmed');
+    assert.ok(altIdx !== -1 && subIdx !== -1 && altIdx < subIdx, pair[0] + ': alternate gate precedes subscription gate');
+  }
+});
+
 await check('R5.1 Linux and Windows CLI detection parity in helpers', () => {
   const ps = fs.readFileSync(path.join(repoRoot, 'scripts', 'Common.ps1'), 'utf8');
   assert.ok(ps.indexOf('claude.exe') !== -1, 'windows executable candidates');
