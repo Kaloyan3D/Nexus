@@ -103,6 +103,21 @@ function Resolve-AihStepRoleTarget {
     return [ordered]@{ targets = $targets; presetId = $resolved.Id; routingDataRoot = $layout.RoutingData; statePath = $statePath }
 }
 
+function Get-AihStepPinField {
+    # R6.3.2: production step targets are [ordered] hashtables, whose entries
+    # are NOT exposed via .PSObject.Properties (that seam only fits the
+    # JSON-deserialized pin side). Read dictionaries by indexer so a live
+    # target is never misread as empty (which would refuse every pinned step).
+    param($Object,[string]$Field)
+    if($null-eq$Object-or[string]::IsNullOrWhiteSpace($Field)){return $null}
+    if($Object -is [System.Collections.IDictionary]){
+        if($Object.Contains($Field)){ $value=$Object[$Field]; if($null-ne$value){return [string]$value} }
+        return $null
+    }
+    $property=$Object.PSObject.Properties[$Field]
+    if($null-ne$property-and$null-ne$property.Value){return [string]$property.Value}
+    return $null
+}
 function Assert-AihStepRoleTargetPinned {
     # R6.3.1: pinned-generation step enforcement. When session-bindings.json
     # carries a registry pin for THIS taskInstanceId, the selected step target
@@ -130,9 +145,7 @@ function Assert-AihStepRoleTargetPinned {
     if($null-eq$entry.PSObject.Properties['target']-or$null-eq$entry.target){throw "registry-role-unpinned: pinned step target for '$Role' has no target."}
     $expected=$entry.target
     foreach($field in @('provider','model','reasoning')){
-        $tp=$Target.PSObject.Properties[$field];$ep=$expected.PSObject.Properties[$field]
-        $a=if($null-ne$tp-and$null-ne$tp.Value){[string]$tp.Value}else{$null}
-        $e=if($null-ne$ep-and$null-ne$ep.Value){[string]$ep.Value}else{$null}
+        $a=Get-AihStepPinField $Target $field;$e=Get-AihStepPinField $expected $field
         if([string]::IsNullOrWhiteSpace($a)){$a=$null}
         if([string]::IsNullOrWhiteSpace($e)){$e=$null}
         if($a-ne$e){throw "registry-step-target-mismatch: step $field drifted (pinned '$e', current '$a') for role '$Role'."}

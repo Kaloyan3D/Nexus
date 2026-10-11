@@ -302,3 +302,58 @@ bypassed the generation pin. Enforcement verdict: ENFORCED (not BLOCKED).
   still applies); late-turn escalation policy itself stays legacy-authored.
 
 
+
+## 13. R6.3.2 execution-boundary evidence (shipped)
+
+R6.3.1 left three rejection branches that still reached the model
+pipeline (route-check fall-through, review-findings next(), step-role
+fallback) plus no per-turn authorization gate. All are corrected; the
+enforcement verdict stays ENFORCED.
+
+### Gates
+
+- Turn-entry gate (pre-step, after engine binding): pinned generations
+  prove generation identity, current role map entry, and current
+  connection authorization before any downstream request; refusal returns
+  reject with no attempt and no next(). Refused and pending generations
+  re-arm route-check while the flag is ON (preserving R6.3.1 retry
+  healing); legacy sessions pass through untouched. Dual resolves the
+  role from the bound class, Muse uses muse_main.
+- Route-check refusal now returns reject instead of falling through to
+  attempt and next(). Review-findings refusal returns reject with a
+  diagnostic instead of next(). Step refusal (JS gate or PS assert) 
+  returns reject before beginAttempt instead of degrading to a fallback
+  role. Legacy paths are byte-identical: the new branches only fire on
+  registry markers or thrown choke errors, which cannot occur for legacy.
+- Direct substitution stays blocked: there is still no controller-owned
+  target-override input to the DSH runtime, so equality-gating remains
+  the safe binding form (R6.3 analysis stands).
+
+### Evidence
+
+- tests/RegistryR632Execution.Tests.cjs 12/12 through the real
+  agent/pre-step middleware with next() counters and attempt-file deltas:
+  initial/second-turn/restart refusals call next zero times and start zero
+  attempts; findings mismatch and step drift reject; revoked connections
+  reject ordinary Dual and Muse turns; valid pinned sessions proceed with
+  exactly one next() and one attempt; flag-OFF legacy is unchanged;
+  rollback proceeds under legacy-rollback with history retained; history
+  stays append-only and protected trees stay clean. Written first: 7 of 12
+  failed pre-fix (missing gate helper plus six live bypasses).
+- Production-shape correction found by the suite: step targets are
+  [ordered] hashes whose entries are invisible to .PSObject.Properties,
+  so the R6.3.1 PS assert misfired on every pinned step. Fixed with a
+  dictionary-aware accessor; the PS suite now covers the ordered shape
+  (11/11) instead of pscustomobject only.
+- Re-ran green: R6.2 (9), R6.3 (10), R6.3.1 lockdown (15) plus step-pin
+  PS (11), R6.5 matrix (7), R0-R5 suites, routing authority, Muse
+  isolation and reasoning suites, controller unit plus identity e2e (DoD),
+  bootstrap, host, and PS provider/opencode/registry suites. Unchanged
+  pre-existing environment blockers (closure json, cordis modules,
+  installed agent-presets, pinned node) and unverified live
+  Windows/GUI/CLI paths as in R6.5.
+- Known limitations carried forward: natural attempt-failure triggers are
+  helper-covered rather than boundary-driven; verify and visual-review
+  command turns on refused generations are outside the asserted scenarios;
+  overlay-attestation TTLs remain undefined; late-turn escalation policy
+  itself stays legacy-authored (its transitions are now pin-checked).

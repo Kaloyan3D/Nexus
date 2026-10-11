@@ -3336,6 +3336,36 @@ function apply(ctx) {
         return { kind: 'reject' }
       }
 
+      // R6.3.2 execution gate.
+      {
+        const gFlag = registrySessionBinding.isRegistryBindingEnabled(process.env);
+        const gCls = registrySessionBinding.classifyRegistryState(binding);
+        if ((gCls.state === 'refused' || gCls.state === 'pending') && gFlag && !binding.needsRouteCheck) {
+          binding.needsRouteCheck = true;
+          log({ event: 'registry-route-check-rearmed', sessionId: session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId || null });
+        }
+        if (gCls.state === 'pinned') {
+          let gRole = binding.engine === 'muse' ? 'muse_main' : null;
+          if (!gRole) {
+            try { gRole = engineeringProfiles.roleOfExecutionClass(binding.executionClass) || null; }
+            catch (gRoleError) { gRole = null; }
+          }
+          let gConn = null;
+          const gEntry = gRole ? registrySessionBinding.mapEntryFor(binding.registryPin, gRole) : null;
+          const gCid = gEntry && gEntry.available === true && gEntry.target ? gEntry.target.connectionId : null;
+          if (gCid) {
+            const gCur = loadTransitionConnection(gCid);
+            if (gCur) gConn = { id: gCid, status: gCur.status, provenance: gCur.provenance, providerId: gCur.providerId };
+          }
+          const gVerdict = registrySessionBinding.checkTurnEntry({ binding: binding, role: gRole, connection: gConn, flagOn: gFlag });
+          if (!gVerdict.ok) {
+            appendMessage(session, createControllerMessage('Controller: Registry execution refused (' + String(gVerdict.code) + ') for this session. The bound generation currently has no verified execution target. No attempt was started and no model was invoked.', 'controller-registry-rejected'));
+            log({ event: 'registry-execution-refused', sessionId: session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId || null, purpose: 'pre-step', code: gVerdict.code });
+            return { kind: 'reject' };
+          }
+        }
+      }
+
       if (explicitReview) {
         // Phase M3: the Muse engine has NO independent reviewer (profile
         // review.independent=false). The request fails closed truthfully:
@@ -3402,7 +3432,8 @@ function apply(ctx) {
           await enforceRegistryTransition(binding, decision, { purpose: 'review-findings' })
         } catch (enforceError) {
           log({ event: 'registry-transition-refused', sessionId: session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId || null, purpose: 'review-findings', code: (enforceError && enforceError.code) || 'unknown' })
-          return next()
+          appendMessage(session, createControllerMessage('Controller: Registry transition refused for review findings (' + String((enforceError && enforceError.code) || 'unknown') + '). The affected execution is stopped here. No model was invoked.', 'controller-registry-rejected'));
+          return { kind: 'reject' };
         }
         binding.executionClass = decision.executionClass
         appendMessage(
@@ -3431,6 +3462,7 @@ function apply(ctx) {
           if (binding.registryRefused && registrySessionBinding.isRegistryBindingEnabled(process.env)) {
             appendMessage(session, createControllerMessage('Controller: Registry binding for this session is not verified (' + String(binding.registryRefused.code || 'refused') + '); execution stays parked until the staged configuration agrees with the bound generation.', 'controller-registry-parked'))
           }
+          return { kind: 'reject' };
         } else if (isReviewClass(decision.executionClass)) {
           binding.executionClass = decision.executionClass
           appendMessage(
@@ -3460,6 +3492,7 @@ function apply(ctx) {
         // Phase 3.2.5: the step role for THIS turn (deterministic; Normal is
         // the default; Deep only through the structured escalation gate).
         let stepRole = null
+        let stepRefused = false;
         // Phase M3: the Muse engine runs exactly ONE main agent with NO Dual
         // role semantics. The epistemic step router is a Dual-plane authority
         // (it selects engineer roles and step role targets) and never applies
@@ -3470,10 +3503,9 @@ function apply(ctx) {
           const stepDecision = museEngine ? null : await selectEngineeringEpistemicStep(binding, payload.turn, promptText)
           if (stepDecision) {
             stepRole = stepDecision.selectedRole
-            // R6.3.1: step targets validate against the generation pin before
-            // reaching the attempt. A refused step keeps the existing degraded
-            // shape (null step role, loud log); the task-level class that the
-            // pin already verified carries the attempt.
+            // R6.3.1/R6.3.2: step targets validate against the generation pin
+            // before reaching the attempt. A refused step rejects the turn (no
+            // fallback execution); legacy sessions keep the degraded null-role shape.
             let stepTargetOk = true
             if (binding.registryPin && stepRole) {
               const stepTargetRole = engineeringProfiles.roleOfExecutionClass(stepRole) || null
@@ -3481,7 +3513,7 @@ function apply(ctx) {
               const stepChecked = registrySessionBinding.validateStepTarget(binding.registryPin, stepTargetRole, stepTarget)
               if (!stepChecked.ok) {
                 log({ event: 'step-target-pin-mismatch', sessionId: session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId || null, stepRole, code: stepChecked.code })
-                stepTargetOk = false
+                stepTargetOk = false; stepRefused = true
               } else {
                 const stepEntry = registrySessionBinding.mapEntryFor(binding.registryPin, stepTargetRole)
                 const stepConnId = stepEntry && stepEntry.available === true && stepEntry.target ? stepEntry.target.connectionId : null
@@ -3489,7 +3521,7 @@ function apply(ctx) {
                 const stepAz = registrySessionBinding.authorizationForTransition(stepCurrent ? { id: stepConnId, status: stepCurrent.status, provenance: stepCurrent.provenance, providerId: stepCurrent.providerId } : null)
                 if (!stepAz.ok) {
                   log({ event: 'step-target-pin-mismatch', sessionId: session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId || null, stepRole, code: stepAz.code })
-                  stepTargetOk = false
+                  stepTargetOk = false; stepRefused = true
                 }
               }
             }
@@ -3521,6 +3553,16 @@ function apply(ctx) {
           }
         } catch (error) {
           log({ event: 'step-routing-failed', sessionId: session.id, taskId: binding.taskId, error: String(error) })
+          if (binding.registryPin && /registry-step-target-mismatch|registry-role-unpinned|registry-role-unavailable/.test(String((error && error.message) || error))) {
+            appendMessage(session, createControllerMessage('Controller: Registry step target refused for this session. The selected step does not match the bound generation. No attempt was started and no model was invoked.', 'controller-registry-rejected'));
+            log({ event: 'registry-execution-refused', sessionId: session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId || null, purpose: 'step-routing', code: 'registry-step-target-mismatch' });
+            return { kind: 'reject' };
+          }
+        }
+        if (stepRefused) {
+          appendMessage(session, createControllerMessage('Controller: Registry step target refused for this session. The selected step does not match the bound generation. No attempt was started and no model was invoked.', 'controller-registry-rejected'));
+          log({ event: 'registry-execution-refused', sessionId: session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId || null, purpose: 'step-target', code: 'registry-step-target-mismatch' });
+          return { kind: 'reject' };
         }
         try {
           await beginAttempt(binding, payload.turn, stepRole)

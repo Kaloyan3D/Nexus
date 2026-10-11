@@ -14,7 +14,8 @@ function New-MapPin {
     $map = [pscustomobject]@{ primaryEngineer = $pe }
     return [pscustomobject]@{ modeId = 'engineering-v1'; resolutionId = 'r1'; configRevision = 0; taskInstanceId = 'task_aaa'; roleTargets = $map }
 }
-function New-MatchTarget { return [pscustomobject]@{ role = 'primaryEngineer'; provider = 'flash-high-direct'; model = 'deepseek-v4-flash'; reasoning = 'high' } }
+function New-OrderedTarget { return [ordered]@{ role = 'primaryEngineer'; provider = 'flash-high-direct'; model = 'deepseek-v4-flash'; reasoning = 'high' } } 
+ function New-MatchTarget { return [pscustomobject]@{ role = 'primaryEngineer'; provider = 'flash-high-direct'; model = 'deepseek-v4-flash'; reasoning = 'high' } }
 $dir = New-FixtureDir 'match'
 Write-PinBindings $dir 'task_aaa' (New-MapPin)
 Assert-AihStepRoleTargetPinned -RoutingDataRoot $dir -TaskInstanceId 'task_aaa' -Role 'primaryEngineer' -Target (New-MatchTarget)
@@ -28,4 +29,9 @@ Assert-AihStepRoleTargetPinned -RoutingDataRoot $dir -TaskInstanceId 'task_other
 $single = [pscustomobject]@{ modeId = 'engineering-v1'; role = 'primaryEngineer'; taskInstanceId = 'task_bbb'; roleTarget = [pscustomobject]@{ provider = 'flash-high-direct'; model = 'deepseek-v4-flash'; reasoning = 'high' } }
 $dir2 = New-FixtureDir 'single'; Write-PinBindings $dir2 'task_bbb' $single
 Assert-AihStepRoleTargetPinned -RoutingDataRoot $dir2 -TaskInstanceId 'task_bbb' -Role 'primaryEngineer' -Target (New-MatchTarget); Assert-Aih ($true) 'singular R6.3 pin honored'
+$ordTgt = New-OrderedTarget
+Assert-AihStepRoleTargetPinned -RoutingDataRoot $dir -TaskInstanceId 'task_aaa' -Role 'primaryEngineer' -Target $ordTgt; Assert-Aih ($true) 'ordered-hash step target passes (production shape)'
+$badOrd = [ordered]@{ role = 'primaryEngineer'; provider = 'other-provider'; model = 'deepseek-v4-flash'; reasoning = 'high' }
+$threwOrd = $false; try { Assert-AihStepRoleTargetPinned -RoutingDataRoot $dir -TaskInstanceId 'task_aaa' -Role 'primaryEngineer' -Target $badOrd } catch { $threwOrd = $true; Assert-Aih ($_.Exception.Message -match 'registry-step-target-mismatch') 'ordered mismatch code exact' }
+Assert-Aih ($threwOrd) 'ordered-hash drift throws'
 Write-Host ("SUITE RESULT: PASS " + $passed + " | FAIL 0")

@@ -151,4 +151,26 @@ function planTransition(input) {
   if (flagOn && o.isInitialBind === true) return { action: 'evaluate-fresh', reason: 'fresh-bind' };
   return { action: 'proceed-legacy', reason: 'legacy' };
 }
-module.exports = { BINDING_FLAG: BINDING_FLAG, mapEntryFor: mapEntryFor, rollbackPinnedBinding: rollbackPinnedBinding, BINDING_SCHEMA_VERSION: BINDING_SCHEMA_VERSION, CONNECTION_EVIDENCE_MAX_AGE_MS: CONNECTION_EVIDENCE_MAX_AGE_MS, isRegistryBindingEnabled: isRegistryBindingEnabled, evaluateRegistryBinding: evaluateRegistryBinding, verifyPinnedBinding: verifyPinnedBinding, verifyTransitionTarget: verifyTransitionTarget, authorizationForTransition: authorizationForTransition, validateStepTarget: validateStepTarget, classifyRegistryState: classifyRegistryState, planTransition: planTransition };
+module.exports = { BINDING_FLAG: BINDING_FLAG, mapEntryFor: mapEntryFor, checkTurnEntry: checkTurnEntry, rollbackPinnedBinding: rollbackPinnedBinding, BINDING_SCHEMA_VERSION: BINDING_SCHEMA_VERSION, CONNECTION_EVIDENCE_MAX_AGE_MS: CONNECTION_EVIDENCE_MAX_AGE_MS, isRegistryBindingEnabled: isRegistryBindingEnabled, evaluateRegistryBinding: evaluateRegistryBinding, verifyPinnedBinding: verifyPinnedBinding, verifyTransitionTarget: verifyTransitionTarget, authorizationForTransition: authorizationForTransition, validateStepTarget: validateStepTarget, classifyRegistryState: classifyRegistryState, planTransition: planTransition };
+function checkTurnEntry(input) {
+  const o = input || {};
+  const cls = classifyRegistryState(o.binding);
+  if (cls.state === 'legacy') return { ok: true, code: 'registry-legacy', mode: 'legacy' };
+  if (cls.state === 'refused' || cls.state === 'pending') {
+    if (o.flagOn === true) {
+      const code = (cls.refusal && cls.refusal.code) || 'registry-refused';
+      return { ok: false, code: code, mode: 'refused' };
+    }
+    return { ok: true, code: 'registry-rollback', mode: 'rollback' };
+  }
+  const binding = o.binding || {}; const pin = cls.pin;
+  if (pin.taskInstanceId != null && binding.taskInstanceId != null && pin.taskInstanceId !== binding.taskInstanceId) return { ok: false, code: 'registry-generation-mismatch', mode: 'pinned' };
+  const role = o.role || null;
+  if (!role) return { ok: false, code: 'registry-role-unmapped', mode: 'pinned' };
+  const entry = mapEntryFor(pin, role);
+  if (!entry) return { ok: false, code: 'registry-role-unpinned', mode: 'pinned' };
+  if (entry.available !== true) return { ok: false, code: 'registry-role-unavailable', mode: 'pinned' };
+  const az = authorizationForTransition(o.connection !== undefined ? o.connection : null);
+  if (!az.ok) return { ok: false, code: az.code, mode: 'pinned' };
+  return { ok: true, code: 'registry-execution-allowed', mode: 'pinned' };
+}
