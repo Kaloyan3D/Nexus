@@ -105,11 +105,38 @@ function runShadowComparison(decision, deps) {
     } else { comparisons.push({ field: 'executionKind', legacy: EXPECTED_EXECUTION_KIND, registry: binding.executionKind, match: true }); }
     if (target.dataUseTier != null || legacy.dataUseTier != null) compare('dataUseTier', legacy.dataUseTier, target.dataUseTier || null, 'data-use-tier-mismatch');
     const projectedOut = { modelId: target.modelId || null, model: target.model || null, provider: target.provider || null, reasoning: target.reasoning || null, dataUseTier: target.dataUseTier || null, logicalModelId: binding.logicalModelId || null, routeId: binding.routeId || null, connectionId: binding.connectionId || null, executionKind: binding.executionKind || null, accessType: binding.accessType || null };
+    // R6.3.1: project EVERY compiled role into the generation map so later
+    // transitions validate against their own immutable assignment. Roles that
+    // cannot project are recorded explicitly, never skipped silently.
+    const roleTargets = {};
+    for (const rn of Object.keys(snapshot.roles || {})) {
+      const b = snapshot.roles[rn];
+      const pr = dshAdapter.bindingToLegacyTarget(b);
+      if (pr && !pr.error && pr.target) {
+        const t = pr.target;
+        roleTargets[rn] = { available: true, target: { modelId: t.modelId || null, model: t.model || null, provider: t.provider || null, reasoning: t.reasoning || null, dataUseTier: t.dataUseTier || null, logicalModelId: b.logicalModelId || null, routeId: b.routeId || null, connectionId: b.connectionId || null, executionKind: b.executionKind || null, accessType: b.accessType || null } };
+      } else {
+        roleTargets[rn] = { available: false, code: 'shadow-role-unprojectable', reason: String(pr && pr.error) };
+      }
+    }
+    // R6.3.1: current effective connection state for the bound role (overlay-
+    // merged snapshot read; no live probe). Missing services yield explicit
+    // unknown, never an assumed status.
+    let connectionOut = null;
+    try {
+      if (service && typeof service.getConnections === 'function') {
+        const conns = service.getConnections();
+        const list = conns && Array.isArray(conns.connections) ? conns.connections : [];
+        const hit = list.find((c) => c && c.id === (binding.connectionId || null));
+        if (hit) connectionOut = { id: hit.id, status: hit.status || null, provenance: hit.provenance || null };
+        else if (binding.connectionId) connectionOut = { id: binding.connectionId, status: 'unknown', provenance: null };
+      } else if (binding.connectionId) connectionOut = { id: binding.connectionId, status: 'unknown', provenance: null };
+    } catch (e2) { connectionOut = binding.connectionId ? { id: binding.connectionId, status: 'unknown', provenance: null } : null; }
     return { shadowOk: true, parity: mismatches.length === 0, code: mismatches.length === 0 ? 'shadow-parity' : 'shadow-mismatch',
       message: mismatches.length === 0 ? 'legacy decision and Registry projection agree on every compared field' : 'legacy and Registry disagree (' + mismatches.map((m) => m.code).join(', ') + '); legacy continues unchanged',
       preset: preset, engine: engine, role: role, modeId: modeId, lockedPreset: partial.lockedPreset, staged: stagedInfo,
       resolutionId: snapshot.resolutionId || null, configRevision: typeof snapshot.configurationRevision === 'number' ? snapshot.configurationRevision : stagedInfo.revision,
-      projected: projectedOut, legacy: legacy, comparisons: comparisons, mismatches: mismatches, errors: [] };
+      projected: projectedOut, roleTargets: roleTargets, connection: connectionOut, legacy: legacy, comparisons: comparisons, mismatches: mismatches, errors: [] };
   } catch (e) { return fail('shadow-internal', 'shadow failed without interrupting legacy: ' + String((e && e.message) || e)); }
 }
 module.exports = { SHADOW_SCHEMA_VERSION: SHADOW_SCHEMA_VERSION, PRESET_TO_MODE: PRESET_TO_MODE, LOCKED_PRESETS: LOCKED_PRESETS, MODE_TO_ENGINE: MODE_TO_ENGINE, EXPECTED_EXECUTION_KIND: EXPECTED_EXECUTION_KIND, runShadowComparison: runShadowComparison };

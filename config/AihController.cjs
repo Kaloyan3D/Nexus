@@ -50,6 +50,7 @@ const crypto = require('node:crypto')
 const engineeringProfiles = require('./Engineering-Profiles.cjs')
 const registryShadowBinding = require('./registry/shadow-binding.cjs')
 const registrySessionBinding = require('./registry/session-binding.cjs')
+const registryService = require('./registry/service.cjs')
 const contextCompaction = require('./ContextCompaction.cjs')
 const compilerShadowHost = require('./ContextCompilerShadowHostV2.cjs')
 const memoryProducerHost = require('./ContextMemoryProducerHostV2.cjs')
@@ -779,7 +780,7 @@ function createBindingGuard(deps) {
       // SAME engine identity carried forward explicitly.
       const bindingInstance = typeof binding.taskInstanceId === 'string' ? binding.taskInstanceId : ''
       if (bindingInstance === '') {
-        return recoverStaleBinding(agent, session, workspace, promptText, binding, 'ambiguous-legacy-binding', { engine: authoritativeEngine, preset: authoritativePreset, ...(binding.registryPin ? { registryPin: binding.registryPin } : {}) })
+        return recoverStaleBinding(agent, session, workspace, promptText, binding, 'ambiguous-legacy-binding', { engine: authoritativeEngine, preset: authoritativePreset, ...(binding.registryPin ? { registryPin: binding.registryPin } : {}), ...(binding.registryRefused ? { registryRefused: binding.registryRefused } : {}) })
       }
       // Part 5/8: the authoritative identity test. A TaskController failure
       // here THROWS (inconclusive) — it must never become 'task missing'.
@@ -803,7 +804,7 @@ function createBindingGuard(deps) {
         // already ran BEFORE any invalidation. Recovery still carries the
         // original bound engine explicitly so createBinding cannot re-resolve
         // it from the mutable profile preference.
-        return recoverStaleBinding(agent, session, workspace, promptText, binding, verdict.reason, { engine: authoritativeEngine, preset: authoritativePreset, ...(binding.registryPin ? { registryPin: binding.registryPin } : {}) })
+        return recoverStaleBinding(agent, session, workspace, promptText, binding, verdict.reason, { engine: authoritativeEngine, preset: authoritativePreset, ...(binding.registryPin ? { registryPin: binding.registryPin } : {}), ...(binding.registryRefused ? { registryRefused: binding.registryRefused } : {}) })
       }
       assertEngineBinding(binding, binding.preset, identity.boundEngine)
       return { binding, outcome: 'valid' }
@@ -985,6 +986,10 @@ function apply(ctx) {
           // Absent fields keep legacy persisted bindings byte-identical.
           ...(binding.bindingAuthority ? { bindingAuthority: binding.bindingAuthority } : {}),
           ...(binding.registryPin ? { registryPin: binding.registryPin } : {}),
+          // R6.3.1: refusal/pending markers persist so a rejected generation can
+          // never restart or recover as an ordinary legacy bind. Absent markers
+          // keep legacy persisted bindings byte-identical.
+          ...(binding.registryRefused ? { registryRefused: binding.registryRefused } : {}),
         }
       }
       const temporary = bindingsPath + '.' + crypto.randomUUID() + '.tmp'
@@ -1119,6 +1124,80 @@ function apply(ctx) {
     const decision = await invokePowerShell('Route.ps1', args, { payload })
     if (!decision || !decision.executionClass) throw new Error('aih-controller: routing returned no execution class')
     return decision
+  }
+
+  function loadTransitionConnection(connectionId) {
+    try {
+      if (typeof connectionId !== 'string' || connectionId === '') return null;
+      const svc = registryService.createService({ installRoot, dataRoot });
+      const res = svc.getConnections();
+      const list = res && Array.isArray(res.connections) ? res.connections : [];
+      const hit = list.find((c) => c && c.id === connectionId);
+      return hit ? { id: hit.id, status: hit.status ?? null, provenance: hit.provenance ?? null, providerId: hit.providerId ?? null } : null;
+    } catch { return null; }
+  }
+
+  // R6.3.1 transition choke: EVERY routeTask consumer passes its decision
+  // through here before mutating the binding. Returns the decision to
+  // execute. Throws fail-closed (callers must not mutate on throw) and may
+  // attach pins/markers plus persist them. Legacy sessions pass through
+  // untouched in every mode.
+  async function enforceRegistryTransition(binding, decision, opts) {
+    const o = opts || {};
+    const purpose = typeof o.purpose === 'string' ? o.purpose : 'transition';
+    const flagOn = registrySessionBinding.isRegistryBindingEnabled(process.env);
+    const plan = registrySessionBinding.planTransition({ binding, decision, flagOn, isInitialBind: o.isInitialBind === true });
+    const sid = (binding && binding.sessionId) || null;
+    const tid = (binding && binding.taskId) || null;
+    const iid = (binding && binding.taskInstanceId) || null;
+    if (plan.action === 'proceed-legacy') return decision;
+    if (plan.action === 'rollback-refused' || plan.action === 'rollback-pinned') {
+      binding.bindingAuthority = 'legacy-rollback';
+      persistBindings();
+      log({ event: 'registry-rollback', sessionId: sid, taskId: tid, taskInstanceId: iid, purpose, from: plan.action === 'rollback-refused' ? 'refused' : 'pinned-stale-generation', authority: 'legacy-rollback' });
+      return decision;
+    }
+    if (plan.action === 'evaluate-fresh') {
+      let shadowOut = o.shadow || null;
+      if (!shadowOut) {
+        try { shadowOut = registryShadowBinding.runShadowComparison(decision, { installRoot, dataRoot }); }
+        catch (e) { shadowOut = { shadowOk: false, parity: false, code: 'shadow-threw', errors: [{ code: 'shadow-threw', message: String((e && e.message) || e) }] }; }
+      }
+      const verdict = registrySessionBinding.evaluateRegistryBinding(decision, shadowOut, { bindTask: { taskId: tid, taskInstanceId: iid } });
+      if (!verdict.ok) {
+        binding.registryRefused = { code: verdict.code, generation: { taskId: tid, taskInstanceId: iid }, atUtc: new Date().toISOString(), reasons: (verdict.mismatches || verdict.errors || []).map((m) => m.code) };
+        persistBindings();
+        log({ event: 'registry-binding-refused', sessionId: sid, taskId: tid, taskInstanceId: iid, purpose, code: verdict.code, reasons: binding.registryRefused.reasons });
+        const error = new Error('registry transition refused (' + String(verdict.code) + ') at ' + purpose + ': refusing to proceed without a verified pin');
+        error.code = verdict.code; error.mismatches = verdict.mismatches; error.bindingErrors = verdict.errors;
+        throw error;
+      }
+      binding.registryPin = verdict.pin;
+      binding.bindingAuthority = 'registry';
+      if (binding.registryRefused) delete binding.registryRefused;
+      persistBindings();
+      log({ event: 'registry-bound', sessionId: sid, taskId: tid, taskInstanceId: iid, purpose, resolutionId: verdict.pin.resolutionId });
+      return decision;
+    }
+    const checked = registrySessionBinding.verifyTransitionTarget(decision, binding.registryPin);
+    if (!checked.ok) {
+      log({ event: 'registry-transition-refused', sessionId: sid, taskId: tid, taskInstanceId: iid, purpose, code: checked.code, mismatches: (checked.mismatches || []).map((m) => m.code) });
+      const error = new Error('registry transition refused (' + String(checked.code) + ') at ' + purpose);
+      error.code = checked.code; error.mismatches = checked.mismatches;
+      throw error;
+    }
+    const role = decision && decision.engine === 'muse' ? 'muse_main' : (decision && decision.role);
+    const entry = registrySessionBinding.mapEntryFor(binding.registryPin, role);
+    const connId = entry && entry.available === true && entry.target ? entry.target.connectionId : null;
+    const current = loadTransitionConnection(connId);
+    const az = registrySessionBinding.authorizationForTransition(current ? { id: connId, status: current.status, provenance: current.provenance, providerId: current.providerId } : null);
+    if (!az.ok) {
+      log({ event: 'registry-transition-refused', sessionId: sid, taskId: tid, taskInstanceId: iid, purpose, code: az.code });
+      const error = new Error('registry transition refused (' + String(az.code) + ') at ' + purpose + ': current authorization does not entitle a new provider request');
+      error.code = az.code;
+      throw error;
+    }
+    return decision;
   }
 
   async function markReviewRequested(workspace, taskId, taskInstanceId) {
@@ -2442,6 +2521,9 @@ function apply(ctx) {
           reviewRequested: true,
           taskInstanceId,
         })
+        // R6.3.1: reviewer transitions validate against the generation pin
+        // (a routeTask throw behaves exactly as before).
+        await enforceRegistryTransition(binding, decision, { purpose: 'review-explicit' })
         binding.executionClass = decision.executionClass
         binding.reviewRequired = Boolean(decision.reviewRequired)
         await markReviewRequested(workspace, taskId, taskInstanceId)
@@ -2661,6 +2743,17 @@ function apply(ctx) {
       boundAtUtc: new Date().toISOString(),
       ...(preparation ? { preparationAuthority: preparation } : {}),
     }
+    // R6.3.1: candidate Registry authority for this generation. Recovery
+    // carries the stale pin/refusal forward for the choke below. A fresh
+    // flag-ON bind starts pending BEFORE the pre-route persist, so even a
+    // crash before evaluation cannot silently become legacy on restart.
+    const incomingPin = authoritative && authoritative.registryPin ? authoritative.registryPin : null
+    const incomingRefusal = authoritative && authoritative.registryRefused ? authoritative.registryRefused : null
+    if (incomingPin) binding.registryPin = incomingPin
+    if (incomingRefusal && !incomingPin) binding.registryRefused = incomingRefusal
+    if (registrySessionBinding.isRegistryBindingEnabled(process.env) && !incomingPin) {
+      binding.registryRefused = { code: 'registry-pending', generation: { taskId: binding.taskId || null, taskInstanceId: binding.taskInstanceId || null }, atUtc: new Date().toISOString(), reasons: [] }
+    }
     // Persist the generation-safe identity before routing. If Route.ps1 fails,
     // the next prompt/restart validates and resumes this same task instead of
     // creating an orphan plus a duplicate replacement task.
@@ -2699,44 +2792,11 @@ function apply(ctx) {
       const shadow = binding.shadowParity || {}
       log({ event: 'shadow-parity', sessionId: session.id, taskId: task.taskId, taskInstanceId, preset, engine, parity: shadow.parity === true, code: shadow.code || null, resolutionId: shadow.resolutionId || null, mismatches: (shadow.mismatches || []).map((m) => m.code) })
     } catch { /* logging must never break the bind */ }
-    // R6.3 flagged Registry binding (default OFF, environment-gated, never via web UI).
-    // New sessions only (!authoritative): the shadow above already compiled the
-    // complete staged config; any disagreement fails this bind closed without
-    // touching other sessions. Recovery carries the generation pin forward and
-    // re-verifies it instead of re-resolving, so a running session never changes
-    // when Registry settings change. Rollback (flag OFF) keeps enforcing an
-    // existing pin under legacy-rollback authority until the generation ends;
-    // new sessions bind pure legacy. The executed decision stays the
-    // authoritative legacy one in every mode.
-    const registryFlagOn = registrySessionBinding.isRegistryBindingEnabled(process.env);
-    const incomingPin = authoritative && authoritative.registryPin ? authoritative.registryPin : null;
-    if (incomingPin) {
-      const recheck = registryFlagOn
-        ? registrySessionBinding.verifyPinnedBinding(decision, incomingPin)
-        : registrySessionBinding.rollbackPinnedBinding(decision, incomingPin);
-      if (!recheck.ok) {
-        const pinError = new Error('registry pin verification failed (' + String(recheck.code) + '): refusing to rebind a drifted generation');
-        pinError.code = recheck.code;
-        pinError.mismatches = recheck.mismatches;
-        throw pinError;
-      }
-      binding.bindingAuthority = registryFlagOn ? 'registry' : 'legacy-rollback';
-      binding.registryPin = registryFlagOn ? incomingPin : (recheck.pin || incomingPin);
-    } else if (registryFlagOn && !authoritative) {
-      const verdict = registrySessionBinding.evaluateRegistryBinding(decision, binding.shadowParity, {});
-      if (!verdict.ok) {
-        const verdictError = new Error('registry binding refused (' + String(verdict.code) + '): this bind fails closed; legacy execution elsewhere continues unchanged');
-        verdictError.code = verdict.code;
-        verdictError.mismatches = verdict.mismatches;
-        verdictError.bindingErrors = verdict.errors;
-        throw verdictError;
-      }
-      binding.bindingAuthority = 'registry';
-      binding.registryPin = verdict.pin;
-    }
-    try {
-      log({ event: 'registry-binding', sessionId: session.id, taskId: task.taskId, taskInstanceId, authority: binding.bindingAuthority || 'legacy', resolutionId: (binding.registryPin && binding.registryPin.resolutionId) || null });
-    } catch { /* logging must never break the bind */ }
+    // R6.3.1: every generation passes the transition choke. Fresh flag-ON
+    // binds evaluate (reusing the shadow above); recovery verifies the carried
+    // pin or re-evaluates for the new generation; rollback converts markers to
+    // legacy-rollback. Legacy sessions pass through untouched.
+    await enforceRegistryTransition(binding, decision, { purpose: 'bind', isInitialBind: true, shadow: binding.shadowParity || null })
     binding.executionClass = decision.executionClass
     binding.reviewRequired = Boolean(decision.reviewRequired)
     binding.needsRouteCheck = false
@@ -2815,6 +2875,8 @@ function apply(ctx) {
           const decision = await routeTask(binding.workspace, binding.taskId, binding.description, {
             preset: binding.preset, requestedEngine: binding.engine, taskInstanceId: binding.taskInstanceId,
           })
+          // R6.3.1: interrupted-preparation completion obeys the same pin.
+          await enforceRegistryTransition(binding, decision, { purpose: 'prepare-complete' })
           binding.executionClass = decision.executionClass
           binding.reviewRequired = Boolean(decision.reviewRequired)
           await initializeEngineeringLifecycle(binding)
@@ -3092,7 +3154,16 @@ function apply(ctx) {
           failureReason: String(reason.error.message),
           taskInstanceId: binding.taskInstanceId || undefined,
         })
-          .then((decision) => {
+          .then(async (decision) => {
+            // R6.3.1: failure-signal re-routes obey the generation pin. A
+            // refused transition keeps the previous class and stays loud;
+            // the pending needsRouteCheck retries visibly on the next turn.
+            try {
+              await enforceRegistryTransition(binding, decision, { purpose: 'attempt-failure-signal' })
+            } catch (enforceError) {
+              log({ event: 'failure-signal-refused', sessionId: subject.id, taskId: binding.taskId, code: (enforceError && enforceError.code) || 'unknown' })
+              return
+            }
             binding.executionClass = decision.executionClass
             log({ event: 'failure-signal-routed', sessionId: subject.id, taskId: binding.taskId, executionClass: decision.executionClass })
           })
@@ -3324,6 +3395,15 @@ function apply(ctx) {
           signal: 'review-findings',
           taskInstanceId: binding.taskInstanceId || undefined,
         })
+        // R6.3.1: findings repair validates against the generation pin. A
+        // refused transition skips the repair branch loudly instead of
+        // executing an unverified target.
+        try {
+          await enforceRegistryTransition(binding, decision, { purpose: 'review-findings' })
+        } catch (enforceError) {
+          log({ event: 'registry-transition-refused', sessionId: session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId || null, purpose: 'review-findings', code: (enforceError && enforceError.code) || 'unknown' })
+          return next()
+        }
         binding.executionClass = decision.executionClass
         appendMessage(
           session,
@@ -3337,7 +3417,21 @@ function apply(ctx) {
 
       if (binding.needsRouteCheck) {
         const decision = await routeTask(binding.workspace, binding.taskId, promptText, { preset: binding.preset, requestedEngine: binding.engine, taskInstanceId: binding.taskInstanceId || undefined })
-        if (isReviewClass(decision.executionClass)) {
+        // R6.3.1: refused or unpinned-mismatched generations never complete
+        // routing here. The check stays pending and retries loudly next turn;
+        // legacy sessions behave exactly as before.
+        let routeChecked = false
+        try {
+          await enforceRegistryTransition(binding, decision, { purpose: 'route-check' })
+          routeChecked = true
+        } catch (enforceError) {
+          log({ event: 'registry-transition-refused', sessionId: session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId || null, purpose: 'route-check', code: (enforceError && enforceError.code) || 'unknown' })
+        }
+        if (!routeChecked) {
+          if (binding.registryRefused && registrySessionBinding.isRegistryBindingEnabled(process.env)) {
+            appendMessage(session, createControllerMessage('Controller: Registry binding for this session is not verified (' + String(binding.registryRefused.code || 'refused') + '); execution stays parked until the staged configuration agrees with the bound generation.', 'controller-registry-parked'))
+          }
+        } else if (isReviewClass(decision.executionClass)) {
           binding.executionClass = decision.executionClass
           appendMessage(
             session,
@@ -3348,10 +3442,12 @@ function apply(ctx) {
           )
           return executeReviewTurn(agent, binding, binding.description, { explicit: false })
         }
-        binding.executionClass = decision.executionClass
-        binding.reviewRequired = Boolean(decision.reviewRequired)
-        binding.needsRouteCheck = false
-        persistBindings()
+        if (routeChecked) {
+          binding.executionClass = decision.executionClass
+          binding.reviewRequired = Boolean(decision.reviewRequired)
+          binding.needsRouteCheck = false
+          persistBindings()
+        }
       }
 
       // Engineering turns own the attempt lifecycle: one execution = exactly
@@ -3374,6 +3470,32 @@ function apply(ctx) {
           const stepDecision = museEngine ? null : await selectEngineeringEpistemicStep(binding, payload.turn, promptText)
           if (stepDecision) {
             stepRole = stepDecision.selectedRole
+            // R6.3.1: step targets validate against the generation pin before
+            // reaching the attempt. A refused step keeps the existing degraded
+            // shape (null step role, loud log); the task-level class that the
+            // pin already verified carries the attempt.
+            let stepTargetOk = true
+            if (binding.registryPin && stepRole) {
+              const stepTargetRole = engineeringProfiles.roleOfExecutionClass(stepRole) || null
+              const stepTarget = stepDecision.roleTarget || (stepDecision.step && stepDecision.step.roleTarget) || null
+              const stepChecked = registrySessionBinding.validateStepTarget(binding.registryPin, stepTargetRole, stepTarget)
+              if (!stepChecked.ok) {
+                log({ event: 'step-target-pin-mismatch', sessionId: session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId || null, stepRole, code: stepChecked.code })
+                stepTargetOk = false
+              } else {
+                const stepEntry = registrySessionBinding.mapEntryFor(binding.registryPin, stepTargetRole)
+                const stepConnId = stepEntry && stepEntry.available === true && stepEntry.target ? stepEntry.target.connectionId : null
+                const stepCurrent = loadTransitionConnection(stepConnId)
+                const stepAz = registrySessionBinding.authorizationForTransition(stepCurrent ? { id: stepConnId, status: stepCurrent.status, provenance: stepCurrent.provenance, providerId: stepCurrent.providerId } : null)
+                if (!stepAz.ok) {
+                  log({ event: 'step-target-pin-mismatch', sessionId: session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId || null, stepRole, code: stepAz.code })
+                  stepTargetOk = false
+                }
+              }
+            }
+            if (!stepTargetOk) {
+              stepRole = null
+            } else {
             binding.currentEpistemicActionId = stepDecision.actionId || null
             binding.currentEngineeringStep = {
               role: stepRole,
@@ -3395,6 +3517,7 @@ function apply(ctx) {
                 'controller-epistemic-action',
               ),
             )
+            }
           }
         } catch (error) {
           log({ event: 'step-routing-failed', sessionId: session.id, taskId: binding.taskId, error: String(error) })

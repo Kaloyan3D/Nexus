@@ -221,4 +221,84 @@ sessions; feature flag defaults OFF with explicit rollback.
   R6.5 PASS with the BLOCKED/UNVERIFIED items above. Claude
   subscription-agent stays non-executable for Engineering Modes per the R6.4
   assessment; its empty engine scope is unchanged.
+## 12. R6.3.1 lockdown evidence (shipped)
+
+Two lifecycle defects found by adversarial tests are corrected: rejected
+binds could retry as ordinary legacy binds, and late routing transitions
+bypassed the generation pin. Enforcement verdict: ENFORCED (not BLOCKED).
+
+### H1 - transactional acceptance
+
+- Fresh flag-ON binds start pending (registry-pending marker written BEFORE
+  the pre-route persist), so even a crash before evaluation restarts into
+  re-evaluation, never silent legacy. Evaluation failure persists a
+  registryRefused marker (code, generation, timestamp, reason codes) BEFORE
+  throwing; the marker round-trips through the persisted whitelist and the
+  stale-recovery authoritative carry. Nothing is ever deleted: ledger tasks,
+  routing history, and CCv2 records are only appended (append-only proven by
+  test). No duplicate tasks: evaluation runs post-routeTask, which creates
+  nothing. Flag OFF writes no markers; persisted shapes stay byte-identical.
+- Rollback policy: refused+flag ON stays refused across retry, restart,
+  stale recovery, and needsRouteCheck (re-evaluates when valid; pins on
+  success). Refused+flag OFF converts once to legacy-rollback WITH the
+  refusal retained as history - the single documented escape hatch, never a
+  silent bypass. Pinned+flag OFF keeps enforcing under legacy-rollback
+  until the generation ends. New generations start clean (pins and refusals
+  are generation-scoped by taskInstanceId).
+
+### H2 - pin enforced on every routing transition
+
+- Pins carry the COMPLETE compiled role-target map (every compiled role
+  projected; unprojectable roles recorded explicitly) plus generation
+  identity. A single choke (enforceRegistryTransition, config/AihController.cjs)
+  guards all routeTask consumers: bind, review-explicit, review-findings,
+  route-check (needsRouteCheck), prepare-complete, and the floating
+  attempt-failure signal (refusal keeps the previous class and stays loud).
+  Legal role transitions proceed only against their own map entry; unknown
+  or unavailable roles refuse with registry-role-unpinned/unavailable, and
+  generation drift refuses with registry-generation-mismatch.
+- Step/role escalation is enforced twice: Select-AihStepRole fails closed
+  pre-record against the pin map read from session-bindings.json
+  (scripts/Engineering/StepRouting.ps1), and the controller validates
+  currentEngineeringStep.roleTarget plus current connection authorization
+  before the attempt (refusal keeps the existing degraded null-step-role
+  shape). Reviewer never enters the step mechanism.
+- Every transition additionally re-checks CURRENT connection authorization
+  (overlay-merged snapshot read, no probes) under the exact resolver
+  eligibility rules; revoked/unverifiable authorization refuses even when
+  the target matches. Stale recovery and preparation recovery flow through
+  the same choke; restart with an intact ledger performs no re-resolution.
+
+### H3 - authorization evidence
+
+- Pins record authorization {connectionId, status, provenance,
+  verifiedAtBind (true only for status connected), evidence timestamp} with
+  the honest note 'snapshot status only; no live probe at bind;
+  re-requests require current entitlement (unchecked here)'. The former
+  'deferred-to-request-time' label is removed: no request-time guard exists
+  yet (R6.4 host concern). No external probes were added at bind or per
+  turn; legacy credentials and native authorization paths are untouched.
+
+### Evidence and limitations
+
+- tests/RegistryR631Lockdown.Tests.cjs 15/15 (written first; 6 behaviors
+  failed pre-fix): real pre-step turns, real Route.ps1 decisions (including
+  cross-profile substitution and approval-gated solver), and real
+  child-process restarts for rejection persistence, pin survival, and staged
+  drift immunity; reviewer-drift and revocation refusals via real /review
+  turns with exact log codes.
+- tests/RegistryR631StepPin.Tests.ps1 8/8 for the PS assert function.
+- Re-ran green post-fix: R6.2 (9), R6.3 (10), R6.5 matrix (7), R0-R5
+  registry suites, routing/authority/engine/Muse suites, controller unit +
+  identity e2e (DoD scenario), bootstrap, host, PS routing/provider/opencode
+  suites, CCv2 authority sample. Same pre-existing environment blockers as
+  R6.5 (closure json, cordis modules, installed agent-presets, pinned node).
+- Known limitations: a natural attempt-failure trigger was not driven at
+  the boundary (floating path shares the reviewed choke, covered by helper
+  tests plus real-signal decisions); step PS records remain history-only;
+  overlay-attestation TTLs are undefined (revoked/expired/missing refuse;
+  unknown+legacy descriptors pass per resolver rules); DryRun/standalone
+  decisions with null instances skip the generation check (target check
+  still applies); late-turn escalation policy itself stays legacy-authored.
+
 

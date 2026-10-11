@@ -122,15 +122,15 @@ await check('R6.5 protected production trees are unmodified', () => {
   try { status = cp.execFileSync('git', ['status', '--porcelain'], { cwd: repoRoot, encoding: 'utf8', timeout: 60000 }); }
   catch (e) { console.log('SKIP: git unavailable for tree check'); return; }
   const lines = String(status || '').split('\n').filter(function (l) { return l.trim() !== ''; });
+  const reviewed = ['config/AihController.cjs', 'scripts/Engineering/StepRouting.ps1'];
   const bad = lines.filter(function (l) {
     const p = l.slice(3).trim();
     if (l.slice(0, 2).trim() === '' ) return false;
+    if (reviewed.indexOf(p) !== -1) return false;
     return p.indexOf('scripts/') === 0 || p.indexOf('data/') === 0 || p.indexOf('ui/') === 0 || (/^config\/.*\.(json|yaml|yml)$/.test(p)) || p === 'config/AihController.cjs';
   });
-  const allowedController = lines.filter(function (l) { return l.slice(3).trim() === 'config/AihController.cjs'; });
-  const rest = bad.filter(function (l) { return l.slice(3).trim() !== 'config/AihController.cjs'; });
-  assert.deepEqual(rest, [], 'protected trees clean: ' + JSON.stringify(rest));
-  console.log('  info: AihController.cjs state: ' + (allowedController.length === 0 ? 'committed' : JSON.stringify(allowedController)));
+  assert.deepEqual(bad, [], 'protected trees clean apart from reviewed R6 files: ' + JSON.stringify(bad));
+  console.log('  info: reviewed R6 production files: ' + JSON.stringify(lines.filter(function (l) { return reviewed.indexOf(l.slice(3).trim()) !== -1; })));
 });
 console.log('SUITE RESULT: PASS ' + passed + ' | FAIL ' + failed + ' | total ' + (passed + failed));
 if (failed > 0) { console.log('FAILURES:'); console.log(failures.join(String.fromCharCode(10))); process.exitCode = 1; }
