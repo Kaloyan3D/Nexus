@@ -123,3 +123,102 @@ sessions; feature flag defaults OFF with explicit rollback.
   schema change to ledger or routing state in R6.
 - Security: snapshots carry credential:// references only; existing secret scans
   (dsh-adapter snapshotHasSecrets, subscription assertNoSecrets) stay in force.
+## 9. R6.2 implementation evidence (shipped)
+
+- Module config/registry/shadow-binding.cjs: runShadowComparison(decision,
+  {installRoot, dataRoot}) compares the authoritative Route.ps1 record with
+  the staged mode config via service.compilePreview plus
+  dsh-adapter.bindingToLegacyTarget. Read-only (no writes,verified by an
+  empty-dataRoot test) and never throws: every failure is a structured
+  diagnostic (shadow-decision-invalid, shadow-preset-unmapped,
+  shadow-compile-failed, shadow-projection-failed, shadow-role-unmapped).
+  Compared fields: provider, model, reasoning (exact equality, so no
+  downgrade can hide), role, engine, reviewer writable vs
+  readOnlyEnforced, executionKind (raw-model required; agent-sdk never
+  parity-matches a mode role), dataUseTier where both planes record it.
+- Wiring: bindSession (config/AihController.cjs) runs the shadow after
+  routeTask, attaches diagnostics to the in-memory binding only
+  (persistBindings serializes a whitelist, so sessions are untouched), and
+  logs a shadow-parity event. Shadow failure cannot interrupt legacy flow.
+- Evidence: tests/RegistryR62Shadow.Tests.cjs 9/9 PASS on real -DryRun
+  decisions, including dual parity (flash-high-direct/deepseek-v4-flash/high),
+  muse parity in isolation (meta-model-api, contributor tier), locked
+  aih-deepseek reporting, revoked-connection compile failure with the exact
+  connection-auth-required code, Claude subscription-agent route pinned as
+  never-parity (compile/projection fail-closed), and determinism.
+
+## 10. R6.3 implementation evidence (shipped, default OFF)
+
+- Module config/registry/session-binding.cjs: isRegistryBindingEnabled reads
+  only NEXUS_REGISTRY_BINDING=1 from process env (no UI reference anywhere;
+  asserted by test). evaluateRegistryBinding demands shadowOk plus full
+  parity plus pinned resolutionId/revision, then mints a generation pin
+  (authority, mode, resolution, revision, exact role target, execution
+  contract, legacy counterpart values). Optional connection evidence must be
+  fresh (5-minute bound) and non-revoked; absent evidence records
+  deferred-to-request-time per the R5 request-time revalidation contract.
+  verifyPinnedBinding re-checks provider/model/reasoning/role/engine;
+  rollbackPinnedBinding flips authority to legacy-rollback with identical
+  targets.
+- Wiring: new sessions with the flag ON pin or fail closed (exact codes
+  registry-binding-mismatch / registry-binding-unavailable); recovery
+  carries the pin via authoritative.registryPin (persisted through an
+  additive whitelist extension - flag-OFF bindings serialize byte-identical
+  shapes, proven by test) and re-verifies instead of re-resolving; rollback
+  (flag OFF) keeps enforcing an existing pin until the generation ends while
+  new sessions bind pure legacy. Reviewer/solver/approval, engine binding,
+  and DeepSeek-lock enforcement stay on the legacy path and are never
+  bypassed: the executed decision is always the legacy one.
+- Consumer boundary (exact blocker analysis): Route.ps1 and the DSH
+  execution substrate expose no target-override input - a registry-only
+  target cannot reach the consumer except through the legacy decision
+  record. Equality-gating (execute if and only if legacy equals pinned) is
+  therefore the safe binding form; direct substitution would need a new
+  controller-owned target input plus per-turn re-verification, which is
+  deliberately out of R6 scope. Known limitation: a refused bind surfaces
+  as a loud pre-step-error and pins nothing, but the turn pipeline's
+  pre-existing bind-failure resilience may still complete the session over
+  legacy authority on later re-routes; late-turn escalation (reviewer
+  findings, failure thresholds) likewise stays legacy-authored. No registry
+  target is ever executed off-parity.
+- Evidence: tests/RegistryR63Binding.Tests.cjs 10/10 PASS, including real
+  bridge turns for OFF byte-identical, ON pinned (cross-checked against the
+  JS legacy mirror), rollback legacy-rollback with identical targets, and
+  drifted-stage refusal with the exact code in the controller log.
+
+## 11. R6.5 matrix verdicts
+
+- tests/RegistryR65Matrix.Tests.cjs 7/7 PASS: reviewer/solver-approved/deep
+  live parity (reviewer read-only on both planes), solver-without-approval
+  still throws at Routing.ps1:573, opencode muse parity under staged opencode
+  config, corrupt-store and unknown-route fail-closed codes, no credential
+  material in diagnostics/pins, protected trees (scripts, data, ui,
+  config json/yaml) unmodified.
+- Regression battery executed in this task, all PASS: R0-R5 registry suites
+  (45+21+41+19+29+16+27+19+14+20+10+3), ComposedRoutingAuthority/Matrix,
+  PreferredRouteContract, RoutingIntegrity, RuntimeRoutingTrace,
+  MuseRoutingAuthorityOrdering (28), MuseIsolation (20),
+  MuseReasoningRuntime (30), MuseReasoningGovernor (52), MuseProvider (33),
+  MuseOpenCodeGo (19), MuseOpenCodeSession (29), MuseEgressCleanup (2),
+  MusePresetDependencyClosure (11), ControllerPresetCleanInstall (3),
+  AihController.Tests, AihControllerIdentity e2e (incl. DoD scenario),
+  ControllerSessionBootstrap (32), AihControllerHost (159),
+  MuseAgentPlane PS (65), MuseProvider PS (111), MuseOpenCodeGo PS (54),
+  Intelligence.Registry PS (65), CCv2 authority sample (35), R6.2 (9),
+  R6.3 (10), R6.5 matrix (7).
+- BLOCKED by pre-existing environment gaps (verified unrelated to R6:
+  missing generated/install artifacts, absent node_modules):
+  ControllerPresetInstalled (needs generated
+  config/.engineering-preset-closure.json), NexusControllerPanel (needs
+  @deepseek-ai/cordis under app/), ControllerRouting.Tests.ps1 (needs
+  installed data/.agent-presets), MuseInstall.Tests.ps1 (needs pinned
+  runtime/node).
+- UNVERIFIED: live Windows PowerShell 5.1 and GUI runs (Linux pwsh 7.5 only
+  executed here), live Claude CLI shapes/billing (no CLI in this
+  environment), the full CCv2 compaction battery beyond the authority
+  sample (outside the R6 change surface), and Windows/GUI paths generally.
+- R6 verdicts: R6.2 PASS, R6.3 PASS (flag OFF default, rollback path proven),
+  R6.5 PASS with the BLOCKED/UNVERIFIED items above. Claude
+  subscription-agent stays non-executable for Engineering Modes per the R6.4
+  assessment; its empty engine scope is unchanged.
+
