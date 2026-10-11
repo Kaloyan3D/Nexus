@@ -48,6 +48,7 @@ const path = require('node:path')
 const os = require('node:os')
 const crypto = require('node:crypto')
 const engineeringProfiles = require('./Engineering-Profiles.cjs')
+const registryShadowBinding = require('./registry/shadow-binding.cjs')
 const contextCompaction = require('./ContextCompaction.cjs')
 const compilerShadowHost = require('./ContextCompilerShadowHostV2.cjs')
 const memoryProducerHost = require('./ContextMemoryProducerHostV2.cjs')
@@ -2678,6 +2679,21 @@ function apply(ctx) {
       reviewRequested,
       taskInstanceId,
     })
+    // R6.2 shadow parity: read-only comparison of the authoritative legacy
+    // decision against the staged Registry compilation. Observable only: any
+    // shadow outcome (including shadow failure) must never alter the legacy
+    // decision, the binding identity, or the execution path. The diagnostics
+    // live on the in-memory binding only; persistBindings serializes a
+    // whitelist, so shadow output is never written to session-bindings.json.
+    try {
+      binding.shadowParity = registryShadowBinding.runShadowComparison(decision, { installRoot, dataRoot })
+    } catch (e) {
+      binding.shadowParity = { shadowOk: false, parity: false, code: 'shadow-threw', message: String((e && e.message) || e) }
+    }
+    try {
+      const shadow = binding.shadowParity || {}
+      log({ event: 'shadow-parity', sessionId: session.id, taskId: task.taskId, taskInstanceId, preset, engine, parity: shadow.parity === true, code: shadow.code || null, resolutionId: shadow.resolutionId || null, mismatches: (shadow.mismatches || []).map((m) => m.code) })
+    } catch { /* logging must never break the bind */ }
     binding.executionClass = decision.executionClass
     binding.reviewRequired = Boolean(decision.reviewRequired)
     binding.needsRouteCheck = false
