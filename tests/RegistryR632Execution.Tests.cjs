@@ -76,18 +76,18 @@ process.env.DSH_HOME = fix.dataHome; process.env.AIH_INSTALL_ROOT = fix.installR
 const controller = require('../config/AihController.cjs');
 const registry = require('../config/registry/index.cjs');
 function boot() { const handlers = {}; const ctx = { on: function (ev, fn) { handlers[ev] = fn; }, shellEnv: { register: function () {} } }; controller.apply(ctx); return handlers['agent/pre-step']; }
-function countAttempts() { let n = 0; const runs = path.join(fix.fixture, '.ai-harness', 'runs'); try { for (const t of fs.readdirSync(runs)) { try { n += fs.readFileSync(path.join(runs, t, 'attempts.jsonl'), 'utf8').split('\n').filter(function (l) { return l !== ''; }).length; } catch (e) {} } } catch (e) {} return n; }
+function countAttempts(workspace = fix.fixture) { let n = 0; const runs = path.join(workspace, '.ai-harness', 'runs'); try { for (const t of fs.readdirSync(runs)) { try { n += fs.readFileSync(path.join(runs, t, 'attempts.jsonl'), 'utf8').split('\n').filter(function (l) { return l !== ''; }).length; } catch (e) {} } } catch (e) {} return n; }
 async function instrumentedTurn(preStep, sid, text, preset) {
   const before = countAttempts(); let nextCount = 0;
   const session = makeSession(sid, fix.fixture, preset);
   const result = await preStep({ agent: { session: session }, messages: [userMessage(text)], step: 1, turn: 'x' }, function () { nextCount++; return 'next'; });
   return { kind: (typeof result === 'string') ? result : (result && result.kind), nextCount: nextCount, attemptsDelta: countAttempts() - before };
 }
-function closeAttempt(taskId, instanceId) {
+function closeAttempt(taskId, instanceId, workspace = fix.fixture) {
   return new Promise((resolve, reject) => {
     const env = cleanEnv();
     env.AIH_INSTALL_ROOT = fix.installRoot;
-    const argv = ['-NoProfile', '-NoLogo', '-File', path.join(repoRoot, 'scripts', 'Task.ps1'), '-Action', 'attempt-event', '-Workspace', fix.fixture, '-TaskId', taskId, '-Status', 'interrupted', '-Reason', 'r632-test-staging', '-TaskInstanceId', instanceId];
+    const argv = ['-NoProfile', '-NoLogo', '-File', path.join(repoRoot, 'scripts', 'Task.ps1'), '-Action', 'attempt-event', '-Workspace', workspace, '-TaskId', taskId, '-Status', 'interrupted', '-Reason', 'r632-test-staging', '-TaskInstanceId', instanceId];
     cp.execFile('pwsh', argv, { cwd: repoRoot, env: env, timeout: 120000, maxBuffer: 1048576 }, (err, stdout, stderr) => {
       if (err) { reject(new Error('closeAttempt failed: '+ String(stderr || (err && err.message) || err).slice(0, 300))); return; }
       resolve(true);
@@ -217,46 +217,106 @@ await check('R6.3.2 revoked connection rejects the ordinary pinned turn', async 
   const hits = logLines().filter(function (l) { return l.indexOf('s-auth') !== -1 && l.indexOf('registry-authorization-revoked') !== -1; });
   assert.ok(hits.length >= 1, 'exact authorization code in log');
 });await check('R6.3.2 muse pin proceeds, revoked muse connection rejects', async () => {
-  const mroot = tmpDir('r632-mroot-');
-  fs.symlinkSync(path.join(repoRoot, 'config'), path.join(mroot, 'config'), 'dir');
-  fs.mkdirSync(path.join(mroot, 'data'), { recursive: true });
-  fs.copyFileSync(path.join(repoRoot, 'config', 'settings.yaml'), path.join(mroot, 'data', 'settings.yaml'));
   const mfix = tmpDir('r632-mws-');
-  const mdec = await new Promise((resolve, reject) => {
-    const argv = ['-NoProfile', '-NoLogo', '-File', path.join(repoRoot, 'scripts', 'Route.ps1'), '-Description', 'Harden contributor tool boundary', '-Workspace', mfix, '-InstallRoot', mroot, '-Preset', 'aih-muse', '-ProfileId', 'muse-spark-1.3-contributor', '-DryRun'];
-    cp.execFile('pwsh', argv, { cwd: repoRoot, env: cleanEnv(), timeout: 120000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
-      const text = String(stdout || ''); const start = text.indexOf('{');
-      if (err || start < 0) { reject(new Error('muse decision missing: ' + String((err && err.message) || stderr || text).slice(0, 300))); return; }
-      try { resolve(JSON.parse(text.slice(start))); } catch (e) { reject(new Error('muse decision unparseable')); }
+  const settingsPath = path.join(fix.dataHome, 'settings.yaml');
+  const settingsBackup = fs.readFileSync(settingsPath);
+  try {
+    // Muse routing requires the provider declaration from the shipped template.
+    fs.copyFileSync(path.join(fix.installRoot, 'config', 'settings.yaml'), settingsPath);
+    // Use the same copied installation and isolated Registry store for routing,
+    // pin resolution, turn-entry authorization, and revocation.
+    const mdec = await new Promise((resolve, reject) => {
+      const argv = ['-NoProfile', '-NoLogo', '-File', path.join(fix.installRoot, 'scripts', 'Route.ps1'), '-Description', 'Harden contributor tool boundary', '-Workspace', mfix, '-InstallRoot', fix.installRoot, '-Preset', 'aih-muse', '-ProfileId', 'muse-spark-1.3-contributor', '-DryRun'];
+      cp.execFile('pwsh', argv, { cwd: mfix, env: cleanEnv(), timeout: 120000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+        const text = String(stdout || ''); const start = text.indexOf('{');
+        if (err || start < 0) { reject(new Error('muse decision missing: ' + String(stderr || (err && err.message) || text).slice(0, 900))); return; }
+        try { resolve(JSON.parse(text.slice(start))); } catch (e) { reject(new Error('muse decision unparseable')); }
+      });
     });
-  });
-  assert.equal(mdec.engine, 'muse');
-  const minst = 'task-d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4';
-  const mshadow = shadow.runShadowComparison(mdec, { installRoot: repoRoot, dataRoot: tmpDir('r632-mstore-') });
-  assert.equal(mshadow.parity, true, JSON.stringify(mshadow.mismatches));
-  const mpin = sessionBinding.evaluateRegistryBinding(mdec, mshadow, { bindTask: { taskId: 'TASK-M1', taskInstanceId: minst } }).pin;
-  fs.mkdirSync(path.join(mfix, '.ai-harness', 'state'), { recursive: true });
-  fs.writeFileSync(path.join(mfix, '.ai-harness', 'state', 'tasks.json'), JSON.stringify({ schemaVersion: 1, nextSequence: 2, tasks: [{ taskId: 'TASK-M1', taskInstanceId: minst, description: 'muse hardening', status: 'ready', boundEngine: 'muse' }] }));
-  const mbind = { sessionId: 's-muse', taskId: 'TASK-M1', taskInstanceId: minst, workspace: mfix, preset: 'aih-muse', engine: 'muse', executionClass: 'muse_main', needsRouteCheck: false, boundAtUtc: '2026-10-11T00:00:00.000Z', registryPin: mpin, bindingAuthority: 'registry' };
-  const mdoc = JSON.parse(fs.readFileSync(path.join(fix.dataHome, 'routing', 'session-bindings.json'), 'utf8'));
-  mdoc.bindings['s-muse'] = mbind;
-  fs.writeFileSync(path.join(fix.dataHome, 'routing', 'session-bindings.json'), JSON.stringify(mdoc));
-  async function museTurn(text) {
-    const session = makeSession('s-muse', mfix, 'aih-muse');
-    let nextCount = 0;
-    const r = await boot()({ agent: { session: session }, messages: [userMessage(text)], step: 1, turn: 'x' }, function () { nextCount++; return 'next'; });
-    return { kind: (typeof r === 'string') ? r : (r && r.kind), nextCount: nextCount };
+    assert.equal(mdec.engine, 'muse');
+    // The real creation contract supplies lifecycle fields and run artifacts;
+    // never fabricate a ledger record or a task generation identity here.
+    const mtask = await new Promise((resolve, reject) => {
+      const argv = ['-NoProfile', '-NoLogo', '-File', path.join(fix.installRoot, 'scripts', 'Task.ps1'), '-Action', 'create-task', '-Workspace', mfix, '-Description', 'muse hardening', '-Engine', 'muse', '-ExecutionClass', 'muse_main'];
+      cp.execFile('pwsh', argv, { cwd: mfix, env: cleanEnv(), timeout: 120000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) { reject(new Error('muse task creation failed: ' + String(stderr || err.message).slice(0, 600))); return; }
+        try { resolve(JSON.parse(stdout)); } catch (e) { reject(new Error('muse task unparseable: ' + e.message)); }
+      });
+    });
+    assert.ok(mtask.taskId);
+    assert.match(mtask.taskInstanceId, /^task_[0-9a-f]{32}$/);
+    assert.equal(mtask.boundEngine, 'muse');
+    assert.equal(mtask.executionClass, 'muse_main');
+    assert.equal(mtask.attempt, 0);
+    const mshadow = shadow.runShadowComparison(mdec, { installRoot: fix.installRoot, dataRoot: fix.dataHome });
+    assert.equal(mshadow.parity, true, JSON.stringify(mshadow.mismatches));
+    const evaluated = sessionBinding.evaluateRegistryBinding(mdec, mshadow, { bindTask: mtask });
+    assert.equal(evaluated.ok, true, JSON.stringify(evaluated.errors));
+    const mpin = evaluated.pin;
+    const mbind = { sessionId: 's-muse', taskId: mtask.taskId, taskInstanceId: mtask.taskInstanceId, workspace: mfix, preset: 'aih-muse', engine: 'muse', executionClass: 'muse_main', needsRouteCheck: false, boundAtUtc: mpin.boundAtUtc, registryPin: mpin, bindingAuthority: 'registry' };
+    const mdoc = JSON.parse(fs.readFileSync(path.join(fix.dataHome, 'routing', 'session-bindings.json'), 'utf8'));
+    mdoc.bindings['s-muse'] = mbind;
+    fs.writeFileSync(path.join(fix.dataHome, 'routing', 'session-bindings.json'), JSON.stringify(mdoc));
+    const run = path.join(mfix, '.ai-harness', 'runs', mtask.taskId);
+    function readTask() { return JSON.parse(fs.readFileSync(path.join(mfix, '.ai-harness', 'state', 'tasks.json'), 'utf8')).tasks.find((t) => t.taskId === mtask.taskId); }
+    function readAttempts() { return fs.readFileSync(path.join(run, 'attempts.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)); }
+    function assertIdentity(record) {
+      assert.equal(record.taskId, mtask.taskId);
+      assert.equal(record.taskInstanceId, mtask.taskInstanceId);
+    }
+    assertIdentity(readTask());
+    assertIdentity(JSON.parse(fs.readFileSync(path.join(run, 'manifest.json'), 'utf8')));
+    assertIdentity(JSON.parse(fs.readFileSync(path.join(run, 'ccv2-authority.json'), 'utf8')));
+    assertIdentity(mpin);
+    async function museTurn(text) {
+      const before = countAttempts(mfix);
+      const session = makeSession('s-muse', mfix, 'aih-muse');
+      let nextCount = 0;
+      const r = await boot()({ agent: { session: session }, messages: [userMessage(text)], step: 1, turn: 'x' }, function () { nextCount++; return 'next'; });
+      return { kind: (typeof r === 'string') ? r : (r && r.kind), nextCount: nextCount, attemptsDelta: countAttempts(mfix) - before };
+    }
+    const mok = await museTurn(TURN);
+    assert.deepEqual(mok, { kind: 'next', nextCount: 1, attemptsDelta: 1 }, 'valid Muse pin proceeds and starts exactly one attempt');
+    assertIdentity(readBindings()['s-muse']);
+    const attempts = readAttempts();
+    assert.equal(attempts.length, 1);
+    assertIdentity(attempts[0]);
+    assert.equal(attempts[0].status, 'started');
+    assert.equal(attempts[0].executionClass, 'muse_main');
+    assert.equal(attempts[0].sequence, 1);
+    assert.equal(attempts[0].sessionId, 's-muse');
+    assert.equal(readTask().attempt, 1);
+    // Close the first attempt so rejection cannot be masked by an open attempt.
+    await closeAttempt(mtask.taskId, mtask.taskInstanceId, mfix);
+    assert.equal(readAttempts().at(-1).status, 'interrupted');
+    const pinnedTarget = sessionBinding.mapEntryFor(mpin, 'muse_main');
+    assert.equal(pinnedTarget.available, true);
+    const connectionId = pinnedTarget.target.connectionId;
+    assert.ok(connectionId, 'Muse pin names the exact connection to revoke');
+    const svc = registry.service.createService({ installRoot: fix.installRoot, dataRoot: fix.dataHome });
+    assert.equal(svc.setBuiltInConnectionStatus(connectionId, 'revoked', {}).ok, true);
+    const beforeRevokeTurn = readAttempts();
+    const taskBeforeRevokeTurn = readTask();
+    const logStart = logLines().filter((l) => l !== '').length;
+    const mno = await museTurn(TURN);
+    assert.deepEqual(mno, { kind: 'reject', nextCount: 0, attemptsDelta: 0 }, 'revoked Muse pin rejects before any downstream inference or fallback');
+    assert.deepEqual(readAttempts(), beforeRevokeTurn, 'revocation starts no attempt or fallback');
+    assert.deepEqual(readTask(), taskBeforeRevokeTurn, 'revocation does not mutate task lifecycle');
+    assert.deepEqual(readBindings()['s-muse'].registryPin, mpin, 'immutable generation pin retained');
+    const hits = logLines().slice(logStart).filter((l) => l.includes('s-muse')).map((l) => JSON.parse(l));
+    const refusal = hits.find((e) => e.event === 'registry-execution-refused' && e.code === 'registry-authorization-revoked');
+    assert.ok(refusal, 'exact Muse authorization revocation diagnostic on this turn');
+    assertIdentity(refusal);
+    assert.equal(refusal.purpose, 'pre-step');
+    console.log('MUSE-EVIDENCE ' + JSON.stringify({ taskId: mtask.taskId, taskInstanceId: mtask.taskInstanceId, resolutionId: mpin.resolutionId, connectionId, positive: mok, revoked: mno, code: refusal.code }));
+  } catch (e) {
+    // Include actionable diagnostics before finally removes all fixture artifacts.
+    console.log('MUSE-DIAGNOSTICS ' + JSON.stringify(logLines().filter((l) => l.includes('s-muse')).slice(-8)));
+    throw e;
+  } finally {
+    fs.writeFileSync(settingsPath, settingsBackup);
+    fs.rmSync(mfix, { recursive: true, force: true });
   }
-  const mok = await museTurn(TURN);
-  assert.equal(mok.kind, 'next'); assert.equal(mok.nextCount, 1);
-  const svc = registry.service.createService({ installRoot: repoRoot, dataRoot: fix.dataHome });
-  assert.equal(svc.setBuiltInConnectionStatus('conn-meta-model-api', 'revoked', {}).ok, true);
-  const mno = await museTurn(TURN);
-  assert.equal(mno.kind, 'reject'); assert.equal(mno.nextCount, 0);
-  const hits = logLines().filter(function (l) { return l.indexOf('s-muse') !== -1 && l.indexOf('registry-authorization-revoked') !== -1; });
-  assert.ok(hits.length >= 1, 'exact muse authorization code in log');
-  try { fs.rmSync(mroot, { recursive: true, force: true }); } catch (e) {}
-  try { fs.rmSync(mfix, { recursive: true, force: true }); } catch (e) {}
 });await check('R6.3.2 authorized rollback proceeds under legacy authority', async () => {
   delete process.env.NEXUS_REGISTRY_BINDING;
   const r = await instrumentedTurn(boot(), 's-r1', TURN);
