@@ -104,5 +104,73 @@ this check (reproducible with the same setup.sh invocation).
 
 The compatibility bridge is release-ready under its documented terms:
 flag default OFF, equality-gated binding only, rollback proven, Claude
-and direct routing explicitly blocked. No merge without explicit
+and direct routing explicitly blocked.
+
+## R7.1.1 - Registry mode manifest closure (Live E2E blocker, fixed - awaiting user retest)
+
+### Live failure (user-executed, pre-fix)
+
+With NEXUS_REGISTRY_BINDING=1 the live run produced shadow-compile-failed /
+registry-binding-unavailable with inner cause unknown-mode, and neither
+inference nor Muse fallback executed. Read-only investigation showed all three
+mode definitions present in the installed config/registry/modes/ but missing
+from data/.agent-presets/aih-muse/registry/modes/, while compiling the saved
+EMv2 revision 2 through the main installed Registry service succeeded.
+
+### Root cause
+
+Managed dependency-closure defect, not OAuth or model authentication:
+config/registry/legacy-import.cjs loads the mode definitions with a
+__dirname-relative fs read (loadModeDefinitions), not with require, so
+the require-graph walk in scripts/MusePresetDependencyClosure.cjs never
+discovered them and no preset copy shipped them. The preset-local Registry
+then compiled every known mode to unknown-mode.
+
+### Fix (this branch, PR #33 still Draft)
+
+- scripts/MusePresetDependencyClosure.cjs: new pinned REGISTRY_MODE_ASSETS
+  (registry/modes/engineering-v1.json, engineering-v2.json,
+  engineering-v3.json) included in all four closure profiles (muse,
+  engineering, deepseek, controller). Tokenizer assets, source tracking, graph
+  validation, SHA-256 integrity, and path-boundary protections unchanged.
+- config/registry/shadow-binding.cjs: new fail-closed diagnostic
+  shadow-mode-definitions-missing (with inner
+  registry-mode-definitions-missing) when a known mode compiles to
+  unknown-mode (or the snapshot is unavailable) while mode asset files are
+  absent. Unrecognized mode ids, invalid saved configs (shadow-compile-failed)
+  and genuine routing mismatches (shadow-mismatch) keep their existing codes;
+  missing configuration is never compiled successfully and never falls back silently.
+- tests/MusePresetRegistryModes.Tests.cjs (new, 8 checks): builds real
+  isolated installs with the actual closure tooling, loads the Registry service
+  from the preset-local copied module, proves preset-local shadow parity on a
+  saved EMv2 config with contributor data-use tier, validates manifests/hashes
+  for all four profiles, and proves removing a mode asset fails validation.
+  Failing-first demonstrated: 0/8 on the pre-fix baseline (inner unknown-mode)
+  versus 8/8 after the fix.
+- tests/ControllerPresetCleanInstall.Tests.cjs: synthetic controller fixture now
+  carries the three pinned mode assets (spec change with justification: the
+  controller profile now requires them); suite passes 3/3.
+
+### Reproduction
+
+1. node scripts/MusePresetDependencyClosure.cjs plan . muse - pre-fix the
+   listing contains no registry/modes JSON; post-fix all three are pinned
+   in every profile.
+2. node tests/MusePresetRegistryModes.Tests.cjs - 8/8 post-fix; stash the
+   two source fixes and it falls to 0/8 with unknown-mode, matching the live
+   failure signature.
+3. Install paths unchanged: setup.sh / scripts/Setup.ps1 still publish the
+   full config/registry tree recursively, and Install-MusePreset.ps1 /
+   Install-ControllerPresets.ps1 call the corrected closure without bypassing
+   validation (see RegistryInstalledRuntime 3/3).
+
+### Status
+
+NOT live-verified: no Live E2E PASS is claimed. The operator retest of the
+installed runtime (reinstall presets, set NEXUS_REGISTRY_BINDING=1) is still
+required. Remaining failures in this check: RegistryR632Execution 11/12
+(muse-pin case fails identically on the pre-fix baseline - pre-existing,
+unrelated to this fix) and RegistryR65Matrix tree-cleanliness (flags task-scoped
+scripts edits while uncommitted; clears once committed).
+Flag default OFF, PR #33 stays Draft, no routing-policy or credential changes. No merge without explicit
 authorization.

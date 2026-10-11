@@ -9,9 +9,36 @@
  * Read-only: no writes, never throws. Every failure is diagnostics.
  * Callers MUST NOT branch production behavior on parity.
  */
+const fs = require('node:fs');
+const path = require('node:path');
 const resolver = require('./resolver.cjs');
 const dshAdapter = require('./dsh-adapter.cjs');
 const serviceModule = require('./service.cjs');
+// R7.1.1: mode definition assets are managed files (config/registry/modes/*.json)
+// pinned by the preset dependency closure. legacy-import.cjs reads them via
+// __dirname-relative fs access, so a preset copy without them compiles every
+// known mode to unknown-mode. Detect that deployment defect explicitly so it
+// is never confused with an unrecognized mode id, an invalid saved config,
+// or a genuine legacy/Registry routing mismatch. All branches stay fail-closed.
+const KNOWN_MODE_IDS = Object.freeze(['engineering-v1', 'engineering-v2', 'engineering-v3']);
+const MODE_DEFINITION_FILES = Object.freeze(['engineering-v1.json', 'engineering-v2.json', 'engineering-v3.json']);
+function missingModeDefinitions(installRoot) {
+  const missing = [];
+  for (const file of MODE_DEFINITION_FILES) {
+    try {
+      const doc = JSON.parse(fs.readFileSync(path.join(String(installRoot), 'config', 'registry', 'modes', file), 'utf8'));
+      if (!doc || doc.id !== file.replace(/\.json$/, '')) missing.push(file);
+    } catch { missing.push(file); }
+  }
+  return missing;
+}
+function compileErrorsSignalMissingModes(errs, modeId) {
+  const codes = (errs || []).map((e) => String((e && e.code) || ''));
+  if (codes.indexOf('registry-mode-definitions-incomplete') !== -1) return true;
+  if (codes.indexOf('snapshot-unavailable') !== -1) return true;
+  if (codes.indexOf('unknown-mode') !== -1 && KNOWN_MODE_IDS.indexOf(modeId) !== -1) return true;
+  return false;
+}
 const SHADOW_SCHEMA_VERSION = 1;
 const PRESET_TO_MODE = Object.freeze({ 'aih-engineering': 'engineering-v1', 'aih-deepseek': 'engineering-v1', 'aih-muse': 'engineering-v2' });
 const LOCKED_PRESETS = Object.freeze({ 'aih-deepseek': true });
@@ -55,13 +82,32 @@ function runShadowComparison(decision, deps) {
     if (!service) service = serviceModule.createService({ installRoot: installRoot, dataRoot: dataRoot });
     let staged = null;
     try { staged = service.getModeConfiguration(modeId, {}); } catch (e) { return fail('shadow-staged-unreadable', 'staged config unreadable: ' + String((e && e.message) || e), partial); }
-    if (!staged || !staged.result || !staged.result.config) return fail('shadow-staged-missing', 'no staged Registry configuration for mode ' + modeId + '; refusing to fabricate parity', partial);
+    if (!staged || !staged.result || !staged.result.config) {
+      const missing = missingModeDefinitions(installRoot);
+      if (missing.length > 0) {
+        const out = fail('shadow-mode-definitions-missing', 'Registry mode definition assets missing (' + missing.join(', ') + '); reinstall the preset closure without bypassing validation; legacy continues unchanged', partial);
+        out.errors = [{ code: 'registry-mode-definitions-missing', path: 'config/registry/modes', message: 'missing mode definition assets: ' + missing.join(', ') }];
+        return out;
+      }
+      return fail('shadow-staged-missing', 'no staged Registry configuration for mode ' + modeId + '; refusing to fabricate parity', partial);
+    }
     const stagedInfo = { persisted: Boolean(staged.result.persisted), source: staged.result.source || null, adoptedFrom: staged.result.adoptedFrom || null, revision: typeof staged.result.config.revision === 'number' ? staged.result.config.revision : null };
     partial.staged = stagedInfo;
     let compiled = null;
     try { compiled = service.compilePreview(staged.result.config); } catch (e) { return fail('shadow-compile-threw', 'compilation threw: ' + String((e && e.message) || e), partial); }
     if (!compiled || compiled.ok !== true || !compiled.snapshot) {
       const errs = (compiled && Array.isArray(compiled.errors) && compiled.errors.length > 0) ? compiled.errors : [diag('unknown', 'staged', 'compilation failed')];
+      // Missing-asset defect first: a known mode that compiles to unknown-mode
+      // (or an unavailable snapshot) with absent mode files is a broken preset
+      // closure, not an unrecognized mode id or an invalid saved config.
+      if (compileErrorsSignalMissingModes(errs, modeId)) {
+        const missing = missingModeDefinitions(installRoot);
+        if (missing.length > 0) {
+          const out = fail('shadow-mode-definitions-missing', 'Registry mode definition assets missing (' + missing.join(', ') + '); reinstall the preset closure without bypassing validation; legacy continues unchanged', partial);
+          out.errors = [{ code: 'registry-mode-definitions-missing', path: 'config/registry/modes', message: 'missing mode definition assets: ' + missing.join(', ') }].concat(errs.map((e) => ({ code: String(e.code || 'unknown'), path: String(e.path || 'staged'), message: String(e.message || e) })));
+          return out;
+        }
+      }
       const out = fail('shadow-compile-failed', 'staged config does not compile (' + errs.map((e) => e.code).join(', ') + '); legacy continues unchanged', partial);
       out.errors = errs.map((e) => ({ code: String(e.code || 'unknown'), path: String(e.path || 'staged'), message: String(e.message || e) }));
       return out;
