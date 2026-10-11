@@ -49,6 +49,7 @@ const os = require('node:os')
 const crypto = require('node:crypto')
 const engineeringProfiles = require('./Engineering-Profiles.cjs')
 const registryShadowBinding = require('./registry/shadow-binding.cjs')
+const registrySessionBinding = require('./registry/session-binding.cjs')
 const contextCompaction = require('./ContextCompaction.cjs')
 const compilerShadowHost = require('./ContextCompilerShadowHostV2.cjs')
 const memoryProducerHost = require('./ContextMemoryProducerHostV2.cjs')
@@ -778,7 +779,7 @@ function createBindingGuard(deps) {
       // SAME engine identity carried forward explicitly.
       const bindingInstance = typeof binding.taskInstanceId === 'string' ? binding.taskInstanceId : ''
       if (bindingInstance === '') {
-        return recoverStaleBinding(agent, session, workspace, promptText, binding, 'ambiguous-legacy-binding', { engine: authoritativeEngine, preset: authoritativePreset })
+        return recoverStaleBinding(agent, session, workspace, promptText, binding, 'ambiguous-legacy-binding', { engine: authoritativeEngine, preset: authoritativePreset, ...(binding.registryPin ? { registryPin: binding.registryPin } : {}) })
       }
       // Part 5/8: the authoritative identity test. A TaskController failure
       // here THROWS (inconclusive) — it must never become 'task missing'.
@@ -802,7 +803,7 @@ function createBindingGuard(deps) {
         // already ran BEFORE any invalidation. Recovery still carries the
         // original bound engine explicitly so createBinding cannot re-resolve
         // it from the mutable profile preference.
-        return recoverStaleBinding(agent, session, workspace, promptText, binding, verdict.reason, { engine: authoritativeEngine, preset: authoritativePreset })
+        return recoverStaleBinding(agent, session, workspace, promptText, binding, verdict.reason, { engine: authoritativeEngine, preset: authoritativePreset, ...(binding.registryPin ? { registryPin: binding.registryPin } : {}) })
       }
       assertEngineBinding(binding, binding.preset, identity.boundEngine)
       return { binding, outcome: 'valid' }
@@ -980,6 +981,10 @@ function apply(ctx) {
           needsRouteCheck: binding.needsRouteCheck,
           boundAtUtc: binding.boundAtUtc,
           ...(binding.preparationAuthority ? { preparationAuthority: binding.preparationAuthority } : {}),
+          // R6.3: generation-scoped Registry pin (present only for flagged binds).
+          // Absent fields keep legacy persisted bindings byte-identical.
+          ...(binding.bindingAuthority ? { bindingAuthority: binding.bindingAuthority } : {}),
+          ...(binding.registryPin ? { registryPin: binding.registryPin } : {}),
         }
       }
       const temporary = bindingsPath + '.' + crypto.randomUUID() + '.tmp'
@@ -2693,6 +2698,44 @@ function apply(ctx) {
     try {
       const shadow = binding.shadowParity || {}
       log({ event: 'shadow-parity', sessionId: session.id, taskId: task.taskId, taskInstanceId, preset, engine, parity: shadow.parity === true, code: shadow.code || null, resolutionId: shadow.resolutionId || null, mismatches: (shadow.mismatches || []).map((m) => m.code) })
+    } catch { /* logging must never break the bind */ }
+    // R6.3 flagged Registry binding (default OFF, environment-gated, never via web UI).
+    // New sessions only (!authoritative): the shadow above already compiled the
+    // complete staged config; any disagreement fails this bind closed without
+    // touching other sessions. Recovery carries the generation pin forward and
+    // re-verifies it instead of re-resolving, so a running session never changes
+    // when Registry settings change. Rollback (flag OFF) keeps enforcing an
+    // existing pin under legacy-rollback authority until the generation ends;
+    // new sessions bind pure legacy. The executed decision stays the
+    // authoritative legacy one in every mode.
+    const registryFlagOn = registrySessionBinding.isRegistryBindingEnabled(process.env);
+    const incomingPin = authoritative && authoritative.registryPin ? authoritative.registryPin : null;
+    if (incomingPin) {
+      const recheck = registryFlagOn
+        ? registrySessionBinding.verifyPinnedBinding(decision, incomingPin)
+        : registrySessionBinding.rollbackPinnedBinding(decision, incomingPin);
+      if (!recheck.ok) {
+        const pinError = new Error('registry pin verification failed (' + String(recheck.code) + '): refusing to rebind a drifted generation');
+        pinError.code = recheck.code;
+        pinError.mismatches = recheck.mismatches;
+        throw pinError;
+      }
+      binding.bindingAuthority = registryFlagOn ? 'registry' : 'legacy-rollback';
+      binding.registryPin = registryFlagOn ? incomingPin : (recheck.pin || incomingPin);
+    } else if (registryFlagOn && !authoritative) {
+      const verdict = registrySessionBinding.evaluateRegistryBinding(decision, binding.shadowParity, {});
+      if (!verdict.ok) {
+        const verdictError = new Error('registry binding refused (' + String(verdict.code) + '): this bind fails closed; legacy execution elsewhere continues unchanged');
+        verdictError.code = verdict.code;
+        verdictError.mismatches = verdict.mismatches;
+        verdictError.bindingErrors = verdict.errors;
+        throw verdictError;
+      }
+      binding.bindingAuthority = 'registry';
+      binding.registryPin = verdict.pin;
+    }
+    try {
+      log({ event: 'registry-binding', sessionId: session.id, taskId: task.taskId, taskInstanceId, authority: binding.bindingAuthority || 'legacy', resolutionId: (binding.registryPin && binding.registryPin.resolutionId) || null });
     } catch { /* logging must never break the bind */ }
     binding.executionClass = decision.executionClass
     binding.reviewRequired = Boolean(decision.reviewRequired)
