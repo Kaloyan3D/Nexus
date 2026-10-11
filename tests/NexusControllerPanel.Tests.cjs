@@ -630,7 +630,7 @@ async function main() {
       // injection resolves and the route registers.
       root.provide('webServer', fakeWebServer)
       for (let i = 0; i < 60 && registered.length < 5; i++) await tick(50)
-      assert.equal(registered.length, 30, 'real cordis: all routes register after webServer becomes available')
+      assert.equal(registered.length, 33, 'real cordis: all routes register after webServer becomes available')
       assert.deepEqual(registered.map((spec) => spec.path).sort(), ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/registry/v1/catalog', '/nexus/registry/v1/configuration', '/nexus/registry/v1/connections', '/nexus/registry/v1/connections/check', '/nexus/registry/v1/connections/delete', '/nexus/registry/v1/connections/disable', '/nexus/registry/v1/connections/discover', '/nexus/registry/v1/connections/list', '/nexus/registry/v1/connections/status', '/nexus/registry/v1/eligible', '/nexus/registry/v1/models', '/nexus/registry/v1/models/delete', '/nexus/registry/v1/models/disable', '/nexus/registry/v1/modes', '/nexus/registry/v1/preview', '/nexus/registry/v1/providers', '/nexus/registry/v1/providers/delete', '/nexus/registry/v1/providers/disable', '/nexus/registry/v1/providers/discover', '/nexus/registry/v1/providers/test', '/nexus/registry/v1/routes', '/nexus/registry/v1/routes/delete', '/nexus/registry/v1/routes/disable', '/nexus/registry/v1/routes/evidence', '/nexus/registry/v1/routes/project', '/nexus/registry/v1/routes/verify', '/nexus/registry/v1/validate', '/nexus/workspace-registration.json'])
       assert.ok(registered.every((spec) => spec.kind === 'exact'))
 

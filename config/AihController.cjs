@@ -1200,6 +1200,32 @@ function apply(ctx) {
     return decision;
   }
 
+  // R7.0 command-turn guard for visual and verify branches.
+  // Refused or pending generations with the flag ON stop before any
+  // model, transport, or verification work. With the flag OFF they
+  // convert once to legacy-rollback and proceed. Pinned and legacy
+  // sessions proceed (pinned turns already passed the entry gate).
+  function guardRegistryCommandTurn(binding, session, purpose) {
+    const gflag = registrySessionBinding.isRegistryBindingEnabled(process.env);
+    const gcls = registrySessionBinding.classifyRegistryState(binding);
+    if (gcls.state === 'legacy' || gcls.state === 'pinned') return null;
+    if (!gflag) {
+      binding.bindingAuthority = 'legacy-rollback';
+      persistBindings();
+      log({ event: 'registry-rollback', sessionId: session && session.id ? session.id : null, taskId: binding.taskId || null, taskInstanceId: binding.taskInstanceId || null, purpose, from: gcls.state, authority: 'legacy-rollback' });
+      return null;
+    }
+    const gcode = (gcls.refusal && gcls.refusal.code) || 'registry-refused';
+    appendMessage(
+      session,
+      createControllerMessage(
+        'Controller: Registry execution refused (' + String(gcode) + ') for this command turn. No model was invoked and no verification ran.',
+        'controller-registry-rejected',
+      ),
+    );
+    log({ event: 'registry-execution-refused', sessionId: session && session.id ? session.id : null, taskId: binding.taskId || null, taskInstanceId: binding.taskInstanceId || null, purpose, code: gcode });
+    return { kind: 'reject' };
+  }
   async function markReviewRequested(workspace, taskId, taskInstanceId) {
     const args = ['-Action', 'set-review-requested', '-TaskId', taskId]
     if (taskInstanceId) args.push('-TaskInstanceId', taskInstanceId)
@@ -3388,10 +3414,14 @@ function apply(ctx) {
       }
 
       if (isVisualReviewCommand(promptText)) {
+        const visualGuard = guardRegistryCommandTurn(binding, session, 'visual-review');
+        if (visualGuard) return visualGuard;
         return executeVisualReviewTurn(agent, binding, visualReviewRequestOf(promptText, binding.workspace))
       }
 
       if (isVerifyCommand(promptText)) {
+        const verifyGuard = guardRegistryCommandTurn(binding, session, 'verify');
+        if (verifyGuard) return verifyGuard;
         return executeVerifyTurn(agent, binding)
       }
 
@@ -3493,6 +3523,7 @@ function apply(ctx) {
         // the default; Deep only through the structured escalation gate).
         let stepRole = null
         let stepRefused = false;
+        var attemptStartFailed = false;
         // Phase M3: the Muse engine runs exactly ONE main agent with NO Dual
         // role semantics. The epistemic step router is a Dual-plane authority
         // (it selects engineer roles and step role targets) and never applies
@@ -3574,6 +3605,7 @@ function apply(ctx) {
             ),
           )
         } catch (error) {
+          attemptStartFailed = true;
           log({ event: 'begin-attempt-failed', sessionId: session.id, taskId: binding.taskId, error: String(error) })
           appendMessage(
             session,
@@ -3585,6 +3617,11 @@ function apply(ctx) {
         }
       }
 
+      // R7.0: a failed attempt start rejects registry generations instead of
+      // falling through to next(). Legacy keeps the existing behavior.
+      if (attemptStartFailed && registrySessionBinding.classifyRegistryState(binding).state !== 'legacy') {
+        return { kind: 'reject' }; 
+      }
       return next()
     } catch (error) {
       const message = String(error && error.message ? error.message : error)
