@@ -225,15 +225,6 @@ await check('R6.3.2 revoked connection rejects the ordinary pinned turn', async 
     fs.copyFileSync(path.join(fix.installRoot, 'config', 'settings.yaml'), settingsPath);
     // Use the same copied installation and isolated Registry store for routing,
     // pin resolution, turn-entry authorization, and revocation.
-    const mdec = await new Promise((resolve, reject) => {
-      const argv = ['-NoProfile', '-NoLogo', '-File', path.join(fix.installRoot, 'scripts', 'Route.ps1'), '-Description', 'Harden contributor tool boundary', '-Workspace', mfix, '-InstallRoot', fix.installRoot, '-Preset', 'aih-muse', '-ProfileId', 'muse-spark-1.3-contributor', '-DryRun'];
-      cp.execFile('pwsh', argv, { cwd: mfix, env: cleanEnv(), timeout: 120000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
-        const text = String(stdout || ''); const start = text.indexOf('{');
-        if (err || start < 0) { reject(new Error('muse decision missing: ' + String(stderr || (err && err.message) || text).slice(0, 900))); return; }
-        try { resolve(JSON.parse(text.slice(start))); } catch (e) { reject(new Error('muse decision unparseable')); }
-      });
-    });
-    assert.equal(mdec.engine, 'muse');
     // The real creation contract supplies lifecycle fields and run artifacts;
     // never fabricate a ledger record or a task generation identity here.
     const mtask = await new Promise((resolve, reject) => {
@@ -248,6 +239,15 @@ await check('R6.3.2 revoked connection rejects the ordinary pinned turn', async 
     assert.equal(mtask.boundEngine, 'muse');
     assert.equal(mtask.executionClass, 'muse_main');
     assert.equal(mtask.attempt, 0);
+    const mdec = await new Promise((resolve, reject) => {
+      const argv = ['-NoProfile', '-NoLogo', '-File', path.join(fix.installRoot, 'scripts', 'Route.ps1'), '-Description', 'Harden contributor tool boundary', '-Workspace', mfix, '-InstallRoot', fix.installRoot, '-Preset', 'aih-muse', '-ProfileId', 'muse-spark-1.3-contributor', '-TaskId', mtask.taskId, '-TaskInstanceId', mtask.taskInstanceId];
+      cp.execFile('pwsh', argv, { cwd: mfix, env: cleanEnv(), timeout: 120000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+        const text = String(stdout || ''); const start = text.indexOf('{');
+        if (err || start < 0) { reject(new Error('muse decision missing: ' + String(stderr || (err && err.message) || text).slice(0, 900))); return; }
+        try { resolve(JSON.parse(text.slice(start))); } catch (e) { reject(new Error('muse decision unparseable')); }
+      });
+    });
+    assert.equal(mdec.engine, 'muse');
     const mshadow = shadow.runShadowComparison(mdec, { installRoot: fix.installRoot, dataRoot: fix.dataHome });
     assert.equal(mshadow.parity, true, JSON.stringify(mshadow.mismatches));
     const evaluated = sessionBinding.evaluateRegistryBinding(mdec, mshadow, { bindTask: mtask });

@@ -24,12 +24,18 @@ try {
     // The compiler loads tokenizer assets relative to its installed module.
     // Both DeepSeek controller presets must carry those assets independently.
     assert(expected.includes('tokenizers/deepseek-v4-tokenizer.json'), 'controller closure must ship the production tokenizer')
-    assert(!expected.includes('Muse-Isolation.cjs'))
+    // R7.4: the shared controller verifies persisted targets through both
+    // pure isolation readers. Shipping the Muse reader is a dependency, not
+    // activation of Muse middleware in a Dual preset.
+    assert(expected.includes('Muse-Isolation.cjs'))
     const preset = path.join(root, name)
     assert.deepEqual(copy(install, preset, { profile }).map(row => row.name), expected)
     assert.deepEqual(closure(preset, { rootIsConfig: true, requireTracked: false, profile }), expected)
     assert.deepEqual(validate(install, preset, { profile }).map(row => row.name), expected)
     require(path.join(preset, 'AihController.cjs'))
+    const museReader = require(path.join(preset, 'Muse-Isolation.cjs'))
+    assert.equal(typeof museReader.controllerTargetFor, 'function')
+    assert.throws(() => museReader.controllerTargetFor(install, { engine: 'dual' }), { code: 'engine-binding-violation' })
     const installedTokenizer = require(path.join(preset, 'ContextTokenizerRegistryV2.cjs'))
     assert(installedTokenizer.createDeepseekV4CounterV2().countText('installed tokenizer') > 0)
     fs.rmSync(path.join(preset, 'ContextCompilerShadowHostV2.cjs'))

@@ -174,3 +174,204 @@ unrelated to this fix) and RegistryR65Matrix tree-cleanliness (flags task-scoped
 scripts edits while uncommitted; clears once committed).
 Flag default OFF, PR #33 stays Draft, no routing-policy or credential changes. No merge without explicit
 authorization.
+
+
+## R7.4 — Rollback and recovery hardening (2026-10-12)
+
+Scope: `feature/model-registry-v1`, based on preserved fixture-repair commit
+`8015037`. The earlier sections are historical checks, not results of this
+milestone. In particular, their R6.3.2 11/12 limitation predates `8015037`.
+PR #33 remains Draft. Registry remains default OFF.
+
+### Transition policy
+
+The flag is evaluated at an execution/transition boundary; changing the
+process environment alone does not mutate persisted session authority.
+
+| Persisted state | Flag ON | Flag OFF | Durable result / execution boundary |
+| --- | --- | --- | --- |
+| Genuine unmarked legacy generation | Continue legacy | Continue legacy | Same identity; no fabricated pin or authority marker |
+| Pending or refused current generation | Fresh parity evaluation; mismatch remains parked | Explicit authorized rollback at routing or command boundary | ON success creates its own pin; OFF persists `legacy-rollback`, retains refusal history and creates no pin |
+| Valid current-generation pin | Verify effective persisted target and exact connection entitlement | Same verification; flag does not discard pin | Identity, resolution ID and role-target map remain immutable; valid continuation reaches `next()` |
+| Current pin with provider/model/reasoning drift | Reject | Reject | `registry-pin-mismatch`, zero `next()` and zero attempt delta |
+| Current pin with revoked/unavailable connection | Reject | Reject | Exact pinned connection checked; no provider fallback or new attempt |
+| Current pin with unreadable/missing execution target | Reject | Reject | `registry-execution-target-unavailable`; pin and identity retained |
+| Pin from A carried into replacement generation B | Retire A authority, persist pending B, evaluate fresh B | Retire A authority, persist pending B, explicitly roll back B | A never authorizes B; no contradictory `legacy-rollback` plus stale pin; re-enabling requires fresh evaluation |
+| Marked generation with inconclusive task identity | Reject before recovery or execution | Reject before rollback or execution | Durable binding preserved; no task/attempt allocation |
+| Requested Muse ↔ Dual switch, including stale recovery | Reject | Reject | Immutable engine guard runs before invalidation or recovery |
+| Interrupted pending/refused/pin/rollback snapshot before attempt | Resume the corresponding policy above | Resume the corresponding policy above | Exactly one first attempt when allowed; open-attempt restart adds none |
+
+Rollback does not erase the security history of a refused generation. A
+successful fresh evaluation replaces the refusal with a verified pin. A
+retired stale pin is removed from current authority; the structured
+`registry-generation-retired` event retains its old/current task identities
+and resolution ID. The original run artifacts remain historical evidence.
+
+### Confirmed defects and minimal changes
+
+- The entry gate checked role and entitlement but did not compare the actual
+  persisted execution target on an already-open attempt. Provider drift
+  reached `next()` despite a valid pin. The controller now reads the same
+  target as Engineering/Muse isolation and applies `verifyTransitionTarget()`
+  before ordinary or command execution, even when a route check is pending.
+- Stale recovery carried A's pin into B. `rollback-pinned` wrote
+  `legacy-rollback` without clearing that pin; classification prioritized the
+  pin and rejected B. Failed fresh evaluation similarly left A's pin shadowing
+  B's refusal. Retirement now persists a B pending marker before evaluation or
+  rollback, including recovery from an interrupted pre-route snapshot.
+- Inconclusive TaskController validation rejected Muse but allowed Dual via
+  `next()`, including Registry-marked Dual sessions. Marked sessions now fail
+  closed with either flag. Genuine unmarked Dual legacy behavior is preserved.
+
+Production changes are confined to `config/AihController.cjs`.
+`tests/RegistryR74RollbackRecovery.Tests.cjs` exercises real middleware,
+TaskController-created lifecycle records, real Route persistence, fresh
+processes for every turn, exact pin-derived connection IDs, structured logs,
+`next()` counters and attempt ledgers. The model boundary is counted without
+calling any provider. Crash checks reconstruct durable boundary snapshots;
+these are not fault-injected disk failures or power-loss tests.
+
+The R6.3.2 Muse fixture now persists the real canonical task route instead of
+using a dry route. This supplies the target that the strengthened gate and
+actual Muse isolation consume; all original R6.3.2 assertions are retained.
+
+The older R6.3 rollback integration test deleted generation A and expected B
+to retain A's pin. Its initial run was 9 PASS / 1 FAIL after the fix. That
+expectation contradicts the explicit R7.4 stale-generation policy. The test
+now verifies complete same-generation pin retention under flag OFF first,
+then explicit retirement, current-generation pending identity and historical
+retirement logging for B. This is a documented policy correction, not removal
+of an execution-safety assertion; R7.4 independently proves allowed/rejected
+boundaries and task/attempt counts.
+
+The initial R6.3.1 run was 14 PASS / 1 FAIL: its reviewer mismatch test left
+Route's refused candidate persisted, so the strengthened entry gate rejected
+that target before the following independent revocation check could reach its
+expected authorization diagnostic. Fixture cleanup now restores the prior
+routing snapshot as well as the mutated profile. Both original negative
+assertions remain intact; no production guard is bypassed.
+
+The clean-install packaging test previously forbade `Muse-Isolation.cjs` in
+Dual preset closures. The shared controller now requires its pure target
+reader, so the closure must ship that dependency. The test now verifies
+presence, copied-module loading and rejection of a Dual binding with the exact
+`engine-binding-violation` code, alongside all original closure integrity,
+tokenizer and missing-file checks. Importing this module does not call its
+`apply()` function or register Muse middleware; engine activation and the
+consumer routing contract are unchanged.
+
+### Architecture review
+
+| Question | R7.4 answer |
+| --- | --- |
+| Source of truth | TaskController owns canonical task/generation/engine identity; Route and step-routing records own effective legacy targets; the Registry pin owns immutable execution equality constraints |
+| Ownership | Controller remains the session-binding writer; existing TaskController/Route writers remain unchanged |
+| Dependency direction | Controller orchestrates existing pure isolation target readers and Registry validators; neither reader depends on the controller; no cycle |
+| Boundary contracts | Plain persisted target fields enter `verifyTransitionTarget()`; live session objects and credentials never enter pins |
+| Failure semantics | Inconclusive identity, unavailable target, drift and ineligible connection reject before `next()` or attempt creation; no automatic fallback |
+| State lifecycle | Stale pin → current pending marker → fresh pin or explicit rollback; atomic binding persistence and existing task/attempt lifecycle remain authoritative |
+| Test seams | Temporary install/data/workspace roots, real CLI tasks and fresh controller processes; only the downstream `next()` model boundary is counted |
+| Compatibility / migration | No schema migration, new authority type, default flag change or legacy retroactive pin; existing pin/refusal shapes remain supported |
+| Observability | Retirement logs old/current IDs and resolution; existing bound/refused/rollback/execution-refused events distinguish transitions |
+| Security | Flag OFF cannot waive an established generation's target equality or connection authorization; replacement generation requires its own transition; no credentials or production status writes |
+
+### Executed evidence
+
+The three regression cases were also executed against an isolated copy of
+`8015037:config/AihController.cjs`, using the new integration suite and the
+unchanged Task/Route/Registry implementation. Each selected case produced
+**0 PASS / 1 FAIL** with an actual assertion failure: provider drift returned
+`next` instead of `reject`; stale OFF recovery returned `reject` instead of
+`next`; inconclusive pinned identity returned `next` instead of `reject`.
+These expected baseline failures are not counted as acceptance PASS results.
+They are retained in `tmp/r74-evidence/baseline-C.log`, `baseline-E.log` and
+`baseline-F.log` on the checking workspace.
+
+Final results for the R7.4 tree based on `8015037` (the commit containing this
+section), CachyOS Linux, bundled Node and PowerShell:
+
+| Gate | PASS | FAIL | Status |
+| --- | ---: | ---: | --- |
+| RegistryR74RollbackRecovery | 21 | 0 | PASS |
+| RegistryR632Execution | 12 | 0 | PASS |
+| RegistryR62Shadow | 9 | 0 | PASS (0 skipped) |
+| RegistryR63Binding | 10 | 0 | PASS, policy-corrected test rerun |
+| RegistryR631Lockdown | 15 | 0 | PASS, isolated fixture cleanup rerun |
+| RegistryR631StepPin (PowerShell) | 11 | 0 | PASS |
+| RegistryR65Matrix | 7 | 0 | PASS |
+| RegistryR70Readiness | 9 | 0 | PASS |
+| MusePresetDependencyClosure | 11 | 0 | PASS |
+| MusePresetRegistryModes | 8 | 0 | PASS |
+| ControllerPresetCleanInstall | 3 | 0 | PASS, reader-dependency assertion updated and rerun |
+| RegistryInstalledRuntime | 3 | 0 | PASS |
+| AihControllerHost | 159 assertions | 0 | PASS |
+| AihControllerIdentity | 7 scenario groups | 0 | PASS, includes real bridge DoD scenario |
+| Node syntax / Git whitespace checks | — | 0 | PASS |
+| R7.4 live installed host / paid inference | — | — | UNVERIFIED, intentionally outside isolated scope |
+| Full native build / application release smoke | — | — | UNVERIFIED, not release qualification |
+
+The final counted Registry/packaging acceptance checks total **119 PASS /
+0 FAIL**: 21 new, 73 existing Registry and 25 packaging. The host assertions
+and identity scenario groups are listed separately rather than conflated with
+that count. Superseded failed runs and expected baseline failures above are
+excluded. No skipped/unexecuted check is counted as PASS.
+
+The executed checks used `DOTNET_PROCESSOR_COUNT=2` to bound workers in
+isolated PowerShell hosts, `PATH` including the bundled PowerShell, and
+`AIH_TOOLCHAIN_ROOT="$HOME/.local/share/nexus"` (executables read only).
+Reproduce their individual commands with:
+
+```bash
+export DOTNET_PROCESSOR_COUNT=2
+export PATH="$HOME/.local/share/nexus/runtime/pwsh:$PATH"
+export AIH_TOOLCHAIN_ROOT="$HOME/.local/share/nexus"
+NEXUS_TEST_NODE="$HOME/.local/share/nexus/runtime/node/bin/node"
+for suite in RegistryR74RollbackRecovery RegistryR632Execution RegistryR62Shadow \
+  RegistryR63Binding RegistryR631Lockdown RegistryR65Matrix RegistryR70Readiness \
+  MusePresetDependencyClosure MusePresetRegistryModes ControllerPresetCleanInstall \
+  RegistryInstalledRuntime AihControllerHost AihControllerIdentity; do
+  "$NEXUS_TEST_NODE" "tests/$suite.Tests.cjs"
+done
+"$HOME/.local/share/nexus/runtime/pwsh/pwsh" -NoLogo -NoProfile \
+  -File tests/RegistryR631StepPin.Tests.ps1
+"$NEXUS_TEST_NODE" --check config/AihController.cjs
+"$NEXUS_TEST_NODE" --check tests/RegistryR74RollbackRecovery.Tests.cjs
+git diff --check
+```
+
+Raw outputs are retained in the checking workspace's ignored
+`tmp/r74-evidence/`. Use `RegistryR63Binding-final.log`,
+`RegistryR631Lockdown-final.log` and `ControllerPresetCleanInstall-verified.log`
+for their final runs; other final logs use the suite name, with `R74.log` for
+R7.4. The table records durable reviewable results independently of those
+local logs.
+
+`R74.log` records immutable restart evidence for Dual `conn-flash-high-direct`
+and Muse `conn-meta-model-api`, with task instance and resolution IDs. Both
+flags retain complete pins; revoked and unavailable status cases use those
+exact IDs and prove rejection/zero next/zero attempt delta after closing the
+initial attempt. It also records A → B stale rollback with explicit authority
+and no retained pin. Positive restarts reach `next()` once without allocating
+another task or open attempt. The A–G scenarios exercise both positive and
+negative boundaries; command rollback reaches safe diagnostic machinery
+without calling a reviewer or provider.
+
+Self-review found no remaining correctness, data-loss/security or lifecycle
+blocker in this bounded change. R7.4's **isolated integration acceptance is
+complete**; the live and full-release limitations below remain explicit.
+
+### Live scope and remaining release gates
+
+The operator-reported R7.1.1 live parity, R7.2 inference continuation and R7.3
+provider mismatch are baseline context, not live runs performed in R7.4.
+R7.4 live installed-host verification is **UNVERIFIED**. No running Nexus
+application was stopped/restarted, no live sessions (including TASK-0052),
+credentials or production connection statuses were changed, and no paid
+inference ran. Bundled Node/PowerShell were read as executables; all mutable
+fixture state was isolated outside the installed application.
+
+Direct Registry-authoritative target overrides and Claude orchestration remain
+blocked as documented above and are outside R7.4. Full native/application
+release gates and real power-loss/storage-failure injection were not performed.
+This milestone's isolated integration assessment does not qualify the whole
+product for release. No push or merge is authorized by this task.

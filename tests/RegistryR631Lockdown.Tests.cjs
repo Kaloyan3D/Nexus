@@ -128,6 +128,7 @@ const prevHome = process.env.DSH_HOME; const prevRoot = process.env.AIH_INSTALL_
 const fix = buildFixture();
 process.env.DSH_HOME = fix.dataHome; process.env.AIH_INSTALL_ROOT = fix.installRoot; delete process.env.NEXUS_REGISTRY_BINDING;
 const controller = require('../config/AihController.cjs');
+const profiles = require('../config/Engineering-Profiles.cjs');
 function boot() { const handlers = {}; const ctx = { on: function (ev, fn) { handlers[ev] = fn; }, shellEnv: { register: function () {} } }; controller.apply(ctx); return handlers['agent/pre-step']; }
 async function turn(preStep, sessionId, text) { const session = makeSession(sessionId, fix.fixture); const agent = { session: session }; await preStep({ agent: agent, messages: [userMessage(text)], step: 1, turn: 'x' }, function () { return 'next'; }); }
 function readBindings() { return JSON.parse(fs.readFileSync(path.join(fix.dataHome, 'routing', 'session-bindings.json'), 'utf8')).bindings; }
@@ -216,6 +217,8 @@ await check('R6.3.1 valid generation pins, then survives restart and staged drif
   assert.ok(pinOn, 'pinned generation captured above');
   const profPath = path.join(fix.installRoot, 'config', 'engineering-profiles.json');
   const backup = fs.readFileSync(profPath, 'utf8');
+  const routePath = profiles.routingStatePath(fix.installRoot, readBindings()['s-p1']);
+  const routeBackup = fs.readFileSync(routePath);
   try {
     const doc = JSON.parse(backup);
     doc.profiles.find(function (p) { return p.id === 'deepseek-codex'; }).roles.reviewer.reasoning = 'low';
@@ -226,7 +229,13 @@ await check('R6.3.1 valid generation pins, then survives restart and staged drif
     assert.deepEqual(b.registryPin, pinOn, 'pin untouched by refused transition');
     const hits = logLines().filter(function (l) { return l.indexOf('s-p1') !== -1 && l.indexOf('registry-pin-mismatch') !== -1; });
     assert.ok(hits.length >= 1, 'exact mismatch code in log');
-  } finally { fs.writeFileSync(profPath, backup); }
+  } finally {
+    fs.writeFileSync(profPath, backup);
+    // Route persists its candidate before the Registry transition rejects it.
+    // Restore this isolated fixture too, so the next authorization test is
+    // not intercepted by the new entry check for the previous target drift.
+    fs.writeFileSync(routePath, routeBackup);
+  }
 });
 await check('R6.3.1 revoked authorization fails the future execution boundary', async () => {
   const svc = registry.service.createService({ installRoot: fix.installRoot, dataRoot: fix.dataHome });

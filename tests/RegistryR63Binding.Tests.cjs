@@ -158,18 +158,29 @@ await check('R6.3 ON pins the parity-proven target at the real boundary', async 
   assert.equal(tgt.reasoning, b.registryPin.roleTarget.reasoning);
   pinOn = JSON.parse(JSON.stringify(b.registryPin));
 });
-await check('R6.3 rollback keeps enforcing the pin under legacy authority', async () => {
+await check('R6.3 flag OFF preserves current pins and retires stale generation authority', async () => {
   assert.ok(pinOn, 'flag-ON pin captured above');
   const oldInstance = readBindings()['s-on'].taskInstanceId;
   delete process.env.NEXUS_REGISTRY_BINDING;
+  await turn(boot(), 's-on', TURN_TEXT);
+  const continued = readBindings()['s-on'];
+  assert.equal(continued.taskInstanceId, oldInstance, 'flag OFF alone preserves the generation');
+  assert.equal(continued.bindingAuthority, 'registry');
+  assert.deepEqual(continued.registryPin, pinOn, 'same-generation continuation keeps the entire immutable pin');
   fs.writeFileSync(path.join(fix.fixture, '.ai-harness', 'state', 'tasks.json'), JSON.stringify({ schemaVersion: 1, nextSequence: 1, tasks: [] }));
   fs.rmSync(path.join(fix.fixture, '.ai-harness', 'runs'), { recursive: true, force: true });
   await turn(boot(), 's-on', TURN_TEXT);
   const b = readBindings()['s-on'];
   assert.notEqual(b.taskInstanceId, oldInstance, 'recovery creates a new generation');
   assert.equal(b.bindingAuthority, 'legacy-rollback');
-  assert.deepEqual(b.registryPin.roleTarget, pinOn.roleTarget, 'rollback never substitutes the target');
-  assert.equal(b.registryPin.resolutionId, pinOn.resolutionId);
+  // R7.4 policy: A's pin cannot be authority for replacement generation B.
+  // The old cross-generation pin expectation encoded the contradictory state
+  // now reproduced and guarded by RegistryR74RollbackRecovery.Tests.cjs.
+  assert.ok(!b.registryPin, 'stale generation pin is retired, never rewritten as a current pin');
+  assert.equal(b.registryRefused.code, 'registry-pending');
+  assert.deepEqual(b.registryRefused.generation, { taskId: b.taskId, taskInstanceId: b.taskInstanceId });
+  const events = fs.readFileSync(path.join(fix.dataHome, 'logs', 'aih-controller.log'), 'utf8').split('\n').filter(Boolean).map(JSON.parse);
+  assert.ok(events.some((e) => e.event === 'registry-generation-retired' && e.oldTaskInstanceId === oldInstance && e.taskInstanceId === b.taskInstanceId && e.resolutionId === pinOn.resolutionId), 'old pin identity remains observable as historical evidence');
 });
 await check('R6.3 staged drift fails the bind closed at the real boundary', async () => {
   process.env.NEXUS_REGISTRY_BINDING = '1';

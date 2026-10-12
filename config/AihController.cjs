@@ -48,6 +48,8 @@ const path = require('node:path')
 const os = require('node:os')
 const crypto = require('node:crypto')
 const engineeringProfiles = require('./Engineering-Profiles.cjs')
+const engineeringIsolation = require('./Engineering-Isolation.cjs')
+const museIsolation = require('./Muse-Isolation.cjs')
 const registryShadowBinding = require('./registry/shadow-binding.cjs')
 const registrySessionBinding = require('./registry/session-binding.cjs')
 const registryService = require('./registry/service.cjs')
@@ -1137,6 +1139,25 @@ function apply(ctx) {
     } catch { return null; }
   }
 
+  // R7.4: a carried pin is historical evidence, never authority for the
+  // replacement task. Persist a current-generation pending marker before
+  // evaluation/rollback so interruption cannot turn recovery into plain legacy.
+  function retireStaleRegistryPin(binding, purpose) {
+    const pin = binding && binding.registryPin
+    if (!pin || pin.taskInstanceId == null || binding.taskInstanceId == null || pin.taskInstanceId === binding.taskInstanceId) return false
+    delete binding.registryPin
+    delete binding.bindingAuthority
+    const refusal = binding.registryRefused
+    if (!refusal || !refusal.generation || refusal.generation.taskInstanceId !== binding.taskInstanceId) {
+      binding.registryRefused = { code: 'registry-pending', generation: { taskId: binding.taskId, taskInstanceId: binding.taskInstanceId }, atUtc: new Date().toISOString(), reasons: [] }
+    }
+    binding.needsRouteCheck = true
+    persistBindings()
+    log({ event: 'registry-generation-retired', sessionId: binding.sessionId, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId,
+      oldTaskId: pin.taskId, oldTaskInstanceId: pin.taskInstanceId, resolutionId: pin.resolutionId, purpose })
+    return true
+  }
+
   // R6.3.1 transition choke: EVERY routeTask consumer passes its decision
   // through here before mutating the binding. Returns the decision to
   // execute. Throws fail-closed (callers must not mutate on throw) and may
@@ -1151,6 +1172,7 @@ function apply(ctx) {
     const tid = (binding && binding.taskId) || null;
     const iid = (binding && binding.taskInstanceId) || null;
     if (plan.action === 'proceed-legacy') return decision;
+    if (plan.reason === 'new-generation' || plan.action === 'rollback-pinned') retireStaleRegistryPin(binding, purpose);
     if (plan.action === 'rollback-refused' || plan.action === 'rollback-pinned') {
       binding.bindingAuthority = 'legacy-rollback';
       persistBindings();
@@ -3331,7 +3353,11 @@ function apply(ctx) {
               'controller-error',
             ),
           )
-          return agentPresetOf(session) === 'aih-muse' ? { kind: 'reject' } : next()
+          // An unmarked legacy Dual session keeps its historical degradation.
+          // Registry state cannot authorize execution without proven identity,
+          // including when flag OFF would otherwise permit explicit rollback.
+          const unvalidated = bindingFor(session)
+          return agentPresetOf(session) === 'aih-muse' || registrySessionBinding.classifyRegistryState(unvalidated).state !== 'legacy' ? { kind: 'reject' } : next()
         }
         throw error
       }
@@ -3362,6 +3388,10 @@ function apply(ctx) {
         return { kind: 'reject' }
       }
 
+      // Identity was authoritatively validated above. Repair an interrupted
+      // recovery snapshot before the entry gate sees a pin from another task.
+      retireStaleRegistryPin(binding, 'turn-entry-recovery')
+
       // R6.3.2 execution gate.
       {
         const gFlag = registrySessionBinding.isRegistryBindingEnabled(process.env);
@@ -3376,6 +3406,18 @@ function apply(ctx) {
             try { gRole = engineeringProfiles.roleOfExecutionClass(binding.executionClass) || null; }
             catch (gRoleError) { gRole = null; }
           }
+          // Read the SAME persisted target consumed by the isolation layer;
+          // no profile re-resolution or Registry-directed target override.
+          let targetVerdict = null;
+          {
+            try {
+              const target = (binding.engine === 'muse' ? museIsolation : engineeringIsolation).controllerTargetFor(installRoot, binding);
+              gRole = binding.engine === 'muse' ? 'muse_main' : (target.role || gRole);
+              targetVerdict = registrySessionBinding.verifyTransitionTarget({ ...target, role: gRole, engine: binding.engine, taskInstanceId: binding.taskInstanceId }, binding.registryPin);
+            } catch (targetError) {
+              targetVerdict = { ok: false, code: 'registry-execution-target-unavailable' };
+            }
+          }
           let gConn = null;
           const gEntry = gRole ? registrySessionBinding.mapEntryFor(binding.registryPin, gRole) : null;
           const gCid = gEntry && gEntry.available === true && gEntry.target ? gEntry.target.connectionId : null;
@@ -3383,7 +3425,7 @@ function apply(ctx) {
             const gCur = loadTransitionConnection(gCid);
             if (gCur) gConn = { id: gCid, status: gCur.status, provenance: gCur.provenance, providerId: gCur.providerId };
           }
-          const gVerdict = registrySessionBinding.checkTurnEntry({ binding: binding, role: gRole, connection: gConn, flagOn: gFlag });
+          const gVerdict = targetVerdict && !targetVerdict.ok ? targetVerdict : registrySessionBinding.checkTurnEntry({ binding: binding, role: gRole, connection: gConn, flagOn: gFlag });
           if (!gVerdict.ok) {
             appendMessage(session, createControllerMessage('Controller: Registry execution refused (' + String(gVerdict.code) + ') for this session. The bound generation currently has no verified execution target. No attempt was started and no model was invoked.', 'controller-registry-rejected'));
             log({ event: 'registry-execution-refused', sessionId: session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId || null, purpose: 'pre-step', code: gVerdict.code });
