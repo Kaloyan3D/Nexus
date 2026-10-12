@@ -101,7 +101,7 @@ async function main() {
     controller.apply({ on(event, handler) {
       if (event === 'session/event') sessionEventHandlers.push(handler)
       handlers[event] = handler
-    }, shellEnv: { register() {} } })
+    }, shellEnv: { list() { return [] }, register() {} } })
     assert.equal(typeof handlers['agent/pre-step'], 'function')
     assert.equal(typeof handlers['session/event'], 'function')
     const session = {

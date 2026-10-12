@@ -1,5 +1,7 @@
 'use strict'
 
+const shellEnvironment = require('./Preset-ShellEnvironment.cjs')
+
 /**
  * Muse-Isolation.cjs — the Muse V0 request boundary (agent plane: aih-muse).
  *
@@ -161,14 +163,7 @@ function controllerTargetFor(installRoot, binding) {
 }
 
 function apply(ctx) {
-  ctx.shellEnv.register({
-    name: 'aih-muse-preset',
-    variables: { DSH_AIH_PRESET: { description: 'Active AI Harness engineering preset.' } },
-    resolve: (execution) =>
-      execution.agent === undefined || !execution.agent.session || sessionPreset(execution.agent.session) !== MUSE_AGENT_PRESET
-        ? {}
-        : { DSH_AIH_PRESET: MUSE_AGENT_PRESET },
-  })
+  shellEnvironment.ensure(ctx)
 
   // The controller route is applied through the shared request boundary so
   // it is in place INSIDE DSH model-selection for every session, not only

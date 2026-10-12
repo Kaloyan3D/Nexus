@@ -68,7 +68,14 @@ async function assertCurrentTaskIdentity(installRoot, binding) {
       { timeout: 30000, maxBuffer: 1024 * 1024, windowsHide: true, env: { ...process.env, AIH_TOOLCHAIN_ROOT: toolchainRoot } })
     const identity = JSON.parse(result.stdout.replace(/^\uFEFF/, ''))
     if (identity.exists !== true || identity.instanceMatches !== true || identity.taskId !== binding.taskId || identity.taskInstanceId !== binding.taskInstanceId) throw new Error('Task identity differs')
+    if (identity.boundEngine !== binding.engine) {
+      const error = new Error('TaskController engine does not match the request binding.')
+      error.code = 'engine-binding-violation'
+      throw error
+    }
+    return identity
   } catch (cause) {
+    if (cause && cause.code === 'engine-binding-violation') throw cause
     const error = new Error('Registry request identity is unverifiable; no downstream request authorized.', { cause })
     error.code = 'binding-validation-inconclusive'
     throw error
@@ -99,9 +106,24 @@ function sameRoute(value, target) {
 function installControllerRequestBoundary(ctx, boundary) {
   const composed = new WeakSet()
   const tickets = new WeakMap()
+  const markedScopes = new WeakSet()
+  function observe(payload, target) {
+    const agent = payload && payload.agent
+    if (!agent) return
+    const scope = agent.ctx || agent
+    const binding = target && target.binding
+    const marked = registryBinding.classifyRegistryState(binding).state !== 'legacy'
+    if (markedScopes.has(scope) && !marked && (!binding || binding.bindingAuthority !== 'legacy-rollback')) {
+      const error = new Error('Registry authority removed without a durable explicit rollback.')
+      error.code = 'registry-authority-unverifiable'
+      throw error
+    }
+    if (marked) markedScopes.add(scope)
+  }
 
   ctx.on('agent/pre-step', (payload, next) => {
     const agent = payload && payload.agent
+    observe(payload, boundary.targetFor(payload))
     if (agent && agent.ctx && !composed.has(agent)) {
       agent.ctx.on('agent/request', async (request, inner) => {
         const ticket = tickets.get(request)
@@ -120,14 +142,33 @@ function installControllerRequestBoundary(ctx, boundary) {
   })
 
   ctx.on('agent/request', async (payload, next) => {
-    const target = boundary.targetFor(payload)
+    let target = boundary.targetFor(payload)
+    observe(payload, target)
     if (target === null) return next()
     // R7.5A: pre-step is not the final request boundary. Re-read entitlement
     // here before downstream work, including later steps of an open attempt.
-    const binding = target.binding
-    if (registryBinding.classifyRegistryState(binding).state !== 'legacy') {
+    let binding = target.binding
+    if (registryBinding.classifyRegistryState(binding).state !== 'legacy' || markedScopes.has(payload.agent.ctx || payload.agent) || binding?.bindingAuthority === 'legacy-rollback') {
       const installRoot = target.installRoot || profiles.installRootOf()
-      await assertCurrentTaskIdentity(installRoot, binding)
+      const identity = await assertCurrentTaskIdentity(installRoot, binding)
+      // TaskController validation awaits a subprocess. Re-read authority and
+      // target afterwards so a durable change during that wait cannot reuse
+      // the earlier authorization snapshot. No async gap remains to dispatch.
+      const current = boundary.targetFor(payload)
+      if (!current || !current.binding || current.binding.taskId !== binding.taskId ||
+          current.binding.taskInstanceId !== binding.taskInstanceId) {
+        const error = new Error('Registry request generation changed during identity validation.')
+        error.code = 'registry-generation-mismatch'
+        throw error
+      }
+      if (current.binding.engine !== identity.boundEngine) {
+        const error = new Error('Request engine changed during authoritative identity validation.')
+        error.code = 'engine-binding-violation'
+        throw error
+      }
+      observe(payload, current)
+      target = current
+      binding = current.binding
       let connection = null
       const role = binding.engine === 'muse' ? 'muse_main' : target.role
       const entry = registryBinding.mapEntryFor(binding.registryPin, role)
@@ -159,6 +200,9 @@ function installControllerRequestBoundary(ctx, boundary) {
       throw boundary.fail('declared-authority-is-not-controller-target', target)
     }
     if (!sameRoute(resolved, target)) throw boundary.fail('effective-route-differs-from-controller-target', target)
+    if (registryBinding.classifyRegistryState(binding).state === 'pinned' && resolved.reasoningEffort !== target.reasoning) {
+      throw boundary.fail('effective-effort-differs-from-pinned-target', target)
+    }
     return resolved
   })
 }

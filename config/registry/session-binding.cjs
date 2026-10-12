@@ -133,7 +133,10 @@ function classifyRegistryState(binding) {
   // Registry authority. Request readers operate independently of pre-step.
   const malformed = ['registryPin', 'registryRefused'].some(field => Object.prototype.hasOwnProperty.call(b, field) &&
     (!b[field] || typeof b[field] !== 'object' || Array.isArray(b[field]))) ||
-    (b.bindingAuthority === 'registry' && !b.registryPin);
+    (b.bindingAuthority === 'registry' && !b.registryPin) ||
+    // A successful evaluation clears its refusal. Both active records cannot
+    // prove permission; an old pin must never override a newer refusal.
+    (Object.prototype.hasOwnProperty.call(b, 'registryPin') && Object.prototype.hasOwnProperty.call(b, 'registryRefused'));
   if (malformed) return { state: 'refused', pin: null, refusal: { code: 'registry-authority-unverifiable' }, invalid: true };
   const pin = b.registryPin && typeof b.registryPin === 'object' ? b.registryPin : null;
   const refusal = b.registryRefused && typeof b.registryRefused === 'object' ? b.registryRefused : null;
@@ -194,6 +197,11 @@ function checkExecutionTarget(input) {
   if (!b.taskInstanceId || !cls.pin.taskInstanceId || cls.pin.taskInstanceId !== b.taskInstanceId ||
       !target.state || target.state.taskInstanceId !== b.taskInstanceId) {
     return { ok: false, code: 'registry-generation-mismatch' };
+  }
+  if (cls.pin.schemaVersion !== BINDING_SCHEMA_VERSION || !['registry', 'legacy-rollback'].includes(cls.pin.authority) ||
+      (b.bindingAuthority != null && !['registry', 'legacy-rollback'].includes(b.bindingAuthority)) || cls.pin.taskId !== b.taskId ||
+      cls.pin.engine !== b.engine || cls.pin.preset !== b.preset || target.state.engine !== b.engine) {
+    return { ok: false, code: 'registry-pin-mismatch' };
   }
   const role = b.engine === 'muse' ? 'muse_main' : target.role;
   const verified = verifyTransitionTarget({ ...target, engine: b.engine, role, taskInstanceId: b.taskInstanceId }, cls.pin);

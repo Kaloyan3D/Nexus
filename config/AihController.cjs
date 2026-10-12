@@ -43,6 +43,7 @@
 const { execFile, spawn } = require('node:child_process')
 const { promisify } = require('node:util')
 const { createRequire } = require('node:module')
+const presetShellEnvironment = require('./Preset-ShellEnvironment.cjs')
 const fs = require('node:fs')
 const path = require('node:path')
 const os = require('node:os')
@@ -938,6 +939,16 @@ function apply(ctx) {
   let bindings = {}
   let bindingsLoadFailure = null
   try { bindings = loadBindings(bindingsPath) } catch (error) { bindingsLoadFailure = error }
+  // Read-version metadata detects another standing mount's authority write.
+  // It cannot authorize a request; only current durable state can do that.
+  function authorityStamp(binding) {
+    const result = {}
+    for (const key of ['taskId', 'taskInstanceId', 'engine', 'preparationAuthority', 'bindingAuthority', 'registryPin', 'registryRefused']) {
+      if (Object.prototype.hasOwnProperty.call(binding, key)) result[key] = binding[key]
+    }
+    return JSON.stringify(result)
+  }
+  const observedBindingAuthority = new Map(Object.entries(bindings).map(([id, b]) => [id, authorityStamp(b)]))
   const resolveWorkspaceSingleFlight = createSingleFlight(normalizeWorkspaceIdentity)
 
   function log(entry) {
@@ -957,7 +968,27 @@ function apply(ctx) {
       // records committed by another mount when persisting this one's turns.
       const durable = loadBindings(bindingsPath)
       for (const [id, binding] of Object.entries(durable)) {
-        if (id !== removedSessionId && binding.preparationAuthority && !bindings[id]) bindings[id] = binding
+        if (id === removedSessionId) continue
+        const cached = bindings[id]
+        const observed = observedBindingAuthority.get(id)
+        if (cached && observed !== undefined && authorityStamp(binding) !== observed) {
+          if (registrySessionBinding.classifyRegistryState(cached).state !== 'legacy' &&
+              registrySessionBinding.classifyRegistryState(binding).state === 'legacy' && binding.bindingAuthority !== 'legacy-rollback') {
+            const error = new Error('Durable Registry authority disappeared without explicit rollback; refusing cache overwrite.')
+            error.code = 'registry-authority-unverifiable'
+            throw error
+          }
+          if (authorityStamp(cached) !== observed) {
+            const error = new Error('Concurrent durable binding authority changed; refusing to overwrite it.')
+            error.code = 'bindings-write-conflict'
+            throw error
+          }
+          for (const field of ['preparationAuthority', 'registryPin', 'registryRefused', 'bindingAuthority']) {
+            if (!Object.prototype.hasOwnProperty.call(binding, field)) delete cached[field]
+          }
+          Object.assign(cached, binding)
+        } else if (!cached) bindings[id] = binding
+        observedBindingAuthority.set(id, authorityStamp(binding))
       }
       fs.mkdirSync(path.dirname(bindingsPath), { recursive: true })
       // Persist ONLY the durable binding fields (whitelist): the live
@@ -1003,6 +1034,8 @@ function apply(ctx) {
         fs.fsyncSync(fd)
       } finally { fs.closeSync(fd) }
       fs.renameSync(temporary, bindingsPath)
+      observedBindingAuthority.clear()
+      for (const [id, binding] of Object.entries(serializable)) observedBindingAuthority.set(id, authorityStamp(binding))
       if (process.platform !== 'win32') {
         const directory = fs.openSync(path.dirname(bindingsPath), 'r')
         try { fs.fsyncSync(directory) } finally { fs.closeSync(directory) }
@@ -2897,7 +2930,20 @@ function apply(ctx) {
         const durable = JSON.parse(fs.readFileSync(bindingsPath, 'utf8'))
         if (!durable || durable.schemaVersion !== 1 || !durable.bindings || typeof durable.bindings !== 'object' || Array.isArray(durable.bindings)) fail('session-prepare-conflict', 'Binding document is invalid.')
         for (const [id, persisted] of Object.entries(durable.bindings)) {
-          bindings[id] = { ...(bindings[id] || {}), ...persisted }
+          const cached = bindings[id]
+          if (cached && cached.preparationAuthority && (cached.taskId !== persisted.taskId || cached.taskInstanceId !== persisted.taskInstanceId || cached.engine !== persisted.engine)) {
+            fail('session-prepare-conflict', 'Prepared generation differs from durable authority.')
+          }
+          if (cached && registrySessionBinding.classifyRegistryState(cached).state !== 'legacy' &&
+              registrySessionBinding.classifyRegistryState(persisted).state === 'legacy' && persisted.bindingAuthority !== 'legacy-rollback') {
+            fail('registry-authority-unverifiable', 'Registry authority disappeared without durable rollback.')
+          }
+          const current = cached || {}
+          for (const field of ['preparationAuthority', 'registryPin', 'registryRefused', 'bindingAuthority']) {
+            if (!Object.prototype.hasOwnProperty.call(persisted, field)) delete current[field]
+          }
+          bindings[id] = Object.assign(current, persisted)
+          observedBindingAuthority.set(id, authorityStamp(persisted))
         }
       }
       const existing = bindingFor(session)
@@ -3030,18 +3076,36 @@ function apply(ctx) {
 
   function bindingFor(session) {
     const cached = bindings[session.id]
-    if (!cached || !cached.preparationAuthority) {
-      const durable = loadBindings(bindingsPath)[session.id]
-      if (durable && durable.preparationAuthority) {
-        if (cached && (cached.taskId !== durable.taskId || cached.taskInstanceId !== durable.taskInstanceId || cached.engine !== durable.engine)) {
-          const error = new Error('Prepared authority conflicts with the mounted controller binding.')
-          error.code = 'session-prepare-conflict'
-          throw error
-        }
-        bindings[session.id] = cached ? Object.assign(cached, durable) : durable
+    const durable = loadBindings(bindingsPath)[session.id]
+    if (!durable) {
+      if (cached && (cached.preparationAuthority || registrySessionBinding.classifyRegistryState(cached).state !== 'legacy')) {
+        const error = new Error('Previously bound session authority is missing from durable state.')
+        error.code = 'bindings-unverifiable'
+        throw error
       }
+      return cached || null
     }
-    return bindings[session.id] || null
+    if (cached && cached.preparationAuthority &&
+        (cached.taskId !== durable.taskId || cached.taskInstanceId !== durable.taskInstanceId || cached.engine !== durable.engine)) {
+      const error = new Error('Prepared authority conflicts with the mounted controller binding.')
+      error.code = 'session-prepare-conflict'
+      throw error
+    }
+    if (cached && registrySessionBinding.classifyRegistryState(cached).state !== 'legacy' &&
+        registrySessionBinding.classifyRegistryState(durable).state === 'legacy' && durable.bindingAuthority !== 'legacy-rollback') {
+      const error = new Error('Registry authority disappeared without an explicit durable rollback.')
+      error.code = 'registry-authority-unverifiable'
+      throw error
+    }
+    // Keep runtime-only members on the same object, but absence of a durable
+    // authority field is meaningful (e.g. an explicit rollback), not a merge.
+    const current = cached || {}
+    for (const field of ['preparationAuthority', 'registryPin', 'registryRefused', 'bindingAuthority']) {
+      if (!Object.prototype.hasOwnProperty.call(durable, field)) delete current[field]
+    }
+    bindings[session.id] = Object.assign(current, durable)
+    observedBindingAuthority.set(session.id, authorityStamp(durable))
+    return bindings[session.id]
   }
 
   let environmentRegistered = false
@@ -3049,6 +3113,7 @@ function apply(ctx) {
     if (environmentRegistered) return
     environmentRegistered = true
     try {
+      presetShellEnvironment.ensure(ctx)
       ctx.shellEnv.register({
         name: 'aih-controller-task-state',
         variables: {

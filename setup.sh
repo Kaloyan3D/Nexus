@@ -183,7 +183,7 @@ for _name in setup.sh setup.ps1 README.md SECURITY.md .gitignore .gitattributes 
   if [ -f "$AIH_SOURCE_ROOT/$_name" ]; then cp -f "$AIH_SOURCE_ROOT/$_name" "$AIH_INSTALL_ROOT/$_name"; fi
 done
 
-AIH_CONFIG_FILES='versions.json settings.yaml home.cordis.patch.yml delegation-block.yml preset.yml preset-deepseek.yml preset-muse.yml DeepSeek-Isolation.cjs Engineering-Isolation.cjs Muse-Isolation.cjs Muse-ReasoningGovernor.cjs Muse-ReasoningRuntime.cjs Muse-ReasoningSignals.cjs Muse-ReasoningActivity.cjs Controller-RequestBoundary.cjs Routing-Integrity.cjs AihController.cjs ContextCompaction.cjs deepseek-agent.cordis.yml routing-policy.json engineering-profiles.json model-registry.json nexus-profiles.json muse-profiles.json Engineering-Profiles.cjs Nexus-Profiles.cjs'
+AIH_CONFIG_FILES='versions.json settings.yaml home.cordis.patch.yml delegation-block.yml preset.yml preset-deepseek.yml preset-muse.yml DeepSeek-Isolation.cjs Engineering-Isolation.cjs Muse-Isolation.cjs Muse-ReasoningGovernor.cjs Muse-ReasoningRuntime.cjs Muse-ReasoningSignals.cjs Muse-ReasoningActivity.cjs Controller-RequestBoundary.cjs Preset-ShellEnvironment.cjs Routing-Integrity.cjs AihController.cjs ContextCompaction.cjs deepseek-agent.cordis.yml routing-policy.json engineering-profiles.json model-registry.json nexus-profiles.json muse-profiles.json Engineering-Profiles.cjs Nexus-Profiles.cjs'
 for _name in $AIH_CONFIG_FILES; do
   if [ -f "$AIH_SOURCE_ROOT/config/$_name" ]; then cp -f "$AIH_SOURCE_ROOT/config/$_name" "$AIH_INSTALL_ROOT/config/$_name"; fi
 done

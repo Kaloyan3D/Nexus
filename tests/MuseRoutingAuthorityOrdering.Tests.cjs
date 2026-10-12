@@ -120,7 +120,7 @@ function createHost(dsh, plugins) {
       const presetCtx = root.extend({})
       const pluginCtx = {
         on: (name, listener, options) => presetCtx.on(name, listener, options),
-        shellEnv: { register() {} },
+        shellEnv: { list() { return [] }, register() {} },
       }
       for (const plugin of plugins[presetId] || []) plugin(pluginCtx)
       mount = { presetCtx }

@@ -976,7 +976,7 @@ section('C07 REAL HOST-PATH PROOF - real boundary composition, stub terminal pro
         handlers.get(event).push(fn);
         return () => {};
       },
-      shellEnv: { register: () => {} },
+      shellEnv: { list: () => [], register: () => {} },
     };
   }
   async function runThroughBoundary(mode) {

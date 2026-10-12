@@ -45,7 +45,7 @@ async function childMain() {
   const logStart = readLines(logFile).length;
   const handlers = {};
   require(path.join(root, 'config', 'AihController.cjs')).apply({
-    on(event, fn) { handlers[event] = fn; }, shellEnv: { register() {} },
+    on(event, fn) { handlers[event] = fn; }, shellEnv: { list() { return [] }, register() {} },
   });
   const session = { id: sid, header: { cwd: workspace, agentPreset: preset }, messages: [], append(k, m) { this.messages.push(m); } };
   if (step === 'request-worker') session.header.origin = 'subagent';
@@ -58,11 +58,13 @@ async function childMain() {
     const requestHandlers = {}; const scoped = {};
     const agent = { session, ctx: { on(event, fn) { scoped[event] = fn; } } };
     require(path.join(root, 'config', preset === 'aih-muse' ? 'Muse-Isolation.cjs' : 'Engineering-Isolation.cjs')).apply({
-      on(event, fn) { requestHandlers[event] = fn; }, shellEnv: { register() {} },
+      on(event, fn) { requestHandlers[event] = fn; }, shellEnv: { list() { return [] }, register() {} },
     });
-    requestHandlers['agent/pre-step']({ agent }, () => {});
     const payload = { agent };
     try {
+      // Arming may already refuse malformed authority; report that structured
+      // denial too, with the same zero-next/zero-attempt expectations.
+      requestHandlers['agent/pre-step']({ agent }, () => {});
       request = await requestHandlers['agent/request'](payload, () => scoped['agent/request'](payload, () => { nextCount++; return { provider: 'seed', model: 'seed' }; }));
       result = 'next';
     } catch (e) { result = { kind: 'reject' }; errorCode = e.code; }

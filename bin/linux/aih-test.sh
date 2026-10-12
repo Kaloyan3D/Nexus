@@ -19,7 +19,14 @@ AIH_SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$AIH_SELF")" && pwd) || exit 1
 if [ -n "$AIH_BAKED_ROOT" ] && [ -d "$AIH_BAKED_ROOT" ]; then
   AIH_ROOT="$AIH_BAKED_ROOT"
 else
-  AIH_ROOT="$(dirname "$AIH_SELF_DIR")"
+  # Source templates live in <checkout>/bin/linux; installed launchers live
+  # in <install>/bin. Baked user launchers keep precedence above.
+  AIH_LAUNCHER_SOURCE_ROOT="$(dirname "$(dirname "$AIH_SELF_DIR")")"
+  if [ "$(basename "$AIH_SELF_DIR")" = linux ] && [ -f "$AIH_LAUNCHER_SOURCE_ROOT/scripts/Platform.ps1" ]; then
+    AIH_ROOT="$AIH_LAUNCHER_SOURCE_ROOT"
+  else
+    AIH_ROOT="$(dirname "$AIH_SELF_DIR")"
+  fi
 fi
 AIH_PWSH="$AIH_ROOT/runtime/pwsh/pwsh"
 if [ ! -x "$AIH_PWSH" ]; then

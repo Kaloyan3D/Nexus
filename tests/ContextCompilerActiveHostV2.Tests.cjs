@@ -406,7 +406,7 @@ function realApplySection() {
   const controller = require(controllerPath);
   const fx = makeFixtureRoot(undefined);
   const listeners = {};
-  const ctx = { on: (event, fn) => { if (!listeners[event]) listeners[event] = []; listeners[event].push(fn); return () => {}; }, shellEnv: { register() {} } };
+  const ctx = { on: (event, fn) => { if (!listeners[event]) listeners[event] = []; listeners[event].push(fn); return () => {}; }, shellEnv: { list() { return [] }, register() {} } };
   const prev = { home: process.env.DSH_HOME, root: process.env.AIH_INSTALL_ROOT, toolchain: process.env.AIH_TOOLCHAIN_ROOT };
   process.env.DSH_HOME = path.join(fx.root, 'data');
   process.env.AIH_INSTALL_ROOT = fx.root;

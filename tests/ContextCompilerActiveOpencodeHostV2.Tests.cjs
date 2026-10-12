@@ -502,7 +502,7 @@ function sectionsOCH3() {
   ;(async () => {
     const fx = makeFixtureRoot(undefined);
     const listeners = {};
-    const ctx = { on: (event, fn, opts) => { (listeners[event] = listeners[event] || []).push(fn); return () => {}; }, shellEnv: { register() {} } };
+    const ctx = { on: (event, fn, opts) => { (listeners[event] = listeners[event] || []).push(fn); return () => {}; }, shellEnv: { list() { return [] }, register() {} } };
     const installed = host.installOpencodeActiveProjection(ctx, { installRoot: fx.root, bindingsPath: bindingsPathOf(fx), log: () => {} });
     check(installed.installed === true, 'installer registers without throwing');
     check(listeners['agent/request'] === undefined, 'no listener on agent/request (that seam never carries messages/sessionId)');

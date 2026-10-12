@@ -129,7 +129,7 @@ const fix = buildFixture();
 process.env.DSH_HOME = fix.dataHome; process.env.AIH_INSTALL_ROOT = fix.installRoot; delete process.env.NEXUS_REGISTRY_BINDING;
 const controller = require('../config/AihController.cjs');
 const profiles = require('../config/Engineering-Profiles.cjs');
-function boot() { const handlers = {}; const ctx = { on: function (ev, fn) { handlers[ev] = fn; }, shellEnv: { register: function () {} } }; controller.apply(ctx); return handlers['agent/pre-step']; }
+function boot() { const handlers = {}; const ctx = { on: function (ev, fn) { handlers[ev] = fn; }, shellEnv: { list: function () { return [] }, register: function () {} } }; controller.apply(ctx); return handlers['agent/pre-step']; }
 async function turn(preStep, sessionId, text) { const session = makeSession(sessionId, fix.fixture); const agent = { session: session }; await preStep({ agent: agent, messages: [userMessage(text)], step: 1, turn: 'x' }, function () { return 'next'; }); }
 function readBindings() { return JSON.parse(fs.readFileSync(path.join(fix.dataHome, 'routing', 'session-bindings.json'), 'utf8')).bindings; }
 function logLines() { try { return fs.readFileSync(path.join(fix.dataHome, 'logs', 'aih-controller.log'), 'utf8').split('\n'); } catch (e) { return []; } }
@@ -148,7 +148,7 @@ fs.writeFileSync(CHILD, [
   '  process.env.DSH_HOME = dataHome; process.env.AIH_INSTALL_ROOT = installRoot;',
   '  if (flag === "1") process.env.NEXUS_REGISTRY_BINDING = "1"; else delete process.env.NEXUS_REGISTRY_BINDING;',
   '  const controller = require(path.join(repoRoot, "config", "AihController.cjs"));',
-  '  const handlers = {}; controller.apply({ on: function (ev, fn) { handlers[ev] = fn; }, shellEnv: { register: function () {} } });',
+  '  const handlers = {}; controller.apply({ on: function (ev, fn) { handlers[ev] = fn; }, shellEnv: { list: function () { return [] }, register: function () {} } });',
   '  const session = { id: sid, header: { cwd: fixture, agentPreset: "aih-engineering" }, messages: [], append: function () {} };',
   '  const um = { role: "user", source: { kind: "user" }, content: [{ type: "text", text: text }] };',
   '  await handlers["agent/pre-step"]({ agent: { session: session }, messages: [um], step: 1, turn: "x" }, function () { return "next"; });',

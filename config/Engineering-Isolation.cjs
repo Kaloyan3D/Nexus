@@ -23,6 +23,7 @@
  * delegation rows, exactly as before.
  */
 
+const shellEnvironment = require('./Preset-ShellEnvironment.cjs')
 const fs = require('node:fs')
 const path = require('node:path')
 const profiles = require('./Engineering-Profiles.cjs')
@@ -179,6 +180,7 @@ function controllerTargetFor(installRoot, binding) {
 }
 
 function apply(ctx) {
+  shellEnvironment.ensure(ctx)
   // The controller route is applied through the shared request boundary so
   // it is in place INSIDE DSH model-selection for every session, not only
   // the first one to mount this standing preset (Controller-RequestBoundary.cjs).
@@ -218,6 +220,7 @@ function apply(ctx) {
 
 module.exports = {
   name: 'aih-engineering-isolation',
+  inject: ['shellEnv'],
   apply,
   bindingFor,
   routingStateFor,

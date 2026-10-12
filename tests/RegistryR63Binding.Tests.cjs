@@ -128,7 +128,7 @@ process.env.AIH_INSTALL_ROOT = fix.installRoot;
 delete process.env.NEXUS_REGISTRY_BINDING;
 const controller = require('../config/AihController.cjs');
 const profiles = require('../config/Engineering-Profiles.cjs');
-function boot() { const handlers = {}; const ctx = { on: function (ev, fn) { handlers[ev] = fn; }, shellEnv: { register: function () {} } }; controller.apply(ctx); return handlers['agent/pre-step']; }
+function boot() { const handlers = {}; const ctx = { on: function (ev, fn) { handlers[ev] = fn; }, shellEnv: { list: function () { return [] }, register: function () {} } }; controller.apply(ctx); return handlers['agent/pre-step']; }
 async function turn(preStep, sessionId, text) { const session = makeSession(sessionId, fix.fixture); const agent = { session: session }; await preStep({ agent: agent, messages: [userMessage(text)], step: 1, turn: 'x' }, function () { return 'next'; }); return session; }
 function readBindings() { return JSON.parse(fs.readFileSync(path.join(fix.dataHome, 'routing', 'session-bindings.json'), 'utf8')).bindings; }
 const TURN_TEXT = 'Fix null handling in workspace resolver';

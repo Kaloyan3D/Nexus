@@ -75,7 +75,7 @@ const fix = buildFixture();
 process.env.DSH_HOME = fix.dataHome; process.env.AIH_INSTALL_ROOT = fix.installRoot; delete process.env.NEXUS_REGISTRY_BINDING;
 const controller = require('../config/AihController.cjs');
 const registry = require('../config/registry/index.cjs');
-function boot() { const handlers = {}; const ctx = { on: function (ev, fn) { handlers[ev] = fn; }, shellEnv: { register: function () {} } }; controller.apply(ctx); return handlers['agent/pre-step']; }
+function boot() { const handlers = {}; const ctx = { on: function (ev, fn) { handlers[ev] = fn; }, shellEnv: { list: function () { return [] }, register: function () {} } }; controller.apply(ctx); return handlers['agent/pre-step']; }
 function countAttempts(workspace = fix.fixture) { let n = 0; const runs = path.join(workspace, '.ai-harness', 'runs'); try { for (const t of fs.readdirSync(runs)) { try { n += fs.readFileSync(path.join(runs, t, 'attempts.jsonl'), 'utf8').split('\n').filter(function (l) { return l !== ''; }).length; } catch (e) {} } } catch (e) {} return n; }
 async function instrumentedTurn(preStep, sid, text, preset) {
   const before = countAttempts(); let nextCount = 0;
@@ -105,7 +105,7 @@ fs.writeFileSync(CHILD, [
   '  if (flag === "1") process.env.NEXUS_REGISTRY_BINDING = "1"; else delete process.env.NEXUS_REGISTRY_BINDING;',
   '  const controller = require(path.join(repoRoot, "config", "AihController.cjs"));',
   '  function countAttempts() { let n = 0; const runs = path.join(fixture, ".ai-harness", "runs"); try { for (const t of fs.readdirSync(runs)) { try { n += fs.readFileSync(path.join(runs, t, "attempts.jsonl"), "utf8").split("\\n").filter(function (l) { return l !== ""; }).length; } catch (e) {} } } catch (e) {} return n; }',
-  '  const handlers = {}; controller.apply({ on: function (ev, fn) { handlers[ev] = fn; }, shellEnv: { register: function () {} } });',
+  '  const handlers = {}; controller.apply({ on: function (ev, fn) { handlers[ev] = fn; }, shellEnv: { list: function () { return [] }, register: function () {} } });',
   '  const session = { id: sid, header: { cwd: fixture, agentPreset: preset }, messages: [], append: function () {} };',
   '  const um = { role: "user", source: { kind: "user" }, content: [{ type: "text", text: text }] };',
   '  const before = countAttempts(); let nextCount = 0;',

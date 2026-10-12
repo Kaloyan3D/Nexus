@@ -67,7 +67,7 @@ function opencodeState(overrides) {
 }
 function makeCtx() {
   const registrations = [];
-  return createPresetCtx({ registrations, shellEnv: { register: function(d) { registrations.push(d); } } });
+  return createPresetCtx({ registrations, shellEnv: { list() { return [] }, register: function(d) { registrations.push(d); } } });
 }
 function runRequest(ctx, session, proposed) {
   const handler = ctx.handlers['agent/request'];

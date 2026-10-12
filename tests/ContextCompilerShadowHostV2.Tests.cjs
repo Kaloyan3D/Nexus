@@ -237,7 +237,7 @@ function applyWithCtx(fx, shared) {
       listeners[event].push(fn);
       return () => {};
     },
-    shellEnv: { register() {} },
+    shellEnv: { list() { return [] }, register() {} },
   };
   const previousHome = process.env.DSH_HOME;
   const previousRoot = process.env.AIH_INSTALL_ROOT;

@@ -192,6 +192,8 @@ $suites = @(
     [ordered]@{ name='ContextCompactionF9TailBound'; script='tests/ContextCompactionF9TailBound.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ContextWireProjectorResponsesV2'; script='tests/ContextWireProjectorResponsesV2.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='ControllerSessionBootstrap'; script='tests/ControllerSessionBootstrap.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='DeepSeekRequestBoundaryHost'; script='tests/DeepSeekRequestBoundaryHost.Tests.cjs'; executable=$layout.Node; kind='node' },
+    [ordered]@{ name='MixedPresetShellEnv'; script='tests/MixedPresetShellEnv.Tests.cjs'; executable=$layout.Node; kind='node'; env=@{ 'NEXUS_RUNTIME_ROOT'=$InstallRoot } },
     [ordered]@{ name='DeepSeekIsolation'; script='tests/DeepSeekIsolation.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='EngineeringIsolation'; script='tests/EngineeringIsolation.Tests.cjs'; executable=$layout.Node; kind='node' },
     [ordered]@{ name='MuseOpenCodeGoRuntime'; script='tests/MuseOpenCodeGo.Tests.cjs'; executable=$layout.Node; kind='node' },
