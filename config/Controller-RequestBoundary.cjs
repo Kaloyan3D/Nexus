@@ -45,6 +45,36 @@
  * effective route, and still ranks and rejects every other route claim.
  */
 
+const registryBinding = require('./registry/session-binding.cjs')
+const registryService = require('./registry/service.cjs')
+const profiles = require('./Engineering-Profiles.cjs')
+const path = require('node:path')
+const fs = require('node:fs')
+const runCli = require('node:util').promisify(require('node:child_process').execFile)
+
+async function assertCurrentTaskIdentity(installRoot, binding) {
+  const toolchainRoot = process.env.AIH_TOOLCHAIN_ROOT || installRoot
+  const pinned = path.join(toolchainRoot, 'runtime', 'pwsh', 'pwsh')
+  const host = process.platform === 'win32' ? 'powershell.exe' :
+    (process.env.AIH_PWSH_HOST || (fs.existsSync(pinned) ? pinned : 'pwsh'))
+  // EncodedCommand transports Unicode paths without shell interpolation or
+  // Windows argv codepage conversion. TaskController remains the authority.
+  const quote = value => "'" + String(value).replace(/'/g, "''") + "'"
+  const command = '& ' + quote(path.join(installRoot, 'scripts', 'Task.ps1')) +
+    ' -Action test-task -Workspace ' + quote(binding.workspace) +
+    ' -TaskId ' + quote(binding.taskId) + ' -TaskInstanceId ' + quote(binding.taskInstanceId)
+  try {
+    const result = await runCli(host, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')],
+      { timeout: 30000, maxBuffer: 1024 * 1024, windowsHide: true, env: { ...process.env, AIH_TOOLCHAIN_ROOT: toolchainRoot } })
+    const identity = JSON.parse(result.stdout.replace(/^\uFEFF/, ''))
+    if (identity.exists !== true || identity.instanceMatches !== true || identity.taskId !== binding.taskId || identity.taskInstanceId !== binding.taskInstanceId) throw new Error('Task identity differs')
+  } catch (cause) {
+    const error = new Error('Registry request identity is unverifiable; no downstream request authorized.', { cause })
+    error.code = 'binding-validation-inconclusive'
+    throw error
+  }
+}
+
 const AUTHORITY_SOURCE = 'controller'
 
 function sameRoute(value, target) {
@@ -92,6 +122,27 @@ function installControllerRequestBoundary(ctx, boundary) {
   ctx.on('agent/request', async (payload, next) => {
     const target = boundary.targetFor(payload)
     if (target === null) return next()
+    // R7.5A: pre-step is not the final request boundary. Re-read entitlement
+    // here before downstream work, including later steps of an open attempt.
+    const binding = target.binding
+    if (registryBinding.classifyRegistryState(binding).state !== 'legacy') {
+      const installRoot = target.installRoot || profiles.installRootOf()
+      await assertCurrentTaskIdentity(installRoot, binding)
+      let connection = null
+      const role = binding.engine === 'muse' ? 'muse_main' : target.role
+      const entry = registryBinding.mapEntryFor(binding.registryPin, role)
+      if (entry && entry.target) {
+        const svc = registryService.createService({ installRoot, dataRoot: process.env.DSH_HOME || path.join(installRoot, 'data') })
+        const current = svc.getConnections()
+        connection = (current.connections || []).find((c) => c.id === entry.target.connectionId) || null
+      }
+      const verdict = registryBinding.checkExecutionTarget({ binding, target, connection, flagOn: registryBinding.isRegistryBindingEnabled(process.env) })
+      if (!verdict.ok) {
+        const error = new Error('Registry request refused (' + verdict.code + '); no downstream request authorized.')
+        error.code = verdict.code
+        throw error
+      }
+    }
     if (!composed.has(payload.agent)) throw boundary.fail('controller-route-rewrite-not-composed', target)
     const prepared = boundary.prepare ? boundary.prepare(payload, target) : undefined
     const ticket = { target, prepared, applied: false }

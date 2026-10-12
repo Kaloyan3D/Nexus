@@ -935,7 +935,9 @@ function apply(ctx) {
       }))
     })
   }
-  const bindings = loadBindings(bindingsPath)
+  let bindings = {}
+  let bindingsLoadFailure = null
+  try { bindings = loadBindings(bindingsPath) } catch (error) { bindingsLoadFailure = error }
   const resolveWorkspaceSingleFlight = createSingleFlight(normalizeWorkspaceIdentity)
 
   function log(entry) {
@@ -1137,6 +1139,18 @@ function apply(ctx) {
       const hit = list.find((c) => c && c.id === connectionId);
       return hit ? { id: hit.id, status: hit.status ?? null, provenance: hit.provenance ?? null, providerId: hit.providerId ?? null } : null;
     } catch { return null; }
+  }
+
+  function registryExecutionVerdict(binding) {
+    const cls = registrySessionBinding.classifyRegistryState(binding)
+    if (cls.state !== 'pinned') return registrySessionBinding.checkExecutionTarget({ binding, flagOn: registrySessionBinding.isRegistryBindingEnabled(process.env) })
+    let target
+    try { target = (binding.engine === 'muse' ? museIsolation : engineeringIsolation).controllerTargetFor(installRoot, binding) }
+    catch { return { ok: false, code: 'registry-execution-target-unavailable' } }
+    const role = binding.engine === 'muse' ? 'muse_main' : target.role
+    const entry = registrySessionBinding.mapEntryFor(binding.registryPin, role)
+    const connection = entry && entry.target ? loadTransitionConnection(entry.target.connectionId) : null
+    return registrySessionBinding.checkExecutionTarget({ binding, target, connection, flagOn: registrySessionBinding.isRegistryBindingEnabled(process.env) })
   }
 
   // R7.4: a carried pin is historical evidence, never authority for the
@@ -3298,7 +3312,30 @@ function apply(ctx) {
     try {
       const agent = payload && payload.agent
       const session = agent && agent.session
+      // A corrupt durable document cannot be interpreted as an empty store.
+      // Quarantine this mount until a repaired document is loaded on restart.
+      if (bindingsLoadFailure) throw bindingsLoadFailure
+      loadBindings(bindingsPath)
       if (!session) return next()
+      const existing = bindingFor(session)
+      const marked = registrySessionBinding.classifyRegistryState(existing).state !== 'legacy'
+      const promptMessages = userPromptMessages(payload.messages)
+      if (marked && (isWorkerAgent(session.header) || payload.step !== 1 || promptMessages.length === 0 || !textOf(promptMessages[0]) || !session.header || !session.header.cwd)) {
+        assertEngineBinding(existing, agentPresetOf(session))
+        const workspaceReason = classifyBindingWorkspace(existing, session.header && session.header.cwd)
+        if (workspaceReason) throw new Error('Registry continuation workspace identity is unavailable')
+        const identity = await testTaskIdentity(existing.workspace, existing.taskId, existing.taskInstanceId)
+        if (classifyBindingIdentity(existing, identity).verdict !== 'valid') {
+          log({ event: 'registry-execution-refused', sessionId: session.id, code: 'registry-generation-mismatch', purpose: 'continuation' })
+          return { kind: 'reject' }
+        }
+        const verdict = registryExecutionVerdict(existing)
+        if (!verdict.ok) {
+          log({ event: 'registry-execution-refused', sessionId: session.id, code: verdict.code, purpose: 'continuation' })
+          return { kind: 'reject' }
+        }
+        return next()
+      }
       if (isWorkerAgent(session.header)) return next()
       if (payload.step !== 1) return next()
       const prompts = userPromptMessages(payload.messages)
@@ -3401,31 +3438,7 @@ function apply(ctx) {
           log({ event: 'registry-route-check-rearmed', sessionId: session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId || null });
         }
         if (gCls.state === 'pinned') {
-          let gRole = binding.engine === 'muse' ? 'muse_main' : null;
-          if (!gRole) {
-            try { gRole = engineeringProfiles.roleOfExecutionClass(binding.executionClass) || null; }
-            catch (gRoleError) { gRole = null; }
-          }
-          // Read the SAME persisted target consumed by the isolation layer;
-          // no profile re-resolution or Registry-directed target override.
-          let targetVerdict = null;
-          {
-            try {
-              const target = (binding.engine === 'muse' ? museIsolation : engineeringIsolation).controllerTargetFor(installRoot, binding);
-              gRole = binding.engine === 'muse' ? 'muse_main' : (target.role || gRole);
-              targetVerdict = registrySessionBinding.verifyTransitionTarget({ ...target, role: gRole, engine: binding.engine, taskInstanceId: binding.taskInstanceId }, binding.registryPin);
-            } catch (targetError) {
-              targetVerdict = { ok: false, code: 'registry-execution-target-unavailable' };
-            }
-          }
-          let gConn = null;
-          const gEntry = gRole ? registrySessionBinding.mapEntryFor(binding.registryPin, gRole) : null;
-          const gCid = gEntry && gEntry.available === true && gEntry.target ? gEntry.target.connectionId : null;
-          if (gCid) {
-            const gCur = loadTransitionConnection(gCid);
-            if (gCur) gConn = { id: gCid, status: gCur.status, provenance: gCur.provenance, providerId: gCur.providerId };
-          }
-          const gVerdict = targetVerdict && !targetVerdict.ok ? targetVerdict : registrySessionBinding.checkTurnEntry({ binding: binding, role: gRole, connection: gConn, flagOn: gFlag });
+          const gVerdict = registryExecutionVerdict(binding);
           if (!gVerdict.ok) {
             appendMessage(session, createControllerMessage('Controller: Registry execution refused (' + String(gVerdict.code) + ') for this session. The bound generation currently has no verified execution target. No attempt was started and no model was invoked.', 'controller-registry-rejected'));
             log({ event: 'registry-execution-refused', sessionId: session.id, taskId: binding.taskId, taskInstanceId: binding.taskInstanceId || null, purpose: 'pre-step', code: gVerdict.code });
@@ -3676,6 +3689,7 @@ function apply(ctx) {
         error: boundedControllerDiagnostic(message),
         ...(error && error.cliFailure ? { cliFailure: error.cliFailure } : {}),
       })
+      if (error && error.code === 'bindings-unverifiable') log({ event: 'registry-execution-refused', sessionId: session && session.id, code: error.code, purpose: 'binding-load' })
       if (error && error.code === 'engine-binding-violation') {
         if (session) {
           appendMessage(
@@ -3745,15 +3759,24 @@ function apply(ctx) {
 
 function loadBindings(bindingsPath) {
   try {
-    if (!fs.existsSync(bindingsPath)) return {}
     const document = JSON.parse(fs.readFileSync(bindingsPath, 'utf8'))
-    if (document && document.schemaVersion === 1 && document.bindings && typeof document.bindings === 'object') {
+    if (document && document.schemaVersion === 1 && document.bindings && typeof document.bindings === 'object' && !Array.isArray(document.bindings)) {
+      for (const binding of Object.values(document.bindings)) {
+        if (!binding || typeof binding !== 'object' || Array.isArray(binding)) throw new Error('Invalid session binding entry')
+        for (const field of ['registryPin', 'registryRefused']) {
+          if (Object.prototype.hasOwnProperty.call(binding, field) && (!binding[field] || typeof binding[field] !== 'object' || Array.isArray(binding[field]))) throw new Error('Invalid Registry authority entry')
+        }
+        if (binding.bindingAuthority === 'registry' && !binding.registryPin) throw new Error('Registry authority requires its pin')
+      }
       return document.bindings
     }
-  } catch {
-    /* corrupt bindings file: start fresh; task ledger remains the source of truth */
+    throw new Error('Unsupported session binding schema')
+  } catch (cause) {
+    if (cause && cause.code === 'ENOENT') return {}
+    const error = new Error('Session bindings are unreadable; execution is quarantined until the durable document is repaired.')
+    error.code = 'bindings-unverifiable'
+    throw error
   }
-  return {}
 }
 
 /**

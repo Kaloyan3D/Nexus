@@ -60,13 +60,17 @@ function bindingFor(installRoot, sessionId) {
     const document = JSON.parse(
       fs.readFileSync(path.join(installRoot, 'data', 'routing', 'session-bindings.json'), 'utf8'),
     )
-    if (document && document.schemaVersion === 1 && document.bindings && typeof document.bindings === 'object') {
-      return document.bindings[sessionId] || null
+    if (!document || document.schemaVersion !== 1 || !document.bindings || typeof document.bindings !== 'object' || Array.isArray(document.bindings)) {
+      throw new Error('Invalid session binding document')
     }
-  } catch {
-    /* fail closed at controllerTargetFor */
+    if (!Object.prototype.hasOwnProperty.call(document.bindings, sessionId)) return null
+    const binding = document.bindings[sessionId]
+    if (!binding || typeof binding !== 'object' || Array.isArray(binding)) throw new Error('Invalid session binding entry')
+    return binding
+  } catch (cause) {
+    if (cause && cause.code === 'ENOENT') return null
+    throw enforcementError('session-bindings-unverifiable', null, null, 'bindings-unverifiable')
   }
-  return null
 }
 
 function readJson(filePath) {
@@ -188,6 +192,9 @@ function apply(ctx) {
     // (MuseReasoningCapabilityError) means no request is produced at all --
     // never a fallback effort, never the stale profile default.
     prepare(_payload, target) {
+      // Registry pins include reasoning. Adaptive preparation writes a new
+      // effort to routing state, so it cannot run after pin verification.
+      if (target.binding && target.binding.registryPin) return { effort: target.reasoning }
       return reasoningRuntime.prepareMuseRequestEffort({ installRoot: target.installRoot, binding: target.binding, target })
     },
     finalize(proposed, target, adaptive) {

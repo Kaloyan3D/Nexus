@@ -232,18 +232,19 @@ function createService(options) {
     try {
       const raw = hooks.readFileSync(statusOverlayPath(), 'utf8');
       const doc = JSON.parse(raw);
-      if (!doc || typeof doc !== 'object' || doc.schemaVersion !== 1 || !doc.statuses || typeof doc.statuses !== 'object') {
-        return { statuses: {}, errors: [err('snapshot-note', 'registry.connection-status', 'connection status overlay is unreadable; live statuses degrade to built-in defaults')] };
+      if (!doc || typeof doc !== 'object' || Array.isArray(doc) || doc.schemaVersion !== 1 || !doc.statuses || typeof doc.statuses !== 'object' || Array.isArray(doc.statuses)) {
+        return { statuses: {}, errors: [err('registry-authorization-unverifiable', 'registry.connection-status', 'connection status overlay is unreadable; current entitlement cannot be proven')] };
       }
       const clean = {};
       for (const id of Object.keys(doc.statuses)) {
         const entry = doc.statuses[id];
-        if (entry && typeof entry === 'object' && OVERLAY_STATUSES.indexOf(entry.status) !== -1) clean[id] = { status: entry.status, updatedAtUtc: entry.updatedAtUtc || null, provenance: entry.provenance || null };
+        if (!entry || typeof entry !== 'object' || OVERLAY_STATUSES.indexOf(entry.status) === -1) return { statuses: {}, errors: [err('registry-authorization-unverifiable', 'registry.connection-status', 'connection status overlay contains an invalid status')] };
+        clean[id] = { status: entry.status, updatedAtUtc: entry.updatedAtUtc || null, provenance: entry.provenance || null };
       }
       return { statuses: clean, errors: [] };
     } catch (e) {
       if (e && (e.code === 'ENOENT' || (e.message && e.message.indexOf('ENOENT') !== -1))) return { statuses: {}, errors: [] };
-      return { statuses: {}, errors: [err('snapshot-note', 'registry.connection-status', 'connection status overlay is unreadable; live statuses degrade to built-in defaults')] };
+      return { statuses: {}, errors: [err('registry-authorization-unverifiable', 'registry.connection-status', 'connection status overlay is unreadable; current entitlement cannot be proven')] };
     }
   }
 
@@ -328,15 +329,20 @@ function createService(options) {
     // ids are ignored so a stale overlay can never invent a connection.
     try {
       const overlay = loadStatusOverlay()
+      if (overlay.errors.length) return { snapshot: null, aliases: canonical.aliases, errors: overlay.errors }
       const disabledConns = op.docs.connections.disabledBuiltins || {}
       for (const id of Object.keys(overlay.statuses)) {
         if (Object.prototype.hasOwnProperty.call(disabledConns, id)) continue
         const c = findById(snap.connections, id)
-        if (c) c.status = overlay.statuses[id].status
+        if (c) {
+          c.status = overlay.statuses[id].status
+          // An explicit indeterminate live check is not an offline legacy descriptor.
+          if (c.status === 'unknown') c.provenance = 'registry-status-unverifiable'
+        }
       }
       for (const e of overlay.errors) notes.push(e)
     } catch (e) {
-      notes.push(err('snapshot-note', 'registry.connection-status', 'connection status overlay merge skipped'))
+      return { snapshot: null, aliases: canonical.aliases, errors: [err('registry-authorization-unverifiable', 'registry.connection-status', 'connection status overlay merge failed')] }
     }
     const ev = catalog.loadEvidence(dataRoot, fsHooks)
     // H3/R4.2: an operator route whose stored availability says 'verified'

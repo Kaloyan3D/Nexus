@@ -129,6 +129,12 @@ function validateStepTarget(pin, role, roleTarget) {
 }
 function classifyRegistryState(binding) {
   const b = binding || {};
+  // A malformed marker is evidence of unverified authority, not absence of
+  // Registry authority. Request readers operate independently of pre-step.
+  const malformed = ['registryPin', 'registryRefused'].some(field => Object.prototype.hasOwnProperty.call(b, field) &&
+    (!b[field] || typeof b[field] !== 'object' || Array.isArray(b[field]))) ||
+    (b.bindingAuthority === 'registry' && !b.registryPin);
+  if (malformed) return { state: 'refused', pin: null, refusal: { code: 'registry-authority-unverifiable' }, invalid: true };
   const pin = b.registryPin && typeof b.registryPin === 'object' ? b.registryPin : null;
   const refusal = b.registryRefused && typeof b.registryRefused === 'object' ? b.registryRefused : null;
   if (pin) return { state: 'pinned', pin: pin, refusal: refusal };
@@ -151,7 +157,7 @@ function planTransition(input) {
   if (flagOn && o.isInitialBind === true) return { action: 'evaluate-fresh', reason: 'fresh-bind' };
   return { action: 'proceed-legacy', reason: 'legacy' };
 }
-module.exports = { BINDING_FLAG: BINDING_FLAG, mapEntryFor: mapEntryFor, checkTurnEntry: checkTurnEntry, rollbackPinnedBinding: rollbackPinnedBinding, BINDING_SCHEMA_VERSION: BINDING_SCHEMA_VERSION, CONNECTION_EVIDENCE_MAX_AGE_MS: CONNECTION_EVIDENCE_MAX_AGE_MS, isRegistryBindingEnabled: isRegistryBindingEnabled, evaluateRegistryBinding: evaluateRegistryBinding, verifyPinnedBinding: verifyPinnedBinding, verifyTransitionTarget: verifyTransitionTarget, authorizationForTransition: authorizationForTransition, validateStepTarget: validateStepTarget, classifyRegistryState: classifyRegistryState, planTransition: planTransition };
+module.exports = { BINDING_FLAG: BINDING_FLAG, mapEntryFor: mapEntryFor, checkTurnEntry: checkTurnEntry, checkExecutionTarget: checkExecutionTarget, rollbackPinnedBinding: rollbackPinnedBinding, BINDING_SCHEMA_VERSION: BINDING_SCHEMA_VERSION, CONNECTION_EVIDENCE_MAX_AGE_MS: CONNECTION_EVIDENCE_MAX_AGE_MS, isRegistryBindingEnabled: isRegistryBindingEnabled, evaluateRegistryBinding: evaluateRegistryBinding, verifyPinnedBinding: verifyPinnedBinding, verifyTransitionTarget: verifyTransitionTarget, authorizationForTransition: authorizationForTransition, validateStepTarget: validateStepTarget, classifyRegistryState: classifyRegistryState, planTransition: planTransition };
 function checkTurnEntry(input) {
   const o = input || {};
   const cls = classifyRegistryState(o.binding);
@@ -173,4 +179,23 @@ function checkTurnEntry(input) {
   const az = authorizationForTransition(o.connection !== undefined ? o.connection : null);
   if (!az.ok) return { ok: false, code: az.code, mode: 'pinned' };
   return { ok: true, code: 'registry-execution-allowed', mode: 'pinned' };
+}
+
+// R7.5A: common pure execution verdict used at pre-step AND actual request.
+// Markers may execute through legacy only after a durable explicit rollback.
+function checkExecutionTarget(input) {
+  const o = input || {}; const b = o.binding || {}; const cls = classifyRegistryState(b);
+  if (cls.state === 'legacy') return { ok: true, code: 'registry-legacy' };
+  if (cls.state !== 'pinned') {
+    if (!cls.invalid && !o.flagOn && b.bindingAuthority === 'legacy-rollback') return { ok: true, code: 'registry-rollback' };
+    return { ok: false, code: cls.refusal.code || 'registry-refused' };
+  }
+  const target = o.target || {};
+  if (!b.taskInstanceId || !cls.pin.taskInstanceId || cls.pin.taskInstanceId !== b.taskInstanceId ||
+      !target.state || target.state.taskInstanceId !== b.taskInstanceId) {
+    return { ok: false, code: 'registry-generation-mismatch' };
+  }
+  const role = b.engine === 'muse' ? 'muse_main' : target.role;
+  const verified = verifyTransitionTarget({ ...target, engine: b.engine, role, taskInstanceId: b.taskInstanceId }, cls.pin);
+  return verified.ok ? checkTurnEntry({ binding: b, role, connection: o.connection, flagOn: o.flagOn }) : verified;
 }

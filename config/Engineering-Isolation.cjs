@@ -27,6 +27,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const profiles = require('./Engineering-Profiles.cjs')
 const requestBoundary = require('./Controller-RequestBoundary.cjs')
+const registryBinding = require('./registry/session-binding.cjs')
 
 /** Read the persisted session binding (workspace/taskId/preset) for a session. */
 function bindingFor(installRoot, sessionId) {
@@ -34,13 +35,17 @@ function bindingFor(installRoot, sessionId) {
     const document = JSON.parse(
       fs.readFileSync(path.join(installRoot, 'data', 'routing', 'session-bindings.json'), 'utf8'),
     )
-    if (document && document.schemaVersion === 1 && document.bindings && typeof document.bindings === 'object') {
-      return document.bindings[sessionId] || null
+    if (!document || document.schemaVersion !== 1 || !document.bindings || typeof document.bindings !== 'object' || Array.isArray(document.bindings)) {
+      throw new Error('Invalid session binding document')
     }
-  } catch {
-    /* fail closed at controllerTargetFor */
+    if (!Object.prototype.hasOwnProperty.call(document.bindings, sessionId)) return null
+    const binding = document.bindings[sessionId]
+    if (!binding || typeof binding !== 'object' || Array.isArray(binding)) throw new Error('Invalid session binding entry')
+    return binding
+  } catch (cause) {
+    if (cause && cause.code === 'ENOENT') return null
+    throw enforcementError('session-bindings-unverifiable', null, null, 'bindings-unverifiable')
   }
-  return null
 }
 
 function readJson(filePath) {
@@ -181,12 +186,18 @@ function apply(ctx) {
     targetFor(payload) {
       const session = payload && payload.agent && payload.agent.session
       const header = session && session.header
-      if (!header) return null
-      const isWorker = header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0
-      if (isWorker) return null
-
+      if (!session) return null
       const installRoot = profiles.installRootOf()
       const binding = bindingFor(installRoot, session.id)
+      const marked = registryBinding.classifyRegistryState(binding).state !== 'legacy'
+      if (!header) {
+        if (marked) throw enforcementError('missing-session-header', binding, null)
+        return null
+      }
+      const isWorker = header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0
+      // Delegated children have their own unmarked bindings. Reusing a
+      // Registry-marked parent identity must still enforce its pinned route.
+      if (isWorker && !marked) return null
       if (binding && binding.engine !== 'dual') throw enforcementError('session-binding-is-not-dual-engine', binding, null, 'engine-binding-violation')
       if (binding && sessionPreset(session) === 'aih-muse') throw enforcementError('session-preset-does-not-match-bound-engine', binding, null, 'engine-binding-violation')
       return { ...controllerTargetFor(installRoot, binding), binding }
