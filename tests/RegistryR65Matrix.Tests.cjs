@@ -122,7 +122,10 @@ await check('R6.5 protected production trees are unmodified', () => {
   try { status = cp.execFileSync('git', ['status', '--porcelain'], { cwd: repoRoot, encoding: 'utf8', timeout: 60000 }); }
   catch (e) { console.log('SKIP: git unavailable for tree check'); return; }
   const lines = String(status || '').split('\n').filter(function (l) { return l.trim() !== ''; });
-  const reviewed = ['config/AihController.cjs', 'scripts/Engineering/StepRouting.ps1'];
+  // R75A explicitly audits installation safety: the reviewed private-path
+  // fix has its own escaping-symlink regression. Catalogs, policies, settings,
+  // data, UI and every other script remain protected by this exact allowlist.
+  const reviewed = ['config/AihController.cjs', 'scripts/Engineering/StepRouting.ps1', 'scripts/Platform.ps1'];
   const bad = lines.filter(function (l) {
     const p = l.slice(3).trim();
     if (l.slice(0, 2).trim() === '' ) return false;

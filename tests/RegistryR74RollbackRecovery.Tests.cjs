@@ -36,7 +36,7 @@ function fixtureEnv(root, flag) {
   return env;
 }
 async function childMain() {
-  const [, , , root, sid, text, flag, preset] = process.argv;
+  const [, , , root, sid, text, flag, preset, step] = process.argv;
   Object.assign(process.env, fixtureEnv(root, flag === '1'));
   if (flag !== '1') delete process.env.NEXUS_REGISTRY_BINDING;
   const workspace = path.join(root, 'workspace');
@@ -48,10 +48,27 @@ async function childMain() {
     on(event, fn) { handlers[event] = fn; }, shellEnv: { register() {} },
   });
   const session = { id: sid, header: { cwd: workspace, agentPreset: preset }, messages: [], append(k, m) { this.messages.push(m); } };
+  if (step === 'request-worker') session.header.origin = 'subagent';
+  if (step === 'request-no-header') delete session.header;
   let nextCount = 0;
-  const result = await handlers['agent/pre-step']({ agent: { session }, messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] }], step: 1, turn: 'r74-turn' }, () => { nextCount++; return 'next'; });
+  let errorCode = null;
+  let request = null;
+  let result;
+  if (step === 'request' || step === 'request-worker' || step === 'request-no-header') {
+    const requestHandlers = {}; const scoped = {};
+    const agent = { session, ctx: { on(event, fn) { scoped[event] = fn; } } };
+    require(path.join(root, 'config', preset === 'aih-muse' ? 'Muse-Isolation.cjs' : 'Engineering-Isolation.cjs')).apply({
+      on(event, fn) { requestHandlers[event] = fn; }, shellEnv: { register() {} },
+    });
+    requestHandlers['agent/pre-step']({ agent }, () => {});
+    const payload = { agent };
+    try {
+      request = await requestHandlers['agent/request'](payload, () => scoped['agent/request'](payload, () => { nextCount++; return { provider: 'seed', model: 'seed' }; }));
+      result = 'next';
+    } catch (e) { result = { kind: 'reject' }; errorCode = e.code; }
+  } else result = await handlers['agent/pre-step']({ agent: { session }, messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] }], step: Number(step || 1), turn: 'r74-turn' }, () => { nextCount++; return 'next'; });
   await new Promise((resolve) => process.stdout.write('TURN-RESULT ' + JSON.stringify({ kind: typeof result === 'string' ? result : result && result.kind, nextCount,
-    attemptsDelta: attemptRows(workspace).length - before.length,
+    errorCode, request, attemptsDelta: attemptRows(workspace).length - before.length,
     logs: readLines(logFile).slice(logStart), messages: session.messages.map((m) => m.source && m.source.form),
   }) + '\n', resolve));
 }
@@ -61,7 +78,7 @@ async function main() {
   function fixture(name, engine = 'dual') {
     const root = path.join(scratch, name);
     fs.mkdirSync(path.join(root, 'data'), { recursive: true });
-    for (const dir of ['scripts', 'config']) fs.cpSync(path.join(repo, dir), path.join(root, dir), { recursive: true });
+    for (const dir of ['scripts', 'config']) fs.cpSync(path.join(process.env.NEXUS_R75_BASELINE_ROOT || repo, dir), path.join(root, dir), { recursive: true });
     fs.mkdirSync(path.join(root, 'ui', 'nexus-controller', 'lib'), { recursive: true });
     fs.copyFileSync(path.join(repo, 'ui', 'nexus-controller', 'lib', 'gate.cjs'), path.join(root, 'ui', 'nexus-controller', 'lib', 'gate.cjs'));
     let settings = fs.readFileSync(path.join(root, 'config', 'settings.yaml'), 'utf8');
@@ -101,8 +118,8 @@ async function main() {
     writeBinding(f, b);
     return b;
   }
-  async function turn(f, flag = true, text = TURN, preset = f.preset) {
-    const r = await execFile(process.execPath, [__filename, '--turn', f.root, f.sid, text, flag ? '1' : '0', preset],
+  async function turn(f, flag = true, text = TURN, preset = f.preset, step = 1) {
+    const r = await execFile(process.execPath, [__filename, '--turn', f.root, f.sid, text, flag ? '1' : '0', preset, String(step)],
       { cwd: f.workspace, env: fixtureEnv(f.root, flag), timeout: 300000, maxBuffer: 4 * 1024 * 1024 });
     const line = r.stdout.split('\n').find((l) => l.startsWith('TURN-RESULT '));
     assert.ok(line, 'fresh controller emits its result: ' + r.stderr);
@@ -118,7 +135,7 @@ async function main() {
     assert.equal(r.kind, 'reject'); assert.equal(r.nextCount, 0); assert.equal(r.attemptsDelta, 0);
     if (code) diagnostic(r, code);
   }
-  function allowed(r, delta) { assert.equal(r.kind, 'next'); assert.equal(r.nextCount, 1); assert.equal(r.attemptsDelta, delta); }
+  function allowed(r, delta) { assert.equal(r.kind, 'next', JSON.stringify(r)); assert.equal(r.nextCount, 1); assert.equal(r.attemptsDelta, delta); }
   function stageDrift(f) {
     const svc = service(f); const state = svc.getModeConfiguration('engineering-v1', {});
     const config = JSON.parse(JSON.stringify(state.result.config));
@@ -331,6 +348,133 @@ async function main() {
       allowed(await turn(f, flag), 0); assertIdentity(f, b); assert.equal(taskCount(f), 1);
       assert.equal(bindingApi.classifyRegistryState(binding(f)).state, 'legacy'); assert.ok(!binding(f).bindingAuthority);
     }
+  });
+  check('R75A later loop steps reject persisted drift and current revocation', async () => {
+    for (const engine of ['dual', 'muse']) {
+      const f = fixture('later-step-' + engine, engine); const b = await pinned(f);
+      mutateTarget(f, 'provider');
+      blocked(await turn(f, false, TURN, f.preset, 2), 'registry-pin-mismatch');
+      assertIdentity(f, b);
+    }
+  });
+  check('R75A later loop steps consult current authorization', async () => {
+    const f = fixture('later-revoked'); const b = await pinned(f);
+    const id = bindingApi.mapEntryFor(b.registryPin, 'primaryEngineer').target.connectionId;
+    assert.equal(service(f).setBuiltInConnectionStatus(id, 'revoked', {}).ok, true);
+    blocked(await turn(f, false, TURN, f.preset, 2), 'registry-authorization-revoked');
+    assertIdentity(f, b);
+  });
+  check('R75A corrupt current entitlement is unverifiable rather than connected by default', async () => {
+    const f = fixture('corrupt-status'); const b = await pinned(f);
+    const id = bindingApi.mapEntryFor(b.registryPin, 'primaryEngineer').target.connectionId;
+    assert.equal(service(f).setBuiltInConnectionStatus(id, 'revoked', {}).ok, true);
+    fs.writeFileSync(path.join(f.root, 'data', 'registry', 'connection-status.json'), '{interrupted-status');
+    for (const flag of [false, true]) blocked(await turn(f, flag), 'registry-authorization-unverifiable');
+    assert.deepEqual(binding(f).registryPin, b.registryPin);
+  });
+  check('R75A corrupt durable bindings cannot restart as fresh flag-OFF legacy', async () => {
+    const f = fixture('corrupt-binding'); await pinned(f);
+    fs.writeFileSync(f.bindingsPath, '{interrupted-bindings');
+    blocked(await turn(f, false), 'bindings-unverifiable');
+    assert.equal(fs.readFileSync(f.bindingsPath, 'utf8'), '{interrupted-bindings');
+    assert.equal(taskCount(f), 1);
+  });
+  for (const mode of ['drift', 'revoked']) {
+    check('R75A actual request boundary rejects ' + mode + ' after pre-step', async () => {
+      for (const engine of ['dual', 'muse']) {
+        const f = fixture('request-' + mode + '-' + engine, engine); const b = await pinned(f);
+        if (mode === 'drift') mutateTarget(f, 'provider');
+        else {
+          const id = bindingApi.mapEntryFor(b.registryPin, engine === 'muse' ? 'muse_main' : 'primaryEngineer').target.connectionId;
+          assert.equal(service(f).setBuiltInConnectionStatus(id, 'revoked', {}).ok, true);
+        }
+        const r = await turn(f, false, TURN, f.preset, 'request'); blocked(r);
+        assert.equal(r.errorCode, mode === 'drift' ? 'registry-pin-mismatch' : 'registry-authorization-revoked');
+        assertIdentity(f, b); assert.deepEqual(binding(f).registryPin, b.registryPin);
+      }
+    });
+  }
+  check('R75A explicit indeterminate entitlement and disabled status fail closed', async () => {
+    const f = fixture('indeterminate-status'); const b = await pinned(f);
+    const id = bindingApi.mapEntryFor(b.registryPin, 'primaryEngineer').target.connectionId;
+    for (const status of ['unknown', 'disabled', 'not-connected']) {
+      assert.equal(service(f).setBuiltInConnectionStatus(id, status, {}).ok, true);
+      for (const flag of [false, true]) for (const step of [1, 2, 'request']) {
+        const r = await turn(f, flag, TURN, f.preset, step); blocked(r);
+        assertIdentity(f, b);
+      }
+    }
+  });
+  check('R75A malformed binding entries cannot erase Registry authority', async () => {
+    for (const engine of ['dual', 'muse']) {
+      const f = fixture('malformed-binding-' + engine, engine); const b = await pinned(f);
+      const { registryPin, ...missingPin } = b;
+      for (const invalid of [null, { ...b, registryPin: 'interrupted' }, { ...b, registryPin: null }, missingPin]) {
+        writeBinding(f, invalid);
+        blocked(await turn(f, false), 'bindings-unverifiable');
+        blocked(await turn(f, false, TURN, f.preset, 'request'));
+        assert.equal(taskCount(f), 1);
+        assert.deepEqual(readJson(f.bindingsPath).bindings[f.sid], invalid);
+      }
+    }
+  });
+  check('R75A current routing generation is verified at pre-step and actual request', async () => {
+    const f = fixture('route-generation'); const b = await pinned(f);
+    const state = readJson(statePath(f)); state.taskInstanceId = 'task_another_generation';
+    fs.writeFileSync(statePath(f), JSON.stringify(state));
+    for (const step of [1, 2, 'request']) blocked(await turn(f, false, TURN, f.preset, step));
+    assertIdentity(f, b);
+  });
+  check('R75A valid pinned requests and later steps continue without additional attempts', async () => {
+    for (const engine of ['dual', 'muse']) {
+      const f = fixture('valid-request-' + engine, engine); const b = await pinned(f);
+      for (const flag of [false, true]) for (const step of [2, 'request']) {
+        const result = await turn(f, flag, TURN, f.preset, step);
+        allowed(result, 0);
+        if (step === 'request') assert.equal(result.request.reasoningEffort, bindingApi.mapEntryFor(b.registryPin, engine === 'muse' ? 'muse_main' : 'primaryEngineer').target.reasoning);
+        assertIdentity(f, b); assert.deepEqual(binding(f).registryPin, b.registryPin);
+      }
+    }
+  });
+  check('R75A actual request fails closed when authoritative identity becomes unavailable', async () => {
+    for (const engine of ['dual', 'muse']) {
+      const f = fixture('request-identity-' + engine, engine); const b = await pinned(f);
+      fs.writeFileSync(f.ledgerPath, '{interrupted');
+      blocked(await turn(f, false, TURN, f.preset, 'request'));
+      assertIdentity(f, b);
+    }
+  });
+  check('R75A marked parent binding cannot bypass request enforcement as a worker', async () => {
+    for (const engine of ['dual', 'muse']) {
+      const f = fixture('worker-authority-' + engine, engine); await pinned(f);
+      mutateTarget(f, 'provider');
+      blocked(await turn(f, false, TURN, f.preset, 'request-worker'));
+    }
+  });
+  check('R75A request workers refuse corrupt or malformed durable authority', async () => {
+    for (const engine of ['dual', 'muse']) {
+      const f = fixture('worker-corruption-' + engine, engine); const b = await pinned(f);
+      for (const invalid of [null, { ...b, registryPin: null, bindingAuthority: undefined }]) {
+        writeBinding(f, invalid);
+        blocked(await turn(f, false, TURN, f.preset, 'request-worker'));
+      }
+      fs.writeFileSync(f.bindingsPath, '{interrupted');
+      blocked(await turn(f, false, TURN, f.preset, 'request-worker'));
+    }
+  });
+  check('R75A marked request cannot bypass enforcement by omitting its header', async () => {
+    for (const engine of ['dual', 'muse']) {
+      const f = fixture('header-corruption-' + engine, engine); await pinned(f);
+      blocked(await turn(f, false, TURN, f.preset, 'request-no-header'));
+      fs.writeFileSync(f.bindingsPath, '{interrupted');
+      blocked(await turn(f, false, TURN, f.preset, 'request-no-header'));
+    }
+  });
+  check('R75A invalid status-overlay collection cannot restore legacy entitlement', async () => {
+    const f = fixture('overlay-array'); await pinned(f);
+    fs.mkdirSync(path.join(f.root, 'data/registry'), { recursive: true });
+    fs.writeFileSync(path.join(f.root, 'data/registry/connection-status.json'), JSON.stringify({ schemaVersion: 1, statuses: [] }));
+    blocked(await turn(f, false));
   });
   const selected = tests.filter((t) => !process.env.NEXUS_R74_FILTER || t.label.includes(process.env.NEXUS_R74_FILTER));
   assert.ok(selected.length, 'R7.4 filter selects at least one scenario');

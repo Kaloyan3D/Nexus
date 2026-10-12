@@ -375,3 +375,63 @@ blocked as documented above and are outside R7.4. Full native/application
 release gates and real power-loss/storage-failure injection were not performed.
 This milestone's isolated integration assessment does not qualify the whole
 product for release. No push or merge is authorized by this task.
+
+## R7.5A independent audit — 2026-10-12
+
+The [R7.5A release audit](registry-r75a-release-audit.md) records newly executed
+checks against `abb1d13` plus scoped working-tree fixes. Its decision is
+**BLOCKED — FIXES REQUIRED**. Historical R7.4 results above remain historical;
+they are not retroactively reclassified as R7.5A evidence.
+
+The independent rollback/recovery rerun passes **34/34**, including the original
+21 scenarios and 13 additional request/continuation/corruption cases. Existing
+R6.2–R7.0/step-pin suites pass **73/73**; R0–R5 pass **261/261**. Packaging checks
+pass **26/26**, actual installed controller/Muse checks **10/10**, and the new
+four-profile/shared installation-upgrade fixture **7/7**. A private-path
+symlink regression passes **3/3**. Host assertions and identity groups were also
+rerun; the dedicated audit contains exact commands and logs.
+
+New defects included later-step and actual-request bypasses, corrupt authority
+state, generation validation, mutable Muse effort after pin verification,
+request-time identity loss, marked-parent worker exemption and Linux private
+permission traversal through symlinks. Scoped fixes retain default OFF, equality
+binding, immutable targets, legacy compatibility and blocked non-goals.
+
+The unchanged pinned dependency tree still fails npm audit with 14 advisories
+(including one critical), and installed PlatformSupport fails an unchanged
+whole-line path heuristic despite passing AST portability checks. These are
+documented separately from Registry regressions. They need resolution/review
+before acceptance; no acceptance commit, push, merge, live-host change or paid
+inference is authorized or performed. Native Windows and live provider/server
+validation remain unavailable here. R7.5B prerequisites are in the audit.
+
+## R7.5A.1 security and platform closure — 2026-10-12
+
+**READY FOR R7.5B LIVE VALIDATION**, limited to the required actionable offline
+gates. This supersedes the historical R7.5A blockers above. The
+[updated audit](registry-r75a-release-audit.md) contains accepted commands,
+counts, artifact hashes, the complete 18-file inventory and residual risks;
+the [dependency matrix](registry-r75a1-dependency-security.md) covers all 22
+underlying advisories across the original 14 vulnerable package entries.
+
+Nine targeted overrides preserve direct runtime pins and vendored DSH bytes.
+A fresh disposable npm ci passes; production and full-tree audits both report
+zero vulnerabilities. Eleven native/MCP/provider compatibility checks pass.
+The AST-based PlatformSupport correction retains genuine path checks and passes
+163/163, including fourteen heuristic regressions. Final source and installed
+AST portability checks each pass 25/25.
+
+R0–R5 pass 261/261; R6.2–R7.0 and step-pin checks pass 73/73. Final recovery and
+security tests pass 36/36, including new malformed-binding/missing-header
+refusals in both isolation planes. Four-profile/shared installation and actual
+upgrade preservation pass 7/7; private-path protection passes 3/3. Controller,
+request isolation, packaging, Muse/provider and syntax checks pass with exact
+counts in the audit. Interrupted attempts are recorded and replaced by completed
+acceptance runs, never counted as passing.
+
+Native Windows/PowerShell 5.1, live host/provider validation, interactive native
+operations, the full live-required harness and power-loss/concurrent-writer
+injection remain UNVERIFIED. The R7.5B operator must run those applicable native
+and live gates before release. Default OFF and existing routing constraints are
+retained. No production installation/state change, paid inference, push or merge
+was performed. Acceptance commits are local only.

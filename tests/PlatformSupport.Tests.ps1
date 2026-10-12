@@ -530,12 +530,61 @@ Assert-Aih (-not $setupUpgrade.Contains("Join-Path " + [char]36 + "launcherRoot 
 $testDir=Join-Path $InstallRoot 'tests'
 $bareSpawns=@(Get-ChildItem -LiteralPath $testDir -Filter '*.Tests.ps1' | ForEach-Object { [IO.File]::ReadAllText($_.FullName) } | Where-Object { $_ -match '&\s*powershell\.exe' -or $_ -match 'Start-Process\s+powershell\.exe' })
 Assert-Aih (@($bareSpawns).Count-eq0) 'no suite spawns a bare powershell.exe child (Get-AihPowerShellHost everywhere)'
+function Get-BackslashJoinCount([string]$Source) {
+  # Inspect path expressions of real Join-Path commands. Neighboring
+  # regexes, comments and strings containing example commands are not paths.
+  $tokens=$null; $parseErrors=$null
+  $ast=[System.Management.Automation.Language.Parser]::ParseInput($Source,[ref]$tokens,[ref]$parseErrors)
+  if (@($parseErrors).Count -gt 0) { throw 'Path scan requires valid PowerShell source' }
+  $count=0
+  foreach ($command in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] },$true)) {
+    if (([string]$command.GetCommandName()).Split([char]92)[-1] -ne 'Join-Path') { continue }
+    $found=$false
+    foreach ($argument in $command.CommandElements | Select-Object -Skip 1) {
+      foreach ($literal in $argument.FindAll({ param($node)
+          $node -is [System.Management.Automation.Language.StringConstantExpressionAst] -or
+          $node -is [System.Management.Automation.Language.ExpandableStringExpressionAst]
+        },$true)) {
+        if (-not $literal.Value.Contains([string][char]92)) { continue }
+        # Regex operands do not become path text. For -replace's two-element
+        # RHS, only the first element is the pattern; replacement text counts.
+        $patternLiteral=$false
+        for ($parent=$literal.Parent; $null -ne $parent -and $parent -ne $command; $parent=$parent.Parent) {
+          if ($parent -is [System.Management.Automation.Language.BinaryExpressionAst] -and
+              @('Ireplace','Creplace') -contains $parent.Operator.ToString()) {
+            $pattern=$parent.Right
+            if ($pattern -is [System.Management.Automation.Language.ArrayLiteralAst]) { $pattern=$pattern.Elements[0] }
+            if ($literal.Extent.StartOffset -ge $pattern.Extent.StartOffset -and
+                $literal.Extent.EndOffset -le $pattern.Extent.EndOffset) { $patternLiteral=$true }
+          }
+        }
+        if (-not $patternLiteral) { $found=$true; break }
+      }
+      if ($found) { break }
+    }
+    if ($found) { $count++ }
+  }
+
+  return $count
+}
+$slash=[string][char]92
+Assert-Aih ((Get-BackslashJoinCount "Join-Path `$root 'config${slash}settings.yaml'") -eq 1) 'path scan detects a positional backslash child'
+Assert-Aih ((Get-BackslashJoinCount "Join-Path -Path `$root -ChildPath 'config${slash}settings.yaml'") -eq 1) 'path scan detects a named backslash child'
+Assert-Aih ((Get-BackslashJoinCount ('Join-Path $root "config' + $slash + 'settings.yaml"')) -eq 1) 'path scan detects a double-quoted backslash child'
+Assert-Aih ((Get-BackslashJoinCount ('Join-Path $root "config' + $slash + '$name"')) -eq 1) 'path scan detects an interpolated backslash child'
+Assert-Aih ((Get-BackslashJoinCount "(Join-Path `$root 'config/settings.yaml') -replace '[^${slash}r${slash}n]+','ok'") -eq 0) 'path scan ignores a neighboring regex'
+Assert-Aih ((Get-BackslashJoinCount "# Join-Path `$root 'config${slash}settings.yaml'") -eq 0) 'path scan ignores comments'
+Assert-Aih ((Get-BackslashJoinCount "Join-Path `$root 'config/settings.yaml'") -eq 0) 'path scan accepts a portable child'
+Assert-Aih ((Get-BackslashJoinCount "Join-Path `$root ('config${slash}settings.yaml')") -eq 1) 'path scan detects a parenthesized backslash child'
+Assert-Aih ((Get-BackslashJoinCount "Join-Path `$root ('config${slash}' + `$name)") -eq 1) 'path scan detects a concatenated backslash child'
+Assert-Aih ((Get-BackslashJoinCount "Join-Path `$root ('config/settings.yaml' -replace '[^${slash}r${slash}n]+','ok')") -eq 0) 'path scan ignores a regex inside path computation'
+Assert-Aih ((Get-BackslashJoinCount "Microsoft.PowerShell.Management${slash}Join-Path `$root 'config${slash}settings.yaml'") -eq 1) 'path scan detects module-qualified path commands'
+Assert-Aih ((Get-BackslashJoinCount "Join-Path `$root ('config/settings.yaml' -replace 'config/', 'config${slash}')") -eq 1) 'path scan detects backslashes introduced by replacement text'
+Assert-Aih ((Get-BackslashJoinCount "Join-Path `n `$root `n 'config${slash}settings.yaml'") -eq 0) 'path scan respects command boundaries'
+Assert-Aih ((Get-BackslashJoinCount ("Join-Path ``" + [char]10 + " `$root ``" + [char]10 + " 'config${slash}settings.yaml'")) -eq 1) 'path scan detects a continued command'
 $backslashJoins=0
 Get-ChildItem -LiteralPath $testDir -Filter '*.Tests.ps1' | ForEach-Object {
-  foreach ($line in [IO.File]::ReadAllLines($_.FullName)) {
-    $quotedBs = [string][char]39 + '[^' + [char]39 + ']*' + [char]92 + [char]92 + '[^' + [char]39 + ']*' + [char]39
-    if ($line-match'Join-Path'-and$line-match$quotedBs) { $backslashJoins++ }
-  }
+  $backslashJoins += Get-BackslashJoinCount ([IO.File]::ReadAllText($_.FullName))
 }
 Assert-Aih ($backslashJoins-eq0) "no Join-Path with backslash-only subpaths remains ($backslashJoins found)"
 $platformSupportSelf=[IO.File]::ReadAllText((Join-Path $InstallRoot 'scripts/Platform.ps1'))
