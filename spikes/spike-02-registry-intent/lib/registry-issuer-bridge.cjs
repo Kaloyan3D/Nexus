@@ -83,12 +83,16 @@ function issueForIntent(intent, modeConfig, snapshot, options) {
       modeConfigRevision,
     },
   };
-  const sealed = resolver.deepFreeze(issued);
+  // Finding 2: issuance identity covers the complete immutable issuance content
+  // (task binding included); targetDigest stays the model-target identity only.
+  const issuanceId = trust.issuanceIdentityOf(issued);
+  const identified = { ...issued, provenance: { ...issued.provenance, issuanceId } };
+  const sealed = resolver.deepFreeze(identified);
   if (options && options.kernelRoot) {
     const record = trust.sealIssuance(options.kernelRoot, JSON.parse(JSON.stringify(sealed)));
     return { ok: true, issued: sealed, issuanceId: record.issuanceId };
   }
-  return { ok: true, issued: sealed };
+  return { ok: true, issued: sealed, issuanceId };
 }
 
 module.exports = {

@@ -96,14 +96,30 @@ function acquireGeneration(kernelRoot, { taskInstanceId, backend }, options) {
     const identity = ensureIdentity(kernelRoot);
     const leases = loadLeases(kernelRoot);
     const key = generationKey(taskInstanceId, backend);
-    let nextEpoch = ((leases[key] && leases[key].epoch) || 0) + 1;
+    const entry = leases[key];
+    // Finding 3: a witness-protected generation stays protected. Omitting the
+    // witness is a downgrade attempt; a lost witness needs explicit recovery.
+    if (entry && entry.witnessProtected && !witnessRoot) {
+      fail('witness-required', 'generation is witness-protected; witnessRoot must not be omitted');
+    }
+    let witness = null;
     if (witnessRoot) {
-      const witness = trust.readWitness(witnessRoot, key);
-      if (witness && typeof witness.maxEpoch === 'number' && witness.maxEpoch >= nextEpoch) {
-        nextEpoch = witness.maxEpoch + 1;
+      // Fail-closed on corrupt witness; null only when never initialized.
+      witness = trust.readWitness(witnessRoot, key);
+      if (!witness && entry && entry.witnessProtected) {
+        fail('reconciliation-required', 'witness record lost after protection was established');
       }
     }
-    leases[key] = { epoch: nextEpoch, storeIncarnation: identity.storeIncarnation, acquiredAtUtc: new Date().toISOString() };
+    let nextEpoch = ((entry && entry.epoch) || 0) + 1;
+    if (witness && typeof witness.maxEpoch === 'number' && witness.maxEpoch >= nextEpoch) {
+      nextEpoch = witness.maxEpoch + 1;
+    }
+    leases[key] = {
+      epoch: nextEpoch,
+      storeIncarnation: identity.storeIncarnation,
+      acquiredAtUtc: new Date().toISOString(),
+      ...(witnessRoot ? { witnessProtected: true } : {}),
+    };
     atomicWriteJson(leasesPath(kernelRoot), { schemaVersion: 1, leases });
     if (witnessRoot) trust.noteEpoch(witnessRoot, key, nextEpoch, identity.storeIncarnation);
     return { leaseEpoch: nextEpoch, storeIncarnation: identity.storeIncarnation };
@@ -127,12 +143,20 @@ function fail(code, message) {
   throw error;
 }
 
-// crashPoint (test-only): 'before-commit' | 'during-commit' | 'after-commit-before-ack'
-// witnessRoot (optional): enables rollback detection (F-02).
+// crashPoint (test-only): 'before-commit' | 'during-commit' |
+//   'after-receipt-before-witness' | 'after-commit-before-ack'
+// witnessRoot (optional): enables rollback detection (F-02/G).
 function deliverCommand(kernelRoot, { intent, issued }, options) {
   const opts = options || {};
   if (!intent || !issued) fail('delivery-invalid', 'intent and issued resolution are required');
   return flock.withLock(kernelRoot, 'kernel-inbox', () => {
+    // Finding 3: omitting the witness for a protected generation is a downgrade.
+    if (!opts.witnessRoot && intent && intent.taskInstanceId && intent.backend) {
+      const entry = (loadLeases(kernelRoot) || {})[generationKey(intent.taskInstanceId, intent.backend)];
+      if (entry && entry.witnessProtected) {
+        fail('witness-required', 'generation is witness-protected; witnessRoot must not be omitted');
+      }
+    }
     // F-01: only sealed issuances are honored. String/provenance/digests alone grant nothing.
     if (!trust.verifySealed(kernelRoot, issued)) fail('forged-issuer', 'no verified sealed issuance for this target');
     const target = issued.target || {};
@@ -167,11 +191,17 @@ function deliverCommand(kernelRoot, { intent, issued }, options) {
     if (!current || lease.epoch !== current.epoch || lease.storeIncarnation !== current.storeIncarnation || current.storeIncarnation !== identity.storeIncarnation) {
       fail('stale-lease', 'stale or superseded lease epoch');
     }
-    // F-02: rollback witness (separate failure domain). Witness max above the
-    // presented epoch, or a foreign incarnation, means the DB was restored.
+    // F-02/G: rollback witness (separate failure domain). Fail-closed on corrupt
+    // witness; a lost witness for a protected generation needs explicit recovery.
+    let witness = null;
     if (opts.witnessRoot) {
-      const witness = trust.readWitness(opts.witnessRoot, generationKey(intent.taskInstanceId, intent.backend));
-      if (witness) {
+      witness = trust.readWitness(opts.witnessRoot, generationKey(intent.taskInstanceId, intent.backend));
+      if (!witness) {
+        const entry = (loadLeases(kernelRoot) || {})[generationKey(intent.taskInstanceId, intent.backend)];
+        if (entry && entry.witnessProtected) {
+          fail('reconciliation-required', 'witness record lost after protection was established');
+        }
+      } else {
         if (typeof witness.maxEpoch === 'number' && witness.maxEpoch > lease.epoch) {
           fail('rollback-detected', 'witness max epoch exceeds presented lease: kernel DB was restored');
         }
@@ -208,9 +238,24 @@ function deliverCommand(kernelRoot, { intent, issued }, options) {
     if (existing) {
       // F-05: commandId reuse with ANY differing immutable authorization field fails closed.
       if (existing.commandDigest === commandDigest && existing.attemptId === candidate.attemptId) {
+        // Idempotent replay also heals witness progress (receipt-then-witness crash order).
+        if (opts.witnessRoot) {
+          trust.noteEpoch(opts.witnessRoot, generationKey(intent.taskInstanceId, intent.backend), lease.epoch, lease.storeIncarnation, {
+            commandId: intent.commandId, commandDigest, leaseEpoch: lease.epoch,
+          });
+        }
         return { receipt: existing, created: false };
       }
       fail('command-conflict', 'conflicting command payload under existing commandId');
+    }
+    // Finding 1: the witness remembers acceptances the restored DB lost. A replay
+    // of a previously accepted command is NEVER silently re-accepted — reconcile.
+    if (witness && witness.accepted && witness.accepted[intent.commandId]) {
+      const prior = witness.accepted[intent.commandId];
+      if (prior && prior.commandDigest === commandDigest) {
+        fail('reconciliation-required', 'command was previously accepted and its receipt was lost; reconcile instead of re-accepting');
+      }
+      fail('command-conflict', 'commandId was previously accepted with different content');
     }
     if (opts.crashPoint === 'during-commit') {
       const orphan = receiptPath(kernelRoot, intent.commandId) + '.' + crypto.randomUUID() + '.tmp';
@@ -227,11 +272,55 @@ function deliverCommand(kernelRoot, { intent, issued }, options) {
       }
       fail('command-conflict', 'conflicting command payload under existing commandId');
     }
+    // Finding 1 crash window (test hook): receipt durable, witness not yet noted.
+    if (opts.crashPoint === 'after-receipt-before-witness') fail('injected-crash', 'injected crash after receipt publish before witness note');
+    // Receipt-then-witness order: a crash between them heals on idempotent replay.
     if (opts.witnessRoot) {
-      trust.noteEpoch(opts.witnessRoot, generationKey(intent.taskInstanceId, intent.backend), lease.epoch, lease.storeIncarnation);
+      trust.noteEpoch(opts.witnessRoot, generationKey(intent.taskInstanceId, intent.backend), lease.epoch, lease.storeIncarnation, {
+        commandId: intent.commandId, commandDigest, leaseEpoch: lease.epoch,
+      });
     }
     if (opts.crashPoint === 'after-commit-before-ack') fail('injected-crash', 'injected crash after inbox commit (ACK lost)');
     return { receipt: readReceipt(kernelRoot, intent.commandId), created: true };
+  });
+}
+
+// Finding 3 explicit recovery: fence the generation above every known max and
+// start a fresh witness baseline recording the operator attestation. Old leases
+// can never deliver again, so forgotten acceptances cannot recur. The caller
+// MUST supply attestedMaxEpoch (highest epoch the operator believes was issued)
+// plus a non-empty operatorAttestation; both are recorded for audit. Safe
+// because the epoch only moves forward past all previously valid leases.
+function fenceForRecovery(kernelRoot, witnessRoot, { taskInstanceId, backend, attestedMaxEpoch, operatorAttestation }) {
+  if (!witnessRoot) fail('recovery-invalid', 'fenced recovery requires a witnessRoot');
+  if (!taskInstanceId || typeof taskInstanceId !== 'string') fail('recovery-invalid', 'taskInstanceId is required');
+  if (backend !== 'native') fail('recovery-invalid', 'only backend=native participates in this spike');
+  if (!Number.isInteger(attestedMaxEpoch) || attestedMaxEpoch < 0) fail('recovery-invalid', 'attestedMaxEpoch must be a non-negative integer');
+  if (typeof operatorAttestation !== 'string' || operatorAttestation === '') fail('recovery-invalid', 'operatorAttestation is required');
+  return flock.withLock(kernelRoot, 'kernel-leases', () => {
+    const identity = ensureIdentity(kernelRoot);
+    const leases = loadLeases(kernelRoot);
+    const key = generationKey(taskInstanceId, backend);
+    const entry = leases[key];
+    let witnessMax = -1;
+    try {
+      const witness = trust.readWitness(witnessRoot, key);
+      if (witness && typeof witness.maxEpoch === 'number') witnessMax = witness.maxEpoch;
+    } catch (error) {
+      if (!error || error.code !== 'reconciliation-required') throw error;
+      // Missing/corrupt witness is exactly why recovery was invoked; proceed
+      // with kernel state + operator attestation as the fencing basis.
+    }
+    const nextEpoch = Math.max((entry && entry.epoch) || 0, witnessMax, attestedMaxEpoch) + 1;
+    leases[key] = { epoch: nextEpoch, storeIncarnation: identity.storeIncarnation, acquiredAtUtc: new Date().toISOString(), witnessProtected: true };
+    atomicWriteJson(leasesPath(kernelRoot), { schemaVersion: 1, leases });
+    trust.writeRecoveryBaseline(witnessRoot, key, {
+      maxEpoch: nextEpoch,
+      storeIncarnation: identity.storeIncarnation,
+      attestedMaxEpoch,
+      operatorAttestation,
+    });
+    return { leaseEpoch: nextEpoch, storeIncarnation: identity.storeIncarnation };
   });
 }
 
@@ -245,6 +334,7 @@ module.exports = {
   acquireGeneration,
   currentLease,
   deliverCommand,
+  fenceForRecovery,
   readReceipt,
   countReceipts,
   ensureIdentity,

@@ -339,7 +339,8 @@ await check('F-01: unsealed bridge issuance (no kernelRoot seal step) is rejecte
   const q = store.attachLease(dataRoot, commandId, { epoch: lease.leaseEpoch, storeIncarnation: lease.storeIncarnation });
   const unsealed = bridge.issueForIntent({ taskInstanceId, role: 'muse_main' }, modeConfig, snapshot, {});
   assert.equal(unsealed.ok, true);
-  assert.equal(unsealed.issuanceId, undefined);
+  // issuanceId is only an identifier; authority comes from the sealed record, which was never written.
+  assert.equal(typeof unsealed.issuanceId, 'string');
   throwsCode(() => kernel.deliverCommand(kernelRoot, { intent: q.intent, issued: unsealed.issued }, {}), 'forged-issuer');
   fs.rmSync(dataRoot, { recursive: true, force: true });
   fs.rmSync(kernelRoot, { recursive: true, force: true });
@@ -719,6 +720,264 @@ await check('unresolvable endpoint yields target-incomplete, never a fake bindin
   const issue = bridge.issueForIntent({ taskInstanceId: 'spike02-t', role: 'muse_main' }, bad, snapshot, {});
   assert.equal(issue.ok, false);
   assert.ok(issue.errors.length > 0);
+});
+
+// ── G. Final hardening: same-lease rollback, issuance identity, witness loss ──
+await check('G-01 Finding 1: same-lease rollback losing an accepted receipt fails closed (reconciliation-required)', () => {
+  const dataRoot = tmpRoot('spike02-g01-c-');
+  const kernelRoot = tmpRoot('spike02-g01-k-');
+  const witnessRoot = tmpRoot('spike02-g01-w-');
+  const snapshot = issuerSnapshot();
+  const modeConfig = museModeConfig(snapshot);
+  const taskInstanceId = 'spike02-g01-task-' + (++seq);
+  store.commitIntent(dataRoot, {
+    taskInstanceId, attemptId: 'a1', commandId: 'cmd1', backend: 'native', controllerRevision: 1,
+    role: 'muse_main', modeId: 'engineering-v2', modeConfigRevision: modeConfig.revision,
+    intentPayload: { op: 'irreversible-effect' }, lease: null,
+  });
+  const lease = kernel.acquireGeneration(kernelRoot, { taskInstanceId, backend: 'native' }, { witnessRoot });
+  const q = store.attachLease(dataRoot, 'cmd1', { epoch: lease.leaseEpoch, storeIncarnation: lease.storeIncarnation });
+  const issue = bridge.issueForIntent({ taskInstanceId, role: 'muse_main' }, modeConfig, snapshot, { kernelRoot });
+  assert.equal(issue.ok, true);
+  // Back up AFTER sealing (sealed record + key present) but BEFORE delivery.
+  const backup = tmpRoot('spike02-g01-bak-');
+  cp.execFileSync('cp', ['-a', kernelRoot + '/.', backup + '/']);
+  const first = kernel.deliverCommand(kernelRoot, { intent: q.intent, issued: issue.issued }, { witnessRoot });
+  assert.equal(first.created, true);
+  // Restore pre-acceptance kernel state (wipe + copy = true restore; plain cp
+  // would leave post-backup files behind); witness stays intact. Same epoch, same lease.
+  fs.rmSync(kernelRoot, { recursive: true, force: true });
+  fs.mkdirSync(kernelRoot, { recursive: true });
+  cp.execFileSync('cp', ['-a', backup + '/.', kernelRoot + '/']);
+  // The lost receipt must NOT be silently re-accepted: prior acceptance may have executed.
+  throwsCode(() => kernel.deliverCommand(kernelRoot, { intent: q.intent, issued: issue.issued }, { witnessRoot }), 'reconciliation-required');
+  assert.equal(kernel.countReceipts(kernelRoot), 0);
+  fs.rmSync(dataRoot, { recursive: true, force: true });
+  fs.rmSync(kernelRoot, { recursive: true, force: true });
+  fs.rmSync(witnessRoot, { recursive: true, force: true });
+  fs.rmSync(backup, { recursive: true, force: true });
+});
+
+await check('G-02 Finding 1 crash window: receipt-without-witness heals on idempotent replay, never duplicates', () => {
+  const dataRoot = tmpRoot('spike02-g02-c-');
+  const kernelRoot = tmpRoot('spike02-g02-k-');
+  const witnessRoot = tmpRoot('spike02-g02-w-');
+  const snapshot = issuerSnapshot();
+  const modeConfig = museModeConfig(snapshot);
+  const taskInstanceId = 'spike02-g02-task-' + (++seq);
+  store.commitIntent(dataRoot, {
+    taskInstanceId, attemptId: 'a1', commandId: 'cmd1', backend: 'native', controllerRevision: 1,
+    role: 'muse_main', modeId: 'engineering-v2', modeConfigRevision: modeConfig.revision,
+    intentPayload: { op: 'x' }, lease: null,
+  });
+  const lease = kernel.acquireGeneration(kernelRoot, { taskInstanceId, backend: 'native' }, { witnessRoot });
+  const q = store.attachLease(dataRoot, 'cmd1', { epoch: lease.leaseEpoch, storeIncarnation: lease.storeIncarnation });
+  const issue = bridge.issueForIntent({ taskInstanceId, role: 'muse_main' }, modeConfig, snapshot, { kernelRoot });
+  assert.equal(issue.ok, true);
+  // Crash AFTER receipt publish but BEFORE witness note: receipt durable, witness stale.
+  throwsCode(() => kernel.deliverCommand(kernelRoot, { intent: q.intent, issued: issue.issued }, { witnessRoot, crashPoint: 'after-receipt-before-witness' }), 'injected-crash');
+  assert.ok(kernel.readReceipt(kernelRoot, 'cmd1'));
+  // Replay must be idempotent (receipt exists) AND heal the witness entry.
+  const replay = kernel.deliverCommand(kernelRoot, { intent: q.intent, issued: issue.issued }, { witnessRoot });
+  assert.equal(replay.created, false);
+  assert.equal(kernel.countReceipts(kernelRoot), 1);
+  const replay2 = kernel.deliverCommand(kernelRoot, { intent: q.intent, issued: issue.issued }, { witnessRoot });
+  assert.equal(replay2.created, false);
+  fs.rmSync(dataRoot, { recursive: true, force: true });
+  fs.rmSync(kernelRoot, { recursive: true, force: true });
+  fs.rmSync(witnessRoot, { recursive: true, force: true });
+});
+
+await check('G-03 Finding 2: two tasks sharing the same model target are both accepted', () => {
+  const dataRoot = tmpRoot('spike02-g03-c-');
+  const kernelRoot = tmpRoot('spike02-g03-k-');
+  const snapshot = issuerSnapshot();
+  const modeConfig = museModeConfig(snapshot);
+  const acceptTask = (n) => {
+    const taskInstanceId = 'spike02-g03-task-' + (++seq) + '-' + n;
+    const commandId = 'spike02-g03-cmd-' + seq;
+    store.commitIntent(dataRoot, {
+      taskInstanceId, attemptId: 'a' + n, commandId, backend: 'native', controllerRevision: 1,
+      role: 'muse_main', modeId: 'engineering-v2', modeConfigRevision: modeConfig.revision,
+      intentPayload: { op: 'shared-target-task-' + n }, lease: null,
+    });
+    const lease = kernel.acquireGeneration(kernelRoot, { taskInstanceId, backend: 'native' });
+    const q = store.attachLease(dataRoot, commandId, { epoch: lease.leaseEpoch, storeIncarnation: lease.storeIncarnation });
+    const issue = bridge.issueForIntent({ taskInstanceId, role: 'muse_main' }, modeConfig, snapshot, { kernelRoot });
+    assert.equal(issue.ok, true);
+    const delivery = kernel.deliverCommand(kernelRoot, { intent: q.intent, issued: issue.issued }, {});
+    assert.equal(delivery.created, true);
+    return issue;
+  };
+  const first = acceptTask('A');
+  const second = acceptTask('B');
+  // Same model target, but distinct issuance identities (task binding differs).
+  assert.equal(second.issued.provenance.targetDigest, first.issued.provenance.targetDigest);
+  assert.notEqual(second.issuanceId, first.issuanceId);
+  assert.equal(kernel.countReceipts(kernelRoot), 2);
+  fs.rmSync(dataRoot, { recursive: true, force: true });
+  fs.rmSync(kernelRoot, { recursive: true, force: true });
+});
+
+await check('G-04 Finding 2: same task and target under two snapshots seal twice, no conflict', () => {
+  const dataRoot = tmpRoot('spike02-g04-c-');
+  const kernelRoot = tmpRoot('spike02-g04-k-');
+  const snapshot = issuerSnapshot();
+  const modeConfig = museModeConfig(snapshot);
+  const mutated = JSON.parse(JSON.stringify(snapshot));
+  mutated.providers[0].baseUrl = 'https://synthetic-second.example.invalid/v1';
+  const taskInstanceId = 'spike02-g04-task-' + (++seq);
+  const first = bridge.issueForIntent({ taskInstanceId, role: 'muse_main' }, modeConfig, snapshot, { kernelRoot });
+  const second = bridge.issueForIntent({ taskInstanceId, role: 'muse_main' }, modeConfig, mutated, { kernelRoot });
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  assert.equal(second.issued.provenance.targetDigest, first.issued.provenance.targetDigest);
+  assert.notEqual(second.issued.provenance.registrySnapshotDigest, first.issued.provenance.registrySnapshotDigest);
+  assert.notEqual(second.issuanceId, first.issuanceId);
+  // Cross-task issuance replay is still rejected (generation binding holds).
+  store.commitIntent(dataRoot, {
+    taskInstanceId, attemptId: 'a1', commandId: 'cmd1', backend: 'native', controllerRevision: 1,
+    role: 'muse_main', modeId: 'engineering-v2', modeConfigRevision: modeConfig.revision,
+    intentPayload: { op: 'x' }, lease: null,
+  });
+  const lease = kernel.acquireGeneration(kernelRoot, { taskInstanceId, backend: 'native' });
+  const q = store.attachLease(dataRoot, 'cmd1', { epoch: lease.leaseEpoch, storeIncarnation: lease.storeIncarnation });
+  const otherTask = bridge.issueForIntent({ taskInstanceId: 'spike02-g04-other', role: 'muse_main' }, modeConfig, snapshot, { kernelRoot });
+  assert.equal(otherTask.ok, true);
+  throwsCode(() => kernel.deliverCommand(kernelRoot, { intent: q.intent, issued: otherTask.issued }, {}), 'generation-mismatch');
+  fs.rmSync(dataRoot, { recursive: true, force: true });
+  fs.rmSync(kernelRoot, { recursive: true, force: true });
+});
+
+await check('G-05 Finding 3: witness deletion after protection fails closed', () => {
+  const dataRoot = tmpRoot('spike02-g05-c-');
+  const kernelRoot = tmpRoot('spike02-g05-k-');
+  const witnessRoot = tmpRoot('spike02-g05-w-');
+  const snapshot = issuerSnapshot();
+  const modeConfig = museModeConfig(snapshot);
+  const taskInstanceId = 'spike02-g05-task-' + (++seq);
+  store.commitIntent(dataRoot, {
+    taskInstanceId, attemptId: 'a1', commandId: 'cmd1', backend: 'native', controllerRevision: 1,
+    role: 'muse_main', modeId: 'engineering-v2', modeConfigRevision: modeConfig.revision,
+    intentPayload: { op: 'x' }, lease: null,
+  });
+  const lease = kernel.acquireGeneration(kernelRoot, { taskInstanceId, backend: 'native' }, { witnessRoot });
+  const q = store.attachLease(dataRoot, 'cmd1', { epoch: lease.leaseEpoch, storeIncarnation: lease.storeIncarnation });
+  const issue = bridge.issueForIntent({ taskInstanceId, role: 'muse_main' }, modeConfig, snapshot, { kernelRoot });
+  assert.equal(issue.ok, true);
+  // Attacker/operator deletes the witness after protection was established.
+  fs.rmSync(witnessRoot, { recursive: true, force: true });
+  fs.mkdirSync(witnessRoot, { recursive: true });
+  throwsCode(() => kernel.deliverCommand(kernelRoot, { intent: q.intent, issued: issue.issued }, { witnessRoot }), 'reconciliation-required');
+  assert.equal(kernel.countReceipts(kernelRoot), 0);
+  fs.rmSync(dataRoot, { recursive: true, force: true });
+  fs.rmSync(kernelRoot, { recursive: true, force: true });
+  fs.rmSync(witnessRoot, { recursive: true, force: true });
+});
+
+await check('G-06 Finding 3: corrupted witness fails closed (never SyntaxError, never skipped)', () => {
+  const dataRoot = tmpRoot('spike02-g06-c-');
+  const kernelRoot = tmpRoot('spike02-g06-k-');
+  const witnessRoot = tmpRoot('spike02-g06-w-');
+  const snapshot = issuerSnapshot();
+  const modeConfig = museModeConfig(snapshot);
+  const taskInstanceId = 'spike02-g06-task-' + (++seq);
+  store.commitIntent(dataRoot, {
+    taskInstanceId, attemptId: 'a1', commandId: 'cmd1', backend: 'native', controllerRevision: 1,
+    role: 'muse_main', modeId: 'engineering-v2', modeConfigRevision: modeConfig.revision,
+    intentPayload: { op: 'x' }, lease: null,
+  });
+  const lease = kernel.acquireGeneration(kernelRoot, { taskInstanceId, backend: 'native' }, { witnessRoot });
+  const q = store.attachLease(dataRoot, 'cmd1', { epoch: lease.leaseEpoch, storeIncarnation: lease.storeIncarnation });
+  const issue = bridge.issueForIntent({ taskInstanceId, role: 'muse_main' }, modeConfig, snapshot, { kernelRoot });
+  assert.equal(issue.ok, true);
+  // Corrupt the witness record bytes for this generation.
+  const files = fs.readdirSync(witnessRoot).filter((n) => n.endsWith('.witness.json'));
+  assert.ok(files.length > 0);
+  fs.writeFileSync(path.join(witnessRoot, files[0]), '{corrupt,,json');
+  throwsCode(() => kernel.deliverCommand(kernelRoot, { intent: q.intent, issued: issue.issued }, { witnessRoot }), 'reconciliation-required');
+  assert.equal(kernel.countReceipts(kernelRoot), 0);
+  fs.rmSync(dataRoot, { recursive: true, force: true });
+  fs.rmSync(kernelRoot, { recursive: true, force: true });
+  fs.rmSync(witnessRoot, { recursive: true, force: true });
+});
+
+await check('G-07 Finding 3: omitting witnessRoot after protection is a downgrade and fails closed', () => {
+  const dataRoot = tmpRoot('spike02-g07-c-');
+  const kernelRoot = tmpRoot('spike02-g07-k-');
+  const witnessRoot = tmpRoot('spike02-g07-w-');
+  const snapshot = issuerSnapshot();
+  const modeConfig = museModeConfig(snapshot);
+  const taskInstanceId = 'spike02-g07-task-' + (++seq);
+  store.commitIntent(dataRoot, {
+    taskInstanceId, attemptId: 'a1', commandId: 'cmd1', backend: 'native', controllerRevision: 1,
+    role: 'muse_main', modeId: 'engineering-v2', modeConfigRevision: modeConfig.revision,
+    intentPayload: { op: 'x' }, lease: null,
+  });
+  const lease = kernel.acquireGeneration(kernelRoot, { taskInstanceId, backend: 'native' }, { witnessRoot });
+  const q = store.attachLease(dataRoot, 'cmd1', { epoch: lease.leaseEpoch, storeIncarnation: lease.storeIncarnation });
+  const issue = bridge.issueForIntent({ taskInstanceId, role: 'muse_main' }, modeConfig, snapshot, { kernelRoot });
+  assert.equal(issue.ok, true);
+  // Caller "forgets" the witness: protection must not silently drop.
+  throwsCode(() => kernel.deliverCommand(kernelRoot, { intent: q.intent, issued: issue.issued }, {}), 'witness-required');
+  throwsCode(() => kernel.acquireGeneration(kernelRoot, { taskInstanceId, backend: 'native' }, {}), 'witness-required');
+  assert.equal(kernel.countReceipts(kernelRoot), 0);
+  fs.rmSync(dataRoot, { recursive: true, force: true });
+  fs.rmSync(kernelRoot, { recursive: true, force: true });
+  fs.rmSync(witnessRoot, { recursive: true, force: true });
+});
+
+await check('G-08 Finding 3: explicit fenced recovery re-enables progress; old leases stay dead', () => {
+  const dataRoot = tmpRoot('spike02-g08-c-');
+  const kernelRoot = tmpRoot('spike02-g08-k-');
+  const witnessRoot = tmpRoot('spike02-g08-w-');
+  const snapshot = issuerSnapshot();
+  const modeConfig = museModeConfig(snapshot);
+  const taskInstanceId = 'spike02-g08-task-' + (++seq);
+  store.commitIntent(dataRoot, {
+    taskInstanceId, attemptId: 'a1', commandId: 'cmd1', backend: 'native', controllerRevision: 1,
+    role: 'muse_main', modeId: 'engineering-v2', modeConfigRevision: modeConfig.revision,
+    intentPayload: { op: 'x' }, lease: null,
+  });
+  const lease = kernel.acquireGeneration(kernelRoot, { taskInstanceId, backend: 'native' }, { witnessRoot });
+  const q = store.attachLease(dataRoot, 'cmd1', { epoch: lease.leaseEpoch, storeIncarnation: lease.storeIncarnation });
+  const issue = bridge.issueForIntent({ taskInstanceId, role: 'muse_main' }, modeConfig, snapshot, { kernelRoot });
+  assert.equal(issue.ok, true);
+  fs.rmSync(witnessRoot, { recursive: true, force: true });
+  fs.mkdirSync(witnessRoot, { recursive: true });
+  throwsCode(() => kernel.deliverCommand(kernelRoot, { intent: q.intent, issued: issue.issued }, { witnessRoot }), 'reconciliation-required');
+  // Explicit operator recovery: attested max + reason recorded, epoch fenced above all known.
+  const recovered = kernel.fenceForRecovery(kernelRoot, witnessRoot, {
+    taskInstanceId, backend: 'native', attestedMaxEpoch: 1, operatorAttestation: 'synthetic-test-recovery',
+  });
+  assert.equal(recovered.leaseEpoch, 2);
+  // Old lease can never deliver again (fenced).
+  throwsCode(() => kernel.deliverCommand(kernelRoot, { intent: q.intent, issued: issue.issued }, { witnessRoot }), 'stale-lease');
+  // New command under the recovery lease executes exactly once.
+  store.commitIntent(dataRoot, {
+    taskInstanceId, attemptId: 'a2', commandId: 'cmd2', backend: 'native', controllerRevision: 1,
+    role: 'muse_main', modeId: 'engineering-v2', modeConfigRevision: modeConfig.revision,
+    intentPayload: { op: 'recovered' }, lease: null,
+  });
+  const q2 = store.attachLease(dataRoot, 'cmd2', { epoch: recovered.leaseEpoch, storeIncarnation: recovered.storeIncarnation });
+  const delivery = kernel.deliverCommand(kernelRoot, { intent: q2.intent, issued: issue.issued }, { witnessRoot });
+  assert.equal(delivery.created, true);
+  assert.equal(kernel.countReceipts(kernelRoot), 1);
+  fs.rmSync(dataRoot, { recursive: true, force: true });
+  fs.rmSync(kernelRoot, { recursive: true, force: true });
+  fs.rmSync(witnessRoot, { recursive: true, force: true });
+});
+
+await check('G-09 Finding 3: legitimate first-time witness initialization still works', () => {
+  const dataRoot = tmpRoot('spike02-g09-c-');
+  const kernelRoot = tmpRoot('spike02-g09-k-');
+  const witnessRoot = tmpRoot('spike02-g09-w-');
+  const h = handshake(dataRoot, kernelRoot, 'g09first', witnessRoot);
+  assert.ok(h.receipt);
+  assert.equal(kernel.countReceipts(kernelRoot), 1);
+  fs.rmSync(dataRoot, { recursive: true, force: true });
+  fs.rmSync(kernelRoot, { recursive: true, force: true });
+  fs.rmSync(witnessRoot, { recursive: true, force: true });
 });
 
 console.log('\nSpike02: PASS ' + passed + ' / FAIL ' + failed);
