@@ -116,6 +116,16 @@ fn status(db: &Path) -> i32 {
 }
 
 fn bridge_command(cmd: &str, db: &Path, witness: Option<PathBuf>, input: &Path) -> i32 {
+    // A1.3.3: while a live nexusd daemon owns this store, legacy CLI
+    // mutations must refuse rather than bypass daemon authorization.
+    // Read-only commands (receipt, journal) need no guard: they cannot
+    // acquire generation authority, seal targets, or publish acceptance.
+    if matches!(cmd, "acquire" | "seal" | "accept") {
+        if let Err(e) = nexus_kernel::ensure_no_live_daemon(db) {
+            eprintln!("bridge request rejected: {e}");
+            return 2;
+        }
+    }
     let req = match bridge::read_request(input) {
         Ok(v) => v,
         Err(e) => {

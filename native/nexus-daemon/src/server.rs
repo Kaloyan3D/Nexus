@@ -1,0 +1,833 @@
+//! `nexusd` connection serving: bounded frames, concurrent clients with
+//! serialized authoritative mutations, structured refusals.
+//!
+//! The single `Mutex<Kernel>` serializes every authoritative mutation (the
+//! kernel's own `flock` + transaction layer remains the cross-process
+//! backstop). Read-only operations share the same gate so status/receipt
+//! reads never interleave torn state. Malformed input yields a versioned
+//! refusal; it can never crash the daemon or corrupt durable state: every
+//! handler returns a value, panics are contained per connection, and the
+//! listener loop survives client failures.
+
+use crate::auth::{now_ms, IssuerAuth};
+use crate::protocol::{
+    codes, fail, is_privileged, is_read_only, ok, parse_frame, AuthFields, IpcRequest, MAX_CLIENTS,
+    MAX_FRAME_BYTES, MAX_JOURNAL_EVENTS, MAX_RESPONSE_BYTES, REQUEST_TIMEOUT_MS,
+};
+use nexus_kernel::bridge;
+use std::io::{BufReader, Read, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// Explicit lifecycle states. `stopped` is the exited process (reported on
+/// the shutdown log line); while serving, the daemon is exactly one of the
+/// first three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifecycle {
+    Starting,
+    Ready,
+    Stopping,
+}
+
+impl Lifecycle {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Stopping => "stopping",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustMode {
+    /// Default: privileged mutations are unconditionally refused.
+    Readonly,
+    /// Explicit opt-in: privileged mutations require per-request issuer
+    /// authentication against the daemon's ephemeral capability key.
+    /// Vulnerable to same-UID hostile peers by construction (see auth.rs).
+    ShadowTest,
+}
+
+impl TrustMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Readonly => "readonly",
+            Self::ShadowTest => "shadow-test",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "readonly" => Ok(Self::Readonly),
+            "shadow-test" => Ok(Self::ShadowTest),
+            _ => Err(format!(
+                "unknown --trust-mode '{s}'; expected 'readonly' or 'shadow-test'"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Counters {
+    pub requests: AtomicU64,
+    pub refused: AtomicU64,
+    pub errors: AtomicU64,
+    pub active_clients: AtomicUsize,
+}
+
+pub struct Daemon {
+    pub kernel: Mutex<nexus_kernel::Kernel>,
+    pub trust_mode: TrustMode,
+    pub auth: Option<Arc<IssuerAuth>>,
+    pub lifecycle: Mutex<Lifecycle>,
+    pub counters: Counters,
+    /// Latched when any operation reports trust-threatening store state
+    /// (reconciliation-required, rollback-detected, witness-required,
+    /// store-corrupt, store-incompatible). Never auto-clears: restart or
+    /// operator recovery only.
+    pub reconcile_latch: Mutex<Option<String>>,
+    pub witness_configured: bool,
+    pub witness_path: Option<std::path::PathBuf>,
+    pub start_utc: String,
+}
+
+pub type SharedDaemon = Arc<Daemon>;
+
+fn now_utc() -> String {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => format!("{}.{:09}Z", d.as_secs(), d.subsec_nanos()),
+        Err(_) => "0.000000000Z".to_owned(),
+    }
+}
+
+/// Bounded, single-line JSON log. Secrets (cap keys, tags, nonces, request
+/// bodies) are never emitted; ids are truncated.
+pub fn log_line(event: &str, id: &str, code: &str, detail: &str) {
+    let short_id: String = id.chars().take(64).collect();
+    let short_detail: String = detail.chars().take(300).collect();
+    let short_code: String = code.chars().take(64).collect();
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "atUtc": now_utc(),
+            "daemon": "nexusd",
+            "event": event,
+            "id": short_id,
+            "code": short_code,
+            "detail": short_detail,
+        })
+    );
+}
+
+fn latch_reconciliation(daemon: &Daemon, code: &str, message: &str) {
+    match code {
+        "reconciliation-required"
+        | "rollback-detected"
+        | "witness-required"
+        | "store-corrupt"
+        | "store-incompatible" => {
+            if let Ok(mut latch) = daemon.reconcile_latch.lock() {
+                if latch.is_none() {
+                    *latch = Some(format!(
+                        "{code}: {}",
+                        message.chars().take(200).collect::<String>()
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn kernel_fail(daemon: &Daemon, id: &str, e: &nexus_contracts::KernelError) -> serde_json::Value {
+    latch_reconciliation(daemon, e.code.as_str(), &e.message);
+    daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+    fail(id, e.code.as_str(), &e.message)
+}
+
+fn get_string(
+    params: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<String, serde_json::Value> {
+    match params.get(field) {
+        Some(serde_json::Value::String(s))
+            if !s.is_empty() && s.len() <= crate::protocol::MAX_ID_LEN =>
+        {
+            Ok(s.clone())
+        }
+        _ => Err(fail(
+            "",
+            codes::BAD_REQUEST,
+            format!("bad-request: '{field}' must be a non-empty string"),
+        )),
+    }
+}
+
+fn get_object(
+    params: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<serde_json::Value, serde_json::Value> {
+    match params.get(field) {
+        Some(v) if v.is_object() => Ok(v.clone()),
+        _ => Err(fail(
+            "",
+            codes::BAD_REQUEST,
+            format!("bad-request: '{field}' must be an object"),
+        )),
+    }
+}
+
+/// Authorize one privileged command. Returns None when admitted, or the
+/// refusal value when denied.
+fn authorize(daemon: &Daemon, req: &IpcRequest) -> Option<serde_json::Value> {
+    match daemon.trust_mode {
+        TrustMode::Readonly => {
+            daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+            Some(fail(
+                &req.id,
+                codes::PRIVILEGED_DISABLED,
+                "privileged commands are disabled: this daemon runs in the default readonly trust mode; restart with --trust-mode shadow-test for the explicitly trusted shadow-test configuration",
+            ))
+        }
+        TrustMode::ShadowTest => {
+            let auth = match daemon.auth.as_ref() {
+                Some(a) => a,
+                None => {
+                    daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                    return Some(fail(
+                        &req.id,
+                        codes::STORE_UNHEALTHY,
+                        "issuer capability is unavailable; failing closed",
+                    ));
+                }
+            };
+            let fields: &AuthFields = match req.auth.as_ref() {
+                Some(f) => f,
+                None => {
+                    daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                    return Some(fail(
+                        &req.id,
+                        codes::ISSUER_UNTRUSTED,
+                        "missing issuer authentication: privileged commands require auth { nonce, ts, tag } from the trusted issuer",
+                    ));
+                }
+            };
+            match auth.verify(&req.cmd, &req.id, &req.params, fields, now_ms()) {
+                Ok(()) => None,
+                Err(code) => {
+                    daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                    Some(fail(
+                        &req.id,
+                        code,
+                        match code {
+                            codes::REPLAY_REJECTED => {
+                                "issuer nonce was already used; replay rejected"
+                            }
+                            _ => "issuer authentication failed: unknown or unauthorized issuer",
+                        },
+                    ))
+                }
+            }
+        }
+    }
+}
+
+fn do_acquire(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    let task = match get_string(&req.params, "taskInstanceId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let backend = match get_string(&req.params, "backend") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let mut kernel = match daemon.kernel.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                codes::STORE_UNHEALTHY,
+                "kernel mutex is poisoned; failing closed",
+            );
+        }
+    };
+    match kernel.acquire_generation(&task, &backend) {
+        Ok(lease) => ok(&req.id, serde_json::json!({ "lease": lease })),
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
+fn do_seal(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    let resolution_value = match get_object(&req.params, "resolution") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let issued: nexus_contracts::RegistryResolutionV1 =
+        match serde_json::from_value(resolution_value) {
+            Ok(v) => v,
+            Err(_) => {
+                daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                return fail(
+                    &req.id,
+                    codes::BAD_REQUEST,
+                    "bad-request: 'resolution' does not match RegistryResolutionV1",
+                );
+            }
+        };
+    let mut kernel = match daemon.kernel.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                codes::STORE_UNHEALTHY,
+                "kernel mutex is poisoned; failing closed",
+            );
+        }
+    };
+    match kernel.seal_issuance(&issued) {
+        Ok(id) => ok(&req.id, serde_json::json!({ "issuanceId": id })),
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
+fn do_accept(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    let intent_value = match get_object(&req.params, "intent") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let resolution_value = match get_object(&req.params, "resolution") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let snapshot = match get_object(&req.params, "snapshot") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let lease_value = match req.params.get("lease") {
+        Some(v) if v.is_object() => v.as_object().expect("lease is an object").clone(),
+        _ => {
+            return fail(
+                &req.id,
+                codes::BAD_REQUEST,
+                "bad-request: 'lease' must be an object",
+            )
+        }
+    };
+    let mut intent: nexus_contracts::ControllerIntentV1 = match serde_json::from_value(intent_value)
+    {
+        Ok(v) => v,
+        Err(_) => {
+            daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                codes::BAD_REQUEST,
+                "bad-request: 'intent' does not match ControllerIntentV1",
+            );
+        }
+    };
+    if intent.lease.is_some() {
+        daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+        return fail(
+            &req.id,
+            codes::BAD_REQUEST,
+            "bad-request: intent carries its own lease; the lease comes only from acquire_generation",
+        );
+    }
+    let issued: nexus_contracts::RegistryResolutionV1 =
+        match serde_json::from_value(resolution_value) {
+            Ok(v) => v,
+            Err(_) => {
+                daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                return fail(
+                    &req.id,
+                    codes::BAD_REQUEST,
+                    "bad-request: 'resolution' does not match RegistryResolutionV1",
+                );
+            }
+        };
+    let epoch = match lease_value.get("epoch") {
+        Some(serde_json::Value::Number(n)) => match n.as_u64() {
+            Some(v) => v,
+            None => {
+                return fail(
+                    &req.id,
+                    codes::BAD_REQUEST,
+                    "bad-request: 'lease.epoch' must be an unsigned integer",
+                )
+            }
+        },
+        _ => {
+            return fail(
+                &req.id,
+                codes::BAD_REQUEST,
+                "bad-request: 'lease.epoch' must be an unsigned integer",
+            )
+        }
+    };
+    let incarnation = match lease_value.get("storeIncarnation") {
+        Some(serde_json::Value::String(s)) if !s.is_empty() => s.clone(),
+        _ => {
+            return fail(
+                &req.id,
+                codes::BAD_REQUEST,
+                "bad-request: 'lease.storeIncarnation' must be a non-empty string",
+            )
+        }
+    };
+    intent = intent.with_lease(epoch, &incarnation);
+    let accept_req = nexus_kernel::AcceptRequest {
+        intent,
+        issued,
+        snapshot,
+    };
+    let mut kernel = match daemon.kernel.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                codes::STORE_UNHEALTHY,
+                "kernel mutex is poisoned; failing closed",
+            );
+        }
+    };
+    match kernel.accept_command(&accept_req) {
+        Ok((receipt, created)) => ok(
+            &req.id,
+            serde_json::json!({ "receipt": receipt, "replayed": !created }),
+        ),
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
+fn do_receipt(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    let command_id = match get_string(&req.params, "commandId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let kernel = match daemon.kernel.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                codes::STORE_UNHEALTHY,
+                "kernel mutex is poisoned; failing closed",
+            );
+        }
+    };
+    match kernel.read_receipt(&command_id) {
+        Ok(found) => ok(&req.id, serde_json::json!({ "receipt": found })),
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
+fn do_journal(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    let task = match get_string(&req.params, "taskInstanceId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let backend = match get_string(&req.params, "backend") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let kernel = match daemon.kernel.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                codes::STORE_UNHEALTHY,
+                "kernel mutex is poisoned; failing closed",
+            );
+        }
+    };
+    let events = match kernel.list_events(&task, &backend) {
+        Ok(v) => v,
+        Err(e) => return kernel_fail(daemon, &req.id, &e),
+    };
+    let truncated = events.len() > MAX_JOURNAL_EVENTS;
+    let mut receipts = Vec::new();
+    for event in events.iter().take(MAX_JOURNAL_EVENTS) {
+        if let Some(command_id) = event.command_id.as_ref() {
+            match kernel.read_receipt(command_id) {
+                Ok(Some(r)) => receipts.push(r),
+                Ok(None) => {}
+                Err(e) => return kernel_fail(daemon, &req.id, &e),
+            }
+        }
+    }
+    ok(
+        &req.id,
+        serde_json::json!({
+            "receipts": receipts,
+            "events": events.into_iter().take(MAX_JOURNAL_EVENTS).collect::<Vec<_>>(),
+            "truncated": truncated,
+        }),
+    )
+}
+
+fn do_health(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    let (state, incarnation) = match daemon.kernel.lock() {
+        Ok(k) => (lifecycle_of(daemon), k.incarnation().to_owned()),
+        Err(_) => (lifecycle_of(daemon), String::new()),
+    };
+    ok(
+        &req.id,
+        serde_json::json!({
+            "state": state,
+            "incarnation": incarnation,
+            "ipcProtocol": crate::protocol::IPC_PROTOCOL_VERSION,
+            "dispatchEnabled": nexus_kernel::Kernel::dispatch_enabled(),
+        }),
+    )
+}
+
+fn lifecycle_of(daemon: &Daemon) -> &'static str {
+    match daemon.lifecycle.lock() {
+        Ok(g) => g.as_str(),
+        Err(_) => "starting",
+    }
+}
+
+fn do_status(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    let kernel = match daemon.kernel.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                codes::STORE_UNHEALTHY,
+                "kernel mutex is poisoned; failing closed",
+            );
+        }
+    };
+    let incarnation = kernel.incarnation().to_owned();
+    let accepted = match kernel.count_receipts() {
+        Ok(v) => v,
+        Err(e) => return kernel_fail(daemon, &req.id, &e),
+    };
+    let commands = match kernel.count_commands() {
+        Ok(v) => v,
+        Err(e) => return kernel_fail(daemon, &req.id, &e),
+    };
+    let events = match kernel.list_all_events() {
+        Ok(v) => v,
+        Err(e) => return kernel_fail(daemon, &req.id, &e),
+    };
+    let journal_head = events
+        .last()
+        .cloned()
+        .unwrap_or(nexus_contracts::KernelEventV1 {
+            schema_version: nexus_contracts::CONTRACT_SCHEMA_VERSION,
+            seq: 0,
+            generation_key: String::new(),
+            kind: nexus_contracts::KernelEventKind::GenerationAcquired,
+            command_id: None,
+            payload: serde_json::Value::Null,
+            recorded_at_utc: String::new(),
+        });
+    drop(kernel);
+    let latch = daemon
+        .reconcile_latch
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or(None);
+    let witness_present = daemon
+        .witness_path
+        .as_ref()
+        .map(|p| p.exists())
+        .unwrap_or(false);
+    ok(
+        &req.id,
+        serde_json::json!({
+            "state": lifecycle_of(daemon),
+            "incarnation": incarnation,
+            "ipcProtocol": crate::protocol::IPC_PROTOCOL_VERSION,
+            "trustMode": daemon.trust_mode.as_str(),
+            "shadowMode": "shadow-only",
+            "dispatchEnabled": nexus_kernel::Kernel::dispatch_enabled(),
+            "acceptedCommands": accepted,
+            "totalCommands": commands,
+            "eventCount": events.len() as u64,
+            "journalHead": journal_head,
+            "witness": { "configured": daemon.witness_configured, "present": witness_present },
+            "reconciliationRequired": latch.is_some(),
+            "reconciliationDetail": latch,
+            "activeClients": daemon.counters.active_clients.load(Ordering::Relaxed) as u64,
+            "requests": daemon.counters.requests.load(Ordering::Relaxed),
+            "refusals": daemon.counters.refused.load(Ordering::Relaxed),
+            "errors": daemon.counters.errors.load(Ordering::Relaxed),
+            "startedAtUtc": daemon.start_utc,
+        }),
+    )
+}
+
+fn with_id(mut v: serde_json::Value, id: &str) -> serde_json::Value {
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("id".to_owned(), serde_json::Value::String(id.to_owned()));
+        obj.insert(
+            "protocol".to_owned(),
+            serde_json::Value::from(crate::protocol::IPC_PROTOCOL_VERSION),
+        );
+    }
+    v
+}
+
+/// Dispatch one validated request. Never panics on adversarial input: every
+/// refusal is a versioned value.
+pub fn dispatch(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    daemon.counters.requests.fetch_add(1, Ordering::Relaxed);
+    if is_privileged(&req.cmd) {
+        if let Some(refusal) = authorize(daemon, req) {
+            log_line(
+                "refuse",
+                &req.id,
+                refusal.get("code").and_then(|v| v.as_str()).unwrap_or("?"),
+                &req.cmd,
+            );
+            return refusal;
+        }
+        let response = match req.cmd.as_str() {
+            "acquire" => do_acquire(daemon, req),
+            "seal" => do_seal(daemon, req),
+            "accept" => do_accept(daemon, req),
+            _ => unreachable!("privileged set is fixed"),
+        };
+        log_line(
+            "privileged",
+            &req.id,
+            response
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("ok"),
+            &req.cmd,
+        );
+        return response;
+    }
+    if !is_read_only(&req.cmd) {
+        daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+        log_line("refuse", &req.id, codes::UNKNOWN_COMMAND, &req.cmd);
+        return fail(
+            &req.id,
+            codes::UNKNOWN_COMMAND,
+            format!(
+                "bad-request: unknown daemon command '{}'",
+                req.cmd.chars().take(64).collect::<String>()
+            ),
+        );
+    }
+    match req.cmd.as_str() {
+        "health" => do_health(daemon, req),
+        "status" => do_status(daemon, req),
+        "receipt" => do_receipt(daemon, req),
+        "journal" => do_journal(daemon, req),
+        "digest" => ok(&req.id, digest_params(&req.params)),
+        _ => unreachable!("read-only set is fixed"),
+    }
+}
+
+fn digest_params(params: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
+    match params.get("value") {
+        Some(v) => {
+            let d = bridge::digest_value(v);
+            let mut map = serde_json::Map::new();
+            if let Some(canonical) = d.get("canonical") {
+                map.insert("canonical".to_owned(), canonical.clone());
+            }
+            if let Some(sha) = d.get("sha256") {
+                map.insert("sha256".to_owned(), sha.clone());
+            }
+            serde_json::Value::Object(map)
+        }
+        None => serde_json::json!({}),
+    }
+}
+
+/// Serve one validated-or-refused frame (used by tests and connections).
+pub fn serve_frame(daemon: &Daemon, frame: &str) -> serde_json::Value {
+    match parse_frame(frame) {
+        Ok(req) => dispatch(daemon, &req),
+        Err((id, code, message)) => {
+            daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+            log_line("refuse", &id, code, "parse");
+            fail(&id, code, message)
+        }
+    }
+}
+
+fn write_response(stream: &mut UnixStream, response: &serde_json::Value) -> Result<(), String> {
+    let mut text =
+        serde_json::to_string(response).map_err(|e| format!("response encoding failed: {e}"))?;
+    if text.len() > MAX_RESPONSE_BYTES {
+        return Err("response exceeds cap; failing closed".to_owned());
+    }
+    text.push('\n');
+    stream
+        .write_all(text.as_bytes())
+        .map_err(|e| format!("write failed: {e}"))?;
+    stream.flush().map_err(|e| format!("flush failed: {e}"))?;
+    Ok(())
+}
+
+fn serve_connection(stream: UnixStream, daemon: SharedDaemon) {
+    daemon
+        .counters
+        .active_clients
+        .fetch_add(1, Ordering::Relaxed);
+    let result = serve_connection_inner(&stream, &daemon);
+    daemon
+        .counters
+        .active_clients
+        .fetch_sub(1, Ordering::Relaxed);
+    if let Err(detail) = result {
+        daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+        log_line("conn-close", "", "transport-error", &detail);
+    }
+}
+
+fn serve_connection_inner(stream: &UnixStream, daemon: &SharedDaemon) -> Result<(), String> {
+    let mut stream = stream
+        .try_clone()
+        .map_err(|e| format!("clone failed: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(REQUEST_TIMEOUT_MS)))
+        .map_err(|e| format!("timeout unsettable: {e}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(REQUEST_TIMEOUT_MS)))
+        .map_err(|e| format!("timeout unsettable: {e}"))?;
+    let mut reader = BufReader::new(
+        stream
+            .try_clone()
+            .map_err(|e| format!("clone failed: {e}"))?,
+    );
+    loop {
+        let mut line = String::new();
+        // Bounded accumulation: read byte-wise in chunks so one huge line
+        // cannot grow memory without bound before we reject it.
+        loop {
+            let mut chunk = vec![0u8; 8192];
+            let n = reader.read(&mut chunk).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut
+                {
+                    "request timeout".to_owned()
+                } else {
+                    format!("read failed: {e}")
+                }
+            })?;
+            if n == 0 {
+                if line.is_empty() {
+                    return Ok(());
+                }
+                return Err("connection closed mid-frame".to_owned());
+            }
+            let text = String::from_utf8_lossy(&chunk[..n]).into_owned();
+            line.push_str(&text);
+            if line.len() > MAX_FRAME_BYTES + 1 {
+                let _ = write_response(
+                    &mut stream,
+                    &fail(
+                        "",
+                        codes::TOO_LARGE,
+                        format!("request frame exceeds {MAX_FRAME_BYTES} bytes (too-large)"),
+                    ),
+                );
+                daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                return Err("oversized frame".to_owned());
+            }
+            if line.ends_with('\n') {
+                break;
+            }
+        }
+        let frame = line.strip_suffix('\n').unwrap_or(&line);
+        let frame = frame.strip_suffix('\r').unwrap_or(frame);
+        // Catch panics per request so adversarial input can never kill the
+        // connection handler, let alone the daemon.
+        let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            serve_frame(daemon, frame)
+        })) {
+            Ok(v) => v,
+            Err(_) => {
+                daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+                fail(
+                    "",
+                    codes::STORE_UNHEALTHY,
+                    "internal failure while serving request; failing closed",
+                )
+            }
+        };
+        if write_response(&mut stream, &response).is_err() {
+            return Err("response write failed".to_owned());
+        }
+    }
+}
+
+/// Accept loop. Returns when `shutdown` is set. `listener` must already be
+/// bound and non-blocking.
+pub fn serve(listener: UnixListener, daemon: SharedDaemon, shutdown: Arc<AtomicBool>) {
+    if let Ok(mut state) = daemon.lifecycle.lock() {
+        *state = Lifecycle::Ready;
+    }
+    log_line("ready", "", "ok", daemon.trust_mode.as_str());
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                if daemon.counters.active_clients.load(Ordering::Relaxed) >= MAX_CLIENTS {
+                    daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                    log_line(
+                        "refuse",
+                        "",
+                        codes::SERVER_BUSY,
+                        "connection over client cap",
+                    );
+                    drop(stream);
+                    continue;
+                }
+                let worker = Arc::clone(&daemon);
+                if std::thread::Builder::new()
+                    .name("nexusd-conn".to_owned())
+                    .spawn(move || serve_connection(stream, worker))
+                    .is_err()
+                {
+                    daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+                    log_line("conn-close", "", "transport-error", "worker spawn failed");
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => {
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+                log_line(
+                    "conn-close",
+                    "",
+                    "transport-error",
+                    &format!("accept failed: {e}"),
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+    if let Ok(mut state) = daemon.lifecycle.lock() {
+        *state = Lifecycle::Stopping;
+    }
+    // Bounded drain: in-flight requests finish or the deadline passes.
+    for _ in 0..200 {
+        if daemon.counters.active_clients.load(Ordering::Relaxed) == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}

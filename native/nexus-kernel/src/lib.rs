@@ -238,3 +238,38 @@ impl Kernel {
         false
     }
 }
+
+/// Path of the daemon lifetime lock for a kernel database. Shared with
+/// `nexusd`: while a daemon holds this lock, CLI mutations must refuse
+/// rather than bypass daemon authorization (A1.3.3).
+pub fn daemon_lock_path_for(db_path: &Path) -> std::path::PathBuf {
+    match db_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join("daemon.lock"),
+        _ => std::path::PathBuf::from("daemon.lock"),
+    }
+}
+
+/// Fail closed when a live daemon owns the store: tries a non-blocking
+/// exclusive lock on the daemon lock file. If the lock is held elsewhere
+/// (or cannot be proven free), the caller must NOT touch the store.
+/// Read-only commands do not need this guard; mutations do.
+pub fn ensure_no_live_daemon(db_path: &Path) -> Result<(), String> {
+    let lock_path = daemon_lock_path_for(db_path);
+    if !lock_path.exists() {
+        return Ok(());
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&lock_path)
+        .map_err(|e| format!("daemon lock unreadable; failing closed: {e}"))?;
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => {
+            let _ = fs2::FileExt::unlock(&file);
+            Ok(())
+        }
+        Err(_) => Err([
+            "daemon-owns-store: a live nexusd daemon owns this store; legacy CLI mutations are refused while the daemon runs (use the daemon IPC surface instead)",
+        ].concat()),
+    }
+}

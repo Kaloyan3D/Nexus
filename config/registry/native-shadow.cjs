@@ -33,6 +33,7 @@ const path = require('node:path');
 const shadowIntent = require('./native-shadow-intent.cjs');
 const issuer = require('./native-issuer.cjs');
 const bridge = require('./native-shadow-bridge.cjs');
+const daemonBridge = require('./native-shadow-daemon.cjs');
 
 const SHADOW_FLAG = 'NEXUS_NATIVE_SHADOW';
 const SHADOW_SCHEMA_VERSION = 1;
@@ -175,15 +176,22 @@ async function deliverShadowCommand(shadow, issuance, kernelIntent, opts, deps) 
   const workspace = o.workspace;
   const taskId = o.taskId;
   const commandId = shadow.commandId;
-  const invoke = d.invokeBridge || bridge.invokeBridge;
+  // Transport selection (A1.3): an explicitly injected invoke wins (tests);
+  // otherwise an explicitly configured daemon socket selects the daemon IPC
+  // transport; the default remains the A1.2 CLI subprocess bridge. A refused
+  // daemon request is surfaced as a refusal — NEVER silently retried over
+  // the CLI, which would bypass daemon authorization.
+  const daemonSocket = typeof o.daemonSocket === 'string' ? o.daemonSocket : (typeof d.daemonSocket === 'string' ? d.daemonSocket : '');
+  const daemonCapPath = typeof o.daemonCapPath === 'string' ? o.daemonCapPath : (typeof d.daemonCapPath === 'string' ? d.daemonCapPath : '');
+  const invoke = d.invokeBridge || (daemonSocket !== '' ? daemonBridge.invokeDaemonBridge : bridge.invokeBridge);
   const dbPath = typeof o.dbPath === 'string' ? o.dbPath : (typeof d.dbPath === 'string' ? d.dbPath : '');
   const witnessPath = typeof o.witnessPath === 'string' ? o.witnessPath : (typeof d.witnessPath === 'string' ? d.witnessPath : '');
-  const runOpts = { kernelBin: o.kernelBin || d.kernelBin, repoRoot: o.repoRoot || d.repoRoot, dbPath: dbPath, witnessPath: witnessPath, timeoutMs: o.timeoutMs || d.timeoutMs };
+  const runOpts = { kernelBin: o.kernelBin || d.kernelBin, repoRoot: o.repoRoot || d.repoRoot, dbPath: dbPath, witnessPath: witnessPath, timeoutMs: o.timeoutMs || d.timeoutMs, daemonSocket: daemonSocket, daemonCapPath: daemonCapPath };
   return bridge.withCommandLock(commandId, async function () {
     // Lost-ACK fast path: a durable receipt already exists for this
     // commandId. Reuse it after verifying it carries OUR issuance identity;
     // a mismatch is surfaced as an explicit conflict, never guessed success.
-    const prior = invoke('receipt', { commandId: commandId }, runOpts);
+    const prior = await invoke('receipt', { commandId: commandId }, runOpts);
     if (prior.ok && prior.status === 'ok' && prior.response && prior.response.receipt) {
       const r = prior.response.receipt;
       if (r.issuanceId === issuance.issuanceId && r.targetDigest === issuance.targetDigest && r.snapshotDigest === issuance.snapshotDigest) {
@@ -201,7 +209,7 @@ async function deliverShadowCommand(shadow, issuance, kernelIntent, opts, deps) 
       }
       return writeDiagnostic(d, workspace, taskId, { outcome: 'error', commandId: commandId, code: prior.code, message: 'kernel unavailable before any delivery (' + prior.code + '); Controller state is untouched and no attempt was created' });
     }
-    const acquired = invoke('acquire', { taskInstanceId: shadow.taskInstanceId, backend: bridge.KERNEL_BACKEND }, runOpts);
+    const acquired = await invoke('acquire', { taskInstanceId: shadow.taskInstanceId, backend: bridge.KERNEL_BACKEND }, runOpts);
     if (!acquired.ok) {
       return writeDiagnostic(d, workspace, taskId, { outcome: 'error', commandId: commandId, code: acquired.code, message: 'kernel unavailable during acquire (' + acquired.code + '); Controller state is untouched and no attempt was created' });
     }
@@ -212,14 +220,14 @@ async function deliverShadowCommand(shadow, issuance, kernelIntent, opts, deps) 
     if (!lease || typeof lease.leaseEpoch !== 'number' || typeof lease.storeIncarnation !== 'string') {
       return refused(d, workspace, taskId, commandId, 'bad-response', 'generation lease is malformed; refusing to submit');
     }
-    const sealed = invoke('seal', { resolution: issuance.resolution }, runOpts);
+    const sealed = await invoke('seal', { resolution: issuance.resolution }, runOpts);
     if (!sealed.ok) {
       return writeDiagnostic(d, workspace, taskId, { outcome: 'error', commandId: commandId, code: sealed.code, message: 'kernel unavailable during seal (' + sealed.code + '); Controller state is untouched' });
     }
     if (sealed.status !== 'ok') {
       return refused(d, workspace, taskId, commandId, sealed.code || 'seal-refused', sealed.message || 'issuance seal refused');
     }
-    const accepted = invoke('accept', { intent: kernelIntent, resolution: issuance.resolution, snapshot: issuance.snapshot, lease: { epoch: lease.leaseEpoch, storeIncarnation: lease.storeIncarnation } }, runOpts);
+    const accepted = await invoke('accept', { intent: kernelIntent, resolution: issuance.resolution, snapshot: issuance.snapshot, lease: { epoch: lease.leaseEpoch, storeIncarnation: lease.storeIncarnation } }, runOpts);
     if (!accepted.ok) {
       return writeDiagnostic(d, workspace, taskId, { outcome: 'error', commandId: commandId, code: accepted.code, message: 'kernel unavailable during accept (' + accepted.code + '); Controller state is untouched, reconciliation required' });
     }
@@ -231,7 +239,7 @@ async function deliverShadowCommand(shadow, issuance, kernelIntent, opts, deps) 
     if ((accepted.code || '') === 'command-conflict') {
       // Same commandId, changed identity: the prior authority wins. Read it
       // back so the outcome is explicit instead of a bare refusal.
-      const reread = invoke('receipt', { commandId: commandId }, runOpts);
+      const reread = await invoke('receipt', { commandId: commandId }, runOpts);
       const receipt = reread.ok && reread.status === 'ok' ? reread.response.receipt : null;
       return refused(d, workspace, taskId, commandId, 'command-conflict', 'shadow identity changed for an existing committed command; prior receipt ' + (receipt ? 'reused (' + receipt.commandDigest + ')' : 'unreadable — reconciliation required'));
     }

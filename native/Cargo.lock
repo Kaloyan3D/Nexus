@@ -261,6 +261,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-daemon"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "hex",
+ "hmac",
+ "libc",
+ "nexus-contracts",
+ "nexus-kernel",
+ "nexus-store",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "nexus-kernel"
 version = "0.1.0"
 dependencies = [
