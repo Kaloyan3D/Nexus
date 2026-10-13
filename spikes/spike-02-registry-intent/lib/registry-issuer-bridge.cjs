@@ -11,6 +11,7 @@
 
 const crypto = require('node:crypto');
 const resolver = require('../../../config/registry/resolver.cjs');
+const trust = require('./trust.cjs');
 
 function canonicalize(value) {
   return resolver.canonicalize(value);
@@ -31,8 +32,12 @@ function targetDigestOf(binding) {
 // intent: { taskInstanceId, role, modeId } — role intent only, no target.
 // modeConfig: a ModeConfiguration for modeId (issuer-validated).
 // snapshot: issuer-controlled Registry snapshot (frozen by caller).
-// Returns { ok: true, issued } or { ok: false, errors } where errors carry
-// the real resolver codes; callers map !ok to 'target-incomplete'.
+// options.kernelRoot (optional): when provided, the bridge seals the issuance
+//   into that Kernel's trusted-issuance store and returns { ok, issued,
+//   issuanceId }. The Kernel ONLY honors sealed issuances (see trust.cjs).
+//   Without kernelRoot the issuance is UNSEALED (test-negative-path use only).
+// Returns { ok: true, issued[, issuanceId] } or { ok: false, errors } where
+// errors carry the real resolver codes; callers map !ok to 'target-incomplete'.
 function issueForIntent(intent, modeConfig, snapshot, options) {
   if (!intent || typeof intent.role !== 'string' || intent.role === '') {
     return { ok: false, errors: [{ code: 'intent-invalid', path: 'intent.role', message: 'role intent is required' }] };
@@ -78,7 +83,12 @@ function issueForIntent(intent, modeConfig, snapshot, options) {
       modeConfigRevision,
     },
   };
-  return { ok: true, issued: resolver.deepFreeze(issued) };
+  const sealed = resolver.deepFreeze(issued);
+  if (options && options.kernelRoot) {
+    const record = trust.sealIssuance(options.kernelRoot, JSON.parse(JSON.stringify(sealed)));
+    return { ok: true, issued: sealed, issuanceId: record.issuanceId };
+  }
+  return { ok: true, issued: sealed };
 }
 
 module.exports = {

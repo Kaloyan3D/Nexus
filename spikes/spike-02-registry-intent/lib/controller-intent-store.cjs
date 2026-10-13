@@ -5,6 +5,12 @@
 // temp-write + fsync(file) + rename + fsync(dir). Single authoritative record
 // per commandId. Projection/delivery state is derived, never a second writer.
 //
+// Hardening (F-03/F-05): creation uses tmp-write + link(2) exclusive-publish
+// so concurrent writers cannot overwrite each other — exactly one wins; losers re-read and
+// get idempotent-vs-conflict semantics. attachLease is serialized with a
+// mkdir mutex. Identity is the canonical intentDigest (see lib/envelope.cjs);
+// issuedAtUtc and lease are mutable/attached state, never identity.
+//
 // Isolated to a caller-supplied dataRoot (tests use fs.mkdtempSync(os.tmpdir())).
 // No production task/session mutation: this store never touches the real
 // Controller bindings path.
@@ -12,24 +18,22 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const envelope = require('./envelope.cjs');
+const flock = require('./file-lock.cjs');
 
 const SCHEMA_VERSION = 1;
 const KIND = 'ControllerIntentV1';
 
 function canonicalize(value) {
-  if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
-  if (value && typeof value === 'object') {
-    return '{' + Object.keys(value).sort().map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
-  }
-  return JSON.stringify(value);
+  return envelope.canonicalize(value);
 }
 
 function sha256Hex(text) {
-  return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
+  return envelope.sha256Hex(text);
 }
 
 function payloadDigestOf(intentPayload) {
-  return sha256Hex(canonicalize(intentPayload));
+  return envelope.payloadDigestOf(intentPayload);
 }
 
 function intentDir(dataRoot) {
@@ -67,16 +71,47 @@ function validateIds({ taskInstanceId, attemptId, commandId }) {
   }
 }
 
-// Commit ONE authoritative intent. Idempotent on byte-identical resend
-// (returns { intent, created: false }); conflicting payload under the same
+function buildDoc(fields, payloadDigest, intentDigest) {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    kind: KIND,
+    taskInstanceId: fields.taskInstanceId,
+    attemptId: fields.attemptId,
+    commandId: fields.commandId,
+    backend: fields.backend,
+    controllerRevision: fields.controllerRevision || 0,
+    role: fields.role,
+    modeId: fields.modeId,
+    modeConfigRevision: fields.modeConfigRevision === undefined ? null : fields.modeConfigRevision,
+    payloadDigest,
+    intentDigest,
+    intentPayload: fields.intentPayload,
+    lease: fields.lease === undefined ? null : fields.lease,
+    status: 'committed',
+    issuedAtUtc: new Date().toISOString(),
+  };
+}
+
+function sameImmutableEnvelope(existing, candidateFields, payloadDigest, intentDigest) {
+  return existing.intentDigest === intentDigest
+    && existing.taskInstanceId === candidateFields.taskInstanceId
+    && existing.attemptId === candidateFields.attemptId
+    && existing.commandId === candidateFields.commandId;
+}
+
+// Commit ONE authoritative intent. Idempotent on identical immutable envelope
+// (returns { intent, created: false }); conflicting envelope under the same
 // commandId fails closed with code 'intent-conflict' and never allocates a
-// second attempt. Fault injection (crashPoint) is test-only:
+// second attempt. Creation is O_EXCL: concurrent identical commits yield one
+// winner and idempotent losers; concurrent conflicting commits yield one
+// winner and conflict losers — never an overwrite. Fault injection
+// (crashPoint) is test-only:
 //   'before-commit' — throw before any tmp file is renamed (nothing committed)
 //   'during-commit' — leave an orphan *.tmp then throw (nothing committed)
 //   'after-commit'  — commit, then throw to simulate a lost ACK (one intent committed)
 function commitIntent(dataRoot, fields, options) {
   const opts = options || {};
-  const { taskInstanceId, attemptId, commandId, backend, controllerRevision, role, modeId, modeConfigRevision, intentPayload, lease } = fields;
+  const { taskInstanceId, attemptId, commandId, backend, role, modeId } = fields;
   validateIds({ taskInstanceId, attemptId, commandId });
   if (backend !== 'native') {
     const error = new Error('only backend=native participates in this spike');
@@ -88,7 +123,8 @@ function commitIntent(dataRoot, fields, options) {
     error.code = 'intent-invalid-id';
     throw error;
   }
-  const digest = payloadDigestOf(intentPayload);
+  const payloadDigest = payloadDigestOf(fields.intentPayload);
+  const intentDigest = envelope.intentDigestOf({ ...fields, payloadDigest });
   const dir = intentDir(dataRoot);
   const target = intentPath(dataRoot, commandId);
   fs.mkdirSync(dir, { recursive: true });
@@ -99,77 +135,61 @@ function commitIntent(dataRoot, fields, options) {
     throw error;
   }
 
-  const doc = {
-    schemaVersion: SCHEMA_VERSION,
-    kind: KIND,
-    taskInstanceId,
-    attemptId,
-    commandId,
-    backend,
-    controllerRevision: controllerRevision || 0,
-    role,
-    modeId,
-    modeConfigRevision: modeConfigRevision === undefined ? null : modeConfigRevision,
-    payloadDigest: digest,
-    intentPayload,
-    lease: lease === undefined ? null : lease,
-    status: 'committed',
-    issuedAtUtc: new Date().toISOString(),
-  };
-
   if (opts.crashPoint === 'during-commit') {
     // Simulate a kill between tmp write and rename: orphan tmp, no commit.
     const orphan = target + '.' + crypto.randomUUID() + '.tmp';
-    fs.writeFileSync(orphan, JSON.stringify(doc, null, 2));
+    fs.writeFileSync(orphan, JSON.stringify(buildDoc(fields, payloadDigest, intentDigest), null, 2));
     const error = new Error('injected crash during intent commit');
     error.code = 'injected-crash';
     throw error;
   }
 
-  const existing = readIntent(dataRoot, commandId);
-  if (existing) {
-    if (existing.payloadDigest !== digest || existing.attemptId !== attemptId || existing.taskInstanceId !== taskInstanceId) {
-      const error = new Error('conflicting payload under existing commandId; refusing second attempt');
-      error.code = 'intent-conflict';
+  const created = flock.exclusivePublishJson(target, buildDoc(fields, payloadDigest, intentDigest));
+  if (created.created) {
+    if (opts.crashPoint === 'after-commit') {
+      const error = new Error('injected crash after intent commit (ACK lost)');
+      error.code = 'injected-crash';
       throw error;
     }
+    return { intent: readIntent(dataRoot, commandId), created: true };
+  }
+  // Lost the exclusive race (or a replay): re-read and classify.
+  const existing = readIntent(dataRoot, commandId);
+  if (existing && sameImmutableEnvelope(existing, fields, payloadDigest, intentDigest)) {
     return { intent: existing, created: false };
   }
-
-  atomicWriteJson(target, doc);
-
-  if (opts.crashPoint === 'after-commit') {
-    const error = new Error('injected crash after intent commit (ACK lost)');
-    error.code = 'injected-crash';
-    throw error;
-  }
-  return { intent: doc, created: true };
+  const error = new Error('conflicting payload under existing commandId; refusing second attempt');
+  error.code = 'intent-conflict';
+  throw error;
 }
 
 // Attach the Kernel-issued lease to an already-committed intent (set-once from
-// null, or idempotent when identical). Any attempt to swap a lease fails closed.
+// null, or idempotent when identical). Serialized with a mutex so concurrent
+// attachers cannot interleave read-modify-write. Any swap fails closed.
 function attachLease(dataRoot, commandId, lease) {
-  const existing = readIntent(dataRoot, commandId);
-  if (!existing) {
-    const error = new Error('no such intent');
-    error.code = 'intent-not-found';
-    throw error;
-  }
-  if (!lease || typeof lease.epoch !== 'number' || typeof lease.storeIncarnation !== 'string') {
-    const error = new Error('invalid lease');
-    error.code = 'stale-lease';
-    throw error;
-  }
-  const same = existing.lease && existing.lease.epoch === lease.epoch && existing.lease.storeIncarnation === lease.storeIncarnation;
-  if (same) return { intent: existing, updated: false };
-  if (existing.lease !== null) {
-    const error = new Error('lease already attached; refusing swap');
-    error.code = 'intent-conflict';
-    throw error;
-  }
-  const updated = { ...existing, lease };
-  atomicWriteJson(intentPath(dataRoot, commandId), updated);
-  return { intent: updated, updated: true };
+  return flock.withLock(dataRoot, 'controller-intent', () => {
+    const existing = readIntent(dataRoot, commandId);
+    if (!existing) {
+      const error = new Error('no such intent');
+      error.code = 'intent-not-found';
+      throw error;
+    }
+    if (!lease || typeof lease.epoch !== 'number' || typeof lease.storeIncarnation !== 'string') {
+      const error = new Error('invalid lease');
+      error.code = 'stale-lease';
+      throw error;
+    }
+    const same = existing.lease && existing.lease.epoch === lease.epoch && existing.lease.storeIncarnation === lease.storeIncarnation;
+    if (same) return { intent: existing, updated: false };
+    if (existing.lease !== null) {
+      const error = new Error('lease already attached; refusing swap');
+      error.code = 'intent-conflict';
+      throw error;
+    }
+    const updated = { ...existing, lease };
+    atomicWriteJson(intentPath(dataRoot, commandId), updated);
+    return { intent: updated, updated: true };
+  });
 }
 
 function readIntent(dataRoot, commandId) {
