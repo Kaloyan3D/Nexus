@@ -26,6 +26,8 @@ pub enum KernelErrorCode {
     StoreIncompatible,
     StoreCorrupt,
     StoreError,
+    ReservationConflict,
+    ReservationExpired,
 }
 
 impl KernelErrorCode {
@@ -52,6 +54,8 @@ impl KernelErrorCode {
             Self::StoreIncompatible => "store-incompatible",
             Self::StoreCorrupt => "store-corrupt",
             Self::StoreError => "store-error",
+            Self::ReservationConflict => "reservation-conflict",
+            Self::ReservationExpired => "reservation-expired",
         }
     }
 }

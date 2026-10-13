@@ -258,8 +258,13 @@ pub fn is_privileged(cmd: &str) -> bool {
 }
 
 /// True for the read-only surface. Anything else is unknown and fails closed.
+/// `readiness` is strictly observational (A2.0 Gate 5): it reports blocker
+/// dimensions, issues no token, and can never authorize execution.
 pub fn is_read_only(cmd: &str) -> bool {
-    matches!(cmd, "health" | "status" | "receipt" | "journal" | "digest")
+    matches!(
+        cmd,
+        "health" | "status" | "receipt" | "journal" | "digest" | "readiness"
+    )
 }
 
 #[cfg(test)]

@@ -219,19 +219,85 @@ impl Kernel {
                 target_json: serde_json::to_string(&target_value).unwrap_or("null".to_owned()),
                 snapshot_digest: recomputed_snapshot_digest,
                 target_digest: recomputed_target_digest,
-                issuance_id: computed_issuance,
+                issuance_id: computed_issuance.clone(),
                 lease_epoch: lease.epoch,
                 store_incarnation: lease.store_incarnation.clone(),
                 command_digest: command_digest.clone(),
             };
-            let outcome = self.store.accept_command(&input)?;
+            // A2.0 witness-acknowledged preparation protocol:
+            //   unseen -> prepared (witness, before commit) -> accepted
+            //   (main store commit) -> acknowledged (witness, after commit).
+            // The two files never commit atomically; every crash point
+            // between them resolves fail-closed below, never to blind
+            // redispatch (dispatch stays disabled regardless).
             if let Some(w) = self.witness.as_mut() {
-                w.note_epoch(
+                // A restored pre-acceptance main-store backup with an intact
+                // witness shows acknowledged-but-no-receipt: the command may
+                // already have executed elsewhere, so re-acceptance is
+                // refused and the outcome stays explicitly unknown.
+                if let Some(res) = w.read_reservation(&intent.command_id)? {
+                    if res.state == nexus_store::ReservationState::Acknowledged {
+                        match self.store.read_receipt(&intent.command_id)? {
+                            Some(r) => {
+                                if r.command_digest != command_digest {
+                                    return Err(KernelError::new(
+                                        KernelErrorCode::CommandConflict,
+                                        "witnessed acknowledgement conflicts with stored receipt",
+                                    ));
+                                }
+                                // Already fully durable: re-acknowledge
+                                // idempotently and report a replay.
+                                w.acknowledge_reservation(
+                                    &intent.command_id,
+                                    &command_digest,
+                                    lease.epoch,
+                                )?;
+                                return Ok((r, false));
+                            }
+                            None => {
+                                return Err(KernelError::new(KernelErrorCode::ReconciliationRequired, "acknowledged command lost its receipt to rollback; outcome is unknown, refusing silent re-acceptance"));
+                            }
+                        }
+                    }
+                    // Prepared-with-receipt is the P2 crash window (commit
+                    // landed, acknowledgement did not). Heal only with a
+                    // byte-identical binding; anything else is a conflict.
+                    if res.state == nexus_store::ReservationState::Prepared {
+                        if let Some(r) = self.store.read_receipt(&intent.command_id)? {
+                            if r.command_digest != command_digest {
+                                return Err(KernelError::new(
+                                    KernelErrorCode::CommandConflict,
+                                    "prepared reservation conflicts with stored receipt",
+                                ));
+                            }
+                            w.acknowledge_reservation(
+                                &intent.command_id,
+                                &command_digest,
+                                lease.epoch,
+                            )?;
+                            return Ok((r, false));
+                        }
+                    }
+                }
+                // Durable independent reservation BEFORE the command can
+                // become eligible for any future external dispatch.
+                w.prepare_reservation(
                     &gkey,
+                    &intent.task_instance_id,
+                    &intent.attempt_id,
+                    &intent.command_id,
                     lease.epoch,
                     &lease.store_incarnation,
-                    Some((&intent.command_id, &command_digest, lease.epoch)),
+                    &command_digest,
+                    &computed_issuance,
                 )?;
+            }
+            let outcome = self.store.accept_command(&input)?;
+            if let Some(w) = self.witness.as_mut() {
+                // Acknowledge even for replays so a P2 crash
+                // (committed receipt, lost acknowledgement) heals on the
+                // next identical replay instead of lingering half-noted.
+                w.acknowledge_reservation(&intent.command_id, &command_digest, lease.epoch)?;
             }
             Ok((outcome.receipt, outcome.created))
         })
@@ -255,10 +321,14 @@ impl Kernel {
                 "only backend=native participates in A1.1",
             ));
         }
-        if operator_attestation.is_empty() {
+        // A2.0 Gate 4: an operator-entered string is not a security
+        // guarantee. Require a non-trivial attestation AND verify the
+        // attested maximum against the independent witness below; a wrong
+        // number can never silently re-enable a forgotten epoch.
+        if operator_attestation.trim().len() < 8 {
             return Err(KernelError::new(
                 KernelErrorCode::DeliveryInvalid,
-                "operator attestation is required for fenced recovery",
+                "operator attestation is required for fenced recovery: provide at least 8 non-blank characters naming the operator, the evidence reviewed, and the reason",
             ));
         }
         Kernel::critical(&self.lock_file, &self.in_process, || {
@@ -281,6 +351,16 @@ impl Kernel {
                 .read(&gkey)?
                 .map(|r| r.max_epoch)
                 .unwrap_or(0);
+            // The attestation is checked against independent evidence,
+            // never trusted blindly: asserting a maximum below what the
+            // witness has already seen would bless a forgotten issuance,
+            // so it fails closed instead of silently taking the maximum.
+            if attested_max_epoch < witness_max {
+                return Err(KernelError::new(
+                    KernelErrorCode::ReconciliationRequired,
+                    "attested maximum is below the witness maximum; review the witness state and re-attest with evidence covering every known issuance",
+                ));
+            }
             let mut base = store_epoch;
             if witness_max > base {
                 base = witness_max;
@@ -288,6 +368,11 @@ impl Kernel {
             if attested_max_epoch > base {
                 base = attested_max_epoch;
             }
+            // Never reuse a previously fenced epoch: the next epoch must
+            // strictly exceed every previously observed epoch. The fenced
+            // baseline recorded below makes the decision auditable; an
+            // unknown prior execution outcome stays explicitly unknown --
+            // recovery fences the future, it never declares the past safe.
             let (next, incarnation) =
                 self.store
                     .acquire_generation(task, backend, Some(base), true)?;

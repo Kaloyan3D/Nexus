@@ -4,6 +4,7 @@
 //! dispatch authorization path always refuses with dispatch-disabled.
 pub mod accept;
 pub mod bridge;
+pub mod readiness;
 
 pub use accept::{AcceptRequest, GenerationState};
 use nexus_contracts::{
@@ -11,6 +12,7 @@ use nexus_contracts::{
     KernelResult, RegistryResolutionV1, CONTRACT_SCHEMA_VERSION,
 };
 use nexus_store::{Store, WitnessStore};
+pub use readiness::{DispatchReadiness, ReadinessDimension};
 use std::path::Path;
 
 pub struct Kernel {
@@ -211,6 +213,53 @@ impl Kernel {
 
     pub fn read_receipt(&self, command_id: &str) -> KernelResult<Option<CommandReceiptV1>> {
         self.store.read_receipt(command_id)
+    }
+
+    /// Read-only: current generation epoch + incarnation, if any.
+    pub fn store_current_generation(
+        &self,
+        task: &str,
+        backend: &str,
+    ) -> KernelResult<Option<(u64, String)>> {
+        Ok(self
+            .store
+            .current_generation(task, backend)?
+            .map(|g| (g.epoch, g.incarnation)))
+    }
+
+    /// Read-only: true when an independent witness is configured and its
+    /// state reads cleanly; false when unconfigured. Corruption surfaces as
+    /// an error (fail-closed), never as healthy.
+    pub fn witness_health(&self) -> KernelResult<bool> {
+        match self.witness.as_ref() {
+            None => Ok(false),
+            Some(w) => {
+                // Probe readability without mutating: list is bounded by
+                // reading a non-existent generation key.
+                let _ = w.read("__health_probe__")?;
+                Ok(true)
+            }
+        }
+    }
+
+    /// Read-only: witness reservation for one command, if any.
+    pub fn read_reservation(
+        &self,
+        command_id: &str,
+    ) -> KernelResult<Option<nexus_store::ReservationRecord>> {
+        match self.witness.as_ref() {
+            None => Ok(None),
+            Some(w) => w.read_reservation(command_id),
+        }
+    }
+
+    /// Recover abandoned reservations without inventing execution success.
+    /// Returns the number transitioned prepared -> abandoned.
+    pub fn reap_abandoned_reservations(&mut self, max_age_secs: u64) -> KernelResult<u64> {
+        match self.witness.as_mut() {
+            None => Ok(0),
+            Some(w) => w.reap_abandoned(max_age_secs),
+        }
     }
     pub fn list_events(
         &self,

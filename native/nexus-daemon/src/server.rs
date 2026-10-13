@@ -627,9 +627,67 @@ pub fn dispatch(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         "status" => do_status(daemon, req),
         "receipt" => do_receipt(daemon, req),
         "journal" => do_journal(daemon, req),
+        "readiness" => do_readiness(daemon, req),
         "digest" => ok(&req.id, digest_params(&req.params)),
         _ => unreachable!("read-only set is fixed"),
     }
+}
+
+/// A2.0 Gate 5: strictly read-only readiness assessment. No mutation, no
+/// token, no authorization -- the verdict is always NOT_READY while
+/// dispatch stays disabled.
+fn do_readiness(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    let command_id = req.params.get("commandId").and_then(|v| v.as_str());
+    let kernel = match daemon.kernel.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                codes::STORE_UNHEALTHY,
+                "kernel mutex is poisoned; failing closed",
+            );
+        }
+    };
+    let report = kernel.dispatch_readiness(command_id);
+    match serde_json::to_value(&report) {
+        Ok(v) => ok(&req.id, serde_json::json!({ "readiness": v })),
+        Err(_) => {
+            daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+            fail(&req.id, codes::STORE_UNHEALTHY, "readiness encoding failed")
+        }
+    }
+}
+
+/// A2.0 Gate 2: observe (never authenticate with) OS peer credentials.
+/// SO_PEERCRED proves which UID/PID connected -- never which JS module
+/// produced a request -- so this value is logged for forensics and is
+/// explicitly NOT an authentication decision. Same-UID hostile peers share
+/// the daemon's UID and are indistinguishable here by construction.
+#[cfg(target_os = "linux")]
+fn peer_credentials(stream: &UnixStream) -> Option<(u32, u32, i32)> {
+    use std::os::unix::io::AsRawFd;
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let ret = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if ret == 0 {
+        Some((cred.uid, cred.gid, cred.pid))
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn peer_credentials(_stream: &UnixStream) -> Option<(u32, u32, i32)> {
+    None
 }
 
 fn digest_params(params: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
@@ -750,6 +808,22 @@ impl Drop for ClientSlot<'_> {
 
 fn serve_connection(stream: UnixStream, daemon: SharedDaemon) {
     let _slot = ClientSlot { daemon: &daemon };
+    // Forensic observation only: peer UID/GID/PID authenticate the process,
+    // never the calling JS module. Logged, never trusted for authorization.
+    match peer_credentials(&stream) {
+        Some((uid, gid, pid)) => log_line(
+            "conn-peer",
+            "",
+            "observed",
+            &format!("peer uid={uid} gid={gid} pid={pid} (observed, not authenticated)"),
+        ),
+        None => log_line(
+            "conn-peer",
+            "",
+            "unavailable",
+            "peer credentials unavailable",
+        ),
+    }
     let result = serve_connection_inner(&stream, &daemon);
     if let Err(detail) = result {
         daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
@@ -924,5 +998,28 @@ pub fn serve(listener: UnixListener, daemon: SharedDaemon, shutdown: Arc<AtomicB
             break;
         }
         std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(test)]
+mod peer_tests {
+    use super::peer_credentials;
+    use std::os::unix::net::UnixStream;
+
+    /// A2.0 Gate 2: SO_PEERCRED reports process credentials (uid/gid/pid)
+    /// and nothing about which JS module produced a request. The observed
+    /// peer uid MUST equal our own uid here -- the exact property that
+    /// makes same-UID hostile peers indistinguishable, hence unpreventable
+    /// by peer credentials. This test pins the limitation: if it ever
+    /// fails, the trust model changed and the design docs must be rewritten.
+    #[test]
+    fn peer_credentials_report_uid_not_module_identity() {
+        let (a, _b) = UnixStream::pair().expect("socketpair");
+        let (uid, _gid, _pid) = peer_credentials(&a).expect("SO_PEERCRED available on Linux");
+        let own = unsafe { libc::getuid() };
+        assert_eq!(
+            uid, own,
+            "peer uid equals our own uid: same-UID peers are indistinguishable"
+        );
     }
 }

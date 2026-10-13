@@ -20,8 +20,10 @@
  *   `tag = HMAC-SHA256(capkey, canonical({protocol,id,cmd,params,nonce,ts}))`
  *   over the daemon's ephemeral capability file. The cap key is read from
  *   `options.daemonCapPath`; nonces are fresh 128-bit values per request.
- * - Read-only subcommands (receipt/journal/digest/health/status) need no
- *   authentication and are safe to call without a cap path.
+ * - Read-only subcommands (receipt/journal/digest/health/status/readiness)
+ *   need no authentication and are safe to call without a cap path.
+ *   `readiness` (A2.0 Gate 5) is strictly observational: it reports blocker
+ *   dimensions, issues no token, and can never authorize execution.
  * - There is NEVER a silent fallback to the CLI: a refused daemon request
  *   is returned as `{ ok: true, status: 'refused', ... }` exactly like a
  *   kernel refusal, and transport failures as
@@ -137,7 +139,7 @@ async function invokeDaemonBridge(subcommand, request, options) {
   const o = options || {};
   const socketPath = typeof o.daemonSocket === 'string' && o.daemonSocket !== '' ? o.daemonSocket : null;
   const timeoutMs = Number.isInteger(o.timeoutMs) && o.timeoutMs > 0 ? o.timeoutMs : DEFAULT_TIMEOUT_MS;
-  const allowed = { acquire: true, seal: true, accept: true, receipt: true, journal: true, digest: true, health: true, status: true };
+  const allowed = { acquire: true, seal: true, accept: true, receipt: true, journal: true, digest: true, health: true, status: true, readiness: true };
   if (!allowed[subcommand]) return failTransport('bad-subcommand', 'unknown daemon subcommand');
   if (!socketPath) return failTransport('bridge-misconfigured', 'daemonSocket is required for daemon transport');
   let req;

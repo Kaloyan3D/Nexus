@@ -18,3 +18,33 @@ pub const WITNESS_DDL_V1: &str = "
 CREATE TABLE IF NOT EXISTS witness_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS witness_state (generation_key TEXT PRIMARY KEY, max_epoch INTEGER NOT NULL, store_incarnation TEXT NOT NULL, accepted_json TEXT NOT NULL, baseline_json TEXT, updated_at_utc TEXT NOT NULL);
 ";
+
+/// A2.0 witness-acknowledged dispatch-reservation protocol (migration v2).
+/// Applied idempotently on every witness open; preserves all v1 state.
+///
+/// State machine per command: unseen -> prepared -> acknowledged.
+/// `accepted` in the main store is the middle transition: prepare (witness)
+/// precedes the store commit, acknowledge (witness) follows it. A crash at
+/// any point resolves fail-closed: prepared-without-receipt may only heal
+/// with a byte-identical binding, acknowledged-without-receipt is
+/// reconciliation-required (never blind redispatch), and abandoned prepared
+/// reservations are reaped explicitly without inventing execution success.
+pub const WITNESS_DDL_V2: &str = "
+CREATE TABLE IF NOT EXISTS dispatch_reservations (
+  command_id TEXT PRIMARY KEY,
+  generation_key TEXT NOT NULL,
+  task_instance_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  lease_epoch INTEGER NOT NULL,
+  store_incarnation TEXT NOT NULL,
+  command_digest TEXT NOT NULL,
+  issuance_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  prepared_at_utc TEXT NOT NULL,
+  acknowledged_at_utc TEXT,
+  updated_at_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reservations_generation ON dispatch_reservations (generation_key, state);
+";
+
+pub const WITNESS_SCHEMA_VERSION: i64 = 2;
