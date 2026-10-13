@@ -176,6 +176,15 @@ impl ReceiptStatus {
             Self::AcceptedReservedDispatchDisabled => "accepted-reserved-dispatch-disabled",
         }
     }
+
+    /// Parse a persisted status. A1.1 writes exactly one status; anything
+    /// else on disk means tampering or corruption and must fail closed.
+    pub fn parse_status(s: &str) -> Option<Self> {
+        match s {
+            "accepted-reserved-dispatch-disabled" => Some(Self::AcceptedReservedDispatchDisabled),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

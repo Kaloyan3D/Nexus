@@ -123,21 +123,20 @@ impl crate::store::Store {
         }
         tx.execute("INSERT INTO commands (command_id, task_instance_id, attempt_id, backend, controller_revision, role, mode_id, mode_config_revision_json, payload_json, payload_digest, intent_digest, target_json, snapshot_digest, target_digest, issuance_id, lease_epoch, store_incarnation, command_digest, created_at_utc) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![input.command_id, input.task_instance_id, input.attempt_id, input.backend, input.controller_revision, input.role, input.mode_id, input.mode_config_revision_json, input.payload_json, input.payload_digest, input.intent_digest, input.target_json, input.snapshot_digest, input.target_digest, input.issuance_id, input.lease_epoch as i64, input.store_incarnation, input.command_digest, now_utc_pub()]).map_err(|e| db_fail_pub("insert command", e))?;
-        let event_payload = [
-            "{\"commandDigest\":\"",
-            &input.command_digest,
-            "\",\"commandId\":\"",
-            &input.command_id,
-            "\",\"leaseEpoch\":",
-            &input.lease_epoch.to_string(),
-            "}",
-        ]
-        .concat();
-        tx.execute("INSERT INTO events (generation_key, kind, command_id, payload_json, recorded_at_utc) VALUES (?1, 'command-accepted', ?2, ?3, ?4)", params![gkey, input.command_id, event_payload, now_utc_pub()]).map_err(|e| db_fail_pub("event", e))?;
+        // Structured serialization: command IDs may carry quotes, backslashes,
+        // Unicode, or control characters that manual concatenation would corrupt.
+        let event_payload = serde_json::json!({
+            "commandDigest": input.command_digest,
+            "commandId": input.command_id,
+            "leaseEpoch": input.lease_epoch,
+        });
+        let event_payload_json =
+            serde_json::to_string(&event_payload).map_err(|e| db_fail_pub("encode", e))?;
+        tx.execute("INSERT INTO events (generation_key, kind, command_id, payload_json, recorded_at_utc) VALUES (?1, 'command-accepted', ?2, ?3, ?4)", params![gkey, input.command_id, event_payload_json, now_utc_pub()]).map_err(|e| db_fail_pub("event", e))?;
         let seq = tx.last_insert_rowid();
         let accepted_at = now_utc_pub();
-        tx.execute("INSERT INTO receipts (command_id, command_digest, task_instance_id, attempt_id, lease_epoch, store_incarnation, target_digest, snapshot_digest, issuance_id, status, event_seq, accepted_at_utc) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'accepted-reserved-dispatch-disabled', ?10, ?11)",
-            params![input.command_id, input.command_digest, input.task_instance_id, input.attempt_id, input.lease_epoch as i64, input.store_incarnation, input.target_digest, input.snapshot_digest, input.issuance_id, seq, accepted_at]).map_err(|e| db_fail_pub("receipt", e))?;
+        tx.execute("INSERT INTO receipts (command_id, command_digest, task_instance_id, attempt_id, lease_epoch, store_incarnation, target_digest, snapshot_digest, issuance_id, status, event_seq, accepted_at_utc) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![input.command_id, input.command_digest, input.task_instance_id, input.attempt_id, input.lease_epoch as i64, input.store_incarnation, input.target_digest, input.snapshot_digest, input.issuance_id, ReceiptStatus::AcceptedReservedDispatchDisabled.as_str(), seq, accepted_at]).map_err(|e| db_fail_pub("receipt", e))?;
         tx.commit().map_err(|e| db_fail_pub("commit", e))?;
         Ok(AcceptOutcome {
             receipt: CommandReceiptV1 {
@@ -164,23 +163,26 @@ impl crate::store::Store {
             "SELECT command_digest, task_instance_id, attempt_id, lease_epoch, store_incarnation, target_digest, snapshot_digest, issuance_id, status, event_seq, accepted_at_utc FROM receipts WHERE command_id = ?1",
             params![command_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?)),
         ).optional().map_err(|e| db_fail_pub("read receipt", e))?;
-        Ok(row.map(
-            |(digest, task, attempt, epoch, si, td, sd, iss, _status, seq, at)| CommandReceiptV1 {
-                schema_version: CONTRACT_SCHEMA_VERSION,
-                command_id: command_id.to_owned(),
-                command_digest: digest,
-                task_instance_id: task,
-                attempt_id: attempt,
-                lease_epoch: epoch as u64,
-                store_incarnation: si,
-                target_digest: td,
-                snapshot_digest: sd,
-                issuance_id: iss,
-                status: ReceiptStatus::AcceptedReservedDispatchDisabled,
-                event_seq: seq,
-                accepted_at_utc: at,
-            },
-        ))
+        match row {
+            Some((digest, task, attempt, epoch, si, td, sd, iss, status, seq, at)) => {
+                Ok(Some(CommandReceiptV1 {
+                    schema_version: CONTRACT_SCHEMA_VERSION,
+                    command_id: command_id.to_owned(),
+                    command_digest: digest,
+                    task_instance_id: task,
+                    attempt_id: attempt,
+                    lease_epoch: epoch as u64,
+                    store_incarnation: si,
+                    target_digest: td,
+                    snapshot_digest: sd,
+                    issuance_id: iss,
+                    status: parse_receipt_status(&status)?,
+                    event_seq: seq,
+                    accepted_at_utc: at,
+                }))
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn list_events(&self, generation: &str) -> KernelResult<Vec<KernelEventV1>> {
@@ -294,6 +296,17 @@ impl crate::store::Store {
         Ok(self.conn_mut().last_insert_rowid())
     }
 }
+/// A1.1 writes exactly one receipt status. Any other persisted value means
+/// the database was tampered with or corrupted: fail closed, never coerce.
+fn parse_receipt_status(stored: &str) -> KernelResult<ReceiptStatus> {
+    ReceiptStatus::parse_status(stored).ok_or_else(|| {
+        KernelError::new(
+            KernelErrorCode::StoreCorrupt,
+            "persisted receipt status is unknown or malformed; failing closed",
+        )
+    })
+}
+
 #[allow(mismatched_lifetime_syntaxes)]
 fn read_receipt_in(tx: &rusqlite::Transaction, command_id: &str) -> KernelResult<CommandReceiptV1> {
     let row: Option<ReceiptRow> = tx.query_row(
@@ -301,7 +314,7 @@ fn read_receipt_in(tx: &rusqlite::Transaction, command_id: &str) -> KernelResult
         params![command_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?)),
     ).optional().map_err(|e| db_fail_pub("read receipt", e))?;
     match row {
-        Some((digest, task, attempt, epoch, si, td, sd, iss, _status, seq, at)) => {
+        Some((digest, task, attempt, epoch, si, td, sd, iss, status, seq, at)) => {
             Ok(CommandReceiptV1 {
                 schema_version: CONTRACT_SCHEMA_VERSION,
                 command_id: command_id.to_owned(),
@@ -313,7 +326,7 @@ fn read_receipt_in(tx: &rusqlite::Transaction, command_id: &str) -> KernelResult
                 target_digest: td,
                 snapshot_digest: sd,
                 issuance_id: iss,
-                status: ReceiptStatus::AcceptedReservedDispatchDisabled,
+                status: parse_receipt_status(&status)?,
                 event_seq: seq,
                 accepted_at_utc: at,
             })
