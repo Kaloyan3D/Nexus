@@ -143,6 +143,7 @@ function Test-AihTaskIdentity {
     return [pscustomobject]@{
         exists = $true; taskId = [string]$found.taskId; taskInstanceId = $actualInstanceId
         boundEngine = if ($null -ne $found.PSObject.Properties['boundEngine']) { [string]$found.boundEngine } else { $null }
+        preparationAuthority = if ($null -ne $found.PSObject.Properties['controllerPreparationAuthority']) { $found.controllerPreparationAuthority } else { $null }
         instanceMatches = $isMatch; expectedTaskInstanceId = $TaskInstanceId
     }
 }
@@ -196,6 +197,21 @@ function Resolve-AihNextTaskId {
     return $taskId
 }
 
+# The native authority document is unchanged; creation and interrupted
+# session allocation recovery share this writer.
+function Write-AihInitialTaskAuthority {
+    param([string]$Run, [object]$Task)
+    $ccv2Authority = [ordered]@{
+        schemaVersion = 1; origin = 'NATIVE'; taskId = $Task.taskId; taskInstanceId = $Task.taskInstanceId
+        createdAtUtc = $task.createdAtUtc; revision = 0; constraints = @(); decisions = @()
+        progress = [ordered]@{ completedMilestones = @(); currentMilestone = $null; remainingMilestones = @() }
+        continuation = [ordered]@{ nextAction = $null; unresolvedQuestions = @(); recentUserIntent = $null }
+        failures = [ordered]@{ activeFailures = @(); rejectedHypotheses = @() }
+        verification = [ordered]@{ outcomes = @() }; mutations = @()
+    }
+    Write-AihAtomicJson (Join-Path $run 'ccv2-authority.json') $ccv2Authority
+}
+
 function New-AihTask {
     param(
         [Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$Description,
@@ -203,12 +219,39 @@ function New-AihTask {
         [ValidateSet('low','normal','high','critical')][string]$Risk = 'normal', [string]$BaseCommit,
         [switch]$ReviewRequested,
         [ValidateSet('dual','muse')][string]$Engine = 'dual',
-        [ValidateSet('deterministic','muse_main','engineer_normal','engineer_deep','reviewer','solver','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClassOverride
+        [ValidateSet('deterministic','muse_main','engineer_normal','engineer_deep','reviewer','solver','deepseek_normal','deepseek_deep','codex_review','codex_solve')][string]$ExecutionClassOverride,
+        [string]$ControllerSessionKey, [string]$ControllerProfileId, [object]$ControllerPreparationAuthority
     )
     $layout = Initialize-AihTaskLedger $Workspace
     $mutex=[Threading.Mutex]::new($false,(Get-AihLedgerMutexName $Workspace));$taken=$false
     try{try{$taken=$mutex.WaitOne(30000)}catch [Threading.AbandonedMutexException]{$taken=$true};if(-not$taken){throw 'Timed out waiting for the task-ledger lock.'}
     $ledger = Read-AihTaskLedger $Workspace
+    if (-not [string]::IsNullOrWhiteSpace($ControllerSessionKey)) {
+        $sessionAllocations = @($ledger.tasks | Where-Object { $null -ne $_.PSObject.Properties['controllerSessionKey'] -and $_.controllerSessionKey -eq $ControllerSessionKey })
+        if ($sessionAllocations.Count -gt 1) { throw 'Conflicting controller session allocations.' }
+        if ($sessionAllocations.Count -eq 1) {
+            $existing = $sessionAllocations[0]
+            if ($existing.boundEngine -ne $Engine -or $existing.controllerProfileId -ne $ControllerProfileId) { throw 'Conflicting controller session allocation authority.' }
+            foreach ($field in @('profile','engine','provider','model')) {
+                if ($null -eq $existing.PSObject.Properties['controllerPreparationAuthority'] -or
+                    $null -eq $ControllerPreparationAuthority -or
+                    [string]$existing.controllerPreparationAuthority.$field -ne [string]$ControllerPreparationAuthority.$field) {
+                    throw 'Conflicting controller session allocation target.'
+                }
+            }
+            # A killed creator can leave only the ledger committed. Repair the
+            # normal artifacts through the same creation path before returning.
+            $run = Join-Path $layout.Runs $existing.taskId
+            New-Item -ItemType Directory -Force -Path $run | Out-Null
+            if (-not (Test-Path -LiteralPath (Join-Path $run 'manifest.json'))) { Write-AihAtomicJson (Join-Path $run 'manifest.json') $existing }
+            if (-not (Test-Path -LiteralPath (Join-Path $run 'ccv2-authority.json'))) {
+                if ([int]$existing.attempt -ne 0 -or [string]$existing.status -ne 'ready') { throw 'Missing authority for an already executed controller session allocation.' }
+                $task = $existing
+                Write-AihInitialTaskAuthority -Run $run -Task $task
+            }
+            return $existing
+        }
+    }
     foreach ($dependency in $DependsOn) { if (-not @($ledger.tasks | Where-Object taskId -eq $dependency).Count) { throw "Unknown task dependency: $dependency" } }
     if ([string]::IsNullOrWhiteSpace($BaseCommit)) {
         try { $BaseCommit = (& git -C $layout.Workspace rev-parse HEAD 2>$null | Select-Object -First 1).Trim() } catch { $BaseCommit = $null }
@@ -226,6 +269,11 @@ function New-AihTask {
         worktree = $null; failureSignatures = @(); codexCalls = 0; completionAuthority = 'controller'
         createdAtUtc = [DateTime]::UtcNow.ToString('o'); updatedAtUtc = [DateTime]::UtcNow.ToString('o'); completedAtUtc = $null
     }
+    if (-not [string]::IsNullOrWhiteSpace($ControllerSessionKey)) {
+        $task.controllerSessionKey = $ControllerSessionKey
+        $task.controllerProfileId = $ControllerProfileId
+        $task.controllerPreparationAuthority = $ControllerPreparationAuthority
+    }
     $ledger.tasks = @($ledger.tasks) + @([pscustomobject]$task)
     $ledger.nextSequence = [int]($taskId -replace '^TASK-', '') + 1
     Write-AihAtomicJson $layout.Tasks $ledger
@@ -240,6 +288,12 @@ function New-AihTask {
         New-Item -ItemType Directory -Force -Path $run | Out-Null
     }
     Write-AihAtomicJson (Join-Path $run 'manifest.json') $task
+    # CCV2-M01 (R1.3): a task created by this controller is NATIVE from
+    # inception. Its CCv2 authority record starts with every category
+    # authoritative-and-empty (COMPLETE) and changes only through typed
+    # controller mutations (config/ContextTaskAuthorityV2.cjs). Tasks without
+    # this record are pre-M01 and bootstrap as LEGACY_BOOTSTRAP.
+    Write-AihInitialTaskAuthority -Run $run -Task $task
     Add-AihJsonLine $layout.Decisions ([ordered]@{ timestampUtc = [DateTime]::UtcNow.ToString('o'); kind = 'task-created'; taskId = $taskId; taskInstanceId = $taskInstanceId; boundEngine = $Engine; dependencies = @($DependsOn) })
     [pscustomobject]$task
     }finally{if($taken){$mutex.ReleaseMutex()};$mutex.Dispose()}

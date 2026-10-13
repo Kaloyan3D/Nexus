@@ -1,0 +1,692 @@
+
+=== restriction-before.log ===
+FAIL: A10 apply refuses with the production disabled code
+FAIL: A02 append refuses with the production disabled code
+FAIL: A02 retry refuses with the production disabled code
+FAIL: A02 intent persist refuses with the production disabled code
+FAIL: A02 intent freeze refuses with the production disabled code
+FAIL: A02 attempt persist refuses with the production disabled code
+FAIL: A03 checkpoint persist refuses with the production disabled code
+FAIL: A04 sealed persist refuses with the production disabled code
+FAIL: A11 reserve refuses with the production disabled code
+FAIL: A11 commit refuses with the production disabled code
+FAIL: A11 supersede refuses with the production disabled code
+FAIL: A11 apply current refuses with the production disabled code
+FAIL: A11 default head repair refuses with the production disabled code
+FAIL: A11 explicit head repair refuses with the production disabled code
+FAIL: A13 recovery refuses with the production disabled code
+FAIL: A13 resume refuses with the production disabled code
+FAIL: M01 open writer refuses with the production disabled code
+FAIL: M01 replay refuses with the production disabled code
+FAIL: refusal precedes input getters/callbacks and IO
+PASS: persisted intent remains byte-identical
+PASS: no writer creates or repairs artifacts
+FAIL: valid A10 request refuses with the production disabled code
+FAIL: valid A10 refusal cannot append, flush or acquire a lock
+PASS: read-only generation inspection remains callable
+PASS: read-only inspect does not initialize a head
+FAIL: producer flag cannot enable production writes: {}
+FAIL: producer flag cannot enable production writes: {"NEXUS_CCV2_PRODUCER":"on"}
+FAIL: producer flag cannot enable production writes: {"NEXUS_CCV2_PRODUCER":"true"}
+FAIL: controller installs read-only session observer
+FAIL: event/restart observer never flushes or writes memory
+PASS: live pressure/projection reader remains available
+FAIL: read-only observer does not claim a producer/checkpoint
+FAIL: shipped policy exists
+Restricted production: passed=5 failed=28
+
+=== restriction-after.log ===
+PASS: A10 apply refuses with the production disabled code
+PASS: A02 append refuses with the production disabled code
+PASS: A02 retry refuses with the production disabled code
+PASS: A02 intent persist refuses with the production disabled code
+PASS: A02 intent freeze refuses with the production disabled code
+PASS: A02 attempt persist refuses with the production disabled code
+PASS: A03 checkpoint persist refuses with the production disabled code
+PASS: A04 sealed persist refuses with the production disabled code
+PASS: A11 reserve refuses with the production disabled code
+PASS: A11 commit refuses with the production disabled code
+PASS: A11 supersede refuses with the production disabled code
+PASS: A11 apply current refuses with the production disabled code
+PASS: A11 default head repair refuses with the production disabled code
+PASS: A11 explicit head repair refuses with the production disabled code
+PASS: A13 recovery refuses with the production disabled code
+PASS: A13 resume refuses with the production disabled code
+PASS: M01 open writer refuses with the production disabled code
+PASS: M01 replay refuses with the production disabled code
+PASS: refusal precedes input getters/callbacks and IO
+PASS: persisted intent remains byte-identical
+PASS: no writer creates or repairs artifacts
+PASS: valid A10 request refuses with the production disabled code
+PASS: valid A10 refusal cannot append, flush or acquire a lock
+PASS: fresh process recovery/resume/finalization and env flags cannot bypass guards
+PASS: direct PowerShell V2 writer fails closed before task/file access
+PASS: restart and PowerShell attempts preserve stored artifact
+PASS: v1 mutation cannot adopt a persisted v2 operation
+PASS: A13 explicit v1 retains no-op delegation to existing DSH path
+PASS: production readers accept authentic old checkpoint and branded durable intent
+PASS: persisted branded operation append refuses with the production disabled code
+PASS: persisted generation finalization refuses with the production disabled code
+PASS: persisted generation resume refuses with the production disabled code
+PASS: persisted generation recovery refuses with the production disabled code
+PASS: authentic old reservation/checkpoint/operation/head bytes preserved without false success
+PASS: A13 environment selection v2 refuses with the production disabled code
+PASS: A13 environment selection 1 refuses with the production disabled code
+PASS: A13 environment selection true refuses with the production disabled code
+PASS: A13 environment selection yes refuses with the production disabled code
+PASS: A13 explicit v2 selection refuses with the production disabled code
+PASS: read-only generation inspection remains callable
+PASS: read-only inspect does not initialize a head
+PASS: producer flag cannot enable production writes: {}
+PASS: producer flag cannot enable production writes: {"NEXUS_CCV2_PRODUCER":"on"}
+PASS: producer flag cannot enable production writes: {"NEXUS_CCV2_PRODUCER":"true"}
+PASS: controller installs read-only session observer
+PASS: event/restart observer never flushes or writes memory
+PASS: live pressure/projection reader remains available
+PASS: read-only observer does not claim a producer/checkpoint
+PASS: shipped policy is frozen and disabled
+Restricted production: passed=49 failed=0
+
+=== restricted-projection.log ===
+PASS: synthetic certification satisfies unchanged production authority
+PASS: DSH auxiliary compaction request retains the original stream
+PASS: production mutation policy stays disabled during projection
+PASS: production host compiles a valid request with mutation disabled
+PASS: original request remains byte-identical
+PASS: request routing, tools, output and abort semantics preserved
+PASS: original system contract preserved
+PASS: native current user retained once
+PASS: projection never writes or repairs durable memory
+PASS: read-only host restart remains functional
+PASS: stale/missing native tail falls back without a derived request
+PASS: fallback/restart leave stored artifacts byte-identical
+PASS: missing checkpoint uses unchanged legacy request
+Restricted projection: passed=13 failed=0
+
+=== restricted-dsh.log ===
+PASS: native summarizer receives selected history
+PASS: CCv2 durable policy stays disabled while native compaction runs
+PASS: real DSH compactor completes once
+PASS: native compaction replaces selected history and retains tail
+PASS: native lifecycle and checkpoint provenance preserved
+PASS: native compaction can flush through the supported DSH barrier
+PASS: native compaction survives real session restore with CCv2 writes disabled
+Restricted DSH compaction: passed=7 failed=0
+
+=== restricted-install.log ===
+PASS: muse installed closure contains fixed guard and no research helper
+PASS: controller installed closure contains fixed guard and no research helper
+PASS: engineering installed closure contains fixed guard and no research helper
+PASS: deepseek installed closure contains fixed guard and no research helper
+PASS: actual installed controller compositions validate with the restricted dependency graph
+PASS: installed controller policy remains disabled
+PASS: installed direct mutation authority refuses
+PASS: three-suite harness dispatch subset passes
+PASS: harness keeps production guard/projection proofs on shipped policy
+PASS: harness labels legacy active algorithm results as research only
+PASS: harness report cannot imply active durable support
+Restricted installation: passed=11 failed=0 (Linux fixture only)
+
+=== known-red-fencing.log ===
+RESEARCH ONLY: private copied checkout; unfinished active algorithms, NOT production support.
+Fixture Git identity assignments omitted: 16
+PASS: valid owner still commits on real DSH
+PASS: after-renew: stale renewal refuses
+PASS: after-renew: sequential stale release refuses
+PASS: after-renew: successor token survives A10 finally
+FAIL: after-renew: no append after takeover
+FAIL: after-renew: no durable write after takeover
+FAIL: after-renew: no stale successful commit
+PASS: after-renew: fresh ownership recovery
+PASS: after-renew: recovered owner releases
+PASS: before-first-append: stale renewal refuses
+PASS: before-first-append: sequential stale release refuses
+PASS: before-first-append: successor token survives A10 finally
+FAIL: before-first-append: no append after takeover
+FAIL: before-first-append: no durable write after takeover
+FAIL: before-first-append: no stale successful commit
+PASS: before-first-append: fresh ownership recovery
+PASS: before-first-append: recovered owner releases
+PASS: before-second-append: stale renewal refuses
+PASS: before-second-append: sequential stale release refuses
+PASS: before-second-append: successor token survives A10 finally
+FAIL: before-second-append: no append after takeover
+FAIL: before-second-append: no durable write after takeover
+FAIL: before-second-append: no stale successful commit
+PASS: before-second-append: fresh ownership recovery
+PASS: before-second-append: recovered owner releases
+PASS: before-flush: stale renewal refuses
+PASS: before-flush: sequential stale release refuses
+PASS: before-flush: successor token survives A10 finally
+PASS: before-flush: no append after takeover
+FAIL: before-flush: no durable write after takeover
+FAIL: before-flush: no stale successful commit
+PASS: before-flush: fresh ownership recovery
+PASS: before-flush: recovered owner releases
+PASS: after-flush: stale renewal refuses
+PASS: after-flush: sequential stale release refuses
+PASS: after-flush: successor token survives A10 finally
+PASS: after-flush: no append after takeover
+PASS: after-flush: no durable write after takeover
+FAIL: after-flush: no stale successful commit
+PASS: after-flush: fresh ownership recovery
+PASS: after-flush: recovered owner releases
+Safety checks: 29 PASS, 12 FAIL
+
+=== known-red-short-lease.log ===
+RESEARCH ONLY: private copied checkout; unfinished active algorithms, NOT production support.
+Fixture Git identity assignments omitted: 16
+{"name":"renew-authority-succeeded","at":"2026-10-08T16:36:31.349Z","result":{"renewed":true,"expiresAtUtc":"2026-10-08T16:36:35.0993750Z","reason":null},"lock":{"schemaVersion":2,"taskId":"TASK-0001","taskInstanceId":"task_28a86a1860b14db5a851c595c870acf5","sessionId":"sess-a10","operationId":"ccop_a1d3487c4247df27a0b8c282ec9a1081","ownerId":"3281af63a6094a69a22a572dfb0c5aca","ownerPid":113167,"ownerProcessStartUtc":"2026-10-08T16:36:29.2212466Z","acquiredAtUtc":"2026-10-08T16:36:30.0280351Z","renewedAtUtc":"2026-10-08T16:36:31.0993750Z","expiresAtUtc":"2026-10-08T16:36:35.0993750Z"}}
+{"name":"other-owner-took-over-before-caller-resumed","at":"2026-10-08T16:36:36.539Z","result":{"acquired":true,"ownerId":"0da449e4352d460280d14e68d17cabb4","leaseSeconds":60,"reason":null}}
+{"name":"post-renew-resume-result","at":"2026-10-08T16:36:37.493Z","status":"committed","mutated":true,"eventCountBefore":7,"eventCountAfter":8,"lockOwnerIsTaker":true}
+{"name":"verdict","at":"2026-10-08T16:36:37.493Z","demonstratedStaleOwnerMutation":true,"concurrentCorruptionTested":false}
+{"name":"diagnostic-error","at":"2026-10-08T16:36:38.345Z","error":"AssertionError [ERR_ASSERTION]: An owner that lost its lease before resuming must not mutate the session\n\ntrue !== false\n\n    at main (/tmp/ccv2-research-only-OIA3ve/tests/diagnostics/ShortLeaseOwnership.cjs:87:10)"}
+
+=== research-ContextRecoveryV2XProc.log ===
+RESEARCH ONLY: private copied checkout; unfinished active algorithms, NOT production support.
+Fixture Git identity assignments omitted: 16
+
+--- XPROC iter 1: concurrent identical apply converges (one mutation) ---
+PASS: iter 1: G1 reserved
+PASS: iter 1: both appliers converge (A={"ok":true,"mode":"apply-current","status":"committed","mutated":true,"eventsLen":8,"activeResult":{"schemaVersion":1,"taskId":"TASK-0001","taskInstanceId":"task_e1479fc0a3b542959b5d7e15938d09f4","ses B={"ok":true,"mode":"apply-current","status":"recovered","mutated":false,"eventsLen":8,"activeResult":{"schemaVersion":1,"taskId":"TASK-0001","taskInstanceId":"task_e1479fc0a3b542959b5d7e15938d09f4","se)
+PASS: iter 1: at most one actual mutation (got 1)
+PASS: iter 1: one generation identity consumed
+PASS: iter 1: no duplicate application surface (op citations<=2, got 1)
+PASS: iter 1: no lock residue
+
+--- XPROC iter 2: concurrent identical apply converges (one mutation) ---
+PASS: iter 2: G1 reserved
+PASS: iter 2: both appliers converge (A={"ok":true,"mode":"apply-current","status":"committed","mutated":true,"eventsLen":8,"activeResult":{"schemaVersion":1,"taskId":"TASK-0001","taskInstanceId":"task_e1479fc0a3b542959b5d7e15938d09f4","ses B={"ok":true,"mode":"apply-current","status":"recovered","mutated":false,"eventsLen":8,"activeResult":{"schemaVersion":1,"taskId":"TASK-0001","taskInstanceId":"task_e1479fc0a3b542959b5d7e15938d09f4","se)
+PASS: iter 2: at most one actual mutation (got 1)
+PASS: iter 2: one generation identity consumed
+PASS: iter 2: no duplicate application surface (op citations<=2, got 1)
+PASS: iter 2: no lock residue
+
+--- XPROC iter 3: concurrent identical apply converges (one mutation) ---
+PASS: iter 3: G1 reserved
+PASS: iter 3: both appliers converge (A={"ok":true,"mode":"apply-current","status":"committed","mutated":true,"eventsLen":8,"activeResult":{"schemaVersion":1,"taskId":"TASK-0001","taskInstanceId":"task_e1479fc0a3b542959b5d7e15938d09f4","ses B={"ok":true,"mode":"apply-current","status":"recovered","mutated":false,"eventsLen":8,"activeResult":{"schemaVersion":1,"taskId":"TASK-0001","taskInstanceId":"task_e1479fc0a3b542959b5d7e15938d09f4","se)
+PASS: iter 3: at most one actual mutation (got 1)
+PASS: iter 3: one generation identity consumed
+PASS: iter 3: no duplicate application surface (op citations<=2, got 1)
+PASS: iter 3: no lock residue
+
+--- XPROC iter 1: apply-vs-supersede, apply wins (supersede refuses) ---
+PASS: iter 1: apply wins (got committed)
+FAIL: iter 1: late supersede refuses (got {"ok":true,"mode":"supersede","outcome":"SUPERSEDED"})
+A12 XPROC HARNESS FAIL: AssertionError [ERR_ASSERTION]: iter 1: late supersede refuses (got {"ok":true,"mode":"supersede","outcome":"SUPERSEDED"})
+    at check (/tmp/ccv2-research-only-Ee8KTy/tests/ContextRecoveryV2XProc.Tests.cjs:44:10)
+    at main (/tmp/ccv2-research-only-Ee8KTy/tests/ContextRecoveryV2XProc.Tests.cjs:245:9)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+
+=== ContextCompactionF2Prod-complete.log ===
+PASS: F2-missing: 0 replacement appends
+PASS: F2-missing: state != applied (got blocked)
+PASS: F2-missing: current work remains present
+PASS: F2-legacy: starts checkpoint-ready without operation
+PASS: F2-legacy: 0 replacement appends
+PASS: F2-legacy: transitions to blocked (got blocked)
+PASS: F2-session: 0 replacement appends for wrong sessionId
+PASS: F2-session: state != applied (got blocked)
+PASS: F2-race setup: Task B events present
+PASS: F2-race: 0 Task B events adopted into the frozen range
+Exception: /home/kaloyan/Projects/Nexus-ccv2-safe-production-scope/scripts/ContextLifecycle.ps1:1439
+Line |
+1439 |          throw 'Operation refused: the exact validated segment plan mu …
+     |          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | Operation refused: the exact validated segment plan must be persisted
+     | (no silent single-span fallback). (KEEP.)
+PASS: F2-race: boundary-violating freeze is refused
+PASS: F2-crash: valid operation applies (got applied)
+PASS: F2-crash: checkpoint in projection
+PASS: F2-crash: Task A bulk shadowed
+PASS: F2-crash: Task B survives exactly once
+PASS: F2-matrix[wrong-operationId]: 0 replacement appends
+PASS: F2-matrix[wrong-operationId]: state != applied (got blocked)
+PASS: F2-matrix[wrong-operationId]: work unchanged
+PASS: F2-matrix[wrong-taskInstanceId]: 0 replacement appends
+PASS: F2-matrix[wrong-taskInstanceId]: state != applied (got apply-pending)
+PASS: F2-matrix[wrong-taskInstanceId]: work unchanged
+PASS: F2-matrix[wrong-taskId]: 0 replacement appends
+PASS: F2-matrix[wrong-taskId]: state != applied (got blocked)
+PASS: F2-matrix[wrong-taskId]: work unchanged
+PASS: F2-matrix[wrong-workspace]: 0 replacement appends
+PASS: F2-matrix[wrong-workspace]: state != applied (got blocked)
+PASS: F2-matrix[wrong-workspace]: work unchanged
+PASS: F2-matrix[wrong-repository]: 0 replacement appends
+PASS: F2-matrix[wrong-repository]: state != applied (got blocked)
+PASS: F2-matrix[wrong-repository]: work unchanged
+PASS: F2-matrix[wrong-checkout]: 0 replacement appends
+PASS: F2-matrix[wrong-checkout]: state != applied (got blocked)
+PASS: F2-matrix[wrong-checkout]: work unchanged
+PASS: F2-matrix[wrong-checkpoint]: 0 replacement appends
+PASS: F2-matrix[wrong-checkpoint]: state != applied (got blocked)
+PASS: F2-matrix[wrong-checkpoint]: work unchanged
+PASS: F2-matrix[duplicate-seq]: 0 replacement appends
+PASS: F2-matrix[duplicate-seq]: state != applied (got blocked)
+PASS: F2-matrix[duplicate-seq]: work unchanged
+PASS: F2-matrix[unordered-seqs]: 0 replacement appends
+PASS: F2-matrix[unordered-seqs]: state != applied (got blocked)
+PASS: F2-matrix[unordered-seqs]: work unchanged
+PASS: F2-matrix[beyond-boundary]: 0 replacement appends
+PASS: F2-matrix[beyond-boundary]: state != applied (got blocked)
+PASS: F2-matrix[beyond-boundary]: work unchanged
+PASS: F2-matrix[wrong-start]: 0 replacement appends
+PASS: F2-matrix[wrong-start]: state != applied (got blocked)
+PASS: F2-matrix[wrong-start]: work unchanged
+PASS: F2-matrix[wrong-end]: 0 replacement appends
+PASS: F2-matrix[wrong-end]: state != applied (got blocked)
+PASS: F2-matrix[wrong-end]: work unchanged
+PASS: F2-matrix[union-mismatch]: 0 replacement appends
+PASS: F2-matrix[union-mismatch]: state != applied (got blocked)
+PASS: F2-matrix[union-mismatch]: work unchanged
+PASS: F2-matrix[endpoint-mismatch]: 0 replacement appends
+PASS: F2-matrix[endpoint-mismatch]: state != applied (got blocked)
+PASS: F2-matrix[endpoint-mismatch]: work unchanged
+PASS: F2-matrix[foreign-seq]: 0 replacement appends
+PASS: F2-matrix[foreign-seq]: state != applied (got blocked)
+PASS: F2-matrix[foreign-seq]: work unchanged
+PASS: F2-matrix[missing-segments]: 0 replacement appends
+PASS: F2-matrix[missing-segments]: state != applied (got blocked)
+PASS: F2-matrix[missing-segments]: work unchanged
+PASS: F2-matrix[malformed-json]: 0 replacement appends
+PASS: F2-matrix[malformed-json]: state != applied (got blocked)
+PASS: F2-matrix[malformed-json]: work unchanged
+PASS: F2-matrix[operationId-mismatch-readable]: 0 replacement appends
+PASS: F2-matrix[operationId-mismatch-readable]: state != applied (got blocked)
+PASS: F2-matrix[operationId-mismatch-readable]: work unchanged
+RESULT: 69 F2 production assertions passed (69 total assertions).
+
+=== ContextApplyLockAuthority.log ===
+PASS: fixture keeps real mutex held until explicit release
+PASS: timeout must fail closed without executing critical section
+PASS: mutex construction failure must fail closed
+Exception: /home/kaloyan/Projects/Nexus-ccv2-safe-production-scope/scripts/ContextLifecycle.ps1:1679
+Line |
+1679 |  … t $taken) { throw "Compaction lock mutex busy: refusing unlocked acti …
+     |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | Compaction lock mutex busy: refusing unlocked action (KEEP).
+PASS: stale release cannot unlink successor after takeover
+
+=== harness-reporting.log ===
+PASS: report records schema, result, and process outcome
+PASS: report aggregates assertion totals and suite count
+PASS: report records harness and suite durations
+PASS: PASS aggregation uses explicit assertion lines
+PASS: report writes to an explicitly supplied alternate location
+PASS: raw textual log is stored next to the report
+PASS: machine-readable report round-trips with exit, totals, and suites
+PASS: structured report links its durable raw log
+PASS: an invalid report target fails explicitly
+RESULT: 9 structured harness-report assertions passed.
+
+=== research-ps-v2.log ===
+RESEARCH ONLY: private copied checkout; unfinished active algorithms, NOT production support.
+Fixture Git identity assignments omitted: 16
+PASS: V2 operationId carries the ccop_ prefix
+PASS: same checkpoint: generation 1 != generation 2
+PASS: same generation: checkpoint A != checkpoint B
+PASS: V2 derivation is deterministic
+PASS: V1 and V2 IDs never collide (separate domain)
+PASS: Unicode/path-like V2 identity is deterministic
+PASS: anchor binds operation, generation, and segment position
+PASS: anchor carries no payload of any kind
+PASS: PS: 1 payload + 1 continuation is valid
+PASS: PS: 1 payload only is valid
+PASS: PS: 0 payload rejected
+PASS: PS: 2 payloads rejected
+PASS: PS: unknown role rejected
+PASS: PS: unordered segments rejected
+PASS: PS: overlapping source sets rejected
+PASS: PS: boundary violation rejected
+PASS: PS: tampered operationId rejected (derived identity, not free text)
+PASS: PS: V1 schemaVersion never reinterpreted as V2
+PASS: PS: unknown lifecycle rejected
+PASS: PS: session mismatch rejected
+PASS: PS: unknown top-level field rejected closed-world (A05H H1)
+PASS: PS: unknown segment field rejected closed-world (A05H H1)
+PASS: PS: frozen operation persists schemaVersion 2
+PASS: PS: frozen operationId is the derived identity
+PASS: PS: frozen operation is durably readable (read-back proof)
+PASS: PS: frozen roles persist verbatim
+PASS: PS: retry reuses the same frozen operation
+PASS: PS: retry never widens the frozen source set
+PASS: PS: a different generation cannot adopt the frozen file (KEEP)
+PASS: PS: V2 freeze never writes the V1 operation file
+RESULT: 30 CCV2-A02 PowerShell assertions passed.
+
+=== selector-before.log ===
+PASS: A10 apply refuses with the production disabled code
+PASS: A02 append refuses with the production disabled code
+PASS: A02 retry refuses with the production disabled code
+PASS: A02 intent persist refuses with the production disabled code
+PASS: A02 intent freeze refuses with the production disabled code
+PASS: A02 attempt persist refuses with the production disabled code
+PASS: A03 checkpoint persist refuses with the production disabled code
+PASS: A04 sealed persist refuses with the production disabled code
+PASS: A11 reserve refuses with the production disabled code
+PASS: A11 commit refuses with the production disabled code
+PASS: A11 supersede refuses with the production disabled code
+PASS: A11 apply current refuses with the production disabled code
+PASS: A11 default head repair refuses with the production disabled code
+PASS: A11 explicit head repair refuses with the production disabled code
+PASS: A13 recovery refuses with the production disabled code
+PASS: A13 resume refuses with the production disabled code
+PASS: M01 open writer refuses with the production disabled code
+PASS: M01 replay refuses with the production disabled code
+PASS: refusal precedes input getters/callbacks and IO
+PASS: persisted intent remains byte-identical
+PASS: no writer creates or repairs artifacts
+PASS: valid A10 request refuses with the production disabled code
+PASS: valid A10 refusal cannot append, flush or acquire a lock
+PASS: fresh process recovery/resume/finalization and env flags cannot bypass guards
+PASS: direct PowerShell V2 writer fails closed before task/file access
+PASS: restart and PowerShell attempts preserve stored artifact
+PASS: v1 mutation cannot adopt a persisted v2 operation
+PASS: A13 explicit v1 retains no-op delegation to existing DSH path
+PASS: production readers accept authentic old checkpoint and branded durable intent
+PASS: persisted branded operation append refuses with the production disabled code
+PASS: persisted generation finalization refuses with the production disabled code
+PASS: persisted generation resume refuses with the production disabled code
+PASS: persisted generation recovery refuses with the production disabled code
+PASS: authentic old reservation/checkpoint/operation/head bytes preserved without false success
+PASS: A13 environment selection v2 refuses with the production disabled code
+PASS: A13 environment selection 1 refuses with the production disabled code
+PASS: A13 environment selection true refuses with the production disabled code
+PASS: A13 environment selection yes refuses with the production disabled code
+PASS: A13 explicit v2 selection refuses with the production disabled code
+FAIL: changing repair selector cannot authorize head mutation refuses with the production disabled code
+PASS: read-only generation inspection remains callable
+PASS: read-only inspect does not initialize a head
+PASS: producer flag cannot enable production writes: {}
+PASS: producer flag cannot enable production writes: {"NEXUS_CCV2_PRODUCER":"on"}
+PASS: producer flag cannot enable production writes: {"NEXUS_CCV2_PRODUCER":"true"}
+PASS: controller installs read-only session observer
+PASS: event/restart observer never flushes or writes memory
+PASS: live pressure/projection reader remains available
+PASS: read-only observer does not claim a producer/checkpoint
+PASS: shipped policy is frozen and disabled
+Restricted production: passed=49 failed=1
+
+=== final-ContextRestrictedProductionV2.log ===
+PASS: A10 apply refuses with the production disabled code
+PASS: A02 append refuses with the production disabled code
+PASS: A02 retry refuses with the production disabled code
+PASS: A02 intent persist refuses with the production disabled code
+PASS: A02 intent freeze refuses with the production disabled code
+PASS: A02 attempt persist refuses with the production disabled code
+PASS: A03 checkpoint persist refuses with the production disabled code
+PASS: A04 sealed persist refuses with the production disabled code
+PASS: A11 reserve refuses with the production disabled code
+PASS: A11 commit refuses with the production disabled code
+PASS: A11 supersede refuses with the production disabled code
+PASS: A11 apply current refuses with the production disabled code
+PASS: A11 default head repair refuses with the production disabled code
+PASS: A11 explicit head repair refuses with the production disabled code
+PASS: A13 recovery refuses with the production disabled code
+PASS: A13 resume refuses with the production disabled code
+PASS: M01 open writer refuses with the production disabled code
+PASS: M01 replay refuses with the production disabled code
+PASS: refusal precedes input getters/callbacks and IO
+PASS: persisted intent remains byte-identical
+PASS: no writer creates or repairs artifacts
+PASS: valid A10 request refuses with the production disabled code
+PASS: valid A10 refusal cannot append, flush or acquire a lock
+PASS: fresh process recovery/resume/finalization and env flags cannot bypass guards
+PASS: direct PowerShell V2 writer fails closed before task/file access
+PASS: restart and PowerShell attempts preserve stored artifact
+PASS: v1 mutation cannot adopt a persisted v2 operation
+PASS: A13 explicit v1 retains no-op delegation to existing DSH path
+PASS: production readers accept authentic old checkpoint and branded durable intent
+PASS: persisted branded operation append refuses with the production disabled code
+PASS: persisted generation finalization refuses with the production disabled code
+PASS: persisted generation resume refuses with the production disabled code
+PASS: persisted generation recovery refuses with the production disabled code
+PASS: authentic old reservation/checkpoint/operation/head bytes preserved without false success
+PASS: A13 environment selection v2 refuses with the production disabled code
+PASS: A13 environment selection 1 refuses with the production disabled code
+PASS: A13 environment selection true refuses with the production disabled code
+PASS: A13 environment selection yes refuses with the production disabled code
+PASS: A13 explicit v2 selection refuses with the production disabled code
+PASS: changing repair selector cannot authorize head mutation refuses with the production disabled code
+PASS: read-only generation inspection remains callable
+PASS: read-only inspect does not initialize a head
+PASS: producer flag cannot enable production writes: {}
+PASS: producer flag cannot enable production writes: {"NEXUS_CCV2_PRODUCER":"on"}
+PASS: producer flag cannot enable production writes: {"NEXUS_CCV2_PRODUCER":"true"}
+PASS: controller installs read-only session observer
+PASS: event/restart observer never flushes or writes memory
+PASS: live pressure/projection reader remains available
+PASS: read-only observer does not claim a producer/checkpoint
+PASS: shipped policy is frozen and disabled
+Restricted production: passed=50 failed=0
+
+=== final-ContextRestrictedProjectionV2.log ===
+PASS: synthetic certification satisfies unchanged production authority
+PASS: DSH auxiliary compaction request retains the original stream
+PASS: production mutation policy stays disabled during projection
+PASS: production host compiles a valid request with mutation disabled
+PASS: original request remains byte-identical
+PASS: request routing, tools, output and abort semantics preserved
+PASS: original system contract preserved
+PASS: native current user retained once
+PASS: projection never writes or repairs durable memory
+PASS: read-only host restart remains functional
+PASS: stale/missing native tail falls back without a derived request
+PASS: fallback/restart leave stored artifacts byte-identical
+PASS: missing checkpoint uses unchanged legacy request
+Restricted projection: passed=13 failed=0
+
+=== final-ContextRestrictedDshCompaction.log ===
+PASS: native summarizer receives selected history
+PASS: CCv2 durable policy stays disabled while native compaction runs
+PASS: real DSH compactor completes once
+PASS: native compaction replaces selected history and retains tail
+PASS: native lifecycle and checkpoint provenance preserved
+PASS: native compaction can flush through the supported DSH barrier
+PASS: native compaction survives real session restore with CCv2 writes disabled
+Restricted DSH compaction: passed=7 failed=0
+
+=== final-ContextRestrictedInstallV2.log ===
+PASS: muse installed closure contains fixed guard and no research helper
+PASS: controller installed closure contains fixed guard and no research helper
+PASS: engineering installed closure contains fixed guard and no research helper
+PASS: deepseek installed closure contains fixed guard and no research helper
+PASS: actual installed controller compositions validate with the restricted dependency graph
+PASS: installed controller policy remains disabled
+PASS: installed direct mutation authority refuses
+PASS: three-suite harness dispatch subset passes
+PASS: harness keeps production guard/projection proofs on shipped policy
+PASS: harness labels legacy active algorithm results as research only
+PASS: harness report cannot imply active durable support
+Restricted installation: passed=11 failed=0 (Linux fixture only)
+
+=== final-research-A11.log ===
+RESEARCH ONLY: private copied checkout; unfinished active algorithms, NOT production support.
+Fixture Git identity assignments omitted: 16
+
+--- A11 AUTHORITY SHAPE (identity only, no auto-trigger) ---
+PASS: explicit reserveNextGenerationV2 API exists
+PASS: explicit commitGenerationV2 API exists
+PASS: explicit supersedeGenerationV2 API exists
+PASS: explicit reconstructGenerationRuntimeV2 API exists
+PASS: superseded-operation guard exists
+PASS: generation eligibility guard exists
+PASS: runtime schema version is 1
+PASS: bounded outcome vocabulary
+PASS: A11 carries no apply behavior (A10 frozen)
+
+--- RESERVATION: G1 null parent, monotonic, idempotent ---
+PASS: first reservation allocates G1
+PASS: G1 parent is null (frozen A03 rule)
+PASS: G1 reservation validates closed-world
+PASS: identical retry returns the same G1 reservation (no new generation consumed)
+PASS: changed source state never rebinds G1 (conflict, not silent rebind)
+PASS: allocated (1) vs committed (null) are distinct concepts
+PASS: active G1 is reserved
+
+--- RESERVATION: no caller-chosen generation ---
+PASS: reserve input carries no generation field
+PASS: caller-provided generation identity is refused as an unknown field
+
+--- G1 COMMIT: full A10 flow then head advancement ---
+PASS: A10 G1 commits (got committed)
+PASS: head advances to G1 only after proven durability
+PASS: head checkpoint binds the proven result
+PASS: highest allocated stays 1
+PASS: no active generation after commit
+PASS: actual equals the G1 A09 prediction
+PASS: refused A10 result cannot advance the head
+PASS: result without application durability cannot advance the head
+PASS: repeated head advancement is idempotent
+
+--- G1->G2->G3 chained commits with latest-only surface ---
+PASS: chain reserves G1
+PASS: chain A10 G1 commits
+PASS: chain head is G1
+PASS: chain reserves G2 (never reuses G1)
+PASS: G2 parent is the latest committed checkpoint
+PASS: G2 is eligible for apply
+PASS: chain A10 G2 commits (got committed [])
+PASS: chain head is G2
+PASS: chain reserves G3
+PASS: G3 parent is the G2 checkpoint
+PASS: chain A10 G3 commits (got committed [])
+PASS: chain head is G3
+PASS: highest allocated is 3
+PASS: final surface equals the G3 A09 prediction exactly
+PASS: latest payload is active exactly once
+PASS: G1 payload no longer accumulates on the active surface
+PASS: G2 payload no longer accumulates on the active surface
+PASS: current user remains exactly once (got 1)
+PASS: protocol remains balanced after G3
+PASS: G2 retention plan is fresh (never G1 reuse)
+PASS: G3 retention plan is fresh (never G2 reuse)
+PASS: G2 snapshot binding is fresh
+PASS: restart reconstruction is byte-identical
+PASS: steady reconstruction outcome on healthy state
+
+--- ZERO-LANDING SUPERSESSION + SKIPPED LINEAGE (G1 committed, G2 superseded, G3 from G1) ---
+PASS: supersede-chain G1 commits
+PASS: G2 checkpoint persists as immutable evidence
+PASS: G2 operation persists as immutable evidence
+PASS: moved state yields a new revision digest (staleness is real)
+PASS: G2 becomes SUPERSEDED after proving zero landing + staleness
+PASS: no active generation after supersession
+PASS: allocated (2) vs committed (1) stay distinct
+PASS: A02 recovery guard reports the G2 intent superseded (must not apply)
+PASS: superseded G2 is never eligible for apply
+PASS: committed G1 cannot be superseded
+PASS: next generation is G3 (G2 number never reused)
+PASS: G3 parent is the G1 checkpoint (skipped lineage, not G2)
+PASS: G3 commits (got committed [])
+PASS: head is G3 with skipped lineage
+PASS: G3.parentCheckpointId == G1.checkpointId (proven skipped lineage)
+PASS: final surface equals the G3 prediction
+PASS: old G2 intent never landed (zero citations)
+PASS: abandoned G2 payload never appears on the surface
+PASS: G4 reserves for continued work
+PASS: unchanged source refuses supersession (recover instead)
+
+--- PARTIAL LANDING: refuse supersede, block G3, reconcile then commit ---
+PASS: injected crash interrupts the multi-segment apply
+PASS: partial G1 is UNRESOLVED (got UNRESOLVED)
+PASS: unresolved generation reported with blocker
+PASS: stable unresolved blocker code
+PASS: partial application cannot be superseded (reconcile first)
+PASS: G2 reservation blocks across UNRESOLVED G1
+PASS: partial G1 is not eligible for fresh apply
+PASS: reconciliation demands retry of exactly the missing segments (got retry-missing)
+PASS: retry lands exactly the missing segments
+PASS: A10 converges after partial recovery (got recovered)
+PASS: head advances after reconciliation completes
+PASS: current runtime snapshot remains pinned on the surface
+
+--- COMMIT-BEFORE-HEAD CRASH: reconstruct repairs without reapply ---
+PASS: G2 commits before the simulated crash
+PASS: restart repairs the head to G2 (no reapply, no G1 stall)
+PASS: repair outcome is explicit
+PASS: repair appends nothing (G2 is not reapplied)
+PASS: head without durable checkpoint fails closed
+
+--- CRASH MATRIX: reservation / shadow / checkpoint-only / intent-only restarts ---
+PASS: restart recovers the same G2 reservation (state reserved)
+PASS: unchanged source resumes the same G2 (no rebinding, no new generation)
+PASS: shadow-crash G2 remains reserved and eligible (no mutation occurred)
+PASS: checkpoint-only G2 may resume the same generation (got RESERVED/reserved)
+PASS: intent-only restart still owns G2 (never silently dropped)
+PASS: moved-state intent-only G2 supersedes after restart
+PASS: supersession survives restart (durable, identity-bound)
+PASS: raw reconcile still sees zero landing (the guard, not luck, blocks application)
+
+--- CORRUPTION / FORK: fail closed, never heuristic ---
+PASS: unknown keys in durable metadata fail closed
+PASS: conflicting supersession markers fail closed as fork
+PASS: operation/checkpoint identity mismatch fails closed
+
+--- DETERMINISM / SECURITY / SECRET-SAFETY / TELEMETRY ---
+PASS: identical artifacts reconstruct byte-identical state
+PASS: string generation identity fails closed
+PASS: prompt-style supersede marker has zero effect
+PASS: prompt-style reservation field has zero effect
+PASS: runtime records carry no prompt/checkpoint text
+PASS: runtime records carry no injected text
+PASS: telemetry exposes exactly the bounded fact set
+PASS: telemetry values are correct
+PASS: telemetry carries no task content
+PASS: committed head is not eligible for re-apply
+PASS: unallocated generation is never eligible
+
+--- A11H ENTRY: one generation-aware active path, explicit commit stays separate ---
+PASS: generation-aware entry applyCurrentGenerationV2 exists
+PASS: runtime module carries no raw active primitive (layering is mechanical)
+PASS: gated generation recovery reconcileGenerationV2 exists
+PASS: snapshot lifecycle policy snapshotProtectionOfV2 exists
+PASS: entry applies G1 through the gate (got committed)
+PASS: entry result proves application durability
+PASS: entry actual equals the A09 prediction
+PASS: entry never auto-advances the head (explicit commit stays separate)
+PASS: explicit commit advances after entry apply
+PASS: stale fixture really moved revisions
+PASS: entry refuses a request that moved past its reservation (got ccv2-generation-runtime-v2: generation-source-stale: request revision moved since generation 1 was reserved)
+PASS: stale refusal mutates nothing
+
+--- A11H SUPERSEDED MATRIX: permanently non-applicable on every route ---
+PASS: stale handle observes G2 as active before supersession
+PASS: restart preserves supersession
+PASS: stale-handle entry refuses after supersession (got ccv2-generation-runtime-v2: generation-cannot-supersede: generation 2 is superseded and permanently non-applicable)
+PASS: entry retry refuses again (got ccv2-generation-runtime-v2: generation-cannot-supersede: generation 2 is superseded and permanently non-applicable)
+PASS: gated reconcile refuses superseded recovery (got ccv2-generation-runtime-v2: generation-cannot-supersede: generation 2 is superseded and permanently non-applicable)
+PASS: every refused route appends zero events
+PASS: zero payload and zero anchors from refused routes
+PASS: raw A02 primitive would land (unguarded by design; entry-only discipline required)
+PASS: live session untouched by the layering probe (scratch copy only)
+
+--- A11H SNAPSHOT MATRIX: pinned vs shadowable per generation state ---
+PASS: snapshot-matrix G1 commits through the entry
+PASS: protection record validates closed-world
+PASS: current runtime snapshot identified
+PASS: current committed snapshot is PINNED
+PASS: older snapshot with no recovery dependency is shadowable
+PASS: protection classification is deterministic
+PASS: two live runtime snapshots during UNRESOLVED (got 2)
+PASS: UNRESOLVED generation pins every live snapshot (newer reservation cannot unpin)
+PASS: non-current pins cite the recovery dependency
+PASS: G2 reservation over UNRESOLVED G1 is impossible
+PASS: superseded zero-landing snapshot may become shadowable
+PASS: new current snapshot stays PINNED
+PASS: superseded-state protection reconstructs identically (no in-memory pins)
+PASS: newest committed snapshot is PINNED
+PASS: older committed snapshot shadowable after self-contained successor (no recovery dependency)
+PASS: committed-state protection reconstructs identically
+
+--- A11H ENTRY RECOVERY: unchanged partial recovers; moved partial refuses cleanly ---
+PASS: entry recovers unchanged partial (got committed)
+PASS: head advances after entry-driven recovery
+PASS: moved partial fails at the frozen post-verify (got failed)
+PASS: drift names the post-apply cause
+PASS: failed recovery moves no head
+PASS: completed landing classifies as commit-pending (projection unverified)
+PASS: commit-pending state names verification
+PASS: unverified landing defers head repair
+
+A11 unit: passed=155 failed=0

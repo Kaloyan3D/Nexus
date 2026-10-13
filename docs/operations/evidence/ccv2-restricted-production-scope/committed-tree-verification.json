@@ -1,0 +1,29 @@
+{
+  "executedSourceHead": "23e30994257346d7de63eb00d35514ab65269359",
+  "suites": [
+    {
+      "suite": "ContextRestrictedProductionV2",
+      "exit": 0,
+      "passed": 49,
+      "failed": 0
+    },
+    {
+      "suite": "ContextRestrictedProjectionV2",
+      "exit": 0,
+      "passed": 13,
+      "failed": 0
+    },
+    {
+      "suite": "ContextRestrictedDshCompaction",
+      "exit": 0,
+      "passed": 7,
+      "failed": 0
+    },
+    {
+      "suite": "ContextRestrictedInstallV2",
+      "exit": 0,
+      "passed": 11,
+      "failed": 0
+    }
+  ]
+}

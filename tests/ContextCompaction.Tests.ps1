@@ -251,7 +251,7 @@ try {
 # == 21. SECRET-LIKE FIXTURES ARE REDACTED ====================================
 $root = New-CompactionFixture 't21'
 try {
-    $secret = 'sk-abcdefghijklmnopqrstuvwx'
+    $secret = ('sk-' + 'abcdefghijklmnopqrstuvwx')
     $task = New-CompactionTask $root -Description ('wire the key ' + $secret + ' password=supersecretvalue123')
     [void](Complete-CompactionTask $root $task)
     $checkpoint = New-AihContextCheckpoint -Workspace $root -TaskId $task.taskId -TaskInstanceId ([string]$task.taskInstanceId) -ContinuityAssistantText ('used token=abcdef1234567890 done')

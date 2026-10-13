@@ -720,6 +720,7 @@ function Get-AihHarnessSuiteTableFindings {
 # Explicit value/file allowlist for backslash-carrying literals that are NOT
 # cross-platform path construction. Every entry carries its justification.
 $script:AihPathLiteralAllowlistEntries = @(
+    @{ File = 'scripts/ContextLifecycle.ps1'; Value = '\u{0:x4}'; Reason = 'canonical JSON control-character escaping format used by StringBuilder.Append; this is serialization data, not a filesystem path.' },
     @{ File = 'scripts/Setup.ps1'; Reason = 'Windows installer (setup.sh is the POSIX installer): hint referencing the Windows-only .cmd launcher.' },
     @{ File = 'scripts/Verify-Project.ps1'; Value = 'System32\cmd.exe'; Reason = 'guarded Windows-only branch (Test-AihIsWindows) resolving the cmd.exe host for .cmd/.bat resolution.' },
     @{ File = 'scripts/Verify-Project.ps1'; Value = 'System32\WindowsPowerShell\v1.0\powershell.exe'; Reason = 'guarded Windows-only branch (Test-AihIsWindows) resolving the fixed Windows PowerShell 5.1 host path.' },

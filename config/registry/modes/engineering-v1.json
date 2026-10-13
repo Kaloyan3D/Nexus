@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "id": "engineering-v1",
+  "displayName": "Engineering Mode v1",
+  "status": "deprecated",
+  "orchestrationEngineId": "dual-v1",
+  "selectable": true,
+  "runnable": true,
+  "slots": [
+    {
+      "id": "engineer",
+      "label": "Engineer",
+      "required": true,
+      "internalRoles": [
+        "primaryEngineer",
+        "deepEngineer",
+        "fallback"
+      ],
+      "requirements": {
+        "toolCalling": true
+      }
+    },
+    {
+      "id": "reviewer",
+      "label": "Independent Reviewer",
+      "required": true,
+      "internalRoles": [
+        "reviewer"
+      ],
+      "requirements": {
+        "readOnlyEnforced": true,
+        "pinnedProvider": "sol-local"
+      }
+    },
+    {
+      "id": "solver",
+      "label": "Approval-gated Solver",
+      "required": true,
+      "internalRoles": [
+        "solver"
+      ],
+      "requirements": {
+        "writeRequiresApproval": true
+      }
+    }
+  ],
+  "internalRoles": [
+    "primaryEngineer",
+    "deepEngineer",
+    "reviewer",
+    "solver",
+    "fallback"
+  ],
+  "optionalCapabilities": [
+    "visualReviewer"
+  ]
+}

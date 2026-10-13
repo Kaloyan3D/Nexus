@@ -67,6 +67,13 @@ Assert-Aih ($rootViolations.Count -eq 0) ("legacy-root literal occurrences are c
 #    TASK-0025 Class E: the classifier no longer lets a backslash path shape
 #    hide behind regex-escape collision letters ('data\routing\...' contains
 #    '\r'), so Windows-only relative fixture paths are caught here.
+# CCv2 canonical JSON emits a Unicode escape format. Only that exact value
+# in its serializer file is permitted; actual relative paths remain refused.
+$jsonControlEscape = [string][char]92 + 'u{0:x4}'
+$relativePathProbe = 'data' + [char]92 + 'routing' + [char]92 + 'state.json'
+Assert-Aih (Test-AihPathLiteralAllowed -File 'scripts/ContextLifecycle.ps1' -Value $jsonControlEscape -Classification 'review') 'canonical JSON control escaping is serialization data'
+Assert-Aih (-not (Test-AihPathLiteralAllowed -File 'scripts/ContextLifecycle.ps1' -Value $relativePathProbe -Classification 'review')) 'serializer allowance never permits a backslash relative path'
+Assert-Aih (-not (Test-AihPathLiteralAllowed -File 'scripts/Other.ps1' -Value $jsonControlEscape -Classification 'review')) 'serializer allowance is confined to the exact owning file'
 $pathViolations = @($audit.PathFindings | Where-Object { -not (Test-AihPathLiteralAllowed -File $_.File -Value $_.Value -Classification $_.Classification) })
 $pathText = ((@($pathViolations) | ForEach-Object { $_.File + ":" + $_.Line + " [" + $_.Value + "]" }) -join ", ")
 Assert-Aih ($pathViolations.Count -eq 0) ("no cross-platform path construction uses backslash literals (found: " + $pathText + ")")

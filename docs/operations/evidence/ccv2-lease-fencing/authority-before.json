@@ -1,0 +1,54 @@
+{
+  "checks": [
+    {
+      "name": "fixture keeps real mutex held until explicit release",
+      "pass": true
+    },
+    {
+      "name": "timeout must fail closed without executing critical section",
+      "pass": false
+    },
+    {
+      "name": "mutex construction failure must fail closed",
+      "pass": false
+    },
+    {
+      "name": "stale release cannot unlink successor after takeover",
+      "pass": false
+    }
+  ],
+  "observations": [
+    {
+      "name": "mutex-timeout",
+      "holderAlive": true,
+      "contender": {
+        "code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "actionEnteredWhileHeld": true
+    },
+    {
+      "name": "mutex-construction-failure",
+      "contender": {
+        "code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "actionEntered": true
+    },
+    {
+      "name": "release-after-check",
+      "takeoverBlockedDuringRelease": false,
+      "releaseLine": 1695,
+      "predecessor": "c69274b7eb6245db82b45da3c0e9e0fa",
+      "successor": "f6587ceda4734e4d96ab0483d7619183",
+      "successorSurvived": false,
+      "releaser": {
+        "code": 0,
+        "stdout": "{\n  \"released\": true\n}\n",
+        "stderr": ""
+      }
+    }
+  ]
+}

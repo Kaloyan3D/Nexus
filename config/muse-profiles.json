@@ -19,6 +19,24 @@
       "review": {
         "independent": false
       }
+    },
+    {
+      "id": "muse-spark-1.3-contributor-opencode",
+      "displayName": "Muse Spark 1.3 Contributor \u2014 OpenCode Go",
+      "status": "ready",
+      "model": {
+        "primary": "muse-spark-1.3-contributor-opencode"
+      },
+      "reasoning": {
+        "default": "xhigh",
+        "escalation": "xhigh"
+      },
+      "subagents": {
+        "enabled": false
+      },
+      "review": {
+        "independent": false
+      }
     }
   ]
 }

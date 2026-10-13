@@ -25,6 +25,7 @@ import status from './status.cjs'
 import detail from './detail.cjs'
 import gate from './gate.cjs'
 import engineering from './engineering.cjs'
+import registryAdapter from './registry.cjs'
 
 const name = 'nexus-controller'
 
@@ -395,6 +396,11 @@ function apply(ctx) {
         return
       }
       try {
+        const profileContract = await execEngineeringProfile(['-Action', 'get', '-InstallRoot', installRoot])
+        if (!profileContract || profileContract.schemaVersion !== 1 || !profileContract.engineAgentPresets || !Object.hasOwn(profileContract, 'preferredRoute')) {
+          respond(503, { ok: false, error: 'engineering-route-contract-unavailable' })
+          return
+        }
         const state = engineering.buildEngineeringProfileState({
           installRoot,
           dataRoot,
@@ -402,6 +408,7 @@ function apply(ctx) {
           profilesPath: join(installRoot, 'config', 'engineering-profiles.json'),
           registryPath: join(installRoot, 'config', 'model-registry.json'),
           customProfilePath: join(dataRoot, 'custom-engineering-profile.json'),
+          profileContract,
           nowUtc: () => new Date().toISOString(),
         })
         respond(200, state)
@@ -619,6 +626,71 @@ function apply(ctx) {
       () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/workspace-registration.json', handler: workspaceRegistrationHandler }),
       'nexus-controller: Phase 3.1 workspace registration route',
     )
+
+    // ── Registry R3 (TASK-0047): Nexus-owned staged configuration API ──
+    // Read/validate/compile plus revision-checked staged saves under
+    // data/registry/. Never touches session bindings, presets,
+    // settings.yaml or routing ledgers (session-pinning boundary).
+    const registryServiceModule = createRequire(import.meta.url)(
+      join(installRoot, 'config', 'registry', 'service.cjs'),
+    )
+    const registryService = registryServiceModule.createService({ installRoot, dataRoot })
+    const registryHandlers = registryAdapter.createRegistryHandlers(registryService)
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/modes', handler: registryHandlers.modesHandler }),
+      'nexus-controller: registry R3 mode list route',
+    )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/configuration', handler: registryHandlers.configurationHandler }),
+      'nexus-controller: registry R3 configuration route',
+    )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/eligible', handler: registryHandlers.eligibleHandler }),
+      'nexus-controller: registry R3 eligible-routes route',
+    )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/validate', handler: registryHandlers.validateHandler }),
+      'nexus-controller: registry R3 validation route',
+    )
+    webCtx.effect(
+      () => webCtx.webServer.register({ kind: 'exact', path: '/nexus/registry/v1/preview', handler: registryHandlers.previewHandler }),
+      'nexus-controller: registry R3 compile-preview route',
+    )
+    // ── Registry R4 (TASK-0048): Models & Providers management API ──
+    // Operator catalog CRUD + explicit probes under data/registry/. Same
+    // trusted caller boundary as R3. No secret values cross these routes.
+    const r4Routes = [
+      ['/nexus/registry/v1/catalog', 'catalogHandler', 'registry R4 catalog route'],
+      ['/nexus/registry/v1/providers', 'providerSaveHandler', 'registry R4 provider save route'],
+      ['/nexus/registry/v1/models', 'modelSaveHandler', 'registry R4 model save route'],
+      ['/nexus/registry/v1/routes', 'routeSaveHandler', 'registry R4 route save route'],
+      ['/nexus/registry/v1/connections', 'connectionSaveHandler', 'registry R4 connection save route'],
+      ['/nexus/registry/v1/providers/disable', 'providerDisableHandler', 'registry R4 provider disable route'],
+      ['/nexus/registry/v1/models/disable', 'modelDisableHandler', 'registry R4 model disable route'],
+      ['/nexus/registry/v1/routes/disable', 'routeDisableHandler', 'registry R4 route disable route'],
+      ['/nexus/registry/v1/connections/disable', 'connectionDisableHandler', 'registry R4 connection disable route'],
+      ['/nexus/registry/v1/providers/delete', 'providerDeleteHandler', 'registry R4 provider delete route'],
+      ['/nexus/registry/v1/models/delete', 'modelDeleteHandler', 'registry R4 model delete route'],
+      ['/nexus/registry/v1/routes/delete', 'routeDeleteHandler', 'registry R4 route delete route'],
+      ['/nexus/registry/v1/connections/delete', 'connectionDeleteHandler', 'registry R4 connection delete route'],
+      ['/nexus/registry/v1/connections/status', 'connectionStatusHandler', 'registry R4 connection status route'],
+      ['/nexus/registry/v1/providers/test', 'providerTestHandler', 'registry R4 provider test route'],
+      ['/nexus/registry/v1/providers/discover', 'providerDiscoverHandler', 'registry R4 provider discover route'],
+      ['/nexus/registry/v1/routes/verify', 'routeVerifyHandler', 'registry R4 route verify route'],
+      ['/nexus/registry/v1/routes/evidence', 'routeEvidenceHandler', 'registry R4 route evidence route'],
+      ['/nexus/registry/v1/routes/project', 'routeProjectHandler', 'registry R4 route projection route'],
+      ['/nexus/registry/v1/connections/list', 'connectionsHandler', 'registry R5 connections list route'],
+      ['/nexus/registry/v1/connections/check', 'connectionCheckHandler', 'registry R5 connection check route'],
+      ['/nexus/registry/v1/connections/discover', 'connectionDiscoverHandler', 'registry R5 connection discover route'],
+    ]
+    for (const [routePath, handlerName, label] of r4Routes) {
+      const handler = registryHandlers[handlerName]
+      if (typeof handler !== 'function') throw new Error('nexus-controller: missing registry R4 handler ' + handlerName)
+      webCtx.effect(
+        () => webCtx.webServer.register({ kind: 'exact', path: routePath, handler }),
+        'nexus-controller: ' + label,
+      )
+    }
   })
 }
 

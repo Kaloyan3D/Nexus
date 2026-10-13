@@ -156,3 +156,63 @@ This is a deliberate whitelist boundary: adding a runtime field to an in-memory 
 ## Fail-closed rule
 
 When controller truth is unavailable or ambiguous, the preferred behavior is to expose unavailable/idle/error state rather than invent success, a route, a duration, a gate, or an execution event.
+
+## Preparing an engineering session before its first prompt
+
+The controller publishes a Cordis host extension in its mounted scope:
+
+```js
+const controller = require('./config/AihController.cjs')
+const authority = await controller.prepareSession(ctx, {
+  sessionId,                    // existing root session in ctx.sessions
+  cwd,                          // absolute, exact immutable session cwd
+  preset: 'aih-muse',            // effective host session preset
+  profileId: 'muse-spark-1.3-contributor-opencode',
+})
+// { sessionId, taskId, taskInstanceId, engine, profile, provider, model }
+```
+
+This is an in-process host API over the bounded `nexus/session-prepare` Cordis
+waterfall extension. It registers no process-global service from the preset.
+Hosts must mount the production controller and
+load/create the session in the DSH session store before calling it. It does not
+add a DSH RPC method or change `session.create`. The caller cannot supply task
+IDs, engine, provider, model, messages, or arbitrary options. Supported presets
+are `aih-engineering`, `aih-deepseek`, and `aih-muse`; DeepSeek retains its locked
+`deepseek-codex` profile. Selection uses the existing production router, including
+Muse provider availability and Dual role validation, with an explicit session
+profile instead of changing the global preference.
+
+Both preparation and the ordinary first prompt call `bindSession`. Preparation
+uses the same workspace resolver, TaskController allocator, routing decision,
+and engineering lifecycle initializer. It creates the normal task ledger,
+run manifest/native authority, session binding, and routing state. The initial
+task description is the content-free label `Prepare engineering session`.
+Preparation emits no session message, starts no attempt, constructs no agent,
+and invokes no model, provider, remote counter, or reasoning step.
+
+The binding and task allocation retain the selected profile; subsequent routing
+and Dual step resolution consume that controller selection. Repeated compatible
+calls return the same seven authority fields and immutable task instance.
+Compatible ordinary bindings can be reused.
+Controllers mounted before preparation reread the committed prepared binding
+before binding their first turn and preserve prepared entries during writes.
+Wrong cwd/preset, stale task identity, profile/engine/target drift, conflicting binding or routing state,
+and malformed persisted authority reject without replacing existing authority.
+The session allocation key is generated inside the controller and committed
+under the task-ledger mutex. A retry after interruption resumes that allocation
+and completes missing creation/routing artifacts instead of allocating another
+task. Preparation calls sharing this controller module and install are serialized.
+
+Success follows atomic binding persistence, file durability barriers for task
+and routing authority, and a flushed content-free `nexus-session-prepared`
+controller diagnostic containing the returned authority plus `new`/`reused`
+status. Write failures reject; retries preserve the allocated instance. The
+ordinary lazy-binding caller continues using its existing guard and defaults.
+No existing file migration is required; added fields and routing arguments are
+optional. There is no separate binding schema or benchmark-specific path.
+
+The contract tests use isolated config/data/workspaces, real PowerShell
+controller commands, and real DSH sessions with provider/network transports
+blocked. They cover creation, reuse, conflicts, restart/interruption, first-turn
+compatibility, exact DeepSeek/Muse selection, and unchanged isolation enforcement.

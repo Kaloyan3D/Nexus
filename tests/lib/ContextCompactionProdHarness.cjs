@@ -77,7 +77,7 @@ function makeCtx({ flushImpl, systemPromptImpl } = {}) {
     },
   };
   const ctx = {
-    shellEnv: { register() {} },
+    shellEnv: { list() { return [] }, register() {} },
     on(name, fn) { if (handlers[name]) handlers[name].push(fn); return () => {}; },
     get(name) {
       if (name === 'sessions') return sessionsService;

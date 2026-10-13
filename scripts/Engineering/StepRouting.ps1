@@ -103,6 +103,55 @@ function Resolve-AihStepRoleTarget {
     return [ordered]@{ targets = $targets; presetId = $resolved.Id; routingDataRoot = $layout.RoutingData; statePath = $statePath }
 }
 
+function Get-AihStepPinField {
+    # R6.3.2: production step targets are [ordered] hashtables, whose entries
+    # are NOT exposed via .PSObject.Properties (that seam only fits the
+    # JSON-deserialized pin side). Read dictionaries by indexer so a live
+    # target is never misread as empty (which would refuse every pinned step).
+    param($Object,[string]$Field)
+    if($null-eq$Object-or[string]::IsNullOrWhiteSpace($Field)){return $null}
+    if($Object -is [System.Collections.IDictionary]){
+        if($Object.Contains($Field)){ $value=$Object[$Field]; if($null-ne$value){return [string]$value} }
+        return $null
+    }
+    $property=$Object.PSObject.Properties[$Field]
+    if($null-ne$property-and$null-ne$property.Value){return [string]$property.Value}
+    return $null
+}
+function Assert-AihStepRoleTargetPinned {
+    # R6.3.1: pinned-generation step enforcement. When session-bindings.json
+    # carries a registry pin for THIS taskInstanceId, the selected step target
+    # must equal the pinned map entry for the step role; otherwise fail closed
+    # BEFORE any step record is written. No pin (or no bindings file) keeps
+    # the exact legacy behavior. R6.3 singular pins (roleTarget) are honored
+    # for their one role. Windows PowerShell 5.1 compatible (no ternary).
+    param([string]$RoutingDataRoot,[string]$TaskInstanceId,[string]$Role,$Target)
+    if([string]::IsNullOrWhiteSpace($TaskInstanceId)){return}
+    if([string]::IsNullOrWhiteSpace($Role)-or$null-eq$Target){return}
+    $bindingsPath=Join-Path $RoutingDataRoot 'session-bindings.json'
+    if(-not(Test-Path -LiteralPath $bindingsPath)){return}
+    try{$doc=Get-Content -Raw -Encoding UTF8 -LiteralPath $bindingsPath|ConvertFrom-Json}catch{return}
+    if($null-eq$doc-or$null-eq$doc.PSObject.Properties['bindings']){return}
+    $pin=$null
+    foreach($b in @($doc.bindings.PSObject.Properties.Value)){
+        if($null-ne$b-and$null-ne$b.PSObject.Properties['taskInstanceId']-and[string]$b.taskInstanceId-eq$TaskInstanceId-and$null-ne$b.PSObject.Properties['registryPin']){$pin=$b.registryPin;break}
+    }
+    if($null-eq$pin){return}
+    $entry=$null
+    if($null-ne$pin.PSObject.Properties['roleTargets']-and$null-ne$pin.roleTargets.PSObject.Properties[$Role]){$entry=$pin.roleTargets.$Role}
+    elseif($null-ne$pin.PSObject.Properties['roleTarget']-and$null-ne$pin.PSObject.Properties['role']-and[string]$pin.role-eq$Role){$entry=[pscustomobject]@{available=$true;target=$pin.roleTarget}}
+    if($null-eq$entry){throw "registry-role-unpinned: no pinned target for step role '$Role' (taskInstanceId '$TaskInstanceId')."}
+    if($null-ne$entry.PSObject.Properties['available']-and-not[bool]$entry.available){throw "registry-role-unavailable: pinned step target for '$Role' is unavailable."}
+    if($null-eq$entry.PSObject.Properties['target']-or$null-eq$entry.target){throw "registry-role-unpinned: pinned step target for '$Role' has no target."}
+    $expected=$entry.target
+    foreach($field in @('provider','model','reasoning')){
+        $a=Get-AihStepPinField $Target $field;$e=Get-AihStepPinField $expected $field
+        if([string]::IsNullOrWhiteSpace($a)){$a=$null}
+        if([string]::IsNullOrWhiteSpace($e)){$e=$null}
+        if($a-ne$e){throw "registry-step-target-mismatch: step $field drifted (pinned '$e', current '$a') for role '$Role'."}
+    }
+}
+
 function Set-AihRoutingStateStepRole {
     # Mirror the selected STEP role into the durable routing state (field
     # 'stepRole'). The task-level executionClass stays untouched (it remains
@@ -253,6 +302,9 @@ function Select-AihStepRole {
     $resolution = Resolve-AihStepRoleTarget -Workspace $Workspace -Preset $Preset -TaskInstanceId $TaskInstanceId
     $targets = $resolution.targets
     $target = $targets[$selectedRole]
+    # R6.3.1: pinned generations fail closed here when the live-resolved step
+    # target disagrees with the pinned map (legacy sessions: no pin, no-op).
+    Assert-AihStepRoleTargetPinned -RoutingDataRoot $resolution.routingDataRoot -TaskInstanceId $TaskInstanceId -Role ([string]$target.role) -Target $target
     $stepId = [guid]::NewGuid().ToString('N')
     $record = [ordered]@{
         recordVersion = 1

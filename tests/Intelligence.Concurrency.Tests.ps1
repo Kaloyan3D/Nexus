@@ -5,6 +5,7 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $InstallRoot 'scripts/Common.ps1')
 . (Join-Path $InstallRoot 'scripts/Workspace.ps1')
+. (Join-Path $InstallRoot 'tests/ProcessSignal.TestHelpers.ps1')
 
 $passed = 0
 function Assert-Aih([bool]$Condition, [string]$Name) {
@@ -34,19 +35,20 @@ function Start-ResolveProcess {
     )
     $scriptText = @'
 . (Join-Path $env:AIH_TEST_ROOT 'scripts/Workspace.ps1')
+. (Join-Path $env:AIH_TEST_ROOT 'tests/ProcessSignal.TestHelpers.ps1')
 function Get-AihCheckoutObservation {
     param([string]$CheckoutRoot, [string]$Vcs)
     [IO.File]::AppendAllText($env:AIH_TEST_OBSERVATION_LOG, ([Diagnostics.Process]::GetCurrentProcess().Id.ToString() + [Environment]::NewLine))
-    $observation = [Threading.EventWaitHandle]::OpenExisting($env:AIH_TEST_OBSERVATION_EVENT)
+    $observation = (Open-AihTestProcessSignal -Path $env:AIH_TEST_OBSERVATION_EVENT)
     try { $null = $observation.Set() } finally { $observation.Dispose() }
-    $release = [Threading.EventWaitHandle]::OpenExisting($env:AIH_TEST_RELEASE_EVENT)
+    $release = (Open-AihTestProcessSignal -Path $env:AIH_TEST_RELEASE_EVENT)
     try { $null = $release.WaitOne() } finally { $release.Dispose() }
     return [pscustomobject]@{
         branch = 'main'; headSha = 'test-head'; detached = $false; isDirty = $false
         changedCount = 0; observedAtUtc = [DateTime]::UtcNow.ToString('o')
     }
 }
-$start = [Threading.EventWaitHandle]::OpenExisting($env:AIH_TEST_START_EVENT)
+$start = (Open-AihTestProcessSignal -Path $env:AIH_TEST_START_EVENT)
 try { $null = $start.WaitOne() } finally { $start.Dispose() }
 Resolve-AihNexusWorkspaceIdentity -StoreRoot $env:AIH_TEST_STORE -Path $env:AIH_TEST_REPOSITORY | ConvertTo-Json -Depth 8 -Compress
 '@
@@ -100,12 +102,12 @@ try {
     # existing-checkout path which exhibited the production lock starvation.
     $seed = Resolve-AihNexusWorkspaceIdentity -StoreRoot $store -Path $repository
 
-    $startEventName = 'AihConcurrencyStart-' + [guid]::NewGuid().ToString('N')
-    $releaseEventName = 'AihConcurrencyRelease-' + [guid]::NewGuid().ToString('N')
-    $observationEventName = 'AihConcurrencyObservation-' + [guid]::NewGuid().ToString('N')
-    $startGate = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $startEventName)
-    $releaseGate = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $releaseEventName)
-    $observationGate = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $observationEventName)
+    $startEventName = (Join-Path $fixture ('AihConcurrencyStart-' + [guid]::NewGuid().ToString('N')))
+    $releaseEventName = (Join-Path $fixture ('AihConcurrencyRelease-' + [guid]::NewGuid().ToString('N')))
+    $observationEventName = (Join-Path $fixture ('AihConcurrencyObservation-' + [guid]::NewGuid().ToString('N')))
+    $startGate = Open-AihTestProcessSignal -Path $startEventName
+    $releaseGate = Open-AihTestProcessSignal -Path $releaseEventName
+    $observationGate = Open-AihTestProcessSignal -Path $observationEventName
     $powerShellHost = (Get-Process -Id $PID).Path
 
     1..6 | ForEach-Object {
@@ -155,11 +157,12 @@ try {
     $postException = Use-AihIntelligenceLock -StoreRoot $store -Script { 'reacquired' }
     Assert-Aih ($postException -eq 'reacquired') 'store lock releases after an exception'
 
-    $abandonedReadyName = 'AihConcurrencyAbandoned-' + [guid]::NewGuid().ToString('N')
-    $abandonedReady = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $abandonedReadyName)
+    $abandonedReadyName = (Join-Path $fixture ('AihConcurrencyAbandoned-' + [guid]::NewGuid().ToString('N')))
+    $abandonedReady = Open-AihTestProcessSignal -Path $abandonedReadyName
     $abandonScript = @'
 . (Join-Path $env:AIH_TEST_ROOT 'scripts/Workspace.ps1')
-$ready = [Threading.EventWaitHandle]::OpenExisting($env:AIH_TEST_ABANDONED_READY)
+. (Join-Path $env:AIH_TEST_ROOT 'tests/ProcessSignal.TestHelpers.ps1')
+$ready = (Open-AihTestProcessSignal -Path $env:AIH_TEST_ABANDONED_READY)
 Use-AihIntelligenceLock -StoreRoot $env:AIH_TEST_STORE -Script {
     $null = $ready.Set()
     [Environment]::Exit(0)
@@ -180,19 +183,20 @@ Use-AihIntelligenceLock -StoreRoot $env:AIH_TEST_STORE -Script {
     $rootA = Join-Path $fixture 'parallel-a'
     $rootB = Join-Path $fixture 'parallel-b'
     New-Item -ItemType Directory -Force -Path $rootA, $rootB | Out-Null
-    $parallelStartName = 'AihConcurrencyParallelStart-' + [guid]::NewGuid().ToString('N')
-    $parallelReleaseName = 'AihConcurrencyParallelRelease-' + [guid]::NewGuid().ToString('N')
-    $enteredAName = 'AihConcurrencyEnteredA-' + [guid]::NewGuid().ToString('N')
-    $enteredBName = 'AihConcurrencyEnteredB-' + [guid]::NewGuid().ToString('N')
-    $parallelStart = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $parallelStartName)
-    $parallelRelease = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $parallelReleaseName)
-    $enteredA = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $enteredAName)
-    $enteredB = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $enteredBName)
+    $parallelStartName = (Join-Path $fixture ('AihConcurrencyParallelStart-' + [guid]::NewGuid().ToString('N')))
+    $parallelReleaseName = (Join-Path $fixture ('AihConcurrencyParallelRelease-' + [guid]::NewGuid().ToString('N')))
+    $enteredAName = (Join-Path $fixture ('AihConcurrencyEnteredA-' + [guid]::NewGuid().ToString('N')))
+    $enteredBName = (Join-Path $fixture ('AihConcurrencyEnteredB-' + [guid]::NewGuid().ToString('N')))
+    $parallelStart = Open-AihTestProcessSignal -Path $parallelStartName
+    $parallelRelease = Open-AihTestProcessSignal -Path $parallelReleaseName
+    $enteredA = Open-AihTestProcessSignal -Path $enteredAName
+    $enteredB = Open-AihTestProcessSignal -Path $enteredBName
     $parallelScript = @'
 . (Join-Path $env:AIH_TEST_ROOT 'scripts/Workspace.ps1')
-$start = [Threading.EventWaitHandle]::OpenExisting($env:AIH_TEST_PARALLEL_START)
-$entered = [Threading.EventWaitHandle]::OpenExisting($env:AIH_TEST_PARALLEL_ENTERED)
-$release = [Threading.EventWaitHandle]::OpenExisting($env:AIH_TEST_PARALLEL_RELEASE)
+. (Join-Path $env:AIH_TEST_ROOT 'tests/ProcessSignal.TestHelpers.ps1')
+$start = (Open-AihTestProcessSignal -Path $env:AIH_TEST_PARALLEL_START)
+$entered = (Open-AihTestProcessSignal -Path $env:AIH_TEST_PARALLEL_ENTERED)
+$release = (Open-AihTestProcessSignal -Path $env:AIH_TEST_PARALLEL_RELEASE)
 try {
     $null = $start.WaitOne()
     $requestStarted = [DateTime]::UtcNow

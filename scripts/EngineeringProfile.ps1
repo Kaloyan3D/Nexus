@@ -104,6 +104,28 @@ function Get-AihEditorState {
     $registry=Get-AihModelRegistry $Layout.ModelRegistry
     $preferredId=Get-AihPreferredProfileId $Layout.Settings
     $preferredDisplayName=$preferredId
+    $preferredEngine=$null
+    $preferredRoute=$null
+    if(-not[string]::IsNullOrWhiteSpace($preferredId)){
+        try{
+            $preferredNexus=Resolve-AihNexusProfile -InstallRoot $Layout.Root -ProfileId $preferredId
+            if($null-ne$preferredNexus){$preferredEngine=[string]$preferredNexus.Engine}
+            if($null-ne$preferredNexus-and[string]$preferredNexus.Engine-eq'muse'){
+                $resolvedRoute=Resolve-AihMuseRoutingTarget -InstallRoot $Layout.Root -PresetId 'aih-muse' -SettingsPath $Layout.Settings -ProfileId $preferredId
+                if([string]$resolvedRoute.ProfileId -eq $preferredId){$preferredRoute=[pscustomobject]@{profileId=[string]$resolvedRoute.ProfileId;engine='muse';provider=[string]$resolvedRoute.Provider;model=[string]$resolvedRoute.Model}}
+            }
+        }catch{$preferredRoute=$null}
+    }
+    # Legacy editor installations can predate the Nexus engine catalog.
+    # Preserve their role editor, with no inferred engine/route authority.
+    $catalogPath=Join-Path $Layout.Config 'nexus-profiles.json'
+    $catalog=if(Test-Path -LiteralPath $catalogPath -PathType Leaf){Get-AihNexusProfileCatalog $catalogPath}else{$null}
+    $engineAgentPresets=[ordered]@{}
+    if($null-ne$catalog-and$null-ne$catalog.PSObject.Properties['engines']){
+        foreach($engineEntry in @($catalog.engines.PSObject.Properties)){
+            if($null-ne$engineEntry.Value-and$null-ne$engineEntry.Value.PSObject.Properties['agentPreset']){$engineAgentPresets[$engineEntry.Name]=[string]$engineEntry.Value.agentPreset}
+        }
+    }
     if(-not[string]::IsNullOrWhiteSpace($preferredId)){
         foreach($profileEntry in @($profiles.profiles)){ if([string]$profileEntry.id -eq $preferredId){$preferredDisplayName=[string]$profileEntry.displayName;break} }
     }
@@ -123,8 +145,11 @@ function Get-AihEditorState {
         generatedAtUtc=[DateTime]::UtcNow.ToString('o')
         profiles=@($profiles.profiles)
         nexusProfiles=Get-AihNexusEditorProfiles $Layout
+        engineAgentPresets=$engineAgentPresets
         registry=$registry.models
         preferredProfile=if([string]::IsNullOrWhiteSpace($preferredId)){$null}else{[pscustomobject]@{id=$preferredId;displayName=$preferredDisplayName}}
+        preferredEngine=$preferredEngine
+        preferredRoute=$preferredRoute
         customRoles=$customRoles
         roleRequirements=[ordered]@{
             primaryEngineer=Get-AihRoleRequirements 'primaryEngineer'

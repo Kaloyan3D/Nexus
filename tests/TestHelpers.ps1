@@ -90,3 +90,10 @@ function Invoke-AihTestFreshProcess {
         else { $env:AIH_INSTALL_ROOT = $previousRoot }
     }
 }
+
+function Test-AihSourceCredentialValue {
+    param([string]$Text)
+    # Require a token start, not the suffix of an ordinary identifier.
+    # Hyphens remain delimiters so prefixed/labelled keys are still detected.
+    return $Text -match '(?i)((?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{16,}|DEEPSEEK_API_KEY\s*:\s*[^\s''"]+)'
+}

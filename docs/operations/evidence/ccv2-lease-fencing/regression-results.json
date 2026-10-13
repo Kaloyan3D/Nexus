@@ -1,0 +1,111 @@
+[
+  {
+    "test": "ContextActiveApplyV2.Tests.cjs",
+    "command": [
+      "node",
+      "tests/ContextActiveApplyV2.Tests.cjs"
+    ],
+    "exitCode": 0
+  },
+  {
+    "test": "ContextActiveApplyV2LiveHost.Tests.cjs",
+    "command": [
+      "node",
+      "tests/ContextActiveApplyV2LiveHost.Tests.cjs"
+    ],
+    "exitCode": 0
+  },
+  {
+    "test": "ContextCompactionV2Operation.Tests.cjs",
+    "command": [
+      "node",
+      "tests/ContextCompactionV2Operation.Tests.cjs"
+    ],
+    "exitCode": 0
+  },
+  {
+    "test": "ContextCompactionV2FoundationHardening.Tests.cjs",
+    "command": [
+      "node",
+      "tests/ContextCompactionV2FoundationHardening.Tests.cjs"
+    ],
+    "exitCode": 0
+  },
+  {
+    "test": "ContextRecoveryV2.Tests.cjs",
+    "command": [
+      "node",
+      "tests/ContextRecoveryV2.Tests.cjs"
+    ],
+    "exitCode": 0
+  },
+  {
+    "test": "ContextRecoveryV2LiveHost.Tests.cjs",
+    "command": [
+      "node",
+      "tests/ContextRecoveryV2LiveHost.Tests.cjs"
+    ],
+    "exitCode": 0
+  },
+  {
+    "test": "ContextGenerationRuntimeV2.Tests.cjs",
+    "command": [
+      "node",
+      "tests/ContextGenerationRuntimeV2.Tests.cjs"
+    ],
+    "exitCode": 0
+  },
+  {
+    "test": "ContextGenerationRuntimeV2LiveHost.Tests.cjs",
+    "command": [
+      "node",
+      "tests/ContextGenerationRuntimeV2LiveHost.Tests.cjs"
+    ],
+    "exitCode": 0
+  },
+  {
+    "test": "ContextCompleteTaskV2.Tests.cjs",
+    "command": [
+      "node",
+      "tests/ContextCompleteTaskV2.Tests.cjs"
+    ],
+    "exitCode": 0
+  },
+  {
+    "test": "ContextCompleteTaskV2LiveHost.Tests.cjs",
+    "command": [
+      "node",
+      "tests/ContextCompleteTaskV2LiveHost.Tests.cjs"
+    ],
+    "exitCode": 0
+  },
+  {
+    "test": "ContextCompaction.Tests.ps1",
+    "command": [
+      "pwsh",
+      "-NoProfile",
+      "-File",
+      "tests/ContextCompaction.Tests.ps1"
+    ],
+    "exitCode": 0
+  },
+  {
+    "test": "ContextCompactionV2.Tests.ps1",
+    "command": [
+      "pwsh",
+      "-NoProfile",
+      "-File",
+      "tests/ContextCompactionV2.Tests.ps1"
+    ],
+    "exitCode": 0
+  },
+  {
+    "test": "ContextApplyLockAuthority.Tests.cjs",
+    "command": [
+      "node",
+      "tests/ContextApplyLockAuthority.Tests.cjs",
+      "/home/kaloyan/nexus-bench/ccv2-lease-fencing-20261008/authority-final.json"
+    ],
+    "exitCode": 0
+  }
+]

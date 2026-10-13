@@ -25,6 +25,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const repoRoot = path.resolve(__dirname, '..');
+const { createPresetCtx } = require('./lib/AgentRequestComposition.cjs');
 const isolation = require(path.join(repoRoot, 'config', 'Muse-Isolation.cjs'));
 const runtime = require(path.join(repoRoot, 'config', 'Muse-ReasoningRuntime.cjs'));
 const governor = require(path.join(repoRoot, 'config', 'Muse-ReasoningGovernor.cjs'));
@@ -97,12 +98,7 @@ function museState(overrides) {
 }
 
 function makeCtx() {
-  const handlers = {};
-  return {
-    handlers,
-    on: (name, handler) => { handlers[name] = handler; },
-    shellEnv: { register: () => {} },
-  };
+  return createPresetCtx();
 }
 
 function museSession(id) {

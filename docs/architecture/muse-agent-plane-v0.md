@@ -1,8 +1,8 @@
 # Muse Agent Plane V0 (Muse Spark 1.3 Contributor)
 
-Status: Muse execution plane ready. The profile is `selectable = true`, `runnable = true`, and `availability = ready`; see [Activation policy](#activation-policy).
+Status: Muse execution plane ready. Two profiles share the plane — `muse-spark-1.3-contributor` (Meta Direct) and `muse-spark-1.3-contributor-opencode` (OpenCode Go) — each `selectable = true`, `runnable = true`, and `availability = ready`; see [Activation policy](#activation-policy).
 
-Task reference: TASK-0040.
+Task reference: TASK-0040. OpenCode Go second transport/profile: TASK-0006.
 
 ## What V0 is
 
@@ -45,7 +45,7 @@ Nexus Profile (engine: muse)
 - profile reasoning default/escalation not in the model's `supportedReasoningLevels`;
 - provider route absent from the live settings document.
 
-The DSH request boundary (`config/Muse-Isolation.cjs`) only ENFORCES the controller-produced target — it never re-resolves it. There is no fallback provider, model, or reasoning level, at routing time, at request time, or after failures.
+The DSH request boundary (`config/Muse-Isolation.cjs`) only ENFORCES the controller-produced target — it never re-resolves it. There is no fallback provider, model, or reasoning level, at routing time, at request time, or after failures. TASK-0006: the OpenCode Go profile (`provider: opencode-go`, remote model `muse-spark-1.3-contributor` at `https://opencode.ai/zen/go/v1/responses`, credential `OPENCODE_API_KEY`) rides this exact chain/boundary/governor; a quota/auth/provider failure surfaces and keeps the session bound to opencode-go — it never migrates to Meta Direct. The Go endpoint additionally requires a stable `x-opencode-session` per conversation for routing/prompt-caching (see https://opencode.ai/docs/go/#where-can-i-use-it); the pinned Responses transport sends its session id when configured. Manual profile selection between the two Muse profiles is enabled by `aih-muse` `profileOverrideAllowed: true` (default stays the Meta profile).
 
 ## Tool surface: no Muse subagents in V0 (release blocker)
 

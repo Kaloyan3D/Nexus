@@ -1,0 +1,447 @@
+{
+  "schemaVersion": 1,
+  "startedAtUtc": "2026-10-08T14:35:03.0684244Z",
+  "finishedAtUtc": "2026-10-08T14:59:00.0671750Z",
+  "durationMs": 1436999,
+  "result": "FAIL",
+  "exitCode": 1,
+  "totalPassed": 2691,
+  "totalFailed": 3,
+  "suiteCount": 62,
+  "suites": [
+    {
+      "name": "SetupUpgrade",
+      "result": "FAIL",
+      "exitCode": 1,
+      "passed": 0,
+      "failed": 1
+    },
+    {
+      "name": "UpdateRootResolution",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 42,
+      "failed": 0
+    },
+    {
+      "name": "SourceCredentialGuard",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 13,
+      "failed": 0
+    },
+    {
+      "name": "Harness",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 274,
+      "failed": 0
+    },
+    {
+      "name": "TestHarness.Reporting",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 9,
+      "failed": 0
+    },
+    {
+      "name": "JsonSerialization",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 35,
+      "failed": 0
+    },
+    {
+      "name": "EpistemicPolicy",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 85,
+      "failed": 0
+    },
+    {
+      "name": "EngineeringTelemetry",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 13,
+      "failed": 0
+    },
+    {
+      "name": "ContextCompaction",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 99,
+      "failed": 0
+    },
+    {
+      "name": "ControllerRouting",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 83,
+      "failed": 0
+    },
+    {
+      "name": "TaskIdentity",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 53,
+      "failed": 0
+    },
+    {
+      "name": "EngineeringProfiles",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 104,
+      "failed": 0
+    },
+    {
+      "name": "EngineeringProfileEditor",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 43,
+      "failed": 0
+    },
+    {
+      "name": "NexusProfiles",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 65,
+      "failed": 0
+    },
+    {
+      "name": "MuseProvider",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 111,
+      "failed": 0
+    },
+    {
+      "name": "MuseAgentPlane",
+      "result": "FAIL",
+      "exitCode": 1,
+      "passed": 7,
+      "failed": 1
+    },
+    {
+      "name": "MuseInstall",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 8,
+      "failed": 0
+    },
+    {
+      "name": "VisualReview",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 94,
+      "failed": 0
+    },
+    {
+      "name": "VisualLoop",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 64,
+      "failed": 0
+    },
+    {
+      "name": "NexusWorkspace",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 16,
+      "failed": 0
+    },
+    {
+      "name": "Intelligence.Concurrency",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 15,
+      "failed": 0
+    },
+    {
+      "name": "NexusSkills",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 164,
+      "failed": 0
+    },
+    {
+      "name": "Intelligence.Registry",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 65,
+      "failed": 0
+    },
+    {
+      "name": "Intelligence.Scanning",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 53,
+      "failed": 0
+    },
+    {
+      "name": "Intelligence.Snapshots",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 38,
+      "failed": 0
+    },
+    {
+      "name": "Intelligence.EndToEnd",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 43,
+      "failed": 0
+    },
+    {
+      "name": "Intelligence.IgnoreRegression",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 20,
+      "failed": 0
+    },
+    {
+      "name": "Intelligence.SnapshotModules",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 19,
+      "failed": 0
+    },
+    {
+      "name": "Intelligence.CodeFoundation",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 45,
+      "failed": 0
+    },
+    {
+      "name": "Intelligence.CodeParsing",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 47,
+      "failed": 0
+    },
+    {
+      "name": "Intelligence.CodeIntelligence",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 58,
+      "failed": 0
+    },
+    {
+      "name": "Intelligence.CodeScale",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 13,
+      "failed": 0
+    },
+    {
+      "name": "AihController",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "VisualControllerLifecycle",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "VisualReviewBridge",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "VisualStructuredOutput",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "NexusSkillsRuntime",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 22,
+      "failed": 0
+    },
+    {
+      "name": "NexusProfilesRuntime",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 37,
+      "failed": 0
+    },
+    {
+      "name": "MuseProviderRuntime",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 35,
+      "failed": 0
+    },
+    {
+      "name": "MuseReasoningGovernor",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 52,
+      "failed": 0
+    },
+    {
+      "name": "MuseReasoningRuntime",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 30,
+      "failed": 0
+    },
+    {
+      "name": "MuseReasoningSignals",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 34,
+      "failed": 0
+    },
+    {
+      "name": "MuseReasoningActivity",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 33,
+      "failed": 0
+    },
+    {
+      "name": "MuseIsolation",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 20,
+      "failed": 0
+    },
+    {
+      "name": "ContextCompactionBridge",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 50,
+      "failed": 0
+    },
+    {
+      "name": "ContextCompactionAcceptance",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 27,
+      "failed": 0
+    },
+    {
+      "name": "ContextCompactionCrash",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 16,
+      "failed": 0
+    },
+    {
+      "name": "ContextCompactionF1Loop",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 14,
+      "failed": 0
+    },
+    {
+      "name": "ContextCompactionF2Prod",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 69,
+      "failed": 0
+    },
+    {
+      "name": "ContextCompactionF5Prod",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 12,
+      "failed": 0
+    },
+    {
+      "name": "ContextCompactionXProc",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 7,
+      "failed": 0
+    },
+    {
+      "name": "ContextCompactionF1Loop",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 14,
+      "failed": 0
+    },
+    {
+      "name": "ContextCompactionPartial",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 8,
+      "failed": 0
+    },
+    {
+      "name": "ContextCompactionF5Slow",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "name": "MuseEgressCleanup",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 0,
+      "failed": 0
+    },
+    {
+      "name": "NexusEngineContract",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 23,
+      "failed": 0
+    },
+    {
+      "name": "EpistemicProductionHardening",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 20,
+      "failed": 0
+    },
+    {
+      "name": "AihControllerIdentity",
+      "result": "FAIL",
+      "exitCode": 1,
+      "passed": 6,
+      "failed": 1
+    },
+    {
+      "name": "PlatformSupport",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 149,
+      "failed": 0
+    },
+    {
+      "name": "StartupProviderIsolation",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 19,
+      "failed": 0
+    },
+    {
+      "name": "PowerShellPortability",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 22,
+      "failed": 0
+    },
+    {
+      "name": "AihControllerHost",
+      "result": "PASS",
+      "exitCode": 0,
+      "passed": 160,
+      "failed": 0
+    }
+  ]
+}

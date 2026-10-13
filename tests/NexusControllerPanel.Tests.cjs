@@ -43,6 +43,16 @@ function tmpDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
 }
 
+function hostDataRoot(prefix) {
+  const installRoot = tmpDir(prefix)
+  // The host now loads Registry runtime code from its authoritative install
+  // root, so lifecycle fixtures must carry the same installed config closure.
+  fs.cpSync(path.join(ROOT, 'config', 'registry'), path.join(installRoot, 'config', 'registry'), { recursive: true })
+  const dataRoot = path.join(installRoot, 'data')
+  fs.mkdirSync(dataRoot)
+  return dataRoot
+}
+
 /** In-memory file map reader for buildControllerSnapshot. Keys must be absolute. */
 function memoryReader(files) {
   return (filePath) => {
@@ -386,12 +396,32 @@ async function main() {
 
   // ── 7. routing-state file name matches the PowerShell contract ───────────
   {
-    // Cross-validated against a real file written by Routing.ps1 in the live
-    // install (data/routing/states/5b4c223a91aeb7a3623942f56a75bb2994554ed6e86b7e539f21748d203a58f1.json).
-    assert.equal(
-      status.routingStateFileName('C:\\AI-Harness', 'aih-engineering', 'TASK-0002'),
-      '5b4c223a91aeb7a3623942f56a75bb2994554ed6e86b7e539f21748d203a58f1.json',
-    )
+    const workspace = path.join(os.tmpdir(), 'Nexus MixedCase', 'Repo')
+    const pinnedHost = path.join(process.env.AIH_TOOLCHAIN_ROOT || ROOT, 'runtime', 'pwsh', 'pwsh')
+    const host = process.platform === 'win32' ? 'powershell.exe'
+      : (process.env.AIH_PWSH_HOST || (fs.existsSync(pinnedHost) ? pinnedHost : 'pwsh'))
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      ". (Join-Path $env:NEXUS_TEST_ROOT 'scripts/Platform.ps1')",
+      ". (Join-Path $env:NEXUS_TEST_ROOT 'scripts/Routing.ps1')",
+      "$p = Get-AihRoutingStatePath -DataRoot $env:NEXUS_TEST_DATA -Workspace $env:NEXUS_TEST_WORKSPACE -TaskId 'TASK-0002' -Preset 'AIH-ENGINEERING' -TaskInstanceId $env:NEXUS_TEST_INSTANCE",
+      '[IO.Path]::GetFileName($p)',
+    ].join('; ')
+    for (const instance of ['', 'instance-generation-A']) {
+      const result = spawnSync(host, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
+        encoding: 'utf8',
+        env: { ...process.env, NEXUS_TEST_ROOT: ROOT, NEXUS_TEST_DATA: os.tmpdir(), NEXUS_TEST_WORKSPACE: workspace, NEXUS_TEST_INSTANCE: instance },
+      })
+      assert.ifError(result.error)
+      assert.equal(result.status, 0, result.stderr)
+      assert.equal(status.routingStateFileName(workspace, 'AIH-ENGINEERING', 'TASK-0002', instance), result.stdout.trim(), 'UI hash must match the native PowerShell routing writer')
+    }
+    const original = status.routingStateFileName(workspace, 'aih-engineering', 'TASK-0002')
+    const lower = status.routingStateFileName(workspace.toLowerCase(), 'aih-engineering', 'TASK-0002')
+    if (process.platform === 'win32') assert.equal(original, lower, 'Windows routing identity folds case')
+    else assert.notEqual(original, lower, 'POSIX routing identity preserves case')
+    assert.equal(original, status.routingStateFileName(path.join(workspace, '..', 'Repo'), 'aih-engineering', 'TASK-0002'), 'normalized equivalent native paths share a state file')
+    assert.notEqual(original, status.routingStateFileName(workspace, 'aih-engineering', 'TASK-0002', 'instance-generation-A'), 'task generations do not alias legacy display identity')
   }
 
   // ── 8. corrupt / missing state degrades safely ───────────────────────────
@@ -471,7 +501,7 @@ async function main() {
 
   // ── 11. host plugin: route registration + endpoint handler ───────────────
   {
-    const dataRoot = tmpDir('nexus-ctr-')
+    const dataRoot = hostDataRoot('nexus-ctr-')
     const workspace = path.join(dataRoot, 'ws')
     const files = fixtureFileMap(dataRoot, workspace, {})
     writeTree(dataRoot, files)
@@ -499,9 +529,9 @@ async function main() {
       // 11b. webServer becomes available later → the injection callback
       // applies and BOTH routes register (Cordis lifecycle semantics).
       assert.doesNotThrow(() => injectCallback({ webServer: fakeWebServer, effect(fn) { fn(); return () => {} } }), 'injection callback must apply cleanly once the service exists')
-      assert.equal(captured.length, 6, 'all routes must register after webServer becomes available')
+      assert.equal(captured.length, 33, 'all routes must register after webServer becomes available (30 pre-R5 plus 3 R5 connections endpoints)')
       const paths = captured.map((spec) => spec.path).sort()
-      assert.deepEqual(paths, ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/workspace-registration.json'])
+      assert.deepEqual(paths, ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/registry/v1/catalog', '/nexus/registry/v1/configuration', '/nexus/registry/v1/connections', '/nexus/registry/v1/connections/check', '/nexus/registry/v1/connections/delete', '/nexus/registry/v1/connections/disable', '/nexus/registry/v1/connections/discover', '/nexus/registry/v1/connections/list', '/nexus/registry/v1/connections/status', '/nexus/registry/v1/eligible', '/nexus/registry/v1/models', '/nexus/registry/v1/models/delete', '/nexus/registry/v1/models/disable', '/nexus/registry/v1/modes', '/nexus/registry/v1/preview', '/nexus/registry/v1/providers', '/nexus/registry/v1/providers/delete', '/nexus/registry/v1/providers/disable', '/nexus/registry/v1/providers/discover', '/nexus/registry/v1/providers/test', '/nexus/registry/v1/routes', '/nexus/registry/v1/routes/delete', '/nexus/registry/v1/routes/disable', '/nexus/registry/v1/routes/evidence', '/nexus/registry/v1/routes/project', '/nexus/registry/v1/routes/verify', '/nexus/registry/v1/validate', '/nexus/workspace-registration.json'])
       const route = captured.find((spec) => spec.path === '/nexus/controller.json')
       assert.equal(route.kind, 'exact')
       const roomRoute = captured.find((spec) => spec.path === '/nexus/control-room.json')
@@ -514,6 +544,13 @@ async function main() {
       assert.equal(engineeringActionRoute.kind, 'exact')
       const workspaceRegistrationRoute = captured.find((spec) => spec.path === '/nexus/workspace-registration.json')
       assert.equal(workspaceRegistrationRoute.kind, 'exact')
+      // R3 (TASK-0047): the five Nexus-owned staged-configuration routes.
+      // R4 (TASK-0048): plus the nineteen Models & Providers catalog/probe routes.
+      for (const registryPath of ['/nexus/registry/v1/modes', '/nexus/registry/v1/configuration', '/nexus/registry/v1/eligible', '/nexus/registry/v1/validate', '/nexus/registry/v1/preview', '/nexus/registry/v1/catalog', '/nexus/registry/v1/providers', '/nexus/registry/v1/models', '/nexus/registry/v1/routes', '/nexus/registry/v1/connections', '/nexus/registry/v1/providers/disable', '/nexus/registry/v1/models/disable', '/nexus/registry/v1/routes/disable', '/nexus/registry/v1/connections/disable', '/nexus/registry/v1/providers/delete', '/nexus/registry/v1/models/delete', '/nexus/registry/v1/routes/delete', '/nexus/registry/v1/connections/delete', '/nexus/registry/v1/connections/status', '/nexus/registry/v1/connections/list', '/nexus/registry/v1/connections/check', '/nexus/registry/v1/connections/discover', '/nexus/registry/v1/providers/test', '/nexus/registry/v1/providers/discover', '/nexus/registry/v1/routes/verify', '/nexus/registry/v1/routes/evidence', '/nexus/registry/v1/routes/project']) {
+        const registryRoute = captured.find((spec) => spec.path === registryPath)
+        assert.ok(registryRoute, 'registry route registers: ' + registryPath)
+        assert.equal(registryRoute.kind, 'exact')
+      }
 
       // 11c. profiles that NEVER provide webServer stay inert (tui/headless)
       captured = []
@@ -571,7 +608,7 @@ async function main() {
   // ── 11b. REAL-cordis regression: plugin activates before webServer, the
   //         service is provided later, and the route registers then ────────
   {
-    const dataRoot = tmpDir('nexus-ctr-cordis-')
+    const dataRoot = hostDataRoot('nexus-ctr-cordis-')
     const workspace = path.join(dataRoot, 'ws')
     writeTree(dataRoot, fixtureFileMap(dataRoot, workspace, {}))
 
@@ -593,8 +630,8 @@ async function main() {
       // injection resolves and the route registers.
       root.provide('webServer', fakeWebServer)
       for (let i = 0; i < 60 && registered.length < 5; i++) await tick(50)
-      assert.equal(registered.length, 6, 'real cordis: all routes register after webServer becomes available')
-      assert.deepEqual(registered.map((spec) => spec.path).sort(), ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/workspace-registration.json'])
+      assert.equal(registered.length, 33, 'real cordis: all routes register after webServer becomes available')
+      assert.deepEqual(registered.map((spec) => spec.path).sort(), ['/nexus/control-room.json', '/nexus/controller.json', '/nexus/engineering-profile-action.json', '/nexus/engineering-profile.json', '/nexus/gate-action.json', '/nexus/registry/v1/catalog', '/nexus/registry/v1/configuration', '/nexus/registry/v1/connections', '/nexus/registry/v1/connections/check', '/nexus/registry/v1/connections/delete', '/nexus/registry/v1/connections/disable', '/nexus/registry/v1/connections/discover', '/nexus/registry/v1/connections/list', '/nexus/registry/v1/connections/status', '/nexus/registry/v1/eligible', '/nexus/registry/v1/models', '/nexus/registry/v1/models/delete', '/nexus/registry/v1/models/disable', '/nexus/registry/v1/modes', '/nexus/registry/v1/preview', '/nexus/registry/v1/providers', '/nexus/registry/v1/providers/delete', '/nexus/registry/v1/providers/disable', '/nexus/registry/v1/providers/discover', '/nexus/registry/v1/providers/test', '/nexus/registry/v1/routes', '/nexus/registry/v1/routes/delete', '/nexus/registry/v1/routes/disable', '/nexus/registry/v1/routes/evidence', '/nexus/registry/v1/routes/project', '/nexus/registry/v1/routes/verify', '/nexus/registry/v1/validate', '/nexus/workspace-registration.json'])
       assert.ok(registered.every((spec) => spec.kind === 'exact'))
 
       // the registered handler keeps the existing semantics.
@@ -1816,7 +1853,7 @@ async function main() {
 
   // ── 21. detail cache: mtime-keyed reuse + fail-closed missing files ──────
   {
-    const dataRoot = tmpDir('nexus-ctr-cache-')
+    const dataRoot = hostDataRoot('nexus-ctr-cache-')
     const workspace = path.join(dataRoot, 'ws')
     const sessionId = 'session-cache-01'
     const decision = {
@@ -1985,9 +2022,9 @@ async function main() {
     assert.equal(norm(''), '', 'empty normalizes to empty')
     assert.equal(norm(null), '', 'null normalizes to empty')
 
-    const dataRoot = 'C:\\aih-fixture-data'
-    const repoA = 'C:\\RepoA'
-    const repoB = 'D:\\RepoB'
+    const dataRoot = path.join(os.tmpdir(), 'aih-fixture-data')
+    const repoA = path.join(os.tmpdir(), 'RepoA')
+    const repoB = path.join(os.tmpdir(), 'RepoB')
     const taskId = 'TASK-0003'
     const modelNames = {
       'flash-high-direct/deepseek-v4-flash': 'DeepSeek V4 Flash',
@@ -1999,7 +2036,7 @@ async function main() {
       kind: 'routed', risk: 'normal',
     }, extra))
     const decisionsText = [
-      decision('2026-08-29T10:00:00.000Z', 'C:/RepoA/', { selectedExecutionClass: 'deepseek_normal', executionClass: 'deepseek_normal', provider: 'flash-high-direct', model: 'deepseek-v4-flash', reasoning: 'high', reason: 'A primary' }),
+      decision('2026-08-29T10:00:00.000Z', repoA.replace(/\\/g, '/') + '/', { selectedExecutionClass: 'deepseek_normal', executionClass: 'deepseek_normal', provider: 'flash-high-direct', model: 'deepseek-v4-flash', reasoning: 'high', reason: 'A primary' }),
       decision('2026-08-29T10:05:00.000Z', repoA, { selectedExecutionClass: 'codex_review', executionClass: 'codex_review', provider: 'sol-local', model: 'gpt-5.6-sol', escalatedFrom: 'deepseek_normal', reviewRequired: true, reason: 'A review' }),
       decision('2026-08-29T10:06:00.000Z', repoA, { selectedExecutionClass: 'deepseek_deep', executionClass: 'deepseek_deep', provider: 'flash-high-direct', model: 'deepseek-v4-flash', escalatedFrom: 'codex_review', reason: 'A escalation' }),
       decision('2026-08-29T11:00:00.000Z', repoB, { selectedExecutionClass: 'deepseek_deep', executionClass: 'deepseek_deep', provider: 'flash-high-direct', model: 'deepseek-v4-flash', reasoning: 'max', reason: 'B primary (NEWER than every A record)' }),
@@ -2056,7 +2093,7 @@ async function main() {
     const records = status.jsonLinesOf(decisionsText)
     assert.equal(status.lastDecisionOf(records, taskId, repoA).provider, 'flash-high-direct', 'A decision resolves inside RepoA')
     assert.equal(status.lastDecisionOf(records, taskId, repoA).escalatedFrom == null, true, 'A root is the primary, not the newer review/escalation')
-    assert.equal(status.lastDecisionOf(records, taskId, 'c:/repoa/').timestampUtc, '2026-08-29T10:00:00.000Z', 'normalized spelling of RepoA matches')
+    assert.equal(status.lastDecisionOf(records, taskId, repoA.toLowerCase().replace(/\\/g, '/') + '/').timestampUtc, '2026-08-29T10:00:00.000Z', 'normalized spelling of RepoA matches')
     assert.equal(status.lastDecisionOf(records, taskId, repoB).executionClass, 'deepseek_deep', 'B decision resolves inside RepoB')
     assert.equal(status.lastDecisionOf(records, taskId, 'C:\\SomewhereElse'), null, 'unknown workspace never joins')
     assert.equal(status.lastDecisionOf(records, taskId, ''), null, 'empty workspace never joins (fail-closed)')
@@ -2111,9 +2148,9 @@ async function main() {
 
   // ── 23f. corruption behavior: fail-closed, no cross-workspace fallback ──
   {
-    const dataRoot = 'C:\\aih-fixture-data-2'
-    const repoA = 'C:\\RepoA'
-    const repoB = 'D:\\RepoB'
+    const dataRoot = path.join(os.tmpdir(), 'aih-fixture-data-2')
+    const repoA = path.join(os.tmpdir(), 'RepoA')
+    const repoB = path.join(os.tmpdir(), 'RepoB')
     const taskId = 'TASK-0003'
     const decision = (ts, workspace, extra) => JSON.stringify(Object.assign({ recordVersion: 1, timestampUtc: ts, taskId, workspace, kind: 'routed' }, extra))
     const decisionsText = [
@@ -2866,7 +2903,12 @@ async function main() {
 
   // ── 32. PHASE 2.1: host GET route — engineering profile state ───────────
   {
-    const dataRoot = tmpDir('nexus-ctr-engr-')
+    const dataRoot = hostDataRoot('nexus-ctr-engr-')
+    // Exercise the real installed CLI boundary: it requires valid profile
+    // and model catalogs, as well as its scripts, under the host install root.
+    const installRoot = path.dirname(dataRoot)
+    fs.cpSync(path.join(ROOT, 'scripts'), path.join(installRoot, 'scripts'), { recursive: true })
+    fs.cpSync(path.join(ROOT, 'config'), path.join(installRoot, 'config'), { recursive: true })
     writeTree(dataRoot, {
       [path.join(dataRoot, 'settings.yaml')]: 'engineering-profile: glm-codex\n',
     })
@@ -2892,12 +2934,20 @@ async function main() {
       assert.equal(res.code, 200)
       assert.equal(payload.schemaVersion, 1)
       assert.equal(payload.preferredProfile.id, 'glm-codex')
-      // DSH_HOME points at an isolated tmp root without config profiles: the
-      // route fails closed and falls back to the id as displayName.
-      assert.equal(payload.preferredProfile.displayName, 'glm-codex')
-      // isolated tmp DSH_HOME has no config files → fail-closed empty state
-      assert.ok(Array.isArray(payload.profiles) && payload.profiles.length === 0, 'isolated root: no profiles exposed, state degrades safely')
-      assert.ok(payload.roleModels && Array.isArray(payload.roleModels.primaryEngineer) && payload.roleModels.primaryEngineer.length === 0, 'isolated root: role models degrade to empty lists')
+      assert.equal(payload.preferredProfile.displayName, 'GLM + Codex')
+      assert.deepEqual(payload.profiles.map(profile => profile.id), ['deepseek-codex', 'glm-codex'], 'installed catalogs expose the two built-in Dual profiles')
+      assert.ok(payload.roleModels && Array.isArray(payload.roleModels.primaryEngineer) && payload.roleModels.primaryEngineer.length > 0, 'installed model catalog supplies primary engineer choices')
+      // Missing CLI catalogs fail closed at the host boundary; they cannot
+      // produce a successful editor response with an invented empty contract.
+      const profilesFile = path.join(installRoot, 'config', 'engineering-profiles.json')
+      fs.renameSync(profilesFile, profilesFile + '.held')
+      try {
+        await engineeringRoute.handler({ method: 'GET', url: '/nexus/engineering-profile.json' }, res)
+        assert.equal(res.code, 503)
+        assert.equal(JSON.parse(res.body).error, 'engineering-route-contract-unavailable')
+      } finally {
+        fs.renameSync(profilesFile + '.held', profilesFile)
+      }
       // GET with POST verb → 405
       await engineeringRoute.handler({ method: 'POST', url: '/nexus/engineering-profile.json' }, res)
       assert.equal(res.code, 405)

@@ -21,6 +21,7 @@ const os = require('node:os')
 const path = require('node:path')
 
 const repoRoot = path.resolve(__dirname, '..')
+const { createPresetCtx } = require('./lib/AgentRequestComposition.cjs')
 const isolation = require(path.join(repoRoot, 'config', 'Muse-Isolation.cjs'))
 
 let passed = 0
@@ -81,14 +82,11 @@ function museState(overrides) {
 }
 
 function makeCtx() {
-  const handlers = {}
   const registrations = []
-  return {
-    handlers,
+  return createPresetCtx({
     registrations,
-    on: (name, handler) => { handlers[name] = handler },
-    shellEnv: { register: (definition) => { registrations.push(definition) } },
-  }
+    shellEnv: { list() { return [] }, register: (definition) => { registrations.push(definition) } },
+  })
 }
 
 async function runRequest(ctx, session, proposed, nextImpl) {
@@ -234,16 +232,16 @@ async function main() {
     await assert.rejects(() => runRequest(ctx, unboundSession, {}), (error) => error.code === 'nexus-execution-target-unavailable')
     pass('9b: a muse-plane session without a controller binding fails closed (API-created sessions are visible, never silently wrong tools)')
 
-    // ── 10. shellEnv publishes DSH_AIH_PRESET for muse sessions only ────────
+    // ── 10. shellEnv publishes DSH_AIH_PRESET through the shared session owner ────────
     const registration = ctx.registrations[0]
-    assert.equal(registration.name, 'aih-muse-preset')
+    assert.equal(registration.name, 'aih-session-preset')
     const execution = { agent: { session } }
     const variables = registration.resolve(execution)
     assert.equal(variables.DSH_AIH_PRESET, 'aih-muse')
     const dualVariables = registration.resolve({ agent: { session: dualSession } })
-    assert.deepEqual(dualVariables, {})
+    assert.deepEqual(dualVariables, { DSH_AIH_PRESET: 'aih-engineering' })
     assert.deepEqual(registration.resolve({}), {})
-    pass('10: shellEnv publishes DSH_AIH_PRESET=aih-muse exactly for muse-plane sessions')
+    pass('10: shellEnv publishes DSH_AIH_PRESET=aih-muse with the correct value for each plane')
 
     // ── 11. Session preset resolution: events win over stale headers ────────
     assert.equal(isolation.sessionPreset(session), 'aih-muse')

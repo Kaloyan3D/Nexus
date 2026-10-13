@@ -35,7 +35,7 @@ function New-AihMuseRoutingFixture{
     $catalogPath=Join-Path $fixtureRoot 'config/nexus-profiles.json'
     $catalogText=[IO.File]::ReadAllText($catalogPath).Replace('"selectable": false','"selectable": true').Replace('"runnable": false','"runnable": true')
     [IO.File]::WriteAllText($catalogPath,$catalogText,[Text.UTF8Encoding]::new($false))
-    $settings=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'config/settings.yaml')
+    $settings=(Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $InstallRoot 'config/settings.yaml')) -replace '(?m)^engineering-profile:[^\r\n]+','engineering-profile: muse-spark-1.3-contributor'
     $settingsPath=Join-Path (Join-Path $fixtureRoot 'data') 'settings.yaml'
     [IO.File]::WriteAllText($settingsPath,$settings,[Text.UTF8Encoding]::new($false))
     [pscustomobject]@{ Root=$fixtureRoot; Settings=$settingsPath; Workspace=(Join-Path $fixtureRoot 'ws'); Policy=(Join-Path $fixtureRoot 'config/routing-policy.json'); Catalog=(Join-Path $fixtureRoot 'config/nexus-profiles.json'); Registry=(Join-Path $fixtureRoot 'config/model-registry.json'); MuseProfiles=(Join-Path $fixtureRoot 'config/muse-profiles.json') }
@@ -61,7 +61,7 @@ try{
     Assert-Aih ($musePreset.allowOpenAI -eq $false -and $musePreset.allowCodexSubagent -eq $false) '1.3: the muse plane carries no Codex/OpenAI permissions'
     Assert-Aih ($musePreset.failurePolicy -eq 'fail-closed') '1.4: the muse plane fails closed on failure'
     Assert-Aih ($musePreset.rootExecutor.provider -eq 'meta-model-api' -and $musePreset.rootExecutor.model -eq 'muse-spark-1.3-contributor' -and $musePreset.rootExecutor.reasoning -eq 'xhigh') '1.5: rootExecutor pins the exact Muse target'
-    Assert-Aih ($musePreset.profileOverrideAllowed -eq $false) '1.6: the muse preset locks its own profile binding'
+    Assert-Aih ($musePreset.profileOverrideAllowed -eq $true) '1.6: the muse preset allows manual profile selection between Meta Direct and OpenCode Go (default stays Meta)'
     $dualPreset=$policy.presets.PSObject.Properties['aih-engineering'].Value
     Assert-Aih ($dualPreset.allowCodexSubagent -eq $true -and $dualPreset.failurePolicy -ne 'fail-closed') '1.7: the Dual aih-engineering policy remains unchanged'
 
@@ -79,6 +79,7 @@ try{
     Assert-Aih ($null-eq$muse.escalatedFrom -and $muse.manualOverride -eq $false) '2.10: no escalation/override semantics exist on the muse plane'
 
     # -- 3. Dual path unchanged: same call shape, byte-compatible record
+    $env:DSH_AIH_PROFILE='deepseek-codex'
     $dual=Invoke-AihRoutingDecision -Description 'Ordinary engineering work on the controller plane.' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot (Join-Path $fixture.Root 'data/routing') -Preset 'aih-engineering' -DryRun -SettingsPath $fixture.Settings
     Assert-Aih ($dual.engine -eq 'dual') '3.1: the Dual record carries its authoritative engine identity'
     Assert-Aih ($null-eq$dual.PSObject.Properties['dataUseTier']) '3.2: the Dual record carries no muse-only fields'
@@ -86,6 +87,7 @@ try{
     Assert-Aih ($dual.preset -eq 'aih-engineering') '3.4: the Dual record names its own preset'
     $mechanical=Invoke-AihRoutingDecision -Description 'run tests' -Workspace $fixture.Workspace -PolicyPath $fixture.Policy -DataRoot (Join-Path $fixture.Root 'data/routing') -Preset 'aih-engineering' -DryRun -SettingsPath $fixture.Settings
     Assert-Aih ($mechanical.executionClass -eq 'deterministic' -and $mechanical.role -eq $null) '3.5: Dual deterministic routing is unchanged'
+    $env:DSH_AIH_PROFILE=$null
     # TASK-0056: Muse keeps NO Dual-derived deterministic path. 'run tests' is
     # a Dual mechanical class (writable=false, role=null, no model target);
     # the Muse plane always runs its one main agent instead of consulting it.
@@ -145,7 +147,7 @@ try{
     Assert-Aih ($readyTarget.runnable -eq $true -and $readyTarget.selectable -eq $true) '8.1: the production Muse profile is explicitly selectable/runnable'
     Assert-Aih ($readyTarget.engine -eq 'muse') '8.2: the ready profile still classifies as the muse engine'
     Assert-Aih ($readyTarget.availability -eq 'ready') '8.3: profile availability is ready'
-    $productionTarget=Resolve-AihMuseRoutingTarget -InstallRoot $InstallRoot -PresetId 'aih-muse' -SettingsPath (Join-Path $InstallRoot 'data/settings.yaml')
+    $productionTarget=Resolve-AihMuseRoutingTarget -InstallRoot $InstallRoot -PresetId 'aih-muse' -SettingsPath (Join-Path $InstallRoot 'config/settings.yaml') -ProfileId 'muse-spark-1.3-contributor'
     Assert-Aih ($productionTarget.provider -eq 'meta-model-api' -and $productionTarget.model -eq 'muse-spark-1.3-contributor' -and $productionTarget.reasoning -eq 'xhigh') '8.4: production activation resolves the exact Muse target'
 
     # -- 9. Malformed catalog engine binding fails closed
@@ -242,6 +244,8 @@ try{
     # -- 14. Dual routing under a muse-absent catalog keeps legacy behavior
     $legacyFixture=New-AihMuseRoutingFixture
     Remove-Item -LiteralPath (Join-Path $legacyFixture.Root 'config/nexus-profiles.json') -Force
+    $legacySettings=(Get-Content -Raw $legacyFixture.Settings) -replace '(?m)^engineering-profile:[^\r\n]+','engineering-profile: deepseek-codex'
+    [IO.File]::WriteAllText($legacyFixture.Settings,$legacySettings,[Text.UTF8Encoding]::new($false))
     $legacy=Invoke-AihRoutingDecision -Description 'Ordinary engineering work.' -Workspace $legacyFixture.Workspace -PolicyPath $legacyFixture.Policy -DataRoot (Join-Path $legacyFixture.Root 'data/routing') -Preset 'aih-engineering' -DryRun -SettingsPath $legacyFixture.Settings
     Assert-Aih ($legacy.engine -eq 'dual' -and $legacy.role -eq 'primaryEngineer') '14.1: a missing catalog keeps Dual behavior with explicit engine identity'
     Remove-Item -LiteralPath $legacyFixture.Root -Recurse -Force

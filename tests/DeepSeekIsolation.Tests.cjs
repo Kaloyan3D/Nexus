@@ -7,6 +7,7 @@ const path = require('node:path')
 const isolation = require('../config/DeepSeek-Isolation.cjs')
 const engineeringIsolation = require('../config/Engineering-Isolation.cjs')
 const profiles = require('../config/Engineering-Profiles.cjs')
+const { createPresetCtx } = require('./lib/AgentRequestComposition.cjs')
 
 let passed = 0
 function pass(name) {
@@ -42,14 +43,14 @@ async function main() {
   let contributor
   isolation.apply({
     on(name, handler) { handlers[name] = handler },
-    shellEnv: { register(value) { contributor = value } },
+    shellEnv: { list() { return [] }, register(value) { contributor = value } },
   })
   assert.equal(isolation.inject[0], 'shellEnv')
   const deepSession = { header: { agentPreset: 'aih-deepseek' }, events: [] }
   const normalSession = { header: { agentPreset: 'aih-engineering' }, events: [] }
   assert.equal(contributor.resolve({ agent: { session: deepSession } }).DSH_AIH_PRESET, 'aih-deepseek')
-  assert.deepEqual(contributor.resolve({ agent: { session: normalSession } }), {})
-  assert.deepEqual(contributor.resolve({ agent: { session: { header: { agentPreset: 'aih-deepseek' }, events: [{ type: 'agent-preset/selected', data: { agentPreset: 'aih-engineering' } }] } } }), {})
+  assert.deepEqual(contributor.resolve({ agent: { session: normalSession } }), { DSH_AIH_PRESET: 'aih-engineering' })
+  assert.deepEqual(contributor.resolve({ agent: { session: { header: { agentPreset: 'aih-deepseek' }, events: [{ type: 'agent-preset/selected', data: { agentPreset: 'aih-engineering' } }] } } }), { DSH_AIH_PRESET: 'aih-engineering' })
 
   const worker = { agent: { session: { header: { origin: 'subagent', delegationDepth: 1 } } } }
   const sol = { provider: 'sol-local', model: 'gpt-5.6-sol', reasoningEffort: 'medium' }
@@ -65,11 +66,10 @@ async function main() {
   const retainedWorker = await handlers['agent/request'](worker, async () => flashMax)
   assert.equal(retainedWorker.provider, 'flash-max-direct')
 
-  const engineeringHandlers = {}
-  engineeringIsolation.apply({
-    on(name, handler) { engineeringHandlers[name] = handler },
-  })
-  assert.equal(engineeringIsolation.inject, undefined)
+  const engineeringCtx = createPresetCtx()
+  engineeringIsolation.apply(engineeringCtx)
+  const engineeringHandlers = engineeringCtx.handlers
+  assert.deepEqual(engineeringIsolation.inject, ['shellEnv'])
 
   // ── Engineering enforcement: controller-owned targets, fail-closed ───────
   //

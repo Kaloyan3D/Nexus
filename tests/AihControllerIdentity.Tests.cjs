@@ -569,7 +569,7 @@ async function runBridgeEndToEnd() {
   const ledgerPath = path.join(fixture, '.ai-harness', 'state', 'tasks.json')
   function boot() {
     const handlers = {}
-    const ctx = { on: (event, fn) => { handlers[event] = fn }, shellEnv: { register() {} } }
+    const ctx = { on: (event, fn) => { handlers[event] = fn }, shellEnv: { list() { return [] }, register() {} } }
     controller.apply(ctx)
     return handlers['agent/pre-step']
   }
@@ -757,7 +757,22 @@ async function runBridgeEndToEnd() {
     try {
       fs.writeFileSync(path.join(museWorkspace, 'package.json'), JSON.stringify({ private: true, scripts: { test: 'node -e "process.exit(0)"' } }))
       const museSettings = fs.readFileSync(path.join(installRoot, 'config', 'settings.yaml'), 'utf8')
-      fs.writeFileSync(path.join(dataHome, 'settings.yaml'), museSettings)
+      fs.writeFileSync(path.join(dataHome, 'settings.yaml'), museSettings.replace(/^engineering-profile:.*$/m, 'engineering-profile: muse-spark-1.3-contributor'))
+      const preStepInvalidPlane = boot()
+      const invalidSession = {
+        id: 'e2e-session-invalid-plane',
+        header: { cwd: museWorkspace, agentPreset: 'aih-engineering' },
+        messages: [],
+        append(kind, message) { this.messages.push({ kind, message }) },
+      }
+      let invalidNextCalls = 0
+      const invalidOutcome = await preStepInvalidPlane(
+        { agent: { session: invalidSession }, messages: [userMessage('hi')], step: 1, turn: 'invalid-1' },
+        () => { invalidNextCalls++; return 'next' },
+      )
+      assert.deepEqual(invalidOutcome, { kind: 'reject' }, 'Muse preference on Dual plane aborts before task creation')
+      assert.equal(invalidNextCalls, 0, 'invalid plane makes no downstream request')
+      assert.equal(fs.existsSync(path.join(museWorkspace, '.ai-harness', 'state', 'tasks.json')), false, 'invalid plane creates no task')
       const preStepMuse = boot()
       const museSession = {
         id: 'e2e-session-muse',
@@ -772,6 +787,25 @@ async function runBridgeEndToEnd() {
       assert.equal(museBinding.engine, 'muse', 'new Muse session persists engine=muse in its binding')
       assert.equal(museLedger.tasks[0].boundEngine, 'muse', 'new Muse session persists boundEngine=muse in its task')
       assert.equal(museBinding.executionClass, 'muse_main', 'complex/security Muse session remains on the Muse main-agent plane')
+
+      // A persisted task may need rerouting after recovery. If routing then
+      // fails, the binding stays recoverable but the current turn must stop.
+      const savedBindings = JSON.parse(fs.readFileSync(bindingsPath, 'utf8'))
+      savedBindings.bindings[museSession.id].needsRouteCheck = true
+      fs.writeFileSync(bindingsPath, JSON.stringify(savedBindings))
+      fs.writeFileSync(path.join(dataHome, 'settings.yaml'), museSettings.replace(/^engineering-profile:.*$/m, 'engineering-profile: missing-muse-profile'))
+      const preStepBrokenRoute = boot()
+      let routeFailureNextCalls = 0
+      const routeFailureOutcome = await preStepBrokenRoute(
+        { agent: { session: museSession }, messages: [userMessage('Continue the same task.')], step: 1, turn: 'muse-route-failure' },
+        () => { routeFailureNextCalls++; return 'next' },
+      )
+      assert.deepEqual(routeFailureOutcome, { kind: 'reject' }, 'routing failure aborts the current turn')
+      assert.equal(routeFailureNextCalls, 0, 'routing failure never invokes downstream inference')
+      assert.ok(museSession.messages.at(-1).message.content[0].text.includes('Inference was not started.'), 'controller reports one clear failure')
+      assert.equal(JSON.parse(fs.readFileSync(bindingsPath, 'utf8')).bindings[museSession.id].taskInstanceId, museBinding.taskInstanceId, 'task binding remains available for recovery')
+      fs.writeFileSync(path.join(dataHome, 'settings.yaml'), museSettings.replace(/^engineering-profile:.*$/m, 'engineering-profile: muse-spark-1.3-contributor'))
+      fs.writeFileSync(bindingsPath, JSON.stringify({ ...savedBindings, bindings: { ...savedBindings.bindings, [museSession.id]: museBinding } }))
 
       // Corrupting the authoritative ledger engine must fail closed at the
       // controller boundary. The downstream model callback is never reached.

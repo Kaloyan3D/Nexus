@@ -104,11 +104,15 @@ function Resolve-AihPreset {
 # global overrides, so DeepSeek-only can never silently route engineer roles
 # to another vendor.
 function Resolve-AihProfile {
-    param([object]$Policy,[object]$Preset,[object]$Profiles,[string]$SettingsPath)
+    param([object]$Policy,[object]$Preset,[object]$Profiles,[string]$SettingsPath,[string]$ProfileId)
     $overrideAllowed=$true
     if($null-ne $Preset-and$null-ne $Preset.Config.PSObject.Properties['profileOverrideAllowed']){$overrideAllowed=[bool]$Preset.Config.profileOverrideAllowed}
     $requested=$null
-    if($overrideAllowed){
+    if(-not[string]::IsNullOrWhiteSpace($ProfileId)){
+        if(-not$overrideAllowed-and$ProfileId-ne[string]$Preset.Config.profile){throw 'Profile override rejected by locked preset.'}
+        $requested=$ProfileId
+    }
+    if($overrideAllowed-and[string]::IsNullOrWhiteSpace($requested)){
         if(-not[string]::IsNullOrWhiteSpace($env:DSH_AIH_PROFILE)){$requested=$env:DSH_AIH_PROFILE.Trim().ToLowerInvariant()}
         elseif(-not[string]::IsNullOrWhiteSpace($env:AIH_ACTIVE_PROFILE)){$requested=$env:AIH_ACTIVE_PROFILE.Trim().ToLowerInvariant()}
         elseif(-not[string]::IsNullOrWhiteSpace($SettingsPath)-and(Test-Path -LiteralPath $SettingsPath)){
@@ -398,11 +402,16 @@ function Resolve-AihMuseRoutingTarget {
     param(
         [Parameter(Mandatory=$true)][string]$InstallRoot,
         [Parameter(Mandatory=$true)][string]$PresetId,
-        [string]$SettingsPath
+        [string]$SettingsPath,
+        [string]$ProfileId
     )
     $root=[IO.Path]::GetFullPath($InstallRoot)
-    # 1. The active Nexus profile (the muse preset locks its own binding).
-    $active=Resolve-AihActiveNexusProfile -InstallRoot $root -Preset $PresetId
+    # 1. The selected Nexus profile is authoritative for the Muse plane. The
+    # preset supplies a default only when there is no operator preference.
+    $policy=Get-AihRoutingPolicy (Join-Path $root 'config/routing-policy.json')
+    $presetDoc=Resolve-AihPreset $policy $PresetId
+    $profileId=if(-not[string]::IsNullOrWhiteSpace($ProfileId)){$ProfileId}else{Get-AihRequestedNexusProfileId -Policy $policy -Preset $presetDoc -SettingsPath $SettingsPath -IgnorePresetLock}
+    $active=Resolve-AihNexusProfile -InstallRoot $root -ProfileId $profileId
     if($null-eq$active){throw "Muse routing rejected: the active Nexus profile could not be resolved (preset '$PresetId')."}
     if([string]$active.Engine -ne 'muse'){throw "Muse routing rejected: active profile '$($active.Id)' is not a muse-engine profile."}
     if(-not[bool]$active.Runnable){throw "Muse routing rejected: profile '$($active.Id)' is not runnable (runnable=false)."}
@@ -449,7 +458,7 @@ function Invoke-AihMuseRoutingDecision {
     # re-select the SAME muse target; unresolved failures terminate
     # truthfully. Shares the identity guard, the routing mutex, and the
     # record/state persistence with the Dual path (one controller plane).
-    param([Parameter(Mandatory=$true)][string]$Description,[Parameter(Mandatory=$true)][string]$Workspace,[Parameter(Mandatory=$true)][string]$PolicyPath,[Parameter(Mandatory=$true)][string]$DataRoot,[string]$TaskId,[string]$Preset,[string]$ForceTier,[string]$ForceClass,[string]$Signal='none',[string]$FailureReason,[switch]$UserApprovedCodexSolve,[switch]$ReviewRequested,[switch]$DryRun,[string]$SettingsPath,[string]$CustomProfilePath,[string]$TaskInstanceId,[string]$RequestedEngine)
+    param([Parameter(Mandatory=$true)][string]$Description,[Parameter(Mandatory=$true)][string]$Workspace,[Parameter(Mandatory=$true)][string]$PolicyPath,[Parameter(Mandatory=$true)][string]$DataRoot,[string]$TaskId,[string]$Preset,[string]$ForceTier,[string]$ForceClass,[string]$Signal='none',[string]$FailureReason,[switch]$UserApprovedCodexSolve,[switch]$ReviewRequested,[switch]$DryRun,[string]$SettingsPath,[string]$CustomProfilePath,[string]$TaskInstanceId,[string]$RequestedEngine,[string]$ProfileId)
     $policy=Get-AihRoutingPolicy $PolicyPath
     $resolved=Resolve-AihPreset $policy $Preset
     if($resolved.Id -ne 'aih-muse'){throw "Muse routing requires the aih-muse agent plane (got '$($resolved.Id)')."}
@@ -483,7 +492,7 @@ function Invoke-AihMuseRoutingDecision {
         # The Muse agent plane runs its one main agent for every supported
         # engineering turn; no Dual execution-class decision is consulted.
         $installRoot=Split-Path -Parent (Split-Path -Parent $PolicyPath)
-        $target=Resolve-AihMuseRoutingTarget -InstallRoot $installRoot -PresetId $resolved.Id -SettingsPath $SettingsPath
+        $target=Resolve-AihMuseRoutingTarget -InstallRoot $installRoot -PresetId $resolved.Id -SettingsPath $SettingsPath -ProfileId $ProfileId
         $record=[ordered]@{recordVersion=4;recordId=[guid]::NewGuid().ToString('N');timestampUtc=[DateTime]::UtcNow.ToString('o');taskId=$TaskId;taskInstanceId=if([string]::IsNullOrWhiteSpace($TaskInstanceId)){$null}else{$TaskInstanceId};workspace=$workspacePath;description=$Description;preset=$resolved.Id;engine='muse';selectedExecutionClass=$current;executionClass=$current;role=$null;profile=$target.ProfileId;profileDisplayName=$target.ProfileDisplayName;provider=$target.Provider;model=$target.Model;modelDisplayName=$target.ModelDisplayName;vendor=$target.Vendor;reasoning=$target.Reasoning;dataUseTier=$target.DataUseTier;writable=$true;risk=$risk;reviewRequired=$false;reviewRequested=[bool]$ReviewRequested;reason=$reason;escalatedFrom=$null;manualOverride=$false;signal=$Signal;failureSignature=$signature;sameFailureCount=$sameCount;matchedRule=$initial.RuleId;matchedPatterns=@($initial.MatchedPatterns);freshSession=$true;completionAuthority=$false;selectedTier=$null;legacyTierDeprecated=$true;dryRun=[bool]$DryRun}
         if(-not$DryRun){
             New-Item -ItemType Directory -Force -Path (Join-Path $DataRoot 'states')|Out-Null
@@ -501,7 +510,7 @@ function Invoke-AihRoutingDecision {
     # ledger) and the durable state/decision records carry the lifecycle
     # identity (Part 15). Legacy callers that omit it keep the exact old
     # behavior (explicit compatibility path).
-    param([Parameter(Mandatory=$true)][string]$Description,[Parameter(Mandatory=$true)][string]$Workspace,[Parameter(Mandatory=$true)][string]$PolicyPath,[Parameter(Mandatory=$true)][string]$DataRoot,[string]$TaskId,[string]$Preset,[string]$ForceTier,[string]$ForceClass,[string]$Signal='none',[string]$FailureReason,[switch]$UserApprovedCodexSolve,[switch]$ReviewRequested,[switch]$DryRun,[string]$SettingsPath,[string]$CustomProfilePath,[string]$TaskInstanceId,[string]$RequestedEngine)
+    param([Parameter(Mandatory=$true)][string]$Description,[Parameter(Mandatory=$true)][string]$Workspace,[Parameter(Mandatory=$true)][string]$PolicyPath,[Parameter(Mandatory=$true)][string]$DataRoot,[string]$TaskId,[string]$Preset,[string]$ForceTier,[string]$ForceClass,[string]$Signal='none',[string]$FailureReason,[switch]$UserApprovedCodexSolve,[switch]$ReviewRequested,[switch]$DryRun,[string]$SettingsPath,[string]$CustomProfilePath,[string]$TaskInstanceId,[string]$RequestedEngine,[string]$ProfileId)
     $policy=Get-AihRoutingPolicy $PolicyPath
     $resolved=Resolve-AihPreset $policy $Preset
     [void](Assert-AihEngineBinding -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId -PresetId $resolved.Id -RequestedEngine $RequestedEngine)
@@ -521,7 +530,7 @@ function Invoke-AihRoutingDecision {
     # profile resolver still fails closed on unknown ids).
     $museEngineOnDualPreset=$false;$museGuardProfileId=$null
     try{
-        $requestedNexusId=Get-AihRequestedNexusProfileId $policy $resolved $SettingsPath
+        $requestedNexusId=if(-not[string]::IsNullOrWhiteSpace($ProfileId)){$ProfileId}else{Get-AihRequestedNexusProfileId $policy $resolved $SettingsPath}
         if(-not[string]::IsNullOrWhiteSpace($requestedNexusId)){
             $catalog=Get-AihNexusProfileCatalog (Join-Path (Split-Path -Parent $PolicyPath) 'nexus-profiles.json')
             foreach($catalogProfile in @($catalog.profiles)){
@@ -533,7 +542,7 @@ function Invoke-AihRoutingDecision {
         }
     }catch{$museEngineOnDualPreset=$false}
     if($museEngineOnDualPreset){throw "Muse routing rejected: the active profile '$museGuardProfileId' selects the muse engine but the session runs the '$($resolved.Id)' agent plane. Start the session on the aih-muse agent plane (Normal Engineering + Muse profile)."}
-    $resolvedProfile=Resolve-AihProfile $policy $resolved $profiles $SettingsPath
+    $resolvedProfile=Resolve-AihProfile $policy $resolved $profiles $SettingsPath -ProfileId $ProfileId
     $workspacePath=[IO.Path]::GetFullPath($Workspace)
     if([string]::IsNullOrWhiteSpace($TaskId)){$TaskId=[guid]::NewGuid().ToString('N')};if($TaskId-notmatch'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'){throw 'TaskId is invalid.'}
     $mutex=$null;$taken=$false;if(-not $DryRun){$mutex=[Threading.Mutex]::new($false,(Get-AihRoutingMutexName $DataRoot));try{$taken=$mutex.WaitOne(30000)}catch [Threading.AbandonedMutexException]{$taken=$true};if(-not $taken){throw 'Timed out waiting for routing lock.'}}

@@ -765,6 +765,582 @@ function New-AihContextCompactionOperationId {
     return ('ccop_' + $digest.Substring(0, 32))
 }
 
+# ══════════════════════════════════════════════════════════════════════
+# CCV2-A02 — durable multi-generation operation foundation (V2, PS authority).
+#
+# V1 functions above are UNCHANGED. V2 lives in an explicit separate domain:
+# schemaVersion 2, operation-ID domain .../v2, and a separate persistence
+# file (context-compaction-operation-v2.json). V1 stored operations are never
+# reinterpreted as V2 (schema branching).
+# ══════════════════════════════════════════════════════════════════════
+
+$AihContextOperationIdDomainV2 = 'nexus/context-compaction-operation/v2'
+$AihContextOperationV2SchemaVersion = 2
+$AihContextOperationV2FileName = 'context-compaction-operation-v2.json'
+
+function New-AihContextCompactionOperationIdV2 {
+    # CANONICAL generation-aware V2 operation identity (derivation authority;
+    # the JS twin deriveCanonicalOperationIdV2 mirrors it byte-for-byte,
+    # proven by parity test). Serialization: domain LF taskId LF
+    # taskInstanceId LF sessionId LF generation LF checkpointId, UTF-8,
+    # SHA-256 hex, first 32 chars, ccop_ prefix.
+    param([Parameter(Mandatory = $true)][string]$TaskId, [Parameter(Mandatory = $true)][string]$TaskInstanceId, [Parameter(Mandatory = $true)][string]$SessionId, [Parameter(Mandatory = $true)][int]$Generation, [Parameter(Mandatory = $true)][string]$CheckpointId)
+    if ([int]$Generation -lt 1) { throw 'V2 operation identity refused: generation must be a positive integer. (KEEP.)' }
+    if ([string]::IsNullOrWhiteSpace($CheckpointId)) { throw 'V2 operation identity refused: checkpointId is required. (KEEP.)' }
+    $joined = [string]$AihContextOperationIdDomainV2 + "`n" + [string]$TaskId + "`n" + [string]$TaskInstanceId + "`n" + [string]$SessionId + "`n" + [string][int]$Generation + "`n" + [string]$CheckpointId
+    $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    return ('ccop_' + $digest.Substring(0, 32))
+}
+
+function New-AihContextContinuationAnchor {
+    # Bounded identity-only continuation anchor (no payload of any kind).
+    param([Parameter(Mandatory = $true)][string]$OperationId, [Parameter(Mandatory = $true)][int]$Generation, [Parameter(Mandatory = $true)][int]$SegmentIndex, [Parameter(Mandatory = $true)][int]$SegmentCount)
+    if ([string]::IsNullOrWhiteSpace($OperationId) -or ($OperationId -match '["<>]')) { throw 'Continuation anchor refused: operationId must be a bounded identity token. (KEEP.)' }
+    if (([int]$SegmentIndex -lt 0) -or ([int]$SegmentIndex -ge [int]$SegmentCount) -or ([int]$SegmentCount -lt 1)) { throw 'Continuation anchor refused: segment index out of range. (KEEP.)' }
+    $oneBased = [int]$SegmentIndex + 1
+    return ('<nexus-context-continuation operation="' + [string]$OperationId + '" generation="' + [string][int]$Generation + '" segment="' + [string]$oneBased + '/' + [string][int]$SegmentCount + '"/>')
+}
+
+function Get-AihContextOperationV2Path {
+    param([Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$TaskId)
+    $layout = Get-AihLedgerLayout $Workspace
+    return (Join-Path (Join-Path $layout.Runs $TaskId) $AihContextOperationV2FileName)
+}
+
+function Read-AihContextCompactionOperationV2 {
+    param([Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$TaskId)
+    $opPath = Get-AihContextOperationV2Path -Workspace $Workspace -TaskId $TaskId
+    if (-not (Test-Path -LiteralPath $opPath)) { return $null }
+    try { $parsed = Get-Content -Raw -Encoding UTF8 -LiteralPath $opPath | ConvertFrom-Json }
+    catch { throw 'Compaction operation V2 blocked: context-compaction-operation-v2.json is malformed. (KEEP: old context retained.)' }
+    if (($null -eq $parsed) -or ([int]$parsed.schemaVersion -ne [int]$AihContextOperationV2SchemaVersion)) {
+        throw 'Compaction operation V2 blocked: stored record is not a V2 operation. (KEEP: old context retained.)'
+    }
+    return $parsed
+}
+
+function Test-AihContextCompactionOperationV2 {
+    # Closed-world V2 validation (JS twin: validateCompactionOperationV2).
+    # Any failure returns valid=false (BLOCK/KEEP) before any mutation.
+    param(
+        [Parameter(Mandatory = $true)]$Operation,
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$TaskInstanceId,
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [string]$CheckpointId = $null,
+        [int]$CheckpointGeneration = -1,
+        [string]$RepositoryId = $null,
+        [string]$CheckoutId = $null
+    )
+    $fail = { param([string]$Reason) return [pscustomobject][ordered]@{ valid = $false; reason = $Reason } }
+    if ($null -eq $Operation) { return (& $fail 'operation-missing') }
+    # A05H H1: exact-key validation (JS twin: OPERATION_V2_EXACT_KEYS).
+    # Unknown protocol fields FAIL CLOSED here, before any value check, so a
+    # recomputed operationId can never legalize an unknown schema field.
+    # Handles both pscustomobject (post-read-back) and Hashtable
+    # (pre-persist draft): Hashtables do not expose entries through
+    # PSObject.Properties.
+    $operationV2Keys = @('schemaVersion','operationId','attemptId','taskId','taskInstanceId','sessionId','workspace','repositoryId','checkoutId','checkpointGeneration','checkpointId','checkpointContentDigest','checkpointPath','snapshotTokenId','safePointBoundarySeq','sourceEventSeqs','segments','lifecycle','createdAtUtc')
+    $operationKeyNames = @()
+    if ($Operation -is [Collections.IDictionary]) { $operationKeyNames = @($Operation.Keys | ForEach-Object { [string]$_ }) }
+    else { $operationKeyNames = @($Operation.PSObject.Properties | ForEach-Object { $_.Name }) }
+    foreach ($operationKeyName in $operationKeyNames) {
+        if ($operationV2Keys -notcontains $operationKeyName) { return (& $fail 'operation-schema-mismatch') }
+    }
+    if ([int]$Operation.schemaVersion -ne [int]$AihContextOperationV2SchemaVersion) { return (& $fail 'operation-schema-mismatch') }
+    if ([string]::IsNullOrWhiteSpace([string]$Operation.operationId)) { return (& $fail 'operation-id-missing') }
+    if ([string]::IsNullOrWhiteSpace([string]$Operation.attemptId)) { return (& $fail 'attempt-id-missing') }
+    if ([string]$Operation.taskId -ne [string]$TaskId) { return (& $fail 'task-id-mismatch') }
+    if ([string]::IsNullOrWhiteSpace([string]$Operation.taskInstanceId) -or ([string]$Operation.taskInstanceId -ne [string]$TaskInstanceId)) { return (& $fail 'task-instance-mismatch') }
+    if ([string]::IsNullOrWhiteSpace([string]$Operation.sessionId) -or ([string]$Operation.sessionId -ne [string]$SessionId)) { return (& $fail 'session-id-mismatch') }
+    if ([string]::IsNullOrWhiteSpace([string]$Operation.workspace) -or ([string]$Operation.workspace -ne [string]$Workspace)) { return (& $fail 'workspace-mismatch') }
+    if ((-not [string]::IsNullOrWhiteSpace($RepositoryId)) -and ([string]$Operation.repositoryId -ne [string]$RepositoryId)) { return (& $fail 'repository-id-mismatch') }
+    if ((-not [string]::IsNullOrWhiteSpace($CheckoutId)) -and ([string]$Operation.checkoutId -ne [string]$CheckoutId)) { return (& $fail 'checkout-id-mismatch') }
+    if ([int]$Operation.checkpointGeneration -lt 1) { return (& $fail 'checkpoint-generation-invalid') }
+    if ([string]::IsNullOrWhiteSpace([string]$Operation.checkpointId)) { return (& $fail 'checkpoint-identity-missing') }
+    if (([int]$CheckpointGeneration -ge 1) -and ([int]$Operation.checkpointGeneration -ne [int]$CheckpointGeneration)) { return (& $fail 'checkpoint-generation-mismatch') }
+    if ((-not [string]::IsNullOrWhiteSpace($CheckpointId)) -and ([string]$Operation.checkpointId -ne [string]$CheckpointId)) { return (& $fail 'checkpoint-identity-mismatch') }
+    $expectedId = $null
+    try { $expectedId = New-AihContextCompactionOperationIdV2 -TaskId $TaskId -TaskInstanceId ([string]$Operation.taskInstanceId) -SessionId $SessionId -Generation ([int]$Operation.checkpointGeneration) -CheckpointId ([string]$Operation.checkpointId) }
+    catch { return (& $fail 'operation-id-derivation-failed') }
+    if ([string]$Operation.operationId -ne [string]$expectedId) { return (& $fail 'operation-id-mismatch') }
+    if (($null -ne $Operation.PSObject.Properties['snapshotTokenId']) -and ($null -ne $Operation.snapshotTokenId) -and ([string]::IsNullOrWhiteSpace([string]$Operation.snapshotTokenId))) { return (& $fail 'snapshot-token-invalid') }
+    if ([int]$Operation.safePointBoundarySeq -lt 0) { return (& $fail 'safe-point-boundary-missing') }
+    $seqs = @($Operation.sourceEventSeqs)
+    if ($seqs.Count -eq 0) { return (& $fail 'source-seqs-missing') }
+    $seen = [Collections.Generic.HashSet[int]]::new()
+    $prev = -1
+    foreach ($seq in $seqs) {
+        if ([int]$seq -lt 0) { return (& $fail 'source-seq-malformed') }
+        if (-not $seen.Add([int]$seq)) { return (& $fail 'source-seqs-duplicate') }
+        if ([int]$seq -le $prev) { return (& $fail 'source-seqs-unordered') }
+        if ([int]$seq -gt [int]$Operation.safePointBoundarySeq) { return (& $fail 'source-seq-beyond-safe-point-boundary') }
+        $prev = [int]$seq
+    }
+    $segments = @($Operation.segments)
+    if ($segments.Count -eq 0) { return (& $fail 'segments-missing') }
+    $payloadCount = 0
+    $flat = [Collections.Generic.List[int]]::new()
+    foreach ($segment in $segments) {
+        if ($null -eq $segment) { return (& $fail 'segment-malformed') }
+        # A05H H1: segments are exact-key validated (JS twin:
+        # OPERATION_V2_SEGMENT_EXACT_KEYS). Unknown segment fields FAIL CLOSED.
+        $segmentV2Keys = @('start','end','sourceEventSeqs','role')
+        $segmentKeyNames = @()
+        if ($segment -is [Collections.IDictionary]) { $segmentKeyNames = @($segment.Keys | ForEach-Object { [string]$_ }) }
+        else { $segmentKeyNames = @($segment.PSObject.Properties | ForEach-Object { $_.Name }) }
+        foreach ($segmentKeyName in $segmentKeyNames) {
+            if ($segmentV2Keys -notcontains $segmentKeyName) { return (& $fail 'operation-schema-mismatch') }
+        }
+        # Role presence must work for both pscustomobject (post-read-back)
+        # and Hashtable (pre-persist draft): Hashtables do not expose entries
+        # through PSObject.Properties.
+        $rolePresent = $false
+        if ($segment -is [Collections.IDictionary]) { $rolePresent = $segment.Contains('role') }
+        else { $rolePresent = ($null -ne $segment.PSObject.Properties['role']) }
+        if (-not $rolePresent) { return (& $fail 'segment-role-missing') }
+        if (($null -eq $segment.start) -or ($null -eq $segment.end) -or ($null -eq $segment.sourceEventSeqs)) {
+            return (& $fail 'segment-malformed')
+        }
+        if ([string]$segment.role -ne 'payload' -and [string]$segment.role -ne 'continuation') { return (& $fail 'segment-role-unknown') }
+        if ([string]$segment.role -eq 'payload') { $payloadCount++ }
+        $sseqs = @($segment.sourceEventSeqs)
+        if ($sseqs.Count -eq 0) { return (& $fail 'segment-seqs-missing') }
+        if (([int]$segment.start -ne [int]$sseqs[0]) -or ([int]$segment.end -ne [int]$sseqs[-1])) { return (& $fail 'segment-endpoint-mismatch') }
+        foreach ($seq in $sseqs) {
+            if ([int]$seq -lt 0) { return (& $fail 'segment-seq-malformed') }
+            [void]$flat.Add([int]$seq)
+        }
+    }
+    if ([int]$payloadCount -eq 0) { return (& $fail 'payload-segment-missing') }
+    if ([int]$payloadCount -gt 1) { return (& $fail 'payload-segment-duplicate') }
+    # Canonical segment order: strictly ascending by start seq (deterministic
+    # frozen form; multi-generation surfaces interleave seqs, so segments are
+    # surface-application runs listed in start order). JS twin:
+    # validateCompactionOperationV2.
+    $previousStart = -1
+    foreach ($segment in $segments) {
+        if ([int]$segment.start -le $previousStart) { return (& $fail 'segments-unordered') }
+        $previousStart = [int]$segment.start
+    }
+    # Non-overlap: segment source sets are pairwise disjoint (set partition).
+    $seen = [Collections.Generic.HashSet[int]]::new()
+    foreach ($segment in $segments) {
+        foreach ($seq in @($segment.sourceEventSeqs)) {
+            if (-not $seen.Add([int]$seq)) { return (& $fail 'segment-overlap') }
+        }
+    }
+    # Exact coverage: the union multiset, ascending-sorted, equals the frozen
+    # sourceEventSeqs.
+    $sortedUnion = @([int[]]$flat.ToArray() | Sort-Object)
+    if ([int]$sortedUnion.Count -ne $seqs.Count) { return (& $fail 'segment-union-mismatch') }
+    for ($i = 0; $i -lt $seqs.Count; $i++) { if ([int]$sortedUnion[$i] -ne [int]$seqs[$i]) { return (& $fail 'segment-union-mismatch') } }
+    foreach ($segment in $segments) {
+        foreach ($seq in @($segment.sourceEventSeqs)) {
+            if ([int]$seq -gt [int]$Operation.safePointBoundarySeq) { return (& $fail 'source-seq-beyond-safe-point-boundary') }
+        }
+    }
+    $lifecycle = [string]$Operation.lifecycle
+    if ($lifecycle -ne 'frozen' -and $lifecycle -ne 'applying' -and $lifecycle -ne 'awaiting-durability' -and $lifecycle -ne 'applied' -and $lifecycle -ne 'blocked') { return (& $fail 'lifecycle-invalid') }
+    return [pscustomobject][ordered]@{ valid = $true; reason = $null }
+}
+
+function Assert-AihCcv2DurableMutationAllowed {
+    # Fixed source-level restriction; no environment or payload opt-in.
+    throw 'ccv2-durable-mutation-disabled: active durable CCv2 is unavailable until mutation-time fencing is verified'
+}
+
+function New-AihContextCompactionOperationV2 {
+    # Freeze ONE immutable V2 application plan: construct → validate → atomic
+    # persist → read-back proof. Retry reuses the frozen plan verbatim (never
+    # re-plans/widens). Any failure throws (KEEP) before any mutation.
+    param(
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$TaskInstanceId,
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [Parameter(Mandatory = $true)][int]$CheckpointGeneration,
+        [Parameter(Mandatory = $true)][string]$CheckpointId,
+        [Parameter(Mandatory = $true)][string]$AttemptId,
+        [Parameter(Mandatory = $true)][int]$SafePointBoundarySeq,
+        [Parameter(Mandatory = $true)][int[]]$SourceEventSeqs,
+        [Parameter(Mandatory = $true)][object[]]$Segments,
+        [Parameter(Mandatory = $true)][string]$CheckpointContentDigest,
+        [Parameter(Mandatory = $true)][string]$Lifecycle,
+        [string]$CheckpointPath = $null,
+        [string]$SnapshotTokenId = $null,
+        [string]$RepositoryId = $null,
+        [string]$CheckoutId = $null
+    )
+    Assert-AihCcv2DurableMutationAllowed
+    $task = Get-AihTask -Workspace $Workspace -TaskId $TaskId -TaskInstanceId $TaskInstanceId
+    if ([string]$task.status -ne 'complete') { throw "Operation V2 refused: task $TaskId status is '$($task.status)', not complete. (KEEP.)" }
+    $operationId = New-AihContextCompactionOperationIdV2 -TaskId $TaskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId $SessionId -Generation ([int]$CheckpointGeneration) -CheckpointId $CheckpointId
+    $existing = $null
+    try { $existing = Read-AihContextCompactionOperationV2 -Workspace $Workspace -TaskId $TaskId } catch { throw }
+    if (($null -ne $existing) -and ([string]$existing.taskInstanceId -eq [string]$task.taskInstanceId) -and ([string]$existing.operationId -eq [string]$operationId)) {
+        return [pscustomobject]$existing
+    }
+    if (($null -ne $existing) -and ([string]$existing.taskInstanceId -eq [string]$task.taskInstanceId) -and ([string]$existing.operationId -ne [string]$operationId)) {
+        throw 'Operation V2 refused: a different frozen operation already owns this generation. (KEEP: never adopt or widen.)'
+    }
+    $segmentRecords = @()
+    foreach ($segment in @($Segments)) {
+        if (($null -eq $segment) -or ($null -eq $segment.start) -or ($null -eq $segment.end) -or ($null -eq $segment.sourceEventSeqs) -or ($null -eq $segment.role)) {
+            throw 'Operation V2 refused: malformed frozen segment (role is required). (KEEP.)'
+        }
+        if ([string]$segment.role -ne 'payload' -and [string]$segment.role -ne 'continuation') {
+            throw 'Operation V2 refused: unknown frozen segment role. (KEEP.)'
+        }
+        $segmentRecords += [ordered]@{ start = [int]$segment.start; end = [int]$segment.end; sourceEventSeqs = @([int[]]$segment.sourceEventSeqs); role = [string]$segment.role }
+    }
+    $operation = [ordered]@{
+        schemaVersion = [int]$AihContextOperationV2SchemaVersion
+        operationId = [string]$operationId
+        attemptId = [string]$AttemptId
+        taskId = [string]$TaskId
+        taskInstanceId = [string]$task.taskInstanceId
+        sessionId = [string]$SessionId
+        checkpointId = [string]$CheckpointId
+        checkpointGeneration = [int]$CheckpointGeneration
+        checkpointContentDigest = [string]$CheckpointContentDigest
+        checkpointPath = $(if ([string]::IsNullOrWhiteSpace($CheckpointPath)) { $null } else { [string]$CheckpointPath })
+        snapshotTokenId = $(if ([string]::IsNullOrWhiteSpace($SnapshotTokenId)) { $null } else { [string]$SnapshotTokenId })
+        safePointBoundarySeq = [int]$SafePointBoundarySeq
+        sourceEventSeqs = @([int[]]$SourceEventSeqs)
+        segments = @($segmentRecords)
+        lifecycle = [string]$Lifecycle
+        workspace = [string]$Workspace
+        repositoryId = $(if ([string]::IsNullOrWhiteSpace($RepositoryId)) { $null } else { [string]$RepositoryId })
+        checkoutId = $(if ([string]::IsNullOrWhiteSpace($CheckoutId)) { $null } else { [string]$CheckoutId })
+        createdAtUtc = [DateTime]::UtcNow.ToString('o')
+    }
+    $check = Test-AihContextCompactionOperationV2 -Operation ([pscustomobject]$operation) -TaskId $TaskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId $SessionId -Workspace $Workspace -CheckpointId $CheckpointId -CheckpointGeneration ([int]$CheckpointGeneration) -RepositoryId $RepositoryId -CheckoutId $CheckoutId
+    if (-not [bool]$check.valid) { throw ('Operation V2 refused: ' + [string]$check.reason + '. (KEEP.)') }
+    $opPath = Get-AihContextOperationV2Path -Workspace $Workspace -TaskId $TaskId
+    Write-AihAtomicJson $opPath $operation
+    $readBack = Read-AihContextCompactionOperationV2 -Workspace $Workspace -TaskId $TaskId
+    if (($null -eq $readBack) -or ([string]$readBack.operationId -ne [string]$operationId)) {
+        throw 'Operation V2 refused: read-back validation failed after atomic write. (KEEP.)'
+    }
+    $recheck = Test-AihContextCompactionOperationV2 -Operation $readBack -TaskId $TaskId -TaskInstanceId ([string]$task.taskInstanceId) -SessionId $SessionId -Workspace $Workspace -CheckpointId $CheckpointId -CheckpointGeneration ([int]$CheckpointGeneration) -RepositoryId $RepositoryId -CheckoutId $CheckoutId
+    if (-not [bool]$recheck.valid) { throw ('Operation V2 refused: read-back invalid (' + [string]$recheck.reason + '). (KEEP.)') }
+    return [pscustomobject]$readBack
+}
+
+# ══════════════════════════════════════════════════════════════════════
+# CCV2-A03 — Checkpoint Schema V2 identity parity (PS authority).
+#
+# V1 checkpoint files (context-checkpoint.json, schemaVersion 1) are
+# UNCHANGED. V2 checkpoints persist separately under
+# context-checkpoints/cp-NNNNNN.json with schemaVersion 2 and are never
+# reinterpreted as V1 (explicit schema branching).
+#
+# Canonical formulas (JS twins in config/ContextCheckpointV2.cjs;
+# proven byte-for-byte by the A03 parity test):
+#   contentDigest = sha256Hex(UTF-8(canonical payload bytes))
+#   checkpointId  = 'ccp_' + sha256Hex(domain LF taskId LF taskInstanceId
+#                   LF sessionId LF generation LF contentDigest)[0..32)
+# ══════════════════════════════════════════════════════════════════════
+
+$AihContextCheckpointV2SchemaVersion = 2
+$AihContextCheckpointIdDomainV2 = 'nexus/context-checkpoint/v2'
+$AihContextCheckpointV2DirName = 'context-checkpoints'
+$AihContextCheckpointV2FilePrefix = 'cp-'
+
+function Get-AihContextCheckpointDigestV2 {
+    # SHA-256 hex (lowercase) over the exact UTF-8 bytes of the supplied
+    # canonical payload text. JS twin: sha256HexUtf8.
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $bytes = [Text.Encoding]::UTF8.GetBytes([string]$Text)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    return $digest
+}
+
+function New-AihContextCheckpointIdV2 {
+    # Canonical deterministic V2 checkpoint identity (derivation authority;
+    # the JS twin deriveCheckpointIdV2 mirrors it byte-for-byte).
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$TaskInstanceId,
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [Parameter(Mandatory = $true)][int]$Generation,
+        [Parameter(Mandatory = $true)][string]$ContentDigest
+    )
+    if ([int]$Generation -lt 1) { throw 'V2 checkpoint identity refused: generation must be a positive integer. (KEEP.)' }
+    if ([string]$ContentDigest -notmatch '^[0-9a-f]{64}$') { throw 'V2 checkpoint identity refused: contentDigest must be sha256 hex. (KEEP.)' }
+    $joined = [string]$AihContextCheckpointIdDomainV2 + "`n" + [string]$TaskId + "`n" + [string]$TaskInstanceId + "`n" + [string]$SessionId + "`n" + [string][int]$Generation + "`n" + [string]$ContentDigest
+    $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    return ('ccp_' + $digest.Substring(0, 32))
+}
+
+function Get-AihContextCheckpointV2FileName {
+    param([Parameter(Mandatory = $true)][int]$Generation)
+    if ([int]$Generation -lt 1) { throw 'V2 checkpoint path refused: generation must be a positive integer. (KEEP.)' }
+    return ($AihContextCheckpointV2FilePrefix + ([string][int]$Generation).PadLeft(6, '0') + '.json')
+}
+
+function Get-AihContextCheckpointV2Path {
+    param([Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$TaskId, [Parameter(Mandatory = $true)][int]$Generation)
+    $layout = Get-AihLedgerLayout $Workspace
+    return (Join-Path (Join-Path (Join-Path $layout.Runs $TaskId) $AihContextCheckpointV2DirName) (Get-AihContextCheckpointV2FileName -Generation ([int]$Generation)))
+}
+
+# CCV2-A04 — Trust Provenance & Content Seal parity (PS authority).
+#
+# V1 checkpoint/operation functions above are UNCHANGED. Trust derivation
+# (sourceKind -> trust class) lives in config/ContextTrustV2.cjs (JS
+# authority); the PS twins below cover seal construction + validation
+# (field binding AND the A04R seal-record digest).
+# Canonical seal shape (JS twin: sealCheckpoint in config/ContextTrustV2.cjs):
+#   { schemaVersion: 1, checkpointId, checkpointContentDigest (sha256 hex),
+#     generation, taskId, taskInstanceId, sessionId, sealedAtUtc (ISO UTC),
+#     algorithm: 'sha256', sealDigest (sha256 hex) }
+# Frozen seal-record digest (JS twin: deriveSealDigestV1):
+#   sealDigest = sha256Hex(UTF-8('nexus/context-content-seal/v1' LF
+#                                canonicalJson(seal excluding sealDigest)))
+# where canonicalJson sorts object keys ordinally (recursive) and keeps
+# array order — byte-identical to the JS repository canonicalizer.
+# ══════════════════════════════════════════════════════════════════════
+
+$AihContextContentSealSchemaVersion = 1
+$AihContextContentSealAlgorithm = 'sha256'
+$AihContextContentSealDigestDomainV1 = 'nexus/context-content-seal/v1'
+
+function ConvertTo-AihJsonEscapedString {
+    # JSON string escaping with JS JSON.stringify semantics: quote,
+    # backslash, \b \f \n \r \t, and \u00XX (lowercase hex) for other
+    # controls below 0x20. All other characters (including non-ASCII and
+    # surrogate pairs) pass through verbatim in UTF-8.
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $sb = New-Object Text.StringBuilder
+    [void]$sb.Append('"')
+    foreach ($ch in ([string]$Text).ToCharArray()) {
+        $code = [int]$ch
+        if ($code -eq 34) { [void]$sb.Append('\"'); }
+        elseif ($code -eq 92) { [void]$sb.Append('\\'); }
+        elseif ($code -eq 8) { [void]$sb.Append('\b'); }
+        elseif ($code -eq 12) { [void]$sb.Append('\f'); }
+        elseif ($code -eq 10) { [void]$sb.Append('\n'); }
+        elseif ($code -eq 13) { [void]$sb.Append('\r'); }
+        elseif ($code -eq 9) { [void]$sb.Append('\t'); }
+        elseif ($code -lt 32) { [void]$sb.Append(('\u{0:x4}' -f $code)); }
+        else { [void]$sb.Append($ch); }
+    }
+    [void]$sb.Append('"')
+    return $sb.ToString()
+}
+
+function ConvertTo-AihCanonicalJson {
+    # Deterministic canonical JSON (JS twin: canonicalize +
+    # JSON.stringify in config/ContextCheckpointV2.cjs): plain objects and
+    # dictionaries serialize with ordinally sorted keys (recursive); arrays
+    # keep author order; no whitespace.
+    param($Value)
+    if ($null -eq $Value) { return 'null' }
+    if ($Value -is [string]) { return (ConvertTo-AihJsonEscapedString -Text ([string]$Value)) }
+    if ($Value -is [datetime]) {
+        # ConvertFrom-Json parses ISO-8601 timestamps into DateTime objects
+        # (whose .Date/.TimeOfDay graph would recurse forever). Sealed
+        # timestamps use canonical millisecond-precision UTC form, so format
+        # back to that exact lexical shape (JS twin hashes the raw string).
+        $utc = ([datetime]$Value).ToUniversalTime()
+        return (ConvertTo-AihJsonEscapedString -Text ($utc.ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture)))
+    }
+    if ($Value -is [bool]) {
+        if ([bool]$Value) { return 'true' }
+        return 'false'
+    }
+    if ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal]) {
+        return ([string]$Value.ToString([Globalization.CultureInfo]::InvariantCulture))
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $keys = @($Value.Keys | ForEach-Object { [string]$_ })
+        $sorted = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($k in $keys) { [void]$sorted.Add($k) }
+        $sorted.Sort([StringComparer]::Ordinal)
+        $parts = @()
+        foreach ($k in $sorted) { $parts += @((ConvertTo-AihJsonEscapedString -Text $k) + ':' + (ConvertTo-AihCanonicalJson -Value $Value[$k])) }
+        return ('{' + ($parts -join ',') + '}')
+    }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        $parts = @()
+        foreach ($entry in $Value) { $parts += @(ConvertTo-AihCanonicalJson -Value $entry) }
+        return ('[' + ($parts -join ',') + ']')
+    }
+    $props = @($Value.PSObject.Properties | Where-Object { $null -ne $_.Name } | ForEach-Object { [string]$_.Name })
+    $sorted = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($k in $props) { [void]$sorted.Add($k) }
+    $sorted.Sort([StringComparer]::Ordinal)
+    $parts = @()
+    foreach ($k in $sorted) { $parts += @((ConvertTo-AihJsonEscapedString -Text $k) + ':' + (ConvertTo-AihCanonicalJson -Value $Value.$k)) }
+    return ('{' + ($parts -join ',') + '}')
+}
+
+function Get-AihContextContentSealDigestV2 {
+    # Domain-separated seal-record digest over the seal body (the seal
+    # excluding sealDigest). JS twin: deriveSealDigestV1.
+    param([Parameter(Mandatory = $true)]$SealBody)
+    $body = @{}
+    foreach ($prop in @($SealBody.PSObject.Properties)) {
+        if ([string]$prop.Name -eq 'sealDigest') { continue }
+        $body[[string]$prop.Name] = $prop.Value
+    }
+    if ($SealBody -is [System.Collections.IDictionary]) {
+        $body = @{}
+        foreach ($key in @($SealBody.Keys)) {
+            if ([string]$key -eq 'sealDigest') { continue }
+            $body[[string]$key] = $SealBody[$key]
+        }
+    }
+    $bodyJson = ConvertTo-AihCanonicalJson -Value $body
+    $joined = [string]$AihContextContentSealDigestDomainV1 + "`n" + $bodyJson
+    $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    return $digest
+}
+
+
+function New-AihContextContentSealV2 {
+    # Mint the authoritative seal for one finalized checkpoint. sealedAtUtc is
+    # an explicit caller input (determinism: no clock reads inside).
+    # JS twin: sealCheckpoint.
+    param(
+        [Parameter(Mandatory = $true)][string]$CheckpointId,
+        [Parameter(Mandatory = $true)][string]$ContentDigest,
+        [Parameter(Mandatory = $true)][int]$Generation,
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$TaskInstanceId,
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [Parameter(Mandatory = $true)][string]$SealedAtUtc
+    )
+    if ([string]::IsNullOrWhiteSpace($CheckpointId)) { throw 'V2 content seal refused: checkpointId is required. (KEEP.)' }
+    if ([string]$ContentDigest -notmatch '^[0-9a-f]{64}$') { throw 'V2 content seal refused: contentDigest must be sha256 hex. (KEEP.)' }
+    if ([int]$Generation -lt 1) { throw 'V2 content seal refused: generation must be a positive integer. (KEEP.)' }
+    if ([string]::IsNullOrWhiteSpace($TaskId)) { throw 'V2 content seal refused: taskId is required. (KEEP.)' }
+    if ([string]::IsNullOrWhiteSpace($TaskInstanceId)) { throw 'V2 content seal refused: taskInstanceId is required. (KEEP.)' }
+    if ([string]::IsNullOrWhiteSpace($SessionId)) { throw 'V2 content seal refused: sessionId is required. (KEEP.)' }
+    try { $null = [DateTime]::Parse([string]$SealedAtUtc) } catch { throw 'V2 content seal refused: sealedAtUtc must be explicit ISO-8601 UTC input. (KEEP.)' }
+    $body = [pscustomobject]@{
+        schemaVersion           = [int]$AihContextContentSealSchemaVersion
+        checkpointId            = [string]$CheckpointId
+        checkpointContentDigest = [string]$ContentDigest
+        generation              = [int]$Generation
+        taskId                  = [string]$TaskId
+        taskInstanceId          = [string]$TaskInstanceId
+        sessionId               = [string]$SessionId
+        sealedAtUtc             = [string]$SealedAtUtc
+        algorithm               = [string]$AihContextContentSealAlgorithm
+    }
+    $sealDigest = Get-AihContextContentSealDigestV2 -SealBody $body
+    return [pscustomobject]@{
+        schemaVersion           = [int]$body.schemaVersion
+        checkpointId            = [string]$body.checkpointId
+        checkpointContentDigest = [string]$body.checkpointContentDigest
+        generation              = [int]$body.generation
+        taskId                  = [string]$body.taskId
+        taskInstanceId          = [string]$body.taskInstanceId
+        sessionId               = [string]$body.sessionId
+        sealedAtUtc             = [string]$body.sealedAtUtc
+        algorithm               = [string]$body.algorithm
+        sealDigest              = [string]$sealDigest
+    }
+}
+
+function Test-AihContextContentSealV2 {
+    # Validate one seal against its checkpoint identity legs. Any mismatch
+    # BLOCKS with a stable reason code (JS twin: validateContentSeal).
+    param(
+        [Parameter(Mandatory = $true)]$Seal,
+        [Parameter(Mandatory = $true)][string]$CheckpointId,
+        [Parameter(Mandatory = $true)][string]$ContentDigest,
+        [Parameter(Mandatory = $true)][int]$Generation,
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$TaskInstanceId,
+        [Parameter(Mandatory = $true)][string]$SessionId
+    )
+    $fail = { param($reason) return @{ valid = $false; reason = [string]$reason } }
+    if ($null -eq $Seal) { return (& $fail 'checkpoint-seal-missing') }
+    if ([int]$Seal.schemaVersion -ne [int]$AihContextContentSealSchemaVersion) { return (& $fail 'checkpoint-seal-invalid') }
+    if ([string]$Seal.algorithm -ne [string]$AihContextContentSealAlgorithm) { return (& $fail 'checkpoint-seal-invalid') }
+    try { $null = [DateTime]::Parse([string]$Seal.sealedAtUtc) } catch { return (& $fail 'checkpoint-seal-invalid') }
+    if ([string]$Seal.sealDigest -notmatch '^[0-9a-f]{64}$') { return (& $fail 'checkpoint-seal-invalid') }
+    if ([string]$Seal.checkpointId -ne [string]$CheckpointId) { return (& $fail 'checkpoint-seal-id-mismatch') }
+    if ([string]$Seal.checkpointContentDigest -ne [string]$ContentDigest) { return (& $fail 'checkpoint-seal-digest-mismatch') }
+    if ([int]$Seal.generation -ne [int]$Generation) { return (& $fail 'checkpoint-seal-generation-mismatch') }
+    if ([string]$Seal.taskId -ne [string]$TaskId) { return (& $fail 'checkpoint-seal-invalid') }
+    if ([string]$Seal.taskInstanceId -ne [string]$TaskInstanceId) { return (& $fail 'checkpoint-seal-invalid') }
+    if ([string]$Seal.sessionId -ne [string]$SessionId) { return (& $fail 'checkpoint-seal-invalid') }
+    $expected = Get-AihContextContentSealDigestV2 -SealBody $Seal
+    if ([string]$Seal.sealDigest -ne [string]$expected) { return (& $fail 'checkpoint-seal-record-digest-mismatch') }
+    return @{ valid = $true; reason = $null }
+}
+
+# ══════════════════════════════════════════════════════════════════════
+# CCV2-A05 — ContextSnapshotToken identity parity (PS authority).
+#
+# SnapshotManager (config/ContextSnapshotV2.cjs) owns capture/derivation/
+# revalidation in JS. The PS twins below cover ONLY the two duplicated
+# identity formulas; PS never mints tokens (no capture/validation here).
+# Canonical formulas (JS twins: deriveRevisionDigest / deriveSnapshotTokenId):
+#   revisionDigest = sha256Hex(UTF-8('nexus/context-snapshot-revision/v1' LF
+#                              canonicalJson(revisionBody)))
+#   snapshotTokenId = 'cst_' + sha256Hex(UTF-8(
+#                       'nexus/context-snapshot-token/v1' LF taskId LF
+#                       taskInstanceId LF sessionId LF generation LF
+#                       revisionDigest))[0..32)
+# canonicalJson is ConvertTo-AihCanonicalJson (ordinally sorted keys,
+# recursive; arrays keep order) — byte-identical to the JS canonicalizer.
+# ══════════════════════════════════════════════════════════════════════
+
+$AihContextSnapshotRevisionDigestDomainV1 = 'nexus/context-snapshot-revision/v1'
+$AihContextSnapshotTokenIdDomainV1 = 'nexus/context-snapshot-token/v1'
+
+function Get-AihContextSnapshotRevisionDigestV2 {
+    # Domain-separated revision digest over canonical revision-body bytes.
+    # Pass the canonical JSON text (preferred: built with
+    # ConvertTo-AihCanonicalJson -Value $RevisionBody) so the hash input is
+    # byte-exact. JS twin: deriveRevisionDigest.
+    param([Parameter(Mandatory = $true)][string]$RevisionBodyJson)
+    $joined = [string]$AihContextSnapshotRevisionDigestDomainV1 + "`n" + [string]$RevisionBodyJson
+    $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    return $digest
+}
+
+function New-AihContextSnapshotTokenIdV2 {
+    # Deterministic generation-bound token identity. JS twin:
+    # deriveSnapshotTokenId in config/ContextSnapshotV2.cjs.
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$TaskInstanceId,
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [Parameter(Mandatory = $true)][int]$Generation,
+        [Parameter(Mandatory = $true)][string]$RevisionDigest
+    )
+    if ([int]$Generation -lt 1) { throw 'V2 snapshot token refused: generation must be a positive integer. (KEEP.)' }
+    if ([string]$RevisionDigest -notmatch '^[0-9a-f]{64}$') { throw 'V2 snapshot token refused: revisionDigest must be sha256 hex. (KEEP.)' }
+    $joined = [string]$AihContextSnapshotTokenIdDomainV1 + "`n" + [string]$TaskId + "`n" + [string]$TaskInstanceId + "`n" + [string]$SessionId + "`n" + [string][int]$Generation + "`n" + [string]$RevisionDigest
+    $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    return ('cst_' + $digest.Substring(0, 32))
+}
+
 function Read-AihContextCompactionOperation {
     param([Parameter(Mandatory = $true)][string]$Workspace, [Parameter(Mandatory = $true)][string]$TaskId)
     $paths = Get-AihContextLifecyclePaths -Workspace $Workspace -TaskId $TaskId
@@ -1094,12 +1670,13 @@ function Use-AihCompactionLockMutex {
     $name = ConvertTo-AihSafeSyncName ('AIHarness.ContextCompaction.LockFile.' + [string]$SessionId + '.' + [string]$OperationId)
     $mutex = $null
     try { $mutex = [Threading.Mutex]::new($false, $name) }
-    catch { return (& $Action) }
+    catch { throw "Compaction lock mutex unavailable: refusing unlocked action (KEEP)." }
     $taken = $false
     try {
         try { $taken = $mutex.WaitOne(5000) }
         catch [Threading.AbandonedMutexException] { $taken = $true }
-        catch { return (& $Action) }
+        catch { throw "Compaction lock mutex unavailable: refusing unlocked action (KEEP)." }
+        if (-not $taken) { throw "Compaction lock mutex busy: refusing unlocked action (KEEP)." }
         return (& $Action)
     } finally {
         if ($taken) { try { $mutex.ReleaseMutex() } catch { } }
@@ -1108,8 +1685,9 @@ function Use-AihCompactionLockMutex {
 }
 
 function Invoke-AihCompactionApplyLockRelease {
-    # Release only when the caller still owns the lock (ownerId match).
-    # Best-effort and idempotent; never throws.
+    # Release is serialized with acquire/takeover/renew. The initial read only
+    # selects the mutex scope; authorization is re-read under the mutex.
+    # Best-effort and idempotent; an unavailable mutex never permits unlink.
     param(
         [Parameter(Mandatory = $true)][string]$Workspace,
         [Parameter(Mandatory = $true)][string]$TaskId,
@@ -1118,12 +1696,22 @@ function Invoke-AihCompactionApplyLockRelease {
     $lockPath = Get-AihCompactionApplyLockPath -Workspace $Workspace -TaskId $TaskId
     try {
         if (-not (Test-Path -LiteralPath $lockPath)) { return [pscustomobject][ordered]@{ released = $true; reason = 'already-absent' } }
-        $existing = Get-Content -Raw -Encoding UTF8 -LiteralPath $lockPath | ConvertFrom-Json
-        if (($null -ne $existing) -and ($null -ne $existing.PSObject.Properties['ownerId']) -and ([string]$existing.ownerId -ne [string]$OwnerId)) {
-            return [pscustomobject][ordered]@{ released = $false; reason = 'not-owner' }
+        $scope = Get-Content -Raw -Encoding UTF8 -LiteralPath $lockPath | ConvertFrom-Json
+        if (($null -eq $scope) -or [string]::IsNullOrWhiteSpace([string]$scope.sessionId) -or [string]::IsNullOrWhiteSpace([string]$scope.operationId)) {
+            return [pscustomobject][ordered]@{ released = $false; reason = 'lock-unreadable' }
         }
-        Remove-Item -LiteralPath $lockPath -Force
-        return [pscustomobject][ordered]@{ released = $true }
+        return (Use-AihCompactionLockMutex -SessionId ([string]$scope.sessionId) -OperationId ([string]$scope.operationId) {
+            if (-not (Test-Path -LiteralPath $lockPath)) { return [pscustomobject][ordered]@{ released = $true; reason = 'already-absent' } }
+            $existing = Get-Content -Raw -Encoding UTF8 -LiteralPath $lockPath | ConvertFrom-Json
+            if (($null -eq $existing) -or ($null -eq $existing.PSObject.Properties['ownerId'])) {
+                return [pscustomobject][ordered]@{ released = $false; reason = 'lock-unreadable' }
+            }
+            if ([string]$existing.ownerId -ne [string]$OwnerId) {
+                return [pscustomobject][ordered]@{ released = $false; reason = 'not-owner' }
+            }
+            Remove-Item -LiteralPath $lockPath -Force
+            return [pscustomobject][ordered]@{ released = $true }
+        })
     } catch { return [pscustomobject][ordered]@{ released = $false; reason = 'release-error' } }
 }
 
