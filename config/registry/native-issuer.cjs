@@ -1,0 +1,259 @@
+'use strict';
+
+/**
+ * A1.2 trusted Registry issuer — real Registry bridge using the existing
+ * JavaScript Registry only.
+ *
+ * Supported scope in A1.2: mode 'engineering-v2', role 'muse_main'.
+ * Every other mode/role returns { ok:false, code:'registry-unsupported-scope' }
+ * explicitly — never silently mapped to Muse.
+ *
+ * Real-source pipeline (no hand-built model targets):
+ *   registryService.createService({ installRoot, dataRoot })
+ *     -> getModeConfiguration('engineering-v2')
+ *     -> compilePreview(config)                      (real resolver)
+ *     -> select ONLY the authorized role binding
+ *     -> carry the complete real target identity
+ *     -> snapshotDigest  = sha256(canonical(resolvedSnapshot))
+ *     -> targetDigest    = sha256(canonical(roleTarget))
+ *     -> modeConfigDigest = sha256(canonical(effectiveModeConfig))
+ *     -> issuanceId      = sha256(canonical(sealContent))  — matches the
+ *        Rust RegistryResolutionV1::issuance_id_of byte-for-byte, so the
+ *        kernel can verify sealed provenance issued for THIS task generation.
+ *
+ * The legacy resolutionId is compatibility metadata only: source identity is
+ * (snapshotDigest, targetDigest, modeConfigDigest, issuanceId). A numeric
+ * mode revision alone cannot prove the definition and assignments are
+ * unchanged, so the effective mode-configuration digest travels in the
+ * shadow intent payload and the issuance binds the full snapshot bytes.
+ *
+ * The Controller can never select an arbitrary executable target: the target
+ * is compiled from trusted Nexus configuration, and only the authorized
+ * role binding for the pinned mode is ever issued.
+ */
+
+const crypto = require('node:crypto');
+const resolver = require('./resolver.cjs');
+const serviceModule = require('./service.cjs');
+
+const ISSUER_SCHEMA_VERSION = 1;
+const ISSUER_ID = 'nexus-registry-bridge/1';
+const SUPPORTED_MODE_ID = 'engineering-v2';
+const SUPPORTED_ROLE = 'muse_main';
+const EXPECTED_EXECUTION_KIND = 'raw-model';
+
+function canonicalSha256(value) {
+  return crypto.createHash('sha256').update(resolver.canonicalize(value), 'utf8').digest('hex');
+}
+
+function fail(code, message) {
+  return { ok: false, code: code, message: message, issuance: null };
+}
+
+/**
+ * Resolve the effective mode configuration and compile it through the real
+ * Registry. Returns the compiled snapshot plus the effective config.
+ * deps: { service? } — an existing registry service may be injected
+ * (tests); otherwise one is created from installRoot/dataRoot.
+ */
+function compileTrustedMode(options, deps) {
+  const o = options || {};
+  const installRoot = typeof o.installRoot === 'string' ? o.installRoot : '';
+  const dataRoot = typeof o.dataRoot === 'string' ? o.dataRoot : '';
+  const modeId = typeof o.modeId === 'string' ? o.modeId : SUPPORTED_MODE_ID;
+  if (modeId !== SUPPORTED_MODE_ID) {
+    return { ok: false, code: 'registry-unsupported-scope', message: 'A1.2 supports only mode engineering-v2; ' + modeId + ' is explicitly unsupported/skipped', issuance: null };
+  }
+  const role = typeof o.role === 'string' ? o.role : SUPPORTED_ROLE;
+  if (role !== SUPPORTED_ROLE) {
+    return { ok: false, code: 'registry-unsupported-scope', message: 'A1.2 supports only role muse_main; ' + role + ' is explicitly unsupported/skipped', issuance: null };
+  }
+  if (installRoot === '' || dataRoot === '') return fail('registry-host-missing', 'installRoot and dataRoot are required');
+  const d = deps || {};
+  let service = d.service || null;
+  try {
+    if (!service) service = serviceModule.createService({ installRoot: installRoot, dataRoot: dataRoot });
+  } catch (e) {
+    return fail('registry-unavailable', 'registry service could not be created: ' + String((e && e.message) || e));
+  }
+  let staged = null;
+  try {
+    staged = service.getModeConfiguration(modeId, {});
+  } catch (e) {
+    return fail('registry-unavailable', 'effective mode configuration is unreadable: ' + String((e && e.message) || e));
+  }
+  if (!staged || !staged.result || !staged.result.config) {
+    const codes = ((staged && staged.errors) || []).map(function (e) { return e && e.code; }).join(',');
+    return fail('registry-unresolved', 'effective mode configuration for ' + modeId + ' is unresolved (' + codes + '); refusing to manufacture a target');
+  }
+  const modeConfig = staged.result.config;
+  let compiled = null;
+  try {
+    compiled = service.compilePreview(modeConfig);
+  } catch (e) {
+    return fail('registry-unavailable', 'registry compilation failed: ' + String((e && e.message) || e));
+  }
+  if (!compiled || compiled.ok !== true || !compiled.snapshot) {
+    const codes = ((compiled && compiled.errors) || []).map(function (e) { return e && e.code; }).join(',');
+    return fail('registry-unresolved', 'mode configuration does not compile (' + codes + '); refusing to issue');
+  }
+  const snapshot = compiled.snapshot;
+  const binding = snapshot.roles && snapshot.roles[role];
+  if (!binding || typeof binding !== 'object') {
+    return fail('registry-role-unauthorized', 'role ' + role + ' has no compiled binding in mode ' + modeId + '; refusing to issue');
+  }
+  return { ok: true, code: null, message: null, issuance: null, snapshot: snapshot, binding: binding, modeConfig: modeConfig, persisted: staged.result.persisted === true, configRevision: staged.result.revision != null ? staged.result.revision : modeConfig.revision };
+}
+
+const REQUIRED_TARGET_FIELDS = ['modeId', 'roleId', 'logicalModelId', 'routeId', 'providerId', 'remoteModelId', 'connectionId', 'executionKind'];
+
+/**
+ * Build the sealed issuance for an exact Controller task generation.
+ * compiled: result of compileTrustedMode. taskInstanceId: authoritative
+ * generation identity (never a display label).
+ */
+function issueForGeneration(compiled, taskInstanceId) {
+  if (!compiled || compiled.ok !== true) return fail('registry-unresolved', 'no trusted compilation to issue from');
+  if (typeof taskInstanceId !== 'string' || taskInstanceId === '') return fail('registry-binding-invalid', 'a task generation identity is required to bind the issuance');
+  const binding = compiled.binding;
+  for (const field of REQUIRED_TARGET_FIELDS) {
+    if (typeof binding[field] !== 'string' || binding[field].trim() === '') {
+      return fail('registry-target-incomplete', 'compiled binding is missing mandatory target field ' + field + '; refusing to issue');
+    }
+  }
+  if (typeof binding.orchestrationEngineId !== 'string' || binding.orchestrationEngineId.trim() === '') {
+    return fail('registry-target-incomplete', 'compiled binding is missing orchestrationEngineId; refusing to issue');
+  }
+  if (binding.executionKind !== EXPECTED_EXECUTION_KIND) {
+    return fail('registry-target-unauthorized', 'compiled binding executionKind ' + binding.executionKind + ' is not the authorized raw-model target; refusing to issue');
+  }
+  if (binding.roleId !== SUPPORTED_ROLE || binding.modeId !== SUPPORTED_MODE_ID) {
+    return fail('registry-role-unauthorized', 'compiled binding is not the authorized engineering-v2/muse_main target; refusing to issue');
+  }
+  // Complete real target identity — field-for-field the Rust
+  // ExecutionTargetCoreV1 (camelCase). No invented endpoint, billing,
+  // session or credential metadata exists here by construction.
+  const target = {
+    schemaVersion: 1,
+    resolutionId: binding.resolutionId,
+    modeId: binding.modeId,
+    orchestrationEngineId: binding.orchestrationEngineId,
+    modeConfigRevision: binding.modeConfigRevision,
+    roleId: binding.roleId,
+    logicalModelId: binding.logicalModelId,
+    routeId: binding.routeId,
+    providerId: binding.providerId,
+    remoteModelId: binding.remoteModelId,
+    connectionId: binding.connectionId,
+    executionKind: binding.executionKind,
+    accessType: binding.accessType,
+    protocolId: binding.protocolId,
+    reasoning: binding.reasoning,
+    requiredCapabilities: binding.requiredCapabilities,
+    slotRequirements: binding.slotRequirements,
+    dataUseTier: binding.dataUseTier != null ? binding.dataUseTier : null,
+  };
+  const snapshot = compiled.snapshot;
+  const modeConfig = compiled.modeConfig;
+  const snapshotDigest = canonicalSha256(snapshot);
+  const targetDigest = canonicalSha256(target);
+  const modeConfigDigest = canonicalSha256(modeConfig);
+  // Seal content MUST match Rust RegistryResolutionV1::seal_content exactly:
+  // { issuer, taskInstanceId, role, target, provenance: { issuer,
+  //   resolutionIdCompat, registrySnapshotDigest, targetDigest,
+  //   modeConfigRevision } }. issuanceId is its canonical digest, so two
+  // tasks with the same model obtain DISTINCT issuances (taskInstanceId is
+  // part of the sealed bytes) while re-issuance for the same generation is
+  // content-stable.
+  const provenanceWithoutId = {
+    issuer: ISSUER_ID,
+    resolutionIdCompat: binding.resolutionId,
+    registrySnapshotDigest: snapshotDigest,
+    targetDigest: targetDigest,
+    modeConfigRevision: binding.modeConfigRevision,
+  };
+  const sealContent = {
+    issuer: ISSUER_ID,
+    taskInstanceId: taskInstanceId,
+    role: SUPPORTED_ROLE,
+    target: target,
+    provenance: provenanceWithoutId,
+  };
+  const issuanceId = canonicalSha256(sealContent);
+  const resolution = {
+    schemaVersion: 1,
+    issuer: ISSUER_ID,
+    taskInstanceId: taskInstanceId,
+    role: SUPPORTED_ROLE,
+    target: target,
+    provenance: {
+      issuer: ISSUER_ID,
+      resolutionIdCompat: binding.resolutionId,
+      registrySnapshotDigest: snapshotDigest,
+      targetDigest: targetDigest,
+      modeConfigRevision: binding.modeConfigRevision,
+      issuanceId: issuanceId,
+    },
+  };
+  // Self-verify before returning: the issuance identity must be derivable
+  // from the sealed bytes we will hand to Rust.
+  const verify = canonicalSha256({
+    issuer: resolution.issuer,
+    taskInstanceId: resolution.taskInstanceId,
+    role: resolution.role,
+    target: resolution.target,
+    provenance: {
+      issuer: resolution.provenance.issuer,
+      resolutionIdCompat: resolution.provenance.resolutionIdCompat,
+      registrySnapshotDigest: resolution.provenance.registrySnapshotDigest,
+      targetDigest: resolution.provenance.targetDigest,
+      modeConfigRevision: resolution.provenance.modeConfigRevision,
+    },
+  });
+  if (verify !== issuanceId) return fail('registry-issuance-corrupt', 'issuance identity failed self-verification; refusing to issue');
+  return {
+    ok: true,
+    code: null,
+    message: null,
+    issuance: {
+      schemaVersion: ISSUER_SCHEMA_VERSION,
+      issuer: ISSUER_ID,
+      modeId: SUPPORTED_MODE_ID,
+      role: SUPPORTED_ROLE,
+      taskInstanceId: taskInstanceId,
+      target: target,
+      resolution: resolution,
+      snapshot: snapshot,
+      modeConfig: modeConfig,
+      snapshotDigest: snapshotDigest,
+      targetDigest: targetDigest,
+      modeConfigDigest: modeConfigDigest,
+      issuanceId: issuanceId,
+      resolutionIdCompat: binding.resolutionId,
+      modeConfigRevision: binding.modeConfigRevision,
+      persisted: compiled.persisted === true,
+    },
+  };
+}
+
+/**
+ * One-step trusted issuance: compile the real Registry and bind it to the
+ * exact Controller task generation.
+ */
+function issueTrustedResolution(options, deps) {
+  const o = options || {};
+  const compiled = compileTrustedMode(o, deps);
+  if (!compiled.ok) return { ok: false, code: compiled.code, message: compiled.message, issuance: null };
+  return issueForGeneration(compiled, o.taskInstanceId);
+}
+
+module.exports = {
+  ISSUER_SCHEMA_VERSION: ISSUER_SCHEMA_VERSION,
+  ISSUER_ID: ISSUER_ID,
+  SUPPORTED_MODE_ID: SUPPORTED_MODE_ID,
+  SUPPORTED_ROLE: SUPPORTED_ROLE,
+  canonicalSha256: canonicalSha256,
+  compileTrustedMode: compileTrustedMode,
+  issueForGeneration: issueForGeneration,
+  issueTrustedResolution: issueTrustedResolution,
+};

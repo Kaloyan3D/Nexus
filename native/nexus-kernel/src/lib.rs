@@ -3,6 +3,7 @@
 //! durably with status accepted-reserved-dispatch-disabled; the only
 //! dispatch authorization path always refuses with dispatch-disabled.
 pub mod accept;
+pub mod bridge;
 
 pub use accept::{AcceptRequest, GenerationState};
 use nexus_contracts::{
