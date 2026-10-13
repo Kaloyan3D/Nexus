@@ -9,6 +9,20 @@
 //!   boundary plus file permissions are the trust boundary. The prototype
 //!   operates in an isolated trusted test boundary; a real Controller
 //!   deployment MUST keep this shadow-only (see A1.2 evidence).
+//!
+//! H-02 issuer authority (explicit limitation, proven by adversarial test):
+//! the `seal` subcommand verifies that a resolution is WELL-FORMED and
+//! self-consistent (target-complete, issuanceId matches sealed bytes) but
+//! it does NOT authenticate Registry origin. ANY local caller that can
+//! execute this binary can seal an arbitrary self-consistent resolution.
+//! Trust that a sealed issuance came from the genuine JS Registry therefore
+//! rests ENTIRELY on the trusted-local boundary: only the Controller-owned
+//! bridge process may invoke this CLI, on a machine where no hostile
+//! same-UID peer can. A public or multi-tenant CLI seal endpoint MUST NOT
+//! be treated as proof of Registry origin. The A1.3 production trust
+//! boundary (designed, not implemented — see A1.2 evidence) must move
+//! issuance authority behind authenticated, replay-resistant IPC before
+//! anything beyond shadow observation is enabled.
 //! - no shell interpolation: argv file paths only, JSON over stdio.
 //! - no model execution, tool invocation, dispatch, network or exec paths:
 //!   the request vocabulary cannot name an executable at all.

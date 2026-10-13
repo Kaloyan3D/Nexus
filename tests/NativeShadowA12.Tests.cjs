@@ -359,6 +359,143 @@ async function main() {
     }
   }
 
+  // ---- H-01. Attempt identity: birth vs transitions -----------------------
+  // Synthetic: latest record is a transition without immutable fields.
+  const wsH1 = mkTemp('a12-h01-');
+  const instH1 = 'task_' + crypto.randomBytes(16).toString('hex');
+  writeTaskLedger(wsH1, makeTask('TASK-0011', instH1, 'muse_main'));
+  appendAttempt(wsH1, 'TASK-0011', makeAttempt('TASK-0011', instH1, 1, 'muse_main'));
+  appendAttempt(wsH1, 'TASK-0011', { attemptId: 'TASK-0011-A1', taskId: 'TASK-0011', taskInstanceId: instH1, workspace: 'fixture-workspace', sequence: 1, status: 'verifying', timestampUtc: new Date().toISOString() });
+  const h1 = shadowIntent.resolveShadowIntent({ workspace: wsH1, taskId: 'TASK-0011', taskInstanceId: instH1 }, {});
+  check('H1 immutable fields come from the started event', h1.ok === true && h1.intent.executionClass === 'muse_main' && typeof h1.intent.sessionIdDigest === 'string' && typeof h1.intent.startedByTurnDigest === 'string', JSON.stringify(h1.intent || h1).slice(0, 200));
+  check('H1 current status comes from the latest event', h1.ok === true && h1.intent.attemptStatus === 'verifying', h1.ok && h1.intent.attemptStatus);
+  // Synthetic: transitions without any started event are refused.
+  const wsH1b = mkTemp('a12-h01-nobirth-');
+  const instH1b = 'task_' + crypto.randomBytes(16).toString('hex');
+  writeTaskLedger(wsH1b, makeTask('TASK-0012', instH1b, 'muse_main'));
+  appendAttempt(wsH1b, 'TASK-0012', { attemptId: 'TASK-0012-A1', taskId: 'TASK-0012', taskInstanceId: instH1b, workspace: 'fixture-workspace', sequence: 1, status: 'verifying', timestampUtc: new Date().toISOString() });
+  const h1b = shadowIntent.resolveShadowIntent({ workspace: wsH1b, taskId: 'TASK-0012', taskInstanceId: instH1b }, {});
+  check('H1 attempt without a started event is refused', h1b.ok === false && h1b.code === 'missing-attempt-evidence', h1b.code);
+  // Real TaskController: started -> verifying -> passed keeps identity stable.
+  if (!pwsh) {
+    check('H1 real started/verifying/passed lifecycle', false, 'UNVERIFIED: no pwsh host');
+  } else {
+    const wsH1c = mkTemp('a12-h01-real-');
+    try {
+      const created = runPwsh(pwsh, 'Task.ps1', ['-Action', 'create-task', '-Workspace', wsH1c, '-Description', 'A1.2 H-01 fixture', '-ExecutionClass', 'muse_main', '-Engine', 'muse']);
+      const taskId = created.taskId;
+      const instanceId = created.taskInstanceId;
+      runPwsh(pwsh, 'Task.ps1', ['-Action', 'begin-attempt', '-Workspace', wsH1c, '-TaskId', taskId, '-ExecutionClass', 'muse_main', '-TaskInstanceId', instanceId, '-PayloadFile', writePayload(wsH1c, { Workspace: wsH1c, SessionId: 'sess-h01', StartedByTurn: 'turn-h01', RequireNoOpenAttempt: true })]);
+      const storeH1 = initKernelStore('h01');
+      const hOpts = baseOpts(wsH1c, storeH1, { taskId: taskId, taskInstanceId: instanceId });
+      const atStarted = await shadow.observeCommittedAttempt(hOpts, {});
+      check('H1 real delivery at started', atStarted.outcome === 'delivered', atStarted.outcome);
+      const idStarted = shadowIntent.resolveShadowIntent({ workspace: wsH1c, taskId: taskId, taskInstanceId: instanceId }, {});
+      runPwsh(pwsh, 'Task.ps1', ['-Action', 'attempt-event', '-Workspace', wsH1c, '-TaskId', taskId, '-TaskInstanceId', instanceId, '-PayloadFile', writePayload(wsH1c, { Workspace: wsH1c, Status: 'verifying' })]);
+      const idVerifying = shadowIntent.resolveShadowIntent({ workspace: wsH1c, taskId: taskId, taskInstanceId: instanceId }, {});
+      check('H1 commandId stable started->verifying', idVerifying.ok && idVerifying.intent.commandId === idStarted.intent.commandId);
+      check('H1 executionClass stable started->verifying', idVerifying.ok && idVerifying.intent.executionClass === idStarted.intent.executionClass);
+      const issH1 = issuer.issueTrustedResolution({ installRoot: REPO_ROOT, dataRoot: REPO_ROOT, modeId: 'engineering-v2', role: 'muse_main', taskInstanceId: instanceId }, {});
+      const kStarted = bridge.buildKernelIntent(idStarted.intent, issH1.issuance);
+      const kVerifying = bridge.buildKernelIntent(idVerifying.intent, issH1.issuance);
+      check('H1 intent digest stable started->verifying', kStarted.ok && kVerifying.ok && kVerifying.intent.intentDigest === kStarted.intent.intentDigest);
+      const atVerifying = await shadow.observeCommittedAttempt(hOpts, {});
+      check('H1 receipt stable at verifying', atVerifying.outcome === 'replayed' && atVerifying.commandId === atStarted.commandId, atVerifying.outcome);
+      runPwsh(pwsh, 'Task.ps1', ['-Action', 'attempt-event', '-Workspace', wsH1c, '-TaskId', taskId, '-TaskInstanceId', instanceId, '-PayloadFile', writePayload(wsH1c, { Workspace: wsH1c, Status: 'passed' })]);
+      const idPassed = shadowIntent.resolveShadowIntent({ workspace: wsH1c, taskId: taskId, taskInstanceId: instanceId }, {});
+      check('H1 commandId stable through passed', idPassed.ok && idPassed.intent.commandId === idStarted.intent.commandId && idPassed.intent.attemptStatus === 'passed', idPassed.ok && idPassed.intent.attemptStatus);
+      const atPassed = await shadow.observeCommittedAttempt(hOpts, {});
+      check('H1 receipt stable at passed (no new attempt)', atPassed.outcome === 'replayed' && atPassed.commandId === atStarted.commandId, atPassed.outcome);
+      const recH1 = bridge.invokeBridge('receipt', { commandId: atStarted.commandId }, { dbPath: storeH1.db, witnessPath: storeH1.witness, repoRoot: REPO_ROOT });
+      check('H1 one durable receipt across the lifecycle', recH1.ok && recH1.response.receipt && recH1.response.receipt.commandDigest === atStarted.commandDigest, atStarted.commandDigest);
+      const linesH1 = readJsonLines(path.join(wsH1c, '.ai-harness', 'runs', taskId, 'attempts.jsonl'));
+      check('H1 lifecycle created no extra attempts', linesH1 && linesH1.filter(function (r) { return r.status === 'started'; }).length === 1);
+    } catch (e) {
+      check('H1 real started/verifying/passed lifecycle', false, 'UNVERIFIED: ' + String((e && e.message) || e).slice(0, 300));
+    }
+  }
+
+  // ---- H-02. Issuer authority: adversarial seal -----------------------------
+  // A self-consistent but Registry-foreign resolution (forged generation
+  // binding, honestly recomputed issuanceId) is submitted to the CLI seal
+  // endpoint. It MUST succeed here: the endpoint checks well-formedness,
+  // not Registry origin. This test pins the trusted-local limitation so no
+  // future change can silently claim CLI seal authenticates origin.
+  const forgedBase = issuer.issueForGeneration(compiled, 'task_a12_real');
+  check('H2 setup trusted issuance exists', forgedBase.ok === true);
+  const forgedResolution = JSON.parse(JSON.stringify(forgedBase.issuance.resolution));
+  forgedResolution.taskInstanceId = 'task_forged_generation';
+  forgedResolution.provenance.issuanceId = '0'.repeat(64); // placeholder, recomputed below
+  const forgedSealContent = {
+    issuer: forgedResolution.issuer, taskInstanceId: forgedResolution.taskInstanceId,
+    role: forgedResolution.role, target: forgedResolution.target,
+    provenance: {
+      issuer: forgedResolution.provenance.issuer,
+      resolutionIdCompat: forgedResolution.provenance.resolutionIdCompat,
+      registrySnapshotDigest: forgedResolution.provenance.registrySnapshotDigest,
+      targetDigest: forgedResolution.provenance.targetDigest,
+      modeConfigRevision: forgedResolution.provenance.modeConfigRevision,
+    },
+  };
+  forgedResolution.provenance.issuanceId = issuer.canonicalSha256(forgedSealContent);
+  const storeH2 = initKernelStore('h02');
+  const forgedSeal = bridge.invokeBridge('seal', { resolution: forgedResolution }, { dbPath: storeH2.db, witnessPath: storeH2.witness, repoRoot: REPO_ROOT });
+  check('H2 CLI seal does NOT authenticate Registry origin (seals foreign bytes)', forgedSeal.ok === true && forgedSeal.status === 'ok' && forgedSeal.response.issuanceId === forgedResolution.provenance.issuanceId, JSON.stringify(forgedSeal).slice(0, 200));
+  check('H2 forged issuance is distinct from trusted issuance', forgedResolution.provenance.issuanceId !== forgedBase.issuance.issuanceId);
+  const malformedSeal = bridge.invokeBridge('seal', { resolution: { schemaVersion: 1 } }, { dbPath: storeH2.db, witnessPath: storeH2.witness, repoRoot: REPO_ROOT });
+  check('H2 seal still rejects malformed resolutions', malformedSeal.ok === true && malformedSeal.status === 'refused', malformedSeal.code);
+
+  // ---- H-03. Pin integrity ---------------------------------------------------
+  check('H3 pin validator rejects non-pins', shadow.isValidPin(null) === false && shadow.isValidPin({ kind: 'shadow-pin' }) === false);
+  function readOutboxTolerant(filePath) {
+    const lines = String(fs.readFileSync(filePath, 'utf8')).split('\n').filter(function (l) { return l.trim() !== ''; });
+    const parsed = [];
+    for (const line of lines) {
+      try { parsed.push(JSON.parse(line)); } catch { parsed.push(null); }
+    }
+    return { lines: lines, parsed: parsed };
+  }
+  const wsH3 = mkTemp('a12-h03-');
+  const instH3 = 'task_' + crypto.randomBytes(16).toString('hex');
+  writeTaskLedger(wsH3, makeTask('TASK-0020', instH3, 'muse_main'));
+  appendAttempt(wsH3, 'TASK-0020', makeAttempt('TASK-0020', instH3, 1, 'muse_main'));
+  const storeH3 = initKernelStore('h03');
+  const h3Opts = baseOpts(wsH3, storeH3, { taskId: 'TASK-0020', taskInstanceId: instH3 });
+  const h3First = await shadow.observeCommittedAttempt(h3Opts, {});
+  check('H3 setup delivery succeeds', h3First.outcome === 'delivered', h3First.outcome);
+  const outboxFile = shadow.outboxPath(wsH3, 'TASK-0020');
+  const pinLinesBefore = readOutboxTolerant(outboxFile).lines.length;
+  check('H3 written pins validate', shadow.isValidPin(readOutboxTolerant(outboxFile).parsed[0]) === true);
+  const journalBefore = bridge.invokeBridge('journal', { taskInstanceId: instH3, backend: 'native' }, { dbPath: storeH3.db, witnessPath: storeH3.witness, repoRoot: REPO_ROOT });
+  // Truncated file: a torn final line must yield uncertainty, never a re-pin.
+  fs.appendFileSync(outboxFile, '{"schemaVersion":1, "kind":"shadow-pin", "comma', 'utf8');
+  const h3Trunc = await shadow.observeCommittedAttempt(h3Opts, {});
+  check('H3 truncated outbox yields uncertainty (reconciliation-required)', h3Trunc.outcome === 'uncertain' && h3Trunc.code === 'reconciliation-required', h3Trunc.outcome + ':' + h3Trunc.code);
+  const pinLinesAfterTrunc = readOutboxTolerant(outboxFile).lines.length;
+  check('H3 no pin appended over corrupt history', pinLinesAfterTrunc === pinLinesBefore + 1, pinLinesBefore + '->' + pinLinesAfterTrunc);
+  // Restore a clean outbox, then plant conflicting duplicate pins.
+  const cleanPin = readOutboxTolerant(outboxFile).parsed.filter(function (r) { return r && r.kind === 'shadow-pin'; })[0];
+  fs.writeFileSync(outboxFile, JSON.stringify(cleanPin) + '\n', 'utf8');
+  const conflicting = Object.assign({}, cleanPin);
+  conflicting.issuanceId = (cleanPin.issuanceId[0] === 'a' ? 'b' : 'a') + cleanPin.issuanceId.slice(1);
+  fs.appendFileSync(outboxFile, JSON.stringify(conflicting) + '\n', 'utf8');
+  const h3Conflict = await shadow.observeCommittedAttempt(h3Opts, {});
+  check('H3 conflicting duplicate pins yield uncertainty (no recency vote)', h3Conflict.outcome === 'uncertain' && h3Conflict.code === 'reconciliation-required', h3Conflict.outcome + ':' + h3Conflict.code);
+  // Malformed pin (valid JSON, invalid digest shape).
+  check('H3 setup pin is well-formed', shadow.isValidPin(cleanPin) === true);
+  fs.writeFileSync(outboxFile, JSON.stringify(cleanPin) + '\n', 'utf8');
+  const malformed = Object.assign({}, cleanPin, { issuanceId: 'not-a-digest' });
+  fs.appendFileSync(outboxFile, JSON.stringify(malformed) + '\n', 'utf8');
+  const h3Malformed = await shadow.observeCommittedAttempt(h3Opts, {});
+  check('H3 malformed pin yields uncertainty', h3Malformed.outcome === 'uncertain' && h3Malformed.code === 'reconciliation-required', h3Malformed.outcome + ':' + h3Malformed.code);
+  // Clean history recovers to replay (operator-equivalent restore path).
+  fs.writeFileSync(outboxFile, JSON.stringify(cleanPin) + '\n', 'utf8');
+  const h3Recovered = await shadow.observeCommittedAttempt(h3Opts, {});
+  check('H3 clean history recovers to replay', h3Recovered.outcome === 'replayed' && h3Recovered.commandId === h3First.commandId, h3Recovered.outcome);
+  const journalAfterH3 = bridge.invokeBridge('journal', { taskInstanceId: instH3, backend: 'native' }, { dbPath: storeH3.db, witnessPath: storeH3.witness, repoRoot: REPO_ROOT });
+  check('H3 exactly one receipt throughout pin turmoil', journalAfterH3.ok && journalAfterH3.response.receipts.length === journalBefore.response.receipts.length && journalAfterH3.response.receipts.length === 1);
+  check('H3 Controller ledger untouched by pin turmoil', snapshotLedger(wsH3, 'TASK-0020').attempts.split('\n').filter(function (l) { return l.trim() !== ''; }).length === 1);
+
   const failed = results.filter(function (r) { return !r.pass; });
   console.log('\nA1.2 shadow: ' + (results.length - failed.length) + '/' + results.length + ' PASS' + (failed.length > 0 ? ' :: ' + failed.map(function (r) { return r.name; }).join(' | ') : ''));
   if (failed.length > 0) process.exit(1);

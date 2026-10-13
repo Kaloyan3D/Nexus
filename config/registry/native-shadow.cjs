@@ -70,33 +70,85 @@ function appendJsonLine(filePath, record) {
   fs.appendFileSync(filePath, JSON.stringify(record) + '\n', 'utf8');
 }
 
+/**
+ * H-03 pin integrity. The outbox is append-only JSONL that the adapter
+ * itself wrote — but a truncated write, a corrupt line, or a tampered
+ * duplicate pin must NEVER lead to a silent re-pin under a different
+ * identity. readOutbox therefore reports corruption explicitly instead of
+ * skipping it, and resolvePin fails closed on malformed or ambiguous
+ * history (outcome 'uncertain', code 'reconciliation-required').
+ */
 function readOutbox(workspace, taskId, limit) {
   const cap = Number.isInteger(limit) && limit > 0 ? limit : MAX_OUTBOX_LINES;
   let raw;
   try {
     raw = fs.readFileSync(outboxPath(workspace, taskId), 'utf8');
   } catch (e) {
-    if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) return [];
+    if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) return { records: [], corruptLines: 0, truncated: false };
     throw e;
   }
   const records = [];
+  let corruptLines = 0;
+  let truncated = false;
   for (const line of String(raw).split('\n')) {
     const trimmed = line.trim();
     if (trimmed === '') continue;
+    if (records.length >= cap) { truncated = true; break; }
     try {
       records.push(JSON.parse(trimmed));
-    } catch { /* skip corrupt lines, mirroring the Controller reader */ }
-    if (records.length >= cap) break;
+    } catch {
+      corruptLines += 1;
+    }
   }
-  return records;
+  return { records: records, corruptLines: corruptLines, truncated: truncated };
 }
 
-function pinFor(records, commandId) {
-  let pin = null;
-  for (const r of records) {
-    if (r && r.commandId === commandId && r.kind === 'shadow-pin') pin = r;
+const PIN_DIGEST_RE = /^[0-9a-f]{64}$/;
+const PIN_STRING_FIELDS = ['commandId', 'taskInstanceId', 'attemptId', 'modeId', 'role', 'resolutionIdCompat'];
+const PIN_DIGEST_FIELDS = ['issuanceId', 'targetDigest', 'snapshotDigest', 'modeConfigDigest'];
+
+function isValidPin(r) {
+  if (!r || typeof r !== 'object' || Array.isArray(r) || r.kind !== 'shadow-pin') return false;
+  for (const f of PIN_STRING_FIELDS) {
+    if (typeof r[f] !== 'string' || r[f] === '') return false;
   }
-  return pin;
+  for (const f of PIN_DIGEST_FIELDS) {
+    if (typeof r[f] !== 'string' || !PIN_DIGEST_RE.test(r[f])) return false;
+  }
+  return true;
+}
+
+function pinIdentityKey(p) {
+  return [p.issuanceId, p.targetDigest, p.snapshotDigest, p.modeConfigDigest, String(p.modeConfigRevision)].join('|');
+}
+
+/**
+ * Resolve the pin for one commandId. States: 'none' (no history),
+ * 'pinned' (exactly one identity), 'unreliable' (truncated file, corrupt
+ * lines, or a malformed pin anywhere in history), 'ambiguous' (two or more
+ * VALID pins with different identities — never resolved by recency).
+ */
+function resolvePin(outbox, commandId) {
+  const box = outbox || { records: [], corruptLines: 0, truncated: false };
+  if (box.truncated) {
+    return { state: 'unreliable', pin: null, detail: 'shadow outbox exceeds the bounded scan; history is incomplete and no pin is trusted' };
+  }
+  if (box.corruptLines > 0) {
+    return { state: 'unreliable', pin: null, detail: 'shadow outbox holds ' + box.corruptLines + ' corrupt line(s); a conflicting pin may be hidden in the unreadable region' };
+  }
+  for (const r of box.records) {
+    if (r && r.kind === 'shadow-pin' && !isValidPin(r)) {
+      return { state: 'unreliable', pin: null, detail: 'shadow outbox holds a malformed pin record; history is not trusted' };
+    }
+  }
+  const pins = box.records.filter(function (r) { return r && r.commandId === commandId && r.kind === 'shadow-pin'; });
+  if (pins.length === 0) return { state: 'none', pin: null, detail: null };
+  const identities = new Map();
+  for (const p of pins) identities.set(pinIdentityKey(p), p);
+  if (identities.size > 1) {
+    return { state: 'ambiguous', pin: null, detail: 'conflicting duplicate pins exist for ' + commandId + '; recency does not decide identity' };
+  }
+  return { state: 'pinned', pin: pins[pins.length - 1], detail: null };
 }
 
 function writeDiagnostic(deps, workspace, taskId, record) {
@@ -250,7 +302,14 @@ async function observeCommittedAttempt(options, deps) {
   } catch (e) {
     return writeDiagnostic(d, workspace, taskId, { outcome: 'uncertain', commandId: shadow.commandId, code: 'shadow-outbox-unreadable', message: 'shadow outbox is unreadable; outcome unknown, reconciliation required' });
   }
-  const pin = pinFor(records, shadow.commandId);
+  const pinRes = resolvePin(records, shadow.commandId);
+  if (pinRes.state === 'unreliable' || pinRes.state === 'ambiguous') {
+    // H-03: malformed or ambiguous pin history never resolves to a delivery
+    // and never silently re-pins. Recovery requires operator inspection of
+    // the outbox (no automatic repair exists in A1.2).
+    return writeDiagnostic(d, workspace, taskId, { outcome: 'uncertain', commandId: shadow.commandId, code: 'reconciliation-required', message: 'shadow pin history is ' + pinRes.state + ' (' + pinRes.detail + '); refusing to deliver or re-pin until an operator inspects the outbox' });
+  }
+  const pin = pinRes.state === 'pinned' ? pinRes.pin : null;
   if (pin && (pin.issuanceId !== issuance.issuanceId || pin.targetDigest !== issuance.targetDigest || pin.snapshotDigest !== issuance.snapshotDigest || pin.modeConfigDigest !== issuance.modeConfigDigest)) {
     return refused(d, workspace, taskId, shadow.commandId, 'registry-changed-after-pin', 'Registry configuration changed after the shadow pin; refusing to overwrite the pinned identity');
   }
@@ -341,6 +400,8 @@ module.exports = {
   observeCommittedAttempt: observeCommittedAttempt,
   reconcileTask: reconcileTask,
   readOutbox: readOutbox,
+  resolvePin: resolvePin,
+  isValidPin: isValidPin,
   outboxPath: outboxPath,
   diagnosticsPath: diagnosticsPath,
 };

@@ -150,50 +150,64 @@ function resolveShadowIntent(options, deps) {
   if (owned.length === 0) {
     return fail('missing-attempt-evidence', 'no committed attempt belongs to generation ' + authoritativeInstance + '; refusing to bridge a foreign or stale attempt');
   }
-  let attempt = null;
+  // H-01: one attempt's timeline is birth + transitions. Immutable identity
+  // fields (sequence, executionClass, session/turn binding) are reconstructed
+  // from the ACTUAL 'started' event written by begin-attempt; only the
+  // CURRENT status is read from the latest event. A later transition record
+  // can never rewrite what the attempt was born with.
+  function birthOf(matches) {
+    for (const r of matches) {
+      if (r && r.status === 'started') return r;
+    }
+    return null;
+  }
+  let matches = null;
   if (wantedAttempt !== null) {
-    const matches = owned.filter(function (r) { return r.attemptId === wantedAttempt; });
+    matches = owned.filter(function (r) { return r.attemptId === wantedAttempt; });
     if (matches.length === 0) {
       return fail('missing-attempt-evidence', 'attempt ' + wantedAttempt + ' is not a committed attempt of generation ' + authoritativeInstance);
     }
-    // Latest record wins: begin-attempt writes 'started', later transitions
-    // append further records under the same attemptId.
-    attempt = matches[matches.length - 1];
   } else {
     const latestByAttempt = new Map();
     for (const r of owned) latestByAttempt.set(r.attemptId, r);
     if (latestByAttempt.size !== 1) {
       return fail('ambiguous-attempt', 'multiple committed attempts exist for this generation; an explicit attemptId is required to derive one stable shadow identity');
     }
-    attempt = owned[owned.length - 1];
+    matches = owned;
   }
-  const sequence = Number(attempt.sequence);
+  const birth = birthOf(matches);
+  if (!birth) {
+    return fail('missing-attempt-evidence', 'attempt ' + matches[0].attemptId + ' has no committed started event; immutable attempt identity cannot be reconstructed and is never inferred from transitions');
+  }
+  const latest = matches[matches.length - 1];
+  const sequence = Number(birth.sequence);
   if (!Number.isInteger(sequence) || sequence <= 0) {
-    return fail('controller-unreadable', 'committed attempt record carries no valid sequence; refusing to infer Controller revision');
+    return fail('controller-unreadable', 'committed started event carries no valid sequence; refusing to infer Controller revision');
   }
-  const commandId = deriveCommandId(authoritativeInstance, attempt.attemptId);
+  if (!isNonEmptyString(birth.executionClass)) {
+    return fail('controller-unreadable', 'committed started event carries no executionClass; role identity cannot be proven and is never inferred');
+  }
+  const commandId = deriveCommandId(authoritativeInstance, birth.attemptId);
   if (!commandId) return fail('shadow-intent-invalid', 'shadow command identity could not be derived');
   // controllerRevision is the Controller's committed attempt counter — the
-  // only monotonic Controller revision available in the JSONL ledger.
-  // The task record counter and the attempt sequence must agree; when the
-  // task record is ahead (a newer attempt committed concurrently) the
-  // attempt sequence still identifies THIS generation record exactly.
+  // only monotonic Controller revision available in the JSONL ledger,
+  // taken from the birth event so later transitions cannot move it.
   const controllerRevision = sequence;
-  const sessionId = isNonEmptyString(attempt.sessionId) ? attempt.sessionId : null;
-  const startedByTurn = isNonEmptyString(attempt.startedByTurn) ? attempt.startedByTurn : null;
+  const sessionId = isNonEmptyString(birth.sessionId) ? birth.sessionId : null;
+  const startedByTurn = isNonEmptyString(birth.startedByTurn) ? birth.startedByTurn : null;
   const intent = {
     schemaVersion: SHADOW_INTENT_SCHEMA_VERSION,
     taskId: taskId,
     taskInstanceId: authoritativeInstance,
-    attemptId: attempt.attemptId,
+    attemptId: birth.attemptId,
     sequence: sequence,
     commandId: commandId,
     backend: SHADOW_BACKEND,
     controllerRevision: controllerRevision,
-    executionClass: isNonEmptyString(attempt.executionClass) ? attempt.executionClass : null,
+    executionClass: birth.executionClass,
     sessionIdDigest: sessionId ? sha256Hex('session:' + sessionId) : null,
     startedByTurnDigest: startedByTurn ? sha256Hex('turn:' + startedByTurn) : null,
-    attemptStatus: isNonEmptyString(attempt.status) ? attempt.status : null,
+    attemptStatus: isNonEmptyString(latest.status) ? latest.status : null,
   };
   return { ok: true, code: null, message: null, intent: intent };
 }
