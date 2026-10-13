@@ -54,6 +54,7 @@ pub mod codes {
     pub const PRIVILEGED_DISABLED: &str = "privileged-disabled";
     pub const ISSUER_UNTRUSTED: &str = "issuer-untrusted";
     pub const REPLAY_REJECTED: &str = "replay-rejected";
+    pub const REPLAY_CACHE_EXHAUSTED: &str = "replay-cache-exhausted";
     pub const DAEMON_ALREADY_RUNNING: &str = "daemon-already-running";
     pub const DAEMON_OWN_STORE: &str = "daemon-owns-store";
     pub const SERVER_BUSY: &str = "server-busy";

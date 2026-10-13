@@ -31,15 +31,31 @@
 //!   per daemon incarnation, rotated on every restart, never logged, never
 //!   returned in responses, and bound to each request's full bytes plus a
 //!   single-use nonce.
+//!
+//! Replay-cache policy (H-06): every admitted nonce is remembered WITH its
+//! request timestamp. Entries are removed ONLY after their validity window
+//! has expired (request ts older than now minus the acceptance window).
+//! When the bounded cache is full of still-valid entries, the daemon fails
+//! closed with `replay-cache-exhausted` rather than evicting a live nonce
+//! and silently re-admitting its replay. Availability is never bought by
+//! weakening replay protection.
+//!
+//! Restart behavior: the cache lives in process memory only, and every
+//! daemon start generates a fresh capability key (the cap file is
+//! overwritten). Pre-restart tags fail HMAC verification post-restart, so
+//! there is no cross-restart replay window to protect: a restarted daemon
+//! starts with an empty cache and a new key, which is safe precisely
+//! because the key rotated.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 use std::sync::Mutex;
 
 /// Timestamp acceptance window (unix millis, +/- skew + transit).
 pub const AUTH_WINDOW_MS: i64 = 5 * 60 * 1000;
-/// Bounded replay cache: at most this many recent nonces are remembered.
+/// Bounded replay cache: at most this many still-valid nonces are
+/// remembered. Exhaustion fails closed; see the module policy above.
 pub const MAX_SEEN_NONCES: usize = 10_000;
 
 pub struct IssuerAuth {
@@ -47,9 +63,10 @@ pub struct IssuerAuth {
     seen: Mutex<NonceCache>,
 }
 
+/// Admitted nonces mapped to their request timestamps. Timestamps make
+/// expiry exact: a nonce is forgotten only after it can no longer verify.
 struct NonceCache {
-    order: VecDeque<String>,
-    set: HashSet<String>,
+    by_nonce: HashMap<String, i64>,
 }
 
 impl IssuerAuth {
@@ -61,8 +78,7 @@ impl IssuerAuth {
         Ok(Self {
             key,
             seen: Mutex::new(NonceCache {
-                order: VecDeque::new(),
-                set: HashSet::new(),
+                by_nonce: HashMap::new(),
             }),
         })
     }
@@ -116,9 +132,9 @@ impl IssuerAuth {
     }
 
     /// Verify one privileged request's auth fields. Ok(()) admits the
-    /// request; Err(code) names the refusal (`issuer-untrusted` or
-    /// `replay-rejected`). Nonce reservation happens here so concurrent
-    /// duplicates cannot both pass.
+    /// request; Err(code) names the refusal (`issuer-untrusted`,
+    /// `replay-rejected`, or `replay-cache-exhausted`). Nonce reservation
+    /// happens here so concurrent duplicates cannot both pass.
     pub fn verify(
         &self,
         cmd: &str,
@@ -144,16 +160,21 @@ impl IssuerAuth {
             .seen
             .lock()
             .map_err(|_| crate::protocol::codes::ISSUER_UNTRUSTED)?;
-        if seen.set.contains(&auth.nonce) {
+        // Any repeat of a remembered nonce is a replay, whatever its age:
+        // requests older than the window already failed the ts check above,
+        // so a remembered match is always a live replay.
+        if seen.by_nonce.contains_key(&auth.nonce) {
             return Err(crate::protocol::codes::REPLAY_REJECTED);
         }
-        seen.set.insert(auth.nonce.clone());
-        seen.order.push_back(auth.nonce.clone());
-        while seen.order.len() > MAX_SEEN_NONCES {
-            if let Some(old) = seen.order.pop_front() {
-                seen.set.remove(&old);
-            }
+        // Expire first: forget only nonces that can no longer verify, so
+        // memory stays bounded without ever dropping live protection.
+        seen.by_nonce.retain(|_, ts| now_ms - *ts <= AUTH_WINDOW_MS);
+        // Still full of live nonces: fail closed. Evicting one would let
+        // its replay verify as fresh inside the validity window.
+        if seen.by_nonce.len() >= MAX_SEEN_NONCES {
+            return Err(crate::protocol::codes::REPLAY_CACHE_EXHAUSTED);
         }
+        seen.by_nonce.insert(auth.nonce.clone(), auth.ts);
         Ok(())
     }
 }
@@ -253,6 +274,58 @@ mod tests {
             auth.verify("seal", "id2", &params, &fields, now_ms())
                 .unwrap_err(),
             crate::protocol::codes::ISSUER_UNTRUSTED
+        );
+    }
+
+    /// H-06: a still-valid nonce is never forgotten while it can verify.
+    /// Failing-first: the pre-fix FIFO cache drops the oldest nonce after
+    /// 10,000 admissions, so replaying it verifies as a fresh request.
+    /// Specified fix (fail closed at capacity): the cache fills with live
+    /// nonces, further fresh requests are refused with
+    /// `replay-cache-exhausted`, and the oldest live replay stays rejected.
+    #[test]
+    fn replay_after_cache_eviction_is_still_rejected() {
+        let auth = IssuerAuth::generate().unwrap();
+        let params = serde_json::Map::new();
+        let ts = now_ms();
+        let first_nonce = "aa".repeat(16);
+        let first_tag = auth.tag_for("acquire", "id-first", &params, &first_nonce, ts);
+        let first = crate::protocol::AuthFields {
+            nonce: first_nonce.clone(),
+            ts,
+            tag: first_tag,
+        };
+        assert!(auth
+            .verify("acquire", "id-first", &params, &first, ts)
+            .is_ok());
+        // Fill the cache exactly to capacity with distinct valid nonces.
+        for i in 1..(super::MAX_SEEN_NONCES as u64) {
+            let nonce = format!("{:032x}{:032x}", i, ts as u64);
+            let id = format!("fill-{i}");
+            let tag = auth.tag_for("acquire", &id, &params, &nonce, ts);
+            let fields = crate::protocol::AuthFields { nonce, ts, tag };
+            assert!(auth.verify("acquire", &id, &params, &fields, ts).is_ok());
+        }
+        // One more fresh, otherwise-valid request: refused (fail closed)
+        // rather than evicting a live nonce to make room.
+        let extra_nonce = "bb".repeat(16);
+        let extra_tag = auth.tag_for("acquire", "id-extra", &params, &extra_nonce, ts);
+        let extra = crate::protocol::AuthFields {
+            nonce: extra_nonce,
+            ts,
+            tag: extra_tag,
+        };
+        assert_eq!(
+            auth.verify("acquire", "id-extra", &params, &extra, ts)
+                .unwrap_err(),
+            crate::protocol::codes::REPLAY_CACHE_EXHAUSTED
+        );
+        // The oldest nonce is still inside its validity window, so its
+        // replay must be rejected — never silently re-admitted.
+        assert_eq!(
+            auth.verify("acquire", "id-first", &params, &first, now_ms())
+                .unwrap_err(),
+            crate::protocol::codes::REPLAY_REJECTED
         );
     }
 

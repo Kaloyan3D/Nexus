@@ -15,7 +15,7 @@ use crate::protocol::{
     MAX_FRAME_BYTES, MAX_JOURNAL_EVENTS, MAX_RESPONSE_BYTES, REQUEST_TIMEOUT_MS,
 };
 use nexus_kernel::bridge;
-use std::io::{BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -675,22 +675,95 @@ fn write_response(stream: &mut UnixStream, response: &serde_json::Value) -> Resu
     Ok(())
 }
 
+/// H-05: atomically reserve one client slot. The accept loop calls this
+/// BEFORE spawning a worker, so the check and the reservation are a single
+/// atomic step and a burst of simultaneous connections can never admit more
+/// than MAX_CLIENTS no matter how the worker threads are scheduled.
+fn try_reserve_client(daemon: &Daemon) -> bool {
+    daemon
+        .counters
+        .active_clients
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            if current < MAX_CLIENTS {
+                Some(current + 1)
+            } else {
+                None
+            }
+        })
+        .is_ok()
+}
+
+fn release_client(daemon: &Daemon) {
+    daemon
+        .counters
+        .active_clients
+        .fetch_sub(1, Ordering::SeqCst);
+}
+
+/// Gracefully refuse an over-cap connection with a structured `server-busy`
+/// refusal instead of a bare close. A bare close with unread request bytes
+/// still queued turns into RST and the client loses the refusal; so the
+/// pending frame bytes are drained first (bounded: at most 4 x 8 KiB reads
+/// with a short deadline — legitimate shadow frames are far smaller, and a
+/// slow-drip peer only costs the accept loop ~1 s, never a worker thread).
+/// Every exit path below ends in close; errors are ignored because the
+/// client is being refused either way.
+fn refuse_over_cap(stream: UnixStream) {
+    let mut stream = stream;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+    let mut chunk = [0u8; 8192];
+    for _ in 0..4 {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                if chunk[..n].contains(&b'\n') {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = write_response(
+        &mut stream,
+        &fail(
+            "",
+            codes::SERVER_BUSY,
+            "connection over client cap (server-busy)",
+        ),
+    );
+}
+
+/// RAII slot release: the counter is decremented on EVERY worker exit path,
+/// including a panicking worker (stack unwinding runs `Drop`). The slot is
+/// reserved by the accept loop before this worker exists; this guard only
+/// ever releases it.
+struct ClientSlot<'a> {
+    daemon: &'a Daemon,
+}
+
+impl Drop for ClientSlot<'_> {
+    fn drop(&mut self) {
+        release_client(self.daemon);
+    }
+}
+
 fn serve_connection(stream: UnixStream, daemon: SharedDaemon) {
-    daemon
-        .counters
-        .active_clients
-        .fetch_add(1, Ordering::Relaxed);
+    let _slot = ClientSlot { daemon: &daemon };
     let result = serve_connection_inner(&stream, &daemon);
-    daemon
-        .counters
-        .active_clients
-        .fetch_sub(1, Ordering::Relaxed);
     if let Err(detail) = result {
         daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
         log_line("conn-close", "", "transport-error", &detail);
     }
 }
 
+/// H-04: byte-oriented, newline-delimited framing. Raw bytes accumulate
+/// in `pending` until a `\n` completes a frame; only complete frames are
+/// UTF-8 validated (strictly — never lossy), so a multi-byte character
+/// split across reads is preserved exactly and several frames arriving in
+/// one read are each served in order. The 1 MiB cap is enforced on bytes:
+/// a frame body beyond the cap, or a newline-less backlog beyond
+/// cap+1, is refused as `too-large` and the connection is closed.
 fn serve_connection_inner(stream: &UnixStream, daemon: &SharedDaemon) -> Result<(), String> {
     let mut stream = stream
         .try_clone()
@@ -701,35 +774,14 @@ fn serve_connection_inner(stream: &UnixStream, daemon: &SharedDaemon) -> Result<
     stream
         .set_write_timeout(Some(Duration::from_millis(REQUEST_TIMEOUT_MS)))
         .map_err(|e| format!("timeout unsettable: {e}"))?;
-    let mut reader = BufReader::new(
-        stream
-            .try_clone()
-            .map_err(|e| format!("clone failed: {e}"))?,
-    );
+    let mut pending: Vec<u8> = Vec::new();
     loop {
-        let mut line = String::new();
-        // Bounded accumulation: read byte-wise in chunks so one huge line
-        // cannot grow memory without bound before we reject it.
-        loop {
-            let mut chunk = vec![0u8; 8192];
-            let n = reader.read(&mut chunk).map_err(|e| {
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut
-                {
-                    "request timeout".to_owned()
-                } else {
-                    format!("read failed: {e}")
-                }
-            })?;
-            if n == 0 {
-                if line.is_empty() {
-                    return Ok(());
-                }
-                return Err("connection closed mid-frame".to_owned());
-            }
-            let text = String::from_utf8_lossy(&chunk[..n]).into_owned();
-            line.push_str(&text);
-            if line.len() > MAX_FRAME_BYTES + 1 {
+        // Serve every complete line already buffered before reading more,
+        // so coalesced requests are each answered in arrival order.
+        if let Some(nl) = pending.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = pending.drain(..=nl).collect();
+            let body = &line[..line.len() - 1];
+            if body.len() > MAX_FRAME_BYTES {
                 let _ = write_response(
                     &mut stream,
                     &fail(
@@ -741,30 +793,71 @@ fn serve_connection_inner(stream: &UnixStream, daemon: &SharedDaemon) -> Result<
                 daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
                 return Err("oversized frame".to_owned());
             }
-            if line.ends_with('\n') {
-                break;
+            let frame = match std::str::from_utf8(body) {
+                Ok(text) => text.strip_suffix('\r').unwrap_or(text),
+                Err(_) => {
+                    daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                    let _ = write_response(
+                        &mut stream,
+                        &fail(
+                            "",
+                            codes::BAD_REQUEST,
+                            "request frame is not valid UTF-8 (bad-request)",
+                        ),
+                    );
+                    continue;
+                }
+            };
+            // Catch panics per request so adversarial input can never kill
+            // the connection handler, let alone the daemon.
+            let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                serve_frame(daemon, frame)
+            })) {
+                Ok(v) => v,
+                Err(_) => {
+                    daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+                    fail(
+                        "",
+                        codes::STORE_UNHEALTHY,
+                        "internal failure while serving request; failing closed",
+                    )
+                }
+            };
+            if write_response(&mut stream, &response).is_err() {
+                return Err("response write failed".to_owned());
             }
+            continue;
         }
-        let frame = line.strip_suffix('\n').unwrap_or(&line);
-        let frame = frame.strip_suffix('\r').unwrap_or(frame);
-        // Catch panics per request so adversarial input can never kill the
-        // connection handler, let alone the daemon.
-        let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            serve_frame(daemon, frame)
-        })) {
-            Ok(v) => v,
-            Err(_) => {
-                daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
-                fail(
+        // No complete line yet: refuse before buffering without bound.
+        if pending.len() > MAX_FRAME_BYTES + 1 {
+            let _ = write_response(
+                &mut stream,
+                &fail(
                     "",
-                    codes::STORE_UNHEALTHY,
-                    "internal failure while serving request; failing closed",
-                )
-            }
-        };
-        if write_response(&mut stream, &response).is_err() {
-            return Err("response write failed".to_owned());
+                    codes::TOO_LARGE,
+                    format!("request frame exceeds {MAX_FRAME_BYTES} bytes (too-large)"),
+                ),
+            );
+            daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+            return Err("oversized frame".to_owned());
         }
+        let mut chunk = [0u8; 8192];
+        let n = stream.read(&mut chunk).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::TimedOut
+            {
+                "request timeout".to_owned()
+            } else {
+                format!("read failed: {e}")
+            }
+        })?;
+        if n == 0 {
+            if pending.is_empty() {
+                return Ok(());
+            }
+            return Err("connection closed mid-frame".to_owned());
+        }
+        pending.extend_from_slice(&chunk[..n]);
     }
 }
 
@@ -781,7 +874,7 @@ pub fn serve(listener: UnixListener, daemon: SharedDaemon, shutdown: Arc<AtomicB
         }
         match listener.accept() {
             Ok((stream, _)) => {
-                if daemon.counters.active_clients.load(Ordering::Relaxed) >= MAX_CLIENTS {
+                if !try_reserve_client(&daemon) {
                     daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
                     log_line(
                         "refuse",
@@ -789,7 +882,7 @@ pub fn serve(listener: UnixListener, daemon: SharedDaemon, shutdown: Arc<AtomicB
                         codes::SERVER_BUSY,
                         "connection over client cap",
                     );
-                    drop(stream);
+                    refuse_over_cap(stream);
                     continue;
                 }
                 let worker = Arc::clone(&daemon);
@@ -798,6 +891,8 @@ pub fn serve(listener: UnixListener, daemon: SharedDaemon, shutdown: Arc<AtomicB
                     .spawn(move || serve_connection(stream, worker))
                     .is_err()
                 {
+                    // The reserved slot is released; no worker exists to do it.
+                    release_client(&daemon);
                     daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
                     log_line("conn-close", "", "transport-error", "worker spawn failed");
                 }
