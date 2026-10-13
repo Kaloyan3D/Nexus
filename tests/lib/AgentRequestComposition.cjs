@@ -18,6 +18,7 @@
 
 function createPresetCtx(extra) {
   const hooks = new Map()
+  const environment = []
   function register(name, listener, agent) {
     const entries = hooks.get(name) || []
     const entry = { listener, agent }
@@ -30,7 +31,10 @@ function createPresetCtx(extra) {
   }
   const ctx = {
     hooks,
-    shellEnv: { register() {} },
+    shellEnv: {
+      list() { return environment.flatMap(c => Object.keys(c.variables).map(key => ({ key, contributor: c.name }))) },
+      register(c) { environment.push(c) },
+    },
     ...(extra || {}),
     on(name, listener) {
       return register(name, listener, undefined)

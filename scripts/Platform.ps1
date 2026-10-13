@@ -454,6 +454,10 @@ function Get-AihUnixPermissionPlan {
     if (-not (Test-Path -LiteralPath $Path)) { return @() }
     $item = Get-Item -LiteralPath $Path -Force
     $plan = [System.Collections.Generic.List[object]]::new()
+    # Dependency fallback links are consumers of app files, not private data.
+    # chmod follows links, so neither a linked root nor linked children may
+    # enter this ownership-scoped plan (also prevents cycles and repeat walks).
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return @() }
     if ($item -isnot [System.IO.DirectoryInfo]) {
         $plan.Add([pscustomobject]@{ Path = $item.FullName; Mode = '600' })
         return ,$plan.ToArray()
@@ -464,6 +468,7 @@ function Get-AihUnixPermissionPlan {
     while ($stack.Count -gt 0) {
         $directory = $stack.Pop()
         foreach ($child in $directory.EnumerateFileSystemInfos()) {
+            if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
             if ($child -is [System.IO.DirectoryInfo]) {
                 $plan.Add([pscustomobject]@{ Path = $child.FullName; Mode = '700' })
                 $stack.Push($child)

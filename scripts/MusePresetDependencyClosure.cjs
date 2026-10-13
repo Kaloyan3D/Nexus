@@ -16,12 +16,22 @@ const ASSETS = Object.freeze([
   'tokenizers/deepseek-v4-tokenizer-config.json',
   'tokenizers/deepseek-v4-tokenizer.provenance.json',
 ])
+// R7.1.1: Registry mode definitions are managed runtime assets loaded by
+// registry/legacy-import.cjs relative to its own __dirname (fs read, not
+// require), so the require-graph walk cannot discover them. Every profile
+// whose entry graph reaches the Registry service must pin all three.
+const REGISTRY_MODE_ASSETS = Object.freeze([
+  'registry/modes/engineering-v1.json',
+  'registry/modes/engineering-v2.json',
+  'registry/modes/engineering-v3.json',
+])
+const REGISTRY_RUNTIME_ASSETS = Object.freeze([...ASSETS, ...REGISTRY_MODE_ASSETS])
 const MANIFEST = '.muse-preset-closure.json'
 const PROFILES = Object.freeze({
-  muse: { entries: ENTRIES, assets: ASSETS, manifest: MANIFEST },
-  controller: { entries: Object.freeze(['AihController.cjs']), assets: Object.freeze([]), manifest: '.controller-preset-closure.json' },
-  engineering: { entries: Object.freeze(['AihController.cjs', 'Engineering-Isolation.cjs']), assets: ASSETS, manifest: '.engineering-preset-closure.json' },
-  deepseek: { entries: Object.freeze(['AihController.cjs', 'DeepSeek-Isolation.cjs']), assets: ASSETS, manifest: '.deepseek-preset-closure.json' },
+  muse: { entries: ENTRIES, assets: REGISTRY_RUNTIME_ASSETS, manifest: MANIFEST },
+  controller: { entries: Object.freeze(['AihController.cjs']), assets: REGISTRY_MODE_ASSETS, manifest: '.controller-preset-closure.json' },
+  engineering: { entries: Object.freeze(['AihController.cjs', 'Engineering-Isolation.cjs']), assets: REGISTRY_RUNTIME_ASSETS, manifest: '.engineering-preset-closure.json' },
+  deepseek: { entries: Object.freeze(['AihController.cjs', 'DeepSeek-Isolation.cjs']), assets: REGISTRY_RUNTIME_ASSETS, manifest: '.deepseek-preset-closure.json' },
 })
 function profile(options = {}) {
   const name = options.profile || 'muse'

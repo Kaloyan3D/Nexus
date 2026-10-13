@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "id": "engineering-v3",
+  "displayName": "Engineering Mode v3 / Nexus Nova",
+  "status": "planned",
+  "orchestrationEngineId": "nova-v3",
+  "selectable": false,
+  "runnable": false,
+  "slots": [
+    {
+      "id": "planner",
+      "label": "Planner",
+      "required": true,
+      "internalRoles": [
+        "nova_planner"
+      ],
+      "requirements": {}
+    },
+    {
+      "id": "engineer",
+      "label": "Engineer",
+      "required": true,
+      "internalRoles": [
+        "nova_engineer"
+      ],
+      "requirements": {}
+    },
+    {
+      "id": "reviewer",
+      "label": "Reviewer",
+      "required": true,
+      "internalRoles": [
+        "nova_reviewer"
+      ],
+      "requirements": {}
+    },
+    {
+      "id": "verifier",
+      "label": "Verifier",
+      "required": true,
+      "internalRoles": [
+        "nova_verifier"
+      ],
+      "requirements": {}
+    },
+    {
+      "id": "specialist",
+      "label": "Specialist",
+      "required": false,
+      "internalRoles": [
+        "nova_specialist"
+      ],
+      "requirements": {}
+    }
+  ],
+  "internalRoles": [
+    "nova_planner",
+    "nova_engineer",
+    "nova_reviewer",
+    "nova_verifier",
+    "nova_specialist"
+  ],
+  "optionalCapabilities": []
+}

@@ -24,12 +24,18 @@ try {
     // The compiler loads tokenizer assets relative to its installed module.
     // Both DeepSeek controller presets must carry those assets independently.
     assert(expected.includes('tokenizers/deepseek-v4-tokenizer.json'), 'controller closure must ship the production tokenizer')
-    assert(!expected.includes('Muse-Isolation.cjs'))
+    // R7.4: the shared controller verifies persisted targets through both
+    // pure isolation readers. Shipping the Muse reader is a dependency, not
+    // activation of Muse middleware in a Dual preset.
+    assert(expected.includes('Muse-Isolation.cjs'))
     const preset = path.join(root, name)
     assert.deepEqual(copy(install, preset, { profile }).map(row => row.name), expected)
     assert.deepEqual(closure(preset, { rootIsConfig: true, requireTracked: false, profile }), expected)
     assert.deepEqual(validate(install, preset, { profile }).map(row => row.name), expected)
     require(path.join(preset, 'AihController.cjs'))
+    const museReader = require(path.join(preset, 'Muse-Isolation.cjs'))
+    assert.equal(typeof museReader.controllerTargetFor, 'function')
+    assert.throws(() => museReader.controllerTargetFor(install, { engine: 'dual' }), { code: 'engine-binding-violation' })
     const installedTokenizer = require(path.join(preset, 'ContextTokenizerRegistryV2.cjs'))
     assert(installedTokenizer.createDeepseekV4CounterV2().countText('installed tokenizer') > 0)
     fs.rmSync(path.join(preset, 'ContextCompilerShadowHostV2.cjs'))
@@ -48,9 +54,16 @@ try {
     fs.writeFileSync(path.join(fixtureConfig, name), contents)
     execFileSync('git', ['-C', fixture, 'add', '--', 'config/' + name])
   }
+  // R7.1.1: the controller profile pins the Registry mode definitions, so the
+  // synthetic fixture must carry them like any real source checkout does.
+  for (const modeFile of ['engineering-v1.json', 'engineering-v2.json', 'engineering-v3.json']) {
+    fs.mkdirSync(path.join(fixtureConfig, 'registry', 'modes'), { recursive: true });
+    fs.writeFileSync(path.join(fixtureConfig, 'registry', 'modes', modeFile), JSON.stringify({ schemaVersion: 1, id: modeFile }));
+    execFileSync('git', ['-C', fixture, 'add', '--', 'config/registry/modes/' + modeFile]);
+  }
   const fixtureInstall = path.join(root, 'fixture-install')
   const fixturePreset = path.join(root, 'fixture-preset')
-  assert.deepEqual(prepare(fixture, fixtureInstall, { profile: 'controller' }).map(row => row.name), ['A.cjs', 'AihController.cjs', 'B.cjs', 'C.cjs'])
+  assert.deepEqual(prepare(fixture, fixtureInstall, { profile: 'controller' }).map(row => row.name), ['A.cjs', 'AihController.cjs', 'B.cjs', 'C.cjs', 'registry/modes/engineering-v1.json', 'registry/modes/engineering-v2.json', 'registry/modes/engineering-v3.json'])
   const requiredSource = path.join(fixtureInstall, 'config/C.cjs')
   fs.rmSync(requiredSource)
   assert.throws(() => copy(fixtureInstall, fixturePreset, { profile: 'controller' }), /closure-missing/)

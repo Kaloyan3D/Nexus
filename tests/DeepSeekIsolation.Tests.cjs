@@ -43,14 +43,14 @@ async function main() {
   let contributor
   isolation.apply({
     on(name, handler) { handlers[name] = handler },
-    shellEnv: { register(value) { contributor = value } },
+    shellEnv: { list() { return [] }, register(value) { contributor = value } },
   })
   assert.equal(isolation.inject[0], 'shellEnv')
   const deepSession = { header: { agentPreset: 'aih-deepseek' }, events: [] }
   const normalSession = { header: { agentPreset: 'aih-engineering' }, events: [] }
   assert.equal(contributor.resolve({ agent: { session: deepSession } }).DSH_AIH_PRESET, 'aih-deepseek')
-  assert.deepEqual(contributor.resolve({ agent: { session: normalSession } }), {})
-  assert.deepEqual(contributor.resolve({ agent: { session: { header: { agentPreset: 'aih-deepseek' }, events: [{ type: 'agent-preset/selected', data: { agentPreset: 'aih-engineering' } }] } } }), {})
+  assert.deepEqual(contributor.resolve({ agent: { session: normalSession } }), { DSH_AIH_PRESET: 'aih-engineering' })
+  assert.deepEqual(contributor.resolve({ agent: { session: { header: { agentPreset: 'aih-deepseek' }, events: [{ type: 'agent-preset/selected', data: { agentPreset: 'aih-engineering' } }] } } }), { DSH_AIH_PRESET: 'aih-engineering' })
 
   const worker = { agent: { session: { header: { origin: 'subagent', delegationDepth: 1 } } } }
   const sol = { provider: 'sol-local', model: 'gpt-5.6-sol', reasoningEffort: 'medium' }
@@ -67,10 +67,9 @@ async function main() {
   assert.equal(retainedWorker.provider, 'flash-max-direct')
 
   const engineeringCtx = createPresetCtx()
-  delete engineeringCtx.shellEnv
   engineeringIsolation.apply(engineeringCtx)
   const engineeringHandlers = engineeringCtx.handlers
-  assert.equal(engineeringIsolation.inject, undefined)
+  assert.deepEqual(engineeringIsolation.inject, ['shellEnv'])
 
   // ── Engineering enforcement: controller-owned targets, fail-closed ───────
   //

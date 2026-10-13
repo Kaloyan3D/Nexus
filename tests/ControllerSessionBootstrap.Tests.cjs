@@ -52,7 +52,7 @@ async function main() {
     const ctx = new Context()
     new SessionStore(ctx)
     contexts.push(ctx)
-    ctx.provide('shellEnv', { register() {} })
+    ctx.provide('shellEnv', { list() { return [] }, register() {} })
     const listeners = {}
     const seam = {
       get: (name) => ctx.get(name),
@@ -217,7 +217,7 @@ async function main() {
       (async () => {
         const { Context } = await import(${JSON.stringify(pathToFileURL(path.join(modules, 'cordis/lib/index.js')).href)});
         const { SessionStore } = await import(${JSON.stringify(pathToFileURL(path.join(modules, 'dsh-session/lib/index.js')).href)});
-        const ctx = new Context(); new SessionStore(ctx); ctx.provide('shellEnv', { register() {} });
+        const ctx = new Context(); new SessionStore(ctx); ctx.provide('shellEnv', { list() { return [] }, register() {} });
         const session = ctx.get('sessions').create(${JSON.stringify(killedSessionId)}, { meta: { cwd: ${JSON.stringify(workspace)}, agentPreset: 'aih-muse' } });
         require(${JSON.stringify(path.join(repo, 'config/AihController.cjs'))}).apply(ctx);
         const rename = fs.renameSync;

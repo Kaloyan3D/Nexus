@@ -24,6 +24,9 @@
     "./gate": {
       "default": "./lib/gate.cjs"
     },
+    "./registry": {
+      "default": "./lib/registry.cjs"
+    },
     "./package.json": "./package.json"
   },
   "dsh": {
@@ -42,6 +45,7 @@
     "lib/client.js",
     "lib/status.cjs",
     "lib/detail.cjs",
-    "lib/gate.cjs"
+    "lib/gate.cjs",
+    "lib/registry.cjs"
   ]
 }

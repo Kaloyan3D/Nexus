@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 1,
+  "sourceRef": "dev@9e81dadde73adcc2cd71f019caa7eaef04504063",
+  "note": "Frozen semantic route target golden fixtures; update only after explicit compatibility review, never auto-regenerate in CI.",
+  "dualProfiles": [
+    {
+      "id": "deepseek-codex",
+      "engine": "dual",
+      "roles": {
+        "primaryEngineer": {
+          "modelId": "deepseek-v4-flash",
+          "model": "deepseek-v4-flash",
+          "provider": "flash-high-direct",
+          "reasoning": "high"
+        },
+        "deepEngineer": {
+          "modelId": "deepseek-v4-flash",
+          "model": "deepseek-v4-flash",
+          "provider": "flash-max-direct",
+          "reasoning": "max"
+        },
+        "reviewer": {
+          "modelId": "gpt-5.6-sol",
+          "model": "gpt-5.6-sol",
+          "provider": "sol-local",
+          "reasoning": "medium"
+        },
+        "solver": {
+          "modelId": "gpt-5.6-sol",
+          "model": "gpt-5.6-sol",
+          "provider": "sol-local",
+          "reasoning": "high"
+        },
+        "fallback": {
+          "modelId": "deepseek-v4-flash",
+          "model": "deepseek-v4-flash",
+          "provider": "flash-max-direct",
+          "reasoning": "max"
+        },
+        "visualReviewer": {
+          "modelId": "deepseek-v4-flash-vision-exp",
+          "model": "deepseek-v4-flash-vision-exp",
+          "provider": "deepseek-vision-direct",
+          "reasoning": "high"
+        }
+      }
+    },
+    {
+      "id": "glm-codex",
+      "engine": "dual",
+      "roles": {
+        "primaryEngineer": {
+          "modelId": "glm-5.3-flash",
+          "model": "glm-5.3-flash",
+          "provider": "zai-direct",
+          "reasoning": "high"
+        },
+        "deepEngineer": {
+          "modelId": "glm-5.3-flash",
+          "model": "glm-5.3-flash",
+          "provider": "zai-direct",
+          "reasoning": "max"
+        },
+        "reviewer": {
+          "modelId": "gpt-5.6-sol",
+          "model": "gpt-5.6-sol",
+          "provider": "sol-local",
+          "reasoning": "medium"
+        },
+        "solver": {
+          "modelId": "gpt-5.6-sol",
+          "model": "gpt-5.6-sol",
+          "provider": "sol-local",
+          "reasoning": "high"
+        },
+        "fallback": {
+          "modelId": "glm-5.3",
+          "model": "glm-5.3",
+          "provider": "zai-direct",
+          "reasoning": "max"
+        },
+        "visualReviewer": {
+          "modelId": "deepseek-v4-flash-vision-exp",
+          "model": "deepseek-v4-flash-vision-exp",
+          "provider": "deepseek-vision-direct",
+          "reasoning": "high"
+        }
+      }
+    }
+  ],
+  "museProfiles": [
+    {
+      "id": "muse-spark-1.3-contributor",
+      "engine": "muse",
+      "modelId": "muse-spark-1.3-contributor",
+      "model": "muse-spark-1.3-contributor",
+      "provider": "meta-model-api",
+      "reasoning": "xhigh",
+      "dataUseTier": "contributor"
+    },
+    {
+      "id": "muse-spark-1.3-contributor-opencode",
+      "engine": "muse",
+      "modelId": "muse-spark-1.3-contributor-opencode",
+      "model": "muse-spark-1.3-contributor",
+      "provider": "opencode-go",
+      "reasoning": "xhigh",
+      "dataUseTier": "contributor"
+    }
+  ]
+}

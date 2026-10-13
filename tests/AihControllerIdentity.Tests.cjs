@@ -569,7 +569,7 @@ async function runBridgeEndToEnd() {
   const ledgerPath = path.join(fixture, '.ai-harness', 'state', 'tasks.json')
   function boot() {
     const handlers = {}
-    const ctx = { on: (event, fn) => { handlers[event] = fn }, shellEnv: { register() {} } }
+    const ctx = { on: (event, fn) => { handlers[event] = fn }, shellEnv: { list() { return [] }, register() {} } }
     controller.apply(ctx)
     return handlers['agent/pre-step']
   }

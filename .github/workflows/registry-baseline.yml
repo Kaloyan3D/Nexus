@@ -1,0 +1,49 @@
+name: Registry Legacy Baseline
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/registry-baseline.yml'
+      - 'config/nexus-profiles.json'
+      - 'config/engineering-profiles.json'
+      - 'config/muse-profiles.json'
+      - 'config/model-registry.json'
+      - 'config/routing-policy.json'
+      - 'config/Nexus-Profiles.cjs'
+      - 'config/Engineering-Profiles.cjs'
+      - 'tests/RegistryLegacyBaseline.Tests.cjs'
+      - 'tests/fixtures/registry/**'
+      - 'docs/architecture/registry-r0-baseline.md'
+  push:
+    branches:
+      - 'feature/model-registry-v1'
+      - 'dev'
+    paths:
+      - '.github/workflows/registry-baseline.yml'
+      - 'config/nexus-profiles.json'
+      - 'config/engineering-profiles.json'
+      - 'config/muse-profiles.json'
+      - 'config/model-registry.json'
+      - 'config/routing-policy.json'
+      - 'config/Nexus-Profiles.cjs'
+      - 'config/Engineering-Profiles.cjs'
+      - 'tests/RegistryLegacyBaseline.Tests.cjs'
+      - 'tests/fixtures/registry/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Syntax check offline baseline harness
+        run: node --check tests/RegistryLegacyBaseline.Tests.cjs
+      - name: Assert frozen v1 Dual and v2 Muse bindings
+        run: node tests/RegistryLegacyBaseline.Tests.cjs

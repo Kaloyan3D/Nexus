@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "engineering-v2",
+  "displayName": "Engineering Mode v2",
+  "status": "active-legacy",
+  "orchestrationEngineId": "muse-v0",
+  "selectable": true,
+  "runnable": true,
+  "slots": [
+    {
+      "id": "main",
+      "label": "Main Engineer",
+      "required": true,
+      "internalRoles": [
+        "muse_main"
+      ],
+      "requirements": {
+        "toolCalling": true,
+        "adaptiveReasoningContract": "muse-v0",
+        "singleAgent": true
+      }
+    }
+  ],
+  "internalRoles": [
+    "muse_main"
+  ],
+  "optionalCapabilities": []
+}
