@@ -1,0 +1,20 @@
+//! Schema migrations and durability pragmas.
+//! journal_mode=WAL, synchronous=FULL, foreign_keys=ON, busy_timeout=5000.
+
+pub const STORE_SCHEMA_VERSION: i64 = 1;
+
+pub const DDL_V1: &str = "
+CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at_utc TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS generations (generation_key TEXT PRIMARY KEY, task_instance_id TEXT NOT NULL, backend TEXT NOT NULL, epoch INTEGER NOT NULL, store_incarnation TEXT NOT NULL, witness_protected INTEGER NOT NULL DEFAULT 0, acquired_at_utc TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sealed_issuances (issuance_id TEXT PRIMARY KEY, issued_json TEXT NOT NULL, seal_hex TEXT NOT NULL, created_at_utc TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS commands (command_id TEXT PRIMARY KEY, task_instance_id TEXT NOT NULL, attempt_id TEXT NOT NULL, backend TEXT NOT NULL, controller_revision INTEGER NOT NULL, role TEXT NOT NULL, mode_id TEXT NOT NULL, mode_config_revision_json TEXT NOT NULL, payload_json TEXT NOT NULL, payload_digest TEXT NOT NULL, intent_digest TEXT NOT NULL, target_json TEXT NOT NULL, snapshot_digest TEXT NOT NULL, target_digest TEXT NOT NULL, issuance_id TEXT NOT NULL, lease_epoch INTEGER NOT NULL, store_incarnation TEXT NOT NULL, command_digest TEXT NOT NULL, created_at_utc TEXT NOT NULL, FOREIGN KEY (issuance_id) REFERENCES sealed_issuances (issuance_id));
+CREATE TABLE IF NOT EXISTS receipts (command_id TEXT PRIMARY KEY, command_digest TEXT NOT NULL, task_instance_id TEXT NOT NULL, attempt_id TEXT NOT NULL, lease_epoch INTEGER NOT NULL, store_incarnation TEXT NOT NULL, target_digest TEXT NOT NULL, snapshot_digest TEXT NOT NULL, issuance_id TEXT NOT NULL, status TEXT NOT NULL, event_seq INTEGER NOT NULL, accepted_at_utc TEXT NOT NULL, FOREIGN KEY (command_id) REFERENCES commands (command_id));
+CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, generation_key TEXT NOT NULL, kind TEXT NOT NULL, command_id TEXT, payload_json TEXT NOT NULL, recorded_at_utc TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_events_generation ON events (generation_key, seq);
+";
+
+pub const WITNESS_DDL_V1: &str = "
+CREATE TABLE IF NOT EXISTS witness_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS witness_state (generation_key TEXT PRIMARY KEY, max_epoch INTEGER NOT NULL, store_incarnation TEXT NOT NULL, accepted_json TEXT NOT NULL, baseline_json TEXT, updated_at_utc TEXT NOT NULL);
+";

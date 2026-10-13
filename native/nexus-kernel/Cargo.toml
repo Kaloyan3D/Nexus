@@ -1,0 +1,27 @@
+[package]
+name = "nexus-kernel"
+version = "0.1.0"
+edition = "2021"
+description = "Nexus Native Core A1.1 kernel: fencing, command acceptance, journal replay"
+license = "MIT"
+
+[[bin]]
+name = "nexus-kernel"
+path = "src/main.rs"
+
+[dependencies]
+nexus-contracts = { workspace = true }
+nexus-store = { workspace = true }
+rusqlite = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+fs2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
