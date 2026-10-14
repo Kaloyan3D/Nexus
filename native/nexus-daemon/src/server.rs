@@ -90,6 +90,17 @@ pub struct Daemon {
     /// confusion remains out of scope (see auth.rs). None = no gate, with
     /// the documented same-UID limitation in full effect.
     pub allowed_uids: Option<Vec<u32>>,
+    /// Closure §2 production socket sharing: when set, the IPC socket lives
+    /// in a dedicated directory owned by the daemon euid with group `gid`
+    /// and mode 0750, and the socket node itself is 0660 group `gid`, so a
+    /// distinct issuer UID in that group can traverse and connect while
+    /// untrusted UIDs get kernel-enforced EACCES. None = socket stays under
+    /// the owner-only DataRoot policy (see verify_protected_dir).
+    pub socket_group: Option<u32>,
+    /// Closure §3 handoff copy of the ephemeral capability, group-readable
+    /// inside the shared socket directory (never inside the DataRoot).
+    /// Removed at shutdown alongside the socket. None = no handoff file.
+    pub cap_handoff: Option<std::path::PathBuf>,
     pub lifecycle: Mutex<Lifecycle>,
     pub counters: Counters,
     /// Latched when any operation reports trust-threatening store state
@@ -208,6 +219,114 @@ pub fn parse_allowed_uids(spec: &str) -> Result<Vec<u32>, String> {
         return Err("--allowed-uids must list at least one UID".to_owned());
     }
     Ok(out)
+}
+
+/// Parse `--socket-group` (decimal GID or group name, resolved at startup).
+/// Names keep operators from hard-coding numeric GIDs in units; the numeric
+/// value is what crosses into enforcement and status reporting.
+pub fn parse_socket_group(spec: &str) -> Result<u32, String> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return Err("--socket-group must name a group or GID".to_owned());
+    }
+    if let Ok(gid) = trimmed.parse::<u32>() {
+        return Ok(gid);
+    }
+    if trimmed.bytes().any(|b| b == 0) {
+        return Err("--socket-group group name contains NUL".to_owned());
+    }
+    let name = std::ffi::CString::new(trimmed)
+        .map_err(|_| "--socket-group group name is invalid".to_owned())?;
+    let group = unsafe { libc::getgrnam(name.as_ptr()) };
+    if group.is_null() {
+        return Err(format!("--socket-group group '{trimmed}' does not exist"));
+    }
+    Ok(unsafe { (*group).gr_gid })
+}
+
+/// Closure §2 fail-closed shared socket-directory check. Unlike
+/// [`verify_protected_dir`] (owner-only, no group bits — the DataRoot
+/// policy, NEVER weakened), this validates the explicitly selected
+/// production sharing layout: `path` must canonicalize to a real directory
+/// owned by the daemon euid, owned by group `gid`, with mode exactly 0750.
+/// Symlink leaves are refused outright; parents are resolved by
+/// canonicalization and the REAL directory is what gets validated, so a
+/// link farm can never smuggle an unvalidated directory past this gate.
+/// Anything else fails closed at startup (`insecure-socket-dir`).
+pub fn verify_socket_dir(path: &Path, gid: u32) -> Result<std::path::PathBuf, String> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    if std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(
+            "socket directory path is a symlink; refusing shared IPC (failing closed)".to_owned(),
+        );
+    }
+    let canonical =
+        std::fs::canonicalize(path).map_err(|e| format!("socket directory unavailable: {e}"))?;
+    let meta =
+        std::fs::metadata(&canonical).map_err(|e| format!("socket directory unavailable: {e}"))?;
+    if !meta.is_dir() {
+        return Err("socket path is not a directory".to_owned());
+    }
+    let euid = unsafe { libc::geteuid() };
+    if meta.uid() != euid {
+        return Err("socket directory is not owned by the daemon uid (failing closed)".to_owned());
+    }
+    if meta.gid() != gid {
+        return Err(
+            "socket directory group does not match --socket-group (failing closed)".to_owned(),
+        );
+    }
+    // Exact match including setuid/setgid/sticky: the sharing layout is one
+    // precise shape, not a ceiling. (E.g. 2750 setgid would otherwise pass a
+    // 0o777 mask while changing inheritance semantics.)
+    if meta.permissions().mode() & 0o7777 != 0o750 {
+        return Err(format!(
+            "socket directory mode must be exactly 0750 (got {:o}); refusing shared IPC (failing closed)",
+            meta.permissions().mode() & 0o7777
+        ));
+    }
+    Ok(canonical)
+}
+
+/// Closure §2: set the bound socket node to 0660 group `gid` (owner rw +
+/// issuer-group rw, no other access) and validate the settled bits.
+/// Untrusted UIDs (neither owner nor group) then fail at `connect(2)` with
+/// EACCES — enforced by the kernel, not by daemon code. Any failure (not a
+/// group member, read-only fs, replaced node) is fatal at startup. Note the
+/// 0750 directory gives the group NO write bit, so group members cannot
+/// rename/swap entries: node-replacement races need directory write (daemon
+/// uid only) and degrade to fail-closed denial, never privilege gain.
+pub fn secure_socket_file(socket_path: &Path, gid: u32) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe {
+        libc::chown(
+            std::ffi::CString::new(socket_path.as_os_str().as_bytes())
+                .map_err(|_| "socket path contains interior NUL".to_owned())?
+                .as_ptr(),
+            u32::MAX,
+            gid,
+        )
+    } != 0
+    {
+        return Err(
+            "socket group unsettable; is the daemon a member of the socket group? (failing closed)"
+                .to_owned(),
+        );
+    }
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
+        .map_err(|e| format!("socket permissions unsettable: {e}"))?;
+    let meta = std::fs::metadata(socket_path).map_err(|e| format!("socket unverifiable: {e}"))?;
+    let euid = unsafe { libc::geteuid() };
+    if meta.uid() != euid || meta.gid() != gid || meta.permissions().mode() & 0o777 != 0o660 {
+        return Err("socket settled with wrong ownership or mode (failing closed)".to_owned());
+    }
+    Ok(())
 }
 
 /// Authorize one privileged command. Returns None when admitted, or the
@@ -603,7 +722,7 @@ fn do_status(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "trustMode": daemon.trust_mode.as_str(),
             "peerUidEnforced": daemon.allowed_uids.is_some(),
             "allowedUids": daemon.allowed_uids.clone().unwrap_or_default(),
-            "shadowMode": "shadow-only",
+            "socketShared": daemon.socket_group.is_some(), "socketGroup": daemon.socket_group, "capHandoff": daemon.cap_handoff.is_some(), "shadowMode": "shadow-only",
             "dispatchEnabled": nexus_kernel::Kernel::dispatch_enabled(),
             "acceptedCommands": accepted,
             "totalCommands": commands,
@@ -729,7 +848,7 @@ fn transport_report(daemon: &Daemon) -> serde_json::Value {
     serde_json::json!({
         "peerUidEnforced": daemon.allowed_uids.is_some(),
         "allowedUids": daemon.allowed_uids.clone().unwrap_or_default(),
-        "capAuth": if daemon.auth.is_some() { "ephemeral-hmac-capability" } else { "none" },
+        "socketShared": daemon.socket_group.is_some(), "socketGroup": daemon.socket_group, "capHandoff": daemon.cap_handoff.is_some(), "socketPolicy": if daemon.socket_group.is_some() { "dataroot-0700 + socketdir-0750 + socket-0660" } else { "dataroot-0700 only (no production sharing)" }, "capAuth": if daemon.auth.is_some() { "ephemeral-hmac-capability" } else { "none" },
         "limitation": "SO_PEERCRED authenticates process credentials, never JS-module origin; same-UID module confusion is out of scope of this gate",
     })
 }
@@ -1176,6 +1295,8 @@ mod isolation_tests {
             trust_mode: trust,
             auth,
             allowed_uids,
+            socket_group: None,
+            cap_handoff: None,
             lifecycle: Mutex::new(Lifecycle::Starting),
             counters: Counters::default(),
             reconcile_latch: Mutex::new(None),
@@ -1311,5 +1432,71 @@ mod isolation_tests {
         assert!(verify_protected_dir(&file, "dataroot").is_err());
         // Missing path: refused.
         assert!(verify_protected_dir(&dir.path().join("nope"), "dataroot").is_err());
+    }
+
+    fn own_gid() -> u32 {
+        unsafe { libc::getegid() }
+    }
+
+    fn provision_socket_dir(parent: &std::path::Path, mode: u32, gid: u32) -> std::path::PathBuf {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = parent.join("sockdir");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).expect("chmod");
+        // chown group-only to a member group (own gid always works).
+        let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).expect("cstr");
+        let rc = unsafe { libc::chown(c.as_ptr(), u32::MAX, gid) };
+        assert_eq!(rc, 0, "test setup chown failed");
+        dir
+    }
+
+    #[test]
+    fn parse_socket_group_accepts_gid_and_name() {
+        let gid = own_gid();
+        assert_eq!(parse_socket_group(&gid.to_string()).unwrap(), gid);
+        // Our own group name must resolve to our own gid.
+        let name = unsafe {
+            let g = libc::getgrgid(gid);
+            assert!(!g.is_null());
+            let bytes = std::ffi::CStr::from_ptr((*g).gr_name).to_bytes();
+            std::str::from_utf8(bytes)
+                .expect("group name utf8")
+                .to_owned()
+        };
+        assert_eq!(parse_socket_group(&name).unwrap(), gid);
+        assert!(parse_socket_group("").is_err());
+        assert!(parse_socket_group("   ").is_err());
+        assert!(parse_socket_group("no-such-group-xyz-123").is_err());
+    }
+
+    #[test]
+    fn socket_dir_policy_is_exact() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let gid = own_gid();
+        // Exact 0750 + daemon-owned + matching group: admitted.
+        let good = provision_socket_dir(tmp.path(), 0o750, gid);
+        assert!(verify_socket_dir(&good, gid).is_ok());
+        // Group/other drift of any kind: refused.
+        for mode in [0o700, 0o755, 0o770, 0o777, 0o751, 0o2750] {
+            std::fs::set_permissions(&good, std::fs::Permissions::from_mode(mode)).expect("chmod");
+            assert!(
+                verify_socket_dir(&good, gid).is_err(),
+                "mode {mode:o} must be refused"
+            );
+        }
+        std::fs::set_permissions(&good, std::fs::Permissions::from_mode(0o750)).expect("chmod");
+        // Wrong group: refused (nobody membership may vary; use gid+1).
+        assert!(verify_socket_dir(&good, gid.wrapping_add(1)).is_err());
+        // Symlink leaf: refused even when the target is perfect.
+        let link = tmp.path().join("socklink");
+        std::os::unix::fs::symlink(&good, &link).expect("symlink");
+        assert!(verify_socket_dir(&link, gid).is_err());
+        // File and missing path: refused.
+        let file = tmp.path().join("f");
+        std::fs::write(&file, b"x").expect("write");
+        assert!(verify_socket_dir(&file, gid).is_err());
+        assert!(verify_socket_dir(&tmp.path().join("nope"), gid).is_err());
     }
 }

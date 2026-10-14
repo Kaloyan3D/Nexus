@@ -221,6 +221,128 @@ pub fn write_cap_file(path: &Path, key_hex: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Write a group-readable copy of the capability key for the production
+/// issuer identity (closure §3). The caller MUST place `path` inside the
+/// validated shared socket directory (never inside the DataRoot) and pass
+/// the socket directory's group: the handoff lands `0640 root-group` so the
+/// `nexus-issuer` UID can authenticate without any read access to the
+/// DataRoot or to the owner-only `issuer.cap`. Rotation matches the primary
+/// cap (overwritten every start). `O_NOFOLLOW` refuses symlink targets so a
+/// pre-planted link can never redirect the key. This is NOT a second
+/// credential: it carries the same per-incarnation key, and a stolen copy is
+/// still insufficient without a matching `--allowed-uids` peer UID.
+///
+/// Fail-closed: any ownership, group, mode, or symlink violation is an
+/// error and the daemon must refuse to start.
+pub fn write_handoff_file(path: &Path, key_hex: &str, gid: u32) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt;
+    // No parent creation here: the directory must already exist and have
+    // passed socket-dir validation. Creating it would mask operator error.
+    if path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .is_none()
+    {
+        return Err(
+            "cap handoff path has no parent directory; place it inside the shared socket directory"
+                .to_owned(),
+        );
+    }
+    // Refuse symlink leaves before and via open: a link could otherwise
+    // point the key at an attacker-readable path.
+    let leaf_meta = std::fs::symlink_metadata(path).ok();
+    if leaf_meta
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err("cap handoff path is a symlink; refusing to write key material".to_owned());
+    }
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| "cap handoff path contains interior NUL".to_owned())?;
+    // Open with O_NOFOLLOW|O_CREAT|O_TRUNC|O_WRONLY, mode 0640. Raw fd
+    // avoids any TOCTOU between a check and std's open.
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o640,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "cap handoff unwritable: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let write_all = unsafe {
+        let bytes = key_hex.as_bytes();
+        let mut done = 0usize;
+        while done < bytes.len() {
+            let rc = libc::write(
+                fd,
+                bytes[done..].as_ptr() as *const libc::c_void,
+                bytes.len() - done,
+            ) as isize;
+            if rc <= 0 {
+                break;
+            }
+            done += rc as usize;
+        }
+        if done == bytes.len() {
+            0
+        } else {
+            -1
+        }
+    };
+    // Group ownership FIRST (while still 0640-or-narrower), then enforce
+    // exact bits: at no point is the key world-accessible.
+    let grp = unsafe { libc::fchown(fd, u32::MAX, gid) };
+    let md = unsafe { libc::fchmod(fd, 0o640) };
+    // Review F3: validate the OPEN file description (fstat), never a
+    // re-resolved pathname. A post-close rename/swap race (possible only for
+    // writers of this daemon-owned directory) cannot smuggle an unvalidated
+    // node past the gate this way.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let fr = unsafe { libc::fstat(fd, &mut st) };
+    unsafe {
+        libc::close(fd);
+    }
+    // Any post-open failure removes the partial file: a truncated or
+    // mis-owned key copy must never linger group-readable. Best effort;
+    // the daemon still refuses startup on the original error.
+    let scrub = |c: &std::ffi::CString| unsafe { libc::unlink(c.as_ptr()) };
+    if write_all != 0 {
+        scrub(&c_path);
+        return Err("cap handoff unwritable: short write".to_owned());
+    }
+    if grp != 0 {
+        scrub(&c_path);
+        return Err("cap handoff group unsettable; is the daemon a member of the socket group? (failing closed)".to_owned());
+    }
+    if md != 0 {
+        scrub(&c_path);
+        return Err(format!(
+            "cap handoff permissions unsettable: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // Validate the settled file description: exact 0640, daemon-owned,
+    // correct group. Uses the fstat above, not a re-resolved name.
+    if fr != 0 {
+        scrub(&c_path);
+        return Err(format!(
+            "cap handoff unverifiable: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let euid = unsafe { libc::geteuid() };
+    if st.st_uid != euid || st.st_gid != gid || st.st_mode & 0o777 != 0o640 {
+        scrub(&c_path);
+        return Err("cap handoff settled with wrong ownership or mode (failing closed)".to_owned());
+    }
+    Ok(())
+}
+
 pub fn read_cap_file(path: &Path) -> Result<String, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cap file unreadable: {e}"))?;
     let trimmed = text.trim().to_owned();
@@ -327,6 +449,24 @@ mod tests {
                 .unwrap_err(),
             crate::protocol::codes::REPLAY_REJECTED
         );
+    }
+
+    #[test]
+    fn handoff_file_is_group_scoped_and_symlink_safe() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gid = unsafe { libc::getegid() };
+        let path = dir.path().join("issuer.handoff");
+        write_handoff_file(&path, &"ab".repeat(32), gid).expect("handoff writes");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "handoff must be 0640, got {mode:o}");
+        assert_eq!(std::fs::read_to_string(&path).expect("read").len(), 64);
+        // A pre-planted symlink at the handoff path is refused, never followed.
+        let link = dir.path().join("link.handoff");
+        std::os::unix::fs::symlink(&path, &link).expect("symlink");
+        assert!(write_handoff_file(&link, &"cd".repeat(32), gid).is_err());
+        // The refused write leaves the real file untouched.
+        assert_eq!(std::fs::read_to_string(&path).expect("read").len(), 64);
     }
 
     #[test]

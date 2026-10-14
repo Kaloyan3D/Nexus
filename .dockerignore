@@ -1,0 +1,9 @@
+# A2.1 multuid image: default-deny build context.
+# The image only builds and tests the Rust workspace in native/; everything
+# else (notably tmp/ test fixtures, data/, .git, node_modules) must never
+# enter the image. Later lines take precedence over earlier ones.
+**
+!native/
+!native/**
+# Build output and host-local artifacts inside native/ stay out as well.
+native/target/

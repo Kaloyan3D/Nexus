@@ -12,8 +12,8 @@
 
 mod common;
 use common::{
-    authed_frame, code_of, kernel_bin, nexusd_bin, raw_request, read_cap, spawn_daemon_opts,
-    terminate,
+    authed_frame, code_of, kernel_bin, nexusd_bin, own_gid, raw_request, read_cap,
+    spawn_daemon_opts, spawn_daemon_shared_opts, terminate,
 };
 use std::process::{Command, Stdio};
 
@@ -254,4 +254,224 @@ fn readiness_reports_transport_posture_and_stays_not_ready() {
     let mut child = proc.child;
     terminate(&mut child);
     let _ = child.wait();
+}
+
+#[test]
+fn shared_layout_serves_handoff_flow_and_hardens_bits() {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let proc = spawn_daemon_shared_opts("shadow-test", true, &[]);
+    let gid = own_gid();
+    let sm = std::fs::metadata(&proc.socket).expect("stat socket");
+    assert_eq!(
+        sm.permissions().mode() & 0o777,
+        0o660,
+        "socket must be 0660"
+    );
+    assert_eq!(sm.gid(), gid, "socket group must be the issuer group");
+    let sockdir = proc.socket.parent().expect("sockdir");
+    let dm = std::fs::metadata(sockdir).expect("stat sockdir");
+    assert_eq!(
+        dm.permissions().mode() & 0o777,
+        0o750,
+        "sockdir must be 0750"
+    );
+    assert_eq!(dm.gid(), gid);
+    let handoff = proc.handoff.clone().expect("handoff path");
+    assert_eq!(handoff.parent(), Some(sockdir));
+    let hm = std::fs::metadata(&handoff).expect("stat handoff");
+    assert_eq!(
+        hm.permissions().mode() & 0o777,
+        0o640,
+        "handoff must be 0640"
+    );
+    assert_eq!(hm.gid(), gid);
+    let handoff_key = read_cap(&handoff);
+    assert_eq!(handoff_key, read_cap(&proc.cap));
+    let dataroot = proc.db.parent().expect("dataroot");
+    assert_eq!(
+        std::fs::metadata(dataroot)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_ne!(sockdir, dataroot);
+    let receipt = common::accept_one(
+        &proc.socket,
+        &handoff_key,
+        "task-shared",
+        "task-shared-A1",
+        "shadow-cmd-shared",
+    );
+    assert_eq!(receipt.get("ok"), Some(&serde_json::Value::Bool(true)));
+    let ready = raw_request(
+        &proc.socket,
+        r#"{"protocol":1,"id":"r2","cmd":"readiness","params":{}}"#,
+    )
+    .expect("transport");
+    assert_eq!(
+        ready.pointer("/transport/socketShared"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    assert_eq!(
+        ready.pointer("/transport/socketGroup"),
+        Some(&serde_json::Value::from(gid))
+    );
+    assert_eq!(
+        ready.pointer("/transport/capHandoff"),
+        Some(&serde_json::Value::Bool(true))
+    );
+
+    assert_eq!(
+        ready.pointer("/readiness/dispatch_enabled"),
+        Some(&serde_json::Value::Bool(false))
+    );
+    let mut child = proc.child;
+    terminate(&mut child);
+    let _ = child.wait();
+}
+
+fn provision_pair(
+    sockdir_mode: u32,
+) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dataroot = dir.path().join("dataroot");
+    std::fs::create_dir_all(&dataroot).expect("mkdir");
+    std::fs::set_permissions(&dataroot, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    let sockdir = dir.path().join("sockdir");
+    std::fs::create_dir_all(&sockdir).expect("mkdir");
+    let c = std::ffi::CString::new(sockdir.as_os_str().as_bytes()).expect("cstr");
+    assert_eq!(unsafe { libc::chown(c.as_ptr(), u32::MAX, own_gid()) }, 0);
+    std::fs::set_permissions(&sockdir, std::fs::Permissions::from_mode(sockdir_mode))
+        .expect("chmod");
+    (dir, dataroot, sockdir)
+}
+
+fn shared_daemon_output(
+    dataroot: &std::path::Path,
+    sockdir: &std::path::Path,
+    extra: &[String],
+) -> std::process::Output {
+    let me = me_uid().to_string();
+    let group = own_gid().to_string();
+    let mut cmd = Command::new(nexusd_bin());
+    cmd.arg("--db")
+        .arg(dataroot.join("k.db"))
+        .arg("--socket")
+        .arg(sockdir.join("n.sock"))
+        .arg("--cap")
+        .arg(dataroot.join("issuer.cap"))
+        .arg("--trust-mode")
+        .arg("shadow-test")
+        .arg("--allowed-uids")
+        .arg(&me)
+        .arg("--socket-group")
+        .arg(&group)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for a in extra {
+        cmd.arg(a);
+    }
+    cmd.output().expect("daemon runs")
+}
+
+#[test]
+fn shared_mode_without_allowlist_refuses_startup() {
+    let (_dir, dataroot, sockdir) = provision_pair(0o750);
+    let group = own_gid().to_string();
+    let out = Command::new(nexusd_bin())
+        .arg("--db")
+        .arg(dataroot.join("k.db"))
+        .arg("--socket")
+        .arg(sockdir.join("n.sock"))
+        .arg("--trust-mode")
+        .arg("shadow-test")
+        .arg("--socket-group")
+        .arg(&group)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("daemon runs");
+    assert!(
+        !out.status.success(),
+        "sharing without peer authorization must refuse"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("insecure-socket-dir"),
+        "refusal is named: {stderr}"
+    );
+    assert!(
+        !sockdir.join("n.sock").exists(),
+        "no socket is ever bound on refusal"
+    );
+}
+
+#[test]
+fn shared_socket_inside_dataroot_is_refused() {
+    let (_dir, dataroot, _sock) = provision_pair(0o750);
+    let me = me_uid().to_string();
+    let group = own_gid().to_string();
+    let out = Command::new(nexusd_bin())
+        .arg("--db")
+        .arg(dataroot.join("k.db"))
+        .arg("--socket")
+        .arg(dataroot.join("n.sock"))
+        .arg("--trust-mode")
+        .arg("shadow-test")
+        .arg("--allowed-uids")
+        .arg(&me)
+        .arg("--socket-group")
+        .arg(&group)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("daemon runs");
+    assert!(!out.status.success(), "socket inside DataRoot must refuse");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("insecure-socket-dir"));
+    assert!(!dataroot.join("n.sock").exists());
+}
+
+#[test]
+fn cap_handoff_outside_socket_dir_is_refused() {
+    let (_dir, dataroot, sockdir) = provision_pair(0o750);
+    let evil = dataroot.join("evil.handoff").to_string_lossy().into_owned();
+    let out = shared_daemon_output(&dataroot, &sockdir, &["--cap-handoff".to_owned(), evil]);
+    assert!(!out.status.success(), "handoff outside sockdir must refuse");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("insecure-socket-dir"));
+    assert!(!sockdir.join("n.sock").exists());
+}
+
+#[test]
+fn cap_handoff_equal_to_socket_path_is_refused() {
+    // Review F1: writing key bytes into the live socket node would corrupt
+    // IPC and drift the 0660 policy. Must refuse startup.
+    let (_dir, dataroot, sockdir) = provision_pair(0o750);
+    let sock = sockdir.join("n.sock").to_string_lossy().into_owned();
+    let out = shared_daemon_output(&dataroot, &sockdir, &["--cap-handoff".to_owned(), sock]);
+    assert!(
+        !out.status.success(),
+        "handoff overwriting the socket must refuse"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("insecure-socket-dir"));
+    assert!(
+        !sockdir.join("n.sock").exists(),
+        "no socket is ever bound on refusal"
+    );
+}
+
+#[test]
+fn group_readable_socket_dir_is_refused() {
+    let (_dir, dataroot, sockdir) = provision_pair(0o755);
+    let out = shared_daemon_output(&dataroot, &sockdir, &[]);
+    assert!(!out.status.success(), "0755 sockdir must refuse startup");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("insecure-socket-dir"));
+    assert!(
+        !sockdir.join("n.sock").exists(),
+        "no socket is ever bound on refusal"
+    );
 }

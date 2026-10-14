@@ -1,0 +1,35 @@
+# Disposable privileged test host for the A2.1 closure multi-UID suite.
+# Builds the workspace as root, creates the four isolation principals, then
+# runs the ignored multi-UID tests with genuine distinct UIDs. The image is
+# throwaway: it carries no production data and must not be promoted.
+#
+#   docker build -f native/deploy/Dockerfile.multuid -t nexus-multuid .
+#   docker run --rm nexus-multuid
+#
+# Expected final line: 8 passed / 0 failed / 1 reporter (see MULTUID-PROCEDURE.md).
+FROM rust:1.99-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 nodejs ca-certificates login passwd procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Isolation principals: distinct UIDs, issuer group membership only where stated.
+# nexusd-test joins nexus-issuer-test (mirrors production SupplementaryGroups=
+# in nexusd.service): the daemon runs unprivileged and can only chown the
+# socket/handoff group to a group it belongs to; without this every spawn
+# fails closed with "socket group unsettable" (observed on first execution).
+RUN groupadd -r nexus-issuer-test \
+    && useradd -r -m -s /usr/sbin/nologin -G nexus-issuer-test nexusd-test \
+    && useradd -r -M -s /usr/sbin/nologin -g nexus-issuer-test nexus-issuer-test \
+    && useradd -r -U -M -s /usr/sbin/nologin -G nexus-issuer-test nexus-bystander-test \
+    && useradd -r -U -M -s /usr/sbin/nologin nexus-untrusted-test \
+    && id nexusd-test && id nexus-issuer-test && id nexus-bystander-test && id nexus-untrusted-test
+
+WORKDIR /src
+COPY . .
+
+# Pre-build binaries (tests spawn ../target/debug/nexusd directly).
+RUN cd native && cargo build -p nexus-daemon -p nexus-kernel
+
+ENV NEXUS_MULTUID=1
+CMD ["bash", "-c", "cd /src/native && cargo test -p nexus-daemon --test multuid -- --ignored --test-threads=1"]

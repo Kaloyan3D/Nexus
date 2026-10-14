@@ -18,9 +18,11 @@
 ## Directories and permissions
 
 ```text
-/var/lib/nexusd            owner nexusd:nexusd  mode 0700   # DataRoot: k.db, k.witness.db, daemon.lock
-/var/lib/nexusd/issuer.cap owner nexusd:nexusd mode 0600   # ephemeral per-incarnation HMAC key, rotated each start
-/run/nexusd/n.sock         socket created by nexusd with umask 0077 (0700 semantics)
+/var/lib/nexusd                 owner nexusd:nexusd        mode 0700   # DataRoot: k.db, k.witness.db, daemon.lock
+/var/lib/nexusd/issuer.cap      owner nexusd:nexusd        mode 0600   # ephemeral per-incarnation HMAC key, rotated each start
+/run/nexusd                     owner nexusd:nexus-issuer mode 0750   # dedicated IPC dir (NOT the DataRoot)
+/run/nexusd/n.sock              owner nexusd:nexus-issuer mode 0660   # set by the daemon at bind; untrusted UIDs get EACCES
+/run/nexusd/issuer.handoff      owner nexusd:nexus-issuer mode 0640   # group-readable key copy, rotated each start
 ```
 
 The daemon enforces this at startup (`verify_protected_dir`): the DataRoot
@@ -37,20 +39,28 @@ if a later chmod is missed.
 > and the reason production is BLOCKED. The multi-UID layout above is the
 > only supported production shape.
 
-## Socket sharing for production (future daemon change, NOT enabled here)
+## Socket sharing for production (implemented; explicitly selected)
 
 With the strict `0700` startup check, a *distinct* `nexus-issuer` UID cannot
-traverse the DataRoot to reach a socket inside it. Production therefore needs
-**both** of the following (not implemented in A2.1 code, listed as remaining
-prerequisites in `native/A2.1-SECURITY-EVIDENCE.md`):
+traverse the DataRoot to reach a socket inside it. The closure implements the
+sharing layout as an explicitly selected configuration (default behavior is
+unchanged and byte-identical to A2.1). Production therefore uses
+**both** of the following (implemented in the closure; refused fail-closed when
+violated):
 
 1. A socket directory outside the DataRoot owned by `nexusd` with group
    `nexus-issuer` access (e.g. `/run/nexusd` mode `0750`), plus a socket-file
    policy that grants the issuer group connect rights without granting store
    access.
-2. A corresponding relaxation of the socket-parent directory check that is
-   **gated on `--allowed-uids` being configured** (fail closed otherwise),
-   proven by a distinct-UID connection test on the target host.
+2. A dedicated socket-parent check (`verify_socket_dir`: canonicalized path,
+   symlink-leaf refusal, daemon-uid owner, exact `--socket-group` group, mode
+   exactly `0750`) that only applies when `--socket-group` is passed AND
+   `--allowed-uids` is configured (sharing without peer authorization refuses
+   with `insecure-socket-dir`). The socket node is set to `0660` group issuer
+   after bind (`secure_socket_file`, validated). The DataRoot `0700` check is
+   never weakened, and the socket directory must live outside the DataRoot
+   (either nesting direction refuses). Proven by the shared-mode integration
+   tests; genuine cross-UID proof requires the MULTUID-PROCEDURE.md host.
 
 Do not chmod the DataRoot to `0750` as a workaround: group traverse rights on
 the DataRoot would let the issuer UID read/replace store files directly,
@@ -65,7 +75,9 @@ nexusd --db /var/lib/nexusd/k.db \
   --socket /run/nexusd/n.sock \
   --cap /var/lib/nexusd/issuer.cap \
   --trust-mode shadow-test \
-  --allowed-uids "$(id -u nexus-issuer)"
+  --allowed-uids "$(id -u nexus-issuer)" \
+  --socket-group nexus-issuer \
+  --cap-handoff /run/nexusd/issuer.handoff
 ```
 
 - `--allowed-uids` lists the **connecting process UIDs** authorized for
@@ -74,6 +86,17 @@ nexusd --db /var/lib/nexusd/k.db \
   insufficient: non-allowlisted UIDs get `peer-unauthorized` even with a
   correct HMAC. Absence of the flag preserves the documented same-UID
   limitation and is BLOCKED for production.
+- `--socket-group` (GID or group name) selects production sharing: the socket
+  parent must be exactly `0750` daemon-uid-owned with that group, the socket
+  node becomes `0660`, and sharing without `--allowed-uids` refuses startup.
+  The issuer bridge passes `daemonCapPath: /run/nexusd/issuer.handoff` to
+  `native-shadow-daemon.cjs` (existing option, no JS change needed).
+- `--cap-handoff` writes a `0640` group-readable copy of the per-incarnation
+  key inside the shared socket directory (`O_NOFOLLOW`, symlink refusal,
+  placement validated, removed at shutdown). The `nexus-issuer` UID
+  authenticates with ZERO read access to the DataRoot or `issuer.cap`.
+  Requires `--socket-group` + `shadow-test`; a stolen copy is still
+  insufficient without a matching allowlisted peer UID.
 - `SO_PEERCRED` authenticates the connecting **process**, never which
   JavaScript module produced a request. Same-UID module confusion (a hostile
   thread/module inside the issuer process) is out of scope of this gate and
@@ -83,7 +106,9 @@ nexusd --db /var/lib/nexusd/k.db \
   Mode, DSH migration, or completion authority is enabled by this setup.
 
 See `nexusd.service` in this directory for the systemd unit (uses the same
-flags with `User=nexusd`, `UMask=0077`, and `ReadWritePaths`).
+flags with `User=nexusd`, `SupplementaryGroups=nexus-issuer`, `UMask=0077`,
+`RuntimeDirectory=nexusd` + `RuntimeDirectoryMode=0750`, and `ReadWritePaths`).
+See `MULTUID-PROCEDURE.md` for the genuine multi-UID verification run.
 
 ## Creating the identities (operator steps, NOT executed by this task)
 
@@ -92,7 +117,8 @@ flags with `User=nexusd`, `UMask=0077`, and `ReadWritePaths`).
 useradd --system --no-create-home --shell /usr/sbin/nologin nexusd
 useradd --system --no-create-home --shell /usr/sbin/nologin nexus-issuer
 install -d -o nexusd -g nexusd -m 0700 /var/lib/nexusd
-install -d -o nexusd -g nexus-issuer -m 0750 /run/nexusd   # after socket-dir support lands
+install -d -o nexusd -g nexus-issuer -m 0750 /run/nexusd
+# nexusd must resolve the socket group (member via SupplementaryGroups= in nexusd.service)
 ```
 
 ## Verification required on the target host (before un-BLOCKing)

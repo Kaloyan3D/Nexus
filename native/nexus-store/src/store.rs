@@ -64,6 +64,28 @@ pub struct Store {
     incarnation: String,
 }
 
+/// Outcome of one open attempt: either a transient lock-contention BUSY
+/// (safe to retry) or a final error (fail closed at once).
+enum OpenError {
+    Busy,
+    Fatal(KernelError),
+}
+
+impl From<KernelError> for OpenError {
+    fn from(e: KernelError) -> Self {
+        OpenError::Fatal(e)
+    }
+}
+
+fn busy_or(action: &str, err: rusqlite::Error) -> OpenError {
+    match &err {
+        rusqlite::Error::SqliteFailure(e, _) if e.code == rusqlite::ErrorCode::DatabaseBusy => {
+            OpenError::Busy
+        }
+        _ => OpenError::Fatal(sqlite_fail(action, err)),
+    }
+}
+
 impl Store {
     pub fn open(path: &Path) -> KernelResult<Self> {
         if let Some(parent) = path.parent() {
@@ -71,38 +93,64 @@ impl Store {
                 std::fs::create_dir_all(parent).map_err(|e| db_fail("mkdir", e))?;
             }
         }
-        let conn = Connection::open(path).map_err(|e| sqlite_fail("open", e))?;
+        // Concurrent first-open races (WAL setup, schema init) surface as
+        // transient SQLITE_BUSY: lock-upgrade deadlocks bypass the
+        // per-connection busy_timeout. Retry those boundedly; corruption,
+        // incompatibility, and every other failure still fail closed at once.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match Self::open_once(path) {
+                Ok(store) => return Ok(store),
+                Err(OpenError::Busy) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(db_fail("open-contended", "database is locked"));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(OpenError::Fatal(e)) => return Err(e),
+            }
+        }
+    }
+
+    fn open_once(path: &Path) -> Result<Self, OpenError> {
+        let conn = Connection::open(path).map_err(|e| busy_or("open", e))?;
         conn.busy_timeout(Duration::from_millis(5000))
             .map_err(|e| sqlite_fail("busy_timeout", e))?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )
-        .map_err(|e| sqlite_fail("pragmas", e))?;
+        .map_err(|e| busy_or("pragmas", e))?;
         let check: String = conn
             .query_row("PRAGMA integrity_check", [], |r| r.get(0))
-            .map_err(|e| sqlite_fail("integrity_check", e))?;
+            .map_err(|e| busy_or("integrity_check", e))?;
         if check != "ok" {
-            return Err(KernelError::new(
+            return Err(OpenError::Fatal(KernelError::new(
                 KernelErrorCode::StoreCorrupt,
                 "kernel store integrity_check failed; failing closed",
-            ));
+            )));
         }
         conn.execute_batch(DDL_V1)
-            .map_err(|e| sqlite_fail("migrate", e))?;
+            .map_err(|e| busy_or("migrate", e))?;
         let version: Option<i64> = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
-            .map_err(|e| sqlite_fail("version", e))?;
+            .map_err(|e| busy_or("version", e))?;
+        // Concurrent openers may stamp the schema row simultaneously: INSERT OR
+        // IGNORE lets exactly one win; the re-read below converges losers with
+        // the winner instead of failing on a uniqueness race.
+        if version.is_none() {
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version, applied_at_utc) VALUES (?1, ?2)",
+                params![STORE_SCHEMA_VERSION, now_utc()],
+            )
+            .map_err(|e| busy_or("version", e))?;
+        }
+        let version: Option<i64> = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .map_err(|e| busy_or("version", e))?;
         match version {
-            None => {
-                conn.execute(
-                    "INSERT INTO schema_version (version, applied_at_utc) VALUES (?1, ?2)",
-                    params![STORE_SCHEMA_VERSION, now_utc()],
-                )
-                .map_err(|e| sqlite_fail("version", e))?;
-            }
             Some(v) if v == STORE_SCHEMA_VERSION => {}
             Some(v) => {
-                return Err(KernelError::new(
+                return Err(OpenError::Fatal(KernelError::new(
                     KernelErrorCode::StoreIncompatible,
                     [
                         "incompatible store schema version ",
@@ -110,8 +158,11 @@ impl Store {
                         "; failing closed",
                     ]
                     .concat(),
-                ));
+                )));
             }
+            // Our stamp was ignored yet no row is visible: the winner has not
+            // committed yet. Retry rather than invent a version.
+            None => return Err(OpenError::Busy),
         }
         let incarnation: Option<String> = conn
             .query_row(
@@ -120,17 +171,30 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()
-            .map_err(|e| sqlite_fail("identity", e))?;
+            .map_err(|e| busy_or("identity", e))?;
         let incarnation = match incarnation {
             Some(s) => s,
             None => {
+                // Same stamp race as schema_version (mirrors the issuance_key
+                // pattern below): exactly one opener wins; losers adopt the
+                // winner's incarnation instead of failing on uniqueness.
                 let id = uuid::Uuid::new_v4().to_string();
-                conn.execute(
-                    "INSERT INTO store_meta (key, value) VALUES ('store_incarnation', ?1)",
-                    params![id],
-                )
-                .map_err(|e| sqlite_fail("identity", e))?;
-                id
+                let applied = conn
+                    .execute(
+                        "INSERT OR IGNORE INTO store_meta (key, value) VALUES ('store_incarnation', ?1)",
+                        params![id],
+                    )
+                    .map_err(|e| busy_or("identity", e))?;
+                if applied == 1 {
+                    id
+                } else {
+                    conn.query_row(
+                        "SELECT value FROM store_meta WHERE key = 'store_incarnation'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| busy_or("identity", e))?
+                }
             }
         };
         Ok(Self { conn, incarnation })

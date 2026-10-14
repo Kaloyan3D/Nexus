@@ -37,6 +37,7 @@ pub struct DaemonProc {
     pub db: PathBuf,
     pub witness: PathBuf,
     pub cap: PathBuf,
+    pub handoff: Option<PathBuf>,
 }
 
 pub fn spawn_daemon(trust: &str, with_witness: bool) -> DaemonProc {
@@ -102,6 +103,113 @@ pub fn spawn_daemon_opts(trust: &str, with_witness: bool, extra_args: &[&str]) -
         db,
         witness,
         cap,
+        handoff: None,
+    }
+}
+
+/// Own gid for same-UID shared-mode provisioning (the operator group on a
+/// real host; here our own group stands in for the issuer group bytes).
+pub fn own_gid() -> u32 {
+    unsafe { libc::getegid() }
+}
+
+/// Spawn in closure S2 production-sharing layout: DataRoot 0700 plus a
+/// SEPARATE socket directory 0750 group-owned, with `--socket-group`,
+/// `--allowed-uids me`, and `--cap-handoff` inside the socket directory.
+/// Refusal-path tests spawn this then re-exec the daemon themselves.
+pub fn spawn_daemon_shared_opts(
+    trust: &str,
+    with_witness: bool,
+    extra_args: &[&str],
+) -> DaemonProc {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dataroot = dir.path().join("dataroot");
+    std::fs::create_dir_all(&dataroot).expect("dataroot mkdir");
+    std::fs::set_permissions(&dataroot, std::fs::Permissions::from_mode(0o700))
+        .expect("provision 0700 dataroot");
+    let sockdir = dir.path().join("sockdir");
+    std::fs::create_dir_all(&sockdir).expect("sockdir mkdir");
+    let gid = own_gid();
+    let c = std::ffi::CString::new(sockdir.as_os_str().as_bytes()).expect("cstr");
+    assert_eq!(
+        unsafe { libc::chown(c.as_ptr(), u32::MAX, gid) },
+        0,
+        "test chown"
+    );
+    std::fs::set_permissions(&sockdir, std::fs::Permissions::from_mode(0o750))
+        .expect("provision 0750 sockdir");
+    let db = dataroot.join("k.db");
+    let witness = dataroot.join("k.witness.db");
+    let socket = sockdir.join("n.sock");
+    let cap = dataroot.join("issuer.cap");
+    let handoff = sockdir.join("issuer.handoff");
+    let me = unsafe { libc::geteuid() }.to_string();
+    let group = gid.to_string();
+    let mut full: Vec<&str> = vec![
+        "--allowed-uids",
+        me.as_str(),
+        "--socket-group",
+        group.as_str(),
+        "--cap-handoff",
+    ];
+    let handoff_str = handoff.to_string_lossy().into_owned();
+    let mut owned = vec![handoff_str];
+    for a in extra_args {
+        owned.push(a.to_string());
+    }
+    full.push(&owned[0]);
+    for a in owned.iter().skip(1) {
+        full.push(a);
+    }
+    let mut cmd = Command::new(nexusd_bin());
+    cmd.arg("--db")
+        .arg(&db)
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--cap")
+        .arg(&cap)
+        .arg("--trust-mode")
+        .arg(trust)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if with_witness {
+        cmd.arg("--witness").arg(&witness);
+    }
+    for a in full {
+        cmd.arg(a);
+    }
+    let mut child = cmd.spawn().expect("spawn nexusd");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Ok(resp) = raw_request(
+            &socket,
+            r#"{"protocol":1,"id":"ready-poll","cmd":"health","params":{}}"#,
+        ) {
+            if resp.get("ok") == Some(&serde_json::Value::Bool(true)) {
+                break;
+            }
+        }
+        if Instant::now() > deadline {
+            terminate(&mut child);
+            panic!("shared daemon never became ready");
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => panic!("shared daemon exited early: {status}"),
+            Ok(None) => {}
+            Err(e) => panic!("wait failed: {e}"),
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    DaemonProc {
+        _dir: dir,
+        child,
+        socket,
+        db,
+        witness,
+        cap,
+        handoff: Some(handoff),
     }
 }
 
