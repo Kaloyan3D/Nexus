@@ -1,7 +1,7 @@
 //! Schema migrations and durability pragmas.
 //! journal_mode=WAL, synchronous=FULL, foreign_keys=ON, busy_timeout=5000.
 
-pub const STORE_SCHEMA_VERSION: i64 = 1;
+pub const STORE_SCHEMA_VERSION: i64 = 2;
 
 pub const DDL_V1: &str = "
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at_utc TEXT NOT NULL);
@@ -48,3 +48,21 @@ CREATE INDEX IF NOT EXISTS idx_reservations_generation ON dispatch_reservations 
 ";
 
 pub const WITNESS_SCHEMA_VERSION: i64 = 2;
+
+/// A2.3 durable Controller intent + sealed V2 extensions (migration v2).
+/// Applied idempotently on every store open; preserves all v1 state.
+/// v1 stores migrate forward (version row 1 -> 2); unknown future versions
+/// still refuse `store-incompatible` in `Store::open_once`.
+///
+/// `controller_intents` holds one published execution authority per
+/// command: the canonical bundle plus its issuance-key seal and a small
+/// explicit lifecycle (`published` -> `executed` | `cancelled`). No silent
+/// transitions exist: execution consumes the intent exactly once, and
+/// fencing is terminal. `sealed_extensions` carries Registry-issued V2
+/// extension bytes under their own digest identity, sealed with the same
+/// issuance key as V1 resolutions (same trust root, separate table so the
+/// two vocabularies can never collide).
+pub const DDL_V2: &str = "
+CREATE TABLE IF NOT EXISTS sealed_extensions (extension_digest TEXT PRIMARY KEY, extension_json TEXT NOT NULL, seal_hex TEXT NOT NULL, created_at_utc TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS controller_intents (command_id TEXT PRIMARY KEY, intent_json TEXT NOT NULL, seal_hex TEXT NOT NULL, state TEXT NOT NULL, published_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL);
+";

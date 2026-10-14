@@ -4,9 +4,11 @@
 //! dispatch authorization path always refuses with dispatch-disabled.
 pub mod accept;
 pub mod bridge;
+pub mod dispatch;
 pub mod readiness;
 
 pub use accept::{AcceptRequest, GenerationState};
+pub use dispatch::{NativeDispatchGrant, NativeDispatchRequest, PublishedIntent, SCOPE_MOCK_E2E};
 use nexus_contracts::{
     generation_key, CommandReceiptV1, GenerationLeaseV1, KernelError, KernelErrorCode,
     KernelResult, RegistryResolutionV1, CONTRACT_SCHEMA_VERSION,

@@ -127,7 +127,7 @@ function sendOneRequest(socketPath, frame, timeoutMs) {
   });
 }
 
-const PRIVILEGED = { acquire: true, seal: true, accept: true };
+const PRIVILEGED = { acquire: true, seal: true, accept: true, 'seal-extension': true, 'intent-publish': true, 'intent-fence': true, 'dispatch-authorize': true };
 
 /**
  * Invoke one daemon IPC command. Mirrors `invokeBridge(subcommand, request,
@@ -139,7 +139,7 @@ async function invokeDaemonBridge(subcommand, request, options) {
   const o = options || {};
   const socketPath = typeof o.daemonSocket === 'string' && o.daemonSocket !== '' ? o.daemonSocket : null;
   const timeoutMs = Number.isInteger(o.timeoutMs) && o.timeoutMs > 0 ? o.timeoutMs : DEFAULT_TIMEOUT_MS;
-  const allowed = { acquire: true, seal: true, accept: true, receipt: true, journal: true, digest: true, health: true, status: true, readiness: true };
+  const allowed = { acquire: true, seal: true, accept: true, receipt: true, journal: true, digest: true, health: true, status: true, readiness: true, 'seal-extension': true, 'intent-publish': true, 'intent-fence': true, 'dispatch-authorize': true };
   if (!allowed[subcommand]) return failTransport('bad-subcommand', 'unknown daemon subcommand');
   if (!socketPath) return failTransport('bridge-misconfigured', 'daemonSocket is required for daemon transport');
   let req;

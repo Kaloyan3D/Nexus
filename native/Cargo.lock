@@ -270,6 +270,7 @@ dependencies = [
  "libc",
  "nexus-contracts",
  "nexus-kernel",
+ "nexus-model",
  "nexus-store",
  "rusqlite",
  "serde",

@@ -255,7 +255,16 @@ pub fn parse_frame(frame: &str) -> Result<IpcRequest, (String, &'static str, Str
 /// True for commands that mutate authoritative state and therefore require
 /// issuer authorization (or explicit refusal when untrusted).
 pub fn is_privileged(cmd: &str) -> bool {
-    matches!(cmd, "acquire" | "seal" | "accept")
+    matches!(
+        cmd,
+        "acquire"
+            | "seal"
+            | "accept"
+            | "seal-extension"
+            | "intent-publish"
+            | "intent-fence"
+            | "dispatch-authorize"
+    )
 }
 
 /// True for the read-only surface. Anything else is unknown and fails closed.

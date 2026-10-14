@@ -3,7 +3,7 @@
 //! either the full winner state or nothing, then classify idempotent vs
 //! conflict by re-reading inside the contention window.
 
-use crate::schema::{DDL_V1, STORE_SCHEMA_VERSION};
+use crate::schema::{DDL_V1, DDL_V2, STORE_SCHEMA_VERSION};
 use nexus_contracts::{generation_key, KernelError, KernelErrorCode, KernelResult};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::io::Read;
@@ -130,6 +130,7 @@ impl Store {
             )));
         }
         conn.execute_batch(DDL_V1)
+            .and_then(|_| conn.execute_batch(DDL_V2))
             .map_err(|e| busy_or("migrate", e))?;
         let version: Option<i64> = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
@@ -149,6 +150,17 @@ impl Store {
             .map_err(|e| busy_or("version", e))?;
         match version {
             Some(v) if v == STORE_SCHEMA_VERSION => {}
+            Some(1) => {
+                // A2.3 forward migration: v1 rows are preserved untouched;
+                // only the version row advances (new tables arrived via
+                // CREATE IF NOT EXISTS above). Concurrent migrators issue
+                // the same idempotent UPDATE.
+                conn.execute(
+                    "UPDATE schema_version SET version = ?1, applied_at_utc = ?2 WHERE version = 1",
+                    params![STORE_SCHEMA_VERSION, now_utc()],
+                )
+                .map_err(|e| busy_or("migrate", e))?;
+            }
             Some(v) => {
                 return Err(OpenError::Fatal(KernelError::new(
                     KernelErrorCode::StoreIncompatible,
@@ -350,6 +362,163 @@ impl Store {
             .optional()
             .map_err(|e| db_fail("read", e))?;
         Ok(row)
+    }
+
+    pub fn seal_extension(
+        &mut self,
+        extension_digest: &str,
+        extension_json: &str,
+        seal_hex: &str,
+    ) -> KernelResult<SealOutcome> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| db_fail("begin", e))?;
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT extension_json, seal_hex FROM sealed_extensions WHERE extension_digest = ?1",
+                params![extension_digest],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| db_fail("read", e))?;
+        match existing {
+            None => {
+                tx.execute("INSERT INTO sealed_extensions (extension_digest, extension_json, seal_hex, created_at_utc) VALUES (?1, ?2, ?3, ?4)", params![extension_digest, extension_json, seal_hex, now_utc()]).map_err(|e| db_fail("seal", e))?;
+                tx.commit().map_err(|e| db_fail("commit", e))?;
+                Ok(SealOutcome::Created)
+            }
+            Some((stored_json, stored_seal)) => {
+                let same = stored_seal == seal_hex && canonical_equal(&stored_json, extension_json);
+                if same {
+                    Ok(SealOutcome::Identical)
+                } else {
+                    Err(KernelError::new(
+                        KernelErrorCode::IssuanceConflict,
+                        "conflicting sealed extension under the same digest identity",
+                    ))
+                }
+            }
+        }
+    }
+
+    pub fn fetch_extension(
+        &self,
+        extension_digest: &str,
+    ) -> KernelResult<Option<(String, String)>> {
+        let row: Option<(String, String)> = self
+            .conn
+            .query_row(
+                "SELECT extension_json, seal_hex FROM sealed_extensions WHERE extension_digest = ?1",
+                params![extension_digest],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| db_fail("read", e))?;
+        Ok(row)
+    }
+
+    pub fn publish_intent(
+        &mut self,
+        command_id: &str,
+        intent_json: &str,
+        seal_hex: &str,
+    ) -> KernelResult<SealOutcome> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| db_fail("begin", e))?;
+        let existing: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT intent_json, seal_hex, state FROM controller_intents WHERE command_id = ?1",
+                params![command_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| db_fail("read", e))?;
+        match existing {
+            None => {
+                tx.execute("INSERT INTO controller_intents (command_id, intent_json, seal_hex, state, published_at_utc, updated_at_utc) VALUES (?1, ?2, ?3, ?4, ?5, ?5)", params![command_id, intent_json, seal_hex, "published", now_utc()]).map_err(|e| db_fail("publish", e))?;
+                tx.commit().map_err(|e| db_fail("commit", e))?;
+                Ok(SealOutcome::Created)
+            }
+            Some((stored_json, stored_seal, state)) => {
+                let same = state == "published"
+                    && stored_seal == seal_hex
+                    && canonical_equal(&stored_json, intent_json);
+                if same {
+                    Ok(SealOutcome::Identical)
+                } else {
+                    Err(KernelError::new(
+                        KernelErrorCode::CommandConflict,
+                        "conflicting or already-consumed intent under this command identity",
+                    ))
+                }
+            }
+        }
+    }
+
+    pub fn fetch_intent(&self, command_id: &str) -> KernelResult<Option<(String, String, String)>> {
+        let row: Option<(String, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT intent_json, seal_hex, state FROM controller_intents WHERE command_id = ?1",
+                params![command_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| db_fail("read", e))?;
+        Ok(row)
+    }
+
+    fn transition_intent(&mut self, command_id: &str, from: &str, to: &str) -> KernelResult<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| db_fail("begin", e))?;
+        let changed = tx
+            .execute(
+                "UPDATE controller_intents SET state = ?1, updated_at_utc = ?2 WHERE command_id = ?3 AND state = ?4",
+                params![to, now_utc(), command_id, from],
+            )
+            .map_err(|e| db_fail("transition", e))?;
+        if changed == 1 {
+            tx.commit().map_err(|e| db_fail("commit", e))?;
+            return Ok(());
+        }
+        let state: Option<String> = tx
+            .query_row(
+                "SELECT state FROM controller_intents WHERE command_id = ?1",
+                params![command_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| db_fail("read", e))?;
+        match state {
+            None => Err(KernelError::new(
+                KernelErrorCode::IntentUnknown,
+                "no published intent for this command identity",
+            )),
+            Some(s) => Err(KernelError::new(
+                KernelErrorCode::CommandConflict,
+                ["intent is ", &s, "; transition refused"].concat(),
+            )),
+        }
+    }
+
+    pub fn fence_intent(&mut self, command_id: &str) -> KernelResult<()> {
+        match self.transition_intent(command_id, "published", "cancelled") {
+            Ok(()) => Ok(()),
+            Err(e) if e.code == KernelErrorCode::IntentUnknown => Err(e),
+            Err(_) => Err(KernelError::new(
+                KernelErrorCode::IntentFenced,
+                "intent is not published; fencing refused",
+            )),
+        }
+    }
+
+    pub fn mark_intent_executed(&mut self, command_id: &str) -> KernelResult<()> {
+        self.transition_intent(command_id, "published", "executed")
     }
 }
 

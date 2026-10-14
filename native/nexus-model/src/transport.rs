@@ -272,6 +272,16 @@ impl Transport for HttpSseTransport {
             ))
         })?;
         let prepared = request.prepared();
+        // No TLS stack exists in this offline transport: an https origin
+        // would receive plaintext (including the credential header) on the
+        // TLS port. Refuse before any socket exists; https termination
+        // belongs to the future live-readiness gate, not to this path.
+        if prepared.protocol != "http" {
+            return Err(TransportError::refused(ModelError::new(
+                ModelErrorCode::TransportRefused,
+                "https endpoints need the TLS termination gate (unimplemented offline); refusing plaintext",
+            )));
+        }
         // Transport-level origin gate (defense in depth alongside the
         // runtime binding check): refused before any socket exists.
         self.binding

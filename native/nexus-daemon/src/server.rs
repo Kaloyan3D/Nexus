@@ -465,6 +465,144 @@ fn do_seal(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     }
 }
 
+fn do_seal_extension(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    let extension = match req.params.get("extension") {
+        Some(v) if v.is_object() => v.clone(),
+        _ => {
+            return fail(
+                &req.id,
+                codes::BAD_REQUEST,
+                "bad-request: extension must be an object",
+            )
+        }
+    };
+    let mut kernel = match daemon.kernel.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                codes::STORE_UNHEALTHY,
+                "kernel mutex is poisoned; failing closed",
+            );
+        }
+    };
+    match kernel.seal_extension(&extension) {
+        Ok(digest) => ok(&req.id, serde_json::json!({ "extensionDigest": digest })),
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
+fn do_intent_publish(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    let intent = match req.params.get("intent") {
+        Some(v) if v.is_object() => v.clone(),
+        _ => {
+            return fail(
+                &req.id,
+                codes::BAD_REQUEST,
+                "bad-request: intent must be an object",
+            )
+        }
+    };
+    let mut kernel = match daemon.kernel.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                codes::STORE_UNHEALTHY,
+                "kernel mutex is poisoned; failing closed",
+            );
+        }
+    };
+    match kernel.publish_intent(&intent) {
+        Ok(published) => ok(
+            &req.id,
+            serde_json::json!({ "commandId": published.command_id }),
+        ),
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
+fn do_intent_fence(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    let command_id = match get_string(&req.params, "commandId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let mut kernel = match daemon.kernel.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                codes::STORE_UNHEALTHY,
+                "kernel mutex is poisoned; failing closed",
+            );
+        }
+    };
+    match kernel.fence_intent(&command_id) {
+        Ok(()) => ok(&req.id, serde_json::json!({})),
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
+fn do_dispatch_authorize(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    let command_id = match get_string(&req.params, "commandId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let request_digest = match get_string(&req.params, "requestDigest") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let scope = match get_string(&req.params, "scope") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let endpoint_origin = match get_string(&req.params, "endpointOrigin") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let credential_ref = match get_string(&req.params, "credentialRef") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let mut kernel = match daemon.kernel.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                codes::STORE_UNHEALTHY,
+                "kernel mutex is poisoned; failing closed",
+            );
+        }
+    };
+    let auth_req = nexus_kernel::NativeDispatchRequest {
+        command_id,
+        request_digest,
+        scope,
+        endpoint_origin,
+        credential_ref,
+    };
+    match kernel.authorize_native_dispatch(&auth_req) {
+        Ok(grant) => ok(
+            &req.id,
+            serde_json::json!({
+                "grant": {
+                    "commandId": grant.command_id,
+                    "attemptId": grant.attempt_id,
+                    "requestDigest": grant.request_digest,
+                    "endpointOrigin": grant.endpoint_origin,
+                    "scope": grant.scope,
+                    "grantedAtUtc": grant.granted_at_utc,
+                }
+            }),
+        ),
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
 fn do_accept(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     let intent_value = match get_object(&req.params, "intent") {
         Ok(v) => v,
@@ -772,6 +910,10 @@ pub fn dispatch(
         }
         let response = match req.cmd.as_str() {
             "acquire" => do_acquire(daemon, req),
+            "seal-extension" => do_seal_extension(daemon, req),
+            "intent-publish" => do_intent_publish(daemon, req),
+            "intent-fence" => do_intent_fence(daemon, req),
+            "dispatch-authorize" => do_dispatch_authorize(daemon, req),
             "seal" => do_seal(daemon, req),
             "accept" => do_accept(daemon, req),
             _ => unreachable!("privileged set is fixed"),

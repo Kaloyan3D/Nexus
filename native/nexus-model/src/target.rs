@@ -81,9 +81,14 @@ pub struct ExecutionTargetV2 {
     pub capabilities: Vec<String>,
     /// Authoritative context window in tokens (> 0).
     pub context_limit_tokens: u64,
+    /// Authoritative output limit in tokens (> 0).
+    pub output_limit_tokens: u64,
     /// Connection binding; must equal `core.connection_id`. The credential
     /// itself never appears here (see `transport::Credential`).
     pub connection_binding: String,
+    /// Opaque credential reference (never a secret value). Binds which
+    /// credential the transport may load at its trusted boundary.
+    pub credential_ref: String,
 }
 
 impl ExecutionTargetV2 {
@@ -151,6 +156,12 @@ impl ExecutionTargetV2 {
         if self.connection_binding.trim().is_empty() {
             return Err(incomplete("connection binding"));
         }
+        if self.output_limit_tokens == 0 {
+            return Err(incomplete("output limit (tokens)"));
+        }
+        if self.credential_ref.trim().is_empty() {
+            return Err(incomplete("credential reference"));
+        }
         if self.connection_binding != self.core.connection_id {
             return Err(ModelError::new(
                 ModelErrorCode::WrongTarget,
@@ -178,7 +189,9 @@ impl ExecutionTargetV2 {
             "session": { "sessionId": self.session.session_id },
             "capabilities": self.capabilities,
             "contextLimitTokens": self.context_limit_tokens,
+            "outputLimitTokens": self.output_limit_tokens,
             "connectionBinding": self.connection_binding,
+            "credentialRef": self.credential_ref,
         });
         nexus_contracts::canonical_json(&value)
     }
@@ -186,6 +199,124 @@ impl ExecutionTargetV2 {
     /// Digest binding the extension bytes.
     pub fn extension_digest(&self) -> String {
         nexus_contracts::sha256_hex(&self.extension_canonical())
+    }
+
+    /// Build the authoritative extension from Registry-issued JSON bound to
+    /// an already-typed sealed core. The JSON contract is exact: unknown
+    /// keys are refused (they would silently split the JS and Rust digests),
+    /// every field is type-checked, and the result passes
+    /// `validate_executable` before it is returned. The core itself is
+    /// caller-provided from the sealed `RegistryResolutionV1`.
+    pub fn from_extension_json(
+        core: ExecutionTargetCoreV1,
+        ext: &serde_json::Value,
+    ) -> Result<Self, ModelError> {
+        let obj = ext
+            .as_object()
+            .ok_or_else(|| incomplete("extension (object)"))?;
+        const TOP: &[&str] = &[
+            "extensionVersion",
+            "endpoint",
+            "remoteModelIdConfirmed",
+            "reasoningEffort",
+            "billing",
+            "session",
+            "capabilities",
+            "contextLimitTokens",
+            "outputLimitTokens",
+            "connectionBinding",
+            "credentialRef",
+        ];
+        for key in obj.keys() {
+            if !TOP.contains(&key.as_str()) {
+                return Err(ModelError::new(
+                    ModelErrorCode::TargetIncomplete,
+                    format!("extension carries unknown field {key}"),
+                ));
+            }
+        }
+        let str_field = |key: &str| -> Result<String, ModelError> {
+            obj.get(key)
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .ok_or_else(|| incomplete(key))
+        };
+        let u64_field = |key: &str| -> Result<u64, ModelError> {
+            obj.get(key)
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| incomplete(key))
+        };
+        let sub = |key: &str| -> Result<&serde_json::Map<String, serde_json::Value>, ModelError> {
+            obj.get(key)
+                .and_then(|v| v.as_object())
+                .ok_or_else(|| incomplete(key))
+        };
+        let sub_str = |map: &serde_json::Map<String, serde_json::Value>,
+                       key: &str,
+                       path: &str|
+         -> Result<String, ModelError> {
+            map.get(key)
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .ok_or_else(|| incomplete(path))
+        };
+        let endpoint_map = sub("endpoint")?;
+        for key in endpoint_map.keys() {
+            if !["protocol", "origin", "path", "method", "localLoopback"].contains(&key.as_str()) {
+                return Err(ModelError::new(
+                    ModelErrorCode::TargetIncomplete,
+                    format!("endpoint carries unknown field {key}"),
+                ));
+            }
+        }
+        let endpoint = AuthoritativeEndpoint {
+            protocol: sub_str(endpoint_map, "protocol", "endpoint.protocol")?,
+            origin: sub_str(endpoint_map, "origin", "endpoint.origin")?,
+            path: sub_str(endpoint_map, "path", "endpoint.path")?,
+            method: sub_str(endpoint_map, "method", "endpoint.method")?,
+            local_loopback: endpoint_map
+                .get("localLoopback")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| incomplete("endpoint.localLoopback"))?,
+        };
+        let billing_map = sub("billing")?;
+        let billing = BillingProvenance {
+            tier: sub_str(billing_map, "tier", "billing.tier")?,
+            data_use: sub_str(billing_map, "dataUse", "billing.dataUse")?,
+        };
+        let session_map = sub("session")?;
+        let session = SessionBinding {
+            session_id: sub_str(session_map, "sessionId", "session.sessionId")?,
+        };
+        let capabilities: Vec<String> = obj
+            .get("capabilities")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|v| v.as_str().unwrap_or("").to_owned())
+                    .collect()
+            })
+            .ok_or_else(|| incomplete("capabilities"))?;
+        let version = obj
+            .get("extensionVersion")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| incomplete("extensionVersion"))? as u32;
+        let target = Self {
+            core,
+            extension_version: version,
+            endpoint,
+            remote_model_id_confirmed: str_field("remoteModelIdConfirmed")?,
+            reasoning_effort: str_field("reasoningEffort")?,
+            billing,
+            session,
+            capabilities,
+            context_limit_tokens: u64_field("contextLimitTokens")?,
+            output_limit_tokens: u64_field("outputLimitTokens")?,
+            connection_binding: str_field("connectionBinding")?,
+            credential_ref: str_field("credentialRef")?,
+        };
+        target.validate_executable()?;
+        Ok(target)
     }
 
     /// Deterministic test target bound to a loopback mock origin.
@@ -231,7 +362,9 @@ impl ExecutionTargetV2 {
             },
             capabilities: vec!["text".to_owned()],
             context_limit_tokens: 8192,
+            output_limit_tokens: 1024,
             connection_binding: "connection-a".to_owned(),
+            credential_ref: "credential://connections/connection-a".to_owned(),
         }
     }
 }
@@ -240,7 +373,7 @@ fn is_wire_safe(value: &str) -> bool {
     value.bytes().all(|b| b.is_ascii_graphic())
 }
 
-fn incomplete(field: &str) -> ModelError {
+pub(crate) fn incomplete(field: &str) -> ModelError {
     ModelError::new(
         ModelErrorCode::TargetIncomplete,
         format!("mandatory authoritative target field {field} is missing"),

@@ -202,6 +202,47 @@ fn invalid_utf8_body_fails_closed_without_panic() {
 }
 
 #[test]
+fn https_without_tls_terminator_is_refused_before_connect() {
+    // The offline transport has no TLS stack: sending plaintext (including
+    // the credential header) to a TLS port would leak secrets. Refuse
+    // before any socket exists; https belongs to the live-readiness gate.
+    let target = target_for("https://127.0.0.1:9");
+    let (issued, snapshot) = issued_for(&target);
+    let pin = pin_for(&target, &issued, &snapshot);
+    let transport = HttpSseTransport::new(TransportBinding::new("https://127.0.0.1:9"));
+    let runtime = OfflineModelRuntime::new(
+        transport,
+        TransportBinding::new("https://127.0.0.1:9"),
+        TransportLimits::default(),
+    );
+    let prepared = runtime
+        .prepare(
+            &pin,
+            &issued,
+            &snapshot,
+            &target,
+            &ModelRequest::text_only("user", "hi"),
+        )
+        .expect("prepare");
+    let attested = runtime
+        .attest(&pin, &issued, &snapshot, &target, prepared)
+        .expect("attest");
+    let mut attempt = AttemptTracker::new("attempt-http");
+    let mut store = AttemptStore::new();
+    let err = runtime
+        .dispatch(
+            &mut attempt,
+            &mut store,
+            &attested,
+            &credential(),
+            &CancellationToken::new(),
+        )
+        .expect_err("https refused");
+    assert_eq!(err.code, ModelErrorCode::TransportRefused);
+    assert_eq!(attempt.state(), AttemptState::NotSent);
+}
+
+#[test]
 fn structural_attestation_is_not_production_authorization() {
     // A fully self-consistent but Registry-unblessed chain
     // (attacker-chosen model, matching digests, bound pin) attests

@@ -28,6 +28,9 @@ pub enum KernelErrorCode {
     StoreError,
     ReservationConflict,
     ReservationExpired,
+    IntentUnknown,
+    IntentFenced,
+    ScopeRefused,
 }
 
 impl KernelErrorCode {
@@ -56,6 +59,9 @@ impl KernelErrorCode {
             Self::StoreError => "store-error",
             Self::ReservationConflict => "reservation-conflict",
             Self::ReservationExpired => "reservation-expired",
+            Self::IntentUnknown => "intent-unknown",
+            Self::IntentFenced => "intent-fenced",
+            Self::ScopeRefused => "scope-refused",
         }
     }
 }

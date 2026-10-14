@@ -103,3 +103,48 @@ fn permission_denied_is_operational_error() {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(code, KernelErrorCode::StoreError);
 }
+
+#[test]
+fn v1_database_migrates_to_v2_preserving_seals() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(nexus_store::schema::DDL_V1).unwrap();
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at_utc) VALUES (1, ?1)",
+            ["test"],
+        )
+        .unwrap();
+        let key = "ab".repeat(32);
+        conn.execute(
+            "INSERT INTO store_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["issuance_key", key],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sealed_issuances (issuance_id, issued_json, seal_hex, created_at_utc) VALUES (?1, ?2, ?3, ?4)",
+            ["id1", "{\"a\":1}", "seal1", "t"],
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&path).unwrap();
+    let row = store
+        .fetch_sealed("id1")
+        .unwrap()
+        .expect("v1 seal survives migration");
+    assert_eq!(row.0, "{\"a\":1}");
+    assert_eq!(row.1, "seal1");
+    store
+        .seal_extension(&"dd".repeat(32), "{\"e\":1}", "s1")
+        .expect("v2 seals work post-migration");
+    store
+        .publish_intent("cmd-1", "{\"c\":1}", "s2")
+        .expect("v2 intents work post-migration");
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 2, "version row advances exactly once");
+}
