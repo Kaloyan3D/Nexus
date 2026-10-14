@@ -24,6 +24,10 @@ fn usage() -> i32 {
 }
 
 fn main() {
+    // Owner-only file creation (SQLite store/WAL): group/other bits removed.
+    unsafe {
+        libc::umask(0o077);
+    }
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("help");
     let db = flag(&args, "--db");

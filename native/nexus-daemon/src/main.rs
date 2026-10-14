@@ -15,7 +15,9 @@
 
 use nexus_daemon::auth::{read_cap_file, write_cap_file};
 use nexus_daemon::protocol::codes;
-use nexus_daemon::server::{log_line, serve, Daemon, Lifecycle, TrustMode};
+use nexus_daemon::server::{
+    log_line, parse_allowed_uids, serve, verify_protected_dir, Daemon, Lifecycle, TrustMode,
+};
 use nexus_daemon::DaemonLayout;
 use std::io::Write;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -46,8 +48,11 @@ fn usage() -> i32 {
     println!("usage:");
     println!("  nexusd --db PATH --socket PATH [--witness PATH]");
     println!("         [--trust-mode readonly|shadow-test] [--cap PATH]");
+    println!("         [--allowed-uids UID[,UID...]]");
     println!("Trust modes: readonly (default, privileged mutations disabled) |");
     println!("  shadow-test (explicit opt-in, per-request issuer authentication).");
+    println!("--allowed-uids gates privileged commands by peer UID (SO_PEERCRED);");
+    println!("  without it, same-UID peers can use a stolen capability (BLOCKED).");
     println!("A1.3 performs no external effects; dispatch is disabled.");
     0
 }
@@ -109,8 +114,27 @@ fn run(args: &[String]) -> i32 {
             return 2;
         }
     };
+    // A2.1: restrictive creation mask FIRST, so every file this process
+    // creates (SQLite store/WAL, cap file, socket) is owner-only even if a
+    // later chmod is missed. 0077 removes all group/other bits.
+    unsafe {
+        libc::umask(0o077);
+    }
     let witness = flag(args, "--witness");
     let cap_flag = flag(args, "--cap");
+    // A2.1 transport gate: explicit UID allowlist for privileged commands.
+    // Absence preserves the documented same-UID limitation (BLOCKED for
+    // production); presence is enforced per-connection via SO_PEERCRED.
+    let allowed_uids = match flag_str(args, "--allowed-uids") {
+        Some(spec) => match parse_allowed_uids(&spec) {
+            Ok(list) => Some(list),
+            Err(e) => {
+                eprintln!("{e}");
+                return 2;
+            }
+        },
+        None => None,
+    };
     let trust_mode = match flag_str(args, "--trust-mode") {
         Some(s) => match TrustMode::parse(&s) {
             Ok(m) => m,
@@ -129,6 +153,24 @@ fn run(args: &[String]) -> i32 {
     );
     if let Err(e) = std::fs::create_dir_all(&layout.dir) {
         return fatal("store-error", &format!("dataroot unavailable: {e}"));
+    }
+    // A2.1 fail-closed hosting checks: the DataRoot (and a custom socket
+    // parent outside it) must be owned by our euid with no group/other
+    // bits, or the daemon refuses to start -- never serves from permissive
+    // directories. umask above makes fresh directories 0700; this check
+    // catches pre-existing permissive ones.
+    if let Err(e) = verify_protected_dir(&layout.dir, "dataroot") {
+        return fatal("insecure-dataroot", &e);
+    }
+    if let Some(socket_parent) = socket_path.parent() {
+        if !socket_parent.as_os_str().is_empty() && socket_parent != layout.dir {
+            if std::fs::create_dir_all(socket_parent).is_err() {
+                return fatal("store-error", "socket directory unavailable");
+            }
+            if let Err(e) = verify_protected_dir(socket_parent, "socket") {
+                return fatal("insecure-dataroot", &e);
+            }
+        }
     }
     // Single ownership: non-blocking exclusive lock for the daemon lifetime.
     // A second daemon (or any holder) makes this fail closed here.
@@ -202,6 +244,7 @@ fn run(args: &[String]) -> i32 {
         kernel: Mutex::new(kernel),
         trust_mode,
         auth,
+        allowed_uids,
         lifecycle: Mutex::new(Lifecycle::Starting),
         counters: Default::default(),
         reconcile_latch: Mutex::new(None),

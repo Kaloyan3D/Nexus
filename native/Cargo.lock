@@ -285,6 +285,7 @@ dependencies = [
  "fs2",
  "hex",
  "hmac",
+ "libc",
  "nexus-contracts",
  "nexus-store",
  "rusqlite",

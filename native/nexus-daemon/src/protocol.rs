@@ -53,6 +53,7 @@ pub mod codes {
     pub const UNKNOWN_COMMAND: &str = "unknown-command";
     pub const PRIVILEGED_DISABLED: &str = "privileged-disabled";
     pub const ISSUER_UNTRUSTED: &str = "issuer-untrusted";
+    pub const PEER_UNAUTHORIZED: &str = "peer-unauthorized";
     pub const REPLAY_REJECTED: &str = "replay-rejected";
     pub const REPLAY_CACHE_EXHAUSTED: &str = "replay-cache-exhausted";
     pub const DAEMON_ALREADY_RUNNING: &str = "daemon-already-running";

@@ -1,0 +1,26 @@
+# systemd unit for nexusd (A2.1 shadow-only, execution disabled).
+#
+# Install only on the target host after creating the service identities
+# (see SETUP.md). This file is configuration, not an enabled service here.
+[Unit]
+Description=nexusd native kernel daemon (shadow-only, no dispatch)
+After=network.target
+
+[Service]
+Type=simple
+User=nexusd
+Group=nexusd
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/nexusd /run/nexusd
+ExecStart=/usr/local/bin/nexusd --db /var/lib/nexusd/k.db --witness /var/lib/nexusd/k.witness.db --socket /run/nexusd/n.sock --cap /var/lib/nexusd/issuer.cap --trust-mode shadow-test --allowed-uids ISSUER_UID_HERE
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

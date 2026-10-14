@@ -40,7 +40,18 @@ pub struct DaemonProc {
 }
 
 pub fn spawn_daemon(trust: &str, with_witness: bool) -> DaemonProc {
+    spawn_daemon_opts(trust, with_witness, &[])
+}
+
+/// Spawn with extra daemon argv entries (e.g. `--allowed-uids`). The temp
+/// DataRoot is provisioned owner-only (0700), modeling the deployment
+/// requirement the daemon enforces at startup; tests for the refusal path
+/// chmod the directory afterwards instead.
+pub fn spawn_daemon_opts(trust: &str, with_witness: bool, extra_args: &[&str]) -> DaemonProc {
+    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("provision 0700 dataroot");
     let db = dir.path().join("k.db");
     let witness = dir.path().join("k.witness.db");
     let socket = dir.path().join("n.sock");
@@ -58,6 +69,9 @@ pub fn spawn_daemon(trust: &str, with_witness: bool) -> DaemonProc {
         .stderr(Stdio::piped());
     if with_witness {
         cmd.arg("--witness").arg(&witness);
+    }
+    for a in extra_args {
+        cmd.arg(a);
     }
     let mut child = cmd.spawn().expect("spawn nexusd");
     let deadline = Instant::now() + Duration::from_secs(15);

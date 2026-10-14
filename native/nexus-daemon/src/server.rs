@@ -17,6 +17,7 @@ use crate::protocol::{
 use nexus_kernel::bridge;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -82,6 +83,13 @@ pub struct Daemon {
     pub kernel: Mutex<nexus_kernel::Kernel>,
     pub trust_mode: TrustMode,
     pub auth: Option<Arc<IssuerAuth>>,
+    /// A2.1 transport gate: when set, privileged commands additionally
+    /// require the connecting process UID (real SO_PEERCRED) to be listed
+    /// here. This gates TRANSPORT access by OS identity; it still does not
+    /// authenticate which JS module produced a request, so same-UID module
+    /// confusion remains out of scope (see auth.rs). None = no gate, with
+    /// the documented same-UID limitation in full effect.
+    pub allowed_uids: Option<Vec<u32>>,
     pub lifecycle: Mutex<Lifecycle>,
     pub counters: Counters,
     /// Latched when any operation reports trust-threatening store state
@@ -180,9 +188,36 @@ fn get_object(
     }
 }
 
+/// Parse `--allowed-uids` (comma-separated decimal UIDs). Empty entries are
+/// rejected; duplicates are removed. Used by `nexusd` startup and unit tests.
+pub fn parse_allowed_uids(spec: &str) -> Result<Vec<u32>, String> {
+    let mut out = Vec::new();
+    for part in spec.split(',') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            return Err("--allowed-uids contains an empty entry".to_owned());
+        }
+        let uid: u32 = trimmed
+            .parse()
+            .map_err(|_| format!("--allowed-uids entry '{trimmed}' is not a decimal UID"))?;
+        if !out.contains(&uid) {
+            out.push(uid);
+        }
+    }
+    if out.is_empty() {
+        return Err("--allowed-uids must list at least one UID".to_owned());
+    }
+    Ok(out)
+}
+
 /// Authorize one privileged command. Returns None when admitted, or the
-/// refusal value when denied.
-fn authorize(daemon: &Daemon, req: &IpcRequest) -> Option<serde_json::Value> {
+/// refusal value when denied. `peer` is the real SO_PEERCRED of the
+/// connecting process, captured once per connection (never self-asserted).
+fn authorize(
+    daemon: &Daemon,
+    req: &IpcRequest,
+    peer: Option<(u32, u32, i32)>,
+) -> Option<serde_json::Value> {
     match daemon.trust_mode {
         TrustMode::Readonly => {
             daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
@@ -216,10 +251,10 @@ fn authorize(daemon: &Daemon, req: &IpcRequest) -> Option<serde_json::Value> {
                 }
             };
             match auth.verify(&req.cmd, &req.id, &req.params, fields, now_ms()) {
-                Ok(()) => None,
+                Ok(()) => {}
                 Err(code) => {
                     daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
-                    Some(fail(
+                    return Some(fail(
                         &req.id,
                         code,
                         match code {
@@ -228,8 +263,24 @@ fn authorize(daemon: &Daemon, req: &IpcRequest) -> Option<serde_json::Value> {
                             }
                             _ => "issuer authentication failed: unknown or unauthorized issuer",
                         },
+                    ));
+                }
+            }
+            // A2.1 transport gate: cap authentication proves possession of
+            // the ephemeral key, NOT OS identity. When an allowlist is
+            // configured, the connecting UID must additionally match, or the
+            // request is refused. A stolen capability alone is insufficient.
+            match (&daemon.allowed_uids, peer) {
+                (Some(allowed), Some((uid, _, _))) if allowed.contains(&uid) => None,
+                (Some(_), _) => {
+                    daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                    Some(fail(
+                        &req.id,
+                        codes::PEER_UNAUTHORIZED,
+                        "connecting process UID is not authorized for privileged commands; failing closed (no fallback)",
                     ))
                 }
+                (None, _) => None,
             }
         }
     }
@@ -550,6 +601,8 @@ fn do_status(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "incarnation": incarnation,
             "ipcProtocol": crate::protocol::IPC_PROTOCOL_VERSION,
             "trustMode": daemon.trust_mode.as_str(),
+            "peerUidEnforced": daemon.allowed_uids.is_some(),
+            "allowedUids": daemon.allowed_uids.clone().unwrap_or_default(),
             "shadowMode": "shadow-only",
             "dispatchEnabled": nexus_kernel::Kernel::dispatch_enabled(),
             "acceptedCommands": accepted,
@@ -580,11 +633,16 @@ fn with_id(mut v: serde_json::Value, id: &str) -> serde_json::Value {
 }
 
 /// Dispatch one validated request. Never panics on adversarial input: every
-/// refusal is a versioned value.
-pub fn dispatch(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+/// refusal is a versioned value. `peer` is the connection's SO_PEERCRED
+/// (None when unavailable, e.g. in-process test frames without a socket).
+pub fn dispatch(
+    daemon: &Daemon,
+    req: &IpcRequest,
+    peer: Option<(u32, u32, i32)>,
+) -> serde_json::Value {
     daemon.counters.requests.fetch_add(1, Ordering::Relaxed);
     if is_privileged(&req.cmd) {
-        if let Some(refusal) = authorize(daemon, req) {
+        if let Some(refusal) = authorize(daemon, req, peer) {
             log_line(
                 "refuse",
                 &req.id,
@@ -651,12 +709,58 @@ fn do_readiness(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     };
     let report = kernel.dispatch_readiness(command_id);
     match serde_json::to_value(&report) {
-        Ok(v) => ok(&req.id, serde_json::json!({ "readiness": v })),
+        Ok(v) => ok(
+            &req.id,
+            serde_json::json!({ "readiness": v, "transport": transport_report(daemon) }),
+        ),
         Err(_) => {
             daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
             fail(&req.id, codes::STORE_UNHEALTHY, "readiness encoding failed")
         }
     }
+}
+
+/// A2.1 transport posture report (observational, part of `readiness`).
+/// `peerUidEnforced` is true only when an explicit UID allowlist gates
+/// privileged commands. Even then the verdict stays NOT_READY: UID gating
+/// authenticates the connecting PROCESS, never the calling JS module, and
+/// dispatch remains disabled regardless.
+fn transport_report(daemon: &Daemon) -> serde_json::Value {
+    serde_json::json!({
+        "peerUidEnforced": daemon.allowed_uids.is_some(),
+        "allowedUids": daemon.allowed_uids.clone().unwrap_or_default(),
+        "capAuth": if daemon.auth.is_some() { "ephemeral-hmac-capability" } else { "none" },
+        "limitation": "SO_PEERCRED authenticates process credentials, never JS-module origin; same-UID module confusion is out of scope of this gate",
+    })
+}
+
+/// A2.1 fail-closed directory check: a protected directory (DataRoot,
+/// socket parent) must exist, be owned by our own euid, and carry no
+/// group/other permission bits (mode 0700 semantics). Anything else fails
+/// closed at startup so a permissive directory can never silently host
+/// kernel persistence or the IPC socket. Group/other access would let a
+/// genuinely distinct OS identity read or replace store files; the check
+/// enforces the exact bits production relies on.
+pub fn verify_protected_dir(path: &Path, role: &str) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(path).map_err(|e| format!("{role} directory unavailable: {e}"))?;
+    if !meta.is_dir() {
+        return Err(format!("{role} path is not a directory"));
+    }
+    let euid = unsafe { libc::geteuid() };
+    if meta.uid() != euid {
+        return Err(format!(
+            "{role} directory is not owned by the daemon uid (failing closed)"
+        ));
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        return Err(format!(
+            "{role} directory is group/other-accessible (mode {:o}); refusing to host kernel state (failing closed)",
+            meta.permissions().mode() & 0o777
+        ));
+    }
+    Ok(())
 }
 
 /// A2.0 Gate 2: observe (never authenticate with) OS peer credentials.
@@ -708,9 +812,21 @@ fn digest_params(params: &serde_json::Map<String, serde_json::Value>) -> serde_j
 }
 
 /// Serve one validated-or-refused frame (used by tests and connections).
+/// In-process callers have no socket peer, so no UID gate can apply: when
+/// an allowlist is configured, privileged in-process frames are refused
+/// exactly like connections without credentials (never silently admitted).
 pub fn serve_frame(daemon: &Daemon, frame: &str) -> serde_json::Value {
+    serve_frame_with_peer(daemon, frame, None)
+}
+
+/// Serve one frame with explicit peer credentials (live connections).
+pub fn serve_frame_with_peer(
+    daemon: &Daemon,
+    frame: &str,
+    peer: Option<(u32, u32, i32)>,
+) -> serde_json::Value {
     match parse_frame(frame) {
-        Ok(req) => dispatch(daemon, &req),
+        Ok(req) => dispatch(daemon, &req, peer),
         Err((id, code, message)) => {
             daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
             log_line("refuse", &id, code, "parse");
@@ -808,23 +924,27 @@ impl Drop for ClientSlot<'_> {
 
 fn serve_connection(stream: UnixStream, daemon: SharedDaemon) {
     let _slot = ClientSlot { daemon: &daemon };
-    // Forensic observation only: peer UID/GID/PID authenticate the process,
-    // never the calling JS module. Logged, never trusted for authorization.
-    match peer_credentials(&stream) {
+    // Peer UID/GID/PID authenticate the connecting process, never the
+    // calling JS module. Observed always; enforced for privileged commands
+    // only when --allowed-uids is configured (see authorize).
+    let peer = peer_credentials(&stream);
+    match peer {
         Some((uid, gid, pid)) => log_line(
             "conn-peer",
             "",
             "observed",
-            &format!("peer uid={uid} gid={gid} pid={pid} (observed, not authenticated)"),
+            &format!(
+                "peer uid={uid} gid={gid} pid={pid} (process identity, not module authentication)"
+            ),
         ),
         None => log_line(
             "conn-peer",
             "",
             "unavailable",
-            "peer credentials unavailable",
+            "peer credentials unavailable; privileged commands fail closed",
         ),
     }
-    let result = serve_connection_inner(&stream, &daemon);
+    let result = serve_connection_inner(&stream, &daemon, peer);
     if let Err(detail) = result {
         daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
         log_line("conn-close", "", "transport-error", &detail);
@@ -838,7 +958,11 @@ fn serve_connection(stream: UnixStream, daemon: SharedDaemon) {
 /// one read are each served in order. The 1 MiB cap is enforced on bytes:
 /// a frame body beyond the cap, or a newline-less backlog beyond
 /// cap+1, is refused as `too-large` and the connection is closed.
-fn serve_connection_inner(stream: &UnixStream, daemon: &SharedDaemon) -> Result<(), String> {
+fn serve_connection_inner(
+    stream: &UnixStream,
+    daemon: &SharedDaemon,
+    peer: Option<(u32, u32, i32)>,
+) -> Result<(), String> {
     let mut stream = stream
         .try_clone()
         .map_err(|e| format!("clone failed: {e}"))?;
@@ -885,7 +1009,7 @@ fn serve_connection_inner(stream: &UnixStream, daemon: &SharedDaemon) -> Result<
             // Catch panics per request so adversarial input can never kill
             // the connection handler, let alone the daemon.
             let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                serve_frame(daemon, frame)
+                serve_frame_with_peer(daemon, frame, peer)
             })) {
                 Ok(v) => v,
                 Err(_) => {
@@ -1021,5 +1145,171 @@ mod peer_tests {
             uid, own,
             "peer uid equals our own uid: same-UID peers are indistinguishable"
         );
+    }
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    //! A2.1 transport-gate unit tests: UID allowlist enforcement, refusal
+    ///without fallback, and fail-closed directory checks. Genuinely distinct
+    ///OS identities are unavailable to this test runner (unprivileged), so
+    ///cross-UID proof lives in the integration suite via a non-matching
+    ///allowlist against real SO_PEERCRED.
+    use super::*;
+    use crate::auth::IssuerAuth;
+    use crate::protocol::AuthFields;
+
+    fn test_daemon(allowed_uids: Option<Vec<u32>>, trust: TrustMode) -> Daemon {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Leak the tempdir: the daemon holds no path that needs it, and the
+        // kernel files must outlive this frame for the whole test.
+        let dir = Box::leak(Box::new(dir));
+        let db = dir.path().join("k.db");
+        let kernel = nexus_kernel::Kernel::open(&db, None).expect("kernel opens on temp root");
+        let auth = if trust == TrustMode::ShadowTest {
+            Some(Arc::new(IssuerAuth::generate().expect("entropy")))
+        } else {
+            None
+        };
+        Daemon {
+            kernel: Mutex::new(kernel),
+            trust_mode: trust,
+            auth,
+            allowed_uids,
+            lifecycle: Mutex::new(Lifecycle::Starting),
+            counters: Counters::default(),
+            reconcile_latch: Mutex::new(None),
+            witness_configured: false,
+            witness_path: None,
+            start_utc: String::new(),
+        }
+    }
+
+    fn own_uid() -> u32 {
+        unsafe { libc::geteuid() }
+    }
+
+    static NONCE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+    fn authed_acquire(daemon: &Daemon) -> IpcRequest {
+        // Fresh nonce per request: the replay cache consumes each tag once,
+        // so sharing a nonce across authorize() calls would false-positive.
+        let n = NONCE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let params = serde_json::Map::new();
+        let nonce = format!("cd{n:030x}");
+        let id = format!("t-gate-{n}");
+        let ts = crate::auth::now_ms();
+        let tag = daemon
+            .auth
+            .as_ref()
+            .expect("shadow-test auth")
+            .tag_for("acquire", &id, &params, &nonce, ts);
+        IpcRequest {
+            id,
+            cmd: "acquire".to_owned(),
+            params,
+            auth: Some(AuthFields { nonce, ts, tag }),
+        }
+    }
+
+    fn code_of(value: &Option<serde_json::Value>) -> &str {
+        value
+            .as_ref()
+            .and_then(|v| v.get("code"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("<admitted>")
+    }
+
+    #[test]
+    fn parse_allowed_uids_accepts_and_rejects() {
+        assert_eq!(parse_allowed_uids("1000").unwrap(), vec![1000]);
+        assert_eq!(
+            parse_allowed_uids("1000, 1001,1000").unwrap(),
+            vec![1000, 1001]
+        );
+        assert!(parse_allowed_uids("").is_err());
+        assert!(parse_allowed_uids("1000,").is_err());
+        assert!(parse_allowed_uids("root").is_err());
+        assert!(parse_allowed_uids("4294967296").is_err());
+    }
+
+    #[test]
+    fn gate_absent_preserves_cap_only_behavior() {
+        let daemon = test_daemon(None, TrustMode::ShadowTest);
+        let req = authed_acquire(&daemon);
+        assert!(authorize(&daemon, &req, Some((own_uid(), 0, 0))).is_none());
+    }
+
+    #[test]
+    fn matching_peer_uid_is_admitted() {
+        let me = own_uid();
+        let daemon = test_daemon(Some(vec![me]), TrustMode::ShadowTest);
+        let req = authed_acquire(&daemon);
+        assert!(authorize(&daemon, &req, Some((me, 0, 0))).is_none());
+    }
+
+    #[test]
+    fn non_matching_peer_uid_is_refused_without_fallback() {
+        let me = own_uid();
+        // Allowlist names a UID we are not: even a VALID capability tag
+        // must not admit the request, and no fallback path may admit it.
+        let daemon = test_daemon(Some(vec![me.wrapping_add(65433)]), TrustMode::ShadowTest);
+        let req = authed_acquire(&daemon);
+        let refusal = authorize(&daemon, &req, Some((me, 0, 0)));
+        assert_eq!(code_of(&refusal), codes::PEER_UNAUTHORIZED);
+        // A valid tag presented in-process (no socket peer) is also refused
+        // when a gate is configured: absence of credentials is not an
+        // allowlist bypass. (Fresh tag: the first tag's nonce is consumed.)
+        let req2 = authed_acquire(&daemon);
+        let refusal = authorize(&daemon, &req2, None);
+        assert_eq!(code_of(&refusal), codes::PEER_UNAUTHORIZED);
+    }
+
+    #[test]
+    fn readonly_refuses_before_any_gate() {
+        let me = own_uid();
+        let daemon = test_daemon(Some(vec![me]), TrustMode::Readonly);
+        let req = IpcRequest {
+            id: "t-ro".to_owned(),
+            cmd: "acquire".to_owned(),
+            params: serde_json::Map::new(),
+            auth: None,
+        };
+        let refusal = authorize(&daemon, &req, Some((me, 0, 0)));
+        assert_eq!(code_of(&refusal), codes::PRIVILEGED_DISABLED);
+    }
+
+    #[test]
+    fn replay_is_rejected_before_gate() {
+        let me = own_uid();
+        let daemon = test_daemon(Some(vec![me]), TrustMode::ShadowTest);
+        let req = authed_acquire(&daemon);
+        assert!(authorize(&daemon, &req, Some((me, 0, 0))).is_none());
+        let replay = authorize(&daemon, &req, Some((me, 0, 0)));
+        assert_eq!(code_of(&replay), codes::REPLAY_REJECTED);
+    }
+
+    #[test]
+    fn protected_dir_checks_are_fail_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Provisioned owner-only root (0700, as deployment requires): passes.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("chmod");
+        assert!(verify_protected_dir(dir.path(), "dataroot").is_ok());
+        // Group/other-readable: refused (this is the real default of
+        // umask-022 tempdirs, which is why the daemon enforces 0700).
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        assert!(verify_protected_dir(dir.path(), "dataroot").is_err());
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777))
+            .expect("chmod");
+        assert!(verify_protected_dir(dir.path(), "dataroot").is_err());
+        // A file is not a directory: refused.
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"x").expect("write");
+        assert!(verify_protected_dir(&file, "dataroot").is_err());
+        // Missing path: refused.
+        assert!(verify_protected_dir(&dir.path().join("nope"), "dataroot").is_err());
     }
 }

@@ -210,6 +210,11 @@ fn crash_restart_recovers_and_reclaims_stale_socket() {
 #[test]
 fn corrupt_database_refuses_startup() {
     let dir = tempfile::tempdir().expect("tempdir");
+    // Provisioned owner-only root, as deployment requires (the daemon
+    // refuses permissive directories before it ever opens the store).
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("provision 0700 dataroot");
     let db = dir.path().join("k.db");
     std::fs::write(&db, b"this is not a sqlite database at all").expect("write garbage");
     let out = Command::new(nexusd_bin())
@@ -232,6 +237,9 @@ fn corrupt_database_refuses_startup() {
 #[test]
 fn incompatible_schema_refuses_startup() {
     let dir = tempfile::tempdir().expect("tempdir");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("provision 0700 dataroot");
     let db = dir.path().join("k.db");
     // Initialize a real store through the kernel binary, then forge a
     // future schema version directly in SQLite.
