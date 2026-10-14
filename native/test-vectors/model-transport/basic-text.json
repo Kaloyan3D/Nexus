@@ -1,0 +1,13 @@
+{
+  "name": "basic-text",
+  "description": "Two ordered text deltas then completion (recorded shape).",
+  "sse_body": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello, \"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"world.\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7},\"finish_reason\":\"stop\"}}\n\ndata: [DONE]\n\n",
+  "expected_text": "Hello, world.",
+  "expected_reasoning": "",
+  "expected_tools": [],
+  "expected_usage": {
+    "input_tokens": 12,
+    "output_tokens": 7
+  },
+  "expected_finish": "stop"
+}

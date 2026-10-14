@@ -221,14 +221,42 @@ pub fn write_cap_file(path: &Path, key_hex: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Best-effort removal of stale `.<leaf>.tmp.*` siblings left by a crashed
+/// rotation. Only regular files with the exact temp prefix are unlinked;
+/// anything else (including symlinks) is left untouched for the caller to
+/// refuse. Errors are ignored: the fresh temp uses a unique name and every
+/// validation still fails closed.
+fn scrub_stale_handoff_temps(dir: &Path, leaf: &str) {
+    let prefix = format!(".{leaf}.tmp.");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        // Never follow or remove a symlink: only a plain temp file.
+        let is_plain = std::fs::symlink_metadata(entry.path())
+            .map(|m| m.file_type().is_file())
+            .unwrap_or(false);
+        if is_plain {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Write a group-readable copy of the capability key for the production
 /// issuer identity (closure §3). The caller MUST place `path` inside the
 /// validated shared socket directory (never inside the DataRoot) and pass
 /// the socket directory's group: the handoff lands `0640 root-group` so the
 /// `nexus-issuer` UID can authenticate without any read access to the
 /// DataRoot or to the owner-only `issuer.cap`. Rotation matches the primary
-/// cap (overwritten every start). `O_NOFOLLOW` refuses symlink targets so a
-/// pre-planted link can never redirect the key. This is NOT a second
+/// cap (overwritten every start). Publication is via a validated `O_EXCL`
+/// temp inode plus atomic rename (A2.2): secret bytes never enter an
+/// unvalidated inode, pre-existing permissive files are replaced rather than
+/// truncated, hardlinks keep only stale bytes, and `O_NOFOLLOW` refuses
+/// symlink targets so a pre-planted link can never redirect the key. This is NOT a second
 /// credential: it carries the same per-incarnation key, and a stolen copy is
 /// still insufficient without a matching `--allowed-uids` peer UID.
 ///
@@ -248,24 +276,83 @@ pub fn write_handoff_file(path: &Path, key_hex: &str, gid: u32) -> Result<(), St
                 .to_owned(),
         );
     }
-    // Refuse symlink leaves before and via open: a link could otherwise
+    // A2.2 review fix: NEVER place secret bytes into an unvalidated inode.
+    // The previous implementation opened the destination itself with O_TRUNC
+    // and wrote the key before ownership/type/permission validation, so a
+    // pre-existing permissive file briefly carried the new key world-readable
+    // and a pre-existing hardlink shared the new bytes permanently. This
+    // implementation writes a fresh O_EXCL temp inode, validates the OPEN
+    // description, then atomically renames over the destination: the old
+    // inode (and any hardlink to it) keeps only stale bytes, never the new
+    // key. Symlinks and nonregular files are refused before any write.
+    if key_hex.len() != 64 || !is_hex(key_hex) {
+        return Err("cap handoff key material is malformed; refusing to write".to_owned());
+    }
+    // Refuse symlink leaves before any write: a link could otherwise
     // point the key at an attacker-readable path.
     let leaf_meta = std::fs::symlink_metadata(path).ok();
     if leaf_meta
+        .as_ref()
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false)
     {
         return Err("cap handoff path is a symlink; refusing to write key material".to_owned());
     }
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+    // Refuse pre-existing nonregular leaves (fifo, socket, directory, ...):
+    // opening one O_WRONLY could block (fifo) or misdirect the key. A
+    // missing leaf is fine (fresh inode below); a regular file is fine (it
+    // is replaced by rename, never truncated in place).
+    if let Some(ref m) = leaf_meta {
+        if !m.file_type().is_file() {
+            return Err(
+                "cap handoff path is not a regular file; refusing to write key material".to_owned(),
+            );
+        }
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| {
+            "cap handoff path has no parent directory; place it inside the shared socket directory"
+                .to_owned()
+        })?
+        .to_path_buf();
+    let leaf = path
+        .file_name()
+        .ok_or_else(|| {
+            "cap handoff path has no file name; place it inside the shared socket directory"
+                .to_owned()
+        })?
+        .to_owned();
+    let leaf_str = leaf.to_string_lossy().into_owned();
+    // Crash-rotation hygiene: a previous incarnation may have left a
+    // `.<leaf>.tmp.*` sibling carrying key bytes. Remove stale ones
+    // best-effort BEFORE publishing; the fresh temp below uses a unique
+    // name, and every validation below still fails closed on error.
+    scrub_stale_handoff_temps(&parent, &leaf_str);
+    // Unique temp sibling in the SAME directory (rename stays on one
+    // filesystem and inherits the socket-dir policy). Dot-prefixed so a
+    // crashed rotation never looks like a published handoff.
+    let pid = unsafe { libc::getpid() };
+    let mut rnd = [0u8; 8];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| {
+            use std::io::Read;
+            f.read_exact(&mut rnd)
+        })
+        .map_err(|_| "cap handoff entropy unavailable; refusing to write".to_owned())?;
+    let tmp_name = format!(".{}.tmp.{}-{}", leaf_str, pid, hex::encode(rnd));
+    let tmp_path = parent.join(&tmp_name);
+    let c_tmp = std::ffi::CString::new(tmp_path.as_os_str().as_bytes())
         .map_err(|_| "cap handoff path contains interior NUL".to_owned())?;
-    // Open with O_NOFOLLOW|O_CREAT|O_TRUNC|O_WRONLY, mode 0640. Raw fd
-    // avoids any TOCTOU between a check and std's open.
+    // O_EXCL|O_NOFOLLOW: never truncate, never follow, never reuse an inode.
+    // Mode 0600 first (narrowest); widened to exactly 0640 after chown.
+    // Raw fd avoids any TOCTOU between a check and std's open.
     let fd = unsafe {
         libc::open(
-            c_path.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o640,
+            c_tmp.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
         )
     };
     if fd < 0 {
@@ -274,6 +361,38 @@ pub fn write_handoff_file(path: &Path, key_hex: &str, gid: u32) -> Result<(), St
             std::io::Error::last_os_error()
         ));
     }
+    let unlink_tmp = || unsafe { libc::unlink(c_tmp.as_ptr()) };
+    // Group ownership FIRST (while still 0600-or-narrower), then enforce
+    // exact bits: at no point is the key group/other-accessible beyond 0640.
+    let grp = unsafe { libc::fchown(fd, u32::MAX, gid) };
+    let md = unsafe { libc::fchmod(fd, 0o640) };
+    // Review F3 + A2.2: validate the OPEN file description (fstat), never a
+    // re-resolved pathname, BEFORE any secret byte enters the inode.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let fr = unsafe { libc::fstat(fd, &mut st) };
+    let euid = unsafe { libc::geteuid() };
+    let pre_ok = fr == 0
+        && grp == 0
+        && md == 0
+        && (st.st_mode & libc::S_IFMT) == libc::S_IFREG
+        && st.st_uid == euid
+        && st.st_gid == gid
+        && st.st_mode & 0o777 == 0o640
+        && st.st_nlink == 1;
+    if !pre_ok {
+        unsafe {
+            libc::close(fd);
+        }
+        unlink_tmp();
+        if grp != 0 {
+            return Err("cap handoff group unsettable; is the daemon a member of the socket group? (failing closed)".to_owned());
+        }
+        return Err(
+            "cap handoff temp inode failed validation; refusing to publish (failing closed)"
+                .to_owned(),
+        );
+    }
+    // Only now do secret bytes enter the validated inode.
     let write_all = unsafe {
         let bytes = key_hex.as_bytes();
         let mut done = 0usize;
@@ -294,52 +413,85 @@ pub fn write_handoff_file(path: &Path, key_hex: &str, gid: u32) -> Result<(), St
             -1
         }
     };
-    // Group ownership FIRST (while still 0640-or-narrower), then enforce
-    // exact bits: at no point is the key world-accessible.
-    let grp = unsafe { libc::fchown(fd, u32::MAX, gid) };
-    let md = unsafe { libc::fchmod(fd, 0o640) };
-    // Review F3: validate the OPEN file description (fstat), never a
-    // re-resolved pathname. A post-close rename/swap race (possible only for
-    // writers of this daemon-owned directory) cannot smuggle an unvalidated
-    // node past the gate this way.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let fr = unsafe { libc::fstat(fd, &mut st) };
+    let sync_rc = unsafe { libc::fsync(fd) };
+    let mut st2: libc::stat = unsafe { std::mem::zeroed() };
+    let fr2 = unsafe { libc::fstat(fd, &mut st2) };
     unsafe {
         libc::close(fd);
     }
-    // Any post-open failure removes the partial file: a truncated or
-    // mis-owned key copy must never linger group-readable. Best effort;
-    // the daemon still refuses startup on the original error.
-    let scrub = |c: &std::ffi::CString| unsafe { libc::unlink(c.as_ptr()) };
-    if write_all != 0 {
-        scrub(&c_path);
-        return Err("cap handoff unwritable: short write".to_owned());
+    if write_all != 0 || sync_rc != 0 || fr2 != 0 || st2.st_size != key_hex.len() as i64 {
+        unlink_tmp();
+        return Err(
+            "cap handoff unwritable: temp write did not settle (failing closed)".to_owned(),
+        );
     }
-    if grp != 0 {
-        scrub(&c_path);
-        return Err("cap handoff group unsettable; is the daemon a member of the socket group? (failing closed)".to_owned());
+    // Atomic publication: rename replaces the destination directory entry
+    // WITHOUT ever truncating the old inode. A pre-existing hardlink keeps
+    // the OLD bytes; a concurrently planted symlink is REPLACED (rename does
+    // not follow the destination), and the post-rename checks below refuse
+    // anything that is not a daemon-owned 0640 regular file.
+    let c_dst = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        unlink_tmp();
+        "cap handoff path contains interior NUL".to_owned()
+    })?;
+    if unsafe { libc::rename(c_tmp.as_ptr(), c_dst.as_ptr()) } != 0 {
+        let e = std::io::Error::last_os_error().to_string();
+        unlink_tmp();
+        return Err(format!("cap handoff unpublished: {e}"));
     }
-    if md != 0 {
-        scrub(&c_path);
-        return Err(format!(
-            "cap handoff permissions unsettable: {}",
-            std::io::Error::last_os_error()
-        ));
+    // Validate the published leaf: lstat must show a non-symlink, and the
+    // settled metadata must show a regular 0640 daemon-owned group file of
+    // exactly the key length with a single link.
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            unsafe {
+                libc::unlink(c_dst.as_ptr());
+            }
+            return Err("cap handoff settled as a symlink (failing closed)".to_owned());
+        }
+        Ok(_) => {}
+        Err(e) => {
+            return Err(format!("cap handoff unverifiable after publish: {e}"));
+        }
     }
-    // Validate the settled file description: exact 0640, daemon-owned,
-    // correct group. Uses the fstat above, not a re-resolved name.
-    if fr != 0 {
-        scrub(&c_path);
-        return Err(format!(
-            "cap handoff unverifiable: {}",
-            std::io::Error::last_os_error()
-        ));
+    match std::fs::metadata(path) {
+        Ok(m) => {
+            use std::os::unix::fs::MetadataExt;
+            use std::os::unix::fs::PermissionsExt;
+            let mode = m.permissions().mode() & 0o777;
+            if !m.file_type().is_file()
+                || m.uid() != euid
+                || m.gid() != gid
+                || mode != 0o640
+                || m.nlink() != 1
+                || m.len() != key_hex.len() as u64
+            {
+                unsafe {
+                    libc::unlink(c_dst.as_ptr());
+                }
+                return Err(
+                    "cap handoff settled with wrong ownership, mode, or linkage (failing closed)"
+                        .to_owned(),
+                );
+            }
+        }
+        Err(e) => {
+            return Err(format!("cap handoff unverifiable after publish: {e}"));
+        }
     }
-    let euid = unsafe { libc::geteuid() };
-    if st.st_uid != euid || st.st_gid != gid || st.st_mode & 0o777 != 0o640 {
-        scrub(&c_path);
-        return Err("cap handoff settled with wrong ownership or mode (failing closed)".to_owned());
+    // Best-effort directory fsync so the rename survives a crash; failure
+    // does not weaken the file-content guarantees above.
+    if let Ok(dfd_c) = std::ffi::CString::new(parent.as_os_str().as_bytes()) {
+        unsafe {
+            let dfd = libc::open(dfd_c.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+            if dfd >= 0 {
+                libc::fsync(dfd);
+                libc::close(dfd);
+            }
+        }
     }
+    // Final hygiene: no temp siblings may linger carrying key bytes.
+    scrub_stale_handoff_temps(&parent, &leaf_str);
     Ok(())
 }
 
@@ -467,6 +619,109 @@ mod tests {
         assert!(write_handoff_file(&link, &"cd".repeat(32), gid).is_err());
         // The refused write leaves the real file untouched.
         assert_eq!(std::fs::read_to_string(&path).expect("read").len(), 64);
+    }
+
+    /// A2.2 review finding, failing-first: the pre-fix implementation opened
+    /// the destination with O_TRUNC and wrote the new key before validation,
+    /// so a pre-existing permissive file briefly carried the new key and a
+    /// hardlink to it shared the new bytes permanently. Post-fix, rotation
+    /// publishes a fresh inode via rename: the old inode (and its hardlink)
+    /// keeps only stale bytes, and the new leaf is a fresh 0640 inode.
+    #[test]
+    fn handoff_rotation_never_exposes_new_key_via_hardlink() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gid = unsafe { libc::getegid() };
+        let path = dir.path().join("issuer.handoff");
+        // Pre-existing permissive file with stale marker bytes.
+        std::fs::write(&path, "00".repeat(32)).expect("seed");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        let alias = dir.path().join("alias.handoff");
+        std::fs::hard_link(&path, &alias).expect("hardlink");
+        let new_key = "ab".repeat(32);
+        write_handoff_file(&path, &new_key, gid).expect("rotation writes");
+        // Published leaf carries the new key on a FRESH inode, exactly 0640.
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), new_key);
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "rotated handoff must be 0640, got {mode:o}");
+        // The pre-existing hardlink still reads the STALE bytes: the new key
+        // never entered the old inode.
+        assert_eq!(
+            std::fs::read_to_string(&alias).expect("read"),
+            "00".repeat(32)
+        );
+        // Distinct inodes prove replacement-by-rename, not truncation.
+        let fresh = std::fs::metadata(&path).expect("stat");
+        let stale = std::fs::metadata(&alias).expect("stat");
+        assert_ne!((fresh.dev(), fresh.ino()), (stale.dev(), stale.ino()));
+        assert_eq!(fresh.nlink(), 1);
+        // Rotation is repeatable over the published leaf.
+        let next_key = "cd".repeat(32);
+        write_handoff_file(&path, &next_key, gid).expect("second rotation");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), next_key);
+        assert_eq!(
+            std::fs::read_to_string(&alias).expect("read"),
+            "00".repeat(32)
+        );
+    }
+
+    /// Nonregular leaves (fifo, directory) are refused before any byte is
+    /// written, and no temp siblings linger carrying key bytes.
+    #[test]
+    fn handoff_refuses_nonregular_leaf_and_leaves_no_temps() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gid = unsafe { libc::getegid() };
+        let fifo = dir.path().join("issuer.handoff");
+        assert_eq!(
+            unsafe {
+                libc::mkfifo(
+                    std::ffi::CString::new(fifo.as_os_str().as_bytes())
+                        .expect("nul")
+                        .as_ptr(),
+                    0o644,
+                )
+            },
+            0,
+            "mkfifo"
+        );
+        assert!(write_handoff_file(&fifo, &"ab".repeat(32), gid).is_err());
+        assert!(
+            std::fs::read_dir(dir.path())
+                .expect("readdir")
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().contains(".tmp.")),
+            "no temp file may linger after refusal"
+        );
+        let sub = dir.path().join("subdir.handoff");
+        std::fs::create_dir(&sub).expect("mkdir");
+        assert!(write_handoff_file(&sub, &"ab".repeat(32), gid).is_err());
+    }
+
+    /// A crashed rotation's stale temp sibling is scrubbed and never
+    /// mistaken for the published handoff.
+    #[test]
+    fn handoff_scrubs_stale_temps_on_rotation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gid = unsafe { libc::getegid() };
+        let path = dir.path().join("issuer.handoff");
+        std::fs::write(
+            dir.path().join(".issuer.handoff.tmp.999-deadbeef"),
+            "ff".repeat(32),
+        )
+        .expect("stale temp");
+        write_handoff_file(&path, &"ab".repeat(32), gid).expect("rotation writes");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "ab".repeat(32)
+        );
+        assert!(
+            std::fs::read_dir(dir.path())
+                .expect("readdir")
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().contains(".tmp.")),
+            "stale temps must be scrubbed"
+        );
     }
 
     #[test]

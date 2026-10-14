@@ -297,6 +297,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-model"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "nexus-contracts",
+ "nexus-kernel",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "nexus-store"
 version = "0.1.0"
 dependencies = [

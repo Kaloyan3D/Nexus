@@ -1,11 +1,12 @@
 [workspace]
-members = ["nexus-contracts", "nexus-store", "nexus-kernel", "nexus-daemon"]
+members = ["nexus-contracts", "nexus-store", "nexus-kernel", "nexus-daemon", "nexus-model"]
 resolver = "2"
 
 [workspace.dependencies]
 nexus-contracts = { path = "nexus-contracts" }
 nexus-store = { path = "nexus-store" }
 nexus-kernel = { path = "nexus-kernel" }
+nexus-model = { path = "nexus-model" }
 libc = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
