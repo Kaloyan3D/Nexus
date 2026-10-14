@@ -1,0 +1,16 @@
+[package]
+name = "nexus-client"
+version = "0.1.0"
+edition = "2021"
+description = "Nexus Native Client API v1: versioned CLI/GUI contract over the authenticated daemon boundary (A2.4)"
+license = "MIT"
+
+[dependencies]
+nexus-contracts = { workspace = true }
+nexus-kernel = { workspace = true }
+nexus-model = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+tempfile = { workspace = true }

@@ -8,7 +8,10 @@ pub mod dispatch;
 pub mod readiness;
 
 pub use accept::{AcceptRequest, GenerationState};
-pub use dispatch::{NativeDispatchGrant, NativeDispatchRequest, PublishedIntent, SCOPE_MOCK_E2E};
+pub use dispatch::{
+    NativeDispatchGrant, NativeDispatchRequest, PublishedIntent, SealedNativeDispatchGrant,
+    GRANT_SEAL_DOMAIN, GRANT_SKEW_MS, GRANT_TTL_MS, SCOPE_MOCK_E2E,
+};
 use nexus_contracts::{
     generation_key, CommandReceiptV1, GenerationLeaseV1, KernelError, KernelErrorCode,
     KernelResult, RegistryResolutionV1, CONTRACT_SCHEMA_VERSION,

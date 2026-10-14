@@ -60,6 +60,32 @@ pub struct NativeDispatchGrant {
     pub granted_at_utc: String,
 }
 
+pub const GRANT_SEAL_DOMAIN: &str = "nexus-dispatch-grant/v1";
+
+pub const GRANT_TTL_MS: i64 = 300_000;
+
+pub const GRANT_SKEW_MS: i64 = 60_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde :: Serialize, serde :: Deserialize)]
+pub struct SealedNativeDispatchGrant {
+    pub command_id: String,
+    pub attempt_id: String,
+    pub task_instance_id: String,
+    pub request_digest: String,
+    pub endpoint_origin: String,
+    pub scope: String,
+    pub target_digest: String,
+    pub extension_digest: String,
+    pub lease_epoch: u64,
+    pub store_incarnation: String,
+    pub credential_ref: String,
+    pub issued_at_ms: i64,
+    pub expires_at_ms: i64,
+    pub nonce_hex: String,
+    pub granted_at_utc: String,
+    pub tag_hex: String,
+}
+
 fn utc_now() -> String {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => [
@@ -94,6 +120,65 @@ fn field_str(bundle: &serde_json::Value, key: &str) -> KernelResult<String> {
                 ["intent field ", key, " is missing"].concat(),
             )
         })
+}
+
+fn now_ms() -> i64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
+        Err(_) => 0,
+    }
+}
+
+fn nonce_hex() -> String {
+    let mut bytes = [0u8; 16];
+    let mut filled = false;
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read as _;
+        if f.read_exact(&mut bytes).is_ok() {
+            filled = true;
+        }
+    }
+    if !filled {
+        static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let c = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let t = now_ms() as u64;
+        let pid = std::process::id() as u64;
+        let mut x =
+            t ^ (pid.wrapping_mul(0x9E3779B97F4A7C15)) ^ (c.wrapping_mul(0xBF58476D1CE4E5B9));
+        for b in bytes.iter_mut() {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            x = x.wrapping_mul(0x2545F4914F6CDD1D);
+            *b = (x & 0xFF) as u8;
+        }
+    }
+    hex::encode(bytes)
+}
+
+fn sealed_grant_canonical(g: &SealedNativeDispatchGrant) -> String {
+    let v = serde_json::json!({
+        "domain": GRANT_SEAL_DOMAIN,
+        "commandId": g.command_id,
+        "attemptId": g.attempt_id,
+        "taskInstanceId": g.task_instance_id,
+        "requestDigest": g.request_digest,
+        "endpointOrigin": g.endpoint_origin,
+        "scope": g.scope,
+        "targetDigest": g.target_digest,
+        "extensionDigest": g.extension_digest,
+        "leaseEpoch": g.lease_epoch,
+        "storeIncarnation": g.store_incarnation,
+        "credentialRef": g.credential_ref,
+        "issuedAtMs": g.issued_at_ms,
+        "expiresAtMs": g.expires_at_ms,
+        "nonceHex": g.nonce_hex,
+    });
+    nexus_contracts::canonical_json(&v)
+}
+
+fn sealed_grant_tag(key_hex: &str, g: &SealedNativeDispatchGrant) -> KernelResult<String> {
+    crate::hmac_seal_hex(key_hex, &sealed_grant_canonical(g))
 }
 
 fn is_loopback_origin(origin: &str) -> bool {
@@ -456,6 +541,488 @@ impl Kernel {
                 endpoint_origin: origin.to_owned(),
                 scope: req.scope.clone(),
                 granted_at_utc: utc_now(),
+            })
+        })
+    }
+}
+
+impl Kernel {
+    pub fn authorize_sealed_dispatch(
+        &mut self,
+        req: &NativeDispatchRequest,
+    ) -> KernelResult<SealedNativeDispatchGrant> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            if req.scope != SCOPE_MOCK_E2E {
+                return Err(KernelError::new(
+                    KernelErrorCode::ScopeRefused,
+                    "only the mock-e2e scope is authorized; live dispatch refused",
+                ));
+            }
+            let (stored_json, stored_seal, state) =
+                self.store.fetch_intent(&req.command_id)?.ok_or_else(|| {
+                    KernelError::new(
+                        KernelErrorCode::IntentUnknown,
+                        "no published intent for this command identity",
+                    )
+                })?;
+            match state.as_str() {
+                "published" => {}
+                "cancelled" => {
+                    return Err(KernelError::new(
+                        KernelErrorCode::IntentFenced,
+                        "intent was fenced; dispatch refused",
+                    ))
+                }
+                "executed" => {
+                    return Err(KernelError::new(
+                        KernelErrorCode::CommandConflict,
+                        "intent already executed; duplicate dispatch refused",
+                    ))
+                }
+                _ => {
+                    return Err(KernelError::new(
+                        KernelErrorCode::StoreCorrupt,
+                        "intent carries an unknown lifecycle state",
+                    ))
+                }
+            }
+            let key_hex = self.store.issuance_key_hex()?;
+            let expect_seal = hmac_seal_hex(&key_hex, &stored_json)?;
+            if expect_seal != stored_seal {
+                return Err(KernelError::new(
+                    KernelErrorCode::ForgedIssuer,
+                    "published intent seal mismatch; store tampered",
+                ));
+            }
+            let bundle: serde_json::Value = serde_json::from_str(&stored_json).map_err(|_| {
+                KernelError::new(
+                    KernelErrorCode::StoreCorrupt,
+                    "published intent is not JSON",
+                )
+            })?;
+            if field_str(&bundle, "commandId")? != req.command_id {
+                return Err(KernelError::new(
+                    KernelErrorCode::StoreCorrupt,
+                    "published intent identity drifted",
+                ));
+            }
+            if field_str(&bundle, "requestDigest")? != req.request_digest {
+                return Err(KernelError::new(
+                    KernelErrorCode::BindingMismatch,
+                    "request bytes differ from the published intent",
+                ));
+            }
+            if field_str(&bundle, "scope")? != req.scope {
+                return Err(KernelError::new(
+                    KernelErrorCode::BindingMismatch,
+                    "request scope differs from the published intent",
+                ));
+            }
+            let extension_digest = field_str(&bundle, "extensionDigest")?;
+            let target_digest = field_str(&bundle, "targetDigest")?;
+            let task_instance_id = field_str(&bundle, "taskInstanceId")?;
+            let attempt_id_b = field_str(&bundle, "attemptId")?;
+            let lease_epoch_b = field_u64(&bundle, "leaseEpoch")?;
+            let _store_incarnation_b = field_str(&bundle, "storeIncarnation")?;
+            let (ext_json, _ext_seal) =
+                self.store
+                    .fetch_extension(&extension_digest)?
+                    .ok_or_else(|| {
+                        KernelError::new(
+                            KernelErrorCode::ForgedIssuer,
+                            "sealed extension lost after publication",
+                        )
+                    })?;
+            let ext_value: serde_json::Value = serde_json::from_str(&ext_json).map_err(|_| {
+                KernelError::new(
+                    KernelErrorCode::StoreCorrupt,
+                    "sealed extension is not JSON",
+                )
+            })?;
+            let origin = ext_value
+                .get("endpoint")
+                .and_then(|e| e.get("origin"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    KernelError::new(
+                        KernelErrorCode::StoreCorrupt,
+                        "sealed extension lacks an endpoint origin",
+                    )
+                })?
+                .to_owned();
+            if origin != req.endpoint_origin {
+                return Err(KernelError::new(
+                    KernelErrorCode::BindingMismatch,
+                    "prepared endpoint differs from the sealed extension",
+                ));
+            }
+            if !is_loopback_origin(&origin) {
+                return Err(KernelError::new(
+                    KernelErrorCode::ScopeRefused,
+                    "mock scope requires a loopback-local endpoint",
+                ));
+            }
+            let cred = ext_value
+                .get("credentialRef")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    KernelError::new(
+                        KernelErrorCode::StoreCorrupt,
+                        "sealed extension lacks a credential reference",
+                    )
+                })?
+                .to_owned();
+            if cred != req.credential_ref {
+                return Err(KernelError::new(
+                    KernelErrorCode::BindingMismatch,
+                    "credential reference differs from the sealed extension",
+                ));
+            }
+            let receipt = self.store.read_receipt(&req.command_id)?.ok_or_else(|| {
+                KernelError::new(
+                    KernelErrorCode::DeliveryInvalid,
+                    "no accepted receipt for this command",
+                )
+            })?;
+            if receipt.target_digest != target_digest
+                || receipt.snapshot_digest != field_str(&bundle, "snapshotDigest")?
+                || receipt.issuance_id != field_str(&bundle, "issuanceId")?
+                || receipt.lease_epoch != lease_epoch_b
+                || receipt.task_instance_id != task_instance_id
+                || receipt.attempt_id != attempt_id_b
+            {
+                return Err(KernelError::new(
+                    KernelErrorCode::BindingMismatch,
+                    "accepted receipt disagrees with the published intent",
+                ));
+            }
+            let task_id = receipt.task_instance_id.clone();
+            let current = self.store.current_generation(&task_id, "native")?;
+            let (epoch_now, incarnation_now, protected_now) = match current {
+                Some(g) => (g.epoch, g.incarnation, g.witness_protected),
+                None => {
+                    return Err(KernelError::new(
+                        KernelErrorCode::StaleLease,
+                        "generation vanished after acceptance",
+                    ))
+                }
+            };
+            if epoch_now != receipt.lease_epoch || incarnation_now != receipt.store_incarnation {
+                return Err(KernelError::new(
+                    KernelErrorCode::StaleLease,
+                    "generation advanced after acceptance; re-acquire first",
+                ));
+            }
+            match self.witness.as_ref() {
+                None => {
+                    return Err(KernelError::new(
+                        KernelErrorCode::WitnessRequired,
+                        "dispatch needs the independent witness; configure it first",
+                    ))
+                }
+                Some(w) => {
+                    let gkey = nexus_contracts::generation_key(&task_id, "native");
+                    match w.read(&gkey)? {
+                        Some(rec) => {
+                            if rec.max_epoch > epoch_now {
+                                return Err(KernelError::new(
+                                    KernelErrorCode::RollbackDetected,
+                                    "store epoch is behind the witness maximum",
+                                ));
+                            }
+                        }
+                        None => {
+                            if protected_now {
+                                return Err(KernelError::new(
+                                    KernelErrorCode::ReconciliationRequired,
+                                    "witness record lost after protection was established",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            self.store.mark_intent_executed(&req.command_id)?;
+            let issued_at = now_ms();
+            let mut grant = SealedNativeDispatchGrant {
+                command_id: req.command_id.clone(),
+                attempt_id: receipt.attempt_id.clone(),
+                task_instance_id: task_id,
+                request_digest: req.request_digest.clone(),
+                endpoint_origin: origin,
+                scope: req.scope.clone(),
+                target_digest,
+                extension_digest,
+                lease_epoch: receipt.lease_epoch,
+                store_incarnation: receipt.store_incarnation.clone(),
+                credential_ref: cred,
+                issued_at_ms: issued_at,
+                expires_at_ms: issued_at.saturating_add(GRANT_TTL_MS),
+                nonce_hex: nonce_hex(),
+                granted_at_utc: utc_now(),
+                tag_hex: String::new(),
+            };
+            let tag = sealed_grant_tag(&key_hex, &grant)?;
+            grant.tag_hex = tag;
+            Ok(grant)
+        })
+    }
+
+    pub fn verify_sealed_grant(
+        &mut self,
+        grant: &SealedNativeDispatchGrant,
+        expected_request_digest: &str,
+        expected_endpoint_origin: &str,
+        expected_credential_ref: &str,
+        now_ms_value: i64,
+    ) -> KernelResult<NativeDispatchGrant> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            if grant.scope != SCOPE_MOCK_E2E {
+                return Err(KernelError::new(
+                    KernelErrorCode::ScopeRefused,
+                    "grant scope is not mock-e2e; refused",
+                ));
+            }
+            if grant.command_id.is_empty()
+                || grant.attempt_id.is_empty()
+                || grant.task_instance_id.is_empty()
+                || grant.request_digest.is_empty()
+                || grant.endpoint_origin.is_empty()
+                || grant.target_digest.is_empty()
+                || grant.extension_digest.is_empty()
+                || grant.store_incarnation.is_empty()
+                || grant.credential_ref.is_empty()
+                || grant.nonce_hex.is_empty()
+                || grant.tag_hex.is_empty()
+            {
+                return Err(KernelError::new(
+                    KernelErrorCode::ForgedIssuer,
+                    "grant is incomplete; refusing",
+                ));
+            }
+            if grant.request_digest != expected_request_digest {
+                return Err(KernelError::new(
+                    KernelErrorCode::BindingMismatch,
+                    "grant does not cover these request bytes",
+                ));
+            }
+            if grant.endpoint_origin != expected_endpoint_origin {
+                return Err(KernelError::new(
+                    KernelErrorCode::BindingMismatch,
+                    "grant does not cover this endpoint",
+                ));
+            }
+            if grant.credential_ref != expected_credential_ref {
+                return Err(KernelError::new(
+                    KernelErrorCode::BindingMismatch,
+                    "grant does not cover this credential reference",
+                ));
+            }
+            if now_ms_value > grant.expires_at_ms {
+                return Err(KernelError::new(
+                    KernelErrorCode::ReservationExpired,
+                    "grant has expired; re-authorize",
+                ));
+            }
+            if now_ms_value < grant.issued_at_ms.saturating_sub(GRANT_SKEW_MS) {
+                return Err(KernelError::new(
+                    KernelErrorCode::ForgedIssuer,
+                    "grant issued-at is in the future; refusing",
+                ));
+            }
+            if grant.expires_at_ms != grant.issued_at_ms.saturating_add(GRANT_TTL_MS) {
+                return Err(KernelError::new(
+                    KernelErrorCode::ForgedIssuer,
+                    "grant TTL was tampered; refusing",
+                ));
+            }
+            let key_hex = self.store.issuance_key_hex()?;
+            let expect_tag = sealed_grant_tag(&key_hex, grant)?;
+            if expect_tag != grant.tag_hex {
+                return Err(KernelError::new(
+                    KernelErrorCode::ForgedIssuer,
+                    "grant tag mismatch; not kernel-issued",
+                ));
+            }
+            let (stored_json, stored_seal, state) =
+                self.store.fetch_intent(&grant.command_id)?.ok_or_else(|| {
+                    KernelError::new(
+                        KernelErrorCode::IntentUnknown,
+                        "no published intent for this grant",
+                    )
+                })?;
+            match state.as_str() {
+                "executed" => {}
+                "cancelled" => {
+                    return Err(KernelError::new(
+                        KernelErrorCode::IntentFenced,
+                        "intent was fenced; grant is revoked",
+                    ))
+                }
+                "published" => {
+                    return Err(KernelError::new(
+                        KernelErrorCode::ForgedIssuer,
+                        "grant precedes authorization; refusing",
+                    ))
+                }
+                _ => {
+                    return Err(KernelError::new(
+                        KernelErrorCode::StoreCorrupt,
+                        "intent carries an unknown lifecycle state",
+                    ))
+                }
+            }
+            let recomputed_seal = hmac_seal_hex(&key_hex, &stored_json)?;
+            if recomputed_seal != stored_seal {
+                return Err(KernelError::new(
+                    KernelErrorCode::ForgedIssuer,
+                    "published intent seal mismatch; store tampered",
+                ));
+            }
+            let bundle: serde_json::Value = serde_json::from_str(&stored_json).map_err(|_| {
+                KernelError::new(
+                    KernelErrorCode::StoreCorrupt,
+                    "published intent is not JSON",
+                )
+            })?;
+            if field_str(&bundle, "commandId")? != grant.command_id
+                || field_str(&bundle, "requestDigest")? != grant.request_digest
+                || field_str(&bundle, "scope")? != grant.scope
+                || field_str(&bundle, "attemptId")? != grant.attempt_id
+                || field_str(&bundle, "taskInstanceId")? != grant.task_instance_id
+                || field_str(&bundle, "targetDigest")? != grant.target_digest
+                || field_str(&bundle, "extensionDigest")? != grant.extension_digest
+                || field_u64(&bundle, "leaseEpoch")? != grant.lease_epoch
+                || field_str(&bundle, "storeIncarnation")? != grant.store_incarnation
+            {
+                return Err(KernelError::new(
+                    KernelErrorCode::BindingMismatch,
+                    "grant disagrees with the published intent",
+                ));
+            }
+            let (ext_json, _ext_seal) = self
+                .store
+                .fetch_extension(&grant.extension_digest)?
+                .ok_or_else(|| {
+                    KernelError::new(
+                        KernelErrorCode::ForgedIssuer,
+                        "sealed extension lost after authorization",
+                    )
+                })?;
+            let ext_value: serde_json::Value = serde_json::from_str(&ext_json).map_err(|_| {
+                KernelError::new(
+                    KernelErrorCode::StoreCorrupt,
+                    "sealed extension is not JSON",
+                )
+            })?;
+            let origin = ext_value
+                .get("endpoint")
+                .and_then(|e| e.get("origin"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    KernelError::new(
+                        KernelErrorCode::StoreCorrupt,
+                        "sealed extension lacks an endpoint origin",
+                    )
+                })?;
+            if origin != grant.endpoint_origin {
+                return Err(KernelError::new(
+                    KernelErrorCode::BindingMismatch,
+                    "grant endpoint differs from the sealed extension",
+                ));
+            }
+            if !is_loopback_origin(origin) {
+                return Err(KernelError::new(
+                    KernelErrorCode::ScopeRefused,
+                    "mock scope requires a loopback-local endpoint",
+                ));
+            }
+            let cred = ext_value
+                .get("credentialRef")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    KernelError::new(
+                        KernelErrorCode::StoreCorrupt,
+                        "sealed extension lacks a credential reference",
+                    )
+                })?;
+            if cred != grant.credential_ref {
+                return Err(KernelError::new(
+                    KernelErrorCode::BindingMismatch,
+                    "grant credential differs from the sealed extension",
+                ));
+            }
+            let receipt = self.store.read_receipt(&grant.command_id)?.ok_or_else(|| {
+                KernelError::new(
+                    KernelErrorCode::DeliveryInvalid,
+                    "no accepted receipt for this grant",
+                )
+            })?;
+            if receipt.attempt_id != grant.attempt_id
+                || receipt.task_instance_id != grant.task_instance_id
+                || receipt.lease_epoch != grant.lease_epoch
+                || receipt.store_incarnation != grant.store_incarnation
+                || receipt.target_digest != grant.target_digest
+            {
+                return Err(KernelError::new(
+                    KernelErrorCode::BindingMismatch,
+                    "grant disagrees with the accepted receipt",
+                ));
+            }
+            let current = self
+                .store
+                .current_generation(&grant.task_instance_id, "native")?;
+            let (epoch_now, incarnation_now, _protected) = match current {
+                Some(g) => (g.epoch, g.incarnation, g.witness_protected),
+                None => {
+                    return Err(KernelError::new(
+                        KernelErrorCode::StaleLease,
+                        "generation vanished after authorization",
+                    ))
+                }
+            };
+            if epoch_now != grant.lease_epoch || incarnation_now != grant.store_incarnation {
+                return Err(KernelError::new(
+                    KernelErrorCode::StaleLease,
+                    "generation advanced after authorization; grant is stale",
+                ));
+            }
+            match self.witness.as_ref() {
+                None => {
+                    return Err(KernelError::new(
+                        KernelErrorCode::WitnessRequired,
+                        "dispatch needs the independent witness",
+                    ))
+                }
+                Some(w) => {
+                    let gkey = nexus_contracts::generation_key(&grant.task_instance_id, "native");
+                    match w.read(&gkey)? {
+                        Some(rec) => {
+                            if rec.max_epoch > epoch_now {
+                                return Err(KernelError::new(
+                                    KernelErrorCode::RollbackDetected,
+                                    "store epoch is behind the witness maximum",
+                                ));
+                            }
+                        }
+                        None => {
+                            if _protected {
+                                return Err(KernelError::new(
+                                    KernelErrorCode::ReconciliationRequired,
+                                    "witness record lost after protection was established",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(NativeDispatchGrant {
+                command_id: grant.command_id.clone(),
+                attempt_id: grant.attempt_id.clone(),
+                request_digest: grant.request_digest.clone(),
+                endpoint_origin: grant.endpoint_origin.clone(),
+                scope: grant.scope.clone(),
+                granted_at_utc: grant.granted_at_utc.clone(),
             })
         })
     }

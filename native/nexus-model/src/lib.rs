@@ -16,6 +16,7 @@
 //! issuance, retry/resume semantics (unknown outcomes stay unknown), and a
 //! second model router (the Registry remains the only model authority).
 
+pub mod authorized;
 pub mod error;
 pub mod pin;
 pub mod prepare;
@@ -27,6 +28,7 @@ pub mod target;
 pub mod testkit;
 pub mod transport;
 
+pub use authorized::dispatch_authorized;
 pub use error::{redact, ModelError, ModelErrorCode};
 pub use pin::VerifiedExecutionPin;
 pub use prepare::{

@@ -585,17 +585,27 @@ fn do_dispatch_authorize(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value
         endpoint_origin,
         credential_ref,
     };
-    match kernel.authorize_native_dispatch(&auth_req) {
+    match kernel.authorize_sealed_dispatch(&auth_req) {
         Ok(grant) => ok(
             &req.id,
             serde_json::json!({
                 "grant": {
                     "commandId": grant.command_id,
                     "attemptId": grant.attempt_id,
+                    "taskInstanceId": grant.task_instance_id,
                     "requestDigest": grant.request_digest,
                     "endpointOrigin": grant.endpoint_origin,
                     "scope": grant.scope,
+                    "targetDigest": grant.target_digest,
+                    "extensionDigest": grant.extension_digest,
+                    "leaseEpoch": grant.lease_epoch,
+                    "storeIncarnation": grant.store_incarnation,
+                    "credentialRef": grant.credential_ref,
+                    "issuedAtMs": grant.issued_at_ms,
+                    "expiresAtMs": grant.expires_at_ms,
+                    "nonceHex": grant.nonce_hex,
                     "grantedAtUtc": grant.granted_at_utc,
+                    "tagHex": grant.tag_hex,
                 }
             }),
         ),

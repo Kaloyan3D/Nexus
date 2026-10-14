@@ -124,6 +124,11 @@ enum AttemptOutcome {
     /// Uncertain outcome: bytes may exist provider-side. Resuming needs a
     /// verified continuation (not issued in A2.2).
     Uncertain { request_digest: String },
+    /// Authorized dispatch completed a network send for these exact bytes
+    /// (A2.4 grant-consumption record). The grant is spent: re-presenting it
+    /// for the same attempt refuses without new bytes, so a replayed grant
+    /// can never cause a second billable call through the same store.
+    Sent { request_digest: String },
 }
 
 /// Suppresses duplicate and replayed provider attempts process-wide.
@@ -180,6 +185,16 @@ impl AttemptStore {
                 ModelErrorCode::DuplicateAttempt,
                 "attempt id was already committed with different request bytes (replay refused)",
             )),
+            Some(AttemptOutcome::Sent { request_digest: sent }) if sent == request_digest => {
+                Err(ModelError::new(
+                    ModelErrorCode::DuplicateAttempt,
+                    "attempt was already dispatched with these bytes (grant consumed; replay refused, no second provider call)",
+                ))
+            }
+            Some(AttemptOutcome::Sent { .. }) => Err(ModelError::new(
+                ModelErrorCode::DuplicateAttempt,
+                "attempt id was already dispatched with different request bytes (replay refused)",
+            )),
             Some(AttemptOutcome::Uncertain { request_digest }) => Err(ModelError::new(
                 ModelErrorCode::ContinuationRequired,
                 format!(
@@ -210,6 +225,17 @@ impl AttemptStore {
         tagged.message = crate::error::redact(&tagged.message);
         self.entries
             .insert(attempt_id.to_owned(), AttemptOutcome::Failed(tagged));
+    }
+
+    /// Record a completed authorized send (grant consumed; never re-sendable).
+    /// The request digest binds the record to the exact bytes that left.
+    pub fn record_sent(&mut self, attempt_id: &str, request_digest: &str) {
+        self.entries.insert(
+            attempt_id.to_owned(),
+            AttemptOutcome::Sent {
+                request_digest: request_digest.to_owned(),
+            },
+        );
     }
 
     /// Record an uncertain outcome (never replayable, never re-sendable).

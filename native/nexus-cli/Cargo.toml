@@ -1,0 +1,17 @@
+[package]
+name = "nexus-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Nexus native CLI (A2.4): independent command-line interface over nexus-client"
+license = "MIT"
+
+[[bin]]
+name = "nexus"
+path = "src/main.rs"
+
+[dependencies]
+nexus-client = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
