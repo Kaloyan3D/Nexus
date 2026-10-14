@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-mock-conversations"
+description = "Enables the list_mock_conversations command without any pre-configured scope."
+commands.allow = ["list_mock_conversations"]
+
+[[permission]]
+identifier = "deny-list-mock-conversations"
+description = "Denies the list_mock_conversations command without any pre-configured scope."
+commands.deny = ["list_mock_conversations"]

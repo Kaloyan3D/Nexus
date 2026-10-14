@@ -81,3 +81,33 @@ fn config_show_carries_no_secrets() {
     assert!(!raw.contains("sk-"));
     assert!(!raw.contains("Bearer"));
 }
+
+#[test]
+fn mock_run_streaming_reports_ordered_steps_and_real_checks() {
+    let mut steps: Vec<String> = Vec::new();
+    let mut stream_idx: Vec<u64> = Vec::new();
+    let r = run_mock_streaming("hi", &mut |p| match p {
+        MockProgress::Step { id, .. } => steps.push(id),
+        MockProgress::Stream(s) => stream_idx.push(s.index),
+        MockProgress::Conversation { .. } => {}
+    })
+    .expect("mock run");
+    assert_eq!(steps.first().map(String::as_str), Some("isolated-store"));
+    assert!(steps.contains(&"sealed-grant".to_owned()));
+    assert!(stream_idx.windows(2).all(|w| w[0] < w[1]));
+    assert!(
+        r.checks.iter().all(|c| c.status == "pass"),
+        "{:?}",
+        r.checks
+    );
+    assert!(r.checks.iter().any(|c| c.id == "dispatch-disabled"));
+    assert_eq!(r.stream.len(), r.events.len());
+    assert!(!r.text.is_empty());
+}
+
+#[test]
+fn journal_for_task_rejects_empty_ids() {
+    let cfg = ClientConfig::resolve(Some("/nonexistent.sock".into()), None, false).unwrap();
+    assert!(journal_for_task(&cfg, "", "native").is_err());
+    assert!(journal_for_task(&cfg, "task_x", "").is_err());
+}

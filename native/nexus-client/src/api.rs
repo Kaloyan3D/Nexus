@@ -58,6 +58,26 @@ pub fn journal(cfg: &ClientConfig, limit: u64) -> Result<serde_json::Value, Clie
     interpret_response(&ipc_roundtrip(&cfg.socket_path, &frame, IPC_TIMEOUT_MS)?)
 }
 
+/// Task-scoped journal read (the daemon's `journal` command requires a task
+/// instance id and backend; this is the form the daemon actually serves).
+pub fn journal_for_task(
+    cfg: &ClientConfig,
+    task_instance_id: &str,
+    backend: &str,
+) -> Result<serde_json::Value, ClientError> {
+    if task_instance_id.is_empty() || backend.is_empty() {
+        return Err(ClientError::usage(
+            "task instance id and backend must not be empty",
+        ));
+    }
+    let frame = read_request(
+        "nexus-journal-task",
+        "journal",
+        serde_json::json!({ "taskInstanceId": task_instance_id, "backend": backend }),
+    );
+    interpret_response(&ipc_roundtrip(&cfg.socket_path, &frame, IPC_TIMEOUT_MS)?)
+}
+
 /// Store digest (read-only integrity pin).
 pub fn digest(cfg: &ClientConfig) -> Result<serde_json::Value, ClientError> {
     req(cfg, "nexus-digest", "digest")

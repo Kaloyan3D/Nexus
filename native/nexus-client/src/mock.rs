@@ -25,11 +25,68 @@ pub struct MockRunReport {
     pub usage_in: u64,
     pub usage_out: u64,
     pub finish_reason: String,
+    /// Structured stream fragments in wire order (derived from real events).
+    pub stream: Vec<MockStreamItem>,
+    /// Verification checks, each the outcome of a real step of this run.
+    pub checks: Vec<MockCheck>,
+}
+
+/// One normalized stream item from the mock provider (wire order).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockStreamItem {
+    pub index: u64,
+    /// `text` | `reasoning` | `tool-fragment` | `usage`.
+    pub kind: String,
+    pub content: String,
+}
+
+/// One verification check produced by an actually executed step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockCheck {
+    pub id: String,
+    pub label: String,
+    /// `pass` | `fail`.
+    pub status: String,
+    pub detail: String,
+}
+
+/// Progress notification emitted while the isolated mock workflow runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MockProgress {
+    /// A workflow step completed successfully.
+    Step { id: String, label: String },
+    /// One provider stream item, in wire order.
+    Stream(MockStreamItem),
+    /// The durable conversation this run is being recorded into.
+    Conversation { id: String },
 }
 
 /// Run one isolated mock task. `prompt` is user content for the mock body
 /// only; it never reaches a live provider.
 pub fn run_mock(prompt: &str) -> Result<MockRunReport, ClientError> {
+    run_mock_streaming(prompt, &mut |_| {})
+}
+
+/// Like [`run_mock`], reporting each completed step and stream item in order.
+/// Stream items are delivered in wire order after the single authorized send
+/// returns; no event is fabricated.
+pub fn run_mock_streaming(
+    prompt: &str,
+    on_progress: &mut dyn FnMut(MockProgress),
+) -> Result<MockRunReport, ClientError> {
+    let mut checks: Vec<MockCheck> = Vec::new();
+    let mut step = |id: &str, label: &str, detail: &str, cb: &mut dyn FnMut(MockProgress)| {
+        checks.push(MockCheck {
+            id: id.to_owned(),
+            label: label.to_owned(),
+            status: "pass".to_owned(),
+            detail: detail.to_owned(),
+        });
+        cb(MockProgress::Step {
+            id: id.to_owned(),
+            label: label.to_owned(),
+        });
+    };
     if prompt.trim().is_empty() {
         return Err(ClientError::usage("prompt must not be empty"));
     }
@@ -39,6 +96,12 @@ pub fn run_mock(prompt: &str) -> Result<MockRunReport, ClientError> {
     let wit = dir.path().join("mock.wit.db");
     let mut kernel = nexus_kernel::Kernel::open(&db, Some(&wit))
         .map_err(|e| ClientError::internal(format!("mock kernel unavailable: {e}")))?;
+    step(
+        "isolated-store",
+        "Isolated throwaway kernel store opened",
+        "tempdir store + witness; never the daemon store",
+        on_progress,
+    );
     let task = "task-mock-cli";
     let attempt = "attempt-mock-1";
     let command = "cmd-mock-1";
@@ -93,6 +156,12 @@ pub fn run_mock(prompt: &str) -> Result<MockRunReport, ClientError> {
         )
         .map_err(|e| ClientError::internal(format!("mock prepare: {e}")))?;
     let request_digest = prepared.request_digest.clone();
+    step(
+        "request-prepared",
+        "Request prepared and digest bound",
+        &request_digest,
+        on_progress,
+    );
     let attested = runtime
         .attest(&pin, &issued, &snapshot, &target, prepared)
         .map_err(|e| ClientError::internal(format!("mock attest: {e}")))?;
@@ -164,6 +233,12 @@ pub fn run_mock(prompt: &str) -> Result<MockRunReport, ClientError> {
             credential_ref: "credential://connections/connection".to_owned(),
         })
         .map_err(|e| ClientError::internal(format!("mock authorize: {e}")))?;
+    step(
+        "sealed-grant",
+        "Sealed mock-e2e dispatch grant minted by the kernel",
+        "scope mock-e2e; exactly-once; 300 s TTL",
+        on_progress,
+    );
     let script2 = MockScript::CleanStream {
         body: nexus_model::testkit::load_fixture("basic-text").sse_body,
     };
@@ -185,15 +260,82 @@ pub fn run_mock(prompt: &str) -> Result<MockRunReport, ClientError> {
     )
     .map_err(|e| ClientError::internal(format!("mock dispatch: {}", e.error)))?;
     let kinds: Vec<String> = report.events.iter().map(|e| format!("{e:?}")).collect();
+    let mut text = String::new();
+    let (mut usage_in, mut usage_out) = (0u64, 0u64);
+    let mut stream: Vec<MockStreamItem> = Vec::new();
+    for (i, ev) in report.events.iter().enumerate() {
+        let item = match ev {
+            ModelEvent::TextDelta(t) => {
+                text.push_str(t);
+                MockStreamItem {
+                    index: i as u64,
+                    kind: "text".to_owned(),
+                    content: t.clone(),
+                }
+            }
+            ModelEvent::ReasoningDelta(t) => MockStreamItem {
+                index: i as u64,
+                kind: "reasoning".to_owned(),
+                content: t.clone(),
+            },
+            ModelEvent::ToolFragment { name, delta, .. } => MockStreamItem {
+                index: i as u64,
+                kind: "tool-fragment".to_owned(),
+                content: format!("{name}: {delta}"),
+            },
+            ModelEvent::Usage(u) => {
+                usage_in = u.input_tokens;
+                usage_out = u.output_tokens;
+                MockStreamItem {
+                    index: i as u64,
+                    kind: "usage".to_owned(),
+                    content: format!("input={} output={}", u.input_tokens, u.output_tokens),
+                }
+            }
+        };
+        on_progress(MockProgress::Stream(item.clone()));
+        stream.push(item);
+    }
+    step(
+        "dispatch-authorized",
+        "Authorized send completed against loopback mock provider",
+        "no live provider traffic; Kernel::dispatch_enabled() stays false",
+        on_progress,
+    );
+    checks.push(MockCheck {
+        id: "dispatch-disabled".to_owned(),
+        label: "Production dispatch remains disabled".to_owned(),
+        status: if nexus_kernel::Kernel::dispatch_enabled() {
+            "fail"
+        } else {
+            "pass"
+        }
+        .to_owned(),
+        detail: "Kernel::dispatch_enabled() == false".to_owned(),
+    });
+    let finish = report.finish_reason.clone();
+    checks.push(MockCheck {
+        id: "stream-terminal".to_owned(),
+        label: "Stream reached a terminal finish reason".to_owned(),
+        status: if finish.is_some() && !report.truncated {
+            "pass"
+        } else {
+            "fail"
+        }
+        .to_owned(),
+        detail: finish.clone().unwrap_or_else(|| "none".to_owned()),
+    });
     Ok(MockRunReport {
-        text: String::from("Hello, world."),
+        text,
         attempt_id: attempt.to_owned(),
         command_id: command.to_owned(),
         request_digest: attested.prepared().request_digest.clone(),
         events: kinds,
-        usage_in: 12,
-        usage_out: 7,
-        finish_reason: report.finish_reason.unwrap_or_else(|| "stop".to_owned()),
+        usage_in,
+        usage_out,
+        finish_reason: finish.unwrap_or_else(|| "none".to_owned()),
+        stream,
+        checks,
     })
 }
 

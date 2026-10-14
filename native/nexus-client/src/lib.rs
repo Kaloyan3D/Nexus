@@ -9,6 +9,7 @@
 
 pub mod api;
 pub mod config;
+pub mod conversation;
 pub mod error;
 pub mod mock;
 pub mod streaming;
@@ -16,11 +17,22 @@ pub mod transport;
 pub mod version;
 
 pub use api::{
-    attempt_status, cancel, digest, health, journal, models, readiness, receipt, status, task_show,
-    tasks, verify,
+    attempt_status, cancel, digest, health, journal, journal_for_task, models, readiness, receipt,
+    status, task_show, tasks, verify,
 };
-pub use config::{default_ledger_dir, default_socket_path, ClientConfig};
+pub use config::{
+    default_ledger_dir, default_sessions_root, default_socket_path, default_transcript_dir,
+    ClientConfig,
+};
+pub use conversation::{
+    conversation, list_mock_conversations, model_io, run_mock_recorded, ConversationView,
+    MockConversationSummary, ModelIoView, NO_HISTORY_MESSAGE,
+};
 pub use error::{ClientError, ExitCode};
-pub use mock::{live_blockers, run_mock, MockRunReport};
+pub use mock::{
+    live_blockers, run_mock, run_mock_streaming, MockCheck, MockProgress, MockRunReport,
+    MockStreamItem,
+};
+pub use nexus_transcript as transcript;
 pub use streaming::{poll_journal, ClientEvent};
 pub use version::{CLIENT_API_VERSION, CLIENT_API_VERSION_STR, IPC_PROTOCOL_VERSION};

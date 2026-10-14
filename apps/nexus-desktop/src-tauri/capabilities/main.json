@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "Nexus main window: read-only native client commands and isolated mock execution only. No fs, shell, http or opener plugins.",
+  "windows": ["main"],
+  "permissions": [
+    "allow-app-info",
+    "allow-runtime-status",
+    "allow-list-tasks",
+    "allow-task-journal",
+    "allow-model-catalog",
+    "allow-live-blockers",
+    "allow-run-mock",
+    "allow-conversation-read",
+    "allow-model-io-read",
+    "allow-list-mock-conversations"
+  ]
+}

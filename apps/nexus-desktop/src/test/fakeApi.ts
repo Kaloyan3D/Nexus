@@ -1,0 +1,204 @@
+import type { NativeApi } from "../lib/api";
+import type {
+  ConversationView,
+  ModelIoView,
+  TranscriptEvent,
+  MockEvent,
+  MockResult,
+  RuntimeSnapshot,
+  TaskRecord,
+  TasksResult,
+} from "../lib/contracts";
+
+export function snapshot(over: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot {
+  return {
+    connection: "connected",
+    detail: null,
+    checkedAtMs: Date.now(),
+    state: "ready",
+    trustMode: "readonly",
+    incarnation: "inc-1234567890",
+    acceptedCommands: 0,
+    totalCommands: 0,
+    eventCount: 0,
+    witnessConfigured: true,
+    witnessPresent: true,
+    reconciliationRequired: false,
+    peerUidEnforced: false,
+    socketShared: false,
+    startedAtUtc: null,
+    activeClients: 1,
+    requests: 1,
+    refusals: 0,
+    errors: 0,
+    dispatchEnabled: false,
+    readinessVerdict: "NOT_READY",
+    readinessDimensions: [],
+    ...over,
+  };
+}
+
+export function task(over: Partial<TaskRecord> = {}): TaskRecord {
+  return {
+    taskId: "TASK-0001",
+    taskInstanceId: "task_0123456789abcdef0123456789abcdef",
+    title: "Implement the registry",
+    description: "Implement the registry\n\nDetails.",
+    descriptionTruncated: false,
+    status: "ready",
+    boundEngine: "muse",
+    executionClass: "engineer_normal",
+    risk: "normal",
+    attempt: 1,
+    maxAttempts: 3,
+    baseCommit: "8b3123acaa5fa84c",
+    worktree: null,
+    createdAtUtc: "2026-09-25T14:37:14.0867405Z",
+    updatedAtUtc: "2026-09-25T15:00:00Z",
+    completedAtUtc: null,
+    acceptanceCriteria: [],
+    dependencies: [],
+    verificationRequired: ["unit"],
+    verificationOutcomes: [{ name: "unit", status: "pass", raw: "passed" }],
+    failureSignatures: [],
+    ...over,
+  };
+}
+
+export function ev(over: Partial<TranscriptEvent> & { seq: number; messageId: string }): TranscriptEvent {
+  return {
+    schema: "nexus.transcript/v1",
+    eventId: over.messageId,
+    revision: 0,
+    revisionSeq: over.seq,
+    taskInstanceId: "task_0123456789abcdef0123456789abcdef",
+    displayTaskId: "TASK-0001",
+    attemptId: "TASK-0001-A1",
+    sessionId: "session-x",
+    turn: 1,
+    kind: "assistant-message",
+    speaker: "worker",
+    actor: { agent: "aih-muse", model: "muse-spark", provider: "opencode-go" },
+    inputClass: "model-generated",
+    timestampMs: 1_790_000_000_000 + over.seq * 1000,
+    state: "final",
+    text: "hello",
+    toolName: null,
+    toolCallId: null,
+    toolInput: null,
+    isError: null,
+    errorCode: null,
+    source: "dsh-session-log",
+    recording: "recorded",
+    redactions: 0,
+    truncated: false,
+    originalLen: null,
+    ...over,
+  };
+}
+
+export function view(events: TranscriptEvent[], over: Partial<ConversationView> = {}): ConversationView {
+  return {
+    taskInstanceId: "task_0123456789abcdef0123456789abcdef",
+    source: "dsh-session-log",
+    available: events.length > 0,
+    reason: events.length ? null : "Conversation history was not recorded for this task.",
+    displayTaskId: "TASK-0001",
+    attempts: [
+      {
+        attemptId: "TASK-0001-A1",
+        sequence: 1,
+        executionClass: "muse_main",
+        sessionId: "session-x",
+        startedByTurn: 1,
+        startedAtUtc: null,
+        binding: "verified",
+      },
+    ],
+    page: {
+      events,
+      total: events.length,
+      firstSeq: events[0]?.seq ?? null,
+      lastSeq: events[events.length - 1]?.seq ?? null,
+      hasEarlier: false,
+      hasLater: false,
+      headSeq: events.reduce((m, e) => Math.max(m, e.revisionSeq), -1),
+    },
+    coverage: {
+      recordsScanned: events.length,
+      eventsEmitted: events.length,
+      recordsInvalid: 0,
+      reasoningBlocksOmitted: 0,
+      redactions: 0,
+      truncatedFields: 0,
+      nestedToolDispatchesNotRendered: 0,
+      notes: [],
+    },
+    integrityFailure: null,
+    ...over,
+  };
+}
+
+export function fakeApi(over: Partial<NativeApi> = {}): NativeApi {
+  const tasks: TasksResult = {
+    available: true,
+    source: "/ledger/tasks.json",
+    error: null,
+    tasks: [task(), task({ taskId: "TASK-0002", title: "Fix the bug", status: "failed", taskInstanceId: null })],
+  };
+  const result: MockResult = {
+    conversationId: "mock_0123456789abcdef0123456789abcdef",
+    runId: "mock-run-1",
+    mock: true,
+    text: "Hello, world.",
+    attemptId: "attempt-mock-1",
+    commandId: "cmd-mock-1",
+    requestDigest: "abc123def456abc123def456",
+    finishReason: "stop",
+    usageInput: 12,
+    usageOutput: 7,
+    checks: [{ id: "isolated-store", label: "Isolated throwaway kernel store opened", status: "pass", detail: "" }],
+    eventCount: 2,
+    durationMs: 12,
+  };
+  return {
+    appInfo: async () => ({
+      appVersion: "0.1.0",
+      clientApiVersion: 1,
+      ipcProtocol: 1,
+      platform: "linux",
+      socketPath: "/tmp/n.sock",
+      ledgerDir: "/ledger",
+      dispatchEnabled: false,
+      liveReady: false,
+    }),
+    runtimeStatus: async () => snapshot(),
+    listTasks: async () => tasks,
+    taskJournal: async () => ({ events: [], receiptCount: 0, truncated: false }),
+    modelCatalog: async () => ({
+      source: "offline-mock-catalog",
+      entries: [{ model: "e2e-mock-model", scope: "mock-e2e", origin: "loopback", reasoning: "low", live: false }],
+      liveReady: false,
+      blockers: ["no live scope authorization"],
+      dispatchEnabled: false,
+    }),
+    liveBlockers: async () => ({ ready: false, dispatchEnabled: false, blockers: ["no live scope authorization"] }),
+    conversationRead: async () => view([]),
+    modelIoRead: async (id: string): Promise<ModelIoView> => ({
+      taskInstanceId: id,
+      source: "none",
+      available: false,
+      records: [],
+      note: "No verified provider request records exist for this task.",
+    }),
+    listMockConversations: async () => [],
+    runMock: async (_p: string, on: (e: MockEvent) => void) => {
+      on({ type: "started", runId: "mock-run-1" });
+      on({ type: "step", id: "isolated-store", label: "Isolated throwaway kernel store opened" });
+      on({ type: "stream", index: 0, kind: "text", content: "Hello, " });
+      on({ type: "stream", index: 1, kind: "text", content: "world." });
+      return result;
+    },
+    ...over,
+  };
+}

@@ -1,0 +1,110 @@
+import { Compass, FlaskConical, Play } from "lucide-react";
+import { relativeTime } from "../../lib/format";
+import { taskStatusView } from "../../lib/status";
+import { useNexus } from "../../state/NexusContext";
+import { Badge, StatusDot } from "../../components/ui/primitives";
+import { ActivityPanel } from "./ActivityPanel";
+import { Composer } from "./Composer";
+import { RecentTasks } from "./RecentTasks";
+
+export function WorkspacePage() {
+  const { selectedTask, selectedMock } = useNexus();
+  return (
+    <div className="nv-page nv-workspace">
+      <nav className="nv-breadcrumb" aria-label="Breadcrumb">
+        <span>Workspace</span>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page">
+          {selectedMock ? "Mock run" : selectedTask ? "Engineering Task" : "No task selected"}
+        </span>
+      </nav>
+      <Heading />
+      <Composer />
+      {selectedMock && <span className="nv-sr-only" />}
+      <div className="nv-split">
+        <RecentTasks />
+        <ActivityPanel />
+      </div>
+    </div>
+  );
+
+  function Heading() {
+    if (selectedMock) {
+      return (
+        <div className="nv-heading">
+          <div className="nv-heading__icon">
+            <FlaskConical size={20} aria-hidden="true" />
+          </div>
+          <div className="nv-heading__text">
+            <h1>{selectedMock.prompt.split("\n")[0]!.slice(0, 90)}</h1>
+            <p>Isolated mock execution. Output is fixture data from a loopback mock provider.</p>
+            <div className="nv-heading__meta">
+              <Badge tone="warning">Mock</Badge>
+              <Badge
+                tone={selectedMock.status === "failed" ? "error" : selectedMock.status === "done" ? "success" : "purple"}
+                icon={<StatusDot tone={selectedMock.status === "failed" ? "error" : selectedMock.status === "done" ? "success" : "purple"} pulse={selectedMock.status === "running"} />}
+              >
+                {selectedMock.status === "running" ? "Running" : selectedMock.status === "done" ? "Completed" : "Failed"}
+              </Badge>
+            </div>
+          </div>
+          <MainAction label="Live execution unavailable" />
+        </div>
+      );
+    }
+    if (selectedTask) {
+      const v = taskStatusView(selectedTask.status);
+      const first = selectedTask.description.split("\n").filter((l) => l.trim() && !l.trim().startsWith("#"))[0] ?? "";
+      return (
+        <div className="nv-heading">
+          <div className="nv-heading__icon">
+            <Compass size={20} aria-hidden="true" />
+          </div>
+          <div className="nv-heading__text">
+            <h1>{selectedTask.title}</h1>
+            {first && <p>{first.slice(0, 180)}</p>}
+            <div className="nv-heading__meta">
+              {selectedTask.boundEngine && <Badge tone="purple">{selectedTask.boundEngine}</Badge>}
+              <Badge mono>{selectedTask.taskId}</Badge>
+              <Badge tone={v.tone} icon={<StatusDot tone={v.tone} pulse={v.pulse} />}>
+                {v.label}
+              </Badge>
+              <span className="nv-heading__updated">
+                Updated {relativeTime(selectedTask.updatedAtUtc)}
+              </span>
+            </div>
+          </div>
+          <MainAction label="Live execution unavailable" />
+        </div>
+      );
+    }
+    return (
+      <div className="nv-heading">
+        <div className="nv-heading__icon">
+          <Compass size={20} aria-hidden="true" />
+        </div>
+        <div className="nv-heading__text">
+          <h1>Nexus workspace</h1>
+          <p>
+            Select a Controller task to inspect it, or describe a step below and run it through the
+            isolated native mock workflow.
+          </p>
+        </div>
+      </div>
+    );
+  }
+}
+
+function MainAction({ label }: { label: string }) {
+  return (
+    <button
+      type="button"
+      className="nv-btn"
+      disabled
+      title="The Kernel forbids dispatch (dispatch_enabled == false). Use Run Mock in the composer."
+    >
+      <Play size={14} aria-hidden="true" />
+      {label}
+    </button>
+  );
+}

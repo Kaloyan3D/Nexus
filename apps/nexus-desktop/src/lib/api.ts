@@ -1,0 +1,113 @@
+import { Channel, invoke } from "@tauri-apps/api/core";
+import type {
+  AppInfo,
+  ConversationQuery,
+  ConversationView,
+  MockConversationSummary,
+  ModelIoView,
+  JournalResult,
+  LiveBlockers,
+  MockEvent,
+  MockResult,
+  ModelCatalog,
+  RuntimeSnapshot,
+  TasksResult,
+  UiError,
+} from "./contracts";
+
+/** Every capability the renderer has. Mirrors the Tauri command allowlist. */
+export interface NativeApi {
+  appInfo(): Promise<AppInfo>;
+  runtimeStatus(): Promise<RuntimeSnapshot>;
+  listTasks(): Promise<TasksResult>;
+  taskJournal(taskInstanceId: string): Promise<JournalResult>;
+  modelCatalog(): Promise<ModelCatalog>;
+  liveBlockers(): Promise<LiveBlockers>;
+  runMock(prompt: string, onEvent: (e: MockEvent) => void): Promise<MockResult>;
+  conversationRead(taskInstanceId: string, q?: ConversationQuery): Promise<ConversationView>;
+  modelIoRead(taskInstanceId: string): Promise<ModelIoView>;
+  listMockConversations(): Promise<MockConversationSummary[]>;
+}
+
+export function isTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+export function asUiError(e: unknown): UiError {
+  if (e && typeof e === "object" && "code" in e && "message" in e) {
+    const o = e as { code: unknown; message: unknown };
+    return { code: String(o.code), message: String(o.message) };
+  }
+  return { code: "internal", message: e instanceof Error ? e.message : String(e) };
+}
+
+export const tauriApi: NativeApi = {
+  appInfo: () => invoke<AppInfo>("app_info"),
+  runtimeStatus: () => invoke<RuntimeSnapshot>("runtime_status"),
+  listTasks: () => invoke<TasksResult>("list_tasks"),
+  taskJournal: (taskInstanceId) => invoke<JournalResult>("task_journal", { taskInstanceId }),
+  modelCatalog: () => invoke<ModelCatalog>("model_catalog"),
+  liveBlockers: () => invoke<LiveBlockers>("live_blockers"),
+  runMock: (prompt, onEvent) => {
+    const channel = new Channel<MockEvent>();
+    channel.onmessage = onEvent;
+    return invoke<MockResult>("run_mock", { prompt, onEvent: channel });
+  },
+  conversationRead: (taskInstanceId, q = {}) =>
+    invoke<ConversationView>("conversation_read", {
+      taskInstanceId,
+      afterSeq: q.afterSeq ?? null,
+      beforeSeq: q.beforeSeq ?? null,
+      limit: q.limit ?? null,
+    }),
+  modelIoRead: (taskInstanceId) => invoke<ModelIoView>("model_io_read", { taskInstanceId }),
+  listMockConversations: () => invoke<MockConversationSummary[]>("list_mock_conversations"),
+};
+
+const notInShell: UiError = {
+  code: "unavailable",
+  message: "Not running inside the Nexus native shell; no backend is reachable.",
+};
+
+/** Used in a plain browser (e.g. `vite dev`): everything reports unavailable. */
+export const unavailableApi: NativeApi = {
+  appInfo: () => Promise.reject(notInShell),
+  runtimeStatus: () =>
+    Promise.resolve({
+      connection: "unavailable",
+      detail: notInShell.message,
+      checkedAtMs: Date.now(),
+      state: null,
+      trustMode: null,
+      incarnation: null,
+      acceptedCommands: null,
+      totalCommands: null,
+      eventCount: null,
+      witnessConfigured: null,
+      witnessPresent: null,
+      reconciliationRequired: null,
+      peerUidEnforced: null,
+      socketShared: null,
+      startedAtUtc: null,
+      activeClients: null,
+      requests: null,
+      refusals: null,
+      errors: null,
+      dispatchEnabled: null,
+      readinessVerdict: null,
+      readinessDimensions: [],
+    }),
+  listTasks: () =>
+    Promise.resolve({ available: false, source: null, error: notInShell.message, tasks: [] }),
+  taskJournal: () => Promise.reject(notInShell),
+  modelCatalog: () => Promise.reject(notInShell),
+  liveBlockers: () => Promise.reject(notInShell),
+  runMock: () => Promise.reject(notInShell),
+  conversationRead: () => Promise.reject(notInShell),
+  modelIoRead: () => Promise.reject(notInShell),
+  listMockConversations: () => Promise.resolve([]),
+};
+
+export function defaultApi(): NativeApi {
+  return isTauri() ? tauriApi : unavailableApi;
+}

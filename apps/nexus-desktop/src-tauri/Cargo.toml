@@ -1,0 +1,38 @@
+[package]
+name = "nexus-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "Nexus - native desktop GUI over nexus-client v1 (A2.5)"
+license = "MIT"
+default-run = "nexus-desktop"
+
+# Standalone workspace: the Tauri dependency tree must not enter the native
+# core workspace (native/Cargo.lock stays untouched).
+[workspace]
+
+[lib]
+name = "nexus_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+nexus-client = { path = "../../../native/nexus-client" }
+
+[dev-dependencies]
+tempfile = "3"
+
+# Untrusted-log decoding (zstd) is CPU heavy; keep dependencies optimized in dev.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
