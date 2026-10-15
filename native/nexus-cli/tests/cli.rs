@@ -220,3 +220,24 @@ fn offline_run_is_double_gated_and_labelled() {
     );
     assert_eq!(v["result"]["stats"]["matchesReturned"], 1);
 }
+
+#[test]
+fn tools_events_needs_scope_and_reports_disconnected_daemon() {
+    let (c, _, se) = run(&["tools", "events"]);
+    assert_eq!(c, 2, "{se}");
+    let (c, _, se) = run(&["tools", "events", "--attempt", "A1"]);
+    assert_eq!(c, 2, "{se}");
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("none.sock");
+    let (c, _, _) = run(&[
+        "--socket",
+        sock.to_str().unwrap(),
+        "tools",
+        "events",
+        "--task",
+        "task_0123456789abcdef0123456789abcdef",
+        "--attempt",
+        "TASK-1-A1",
+    ]);
+    assert_eq!(c, 3);
+}

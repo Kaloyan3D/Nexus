@@ -27,6 +27,8 @@ pub enum ToolErrorCode {
     WorkspaceInvalid,
     WorkspaceMismatch,
     Cancelled,
+    /// Authoritative revocation/fencing observed mid-execution.
+    Revoked,
     AuthorizationRefused,
     IoError,
 }
@@ -54,6 +56,7 @@ impl ToolErrorCode {
             Self::WorkspaceInvalid => "workspace-invalid",
             Self::WorkspaceMismatch => "workspace-mismatch",
             Self::Cancelled => "cancelled",
+            Self::Revoked => "revoked",
             Self::AuthorizationRefused => "authorization-refused",
             Self::IoError => "io-error",
         }

@@ -338,6 +338,22 @@ pub fn task_journal(cfg: &nc::ClientConfig, task_instance_id: &str) -> Result<Jo
         .map_err(|e| ui_error(&e))
 }
 
+/// Read-only tool events for a task instance, grouped by the attempts the
+/// Controller attempt journal records. The renderer never supplies (or
+/// guesses) an attempt id and never executes tools.
+pub fn tool_events(
+    cfg: &nc::ClientConfig,
+    task_instance_id: &str,
+) -> Result<nc::TaskToolEvents, UiError> {
+    if !valid_instance_id(task_instance_id) {
+        return Err(UiError {
+            code: "bad-usage".to_owned(),
+            message: "task instance id is malformed".to_owned(),
+        });
+    }
+    nc::tool_events_for_task(cfg, task_instance_id).map_err(|e| ui_error(&e))
+}
+
 pub fn model_catalog() -> ModelCatalog {
     let m = nc::models();
     let entries = m

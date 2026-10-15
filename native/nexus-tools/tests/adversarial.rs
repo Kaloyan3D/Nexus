@@ -6,8 +6,7 @@ use common::*;
 use nexus_kernel::Kernel;
 use nexus_tools::workspace::{RelPath, Workspace, WorkspacePolicy};
 use nexus_tools::{
-    authorize, execute, prepare, tool_events_from_journal, CancellationToken, ToolBudgets,
-    ToolEventStatus,
+    authorize, execute, tool_events_from_journal, CancellationToken, ToolBudgets, ToolEventStatus,
 };
 use serde_json::json;
 
@@ -82,7 +81,7 @@ fn traversal_and_encoded_forms_are_refused_with_zero_fs_access() {
     ] {
         let r = fx.request("fs.read", json!({"path": bad}));
         let cancel = CancellationToken::new(&r.cancellation_id);
-        let call = authorize(&mut fx.kernel, prepare(r).unwrap()).unwrap();
+        let call = authorize(&mut fx.kernel, prepare_b(r).unwrap()).unwrap();
         let res = execute(&mut fx.kernel, &call, &cancel).unwrap();
         assert_eq!(
             res.result.error.as_ref().map(|e| e.code.as_str()),
@@ -269,21 +268,27 @@ fn assert_no_start(fx: &Fx) {
 use common::Fx;
 
 #[test]
-fn unauthorized_workspace_grant_for_other_root_is_refused() {
+fn foreign_or_replaced_workspace_root_is_refused_before_any_read() {
     let mut fx = fixture("ws-mismatch");
     fx.write("a.txt", b"a\n");
     let other = fx.dir.path().join("other-ws");
     std::fs::create_dir_all(&other).unwrap();
     std::fs::write(other.join("a.txt"), "OTHER-WS\n").unwrap();
-    let (call, cancel) = fx.authorized("fs.read", json!({"path": "a.txt"}));
-    // Swap in a prepared request for a *different* workspace but reuse grant.
-    let mut r2 = call.prepared().request().clone();
-    r2.workspace_root = other.to_str().unwrap().to_owned();
-    let p2 = prepare(r2).unwrap();
-    let forged = nexus_tools::AuthorizedToolCall::from_parts(p2, call.grant().clone());
-    let r = execute(&mut fx.kernel, &forged, &cancel);
-    assert_eq!(r.unwrap_err().code.as_str(), "workspace-mismatch");
-    assert_eq!(forged.prepared().workspace().access_count(), 0);
+    // A binding pointing at a different directory (forged root) cannot be
+    // prepared: identity differs from the sealed Controller binding.
+    let mut forged = fx.binding();
+    forged.root_path = other.to_str().unwrap().to_owned();
+    let r = fx.request("fs.read", json!({"path": "a.txt"}));
+    let e = nexus_tools::prepare(r, &forged).unwrap_err();
+    assert_eq!(e.code.as_str(), "workspace-mismatch");
+    // Root replacement: move the authorized dir away, put another in place.
+    let moved = fx.dir.path().join("moved-ws");
+    std::fs::rename(&fx.ws, &moved).unwrap();
+    std::fs::create_dir_all(&fx.ws).unwrap();
+    std::fs::write(fx.ws.join("a.txt"), "REPLACED\n").unwrap();
+    let r = fx.request("fs.read", json!({"path": "a.txt"}));
+    let e = fx.prepare_req(r).unwrap_err();
+    assert_eq!(e.code.as_str(), "workspace-mismatch", "{e}");
     assert_no_start(&fx);
 }
 
@@ -304,7 +309,7 @@ fn stale_attempt_generation_is_refused_before_any_read() {
     assert_no_start(&fx);
     // And a fresh request that still carries the old epoch cannot even be authorized.
     let r = fx.request("fs.read", json!({"path": "a.txt"}));
-    let p = prepare(r).unwrap();
+    let p = prepare_b(r).unwrap();
     let e = authorize(&mut fx.kernel, p).unwrap_err();
     assert!(e.message.contains("stale-lease"), "{e}");
 }
@@ -317,13 +322,34 @@ fn forged_requests_and_grants_are_refused() {
     // Unknown command identity.
     let mut r = fx.request("fs.read", json!({"path": "a.txt"}));
     r.command_id = "cmd-never-accepted".into();
-    let e = authorize(&mut fx.kernel, prepare(r).unwrap()).unwrap_err();
+    // The Controller binding belongs to the real command, so preparing a
+    // request for another command cannot even start.
+    let b = fx.binding();
+    let e = nexus_tools::prepare(r.clone(), &b).unwrap_err();
+    assert_eq!(e.code.as_str(), "workspace-mismatch");
+    // Even a hand-forged binding for the unknown command is refused by the
+    // Kernel: it has no sealed binding and no accepted receipt for it.
+    let mut fb = b.clone();
+    fb.command_id = "cmd-never-accepted".into();
+    let e = authorize(&mut fx.kernel, nexus_tools::prepare(r, &fb).unwrap()).unwrap_err();
     assert_eq!(e.code.as_str(), "authorization-refused");
 
     // Wrong attempt for a real command.
     let mut r = fx.request("fs.read", json!({"path": "a.txt"}));
     r.attempt_id = "attempt-evil".into();
-    let e = authorize(&mut fx.kernel, prepare(r).unwrap()).unwrap_err();
+    let b = fx.binding();
+    assert_eq!(
+        nexus_tools::prepare(r.clone(), &b)
+            .unwrap_err()
+            .code
+            .as_str(),
+        "workspace-mismatch"
+    );
+    // A forged binding that claims the evil attempt is caught by the Kernel
+    // (the sealed binding for the real command says otherwise).
+    let mut fb = b.clone();
+    fb.attempt_id = "attempt-evil".into();
+    let e = authorize(&mut fx.kernel, nexus_tools::prepare(r, &fb).unwrap()).unwrap_err();
     assert!(e.message.contains("binding-mismatch"), "{e}");
 
     // Arbitrary JSON with unknown / extra fields cannot even deserialize.
@@ -346,7 +372,7 @@ fn forged_requests_and_grants_are_refused() {
             _ => g.tag_hex = "00".repeat(32),
         }
         // Rebuild a call carrying the forged grant over the same prepared request.
-        let p = prepare(call.prepared().request().clone()).unwrap();
+        let p = prepare_b(call.prepared().request().clone()).unwrap();
         let forged = nexus_tools::AuthorizedToolCall::from_parts(p, g);
         let res = execute(&mut fx.kernel, &forged, &cancel);
         assert!(res.is_err(), "mutation {mutate} must be refused");
@@ -364,7 +390,7 @@ fn arguments_swapped_after_authorization_are_refused() {
     let mut r = call.prepared().request().clone();
     r.args = json!({"path": "other.txt"});
     let swapped =
-        nexus_tools::AuthorizedToolCall::from_parts(prepare(r).unwrap(), call.grant().clone());
+        nexus_tools::AuthorizedToolCall::from_parts(prepare_b(r).unwrap(), call.grant().clone());
     let e = execute(&mut fx.kernel, &swapped, &cancel).unwrap_err();
     assert!(e.message.contains("binding-mismatch"), "{e}");
     assert_eq!(swapped.prepared().workspace().access_count(), 0);
@@ -378,7 +404,7 @@ fn budget_inflation_after_authorization_is_refused() {
     let mut r = call.prepared().request().clone();
     r.budgets.max_file_bytes = 8 * 1024 * 1024;
     let inflated =
-        nexus_tools::AuthorizedToolCall::from_parts(prepare(r).unwrap(), call.grant().clone());
+        nexus_tools::AuthorizedToolCall::from_parts(prepare_b(r).unwrap(), call.grant().clone());
     let e = execute(&mut fx.kernel, &inflated, &cancel).unwrap_err();
     assert!(e.message.contains("binding-mismatch"), "{e}");
 }
@@ -393,13 +419,13 @@ fn replay_and_duplicate_execution_are_refused() {
     let again = execute(&mut fx.kernel, &call, &cancel).unwrap_err();
     assert!(again.message.contains("command-conflict"), "{again}");
     // Re-presenting through a fresh prepared view of the same request too.
-    let p = prepare(call.prepared().request().clone()).unwrap();
+    let p = prepare_b(call.prepared().request().clone()).unwrap();
     let dup = nexus_tools::AuthorizedToolCall::from_parts(p, call.grant().clone());
     let e = execute(&mut fx.kernel, &dup, &cancel).unwrap_err();
     assert!(e.message.contains("command-conflict"), "{e}");
     assert_eq!(dup.prepared().workspace().access_count(), 0);
     // Re-authorizing the same request id is also a conflict.
-    let p = prepare(call.prepared().request().clone()).unwrap();
+    let p = prepare_b(call.prepared().request().clone()).unwrap();
     let e = authorize(&mut fx.kernel, p).unwrap_err();
     assert!(e.message.contains("command-conflict"), "{e}");
     let phases = fx.journal_phases();
@@ -434,7 +460,7 @@ fn dispatch_stays_disabled_and_no_write_tool_exists() {
     let mut fx = fixture("nowrite");
     for t in ["fs.write", "fs.edit", "shell.exec", "fs.delete"] {
         let r = fx.request(t, json!({}));
-        assert_eq!(prepare(r).unwrap_err().code.as_str(), "unsupported-tool");
+        assert_eq!(prepare_b(r).unwrap_err().code.as_str(), "unsupported-tool");
     }
 }
 
@@ -455,7 +481,7 @@ fn oversized_files_are_refused_without_reading() {
     // Default ceiling clamps hostile budget requests.
     let mut r = fx.request("fs.read", json!({"path": "big.txt"}));
     r.budgets.max_file_bytes = u64::MAX;
-    let p = prepare(r).unwrap();
+    let p = prepare_b(r).unwrap();
     assert_eq!(p.budgets().max_file_bytes, 8 * 1024 * 1024);
 }
 
@@ -699,7 +725,11 @@ fn long_lines_are_clipped_on_char_boundaries() {
     let c = o.result.output.as_ref().unwrap()["content"]
         .as_str()
         .unwrap();
-    assert_eq!(c.trim_end().chars().count(), 50);
+    let body = c
+        .trim_end()
+        .strip_suffix("[TRUNCATED:nexus]")
+        .expect("inline marker");
+    assert_eq!(body.trim_end().chars().count(), 50);
     assert!(o
         .result
         .truncation
@@ -800,7 +830,6 @@ fn concurrent_kernels_journal_exactly_once_and_stay_chained() {
     std::fs::write(fx.ws.join("a.txt"), "needle\n").unwrap();
     let db = fx.db.clone();
     let witness = fx.witness.clone();
-    let ws = fx.ws.clone();
     let (task, attempt, command, epoch, inc) = (
         fx.task.clone(),
         fx.attempt.clone(),
@@ -811,10 +840,9 @@ fn concurrent_kernels_journal_exactly_once_and_stay_chained() {
     drop(fx.kernel);
     let mut handles = Vec::new();
     for n in 0..8 {
-        let (db, witness, ws, task, attempt, command, inc) = (
+        let (db, witness, task, attempt, command, inc) = (
             db.clone(),
             witness.clone(),
-            ws.clone(),
             task.clone(),
             attempt.clone(),
             command.clone(),
@@ -837,10 +865,9 @@ fn concurrent_kernels_journal_exactly_once_and_stay_chained() {
                     tool_version: 1,
                     args: json!({"query": "needle"}),
                     budgets: ToolBudgets::default(),
-                    workspace_root: ws.to_str().unwrap().into(),
                 };
                 let c = CancellationToken::new(&req.cancellation_id);
-                let call = authorize(&mut k, prepare(req).unwrap()).unwrap();
+                let call = authorize(&mut k, prepare_b(req).unwrap()).unwrap();
                 let o = execute(&mut k, &call, &c).unwrap();
                 assert_eq!(o.result.stats.matches_returned, 1);
                 oks += 1;
@@ -859,7 +886,6 @@ fn concurrent_duplicate_authorization_has_exactly_one_winner() {
     let fx = fixture("dupwin");
     std::fs::write(fx.ws.join("a.txt"), "x\n").unwrap();
     let (db, witness) = (fx.db.clone(), fx.witness.clone());
-    let base = fx.ws.to_str().unwrap().to_owned();
     let mk = move || nexus_tools::ToolRequestV1 {
         schema_version: 1,
         request_id: "same-request".into(),
@@ -873,7 +899,6 @@ fn concurrent_duplicate_authorization_has_exactly_one_winner() {
         tool_version: 1,
         args: json!({"path": "a.txt"}),
         budgets: ToolBudgets::default(),
-        workspace_root: base.clone(),
     };
     drop(fx.kernel);
     let mut hs = Vec::new();
@@ -881,7 +906,7 @@ fn concurrent_duplicate_authorization_has_exactly_one_winner() {
         let (db, witness, req) = (db.clone(), witness.clone(), mk());
         hs.push(std::thread::spawn(move || {
             let mut k = Kernel::open(&db, Some(&witness)).unwrap();
-            authorize(&mut k, prepare(req).unwrap()).is_ok()
+            authorize(&mut k, prepare_b(req).unwrap()).is_ok()
         }));
     }
     let winners = hs

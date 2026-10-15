@@ -158,7 +158,6 @@ impl ToolArgs {
             Self::Search(a) => serde_json::json!({
                 "path": a.path,
                 "queryLen": a.query.len(),
-                "queryDigest": sha256_hex(&a.query),
                 "caseInsensitive": a.case_insensitive,
                 "maxMatches": a.max_matches,
             }),
@@ -263,9 +262,8 @@ pub struct ToolRequestV1 {
     pub tool_version: u32,
     pub args: serde_json::Value,
     pub budgets: ToolBudgets,
-    /// Authorized workspace root, supplied by the trusted issuer. Never
-    /// taken from model output.
-    pub workspace_root: String,
+    // NOTE (A3.2): there is deliberately no workspace root here. The root
+    // comes only from the Kernel-sealed Controller workspace binding.
 }
 
 #[derive(Debug, Clone, Serialize)]

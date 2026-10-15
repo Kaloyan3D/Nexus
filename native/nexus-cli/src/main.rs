@@ -35,6 +35,10 @@ fn help_text() -> String {
     s.push_str("    interactive           line-based interactive session (mock only)\n");
     s.push_str("    tools list            native read-only tools (fs.list, fs.read, fs.search)\n");
     s.push_str("    tools inspect <id>    tool contract, arguments, budgets and policy\n");
+    s.push_str("    tools events --task <instance-id> [--attempt <attempt-id> [--after <seq>]]\n");
+    s.push_str(
+        "                          real tool execution records from the daemon (read-only)\n",
+    );
     s.push_str("    tools run-offline --offline-test --workspace <dir> <id> '<args-json>'\n");
     s.push_str("                          offline/test execution under an EPHEMERAL kernel\n");
     s.push_str(
@@ -399,6 +403,109 @@ fn cmd_tools(args: &[String], cfg: &ClientConfig) -> ExitCode {
             emit(cfg, &v, human.trim_end());
             ExitCode::Ok
         }
+        Some("events") => {
+            let mut task = None;
+            let mut attempt = None;
+            let mut after = 0i64;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--task" => {
+                        i += 1;
+                        task = args.get(i).cloned();
+                    }
+                    "--attempt" => {
+                        i += 1;
+                        attempt = args.get(i).cloned();
+                    }
+                    "--after" => {
+                        i += 1;
+                        after = args.get(i).and_then(|v| v.parse().ok()).unwrap_or(-1);
+                    }
+                    "--json" => {}
+                    other => return usage(&format!("unknown argument '{other}'")),
+                }
+                i += 1;
+            }
+            let Some(task) = task else {
+                return usage("usage: nexus tools events --task <instance-id> [--attempt <attempt-id> [--after <seq>]]");
+            };
+            // Without --attempt the attempt list comes from the Controller
+            // attempt journal (never guessed); each attempt is read under
+            // its own scope and never merged with another.
+            let Some(attempt) = attempt else {
+                return match nexus_client::tool_events_for_task(cfg, &task) {
+                    Ok(t) => {
+                        let human = if !t.available {
+                            format!(
+                                "tool activity unavailable: {}",
+                                t.reason.clone().unwrap_or_default()
+                            )
+                        } else {
+                            t.attempts
+                                .iter()
+                                .map(|a| {
+                                    format!(
+                                        "attempt {} ({}): {} execution(s){}",
+                                        a.sequence,
+                                        a.attempt_id,
+                                        a.events.len(),
+                                        a.error
+                                            .as_ref()
+                                            .map(|e| format!(" [no kernel record: {e}]"))
+                                            .unwrap_or_default()
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        };
+                        emit(
+                            cfg,
+                            &serde_json::to_value(&t).unwrap_or(serde_json::Value::Null),
+                            &human,
+                        );
+                        ExitCode::Ok
+                    }
+                    Err(e) => emit_err(cfg.json, &e),
+                };
+            };
+            if after < 0 {
+                return usage("--after must be a non-negative integer");
+            }
+            match nexus_client::tool_events_folded(cfg, &task, &attempt, after) {
+                Ok((events, cursor, complete)) => {
+                    let v = serde_json::json!({
+                        "ok": true,
+                        "events": events,
+                        "nextCursor": cursor,
+                        "complete": complete,
+                        "aiInitiatedExecution": "disabled",
+                    });
+                    let mut human = format!(
+                        "{} tool execution(s) for {task} / {attempt}\n",
+                        events.len()
+                    );
+                    for e in &events {
+                        human.push_str(&format!(
+                            "  #{:<4} {:<11} {:<9} {}{}{}\n",
+                            e.first_seq,
+                            format!("{:?}", e.status).to_lowercase(),
+                            e.tool_id,
+                            e.args.get("path").and_then(|p| p.as_str()).unwrap_or("."),
+                            if e.truncated { "  [truncated]" } else { "" },
+                            if e.redacted { "  [redacted]" } else { "" },
+                        ));
+                    }
+                    human.push_str(&format!(
+                        "cursor: {cursor}{}",
+                        if complete { "" } else { " (more available)" }
+                    ));
+                    emit(cfg, &v, human.trim_end());
+                    ExitCode::Ok
+                }
+                Err(e) => emit_err(cfg.json, &e),
+            }
+        }
         Some("run-offline") => {
             let mut workspace: Option<String> = None;
             let mut offline = false;
@@ -473,7 +580,7 @@ fn cmd_tools(args: &[String], cfg: &ClientConfig) -> ExitCode {
                 }
             }
         }
-        _ => usage("usage: nexus tools <list|inspect <id>|run-offline ...>"),
+        _ => usage("usage: nexus tools <list|inspect <id>|events ...|run-offline ...>"),
     }
 }
 

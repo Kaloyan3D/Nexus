@@ -23,6 +23,7 @@ const base: ToolEventV1 = {
   outputBytes: 10,
   stats: null,
   aiInitiated: false,
+  leaseEpoch: 3,
   firstSeq: 1,
   lastSeq: 3,
   authorizedAtUtc: "1.0Z",

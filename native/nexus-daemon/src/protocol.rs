@@ -264,6 +264,9 @@ pub fn is_privileged(cmd: &str) -> bool {
             | "intent-publish"
             | "intent-fence"
             | "dispatch-authorize"
+            | "workspace-bind"
+            | "tool-execute"
+            | "tool-revoke"
     )
 }
 
@@ -273,7 +276,7 @@ pub fn is_privileged(cmd: &str) -> bool {
 pub fn is_read_only(cmd: &str) -> bool {
     matches!(
         cmd,
-        "health" | "status" | "receipt" | "journal" | "digest" | "readiness"
+        "health" | "status" | "receipt" | "journal" | "digest" | "readiness" | "tool-events"
     )
 }
 

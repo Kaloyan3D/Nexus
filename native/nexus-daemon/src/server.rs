@@ -108,6 +108,11 @@ pub struct Daemon {
     /// store-corrupt, store-incompatible). Never auto-clears: restart or
     /// operator recovery only.
     pub reconcile_latch: Mutex<Option<String>>,
+    /// A3.2: operator-configured bases beneath which the Controller may
+    /// bind workspaces. Empty = workspace binding refused (fail closed).
+    pub workspace_bases: Vec<std::path::PathBuf>,
+    /// Bounded concurrent tool executions.
+    pub tool_inflight: AtomicUsize,
     pub witness_configured: bool,
     pub witness_path: Option<std::path::PathBuf>,
     pub start_utc: String,
@@ -723,6 +728,440 @@ fn do_accept(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     }
 }
 
+// ---------------------------------------------------------------- A3.2 tools
+
+/// Hard bound on concurrent tool executions.
+pub const MAX_TOOL_INFLIGHT: usize = 4;
+const TOOL_EVENTS_MAX_PAGE: usize = 200;
+const TOOL_EVENTS_DEFAULT_PAGE: usize = 100;
+
+struct InflightGuard<'a>(&'a AtomicUsize);
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn lock_kernel<'a>(
+    daemon: &'a Daemon,
+    id: &str,
+) -> Result<std::sync::MutexGuard<'a, nexus_kernel::Kernel>, serde_json::Value> {
+    daemon.kernel.lock().map_err(|_| {
+        daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+        fail(
+            id,
+            codes::STORE_UNHEALTHY,
+            "kernel mutex is poisoned; failing closed",
+        )
+    })
+}
+
+fn only_keys(
+    params: &serde_json::Map<String, serde_json::Value>,
+    allowed: &[&str],
+    id: &str,
+) -> Result<(), serde_json::Value> {
+    for k in params.keys() {
+        if !allowed.contains(&k.as_str()) {
+            return Err(fail(
+                id,
+                codes::BAD_REQUEST,
+                format!(
+                    "bad-request: unknown parameter '{}' (no caller-supplied roots or paths are accepted)",
+                    k.chars().take(40).collect::<String>()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn get_u64(
+    params: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    id: &str,
+) -> Result<u64, serde_json::Value> {
+    params.get(field).and_then(|v| v.as_u64()).ok_or_else(|| {
+        fail(
+            id,
+            codes::BAD_REQUEST,
+            format!("bad-request: '{field}' must be an unsigned integer"),
+        )
+    })
+}
+
+fn do_workspace_bind(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    if let Err(r) = only_keys(&req.params, &["commandId", "root"], &req.id) {
+        return r;
+    }
+    let command_id = match get_string(&req.params, "commandId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let root = match get_string(&req.params, "root") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let mut kernel = match lock_kernel(daemon, &req.id) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    match kernel.bind_workspace(&command_id, &root, &daemon.workspace_bases) {
+        // The root path itself is deliberately not echoed back.
+        Ok(b) => ok(
+            &req.id,
+            serde_json::json!({
+                "binding": {
+                    "commandId": b.command_id,
+                    "taskInstanceId": b.task_instance_id,
+                    "attemptId": b.attempt_id,
+                    "leaseEpoch": b.lease_epoch,
+                    "rootDigest": b.root_digest,
+                }
+            }),
+        ),
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
+fn do_tool_revoke(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    if let Err(r) = only_keys(&req.params, &["commandId", "reason"], &req.id) {
+        return r;
+    }
+    let command_id = match get_string(&req.params, "commandId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let reason = req
+        .params
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("controller-revoked")
+        .to_owned();
+    let mut kernel = match lock_kernel(daemon, &req.id) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    match kernel.revoke_tools(&command_id, &reason) {
+        Ok(()) => ok(&req.id, serde_json::json!({ "revoked": true })),
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
+fn tool_fail(daemon: &Daemon, id: &str, e: &nexus_tools::ToolError) -> serde_json::Value {
+    daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+    // Kernel refusals arrive wrapped (`authorization-refused`); trust-
+    // threatening store states must still latch reconciliation.
+    for code in [
+        "reconciliation-required",
+        "rollback-detected",
+        "witness-required",
+        "store-corrupt",
+        "store-incompatible",
+    ] {
+        if e.message.contains(code) {
+            latch_reconciliation(daemon, code, &e.message);
+            break;
+        }
+    }
+    fail(id, e.code.as_str(), &e.message)
+}
+
+fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    const KEYS: &[&str] = &[
+        "requestId",
+        "cancellationId",
+        "taskInstanceId",
+        "attemptId",
+        "commandId",
+        "leaseEpoch",
+        "storeIncarnation",
+        "toolId",
+        "toolVersion",
+        "args",
+        "budgets",
+    ];
+    if let Err(r) = only_keys(&req.params, KEYS, &req.id) {
+        return r;
+    }
+    macro_rules! s {
+        ($f:expr) => {
+            match get_string(&req.params, $f) {
+                Ok(v) => v,
+                Err(r) => return with_id(r, &req.id),
+            }
+        };
+    }
+    let request_id = s!("requestId");
+    let cancellation_id = s!("cancellationId");
+    let task = s!("taskInstanceId");
+    let attempt = s!("attemptId");
+    let command = s!("commandId");
+    let incarnation = s!("storeIncarnation");
+    let tool_id = s!("toolId");
+    let lease_epoch = match get_u64(&req.params, "leaseEpoch", &req.id) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let tool_version = match get_u64(&req.params, "toolVersion", &req.id) {
+        Ok(v) => v as u32,
+        Err(r) => return r,
+    };
+    let args = match req.params.get("args") {
+        Some(v) if v.is_object() => v.clone(),
+        _ => {
+            return fail(
+                &req.id,
+                codes::BAD_REQUEST,
+                "bad-request: 'args' must be an object",
+            )
+        }
+    };
+    let mut budgets = serde_json::to_value(nexus_tools::ToolBudgets::default())
+        .unwrap_or(serde_json::Value::Null);
+    if let Some(over) = req.params.get("budgets") {
+        match (over.as_object(), budgets.as_object_mut()) {
+            (Some(o), Some(b)) => {
+                for (k, v) in o {
+                    b.insert(k.clone(), v.clone());
+                }
+            }
+            _ => {
+                return fail(
+                    &req.id,
+                    codes::BAD_REQUEST,
+                    "bad-request: 'budgets' must be an object",
+                )
+            }
+        }
+    }
+    let budgets: nexus_tools::ToolBudgets = match serde_json::from_value(budgets) {
+        Ok(b) => b,
+        Err(_) => {
+            return fail(
+                &req.id,
+                codes::BAD_REQUEST,
+                "bad-request: 'budgets' contains unknown or invalid fields",
+            )
+        }
+    };
+    let request = nexus_tools::ToolRequestV1 {
+        schema_version: nexus_tools::TOOL_CONTRACT_VERSION,
+        request_id: request_id.clone(),
+        cancellation_id: cancellation_id.clone(),
+        task_instance_id: task,
+        attempt_id: attempt,
+        command_id: command.clone(),
+        lease_epoch,
+        store_incarnation: incarnation,
+        tool_id,
+        tool_version,
+        args,
+        budgets,
+    };
+    // Bounded concurrency (backpressure, never an unbounded queue).
+    if daemon.tool_inflight.fetch_add(1, Ordering::SeqCst) >= MAX_TOOL_INFLIGHT {
+        daemon.tool_inflight.fetch_sub(1, Ordering::SeqCst);
+        return fail(
+            &req.id,
+            codes::SERVER_BUSY,
+            "too many concurrent tool executions",
+        );
+    }
+    let _guard = InflightGuard(&daemon.tool_inflight);
+
+    // Step 1 (under the Kernel lock): resolve the Controller binding,
+    // pin the workspace, authorize, journal `started`.
+    let cancel = nexus_tools::CancellationToken::new(&cancellation_id);
+    let (call, started) = {
+        let mut kernel = match lock_kernel(daemon, &req.id) {
+            Ok(k) => k,
+            Err(r) => return r,
+        };
+        let binding = match kernel.workspace_binding(&command) {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                return fail(
+                    &req.id,
+                    "delivery-invalid",
+                    "no Controller workspace binding for this command; tool execution refused",
+                );
+            }
+            Err(e) => return kernel_fail(daemon, &req.id, &e),
+        };
+        let prepared = match nexus_tools::prepare(request, &binding) {
+            Ok(p) => p,
+            Err(e) => return tool_fail(daemon, &req.id, &e),
+        };
+        let call = match nexus_tools::authorize(&mut kernel, prepared) {
+            Ok(c) => c,
+            Err(e) => return tool_fail(daemon, &req.id, &e),
+        };
+        let started = match nexus_tools::begin(&mut kernel, &call, &cancel) {
+            Ok(s) => s,
+            Err(e) => return tool_fail(daemon, &req.id, &e),
+        };
+        (call, started)
+    };
+
+    // Step 2 (NO Kernel lock held across the scan): run with the
+    // authoritative fence probe, which takes the lock only briefly.
+    let result = {
+        let _ = &started;
+        let mut probe = || -> Result<(), nexus_tools::ToolError> {
+            let kernel = daemon.kernel.lock().map_err(|_| {
+                nexus_tools::ToolError::new(
+                    nexus_tools::ToolErrorCode::Revoked,
+                    "kernel unavailable; failing closed",
+                )
+            })?;
+            kernel.check_tool_fence_for(call.grant()).map_err(|e| {
+                nexus_tools::ToolError::new(
+                    nexus_tools::ToolErrorCode::Revoked,
+                    format!("authority revoked mid-execution ({})", e.code.as_str()),
+                )
+            })
+        };
+        nexus_tools::run_started(&call, &cancel, &mut probe)
+    };
+
+    // Step 3: journal the (redacted) outcome.
+    let mut kernel = match lock_kernel(daemon, &req.id) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    match nexus_tools::finish(&mut kernel, &call, &started, result) {
+        Ok(o) => ok(
+            &req.id,
+            serde_json::json!({
+                "result": o.result,
+                "execution": {
+                    "requestId": request_id,
+                    "executionId": o.journal.execution_id,
+                    "journalSeq": o.journal.seq,
+                    "aiInitiated": false,
+                },
+            }),
+        ),
+        Err(e) => tool_fail(daemon, &req.id, &e),
+    }
+}
+
+fn do_tool_events(
+    daemon: &Daemon,
+    req: &IpcRequest,
+    peer: Option<(u32, u32, i32)>,
+) -> serde_json::Value {
+    if let Err(r) = only_keys(
+        &req.params,
+        &["taskInstanceId", "attemptId", "afterSeq", "limit"],
+        &req.id,
+    ) {
+        return r;
+    }
+    // Visibility gate: when a UID allowlist is configured the connecting
+    // UID must be on it (same OS-identity gate as privileged commands).
+    if let Some(allowed) = &daemon.allowed_uids {
+        match peer {
+            Some((uid, _, _)) if allowed.contains(&uid) => {}
+            _ => {
+                daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                return fail(
+                    &req.id,
+                    codes::PEER_UNAUTHORIZED,
+                    "connecting process UID is not authorized to read tool events",
+                );
+            }
+        }
+    }
+    let task = match get_string(&req.params, "taskInstanceId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let attempt = match get_string(&req.params, "attemptId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let after = match req.params.get("afterSeq") {
+        None => 0i64,
+        Some(v) => match v.as_i64() {
+            Some(n) if n >= 0 => n,
+            _ => {
+                return fail(
+                    &req.id,
+                    codes::BAD_REQUEST,
+                    "bad-request: 'afterSeq' must be a non-negative integer",
+                )
+            }
+        },
+    };
+    let limit = match req.params.get("limit") {
+        None => TOOL_EVENTS_DEFAULT_PAGE,
+        Some(v) => match v.as_u64() {
+            Some(n) if n >= 1 => (n as usize).min(TOOL_EVENTS_MAX_PAGE),
+            _ => {
+                return fail(
+                    &req.id,
+                    codes::BAD_REQUEST,
+                    "bad-request: 'limit' must be a positive integer",
+                )
+            }
+        },
+    };
+    let kernel = match lock_kernel(daemon, &req.id) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    let mut rows = match kernel.tool_records_page(&task, &attempt, after, limit + 1) {
+        Ok(r) => r,
+        Err(e) => return kernel_fail(daemon, &req.id, &e),
+    };
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    let next_cursor = rows.last().map(|r| r.seq).unwrap_or(after);
+    let records: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|e| {
+            // Allowlisted projection: never the raw payload, never roots.
+            let p = &e.payload;
+            let pick = |k: &str| p.get(k).cloned().unwrap_or(serde_json::Value::Null);
+            serde_json::json!({
+                "seq": e.seq,
+                "phase": e.phase,
+                "requestId": e.request_id,
+                "executionId": e.execution_id,
+                "taskInstanceId": e.task_instance_id,
+                "attemptId": e.attempt_id,
+                "commandId": e.command_id,
+                "recordedAtUtc": e.recorded_at_utc,
+                "toolId": pick("toolId"),
+                "toolVersion": pick("toolVersion"),
+                "args": pick("args"),
+                "resultStatus": pick("resultStatus"),
+                "errorCode": pick("errorCode"),
+                "truncation": pick("truncation"),
+                "redaction": pick("redaction"),
+                "stats": pick("stats"),
+                "outputDigest": pick("outputDigest"),
+                "outputBytes": pick("outputBytes"),
+                "reason": pick("reason"),
+                "leaseEpoch": p.get("leaseEpoch").cloned().or_else(|| p.get("provenance").and_then(|x| x.get("leaseEpoch")).cloned()).unwrap_or(serde_json::Value::Null),
+                "aiInitiated": false,
+            })
+        })
+        .collect();
+    ok(
+        &req.id,
+        serde_json::json!({
+            "records": records,
+            "nextCursor": next_cursor,
+            "hasMore": has_more,
+            "pageSize": limit,
+        }),
+    )
+}
+
 fn do_receipt(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     let command_id = match get_string(&req.params, "commandId") {
         Ok(v) => v,
@@ -924,6 +1363,9 @@ pub fn dispatch(
             "intent-publish" => do_intent_publish(daemon, req),
             "intent-fence" => do_intent_fence(daemon, req),
             "dispatch-authorize" => do_dispatch_authorize(daemon, req),
+            "workspace-bind" => do_workspace_bind(daemon, req),
+            "tool-execute" => do_tool_execute(daemon, req),
+            "tool-revoke" => do_tool_revoke(daemon, req),
             "seal" => do_seal(daemon, req),
             "accept" => do_accept(daemon, req),
             _ => unreachable!("privileged set is fixed"),
@@ -957,6 +1399,7 @@ pub fn dispatch(
         "receipt" => do_receipt(daemon, req),
         "journal" => do_journal(daemon, req),
         "readiness" => do_readiness(daemon, req),
+        "tool-events" => do_tool_events(daemon, req, peer),
         "digest" => ok(&req.id, digest_params(&req.params)),
         _ => unreachable!("read-only set is fixed"),
     }
@@ -1452,6 +1895,8 @@ mod isolation_tests {
             lifecycle: Mutex::new(Lifecycle::Starting),
             counters: Counters::default(),
             reconcile_latch: Mutex::new(None),
+            workspace_bases: Vec::new(),
+            tool_inflight: AtomicUsize::new(0),
             witness_configured: false,
             witness_path: None,
             start_utc: String::new(),

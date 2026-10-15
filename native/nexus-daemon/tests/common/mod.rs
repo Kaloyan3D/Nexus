@@ -413,6 +413,69 @@ pub fn intent_for(task: &str, attempt: &str, command: &str) -> serde_json::Value
     serde_json::to_value(&intent).expect("intent value")
 }
 
+/// Same as `accept_one` but the Controller intent payload commits to a
+/// workspace root digest (required by `workspace-bind`).
+pub fn accept_one_ws(
+    socket: &Path,
+    cap_hex: &str,
+    task: &str,
+    attempt: &str,
+    command: &str,
+    workspace_root_digest: &str,
+) -> serde_json::Value {
+    let acquired = raw_request(
+        socket,
+        &authed_frame(
+            cap_hex,
+            "acquire",
+            serde_json::json!({"taskInstanceId": task, "backend": "native"}),
+        ),
+    )
+    .expect("acquire transport");
+    assert_ok(&acquired);
+    let lease = acquired.get("lease").expect("lease").clone();
+    let snapshot = snapshot();
+    let resolution = resolution_for(task, &snapshot);
+    assert_ok(
+        &raw_request(
+            socket,
+            &authed_frame(
+                cap_hex,
+                "seal",
+                serde_json::json!({"resolution": resolution}),
+            ),
+        )
+        .expect("seal transport"),
+    );
+    let intent = nexus_contracts::ControllerIntentV1::build(
+        task,
+        attempt,
+        command,
+        "native",
+        1,
+        "muse_main",
+        "engineering-v2",
+        rev3(),
+        serde_json::json!({"op": "engineer-turn", "workspaceRootDigest": workspace_root_digest}),
+    );
+    let accepted = raw_request(
+        socket,
+        &authed_frame(
+            cap_hex,
+            "accept",
+            serde_json::json!({
+                "intent": serde_json::to_value(&intent).unwrap(),
+                "resolution": resolution,
+                "snapshot": snapshot,
+                "lease": { "epoch": lease.get("leaseEpoch"), "storeIncarnation": lease.get("storeIncarnation") },
+            }),
+        ),
+    )
+    .expect("accept transport");
+    assert_ok(&accepted);
+    accepted
+}
+
 /// Full privileged flow: acquire -> seal -> accept. Returns the receipt.
 pub fn accept_one(
     socket: &Path,

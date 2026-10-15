@@ -9,7 +9,7 @@
 //! Each `(request_id, phase)` pair exists at most once, which makes every
 //! lifecycle transition (authorized / started / completed) exactly-once.
 
-use crate::store::{db_fail_pub, now_utc_pub, Store};
+use crate::store::{db_fail_pub, now_utc_pub, SealOutcome, Store};
 use nexus_contracts::{canonical_json, sha256_hex, KernelError, KernelErrorCode, KernelResult};
 use rusqlite::{params, OptionalExtension};
 
@@ -67,6 +67,9 @@ fn seal_of(key_hex: &str, entry_hash: &str) -> KernelResult<String> {
     mac.update(entry_hash.as_bytes());
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
+
+/// `(request_id, execution_id, task, attempt, command, recorded_at_utc)`.
+pub type ToolRequestRow = (String, String, String, String, String, String);
 
 type Row = (
     i64,
@@ -294,5 +297,192 @@ impl Store {
             count += 1;
         }
         Ok(count)
+    }
+
+    // ---- Controller workspace bindings (A3.2) ---------------------------
+
+    pub fn insert_workspace_binding(
+        &mut self,
+        command_id: &str,
+        binding_json: &str,
+        seal_hex: &str,
+    ) -> KernelResult<SealOutcome> {
+        let tx = self.conn_tx().map_err(|e| db_fail_pub("begin", e))?;
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT binding_json, seal_hex FROM workspace_bindings WHERE command_id = ?1",
+                params![command_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| db_fail_pub("read", e))?;
+        match existing {
+            Some((j, s)) => {
+                if j == binding_json && s == seal_hex {
+                    Ok(SealOutcome::Identical)
+                } else {
+                    Err(KernelError::new(
+                        KernelErrorCode::CommandConflict,
+                        "a different workspace binding already exists for this command",
+                    ))
+                }
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO workspace_bindings (command_id, binding_json, seal_hex, created_at_utc) VALUES (?1,?2,?3,?4)",
+                    params![command_id, binding_json, seal_hex, now_utc_pub()],
+                )
+                .map_err(|e| db_fail_pub("bind", e))?;
+                tx.commit().map_err(|e| db_fail_pub("commit", e))?;
+                Ok(SealOutcome::Created)
+            }
+        }
+    }
+
+    pub fn fetch_workspace_binding(
+        &self,
+        command_id: &str,
+    ) -> KernelResult<Option<(String, String)>> {
+        self.conn_ref()
+            .query_row(
+                "SELECT binding_json, seal_hex FROM workspace_bindings WHERE command_id = ?1",
+                params![command_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| db_fail_pub("read", e))
+    }
+
+    /// Sealed intent payload of an accepted command (Controller-authored,
+    /// digest-verified at acceptance).
+    pub fn command_payload(&self, command_id: &str) -> KernelResult<Option<String>> {
+        self.conn_ref()
+            .query_row(
+                "SELECT payload_json FROM commands WHERE command_id = ?1",
+                params![command_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| db_fail_pub("read", e))
+    }
+
+    // ---- revocation ------------------------------------------------------
+
+    pub fn revoke_tools(&mut self, command_id: &str, reason: &str) -> KernelResult<()> {
+        self.conn_ref()
+            .execute(
+                "INSERT OR IGNORE INTO tool_revocations (command_id, reason, revoked_at_utc) VALUES (?1, ?2, ?3)",
+                params![command_id, reason, now_utc_pub()],
+            )
+            .map_err(|e| db_fail_pub("revoke", e))?;
+        Ok(())
+    }
+
+    pub fn tools_revoked(&self, command_id: &str) -> KernelResult<bool> {
+        let n: Option<i64> = self
+            .conn_ref()
+            .query_row(
+                "SELECT 1 FROM tool_revocations WHERE command_id = ?1",
+                params![command_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| db_fail_pub("read", e))?;
+        Ok(n.is_some())
+    }
+
+    // ---- paging + consistency ------------------------------------------
+
+    /// Entries for one (task, attempt) with `seq > after`, ascending, at
+    /// most `limit`. Strictly increasing `seq` is the cursor.
+    pub fn list_tool_entries_page(
+        &self,
+        task: &str,
+        attempt: &str,
+        after_seq: i64,
+        limit: usize,
+    ) -> KernelResult<Vec<ToolJournalEntry>> {
+        let mut stmt = self
+            .conn_ref()
+            .prepare(&format!(
+                "SELECT {COLS} FROM tool_journal WHERE task_instance_id = ?1 AND attempt_id = ?2 AND seq > ?3 ORDER BY seq ASC LIMIT ?4"
+            ))
+            .map_err(|e| db_fail_pub("prepare", e))?;
+        let rows = stmt
+            .query_map(params![task, attempt, after_seq, limit as i64], row_of)
+            .map_err(|e| db_fail_pub("query", e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| db_fail_pub("rows", e))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(entry_of(r)?.0);
+        }
+        Ok(out)
+    }
+
+    /// Entry hash of the `pos`-th journal row (1-based, by seq order).
+    pub fn tool_entry_hash_at(&self, pos: u64) -> KernelResult<Option<String>> {
+        if pos == 0 {
+            return Ok(Some(TOOL_JOURNAL_GENESIS.to_owned()));
+        }
+        self.conn_ref()
+            .query_row(
+                "SELECT entry_hash FROM tool_journal ORDER BY seq ASC LIMIT 1 OFFSET ?1",
+                params![(pos - 1) as i64],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| db_fail_pub("read", e))
+    }
+
+    /// Distinct request ids that have `phase_a` but none of `absent`.
+    /// Returned with the authorizing row's linkage for reconciliation.
+    pub fn tool_requests_in_state(
+        &self,
+        has_phase: &str,
+        lacks: &[&str],
+    ) -> KernelResult<Vec<ToolRequestRow>> {
+        let mut sql = String::from(
+            "SELECT j.request_id, j.execution_id, j.task_instance_id, j.attempt_id, j.command_id, j.recorded_at_utc FROM tool_journal j WHERE j.phase = ?1",
+        );
+        for p in lacks {
+            sql.push_str(&format!(
+                " AND NOT EXISTS (SELECT 1 FROM tool_journal k WHERE k.request_id = j.request_id AND k.phase = '{p}')"
+            ));
+        }
+        sql.push_str(" ORDER BY j.seq ASC");
+        let mut stmt = self
+            .conn_ref()
+            .prepare(&sql)
+            .map_err(|e| db_fail_pub("prepare", e))?;
+        let rows = stmt
+            .query_map(params![has_phase], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .map_err(|e| db_fail_pub("query", e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| db_fail_pub("rows", e))?;
+        Ok(rows)
+    }
+
+    /// True when a (task, attempt) pair has any accepted command.
+    pub fn attempt_exists(&self, task: &str, attempt: &str) -> KernelResult<bool> {
+        let n: Option<i64> = self
+            .conn_ref()
+            .query_row(
+                "SELECT 1 FROM receipts WHERE task_instance_id = ?1 AND attempt_id = ?2 LIMIT 1",
+                params![task, attempt],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| db_fail_pub("read", e))?;
+        Ok(n.is_some())
     }
 }

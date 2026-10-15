@@ -14,6 +14,8 @@ export function toolEventPresentation(e: ToolEventV1): {
     completed: e.truncated ? "warning" : "success",
     failed: "danger",
     interrupted: "warning",
+    expired: "neutral",
+    cancelled: "warning",
   };
   const path = typeof e.args?.path === "string" ? (e.args.path as string) : ".";
   const what = e.toolId === "fs.search" ? `search in ${path}` : `${e.toolId.slice(3)} ${path}`;

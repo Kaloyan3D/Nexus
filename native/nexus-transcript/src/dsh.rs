@@ -974,3 +974,15 @@ pub fn read_history_cached(
     }
     Ok(built)
 }
+
+/// Authoritative attempt list for a task instance, from the Controller
+/// attempt journal only (no session logs are opened). Returns the display
+/// task id and the recorded attempts in sequence order.
+pub fn list_attempts(
+    runs_dir: &Path,
+    task_instance_id: &str,
+) -> Result<(String, Vec<AttemptProvenance>), HistoryError> {
+    let mut cov = Coverage::default();
+    let (display, attempts) = load_attempts(runs_dir, task_instance_id, &mut cov)?;
+    Ok((display, attempts.into_iter().map(|a| a.prov).collect()))
+}

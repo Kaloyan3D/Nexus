@@ -22,7 +22,13 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const REDACTED: &str = "[REDACTED]";
+/// Inline marker for withheld content. Distinct from any common literal;
+/// if the *source* itself contains it, the line is flagged
+/// `marker-collision` so a consumer can never mistake source text for a
+/// redaction.
+pub const REDACTED: &str = "[REDACTED:nexus]";
+/// Appended to a line that was clipped to the per-line byte budget.
+pub const LINE_TRUNCATED: &str = " [TRUNCATED:nexus]";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -186,6 +192,9 @@ impl Redactor {
 
     /// Redact one line (no terminator). Updates `acc` with counts.
     pub fn line(&mut self, line: &str, acc: &mut Redaction) -> String {
+        if line.contains(REDACTED) || line.contains(LINE_TRUNCATED.trim()) {
+            acc.note("marker-collision", 1);
+        }
         if self.in_private_key {
             if line.contains("-----END") && line.contains("PRIVATE KEY") {
                 self.in_private_key = false;

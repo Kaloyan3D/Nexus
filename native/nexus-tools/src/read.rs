@@ -147,6 +147,13 @@ pub fn run(ctx: &mut ExecCtx<'_>, args: &ReadArgs) -> Result<serde_json::Value, 
         let safe = redactor.line(text, &mut ctx.redaction);
         let (shown, was_clipped) = clip(&safe, ctx.budgets.max_line_bytes as usize);
         clipped |= was_clipped;
+        let marked;
+        let shown = if was_clipped {
+            marked = [shown, crate::redact::LINE_TRUNCATED].concat();
+            marked.as_str()
+        } else {
+            shown
+        };
         if out.len() as u64 + shown.len() as u64 + 1 > ctx.budgets.max_output_bytes {
             ctx.truncation.add("max-output-bytes");
             eof = false;

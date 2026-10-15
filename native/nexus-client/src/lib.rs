@@ -18,7 +18,8 @@ pub mod version;
 
 pub use api::{
     attempt_status, cancel, digest, health, journal, journal_for_task, models, readiness, receipt,
-    status, task_show, tasks, verify,
+    status, task_show, tasks, tool_events, tool_events_folded, tool_events_for_task, verify,
+    AttemptToolEvents, TaskToolEvents, ToolRecordsPage,
 };
 pub use config::{
     default_ledger_dir, default_sessions_root, default_socket_path, default_transcript_dir,
@@ -33,6 +34,7 @@ pub use mock::{
     live_blockers, run_mock, run_mock_streaming, MockCheck, MockProgress, MockRunReport,
     MockStreamItem,
 };
+pub use nexus_tools::{ToolEventStatus, ToolEventV1, ToolRecordV1};
 pub use nexus_transcript as transcript;
 pub use streaming::{poll_journal, ClientEvent};
 pub use version::{CLIENT_API_VERSION, CLIENT_API_VERSION_STR, IPC_PROTOCOL_VERSION};

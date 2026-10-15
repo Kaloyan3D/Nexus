@@ -172,3 +172,159 @@ pub fn probe_daemon(cfg: &ClientConfig) -> (bool, String) {
         ),
     }
 }
+
+/// One page of tool-journal records for a task attempt (read-only).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolRecordsPage {
+    pub records: Vec<nexus_tools::ToolRecordV1>,
+    pub next_cursor: i64,
+    pub has_more: bool,
+}
+
+/// Authenticated, bounded, cursor-paged tool records for exactly one
+/// (task instance, attempt). `after_seq` is the last seq already seen.
+pub fn tool_events(
+    cfg: &ClientConfig,
+    task_instance_id: &str,
+    attempt_id: &str,
+    after_seq: i64,
+    limit: u32,
+) -> Result<ToolRecordsPage, ClientError> {
+    if task_instance_id.is_empty() || attempt_id.is_empty() {
+        return Err(ClientError::usage(
+            "task instance id and attempt id must not be empty",
+        ));
+    }
+    let frame = read_request(
+        "nexus-tool-events",
+        "tool-events",
+        serde_json::json!({
+            "taskInstanceId": task_instance_id,
+            "attemptId": attempt_id,
+            "afterSeq": after_seq.max(0),
+            "limit": limit.clamp(1, 200),
+        }),
+    );
+    let v = interpret_response(&ipc_roundtrip(&cfg.socket_path, &frame, IPC_TIMEOUT_MS)?)?;
+    let records: Vec<nexus_tools::ToolRecordV1> = serde_json::from_value(
+        v.get("records")
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(vec![])),
+    )
+    .map_err(|e| ClientError::internal(format!("malformed tool records: {e}")))?;
+    Ok(ToolRecordsPage {
+        next_cursor: v
+            .get("nextCursor")
+            .and_then(|x| x.as_i64())
+            .unwrap_or(after_seq),
+        has_more: v.get("hasMore").and_then(|x| x.as_bool()).unwrap_or(false),
+        records,
+    })
+}
+
+/// Read every record after `after_seq` (bounded to 50 pages) and fold into
+/// typed events. Returns `(events, next_cursor, complete)`.
+pub fn tool_events_folded(
+    cfg: &ClientConfig,
+    task_instance_id: &str,
+    attempt_id: &str,
+    after_seq: i64,
+) -> Result<(Vec<nexus_tools::ToolEventV1>, i64, bool), ClientError> {
+    let mut cursor = after_seq.max(0);
+    let mut all = Vec::new();
+    let mut complete = false;
+    for _ in 0..50 {
+        let page = tool_events(cfg, task_instance_id, attempt_id, cursor, 200)?;
+        cursor = page.next_cursor;
+        all.extend(page.records);
+        if !page.has_more {
+            complete = true;
+            break;
+        }
+    }
+    Ok((nexus_tools::fold_tool_records(&all), cursor, complete))
+}
+
+/// One authoritative attempt and its tool events.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttemptToolEvents {
+    pub attempt_id: String,
+    pub sequence: u64,
+    pub events: Vec<nexus_tools::ToolEventV1>,
+    pub complete: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskToolEvents {
+    pub available: bool,
+    pub reason: Option<String>,
+    pub attempts: Vec<AttemptToolEvents>,
+}
+
+/// Tool events for one task instance, grouped by the attempts recorded in
+/// the Controller attempt journal. Attempt ids are never constructed: when
+/// no authoritative list exists the result is `available: false` with a
+/// reason. Each attempt is queried under its own (task, attempt) scope, so
+/// events of different tasks, attempts or generations are never merged; an
+/// attempt the daemon does not know is reported per attempt, not hidden.
+pub fn tool_events_for_task(
+    cfg: &ClientConfig,
+    task_instance_id: &str,
+) -> Result<TaskToolEvents, ClientError> {
+    if task_instance_id.is_empty() {
+        return Err(ClientError::usage("task instance id must not be empty"));
+    }
+    let unavailable = |reason: &str| TaskToolEvents {
+        available: false,
+        reason: Some(reason.to_owned()),
+        attempts: Vec::new(),
+    };
+    let Some(runs) = cfg.runs_dir.clone() else {
+        return Ok(unavailable(
+            "no Controller run directory is configured; attempt identity cannot be established",
+        ));
+    };
+    let attempts = match nexus_transcript::list_attempts(&runs, task_instance_id) {
+        Ok((_, a)) => a,
+        Err(nexus_transcript::HistoryError::NoAttempts) => {
+            return Ok(unavailable(
+                "the Controller recorded no attempt for this task instance",
+            ))
+        }
+        Err(_) => return Ok(unavailable("the Controller attempt journal is unreadable")),
+    };
+    let mut out = Vec::new();
+    for a in attempts {
+        match tool_events_folded(cfg, task_instance_id, &a.attempt_id, 0) {
+            Ok((events, _, complete)) => out.push(AttemptToolEvents {
+                attempt_id: a.attempt_id,
+                sequence: a.sequence,
+                events,
+                complete,
+                error: None,
+            }),
+            Err(e) => {
+                // A daemon that cannot be reached is an overall failure; a
+                // refusal for one attempt (unknown to the kernel) is local.
+                if e.exit == crate::error::ExitCode::Disconnected {
+                    return Err(e);
+                }
+                out.push(AttemptToolEvents {
+                    attempt_id: a.attempt_id,
+                    sequence: a.sequence,
+                    events: Vec::new(),
+                    complete: true,
+                    error: Some(e.code.to_owned()),
+                });
+            }
+        }
+    }
+    Ok(TaskToolEvents {
+        available: true,
+        reason: None,
+        attempts: out,
+    })
+}

@@ -11,6 +11,7 @@ import type {
   MockResult,
   ModelCatalog,
   RuntimeSnapshot,
+  TaskToolEvents,
   TasksResult,
   UiError,
 } from "./contracts";
@@ -27,6 +28,8 @@ export interface NativeApi {
   conversationRead(taskInstanceId: string, q?: ConversationQuery): Promise<ConversationView>;
   modelIoRead(taskInstanceId: string): Promise<ModelIoView>;
   listMockConversations(): Promise<MockConversationSummary[]>;
+  /** Read-only tool records for a task attempt. Never executes tools. */
+  toolEvents(taskInstanceId: string): Promise<TaskToolEvents>;
 }
 
 export function isTauri(): boolean {
@@ -62,6 +65,7 @@ export const tauriApi: NativeApi = {
     }),
   modelIoRead: (taskInstanceId) => invoke<ModelIoView>("model_io_read", { taskInstanceId }),
   listMockConversations: () => invoke<MockConversationSummary[]>("list_mock_conversations"),
+  toolEvents: (taskInstanceId) => invoke<TaskToolEvents>("tool_events", { taskInstanceId }),
 };
 
 const notInShell: UiError = {
@@ -106,6 +110,7 @@ export const unavailableApi: NativeApi = {
   conversationRead: () => Promise.reject(notInShell),
   modelIoRead: () => Promise.reject(notInShell),
   listMockConversations: () => Promise.resolve([]),
+  toolEvents: () => Promise.reject(notInShell),
 };
 
 export function defaultApi(): NativeApi {

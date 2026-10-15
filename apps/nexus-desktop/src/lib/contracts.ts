@@ -315,7 +315,9 @@ export type ToolEventStatus =
   | "started"
   | "completed"
   | "failed"
-  | "interrupted";
+  | "interrupted"
+  | "expired"
+  | "cancelled";
 
 export interface ToolEventV1 {
   schemaVersion: 1;
@@ -340,8 +342,31 @@ export interface ToolEventV1 {
   outputBytes: number | null;
   stats: Record<string, number> | null;
   aiInitiated: boolean;
+  /** Lease generation the request was authorized under. */
+  leaseEpoch: number | null;
   firstSeq: number;
   lastSeq: number;
   authorizedAtUtc: string;
   lastAtUtc: string;
+}
+
+/** One authoritative attempt of a task and its tool events (never merged). */
+export interface AttemptToolEvents {
+  attemptId: string;
+  sequence: number;
+  events: ToolEventV1[];
+  complete: boolean;
+  /** Set when the daemon refused or could not serve this attempt. */
+  error: string | null;
+}
+
+/**
+ * Tool events for a task instance, grouped by the attempts the Controller
+ * attempt journal records. `available=false` means no authoritative attempt
+ * list exists: the UI must show that state, never guess an attempt id.
+ */
+export interface TaskToolEvents {
+  available: boolean;
+  reason: string | null;
+  attempts: AttemptToolEvents[];
 }

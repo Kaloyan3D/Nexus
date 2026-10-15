@@ -17,6 +17,8 @@ pub mod store;
 pub mod view;
 
 pub use contract::*;
-pub use dsh::{read_history, read_history_cached, DshLimits, DshSources, HistoryError};
+pub use dsh::{
+    list_attempts, read_history, read_history_cached, DshLimits, DshSources, HistoryError,
+};
 pub use store::{AppendOutcome, StoreError, TranscriptStore};
 pub use view::{page, Page, PageSpec};

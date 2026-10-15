@@ -50,6 +50,7 @@ fn usage() -> i32 {
     println!("  nexusd --db PATH --socket PATH [--witness PATH]");
     println!("         [--trust-mode readonly|shadow-test] [--cap PATH]");
     println!("         [--allowed-uids UID[,UID...]] [--socket-group GID|NAME]");
+    println!("         [--workspace-bases DIR[,DIR...]]");
     println!("         [--cap-handoff PATH]");
     println!("Trust modes: readonly (default, privileged mutations disabled) |");
     println!("  shadow-test (explicit opt-in, per-request issuer authentication).");
@@ -83,6 +84,13 @@ fn flag_str(args: &[String], name: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn log_line_startup(msg: &str) {
+    eprintln!(
+        "{}",
+        serde_json::json!({"daemon": "nexusd", "event": "startup", "detail": msg})
+    );
 }
 
 fn fatal(code: &str, message: &str) -> i32 {
@@ -411,6 +419,35 @@ fn run(args: &[String]) -> i32 {
             return fatal("insecure-socket-dir", &e);
         }
     }
+    // A3.2: startup reconciliation. This process is the single owner of the
+    // store and has no in-flight executions, so any `started` without a
+    // completion is a crash/restart residue: close it as `interrupted`
+    // (uncertain, never re-executed) and lapse unexecuted grants.
+    let mut kernel = kernel;
+    match kernel.reconcile_tool_journal(true) {
+        Ok(rep) => {
+            if rep.expired + rep.interrupted > 0 {
+                log_line_startup(&format!(
+                    "tool journal reconciled: expired={} interrupted={}",
+                    rep.expired, rep.interrupted
+                ));
+            }
+        }
+        Err(e) => {
+            return fatal(
+                "store-corrupt",
+                &format!("tool journal inconsistent at startup; failing closed: {e}"),
+            );
+        }
+    }
+    let workspace_bases: Vec<std::path::PathBuf> = flag_str(args, "--workspace-bases")
+        .map(|v| {
+            v.split(',')
+                .filter(|p| !p.is_empty())
+                .map(std::path::PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default();
     let daemon = Arc::new(Daemon {
         kernel: Mutex::new(kernel),
         trust_mode,
@@ -421,6 +458,8 @@ fn run(args: &[String]) -> i32 {
         lifecycle: Mutex::new(Lifecycle::Starting),
         counters: Default::default(),
         reconcile_latch: Mutex::new(None),
+        workspace_bases,
+        tool_inflight: std::sync::atomic::AtomicUsize::new(0),
         witness_configured: layout.witness.is_some(),
         witness_path: layout.witness.clone(),
         start_utc: match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {

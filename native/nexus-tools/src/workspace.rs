@@ -506,13 +506,7 @@ impl Workspace {
         }
     }
 
-    fn open_one(
-        &self,
-        parent: RawFd,
-        name: &str,
-        want_dir: bool,
-        hl_exempt: bool,
-    ) -> Result<Opened, ToolError> {
+    fn open_one(&self, parent: RawFd, name: &str, want_dir: bool) -> Result<Opened, ToolError> {
         let c = CString::new(name).map_err(|_| pe("component contains NUL"))?;
         self.accesses.fetch_add(1, Ordering::SeqCst);
         let pre = match fstatat_nofollow(parent, &c) {
@@ -555,7 +549,7 @@ impl Workspace {
                 "path crosses onto another filesystem or mount",
             ));
         }
-        if pre.kind == Kind::File && pre.nlink > 1 && !hl_exempt {
+        if pre.kind == Kind::File && pre.nlink > 1 {
             return Err(ToolError::new(
                 ToolErrorCode::HardlinkRefused,
                 "files with multiple hard links are refused (cannot prove they are workspace-local)",
@@ -594,7 +588,7 @@ impl Workspace {
             || post.ino != pre.ino
             || post.kind != pre.kind
             || post.mnt_id != pre.mnt_id
-            || (post.kind == Kind::File && post.nlink > 1 && !hl_exempt)
+            || (post.kind == Kind::File && post.nlink > 1)
         {
             return Err(ToolError::new(
                 ToolErrorCode::RaceDetected,
@@ -624,12 +618,6 @@ impl Workspace {
                 identity: self.root_identity,
             });
         }
-        // Hard-linked files inside conventional dependency/build trees
-        // (pnpm, cargo) are legitimate; elsewhere nlink>1 is refused.
-        let exempt = rel
-            .components()
-            .iter()
-            .any(|c| self.policy.is_ignored_dir(c));
         let mut last: Option<Opened> = None;
         for (i, name) in rel.components().iter().enumerate() {
             self.check_name(name)?;
@@ -638,7 +626,7 @@ impl Workspace {
                 None => self.root.as_raw_fd(),
             };
             let is_last = i + 1 == n;
-            let opened = self.open_one(parent, name, !is_last, exempt)?;
+            let opened = self.open_one(parent, name, !is_last)?;
             if is_last {
                 last = Some(opened);
                 break;

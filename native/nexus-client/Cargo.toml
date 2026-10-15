@@ -9,6 +9,7 @@ license = "MIT"
 nexus-contracts = { workspace = true }
 nexus-kernel = { workspace = true }
 nexus-model = { workspace = true }
+nexus-tools = { workspace = true }
 nexus-transcript = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

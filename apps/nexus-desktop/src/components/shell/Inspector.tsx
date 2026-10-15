@@ -1,5 +1,7 @@
-import { Activity, FileBox, ListChecks, SquareStack, X } from "lucide-react";
-import type { TaskRecord } from "../../lib/contracts";
+import { useEffect, useState } from "react";
+import { Activity, FileBox, ListChecks, SquareStack, Wrench, X } from "lucide-react";
+import type { TaskRecord, TaskToolEvents } from "../../lib/contracts";
+import { toolEventPresentation } from "../../lib/toolEvents";
 import { absoluteTime, durationBetween, relativeTime, shortId } from "../../lib/format";
 import { taskStatusView } from "../../lib/status";
 import { useNexus } from "../../state/NexusContext";
@@ -57,6 +59,87 @@ export function Inspector({ onClose, overlay }: { onClose?: () => void; overlay:
 
 function Section({ children }: { children: React.ReactNode }) {
   return <section className="nv-inspector__section">{children}</section>;
+}
+
+function ToolActivity({ task }: { task: TaskRecord }) {
+  const { api } = useNexus();
+  const instance = task.taskInstanceId;
+  // Results are keyed by the instance they answer, so a stale response for
+  // a previously selected task is never shown.
+  const [res, setRes] = useState<{
+    key: string;
+    data?: TaskToolEvents;
+    error?: string;
+  } | null>(null);
+  useEffect(() => {
+    if (!instance) return;
+    let live = true;
+    api
+      .toolEvents(instance)
+      .then((data) => live && setRes({ key: instance, data }))
+      .catch((e: { message?: string }) => live && setRes({ key: instance, error: e?.message ?? "unavailable" }));
+    return () => {
+      live = false;
+    };
+  }, [api, instance]);
+  const current = res && instance && res.key === instance ? res : null;
+  const data = current?.data ?? null;
+  const total = data?.attempts.reduce((n, a) => n + a.events.length, 0);
+  return (
+    <Section>
+      <SectionHeading icon={Wrench} aside={data?.available ? String(total) : undefined}>
+        Tool activity
+      </SectionHeading>
+      {!instance ? (
+        <p className="nv-note" style={{ marginTop: 0 }}>
+          No kernel task instance is linked to this ledger task.
+        </p>
+      ) : current?.error ? (
+        <p className="nv-note" style={{ marginTop: 0 }}>
+          Tool records unavailable: {current.error}
+        </p>
+      ) : data === null ? (
+        <p className="nv-note" style={{ marginTop: 0 }}>Loading…</p>
+      ) : !data.available ? (
+        <p className="nv-note" style={{ marginTop: 0 }}>
+          Tool activity unavailable: {data.reason ?? "attempt identity is not established"}.
+        </p>
+      ) : total === 0 && data.attempts.every((a) => !a.error) ? (
+        <p className="nv-note" style={{ marginTop: 0 }}>
+          No read-only tool executions are recorded for this task.
+        </p>
+      ) : (
+        data.attempts.map((a) => (
+          <div key={a.attemptId} className="nv-toolattempt">
+            <div className="nv-note nv-mono">
+              Attempt {a.sequence} · {a.attemptId}
+            </div>
+            {a.error ? (
+              <p className="nv-note">No kernel record for this attempt ({a.error}).</p>
+            ) : (
+              <ul className="nv-toolevents" aria-label={`Tool executions for ${a.attemptId}`}>
+                {a.events.map((e) => {
+                  const p = toolEventPresentation(e);
+                  return (
+                    <li key={`${e.attemptId}:${e.requestId}`}>
+                      <Badge tone={p.tone === "danger" ? "error" : p.tone === "success" ? "success" : "warning"}>
+                        {p.label}
+                      </Badge>{" "}
+                      <span className="nv-mono">{e.toolId}</span> {p.summary}
+                      {e.leaseEpoch !== null && (
+                        <span className="nv-note"> · generation {e.leaseEpoch}</span>
+                      )}
+                      {!e.aiInitiated && <span className="nv-note"> · operator/test initiated</span>}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        ))
+      )}
+    </Section>
+  );
 }
 
 function TaskInspector({ task }: { task: TaskRecord }) {
@@ -145,6 +228,7 @@ function TaskInspector({ task }: { task: TaskRecord }) {
           </>
         )}
       </Section>
+      <ToolActivity task={task} />
       <Section>
         <SectionHeading icon={FileBox}>Artifacts</SectionHeading>
         <p className="nv-note" style={{ marginTop: 0 }}>

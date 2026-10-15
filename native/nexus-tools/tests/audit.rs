@@ -6,9 +6,7 @@ mod common;
 use common::*;
 use nexus_kernel::Kernel;
 use nexus_tools::workspace::{RelPath, Workspace, WorkspacePolicy};
-use nexus_tools::{
-    authorize, execute, prepare, AuthorizedToolCall, CancellationToken, ToolRequestV1,
-};
+use nexus_tools::{authorize, execute, AuthorizedToolCall, CancellationToken, ToolRequestV1};
 use serde_json::json;
 use std::process::Command;
 
@@ -111,13 +109,14 @@ fn hard_links_to_outside_files_are_refused() {
         err_code(&fx.run("fs.read", json!({"path": "plain.txt"}))),
         "ok"
     );
-    // Dependency trees legitimately hard-link; exempt by policy.
-    std::fs::create_dir_all(fx.ws.join("node_modules")).unwrap();
-    std::fs::hard_link(fx.ws.join("plain.txt"), fx.ws.join("node_modules/p.txt")).unwrap();
-    assert_eq!(
-        err_code(&fx.run("fs.read", json!({"path": "node_modules/p.txt"}))),
-        "ok"
-    );
+    // A3.2: there is no dependency-directory exemption. A hard link into
+    // node_modules/target/vendor is refused exactly like any other.
+    for d in ["node_modules", "target", "vendor"] {
+        std::fs::create_dir_all(fx.ws.join(d)).unwrap();
+        std::fs::hard_link(fx.outside.join("secret.txt"), fx.ws.join(d).join("p.txt")).unwrap();
+        let r = fx.run("fs.read", json!({"path": format!("{d}/p.txt")}));
+        assert_eq!(err_code(&r), "hardlink-refused", "{d}");
+    }
 }
 
 // ------------------------------------------------------------ cancellation
@@ -134,7 +133,7 @@ fn search_is_cancellable_mid_run() {
     r.budgets.max_files = 20_000;
     r.budgets.max_dirs = 1000;
     let cancel = CancellationToken::new(&r.cancellation_id);
-    let call = authorize(&mut fx.kernel, prepare(r).unwrap()).unwrap();
+    let call = authorize(&mut fx.kernel, prepare_b(r).unwrap()).unwrap();
     let c2 = cancel.clone();
     let t = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -215,7 +214,7 @@ fn secrets_in_permitted_files_are_redacted_and_marked() {
     assert_eq!(s.result.stats.matches_returned, 0);
     let s = fx.run("fs.search", json!({"query": "api_token"})).unwrap();
     let m = &s.result.output.as_ref().unwrap()["matches"][0]["text"];
-    assert!(m.as_str().unwrap().contains("[REDACTED]"));
+    assert!(m.as_str().unwrap().contains("[REDACTED:nexus]"));
     assert!(s.result.redaction.redacted);
 }
 
@@ -248,7 +247,7 @@ fn grant_survives_restart_exactly_once_and_crash_is_not_replayable() {
     let mut fx = fixture("restart");
     fx.write("a.txt", b"x\n");
     let req = make_request(&mut fx, "r-1");
-    let call = authorize(&mut fx.kernel, prepare(req.clone()).unwrap()).unwrap();
+    let call = authorize(&mut fx.kernel, prepare_b(req.clone()).unwrap()).unwrap();
     let grant = call.grant().clone();
     let (db, wit) = (fx.db.clone(), fx.witness.clone());
     drop(fx.kernel);
@@ -256,20 +255,20 @@ fn grant_survives_restart_exactly_once_and_crash_is_not_replayable() {
     // Restart #1: valid grant executes exactly once.
     let mut k = Kernel::open(&db, Some(&wit)).unwrap();
     let c = CancellationToken::new(&req.cancellation_id);
-    let call = AuthorizedToolCall::from_parts(prepare(req.clone()).unwrap(), grant.clone());
+    let call = AuthorizedToolCall::from_parts(prepare_b(req.clone()).unwrap(), grant.clone());
     execute(&mut k, &call, &c).unwrap();
     drop(k);
 
     // Restart #2: replay after restart is refused with zero reads.
     let mut k = Kernel::open(&db, Some(&wit)).unwrap();
-    let call = AuthorizedToolCall::from_parts(prepare(req.clone()).unwrap(), grant);
+    let call = AuthorizedToolCall::from_parts(prepare_b(req.clone()).unwrap(), grant);
     let e = execute(&mut k, &call, &c).unwrap_err();
     assert!(e.message.contains("command-conflict"), "{e}");
     assert_eq!(call.prepared().workspace().access_count(), 0);
 
     // Crash between started and completed: begin only, then "die".
     let req2 = retarget(&req, "r-2");
-    let call2 = authorize(&mut k, prepare(req2.clone()).unwrap()).unwrap();
+    let call2 = authorize(&mut k, prepare_b(req2.clone()).unwrap()).unwrap();
     k.begin_tool_execution(
         call2.grant(),
         call2.prepared().args_digest(),
@@ -279,7 +278,7 @@ fn grant_survives_restart_exactly_once_and_crash_is_not_replayable() {
     drop(k);
     let mut k = Kernel::open(&db, Some(&wit)).unwrap();
     let c2 = CancellationToken::new(&req2.cancellation_id);
-    let again = AuthorizedToolCall::from_parts(prepare(req2).unwrap(), call2.grant().clone());
+    let again = AuthorizedToolCall::from_parts(prepare_b(req2).unwrap(), call2.grant().clone());
     assert!(
         execute(&mut k, &again, &c2).is_err(),
         "crashed start must not replay"
@@ -312,7 +311,7 @@ fn child_race_begin() {
     )
     .unwrap();
     let c = CancellationToken::new(&req.cancellation_id);
-    let call = AuthorizedToolCall::from_parts(prepare(req).unwrap(), grant);
+    let call = AuthorizedToolCall::from_parts(prepare_b(req).unwrap(), grant);
     match execute(&mut k, &call, &c) {
         Ok(_) => println!("RACE-WON"),
         Err(_) => println!("RACE-REFUSED"),
@@ -324,8 +323,12 @@ fn multi_process_grant_race_has_exactly_one_winner() {
     let mut fx = fixture("mproc");
     fx.write("a.txt", b"x\n");
     let req = make_request(&mut fx, "mp-1");
-    let call = authorize(&mut fx.kernel, prepare(req.clone()).unwrap()).unwrap();
+    let call = authorize(&mut fx.kernel, prepare_b(req.clone()).unwrap()).unwrap();
     let env = [
+        (
+            "AUDIT_BINDING",
+            serde_json::to_string(&fx.binding()).unwrap(),
+        ),
         ("AUDIT_REQ", serde_json::to_string(&req).unwrap()),
         ("AUDIT_GRANT", serde_json::to_string(call.grant()).unwrap()),
         ("AUDIT_DB", fx.db.to_str().unwrap().to_owned()),

@@ -192,6 +192,7 @@ export function fakeApi(over: Partial<NativeApi> = {}): NativeApi {
       note: "No verified provider request records exist for this task.",
     }),
     listMockConversations: async () => [],
+    toolEvents: async () => ({ available: true, reason: null, attempts: [] }),
     runMock: async (_p: string, on: (e: MockEvent) => void) => {
       on({ type: "started", runId: "mock-run-1" });
       on({ type: "step", id: "isolated-store", label: "Isolated throwaway kernel store opened" });

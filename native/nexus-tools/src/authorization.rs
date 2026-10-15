@@ -17,7 +17,9 @@ use crate::exec::ExecCtx;
 use crate::result::{ResultStatus, ToolError, ToolErrorCode, ToolResultV1, ToolStats};
 use crate::workspace::{Workspace, WorkspacePolicy, POLICY_VERSION};
 use nexus_contracts::sha256_hex;
-use nexus_kernel::{Kernel, SealedToolGrant, ToolAuthorizationRequest};
+use nexus_kernel::{
+    Kernel, SealedToolGrant, ToolAuthorizationRequest, VerifiedToolGrant, WorkspaceBinding,
+};
 use nexus_store::ToolJournalEntry;
 
 #[derive(Debug)]
@@ -76,7 +78,10 @@ impl PreparedToolRequest {
 
 /// Validate and pin. Performs only open/fstat of the authorized root
 /// directory itself.
-pub fn prepare(request: ToolRequestV1) -> Result<PreparedToolRequest, ToolError> {
+pub fn prepare(
+    request: ToolRequestV1,
+    binding: &WorkspaceBinding,
+) -> Result<PreparedToolRequest, ToolError> {
     let inv = |m: &str| ToolError::new(ToolErrorCode::InvalidArguments, m);
     if request.schema_version != TOOL_CONTRACT_VERSION {
         return Err(inv("unsupported tool request schemaVersion"));
@@ -103,8 +108,28 @@ pub fn prepare(request: ToolRequestV1) -> Result<PreparedToolRequest, ToolError>
     }
     let args = ToolArgs::parse(tool, &request.args)?;
     let budgets = request.budgets.clamped();
-    let workspace = Workspace::open_root(&request.workspace_root, WorkspacePolicy::default())?;
+    // The root is taken ONLY from the Controller-sealed binding and must
+    // still be the same directory the Controller authorized.
+    if binding.command_id != request.command_id
+        || binding.task_instance_id != request.task_instance_id
+        || binding.attempt_id != request.attempt_id
+    {
+        return Err(ToolError::new(
+            ToolErrorCode::WorkspaceMismatch,
+            "workspace binding does not belong to this request",
+        ));
+    }
+    let workspace = Workspace::open_root(&binding.root_path, WorkspacePolicy::default())?;
     let root_digest = sha256_hex(workspace.root_path());
+    if workspace.root_dev() != binding.root_dev
+        || workspace.root_ino() != binding.root_ino
+        || root_digest != binding.root_digest
+    {
+        return Err(ToolError::new(
+            ToolErrorCode::WorkspaceMismatch,
+            "workspace root was replaced since Controller authorization",
+        ));
+    }
     Ok(PreparedToolRequest {
         args_digest: args.digest(),
         budget_digest: budgets.digest(),
@@ -165,24 +190,18 @@ pub struct ToolExecutionOutcome {
     pub journal: ToolJournalEntry,
 }
 
-fn run_tool(ctx: &mut ExecCtx<'_>, args: &ToolArgs) -> Result<serde_json::Value, ToolError> {
-    match args {
-        ToolArgs::List(a) => crate::list::run(ctx, a),
-        ToolArgs::Read(a) => crate::read::run(ctx, a),
-        ToolArgs::Search(a) => crate::search::run(ctx, a),
-    }
+/// A call whose grant the Kernel verified and journaled as `started`.
+#[derive(Debug)]
+pub struct StartedToolCall {
+    verified: VerifiedToolGrant,
 }
 
-/// Execute an authorized call. Every refusal path returns before any
-/// workspace content access (the workspace access counter stays 0).
-pub fn execute(
-    kernel: &mut Kernel,
+fn local_bindings_ok(
     call: &AuthorizedToolCall,
     cancel: &CancellationToken,
-) -> Result<ToolExecutionOutcome, ToolError> {
+) -> Result<(), ToolError> {
     let p = &call.prepared;
     let g = &call.grant;
-    // Cheap local bindings first: grant must describe *this* prepared call.
     let mismatch = g.request_id != p.request.request_id
         || g.tool_id != p.tool.as_str()
         || g.tool_version != TOOL_VERSION
@@ -212,14 +231,40 @@ pub fn execute(
             "cancelled before start; nothing executed",
         ));
     }
-    let verified = kernel
-        .begin_tool_execution(g, &p.args_digest, &p.budget_digest)
-        .map_err(|e| kernel_refusal(&e))?;
+    Ok(())
+}
 
-    let mut ctx = ExecCtx::new(&p.workspace, p.budgets.clone(), cancel);
+/// Step 1: verify and journal `started`. Nothing on the workspace is
+/// touched by this step.
+pub fn begin(
+    kernel: &mut Kernel,
+    call: &AuthorizedToolCall,
+    cancel: &CancellationToken,
+) -> Result<StartedToolCall, ToolError> {
+    local_bindings_ok(call, cancel)?;
+    let verified = kernel
+        .begin_tool_execution(
+            &call.grant,
+            &call.prepared.args_digest,
+            &call.prepared.budget_digest,
+        )
+        .map_err(|e| kernel_refusal(&e))?;
+    Ok(StartedToolCall { verified })
+}
+
+/// Step 2: run the tool. `probe` is the authoritative fence check, called
+/// at bounded intervals (<= 20 ms) during long operations in addition to
+/// the caller's cancellation token.
+pub fn run_started(
+    call: &AuthorizedToolCall,
+    cancel: &CancellationToken,
+    probe: &mut dyn FnMut() -> Result<(), ToolError>,
+) -> ToolResultV1 {
+    let p = &call.prepared;
+    let mut ctx = ExecCtx::new(&p.workspace, p.budgets.clone(), cancel).with_probe(probe);
     let outcome = run_tool(&mut ctx, &p.args);
     let tool_id = p.tool.as_str();
-    let result = match outcome {
+    match outcome {
         Ok(output) => {
             let stats = std::mem::take(&mut ctx.stats);
             let trunc = std::mem::take(&mut ctx.truncation);
@@ -230,9 +275,20 @@ pub fn execute(
             let stats: ToolStats = std::mem::take(&mut ctx.stats);
             ToolResultV1::failure(tool_id, TOOL_VERSION, e, stats)
         }
-    };
+    }
+}
+
+/// Step 3: journal `completed` with the redacted record.
+pub fn finish(
+    kernel: &mut Kernel,
+    call: &AuthorizedToolCall,
+    started: &StartedToolCall,
+    result: ToolResultV1,
+) -> Result<ToolExecutionOutcome, ToolError> {
+    let p = &call.prepared;
+    let g = &call.grant;
     let record = serde_json::json!({
-        "toolId": tool_id,
+        "toolId": p.tool.as_str(),
         "toolVersion": TOOL_VERSION,
         "args": p.args.journal_meta(),
         "resultStatus": match result.status {
@@ -257,7 +313,40 @@ pub fn execute(
         },
     });
     let journal = kernel
-        .complete_tool_execution(&verified, record)
+        .complete_tool_execution(&started.verified, record)
         .map_err(|e| kernel_refusal(&e))?;
     Ok(ToolExecutionOutcome { result, journal })
+}
+
+/// Convenience composition for in-process trusted callers (tests,
+/// offline harness). The daemon uses the three steps separately so it
+/// never holds the Kernel lock during a long scan.
+pub fn execute(
+    kernel: &mut Kernel,
+    call: &AuthorizedToolCall,
+    cancel: &CancellationToken,
+) -> Result<ToolExecutionOutcome, ToolError> {
+    let started = begin(kernel, call, cancel)?;
+    let result = {
+        let k: &Kernel = kernel;
+        let v = &started.verified;
+        let mut probe = || {
+            k.check_tool_fence(v).map_err(|e| {
+                ToolError::new(
+                    ToolErrorCode::Revoked,
+                    format!("authority revoked mid-execution ({})", e.code.as_str()),
+                )
+            })
+        };
+        run_started(call, cancel, &mut probe)
+    };
+    finish(kernel, call, &started, result)
+}
+
+fn run_tool(ctx: &mut ExecCtx<'_>, args: &ToolArgs) -> Result<serde_json::Value, ToolError> {
+    match args {
+        ToolArgs::List(a) => crate::list::run(ctx, a),
+        ToolArgs::Read(a) => crate::read::run(ctx, a),
+        ToolArgs::Search(a) => crate::search::run(ctx, a),
+    }
 }

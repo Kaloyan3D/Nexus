@@ -21,8 +21,9 @@ use nexus_store::{Store, WitnessStore};
 pub use readiness::{DispatchReadiness, ReadinessDimension};
 use std::path::Path;
 pub use tools::{
-    SealedToolGrant, ToolAuthorizationRequest, VerifiedToolGrant, PHASE_AUTHORIZED,
-    PHASE_COMPLETED, PHASE_STARTED, TOOL_GRANT_SEAL_DOMAIN, TOOL_GRANT_TTL_MS,
+    ReconcileReport, SealedToolGrant, ToolAuthorizationRequest, VerifiedToolGrant,
+    WorkspaceBinding, PHASE_AUTHORIZED, PHASE_COMPLETED, PHASE_EXPIRED, PHASE_INTERRUPTED,
+    PHASE_STARTED, TOOL_GRANT_SEAL_DOMAIN, TOOL_GRANT_TTL_MS,
 };
 
 pub struct Kernel {

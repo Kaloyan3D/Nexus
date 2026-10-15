@@ -3,12 +3,30 @@ use nexus_contracts::{
     ControllerIntentV1, ExecutionTargetCoreV1, RegistryProvenanceV1, RegistryResolutionV1,
     CONTRACT_SCHEMA_VERSION,
 };
-use nexus_kernel::{AcceptRequest, Kernel};
+use nexus_kernel::{AcceptRequest, Kernel, WorkspaceBinding};
 use nexus_tools::{
     authorize, execute, prepare, AuthorizedToolCall, CancellationToken, ToolBudgets, ToolError,
     ToolExecutionOutcome, ToolRequestV1, TOOL_CONTRACT_VERSION, TOOL_VERSION,
 };
 use std::path::{Path, PathBuf};
+
+static BINDINGS: std::sync::Mutex<Vec<WorkspaceBinding>> = std::sync::Mutex::new(Vec::new());
+
+/// Look up the Controller binding the fixture published for this request's
+/// command (or take it from the child-process environment).
+pub fn prepare_b(r: ToolRequestV1) -> Result<nexus_tools::PreparedToolRequest, ToolError> {
+    let b = {
+        let g = BINDINGS.lock().unwrap();
+        g.iter().find(|b| b.command_id == r.command_id).cloned()
+    }
+    .or_else(|| {
+        std::env::var("AUDIT_BINDING")
+            .ok()
+            .and_then(|j| serde_json::from_str(&j).ok())
+    })
+    .expect("binding for command");
+    prepare(r, &b)
+}
 
 pub struct Fx {
     pub kernel: Kernel,
@@ -25,6 +43,7 @@ pub struct Fx {
     pub epoch: u64,
     pub incarnation: String,
     next: u32,
+    pub base: PathBuf,
 }
 
 pub const OUTSIDE_SECRET: &str = "OUTSIDE-SECRET-MARKER-9f31";
@@ -81,7 +100,7 @@ pub fn fixture(tag: &str) -> Fx {
         "muse_main",
         "engineering-v2",
         serde_json::json!(3),
-        serde_json::json!({"op": "engineer-turn"}),
+        serde_json::json!({"op": "engineer-turn", "workspaceRootDigest": nexus_contracts::sha256_hex(ws.to_str().unwrap())}),
     )
     .with_lease(lease.lease_epoch, &lease.store_incarnation);
     let snapshot = serde_json::json!({"schemaVersion": 1, "tag": "tools-fixture", "modes": []});
@@ -93,6 +112,11 @@ pub fn fixture(tag: &str) -> Fx {
             snapshot,
         })
         .unwrap();
+    // Controller publishes the workspace authority for this command.
+    let binding = kernel
+        .bind_workspace(&command, ws.to_str().unwrap(), std::slice::from_ref(&base))
+        .unwrap();
+    BINDINGS.lock().unwrap().push(binding);
     Fx {
         kernel,
         dir,
@@ -106,6 +130,7 @@ pub fn fixture(tag: &str) -> Fx {
         epoch: lease.lease_epoch,
         incarnation: lease.store_incarnation,
         next: 0,
+        base,
     }
 }
 
@@ -133,7 +158,6 @@ impl Fx {
             tool_version: TOOL_VERSION,
             args,
             budgets: ToolBudgets::default(),
-            workspace_root: self.ws.to_str().unwrap().to_owned(),
         }
     }
 
@@ -147,9 +171,24 @@ impl Fx {
         self.run_request(r)
     }
 
+    pub fn binding(&mut self) -> WorkspaceBinding {
+        self.kernel
+            .workspace_binding(&self.command)
+            .unwrap()
+            .expect("binding")
+    }
+
+    pub fn prepare_req(
+        &mut self,
+        r: ToolRequestV1,
+    ) -> Result<nexus_tools::PreparedToolRequest, ToolError> {
+        let b = self.binding();
+        prepare(r, &b)
+    }
+
     pub fn run_request(&mut self, r: ToolRequestV1) -> Result<ToolExecutionOutcome, ToolError> {
         let cancel = CancellationToken::new(&r.cancellation_id);
-        let p = prepare(r)?;
+        let p = self.prepare_req(r)?;
         let call = authorize(&mut self.kernel, p)?;
         execute(&mut self.kernel, &call, &cancel)
     }
@@ -161,7 +200,7 @@ impl Fx {
     ) -> (AuthorizedToolCall, CancellationToken) {
         let r = self.request(tool, args);
         let cancel = CancellationToken::new(&r.cancellation_id);
-        let p = prepare(r).unwrap();
+        let p = self.prepare_req(r).unwrap();
         (authorize(&mut self.kernel, p).unwrap(), cancel)
     }
 

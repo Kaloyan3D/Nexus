@@ -2,8 +2,11 @@
 //!
 //! One daemon owns one DataRoot: it hosts a single persistent [`Kernel`]
 //! instance and exposes a versioned Unix-socket IPC surface. There is no
-//! model runtime, no tool runtime, no dispatch, no network, and no exec
-//! capability anywhere in this crate.
+//! model runtime, no dispatch, no network, and no exec capability anywhere
+//! in this crate. A3.2 adds exactly one tool surface: read-only
+//! `fs.list`/`fs.read`/`fs.search` via the issuer-authenticated
+//! `tool-execute` command (workspace root comes only from a Kernel-sealed
+//! Controller binding), plus the read-only `tool-events` query.
 
 pub mod auth;
 pub mod protocol;

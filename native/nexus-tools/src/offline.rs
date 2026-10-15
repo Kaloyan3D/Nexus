@@ -83,7 +83,9 @@ fn run_in(
         "muse_main",
         "engineering-v2",
         rev.clone(),
-        serde_json::json!({"op": "offline-tool-test"}),
+        serde_json::json!({"op": "offline-tool-test", "workspaceRootDigest": nexus_contracts::sha256_hex(
+            std::fs::canonicalize(workspace).map_err(|e| e.to_string())?.to_str().unwrap_or_default()
+        )}),
     )
     .with_lease(lease.lease_epoch, &lease.store_incarnation);
     let snapshot = serde_json::json!({"schemaVersion": 1, "tag": "offline-tools", "modes": []});
@@ -126,10 +128,14 @@ fn run_in(
         tool_version: crate::TOOL_VERSION,
         args,
         budgets,
-        workspace_root: workspace.into(),
     };
     let cancel = CancellationToken::new(&req.cancellation_id);
-    let prepared = prepare(req).map_err(|e| e.to_string())?;
+    // Offline: the ephemeral Controller stand-in binds exactly the
+    // operator-named directory (allowed base == the workspace itself).
+    let binding = kernel
+        .bind_workspace(command, workspace, &[std::path::PathBuf::from(workspace)])
+        .map_err(kerr)?;
+    let prepared = prepare(req, &binding).map_err(|e| e.to_string())?;
     let call = authorize(&mut kernel, prepared).map_err(|e| e.to_string())?;
     let outcome = execute(&mut kernel, &call, &cancel).map_err(|e| e.to_string())?;
     let phases = kernel

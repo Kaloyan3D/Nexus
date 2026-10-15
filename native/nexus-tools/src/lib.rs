@@ -28,13 +28,16 @@ pub mod search;
 pub mod workspace;
 
 pub use authorization::{
-    authorize, execute, prepare, AuthorizedToolCall, PreparedToolRequest, ToolExecutionOutcome,
+    authorize, begin, execute, finish, prepare, run_started, AuthorizedToolCall,
+    PreparedToolRequest, StartedToolCall, ToolExecutionOutcome,
 };
 pub use contract::{
     descriptor_for, descriptors, ListArgs, ReadArgs, SearchArgs, ToolArgs, ToolBudgets,
     ToolDescriptor, ToolId, ToolRequestV1, TOOL_CONTRACT_VERSION, TOOL_VERSION,
 };
-pub use events::{tool_events_from_journal, ToolEventStatus, ToolEventV1};
+pub use events::{
+    fold_tool_records, tool_events_from_journal, ToolEventStatus, ToolEventV1, ToolRecordV1,
+};
 pub use exec::{CancellationToken, ExecCtx};
 pub use redact::{Redaction, Redactor};
 pub use result::{ResultStatus, ToolError, ToolErrorCode, ToolResultV1, ToolStats, Truncation};

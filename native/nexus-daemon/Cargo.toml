@@ -13,6 +13,7 @@ path = "src/main.rs"
 nexus-contracts = { workspace = true }
 nexus-store = { workspace = true }
 nexus-kernel = { workspace = true }
+nexus-tools = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -30,3 +31,4 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 nexus-contracts = { workspace = true }
 nexus-model = { workspace = true }
+nexus-client = { workspace = true }

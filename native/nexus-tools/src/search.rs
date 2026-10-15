@@ -129,6 +129,13 @@ fn scan_file(
         if was_clipped {
             ctx.truncation.add("line-truncated");
         }
+        let marked;
+        let shown = if was_clipped {
+            marked = [shown, crate::redact::LINE_TRUNCATED].concat();
+            marked.as_str()
+        } else {
+            shown
+        };
         let cost = (disp.len() + shown.len() + 40) as u64;
         if matches.len() >= max_matches {
             ctx.truncation.add("max-matches");
