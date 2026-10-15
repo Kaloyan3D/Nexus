@@ -19,6 +19,16 @@ use nexus_contracts::{KernelError, KernelErrorCode, KernelResult, RegistryResolu
 /// The only execution scope A2.3 authorizes: loopback mock provider.
 pub const SCOPE_MOCK_E2E: &str = "mock-e2e";
 
+/// A5.1 user-initiated, text-only model inference scope. Separately gated
+/// (`Kernel::enable_model_only_pilot`, default off), sealed-grant only, and
+/// never a tool/effect authority: the grant covers one prepared request's
+/// bytes to one sealed endpoint and nothing else. `dispatch_enabled()` and
+/// `authorize_dispatch()` are untouched by this scope.
+pub const SCOPE_MODEL_ONLY: &str = "model-only";
+
+/// The only initiator value a `model-only` intent may carry.
+pub const INITIATOR_USER_EXPLICIT: &str = "user-explicit";
+
 /// Durable Controller execution intent bundle reference.
 #[derive(Debug, Clone)]
 pub struct PublishedIntent {
@@ -197,6 +207,57 @@ fn is_loopback_origin(origin: &str) -> bool {
     h == "localhost" || h == "127.0.0.1" || h == "::1" || h.starts_with("127.")
 }
 
+/// Origin policy per scope. mock-e2e: loopback http only (unchanged).
+/// model-only: loopback http (local test double or local model, no public
+/// network) OR https to a syntactically public host; plaintext to any
+/// non-loopback host and every private/link-local/metadata address is
+/// refused.
+fn origin_allowed_for_scope(scope: &str, origin: &str) -> KernelResult<()> {
+    if is_loopback_origin(origin) {
+        return Ok(());
+    }
+    if scope == SCOPE_MODEL_ONLY && nexus_contracts::is_public_https_origin(origin) {
+        return Ok(());
+    }
+    Err(KernelError::new(
+        KernelErrorCode::ScopeRefused,
+        if scope == SCOPE_MODEL_ONLY {
+            "model-only scope requires a loopback endpoint or a public https endpoint"
+        } else {
+            "mock scope requires a loopback-local endpoint"
+        },
+    ))
+}
+
+impl Kernel {
+    /// A5.1: enable the model-only pilot scope for this Kernel handle.
+    /// Default OFF; only the daemon's explicit `--enable-model-pilot` flag
+    /// calls this. It grants no tool, file, process or approval authority.
+    pub fn enable_model_only_pilot(&mut self) {
+        self.model_only_enabled = true;
+    }
+
+    /// True when the model-only pilot scope is enabled on this handle.
+    pub fn model_only_pilot_enabled(&self) -> bool {
+        self.model_only_enabled
+    }
+}
+
+fn scope_admitted(pilot_enabled: bool, scope: &str) -> KernelResult<()> {
+    match scope {
+        SCOPE_MOCK_E2E => Ok(()),
+        SCOPE_MODEL_ONLY if pilot_enabled => Ok(()),
+        SCOPE_MODEL_ONLY => Err(KernelError::new(
+            KernelErrorCode::ScopeRefused,
+            "model-only pilot is disabled on this kernel (default off)",
+        )),
+        _ => Err(KernelError::new(
+            KernelErrorCode::ScopeRefused,
+            "scope is not authorized; live dispatch refused",
+        )),
+    }
+}
+
 impl Kernel {
     /// Seal one Registry-issued V2 extension under its digest identity,
     /// using the issuance key (same trust root as V1 seals). The extension
@@ -227,6 +288,7 @@ impl Kernel {
     /// the lease must equal the current generation. Republishing
     /// byte-identical intent is idempotent.
     pub fn publish_intent(&mut self, bundle: &serde_json::Value) -> KernelResult<PublishedIntent> {
+        let pilot = self.model_only_enabled;
         Self::critical(&self.lock_file, &self.in_process, || {
             let command_id = field_str(bundle, "commandId")?;
             let task_instance_id = field_str(bundle, "taskInstanceId")?;
@@ -241,10 +303,13 @@ impl Kernel {
             field_str(bundle, "attemptId")?;
             field_str(bundle, "requestDigest")?;
             field_str(bundle, "sessionId")?;
-            if scope != SCOPE_MOCK_E2E {
+            scope_admitted(pilot, &scope)?;
+            if scope == SCOPE_MODEL_ONLY
+                && bundle.get("initiator").and_then(|v| v.as_str()) != Some(INITIATOR_USER_EXPLICIT)
+            {
                 return Err(KernelError::new(
                     KernelErrorCode::ScopeRefused,
-                    "intent scope is not mock-e2e; publication refused",
+                    "model-only intents must declare initiator user-explicit",
                 ));
             }
             let (issued_json, _seal) = self.store.fetch_sealed(&issuance_id)?.ok_or_else(|| {
@@ -291,6 +356,14 @@ impl Kernel {
                     KernelErrorCode::BindingMismatch,
                     "sealed extension does not match its digest",
                 ));
+            }
+            if scope == SCOPE_MODEL_ONLY {
+                let origin = ext_value
+                    .get("endpoint")
+                    .and_then(|e| e.get("origin"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                origin_allowed_for_scope(&scope, origin)?;
             }
             let ext_remote = ext_value
                 .get("remoteModelIdConfirmed")
@@ -371,7 +444,7 @@ impl Kernel {
                         "intent was fenced; dispatch refused",
                     ));
                 }
-                "executed" => {
+                "executed" | "redeemed" => {
                     return Err(KernelError::new(
                         KernelErrorCode::CommandConflict,
                         "intent already executed; duplicate dispatch refused",
@@ -551,13 +624,9 @@ impl Kernel {
         &mut self,
         req: &NativeDispatchRequest,
     ) -> KernelResult<SealedNativeDispatchGrant> {
+        let pilot = self.model_only_enabled;
         Self::critical(&self.lock_file, &self.in_process, || {
-            if req.scope != SCOPE_MOCK_E2E {
-                return Err(KernelError::new(
-                    KernelErrorCode::ScopeRefused,
-                    "only the mock-e2e scope is authorized; live dispatch refused",
-                ));
-            }
+            scope_admitted(pilot, &req.scope)?;
             let (stored_json, stored_seal, state) =
                 self.store.fetch_intent(&req.command_id)?.ok_or_else(|| {
                     KernelError::new(
@@ -573,7 +642,7 @@ impl Kernel {
                         "intent was fenced; dispatch refused",
                     ))
                 }
-                "executed" => {
+                "executed" | "redeemed" => {
                     return Err(KernelError::new(
                         KernelErrorCode::CommandConflict,
                         "intent already executed; duplicate dispatch refused",
@@ -656,12 +725,7 @@ impl Kernel {
                     "prepared endpoint differs from the sealed extension",
                 ));
             }
-            if !is_loopback_origin(&origin) {
-                return Err(KernelError::new(
-                    KernelErrorCode::ScopeRefused,
-                    "mock scope requires a loopback-local endpoint",
-                ));
-            }
+            origin_allowed_for_scope(&req.scope, &origin)?;
             let cred = ext_value
                 .get("credentialRef")
                 .and_then(|v| v.as_str())
@@ -776,13 +840,9 @@ impl Kernel {
         expected_credential_ref: &str,
         now_ms_value: i64,
     ) -> KernelResult<NativeDispatchGrant> {
+        let pilot = self.model_only_enabled;
         Self::critical(&self.lock_file, &self.in_process, || {
-            if grant.scope != SCOPE_MOCK_E2E {
-                return Err(KernelError::new(
-                    KernelErrorCode::ScopeRefused,
-                    "grant scope is not mock-e2e; refused",
-                ));
-            }
+            scope_admitted(pilot, &grant.scope)?;
             if grant.command_id.is_empty()
                 || grant.attempt_id.is_empty()
                 || grant.task_instance_id.is_empty()
@@ -859,6 +919,12 @@ impl Kernel {
                         "intent was fenced; grant is revoked",
                     ))
                 }
+                "redeemed" => {
+                    return Err(KernelError::new(
+                        KernelErrorCode::CommandConflict,
+                        "grant was already redeemed; a second send is refused",
+                    ))
+                }
                 "published" => {
                     return Err(KernelError::new(
                         KernelErrorCode::ForgedIssuer,
@@ -931,12 +997,7 @@ impl Kernel {
                     "grant endpoint differs from the sealed extension",
                 ));
             }
-            if !is_loopback_origin(origin) {
-                return Err(KernelError::new(
-                    KernelErrorCode::ScopeRefused,
-                    "mock scope requires a loopback-local endpoint",
-                ));
-            }
+            origin_allowed_for_scope(&grant.scope, origin)?;
             let cred = ext_value
                 .get("credentialRef")
                 .and_then(|v| v.as_str())
@@ -1025,5 +1086,36 @@ impl Kernel {
                 granted_at_utc: grant.granted_at_utc.clone(),
             })
         })
+    }
+}
+
+impl Kernel {
+    /// A5.1: durable cross-process single-use redemption of a sealed grant.
+    ///
+    /// Performs the full `verify_sealed_grant` checks and then atomically
+    /// moves the intent `executed` -> `redeemed` BEFORE the caller may put
+    /// bytes on the wire. A second redemption of the same grant (or any
+    /// grant for the same command) fails with `command-conflict`, so a
+    /// crash after redemption can never lead to an automatic resubmission:
+    /// the outcome is uncertain by construction and stays uncertain.
+    pub fn redeem_sealed_grant(
+        &mut self,
+        grant: &SealedNativeDispatchGrant,
+        expected_request_digest: &str,
+        expected_endpoint_origin: &str,
+        expected_credential_ref: &str,
+        now_ms_value: i64,
+    ) -> KernelResult<NativeDispatchGrant> {
+        let verified = self.verify_sealed_grant(
+            grant,
+            expected_request_digest,
+            expected_endpoint_origin,
+            expected_credential_ref,
+            now_ms_value,
+        )?;
+        Self::critical(&self.lock_file, &self.in_process, || {
+            self.store.mark_intent_redeemed(&grant.command_id)
+        })?;
+        Ok(verified)
     }
 }

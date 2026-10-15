@@ -12,6 +12,7 @@ pub mod config;
 pub mod conversation;
 pub mod error;
 pub mod mock;
+pub mod model_run;
 pub mod streaming;
 pub mod transport;
 pub mod version;
@@ -35,6 +36,13 @@ pub use mock::{
     live_blockers, run_mock, run_mock_streaming, MockCheck, MockProgress, MockRunReport,
     MockStreamItem,
 };
+pub use model_run::{
+    list_model_conversations, prepare_model_run, recover_model_run, request_model_cancel,
+    run_model_only, status_from_store as model_run_status, ExpectedTarget,
+    ModelConversationSummary, ModelRunOptions, ModelRunOutcome, ModelRunRequest, ModelRunState,
+    ModelRunStatus, ModelRunUpdate, PreparedModelRun, MAX_PROMPT_BYTES, MODEL_CONVERSATION_PREFIX,
+};
+pub use nexus_model::TransportLimits;
 pub use nexus_tools::{ToolEventStatus, ToolEventV1, ToolRecordV1};
 pub use nexus_transcript as transcript;
 pub use streaming::{poll_journal, ClientEvent};

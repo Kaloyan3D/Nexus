@@ -299,6 +299,7 @@ name = "nexus-client"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "hmac",
  "nexus-contracts",
  "nexus-kernel",
  "nexus-model",

@@ -62,6 +62,7 @@ fn usage() -> i32 {
     println!("         [--security-profile production-v1 [--validate-config-only]]  (A4.4 enforced production contract)");
     println!("         [--require-external-witness]  (refuse to start without --external-witness; production units)");
     println!("         [--require-human-approval]  (A4.2: per-operation human approval; needs --require-independent-approver)");
+    println!("         [--enable-model-pilot]  (A5.1: model-only text inference scope; default off; needs shadow-test + --allowed-uids)");
     println!("Trust modes: readonly (default, privileged mutations disabled) |");
     println!("  shadow-test (explicit opt-in, per-request issuer authentication).");
     println!("--allowed-uids gates privileged commands by peer UID (SO_PEERCRED);");
@@ -452,6 +453,24 @@ fn run(args: &[String]) -> i32 {
         }
     };
     let mut kernel = kernel;
+    // A5.1: model-only pilot scope. Default OFF. Needs the same privileged
+    // transport gates as every other opt-in (shadow-test + peer UIDs); it
+    // adds no network, credential or tool surface to this process.
+    if args.iter().any(|a| a == "--enable-model-pilot") {
+        if trust_mode != TrustMode::ShadowTest {
+            return fatal(
+                "bad-config",
+                "--enable-model-pilot requires --trust-mode shadow-test (failing closed)",
+            );
+        }
+        if flag_str(args, "--allowed-uids").is_none() {
+            return fatal(
+                "bad-config",
+                "--enable-model-pilot requires --allowed-uids (failing closed)",
+            );
+        }
+        kernel.enable_model_only_pilot();
+    }
     // A4.2 no-downgrade latch (before any socket/credential is published).
     // A store that has run in human-approval mode refuses to enable writes
     // or processes under a weaker policy; read-only service stays available.

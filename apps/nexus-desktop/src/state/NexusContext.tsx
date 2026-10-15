@@ -14,6 +14,7 @@ import type {
   AppInfo,
   LiveBlockers,
   MockEvent,
+  ModelConversationSummary,
   ModelCatalog,
   RuntimeSnapshot,
   TaskRecord,
@@ -22,7 +23,11 @@ import type {
 } from "../lib/contracts";
 import { mockReducer, type MockRun } from "./mockRuns";
 
-export type Selection = { kind: "task"; id: string } | { kind: "mock"; id: string } | null;
+export type Selection =
+  | { kind: "task"; id: string }
+  | { kind: "mock"; id: string }
+  | { kind: "model"; id: string }
+  | null;
 
 export type Page =
   | "workspace"
@@ -54,6 +59,9 @@ export interface NexusState {
   select: (s: Selection) => void;
   selectedTask: TaskRecord | null;
   selectedMock: MockRun | null;
+  modelRuns: ModelConversationSummary[];
+  selectedModel: ModelConversationSummary | null;
+  refreshModelRuns: () => void;
   refreshRuntime: () => void;
   refreshTasks: () => void;
   startMock: (prompt: string) => Promise<void>;
@@ -166,6 +174,21 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
       alive = false;
     };
   }, [nativeApi]);
+  // A5.1 model-only runs are recorded by the backend executor; the renderer
+  // only lists and follows them. Poll fast while one is in flight.
+  const [modelRuns, setModelRuns] = useState<ModelConversationSummary[]>([]);
+  const refreshModelRuns = useCallback(() => {
+    nativeApi
+      .listModelConversations()
+      .then((list) => setModelRuns(list))
+      .catch(() => {});
+  }, [nativeApi]);
+  const anyActive = modelRuns.some((m) => !m.terminal);
+  useEffect(() => {
+    refreshModelRuns();
+    const t = setInterval(refreshModelRuns, anyActive ? 1_000 : 8_000);
+    return () => clearInterval(t);
+  }, [refreshModelRuns, anyActive]);
   const [mockBusy, setMockBusy] = useState(false);
   const [selection, select] = useState<Selection>(null);
   const [page, setPage] = useState<Page>("workspace");
@@ -215,6 +238,11 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
   const selectedMock =
     selection?.kind === "mock" ? (mockRuns.find((r) => r.key === selection.id) ?? null) : null;
 
+  const selectedModel =
+    selection?.kind === "model"
+      ? (modelRuns.find((r) => r.conversationId === selection.id) ?? null)
+      : null;
+
   const value: NexusState = {
     api: nativeApi,
     appInfo,
@@ -230,6 +258,9 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     select,
     selectedTask,
     selectedMock,
+    modelRuns,
+    selectedModel,
+    refreshModelRuns,
     refreshRuntime,
     refreshTasks,
     startMock,

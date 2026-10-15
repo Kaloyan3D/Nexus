@@ -1,10 +1,11 @@
-import { FlaskConical, ListChecks, Plus } from "lucide-react";
+import { Bot, FlaskConical, ListChecks, Plus } from "lucide-react";
 import { useMemo, useState } from "react";
 import { relativeTime } from "../../lib/format";
 import { taskStatusView } from "../../lib/status";
 import { useNexus } from "../../state/NexusContext";
 import type { MockRun } from "../../state/mockRuns";
-import type { TaskRecord } from "../../lib/contracts";
+import type { ModelConversationSummary, TaskRecord } from "../../lib/contracts";
+import { modelStateView } from "../../lib/modelRun";
 import { Alert, Badge, EmptyState, Loading, SearchInput, StatusDot } from "../../components/ui/primitives";
 
 export function TaskRow({
@@ -74,8 +75,45 @@ export function MockRow({
   );
 }
 
+export function ModelRow({
+  run,
+  selected,
+  onSelect,
+}: {
+  run: ModelConversationSummary;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const v = modelStateView(run.state);
+  return (
+    <button
+      type="button"
+      className="nv-row"
+      aria-current={selected ? "true" : undefined}
+      onClick={onSelect}
+    >
+      <span className="nv-row__status">
+        <StatusDot tone={v.tone} pulse={v.pulse} />
+      </span>
+      <span className="nv-row__main">
+        <span className="nv-row__title">{run.firstPrompt || "(model run)"}</span>
+        <span className="nv-row__meta">
+          <Badge tone={run.endpointKind === "provider" ? "purple" : "warning"} icon={<Bot size={11} />}>
+            {run.endpointKind === "provider" ? "MODEL" : "FIXTURE"}
+          </Badge>
+          <span className="nv-mono">
+            {run.providerId ?? "?"}/{run.remoteModelId ?? "?"}
+          </span>
+          <span>{v.label}</span>
+          {run.startedAtMs !== null && <span>{relativeTime(new Date(run.startedAtMs).toISOString())}</span>}
+        </span>
+      </span>
+    </button>
+  );
+}
+
 export function RecentTasks() {
-  const { tasks, mockRuns, selection, select } = useNexus();
+  const { tasks, mockRuns, modelRuns, selection, select } = useNexus();
   const [q, setQ] = useState("");
   const needle = q.trim().toLowerCase();
 
@@ -101,6 +139,19 @@ export function RecentTasks() {
       </div>
       <SearchInput value={q} onChange={setQ} placeholder="Search tasks…" label="Search tasks" />
       <div className="nv-recent__list">
+        {modelRuns.length > 0 && (
+          <>
+            <div className="nv-group-label">Model-only runs · user-initiated, text only</div>
+            {modelRuns.map((m) => (
+              <ModelRow
+                key={m.conversationId}
+                run={m}
+                selected={selection?.kind === "model" && selection.id === m.conversationId}
+                onSelect={() => select({ kind: "model", id: m.conversationId })}
+              />
+            ))}
+          </>
+        )}
         {mocks.length > 0 && (
           <>
             <div className="nv-group-label">Mock runs · not in the Controller ledger</div>
@@ -139,7 +190,7 @@ export function RecentTasks() {
         ))}
       </div>
       <div className="nv-recent__foot">
-        <Plus size={13} aria-hidden="true" /> Tasks are created by the Controller; Nexus runs mock work only.
+        <Plus size={13} aria-hidden="true" /> Tasks are created by the Controller. Model-only runs are started by the operator (nexus model run); this window follows and can cancel them.
       </div>
     </section>
   );

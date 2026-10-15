@@ -94,6 +94,48 @@ async fn list_mock_conversations(
         .map_err(|_| internal())
 }
 
+/// A5.1: read-only index of recorded model-only conversations.
+#[tauri::command]
+async fn list_model_conversations(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<nexus_client::ModelConversationSummary>, UiError> {
+    let cfg = state.cfg.clone();
+    tauri::async_runtime::spawn_blocking(move || nexus_client::list_model_conversations(&cfg))
+        .await
+        .map_err(|_| internal())
+}
+
+/// A5.1: durable status of one model-only run, derived from the transcript.
+#[tauri::command]
+async fn model_run_status(
+    state: tauri::State<'_, AppState>,
+    conversation_id: String,
+) -> Result<nexus_client::ModelRunStatus, UiError> {
+    let cfg = state.cfg.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::model_run_status(&cfg, &conversation_id).map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// A5.1: request cancellation of a model-only run. Fail-safe direction
+/// only: writes a stop marker next to the transcript; grants nothing and
+/// cannot start, resend or authorize anything.
+#[tauri::command]
+async fn cancel_model_run(
+    state: tauri::State<'_, AppState>,
+    conversation_id: String,
+) -> Result<(), UiError> {
+    let cfg = state.cfg.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::request_model_cancel(&cfg, &conversation_id)
+            .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
 #[tauri::command]
 async fn tool_events(
     state: tauri::State<'_, AppState>,
@@ -195,6 +237,9 @@ pub fn run() {
             conversation_read,
             model_io_read,
             list_mock_conversations,
+            list_model_conversations,
+            model_run_status,
+            cancel_model_run,
             tool_events,
             list_approvals,
             integrity_status
@@ -218,6 +263,9 @@ mod authz_tests {
         "conversation_read",
         "model_io_read",
         "list_mock_conversations",
+        "list_model_conversations",
+        "model_run_status",
+        "cancel_model_run",
         "tool_events",
         "list_approvals",
         "integrity_status",
@@ -266,5 +314,63 @@ mod authz_tests {
                 || csp.contains("http://ipc.localhost")
         );
         assert!(!csp.replace("http://ipc.localhost", "").contains("http://"));
+    }
+
+    /// A5.1: the renderer-facing model-run surface carries no credential,
+    /// grant or issuer authority, and the backend never calls the executor.
+    #[test]
+    fn model_run_surface_exposes_no_credentials_or_authority() {
+        let st = nexus_client::ModelRunStatus {
+            conversation_id: "model_0123456789abcdef0123456789abcdef".into(),
+            state: "completed".into(),
+            terminal: true,
+            provider_id: Some("p".into()),
+            remote_model_id: Some("m".into()),
+            logical_model_id: Some("l".into()),
+            endpoint_kind: Some("provider".into()),
+            attempt_id: Some("a".into()),
+            command_id: Some("c".into()),
+            request_digest: Some("d".into()),
+            http_status: Some(200),
+            usage_input_tokens: Some(1),
+            usage_output_tokens: Some(2),
+            finish_reason: Some("stop".into()),
+            latency_ms: Some(3),
+            error_code: None,
+            cancel_requested: false,
+            text: "hello".into(),
+        };
+        let v = serde_json::to_value(&st).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        let mut expected = vec![
+            "attemptId", "cancelRequested", "commandId", "conversationId", "endpointKind",
+            "errorCode", "finishReason", "httpStatus", "latencyMs", "logicalModelId",
+            "providerId", "remoteModelId", "requestDigest", "state", "terminal", "text",
+            "usageInputTokens", "usageOutputTokens",
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected, "an exact, credential-free field set");
+        let src = include_str!("lib.rs");
+        let (prod, _) = src.split_once("#[cfg(test)]").unwrap();
+        for forbidden in [
+            "run_model_only",
+            "credentials_path",
+            "cap_path",
+            "model-redeem",
+            "dispatch-authorize",
+            "from_protected_file",
+        ] {
+            assert!(!prod.contains(forbidden), "Tauri backend must not reference {forbidden}");
+        }
+        let cap: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/main.json")).unwrap();
+        for p in cap["permissions"].as_array().unwrap() {
+            let p = p.as_str().unwrap();
+            assert!(p.starts_with("allow-"), "{p}");
+            for bad in ["fs", "shell", "http", "opener", "process", "dialog"] {
+                assert!(!p.contains(&format!("{bad}:")), "{p}");
+            }
+        }
     }
 }

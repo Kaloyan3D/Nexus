@@ -6,6 +6,8 @@ import type {
   ConversationView,
   IntegrityView,
   MockConversationSummary,
+  ModelConversationSummary,
+  ModelRunStatus,
   ModelIoView,
   JournalResult,
   LiveBlockers,
@@ -30,6 +32,12 @@ export interface NativeApi {
   conversationRead(taskInstanceId: string, q?: ConversationQuery): Promise<ConversationView>;
   modelIoRead(taskInstanceId: string): Promise<ModelIoView>;
   listMockConversations(): Promise<MockConversationSummary[]>;
+  /** A5.1: recorded user-initiated model-only runs (read-only). */
+  listModelConversations(): Promise<ModelConversationSummary[]>;
+  /** A5.1: durable status of one model-only run (read-only). */
+  modelRunStatus(conversationId: string): Promise<ModelRunStatus>;
+  /** A5.1: fail-safe stop request. Cannot start, resend or authorize a run. */
+  cancelModelRun(conversationId: string): Promise<void>;
   /** Read-only tool records for a task attempt. Never executes tools. */
   toolEvents(taskInstanceId: string): Promise<TaskToolEvents>;
   /** Read-only approval status. There is deliberately no approve/deny here. */
@@ -71,6 +79,9 @@ export const tauriApi: NativeApi = {
     }),
   modelIoRead: (taskInstanceId) => invoke<ModelIoView>("model_io_read", { taskInstanceId }),
   listMockConversations: () => invoke<MockConversationSummary[]>("list_mock_conversations"),
+  listModelConversations: () => invoke<ModelConversationSummary[]>("list_model_conversations"),
+  modelRunStatus: (conversationId) => invoke<ModelRunStatus>("model_run_status", { conversationId }),
+  cancelModelRun: (conversationId) => invoke<void>("cancel_model_run", { conversationId }),
   toolEvents: (taskInstanceId) => invoke<TaskToolEvents>("tool_events", { taskInstanceId }),
   listApprovals: (taskInstanceId) => invoke<ApprovalsView>("list_approvals", { taskInstanceId }),
   integrityStatus: () => invoke<IntegrityView>("integrity_status"),
@@ -118,6 +129,9 @@ export const unavailableApi: NativeApi = {
   conversationRead: () => Promise.reject(notInShell),
   modelIoRead: () => Promise.reject(notInShell),
   listMockConversations: () => Promise.resolve([]),
+  listModelConversations: () => Promise.resolve([]),
+  modelRunStatus: () => Promise.reject(notInShell),
+  cancelModelRun: () => Promise.reject(notInShell),
   toolEvents: () => Promise.reject(notInShell),
   listApprovals: () => Promise.reject(notInShell),
   integrityStatus: () => Promise.reject(notInShell),

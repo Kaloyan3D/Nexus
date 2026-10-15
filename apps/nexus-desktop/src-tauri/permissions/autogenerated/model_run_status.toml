@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-model-run-status"
+description = "Enables the model_run_status command without any pre-configured scope."
+commands.allow = ["model_run_status"]
+
+[[permission]]
+identifier = "deny-model-run-status"
+description = "Denies the model_run_status command without any pre-configured scope."
+commands.deny = ["model_run_status"]

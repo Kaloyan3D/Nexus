@@ -1427,3 +1427,282 @@ fn production_dispatch_remains_disabled() {
         .expect_err("dispatch is never authorized");
     assert_eq!(err.code, nexus_contracts::KernelErrorCode::DispatchDisabled);
 }
+
+// ---- A5.1: streaming delivery, wall-clock bound, protected credentials. ----
+
+mod a51 {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    /// One-shot loopback provider running `script` against the single
+    /// accepted connection (after the request was read in full).
+    fn serve_once(
+        script: impl FnOnce(&mut std::net::TcpStream) + Send + 'static,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let origin = format!("http://{}", l.local_addr().expect("addr"));
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().expect("accept");
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            loop {
+                let n = s.read(&mut tmp).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&buf[..p]).to_ascii_lowercase();
+                    let want: usize = head
+                        .lines()
+                        .find_map(|l| {
+                            l.strip_prefix("content-length:")
+                                .and_then(|v| v.trim().parse().ok())
+                        })
+                        .unwrap_or(0);
+                    if buf.len() >= p + 4 + want {
+                        break;
+                    }
+                }
+            }
+            script(&mut s);
+        });
+        (origin, h)
+    }
+
+    fn attested_for(
+        origin: &str,
+        limits: TransportLimits,
+    ) -> (
+        OfflineModelRuntime<HttpSseTransport>,
+        AttestedPreparedModelRequest,
+    ) {
+        let target = target_for(origin);
+        let (issued, snapshot) = issued_for(&target, TASK);
+        let pin = pin_for(&target, &issued, &snapshot, "attempt-a51");
+        let binding = TransportBinding::new(origin);
+        let runtime =
+            OfflineModelRuntime::new(HttpSseTransport::new(binding.clone()), binding, limits);
+        let prepared = runtime
+            .prepare(
+                &pin,
+                &issued,
+                &snapshot,
+                &target,
+                &ModelRequest::text_only("user", "hi"),
+            )
+            .expect("prepare");
+        let attested = runtime
+            .attest(&pin, &issued, &snapshot, &target, prepared)
+            .expect("attest");
+        (runtime, attested)
+    }
+
+    const HEAD: &str =
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+
+    #[test]
+    fn streaming_callback_delivers_events_before_the_stream_finishes() {
+        let (origin, h) = serve_once(|s| {
+            let _ = s.write_all(HEAD.as_bytes());
+            let _ =
+                s.write_all(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n");
+            let _ = s.flush();
+            std::thread::sleep(Duration::from_millis(400));
+            let _ = s.write_all(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+            );
+        });
+        let (runtime, attested) = attested_for(&origin, TransportLimits::default());
+        let mut seen: Vec<(Instant, String)> = Vec::new();
+        let started = Instant::now();
+        let report = runtime
+            .transport()
+            .send_streaming(
+                &attested,
+                &credential(),
+                &CancellationToken::new(),
+                &TransportLimits::default(),
+                &mut |e| {
+                    if let ModelEvent::TextDelta(t) = e {
+                        seen.push((Instant::now(), t.clone()));
+                    }
+                },
+            )
+            .expect("stream");
+        h.join().expect("server");
+        assert_eq!(report.finish_reason.as_deref(), Some("stop"));
+        let texts: Vec<_> = seen.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(texts, ["A", "B"], "wire order, no duplicates");
+        assert!(
+            seen[1].0.duration_since(seen[0].0) >= Duration::from_millis(250),
+            "A was delivered while B was still in flight"
+        );
+        assert!(seen[0].0.duration_since(started) < Duration::from_millis(300));
+    }
+
+    #[test]
+    fn total_deadline_bounds_a_provider_that_never_finishes() {
+        let (origin, h) = serve_once(|s| {
+            let _ = s.write_all(HEAD.as_bytes());
+            // A keepalive comment every 50 ms: every read succeeds, the
+            // stream never ends. Only the wall-clock bound can stop it.
+            for _ in 0..200 {
+                if s.write_all(b": keepalive\n\n").is_err() {
+                    return;
+                }
+                let _ = s.flush();
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let limits = TransportLimits {
+            read_timeout_ms: 5_000,
+            total_timeout_ms: 700,
+            ..TransportLimits::default()
+        };
+        let (runtime, attested) = attested_for(&origin, limits);
+        let started = Instant::now();
+        let r =
+            runtime
+                .transport()
+                .send(&attested, &credential(), &CancellationToken::new(), &limits);
+        let took = started.elapsed();
+        drop(h);
+        assert!(took < Duration::from_secs(3), "bounded: {took:?}");
+        match r {
+            Ok(rep) => {
+                assert!(rep.truncated);
+                assert_eq!(rep.stop_cause, Some(ModelErrorCode::Timeout));
+            }
+            Err(e) => assert_eq!(e.error.code, ModelErrorCode::Timeout),
+        }
+    }
+
+    #[test]
+    fn cancellation_is_observed_between_events_within_a_read_slice() {
+        let (origin, h) = serve_once(|s| {
+            let _ = s.write_all(HEAD.as_bytes());
+            let _ =
+                s.write_all(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n");
+            let _ = s.flush();
+            std::thread::sleep(Duration::from_secs(5));
+        });
+        let (runtime, attested) = attested_for(&origin, TransportLimits::default());
+        let token = CancellationToken::new();
+        let t2 = token.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            t2.cancel();
+        });
+        let started = Instant::now();
+        let r = runtime.transport().send(
+            &attested,
+            &credential(),
+            &token,
+            &TransportLimits::default(),
+        );
+        canceller.join().expect("canceller");
+        drop(h);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        let e = r.expect_err("cancelled");
+        assert_eq!(e.error.code, ModelErrorCode::Cancelled);
+        assert!(e.bytes_sent, "cancel after send stays uncertain");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_credential_file_rules() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = tempfile::tempdir().expect("dir");
+        let reference = "credential://connections/c1";
+        let write = |name: &str, body: &str, mode: u32| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, body).expect("write");
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).expect("chmod");
+            p
+        };
+        let good = write(
+            "ok.json",
+            &serde_json::json!({ reference: "tok-abc-123" }).to_string(),
+            0o600,
+        );
+        let c = Credential::from_protected_file(&good, reference).expect("loads");
+        assert_eq!(c.authorization_value(), "Bearer tok-abc-123");
+        assert_eq!(format!("{c:?}"), "Credential([REDACTED])");
+        // Wrong reference, loose permissions, symlink, bad token charset,
+        // not JSON, oversize: all refused and none leak the token.
+        let refused: Vec<(&str, std::path::PathBuf, &str)> = vec![
+            ("wrong-ref", good.clone(), "credential://other"),
+            (
+                "loose",
+                write(
+                    "loose.json",
+                    &serde_json::json!({ reference: "tok-abc-123" }).to_string(),
+                    0o644,
+                ),
+                reference,
+            ),
+            (
+                "group-readable",
+                write(
+                    "grp.json",
+                    &serde_json::json!({ reference: "tok-abc-123" }).to_string(),
+                    0o640,
+                ),
+                reference,
+            ),
+            (
+                "space-in-token",
+                write(
+                    "sp.json",
+                    &serde_json::json!({ reference: "tok abc" }).to_string(),
+                    0o600,
+                ),
+                reference,
+            ),
+            (
+                "crlf-token",
+                write(
+                    "crlf.json",
+                    &serde_json::json!({ reference: "tok\r\nx: y" }).to_string(),
+                    0o600,
+                ),
+                reference,
+            ),
+            (
+                "not-json",
+                write("nj.json", "tok-abc-123", 0o600),
+                reference,
+            ),
+            (
+                "oversize",
+                write("big.json", &"x".repeat(70_000), 0o600),
+                reference,
+            ),
+        ];
+        for (name, path, r) in refused {
+            let e = Credential::from_protected_file(&path, r).expect_err(name);
+            assert_eq!(e.code, ModelErrorCode::TransportRefused, "{name}");
+            assert!(!e.message.contains("tok-abc-123"), "{name} leaked: {e}");
+        }
+        let link = dir.path().join("link.json");
+        symlink(&good, &link).expect("symlink");
+        assert!(
+            Credential::from_protected_file(&link, reference).is_err(),
+            "symlink"
+        );
+        let hard = dir.path().join("hard.json");
+        std::fs::hard_link(&good, &hard).expect("hardlink");
+        assert!(
+            Credential::from_protected_file(&good, reference).is_err(),
+            "nlink > 1"
+        );
+        assert!(Credential::from_protected_file(&dir.path().join("missing"), reference).is_err());
+    }
+}

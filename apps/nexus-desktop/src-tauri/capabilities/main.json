@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-window",
-  "description": "Nexus main window: read-only native client commands and isolated mock execution only. No fs, shell, http or opener plugins.",
+  "description": "Nexus main window: read-only native client commands, isolated mock execution, and a fail-safe model-run cancel marker only. No fs, shell, http or opener plugins; no credential, grant or issuer access.",
   "windows": [
     "main"
   ],
@@ -16,6 +16,9 @@
     "allow-conversation-read",
     "allow-model-io-read",
     "allow-list-mock-conversations",
+    "allow-list-model-conversations",
+    "allow-model-run-status",
+    "allow-cancel-model-run",
     "allow-tool-events",
     "allow-list-approvals",
     "allow-integrity-status"

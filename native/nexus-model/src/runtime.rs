@@ -84,6 +84,11 @@ impl<T: Transport> OfflineModelRuntime<T> {
         &self.binding
     }
 
+    /// Borrow the transport (the authorized-dispatch entry points need it).
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
     /// Borrow the transport limits.
     pub fn limits(&self) -> &TransportLimits {
         &self.limits

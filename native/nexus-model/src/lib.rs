@@ -28,7 +28,7 @@ pub mod target;
 pub mod testkit;
 pub mod transport;
 
-pub use authorized::dispatch_authorized;
+pub use authorized::{dispatch_authorized, dispatch_redeemed_streaming, RedeemedDispatch};
 pub use error::{redact, ModelError, ModelErrorCode};
 pub use pin::VerifiedExecutionPin;
 pub use prepare::{

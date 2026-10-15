@@ -16,6 +16,10 @@
 
 const INTENT_BUNDLE_VERSION = 1;
 const SCOPE_MOCK_E2E = 'mock-e2e';
+// A5.1: user-initiated, text-only model inference. Issuable only with an
+// explicit user initiator; the kernel pilot gate is a second, separate lock.
+const SCOPE_MODEL_ONLY = 'model-only';
+const INITIATOR_USER_EXPLICIT = 'user-explicit';
 
 function fail(code, message) {
   return { ok: false, code: code, message: message, bundle: null };
@@ -39,7 +43,8 @@ function isHex64(v) {
  *   extensionDigest (sha256 hex of the V2 extension),
  *   requestDigest (sha256 hex of the exact prepared request bytes),
  *   sessionId (raw Controller attempt session, non-empty),
- *   scope (must be 'mock-e2e' in A2.3)
+ *   scope ('mock-e2e', or 'model-only' together with initiator 'user-explicit')
+ *   initiator (required for model-only; must equal 'user-explicit')
  * }
  */
 function buildDispatchIntent(options) {
@@ -72,7 +77,15 @@ function buildDispatchIntent(options) {
   if (requestDigest === '') return fail('intent-invalid', 'a prepared request digest is required');
   const sessionId = isNonEmptyString(o.sessionId) ? o.sessionId : '';
   if (sessionId === '') return fail('intent-invalid', 'a Controller attempt session is required');
-  if (o.scope !== SCOPE_MOCK_E2E) return fail('intent-scope-refused', 'only the mock-e2e scope is issuable in A2.3');
+  if (o.scope !== SCOPE_MOCK_E2E && o.scope !== SCOPE_MODEL_ONLY) {
+    return fail('intent-scope-refused', 'only the mock-e2e and model-only scopes are issuable');
+  }
+  if (o.scope === SCOPE_MODEL_ONLY && o.initiator !== INITIATOR_USER_EXPLICIT) {
+    return fail('intent-initiator-refused', 'model-only intents require an explicit user initiator');
+  }
+  if (o.scope === SCOPE_MOCK_E2E && o.initiator !== undefined) {
+    return fail('intent-initiator-refused', 'initiator is only valid for the model-only scope');
+  }
   if (issuance.taskInstanceId !== taskInstanceId) {
     return fail('intent-generation-mismatch', 'issuance task generation differs from the intent generation');
   }
@@ -90,13 +103,16 @@ function buildDispatchIntent(options) {
     extensionDigest: extensionDigest,
     requestDigest: requestDigest,
     sessionId: sessionId,
-    scope: SCOPE_MOCK_E2E,
+    scope: o.scope,
   };
+  if (o.scope === SCOPE_MODEL_ONLY) bundle.initiator = INITIATOR_USER_EXPLICIT;
   return { ok: true, code: null, message: null, bundle: bundle };
 }
 
 module.exports = {
   INTENT_BUNDLE_VERSION: INTENT_BUNDLE_VERSION,
   SCOPE_MOCK_E2E: SCOPE_MOCK_E2E,
+  SCOPE_MODEL_ONLY: SCOPE_MODEL_ONLY,
+  INITIATOR_USER_EXPLICIT: INITIATOR_USER_EXPLICIT,
   buildDispatchIntent: buildDispatchIntent,
 };

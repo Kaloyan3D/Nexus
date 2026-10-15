@@ -19,6 +19,7 @@ import { stickToBottom } from "../../lib/useViewport";
 import { asUiError } from "../../lib/api";
 import { useNexus } from "../../state/NexusContext";
 import { ConversationPanel } from "../conversation/ConversationPanel";
+import { ModelRunPanel } from "../conversation/ModelRunPanel";
 import { useConversation } from "../conversation/useConversation";
 import { streamedText, type MockRun } from "../../state/mockRuns";
 import { Alert, Badge, CheckRow, CodeBlock, EmptyState, Loading, Tabs, type TabDef } from "../../components/ui/primitives";
@@ -43,18 +44,30 @@ const UNAVAILABLE: Record<string, string> = {
 };
 
 export function ActivityPanel() {
-  const { selectedTask, selectedMock } = useNexus();
-  const conversationId = selectedMock
-    ? selectedMock.conversationId
-    : (selectedTask?.taskInstanceId ?? null);
-  const selKey = selectedMock ? `m:${selectedMock.key}` : selectedTask ? `t:${selectedTask.taskId}` : "";
-  const follow = selectedMock?.status === "running";
-  const conv = useConversation(conversationId, follow, selKey + (selectedMock?.status ?? ""));
+  const { selectedTask, selectedMock, selectedModel } = useNexus();
+  const conversationId = selectedModel
+    ? selectedModel.conversationId
+    : selectedMock
+      ? selectedMock.conversationId
+      : (selectedTask?.taskInstanceId ?? null);
+  const selKey = selectedModel
+    ? `x:${selectedModel.conversationId}`
+    : selectedMock
+      ? `m:${selectedMock.key}`
+      : selectedTask
+        ? `t:${selectedTask.taskId}`
+        : "";
+  const follow = selectedModel ? !selectedModel.terminal : selectedMock?.status === "running";
+  const conv = useConversation(
+    conversationId,
+    follow,
+    selKey + (selectedModel?.state ?? selectedMock?.status ?? ""),
+  );
   const [pick, setPick] = useState<{ key: string; tab: string } | null>(null);
   // Conversation is the default view only when recorded messages exist.
   const preferred = conv.view?.available ? "conversation" : "activity";
   const tab = pick && pick.key === selKey ? pick.tab : preferred;
-  const hasSelection = Boolean(selectedTask || selectedMock);
+  const hasSelection = Boolean(selectedTask || selectedMock || selectedModel);
   return (
     <section className="nv-activity" aria-label="Engineering activity">
       <Tabs
@@ -79,9 +92,21 @@ export function ActivityPanel() {
             </EmptyState>
           )
         ) : tab === "activity" ? (
-          selectedMock ? <MockActivity run={selectedMock} /> : <TaskActivity task={selectedTask!} />
+          selectedModel ? (
+            <ModelRunPanel conversationId={selectedModel.conversationId} />
+          ) : selectedMock ? (
+            <MockActivity run={selectedMock} />
+          ) : (
+            <TaskActivity task={selectedTask!} />
+          )
         ) : tab === "logs" ? (
-          selectedMock ? <MockLogs run={selectedMock} /> : <TaskLogs task={selectedTask!} />
+          selectedModel ? (
+            <ModelRunPanel conversationId={selectedModel.conversationId} />
+          ) : selectedMock ? (
+            <MockLogs run={selectedMock} />
+          ) : (
+            <TaskLogs task={selectedTask!} />
+          )
         ) : tab === "verification" ? (
           <VerificationTab />
         ) : (

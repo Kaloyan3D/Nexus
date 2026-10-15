@@ -33,6 +33,12 @@ fn help_text() -> String {
     );
     s.push_str("    run                   live execution gate (always blocked in A2.4)\n");
     s.push_str("    interactive           line-based interactive session (mock only)\n");
+    s.push_str("    model prepare --request <file>      A5.1 pure request preparation (digest, target, endpoint); sends nothing\n");
+    s.push_str("    model run --request <file> --grant <file> --cap <file> --credentials <file>\n");
+    s.push_str("                          A5.1 user-initiated, text-only, model-only run (needs a daemon started\n");
+    s.push_str("                          with --enable-model-pilot and a Controller-issued model-only grant)\n");
+    s.push_str("    model status|cancel|recover <conversation-id>   inspect / stop / close out a model run\n");
+    s.push_str("    model list            recorded model-only conversations\n");
     s.push_str("    integrity             read-only journal integrity (states the verification scope; never a bare 'secure')\n");
     s.push_str("    approvals [--task <instance-id>]   read-only human-approval status (approve/deny only via the terminal approver)\n");
     s.push_str("    tools list            native read-only tools (fs.list, fs.read, fs.search)\n");
@@ -363,6 +369,122 @@ fn cmd_run(cmd_args: &[String], cfg: &ClientConfig) -> ExitCode {
             e2.exit = ExitCode::MockFailed;
             emit_err(cfg.json, &e2)
         }
+    }
+}
+
+fn read_json_file(path: &str) -> Result<serde_json::Value, nexus_client::ClientError> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| nexus_client::ClientError::usage(format!("cannot read {path}: {e}")))?;
+    serde_json::from_str(&raw)
+        .map_err(|_| nexus_client::ClientError::usage(format!("{path} is not valid JSON")))
+}
+
+fn flag_value(args: &[String], name: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
+/// A5.1 model-only commands. Every path here is explicit user invocation;
+/// there is no daemon mode, no polling loop, and no retry.
+fn cmd_model(args: &[String], cfg: &ClientConfig) -> ExitCode {
+    let mut cfg = cfg.clone();
+    if let Some(dir) = flag_value(args, "--transcript-dir") {
+        cfg.transcript_dir = PathBuf::from(dir);
+    }
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("");
+    let positional = || {
+        args.iter()
+            .skip(1)
+            .find(|a| !a.starts_with("--"))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let result: Result<serde_json::Value, nexus_client::ClientError> = (|| match sub {
+        "prepare" => {
+            let path = flag_value(args, "--request").ok_or_else(|| {
+                nexus_client::ClientError::usage("model prepare needs --request <file>")
+            })?;
+            let req: nexus_client::ModelRunRequest = serde_json::from_value(read_json_file(&path)?)
+                .map_err(|e| nexus_client::ClientError::usage(format!("request shape: {e}")))?;
+            let p = nexus_client::prepare_model_run(&req)?;
+            serde_json::to_value(p).map_err(|e| nexus_client::ClientError::internal(e.to_string()))
+        }
+        "run" => {
+            let need = |n: &str| {
+                flag_value(args, n).ok_or_else(|| {
+                    nexus_client::ClientError::usage(format!("model run needs {n} <file>"))
+                })
+            };
+            let req: nexus_client::ModelRunRequest =
+                serde_json::from_value(read_json_file(&need("--request")?)?)
+                    .map_err(|e| nexus_client::ClientError::usage(format!("request shape: {e}")))?;
+            let grant_doc = read_json_file(&need("--grant")?)?;
+            let grant = grant_doc.get("grant").cloned().unwrap_or(grant_doc);
+            let mut limits = nexus_client::TransportLimits::default();
+            for (flag, slot) in [
+                ("--read-timeout-ms", 0usize),
+                ("--total-timeout-ms", 1),
+                ("--max-text-bytes", 2),
+            ] {
+                if let Some(v) = flag_value(args, flag) {
+                    let n: u64 = v.parse().map_err(|_| {
+                        nexus_client::ClientError::usage(format!("{flag} must be an integer"))
+                    })?;
+                    match slot {
+                        0 => limits.read_timeout_ms = n,
+                        1 => limits.total_timeout_ms = n,
+                        _ => limits.max_text_bytes = n as usize,
+                    }
+                }
+            }
+            let opts = nexus_client::ModelRunOptions {
+                cap_path: PathBuf::from(need("--cap")?),
+                credentials_path: PathBuf::from(need("--credentials")?),
+                limits,
+            };
+            let human = !cfg.json;
+            let out = nexus_client::run_model_only(&cfg, &opts, &req, &grant, &mut |u| {
+                if human {
+                    match u {
+                        nexus_client::ModelRunUpdate::Conversation { id } => {
+                            eprintln!("[model] conversation {id}")
+                        }
+                        nexus_client::ModelRunUpdate::State { state } => {
+                            eprintln!("[model] state {}", state.as_str())
+                        }
+                        nexus_client::ModelRunUpdate::Text { delta } => print!("{delta}"),
+                    }
+                }
+            })?;
+            if human {
+                println!();
+            }
+            serde_json::to_value(out)
+                .map_err(|e| nexus_client::ClientError::internal(e.to_string()))
+        }
+        "status" => serde_json::to_value(nexus_client::model_run_status(&cfg, &positional())?)
+            .map_err(|e| nexus_client::ClientError::internal(e.to_string())),
+        "recover" => serde_json::to_value(nexus_client::recover_model_run(&cfg, &positional())?)
+            .map_err(|e| nexus_client::ClientError::internal(e.to_string())),
+        "cancel" => {
+            nexus_client::request_model_cancel(&cfg, &positional())?;
+            Ok(serde_json::json!({ "ok": true, "cancelRequested": true }))
+        }
+        "list" => serde_json::to_value(nexus_client::list_model_conversations(&cfg))
+            .map_err(|e| nexus_client::ClientError::internal(e.to_string())),
+        _ => Err(nexus_client::ClientError::usage(
+            "usage: nexus model <prepare|run|status|cancel|recover|list> (see --help)",
+        )),
+    })();
+    match result {
+        Ok(v) => {
+            let human = serde_json::to_string_pretty(&v).unwrap_or_default();
+            emit(&cfg, &v, &human);
+            ExitCode::Ok
+        }
+        Err(e) => emit_err(cfg.json, &e),
     }
 }
 
@@ -870,6 +992,7 @@ fn main() {
         },
         "run" => cmd_run(&args, &cfg),
         "interactive" => cmd_interactive(&cfg),
+        "model" => cmd_model(&args, &cfg),
         "tools" => cmd_tools(&args, &cfg),
         "approvals" => cmd_approvals(&args, &cfg),
         "integrity" => match nexus_client::integrity(&cfg) {

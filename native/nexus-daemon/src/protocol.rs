@@ -264,6 +264,7 @@ pub fn is_privileged(cmd: &str) -> bool {
             | "intent-publish"
             | "intent-fence"
             | "dispatch-authorize"
+            | "model-redeem"
             | "workspace-bind"
             | "tool-execute"
             | "tool-revoke"

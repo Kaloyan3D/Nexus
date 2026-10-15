@@ -638,6 +638,96 @@ fn do_dispatch_authorize(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value
     }
 }
 
+/// A5.1: durable single-use redemption of a sealed dispatch grant.
+///
+/// The model executor (a separate, network-capable process under the
+/// issuer identity) presents the grant it received from
+/// `dispatch-authorize` immediately before it writes request bytes. The
+/// daemon re-verifies seal, binding, expiry, lease and witness state and
+/// atomically records `redeemed`; a second redemption is `command-conflict`.
+/// The daemon itself never opens a network connection, never holds a
+/// provider credential, and gains no tool authority from this command.
+fn do_model_redeem(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    let request_digest = match get_string(&req.params, "requestDigest") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let endpoint_origin = match get_string(&req.params, "endpointOrigin") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let credential_ref = match get_string(&req.params, "credentialRef") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let g = match get_object(&req.params, "grant") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let s = |k: &str| -> Option<String> { g.get(k).and_then(|v| v.as_str()).map(str::to_owned) };
+    let i = |k: &str| -> Option<i64> { g.get(k).and_then(|v| v.as_i64()) };
+    let parsed = (|| {
+        Some(nexus_kernel::SealedNativeDispatchGrant {
+            command_id: s("commandId")?,
+            attempt_id: s("attemptId")?,
+            task_instance_id: s("taskInstanceId")?,
+            request_digest: s("requestDigest")?,
+            endpoint_origin: s("endpointOrigin")?,
+            scope: s("scope")?,
+            target_digest: s("targetDigest")?,
+            extension_digest: s("extensionDigest")?,
+            lease_epoch: g.get("leaseEpoch").and_then(|v| v.as_u64())?,
+            store_incarnation: s("storeIncarnation")?,
+            credential_ref: s("credentialRef")?,
+            issued_at_ms: i("issuedAtMs")?,
+            expires_at_ms: i("expiresAtMs")?,
+            nonce_hex: s("nonceHex")?,
+            granted_at_utc: s("grantedAtUtc")?,
+            tag_hex: s("tagHex")?,
+        })
+    })();
+    let grant = match parsed {
+        Some(g) => g,
+        None => {
+            daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                codes::BAD_REQUEST,
+                "bad-request: 'grant' does not match the sealed grant shape",
+            );
+        }
+    };
+    let mut kernel = match daemon.kernel.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                codes::STORE_UNHEALTHY,
+                "kernel mutex is poisoned; failing closed",
+            );
+        }
+    };
+    match kernel.redeem_sealed_grant(
+        &grant,
+        &request_digest,
+        &endpoint_origin,
+        &credential_ref,
+        now_ms(),
+    ) {
+        Ok(_) => ok(
+            &req.id,
+            serde_json::json!({
+                "redeemed": true,
+                "commandId": grant.command_id,
+                "attemptId": grant.attempt_id,
+                "scope": grant.scope,
+            }),
+        ),
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
 fn do_accept(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     let intent_value = match get_object(&req.params, "intent") {
         Ok(v) => v,
@@ -2379,6 +2469,7 @@ fn do_status(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             payload: serde_json::Value::Null,
             recorded_at_utc: String::new(),
         });
+    let model_pilot_enabled = kernel.model_only_pilot_enabled();
     drop(kernel);
     let latch = daemon
         .reconcile_latch
@@ -2401,6 +2492,7 @@ fn do_status(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "allowedUids": daemon.allowed_uids.clone().unwrap_or_default(),
             "socketShared": daemon.socket_group.is_some(), "socketGroup": daemon.socket_group, "capHandoff": daemon.cap_handoff.is_some(), "shadowMode": "shadow-only",
             "dispatchEnabled": nexus_kernel::Kernel::dispatch_enabled(),
+            "modelPilotEnabled": model_pilot_enabled,
             "writesEnabled": daemon.writes_enabled,
             "processEnabled": daemon.process_enabled,
             "sandbox": daemon.sandbox_caps.as_ref().map(|c| serde_json::json!({
@@ -2483,6 +2575,7 @@ pub fn dispatch(
             "intent-publish" => do_intent_publish(daemon, req),
             "intent-fence" => do_intent_fence(daemon, req),
             "dispatch-authorize" => do_dispatch_authorize(daemon, req),
+            "model-redeem" => do_model_redeem(daemon, req),
             "workspace-bind" => do_workspace_bind(daemon, req),
             "tool-execute" => do_tool_execute(daemon, req),
             "tool-revoke" => do_tool_revoke(daemon, req),

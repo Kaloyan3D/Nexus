@@ -42,7 +42,20 @@ mount --bind "$HOME_REAL/.cargo/bin" /tmp/nxmu/rust/cargo/bin && mount --bind "$
 export CARGO_HOME=/tmp/nxmu/rust/cargo RUSTUP_HOME=/tmp/nxmu/rust/rustup
 export NEXUS_MULTUID=1 NEXUSD_BIN=/tmp/nxmu/bin/nexusd NEXUS_APPROVER_BIN=/tmp/nxmu/bin/nexus-approver NEXUS_WITNESS_BIN=/tmp/nxmu/bin/nexus-witness NEXUS_KERNEL_BIN=/tmp/nxmu/bin/nexus-kernel
 cd /tmp/nxmu
-exec /tmp/nxmu/bin/$(ls /tmp/nxmu/bin | grep ^multuid-) "$@"
+# Not exec: after the suite we must reap any daemon a test leaked. The
+# pattern is anchored to this harness's private bin dir, so it can never
+# match a host process outside it. A leak fails the run (exit 98) instead
+# of silently blocking the next one with "Text file busy".
+/tmp/nxmu/bin/$(ls /tmp/nxmu/bin | grep ^multuid-) "$@"
+RC=$?
+LEAKED=$(pgrep -f '^/tmp/nxmu/bin/(nexusd|nexus-witness|nexus-approver|nexus-kernel)( |$)' | wc -l)
+if [ "$LEAKED" -gt 0 ]; then
+  pgrep -af '^/tmp/nxmu/bin/(nexusd|nexus-witness|nexus-approver|nexus-kernel)( |$)' | cut -c1-200 >&2
+  pkill -KILL -f '^/tmp/nxmu/bin/(nexusd|nexus-witness|nexus-approver|nexus-kernel)( |$)'
+  echo "ORPHAN-LEAK: reaped $LEAKED leaked harness process(es) under /tmp/nxmu/bin" >&2
+  [ "$RC" -eq 0 ] && RC=98
+fi
+exit $RC
 R
 chmod -R a+rX "$M"; chmod a+rx "$M/run.sh"
 cd "$M"

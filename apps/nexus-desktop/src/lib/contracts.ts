@@ -298,6 +298,59 @@ export interface MockConversationSummary {
   finalized: boolean;
 }
 
+// ---- A5.1 controlled model-only runs ---------------------------------------
+// Mirrors native/nexus-client `ModelRunStatus` / `ModelConversationSummary`.
+// Display-only: the renderer cannot start, resend or authorize a run; it can
+// only read status and request a fail-safe cancellation. No field here can
+// carry a credential, grant or capability.
+
+export type ModelRunStateName =
+  | "accepted"
+  | "target-selected"
+  | "authorized"
+  | "request-started"
+  | "streaming"
+  | "completed"
+  | "cancelled"
+  | "timed-out"
+  | "provider-failed"
+  | "uncertain"
+  | "refused"
+  | "failed";
+
+export interface ModelConversationSummary {
+  conversationId: string;
+  firstPrompt: string;
+  startedAtMs: number | null;
+  state: ModelRunStateName | string;
+  terminal: boolean;
+  providerId: string | null;
+  remoteModelId: string | null;
+  /** `provider` | `loopback-test-double` */
+  endpointKind: string | null;
+}
+
+export interface ModelRunStatus {
+  conversationId: string;
+  state: ModelRunStateName | string;
+  terminal: boolean;
+  providerId: string | null;
+  remoteModelId: string | null;
+  logicalModelId: string | null;
+  endpointKind: string | null;
+  attemptId: string | null;
+  commandId: string | null;
+  requestDigest: string | null;
+  httpStatus: number | null;
+  usageInputTokens: number | null;
+  usageOutputTokens: number | null;
+  finishReason: string | null;
+  latencyMs: number | null;
+  errorCode: string | null;
+  cancelRequested: boolean;
+  text: string;
+}
+
 export interface ConversationQuery {
   afterSeq?: number;
   beforeSeq?: number;

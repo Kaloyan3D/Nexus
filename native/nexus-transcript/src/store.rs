@@ -70,7 +70,8 @@ const GENESIS: &str = "genesis";
 pub fn valid_task_id(id: &str) -> bool {
     let rest = id
         .strip_prefix("task_")
-        .or_else(|| id.strip_prefix("mock_"));
+        .or_else(|| id.strip_prefix("mock_"))
+        .or_else(|| id.strip_prefix("model_"));
     match rest {
         Some(r) => {
             r.len() == 32

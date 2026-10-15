@@ -216,6 +216,11 @@ pub fn model_io(cfg: &ClientConfig, task_instance_id: &str) -> Result<ModelIoVie
         records: Vec::new(),
         note: note.to_owned(),
     };
+    if task_instance_id.starts_with("model_") {
+        return Ok(empty(
+            "Model-only runs record their provider/model identity in status events; the provider request header is not reconstructed.",
+        ));
+    }
     if task_instance_id.starts_with("mock_") {
         return Ok(empty(
             "Mock runs use a loopback fixture provider; no provider request header exists.",

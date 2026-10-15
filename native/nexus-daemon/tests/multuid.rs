@@ -19,7 +19,7 @@
 //! Safety: shadow-only flows. dispatch_enabled() stays false throughout.
 
 mod common;
-use common::{code_of, nexusd_bin, raw_request, terminate};
+use common::{code_of, nexusd_bin, raw_request, terminate as terminate_one};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -210,6 +210,17 @@ fn signed_frame(cap_hex: &str, cmd: &str, params: serde_json::Value) -> String {
     .to_string()
 }
 
+/// Stop a daemon launched through `runuser`. `runuser` forks the real
+/// `nexusd`; signalling only the wrapper orphaned the daemon (it kept
+/// running after the test and blocked the next harness run with
+/// "Text file busy"). Signal the wrapper's direct children first.
+fn terminate(child: &mut Child) {
+    let _ = Command::new("pkill")
+        .args(["-TERM", "-P", &child.id().to_string()])
+        .status();
+    terminate_one(child);
+}
+
 struct TestDaemon {
     child: Child,
     argv: Vec<String>,
@@ -276,6 +287,10 @@ fn poll_ready(socket: &Path) {
 /// user: DataRoot 0700, socket dir 0750 group issuer, socket 0660,
 /// handoff 0640. The operator procedure guarantees the users/groups.
 fn spawn_as(h: &Host, trust: &str) -> TestDaemon {
+    spawn_as_with(h, trust, &[])
+}
+
+fn spawn_as_with(h: &Host, trust: &str, extra: &[&str]) -> TestDaemon {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
     let dir = std::env::temp_dir().join(format!(
@@ -329,6 +344,8 @@ fn spawn_as(h: &Host, trust: &str) -> TestDaemon {
         "--cap-handoff-gid".to_owned(),
         h.issuercred_gid.to_string(),
     ];
+    let mut argv = argv;
+    argv.extend(extra.iter().map(|a| (*a).to_owned()));
     let mut cmd = Command::new("runuser");
     cmd.arg("-u").arg(DAEMON_USER).arg("--").arg(nexusd_bin());
     for a in &argv {
@@ -713,6 +730,77 @@ fn multuid_no_shadow_operation_dispatches() {
         !nexus_kernel::Kernel::dispatch_enabled(),
         "dispatch stays disabled"
     );
+}
+
+/// A5.1: with the model pilot ENABLED, the new privileged `model-redeem`
+/// command obeys exactly the same real-identity gates as every other
+/// privileged command: only the issuer UID (with the capability) reaches
+/// the kernel; a bystander in the socket group with a stolen capability is
+/// `peer-unauthorized`; an untrusted UID is stopped by the kernel (EACCES).
+/// The pilot adds no authority to any identity: readiness stays NOT_READY
+/// and dispatch stays disabled.
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_model_pilot_redeem_obeys_real_identity_gates() {
+    let Some(h) = require_multuid_host("model-pilot-identity") else {
+        return;
+    };
+    let d = spawn_as_with(&h, "shadow-test", &["--enable-model-pilot"]);
+    let cap = d.read_handoff();
+    let bogus_grant = serde_json::json!({
+        "grant": {
+            "commandId": "c", "attemptId": "a", "taskInstanceId": "t",
+            "requestDigest": "d", "endpointOrigin": "http://127.0.0.1:9",
+            "scope": "model-only", "targetDigest": "t", "extensionDigest": "e",
+            "leaseEpoch": 1, "storeIncarnation": "i", "credentialRef": "credential://x",
+            "issuedAtMs": 0, "expiresAtMs": 1, "nonceHex": "00", "grantedAtUtc": "0Z",
+            "tagHex": "00",
+        },
+        "requestDigest": "d", "endpointOrigin": "http://127.0.0.1:9", "credentialRef": "credential://x",
+    });
+    // Issuer UID: reaches the kernel and is refused on the merits.
+    let issuer = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(&cap, "model-redeem", bogus_grant.clone()),
+    )
+    .expect("issuer transport");
+    assert_eq!(issuer.get("ok"), Some(&serde_json::Value::Bool(false)));
+    assert_ne!(code_of(&issuer), "peer-unauthorized", "{issuer}");
+    assert_ne!(code_of(&issuer), "issuer-untrusted", "{issuer}");
+    // Bystander (in the socket group) with the stolen capability.
+    let by = send_as(
+        BYSTANDER_USER,
+        &d.socket,
+        &signed_frame(&cap, "model-redeem", bogus_grant.clone()),
+    )
+    .expect("bystander connects (in group)");
+    assert_eq!(code_of(&by), "peer-unauthorized", "{by}");
+    // Untrusted UID: OS-level denial before any byte reaches the daemon.
+    let err = send_as(
+        UNTRUSTED_USER,
+        &d.socket,
+        &signed_frame(&cap, "model-redeem", bogus_grant),
+    )
+    .expect_err("untrusted connect must fail");
+    assert!(err.contains("Permission denied"), "{err}");
+    // The pilot is visible, and grants no dispatch authority.
+    let status = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(&cap, "status", serde_json::json!({})),
+    )
+    .expect("status");
+    assert_eq!(
+        status.get("modelPilotEnabled"),
+        Some(&serde_json::Value::Bool(true)),
+        "{status}"
+    );
+    assert_eq!(
+        status.get("dispatchEnabled"),
+        Some(&serde_json::Value::Bool(false))
+    );
+    assert!(!nexus_kernel::Kernel::dispatch_enabled());
 }
 
 // ---- A3.2 / A3.3 privileged tool commands ------------------------------
@@ -3267,7 +3355,7 @@ fn multuid_production_profile_refuses_incomplete_downgraded_and_test_only_starts
     poll_ready(&h.d.socket);
     let r = read_only(&h, ISSUER_USER, "health");
     assert_eq!(r["ok"], true);
-    let _ = child.kill();
+    terminate(&mut child);
     let _ = child.wait();
     argv_ok.clear();
     drop(rig);

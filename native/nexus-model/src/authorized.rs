@@ -159,3 +159,129 @@ pub fn dispatch_authorized<T: Transport>(
         }
     }
 }
+
+/// Hooks around one redeemed, streaming dispatch (A5.1).
+pub struct RedeemedDispatch<'a> {
+    /// Redeems the sealed grant with the authority (the daemon). Called
+    /// exactly once, after every local check passed and before any byte is
+    /// written. An `Err` means nothing was sent (and the grant may or may
+    /// not be consumed: the caller never re-presents it).
+    pub redeem: &'a mut dyn FnMut() -> Result<(), ModelError>,
+    /// Called after a successful redemption and immediately before the
+    /// request bytes are written. This is the write-ahead point: the caller
+    /// persists "provider request started" here, so a crash from this
+    /// moment on is recorded as an UNCERTAIN billable submission. If the
+    /// write-ahead record cannot be made durable the send is aborted: no
+    /// byte may leave without its durable record.
+    pub on_started: &'a mut dyn FnMut() -> Result<(), ModelError>,
+    /// Receives each normalized provider event as it completes.
+    pub on_event: &'a mut dyn FnMut(&crate::sse::ModelEvent),
+}
+
+/// Production streaming send for a grant whose redemption authority lives
+/// in another process (the daemon holds the issuance key; this process
+/// holds the provider credential and the network).
+///
+/// The same invariants as [`dispatch_authorized`] apply: the grant must
+/// bind this exact request digest, attempt and endpoint; replay protection
+/// via the tracker/store; credential and cancellation are checked before
+/// redemption; the send happens at most once and is never retried. The
+/// grant's HMAC seal cannot be verified here (no key): the redemption call
+/// is the cryptographic check, and it is durable-exactly-once.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_redeemed_streaming<T: Transport>(
+    transport: &T,
+    grant: &nexus_kernel::SealedNativeDispatchGrant,
+    request: &AttestedPreparedModelRequest,
+    credential_ref: &str,
+    credential: &Credential,
+    cancel: &crate::stream::CancellationToken,
+    limits: &TransportLimits,
+    attempt: &mut AttemptTracker,
+    store: &mut AttemptStore,
+    hooks: RedeemedDispatch<'_>,
+) -> Result<SendReport, TransportError> {
+    let prepared = request.prepared();
+    let refuse =
+        |attempt: &AttemptTracker, store: &mut AttemptStore, me: ModelError| -> TransportError {
+            store.record_failed(&attempt.attempt_id, &prepared.request_digest, &me);
+            TransportError::refused(me)
+        };
+    if grant.request_digest != prepared.request_digest
+        || grant.endpoint_origin != prepared.endpoint_origin
+        || grant.credential_ref != credential_ref
+        || grant.attempt_id != prepared.attempt_id
+        || prepared.attempt_id != attempt.attempt_id
+    {
+        let me = ModelError::new(
+            ModelErrorCode::AttestationFailed,
+            "grant does not bind this request, endpoint, credential or attempt (refusing dispatch)",
+        );
+        return Err(refuse(attempt, store, me));
+    }
+    if now_ms() > grant.expires_at_ms {
+        let me = ModelError::new(
+            ModelErrorCode::AttestationFailed,
+            "grant has expired before dispatch (re-authorize through the Controller)",
+        );
+        return Err(refuse(attempt, store, me));
+    }
+    if let Err(e) = attempt.require_not_sent() {
+        return Err(refuse(attempt, store, e));
+    }
+    match store.preflight(&attempt.attempt_id, &prepared.request_digest) {
+        Ok(Preflight::Fresh) => {}
+        Ok(Preflight::ReplayTerminal(t)) => {
+            attempt.mark_terminal();
+            return Err(TransportError::refused(ModelError::new(
+                ModelErrorCode::DuplicateAttempt,
+                format!("duplicate dispatch refused; committed terminal for {} already recorded (no second network call)", t.attempt_id),
+            )));
+        }
+        Ok(Preflight::ReplayFailure(e)) => return Err(TransportError::refused(e)),
+        Err(e) => return Err(TransportError::refused(e)),
+    }
+    if let Err(e) = credential.check() {
+        return Err(refuse(attempt, store, e));
+    }
+    if cancel.is_cancelled() {
+        let e = ModelError::new(
+            ModelErrorCode::Cancelled,
+            "cancelled before sending (no bytes sent)",
+        );
+        return Err(refuse(attempt, store, e));
+    }
+    if let Err(e) = (hooks.redeem)() {
+        return Err(refuse(attempt, store, e));
+    }
+    if let Err(e) = (hooks.on_started)() {
+        return Err(refuse(attempt, store, e));
+    }
+    let on_event = hooks.on_event;
+    match transport.send_streaming(request, credential, cancel, limits, on_event) {
+        Ok(report) => {
+            store.record_sent(&attempt.attempt_id, &prepared.request_digest);
+            if report.events.is_empty() {
+                attempt.mark_send_uncertain();
+            } else {
+                for _ in &report.events {
+                    attempt.mark_event();
+                }
+            }
+            if report.finish_reason.is_some() {
+                attempt.mark_terminal();
+            }
+            Ok(report)
+        }
+        Err(te) => {
+            if te.bytes_sent {
+                attempt.mark_send_uncertain();
+                store.record_uncertain(&attempt.attempt_id, &prepared.request_digest);
+            } else {
+                let me = ModelError::new(te.error.code, te.error.message.clone());
+                store.record_failed(&attempt.attempt_id, &prepared.request_digest, &me);
+            }
+            Err(te)
+        }
+    }
+}

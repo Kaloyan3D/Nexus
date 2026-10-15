@@ -523,6 +523,11 @@ impl Store {
     pub fn mark_intent_executed(&mut self, command_id: &str) -> KernelResult<()> {
         self.transition_intent(command_id, "published", "executed")
     }
+
+    /// A5.1: durable single-use redemption (`executed` -> `redeemed`).
+    pub fn mark_intent_redeemed(&mut self, command_id: &str) -> KernelResult<()> {
+        self.transition_intent(command_id, "executed", "redeemed")
+    }
 }
 
 impl Store {

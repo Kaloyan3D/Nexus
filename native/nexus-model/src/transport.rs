@@ -49,6 +49,12 @@ pub const DEFAULT_MAX_TEXT_BYTES: usize = 256 * 1024;
 pub const DEFAULT_MAX_ARG_BYTES: usize = 64 * 1024;
 /// Default per-read timeout (30 s; tests override to millis).
 pub const DEFAULT_READ_TIMEOUT_MS: u64 = 30_000;
+/// Default wall-clock bound for one whole exchange: connect, send and the
+/// entire response stream (120 s). A provider that keeps each read alive
+/// but never finishes cannot hold an attempt open past this bound.
+pub const DEFAULT_TOTAL_TIMEOUT_MS: u64 = 120_000;
+/// Hard ceiling on the TCP connect phase.
+const CONNECT_TIMEOUT_MS: u64 = 10_000;
 
 /// Transport resource bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +67,8 @@ pub struct TransportLimits {
     pub max_arg_bytes: usize,
     /// Per-read deadline in millis.
     pub read_timeout_ms: u64,
+    /// Wall-clock deadline for the whole exchange in millis.
+    pub total_timeout_ms: u64,
 }
 
 impl Default for TransportLimits {
@@ -70,6 +78,7 @@ impl Default for TransportLimits {
             max_text_bytes: DEFAULT_MAX_TEXT_BYTES,
             max_arg_bytes: DEFAULT_MAX_ARG_BYTES,
             read_timeout_ms: DEFAULT_READ_TIMEOUT_MS,
+            total_timeout_ms: DEFAULT_TOTAL_TIMEOUT_MS,
         }
     }
 }
@@ -91,6 +100,67 @@ impl Credential {
             token: token.to_owned(),
             revoked: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Load the provider token for one credential reference from a
+    /// protected backend credential file (A5.1).
+    ///
+    /// The file is a JSON object `{ "<credentialRef>": "<token>" }` and is
+    /// opened with `O_NOFOLLOW`; the OPEN description must be a regular
+    /// file, owned by the current effective uid, with no group/other
+    /// permission bits and `nlink == 1`, at most 64 KiB. The token must be
+    /// printable ASCII without whitespace (it becomes one header value).
+    /// Every error is redacted: neither the file contents nor any token
+    /// ever appears in an error string.
+    pub fn from_protected_file(
+        path: &std::path::Path,
+        credential_ref: &str,
+    ) -> Result<Self, ModelError> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let refuse = |why: &str| {
+            ModelError::new(
+                ModelErrorCode::TransportRefused,
+                format!("provider credential file refused: {why}"),
+            )
+        };
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc_o_nofollow())
+            .open(path)
+            .map_err(|_| refuse("cannot be opened (missing, symlink, or unreadable)"))?;
+        let meta = file.metadata().map_err(|_| refuse("metadata unreadable"))?;
+        if !meta.is_file() {
+            return Err(refuse("not a regular file"));
+        }
+        if meta.mode() & 0o077 != 0 {
+            return Err(refuse("group/other permission bits are set (need 0600)"));
+        }
+        if meta.nlink() != 1 {
+            return Err(refuse("file has additional hard links"));
+        }
+        if meta.uid() != current_euid() {
+            return Err(refuse("file is not owned by the current user"));
+        }
+        if meta.len() > 64 * 1024 {
+            return Err(refuse("file exceeds the size bound"));
+        }
+        let mut raw = String::new();
+        file.read_to_string(&mut raw)
+            .map_err(|_| refuse("file is not valid UTF-8 text"))?;
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|_| refuse("file is not a JSON object"))?;
+        let token = value
+            .as_object()
+            .and_then(|o| o.get(credential_ref))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| refuse("no entry for the sealed credential reference"))?;
+        if token.is_empty() || token.len() > 4096 || !token.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(refuse("token is empty, oversized or not printable ASCII"));
+        }
+        Ok(Self {
+            token: token.to_owned(),
+            revoked: Arc::new(AtomicBool::new(false)),
+        })
     }
 
     /// Revoke the credential. In-flight dispatch observes this before
@@ -120,6 +190,24 @@ impl Credential {
     pub fn authorization_value(&self) -> String {
         format!("Bearer {}", self.token)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn libc_o_nofollow() -> i32 {
+    0o400000 // O_NOFOLLOW on Linux (x86_64/aarch64)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn libc_o_nofollow() -> i32 {
+    0
+}
+
+fn current_euid() -> u32 {
+    // /proc/self is owned by the process euid; avoids a libc dependency.
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self")
+        .map(|m| m.uid())
+        .unwrap_or(u32::MAX)
 }
 
 impl std::fmt::Debug for Credential {
@@ -172,6 +260,9 @@ pub struct SendReport {
     pub truncated: bool,
     /// Redacted transport note (e.g. why a stream truncated). Never secret.
     pub note: Option<String>,
+    /// Structured cause when the read ended early (`timeout`, `cancelled`,
+    /// `disconnected`, ...). `None` for a clean end of stream.
+    pub stop_cause: Option<ModelErrorCode>,
 }
 
 /// Transport failure with honest send context. `bytes_sent == false` proves
@@ -222,6 +313,27 @@ pub trait Transport {
         cancel: &CancellationToken,
         limits: &TransportLimits,
     ) -> Result<SendReport, TransportError>;
+
+    /// Like [`Transport::send`], additionally delivering each normalized
+    /// event to `on_event` as soon as its SSE frame is complete (A5.1).
+    /// Events observed before a failure were already delivered, so a UI
+    /// never loses a partial answer to an error. The default replays the
+    /// finished report; `HttpSseTransport` overrides it with incremental
+    /// delivery. Same single-send, no-retry contract as `send`.
+    fn send_streaming(
+        &self,
+        request: &AttestedPreparedModelRequest,
+        credential: &Credential,
+        cancel: &CancellationToken,
+        limits: &TransportLimits,
+        on_event: &mut dyn FnMut(&ModelEvent),
+    ) -> Result<SendReport, TransportError> {
+        let report = self.send(request, credential, cancel, limits)?;
+        for event in &report.events {
+            on_event(event);
+        }
+        Ok(report)
+    }
 }
 
 /// Minimal direct Responses-compatible HTTP/1.1 + SSE transport over
@@ -264,6 +376,31 @@ impl Transport for HttpSseTransport {
         cancel: &CancellationToken,
         limits: &TransportLimits,
     ) -> Result<SendReport, TransportError> {
+        self.send_impl(request, credential, cancel, limits, None)
+    }
+
+    fn send_streaming(
+        &self,
+        request: &AttestedPreparedModelRequest,
+        credential: &Credential,
+        cancel: &CancellationToken,
+        limits: &TransportLimits,
+        on_event: &mut dyn FnMut(&ModelEvent),
+    ) -> Result<SendReport, TransportError> {
+        self.send_impl(request, credential, cancel, limits, Some(on_event))
+    }
+}
+
+impl HttpSseTransport {
+    fn send_impl(
+        &self,
+        request: &AttestedPreparedModelRequest,
+        credential: &Credential,
+        cancel: &CancellationToken,
+        limits: &TransportLimits,
+        mut on_event: Option<&mut dyn FnMut(&ModelEvent)>,
+    ) -> Result<SendReport, TransportError> {
+        let deadline = std::time::Instant::now() + Duration::from_millis(limits.total_timeout_ms);
         credential.check().map_err(TransportError::refused)?;
         cancel.check().map_err(|_| {
             TransportError::refused(ModelError::new(
@@ -289,8 +426,33 @@ impl Transport for HttpSseTransport {
             .map_err(TransportError::refused)?;
         let (host, port) =
             split_origin(&prepared.endpoint_origin).map_err(TransportError::refused)?;
-        let addr = format!("{host}:{port}");
-        let mut stream = TcpStream::connect(&addr).map_err(|e| {
+        // Resolve once and pin the connect to a LOOPBACK socket address: a
+        // name that resolves to anything else (DNS rebinding / hosts-file
+        // games) is refused before any socket exists.
+        let resolved: Vec<std::net::SocketAddr> =
+            std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
+                .map_err(|e| {
+                    TransportError::refused(ModelError::new(
+                        ModelErrorCode::Disconnected,
+                        format!(
+                            "pinned endpoint did not resolve: {}",
+                            redact(&e.to_string())
+                        ),
+                    ))
+                })?
+                .collect();
+        let target_addr = match resolved.iter().find(|a| a.ip().is_loopback()) {
+            Some(a) if resolved.iter().all(|r| r.ip().is_loopback()) => *a,
+            _ => {
+                return Err(TransportError::refused(ModelError::new(
+                    ModelErrorCode::EndpointMismatch,
+                    "pinned endpoint resolves outside loopback; refusing to connect",
+                )));
+            }
+        };
+        let connect_budget = Duration::from_millis(CONNECT_TIMEOUT_MS)
+            .min(deadline.saturating_duration_since(std::time::Instant::now()));
+        let mut stream = TcpStream::connect_timeout(&target_addr, connect_budget).map_err(|e| {
             TransportError::refused(ModelError::new(
                 ModelErrorCode::Disconnected,
                 format!(
@@ -299,6 +461,14 @@ impl Transport for HttpSseTransport {
                 ),
             ))
         })?;
+        stream
+            .set_write_timeout(Some(Duration::from_millis(limits.read_timeout_ms)))
+            .map_err(|e| {
+                TransportError::refused(ModelError::new(
+                    ModelErrorCode::TransportRefused,
+                    format!("write deadline unsettable: {}", redact(&e.to_string())),
+                ))
+            })?;
         stream
             .set_read_timeout(Some(Duration::from_millis(limits.read_timeout_ms)))
             .map_err(|e| {
@@ -377,7 +547,45 @@ impl Transport for HttpSseTransport {
                 "credential was revoked after send (outcome unknown; not re-sending)",
             )));
         }
-        let (raw, read_err) = read_all_partial(&stream, cancel, limits);
+        // Incremental delivery: after each chunk, complete frames beyond
+        // those already delivered are handed to `on_event` in wire order.
+        let mut emitted = 0usize;
+        let mut stream_ok: Option<bool> = None;
+        let mut observe = |buf: &[u8]| {
+            let Some(cb) = on_event.as_mut() else {
+                return;
+            };
+            let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                return;
+            };
+            if stream_ok.is_none() {
+                let head = String::from_utf8_lossy(&buf[..pos]);
+                let status_ok = head
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .map(|c| c == "200")
+                    .unwrap_or(false);
+                let ct_ok = head.lines().skip(1).any(|l| {
+                    l.split_once(':').is_some_and(|(k, v)| {
+                        k.trim().eq_ignore_ascii_case("content-type")
+                            && v.contains("text/event-stream")
+                    })
+                });
+                stream_ok = Some(status_ok && ct_ok);
+            }
+            if stream_ok != Some(true) {
+                return;
+            }
+            let body = String::from_utf8_lossy(&buf[pos + 4..]);
+            if let Ok(events) = parse_sse_body_complete_prefix(&body, limits.max_events) {
+                for ev in events.iter().skip(emitted) {
+                    cb(ev);
+                }
+                emitted = emitted.max(events.len());
+            }
+        };
+        let (raw, read_err) = read_all_partial(&stream, cancel, limits, deadline, &mut observe);
         // Cancellation wins over partial bytes: stop now, keep the attempt
         // uncertain, and never present a cancelled stream as data.
         if let Some(ref e) = read_err {
@@ -409,9 +617,22 @@ impl Transport for HttpSseTransport {
             )));
         }
         if status != 200 {
+            // Classified, never retried: the provider answered, so the
+            // failure is the provider's, not a transport guess.
+            let class = match status {
+                401 | 403 => "authentication or authorization rejected",
+                402 => "payment or quota rejected",
+                404 => "endpoint or model not found",
+                408 => "request timed out at the provider",
+                413 => "request too large for the provider",
+                429 => "rate limited",
+                400..=499 => "request rejected by the provider",
+                500..=599 => "provider server error",
+                _ => "unexpected provider status",
+            };
             return Err(TransportError::after_send(ModelError::new(
-                ModelErrorCode::Disconnected,
-                format!("provider answered HTTP {status} (no event observed; outcome uncertain)"),
+                ModelErrorCode::ProviderFailed,
+                format!("provider answered HTTP {status} ({class}); not retried"),
             )));
         }
         let content_type = headers
@@ -429,6 +650,7 @@ impl Transport for HttpSseTransport {
             Ok((events, finish_reason)) => {
                 let truncated = finish_reason.is_none();
                 Ok(SendReport {
+                    stop_cause: read_err.as_ref().map(|e| e.code),
                     bytes_sent: true,
                     events,
                     finish_reason,
@@ -445,6 +667,7 @@ impl Transport for HttpSseTransport {
                     if let Ok(events) = parse_sse_body_complete_prefix(&body, limits.max_events) {
                         if !events.is_empty() {
                             return Ok(SendReport {
+                                stop_cause: read_err.as_ref().map(|e| e.code),
                                 bytes_sent: true,
                                 events,
                                 finish_reason: None,
@@ -529,6 +752,8 @@ fn read_all_partial(
     mut stream: &TcpStream,
     cancel: &CancellationToken,
     limits: &TransportLimits,
+    deadline: std::time::Instant,
+    observer: &mut dyn FnMut(&[u8]),
 ) -> (Vec<u8>, Option<ModelError>) {
     // Bounded: at most max_text_bytes + max_arg_bytes + 64 KiB framing.
     let cap = limits
@@ -537,6 +762,7 @@ fn read_all_partial(
         .saturating_add(64 * 1024);
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
+    let mut idle_since = std::time::Instant::now();
     loop {
         if cancel.is_cancelled() {
             return (
@@ -547,10 +773,28 @@ fn read_all_partial(
                 )),
             );
         }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return (
+                buf,
+                Some(ModelError::new(
+                    ModelErrorCode::Timeout,
+                    "provider total deadline expired (outcome uncertain; not re-sending)",
+                )),
+            );
+        }
+        // Short read slices keep cancellation responsive; the per-read
+        // deadline is enforced as cumulative idle time across slices.
+        let per_read = Duration::from_millis(limits.read_timeout_ms)
+            .min(Duration::from_millis(100))
+            .min(remaining);
+        let _ = stream.set_read_timeout(Some(per_read.max(Duration::from_millis(1))));
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
+                idle_since = std::time::Instant::now();
                 buf.extend_from_slice(&chunk[..n]);
+                observer(&buf);
                 if buf.len() > cap {
                     return (
                         buf,
@@ -560,6 +804,13 @@ fn read_all_partial(
                         )),
                     );
                 }
+            }
+            Err(e)
+                if (e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut)
+                    && idle_since.elapsed() < Duration::from_millis(limits.read_timeout_ms) =>
+            {
+                continue;
             }
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock

@@ -217,6 +217,7 @@ impl Transport for MockTransport {
                     if cancel.is_cancelled() {
                         // Stop pulling: further script events are never read.
                         return Ok(SendReport {
+                            stop_cause: None,
                             bytes_sent: true,
                             events: shown,
                             finish_reason: None,
@@ -232,6 +233,7 @@ impl Transport for MockTransport {
                 }
                 let truncated = finish.is_none();
                 Ok(SendReport {
+                    stop_cause: None,
                     bytes_sent: true,
                     events: shown,
                     finish_reason: finish,
@@ -251,6 +253,7 @@ impl Transport for MockTransport {
                     self.observed.reads.fetch_add(1, Ordering::SeqCst);
                 }
                 Ok(SendReport {
+                    stop_cause: None,
                     bytes_sent: true,
                     events,
                     finish_reason: None,
@@ -272,6 +275,7 @@ fn parse_body_report(
         parse_sse_body(body, limits.max_events).map_err(TransportError::after_send)?;
     let truncated = finish_reason.is_none();
     Ok(SendReport {
+        stop_cause: None,
         bytes_sent: true,
         events,
         finish_reason,

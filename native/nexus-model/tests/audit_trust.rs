@@ -206,13 +206,14 @@ fn https_without_tls_terminator_is_refused_before_connect() {
     // The offline transport has no TLS stack: sending plaintext (including
     // the credential header) to a TLS port would leak secrets. Refuse
     // before any socket exists; https belongs to the live-readiness gate.
-    let target = target_for("https://127.0.0.1:9");
+    let target = target_for("https://provider.example.com:443");
     let (issued, snapshot) = issued_for(&target);
     let pin = pin_for(&target, &issued, &snapshot);
-    let transport = HttpSseTransport::new(TransportBinding::new("https://127.0.0.1:9"));
+    let transport =
+        HttpSseTransport::new(TransportBinding::new("https://provider.example.com:443"));
     let runtime = OfflineModelRuntime::new(
         transport,
-        TransportBinding::new("https://127.0.0.1:9"),
+        TransportBinding::new("https://provider.example.com:443"),
         TransportLimits::default(),
     );
     let prepared = runtime
@@ -240,6 +241,32 @@ fn https_without_tls_terminator_is_refused_before_connect() {
         .expect_err("https refused");
     assert_eq!(err.code, ModelErrorCode::TransportRefused);
     assert_eq!(attempt.state(), AttemptState::NotSent);
+}
+
+#[test]
+fn https_to_private_or_loopback_hosts_is_refused_at_target_validation() {
+    // A5.1: https endpoints must name a public provider host. Loopback,
+    // RFC1918, link-local/metadata, local names and obfuscated numeric
+    // hosts are refused before a request can even be prepared.
+    for origin in [
+        "https://127.0.0.1:9",
+        "https://10.1.2.3:443",
+        "https://169.254.169.254:443",
+        "https://[::1]:443",
+        "https://localhost:443",
+        "https://service.internal:443",
+        "https://2130706433:443",
+    ] {
+        let target = target_for(origin);
+        let err = target
+            .validate_executable()
+            .expect_err(&format!("{origin} must be refused"));
+        assert_eq!(
+            err.code,
+            ModelErrorCode::TransportRefused,
+            "{origin}: {err}"
+        );
+    }
 }
 
 #[test]

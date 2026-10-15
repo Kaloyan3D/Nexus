@@ -441,6 +441,15 @@ fn validate_endpoint(ep: &AuthoritativeEndpoint) -> Result<(), ModelError> {
     if host.trim().is_empty() {
         return Err(incomplete("endpoint.origin (hostname)"));
     }
+    // https must name a syntactically PUBLIC provider host: loopback,
+    // private, link-local, metadata, CGNAT, local names and obfuscated
+    // numeric spellings are never a model provider.
+    if ep.protocol == "https" && !nexus_contracts::classify_host(host).is_public() {
+        return Err(ModelError::new(
+            ModelErrorCode::TransportRefused,
+            "https endpoint host is not a public provider destination (private, loopback, link-local or local name refused)",
+        ));
+    }
     if ep.protocol == "http" && !ep.local_loopback {
         return Err(ModelError::new(
             ModelErrorCode::TargetIncomplete,

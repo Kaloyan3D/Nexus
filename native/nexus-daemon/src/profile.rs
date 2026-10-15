@@ -42,6 +42,9 @@ const REQUIRED_BOOL: &[&str] = &[
 const FORBIDDEN: &[&str] = &[
     "--allow-nonindependent-approver-test-only",
     "--witness-adopt-legacy",
+    // A5.1 development pilot: model inference is never part of the
+    // production-v1 contract; it needs its own reviewed profile.
+    "--enable-model-pilot",
 ];
 
 /// Environment variables that arm test-only behaviour.
@@ -183,6 +186,18 @@ mod tests {
             let e = validate_production_v1(&a, &no_env, 2001).unwrap_err();
             assert!(e.iter().any(|m| m.contains(f)), "{f}: {e:?}");
         }
+    }
+
+    #[test]
+    fn development_model_pilot_cannot_be_activated_under_production_v1() {
+        let mut a = good();
+        a.push("--enable-model-pilot".into());
+        let errs = validate_production_v1(&a, &no_env, 2001).expect_err("pilot refused");
+        assert!(
+            errs.iter().any(|e| e.contains("--enable-model-pilot")),
+            "{errs:?}"
+        );
+        assert!(validate_production_v1(&good(), &no_env, 2001).is_ok());
     }
 
     #[test]
