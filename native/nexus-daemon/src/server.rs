@@ -111,6 +111,13 @@ pub struct Daemon {
     /// A3.2: operator-configured bases beneath which the Controller may
     /// bind workspaces. Empty = workspace binding refused (fail closed).
     pub workspace_bases: Vec<std::path::PathBuf>,
+    /// A3.3: mutating tools are refused unless explicitly enabled.
+    pub writes_enabled: bool,
+    /// Separate approver capability (never the issuer capability).
+    pub approver_auth: Option<Arc<IssuerAuth>>,
+    pub approver_uids: Option<Vec<u32>>,
+    /// True only when approver UIDs are disjoint from issuer UIDs.
+    pub approver_independent: bool,
     /// Bounded concurrent tool executions.
     pub tool_inflight: AtomicUsize,
     pub witness_configured: bool,
@@ -728,6 +735,162 @@ fn do_accept(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     }
 }
 
+// ---------------------------------------------------------------- A3.3 writes
+
+/// Independent approver channel. Authenticated with the SEPARATE approver
+/// capability and gated by `--approver-uids`; the issuer capability cannot
+/// satisfy it (different key), so a valid issuer alone can never create a
+/// write scope.
+fn do_write_scope_approve(
+    daemon: &Daemon,
+    req: &IpcRequest,
+    peer: Option<(u32, u32, i32)>,
+) -> serde_json::Value {
+    let refuse = |code: &str, msg: &str| {
+        daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+        log_line("refuse", &req.id, code, &req.cmd);
+        fail(&req.id, code, msg)
+    };
+    if !daemon.writes_enabled {
+        return refuse(
+            "write-disabled",
+            "write tools are not enabled on this daemon",
+        );
+    }
+    let (Some(auth), Some(uids)) = (daemon.approver_auth.as_ref(), daemon.approver_uids.as_ref())
+    else {
+        return refuse("write-disabled", "no approver credential is configured");
+    };
+    let Some(fields) = req.auth.as_ref() else {
+        return refuse(
+            codes::ISSUER_UNTRUSTED,
+            "missing approver authentication (auth { nonce, ts, tag })",
+        );
+    };
+    if let Err(code) = auth.verify(&req.cmd, &req.id, &req.params, fields, now_ms()) {
+        return refuse(
+            code,
+            if code == codes::REPLAY_REJECTED {
+                "approver nonce was already used; replay rejected"
+            } else {
+                "approver authentication failed (the issuer capability cannot approve writes)"
+            },
+        );
+    }
+    match peer {
+        Some((uid, _, _)) if uids.contains(&uid) => {}
+        _ => {
+            return refuse(
+                codes::PEER_UNAUTHORIZED,
+                "connecting process UID is not an authorized approver",
+            )
+        }
+    }
+    if let Err(r) = only_keys(
+        &req.params,
+        &[
+            "commandId",
+            "workspaceRootDigest",
+            "maxWriteBytes",
+            "approverId",
+        ],
+        &req.id,
+    ) {
+        return r;
+    }
+    let command_id = match get_string(&req.params, "commandId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let digest = match get_string(&req.params, "workspaceRootDigest") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let max = match get_u64(&req.params, "maxWriteBytes", &req.id) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let approver_id = req
+        .params
+        .get("approverId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("approver")
+        .to_owned();
+    let mut kernel = match lock_kernel(daemon, &req.id) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    match kernel.bind_write_scope(
+        &command_id,
+        &approver_id,
+        daemon.approver_independent,
+        &digest,
+        max,
+    ) {
+        Ok(b) => {
+            log_line("approver", &req.id, "ok", &req.cmd);
+            ok(
+                &req.id,
+                serde_json::json!({"writeScope": {
+                    "commandId": b.command_id,
+                    "attemptId": b.attempt_id,
+                    "leaseEpoch": b.lease_epoch,
+                    "maxWriteBytes": b.max_write_bytes,
+                    "independent": b.independent,
+                }}),
+            )
+        }
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
+/// Daemon-side hooks for the write lifecycle: journal and fence take the
+/// Kernel lock only briefly per call; nothing is held across file I/O.
+struct DaemonWriteHooks<'a> {
+    daemon: &'a Daemon,
+    verified: &'a nexus_kernel::VerifiedToolGrant,
+    last_seq: i64,
+}
+
+impl nexus_tools::WriteHooks for DaemonWriteHooks<'_> {
+    fn journal(
+        &mut self,
+        phase: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), nexus_tools::ToolError> {
+        let mut k = self.daemon.kernel.lock().map_err(|_| {
+            nexus_tools::ToolError::new(
+                nexus_tools::ToolErrorCode::IoError,
+                "kernel mutex is poisoned; failing closed",
+            )
+        })?;
+        let e = k
+            .record_write_phase(self.verified, phase, payload)
+            .map_err(|e| {
+                nexus_tools::ToolError::new(
+                    nexus_tools::ToolErrorCode::AuthorizationRefused,
+                    format!("journal refused ({}): {}", e.code.as_str(), e.message),
+                )
+            })?;
+        self.last_seq = e.seq;
+        Ok(())
+    }
+    fn fence(&mut self) -> Result<(), nexus_tools::ToolError> {
+        let k = self.daemon.kernel.lock().map_err(|_| {
+            nexus_tools::ToolError::new(
+                nexus_tools::ToolErrorCode::Revoked,
+                "kernel unavailable; failing closed",
+            )
+        })?;
+        k.check_tool_fence_for(self.verified.grant()).map_err(|e| {
+            nexus_tools::ToolError::new(
+                nexus_tools::ToolErrorCode::Revoked,
+                format!("authority revoked ({})", e.code.as_str()),
+            )
+        })
+    }
+}
+
 // ---------------------------------------------------------------- A3.2 tools
 
 /// Hard bound on concurrent tool executions.
@@ -973,7 +1136,7 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     // Step 1 (under the Kernel lock): resolve the Controller binding,
     // pin the workspace, authorize, journal `started`.
     let cancel = nexus_tools::CancellationToken::new(&cancellation_id);
-    let (call, started) = {
+    let call = {
         let mut kernel = match lock_kernel(daemon, &req.id) {
             Ok(k) => k,
             Err(r) => return r,
@@ -990,10 +1153,39 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             }
             Err(e) => return kernel_fail(daemon, &req.id, &e),
         };
-        let prepared = match nexus_tools::prepare(request, &binding) {
+        let mutating = nexus_tools::ToolId::parse(&request.tool_id)
+            .map(|t| t.is_mutating())
+            .unwrap_or(false);
+        if mutating && !daemon.writes_enabled {
+            daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                "write-disabled",
+                "write tools are not enabled on this daemon",
+            );
+        }
+        let prepared = if mutating {
+            let scope = match kernel.write_scope_binding(&command) {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                    return fail(
+                        &req.id,
+                        "scope-refused",
+                        "no independently approved write scope for this command; mutation refused",
+                    );
+                }
+                Err(e) => return kernel_fail(daemon, &req.id, &e),
+            };
+            nexus_tools::prepare_write(request, &binding, &scope)
+        } else {
+            nexus_tools::prepare(request, &binding)
+        };
+        let prepared = match prepared {
             Ok(p) => p,
             Err(e) => return tool_fail(daemon, &req.id, &e),
         };
+        let is_write = mutating;
         let call = match nexus_tools::authorize(&mut kernel, prepared) {
             Ok(c) => c,
             Err(e) => return tool_fail(daemon, &req.id, &e),
@@ -1002,8 +1194,46 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             Ok(s) => s,
             Err(e) => return tool_fail(daemon, &req.id, &e),
         };
-        (call, started)
+        (call, started, is_write)
     };
+    let (call, started, is_write) = (call.0, call.1, call.2);
+
+    if is_write {
+        // Write lifecycle: journal + fence hooks lock the Kernel only
+        // briefly; the filesystem work holds no lock.
+        let mut hooks = DaemonWriteHooks {
+            daemon,
+            verified: started.verified(),
+            last_seq: 0,
+        };
+        return match nexus_tools::run_write_call(&call, &cancel, &mut hooks) {
+            Ok(result) => ok(
+                &req.id,
+                serde_json::json!({
+                    "result": result,
+                    "execution": {
+                        "requestId": request_id,
+                        "executionId": call.grant().execution_id,
+                        "journalSeq": hooks.last_seq,
+                        "aiInitiated": false,
+                        "scope": "write",
+                        "approverIndependent": daemon.approver_independent,
+                        "testOnlyApproval": !daemon.approver_independent,
+                    },
+                }),
+            ),
+            Err(e) => {
+                // A journal failure after the filesystem may have changed:
+                // the outcome is UNCERTAIN; restart reconciliation will
+                // observe and record it. Never claim success.
+                let mut r = tool_fail(daemon, &req.id, &e);
+                if let Some(o) = r.as_object_mut() {
+                    o.insert("outcome".to_owned(), serde_json::json!("uncertain"));
+                }
+                r
+            }
+        };
+    }
 
     // Step 2 (NO Kernel lock held across the scan): run with the
     // authoritative fence probe, which takes the lock only briefly.
@@ -1120,36 +1350,10 @@ fn do_tool_events(
     let has_more = rows.len() > limit;
     rows.truncate(limit);
     let next_cursor = rows.last().map(|r| r.seq).unwrap_or(after);
+    // One shared allow-listed projection (no raw payload passthrough).
     let records: Vec<serde_json::Value> = rows
         .iter()
-        .map(|e| {
-            // Allowlisted projection: never the raw payload, never roots.
-            let p = &e.payload;
-            let pick = |k: &str| p.get(k).cloned().unwrap_or(serde_json::Value::Null);
-            serde_json::json!({
-                "seq": e.seq,
-                "phase": e.phase,
-                "requestId": e.request_id,
-                "executionId": e.execution_id,
-                "taskInstanceId": e.task_instance_id,
-                "attemptId": e.attempt_id,
-                "commandId": e.command_id,
-                "recordedAtUtc": e.recorded_at_utc,
-                "toolId": pick("toolId"),
-                "toolVersion": pick("toolVersion"),
-                "args": pick("args"),
-                "resultStatus": pick("resultStatus"),
-                "errorCode": pick("errorCode"),
-                "truncation": pick("truncation"),
-                "redaction": pick("redaction"),
-                "stats": pick("stats"),
-                "outputDigest": pick("outputDigest"),
-                "outputBytes": pick("outputBytes"),
-                "reason": pick("reason"),
-                "leaseEpoch": p.get("leaseEpoch").cloned().or_else(|| p.get("provenance").and_then(|x| x.get("leaseEpoch")).cloned()).unwrap_or(serde_json::Value::Null),
-                "aiInitiated": false,
-            })
-        })
+        .map(|e| serde_json::to_value(nexus_tools::record_from_entry(e)).unwrap_or_default())
         .collect();
     ok(
         &req.id,
@@ -1347,6 +1551,9 @@ pub fn dispatch(
     peer: Option<(u32, u32, i32)>,
 ) -> serde_json::Value {
     daemon.counters.requests.fetch_add(1, Ordering::Relaxed);
+    if req.cmd == "write-scope-approve" {
+        return do_write_scope_approve(daemon, req, peer);
+    }
     if is_privileged(&req.cmd) {
         if let Some(refusal) = authorize(daemon, req, peer) {
             log_line(
@@ -1896,6 +2103,10 @@ mod isolation_tests {
             counters: Counters::default(),
             reconcile_latch: Mutex::new(None),
             workspace_bases: Vec::new(),
+            writes_enabled: false,
+            approver_auth: None,
+            approver_uids: None,
+            approver_independent: false,
             tool_inflight: AtomicUsize::new(0),
             witness_configured: false,
             witness_path: None,

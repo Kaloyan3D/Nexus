@@ -20,25 +20,30 @@ pub mod contract;
 pub mod events;
 pub mod exec;
 pub mod list;
+pub mod mutate;
 pub mod offline;
 pub mod read;
 pub mod redact;
 pub mod result;
 pub mod search;
 pub mod workspace;
+pub mod write;
 
 pub use authorization::{
-    authorize, begin, execute, finish, prepare, run_started, AuthorizedToolCall,
-    PreparedToolRequest, StartedToolCall, ToolExecutionOutcome,
+    authorize, begin, execute, execute_write, finish, prepare, prepare_write, reconcile_writes,
+    run_started, run_write_call, AuthorizedToolCall, PreparedToolRequest, StartedToolCall,
+    ToolExecutionOutcome,
 };
 pub use contract::{
     descriptor_for, descriptors, ListArgs, ReadArgs, SearchArgs, ToolArgs, ToolBudgets,
     ToolDescriptor, ToolId, ToolRequestV1, TOOL_CONTRACT_VERSION, TOOL_VERSION,
 };
 pub use events::{
-    fold_tool_records, tool_events_from_journal, ToolEventStatus, ToolEventV1, ToolRecordV1,
+    fold_tool_records, record_from_entry, tool_events_from_journal, ToolEventStatus, ToolEventV1,
+    ToolRecordV1,
 };
 pub use exec::{CancellationToken, ExecCtx};
 pub use redact::{Redaction, Redactor};
 pub use result::{ResultStatus, ToolError, ToolErrorCode, ToolResultV1, ToolStats, Truncation};
 pub use workspace::{Workspace, WorkspacePolicy, POLICY_VERSION};
+pub use write::WriteHooks;

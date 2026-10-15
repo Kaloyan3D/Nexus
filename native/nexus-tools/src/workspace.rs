@@ -245,6 +245,10 @@ pub struct Identity {
     /// differs across bind mounts of the same filesystem.
     pub mnt_id: u64,
     pub nlink: u64,
+    /// Permission bits (`st_mode & 0o7777`).
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
     pub kind: Kind,
     pub size: u64,
 }
@@ -285,6 +289,9 @@ fn statx_at(dirfd: RawFd, name: &CString, flags: i32) -> Result<Identity, i32> {
         ino: sx.stx_ino,
         mnt_id: sx.stx_mnt_id,
         nlink: sx.stx_nlink as u64,
+        mode: sx.stx_mode as u32 & 0o7777,
+        uid: sx.stx_uid,
+        gid: sx.stx_gid,
         kind: kind_of_mode(sx.stx_mode as u32),
         size: sx.stx_size,
     })
@@ -716,5 +723,89 @@ impl Workspace {
         }
         unsafe { libc::closedir(dirp) };
         Ok((out, overflow))
+    }
+
+    // ---- A3.3 write-side descriptor operations ---------------------------
+
+    /// Write policy is strictly tighter than read policy: *any* hidden,
+    /// sensitive or internal component refuses, including the read
+    /// allowlist (`.gitignore`, `.github`, ...), `.git` and Nexus' own
+    /// temp-file prefix. Directories named like dependency/build trees are
+    /// refused too. Applied to every component before any descriptor work.
+    pub fn check_write_names(&self, rel: &RelPath) -> Result<(), ToolError> {
+        if rel.is_root() {
+            return Err(ToolError::new(
+                ToolErrorCode::NotAFile,
+                "the workspace root is not a writable file",
+            ));
+        }
+        for c in rel.components() {
+            if c.starts_with('.') {
+                return Err(ToolError::new(
+                    ToolErrorCode::HiddenPathRefused,
+                    "hidden, VCS and internal paths are never writable",
+                ));
+            }
+            if self.policy.classify_name(c) == NameClass::Sensitive {
+                return Err(ToolError::new(
+                    ToolErrorCode::SensitivePathRefused,
+                    "credential or sensitive paths are never writable",
+                ));
+            }
+            if self.policy.is_ignored_dir(c) {
+                return Err(ToolError::new(
+                    ToolErrorCode::HiddenPathRefused,
+                    "dependency and build directories are not writable by tools",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Open the (existing) parent directory of a write target by
+    /// descriptor. Returns the directory and the final component name.
+    pub fn open_parent_for_write(&self, rel: &RelPath) -> Result<(Opened, String), ToolError> {
+        self.check_write_names(rel)?;
+        let comps = rel.components();
+        let (name, parent) = comps.split_last().ok_or_else(|| pe("empty path"))?;
+        let parent_rel = RelPath {
+            comps: parent.to_vec(),
+        };
+        let dir = self.open_dir(&parent_rel)?;
+        Ok((dir, name.clone()))
+    }
+
+    /// `None` when the entry does not exist; otherwise its identity
+    /// (no symlink following).
+    pub fn stat_in_dir(&self, dir: &OwnedFd, name: &str) -> Result<Option<Identity>, ToolError> {
+        let c = CString::new(name).map_err(|_| pe("component contains NUL"))?;
+        self.accesses.fetch_add(1, Ordering::SeqCst);
+        match fstatat_nofollow(dir.as_raw_fd(), &c) {
+            Ok(i) => Ok(Some(i)),
+            Err(e) if e == libc::ENOENT => Ok(None),
+            Err(e) => Err(io_err("stat", e)),
+        }
+    }
+
+    /// Open an existing regular file by name relative to an already-open
+    /// directory, with the full read-side protections (no symlink, no
+    /// mount crossing, hard-link refusal, identity re-check).
+    pub fn open_file_in_dir(&self, dir: &OwnedFd, name: &str) -> Result<Opened, ToolError> {
+        let o = self.open_one(dir.as_raw_fd(), name, false)?;
+        if o.identity.kind != Kind::File {
+            return Err(ToolError::new(
+                ToolErrorCode::NotAFile,
+                "target is not a regular file",
+            ));
+        }
+        Ok(o)
+    }
+
+    pub fn same_mount_as_root(&self, id: &Identity) -> bool {
+        self.same_mount(id)
+    }
+
+    pub fn count_access(&self) {
+        self.accesses.fetch_add(1, Ordering::SeqCst);
     }
 }

@@ -452,16 +452,30 @@ fn cancelled_command_and_fenced_intent_refuse_authority() {
 }
 
 #[test]
-fn dispatch_stays_disabled_and_no_write_tool_exists() {
+fn dispatch_stays_disabled_and_only_scoped_mutating_tools_exist() {
     assert!(!Kernel::dispatch_enabled());
-    let ids: Vec<_> = nexus_tools::descriptors().iter().map(|d| d.id).collect();
-    assert_eq!(ids, vec!["fs.list", "fs.read", "fs.search"]);
-    assert!(nexus_tools::descriptors().iter().all(|d| d.read_only));
+    let d = nexus_tools::descriptors();
+    let ids: Vec<_> = d.iter().map(|d| d.id).collect();
+    assert_eq!(
+        ids,
+        vec!["fs.list", "fs.read", "fs.search", "fs.write", "fs.edit"]
+    );
+    for t in &d {
+        assert_eq!(t.read_only, !t.requires_write_scope, "{}", t.id);
+    }
     let mut fx = fixture("nowrite");
-    for t in ["fs.write", "fs.edit", "shell.exec", "fs.delete"] {
+    // No shell/exec/delete tool can even be named.
+    for t in ["shell.exec", "fs.delete", "fs.move", "fs.chmod"] {
         let r = fx.request(t, json!({}));
         assert_eq!(prepare_b(r).unwrap_err().code.as_str(), "unsupported-tool");
     }
+    // Mutating tools cannot be prepared through the read path.
+    let r = fx.request(
+        "fs.write",
+        json!({"path": "a.txt", "content": "x", "mode": "create"}),
+    );
+    let e = prepare_b(r).unwrap_err();
+    assert_eq!(e.code.as_str(), "authorization-refused");
 }
 
 // ----------------------------------------------------------------- limits

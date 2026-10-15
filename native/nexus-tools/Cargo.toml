@@ -12,6 +12,12 @@ nexus-store = { workspace = true }
 libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[features]
+# Test-only deterministic SIGKILL points for crash-recovery tests.
+crash-injection = []
 
 [dev-dependencies]
 tempfile = { workspace = true }

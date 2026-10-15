@@ -49,6 +49,17 @@ pub fn spawn_daemon(trust: &str, with_witness: bool) -> DaemonProc {
 /// requirement the daemon enforces at startup; tests for the refusal path
 /// chmod the directory afterwards instead.
 pub fn spawn_daemon_opts(trust: &str, with_witness: bool, extra_args: &[&str]) -> DaemonProc {
+    spawn_daemon_env(trust, with_witness, extra_args, &[])
+}
+
+/// As `spawn_daemon_opts`, additionally setting environment variables on
+/// the daemon process (used for deterministic crash injection).
+pub fn spawn_daemon_env(
+    trust: &str,
+    with_witness: bool,
+    extra_args: &[&str],
+    envs: &[(&str, &str)],
+) -> DaemonProc {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
@@ -74,6 +85,9 @@ pub fn spawn_daemon_opts(trust: &str, with_witness: bool, extra_args: &[&str]) -
     for a in extra_args {
         cmd.arg(a);
     }
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
     let mut child = cmd.spawn().expect("spawn nexusd");
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -90,7 +104,17 @@ pub fn spawn_daemon_opts(trust: &str, with_witness: bool, extra_args: &[&str]) -
             panic!("daemon never became ready");
         }
         match child.try_wait() {
-            Ok(Some(status)) => panic!("daemon exited early: {status}"),
+            Ok(Some(status)) => {
+                use std::io::Read as _;
+                let mut out = String::new();
+                if let Some(mut e) = child.stderr.take() {
+                    let _ = e.read_to_string(&mut out);
+                }
+                if let Some(mut o) = child.stdout.take() {
+                    let _ = o.read_to_string(&mut out);
+                }
+                panic!("daemon exited early: {status}: {out}")
+            }
             Ok(None) => {}
             Err(e) => panic!("wait failed: {e}"),
         }

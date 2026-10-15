@@ -3,7 +3,7 @@ use nexus_contracts::{
     ControllerIntentV1, ExecutionTargetCoreV1, RegistryProvenanceV1, RegistryResolutionV1,
     CONTRACT_SCHEMA_VERSION,
 };
-use nexus_kernel::{AcceptRequest, Kernel, WorkspaceBinding};
+use nexus_kernel::{AcceptRequest, Kernel, WorkspaceBinding, WriteScopeBinding};
 use nexus_tools::{
     authorize, execute, prepare, AuthorizedToolCall, CancellationToken, ToolBudgets, ToolError,
     ToolExecutionOutcome, ToolRequestV1, TOOL_CONTRACT_VERSION, TOOL_VERSION,
@@ -169,6 +169,64 @@ impl Fx {
     ) -> Result<ToolExecutionOutcome, ToolError> {
         let r = self.request(tool, args);
         self.run_request(r)
+    }
+
+    /// Independent approver grants write scope for this command's workspace.
+    pub fn approve_write(&mut self, max_bytes: u64) -> WriteScopeBinding {
+        let root = self.binding().root_digest;
+        self.kernel
+            .bind_write_scope(
+                &self.command.clone(),
+                "test-approver",
+                false,
+                &root,
+                max_bytes,
+            )
+            .unwrap()
+    }
+
+    pub fn scope(&mut self) -> WriteScopeBinding {
+        self.kernel
+            .write_scope_binding(&self.command.clone())
+            .unwrap()
+            .expect("write scope")
+    }
+
+    pub fn prepare_w(
+        &mut self,
+        r: ToolRequestV1,
+    ) -> Result<nexus_tools::PreparedToolRequest, ToolError> {
+        let b = self.binding();
+        let sc = self.scope();
+        nexus_tools::prepare_write(r, &b, &sc)
+    }
+
+    /// prepare_write + authorize + execute_write (trusted full path).
+    pub fn run_write(
+        &mut self,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> Result<ToolExecutionOutcome, ToolError> {
+        let r = self.request(tool, args);
+        let cancel = CancellationToken::new(&r.cancellation_id);
+        let p = self.prepare_w(r)?;
+        let call = authorize(&mut self.kernel, p)?;
+        nexus_tools::execute_write(&mut self.kernel, &call, &cancel)
+    }
+
+    pub fn disk(&self, rel: &str) -> Option<String> {
+        std::fs::read_to_string(self.ws.join(rel)).ok()
+    }
+
+    pub fn tmp_leftovers(&self) -> Vec<String> {
+        let mut v = Vec::new();
+        for e in std::fs::read_dir(&self.ws).unwrap().flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if n.starts_with(".nexus-tmp-") {
+                v.push(n);
+            }
+        }
+        v
     }
 
     pub fn binding(&mut self) -> WorkspaceBinding {

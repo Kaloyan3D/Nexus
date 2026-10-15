@@ -2022,12 +2022,14 @@ dependencies = [
 name = "nexus-tools"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "libc",
  "nexus-contracts",
  "nexus-kernel",
  "nexus-store",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

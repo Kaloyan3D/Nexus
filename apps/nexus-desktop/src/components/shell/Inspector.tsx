@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Activity, FileBox, ListChecks, SquareStack, Wrench, X } from "lucide-react";
 import type { TaskRecord, TaskToolEvents } from "../../lib/contracts";
-import { toolEventPresentation } from "../../lib/toolEvents";
+import { approvalNote, describeMutation, toolEventPresentation } from "../../lib/toolEvents";
 import { absoluteTime, durationBetween, relativeTime, shortId } from "../../lib/format";
 import { taskStatusView } from "../../lib/status";
 import { useNexus } from "../../state/NexusContext";
@@ -126,6 +126,16 @@ function ToolActivity({ task }: { task: TaskRecord }) {
                         {p.label}
                       </Badge>{" "}
                       <span className="nv-mono">{e.toolId}</span> {p.summary}
+                      {e.scope === "write" && (
+                        <span className="nv-note">
+                          {" "}
+                          · write · {approvalNote(e.change, e.scope)}
+                        </span>
+                      )}
+                      {p.change && <span className="nv-note nv-mono"> · {p.change}</span>}
+                      {describeMutation(e.change) && (
+                        <span className="nv-note"> · {describeMutation(e.change)}</span>
+                      )}
                       {e.leaseEpoch !== null && (
                         <span className="nv-note"> · generation {e.leaseEpoch}</span>
                       )}

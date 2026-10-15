@@ -23,7 +23,10 @@ RUN groupadd -r nexus-issuer-test \
     && useradd -r -M -s /usr/sbin/nologin -g nexus-issuer-test nexus-issuer-test \
     && useradd -r -U -M -s /usr/sbin/nologin -G nexus-issuer-test nexus-bystander-test \
     && useradd -r -U -M -s /usr/sbin/nologin nexus-untrusted-test \
-    && id nexusd-test && id nexus-issuer-test && id nexus-bystander-test && id nexus-untrusted-test
+    && groupadd -r nexus-approver-test \
+    && useradd -r -M -s /usr/sbin/nologin -g nexus-approver-test nexus-approver-test \
+    && usermod -aG nexus-approver-test nexusd-test \
+    && id nexus-approver-test && id nexusd-test && id nexus-issuer-test && id nexus-bystander-test && id nexus-untrusted-test
 
 WORKDIR /src
 COPY . .

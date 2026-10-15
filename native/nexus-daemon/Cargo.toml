@@ -32,3 +32,4 @@ sha2 = { workspace = true }
 nexus-contracts = { workspace = true }
 nexus-model = { workspace = true }
 nexus-client = { workspace = true }
+nexus-tools = { workspace = true, features = ["crash-injection"] }

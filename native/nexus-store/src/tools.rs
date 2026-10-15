@@ -485,4 +485,73 @@ impl Store {
             .map_err(|e| db_fail_pub("read", e))?;
         Ok(n.is_some())
     }
+
+    // ---- A3.3 write-scope bindings + write lifecycle queries ------------
+
+    pub fn insert_write_scope(
+        &mut self,
+        command_id: &str,
+        binding_json: &str,
+        seal_hex: &str,
+    ) -> KernelResult<SealOutcome> {
+        let tx = self.conn_tx().map_err(|e| db_fail_pub("begin", e))?;
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT binding_json, seal_hex FROM write_scope_bindings WHERE command_id = ?1",
+                params![command_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| db_fail_pub("read", e))?;
+        match existing {
+            Some((j, s)) if j == binding_json && s == seal_hex => Ok(SealOutcome::Identical),
+            Some(_) => Err(KernelError::new(
+                KernelErrorCode::CommandConflict,
+                "a different write scope is already bound for this command",
+            )),
+            None => {
+                tx.execute(
+                    "INSERT INTO write_scope_bindings (command_id, binding_json, seal_hex, created_at_utc) VALUES (?1,?2,?3,?4)",
+                    params![command_id, binding_json, seal_hex, now_utc_pub()],
+                )
+                .map_err(|e| db_fail_pub("bind", e))?;
+                tx.commit().map_err(|e| db_fail_pub("commit", e))?;
+                Ok(SealOutcome::Created)
+            }
+        }
+    }
+
+    pub fn fetch_write_scope(&self, command_id: &str) -> KernelResult<Option<(String, String)>> {
+        self.conn_ref()
+            .query_row(
+                "SELECT binding_json, seal_hex FROM write_scope_bindings WHERE command_id = ?1",
+                params![command_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| db_fail_pub("read", e))
+    }
+
+    /// All journal entries of one request, ascending.
+    pub fn tool_entries_for_request(
+        &self,
+        request_id: &str,
+    ) -> KernelResult<Vec<ToolJournalEntry>> {
+        let mut stmt = self
+            .conn_ref()
+            .prepare(&format!(
+                "SELECT {COLS} FROM tool_journal WHERE request_id = ?1 ORDER BY seq ASC"
+            ))
+            .map_err(|e| db_fail_pub("prepare", e))?;
+        let rows = stmt
+            .query_map(params![request_id], row_of)
+            .map_err(|e| db_fail_pub("query", e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| db_fail_pub("rows", e))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(entry_of(r)?.0);
+        }
+        Ok(out)
+    }
 }

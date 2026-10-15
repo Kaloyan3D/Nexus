@@ -313,11 +313,36 @@ export interface ConversationQuery {
 export type ToolEventStatus =
   | "authorized"
   | "started"
+  | "planned"
+  | "prepared"
+  | "applied"
+  | "verified"
+  | "conflict"
   | "completed"
   | "failed"
   | "interrupted"
   | "expired"
   | "cancelled";
+
+/** Pre/post-image metadata of a write or edit (never file content). */
+export interface ToolChange {
+  operation?: "create" | "replace" | "edit";
+  path?: string;
+  preSha256?: string | null;
+  postSha256?: string;
+  postBytes?: number;
+  /** none | applied | applied-unverified | published-unverified | uncertain */
+  mutation?: string;
+  observed?: string;
+  observedSha256?: string | null;
+  conflict?: string;
+  /** Name a displaced/modified file was preserved under (never deleted). */
+  preservedAs?: string | null;
+  /** false = single-identity TEST approval; not an independent approver. */
+  approverIndependent?: boolean | null;
+  displacedPreserved?: boolean;
+  publishedOverUnexpectedPreImage?: boolean;
+}
 
 export interface ToolEventV1 {
   schemaVersion: 1;
@@ -326,8 +351,10 @@ export interface ToolEventV1 {
   taskInstanceId: string;
   attemptId: string;
   commandId: string;
-  toolId: "fs.list" | "fs.read" | "fs.search";
+  toolId: "fs.list" | "fs.read" | "fs.search" | "fs.write" | "fs.edit";
   toolVersion: number;
+  /** `write` grants required an independently approved write scope. */
+  scope: "read" | "write";
   status: ToolEventStatus;
   /** Redacted argument metadata (search queries appear as length + digest). */
   args: Record<string, unknown> | null;
@@ -341,6 +368,8 @@ export interface ToolEventV1 {
   outputDigest: string | null;
   outputBytes: number | null;
   stats: Record<string, number> | null;
+  /** Write tools only: proposed/applied change metadata. */
+  change: ToolChange | null;
   aiInitiated: boolean;
   /** Lease generation the request was authorized under. */
   leaseEpoch: number | null;

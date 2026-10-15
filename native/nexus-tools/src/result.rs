@@ -26,6 +26,15 @@ pub enum ToolErrorCode {
     RaceDetected,
     WorkspaceInvalid,
     WorkspaceMismatch,
+    /// The target differs from what the request expected (pre-image
+    /// mismatch, already exists, ambiguous edit, concurrent change).
+    Conflict,
+    /// The write failed before publication; the target is unchanged.
+    WriteFailed,
+    /// The filesystem lacks an atomic primitive we require (renameat2).
+    UnsupportedFilesystem,
+    /// Bytes were published but could not be verified.
+    PublishedUnverified,
     Cancelled,
     /// Authoritative revocation/fencing observed mid-execution.
     Revoked,
@@ -55,6 +64,10 @@ impl ToolErrorCode {
             Self::RaceDetected => "race-detected",
             Self::WorkspaceInvalid => "workspace-invalid",
             Self::WorkspaceMismatch => "workspace-mismatch",
+            Self::Conflict => "conflict",
+            Self::WriteFailed => "write-failed",
+            Self::UnsupportedFilesystem => "unsupported-filesystem",
+            Self::PublishedUnverified => "published-unverified",
             Self::Cancelled => "cancelled",
             Self::Revoked => "revoked",
             Self::AuthorizationRefused => "authorization-refused",

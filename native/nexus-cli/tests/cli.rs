@@ -156,14 +156,25 @@ fn tools_list_and_inspect_are_read_only_metadata() {
         .iter()
         .map(|t| t["id"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(ids, vec!["fs.list", "fs.read", "fs.search"]);
-    assert_eq!(v["writeTools"], "none");
+    assert_eq!(
+        ids,
+        vec!["fs.list", "fs.read", "fs.search", "fs.write", "fs.edit"]
+    );
+    assert!(v["writeTools"]
+        .as_str()
+        .unwrap()
+        .contains("independently approved"));
     assert_eq!(v["aiInitiatedExecution"], "disabled");
     let (c, so, _) = run(&["--json", "tools", "inspect", "fs.read"]);
     assert_eq!(c, 0);
     let v: serde_json::Value = serde_json::from_str(&so).unwrap();
     assert_eq!(v["readOnly"], true);
-    let (c, _, se) = run(&["tools", "inspect", "fs.write"]);
+    let (c, so, _) = run(&["--json", "tools", "inspect", "fs.write"]);
+    assert_eq!(c, 0);
+    let v: serde_json::Value = serde_json::from_str(&so).unwrap();
+    assert_eq!(v["readOnly"], false);
+    assert_eq!(v["requiresWriteScope"], true);
+    let (c, _, se) = run(&["tools", "inspect", "fs.delete"]);
     assert_eq!(c, 2, "{se}");
 }
 
@@ -240,4 +251,111 @@ fn tools_events_needs_scope_and_reports_disconnected_daemon() {
         "TASK-1-A1",
     ]);
     assert_eq!(c, 3);
+}
+
+#[test]
+fn offline_writes_are_quadruple_gated_and_isolated() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "old\n").unwrap();
+    let ws = dir.path().to_str().unwrap();
+    let args = r#"{"path":"b.txt","content":"new\n","mode":"create"}"#;
+    let go = |flag: bool, env_read: bool, env_write: bool| {
+        let mut c = nexus();
+        c.args([
+            "--json",
+            "tools",
+            "run-offline",
+            "--offline-test",
+            "--workspace",
+            ws,
+            "fs.write",
+            args,
+        ]);
+        if flag {
+            c.arg("--allow-write-test");
+        }
+        c.env_remove("NEXUS_TOOLS_OFFLINE_TEST")
+            .env_remove("NEXUS_TOOLS_OFFLINE_WRITE_TEST");
+        if env_read {
+            c.env("NEXUS_TOOLS_OFFLINE_TEST", "1");
+        }
+        if env_write {
+            c.env("NEXUS_TOOLS_OFFLINE_WRITE_TEST", "1");
+        }
+        c.output().unwrap()
+    };
+    // Each missing gate refuses and nothing is created.
+    for (f, r, w) in [
+        (false, true, true),
+        (true, false, true),
+        (true, true, false),
+        (true, true, true),
+    ] {
+        let out = go(f, r, w);
+        assert_eq!(
+            out.status.code(),
+            Some(4),
+            "{f}{r}{w}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!dir.path().join("b.txt").exists());
+    }
+    // Marker present (all gates): succeeds, labelled self-approved.
+    std::fs::write(dir.path().join(".nexus-offline-write-test"), "").unwrap();
+    let out = go(true, true, true);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["controllerAuthorized"], false);
+    assert_eq!(v["aiInitiated"], false);
+    assert!(v["authority"].as_str().unwrap().contains("NOT independent"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+        "new\n"
+    );
+    // The marker is hidden: the tool can never write it or anything hidden.
+    let out = nexus()
+        .args([
+            "--json",
+            "tools",
+            "run-offline",
+            "--offline-test",
+            "--allow-write-test",
+            "--workspace",
+            ws,
+            "fs.write",
+            r#"{"path":".nexus-offline-write-test","content":"x","mode":"create"}"#,
+        ])
+        .env("NEXUS_TOOLS_OFFLINE_TEST", "1")
+        .env("NEXUS_TOOLS_OFFLINE_WRITE_TEST", "1")
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["result"]["error"]["code"], "hidden-path-refused");
+    // A non-temp workspace is refused even with every gate.
+    let home = std::env::current_dir().unwrap();
+    let out = nexus()
+        .args([
+            "--json",
+            "tools",
+            "run-offline",
+            "--offline-test",
+            "--allow-write-test",
+            "--workspace",
+            home.to_str().unwrap(),
+            "fs.write",
+            args,
+        ])
+        .env("NEXUS_TOOLS_OFFLINE_TEST", "1")
+        .env("NEXUS_TOOLS_OFFLINE_WRITE_TEST", "1")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    // There is no unrestricted write command.
+    let (c, _, _) = run(&["write", "x"]);
+    assert_eq!(c, 2);
 }

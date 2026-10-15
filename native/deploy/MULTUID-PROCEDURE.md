@@ -48,6 +48,11 @@ useradd -r -m -s /usr/sbin/nologin -G nexus-issuer-test nexusd-test
 useradd -r -M -s /usr/sbin/nologin -g nexus-issuer-test nexus-issuer-test
 useradd -r -U -M -s /usr/sbin/nologin -G nexus-issuer-test nexus-bystander-test
 useradd -r -U -M -s /usr/sbin/nologin nexus-untrusted-test
+# A3.3 independent write approver (own group; daemon joins it only to chgrp
+# the approver credential handoff file):
+groupadd -r nexus-approver-test
+useradd -r -M -s /usr/sbin/nologin -g nexus-approver-test nexus-approver-test
+usermod -aG nexus-approver-test nexusd-test
 id nexusd-test nexus-issuer-test nexus-bystander-test nexus-untrusted-test
 
 # 2. Tooling the harness shells out to: runuser (util-linux), python3, cat/tee/ls.
@@ -105,3 +110,27 @@ always-run JS gates (`NativeA20`, `NativeShadowA13/A12`, `Spike02`,
 Copy the full `-- --ignored` output (including the `running 9 tests` header
 and the `test result` line) into the closure evidence report. An `ignored`
 count with no `--ignored` execution is NOT RUN — never transcribe it as PASS.
+
+
+## C. A3.2 / A3.3 tool commands (additional tests, NOT RUN without this host)
+
+Three further ignored tests cover `workspace-bind`, `tool-execute`,
+`tool-revoke`, `tool-events` and the approver channel
+`write-scope-approve`:
+
+- `multuid_tool_commands_require_issuer_and_writes_require_the_approver`
+- `multuid_untrusted_and_bystander_cannot_use_tool_commands_or_read_events`
+- `multuid_approver_with_stolen_approver_cap_from_wrong_uid_is_refused`
+
+They need the additional `nexus-approver-test` user/group created in
+section B and are included by the same command:
+
+```sh
+NEXUS_MULTUID=1 cargo test -p nexus-daemon --test multuid -- --ignored --test-threads=1
+```
+
+The daemon is started with `--enable-writes --approver-cap <file>
+--approver-uids <approver uid> --approver-cap-gid <approver gid>
+--require-independent-approver`, so it refuses to start unless the approver
+UIDs are disjoint from the issuer allow-list. A run is not a PASS unless the
+reporter prints PREPARED and every test prints no `NOT RUN` line.

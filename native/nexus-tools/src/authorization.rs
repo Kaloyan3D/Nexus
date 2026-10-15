@@ -19,6 +19,7 @@ use crate::workspace::{Workspace, WorkspacePolicy, POLICY_VERSION};
 use nexus_contracts::sha256_hex;
 use nexus_kernel::{
     Kernel, SealedToolGrant, ToolAuthorizationRequest, VerifiedToolGrant, WorkspaceBinding,
+    WriteScopeBinding,
 };
 use nexus_store::ToolJournalEntry;
 
@@ -82,6 +83,33 @@ pub fn prepare(
     request: ToolRequestV1,
     binding: &WorkspaceBinding,
 ) -> Result<PreparedToolRequest, ToolError> {
+    prepare_inner(request, binding, None)
+}
+
+/// Preparation for mutating tools. Requires the independent write scope;
+/// the sealed byte budget can never exceed what the approver allowed.
+pub fn prepare_write(
+    request: ToolRequestV1,
+    binding: &WorkspaceBinding,
+    scope: &WriteScopeBinding,
+) -> Result<PreparedToolRequest, ToolError> {
+    if scope.command_id != request.command_id
+        || scope.root_digest != binding.root_digest
+        || scope.lease_epoch != request.lease_epoch
+    {
+        return Err(ToolError::new(
+            ToolErrorCode::WorkspaceMismatch,
+            "write scope does not belong to this request",
+        ));
+    }
+    prepare_inner(request, binding, Some(scope))
+}
+
+fn prepare_inner(
+    request: ToolRequestV1,
+    binding: &WorkspaceBinding,
+    scope: Option<&WriteScopeBinding>,
+) -> Result<PreparedToolRequest, ToolError> {
     let inv = |m: &str| ToolError::new(ToolErrorCode::InvalidArguments, m);
     if request.schema_version != TOOL_CONTRACT_VERSION {
         return Err(inv("unsupported tool request schemaVersion"));
@@ -106,8 +134,26 @@ pub fn prepare(
             return Err(inv(&["missing ", n].concat()));
         }
     }
+    match (tool.is_mutating(), scope.is_some()) {
+        (true, false) => {
+            return Err(ToolError::new(
+                ToolErrorCode::AuthorizationRefused,
+                "mutating tools require an independently approved write scope",
+            ))
+        }
+        (false, true) => {
+            return Err(ToolError::new(
+                ToolErrorCode::InvalidArguments,
+                "a write scope was supplied for a read-only tool",
+            ))
+        }
+        _ => {}
+    }
     let args = ToolArgs::parse(tool, &request.args)?;
-    let budgets = request.budgets.clamped();
+    let mut budgets = request.budgets.clamped();
+    if let Some(sc) = scope {
+        budgets.max_write_bytes = budgets.max_write_bytes.min(sc.max_write_bytes).max(1);
+    }
     // The root is taken ONLY from the Controller-sealed binding and must
     // still be the same directory the Controller authorized.
     if binding.command_id != request.command_id
@@ -194,6 +240,108 @@ pub struct ToolExecutionOutcome {
 #[derive(Debug)]
 pub struct StartedToolCall {
     verified: VerifiedToolGrant,
+}
+
+impl StartedToolCall {
+    pub fn verified(&self) -> &VerifiedToolGrant {
+        &self.verified
+    }
+}
+
+struct KernelWriteHooks<'a> {
+    kernel: &'a mut Kernel,
+    verified: &'a VerifiedToolGrant,
+    last: Option<nexus_store::ToolJournalEntry>,
+}
+
+impl crate::write::WriteHooks for KernelWriteHooks<'_> {
+    fn journal(&mut self, phase: &str, payload: serde_json::Value) -> Result<(), ToolError> {
+        let e = self
+            .kernel
+            .record_write_phase(self.verified, phase, payload)
+            .map_err(|e| kernel_refusal(&e))?;
+        self.last = Some(e);
+        Ok(())
+    }
+    fn fence(&mut self) -> Result<(), ToolError> {
+        self.kernel
+            .check_tool_fence_for(self.verified.grant())
+            .map_err(|e| {
+                ToolError::new(
+                    ToolErrorCode::Revoked,
+                    format!("authority revoked ({})", e.code.as_str()),
+                )
+            })
+    }
+}
+
+/// Drive a started write call through the lifecycle on the given hooks.
+pub fn run_write_call(
+    call: &AuthorizedToolCall,
+    cancel: &CancellationToken,
+    hooks: &mut dyn crate::write::WriteHooks,
+) -> Result<ToolResultV1, ToolError> {
+    let p = &call.prepared;
+    crate::write::run_write(
+        &p.workspace,
+        &p.args,
+        &p.budgets,
+        &call.grant.execution_id,
+        cancel,
+        hooks,
+    )
+}
+
+/// In-process composition for trusted callers (tests, offline harness).
+pub fn execute_write(
+    kernel: &mut Kernel,
+    call: &AuthorizedToolCall,
+    cancel: &CancellationToken,
+) -> Result<ToolExecutionOutcome, ToolError> {
+    let started = begin(kernel, call, cancel)?;
+    let mut hooks = KernelWriteHooks {
+        kernel,
+        verified: &started.verified,
+        last: None,
+    };
+    let result = run_write_call(call, cancel, &mut hooks)?;
+    let journal = hooks.last.ok_or_else(|| {
+        ToolError::new(ToolErrorCode::IoError, "write produced no journal record")
+    })?;
+    Ok(ToolExecutionOutcome { result, journal })
+}
+
+/// Startup reconciliation for write requests that have `planned` but no
+/// terminal record. Observes each target (never modifies it, never
+/// replays), removes abandoned temp files, and records `interrupted` with
+/// the explicit observed state.
+pub fn reconcile_writes(kernel: &mut Kernel) -> Result<u64, ToolError> {
+    let open = kernel.open_writes().map_err(|e| kernel_refusal(&e))?;
+    let mut observations: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::new();
+    for ow in open {
+        let obs = match kernel.workspace_binding(&ow.command_id) {
+            Ok(Some(b)) => match Workspace::open_root(&b.root_path, WorkspacePolicy::default()) {
+                Ok(ws) => crate::write::observe_for_recovery(
+                    &ws,
+                    &ow.planned,
+                    &ow.prepared.clone().unwrap_or_default(),
+                ),
+                Err(_) => serde_json::json!({"observed": "unobservable", "mutation": "uncertain",
+                    "reason": "workspace unavailable at recovery"}),
+            },
+            _ => serde_json::json!({"observed": "unobservable", "mutation": "uncertain",
+                "reason": "workspace binding unavailable at recovery"}),
+        };
+        observations.insert(ow.request_id.clone(), obs);
+    }
+    kernel
+        .reconcile_open_writes(&mut |ow| {
+            observations.remove(&ow.request_id).unwrap_or_else(
+                || serde_json::json!({"observed": "unobservable", "mutation": "uncertain"}),
+            )
+        })
+        .map_err(|e| kernel_refusal(&e))
 }
 
 fn local_bindings_ok(
@@ -348,5 +496,9 @@ fn run_tool(ctx: &mut ExecCtx<'_>, args: &ToolArgs) -> Result<serde_json::Value,
         ToolArgs::List(a) => crate::list::run(ctx, a),
         ToolArgs::Read(a) => crate::read::run(ctx, a),
         ToolArgs::Search(a) => crate::search::run(ctx, a),
+        ToolArgs::Write(_) | ToolArgs::Edit(_) => Err(ToolError::new(
+            ToolErrorCode::UnsupportedTool,
+            "mutating tools run only through the write lifecycle",
+        )),
     }
 }

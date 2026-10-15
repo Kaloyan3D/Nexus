@@ -16,6 +16,10 @@ pub enum ToolId {
     FsRead,
     #[serde(rename = "fs.search")]
     FsSearch,
+    #[serde(rename = "fs.write")]
+    FsWrite,
+    #[serde(rename = "fs.edit")]
+    FsEdit,
 }
 
 impl ToolId {
@@ -24,13 +28,21 @@ impl ToolId {
             Self::FsList => "fs.list",
             Self::FsRead => "fs.read",
             Self::FsSearch => "fs.search",
+            Self::FsWrite => "fs.write",
+            Self::FsEdit => "fs.edit",
         }
+    }
+    /// True for tools that mutate the workspace (need a write scope).
+    pub fn is_mutating(self) -> bool {
+        matches!(self, Self::FsWrite | Self::FsEdit)
     }
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "fs.list" => Some(Self::FsList),
             "fs.read" => Some(Self::FsRead),
             "fs.search" => Some(Self::FsSearch),
+            "fs.write" => Some(Self::FsWrite),
+            "fs.edit" => Some(Self::FsEdit),
             _ => None,
         }
     }
@@ -65,6 +77,49 @@ pub struct SearchArgs {
     pub max_matches: Option<u32>,
 }
 
+/// `fs.write`: create or replace a UTF-8 text file. Never implicit:
+/// `create` requires absence; `replace` requires the exact pre-image hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct WriteArgs {
+    pub path: String,
+    pub content: String,
+    /// `create` | `replace`
+    pub mode: String,
+    /// Required for `replace`: sha256 hex of the current file bytes.
+    #[serde(default)]
+    pub expected_sha256: Option<String>,
+    /// Optional permission bits for `create` (octal string, <= 0777).
+    #[serde(default)]
+    pub file_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct EditOp {
+    pub old_text: String,
+    pub new_text: String,
+}
+
+/// `fs.edit`: ordered exact-content replacements on an existing file,
+/// guarded by the pre-image hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct EditArgs {
+    pub path: String,
+    pub expected_sha256: String,
+    pub edits: Vec<EditOp>,
+}
+
+pub const MAX_EDITS: usize = 16;
+pub const MAX_EDIT_TEXT: usize = 64 * 1024;
+
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 fn dot() -> String {
     ".".to_owned()
 }
@@ -74,6 +129,8 @@ pub enum ToolArgs {
     List(ListArgs),
     Read(ReadArgs),
     Search(SearchArgs),
+    Write(WriteArgs),
+    Edit(EditArgs),
 }
 
 impl ToolArgs {
@@ -82,6 +139,8 @@ impl ToolArgs {
             Self::List(_) => ToolId::FsList,
             Self::Read(_) => ToolId::FsRead,
             Self::Search(_) => ToolId::FsSearch,
+            Self::Write(_) => ToolId::FsWrite,
+            Self::Edit(_) => ToolId::FsEdit,
         }
     }
 
@@ -97,6 +156,8 @@ impl ToolArgs {
             ToolId::FsList => Self::List(serde_json::from_value(raw.clone()).map_err(bad)?),
             ToolId::FsRead => Self::Read(serde_json::from_value(raw.clone()).map_err(bad)?),
             ToolId::FsSearch => Self::Search(serde_json::from_value(raw.clone()).map_err(bad)?),
+            ToolId::FsWrite => Self::Write(serde_json::from_value(raw.clone()).map_err(bad)?),
+            ToolId::FsEdit => Self::Edit(serde_json::from_value(raw.clone()).map_err(bad)?),
         };
         parsed.validate()?;
         Ok(parsed)
@@ -112,6 +173,53 @@ impl ToolArgs {
                 }
                 if a.max_lines == Some(0) {
                     return inv("maxLines must be positive");
+                }
+                Ok(())
+            }
+            Self::Write(a) => {
+                match a.mode.as_str() {
+                    "create" => {
+                        if a.expected_sha256.is_some() {
+                            return inv("create must not carry expectedSha256");
+                        }
+                    }
+                    "replace" => match &a.expected_sha256 {
+                        Some(h) if is_sha256_hex(h) => {}
+                        _ => return inv("replace requires a 64-hex expectedSha256"),
+                    },
+                    _ => return inv("mode must be 'create' or 'replace'"),
+                }
+                if a.content.contains('\0') {
+                    return inv("content must be text (no NUL)");
+                }
+                if let Some(m) = &a.file_mode {
+                    match u32::from_str_radix(m, 8) {
+                        Ok(v) if v <= 0o777 && v != 0 => {}
+                        _ => return inv("fileMode must be octal permission bits (<= 0777)"),
+                    }
+                    if a.mode != "create" {
+                        return inv("fileMode applies only to create (replace preserves mode)");
+                    }
+                }
+                Ok(())
+            }
+            Self::Edit(a) => {
+                if !is_sha256_hex(&a.expected_sha256) {
+                    return inv("expectedSha256 must be 64 lowercase hex");
+                }
+                if a.edits.is_empty() || a.edits.len() > MAX_EDITS {
+                    return inv("edits must contain 1..=16 operations");
+                }
+                for e in &a.edits {
+                    if e.old_text.is_empty() {
+                        return inv("oldText must not be empty");
+                    }
+                    if e.old_text.len() > MAX_EDIT_TEXT || e.new_text.len() > MAX_EDIT_TEXT {
+                        return inv("edit text exceeds 64 KiB");
+                    }
+                    if e.old_text.contains('\0') || e.new_text.contains('\0') {
+                        return inv("edit text must not contain NUL");
+                    }
                 }
                 Ok(())
             }
@@ -139,6 +247,8 @@ impl ToolArgs {
             Self::List(a) => serde_json::to_value(a),
             Self::Read(a) => serde_json::to_value(a),
             Self::Search(a) => serde_json::to_value(a),
+            Self::Write(a) => serde_json::to_value(a),
+            Self::Edit(a) => serde_json::to_value(a),
         }
         .unwrap_or(serde_json::Value::Null);
         sha256_hex(&canonical_json(&serde_json::json!({
@@ -154,6 +264,14 @@ impl ToolArgs {
             Self::List(a) => serde_json::json!({ "path": a.path }),
             Self::Read(a) => serde_json::json!({
                 "path": a.path, "startLine": a.start_line, "maxLines": a.max_lines,
+            }),
+            // Content and edit text are never journaled; only structure.
+            Self::Write(a) => serde_json::json!({
+                "path": a.path, "mode": a.mode, "contentBytes": a.content.len(),
+                "expectedSha256": a.expected_sha256,
+            }),
+            Self::Edit(a) => serde_json::json!({
+                "path": a.path, "expectedSha256": a.expected_sha256, "edits": a.edits.len(),
             }),
             Self::Search(a) => serde_json::json!({
                 "path": a.path,
@@ -181,6 +299,8 @@ pub struct ToolBudgets {
     pub max_depth: u32,
     pub max_line_bytes: u32,
     pub deadline_ms: u64,
+    /// Maximum bytes of content a write/edit may publish.
+    pub max_write_bytes: u64,
 }
 
 impl Default for ToolBudgets {
@@ -197,6 +317,7 @@ impl Default for ToolBudgets {
             max_depth: 16,
             max_line_bytes: 4096,
             deadline_ms: 10_000,
+            max_write_bytes: 256 * 1024,
         }
     }
 }
@@ -216,6 +337,7 @@ impl ToolBudgets {
             max_depth: 32,
             max_line_bytes: 16 * 1024,
             deadline_ms: 60_000,
+            max_write_bytes: 4 * 1024 * 1024,
         }
     }
 
@@ -236,6 +358,7 @@ impl ToolBudgets {
             max_line_bytes: at_least_one(self.max_line_bytes as u64).min(c.max_line_bytes as u64)
                 as u32,
             deadline_ms: at_least_one(self.deadline_ms).min(c.deadline_ms),
+            max_write_bytes: at_least_one(self.max_write_bytes).min(c.max_write_bytes),
         }
     }
 
@@ -273,6 +396,8 @@ pub struct ToolDescriptor {
     pub version: u32,
     pub summary: &'static str,
     pub read_only: bool,
+    /// True when execution needs an independently approved write scope.
+    pub requires_write_scope: bool,
     pub arguments: Vec<ArgDescriptor>,
     pub defaults: ToolBudgets,
     pub ceilings: ToolBudgets,
@@ -325,12 +450,66 @@ pub fn descriptor_for(id: ToolId) -> ToolDescriptor {
                 arg("maxMatches", "u32", false, "cap on returned matches"),
             ],
         ),
+        ToolId::FsWrite => (
+            "Create or replace a UTF-8 text file atomically, with explicit pre-image checks.",
+            vec![
+                arg(
+                    "path",
+                    "string",
+                    true,
+                    "file path; parent directory must exist",
+                ),
+                arg(
+                    "content",
+                    "string",
+                    true,
+                    "new content, bounded by maxWriteBytes",
+                ),
+                arg(
+                    "mode",
+                    "string",
+                    true,
+                    "'create' (must not exist) or 'replace'",
+                ),
+                arg(
+                    "expectedSha256",
+                    "string",
+                    false,
+                    "required for replace: sha256 of current bytes",
+                ),
+                arg(
+                    "fileMode",
+                    "string",
+                    false,
+                    "create only: octal permission bits",
+                ),
+            ],
+        ),
+        ToolId::FsEdit => (
+            "Apply ordered exact-text edits to an existing file, guarded by its sha256.",
+            vec![
+                arg("path", "string", true, "file path"),
+                arg(
+                    "expectedSha256",
+                    "string",
+                    true,
+                    "sha256 of the current file bytes",
+                ),
+                arg(
+                    "edits",
+                    "array",
+                    true,
+                    "1..=16 {oldText,newText}; each oldText must match exactly once",
+                ),
+            ],
+        ),
     };
     ToolDescriptor {
         id: id.as_str(),
         version: TOOL_VERSION,
         summary,
-        read_only: true,
+        read_only: !id.is_mutating(),
+        requires_write_scope: id.is_mutating(),
         arguments,
         defaults: ToolBudgets::default(),
         ceilings: ToolBudgets::ceiling(),
@@ -339,8 +518,14 @@ pub fn descriptor_for(id: ToolId) -> ToolDescriptor {
 }
 
 pub fn descriptors() -> Vec<ToolDescriptor> {
-    [ToolId::FsList, ToolId::FsRead, ToolId::FsSearch]
-        .into_iter()
-        .map(descriptor_for)
-        .collect()
+    [
+        ToolId::FsList,
+        ToolId::FsRead,
+        ToolId::FsSearch,
+        ToolId::FsWrite,
+        ToolId::FsEdit,
+    ]
+    .into_iter()
+    .map(descriptor_for)
+    .collect()
 }

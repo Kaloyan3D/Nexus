@@ -88,5 +88,6 @@ CREATE TABLE IF NOT EXISTS tool_journal (
 );
 CREATE INDEX IF NOT EXISTS idx_tool_journal_task ON tool_journal (task_instance_id, attempt_id, seq);
 CREATE TABLE IF NOT EXISTS workspace_bindings (command_id TEXT PRIMARY KEY, binding_json TEXT NOT NULL, seal_hex TEXT NOT NULL, created_at_utc TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS write_scope_bindings (command_id TEXT PRIMARY KEY, binding_json TEXT NOT NULL, seal_hex TEXT NOT NULL, created_at_utc TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tool_revocations (command_id TEXT PRIMARY KEY, reason TEXT NOT NULL, revoked_at_utc TEXT NOT NULL);
 ";

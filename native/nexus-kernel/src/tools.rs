@@ -36,6 +36,36 @@ pub const PHASE_EXPIRED: &str = "expired";
 /// completion is invented.
 pub const PHASE_INTERRUPTED: &str = "interrupted";
 
+/// Write lifecycle phases (A3.3). Durability points are documented in
+/// `native/A3.3-EVIDENCE.md`.
+pub const PHASE_PLANNED: &str = "planned";
+pub const PHASE_PREPARED: &str = "prepared";
+pub const PHASE_APPLIED: &str = "applied";
+pub const PHASE_VERIFIED: &str = "verified";
+pub const PHASE_FAILED: &str = "failed";
+pub const PHASE_CONFLICT: &str = "conflict";
+
+const WRITE_TERMINALS: [&str; 6] = [
+    PHASE_VERIFIED,
+    PHASE_FAILED,
+    PHASE_CONFLICT,
+    PHASE_INTERRUPTED,
+    PHASE_COMPLETED,
+    PHASE_EXPIRED,
+];
+
+/// Tool identifiers the Kernel will ever seal, with their grant scope.
+/// A `read` grant can never authorize mutation: the scope is sealed into
+/// the grant and re-derived from the tool id at every verification.
+pub fn tool_scope(tool_id: &str) -> Option<&'static str> {
+    match tool_id {
+        "fs.list" | "fs.read" | "fs.search" => Some("read"),
+        "fs.write" | "fs.edit" => Some("write"),
+        _ => None,
+    }
+}
+
+pub const WRITE_SCOPE_DOMAIN: &str = "nexus-write-scope/v1";
 pub const WORKSPACE_BINDING_DOMAIN: &str = "nexus-workspace-binding/v1";
 
 /// What the trusted issuer asks the Kernel to authorize.
@@ -67,6 +97,8 @@ pub struct SealedToolGrant {
     pub lease_epoch: u64,
     pub store_incarnation: String,
     pub tool_id: String,
+    /// `read` or `write`; derived from the tool id and sealed.
+    pub scope: String,
     pub tool_version: u32,
     pub args_digest: String,
     pub workspace_root_digest: String,
@@ -92,6 +124,52 @@ pub struct WorkspaceBinding {
     pub root_digest: String,
     pub root_dev: u64,
     pub root_ino: u64,
+}
+
+/// Independent write authority for one accepted command (A3.3). Created
+/// only through the approver-authenticated daemon channel; the issuer
+/// capability alone cannot create it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WriteScopeBinding {
+    pub command_id: String,
+    pub task_instance_id: String,
+    pub attempt_id: String,
+    pub lease_epoch: u64,
+    pub store_incarnation: String,
+    pub root_digest: String,
+    pub max_write_bytes: u64,
+    pub approver_id: String,
+    /// True only when the daemon verified the approver credential is held
+    /// by identities disjoint from the issuer's. Never self-asserted.
+    pub independent: bool,
+}
+
+fn write_scope_canonical(b: &WriteScopeBinding) -> String {
+    canonical_json(&serde_json::json!({
+        "domain": WRITE_SCOPE_DOMAIN,
+        "commandId": b.command_id,
+        "taskInstanceId": b.task_instance_id,
+        "attemptId": b.attempt_id,
+        "leaseEpoch": b.lease_epoch,
+        "storeIncarnation": b.store_incarnation,
+        "rootDigest": b.root_digest,
+        "maxWriteBytes": b.max_write_bytes,
+        "approverId": b.approver_id,
+        "independent": b.independent,
+    }))
+}
+
+/// One open (non-terminal) write request, as seen by reconciliation.
+#[derive(Debug, Clone)]
+pub struct OpenWrite {
+    pub request_id: String,
+    pub execution_id: String,
+    pub task_instance_id: String,
+    pub attempt_id: String,
+    pub command_id: String,
+    pub planned: serde_json::Value,
+    pub prepared: Option<serde_json::Value>,
+    pub applied: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -161,6 +239,7 @@ fn grant_canonical(g: &SealedToolGrant) -> String {
         "leaseEpoch": g.lease_epoch,
         "storeIncarnation": g.store_incarnation,
         "toolId": g.tool_id,
+        "scope": g.scope,
         "toolVersion": g.tool_version,
         "argsDigest": g.args_digest,
         "workspaceRootDigest": g.workspace_root_digest,
@@ -289,6 +368,8 @@ impl Kernel {
                     ));
                 }
             }
+            let scope = tool_scope(&req.tool_id)
+                .ok_or_else(|| refuse(KernelErrorCode::ScopeRefused, "unknown tool id; refused"))?;
             Self::require_tool_authority(
                 &self.store,
                 self.witness.as_ref(),
@@ -300,6 +381,11 @@ impl Kernel {
             )?;
             let key_for_binding = self.store.issuance_key_hex()?;
             Self::check_binding(&self.store, &key_for_binding, req)?;
+            let write_scope = if scope == "write" {
+                Some(Self::check_write_scope(&self.store, &key_for_binding, req)?)
+            } else {
+                None
+            };
             Self::ensure_journal_consistent(&mut self.store, self.witness.as_ref())?;
             if self
                 .store
@@ -321,6 +407,7 @@ impl Kernel {
                 lease_epoch: req.lease_epoch,
                 store_incarnation: req.store_incarnation.clone(),
                 tool_id: req.tool_id.clone(),
+                scope: scope.to_owned(),
                 tool_version: req.tool_version,
                 args_digest: req.args_digest.clone(),
                 workspace_root_digest: req.workspace_root_digest.clone(),
@@ -343,6 +430,8 @@ impl Kernel {
                 phase: PHASE_AUTHORIZED.to_owned(),
                 payload: serde_json::json!({
                     "toolId": g.tool_id,
+                    "scope": g.scope,
+                    "approverIndependent": write_scope.as_ref().map(|b| b.independent),
                     "toolVersion": g.tool_version,
                     "workspaceRootDigest": g.workspace_root_digest,
                     "budgetDigest": g.budget_digest,
@@ -381,6 +470,31 @@ impl Kernel {
                     KernelErrorCode::ReservationExpired,
                     "tool grant expired or not yet valid",
                 ));
+            }
+            if tool_scope(&grant.tool_id) != Some(grant.scope.as_str()) {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "grant scope does not match its tool id; refused",
+                ));
+            }
+            if grant.scope == "write" {
+                let key = self.store.issuance_key_hex()?;
+                let b = Self::verified_write_scope(&self.store, &key, &grant.command_id)?
+                    .ok_or_else(|| {
+                        refuse(
+                            KernelErrorCode::ScopeRefused,
+                            "no independent write scope for this command; mutation refused",
+                        )
+                    })?;
+                if b.lease_epoch != grant.lease_epoch
+                    || b.store_incarnation != grant.store_incarnation
+                    || b.root_digest != grant.workspace_root_digest
+                {
+                    return Err(refuse(
+                        KernelErrorCode::BindingMismatch,
+                        "write scope does not match this grant",
+                    ));
+                }
             }
             if grant.args_digest != expected_args_digest {
                 return Err(refuse(
@@ -802,6 +916,7 @@ impl Kernel {
             let unstarted = self
                 .store
                 .tool_requests_in_state(PHASE_AUTHORIZED, &[PHASE_STARTED, PHASE_EXPIRED])?;
+            let unstarted: Vec<_> = unstarted;
             for (rid, eid, task, attempt, cmd, at) in unstarted {
                 let at_s: u64 = at
                     .split('.')
@@ -823,9 +938,17 @@ impl Kernel {
                 }
             }
             if include_started {
-                let open = self
-                    .store
-                    .tool_requests_in_state(PHASE_STARTED, &[PHASE_COMPLETED, PHASE_INTERRUPTED])?;
+                let open = self.store.tool_requests_in_state(
+                    PHASE_STARTED,
+                    &[
+                        PHASE_COMPLETED,
+                        PHASE_INTERRUPTED,
+                        PHASE_PLANNED,
+                        PHASE_VERIFIED,
+                        PHASE_FAILED,
+                        PHASE_CONFLICT,
+                    ],
+                )?;
                 for (rid, eid, task, attempt, cmd, _) in open {
                     self.store.append_tool_entry(&ToolEntryInput {
                         request_id: rid,
@@ -864,6 +987,256 @@ impl Kernel {
         }
         self.store
             .list_tool_entries_page(task, attempt, after_seq.max(0), limit.clamp(1, 500))
+    }
+
+    fn verified_write_scope(
+        store: &nexus_store::Store,
+        key_hex: &str,
+        command_id: &str,
+    ) -> KernelResult<Option<WriteScopeBinding>> {
+        match store.fetch_write_scope(command_id)? {
+            None => Ok(None),
+            Some((json, seal)) => {
+                let b: WriteScopeBinding = serde_json::from_str(&json).map_err(|_| {
+                    KernelError::new(KernelErrorCode::StoreCorrupt, "write scope unreadable")
+                })?;
+                if hmac_seal_hex(key_hex, &write_scope_canonical(&b))? != seal
+                    || canonical_json(&serde_json::to_value(&b).unwrap_or_default()) != json
+                {
+                    return Err(KernelError::new(
+                        KernelErrorCode::ForgedIssuer,
+                        "write scope seal mismatch; store tampered",
+                    ));
+                }
+                Ok(Some(b))
+            }
+        }
+    }
+
+    fn check_write_scope(
+        store: &nexus_store::Store,
+        key_hex: &str,
+        req: &ToolAuthorizationRequest,
+    ) -> KernelResult<WriteScopeBinding> {
+        let b = Self::verified_write_scope(store, key_hex, &req.command_id)?.ok_or_else(|| {
+            refuse(
+                KernelErrorCode::ScopeRefused,
+                "no independent write scope for this command; mutation refused",
+            )
+        })?;
+        if b.task_instance_id != req.task_instance_id
+            || b.attempt_id != req.attempt_id
+            || b.lease_epoch != req.lease_epoch
+            || b.store_incarnation != req.store_incarnation
+            || b.root_digest != req.workspace_root_digest
+        {
+            return Err(refuse(
+                KernelErrorCode::BindingMismatch,
+                "write scope does not belong to this task/attempt/generation/workspace",
+            ));
+        }
+        Ok(b)
+    }
+
+    /// Verified read of a command's write scope (seal checked).
+    pub fn write_scope_binding(
+        &mut self,
+        command_id: &str,
+    ) -> KernelResult<Option<WriteScopeBinding>> {
+        let key = self.store.issuance_key_hex()?;
+        Self::verified_write_scope(&self.store, &key, command_id)
+    }
+
+    /// Publish the independent write scope. The caller (the daemon) must
+    /// already have verified an approver credential that is distinct from
+    /// the issuer capability; `independent` records whether the daemon
+    /// could additionally prove the two credentials are held by disjoint
+    /// OS identities. Requires: accepted command in its current lease, an
+    /// existing read workspace binding for the same root, and an approver
+    /// that explicitly named that root digest.
+    pub fn bind_write_scope(
+        &mut self,
+        command_id: &str,
+        approver_id: &str,
+        independent: bool,
+        approved_root_digest: &str,
+        max_write_bytes: u64,
+    ) -> KernelResult<WriteScopeBinding> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            let receipt = self.store.read_receipt(command_id)?.ok_or_else(|| {
+                refuse(
+                    KernelErrorCode::DeliveryInvalid,
+                    "no accepted receipt for this command; write scope refused",
+                )
+            })?;
+            Self::require_tool_authority(
+                &self.store,
+                self.witness.as_ref(),
+                command_id,
+                &receipt.task_instance_id,
+                &receipt.attempt_id,
+                receipt.lease_epoch,
+                &receipt.store_incarnation,
+            )?;
+            let key_hex = self.store.issuance_key_hex()?;
+            let read_binding = Self::verified_binding(&self.store, &key_hex, command_id)?
+                .ok_or_else(|| {
+                    refuse(
+                        KernelErrorCode::DeliveryInvalid,
+                        "no workspace binding; bind the read workspace first",
+                    )
+                })?;
+            if read_binding.root_digest != approved_root_digest {
+                return Err(refuse(
+                    KernelErrorCode::BindingMismatch,
+                    "the approver authorized a different workspace than the bound one",
+                ));
+            }
+            if max_write_bytes == 0 {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "maxWriteBytes must be positive",
+                ));
+            }
+            let b = WriteScopeBinding {
+                command_id: command_id.to_owned(),
+                task_instance_id: receipt.task_instance_id.clone(),
+                attempt_id: receipt.attempt_id.clone(),
+                lease_epoch: receipt.lease_epoch,
+                store_incarnation: receipt.store_incarnation.clone(),
+                root_digest: read_binding.root_digest.clone(),
+                max_write_bytes,
+                approver_id: approver_id.chars().take(64).collect(),
+                independent,
+            };
+            let seal = hmac_seal_hex(&key_hex, &write_scope_canonical(&b))?;
+            let json = canonical_json(&serde_json::to_value(&b).map_err(|_| {
+                KernelError::new(KernelErrorCode::StoreError, "scope not serializable")
+            })?);
+            self.store.insert_write_scope(command_id, &json, &seal)?;
+            Ok(b)
+        })
+    }
+
+    /// Append one write-lifecycle phase for a verified write grant,
+    /// enforcing the state machine, then checkpoint. Each phase is
+    /// journaled exactly once; the record is durable (SQLite
+    /// `synchronous=FULL`) before this returns.
+    pub fn record_write_phase(
+        &mut self,
+        verified: &VerifiedToolGrant,
+        phase: &str,
+        payload: serde_json::Value,
+    ) -> KernelResult<ToolJournalEntry> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            let g = &verified.grant;
+            if g.scope != "write" {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "read grants cannot record write phases",
+                ));
+            }
+            let has = |st: &nexus_store::Store, p: &str| st.tool_phase_recorded(&g.request_id, p);
+            for t in WRITE_TERMINALS {
+                if has(&self.store, t)? {
+                    return Err(refuse(
+                        KernelErrorCode::CommandConflict,
+                        "write request is already terminal",
+                    ));
+                }
+            }
+            let ok = match phase {
+                PHASE_PLANNED => has(&self.store, PHASE_STARTED)?,
+                PHASE_PREPARED => has(&self.store, PHASE_PLANNED)?,
+                PHASE_APPLIED => has(&self.store, PHASE_PREPARED)?,
+                PHASE_VERIFIED => has(&self.store, PHASE_APPLIED)?,
+                PHASE_FAILED | PHASE_CONFLICT => has(&self.store, PHASE_STARTED)?,
+                _ => false,
+            };
+            if !ok {
+                return Err(refuse(
+                    KernelErrorCode::CommandConflict,
+                    "write phase is not valid in the request's current state",
+                ));
+            }
+            Self::ensure_journal_consistent(&mut self.store, self.witness.as_ref())?;
+            let entry = self.store.append_tool_entry(&ToolEntryInput {
+                request_id: g.request_id.clone(),
+                execution_id: g.execution_id.clone(),
+                task_instance_id: g.task_instance_id.clone(),
+                attempt_id: g.attempt_id.clone(),
+                command_id: g.command_id.clone(),
+                phase: phase.to_owned(),
+                payload,
+            })?;
+            Self::checkpoint_tool_journal(&mut self.store, self.witness.as_mut())?;
+            Ok(entry)
+        })
+    }
+
+    /// Reconcile write requests that have `planned` but no terminal
+    /// record. `inspect` (supplied by the filesystem layer) observes the
+    /// target and returns the `interrupted` payload. Never replays a write
+    /// and never invents `applied`/`verified`.
+    pub fn reconcile_open_writes(
+        &mut self,
+        inspect: &mut dyn FnMut(&OpenWrite) -> serde_json::Value,
+    ) -> KernelResult<u64> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            Self::ensure_journal_consistent(&mut self.store, self.witness.as_ref())?;
+            let mut n = 0;
+            for ow in Self::collect_open_writes(&self.store)? {
+                let payload = inspect(&ow);
+                self.store.append_tool_entry(&ToolEntryInput {
+                    request_id: ow.request_id,
+                    execution_id: ow.execution_id,
+                    task_instance_id: ow.task_instance_id,
+                    attempt_id: ow.attempt_id,
+                    command_id: ow.command_id,
+                    phase: PHASE_INTERRUPTED.to_owned(),
+                    payload,
+                })?;
+                Self::checkpoint_tool_journal(&mut self.store, self.witness.as_mut())?;
+                n += 1;
+            }
+            Ok(n)
+        })
+    }
+
+    fn collect_open_writes(store: &nexus_store::Store) -> KernelResult<Vec<OpenWrite>> {
+        let open = store.tool_requests_in_state(
+            PHASE_PLANNED,
+            &[
+                PHASE_VERIFIED,
+                PHASE_FAILED,
+                PHASE_CONFLICT,
+                PHASE_INTERRUPTED,
+                PHASE_COMPLETED,
+            ],
+        )?;
+        let mut out = Vec::new();
+        for (rid, eid, task, attempt, cmd, _) in open {
+            let entries = store.tool_entries_for_request(&rid)?;
+            let find = |p: &str| entries.iter().find(|e| e.phase == p);
+            out.push(OpenWrite {
+                request_id: rid.clone(),
+                execution_id: eid,
+                task_instance_id: task,
+                attempt_id: attempt,
+                command_id: cmd,
+                planned: find(PHASE_PLANNED)
+                    .map(|e| e.payload.clone())
+                    .unwrap_or_default(),
+                prepared: find(PHASE_PREPARED).map(|e| e.payload.clone()),
+                applied: find(PHASE_APPLIED).is_some(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Read-only view of write requests awaiting reconciliation.
+    pub fn open_writes(&self) -> KernelResult<Vec<OpenWrite>> {
+        Self::collect_open_writes(&self.store)
     }
 
     /// Record the journal tail in the independent witness store (a separate

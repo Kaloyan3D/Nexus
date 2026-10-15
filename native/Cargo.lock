@@ -359,6 +359,7 @@ dependencies = [
 name = "nexus-tools"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "libc",
  "nexus-contracts",
  "nexus-kernel",
@@ -366,6 +367,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 

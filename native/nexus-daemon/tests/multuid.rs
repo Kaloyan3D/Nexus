@@ -29,6 +29,9 @@ const ISSUER_USER: &str = "nexus-issuer-test";
 const ISSUER_GROUP: &str = "nexus-issuer-test";
 const BYSTANDER_USER: &str = "nexus-bystander-test";
 const UNTRUSTED_USER: &str = "nexus-untrusted-test";
+/// A3.3: independent write approver (own group, NOT in the issuer group).
+const APPROVER_USER: &str = "nexus-approver-test";
+const APPROVER_GROUP: &str = "nexus-approver-test";
 
 struct Host {
     nexusd_uid: u32,
@@ -690,4 +693,265 @@ fn multuid_no_shadow_operation_dispatches() {
         !nexus_kernel::Kernel::dispatch_enabled(),
         "dispatch stays disabled"
     );
+}
+
+// ---- A3.2 / A3.3 privileged tool commands ------------------------------
+//
+// These tests extend the suite to `workspace-bind`, `tool-execute`,
+// `tool-revoke`, `tool-events` and the approver channel
+// `write-scope-approve`. They require the extra approver identity
+// (`nexus-approver-test`, own group) described in MULTUID-PROCEDURE.md.
+// NOT RUN anywhere without that host; they never report PASS otherwise.
+
+struct ToolHost {
+    h: Host,
+    approver_uid: u32,
+    approver_gid: u32,
+}
+
+fn require_tool_host(test: &str) -> Option<ToolHost> {
+    let h = require_multuid_host(test)?;
+    let Some(approver_uid) = uid_of(APPROVER_USER) else {
+        println!("NOT RUN ({test}): user {APPROVER_USER} is missing");
+        return None;
+    };
+    let Some(approver_gid) = gid_of(APPROVER_GROUP) else {
+        println!("NOT RUN ({test}): group {APPROVER_GROUP} is missing");
+        return None;
+    };
+    Some(ToolHost {
+        h,
+        approver_uid,
+        approver_gid,
+    })
+}
+
+/// nexusd as the daemon user with writes enabled. The approver credential
+/// is handed to the approver GROUP only (0640), and approver UIDs are
+/// disjoint from the issuer UIDs, so `--require-independent-approver`
+/// holds.
+fn spawn_tools_as(t: &ToolHost) -> (TestDaemon, PathBuf, PathBuf) {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    let mut d = spawn_as(&t.h, "shadow-test");
+    // Workspace base + approver credential directory owned by the daemon.
+    let base = d.dir.join("work");
+    let adir = d.dir.join("approver");
+    for p in [&base, &adir] {
+        std::fs::create_dir_all(p).expect("mkdir");
+    }
+    let own = |p: &Path, mode: u32, uid: u32, gid: u32| {
+        let c = std::ffi::CString::new(p.as_os_str().as_bytes()).expect("cstr");
+        assert_eq!(unsafe { libc::chown(c.as_ptr(), uid, gid) }, 0);
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).expect("chmod");
+    };
+    own(&base, 0o770, t.h.nexusd_uid, t.h.issuer_gid);
+    own(&adir, 0o750, t.h.nexusd_uid, t.approver_gid);
+    let acap = adir.join("approver.cap");
+    d.argv.extend([
+        "--workspace-bases".to_owned(),
+        base.to_string_lossy().into_owned(),
+        "--enable-writes".to_owned(),
+        "--approver-cap".to_owned(),
+        acap.to_string_lossy().into_owned(),
+        "--approver-uids".to_owned(),
+        t.approver_uid.to_string(),
+        "--approver-cap-gid".to_owned(),
+        t.approver_gid.to_string(),
+        "--require-independent-approver".to_owned(),
+    ]);
+    d.restart();
+    (d, base, acap)
+}
+
+fn root_read(path: &Path) -> String {
+    std::fs::read_to_string(path)
+        .expect("readable by root")
+        .trim()
+        .to_owned()
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_tool_commands_require_issuer_and_writes_require_the_approver() {
+    let Some(t) = require_tool_host("tool-commands") else {
+        return;
+    };
+    let (d, base, acap) = spawn_tools_as(&t);
+    let issuer_cap = d.read_handoff();
+    let approver_cap = root_read(&acap);
+    let ws = base.join("ws");
+    std::fs::create_dir_all(&ws).expect("ws");
+    let c = std::ffi::CString::new(ws.to_string_lossy().as_bytes()).unwrap();
+    unsafe { libc::chown(c.as_ptr(), t.h.nexusd_uid, t.h.issuer_gid) };
+    let digest = {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(ws.to_string_lossy().as_bytes()))
+    };
+    // Accept a command whose intent commits to this workspace (issuer).
+    let snapshot = common::snapshot();
+    let acquired = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(
+            &issuer_cap,
+            "acquire",
+            serde_json::json!({"taskInstanceId": "mu-w", "backend": "native"}),
+        ),
+    )
+    .expect("acquire");
+    let lease = acquired.get("lease").expect("lease").clone();
+    let resolution = common::resolution_for("mu-w", &snapshot);
+    let _ = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(
+            &issuer_cap,
+            "seal",
+            serde_json::json!({"resolution": resolution}),
+        ),
+    );
+    let intent = nexus_contracts::ControllerIntentV1::build(
+        "mu-w",
+        "mu-a",
+        "mu-c",
+        "native",
+        1,
+        "muse_main",
+        "engineering-v2",
+        common::rev3(),
+        serde_json::json!({"op": "engineer-turn", "workspaceRootDigest": digest}),
+    );
+    let accepted = send_as(ISSUER_USER, &d.socket, &signed_frame(&issuer_cap, "accept", serde_json::json!({
+        "intent": serde_json::to_value(&intent).unwrap(), "resolution": resolution, "snapshot": snapshot,
+        "lease": {"epoch": lease.get("leaseEpoch"), "storeIncarnation": lease.get("storeIncarnation")}})))
+        .expect("accept");
+    assert_eq!(
+        accepted.get("ok"),
+        Some(&serde_json::Value::Bool(true)),
+        "{accepted}"
+    );
+    let rc = accepted["receipt"].clone();
+    let bind = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(
+            &issuer_cap,
+            "workspace-bind",
+            serde_json::json!({"commandId": "mu-c", "root": ws.to_string_lossy()}),
+        ),
+    )
+    .expect("bind");
+    assert_eq!(
+        bind.get("ok"),
+        Some(&serde_json::Value::Bool(true)),
+        "{bind}"
+    );
+    let exec = |cap: &str, user: &str, rid: &str| {
+        send_as(
+            user,
+            &d.socket,
+            &signed_frame(
+                cap,
+                "tool-execute",
+                serde_json::json!({
+            "requestId": rid, "cancellationId": format!("c-{rid}"), "taskInstanceId": "mu-w",
+            "attemptId": "mu-a", "commandId": "mu-c", "leaseEpoch": rc["leaseEpoch"],
+            "storeIncarnation": rc["storeIncarnation"], "toolId": "fs.write", "toolVersion": 1,
+            "args": {"path": "f.txt", "content": "hi\n", "mode": "create"}}),
+            ),
+        )
+    };
+    // Issuer alone: no approved scope -> refused.
+    assert_eq!(
+        code_of(&exec(&issuer_cap, ISSUER_USER, "r1").expect("t")),
+        "scope-refused"
+    );
+    // The issuer key cannot approve.
+    let r = send_as(ISSUER_USER, &d.socket, &signed_frame(&issuer_cap, "write-scope-approve",
+        serde_json::json!({"commandId": "mu-c", "workspaceRootDigest": digest, "maxWriteBytes": 1000}))).expect("t");
+    assert_eq!(code_of(&r), "issuer-untrusted");
+    // The approver identity with the approver key can; and is reported independent.
+    let r = send_as(APPROVER_USER, &d.socket, &signed_frame(&approver_cap, "write-scope-approve",
+        serde_json::json!({"commandId": "mu-c", "workspaceRootDigest": digest, "maxWriteBytes": 1000}))).expect("t");
+    assert_eq!(r["writeScope"]["independent"], true, "{r}");
+    assert_eq!(
+        exec(&issuer_cap, ISSUER_USER, "r2").expect("t").get("ok"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    assert_eq!(std::fs::read_to_string(ws.join("f.txt")).unwrap(), "hi\n");
+    // The approver identity cannot execute tools or bind workspaces.
+    let r = exec(&approver_cap, APPROVER_USER, "r3");
+    assert!(r.is_err() || r.as_ref().unwrap().get("ok") == Some(&serde_json::Value::Bool(false)));
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_untrusted_and_bystander_cannot_use_tool_commands_or_read_events() {
+    let Some(t) = require_tool_host("tool-denials") else {
+        return;
+    };
+    let (d, _base, acap) = spawn_tools_as(&t);
+    let stolen_issuer = d.read_handoff();
+    for (cmd, params) in [
+        (
+            "workspace-bind",
+            serde_json::json!({"commandId": "x", "root": "/tmp"}),
+        ),
+        ("tool-execute", serde_json::json!({"requestId": "x"})),
+        ("tool-revoke", serde_json::json!({"commandId": "x"})),
+    ] {
+        // Untrusted: OS-level denial at connect.
+        let e = send_as(
+            UNTRUSTED_USER,
+            &d.socket,
+            &signed_frame(&stolen_issuer, cmd, params.clone()),
+        )
+        .expect_err("untrusted must not connect");
+        assert!(e.contains("Permission denied"), "{e}");
+        // Bystander (in issuer group, NOT allow-listed): peer-unauthorized.
+        let r = send_as(
+            BYSTANDER_USER,
+            &d.socket,
+            &signed_frame(&stolen_issuer, cmd, params),
+        )
+        .expect("t");
+        assert_eq!(code_of(&r), "peer-unauthorized", "{cmd}");
+    }
+    // Read-only tool-events is peer-gated for the bystander as well.
+    let frame = serde_json::json!({"protocol":1,"id":"ev","cmd":"tool-events",
+        "params":{"taskInstanceId":"t","attemptId":"a"}})
+    .to_string();
+    let r = send_as(BYSTANDER_USER, &d.socket, &frame).expect("t");
+    assert_eq!(code_of(&r), "peer-unauthorized");
+    // The approver credential file is not readable by issuer-side identities.
+    for user in [ISSUER_USER, BYSTANDER_USER, UNTRUSTED_USER] {
+        let out = run_as(user, "cat", &[&acap.to_string_lossy()]).expect("run");
+        assert!(
+            !out.status.success(),
+            "{user} must not read the approver credential"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_approver_with_stolen_approver_cap_from_wrong_uid_is_refused() {
+    let Some(t) = require_tool_host("approver-wrong-uid") else {
+        return;
+    };
+    let (d, _base, acap) = spawn_tools_as(&t);
+    let approver_cap = root_read(&acap);
+    // The issuer UID somehow holds the approver key (stolen): peer gate.
+    let r = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(
+            &approver_cap,
+            "write-scope-approve",
+            serde_json::json!({"commandId": "x", "workspaceRootDigest": "d", "maxWriteBytes": 1}),
+        ),
+    )
+    .expect("t");
+    assert_eq!(code_of(&r), "peer-unauthorized");
 }

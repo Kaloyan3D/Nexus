@@ -15,6 +15,10 @@ use nexus_contracts::{
 use nexus_kernel::{AcceptRequest, Kernel};
 
 pub const OFFLINE_ENV_GATE: &str = "NEXUS_TOOLS_OFFLINE_TEST";
+/// Second, separate gate for mutating tools.
+pub const OFFLINE_WRITE_ENV_GATE: &str = "NEXUS_TOOLS_OFFLINE_WRITE_TEST";
+/// A workspace must contain this marker to be mutated offline.
+pub const OFFLINE_WRITE_MARKER: &str = ".nexus-offline-write-test";
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,13 +53,54 @@ pub fn run_offline(
     args: serde_json::Value,
     budgets: ToolBudgets,
 ) -> Result<OfflineReport, String> {
+    run_offline_opts(workspace, tool_id, args, budgets, false)
+}
+
+/// Offline harness with an explicit mutation switch. Mutating tools need
+/// ALL of: `allow_write`, `NEXUS_TOOLS_OFFLINE_WRITE_TEST=1`, a workspace
+/// beneath the system temp directory, and the marker file in the
+/// workspace root. The throwaway Kernel plays both issuer and approver, so
+/// the report states the write scope is NOT independent.
+pub fn run_offline_opts(
+    workspace: &str,
+    tool_id: &str,
+    args: serde_json::Value,
+    budgets: ToolBudgets,
+    allow_write: bool,
+) -> Result<OfflineReport, String> {
+    let mutating = crate::ToolId::parse(tool_id)
+        .map(|t| t.is_mutating())
+        .unwrap_or(false);
+    if mutating {
+        if !allow_write {
+            return Err("mutating tools need the explicit --allow-write-test flag".to_owned());
+        }
+        if std::env::var(OFFLINE_WRITE_ENV_GATE).as_deref() != Ok("1") {
+            return Err(format!(
+                "offline write execution is gated: set {OFFLINE_WRITE_ENV_GATE}=1 (isolated temp workspaces only)"
+            ));
+        }
+        let canon = std::fs::canonicalize(workspace).map_err(|e| e.to_string())?;
+        let tmp = std::fs::canonicalize(std::env::temp_dir()).map_err(|e| e.to_string())?;
+        if !canon.starts_with(&tmp) || canon == tmp {
+            return Err(
+                "offline writes are limited to a workspace beneath the system temp directory"
+                    .to_owned(),
+            );
+        }
+        if !canon.join(OFFLINE_WRITE_MARKER).is_file() {
+            return Err(format!(
+                "offline writes require the marker file {OFFLINE_WRITE_MARKER} in the workspace root"
+            ));
+        }
+    }
     if std::env::var(OFFLINE_ENV_GATE).as_deref() != Ok("1") {
         return Err(format!(
             "offline tool execution is gated: set {OFFLINE_ENV_GATE}=1 (test use only; not Controller-authorized)"
         ));
     }
     let dir = scratch_dir()?;
-    let result = run_in(&dir, workspace, tool_id, args, budgets);
+    let result = run_in(&dir, workspace, tool_id, args, budgets, mutating);
     let _ = std::fs::remove_dir_all(&dir);
     result
 }
@@ -66,6 +111,7 @@ fn run_in(
     tool_id: &str,
     args: serde_json::Value,
     budgets: ToolBudgets,
+    mutating: bool,
 ) -> Result<OfflineReport, String> {
     let kerr = |e: nexus_contracts::KernelError| e.to_string();
     let mut kernel = Kernel::open(&dir.join("k.db"), Some(&dir.join("w.db"))).map_err(kerr)?;
@@ -135,9 +181,24 @@ fn run_in(
     let binding = kernel
         .bind_workspace(command, workspace, &[std::path::PathBuf::from(workspace)])
         .map_err(kerr)?;
-    let prepared = prepare(req, &binding).map_err(|e| e.to_string())?;
-    let call = authorize(&mut kernel, prepared).map_err(|e| e.to_string())?;
-    let outcome = execute(&mut kernel, &call, &cancel).map_err(|e| e.to_string())?;
+    let outcome = if mutating {
+        let scope = kernel
+            .bind_write_scope(
+                command,
+                "offline-test-self",
+                false,
+                &binding.root_digest,
+                1 << 20,
+            )
+            .map_err(kerr)?;
+        let prepared = crate::prepare_write(req, &binding, &scope).map_err(|e| e.to_string())?;
+        let call = authorize(&mut kernel, prepared).map_err(|e| e.to_string())?;
+        crate::execute_write(&mut kernel, &call, &cancel).map_err(|e| e.to_string())?
+    } else {
+        let prepared = prepare(req, &binding).map_err(|e| e.to_string())?;
+        let call = authorize(&mut kernel, prepared).map_err(|e| e.to_string())?;
+        execute(&mut kernel, &call, &cancel).map_err(|e| e.to_string())?
+    };
     let phases = kernel
         .list_tool_journal(None)
         .map_err(kerr)?
@@ -146,7 +207,11 @@ fn run_in(
         .collect();
     let verified = kernel.verify_tool_journal().map_err(kerr)?;
     Ok(OfflineReport {
-        authority: "offline-test (ephemeral kernel; NOT Controller-authorized)",
+        authority: if mutating {
+            "offline-test (ephemeral kernel; write scope SELF-approved, NOT independent; NOT Controller-authorized)"
+        } else {
+            "offline-test (ephemeral kernel; NOT Controller-authorized)"
+        },
         controller_authorized: false,
         ai_initiated: false,
         result: outcome.result,

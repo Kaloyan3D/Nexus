@@ -364,10 +364,11 @@ fn cmd_tools(args: &[String], cfg: &ClientConfig) -> ExitCode {
         Some("list") => {
             let d = nexus_tools::descriptors();
             let v = serde_json::json!({
-                "tools": d, "aiInitiatedExecution": "disabled", "writeTools": "none",
+                "tools": d, "aiInitiatedExecution": "disabled",
+                "writeTools": "require an independently approved write scope (never available to this CLI)",
             });
             let mut human =
-                String::from("native tools (read-only; AI-initiated execution disabled):\n");
+                String::from("native tools (AI-initiated execution disabled; write tools need an independently approved scope):\n");
             for t in &d {
                 human.push_str(&format!("  {} v{}  {}\n", t.id, t.version, t.summary));
             }
@@ -509,11 +510,13 @@ fn cmd_tools(args: &[String], cfg: &ClientConfig) -> ExitCode {
         Some("run-offline") => {
             let mut workspace: Option<String> = None;
             let mut offline = false;
+            let mut allow_write = false;
             let mut pos: Vec<String> = Vec::new();
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
                     "--offline-test" => offline = true,
+                    "--allow-write-test" => allow_write = true,
                     "--json" => {}
                     "--workspace" => {
                         i += 1;
@@ -538,11 +541,12 @@ fn cmd_tools(args: &[String], cfg: &ClientConfig) -> ExitCode {
                 Ok(p) => p.to_string_lossy().into_owned(),
                 Err(_) => return usage("workspace does not exist"),
             };
-            match nexus_tools::offline::run_offline(
+            match nexus_tools::offline::run_offline_opts(
                 &abs,
                 tool,
                 parsed,
                 nexus_tools::ToolBudgets::default(),
+                allow_write,
             ) {
                 Ok(rep) => {
                     let v = serde_json::to_value(&rep).unwrap_or(serde_json::Value::Null);

@@ -51,6 +51,9 @@ fn usage() -> i32 {
     println!("         [--trust-mode readonly|shadow-test] [--cap PATH]");
     println!("         [--allowed-uids UID[,UID...]] [--socket-group GID|NAME]");
     println!("         [--workspace-bases DIR[,DIR...]]");
+    println!("         [--enable-writes --approver-cap PATH --approver-uids UID[,UID...]");
+    println!("          [--require-independent-approver] [--approver-cap-gid GID]");
+    println!("          [--allow-nonindependent-approver-test-only]]");
     println!("         [--cap-handoff PATH]");
     println!("Trust modes: readonly (default, privileged mutations disabled) |");
     println!("  shadow-test (explicit opt-in, per-request issuer authentication).");
@@ -84,6 +87,12 @@ fn flag_str(args: &[String], name: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn workspace_bases_nonempty(args: &[String]) -> bool {
+    flag_str(args, "--workspace-bases")
+        .map(|v| v.split(',').any(|p| !p.is_empty()))
+        .unwrap_or(false)
 }
 
 fn log_line_startup(msg: &str) {
@@ -394,6 +403,92 @@ fn run(args: &[String]) -> i32 {
             Err(e) => return fatal("store-error", &format!("capability entropy failed: {e}")),
         },
     };
+    // A3.3: independent write approver. A SECOND random capability, written
+    // to its own owner-only file. The issuer capability can never satisfy
+    // `write-scope-approve`, and the approver capability can never satisfy
+    // issuer commands. Writes stay disabled unless explicitly enabled.
+    let writes_enabled = args.iter().any(|a| a == "--enable-writes");
+    let approver_cap_path = flag(args, "--approver-cap");
+    let approver_uids: Option<Vec<u32>> = match flag_str(args, "--approver-uids") {
+        Some(spec) => match parse_allowed_uids(&spec) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!("{e}");
+                return 2;
+            }
+        },
+        None => None,
+    };
+    let require_independent = args.iter().any(|a| a == "--require-independent-approver");
+    let mut approver_auth: Option<Arc<nexus_daemon::IssuerAuth>> = None;
+    let mut approver_independent = false;
+    if writes_enabled {
+        if trust_mode != TrustMode::ShadowTest {
+            return fatal(
+                "bad-config",
+                "--enable-writes requires --trust-mode shadow-test (failing closed)",
+            );
+        }
+        if allowed_uids.is_none() {
+            return fatal(
+                "bad-config",
+                "--enable-writes requires --allowed-uids so tool events and privileged commands are peer-gated (failing closed)",
+            );
+        }
+        let (Some(cap_path), Some(ap_uids)) = (approver_cap_path.as_ref(), approver_uids.as_ref())
+        else {
+            return fatal(
+                "bad-config",
+                "--enable-writes requires --approver-cap and --approver-uids (failing closed)",
+            );
+        };
+        if !workspace_bases_nonempty(args) {
+            return fatal(
+                "bad-config",
+                "--enable-writes requires --workspace-bases (failing closed)",
+            );
+        }
+        if Some(cap_path) == Some(&layout.cap) || cap_path == &layout.socket {
+            return fatal("bad-config", "approver cap path collides with another file");
+        }
+        let issuer_uids = allowed_uids.clone().unwrap_or_default();
+        approver_independent = ap_uids.iter().all(|u| !issuer_uids.contains(u));
+        if require_independent && !approver_independent {
+            return fatal(
+                "bad-config",
+                "--require-independent-approver: approver UIDs overlap the issuer UIDs (failing closed)",
+            );
+        }
+        // Production restriction: without a verified-disjoint approver the
+        // daemon refuses to enable writes unless the operator explicitly
+        // names this a test-only configuration.
+        let test_only = args
+            .iter()
+            .any(|a| a == "--allow-nonindependent-approver-test-only");
+        if !approver_independent && !test_only {
+            return fatal(
+                "bad-config",
+                "approver UIDs overlap issuer UIDs: write approval is not independent; refusing to enable writes (use --allow-nonindependent-approver-test-only for isolated test setups only)",
+            );
+        }
+        if !approver_independent {
+            log_line_startup(
+                "WARNING: approver UIDs overlap issuer UIDs; write approval is NOT independent (test configuration only)",
+            );
+        }
+        match nexus_daemon::IssuerAuth::generate() {
+            Ok(a) => {
+                if let Err(e) = write_cap_file(cap_path, &a.key_hex()) {
+                    return fatal(
+                        "store-error",
+                        &format!("approver capability store failed: {e}"),
+                    );
+                }
+                approver_auth = Some(Arc::new(a));
+            }
+            Err(e) => return fatal("store-error", &format!("approver entropy failed: {e}")),
+        }
+    }
     // Closure S3: group-readable handoff copy inside the shared socket dir.
     // Same per-incarnation key, rotated every start like the primary cap.
     if let Some(ref handoff) = cap_handoff {
@@ -440,6 +535,18 @@ fn run(args: &[String]) -> i32 {
             );
         }
     }
+    match nexus_tools::reconcile_writes(&mut kernel) {
+        Ok(n) if n > 0 => log_line_startup(&format!(
+            "write journal reconciled: {n} open write(s) closed as interrupted (never replayed)"
+        )),
+        Ok(_) => {}
+        Err(e) => {
+            return fatal(
+                "store-corrupt",
+                &format!("write journal reconciliation failed; failing closed: {e}"),
+            );
+        }
+    }
     let workspace_bases: Vec<std::path::PathBuf> = flag_str(args, "--workspace-bases")
         .map(|v| {
             v.split(',')
@@ -459,6 +566,10 @@ fn run(args: &[String]) -> i32 {
         counters: Default::default(),
         reconcile_latch: Mutex::new(None),
         workspace_bases,
+        writes_enabled,
+        approver_auth,
+        approver_uids,
+        approver_independent,
         tool_inflight: std::sync::atomic::AtomicUsize::new(0),
         witness_configured: layout.witness.is_some(),
         witness_path: layout.witness.clone(),
