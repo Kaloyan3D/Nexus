@@ -113,6 +113,9 @@ pub fn prepare(
         }).collect::<Vec<_>>(),
         "reasoning": { "effort": reasoning },
         "stream": true,
+        // A5.2 budget: the Registry-sealed output limit travels with every
+        // request so the provider itself bounds the billable output.
+        "max_output_tokens": target.output_limit_tokens,
         "session": { "id": session },
         "tools": input.tools.iter().map(|t| {
             serde_json::json!({

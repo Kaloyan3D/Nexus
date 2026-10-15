@@ -103,6 +103,21 @@ pub struct ModelRunOptions {
     /// Protected provider credential file (`0600`, JSON ref -> token).
     pub credentials_path: PathBuf,
     pub limits: TransportLimits,
+    /// `None` in production and in the CLI: the transport is the verifying
+    /// rustls/webpki-roots HTTPS transport with the public-address policy.
+    /// The offline acceptance suite injects a transport that trusts its own
+    /// test CA and a scripted resolver. It cannot disable verification.
+    pub transport: Option<TransportFactory>,
+}
+
+/// Builds the transport for one sealed endpoint binding (test seam).
+#[derive(Clone)]
+pub struct TransportFactory(pub Arc<dyn Fn(TransportBinding) -> HttpSseTransport + Send + Sync>);
+
+impl std::fmt::Debug for TransportFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TransportFactory(..)")
+    }
 }
 
 /// Lifecycle of one model-only run, persisted as transcript status events.
@@ -351,16 +366,21 @@ fn bind(req: &ModelRunRequest) -> Result<Bound, ClientError> {
 fn runtime_for(
     target: &ExecutionTargetV2,
     limits: TransportLimits,
+    factory: Option<&TransportFactory>,
 ) -> OfflineModelRuntime<HttpSseTransport> {
     let binding = TransportBinding::new(&target.endpoint.origin);
-    OfflineModelRuntime::new(HttpSseTransport::new(binding.clone()), binding, limits)
+    let transport = match factory {
+        Some(f) => (f.0)(binding.clone()),
+        None => HttpSseTransport::new(binding.clone()),
+    };
+    OfflineModelRuntime::new(transport, binding, limits)
 }
 
 /// Pure preparation: validate the target, enforce the expected model, build
 /// the exact request bytes and report their digest. Sends nothing.
 pub fn prepare_model_run(req: &ModelRunRequest) -> Result<PreparedModelRun, ClientError> {
     let b = bind(req)?;
-    let runtime = runtime_for(&b.target, TransportLimits::default());
+    let runtime = runtime_for(&b.target, TransportLimits::default(), None);
     let prepared = runtime
         .prepare(
             &b.pin,
@@ -587,7 +607,7 @@ pub fn run_model_only(
 ) -> Result<ModelRunOutcome, ClientError> {
     let started = Instant::now();
     let bound = bind(req)?;
-    let runtime = runtime_for(&bound.target, opts.limits);
+    let runtime = runtime_for(&bound.target, opts.limits, opts.transport.as_ref());
     let prepared = runtime
         .prepare(
             &bound.pin,

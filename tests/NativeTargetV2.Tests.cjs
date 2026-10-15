@@ -180,6 +180,17 @@ check('baseUrl path prefix is preserved in the endpoint path', function () {
   assert.equal(r.target.extension.endpoint.path, '/prefix/v1/responses');
 });
 
+check('a versioned baseUrl (.../v1) does not double the version segment', function () {
+  // Regression (A5.2): https://api.example/v1 + /v1/responses produced
+  // /v1/v1/responses, a request no provider serves, while the probe used
+  // /v1/responses. The authoritative path must match the probed path.
+  const r = harness(null, { provider: { baseUrl: 'http://127.0.0.1:9/v1' } });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.target.extension.endpoint.path, '/v1/responses');
+  const r2 = harness(null, { provider: { baseUrl: 'http://127.0.0.1:9/v1/' } });
+  assert.equal(r2.target.extension.endpoint.path, '/v1/responses');
+});
+
 check('unsupported scope never reaches extension', function () {
   const r = harness({ roleId: 'engineer_normal' });
   assert.equal(r.ok, false);

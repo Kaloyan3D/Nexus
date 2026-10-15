@@ -290,23 +290,29 @@ struct Ctx {
 }
 
 fn setup(script: Script, pilot: bool) -> Ctx {
+    setup_with(start_provider(script), None, pilot)
+}
+
+/// `base`: optional (baseUrl, dialect) for the Registry fixture (https runs).
+fn setup_with(mock: Provider, base: Option<(String, String)>, pilot: bool) -> Ctx {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data_root = tmp.path().join("registry");
     std::fs::create_dir_all(&data_root).expect("dataroot");
     let workspace = tmp.path().join("ws");
     std::fs::create_dir_all(&workspace).expect("workspace");
     let repo = repo_root();
-    let mock = start_provider(script);
     let port = mock.addr.port().to_string();
-    let reg = node_json(
-        &[
-            "registry",
-            data_root.to_str().expect("utf8"),
-            repo.to_str().expect("utf8"),
-            port.as_str(),
-        ],
-        None,
-    );
+    let mut reg_args: Vec<&str> = vec![
+        "registry",
+        data_root.to_str().expect("utf8"),
+        repo.to_str().expect("utf8"),
+        port.as_str(),
+    ];
+    if let Some((url, dialect)) = &base {
+        reg_args.push(url.as_str());
+        reg_args.push(dialect.as_str());
+    }
+    let reg = node_json(&reg_args, None);
     assert_eq!(
         reg.get("ok"),
         Some(&serde_json::Value::Bool(true)),
@@ -578,6 +584,7 @@ fn execute(
         cap_path: ctx.proc_.cap.clone(),
         credentials_path: creds.to_path_buf(),
         limits,
+        transport: None,
     };
     let mut updates = Vec::new();
     let started = Instant::now();
@@ -1485,5 +1492,361 @@ fn a51_declaring_the_user_initiator_grants_nothing_without_issuer_authentication
         assert_eq!(code_of(&r), "issuer-untrusted", "{cmd}: {r}");
     }
     assert_eq!(ctx.mock.connections(), 0);
+    terminate(&mut ctx.proc_.child);
+}
+
+// ============================ A5.2: https E2E ============================
+
+mod tls {
+    use super::*;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+    pub const HOST: &str = "api.provider.test";
+
+    pub struct Pki {
+        dir: tempfile::TempDir,
+        pub ca_der: Vec<u8>,
+    }
+
+    fn sh(dir: &Path, args: &[&str]) {
+        let out = Command::new("openssl")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("openssl CLI required");
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    impl Pki {
+        pub fn new(cn: &str) -> Self {
+            let dir = tempfile::tempdir().expect("pki");
+            let d = dir.path();
+            sh(
+                d,
+                &[
+                    "ecparam",
+                    "-name",
+                    "prime256v1",
+                    "-genkey",
+                    "-noout",
+                    "-out",
+                    "ca.key",
+                ],
+            );
+            sh(
+                d,
+                &[
+                    "req",
+                    "-x509",
+                    "-new",
+                    "-key",
+                    "ca.key",
+                    "-out",
+                    "ca.pem",
+                    "-days",
+                    "2",
+                    "-subj",
+                    &format!("/CN={cn}"),
+                    "-addext",
+                    "basicConstraints=critical,CA:TRUE",
+                    "-addext",
+                    "keyUsage=critical,keyCertSign,cRLSign",
+                ],
+            );
+            sh(
+                d,
+                &["x509", "-in", "ca.pem", "-outform", "DER", "-out", "ca.der"],
+            );
+            let ca_der = std::fs::read(d.join("ca.der")).expect("ca der");
+            Self { dir, ca_der }
+        }
+
+        pub fn leaf(&self, dns: &str) -> (Vec<u8>, Vec<u8>) {
+            let d = self.dir.path();
+            sh(
+                d,
+                &[
+                    "ecparam",
+                    "-name",
+                    "prime256v1",
+                    "-genkey",
+                    "-noout",
+                    "-out",
+                    "l.key",
+                ],
+            );
+            sh(
+                d,
+                &[
+                    "req", "-new", "-key", "l.key", "-subj", "/CN=leaf", "-out", "l.csr",
+                ],
+            );
+            std::fs::write(
+                d.join("l.ext"),
+                format!("subjectAltName=DNS:{dns}\nextendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature\n"),
+            )
+            .expect("ext");
+            sh(
+                d,
+                &[
+                    "x509",
+                    "-req",
+                    "-in",
+                    "l.csr",
+                    "-CA",
+                    "ca.pem",
+                    "-CAkey",
+                    "ca.key",
+                    "-CAcreateserial",
+                    "-out",
+                    "l.pem",
+                    "-days",
+                    "1",
+                    "-extfile",
+                    "l.ext",
+                ],
+            );
+            sh(
+                d,
+                &["x509", "-in", "l.pem", "-outform", "DER", "-out", "l.der"],
+            );
+            sh(
+                d,
+                &[
+                    "pkcs8", "-topk8", "-nocrypt", "-in", "l.key", "-outform", "DER", "-out",
+                    "l.pk8",
+                ],
+            );
+            (
+                std::fs::read(d.join("l.der")).expect("cert"),
+                std::fs::read(d.join("l.pk8")).expect("key"),
+            )
+        }
+    }
+
+    /// Bind first (so the Registry fixture knows the port), serve later.
+    pub fn bind() -> (TcpListener, u16) {
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = l.local_addr().expect("addr").port();
+        (l, port)
+    }
+
+    pub fn serve(l: TcpListener, cert: Vec<u8>, key: Vec<u8>, frames: Vec<String>) -> Provider {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let cfg = Arc::new(
+            rustls::ServerConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .expect("versions")
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![CertificateDer::from(cert)],
+                    PrivateKeyDer::from(PrivatePkcs8KeyDer::from(key)),
+                )
+                .expect("cert"),
+        );
+        let addr = l.local_addr().expect("addr");
+        let connections = Arc::new(AtomicUsize::new(0));
+        let requests: Arc<Mutex<Vec<Recorded>>> = Arc::new(Mutex::new(Vec::new()));
+        let (c, r) = (connections.clone(), requests.clone());
+        std::thread::spawn(move || {
+            for _ in 0..3 {
+                let Ok((tcp, _)) = l.accept() else { return };
+                c.fetch_add(1, Ordering::SeqCst);
+                tcp.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                let Ok(conn) = rustls::ServerConnection::new(cfg.clone()) else {
+                    return;
+                };
+                let mut s = rustls::StreamOwned::new(conn, tcp);
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                let mut at = None;
+                while at.is_none() {
+                    match s.read(&mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            at = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4);
+                        }
+                    }
+                }
+                let Some(at) = at else { continue };
+                let head = String::from_utf8_lossy(&buf[..at]).into_owned();
+                let want: usize = head
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse().ok())
+                    })
+                    .unwrap_or(0);
+                let mut body = buf[at..].to_vec();
+                while body.len() < want {
+                    match s.read(&mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => body.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                r.lock().expect("mutex").push(Recorded { head, body });
+                let _ = s.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+                );
+                for f in &frames {
+                    let _ = s.write_all(f.as_bytes());
+                }
+                s.conn.send_close_notify();
+                let _ = s.flush();
+            }
+        });
+        Provider {
+            addr,
+            connections,
+            requests,
+        }
+    }
+
+    pub fn factory(trust: &Pki) -> nexus_client::TransportFactory {
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(trust.ca_der.clone()))
+            .expect("root");
+        let cfg = nexus_model::egress::tls_config_with_roots(roots);
+        nexus_client::TransportFactory(Arc::new(move |binding| {
+            nexus_model::HttpSseTransport::with_parts(
+                binding,
+                Arc::new(nexus_model::testkit::ScriptedResolver::new(vec![vec![
+                    "127.0.0.1".parse().unwrap(),
+                ]])),
+                nexus_model::egress::AddressPolicy::PublicOrLoopbackForTests,
+                cfg.clone(),
+            )
+        }))
+    }
+}
+
+fn tls_frames() -> Vec<String> {
+    vec![delta("Secure "), delta("hello"), completed(5, 6)]
+}
+
+fn https_ctx(server_pki: &tls::Pki) -> Ctx {
+    let (listener, port) = tls::bind();
+    let (cert, key) = server_pki.leaf(tls::HOST);
+    let provider = tls::serve(listener, cert, key, tls_frames());
+    setup_with(
+        provider,
+        Some((
+            format!("https://{}:{port}/v1", tls::HOST),
+            "openai-responses".to_owned(),
+        )),
+        true,
+    )
+}
+
+fn execute_tls(
+    ctx: &Ctx,
+    creds: &Path,
+    req: &ModelRunRequest,
+    grant: &serde_json::Value,
+    trust: &tls::Pki,
+) -> Result<Run, nexus_client::ClientError> {
+    let cfg = client_cfg(ctx);
+    let opts = ModelRunOptions {
+        cap_path: ctx.proc_.cap.clone(),
+        credentials_path: creds.to_path_buf(),
+        limits: fast(),
+        transport: Some(tls::factory(trust)),
+    };
+    let mut updates = Vec::new();
+    let started = Instant::now();
+    let out = nexus_client::run_model_only(&cfg, &opts, req, grant, &mut |u| {
+        updates.push((Instant::now(), u));
+    })?;
+    Ok(Run {
+        status: out.status,
+        updates,
+        started,
+        finished: Instant::now(),
+    })
+}
+
+#[test]
+fn a52_e2e_https_model_only_run_through_registry_kernel_and_verified_tls() {
+    let pki = tls::Pki::new("Nexus A5.2 Test CA");
+    let mut ctx = https_ctx(&pki);
+    let creds = creds_dir();
+    let req = request_for(&ctx, "say hi securely", None);
+    let prepared = nexus_client::prepare_model_run(&req).expect("prepare");
+    // The Registry issued a real https target; the kernel admitted it as a
+    // public https model-only destination.
+    assert!(prepared
+        .endpoint_origin
+        .starts_with("https://api.provider.test:"));
+    let grant = authorize(&ctx, &req);
+    assert_eq!(
+        grant.get("scope").and_then(|v| v.as_str()),
+        Some("model-only")
+    );
+    let cred = write_creds(creds.path(), &prepared.credential_ref, 0o600);
+    let run = execute_tls(&ctx, &cred, &req, &grant, &pki).expect("run");
+    let st = &run.status;
+    assert_eq!(st.state, "completed", "{st:?}");
+    assert_eq!(st.text, "Secure hello");
+    assert_eq!(
+        st.endpoint_kind.as_deref(),
+        Some("provider"),
+        "https is a provider endpoint"
+    );
+    assert_eq!(st.usage_input_tokens, Some(5));
+    assert_eq!(st.provider_id.as_deref(), Some("e2e-mock"));
+    let reqs = ctx.mock.requests.lock().expect("mutex");
+    assert_eq!(reqs.len(), 1);
+    let head = reqs[0].head.to_ascii_lowercase();
+    assert!(head.starts_with("post /v1/responses http/1.1"), "{head}");
+    assert!(head.contains(&format!("authorization: bearer {SECRET_MARKER}")));
+    assert!(!contains(&reqs[0].body, SECRET_MARKER));
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).expect("json");
+    assert_eq!(
+        body.get("model").and_then(|v| v.as_str()),
+        Some("e2e-mock-model")
+    );
+    drop(reqs);
+    let mut hay = Vec::new();
+    all_bytes_under(&client_cfg(&ctx).transcript_dir, &mut hay);
+    all_bytes_under(ctx.proc_.db.parent().expect("dir"), &mut hay);
+    assert!(!contains(&hay, SECRET_MARKER), "secret persisted on disk");
+    assert!(!nexus_kernel::Kernel::dispatch_enabled());
+    terminate(&mut ctx.proc_.child);
+}
+
+#[test]
+fn a52_e2e_untrusted_server_certificate_receives_no_credential_and_burns_the_grant() {
+    let rogue = tls::Pki::new("Rogue CA");
+    let trusted = tls::Pki::new("Trusted CA");
+    let mut ctx = https_ctx(&rogue);
+    let creds = creds_dir();
+    let req = request_for(&ctx, "hi", None);
+    let prepared = nexus_client::prepare_model_run(&req).expect("prepare");
+    let grant = authorize(&ctx, &req);
+    let cred = write_creds(creds.path(), &prepared.credential_ref, 0o600);
+    let run = execute_tls(&ctx, &cred, &req, &grant, &trusted).expect("run");
+    assert_eq!(run.status.state, "refused", "{:?}", run.status);
+    assert_eq!(run.status.error_code.as_deref(), Some("tls-failed"));
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        ctx.mock.requests.lock().expect("mutex").is_empty(),
+        "no application data reached the peer"
+    );
+    // TLS failed after redemption: nothing was sent, and the grant stays
+    // consumed (a new Controller authorization is required).
+    let again = execute_tls(&ctx, &cred, &req, &grant, &trusted).expect("second");
+    assert_eq!(again.status.state, "refused");
+    assert_ne!(
+        again.status.error_code.as_deref(),
+        Some("tls-failed"),
+        "refused at redemption now"
+    );
     terminate(&mut ctx.proc_.child);
 }

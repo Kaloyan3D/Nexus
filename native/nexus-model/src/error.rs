@@ -56,6 +56,13 @@ pub enum ModelErrorCode {
     Timeout,
     /// The provider reported its own terminal failure (message redacted).
     ProviderFailed,
+    /// TLS could not be established or verified (untrusted/expired/wrong
+    /// name certificate, protocol failure). Raised only BEFORE any request
+    /// byte or credential is written.
+    TlsFailed,
+    /// The destination (or any address it resolved to) violates the egress
+    /// policy. Raised before any socket is opened.
+    DestinationRefused,
 }
 
 impl ModelErrorCode {
@@ -79,6 +86,8 @@ impl ModelErrorCode {
             Self::ContinuationRequired => "continuation-required",
             Self::Timeout => "timeout",
             Self::ProviderFailed => "provider-failed",
+            Self::TlsFailed => "tls-failed",
+            Self::DestinationRefused => "destination-refused",
         }
     }
 }

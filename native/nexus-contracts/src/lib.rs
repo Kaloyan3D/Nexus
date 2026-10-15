@@ -11,7 +11,7 @@ pub use canonical::{
     sha256_hex, snapshot_digest_of, target_digest_of,
 };
 pub use destination::{
-    classify_host, is_public_https_origin, origin_scheme_host, DestinationVerdict,
+    classify_host, classify_ip, is_public_https_origin, origin_scheme_host, DestinationVerdict,
 };
 pub use errors::{KernelError, KernelErrorCode, KernelResult};
 pub use target::{ExecutionTargetCoreV1, RegistryProvenanceV1, RegistryResolutionV1};

@@ -84,6 +84,17 @@ function splitBaseUrl(baseUrl) {
   return { protocol: parsed.protocol.slice(0, -1), origin: origin, basePath: stripTrailingSlashes(parsed.pathname || ''), host: parsed.hostname };
 }
 
+// The dialect path carries its own version segment ('/v1/responses'). A
+// provider baseUrl that already ends in '/v1' (the OpenAI convention) must
+// not double it: the executed path has to equal the probed path.
+function endpointPath(basePath, dialectPath) {
+  const base = basePath === '' ? '' : basePath;
+  if (/\/v1$/.test(base) && dialectPath.indexOf('/v1/') === 0) {
+    return base + dialectPath.slice('/v1'.length);
+  }
+  return base + dialectPath;
+}
+
 function billingTierOf(provider, connection) {
   const c = connection && connection.metadata && connection.metadata.billingTier;
   if (isNonEmptyString(c)) return c;
@@ -188,7 +199,7 @@ function issueExecutionTargetV2(options, deps) {
     endpoint: {
       protocol: split.protocol,
       origin: split.origin,
-      path: (split.basePath === '' ? '' : split.basePath) + dialectPath,
+      path: endpointPath(split.basePath, dialectPath),
       method: 'POST',
       localLoopback: isLoopbackHost(split.host),
     },

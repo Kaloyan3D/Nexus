@@ -443,6 +443,7 @@ fn cmd_model(args: &[String], cfg: &ClientConfig) -> ExitCode {
                 cap_path: PathBuf::from(need("--cap")?),
                 credentials_path: PathBuf::from(need("--credentials")?),
                 limits,
+                transport: None,
             };
             let human = !cfg.json;
             let out = nexus_client::run_model_only(&cfg, &opts, &req, &grant, &mut |u| {

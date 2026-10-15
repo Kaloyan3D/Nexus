@@ -60,6 +60,15 @@ fn v4_verdict(a: Ipv4Addr) -> DestinationVerdict {
     }
 }
 
+/// Classify one resolved address. This is the check that matters for
+/// connecting: a name's syntax proves nothing about what it resolves to.
+pub fn classify_ip(ip: std::net::IpAddr) -> DestinationVerdict {
+    match ip {
+        std::net::IpAddr::V4(a) => v4_verdict(a),
+        std::net::IpAddr::V6(a) => v6_verdict(a),
+    }
+}
+
 fn v6_verdict(a: Ipv6Addr) -> DestinationVerdict {
     if a.is_loopback() {
         return DestinationVerdict::Loopback;
@@ -75,7 +84,9 @@ fn v6_verdict(a: Ipv6Addr) -> DestinationVerdict {
         || (seg[0] & 0xFFC0) == 0xFEC0 // fec0::/10 deprecated site-local
         || (seg[0] == 0x2001 && seg[1] == 0x0db8) // documentation
         || (seg[0] == 0 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0 && seg[4] == 0 && seg[5] == 0) // ::/96 compat
-        || (seg[0] == 0x0064 && seg[1] == 0xff9b); // 64:ff9b::/96 NAT64
+        || (seg[0] == 0x0064 && seg[1] == 0xff9b) // 64:ff9b::/96 NAT64
+        || seg[0] == 0x2002 // 6to4: embeds an arbitrary IPv4 destination
+        || (seg[0] == 0x2001 && seg[1] == 0x0000); // Teredo
     if reserved {
         DestinationVerdict::PrivateOrReserved
     } else {
@@ -206,6 +217,34 @@ mod tests {
             "017700000001",
         ] {
             assert!(!classify_host(h).is_public(), "{h} must be refused");
+        }
+    }
+
+    #[test]
+    fn resolved_addresses_are_classified_not_just_names() {
+        use std::net::IpAddr;
+        let p = |s: &str| classify_ip(s.parse::<IpAddr>().unwrap()).is_public();
+        assert!(p("93.184.216.34") && p("2606:4700::1111"));
+        for bad in [
+            "127.0.0.1",
+            "10.0.0.5",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "::1",
+            "::",
+            "fe80::1",
+            "fd00::1",
+            "ff02::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.1.1.1",
+            "::ffff:169.254.169.254",
+            "2002:7f00:1::1",
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+            "64:ff9b::7f00:1",
+        ] {
+            assert!(!p(bad), "{bad}");
         }
     }
 

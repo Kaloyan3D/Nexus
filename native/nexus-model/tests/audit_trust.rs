@@ -202,18 +202,26 @@ fn invalid_utf8_body_fails_closed_without_panic() {
 }
 
 #[test]
-fn https_without_tls_terminator_is_refused_before_connect() {
-    // The offline transport has no TLS stack: sending plaintext (including
-    // the credential header) to a TLS port would leak secrets. Refuse
-    // before any socket exists; https belongs to the live-readiness gate.
-    let target = target_for("https://provider.example.com:443");
+fn https_to_a_name_resolving_privately_is_refused_before_any_socket() {
+    // A5.2: https is real now, so the egress policy (not a missing TLS
+    // stack) is the gate. A public-looking name that RESOLVES to a private
+    // address must be refused before any connection is attempted.
+    let origin = "https://provider.example.com:443";
+    let target = target_for(origin);
     let (issued, snapshot) = issued_for(&target);
     let pin = pin_for(&target, &issued, &snapshot);
-    let transport =
-        HttpSseTransport::new(TransportBinding::new("https://provider.example.com:443"));
+    let resolver = std::sync::Arc::new(nexus_model::testkit::ScriptedResolver::new(vec![vec![
+        "10.1.2.3".parse().unwrap(),
+    ]]));
+    let transport = HttpSseTransport::with_parts(
+        TransportBinding::new(origin),
+        resolver.clone(),
+        nexus_model::egress::AddressPolicy::PublicOnly,
+        nexus_model::egress::default_tls_config(),
+    );
     let runtime = OfflineModelRuntime::new(
         transport,
-        TransportBinding::new("https://provider.example.com:443"),
+        TransportBinding::new(origin),
         TransportLimits::default(),
     );
     let prepared = runtime
@@ -238,9 +246,10 @@ fn https_without_tls_terminator_is_refused_before_connect() {
             &credential(),
             &CancellationToken::new(),
         )
-        .expect_err("https refused");
-    assert_eq!(err.code, ModelErrorCode::TransportRefused);
+        .expect_err("private resolution refused");
+    assert_eq!(err.code, ModelErrorCode::DestinationRefused, "{err}");
     assert_eq!(attempt.state(), AttemptState::NotSent);
+    assert_eq!(resolver.calls(), 1);
 }
 
 #[test]

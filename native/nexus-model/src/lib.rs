@@ -17,6 +17,7 @@
 //! second model router (the Registry remains the only model authority).
 
 pub mod authorized;
+pub mod egress;
 pub mod error;
 pub mod pin;
 pub mod prepare;

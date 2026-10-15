@@ -40,4 +40,5 @@ sha2 = { workspace = true }
 nexus-contracts = { workspace = true }
 nexus-model = { workspace = true }
 nexus-client = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 nexus-tools = { workspace = true, features = ["crash-injection"] }

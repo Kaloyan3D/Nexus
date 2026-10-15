@@ -40,7 +40,8 @@ pub use model_run::{
     list_model_conversations, prepare_model_run, recover_model_run, request_model_cancel,
     run_model_only, status_from_store as model_run_status, ExpectedTarget,
     ModelConversationSummary, ModelRunOptions, ModelRunOutcome, ModelRunRequest, ModelRunState,
-    ModelRunStatus, ModelRunUpdate, PreparedModelRun, MAX_PROMPT_BYTES, MODEL_CONVERSATION_PREFIX,
+    ModelRunStatus, ModelRunUpdate, PreparedModelRun, TransportFactory, MAX_PROMPT_BYTES,
+    MODEL_CONVERSATION_PREFIX,
 };
 pub use nexus_model::TransportLimits;
 pub use nexus_tools::{ToolEventStatus, ToolEventV1, ToolRecordV1};

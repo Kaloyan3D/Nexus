@@ -699,3 +699,51 @@ mod tests {
         assert_eq!(t.sends(), 0);
     }
 }
+
+/// Scripted name resolution for the egress tests. Each call consumes the
+/// next answer (the last one repeats), and the call count is observable so
+/// tests can prove "resolved exactly once" / rebinding resistance.
+#[derive(Debug)]
+pub struct ScriptedResolver {
+    answers: Vec<std::io::Result<Vec<std::net::IpAddr>>>,
+    calls: std::sync::atomic::AtomicUsize,
+    delay_ms: u64,
+}
+
+impl ScriptedResolver {
+    /// Answers in call order; the final answer repeats.
+    pub fn new(answers: Vec<Vec<std::net::IpAddr>>) -> Self {
+        Self {
+            answers: answers.into_iter().map(Ok).collect(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            delay_ms: 0,
+        }
+    }
+
+    /// Make every resolution take `ms` (stuck-resolver probes).
+    pub fn with_delay_ms(mut self, ms: u64) -> Self {
+        self.delay_ms = ms;
+        self
+    }
+
+    /// Number of resolutions requested so far.
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl crate::egress::Resolver for ScriptedResolver {
+    fn resolve(&self, _host: &str, _port: u16) -> std::io::Result<Vec<std::net::IpAddr>> {
+        let i = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.delay_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(self.delay_ms));
+        }
+        match self
+            .answers
+            .get(i.min(self.answers.len().saturating_sub(1)))
+        {
+            Some(Ok(v)) => Ok(v.clone()),
+            _ => Err(std::io::Error::other("scripted resolver has no answer")),
+        }
+    }
+}

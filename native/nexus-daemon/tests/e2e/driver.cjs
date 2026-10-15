@@ -48,12 +48,25 @@ async function probeFetch(url, init) {
   if (method === 'GET' && u.indexOf('/models') !== -1) {
     return probeJson(200, JSON.stringify({ data: [{ id: 'e2e-mock-model' }] }));
   }
-  if (false) {
+  if (method === 'POST' && u.indexOf('/responses') !== -1) {
     let effort = 'low';
     try {
       const incoming = JSON.parse(String((init && init.body) || '{}'));
       if (incoming && incoming.reasoning && typeof incoming.reasoning.effort === 'string') effort = incoming.reasoning.effort;
     } catch (ignored) {}
+    try {
+      const inc2 = JSON.parse(String((init && init.body) || '{}'));
+      if (inc2 && Array.isArray(inc2.tools) && inc2.tools.length > 0) {
+        const nm = inc2.tools[0].name || 'probe_echo';
+        return probeJson(200, JSON.stringify({ status: 'completed', reasoning: { effort: effort }, output: [{ type: 'function_call', id: 'fc_probe_1', call_id: 'call_probe_1', name: nm, arguments: '{"word":"probe-ok"}' }] }));
+      }
+      if (inc2 && Array.isArray(inc2.input) && inc2.input.length > 0 && inc2.input[0].type === 'function_call_output') {
+        return probeJson(200, JSON.stringify({ status: 'completed', reasoning: { effort: effort }, output: [{ type: 'message', content: [{ type: 'output_text', text: 'probe-ok' }] }] }));
+      }
+      if (inc2 && inc2.stream === true) {
+        return probeText(200, 'data: {"type":"response.output_text.delta","delta":"probe-ok"}' + "\n\n" + 'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}' + "\n\n" + 'data: [DONE]' + "\n\n");
+      }
+    } catch (ignoredS) {}
     return probeJson(200, JSON.stringify({ status: 'completed', reasoning: { effort: effort }, output: [{ type: 'message', content: [{ type: 'output_text', text: 'probe-ok' }] }] }));
   }
   if (false) {
@@ -95,12 +108,15 @@ async function cmdRegistry(args) {
   const dataRoot = args[0];
   const installRoot = args[1];
   const port = Number(args[2]);
+  // A5.2: optional explicit provider base URL / dialect (default: loopback fixture).
+  const baseUrlArg = args[3] || ('http://127.0.0.1:' + port);
+  const transportArg = args[4] || 'local-openai-compatible';
   const fail = function (where, result) { console.error("SAVE_DEBUG " + JSON.stringify(result).slice(0, 600));
     emit({ ok: false, where: where, code: result.code, message: result.message });
     process.exitCode = 1;
   };
   const service = makeService(installRoot, dataRoot);
-  let r = service.saveProvider({ id: 'e2e-mock', name: 'E2E Mock', transportId: 'local-openai-compatible', baseUrl: 'http://127.0.0.1:' + port, authType: 'api-key', metadata: { billingTier: 'e2e-unmetered-test' } }, {});
+  let r = service.saveProvider({ id: 'e2e-mock', name: 'E2E Mock', transportId: transportArg, baseUrl: baseUrlArg, authType: 'api-key', metadata: { billingTier: 'e2e-unmetered-test' } }, {});
   if (!r.ok) return fail('provider', r);
   r = service.saveModel({ id: 'e2e/e2e-1', vendor: 'E2E', displayName: 'E2E Mock', checkpoint: 'e2e-1', capabilities: { textInput: true, imageInput: false, toolCalling: true, streaming: true, reasoning: true }, dataUseTier: 'contributor', contextWindow: 8192, maxOutputTokens: 1024, enabled: true, engines: ['muse-v0'] }, {});
   if (!r.ok) return fail('model', r);
@@ -108,13 +124,13 @@ async function cmdRegistry(args) {
   if (!r.ok) return fail('connection', r);
   r = service.setConnectionStatus('conn-e2e-mock', 'connected', { attested: true });
   if (!r.ok) return fail('connection-status', r);
-  r = service.saveRoute({ id: 'e2e-mock/e2e-1', providerId: 'e2e-mock', logicalModelId: 'e2e/e2e-1', remoteModelId: 'e2e-mock-model', connectionId: 'conn-e2e-mock', reasoningLevels: ['low'], availability: 'probe-required', executionKind: 'raw-model', accessType: 'api-key', compatibility: { transport: 'local-openai-compatible' } }, {});
+  r = service.saveRoute({ id: 'e2e-mock/e2e-1', providerId: 'e2e-mock', logicalModelId: 'e2e/e2e-1', remoteModelId: 'e2e-mock-model', connectionId: 'conn-e2e-mock', reasoningLevels: ['low'], availability: 'probe-required', executionKind: 'raw-model', accessType: 'api-key', compatibility: { transport: transportArg } }, {});
   if (!r.ok) return fail('route', r);
 
 
 
   try {
-    const verified = await service.verifyProviderRoute('e2e-mock/e2e-1', { fetchImpl: probeFetch, testBearer: 'e2e-probe-bearer' });
+    const verified = await service.verifyProviderRoute('e2e-mock/e2e-1', { fetchImpl: probeFetch, testBearer: 'e2e-probe-bearer', lookup: async function () { return [{ address: '8.8.8.8', family: 4 }]; } });
     if (!verified.ok) return fail('route-probe', { code: 'route-probe-failed', message: JSON.stringify(verified.errors || verified).slice(0, 400) });
   } catch (e) {
     return fail('route-probe', { code: 'route-probe-threw', message: String((e && e.message) || e).slice(0, 200) });

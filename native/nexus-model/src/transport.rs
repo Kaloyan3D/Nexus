@@ -34,7 +34,6 @@ use crate::prepare::AttestedPreparedModelRequest;
 use crate::sse::{parse_sse_body, parse_sse_body_complete_prefix, ModelEvent};
 use crate::stream::CancellationToken;
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -53,8 +52,6 @@ pub const DEFAULT_READ_TIMEOUT_MS: u64 = 30_000;
 /// entire response stream (120 s). A provider that keeps each read alive
 /// but never finishes cannot hold an attempt open past this bound.
 pub const DEFAULT_TOTAL_TIMEOUT_MS: u64 = 120_000;
-/// Hard ceiling on the TCP connect phase.
-const CONNECT_TIMEOUT_MS: u64 = 10_000;
 
 /// Transport resource bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,15 +348,43 @@ pub trait Transport {
 /// cancellation checks between reads.
 pub struct HttpSseTransport {
     binding: TransportBinding,
+    resolver: Arc<dyn crate::egress::Resolver>,
+    policy: crate::egress::AddressPolicy,
+    tls: Option<Arc<rustls::ClientConfig>>,
 }
 
 impl HttpSseTransport {
-    /// Create the transport pinned to one exact endpoint origin. The binding
-    /// is enforced inside `send()` before connect, so even a direct caller
-    /// bypassing the runtime cannot steer this transport at another origin.
-    /// (The runtime checks its own binding too: either gate fails closed.)
+    /// Production transport pinned to one exact endpoint origin: system
+    /// resolver, public-addresses-only policy, webpki roots, no proxy.
+    /// The binding is enforced inside `send()` before connect, so even a
+    /// direct caller bypassing the runtime cannot steer this transport at
+    /// another origin. (The runtime checks its own binding too.)
     pub fn new(binding: TransportBinding) -> Self {
-        Self { binding }
+        Self {
+            binding,
+            resolver: Arc::new(crate::egress::SystemResolver),
+            policy: crate::egress::AddressPolicy::PublicOnly,
+            tls: None,
+        }
+    }
+
+    /// Fully specified transport. Intended for the offline fixtures in
+    /// `testkit` and the A5.2 adversarial suite (scripted resolver, a test
+    /// CA in `tls`, loopback allowed for https). TLS verification is
+    /// enforced by whatever `ClientConfig` is passed; this crate offers no
+    /// constructor that builds a non-verifying one.
+    pub fn with_parts(
+        binding: TransportBinding,
+        resolver: Arc<dyn crate::egress::Resolver>,
+        policy: crate::egress::AddressPolicy,
+        tls: Arc<rustls::ClientConfig>,
+    ) -> Self {
+        Self {
+            binding,
+            resolver,
+            policy,
+            tls: Some(tls),
+        }
     }
 
     /// Borrow the pinned origin.
@@ -409,74 +434,36 @@ impl HttpSseTransport {
             ))
         })?;
         let prepared = request.prepared();
-        // No TLS stack exists in this offline transport: an https origin
-        // would receive plaintext (including the credential header) on the
-        // TLS port. Refuse before any socket exists; https termination
-        // belongs to the future live-readiness gate, not to this path.
-        if prepared.protocol != "http" {
-            return Err(TransportError::refused(ModelError::new(
-                ModelErrorCode::TransportRefused,
-                "https endpoints need the TLS termination gate (unimplemented offline); refusing plaintext",
-            )));
-        }
         // Transport-level origin gate (defense in depth alongside the
         // runtime binding check): refused before any socket exists.
         self.binding
             .check(&prepared.endpoint_origin)
             .map_err(TransportError::refused)?;
-        let (host, port) =
-            split_origin(&prepared.endpoint_origin).map_err(TransportError::refused)?;
-        // Resolve once and pin the connect to a LOOPBACK socket address: a
-        // name that resolves to anything else (DNS rebinding / hosts-file
-        // games) is refused before any socket exists.
-        let resolved: Vec<std::net::SocketAddr> =
-            std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
-                .map_err(|e| {
-                    TransportError::refused(ModelError::new(
-                        ModelErrorCode::Disconnected,
-                        format!(
-                            "pinned endpoint did not resolve: {}",
-                            redact(&e.to_string())
-                        ),
-                    ))
-                })?
-                .collect();
-        let target_addr = match resolved.iter().find(|a| a.ip().is_loopback()) {
-            Some(a) if resolved.iter().all(|r| r.ip().is_loopback()) => *a,
-            _ => {
-                return Err(TransportError::refused(ModelError::new(
-                    ModelErrorCode::EndpointMismatch,
-                    "pinned endpoint resolves outside loopback; refusing to connect",
-                )));
-            }
-        };
-        let connect_budget = Duration::from_millis(CONNECT_TIMEOUT_MS)
-            .min(deadline.saturating_duration_since(std::time::Instant::now()));
-        let mut stream = TcpStream::connect_timeout(&target_addr, connect_budget).map_err(|e| {
-            TransportError::refused(ModelError::new(
-                ModelErrorCode::Disconnected,
-                format!(
-                    "connection to the pinned endpoint failed: {}",
-                    redact(&e.to_string())
-                ),
-            ))
-        })?;
-        stream
-            .set_write_timeout(Some(Duration::from_millis(limits.read_timeout_ms)))
-            .map_err(|e| {
-                TransportError::refused(ModelError::new(
-                    ModelErrorCode::TransportRefused,
-                    format!("write deadline unsettable: {}", redact(&e.to_string())),
-                ))
-            })?;
-        stream
-            .set_read_timeout(Some(Duration::from_millis(limits.read_timeout_ms)))
-            .map_err(|e| {
-                TransportError::refused(ModelError::new(
-                    ModelErrorCode::TransportRefused,
-                    format!("read deadline unsettable: {}", redact(&e.to_string())),
-                ))
-            })?;
+        // Egress policy: resolve ONCE, classify every address, pin the
+        // connection to an approved IP, keep the name for SNI/verification.
+        let dest = crate::egress::approve_destination_bounded(
+            &prepared.endpoint_origin,
+            &self.resolver,
+            self.policy,
+            cancel,
+            deadline,
+        )
+        .map_err(TransportError::refused)?;
+        if cancel.is_cancelled() {
+            return Err(TransportError::refused(ModelError::new(
+                ModelErrorCode::Cancelled,
+                "cancelled before connecting (no bytes sent)",
+            )));
+        }
+        let tls = self
+            .tls
+            .clone()
+            .unwrap_or_else(crate::egress::default_tls_config);
+        // No byte (and therefore no credential) is written until the TCP
+        // connect AND the TLS handshake completed with a verified peer.
+        let mut stream = crate::egress::connect(&dest, &tls, cancel, deadline)
+            .map_err(TransportError::refused)?;
+        let (host, port) = (dest.host.clone(), dest.port);
         // Exact request line + fixed header allowlist. The credential
         // enters exactly one header and never the body.
         let session = &prepared.session_header;
@@ -585,7 +572,7 @@ impl HttpSseTransport {
                 emitted = emitted.max(events.len());
             }
         };
-        let (raw, read_err) = read_all_partial(&stream, cancel, limits, deadline, &mut observe);
+        let (raw, read_err) = read_all_partial(&mut stream, cancel, limits, deadline, &mut observe);
         // Cancellation wins over partial bytes: stop now, keep the attempt
         // uncertain, and never present a cancelled stream as data.
         if let Some(ref e) = read_err {
@@ -684,62 +671,21 @@ impl HttpSseTransport {
     }
 }
 
-fn split_origin(origin: &str) -> Result<(String, u16), ModelError> {
-    let (scheme, rest) = origin.split_once("://").ok_or_else(|| {
-        ModelError::new(
-            ModelErrorCode::EndpointMismatch,
-            "endpoint origin lacks a scheme",
-        )
-    })?;
-    let host_part = rest.split('/').next().unwrap_or("");
-    if host_part.contains('@') {
-        return Err(ModelError::new(
-            ModelErrorCode::EndpointMismatch,
-            "endpoint origin must not carry userinfo",
-        ));
-    }
-    let (host, port) = match host_part.rsplit_once(':') {
-        Some((h, p)) => {
-            let port: u16 = p.parse().map_err(|_| {
-                ModelError::new(
-                    ModelErrorCode::EndpointMismatch,
-                    "endpoint origin port invalid",
-                )
-            })?;
-            (h.to_owned(), port)
-        }
-        None => (
-            host_part.to_owned(),
-            if scheme == "https" { 443 } else { 80 },
-        ),
-    };
-    if host.trim().is_empty() {
-        return Err(ModelError::new(
-            ModelErrorCode::EndpointMismatch,
-            "endpoint origin lacks a host",
-        ));
-    }
-    // Defense in depth (prepared hosts already passed target validation):
-    // no control, space, DEL, or non-ASCII byte may reach the request line.
-    if !host.bytes().all(|b| b.is_ascii_graphic()) {
-        return Err(ModelError::new(
-            ModelErrorCode::EndpointMismatch,
-            "endpoint host carries characters forbidden on the wire",
-        ));
-    }
-    Ok((host, port))
-}
-
 fn host_port_header(origin: &str, host: &str, port: u16) -> String {
     let default = if origin.starts_with("https://") {
         443
     } else {
         80
     };
-    if port == default {
-        host.to_owned()
+    let h = if host.contains(':') {
+        format!("[{host}]")
     } else {
-        format!("{host}:{port}")
+        host.to_owned()
+    };
+    if port == default {
+        h
+    } else {
+        format!("{h}:{port}")
     }
 }
 
@@ -749,7 +695,7 @@ fn host_port_header(origin: &str, host: &str, port: u16) -> String {
 /// Returns `(bytes, None)` on a clean EOF, `(bytes, Some(error))` when the
 /// read itself failed or was cancelled after bytes arrived.
 fn read_all_partial(
-    mut stream: &TcpStream,
+    stream: &mut dyn Read,
     cancel: &CancellationToken,
     limits: &TransportLimits,
     deadline: std::time::Instant,
@@ -783,12 +729,6 @@ fn read_all_partial(
                 )),
             );
         }
-        // Short read slices keep cancellation responsive; the per-read
-        // deadline is enforced as cumulative idle time across slices.
-        let per_read = Duration::from_millis(limits.read_timeout_ms)
-            .min(Duration::from_millis(100))
-            .min(remaining);
-        let _ = stream.set_read_timeout(Some(per_read.max(Duration::from_millis(1))));
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
@@ -825,6 +765,10 @@ fn read_all_partial(
                 );
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            // A peer that closes without TLS close_notify surfaces as
+            // UnexpectedEof. Truncation is detected by the missing
+            // completion event, never by trusting EOF framing.
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(e) => {
                 return (
                     buf,
