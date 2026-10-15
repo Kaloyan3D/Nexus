@@ -63,3 +63,11 @@ cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings &
 `conversation_read`, `model_io_read`, `list_mock_conversations`.
 `build.rs`, `capabilities/main.json` and the handler list are cross-checked by unit tests.
 No fs, shell, http or opener plugin is installed.
+
+## Conversation scroll policy
+
+- Historical (DSH) conversations open on the latest message.
+- Native and mock conversations open at the top so the submitted prompt is visible; a "Jump to latest"
+  control appears when more content follows.
+- New output is followed only while the viewport is already at the bottom; scrolling up is never overridden.
+- Loading earlier records keeps the visible message in place; expanding a tool call never moves the viewport.

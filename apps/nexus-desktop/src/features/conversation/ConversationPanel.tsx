@@ -8,12 +8,13 @@ import {
   Layers,
   MessageSquare,
   RefreshCw,
+  ArrowDown,
   ShieldAlert,
   Terminal,
   User,
   Wrench,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { asUiError } from "../../lib/api";
 import type {
   AttemptProvenance,
@@ -397,7 +398,10 @@ export function ConversationPanel({
   const [modelIo, setModelIo] = useState(false);
   const [visible, setVisible] = useState(INITIAL_VISIBLE);
   const scroller = useRef<HTMLDivElement>(null);
-  const pinned = useRef(true);
+  const pinned = useRef(false);
+  const initialFor = useRef<string | null>(null);
+  const anchor = useRef<{ height: number; top: number; firstKey: string | undefined } | null>(null);
+  const [showJump, setShowJump] = useState(false);
   const { view, events } = state;
 
   const items = useMemo(() => {
@@ -406,12 +410,61 @@ export function ConversationPanel({
     return buildItems(filtered);
   }, [events, filter]);
   const shown = items.slice(Math.max(0, items.length - visible));
+  const firstKey = shown[0]?.key;
+
+  // Scroll policy (documented in README):
+  //  * Opening a historical (DSH) conversation lands on the latest message.
+  //  * Opening a native/mock conversation lands on the top so the submitted
+  //    prompt is visible; "Jump to latest" appears when more content follows.
+  //  * Output is followed only while the viewport is already at the bottom.
+  //  * Prepending earlier records keeps the visible message in place.
+  //  * Expanding a tool call never moves the viewport.
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    if (anchor.current && firstKey !== anchor.current.firstKey) {
+      // earlier records were prepended: compensate for the added height
+      el.scrollTop = anchor.current.top + (el.scrollHeight - anchor.current.height);
+      anchor.current = null;
+      return;
+    }
+    if (events.length > 0 && initialFor.current !== conversationId) {
+      initialFor.current = conversationId;
+      if (view?.source === "dsh-session-log") {
+        el.scrollTop = el.scrollHeight;
+      } else {
+        el.scrollTop = 0;
+      }
+      pinned.current = stickToBottom(el);
+      setShowJump(!pinned.current);
+    }
+  }, [firstKey, events.length, conversationId, view?.source]);
 
   const lastKey = events[events.length - 1]?.revisionSeq ?? -1;
   useEffect(() => {
     const el = scroller.current;
-    if (el && pinned.current) el.scrollTop = el.scrollHeight;
+    if (!el || initialFor.current !== conversationId) return;
+    if (pinned.current) el.scrollTop = el.scrollHeight;
+    setShowJump(!stickToBottom(el));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastKey, filter]);
+
+  const onScroll = () => {
+    const near = stickToBottom(scroller.current);
+    pinned.current = near;
+    setShowJump((cur) => (cur === !near ? cur : !near));
+  };
+  const jumpToLatest = () => {
+    const el = scroller.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    pinned.current = true;
+    setShowJump(false);
+  };
+  const rememberAnchor = () => {
+    const el = scroller.current;
+    if (el) anchor.current = { height: el.scrollHeight, top: el.scrollTop, firstKey };
+  };
 
   if (state.loading && !view) return <Loading label="Loading recorded conversation…" />;
   if (state.error)
@@ -500,27 +553,35 @@ export function ConversationPanel({
           <ModelIoPanel conversationId={conversationId} />
         </div>
       ) : (
-        <div
-          className="nv-scroll nv-conv__list"
-          ref={scroller}
-          onScroll={() => (pinned.current = stickToBottom(scroller.current))}
-          aria-live="polite"
-        >
-          {(state.hasEarlier || items.length > shown.length) && (
-            <button
-              type="button"
-              className="nv-link nv-conv__earlier"
-              onClick={() => {
-                if (items.length > shown.length) setVisible((v) => v + INITIAL_VISIBLE);
-                else state.loadEarlier();
-              }}
-            >
-              Load earlier messages
+        <div className="nv-conv__viewport">
+          <div
+            className="nv-scroll nv-conv__list"
+            ref={scroller}
+            onScroll={onScroll}
+            aria-live="polite"
+          >
+            {(state.hasEarlier || items.length > shown.length) && (
+              <button
+                type="button"
+                className="nv-link nv-conv__earlier"
+                onClick={() => {
+                  rememberAnchor();
+                  if (items.length > shown.length) setVisible((v) => v + INITIAL_VISIBLE);
+                  else state.loadEarlier();
+                }}
+              >
+                Load earlier messages
+              </button>
+            )}
+            {rows}
+            {items.length === 0 && (
+              <p className="nv-note">No messages match this filter.</p>
+            )}
+          </div>
+          {showJump && (
+            <button type="button" className="nv-jump" onClick={jumpToLatest}>
+              <ArrowDown size={13} aria-hidden="true" /> Jump to latest
             </button>
-          )}
-          {rows}
-          {items.length === 0 && (
-            <p className="nv-note">No messages match this filter.</p>
           )}
         </div>
       )}

@@ -332,15 +332,59 @@
 .nv-composer__input:focus-visible {
   outline: none;
 }
+.nv-composer {
+  container-type: inline-size;
+}
 .nv-composer__bar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--nv-s-2);
+  justify-content: space-between;
+  gap: var(--nv-s-2) var(--nv-s-3);
   padding: 0 var(--nv-s-3) var(--nv-s-3);
 }
-.nv-composer__spacer {
-  flex: 1;
+/* Secondary tools may wrap among themselves; the action group stays whole. */
+.nv-composer__tools {
+  display: flex;
+  flex: 1 1 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nv-s-2);
+  min-width: 0;
+}
+/* Run Mock is always the last element and hugs the right edge, also when the
+   group wraps to its own row on narrow widths. */
+.nv-composer__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--nv-s-2);
+  margin-left: auto;
+}
+@container (max-width: 760px) {
+  .nv-chip__label {
+    display: none;
+  }
+  .nv-chip {
+    padding: 0 8px;
+  }
+  .nv-chip--static .nv-chip__label {
+    display: inline;
+    max-width: 14ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+@container (max-width: 520px) {
+  .nv-composer__actions {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+  .nv-chip--static .nv-chip__label {
+    display: none;
+  }
 }
 .nv-composer__hint {
   display: flex;
@@ -1133,4 +1177,33 @@
 }
 .nv-modelio__sys {
   max-height: 260px;
+}
+
+/* ---------- Conversation scroll helpers ---------- */
+.nv-conv__viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.nv-jump {
+  position: absolute;
+  left: 50%;
+  bottom: var(--nv-s-3);
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 var(--nv-s-3);
+  border: 1px solid var(--nv-purple-border);
+  border-radius: var(--nv-radius-pill);
+  background: var(--nv-surface-popover);
+  color: var(--nv-purple-hover);
+  font-size: var(--nv-text-sm);
+  box-shadow: var(--nv-shadow-overlay);
+}
+.nv-jump:hover {
+  background: var(--nv-purple-tint-strong);
 }

@@ -46,38 +46,43 @@ export function Composer() {
         }}
       />
       <div className="nv-composer__bar">
-        <Button variant="ghost" size="sm" disabled aria-label="Attach (unavailable)" title="Attachments are not supported by the native backend yet" icon={<Paperclip size={15} />} />
-        {TOOLS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            className="nv-chip"
-            aria-disabled="true"
-            tabIndex={0}
-            title={`${t.label} is not exposed by the native backend yet`}
-            onClick={(e) => e.preventDefault()}
+        <div className="nv-composer__tools" role="group" aria-label="Tools">
+          <Button variant="ghost" size="sm" disabled aria-label="Attach (unavailable)" title="Attachments are not supported by the native backend yet" icon={<Paperclip size={15} />} />
+          {TOOLS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              className="nv-chip"
+              aria-disabled="true"
+              aria-label={t.label}
+              tabIndex={0}
+              title={`${t.label} is not exposed by the native backend yet`}
+              onClick={(e) => e.preventDefault()}
+            >
+              <t.icon size={14} aria-hidden="true" />
+              <span className="nv-chip__label">{t.label}</span>
+            </button>
+          ))}
+        </div>
+        <div className="nv-composer__actions">
+          <Badge tone="warning" title="Live dispatch is disabled in the Kernel (dispatch_enabled == false)">
+            Live execution unavailable
+          </Badge>
+          <span className="nv-chip nv-chip--static" title="Offline mock catalog entry; the mock workflow does not route models">
+            <Sparkles size={14} aria-hidden="true" />
+            <span className="nv-chip__label">Mock · e2e-mock-model</span>
+          </span>
+          <Button
+            variant="primary"
+            disabled={empty || mockBusy}
+            onClick={submit}
+            aria-label="Run Mock"
+            title={`Run isolated mock workflow (${modKeys("Enter").join("+")})`}
+            icon={mockBusy ? <Loader2 size={15} className="nv-spin" /> : <ArrowUp size={15} />}
           >
-            <t.icon size={14} aria-hidden="true" />
-            {t.label}
-          </button>
-        ))}
-        <span className="nv-composer__spacer" />
-        <Badge tone="warning" title="Live dispatch is disabled in the Kernel (dispatch_enabled == false)">
-          Live execution unavailable
-        </Badge>
-        <span className="nv-chip nv-chip--static" title="Offline mock catalog entry; the mock workflow does not route models">
-          <Sparkles size={14} aria-hidden="true" /> Mock · e2e-mock-model
-        </span>
-        <Button
-          variant="primary"
-          disabled={empty || mockBusy}
-          onClick={submit}
-          aria-label="Run Mock"
-          title={`Run isolated mock workflow (${modKeys("Enter").join("+")})`}
-          icon={mockBusy ? <Loader2 size={15} className="nv-spin" /> : <ArrowUp size={15} />}
-        >
-          Run Mock
-        </Button>
+            Run Mock
+          </Button>
+        </div>
       </div>
       <div className="nv-composer__hint">
         Runs the isolated native mock workflow only. No provider traffic. <Kbd keys={modKeys("↵")} />
