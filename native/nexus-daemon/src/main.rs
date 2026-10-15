@@ -57,7 +57,7 @@ fn usage() -> i32 {
     println!(
         "         [--enable-process]   (A3.4 sandboxed processes; needs the approver flags above)\n         [--dep-cache <dir>]  (A3.5 read-only verified dependency cache, populated out of band)"
     );
-    println!("         [--cap-handoff PATH]");
+    println!("         [--cap-handoff PATH [--cap-handoff-gid GID|NAME]]");
     println!("Trust modes: readonly (default, privileged mutations disabled) |");
     println!("  shadow-test (explicit opt-in, per-request issuer authentication).");
     println!("--allowed-uids gates privileged commands by peer UID (SO_PEERCRED);");
@@ -103,6 +103,19 @@ fn log_line_startup(msg: &str) {
         "{}",
         serde_json::json!({"daemon": "nexusd", "event": "startup", "detail": msg})
     );
+}
+
+/// A4.1: withdraw credential files this process published. Only regular files
+/// (never symlinks, directories or other nodes) at the exact published paths
+/// are removed; failures are ignored (rotation per start bounds any residue).
+fn remove_published_credentials(paths: &[std::path::PathBuf]) {
+    for p in paths {
+        if let Ok(m) = std::fs::symlink_metadata(p) {
+            if m.file_type().is_file() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
 }
 
 fn fatal(code: &str, message: &str) -> i32 {
@@ -166,6 +179,19 @@ fn run(args: &[String]) -> i32 {
     // UID. Validated below (requires sharing + shadow-test + placement
     // inside the shared socket directory).
     let cap_handoff = flag(args, "--cap-handoff");
+    // A4.1: dedicated issuer-credential group. Decouples issuer credential
+    // access from socket-group membership: the handoff then lives in its OWN
+    // 0750 directory (daemon + this group), never in the shared socket dir.
+    let handoff_gid_flag = match flag_str(args, "--cap-handoff-gid") {
+        Some(spec) => match parse_socket_group(&spec) {
+            Ok(gid) => Some(gid),
+            Err(e) => {
+                eprintln!("{e}");
+                return 2;
+            }
+        },
+        None => None,
+    };
     // A2.1 transport gate: explicit UID allowlist for privileged commands.
     // Absence preserves the documented same-UID limitation (BLOCKED for
     // production); presence is enforced per-connection via SO_PEERCRED.
@@ -280,6 +306,13 @@ fn run(args: &[String]) -> i32 {
     // Closure S3 handoff placement: the file must sit directly inside the
     // validated shared socket directory -- never in the DataRoot, never
     // elsewhere. Canonical comparison defeats dotdot and parent-symlink escapes.
+    let mut handoff_dir_canon: Option<std::path::PathBuf> = None;
+    if handoff_gid_flag.is_some() && cap_handoff.is_none() {
+        return fatal(
+            "bad-config",
+            "--cap-handoff-gid requires --cap-handoff (failing closed)",
+        );
+    }
     if let Some(ref handoff) = cap_handoff {
         if trust_mode != TrustMode::ShadowTest {
             return fatal(
@@ -305,13 +338,42 @@ fn run(args: &[String]) -> i32 {
                 );
             }
         };
-        match std::fs::canonicalize(h_parent) {
-            Ok(canon) if canon == *sock_canon => {}
-            _ => {
-                return fatal(
-                    "insecure-socket-dir",
-                    "cap handoff must live directly inside the shared socket directory (failing closed)",
-                );
+        match handoff_gid_flag {
+            None => match std::fs::canonicalize(h_parent) {
+                Ok(canon) if canon == *sock_canon => {}
+                _ => {
+                    return fatal(
+                        "insecure-socket-dir",
+                        "cap handoff must live directly inside the shared socket directory (failing closed)",
+                    );
+                }
+            },
+            Some(hg) => {
+                // A4.1 dedicated credential directory: exact 0750 daemon:hg,
+                // no symlink leaf, distinct from the socket dir and outside
+                // (and not containing) the DataRoot.
+                if Some(hg) == socket_group {
+                    return fatal(
+                        "bad-config",
+                        "--cap-handoff-gid equals --socket-group: socket membership would grant issuer credential access (failing closed)",
+                    );
+                }
+                match verify_socket_dir(h_parent, hg) {
+                    Err(e) => return fatal("insecure-socket-dir", &e),
+                    Ok(canon) => {
+                        if canon == *sock_canon
+                            || canon == dataroot_canon
+                            || canon.starts_with(&dataroot_canon)
+                            || dataroot_canon.starts_with(&canon)
+                        {
+                            return fatal(
+                                "insecure-socket-dir",
+                                "issuer credential directory must differ from the socket directory and live outside the DataRoot (failing closed)",
+                            );
+                        }
+                        handoff_dir_canon = Some(canon);
+                    }
+                }
             }
         }
         if handoff == &layout.cap {
@@ -394,6 +456,18 @@ fn run(args: &[String]) -> i32 {
         }
     }
     let mut socket_guard = SocketGuard(layout.socket.clone(), true);
+    // A4.1: credentials this process published (and ONLY those exact paths)
+    // are withdrawn on any startup refusal after publication. Symlinks and
+    // non-regular nodes are never followed or removed.
+    struct CredGuard(Vec<std::path::PathBuf>, bool);
+    impl Drop for CredGuard {
+        fn drop(&mut self) {
+            if self.1 {
+                remove_published_credentials(&self.0);
+            }
+        }
+    }
+    let mut cred_guard = CredGuard(Vec::new(), true);
     if listener.set_nonblocking(true).is_err() {
         return fatal("store-error", "socket mode failed");
     }
@@ -509,12 +583,61 @@ fn run(args: &[String]) -> i32 {
                 Err(_) => return fatal("bad-config", "--approver-cap-gid must be a numeric gid"),
             },
         };
+        if let Some(ag) = approver_gid {
+            // A4.1: the approver credential group must be disjoint from the
+            // issuer credential group, and the issuer handoff must not be
+            // readable via the socket group the approver must join to connect.
+            let issuer_cred_gid = handoff_gid_flag.or(socket_group);
+            if cap_handoff.is_some() && Some(ag) == issuer_cred_gid {
+                return fatal(
+                    "bad-config",
+                    "--approver-cap-gid equals the issuer credential group (failing closed)",
+                );
+            }
+            if cap_handoff.is_some() && handoff_gid_flag.is_none() {
+                return fatal(
+                    "bad-config",
+                    "approver credential with an issuer handoff requires --cap-handoff-gid: the approver must join the socket group to connect and would read a socket-group handoff (failing closed)",
+                );
+            }
+            let a_parent = match cap_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                Some(p) => p,
+                None => {
+                    return fatal(
+                        "insecure-socket-dir",
+                        "approver capability path has no parent directory (failing closed)",
+                    )
+                }
+            };
+            match verify_socket_dir(a_parent, ag) {
+                Err(e) => {
+                    return fatal(
+                        "insecure-socket-dir",
+                        &format!("approver credential directory: {e}"),
+                    )
+                }
+                Ok(canon) => {
+                    let clash = Some(&canon) == socket_dir_canon.as_ref()
+                        || Some(&canon) == handoff_dir_canon.as_ref()
+                        || canon == dataroot_canon
+                        || canon.starts_with(&dataroot_canon)
+                        || dataroot_canon.starts_with(&canon);
+                    if clash {
+                        return fatal(
+                            "insecure-socket-dir",
+                            "approver credential directory must be separate from the socket, issuer credential and DataRoot directories (failing closed)",
+                        );
+                    }
+                }
+            }
+        }
         match nexus_daemon::IssuerAuth::generate() {
             Ok(a) => {
                 let stored = match approver_gid {
                     Some(gid) => write_handoff_file(cap_path, &a.key_hex(), gid),
                     None => write_cap_file(cap_path, &a.key_hex()),
                 };
+                cred_guard.0.push(cap_path.clone());
                 if let Err(e) = stored {
                     return fatal(
                         "store-error",
@@ -529,7 +652,7 @@ fn run(args: &[String]) -> i32 {
     // Closure S3: group-readable handoff copy inside the shared socket dir.
     // Same per-incarnation key, rotated every start like the primary cap.
     if let Some(ref handoff) = cap_handoff {
-        let gid = match socket_group {
+        let gid = match handoff_gid_flag.or(socket_group) {
             Some(g) => g,
             None => {
                 return fatal(
@@ -547,6 +670,7 @@ fn run(args: &[String]) -> i32 {
                 )
             }
         };
+        cred_guard.0.push(handoff.clone());
         if let Err(e) = write_handoff_file(handoff, &key_hex, gid) {
             return fatal("insecure-socket-dir", &e);
         }
@@ -693,13 +817,12 @@ fn run(args: &[String]) -> i32 {
     println!("{ready}");
     let _ = std::io::stdout().flush();
     socket_guard.1 = false;
+    cred_guard.1 = false;
     serve(listener, Arc::clone(&daemon), shutdown);
     let _ = std::fs::remove_file(&layout.socket);
     // Closure S3: remove the group-readable key copy on shutdown (best
     // effort, like the socket). Rotation per start bounds any residue.
-    if let Some(ref handoff) = daemon.cap_handoff {
-        let _ = std::fs::remove_file(handoff);
-    }
+    remove_published_credentials(&cred_guard.0);
     // Explicitly release the DataRoot before exit so a supervisor restart
     // never observes a stale owner. Ordinary termination recovers cleanly;
     // only untrusted persistence latches reconciliation (never silent repair).

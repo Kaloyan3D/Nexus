@@ -10,21 +10,25 @@ After=network.target
 Type=simple
 User=nexusd
 Group=nexusd
-SupplementaryGroups=nexus-issuer
+SupplementaryGroups=nexus-issuer nexus-issuercred
 UMask=0077
-RuntimeDirectory=nexusd
+RuntimeDirectory=nexusd nexusd-cred
 RuntimeDirectoryMode=0750
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/nexusd /run/nexusd
+ReadWritePaths=/var/lib/nexusd /run/nexusd /run/nexusd-cred
 # RuntimeDirectory creates /run/nexusd as nexusd:nexusd; the daemon requires
 # nexusd:nexus-issuer 0750, so hand the group over before startup. (chgrp to a
 # member group needs no privilege; SupplementaryGroups above grants membership.)
 ExecStartPre=/bin/chgrp nexus-issuer /run/nexusd
 ExecStartPre=/bin/chmod 0750 /run/nexusd
-ExecStart=/usr/local/bin/nexusd --db /var/lib/nexusd/k.db --witness /var/lib/nexusd/k.witness.db --socket /run/nexusd/n.sock --cap /var/lib/nexusd/issuer.cap --trust-mode shadow-test --allowed-uids ISSUER_UID_HERE --socket-group nexus-issuer --cap-handoff /run/nexusd/issuer.handoff
+# A4.1: issuer credential lives in its OWN directory (group nexus-issuercred,
+# members: nexusd + the issuer only). Socket-group membership grants nothing here.
+ExecStartPre=/bin/chgrp nexus-issuercred /run/nexusd-cred
+ExecStartPre=/bin/chmod 0750 /run/nexusd-cred
+ExecStart=/usr/local/bin/nexusd --db /var/lib/nexusd/k.db --witness /var/lib/nexusd/k.witness.db --socket /run/nexusd/n.sock --cap /var/lib/nexusd/issuer.cap --trust-mode shadow-test --allowed-uids ISSUER_UID_HERE --socket-group nexus-issuer --cap-handoff /run/nexusd-cred/issuer.handoff --cap-handoff-gid nexus-issuercred
 Restart=on-failure
 RestartSec=2
 StandardOutput=journal

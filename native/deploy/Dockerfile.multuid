@@ -29,6 +29,11 @@ RUN groupadd -r nexus-issuer-test \
     # The approver must be in the socket group to connect (the issuer
     # allow-list, not the group, is the authority; see A3.6-EVIDENCE.md).
     && usermod -aG nexus-issuer-test nexus-approver-test \
+    # A4.1: dedicated issuer-credential group (daemon + issuer ONLY; never the
+    # socket group, so socket membership grants no credential access).
+    && groupadd -r nexus-issuercred-test \
+    && usermod -aG nexus-issuercred-test nexusd-test \
+    && usermod -aG nexus-issuercred-test nexus-issuer-test \
     && id nexus-approver-test && id nexusd-test && id nexus-issuer-test && id nexus-bystander-test && id nexus-untrusted-test
 
 WORKDIR /src

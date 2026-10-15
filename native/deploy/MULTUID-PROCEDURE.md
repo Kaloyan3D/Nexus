@@ -57,6 +57,11 @@ usermod -aG nexus-approver-test nexusd-test
 # --allowed-uids allow-list, not the group; the issuer handoff becomes readable
 # to it, which the peer check makes harmless):
 usermod -aG nexus-issuer-test nexus-approver-test
+# A4.1 dedicated issuer-credential group (daemon + issuer only; NOT the socket
+# group, NOT the approver): socket membership grants no credential access.
+groupadd -r nexus-issuercred-test
+usermod -aG nexus-issuercred-test nexusd-test
+usermod -aG nexus-issuercred-test nexus-issuer-test
 id nexusd-test nexus-issuer-test nexus-bystander-test nexus-untrusted-test
 
 # 2. Tooling the harness shells out to: runuser (util-linux), python3, cat/tee/ls.

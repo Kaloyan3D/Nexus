@@ -24,6 +24,7 @@ P
 cat >> "$M/etc/group" <<G
 nexusd-test:x:20001:
 nexus-issuer-test:x:20002:nexusd-test,nexus-bystander-test,nexus-approver-test
+nexus-issuercred-test:x:20006:nexusd-test,nexus-issuer-test
 nexus-bystander-test:x:20003:
 nexus-untrusted-test:x:20004:
 nexus-approver-test:x:20005:nexusd-test

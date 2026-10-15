@@ -32,6 +32,9 @@ const UNTRUSTED_USER: &str = "nexus-untrusted-test";
 /// A3.3: independent write approver (own group, NOT in the issuer group).
 const APPROVER_USER: &str = "nexus-approver-test";
 const APPROVER_GROUP: &str = "nexus-approver-test";
+/// A4.1: dedicated issuer-credential group. Members: daemon + issuer ONLY
+/// (never the socket group, the approver or the bystander).
+const ISSUER_CRED_GROUP: &str = "nexus-issuercred-test";
 
 struct Host {
     nexusd_uid: u32,
@@ -39,6 +42,7 @@ struct Host {
     bystander_uid: u32,
     untrusted_uid: u32,
     issuer_gid: u32,
+    issuercred_gid: u32,
 }
 
 fn uid_of(user: &str) -> Option<u32> {
@@ -119,12 +123,17 @@ fn require_multuid_host(test: &str) -> Option<Host> {
         println!("NOT RUN ({test}): group {ISSUER_GROUP} is missing");
         return None;
     };
+    let Some(issuercred_gid) = gid_of(ISSUER_CRED_GROUP) else {
+        println!("NOT RUN ({test}): group {ISSUER_CRED_GROUP} is missing");
+        return None;
+    };
     let h = Host {
         nexusd_uid,
         issuer_uid,
         bystander_uid,
         untrusted_uid,
         issuer_gid,
+        issuercred_gid,
     };
     // Distinctness is the whole point: refuse to run if the principals
     // collapse onto one UID (mis-provisioned host).
@@ -292,9 +301,14 @@ fn spawn_as(h: &Host, trust: &str) -> TestDaemon {
     own(&sockdir, 0o750, h.nexusd_uid, h.issuer_gid);
     let db = dataroot.join("k.db");
     let witness = dataroot.join("k.witness.db");
+    // A4.1: the issuer handoff lives in its OWN 0750 daemon:issuercred dir,
+    // not in the socket directory the approver/bystander can traverse.
+    let credir = dir.join("issuercred");
+    std::fs::create_dir_all(&credir).expect("mkdir");
+    own(&credir, 0o750, h.nexusd_uid, h.issuercred_gid);
     let socket = sockdir.join("n.sock");
     let cap = dataroot.join("issuer.cap");
-    let handoff = sockdir.join("issuer.handoff");
+    let handoff = credir.join("issuer.handoff");
     let argv = vec![
         "--db".to_owned(),
         db.to_string_lossy().into_owned(),
@@ -312,6 +326,8 @@ fn spawn_as(h: &Host, trust: &str) -> TestDaemon {
         h.issuer_gid.to_string(),
         "--cap-handoff".to_owned(),
         handoff.to_string_lossy().into_owned(),
+        "--cap-handoff-gid".to_owned(),
+        h.issuercred_gid.to_string(),
     ];
     let mut cmd = Command::new("runuser");
     cmd.arg("-u").arg(DAEMON_USER).arg("--").arg(nexusd_bin());
@@ -1127,7 +1143,7 @@ fn multuid_credential_files_have_exact_owners_and_cross_identity_reads_fail() {
     let (u, g, m) = stat_of(&d.handoff);
     assert_eq!(
         (u, g, m),
-        (t.h.nexusd_uid, t.h.issuer_gid, 0o640),
+        (t.h.nexusd_uid, t.h.issuercred_gid, 0o640),
         "issuer handoff"
     );
     let (u, g, m) = stat_of(&d.cap);
@@ -1161,16 +1177,15 @@ fn multuid_approver_identity_cannot_issue_even_holding_the_issuer_key() {
     };
     let (d, _base, _acap) = spawn_tools_as(&t);
     let issuer_cap = d.read_handoff();
-    // Topology: the approver UID must be in the socket group to connect at
-    // all, which also makes the 0640 issuer handoff readable to it. The
-    // control is the daemon's SO_PEERCRED allow-list, not file secrecy.
-    let seen = cat_as(APPROVER_USER, &d.handoff);
-    println!(
-        "approver can read issuer handoff via socket group: {}",
-        seen.is_ok()
+    // A4.1: the approver is in the socket group (it must connect) but the
+    // issuer handoff is in a separate credential group: the filesystem now
+    // denies the read. The key below is therefore a STOLEN key (root-read),
+    // and the SO_PEERCRED allow-list must still refuse it independently.
+    assert!(
+        cat_as(APPROVER_USER, &d.handoff).is_err(),
+        "approver must not read the issuer handoff via socket-group membership"
     );
-    let key = seen.unwrap_or(issuer_cap.clone());
-    let key = key.trim().to_owned();
+    let key = issuer_cap.clone();
     let r = send_as(
         APPROVER_USER,
         &d.socket,
@@ -1205,7 +1220,10 @@ fn multuid_restart_preserves_ownership_and_privilege_changes_apply() {
     let old_approver = root_read(&acap);
     d.restart();
     // Ownership/modes are re-established, not inherited from luck.
-    assert_eq!(stat_of(&d.handoff), (t.h.nexusd_uid, t.h.issuer_gid, 0o640));
+    assert_eq!(
+        stat_of(&d.handoff),
+        (t.h.nexusd_uid, t.h.issuercred_gid, 0o640)
+    );
     assert_eq!(stat_of(&acap), (t.h.nexusd_uid, t.approver_gid, 0o640));
     assert_eq!(stat_of(&d.cap).0, t.h.nexusd_uid);
     let new_issuer = d.read_handoff();
@@ -1265,6 +1283,7 @@ fn multuid_production_configuration_refuses_overlapping_or_test_only_approval() 
     // Fresh paths so nothing collides with the running daemon.
     let dir = d.dir.join("prod2d");
     let sock = d.dir.join("prod2s");
+    let cred2 = d.dir.join("prod2c");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::create_dir_all(&sock).unwrap();
     {
@@ -1277,6 +1296,8 @@ fn multuid_production_configuration_refuses_overlapping_or_test_only_approval() 
         };
         own(&dir, 0o700, t.h.nexusd_uid);
         own(&sock, 0o750, t.h.issuer_gid);
+        std::fs::create_dir_all(&cred2).unwrap();
+        own(&cred2, 0o750, t.h.issuercred_gid);
     }
     let swap = |argv: &mut Vec<String>, flag: &str, val: String| {
         let i = argv.iter().position(|a| a == flag).unwrap();
@@ -1305,7 +1326,7 @@ fn multuid_production_configuration_refuses_overlapping_or_test_only_approval() 
     swap(
         &mut base_argv,
         "--cap-handoff",
-        sock.join("h").to_string_lossy().into_owned(),
+        cred2.join("h").to_string_lossy().into_owned(),
     );
     swap(
         &mut base_argv,
@@ -1544,4 +1565,391 @@ fn multuid_dependency_cache_is_single_owner_and_wrong_owner_fails_closed() {
         assert!(!o.status.success(), "{who} listed the cache");
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------------
+// A4.1 credential isolation. The issuer handoff lives in a dedicated
+// `daemon:issuercred 0750` directory; the approver credential in a dedicated
+// `daemon:approver 0750` directory; the socket group (which the approver
+// MUST join to connect) grants no credential access at all.
+// ---------------------------------------------------------------------------
+
+fn ls_as(user: &str, dir: &Path) -> bool {
+    run_as(user, "ls", &[&dir.to_string_lossy()])
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn denied_reply(user: &str, socket: &Path, key: &str) -> serde_json::Value {
+    send_as(
+        user,
+        socket,
+        &signed_frame(
+            key,
+            "acquire",
+            serde_json::json!({"taskInstanceId": "a41-x", "backend": "native"}),
+        ),
+    )
+    .expect("a socket-group member must be able to connect")
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_socket_membership_grants_no_credential_access_before_and_after_restart() {
+    let Some(t) = require_tool_host("a41-socket-membership") else {
+        return;
+    };
+    let (mut d, _base, acap) = spawn_tools_as(&t);
+    let credir = d.handoff.parent().unwrap().to_path_buf();
+    let adir = acap.parent().unwrap().to_path_buf();
+    for round in 0..2 {
+        if round == 1 {
+            d.restart();
+        }
+        let issuer_key = d.read_handoff();
+        let approver_key = root_read(&acap);
+        // Socket-group members (approver, bystander) CAN connect: the reply is
+        // a refusal, not a transport error. This is the premise being tested.
+        for who in [APPROVER_USER, BYSTANDER_USER] {
+            let r = denied_reply(who, &d.socket, &issuer_key);
+            assert_eq!(code_of(&r), "peer-unauthorized", "{who}: {r}");
+            // ...and the connection grants NO credential access.
+            assert!(
+                cat_as(who, &d.handoff).is_err(),
+                "{who} read issuer handoff"
+            );
+            assert!(cat_as(who, &acap).is_err() || who == APPROVER_USER);
+            assert!(
+                !ls_as(who, &credir),
+                "{who} listed the issuer credential dir"
+            );
+        }
+        // The approver reads ONLY its own credential; the issuer only its own.
+        assert_eq!(cat_as(APPROVER_USER, &acap).unwrap().trim(), approver_key);
+        assert_eq!(cat_as(ISSUER_USER, &d.handoff).unwrap().trim(), issuer_key);
+        assert!(
+            cat_as(ISSUER_USER, &acap).is_err(),
+            "issuer read approver cap"
+        );
+        assert!(cat_as(APPROVER_USER, &d.handoff).is_err());
+        assert!(!ls_as(ISSUER_USER, &adir), "issuer listed approver dir");
+        assert!(!ls_as(APPROVER_USER, &credir));
+        // Untrusted: no connect, no read, no listing, of anything.
+        assert!(send_as(
+            UNTRUSTED_USER,
+            &d.socket,
+            &signed_frame(&issuer_key, "health", serde_json::json!({}))
+        )
+        .is_err());
+        for p in [&d.handoff, &acap, &d.cap] {
+            assert!(cat_as(UNTRUSTED_USER, p).is_err());
+        }
+        assert!(!ls_as(UNTRUSTED_USER, &credir) && !ls_as(UNTRUSTED_USER, &adir));
+        // Exact modes; never world-accessible; directories exactly 0750.
+        assert_eq!(
+            stat_of(&d.handoff),
+            (t.h.nexusd_uid, t.h.issuercred_gid, 0o640)
+        );
+        assert_eq!(stat_of(&acap), (t.h.nexusd_uid, t.approver_gid, 0o640));
+        assert_eq!(
+            stat_of(&credir),
+            (t.h.nexusd_uid, t.h.issuercred_gid, 0o750)
+        );
+        assert_eq!(stat_of(&adir), (t.h.nexusd_uid, t.approver_gid, 0o750));
+        assert_ne!(
+            t.h.issuercred_gid, t.h.issuer_gid,
+            "credential group != socket group"
+        );
+        assert_ne!(t.h.issuercred_gid, t.approver_gid);
+    }
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_each_role_credential_is_refused_for_the_other_roles_commands() {
+    let Some(t) = require_tool_host("a41-cross-role") else {
+        return;
+    };
+    let (mut d, _base, acap) = spawn_tools_as(&t);
+    // Enable sandboxed processes too so process-scope-approve is live.
+    d.argv.push("--enable-process".to_owned());
+    d.restart();
+    let issuer_key = d.read_handoff();
+    let approver_key = root_read(&acap);
+    let digest = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"x"));
+    let approve = |cmd: &str| serde_json::json!({"commandId": "c", "workspaceRootDigest": digest, "maxWriteBytes": 1, "cmd": cmd});
+    let _ = approve;
+    // Issuer UID + issuer key -> approver commands: refused on the key.
+    for cmd in ["write-scope-approve", "process-scope-approve"] {
+        let r = send_as(
+            ISSUER_USER,
+            &d.socket,
+            &signed_frame(
+                &issuer_key,
+                cmd,
+                serde_json::json!({"commandId": "c", "workspaceRootDigest": digest, "maxWriteBytes": 1}),
+            ),
+        )
+        .expect("t");
+        assert_eq!(code_of(&r), "issuer-untrusted", "{cmd}: {r}");
+        // Issuer UID + a STOLEN approver key: key is valid, peer UID is not.
+        let r = send_as(
+            ISSUER_USER,
+            &d.socket,
+            &signed_frame(
+                &approver_key,
+                cmd,
+                serde_json::json!({"commandId": "c2", "workspaceRootDigest": digest, "maxWriteBytes": 1}),
+            ),
+        )
+        .expect("t");
+        assert_eq!(code_of(&r), "peer-unauthorized", "{cmd} stolen: {r}");
+    }
+    // Approver UID + approver key (and + stolen issuer key) -> issuer grants.
+    // The approver key fails issuer authentication; a stolen issuer key
+    // authenticates but the approver PEER is not on the issuer allow-list.
+    for (key, want) in [
+        (&approver_key, "issuer-untrusted"),
+        (&issuer_key, "peer-unauthorized"),
+    ] {
+        for cmd in ["acquire", "workspace-bind", "tool-execute", "tool-revoke"] {
+            let r = send_as(
+                APPROVER_USER,
+                &d.socket,
+                &signed_frame(
+                    key,
+                    cmd,
+                    serde_json::json!({"taskInstanceId": "a41-y", "backend": "native"}),
+                ),
+            )
+            .expect("t");
+            assert_eq!(code_of(&r), want, "{cmd}: {r}");
+        }
+    }
+    // Approver key presented by the issuer UID to an issuer command: the
+    // approver capability can never satisfy issuer authentication.
+    let r = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(
+            &approver_key,
+            "acquire",
+            serde_json::json!({"taskInstanceId": "a41-z", "backend": "native"}),
+        ),
+    )
+    .expect("t");
+    assert_eq!(code_of(&r), "issuer-untrusted", "{r}");
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_credentials_never_appear_in_responses_or_diagnostics() {
+    let Some(t) = require_tool_host("a41-no-leak") else {
+        return;
+    };
+    let (mut d, _base, acap) = spawn_tools_as(&t);
+    let issuer_key = d.read_handoff();
+    let approver_key = root_read(&acap);
+    let mut seen = String::new();
+    for cmd in ["health", "status", "readiness", "journal", "tool-events"] {
+        let r = send_as(
+            ISSUER_USER,
+            &d.socket,
+            &signed_frame(&issuer_key, cmd, serde_json::json!({})),
+        )
+        .expect("t");
+        seen.push_str(&r.to_string());
+    }
+    // Refusals (wrong peer / wrong key) must not echo key material either.
+    seen.push_str(&denied_reply(APPROVER_USER, &d.socket, &issuer_key).to_string());
+    seen.push_str(
+        &send_as(
+            ISSUER_USER,
+            &d.socket,
+            &signed_frame(
+                &approver_key,
+                "acquire",
+                serde_json::json!({"taskInstanceId": "q", "backend": "native"}),
+            ),
+        )
+        .expect("t")
+        .to_string(),
+    );
+    terminate(&mut d.child);
+    let _ = d.child.wait();
+    use std::io::Read;
+    let mut diag = String::new();
+    if let Some(mut e) = d.child.stderr.take() {
+        let _ = e.read_to_string(&mut diag);
+    }
+    if let Some(mut o) = d.child.stdout.take() {
+        let _ = o.read_to_string(&mut diag);
+    }
+    seen.push_str(&diag);
+    assert!(!seen.contains(&issuer_key), "issuer key leaked");
+    assert!(!seen.contains(&approver_key), "approver key leaked");
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_a41_misconfiguration_and_hostile_paths_fail_closed_without_residue() {
+    let Some(t) = require_tool_host("a41-config") else {
+        return;
+    };
+    let (d, _base, acap) = spawn_tools_as(&t);
+    let argv0: Vec<String> = d.argv.clone();
+    // Fresh isolated layout so nothing collides with the running daemon.
+    let root = d.dir.join("a41cfg");
+    std::fs::create_dir_all(&root).unwrap();
+    let own = |p: &Path, mode: u32, uid: u32, gid: u32| {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+        let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::chown(c.as_ptr(), uid, gid) }, 0);
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    own(&root, 0o755, t.h.nexusd_uid, t.h.nexusd_uid);
+    let mk = |name: &str, mode: u32, gid: u32| {
+        let p = root.join(name);
+        std::fs::create_dir_all(&p).unwrap();
+        own(&p, mode, t.h.nexusd_uid, gid);
+        p
+    };
+    let data = mk("data", 0o700, t.h.nexusd_uid);
+    let sock = mk("sock", 0o750, t.h.issuer_gid);
+    let cred = mk("cred", 0o750, t.h.issuercred_gid);
+    let adir = mk("adir", 0o750, t.approver_gid);
+    let set = |argv: &mut Vec<String>, flag: &str, val: String| {
+        let i = argv.iter().position(|a| a == flag).unwrap();
+        argv[i + 1] = val;
+    };
+    let s = |p: PathBuf| p.to_string_lossy().into_owned();
+    let mut base = argv0.clone();
+    set(&mut base, "--db", s(data.join("k.db")));
+    set(&mut base, "--witness", s(data.join("w.db")));
+    set(&mut base, "--cap", s(data.join("i.cap")));
+    set(&mut base, "--socket", s(sock.join("n.sock")));
+    set(&mut base, "--cap-handoff", s(cred.join("h")));
+    set(&mut base, "--approver-cap", s(adir.join("a.cap")));
+    let run = |argv: &[String]| -> (bool, String) {
+        let o = Command::new("runuser")
+            .arg("-u")
+            .arg(DAEMON_USER)
+            .arg("--")
+            .arg(nexusd_bin())
+            .args(argv)
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn");
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr),
+        )
+    };
+    let no_residue = |label: &str| {
+        for p in [sock.join("n.sock"), cred.join("h"), adir.join("a.cap")] {
+            assert!(
+                std::fs::symlink_metadata(&p).is_err(),
+                "{label}: residue {p:?}"
+            );
+        }
+    };
+    // 1. Issuer credential group == socket group: refused.
+    let mut a = base.clone();
+    set(&mut a, "--cap-handoff-gid", t.h.issuer_gid.to_string());
+    let (ok, out) = run(&a);
+    assert!(!ok && out.contains("equals --socket-group"), "{out}");
+    no_residue("gid==socket");
+    // 2. Approver credential group == issuer credential group: refused.
+    let mut b = base.clone();
+    set(&mut b, "--approver-cap-gid", t.h.issuercred_gid.to_string());
+    let (ok, out) = run(&b);
+    assert!(!ok && out.contains("issuer credential group"), "{out}");
+    no_residue("approver==issuercred");
+    // 3. Approver credential directory collides with the issuer credential dir.
+    let mut c = base.clone();
+    set(&mut c, "--approver-cap", s(cred.join("a.cap")));
+    let (ok, out) = run(&c);
+    assert!(!ok, "{out}");
+    no_residue("approver in credir");
+    // 4. Approver credential in the socket directory: refused (the approver
+    //    must be in the socket group; this layout would couple the two).
+    let mut e = base.clone();
+    set(&mut e, "--approver-cap", s(sock.join("a.cap")));
+    let (ok, out) = run(&e);
+    assert!(!ok, "{out}");
+    no_residue("approver in sockdir");
+    // 5. Credential directory is a symlink to a valid directory: refused.
+    let link = root.join("credlink");
+    std::os::unix::fs::symlink(&cred, &link).unwrap();
+    let mut f = base.clone();
+    set(&mut f, "--cap-handoff", s(link.join("h")));
+    // (the parent of the handoff is the symlink itself)
+    let (ok, out) = run(&f);
+    assert!(!ok, "{out}");
+    no_residue("symlinked credir");
+    // 6. Credential directory with loosened mode (0770): refused.
+    own(&cred, 0o770, t.h.nexusd_uid, t.h.issuercred_gid);
+    let (ok, out) = run(&base);
+    assert!(!ok && out.contains("0750"), "{out}");
+    no_residue("0770 credir");
+    own(&cred, 0o750, t.h.nexusd_uid, t.h.issuercred_gid);
+    // 7. Wrong credential directory group: refused.
+    own(&cred, 0o750, t.h.nexusd_uid, t.h.issuer_gid);
+    let (ok, out) = run(&base);
+    assert!(!ok, "{out}");
+    no_residue("wrong-group credir");
+    own(&cred, 0o750, t.h.nexusd_uid, t.h.issuercred_gid);
+    // 8. Failed startup AFTER the approver credential is published (handoff
+    //    leaf is a planted symlink): the published approver credential is
+    //    withdrawn, the symlink and its decoy target are left untouched.
+    let decoy = root.join("decoy");
+    std::fs::write(&decoy, "keep").unwrap();
+    own(&decoy, 0o644, t.h.nexusd_uid, t.h.nexusd_uid);
+    std::os::unix::fs::symlink(&decoy, cred.join("h")).unwrap();
+    let (ok, out) = run(&base);
+    assert!(!ok && out.contains("symlink"), "{out}");
+    assert!(
+        std::fs::symlink_metadata(adir.join("a.cap")).is_err(),
+        "approver cred left behind"
+    );
+    assert!(!sock.join("n.sock").exists(), "socket left behind");
+    assert_eq!(std::fs::read_to_string(&decoy).unwrap(), "keep");
+    assert!(std::fs::symlink_metadata(cred.join("h"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    std::fs::remove_file(cred.join("h")).unwrap();
+    // 9. Pre-existing permissive regular file + hardlink at the handoff path:
+    //    replaced atomically with a fresh 0640 inode; the hardlink keeps only
+    //    stale bytes. (Run the real daemon briefly.)
+    let planted = cred.join("h");
+    std::fs::write(&planted, "stale-secret").unwrap();
+    own(&planted, 0o666, t.h.nexusd_uid, t.h.nexusd_uid);
+    let alias = cred.join("alias");
+    std::fs::hard_link(&planted, &alias).unwrap();
+    let mut cmd = Command::new("runuser");
+    cmd.arg("-u")
+        .arg(DAEMON_USER)
+        .arg("--")
+        .arg(nexusd_bin())
+        .args(&base);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    poll_ready(&sock.join("n.sock"));
+    assert_eq!(
+        stat_of(&planted),
+        (t.h.nexusd_uid, t.h.issuercred_gid, 0o640)
+    );
+    assert_eq!(std::fs::read_to_string(&alias).unwrap(), "stale-secret");
+    assert_eq!(std::fs::read_to_string(&planted).unwrap().trim().len(), 64);
+    // Orderly shutdown withdraws exactly the published credentials.
+    terminate(&mut child);
+    let _ = child.wait();
+    no_residue("after clean stop");
+    assert!(
+        std::fs::symlink_metadata(&alias).is_ok(),
+        "unrelated sibling must survive"
+    );
+    let _ = acap;
 }

@@ -77,7 +77,8 @@ nexusd --db /var/lib/nexusd/k.db \
   --trust-mode shadow-test \
   --allowed-uids "$(id -u nexus-issuer)" \
   --socket-group nexus-issuer \
-  --cap-handoff /run/nexusd/issuer.handoff
+  --cap-handoff /run/nexusd-cred/issuer.handoff \
+  --cap-handoff-gid nexus-issuercred
 ```
 
 - `--allowed-uids` lists the **connecting process UIDs** authorized for
@@ -97,6 +98,18 @@ nexusd --db /var/lib/nexusd/k.db \
   authenticates with ZERO read access to the DataRoot or `issuer.cap`.
   Requires `--socket-group` + `shadow-test`; a stolen copy is still
   insufficient without a matching allowlisted peer UID.
+- **A4.1 `--cap-handoff-gid`** places the issuer credential in its own
+  `0750 daemon:<gid>` directory, distinct from the socket directory and the
+  DataRoot. The group must differ from `--socket-group` (and from any
+  `--approver-cap-gid`), and its members are the daemon and the issuer only.
+  Without it the handoff is group-readable by every socket-group member --
+  including the independent approver, which must join the socket group to
+  connect. With an approver credential (`--approver-cap-gid`) the daemon now
+  REFUSES to start unless `--cap-handoff-gid` is set. The approver credential
+  directory must likewise be a separate `0750 daemon:<approver gid>` dir.
+  **Legacy issuer-only mode** (no `--cap-handoff-gid`, no approver credential)
+  keeps the handoff in the socket directory, readable by every socket-group
+  member; use it only when no other identity shares that group.
 - `SO_PEERCRED` authenticates the connecting **process**, never which
   JavaScript module produced a request. Same-UID module confusion (a hostile
   thread/module inside the issuer process) is out of scope of this gate and
