@@ -53,6 +53,10 @@ useradd -r -U -M -s /usr/sbin/nologin nexus-untrusted-test
 groupadd -r nexus-approver-test
 useradd -r -M -s /usr/sbin/nologin -g nexus-approver-test nexus-approver-test
 usermod -aG nexus-approver-test nexusd-test
+# The approver must be in the socket group to connect at all (authority is the
+# --allowed-uids allow-list, not the group; the issuer handoff becomes readable
+# to it, which the peer check makes harmless):
+usermod -aG nexus-issuer-test nexus-approver-test
 id nexusd-test nexus-issuer-test nexus-bystander-test nexus-untrusted-test
 
 # 2. Tooling the harness shells out to: runuser (util-linux), python3, cat/tee/ls.
@@ -144,3 +148,14 @@ unprivileged user namespaces and a delegated cgroup v2 subtree for the daemon
 user (systemd `Delegate=yes`), plus the same five identities. The daemon is
 started with `--enable-process`; it refuses to start if the sandbox
 preflight fails. The test prints `NOT RUN` otherwise.
+
+
+## E. Unprivileged user-namespace host (A3.6, no Docker daemon available)
+
+When no rootful container runtime is available, a user namespace with a
+subuid range gives genuinely distinct kernel UIDs (inner 1..65535 map to
+subuids; inner 0 maps to the invoking user). `native/deploy/multuid-userns.sh`
+builds the passwd/group overlay, delegates a cgroup leaf and runs the suite.
+Caveats: user-manager transient scopes are unavailable to the inner daemon UID,
+so kernel-enforced memory/pids limits are NOT verified there (labelled
+`rlimit-polling`); see A3.6-EVIDENCE.md.

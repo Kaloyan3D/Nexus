@@ -383,6 +383,17 @@ fn run(args: &[String]) -> i32 {
         Ok(l) => l,
         Err(e) => return fatal("store-error", &format!("socket bind failed: {e}")),
     };
+    // A3.6: any startup refusal after the bind (approver/writes/process
+    // configuration is validated later) must not leave a socket node behind.
+    struct SocketGuard(std::path::PathBuf, bool);
+    impl Drop for SocketGuard {
+        fn drop(&mut self) {
+            if self.1 {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+    }
+    let mut socket_guard = SocketGuard(layout.socket.clone(), true);
     if listener.set_nonblocking(true).is_err() {
         return fatal("store-error", "socket mode failed");
     }
@@ -480,9 +491,31 @@ fn run(args: &[String]) -> i32 {
                 "WARNING: approver UIDs overlap issuer UIDs; write approval is NOT independent (test configuration only)",
             );
         }
+        // A3.6: --approver-cap-gid delivers the approver credential to the
+        // approver GROUP (0640). It was documented and passed by the test
+        // topology but silently ignored, leaving the file 0600 and
+        // unreadable by the approver identity. It must never be the issuer
+        // socket group, or issuers could read the approver key.
+        let approver_gid: Option<u32> = match flag_str(args, "--approver-cap-gid") {
+            None => None,
+            Some(g) => match g.parse::<u32>() {
+                Ok(v) if Some(v) != socket_group => Some(v),
+                Ok(_) => {
+                    return fatal(
+                        "bad-config",
+                        "--approver-cap-gid equals the issuer socket group: issuers could read the approver credential (failing closed)",
+                    )
+                }
+                Err(_) => return fatal("bad-config", "--approver-cap-gid must be a numeric gid"),
+            },
+        };
         match nexus_daemon::IssuerAuth::generate() {
             Ok(a) => {
-                if let Err(e) = write_cap_file(cap_path, &a.key_hex()) {
+                let stored = match approver_gid {
+                    Some(gid) => write_handoff_file(cap_path, &a.key_hex(), gid),
+                    None => write_cap_file(cap_path, &a.key_hex()),
+                };
+                if let Err(e) = stored {
                     return fatal(
                         "store-error",
                         &format!("approver capability store failed: {e}"),
@@ -659,6 +692,7 @@ fn run(args: &[String]) -> i32 {
     });
     println!("{ready}");
     let _ = std::io::stdout().flush();
+    socket_guard.1 = false;
     serve(listener, Arc::clone(&daemon), shutdown);
     let _ = std::fs::remove_file(&layout.socket);
     // Closure S3: remove the group-readable key copy on shutdown (best

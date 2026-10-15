@@ -170,10 +170,14 @@ fn send_as(user: &str, socket: &Path, frame: &str) -> Result<serde_json::Value, 
     if !out.status.success() {
         return Err(format!(
             "transport refused: {}",
-            String::from_utf8_lossy(&out.stderr)
-                .chars()
-                .take(300)
-                .collect::<String>()
+            // Keep the TAIL: modern Python prints the offending source line
+            // and carets first, pushing the actual errno message past 300
+            // leading characters (observed on Python 3.14).
+            {
+                let s = String::from_utf8_lossy(&out.stderr).into_owned();
+                let n = s.chars().count();
+                s.chars().skip(n.saturating_sub(300)).collect::<String>()
+            }
         ));
     }
     serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
@@ -1090,4 +1094,454 @@ fn multuid_process_commands_require_issuer_and_approver_and_deny_everyone_else()
     // 6. the daemon user's sandbox cannot read the credential directory.
     let out = run_as(DAEMON_USER, "cat", &[&acap.to_string_lossy()]).expect("run");
     let _ = out; // daemon user owns it; the SANDBOX (not the user) is the boundary tested elsewhere
+}
+
+// ------------------------------------------------------------------------
+// A3.6 additions: identity-level properties the A3.2–A3.5 suites could only
+// exercise as flags. All use real distinct OS identities.
+// ------------------------------------------------------------------------
+
+fn stat_of(path: &Path) -> (u32, u32, u32) {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(path).expect("stat as root");
+    (m.uid(), m.gid(), m.mode() & 0o7777)
+}
+
+fn cat_as(user: &str, path: &Path) -> Result<String, String> {
+    let o = run_as(user, "cat", &[&path.to_string_lossy()]).map_err(|e| e.to_string())?;
+    if o.status.success() {
+        Ok(String::from_utf8_lossy(&o.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&o.stderr).into_owned())
+    }
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_credential_files_have_exact_owners_and_cross_identity_reads_fail() {
+    let Some(t) = require_tool_host("credential-files") else {
+        return;
+    };
+    let (d, _base, acap) = spawn_tools_as(&t);
+    // Daemon-created credentials: exact owner/group/mode.
+    let (u, g, m) = stat_of(&d.handoff);
+    assert_eq!(
+        (u, g, m),
+        (t.h.nexusd_uid, t.h.issuer_gid, 0o640),
+        "issuer handoff"
+    );
+    let (u, g, m) = stat_of(&d.cap);
+    assert_eq!((u, m), (t.h.nexusd_uid, 0o600), "issuer master cap");
+    let _ = g;
+    let (u, g, m) = stat_of(&acap);
+    assert_eq!(
+        (u, g, m),
+        (t.h.nexusd_uid, t.approver_gid, 0o640),
+        "approver cap"
+    );
+    // Issuer cannot read the approver credential nor the issuer master key
+    // or the database; the untrusted identity cannot even traverse.
+    for who in [ISSUER_USER, BYSTANDER_USER, UNTRUSTED_USER] {
+        assert!(cat_as(who, &acap).is_err(), "{who} read approver cap");
+        assert!(cat_as(who, &d.cap).is_err(), "{who} read master cap");
+        assert!(cat_as(who, &d.db).is_err(), "{who} read db");
+    }
+    // The approver identity cannot read the master cap or the database.
+    assert!(cat_as(APPROVER_USER, &d.cap).is_err());
+    assert!(cat_as(APPROVER_USER, &d.db).is_err());
+    // The untrusted identity cannot read the issuer handoff.
+    assert!(cat_as(UNTRUSTED_USER, &d.handoff).is_err());
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_approver_identity_cannot_issue_even_holding_the_issuer_key() {
+    let Some(t) = require_tool_host("approver-cannot-issue") else {
+        return;
+    };
+    let (d, _base, _acap) = spawn_tools_as(&t);
+    let issuer_cap = d.read_handoff();
+    // Topology: the approver UID must be in the socket group to connect at
+    // all, which also makes the 0640 issuer handoff readable to it. The
+    // control is the daemon's SO_PEERCRED allow-list, not file secrecy.
+    let seen = cat_as(APPROVER_USER, &d.handoff);
+    println!(
+        "approver can read issuer handoff via socket group: {}",
+        seen.is_ok()
+    );
+    let key = seen.unwrap_or(issuer_cap.clone());
+    let key = key.trim().to_owned();
+    let r = send_as(
+        APPROVER_USER,
+        &d.socket,
+        &signed_frame(
+            &key,
+            "acquire",
+            serde_json::json!({"taskInstanceId": "mu-x", "backend": "native"}),
+        ),
+    )
+    .expect("transport");
+    assert_eq!(code_of(&r), "peer-unauthorized", "{r}");
+    // And an issuer UID presenting the issuer key to an approver command is
+    // refused on the key, not merely on the peer.
+    let digest = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"x"));
+    let r = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(&issuer_cap, "write-scope-approve", serde_json::json!({"commandId": "c", "workspaceRootDigest": digest, "maxWriteBytes": 1})),
+    )
+    .expect("transport");
+    assert_eq!(code_of(&r), "issuer-untrusted", "{r}");
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_restart_preserves_ownership_and_privilege_changes_apply() {
+    let Some(t) = require_tool_host("restart-ownership") else {
+        return;
+    };
+    let (mut d, _base, acap) = spawn_tools_as(&t);
+    let old_issuer = d.read_handoff();
+    let old_approver = root_read(&acap);
+    d.restart();
+    // Ownership/modes are re-established, not inherited from luck.
+    assert_eq!(stat_of(&d.handoff), (t.h.nexusd_uid, t.h.issuer_gid, 0o640));
+    assert_eq!(stat_of(&acap), (t.h.nexusd_uid, t.approver_gid, 0o640));
+    assert_eq!(stat_of(&d.cap).0, t.h.nexusd_uid);
+    let new_issuer = d.read_handoff();
+    assert_ne!(old_issuer, new_issuer, "issuer key must rotate on restart");
+    assert_ne!(old_approver, root_read(&acap), "approver key must rotate");
+    // The pre-restart key is dead for its own (still allowed) UID.
+    let r = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(
+            &old_issuer,
+            "acquire",
+            serde_json::json!({"taskInstanceId": "mu-r", "backend": "native"}),
+        ),
+    )
+    .expect("t");
+    assert_eq!(code_of(&r), "issuer-untrusted", "{r}");
+    // Privilege change: restart with the allow-list moved to the bystander.
+    // The former issuer UID, now holding a *fresh valid* key, is refused on
+    // the peer; the new UID succeeds.
+    let i = d.argv.iter().position(|a| a == "--allowed-uids").unwrap();
+    d.argv[i + 1] = t.h.bystander_uid.to_string();
+    d.restart();
+    let fresh = d.read_handoff();
+    let r = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(
+            &fresh,
+            "acquire",
+            serde_json::json!({"taskInstanceId": "mu-r2", "backend": "native"}),
+        ),
+    )
+    .expect("t");
+    assert_eq!(code_of(&r), "peer-unauthorized", "{r}");
+    let r = send_as(
+        BYSTANDER_USER,
+        &d.socket,
+        &signed_frame(
+            &fresh,
+            "acquire",
+            serde_json::json!({"taskInstanceId": "mu-r2", "backend": "native"}),
+        ),
+    )
+    .expect("t");
+    assert_eq!(r.get("ok"), Some(&serde_json::Value::Bool(true)), "{r}");
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_production_configuration_refuses_overlapping_or_test_only_approval() {
+    let Some(t) = require_tool_host("production-config") else {
+        return;
+    };
+    let (d, base, acap) = spawn_tools_as(&t);
+    let mut base_argv: Vec<String> = d.argv.clone();
+    // Fresh paths so nothing collides with the running daemon.
+    let dir = d.dir.join("prod2d");
+    let sock = d.dir.join("prod2s");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&sock).unwrap();
+    {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+        let own = |p: &Path, mode: u32, gid: u32| {
+            let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::chown(c.as_ptr(), t.h.nexusd_uid, gid) }, 0);
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        own(&dir, 0o700, t.h.nexusd_uid);
+        own(&sock, 0o750, t.h.issuer_gid);
+    }
+    let swap = |argv: &mut Vec<String>, flag: &str, val: String| {
+        let i = argv.iter().position(|a| a == flag).unwrap();
+        argv[i + 1] = val;
+    };
+    swap(
+        &mut base_argv,
+        "--db",
+        dir.join("k.db").to_string_lossy().into_owned(),
+    );
+    swap(
+        &mut base_argv,
+        "--socket",
+        sock.join("n.sock").to_string_lossy().into_owned(),
+    );
+    swap(
+        &mut base_argv,
+        "--cap",
+        dir.join("i.cap").to_string_lossy().into_owned(),
+    );
+    swap(
+        &mut base_argv,
+        "--witness",
+        dir.join("w.db").to_string_lossy().into_owned(),
+    );
+    swap(
+        &mut base_argv,
+        "--cap-handoff",
+        sock.join("h").to_string_lossy().into_owned(),
+    );
+    swap(
+        &mut base_argv,
+        "--approver-cap",
+        acap.with_file_name("a2.cap").to_string_lossy().into_owned(),
+    );
+    let _ = &base;
+    let run = |argv: &[String]| -> (bool, String) {
+        let o = Command::new("runuser")
+            .arg("-u")
+            .arg(DAEMON_USER)
+            .arg("--")
+            .arg(nexusd_bin())
+            .args(argv)
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn");
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr),
+        )
+    };
+    // 1. Approver == issuer UID with --require-independent-approver: fatal.
+    let mut a = base_argv.clone();
+    swap(&mut a, "--approver-uids", t.h.issuer_uid.to_string());
+    let (ok, out) = run(&a);
+    assert!(!ok, "overlapping approver must refuse: {out}");
+    assert!(out.contains("approver UIDs overlap"), "{out}");
+    assert!(!sock.join("n.sock").exists(), "no socket may be bound");
+    // 2. Overlap without --require and without the test-only flag: still
+    //    refuses to enable writes (never silently non-independent).
+    let mut b = a.clone();
+    b.retain(|x| x != "--require-independent-approver");
+    let (ok, out) = run(&b);
+    assert!(!ok, "{out}");
+    assert!(out.contains("not independent"), "{out}");
+    // 3. The test-only flag cannot satisfy --require-independent-approver.
+    let mut c = a.clone();
+    c.push("--allow-nonindependent-approver-test-only".to_owned());
+    let (ok, out) = run(&c);
+    assert!(!ok, "{out}");
+    assert!(!sock.join("n.sock").exists());
+    // 4. An approver credential group equal to the issuer socket group
+    //    would let issuers read the approver key: refused.
+    let mut e = base_argv.clone();
+    swap(&mut e, "--approver-cap-gid", t.h.issuer_gid.to_string());
+    let (ok, out) = run(&e);
+    assert!(!ok, "{out}");
+    assert!(out.contains("issuer socket group"), "{out}");
+    assert!(!sock.join("n.sock").exists());
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_sandboxed_build_cannot_reach_capability_files_or_daemon_state() {
+    let Some(t) = require_tool_host("sandbox-credentials") else {
+        return;
+    };
+    if !nexus_tools::sandbox::preflight().available {
+        println!("NOT RUN (sandbox-credentials): sandbox unavailable on this host");
+        return;
+    }
+    let (mut d, base, acap) = spawn_tools_as(&t);
+    d.argv.push("--enable-process".to_owned());
+    d.restart();
+    let issuer_cap = d.read_handoff();
+    let approver_cap = root_read(&acap);
+    let ws = base.join("ws");
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    // The build script runs as the daemon's UID inside the sandbox and
+    // probes every credential/state path by absolute name plus the host
+    // process table. Any success is an ESCAPE panic.
+    let targets = [
+        d.cap.clone(),
+        d.handoff.clone(),
+        acap.clone(),
+        d.db.clone(),
+        d.witness.clone(),
+        d.socket.clone(),
+    ];
+    let list = targets
+        .iter()
+        .map(|p| format!("{:?}", p.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(",");
+    std::fs::write(
+        ws.join("Cargo.toml"),
+        "[package]\nname=\"probe\"\nversion=\"0.1.0\"\nedition=\"2021\"\nbuild=\"build.rs\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"probe\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("src/lib.rs"), "").unwrap();
+    std::fs::write(
+        ws.join("build.rs"),
+        format!(
+            r#"fn main() {{
+    let mut bad: Vec<String> = Vec::new();
+    for p in [{list}] {{
+        if std::fs::read(p).is_ok() || std::fs::metadata(p).is_ok() {{ bad.push(p.to_string()); }}
+    }}
+    for p in ["/proc/1/root/tmp/nexus-multuid", "/tmp/nexus-multuid"] {{
+        if std::fs::metadata(p).is_ok() {{ bad.push(p.to_string()); }}
+    }}
+    // PID 1 here is the sandbox's own init (private pid namespace); it must
+    // not carry any daemon/host markers.
+    if let Ok(e) = std::fs::read_to_string("/proc/1/environ") {{
+        if e.contains("NEXUS") || e.contains("SSH_AUTH") {{ bad.push("pid1-env".to_string()); }}
+    }}
+    // Only this sandbox's own processes may be visible.
+    let n = std::fs::read_dir("/proc").map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().chars().all(|c| c.is_ascii_digit())).count()).unwrap_or(0);
+    if n > 40 {{ bad.push(format!("host-proc-table:{{n}}")); }}
+    if let Ok(e) = std::fs::read_to_string("/proc/self/environ") {{
+        if e.contains("NEXUS") || e.contains("cap") {{ bad.push("env".to_string()); }}
+    }}
+    if !bad.is_empty() {{ panic!("ESCAPE:{{}}", bad.join(",")); }}
+}}
+"#
+        ),
+    )
+    .unwrap();
+    let digest = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
+        ws.to_string_lossy().as_bytes(),
+    ));
+    let snapshot = common::snapshot();
+    let acquired = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(
+            &issuer_cap,
+            "acquire",
+            serde_json::json!({"taskInstanceId": "mu-s", "backend": "native"}),
+        ),
+    )
+    .expect("acquire");
+    let lease = acquired.get("lease").expect("lease").clone();
+    let resolution = common::resolution_for("mu-s", &snapshot);
+    let _ = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(
+            &issuer_cap,
+            "seal",
+            serde_json::json!({"resolution": resolution}),
+        ),
+    );
+    let intent = nexus_contracts::ControllerIntentV1::build(
+        "mu-s",
+        "mu-sa",
+        "mu-sc",
+        "native",
+        1,
+        "muse_main",
+        "engineering-v2",
+        common::rev3(),
+        serde_json::json!({"op": "engineer-turn", "workspaceRootDigest": digest}),
+    );
+    let accepted = send_as(ISSUER_USER, &d.socket, &signed_frame(&issuer_cap, "accept", serde_json::json!({
+        "intent": serde_json::to_value(&intent).unwrap(), "resolution": resolution, "snapshot": snapshot,
+        "lease": {"epoch": lease.get("leaseEpoch"), "storeIncarnation": lease.get("storeIncarnation")}}))).expect("accept");
+    let rc = accepted["receipt"].clone();
+    let bind = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(
+            &issuer_cap,
+            "workspace-bind",
+            serde_json::json!({"commandId": "mu-sc", "root": ws.to_string_lossy()}),
+        ),
+    )
+    .expect("bind");
+    assert_eq!(
+        bind.get("ok"),
+        Some(&serde_json::Value::Bool(true)),
+        "{bind}"
+    );
+    let r = send_as(APPROVER_USER, &d.socket, &signed_frame(&approver_cap, "process-scope-approve",
+        serde_json::json!({"commandId": "mu-sc", "workspaceRootDigest": digest, "maxWallMs": 120000}))).expect("approve");
+    assert_eq!(r["processScope"]["independent"], true, "{r}");
+    let out = send_as(ISSUER_USER, &d.socket, &signed_frame(&issuer_cap, "tool-execute", serde_json::json!({
+        "requestId": "s1", "cancellationId": "c-s1", "taskInstanceId": "mu-s", "attemptId": "mu-sa", "commandId": "mu-sc",
+        "leaseEpoch": rc["leaseEpoch"], "storeIncarnation": rc["storeIncarnation"], "toolId": "proc.run", "toolVersion": 1,
+        "args": {"program": "cargo", "args": ["check", "--offline", "--locked"]}}))).expect("exec");
+    println!("sandbox probe response: {out}");
+    let text = out.to_string();
+    // The probe ran (not refused for lack of a toolchain) and found nothing.
+    assert!(
+        !text.contains("ESCAPE"),
+        "sandbox build observed host state: {text}"
+    );
+    assert!(
+        !text.contains(&issuer_cap) && !text.contains(&approver_cap),
+        "capability leaked"
+    );
+    assert!(
+        text.contains("\"exitCode\":0")
+            || text.contains("command-refused")
+            || text.contains("toolchain"),
+        "unexpected process outcome: {text}"
+    );
+    if text.contains("command-refused") || text.contains("toolchain") {
+        println!("NOT RUN (sandbox-credentials probe body): cargo toolchain not reachable by the daemon identity");
+    }
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_dependency_cache_is_single_owner_and_wrong_owner_fails_closed() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    let Some(t) = require_tool_host("depcache-owner") else {
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("nexus-multuid-dc-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let c = std::ffi::CString::new(root.as_os_str().as_bytes()).unwrap();
+    // Owned by the daemon identity, private: the intended deployment.
+    unsafe { libc::chown(c.as_ptr(), t.h.nexusd_uid, t.h.nexusd_uid) };
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(root.join("VERSION"), "nexus-depcache/1\n").unwrap();
+    // Root (a different euid) must not silently adopt a cache it does not
+    // own: fail closed.
+    let e = nexus_tools::depcache::DepCache::open(
+        &root,
+        false,
+        nexus_tools::depcache::CacheQuota::default(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, "cache-root", "{e}");
+    // No other identity can even list it.
+    for who in [ISSUER_USER, BYSTANDER_USER, UNTRUSTED_USER, APPROVER_USER] {
+        let o = run_as(who, "ls", &[&root.to_string_lossy()]).expect("run");
+        assert!(!o.status.success(), "{who} listed the cache");
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }
