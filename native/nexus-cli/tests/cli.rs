@@ -142,3 +142,81 @@ fn malformed_ledger_is_honest_error() {
     assert_eq!(out.status.code(), Some(1));
     assert!(!out.status.success());
 }
+
+// ---- A3.1 native tools -------------------------------------------------
+
+#[test]
+fn tools_list_and_inspect_are_read_only_metadata() {
+    let (c, so, _) = run(&["--json", "tools", "list"]);
+    assert_eq!(c, 0);
+    let v: serde_json::Value = serde_json::from_str(&so).expect("tools json");
+    let ids: Vec<_> = v["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, vec!["fs.list", "fs.read", "fs.search"]);
+    assert_eq!(v["writeTools"], "none");
+    assert_eq!(v["aiInitiatedExecution"], "disabled");
+    let (c, so, _) = run(&["--json", "tools", "inspect", "fs.read"]);
+    assert_eq!(c, 0);
+    let v: serde_json::Value = serde_json::from_str(&so).unwrap();
+    assert_eq!(v["readOnly"], true);
+    let (c, _, se) = run(&["tools", "inspect", "fs.write"]);
+    assert_eq!(c, 2, "{se}");
+}
+
+#[test]
+fn offline_run_is_double_gated_and_labelled() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hello needle\n").unwrap();
+    let ws = dir.path().to_str().unwrap();
+    // Missing flag.
+    let (c, _, _) = run(&["tools", "run-offline", "--workspace", ws, "fs.list"]);
+    assert_eq!(c, 2);
+    // Flag but no env gate.
+    let out = nexus()
+        .args([
+            "--json",
+            "tools",
+            "run-offline",
+            "--offline-test",
+            "--workspace",
+            ws,
+            "fs.list",
+        ])
+        .env_remove("NEXUS_TOOLS_OFFLINE_TEST")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    // Both gates.
+    let out = nexus()
+        .args([
+            "--json",
+            "tools",
+            "run-offline",
+            "--offline-test",
+            "--workspace",
+            ws,
+            "fs.search",
+            r#"{"query":"needle"}"#,
+        ])
+        .env("NEXUS_TOOLS_OFFLINE_TEST", "1")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["controllerAuthorized"], false);
+    assert_eq!(v["aiInitiated"], false);
+    assert_eq!(
+        v["journalPhases"],
+        serde_json::json!(["authorized", "started", "completed"])
+    );
+    assert_eq!(v["result"]["stats"]["matchesReturned"], 1);
+}

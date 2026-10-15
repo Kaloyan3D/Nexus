@@ -33,6 +33,13 @@ fn help_text() -> String {
     );
     s.push_str("    run                   live execution gate (always blocked in A2.4)\n");
     s.push_str("    interactive           line-based interactive session (mock only)\n");
+    s.push_str("    tools list            native read-only tools (fs.list, fs.read, fs.search)\n");
+    s.push_str("    tools inspect <id>    tool contract, arguments, budgets and policy\n");
+    s.push_str("    tools run-offline --offline-test --workspace <dir> <id> '<args-json>'\n");
+    s.push_str("                          offline/test execution under an EPHEMERAL kernel\n");
+    s.push_str(
+        "                          (needs NEXUS_TOOLS_OFFLINE_TEST=1; not Controller-authorized)\n",
+    );
     s.push_str("\nEXAMPLES:\n");
     s.push_str("    nexus status\n");
     s.push_str("    nexus tasks --json\n");
@@ -347,6 +354,129 @@ fn cmd_interactive(cfg: &ClientConfig) -> ExitCode {
     ExitCode::Ok
 }
 
+fn cmd_tools(args: &[String], cfg: &ClientConfig) -> ExitCode {
+    let usage = |m: &str| emit_err(cfg.json, &nexus_client::ClientError::usage(m));
+    match args.first().map(|s| s.as_str()) {
+        Some("list") => {
+            let d = nexus_tools::descriptors();
+            let v = serde_json::json!({
+                "tools": d, "aiInitiatedExecution": "disabled", "writeTools": "none",
+            });
+            let mut human =
+                String::from("native tools (read-only; AI-initiated execution disabled):\n");
+            for t in &d {
+                human.push_str(&format!("  {} v{}  {}\n", t.id, t.version, t.summary));
+            }
+            emit(cfg, &v, human.trim_end());
+            ExitCode::Ok
+        }
+        Some("inspect") => {
+            let Some(id) = args.get(1) else {
+                return usage("usage: nexus tools inspect <tool-id>");
+            };
+            let Some(tool) = nexus_tools::ToolId::parse(id) else {
+                return usage(&format!("unknown tool '{id}' (try: nexus tools list)"));
+            };
+            let d = nexus_tools::descriptor_for(tool);
+            let v = serde_json::to_value(&d).unwrap_or(serde_json::Value::Null);
+            let mut human = format!(
+                "{} v{} (read-only)\n  {}\narguments:\n",
+                d.id, d.version, d.summary
+            );
+            for a in &d.arguments {
+                human.push_str(&format!(
+                    "  {:<16} {:<7} {}  {}\n",
+                    a.name,
+                    a.kind,
+                    if a.required { "required" } else { "optional" },
+                    a.description
+                ));
+            }
+            human.push_str("policy:\n");
+            for n in &d.notes {
+                human.push_str(&format!("  - {n}\n"));
+            }
+            emit(cfg, &v, human.trim_end());
+            ExitCode::Ok
+        }
+        Some("run-offline") => {
+            let mut workspace: Option<String> = None;
+            let mut offline = false;
+            let mut pos: Vec<String> = Vec::new();
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--offline-test" => offline = true,
+                    "--json" => {}
+                    "--workspace" => {
+                        i += 1;
+                        workspace = args.get(i).cloned();
+                    }
+                    other => pos.push(other.to_owned()),
+                }
+                i += 1;
+            }
+            if !offline {
+                return usage("run-offline requires the explicit --offline-test flag");
+            }
+            let (Some(ws), Some(tool)) = (workspace, pos.first()) else {
+                return usage("usage: nexus tools run-offline --offline-test --workspace <dir> <tool-id> '<args-json>'");
+            };
+            let raw = pos.get(1).map(|s| s.as_str()).unwrap_or("{}");
+            let parsed: serde_json::Value = match serde_json::from_str(raw) {
+                Ok(v) => v,
+                Err(e) => return usage(&format!("args must be JSON: {e}")),
+            };
+            let abs = match std::fs::canonicalize(&ws) {
+                Ok(p) => p.to_string_lossy().into_owned(),
+                Err(_) => return usage("workspace does not exist"),
+            };
+            match nexus_tools::offline::run_offline(
+                &abs,
+                tool,
+                parsed,
+                nexus_tools::ToolBudgets::default(),
+            ) {
+                Ok(rep) => {
+                    let v = serde_json::to_value(&rep).unwrap_or(serde_json::Value::Null);
+                    let human = format!(
+                        "[offline-test] {} -> {:?}\nauthority: {}\nnot Controller-authorized; not AI-initiated\njournal: {} (verified {})\n{}",
+                        tool,
+                        rep.result.status,
+                        rep.authority,
+                        rep.journal_phases.join(" > "),
+                        rep.journal_verified_entries,
+                        rep.result
+                            .output
+                            .as_ref()
+                            .map(|o| serde_json::to_string_pretty(o).unwrap_or_default())
+                            .or_else(|| rep.result.error.as_ref().map(|e| e.to_string()))
+                            .unwrap_or_default()
+                    );
+                    emit(cfg, &v, &human);
+                    if rep.result.error.is_some() {
+                        ExitCode::Internal
+                    } else {
+                        ExitCode::Ok
+                    }
+                }
+                Err(m) => {
+                    let code = if m.contains("gated") {
+                        "offline-gate"
+                    } else {
+                        "tool-refused"
+                    };
+                    emit_err(
+                        cfg.json,
+                        &nexus_client::ClientError::new(code, ExitCode::Unauthorized, m),
+                    )
+                }
+            }
+        }
+        _ => usage("usage: nexus tools <list|inspect <id>|run-offline ...>"),
+    }
+}
+
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.iter().any(|a| a == "--version" || a == "-V") {
@@ -412,6 +542,7 @@ fn main() {
         },
         "run" => cmd_run(&args, &cfg),
         "interactive" => cmd_interactive(&cfg),
+        "tools" => cmd_tools(&args, &cfg),
         other => emit_err(
             cfg.json,
             &nexus_client::ClientError::usage(format!("unknown command '{other}' (try --help)")),

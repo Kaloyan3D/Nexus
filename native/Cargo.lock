@@ -254,6 +254,7 @@ name = "nexus-cli"
 version = "0.1.0"
 dependencies = [
  "nexus-client",
+ "nexus-tools",
  "serde_json",
  "tempfile",
 ]
@@ -349,6 +350,20 @@ dependencies = [
  "tempfile",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "nexus-tools"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nexus-contracts",
+ "nexus-kernel",
+ "nexus-store",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

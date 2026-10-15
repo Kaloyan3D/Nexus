@@ -6,6 +6,7 @@ pub mod accept;
 pub mod bridge;
 pub mod dispatch;
 pub mod readiness;
+pub mod tools;
 
 pub use accept::{AcceptRequest, GenerationState};
 pub use dispatch::{
@@ -19,6 +20,10 @@ use nexus_contracts::{
 use nexus_store::{Store, WitnessStore};
 pub use readiness::{DispatchReadiness, ReadinessDimension};
 use std::path::Path;
+pub use tools::{
+    SealedToolGrant, ToolAuthorizationRequest, VerifiedToolGrant, PHASE_AUTHORIZED,
+    PHASE_COMPLETED, PHASE_STARTED, TOOL_GRANT_SEAL_DOMAIN, TOOL_GRANT_TTL_MS,
+};
 
 pub struct Kernel {
     store: Store,

@@ -200,6 +200,29 @@ impl WitnessStore {
         Ok(Self { conn })
     }
 
+    /// Opaque key/value cell in `witness_meta` (used for the A3.1 tool
+    /// journal checkpoint). Keys are namespaced by the caller.
+    pub fn get_meta(&self, key: &str) -> KernelResult<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT value FROM witness_meta WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| db_fail("read meta", e))
+    }
+
+    pub fn set_meta(&mut self, key: &str, value: &str) -> KernelResult<()> {
+        self.conn
+            .execute(
+                "INSERT INTO witness_meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )
+            .map_err(|e| db_fail("write meta", e))?;
+        Ok(())
+    }
+
     pub fn read(&self, generation_key: &str) -> KernelResult<Option<WitnessRecord>> {
         let row: Option<(i64, String, String, Option<String>)> = self.conn.query_row(
             "SELECT max_epoch, store_incarnation, accepted_json, baseline_json FROM witness_state WHERE generation_key = ?1",

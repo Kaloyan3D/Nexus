@@ -1,5 +1,5 @@
 [workspace]
-members = ["nexus-contracts", "nexus-store", "nexus-kernel", "nexus-daemon", "nexus-model", "nexus-client", "nexus-cli", "nexus-transcript"]
+members = ["nexus-contracts", "nexus-store", "nexus-kernel", "nexus-daemon", "nexus-model", "nexus-client", "nexus-cli", "nexus-transcript", "nexus-tools"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -9,6 +9,7 @@ nexus-kernel = { path = "nexus-kernel" }
 nexus-model = { path = "nexus-model" }
 nexus-client = { path = "nexus-client" }
 nexus-transcript = { path = "nexus-transcript" }
+nexus-tools = { path = "nexus-tools" }
 libc = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

@@ -66,3 +66,25 @@ pub const DDL_V2: &str = "
 CREATE TABLE IF NOT EXISTS sealed_extensions (extension_digest TEXT PRIMARY KEY, extension_json TEXT NOT NULL, seal_hex TEXT NOT NULL, created_at_utc TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS controller_intents (command_id TEXT PRIMARY KEY, intent_json TEXT NOT NULL, seal_hex TEXT NOT NULL, state TEXT NOT NULL, published_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL);
 ";
+
+/// A3.1 durable native tool-execution journal (additive; no version bump).
+/// Append-only, hash-chained, HMAC-sealed. One row per
+/// (request_id, phase) so each lifecycle phase is exactly-once.
+pub const DDL_V3_TOOLS: &str = "
+CREATE TABLE IF NOT EXISTS tool_journal (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id TEXT NOT NULL,
+  execution_id TEXT NOT NULL,
+  task_instance_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  command_id TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  prev_hash TEXT NOT NULL,
+  entry_hash TEXT NOT NULL,
+  seal_hex TEXT NOT NULL,
+  recorded_at_utc TEXT NOT NULL,
+  UNIQUE (request_id, phase)
+);
+CREATE INDEX IF NOT EXISTS idx_tool_journal_task ON tool_journal (task_instance_id, seq);
+";

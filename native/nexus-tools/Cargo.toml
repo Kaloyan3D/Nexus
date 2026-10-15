@@ -1,0 +1,18 @@
+[package]
+name = "nexus-tools"
+version = "0.1.0"
+edition = "2021"
+description = "Nexus Native Core A3.1 secure read-only workspace tools (fs.list, fs.read, fs.search) bound to Kernel-sealed grants"
+license = "MIT"
+
+[dependencies]
+nexus-contracts = { workspace = true }
+nexus-kernel = { workspace = true }
+nexus-store = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rusqlite = { workspace = true }

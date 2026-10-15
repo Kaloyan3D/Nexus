@@ -3,7 +3,7 @@
 //! either the full winner state or nothing, then classify idempotent vs
 //! conflict by re-reading inside the contention window.
 
-use crate::schema::{DDL_V1, DDL_V2, STORE_SCHEMA_VERSION};
+use crate::schema::{DDL_V1, DDL_V2, DDL_V3_TOOLS, STORE_SCHEMA_VERSION};
 use nexus_contracts::{generation_key, KernelError, KernelErrorCode, KernelResult};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::io::Read;
@@ -131,6 +131,7 @@ impl Store {
         }
         conn.execute_batch(DDL_V1)
             .and_then(|_| conn.execute_batch(DDL_V2))
+            .and_then(|_| conn.execute_batch(DDL_V3_TOOLS))
             .map_err(|e| busy_or("migrate", e))?;
         let version: Option<i64> = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))

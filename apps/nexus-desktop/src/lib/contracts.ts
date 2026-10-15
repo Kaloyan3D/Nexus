@@ -303,3 +303,45 @@ export interface ConversationQuery {
   beforeSeq?: number;
   limit?: number;
 }
+
+// ---- A3.1 native read-only tool events -------------------------------------
+// Mirrors native/nexus-tools `ToolEventV1`. Derived from the Kernel's
+// authoritative tool journal; the renderer only *displays* these. It never
+// executes tools and never authors them. `aiInitiated` is always false in
+// A3.1 (live AI-initiated tool execution is disabled).
+
+export type ToolEventStatus =
+  | "authorized"
+  | "started"
+  | "completed"
+  | "failed"
+  | "interrupted";
+
+export interface ToolEventV1 {
+  schemaVersion: 1;
+  requestId: string;
+  executionId: string;
+  taskInstanceId: string;
+  attemptId: string;
+  commandId: string;
+  toolId: "fs.list" | "fs.read" | "fs.search";
+  toolVersion: number;
+  status: ToolEventStatus;
+  /** Redacted argument metadata (search queries appear as length + digest). */
+  args: Record<string, unknown> | null;
+  resultStatus: "ok" | "truncated" | "error" | null;
+  errorCode: string | null;
+  truncated: boolean;
+  truncationReasons: string[];
+  /** True when returned content had secrets redacted (see redactionKinds). */
+  redacted: boolean;
+  redactionKinds: string[];
+  outputDigest: string | null;
+  outputBytes: number | null;
+  stats: Record<string, number> | null;
+  aiInitiated: boolean;
+  firstSeq: number;
+  lastSeq: number;
+  authorizedAtUtc: string;
+  lastAtUtc: string;
+}

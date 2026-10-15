@@ -1,0 +1,41 @@
+//! Nexus Native Core A3.1 — secure, deterministic, read-only workspace tools.
+//!
+//! Trust boundary (see `native/A3.1-EVIDENCE.md`):
+//!
+//! ```text
+//!  model / renderer JSON ──► prepare (typed, validated, digested; no content I/O)
+//!        ──► Kernel::authorize_tool (sealed grant, journal `authorized`)
+//!        ──► Kernel::begin_tool_execution (re-verify seal+lease+fence, journal `started`)
+//!        ──► executor (descriptor-relative reads beneath the pinned root)
+//!        ──► Kernel::complete_tool_execution (journal `completed`, redacted)
+//! ```
+//!
+//! The executor never invents authority: it can only run a call whose grant
+//! the Kernel signed, whose arguments and budgets hash to what was signed,
+//! and whose workspace identity matches the sealed device/inode. There is
+//! no shell, no subprocess, no write path and no network in this crate.
+
+pub mod authorization;
+pub mod contract;
+pub mod events;
+pub mod exec;
+pub mod list;
+pub mod offline;
+pub mod read;
+pub mod redact;
+pub mod result;
+pub mod search;
+pub mod workspace;
+
+pub use authorization::{
+    authorize, execute, prepare, AuthorizedToolCall, PreparedToolRequest, ToolExecutionOutcome,
+};
+pub use contract::{
+    descriptor_for, descriptors, ListArgs, ReadArgs, SearchArgs, ToolArgs, ToolBudgets,
+    ToolDescriptor, ToolId, ToolRequestV1, TOOL_CONTRACT_VERSION, TOOL_VERSION,
+};
+pub use events::{tool_events_from_journal, ToolEventStatus, ToolEventV1};
+pub use exec::{CancellationToken, ExecCtx};
+pub use redact::{Redaction, Redactor};
+pub use result::{ResultStatus, ToolError, ToolErrorCode, ToolResultV1, ToolStats, Truncation};
+pub use workspace::{Workspace, WorkspacePolicy, POLICY_VERSION};
