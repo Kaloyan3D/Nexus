@@ -235,6 +235,7 @@ pub fn run_offline_process(
     program: &str,
     args: &[String],
     wall_ms: u64,
+    dep_cache: Option<&std::path::Path>,
 ) -> Result<serde_json::Value, String> {
     if std::env::var(OFFLINE_ENV_GATE).as_deref() != Ok("1") {
         return Err(format!(
@@ -341,7 +342,11 @@ pub fn run_offline_process(
             budgets: ToolBudgets::default(),
         };
         let cancel = CancellationToken::new(&req.cancellation_id);
-        let policy = crate::process::CommandPolicy::standard(crate::process::Toolchain::discover());
+        let mut policy =
+            crate::process::CommandPolicy::standard(crate::process::Toolchain::discover());
+        if let Some(d) = dep_cache {
+            policy = policy.with_dep_cache(d.to_path_buf());
+        }
         let prepared =
             crate::prepare_process(req, &binding, &scope, &policy).map_err(|e| e.to_string())?;
         let call = authorize(&mut kernel, prepared).map_err(|e| e.to_string())?;

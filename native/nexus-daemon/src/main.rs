@@ -55,7 +55,7 @@ fn usage() -> i32 {
     println!("          [--require-independent-approver] [--approver-cap-gid GID]");
     println!("          [--allow-nonindependent-approver-test-only]]");
     println!(
-        "         [--enable-process]   (A3.4 sandboxed processes; needs the approver flags above)"
+        "         [--enable-process]   (A3.4 sandboxed processes; needs the approver flags above)\n         [--dep-cache <dir>]  (A3.5 read-only verified dependency cache, populated out of band)"
     );
     println!("         [--cap-handoff PATH]");
     println!("Trust modes: readonly (default, privileged mutations disabled) |");
@@ -612,9 +612,15 @@ fn run(args: &[String]) -> i32 {
         workspace_bases,
         writes_enabled,
         process_enabled,
-        command_policy: nexus_tools::process::CommandPolicy::standard(
-            nexus_tools::process::Toolchain::discover(),
-        ),
+        command_policy: {
+            let p = nexus_tools::process::CommandPolicy::standard(
+                nexus_tools::process::Toolchain::discover(),
+            );
+            match flag(args, "--dep-cache") {
+                Some(d) => p.with_dep_cache(d),
+                None => p,
+            }
+        },
         run_root: layout.dir.join("exec"),
         sandbox_caps,
         approver_auth,

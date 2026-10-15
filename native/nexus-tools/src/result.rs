@@ -37,6 +37,8 @@ pub enum ToolErrorCode {
     SandboxUnavailable,
     /// The workspace snapshot could not be staged safely.
     SnapshotFailed,
+    /// Locked dependencies are not available from the verified cache.
+    DependencyUnavailable,
     /// Command refused by policy.
     CommandRefused,
     /// Bytes were published but could not be verified.
@@ -76,6 +78,7 @@ impl ToolErrorCode {
             Self::PublishedUnverified => "published-unverified",
             Self::SandboxUnavailable => "sandbox-unavailable",
             Self::SnapshotFailed => "snapshot-failed",
+            Self::DependencyUnavailable => "dependency-unavailable",
             Self::CommandRefused => "command-refused",
             Self::Cancelled => "cancelled",
             Self::Revoked => "revoked",

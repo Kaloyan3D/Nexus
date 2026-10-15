@@ -41,6 +41,7 @@ fn help_text() -> String {
     );
     s.push_str("    tools processes --task <instance-id> [--attempt <attempt-id>]\n");
     s.push_str("                          read-only sandboxed-process execution history\n");
+    s.push_str("    tools depcache <admit|verify|list|stats|gc> --cache <abs dir> [--lockfile <Cargo.lock> --from-dir <dir>]  (operator, offline)\n");
     s.push_str("    tools run-offline-process --offline-test --allow-process-test --workspace <dir> <cargo|npm|tsc> [args...]\n");
     s.push_str(
         "                          offline sandbox test (needs NEXUS_TOOLS_OFFLINE_TEST=1,\n",
@@ -589,14 +590,20 @@ fn cmd_tools(args: &[String], cfg: &ClientConfig) -> ExitCode {
                 Err(e) => emit_err(cfg.json, &e),
             }
         }
+        Some("depcache") => depcache_command(cfg, &args[1..]),
         Some("run-offline-process") => {
             let mut workspace: Option<String> = None;
             let mut offline = false;
             let mut allow = false;
             let mut pos: Vec<String> = Vec::new();
+            let mut dep_cache: Option<String> = None;
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
+                    "--dep-cache" => {
+                        i += 1;
+                        dep_cache = args.get(i).cloned();
+                    }
                     "--offline-test" => offline = true,
                     "--allow-process-test" => allow = true,
                     "--json" => {}
@@ -604,7 +611,12 @@ fn cmd_tools(args: &[String], cfg: &ClientConfig) -> ExitCode {
                         i += 1;
                         workspace = args.get(i).cloned();
                     }
-                    other => pos.push(other.to_owned()),
+                    _ => {
+                        // Everything from the program name on belongs to
+                        // the command, not to this parser.
+                        pos.extend(args[i..].iter().cloned());
+                        break;
+                    }
                 }
                 i += 1;
             }
@@ -621,7 +633,13 @@ fn cmd_tools(args: &[String], cfg: &ClientConfig) -> ExitCode {
                 Ok(p) => p.to_string_lossy().into_owned(),
                 Err(_) => return usage("workspace does not exist"),
             };
-            match nexus_tools::offline::run_offline_process(&abs, &program, &rest, 300_000) {
+            match nexus_tools::offline::run_offline_process(
+                &abs,
+                &program,
+                &rest,
+                300_000,
+                dep_cache.as_deref().map(std::path::Path::new),
+            ) {
                 Ok(v) => {
                     let out = v["result"]["output"].clone();
                     let human = format!(
@@ -802,4 +820,149 @@ fn main() {
         ),
     };
     std::process::exit(code as i32);
+}
+
+/// `nexus tools depcache <admit|verify|list|stats|gc> --cache <dir> ...`
+/// Operator-only, offline. Never reachable from the daemon or a model.
+fn fail(cfg: &ClientConfig, m: &str) -> ExitCode {
+    emit_err(cfg.json, &nexus_client::ClientError::usage(m))
+}
+
+fn usage_err(cfg: &ClientConfig, m: &str) -> ExitCode {
+    fail(cfg, m)
+}
+
+fn depcache_command(cfg: &ClientConfig, args: &[String]) -> ExitCode {
+    use nexus_tools::depcache::{parse_cargo_lock, CacheQuota, DepCache};
+    let sub = args.first().map(String::as_str).unwrap_or("");
+    let (mut cache, mut lock, mut from, mut index_cache): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = (None, None, None, None);
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--cache" => {
+                i += 1;
+                cache = args.get(i).cloned();
+            }
+            "--lockfile" => {
+                i += 1;
+                lock = args.get(i).cloned();
+            }
+            "--from-dir" => {
+                i += 1;
+                from = args.get(i).cloned();
+            }
+            "--index-cache" => {
+                i += 1;
+                index_cache = args.get(i).cloned();
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let Some(cache) = cache else {
+        return usage_err(cfg, "usage: nexus tools depcache <admit|verify|list|stats|gc> --cache <absolute dir> [--lockfile <Cargo.lock> --from-dir <dir with .crate files>]");
+    };
+    let create = sub == "admit";
+    let dc = match DepCache::open(std::path::Path::new(&cache), create, CacheQuota::default()) {
+        Ok(d) => d,
+        Err(e) => return fail(cfg, &e.to_string()),
+    };
+    match sub {
+        "admit" => {
+            let (Some(lock), Some(from)) = (lock, from) else {
+                return usage_err(cfg, "admit requires --lockfile and --from-dir");
+            };
+            let text = match std::fs::read_to_string(&lock) {
+                Ok(t) => t,
+                Err(e) => return fail(cfg, &format!("lockfile: {e}")),
+            };
+            let lf = match parse_cargo_lock(&text) {
+                Ok(l) => l,
+                Err(e) => return fail(cfg, &e.to_string()),
+            };
+            let rep = dc.admit_from_dir(
+                std::path::Path::new(&from),
+                index_cache.as_deref().map(std::path::Path::new),
+                &lf,
+                "operator-cli",
+            );
+            let v = serde_json::json!({
+                "created": rep.created.len(), "identical": rep.identical.len(),
+                "missing": rep.missing, "indexMissing": rep.index_missing, "rejected": rep.rejected,
+                "complete": rep.complete(), "resolvable": rep.resolvable(),
+            });
+            emit(
+                cfg,
+                &v,
+                &format!(
+                    "admitted {} new, {} already present; missing {}, rejected {} -> {}",
+                    rep.created.len(),
+                    rep.identical.len(),
+                    rep.missing.len(),
+                    rep.rejected.len(),
+                    if rep.complete() {
+                        "COMPLETE"
+                    } else {
+                        "INCOMPLETE"
+                    }
+                ),
+            );
+            if rep.resolvable() {
+                ExitCode::Ok
+            } else {
+                fail(cfg, "cache cannot resolve this lockfile")
+            }
+        }
+        "verify" => {
+            let (ok, bad) = dc.verify_all();
+            let v = serde_json::json!({"ok": ok, "failures": bad});
+            emit(
+                cfg,
+                &v,
+                &format!("verified {ok} object(s); {} failure(s)", bad.len()),
+            );
+            if bad.is_empty() {
+                ExitCode::Ok
+            } else {
+                fail(cfg, "cache verification failed")
+            }
+        }
+        "list" => {
+            let l = dc.list();
+            let human = l
+                .iter()
+                .map(|p| format!("{} {} {}", p.name, p.version, p.sha256))
+                .collect::<Vec<_>>()
+                .join("\n");
+            emit(cfg, &serde_json::to_value(&l).unwrap_or_default(), &human);
+            ExitCode::Ok
+        }
+        "stats" => {
+            let s = dc.stats();
+            emit(
+                cfg,
+                &serde_json::to_value(&s).unwrap_or_default(),
+                &format!(
+                    "{} object(s), {} bytes, {} stale staging",
+                    s.objects, s.total_bytes, s.stale_staging
+                ),
+            );
+            ExitCode::Ok
+        }
+        "gc" => {
+            let n = dc.gc_staging();
+            emit(
+                cfg,
+                &serde_json::json!({"removedStaging": n}),
+                &format!("removed {n} stale staging dir(s)"),
+            );
+            ExitCode::Ok
+        }
+        _ => usage_err(cfg, "unknown depcache subcommand"),
+    }
 }

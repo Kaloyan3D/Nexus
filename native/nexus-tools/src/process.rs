@@ -123,6 +123,9 @@ pub struct CommandPolicy {
     /// Test-only: additional absolute programs allowed with free argv.
     /// Only constructible through [`CommandPolicy::offline_test`].
     test_programs: Vec<String>,
+    /// Operator-provisioned, verified dependency cache (A3.5). `None`
+    /// means cargo sees no vendored source (dependency-free projects only).
+    dep_cache: Option<PathBuf>,
 }
 
 fn arg_ok(a: &str) -> bool {
@@ -141,14 +144,22 @@ impl CommandPolicy {
     pub fn standard(toolchain: Toolchain) -> Self {
         Self {
             toolchain,
+            dep_cache: None,
             test_programs: Vec::new(),
         }
+    }
+
+    /// Attach an operator-provisioned dependency cache directory.
+    pub fn with_dep_cache(mut self, dir: PathBuf) -> Self {
+        self.dep_cache = Some(dir);
+        self
     }
 
     /// Offline test policy: also allows the listed absolute programs.
     pub fn offline_test(toolchain: Toolchain, programs: &[&str]) -> Self {
         Self {
             toolchain,
+            dep_cache: None,
             test_programs: programs.iter().map(|s| s.to_string()).collect(),
         }
     }
@@ -359,6 +370,79 @@ pub struct ProcessContext<'a> {
     pub scope_max_wall_ms: u64,
 }
 
+/// Read-only binds plus the provenance note recorded in the journal.
+type DependencyView = (Vec<(PathBuf, String)>, serde_json::Value);
+
+/// Locate the lockfile governing `cwd` (walking up inside the snapshot),
+/// materialise the vendor view under `run_dir`, and return the read-only
+/// binds. `Ok(None)` when the project has no registry dependencies.
+fn prepare_dependency_view(
+    cache_dir: &Path,
+    src: &Path,
+    cwd_in_sandbox: &str,
+    run_dir: &Path,
+) -> Result<Option<DependencyView>, crate::depcache::CacheError> {
+    use crate::depcache::{
+        cargo_source_config, parse_cargo_lock, CacheError, CacheQuota, DepCache,
+    };
+    let rel = cwd_in_sandbox
+        .strip_prefix("/work/src")
+        .unwrap_or("")
+        .trim_start_matches('/');
+    let mut dir = src.join(rel);
+    let lock_path = loop {
+        let c = dir.join("Cargo.lock");
+        if let Ok(md) = std::fs::symlink_metadata(&c) {
+            if md.is_file() {
+                break Some(c);
+            }
+        }
+        if dir == src || !dir.pop() {
+            break None;
+        }
+    };
+    let Some(lock_path) = lock_path else {
+        return Ok(None);
+    };
+    let text = std::fs::read(&lock_path).map_err(|e| CacheError {
+        code: "lockfile-invalid",
+        message: format!("Cargo.lock: {e}"),
+    })?;
+    if text.len() > 8 * 1024 * 1024 {
+        return Err(CacheError {
+            code: "lockfile-invalid",
+            message: "Cargo.lock too large".into(),
+        });
+    }
+    let lock = parse_cargo_lock(&String::from_utf8_lossy(&text))?;
+    if lock.registry.is_empty() && lock.unsupported.is_empty() {
+        return Ok(None);
+    }
+    let cache = DepCache::open(cache_dir, false, CacheQuota::default())?;
+    let vendor = run_dir.join("vendor");
+    let rep = cache.materialize(&lock, &vendor)?;
+    let cfg = run_dir.join("cargo-config.toml");
+    std::fs::write(&cfg, cargo_source_config("/work/vendor")).map_err(|e| CacheError {
+        code: "materialize",
+        message: format!("config: {e}"),
+    })?;
+    let note = serde_json::json!({
+        "cache": CACHE_LABEL,
+        "packages": rep.packages, "files": rep.files, "bytes": rep.bytes,
+        "copiedInsteadOfLinked": rep.copied_instead_of_linked,
+        "lockfile": "snapshot",
+    });
+    Ok(Some((
+        vec![
+            (vendor, "/work/vendor".to_owned()),
+            (cfg, "/work/out/cargo-home/config.toml".to_owned()),
+        ],
+        note,
+    )))
+}
+
+const CACHE_LABEL: &str = crate::depcache::CACHE_VERSION;
+
 fn limits_from(b: &ToolBudgets, scope_wall: u64) -> SandboxLimits {
     SandboxLimits {
         wall_ms: b.proc_wall_ms.min(scope_wall).max(1),
@@ -534,6 +618,32 @@ pub fn run_process(
         Err(e) => return failed(hooks, &run_dir, e.code, e.message),
     };
     hooks.at("after-stage");
+    // 1b. Dependency view (A3.5): a per-execution, read-only vendor tree
+    //     built only from verified cache objects named by the snapshot's
+    //     own Cargo.lock; plus a generated source-replacement config.
+    let mut cmd = cmd;
+    let mut dep_note = serde_json::Value::Null;
+    if let (Some(dir), "cargo") = (&ctx.policy.dep_cache, cmd.name.as_str()) {
+        if args.args.first().map(String::as_str) != Some("fmt") {
+            match prepare_dependency_view(dir, &src, &cmd.cwd, &run_dir) {
+                Ok(Some((binds, note))) => {
+                    cmd.ro_binds.extend(binds);
+                    cmd.env.insert("CARGO_INCREMENTAL".into(), "0".into());
+                    cmd.env.insert("CARGO_PROFILE_DEV_DEBUG".into(), "0".into());
+                    dep_note = note;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return failed(
+                        hooks,
+                        &run_dir,
+                        ToolErrorCode::DependencyUnavailable,
+                        e.to_string(),
+                    )
+                }
+            }
+        }
+    }
     // 2. Sandbox configuration.
     let limits = limits_from(ctx.budgets, ctx.scope_max_wall_ms);
     let spec = SandboxSpec {
@@ -577,6 +687,7 @@ pub fn run_process(
                 "mountCrossing": report.skipped_mount_crossing, "large": report.skipped_large,
             },
             "sandboxDigest": sbx_digest,
+            "dependencies": dep_note,
             "sandbox": {
                 "backend": "bubblewrap+seccomp+cgroup-v2", "network": "none",
                 "rootfs": "synthetic (usr ro, tmpfs scratch)", "workspace": "snapshot-ro",

@@ -17,6 +17,7 @@
 
 pub mod authorization;
 pub mod contract;
+pub mod depcache;
 pub mod events;
 pub mod exec;
 pub mod list;
