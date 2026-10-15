@@ -328,3 +328,99 @@ pub fn tool_events_for_task(
         attempts: out,
     })
 }
+
+// ------------------------------------------------------------------ A4.2
+
+/// One human-approval request as the daemon reports it to read-only
+/// clients. Deliberately carries NO review content (diff, argv text), no
+/// review code and no credential: the privileged review and the Approve /
+/// Deny action live only in the trusted terminal approver workflow.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRecord {
+    pub approval_id: String,
+    pub state: String,
+    pub command_id: String,
+    pub task_instance_id: String,
+    pub attempt_id: String,
+    pub tool_id: String,
+    pub scope: String,
+    pub request_digest: String,
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub operation_kind: Option<String>,
+    pub created_ms: i64,
+    pub expires_ms: i64,
+    #[serde(default)]
+    pub decided_ms: Option<i64>,
+    #[serde(default)]
+    pub decision: Option<String>,
+    #[serde(default)]
+    pub decision_reason: Option<String>,
+    #[serde(default)]
+    pub approver_id: Option<String>,
+    #[serde(default)]
+    pub human_auth_mechanism: Option<String>,
+    #[serde(default)]
+    pub grant_request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalsView {
+    pub available: bool,
+    pub reason: Option<String>,
+    /// Always `terminal-only` in A4.2: the GUI never approves.
+    pub approval_action: String,
+    pub approvals: Vec<ApprovalRecord>,
+}
+
+/// Read-only approval status for one task instance (or all). An absent or
+/// non-human-approval daemon is reported as `available: false`, never as
+/// an empty approved list.
+pub fn approvals(
+    cfg: &ClientConfig,
+    task_instance_id: Option<&str>,
+) -> Result<ApprovalsView, ClientError> {
+    let mut params = serde_json::Map::new();
+    if let Some(t) = task_instance_id {
+        if t.is_empty() {
+            return Err(ClientError::usage("task instance id must not be empty"));
+        }
+        params.insert("taskInstanceId".to_owned(), t.into());
+    }
+    let frame = read_request(
+        "nexus-approval-list",
+        "approval-list",
+        serde_json::Value::Object(params),
+    );
+    let resp = ipc_roundtrip(&cfg.socket_path, &frame, IPC_TIMEOUT_MS)?;
+    let unavailable = |reason: String| ApprovalsView {
+        available: false,
+        reason: Some(reason),
+        approval_action: "terminal-only".to_owned(),
+        approvals: Vec::new(),
+    };
+    match interpret_response(&resp) {
+        Ok(v) => {
+            let approvals: Vec<ApprovalRecord> = serde_json::from_value(
+                v.get("approvals")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Array(vec![])),
+            )
+            .map_err(|e| ClientError::internal(format!("malformed approvals: {e}")))?;
+            Ok(ApprovalsView {
+                available: true,
+                reason: None,
+                approval_action: "terminal-only".to_owned(),
+                approvals,
+            })
+        }
+        Err(e) if e.message.contains("approval-disabled") => Ok(unavailable(
+            "the daemon is not running in human-approval mode".to_owned(),
+        )),
+        Err(e) if e.exit == crate::error::ExitCode::Disconnected => Err(e),
+        Err(e) => Ok(unavailable(e.code.to_owned())),
+    }
+}

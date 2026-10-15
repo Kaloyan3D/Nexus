@@ -1,10 +1,12 @@
 //! Nexus Native Core A1.1 transactional SQLite store.
+pub mod approvals;
 pub mod journal;
 pub mod schema;
 pub mod store;
 pub mod tools;
 pub mod witness;
 
+pub use approvals::{ApprovalEvent, ApprovalRow, ApprovalUpdate};
 pub use journal::{AcceptInput, AcceptOutcome};
 pub use schema::STORE_SCHEMA_VERSION;
 pub use store::{GenerationInfo, SealOutcome, Store};

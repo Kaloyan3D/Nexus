@@ -50,4 +50,4 @@ pub use exec::{CancellationToken, ExecCtx};
 pub use redact::{Redaction, Redactor};
 pub use result::{ResultStatus, ToolError, ToolErrorCode, ToolResultV1, ToolStats, Truncation};
 pub use workspace::{Workspace, WorkspacePolicy, POLICY_VERSION};
-pub use write::WriteHooks;
+pub use write::{preview_write, unified_diff, WriteHooks, WritePreview};

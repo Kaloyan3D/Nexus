@@ -16,6 +16,7 @@
     "allow-conversation-read",
     "allow-model-io-read",
     "allow-list-mock-conversations",
-    "allow-tool-events"
+    "allow-tool-events",
+    "allow-list-approvals"
   ]
 }

@@ -1,6 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   AppInfo,
+  ApprovalsView,
   ConversationQuery,
   ConversationView,
   MockConversationSummary,
@@ -30,6 +31,8 @@ export interface NativeApi {
   listMockConversations(): Promise<MockConversationSummary[]>;
   /** Read-only tool records for a task attempt. Never executes tools. */
   toolEvents(taskInstanceId: string): Promise<TaskToolEvents>;
+  /** Read-only approval status. There is deliberately no approve/deny here. */
+  listApprovals(taskInstanceId: string): Promise<ApprovalsView>;
 }
 
 export function isTauri(): boolean {
@@ -66,6 +69,7 @@ export const tauriApi: NativeApi = {
   modelIoRead: (taskInstanceId) => invoke<ModelIoView>("model_io_read", { taskInstanceId }),
   listMockConversations: () => invoke<MockConversationSummary[]>("list_mock_conversations"),
   toolEvents: (taskInstanceId) => invoke<TaskToolEvents>("tool_events", { taskInstanceId }),
+  listApprovals: (taskInstanceId) => invoke<ApprovalsView>("list_approvals", { taskInstanceId }),
 };
 
 const notInShell: UiError = {
@@ -111,6 +115,7 @@ export const unavailableApi: NativeApi = {
   modelIoRead: () => Promise.reject(notInShell),
   listMockConversations: () => Promise.resolve([]),
   toolEvents: () => Promise.reject(notInShell),
+  listApprovals: () => Promise.reject(notInShell),
 };
 
 export function defaultApi(): NativeApi {

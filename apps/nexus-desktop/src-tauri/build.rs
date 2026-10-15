@@ -12,6 +12,7 @@ const COMMANDS: &[&str] = &[
     "model_io_read",
     "list_mock_conversations",
     "tool_events",
+    "list_approvals",
 ];
 
 fn main() {

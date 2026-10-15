@@ -776,3 +776,174 @@ pub fn observe_for_recovery(
         "publishedOverUnexpectedPreImage": over_unexpected,
     })
 }
+
+// ---------------------------------------------------------------- A4.2
+
+/// Side-effect-free description of what a write would do, derived from the
+/// live workspace and the exact typed arguments. Used only to build the
+/// authoritative human review; the executor re-derives everything itself.
+#[derive(Debug, Clone)]
+pub struct WritePreview {
+    pub operation: &'static str,
+    pub path: String,
+    pub pre_sha256: Option<String>,
+    pub pre_bytes: Option<usize>,
+    pub post_sha256: String,
+    pub post_bytes: usize,
+    pub pre_text: Option<String>,
+    pub post_text: String,
+    pub file_mode: u32,
+}
+
+/// Compute the pre-image/post-image without mutating anything. Refuses (as
+/// the executor would) on stale pre-image, missing target, ambiguous edit,
+/// non-UTF-8 edit target, or a budget overflow, so no approval can be
+/// requested for an operation that cannot execute as described.
+pub fn preview_write(
+    ws: &Workspace,
+    args: &ToolArgs,
+    budgets: &ToolBudgets,
+) -> Result<WritePreview, ToolError> {
+    let conflict = |m: &str| ToolError::new(ToolErrorCode::Conflict, m.to_owned());
+    let (path_s, wa, ea) = match args {
+        ToolArgs::Write(a) => (a.path.as_str(), Some(a), None),
+        ToolArgs::Edit(a) => (a.path.as_str(), None, Some(a)),
+        _ => {
+            return Err(ToolError::new(
+                ToolErrorCode::UnsupportedTool,
+                "not a mutating tool",
+            ))
+        }
+    };
+    let rel = RelPath::parse(path_s)?;
+    let (dir, name) = ws.open_parent_for_write(&rel)?;
+    let existing = ws.stat_in_dir(&dir.fd, &name)?;
+    let (pre_bytes, pre_sha, pre_mode) = match existing {
+        None => (None, None, None),
+        Some(_) => {
+            let o = ws.open_file_in_dir(&dir.fd, &name)?;
+            let mode = o.identity.mode;
+            let bytes = read_bounded(std::fs::File::from(o.fd), budgets.max_file_bytes)?;
+            let sha = sha256_bytes_hex(&bytes);
+            (Some(bytes), Some(sha), Some(mode))
+        }
+    };
+    let (post, file_mode, op_name): (Vec<u8>, u32, &'static str) = match (wa, ea) {
+        (Some(a), _) if a.mode == "create" => {
+            if pre_bytes.is_some() {
+                return Err(conflict("create refused: the target already exists"));
+            }
+            let mode = a
+                .file_mode
+                .as_deref()
+                .and_then(|m| u32::from_str_radix(m, 8).ok())
+                .unwrap_or(0o644);
+            (a.content.clone().into_bytes(), mode, "create")
+        }
+        (Some(a), _) => {
+            let Some(cur) = &pre_sha else {
+                return Err(conflict("replace refused: the target does not exist"));
+            };
+            if Some(cur) != a.expected_sha256.as_ref() {
+                return Err(conflict(
+                    "replace refused: the file changed since it was read",
+                ));
+            }
+            (
+                a.content.clone().into_bytes(),
+                pre_mode.unwrap_or(0o644),
+                "replace",
+            )
+        }
+        (_, Some(a)) => {
+            let Some(cur) = &pre_sha else {
+                return Err(conflict("edit refused: the target does not exist"));
+            };
+            if cur != &a.expected_sha256 {
+                return Err(conflict("edit refused: the file changed since it was read"));
+            }
+            let mut text =
+                String::from_utf8(pre_bytes.clone().unwrap_or_default()).map_err(|_| {
+                    ToolError::new(ToolErrorCode::InvalidUtf8, "edit target is not valid UTF-8")
+                })?;
+            for e in &a.edits {
+                match text.matches(e.old_text.as_str()).count() {
+                    0 => return Err(conflict("an edit's oldText was not found")),
+                    1 => text = text.replacen(e.old_text.as_str(), &e.new_text, 1),
+                    _ => return Err(conflict("an edit's oldText matches more than once")),
+                }
+            }
+            (text.into_bytes(), pre_mode.unwrap_or(0o644), "edit")
+        }
+        _ => unreachable!("typed args are Write or Edit"),
+    };
+    if post.len() as u64 > budgets.max_write_bytes {
+        return Err(ToolError::new(
+            ToolErrorCode::FileTooLarge,
+            "resulting content exceeds the write budget",
+        ));
+    }
+    let post_sha256 = sha256_bytes_hex(&post);
+    if pre_sha.as_deref() == Some(post_sha256.as_str()) {
+        return Err(conflict(
+            "the requested change leaves the file byte-identical",
+        ));
+    }
+    Ok(WritePreview {
+        operation: op_name,
+        path: path_s.to_owned(),
+        pre_sha256: pre_sha,
+        pre_bytes: pre_bytes.as_ref().map(|b| b.len()),
+        post_sha256,
+        post_bytes: post.len(),
+        pre_text: pre_bytes.map(|b| String::from_utf8_lossy(&b).into_owned()),
+        post_text: String::from_utf8_lossy(&post).into_owned(),
+        file_mode,
+    })
+}
+
+/// Bounded line-based unified diff (LCS). Returns `None` when the inputs
+/// are too large for a reliable diff within the review budget; the caller
+/// must then mark the preview unavailable rather than summarize.
+pub fn unified_diff(old: &str, new: &str) -> Option<String> {
+    const MAX_LINES: usize = 1500;
+    let a: Vec<&str> = old.split_inclusive('\n').collect();
+    let b: Vec<&str> = new.split_inclusive('\n').collect();
+    if a.len() > MAX_LINES || b.len() > MAX_LINES {
+        return None;
+    }
+    let (n, m) = (a.len(), b.len());
+    let mut lcs = vec![vec![0u32; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i][j] = if a[i] == b[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+    let mut out = String::from("--- before\n+++ after\n");
+    let (mut i, mut j) = (0, 0);
+    let line = |out: &mut String, tag: char, s: &str| {
+        out.push(tag);
+        out.push_str(s);
+        if !s.ends_with('\n') {
+            out.push_str("\n\\ No newline at end of file\n");
+        }
+    };
+    while i < n || j < m {
+        if i < n && j < m && a[i] == b[j] {
+            line(&mut out, ' ', a[i]);
+            i += 1;
+            j += 1;
+        } else if j < m && (i == n || lcs[i][j + 1] >= lcs[i + 1][j]) {
+            line(&mut out, '+', b[j]);
+            j += 1;
+        } else {
+            line(&mut out, '-', a[i]);
+            i += 1;
+        }
+    }
+    Some(out)
+}

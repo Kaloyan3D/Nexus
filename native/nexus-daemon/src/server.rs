@@ -124,6 +124,10 @@ pub struct Daemon {
     pub approver_uids: Option<Vec<u32>>,
     /// True only when approver UIDs are disjoint from issuer UIDs.
     pub approver_independent: bool,
+    /// A4.2: every mutation/process execution additionally requires one
+    /// consumed human approval bound to its exact operation; the legacy
+    /// scope-approve commands are refused.
+    pub require_human_approval: bool,
     /// Bounded concurrent tool executions.
     pub tool_inflight: AtomicUsize,
     pub witness_configured: bool,
@@ -953,6 +957,546 @@ fn do_process_scope_approve(
     }
 }
 
+// ------------------------------------------------------- A4.2 human approval
+
+/// Approver-channel gate: separate approver HMAC AND an approver peer UID.
+fn approver_gate(
+    daemon: &Daemon,
+    req: &IpcRequest,
+    peer: Option<(u32, u32, i32)>,
+) -> Result<(u32, u32, i32), serde_json::Value> {
+    let refuse = |code: &str, msg: &str| {
+        daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+        log_line("refuse", &req.id, code, &req.cmd);
+        fail(&req.id, code, msg)
+    };
+    if !daemon.require_human_approval {
+        return Err(refuse(
+            "approval-disabled",
+            "human approval mode is not enabled on this daemon",
+        ));
+    }
+    let (Some(auth), Some(uids)) = (daemon.approver_auth.as_ref(), daemon.approver_uids.as_ref())
+    else {
+        return Err(refuse(
+            "approval-disabled",
+            "no approver credential is configured",
+        ));
+    };
+    let Some(fields) = req.auth.as_ref() else {
+        return Err(refuse(
+            codes::ISSUER_UNTRUSTED,
+            "missing approver authentication (auth { nonce, ts, tag })",
+        ));
+    };
+    if let Err(code) = auth.verify(&req.cmd, &req.id, &req.params, fields, now_ms()) {
+        return Err(refuse(
+            code,
+            if code == codes::REPLAY_REJECTED {
+                "approver nonce was already used; replay rejected"
+            } else {
+                "approver authentication failed (issuer credentials cannot act as the approver)"
+            },
+        ));
+    }
+    match peer {
+        Some(p) if uids.contains(&p.0) => Ok(p),
+        _ => Err(refuse(
+            codes::PEER_UNAUTHORIZED,
+            "connecting process UID is not an authorized approver",
+        )),
+    }
+}
+
+fn approval_state_view(r: &nexus_store::ApprovalRow, full: bool) -> serde_json::Value {
+    let req: serde_json::Value =
+        serde_json::from_str(&r.request_json).unwrap_or(serde_json::Value::Null);
+    let decision: serde_json::Value = r
+        .decision_json
+        .as_deref()
+        .and_then(|d| serde_json::from_str(d).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let mut v = serde_json::json!({
+        "approvalId": r.approval_id,
+        "state": r.state,
+        "commandId": r.command_id,
+        "taskInstanceId": r.task_instance_id,
+        "attemptId": r.attempt_id,
+        "leaseEpoch": r.lease_epoch,
+        "toolId": r.tool_id,
+        "scope": r.scope,
+        "requestDigest": r.request_digest,
+        "argsDigest": req.get("argsDigest"),
+        "workspaceRootDigest": req.get("workspaceRootDigest"),
+        "paths": req.get("paths"),
+        "operationKind": req.get("operation").and_then(|o| o.get("kind")),
+        "createdMs": r.created_ms,
+        "expiresMs": r.expires_ms,
+        "decidedMs": r.decided_ms,
+        "decision": decision.get("decision"),
+        "decisionReason": decision.get("reason"),
+        "approverId": decision.get("approverId"),
+        "humanAuthMechanism": decision.get("humanAuth").and_then(|h| h.get("mechanism")),
+        "grantRequestId": r.grant_request_id,
+    });
+    if full {
+        v["request"] = req;
+    }
+    v
+}
+
+/// Issuer submits one proposed mutation/process. The daemon (not the
+/// submitter) derives the authoritative operation description, pre/post
+/// image identity and diff from the live workspace.
+fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    let refuse = |code: &str, msg: &str| {
+        daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+        fail(&req.id, code, msg)
+    };
+    if !daemon.require_human_approval {
+        return refuse(
+            "approval-disabled",
+            "human approval mode is not enabled on this daemon",
+        );
+    }
+    let request = match build_tool_request(req, &["ttlMs"]) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let ttl_ms = req
+        .params
+        .get("ttlMs")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as i64)
+        .unwrap_or(nexus_kernel::APPROVAL_TTL_DEFAULT_MS);
+    let tool = match nexus_tools::ToolId::parse(&request.tool_id) {
+        Some(t) => t,
+        None => return refuse("unsupported-tool", "unknown tool identifier"),
+    };
+    let (is_write, is_proc) = (tool.is_mutating(), tool.is_process());
+    if !is_write && !is_proc {
+        return refuse(
+            codes::BAD_REQUEST,
+            "bad-request: only mutating and process tools require human approval",
+        );
+    }
+    if (is_write && !daemon.writes_enabled) || (is_proc && !daemon.process_enabled) {
+        return refuse("scope-refused", "the requested tool class is not enabled");
+    }
+    let ceiling = nexus_tools::ToolBudgets::ceiling();
+    let mut kernel = match lock_kernel(daemon, &req.id) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    let binding = match kernel.workspace_binding(&request.command_id) {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            return refuse(
+                "delivery-invalid",
+                "no Controller workspace binding for this command; approval refused",
+            )
+        }
+        Err(e) => return kernel_fail(daemon, &req.id, &e),
+    };
+    let sub_common = |scope: &str,
+                      p: &nexus_tools::PreparedToolRequest,
+                      paths: Vec<String>,
+                      operation: serde_json::Value,
+                      preview: serde_json::Value,
+                      limits: serde_json::Value| {
+        nexus_kernel::ApprovalSubmission {
+            command_id: request.command_id.clone(),
+            task_instance_id: request.task_instance_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            lease_epoch: request.lease_epoch,
+            store_incarnation: request.store_incarnation.clone(),
+            tool_id: request.tool_id.clone(),
+            tool_version: request.tool_version,
+            scope: scope.to_owned(),
+            args_digest: p.args_digest().to_owned(),
+            budget_digest: p.budget_digest().to_owned(),
+            workspace_root_digest: p.workspace_root_digest().to_owned(),
+            paths,
+            operation,
+            preview,
+            limits,
+            ttl_ms,
+        }
+    };
+    let typed = match nexus_tools::ToolArgs::parse(tool, &request.args) {
+        Ok(a) => a,
+        Err(e) => return tool_fail(daemon, &req.id, &e),
+    };
+    let sub = if is_write {
+        let dummy = nexus_kernel::WriteScopeBinding {
+            command_id: request.command_id.clone(),
+            task_instance_id: request.task_instance_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            lease_epoch: request.lease_epoch,
+            store_incarnation: request.store_incarnation.clone(),
+            root_digest: binding.root_digest.clone(),
+            max_write_bytes: ceiling.max_write_bytes,
+            approver_id: "preview".to_owned(),
+            independent: false,
+        };
+        let prepared = match nexus_tools::prepare_write(request.clone(), &binding, &dummy) {
+            Ok(p) => p,
+            Err(e) => return tool_fail(daemon, &req.id, &e),
+        };
+        let pv = match nexus_tools::preview_write(prepared.workspace(), &typed, prepared.budgets())
+        {
+            Ok(p) => p,
+            Err(e) => return tool_fail(daemon, &req.id, &e),
+        };
+        let faithful = pv.pre_text.as_deref().map(sha256_hex_str) == pv.pre_sha256.clone()
+            || pv.pre_text.is_none();
+        let faithful = faithful && sha256_hex_str(&pv.post_text) == pv.post_sha256;
+        let diff = if faithful {
+            nexus_tools::unified_diff(pv.pre_text.as_deref().unwrap_or(""), &pv.post_text)
+        } else {
+            None
+        };
+        let preview = match diff {
+            Some(d) => serde_json::json!({
+                "kind": "unified-diff", "digest": sha256_hex_str(&d), "text": d,
+                "boundTo": "args-digest",
+            }),
+            None => serde_json::json!({
+                "kind": "unavailable", "digest": serde_json::Value::Null,
+                "reason": if faithful { "too-large-for-reliable-diff" } else { "content-not-utf8" },
+                "note": "no summary substituted; review the digests and byte counts only",
+            }),
+        };
+        sub_common(
+            "write",
+            &prepared,
+            vec![pv.path.clone()],
+            serde_json::json!({
+                "kind": request.tool_id, "operation": pv.operation, "path": pv.path,
+                "preImageSha256": pv.pre_sha256, "preImageBytes": pv.pre_bytes,
+                "postImageSha256": pv.post_sha256, "postImageBytes": pv.post_bytes,
+                "fileMode": format!("{:o}", pv.file_mode),
+                "expectedPreImage": pv.pre_sha256,
+            }),
+            preview,
+            serde_json::json!({
+                "maxWriteBytes": prepared.budgets().max_write_bytes,
+                "maxFileBytes": prepared.budgets().max_file_bytes,
+                "deadlineMs": prepared.budgets().deadline_ms,
+            }),
+        )
+    } else {
+        let dummy = nexus_kernel::ProcessScopeBinding {
+            command_id: request.command_id.clone(),
+            task_instance_id: request.task_instance_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            lease_epoch: request.lease_epoch,
+            store_incarnation: request.store_incarnation.clone(),
+            root_digest: binding.root_digest.clone(),
+            max_wall_ms: ceiling.proc_wall_ms,
+            approver_id: "preview".to_owned(),
+            independent: false,
+        };
+        let prepared = match nexus_tools::prepare_process(
+            request.clone(),
+            &binding,
+            &dummy,
+            &daemon.command_policy,
+        ) {
+            Ok(p) => p,
+            Err(e) => return tool_fail(daemon, &req.id, &e),
+        };
+        let nexus_tools::ToolArgs::Proc(pa) = &typed else {
+            return refuse(codes::BAD_REQUEST, "bad-request: not a process request");
+        };
+        let resolved = match daemon.command_policy.resolve(pa) {
+            Ok(r) => r,
+            Err(e) => return tool_fail(daemon, &req.id, &e),
+        };
+        let b = prepared.budgets();
+        sub_common(
+            "process",
+            &prepared,
+            Vec::new(),
+            serde_json::json!({
+                "kind": "proc.run",
+                "program": resolved.name,
+                "resolvedProgram": resolved.program,
+                "argv": resolved.argv,
+                "argvDigest": resolved.argv_digest(),
+                "cwd": resolved.cwd,
+                "sandbox": {
+                    "backend": "bubblewrap+seccomp+cgroup-v2", "network": "none",
+                    "workspace": "read-only snapshot", "writeBack": "none",
+                    "env": "allowlist", "shell": false,
+                },
+                "filesystemEffects": "none to the workspace: runs on a staged read-only snapshot; scratch output is discarded",
+            }),
+            serde_json::json!({
+                "kind": "argv", "digest": resolved.argv_digest(),
+                "text": resolved.display(),
+                "note": "argv field of the operation is the exact, unredacted vector",
+            }),
+            serde_json::json!({
+                "procWallMs": b.proc_wall_ms, "procCpuSecs": b.proc_cpu_secs,
+                "procMemoryBytes": b.proc_memory_bytes, "procMaxProcs": b.proc_max_procs,
+                "procOutputBytes": b.proc_output_bytes, "procScratchBytes": b.proc_scratch_bytes,
+            }),
+        )
+    };
+    match kernel.create_approval(&sub) {
+        Ok(row) => {
+            log_line("approval-request", &req.id, "ok", &req.cmd);
+            ok(
+                &req.id,
+                serde_json::json!({ "approval": approval_state_view(&row, false) }),
+            )
+        }
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
+fn sha256_hex_str(s: &str) -> String {
+    hex::encode(<sha2::Sha256 as sha2::Digest>::digest(s.as_bytes()))
+}
+
+fn do_approval_revoke(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    if let Err(r) = only_keys(&req.params, &["approvalId", "reason"], &req.id) {
+        return r;
+    }
+    let id = match get_string(&req.params, "approvalId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let reason = req
+        .params
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("issuer-withdrawn")
+        .to_owned();
+    let mut kernel = match lock_kernel(daemon, &req.id) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    match kernel.revoke_approval(&id, &reason) {
+        Ok(changed) => ok(&req.id, serde_json::json!({ "revoked": changed })),
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
+/// Read-only metadata listing. No preview text, no review code, no
+/// credentials. Gated by the issuer allow-list OR the approver UID list.
+fn do_approval_list(
+    daemon: &Daemon,
+    req: &IpcRequest,
+    peer: Option<(u32, u32, i32)>,
+) -> serde_json::Value {
+    if let Err(r) = only_keys(
+        &req.params,
+        &["taskInstanceId", "approvalId", "limit"],
+        &req.id,
+    ) {
+        return r;
+    }
+    if !daemon.require_human_approval {
+        return fail(
+            &req.id,
+            "approval-disabled",
+            "human approval mode is not enabled on this daemon",
+        );
+    }
+    let uid_ok = match peer {
+        Some((uid, _, _)) => {
+            daemon
+                .allowed_uids
+                .as_ref()
+                .is_some_and(|v| v.contains(&uid))
+                || daemon
+                    .approver_uids
+                    .as_ref()
+                    .is_some_and(|v| v.contains(&uid))
+        }
+        None => false,
+    };
+    if !uid_ok {
+        daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+        return fail(
+            &req.id,
+            codes::PEER_UNAUTHORIZED,
+            "connecting process UID is not authorized to read approval history",
+        );
+    }
+    let mut kernel = match lock_kernel(daemon, &req.id) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    if let Some(id) = req.params.get("approvalId").and_then(|v| v.as_str()) {
+        return match kernel.approval_history(id) {
+            Ok((Some(row), ev)) => ok(
+                &req.id,
+                serde_json::json!({
+                    "approval": approval_state_view(&row, false),
+                    "events": ev.iter().map(|e| serde_json::json!({
+                        "seq": e.seq, "event": e.event, "atMs": e.recorded_ms,
+                        "payload": e.payload,
+                    })).collect::<Vec<_>>(),
+                }),
+            ),
+            Ok((None, _)) => fail(&req.id, "delivery-invalid", "unknown approval"),
+            Err(e) => kernel_fail(daemon, &req.id, &e),
+        };
+    }
+    let limit = req
+        .params
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(100) as usize;
+    let task = req.params.get("taskInstanceId").and_then(|v| v.as_str());
+    match kernel.list_approvals(task, limit) {
+        Ok(rows) => ok(
+            &req.id,
+            serde_json::json!({
+                "approvals": rows.iter().map(|r| approval_state_view(r, false)).collect::<Vec<_>>(),
+                "approvalAction": "terminal-only",
+            }),
+        ),
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
+/// Approver fetches the authoritative review (full request, diff, review
+/// code). Recording this fetch is what arms a later decision.
+fn do_approval_get(
+    daemon: &Daemon,
+    req: &IpcRequest,
+    peer: Option<(u32, u32, i32)>,
+) -> serde_json::Value {
+    let (uid, _, _) = match approver_gate(daemon, req, peer) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if let Err(r) = only_keys(&req.params, &["approvalId"], &req.id) {
+        return r;
+    }
+    let id = match get_string(&req.params, "approvalId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let mut kernel = match lock_kernel(daemon, &req.id) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    match kernel.review_approval(&id, uid) {
+        Ok(row) => {
+            let mut v = approval_state_view(&row, true);
+            v["reviewCode"] = serde_json::json!(row.review_code);
+            ok(&req.id, serde_json::json!({ "approval": v }))
+        }
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
+fn do_approval_decide(
+    daemon: &Daemon,
+    req: &IpcRequest,
+    peer: Option<(u32, u32, i32)>,
+) -> serde_json::Value {
+    let (uid, gid, pid) = match approver_gate(daemon, req, peer) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if let Err(r) = only_keys(
+        &req.params,
+        &[
+            "approvalId",
+            "requestDigest",
+            "decision",
+            "reviewCode",
+            "reason",
+            "confirmation",
+        ],
+        &req.id,
+    ) {
+        return r;
+    }
+    let id = match get_string(&req.params, "approvalId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let digest = match get_string(&req.params, "requestDigest") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let code = match get_string(&req.params, "reviewCode") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let approve = match req.params.get("decision").and_then(|v| v.as_str()) {
+        Some("approve") => true,
+        Some("deny") => false,
+        _ => {
+            return fail(
+                &req.id,
+                codes::BAD_REQUEST,
+                "bad-request: 'decision' must be 'approve' or 'deny'",
+            )
+        }
+    };
+    let reason = req
+        .params
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let tty_attested = req
+        .params
+        .get("confirmation")
+        .and_then(|c| c.get("tty"))
+        .and_then(|t| t.as_bool())
+        .unwrap_or(false);
+    // Only facts the daemon itself verified are recorded as verified. The
+    // client's TTY claim is stored as an attestation, never as proof.
+    let human_auth = serde_json::json!({
+        "mechanism": "approver-uid-terminal-review-code",
+        "verifiedByDaemon": ["approver-hmac-capability", "peer-uid-allowlist", "prior-authenticated-review", "review-code-echo"],
+        "clientAttested": { "tty": tty_attested },
+        "notVerified": ["human-presence", "tty-origin"],
+        "peerUid": uid, "peerGid": gid, "peerPid": pid,
+    });
+    let ceiling = nexus_tools::ToolBudgets::ceiling();
+    let mut kernel = match lock_kernel(daemon, &req.id) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    // Scope cap depends on the approval's scope; the Kernel re-reads it.
+    let cap = match kernel.approval_history(&id) {
+        Ok((Some(r), _)) if r.scope == "process" => ceiling.proc_wall_ms,
+        Ok((Some(_), _)) => ceiling.max_write_bytes,
+        Ok((None, _)) => return fail(&req.id, "delivery-invalid", "unknown approval"),
+        Err(e) => return kernel_fail(daemon, &req.id, &e),
+    };
+    let d = nexus_kernel::ApprovalDecision {
+        approve,
+        request_digest: digest,
+        review_code: code,
+        approver_id: format!("uid:{uid}"),
+        independent: daemon.approver_independent,
+        reason,
+        human_auth,
+        scope_cap: cap,
+    };
+    match kernel.decide_approval(&id, &d) {
+        Ok(row) => {
+            log_line("approval-decision", &req.id, &row.state, &req.cmd);
+            ok(
+                &req.id,
+                serde_json::json!({ "approval": approval_state_view(&row, false) }),
+            )
+        }
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
 /// Daemon-side hooks for the write lifecycle: journal and fence take the
 /// Kernel lock only briefly per call; nothing is held across file I/O.
 struct DaemonWriteHooks<'a> {
@@ -1185,6 +1729,63 @@ fn tool_fail(daemon: &Daemon, id: &str, e: &nexus_tools::ToolError) -> serde_jso
     fail(id, e.code.as_str(), &e.message)
 }
 
+/// Parse the shared tool-request shape for `approval-request` so the
+/// approval is bound to exactly the request `tool-execute` will build.
+fn build_tool_request(
+    req: &IpcRequest,
+    extra_keys: &[&str],
+) -> Result<nexus_tools::ToolRequestV1, serde_json::Value> {
+    let mut keys: Vec<&str> = vec![
+        "requestId",
+        "cancellationId",
+        "taskInstanceId",
+        "attemptId",
+        "commandId",
+        "leaseEpoch",
+        "storeIncarnation",
+        "toolId",
+        "toolVersion",
+        "args",
+        "budgets",
+    ];
+    keys.extend_from_slice(extra_keys);
+    only_keys(&req.params, &keys, &req.id)?;
+    let s = |f: &str| get_string(&req.params, f).map_err(|r| with_id(r, &req.id));
+    let bad = |m: &str| fail(&req.id, codes::BAD_REQUEST, m);
+    let args = match req.params.get("args") {
+        Some(v) if v.is_object() => v.clone(),
+        _ => return Err(bad("bad-request: 'args' must be an object")),
+    };
+    let mut budgets = serde_json::to_value(nexus_tools::ToolBudgets::default())
+        .unwrap_or(serde_json::Value::Null);
+    if let Some(over) = req.params.get("budgets") {
+        match (over.as_object(), budgets.as_object_mut()) {
+            (Some(o), Some(b)) => {
+                for (k, v) in o {
+                    b.insert(k.clone(), v.clone());
+                }
+            }
+            _ => return Err(bad("bad-request: 'budgets' must be an object")),
+        }
+    }
+    let budgets: nexus_tools::ToolBudgets = serde_json::from_value(budgets)
+        .map_err(|_| bad("bad-request: 'budgets' contains unknown or invalid fields"))?;
+    Ok(nexus_tools::ToolRequestV1 {
+        schema_version: nexus_tools::TOOL_CONTRACT_VERSION,
+        request_id: s("requestId")?,
+        cancellation_id: s("cancellationId")?,
+        task_instance_id: s("taskInstanceId")?,
+        attempt_id: s("attemptId")?,
+        command_id: s("commandId")?,
+        lease_epoch: get_u64(&req.params, "leaseEpoch", &req.id)?,
+        store_incarnation: s("storeIncarnation")?,
+        tool_id: s("toolId")?,
+        tool_version: get_u64(&req.params, "toolVersion", &req.id)? as u32,
+        args,
+        budgets,
+    })
+}
+
 fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     const KEYS: &[&str] = &[
         "requestId",
@@ -1369,6 +1970,27 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         };
         let is_write = mutating;
         let is_proc = is_process;
+        // A4.2: single-use human approval bound to this exact operation.
+        // Consumed immediately before the grant is minted; any mismatch,
+        // expiry, revocation or reuse refuses with no execution.
+        if daemon.require_human_approval && (is_write || is_proc) {
+            let r = prepared.request();
+            if let Err(e) = kernel.consume_approval(
+                &r.command_id,
+                &r.task_instance_id,
+                &r.attempt_id,
+                r.lease_epoch,
+                &r.store_incarnation,
+                &r.tool_id,
+                prepared.args_digest(),
+                prepared.budget_digest(),
+                prepared.workspace_root_digest(),
+                &r.request_id,
+                daemon.approver_independent,
+            ) {
+                return kernel_fail(daemon, &req.id, &e);
+            }
+        }
         let call = match nexus_tools::authorize(&mut kernel, prepared) {
             Ok(c) => c,
             Err(e) => return tool_fail(daemon, &req.id, &e),
@@ -1780,11 +2402,27 @@ pub fn dispatch(
     peer: Option<(u32, u32, i32)>,
 ) -> serde_json::Value {
     daemon.counters.requests.fetch_add(1, Ordering::Relaxed);
-    if req.cmd == "write-scope-approve" {
-        return do_write_scope_approve(daemon, req, peer);
+    if req.cmd == "write-scope-approve" || req.cmd == "process-scope-approve" {
+        if daemon.require_human_approval {
+            daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+            log_line("refuse", &req.id, "approval-required", &req.cmd);
+            return fail(
+                &req.id,
+                "approval-required",
+                "human approval mode: scopes are created only by a reviewed, confirmed approval decision",
+            );
+        }
+        return if req.cmd == "write-scope-approve" {
+            do_write_scope_approve(daemon, req, peer)
+        } else {
+            do_process_scope_approve(daemon, req, peer)
+        };
     }
-    if req.cmd == "process-scope-approve" {
-        return do_process_scope_approve(daemon, req, peer);
+    if req.cmd == "approval-get" {
+        return do_approval_get(daemon, req, peer);
+    }
+    if req.cmd == "approval-decide" {
+        return do_approval_decide(daemon, req, peer);
     }
     if is_privileged(&req.cmd) {
         if let Some(refusal) = authorize(daemon, req, peer) {
@@ -1805,6 +2443,8 @@ pub fn dispatch(
             "workspace-bind" => do_workspace_bind(daemon, req),
             "tool-execute" => do_tool_execute(daemon, req),
             "tool-revoke" => do_tool_revoke(daemon, req),
+            "approval-request" => do_approval_request(daemon, req),
+            "approval-revoke" => do_approval_revoke(daemon, req),
             "seal" => do_seal(daemon, req),
             "accept" => do_accept(daemon, req),
             _ => unreachable!("privileged set is fixed"),
@@ -1839,6 +2479,7 @@ pub fn dispatch(
         "journal" => do_journal(daemon, req),
         "readiness" => do_readiness(daemon, req),
         "tool-events" => do_tool_events(daemon, req, peer),
+        "approval-list" => do_approval_list(daemon, req, peer),
         "digest" => ok(&req.id, digest_params(&req.params)),
         _ => unreachable!("read-only set is fixed"),
     }
@@ -2345,6 +2986,7 @@ mod isolation_tests {
             approver_auth: None,
             approver_uids: None,
             approver_independent: false,
+            require_human_approval: false,
             tool_inflight: AtomicUsize::new(0),
             witness_configured: false,
             witness_path: None,

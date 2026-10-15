@@ -443,3 +443,37 @@ export interface TaskToolEvents {
   reason: string | null;
   attempts: AttemptToolEvents[];
 }
+
+/**
+ * One human-approval request (A4.2). Status only: it carries no diff, argv
+ * text, review code or credential. Approve/Deny exist only in the trusted
+ * terminal approver, never in this renderer.
+ */
+export interface ApprovalRecord {
+  approvalId: string;
+  state: "pending" | "approved" | "denied" | "expired" | "revoked" | "consumed";
+  commandId: string;
+  taskInstanceId: string;
+  attemptId: string;
+  toolId: string;
+  scope: "write" | "process";
+  requestDigest: string;
+  paths: string[];
+  operationKind: string | null;
+  createdMs: number;
+  expiresMs: number;
+  decidedMs: number | null;
+  decision: string | null;
+  decisionReason: string | null;
+  approverId: string | null;
+  humanAuthMechanism: string | null;
+  grantRequestId: string | null;
+}
+
+export interface ApprovalsView {
+  available: boolean;
+  reason: string | null;
+  /** Always "terminal-only": the GUI never approves. */
+  approvalAction: "terminal-only";
+  approvals: ApprovalRecord[];
+}

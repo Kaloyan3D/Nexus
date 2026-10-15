@@ -33,6 +33,7 @@ fn help_text() -> String {
     );
     s.push_str("    run                   live execution gate (always blocked in A2.4)\n");
     s.push_str("    interactive           line-based interactive session (mock only)\n");
+    s.push_str("    approvals [--task <instance-id>]   read-only human-approval status (approve/deny only via the terminal approver)\n");
     s.push_str("    tools list            native read-only tools (fs.list, fs.read, fs.search)\n");
     s.push_str("    tools inspect <id>    tool contract, arguments, budgets and policy\n");
     s.push_str("    tools events --task <instance-id> [--attempt <attempt-id> [--after <seq>]]\n");
@@ -124,6 +125,61 @@ fn emit(cfg: &ClientConfig, value: &serde_json::Value, human: &str) {
         );
     } else {
         println!("{human}");
+    }
+}
+
+/// A4.2 read-only approval status. There is deliberately no approve/deny
+/// here: those exist only in the trusted terminal approver (`nexus-approver`)
+/// running as the independent approver identity.
+fn cmd_approvals(args: &[String], cfg: &ClientConfig) -> ExitCode {
+    let usage = |m: &str| emit_err(cfg.json, &nexus_client::ClientError::usage(m));
+    let mut task: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--task" => {
+                i += 1;
+                task = args.get(i).cloned();
+            }
+            "--json" => {}
+            other => return usage(&format!("unknown argument '{other}'")),
+        }
+        i += 1;
+    }
+    match nexus_client::approvals(cfg, task.as_deref()) {
+        Ok(v) => {
+            let human = if !v.available {
+                format!(
+                    "approvals unavailable: {}",
+                    v.reason.clone().unwrap_or_default()
+                )
+            } else if v.approvals.is_empty() {
+                "no approval requests".to_owned()
+            } else {
+                let mut h = String::new();
+                for a in &v.approvals {
+                    h.push_str(&format!(
+                        "{}  {:<8} {} {}  {}\n",
+                        a.approval_id,
+                        a.state,
+                        a.tool_id,
+                        a.paths.join(","),
+                        a.decision_reason.clone().unwrap_or_default()
+                    ));
+                }
+                h.push_str(
+                    "approve/deny: run nexus-approver in a terminal as the approver identity",
+                );
+                h
+            };
+            emit(
+                cfg,
+                &serde_json::to_value(&v).unwrap_or(serde_json::Value::Null),
+                &human,
+            );
+            ExitCode::Ok
+        }
+        Err(e) => emit_err(cfg.json, &e),
     }
 }
 
@@ -814,6 +870,7 @@ fn main() {
         "run" => cmd_run(&args, &cfg),
         "interactive" => cmd_interactive(&cfg),
         "tools" => cmd_tools(&args, &cfg),
+        "approvals" => cmd_approvals(&args, &cfg),
         other => emit_err(
             cfg.json,
             &nexus_client::ClientError::usage(format!("unknown command '{other}' (try --help)")),

@@ -83,6 +83,20 @@ impl IssuerAuth {
         })
     }
 
+    /// Client-side constructor (approver CLI): load a published key.
+    pub fn from_key_hex(key_hex: &str) -> Result<Self, String> {
+        let raw = hex::decode(key_hex.trim()).map_err(|_| "capability is not hex".to_owned())?;
+        let key: [u8; 32] = raw
+            .try_into()
+            .map_err(|_| "capability must be 32 bytes".to_owned())?;
+        Ok(Self {
+            key,
+            seen: Mutex::new(NonceCache {
+                by_nonce: HashMap::new(),
+            }),
+        })
+    }
+
     pub fn key_hex(&self) -> String {
         hex::encode(self.key)
     }

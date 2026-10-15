@@ -58,6 +58,7 @@ fn usage() -> i32 {
         "         [--enable-process]   (A3.4 sandboxed processes; needs the approver flags above)\n         [--dep-cache <dir>]  (A3.5 read-only verified dependency cache, populated out of band)"
     );
     println!("         [--cap-handoff PATH [--cap-handoff-gid GID|NAME]]");
+    println!("         [--require-human-approval]  (A4.2: per-operation human approval; needs --require-independent-approver)");
     println!("Trust modes: readonly (default, privileged mutations disabled) |");
     println!("  shadow-test (explicit opt-in, per-request issuer authentication).");
     println!("--allowed-uids gates privileged commands by peer UID (SO_PEERCRED);");
@@ -424,6 +425,32 @@ fn run(args: &[String]) -> i32 {
             );
         }
     };
+    let mut kernel = kernel;
+    // A4.2 no-downgrade latch (before any socket/credential is published).
+    // A store that has run in human-approval mode refuses to enable writes
+    // or processes under a weaker policy; read-only service stays available.
+    {
+        let human = args.iter().any(|a| a == "--require-human-approval");
+        let indep = args.iter().any(|a| a == "--require-independent-approver");
+        let level = if !human {
+            None
+        } else if indep {
+            Some(nexus_kernel::approvals::POLICY_INDEPENDENT)
+        } else {
+            Some(nexus_kernel::approvals::POLICY_TEST_ONLY)
+        };
+        let mutating = args
+            .iter()
+            .any(|a| a == "--enable-writes" || a == "--enable-process");
+        match kernel.enforce_approval_policy(level) {
+            Ok(_) => {}
+            Err(e) if !mutating => log_line_startup(&format!(
+                "approval policy latch active; writes/process stay disabled ({})",
+                e.message
+            )),
+            Err(e) => return fatal("approval-downgrade-refused", &e.message),
+        }
+    }
     let incarnation = kernel.incarnation().to_owned();
     // Stale socket recovery: if a socket file remains but no listener
     // answers, it is a crash leftover and is reclaimed. A live listener
@@ -509,6 +536,34 @@ fn run(args: &[String]) -> i32 {
         None => None,
     };
     let require_independent = args.iter().any(|a| a == "--require-independent-approver");
+    // A4.2: human approval mode. Every mutation/process then needs one
+    // reviewed, confirmed, single-use approval bound to its exact operation.
+    let require_human_approval = args.iter().any(|a| a == "--require-human-approval");
+    if require_human_approval {
+        if !(writes_enabled || process_enabled) {
+            return fatal(
+                "bad-config",
+                "--require-human-approval requires --enable-writes and/or --enable-process (failing closed)",
+            );
+        }
+        let test_only_flag = args
+            .iter()
+            .any(|a| a == "--allow-nonindependent-approver-test-only");
+        if !require_independent && !test_only_flag {
+            return fatal(
+                "bad-config",
+                "--require-human-approval requires --require-independent-approver (failing closed)",
+            );
+        }
+        if !test_only_flag
+            && (flag_str(args, "--approver-cap-gid").is_none() || cap_handoff.is_none())
+        {
+            return fatal(
+                "bad-config",
+                "--require-human-approval requires --approver-cap-gid and --cap-handoff with --cap-handoff-gid so the credentials are role-separated (failing closed)",
+            );
+        }
+    }
     let mut approver_auth: Option<Arc<nexus_daemon::IssuerAuth>> = None;
     let mut approver_independent = false;
     if writes_enabled || process_enabled {
@@ -748,6 +803,20 @@ fn run(args: &[String]) -> i32 {
             );
         }
     }
+    // A4.2: a restart never fabricates or preserves consent. Approved but
+    // unconsumed approvals lapse; reviewed-pending ones must be re-reviewed.
+    match kernel.recover_approvals() {
+        Ok((lapsed, rearmed)) if lapsed + rearmed > 0 => log_line_startup(&format!(
+            "approvals recovered: lapsed={lapsed} rearmed={rearmed}"
+        )),
+        Ok(_) => {}
+        Err(e) => {
+            return fatal(
+                "store-corrupt",
+                &format!("approval recovery failed; failing closed: {e}"),
+            );
+        }
+    }
     let workspace_bases: Vec<std::path::PathBuf> = flag_str(args, "--workspace-bases")
         .map(|v| {
             v.split(',')
@@ -783,6 +852,7 @@ fn run(args: &[String]) -> i32 {
         approver_auth,
         approver_uids,
         approver_independent,
+        require_human_approval,
         tool_inflight: std::sync::atomic::AtomicUsize::new(0),
         witness_configured: layout.witness.is_some(),
         witness_path: layout.witness.clone(),

@@ -9,6 +9,10 @@ license = "MIT"
 name = "nexusd"
 path = "src/main.rs"
 
+[[bin]]
+name = "nexus-approver"
+path = "src/bin/nexus-approver.rs"
+
 [dependencies]
 nexus-contracts = { workspace = true }
 nexus-store = { workspace = true }

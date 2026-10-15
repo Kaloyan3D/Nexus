@@ -106,6 +106,17 @@ async fn tool_events(
 }
 
 #[tauri::command]
+async fn list_approvals(
+    state: tauri::State<'_, AppState>,
+    task_instance_id: String,
+) -> Result<nexus_client::ApprovalsView, UiError> {
+    let cfg = state.cfg.clone();
+    tauri::async_runtime::spawn_blocking(move || backend::approvals(&cfg, &task_instance_id))
+        .await
+        .map_err(|_| internal())?
+}
+
+#[tauri::command]
 fn model_catalog() -> ModelCatalog {
     backend::model_catalog()
 }
@@ -174,7 +185,8 @@ pub fn run() {
             conversation_read,
             model_io_read,
             list_mock_conversations,
-            tool_events
+            tool_events,
+            list_approvals
         ])
         .run(tauri::generate_context!())
         .expect("error while running Nexus");
@@ -196,6 +208,7 @@ mod authz_tests {
         "model_io_read",
         "list_mock_conversations",
         "tool_events",
+        "list_approvals",
     ];
 
     #[test]

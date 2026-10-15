@@ -271,14 +271,14 @@ impl VerifiedToolGrant {
     }
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
         Err(_) => 0,
     }
 }
 
-fn random_hex(n: usize) -> KernelResult<String> {
+pub(crate) fn random_hex(n: usize) -> KernelResult<String> {
     use std::io::Read as _;
     let mut bytes = vec![0u8; n];
     std::fs::File::open("/dev/urandom")
@@ -317,14 +317,14 @@ fn grant_canonical(g: &SealedToolGrant) -> String {
     }))
 }
 
-fn refuse(code: KernelErrorCode, msg: &str) -> KernelError {
+pub(crate) fn refuse(code: KernelErrorCode, msg: &str) -> KernelError {
     KernelError::new(code, msg)
 }
 
 impl Kernel {
     /// Shared authority revalidation: accepted receipt, current lease,
     /// witness health, intent not fenced. Returns nothing; refuses closed.
-    fn require_tool_authority(
+    pub(crate) fn require_tool_authority(
         store: &nexus_store::Store,
         witness: Option<&nexus_store::WitnessStore>,
         command_id: &str,
@@ -722,7 +722,7 @@ impl Kernel {
         Ok(())
     }
 
-    fn verified_binding(
+    pub(crate) fn verified_binding(
         store: &nexus_store::Store,
         key_hex: &str,
         command_id: &str,
@@ -883,7 +883,10 @@ impl Kernel {
                 ));
             }
             self.store
-                .revoke_tools(command_id, &reason.chars().take(120).collect::<String>())
+                .revoke_tools(command_id, &reason.chars().take(120).collect::<String>())?;
+            // A4.2: revocation also withdraws every open human approval.
+            Self::revoke_open_approvals(&mut self.store, command_id, "tools-revoked")?;
+            Ok(())
         })
     }
 
@@ -1160,24 +1163,46 @@ impl Kernel {
         max_wall_ms: u64,
     ) -> KernelResult<ProcessScopeBinding> {
         Self::critical(&self.lock_file, &self.in_process, || {
-            let receipt = self.store.read_receipt(command_id)?.ok_or_else(|| {
+            Self::bind_process_scope_inner(
+                &mut self.store,
+                self.witness.as_ref(),
+                command_id,
+                approver_id,
+                independent,
+                approved_root_digest,
+                max_wall_ms,
+            )
+        })
+    }
+
+    pub(crate) fn bind_process_scope_inner(
+        store: &mut nexus_store::Store,
+        witness: Option<&nexus_store::WitnessStore>,
+        command_id: &str,
+        approver_id: &str,
+        independent: bool,
+        approved_root_digest: &str,
+        max_wall_ms: u64,
+    ) -> KernelResult<ProcessScopeBinding> {
+        {
+            let receipt = store.read_receipt(command_id)?.ok_or_else(|| {
                 refuse(
                     KernelErrorCode::DeliveryInvalid,
                     "no accepted receipt for this command; process scope refused",
                 )
             })?;
             Self::require_tool_authority(
-                &self.store,
-                self.witness.as_ref(),
+                store,
+                witness,
                 command_id,
                 &receipt.task_instance_id,
                 &receipt.attempt_id,
                 receipt.lease_epoch,
                 &receipt.store_incarnation,
             )?;
-            let key_hex = self.store.issuance_key_hex()?;
-            let read_binding = Self::verified_binding(&self.store, &key_hex, command_id)?
-                .ok_or_else(|| {
+            let key_hex = store.issuance_key_hex()?;
+            let read_binding =
+                Self::verified_binding(store, &key_hex, command_id)?.ok_or_else(|| {
                     refuse(
                         KernelErrorCode::DeliveryInvalid,
                         "no workspace binding; bind the read workspace first",
@@ -1210,9 +1235,9 @@ impl Kernel {
             let json = canonical_json(&serde_json::to_value(&b).map_err(|_| {
                 KernelError::new(KernelErrorCode::StoreError, "scope not serializable")
             })?);
-            self.store.insert_process_scope(command_id, &json, &seal)?;
+            store.insert_process_scope(command_id, &json, &seal)?;
             Ok(b)
-        })
+        }
     }
 
     /// Append one process-lifecycle phase for a verified process grant,
@@ -1408,24 +1433,46 @@ impl Kernel {
         max_write_bytes: u64,
     ) -> KernelResult<WriteScopeBinding> {
         Self::critical(&self.lock_file, &self.in_process, || {
-            let receipt = self.store.read_receipt(command_id)?.ok_or_else(|| {
+            Self::bind_write_scope_inner(
+                &mut self.store,
+                self.witness.as_ref(),
+                command_id,
+                approver_id,
+                independent,
+                approved_root_digest,
+                max_write_bytes,
+            )
+        })
+    }
+
+    pub(crate) fn bind_write_scope_inner(
+        store: &mut nexus_store::Store,
+        witness: Option<&nexus_store::WitnessStore>,
+        command_id: &str,
+        approver_id: &str,
+        independent: bool,
+        approved_root_digest: &str,
+        max_write_bytes: u64,
+    ) -> KernelResult<WriteScopeBinding> {
+        {
+            let receipt = store.read_receipt(command_id)?.ok_or_else(|| {
                 refuse(
                     KernelErrorCode::DeliveryInvalid,
                     "no accepted receipt for this command; write scope refused",
                 )
             })?;
             Self::require_tool_authority(
-                &self.store,
-                self.witness.as_ref(),
+                store,
+                witness,
                 command_id,
                 &receipt.task_instance_id,
                 &receipt.attempt_id,
                 receipt.lease_epoch,
                 &receipt.store_incarnation,
             )?;
-            let key_hex = self.store.issuance_key_hex()?;
-            let read_binding = Self::verified_binding(&self.store, &key_hex, command_id)?
-                .ok_or_else(|| {
+            let key_hex = store.issuance_key_hex()?;
+            let read_binding =
+                Self::verified_binding(store, &key_hex, command_id)?.ok_or_else(|| {
                     refuse(
                         KernelErrorCode::DeliveryInvalid,
                         "no workspace binding; bind the read workspace first",
@@ -1458,9 +1505,9 @@ impl Kernel {
             let json = canonical_json(&serde_json::to_value(&b).map_err(|_| {
                 KernelError::new(KernelErrorCode::StoreError, "scope not serializable")
             })?);
-            self.store.insert_write_scope(command_id, &json, &seal)?;
+            store.insert_write_scope(command_id, &json, &seal)?;
             Ok(b)
-        })
+        }
     }
 
     /// Append one write-lifecycle phase for a verified write grant,

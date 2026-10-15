@@ -149,3 +149,28 @@ install -d -o nexusd -g nexus-issuer -m 0750 /run/nexusd
    transport posture (`peerUidEnforced: true`).
 5. No permissive fallback: chmod the DataRoot to `0755` and confirm the
    daemon refuses startup with `insecure-dataroot` and binds no socket.
+
+## Human approval (A4.2)
+
+Start `nexusd` with `--require-human-approval` (needs `--enable-writes` and/or
+`--enable-process`, `--require-independent-approver`, `--approver-cap-gid`, and
+the A4.1 role-separated credential directories). Then:
+
+- Legacy `write-scope-approve` / `process-scope-approve` are refused
+  (`approval-required`). Every mutation/process needs one reviewed, confirmed,
+  single-use approval bound to its exact operation.
+- The Controller/issuer submits `approval-request`; the operator, logged in as
+  the approver OS identity, runs
+  `nexus-approver --socket <sock> --cap-file <approver.cap> review <approval-id>`
+  in a real terminal. The CLI refuses piped stdin/stdout.
+- `nexus approvals [--task <id>]` and the Nexus Desktop Inspector show status
+  only. No GUI/Tauri path can approve or deny.
+- A daemon restart lapses approved-but-unconsumed approvals and voids pending
+  reviews; nothing is auto-approved.
+- No silent downgrade: the first start with `--require-human-approval`
+  latches the store. Later starts without it (or with the test-only
+  independence flag on an independent store) refuse to enable
+  `--enable-writes`/`--enable-process` (`approval-downgrade-refused`) and can
+  only serve read-only. Leaving human mode requires a fresh DataRoot.
+- Without ever using the flag, A3.3/A3.4 legacy behaviour is unchanged and NOT
+  sufficient for production.

@@ -193,6 +193,12 @@ export function fakeApi(over: Partial<NativeApi> = {}): NativeApi {
     }),
     listMockConversations: async () => [],
     toolEvents: async () => ({ available: true, reason: null, attempts: [] }),
+    listApprovals: async () => ({
+      available: true,
+      reason: null,
+      approvalAction: "terminal-only" as const,
+      approvals: [],
+    }),
     runMock: async (_p: string, on: (e: MockEvent) => void) => {
       on({ type: "started", runId: "mock-run-1" });
       on({ type: "step", id: "isolated-store", label: "Isolated throwaway kernel store opened" });

@@ -267,6 +267,8 @@ pub fn is_privileged(cmd: &str) -> bool {
             | "workspace-bind"
             | "tool-execute"
             | "tool-revoke"
+            | "approval-request"
+            | "approval-revoke"
     )
 }
 
@@ -276,7 +278,14 @@ pub fn is_privileged(cmd: &str) -> bool {
 pub fn is_read_only(cmd: &str) -> bool {
     matches!(
         cmd,
-        "health" | "status" | "receipt" | "journal" | "digest" | "readiness" | "tool-events"
+        "health"
+            | "status"
+            | "receipt"
+            | "journal"
+            | "digest"
+            | "readiness"
+            | "tool-events"
+            | "approval-list"
     )
 }
 

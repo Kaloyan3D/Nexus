@@ -3,12 +3,16 @@
 //! durably with status accepted-reserved-dispatch-disabled; the only
 //! dispatch authorization path always refuses with dispatch-disabled.
 pub mod accept;
+pub mod approvals;
 pub mod bridge;
 pub mod dispatch;
 pub mod readiness;
 pub mod tools;
 
 pub use accept::{AcceptRequest, GenerationState};
+pub use approvals::{
+    ApprovalDecision, ApprovalSubmission, APPROVAL_TTL_DEFAULT_MS, APPROVAL_TTL_MAX_MS,
+};
 pub use dispatch::{
     NativeDispatchGrant, NativeDispatchRequest, PublishedIntent, SealedNativeDispatchGrant,
     GRANT_SEAL_DOMAIN, GRANT_SKEW_MS, GRANT_TTL_MS, SCOPE_MOCK_E2E,

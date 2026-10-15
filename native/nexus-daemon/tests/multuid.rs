@@ -1953,3 +1953,570 @@ fn multuid_a41_misconfiguration_and_hostile_paths_fail_closed_without_residue() 
     );
     let _ = acap;
 }
+
+// ---------------------------------------------------------------------------
+// A4.2 human approval across REAL Linux identities. The approver credential
+// is read through the filesystem AS the approver user (never as root); the
+// issuer and bystander cannot read or use it; the terminal CLI runs as the
+// approver UID on a genuine pty.
+// ---------------------------------------------------------------------------
+
+struct Human {
+    d: TestDaemon,
+    t: ToolHost,
+    acap: PathBuf,
+    issuer_cap: String,
+    ws: PathBuf,
+    task: String,
+    attempt: String,
+    command: String,
+    lease: serde_json::Value,
+}
+
+fn sha_hex(s: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(s.as_bytes()))
+}
+
+fn human_setup(tag: &str) -> Option<Human> {
+    let t = require_tool_host(tag)?;
+    let (mut d, base, acap) = spawn_tools_as(&t);
+    d.argv.push("--require-human-approval".to_owned());
+    d.restart();
+    let issuer_cap = d.read_handoff();
+    let ws = base.join(format!("ws-{tag}"));
+    std::fs::create_dir_all(&ws).expect("ws");
+    let c = std::ffi::CString::new(ws.to_string_lossy().as_bytes()).unwrap();
+    unsafe { libc::chown(c.as_ptr(), t.h.nexusd_uid, t.h.issuer_gid) };
+    let digest = sha_hex(&ws.to_string_lossy());
+    let (task, attempt, command) = (
+        format!("hu-t-{tag}"),
+        format!("hu-a-{tag}"),
+        format!("hu-c-{tag}"),
+    );
+    let snapshot = common::snapshot();
+    let acquired = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(
+            &issuer_cap,
+            "acquire",
+            serde_json::json!({"taskInstanceId": task, "backend": "native"}),
+        ),
+    )
+    .expect("acquire");
+    let lease = acquired.get("lease").expect("lease").clone();
+    let resolution = common::resolution_for(&task, &snapshot);
+    let _ = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(
+            &issuer_cap,
+            "seal",
+            serde_json::json!({"resolution": resolution}),
+        ),
+    );
+    let intent = nexus_contracts::ControllerIntentV1::build(
+        &task,
+        &attempt,
+        &command,
+        "native",
+        1,
+        "muse_main",
+        "engineering-v2",
+        common::rev3(),
+        serde_json::json!({"op": "engineer-turn", "workspaceRootDigest": digest}),
+    );
+    let accepted = send_as(ISSUER_USER, &d.socket, &signed_frame(&issuer_cap, "accept", serde_json::json!({
+        "intent": serde_json::to_value(&intent).unwrap(), "resolution": resolution, "snapshot": snapshot,
+        "lease": {"epoch": lease.get("leaseEpoch"), "storeIncarnation": lease.get("storeIncarnation")}})))
+        .expect("accept");
+    assert_eq!(accepted["ok"], true, "{accepted}");
+    let bind = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(
+            &issuer_cap,
+            "workspace-bind",
+            serde_json::json!({"commandId": command, "root": ws.to_string_lossy()}),
+        ),
+    )
+    .expect("bind");
+    assert_eq!(bind["ok"], true, "{bind}");
+    let lease = accepted["receipt"].clone();
+    Some(Human {
+        d,
+        t,
+        acap,
+        issuer_cap,
+        ws,
+        task,
+        attempt,
+        command,
+        lease,
+    })
+}
+
+impl Human {
+    fn tool_params(&self, rid: &str, args: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "requestId": rid, "cancellationId": format!("c-{rid}"),
+            "taskInstanceId": self.task, "attemptId": self.attempt, "commandId": self.command,
+            "leaseEpoch": self.lease["leaseEpoch"], "storeIncarnation": self.lease["storeIncarnation"],
+            "toolId": "fs.write", "toolVersion": 1, "args": args,
+        })
+    }
+    fn put_file(&self, name: &str, body: &str) {
+        let p = self.ws.join(name);
+        std::fs::write(&p, body).unwrap();
+        let c = std::ffi::CString::new(p.to_string_lossy().as_bytes()).unwrap();
+        unsafe { libc::chown(c.as_ptr(), self.t.h.nexusd_uid, self.t.h.issuer_gid) };
+    }
+    /// The approver reads its OWN credential through the filesystem.
+    fn approver_key(&self) -> String {
+        cat_as(APPROVER_USER, &self.acap)
+            .expect("approver must read its own credential")
+            .trim()
+            .to_owned()
+    }
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_human_approval_end_to_end_with_separate_real_identities() {
+    let Some(h) = human_setup("e2e") else {
+        return;
+    };
+    h.put_file("a.txt", "before\n");
+    let args = serde_json::json!({"path": "a.txt", "content": "after\n", "mode": "replace",
+        "expectedSha256": sha_hex("before\n")});
+    // The issuer cannot execute: no approval yet.
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(
+            &h.issuer_cap,
+            "tool-execute",
+            h.tool_params("e2e-0", args.clone()),
+        ),
+    )
+    .unwrap();
+    assert_eq!(code_of(&r), "scope-refused", "{r}");
+    // Issuer submits the proposal.
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(
+            &h.issuer_cap,
+            "approval-request",
+            h.tool_params("e2e-1", args.clone()),
+        ),
+    )
+    .unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    let id = r["approval"]["approvalId"].as_str().unwrap().to_owned();
+    // The approver fetches the daemon-authored review with ITS OWN key.
+    let akey = h.approver_key();
+    let g = send_as(
+        APPROVER_USER,
+        &h.d.socket,
+        &signed_frame(&akey, "approval-get", serde_json::json!({"approvalId": id})),
+    )
+    .unwrap();
+    assert_eq!(g["ok"], true, "{g}");
+    let a = &g["approval"];
+    assert_eq!(
+        a["request"]["operation"]["postImageSha256"],
+        sha_hex("after\n")
+    );
+    assert!(a["request"]["preview"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("+after"));
+    // The issuer cannot approve, with either its key or the approver key.
+    let decide = serde_json::json!({"approvalId": id, "requestDigest": a["requestDigest"],
+        "decision": "approve", "reviewCode": a["reviewCode"], "confirmation": {"tty": true}});
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(&h.issuer_cap, "approval-decide", decide.clone()),
+    )
+    .unwrap();
+    assert_eq!(code_of(&r), "issuer-untrusted", "{r}");
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(&akey, "approval-decide", decide.clone()),
+    )
+    .unwrap();
+    assert_eq!(code_of(&r), "peer-unauthorized", "{r}");
+    // The approver decides; the issuer then executes exactly once.
+    let r = send_as(
+        APPROVER_USER,
+        &h.d.socket,
+        &signed_frame(&akey, "approval-decide", decide),
+    )
+    .unwrap();
+    assert_eq!(r["approval"]["state"], "approved", "{r}");
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(
+            &h.issuer_cap,
+            "tool-execute",
+            h.tool_params("e2e-2", args.clone()),
+        ),
+    )
+    .unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("a.txt")).unwrap(),
+        "after\n"
+    );
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(&h.issuer_cap, "tool-execute", h.tool_params("e2e-3", args)),
+    )
+    .unwrap();
+    assert_eq!(code_of(&r), "scope-refused", "{r}");
+    // Decided approvals are visible to issuer and approver, not to others.
+    let list = |who: &str| {
+        send_as(
+            who,
+            &h.d.socket,
+            &serde_json::json!({"protocol":1,"id":common::next_id("l"),"cmd":"approval-list","params":{}})
+                .to_string(),
+        )
+    };
+    assert_eq!(list(ISSUER_USER).unwrap()["ok"], true);
+    assert_eq!(list(APPROVER_USER).unwrap()["ok"], true);
+    let r = list(BYSTANDER_USER).unwrap();
+    assert_eq!(code_of(&r), "peer-unauthorized", "bystander history: {r}");
+    assert!(
+        list(UNTRUSTED_USER).is_err(),
+        "untrusted must be refused at connect"
+    );
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_stolen_credentials_cannot_forge_human_approval() {
+    let Some(h) = human_setup("forge") else {
+        return;
+    };
+    h.put_file("a.txt", "before\n");
+    let args = serde_json::json!({"path": "a.txt", "content": "after\n", "mode": "replace",
+        "expectedSha256": sha_hex("before\n")});
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(
+            &h.issuer_cap,
+            "approval-request",
+            h.tool_params("f-1", args.clone()),
+        ),
+    )
+    .unwrap();
+    let id = r["approval"]["approvalId"].as_str().unwrap().to_owned();
+    let akey = root_read(&h.acap); // root-stolen copy of the approver key
+                                   // Every non-approver UID holding the stolen approver key is refused on
+                                   // the peer, including for review (so the code cannot be harvested).
+    for who in [ISSUER_USER, BYSTANDER_USER] {
+        let r = send_as(
+            who,
+            &h.d.socket,
+            &signed_frame(&akey, "approval-get", serde_json::json!({"approvalId": id})),
+        )
+        .unwrap();
+        assert_eq!(code_of(&r), "peer-unauthorized", "{who}: {r}");
+        assert!(
+            cat_as(who, &h.acap).is_err(),
+            "{who} read the approver credential"
+        );
+    }
+    assert!(send_as(
+        UNTRUSTED_USER,
+        &h.d.socket,
+        &signed_frame(&akey, "approval-get", serde_json::json!({"approvalId": id})),
+    )
+    .is_err());
+    // The approver UID with a wrong digest/code cannot decide, and a blind
+    // decision without review is refused.
+    let r = send_as(
+        APPROVER_USER,
+        &h.d.socket,
+        &signed_frame(
+            &akey,
+            "approval-decide",
+            serde_json::json!({"approvalId": id, "requestDigest": "0".repeat(64),
+                "decision": "approve", "reviewCode": "00000000", "confirmation": {"tty": true}}),
+        ),
+    )
+    .unwrap();
+    assert_ne!(r["ok"], true, "{r}");
+    // After the failed attempts nothing is approved and nothing ran.
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(&h.issuer_cap, "tool-execute", h.tool_params("f-2", args)),
+    )
+    .unwrap();
+    assert_eq!(code_of(&r), "scope-refused", "{r}");
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("a.txt")).unwrap(),
+        "before\n"
+    );
+    // Restart cannot turn a stale review into consent.
+    let mut h = h;
+    h.d.restart();
+    let akey2 = h.approver_key();
+    let r = send_as(
+        APPROVER_USER,
+        &h.d.socket,
+        &signed_frame(
+            &akey2,
+            "approval-get",
+            serde_json::json!({"approvalId": id}),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        r["ok"], true,
+        "pending request survives restart for re-review: {r}"
+    );
+}
+
+const PTY_DRIVER: &str = r#"
+import os, pty, sys, time, select
+user, argv_json = sys.argv[1], sys.argv[2]
+import json
+argv = json.loads(argv_json)
+answer = sys.argv[3] if len(sys.argv) > 3 else None
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp("runuser", ["runuser", "-u", user, "--"] + argv)
+out = b""
+sent = False
+deadline = time.time() + 40
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if r:
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+        if answer is not None and not sent and b"Type the review code" in out and out.rstrip().endswith(b":") or (answer is not None and not sent and b"leave pending: " in out):
+            time.sleep(0.2)
+            os.write(fd, (answer + "\n").encode())
+            sent = True
+_, status = os.waitpid(pid, 0)
+sys.stdout.write(out.decode("utf-8", "replace"))
+sys.stdout.write("\nEXIT=%d\n" % (os.waitstatus_to_exitcode(status)))
+"#;
+
+fn approver_cli_bin() -> PathBuf {
+    if let Ok(p) = std::env::var("NEXUS_APPROVER_BIN") {
+        return PathBuf::from(p);
+    }
+    nexusd_bin().with_file_name("nexus-approver")
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_terminal_approver_cli_requires_a_real_terminal_and_typed_code() {
+    let Some(h) = human_setup("cli") else {
+        return;
+    };
+    let cli = approver_cli_bin();
+    if !cli.exists() {
+        println!("NOT RUN: nexus-approver binary missing at {cli:?}");
+        return;
+    }
+    h.put_file("a.txt", "before\n");
+    let args = serde_json::json!({"path": "a.txt", "content": "after\n", "mode": "replace",
+        "expectedSha256": sha_hex("before\n")});
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(
+            &h.issuer_cap,
+            "approval-request",
+            h.tool_params("c-1", args.clone()),
+        ),
+    )
+    .unwrap();
+    let id = r["approval"]["approvalId"].as_str().unwrap().to_owned();
+    let argv = |extra: &[&str]| -> String {
+        let mut v = vec![
+            cli.to_string_lossy().into_owned(),
+            "--socket".to_owned(),
+            h.d.socket.to_string_lossy().into_owned(),
+            "--cap-file".to_owned(),
+            h.acap.to_string_lossy().into_owned(),
+        ];
+        v.extend(extra.iter().map(|s| s.to_string()));
+        serde_json::to_string(&v).unwrap()
+    };
+    // 1. No terminal (piped stdin/stdout): the CLI refuses outright.
+    let out = Command::new("runuser")
+        .arg("-u")
+        .arg(APPROVER_USER)
+        .arg("--")
+        .arg(&cli)
+        .args([
+            "--socket",
+            &h.d.socket.to_string_lossy(),
+            "--cap-file",
+            &h.acap.to_string_lossy(),
+            "review",
+            &id,
+        ])
+        .stdin(Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // 2. A wrong answer on a real pty leaves the approval pending.
+    let run = |answer: &str| {
+        let o = Command::new("python3")
+            .arg("-c")
+            .arg(PTY_DRIVER)
+            .arg(APPROVER_USER)
+            .arg(argv(&["review", &id]))
+            .arg(answer)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    };
+    let out = run("not-the-code");
+    assert!(
+        out.contains("left pending") && out.contains("EXIT=0"),
+        "{out}"
+    );
+    let state = |who: &str, key: &str| {
+        let r = send_as(
+            who,
+            &h.d.socket,
+            &serde_json::json!({"protocol":1,"id":common::next_id("s"),"cmd":"approval-list",
+                "params":{"approvalId": id}})
+            .to_string(),
+        )
+        .unwrap();
+        let _ = key;
+        r["approval"]["state"].as_str().unwrap_or("?").to_owned()
+    };
+    assert_eq!(state(ISSUER_USER, ""), "pending");
+    // 3. The review shows the exact diff and digests; the typed review
+    //    code (echoed by the harness from the screen) approves.
+    let probe = run("");
+    assert!(
+        probe.contains("+after") && probe.contains("postImageSha256"),
+        "{probe}"
+    );
+    let code = probe
+        .split("review code (")
+        .nth(1)
+        .and_then(|s| s.split(')').next())
+        .expect("review code displayed")
+        .to_owned();
+    let out = run(&code);
+    assert!(
+        out.contains("recorded: approved") && out.contains("EXIT=0"),
+        "{out}"
+    );
+    assert_eq!(state(ISSUER_USER, ""), "approved");
+    // 4. Execute under the approval.
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(&h.issuer_cap, "tool-execute", h.tool_params("c-2", args)),
+    )
+    .unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(
+        std::fs::read_to_string(h.ws.join("a.txt")).unwrap(),
+        "after\n"
+    );
+    // 5. The CLI cannot even load the credential as another identity.
+    let out = Command::new("runuser")
+        .arg("-u")
+        .arg(ISSUER_USER)
+        .arg("--")
+        .arg(&cli)
+        .args([
+            "--socket",
+            &h.d.socket.to_string_lossy(),
+            "--cap-file",
+            &h.acap.to_string_lossy(),
+            "review",
+            &id,
+        ])
+        .output()
+        .unwrap();
+    assert_ne!(out.status.code(), Some(0));
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_independent_human_approval_store_cannot_be_downgraded_by_restart() {
+    let Some(mut h) = human_setup("down") else {
+        return;
+    };
+    h.put_file("a.txt", "before\n");
+    let argv = h.d.argv.clone();
+    terminate(&mut h.d.child);
+    let _ = h.d.child.wait();
+    let run = |argv: &[String]| -> (bool, String) {
+        let o = Command::new("runuser")
+            .arg("-u")
+            .arg(DAEMON_USER)
+            .arg("--")
+            .arg(nexusd_bin())
+            .args(argv)
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn");
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr),
+        )
+    };
+    // (a) the flag silently dropped, writes still enabled
+    let a: Vec<String> = argv
+        .iter()
+        .filter(|x| *x != "--require-human-approval")
+        .cloned()
+        .collect();
+    let (ok, out) = run(&a);
+    assert!(!ok && out.contains("approval-downgrade-refused"), "{out}");
+    // (b) independence replaced by the test-only self-approval flag
+    let mut b: Vec<String> = argv
+        .iter()
+        .filter(|x| *x != "--require-independent-approver")
+        .cloned()
+        .collect();
+    b.push("--allow-nonindependent-approver-test-only".to_owned());
+    let (ok, out) = run(&b);
+    assert!(!ok && out.contains("approval-downgrade-refused"), "{out}");
+    // (c) processes enabled under the dropped flag
+    let mut c = a.clone();
+    c.push("--enable-process".to_owned());
+    let (ok, out) = run(&c);
+    assert!(!ok && out.contains("approval-downgrade-refused"), "{out}");
+    // The compliant configuration still starts and the credentials are
+    // re-published with the A4.1 modes.
+    let _ = std::fs::remove_file(&h.d.socket);
+    h.d.restart();
+    assert_eq!(
+        stat_of(&h.acap),
+        (h.t.h.nexusd_uid, h.t.approver_gid, 0o640)
+    );
+}

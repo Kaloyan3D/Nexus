@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Activity, FileBox, ListChecks, SquareStack, Wrench, X } from "lucide-react";
-import type { TaskRecord, TaskToolEvents } from "../../lib/contracts";
+import { Activity, FileBox, ListChecks, ShieldCheck, SquareStack, Wrench, X } from "lucide-react";
+import type { ApprovalsView, TaskRecord, TaskToolEvents } from "../../lib/contracts";
 import {
   approvalNote,
   describeMutation,
@@ -179,6 +179,83 @@ function ToolActivity({ task }: { task: TaskRecord }) {
   );
 }
 
+const APPROVAL_LABEL: Record<string, string> = {
+  pending: "Awaiting human review",
+  approved: "Approved (unused)",
+  consumed: "Approved and used",
+  denied: "Denied",
+  expired: "Expired",
+  revoked: "Revoked",
+};
+
+function approvalTone(state: string): "success" | "warning" | "error" | "neutral" {
+  if (state === "approved" || state === "consumed") return "success";
+  if (state === "pending") return "warning";
+  if (state === "denied" || state === "revoked") return "error";
+  return "neutral";
+}
+
+/**
+ * Read-only human-approval status. The approval itself happens only in the
+ * trusted terminal approver (independent OS identity); nothing here can
+ * approve, deny, or reveal the reviewed content.
+ */
+function Approvals({ task }: { task: TaskRecord }) {
+  const { api } = useNexus();
+  const instance = task.taskInstanceId;
+  const [res, setRes] = useState<{ key: string; data?: ApprovalsView; error?: string } | null>(null);
+  useEffect(() => {
+    if (!instance) return;
+    let live = true;
+    api
+      .listApprovals(instance)
+      .then((data) => live && setRes({ key: instance, data }))
+      .catch((e: { message?: string }) => live && setRes({ key: instance, error: e?.message ?? "unavailable" }));
+    return () => {
+      live = false;
+    };
+  }, [api, instance]);
+  if (!instance) return null;
+  const current = res && res.key === instance ? res : null;
+  const data = current?.data ?? null;
+  return (
+    <Section>
+      <SectionHeading icon={ShieldCheck} aside={data?.available ? String(data.approvals.length) : undefined}>
+        Approvals
+      </SectionHeading>
+      {current?.error ? (
+        <p className="nv-note" style={{ marginTop: 0 }}>Approvals unavailable: {current.error}</p>
+      ) : data === null ? (
+        <p className="nv-note" style={{ marginTop: 0 }}>Loading…</p>
+      ) : !data.available ? (
+        <p className="nv-note" style={{ marginTop: 0 }}>
+          Human approval is not active: {data.reason ?? "unavailable"}.
+        </p>
+      ) : data.approvals.length === 0 ? (
+        <p className="nv-note" style={{ marginTop: 0 }}>No approval requests for this task.</p>
+      ) : (
+        <ul className="nv-toolevents" aria-label="Approval requests">
+          {data.approvals.map((a) => (
+            <li key={a.approvalId}>
+              <Badge tone={approvalTone(a.state)}>{APPROVAL_LABEL[a.state] ?? a.state}</Badge>{" "}
+              <span className="nv-mono">{a.toolId}</span>
+              {a.paths.length > 0 && <span className="nv-note nv-mono"> · {a.paths.join(", ")}</span>}
+              <div className="nv-note nv-mono">
+                {shortId(a.approvalId)} · request {a.requestDigest.slice(0, 12)}
+                {a.humanAuthMechanism ? ` · ${a.humanAuthMechanism}` : ""}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="nv-note">
+        Approve or deny in a terminal as the approver identity (<span className="nv-mono">nexus-approver</span>).
+        This window can only display status.
+      </p>
+    </Section>
+  );
+}
+
 function TaskInspector({ task }: { task: TaskRecord }) {
   const v = taskStatusView(task.status);
   const lifetime = durationBetween(task.createdAtUtc, task.completedAtUtc);
@@ -265,6 +342,7 @@ function TaskInspector({ task }: { task: TaskRecord }) {
           </>
         )}
       </Section>
+      <Approvals task={task} />
       <ToolActivity task={task} />
       <Section>
         <SectionHeading icon={FileBox}>Artifacts</SectionHeading>

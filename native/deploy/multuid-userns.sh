@@ -12,7 +12,8 @@ SUB=$(awk -F: -v u="$(id -un)" '$1==u{print $2; exit}' /etc/subuid)
 (cd "$ROOT/native" && cargo build -p nexus-daemon -p nexus-kernel && cargo test -p nexus-daemon --test multuid --no-run)
 T=$(ls -t "$ROOT"/native/target/debug/deps/multuid-* | grep -v '\.d$' | head -1)
 mkdir -p "$M/bin" "$M/etc" "$M/rust/cargo/bin" "$M/rust/rustup"
-cp "$ROOT/native/target/debug/nexusd" "$ROOT/native/target/debug/nexus-kernel" "$T" "$M/bin/"
+rm -f "$M"/bin/multuid-*  # a stale hash would be mistaken for a test filter
+cp "$ROOT/native/target/debug/nexusd" "$ROOT/native/target/debug/nexus-approver" "$ROOT/native/target/debug/nexus-kernel" "$T" "$M/bin/"
 cp /etc/passwd "$M/etc/passwd"; cp /etc/group "$M/etc/group"
 cat >> "$M/etc/passwd" <<P
 nexusd-test:x:20001:20001::/nonexistent:/usr/sbin/nologin
@@ -36,7 +37,7 @@ P=/sys/fs/cgroup/$(sed 's/^0:://' /proc/self/cgroup)/nxmu-run
 mkdir -p "$P" && chown 20001:20001 "$P" "$P/cgroup.procs" "$P/cgroup.subtree_control" "$P/cgroup.threads" && echo $$ > "$P/cgroup.procs" || echo "cgroup delegation FAILED"
 mount --bind "$HOME_REAL/.cargo/bin" /tmp/nxmu/rust/cargo/bin && mount --bind "$HOME_REAL/.rustup" /tmp/nxmu/rust/rustup || echo "toolchain bind FAILED"
 export CARGO_HOME=/tmp/nxmu/rust/cargo RUSTUP_HOME=/tmp/nxmu/rust/rustup
-export NEXUS_MULTUID=1 NEXUSD_BIN=/tmp/nxmu/bin/nexusd NEXUS_KERNEL_BIN=/tmp/nxmu/bin/nexus-kernel
+export NEXUS_MULTUID=1 NEXUSD_BIN=/tmp/nxmu/bin/nexusd NEXUS_APPROVER_BIN=/tmp/nxmu/bin/nexus-approver NEXUS_KERNEL_BIN=/tmp/nxmu/bin/nexus-kernel
 cd /tmp/nxmu
 exec /tmp/nxmu/bin/$(ls /tmp/nxmu/bin | grep ^multuid-) "$@"
 R

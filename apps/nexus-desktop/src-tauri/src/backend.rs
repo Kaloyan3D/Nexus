@@ -354,6 +354,22 @@ pub fn tool_events(
     nc::tool_events_for_task(cfg, task_instance_id).map_err(|e| ui_error(&e))
 }
 
+/// Read-only human-approval status for one task instance. Status only:
+/// the renderer can neither approve nor deny, and receives no review
+/// content or credentials (those exist only in the terminal approver).
+pub fn approvals(
+    cfg: &nc::ClientConfig,
+    task_instance_id: &str,
+) -> Result<nc::ApprovalsView, UiError> {
+    if !valid_instance_id(task_instance_id) {
+        return Err(UiError {
+            code: "bad-usage".to_owned(),
+            message: "task instance id is malformed".to_owned(),
+        });
+    }
+    nc::approvals(cfg, Some(task_instance_id)).map_err(|e| ui_error(&e))
+}
+
 pub fn model_catalog() -> ModelCatalog {
     let m = nc::models();
     let entries = m
@@ -543,6 +559,24 @@ mod tests {
         let s = runtime_status(&cfg);
         assert_eq!(s.connection, Connection::Disconnected);
         assert!(s.state.is_none() && s.accepted_commands.is_none());
+    }
+
+    #[test]
+    fn approvals_are_status_only_and_validate_the_instance_id() {
+        let cfg =
+            nc::ClientConfig::resolve(Some("/nonexistent/nexus.sock".into()), None, false).unwrap();
+        assert_eq!(approvals(&cfg, "../etc").unwrap_err().code, "bad-usage");
+        // An unreachable daemon is an error, never an empty/approved list.
+        assert!(approvals(&cfg, "task_0123456789abcdef0123456789abcdef").is_err());
+        // The renderer-facing view type has no approve/deny surface.
+        let v = nc::ApprovalsView {
+            available: true,
+            reason: None,
+            approval_action: "terminal-only".to_owned(),
+            approvals: Vec::new(),
+        };
+        let j = serde_json::to_string(&v).unwrap();
+        assert!(j.contains("terminal-only") && !j.contains("reviewCode"));
     }
 
     #[test]
