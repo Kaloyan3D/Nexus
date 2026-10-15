@@ -976,3 +976,64 @@ print(json.dumps(r))",
 
 // 12-hour reminder: nothing above uses a shell; every payload is a program
 // plus argv, so there is no quoting/expansion surface in the harness.
+
+/// A4.4: namespace-creating clone() flags must be refused. `unshare`/`setns`
+/// are denied by number, but `clone(CLONE_NEWUSER|...)` is a different
+/// syscall whose danger is in its flag argument.
+#[test]
+fn nested_namespace_creation_via_clone_is_denied() {
+    require_sandbox!("nested-userns");
+    let src = stage();
+    let code = r#"
+import ctypes, os, json
+libc = ctypes.CDLL(None, use_errno=True)
+SIGCHLD = 17
+flags = {"newuser": 0x10000000, "newns": 0x00020000, "newnet": 0x40000000,
+         "newpid": 0x20000000, "newuts": 0x04000000, "newipc": 0x08000000,
+         "newcgroup": 0x02000000}
+res = {}
+for name, f in flags.items():
+    r = libc.syscall(56, ctypes.c_long(f | SIGCHLD), 0, 0, 0, 0)
+    e = ctypes.get_errno()
+    if r == 0:
+        os._exit(0)          # we are the child of an ALLOWED clone
+    if r > 0:
+        try: os.waitpid(r, 0)
+        except Exception: pass
+    res[name] = {"ret": r, "errno": e}
+# a plain fork-style clone must still work
+r = libc.syscall(56, ctypes.c_long(SIGCHLD), 0, 0, 0, 0)
+if r == 0:
+    os._exit(0)
+os.waitpid(r, 0)
+res["plain_fork"] = "ok" if r > 0 else "fail"
+print(json.dumps(res))
+"#;
+    let o = py("nested-ns", code, src.path());
+    assert_eq!(
+        o.exit,
+        ExitKind::Exited(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_str(out(&o).trim()).unwrap();
+    for k in [
+        "newuser",
+        "newns",
+        "newnet",
+        "newpid",
+        "newuts",
+        "newipc",
+        "newcgroup",
+    ] {
+        assert_eq!(v[k]["ret"], -1, "clone with {k} must be refused: {v}");
+        // Capability-less namespaces are refused with EPERM; nested user
+        // namespaces hit the sandbox's user-namespace limit (ENOSPC).
+        let e = v[k]["errno"].as_i64().unwrap();
+        assert!(e == 1 || (k == "newuser" && e == 28), "{k}: errno {e}: {v}");
+    }
+    assert_eq!(
+        v["plain_fork"], "ok",
+        "ordinary fork must keep working: {v}"
+    );
+}

@@ -59,6 +59,7 @@ fn usage() -> i32 {
     );
     println!("         [--cap-handoff PATH [--cap-handoff-gid GID|NAME]]");
     println!("         [--external-witness SOCKET --external-witness-uid UID [--witness-adopt-legacy]]  (A4.3 independent journal witness)");
+    println!("         [--security-profile production-v1 [--validate-config-only]]  (A4.4 enforced production contract)");
     println!("         [--require-external-witness]  (refuse to start without --external-witness; production units)");
     println!("         [--require-human-approval]  (A4.2: per-operation human approval; needs --require-independent-approver)");
     println!("Trust modes: readonly (default, privileged mutations disabled) |");
@@ -144,6 +145,29 @@ fn main() {
 }
 
 fn run(args: &[String]) -> i32 {
+    // A4.4 production security profile: validated BEFORE any file is
+    // touched so a fresh DataRoot cannot start without the whole contract.
+    let profile = flag_str(args, "--security-profile");
+    if let Some(p) = &profile {
+        if p != nexus_daemon::profile::PRODUCTION_V1 {
+            return fatal(
+                "bad-config",
+                "unknown --security-profile (known: production-v1)",
+            );
+        }
+        let env = |k: &str| std::env::var(k).ok();
+        let euid = unsafe { libc::geteuid() };
+        if let Err(v) = nexus_daemon::profile::validate_production_v1(args, &env, euid) {
+            return fatal(
+                "profile-violation",
+                &format!("production-v1 requirements not met: {}", v.join("; ")),
+            );
+        }
+        if args.iter().any(|a| a == "--validate-config-only") {
+            println!("{{\"profile\":\"production-v1\",\"valid\":true}}");
+            return 0;
+        }
+    }
     let db = match flag(args, "--db") {
         Some(p) => p,
         None => {
@@ -454,6 +478,17 @@ fn run(args: &[String]) -> i32 {
         }
     }
     let incarnation = kernel.incarnation().to_owned();
+    {
+        let mutating = args
+            .iter()
+            .any(|a| a == "--enable-writes" || a == "--enable-process");
+        if let Err(e) = kernel.enforce_security_profile(profile.as_deref()) {
+            if mutating {
+                return fatal("profile-downgrade-refused", &e.message);
+            }
+            log_line_startup("security profile latch active; writes/process stay disabled");
+        }
+    }
     // A4.3 independent journal witness. Optional, but once a store has been
     // anchored it can never again serve privileged operations without it.
     let ext_witness = flag(args, "--external-witness");
@@ -949,6 +984,7 @@ fn run(args: &[String]) -> i32 {
         approver_uids,
         approver_independent,
         require_human_approval,
+        security_profile: profile.clone(),
         tool_inflight: std::sync::atomic::AtomicUsize::new(0),
         witness_configured: layout.witness.is_some(),
         witness_path: layout.witness.clone(),

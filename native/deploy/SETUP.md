@@ -217,3 +217,26 @@ nexusd ... --witness <local witness db> \
 | Test-only (`--allow-nonindependent-approver-test-only`, `--allow-same-uid-test-only`) | proves logic only; never isolation |
 
 The persistent latch is set only after the witness actually holds the store's history (first `verified`), not on mere configuration. Production units must therefore always pass `--require-external-witness` (see `nexusd.service`).
+
+## Production security profile (A4.4)
+
+`--security-profile production-v1` is one explicit startup contract. It
+validates BEFORE touching the DataRoot and refuses (`profile-violation`) unless:
+issuer/approver/witness/daemon uids are pairwise distinct, the daemon is not
+root, `--require-human-approval`, `--require-independent-approver`,
+`--require-external-witness` with the external witness flags, the A4.1
+credential separation flags (`--cap-handoff-gid`, `--approver-cap-gid`) and
+`--workspace-bases` are present, `--trust-mode shadow-test` is set,
+`--enable-process` is accompanied by `--require-kernel-resource-limits`, and no
+test-only flag (`--allow-nonindependent-approver-test-only`,
+`--witness-adopt-legacy`) or env (`NEXUS_TEST_WRITE_CRASH_AT`,
+`NEXUS_WITNESS_FAULT`, `NEXUS_TOOLS_OFFLINE_*`) is present. `--validate-config-only`
+checks and exits. The profile is latched per store: a later start without it
+cannot enable writes/process (`profile-downgrade-refused`); read-only start
+remains available.
+
+A launcher running as the daemon's own user can still omit the flag on a
+FRESH store; only a root-owned unit file (`deploy/nexusd.service`) can make the
+profile mandatory. Legacy migration (`--witness-adopt-legacy`) is an offline
+operator step performed WITHOUT the profile, followed by the first
+profile start.

@@ -1,12 +1,24 @@
-# A4.3: this unit passes --require-external-witness so a missing/typo'd witness
-# configuration refuses to start (fail closed) even on a FRESH DataRoot; with
-# the witness down it serves read-only. NOT verified on a real systemd host.
-# systemd unit for nexusd (A2.1 shadow-only, execution disabled).
+# nexusd production unit (A4.4, security profile production-v1).
 #
-# Install only on the target host after creating the service identities
-# (see SETUP.md). This file is configuration, not an enabled service here.
+# NOT VERIFIED on a real system manager with User=/Group=: the disposable
+# systemd test (deploy/systemd-user-integration-test.sh) used a USER manager
+# on one UID. See native/A4.4-EVIDENCE.md for exactly what is unverified.
+#
+# Security properties this unit enforces (root-owned file, so the daemon's
+# own user cannot relax them):
+#   * --security-profile production-v1: the daemon refuses to start unless
+#     the complete contract is present (independent approver, human
+#     approval, external witness, kernel resource limits when processes are
+#     enabled, no test-only flags/env). It validates before touching state.
+#   * Requires=/After= the witness: no witness, no start; witness stop stops
+#     the daemon.
+#   * No Environment= lines: nothing test-only can be armed from the unit.
+#
+# Replace the *_HERE tokens at provisioning time. Writes are enabled; add
+# --enable-process --require-kernel-resource-limits only on hosts where the
+# sandbox preflight with kernel-enforced limits passes.
 [Unit]
-Description=nexusd native kernel daemon (shadow-only, no dispatch)
+Description=nexusd native kernel daemon (production-v1)
 After=network.target nexus-witness.service
 Requires=nexus-witness.service
 
@@ -14,25 +26,42 @@ Requires=nexus-witness.service
 Type=simple
 User=nexusd
 Group=nexusd
-SupplementaryGroups=nexus-issuer nexus-issuercred nexus-witnessc
+SupplementaryGroups=nexus-issuer nexus-issuercred nexus-approver nexus-witnessc
 UMask=0077
-RuntimeDirectory=nexusd nexusd-cred
+RuntimeDirectory=nexusd nexusd-cred nexusd-approver
 RuntimeDirectoryMode=0750
+StateDirectory=nexusd
+StateDirectoryMode=0700
+Delegate=yes
 NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/nexusd /run/nexusd /run/nexusd-cred
-# RuntimeDirectory creates /run/nexusd as nexusd:nexusd; the daemon requires
-# nexusd:nexus-issuer 0750, so hand the group over before startup. (chgrp to a
-# member group needs no privilege; SupplementaryGroups above grants membership.)
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=false
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/var/lib/nexusd /run/nexusd /run/nexusd-cred /run/nexusd-approver WORKSPACE_BASE_HERE
 ExecStartPre=/bin/chgrp nexus-issuer /run/nexusd
-ExecStartPre=/bin/chmod 0750 /run/nexusd
-# A4.1: issuer credential lives in its OWN directory (group nexus-issuercred,
-# members: nexusd + the issuer only). Socket-group membership grants nothing here.
 ExecStartPre=/bin/chgrp nexus-issuercred /run/nexusd-cred
-ExecStartPre=/bin/chmod 0750 /run/nexusd-cred
-ExecStart=/usr/local/bin/nexusd --db /var/lib/nexusd/k.db --witness /var/lib/nexusd/k.witness.db --socket /run/nexusd/n.sock --cap /var/lib/nexusd/issuer.cap --trust-mode shadow-test --allowed-uids ISSUER_UID_HERE --socket-group nexus-issuer --cap-handoff /run/nexusd-cred/issuer.handoff --cap-handoff-gid nexus-issuercred --witness /var/lib/nexusd/k.witness.db --external-witness /run/nexus-witness/w.sock --external-witness-uid NEXUS_WITNESS_UID_HERE --require-external-witness
+ExecStartPre=/bin/chgrp nexus-approver /run/nexusd-approver
+ExecStartPre=/bin/chmod 0750 /run/nexusd /run/nexusd-cred /run/nexusd-approver
+ExecStart=/usr/local/bin/nexusd \
+  --security-profile production-v1 \
+  --db /var/lib/nexusd/k.db --witness /var/lib/nexusd/k.witness.db \
+  --socket /run/nexusd/n.sock --cap /var/lib/nexusd/issuer.cap \
+  --trust-mode shadow-test \
+  --allowed-uids ISSUER_UID_HERE --socket-group nexus-issuer \
+  --cap-handoff /run/nexusd-cred/issuer.handoff --cap-handoff-gid nexus-issuercred \
+  --approver-cap /run/nexusd-approver/approver.cap --approver-uids APPROVER_UID_HERE \
+  --approver-cap-gid nexus-approver --require-independent-approver \
+  --require-human-approval \
+  --require-external-witness --external-witness /run/nexus-witness/w.sock \
+  --external-witness-uid NEXUS_WITNESS_UID_HERE \
+  --workspace-bases WORKSPACE_BASE_HERE --enable-writes
 Restart=on-failure
 RestartSec=2
 StandardOutput=journal

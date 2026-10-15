@@ -7,7 +7,7 @@
 //!
 //! Usage:
 //!   nexus-witness --dir STATE_DIR --socket PATH --allowed-uids UID[,UID]
-//!                 [--socket-group GID] [--allow-same-uid-test-only]
+//!                 [--socket-group GID] [--production] [--allow-same-uid-test-only]
 //!   nexus-witness --dir STATE_DIR status        (offline, run as the witness UID)
 //!
 //! `NEXUS_WITNESS_FAULT=fail-persist|drop-ack|exit-after-persist|hang|fail-after:N|drop-ack-after:N` is a
@@ -75,6 +75,13 @@ fn run() -> i32 {
     };
     if let Err(e) = verify_state_dir(&dir) {
         return fatal(&e);
+    }
+    // Production: no test-only escape hatches may be armed.
+    if args.iter().any(|a| a == "--production")
+        && (std::env::var_os("NEXUS_WITNESS_FAULT").is_some()
+            || args.iter().any(|a| a == "--allow-same-uid-test-only"))
+    {
+        return fatal("--production forbids NEXUS_WITNESS_FAULT and --allow-same-uid-test-only");
     }
     let mut core = match WitnessCore::open(&dir) {
         Ok(c) => c,

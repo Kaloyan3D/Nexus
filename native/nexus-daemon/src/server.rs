@@ -128,6 +128,9 @@ pub struct Daemon {
     /// consumed human approval bound to its exact operation; the legacy
     /// scope-approve commands are refused.
     pub require_human_approval: bool,
+    /// A4.4: named production security profile this daemon was validated
+    /// against at startup (None = no profile; NOT production-configured).
+    pub security_profile: Option<String>,
     /// Bounded concurrent tool executions.
     pub tool_inflight: AtomicUsize,
     pub witness_configured: bool,
@@ -1531,7 +1534,10 @@ fn do_integrity_status(
         Err(r) => return r,
     };
     let rep = kernel.integrity_report(true);
-    ok(&req.id, serde_json::json!({ "integrity": rep }))
+    ok(
+        &req.id,
+        serde_json::json!({ "integrity": rep, "securityProfile": daemon.security_profile }),
+    )
 }
 
 /// Daemon-side hooks for the write lifecycle: journal and fence take the
@@ -3025,6 +3031,7 @@ mod isolation_tests {
             approver_uids: None,
             approver_independent: false,
             require_human_approval: false,
+            security_profile: None,
             tool_inflight: AtomicUsize::new(0),
             witness_configured: false,
             witness_path: None,

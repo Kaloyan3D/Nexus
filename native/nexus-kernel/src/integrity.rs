@@ -123,6 +123,25 @@ impl Kernel {
         Ok(())
     }
 
+    /// Persistent security-profile latch. A store that has run under a
+    /// named profile refuses privileged classes when started without it.
+    pub fn enforce_security_profile(&mut self, requested: Option<&str>) -> KernelResult<()> {
+        let cur = self.store.meta_get("security_profile")?;
+        match (requested, cur.as_deref()) {
+            (Some(r), None) => self.store.meta_set("security_profile", r),
+            (Some(r), Some(c)) if r == c => Ok(()),
+            (Some(r), Some(c)) => Err(KernelError::new(
+                KernelErrorCode::ScopeRefused,
+                format!("profile-downgrade-refused: store is bound to {c}, requested {r}"),
+            )),
+            (None, Some(c)) => Err(KernelError::new(
+                KernelErrorCode::ScopeRefused,
+                format!("profile-downgrade-refused: store is bound to security profile {c}"),
+            )),
+            (None, None) => Ok(()),
+        }
+    }
+
     pub fn external_witness_configured(&self) -> bool {
         self.witness.as_ref().is_some_and(|w| w.remote().is_some())
     }

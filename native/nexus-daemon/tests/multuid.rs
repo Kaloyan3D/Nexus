@@ -2537,6 +2537,43 @@ struct WitnessRig {
     uid: u32,
 }
 
+impl WitnessRig {
+    /// Restart the SAME witness identity on the SAME protected state.
+    fn restart(&mut self, daemon_uid: u32) {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.sock);
+        let cgid = gid_of(WITNESS_CLIENT_GROUP).unwrap();
+        self.child = Command::new("runuser")
+            .process_group(0)
+            .arg("-u")
+            .arg(WITNESS_USER)
+            .arg("--")
+            .arg(witness_bin())
+            .arg("--dir")
+            .arg(&self.state)
+            .arg("--socket")
+            .arg(&self.sock)
+            .arg("--allowed-uids")
+            .arg(daemon_uid.to_string())
+            .arg("--socket-group")
+            .arg(cgid.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("respawn witness");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.sock.exists() {
+            assert!(Instant::now() < deadline, "witness did not come back");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
 impl Drop for WitnessRig {
     fn drop(&mut self) {
         // runuser forks: signal the whole process group.
@@ -2822,4 +2859,546 @@ fn multuid_daemon_uid_rollback_of_its_own_journal_is_detected_by_the_witness() {
     )
     .unwrap();
     assert_ne!(r["ok"], true, "authority must be refused: {r}");
+}
+
+// ---------------------------------------------------------------------------
+// A4.4 integrated offline end-to-end under the production-v1 profile with
+// real, distinct identities: issuer, approver, daemon, witness, bystander,
+// untrusted. Approver interaction is driven by this harness over IPC: it is
+// labelled TEST-ONLY and is NOT authenticated human presence (the pty CLI
+// test covers the terminal workflow; presence remains PARTIAL).
+// ---------------------------------------------------------------------------
+
+fn profile_flags() -> Vec<String> {
+    [
+        "--require-external-witness",
+        "--security-profile",
+        "production-v1",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+fn ipc_i(h: &Human, cmd: &str, p: serde_json::Value) -> serde_json::Value {
+    send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(&h.issuer_cap, cmd, p),
+    )
+    .expect("issuer ipc")
+}
+
+fn ipc_a(h: &Human, key: &str, cmd: &str, p: serde_json::Value) -> serde_json::Value {
+    send_as(APPROVER_USER, &h.d.socket, &signed_frame(key, cmd, p)).expect("approver ipc")
+}
+
+fn read_only(h: &Human, who: &str, cmd: &str) -> serde_json::Value {
+    send_as(
+        who,
+        &h.d.socket,
+        &serde_json::json!({"protocol":1,"id":common::next_id("r"),"cmd":cmd,"params":{}})
+            .to_string(),
+    )
+    .expect("read-only ipc")
+}
+
+fn wit_counts(rig: &WitnessRig) -> (u64, u64) {
+    let st = status_via(DAEMON_USER, &rig.sock).expect("witness status");
+    (
+        st["journals"]["tool-journal"]["count"]
+            .as_u64()
+            .unwrap_or(0),
+        st["journals"]["approval-events"]["count"]
+            .as_u64()
+            .unwrap_or(0),
+    )
+}
+
+fn db_counts(db: &Path) -> (u64, u64) {
+    // Read as root (harness); the daemon user owns the files.
+    let c = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("db readable by root");
+    let t: u64 = c
+        .query_row("SELECT COUNT(*) FROM tool_journal", [], |r| r.get(0))
+        .unwrap();
+    let a: u64 = c
+        .query_row("SELECT COUNT(*) FROM approval_events", [], |r| r.get(0))
+        .unwrap();
+    (t, a)
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_integrated_offline_e2e_under_the_production_profile() {
+    let Some((mut h, mut rig)) = witness_human_setup("a44e2e") else {
+        return;
+    };
+    // Production profile: restart the daemon under production-v1.
+    h.d.argv.extend(profile_flags());
+    h.d.restart();
+    h.issuer_cap = h.d.read_handoff();
+    let integ = read_only(&h, ISSUER_USER, "integrity-status");
+    assert_eq!(integ["securityProfile"], "production-v1", "{integ}");
+    assert_eq!(integ["integrity"]["state"], "verified", "{integ}");
+
+    let args = |content: &str, pre: &str| {
+        serde_json::json!({"path": "a.txt", "content": content, "mode": "replace",
+            "expectedSha256": sha_hex(pre)})
+    };
+    h.put_file("a.txt", "v0\n");
+    let propose = |h: &Human, rid: &str, a: serde_json::Value, ttl: Option<u64>| {
+        let mut p = h.tool_params(rid, a);
+        if let Some(t) = ttl {
+            p["ttlMs"] = serde_json::json!(t);
+        }
+        ipc_i(h, "approval-request", p)
+    };
+    let review = |h: &Human, key: &str, id: &str| {
+        ipc_a(
+            h,
+            key,
+            "approval-get",
+            serde_json::json!({"approvalId": id}),
+        )
+    };
+    let decide = |h: &Human, key: &str, id: &str, g: &serde_json::Value, d: &str| {
+        let a = &g["approval"];
+        ipc_a(
+            h,
+            key,
+            "approval-decide",
+            serde_json::json!({
+            "approvalId": id, "requestDigest": a["requestDigest"], "decision": d,
+            "reviewCode": a["reviewCode"], "confirmation": {"tty": false}}),
+        )
+    };
+    let exec = |h: &Human, rid: &str, a: serde_json::Value| {
+        ipc_i(h, "tool-execute", h.tool_params(rid, a))
+    };
+
+    // --- 1..2: proposal, daemon-authored request, independent review/deny.
+    let r = propose(&h, "e-1", args("v1\n", "v0\n"), None);
+    assert_eq!(r["ok"], true, "{r}");
+    let id1 = r["approval"]["approvalId"].as_str().unwrap().to_owned();
+    let akey = h.approver_key();
+    let g = review(&h, &akey, &id1);
+    assert_eq!(
+        g["approval"]["request"]["operation"]["postImageSha256"],
+        sha_hex("v1\n")
+    );
+    let d = decide(&h, &akey, &id1, &g, "deny");
+    assert_eq!(d["approval"]["state"], "denied", "{d}");
+    assert_eq!(
+        code_of(&exec(&h, "e-1x", args("v1\n", "v0\n"))),
+        "scope-refused"
+    );
+    assert_eq!(std::fs::read_to_string(h.ws.join("a.txt")).unwrap(), "v0\n");
+
+    // --- 3..9: approve -> witness-committed -> consume -> execute -> verify.
+    let r = propose(&h, "e-2", args("v1\n", "v0\n"), None);
+    let id2 = r["approval"]["approvalId"].as_str().unwrap().to_owned();
+    let g = review(&h, &akey, &id2);
+    let d = decide(&h, &akey, &id2, &g, "approve");
+    assert_eq!(d["approval"]["state"], "approved", "{d}");
+    // The decision is already witnessed when the response is returned.
+    let (_, wa) = wit_counts(&rig);
+    assert_eq!(wa, db_counts(&h.d.db).1, "approval journal fully witnessed");
+    // Exact scope only: any other content is refused.
+    assert_eq!(
+        code_of(&exec(&h, "e-2bad", args("EVIL\n", "v0\n"))),
+        "scope-refused"
+    );
+    let r = exec(&h, "e-2ok", args("v1\n", "v0\n"));
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(std::fs::read_to_string(h.ws.join("a.txt")).unwrap(), "v1\n");
+    assert_eq!(
+        code_of(&exec(&h, "e-2again", args("v1\n", "v0\n"))),
+        "scope-refused"
+    );
+    let (wt, wa) = wit_counts(&rig);
+    assert_eq!(
+        (wt, wa),
+        db_counts(&h.d.db),
+        "journals fully witnessed after execution"
+    );
+    let integ = read_only(&h, ISSUER_USER, "integrity-status");
+    assert_eq!(integ["integrity"]["state"], "verified", "{integ}");
+    let hist = read_only(&h, ISSUER_USER, "approval-list");
+    assert!(hist["approvals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["approvalId"] == id2 && a["state"] == "consumed"));
+
+    // --- expiry
+    let r = propose(&h, "e-3", args("v2\n", "v1\n"), Some(1000));
+    let id3 = r["approval"]["approvalId"].as_str().unwrap().to_owned();
+    let g = review(&h, &akey, &id3);
+    std::thread::sleep(Duration::from_millis(1400));
+    let d = decide(&h, &akey, &id3, &g, "approve");
+    assert_ne!(d["ok"], true, "expired approval must not be decidable: {d}");
+
+    // --- revocation before execution
+    let r = propose(&h, "e-4", args("v2\n", "v1\n"), None);
+    let id4 = r["approval"]["approvalId"].as_str().unwrap().to_owned();
+    let g = review(&h, &akey, &id4);
+    assert_eq!(decide(&h, &akey, &id4, &g, "approve")["ok"], true);
+    let r = ipc_i(
+        &h,
+        "approval-revoke",
+        serde_json::json!({"approvalId": id4, "reason": "e2e"}),
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(
+        code_of(&exec(&h, "e-4x", args("v2\n", "v1\n"))),
+        "scope-refused"
+    );
+
+    // --- restart: approved-but-unconsumed lapses; history verifies.
+    let r = propose(&h, "e-5", args("v2\n", "v1\n"), None);
+    let id5 = r["approval"]["approvalId"].as_str().unwrap().to_owned();
+    let g = review(&h, &akey, &id5);
+    assert_eq!(decide(&h, &akey, &id5, &g, "approve")["ok"], true);
+    h.d.restart();
+    h.issuer_cap = h.d.read_handoff();
+    assert_eq!(
+        code_of(&exec(&h, "e-5x", args("v2\n", "v1\n"))),
+        "scope-refused"
+    );
+    let integ = read_only(&h, ISSUER_USER, "integrity-status");
+    assert_eq!(integ["integrity"]["state"], "verified", "{integ}");
+    assert_eq!(integ["securityProfile"], "production-v1");
+
+    // --- witness outage: reads stay up, authority refused, then recovery.
+    unsafe {
+        libc::kill(-(rig.child.id() as i32), libc::SIGKILL);
+    }
+    let _ = rig.child.wait();
+    let _ = std::fs::remove_file(&rig.sock);
+    assert_eq!(read_only(&h, ISSUER_USER, "health")["ok"], true);
+    let r = propose(&h, "e-7", args("v2\n", "v1\n"), None);
+    assert_ne!(r["ok"], true, "no authority while the witness is down: {r}");
+    let integ = read_only(&h, ISSUER_USER, "integrity-status");
+    assert_eq!(
+        integ["integrity"]["state"], "witness-unavailable",
+        "{integ}"
+    );
+    // Real-identity boundaries still hold during the outage.
+    assert_eq!(
+        code_of(
+            &send_as(
+                BYSTANDER_USER,
+                &h.d.socket,
+                &signed_frame(
+                    &h.issuer_cap,
+                    "tool-execute",
+                    serde_json::json!({"requestId":"x"})
+                )
+            )
+            .unwrap()
+        ),
+        "peer-unauthorized"
+    );
+    assert!(send_as(UNTRUSTED_USER, &h.d.socket, "{}").is_err());
+    // Same identity, same protected state: deterministic recovery.
+    rig.restart(h.t.h.nexusd_uid);
+    let integ = read_only(&h, ISSUER_USER, "integrity-status");
+    assert_eq!(integ["integrity"]["state"], "verified", "{integ}");
+    let akey = h.approver_key();
+    // The request whose acknowledgement never arrived exists as PENDING
+    // (it authorized nothing) and blocks an identical retry: withdraw it.
+    let l = read_only(&h, ISSUER_USER, "approval-list");
+    for a in l["approvals"].as_array().unwrap() {
+        if a["state"] == "pending" {
+            let r = ipc_i(
+                &h,
+                "approval-revoke",
+                serde_json::json!({"approvalId": a["approvalId"]}),
+            );
+            assert_eq!(r["ok"], true, "{r}");
+        }
+    }
+    let r = propose(&h, "e-8", args("v2\n", "v1\n"), None);
+    assert_eq!(r["ok"], true, "authority returns with the witness: {r}");
+    let id8 = r["approval"]["approvalId"].as_str().unwrap().to_owned();
+    let g = review(&h, &akey, &id8);
+    assert_eq!(decide(&h, &akey, &id8, &g, "approve")["ok"], true);
+    assert_eq!(exec(&h, "e-8x", args("v2\n", "v1\n"))["ok"], true);
+    assert_eq!(std::fs::read_to_string(h.ws.join("a.txt")).unwrap(), "v2\n");
+    let (wt, wa) = wit_counts(&rig);
+    assert_eq!((wt, wa), db_counts(&h.d.db));
+
+    // --- stale lease: a new generation supersedes older approvals.
+    let r = propose(&h, "e-9", args("v3\n", "v2\n"), None);
+    let id6 = r["approval"]["approvalId"].as_str().unwrap().to_owned();
+    let g = review(&h, &akey, &id6);
+    assert_eq!(decide(&h, &akey, &id6, &g, "approve")["ok"], true);
+    let acq = ipc_i(
+        &h,
+        "acquire",
+        serde_json::json!({"taskInstanceId": h.task, "backend": "native"}),
+    );
+    assert_eq!(acq["ok"], true, "{acq}");
+    let r = exec(&h, "e-9x", args("v3\n", "v2\n"));
+    assert_ne!(r["ok"], true, "stale lease must not execute: {r}");
+    assert_eq!(std::fs::read_to_string(h.ws.join("a.txt")).unwrap(), "v2\n");
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_production_profile_refuses_incomplete_downgraded_and_test_only_starts() {
+    let Some((mut h, rig)) = witness_human_setup("a44prof") else {
+        return;
+    };
+    let base_argv = h.d.argv.clone();
+    // Start under the profile, then try every downgrade as the launcher.
+    h.d.argv.extend(profile_flags());
+    h.d.restart();
+    let mut argv_ok = h.d.argv.clone();
+    terminate(&mut h.d.child);
+    let _ = h.d.child.wait();
+    let run = |argv: &[String]| -> (bool, String) {
+        let o = Command::new("runuser")
+            .arg("-u")
+            .arg(DAEMON_USER)
+            .arg("--")
+            .arg(nexusd_bin())
+            .args(argv)
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn");
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr),
+        )
+    };
+    let _ = std::fs::remove_file(&h.d.socket);
+    // (a) profile dropped on a profiled store, writes still enabled
+    let (ok, out) = run(&base_argv);
+    assert!(!ok && out.contains("profile-downgrade-refused"), "{out}");
+    // (b) test-only approver flag under the profile
+    let mut b = argv_ok.clone();
+    b.push("--allow-nonindependent-approver-test-only".into());
+    let (ok, out) = run(&b);
+    assert!(!ok && out.contains("profile-violation"), "{out}");
+    // (c) legacy adoption flag under the profile
+    let mut c = argv_ok.clone();
+    c.push("--witness-adopt-legacy".into());
+    let (ok, out) = run(&c);
+    assert!(!ok && out.contains("profile-violation"), "{out}");
+    // (d) witness configuration omitted under the profile
+    let mut d: Vec<String> = Vec::new();
+    let mut skip = 0;
+    for a in &argv_ok {
+        if skip > 0 {
+            skip -= 1;
+            continue;
+        }
+        if a == "--external-witness" || a == "--external-witness-uid" {
+            skip = 1;
+            continue;
+        }
+        d.push(a.clone());
+    }
+    let (ok, out) = run(&d);
+    assert!(!ok && out.contains("profile-violation"), "{out}");
+    // (e) witness fault injection armed in the daemon environment
+    let o = Command::new("runuser")
+        .arg("-u")
+        .arg(DAEMON_USER)
+        .arg("--")
+        .env("NEXUS_WITNESS_FAULT", "fail-persist")
+        .arg(nexusd_bin())
+        .args(&argv_ok)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    // `runuser` forwards the environment: the profile must see it.
+    let txt = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(
+        !o.status.success() && txt.contains("NEXUS_WITNESS_FAULT"),
+        "{txt}"
+    );
+    // (f) a fresh DataRoot with the profile but incomplete flags never
+    //     creates a store or socket.
+    let fresh = h.d.dir.join("fresh-profile");
+    std::fs::create_dir_all(&fresh).unwrap();
+    let mut f = vec![
+        "--db".to_owned(),
+        fresh.join("k.db").to_string_lossy().into_owned(),
+        "--socket".to_owned(),
+        fresh.join("n.sock").to_string_lossy().into_owned(),
+        "--trust-mode".to_owned(),
+        "shadow-test".to_owned(),
+        "--security-profile".to_owned(),
+        "production-v1".to_owned(),
+        "--enable-writes".to_owned(),
+    ];
+    let (ok, out) = run(&f);
+    assert!(!ok && out.contains("profile-violation"), "{out}");
+    assert!(!fresh.join("k.db").exists() && !fresh.join("n.sock").exists());
+    f.push("--validate-config-only".into());
+    let (ok, _) = run(&f);
+    assert!(!ok);
+    // (g) read-only start of a profiled store is still possible (no writes).
+    let mut ro: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < base_argv.len() {
+        let a = &base_argv[i];
+        if a == "--enable-writes" || a == "--require-human-approval" {
+            i += 1;
+            continue;
+        }
+        ro.push(a.clone());
+        i += 1;
+    }
+    let _ = std::fs::remove_file(&h.d.socket);
+    let mut child = Command::new("runuser")
+        .arg("-u")
+        .arg(DAEMON_USER)
+        .arg("--")
+        .arg(nexusd_bin())
+        .args(&ro)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    poll_ready(&h.d.socket);
+    let r = read_only(&h, ISSUER_USER, "health");
+    assert_eq!(r["ok"], true);
+    let _ = child.kill();
+    let _ = child.wait();
+    argv_ok.clear();
+    drop(rig);
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_sandboxed_process_under_approval_and_witness() {
+    let Some((mut h, rig)) = witness_human_setup("a44proc") else {
+        return;
+    };
+    h.d.argv.extend([
+        "--enable-process".to_owned(),
+        "--require-kernel-resource-limits".to_owned(),
+        "--require-external-witness".to_owned(),
+    ]);
+    // Probe first: if the harness cannot provide kernel-enforced limits for
+    // the daemon identity the daemon must REFUSE (fail closed). Report that
+    // gate honestly instead of weakening the requirement.
+    terminate(&mut h.d.child);
+    let _ = h.d.child.wait();
+    let _ = std::fs::remove_file(&h.d.socket);
+    let probe = Command::new("timeout")
+        .arg("8")
+        .arg("runuser")
+        .arg("-u")
+        .arg(DAEMON_USER)
+        .arg("--")
+        .arg(nexusd_bin())
+        .args(&h.d.argv)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&probe.stderr).into_owned();
+    if text.contains("\"event\":\"fatal\"") {
+        assert!(
+            text.contains("sandbox-unavailable"),
+            "refusal must be the explicit fail-closed code: {text}"
+        );
+        println!(
+            "GATE BLOCKED: kernel-enforced limits unavailable to the daemon identity in the userns harness (daemon refused, fail closed). Continuing with the labelled POLLING backend; kernel enforcement is verified separately on the host."
+        );
+        h.d.argv.retain(|a| a != "--require-kernel-resource-limits");
+    }
+    let _ = std::fs::remove_file(&h.d.socket);
+    h.d.restart();
+    h.issuer_cap = h.d.read_handoff();
+    h.put_file(
+        "Cargo.toml",
+        "[package]\nname = \"a44\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    std::fs::create_dir_all(h.ws.join("src")).unwrap();
+    h.put_file("src/lib.rs", "pub fn f() -> u8 { 1 }\n");
+    let args = serde_json::json!({"program": "cargo", "args": ["check", "--offline"], "cwd": "."});
+    let mk = |rid: &str| {
+        let mut p = h.tool_params(rid, args.clone());
+        p["toolId"] = serde_json::json!("proc.run");
+        p
+    };
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(&h.issuer_cap, "tool-execute", mk("p-0")),
+    )
+    .unwrap();
+    assert_eq!(code_of(&r), "scope-refused", "{r}");
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(&h.issuer_cap, "approval-request", mk("p-1")),
+    )
+    .unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    let id = r["approval"]["approvalId"].as_str().unwrap().to_owned();
+    let akey = h.approver_key();
+    let g = send_as(
+        APPROVER_USER,
+        &h.d.socket,
+        &signed_frame(&akey, "approval-get", serde_json::json!({"approvalId": id})),
+    )
+    .unwrap();
+    let op = &g["approval"]["request"]["operation"];
+    assert_eq!(op["sandbox"]["network"], "none");
+    assert_eq!(op["argv"], serde_json::json!(["check", "--offline"]));
+    let a = &g["approval"];
+    let d = send_as(
+        APPROVER_USER,
+        &h.d.socket,
+        &signed_frame(
+            &akey,
+            "approval-decide",
+            serde_json::json!({"approvalId": id, "requestDigest": a["requestDigest"],
+                "decision": "approve", "reviewCode": a["reviewCode"], "confirmation": {"tty": false}}),
+        ),
+    )
+    .unwrap();
+    assert_eq!(d["ok"], true, "{d}");
+    let mut bad = mk("p-2");
+    bad["args"]["args"] = serde_json::json!(["build", "--offline"]);
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(&h.issuer_cap, "tool-execute", bad),
+    )
+    .unwrap();
+    assert_eq!(code_of(&r), "scope-refused", "{r}");
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(&h.issuer_cap, "tool-execute", mk("p-3")),
+    )
+    .unwrap();
+    let r2 = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(&h.issuer_cap, "tool-execute", mk("p-4")),
+    )
+    .unwrap();
+    assert_eq!(code_of(&r2), "scope-refused", "single use: {r2}");
+    let list = read_only(&h, ISSUER_USER, "approval-list");
+    assert!(
+        list["approvals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["approvalId"] == id && x["state"] == "consumed"),
+        "approval consumed by the execution attempt: first={r}"
+    );
+    let (wt, wa) = wit_counts(&rig);
+    assert_eq!((wt, wa), db_counts(&h.d.db), "journals fully witnessed");
+    let integ = read_only(&h, ISSUER_USER, "integrity-status");
+    assert_eq!(integ["integrity"]["state"], "verified", "{integ}");
+    println!("PROCESS RESULT: ok={} code={}", r["ok"], code_of(&r));
 }

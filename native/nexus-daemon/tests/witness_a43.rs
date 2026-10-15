@@ -1174,3 +1174,35 @@ fn witness_has_no_authority_operations() {
     assert_eq!(before["journals"], after["journals"]);
     assert_eq!(before["commitSeq"], after["commitSeq"]);
 }
+
+#[test]
+fn production_witness_refuses_test_only_escape_hatches() {
+    let d = tempfile::tempdir().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let sock = d.path().join("s.sock");
+    let base = |extra: &[&str]| {
+        let mut c = Command::new(witness_bin());
+        c.arg("--dir")
+            .arg(d.path())
+            .arg("--socket")
+            .arg(&sock)
+            .arg("--allowed-uids")
+            .arg((euid() + 1).to_string())
+            .arg("--production")
+            .args(extra)
+            .stdin(Stdio::null());
+        c
+    };
+    // Fault injector armed in the environment.
+    let o = base(&[])
+        .env("NEXUS_WITNESS_FAULT", "fail-persist")
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--production forbids"));
+    // Same-uid test mode.
+    let o = base(&["--allow-same-uid-test-only"]).output().unwrap();
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--production forbids"));
+}

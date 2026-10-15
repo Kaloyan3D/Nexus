@@ -1,7 +1,8 @@
 # systemd unit for the A4.3 independent journal witness.
 #
-# NOT VERIFIED on a real systemd host (see native/A4.3-EVIDENCE.md). The
-# multi-UID evidence used an unprivileged user-namespace harness.
+# NOT VERIFIED with User=/Group= on a real system manager (see
+# native/A4.4-EVIDENCE.md). --production forbids NEXUS_WITNESS_FAULT and
+# --allow-same-uid-test-only; this unit sets no Environment= lines.
 #
 # Requirements: a dedicated user `nexus-witness` that is NOT the nexusd user
 # and NOT the issuer/approver; group `nexus-witnessc` containing only
@@ -27,7 +28,7 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ExecStartPre=/bin/chgrp nexus-witnessc /run/nexus-witness
-ExecStart=/usr/local/bin/nexus-witness --dir /var/lib/nexus-witness --socket /run/nexus-witness/w.sock --allowed-uids NEXUSD_UID_HERE --socket-group nexus-witnessc
+ExecStart=/usr/local/bin/nexus-witness --dir /var/lib/nexus-witness --socket /run/nexus-witness/w.sock --allowed-uids NEXUSD_UID_HERE --socket-group nexus-witnessc --production
 Restart=on-failure
 RestartSec=2
 
