@@ -1,0 +1,35 @@
+# systemd unit for the A4.3 independent journal witness.
+#
+# NOT VERIFIED on a real systemd host (see native/A4.3-EVIDENCE.md). The
+# multi-UID evidence used an unprivileged user-namespace harness.
+#
+# Requirements: a dedicated user `nexus-witness` that is NOT the nexusd user
+# and NOT the issuer/approver; group `nexus-witnessc` containing only
+# nexusd and nexus-witness. State lives in a StateDirectory only the
+# witness can read.
+[Unit]
+Description=nexus journal witness (independent commitment authority)
+After=local-fs.target
+Before=nexusd.service
+
+[Service]
+Type=simple
+User=nexus-witness
+Group=nexus-witness
+SupplementaryGroups=nexus-witnessc
+UMask=0077
+StateDirectory=nexus-witness
+StateDirectoryMode=0700
+RuntimeDirectory=nexus-witness
+RuntimeDirectoryMode=0750
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ExecStartPre=/bin/chgrp nexus-witnessc /run/nexus-witness
+ExecStart=/usr/local/bin/nexus-witness --dir /var/lib/nexus-witness --socket /run/nexus-witness/w.sock --allowed-uids NEXUSD_UID_HERE --socket-group nexus-witnessc
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

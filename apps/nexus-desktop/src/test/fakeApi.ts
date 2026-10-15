@@ -193,6 +193,13 @@ export function fakeApi(over: Partial<NativeApi> = {}): NativeApi {
     }),
     listMockConversations: async () => [],
     toolEvents: async () => ({ available: true, reason: null, attempts: [] }),
+    integrityStatus: async () => ({
+      state: "not-configured" as const,
+      scope: "local hash chains and seals only; NO independent anchor",
+      configured: false,
+      journals: [],
+      detail: "no external witness configured",
+    }),
     listApprovals: async () => ({
       available: true,
       reason: null,

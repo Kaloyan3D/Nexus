@@ -370,6 +370,12 @@ pub fn approvals(
     nc::approvals(cfg, Some(task_instance_id)).map_err(|e| ui_error(&e))
 }
 
+/// Read-only journal integrity (A4.3). Status only: the renderer holds no
+/// witness credential and cannot commit, adopt or reset anything.
+pub fn integrity(cfg: &nc::ClientConfig) -> Result<nc::IntegrityView, UiError> {
+    nc::integrity(cfg).map_err(|e| ui_error(&e))
+}
+
 pub fn model_catalog() -> ModelCatalog {
     let m = nc::models();
     let entries = m

@@ -333,6 +333,16 @@ impl Kernel {
         lease_epoch: u64,
         incarnation: &str,
     ) -> KernelResult<()> {
+        if let Some(reason) = witness.and_then(|w| w.blocked()) {
+            return Err(refuse(
+                KernelErrorCode::ReconciliationRequired,
+                &[
+                    "journal integrity is not established; privileged authority refused: ",
+                    reason,
+                ]
+                .concat(),
+            ));
+        }
         let receipt = store.read_receipt(command_id)?.ok_or_else(|| {
             refuse(
                 KernelErrorCode::DeliveryInvalid,
@@ -875,6 +885,11 @@ impl Kernel {
     /// Controller-side revocation of tool authority for one command.
     /// Observed by `begin_tool_execution` and by mid-execution probes.
     pub fn revoke_tools(&mut self, command_id: &str, reason: &str) -> KernelResult<()> {
+        let r = self.revoke_tools_inner(command_id, reason);
+        self.anchored(r)
+    }
+
+    fn revoke_tools_inner(&mut self, command_id: &str, reason: &str) -> KernelResult<()> {
         Self::critical(&self.lock_file, &self.in_process, || {
             if self.store.read_receipt(command_id)?.is_none() {
                 return Err(refuse(
@@ -933,6 +948,8 @@ impl Kernel {
         witness: Option<&nexus_store::WitnessStore>,
     ) -> KernelResult<()> {
         let Some(w) = witness else { return Ok(()) };
+        // A4.3: catch up / verify against the independent witness first.
+        Self::anchor_all(store, Some(w))?;
         let corrupt = |m: &str| KernelError::new(KernelErrorCode::StoreCorrupt, m);
         let (n, tail) = store.tool_journal_tail()?;
         let Some(raw) = w.get_meta(TOOL_CHECKPOINT_KEY)? else {
@@ -1645,6 +1662,9 @@ impl Kernel {
         if let Some(w) = witness {
             let v = serde_json::json!({"count": count, "tail": tail, "seal": seal});
             w.set_meta(TOOL_CHECKPOINT_KEY, &canonical_json(&v))?;
+            // A4.3: the independent witness must acknowledge before the
+            // caller may treat this transition as authorized/visible.
+            Self::anchor_all(store, Some(&*w))?;
         }
         Ok(())
     }

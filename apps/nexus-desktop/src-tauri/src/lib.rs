@@ -117,6 +117,16 @@ async fn list_approvals(
 }
 
 #[tauri::command]
+async fn integrity_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<nexus_client::IntegrityView, UiError> {
+    let cfg = state.cfg.clone();
+    tauri::async_runtime::spawn_blocking(move || backend::integrity(&cfg))
+        .await
+        .map_err(|_| internal())?
+}
+
+#[tauri::command]
 fn model_catalog() -> ModelCatalog {
     backend::model_catalog()
 }
@@ -186,7 +196,8 @@ pub fn run() {
             model_io_read,
             list_mock_conversations,
             tool_events,
-            list_approvals
+            list_approvals,
+            integrity_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running Nexus");
@@ -209,6 +220,7 @@ mod authz_tests {
         "list_mock_conversations",
         "tool_events",
         "list_approvals",
+        "integrity_status",
     ];
 
     #[test]

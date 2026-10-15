@@ -17,10 +17,10 @@ pub mod transport;
 pub mod version;
 
 pub use api::{
-    approvals, attempt_status, cancel, digest, health, journal, journal_for_task, models,
-    readiness, receipt, status, task_show, tasks, tool_events, tool_events_folded,
-    tool_events_for_task, verify, ApprovalRecord, ApprovalsView, AttemptToolEvents, TaskToolEvents,
-    ToolRecordsPage,
+    approvals, attempt_status, cancel, digest, health, integrity, journal, journal_for_task,
+    models, readiness, receipt, status, task_show, tasks, tool_events, tool_events_folded,
+    tool_events_for_task, verify, ApprovalRecord, ApprovalsView, AttemptToolEvents, IntegrityView,
+    JournalIntegrityView, TaskToolEvents, ToolRecordsPage,
 };
 pub use config::{
     default_ledger_dir, default_sessions_root, default_socket_path, default_transcript_dir,

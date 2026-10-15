@@ -174,3 +174,46 @@ the A4.1 role-separated credential directories). Then:
   only serve read-only. Leaving human mode requires a fresh DataRoot.
 - Without ever using the flag, A3.3/A3.4 legacy behaviour is unchanged and NOT
   sufficient for production.
+
+## Independent journal witness (A4.3)
+
+`nexus-witness` runs as its own user (never nexusd, issuer or approver) with a
+`0700` state directory and a sealing key the daemon cannot read. Start it
+before `nexusd` and pass:
+
+```
+nexusd ... --witness <local witness db> \
+  --external-witness /run/nexus-witness/w.sock \
+  --external-witness-uid "$(id -u nexus-witness)"
+```
+
+- The daemon authenticates by SO_PEERCRED uid; the daemon verifies the
+  witness's uid on the connected socket, so acknowledgements cannot be forged
+  by any other identity.
+- Security-critical transitions (tool authorization/start/completion, approval
+  decisions and consumption) are committed to the witness BEFORE they can
+  authorize anything. Outage or ambiguity fails closed; reads stay available.
+- A store that already has history is `unanchored-legacy` until explicitly
+  adopted once with `--witness-adopt-legacy` (history before adoption stays
+  unwitnessed). After anchoring, the daemon refuses writes/process without the
+  witness (`witness-downgrade-refused`); a different store is refused
+  (`store-substitution`).
+- `nexus integrity` and the Control Room show state and scope. The witness
+  protects against the daemon UID, not root or a compromised witness UID.
+- `deploy/nexus-witness.service` is provided but NOT verified on a real host.
+
+### Witness enforcement matrix (A4.3 audit)
+
+| Situation | Behaviour |
+|---|---|
+| Fresh store, no witness flags | legacy mode, `integrity: not-configured` (explicit "NO independent anchor"). Enforcement is deployment policy only. |
+| Fresh store, `--require-external-witness` without `--external-witness` | refuses to start (`witness-required`) |
+| `--require-external-witness`, witness down | starts read-only; privileged authority refused; reads/status available |
+| Store anchored once (witness holds history), restarted without the flag | writes/process refused (`witness-downgrade-refused`); read-only start allowed |
+| Anchored store + fresh witness + `--witness-adopt-legacy` | refused (`adopt-refused`); re-anchoring requires a fresh DataRoot |
+| Anchored store + fresh witness, no adopt | `unanchored-legacy`, authority refused |
+| Never-anchored store with history + `--witness-adopt-legacy` | adopted once, then latched |
+| Approval-enabled (human) store without witness | works as A4.2; reported `not-configured`; not claimed anchored |
+| Test-only (`--allow-nonindependent-approver-test-only`, `--allow-same-uid-test-only`) | proves logic only; never isolation |
+
+The persistent latch is set only after the witness actually holds the store's history (first `verified`), not on mere configuration. Production units must therefore always pass `--require-external-witness` (see `nexusd.service`).

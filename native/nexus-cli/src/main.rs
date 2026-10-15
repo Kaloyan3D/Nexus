@@ -33,6 +33,7 @@ fn help_text() -> String {
     );
     s.push_str("    run                   live execution gate (always blocked in A2.4)\n");
     s.push_str("    interactive           line-based interactive session (mock only)\n");
+    s.push_str("    integrity             read-only journal integrity (states the verification scope; never a bare 'secure')\n");
     s.push_str("    approvals [--task <instance-id>]   read-only human-approval status (approve/deny only via the terminal approver)\n");
     s.push_str("    tools list            native read-only tools (fs.list, fs.read, fs.search)\n");
     s.push_str("    tools inspect <id>    tool contract, arguments, budgets and policy\n");
@@ -871,6 +872,33 @@ fn main() {
         "interactive" => cmd_interactive(&cfg),
         "tools" => cmd_tools(&args, &cfg),
         "approvals" => cmd_approvals(&args, &cfg),
+        "integrity" => match nexus_client::integrity(&cfg) {
+            Ok(v) => {
+                let mut h = format!("journal integrity: {}\nscope: {}\n", v.state, v.scope);
+                for j in &v.journals {
+                    h.push_str(&format!(
+                        "  {:<16} local={} witness={} {} — {}\n",
+                        j.journal,
+                        j.local_count,
+                        j.witness_count
+                            .map(|c| c.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                        j.status,
+                        j.detail
+                    ));
+                }
+                if !v.detail.is_empty() {
+                    h.push_str(&format!("detail: {}\n", v.detail));
+                }
+                emit(
+                    &cfg,
+                    &serde_json::to_value(&v).unwrap_or(serde_json::Value::Null),
+                    h.trim_end(),
+                );
+                ExitCode::Ok
+            }
+            Err(e) => emit_err(cfg.json, &e),
+        },
         other => emit_err(
             cfg.json,
             &nexus_client::ClientError::usage(format!("unknown command '{other}' (try --help)")),

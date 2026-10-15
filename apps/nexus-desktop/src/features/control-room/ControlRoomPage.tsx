@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import type { IntegrityView } from "../../lib/contracts";
 import { useNow } from "../../lib/useViewport";
 import { useNexus } from "../../state/NexusContext";
 import { absoluteTime, relativeTime, shortId } from "../../lib/format";
@@ -22,6 +24,57 @@ const CONNECTION_COPY: Record<string, string> = {
   error: "The runtime check failed.",
   unavailable: "Not running inside the native shell.",
 };
+
+const INTEGRITY_LABEL: Record<string, { text: string; tone: "success" | "warning" | "error" | "neutral" }> = {
+  verified: { text: "Verified against independent witness", tone: "success" },
+  "unanchored-legacy": { text: "Unanchored legacy history", tone: "warning" },
+  "witness-unavailable": { text: "Witness unavailable", tone: "warning" },
+  "recovery-required": { text: "Recovery required", tone: "warning" },
+  "integrity-mismatch": { text: "Integrity mismatch", tone: "error" },
+  "not-configured": { text: "No independent witness configured", tone: "neutral" },
+};
+
+/** Read-only journal integrity with its verification scope always shown. */
+function JournalIntegrityPanel() {
+  const { api } = useNexus();
+  const [res, setRes] = useState<{ data?: IntegrityView; error?: string } | null>(null);
+  useEffect(() => {
+    let live = true;
+    api
+      .integrityStatus()
+      .then((data) => live && setRes({ data }))
+      .catch((e: { message?: string }) => live && setRes({ error: e?.message ?? "unavailable" }));
+    return () => {
+      live = false;
+    };
+  }, [api]);
+  const d = res?.data;
+  const label = d ? (INTEGRITY_LABEL[d.state] ?? { text: d.state, tone: "neutral" as const }) : null;
+  return (
+    <section className="nv-panel">
+      <SectionHeading>Journal integrity</SectionHeading>
+      {res === null ? (
+        <Loading label="Verifying journals…" />
+      ) : res.error ? (
+        <p className="nv-note" style={{ marginTop: 0 }}>Integrity status unavailable: {res.error}</p>
+      ) : d && label ? (
+        <>
+          <Badge tone={label.tone}>{label.text}</Badge>
+          <p className="nv-note">Scope: {d.scope}</p>
+          {d.detail && <p className="nv-note">{d.detail}</p>}
+          <ul className="nv-list" aria-label="Journal integrity details">
+            {d.journals.map((j) => (
+              <li key={j.journal}>
+                <span className="nv-mono">{j.journal}</span> · local {j.localCount}
+                {j.witnessCount !== null ? ` · witness ${j.witnessCount}` : ""} · {j.status}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+    </section>
+  );
+}
 
 export function ControlRoomPage() {
   const { runtime, blockers, selectedTask, tasks } = useNexus();
@@ -97,6 +150,8 @@ export function ControlRoomPage() {
             </>
           )}
         </section>
+
+        <JournalIntegrityPanel />
 
         <section className="nv-panel">
           <SectionHeading>Controller</SectionHeading>

@@ -424,3 +424,47 @@ pub fn approvals(
         Err(e) => Ok(unavailable(e.code.to_owned())),
     }
 }
+
+// ------------------------------------------------------------------ A4.3
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalIntegrityView {
+    pub journal: String,
+    pub local_count: u64,
+    #[serde(default)]
+    pub witness_count: Option<u64>,
+    pub status: String,
+    pub detail: String,
+}
+
+/// Read-only journal integrity. `state` is one of: `verified`,
+/// `unanchored-legacy`, `witness-unavailable`, `recovery-required`,
+/// `integrity-mismatch`, `not-configured`. `scope` always states what was
+/// and was not verified; there is no generic "secure" value.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrityView {
+    pub state: String,
+    pub scope: String,
+    pub configured: bool,
+    #[serde(default)]
+    pub journals: Vec<JournalIntegrityView>,
+    #[serde(default)]
+    pub detail: String,
+}
+
+pub fn integrity(cfg: &ClientConfig) -> Result<IntegrityView, ClientError> {
+    let frame = read_request(
+        "nexus-integrity-status",
+        "integrity-status",
+        serde_json::json!({}),
+    );
+    let v = interpret_response(&ipc_roundtrip(&cfg.socket_path, &frame, IPC_TIMEOUT_MS)?)?;
+    serde_json::from_value(
+        v.get("integrity")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    )
+    .map_err(|e| ClientError::internal(format!("malformed integrity status: {e}")))
+}

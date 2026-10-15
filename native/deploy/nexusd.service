@@ -1,16 +1,20 @@
+# A4.3: this unit passes --require-external-witness so a missing/typo'd witness
+# configuration refuses to start (fail closed) even on a FRESH DataRoot; with
+# the witness down it serves read-only. NOT verified on a real systemd host.
 # systemd unit for nexusd (A2.1 shadow-only, execution disabled).
 #
 # Install only on the target host after creating the service identities
 # (see SETUP.md). This file is configuration, not an enabled service here.
 [Unit]
 Description=nexusd native kernel daemon (shadow-only, no dispatch)
-After=network.target
+After=network.target nexus-witness.service
+Requires=nexus-witness.service
 
 [Service]
 Type=simple
 User=nexusd
 Group=nexusd
-SupplementaryGroups=nexus-issuer nexus-issuercred
+SupplementaryGroups=nexus-issuer nexus-issuercred nexus-witnessc
 UMask=0077
 RuntimeDirectory=nexusd nexusd-cred
 RuntimeDirectoryMode=0750
@@ -28,7 +32,7 @@ ExecStartPre=/bin/chmod 0750 /run/nexusd
 # members: nexusd + the issuer only). Socket-group membership grants nothing here.
 ExecStartPre=/bin/chgrp nexus-issuercred /run/nexusd-cred
 ExecStartPre=/bin/chmod 0750 /run/nexusd-cred
-ExecStart=/usr/local/bin/nexusd --db /var/lib/nexusd/k.db --witness /var/lib/nexusd/k.witness.db --socket /run/nexusd/n.sock --cap /var/lib/nexusd/issuer.cap --trust-mode shadow-test --allowed-uids ISSUER_UID_HERE --socket-group nexus-issuer --cap-handoff /run/nexusd-cred/issuer.handoff --cap-handoff-gid nexus-issuercred
+ExecStart=/usr/local/bin/nexusd --db /var/lib/nexusd/k.db --witness /var/lib/nexusd/k.witness.db --socket /run/nexusd/n.sock --cap /var/lib/nexusd/issuer.cap --trust-mode shadow-test --allowed-uids ISSUER_UID_HERE --socket-group nexus-issuer --cap-handoff /run/nexusd-cred/issuer.handoff --cap-handoff-gid nexus-issuercred --witness /var/lib/nexusd/k.witness.db --external-witness /run/nexus-witness/w.sock --external-witness-uid NEXUS_WITNESS_UID_HERE --require-external-witness
 Restart=on-failure
 RestartSec=2
 StandardOutput=journal

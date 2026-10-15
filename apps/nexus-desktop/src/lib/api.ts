@@ -4,6 +4,7 @@ import type {
   ApprovalsView,
   ConversationQuery,
   ConversationView,
+  IntegrityView,
   MockConversationSummary,
   ModelIoView,
   JournalResult,
@@ -33,6 +34,8 @@ export interface NativeApi {
   toolEvents(taskInstanceId: string): Promise<TaskToolEvents>;
   /** Read-only approval status. There is deliberately no approve/deny here. */
   listApprovals(taskInstanceId: string): Promise<ApprovalsView>;
+  /** Read-only journal integrity; holds no witness credential. */
+  integrityStatus(): Promise<IntegrityView>;
 }
 
 export function isTauri(): boolean {
@@ -70,6 +73,7 @@ export const tauriApi: NativeApi = {
   listMockConversations: () => invoke<MockConversationSummary[]>("list_mock_conversations"),
   toolEvents: (taskInstanceId) => invoke<TaskToolEvents>("tool_events", { taskInstanceId }),
   listApprovals: (taskInstanceId) => invoke<ApprovalsView>("list_approvals", { taskInstanceId }),
+  integrityStatus: () => invoke<IntegrityView>("integrity_status"),
 };
 
 const notInShell: UiError = {
@@ -116,6 +120,7 @@ export const unavailableApi: NativeApi = {
   listMockConversations: () => Promise.resolve([]),
   toolEvents: () => Promise.reject(notInShell),
   listApprovals: () => Promise.reject(notInShell),
+  integrityStatus: () => Promise.reject(notInShell),
 };
 
 export function defaultApi(): NativeApi {

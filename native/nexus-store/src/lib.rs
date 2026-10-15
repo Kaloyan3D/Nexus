@@ -1,5 +1,6 @@
 //! Nexus Native Core A1.1 transactional SQLite store.
 pub mod approvals;
+pub mod ext_witness;
 pub mod journal;
 pub mod schema;
 pub mod store;

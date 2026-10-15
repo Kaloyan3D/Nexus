@@ -13,7 +13,7 @@ SUB=$(awk -F: -v u="$(id -un)" '$1==u{print $2; exit}' /etc/subuid)
 T=$(ls -t "$ROOT"/native/target/debug/deps/multuid-* | grep -v '\.d$' | head -1)
 mkdir -p "$M/bin" "$M/etc" "$M/rust/cargo/bin" "$M/rust/rustup"
 rm -f "$M"/bin/multuid-*  # a stale hash would be mistaken for a test filter
-cp "$ROOT/native/target/debug/nexusd" "$ROOT/native/target/debug/nexus-approver" "$ROOT/native/target/debug/nexus-kernel" "$T" "$M/bin/"
+cp "$ROOT/native/target/debug/nexusd" "$ROOT/native/target/debug/nexus-approver" "$ROOT/native/target/debug/nexus-witness" "$ROOT/native/target/debug/nexus-kernel" "$T" "$M/bin/"
 cp /etc/passwd "$M/etc/passwd"; cp /etc/group "$M/etc/group"
 cat >> "$M/etc/passwd" <<P
 nexusd-test:x:20001:20001::/nonexistent:/usr/sbin/nologin
@@ -21,6 +21,7 @@ nexus-issuer-test:x:20002:20002::/nonexistent:/usr/sbin/nologin
 nexus-bystander-test:x:20003:20003::/nonexistent:/usr/sbin/nologin
 nexus-untrusted-test:x:20004:20004::/nonexistent:/usr/sbin/nologin
 nexus-approver-test:x:20005:20005::/nonexistent:/usr/sbin/nologin
+nexus-witness-test:x:20007:20007::/nonexistent:/usr/sbin/nologin
 P
 cat >> "$M/etc/group" <<G
 nexusd-test:x:20001:
@@ -29,6 +30,8 @@ nexus-issuercred-test:x:20006:nexusd-test,nexus-issuer-test
 nexus-bystander-test:x:20003:
 nexus-untrusted-test:x:20004:
 nexus-approver-test:x:20005:nexusd-test
+nexus-witness-test:x:20007:
+nexus-witnessc-test:x:20008:nexusd-test,nexus-witness-test,nexus-bystander-test
 G
 cat > "$M/run.sh" <<'R'
 #!/bin/sh
@@ -37,7 +40,7 @@ P=/sys/fs/cgroup/$(sed 's/^0:://' /proc/self/cgroup)/nxmu-run
 mkdir -p "$P" && chown 20001:20001 "$P" "$P/cgroup.procs" "$P/cgroup.subtree_control" "$P/cgroup.threads" && echo $$ > "$P/cgroup.procs" || echo "cgroup delegation FAILED"
 mount --bind "$HOME_REAL/.cargo/bin" /tmp/nxmu/rust/cargo/bin && mount --bind "$HOME_REAL/.rustup" /tmp/nxmu/rust/rustup || echo "toolchain bind FAILED"
 export CARGO_HOME=/tmp/nxmu/rust/cargo RUSTUP_HOME=/tmp/nxmu/rust/rustup
-export NEXUS_MULTUID=1 NEXUSD_BIN=/tmp/nxmu/bin/nexusd NEXUS_APPROVER_BIN=/tmp/nxmu/bin/nexus-approver NEXUS_KERNEL_BIN=/tmp/nxmu/bin/nexus-kernel
+export NEXUS_MULTUID=1 NEXUSD_BIN=/tmp/nxmu/bin/nexusd NEXUS_APPROVER_BIN=/tmp/nxmu/bin/nexus-approver NEXUS_WITNESS_BIN=/tmp/nxmu/bin/nexus-witness NEXUS_KERNEL_BIN=/tmp/nxmu/bin/nexus-kernel
 cd /tmp/nxmu
 exec /tmp/nxmu/bin/$(ls /tmp/nxmu/bin | grep ^multuid-) "$@"
 R

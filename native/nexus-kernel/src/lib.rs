@@ -6,6 +6,7 @@ pub mod accept;
 pub mod approvals;
 pub mod bridge;
 pub mod dispatch;
+pub mod integrity;
 pub mod readiness;
 pub mod tools;
 

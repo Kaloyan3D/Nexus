@@ -158,7 +158,7 @@ impl Kernel {
 
     /// Create a pending approval. Authority, receipt and workspace binding
     /// are re-derived here; the submission only describes the operation.
-    pub fn create_approval(&mut self, sub: &ApprovalSubmission) -> KernelResult<ApprovalRow> {
+    fn create_approval_inner(&mut self, sub: &ApprovalSubmission) -> KernelResult<ApprovalRow> {
         Self::critical(&self.lock_file, &self.in_process, || {
             let now = now_ms();
             Self::expire_due(&mut self.store, now)?;
@@ -296,7 +296,7 @@ impl Kernel {
 
     /// Visible, lazily-expired view of approvals (metadata only; callers
     /// decide what to project).
-    pub fn list_approvals(
+    fn list_approvals_inner(
         &mut self,
         task: Option<&str>,
         limit: usize,
@@ -321,7 +321,7 @@ impl Kernel {
 
     /// Approver-side review: returns the sealed row and records that this
     /// approver identity viewed the exact request (decisions require it).
-    pub fn review_approval(&mut self, id: &str, approver_uid: u32) -> KernelResult<ApprovalRow> {
+    fn review_approval_inner(&mut self, id: &str, approver_uid: u32) -> KernelResult<ApprovalRow> {
         Self::critical(&self.lock_file, &self.in_process, || {
             let now = now_ms();
             Self::expire_due(&mut self.store, now)?;
@@ -361,7 +361,11 @@ impl Kernel {
 
     /// Final human decision. On approval the coarse per-command scope is
     /// bound (idempotent) so the existing Kernel scope checks still hold.
-    pub fn decide_approval(&mut self, id: &str, d: &ApprovalDecision) -> KernelResult<ApprovalRow> {
+    fn decide_approval_inner(
+        &mut self,
+        id: &str,
+        d: &ApprovalDecision,
+    ) -> KernelResult<ApprovalRow> {
         Self::critical(&self.lock_file, &self.in_process, || {
             let now = now_ms();
             Self::expire_due(&mut self.store, now)?;
@@ -467,7 +471,7 @@ impl Kernel {
     /// tool grant; success is the only way a human-approval-mode execution
     /// proceeds. Mismatch, expiry, revocation or reuse all refuse.
     #[allow(clippy::too_many_arguments)]
-    pub fn consume_approval(
+    fn consume_approval_inner(
         &mut self,
         command_id: &str,
         task: &str,
@@ -539,7 +543,7 @@ impl Kernel {
     }
 
     /// Withdraw one open approval (issuer cancel / operator revoke).
-    pub fn revoke_approval(&mut self, id: &str, reason: &str) -> KernelResult<bool> {
+    fn revoke_approval_inner(&mut self, id: &str, reason: &str) -> KernelResult<bool> {
         Self::critical(&self.lock_file, &self.in_process, || {
             let now = now_ms();
             self.store.approval_transition(
@@ -580,7 +584,7 @@ impl Kernel {
     /// Startup recovery (single owner, no execution in flight). A restart
     /// never fabricates or preserves consent: approved-but-unconsumed
     /// approvals lapse, and pending ones must be reviewed again.
-    pub fn recover_approvals(&mut self) -> KernelResult<(u64, u64)> {
+    fn recover_approvals_inner(&mut self) -> KernelResult<(u64, u64)> {
         Self::critical(&self.lock_file, &self.in_process, || {
             let now = now_ms();
             let (mut lapsed, mut rearmed) = (0u64, 0u64);
@@ -618,6 +622,77 @@ impl Kernel {
             Self::expire_due(&mut self.store, now)?;
             Ok((lapsed, rearmed))
         })
+    }
+
+    pub fn create_approval(&mut self, sub: &ApprovalSubmission) -> KernelResult<ApprovalRow> {
+        self.anchor_gate()?;
+        let r = self.create_approval_inner(sub);
+        self.anchored(r)
+    }
+
+    pub fn review_approval(&mut self, id: &str, approver_uid: u32) -> KernelResult<ApprovalRow> {
+        self.anchor_gate()?;
+        let r = self.review_approval_inner(id, approver_uid);
+        self.anchored(r)
+    }
+
+    pub fn decide_approval(&mut self, id: &str, d: &ApprovalDecision) -> KernelResult<ApprovalRow> {
+        self.anchor_gate()?;
+        let r = self.decide_approval_inner(id, d);
+        self.anchored(r)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn consume_approval(
+        &mut self,
+        command_id: &str,
+        task: &str,
+        attempt: &str,
+        lease_epoch: u64,
+        incarnation: &str,
+        tool_id: &str,
+        args_digest: &str,
+        budget_digest: &str,
+        workspace_root_digest: &str,
+        grant_request_id: &str,
+        require_independent: bool,
+    ) -> KernelResult<String> {
+        self.anchor_gate()?;
+        let r = self.consume_approval_inner(
+            command_id,
+            task,
+            attempt,
+            lease_epoch,
+            incarnation,
+            tool_id,
+            args_digest,
+            budget_digest,
+            workspace_root_digest,
+            grant_request_id,
+            require_independent,
+        );
+        self.anchored(r)
+    }
+
+    pub fn revoke_approval(&mut self, id: &str, reason: &str) -> KernelResult<bool> {
+        let r = self.revoke_approval_inner(id, reason);
+        self.anchored(r)
+    }
+
+    pub fn recover_approvals(&mut self) -> KernelResult<(u64, u64)> {
+        let r = self.recover_approvals_inner();
+        self.anchored(r)
+    }
+
+    pub fn list_approvals(
+        &mut self,
+        task: Option<&str>,
+        limit: usize,
+    ) -> KernelResult<Vec<ApprovalRow>> {
+        let r = self.list_approvals_inner(task, limit);
+        // Read path: anchoring is best-effort so inspection stays available.
+        let _ = self.anchored(Ok(()));
+        r
     }
 
     pub fn verify_approval_journal(&mut self) -> KernelResult<u64> {

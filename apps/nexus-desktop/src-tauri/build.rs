@@ -13,6 +13,7 @@ const COMMANDS: &[&str] = &[
     "list_mock_conversations",
     "tool_events",
     "list_approvals",
+    "integrity_status",
 ];
 
 fn main() {

@@ -1497,6 +1497,43 @@ fn do_approval_decide(
     }
 }
 
+/// A4.3 read-only integrity status. Never mutates authoritative history;
+/// a verified result may clear a recoverable block, a mismatch never does.
+fn do_integrity_status(
+    daemon: &Daemon,
+    req: &IpcRequest,
+    peer: Option<(u32, u32, i32)>,
+) -> serde_json::Value {
+    if let Err(r) = only_keys(&req.params, &[], &req.id) {
+        return r;
+    }
+    let uid_ok = match (&daemon.allowed_uids, peer) {
+        (None, _) => true,
+        (Some(allowed), Some((uid, _, _))) => {
+            allowed.contains(&uid)
+                || daemon
+                    .approver_uids
+                    .as_ref()
+                    .is_some_and(|v| v.contains(&uid))
+        }
+        _ => false,
+    };
+    if !uid_ok {
+        daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+        return fail(
+            &req.id,
+            codes::PEER_UNAUTHORIZED,
+            "connecting process UID is not authorized to read integrity status",
+        );
+    }
+    let mut kernel = match lock_kernel(daemon, &req.id) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    let rep = kernel.integrity_report(true);
+    ok(&req.id, serde_json::json!({ "integrity": rep }))
+}
+
 /// Daemon-side hooks for the write lifecycle: journal and fence take the
 /// Kernel lock only briefly per call; nothing is held across file I/O.
 struct DaemonWriteHooks<'a> {
@@ -2480,6 +2517,7 @@ pub fn dispatch(
         "readiness" => do_readiness(daemon, req),
         "tool-events" => do_tool_events(daemon, req, peer),
         "approval-list" => do_approval_list(daemon, req, peer),
+        "integrity-status" => do_integrity_status(daemon, req, peer),
         "digest" => ok(&req.id, digest_params(&req.params)),
         _ => unreachable!("read-only set is fixed"),
     }

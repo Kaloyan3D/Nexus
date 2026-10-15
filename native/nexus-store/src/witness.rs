@@ -94,6 +94,10 @@ fn prepared_secs(stamp: &str) -> Option<u64> {
 
 pub struct WitnessStore {
     conn: Connection,
+    remote: Option<crate::ext_witness::RemoteWitness>,
+    /// A4.3: when set, privileged tool/approval authority is refused
+    /// (fail closed) until integrity is re-established.
+    blocked: Option<String>,
 }
 
 fn now_utc() -> String {
@@ -197,7 +201,27 @@ impl WitnessStore {
                 ));
             }
         }
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            remote: None,
+            blocked: None,
+        })
+    }
+
+    pub fn set_remote(&mut self, r: crate::ext_witness::RemoteWitness) {
+        self.remote = Some(r);
+    }
+
+    pub fn remote(&self) -> Option<&crate::ext_witness::RemoteWitness> {
+        self.remote.as_ref()
+    }
+
+    pub fn set_blocked(&mut self, reason: Option<String>) {
+        self.blocked = reason;
+    }
+
+    pub fn blocked(&self) -> Option<&str> {
+        self.blocked.as_deref()
     }
 
     /// Opaque key/value cell in `witness_meta` (used for the A3.1 tool

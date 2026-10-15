@@ -477,3 +477,29 @@ export interface ApprovalsView {
   approvalAction: "terminal-only";
   approvals: ApprovalRecord[];
 }
+
+/**
+ * Journal integrity (A4.3). `scope` always states what was verified; the UI
+ * must show it next to the state and never render a generic "secure" badge.
+ */
+export interface JournalIntegrity {
+  journal: string;
+  localCount: number;
+  witnessCount: number | null;
+  status: string;
+  detail: string;
+}
+
+export interface IntegrityView {
+  state:
+    | "verified"
+    | "unanchored-legacy"
+    | "witness-unavailable"
+    | "recovery-required"
+    | "integrity-mismatch"
+    | "not-configured";
+  scope: string;
+  configured: boolean;
+  journals: JournalIntegrity[];
+  detail: string;
+}

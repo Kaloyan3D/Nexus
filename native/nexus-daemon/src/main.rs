@@ -58,6 +58,8 @@ fn usage() -> i32 {
         "         [--enable-process]   (A3.4 sandboxed processes; needs the approver flags above)\n         [--dep-cache <dir>]  (A3.5 read-only verified dependency cache, populated out of band)"
     );
     println!("         [--cap-handoff PATH [--cap-handoff-gid GID|NAME]]");
+    println!("         [--external-witness SOCKET --external-witness-uid UID [--witness-adopt-legacy]]  (A4.3 independent journal witness)");
+    println!("         [--require-external-witness]  (refuse to start without --external-witness; production units)");
     println!("         [--require-human-approval]  (A4.2: per-operation human approval; needs --require-independent-approver)");
     println!("Trust modes: readonly (default, privileged mutations disabled) |");
     println!("  shadow-test (explicit opt-in, per-request issuer authentication).");
@@ -452,6 +454,77 @@ fn run(args: &[String]) -> i32 {
         }
     }
     let incarnation = kernel.incarnation().to_owned();
+    // A4.3 independent journal witness. Optional, but once a store has been
+    // anchored it can never again serve privileged operations without it.
+    let ext_witness = flag(args, "--external-witness");
+    let mut integrity_blocked: Option<String> = None;
+    {
+        let mutating = args
+            .iter()
+            .any(|a| a == "--enable-writes" || a == "--enable-process");
+        // Mandatory enforcement on a fresh store (production units): the
+        // latch alone only protects a store AFTER its first anchoring.
+        if args.iter().any(|a| a == "--require-external-witness") && ext_witness.is_none() {
+            return fatal(
+                "witness-required",
+                "--require-external-witness is set but no --external-witness was configured (failing closed)",
+            );
+        }
+        let was_latched = match kernel.enforce_witness_latch(ext_witness.is_some()) {
+            Ok(b) => b,
+            Err(e) => {
+                if mutating {
+                    return fatal("witness-downgrade-refused", &e.message);
+                }
+                log_line_startup("external witness latch active; writes/process stay disabled");
+                true
+            }
+        };
+        // Legacy adoption launders history: it is only ever valid for a
+        // store that has never been anchored. Pointing an anchored store at
+        // a fresh witness with --witness-adopt-legacy is refused.
+        if was_latched && args.iter().any(|a| a == "--witness-adopt-legacy") {
+            return fatal(
+                "adopt-refused",
+                "--witness-adopt-legacy is refused: this store was already anchored; re-anchoring requires a fresh DataRoot",
+            );
+        }
+        if let Some(sock) = ext_witness.clone() {
+            let uid = match flag_str(args, "--external-witness-uid")
+                .and_then(|u| u.parse::<u32>().ok())
+            {
+                Some(u) => u,
+                None => {
+                    return fatal(
+                        "bad-config",
+                        "--external-witness requires --external-witness-uid (failing closed)",
+                    )
+                }
+            };
+            if flag(args, "--witness").is_none() {
+                return fatal(
+                    "bad-config",
+                    "--external-witness requires the local --witness store as well (failing closed)",
+                );
+            }
+            let adopt = args.iter().any(|a| a == "--witness-adopt-legacy");
+            let remote =
+                nexus_store::ext_witness::RemoteWitness::new(sock, uid, incarnation.clone(), adopt);
+            if let Err(e) = kernel.attach_external_witness(remote) {
+                return fatal("bad-config", &e.message);
+            }
+            let rep = kernel.integrity_report(true);
+            log_line_startup(&format!(
+                "journal integrity: {} ({})",
+                rep.state, rep.detail
+            ));
+            if rep.state != "verified" {
+                integrity_blocked = Some(format!("{}: {}", rep.state, rep.detail));
+            } else if let Err(e) = kernel.mark_anchored() {
+                return fatal("store-error", &e.message);
+            }
+        }
+    }
     // Stale socket recovery: if a socket file remains but no listener
     // answers, it is a crash leftover and is reclaimed. A live listener
     // means a running daemon -> refuse (second-instance refusal).
@@ -735,7 +808,18 @@ fn run(args: &[String]) -> i32 {
     // completion is a crash/restart residue: close it as `interrupted`
     // (uncertain, never re-executed) and lapse unexecuted grants.
     let mut kernel = kernel;
-    match kernel.reconcile_tool_journal(true) {
+    if let Some(why) = &integrity_blocked {
+        // Interrupted writes/processes stay open and uncertain (never
+        // replayed); privileged authority is refused until integrity holds.
+        log_line_startup(&format!(
+            "journal integrity not established; reconciliation and privileged authority withheld: {why}"
+        ));
+    }
+    match if integrity_blocked.is_some() {
+        Ok(Default::default())
+    } else {
+        kernel.reconcile_tool_journal(true)
+    } {
         Ok(rep) => {
             if rep.expired + rep.interrupted > 0 {
                 log_line_startup(&format!(
@@ -751,7 +835,11 @@ fn run(args: &[String]) -> i32 {
             );
         }
     }
-    match nexus_tools::reconcile_writes(&mut kernel) {
+    match if integrity_blocked.is_some() {
+        Ok(0)
+    } else {
+        nexus_tools::reconcile_writes(&mut kernel)
+    } {
         Ok(n) if n > 0 => log_line_startup(&format!(
             "write journal reconciled: {n} open write(s) closed as interrupted (never replayed)"
         )),
@@ -791,7 +879,11 @@ fn run(args: &[String]) -> i32 {
     };
     // Close leftover process requests (kill orphaned cgroups, remove
     // staging) BEFORE serving; never restarts anything.
-    match nexus_tools::reconcile_processes(&mut kernel) {
+    match if integrity_blocked.is_some() {
+        Ok(0)
+    } else {
+        nexus_tools::reconcile_processes(&mut kernel)
+    } {
         Ok(n) if n > 0 => log_line_startup(&format!(
             "process journal reconciled: {n} open execution(s) closed as interrupted (never restarted)"
         )),
@@ -805,7 +897,11 @@ fn run(args: &[String]) -> i32 {
     }
     // A4.2: a restart never fabricates or preserves consent. Approved but
     // unconsumed approvals lapse; reviewed-pending ones must be re-reviewed.
-    match kernel.recover_approvals() {
+    match if integrity_blocked.is_some() {
+        Ok((0, 0))
+    } else {
+        kernel.recover_approvals()
+    } {
         Ok((lapsed, rearmed)) if lapsed + rearmed > 0 => log_line_startup(&format!(
             "approvals recovered: lapsed={lapsed} rearmed={rearmed}"
         )),

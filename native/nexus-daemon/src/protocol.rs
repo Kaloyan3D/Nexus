@@ -286,6 +286,7 @@ pub fn is_read_only(cmd: &str) -> bool {
             | "readiness"
             | "tool-events"
             | "approval-list"
+            | "integrity-status"
     )
 }
 

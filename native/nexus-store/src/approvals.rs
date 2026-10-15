@@ -177,6 +177,64 @@ fn append_event(
 }
 
 impl Store {
+    /// `(row count, tail entry hash)` of the approval event chain.
+    pub fn approval_tail(&self) -> KernelResult<(u64, String)> {
+        let n: i64 = self
+            .conn_ref()
+            .query_row("SELECT COUNT(*) FROM approval_events", [], |r| r.get(0))
+            .map_err(|e| db_fail_pub("count", e))?;
+        let tail: Option<String> = self
+            .conn_ref()
+            .query_row(
+                "SELECT entry_hash FROM approval_events ORDER BY seq DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| db_fail_pub("tail", e))?;
+        Ok((
+            n as u64,
+            tail.unwrap_or_else(|| APPROVAL_GENESIS.to_owned()),
+        ))
+    }
+
+    /// Entry hash after `pos` events (`pos == 0` is genesis).
+    pub fn approval_hash_at(&self, pos: u64) -> KernelResult<Option<String>> {
+        if pos == 0 {
+            return Ok(Some(APPROVAL_GENESIS.to_owned()));
+        }
+        self.conn_ref()
+            .query_row(
+                "SELECT entry_hash FROM approval_events ORDER BY seq ASC LIMIT 1 OFFSET ?1",
+                params![(pos - 1) as i64],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| db_fail_pub("hash_at", e))
+    }
+
+    /// Opaque store_meta cell (policy latches).
+    pub fn meta_get(&self, key: &str) -> KernelResult<Option<String>> {
+        self.conn_ref()
+            .query_row(
+                "SELECT value FROM store_meta WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| db_fail_pub("read meta", e))
+    }
+
+    pub fn meta_set(&mut self, key: &str, value: &str) -> KernelResult<()> {
+        self.conn_ref()
+            .execute(
+                "INSERT INTO store_meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )
+            .map_err(|e| db_fail_pub("write meta", e))?;
+        Ok(())
+    }
+
     /// Persistent approval-policy latch (store_meta). Raised, never lowered.
     pub fn approval_policy_get(&self) -> KernelResult<Option<String>> {
         self.conn_ref()

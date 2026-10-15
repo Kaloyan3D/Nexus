@@ -2520,3 +2520,306 @@ fn multuid_independent_human_approval_store_cannot_be_downgraded_by_restart() {
         (h.t.h.nexusd_uid, h.t.approver_gid, 0o640)
     );
 }
+
+// ---------------------------------------------------------------------------
+// A4.3 independent journal witness under its own Linux identity. The
+// witness state/key are 0700 witness-owned; the daemon is only a client.
+// ---------------------------------------------------------------------------
+
+const WITNESS_USER: &str = "nexus-witness-test";
+const WITNESS_CLIENT_GROUP: &str = "nexus-witnessc-test";
+
+struct WitnessRig {
+    child: Child,
+    base: PathBuf,
+    state: PathBuf,
+    sock: PathBuf,
+    uid: u32,
+}
+
+impl Drop for WitnessRig {
+    fn drop(&mut self) {
+        // runuser forks: signal the whole process group.
+        unsafe {
+            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
+
+fn witness_bin() -> PathBuf {
+    if let Ok(p) = std::env::var("NEXUS_WITNESS_BIN") {
+        return PathBuf::from(p);
+    }
+    nexusd_bin().with_file_name("nexus-witness")
+}
+
+fn start_witness_rig(daemon_uid: u32) -> Option<WitnessRig> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    let wuid = uid_of(WITNESS_USER)?;
+    let wgid = gid_of(WITNESS_USER)?;
+    let cgid = gid_of(WITNESS_CLIENT_GROUP)?;
+    if !witness_bin().exists() {
+        println!("NOT RUN: nexus-witness binary missing");
+        return None;
+    }
+    let base = std::env::temp_dir().join(format!(
+        "nexus-witness-{}-{}",
+        std::process::id(),
+        common::next_id("w")
+    ));
+    std::fs::create_dir_all(&base).ok()?;
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).ok()?;
+    let own = |p: &Path, mode: u32, gid: u32| {
+        let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::chown(c.as_ptr(), wuid, gid) }, 0);
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let state = base.join("state");
+    let sockdir = base.join("sock");
+    std::fs::create_dir_all(&state).ok()?;
+    std::fs::create_dir_all(&sockdir).ok()?;
+    own(&state, 0o700, wgid);
+    own(&sockdir, 0o750, cgid);
+    let sock = sockdir.join("w.sock");
+    use std::os::unix::process::CommandExt;
+    let child = Command::new("runuser")
+        .process_group(0)
+        .arg("-u")
+        .arg(WITNESS_USER)
+        .arg("--")
+        .arg(witness_bin())
+        .arg("--dir")
+        .arg(&state)
+        .arg("--socket")
+        .arg(&sock)
+        .arg("--allowed-uids")
+        .arg(daemon_uid.to_string())
+        .arg("--socket-group")
+        .arg(cgid.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !sock.exists() {
+        if Instant::now() > deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Some(WitnessRig {
+        child,
+        base,
+        state,
+        sock,
+        uid: wuid,
+    })
+}
+
+fn witness_human_setup(tag: &str) -> Option<(Human, WitnessRig)> {
+    let mut h = human_setup(tag)?;
+    let rig = start_witness_rig(h.t.h.nexusd_uid)?;
+    h.d.argv.extend([
+        "--external-witness".to_owned(),
+        rig.sock.to_string_lossy().into_owned(),
+        "--external-witness-uid".to_owned(),
+        rig.uid.to_string(),
+    ]);
+    h.d.restart();
+    h.issuer_cap = h.d.read_handoff(); // keys rotate on every start
+    Some((h, rig))
+}
+
+fn status_via(user: &str, sock: &Path) -> Result<serde_json::Value, String> {
+    let frame = serde_json::json!({"v":1,"op":"status","nonce":"probe"}).to_string();
+    send_as(user, sock, &frame)
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_witness_state_and_key_are_unreachable_to_every_other_identity() {
+    let Some((h, rig)) = witness_human_setup("wiso") else {
+        return;
+    };
+    let key = rig.state.join("witness.key");
+    let st = rig.state.join("state.json");
+    // Anchored operation works across real identities.
+    h.put_file("a.txt", "before\n");
+    let args = serde_json::json!({"path": "a.txt", "content": "after\n", "mode": "replace",
+        "expectedSha256": sha_hex("before\n")});
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(
+            &h.issuer_cap,
+            "approval-request",
+            h.tool_params("w-1", args),
+        ),
+    )
+    .unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    let integ = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &serde_json::json!({"protocol":1,"id":common::next_id("i"),"cmd":"integrity-status","params":{}})
+            .to_string(),
+    )
+    .unwrap();
+    assert_eq!(integ["integrity"]["state"], "verified", "{integ}");
+    // Daemon, issuer, approver, bystander, untrusted: no read, no listing.
+    for who in [
+        DAEMON_USER,
+        ISSUER_USER,
+        APPROVER_USER,
+        BYSTANDER_USER,
+        UNTRUSTED_USER,
+    ] {
+        assert!(cat_as(who, &key).is_err(), "{who} read the witness key");
+        assert!(cat_as(who, &st).is_err(), "{who} read witness state");
+        assert!(!ls_as(who, &rig.state), "{who} listed witness state");
+    }
+    // The daemon cannot write or replace witness state either.
+    let o = run_as(
+        DAEMON_USER,
+        "sh",
+        &["-c", &format!("echo x > {}", st.to_string_lossy())],
+    )
+    .unwrap();
+    assert!(!o.status.success());
+    let o = run_as(DAEMON_USER, "rm", &["-f", &st.to_string_lossy()]).unwrap();
+    assert!(!o.status.success() || st.exists());
+    assert!(st.exists());
+    // Modes (and ownership) are exact, and survive a daemon restart.
+    let mut h = h;
+    let before = (stat_of(&rig.state), stat_of(&key), stat_of(&st));
+    h.d.restart();
+    assert_eq!(before, (stat_of(&rig.state), stat_of(&key), stat_of(&st)));
+    assert_eq!(stat_of(&rig.state).0, rig.uid);
+    assert_eq!(stat_of(&rig.state).2, 0o700);
+    assert_eq!(stat_of(&key).2, 0o600);
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_only_the_daemon_uid_can_talk_to_the_witness_and_cannot_rewind_it() {
+    let Some((h, rig)) = witness_human_setup("wpeer") else {
+        return;
+    };
+    // Only the daemon may commit/query: a same-group but unauthorized
+    // identity reaches the socket and is refused on the peer UID.
+    let r = status_via(BYSTANDER_USER, &rig.sock).expect("bystander can connect (group)");
+    assert_eq!(r["code"], "peer-unauthorized", "{r}");
+    // Identities outside the client group never reach it (kernel EACCES).
+    for who in [ISSUER_USER, APPROVER_USER, UNTRUSTED_USER] {
+        assert!(
+            status_via(who, &rig.sock).is_err(),
+            "{who} connected to the witness"
+        );
+    }
+    // Integrity status is peer-gated on the daemon too (same-group bystander).
+    let r = send_as(
+        BYSTANDER_USER,
+        &h.d.socket,
+        &serde_json::json!({"protocol":1,"id":common::next_id("i"),"cmd":"integrity-status","params":{}})
+            .to_string(),
+    )
+    .unwrap();
+    assert_eq!(code_of(&r), "peer-unauthorized", "{r}");
+    // The daemon identity itself cannot rewind or fork committed history.
+    h.put_file("a.txt", "x\n");
+    let args = serde_json::json!({"path": "a.txt", "content": "y\n", "mode": "replace",
+        "expectedSha256": sha_hex("x\n")});
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(
+            &h.issuer_cap,
+            "approval-request",
+            h.tool_params("w-2", args),
+        ),
+    )
+    .unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    let st = status_via(DAEMON_USER, &rig.sock).unwrap();
+    assert_eq!(st["ok"], true, "{st}");
+    let store = st["storeId"].as_str().unwrap().to_owned();
+    let n = st["journals"]["approval-events"]["count"].as_u64().unwrap();
+    assert!(n >= 2);
+    let evil = serde_json::json!({"v":1,"op":"commit","nonce":"e1","storeId":store,
+        "journal":"approval-events","count":1,"tail":"a".repeat(64),
+        "prevCount":0,"prevTail":"0".repeat(64)})
+    .to_string();
+    let r = send_as(DAEMON_USER, &rig.sock, &evil).unwrap();
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!(r["code"], "rollback");
+    let after = status_via(DAEMON_USER, &rig.sock).unwrap();
+    assert_eq!(
+        after["journals"]["approval-events"],
+        st["journals"]["approval-events"]
+    );
+    assert!(after["violations"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_daemon_uid_rollback_of_its_own_journal_is_detected_by_the_witness() {
+    let Some((mut h, _rig)) = witness_human_setup("wroll") else {
+        return;
+    };
+    h.put_file("a.txt", "before\n");
+    let args = serde_json::json!({"path": "a.txt", "content": "after\n", "mode": "replace",
+        "expectedSha256": sha_hex("before\n")});
+    for rid in ["r-1", "r-2"] {
+        let mut a = args.clone();
+        a["content"] = serde_json::json!(format!("after-{rid}\n"));
+        let r = send_as(
+            ISSUER_USER,
+            &h.d.socket,
+            &signed_frame(&h.issuer_cap, "approval-request", h.tool_params(rid, a)),
+        )
+        .unwrap();
+        assert_eq!(r["ok"], true, "{r}");
+    }
+    // The daemon UID (owner of its database) deletes approval history as
+    // itself. Nothing local can tell; the independent witness can.
+    let db = h.d.db.clone();
+    terminate(&mut h.d.child);
+    let _ = h.d.child.wait();
+    let o = run_as(
+        DAEMON_USER,
+        "python3",
+        &[
+            "-c",
+            "import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('DELETE FROM approval_events WHERE seq > (SELECT MIN(seq)+1 FROM approval_events)');c.commit()",
+            &db.to_string_lossy(),
+        ],
+    )
+    .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let _ = std::fs::remove_file(&h.d.socket);
+    h.d.restart();
+    h.issuer_cap = h.d.read_handoff();
+    let integ = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &serde_json::json!({"protocol":1,"id":common::next_id("i"),"cmd":"integrity-status","params":{}})
+            .to_string(),
+    )
+    .unwrap();
+    assert_eq!(integ["integrity"]["state"], "integrity-mismatch", "{integ}");
+    let r = send_as(
+        ISSUER_USER,
+        &h.d.socket,
+        &signed_frame(
+            &h.issuer_cap,
+            "approval-request",
+            h.tool_params("r-3", args),
+        ),
+    )
+    .unwrap();
+    assert_ne!(r["ok"], true, "authority must be refused: {r}");
+}

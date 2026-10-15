@@ -2009,6 +2009,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "hmac",
+ "libc",
  "nexus-contracts",
  "rusqlite",
  "serde",

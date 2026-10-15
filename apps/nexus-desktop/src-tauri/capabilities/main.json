@@ -17,6 +17,7 @@
     "allow-model-io-read",
     "allow-list-mock-conversations",
     "allow-tool-events",
-    "allow-list-approvals"
+    "allow-list-approvals",
+    "allow-integrity-status"
   ]
 }
