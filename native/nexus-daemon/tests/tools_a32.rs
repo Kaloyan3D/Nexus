@@ -132,6 +132,7 @@ fn respawn(d: &DaemonProc, bases: &Path) -> std::process::Child {
         .arg(bases)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    common::die_with_test(&mut cmd);
     let mut child = cmd.spawn().unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {

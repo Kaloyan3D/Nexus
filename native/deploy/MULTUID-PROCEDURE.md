@@ -134,3 +134,13 @@ The daemon is started with `--enable-writes --approver-cap <file>
 --require-independent-approver`, so it refuses to start unless the approver
 UIDs are disjoint from the issuer allow-list. A run is not a PASS unless the
 reporter prints PREPARED and every test prints no `NOT RUN` line.
+
+## D. A3.4 sandboxed process commands (additional test, NOT RUN without this host)
+
+- `multuid_process_commands_require_issuer_and_approver_and_deny_everyone_else`
+
+It additionally requires bubblewrap (`/usr/bin/bwrap`), `/usr/bin/prlimit`,
+unprivileged user namespaces and a delegated cgroup v2 subtree for the daemon
+user (systemd `Delegate=yes`), plus the same five identities. The daemon is
+started with `--enable-process`; it refuses to start if the sandbox
+preflight fails. The test prints `NOT RUN` otherwise.

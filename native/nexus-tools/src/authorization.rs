@@ -18,8 +18,8 @@ use crate::result::{ResultStatus, ToolError, ToolErrorCode, ToolResultV1, ToolSt
 use crate::workspace::{Workspace, WorkspacePolicy, POLICY_VERSION};
 use nexus_contracts::sha256_hex;
 use nexus_kernel::{
-    Kernel, SealedToolGrant, ToolAuthorizationRequest, VerifiedToolGrant, WorkspaceBinding,
-    WriteScopeBinding,
+    Kernel, ProcessScopeBinding, SealedToolGrant, ToolAuthorizationRequest, VerifiedToolGrant,
+    WorkspaceBinding, WriteScopeBinding,
 };
 use nexus_store::ToolJournalEntry;
 
@@ -83,7 +83,43 @@ pub fn prepare(
     request: ToolRequestV1,
     binding: &WorkspaceBinding,
 ) -> Result<PreparedToolRequest, ToolError> {
-    prepare_inner(request, binding, None)
+    prepare_inner(request, binding, None, false)
+}
+
+/// Preparation for sandboxed process execution. Requires the independent
+/// process scope; the command is validated by the policy *before* any grant
+/// can exist, and the wall-clock budget is capped by the approval.
+pub fn prepare_process(
+    request: ToolRequestV1,
+    binding: &WorkspaceBinding,
+    scope: &ProcessScopeBinding,
+    policy: &crate::process::CommandPolicy,
+) -> Result<PreparedToolRequest, ToolError> {
+    if scope.command_id != request.command_id
+        || scope.root_digest != binding.root_digest
+        || scope.lease_epoch != request.lease_epoch
+    {
+        return Err(ToolError::new(
+            ToolErrorCode::WorkspaceMismatch,
+            "process scope does not belong to this request",
+        ));
+    }
+    let tool = ToolId::parse(&request.tool_id);
+    if tool != Some(ToolId::ProcRun) {
+        return Err(ToolError::new(
+            ToolErrorCode::UnsupportedTool,
+            "process scope applies only to proc.run",
+        ));
+    }
+    let args = ToolArgs::parse(ToolId::ProcRun, &request.args)?;
+    if let ToolArgs::Proc(a) = &args {
+        policy.resolve(a)?;
+    }
+    let mut p = prepare_inner(request, binding, None, true)?;
+    // Clamp BEFORE the budget digest is sealed.
+    p.budgets.proc_wall_ms = p.budgets.proc_wall_ms.min(scope.max_wall_ms).max(1);
+    p.budget_digest = p.budgets.digest();
+    Ok(p)
 }
 
 /// Preparation for mutating tools. Requires the independent write scope;
@@ -102,13 +138,14 @@ pub fn prepare_write(
             "write scope does not belong to this request",
         ));
     }
-    prepare_inner(request, binding, Some(scope))
+    prepare_inner(request, binding, Some(scope), false)
 }
 
 fn prepare_inner(
     request: ToolRequestV1,
     binding: &WorkspaceBinding,
     scope: Option<&WriteScopeBinding>,
+    allow_process: bool,
 ) -> Result<PreparedToolRequest, ToolError> {
     let inv = |m: &str| ToolError::new(ToolErrorCode::InvalidArguments, m);
     if request.schema_version != TOOL_CONTRACT_VERSION {
@@ -133,6 +170,12 @@ fn prepare_inner(
         if v.is_empty() {
             return Err(inv(&["missing ", n].concat()));
         }
+    }
+    if tool.is_process() && !allow_process {
+        return Err(ToolError::new(
+            ToolErrorCode::AuthorizationRefused,
+            "process execution requires an independently approved process scope",
+        ));
     }
     match (tool.is_mutating(), scope.is_some()) {
         (true, false) => {
@@ -500,5 +543,117 @@ fn run_tool(ctx: &mut ExecCtx<'_>, args: &ToolArgs) -> Result<serde_json::Value,
             ToolErrorCode::UnsupportedTool,
             "mutating tools run only through the write lifecycle",
         )),
+        ToolArgs::Proc(_) => Err(ToolError::new(
+            ToolErrorCode::UnsupportedTool,
+            "process execution runs only through the sandbox lifecycle",
+        )),
     }
+}
+
+// ------------------------------------------------------------ A3.4
+
+struct KernelProcessHooks<'a> {
+    kernel: &'a mut Kernel,
+    verified: &'a VerifiedToolGrant,
+    last: Option<nexus_store::ToolJournalEntry>,
+}
+
+impl crate::process::ProcessHooks for KernelProcessHooks<'_> {
+    fn journal(&mut self, phase: &str, payload: serde_json::Value) -> Result<(), ToolError> {
+        let e = self
+            .kernel
+            .record_process_phase(self.verified, phase, payload)
+            .map_err(|e| kernel_refusal(&e))?;
+        self.last = Some(e);
+        Ok(())
+    }
+    fn fence(&mut self) -> Result<(), ToolError> {
+        self.kernel
+            .check_tool_fence_for(self.verified.grant())
+            .map_err(|e| {
+                ToolError::new(
+                    ToolErrorCode::Revoked,
+                    format!("authority revoked ({})", e.code.as_str()),
+                )
+            })
+    }
+}
+
+/// Run a started process call through the sandbox lifecycle on the given
+/// hooks (the daemon passes hooks that lock the Kernel only briefly).
+pub fn run_process_call(
+    call: &AuthorizedToolCall,
+    cancel: &CancellationToken,
+    policy: &crate::process::CommandPolicy,
+    run_root: &std::path::Path,
+    scope_max_wall_ms: u64,
+    hooks: &mut dyn crate::process::ProcessHooks,
+) -> Result<ToolResultV1, ToolError> {
+    let p = &call.prepared;
+    let ToolArgs::Proc(args) = &p.args else {
+        return Err(ToolError::new(
+            ToolErrorCode::UnsupportedTool,
+            "not a process call",
+        ));
+    };
+    let ctx = crate::process::ProcessContext {
+        ws: &p.workspace,
+        run_root,
+        execution_id: &call.grant.execution_id,
+        policy,
+        budgets: &p.budgets,
+        scope_max_wall_ms,
+    };
+    crate::process::run_process(&ctx, args, cancel, hooks)
+}
+
+/// In-process composition (tests, offline harness).
+pub fn execute_process(
+    kernel: &mut Kernel,
+    call: &AuthorizedToolCall,
+    cancel: &CancellationToken,
+    policy: &crate::process::CommandPolicy,
+    run_root: &std::path::Path,
+    scope_max_wall_ms: u64,
+) -> Result<ToolExecutionOutcome, ToolError> {
+    let started = begin(kernel, call, cancel)?;
+    let mut hooks = KernelProcessHooks {
+        kernel,
+        verified: &started.verified,
+        last: None,
+    };
+    let result = run_process_call(
+        call,
+        cancel,
+        policy,
+        run_root,
+        scope_max_wall_ms,
+        &mut hooks,
+    )?;
+    let journal = hooks.last.ok_or_else(|| {
+        ToolError::new(ToolErrorCode::IoError, "process produced no journal record")
+    })?;
+    Ok(ToolExecutionOutcome { result, journal })
+}
+
+/// Startup reconciliation for process requests with `prepared` and no
+/// terminal record: kill any leftover cgroup, remove run directories, and
+/// record `interrupted`. Never restarts a process.
+pub fn reconcile_processes(kernel: &mut Kernel) -> Result<u64, ToolError> {
+    let open = kernel.open_processes().map_err(|e| kernel_refusal(&e))?;
+    let mut obs: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::new();
+    for op in open {
+        obs.insert(
+            op.request_id.clone(),
+            crate::process::observe_process_for_recovery(&op.prepared, op.running.as_ref()),
+        );
+    }
+    kernel
+        .reconcile_open_processes(&mut |op| {
+            obs.remove(&op.request_id).unwrap_or_else(
+                || serde_json::json!({"reason": "no terminal record", "outcome": "uncertain"}),
+            )
+        })
+        .map_err(|e| kernel_refusal(&e))
 }

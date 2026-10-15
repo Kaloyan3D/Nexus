@@ -33,6 +33,12 @@ pub enum ToolErrorCode {
     WriteFailed,
     /// The filesystem lacks an atomic primitive we require (renameat2).
     UnsupportedFilesystem,
+    /// A mandatory sandbox primitive is unavailable: nothing was run.
+    SandboxUnavailable,
+    /// The workspace snapshot could not be staged safely.
+    SnapshotFailed,
+    /// Command refused by policy.
+    CommandRefused,
     /// Bytes were published but could not be verified.
     PublishedUnverified,
     Cancelled,
@@ -68,6 +74,9 @@ impl ToolErrorCode {
             Self::WriteFailed => "write-failed",
             Self::UnsupportedFilesystem => "unsupported-filesystem",
             Self::PublishedUnverified => "published-unverified",
+            Self::SandboxUnavailable => "sandbox-unavailable",
+            Self::SnapshotFailed => "snapshot-failed",
+            Self::CommandRefused => "command-refused",
             Self::Cancelled => "cancelled",
             Self::Revoked => "revoked",
             Self::AuthorizationRefused => "authorization-refused",

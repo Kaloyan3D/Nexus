@@ -158,7 +158,14 @@ fn tools_list_and_inspect_are_read_only_metadata() {
         .collect();
     assert_eq!(
         ids,
-        vec!["fs.list", "fs.read", "fs.search", "fs.write", "fs.edit"]
+        vec![
+            "fs.list",
+            "fs.read",
+            "fs.search",
+            "fs.write",
+            "fs.edit",
+            "proc.run"
+        ]
     );
     assert!(v["writeTools"]
         .as_str()
@@ -357,5 +364,93 @@ fn offline_writes_are_quadruple_gated_and_isolated() {
     assert_eq!(out.status.code(), Some(4));
     // There is no unrestricted write command.
     let (c, _, _) = run(&["write", "x"]);
+    assert_eq!(c, 2);
+}
+
+#[test]
+fn process_tools_inspect_and_offline_sandbox_gates() {
+    let (c, so, _) = run(&["--json", "tools", "inspect", "proc.run"]);
+    assert_eq!(c, 0);
+    let v: serde_json::Value = serde_json::from_str(&so).unwrap();
+    assert_eq!(v["readOnly"], false);
+    assert_eq!(v["requiresWriteScope"], true);
+    // History needs a task and a daemon.
+    let (c, _, _) = run(&["tools", "processes"]);
+    assert_eq!(c, 2);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+    let ws = dir.path().to_str().unwrap();
+    // Missing flags / env / marker each refuse before anything runs.
+    let (c, _, _) = run(&[
+        "tools",
+        "run-offline-process",
+        "--workspace",
+        ws,
+        "cargo",
+        "check",
+    ]);
+    assert_eq!(c, 2);
+    let go = |env_a: bool, env_b: bool| {
+        let mut c = nexus();
+        c.args([
+            "--json",
+            "tools",
+            "run-offline-process",
+            "--offline-test",
+            "--allow-process-test",
+            "--workspace",
+            ws,
+            "cargo",
+            "check",
+            "--offline",
+            "--locked",
+        ]);
+        c.env_remove("NEXUS_TOOLS_OFFLINE_TEST")
+            .env_remove("NEXUS_TOOLS_OFFLINE_PROCESS_TEST");
+        if env_a {
+            c.env("NEXUS_TOOLS_OFFLINE_TEST", "1");
+        }
+        if env_b {
+            c.env("NEXUS_TOOLS_OFFLINE_PROCESS_TEST", "1");
+        }
+        c.output().unwrap()
+    };
+    for (a, b) in [(false, true), (true, false), (true, true)] {
+        let out = go(a, b);
+        assert_eq!(
+            out.status.code(),
+            Some(4),
+            "{a}{b}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    // Free-form programs are not available even with every gate.
+    std::fs::write(dir.path().join(".nexus-offline-process-test"), "").unwrap();
+    let out = nexus()
+        .args([
+            "--json",
+            "tools",
+            "run-offline-process",
+            "--offline-test",
+            "--allow-process-test",
+            "--workspace",
+            ws,
+            "sh",
+            "-c",
+            "id",
+        ])
+        .env("NEXUS_TOOLS_OFFLINE_TEST", "1")
+        .env("NEXUS_TOOLS_OFFLINE_PROCESS_TEST", "1")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not an approved command")
+            || String::from_utf8_lossy(&out.stderr).contains("sandbox"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // There is no host command execution entry point.
+    let (c, _, _) = run(&["exec", "id"]);
     assert_eq!(c, 2);
 }

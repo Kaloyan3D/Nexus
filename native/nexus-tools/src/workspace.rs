@@ -249,6 +249,8 @@ pub struct Identity {
     pub mode: u32,
     pub uid: u32,
     pub gid: u32,
+    pub mtime_ns: i128,
+    pub ctime_ns: i128,
     pub kind: Kind,
     pub size: u64,
 }
@@ -292,6 +294,8 @@ fn statx_at(dirfd: RawFd, name: &CString, flags: i32) -> Result<Identity, i32> {
         mode: sx.stx_mode as u32 & 0o7777,
         uid: sx.stx_uid,
         gid: sx.stx_gid,
+        mtime_ns: sx.stx_mtime.tv_sec as i128 * 1_000_000_000 + sx.stx_mtime.tv_nsec as i128,
+        ctime_ns: sx.stx_ctime.tv_sec as i128 * 1_000_000_000 + sx.stx_ctime.tv_nsec as i128,
         kind: kind_of_mode(sx.stx_mode as u32),
         size: sx.stx_size,
     })
@@ -696,6 +700,10 @@ impl Workspace {
             return Err(io_err("fdopendir", e));
         }
         self.accesses.fetch_add(1, Ordering::SeqCst);
+        // The duplicated descriptor shares its file offset with the one it
+        // came from (notably the pinned root): always start from the top,
+        // or a second listing of the same directory is silently empty.
+        unsafe { libc::rewinddir(dirp) };
         let mut out = Vec::new();
         let mut overflow = false;
         loop {
@@ -799,6 +807,12 @@ impl Workspace {
             ));
         }
         Ok(o)
+    }
+
+    /// Fresh `statx` of an already-open descriptor (identity, size and
+    /// nanosecond mtime/ctime) for before/after consistency checks.
+    pub fn fstat_identity(&self, fd: &OwnedFd) -> Result<Identity, ToolError> {
+        fstat_fd(fd.as_raw_fd()).map_err(|e| io_err("fstat", e))
     }
 
     pub fn same_mount_as_root(&self, id: &Identity) -> bool {

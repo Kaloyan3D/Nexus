@@ -28,6 +28,7 @@ const base: ToolEventV1 = {
   outputBytes: 10,
   stats: null,
   change: null,
+  process: null,
   aiInitiated: false,
   leaseEpoch: 3,
   firstSeq: 1,

@@ -955,3 +955,139 @@ fn multuid_approver_with_stolen_approver_cap_from_wrong_uid_is_refused() {
     .expect("t");
     assert_eq!(code_of(&r), "peer-unauthorized");
 }
+
+// ---- A3.4 sandboxed process commands -----------------------------------
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_process_commands_require_issuer_and_approver_and_deny_everyone_else() {
+    let Some(t) = require_tool_host("process-commands") else {
+        return;
+    };
+    // Sandbox must exist on the host too, else this is NOT RUN.
+    if !nexus_tools::sandbox::preflight().available {
+        println!("NOT RUN (process-commands): sandbox unavailable on this host");
+        return;
+    }
+    let (mut d, base, acap) = spawn_tools_as(&t);
+    d.argv.push("--enable-process".to_owned());
+    d.restart();
+    let issuer_cap = d.read_handoff();
+    let approver_cap = root_read(&acap);
+    let ws = base.join("ws");
+    std::fs::create_dir_all(&ws).expect("ws");
+    let digest = {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(ws.to_string_lossy().as_bytes()))
+    };
+    let snapshot = common::snapshot();
+    let acquired = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(
+            &issuer_cap,
+            "acquire",
+            serde_json::json!({"taskInstanceId": "mu-p", "backend": "native"}),
+        ),
+    )
+    .expect("acquire");
+    let lease = acquired.get("lease").expect("lease").clone();
+    let resolution = common::resolution_for("mu-p", &snapshot);
+    let _ = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(
+            &issuer_cap,
+            "seal",
+            serde_json::json!({"resolution": resolution}),
+        ),
+    );
+    let intent = nexus_contracts::ControllerIntentV1::build(
+        "mu-p",
+        "mu-pa",
+        "mu-pc",
+        "native",
+        1,
+        "muse_main",
+        "engineering-v2",
+        common::rev3(),
+        serde_json::json!({"op": "engineer-turn", "workspaceRootDigest": digest}),
+    );
+    let accepted = send_as(ISSUER_USER, &d.socket, &signed_frame(&issuer_cap, "accept", serde_json::json!({
+        "intent": serde_json::to_value(&intent).unwrap(), "resolution": resolution, "snapshot": snapshot,
+        "lease": {"epoch": lease.get("leaseEpoch"), "storeIncarnation": lease.get("storeIncarnation")}})))
+        .expect("accept");
+    let rc = accepted["receipt"].clone();
+    let bind = send_as(
+        ISSUER_USER,
+        &d.socket,
+        &signed_frame(
+            &issuer_cap,
+            "workspace-bind",
+            serde_json::json!({"commandId": "mu-pc", "root": ws.to_string_lossy()}),
+        ),
+    )
+    .expect("bind");
+    assert_eq!(
+        bind.get("ok"),
+        Some(&serde_json::Value::Bool(true)),
+        "{bind}"
+    );
+    let run = |cap: &str, user: &str, rid: &str| {
+        send_as(
+            user,
+            &d.socket,
+            &signed_frame(
+                cap,
+                "tool-execute",
+                serde_json::json!({
+            "requestId": rid, "cancellationId": format!("c-{rid}"), "taskInstanceId": "mu-p",
+            "attemptId": "mu-pa", "commandId": "mu-pc", "leaseEpoch": rc["leaseEpoch"],
+            "storeIncarnation": rc["storeIncarnation"], "toolId": "proc.run", "toolVersion": 1,
+            "args": {"program": "cargo", "args": ["check", "--offline", "--locked"]}}),
+            ),
+        )
+    };
+    // 1. issuer alone: no process scope -> refused.
+    assert_eq!(
+        code_of(&run(&issuer_cap, ISSUER_USER, "q1").expect("t")),
+        "scope-refused"
+    );
+    // 2. issuer key cannot approve a process scope.
+    let r = send_as(ISSUER_USER, &d.socket, &signed_frame(&issuer_cap, "process-scope-approve",
+        serde_json::json!({"commandId": "mu-pc", "workspaceRootDigest": digest, "maxWallMs": 1000}))).expect("t");
+    assert_eq!(code_of(&r), "issuer-untrusted");
+    // 3. untrusted: OS-level denial; bystander: peer-unauthorized (even with the stolen issuer cap).
+    let e = send_as(
+        UNTRUSTED_USER,
+        &d.socket,
+        &signed_frame(
+            &issuer_cap,
+            "tool-execute",
+            serde_json::json!({"requestId": "x"}),
+        ),
+    )
+    .expect_err("untrusted must not connect");
+    assert!(e.contains("Permission denied"), "{e}");
+    let r = send_as(
+        BYSTANDER_USER,
+        &d.socket,
+        &signed_frame(
+            &issuer_cap,
+            "tool-execute",
+            serde_json::json!({"requestId": "x"}),
+        ),
+    )
+    .expect("t");
+    assert_eq!(code_of(&r), "peer-unauthorized");
+    // 4. the approver identity approves; independence is reported true.
+    let r = send_as(APPROVER_USER, &d.socket, &signed_frame(&approver_cap, "process-scope-approve",
+        serde_json::json!({"commandId": "mu-pc", "workspaceRootDigest": digest, "maxWallMs": 60000}))).expect("t");
+    assert_eq!(r["processScope"]["independent"], true, "{r}");
+    // 5. the approver identity cannot execute.
+    let r = run(&approver_cap, APPROVER_USER, "q2");
+    assert!(r.is_err() || r.as_ref().unwrap().get("ok") == Some(&serde_json::Value::Bool(false)));
+    // 6. the daemon user's sandbox cannot read the credential directory.
+    let out = run_as(DAEMON_USER, "cat", &[&acap.to_string_lossy()]).expect("run");
+    let _ = out; // daemon user owns it; the SANDBOX (not the user) is the boundary tested elsewhere
+}

@@ -458,7 +458,14 @@ fn dispatch_stays_disabled_and_only_scoped_mutating_tools_exist() {
     let ids: Vec<_> = d.iter().map(|d| d.id).collect();
     assert_eq!(
         ids,
-        vec!["fs.list", "fs.read", "fs.search", "fs.write", "fs.edit"]
+        vec![
+            "fs.list",
+            "fs.read",
+            "fs.search",
+            "fs.write",
+            "fs.edit",
+            "proc.run"
+        ]
     );
     for t in &d {
         assert_eq!(t.read_only, !t.requires_write_scope, "{}", t.id);
@@ -929,4 +936,22 @@ fn concurrent_duplicate_authorization_has_exactly_one_winner() {
         .filter(|w| *w)
         .count();
     assert_eq!(winners, 1);
+}
+
+#[test]
+fn listing_the_same_directory_twice_through_one_workspace_is_complete() {
+    // Regression (found in A3.4): the root descriptor is dup'ed and shares
+    // its offset, so a second readdir on the same Workspace used to be
+    // empty.
+    let fx = fixture("list-twice");
+    for i in 0..5 {
+        std::fs::write(fx.ws.join(format!("f{i}.txt")), "x").unwrap();
+    }
+    let ws = Workspace::open_root(fx.ws.to_str().unwrap(), WorkspacePolicy::default()).unwrap();
+    for _ in 0..3 {
+        let d = ws.open_dir(&RelPath::root()).unwrap();
+        let (names, over) = ws.read_dir_names(&d.fd, 100).unwrap();
+        assert!(!over);
+        assert_eq!(names.len(), 5);
+    }
 }

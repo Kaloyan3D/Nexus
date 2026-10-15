@@ -113,6 +113,12 @@ pub struct Daemon {
     pub workspace_bases: Vec<std::path::PathBuf>,
     /// A3.3: mutating tools are refused unless explicitly enabled.
     pub writes_enabled: bool,
+    /// A3.4: sandboxed process execution is refused unless enabled AND the
+    /// sandbox preflight succeeded at startup (fail closed).
+    pub process_enabled: bool,
+    pub command_policy: nexus_tools::process::CommandPolicy,
+    pub run_root: std::path::PathBuf,
+    pub sandbox_caps: Option<nexus_tools::sandbox::SandboxCapabilities>,
     /// Separate approver capability (never the issuer capability).
     pub approver_auth: Option<Arc<IssuerAuth>>,
     pub approver_uids: Option<Vec<u32>>,
@@ -844,6 +850,109 @@ fn do_write_scope_approve(
     }
 }
 
+fn do_process_scope_approve(
+    daemon: &Daemon,
+    req: &IpcRequest,
+    peer: Option<(u32, u32, i32)>,
+) -> serde_json::Value {
+    let refuse = |code: &str, msg: &str| {
+        daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+        log_line("refuse", &req.id, code, &req.cmd);
+        fail(&req.id, code, msg)
+    };
+    if !daemon.process_enabled {
+        return refuse(
+            "process-disabled",
+            "sandboxed process execution is not enabled on this daemon",
+        );
+    }
+    let (Some(auth), Some(uids)) = (daemon.approver_auth.as_ref(), daemon.approver_uids.as_ref())
+    else {
+        return refuse("process-disabled", "no approver credential is configured");
+    };
+    let Some(fields) = req.auth.as_ref() else {
+        return refuse(
+            codes::ISSUER_UNTRUSTED,
+            "missing approver authentication (auth { nonce, ts, tag })",
+        );
+    };
+    if let Err(code) = auth.verify(&req.cmd, &req.id, &req.params, fields, now_ms()) {
+        return refuse(
+            code,
+            if code == codes::REPLAY_REJECTED {
+                "approver nonce was already used; replay rejected"
+            } else {
+                "approver authentication failed (the issuer capability cannot approve processes)"
+            },
+        );
+    }
+    match peer {
+        Some((uid, _, _)) if uids.contains(&uid) => {}
+        _ => {
+            return refuse(
+                codes::PEER_UNAUTHORIZED,
+                "connecting process UID is not an authorized approver",
+            )
+        }
+    }
+    if let Err(r) = only_keys(
+        &req.params,
+        &[
+            "commandId",
+            "workspaceRootDigest",
+            "maxWallMs",
+            "approverId",
+        ],
+        &req.id,
+    ) {
+        return r;
+    }
+    let command_id = match get_string(&req.params, "commandId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let digest = match get_string(&req.params, "workspaceRootDigest") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let max = match get_u64(&req.params, "maxWallMs", &req.id) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let approver_id = req
+        .params
+        .get("approverId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("approver")
+        .to_owned();
+    let mut kernel = match lock_kernel(daemon, &req.id) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    match kernel.bind_process_scope(
+        &command_id,
+        &approver_id,
+        daemon.approver_independent,
+        &digest,
+        max,
+    ) {
+        Ok(b) => {
+            log_line("approver", &req.id, "ok", &req.cmd);
+            ok(
+                &req.id,
+                serde_json::json!({"processScope": {
+                    "commandId": b.command_id,
+                    "attemptId": b.attempt_id,
+                    "leaseEpoch": b.lease_epoch,
+                    "maxWallMs": b.max_wall_ms,
+                    "independent": b.independent,
+                }}),
+            )
+        }
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
 /// Daemon-side hooks for the write lifecycle: journal and fence take the
 /// Kernel lock only briefly per call; nothing is held across file I/O.
 struct DaemonWriteHooks<'a> {
@@ -866,6 +975,52 @@ impl nexus_tools::WriteHooks for DaemonWriteHooks<'_> {
         })?;
         let e = k
             .record_write_phase(self.verified, phase, payload)
+            .map_err(|e| {
+                nexus_tools::ToolError::new(
+                    nexus_tools::ToolErrorCode::AuthorizationRefused,
+                    format!("journal refused ({}): {}", e.code.as_str(), e.message),
+                )
+            })?;
+        self.last_seq = e.seq;
+        Ok(())
+    }
+    fn fence(&mut self) -> Result<(), nexus_tools::ToolError> {
+        let k = self.daemon.kernel.lock().map_err(|_| {
+            nexus_tools::ToolError::new(
+                nexus_tools::ToolErrorCode::Revoked,
+                "kernel unavailable; failing closed",
+            )
+        })?;
+        k.check_tool_fence_for(self.verified.grant()).map_err(|e| {
+            nexus_tools::ToolError::new(
+                nexus_tools::ToolErrorCode::Revoked,
+                format!("authority revoked ({})", e.code.as_str()),
+            )
+        })
+    }
+}
+
+/// Daemon hooks for the sandboxed-process lifecycle (brief Kernel locks).
+struct DaemonProcessHooks<'a> {
+    daemon: &'a Daemon,
+    verified: &'a nexus_kernel::VerifiedToolGrant,
+    last_seq: i64,
+}
+
+impl nexus_tools::process::ProcessHooks for DaemonProcessHooks<'_> {
+    fn journal(
+        &mut self,
+        phase: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), nexus_tools::ToolError> {
+        let mut k = self.daemon.kernel.lock().map_err(|_| {
+            nexus_tools::ToolError::new(
+                nexus_tools::ToolErrorCode::IoError,
+                "kernel mutex is poisoned; failing closed",
+            )
+        })?;
+        let e = k
+            .record_process_phase(self.verified, phase, payload)
             .map_err(|e| {
                 nexus_tools::ToolError::new(
                     nexus_tools::ToolErrorCode::AuthorizationRefused,
@@ -1156,6 +1311,18 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         let mutating = nexus_tools::ToolId::parse(&request.tool_id)
             .map(|t| t.is_mutating())
             .unwrap_or(false);
+        let is_process = nexus_tools::ToolId::parse(&request.tool_id)
+            .map(|t| t.is_process())
+            .unwrap_or(false);
+        if is_process && !daemon.process_enabled {
+            daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                "process-disabled",
+                "sandboxed process execution is not enabled on this daemon",
+            );
+        }
+        let mut proc_scope_wall: u64 = 0;
         if mutating && !daemon.writes_enabled {
             daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
             return fail(
@@ -1164,7 +1331,22 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                 "write tools are not enabled on this daemon",
             );
         }
-        let prepared = if mutating {
+        let prepared = if is_process {
+            let scope = match kernel.process_scope_binding(&command) {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                    return fail(
+                        &req.id,
+                        "scope-refused",
+                        "no independently approved process scope for this command; execution refused",
+                    );
+                }
+                Err(e) => return kernel_fail(daemon, &req.id, &e),
+            };
+            proc_scope_wall = scope.max_wall_ms;
+            nexus_tools::prepare_process(request, &binding, &scope, &daemon.command_policy)
+        } else if mutating {
             let scope = match kernel.write_scope_binding(&command) {
                 Ok(Some(s)) => s,
                 Ok(None) => {
@@ -1186,6 +1368,7 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             Err(e) => return tool_fail(daemon, &req.id, &e),
         };
         let is_write = mutating;
+        let is_proc = is_process;
         let call = match nexus_tools::authorize(&mut kernel, prepared) {
             Ok(c) => c,
             Err(e) => return tool_fail(daemon, &req.id, &e),
@@ -1194,10 +1377,48 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             Ok(s) => s,
             Err(e) => return tool_fail(daemon, &req.id, &e),
         };
-        (call, started, is_write)
+        (call, started, is_write, is_proc, proc_scope_wall)
     };
-    let (call, started, is_write) = (call.0, call.1, call.2);
+    let (call, started, is_write, is_proc, proc_wall) = (call.0, call.1, call.2, call.3, call.4);
 
+    if is_proc {
+        let mut hooks = DaemonProcessHooks {
+            daemon,
+            verified: started.verified(),
+            last_seq: 0,
+        };
+        return match nexus_tools::run_process_call(
+            &call,
+            &cancel,
+            &daemon.command_policy,
+            &daemon.run_root,
+            proc_wall,
+            &mut hooks,
+        ) {
+            Ok(result) => ok(
+                &req.id,
+                serde_json::json!({
+                    "result": result,
+                    "execution": {
+                        "requestId": request_id,
+                        "executionId": call.grant().execution_id,
+                        "journalSeq": hooks.last_seq,
+                        "aiInitiated": false,
+                        "scope": "process",
+                        "approverIndependent": daemon.approver_independent,
+                        "testOnlyApproval": !daemon.approver_independent,
+                    },
+                }),
+            ),
+            Err(e) => {
+                let mut r = tool_fail(daemon, &req.id, &e);
+                if let Some(o) = r.as_object_mut() {
+                    o.insert("outcome".to_owned(), serde_json::json!("uncertain"));
+                }
+                r
+            }
+        };
+    }
     if is_write {
         // Write lifecycle: journal + fence hooks lock the Kernel only
         // briefly; the filesystem work holds no lock.
@@ -1515,6 +1736,14 @@ fn do_status(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "allowedUids": daemon.allowed_uids.clone().unwrap_or_default(),
             "socketShared": daemon.socket_group.is_some(), "socketGroup": daemon.socket_group, "capHandoff": daemon.cap_handoff.is_some(), "shadowMode": "shadow-only",
             "dispatchEnabled": nexus_kernel::Kernel::dispatch_enabled(),
+            "writesEnabled": daemon.writes_enabled,
+            "processEnabled": daemon.process_enabled,
+            "sandbox": daemon.sandbox_caps.as_ref().map(|c| serde_json::json!({
+                "available": c.available, "backend": c.backend,
+                "cgroupMemoryController": c.cgroup_memory_controller,
+                "kernelEnforcedLimits": c.kernel_enforced_limits,
+                "resourceEnforcement": if c.kernel_enforced_limits { "kernel-cgroup" } else { "rlimit-polling" },
+            })),
             "acceptedCommands": accepted,
             "totalCommands": commands,
             "eventCount": events.len() as u64,
@@ -1553,6 +1782,9 @@ pub fn dispatch(
     daemon.counters.requests.fetch_add(1, Ordering::Relaxed);
     if req.cmd == "write-scope-approve" {
         return do_write_scope_approve(daemon, req, peer);
+    }
+    if req.cmd == "process-scope-approve" {
+        return do_process_scope_approve(daemon, req, peer);
     }
     if is_privileged(&req.cmd) {
         if let Some(refusal) = authorize(daemon, req, peer) {
@@ -2104,6 +2336,12 @@ mod isolation_tests {
             reconcile_latch: Mutex::new(None),
             workspace_bases: Vec::new(),
             writes_enabled: false,
+            process_enabled: false,
+            command_policy: nexus_tools::process::CommandPolicy::standard(
+                nexus_tools::process::Toolchain::discover(),
+            ),
+            run_root: std::path::PathBuf::from("exec"),
+            sandbox_caps: None,
             approver_auth: None,
             approver_uids: None,
             approver_independent: false,

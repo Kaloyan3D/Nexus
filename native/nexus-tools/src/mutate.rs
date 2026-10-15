@@ -98,6 +98,77 @@ pub fn unlink(dir: RawFd, name: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
+/// Create a private (0700) directory entry and open it. The directory is
+/// freshly created (`mkdirat` fails on an existing name), owned by us and
+/// verified before use: it is the protected staging area in which temp and
+/// displaced files live, so that no directory-writer without access to it
+/// can substitute a file under a name Nexus is about to unlink.
+pub fn mkdir_private(dir: RawFd, name: &str) -> Result<OwnedFd, ToolError> {
+    let c = cname(name)?;
+    if unsafe { libc::mkdirat(dir, c.as_ptr(), 0o700) } != 0 {
+        return Err(werr("mkdir stage", errno()));
+    }
+    let fd = unsafe {
+        libc::openat(
+            dir,
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let e = errno();
+        unsafe { libc::unlinkat(dir, c.as_ptr(), libc::AT_REMOVEDIR) };
+        return Err(werr("open stage", e));
+    }
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    // Enforce mode regardless of umask and verify ownership.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let ok = unsafe { libc::fchmod(fd, 0o700) } == 0
+        && unsafe { libc::fstat(fd, &mut st) } == 0
+        && st.st_uid == unsafe { libc::geteuid() }
+        && (st.st_mode & 0o777) == 0o700;
+    if !ok {
+        unsafe { libc::unlinkat(dir, c.as_ptr(), libc::AT_REMOVEDIR) };
+        return Err(werr("verify stage", libc::EPERM));
+    }
+    Ok(owned)
+}
+
+/// Remove an (empty) directory entry; `Ok(false)` when it is not empty.
+pub fn rmdir(dir: RawFd, name: &str) -> bool {
+    match cname(name) {
+        Ok(c) => unsafe { libc::unlinkat(dir, c.as_ptr(), libc::AT_REMOVEDIR) == 0 },
+        Err(_) => false,
+    }
+}
+
+/// `renameat2` between two directories (same filesystem).
+pub fn renameat2_dirs(
+    from_dir: RawFd,
+    from: &str,
+    to_dir: RawFd,
+    to: &str,
+    flags: u32,
+) -> Result<(), i32> {
+    let f = CString::new(from).map_err(|_| libc::EINVAL)?;
+    let t = CString::new(to).map_err(|_| libc::EINVAL)?;
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            from_dir,
+            f.as_ptr(),
+            to_dir,
+            t.as_ptr(),
+            flags as libc::c_uint,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(errno())
+    }
+}
+
 /// Raw `renameat2` within one directory. Returns the errno on failure so
 /// callers can classify `EEXIST` (conflict) vs `EINVAL/ENOSYS`
 /// (unsupported filesystem).
@@ -160,12 +231,42 @@ pub fn entry_identity(dir: RawFd, name: &str) -> Option<(u64, u64)> {
 /// documented in the evidence and only ever concerns files Nexus created.)
 pub fn unlink_if_identity(dir: RawFd, name: &str, id: (u64, u64)) -> Result<bool, ToolError> {
     if entry_identity(dir, name) == Some(id) {
+        between_check_and_unlink(name);
         unlink(dir, name)?;
         Ok(true)
     } else {
         Ok(false)
     }
 }
+
+// Test-only injection point inside the check-then-unlink window
+// (feature `crash-injection`; compiled out of production builds).
+#[cfg(feature = "crash-injection")]
+type UnlinkHook = Box<dyn FnMut(&str)>;
+
+#[cfg(feature = "crash-injection")]
+thread_local! {
+    static UNLINK_HOOK: std::cell::RefCell<Option<UnlinkHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(feature = "crash-injection")]
+pub fn set_between_check_and_unlink(f: Option<UnlinkHook>) {
+    UNLINK_HOOK.with(|h| *h.borrow_mut() = f);
+}
+
+#[cfg(feature = "crash-injection")]
+fn between_check_and_unlink(name: &str) {
+    UNLINK_HOOK.with(|h| {
+        if let Some(f) = h.borrow_mut().as_mut() {
+            f(name);
+        }
+    });
+}
+
+#[cfg(not(feature = "crash-injection"))]
+#[inline(always)]
+fn between_check_and_unlink(_name: &str) {}
 
 /// Atomically move `from` to `to` only if `to` does not exist.
 pub fn rename_aside(dir: RawFd, from: &str, to: &str) -> Result<(), i32> {

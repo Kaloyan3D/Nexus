@@ -948,14 +948,7 @@ fn temp_artifacts_are_private_and_names_cannot_be_targeted() {
 // ============ A3.3 final audit: reversal must never destroy newer data =====
 
 fn all_file_contents(dir: &std::path::Path) -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir(dir)
-        .unwrap()
-        .flatten()
-        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
-        .collect();
-    v.sort();
-    v
+    all_file_contents_recursive(dir)
 }
 
 #[test]
@@ -1303,4 +1296,106 @@ fn deterministic_publication_window_matrix_never_loses_data() {
             "{case}: rejected content must not survive unmodified: {all:?}"
         );
     }
+}
+
+// ============ A3.4 Phase 0: cleanup-unlink TOCTOU (directory writer) ======
+
+#[cfg(feature = "crash-injection")]
+#[test]
+fn cleanup_cannot_remove_a_foreign_file_renamed_onto_the_temp_name() {
+    // An adversary with write access to the *public* parent directory
+    // learns the temp name and renames their own file onto it inside the
+    // check-then-unlink window. Cleanup must never delete a file it did
+    // not create.
+    let mut fx = fixture("w-toctou");
+    fx.approve_write(64 * 1024);
+    fx.write("a.txt", b"orig\n");
+    let ws_dir = fx.ws.clone();
+    let victim = fx.ws.join("VICTIM.txt");
+    std::fs::write(&victim, "FOREIGN DATA\n").unwrap();
+    let public_tmp = ws_dir.join(nexus_tools::write::temp_name(&"e".repeat(32)));
+    let (v2, p2) = (victim.clone(), public_tmp.clone());
+    nexus_tools::mutate::set_between_check_and_unlink(Some(Box::new(move |_name| {
+        // Atomically put the foreign file at the (known) public temp name.
+        let _ = std::fs::rename(&v2, &p2);
+    })));
+    let cancel = CancellationToken::new("x");
+    let mut h = Script {
+        seen: vec![],
+        fence_after: None,
+        fences: 0,
+        fail_journal_at: None,
+        on_phase: Box::new(|_| {}),
+    };
+    let res = direct(
+        &mut fx,
+        json!({"path": "a.txt", "content": "NEW\n", "mode": "replace", "expectedSha256": sha("orig\n")}),
+        "fs.write",
+        &cancel,
+        &mut h,
+    );
+    nexus_tools::mutate::set_between_check_and_unlink(None);
+    assert!(res.error.is_none(), "{:?}", res.error);
+    let all = all_file_contents_recursive(&ws_dir);
+    assert!(
+        all.contains(&"FOREIGN DATA\n".to_owned()),
+        "a foreign file renamed onto the temp name was deleted: {all:?}"
+    );
+}
+
+#[allow(dead_code)]
+fn all_file_contents_recursive(dir: &std::path::Path) -> Vec<String> {
+    let mut v = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let t = e.file_type().unwrap();
+            if t.is_dir() {
+                stack.push(e.path());
+            } else if t.is_file() {
+                if let Ok(s) = std::fs::read_to_string(e.path()) {
+                    v.push(s);
+                }
+            }
+        }
+    }
+    v.sort();
+    v
+}
+
+#[test]
+fn staged_recovery_preserves_displaced_foreign_file_inside_the_stage() {
+    let fx = fixture("w-stage-recover");
+    let ws = nexus_tools::Workspace::open_root(
+        fx.ws.to_str().unwrap(),
+        nexus_tools::WorkspacePolicy::default(),
+    )
+    .unwrap();
+    std::fs::write(fx.ws.join("a.txt"), "OURS\n").unwrap();
+    let stage = fx.ws.join(".nexus-stage-q");
+    std::fs::create_dir(&stage).unwrap();
+    std::fs::write(stage.join(".nexus-tmp-q"), "FOREIGN\n").unwrap();
+    let planned = json!({"path": "a.txt", "preSha256": sha("orig\n"), "postSha256": sha("OURS\n"),
+        "tmpName": ".nexus-tmp-q", "stageName": ".nexus-stage-q"});
+    let prepared =
+        json!({"tmpName": ".nexus-tmp-q", "stageName": ".nexus-stage-q", "tmpDev": 1, "tmpIno": 2});
+    let o = nexus_tools::write::observe_for_recovery(&ws, &planned, &prepared);
+    assert_eq!(o["displacedPreserved"], true, "{o}");
+    assert_eq!(o["preservedAs"], ".nexus-stage-q/displaced");
+    assert_eq!(
+        std::fs::read_to_string(stage.join("displaced")).unwrap(),
+        "FOREIGN\n"
+    );
+    // A stage whose temp is verifiably ours is removed entirely.
+    let stage2 = fx.ws.join(".nexus-stage-r");
+    std::fs::create_dir(&stage2).unwrap();
+    std::fs::write(stage2.join(".nexus-tmp-r"), "half").unwrap();
+    use std::os::unix::fs::MetadataExt;
+    let md = std::fs::metadata(stage2.join(".nexus-tmp-r")).unwrap();
+    let planned = json!({"path": "a.txt", "preSha256": sha("orig\n"), "postSha256": sha("OURS\n"),
+        "tmpName": ".nexus-tmp-r", "stageName": ".nexus-stage-r"});
+    let prepared = json!({"tmpName": ".nexus-tmp-r", "tmpDev": md.dev(), "tmpIno": md.ino()});
+    let o = nexus_tools::write::observe_for_recovery(&ws, &planned, &prepared);
+    assert_eq!(o["tmpRemoved"], true, "{o}");
+    assert!(!stage2.exists());
 }

@@ -54,6 +54,9 @@ fn usage() -> i32 {
     println!("         [--enable-writes --approver-cap PATH --approver-uids UID[,UID...]");
     println!("          [--require-independent-approver] [--approver-cap-gid GID]");
     println!("          [--allow-nonindependent-approver-test-only]]");
+    println!(
+        "         [--enable-process]   (A3.4 sandboxed processes; needs the approver flags above)"
+    );
     println!("         [--cap-handoff PATH]");
     println!("Trust modes: readonly (default, privileged mutations disabled) |");
     println!("  shadow-test (explicit opt-in, per-request issuer authentication).");
@@ -408,6 +411,7 @@ fn run(args: &[String]) -> i32 {
     // `write-scope-approve`, and the approver capability can never satisfy
     // issuer commands. Writes stay disabled unless explicitly enabled.
     let writes_enabled = args.iter().any(|a| a == "--enable-writes");
+    let process_enabled = args.iter().any(|a| a == "--enable-process");
     let approver_cap_path = flag(args, "--approver-cap");
     let approver_uids: Option<Vec<u32>> = match flag_str(args, "--approver-uids") {
         Some(spec) => match parse_allowed_uids(&spec) {
@@ -422,30 +426,30 @@ fn run(args: &[String]) -> i32 {
     let require_independent = args.iter().any(|a| a == "--require-independent-approver");
     let mut approver_auth: Option<Arc<nexus_daemon::IssuerAuth>> = None;
     let mut approver_independent = false;
-    if writes_enabled {
+    if writes_enabled || process_enabled {
         if trust_mode != TrustMode::ShadowTest {
             return fatal(
                 "bad-config",
-                "--enable-writes requires --trust-mode shadow-test (failing closed)",
+                "--enable-writes/--enable-process requires --trust-mode shadow-test (failing closed)",
             );
         }
         if allowed_uids.is_none() {
             return fatal(
                 "bad-config",
-                "--enable-writes requires --allowed-uids so tool events and privileged commands are peer-gated (failing closed)",
+                "--enable-writes/--enable-process requires --allowed-uids so tool events and privileged commands are peer-gated (failing closed)",
             );
         }
         let (Some(cap_path), Some(ap_uids)) = (approver_cap_path.as_ref(), approver_uids.as_ref())
         else {
             return fatal(
                 "bad-config",
-                "--enable-writes requires --approver-cap and --approver-uids (failing closed)",
+                "--enable-writes/--enable-process requires --approver-cap and --approver-uids (failing closed)",
             );
         };
         if !workspace_bases_nonempty(args) {
             return fatal(
                 "bad-config",
-                "--enable-writes requires --workspace-bases (failing closed)",
+                "--enable-writes/--enable-process requires --workspace-bases (failing closed)",
             );
         }
         if Some(cap_path) == Some(&layout.cap) || cap_path == &layout.socket {
@@ -547,6 +551,46 @@ fn run(args: &[String]) -> i32 {
             );
         }
     }
+    // A3.4: sandbox preflight. Process execution stays disabled (and the
+    // daemon refuses to start) unless every mandatory isolation primitive
+    // actually works on this host; there is no unsandboxed fallback.
+    let sandbox_caps = if process_enabled {
+        let caps = nexus_tools::sandbox::preflight();
+        if args.iter().any(|a| a == "--require-kernel-resource-limits")
+            && !caps.kernel_enforced_limits
+        {
+            return fatal(
+                "sandbox-unavailable",
+                "--require-kernel-resource-limits: aggregate memory/process limits cannot be kernel-enforced on this host (polling is not equivalent); refusing to enable processes",
+            );
+        }
+        if !caps.available {
+            return fatal(
+                "sandbox-unavailable",
+                &format!(
+                    "--enable-process but the sandbox cannot be established: {}",
+                    caps.problems.join("; ")
+                ),
+            );
+        }
+        Some(caps)
+    } else {
+        None
+    };
+    // Close leftover process requests (kill orphaned cgroups, remove
+    // staging) BEFORE serving; never restarts anything.
+    match nexus_tools::reconcile_processes(&mut kernel) {
+        Ok(n) if n > 0 => log_line_startup(&format!(
+            "process journal reconciled: {n} open execution(s) closed as interrupted (never restarted)"
+        )),
+        Ok(_) => {}
+        Err(e) => {
+            return fatal(
+                "store-corrupt",
+                &format!("process journal reconciliation failed; failing closed: {e}"),
+            );
+        }
+    }
     let workspace_bases: Vec<std::path::PathBuf> = flag_str(args, "--workspace-bases")
         .map(|v| {
             v.split(',')
@@ -567,6 +611,12 @@ fn run(args: &[String]) -> i32 {
         reconcile_latch: Mutex::new(None),
         workspace_bases,
         writes_enabled,
+        process_enabled,
+        command_policy: nexus_tools::process::CommandPolicy::standard(
+            nexus_tools::process::Toolchain::discover(),
+        ),
+        run_root: layout.dir.join("exec"),
+        sandbox_caps,
         approver_auth,
         approver_uids,
         approver_independent,

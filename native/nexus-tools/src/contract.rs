@@ -20,6 +20,8 @@ pub enum ToolId {
     FsWrite,
     #[serde(rename = "fs.edit")]
     FsEdit,
+    #[serde(rename = "proc.run")]
+    ProcRun,
 }
 
 impl ToolId {
@@ -30,11 +32,16 @@ impl ToolId {
             Self::FsSearch => "fs.search",
             Self::FsWrite => "fs.write",
             Self::FsEdit => "fs.edit",
+            Self::ProcRun => "proc.run",
         }
     }
     /// True for tools that mutate the workspace (need a write scope).
     pub fn is_mutating(self) -> bool {
         matches!(self, Self::FsWrite | Self::FsEdit)
+    }
+    /// True for sandboxed subprocess execution (needs a process scope).
+    pub fn is_process(self) -> bool {
+        matches!(self, Self::ProcRun)
     }
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -43,6 +50,7 @@ impl ToolId {
             "fs.search" => Some(Self::FsSearch),
             "fs.write" => Some(Self::FsWrite),
             "fs.edit" => Some(Self::FsEdit),
+            "proc.run" => Some(Self::ProcRun),
             _ => None,
         }
     }
@@ -111,6 +119,20 @@ pub struct EditArgs {
     pub edits: Vec<EditOp>,
 }
 
+/// `proc.run`: run one policy-approved command in the sandbox. There is no
+/// shell string: `program` is a *logical name* resolved by the command
+/// policy and `args` is the exact argument vector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ProcessArgs {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Workspace-relative working directory inside the snapshot.
+    #[serde(default = "dot")]
+    pub cwd: String,
+}
+
 pub const MAX_EDITS: usize = 16;
 pub const MAX_EDIT_TEXT: usize = 64 * 1024;
 
@@ -131,6 +153,7 @@ pub enum ToolArgs {
     Search(SearchArgs),
     Write(WriteArgs),
     Edit(EditArgs),
+    Proc(ProcessArgs),
 }
 
 impl ToolArgs {
@@ -141,6 +164,7 @@ impl ToolArgs {
             Self::Search(_) => ToolId::FsSearch,
             Self::Write(_) => ToolId::FsWrite,
             Self::Edit(_) => ToolId::FsEdit,
+            Self::Proc(_) => ToolId::ProcRun,
         }
     }
 
@@ -158,6 +182,7 @@ impl ToolArgs {
             ToolId::FsSearch => Self::Search(serde_json::from_value(raw.clone()).map_err(bad)?),
             ToolId::FsWrite => Self::Write(serde_json::from_value(raw.clone()).map_err(bad)?),
             ToolId::FsEdit => Self::Edit(serde_json::from_value(raw.clone()).map_err(bad)?),
+            ToolId::ProcRun => Self::Proc(serde_json::from_value(raw.clone()).map_err(bad)?),
         };
         parsed.validate()?;
         Ok(parsed)
@@ -199,6 +224,23 @@ impl ToolArgs {
                     }
                     if a.mode != "create" {
                         return inv("fileMode applies only to create (replace preserves mode)");
+                    }
+                }
+                Ok(())
+            }
+            Self::Proc(a) => {
+                if a.program.is_empty() || a.program.len() > 64 {
+                    return inv("program must be a known command name (1..=64 bytes)");
+                }
+                if a.args.len() > 64 {
+                    return inv("at most 64 arguments");
+                }
+                for x in &a.args {
+                    if x.len() > 4096
+                        || x.contains('\0')
+                        || x.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
+                    {
+                        return inv("arguments must be plain text (no NUL/control characters, <= 4096 bytes)");
                     }
                 }
                 Ok(())
@@ -249,6 +291,7 @@ impl ToolArgs {
             Self::Search(a) => serde_json::to_value(a),
             Self::Write(a) => serde_json::to_value(a),
             Self::Edit(a) => serde_json::to_value(a),
+            Self::Proc(a) => serde_json::to_value(a),
         }
         .unwrap_or(serde_json::Value::Null);
         sha256_hex(&canonical_json(&serde_json::json!({
@@ -272,6 +315,11 @@ impl ToolArgs {
             }),
             Self::Edit(a) => serde_json::json!({
                 "path": a.path, "expectedSha256": a.expected_sha256, "edits": a.edits.len(),
+            }),
+            // The argv itself is journaled after redaction by the process
+            // layer; here only structure + digest of the argument vector.
+            Self::Proc(a) => serde_json::json!({
+                "program": a.program, "argc": a.args.len(), "cwd": a.cwd,
             }),
             Self::Search(a) => serde_json::json!({
                 "path": a.path,
@@ -301,6 +349,16 @@ pub struct ToolBudgets {
     pub deadline_ms: u64,
     /// Maximum bytes of content a write/edit may publish.
     pub max_write_bytes: u64,
+    // ---- A3.4 sandboxed process budgets --------------------------------
+    pub proc_wall_ms: u64,
+    pub proc_cpu_secs: u64,
+    pub proc_memory_bytes: u64,
+    pub proc_max_procs: u64,
+    /// Per-stream captured output cap (stdout and stderr each).
+    pub proc_output_bytes: u64,
+    pub proc_scratch_bytes: u64,
+    pub stage_max_files: u64,
+    pub stage_max_bytes: u64,
 }
 
 impl Default for ToolBudgets {
@@ -318,6 +376,14 @@ impl Default for ToolBudgets {
             max_line_bytes: 4096,
             deadline_ms: 10_000,
             max_write_bytes: 256 * 1024,
+            proc_wall_ms: 120_000,
+            proc_cpu_secs: 120,
+            proc_memory_bytes: 2 * 1024 * 1024 * 1024,
+            proc_max_procs: 256,
+            proc_output_bytes: 256 * 1024,
+            proc_scratch_bytes: 512 * 1024 * 1024,
+            stage_max_files: 20_000,
+            stage_max_bytes: 256 * 1024 * 1024,
         }
     }
 }
@@ -338,6 +404,14 @@ impl ToolBudgets {
             max_line_bytes: 16 * 1024,
             deadline_ms: 60_000,
             max_write_bytes: 4 * 1024 * 1024,
+            proc_wall_ms: 900_000,
+            proc_cpu_secs: 900,
+            proc_memory_bytes: 8 * 1024 * 1024 * 1024,
+            proc_max_procs: 1024,
+            proc_output_bytes: 2 * 1024 * 1024,
+            proc_scratch_bytes: 2 * 1024 * 1024 * 1024,
+            stage_max_files: 100_000,
+            stage_max_bytes: 1024 * 1024 * 1024,
         }
     }
 
@@ -359,6 +433,14 @@ impl ToolBudgets {
                 as u32,
             deadline_ms: at_least_one(self.deadline_ms).min(c.deadline_ms),
             max_write_bytes: at_least_one(self.max_write_bytes).min(c.max_write_bytes),
+            proc_wall_ms: at_least_one(self.proc_wall_ms).min(c.proc_wall_ms),
+            proc_cpu_secs: at_least_one(self.proc_cpu_secs).min(c.proc_cpu_secs),
+            proc_memory_bytes: at_least_one(self.proc_memory_bytes).min(c.proc_memory_bytes),
+            proc_max_procs: at_least_one(self.proc_max_procs).min(c.proc_max_procs),
+            proc_output_bytes: at_least_one(self.proc_output_bytes).min(c.proc_output_bytes),
+            proc_scratch_bytes: at_least_one(self.proc_scratch_bytes).min(c.proc_scratch_bytes),
+            stage_max_files: at_least_one(self.stage_max_files).min(c.stage_max_files),
+            stage_max_bytes: at_least_one(self.stage_max_bytes).min(c.stage_max_bytes),
         }
     }
 
@@ -503,13 +585,21 @@ pub fn descriptor_for(id: ToolId) -> ToolDescriptor {
                 ),
             ],
         ),
+        ToolId::ProcRun => (
+            "Run a policy-approved command (cargo check/test/build/fmt, npm test, npm run build, tsc --noEmit) in an isolated sandbox over a read-only snapshot. No shell, no network.",
+            vec![
+                arg("program", "string", true, "logical command name: cargo | npm | tsc"),
+                arg("args", "array", false, "exact argv (validated by the command policy)"),
+                arg("cwd", "string", false, "snapshot-relative working directory, default '.'"),
+            ],
+        ),
     };
     ToolDescriptor {
         id: id.as_str(),
         version: TOOL_VERSION,
         summary,
-        read_only: !id.is_mutating(),
-        requires_write_scope: id.is_mutating(),
+        read_only: !id.is_mutating() && !id.is_process(),
+        requires_write_scope: id.is_mutating() || id.is_process(),
         arguments,
         defaults: ToolBudgets::default(),
         ceilings: ToolBudgets::ceiling(),
@@ -524,6 +614,7 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
         ToolId::FsSearch,
         ToolId::FsWrite,
         ToolId::FsEdit,
+        ToolId::ProcRun,
     ]
     .into_iter()
     .map(descriptor_for)

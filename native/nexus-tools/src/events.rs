@@ -32,6 +32,10 @@ pub enum ToolEventStatus {
     Interrupted,
     Expired,
     Cancelled,
+    /// Sandboxed process is executing (`running` journaled).
+    Running,
+    /// Sandboxed process terminated; see `process.reason`/`exitCode`.
+    Exited,
 }
 
 /// Allow-listed projection of one journal phase record.
@@ -73,6 +77,10 @@ pub struct ToolRecordV1 {
     /// Write phases: operation/path/pre+post digests/mutation/observed.
     #[serde(default)]
     pub change: serde_json::Value,
+    /// Process phases: command, snapshot/sandbox digests, exit, usage,
+    /// bounded redacted output tails, sandbox policy summary.
+    #[serde(default)]
+    pub process: serde_json::Value,
     #[serde(default)]
     pub ai_initiated: bool,
     #[serde(default)]
@@ -132,6 +140,54 @@ pub fn record_from_entry(e: &ToolJournalEntry) -> ToolRecordV1 {
         output_digest: s("outputDigest"),
         output_bytes: p.get("outputBytes").and_then(|v| v.as_u64()),
         reason: s("reason"),
+        process: {
+            let mut m = serde_json::Map::new();
+            for k in [
+                "command",
+                "program",
+                "argvDigest",
+                "cwd",
+                "snapshotDigest",
+                "snapshotFiles",
+                "snapshotBytes",
+                "snapshotSkipped",
+                "sandboxDigest",
+                "sandbox",
+                "limits",
+                "exitCode",
+                "signal",
+                "verification",
+                "wallMs",
+                "userMs",
+                "sysMs",
+                "maxRssKb",
+                "peakRssBytes",
+                "peakProcs",
+                "stdoutBytes",
+                "stderrBytes",
+                "stdoutTruncated",
+                "stderrTruncated",
+                "stdoutTail",
+                "stderrTail",
+                "outputDigest",
+                "processStarted",
+                "outcome",
+                "leftoverProcessesKilled",
+                "runDirRemoved",
+            ] {
+                if let Some(v) = p.get(k) {
+                    m.insert(k.to_owned(), v.clone());
+                }
+            }
+            if (e.phase == "exited" || e.phase == "cancelled") && p.get("reason").is_some() {
+                m.insert("terminationReason".to_owned(), p["reason"].clone());
+            }
+            if m.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::Object(m)
+            }
+        },
         change: if change.is_empty() {
             serde_json::Value::Null
         } else {
@@ -173,6 +229,8 @@ pub struct ToolEventV1 {
     /// Write tools: operation, path, pre/post digests, `mutation`
     /// (`none` | `applied` | `applied-unverified` | `uncertain` | ...).
     pub change: Option<serde_json::Value>,
+    /// Process tools only (see `ToolRecordV1::process`).
+    pub process: Option<serde_json::Value>,
     /// Always false: live AI-initiated execution is disabled.
     pub ai_initiated: bool,
     /// Lease generation the request was authorized under.
@@ -219,6 +277,7 @@ pub fn fold_tool_records(records: &[ToolRecordV1]) -> Vec<ToolEventV1> {
                 output_bytes: None,
                 stats: None,
                 change: None,
+                process: None,
                 ai_initiated: false,
                 lease_epoch: r.lease_epoch,
                 first_seq: r.seq,
@@ -245,7 +304,26 @@ pub fn fold_tool_records(records: &[ToolRecordV1]) -> Vec<ToolEventV1> {
             }
             ev.change = Some(serde_json::Value::Object(cur));
         }
+        if let serde_json::Value::Object(m) = &r.process {
+            let mut cur = match ev.process.take() {
+                Some(serde_json::Value::Object(c)) => c,
+                _ => serde_json::Map::new(),
+            };
+            for (k, v) in m {
+                cur.insert(k.clone(), v.clone());
+            }
+            ev.process = Some(serde_json::Value::Object(cur));
+        }
         match r.phase.as_str() {
+            "running" => ev.status = ToolEventStatus::Running,
+            "exited" => {
+                ev.status = ToolEventStatus::Exited;
+                ev.result_status = Some("ok".to_owned());
+            }
+            "cancelled" => {
+                ev.status = ToolEventStatus::Cancelled;
+                ev.result_status = Some("error".to_owned());
+            }
             "started" => ev.status = ToolEventStatus::Started,
             "planned" => ev.status = ToolEventStatus::Planned,
             "prepared" => ev.status = ToolEventStatus::Prepared,
@@ -343,7 +421,10 @@ impl ToolEventV1 {
     pub fn mark_interrupted_if_open(mut self) -> Self {
         if matches!(
             self.status,
-            ToolEventStatus::Started | ToolEventStatus::Planned | ToolEventStatus::Prepared
+            ToolEventStatus::Started
+                | ToolEventStatus::Planned
+                | ToolEventStatus::Prepared
+                | ToolEventStatus::Running
         ) {
             self.status = ToolEventStatus::Interrupted;
         }

@@ -101,6 +101,14 @@ fn setup(tag: &str) -> W {
     setup_with(tag, &[], &[], true)
 }
 
+/// A panicking test must never leak a daemon (and its sandboxes).
+impl Drop for W {
+    fn drop(&mut self) {
+        let _ = self.d.child.kill();
+        let _ = self.d.child.wait();
+    }
+}
+
 impl W {
     fn issuer(&self, cmd: &str, params: Value) -> Value {
         raw_request(&self.d.socket, &authed_frame(&self.cap, cmd, params)).unwrap()
@@ -159,7 +167,10 @@ impl W {
         std::fs::read_dir(&self.ws)
             .unwrap()
             .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with(".nexus-tmp-"))
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n.starts_with(".nexus-tmp-") || n.starts_with(".nexus-stage-")
+            })
             .count()
     }
 }
@@ -193,6 +204,7 @@ fn respawn(w: &W, envs: &[(&str, &str)]) -> std::process::Child {
     for (k, v) in envs {
         cmd.env(k, v);
     }
+    common::die_with_test(&mut cmd);
     let mut child = cmd.spawn().unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {

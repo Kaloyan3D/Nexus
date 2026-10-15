@@ -61,10 +61,30 @@ pub fn tool_scope(tool_id: &str) -> Option<&'static str> {
     match tool_id {
         "fs.list" | "fs.read" | "fs.search" => Some("read"),
         "fs.write" | "fs.edit" => Some("write"),
+        "proc.run" => Some("process"),
         _ => None,
     }
 }
 
+/// Process lifecycle (A3.4): authorized -> started (grant consumed,
+/// exactly once) -> prepared (snapshot + sandbox digests durable, BEFORE
+/// spawn) -> running (process spawned) -> exited | failed | cancelled |
+/// interrupted.
+pub const PHASE_RUNNING: &str = "running";
+pub const PHASE_EXITED: &str = "exited";
+pub const PHASE_CANCELLED: &str = "cancelled";
+
+const PROCESS_TERMINALS: [&str; 7] = [
+    PHASE_EXITED,
+    PHASE_FAILED,
+    PHASE_CANCELLED,
+    PHASE_INTERRUPTED,
+    PHASE_EXPIRED,
+    PHASE_COMPLETED,
+    PHASE_VERIFIED,
+];
+
+pub const PROCESS_SCOPE_DOMAIN: &str = "nexus-process-scope/v1";
 pub const WRITE_SCOPE_DOMAIN: &str = "nexus-write-scope/v1";
 pub const WORKSPACE_BINDING_DOMAIN: &str = "nexus-workspace-binding/v1";
 
@@ -154,6 +174,50 @@ fn write_scope_canonical(b: &WriteScopeBinding) -> String {
         "storeIncarnation": b.store_incarnation,
         "rootDigest": b.root_digest,
         "maxWriteBytes": b.max_write_bytes,
+        "approverId": b.approver_id,
+        "independent": b.independent,
+    }))
+}
+
+/// One open (non-terminal) process request, as seen by reconciliation.
+#[derive(Debug, Clone)]
+pub struct OpenProcess {
+    pub request_id: String,
+    pub execution_id: String,
+    pub task_instance_id: String,
+    pub attempt_id: String,
+    pub command_id: String,
+    pub prepared: serde_json::Value,
+    pub running: Option<serde_json::Value>,
+}
+
+/// Independent approval to run sandboxed processes for one accepted
+/// command (A3.4). Separate from read bindings and from write scopes: a
+/// read or write grant can never authorize a subprocess.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProcessScopeBinding {
+    pub command_id: String,
+    pub task_instance_id: String,
+    pub attempt_id: String,
+    pub lease_epoch: u64,
+    pub store_incarnation: String,
+    pub root_digest: String,
+    /// Upper bound on wall-clock runtime the approver allows.
+    pub max_wall_ms: u64,
+    pub approver_id: String,
+    pub independent: bool,
+}
+
+fn process_scope_canonical(b: &ProcessScopeBinding) -> String {
+    canonical_json(&serde_json::json!({
+        "domain": PROCESS_SCOPE_DOMAIN,
+        "commandId": b.command_id,
+        "taskInstanceId": b.task_instance_id,
+        "attemptId": b.attempt_id,
+        "leaseEpoch": b.lease_epoch,
+        "storeIncarnation": b.store_incarnation,
+        "rootDigest": b.root_digest,
+        "maxWallMs": b.max_wall_ms,
         "approverId": b.approver_id,
         "independent": b.independent,
     }))
@@ -386,6 +450,15 @@ impl Kernel {
             } else {
                 None
             };
+            let process_scope = if scope == "process" {
+                Some(Self::check_process_scope(
+                    &self.store,
+                    &key_for_binding,
+                    req,
+                )?)
+            } else {
+                None
+            };
             Self::ensure_journal_consistent(&mut self.store, self.witness.as_ref())?;
             if self
                 .store
@@ -431,7 +504,10 @@ impl Kernel {
                 payload: serde_json::json!({
                     "toolId": g.tool_id,
                     "scope": g.scope,
-                    "approverIndependent": write_scope.as_ref().map(|b| b.independent),
+                    "approverIndependent": write_scope
+                        .as_ref()
+                        .map(|b| b.independent)
+                        .or(process_scope.as_ref().map(|b| b.independent)),
                     "toolVersion": g.tool_version,
                     "workspaceRootDigest": g.workspace_root_digest,
                     "budgetDigest": g.budget_digest,
@@ -493,6 +569,25 @@ impl Kernel {
                     return Err(refuse(
                         KernelErrorCode::BindingMismatch,
                         "write scope does not match this grant",
+                    ));
+                }
+            }
+            if grant.scope == "process" {
+                let key = self.store.issuance_key_hex()?;
+                let b = Self::verified_process_scope(&self.store, &key, &grant.command_id)?
+                    .ok_or_else(|| {
+                        refuse(
+                            KernelErrorCode::ScopeRefused,
+                            "no independent process scope for this command; execution refused",
+                        )
+                    })?;
+                if b.lease_epoch != grant.lease_epoch
+                    || b.store_incarnation != grant.store_incarnation
+                    || b.root_digest != grant.workspace_root_digest
+                {
+                    return Err(refuse(
+                        KernelErrorCode::BindingMismatch,
+                        "process scope does not match this grant",
                     ));
                 }
             }
@@ -947,6 +1042,12 @@ impl Kernel {
                         PHASE_VERIFIED,
                         PHASE_FAILED,
                         PHASE_CONFLICT,
+                        // Process lifecycle phases are reconciled by the
+                        // process layer (it must kill leftovers first).
+                        PHASE_PREPARED,
+                        PHASE_RUNNING,
+                        PHASE_EXITED,
+                        PHASE_CANCELLED,
                     ],
                 )?;
                 for (rid, eid, task, attempt, cmd, _) in open {
@@ -987,6 +1088,250 @@ impl Kernel {
         }
         self.store
             .list_tool_entries_page(task, attempt, after_seq.max(0), limit.clamp(1, 500))
+    }
+
+    fn verified_process_scope(
+        store: &nexus_store::Store,
+        key_hex: &str,
+        command_id: &str,
+    ) -> KernelResult<Option<ProcessScopeBinding>> {
+        match store.fetch_process_scope(command_id)? {
+            None => Ok(None),
+            Some((json, seal)) => {
+                let b: ProcessScopeBinding = serde_json::from_str(&json).map_err(|_| {
+                    KernelError::new(KernelErrorCode::StoreCorrupt, "process scope unreadable")
+                })?;
+                if hmac_seal_hex(key_hex, &process_scope_canonical(&b))? != seal
+                    || canonical_json(&serde_json::to_value(&b).unwrap_or_default()) != json
+                {
+                    return Err(KernelError::new(
+                        KernelErrorCode::ForgedIssuer,
+                        "process scope seal mismatch; store tampered",
+                    ));
+                }
+                Ok(Some(b))
+            }
+        }
+    }
+
+    fn check_process_scope(
+        store: &nexus_store::Store,
+        key_hex: &str,
+        req: &ToolAuthorizationRequest,
+    ) -> KernelResult<ProcessScopeBinding> {
+        let b =
+            Self::verified_process_scope(store, key_hex, &req.command_id)?.ok_or_else(|| {
+                refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "no independent process scope for this command; execution refused",
+                )
+            })?;
+        if b.task_instance_id != req.task_instance_id
+            || b.attempt_id != req.attempt_id
+            || b.lease_epoch != req.lease_epoch
+            || b.store_incarnation != req.store_incarnation
+            || b.root_digest != req.workspace_root_digest
+        {
+            return Err(refuse(
+                KernelErrorCode::BindingMismatch,
+                "process scope does not belong to this task/attempt/generation/workspace",
+            ));
+        }
+        Ok(b)
+    }
+
+    /// Verified read of a command's process scope (seal checked).
+    pub fn process_scope_binding(
+        &mut self,
+        command_id: &str,
+    ) -> KernelResult<Option<ProcessScopeBinding>> {
+        let key = self.store.issuance_key_hex()?;
+        Self::verified_process_scope(&self.store, &key, command_id)
+    }
+
+    /// Publish the independent process scope (approver channel only; the
+    /// daemon verified the approver credential beforehand).
+    pub fn bind_process_scope(
+        &mut self,
+        command_id: &str,
+        approver_id: &str,
+        independent: bool,
+        approved_root_digest: &str,
+        max_wall_ms: u64,
+    ) -> KernelResult<ProcessScopeBinding> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            let receipt = self.store.read_receipt(command_id)?.ok_or_else(|| {
+                refuse(
+                    KernelErrorCode::DeliveryInvalid,
+                    "no accepted receipt for this command; process scope refused",
+                )
+            })?;
+            Self::require_tool_authority(
+                &self.store,
+                self.witness.as_ref(),
+                command_id,
+                &receipt.task_instance_id,
+                &receipt.attempt_id,
+                receipt.lease_epoch,
+                &receipt.store_incarnation,
+            )?;
+            let key_hex = self.store.issuance_key_hex()?;
+            let read_binding = Self::verified_binding(&self.store, &key_hex, command_id)?
+                .ok_or_else(|| {
+                    refuse(
+                        KernelErrorCode::DeliveryInvalid,
+                        "no workspace binding; bind the read workspace first",
+                    )
+                })?;
+            if read_binding.root_digest != approved_root_digest {
+                return Err(refuse(
+                    KernelErrorCode::BindingMismatch,
+                    "the approver authorized a different workspace than the bound one",
+                ));
+            }
+            if max_wall_ms == 0 {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "maxWallMs must be positive",
+                ));
+            }
+            let b = ProcessScopeBinding {
+                command_id: command_id.to_owned(),
+                task_instance_id: receipt.task_instance_id.clone(),
+                attempt_id: receipt.attempt_id.clone(),
+                lease_epoch: receipt.lease_epoch,
+                store_incarnation: receipt.store_incarnation.clone(),
+                root_digest: read_binding.root_digest.clone(),
+                max_wall_ms,
+                approver_id: approver_id.chars().take(64).collect(),
+                independent,
+            };
+            let seal = hmac_seal_hex(&key_hex, &process_scope_canonical(&b))?;
+            let json = canonical_json(&serde_json::to_value(&b).map_err(|_| {
+                KernelError::new(KernelErrorCode::StoreError, "scope not serializable")
+            })?);
+            self.store.insert_process_scope(command_id, &json, &seal)?;
+            Ok(b)
+        })
+    }
+
+    /// Append one process-lifecycle phase for a verified process grant,
+    /// enforcing the state machine, then checkpoint.
+    pub fn record_process_phase(
+        &mut self,
+        verified: &VerifiedToolGrant,
+        phase: &str,
+        payload: serde_json::Value,
+    ) -> KernelResult<ToolJournalEntry> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            let g = &verified.grant;
+            if g.scope != "process" {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "only process grants can record process phases",
+                ));
+            }
+            let has = |st: &nexus_store::Store, p: &str| st.tool_phase_recorded(&g.request_id, p);
+            for t in PROCESS_TERMINALS {
+                if has(&self.store, t)? {
+                    return Err(refuse(
+                        KernelErrorCode::CommandConflict,
+                        "process request is already terminal",
+                    ));
+                }
+            }
+            let ok = match phase {
+                PHASE_PREPARED => has(&self.store, PHASE_STARTED)?,
+                PHASE_RUNNING => has(&self.store, PHASE_PREPARED)?,
+                PHASE_EXITED => has(&self.store, PHASE_RUNNING)?,
+                PHASE_FAILED | PHASE_CANCELLED => has(&self.store, PHASE_STARTED)?,
+                _ => false,
+            };
+            if !ok {
+                return Err(refuse(
+                    KernelErrorCode::CommandConflict,
+                    "process phase is not valid in the request's current state",
+                ));
+            }
+            Self::ensure_journal_consistent(&mut self.store, self.witness.as_ref())?;
+            let entry = self.store.append_tool_entry(&ToolEntryInput {
+                request_id: g.request_id.clone(),
+                execution_id: g.execution_id.clone(),
+                task_instance_id: g.task_instance_id.clone(),
+                attempt_id: g.attempt_id.clone(),
+                command_id: g.command_id.clone(),
+                phase: phase.to_owned(),
+                payload,
+            })?;
+            Self::checkpoint_tool_journal(&mut self.store, self.witness.as_mut())?;
+            Ok(entry)
+        })
+    }
+
+    fn collect_open_processes(store: &nexus_store::Store) -> KernelResult<Vec<OpenProcess>> {
+        let open = store.tool_requests_in_state(
+            PHASE_PREPARED,
+            &[
+                PHASE_EXITED,
+                PHASE_FAILED,
+                PHASE_CANCELLED,
+                PHASE_INTERRUPTED,
+                PHASE_PLANNED,
+                PHASE_VERIFIED,
+                PHASE_CONFLICT,
+                PHASE_COMPLETED,
+            ],
+        )?;
+        let mut out = Vec::new();
+        for (rid, eid, task, attempt, cmd, _) in open {
+            let entries = store.tool_entries_for_request(&rid)?;
+            let find = |p: &str| entries.iter().find(|e| e.phase == p);
+            out.push(OpenProcess {
+                request_id: rid.clone(),
+                execution_id: eid,
+                task_instance_id: task,
+                attempt_id: attempt,
+                command_id: cmd,
+                prepared: find(PHASE_PREPARED)
+                    .map(|e| e.payload.clone())
+                    .unwrap_or_default(),
+                running: find(PHASE_RUNNING).map(|e| e.payload.clone()),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Read-only view of process requests awaiting reconciliation.
+    pub fn open_processes(&self) -> KernelResult<Vec<OpenProcess>> {
+        Self::collect_open_processes(&self.store)
+    }
+
+    /// Close every open process request as `interrupted`. `inspect` (the
+    /// process layer) kills leftover cgroups and cleans staging, and
+    /// returns the payload describing what it found. Never restarts.
+    pub fn reconcile_open_processes(
+        &mut self,
+        inspect: &mut dyn FnMut(&OpenProcess) -> serde_json::Value,
+    ) -> KernelResult<u64> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            Self::ensure_journal_consistent(&mut self.store, self.witness.as_ref())?;
+            let mut n = 0;
+            for op in Self::collect_open_processes(&self.store)? {
+                let payload = inspect(&op);
+                self.store.append_tool_entry(&ToolEntryInput {
+                    request_id: op.request_id,
+                    execution_id: op.execution_id,
+                    task_instance_id: op.task_instance_id,
+                    attempt_id: op.attempt_id,
+                    command_id: op.command_id,
+                    phase: PHASE_INTERRUPTED.to_owned(),
+                    payload,
+                })?;
+                Self::checkpoint_tool_journal(&mut self.store, self.witness.as_mut())?;
+                n += 1;
+            }
+            Ok(n)
+        })
     }
 
     fn verified_write_scope(

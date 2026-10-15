@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 import { Activity, FileBox, ListChecks, SquareStack, Wrench, X } from "lucide-react";
 import type { TaskRecord, TaskToolEvents } from "../../lib/contracts";
-import { approvalNote, describeMutation, toolEventPresentation } from "../../lib/toolEvents";
+import {
+  approvalNote,
+  describeMutation,
+  describeProcess,
+  sandboxSummary,
+  toolEventPresentation,
+} from "../../lib/toolEvents";
 import { absoluteTime, durationBetween, relativeTime, shortId } from "../../lib/format";
 import { taskStatusView } from "../../lib/status";
 import { useNexus } from "../../state/NexusContext";
@@ -133,6 +139,27 @@ function ToolActivity({ task }: { task: TaskRecord }) {
                         </span>
                       )}
                       {p.change && <span className="nv-note nv-mono"> · {p.change}</span>}
+                      {e.scope === "process" && (
+                        <span className="nv-note">
+                          {" "}
+                          · sandboxed process
+                          {describeProcess(e.process) && ` · ${describeProcess(e.process)}`}
+                          {e.process?.verification && ` · verification ${e.process.verification}`}
+                        </span>
+                      )}
+                      {e.scope === "process" && sandboxSummary(e.process) && (
+                        <div className="nv-note">sandbox: {sandboxSummary(e.process)}</div>
+                      )}
+                      {e.scope === "process" && (e.process?.stdoutTail || e.process?.stderrTail) && (
+                        <details className="nv-toolevents__output">
+                          <summary>
+                            Output (bounded, redacted
+                            {e.process?.stdoutTruncated || e.process?.stderrTruncated ? ", truncated" : ""})
+                          </summary>
+                          {e.process?.stderrTail && <pre className="nv-mono">{e.process.stderrTail}</pre>}
+                          {e.process?.stdoutTail && <pre className="nv-mono">{e.process.stdoutTail}</pre>}
+                        </details>
+                      )}
                       {describeMutation(e.change) && (
                         <span className="nv-note"> · {describeMutation(e.change)}</span>
                       )}

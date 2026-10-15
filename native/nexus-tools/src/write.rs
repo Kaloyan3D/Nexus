@@ -49,6 +49,14 @@ pub fn sha256_bytes_hex(b: &[u8]) -> String {
     hex::encode(Sha256::digest(b))
 }
 
+/// Name of the protected (0700) staging directory for one execution. All
+/// temp and displaced files live inside it; it is created by us, verified,
+/// and removed when empty.
+pub fn stage_name(execution_id: &str) -> String {
+    let id: String = execution_id.chars().take(24).collect();
+    format!(".nexus-stage-{id}")
+}
+
 pub fn temp_name(execution_id: &str) -> String {
     let id: String = execution_id.chars().take(24).collect();
     format!(".nexus-tmp-{id}")
@@ -294,6 +302,7 @@ pub fn run_write(
         );
     }
     let tmp = temp_name(execution_id);
+    let stage = stage_name(execution_id);
 
     // 3. Fence, then make the INTENT durable before touching the disk.
     if cancel.is_cancelled() {
@@ -308,18 +317,29 @@ pub fn run_write(
             "toolId": tool, "operation": op_name, "path": path_s,
             "preSha256": pre_sha, "preBytes": pre_bytes.as_ref().map(|b| b.len()),
             "postSha256": post_sha, "postBytes": post.len(), "fileMode": file_mode,
-            "tmpName": tmp,
+            "tmpName": tmp, "stageName": stage,
         }),
     )?;
     crash_point("after-planned");
 
-    // 4. Prepare: private temp file in the same directory, fsynced.
-    let tmp_fd = match mutate::create_temp(dir.fd.as_raw_fd(), &tmp) {
+    // 4. Prepare: a protected staging directory (0700, created by us), and
+    //    inside it a private temp file, fsynced. Nothing Nexus will later
+    //    unlink lives in the shared directory.
+    let dfd = dir.fd.as_raw_fd();
+    let stage_fd = match mutate::mkdir_private(dfd, &stage) {
         Ok(f) => f,
         Err(e) => refuse_none!(e.code, e.message),
     };
-    // Our temp inode's identity: later used to prove which inode we may
-    // unlink, and recorded in `prepared` for crash recovery.
+    let sfd = stage_fd.as_raw_fd();
+    let tmp_fd = match mutate::create_temp(sfd, &tmp) {
+        Ok(f) => f,
+        Err(e) => {
+            mutate::rmdir(dfd, &stage);
+            refuse_none!(e.code, e.message)
+        }
+    };
+    // Our temp inode's identity: proves which inode we may unlink, and is
+    // recorded in `prepared` for crash recovery.
     let tmp_id = mutate::fd_identity(tmp_fd.as_raw_fd());
     let prep = (|| -> Result<(), ToolError> {
         mutate::write_all(tmp_fd.as_raw_fd(), &post)?;
@@ -328,13 +348,13 @@ pub fn run_write(
     })();
     drop(tmp_fd);
     if let Err(e) = prep {
-        remove_own_temp(dir.fd.as_raw_fd(), &tmp, tmp_id);
+        cleanup_stage(dfd, sfd, &stage, &tmp, tmp_id);
         refuse_none!(e.code, e.message);
     }
     hooks.journal(
         PH_PREPARED,
         serde_json::json!({
-            "tmpName": tmp, "postSha256": post_sha,
+            "tmpName": tmp, "stageName": stage, "postSha256": post_sha,
             "tmpDev": tmp_id.map(|i| i.0), "tmpIno": tmp_id.map(|i| i.1),
         }),
     )?;
@@ -350,24 +370,26 @@ pub fn run_write(
         hooks.fence()
     };
     if let Err(e) = pre_publish {
-        remove_own_temp(dir.fd.as_raw_fd(), &tmp, tmp_id);
+        cleanup_stage(dfd, sfd, &stage, &tmp, tmp_id);
         refuse_none!(e.code, e.message);
     }
 
-    // 6. Publish atomically.
-    let dfd = dir.fd.as_raw_fd();
+    // 6. Publish atomically (cross-directory rename: stage -> target).
     match &pre_sha {
-        None => match mutate::renameat2(dfd, &tmp, &name, mutate::RENAME_NOREPLACE) {
-            Ok(()) => {}
+        None => match mutate::renameat2_dirs(sfd, &tmp, dfd, &name, mutate::RENAME_NOREPLACE) {
+            Ok(()) => {
+                // The temp name is gone; only the empty stage remains.
+                mutate::rmdir(dfd, &stage);
+            }
             Err(e) if e == libc::EEXIST => {
-                remove_own_temp(dfd, &tmp, tmp_id);
+                cleanup_stage(dfd, sfd, &stage, &tmp, tmp_id);
                 conflict!(
                     "target-created-concurrently",
                     "the target appeared before publication"
                 );
             }
             Err(e) => {
-                remove_own_temp(dfd, &tmp, tmp_id);
+                cleanup_stage(dfd, sfd, &stage, &tmp, tmp_id);
                 let code = if e == libc::EINVAL || e == libc::ENOSYS || e == libc::EOPNOTSUPP {
                     ToolErrorCode::UnsupportedFilesystem
                 } else {
@@ -377,10 +399,10 @@ pub fn run_write(
             }
         },
         Some(expected) => {
-            match mutate::renameat2(dfd, &tmp, &name, mutate::RENAME_EXCHANGE) {
+            match mutate::renameat2_dirs(sfd, &tmp, dfd, &name, mutate::RENAME_EXCHANGE) {
                 Ok(()) => {}
                 Err(e) => {
-                    remove_own_temp(dfd, &tmp, tmp_id);
+                    cleanup_stage(dfd, sfd, &stage, &tmp, tmp_id);
                     let code = if e == libc::EINVAL || e == libc::ENOSYS || e == libc::EOPNOTSUPP {
                         ToolErrorCode::UnsupportedFilesystem
                     } else {
@@ -391,20 +413,23 @@ pub fn run_write(
             }
             hooks.at("after-exchange");
             crash_point("after-exchange");
-            // `name` now holds OUR inode; `tmp` holds exactly the inode
-            // that was replaced. Hash THAT inode (not a path guess).
-            let displaced = ws.open_file_in_dir(&dir.fd, &tmp).ok();
+            // `name` now holds OUR inode; the stage holds exactly the
+            // inode that was replaced. Hash THAT inode.
+            let displaced = ws.open_file_in_dir(&stage_fd, &tmp).ok();
             let displaced_id = displaced.as_ref().map(|o| (o.identity.dev, o.identity.ino));
             let displaced_matches = displaced
                 .and_then(|o| read_bounded(std::fs::File::from(o.fd), budgets.max_file_bytes).ok())
                 .map(|b| &sha256_bytes_hex(&b) == expected)
                 .unwrap_or(false);
             if !displaced_matches {
-                // The target was not the expected pre-image at the instant
-                // of publication. Undo NON-DESTRUCTIVELY.
-                match reverse_publication(ws, &dir, &name, &tmp, tmp_id, &post_sha, execution_id) {
+                // Not the expected pre-image at the instant of publication:
+                // undo NON-DESTRUCTIVELY.
+                match reverse_publication(
+                    ws, &dir, &stage_fd, &stage, &name, &tmp, tmp_id, &post_sha,
+                ) {
                     Ok(Reversal::Restored) => {
                         let _ = mutate::fsync(dfd);
+                        mutate::rmdir(dfd, &stage);
                         conflict!(
                             "concurrent-modification",
                             "the target changed during publication; original restored"
@@ -449,7 +474,7 @@ pub fn run_write(
                                 "mutation": "uncertain",
                                 "errorCode": "published-unverified",
                                 "reason": format!("could not undo publication (errno {errno})"),
-                                "tmpName": tmp,
+                                "tmpName": tmp, "stageName": stage,
                             }),
                         )?;
                         return Ok(out_err(
@@ -463,10 +488,14 @@ pub fn run_write(
                 }
             }
             crash_point("after-rename");
-            // Remove exactly the inode we hashed (the verified pre-image).
+            // Remove exactly the inode we hashed, inside our protected
+            // stage (a directory-writer without access to the stage cannot
+            // substitute anything under this name).
+            hooks.at("before-cleanup-unlink");
             if let Some(id) = displaced_id {
-                let _ = mutate::unlink_if_identity(dfd, &tmp, id);
+                let _ = mutate::unlink_if_identity(sfd, &tmp, id);
             }
+            mutate::rmdir(dfd, &stage);
         }
     }
     if pre_sha.is_none() {
@@ -543,59 +572,61 @@ enum Reversal {
     ForeignPreserved(String),
 }
 
-fn remove_own_temp(dir: i32, tmp: &str, id: Option<(u64, u64)>) {
-    // Identity unknown (fstat failed): leave it for reconciliation rather
-    // than delete by name.
+/// Remove our own temp (only if its identity still matches) and the
+/// stage directory when empty. Anything unexpected stays in the stage.
+fn cleanup_stage(dfd: i32, sfd: i32, stage: &str, tmp: &str, id: Option<(u64, u64)>) {
     if let Some(i) = id {
-        let _ = mutate::unlink_if_identity(dir, tmp, i);
+        let _ = mutate::unlink_if_identity(sfd, tmp, i);
     }
+    mutate::rmdir(dfd, stage);
 }
 
 /// Non-destructive undo of an exchange whose displaced inode was not the
 /// expected pre-image. Invariant: no inode is unlinked unless it is
-/// verified to be our own unmodified temp.
+/// verified to be our own unmodified temp, and everything is kept inside
+/// the protected stage directory.
 ///
-/// `name` <-> `tmp` are exchanged back. Then:
-/// * `tmp` holds our inode: delete it only if it is byte-identical to the
-///   post-image (nobody wrote into it); otherwise keep it renamed aside.
-/// * `tmp` holds a foreign inode (another writer replaced `name` during the
-///   window): exchange again so their file is back at `name`, and rename the
-///   displaced earlier file aside instead of deleting it.
+/// `stage/tmp` <-> `name` are exchanged back. Then:
+/// * `stage/tmp` holds our inode: delete it only if it is byte-identical to
+///   the post-image; otherwise keep it renamed aside in the stage.
+/// * `stage/tmp` holds a foreign inode (another writer replaced `name`
+///   during the window): exchange again so their file is back at `name`,
+///   and keep the displaced earlier file aside in the stage.
+#[allow(clippy::too_many_arguments)]
 fn reverse_publication(
     ws: &Workspace,
     dir: &crate::workspace::Opened,
+    stage_fd: &std::os::fd::OwnedFd,
+    stage: &str,
     name: &str,
     tmp: &str,
     ours: Option<(u64, u64)>,
     post_sha: &str,
-    execution_id: &str,
 ) -> Result<Reversal, i32> {
     let dfd = dir.fd.as_raw_fd();
-    mutate::renameat2(dfd, tmp, name, mutate::RENAME_EXCHANGE)?;
-    let at_tmp = mutate::entry_identity(dfd, tmp);
-    let tag: String = execution_id.chars().take(24).collect();
+    let sfd = stage_fd.as_raw_fd();
+    mutate::renameat2_dirs(sfd, tmp, dfd, name, mutate::RENAME_EXCHANGE)?;
+    let at_tmp = mutate::entry_identity(sfd, tmp);
     if at_tmp.is_some() && at_tmp == ours {
         let intact = ws
-            .open_file_in_dir(&dir.fd, tmp)
+            .open_file_in_dir(stage_fd, tmp)
             .ok()
             .and_then(|o| read_bounded(std::fs::File::from(o.fd), 8 * 1024 * 1024).ok())
             .map(|b| sha256_bytes_hex(&b) == post_sha)
             .unwrap_or(false);
         if intact {
             if let Some(id) = ours {
-                let _ = mutate::unlink_if_identity(dfd, tmp, id);
+                let _ = mutate::unlink_if_identity(sfd, tmp, id);
             }
             return Ok(Reversal::Restored);
         }
-        let kept = format!(".nexus-conflict-{tag}");
-        mutate::rename_aside(dfd, tmp, &kept)?;
-        return Ok(Reversal::RestoredOursModified(kept));
+        mutate::rename_aside(sfd, tmp, "conflict")?;
+        return Ok(Reversal::RestoredOursModified(format!("{stage}/conflict")));
     }
-    // Foreign inode at `tmp`: put it back, keep what we displaced.
-    mutate::renameat2(dfd, tmp, name, mutate::RENAME_EXCHANGE)?;
-    let kept = format!(".nexus-displaced-{tag}");
-    mutate::rename_aside(dfd, tmp, &kept)?;
-    Ok(Reversal::ForeignPreserved(kept))
+    // Foreign inode in the stage: put it back, keep what we displaced.
+    mutate::renameat2_dirs(sfd, tmp, dfd, name, mutate::RENAME_EXCHANGE)?;
+    mutate::rename_aside(sfd, tmp, "displaced")?;
+    Ok(Reversal::ForeignPreserved(format!("{stage}/displaced")))
 }
 
 pub const PH_PLANNED: &str = "planned";
@@ -639,54 +670,95 @@ pub fn observe_for_recovery(
         Some(None) if pre.is_none() => ("pre-image-intact", "none"),
         Some(_) => ("diverged", "uncertain"),
     };
-    // Temp-name handling. The temp name can hold (a) our own unpublished
-    // temp, or (b) after a crash following `RENAME_EXCHANGE`, the file that
-    // was displaced from the target. Only (a) and a verified-expected
-    // pre-image may be removed; anything else is preserved.
+    // Temp handling. The temp name lives inside the protected stage
+    // directory. It can hold (a) our own unpublished temp, or (b) after a
+    // crash following `RENAME_EXCHANGE`, the file that was displaced from
+    // the target. Only (a) and a verified-expected pre-image may be removed;
+    // anything else is preserved inside the stage.
     let mut tmp_removed = false;
     let mut displaced_removed = false;
     let mut displaced_preserved = false;
     let mut preserved_as: Option<String> = None;
     let mut over_unexpected = false;
+    let stage = planned.get("stageName").and_then(|v| v.as_str());
     if let Some(t) = tmp {
         if t.starts_with(".nexus-tmp-") {
             let dfd = dir.fd.as_raw_fd();
-            if let Some(id) = mutate::entry_identity(dfd, t) {
-                let ours = match (
-                    prepared.get("tmpDev").and_then(|v| v.as_u64()),
-                    prepared.get("tmpIno").and_then(|v| v.as_u64()),
-                ) {
-                    (Some(d), Some(i)) => Some((d, i)),
-                    _ => None,
+            // Legacy (pre-stage) journals keep the temp in the parent.
+            let stage_owned: Option<std::os::fd::OwnedFd> = stage.and_then(|st| {
+                if !st.starts_with(".nexus-stage-") {
+                    return None;
+                }
+                let c = std::ffi::CString::new(st).ok()?;
+                let fd = unsafe {
+                    libc::openat(
+                        dfd,
+                        c.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    )
                 };
-                let never_exchanged = prepared.get("tmpName").is_none();
-                if never_exchanged || Some(id) == ours {
-                    // Our own never-published temp (no exchange can have
-                    // happened before `prepared` was journaled).
-                    tmp_removed = mutate::unlink_if_identity(dfd, t, id).unwrap_or(false);
+                if fd < 0 {
+                    None
                 } else {
-                    let content_sha = ws
-                        .open_file_in_dir(&dir.fd, t)
-                        .ok()
+                    use std::os::fd::FromRawFd;
+                    Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+                }
+            });
+            let (base_fd, base_owned): (i32, Option<&std::os::fd::OwnedFd>) = match &stage_owned {
+                Some(o) => (o.as_raw_fd(), Some(o)),
+                None => (dfd, None),
+            };
+            // A stage directory that does not exist (nothing was created
+            // yet) means there is nothing to clean.
+            let skip = stage.is_some() && stage_owned.is_none();
+            if !skip {
+                if let Some(id) = mutate::entry_identity(base_fd, t) {
+                    let ours = match (
+                        prepared.get("tmpDev").and_then(|v| v.as_u64()),
+                        prepared.get("tmpIno").and_then(|v| v.as_u64()),
+                    ) {
+                        (Some(d), Some(i)) => Some((d, i)),
+                        _ => None,
+                    };
+                    let never_exchanged = prepared.get("tmpName").is_none();
+                    if never_exchanged || Some(id) == ours {
+                        tmp_removed = mutate::unlink_if_identity(base_fd, t, id).unwrap_or(false);
+                    } else {
+                        let content_sha = match base_owned {
+                            Some(o) => ws.open_file_in_dir(o, t).ok(),
+                            None => ws.open_file_in_dir(&dir.fd, t).ok(),
+                        }
                         .and_then(|o| read_bounded(std::fs::File::from(o.fd), 8 * 1024 * 1024).ok())
                         .map(|b| sha256_bytes_hex(&b));
-                    if content_sha.is_some() && content_sha.as_deref() == pre {
-                        // Exactly the expected pre-image displaced by a
-                        // successful exchange: same disposal as the
-                        // success path.
-                        displaced_removed = mutate::unlink_if_identity(dfd, t, id).unwrap_or(false);
-                    } else {
-                        let tag: String = t
-                            .trim_start_matches(".nexus-tmp-")
-                            .chars()
-                            .take(24)
-                            .collect();
-                        let kept = format!(".nexus-displaced-{tag}");
-                        if mutate::rename_aside(dfd, t, &kept).is_ok() {
-                            displaced_preserved = true;
-                            preserved_as = Some(kept);
+                        if content_sha.is_some() && content_sha.as_deref() == pre {
+                            displaced_removed =
+                                mutate::unlink_if_identity(base_fd, t, id).unwrap_or(false);
+                        } else {
+                            let kept = if stage_owned.is_some() {
+                                "displaced".to_owned()
+                            } else {
+                                let tag: String = t
+                                    .trim_start_matches(".nexus-tmp-")
+                                    .chars()
+                                    .take(24)
+                                    .collect();
+                                format!(".nexus-displaced-{tag}")
+                            };
+                            if mutate::rename_aside(base_fd, t, &kept).is_ok() {
+                                displaced_preserved = true;
+                                preserved_as = Some(match stage {
+                                    Some(st) if stage_owned.is_some() => format!("{st}/{kept}"),
+                                    _ => kept,
+                                });
+                            }
+                            over_unexpected = true;
                         }
-                        over_unexpected = true;
+                    }
+                }
+                if let Some(st) = stage {
+                    if stage_owned.is_some() {
+                        drop(stage_owned);
+                        mutate::rmdir(dfd, st);
                     }
                 }
             }

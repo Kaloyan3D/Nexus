@@ -30,6 +30,24 @@ pub fn kernel_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/debug/nexus-kernel")
 }
 
+/// Make a spawned test daemon die with the test thread that created it, so
+/// a panicking (or simply forgetful) test can never leak a `nexusd`.
+pub fn die_with_test(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::prctl(
+                libc::PR_SET_PDEATHSIG,
+                libc::SIGKILL as libc::c_ulong,
+                0,
+                0,
+                0,
+            );
+            Ok(())
+        });
+    }
+}
+
 pub struct DaemonProc {
     pub _dir: tempfile::TempDir,
     pub child: Child,
@@ -88,6 +106,7 @@ pub fn spawn_daemon_env(
     for (k, v) in envs {
         cmd.env(k, v);
     }
+    die_with_test(&mut cmd);
     let mut child = cmd.spawn().expect("spawn nexusd");
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -204,6 +223,7 @@ pub fn spawn_daemon_shared_opts(
     for a in full {
         cmd.arg(a);
     }
+    die_with_test(&mut cmd);
     let mut child = cmd.spawn().expect("spawn nexusd");
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {

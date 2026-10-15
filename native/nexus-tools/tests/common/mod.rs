@@ -3,7 +3,9 @@ use nexus_contracts::{
     ControllerIntentV1, ExecutionTargetCoreV1, RegistryProvenanceV1, RegistryResolutionV1,
     CONTRACT_SCHEMA_VERSION,
 };
-use nexus_kernel::{AcceptRequest, Kernel, WorkspaceBinding, WriteScopeBinding};
+use nexus_kernel::{
+    AcceptRequest, Kernel, ProcessScopeBinding, WorkspaceBinding, WriteScopeBinding,
+};
 use nexus_tools::{
     authorize, execute, prepare, AuthorizedToolCall, CancellationToken, ToolBudgets, ToolError,
     ToolExecutionOutcome, ToolRequestV1, TOOL_CONTRACT_VERSION, TOOL_VERSION,
@@ -185,6 +187,37 @@ impl Fx {
             .unwrap()
     }
 
+    /// Independent approver grants process scope for this command.
+    pub fn approve_process(&mut self, max_wall_ms: u64) -> ProcessScopeBinding {
+        let root = self.binding().root_digest;
+        self.kernel
+            .bind_process_scope(
+                &self.command.clone(),
+                "test-approver",
+                false,
+                &root,
+                max_wall_ms,
+            )
+            .unwrap()
+    }
+
+    pub fn pscope(&mut self) -> ProcessScopeBinding {
+        self.kernel
+            .process_scope_binding(&self.command.clone())
+            .unwrap()
+            .expect("process scope")
+    }
+
+    pub fn prepare_p(
+        &mut self,
+        r: ToolRequestV1,
+        policy: &nexus_tools::process::CommandPolicy,
+    ) -> Result<nexus_tools::PreparedToolRequest, ToolError> {
+        let b = self.binding();
+        let sc = self.pscope();
+        nexus_tools::prepare_process(r, &b, &sc, policy)
+    }
+
     pub fn scope(&mut self) -> WriteScopeBinding {
         self.kernel
             .write_scope_binding(&self.command.clone())
@@ -222,7 +255,7 @@ impl Fx {
         let mut v = Vec::new();
         for e in std::fs::read_dir(&self.ws).unwrap().flatten() {
             let n = e.file_name().to_string_lossy().into_owned();
-            if n.starts_with(".nexus-tmp-") {
+            if n.starts_with(".nexus-tmp-") || n.starts_with(".nexus-stage-") {
                 v.push(n);
             }
         }

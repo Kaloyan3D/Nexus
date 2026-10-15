@@ -1,4 +1,4 @@
-import type { ToolChange, ToolEventStatus, ToolEventV1 } from "./contracts";
+import type { ToolChange, ToolEventStatus, ToolEventV1, ToolProcess } from "./contracts";
 
 export type ToolEventTone = "neutral" | "progress" | "success" | "warning" | "danger";
 
@@ -8,6 +8,36 @@ const short = (h: string | null | undefined) => (h ? h.slice(0, 10) : "none");
  * Honest description of what is known about the file after a write event.
  * Never claims "no changes" unless the backend recorded `mutation: none`.
  */
+/** One-line, honest summary of a sandboxed process outcome. */
+export function describeProcess(p: ToolProcess | null | undefined): string | null {
+  if (!p) return null;
+  const parts: string[] = [];
+  if (p.terminationReason && p.terminationReason !== "exited") {
+    parts.push(`terminated: ${p.terminationReason}`);
+  } else if (p.exitCode !== undefined && p.exitCode !== null) {
+    parts.push(`exit ${p.exitCode}`);
+  } else if (p.signal !== undefined && p.signal !== null) {
+    parts.push(`signal ${p.signal}`);
+  }
+  if (p.wallMs !== undefined) parts.push(`${p.wallMs} ms`);
+  if (p.peakRssBytes) parts.push(`${Math.round(p.peakRssBytes / (1024 * 1024))} MiB peak`);
+  if (p.peakProcs) parts.push(`${p.peakProcs} procs`);
+  if (p.outcome === "never-started") parts.push("never started");
+  if (p.outcome === "uncertain") parts.push("outcome uncertain: process may have run");
+  return parts.length ? parts.join(" · ") : null;
+}
+
+export function sandboxSummary(p: ToolProcess | null | undefined): string | null {
+  const s = p?.sandbox;
+  if (!s) return null;
+  return [
+    `network ${s.network ?? "?"}`,
+    `workspace ${s.workspace ?? "?"}`,
+    `write-back ${s.writeBack ?? "?"}`,
+    `env ${s.env ?? "?"}`,
+  ].join(" · ");
+}
+
 /** Write approvals that were not provably independent are test-only. */
 export function approvalNote(c: ToolChange | null | undefined, scope: string): string | null {
   if (scope !== "write") return null;
@@ -55,13 +85,17 @@ export function toolEventPresentation(e: ToolEventV1): {
     interrupted: "warning",
     expired: "neutral",
     cancelled: "warning",
+    running: "progress",
+    exited: e.process?.verification === "pass" ? "success" : "danger",
   };
   const path =
     (typeof e.change?.path === "string" && e.change.path) ||
     (typeof e.args?.path === "string" ? (e.args.path as string) : ".");
   const op = e.change?.operation;
   const what =
-    e.toolId === "fs.search"
+    e.toolId === "proc.run"
+      ? (e.process?.command ?? "sandboxed process")
+      : e.toolId === "fs.search"
       ? `search in ${path}`
       : e.scope === "write"
         ? `${op ?? e.toolId.slice(3)} ${path}`
@@ -86,6 +120,6 @@ export function toolEventPresentation(e: ToolEventV1): {
     // A write that has not reached a terminal state is awaiting (or
     // proceeding under) the independently approved scope; the renderer can
     // only display this, never grant it.
-    requiresApproval: e.scope === "write" && ["authorized", "started", "planned"].includes(e.status),
+    requiresApproval: e.scope !== "read" && ["authorized", "started", "planned"].includes(e.status),
   };
 }

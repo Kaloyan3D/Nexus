@@ -322,7 +322,49 @@ export type ToolEventStatus =
   | "failed"
   | "interrupted"
   | "expired"
-  | "cancelled";
+  | "cancelled"
+  | "running"
+  | "exited";
+
+/** Sandboxed process metadata (A3.4). Output tails are bounded + redacted. */
+export interface ToolProcess {
+  command?: string;
+  program?: string;
+  argvDigest?: string;
+  cwd?: string;
+  snapshotDigest?: string;
+  snapshotFiles?: number;
+  snapshotBytes?: number;
+  sandboxDigest?: string;
+  sandbox?: {
+    backend?: string;
+    network?: string;
+    rootfs?: string;
+    workspace?: string;
+    writeBack?: string;
+    env?: string;
+  };
+  limits?: { wallMs?: number; cpuSecs?: number; memoryBytes?: number; maxProcs?: number };
+  exitCode?: number | null;
+  signal?: number | null;
+  /** termination reason: exited | timeout | memory-limit | process-limit | cancelled | revoked */
+  terminationReason?: string;
+  verification?: "pass" | "fail";
+  wallMs?: number;
+  userMs?: number;
+  sysMs?: number;
+  peakRssBytes?: number;
+  peakProcs?: number;
+  stdoutBytes?: number;
+  stderrBytes?: number;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
+  stdoutTail?: string;
+  stderrTail?: string;
+  processStarted?: boolean;
+  /** interrupted executions: never-started | uncertain */
+  outcome?: string;
+}
 
 /** Pre/post-image metadata of a write or edit (never file content). */
 export interface ToolChange {
@@ -351,10 +393,10 @@ export interface ToolEventV1 {
   taskInstanceId: string;
   attemptId: string;
   commandId: string;
-  toolId: "fs.list" | "fs.read" | "fs.search" | "fs.write" | "fs.edit";
+  toolId: "fs.list" | "fs.read" | "fs.search" | "fs.write" | "fs.edit" | "proc.run";
   toolVersion: number;
   /** `write` grants required an independently approved write scope. */
-  scope: "read" | "write";
+  scope: "read" | "write" | "process";
   status: ToolEventStatus;
   /** Redacted argument metadata (search queries appear as length + digest). */
   args: Record<string, unknown> | null;
@@ -370,6 +412,8 @@ export interface ToolEventV1 {
   stats: Record<string, number> | null;
   /** Write tools only: proposed/applied change metadata. */
   change: ToolChange | null;
+  /** Process tools only: sandboxed execution identity, exit and usage. */
+  process: ToolProcess | null;
   aiInitiated: boolean;
   /** Lease generation the request was authorized under. */
   leaseEpoch: number | null;

@@ -22,21 +22,24 @@ pub mod exec;
 pub mod list;
 pub mod mutate;
 pub mod offline;
+pub mod process;
 pub mod read;
 pub mod redact;
 pub mod result;
+pub mod sandbox;
 pub mod search;
+pub mod stage;
 pub mod workspace;
 pub mod write;
 
 pub use authorization::{
-    authorize, begin, execute, execute_write, finish, prepare, prepare_write, reconcile_writes,
-    run_started, run_write_call, AuthorizedToolCall, PreparedToolRequest, StartedToolCall,
-    ToolExecutionOutcome,
+    authorize, begin, execute, execute_process, execute_write, finish, prepare, prepare_process,
+    prepare_write, reconcile_processes, reconcile_writes, run_process_call, run_started,
+    run_write_call, AuthorizedToolCall, PreparedToolRequest, StartedToolCall, ToolExecutionOutcome,
 };
 pub use contract::{
-    descriptor_for, descriptors, ListArgs, ReadArgs, SearchArgs, ToolArgs, ToolBudgets,
-    ToolDescriptor, ToolId, ToolRequestV1, TOOL_CONTRACT_VERSION, TOOL_VERSION,
+    descriptor_for, descriptors, ListArgs, ProcessArgs, ReadArgs, SearchArgs, ToolArgs,
+    ToolBudgets, ToolDescriptor, ToolId, ToolRequestV1, TOOL_CONTRACT_VERSION, TOOL_VERSION,
 };
 pub use events::{
     fold_tool_records, record_from_entry, tool_events_from_journal, ToolEventStatus, ToolEventV1,

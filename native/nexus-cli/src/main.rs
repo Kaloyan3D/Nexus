@@ -39,6 +39,16 @@ fn help_text() -> String {
     s.push_str(
         "                          real tool execution records from the daemon (read-only)\n",
     );
+    s.push_str("    tools processes --task <instance-id> [--attempt <attempt-id>]\n");
+    s.push_str("                          read-only sandboxed-process execution history\n");
+    s.push_str("    tools run-offline-process --offline-test --allow-process-test --workspace <dir> <cargo|npm|tsc> [args...]\n");
+    s.push_str(
+        "                          offline sandbox test (needs NEXUS_TOOLS_OFFLINE_TEST=1,\n",
+    );
+    s.push_str(
+        "                          NEXUS_TOOLS_OFFLINE_PROCESS_TEST=1, a temp-dir workspace\n",
+    );
+    s.push_str("                          with a .nexus-offline-process-test marker)\n");
     s.push_str("    tools run-offline --offline-test --workspace <dir> <id> '<args-json>'\n");
     s.push_str("                          offline/test execution under an EPHEMERAL kernel\n");
     s.push_str(
@@ -505,6 +515,138 @@ fn cmd_tools(args: &[String], cfg: &ClientConfig) -> ExitCode {
                     ExitCode::Ok
                 }
                 Err(e) => emit_err(cfg.json, &e),
+            }
+        }
+        Some("processes") => {
+            let mut task = None;
+            let mut attempt: Option<String> = None;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--task" => {
+                        i += 1;
+                        task = args.get(i).cloned();
+                    }
+                    "--attempt" => {
+                        i += 1;
+                        attempt = args.get(i).cloned();
+                    }
+                    "--json" => {}
+                    other => return usage(&format!("unknown argument '{other}'")),
+                }
+                i += 1;
+            }
+            let Some(task) = task else {
+                return usage(
+                    "usage: nexus tools processes --task <instance-id> [--attempt <attempt-id>]",
+                );
+            };
+            let groups: Result<
+                Vec<(String, Vec<nexus_client::ToolEventV1>)>,
+                nexus_client::ClientError,
+            > = match attempt {
+                Some(a) => nexus_client::tool_events_folded(cfg, &task, &a, 0)
+                    .map(|(ev, _, _)| vec![(a, ev)]),
+                None => nexus_client::tool_events_for_task(cfg, &task).map(|t| {
+                    t.attempts
+                        .into_iter()
+                        .map(|a| (a.attempt_id, a.events))
+                        .collect()
+                }),
+            };
+            match groups {
+                Ok(g) => {
+                    let mut human = String::new();
+                    let mut all = Vec::new();
+                    for (att, evs) in g {
+                        for e in evs.into_iter().filter(|e| e.tool_id == "proc.run") {
+                            let p = e.process.clone().unwrap_or_default();
+                            human.push_str(&format!(
+                                "{att} {:?} {} exit={} {}ms verification={} network=none\n",
+                                e.status,
+                                p.get("command").and_then(|v| v.as_str()).unwrap_or("?"),
+                                p.get("exitCode")
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| "-".into()),
+                                p.get("wallMs").and_then(|v| v.as_u64()).unwrap_or(0),
+                                p.get("verification")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("-"),
+                            ));
+                            all.push(serde_json::to_value(&e).unwrap_or_default());
+                        }
+                    }
+                    if human.is_empty() {
+                        human.push_str("no sandboxed process executions recorded");
+                    }
+                    emit(
+                        cfg,
+                        &serde_json::json!({"ok": true, "processes": all, "aiInitiatedExecution": "disabled"}),
+                        human.trim_end(),
+                    );
+                    ExitCode::Ok
+                }
+                Err(e) => emit_err(cfg.json, &e),
+            }
+        }
+        Some("run-offline-process") => {
+            let mut workspace: Option<String> = None;
+            let mut offline = false;
+            let mut allow = false;
+            let mut pos: Vec<String> = Vec::new();
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--offline-test" => offline = true,
+                    "--allow-process-test" => allow = true,
+                    "--json" => {}
+                    "--workspace" => {
+                        i += 1;
+                        workspace = args.get(i).cloned();
+                    }
+                    other => pos.push(other.to_owned()),
+                }
+                i += 1;
+            }
+            if !offline || !allow {
+                return usage(
+                    "run-offline-process requires --offline-test and --allow-process-test",
+                );
+            }
+            let (Some(ws), Some(program)) = (workspace, pos.first().cloned()) else {
+                return usage("usage: nexus tools run-offline-process --offline-test --allow-process-test --workspace <dir> <cargo|npm|tsc> [args...]");
+            };
+            let rest: Vec<String> = pos.into_iter().skip(1).collect();
+            let abs = match std::fs::canonicalize(&ws) {
+                Ok(p) => p.to_string_lossy().into_owned(),
+                Err(_) => return usage("workspace does not exist"),
+            };
+            match nexus_tools::offline::run_offline_process(&abs, &program, &rest, 300_000) {
+                Ok(v) => {
+                    let out = v["result"]["output"].clone();
+                    let human = format!(
+                        "[offline-test sandbox] {program} -> {}\nauthority: {}\nnot Controller-authorized; not AI-initiated\nverification={} exit={} reason={}\njournal: {}",
+                        v["result"]["status"],
+                        v["authority"].as_str().unwrap_or(""),
+                        out["verification"],
+                        out["exitCode"],
+                        out["reason"],
+                        v["journalPhases"],
+                    );
+                    emit(cfg, &v, &human);
+                    ExitCode::Ok
+                }
+                Err(m) => {
+                    let code = if m.contains("gated") {
+                        "offline-gate"
+                    } else {
+                        "sandbox-refused"
+                    };
+                    emit_err(
+                        cfg.json,
+                        &nexus_client::ClientError::new(code, ExitCode::Unauthorized, m),
+                    )
+                }
             }
         }
         Some("run-offline") => {
