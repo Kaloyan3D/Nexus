@@ -72,6 +72,9 @@ fn status_from_run(r: &IntentRun) -> ModelRunStatus {
         usage_output_tokens: r.usage_output_tokens,
         finish_reason: r.finish_reason.clone(),
         latency_ms: r.latency_ms,
+        first_token_ms: r.first_token_ms,
+        provider_request_id: r.provider_request_id.clone(),
+        provider_response_id: r.provider_response_id.clone(),
         error_code: r.error_code.clone(),
         cancel_requested: r.cancel_requested,
         // Text is delivered through the conversation view, not duplicated here.

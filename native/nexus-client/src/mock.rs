@@ -283,6 +283,11 @@ pub fn run_mock_streaming(
                 kind: "tool-fragment".to_owned(),
                 content: format!("{name}: {delta}"),
             },
+            ModelEvent::ResponseId(id) => MockStreamItem {
+                index: i as u64,
+                kind: "response-id".to_owned(),
+                content: id.clone(),
+            },
             ModelEvent::Usage(u) => {
                 usage_in = u.input_tokens;
                 usage_out = u.output_tokens;

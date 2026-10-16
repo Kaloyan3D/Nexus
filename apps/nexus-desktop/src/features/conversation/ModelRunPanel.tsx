@@ -108,8 +108,14 @@ export function ModelRunPanel({ conversationId }: { conversationId: string }) {
         <dd>{status.httpStatus ?? "—"}</dd>
         <dt>Usage</dt>
         <dd>{usageLabel(status)}</dd>
+        <dt>First token</dt>
+        <dd>{status.firstTokenMs == null ? "—" : `${status.firstTokenMs} ms`}</dd>
         <dt>Latency</dt>
         <dd>{status.latencyMs === null ? "—" : `${status.latencyMs} ms`}</dd>
+        <dt>Provider request id</dt>
+        <dd className="nv-mono">{status.providerRequestId ?? "not supplied"}</dd>
+        <dt>Provider response id</dt>
+        <dd className="nv-mono">{status.providerResponseId ?? "not supplied"}</dd>
         <dt>Finish</dt>
         <dd>{status.finishReason ?? "—"}</dd>
       </dl>

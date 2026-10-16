@@ -346,6 +346,9 @@ export interface ModelRunStatus {
   usageOutputTokens: number | null;
   finishReason: string | null;
   latencyMs: number | null;
+  firstTokenMs?: number | null;
+  providerRequestId?: string | null;
+  providerResponseId?: string | null;
   errorCode: string | null;
   cancelRequested: boolean;
   text: string;
@@ -379,6 +382,9 @@ export interface IntentRun {
   usageOutputTokens: number | null;
   finishReason: string | null;
   latencyMs: number | null;
+  firstTokenMs?: number | null;
+  providerRequestId?: string | null;
+  providerResponseId?: string | null;
   errorCode: string | null;
   errorMessage: string | null;
   cancelRequested: boolean;

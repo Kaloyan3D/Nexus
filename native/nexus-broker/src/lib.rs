@@ -15,6 +15,8 @@
 //! * clients can only see and cancel runs owned by their own client id.
 
 pub mod config;
+pub mod identity;
+pub mod live_auth;
 pub mod pipeline;
 pub mod server;
 pub mod store;

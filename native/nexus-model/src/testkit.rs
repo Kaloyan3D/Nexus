@@ -218,6 +218,7 @@ impl Transport for MockTransport {
                         // Stop pulling: further script events are never read.
                         return Ok(SendReport {
                             stop_cause: None,
+                            provider_request_id: None,
                             bytes_sent: true,
                             events: shown,
                             finish_reason: None,
@@ -234,6 +235,7 @@ impl Transport for MockTransport {
                 let truncated = finish.is_none();
                 Ok(SendReport {
                     stop_cause: None,
+                    provider_request_id: None,
                     bytes_sent: true,
                     events: shown,
                     finish_reason: finish,
@@ -254,6 +256,7 @@ impl Transport for MockTransport {
                 }
                 Ok(SendReport {
                     stop_cause: None,
+                    provider_request_id: None,
                     bytes_sent: true,
                     events,
                     finish_reason: None,
@@ -276,6 +279,7 @@ fn parse_body_report(
     let truncated = finish_reason.is_none();
     Ok(SendReport {
         stop_cause: None,
+        provider_request_id: None,
         bytes_sent: true,
         events,
         finish_reason,

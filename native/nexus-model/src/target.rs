@@ -21,6 +21,45 @@ pub const TARGET_EXTENSION_VERSION: u32 = 1;
 /// Maximum endpoint URL length (mirrors Registry `MAX_URL_LENGTH`).
 pub const MAX_ENDPOINT_URL_LEN: usize = 2048;
 
+/// The wire adapter a Registry target selects. Explicit and closed: the
+/// transport never infers a protocol dialect from the endpoint string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WireProfile {
+    /// Pre-A5.4 body (OpenCode-style `session`/`metadata` extension fields,
+    /// empty `tools`). Used by the offline fixtures and existing targets.
+    #[default]
+    Legacy,
+    /// OpenCode Go Responses adapter (A5.4): a minimal OpenAI-Responses body
+    /// (`model`, `input`, `stream`, `max_output_tokens`, `reasoning`), the
+    /// `x-opencode-session` header and an identifying user agent. Pinned in
+    /// production to `https://opencode.ai/inference/go/openai/v1/responses`.
+    OpenCodeGoResponses,
+}
+
+impl WireProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy-extended",
+            Self::OpenCodeGoResponses => "opencode-go-responses",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "legacy-extended" => Some(Self::Legacy),
+            "opencode-go-responses" => Some(Self::OpenCodeGoResponses),
+            _ => None,
+        }
+    }
+}
+
+/// Origin the OpenCode Go adapter may talk to in production.
+pub const OPENCODE_GO_ORIGIN: &str = "https://opencode.ai";
+/// The current documented OpenCode Go Responses endpoint (no fallback to the
+/// older `/zen/go/v1/responses` path: switching needs a code change).
+pub const OPENCODE_GO_RESPONSES_PATH: &str = "/inference/go/openai/v1/responses";
+/// OpenCode Go Responses floor for `max_output_tokens`.
+pub const OPENCODE_GO_MIN_OUTPUT_TOKENS: u64 = 16;
+
 /// Authoritative provider endpoint. The origin + path are the ONLY bytes
 /// the transport may connect to; redirects and proxy rewrites are refused
 /// at the transport layer (see `transport.rs`).
@@ -89,6 +128,8 @@ pub struct ExecutionTargetV2 {
     /// Opaque credential reference (never a secret value). Binds which
     /// credential the transport may load at its trusted boundary.
     pub credential_ref: String,
+    /// Selected wire adapter (default: legacy).
+    pub wire_profile: WireProfile,
 }
 
 impl ExecutionTargetV2 {
@@ -168,6 +209,20 @@ impl ExecutionTargetV2 {
                 "connection binding differs from the sealed core identity",
             ));
         }
+        if self.wire_profile == WireProfile::OpenCodeGoResponses {
+            if self.endpoint.protocol != "https" {
+                return Err(ModelError::new(
+                    ModelErrorCode::TargetIncomplete,
+                    "the OpenCode Go adapter requires an https endpoint",
+                ));
+            }
+            if self.output_limit_tokens < OPENCODE_GO_MIN_OUTPUT_TOKENS {
+                return Err(ModelError::new(
+                    ModelErrorCode::TargetIncomplete,
+                    "the OpenCode Go adapter requires an output limit of at least 16 tokens",
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -193,6 +248,12 @@ impl ExecutionTargetV2 {
             "connectionBinding": self.connection_binding,
             "credentialRef": self.credential_ref,
         });
+        let mut value = value;
+        // Only a non-default adapter is written, so every pre-A5.4 extension
+        // (and its digest) is byte-for-byte unchanged.
+        if self.wire_profile != WireProfile::Legacy {
+            value["wireProfile"] = serde_json::json!(self.wire_profile.as_str());
+        }
         nexus_contracts::canonical_json(&value)
     }
 
@@ -226,6 +287,7 @@ impl ExecutionTargetV2 {
             "outputLimitTokens",
             "connectionBinding",
             "credentialRef",
+            "wireProfile",
         ];
         for key in obj.keys() {
             if !TOP.contains(&key.as_str()) {
@@ -314,6 +376,15 @@ impl ExecutionTargetV2 {
             output_limit_tokens: u64_field("outputLimitTokens")?,
             connection_binding: str_field("connectionBinding")?,
             credential_ref: str_field("credentialRef")?,
+            wire_profile: match obj.get("wireProfile") {
+                None => WireProfile::Legacy,
+                Some(v) => v.as_str().and_then(WireProfile::parse).ok_or_else(|| {
+                    ModelError::new(
+                        ModelErrorCode::TargetIncomplete,
+                        "extension names an unknown wireProfile",
+                    )
+                })?,
+            },
         };
         target.validate_executable()?;
         Ok(target)
@@ -365,6 +436,7 @@ impl ExecutionTargetV2 {
             output_limit_tokens: 1024,
             connection_binding: "connection-a".to_owned(),
             credential_ref: "credential://connections/connection-a".to_owned(),
+            wire_profile: WireProfile::Legacy,
         }
     }
 }

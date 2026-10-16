@@ -40,7 +40,8 @@ pub use runtime::{ModelRuntime, OfflineModelRuntime};
 pub use sse::{AssembledToolCall, ModelEvent, StreamAssembler, TerminalResponse, Usage};
 pub use stream::{AttemptState, AttemptStore, AttemptTracker, CancellationToken};
 pub use target::{
-    AuthoritativeEndpoint, BillingProvenance, ExecutionTargetV2, SessionBinding,
+    AuthoritativeEndpoint, BillingProvenance, ExecutionTargetV2, SessionBinding, WireProfile,
+    OPENCODE_GO_MIN_OUTPUT_TOKENS, OPENCODE_GO_ORIGIN, OPENCODE_GO_RESPONSES_PATH,
     TARGET_EXTENSION_VERSION,
 };
 pub use transport::{

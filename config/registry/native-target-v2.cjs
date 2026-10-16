@@ -213,6 +213,13 @@ function issueExecutionTargetV2(options, deps) {
     connectionBinding: binding.connectionId,
     credentialRef: connection.credentialRef,
   };
+  // Optional provider-declared wire profile (A5.4). Emitted ONLY when set so
+  // every pre-existing target digest is unchanged; Rust validates the value.
+  const wire = provider.metadata && provider.metadata.wireProfile;
+  if (wire !== undefined && wire !== null) {
+    if (wire !== 'opencode-go-responses') return fail('registry-target-incomplete', 'provider ' + provider.id + ' declares an unknown wireProfile');
+    extension.wireProfile = wire;
+  }
   const core = issued.issuance.resolution.target;
   if (extension.remoteModelIdConfirmed !== core.remoteModelId
     || extension.reasoningEffort !== core.reasoning

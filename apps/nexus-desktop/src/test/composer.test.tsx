@@ -44,7 +44,7 @@ describe("Composer -> intent broker (A5.3)", () => {
     expect(model).toEqual({ providerId: "acme", remoteModelId: "acme-large-1" });
     expect(String(key)).toMatch(/^gui-[0-9a-f]{16,}/);
     // The shared conversation view takes over, showing provenance.
-    expect(await screen.findByText(/acme \/ acme-large-1/)).toBeInTheDocument();
+    expect(await screen.findByText(/acme \/ acme-large-1/, {}, { timeout: 5000 })).toBeInTheDocument();
     // Only the three documented fields cross the renderer boundary.
     expect(submit.mock.calls[0]!.length).toBe(3);
   });
@@ -83,7 +83,7 @@ describe("Composer -> intent broker (A5.3)", () => {
     const send = await screen.findByRole("button", { name: "Send to model" });
     await waitFor(() => expect(send).toBeEnabled());
     await user.click(send);
-    expect(await screen.findByText("Send failed: model-not-available")).toBeInTheDocument();
+    expect(await screen.findByText("Send failed: model-not-available", {}, { timeout: 5000 })).toBeInTheDocument();
     expect(screen.getByLabelText("Task prompt")).toHaveValue("keep me");
   });
 

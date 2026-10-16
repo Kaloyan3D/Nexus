@@ -38,6 +38,8 @@ pub struct PreparedModelRequest {
     pub reasoning_effort: String,
     /// Stable `x-opencode-session` value (pin-confirmed).
     pub session_header: String,
+    /// Wire adapter the Registry target selected.
+    pub wire_profile: crate::target::WireProfile,
     /// Exact serialized request body (canonical JSON).
     pub request_bytes: Vec<u8>,
     /// sha256 of `request_bytes`.
@@ -107,31 +109,60 @@ pub fn prepare(
     let max_output = input.effective_max_output(target.output_limit_tokens)?;
     // Exact OpenCode-compatible body. The model id, reasoning effort, and
     // session come ONLY from the pinned target + confirmed overrides.
-    let body = serde_json::json!({
-        "model": target.remote_model_id_confirmed,
-        "input": input.messages.iter().map(|m| {
-            serde_json::json!({ "role": m.role, "content": m.content })
-        }).collect::<Vec<_>>(),
-        "reasoning": { "effort": reasoning },
-        "stream": true,
-        // A5.2 budget: the Registry-sealed output limit travels with every
-        // request so the provider itself bounds the billable output.
-        "max_output_tokens": max_output,
-        "session": { "id": session },
-        "tools": input.tools.iter().map(|t| {
+    let body = match target.wire_profile {
+        crate::target::WireProfile::Legacy => serde_json::json!({
+            "model": target.remote_model_id_confirmed,
+            "input": input.messages.iter().map(|m| {
+                serde_json::json!({ "role": m.role, "content": m.content })
+            }).collect::<Vec<_>>(),
+            "reasoning": { "effort": reasoning },
+            "stream": true,
+            // A5.2 budget: the Registry-sealed output limit travels with every
+            // request so the provider itself bounds the billable output.
+            "max_output_tokens": max_output,
+            "session": { "id": session },
+            "tools": input.tools.iter().map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                })
+            }).collect::<Vec<_>>(),
+            "metadata": {
+                "x-opencode-session": session,
+                "route": target.core.route_id,
+                "provider": target.core.provider_id,
+                "connection": target.core.connection_id,
+            },
+        }),
+        // OpenCode Go adapter: the minimal Responses body only. No `session`
+        // or `metadata` extension fields (the session travels in the
+        // `x-opencode-session` header), no `tools` (model-only), nothing the
+        // documented contract does not name.
+        crate::target::WireProfile::OpenCodeGoResponses => {
+            if !input.tools.is_empty() {
+                return Err(ModelError::new(
+                    ModelErrorCode::TransportRefused,
+                    "the OpenCode Go adapter is model-only: tool definitions are not sent",
+                ));
+            }
+            if max_output < crate::target::OPENCODE_GO_MIN_OUTPUT_TOKENS {
+                return Err(ModelError::new(
+                    ModelErrorCode::TargetIncomplete,
+                    "output cap is below the provider minimum of 16 tokens",
+                ));
+            }
             serde_json::json!({
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.parameters,
+                "model": target.remote_model_id_confirmed,
+                "input": input.messages.iter().map(|m| {
+                    serde_json::json!({ "role": m.role, "content": m.content })
+                }).collect::<Vec<_>>(),
+                "stream": true,
+                "max_output_tokens": max_output,
+                "reasoning": { "effort": reasoning },
             })
-        }).collect::<Vec<_>>(),
-        "metadata": {
-            "x-opencode-session": session,
-            "route": target.core.route_id,
-            "provider": target.core.provider_id,
-            "connection": target.core.connection_id,
-        },
-    });
+        }
+    };
     let canonical = nexus_contracts::canonical_json(&body);
     if canonical.len() > MAX_REQUEST_BYTES {
         return Err(ModelError::new(
@@ -149,6 +180,7 @@ pub fn prepare(
         remote_model_id: target.remote_model_id_confirmed.clone(),
         reasoning_effort: reasoning,
         session_header: session,
+        wire_profile: target.wire_profile,
         request_bytes: canonical.into_bytes(),
         request_digest,
         target_digest: pin.target_digest.clone(),

@@ -191,6 +191,19 @@ check('a versioned baseUrl (.../v1) does not double the version segment', functi
   assert.equal(r2.target.extension.endpoint.path, '/v1/responses');
 });
 
+check('wireProfile is emitted only when the provider declares a known profile (A5.4)', function () {
+  const plain = harness(null, {});
+  assert.equal(plain.ok, true, JSON.stringify(plain));
+  assert.equal('wireProfile' in plain.target.extension, false, 'legacy digest must be unchanged');
+  const go = harness(null, { provider: { metadata: { billingTier: 'test-unmetered', wireProfile: 'opencode-go-responses' } } });
+  assert.equal(go.ok, true, JSON.stringify(go));
+  assert.equal(go.target.extension.wireProfile, 'opencode-go-responses');
+  assert.notEqual(go.target.extensionDigest || sha256Hex(canonicalize(go.target.extension)), sha256Hex(canonicalize(plain.target.extension)));
+  const bad = harness(null, { provider: { metadata: { billingTier: 'test-unmetered', wireProfile: 'something-else' } } });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, 'registry-target-incomplete');
+});
+
 check('unsupported scope never reaches extension', function () {
   const r = harness({ roleId: 'engineer_normal' });
   assert.equal(r.ok, false);

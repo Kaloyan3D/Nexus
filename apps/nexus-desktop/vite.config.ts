@@ -12,5 +12,8 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     globals: true,
     css: false,
+    // jsdom + user-event typing is CPU-bound; under a loaded host (e.g. a
+    // parallel cargo build) 5 s default flaked on modelRun/composer tests.
+    testTimeout: 20000,
   },
 });

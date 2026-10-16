@@ -312,6 +312,29 @@ fn run_steps(
         };
         se(code, e.message)
     })?;
+    // A5.4: a real (https, production-transport) provider call needs an
+    // operator authorization, consumed before any grant exists.
+    if b.cfg.transport.is_none() && prepared.endpoint_origin.starts_with("https://") {
+        // A broker whose binary was replaced since it started must not spend
+        // a live authorization (checked BEFORE consuming it, so the record
+        // survives and the operator can restart and retry).
+        if crate::identity::self_stale() {
+            return Err(se(
+                "broker-stale",
+                "this broker process predates the installed nexus-broker binary; restart it (nothing sent, authorization kept)",
+            ));
+        }
+        crate::live_auth::consume(
+            &b.cfg.state_dir,
+            &crate::live_auth::Attempt {
+                provider_id: &prepared.provider_id,
+                remote_model_id: &prepared.remote_model_id,
+                prompt: &intent.content,
+                requested_max_output: intent.limits.max_output_tokens,
+            },
+        )
+        .map_err(|(c, m)| se(c, m))?;
+    }
     b.update(run_id, |r| {
         r.provider_id = Some(prepared.provider_id.clone());
         r.remote_model_id = Some(prepared.remote_model_id.clone());
@@ -415,6 +438,9 @@ pub(crate) fn apply_status(r: &mut IntentRun, s: &nexus_client::ModelRunStatus) 
     r.usage_output_tokens = s.usage_output_tokens;
     r.finish_reason = s.finish_reason.clone();
     r.latency_ms = s.latency_ms;
+    r.first_token_ms = s.first_token_ms;
+    r.provider_request_id = s.provider_request_id.clone();
+    r.provider_response_id = s.provider_response_id.clone();
     r.error_code = s.error_code.clone();
     if s.terminal && s.state != "completed" && r.error_message.is_none() {
         r.error_message = Some(format!("run ended as {}", s.state));

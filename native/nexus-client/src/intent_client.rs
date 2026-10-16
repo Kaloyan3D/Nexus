@@ -61,6 +61,12 @@ pub struct IntentRun {
     pub usage_output_tokens: Option<u64>,
     pub finish_reason: Option<String>,
     pub latency_ms: Option<u64>,
+    #[serde(default)]
+    pub first_token_ms: Option<u64>,
+    #[serde(default)]
+    pub provider_request_id: Option<String>,
+    #[serde(default)]
+    pub provider_response_id: Option<String>,
     /// Machine-readable classification of a non-success end.
     pub error_code: Option<String>,
     pub error_message: Option<String>,

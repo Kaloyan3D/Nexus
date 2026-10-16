@@ -86,7 +86,10 @@ fn v6_verdict(a: Ipv6Addr) -> DestinationVerdict {
         || (seg[0] == 0 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0 && seg[4] == 0 && seg[5] == 0) // ::/96 compat
         || (seg[0] == 0x0064 && seg[1] == 0xff9b) // 64:ff9b::/96 NAT64
         || seg[0] == 0x2002 // 6to4: embeds an arbitrary IPv4 destination
-        || (seg[0] == 0x2001 && seg[1] == 0x0000); // Teredo
+        || (seg[0] == 0x2001 && seg[1] == 0x0000) // Teredo
+        || (seg[0] == 0x0100 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0) // 100::/64 discard-only
+        || (seg[0] == 0x2001 && seg[1] == 0x0002 && seg[2] == 0) // 2001:2::/48 benchmarking
+        || (seg[0] == 0x3FFF && (seg[1] & 0xF000) == 0); // 3fff::/20 documentation
     if reserved {
         DestinationVerdict::PrivateOrReserved
     } else {

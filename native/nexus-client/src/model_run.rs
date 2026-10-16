@@ -210,6 +210,9 @@ struct StateMeta {
     usage_output_tokens: Option<u64>,
     finish_reason: Option<String>,
     latency_ms: Option<u64>,
+    first_token_ms: Option<u64>,
+    provider_request_id: Option<String>,
+    provider_response_id: Option<String>,
     error_code: Option<String>,
     response_origin: Option<String>,
 }
@@ -234,6 +237,12 @@ pub struct ModelRunStatus {
     pub usage_output_tokens: Option<u64>,
     pub finish_reason: Option<String>,
     pub latency_ms: Option<u64>,
+    /// Time from run start to the first text delta (None until/unless one arrived).
+    pub first_token_ms: Option<u64>,
+    /// Request id the provider supplied in a response header (never synthesized).
+    pub provider_request_id: Option<String>,
+    /// `response.id` the provider supplied in the stream (never synthesized).
+    pub provider_response_id: Option<String>,
     pub error_code: Option<String>,
     pub cancel_requested: bool,
     /// Text recorded so far (untrusted model output).
@@ -766,6 +775,8 @@ pub fn run_model_only(
     let mut tracker = nexus_model::AttemptTracker::new(&req.attempt_id);
     let mut attempts = nexus_model::AttemptStore::new();
     let mut first_event = true;
+    let mut first_token_ms: Option<u64> = None;
+    let mut response_id: Option<String> = None;
     let mut usage: Option<(u64, u64)> = None;
     // The hooks borrow the recorder and the callback: use RefCell-free
     // sequencing by collecting events into a queue processed through a
@@ -804,6 +815,9 @@ pub fn run_model_only(
                             state: ModelRunState::Streaming,
                         });
                     }
+                    if first_token_ms.is_none() {
+                        first_token_ms = Some(started.elapsed().as_millis() as u64);
+                    }
                     r.text.push_str(t);
                     if r.text.len() > 256 * 1024 {
                         r.text.truncate(256 * 1024);
@@ -814,6 +828,7 @@ pub fn run_model_only(
                     }
                 }
                 ModelEvent::Usage(u) => usage = Some((u.input_tokens, u.output_tokens)),
+                ModelEvent::ResponseId(id) => response_id = Some(id.clone()),
                 // Reasoning deltas and tool-call fragments are provider
                 // data. They are never rendered as output and never
                 // dispatched: a fragment is inert text at most.
@@ -843,6 +858,8 @@ pub fn run_model_only(
     let mut rec = rec_cell.into_inner();
     let latency = started.elapsed().as_millis() as u64;
     rec.meta.latency_ms = Some(latency);
+    rec.meta.first_token_ms = first_token_ms;
+    rec.meta.provider_response_id = response_id;
     if let Some((i, o)) = usage {
         rec.meta.usage_input_tokens = Some(i);
         rec.meta.usage_output_tokens = Some(o);
@@ -851,6 +868,7 @@ pub fn run_model_only(
     match result {
         Ok(report) => {
             rec.meta.http_status = report.http_status;
+            rec.meta.provider_request_id = report.provider_request_id.clone();
             rec.meta.finish_reason = report.finish_reason.clone();
             if report.finish_reason.is_some() && !report.truncated {
                 rec.assistant(MessageState::Final)?;
@@ -1029,6 +1047,9 @@ pub fn status_from_store(
         usage_output_tokens: meta.usage_output_tokens,
         finish_reason: meta.finish_reason,
         latency_ms: meta.latency_ms,
+        first_token_ms: meta.first_token_ms,
+        provider_request_id: meta.provider_request_id,
+        provider_response_id: meta.provider_response_id,
         error_code: meta.error_code,
         cancel_requested: cancel_marker(cfg, conversation_id).exists(),
         text,

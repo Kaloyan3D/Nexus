@@ -61,6 +61,13 @@ function isSpecialV4(p) {
   if (p[0] === 0) return true
   if (p[0] === 214 && p[1] === 71) return false
   if (p[0] >= 224) return true // multicast + reserved + broadcast
+  // Aligned with the Rust destination classifier (nexus-contracts): IETF
+  // protocol assignments, documentation and benchmarking ranges are never
+  // provider destinations.
+  if (p[0] === 192 && p[1] === 0 && (p[2] === 0 || p[2] === 2)) return true // 192.0.0.0/24, 192.0.2.0/24
+  if (p[0] === 198 && (p[1] === 18 || p[1] === 19)) return true // 198.18.0.0/15
+  if (p[0] === 198 && p[1] === 51 && p[2] === 100) return true // 198.51.100.0/24
+  if (p[0] === 203 && p[1] === 0 && p[2] === 113) return true // 203.0.113.0/24
   return false
 }
 function bracketless(host) {

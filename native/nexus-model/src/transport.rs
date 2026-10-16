@@ -40,6 +40,9 @@ use std::sync::{
 };
 use std::time::Duration;
 
+/// Identifying user agent (never a generic HTTP-library name).
+pub const USER_AGENT: &str = "nexus-native-model-only/1";
+
 /// Default bound on SSE frames per response.
 pub const DEFAULT_MAX_EVENTS: usize = 1024;
 /// Default bound on assembled text+reasoning bytes (256 KiB).
@@ -257,6 +260,10 @@ pub struct SendReport {
     pub truncated: bool,
     /// Redacted transport note (e.g. why a stream truncated). Never secret.
     pub note: Option<String>,
+    /// Request identifier the provider supplied in a response header
+    /// (`x-request-id`, `request-id` or `x-opencode-request-id`), sanitized.
+    /// Never synthesized: `None` when the provider sent none.
+    pub provider_request_id: Option<String>,
     /// Structured cause when the read ended early (`timeout`, `cancelled`,
     /// `disconnected`, ...). `None` for a clean end of stream.
     pub stop_cause: Option<ModelErrorCode>,
@@ -351,6 +358,8 @@ pub struct HttpSseTransport {
     resolver: Arc<dyn crate::egress::Resolver>,
     policy: crate::egress::AddressPolicy,
     tls: Option<Arc<rustls::ClientConfig>>,
+    /// Provider endpoint pins (production constructors only).
+    enforce_pins: bool,
 }
 
 impl HttpSseTransport {
@@ -365,6 +374,7 @@ impl HttpSseTransport {
             resolver: Arc::new(crate::egress::SystemResolver),
             policy: crate::egress::AddressPolicy::PublicOnly,
             tls: None,
+            enforce_pins: true,
         }
     }
 
@@ -384,6 +394,7 @@ impl HttpSseTransport {
             resolver,
             policy,
             tls: Some(tls),
+            enforce_pins: false,
         }
     }
 
@@ -439,6 +450,20 @@ impl HttpSseTransport {
         self.binding
             .check(&prepared.endpoint_origin)
             .map_err(TransportError::refused)?;
+        // Provider adapter pins (production transport only): the OpenCode Go
+        // adapter may talk to exactly one documented origin + path. Anything
+        // else is refused before any DNS query - there is no endpoint
+        // fallback and no frontend/URL override.
+        if self.enforce_pins
+            && prepared.wire_profile == crate::target::WireProfile::OpenCodeGoResponses
+            && (prepared.endpoint_origin != crate::target::OPENCODE_GO_ORIGIN
+                || prepared.endpoint_path != crate::target::OPENCODE_GO_RESPONSES_PATH)
+        {
+            return Err(TransportError::refused(ModelError::new(
+                ModelErrorCode::EndpointMismatch,
+                "the OpenCode Go adapter is pinned to its documented endpoint; this target names another",
+            )));
+        }
         // Egress policy: resolve ONCE, classify every address, pin the
         // connection to an approved IP, keep the name for SNI/verification.
         let dest = crate::egress::approve_destination_bounded(
@@ -469,10 +494,11 @@ impl HttpSseTransport {
         let session = &prepared.session_header;
         let auth = credential.authorization_value();
         let head = format!(
-            "POST {} HTTP/1.1\r\nhost: {}\r\ncontent-type: application/json\r\naccept: text/event-stream\r\ncontent-length: {}\r\nx-opencode-session: {}\r\nconnection: close\r\n",
+            "POST {} HTTP/1.1\r\nhost: {}\r\ncontent-type: application/json\r\naccept: text/event-stream\r\ncontent-length: {}\r\nuser-agent: {}\r\nx-opencode-session: {}\r\nconnection: close\r\n",
             prepared.endpoint_path,
             host_port_header(&prepared.endpoint_origin, &host, port),
             prepared.request_bytes.len(),
+            USER_AGENT,
             session,
         );
         // NOTE: `auth` is written to the socket only; it never enters any
@@ -564,7 +590,21 @@ impl HttpSseTransport {
             if stream_ok != Some(true) {
                 return;
             }
-            let body = String::from_utf8_lossy(&buf[pos + 4..]);
+            let head_txt = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
+            let raw_body = &buf[pos + 4..];
+            let decoded;
+            let body_bytes: &[u8] = if head_txt.contains("transfer-encoding: chunked") {
+                match dechunk_prefix(raw_body) {
+                    Ok((d, _)) => {
+                        decoded = d;
+                        &decoded
+                    }
+                    Err(_) => return,
+                }
+            } else {
+                raw_body
+            };
+            let body = String::from_utf8_lossy(body_bytes);
             if let Ok(events) = parse_sse_body_complete_prefix(&body, limits.max_events) {
                 for ev in events.iter().skip(emitted) {
                     cb(ev);
@@ -594,32 +634,39 @@ impl HttpSseTransport {
             });
             return Err(TransportError::after_send(error));
         }
-        let text = String::from_utf8_lossy(&raw).into_owned();
-        let (status, headers, body) =
-            split_http_response(&text).map_err(TransportError::after_send)?;
+        let (status, headers, body, chunk_complete) =
+            split_http_response(&raw).map_err(TransportError::after_send)?;
         if (300..400).contains(&status) {
             return Err(TransportError::after_send(ModelError::new(
                 ModelErrorCode::RedirectRefused,
                 "provider answered with a redirect (never followed; pinned endpoint retained)",
             )));
         }
+        let request_id = headers
+            .iter()
+            .find(|(k, _)| {
+                ["x-request-id", "request-id", "x-opencode-request-id"]
+                    .iter()
+                    .any(|n| k.eq_ignore_ascii_case(n))
+            })
+            .map(|(_, v)| {
+                v.chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+                    .take(64)
+                    .collect::<String>()
+            })
+            .filter(|v| !v.is_empty());
         if status != 200 {
             // Classified, never retried: the provider answered, so the
             // failure is the provider's, not a transport guess.
-            let class = match status {
-                401 | 403 => "authentication or authorization rejected",
-                402 => "payment or quota rejected",
-                404 => "endpoint or model not found",
-                408 => "request timed out at the provider",
-                413 => "request too large for the provider",
-                429 => "rate limited",
-                400..=499 => "request rejected by the provider",
-                500..=599 => "provider server error",
-                _ => "unexpected provider status",
-            };
+            let class = classify_provider_status(status, &body);
+            let rid = request_id
+                .as_deref()
+                .map(|r| format!(" request-id={r};"))
+                .unwrap_or_default();
             return Err(TransportError::after_send(ModelError::new(
                 ModelErrorCode::ProviderFailed,
-                format!("provider answered HTTP {status} ({class}); not retried"),
+                format!("provider answered HTTP {status} ({class});{rid} not retried"),
             )));
         }
         let content_type = headers
@@ -635,15 +682,25 @@ impl HttpSseTransport {
         }
         match parse_sse_body(&body, limits.max_events) {
             Ok((events, finish_reason)) => {
-                let truncated = finish_reason.is_none();
+                // A chunked body that never reached its terminating chunk was
+                // cut off, even if every frame so far parsed: never a clean end.
+                let cut = chunk_complete == Some(false);
+                let truncated = finish_reason.is_none() || cut;
                 Ok(SendReport {
-                    stop_cause: read_err.as_ref().map(|e| e.code),
+                    stop_cause: read_err
+                        .as_ref()
+                        .map(|e| e.code)
+                        .or(cut.then_some(ModelErrorCode::Disconnected)),
+                    provider_request_id: request_id.clone(),
                     bytes_sent: true,
                     events,
                     finish_reason,
                     http_status: Some(status),
                     truncated,
-                    note: read_err.map(|e| e.message),
+                    note: read_err.map(|e| e.message).or(cut.then(|| {
+                        "chunked body ended without its terminating chunk (truncated stream)"
+                            .to_owned()
+                    })),
                 })
             }
             Err(parse_err) => {
@@ -655,6 +712,7 @@ impl HttpSseTransport {
                         if !events.is_empty() {
                             return Ok(SendReport {
                                 stop_cause: read_err.as_ref().map(|e| e.code),
+                                provider_request_id: request_id.clone(),
                                 bytes_sent: true,
                                 events,
                                 finish_reason: None,
@@ -665,9 +723,54 @@ impl HttpSseTransport {
                         }
                     }
                 }
-                Err(TransportError::after_send(parse_err))
+                let rid = request_id
+                    .as_deref()
+                    .map(|r| format!(" request-id={r};"))
+                    .unwrap_or_default();
+                Err(TransportError::after_send(ModelError::new(
+                    parse_err.code,
+                    format!("{} [http {status};{rid} not retried]", parse_err.message),
+                )))
             }
         }
+    }
+}
+
+/// Classify a non-200 provider answer into a short, fixed vocabulary. The
+/// body is only inspected for known markers; none of its text is echoed.
+fn classify_provider_status(status: u16, body: &str) -> &'static str {
+    let b = body
+        .chars()
+        .take(4096)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if status == 400 {
+        if b.contains("missingsessionid") || b.contains("missing session") {
+            return "protocol: the x-opencode-session header is required";
+        }
+        if b.contains("privacy") {
+            return "provider privacy opt-in required for this model";
+        }
+        if b.contains("model is unavailable")
+            || b.contains("model_not_found")
+            || b.contains("unknown model")
+        {
+            return "model unavailable for this account, region or plan";
+        }
+    }
+    if status == 401 || (status == 403 && b.contains("autherror")) {
+        return "authentication or authorization rejected";
+    }
+    match status {
+        403 => "authentication or authorization rejected",
+        402 => "payment or quota rejected",
+        404 => "endpoint or model not found",
+        408 => "request timed out at the provider",
+        413 => "request too large for the provider",
+        429 => "rate limited",
+        400..=499 => "request rejected by the provider",
+        500..=599 => "provider server error",
+        _ => "unexpected provider status",
     }
 }
 
@@ -784,15 +887,25 @@ fn read_all_partial(
 }
 
 /// Parsed HTTP response head: status, headers, and body.
-type HttpResponseParts = (u16, Vec<(String, String)>, String);
+/// status, headers, decoded body, and for chunked bodies whether the
+/// terminating zero-size chunk was seen (`None` when not chunked).
+type HttpResponseParts = (u16, Vec<(String, String)>, String, Option<bool>);
 
-fn split_http_response(text: &str) -> Result<HttpResponseParts, ModelError> {
-    let (head, body) = text.split_once("\r\n\r\n").ok_or_else(|| {
-        ModelError::new(
-            ModelErrorCode::SseMalformed,
-            "provider response lacks a complete HTTP header block",
-        )
-    })?;
+fn split_http_response(raw: &[u8]) -> Result<HttpResponseParts, ModelError> {
+    // Work on BYTES: chunk sizes count bytes, so decoding to text first would
+    // corrupt the framing wherever a chunk boundary splits a UTF-8 sequence.
+    let pos = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| {
+            ModelError::new(
+                ModelErrorCode::SseMalformed,
+                "provider response lacks a complete HTTP header block",
+            )
+        })?;
+    let head_owned = String::from_utf8_lossy(&raw[..pos]).into_owned();
+    let head = head_owned.as_str();
+    let body_bytes = &raw[pos + 4..];
     let mut lines = head.lines();
     let status_line = lines.next().ok_or_else(|| {
         ModelError::new(
@@ -816,5 +929,106 @@ fn split_http_response(text: &str) -> Result<HttpResponseParts, ModelError> {
             headers.push((k.trim().to_owned(), v.trim().to_owned()));
         }
     }
-    Ok((status, headers, body.to_owned()))
+    let te: Vec<&str> = headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("transfer-encoding"))
+        .map(|(_, v)| v.as_str())
+        .collect();
+    let has_len = headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-length"));
+    // Anything but a plain identity/`chunked` framing is refused rather than
+    // guessed at: stacked codings, duplicate headers and the Content-Length +
+    // Transfer-Encoding combination are classic response-smuggling shapes.
+    let non_identity_encoding = headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("content-encoding")
+            && !v.trim().eq_ignore_ascii_case("identity")
+            && !v.trim().is_empty()
+    });
+    if non_identity_encoding {
+        return Err(ModelError::new(
+            ModelErrorCode::SseMalformed,
+            "provider response uses a content-encoding that was not requested",
+        ));
+    }
+    if !te.is_empty() {
+        if te.len() != 1 || !te[0].trim().eq_ignore_ascii_case("chunked") {
+            return Err(ModelError::new(
+                ModelErrorCode::SseMalformed,
+                "provider response uses an unsupported transfer-encoding",
+            ));
+        }
+        if has_len {
+            return Err(ModelError::new(
+                ModelErrorCode::SseMalformed,
+                "provider response carries both content-length and transfer-encoding",
+            ));
+        }
+        let (decoded, complete) = dechunk_prefix(body_bytes)
+            .map_err(|m| ModelError::new(ModelErrorCode::SseMalformed, m))?;
+        return Ok((
+            status,
+            headers,
+            String::from_utf8_lossy(&decoded).into_owned(),
+            Some(complete),
+        ));
+    }
+    Ok((
+        status,
+        headers,
+        String::from_utf8_lossy(body_bytes).into_owned(),
+        None,
+    ))
+}
+
+/// Largest single chunk accepted. The whole response is already capped by the
+/// read loop; this rejects absurd declared sizes up front.
+const MAX_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+
+/// Decode an HTTP/1.1 `Transfer-Encoding: chunked` body (possibly cut short).
+/// Returns the data bytes decoded so far and whether the terminating
+/// zero-size chunk was seen. Chunk extensions and trailers are ignored; a
+/// malformed size line is an error (never guessed through). A partial last
+/// chunk contributes the bytes that have arrived. TLS already delivers one
+/// ordered byte stream, so there is no reassembly beyond this framing.
+pub(crate) fn dechunk_prefix(body: &[u8]) -> Result<(Vec<u8>, bool), &'static str> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    loop {
+        let Some(rel) = body[i..].windows(2).position(|w| w == b"\r\n") else {
+            return Ok((out, false)); // size line not complete yet
+        };
+        let line = &body[i..i + rel];
+        let size_txt = line.split(|b| *b == b';').next().unwrap_or(&[]);
+        let size_txt = std::str::from_utf8(size_txt).map_err(|_| "malformed chunk size line")?;
+        let size_txt = size_txt.trim();
+        if size_txt.is_empty()
+            || size_txt.len() > 8
+            || !size_txt.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err("malformed chunked transfer encoding");
+        }
+        let size = usize::from_str_radix(size_txt, 16).map_err(|_| "malformed chunk size")?;
+        if size > MAX_CHUNK_BYTES {
+            return Err("chunk size exceeds the transport bound");
+        }
+        i += rel + 2;
+        if size == 0 {
+            return Ok((out, true));
+        }
+        let avail = body.len().saturating_sub(i);
+        if avail < size {
+            out.extend_from_slice(&body[i..]);
+            return Ok((out, false));
+        }
+        out.extend_from_slice(&body[i..i + size]);
+        i += size;
+        if body.len() < i + 2 {
+            return Ok((out, false));
+        }
+        if &body[i..i + 2] != b"\r\n" {
+            return Err("malformed chunked transfer encoding");
+        }
+        i += 2;
+    }
 }

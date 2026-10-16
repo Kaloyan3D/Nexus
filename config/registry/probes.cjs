@@ -120,6 +120,45 @@ function joinUrl(baseUrl, suffix) {
   return base + suffix
 }
 
+// A5.4: the OpenCode Go adapter is selected only by the provider's explicit
+// `metadata.wireProfile`. Its models endpoint is NOT base+/models (it lives at
+// /inference/go/v1/models) and every request carries a stable session header.
+// Both are derived here from fixed constants, never from probe input.
+const GO_PROFILE = 'opencode-go-responses'
+const GO_BASE_URL = 'https://opencode.ai/inference/go/openai/v1'
+const GO_MODELS_URL = 'https://opencode.ai/inference/go/v1/models'
+// Muse is a reasoning model: with 128 the first live probe came back
+// status "incomplete" (budget spent before any text). Probe-only ceiling.
+const GO_PROBE_MAX_OUTPUT = 1024
+function isGoProfile(provider) {
+  return !!(provider && provider.metadata && provider.metadata.wireProfile === GO_PROFILE)
+}
+function modelsUrlOf(provider, paths) {
+  if (isGoProfile(provider) && String(provider.baseUrl).replace(/\/+$/, '') === GO_BASE_URL) return GO_MODELS_URL
+  return joinUrl(provider.baseUrl, paths.models)
+}
+// The shared SSRF policy treats every global IPv6 address as restricted and
+// refuses a host if ANY resolved address is restricted, so a dual-stack host
+// (opencode.ai has AAAA records) would always be refused. For the Go profile
+// only, the probe resolves IPv4 addresses alone: still every address validated,
+// just a narrower dial set. Nothing in the policy is relaxed.
+async function ipv4OnlyLookup(host) {
+  try {
+    const dns = require('node:dns').promises
+    const all = await dns.lookup(host, { all: true, family: 4 })
+    return (all || []).map((a) => ({ address: a.address, family: a.family }))
+  } catch {
+    return []
+  }
+}
+function probeLookupFor(provider) {
+  return isGoProfile(provider) ? ipv4OnlyLookup : undefined
+}
+function profileHeaders(provider) {
+  if (!isGoProfile(provider)) return {}
+  return { 'x-opencode-session': 'nexus-registry-probe-' + String(provider.id).replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 64) }
+}
+
 function transportPaths(transportId) {
   if (transportId === 'openai-responses') return { models: '/models', text: '/responses' }
   return { models: '/models', text: '/chat/completions' }
@@ -399,7 +438,8 @@ function validateTextCompletion(transportId, json) {
   }
   if (transportId === 'openai-responses') {
     if (json.status !== undefined && json.status !== 'completed') {
-      return failValidation('responses status is ' + JSON.stringify(json.status) + ', not completed')
+      const why = json.incomplete_details && typeof json.incomplete_details.reason === 'string' && /^[A-Za-z0-9_.:-]{1,48}$/.test(json.incomplete_details.reason) ? ' (incomplete reason: ' + json.incomplete_details.reason + ')' : ''
+      return failValidation('responses status is ' + JSON.stringify(json.status) + ', not completed' + why)
     }
     if (typeof json.output_text === 'string' && json.output_text.trim() !== '') {
       return okValidation('responses text completion (' + json.output_text.trim().length + ' chars of generated text)')
@@ -610,13 +650,13 @@ async function testConnection(provider, connection, fetchImpl, options) {
   const authReq = authRequirement(connection)
   const bearer = presentedBearer(connection)
   try {
-    const out = await boundedJson(fetchImpl, joinUrl(provider.baseUrl, paths.models), {
+    const out = await boundedJson(fetchImpl, modelsUrlOf(provider, paths), {
       transportId: provider.transportId,
       endpointOptions: opts.endpointOptions,
-      lookup: opts.lookup,
+      lookup: opts.lookup || probeLookupFor(provider),
       timeoutMs: opts.timeoutMs,
       signal: opts.signal,
-      headers: authHeaders(connection),
+      headers: Object.assign({}, profileHeaders(provider), authHeaders(connection)),
     })
     const ms = Date.now() - started
     if (out.status === 401 || out.status === 403) {
@@ -643,13 +683,13 @@ async function discoverModels(provider, connection, fetchImpl, options) {
   const where = 'probe.discover'
   const paths = transportPaths(provider.transportId)
   try {
-    const out = await boundedJson(fetchImpl, joinUrl(provider.baseUrl, paths.models), {
+    const out = await boundedJson(fetchImpl, modelsUrlOf(provider, paths), {
       transportId: provider.transportId,
       endpointOptions: opts.endpointOptions,
-      lookup: opts.lookup,
+      lookup: opts.lookup || probeLookupFor(provider),
       timeoutMs: opts.timeoutMs,
       signal: opts.signal,
-      headers: authHeaders(connection),
+      headers: Object.assign({}, profileHeaders(provider), authHeaders(connection)),
     })
     if (out.status === 401 || out.status === 403) {
       return { ok: false, advertised: [], errors: [err('probe-auth-failed', where, 'discovery rejected the credential (HTTP ' + out.status + ')')] }
@@ -670,10 +710,10 @@ async function discoverModels(provider, connection, fetchImpl, options) {
   }
 }
 
-function textPayload(transportId, remoteModelId, reasoning) {
+function textPayload(transportId, remoteModelId, reasoning, provider) {
   const probeText = 'nexus synthetic capability probe (no user content; reply with the single word: probe-ok)'
   if (transportId === 'openai-responses') {
-    const body = { model: remoteModelId, input: probeText, max_output_tokens: 16 }
+    const body = { model: remoteModelId, input: probeText, max_output_tokens: isGoProfile(provider) ? GO_PROBE_MAX_OUTPUT : 16 }
     if (reasoning) body.reasoning = { effort: reasoning }
     return body
   }
@@ -682,15 +722,23 @@ function textPayload(transportId, remoteModelId, reasoning) {
   return body
 }
 
-function toolPayload(transportId, remoteModelId) {
+function toolPayload(transportId, remoteModelId, provider) {
   const tool = { type: 'function', function: { name: 'probe_echo', description: 'Synthetic probe tool (no user content).', parameters: { type: 'object', properties: { word: { type: 'string' } }, required: ['word'] } } }
   if (transportId === 'openai-responses') {
-    return { model: remoteModelId, input: 'nexus synthetic tool probe (no user content; call probe_echo with word set to probe-ok)', tools: [{ type: 'function', name: 'probe_echo', description: 'Synthetic probe tool.', parameters: { type: 'object', properties: { word: { type: 'string' } }, required: ['word'] } }], max_output_tokens: 64 }
+    return { model: remoteModelId, input: 'nexus synthetic tool probe (no user content; call probe_echo with word set to probe-ok)', tools: [{ type: 'function', name: 'probe_echo', description: 'Synthetic probe tool.', parameters: { type: 'object', properties: { word: { type: 'string' } }, required: ['word'] } }], max_output_tokens: isGoProfile(provider) ? GO_PROBE_MAX_OUTPUT : 64 }
   }
   return { model: remoteModelId, messages: [{ role: 'user', content: 'nexus synthetic tool probe (no user content; call probe_echo with word set to probe-ok)' }], tools: [tool], tool_choice: 'auto', max_tokens: 64, stream: false }
 }
 
-function continuationPayload(transportId, remoteModelId, toolCallId) {
+function continuationPayload(transportId, remoteModelId, toolCallId, provider) {
+  if (transportId === 'openai-responses' && isGoProfile(provider)) {
+    // Stateless Responses continuation: the function_call item must precede
+    // its output, otherwise a real Responses endpoint rejects the call id.
+    return { model: remoteModelId, input: [
+      { type: 'function_call', call_id: toolCallId, name: 'probe_echo', arguments: '{"word":"probe-ok"}' },
+      { type: 'function_call_output', call_id: toolCallId, output: 'probe-ok' },
+    ], max_output_tokens: GO_PROBE_MAX_OUTPUT }
+  }
   if (transportId === 'openai-responses') {
     return { model: remoteModelId, input: [{ type: 'function_call_output', call_id: toolCallId, output: 'probe-ok' }], max_output_tokens: 16 }
   }
@@ -716,7 +764,7 @@ async function verifyRoute(provider, model, route, connection, fetchImpl, option
   const basePolicy = {
     transportId: provider.transportId,
     endpointOptions: opts.endpointOptions,
-    lookup: opts.lookup,
+    lookup: opts.lookup || probeLookupFor(provider),
     timeoutMs: opts.timeoutMs,
     signal: opts.signal,
   }
@@ -724,7 +772,7 @@ async function verifyRoute(provider, model, route, connection, fetchImpl, option
     return { ok: false, checks, evidence: null, errors: [err('probe-cancelled', where, 'verification cancelled before it started')] }
   }
   function requestOpts(extra) {
-    return Object.assign({}, basePolicy, { headers: Object.assign({ 'content-type': 'application/json' }, authHeaders(connection)) }, extra || {})
+    return Object.assign({}, basePolicy, { headers: Object.assign({ 'content-type': 'application/json' }, profileHeaders(provider), authHeaders(connection)) }, extra || {})
   }
   async function postCheck(name, payload, validate) {
     const started = Date.now()
@@ -768,7 +816,7 @@ async function verifyRoute(provider, model, route, connection, fetchImpl, option
     if (opts.signal && opts.signal.aborted) {
       return { ok: false, checks, evidence: null, errors: [err('probe-cancelled', where, 'verification cancelled')] }
     }
-    const probe = await postCheck('text-completion (reasoning:' + level + ')', textPayload(provider.transportId, route.remoteModelId, level), (json) => {
+    const probe = await postCheck('text-completion (reasoning:' + level + ')', textPayload(provider.transportId, route.remoteModelId, level, provider), (json) => {
       const shaped = validateTextCompletion(provider.transportId, json)
       if (!shaped.ok) return shaped
       if (!findReasoningEvidence(json, level)) {
@@ -789,7 +837,7 @@ async function verifyRoute(provider, model, route, connection, fetchImpl, option
   if (needsStreaming) {
     const started = Date.now()
     try {
-      const streamPayload = Object.assign(textPayload(provider.transportId, route.remoteModelId, reasoning), { stream: true })
+      const streamPayload = Object.assign(textPayload(provider.transportId, route.remoteModelId, reasoning, provider), { stream: true })
       const out = await boundedSse(fetchImpl, joinUrl(provider.baseUrl, paths.text), requestOpts({ method: 'POST', body: JSON.stringify(streamPayload) }))
       const ms = Date.now() - started
       if (out.status === 401 || out.status === 403) {
@@ -814,11 +862,11 @@ async function verifyRoute(provider, model, route, connection, fetchImpl, option
     checks.push({ name: 'streaming', ok: true, ms: 0, detail: 'not declared by model capabilities' })
   }
   if (needsTools) {
-    const emission = await postCheck('tool-call-emission', toolPayload(provider.transportId, route.remoteModelId), (json) => validateToolEmission(provider.transportId, json, 'probe_echo'))
+    const emission = await postCheck('tool-call-emission', toolPayload(provider.transportId, route.remoteModelId, provider), (json) => validateToolEmission(provider.transportId, json, 'probe_echo'))
     if (!emission.ok) {
       return { ok: false, checks, evidence: null, errors: [err('probe-failed', where, 'tool-call emission probe failed; route stays unverified')] }
     }
-    const continuation = await postCheck('tool-result-continuation', continuationPayload(provider.transportId, route.remoteModelId, emission.callId), (json) => validateContinuation(provider.transportId, json))
+    const continuation = await postCheck('tool-result-continuation', continuationPayload(provider.transportId, route.remoteModelId, emission.callId, provider), (json) => validateContinuation(provider.transportId, json))
     if (!continuation.ok) {
       return { ok: false, checks, evidence: null, errors: [err('probe-failed', where, 'tool-result continuation probe failed; route stays unverified')] }
     }

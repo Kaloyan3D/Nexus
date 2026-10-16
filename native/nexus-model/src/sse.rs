@@ -46,6 +46,8 @@ pub struct TerminalResponse {
     pub tool_calls: Vec<AssembledToolCall>,
     /// Provider-reported usage.
     pub usage: Usage,
+    /// Provider response id, when the provider supplied one.
+    pub response_id: Option<String>,
     /// Provider finish reason (`stop`, `tool_calls`, `length`, ...).
     pub finish_reason: String,
 }
@@ -66,8 +68,11 @@ pub enum ModelEvent {
         /// Argument bytes fragment.
         delta: String,
     },
-    /// Provider usage snapshot.
+    /// Provider usage snapshot (only when the provider actually reported it).
     Usage(Usage),
+    /// Provider response identifier (`response.id`), as supplied. Never
+    /// synthesized.
+    ResponseId(String),
 }
 
 struct ToolAssembly {
@@ -84,6 +89,7 @@ pub struct StreamAssembler {
     reasoning: String,
     tools: BTreeMap<String, ToolAssembly>,
     usage: Usage,
+    response_id: Option<String>,
     finish_reason: Option<String>,
     text_bytes: usize,
     arg_bytes: usize,
@@ -109,6 +115,7 @@ impl StreamAssembler {
             reasoning: String::new(),
             tools: BTreeMap::new(),
             usage: Usage::default(),
+            response_id: None,
             finish_reason: None,
             text_bytes: 0,
             arg_bytes: 0,
@@ -197,6 +204,10 @@ impl StreamAssembler {
                 self.usage = u;
                 Ok(())
             }
+            ModelEvent::ResponseId(id) => {
+                self.response_id = Some(id);
+                Ok(())
+            }
         }
     }
 
@@ -241,8 +252,26 @@ impl StreamAssembler {
             reasoning_text: self.reasoning,
             tool_calls: calls,
             usage: self.usage,
+            response_id: self.response_id,
             finish_reason: reason,
         })
+    }
+}
+
+/// Keep only a short, token-like identifier from provider-supplied text so a
+/// hostile or verbose provider cannot smuggle prose or secrets into our
+/// records.
+fn safe_token(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+        .take(64)
+        .collect::<String>()
+}
+
+fn push_response_id(id: &str, out: &mut Vec<ModelEvent>) {
+    let t = safe_token(id);
+    if !t.is_empty() && out.last() != Some(&ModelEvent::ResponseId(t.clone())) {
+        out.push(ModelEvent::ResponseId(t));
     }
 }
 
@@ -376,14 +405,20 @@ pub fn parse_data_payload(
                     format!("provider reported terminal status {status}"),
                 ));
             }
-            let usage = response
+            // Usage is recorded ONLY when the provider reported it: absent
+            // usage stays absent (never a fabricated 0/0).
+            if let Some(u) = response
                 .and_then(|r| r.get("usage"))
-                .map(|u| Usage {
+                .filter(|u| u.is_object())
+            {
+                out.push(ModelEvent::Usage(Usage {
                     input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                     output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                })
-                .unwrap_or_default();
-            out.push(ModelEvent::Usage(usage));
+                }));
+            }
+            if let Some(id) = response.and_then(|r| r.get("id")).and_then(|v| v.as_str()) {
+                push_response_id(id, out);
+            }
             let reason = response
                 .and_then(|r| r.get("finish_reason"))
                 .and_then(|v| v.as_str())
@@ -391,6 +426,62 @@ pub fn parse_data_payload(
                 .to_owned();
             *assembler_finish = Some(reason);
             Ok(true)
+        }
+        "response.created" | "response.in_progress" => {
+            if let Some(id) = value
+                .get("response")
+                .and_then(|r| r.get("id"))
+                .and_then(|v| v.as_str())
+            {
+                push_response_id(id, out);
+            }
+            Ok(false)
+        }
+        // The provider ended the response early but deliberately (for
+        // example the output-token limit). That is a definitive provider
+        // terminal, reported with its own reason - never as a plain stop.
+        "response.incomplete" => {
+            if *completed_seen {
+                return Err(ModelError::new(
+                    ModelErrorCode::SseMalformed,
+                    "duplicate provider completion in one stream (refusing to pick a winner)",
+                ));
+            }
+            *completed_seen = true;
+            let response = value.get("response");
+            if let Some(u) = response
+                .and_then(|r| r.get("usage"))
+                .filter(|u| u.is_object())
+            {
+                out.push(ModelEvent::Usage(Usage {
+                    input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                    output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                }));
+            }
+            if let Some(id) = response.and_then(|r| r.get("id")).and_then(|v| v.as_str()) {
+                push_response_id(id, out);
+            }
+            let why = response
+                .and_then(|r| r.get("incomplete_details"))
+                .and_then(|d| d.get("reason"))
+                .and_then(|v| v.as_str())
+                .map(safe_token)
+                .unwrap_or_else(|| "unspecified".to_owned());
+            *assembler_finish = Some(format!("incomplete:{why}"));
+            Ok(true)
+        }
+        // Top-level stream error event (`{"type":"error", ...}`).
+        "error" => {
+            let code = value
+                .get("code")
+                .or_else(|| value.get("error").and_then(|e| e.get("code")))
+                .and_then(|v| v.as_str())
+                .map(safe_token)
+                .unwrap_or_else(|| "unknown".to_owned());
+            Err(ModelError::new(
+                ModelErrorCode::ProviderFailed,
+                format!("provider reported stream error {code}"),
+            ))
         }
         "response.failed" => {
             let code = value
@@ -477,9 +568,19 @@ fn parse_sse_body_inner(
         {
             continue; // Named-event metadata we do not route on.
         } else {
+            // Shape only (never content): a short field-name-like prefix and
+            // the line length, so a protocol mismatch is diagnosable.
+            let shape: String = line
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+                .take(16)
+                .collect();
             return Err(ModelError::new(
                 ModelErrorCode::SseMalformed,
-                "SSE line is neither data nor a comment",
+                format!(
+                    "SSE line is neither data nor a comment (prefix '{shape}', {} bytes)",
+                    line.len()
+                ),
             ));
         }
     }

@@ -27,8 +27,100 @@ fn main() {
     std::process::exit(run());
 }
 
+fn authorize_live(args: &[String]) -> i32 {
+    let get = |n: &str| {
+        args.iter()
+            .position(|a| a == n)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let r = (|| -> Result<_, String> {
+        let state = PathBuf::from(get("--state-dir").ok_or("--state-dir is required")?);
+        // Never authorize spending against a broker running an older build.
+        let me = std::env::current_exe().map_err(|e| format!("current exe: {e}"))?;
+        match nexus_broker::identity::running_broker(&state, &me) {
+            nexus_broker::identity::Running::Stale(pid) => {
+                return Err(format!(
+                    "the running broker (pid {pid}) is an older build than this binary; restart it first (no authorization written)"
+                ))
+            }
+            nexus_broker::identity::Running::None => {
+                eprintln!("nexus-broker authorize-live: note: no running broker recorded for this state directory")
+            }
+            nexus_broker::identity::Running::Current(_) => {}
+        }
+        let prompt =
+            std::fs::read_to_string(get("--prompt-file").ok_or("--prompt-file is required")?)
+                .map_err(|e| format!("prompt file: {e}"))?;
+        let num = |n: &str| -> Result<u64, String> {
+            get(n)
+                .ok_or(format!("{n} is required"))?
+                .parse()
+                .map_err(|_| format!("{n} must be a number"))
+        };
+        nexus_broker::live_auth::write_record(
+            &state,
+            &get("--provider").ok_or("--provider is required")?,
+            &get("--model").ok_or("--model is required")?,
+            &prompt,
+            num("--max-output-tokens")?,
+            num("--expires-in-secs")?,
+            args.iter().any(|a| a == "--acknowledge-billable"),
+        )
+    })();
+    match r {
+        Ok(rec) => {
+            println!(
+                "authorized ONE live attempt: provider={} model={} promptSha256={} maxOutputTokens={} expiresAtMs={}",
+                rec.provider_id, rec.remote_model_id, rec.prompt_sha256, rec.max_output_tokens, rec.expires_at_ms
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("nexus-broker authorize-live: {e}");
+            2
+        }
+    }
+}
+
+/// `nexus-broker identity --state-dir D`: exit 0 = a current broker runs,
+/// 3 = a STALE broker runs, 4 = none recorded. Read-only.
+fn identity_report(args: &[String]) -> i32 {
+    let Some(state) = args
+        .iter()
+        .position(|a| a == "--state-dir")
+        .and_then(|i| args.get(i + 1))
+    else {
+        eprintln!("--state-dir is required");
+        return 2;
+    };
+    let Ok(me) = std::env::current_exe() else {
+        return 2;
+    };
+    match nexus_broker::identity::running_broker(&PathBuf::from(state), &me) {
+        nexus_broker::identity::Running::Current(pid) => {
+            println!("broker pid {pid}: runs the installed binary");
+            0
+        }
+        nexus_broker::identity::Running::Stale(pid) => {
+            println!("broker pid {pid}: STALE (older build than the installed binary; restart it)");
+            3
+        }
+        nexus_broker::identity::Running::None => {
+            println!("no running broker recorded");
+            4
+        }
+    }
+}
+
 fn run() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("authorize-live") {
+        return authorize_live(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("identity") {
+        return identity_report(&args[1..]);
+    }
     let get = |n: &str| {
         args.iter()
             .position(|a| a == n)

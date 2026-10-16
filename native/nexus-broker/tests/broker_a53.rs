@@ -1730,3 +1730,83 @@ fn a531_conversation_is_served_per_run_by_ownership_with_incremental_paging() {
     }
     b.shutdown();
 }
+
+#[test]
+fn a54_live_gate_refuses_real_https_runs_without_operator_authorization() {
+    use std::sync::atomic::Ordering;
+    let fx = fixture(hello(), true);
+    // Production transport (no injected one): an https endpoint is "live".
+    let mut cfg = fx.config("live");
+    cfg.transport = None;
+    let state = cfg.state_dir.clone();
+    let b = nexus_broker::start(cfg).expect("broker starts");
+    let sock = b.socket_path().to_owned();
+
+    // 1. No record: refused before any grant; the provider sees nothing.
+    let r = ic::submit(&sock, &intent("ping", "a54-live-none"))
+        .unwrap()
+        .run;
+    let r = wait_terminal(&sock, &r.run_id, 30);
+    assert_eq!(r.state, "rejected", "{r:?}");
+    assert_eq!(
+        r.error_code.as_deref(),
+        Some("live-not-authorized"),
+        "{r:?}"
+    );
+    assert_eq!(fx.provider.accepted.load(Ordering::SeqCst), 0);
+
+    // 2. A record for a different prompt is refused AND consumed.
+    nexus_broker::live_auth::write_record(
+        &state,
+        "e2e-mock",
+        "e2e-mock-model",
+        "another prompt",
+        64,
+        600,
+        true,
+    )
+    .unwrap();
+    let mut i = intent("ping", "a54-live-mismatch");
+    i.limits.max_output_tokens = Some(32);
+    let r = wait_terminal(&sock, &ic::submit(&sock, &i).unwrap().run.run_id, 30);
+    assert_eq!(
+        r.error_code.as_deref(),
+        Some("live-not-authorized"),
+        "{r:?}"
+    );
+    assert!(
+        !nexus_broker::live_auth::record_path(&state).exists(),
+        "mismatch consumes the record"
+    );
+
+    // 3. Exact record but no explicit output limit: refused (nothing sent).
+    nexus_broker::live_auth::write_record(
+        &state,
+        "e2e-mock",
+        "e2e-mock-model",
+        "ping",
+        64,
+        600,
+        true,
+    )
+    .unwrap();
+    let r = wait_terminal(
+        &sock,
+        &ic::submit(&sock, &intent("ping", "a54-live-nolimit"))
+            .unwrap()
+            .run
+            .run_id,
+        30,
+    );
+    assert_eq!(
+        r.error_code.as_deref(),
+        Some("live-not-authorized"),
+        "{r:?}"
+    );
+    assert_eq!(
+        fx.provider.accepted.load(Ordering::SeqCst),
+        0,
+        "nothing was sent in any case"
+    );
+    b.shutdown();
+}

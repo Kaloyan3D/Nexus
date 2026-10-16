@@ -189,9 +189,14 @@ async fn intent_submit(
     idempotency_key: String,
 ) -> Result<nexus_client::intent_client::SubmitReply, UiError> {
     tauri::async_runtime::spawn_blocking(move || {
-        use nexus_client::intent_contract::{IntentLimits, ModelSelection, NexusIntentV1, ResponseMode};
+        use nexus_client::intent_contract::{
+            IntentLimits, ModelSelection, NexusIntentV1, ResponseMode,
+        };
         let model = match (provider_id, remote_model_id) {
-            (Some(p), Some(m)) => Some(ModelSelection { provider_id: p, remote_model_id: m }),
+            (Some(p), Some(m)) => Some(ModelSelection {
+                provider_id: p,
+                remote_model_id: m,
+            }),
             (None, None) => None,
             _ => {
                 return Err(UiError {
@@ -211,8 +216,11 @@ async fn intent_submit(
             response_mode: ResponseMode::Stream,
             client_label: Some("nexus-desktop".to_owned()),
         };
-        nexus_client::intent_client::submit(&nexus_client::intent_client::default_broker_socket(), &intent)
-            .map_err(|e| backend::ui_error(&e))
+        nexus_client::intent_client::submit(
+            &nexus_client::intent_client::default_broker_socket(),
+            &intent,
+        )
+        .map_err(|e| backend::ui_error(&e))
     })
     .await
     .map_err(|_| internal())?
@@ -221,18 +229,26 @@ async fn intent_submit(
 #[tauri::command]
 async fn intent_status(run_id: String) -> Result<nexus_client::intent_client::IntentRun, UiError> {
     tauri::async_runtime::spawn_blocking(move || {
-        nexus_client::intent_client::status(&nexus_client::intent_client::default_broker_socket(), &run_id)
-            .map_err(|e| backend::ui_error(&e))
+        nexus_client::intent_client::status(
+            &nexus_client::intent_client::default_broker_socket(),
+            &run_id,
+        )
+        .map_err(|e| backend::ui_error(&e))
     })
     .await
     .map_err(|_| internal())?
 }
 
 #[tauri::command]
-async fn intent_cancel(run_id: String) -> Result<nexus_client::intent_client::CancelReply, UiError> {
+async fn intent_cancel(
+    run_id: String,
+) -> Result<nexus_client::intent_client::CancelReply, UiError> {
     tauri::async_runtime::spawn_blocking(move || {
-        nexus_client::intent_client::cancel(&nexus_client::intent_client::default_broker_socket(), &run_id)
-            .map_err(|e| backend::ui_error(&e))
+        nexus_client::intent_client::cancel(
+            &nexus_client::intent_client::default_broker_socket(),
+            &run_id,
+        )
+        .map_err(|e| backend::ui_error(&e))
     })
     .await
     .map_err(|_| internal())?
@@ -458,6 +474,9 @@ mod authz_tests {
             usage_output_tokens: Some(2),
             finish_reason: Some("stop".into()),
             latency_ms: Some(3),
+            first_token_ms: Some(2),
+            provider_request_id: Some("req_x".into()),
+            provider_response_id: Some("resp_x".into()),
             error_code: None,
             cancel_requested: false,
             text: "hello".into(),
@@ -466,10 +485,27 @@ mod authz_tests {
         let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
         keys.sort_unstable();
         let mut expected = vec![
-            "attemptId", "cancelRequested", "commandId", "conversationId", "endpointKind",
-            "errorCode", "finishReason", "httpStatus", "latencyMs", "logicalModelId",
-            "providerId", "remoteModelId", "requestDigest", "state", "terminal", "text",
-            "usageInputTokens", "usageOutputTokens",
+            "attemptId",
+            "cancelRequested",
+            "commandId",
+            "conversationId",
+            "endpointKind",
+            "errorCode",
+            "finishReason",
+            "firstTokenMs",
+            "httpStatus",
+            "latencyMs",
+            "logicalModelId",
+            "providerId",
+            "providerRequestId",
+            "providerResponseId",
+            "remoteModelId",
+            "requestDigest",
+            "state",
+            "terminal",
+            "text",
+            "usageInputTokens",
+            "usageOutputTokens",
         ];
         expected.sort_unstable();
         assert_eq!(keys, expected, "an exact, credential-free field set");
@@ -483,7 +519,10 @@ mod authz_tests {
             "dispatch-authorize",
             "from_protected_file",
         ] {
-            assert!(!prod.contains(forbidden), "Tauri backend must not reference {forbidden}");
+            assert!(
+                !prod.contains(forbidden),
+                "Tauri backend must not reference {forbidden}"
+            );
         }
         let cap: serde_json::Value =
             serde_json::from_str(include_str!("../capabilities/main.json")).unwrap();
@@ -515,7 +554,10 @@ mod authz_tests {
             "dispatch-authorize",
             "tool-execute",
         ] {
-            assert!(!prod.contains(forbidden), "Tauri backend must not reference {forbidden}");
+            assert!(
+                !prod.contains(forbidden),
+                "Tauri backend must not reference {forbidden}"
+            );
         }
         // The submit command cannot carry anything but text + an explicit
         // provider/model pair + an idempotency key.
@@ -540,7 +582,9 @@ mod authz_tests {
             for stream in l.incoming().take(3) {
                 let mut s = stream.unwrap();
                 let mut line = String::new();
-                BufReader::new(s.try_clone().unwrap()).read_line(&mut line).unwrap();
+                BufReader::new(s.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
                 let v: serde_json::Value = serde_json::from_str(&line).unwrap();
                 let cmd = v["cmd"].as_str().unwrap_or("").to_owned();
                 let rid = v["id"].clone();
@@ -551,7 +595,13 @@ mod authz_tests {
                     "intent-cancel" => serde_json::json!({"run": run, "outcome": "requested"}),
                     _ => serde_json::json!({"models": []}),
                 };
-                let _ = s.write_all(format!("{}\n", serde_json::json!({"protocol":1,"id":rid,"ok":true,"result":result})).as_bytes());
+                let _ = s.write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::json!({"protocol":1,"id":rid,"ok":true,"result":result})
+                    )
+                    .as_bytes(),
+                );
             }
         });
         std::env::set_var("NEXUS_BROKER_SOCKET", &sock);
@@ -563,7 +613,10 @@ mod authz_tests {
         ))
         .unwrap();
         assert!(!r.replay);
-        tauri::async_runtime::block_on(super::intent_cancel("run_00000000000000000000000000000000".into())).unwrap();
+        tauri::async_runtime::block_on(super::intent_cancel(
+            "run_00000000000000000000000000000000".into(),
+        ))
+        .unwrap();
         tauri::async_runtime::block_on(super::intent_models()).unwrap();
         let got = frames.lock().unwrap().clone();
         assert_eq!(got.len(), 3);
@@ -574,7 +627,17 @@ mod authz_tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["clientLabel", "content", "idempotencyKey", "intentType", "limits", "model", "requestId", "responseMode", "schemaVersion"]
+            [
+                "clientLabel",
+                "content",
+                "idempotencyKey",
+                "intentType",
+                "limits",
+                "model",
+                "requestId",
+                "responseMode",
+                "schemaVersion"
+            ]
         );
         assert_eq!(i["intentType"], "model-only");
         assert_eq!(i["model"]["providerId"], "acme");
@@ -604,8 +667,15 @@ mod authz_tests {
         ] {
             assert!(prod.contains(needed), "missing {needed}");
         }
-        for forbidden in ["nexus_client::list_model_conversations", "nexus_client::model_run_status", "nexus_client::request_model_cancel"] {
-            assert!(!prod.contains(forbidden), "the backend must not read transcripts directly: {forbidden}");
+        for forbidden in [
+            "nexus_client::list_model_conversations",
+            "nexus_client::model_run_status",
+            "nexus_client::request_model_cancel",
+        ] {
+            assert!(
+                !prod.contains(forbidden),
+                "the backend must not read transcripts directly: {forbidden}"
+            );
         }
     }
 }

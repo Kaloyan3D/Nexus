@@ -490,6 +490,9 @@ fn overlay(run: &mut IntentRun, s: &ModelRunStatus) {
     run.usage_output_tokens = s.usage_output_tokens;
     run.finish_reason = s.finish_reason.clone();
     run.latency_ms = s.latency_ms;
+    run.first_token_ms = s.first_token_ms;
+    run.provider_request_id = s.provider_request_id.clone();
+    run.provider_response_id = s.provider_response_id.clone();
     run.error_code = s.error_code.clone().or(run.error_code.take());
     run.cancel_requested = run.cancel_requested || s.cancel_requested;
 }
@@ -684,6 +687,7 @@ pub fn start(cfg: BrokerConfig) -> Result<BrokerHandle, String> {
         .map_err(|e| format!("lock: {e}"))?;
     lock.try_lock_exclusive()
         .map_err(|_| "another broker already owns this state directory".to_owned())?;
+    crate::identity::write_instance(&cfg.state_dir)?;
     let node_abs = crate::trust::resolve_node(&cfg.node, &cfg.extra_trusted_owner_uids)?;
     crate::trust::check_bridge(&cfg.bridge_path(), &cfg.extra_trusted_owner_uids)?;
     let cap_hex = nexus_client::issuer::read_capability(&cfg.cap_path)
