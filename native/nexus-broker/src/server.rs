@@ -118,6 +118,16 @@ impl Broker {
         let mut run = rec.run.clone();
         let mut text = String::new();
         if let Some(conv) = &run.conversation_id {
+            if let Ok(store) = nexus_transcript::TranscriptStore::open(&self.cfg.transcript_dir) {
+                if let Ok(l) = store.load(conv) {
+                    run.prompt_preview = l
+                        .events
+                        .iter()
+                        .find(|e| e.kind == nexus_transcript::EventKind::UserMessage)
+                        .and_then(|e| e.text.clone())
+                        .map(|t| t.chars().take(160).collect());
+                }
+            }
             if let Ok(s) = nexus_client::model_run_status(&self.client_config(), conv) {
                 text = s.text.clone();
                 // Live overlay only while the record is not final; a final
@@ -430,6 +440,30 @@ impl Broker {
                     .map(|r| self.view(r).0)
                     .collect();
                 Ok(json!({ "runs": runs }))
+            }
+            "intent-conversation" => {
+                // Read-only, per-run, ownership-authorized transcript page. The
+                // client names a conversation id; the broker serves it ONLY if a
+                // run owned by this client points at it. No path, no file.
+                let conv = params
+                    .get("conversationId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let owned = self.store.all().into_iter().any(|r| {
+                    r.run.client_id == client && r.run.conversation_id.as_deref() == Some(conv)
+                });
+                if !owned {
+                    return Err(("not-found", "no such run".to_owned()));
+                }
+                let n = |k: &str| params.get(k).and_then(|v| v.as_u64());
+                let spec = nexus_transcript::PageSpec {
+                    after_seq: n("afterSeq"),
+                    before_seq: n("beforeSeq"),
+                    limit: n("limit").unwrap_or(200).clamp(1, 200) as u32,
+                };
+                let view = nexus_client::conversation(&self.client_config(), conv, spec)
+                    .map_err(|_| ("internal", "the conversation could not be read".to_owned()))?;
+                Ok(json!({ "view": view }))
             }
             "intent-models" => Ok(json!({ "models": self.models()? })),
             "broker-health" => Ok(json!({ "ok": true, "clientId": client })),

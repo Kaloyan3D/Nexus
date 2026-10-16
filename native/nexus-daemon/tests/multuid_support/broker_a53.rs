@@ -826,3 +826,254 @@ fn multuid_broker_restart_preserves_ownership_and_idempotency_and_leaks_no_proce
         String::from_utf8_lossy(&still.stdout)
     );
 }
+
+/// CLI as `user` with extra environment (a private local transcript dir).
+fn cli_env_as(rig: &Rig, user: &str, local: &Path, args: &[&str]) -> (i32, serde_json::Value) {
+    let cli = std::env::var("NEXUS_CLI_BIN").expect("NEXUS_CLI_BIN");
+    let mut a: Vec<String> = vec![
+        format!("NEXUS_BROKER_SOCKET={}", rig.sock.display()),
+        format!("NEXUS_TRANSCRIPT_DIR={}", local.display()),
+        cli,
+        "--json".into(),
+    ];
+    a.extend(args.iter().map(|s| s.to_string()));
+    let refs: Vec<&str> = a.iter().map(|s| s.as_str()).collect();
+    let out = run_as(user, "env", &refs).unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    (
+        out.status.code().unwrap_or(-1),
+        serde_json::from_str(text.trim().lines().last().unwrap_or("{}"))
+            .unwrap_or(serde_json::Value::Null),
+    )
+}
+
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_desktop_contract_reads_runs_without_transcript_access() {
+    let Some(mut rig) = Rig::new("desktop-contract", 700) else {
+        return;
+    };
+    rig.start_broker();
+    let input = rig.root.join("input.txt");
+    std::fs::write(&input, "hello from the desktop identity").unwrap();
+    own(&input, 0o644, 0, 0);
+    // each Desktop UID has its OWN private local transcript dir (empty)
+    let (l1, l2) = (rig.root.join("local-d1"), rig.root.join("local-d2"));
+    for (p, u) in [(&l1, rig.desktop), (&l2, rig.desktop2)] {
+        std::fs::create_dir_all(p).unwrap();
+        own(p, 0o700, u, u);
+    }
+    let mut seen_output = String::new();
+
+    // 1-2. Desktop submits; the broker runs the real chain.
+    let (c, v) = cli_env_as(
+        &rig,
+        DESKTOP_USER,
+        &l1,
+        &[
+            "intent",
+            "submit",
+            "--input",
+            input.to_str().unwrap(),
+            "--idempotency-key",
+            "mu-dc-key-0001",
+        ],
+    );
+    assert_eq!(c, 0, "{v}");
+    let run_id = v["run"]["runId"].as_str().unwrap().to_owned();
+    seen_output.push_str(&v.to_string());
+
+    // 4. Desktop contract: list -> conversation id, then incremental reads by cursor.
+    let end = Instant::now() + Duration::from_secs(60);
+    let conv = loop {
+        let (_, l) = cli_env_as(&rig, DESKTOP_USER, &l1, &["intent", "desktop", "list"]);
+        if let Some(e) = l["value"].as_array().and_then(|a| a.first()) {
+            assert_eq!(e["firstPrompt"], "hello from the desktop identity");
+            assert_eq!(e["providerId"], "e2e-mock");
+            break e["conversationId"].as_str().unwrap().to_owned();
+        }
+        assert!(Instant::now() < end, "conversation never appeared");
+        std::thread::sleep(Duration::from_millis(150));
+    };
+    let mut cursor: Option<u64> = None;
+    let mut partials: Vec<String> = Vec::new();
+    let mut last_user = String::new();
+    loop {
+        let mut args = vec!["intent", "desktop", "conversation", conv.as_str()];
+        let cur = cursor.map(|c| c.to_string());
+        if let Some(c) = &cur {
+            args.extend(["--after", c.as_str()]);
+        }
+        let (code, r) = cli_env_as(&rig, DESKTOP_USER, &l1, &args);
+        assert_eq!(code, 0, "{r}");
+        let view = &r["value"];
+        assert_eq!(view["source"], "native-store");
+        if let Some(h) = view["page"]["headSeq"].as_u64() {
+            cursor = Some(h);
+        }
+        for e in view["page"]["events"].as_array().unwrap() {
+            if e["kind"] == "assistant-message" {
+                partials.push(e["text"].as_str().unwrap_or("").to_owned());
+            }
+            if e["kind"] == "user-message" {
+                last_user = e["text"].as_str().unwrap_or("").to_owned();
+            }
+        }
+        seen_output.push_str(&r.to_string());
+        let (_, s) = cli_env_as(
+            &rig,
+            DESKTOP_USER,
+            &l1,
+            &["intent", "desktop", "status", &conv],
+        );
+        if s["value"]["terminal"] == true {
+            assert_eq!(s["value"]["state"], "completed", "{s}");
+            assert_eq!(s["value"]["providerId"], "e2e-mock");
+            assert_eq!(s["value"]["usageInputTokens"], 4);
+            break;
+        }
+        assert!(Instant::now() < end);
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    assert_eq!(last_user, "hello from the desktop identity");
+    assert!(
+        partials.len() >= 2,
+        "streamed incrementally through the broker: {partials:?}"
+    );
+    assert_eq!(
+        partials.last().unwrap(),
+        "Hello from the fixture",
+        "complete response, no transcript read"
+    );
+    assert_eq!(rig.provider.accepted.load(Ordering::SeqCst), 1);
+
+    // 5. Reconnect/resume from the correct byte offset (fresh process each call).
+    let full = "Hello from the fixture";
+    let mid = 11u64; // "Hello from " boundary
+    let f = rig
+        .call(
+            DESKTOP_USER,
+            "intent-follow",
+            serde_json::json!({"runId": run_id, "offset": mid, "waitMs": 0}),
+        )
+        .unwrap();
+    assert_eq!(f["result"]["textDelta"], &full[mid as usize..]);
+    assert_eq!(f["result"]["nextOffset"], full.len());
+    let bad = rig
+        .call(
+            DESKTOP_USER,
+            "intent-follow",
+            serde_json::json!({"runId": run_id, "offset": 9999, "waitMs": 0}),
+        )
+        .unwrap();
+    assert_eq!(bad["code"], "bad-offset");
+
+    // 3 / 8. The Desktop UID cannot read the private transcript files directly.
+    let tdir = rig.transcripts.to_string_lossy().into_owned();
+    let tfile = format!("{tdir}/{conv}.jsonl");
+    for user in [DESKTOP_USER, DESKTOP2_USER] {
+        assert!(
+            denied(user, "ls", &[&tdir]),
+            "{user} must not list the transcript dir"
+        );
+        assert!(
+            denied(user, "cat", &[&tfile]),
+            "{user} must not read the transcript file"
+        );
+    }
+
+    // 7. The other authorized Desktop UID sees nothing of this run.
+    let (_, o) = cli_env_as(
+        &rig,
+        DESKTOP2_USER,
+        &l2,
+        &["intent", "desktop", "conversation", &conv],
+    );
+    assert_eq!(o["value"]["available"], false, "{o}");
+    assert!(
+        !o.to_string().contains("Hello from the fixture")
+            && !o.to_string().contains("hello from the desktop")
+    );
+    let (_, ol) = cli_env_as(&rig, DESKTOP2_USER, &l2, &["intent", "desktop", "list"]);
+    assert_eq!(ol["value"].as_array().map(|a| a.len()), Some(0));
+    let (c2, os) = cli_env_as(
+        &rig,
+        DESKTOP2_USER,
+        &l2,
+        &["intent", "desktop", "status", &conv],
+    );
+    assert_ne!(c2, 0, "{os}");
+    let (c3, _) = cli_env_as(
+        &rig,
+        DESKTOP2_USER,
+        &l2,
+        &["intent", "desktop", "cancel", &conv],
+    );
+    assert_ne!(
+        c3, 0,
+        "a foreign UID cannot cancel through the Desktop contract either"
+    );
+
+    // 6. Cancellation through the Desktop contract reaches the executor.
+    let (_, v2) = cli_env_as(
+        &rig,
+        DESKTOP_USER,
+        &l1,
+        &[
+            "intent",
+            "submit",
+            "--input",
+            input.to_str().unwrap(),
+            "--idempotency-key",
+            "mu-dc-key-0002",
+        ],
+    );
+    let run2 = v2["run"]["runId"].as_str().unwrap().to_owned();
+    let conv2 = loop {
+        let (_, s) = cli_env_as(&rig, DESKTOP_USER, &l1, &["intent", "desktop", "list"]);
+        let hit = s["value"]
+            .as_array()
+            .and_then(|a| a.iter().find(|e| e["state"] == "streaming").cloned());
+        if let Some(e) = hit {
+            break e["conversationId"].as_str().unwrap().to_owned();
+        }
+        assert!(Instant::now() < end, "second run never streamed");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let (cc, cr) = cli_env_as(
+        &rig,
+        DESKTOP_USER,
+        &l1,
+        &["intent", "desktop", "cancel", &conv2],
+    );
+    assert_eq!(cc, 0, "{cr}");
+    let fin = rig.wait_terminal(DESKTOP_USER, &run2);
+    assert_eq!(fin["state"], "cancelled", "{fin}");
+    assert_eq!(
+        rig.provider.accepted.load(Ordering::SeqCst),
+        2,
+        "one submission per run, no resend"
+    );
+
+    // 8. No private state or credential in anything the Desktop saw or logged.
+    let mut hay = seen_output;
+    for e in std::fs::read_dir(&rig.root).unwrap().flatten() {
+        if e.file_name().to_string_lossy().ends_with(".log") {
+            hay.push_str(&std::fs::read_to_string(e.path()).unwrap_or_default());
+        }
+    }
+    let cap = rig.d.read_handoff();
+    assert!(!hay.contains(SECRET) && !hay.contains(cap.trim()));
+    assert!(!hay.contains("provider-credentials") && !hay.contains("broker-state"));
+
+    // 9. No process remains.
+    let pid = rig.broker.as_ref().unwrap().id() as i32;
+    rig.stop_broker();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(unsafe { libc::kill(-pid, 0) }, -1);
+    let still = Command::new("pgrep")
+        .args(["-f", "^/tmp/nxmu/bin/nexus-broker"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&still.stdout).trim().is_empty());
+}

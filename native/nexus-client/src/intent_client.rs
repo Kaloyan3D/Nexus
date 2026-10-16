@@ -65,6 +65,9 @@ pub struct IntentRun {
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub cancel_requested: bool,
+    /// First 160 characters of the user's own prompt (owner-only view).
+    #[serde(default)]
+    pub prompt_preview: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }
@@ -267,6 +270,28 @@ pub fn list(socket: &Path, limit: u32) -> Result<Vec<IntentRun>, ClientError> {
         10_000,
     )?;
     decode(v.get("runs").cloned().unwrap_or_default())
+}
+
+/// Read-only conversation page for one of THIS client's runs (the broker
+/// authorizes by run ownership; the transcript file stays issuer-private).
+/// Returns the same JSON shape as a native `ConversationView`.
+pub fn conversation(
+    socket: &Path,
+    conversation_id: &str,
+    after_seq: Option<u64>,
+    before_seq: Option<u64>,
+    limit: Option<u32>,
+) -> Result<serde_json::Value, ClientError> {
+    let v = call(
+        socket,
+        "intent-conversation",
+        serde_json::json!({
+            "conversationId": conversation_id, "afterSeq": after_seq,
+            "beforeSeq": before_seq, "limit": limit,
+        }),
+        15_000,
+    )?;
+    Ok(v.get("view").cloned().unwrap_or(serde_json::Value::Null))
 }
 
 /// Look up the run owning a conversation (Desktop cancel helper).

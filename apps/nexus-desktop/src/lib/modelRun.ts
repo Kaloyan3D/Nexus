@@ -5,6 +5,15 @@ export type RunTone = "success" | "purple" | "warning" | "error" | "neutral";
 /** Presentation of the durable run state. No state is ever invented. */
 export function modelStateView(state: string): { label: string; tone: RunTone; pulse: boolean } {
   switch (state) {
+    case "received":
+    case "preparing":
+      return { label: "Preparing request", tone: "purple", pulse: true };
+    case "executing":
+      return { label: "Running", tone: "purple", pulse: true };
+    case "rejected":
+      return { label: "Rejected (nothing sent)", tone: "error", pulse: false };
+    case "abandoned":
+      return { label: "Abandoned (nothing sent)", tone: "warning", pulse: false };
     case "accepted":
       return { label: "Accepted", tone: "purple", pulse: true };
     case "target-selected":

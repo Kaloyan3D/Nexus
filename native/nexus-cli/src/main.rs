@@ -628,6 +628,30 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
     };
     let r: Result<ExitCode, nexus_client::ClientError> = (|| {
         match sub {
+        "desktop" => {
+            // Exactly what Nexus Desktop's Tauri backend calls (same functions).
+            use nexus_client::desktop_contract as dc;
+            let verb = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            let id = args
+                .iter()
+                .skip(2)
+                .find(|a| !a.starts_with("--"))
+                .cloned()
+                .unwrap_or_default();
+            let num = |f: &str| flag_value(args, f).and_then(|v| v.parse::<u64>().ok());
+            let value = match verb {
+                "conversation" => dc::conversation_read(cfg, &sock, &id, num("--after"), num("--before"), num("--limit").map(|n| n as u32))?,
+                "status" => serde_json::to_value(dc::model_run_status(cfg, &sock, &id)?).unwrap_or_default(),
+                "list" => serde_json::to_value(dc::list_model_conversations(cfg, &sock)).unwrap_or_default(),
+                "cancel" => {
+                    dc::cancel_model_run(cfg, &sock, &id)?;
+                    serde_json::json!({ "cancelRequested": true })
+                }
+                _ => return Err(nexus_client::ClientError::usage("usage: nexus intent desktop <conversation|status|list|cancel> [conversation-id]")),
+            };
+            intent_ok(cfg, serde_json::json!({ "value": value }), &value.to_string());
+            Ok(ExitCode::Ok)
+        }
         "models" => {
             let m = ic::models(&sock)?;
             let human = m

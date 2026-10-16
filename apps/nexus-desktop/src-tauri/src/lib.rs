@@ -64,10 +64,21 @@ async fn conversation_read(
     after_seq: Option<u64>,
     before_seq: Option<u64>,
     limit: Option<u32>,
-) -> Result<nexus_client::ConversationView, UiError> {
+) -> Result<serde_json::Value, UiError> {
     let cfg = state.cfg.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        backend::conversation_read(&cfg, &task_instance_id, after_seq, before_seq, limit)
+        // Model runs are read THROUGH THE BROKER (ownership-authorized,
+        // transcript files stay issuer-private); everything else keeps the
+        // historical local reader.
+        nexus_client::desktop_contract::conversation_read(
+            &cfg,
+            &nexus_client::intent_client::default_broker_socket(),
+            &task_instance_id,
+            after_seq,
+            before_seq,
+            limit,
+        )
+        .map_err(|e| backend::ui_error(&e))
     })
     .await
     .map_err(|_| internal())?
@@ -100,9 +111,14 @@ async fn list_model_conversations(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<nexus_client::ModelConversationSummary>, UiError> {
     let cfg = state.cfg.clone();
-    tauri::async_runtime::spawn_blocking(move || nexus_client::list_model_conversations(&cfg))
-        .await
-        .map_err(|_| internal())
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::desktop_contract::list_model_conversations(
+            &cfg,
+            &nexus_client::intent_client::default_broker_socket(),
+        )
+    })
+    .await
+    .map_err(|_| internal())
 }
 
 /// A5.1: durable status of one model-only run, derived from the transcript.
@@ -113,7 +129,12 @@ async fn model_run_status(
 ) -> Result<nexus_client::ModelRunStatus, UiError> {
     let cfg = state.cfg.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        nexus_client::model_run_status(&cfg, &conversation_id).map_err(|e| backend::ui_error(&e))
+        nexus_client::desktop_contract::model_run_status(
+            &cfg,
+            &nexus_client::intent_client::default_broker_socket(),
+            &conversation_id,
+        )
+        .map_err(|e| backend::ui_error(&e))
     })
     .await
     .map_err(|_| internal())?
@@ -132,14 +153,12 @@ async fn cancel_model_run(
 ) -> Result<(), UiError> {
     let cfg = state.cfg.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let sock = nexus_client::intent_client::default_broker_socket();
-        if let Ok(Some(run)) = nexus_client::intent_client::run_for_conversation(&sock, &conversation_id) {
-            return nexus_client::intent_client::cancel(&sock, &run.run_id)
-                .map(|_| ())
-                .map_err(|e| backend::ui_error(&e));
-        }
-        nexus_client::request_model_cancel(&cfg, &conversation_id)
-            .map_err(|e| backend::ui_error(&e))
+        nexus_client::desktop_contract::cancel_model_run(
+            &cfg,
+            &nexus_client::intent_client::default_broker_socket(),
+            &conversation_id,
+        )
+        .map_err(|e| backend::ui_error(&e))
     })
     .await
     .map_err(|_| internal())?
@@ -568,5 +587,25 @@ mod authz_tests {
             assert!(!text.contains("cap") || !text.contains("hmac"), "{text}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A5.3.1: every model-run read/cancel goes through the shared Desktop
+    /// contract (broker first). The backend no longer reads transcripts for
+    /// model runs by itself.
+    #[test]
+    fn model_run_commands_route_through_the_shared_desktop_contract() {
+        let src = include_str!("lib.rs");
+        let (prod, _) = src.split_once("#[cfg(test)]").unwrap();
+        for needed in [
+            "desktop_contract::conversation_read",
+            "desktop_contract::model_run_status",
+            "desktop_contract::list_model_conversations",
+            "desktop_contract::cancel_model_run",
+        ] {
+            assert!(prod.contains(needed), "missing {needed}");
+        }
+        for forbidden in ["nexus_client::list_model_conversations", "nexus_client::model_run_status", "nexus_client::request_model_cancel"] {
+            assert!(!prod.contains(forbidden), "the backend must not read transcripts directly: {forbidden}");
+        }
     }
 }

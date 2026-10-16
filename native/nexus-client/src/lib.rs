@@ -10,6 +10,7 @@
 pub mod api;
 pub mod config;
 pub mod conversation;
+pub mod desktop_contract;
 pub mod error;
 pub mod intent_client;
 pub use nexus_contracts::intent as intent_contract;

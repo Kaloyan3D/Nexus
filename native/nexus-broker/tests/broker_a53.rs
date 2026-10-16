@@ -45,10 +45,25 @@ fn node_json(args: &[&str]) -> serde_json::Value {
     let out = Command::new("node")
         .arg(driver)
         .args(args)
-        .stderr(Stdio::null())
         .output()
         .expect("node");
-    assert!(out.status.success(), "driver {:?}", args[0]);
+    // Keep the driver's own output in the failure message: a bare exit code
+    // hid the cause of an earlier transient failure.
+    assert!(
+        out.status.success(),
+        "driver {:?} exited {:?}\nstdout: {}\nstderr: {}",
+        args[0],
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+            .chars()
+            .rev()
+            .take(1500)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>()
+    );
     serde_json::from_slice(&out.stdout).expect("json line")
 }
 
@@ -1629,4 +1644,89 @@ fn a53_audit_default_broker_binary_carries_no_fixture_trust_injection() {
         "default broker contains the fixture marker"
     );
     assert!(!has("--test-tls-ca") && !has("--test-resolve") && !has("--test-trust-owner-uid"));
+}
+
+#[test]
+fn a531_conversation_is_served_per_run_by_ownership_with_incremental_paging() {
+    let fx = fixture(slow(300), true);
+    let b = fx.start("conv");
+    let sock = b.socket_path().to_owned();
+    let run = ic::submit(&sock, &intent("page me", "conv-key-00001"))
+        .unwrap()
+        .run;
+    // incremental: poll the conversation by cursor while the run streams
+    let end = Instant::now() + Duration::from_secs(30);
+    let mut cursor: Option<u64> = None;
+    let mut texts: Vec<String> = Vec::new();
+    #[allow(unused_assignments)]
+    let mut conv_id: Option<String> = None;
+    loop {
+        let r = ic::status(&sock, &run.run_id).unwrap();
+        if let Some(c) = &r.conversation_id {
+            conv_id = Some(c.clone());
+            let view = ic::conversation(&sock, c, cursor, None, Some(50)).unwrap();
+            assert_eq!(view["source"], "native-store");
+            if let Some(h) = view["page"]["headSeq"].as_u64() {
+                cursor = Some(h);
+            }
+            for e in view["page"]["events"].as_array().unwrap() {
+                if e["kind"] == "assistant-message" {
+                    texts.push(e["text"].as_str().unwrap_or("").to_owned());
+                }
+            }
+            if r.terminal {
+                break;
+            }
+        }
+        assert!(Instant::now() < end);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        texts.len() >= 2,
+        "partial revisions arrived incrementally: {texts:?}"
+    );
+    assert_eq!(texts.last().unwrap(), "one two three ");
+    // a fully caught-up cursor yields nothing new
+    let again =
+        ic::conversation(&sock, conv_id.as_deref().unwrap(), cursor, None, Some(50)).unwrap();
+    assert!(again["page"]["events"].as_array().unwrap().is_empty());
+    // the owner's list carries a prompt preview; the user's prompt is in the view
+    let l = ic::list(&sock, 10).unwrap();
+    assert_eq!(l[0].prompt_preview.as_deref(), Some("page me"));
+    // ownership: someone else's conversation, an unknown id and a traversal id are all `not-found`
+    let foreign_conv = "model_ffffffffffffffffffffffffffffffff";
+    {
+        let store = Store::open(&b.broker.cfg.state_dir).unwrap();
+        let _g = store.lock();
+        let run = ic::IntentRun {
+            run_id: format!("run_{}", "12".repeat(16)),
+            client_id: "uid:99999".into(),
+            state: "completed".into(),
+            terminal: true,
+            conversation_id: Some(foreign_conv.into()),
+            ..Default::default()
+        };
+        store
+            .put(&RunRecord {
+                run,
+                payload_digest: "d".into(),
+                idempotency_key: "k".into(),
+            })
+            .unwrap();
+    }
+    for c in [
+        foreign_conv,
+        "model_00000000000000000000000000000000",
+        "../../etc/passwd",
+        "task_0123456789abcdef0123456789abcdef",
+    ] {
+        assert_eq!(
+            ic::conversation(&sock, c, None, None, None)
+                .unwrap_err()
+                .code,
+            "not-found",
+            "{c}"
+        );
+    }
+    b.shutdown();
 }

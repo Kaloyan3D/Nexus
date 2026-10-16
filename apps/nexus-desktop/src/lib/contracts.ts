@@ -382,6 +382,7 @@ export interface IntentRun {
   errorCode: string | null;
   errorMessage: string | null;
   cancelRequested: boolean;
+  promptPreview?: string | null;
   createdAtMs: number;
   updatedAtMs: number;
 }
