@@ -212,7 +212,59 @@ async fn intent_submit(
             intent_type: "model-only".to_owned(),
             content: prompt,
             model,
+            workspace_id: None,
             limits: IntentLimits::default(),
+            response_mode: ResponseMode::Stream,
+            client_label: Some("nexus-desktop".to_owned()),
+        };
+        nexus_client::intent_client::submit(
+            &nexus_client::intent_client::default_broker_socket(),
+            &intent,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// A5.5: the operator-approved read-only workspaces this user may inspect
+/// (identities only; the broker never returns a path).
+#[tauri::command]
+async fn intent_workspaces() -> Result<Vec<nexus_client::intent_client::AllowedWorkspace>, UiError>
+{
+    tauri::async_runtime::spawn_blocking(|| {
+        nexus_client::intent_client::workspaces(
+            &nexus_client::intent_client::default_broker_socket(),
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// A5.5: submit one user-typed READ-ONLY repository inspection. The renderer
+/// supplies text, a workspace IDENTITY chosen from `intent_workspaces`, and an
+/// idempotency key. It cannot name a path, a tool, a limit or a model.
+#[tauri::command]
+async fn intent_inspect_submit(
+    prompt: String,
+    workspace_id: String,
+    idempotency_key: String,
+) -> Result<nexus_client::intent_client::SubmitReply, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use nexus_client::intent_contract::{IntentLimits, NexusIntentV1, ResponseMode};
+        let intent = NexusIntentV1 {
+            schema_version: 1,
+            request_id: nexus_client::intent_client::fresh_key("gui"),
+            idempotency_key,
+            intent_type: "repo-inspect".to_owned(),
+            content: prompt,
+            model: None,
+            workspace_id: Some(workspace_id),
+            limits: IntentLimits {
+                max_output_tokens: Some(1024),
+                ..IntentLimits::default()
+            },
             response_mode: ResponseMode::Stream,
             client_label: Some("nexus-desktop".to_owned()),
         };
@@ -370,6 +422,8 @@ pub fn run() {
             cancel_model_run,
             intent_models,
             intent_submit,
+            intent_workspaces,
+            intent_inspect_submit,
             intent_status,
             intent_cancel,
             intent_list,
@@ -401,6 +455,8 @@ mod authz_tests {
         "cancel_model_run",
         "intent_models",
         "intent_submit",
+        "intent_workspaces",
+        "intent_inspect_submit",
         "intent_status",
         "intent_cancel",
         "intent_list",
@@ -564,11 +620,113 @@ mod authz_tests {
         assert!(prod.contains("fn intent_submit(\n    prompt: String,\n    provider_id: Option<String>,\n    remote_model_id: Option<String>,\n    idempotency_key: String,\n)"));
     }
 
+    /// `NEXUS_BROKER_SOCKET` is process-global: the fake-broker tests must not
+    /// overlap.
+    static BROKER_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A5.5: the renderer can only pick a workspace IDENTITY from the broker's
+    /// list and send text; the repo-inspect submit carries no path, tool,
+    /// model, grant or loop-limit field of the renderer's choosing.
+    #[test]
+    fn desktop_repo_inspect_commands_carry_identities_never_paths_or_authority() {
+        let _env = BROKER_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!("nexus-tauri-a55-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("broker.sock");
+        let _ = std::fs::remove_file(&sock);
+        let l = UnixListener::bind(&sock).unwrap();
+        let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let f2 = frames.clone();
+        std::thread::spawn(move || {
+            for stream in l.incoming().take(2) {
+                let mut s = stream.unwrap();
+                let mut line = String::new();
+                BufReader::new(s.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let cmd = v["cmd"].as_str().unwrap_or("").to_owned();
+                let rid = v["id"].clone();
+                f2.lock().unwrap().push(v);
+                let run = serde_json::json!({"runId":"run_00000000000000000000000000000000","requestId":"r","clientId":"uid:1","state":"preparing","terminal":false,"intentType":"repo-inspect","responseMode":"stream","cancelRequested":false,"createdAtMs":1,"updatedAtMs":1,"workspaceId":"demo"});
+                let result = match cmd.as_str() {
+                    "intent-submit" => serde_json::json!({"run": run, "replay": false}),
+                    _ => serde_json::json!({"workspaces": [{"workspaceId": "demo"}]}),
+                };
+                let _ = s.write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::json!({"protocol":1,"id":rid,"ok":true,"result":result})
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("NEXUS_BROKER_SOCKET", &sock);
+        let ws = tauri::async_runtime::block_on(super::intent_workspaces()).unwrap();
+        assert_eq!(ws[0].workspace_id, "demo");
+        let r = tauri::async_runtime::block_on(super::intent_inspect_submit(
+            "explain auth".into(),
+            "demo".into(),
+            "gui-0123456789abcdef".into(),
+        ))
+        .unwrap();
+        assert!(!r.replay);
+        let got = frames.lock().unwrap().clone();
+        assert_eq!(got[0]["cmd"], "intent-workspaces");
+        assert_eq!(got[1]["cmd"], "intent-submit");
+        let i = got[1]["params"]["intent"].as_object().unwrap();
+        let mut keys: Vec<&str> = i.keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "clientLabel",
+                "content",
+                "idempotencyKey",
+                "intentType",
+                "limits",
+                "model",
+                "requestId",
+                "responseMode",
+                "schemaVersion",
+                "workspaceId"
+            ]
+        );
+        assert_eq!(i["intentType"], "repo-inspect");
+        assert_eq!(i["workspaceId"], "demo");
+        assert_eq!(i["limits"], serde_json::json!({"maxOutputTokens": 1024}));
+        let wire = got[1].to_string();
+        assert!(
+            !wire.contains('/') || !wire.contains("etc"),
+            "no path-like workspace"
+        );
+        let src = include_str!("lib.rs");
+        let (prod, _) = src.split_once("#[cfg(test)]").unwrap();
+        for forbidden in [
+            "fs_read",
+            "fs_list",
+            "fs_search",
+            "fs.read",
+            "toolPolicy",
+            "workspace_root",
+        ] {
+            assert!(
+                !prod.contains(forbidden),
+                "Tauri backend must not reference {forbidden}"
+            );
+        }
+        assert!(prod.contains("fn intent_inspect_submit(\n    prompt: String,\n    workspace_id: String,\n    idempotency_key: String,\n)"));
+    }
+
     /// A5.3: the Desktop's Send/cancel commands put exactly the documented
     /// broker verbs on the broker socket (the same wire the CLI uses) and
     /// nothing else. A recording fake broker captures the frames.
     #[test]
     fn desktop_intent_commands_speak_only_the_broker_protocol() {
+        let _env = BROKER_ENV.lock().unwrap_or_else(|p| p.into_inner());
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
         let dir = std::env::temp_dir().join(format!("nexus-tauri-a53-{}", std::process::id()));

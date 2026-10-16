@@ -12,6 +12,7 @@ pub mod config;
 pub mod conversation;
 pub mod desktop_contract;
 pub mod error;
+pub mod inspect_run;
 pub mod intent_client;
 pub use nexus_contracts::intent as intent_contract;
 pub mod issuer;
@@ -36,6 +37,10 @@ pub use conversation::{
     MockConversationSummary, ModelIoView, NO_HISTORY_MESSAGE,
 };
 pub use error::{ClientError, ExitCode};
+pub use inspect_run::{
+    prepare_inspect_turn, run_inspect_turn, InspectBasics, InspectSession, InspectTurn, TurnEnd,
+    TurnOutput,
+};
 pub use mock::{
     live_blockers, run_mock, run_mock_streaming, MockCheck, MockProgress, MockRunReport,
     MockStreamItem,
@@ -47,7 +52,7 @@ pub use model_run::{
     ModelRunStatus, ModelRunUpdate, PreparedModelRun, TransportFactory, MAX_PROMPT_BYTES,
     MODEL_CONVERSATION_PREFIX,
 };
-pub use nexus_model::TransportLimits;
+pub use nexus_model::{InputItem, TransportLimits};
 pub use nexus_tools::{ToolEventStatus, ToolEventV1, ToolRecordV1};
 pub use nexus_transcript as transcript;
 pub use streaming::{poll_journal, ClientEvent};

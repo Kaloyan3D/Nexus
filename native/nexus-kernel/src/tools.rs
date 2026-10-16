@@ -105,6 +105,10 @@ pub struct ToolAuthorizationRequest {
     pub workspace_root_ino: u64,
     pub budget_digest: String,
     pub cancellation_id: String,
+    /// A5.5: `Some` marks a MODEL-PROPOSED call (opaque, sanitized
+    /// provenance such as `<responseId>/<callId>`). The Kernel then requires
+    /// a dispatched `repo-inspect` command and a read-scope tool.
+    pub ai_origin: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -455,6 +459,16 @@ impl Kernel {
             )?;
             let key_for_binding = self.store.issuance_key_hex()?;
             Self::check_binding(&self.store, &key_for_binding, req)?;
+            if let Some(origin) = &req.ai_origin {
+                Self::check_ai_proposal(
+                    &self.store,
+                    &key_for_binding,
+                    self.repo_inspect_enabled,
+                    scope,
+                    origin,
+                    &req.command_id,
+                )?;
+            }
             let write_scope = if scope == "write" {
                 Some(Self::check_write_scope(&self.store, &key_for_binding, req)?)
             } else {
@@ -524,6 +538,8 @@ impl Kernel {
                     "cancellationId": g.cancellation_id,
                     "leaseEpoch": g.lease_epoch,
                     "expiresAtMs": g.expires_at_ms,
+                    "aiInitiated": req.ai_origin.is_some(),
+                    "aiOrigin": req.ai_origin,
                 }),
             })?;
             Self::checkpoint_tool_journal(&mut self.store, self.witness.as_mut())?;
@@ -697,6 +713,83 @@ impl Kernel {
             Self::checkpoint_tool_journal(&mut self.store, self.witness.as_mut())?;
             Ok(entry)
         })
+    }
+
+    /// A5.5: the narrow authority for MODEL-PROPOSED tool calls. The call is
+    /// untrusted model output; this is the Kernel-side gate, independent of
+    /// any Controller-side validation. All of it must hold:
+    /// * the repo-inspect pilot is enabled on this Kernel handle;
+    /// * the tool is read-scope (a write/process call can never be
+    ///   AI-initiated in this milestone);
+    /// * the command's sealed published intent has scope `repo-inspect`
+    ///   and a user-explicit initiator;
+    /// * that intent's single model dispatch already happened (state
+    ///   `executed`/`redeemed`): a tool proposal presupposes a provider turn.
+    fn check_ai_proposal(
+        store: &nexus_store::Store,
+        key_hex: &str,
+        repo_enabled: bool,
+        tool_scope_name: &str,
+        origin: &str,
+        command_id: &str,
+    ) -> KernelResult<()> {
+        if !repo_enabled {
+            return Err(refuse(
+                KernelErrorCode::ScopeRefused,
+                "repo-inspect pilot is disabled; AI-initiated tool calls refused",
+            ));
+        }
+        if tool_scope_name != "read" {
+            return Err(refuse(
+                KernelErrorCode::ScopeRefused,
+                "AI-initiated tool calls are read-only; this tool is not",
+            ));
+        }
+        if origin.is_empty()
+            || origin.len() > 160
+            || !origin
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':' | b'/'))
+        {
+            return Err(refuse(
+                KernelErrorCode::DeliveryInvalid,
+                "AI proposal provenance is malformed",
+            ));
+        }
+        let (json, seal, state) = store.fetch_intent(command_id)?.ok_or_else(|| {
+            refuse(
+                KernelErrorCode::IntentUnknown,
+                "no published intent for this command; AI tool call refused",
+            )
+        })?;
+        if hmac_seal_hex(key_hex, &json)? != seal {
+            return Err(KernelError::new(
+                KernelErrorCode::ForgedIssuer,
+                "published intent seal mismatch; store tampered",
+            ));
+        }
+        let bundle: serde_json::Value = serde_json::from_str(&json).map_err(|_| {
+            KernelError::new(
+                KernelErrorCode::StoreCorrupt,
+                "published intent is not JSON",
+            )
+        })?;
+        if bundle.get("scope").and_then(|v| v.as_str()) != Some(crate::SCOPE_REPO_INSPECT)
+            || bundle.get("initiator").and_then(|v| v.as_str())
+                != Some(crate::INITIATOR_USER_EXPLICIT)
+        {
+            return Err(refuse(
+                KernelErrorCode::ScopeRefused,
+                "AI-initiated tool calls require a user-initiated repo-inspect command",
+            ));
+        }
+        if state != "executed" && state != "redeemed" {
+            return Err(refuse(
+                KernelErrorCode::IntentFenced,
+                "the command's model turn has not been dispatched; AI tool call refused",
+            ));
+        }
+        Ok(())
     }
 
     fn check_binding(

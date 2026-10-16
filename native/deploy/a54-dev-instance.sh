@@ -7,6 +7,8 @@
 #   sh deploy/a54-dev-instance.sh prepare     create dirs, Registry records (offline)
 #   sh deploy/a54-dev-instance.sh credentials write credentials.json from the existing OPENCODE_API_KEY (env, then repo .env; parsed, never printed)
 #   sh deploy/a54-dev-instance.sh start       start nexusd + nexus-broker (no network egress by itself)
+#   sh deploy/a54-dev-instance.sh synthetic-repo   create $A54_HOME/inspect-repo (synthetic sources, no secrets) for A5.5
+#   (A5.5) export A55_WORKSPACE=ID=ABS_PATH before `start` to enable read-only repo-inspect on that ONE workspace
 #   sh deploy/a54-dev-instance.sh check      read-only: is the running broker the installed build?
 #   sh deploy/a54-dev-instance.sh stop
 #   sh deploy/a54-dev-instance.sh env         print the exports for the CLI
@@ -29,6 +31,56 @@ credentials)
   mkdir -p "$A" && chmod 700 "$A"
   node "$REPO/scripts/Prepare-NativeOpenCodeGoCredentials.cjs" --out "$A"
   ;;
+synthetic-repo)
+  R="$A/inspect-repo"
+  [ -e "$R" ] && { echo "$R already exists; not touching it" >&2; exit 1; }
+  mkdir -p "$R/src" "$R/docs"
+  cat >"$R/README.md" <<'EOF'
+# demo-gateway
+Synthetic repository for the Nexus A5.5 read-only inspection smoke test.
+Authorization of model execution lives in src/auth.rs and is used by src/dispatch.rs.
+EOF
+  cat >"$R/src/auth.rs" <<'EOF'
+//! Authorization gate for model execution.
+use crate::dispatch::Grant;
+
+/// Decide whether a model request may execute.
+pub fn authorize_model_execution(prompt: &str, scope: &str) -> Option<Grant> {
+    if scope != "model-only" {
+        return None;
+    }
+    if prompt.is_empty() {
+        return None;
+    }
+    Some(Grant { scope: scope.to_owned() })
+}
+EOF
+  cat >"$R/src/dispatch.rs" <<'EOF'
+use crate::auth::authorize_model_execution;
+
+#[derive(Debug)]
+pub struct Grant {
+    pub scope: String,
+}
+
+pub fn run_model(prompt: &str) -> Option<Grant> {
+    authorize_model_execution(prompt, "model-only")
+}
+
+pub fn replay(prompt: &str) -> Option<Grant> {
+    authorize_model_execution(prompt, "model-only")
+}
+EOF
+  cat >"$R/src/main.rs" <<'EOF'
+mod auth;
+mod dispatch;
+
+fn main() {
+    println!("{:?}", dispatch::run_model("hello"));
+}
+EOF
+  echo "created $R (no credentials, no private content)"
+  ;;
 check)
   # Read-only: is the running broker the installed build?
   rc=0; "$BIN/nexus-broker" identity --state-dir "$A/broker" || rc=$?
@@ -46,7 +98,16 @@ start)
     exit 1
   fi
   UIDN=$(id -u)
-  "$BIN/nexusd" --db "$A/daemon/k.db" --socket "$A/daemon/n.sock" --cap "$A/daemon/issuer.cap" \
+  EXTRA_D=""; EXTRA_B=""
+  if [ -n "${A55_WORKSPACE:-}" ]; then
+    WID=${A55_WORKSPACE%%=*}; WPATH=${A55_WORKSPACE#*=}
+    case "$WPATH" in /*) ;; *) echo "A55_WORKSPACE must be ID=ABSOLUTE_PATH" >&2; exit 2;; esac
+    [ -d "$WPATH" ] || { echo "workspace path is not a directory" >&2; exit 2; }
+    EXTRA_D="--workspace-bases $WPATH --enable-repo-inspect"
+    EXTRA_B="--workspace $WID=$WPATH"
+  fi
+  # shellcheck disable=SC2086
+  "$BIN/nexusd" $EXTRA_D --db "$A/daemon/k.db" --socket "$A/daemon/n.sock" --cap "$A/daemon/issuer.cap" \
     --trust-mode shadow-test --witness "$A/daemon/k.wit.db" --allowed-uids "$UIDN" --enable-model-pilot \
     >"$A/daemon.log" 2>&1 &
   echo $! >"$A/daemon.pid"
@@ -55,7 +116,7 @@ start)
   chmod 600 "$A/credentials.json"
   "$BIN/nexus-broker" --state-dir "$A/broker" --socket "$A/broker.sock" --daemon-socket "$A/daemon/n.sock" \
     --cap "$A/daemon/issuer.cap" --credentials "$A/credentials.json" --repo-root "$REPO" \
-    --registry-data-root "$A/registry" --transcript-dir "$A/transcripts" --allowed-uids "$UIDN" \
+    --registry-data-root "$A/registry" --transcript-dir "$A/transcripts" --allowed-uids "$UIDN" $EXTRA_B \
     >"$A/broker.log" 2>&1 &
   echo $! >"$A/broker.pid"
   sleep 1
@@ -84,5 +145,5 @@ stop)
 env)
   echo "export NEXUS_BROKER_SOCKET=$A/broker.sock"
   ;;
-*) echo "usage: $0 prepare|credentials|start|check|stop|env" >&2; exit 2;;
+*) echo "usage: $0 prepare|credentials|start|synthetic-repo|check|stop|env" >&2; exit 2;;
 esac

@@ -6,6 +6,7 @@ import type {
   ConversationView,
   IntegrityView,
   AllowedModel,
+  AllowedWorkspace,
   IntentCancelReply,
   IntentRun,
   IntentSubmitReply,
@@ -42,6 +43,14 @@ export interface NativeApi {
   intentSubmit(
     prompt: string,
     model: { providerId: string; remoteModelId: string } | null,
+    idempotencyKey: string,
+  ): Promise<IntentSubmitReply>;
+  /** A5.5: read-only workspaces (identities) the broker lets this client inspect. */
+  intentWorkspaces(): Promise<AllowedWorkspace[]>;
+  /** A5.5: submit a READ-ONLY repository inspection (text + workspace identity only). */
+  intentInspectSubmit(
+    prompt: string,
+    workspaceId: string,
     idempotencyKey: string,
   ): Promise<IntentSubmitReply>;
   intentStatus(runId: string): Promise<IntentRun>;
@@ -102,6 +111,9 @@ export const tauriApi: NativeApi = {
       remoteModelId: model?.remoteModelId ?? null,
       idempotencyKey,
     }),
+  intentWorkspaces: () => invoke<AllowedWorkspace[]>("intent_workspaces"),
+  intentInspectSubmit: (prompt, workspaceId, idempotencyKey) =>
+    invoke<IntentSubmitReply>("intent_inspect_submit", { prompt, workspaceId, idempotencyKey }),
   intentStatus: (runId) => invoke<IntentRun>("intent_status", { runId }),
   intentCancel: (runId) => invoke<IntentCancelReply>("intent_cancel", { runId }),
   intentList: () => invoke<IntentRun[]>("intent_list"),
@@ -157,6 +169,8 @@ export const unavailableApi: NativeApi = {
   listMockConversations: () => Promise.resolve([]),
   intentModels: () => Promise.reject(notInShell),
   intentSubmit: () => Promise.reject(notInShell),
+  intentWorkspaces: () => Promise.resolve([]),
+  intentInspectSubmit: () => Promise.reject(notInShell),
   intentStatus: () => Promise.reject(notInShell),
   intentCancel: () => Promise.reject(notInShell),
   intentList: () => Promise.resolve([]),

@@ -171,6 +171,200 @@ pub fn consume(state_dir: &Path, a: &Attempt<'_>) -> Result<LiveAuthorization, (
 
 use std::os::unix::fs::MetadataExt;
 
+// ---------------------------------------------------------------------------
+// A5.5: multi-call live SESSION authorization.
+//
+// A repo-inspect run makes several provider requests whose later bodies
+// (tool results) cannot be known when the operator authorizes. The record is
+// therefore a bounded SESSION BUDGET, never a reusable per-call token: it
+// names the provider, model, workspace and the exact initial task text
+// (SHA-256), and caps provider calls (turns), tool calls, output tokens per
+// call and total tool-result bytes. It is consumed once, atomically, before
+// the first grant is minted; the run can only be tighter than it, a restart
+// never resumes (and so never re-spends) it, and an A5.4 single-call record
+// is a different file with a different shape that can never satisfy it.
+
+pub const SESSION_FILE: &str = "live-session-authorization.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LiveSessionAuthorization {
+    pub provider_id: String,
+    pub remote_model_id: String,
+    pub workspace_id: String,
+    pub prompt_sha256: String,
+    /// Maximum provider calls (one per model turn) in the session.
+    pub max_turns: u32,
+    pub max_tool_calls: u32,
+    /// Output-token ceiling for EACH provider call.
+    pub max_output_tokens: u64,
+    pub max_tool_result_bytes: u64,
+    pub billable_acknowledged: bool,
+    pub created_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
+pub fn session_record_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(SESSION_FILE)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn write_session_record(
+    state_dir: &Path,
+    provider_id: &str,
+    remote_model_id: &str,
+    workspace_id: &str,
+    prompt: &str,
+    max_turns: u32,
+    max_tool_calls: u32,
+    max_output_tokens: u64,
+    max_tool_result_bytes: u64,
+    ttl_secs: u64,
+    acknowledged: bool,
+) -> Result<LiveSessionAuthorization, String> {
+    if !acknowledged {
+        return Err(
+            "--acknowledge-billable is required: every turn is a billable provider call".into(),
+        );
+    }
+    if provider_id.is_empty()
+        || remote_model_id.is_empty()
+        || workspace_id.is_empty()
+        || prompt.trim().is_empty()
+    {
+        return Err("provider, model, workspace and a non-empty prompt are required".into());
+    }
+    if !(1..=12).contains(&max_turns) {
+        return Err("--max-turns must be 1..12".into());
+    }
+    if !(1..=40).contains(&max_tool_calls) {
+        return Err("--max-tool-calls must be 1..40".into());
+    }
+    if !(16..=8192).contains(&max_output_tokens) {
+        return Err("--max-output-tokens must be 16..8192 per call".into());
+    }
+    if !(1024..=2 * 1024 * 1024).contains(&max_tool_result_bytes) {
+        return Err("--max-tool-result-bytes must be 1024..2097152".into());
+    }
+    if ttl_secs == 0 || ttl_secs > MAX_TTL_SECS {
+        return Err(format!("--expires-in-secs must be 1..{MAX_TTL_SECS}"));
+    }
+    let rec = LiveSessionAuthorization {
+        provider_id: provider_id.to_owned(),
+        remote_model_id: remote_model_id.to_owned(),
+        workspace_id: workspace_id.to_owned(),
+        prompt_sha256: prompt_digest(prompt),
+        max_turns,
+        max_tool_calls,
+        max_output_tokens,
+        max_tool_result_bytes,
+        billable_acknowledged: true,
+        created_at_ms: now_ms(),
+        expires_at_ms: now_ms() + ttl_secs * 1000,
+    };
+    let path = session_record_path(state_dir);
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| {
+            format!(
+                "cannot create {}: {e} (an unconsumed record already exists?)",
+                path.display()
+            )
+        })?;
+    f.write_all(
+        serde_json::to_string_pretty(&rec)
+            .map_err(|e| e.to_string())?
+            .as_bytes(),
+    )
+    .map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())?;
+    Ok(rec)
+}
+
+/// What a repo-inspect run is about to do (computed by the broker).
+pub struct SessionAttempt<'a> {
+    pub provider_id: &'a str,
+    pub remote_model_id: &'a str,
+    pub workspace_id: &'a str,
+    pub prompt: &'a str,
+    pub max_turns: u32,
+    pub max_tool_calls: u32,
+    pub max_output_tokens: Option<u64>,
+    pub max_tool_result_bytes: u64,
+}
+
+/// Verify and CONSUME the session record (rename = the single-use point).
+pub fn consume_session(
+    state_dir: &Path,
+    a: &SessionAttempt<'_>,
+) -> Result<LiveSessionAuthorization, (String, String)> {
+    let refuse = |m: &str| Err(("live-not-authorized".to_owned(), m.to_owned()));
+    let path = session_record_path(state_dir);
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(_) => {
+            return refuse(
+                "live agentic use is not authorized: no operator session authorization record",
+            )
+        }
+    };
+    if !meta.file_type().is_file()
+        || meta.permissions().mode() & 0o077 != 0
+        || meta.uid() != unsafe { libc::geteuid() }
+    {
+        return refuse(
+            "live session authorization is not a private file owned by the issuer identity",
+        );
+    }
+    let consumed = state_dir.join(format!(
+        "live-session-authorization.consumed-{}.json",
+        now_ms()
+    ));
+    if std::fs::rename(&path, &consumed).is_err() {
+        return refuse("live session authorization was consumed by another run");
+    }
+    let rec: LiveSessionAuthorization = match std::fs::read_to_string(&consumed)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(r) => r,
+        None => return refuse("live session authorization record is malformed"),
+    };
+    if !rec.billable_acknowledged {
+        return refuse("live session authorization lacks the billable acknowledgement");
+    }
+    if now_ms() > rec.expires_at_ms {
+        return refuse("live session authorization has expired");
+    }
+    if rec.provider_id != a.provider_id || rec.remote_model_id != a.remote_model_id {
+        return refuse("live session authorization names a different provider or model");
+    }
+    if rec.workspace_id != a.workspace_id {
+        return refuse("live session authorization names a different workspace");
+    }
+    if rec.prompt_sha256 != prompt_digest(a.prompt) {
+        return refuse("live session authorization was issued for a different task text");
+    }
+    if a.max_turns == 0 || a.max_turns > rec.max_turns {
+        return refuse("requested turn limit exceeds the authorized session budget");
+    }
+    if a.max_tool_calls > rec.max_tool_calls {
+        return refuse("requested tool-call limit exceeds the authorized session budget");
+    }
+    if a.max_tool_result_bytes > rec.max_tool_result_bytes {
+        return refuse("requested tool-result byte limit exceeds the authorized session budget");
+    }
+    match a.max_output_tokens {
+        Some(n) if (1..=rec.max_output_tokens).contains(&n) => {}
+        Some(_) => return refuse("requested output limit exceeds the authorized per-call budget"),
+        None => return refuse("a live run must state limits.maxOutputTokens explicitly"),
+    }
+    Ok(rec)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +484,129 @@ mod tests {
             .unwrap_err()
             .1
             .contains("malformed"));
+    }
+
+    fn sess(d: &Path, prompt: &str) {
+        write_session_record(d, P, M, "demo", prompt, 5, 10, 512, 65536, 600, true).unwrap();
+    }
+    fn sa<'a>(prompt: &'a str) -> SessionAttempt<'a> {
+        SessionAttempt {
+            provider_id: P,
+            remote_model_id: M,
+            workspace_id: "demo",
+            prompt,
+            max_turns: 5,
+            max_tool_calls: 10,
+            max_output_tokens: Some(512),
+            max_tool_result_bytes: 65536,
+        }
+    }
+
+    #[test]
+    fn session_budget_is_single_use_exact_and_never_satisfied_by_an_a54_record() {
+        let d = tempfile::tempdir().unwrap();
+        // an A5.4 single-call record does not satisfy a session
+        auth(d.path(), "task");
+        assert_eq!(
+            consume_session(d.path(), &sa("task")).unwrap_err().0,
+            "live-not-authorized"
+        );
+        assert!(
+            record_path(d.path()).exists(),
+            "the A5.4 record is untouched"
+        );
+        let d = tempfile::tempdir().unwrap();
+        sess(d.path(), "task");
+        assert!(!std::fs::read_to_string(session_record_path(d.path()))
+            .unwrap()
+            .contains("task"));
+        consume_session(d.path(), &sa("task")).expect("exact match");
+        assert!(
+            consume_session(d.path(), &sa("task")).is_err(),
+            "single use"
+        );
+        // and a session record is not an A5.4 record
+        let d = tempfile::tempdir().unwrap();
+        sess(d.path(), "task");
+        assert!(consume(d.path(), &att("task", Some(8))).is_err());
+        assert!(session_record_path(d.path()).exists());
+    }
+
+    #[test]
+    fn session_mismatches_and_over_budget_requests_refuse_and_consume() {
+        type Mut = Box<dyn Fn(&mut SessionAttempt<'static>)>;
+        let cases: Vec<(&str, Mut)> = vec![
+            ("turns", Box::new(|a| a.max_turns = 6)),
+            ("zero turns", Box::new(|a| a.max_turns = 0)),
+            ("tools", Box::new(|a| a.max_tool_calls = 11)),
+            ("bytes", Box::new(|a| a.max_tool_result_bytes = 65537)),
+            ("tokens", Box::new(|a| a.max_output_tokens = Some(513))),
+            ("no tokens", Box::new(|a| a.max_output_tokens = None)),
+            ("workspace", Box::new(|a| a.workspace_id = "other")),
+            ("provider", Box::new(|a| a.provider_id = "opencode-go")),
+            ("model", Box::new(|a| a.remote_model_id = "x")),
+            ("prompt", Box::new(|a| a.prompt = "different task")),
+        ];
+        for (name, m) in cases {
+            let d = tempfile::tempdir().unwrap();
+            sess(d.path(), "task");
+            let mut a = sa("task");
+            m(&mut a);
+            assert!(consume_session(d.path(), &a).is_err(), "{name}");
+            assert!(
+                consume_session(d.path(), &sa("task")).is_err(),
+                "{name}: consumed"
+            );
+        }
+    }
+
+    #[test]
+    fn session_record_bounds_and_expiry() {
+        let d = tempfile::tempdir().unwrap();
+        for bad in [
+            (0u32, 10u32, 512u64, 65536u64),
+            (13, 10, 512, 65536),
+            (5, 0, 512, 65536),
+            (5, 41, 512, 65536),
+            (5, 10, 8, 65536),
+            (5, 10, 9000, 65536),
+            (5, 10, 512, 10),
+        ] {
+            assert!(
+                write_session_record(
+                    d.path(),
+                    P,
+                    M,
+                    "demo",
+                    "t",
+                    bad.0,
+                    bad.1,
+                    bad.2,
+                    bad.3,
+                    600,
+                    true
+                )
+                .is_err(),
+                "{bad:?}"
+            );
+        }
+        assert!(
+            write_session_record(d.path(), P, M, "demo", "t", 5, 10, 512, 65536, 600, false)
+                .is_err()
+        );
+        let mut rec =
+            write_session_record(d.path(), P, M, "demo", "t", 5, 10, 512, 65536, 600, true)
+                .unwrap();
+        rec.expires_at_ms = 1;
+        std::fs::write(
+            session_record_path(d.path()),
+            serde_json::to_string(&rec).unwrap(),
+        )
+        .unwrap();
+        assert!(consume_session(d.path(), &sa("t"))
+            .unwrap_err()
+            .1
+            .contains("expired"));
     }
 
     #[test]

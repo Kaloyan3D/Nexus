@@ -76,6 +76,75 @@ pub struct IntentRun {
     pub prompt_preview: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+    // ---- A5.5 repo-inspect progress (absent/zero for model-only runs) ----
+    /// Server-managed workspace identity (never a path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// Provider calls (model turns) started so far / allowed.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub turn: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub max_turns: u32,
+    /// Tool calls proposed so far / allowed.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub tool_calls: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub max_tool_calls: u32,
+    /// Bytes of tool results returned to the model so far.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub tool_result_bytes: u64,
+    /// Which policy limit ended the run cleanly (`max-turns`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    /// Bounded, ordered record of every proposed tool call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_activity: Vec<ToolActivity>,
+    /// `path:line[-line]` references in the final answer that the Controller
+    /// could match against bytes the tools actually returned in this run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub citations_verified: Vec<String>,
+    /// References the model made that no tool result in this run supports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub citations_unverified: Vec<String>,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+/// One model-proposed tool call and what became of it. Everything here is a
+/// summary or a digest: result bytes stay in the durable transcript.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolActivity {
+    pub index: u32,
+    pub turn: u32,
+    /// Provider `call_id` (as supplied; sanitized).
+    pub call_id: String,
+    /// Model-visible name (`fs_list`, ...), or what it asked for.
+    pub tool: String,
+    /// Short, redaction-safe argument summary (path, line range; never a
+    /// search query's text, only its length).
+    pub args_summary: String,
+    /// `executed` | `refused` | `failed` | `cancelled`
+    pub status: String,
+    pub error_code: Option<String>,
+    pub result_bytes: u64,
+    pub result_digest: Option<String>,
+    pub truncated: bool,
+    pub execution_id: Option<String>,
+    pub journal_seq: Option<i64>,
+    pub args_digest: Option<String>,
+}
+
+/// A workspace this client may select (identity only, never a path).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AllowedWorkspace {
+    pub workspace_id: String,
 }
 
 /// Allowed (Registry-issued) model the client may select.
@@ -156,6 +225,8 @@ fn leak_code(code: &str) -> &'static str {
         "unknown-command",
         "model-not-available",
         "model-not-allowed",
+        "workspace-not-allowed",
+        "live-not-authorized",
         "idempotency-conflict",
         "bad-offset",
         "not-terminal",
@@ -266,6 +337,12 @@ pub fn cancel(socket: &Path, run_id: &str) -> Result<CancelReply, ClientError> {
         serde_json::json!({ "runId": run_id }),
         10_000,
     )?)
+}
+
+/// Workspaces this client may select for `repo-inspect`.
+pub fn workspaces(socket: &Path) -> Result<Vec<AllowedWorkspace>, ClientError> {
+    let v = call(socket, "intent-workspaces", serde_json::json!({}), 10_000)?;
+    decode(v.get("workspaces").cloned().unwrap_or_default())
 }
 
 pub fn list(socket: &Path, limit: u32) -> Result<Vec<IntentRun>, ClientError> {

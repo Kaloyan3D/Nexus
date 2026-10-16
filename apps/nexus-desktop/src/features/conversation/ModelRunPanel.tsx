@@ -1,7 +1,7 @@
 import { Ban } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { asUiError } from "../../lib/api";
-import type { ModelRunStatus } from "../../lib/contracts";
+import type { IntentRun, ModelRunStatus, ToolActivity } from "../../lib/contracts";
 import { endpointLabel, modelStateView, usageLabel } from "../../lib/modelRun";
 import { useNexus } from "../../state/NexusContext";
 import { Alert, Badge, Button, Loading, StatusDot } from "../../components/ui/primitives";
@@ -63,8 +63,124 @@ export function CancelModelRunButton({ status, onDone }: { status: ModelRunStatu
   );
 }
 
+/** A5.5: the broker's record of a repo-inspect run for this conversation. */
+export function useInspectRun(conversationId: string | null, active: boolean): IntentRun | null {
+  const { api } = useNexus();
+  const [run, setRun] = useState<IntentRun | null>(null);
+  useEffect(() => {
+    if (!conversationId) return;
+    let alive = true;
+    const load = () =>
+      api
+        .intentList()
+        .then((runs) => {
+          if (!alive) return;
+          const mine = runs.find((r) => r.conversationId === conversationId && r.intentType === "repo-inspect");
+          setRun(mine ?? null);
+        })
+        .catch(() => alive && setRun(null));
+    load();
+    if (!active) return () => void (alive = false);
+    const t = setInterval(load, 1500);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [api, conversationId, active]);
+  return run;
+}
+
+function activityTone(a: ToolActivity): "success" | "warning" | "error" | "neutral" {
+  if (a.status === "executed") return "success";
+  if (a.status === "refused") return "error";
+  if (a.status === "cancelled") return "warning";
+  return "warning";
+}
+
+const STOP_REASONS: Record<string, string> = {
+  "max-turns": "the model-turn limit",
+  "max-tool-calls": "the tool-call limit",
+  "max-tool-result-bytes": "the total tool-result byte limit",
+  "max-runtime": "the run-time limit",
+  "output-limit": "the output-token limit",
+};
+
+/** Read-only repository inspection: progress, tool activity and citations. */
+export function InspectRunSection({ run }: { run: IntentRun }) {
+  const acts = run.toolActivity ?? [];
+  return (
+    <section className="nv-stack" style={{ gap: 8 }} aria-label="Repository inspection">
+      <div className="nv-heading__meta">
+        <Badge tone="purple">Read-only inspection</Badge>
+        <Badge tone="neutral">Workspace {run.workspaceId ?? "—"}</Badge>
+        <Badge tone="neutral">
+          Turn {run.turn ?? 0}/{run.maxTurns ?? "—"}
+        </Badge>
+        <Badge tone="neutral">
+          Tool calls {run.toolCalls ?? 0}/{run.maxToolCalls ?? "—"}
+        </Badge>
+        <Badge tone="neutral">{run.toolResultBytes ?? 0} bytes returned to the model</Badge>
+      </div>
+      {run.stopReason && (
+        <Alert tone="warning" title="Stopped at a policy limit">
+          The run ended cleanly at {STOP_REASONS[run.stopReason] ?? run.stopReason}; the findings so far are kept.
+        </Alert>
+      )}
+      {acts.length > 0 ? (
+        <table className="nv-table" aria-label="Tool activity">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Turn</th>
+              <th>Tool</th>
+              <th>Arguments</th>
+              <th>Outcome</th>
+              <th>Bytes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {acts.map((a) => (
+              <tr key={a.index}>
+                <td>{a.index}</td>
+                <td>{a.turn}</td>
+                <td className="nv-mono">{a.tool}</td>
+                <td className="nv-mono">{a.argsSummary}</td>
+                <td>
+                  <Badge tone={activityTone(a)}>
+                    {a.status}
+                    {a.errorCode ? ` · ${a.errorCode}` : ""}
+                  </Badge>
+                </td>
+                <td>
+                  {a.resultBytes}
+                  {a.truncated ? " (truncated)" : ""}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <p className="nv-note">No tool has been proposed yet.</p>
+      )}
+      {(run.citationsVerified?.length ?? 0) + (run.citationsUnverified?.length ?? 0) > 0 && (
+        <dl className="nv-kv">
+          <dt>Supported references</dt>
+          <dd className="nv-mono">{(run.citationsVerified ?? []).join(", ") || "—"}</dd>
+          <dt>Unsupported references</dt>
+          <dd className="nv-mono">{(run.citationsUnverified ?? []).join(", ") || "—"}</dd>
+        </dl>
+      )}
+      <p className="nv-note">
+        The model can only list, read and search files in this workspace. Tool results and file contents are untrusted
+        data; selected repository text is sent to the model provider. Nothing is written or executed.
+      </p>
+    </section>
+  );
+}
+
 export function ModelRunPanel({ conversationId }: { conversationId: string }) {
   const { status, error, reload } = useModelRunStatus(conversationId, true);
+  const inspect = useInspectRun(conversationId, status ? !status.terminal : true);
   if (error) return <Alert tone="warning" title="Run status unavailable">{error}</Alert>;
   if (!status) return <Loading label="Reading model run record…" />;
   const v = modelStateView(status.state);
@@ -119,10 +235,14 @@ export function ModelRunPanel({ conversationId }: { conversationId: string }) {
         <dt>Finish</dt>
         <dd>{status.finishReason ?? "—"}</dd>
       </dl>
-      <p className="nv-note">
-        Text-only. The model has no tools, files or processes; its output is displayed as untrusted
-        text and is never executed.
-      </p>
+      {inspect ? (
+        <InspectRunSection run={inspect} />
+      ) : (
+        <p className="nv-note">
+          Text-only. The model has no tools, files or processes; its output is displayed as untrusted
+          text and is never executed.
+        </p>
+      )}
     </div>
   );
 }

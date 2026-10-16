@@ -60,7 +60,19 @@ impl Default for WorkspacePolicy {
                 ".env.template",
                 ".github",
             ],
-            always_denied_names: &[".git", ".ssh", ".gnupg", ".aws", ".kube", ".docker"],
+            // `.nexus*`, `.ai-harness`: Nexus runtime state, ledgers and
+            // dev-instance homes (A5.5): never repository content.
+            always_denied_names: &[
+                ".git",
+                ".ssh",
+                ".gnupg",
+                ".aws",
+                ".kube",
+                ".docker",
+                ".nexus",
+                ".nexus-a54",
+                ".ai-harness",
+            ],
             ignored_dirs: &[
                 "node_modules",
                 "target",
@@ -118,7 +130,17 @@ impl WorkspacePolicy {
                 "credentials.json",
                 "service-account.json",
             ];
-            let sensitive_prefix = ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", ".env"];
+            let sensitive_prefix = [
+                "id_rsa",
+                "id_dsa",
+                "id_ecdsa",
+                "id_ed25519",
+                ".env",
+                // Nexus operator authorization records (A5.4/A5.5).
+                "live-authorization",
+                "live-session-authorization",
+                "route-verification-authorization",
+            ];
             let sensitive_suffix = [
                 ".pem",
                 ".key",
@@ -131,6 +153,8 @@ impl WorkspacePolicy {
                 ".gpg",
                 ".asc",
                 ".crt.key",
+                // Issuer/approver/witness capability files.
+                ".cap",
             ];
             if sensitive_exact.contains(&lower.as_str())
                 || sensitive_prefix.iter().any(|p| lower.starts_with(p))
@@ -821,5 +845,47 @@ impl Workspace {
 
     pub fn count_access(&self) {
         self.accesses.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod a55_policy_tests {
+    use super::*;
+
+    #[test]
+    fn nexus_runtime_state_credentials_and_authorizations_are_never_repository_content() {
+        let p = WorkspacePolicy::default();
+        for n in [
+            ".nexus",
+            ".NEXUS-A54",
+            ".ai-harness",
+            ".git",
+            ".env",
+            ".env.local",
+            "id_rsa",
+            "server.pem",
+            "issuer.cap",
+            "approver.cap",
+            "credentials.json",
+            "provider-credentials.json",
+            "live-authorization.json",
+            "live-session-authorization.consumed-1.json",
+            "route-verification-authorization.json",
+            "secrets.yaml",
+            ".npmrc",
+        ] {
+            assert_eq!(p.classify_name(n), NameClass::Sensitive, "{n}");
+        }
+        // ordinary source whose NAME merely mentions authorization stays readable
+        for n in [
+            "authorization.rs",
+            "authorize.rs",
+            "auth.rs",
+            "dispatch.rs",
+            "README.md",
+            "capability.rs",
+        ] {
+            assert_eq!(p.classify_name(n), NameClass::Allowed, "{n}");
+        }
     }
 }

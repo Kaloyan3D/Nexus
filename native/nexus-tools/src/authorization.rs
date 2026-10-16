@@ -33,9 +33,20 @@ pub struct PreparedToolRequest {
     args_digest: String,
     budget_digest: String,
     root_digest: String,
+    /// A5.5: set only for a model-proposed read call (see `with_ai_origin`).
+    ai_origin: Option<String>,
 }
 
 impl PreparedToolRequest {
+    /// Mark this call as proposed by a model within a repo-inspect command.
+    /// The Kernel independently refuses it unless the command's published
+    /// intent is `repo-inspect`, its model turn was dispatched, the pilot is
+    /// enabled and the tool is read-only.
+    pub fn with_ai_origin(mut self, origin: String) -> Self {
+        self.ai_origin = Some(origin);
+        self
+    }
+
     pub fn request(&self) -> &ToolRequestV1 {
         &self.request
     }
@@ -73,6 +84,7 @@ impl PreparedToolRequest {
             workspace_root_ino: self.workspace.root_ino(),
             budget_digest: self.budget_digest.clone(),
             cancellation_id: self.request.cancellation_id.clone(),
+            ai_origin: self.ai_origin.clone(),
         }
     }
 }
@@ -223,6 +235,7 @@ fn prepare_inner(
         args_digest: args.digest(),
         budget_digest: budgets.digest(),
         root_digest,
+        ai_origin: None,
         request,
         tool,
         args,
@@ -500,7 +513,7 @@ pub fn finish(
             "authority": "kernel-sealed-grant",
             "workspaceRootDigest": p.root_digest,
             "leaseEpoch": g.lease_epoch,
-            "aiInitiated": false,
+            "aiInitiated": p.ai_origin.is_some(),
         },
     });
     let journal = kernel

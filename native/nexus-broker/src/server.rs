@@ -32,6 +32,7 @@ const TERMINAL: &[&str] = &[
     "uncertain",
     "refused",
     "failed",
+    "limit-reached",
     "rejected",
     "abandoned",
 ];
@@ -132,10 +133,21 @@ impl Broker {
                 text = s.text.clone();
                 // Live overlay only while the record is not final; a final
                 // record keeps its own recorded outcome.
-                if !run.terminal {
+                // A repo-inspect run is published ONLY by its loop (the run
+                // record is the single source of its state): a transcript
+                // terminal written a moment before the record would otherwise
+                // expose a finished run without its findings.
+                if !run.terminal && run.intent_type != nexus_contracts::intent::INTENT_REPO_INSPECT
+                {
                     overlay(&mut run, &s);
                 }
             }
+        }
+        // A5.5: a repo-inspect run streams progress through state and tool
+        // events; its text is the final answer only. (Intermediate assistant
+        // text resets each turn, which would break byte offsets.)
+        if run.intent_type == nexus_contracts::intent::INTENT_REPO_INSPECT && !run.terminal {
+            text.clear();
         }
         (run, text)
     }
@@ -220,6 +232,15 @@ impl Broker {
                     let (run, _) = self.view(&rec);
                     return Ok(json!({ "run": run, "replay": true }));
                 }
+            }
+        }
+        // A5.5: the workspace is checked BEFORE a run exists as well.
+        if let Some(w) = &intent.workspace_id {
+            if !crate::inspect::workspaces_for(&self.cfg, client).contains(w) {
+                return Err((
+                    "workspace-not-allowed",
+                    "that workspace is not available to this client".into(),
+                ));
             }
         }
         // Model selection is checked BEFORE a run exists: a wrong model
@@ -466,6 +487,12 @@ impl Broker {
                 Ok(json!({ "view": view }))
             }
             "intent-models" => Ok(json!({ "models": self.models()? })),
+            "intent-workspaces" => Ok(json!({
+                "workspaces": crate::inspect::workspaces_for(&self.cfg, client)
+                    .into_iter()
+                    .map(|id| json!({ "workspaceId": id }))
+                    .collect::<Vec<_>>(),
+            })),
             "broker-health" => Ok(json!({ "ok": true, "clientId": client })),
             _ => Err((
                 "unknown-command",
@@ -675,7 +702,7 @@ fn recover(b: &Broker) {
 
 /// Start the broker. Refuses unless the daemon is a shadow-test daemon with
 /// the model pilot enabled (which production-v1 forbids) and dispatch off.
-pub fn start(cfg: BrokerConfig) -> Result<BrokerHandle, String> {
+pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
     use fs2::FileExt;
     use std::os::unix::fs::PermissionsExt;
     let store = Store::open(&cfg.state_dir).map_err(|e| format!("state dir: {e}"))?;
@@ -687,6 +714,7 @@ pub fn start(cfg: BrokerConfig) -> Result<BrokerHandle, String> {
         .map_err(|e| format!("lock: {e}"))?;
     lock.try_lock_exclusive()
         .map_err(|_| "another broker already owns this state directory".to_owned())?;
+    cfg.workspaces = crate::inspect::validate_workspaces(&cfg)?;
     crate::identity::write_instance(&cfg.state_dir)?;
     let node_abs = crate::trust::resolve_node(&cfg.node, &cfg.extra_trusted_owner_uids)?;
     crate::trust::check_bridge(&cfg.bridge_path(), &cfg.extra_trusted_owner_uids)?;
@@ -736,32 +764,49 @@ pub fn start(cfg: BrokerConfig) -> Result<BrokerHandle, String> {
         }
         let _ = std::fs::remove_file(&cfg.socket_path);
     }
-    // Bind under a restrictive umask so the socket is never briefly more
-    // permissive than its final mode.
-    let umask_val: libc::mode_t = if cfg.socket_group.is_some() {
-        0o117
-    } else {
-        0o177
-    };
-    let old_umask = unsafe { libc::umask(umask_val) };
-    let bound = UnixListener::bind(&cfg.socket_path);
-    unsafe { libc::umask(old_umask) };
-    let listener = bound.map_err(|e| format!("bind: {e}"))?;
+    // Bind inside a private (0700) scratch directory, fix the mode there, then
+    // rename into place: the socket is never reachable at its final path with
+    // a looser mode, and no PROCESS-WIDE umask is touched (a temporary umask
+    // races every other thread's file creation, which made unrelated
+    // directories appear with mode 0600 whenever brokers started concurrently).
+    use std::os::unix::fs::DirBuilderExt;
+    let parent = cfg
+        .socket_path
+        .parent()
+        .ok_or_else(|| "socket path has no parent directory".to_owned())?;
+    let scratch = parent.join(format!(
+        ".nexus-bind-{}-{}",
+        std::process::id(),
+        rand_hex(6)
+    ));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&scratch)
+        .map_err(|e| format!("bind scratch: {e}"))?;
+    let tmp_sock = scratch.join("s");
     let mode = if cfg.socket_group.is_some() {
         0o660
     } else {
         0o600
     };
-    std::fs::set_permissions(&cfg.socket_path, std::fs::Permissions::from_mode(mode))
-        .map_err(|e| format!("socket mode: {e}"))?;
-    if let Some(gid) = cfg.socket_group {
-        use std::os::unix::ffi::OsStrExt;
-        let c = std::ffi::CString::new(cfg.socket_path.as_os_str().as_bytes())
-            .map_err(|e| e.to_string())?;
-        if unsafe { libc::chown(c.as_ptr(), u32::MAX, gid) } != 0 {
-            return Err("cannot set the socket group".into());
+    let setup = (|| -> Result<UnixListener, String> {
+        let listener = UnixListener::bind(&tmp_sock).map_err(|e| format!("bind: {e}"))?;
+        std::fs::set_permissions(&tmp_sock, std::fs::Permissions::from_mode(mode))
+            .map_err(|e| format!("socket mode: {e}"))?;
+        if let Some(gid) = cfg.socket_group {
+            use std::os::unix::ffi::OsStrExt;
+            let c = std::ffi::CString::new(tmp_sock.as_os_str().as_bytes())
+                .map_err(|e| e.to_string())?;
+            if unsafe { libc::chown(c.as_ptr(), u32::MAX, gid) } != 0 {
+                return Err("cannot set the socket group".into());
+            }
         }
-    }
+        std::fs::rename(&tmp_sock, &cfg.socket_path).map_err(|e| format!("socket publish: {e}"))?;
+        Ok(listener)
+    })();
+    let _ = std::fs::remove_file(&tmp_sock);
+    let _ = std::fs::remove_dir(&scratch);
+    let listener = setup?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let socket = cfg.socket_path.clone();
     let broker = Arc::new(Broker {

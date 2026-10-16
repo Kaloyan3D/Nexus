@@ -120,7 +120,10 @@ describe("Composer -> intent broker (A5.3)", () => {
   it("the renderer API exposes no secret, grant, capability or tool vocabulary", () => {
     const keys = Object.keys(fakeApi());
     for (const k of keys) {
-      expect(k).not.toMatch(/credential|capab|grant|secret|token|shell|exec|approve|issuer|redeem|workspace|writeFile/i);
+      // A5.5: the ONLY workspace vocabulary is an identity list + an inspect
+      // submit; there is still no path, root, file or shell surface.
+      if (k === "intentWorkspaces") continue;
+      expect(k).not.toMatch(/credential|capab|grant|secret|token|shell|exec|approve|issuer|redeem|workspace|writeFile|path|root/i);
     }
     expect(keys).toEqual(expect.arrayContaining(["intentModels", "intentSubmit", "intentStatus", "intentCancel", "intentList"]));
   });

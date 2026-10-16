@@ -110,6 +110,12 @@ pub fn prepare(
     // Exact OpenCode-compatible body. The model id, reasoning effort, and
     // session come ONLY from the pinned target + confirmed overrides.
     let body = match target.wire_profile {
+        crate::target::WireProfile::Legacy if input.tool_profile.is_some() => {
+            return Err(ModelError::new(
+                ModelErrorCode::TransportRefused,
+                "the repo-inspect tool profile is only offered through the OpenCode Go adapter",
+            ));
+        }
         crate::target::WireProfile::Legacy => serde_json::json!({
             "model": target.remote_model_id_confirmed,
             "input": input.messages.iter().map(|m| {
@@ -143,7 +149,7 @@ pub fn prepare(
             if !input.tools.is_empty() {
                 return Err(ModelError::new(
                     ModelErrorCode::TransportRefused,
-                    "the OpenCode Go adapter is model-only: tool definitions are not sent",
+                    "the OpenCode Go adapter never sends caller-supplied tool definitions",
                 ));
             }
             if max_output < crate::target::OPENCODE_GO_MIN_OUTPUT_TOKENS {
@@ -152,15 +158,44 @@ pub fn prepare(
                     "output cap is below the provider minimum of 16 tokens",
                 ));
             }
-            serde_json::json!({
-                "model": target.remote_model_id_confirmed,
-                "input": input.messages.iter().map(|m| {
-                    serde_json::json!({ "role": m.role, "content": m.content })
-                }).collect::<Vec<_>>(),
-                "stream": true,
-                "max_output_tokens": max_output,
-                "reasoning": { "effort": reasoning },
-            })
+            match input.tool_profile {
+                // A5.5 tool-enabled variant: fixed catalog, stateless history
+                // (function_call + function_call_output items), one call at a time.
+                Some(crate::request::ToolProfile::RepoInspectV1) => serde_json::json!({
+                    "model": target.remote_model_id_confirmed,
+                    "input": input.items.iter().map(|it| match it {
+                        crate::request::InputItem::Message { role, content } => {
+                            serde_json::json!({ "role": role, "content": content })
+                        }
+                        crate::request::InputItem::FunctionCall { call_id, name, arguments } => {
+                            serde_json::json!({
+                                "type": "function_call", "call_id": call_id,
+                                "name": name, "arguments": arguments,
+                            })
+                        }
+                        crate::request::InputItem::FunctionCallOutput { call_id, output } => {
+                            serde_json::json!({
+                                "type": "function_call_output", "call_id": call_id, "output": output,
+                            })
+                        }
+                    }).collect::<Vec<_>>(),
+                    "tools": crate::repo_tools::definitions(),
+                    "tool_choice": "auto",
+                    "parallel_tool_calls": false,
+                    "stream": true,
+                    "max_output_tokens": max_output,
+                    "reasoning": { "effort": reasoning },
+                }),
+                None => serde_json::json!({
+                    "model": target.remote_model_id_confirmed,
+                    "input": input.messages.iter().map(|m| {
+                        serde_json::json!({ "role": m.role, "content": m.content })
+                    }).collect::<Vec<_>>(),
+                    "stream": true,
+                    "max_output_tokens": max_output,
+                    "reasoning": { "effort": reasoning },
+                }),
+            }
         }
     };
     let canonical = nexus_contracts::canonical_json(&body);

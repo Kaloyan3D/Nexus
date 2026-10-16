@@ -16,6 +16,8 @@ const COMMANDS: &[&str] = &[
     "cancel_model_run",
     "intent_models",
     "intent_submit",
+    "intent_workspaces",
+    "intent_inspect_submit",
     "intent_status",
     "intent_cancel",
     "intent_list",

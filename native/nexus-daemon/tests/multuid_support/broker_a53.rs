@@ -135,6 +135,194 @@ fn serve_tls(l: TcpListener, cert: Vec<u8>, key: Vec<u8>, gap_ms: u64) -> Provid
     Provider { accepted, requests }
 }
 
+/// A5.5: the simulated MODEL. It reads each request body and answers with
+/// the SSE frames of one provider response (function calls or text).
+type Responder = Arc<dyn Fn(usize, &serde_json::Value) -> Vec<String> + Send + Sync>;
+
+#[derive(Default)]
+struct RigOpts {
+    /// Enable the repo-inspect pilot and a read-only workspace named `demo`.
+    repo_inspect: bool,
+    responder: Option<Responder>,
+}
+
+fn sse_ev(ev: &str, v: serde_json::Value) -> String {
+    format!("event: {ev}\ndata: {v}\n\n")
+}
+
+fn completed_ev(resp: &str) -> String {
+    sse_ev(
+        "response.completed",
+        serde_json::json!({"type":"response.completed","response":{"id":resp,"status":"completed","usage":{"input_tokens":50,"output_tokens":20}}}),
+    )
+}
+
+fn call_frames(resp: &str, n: usize, call_id: &str, name: &str, args: &str) -> Vec<String> {
+    let item = format!("fc_{n}");
+    vec![
+        sse_ev(
+            "response.created",
+            serde_json::json!({"type":"response.created","response":{"id":resp,"status":"in_progress"}}),
+        ),
+        sse_ev(
+            "response.output_item.added",
+            serde_json::json!({"type":"response.output_item.added","item":{"type":"function_call","id":item,"call_id":call_id,"name":name,"arguments":""}}),
+        ),
+        sse_ev(
+            "response.function_call_arguments.delta",
+            serde_json::json!({"type":"response.function_call_arguments.delta","item_id":item,"delta":args}),
+        ),
+        sse_ev(
+            "response.output_item.done",
+            serde_json::json!({"type":"response.output_item.done","item":{"type":"function_call","id":item,"call_id":call_id,"name":name,"arguments":args}}),
+        ),
+        completed_ev(resp),
+    ]
+}
+
+fn text_frames(resp: &str, text: &str) -> Vec<String> {
+    vec![
+        sse_ev(
+            "response.created",
+            serde_json::json!({"type":"response.created","response":{"id":resp,"status":"in_progress"}}),
+        ),
+        sse_ev(
+            "response.output_text.delta",
+            serde_json::json!({"type":"response.output_text.delta","delta":text}),
+        ),
+        completed_ev(resp),
+    ]
+}
+
+fn last_output(body: &serde_json::Value) -> Option<serde_json::Value> {
+    body["input"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|i| i["type"] == "function_call_output")
+        .and_then(|i| i["output"].as_str())
+        .and_then(|s| serde_json::from_str(s).ok())
+}
+
+/// list -> search -> read -> grounded answer, every step derived from the
+/// real tool result in the request.
+fn investigate_responder() -> Responder {
+    Arc::new(|n, body| {
+        let resp = format!("resp_{n}");
+        match n {
+            0 => call_frames(&resp, n, "call_list", "fs_list", r#"{"path":"."}"#),
+            1 => {
+                let out = last_output(body).expect("list output");
+                assert!(out["result"]["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e["name"] == "src"));
+                call_frames(
+                    &resp,
+                    n,
+                    "call_search",
+                    "fs_search",
+                    r#"{"query":"authorize_model_execution","path":"src"}"#,
+                )
+            }
+            2 => {
+                let out = last_output(body).expect("search output");
+                let def = out["result"]["matches"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|m| {
+                        m["text"]
+                            .as_str()
+                            .unwrap_or("")
+                            .contains("pub fn authorize_model_execution")
+                    })
+                    .expect("definition")
+                    .clone();
+                let args = serde_json::json!({"path": def["path"], "startLine": def["line"].as_u64().unwrap() - 1, "maxLines": 12}).to_string();
+                call_frames(&resp, n, "call_read", "fs_read", &args)
+            }
+            _ => text_frames(&resp, "Authorization is decided in src/auth.rs:5-13."),
+        }
+    })
+}
+
+fn serve_tls_reactive(
+    l: TcpListener,
+    cert: Vec<u8>,
+    key: Vec<u8>,
+    responder: Responder,
+) -> Provider {
+    let cfg = Arc::new(
+        rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from(cert)],
+            PrivateKeyDer::from(PrivatePkcs8KeyDer::from(key)),
+        )
+        .unwrap(),
+    );
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let (a, r) = (accepted.clone(), requests.clone());
+    std::thread::spawn(move || {
+        for _ in 0..32 {
+            let Ok((tcp, _)) = l.accept() else { return };
+            let n = a.fetch_add(1, Ordering::SeqCst);
+            tcp.set_read_timeout(Some(Duration::from_secs(10))).ok();
+            let Ok(conn) = rustls::ServerConnection::new(cfg.clone()) else {
+                return;
+            };
+            let mut s = rustls::StreamOwned::new(conn, tcp);
+            let (mut buf, mut tmp, mut at) = (Vec::new(), [0u8; 8192], None);
+            while at.is_none() {
+                match s.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(k) => {
+                        buf.extend_from_slice(&tmp[..k]);
+                        at = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4);
+                    }
+                }
+            }
+            let Some(at) = at else { continue };
+            let head = String::from_utf8_lossy(&buf[..at]).into_owned();
+            let want: usize = head
+                .lines()
+                .find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .and_then(|v| v.trim().parse().ok())
+                })
+                .unwrap_or(0);
+            let mut body = buf[at..].to_vec();
+            while body.len() < want {
+                match s.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(k) => body.extend_from_slice(&tmp[..k]),
+                }
+            }
+            let parsed: serde_json::Value =
+                serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+            r.lock().unwrap().push((head, body));
+            let frames = responder(n, &parsed);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n");
+            for f in frames {
+                let _ = s.write_all(format!("{:x}\r\n{}\r\n", f.len(), f).as_bytes());
+                let _ = s.flush();
+            }
+            let _ = s.write_all(b"0\r\n\r\n");
+            s.conn.send_close_notify();
+            let _ = s.flush();
+        }
+    });
+    Provider { accepted, requests }
+}
+
 fn own(p: &Path, mode: u32, uid: u32, gid: u32) {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
@@ -174,6 +362,8 @@ struct Rig {
     provider: Provider,
     broker: Option<Child>,
     handoff_gid: u32,
+    /// A5.5: daemon-owned read-only repository (None unless repo_inspect).
+    workspace: Option<PathBuf>,
 }
 
 impl Drop for Rig {
@@ -193,13 +383,17 @@ fn intent(content: &str, key: &str) -> serde_json::Value {
 
 impl Rig {
     fn new(tag: &str, gap_ms: u64) -> Option<Rig> {
+        Self::new_opts(tag, gap_ms, RigOpts::default())
+    }
+
+    fn new_opts(tag: &str, gap_ms: u64, opts: RigOpts) -> Option<Rig> {
         let t = require_tool_host(tag)?;
         let desktop = uid_of(DESKTOP_USER)?;
         let desktop2 = uid_of(DESKTOP2_USER)?;
         let client_gid = gid_of(CLIENT_GROUP)?;
         // Daemon with the independent approver AND the external witness, the
         // model pilot enabled: the full identity set around the broker.
-        let (mut d, _base, _acap) = spawn_tools_as(&t);
+        let (mut d, base, _acap) = spawn_tools_as(&t);
         let w = start_witness_rig(t.h.nexusd_uid)?;
         d.argv.extend([
             "--external-witness".to_owned(),
@@ -208,6 +402,9 @@ impl Rig {
             w.uid.to_string(),
             "--enable-model-pilot".to_owned(),
         ]);
+        if opts.repo_inspect {
+            d.argv.push("--enable-repo-inspect".to_owned());
+        }
         d.restart();
         let root = std::env::temp_dir().join(format!(
             "nexus-mu-broker-{}-{}",
@@ -307,12 +504,14 @@ impl Rig {
         let ca = pki.join("ca.der");
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
-        let provider = serve_tls(
-            l,
+        let (cert, key) = (
             std::fs::read(pki.join("l.der")).unwrap(),
             std::fs::read(pki.join("l.pk8")).unwrap(),
-            gap_ms,
         );
+        let provider = match opts.responder.clone() {
+            Some(rsp) => serve_tls_reactive(l, cert, key, rsp),
+            None => serve_tls(l, cert, key, gap_ms),
+        };
         // Registry fixture (real JS code) -> issuer-owned data root
         let repo_mu = PathBuf::from(std::env::var("NEXUS_MU_REPO").expect("NEXUS_MU_REPO"));
         let registry = root.join("registry");
@@ -329,6 +528,11 @@ impl Rig {
             .arg(port.to_string())
             .arg(format!("https://{HOST}:{port}/v1"))
             .arg("openai-responses")
+            .args(if opts.repo_inspect {
+                vec!["opencode-go-responses"]
+            } else {
+                vec![]
+            })
             .stderr(Stdio::null())
             .output()
             .unwrap();
@@ -353,7 +557,34 @@ impl Rig {
         std::fs::write(&creds, serde_json::json!({ CRED_REF: SECRET }).to_string()).unwrap();
         own(&creds, 0o600, t.h.issuer_uid, t.h.issuer_gid);
         let sock = sockdir.join("broker.sock");
+        // A5.5: a daemon-owned repository. Only the daemon UID (the tool
+        // executor) and the broker's issuer group can traverse it; neither
+        // Desktop UID can read a byte of it directly.
+        let workspace = if opts.repo_inspect {
+            let ws = base.join("repo");
+            for (rel, text) in [
+                ("README.md", "# demo\n"),
+                ("src/auth.rs", "//! Authorization gate.\nuse crate::dispatch::Grant;\n\n/// Decide whether a model request may execute.\npub fn authorize_model_execution(prompt: &str, scope: &str) -> Option<Grant> {\n    if scope != \"model-only\" {\n        return None;\n    }\n    if prompt.is_empty() {\n        return None;\n    }\n    Some(Grant { scope: scope.to_owned() })\n}\n"),
+                ("src/dispatch.rs", "use crate::auth::authorize_model_execution;\n\npub fn run_model(prompt: &str) {\n    let _ = authorize_model_execution(prompt, \"model-only\");\n}\n"),
+                (".env", "API_KEY=MU-REPO-SECRET-do-not-leak-4411\n"),
+            ] {
+                let p = ws.join(rel);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, text).unwrap();
+            }
+            chown_r(&ws, t.h.nexusd_uid, t.h.issuer_gid);
+            let _ = Command::new("chmod")
+                .args(["-R", "u=rwX,g=rX,o=", ws.to_str().unwrap()])
+                .status();
+            let _ = Command::new("chmod")
+                .args(["600", ws.join(".env").to_str().unwrap()])
+                .status();
+            Some(ws)
+        } else {
+            None
+        };
         Some(Rig {
+            workspace,
             handoff_gid: t.h.issuercred_gid,
             d,
             _witness: w,
@@ -415,9 +646,15 @@ impl Rig {
             .arg("127.0.0.1")
             .arg("--test-trust-owner-uid")
             .arg("65534")
-            .args(["--read-timeout-ms", "3000", "--total-timeout-ms", "40000"])
-            .stdout(Stdio::null())
-            .stderr(log);
+            .args(["--read-timeout-ms", "3000", "--total-timeout-ms", "40000"]);
+        if let Some(ws) = &self.workspace {
+            // only the FIRST Desktop UID may select it
+            c.arg("--workspace")
+                .arg(format!("demo={}", ws.display()))
+                .arg("--workspace-allow")
+                .arg(format!("demo={}", self.desktop));
+        }
+        c.stdout(Stdio::null()).stderr(log);
         self.broker = Some(c.spawn().expect("spawn broker as issuer"));
         let end = Instant::now() + Duration::from_secs(30);
         loop {
@@ -1076,4 +1313,256 @@ fn multuid_desktop_contract_reads_runs_without_transcript_access() {
         .output()
         .unwrap();
     assert!(String::from_utf8_lossy(&still.stdout).trim().is_empty());
+}
+
+/// A5.5: the read-only tool boundary under REAL distinct kernel UIDs.
+///
+/// The tool executor is the daemon UID; the broker/issuer UID sequences the
+/// loop; two Desktop UIDs are authorized broker clients but only the FIRST may
+/// select the `demo` workspace; neither can read one byte of the repository,
+/// the credentials, the transcripts or the daemon directly. The model is
+/// simulated by a local verified-TLS provider; everything else is real.
+#[test]
+#[ignore = "requires prepared multi-UID host (see MULTUID-PROCEDURE.md); NOT RUN elsewhere"]
+fn multuid_a55_repo_inspect_read_only_tools_across_distinct_identities() {
+    let Some(mut rig) = Rig::new_opts(
+        "inspect-e2e",
+        0,
+        RigOpts {
+            repo_inspect: true,
+            responder: Some(investigate_responder()),
+        },
+    ) else {
+        return;
+    };
+    rig.start_broker();
+    let ws = rig.workspace.clone().unwrap();
+    let task = rig.root.join("task.txt");
+    std::fs::write(
+        &task,
+        "Find the function that authorizes model execution and cite it.",
+    )
+    .unwrap();
+    own(&task, 0o644, 0, 0);
+
+    // 1. workspace identities are per-UID; a path never crosses the protocol
+    let (code, v) = cli_as(&rig, DESKTOP_USER, &["intent", "workspaces"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(
+        v["workspaces"],
+        serde_json::json!([{"workspaceId": "demo"}])
+    );
+    assert!(!v.to_string().contains(ws.to_str().unwrap()));
+    let (code, v2) = cli_as(&rig, DESKTOP2_USER, &["intent", "workspaces"]);
+    assert_eq!(code, 0, "{v2}");
+    assert_eq!(v2["workspaces"], serde_json::json!([]));
+
+    // 2. neither Desktop UID can read the repository (or its secret) directly
+    for user in [DESKTOP_USER, DESKTOP2_USER] {
+        for t in [
+            ws.join("src/auth.rs"),
+            ws.join(".env"),
+            ws.clone(),
+            ws.parent().unwrap().to_path_buf(),
+        ] {
+            let ts = t.to_string_lossy().into_owned();
+            assert!(
+                denied(user, "cat", &[&ts])
+                    || denied(user, "ls", &["-ld", &ts])
+                    || denied(user, "ls", &[&ts]),
+                "{user} must not reach {ts}"
+            );
+        }
+    }
+
+    // 3. the allowed Desktop UID runs the whole agentic loop through the CLI
+    let (code, v) = cli_as(
+        &rig,
+        DESKTOP_USER,
+        &[
+            "intent",
+            "submit",
+            "--type",
+            "repo-inspect",
+            "--workspace",
+            "demo",
+            "--input",
+            task.to_str().unwrap(),
+            "--max-output-tokens",
+            "512",
+            "--wait",
+            "--idempotency-key",
+            "mu-inspect-key1",
+        ],
+    );
+    assert_eq!(code, 0, "{v}");
+    let run = v["run"].clone();
+    assert_eq!(run["state"], "completed", "{run}");
+    assert_eq!(run["clientId"], format!("uid:{}", rig.desktop));
+    assert_eq!(run["workspaceId"], "demo");
+    assert_eq!(run["toolCalls"], 3, "{run}");
+    let tools: Vec<&str> = run["toolActivity"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["tool"].as_str().unwrap())
+        .collect();
+    assert_eq!(tools, ["fs_list", "fs_search", "fs_read"]);
+    assert!(run["toolActivity"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|a| a["status"] == "executed" && a["executionId"].is_string()));
+    assert!(v["text"].as_str().unwrap().contains("src/auth.rs:5-13"));
+    assert_eq!(run["citationsVerified"][0], "src/auth.rs:5-13", "{run}");
+    assert_eq!(
+        rig.provider.accepted.load(Ordering::SeqCst),
+        4,
+        "four provider calls, no more"
+    );
+    {
+        let reqs = rig.provider.requests.lock().unwrap();
+        assert!(reqs[0]
+            .0
+            .to_ascii_lowercase()
+            .contains(&format!("authorization: bearer {SECRET}")));
+        let first: serde_json::Value = serde_json::from_slice(&reqs[0].1).unwrap();
+        assert_eq!(first["tools"].as_array().unwrap().len(), 3);
+        for (_, body) in reqs.iter() {
+            let t = String::from_utf8_lossy(body);
+            assert!(
+                !t.contains("MU-REPO-SECRET"),
+                "repo secret reached the provider"
+            );
+            assert!(
+                !t.contains(SECRET),
+                "provider credential reached the provider body"
+            );
+        }
+    }
+
+    // 4. the real Kernel journal (daemon UID) recorded each call as a
+    //    model-initiated READ, under the turn that proposed it
+    let task_id = run["taskId"].as_str().unwrap();
+    let ti = run["taskInstanceId"].as_str().unwrap();
+    for turn in 1..=3 {
+        let r = send_as(
+            ISSUER_USER,
+            &rig.d.socket,
+            &frame(
+                "tool-events",
+                serde_json::json!({"taskInstanceId": ti, "attemptId": format!("{task_id}-A{turn}"), "limit": 50}),
+            ),
+        )
+        .unwrap();
+        let recs = r["records"].as_array().unwrap_or_else(|| panic!("{r}"));
+        assert_eq!(recs[0]["phase"], "authorized");
+        assert_eq!(recs[0]["scope"], "read");
+        assert_eq!(recs[0]["aiInitiated"], true, "{r}");
+        assert!(recs.iter().all(|x| ["fs.list", "fs.search", "fs.read"]
+            .contains(&x["toolId"].as_str().unwrap_or("fs.list"))));
+    }
+
+    // 5. cross-UID isolation of the run, its tool activity and its transcript
+    let run_id = run["runId"].as_str().unwrap().to_owned();
+    let conv = run["conversationId"].as_str().unwrap().to_owned();
+    for (cmd, p) in [
+        ("intent-status", serde_json::json!({"runId": run_id})),
+        ("intent-result", serde_json::json!({"runId": run_id})),
+        ("intent-cancel", serde_json::json!({"runId": run_id})),
+        (
+            "intent-follow",
+            serde_json::json!({"runId": run_id, "offset": 0, "waitMs": 0}),
+        ),
+        (
+            "intent-conversation",
+            serde_json::json!({"conversationId": conv}),
+        ),
+    ] {
+        let r = rig.call(DESKTOP2_USER, cmd, p).unwrap();
+        assert_eq!(r["code"], "not-found", "{cmd}: {r}");
+    }
+    let l2 = rig
+        .call(DESKTOP2_USER, "intent-list", serde_json::json!({}))
+        .unwrap();
+    assert_eq!(l2["result"]["runs"].as_array().unwrap().len(), 0);
+    let conv_view = rig
+        .call(
+            DESKTOP_USER,
+            "intent-conversation",
+            serde_json::json!({"conversationId": conv, "limit": 200}),
+        )
+        .unwrap();
+    let ct = conv_view.to_string();
+    assert!(
+        ct.contains("fs_read") && ct.contains("toolresult-"),
+        "tool activity is in the owner's conversation"
+    );
+    assert!(!ct.contains("MU-REPO-SECRET"));
+    // the second UID may not select the workspace even though the broker allows it to connect
+    let r = rig
+        .call(
+            DESKTOP2_USER,
+            "intent-submit",
+            serde_json::json!({"intent": {"schemaVersion":1,"requestId":"r2","idempotencyKey":"mu-inspect-key2","intentType":"repo-inspect","content":"x","workspaceId":"demo"}}),
+        )
+        .unwrap();
+    assert_eq!(r["code"], "workspace-not-allowed", "{r}");
+
+    // 6. no client can smuggle a path or authority into the intent
+    for bad in [
+        serde_json::json!({"workspaceId": "/"}),
+        serde_json::json!({"workspaceId": "demo", "workspace": ws.to_str().unwrap()}),
+        serde_json::json!({"workspaceId": "demo", "root": "/"}),
+        serde_json::json!({"workspaceId": "demo", "tools": ["fs_write"]}),
+        serde_json::json!({"workspaceId": "demo", "toolPolicy": "all"}),
+    ] {
+        let mut i = serde_json::json!({"schemaVersion":1,"requestId":"r3","idempotencyKey":"mu-inspect-bad1","intentType":"repo-inspect","content":"x"});
+        for (k, val) in bad.as_object().unwrap() {
+            i[k] = val.clone();
+        }
+        let r = rig
+            .call(
+                DESKTOP_USER,
+                "intent-submit",
+                serde_json::json!({"intent": i}),
+            )
+            .unwrap();
+        assert_eq!(r["ok"], false, "{bad}: {r}");
+        assert_eq!(r["code"], "bad-intent", "{bad}: {r}");
+    }
+
+    // 7. unauthorized identities cannot enumerate or use workspaces; the
+    //    privileged daemon verbs stay unreachable from every client UID
+    let r = rig
+        .call(BYSTANDER_USER, "intent-workspaces", serde_json::json!({}))
+        .unwrap();
+    assert_eq!(r["code"], "unauthorized", "{r}");
+    let e = rig
+        .call(UNTRUSTED_USER, "intent-workspaces", serde_json::json!({}))
+        .unwrap_err();
+    assert!(e.contains("Permission denied"), "{e}");
+    for user in [DESKTOP_USER, DESKTOP2_USER] {
+        let e = send_as(
+            user,
+            &rig.d.socket,
+            &frame("tool-execute", serde_json::json!({})),
+        )
+        .unwrap_err();
+        assert!(e.contains("Permission denied"), "{user}: {e}");
+    }
+    for cmd in [
+        "tool-execute",
+        "workspace-bind",
+        "dispatch-authorize",
+        "model-redeem",
+    ] {
+        let r = rig.call(DESKTOP_USER, cmd, serde_json::json!({})).unwrap();
+        assert_eq!(r["code"], "unknown-command", "{cmd}: {r}");
+    }
+    assert_eq!(
+        rig.provider.accepted.load(Ordering::SeqCst),
+        4,
+        "none of the above caused a provider call"
+    );
 }

@@ -17,7 +17,7 @@ pub use approvals::{
 pub use dispatch::{
     NativeDispatchGrant, NativeDispatchRequest, PublishedIntent, SealedNativeDispatchGrant,
     GRANT_SEAL_DOMAIN, GRANT_SKEW_MS, GRANT_TTL_MS, INITIATOR_USER_EXPLICIT, SCOPE_MOCK_E2E,
-    SCOPE_MODEL_ONLY,
+    SCOPE_MODEL_ONLY, SCOPE_REPO_INSPECT,
 };
 use nexus_contracts::{
     generation_key, CommandReceiptV1, GenerationLeaseV1, KernelError, KernelErrorCode,
@@ -40,6 +40,7 @@ pub struct Kernel {
     lock_file: std::path::PathBuf,
     in_process: std::sync::Mutex<()>,
     model_only_enabled: bool,
+    repo_inspect_enabled: bool,
 }
 
 fn now_utc() -> String {
@@ -82,6 +83,7 @@ impl Kernel {
             lock_file,
             in_process: std::sync::Mutex::new(()),
             model_only_enabled: false,
+            repo_inspect_enabled: false,
         })
     }
 

@@ -1932,6 +1932,7 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         "toolVersion",
         "args",
         "budgets",
+        "aiOrigin",
     ];
     if let Err(r) = only_keys(&req.params, KEYS, &req.id) {
         return r;
@@ -1994,6 +1995,19 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                 &req.id,
                 codes::BAD_REQUEST,
                 "bad-request: 'budgets' contains unknown or invalid fields",
+            )
+        }
+    };
+    // A5.5: optional provenance marking a model-PROPOSED read call. The
+    // Kernel (not this parser) decides whether it is admissible.
+    let ai_origin: Option<String> = match req.params.get("aiOrigin") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(o)) => Some(o.clone()),
+        Some(_) => {
+            return fail(
+                &req.id,
+                codes::BAD_REQUEST,
+                "bad-request: 'aiOrigin' must be a string",
             )
         }
     };
@@ -2098,7 +2112,10 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             nexus_tools::prepare(request, &binding)
         };
         let prepared = match prepared {
-            Ok(p) => p,
+            Ok(p) => match &ai_origin {
+                Some(o) => p.with_ai_origin(o.clone()),
+                None => p,
+            },
             Err(e) => return tool_fail(daemon, &req.id, &e),
         };
         let is_write = mutating;
@@ -2246,7 +2263,7 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                     "requestId": request_id,
                     "executionId": o.journal.execution_id,
                     "journalSeq": o.journal.seq,
-                    "aiInitiated": false,
+                    "aiInitiated": ai_origin.is_some(),
                 },
             }),
         ),
@@ -2470,6 +2487,7 @@ fn do_status(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             recorded_at_utc: String::new(),
         });
     let model_pilot_enabled = kernel.model_only_pilot_enabled();
+    let repo_inspect_enabled = kernel.repo_inspect_pilot_enabled();
     drop(kernel);
     let latch = daemon
         .reconcile_latch
@@ -2493,6 +2511,7 @@ fn do_status(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "socketShared": daemon.socket_group.is_some(), "socketGroup": daemon.socket_group, "capHandoff": daemon.cap_handoff.is_some(), "shadowMode": "shadow-only",
             "dispatchEnabled": nexus_kernel::Kernel::dispatch_enabled(),
             "modelPilotEnabled": model_pilot_enabled,
+            "repoInspectEnabled": repo_inspect_enabled,
             "writesEnabled": daemon.writes_enabled,
             "processEnabled": daemon.process_enabled,
             "sandbox": daemon.sandbox_caps.as_ref().map(|c| serde_json::json!({

@@ -21,6 +21,7 @@ pub mod egress;
 pub mod error;
 pub mod pin;
 pub mod prepare;
+pub mod repo_tools;
 pub mod request;
 pub mod runtime;
 pub mod sse;
@@ -35,7 +36,7 @@ pub use pin::VerifiedExecutionPin;
 pub use prepare::{
     attest, now_ms, prepare, Attestation, AttestedPreparedModelRequest, PreparedModelRequest,
 };
-pub use request::{ChatMessage, ModelRequest, ToolDefinition};
+pub use request::{ChatMessage, InputItem, ModelRequest, ToolDefinition, ToolProfile};
 pub use runtime::{ModelRuntime, OfflineModelRuntime};
 pub use sse::{AssembledToolCall, ModelEvent, StreamAssembler, TerminalResponse, Usage};
 pub use stream::{AttemptState, AttemptStore, AttemptTracker, CancellationToken};

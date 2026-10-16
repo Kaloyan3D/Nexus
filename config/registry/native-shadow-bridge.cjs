@@ -78,7 +78,7 @@ function redactForLog(value) {
  * credentials, no raw user content — and only IMMUTABLE attempt fields, so
  * the identity is stable across retry/restart.
  */
-function buildKernelIntent(shadowIntent, issuance) {
+function buildKernelIntent(shadowIntent, issuance, extras) {
   if (!shadowIntent || typeof shadowIntent !== 'object') return { ok: false, code: 'shadow-intent-invalid', message: 'shadow intent is required', intent: null };
   if (!issuance || typeof issuance !== 'object') return { ok: false, code: 'registry-issuance-missing', message: 'trusted issuance is required', intent: null };
   for (const field of ['taskInstanceId', 'attemptId', 'commandId']) {
@@ -97,6 +97,16 @@ function buildKernelIntent(shadowIntent, issuance) {
     startedByTurnDigest: shadowIntent.startedByTurnDigest,
     modeConfigDigest: issuance.modeConfigDigest,
   };
+  // A5.5: a repo-inspect command commits to its workspace in the
+  // Controller-authored intent payload. The Kernel refuses to bind any
+  // other root to this command (bind_workspace). Absent for every other
+  // intent, so pre-existing payload digests are unchanged.
+  if (extras && extras.workspaceRootDigest !== undefined) {
+    if (typeof extras.workspaceRootDigest !== 'string' || !/^[0-9a-f]{64}$/.test(extras.workspaceRootDigest)) {
+      return { ok: false, code: 'shadow-intent-invalid', message: 'workspaceRootDigest must be 64 lowercase hex', intent: null };
+    }
+    payload.workspaceRootDigest = extras.workspaceRootDigest;
+  }
   const payloadDigest = canonicalSha256(payload);
   const modeConfigRevision = issuance.modeConfigRevision;
   const digestInput = {

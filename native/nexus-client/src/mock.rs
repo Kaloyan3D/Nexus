@@ -283,6 +283,13 @@ pub fn run_mock_streaming(
                 kind: "tool-fragment".to_owned(),
                 content: format!("{name}: {delta}"),
             },
+            ModelEvent::ToolDone {
+                name, arguments, ..
+            } => MockStreamItem {
+                index: i as u64,
+                kind: "tool-complete".to_owned(),
+                content: format!("{name}: {arguments}"),
+            },
             ModelEvent::ResponseId(id) => MockStreamItem {
                 index: i as u64,
                 kind: "response-id".to_owned(),

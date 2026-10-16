@@ -391,6 +391,41 @@ export interface IntentRun {
   promptPreview?: string | null;
   createdAtMs: number;
   updatedAtMs: number;
+  // ---- A5.5 repo-inspect progress (absent for model-only runs) ----
+  workspaceId?: string | null;
+  turn?: number;
+  maxTurns?: number;
+  toolCalls?: number;
+  maxToolCalls?: number;
+  toolResultBytes?: number;
+  stopReason?: string | null;
+  toolActivity?: ToolActivity[];
+  citationsVerified?: string[];
+  citationsUnverified?: string[];
+}
+
+/** One model-proposed read-only tool call and what became of it (A5.5). */
+export interface ToolActivity {
+  index: number;
+  turn: number;
+  callId: string;
+  /** `fs_list` | `fs_read` | `fs_search`, or what the model asked for. */
+  tool: string;
+  argsSummary: string;
+  /** `executed` | `refused` | `failed` | `cancelled` */
+  status: string;
+  errorCode: string | null;
+  resultBytes: number;
+  resultDigest: string | null;
+  truncated: boolean;
+  executionId: string | null;
+  journalSeq: number | null;
+  argsDigest: string | null;
+}
+
+/** An operator-approved read-only workspace, by identity only (never a path). */
+export interface AllowedWorkspace {
+  workspaceId: string;
 }
 
 export interface AllowedModel {

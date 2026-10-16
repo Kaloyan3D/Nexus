@@ -193,7 +193,13 @@ pub fn record_from_entry(e: &ToolJournalEntry) -> ToolRecordV1 {
         } else {
             serde_json::Value::Object(change)
         },
-        ai_initiated: false,
+        // A5.5: set by the Kernel only for a model-proposed read call in a
+        // repo-inspect command (journaled at `authorized`).
+        ai_initiated: p
+            .get("aiInitiated")
+            .or_else(|| p.get("provenance").and_then(|x| x.get("aiInitiated")))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         lease_epoch: p.get("leaseEpoch").and_then(|v| v.as_u64()).or_else(|| {
             p.get("provenance")
                 .and_then(|x| x.get("leaseEpoch"))
@@ -231,7 +237,8 @@ pub struct ToolEventV1 {
     pub change: Option<serde_json::Value>,
     /// Process tools only (see `ToolRecordV1::process`).
     pub process: Option<serde_json::Value>,
-    /// Always false: live AI-initiated execution is disabled.
+    /// True only for a model-proposed read call in a user-initiated
+    /// repo-inspect command (A5.5); false for everything else.
     pub ai_initiated: bool,
     /// Lease generation the request was authorized under.
     pub lease_epoch: Option<u64>,
@@ -278,7 +285,7 @@ pub fn fold_tool_records(records: &[ToolRecordV1]) -> Vec<ToolEventV1> {
                 stats: None,
                 change: None,
                 process: None,
-                ai_initiated: false,
+                ai_initiated: r.ai_initiated,
                 lease_epoch: r.lease_epoch,
                 first_seq: r.seq,
                 last_seq: r.seq,

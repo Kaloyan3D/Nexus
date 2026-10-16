@@ -62,6 +62,7 @@ fn usage() -> i32 {
     println!("         [--security-profile production-v1 [--validate-config-only]]  (A4.4 enforced production contract)");
     println!("         [--require-external-witness]  (refuse to start without --external-witness; production units)");
     println!("         [--require-human-approval]  (A4.2: per-operation human approval; needs --require-independent-approver)");
+    println!("         [--enable-repo-inspect]  (A5.5: model-proposed read-only tools in repo-inspect commands; default off; needs --enable-model-pilot + --workspace-bases)");
     println!("         [--enable-model-pilot]  (A5.1: model-only text inference scope; default off; needs shadow-test + --allowed-uids)");
     println!("Trust modes: readonly (default, privileged mutations disabled) |");
     println!("  shadow-test (explicit opt-in, per-request issuer authentication).");
@@ -470,6 +471,24 @@ fn run(args: &[String]) -> i32 {
             );
         }
         kernel.enable_model_only_pilot();
+    }
+    // A5.5: model-proposed READ tool calls inside user-initiated
+    // repo-inspect commands. Default OFF; needs the model pilot, shadow-test,
+    // peer UIDs and a workspace base. Grants no write/process authority.
+    if args.iter().any(|a| a == "--enable-repo-inspect") {
+        if !kernel.model_only_pilot_enabled() {
+            return fatal(
+                "bad-config",
+                "--enable-repo-inspect requires --enable-model-pilot (failing closed)",
+            );
+        }
+        if flag_str(args, "--workspace-bases").is_none() {
+            return fatal(
+                "bad-config",
+                "--enable-repo-inspect requires --workspace-bases (failing closed)",
+            );
+        }
+        kernel.enable_repo_inspect_pilot();
     }
     // A4.2 no-downgrade latch (before any socket/credential is published).
     // A store that has run in human-approval mode refuses to enable writes

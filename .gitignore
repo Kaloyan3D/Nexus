@@ -54,3 +54,4 @@ credentials.json
 .credentials.*.tmp
 route-verification-authorization*.json
 live-authorization*.json
+live-session-authorization*.json

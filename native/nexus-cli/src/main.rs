@@ -33,7 +33,7 @@ fn help_text() -> String {
     );
     s.push_str("    run                   live execution gate (always blocked in A2.4)\n");
     s.push_str("    interactive           line-based interactive session (mock only)\n");
-    s.push_str("    intent submit|status|result|follow|cancel|list|models   A5.3 unprivileged intent client (talks to nexus-broker only;\n");
+    s.push_str("    intent submit|status|result|follow|cancel|list|models|workspaces   A5.3 unprivileged intent client (talks to nexus-broker only;\n");
     s.push_str("                          needs no issuer capability and no provider credential; see `nexus intent --help`)\n");
     s.push_str("    model prepare --request <file>      A5.1 pure request preparation (digest, target, endpoint); sends nothing\n");
     s.push_str("    model run --request <file> --grant <file> --cap <file> --credentials <file>\n");
@@ -491,9 +491,14 @@ fn cmd_model(args: &[String], cfg: &ClientConfig) -> ExitCode {
     }
 }
 
-const INTENT_HELP: &str = "nexus intent <submit|status|result|follow|cancel|list|models> [--json]\n\
+const INTENT_HELP: &str = "nexus intent <submit|status|result|follow|cancel|list|models|workspaces> [--json]\n\
   submit  (--input FILE|- | --intent FILE|-) [--model provider/model] [--idempotency-key K]\n\
           [--request-id R] [--max-output-tokens N] [--follow | --wait]\n\
+          [--type model-only|repo-inspect]   repo-inspect = read-only agentic inspection (A5.5):\n\
+          --workspace ID (an operator-approved identity from `workspaces`, never a path)\n\
+          [--max-turns N] [--max-tool-calls N] [--max-tool-result-bytes N] [--max-runtime-secs N]\n\
+          --follow emits NDJSON events: submitted, state, tool (every proposed/executed call), text, end\n\
+  workspaces                        list the read-only workspace identities this client may inspect\n\
   status|result|cancel <runId>      follow <runId> [--from-offset N]      list [--limit N]      models\n\
 Global: --broker-socket PATH (or NEXUS_BROKER_SOCKET). JSON envelope schema: nexus.intent.cli/v1.\n\
 Exit codes: 0 ok / completed, 2 usage or rejected, 3 broker unreachable, 4 unauthorized, 6 run ended without completing.\n\
@@ -568,8 +573,32 @@ fn follow_run(
     mut offset: u64,
 ) -> Result<nexus_client::intent_client::IntentRun, nexus_client::ClientError> {
     let mut seen: Option<String> = None;
+    let mut tools_seen = 0usize;
     loop {
         let f = nexus_client::intent_client::follow(sock, id, offset, seen.as_deref(), 1_500)?;
+        // A5.5: observe proposed/executed tool calls as they appear.
+        for a in f.run.tool_activity.iter().skip(tools_seen) {
+            if cfg.json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "schema": nexus_client::intent_client::CLI_SCHEMA, "event": "tool", "runId": id, "activity": a })
+                );
+            } else {
+                eprintln!(
+                    "[tool {}] turn {} {} {} -> {}{}",
+                    a.index,
+                    a.turn,
+                    a.tool,
+                    a.args_summary,
+                    a.status,
+                    a.error_code
+                        .as_deref()
+                        .map(|c| format!(" ({c})"))
+                        .unwrap_or_default()
+                );
+            }
+        }
+        tools_seen = tools_seen.max(f.run.tool_activity.len());
         if seen.as_deref() != Some(f.run.state.as_str()) {
             seen = Some(f.run.state.clone());
             if cfg.json {
@@ -662,6 +691,12 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
             intent_ok(cfg, serde_json::json!({ "models": m }), &human);
             Ok(ExitCode::Ok)
         }
+        "workspaces" => {
+            let w = ic::workspaces(&sock)?;
+            let human = w.iter().map(|x| x.workspace_id.clone()).collect::<Vec<_>>().join("\n");
+            intent_ok(cfg, serde_json::json!({ "workspaces": w }), &human);
+            Ok(ExitCode::Ok)
+        }
         "submit" => {
             let intent = if let Some(p) = flag_value(args, "--intent") {
                 let v: serde_json::Value = serde_json::from_str(&read_input(&p)?)
@@ -686,14 +721,27 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
                 let max_out = flag_value(args, "--max-output-tokens")
                     .map(|v| v.parse::<u64>().map_err(|_| nexus_client::ClientError::usage("--max-output-tokens must be an integer")))
                     .transpose()?;
+                let num_flag = |f: &str| -> Result<Option<u64>, nexus_client::ClientError> {
+                    flag_value(args, f)
+                        .map(|v| v.parse::<u64>().map_err(|_| nexus_client::ClientError::usage(format!("{f} must be an integer"))))
+                        .transpose()
+                };
+                let intent_type = flag_value(args, "--type").unwrap_or_else(|| "model-only".to_owned());
                 nexus_client::intent_contract::NexusIntentV1 {
                     schema_version: 1,
                     request_id: flag_value(args, "--request-id").unwrap_or_else(|| ic::fresh_key("cli")),
                     idempotency_key: flag_value(args, "--idempotency-key").unwrap_or_else(|| ic::fresh_key("idem")),
-                    intent_type: "model-only".to_owned(),
+                    intent_type,
                     content,
                     model,
-                    limits: nexus_client::intent_contract::IntentLimits { max_output_tokens: max_out },
+                    workspace_id: flag_value(args, "--workspace"),
+                    limits: nexus_client::intent_contract::IntentLimits {
+                        max_output_tokens: max_out,
+                        max_turns: num_flag("--max-turns")?.map(|n| n as u32),
+                        max_tool_calls: num_flag("--max-tool-calls")?.map(|n| n as u32),
+                        max_tool_result_bytes: num_flag("--max-tool-result-bytes")?,
+                        max_runtime_secs: num_flag("--max-runtime-secs")?,
+                    },
                     response_mode: if args.iter().any(|a| a == "--wait") {
                         nexus_client::intent_contract::ResponseMode::Final
                     } else {
@@ -758,7 +806,7 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
             intent_ok(cfg, serde_json::json!({ "runs": runs }), &human);
             Ok(ExitCode::Ok)
         }
-        _ => Err(nexus_client::ClientError::usage("usage: nexus intent <submit|status|result|follow|cancel|list|models> (see `nexus intent --help`)")),
+        _ => Err(nexus_client::ClientError::usage("usage: nexus intent <submit|status|result|follow|cancel|list|models|workspaces> (see `nexus intent --help`)")),
     }
     })();
     match r {

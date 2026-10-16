@@ -19,6 +19,7 @@ fn usage() -> i32 {
     );
     eprintln!("         [--allowed-uids U,U] [--socket-group GID] [--node PATH] [--max-active N]");
     eprintln!("         [--rate-per-minute N] [--allow-model provider/model]... [--read-timeout-ms N] [--total-timeout-ms N]");
+    eprintln!("         [--workspace ID=ABS_PATH]... [--workspace-allow ID=UID,UID]...   (A5.5 repo-inspect workspaces)");
     eprintln!("Runs as the issuer identity. Refuses to start unless the daemon has the model pilot enabled.");
     2
 }
@@ -113,10 +114,117 @@ fn identity_report(args: &[String]) -> i32 {
     }
 }
 
+/// `--workspace ID=ABS_PATH` (repeatable) and optional
+/// `--workspace-allow ID=UID,UID`.
+fn parse_workspaces(args: &[String]) -> Result<Vec<nexus_broker::WorkspaceSpec>, String> {
+    let mut out: Vec<nexus_broker::WorkspaceSpec> = Vec::new();
+    for (i, a) in args.iter().enumerate() {
+        if a != "--workspace" {
+            continue;
+        }
+        let v = args.get(i + 1).ok_or("--workspace needs ID=PATH")?;
+        let (id, path) = v.split_once('=').ok_or("--workspace needs ID=PATH")?;
+        if out.iter().any(|w| w.id == id) {
+            return Err(format!("duplicate workspace id {id}"));
+        }
+        out.push(nexus_broker::WorkspaceSpec {
+            id: id.to_owned(),
+            root: PathBuf::from(path),
+            allowed_uids: Vec::new(),
+        });
+    }
+    for (i, a) in args.iter().enumerate() {
+        if a != "--workspace-allow" {
+            continue;
+        }
+        let v = args
+            .get(i + 1)
+            .ok_or("--workspace-allow needs ID=UID,UID")?;
+        let (id, uids) = v
+            .split_once('=')
+            .ok_or("--workspace-allow needs ID=UID,UID")?;
+        let w = out
+            .iter_mut()
+            .find(|w| w.id == id)
+            .ok_or_else(|| format!("--workspace-allow names unknown workspace {id}"))?;
+        w.allowed_uids = uids
+            .split(',')
+            .filter_map(|x| x.trim().parse().ok())
+            .collect();
+    }
+    Ok(out)
+}
+
+/// A5.5: `authorize-live-session` writes the bounded, single-use session
+/// budget a live repo-inspect run needs (several billable provider calls).
+fn authorize_live_session(args: &[String]) -> i32 {
+    let get = |n: &str| {
+        args.iter()
+            .position(|a| a == n)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let r = (|| -> Result<_, String> {
+        let state = PathBuf::from(get("--state-dir").ok_or("--state-dir is required")?);
+        let me = std::env::current_exe().map_err(|e| format!("current exe: {e}"))?;
+        if let nexus_broker::identity::Running::Stale(pid) =
+            nexus_broker::identity::running_broker(&state, &me)
+        {
+            return Err(format!(
+                "the running broker (pid {pid}) is an older build than this binary; restart it first (no authorization written)"
+            ));
+        }
+        let prompt =
+            std::fs::read_to_string(get("--prompt-file").ok_or("--prompt-file is required")?)
+                .map_err(|e| format!("prompt file: {e}"))?;
+        let num = |n: &str| -> Result<u64, String> {
+            get(n)
+                .ok_or(format!("{n} is required"))?
+                .parse()
+                .map_err(|_| format!("{n} must be a number"))
+        };
+        nexus_broker::live_auth::write_session_record(
+            &state,
+            &get("--provider").ok_or("--provider is required")?,
+            &get("--model").ok_or("--model is required")?,
+            &get("--workspace").ok_or("--workspace is required")?,
+            &prompt,
+            num("--max-turns")? as u32,
+            num("--max-tool-calls")? as u32,
+            num("--max-output-tokens")?,
+            num("--max-tool-result-bytes")?,
+            num("--expires-in-secs")?,
+            args.iter().any(|a| a == "--acknowledge-billable"),
+        )
+    })();
+    match r {
+        Ok(rec) => {
+            println!(
+                "authorized ONE live repo-inspect SESSION: provider={} model={} workspace={} promptSha256={} maxTurns={} maxToolCalls={} maxOutputTokensPerCall={} maxToolResultBytes={} expiresAtMs={}",
+                rec.provider_id, rec.remote_model_id, rec.workspace_id, rec.prompt_sha256,
+                rec.max_turns, rec.max_tool_calls, rec.max_output_tokens, rec.max_tool_result_bytes,
+                rec.expires_at_ms
+            );
+            println!(
+                "up to {} billable provider calls; selected repository contents will be sent to the provider",
+                rec.max_turns
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("nexus-broker authorize-live-session: {e}");
+            2
+        }
+    }
+}
+
 fn run() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("authorize-live") {
         return authorize_live(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("authorize-live-session") {
+        return authorize_live_session(&args[1..]);
     }
     if args.first().map(String::as_str) == Some("identity") {
         return identity_report(&args[1..]);
@@ -172,6 +280,7 @@ fn run() -> i32 {
             limits,
             allow_models: allow,
             transport: None,
+            workspaces: parse_workspaces(&args)?,
             state_dir: state,
         })
     };

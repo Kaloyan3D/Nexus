@@ -143,6 +143,13 @@ pub enum ModelRunState {
     /// Failed after send with a definite local classification
     /// (malformed stream, oversize, ...).
     Failed,
+    /// A5.5 repo-inspect: a model turn finished and its proposed read-only
+    /// tool calls are being validated/executed. Not terminal; no provider
+    /// request is in flight.
+    ToolRunning,
+    /// A5.5 repo-inspect: the run stopped cleanly at a policy limit (turns,
+    /// tool calls, bytes or runtime). Terminal; partial findings are kept.
+    LimitReached,
 }
 
 impl ModelRunState {
@@ -160,6 +167,8 @@ impl ModelRunState {
             Self::Uncertain => "uncertain",
             Self::Refused => "refused",
             Self::Failed => "failed",
+            Self::ToolRunning => "tool-running",
+            Self::LimitReached => "limit-reached",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -176,6 +185,8 @@ impl ModelRunState {
             "uncertain" => Self::Uncertain,
             "refused" => Self::Refused,
             "failed" => Self::Failed,
+            "tool-running" => Self::ToolRunning,
+            "limit-reached" => Self::LimitReached,
             _ => return None,
         })
     }
@@ -187,6 +198,7 @@ impl ModelRunState {
                 | Self::Authorized
                 | Self::RequestStarted
                 | Self::Streaming
+                | Self::ToolRunning
         )
     }
 }
@@ -195,26 +207,26 @@ impl ModelRunState {
 /// `tool_input` field (never rendered as markup; contains no secrets).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-struct StateMeta {
-    state: String,
-    provider_id: Option<String>,
-    remote_model_id: Option<String>,
-    logical_model_id: Option<String>,
-    endpoint_kind: Option<String>,
-    endpoint_origin: Option<String>,
-    attempt_id: Option<String>,
-    command_id: Option<String>,
-    request_digest: Option<String>,
-    http_status: Option<u16>,
-    usage_input_tokens: Option<u64>,
-    usage_output_tokens: Option<u64>,
-    finish_reason: Option<String>,
-    latency_ms: Option<u64>,
-    first_token_ms: Option<u64>,
-    provider_request_id: Option<String>,
-    provider_response_id: Option<String>,
-    error_code: Option<String>,
-    response_origin: Option<String>,
+pub(crate) struct StateMeta {
+    pub(crate) state: String,
+    pub(crate) provider_id: Option<String>,
+    pub(crate) remote_model_id: Option<String>,
+    pub(crate) logical_model_id: Option<String>,
+    pub(crate) endpoint_kind: Option<String>,
+    pub(crate) endpoint_origin: Option<String>,
+    pub(crate) attempt_id: Option<String>,
+    pub(crate) command_id: Option<String>,
+    pub(crate) request_digest: Option<String>,
+    pub(crate) http_status: Option<u16>,
+    pub(crate) usage_input_tokens: Option<u64>,
+    pub(crate) usage_output_tokens: Option<u64>,
+    pub(crate) finish_reason: Option<String>,
+    pub(crate) latency_ms: Option<u64>,
+    pub(crate) first_token_ms: Option<u64>,
+    pub(crate) provider_request_id: Option<String>,
+    pub(crate) provider_response_id: Option<String>,
+    pub(crate) error_code: Option<String>,
+    pub(crate) response_origin: Option<String>,
 }
 
 /// Read model of one run, for CLI and GUI.
@@ -280,11 +292,11 @@ pub(crate) fn urandom_hex(n: usize) -> Result<String, ClientError> {
     Ok(hex::encode(buf))
 }
 
-fn model_conversation_id() -> Result<String, ClientError> {
+pub(crate) fn model_conversation_id() -> Result<String, ClientError> {
     Ok(format!("{MODEL_CONVERSATION_PREFIX}{}", urandom_hex(16)?))
 }
 
-fn endpoint_kind(origin: &str) -> &'static str {
+pub(crate) fn endpoint_kind(origin: &str) -> &'static str {
     let loopback = nexus_contracts::origin_scheme_host(origin)
         .map(|(scheme, host)| {
             scheme == "http"
@@ -301,17 +313,21 @@ fn endpoint_kind(origin: &str) -> &'static str {
     }
 }
 
-struct Bound {
-    target: ExecutionTargetV2,
-    issued: nexus_contracts::RegistryResolutionV1,
-    pin: VerifiedExecutionPin,
+pub(crate) struct Bound {
+    pub(crate) target: ExecutionTargetV2,
+    pub(crate) issued: nexus_contracts::RegistryResolutionV1,
+    pub(crate) pin: VerifiedExecutionPin,
 }
 
 fn bind(req: &ModelRunRequest) -> Result<Bound, ClientError> {
+    bind_with(req, "model-only")
+}
+
+pub(crate) fn bind_with(req: &ModelRunRequest, what: &str) -> Result<Bound, ClientError> {
     if !req.user_initiated {
-        return Err(ClientError::usage(
-            "model-only runs must be explicitly user-initiated (userInitiated=true)",
-        ));
+        return Err(ClientError::usage(format!(
+            "{what} runs must be explicitly user-initiated (userInitiated=true)"
+        )));
     }
     if req.prompt.trim().is_empty() {
         return Err(ClientError::usage("prompt must not be empty"));
@@ -374,7 +390,7 @@ fn bind(req: &ModelRunRequest) -> Result<Bound, ClientError> {
     })
 }
 
-fn runtime_for(
+pub(crate) fn runtime_for(
     target: &ExecutionTargetV2,
     limits: TransportLimits,
     factory: Option<&TransportFactory>,
@@ -419,7 +435,7 @@ fn model_input(req: &ModelRunRequest) -> ModelRequest {
     m
 }
 
-fn cancel_marker(cfg: &ClientConfig, conv: &str) -> PathBuf {
+pub(crate) fn cancel_marker(cfg: &ClientConfig, conv: &str) -> PathBuf {
     cfg.transcript_dir.join(format!("{conv}.cancel"))
 }
 
@@ -438,20 +454,23 @@ pub fn request_model_cancel(cfg: &ClientConfig, conversation_id: &str) -> Result
         .map_err(|e| ClientError::internal(format!("cancel marker unwritable: {e}")))
 }
 
-struct Recorder<'a> {
-    store: &'a TranscriptStore,
-    conv: String,
-    task_instance_id: String,
-    attempt_id: String,
-    actor: Actor,
-    meta: StateMeta,
-    text: String,
-    rev: u32,
-    last_partial_ms: u64,
+pub(crate) struct Recorder {
+    pub(crate) store: Arc<TranscriptStore>,
+    pub(crate) conv: String,
+    pub(crate) task_instance_id: String,
+    pub(crate) attempt_id: String,
+    pub(crate) actor: Actor,
+    pub(crate) meta: StateMeta,
+    pub(crate) text: String,
+    pub(crate) rev: u32,
+    pub(crate) last_partial_ms: u64,
+    /// Appended to state-event and assistant-message ids so repeated states
+    /// across the turns of one conversation stay distinct (repo-inspect).
+    pub(crate) suffix: String,
 }
 
-impl Recorder<'_> {
-    fn base(
+impl Recorder {
+    pub(crate) fn base(
         &self,
         id: &str,
         kind: EventKind,
@@ -467,14 +486,14 @@ impl Recorder<'_> {
         e
     }
 
-    fn append(&self, e: TranscriptEventV1) -> Result<(), ClientError> {
+    pub(crate) fn append(&self, e: TranscriptEventV1) -> Result<(), ClientError> {
         self.store
             .append(&self.conv, e)
             .map(|_| ())
             .map_err(|err| ClientError::internal(format!("transcript write failed: {err}")))
     }
 
-    fn state(
+    pub(crate) fn state(
         &mut self,
         state: ModelRunState,
         text: &str,
@@ -488,7 +507,7 @@ impl Recorder<'_> {
             (EventKind::Status, InputClass::System)
         };
         let mut e = self.base(
-            &format!("model-state-{}", state.as_str()),
+            &format!("model-state-{}{}", state.as_str(), self.suffix),
             kind,
             Speaker::Runtime,
             class,
@@ -503,14 +522,14 @@ impl Recorder<'_> {
         self.append(e)
     }
 
-    fn assistant(&mut self, state: MessageState) -> Result<(), ClientError> {
+    pub(crate) fn assistant(&mut self, state: MessageState) -> Result<(), ClientError> {
         let mut e = self.base(
-            "assistant-1",
+            &format!("assistant-1{}", self.suffix),
             EventKind::AssistantMessage,
             Speaker::Worker,
             InputClass::ModelGenerated,
         );
-        e.event_id = format!("assistant-1@{}", self.rev);
+        e.event_id = format!("assistant-1{}@{}", self.suffix, self.rev);
         e.revision = self.rev;
         e.state = state;
         e.actor = self.actor.clone();
@@ -521,7 +540,7 @@ impl Recorder<'_> {
     }
 }
 
-fn classify(code: ModelErrorCode, bytes_sent: bool) -> ModelRunState {
+pub(crate) fn classify(code: ModelErrorCode, bytes_sent: bool) -> ModelRunState {
     match code {
         ModelErrorCode::Cancelled => ModelRunState::Cancelled,
         ModelErrorCode::Timeout => {
@@ -539,7 +558,7 @@ fn classify(code: ModelErrorCode, bytes_sent: bool) -> ModelRunState {
     }
 }
 
-fn grant_from_json(
+pub(crate) fn grant_from_json(
     g: &serde_json::Value,
 ) -> Result<nexus_kernel::SealedNativeDispatchGrant, ClientError> {
     let s = |k: &str| g.get(k).and_then(|v| v.as_str()).map(str::to_owned);
@@ -574,7 +593,7 @@ fn grant_from_json(
 }
 
 /// Build an issuer-authenticated IPC frame (see `crate::issuer`).
-fn authed_frame(
+pub(crate) fn authed_frame(
     cap_hex: &str,
     cmd: &str,
     params: serde_json::Value,
@@ -582,7 +601,7 @@ fn authed_frame(
     crate::issuer::signed_frame(cap_hex, cmd, params)
 }
 
-fn read_cap(path: &Path) -> Result<String, ClientError> {
+pub(crate) fn read_cap(path: &Path) -> Result<String, ClientError> {
     std::fs::read_to_string(path)
         .map_err(|_| ClientError::unauthorized("issuer capability file is unreadable"))
 }
@@ -633,8 +652,10 @@ pub fn run_model_only(
         .map_err(|e| ClientError::blocked(format!("provider credential unavailable: {e}")))?;
     let cap_hex = read_cap(&opts.cap_path)?;
 
-    let store = TranscriptStore::open(&cfg.transcript_dir)
-        .map_err(|e| ClientError::internal(format!("transcript store unavailable: {e}")))?;
+    let store = Arc::new(
+        TranscriptStore::open(&cfg.transcript_dir)
+            .map_err(|e| ClientError::internal(format!("transcript store unavailable: {e}")))?,
+    );
     let conv = model_conversation_id()?;
     on_update(ModelRunUpdate::Conversation { id: conv.clone() });
     let target = &bound.target;
@@ -657,7 +678,7 @@ pub fn run_model_only(
         ..Default::default()
     };
     let mut rec = Recorder {
-        store: &store,
+        store: Arc::clone(&store),
         conv: conv.clone(),
         task_instance_id: req.task_instance_id.clone(),
         attempt_id: req.attempt_id.clone(),
@@ -670,6 +691,7 @@ pub fn run_model_only(
         text: String::new(),
         rev: 0,
         last_partial_ms: 0,
+        suffix: String::new(),
     };
     let (prompt_text, redactions) = nexus_transcript::redact::redact_text(&req.prompt);
     let mut user = rec.base(
@@ -832,7 +854,9 @@ pub fn run_model_only(
                 // Reasoning deltas and tool-call fragments are provider
                 // data. They are never rendered as output and never
                 // dispatched: a fragment is inert text at most.
-                ModelEvent::ReasoningDelta(_) | ModelEvent::ToolFragment { .. } => {}
+                ModelEvent::ReasoningDelta(_)
+                | ModelEvent::ToolFragment { .. }
+                | ModelEvent::ToolDone { .. } => {}
             }
         };
         nexus_model::dispatch_redeemed_streaming(
@@ -946,7 +970,17 @@ pub fn recover_model_run(
         ModelRunState::parse(&status.state),
         Some(ModelRunState::RequestStarted | ModelRunState::Streaming)
     );
-    let (state, text, code) = if started {
+    let between_turns = matches!(
+        ModelRunState::parse(&status.state),
+        Some(ModelRunState::ToolRunning)
+    );
+    let (state, text, code) = if between_turns {
+        (
+            ModelRunState::Failed,
+            "The executor stopped between model turns. No provider request was in flight; partial findings are kept and nothing is resumed or re-run.",
+            "loop-interrupted",
+        )
+    } else if started {
         (
             ModelRunState::Uncertain,
             "The executor stopped during inference. The outcome is UNKNOWN (possibly billed). The request will not be re-sent automatically.",

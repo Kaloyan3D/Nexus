@@ -21,6 +21,8 @@
     "allow-cancel-model-run",
     "allow-intent-models",
     "allow-intent-submit",
+    "allow-intent-workspaces",
+    "allow-intent-inspect-submit",
     "allow-intent-status",
     "allow-intent-cancel",
     "allow-intent-list",

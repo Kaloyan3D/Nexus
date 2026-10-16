@@ -233,6 +233,11 @@ export function fakeApi(over: Partial<NativeApi> = {}): NativeApi {
       replay: false,
       run: fakeRun({ runId: "run_" + "a".repeat(32), requestId: key, conversationId: null, state: "preparing" }),
     }),
+    intentWorkspaces: async () => [],
+    intentInspectSubmit: async (_p: string, _w: string, key: string) => ({
+      replay: false,
+      run: fakeRun({ runId: "run_" + "b".repeat(32), requestId: key, conversationId: null, state: "preparing", intentType: "repo-inspect" }),
+    }),
     intentStatus: async (id: string) => fakeRun({ runId: id }),
     intentCancel: async (id: string) => ({ run: fakeRun({ runId: id, cancelRequested: true }), outcome: "requested" }),
     intentList: async () => [],

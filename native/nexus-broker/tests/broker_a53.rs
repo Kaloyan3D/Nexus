@@ -480,6 +480,7 @@ impl Fx {
             },
             allow_models: vec![],
             transport: Some(factory),
+            workspaces: vec![],
         }
     }
 
@@ -529,6 +530,7 @@ fn intent(content: &str, key: &str) -> NexusIntentV1 {
         intent_type: "model-only".into(),
         content: content.to_owned(),
         model: None,
+        workspace_id: None,
         limits: IntentLimits::default(),
         response_mode: ResponseMode::Stream,
         client_label: Some("a53-test".into()),
@@ -1275,6 +1277,7 @@ fn broker_child_entry() {
         },
         allow_models: vec![],
         transport: Some(factory),
+        workspaces: vec![],
     };
     let _h = nexus_broker::start(cfg).expect("child broker");
     std::thread::sleep(Duration::from_secs(600));

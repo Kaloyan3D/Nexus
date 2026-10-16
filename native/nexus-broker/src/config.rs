@@ -3,6 +3,17 @@
 use nexus_client::{TransportFactory, TransportLimits};
 use std::path::PathBuf;
 
+/// An operator-approved, read-only repository workspace (A5.5). The client
+/// only ever names the `id`; the path never crosses the client protocol.
+#[derive(Clone, Debug)]
+pub struct WorkspaceSpec {
+    pub id: String,
+    /// Canonical absolute root (validated at broker start).
+    pub root: PathBuf,
+    /// Peer UIDs allowed to select it. Empty = every UID the broker allows.
+    pub allowed_uids: Vec<u32>,
+}
+
 #[derive(Clone)]
 pub struct BrokerConfig {
     /// Durable broker state (0700): run records, idempotency index, lock.
@@ -40,6 +51,9 @@ pub struct BrokerConfig {
     pub allow_models: Vec<(String, String)>,
     /// Test seam only (offline TLS fixtures). Always `None` in the binary.
     pub transport: Option<TransportFactory>,
+    /// Operator-approved repo-inspect workspaces (A5.5). Empty = repo-inspect
+    /// is unavailable.
+    pub workspaces: Vec<WorkspaceSpec>,
 }
 
 impl BrokerConfig {

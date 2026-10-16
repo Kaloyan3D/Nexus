@@ -111,12 +111,14 @@ async function cmdRegistry(args) {
   // A5.2: optional explicit provider base URL / dialect (default: loopback fixture).
   const baseUrlArg = args[3] || ('http://127.0.0.1:' + port);
   const transportArg = args[4] || 'local-openai-compatible';
+  // A5.5: optional wire profile declared by the provider (e.g. opencode-go-responses).
+  const wireProfileArg = args[5] || '';
   const fail = function (where, result) { console.error("SAVE_DEBUG " + JSON.stringify(result).slice(0, 600));
     emit({ ok: false, where: where, code: result.code, message: result.message });
     process.exitCode = 1;
   };
   const service = makeService(installRoot, dataRoot);
-  let r = service.saveProvider({ id: 'e2e-mock', name: 'E2E Mock', transportId: transportArg, baseUrl: baseUrlArg, authType: 'api-key', metadata: { billingTier: 'e2e-unmetered-test' } }, {});
+  let r = service.saveProvider({ id: 'e2e-mock', name: 'E2E Mock', transportId: transportArg, baseUrl: baseUrlArg, authType: 'api-key', metadata: Object.assign({ billingTier: 'e2e-unmetered-test' }, wireProfileArg ? { wireProfile: wireProfileArg } : {}) }, {});
   if (!r.ok) return fail('provider', r);
   r = service.saveModel({ id: 'e2e/e2e-1', vendor: 'E2E', displayName: 'E2E Mock', checkpoint: 'e2e-1', capabilities: { textInput: true, imageInput: false, toolCalling: true, streaming: true, reasoning: true }, dataUseTier: 'contributor', contextWindow: 8192, maxOutputTokens: 1024, enabled: true, engines: ['muse-v0'] }, {});
   if (!r.ok) return fail('model', r);

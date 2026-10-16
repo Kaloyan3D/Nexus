@@ -1350,3 +1350,364 @@ fn a54_cancellation_during_a_chunked_stream_is_not_a_completion() {
         Ok(rep) => panic!("cancelled stream reported as data: {rep:?}"),
     }
 }
+
+// ===================== A5.5: tool-enabled variant (repo-inspect) ==========
+
+fn prep(profile: WireProfile, req: &ModelRequest) -> Result<PreparedModelRequest, ModelError> {
+    let mut target = ExecutionTargetV2::test_target("https://api.provider.test:443", GO_PATH);
+    target.wire_profile = profile;
+    let (issued, snapshot) = issued_for(&target);
+    let pin = VerifiedExecutionPin::bind(
+        TASK,
+        "cmd-a55",
+        "attempt-a55",
+        1,
+        "inc",
+        &issued,
+        &snapshot,
+        &target,
+        "cmd-digest",
+    )
+    .expect("pin");
+    let binding = TransportBinding::new("https://api.provider.test:443");
+    let rt = OfflineModelRuntime::new(
+        HttpSseTransport::new(binding.clone()),
+        binding,
+        TransportLimits::default(),
+    );
+    rt.prepare(&pin, &issued, &snapshot, &target, req)
+}
+
+fn tool_req(items: Vec<InputItem>) -> ModelRequest {
+    ModelRequest {
+        messages: vec![],
+        items,
+        tool_profile: Some(ToolProfile::RepoInspectV1),
+        tools: vec![],
+        reasoning_effort_override: None,
+        session_override: None,
+        stream: true,
+        max_output_tokens: Some(256),
+    }
+}
+
+fn user(t: &str) -> InputItem {
+    InputItem::Message {
+        role: "user".into(),
+        content: t.into(),
+    }
+}
+
+#[test]
+fn a55_the_tool_variant_sends_exactly_the_fixed_catalog_and_the_stateless_history() {
+    let p = prep(
+        WireProfile::OpenCodeGoResponses,
+        &tool_req(vec![
+            user("investigate"),
+            InputItem::FunctionCall {
+                call_id: "call_1".into(),
+                name: "fs_list".into(),
+                arguments: "{\"path\":\".\"}".into(),
+            },
+            InputItem::FunctionCallOutput {
+                call_id: "call_1".into(),
+                output: "{\"tool\":\"fs_list\"}".into(),
+            },
+        ]),
+    )
+    .expect("prepared");
+    let v: serde_json::Value = serde_json::from_slice(&p.request_bytes).unwrap();
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "input",
+            "max_output_tokens",
+            "model",
+            "parallel_tool_calls",
+            "reasoning",
+            "stream",
+            "tool_choice",
+            "tools"
+        ]
+    );
+    assert_eq!(v["parallel_tool_calls"], false);
+    assert_eq!(v["tool_choice"], "auto");
+    let names: Vec<&str> = v["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["fs_list", "fs_read", "fs_search"]);
+    assert_eq!(
+        v["tools"],
+        serde_json::Value::Array(repo_tools::definitions())
+    );
+    let types: Vec<&str> = v["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["type"].as_str().unwrap_or("message"))
+        .collect();
+    assert_eq!(types, ["message", "function_call", "function_call_output"]);
+    assert_eq!(v["input"][2]["call_id"], "call_1");
+    // no extension fields the documented contract does not name
+    assert!(v.get("session").is_none() && v.get("metadata").is_none());
+}
+
+#[test]
+fn a55_caller_supplied_tools_and_other_profiles_never_get_tools() {
+    // a caller cannot add or reshape tools, even next to the profile
+    let mut r = tool_req(vec![user("x")]);
+    r.tools = vec![ToolDefinition {
+        name: "fs_write".into(),
+        description: "".into(),
+        parameters: serde_json::json!({}),
+    }];
+    assert!(prep(WireProfile::OpenCodeGoResponses, &r).is_err());
+    // text-only Go requests are still tool-free and still refuse tools
+    let mut t = ModelRequest::text_only("user", "hi");
+    t.tools = r.tools.clone();
+    assert!(prep(WireProfile::OpenCodeGoResponses, &t).is_err());
+    let plain = prep(
+        WireProfile::OpenCodeGoResponses,
+        &ModelRequest::text_only("user", "hi"),
+    )
+    .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&plain.request_bytes).unwrap();
+    assert!(v.get("tools").is_none() && v.get("tool_choice").is_none());
+    // the legacy profile never offers the repo-inspect catalog
+    assert!(prep(WireProfile::Legacy, &tool_req(vec![user("x")])).is_err());
+    // items without a profile are refused
+    let mut s = ModelRequest::text_only("user", "hi");
+    s.items = vec![user("x")];
+    assert!(prep(WireProfile::OpenCodeGoResponses, &s).is_err());
+    // a tool-profile request carries items only
+    let mut m = tool_req(vec![user("x")]);
+    m.messages = vec![ChatMessage {
+        role: "user".into(),
+        content: "y".into(),
+    }];
+    assert!(prep(WireProfile::OpenCodeGoResponses, &m).is_err());
+}
+
+#[test]
+fn a55_conversation_items_must_be_a_well_formed_call_output_history() {
+    let call = |id: &str| InputItem::FunctionCall {
+        call_id: id.into(),
+        name: "fs_read".into(),
+        arguments: "{}".into(),
+    };
+    let out = |id: &str| InputItem::FunctionCallOutput {
+        call_id: id.into(),
+        output: "{}".into(),
+    };
+    let ok =
+        |items: Vec<InputItem>| prep(WireProfile::OpenCodeGoResponses, &tool_req(items)).is_ok();
+    assert!(ok(vec![user("a"), call("c1"), out("c1")]));
+    assert!(
+        ok(vec![
+            user("a"),
+            call("c1"),
+            call("c2"),
+            out("c2"),
+            out("c1")
+        ]),
+        "answers may arrive in any order"
+    );
+    assert!(!ok(vec![]));
+    assert!(!ok(vec![user("a"), call("c1")]), "unanswered call");
+    assert!(!ok(vec![user("a"), out("c1")]), "output without a call");
+    assert!(
+        !ok(vec![user("a"), call("c1"), out("c1"), out("c1")]),
+        "answered twice"
+    );
+    assert!(
+        !ok(vec![user("a"), call("c1"), call("c1"), out("c1")]),
+        "duplicate call id"
+    );
+    assert!(
+        !ok(vec![user("a"), call("bad id"), out("bad id")]),
+        "malformed id"
+    );
+    assert!(
+        !ok(vec![InputItem::Message {
+            role: "system".into(),
+            content: "x".into()
+        }]),
+        "system role"
+    );
+    assert!(
+        !ok(vec![
+            user("a"),
+            InputItem::Message {
+                role: "assistant".into(),
+                content: "x".into()
+            }
+        ]),
+        "must end on user/output"
+    );
+    assert!(!ok(vec![user(&"x".repeat(40 * 1024))]), "oversize message");
+    assert!(!ok(vec![
+        user("a"),
+        call("c1"),
+        InputItem::FunctionCallOutput {
+            call_id: "c1".into(),
+            output: "x".repeat(100 * 1024)
+        }
+    ]));
+    // a refused/unknown tool name may still be echoed (history), never offered
+    assert!(ok(vec![
+        user("a"),
+        InputItem::FunctionCall {
+            call_id: "c1".into(),
+            name: "fs_write".into(),
+            arguments: "{}".into()
+        },
+        out("c1")
+    ]));
+    assert!(!ok(vec![
+        user("a"),
+        InputItem::FunctionCall {
+            call_id: "c1".into(),
+            name: "bad name!".into(),
+            arguments: "{}".into()
+        },
+        out("c1")
+    ]));
+}
+
+// ---- streamed function calls: assembly, never execution ----
+
+fn frames(v: &[serde_json::Value]) -> String {
+    v.iter().map(|x| format!("data: {x}\n\n")).collect()
+}
+
+fn assemble(body: &str) -> Result<TerminalResponse, ModelError> {
+    let (events, finish) = nexus_model::sse::parse_sse_body(body, 1000)?;
+    let mut a = StreamAssembler::new("att", "dig", 1000, 1 << 20, 1 << 20);
+    for e in events {
+        a.push(e)?;
+    }
+    if let Some(f) = finish.as_deref() {
+        a.set_finish(f);
+    }
+    a.finish()
+}
+
+fn added(id: &str, call: &str, name: &str) -> serde_json::Value {
+    serde_json::json!({"type":"response.output_item.added","item":{"type":"function_call","id":id,"call_id":call,"name":name,"arguments":""}})
+}
+fn argdelta(id: &str, d: &str) -> serde_json::Value {
+    serde_json::json!({"type":"response.function_call_arguments.delta","item_id":id,"delta":d})
+}
+fn done_item(id: &str, call: &str, name: &str, args: &str) -> serde_json::Value {
+    serde_json::json!({"type":"response.output_item.done","item":{"type":"function_call","id":id,"call_id":call,"name":name,"arguments":args}})
+}
+fn completed_ev() -> serde_json::Value {
+    serde_json::json!({"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":3,"output_tokens":4}}})
+}
+
+#[test]
+fn a55_function_call_fragments_assemble_into_data_with_the_providers_call_id() {
+    let body = frames(&[
+        added("fc_1", "call_abc", "fs_read"),
+        argdelta("fc_1", "{\"path\":\"src/"),
+        argdelta("fc_1", "auth.rs\",\"startLine\":4}"),
+        done_item(
+            "fc_1",
+            "call_abc",
+            "fs_read",
+            "{\"path\":\"src/auth.rs\",\"startLine\":4}",
+        ),
+        completed_ev(),
+    ]);
+    let t = assemble(&body).expect("assembled");
+    assert_eq!(t.tool_calls.len(), 1);
+    assert_eq!(t.tool_calls[0].call_id, "call_abc");
+    assert_eq!(t.tool_calls[0].name, "fs_read");
+    assert_eq!(t.tool_calls[0].arguments["startLine"], 4);
+    // deltas alone (no done event) assemble too
+    let body = frames(&[
+        added("fc_1", "call_abc", "fs_list"),
+        argdelta("fc_1", "{}"),
+        completed_ev(),
+    ]);
+    assert_eq!(assemble(&body).unwrap().tool_calls[0].call_id, "call_abc");
+    // the final response object may list complete calls
+    let body = frames(&[
+        serde_json::json!({"type":"response.completed","response":{"id":"r","status":"completed",
+        "output":[{"type":"function_call","id":"fc_9","call_id":"call_9","name":"fs_list","arguments":"{\"path\":\".\"}"}]}}),
+    ]);
+    let t = assemble(&body).unwrap();
+    assert_eq!(
+        (
+            t.tool_calls[0].call_id.as_str(),
+            t.tool_calls[0].name.as_str()
+        ),
+        ("call_9", "fs_list")
+    );
+}
+
+#[test]
+fn a55_partial_or_inconsistent_calls_are_errors_never_tool_calls() {
+    // arguments never became valid JSON
+    let body = frames(&[
+        added("fc_1", "c", "fs_read"),
+        argdelta("fc_1", "{\"path\":\"READ"),
+        completed_ev(),
+    ]);
+    assert_eq!(
+        assemble(&body).unwrap_err().code,
+        ModelErrorCode::StreamPartial
+    );
+    // no arguments at all
+    let body = frames(&[added("fc_1", "c", "fs_read"), completed_ev()]);
+    assert!(assemble(&body).is_err());
+    // the stream ends before the provider's completion
+    let body = frames(&[added("fc_1", "c", "fs_list"), argdelta("fc_1", "{}")]);
+    assert_eq!(
+        assemble(&body).unwrap_err().code,
+        ModelErrorCode::StreamPartial
+    );
+    // done disagrees with the streamed deltas
+    let body = frames(&[
+        added("fc_1", "c", "fs_read"),
+        argdelta("fc_1", "{\"path\":\"a\"}"),
+        done_item("fc_1", "c", "fs_read", "{\"path\":\"b\"}"),
+        completed_ev(),
+    ]);
+    assert!(assemble(&body).is_err());
+    // call_id / name drift between events of one item
+    let body = frames(&[
+        added("fc_1", "c1", "fs_read"),
+        done_item("fc_1", "c2", "fs_read", "{}"),
+        completed_ev(),
+    ]);
+    assert_eq!(
+        assemble(&body).unwrap_err().code,
+        ModelErrorCode::SseMalformed
+    );
+    let body = frames(&[
+        added("fc_1", "c1", "fs_read"),
+        done_item("fc_1", "c1", "fs_list", "{}"),
+        completed_ev(),
+    ]);
+    assert_eq!(
+        assemble(&body).unwrap_err().code,
+        ModelErrorCode::SseMalformed
+    );
+    // arguments for an item that was never announced
+    let body = frames(&[argdelta("ghost", "{}"), completed_ev()]);
+    assert!(assemble(&body).is_err());
+    // two different complete argument sets for one item
+    let body = frames(&[
+        added("fc_1", "c", "fs_read"),
+        done_item("fc_1", "c", "fs_read", "{\"a\":1}"),
+        done_item("fc_1", "c", "fs_read", "{\"a\":2}"),
+        completed_ev(),
+    ]);
+    assert!(assemble(&body).is_err());
+}

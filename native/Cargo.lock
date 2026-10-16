@@ -306,6 +306,7 @@ dependencies = [
  "nexus-contracts",
  "nexus-kernel",
  "nexus-model",
+ "nexus-tools",
  "nexus-transcript",
  "rustls",
  "serde",

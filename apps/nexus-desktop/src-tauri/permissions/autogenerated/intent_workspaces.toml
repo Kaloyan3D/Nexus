@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-intent-workspaces"
+description = "Enables the intent_workspaces command without any pre-configured scope."
+commands.allow = ["intent_workspaces"]
+
+[[permission]]
+identifier = "deny-intent-workspaces"
+description = "Denies the intent_workspaces command without any pre-configured scope."
+commands.deny = ["intent_workspaces"]

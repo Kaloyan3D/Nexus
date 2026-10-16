@@ -26,7 +26,15 @@ pub const SCOPE_MOCK_E2E: &str = "mock-e2e";
 /// `authorize_dispatch()` are untouched by this scope.
 pub const SCOPE_MODEL_ONLY: &str = "model-only";
 
-/// The only initiator value a `model-only` intent may carry.
+/// A5.5 user-initiated, read-only agentic repository inspection. One
+/// published intent covers exactly ONE provider request (one model turn);
+/// the tools its response proposes may afterwards be authorized under the
+/// same command, read scope only, against the Controller-committed
+/// workspace. Separately gated (`Kernel::enable_repo_inspect_pilot`, default
+/// off). It is never a write/process authority.
+pub const SCOPE_REPO_INSPECT: &str = "repo-inspect";
+
+/// The only initiator value a `model-only` or `repo-inspect` intent may carry.
 pub const INITIATOR_USER_EXPLICIT: &str = "user-explicit";
 
 /// Durable Controller execution intent bundle reference.
@@ -216,13 +224,15 @@ fn origin_allowed_for_scope(scope: &str, origin: &str) -> KernelResult<()> {
     if is_loopback_origin(origin) {
         return Ok(());
     }
-    if scope == SCOPE_MODEL_ONLY && nexus_contracts::is_public_https_origin(origin) {
+    if (scope == SCOPE_MODEL_ONLY || scope == SCOPE_REPO_INSPECT)
+        && nexus_contracts::is_public_https_origin(origin)
+    {
         return Ok(());
     }
     Err(KernelError::new(
         KernelErrorCode::ScopeRefused,
-        if scope == SCOPE_MODEL_ONLY {
-            "model-only scope requires a loopback endpoint or a public https endpoint"
+        if scope == SCOPE_MODEL_ONLY || scope == SCOPE_REPO_INSPECT {
+            "model-only and repo-inspect scopes require a loopback endpoint or a public https endpoint"
         } else {
             "mock scope requires a loopback-local endpoint"
         },
@@ -241,11 +251,28 @@ impl Kernel {
     pub fn model_only_pilot_enabled(&self) -> bool {
         self.model_only_enabled
     }
+
+    /// A5.5: enable the repo-inspect pilot scope. Default OFF; only the
+    /// daemon's explicit `--enable-repo-inspect` flag calls this (and it is
+    /// refused under `production-v1`). It needs the model-only pilot too and
+    /// grants read tools only; no write, process or approval authority.
+    pub fn enable_repo_inspect_pilot(&mut self) {
+        self.repo_inspect_enabled = true;
+    }
+
+    pub fn repo_inspect_pilot_enabled(&self) -> bool {
+        self.repo_inspect_enabled
+    }
 }
 
-fn scope_admitted(pilot_enabled: bool, scope: &str) -> KernelResult<()> {
+fn scope_admitted(pilot_enabled: bool, repo_enabled: bool, scope: &str) -> KernelResult<()> {
     match scope {
         SCOPE_MOCK_E2E => Ok(()),
+        SCOPE_REPO_INSPECT if repo_enabled && pilot_enabled => Ok(()),
+        SCOPE_REPO_INSPECT => Err(KernelError::new(
+            KernelErrorCode::ScopeRefused,
+            "repo-inspect pilot is disabled on this kernel (default off)",
+        )),
         SCOPE_MODEL_ONLY if pilot_enabled => Ok(()),
         SCOPE_MODEL_ONLY => Err(KernelError::new(
             KernelErrorCode::ScopeRefused,
@@ -289,6 +316,7 @@ impl Kernel {
     /// byte-identical intent is idempotent.
     pub fn publish_intent(&mut self, bundle: &serde_json::Value) -> KernelResult<PublishedIntent> {
         let pilot = self.model_only_enabled;
+        let repo = self.repo_inspect_enabled;
         Self::critical(&self.lock_file, &self.in_process, || {
             let command_id = field_str(bundle, "commandId")?;
             let task_instance_id = field_str(bundle, "taskInstanceId")?;
@@ -303,13 +331,13 @@ impl Kernel {
             field_str(bundle, "attemptId")?;
             field_str(bundle, "requestDigest")?;
             field_str(bundle, "sessionId")?;
-            scope_admitted(pilot, &scope)?;
-            if scope == SCOPE_MODEL_ONLY
+            scope_admitted(pilot, repo, &scope)?;
+            if (scope == SCOPE_MODEL_ONLY || scope == SCOPE_REPO_INSPECT)
                 && bundle.get("initiator").and_then(|v| v.as_str()) != Some(INITIATOR_USER_EXPLICIT)
             {
                 return Err(KernelError::new(
                     KernelErrorCode::ScopeRefused,
-                    "model-only intents must declare initiator user-explicit",
+                    "model-only and repo-inspect intents must declare initiator user-explicit",
                 ));
             }
             let (issued_json, _seal) = self.store.fetch_sealed(&issuance_id)?.ok_or_else(|| {
@@ -357,7 +385,7 @@ impl Kernel {
                     "sealed extension does not match its digest",
                 ));
             }
-            if scope == SCOPE_MODEL_ONLY {
+            if scope == SCOPE_MODEL_ONLY || scope == SCOPE_REPO_INSPECT {
                 let origin = ext_value
                     .get("endpoint")
                     .and_then(|e| e.get("origin"))
@@ -625,8 +653,9 @@ impl Kernel {
         req: &NativeDispatchRequest,
     ) -> KernelResult<SealedNativeDispatchGrant> {
         let pilot = self.model_only_enabled;
+        let repo = self.repo_inspect_enabled;
         Self::critical(&self.lock_file, &self.in_process, || {
-            scope_admitted(pilot, &req.scope)?;
+            scope_admitted(pilot, repo, &req.scope)?;
             let (stored_json, stored_seal, state) =
                 self.store.fetch_intent(&req.command_id)?.ok_or_else(|| {
                     KernelError::new(
@@ -841,8 +870,9 @@ impl Kernel {
         now_ms_value: i64,
     ) -> KernelResult<NativeDispatchGrant> {
         let pilot = self.model_only_enabled;
+        let repo = self.repo_inspect_enabled;
         Self::critical(&self.lock_file, &self.in_process, || {
-            scope_admitted(pilot, &grant.scope)?;
+            scope_admitted(pilot, repo, &grant.scope)?;
             if grant.command_id.is_empty()
                 || grant.attempt_id.is_empty()
                 || grant.task_instance_id.is_empty()

@@ -16,11 +16,12 @@
 
 pub mod config;
 pub mod identity;
+pub mod inspect;
 pub mod live_auth;
 pub mod pipeline;
 pub mod server;
 pub mod store;
 pub mod trust;
 
-pub use config::BrokerConfig;
+pub use config::{BrokerConfig, WorkspaceSpec};
 pub use server::{start, BrokerHandle};

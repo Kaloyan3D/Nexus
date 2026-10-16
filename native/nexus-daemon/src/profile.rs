@@ -45,6 +45,9 @@ const FORBIDDEN: &[&str] = &[
     // A5.1 development pilot: model inference is never part of the
     // production-v1 contract; it needs its own reviewed profile.
     "--enable-model-pilot",
+    // A5.5 development pilot: model-driven read tools are not part of the
+    // production-v1 contract either.
+    "--enable-repo-inspect",
 ];
 
 /// Environment variables that arm test-only behaviour.
@@ -198,6 +201,17 @@ mod tests {
             "{errs:?}"
         );
         assert!(validate_production_v1(&good(), &no_env, 2001).is_ok());
+    }
+
+    #[test]
+    fn repo_inspect_pilot_cannot_be_activated_under_production_v1() {
+        let mut a = good();
+        a.push("--enable-repo-inspect".into());
+        let errs = validate_production_v1(&a, &no_env, 2001).expect_err("pilot refused");
+        assert!(
+            errs.iter().any(|e| e.contains("--enable-repo-inspect")),
+            "{errs:?}"
+        );
     }
 
     #[test]

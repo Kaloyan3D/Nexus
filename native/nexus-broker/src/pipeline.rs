@@ -25,7 +25,7 @@ pub(crate) struct StepError {
     pub message: String,
 }
 
-fn se(code: impl Into<String>, message: impl Into<String>) -> StepError {
+pub(crate) fn se(code: impl Into<String>, message: impl Into<String>) -> StepError {
     StepError {
         code: code.into(),
         message: message.into(),
@@ -110,7 +110,7 @@ pub(crate) fn bridge(
     }
 }
 
-fn daemon(b: &Broker, cmd: &str, params: Value) -> Result<Value, StepError> {
+pub(crate) fn daemon(b: &Broker, cmd: &str, params: Value) -> Result<Value, StepError> {
     let resp = issuer::issuer_call(&b.cfg.daemon_socket, &b.cap_hex, cmd, params)
         .map_err(|e| se("daemon-unreachable", e.message))?;
     if resp.get("ok") == Some(&Value::Bool(true)) {
@@ -129,7 +129,7 @@ fn daemon(b: &Broker, cmd: &str, params: Value) -> Result<Value, StepError> {
     }
 }
 
-fn str_of(v: &Value, k: &str) -> Result<String, StepError> {
+pub(crate) fn str_of(v: &Value, k: &str) -> Result<String, StepError> {
     v.get(k)
         .and_then(|x| x.as_str())
         .map(str::to_owned)
@@ -137,7 +137,7 @@ fn str_of(v: &Value, k: &str) -> Result<String, StepError> {
 }
 
 /// Mark a pre-execution failure. Nothing was sent.
-fn reject(b: &Broker, run_id: &str, code: &str, message: &str) {
+pub(crate) fn reject(b: &Broker, run_id: &str, code: &str, message: &str) {
     b.update(run_id, |r| {
         r.state = "rejected".into();
         r.terminal = true;
@@ -146,7 +146,7 @@ fn reject(b: &Broker, run_id: &str, code: &str, message: &str) {
     });
 }
 
-fn cancelled_before_submission(b: &Broker, run_id: &str) {
+pub(crate) fn cancelled_before_submission(b: &Broker, run_id: &str) {
     b.update(run_id, |r| {
         r.state = "cancelled".into();
         r.terminal = true;
@@ -157,7 +157,7 @@ fn cancelled_before_submission(b: &Broker, run_id: &str) {
 
 /// Client-visible text for a pre-execution failure. Infrastructure detail
 /// (paths, interpreter messages) stays in the operator log only.
-fn client_message(code: &str, message: &str) -> String {
+pub(crate) fn client_message(code: &str, message: &str) -> String {
     match code {
         "bridge-error" | "bridge-timeout" | "bridge-unavailable" | "ledger-unreadable"
         | "daemon-unreachable" | "daemon-shape" | "internal-panic" => {
@@ -171,7 +171,11 @@ pub fn execute(b: Arc<Broker>, run_id: String, intent: NexusIntentV1, flag: Arc<
     // A panic in any step must end the run (nothing sent), never strand it
     // in a non-terminal state or take the worker's cleanup with it.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_steps(&b, &run_id, &intent, &flag)
+        if intent.intent_type == nexus_contracts::intent::INTENT_REPO_INSPECT {
+            crate::inspect::run(&b, &run_id, &intent, &flag)
+        } else {
+            run_steps(&b, &run_id, &intent, &flag)
+        }
     }))
     .unwrap_or_else(|_| Err(se("internal-panic", "the pipeline panicked")));
     if let Err(e) = result {

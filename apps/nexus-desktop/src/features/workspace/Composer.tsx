@@ -21,13 +21,24 @@ export function Composer() {
     intentPending,
     intentSubmitting,
     intentError,
+    intentWorkspaces,
     sendIntent,
+    sendInspect,
     cancelPendingIntent,
   } = useNexus();
   const [text, setText] = useState("");
   const [modelIdx, setModelIdx] = useState(0);
+  // A5.5: "Ask" is the text-only model request; "Inspect" lets the model use
+  // read-only list/read/search tools inside one operator-approved repository.
+  const [mode, setMode] = useState<"ask" | "inspect">("ask");
+  const [wsIdx, setWsIdx] = useState(0);
+  const workspaces = intentWorkspaces ?? [];
+  const workspace = workspaces.length > 0 ? workspaces[Math.min(wsIdx, workspaces.length - 1)]! : null;
   const model = intentModels && intentModels.length > 0 ? intentModels[Math.min(modelIdx, intentModels.length - 1)]! : null;
-  const canSend = model !== null && !intentSubmitting && intentPending === null;
+  const canSend =
+    (mode === "inspect" ? workspace !== null && model !== null : model !== null) &&
+    !intentSubmitting &&
+    intentPending === null;
   const ref = useRef<HTMLTextAreaElement>(null);
   const empty = text.trim().length === 0;
 
@@ -42,6 +53,10 @@ export function Composer() {
     if (empty || !canSend) return;
     const prompt = text;
     // Keep the text until the broker accepted it, so a refusal loses nothing.
+    if (mode === "inspect" && workspace) {
+      void sendInspect(prompt, workspace.workspaceId).then((ok) => ok && setText(""));
+      return;
+    }
     void sendIntent(prompt, model).then((ok) => ok && setText(""));
   };
 
@@ -132,19 +147,66 @@ export function Composer() {
               {intentPending.cancelRequested ? "Cancelling…" : "Cancel"}
             </Button>
           ) : null}
+          <div className="nv-chip nv-chip--static" role="group" aria-label="Request mode">
+            <button
+              type="button"
+              className="nv-chip"
+              aria-pressed={mode === "ask"}
+              onClick={() => setMode("ask")}
+              title="Text-only request: no tools, no files"
+            >
+              Ask
+            </button>
+            <button
+              type="button"
+              className="nv-chip"
+              aria-pressed={mode === "inspect"}
+              onClick={() => setMode("inspect")}
+              disabled={workspaces.length === 0}
+              title={
+                workspaces.length === 0
+                  ? "No read-only workspace has been approved by the operator"
+                  : "Let the model read an approved repository with read-only tools"
+              }
+            >
+              Inspect repo
+            </button>
+          </div>
+          {mode === "inspect" && (
+            <>
+              <label className="nv-sr-only" htmlFor="nv-workspace-select">
+                Workspace
+              </label>
+              <select
+                id="nv-workspace-select"
+                className="nv-chip"
+                value={wsIdx}
+                onChange={(e) => setWsIdx(Number(e.target.value))}
+                title="Operator-approved read-only workspaces (identities, not paths)"
+              >
+                {workspaces.map((w, i) => (
+                  <option key={w.workspaceId} value={i}>
+                    {w.workspaceId}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
           <Button
             variant="primary"
             disabled={empty || !canSend}
             onClick={send}
-            aria-label="Send to model"
+            aria-label={mode === "inspect" ? "Inspect repository" : "Send to model"}
             title={
-              model
-                ? `Send as a text-only model request through the Nexus broker (${model.providerId}/${model.remoteModelId})`
-                : "No broker model is available"
+              mode === "inspect"
+                ? "Start a read-only repository inspection through the Nexus broker"
+                : model
+                  ? `Send as a text-only model request through the Nexus broker (${model.providerId}/${model.remoteModelId})`
+                  : "No broker model is available"
             }
             icon={intentSubmitting || intentPending ? <Loader2 size={15} className="nv-spin" /> : <Send size={15} />}
           >
-            Send
+            {mode === "inspect" ? "Inspect" : "Send"}
           </Button>
         </div>
       </div>
@@ -162,6 +224,14 @@ export function Composer() {
         <div className="nv-composer__hint">
           Model sending is unavailable: {intentModelsError.message}
         </div>
+      )}
+      {mode === "inspect" && model && (
+        <Alert tone="warning" title="Repository contents may be sent to the model provider">
+          The model can list, read and search files in the selected repository (read-only; secrets, VCS
+          internals and Nexus state are blocked, other source text is sent as-is to{" "}
+          <span className="nv-mono">{model.providerId}</span>). Each model turn is a billable request.
+          Nothing is written or executed.
+        </Alert>
       )}
       <div className="nv-composer__hint">
         Send: text-only request to the selected Registry model via the broker (no tools, no files). Run Mock:
