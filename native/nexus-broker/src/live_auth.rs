@@ -189,6 +189,10 @@ pub const SESSION_FILE: &str = "live-session-authorization.json";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LiveSessionAuthorization {
+    /// `repo-inspect` (A5.5 records, the default when absent) or `repo-code`
+    /// (A5.6). A record for one can never satisfy the other.
+    #[serde(default = "default_intent_type")]
+    pub intent_type: String,
     pub provider_id: String,
     pub remote_model_id: String,
     pub workspace_id: String,
@@ -204,12 +208,47 @@ pub struct LiveSessionAuthorization {
     pub expires_at_ms: u64,
 }
 
+fn default_intent_type() -> String {
+    "repo-inspect".to_owned()
+}
+
 pub fn session_record_path(state_dir: &Path) -> PathBuf {
     state_dir.join(SESSION_FILE)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn write_session_record(
+    state_dir: &Path,
+    provider_id: &str,
+    remote_model_id: &str,
+    workspace_id: &str,
+    prompt: &str,
+    max_turns: u32,
+    max_tool_calls: u32,
+    max_output_tokens: u64,
+    max_tool_result_bytes: u64,
+    ttl_secs: u64,
+    acknowledged: bool,
+) -> Result<LiveSessionAuthorization, String> {
+    write_session_record_for(
+        "repo-inspect",
+        state_dir,
+        provider_id,
+        remote_model_id,
+        workspace_id,
+        prompt,
+        max_turns,
+        max_tool_calls,
+        max_output_tokens,
+        max_tool_result_bytes,
+        ttl_secs,
+        acknowledged,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn write_session_record_for(
+    intent_type: &str,
     state_dir: &Path,
     provider_id: &str,
     remote_model_id: &str,
@@ -234,11 +273,19 @@ pub fn write_session_record(
     {
         return Err("provider, model, workspace and a non-empty prompt are required".into());
     }
-    if !(1..=12).contains(&max_turns) {
-        return Err("--max-turns must be 1..12".into());
+    if intent_type != "repo-inspect" && intent_type != "repo-code" {
+        return Err("a session record is only for repo-inspect or repo-code".into());
     }
-    if !(1..=40).contains(&max_tool_calls) {
-        return Err("--max-tool-calls must be 1..40".into());
+    let (turn_cap, call_cap) = if intent_type == "repo-code" {
+        (24, 80)
+    } else {
+        (12, 40)
+    };
+    if !(1..=turn_cap).contains(&max_turns) {
+        return Err(format!("--max-turns must be 1..{turn_cap}"));
+    }
+    if !(1..=call_cap).contains(&max_tool_calls) {
+        return Err(format!("--max-tool-calls must be 1..{call_cap}"));
     }
     if !(16..=8192).contains(&max_output_tokens) {
         return Err("--max-output-tokens must be 16..8192 per call".into());
@@ -250,6 +297,7 @@ pub fn write_session_record(
         return Err(format!("--expires-in-secs must be 1..{MAX_TTL_SECS}"));
     }
     let rec = LiveSessionAuthorization {
+        intent_type: intent_type.to_owned(),
         provider_id: provider_id.to_owned(),
         remote_model_id: remote_model_id.to_owned(),
         workspace_id: workspace_id.to_owned(),
@@ -286,6 +334,7 @@ pub fn write_session_record(
 
 /// What a repo-inspect run is about to do (computed by the broker).
 pub struct SessionAttempt<'a> {
+    pub intent_type: &'a str,
     pub provider_id: &'a str,
     pub remote_model_id: &'a str,
     pub workspace_id: &'a str,
@@ -338,6 +387,9 @@ pub fn consume_session(
     }
     if now_ms() > rec.expires_at_ms {
         return refuse("live session authorization has expired");
+    }
+    if rec.intent_type != a.intent_type {
+        return refuse("live session authorization was issued for a different kind of run");
     }
     if rec.provider_id != a.provider_id || rec.remote_model_id != a.remote_model_id {
         return refuse("live session authorization names a different provider or model");
@@ -491,6 +543,7 @@ mod tests {
     }
     fn sa<'a>(prompt: &'a str) -> SessionAttempt<'a> {
         SessionAttempt {
+            intent_type: "repo-inspect",
             provider_id: P,
             remote_model_id: M,
             workspace_id: "demo",
@@ -558,6 +611,83 @@ mod tests {
                 "{name}: consumed"
             );
         }
+    }
+
+    #[test]
+    fn a_repo_inspect_session_record_never_authorizes_repo_code_and_vice_versa() {
+        let d = tempfile::tempdir().unwrap();
+        write_session_record(d.path(), P, M, "demo", "task", 5, 10, 512, 65536, 600, true).unwrap();
+        let mut a = sa("task");
+        a.intent_type = "repo-code";
+        assert!(consume_session(d.path(), &a)
+            .unwrap_err()
+            .1
+            .contains("different kind"));
+        // and a code record needs the code type
+        write_session_record_for(
+            "repo-code",
+            d.path(),
+            P,
+            M,
+            "demo",
+            "task",
+            12,
+            30,
+            1024,
+            262144,
+            600,
+            true,
+        )
+        .unwrap();
+        let mut ok = sa("task");
+        ok.max_turns = 12;
+        ok.max_tool_calls = 30;
+        ok.max_output_tokens = Some(1024);
+        ok.max_tool_result_bytes = 262144;
+        assert!(
+            consume_session(d.path(), &ok).is_err(),
+            "inspect type presented to a code record"
+        );
+        write_session_record_for(
+            "repo-code",
+            d.path(),
+            P,
+            M,
+            "demo",
+            "task",
+            12,
+            30,
+            1024,
+            262144,
+            600,
+            true,
+        )
+        .unwrap();
+        ok.intent_type = "repo-code";
+        assert!(consume_session(d.path(), &ok).is_ok());
+        assert!(write_session_record_for(
+            "model-only",
+            d.path(),
+            P,
+            M,
+            "demo",
+            "t",
+            1,
+            1,
+            64,
+            2048,
+            60,
+            true
+        )
+        .is_err());
+        // the A5.5 on-disk shape (no intentType) is read as repo-inspect
+        let legacy = r#"{"providerId":"opencode-go-native","remoteModelId":"m","workspaceId":"w","promptSha256":"x","maxTurns":1,"maxToolCalls":1,"maxOutputTokens":64,"maxToolResultBytes":2048,"billableAcknowledged":true,"createdAtMs":1,"expiresAtMs":2}"#;
+        assert_eq!(
+            serde_json::from_str::<LiveSessionAuthorization>(legacy)
+                .unwrap()
+                .intent_type,
+            "repo-inspect"
+        );
     }
 
     #[test]

@@ -34,7 +34,16 @@ pub const SCOPE_MODEL_ONLY: &str = "model-only";
 /// off). It is never a write/process authority.
 pub const SCOPE_REPO_INSPECT: &str = "repo-inspect";
 
-/// The only initiator value a `model-only` or `repo-inspect` intent may carry.
+/// A5.6 user-initiated, bounded coding workflow in an isolated working copy.
+/// One published intent covers exactly ONE provider request, exactly like
+/// `repo-inspect`; the tools its response proposes may be authorized under the
+/// same command, but write and process tools additionally need an
+/// independent, transaction-scoped human approval consumed immediately before
+/// their grant is minted. Separately gated (`enable_repo_code_pilot`, default
+/// off) and never implied by `repo-inspect`.
+pub const SCOPE_REPO_CODE: &str = "repo-code";
+
+/// The only initiator value a `model-only`, `repo-inspect` or `repo-code` intent may carry.
 pub const INITIATOR_USER_EXPLICIT: &str = "user-explicit";
 
 /// Durable Controller execution intent bundle reference.
@@ -224,15 +233,15 @@ fn origin_allowed_for_scope(scope: &str, origin: &str) -> KernelResult<()> {
     if is_loopback_origin(origin) {
         return Ok(());
     }
-    if (scope == SCOPE_MODEL_ONLY || scope == SCOPE_REPO_INSPECT)
+    if (scope == SCOPE_MODEL_ONLY || scope == SCOPE_REPO_INSPECT || scope == SCOPE_REPO_CODE)
         && nexus_contracts::is_public_https_origin(origin)
     {
         return Ok(());
     }
     Err(KernelError::new(
         KernelErrorCode::ScopeRefused,
-        if scope == SCOPE_MODEL_ONLY || scope == SCOPE_REPO_INSPECT {
-            "model-only and repo-inspect scopes require a loopback endpoint or a public https endpoint"
+        if scope == SCOPE_MODEL_ONLY || scope == SCOPE_REPO_INSPECT || scope == SCOPE_REPO_CODE {
+            "model-only, repo-inspect and repo-code scopes require a loopback endpoint or a public https endpoint"
         } else {
             "mock scope requires a loopback-local endpoint"
         },
@@ -263,11 +272,34 @@ impl Kernel {
     pub fn repo_inspect_pilot_enabled(&self) -> bool {
         self.repo_inspect_enabled
     }
+
+    /// A5.6: enable the repo-code pilot scope. Default OFF; only the daemon's
+    /// explicit `--enable-repo-code` flag calls this (refused under
+    /// `production-v1`). It also requires the model pilot, writes, human
+    /// approval and a worktree root at the daemon layer; the Kernel adds no
+    /// approval bypass: write/process tools still need a consumed approval.
+    pub fn enable_repo_code_pilot(&mut self) {
+        self.repo_code_enabled = true;
+    }
+
+    pub fn repo_code_pilot_enabled(&self) -> bool {
+        self.repo_code_enabled
+    }
 }
 
-fn scope_admitted(pilot_enabled: bool, repo_enabled: bool, scope: &str) -> KernelResult<()> {
+fn scope_admitted(
+    pilot_enabled: bool,
+    repo_enabled: bool,
+    code_enabled: bool,
+    scope: &str,
+) -> KernelResult<()> {
     match scope {
         SCOPE_MOCK_E2E => Ok(()),
+        SCOPE_REPO_CODE if code_enabled && pilot_enabled => Ok(()),
+        SCOPE_REPO_CODE => Err(KernelError::new(
+            KernelErrorCode::ScopeRefused,
+            "repo-code pilot is disabled on this kernel (default off)",
+        )),
         SCOPE_REPO_INSPECT if repo_enabled && pilot_enabled => Ok(()),
         SCOPE_REPO_INSPECT => Err(KernelError::new(
             KernelErrorCode::ScopeRefused,
@@ -317,6 +349,7 @@ impl Kernel {
     pub fn publish_intent(&mut self, bundle: &serde_json::Value) -> KernelResult<PublishedIntent> {
         let pilot = self.model_only_enabled;
         let repo = self.repo_inspect_enabled;
+        let code = self.repo_code_enabled;
         Self::critical(&self.lock_file, &self.in_process, || {
             let command_id = field_str(bundle, "commandId")?;
             let task_instance_id = field_str(bundle, "taskInstanceId")?;
@@ -331,8 +364,10 @@ impl Kernel {
             field_str(bundle, "attemptId")?;
             field_str(bundle, "requestDigest")?;
             field_str(bundle, "sessionId")?;
-            scope_admitted(pilot, repo, &scope)?;
-            if (scope == SCOPE_MODEL_ONLY || scope == SCOPE_REPO_INSPECT)
+            scope_admitted(pilot, repo, code, &scope)?;
+            if (scope == SCOPE_MODEL_ONLY
+                || scope == SCOPE_REPO_INSPECT
+                || scope == SCOPE_REPO_CODE)
                 && bundle.get("initiator").and_then(|v| v.as_str()) != Some(INITIATOR_USER_EXPLICIT)
             {
                 return Err(KernelError::new(
@@ -385,7 +420,8 @@ impl Kernel {
                     "sealed extension does not match its digest",
                 ));
             }
-            if scope == SCOPE_MODEL_ONLY || scope == SCOPE_REPO_INSPECT {
+            if scope == SCOPE_MODEL_ONLY || scope == SCOPE_REPO_INSPECT || scope == SCOPE_REPO_CODE
+            {
                 let origin = ext_value
                     .get("endpoint")
                     .and_then(|e| e.get("origin"))
@@ -654,8 +690,9 @@ impl Kernel {
     ) -> KernelResult<SealedNativeDispatchGrant> {
         let pilot = self.model_only_enabled;
         let repo = self.repo_inspect_enabled;
+        let code = self.repo_code_enabled;
         Self::critical(&self.lock_file, &self.in_process, || {
-            scope_admitted(pilot, repo, &req.scope)?;
+            scope_admitted(pilot, repo, code, &req.scope)?;
             let (stored_json, stored_seal, state) =
                 self.store.fetch_intent(&req.command_id)?.ok_or_else(|| {
                     KernelError::new(
@@ -871,8 +908,9 @@ impl Kernel {
     ) -> KernelResult<NativeDispatchGrant> {
         let pilot = self.model_only_enabled;
         let repo = self.repo_inspect_enabled;
+        let code = self.repo_code_enabled;
         Self::critical(&self.lock_file, &self.in_process, || {
-            scope_admitted(pilot, repo, &grant.scope)?;
+            scope_admitted(pilot, repo, code, &grant.scope)?;
             if grant.command_id.is_empty()
                 || grant.attempt_id.is_empty()
                 || grant.task_instance_id.is_empty()

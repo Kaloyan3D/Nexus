@@ -111,6 +111,10 @@ pub struct Daemon {
     /// A3.2: operator-configured bases beneath which the Controller may
     /// bind workspaces. Empty = workspace binding refused (fail closed).
     pub workspace_bases: Vec<std::path::PathBuf>,
+    /// A5.6: directory holding one isolated working copy per coding task.
+    pub worktree_root: Option<std::path::PathBuf>,
+    /// A5.6: repo-code pilot (also latched in the Kernel handle).
+    pub repo_code_enabled: bool,
     /// A3.3: mutating tools are refused unless explicitly enabled.
     pub writes_enabled: bool,
     /// A3.4: sandboxed process execution is refused unless enabled AND the
@@ -1152,9 +1156,23 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "human approval mode is not enabled on this daemon",
         );
     }
-    let request = match build_tool_request(req, &["ttlMs"]) {
+    let request = match build_tool_request(req, &["ttlMs", "aiOrigin"]) {
         Ok(r) => r,
         Err(r) => return r,
+    };
+    // A5.6: provenance of a MODEL-proposed operation, shown to the approver.
+    let ai_origin: Option<String> = match req.params.get("aiOrigin") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(o))
+            if !o.is_empty()
+                && o.len() <= 160
+                && o.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':' | b'/')
+                }) =>
+        {
+            Some(o.clone())
+        }
+        Some(_) => return refuse(codes::BAD_REQUEST, "bad-request: 'aiOrigin' is malformed"),
     };
     let ttl_ms = req
         .params
@@ -1337,6 +1355,15 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             }),
         )
     };
+    let mut sub = sub;
+    if let (Some(o), Some(op)) = (&ai_origin, sub.operation.as_object_mut()) {
+        // Part of the sealed, reviewed request: the approver sees that a model
+        // proposed this operation (never a claim that a human did).
+        op.insert(
+            "proposedBy".to_owned(),
+            serde_json::json!({ "origin": "model", "ref": o }),
+        );
+    }
     match kernel.create_approval(&sub) {
         Ok(row) => {
             log_line("approval-request", &req.id, "ok", &req.cmd);
@@ -1816,6 +1843,188 @@ fn do_workspace_bind(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             }),
         ),
         Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
+// ---- A5.6: isolated working copies for autonomous coding ------------------
+
+fn wt_fail(daemon: &Daemon, id: &str, e: &nexus_tools::gitwt::WtError) -> serde_json::Value {
+    daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+    fail(id, e.code, &e.message)
+}
+
+fn wt_root<'a>(daemon: &'a Daemon, id: &str) -> Result<&'a std::path::PathBuf, serde_json::Value> {
+    if !daemon.repo_code_enabled {
+        daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+        return Err(fail(
+            id,
+            "scope-refused",
+            "the repo-code pilot is not enabled on this daemon",
+        ));
+    }
+    daemon.worktree_root.as_ref().ok_or_else(|| {
+        fail(
+            id,
+            "scope-refused",
+            "no worktree root is configured on this daemon",
+        )
+    })
+}
+
+fn wt_meta_path(root: &std::path::Path, task: &str) -> std::path::PathBuf {
+    root.join(".meta").join(format!("{task}.json"))
+}
+
+fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    if let Err(r) = only_keys(&req.params, &["taskInstanceId", "sourceRoot"], &req.id) {
+        return r;
+    }
+    let root = match wt_root(daemon, &req.id) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let task = match get_string(&req.params, "taskInstanceId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    let source = match get_string(&req.params, "sourceRoot") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    if !source.starts_with('/') || source.contains('\0') {
+        return fail(
+            &req.id,
+            "scope-refused",
+            "source root must be an absolute path",
+        );
+    }
+    // The source repository must lie beneath an operator-allowed base, just
+    // like a bound workspace (the issuer does not get to pick any directory).
+    let canon = match std::fs::canonicalize(&source) {
+        Ok(c) => c,
+        Err(_) => return fail(&req.id, "scope-refused", "source repository does not exist"),
+    };
+    let beneath = daemon.workspace_bases.iter().any(|b| {
+        std::fs::canonicalize(b)
+            .map(|cb| cb != std::path::Path::new("/") && canon.starts_with(&cb))
+            .unwrap_or(false)
+    });
+    if !beneath {
+        daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+        return fail(
+            &req.id,
+            "scope-refused",
+            "source repository is not beneath an operator-allowed workspace base",
+        );
+    }
+    let info = match nexus_tools::gitwt::create(&canon, root, &task) {
+        Ok(i) => i,
+        Err(e) => return wt_fail(daemon, &req.id, &e),
+    };
+    // Authoritative record of what this copy was made from (outside the
+    // workspace the tools can reach).
+    let meta_dir = root.join(".meta");
+    let meta = serde_json::json!({
+        "taskInstanceId": task,
+        "sourceCommit": info.source.commit,
+        "sourceRepoId": info.source.repo_id,
+    });
+    let wrote = (|| -> std::io::Result<()> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&meta_dir)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(wt_meta_path(root, &task))?;
+        std::io::Write::write_all(&mut f, meta.to_string().as_bytes())?;
+        f.sync_all()
+    })();
+    if wrote.is_err() {
+        let _ = nexus_tools::gitwt::remove(root, &task);
+        return fail(
+            &req.id,
+            "internal",
+            "cannot record the working copy identity",
+        );
+    }
+    ok(
+        &req.id,
+        serde_json::json!({
+            "worktree": {
+                "path": info.path.to_string_lossy(),
+                "sourceCommit": info.source.commit,
+                "sourceRepoId": info.source.repo_id,
+            }
+        }),
+    )
+}
+
+fn wt_read_meta(root: &std::path::Path, task: &str) -> Option<(String, String)> {
+    let raw = std::fs::read_to_string(wt_meta_path(root, task)).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    Some((
+        v.get("sourceCommit")?.as_str()?.to_owned(),
+        v.get("sourceRepoId")?.as_str()?.to_owned(),
+    ))
+}
+
+fn do_worktree_diff(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    if let Err(r) = only_keys(&req.params, &["taskInstanceId"], &req.id) {
+        return r;
+    }
+    let root = match wt_root(daemon, &req.id) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let task = match get_string(&req.params, "taskInstanceId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    if !nexus_tools::gitwt::valid_task_id(&task) {
+        return fail(
+            &req.id,
+            "bad-request",
+            "bad-request: invalid task instance id",
+        );
+    }
+    let Some((commit, repo_id)) = wt_read_meta(root, &task) else {
+        return fail(
+            &req.id,
+            "not-found",
+            "no working copy was created for this task",
+        );
+    };
+    match nexus_tools::gitwt::diff(&root.join(&task), &commit) {
+        Ok(d) => ok(
+            &req.id,
+            serde_json::json!({ "diff": d, "sourceRepoId": repo_id }),
+        ),
+        Err(e) => wt_fail(daemon, &req.id, &e),
+    }
+}
+
+fn do_worktree_remove(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    if let Err(r) = only_keys(&req.params, &["taskInstanceId"], &req.id) {
+        return r;
+    }
+    let root = match wt_root(daemon, &req.id) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let task = match get_string(&req.params, "taskInstanceId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    match nexus_tools::gitwt::remove(root, &task) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(wt_meta_path(root, &task));
+            ok(&req.id, serde_json::json!({ "removed": true }))
+        }
+        Err(e) => wt_fail(daemon, &req.id, &e),
     }
 }
 
@@ -2512,6 +2721,8 @@ fn do_status(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "dispatchEnabled": nexus_kernel::Kernel::dispatch_enabled(),
             "modelPilotEnabled": model_pilot_enabled,
             "repoInspectEnabled": repo_inspect_enabled,
+            "repoCodeEnabled": daemon.repo_code_enabled,
+            "requireHumanApproval": daemon.require_human_approval,
             "writesEnabled": daemon.writes_enabled,
             "processEnabled": daemon.process_enabled,
             "sandbox": daemon.sandbox_caps.as_ref().map(|c| serde_json::json!({
@@ -2600,6 +2811,9 @@ pub fn dispatch(
             "tool-revoke" => do_tool_revoke(daemon, req),
             "approval-request" => do_approval_request(daemon, req),
             "approval-revoke" => do_approval_revoke(daemon, req),
+            "worktree-create" => do_worktree_create(daemon, req),
+            "worktree-diff" => do_worktree_diff(daemon, req),
+            "worktree-remove" => do_worktree_remove(daemon, req),
             "seal" => do_seal(daemon, req),
             "accept" => do_accept(daemon, req),
             _ => unreachable!("privileged set is fixed"),
@@ -3132,6 +3346,8 @@ mod isolation_tests {
             counters: Counters::default(),
             reconcile_latch: Mutex::new(None),
             workspace_bases: Vec::new(),
+            worktree_root: None,
+            repo_code_enabled: false,
             writes_enabled: false,
             process_enabled: false,
             command_policy: nexus_tools::process::CommandPolicy::standard(

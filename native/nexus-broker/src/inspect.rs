@@ -23,6 +23,7 @@
 //! resumes a run (recovery marks it terminal), so no tool or provider call can
 //! be repeated by a reconnect.
 
+use crate::code::{ApprovalOutcome, CodePolicy, CodeProposal, Kind};
 use crate::pipeline::{bridge, daemon, se, str_of, StepError};
 use crate::server::Broker;
 use nexus_client::intent_client::{IntentRun, ToolActivity};
@@ -63,12 +64,66 @@ pub struct Limits {
 
 pub fn resolve_limits(intent: &NexusIntentV1) -> Limits {
     let l = &intent.limits;
+    let code = intent.intent_type == nexus_contracts::intent::INTENT_REPO_CODE;
     Limits {
-        turns: l.max_turns.unwrap_or(DEFAULT_MAX_TURNS),
-        tool_calls: l.max_tool_calls.unwrap_or(DEFAULT_MAX_TOOL_CALLS),
-        result_bytes: l.max_tool_result_bytes.unwrap_or(DEFAULT_MAX_RESULT_BYTES),
-        runtime: Duration::from_secs(l.max_runtime_secs.unwrap_or(DEFAULT_MAX_RUNTIME_SECS)),
+        turns: l.max_turns.unwrap_or(if code {
+            crate::code::DEFAULT_CODE_TURNS
+        } else {
+            DEFAULT_MAX_TURNS
+        }),
+        tool_calls: l.max_tool_calls.unwrap_or(if code {
+            crate::code::DEFAULT_CODE_TOOL_CALLS
+        } else {
+            DEFAULT_MAX_TOOL_CALLS
+        }),
+        result_bytes: l.max_tool_result_bytes.unwrap_or(if code {
+            crate::code::DEFAULT_CODE_RESULT_BYTES
+        } else {
+            DEFAULT_MAX_RESULT_BYTES
+        }),
+        runtime: Duration::from_secs(l.max_runtime_secs.unwrap_or(if code {
+            crate::code::DEFAULT_CODE_RUNTIME_SECS
+        } else {
+            DEFAULT_MAX_RUNTIME_SECS
+        })),
         output_tokens: l.max_output_tokens,
+    }
+}
+
+/// Which agentic workflow a run is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// A5.5: read-only tools.
+    Inspect,
+    /// A5.6: read tools plus approved edits and sandboxed commands.
+    Code,
+}
+
+impl Mode {
+    pub fn of(intent: &NexusIntentV1) -> Self {
+        if intent.intent_type == nexus_contracts::intent::INTENT_REPO_CODE {
+            Self::Code
+        } else {
+            Self::Inspect
+        }
+    }
+    fn scope(self) -> &'static str {
+        match self {
+            Self::Inspect => "repo-inspect",
+            Self::Code => "repo-code",
+        }
+    }
+    fn publish(self) -> &'static str {
+        match self {
+            Self::Inspect => "publish-inspect",
+            Self::Code => "publish-code",
+        }
+    }
+    fn profile(self) -> nexus_model::ToolProfile {
+        match self {
+            Self::Inspect => nexus_model::ToolProfile::RepoInspectV1,
+            Self::Code => nexus_model::ToolProfile::RepoCodeV1,
+        }
     }
 }
 
@@ -106,7 +161,22 @@ pub fn validate_workspaces(cfg: &crate::BrokerConfig) -> Result<Vec<crate::Works
         }
     })
     .collect();
-    for w in &cfg.workspaces {
+    let all: Vec<&crate::WorkspaceSpec> = cfg
+        .workspaces
+        .iter()
+        .chain(cfg.code_sources.iter())
+        .collect();
+    let mut seen_ids: Vec<&str> = Vec::new();
+    for w in &all {
+        if seen_ids.contains(&w.id.as_str()) {
+            return Err(format!(
+                "id '{}' is used by both an inspect workspace and a code source (or twice)",
+                w.id
+            ));
+        }
+        seen_ids.push(&w.id);
+    }
+    for w in all {
         let id_ok = !w.id.is_empty()
             && w.id.len() <= 64
             && w.id
@@ -145,6 +215,28 @@ pub fn validate_workspaces(cfg: &crate::BrokerConfig) -> Result<Vec<crate::Works
         out.push(w2);
     }
     Ok(out)
+}
+
+/// Same validation for the coding sources; returns the canonicalized list.
+pub fn validate_code_sources(
+    cfg: &crate::BrokerConfig,
+) -> Result<(Vec<crate::WorkspaceSpec>, Vec<crate::WorkspaceSpec>), String> {
+    let all = validate_workspaces(cfg)?;
+    let n = cfg.workspaces.len();
+    let (a, b) = all.split_at(n);
+    Ok((a.to_vec(), b.to_vec()))
+}
+
+/// Code sources this client may select, by identity only.
+pub fn code_sources_for(cfg: &crate::BrokerConfig, client: &str) -> Vec<String> {
+    let uid = uid_of(client);
+    cfg.code_sources
+        .iter()
+        .filter(|w| {
+            w.allowed_uids.is_empty() || uid.map(|u| w.allowed_uids.contains(&u)).unwrap_or(false)
+        })
+        .map(|w| w.id.clone())
+        .collect()
 }
 
 fn uid_of(client: &str) -> Option<u32> {
@@ -259,6 +351,10 @@ pub fn validate_proposal(name: &str, arguments: &Value) -> Result<ValidProposal,
         args: arguments.clone(),
         args_digest: parsed.digest(),
     })
+}
+
+pub(crate) fn path_ok_pub(p: &str) -> Result<(), Refusal> {
+    path_ok(p)
 }
 
 fn path_ok(p: &str) -> Result<(), Refusal> {
@@ -597,19 +693,22 @@ pub(crate) fn run(
 ) -> Result<(), StepError> {
     let ctx = Ctx { b, run_id, flag };
     let started = Instant::now();
+    let mode = Mode::of(intent);
     let limits = resolve_limits(intent);
     let workspace_id = intent
         .workspace_id
         .clone()
-        .ok_or_else(|| se("bad-intent", "repo-inspect requires a workspace"))?;
+        .ok_or_else(|| se("bad-intent", "this intent requires a workspace"))?;
     let client = b
         .store
         .load(run_id)
         .map(|r| r.run.client_id)
         .unwrap_or_default();
-    let ws = b
-        .cfg
-        .workspaces
+    let pool = match mode {
+        Mode::Inspect => &b.cfg.workspaces,
+        Mode::Code => &b.cfg.code_sources,
+    };
+    let ws = pool
         .iter()
         .find(|w| w.id == workspace_id)
         .filter(|w| {
@@ -625,24 +724,42 @@ pub(crate) fn run(
             )
         })?
         .clone();
-    let root = ws.root.to_string_lossy().into_owned();
-    let ws_digest = nexus_contracts::sha256_hex(&root);
+    let policy = crate::code::resolve_policy(intent);
     b.update(run_id, |r| {
         r.state = "preparing".into();
         r.workspace_id = Some(workspace_id.clone());
         r.max_turns = limits.turns;
         r.max_tool_calls = limits.tool_calls;
+        if mode == Mode::Code {
+            r.max_edits = policy.max_edits;
+            r.max_tests = policy.max_tests;
+        }
     });
     if ctx.stop() {
         crate::pipeline::cancelled_before_submission(b, run_id);
         return Ok(());
+    }
+    // repo-code needs every daemon-side lock; check before creating anything.
+    if mode == Mode::Code {
+        let st = daemon(b, "status", serde_json::json!({}))?;
+        let on = |k: &str| st.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+        if !(on("repoCodeEnabled")
+            && on("writesEnabled")
+            && on("processEnabled")
+            && on("requireHumanApproval"))
+        {
+            return Err(se(
+                "code-not-available",
+                "the daemon is not configured for autonomous coding (repo-code, writes, processes and mandatory human approval must all be enabled)",
+            ));
+        }
     }
 
     // 1. Controller task (kind repo-inspect) + Registry issuance, once.
     let ledger = b.cfg.ledger_workspace.to_string_lossy().into_owned();
     let task = {
         let _g = b.bridge_lock.lock().unwrap_or_else(|p| p.into_inner());
-        bridge(b, "task-create", &[&ledger, "repo-inspect"], None)?
+        bridge(b, "task-create", &[&ledger, mode.scope()], None)?
     };
     let (task_id, task_instance, attempt1, session_id) = (
         str_of(&task, "taskId")?,
@@ -701,18 +818,57 @@ pub(crate) fn run(
         .unwrap_or(0);
     let out_tokens = out_tokens.map(|n| if sealed_out > 0 { n.min(sealed_out) } else { n });
 
+    // 1b. repo-code: the isolated working copy, created by the daemon (trusted
+    //     native code), BEFORE any authorization can be spent so that a dirty
+    //     or ambiguous source repository burns nothing. The model never names
+    //     this path; the Controller commits to its digest.
+    let mut root = ws.root.to_string_lossy().into_owned();
+    let mut created_worktree = false;
+    if mode == Mode::Code {
+        let wt = daemon(
+            b,
+            "worktree-create",
+            serde_json::json!({ "taskInstanceId": task_instance, "sourceRoot": root }),
+        )?;
+        root = wt
+            .pointer("/worktree/path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| se("daemon-shape", "worktree-create returned no path"))?
+            .to_owned();
+        let commit = wt
+            .pointer("/worktree/sourceCommit")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        created_worktree = true;
+        b.update(run_id, |r| r.worktree_commit = commit);
+    }
+    let ws_digest = nexus_contracts::sha256_hex(&root);
+    // Until a conversation exists nothing worth keeping has happened: a
+    // failure removes the empty copy (afterwards it is retained for review).
+    let discard = |why: StepError| -> StepError {
+        if created_worktree {
+            let _ = daemon(
+                b,
+                "worktree-remove",
+                serde_json::json!({ "taskInstanceId": task_instance }),
+            );
+        }
+        why
+    };
+
     // 2. A real (https, production-transport) provider needs a bounded,
     //    operator-created SESSION authorization, consumed before any grant.
     if b.cfg.transport.is_none() && origin.starts_with("https://") {
         if crate::identity::self_stale() {
-            return Err(se(
+            return Err(discard(se(
                 "broker-stale",
                 "this broker process predates the installed nexus-broker binary; restart it (nothing sent, authorization kept)",
-            ));
+            )));
         }
         crate::live_auth::consume_session(
             &b.cfg.state_dir,
             &crate::live_auth::SessionAttempt {
+                intent_type: mode.scope(),
                 provider_id: &provider_id,
                 remote_model_id: &remote_model_id,
                 workspace_id: &workspace_id,
@@ -723,9 +879,10 @@ pub(crate) fn run(
                 max_tool_result_bytes: limits.result_bytes,
             },
         )
-        .map_err(|(c, m)| se(c, m))?;
+        .map_err(|(c, m)| discard(se(c, m)))?;
     }
     if ctx.stop() {
+        let _ = discard(se("cancelled", "cancelled"));
         crate::pipeline::cancelled_before_submission(b, run_id);
         return Ok(());
     }
@@ -735,7 +892,8 @@ pub(crate) fn run(
         b,
         "acquire",
         serde_json::json!({ "taskInstanceId": task_instance, "backend": "native" }),
-    )?;
+    )
+    .map_err(discard)?;
     let lease_epoch = acquired
         .pointer("/lease/leaseEpoch")
         .and_then(|v| v.as_u64())
@@ -745,12 +903,13 @@ pub(crate) fn run(
         .and_then(|v| v.as_str())
         .ok_or_else(|| se("daemon-shape", "acquire returned no store incarnation"))?
         .to_owned();
-    daemon(b, "seal", serde_json::json!({ "resolution": resolution }))?;
+    daemon(b, "seal", serde_json::json!({ "resolution": resolution })).map_err(discard)?;
     let sealed = daemon(
         b,
         "seal-extension",
         serde_json::json!({ "extension": extension }),
-    )?;
+    )
+    .map_err(discard)?;
     let extension_digest = str_of(&sealed, "extensionDigest")?;
 
     let opts = ModelRunOptions {
@@ -765,6 +924,7 @@ pub(crate) fn run(
         &task_instance,
         &intent.content,
         &InspectBasics {
+            mode: mode.scope(),
             provider_id: provider_id.clone(),
             remote_model_id: remote_model_id.clone(),
             logical_model_id: logical_model_id.clone(),
@@ -772,7 +932,7 @@ pub(crate) fn run(
             workspace_id: workspace_id.clone(),
         },
     )
-    .map_err(|e| se(e.code, e.message))?;
+    .map_err(|e| discard(se(e.code, e.message)))?;
     let conv = session.conversation_id().to_owned();
     b.update(run_id, |r| {
         r.conversation_id = Some(conv.clone());
@@ -786,7 +946,10 @@ pub(crate) fn run(
     }
 
     // From here a conversation exists: every exit records a terminal state.
-    let mut loop_state = LoopState::default();
+    let mut loop_state = LoopState {
+        mode_code: mode == Mode::Code,
+        ..Default::default()
+    };
     let result = turn_loop(
         &ctx,
         &mut session,
@@ -795,6 +958,8 @@ pub(crate) fn run(
         out_tokens,
         &started,
         &Shared {
+            mode,
+            policy,
             intent,
             task_id: &task_id,
             task_instance: &task_instance,
@@ -815,6 +980,8 @@ pub(crate) fn run(
 }
 
 struct Shared<'a> {
+    mode: Mode,
+    policy: CodePolicy,
     intent: &'a NexusIntentV1,
     task_id: &'a str,
     task_instance: &'a str,
@@ -842,6 +1009,15 @@ struct LoopState {
     last_output: Option<TurnOutput>,
     citations_verified: Vec<String>,
     citations_unverified: Vec<String>,
+    // ---- repo-code ----
+    /// Latest whole-file sha256 a tool reported per path (read result or the
+    /// post-image of an approved edit): the pre-image the next edit is pinned to.
+    last_sha: BTreeMap<String, String>,
+    edits_used: u32,
+    tests_used: u32,
+    write_bytes: u64,
+    last_test: Option<String>,
+    mode_code: bool,
 }
 
 /// How the loop ended (a terminal state is ALWAYS recorded by `finalize`).
@@ -852,6 +1028,8 @@ enum LoopEnd {
     /// The executor already recorded the terminal state.
     Recorded,
     Failed(String, String),
+    /// A write/process may or may not have happened (lost answer).
+    Uncertain(String, String),
 }
 
 impl Ctx<'_> {
@@ -961,11 +1139,11 @@ fn turn_loop(
                 }),
             max_output_tokens: out_tokens,
         };
-        let prepared = nexus_client::prepare_inspect_turn(&req, &items)
+        let prepared = nexus_client::prepare_inspect_turn(&req, &items, sh.mode.profile())
             .map_err(|e| se("prepare-refused", e.message))?;
         let bundle = bridge(
             b,
-            "publish-inspect",
+            sh.mode.publish(),
             &[],
             Some(&serde_json::json!({
                 "shadowIntent": shadow_intent,
@@ -1006,7 +1184,7 @@ fn turn_loop(
             "dispatch-authorize",
             serde_json::json!({
                 "commandId": command_id, "requestDigest": prepared.request_digest,
-                "scope": "repo-inspect", "endpointOrigin": prepared.endpoint_origin,
+                "scope": sh.mode.scope(), "endpointOrigin": prepared.endpoint_origin,
                 "credentialRef": prepared.credential_ref,
             }),
         )?;
@@ -1022,6 +1200,7 @@ fn turn_loop(
             opts,
             session,
             &InspectTurn {
+                profile: sh.mode.profile(),
                 request: &req,
                 items: items.clone(),
                 grant: &grant,
@@ -1129,8 +1308,22 @@ fn turn_loop(
                 args_summary: fallback_summary(&call.name, &call.arguments),
                 ..Default::default()
             };
-            // 1. deterministic validation
-            let rendered = match validate_proposal(&call.name, &call.arguments) {
+            // 1. deterministic validation (the catalog depends on the mode)
+            let validated = match sh.mode {
+                Mode::Code => {
+                    crate::code::validate_code_proposal(&call.name, &call.arguments, &ls.last_sha)
+                }
+                Mode::Inspect => {
+                    validate_proposal(&call.name, &call.arguments).map(|v| CodeProposal {
+                        summary: String::new(),
+                        inner: v,
+                        kind: Kind::Read,
+                        path: None,
+                        bytes: 0,
+                    })
+                }
+            };
+            let rendered = match validated {
                 Err(r) => {
                     act.status = "refused".into();
                     act.error_code = Some(r.code.to_owned());
@@ -1139,97 +1332,212 @@ fn turn_loop(
                     refusals_in_a_row += 1;
                     render_error(&act.tool, r.code, &r.message)
                 }
-                Ok(p) => {
+                Ok(cp) => {
+                    let p = &cp.inner;
                     act.tool = p.model_name.to_owned();
-                    act.args_summary = args_summary(&p);
+                    act.args_summary = match cp.kind {
+                        Kind::Read => args_summary(p),
+                        _ => cp.summary.clone(),
+                    };
                     act.args_digest = Some(p.args_digest.clone());
-                    let _ = session.tool_call(
-                        idx,
-                        &call_id,
-                        p.model_name,
-                        &args_echo,
-                        "authorizing",
-                        false,
-                    );
-                    // 2. Kernel-mediated execution via the existing tool path.
-                    let rid = format!("ri-{}-t{}-c{}", &ctx.run_id[4..16], turn, idx);
-                    let origin_tag = format!(
-                        "{}/{}",
-                        safe_id(out.response_id.as_deref().unwrap_or("noresp")),
-                        call_id
-                    );
-                    let resp = daemon(
-                        b,
-                        "tool-execute",
-                        serde_json::json!({
+                    // Per-run budgets for mutations and commands.
+                    if let Some(msg) = budget_refusal(&cp, ls, &sh.policy) {
+                        act.status = "refused".into();
+                        act.error_code = Some("budget-exhausted".into());
+                        let _ = session.tool_call(
+                            idx,
+                            &call_id,
+                            p.model_name,
+                            &args_echo,
+                            "refused",
+                            true,
+                        );
+                        refusals_in_a_row += 1;
+                        render_error(p.model_name, "budget-exhausted", msg)
+                    } else {
+                        let _ = session.tool_call(
+                            idx,
+                            &call_id,
+                            p.model_name,
+                            &args_echo,
+                            if cp.kind == Kind::Read {
+                                "authorizing"
+                            } else {
+                                "awaiting-approval"
+                            },
+                            false,
+                        );
+                        let rid = format!("ri-{}-t{}-c{}", &ctx.run_id[4..16], turn, idx);
+                        let origin_tag = format!(
+                            "{}/{}",
+                            safe_id(out.response_id.as_deref().unwrap_or("noresp")),
+                            call_id
+                        );
+                        let params = serde_json::json!({
                             "requestId": rid, "cancellationId": rid,
                             "taskInstanceId": sh.task_instance, "attemptId": attempt_id,
                             "commandId": command_id, "leaseEpoch": sh.lease_epoch,
                             "storeIncarnation": sh.incarnation,
                             "toolId": p.tool_id.as_str(), "toolVersion": nexus_tools::TOOL_VERSION,
                             "args": p.args,
-                            "budgets": {
-                                "maxOutputBytes": 32 * 1024u64, "maxFileBytes": 512 * 1024u64,
-                                "maxMatches": nexus_model::repo_tools::MODEL_MAX_SEARCH_MATCHES,
-                                "maxEntries": 500u32, "maxDepth": 8u32, "deadlineMs": 10_000u64,
-                            },
-                            "aiOrigin": origin_tag,
-                        }),
-                    );
-                    match resp {
-                        Ok(v) => {
-                            refusals_in_a_row = 0;
-                            let result = v.get("result").cloned().unwrap_or_default();
-                            let r = render_result(p.model_name, &result, PER_RESULT_BYTES);
-                            act.status = if r.is_error { "failed" } else { "executed" }.into();
-                            act.execution_id = v
-                                .pointer("/execution/executionId")
-                                .and_then(|x| x.as_str())
-                                .map(str::to_owned);
-                            act.journal_seq =
-                                v.pointer("/execution/journalSeq").and_then(|x| x.as_i64());
-                            if r.is_error {
-                                act.error_code = result
-                                    .pointer("/error/code")
-                                    .and_then(|x| x.as_str())
-                                    .map(str::to_owned);
+                            "budgets": budgets_for(cp.kind),
+                        });
+                        // 2. Mutations and commands first need an independent
+                        //    approval of this exact operation.
+                        let mut proceed = true;
+                        let mut denial: Option<Rendered> = None;
+                        if cp.kind != Kind::Read {
+                            match cp.kind {
+                                Kind::Write => ls.edits_used += 1,
+                                _ => ls.tests_used += 1,
                             }
-                            // Evidence for citation checking comes only from
-                            // what the native tool actually returned.
-                            record_evidence(&mut evidence, p.model_name, &p.args, &result);
-                            r
+                            ls.write_bytes += cp.bytes;
+                            let (e, t) = (ls.edits_used, ls.tests_used);
+                            b.update(ctx.run_id, |r| {
+                                r.edits_used = e;
+                                r.tests_used = t;
+                            });
+                            let outcome = crate::code::request_and_wait(
+                                b,
+                                ctx.run_id,
+                                ctx.flag,
+                                *started + limits.runtime,
+                                &params,
+                                &origin_tag,
+                                p.model_name,
+                                &cp.summary,
+                            );
+                            act.approval_id = outcome.approval_id().map(str::to_owned);
+                            act.approval_outcome = Some(outcome.label().to_owned());
+                            match outcome {
+                                ApprovalOutcome::Approved { .. } => {}
+                                ApprovalOutcome::Refused { code, message } => {
+                                    proceed = false;
+                                    if is_authority_failure(&code) {
+                                        act.status = "refused".into();
+                                        act.error_code = Some(code.clone());
+                                        ls.activity.push(act);
+                                        return Ok(LoopEnd::Failed(
+                                            "tool-authority-refused".into(),
+                                            format!("the daemon refused to create the approval ({code}); the run was stopped (fail closed)"),
+                                        ));
+                                    }
+                                    act.status = "refused".into();
+                                    act.error_code = Some(code.clone());
+                                    refusals_in_a_row += 1;
+                                    denial = Some(render_error(p.model_name, &code, &message));
+                                }
+                                ApprovalOutcome::Cancelled { .. } => {
+                                    act.status = "cancelled".into();
+                                    ls.activity.push(act);
+                                    return Ok(LoopEnd::Cancelled);
+                                }
+                                ApprovalOutcome::TimedOut { .. } => {
+                                    act.status = "cancelled".into();
+                                    ls.activity.push(act);
+                                    return Ok(LoopEnd::Limit("max-runtime"));
+                                }
+                                other => {
+                                    proceed = false;
+                                    let code = format!("approval-{}", other.label());
+                                    act.status = "refused".into();
+                                    act.error_code = Some(code.clone());
+                                    denial = Some(render_error(
+                                        p.model_name,
+                                        &code,
+                                        "the independent approver did not approve this operation; it was not run",
+                                    ));
+                                }
+                            }
                         }
-                        Err(e) => {
-                            let code = e.code.strip_prefix("daemon-").unwrap_or(&e.code).to_owned();
-                            if is_authority_failure(&code) {
-                                act.status = "refused".into();
-                                act.error_code = Some(code.clone());
-                                ls.activity.push(act);
-                                return Ok(LoopEnd::Failed(
-                                    "tool-authority-refused".into(),
-                                    format!("the Kernel refused the tool call ({code}); the run was stopped (fail closed)"),
-                                ));
+                        if !proceed {
+                            denial.unwrap_or_else(|| {
+                                render_error(p.model_name, "refused", "the operation was not run")
+                            })
+                        } else {
+                            // 3. Kernel-mediated execution via the existing tool path.
+                            let mut exec = params.clone();
+                            exec["aiOrigin"] = serde_json::json!(origin_tag);
+                            let resp = exec_with_cancel(b, ctx.flag, &exec, command_id.as_str());
+                            match resp {
+                                Ok(v) => {
+                                    refusals_in_a_row = 0;
+                                    let result = v.get("result").cloned().unwrap_or_default();
+                                    let r = if p.model_name == "proc_run" {
+                                        render_process(&result, PER_RESULT_BYTES)
+                                    } else {
+                                        render_result(p.model_name, &result, PER_RESULT_BYTES)
+                                    };
+                                    act.status =
+                                        if r.is_error { "failed" } else { "executed" }.into();
+                                    act.execution_id = v
+                                        .pointer("/execution/executionId")
+                                        .and_then(|x| x.as_str())
+                                        .map(str::to_owned);
+                                    act.journal_seq =
+                                        v.pointer("/execution/journalSeq").and_then(|x| x.as_i64());
+                                    if r.is_error {
+                                        act.error_code = result
+                                            .pointer("/error/code")
+                                            .and_then(|x| x.as_str())
+                                            .map(str::to_owned);
+                                    }
+                                    record_evidence(&mut evidence, p.model_name, &p.args, &result);
+                                    record_receipts(ls, &mut act, &cp, &result);
+                                    r
+                                }
+                                Err(e) => {
+                                    let code = e
+                                        .code
+                                        .strip_prefix("daemon-")
+                                        .unwrap_or(&e.code)
+                                        .to_owned();
+                                    // A lost answer to a WRITE or PROCESS is not a failure
+                                    // we may assume: the operation may have happened. Stop,
+                                    // keep the copy, and require explicit reconciliation.
+                                    if e.code == "daemon-unreachable"
+                                        && cp.kind != crate::code::Kind::Read
+                                    {
+                                        act.status = "uncertain".into();
+                                        act.error_code = Some("tool-outcome-uncertain".into());
+                                        ls.activity.push(act);
+                                        return Ok(LoopEnd::Uncertain(
+                                            "tool-outcome-uncertain".into(),
+                                            "the daemon did not answer while a write or command was running; its effect is unknown. Nothing was repeated. Review the working copy diff before trusting it".into(),
+                                        ));
+                                    }
+                                    if is_authority_failure(&code) {
+                                        act.status = "refused".into();
+                                        act.error_code = Some(code.clone());
+                                        ls.activity.push(act);
+                                        return Ok(LoopEnd::Failed(
+                                            "tool-authority-refused".into(),
+                                            format!("the Kernel refused the tool call ({code}); the run was stopped (fail closed)"),
+                                        ));
+                                    }
+                                    // An ordinary tool failure (not-found, sensitive
+                                    // path, conflict, ...) is data for the model.
+                                    act.status = "failed".into();
+                                    act.error_code = Some(code.clone());
+                                    if matches!(
+                                        code.as_str(),
+                                        "sensitive-path-refused"
+                                            | "hidden-path-refused"
+                                            | "symlink-refused"
+                                            | "special-file-refused"
+                                            | "hardlink-refused"
+                                            | "path-invalid"
+                                            | "invalid-arguments"
+                                            | "unsupported-tool"
+                                            | "command-refused"
+                                    ) {
+                                        refusals_in_a_row += 1;
+                                    } else {
+                                        refusals_in_a_row = 0;
+                                    }
+                                    render_error(p.model_name, &code, &e.message)
+                                }
                             }
-                            // An ordinary tool failure (not-found, sensitive
-                            // path, too large, ...) is data for the model.
-                            act.status = "failed".into();
-                            act.error_code = Some(code.clone());
-                            if matches!(
-                                code.as_str(),
-                                "sensitive-path-refused"
-                                    | "hidden-path-refused"
-                                    | "symlink-refused"
-                                    | "special-file-refused"
-                                    | "hardlink-refused"
-                                    | "path-invalid"
-                                    | "invalid-arguments"
-                                    | "unsupported-tool"
-                            ) {
-                                refusals_in_a_row += 1;
-                            } else {
-                                refusals_in_a_row = 0;
-                            }
-                            render_error(p.model_name, &code, &e.message)
                         }
                     }
                 }
@@ -1243,6 +1551,9 @@ fn turn_loop(
                 "resultDigest": act.result_digest, "resultBytes": act.result_bytes,
                 "truncated": act.truncated, "executionId": act.execution_id,
                 "journalSeq": act.journal_seq, "turn": turn,
+                "approvalId": act.approval_id, "approvalOutcome": act.approval_outcome,
+                "preSha256": act.pre_sha256, "postSha256": act.post_sha256,
+                "exitCode": act.exit_code, "verification": act.verification,
             })
             .to_string();
             let _ = session.tool_result(
@@ -1279,6 +1590,208 @@ fn turn_loop(
         }
     }
     Ok(LoopEnd::Limit("max-turns"))
+}
+
+/// Per-run budgets for mutations and commands (None = allowed).
+fn budget_refusal(cp: &CodeProposal, ls: &LoopState, pol: &CodePolicy) -> Option<&'static str> {
+    match cp.kind {
+        Kind::Read => None,
+        Kind::Write => {
+            if ls.edits_used >= pol.max_edits {
+                Some("the edit budget for this run is exhausted; summarize your work and finish")
+            } else if ls.write_bytes + cp.bytes > pol.max_total_write_bytes {
+                Some("the total write-size budget for this run is exhausted")
+            } else {
+                None
+            }
+        }
+        Kind::Process => {
+            if ls.tests_used >= pol.max_tests {
+                Some("the command budget for this run is exhausted; summarize your work and finish")
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Tool budgets sealed into the Kernel grant (and the approval) per kind.
+fn budgets_for(kind: Kind) -> Value {
+    match kind {
+        Kind::Read => serde_json::json!({
+            "maxOutputBytes": 32 * 1024u64, "maxFileBytes": 512 * 1024u64,
+            "maxMatches": nexus_model::repo_tools::MODEL_MAX_SEARCH_MATCHES,
+            "maxEntries": 500u32, "maxDepth": 8u32, "deadlineMs": 10_000u64,
+        }),
+        Kind::Write => serde_json::json!({
+            "maxFileBytes": 512 * 1024u64, "maxWriteBytes": 64 * 1024u64, "deadlineMs": 10_000u64,
+        }),
+        Kind::Process => serde_json::json!({
+            "procWallMs": crate::code::PROC_WALL_MS, "procOutputBytes": 64 * 1024u64,
+            "deadlineMs": 10_000u64,
+        }),
+    }
+}
+
+/// `tool-execute` with cancellation: while the daemon runs the tool, a
+/// watcher turns the user's cancel into a Kernel `tool-revoke` of this
+/// command, which fences the write/kills the sandboxed process tree. The
+/// outcome of an interrupted operation is whatever the daemon's lifecycle
+/// recorded (never assumed).
+fn exec_with_cancel(
+    b: &Arc<Broker>,
+    flag: &Arc<AtomicBool>,
+    params: &Value,
+    command_id: &str,
+) -> Result<Value, StepError> {
+    let done = Arc::new(AtomicBool::new(false));
+    let watcher = {
+        let (b, flag, done) = (Arc::clone(b), Arc::clone(flag), Arc::clone(&done));
+        let cmd = command_id.to_owned();
+        std::thread::spawn(move || {
+            while !done.load(Ordering::SeqCst) {
+                if flag.load(Ordering::SeqCst) || b.shutdown.load(Ordering::SeqCst) {
+                    // Keep trying until the revocation is accepted or the
+                    // call ends: a single lost attempt must not leave a
+                    // cancelled command running.
+                    match daemon(
+                        &b,
+                        "tool-revoke",
+                        serde_json::json!({ "commandId": cmd, "reason": "run-cancelled" }),
+                    ) {
+                        Ok(_) => return,
+                        Err(e) => {
+                            eprintln!(
+                                "[broker] tool-revoke failed ({}): {}; retrying",
+                                e.code, e.message
+                            );
+                            std::thread::sleep(Duration::from_millis(200));
+                            continue;
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        })
+    };
+    // A sandboxed process may run for its full wall budget; the IPC read must
+    // outlast it so a timeout can only mean "daemon gone".
+    let long = params.get("toolId").and_then(|t| t.as_str()) == Some("proc.run");
+    let ms = if long {
+        crate::code::PROC_WALL_MS + 30_000
+    } else {
+        30_000
+    };
+    let r = crate::pipeline::daemon_timeout(b, "tool-execute", params.clone(), ms);
+    done.store(true, Ordering::SeqCst);
+    let _ = watcher.join();
+    r
+}
+
+/// Receipts and evidence from a finished tool call (authoritative values
+/// from the native tool's own result, never from the model).
+fn record_receipts(ls: &mut LoopState, act: &mut ToolActivity, cp: &CodeProposal, result: &Value) {
+    let out = match result.get("output") {
+        Some(o) if !o.is_null() => o,
+        _ => return,
+    };
+    match cp.inner.model_name {
+        "fs_read" => {
+            if let (Some(p), Some(h)) = (
+                out.get("path").and_then(|v| v.as_str()),
+                out.get("fileSha256").and_then(|v| v.as_str()),
+            ) {
+                ls.last_sha.insert(p.to_owned(), h.to_owned());
+            }
+        }
+        "fs_write" | "fs_edit" => {
+            act.pre_sha256 = out
+                .get("preSha256")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            act.post_sha256 = out
+                .get("postSha256")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            if let (Some(p), Some(h)) = (
+                out.get("path").and_then(|v| v.as_str()),
+                out.get("postSha256").and_then(|v| v.as_str()),
+            ) {
+                ls.last_sha.insert(p.to_owned(), h.to_owned());
+            }
+        }
+        "proc_run" => {
+            act.exit_code = out.get("exitCode").and_then(|v| v.as_i64());
+            act.verification = out
+                .get("verification")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            ls.last_test = act.verification.clone();
+        }
+        _ => {}
+    }
+}
+
+/// What the model sees of a finished command: exit status and the TAIL of
+/// each stream (compiler/test failures are at the end), bounded.
+pub fn render_process(result: &Value, cap: usize) -> Rendered {
+    let status = result
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("error");
+    let Some(out) = result.get("output").filter(|o| !o.is_null()) else {
+        let code = result
+            .pointer("/error/code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("tool-error");
+        let msg = result
+            .pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("the command failed");
+        return render_error("proc_run", code, msg);
+    };
+    let _ = status;
+    let tail = |s: &str, n: usize| -> String {
+        if s.len() <= n {
+            return s.to_owned();
+        }
+        let mut cut = s.len() - n;
+        while !s.is_char_boundary(cut) {
+            cut += 1;
+        }
+        let from = s[cut..].find('\n').map(|i| cut + i + 1).unwrap_or(cut);
+        format!("[... earlier output omitted ...]\n{}", &s[from..])
+    };
+    let mut keep = (cap / 2).saturating_sub(512);
+    loop {
+        let env = serde_json::json!({
+            "tool": "proc_run",
+            "status": if out.get("verification").and_then(|v| v.as_str()) == Some("pass") { "ok" } else { "failed" },
+            "untrustedOutput": true,
+            "reason": out.get("reason").cloned().unwrap_or(Value::Null),
+            "exitCode": out.get("exitCode").cloned().unwrap_or(Value::Null),
+            "signal": out.get("signal").cloned().unwrap_or(Value::Null),
+            "verification": out.get("verification").cloned().unwrap_or(Value::Null),
+            "wallMs": out.get("wallMs").cloned().unwrap_or(Value::Null),
+            "stdoutTruncatedByTool": out.get("stdoutTruncated").cloned().unwrap_or(Value::Null),
+            "stderrTruncatedByTool": out.get("stderrTruncated").cloned().unwrap_or(Value::Null),
+            "stdoutTail": tail(out.get("stdout").and_then(|v| v.as_str()).unwrap_or(""), keep),
+            "stderrTail": tail(out.get("stderr").and_then(|v| v.as_str()).unwrap_or(""), keep),
+        });
+        let text = nexus_contracts::canonical_json(&env);
+        if text.len() <= cap || keep < 256 {
+            let truncated = out.get("stdoutTruncated") == Some(&Value::Bool(true))
+                || out.get("stderrTruncated") == Some(&Value::Bool(true))
+                || text.contains("earlier output omitted");
+            return Rendered {
+                digest: digest_of(&text),
+                text,
+                is_error: false,
+                truncated,
+            };
+        }
+        keep /= 2;
+    }
 }
 
 fn record_evidence(ev: &mut Evidence, tool: &str, args: &Value, result: &Value) {
@@ -1372,9 +1885,42 @@ fn finalize(
         LoopEnd::Failed(code, msg) => {
             let _ = session.state(S::Failed, &format!("Failed: {msg}"), Some(&code));
         }
+        LoopEnd::Uncertain(code, msg) => {
+            let _ = session.state(S::Uncertain, &format!("Uncertain: {msg}"), Some(&code));
+        }
     }
     let conv = session.conversation_id().to_owned();
     let status = nexus_client::model_run_status(cfg, &conv);
+    // repo-code: the reviewable change set, read by the daemon from the
+    // isolated working copy (kept for review whatever the outcome).
+    let mut changed: Vec<nexus_client::intent_client::ChangedFile> = Vec::new();
+    let mut diff_digest: Option<String> = None;
+    if ls.mode_code {
+        if let Some(t) = ctx
+            .b
+            .store
+            .load(ctx.run_id)
+            .and_then(|r| r.run.task_instance_id)
+        {
+            if let Ok(resp) = daemon(
+                ctx.b,
+                "worktree-diff",
+                serde_json::json!({ "taskInstanceId": t }),
+            ) {
+                if let Some(files) = resp.pointer("/diff/files").and_then(|v| v.as_array()) {
+                    changed = files
+                        .iter()
+                        .filter_map(|f| serde_json::from_value(f.clone()).ok())
+                        .collect();
+                }
+                diff_digest = resp
+                    .pointer("/diff/diffDigest")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+            }
+        }
+    }
+    let (edits_used, tests_used, last_test) = (ls.edits_used, ls.tests_used, ls.last_test.clone());
     let verified = ls.citations_verified.clone();
     let unverified = ls.citations_unverified.clone();
     let activity = ls.activity.clone();
@@ -1394,6 +1940,16 @@ fn finalize(
         r.tool_activity = activity.into_iter().skip(skip).collect();
         r.citations_verified = verified;
         r.citations_unverified = unverified;
+        r.pending_approval = None;
+        if !changed.is_empty() || diff_digest.is_some() {
+            r.changed_files = changed;
+            r.diff_digest = diff_digest;
+        }
+        if r.max_edits > 0 {
+            r.edits_used = edits_used;
+            r.tests_used = tests_used;
+            r.last_test_verification = last_test;
+        }
         r.stop_reason = stop_reason;
         r.updated_at_ms = now_ms();
     });

@@ -76,6 +76,34 @@ pub fn clip(s: &str, max: usize) -> (&str, bool) {
     (&s[..end], true)
 }
 
+/// sha256 of the complete file bytes via positional reads (bounded by the
+/// already-checked size budget).
+fn whole_file_sha256(fd: &std::os::fd::OwnedFd, size: u64) -> Result<String, ToolError> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::FileExt;
+    let f = std::fs::File::from(fd.try_clone().map_err(|e| {
+        ToolError::new(
+            ToolErrorCode::IoError,
+            format!("descriptor duplicate failed: {e}"),
+        )
+    })?);
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut off = 0u64;
+    while off < size {
+        let want = (size - off).min(buf.len() as u64) as usize;
+        let n = f
+            .read_at(&mut buf[..want], off)
+            .map_err(|e| ToolError::new(ToolErrorCode::IoError, format!("read failed: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+        off += n as u64;
+    }
+    Ok(hex::encode(h.finalize()))
+}
+
 pub fn run(ctx: &mut ExecCtx<'_>, args: &ReadArgs) -> Result<serde_json::Value, ToolError> {
     ctx.check_cancel()?;
     let rel = RelPath::parse(&args.path)?;
@@ -92,6 +120,10 @@ pub fn run(ctx: &mut ExecCtx<'_>, args: &ReadArgs) -> Result<serde_json::Value, 
             "file exceeds the size budget",
         ));
     }
+    // Whole-file identity (A5.6): lets a later edit be pinned to exactly the
+    // bytes the model saw. `pread` on a duplicate descriptor leaves the shared
+    // file offset untouched for the line reader below.
+    let file_sha256 = whole_file_sha256(&opened.fd, opened.identity.size)?;
     let mut rd = LineReader::new(opened.fd, ctx.budgets.max_file_bytes);
     if rd.looks_binary()? {
         return Err(ToolError::new(
@@ -170,6 +202,8 @@ pub fn run(ctx: &mut ExecCtx<'_>, args: &ReadArgs) -> Result<serde_json::Value, 
     ctx.stats.files_scanned = 1;
     Ok(serde_json::json!({
         "path": rel.display(),
+        "fileSha256": file_sha256,
+        "fileBytes": opened.identity.size,
         "content": out,
         "startLine": start,
         "linesReturned": returned,

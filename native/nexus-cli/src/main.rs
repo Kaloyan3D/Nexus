@@ -491,14 +491,19 @@ fn cmd_model(args: &[String], cfg: &ClientConfig) -> ExitCode {
     }
 }
 
-const INTENT_HELP: &str = "nexus intent <submit|status|result|follow|cancel|list|models|workspaces> [--json]\n\
+const INTENT_HELP: &str = "nexus intent <submit|status|result|follow|cancel|list|models|workspaces|code-sources|diff> [--json]\n\
   submit  (--input FILE|- | --intent FILE|-) [--model provider/model] [--idempotency-key K]\n\
           [--request-id R] [--max-output-tokens N] [--follow | --wait]\n\
-          [--type model-only|repo-inspect]   repo-inspect = read-only agentic inspection (A5.5):\n\
-          --workspace ID (an operator-approved identity from `workspaces`, never a path)\n\
+          [--type model-only|repo-inspect|repo-code]   repo-inspect = read-only agentic inspection (A5.5);\n\
+          repo-code = controlled coding in an ISOLATED COPY (A5.6): every edit and command needs an\n\
+          independent approval (nexus-approver); nothing is committed, pushed or merged.\n\
+          --workspace ID (an identity from `workspaces` / `code-sources`, never a path)\n\
+          [--max-edits N] [--max-tests N]   repo-code only\n\
           [--max-turns N] [--max-tool-calls N] [--max-tool-result-bytes N] [--max-runtime-secs N]\n\
           --follow emits NDJSON events: submitted, state, tool (every proposed/executed call), text, end\n\
   workspaces                        list the read-only workspace identities this client may inspect\n\
+  code-sources                      list the source repositories this client may ask Nexus to modify\n\
+  diff <runId>                      the reviewable change set of a repo-code run (isolated copy vs recorded commit)\n\
   status|result|cancel <runId>      follow <runId> [--from-offset N]      list [--limit N]      models\n\
 Global: --broker-socket PATH (or NEXUS_BROKER_SOCKET). JSON envelope schema: nexus.intent.cli/v1.\n\
 Exit codes: 0 ok / completed, 2 usage or rejected, 3 broker unreachable, 4 unauthorized, 6 run ended without completing.\n\
@@ -574,6 +579,7 @@ fn follow_run(
 ) -> Result<nexus_client::intent_client::IntentRun, nexus_client::ClientError> {
     let mut seen: Option<String> = None;
     let mut tools_seen = 0usize;
+    let mut pending_seen: Option<String> = None;
     loop {
         let f = nexus_client::intent_client::follow(sock, id, offset, seen.as_deref(), 1_500)?;
         // A5.5: observe proposed/executed tool calls as they appear.
@@ -599,6 +605,23 @@ fn follow_run(
             }
         }
         tools_seen = tools_seen.max(f.run.tool_activity.len());
+        // A5.6: surface (once per approval) what is waiting for an independent reviewer.
+        if let Some(pa) = f.run.pending_approval.as_ref() {
+            if pending_seen.as_deref() != Some(pa.approval_id.as_str()) {
+                pending_seen = Some(pa.approval_id.clone());
+                if cfg.json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "schema": nexus_client::intent_client::CLI_SCHEMA, "event": "approval-pending", "runId": id, "approval": pa })
+                    );
+                } else {
+                    eprintln!(
+                        "[approval pending] {} {} - waiting for an independent approver",
+                        pa.approval_id, pa.summary
+                    );
+                }
+            }
+        }
         if seen.as_deref() != Some(f.run.state.as_str()) {
             seen = Some(f.run.state.clone());
             if cfg.json {
@@ -691,6 +714,29 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
             intent_ok(cfg, serde_json::json!({ "models": m }), &human);
             Ok(ExitCode::Ok)
         }
+        "code-sources" => {
+            let w = ic::code_sources(&sock)?;
+            let human = w.iter().map(|x| x.source_id.clone()).collect::<Vec<_>>().join("\n");
+            intent_ok(cfg, serde_json::json!({ "sources": w }), &human);
+            Ok(ExitCode::Ok)
+        }
+        "diff" => {
+            let id = pos();
+            if id.is_empty() {
+                return Err(nexus_client::ClientError::usage("usage: nexus intent diff <runId>"));
+            }
+            let d = ic::diff(&sock, &id)?;
+            let human = format!(
+                "{} files changed (base {}, diff {})\n{}{}",
+                d.files.len(),
+                d.base_commit,
+                d.diff_digest,
+                d.diff,
+                if d.diff_truncated { "\n[diff truncated]" } else { "" }
+            );
+            intent_ok(cfg, serde_json::to_value(&d).unwrap_or_default(), &human);
+            Ok(ExitCode::Ok)
+        }
         "workspaces" => {
             let w = ic::workspaces(&sock)?;
             let human = w.iter().map(|x| x.workspace_id.clone()).collect::<Vec<_>>().join("\n");
@@ -741,6 +787,8 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
                         max_tool_calls: num_flag("--max-tool-calls")?.map(|n| n as u32),
                         max_tool_result_bytes: num_flag("--max-tool-result-bytes")?,
                         max_runtime_secs: num_flag("--max-runtime-secs")?,
+                        max_edits: num_flag("--max-edits")?.map(|n| n as u32),
+                        max_tests: num_flag("--max-tests")?.map(|n| n as u32),
                     },
                     response_mode: if args.iter().any(|a| a == "--wait") {
                         nexus_client::intent_contract::ResponseMode::Final

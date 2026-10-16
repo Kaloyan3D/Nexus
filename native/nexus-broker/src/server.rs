@@ -61,6 +61,12 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Runs published only by their own loop (repo-inspect and repo-code).
+fn is_agentic(intent_type: &str) -> bool {
+    intent_type == nexus_contracts::intent::INTENT_REPO_INSPECT
+        || intent_type == nexus_contracts::intent::INTENT_REPO_CODE
+}
+
 pub fn is_terminal_state(s: &str) -> bool {
     TERMINAL.contains(&s)
 }
@@ -137,8 +143,7 @@ impl Broker {
                 // record is the single source of its state): a transcript
                 // terminal written a moment before the record would otherwise
                 // expose a finished run without its findings.
-                if !run.terminal && run.intent_type != nexus_contracts::intent::INTENT_REPO_INSPECT
-                {
+                if !run.terminal && !is_agentic(&run.intent_type) {
                     overlay(&mut run, &s);
                 }
             }
@@ -146,7 +151,7 @@ impl Broker {
         // A5.5: a repo-inspect run streams progress through state and tool
         // events; its text is the final answer only. (Intermediate assistant
         // text resets each turn, which would break byte offsets.)
-        if run.intent_type == nexus_contracts::intent::INTENT_REPO_INSPECT && !run.terminal {
+        if is_agentic(&run.intent_type) && !run.terminal {
             text.clear();
         }
         (run, text)
@@ -236,7 +241,12 @@ impl Broker {
         }
         // A5.5: the workspace is checked BEFORE a run exists as well.
         if let Some(w) = &intent.workspace_id {
-            if !crate::inspect::workspaces_for(&self.cfg, client).contains(w) {
+            let allowed = if intent.intent_type == nexus_contracts::intent::INTENT_REPO_CODE {
+                crate::inspect::code_sources_for(&self.cfg, client)
+            } else {
+                crate::inspect::workspaces_for(&self.cfg, client)
+            };
+            if !allowed.contains(w) {
                 return Err((
                     "workspace-not-allowed",
                     "that workspace is not available to this client".into(),
@@ -389,6 +399,38 @@ impl Broker {
         )
     }
 
+    /// The reviewable change set of one of THIS client's repo-code runs, read
+    /// by the daemon from the isolated working copy (the broker never opens it).
+    fn diff(&self, client: &str, run_id: &str) -> CmdResult {
+        let rec = self.owned(client, run_id)?;
+        if rec.run.intent_type != nexus_contracts::intent::INTENT_REPO_CODE {
+            return Err(("not-found", "this run has no working copy".into()));
+        }
+        let task = rec
+            .run
+            .task_instance_id
+            .clone()
+            .ok_or(("not-found", "this run has no working copy yet".to_owned()))?;
+        let resp = pipeline::daemon(self, "worktree-diff", json!({ "taskInstanceId": task }))
+            .map_err(|e| {
+                (
+                    "internal",
+                    format!("the change set could not be read ({})", e.code),
+                )
+            })?;
+        let d = resp.get("diff").cloned().unwrap_or_default();
+        let (run, _) = self.view(&rec);
+        Ok(json!({
+            "run": run,
+            "baseCommit": d.get("baseCommit").cloned().unwrap_or_default(),
+            "files": d.get("files").cloned().unwrap_or_default(),
+            "filesTruncated": d.get("filesTruncated").cloned().unwrap_or(Value::Bool(false)),
+            "diff": d.get("diff").cloned().unwrap_or_default(),
+            "diffDigest": d.get("diffDigest").cloned().unwrap_or_default(),
+            "diffTruncated": d.get("diffTruncated").cloned().unwrap_or(Value::Bool(false)),
+        }))
+    }
+
     fn follow(&self, client: &str, params: &Value) -> CmdResult {
         let run_id = params.get("runId").and_then(|v| v.as_str()).unwrap_or("");
         let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -487,6 +529,13 @@ impl Broker {
                 Ok(json!({ "view": view }))
             }
             "intent-models" => Ok(json!({ "models": self.models()? })),
+            "intent-code-sources" => Ok(json!({
+                "sources": crate::inspect::code_sources_for(&self.cfg, client)
+                    .into_iter()
+                    .map(|id| json!({ "sourceId": id }))
+                    .collect::<Vec<_>>(),
+            })),
+            "intent-diff" => self.diff(client, run_id),
             "intent-workspaces" => Ok(json!({
                 "workspaces": crate::inspect::workspaces_for(&self.cfg, client)
                     .into_iter()
@@ -679,6 +728,29 @@ fn recover(b: &Broker) {
                     let _g = b.store.lock();
                     if let Some(mut r) = b.store.load(&id) {
                         pipeline::apply_status(&mut r.run, &s);
+                        if r.run.intent_type == nexus_contracts::intent::INTENT_REPO_CODE {
+                            r.run.pending_approval = None;
+                            if let Some(ti) = r.run.task_instance_id.clone() {
+                                let rc = crate::code::recover_code_run(
+                                    b,
+                                    r.run.task_id.as_deref(),
+                                    &ti,
+                                    r.run.turn,
+                                );
+                                if !rc.uncertain.is_empty() {
+                                    // A write/process was in flight: its outcome is
+                                    // UNKNOWN. Never assume failure or success.
+                                    r.run.state = "uncertain".into();
+                                    r.run.terminal = true;
+                                    r.run.error_code = Some("tool-outcome-uncertain".into());
+                                    r.run.error_message = Some(format!(
+                                        "the broker restarted while {} was running; its effect is unknown. Nothing was repeated and no approval remains usable. Review `nexus intent diff {}` and re-verify before trusting the working copy",
+                                        rc.uncertain.join(", "),
+                                        r.run.run_id
+                                    ));
+                                }
+                            }
+                        }
                         r.run.updated_at_ms = now_ms();
                         let _ = b.store.put(&r);
                     }
@@ -714,7 +786,9 @@ pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
         .map_err(|e| format!("lock: {e}"))?;
     lock.try_lock_exclusive()
         .map_err(|_| "another broker already owns this state directory".to_owned())?;
-    cfg.workspaces = crate::inspect::validate_workspaces(&cfg)?;
+    let (workspaces, code_sources) = crate::inspect::validate_code_sources(&cfg)?;
+    cfg.workspaces = workspaces;
+    cfg.code_sources = code_sources;
     crate::identity::write_instance(&cfg.state_dir)?;
     let node_abs = crate::trust::resolve_node(&cfg.node, &cfg.extra_trusted_owner_uids)?;
     crate::trust::check_bridge(&cfg.bridge_path(), &cfg.extra_trusted_owner_uids)?;

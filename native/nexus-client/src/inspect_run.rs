@@ -30,6 +30,8 @@ use std::time::{Duration, Instant};
 /// What the Controller needs to describe a run's target to the transcript.
 #[derive(Debug, Clone)]
 pub struct InspectBasics {
+    /// `repo-inspect` or `repo-code` (recorded in the conversation).
+    pub mode: &'static str,
     pub provider_id: String,
     pub remote_model_id: String,
     pub logical_model_id: String,
@@ -44,11 +46,15 @@ pub struct InspectSession {
     kind: &'static str,
 }
 
-fn input_items_model(items: &[InputItem], max_output_tokens: Option<u64>) -> ModelRequest {
+fn input_items_model(
+    items: &[InputItem],
+    max_output_tokens: Option<u64>,
+    profile: ToolProfile,
+) -> ModelRequest {
     ModelRequest {
         messages: Vec::new(),
         items: items.to_vec(),
-        tool_profile: Some(ToolProfile::RepoInspectV1),
+        tool_profile: Some(profile),
         tools: Vec::new(),
         reasoning_effort_override: None,
         session_override: None,
@@ -61,6 +67,7 @@ fn input_items_model(items: &[InputItem], max_output_tokens: Option<u64>) -> Mod
 pub fn prepare_inspect_turn(
     req: &ModelRunRequest,
     items: &[InputItem],
+    profile: ToolProfile,
 ) -> Result<PreparedModelRun, ClientError> {
     let b = bind_with(req, "repo-inspect")?;
     let runtime = runtime_for(&b.target, nexus_model::TransportLimits::default(), None);
@@ -70,7 +77,7 @@ pub fn prepare_inspect_turn(
             &b.issued,
             &req.snapshot,
             &b.target,
-            &input_items_model(items, req.max_output_tokens),
+            &input_items_model(items, req.max_output_tokens, profile),
         )
         .map_err(|e| ClientError::usage(format!("request preparation refused: {e}")))?;
     Ok(PreparedModelRun {
@@ -118,7 +125,7 @@ impl InspectSession {
             task_instance_id: task_instance_id.to_owned(),
             attempt_id: String::new(),
             actor: Actor {
-                agent: Some("nexus-repo-inspect".to_owned()),
+                agent: Some(format!("nexus-{}", basics.mode)),
                 model: Some(basics.remote_model_id.clone()),
                 provider: Some(basics.provider_id.clone()),
             },
@@ -141,8 +148,14 @@ impl InspectSession {
         rec.state(
             ModelRunState::Accepted,
             &format!(
-                "Request accepted (user-initiated repo-inspect on workspace '{}', read-only tools).",
-                basics.workspace_id
+                "Request accepted (user-initiated {} on '{}'{}).",
+                basics.mode,
+                basics.workspace_id,
+                if basics.mode == "repo-code" {
+                    "; isolated working copy, every write and command needs independent approval"
+                } else {
+                    ", read-only tools"
+                }
             ),
             None,
         )?;
@@ -284,6 +297,7 @@ impl InspectSession {
 /// re-verified: the Kernel seals bind these digests, so tampered copies fail
 /// redemption.
 pub struct InspectTurn<'a> {
+    pub profile: ToolProfile,
     pub request: &'a ModelRunRequest,
     pub items: Vec<InputItem>,
     /// `result.grant` of the daemon's `dispatch-authorize` (scope repo-inspect).
@@ -342,7 +356,7 @@ pub fn run_inspect_turn(
             &bound.issued,
             &req.snapshot,
             &bound.target,
-            &input_items_model(&turn.items, req.max_output_tokens),
+            &input_items_model(&turn.items, req.max_output_tokens, turn.profile),
         )
         .map_err(|e| ClientError::usage(format!("request preparation refused: {e}")))?;
     let attested = runtime
@@ -355,9 +369,13 @@ pub fn run_inspect_turn(
         )
         .map_err(|e| ClientError::usage(format!("attestation refused: {e}")))?;
     let grant = grant_from_json(turn.grant)?;
-    if grant.scope != nexus_kernel::SCOPE_REPO_INSPECT {
+    let want_scope = match turn.profile {
+        ToolProfile::RepoInspectV1 => nexus_kernel::SCOPE_REPO_INSPECT,
+        ToolProfile::RepoCodeV1 => nexus_kernel::SCOPE_REPO_CODE,
+    };
+    if grant.scope != want_scope {
         return Err(ClientError::usage(
-            "grant scope is not repo-inspect; this executor sends nothing for any other scope",
+            "grant scope does not match this agentic profile; this executor sends nothing for any other scope",
         ));
     }
     let credential = Credential::from_protected_file(&opts.credentials_path, &grant.credential_ref)
@@ -367,7 +385,7 @@ pub fn run_inspect_turn(
 
     session.rec.state(
         ModelRunState::Authorized,
-        "Sealed repo-inspect grant presented; redeeming with the daemon.",
+        "Sealed agentic grant presented; redeeming with the daemon.",
         None,
     )?;
 

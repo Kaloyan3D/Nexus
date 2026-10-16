@@ -44,6 +44,47 @@ pub const CATALOG: [RepoTool; 3] = [
     },
 ];
 
+/// `repo-code` additions (A5.6). Offered ONLY under the `RepoCodeV1` profile;
+/// the `repo-inspect` catalog above is unchanged and stays read-only.
+pub const CODE_EXTRA: [RepoTool; 3] = [
+    RepoTool {
+        model_name: "fs_write",
+        tool_id: "fs.write",
+    },
+    RepoTool {
+        model_name: "fs_edit",
+        tool_id: "fs.edit",
+    },
+    RepoTool {
+        model_name: "proc_run",
+        tool_id: "proc.run",
+    },
+];
+
+/// Largest `content` the model may propose in one `fs_write`.
+pub const MODEL_MAX_WRITE_CHARS: usize = 32 * 1024;
+/// Largest number of edit operations in one `fs_edit`.
+pub const MODEL_MAX_EDITS: usize = 8;
+/// Commands the model may name (the sandbox command policy still decides).
+pub const MODEL_PROGRAMS: [&str; 3] = ["cargo", "npm", "tsc"];
+
+/// Map a provider-proposed tool name to its Kernel tool id for `profile`.
+pub fn tool_id_for_profile(
+    profile: crate::request::ToolProfile,
+    model_name: &str,
+) -> Option<&'static str> {
+    use crate::request::ToolProfile as P;
+    match profile {
+        P::RepoInspectV1 => tool_id_for(model_name),
+        P::RepoCodeV1 => tool_id_for(model_name).or_else(|| {
+            CODE_EXTRA
+                .iter()
+                .find(|t| t.model_name == model_name)
+                .map(|t| t.tool_id)
+        }),
+    }
+}
+
 /// Map a provider-proposed tool name to its Kernel tool id. Anything that is
 /// not one of the three catalog names (including a Kernel id such as
 /// `fs.write`, `proc.run`, or a daemon operation) is `None`.
@@ -103,6 +144,84 @@ pub fn definitions() -> Vec<Value> {
     ]
 }
 
+/// The exact `tools` array for one profile.
+pub fn definitions_for(profile: crate::request::ToolProfile) -> Vec<Value> {
+    let mut v = definitions();
+    if matches!(profile, crate::request::ToolProfile::RepoCodeV1) {
+        v.extend(code_definitions());
+    }
+    v
+}
+
+fn code_definitions() -> Vec<Value> {
+    vec![
+        json!({
+            "type": "function",
+            "name": "fs_write",
+            "description": "Create a new UTF-8 text file or replace an existing one inside the isolated working copy. Every write needs independent human approval before it runs; you will be told if it is denied. `replace` needs the `fileSha256` that fs_read returned for that file. Protected, hidden, credential and VCS paths are refused.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File relative to the repository root."},
+                    "content": {"type": "string", "maxLength": MODEL_MAX_WRITE_CHARS, "description": "Complete new file content."},
+                    "mode": {"type": "string", "enum": ["create", "replace"]},
+                    "expectedSha256": {"type": "string", "description": "fileSha256 of the file as you last read it (replace only; filled in for you if omitted)."}
+                },
+                "required": ["path", "content", "mode"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "type": "function",
+            "name": "fs_edit",
+            "description": "Apply exact-text replacements to an existing file. Each oldText must occur exactly once. Needs independent human approval. Prefer this over fs_write for small changes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File relative to the repository root."},
+                    "expectedSha256": {"type": "string", "description": "fileSha256 of the file as you last read it (filled in for you if omitted)."},
+                    "edits": {
+                        "type": "array", "minItems": 1, "maxItems": MODEL_MAX_EDITS,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "oldText": {"type": "string", "minLength": 1},
+                                "newText": {"type": "string"}
+                            },
+                            "required": ["oldText", "newText"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["path", "edits"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "type": "function",
+            "name": "proc_run",
+            "description": "Run an approved build or test command in an offline sandbox over a read-only snapshot of the working copy (no network, no writes persist). Only `cargo check|test|build|fmt --check` (with --offline), `npm test`, `npm run build` and `tsc --noEmit` exist. Needs independent human approval. Output is bounded.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "program": {"type": "string", "enum": MODEL_PROGRAMS},
+                    "args": {"type": "array", "items": {"type": "string"}, "maxItems": 12},
+                    "cwd": {"type": "string", "description": "Directory relative to the repository root. Default \".\"."}
+                },
+                "required": ["program", "args"],
+                "additionalProperties": false
+            }
+        }),
+    ]
+}
+
+/// Digest of the exact catalog bytes for one profile.
+pub fn catalog_digest_for(profile: crate::request::ToolProfile) -> String {
+    nexus_contracts::sha256_hex(&nexus_contracts::canonical_json(&Value::Array(
+        definitions_for(profile),
+    )))
+}
+
 /// Digest of the exact catalog bytes (recorded with every run so a changed
 /// schema is visible in the evidence).
 pub fn catalog_digest() -> String {
@@ -145,6 +264,53 @@ mod tests {
         ] {
             assert!(tool_id_for(bad).is_none(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn code_catalog_adds_exactly_write_edit_and_run_and_inspect_stays_read_only() {
+        use crate::request::ToolProfile as P;
+        assert_eq!(definitions_for(P::RepoInspectV1), definitions());
+        let code = definitions_for(P::RepoCodeV1);
+        let names: Vec<&str> = code.iter().map(|d| d["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            [
+                "fs_list",
+                "fs_read",
+                "fs_search",
+                "fs_write",
+                "fs_edit",
+                "proc_run"
+            ]
+        );
+        for d in &code {
+            assert_eq!(d["parameters"]["additionalProperties"], json!(false));
+        }
+        for n in ["fs_write", "fs_edit", "proc_run"] {
+            assert!(
+                tool_id_for_profile(P::RepoInspectV1, n).is_none(),
+                "{n} must not exist for inspect"
+            );
+            assert!(tool_id_for_profile(P::RepoCodeV1, n).is_some(), "{n}");
+        }
+        for bad in [
+            "fs.write",
+            "proc.run",
+            "bash",
+            "shell",
+            "git",
+            "git_commit",
+            "fs_delete",
+            "fs_move",
+            "fs_chmod",
+        ] {
+            assert!(tool_id_for_profile(P::RepoCodeV1, bad).is_none(), "{bad}");
+        }
+        assert_ne!(
+            catalog_digest_for(P::RepoCodeV1),
+            catalog_digest_for(P::RepoInspectV1)
+        );
+        assert_eq!(catalog_digest_for(P::RepoInspectV1), catalog_digest());
     }
 
     #[test]

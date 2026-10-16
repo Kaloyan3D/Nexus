@@ -402,6 +402,51 @@ export interface IntentRun {
   toolActivity?: ToolActivity[];
   citationsVerified?: string[];
   citationsUnverified?: string[];
+  // ---- A5.6 repo-code progress (absent for other run types) ----
+  editsUsed?: number;
+  maxEdits?: number;
+  testsUsed?: number;
+  maxTests?: number;
+  /** `pass` / `fail` of the most recent approved test or build command. */
+  lastTestVerification?: string | null;
+  /** The operation currently waiting for an INDEPENDENT approver. */
+  pendingApproval?: PendingApproval | null;
+  /** Commit the isolated working copy was created from. */
+  worktreeCommit?: string | null;
+  changedFiles?: ChangedFile[];
+  diffDigest?: string | null;
+}
+
+/** An operation waiting for an independent approval (A5.6). Desktop only shows it. */
+export interface PendingApproval {
+  approvalId: string;
+  tool: string;
+  summary: string;
+  requestDigest: string | null;
+  expiresAtMs: number | null;
+}
+
+export interface ChangedFile {
+  path: string;
+  status: string;
+  additions: number | null;
+  deletions: number | null;
+}
+
+/** A source repository the operator lets this user have modified (identity only). */
+export interface AllowedCodeSource {
+  sourceId: string;
+}
+
+/** The reviewable result of a repo-code run, from the isolated working copy. */
+export interface DiffReply {
+  run: IntentRun;
+  baseCommit: string;
+  files: ChangedFile[];
+  filesTruncated: boolean;
+  diff: string;
+  diffDigest: string;
+  diffTruncated: boolean;
 }
 
 /** One model-proposed read-only tool call and what became of it (A5.5). */
@@ -421,6 +466,15 @@ export interface ToolActivity {
   executionId: string | null;
   journalSeq: number | null;
   argsDigest: string | null;
+  // ---- A5.6 (write/edit/command calls only) ----
+  approvalId?: string | null;
+  /** `approved` | `denied` | `expired` | `revoked` | `cancelled` | `timed-out` */
+  approvalOutcome?: string | null;
+  preSha256?: string | null;
+  postSha256?: string | null;
+  exitCode?: number | null;
+  /** `pass` | `fail` for a command. */
+  verification?: string | null;
 }
 
 /** An operator-approved read-only workspace, by identity only (never a path). */

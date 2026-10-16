@@ -14,6 +14,7 @@
 //!   shell or a filesystem operation;
 //! * clients can only see and cancel runs owned by their own client id.
 
+pub mod code;
 pub mod config;
 pub mod identity;
 pub mod inspect;

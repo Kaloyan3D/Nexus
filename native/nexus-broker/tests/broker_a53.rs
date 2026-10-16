@@ -481,6 +481,7 @@ impl Fx {
             allow_models: vec![],
             transport: Some(factory),
             workspaces: vec![],
+            code_sources: vec![],
         }
     }
 
@@ -1278,6 +1279,7 @@ fn broker_child_entry() {
         allow_models: vec![],
         transport: Some(factory),
         workspaces: vec![],
+        code_sources: vec![],
     };
     let _h = nexus_broker::start(cfg).expect("child broker");
     std::thread::sleep(Duration::from_secs(600));

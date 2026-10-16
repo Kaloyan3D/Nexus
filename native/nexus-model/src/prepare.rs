@@ -161,7 +161,10 @@ pub fn prepare(
             match input.tool_profile {
                 // A5.5 tool-enabled variant: fixed catalog, stateless history
                 // (function_call + function_call_output items), one call at a time.
-                Some(crate::request::ToolProfile::RepoInspectV1) => serde_json::json!({
+                Some(
+                    profile @ (crate::request::ToolProfile::RepoInspectV1
+                    | crate::request::ToolProfile::RepoCodeV1),
+                ) => serde_json::json!({
                     "model": target.remote_model_id_confirmed,
                     "input": input.items.iter().map(|it| match it {
                         crate::request::InputItem::Message { role, content } => {
@@ -179,7 +182,7 @@ pub fn prepare(
                             })
                         }
                     }).collect::<Vec<_>>(),
-                    "tools": crate::repo_tools::definitions(),
+                    "tools": crate::repo_tools::definitions_for(profile),
                     "tool_choice": "auto",
                     "parallel_tool_calls": false,
                     "stream": true,

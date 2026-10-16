@@ -56,3 +56,18 @@ pub fn issuer_call(
     let frame = signed_frame(cap_hex, cmd, params)?;
     crate::transport::ipc_roundtrip(socket, &frame, 15_000)
 }
+
+/// Like [`issuer_call`] with an explicit read timeout, for the long-running
+/// verbs (a sandboxed process may legitimately run for minutes). The caller
+/// must pass a timeout larger than the operation's own wall limit so that a
+/// timeout here always means "daemon unreachable", never "still running".
+pub fn issuer_call_with_timeout(
+    socket: &Path,
+    cap_hex: &str,
+    cmd: &str,
+    params: serde_json::Value,
+    timeout_ms: u64,
+) -> Result<serde_json::Value, ClientError> {
+    let frame = signed_frame(cap_hex, cmd, params)?;
+    crate::transport::ipc_roundtrip(socket, &frame, timeout_ms)
+}

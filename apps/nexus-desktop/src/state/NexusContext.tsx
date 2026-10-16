@@ -14,6 +14,7 @@ import type {
   AppInfo,
   AllowedModel,
   AllowedWorkspace,
+  AllowedCodeSource,
   IntentRun,
   LiveBlockers,
   MockEvent,
@@ -79,6 +80,10 @@ export interface NexusState {
   intentSubmitting: boolean;
   intentError: UiError | null;
   sendIntent: (prompt: string, model: AllowedModel | null) => Promise<boolean>;
+  /** A5.6: sources (identities) that may be modified in an isolated copy. */
+  intentCodeSources: AllowedCodeSource[] | null;
+  /** A5.6: submit a controlled coding task for a source identity. */
+  sendCode: (prompt: string, sourceId: string) => Promise<boolean>;
   /** A5.5: submit a read-only repository inspection for a workspace identity. */
   sendInspect: (prompt: string, workspaceId: string) => Promise<boolean>;
   cancelPendingIntent: () => Promise<void>;
@@ -238,6 +243,17 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
       alive = false;
     };
   }, [nativeApi]);
+  const [intentCodeSources, setIntentCodeSources] = useState<AllowedCodeSource[] | null>(null);
+  useEffect(() => {
+    let alive = true;
+    nativeApi
+      .intentCodeSources()
+      .then((w) => alive && setIntentCodeSources(w))
+      .catch(() => alive && setIntentCodeSources(null));
+    return () => {
+      alive = false;
+    };
+  }, [nativeApi]);
   const [intentPending, setIntentPending] = useState<IntentRun | null>(null);
   const [intentSubmitting, setIntentSubmitting] = useState(false);
   const [intentError, setIntentError] = useState<UiError | null>(null);
@@ -355,6 +371,26 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     [nativeApi, followSubmitted],
   );
 
+  const sendCode = useCallback(
+    async (prompt: string, sourceId: string): Promise<boolean> => {
+      const key = newIdempotencyKey();
+      setIntentSubmitting(true);
+      setIntentError(null);
+      try {
+        const reply = await nativeApi.intentCodeSubmit(prompt, sourceId, key);
+        await followSubmitted(reply.run);
+        return true;
+      } catch (e) {
+        setIntentError(asUiError(e));
+        setIntentPending(null);
+        return false;
+      } finally {
+        setIntentSubmitting(false);
+      }
+    },
+    [nativeApi, followSubmitted],
+  );
+
   const cancelPendingIntent = useCallback(async () => {
     if (!intentPending) return;
     try {
@@ -402,6 +438,8 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     intentModels,
     intentModelsError,
     intentWorkspaces,
+    intentCodeSources,
+    sendCode,
     intentPending,
     intentSubmitting,
     intentError,

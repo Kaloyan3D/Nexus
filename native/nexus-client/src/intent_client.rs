@@ -96,6 +96,30 @@ pub struct IntentRun {
     /// Which policy limit ended the run cleanly (`max-turns`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
+    /// repo-code: approved edit operations used / allowed.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub edits_used: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub max_edits: u32,
+    /// repo-code: approved test/build executions used / allowed.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub tests_used: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub max_tests: u32,
+    /// repo-code: `pass` / `fail` of the most recent test execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_test_verification: Option<String>,
+    /// repo-code: the operation waiting for an independent approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_approval: Option<PendingApproval>,
+    /// repo-code: commit the isolated working copy was made from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_commit: Option<String>,
+    /// repo-code: final change set (summary; the diff text is `intent diff`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_files: Vec<ChangedFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_digest: Option<String>,
     /// Bounded, ordered record of every proposed tool call.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_activity: Vec<ToolActivity>,
@@ -138,6 +162,65 @@ pub struct ToolActivity {
     pub execution_id: Option<String>,
     pub journal_seq: Option<i64>,
     pub args_digest: Option<String>,
+    // ---- A5.6 repo-code (absent for read-only tools) ----
+    /// The independent approval this mutation/process ran under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
+    /// `approved` | `denied` | `expired` | `revoked` | `cancelled` | `timed-out`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_outcome: Option<String>,
+    /// Write/edit: sha256 of the file before and after (receipt).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_sha256: Option<String>,
+    /// Process: exit code and `pass`/`fail`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<String>,
+}
+
+/// An operation waiting for an independent human approval (A5.6). The
+/// reviewer uses the separate approver tool; nothing here can approve.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingApproval {
+    pub approval_id: String,
+    pub tool: String,
+    pub summary: String,
+    pub request_digest: Option<String>,
+    pub expires_at_ms: Option<u64>,
+}
+
+/// One file of the final reviewable change set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangedFile {
+    pub path: String,
+    pub status: String,
+    pub additions: Option<u64>,
+    pub deletions: Option<u64>,
+}
+
+/// A source repository this client may ask Nexus to modify (identity only).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AllowedCodeSource {
+    pub source_id: String,
+}
+
+/// The reviewable result of a repo-code run, from the isolated working copy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffReply {
+    pub run: IntentRun,
+    pub base_commit: String,
+    pub files: Vec<ChangedFile>,
+    pub files_truncated: bool,
+    pub diff: String,
+    pub diff_digest: String,
+    pub diff_truncated: bool,
 }
 
 /// A workspace this client may select (identity only, never a path).
@@ -226,6 +309,7 @@ fn leak_code(code: &str) -> &'static str {
         "model-not-available",
         "model-not-allowed",
         "workspace-not-allowed",
+        "code-not-available",
         "live-not-authorized",
         "idempotency-conflict",
         "bad-offset",
@@ -343,6 +427,23 @@ pub fn cancel(socket: &Path, run_id: &str) -> Result<CancelReply, ClientError> {
 pub fn workspaces(socket: &Path) -> Result<Vec<AllowedWorkspace>, ClientError> {
     let v = call(socket, "intent-workspaces", serde_json::json!({}), 10_000)?;
     decode(v.get("workspaces").cloned().unwrap_or_default())
+}
+
+/// Operator-approved CODING sources (A5.6) this client may select. Distinct
+/// from read-only workspaces: a right to inspect never implies a right to edit.
+pub fn code_sources(socket: &Path) -> Result<Vec<AllowedCodeSource>, ClientError> {
+    let v = call(socket, "intent-code-sources", serde_json::json!({}), 10_000)?;
+    decode(v.get("sources").cloned().unwrap_or_default())
+}
+
+/// The reviewable change set of one of THIS client's repo-code runs.
+pub fn diff(socket: &Path, run_id: &str) -> Result<DiffReply, ClientError> {
+    decode(call(
+        socket,
+        "intent-diff",
+        serde_json::json!({ "runId": run_id }),
+        30_000,
+    )?)
 }
 
 pub fn list(socket: &Path, limit: u32) -> Result<Vec<IntentRun>, ClientError> {

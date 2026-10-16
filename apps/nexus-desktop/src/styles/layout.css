@@ -1207,3 +1207,11 @@
 .nv-jump:hover {
   background: var(--nv-purple-tint-strong);
 }
+
+/* A5.6 diff viewer: text only, classified per line. */
+.nv-diff { margin: 0; padding: 8px; border: 1px solid var(--nv-border, #3a3a4a); border-radius: 6px; font-size: 12px; line-height: 1.45; }
+.nv-diff__line { white-space: pre; }
+.nv-diff__line--add { background: rgba(46, 160, 67, 0.18); }
+.nv-diff__line--del { background: rgba(248, 81, 73, 0.18); }
+.nv-diff__line--hunk { opacity: 0.75; }
+.nv-diff__line--meta { font-weight: 600; opacity: 0.85; }

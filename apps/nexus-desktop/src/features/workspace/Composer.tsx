@@ -22,21 +22,28 @@ export function Composer() {
     intentSubmitting,
     intentError,
     intentWorkspaces,
+    intentCodeSources,
     sendIntent,
     sendInspect,
+    sendCode,
     cancelPendingIntent,
   } = useNexus();
   const [text, setText] = useState("");
   const [modelIdx, setModelIdx] = useState(0);
   // A5.5: "Ask" is the text-only model request; "Inspect" lets the model use
   // read-only list/read/search tools inside one operator-approved repository.
-  const [mode, setMode] = useState<"ask" | "inspect">("ask");
+  // A5.6: "Code" lets the model PROPOSE edits and test commands in an isolated
+  // copy; each one still needs a separate, independent approval.
+  const [mode, setMode] = useState<"ask" | "inspect" | "code">("ask");
   const [wsIdx, setWsIdx] = useState(0);
+  const [srcIdx, setSrcIdx] = useState(0);
+  const sources = intentCodeSources ?? [];
+  const source = sources.length > 0 ? sources[Math.min(srcIdx, sources.length - 1)]! : null;
   const workspaces = intentWorkspaces ?? [];
   const workspace = workspaces.length > 0 ? workspaces[Math.min(wsIdx, workspaces.length - 1)]! : null;
   const model = intentModels && intentModels.length > 0 ? intentModels[Math.min(modelIdx, intentModels.length - 1)]! : null;
   const canSend =
-    (mode === "inspect" ? workspace !== null && model !== null : model !== null) &&
+    (mode === "inspect" ? workspace !== null && model !== null : mode === "code" ? source !== null && model !== null : model !== null) &&
     !intentSubmitting &&
     intentPending === null;
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -53,6 +60,10 @@ export function Composer() {
     if (empty || !canSend) return;
     const prompt = text;
     // Keep the text until the broker accepted it, so a refusal loses nothing.
+    if (mode === "code" && source) {
+      void sendCode(prompt, source.sourceId).then((ok) => ok && setText(""));
+      return;
+    }
     if (mode === "inspect" && workspace) {
       void sendInspect(prompt, workspace.workspaceId).then((ok) => ok && setText(""));
       return;
@@ -171,7 +182,41 @@ export function Composer() {
             >
               Inspect repo
             </button>
+            <button
+              type="button"
+              className="nv-chip"
+              aria-pressed={mode === "code"}
+              onClick={() => setMode("code")}
+              disabled={sources.length === 0}
+              title={
+                sources.length === 0
+                  ? "No source repository has been approved for coding by the operator"
+                  : "Let the model propose edits and test commands in an isolated copy (each needs separate approval)"
+              }
+            >
+              Code in copy
+            </button>
           </div>
+          {mode === "code" && (
+            <>
+              <label className="nv-sr-only" htmlFor="nv-source-select">
+                Source repository
+              </label>
+              <select
+                id="nv-source-select"
+                className="nv-chip"
+                value={srcIdx}
+                onChange={(e) => setSrcIdx(Number(e.target.value))}
+                title="Operator-approved coding sources (identities, not paths)"
+              >
+                {sources.map((w, i) => (
+                  <option key={w.sourceId} value={i}>
+                    {w.sourceId}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
           {mode === "inspect" && (
             <>
               <label className="nv-sr-only" htmlFor="nv-workspace-select">
@@ -196,9 +241,11 @@ export function Composer() {
             variant="primary"
             disabled={empty || !canSend}
             onClick={send}
-            aria-label={mode === "inspect" ? "Inspect repository" : "Send to model"}
+            aria-label={mode === "code" ? "Start coding task" : mode === "inspect" ? "Inspect repository" : "Send to model"}
             title={
-              mode === "inspect"
+              mode === "code"
+                ? "Start a controlled coding task in an isolated copy through the Nexus broker"
+                : mode === "inspect"
                 ? "Start a read-only repository inspection through the Nexus broker"
                 : model
                   ? `Send as a text-only model request through the Nexus broker (${model.providerId}/${model.remoteModelId})`
@@ -206,7 +253,7 @@ export function Composer() {
             }
             icon={intentSubmitting || intentPending ? <Loader2 size={15} className="nv-spin" /> : <Send size={15} />}
           >
-            {mode === "inspect" ? "Inspect" : "Send"}
+            {mode === "code" ? "Start coding" : mode === "inspect" ? "Inspect" : "Send"}
           </Button>
         </div>
       </div>
@@ -231,6 +278,15 @@ export function Composer() {
           internals and Nexus state are blocked, other source text is sent as-is to{" "}
           <span className="nv-mono">{model.providerId}</span>). Each model turn is a billable request.
           Nothing is written or executed.
+        </Alert>
+      )}
+      {mode === "code" && model && (
+        <Alert tone="warning" title="This mode can change files (in an isolated copy) and run commands">
+          The model may propose edits and build/test commands. Nothing runs until a separate approver reviews the
+          exact patch or command; this application cannot approve. Changes are made in a throw-away copy, never your
+          repository, and nothing is committed, pushed or merged. Selected source text and command output are sent
+          to <span className="nv-mono">{model.providerId}</span>; commands run offline in a sandbox. Each model turn
+          is a billable request.
         </Alert>
       )}
       <div className="nv-composer__hint">

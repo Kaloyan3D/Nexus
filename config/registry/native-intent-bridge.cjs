@@ -16,7 +16,7 @@
  * reads real Controller records. Real Controller ledgers are never touched.
  *
  * Subcommands:
- *   task-create <workspace> [repo-inspect]        allocate task + attempt + session
+ *   task-create <workspace> [repo-inspect|repo-code]        allocate task + attempt + session
  *   attempt-add <workspace> <taskId> <taskInstanceId>   next attempt of the same task (one per model turn)
  *   target-info <repoRoot> <dataRoot>             Registry-selected target (no side effects)
  *   issue <repoRoot> <dataRoot> <taskInstanceId> <sessionId>
@@ -24,6 +24,7 @@
  *   kernel-intent        (stdin {shadowIntent, issuance})
  *   publish              (stdin; scope and initiator are FIXED here)
  *   publish-inspect      (stdin; same, scope FIXED to repo-inspect)
+ *   publish-code         (stdin; same, scope FIXED to repo-code)
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -80,12 +81,12 @@ function cmdTaskCreate(args) {
   // This ledger is exclusively for native model-only intents. A ledger that
   // holds anything else (a real Controller ledger pointed at by mistake) is
   // never appended to or overwritten.
-  const KINDS = ['model-only-intent', 'repo-inspect-intent'];
+  const KINDS = ['model-only-intent', 'repo-inspect-intent', 'repo-code-intent'];
   if (doc.tasks.some(function (t) { return !t || KINDS.indexOf(t.kind) === -1; })) {
     return failOut('ledger-foreign', 'tasks.json holds records that are not native intents; refusing to write into it');
   }
-  const kind = args[1] === 'repo-inspect' ? 'repo-inspect-intent' : 'model-only-intent';
-  if (args[1] !== undefined && args[1] !== 'repo-inspect') return failOut('bad-args', 'unknown task kind');
+  const kind = args[1] === 'repo-inspect' ? 'repo-inspect-intent' : args[1] === 'repo-code' ? 'repo-code-intent' : 'model-only-intent';
+  if (args[1] !== undefined && args[1] !== 'repo-inspect' && args[1] !== 'repo-code') return failOut('bad-args', 'unknown task kind');
   let seq = doc.nextSequence;
   // An orphan attempt directory (a crash between the two writes below)
   // is never reused: skip past it. A task record that already owns the id
@@ -130,14 +131,14 @@ function cmdAttemptAdd(args) {
   let doc;
   try { doc = JSON.parse(fs.readFileSync(tasksFile, 'utf8')); } catch (e) { return failOut('ledger-unreadable', 'intent ledger tasks.json is unreadable'); }
   const task = (doc.tasks || []).find(function (t) { return t && t.taskId === taskId; });
-  if (!task || task.taskInstanceId !== taskInstanceId || task.kind !== 'repo-inspect-intent') return failOut('unknown-task', 'no repo-inspect task with this identity');
+  if (!task || task.taskInstanceId !== taskInstanceId || (task.kind !== 'repo-inspect-intent' && task.kind !== 'repo-code-intent')) return failOut('unknown-task', 'no repo-inspect task with this identity');
   const runs = path.join(workspace, '.ai-harness', 'runs', taskId);
   const file = path.join(runs, 'attempts.jsonl');
   const lines = fs.readFileSync(file, 'utf8').split('\n').filter(function (l) { return l.trim() !== ''; }).map(function (l) { return JSON.parse(l); });
   const first = lines.find(function (r) { return r.status === 'started'; });
   if (!first) return failOut('ledger-unreadable', 'task has no started attempt');
   const seq = lines.filter(function (r) { return r.status === 'started'; }).length + 1;
-  if (seq > 64) return failOut('too-many-attempts', 'attempt limit reached');
+  if (seq > 96) return failOut('too-many-attempts', 'attempt limit reached');
   const attemptId = taskId + '-A' + seq;
   const attempt = { taskId: taskId, taskInstanceId: taskInstanceId, attemptId: attemptId, sequence: seq, status: 'started', executionClass: first.executionClass, sessionId: first.sessionId, startedByTurn: 'turn-' + seq };
   atomicWrite(file, lines.map(function (r) { return JSON.stringify(r); }).concat([JSON.stringify(attempt)]).join('\n') + '\n');
@@ -216,6 +217,15 @@ function cmdPublishInspect(text) {
   emit({ ok: true, bundle: out.bundle });
 }
 
+function cmdPublishCode(text) {
+  const input = JSON.parse(text);
+  const dispatchIntent = require(path.join(REPO, 'config', 'registry', 'native-dispatch-intent.cjs'));
+  const opts = Object.assign({}, input, { scope: dispatchIntent.SCOPE_REPO_CODE, initiator: dispatchIntent.INITIATOR_USER_EXPLICIT });
+  const out = dispatchIntent.buildDispatchIntent(opts);
+  if (!out.ok) return failOut(out.code, out.message);
+  emit({ ok: true, bundle: out.bundle });
+}
+
 function main() {
   const sub = process.argv[2];
   const args = process.argv.slice(3);
@@ -233,6 +243,7 @@ function main() {
       case 'shadow': return cmdShadow(args);
       case 'kernel-intent': return readStdin(function (t) { try { cmdKernelIntent(t); } catch (e) { failOut('bridge-error', String((e && e.message) || e).slice(0, 200)); } });
       case 'publish': return readStdin(function (t) { try { cmdPublish(t); } catch (e) { failOut('bridge-error', String((e && e.message) || e).slice(0, 200)); } });
+      case 'publish-code': return readStdin(function (t) { try { cmdPublishCode(t); } catch (e) { failOut('bridge-error', String((e && e.message) || e).slice(0, 200)); } });
       case 'publish-inspect': return readStdin(function (t) { try { cmdPublishInspect(t); } catch (e) { failOut('bridge-error', String((e && e.message) || e).slice(0, 200)); } });
       default: return failOut('bad-subcommand', 'unknown bridge subcommand');
     }

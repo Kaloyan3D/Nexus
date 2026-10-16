@@ -278,6 +278,74 @@ async fn intent_inspect_submit(
     .map_err(|_| internal())?
 }
 
+/// A5.6: the operator-approved CODING sources (identities only). A right to
+/// inspect never implies a right to modify; the broker lists them separately.
+#[tauri::command]
+async fn intent_code_sources(
+) -> Result<Vec<nexus_client::intent_client::AllowedCodeSource>, UiError> {
+    tauri::async_runtime::spawn_blocking(|| {
+        nexus_client::intent_client::code_sources(
+            &nexus_client::intent_client::default_broker_socket(),
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// A5.6: submit one user-typed `repo-code` task. The renderer supplies text,
+/// a source IDENTITY from `intent_code_sources` and an idempotency key - no
+/// path, tool, command, limit, model or approval. The work happens in an
+/// isolated copy; every edit and command still needs an independent approval
+/// that this application cannot give.
+#[tauri::command]
+async fn intent_code_submit(
+    prompt: String,
+    source_id: String,
+    idempotency_key: String,
+) -> Result<nexus_client::intent_client::SubmitReply, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use nexus_client::intent_contract::{IntentLimits, NexusIntentV1, ResponseMode};
+        let intent = NexusIntentV1 {
+            schema_version: 1,
+            request_id: nexus_client::intent_client::fresh_key("gui"),
+            idempotency_key,
+            intent_type: "repo-code".to_owned(),
+            content: prompt,
+            model: None,
+            workspace_id: Some(source_id),
+            limits: IntentLimits {
+                max_output_tokens: Some(1024),
+                ..IntentLimits::default()
+            },
+            response_mode: ResponseMode::Stream,
+            client_label: Some("nexus-desktop".to_owned()),
+        };
+        nexus_client::intent_client::submit(
+            &nexus_client::intent_client::default_broker_socket(),
+            &intent,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// A5.6: the reviewable change set of one of this user's repo-code runs.
+/// Read-only; nothing here can apply, commit or push it.
+#[tauri::command]
+async fn intent_diff(run_id: String) -> Result<nexus_client::intent_client::DiffReply, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::diff(
+            &nexus_client::intent_client::default_broker_socket(),
+            &run_id,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
 #[tauri::command]
 async fn intent_status(run_id: String) -> Result<nexus_client::intent_client::IntentRun, UiError> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -424,6 +492,9 @@ pub fn run() {
             intent_submit,
             intent_workspaces,
             intent_inspect_submit,
+            intent_code_sources,
+            intent_code_submit,
+            intent_diff,
             intent_status,
             intent_cancel,
             intent_list,
@@ -457,6 +528,9 @@ mod authz_tests {
         "intent_submit",
         "intent_workspaces",
         "intent_inspect_submit",
+        "intent_code_sources",
+        "intent_code_submit",
+        "intent_diff",
         "intent_status",
         "intent_cancel",
         "intent_list",
@@ -719,6 +793,69 @@ mod authz_tests {
             );
         }
         assert!(prod.contains("fn intent_inspect_submit(\n    prompt: String,\n    workspace_id: String,\n    idempotency_key: String,\n)"));
+    }
+
+    /// A5.6: the renderer picks a code SOURCE identity and sends text; it can
+    /// never carry a path, tool, command, limit, approval or model, and the
+    /// backend holds no approval authority at all.
+    #[test]
+    fn desktop_repo_code_commands_carry_identities_never_paths_or_authority() {
+        let _env = BROKER_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!("nexus-tauri-a56-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("broker.sock");
+        let _ = std::fs::remove_file(&sock);
+        let l = UnixListener::bind(&sock).unwrap();
+        let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let f2 = frames.clone();
+        std::thread::spawn(move || {
+            for stream in l.incoming().take(3) {
+                let mut s = stream.unwrap();
+                let mut line = String::new();
+                BufReader::new(s.try_clone().unwrap()).read_line(&mut line).unwrap();
+                let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let cmd = v["cmd"].as_str().unwrap_or("").to_owned();
+                let rid = v["id"].clone();
+                f2.lock().unwrap().push(v);
+                let run = serde_json::json!({"runId":"run_00000000000000000000000000000000","requestId":"r","clientId":"uid:1","state":"preparing","terminal":false,"intentType":"repo-code","responseMode":"stream","cancelRequested":false,"createdAtMs":1,"updatedAtMs":1,"workspaceId":"proj"});
+                let result = match cmd.as_str() {
+                    "intent-submit" => serde_json::json!({"run": run, "replay": false}),
+                    "intent-diff" => serde_json::json!({"run": run, "baseCommit": "abc", "files": [{"path": "src/lib.rs", "status": "M", "additions": 1, "deletions": 1}], "filesTruncated": false, "diff": "--- a\n+++ b\n", "diffDigest": "d", "diffTruncated": false}),
+                    _ => serde_json::json!({"sources": [{"sourceId": "proj"}]}),
+                };
+                let _ = s.write_all(format!("{}\n", serde_json::json!({"protocol":1,"id":rid,"ok":true,"result":result})).as_bytes());
+            }
+        });
+        std::env::set_var("NEXUS_BROKER_SOCKET", &sock);
+        let src = tauri::async_runtime::block_on(super::intent_code_sources()).unwrap();
+        assert_eq!(src[0].source_id, "proj");
+        let r = tauri::async_runtime::block_on(super::intent_code_submit("fix the test".into(), "proj".into(), "gui-0123456789abcdef".into())).unwrap();
+        assert!(!r.replay);
+        let d = tauri::async_runtime::block_on(super::intent_diff(r.run.run_id.clone())).unwrap();
+        assert_eq!(d.files[0].path, "src/lib.rs");
+        let got = frames.lock().unwrap().clone();
+        assert_eq!(got[0]["cmd"], "intent-code-sources");
+        assert_eq!(got[1]["cmd"], "intent-submit");
+        assert_eq!(got[2]["cmd"], "intent-diff");
+        let i = got[1]["params"]["intent"].as_object().unwrap();
+        let mut keys: Vec<&str> = i.keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["clientLabel", "content", "idempotencyKey", "intentType", "limits", "model", "requestId", "responseMode", "schemaVersion", "workspaceId"]);
+        assert_eq!(i["intentType"], "repo-code");
+        assert_eq!(i["workspaceId"], "proj");
+        assert_eq!(i["limits"], serde_json::json!({"maxOutputTokens": 1024}), "no edit/test/turn/tool limit is renderer-controlled");
+        let src = include_str!("lib.rs");
+        let (prod, _) = src.split_once("#[cfg(test)]").unwrap();
+        for forbidden in [
+            "approval-decide", "approval-get", "approval-request", "approval-revoke", "approval_decide", "approvalDecide",
+            "fs_write", "fs_edit", "proc_run", "fs.write", "fs.edit", "proc.run", "worktree", "git ", "Command::new",
+            "std::process",
+        ] {
+            assert!(!prod.contains(forbidden), "Tauri backend must not reference {forbidden}");
+        }
+        assert!(prod.contains("fn intent_code_submit(\n    prompt: String,\n    source_id: String,\n    idempotency_key: String,\n)"));
     }
 
     /// A5.3: the Desktop's Send/cancel commands put exactly the documented

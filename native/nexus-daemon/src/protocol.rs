@@ -270,6 +270,9 @@ pub fn is_privileged(cmd: &str) -> bool {
             | "tool-revoke"
             | "approval-request"
             | "approval-revoke"
+            | "worktree-create"
+            | "worktree-diff"
+            | "worktree-remove"
     )
 }
 

@@ -7,6 +7,8 @@ import type {
   IntegrityView,
   AllowedModel,
   AllowedWorkspace,
+  AllowedCodeSource,
+  DiffReply,
   IntentCancelReply,
   IntentRun,
   IntentSubmitReply,
@@ -53,6 +55,16 @@ export interface NativeApi {
     workspaceId: string,
     idempotencyKey: string,
   ): Promise<IntentSubmitReply>;
+  /** A5.6: sources (identities) the broker lets this client have MODIFIED in an isolated copy. */
+  intentCodeSources(): Promise<AllowedCodeSource[]>;
+  /** A5.6: submit a controlled coding task (text + source identity only). */
+  intentCodeSubmit(
+    prompt: string,
+    sourceId: string,
+    idempotencyKey: string,
+  ): Promise<IntentSubmitReply>;
+  /** A5.6: read-only change set of this user's repo-code run. */
+  intentDiff(runId: string): Promise<DiffReply>;
   intentStatus(runId: string): Promise<IntentRun>;
   intentCancel(runId: string): Promise<IntentCancelReply>;
   intentList(): Promise<IntentRun[]>;
@@ -114,6 +126,10 @@ export const tauriApi: NativeApi = {
   intentWorkspaces: () => invoke<AllowedWorkspace[]>("intent_workspaces"),
   intentInspectSubmit: (prompt, workspaceId, idempotencyKey) =>
     invoke<IntentSubmitReply>("intent_inspect_submit", { prompt, workspaceId, idempotencyKey }),
+  intentCodeSources: () => invoke<AllowedCodeSource[]>("intent_code_sources"),
+  intentCodeSubmit: (prompt, sourceId, idempotencyKey) =>
+    invoke<IntentSubmitReply>("intent_code_submit", { prompt, sourceId, idempotencyKey }),
+  intentDiff: (runId) => invoke<DiffReply>("intent_diff", { runId }),
   intentStatus: (runId) => invoke<IntentRun>("intent_status", { runId }),
   intentCancel: (runId) => invoke<IntentCancelReply>("intent_cancel", { runId }),
   intentList: () => invoke<IntentRun[]>("intent_list"),
@@ -171,6 +187,9 @@ export const unavailableApi: NativeApi = {
   intentSubmit: () => Promise.reject(notInShell),
   intentWorkspaces: () => Promise.resolve([]),
   intentInspectSubmit: () => Promise.reject(notInShell),
+  intentCodeSources: () => Promise.resolve([]),
+  intentCodeSubmit: () => Promise.reject(notInShell),
+  intentDiff: () => Promise.reject(notInShell),
   intentStatus: () => Promise.reject(notInShell),
   intentCancel: () => Promise.reject(notInShell),
   intentList: () => Promise.resolve([]),

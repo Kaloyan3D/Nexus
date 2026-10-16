@@ -67,9 +67,9 @@ check('the attempt count is bounded', () => {
   const d = tmp();
   const t = run(['task-create', d, 'repo-inspect']);
   let last;
-  for (let i = 0; i < 70; i++) last = run(['attempt-add', d, t.taskId, t.taskInstanceId]);
+  for (let i = 0; i < 100; i++) last = run(['attempt-add', d, t.taskId, t.taskInstanceId]);
   assert.equal(last.ok, false);
-  assert.equal(last.code, 'too-many-attempts');
+  assert.equal(last.code, "too-many-attempts");
 });
 
 const issuance = () => ({
@@ -81,6 +81,26 @@ const base = (over) => Object.assign({
   lease: { epoch: 1, storeIncarnation: 'inc' }, role: 'muse_main', issuance: issuance(),
   extensionDigest: 'd'.repeat(64), requestDigest: 'e'.repeat(64), sessionId: 's',
 }, over || {});
+
+check('repo-code is a separate task kind and scope; the publishers fix their own scope', () => {
+  const d = tmp();
+  const t = run(['task-create', d, 'repo-code']);
+  assert.equal(ledger(d).tasks[0].kind, 'repo-code-intent');
+  assert.equal(run(['attempt-add', d, t.taskId, t.taskInstanceId]).ok, true);
+  const ok = dispatchIntent.buildDispatchIntent(base({ scope: 'repo-code', initiator: 'user-explicit' }));
+  assert.equal(ok.ok, true);
+  assert.equal(ok.bundle.scope, 'repo-code');
+  assert.equal(dispatchIntent.buildDispatchIntent(base({ scope: 'repo-code' })).ok, false);
+  assert.equal(dispatchIntent.buildDispatchIntent(base({ scope: 'repo-code', initiator: 'agent' })).ok, false);
+  for (const sub of ['publish-code']) {
+    const r = run([sub], JSON.stringify(base({ scope: 'repo-inspect', initiator: 'agent' })));
+    assert.equal(r.bundle.scope, 'repo-code');
+    assert.equal(r.bundle.initiator, 'user-explicit');
+  }
+  // the other publishers do not become repo-code publishers
+  assert.equal(run(['publish-inspect'], JSON.stringify(base({ scope: 'repo-code' }))).bundle.scope, 'repo-inspect');
+  assert.equal(run(['publish'], JSON.stringify(base({ scope: 'repo-code' }))).bundle.scope, 'model-only');
+});
 
 check('repo-inspect bundles need the explicit user initiator and are scoped repo-inspect', () => {
   const ok = dispatchIntent.buildDispatchIntent(base({ scope: 'repo-inspect', initiator: 'user-explicit' }));

@@ -111,8 +111,18 @@ pub(crate) fn bridge(
 }
 
 pub(crate) fn daemon(b: &Broker, cmd: &str, params: Value) -> Result<Value, StepError> {
-    let resp = issuer::issuer_call(&b.cfg.daemon_socket, &b.cap_hex, cmd, params)
-        .map_err(|e| se("daemon-unreachable", e.message))?;
+    daemon_timeout(b, cmd, params, 15_000)
+}
+
+pub(crate) fn daemon_timeout(
+    b: &Broker,
+    cmd: &str,
+    params: Value,
+    timeout_ms: u64,
+) -> Result<Value, StepError> {
+    let resp =
+        issuer::issuer_call_with_timeout(&b.cfg.daemon_socket, &b.cap_hex, cmd, params, timeout_ms)
+            .map_err(|e| se("daemon-unreachable", e.message))?;
     if resp.get("ok") == Some(&Value::Bool(true)) {
         Ok(resp)
     } else {
@@ -171,7 +181,9 @@ pub fn execute(b: Arc<Broker>, run_id: String, intent: NexusIntentV1, flag: Arc<
     // A panic in any step must end the run (nothing sent), never strand it
     // in a non-terminal state or take the worker's cleanup with it.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if intent.intent_type == nexus_contracts::intent::INTENT_REPO_INSPECT {
+        if intent.intent_type == nexus_contracts::intent::INTENT_REPO_INSPECT
+            || intent.intent_type == nexus_contracts::intent::INTENT_REPO_CODE
+        {
             crate::inspect::run(&b, &run_id, &intent, &flag)
         } else {
             run_steps(&b, &run_id, &intent, &flag)

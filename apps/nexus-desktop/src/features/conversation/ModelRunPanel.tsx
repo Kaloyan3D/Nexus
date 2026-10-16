@@ -1,7 +1,7 @@
 import { Ban } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { asUiError } from "../../lib/api";
-import type { IntentRun, ModelRunStatus, ToolActivity } from "../../lib/contracts";
+import type { DiffReply, IntentRun, ModelRunStatus, ToolActivity } from "../../lib/contracts";
 import { endpointLabel, modelStateView, usageLabel } from "../../lib/modelRun";
 import { useNexus } from "../../state/NexusContext";
 import { Alert, Badge, Button, Loading, StatusDot } from "../../components/ui/primitives";
@@ -75,7 +75,9 @@ export function useInspectRun(conversationId: string | null, active: boolean): I
         .intentList()
         .then((runs) => {
           if (!alive) return;
-          const mine = runs.find((r) => r.conversationId === conversationId && r.intentType === "repo-inspect");
+          const mine = runs.find(
+            (r) => r.conversationId === conversationId && (r.intentType === "repo-inspect" || r.intentType === "repo-code"),
+          );
           setRun(mine ?? null);
         })
         .catch(() => alive && setRun(null));
@@ -178,6 +180,153 @@ export function InspectRunSection({ run }: { run: IntentRun }) {
   );
 }
 
+
+const short = (h?: string | null) => (h ? h.slice(0, 10) : "—");
+
+/** Unified diff, line-classified. Text only: never interpreted as HTML. */
+export function DiffViewer({ diff, truncated }: { diff: string; truncated: boolean }) {
+  const lines = diff.split("\n");
+  return (
+    <div>
+      <pre className="nv-diff nv-mono" aria-label="Unified diff" style={{ overflow: "auto", maxHeight: 360 }}>
+        {lines.map((l, i) => {
+          const tone = l.startsWith("+++") || l.startsWith("---") ? "meta" : l.startsWith("+") ? "add" : l.startsWith("-") ? "del" : l.startsWith("@@") ? "hunk" : "ctx";
+          return (
+            <div key={i} data-diff={tone} className={`nv-diff__line nv-diff__line--${tone}`}>
+              {l || " "}
+            </div>
+          );
+        })}
+      </pre>
+      {truncated && <p className="nv-note">The diff is truncated here; the full change set stays in the isolated copy.</p>}
+    </div>
+  );
+}
+
+/** A5.6: controlled coding - approvals, edits, tests and the reviewable diff. */
+export function CodeRunSection({ run }: { run: IntentRun }) {
+  const { api } = useNexus();
+  const acts = run.toolActivity ?? [];
+  const [diff, setDiff] = useState<DiffReply | null>(null);
+  const [diffErr, setDiffErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const pa = run.pendingApproval ?? null;
+  const loadDiff = () => {
+    setLoading(true);
+    setDiffErr(null);
+    api
+      .intentDiff(run.runId)
+      .then(setDiff)
+      .catch((e) => setDiffErr(asUiError(e).message))
+      .finally(() => setLoading(false));
+  };
+  const files = run.changedFiles ?? [];
+  return (
+    <section className="nv-stack" style={{ gap: 8 }} aria-label="Controlled coding">
+      <div className="nv-heading__meta">
+        <Badge tone="warning">Code in isolated copy</Badge>
+        <Badge tone="neutral">Source {run.workspaceId ?? "—"}</Badge>
+        <Badge tone="neutral">
+          Turn {run.turn ?? 0}/{run.maxTurns ?? "—"}
+        </Badge>
+        <Badge tone="neutral">
+          Edits {run.editsUsed ?? 0}/{run.maxEdits ?? "—"}
+        </Badge>
+        <Badge tone="neutral">
+          Commands {run.testsUsed ?? 0}/{run.maxTests ?? "—"}
+        </Badge>
+        {run.lastTestVerification && (
+          <Badge tone={run.lastTestVerification === "pass" ? "success" : "error"}>
+            Last test: {run.lastTestVerification === "pass" ? "passed" : "failed"}
+          </Badge>
+        )}
+      </div>
+      {pa && (
+        <Alert tone="warning" title="Waiting for an independent approval">
+          <span className="nv-mono">{pa.tool}</span>: {pa.summary}. Nothing has run. A separate approver must review the
+          exact {pa.tool === "proc_run" ? "command" : "patch"} (digest <span className="nv-mono">{short(pa.requestDigest)}</span>)
+          with the approver tool; Nexus Desktop cannot approve, and the request expires on its own.
+        </Alert>
+      )}
+      {run.stopReason && (
+        <Alert tone="warning" title="Stopped at a policy limit">
+          The run ended cleanly at {STOP_REASONS[run.stopReason] ?? run.stopReason}; the working copy is kept for review.
+        </Alert>
+      )}
+      {run.errorCode === "tool-outcome-uncertain" && (
+        <Alert tone="error" title="A write or command may or may not have happened">
+          Its effect is unknown and was not repeated. Review the diff below before trusting the working copy.
+        </Alert>
+      )}
+      {acts.length > 0 ? (
+        <table className="nv-table" aria-label="Proposed edits and tool activity">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Tool</th>
+              <th>Proposed</th>
+              <th>Approval</th>
+              <th>Outcome</th>
+              <th>Receipt</th>
+            </tr>
+          </thead>
+          <tbody>
+            {acts.map((a) => (
+              <tr key={a.index}>
+                <td>{a.index}</td>
+                <td className="nv-mono">{a.tool}</td>
+                <td className="nv-mono">{a.argsSummary}</td>
+                <td>{a.approvalOutcome ? <Badge tone={a.approvalOutcome === "approved" ? "success" : "warning"}>{a.approvalOutcome}</Badge> : "—"}</td>
+                <td>
+                  <Badge tone={activityTone(a)}>
+                    {a.status}
+                    {a.errorCode ? ` · ${a.errorCode}` : ""}
+                  </Badge>
+                  {a.verification && (
+                    <Badge tone={a.verification === "pass" ? "success" : "error"}>
+                      {a.verification === "pass" ? "tests passed" : "tests failed"}
+                      {a.exitCode != null ? ` (exit ${a.exitCode})` : ""}
+                    </Badge>
+                  )}
+                </td>
+                <td className="nv-mono">{a.postSha256 ? `${short(a.preSha256)} → ${short(a.postSha256)}` : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <p className="nv-note">No tool has been proposed yet.</p>
+      )}
+      <h4 className="nv-subheading">Changes in the isolated copy</h4>
+      {files.length > 0 ? (
+        <ul className="nv-list" aria-label="Changed files">
+          {files.map((f) => (
+            <li key={f.path} className="nv-mono">
+              {f.status} {f.path} {f.additions != null ? `+${f.additions}` : ""} {f.deletions != null ? `-${f.deletions}` : ""}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="nv-note">{run.terminal ? "No file was changed." : "No change has been applied yet."}</p>
+      )}
+      {run.terminal && (
+        <div>
+          <Button size="sm" onClick={loadDiff} disabled={loading}>
+            {loading ? "Loading diff…" : diff ? "Reload diff" : "Show diff"}
+          </Button>
+          {diffErr && <span className="nv-note"> {diffErr}</span>}
+        </div>
+      )}
+      {diff && <DiffViewer diff={diff.diff || "(no changes)"} truncated={diff.diffTruncated} />}
+      <p className="nv-note">
+        Edits and commands ran only in a throw-away copy of commit <span className="nv-mono">{short(run.worktreeCommit)}</span>;
+        your repository is unchanged. Nothing is committed, pushed or merged automatically. Tool output and file contents
+        are untrusted data.
+      </p>
+    </section>
+  );
+}
+
 export function ModelRunPanel({ conversationId }: { conversationId: string }) {
   const { status, error, reload } = useModelRunStatus(conversationId, true);
   const inspect = useInspectRun(conversationId, status ? !status.terminal : true);
@@ -235,7 +384,9 @@ export function ModelRunPanel({ conversationId }: { conversationId: string }) {
         <dt>Finish</dt>
         <dd>{status.finishReason ?? "—"}</dd>
       </dl>
-      {inspect ? (
+      {inspect?.intentType === "repo-code" ? (
+        <CodeRunSection run={inspect} />
+      ) : inspect ? (
         <InspectRunSection run={inspect} />
       ) : (
         <p className="nv-note">

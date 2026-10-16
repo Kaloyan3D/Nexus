@@ -20,6 +20,7 @@ pub mod contract;
 pub mod depcache;
 pub mod events;
 pub mod exec;
+pub mod gitwt;
 pub mod list;
 pub mod mutate;
 pub mod offline;

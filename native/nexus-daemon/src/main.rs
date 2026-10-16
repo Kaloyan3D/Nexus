@@ -63,6 +63,7 @@ fn usage() -> i32 {
     println!("         [--require-external-witness]  (refuse to start without --external-witness; production units)");
     println!("         [--require-human-approval]  (A4.2: per-operation human approval; needs --require-independent-approver)");
     println!("         [--enable-repo-inspect]  (A5.5: model-proposed read-only tools in repo-inspect commands; default off; needs --enable-model-pilot + --workspace-bases)");
+    println!("         [--enable-repo-code --worktree-root DIR]  (A5.6: bounded autonomous coding in isolated working copies; default off; needs the model pilot, --enable-writes, --enable-process, --require-human-approval and a worktree root beneath --workspace-bases)");
     println!("         [--enable-model-pilot]  (A5.1: model-only text inference scope; default off; needs shadow-test + --allowed-uids)");
     println!("Trust modes: readonly (default, privileged mutations disabled) |");
     println!("  shadow-test (explicit opt-in, per-request issuer authentication).");
@@ -986,6 +987,70 @@ fn run(args: &[String]) -> i32 {
             );
         }
     }
+    // A5.6: bounded autonomous coding in isolated working copies. Default OFF.
+    // Every precondition is a separate lock: the model pilot, writes AND
+    // sandboxed processes, mandatory per-operation human approval (never the
+    // legacy coarse scope), and a dedicated worktree root beneath a workspace
+    // base. Without all of them the daemon refuses to start with the flag.
+    let worktree_root: Option<std::path::PathBuf> =
+        flag_str(args, "--worktree-root").map(std::path::PathBuf::from);
+    let repo_code_enabled = args.iter().any(|a| a == "--enable-repo-code");
+    if repo_code_enabled {
+        if !kernel.model_only_pilot_enabled() {
+            return fatal(
+                "bad-config",
+                "--enable-repo-code requires --enable-model-pilot (failing closed)",
+            );
+        }
+        if !(writes_enabled && process_enabled) {
+            return fatal(
+                "bad-config",
+                "--enable-repo-code requires --enable-writes and --enable-process (failing closed)",
+            );
+        }
+        if !require_human_approval {
+            return fatal("bad-config", "--enable-repo-code requires --require-human-approval: model-proposed mutations always need a per-operation approval (failing closed)");
+        }
+        let Some(root) = worktree_root.as_ref() else {
+            return fatal(
+                "bad-config",
+                "--enable-repo-code requires --worktree-root (failing closed)",
+            );
+        };
+        let canon_root = match std::fs::canonicalize(root) {
+            Ok(c) => c,
+            Err(_) => {
+                return fatal(
+                    "bad-config",
+                    "--worktree-root does not exist (failing closed)",
+                )
+            }
+        };
+        let bases: Vec<std::path::PathBuf> = flag_str(args, "--workspace-bases")
+            .map(|v| {
+                v.split(',')
+                    .filter(|p| !p.is_empty())
+                    .filter_map(|p| std::fs::canonicalize(p).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if canon_root == std::path::Path::new("/")
+            || !bases.iter().any(|b| canon_root.starts_with(b))
+        {
+            return fatal("bad-config", "--worktree-root must lie beneath an operator-allowed --workspace-bases entry (failing closed)");
+        }
+        kernel.enable_repo_code_pilot();
+        // Half-built working copies from a crash are never reused.
+        let swept = nexus_tools::gitwt::sweep_stale(&canon_root);
+        if swept > 0 {
+            eprintln!("nexusd: removed {swept} stale half-built working copy director(ies)");
+        }
+    } else if worktree_root.is_some() {
+        return fatal(
+            "bad-config",
+            "--worktree-root is only valid together with --enable-repo-code (failing closed)",
+        );
+    }
     let workspace_bases: Vec<std::path::PathBuf> = flag_str(args, "--workspace-bases")
         .map(|v| {
             v.split(',')
@@ -1005,6 +1070,8 @@ fn run(args: &[String]) -> i32 {
         counters: Default::default(),
         reconcile_latch: Mutex::new(None),
         workspace_bases,
+        worktree_root: worktree_root.and_then(|r| std::fs::canonicalize(r).ok()),
+        repo_code_enabled,
         writes_enabled,
         process_enabled,
         command_policy: {

@@ -636,6 +636,7 @@ impl Fx {
                 root: self.repo.clone(),
                 allowed_uids: vec![],
             }],
+            code_sources: vec![],
         }
     }
 
@@ -1564,6 +1565,7 @@ fn plant_crashed_run(fx: &Fx, name: &str, state: nexus_client::model_run::ModelR
         "task-crashed-0001",
         "inspect the repo",
         &nexus_client::InspectBasics {
+            mode: "repo-inspect",
             provider_id: "e2e-mock".into(),
             remote_model_id: "e2e-mock-model".into(),
             logical_model_id: "e2e/e2e-1".into(),

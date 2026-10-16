@@ -54,6 +54,10 @@ pub struct BrokerConfig {
     /// Operator-approved repo-inspect workspaces (A5.5). Empty = repo-inspect
     /// is unavailable.
     pub workspaces: Vec<WorkspaceSpec>,
+    /// Operator-approved CODING sources (A5.6): repositories the agent may
+    /// work on, always through an isolated working copy and never in place.
+    /// Distinct from `workspaces`: inspect rights never imply code rights.
+    pub code_sources: Vec<WorkspaceSpec>,
 }
 
 impl BrokerConfig {

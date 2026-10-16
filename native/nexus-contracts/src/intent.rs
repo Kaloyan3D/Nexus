@@ -81,6 +81,12 @@ pub struct IntentLimits {
     /// Maximum wall-clock seconds for the whole run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_runtime_secs: Option<u64>,
+    /// `repo-code` only: maximum approved edit/write operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_edits: Option<u32>,
+    /// `repo-code` only: maximum approved test/build executions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tests: Option<u32>,
 }
 
 impl IntentLimits {
@@ -90,12 +96,29 @@ impl IntentLimits {
             || self.max_tool_result_bytes.is_some()
             || self.max_runtime_secs.is_some()
     }
+
+    fn has_code_limits(&self) -> bool {
+        self.max_edits.is_some() || self.max_tests.is_some()
+    }
 }
 
 /// Intent type of the plain text-only inference (A5.1).
 pub const INTENT_MODEL_ONLY: &str = "model-only";
 /// Intent type of the read-only agentic repository inspection (A5.5).
 pub const INTENT_REPO_INSPECT: &str = "repo-inspect";
+
+/// Intent type of the bounded read/edit/test coding workflow (A5.6). It needs
+/// additional operator authority (a code source, write and process policy,
+/// independent approvals); a `repo-inspect` right never implies it.
+pub const INTENT_REPO_CODE: &str = "repo-code";
+
+/// Hard ceilings for `repo-code` (policy may be lower).
+pub const MAX_CODE_TURNS: u32 = 24;
+pub const MAX_CODE_TOOL_CALLS: u32 = 80;
+pub const MAX_CODE_RESULT_BYTES: u64 = 4 * 1024 * 1024;
+pub const MAX_CODE_RUNTIME_SECS: u64 = 3600;
+pub const MAX_CODE_EDITS: u32 = 20;
+pub const MAX_CODE_TESTS: u32 = 20;
 
 /// Hard ceilings a client may request for the loop (policy may be lower).
 pub const MAX_INSPECT_TURNS: u32 = 12;
@@ -167,18 +190,22 @@ impl NexusIntentV1 {
                 "unsupported NexusIntent schemaVersion",
             ));
         }
-        if self.intent_type != INTENT_MODEL_ONLY && self.intent_type != INTENT_REPO_INSPECT {
+        if self.intent_type != INTENT_MODEL_ONLY
+            && self.intent_type != INTENT_REPO_INSPECT
+            && self.intent_type != INTENT_REPO_CODE
+        {
             return Err(IntentError::new(
                 "unsupported-intent-type",
-                "only the model-only and repo-inspect intent types are implemented",
+                "only the model-only, repo-inspect and repo-code intent types are implemented",
             ));
         }
-        let inspect = self.intent_type == INTENT_REPO_INSPECT;
+        let code = self.intent_type == INTENT_REPO_CODE;
+        let inspect = self.intent_type == INTENT_REPO_INSPECT || code;
         match (&self.workspace_id, inspect) {
             (None, true) => {
                 return Err(IntentError::new(
                     "bad-intent",
-                    "repo-inspect requires an explicit workspaceId",
+                    "repo-inspect and repo-code require an explicit workspaceId",
                 ))
             }
             (Some(_), false) => return Err(IntentError::new(
@@ -196,29 +223,49 @@ impl NexusIntentV1 {
         if !inspect && self.limits.has_loop_limits() {
             return Err(IntentError::new(
                 "bad-intent",
-                "loop limits are only valid for repo-inspect",
+                "loop limits are only valid for repo-inspect and repo-code",
             ));
         }
+        if !code && self.limits.has_code_limits() {
+            return Err(IntentError::new(
+                "bad-intent",
+                "edit and test limits are only valid for repo-code",
+            ));
+        }
+        let ceil = |a: u64, b: u64| if code { b } else { a };
         for (name, v, max) in [
             (
                 "maxTurns",
                 self.limits.max_turns.map(u64::from),
-                u64::from(MAX_INSPECT_TURNS),
+                ceil(u64::from(MAX_INSPECT_TURNS), u64::from(MAX_CODE_TURNS)),
             ),
             (
                 "maxToolCalls",
                 self.limits.max_tool_calls.map(u64::from),
-                u64::from(MAX_INSPECT_TOOL_CALLS),
+                ceil(
+                    u64::from(MAX_INSPECT_TOOL_CALLS),
+                    u64::from(MAX_CODE_TOOL_CALLS),
+                ),
             ),
             (
                 "maxToolResultBytes",
                 self.limits.max_tool_result_bytes,
-                MAX_INSPECT_RESULT_BYTES,
+                ceil(MAX_INSPECT_RESULT_BYTES, MAX_CODE_RESULT_BYTES),
             ),
             (
                 "maxRuntimeSecs",
                 self.limits.max_runtime_secs,
-                MAX_INSPECT_RUNTIME_SECS,
+                ceil(MAX_INSPECT_RUNTIME_SECS, MAX_CODE_RUNTIME_SECS),
+            ),
+            (
+                "maxEdits",
+                self.limits.max_edits.map(u64::from),
+                u64::from(MAX_CODE_EDITS),
+            ),
+            (
+                "maxTests",
+                self.limits.max_tests.map(u64::from),
+                u64::from(MAX_CODE_TESTS),
             ),
         ] {
             if let Some(n) = v {
@@ -455,6 +502,91 @@ mod tests {
         assert_eq!(
             NexusIntentV1::parse(&w).unwrap_err().code,
             "unsupported-intent-type"
+        );
+    }
+
+    #[test]
+    fn repo_code_is_a_distinct_intent_with_its_own_limits_and_no_smuggled_authority() {
+        let mut v = base();
+        v["intentType"] = serde_json::json!("repo-code");
+        assert_eq!(
+            NexusIntentV1::parse(&v).unwrap_err().code,
+            "bad-intent",
+            "needs a workspace"
+        );
+        v["workspaceId"] = serde_json::json!("demo");
+        v["limits"] = serde_json::json!({"maxTurns": 12, "maxToolCalls": 30, "maxEdits": 5, "maxTests": 5, "maxRuntimeSecs": 1800});
+        let i = NexusIntentV1::parse(&v).expect("valid repo-code");
+        assert_eq!(i.limits.max_edits, Some(5));
+        // code ceilings are higher than inspect's, but still bounded
+        v["limits"]["maxTurns"] = serde_json::json!(25);
+        assert!(NexusIntentV1::parse(&v).is_err());
+        v["limits"] = serde_json::json!({"maxEdits": 21});
+        assert!(NexusIntentV1::parse(&v).is_err());
+        v["limits"] = serde_json::json!({"maxTests": 0});
+        assert!(NexusIntentV1::parse(&v).is_err());
+        // edit/test limits exist for repo-code only
+        for t in ["model-only", "repo-inspect"] {
+            let mut w = base();
+            w["intentType"] = serde_json::json!(t);
+            if t == "repo-inspect" {
+                w["workspaceId"] = serde_json::json!("demo");
+            }
+            w["limits"] = serde_json::json!({"maxEdits": 1});
+            assert!(NexusIntentV1::parse(&w).is_err(), "{t}");
+        }
+        // the model/client can never supply or elevate permissions
+        let mut v = base();
+        v["intentType"] = serde_json::json!("repo-code");
+        v["workspaceId"] = serde_json::json!("demo");
+        for k in [
+            "allowWrite",
+            "writeScope",
+            "processScope",
+            "approval",
+            "approvalId",
+            "approver",
+            "commands",
+            "allowedCommands",
+            "program",
+            "args",
+            "cwd",
+            "env",
+            "network",
+            "worktree",
+            "worktreePath",
+            "branch",
+            "commit",
+            "gitRef",
+            "sourcePath",
+            "root",
+            "policy",
+            "codingPolicy",
+            "autoApprove",
+            "sandbox",
+            "unsandboxed",
+            "tools",
+        ] {
+            let mut w = v.clone();
+            w[k] = serde_json::json!("x");
+            assert_eq!(
+                NexusIntentV1::parse(&w).unwrap_err().code,
+                "bad-intent",
+                "{k}"
+            );
+        }
+        let mut w = v.clone();
+        w["limits"] = serde_json::json!({"allowedPrograms": ["cargo"]});
+        assert!(NexusIntentV1::parse(&w).is_err());
+        // the inspect payload digest is unchanged; code differs by type
+        let mut a = base();
+        a["intentType"] = serde_json::json!("repo-inspect");
+        a["workspaceId"] = serde_json::json!("demo");
+        let mut b = a.clone();
+        b["intentType"] = serde_json::json!("repo-code");
+        assert_ne!(
+            NexusIntentV1::parse(&a).unwrap().payload_digest(),
+            NexusIntentV1::parse(&b).unwrap().payload_digest()
         );
     }
 

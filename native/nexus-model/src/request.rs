@@ -61,6 +61,9 @@ pub enum InputItem {
 pub enum ToolProfile {
     /// `fs_list`, `fs_read`, `fs_search` (see `repo_tools`).
     RepoInspectV1,
+    /// `fs_list`, `fs_read`, `fs_search` plus `fs_write`, `fs_edit`,
+    /// `proc_run` (A5.6, `repo-code` only; every mutation needs approval).
+    RepoCodeV1,
 }
 
 /// Bounds for a tool-capable conversation.

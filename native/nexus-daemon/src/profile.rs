@@ -48,6 +48,9 @@ const FORBIDDEN: &[&str] = &[
     // A5.5 development pilot: model-driven read tools are not part of the
     // production-v1 contract either.
     "--enable-repo-inspect",
+    // A5.6 development pilot: autonomous coding is not part of production-v1.
+    "--enable-repo-code",
+    "--worktree-root",
 ];
 
 /// Environment variables that arm test-only behaviour.
@@ -212,6 +215,16 @@ mod tests {
             errs.iter().any(|e| e.contains("--enable-repo-inspect")),
             "{errs:?}"
         );
+    }
+
+    #[test]
+    fn repo_code_pilot_cannot_be_activated_under_production_v1() {
+        for f in ["--enable-repo-code", "--worktree-root"] {
+            let mut a = good();
+            a.push(f.into());
+            let errs = validate_production_v1(&a, &no_env, 2001).expect_err("pilot refused");
+            assert!(errs.iter().any(|e| e.contains(f)), "{f}: {errs:?}");
+        }
     }
 
     #[test]

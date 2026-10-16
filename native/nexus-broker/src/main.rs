@@ -20,6 +20,7 @@ fn usage() -> i32 {
     eprintln!("         [--allowed-uids U,U] [--socket-group GID] [--node PATH] [--max-active N]");
     eprintln!("         [--rate-per-minute N] [--allow-model provider/model]... [--read-timeout-ms N] [--total-timeout-ms N]");
     eprintln!("         [--workspace ID=ABS_PATH]... [--workspace-allow ID=UID,UID]...   (A5.5 repo-inspect workspaces)");
+    eprintln!("         [--code-source ID=ABS_PATH]... [--code-allow ID=UID,UID]...   (A5.6 repo-code sources; the daemon also needs --enable-repo-code --worktree-root)");
     eprintln!("Runs as the issuer identity. Refuses to start unless the daemon has the model pilot enabled.");
     2
 }
@@ -117,13 +118,26 @@ fn identity_report(args: &[String]) -> i32 {
 /// `--workspace ID=ABS_PATH` (repeatable) and optional
 /// `--workspace-allow ID=UID,UID`.
 fn parse_workspaces(args: &[String]) -> Result<Vec<nexus_broker::WorkspaceSpec>, String> {
+    parse_specs(args, "--workspace", "--workspace-allow")
+}
+
+/// `--code-source ID=ABS_PATH` and optional `--code-allow ID=UID,UID` (A5.6).
+fn parse_code_sources(args: &[String]) -> Result<Vec<nexus_broker::WorkspaceSpec>, String> {
+    parse_specs(args, "--code-source", "--code-allow")
+}
+
+fn parse_specs(
+    args: &[String],
+    flag: &str,
+    allow_flag: &str,
+) -> Result<Vec<nexus_broker::WorkspaceSpec>, String> {
     let mut out: Vec<nexus_broker::WorkspaceSpec> = Vec::new();
     for (i, a) in args.iter().enumerate() {
-        if a != "--workspace" {
+        if a != flag {
             continue;
         }
-        let v = args.get(i + 1).ok_or("--workspace needs ID=PATH")?;
-        let (id, path) = v.split_once('=').ok_or("--workspace needs ID=PATH")?;
+        let v = args.get(i + 1).ok_or(format!("{flag} needs ID=PATH"))?;
+        let (id, path) = v.split_once('=').ok_or(format!("{flag} needs ID=PATH"))?;
         if out.iter().any(|w| w.id == id) {
             return Err(format!("duplicate workspace id {id}"));
         }
@@ -134,19 +148,19 @@ fn parse_workspaces(args: &[String]) -> Result<Vec<nexus_broker::WorkspaceSpec>,
         });
     }
     for (i, a) in args.iter().enumerate() {
-        if a != "--workspace-allow" {
+        if a != allow_flag {
             continue;
         }
         let v = args
             .get(i + 1)
-            .ok_or("--workspace-allow needs ID=UID,UID")?;
+            .ok_or(format!("{allow_flag} needs ID=UID,UID"))?;
         let (id, uids) = v
             .split_once('=')
-            .ok_or("--workspace-allow needs ID=UID,UID")?;
+            .ok_or(format!("{allow_flag} needs ID=UID,UID"))?;
         let w = out
             .iter_mut()
             .find(|w| w.id == id)
-            .ok_or_else(|| format!("--workspace-allow names unknown workspace {id}"))?;
+            .ok_or_else(|| format!("{allow_flag} names unknown workspace {id}"))?;
         w.allowed_uids = uids
             .split(',')
             .filter_map(|x| x.trim().parse().ok())
@@ -183,7 +197,8 @@ fn authorize_live_session(args: &[String]) -> i32 {
                 .parse()
                 .map_err(|_| format!("{n} must be a number"))
         };
-        nexus_broker::live_auth::write_session_record(
+        nexus_broker::live_auth::write_session_record_for(
+            &get("--intent-type").unwrap_or_else(|| "repo-inspect".to_owned()),
             &state,
             &get("--provider").ok_or("--provider is required")?,
             &get("--model").ok_or("--model is required")?,
@@ -200,14 +215,15 @@ fn authorize_live_session(args: &[String]) -> i32 {
     match r {
         Ok(rec) => {
             println!(
-                "authorized ONE live repo-inspect SESSION: provider={} model={} workspace={} promptSha256={} maxTurns={} maxToolCalls={} maxOutputTokensPerCall={} maxToolResultBytes={} expiresAtMs={}",
-                rec.provider_id, rec.remote_model_id, rec.workspace_id, rec.prompt_sha256,
+                "authorized ONE live {} SESSION: provider={} model={} workspace={} promptSha256={} maxTurns={} maxToolCalls={} maxOutputTokensPerCall={} maxToolResultBytes={} expiresAtMs={}",
+                rec.intent_type, rec.provider_id, rec.remote_model_id, rec.workspace_id, rec.prompt_sha256,
                 rec.max_turns, rec.max_tool_calls, rec.max_output_tokens, rec.max_tool_result_bytes,
                 rec.expires_at_ms
             );
             println!(
-                "up to {} billable provider calls; selected repository contents will be sent to the provider",
-                rec.max_turns
+                "up to {} billable provider calls; selected repository contents{} will be sent to the provider",
+                rec.max_turns,
+                if rec.intent_type == "repo-code" { " and build/test command output" } else { "" }
             );
             0
         }
@@ -281,6 +297,7 @@ fn run() -> i32 {
             allow_models: allow,
             transport: None,
             workspaces: parse_workspaces(&args)?,
+            code_sources: parse_code_sources(&args)?,
             state_dir: state,
         })
     };

@@ -22,6 +22,9 @@ const SCOPE_MODEL_ONLY = 'model-only';
 // A5.5: user-initiated, read-only agentic repository inspection. One intent
 // covers exactly one provider request (one model turn).
 const SCOPE_REPO_INSPECT = 'repo-inspect';
+// A5.6: user-initiated bounded coding in an isolated working copy. One intent
+// still covers exactly one provider request; mutations need separate approvals.
+const SCOPE_REPO_CODE = 'repo-code';
 const INITIATOR_USER_EXPLICIT = 'user-explicit';
 
 function fail(code, message) {
@@ -80,11 +83,11 @@ function buildDispatchIntent(options) {
   if (requestDigest === '') return fail('intent-invalid', 'a prepared request digest is required');
   const sessionId = isNonEmptyString(o.sessionId) ? o.sessionId : '';
   if (sessionId === '') return fail('intent-invalid', 'a Controller attempt session is required');
-  if (o.scope !== SCOPE_MOCK_E2E && o.scope !== SCOPE_MODEL_ONLY && o.scope !== SCOPE_REPO_INSPECT) {
-    return fail('intent-scope-refused', 'only the mock-e2e, model-only and repo-inspect scopes are issuable');
+  if (o.scope !== SCOPE_MOCK_E2E && o.scope !== SCOPE_MODEL_ONLY && o.scope !== SCOPE_REPO_INSPECT && o.scope !== SCOPE_REPO_CODE) {
+    return fail('intent-scope-refused', 'only the mock-e2e, model-only, repo-inspect and repo-code scopes are issuable');
   }
-  if ((o.scope === SCOPE_MODEL_ONLY || o.scope === SCOPE_REPO_INSPECT) && o.initiator !== INITIATOR_USER_EXPLICIT) {
-    return fail('intent-initiator-refused', 'model-only and repo-inspect intents require an explicit user initiator');
+  if ((o.scope === SCOPE_MODEL_ONLY || o.scope === SCOPE_REPO_INSPECT || o.scope === SCOPE_REPO_CODE) && o.initiator !== INITIATOR_USER_EXPLICIT) {
+    return fail('intent-initiator-refused', 'model-only, repo-inspect and repo-code intents require an explicit user initiator');
   }
   if (o.scope === SCOPE_MOCK_E2E && o.initiator !== undefined) {
     return fail('intent-initiator-refused', 'initiator is only valid for the model-only scope');
@@ -108,7 +111,7 @@ function buildDispatchIntent(options) {
     sessionId: sessionId,
     scope: o.scope,
   };
-  if (o.scope === SCOPE_MODEL_ONLY || o.scope === SCOPE_REPO_INSPECT) bundle.initiator = INITIATOR_USER_EXPLICIT;
+  if (o.scope === SCOPE_MODEL_ONLY || o.scope === SCOPE_REPO_INSPECT || o.scope === SCOPE_REPO_CODE) bundle.initiator = INITIATOR_USER_EXPLICIT;
   return { ok: true, code: null, message: null, bundle: bundle };
 }
 
@@ -117,6 +120,7 @@ module.exports = {
   SCOPE_MOCK_E2E: SCOPE_MOCK_E2E,
   SCOPE_MODEL_ONLY: SCOPE_MODEL_ONLY,
   SCOPE_REPO_INSPECT: SCOPE_REPO_INSPECT,
+  SCOPE_REPO_CODE: SCOPE_REPO_CODE,
   INITIATOR_USER_EXPLICIT: INITIATOR_USER_EXPLICIT,
   buildDispatchIntent: buildDispatchIntent,
 };

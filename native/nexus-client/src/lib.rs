@@ -52,7 +52,7 @@ pub use model_run::{
     ModelRunStatus, ModelRunUpdate, PreparedModelRun, TransportFactory, MAX_PROMPT_BYTES,
     MODEL_CONVERSATION_PREFIX,
 };
-pub use nexus_model::{InputItem, TransportLimits};
+pub use nexus_model::{InputItem, ToolProfile, TransportLimits};
 pub use nexus_tools::{ToolEventStatus, ToolEventV1, ToolRecordV1};
 pub use nexus_transcript as transcript;
 pub use streaming::{poll_journal, ClientEvent};
