@@ -12,6 +12,8 @@ import {
 import { asUiError, defaultApi, type NativeApi } from "../lib/api";
 import type {
   AppInfo,
+  AllowedModel,
+  IntentRun,
   LiveBlockers,
   MockEvent,
   ModelConversationSummary,
@@ -66,6 +68,24 @@ export interface NexusState {
   refreshTasks: () => void;
   startMock: (prompt: string) => Promise<void>;
   mockBusy: boolean;
+  /** A5.3: models the broker lets this client choose (null = not loaded). */
+  intentModels: AllowedModel[] | null;
+  intentModelsError: UiError | null;
+  /** The run being submitted/prepared (before its conversation exists). */
+  intentPending: IntentRun | null;
+  intentSubmitting: boolean;
+  intentError: UiError | null;
+  sendIntent: (prompt: string, model: AllowedModel | null) => Promise<boolean>;
+  cancelPendingIntent: () => Promise<void>;
+}
+
+function newIdempotencyKey(): string {
+  const c = typeof crypto !== "undefined" ? crypto : undefined;
+  const id =
+    c && "randomUUID" in c
+      ? c.randomUUID().replace(/-/g, "")
+      : Math.random().toString(16).slice(2) + Date.now().toString(16);
+  return `gui-${id}`;
 }
 
 const Ctx = createContext<NexusState | null>(null);
@@ -189,6 +209,22 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     const t = setInterval(refreshModelRuns, anyActive ? 1_000 : 8_000);
     return () => clearInterval(t);
   }, [refreshModelRuns, anyActive]);
+  // A5.3: the composer's Send goes through the SAME broker the CLI uses.
+  const [intentModels, setIntentModels] = useState<AllowedModel[] | null>(null);
+  const [intentModelsError, setIntentModelsError] = useState<UiError | null>(null);
+  useEffect(() => {
+    let alive = true;
+    nativeApi
+      .intentModels()
+      .then((m) => alive && (setIntentModels(m), setIntentModelsError(null)))
+      .catch((e) => alive && (setIntentModels(null), setIntentModelsError(asUiError(e))));
+    return () => {
+      alive = false;
+    };
+  }, [nativeApi]);
+  const [intentPending, setIntentPending] = useState<IntentRun | null>(null);
+  const [intentSubmitting, setIntentSubmitting] = useState(false);
+  const [intentError, setIntentError] = useState<UiError | null>(null);
   const [mockBusy, setMockBusy] = useState(false);
   const [selection, select] = useState<Selection>(null);
   const [page, setPage] = useState<Page>("workspace");
@@ -231,6 +267,61 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     [nativeApi],
   );
 
+  const sendIntent = useCallback(
+    async (prompt: string, model: AllowedModel | null): Promise<boolean> => {
+      // One key per click: a duplicate click or a retried call cannot create
+      // a second billable attempt (the broker de-duplicates on this key).
+      const key = newIdempotencyKey();
+      setIntentSubmitting(true);
+      setIntentError(null);
+      try {
+        const reply = await nativeApi.intentSubmit(
+          prompt,
+          model ? { providerId: model.providerId, remoteModelId: model.remoteModelId } : null,
+          key,
+        );
+        let run = reply.run;
+        setIntentPending(run);
+        // Follow the run until its conversation exists, then hand over to the
+        // shared conversation view (which streams from the transcript).
+        for (let i = 0; i < 300 && !run.conversationId && !run.terminal; i++) {
+          await new Promise((r) => setTimeout(r, 300));
+          run = await nativeApi.intentStatus(run.runId);
+          setIntentPending(run);
+        }
+        if (run.conversationId) {
+          select({ kind: "model", id: run.conversationId });
+          refreshModelRuns();
+          setIntentPending(null);
+        } else if (run.terminal) {
+          setIntentError({
+            code: run.errorCode ?? run.state,
+            message: run.errorMessage ?? `The run ended as ${run.state} before any provider submission.`,
+          });
+          setIntentPending(null);
+        }
+        return true;
+      } catch (e) {
+        setIntentError(asUiError(e));
+        setIntentPending(null);
+        return false;
+      } finally {
+        setIntentSubmitting(false);
+      }
+    },
+    [nativeApi, refreshModelRuns],
+  );
+
+  const cancelPendingIntent = useCallback(async () => {
+    if (!intentPending) return;
+    try {
+      const c = await nativeApi.intentCancel(intentPending.runId);
+      setIntentPending(c.run);
+    } catch (e) {
+      setIntentError(asUiError(e));
+    }
+  }, [nativeApi, intentPending]);
+
   const selectedTask =
     selection?.kind === "task"
       ? (tasks.data?.tasks.find((t) => t.taskId === selection.id) ?? null)
@@ -265,6 +356,13 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     refreshTasks,
     startMock,
     mockBusy,
+    intentModels,
+    intentModelsError,
+    intentPending,
+    intentSubmitting,
+    intentError,
+    sendIntent,
+    cancelPendingIntent,
   };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

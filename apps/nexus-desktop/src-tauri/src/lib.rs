@@ -119,9 +119,12 @@ async fn model_run_status(
     .map_err(|_| internal())?
 }
 
-/// A5.1: request cancellation of a model-only run. Fail-safe direction
-/// only: writes a stop marker next to the transcript; grants nothing and
-/// cannot start, resend or authorize anything.
+/// Cancel a model-only run. Runs started through the intent broker are
+/// cancelled through the broker (the authoritative path, same as
+/// `nexus intent cancel`). Only when no broker run owns the conversation
+/// (an operator-started `nexus model run`) does this fall back to the
+/// fail-safe stop marker. Either way it can only STOP a run: it cannot
+/// start, resend or authorize anything.
 #[tauri::command]
 async fn cancel_model_run(
     state: tauri::State<'_, AppState>,
@@ -129,7 +132,97 @@ async fn cancel_model_run(
 ) -> Result<(), UiError> {
     let cfg = state.cfg.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let sock = nexus_client::intent_client::default_broker_socket();
+        if let Ok(Some(run)) = nexus_client::intent_client::run_for_conversation(&sock, &conversation_id) {
+            return nexus_client::intent_client::cancel(&sock, &run.run_id)
+                .map(|_| ())
+                .map_err(|e| backend::ui_error(&e));
+        }
         nexus_client::request_model_cancel(&cfg, &conversation_id)
+            .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+// ---- A5.3: the SAME intent client the CLI uses (broker socket only) --------
+// No capability, credential, grant or daemon socket is reachable from here:
+// these commands only call `nexus_client::intent_client`.
+
+#[tauri::command]
+async fn intent_models() -> Result<Vec<nexus_client::intent_client::AllowedModel>, UiError> {
+    tauri::async_runtime::spawn_blocking(|| {
+        nexus_client::intent_client::models(&nexus_client::intent_client::default_broker_socket())
+            .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// Submit one user-typed model-only intent. `idempotency_key` is generated
+/// once per Send click by the UI so a duplicate click or a retried call can
+/// never create a second billable attempt.
+#[tauri::command]
+async fn intent_submit(
+    prompt: String,
+    provider_id: Option<String>,
+    remote_model_id: Option<String>,
+    idempotency_key: String,
+) -> Result<nexus_client::intent_client::SubmitReply, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use nexus_client::intent_contract::{IntentLimits, ModelSelection, NexusIntentV1, ResponseMode};
+        let model = match (provider_id, remote_model_id) {
+            (Some(p), Some(m)) => Some(ModelSelection { provider_id: p, remote_model_id: m }),
+            (None, None) => None,
+            _ => {
+                return Err(UiError {
+                    code: "bad-usage".to_owned(),
+                    message: "provider and model must be selected together".to_owned(),
+                })
+            }
+        };
+        let intent = NexusIntentV1 {
+            schema_version: 1,
+            request_id: nexus_client::intent_client::fresh_key("gui"),
+            idempotency_key,
+            intent_type: "model-only".to_owned(),
+            content: prompt,
+            model,
+            limits: IntentLimits::default(),
+            response_mode: ResponseMode::Stream,
+            client_label: Some("nexus-desktop".to_owned()),
+        };
+        nexus_client::intent_client::submit(&nexus_client::intent_client::default_broker_socket(), &intent)
+            .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+#[tauri::command]
+async fn intent_status(run_id: String) -> Result<nexus_client::intent_client::IntentRun, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::status(&nexus_client::intent_client::default_broker_socket(), &run_id)
+            .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+#[tauri::command]
+async fn intent_cancel(run_id: String) -> Result<nexus_client::intent_client::CancelReply, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::cancel(&nexus_client::intent_client::default_broker_socket(), &run_id)
+            .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+#[tauri::command]
+async fn intent_list() -> Result<Vec<nexus_client::intent_client::IntentRun>, UiError> {
+    tauri::async_runtime::spawn_blocking(|| {
+        nexus_client::intent_client::list(&nexus_client::intent_client::default_broker_socket(), 50)
             .map_err(|e| backend::ui_error(&e))
     })
     .await
@@ -240,6 +333,11 @@ pub fn run() {
             list_model_conversations,
             model_run_status,
             cancel_model_run,
+            intent_models,
+            intent_submit,
+            intent_status,
+            intent_cancel,
+            intent_list,
             tool_events,
             list_approvals,
             integrity_status
@@ -266,6 +364,11 @@ mod authz_tests {
         "list_model_conversations",
         "model_run_status",
         "cancel_model_run",
+        "intent_models",
+        "intent_submit",
+        "intent_status",
+        "intent_cancel",
+        "intent_list",
         "tool_events",
         "list_approvals",
         "integrity_status",
@@ -372,5 +475,98 @@ mod authz_tests {
                 assert!(!p.contains(&format!("{bad}:")), "{p}");
             }
         }
+    }
+
+    /// A5.3: the renderer-facing intent commands go through the shared
+    /// unprivileged intent client only; the backend links no path that reads
+    /// an issuer capability, signs a daemon frame or opens a credential.
+    #[test]
+    fn intent_commands_use_only_the_unprivileged_broker_client() {
+        let src = include_str!("lib.rs");
+        let (prod, _) = src.split_once("#[cfg(test)]").unwrap();
+        assert!(prod.contains("intent_client::submit"));
+        for forbidden in [
+            "issuer::",
+            "signed_frame",
+            "read_capability",
+            "issuer_call",
+            "credentials",
+            "from_protected_file",
+            "run_model_only",
+            "dispatch-authorize",
+            "tool-execute",
+        ] {
+            assert!(!prod.contains(forbidden), "Tauri backend must not reference {forbidden}");
+        }
+        // The submit command cannot carry anything but text + an explicit
+        // provider/model pair + an idempotency key.
+        assert!(prod.contains("fn intent_submit(\n    prompt: String,\n    provider_id: Option<String>,\n    remote_model_id: Option<String>,\n    idempotency_key: String,\n)"));
+    }
+
+    /// A5.3: the Desktop's Send/cancel commands put exactly the documented
+    /// broker verbs on the broker socket (the same wire the CLI uses) and
+    /// nothing else. A recording fake broker captures the frames.
+    #[test]
+    fn desktop_intent_commands_speak_only_the_broker_protocol() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!("nexus-tauri-a53-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("broker.sock");
+        let _ = std::fs::remove_file(&sock);
+        let l = UnixListener::bind(&sock).unwrap();
+        let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let f2 = frames.clone();
+        std::thread::spawn(move || {
+            for stream in l.incoming().take(3) {
+                let mut s = stream.unwrap();
+                let mut line = String::new();
+                BufReader::new(s.try_clone().unwrap()).read_line(&mut line).unwrap();
+                let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let cmd = v["cmd"].as_str().unwrap_or("").to_owned();
+                let rid = v["id"].clone();
+                f2.lock().unwrap().push(v);
+                let run = serde_json::json!({"runId":"run_00000000000000000000000000000000","requestId":"r","clientId":"uid:1","state":"preparing","terminal":false,"intentType":"model-only","responseMode":"stream","cancelRequested":false,"createdAtMs":1,"updatedAtMs":1});
+                let result = match cmd.as_str() {
+                    "intent-submit" => serde_json::json!({"run": run, "replay": false}),
+                    "intent-cancel" => serde_json::json!({"run": run, "outcome": "requested"}),
+                    _ => serde_json::json!({"models": []}),
+                };
+                let _ = s.write_all(format!("{}\n", serde_json::json!({"protocol":1,"id":rid,"ok":true,"result":result})).as_bytes());
+            }
+        });
+        std::env::set_var("NEXUS_BROKER_SOCKET", &sock);
+        let r = tauri::async_runtime::block_on(super::intent_submit(
+            "hello model".into(),
+            Some("acme".into()),
+            Some("acme-large-1".into()),
+            "gui-0123456789abcdef".into(),
+        ))
+        .unwrap();
+        assert!(!r.replay);
+        tauri::async_runtime::block_on(super::intent_cancel("run_00000000000000000000000000000000".into())).unwrap();
+        tauri::async_runtime::block_on(super::intent_models()).unwrap();
+        let got = frames.lock().unwrap().clone();
+        assert_eq!(got.len(), 3);
+        // submit: closed field set, explicit model, caller-supplied key, no authority.
+        assert_eq!(got[0]["cmd"], "intent-submit");
+        let i = got[0]["params"]["intent"].as_object().unwrap();
+        let mut keys: Vec<&str> = i.keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["clientLabel", "content", "idempotencyKey", "intentType", "limits", "model", "requestId", "responseMode", "schemaVersion"]
+        );
+        assert_eq!(i["intentType"], "model-only");
+        assert_eq!(i["model"]["providerId"], "acme");
+        assert_eq!(i["idempotencyKey"], "gui-0123456789abcdef");
+        assert_eq!(got[1]["cmd"], "intent-cancel");
+        assert_eq!(got[2]["cmd"], "intent-models");
+        for f in &got {
+            assert!(f.get("auth").is_none(), "the renderer path signs nothing");
+            let text = f.to_string();
+            assert!(!text.contains("cap") || !text.contains("hmac"), "{text}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

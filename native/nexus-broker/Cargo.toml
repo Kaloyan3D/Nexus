@@ -1,0 +1,38 @@
+[package]
+name = "nexus-broker"
+version = "0.1.0"
+edition = "2021"
+description = "Nexus intent broker (A5.3): narrow unprivileged submission protocol in front of the issuer-side Controller chain and model executor"
+license = "MIT"
+
+[lib]
+name = "nexus_broker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nexus-broker"
+path = "src/main.rs"
+
+[dependencies]
+nexus-contracts = { workspace = true }
+nexus-client = { workspace = true }
+nexus-model = { workspace = true }
+nexus-transcript = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+libc = { workspace = true }
+fs2 = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+
+[features]
+# Offline multi-identity acceptance only: adds --test-tls-ca/--test-resolve to
+# the binary so a fixture CA and resolver can be injected. NEVER enabled by
+# default or by the workspace build; verification stays mandatory either way.
+test-fixtures = ["dep:rustls"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+nexus-kernel = { workspace = true }

@@ -19,6 +19,11 @@
     "allow-list-model-conversations",
     "allow-model-run-status",
     "allow-cancel-model-run",
+    "allow-intent-models",
+    "allow-intent-submit",
+    "allow-intent-status",
+    "allow-intent-cancel",
+    "allow-intent-list",
     "allow-tool-events",
     "allow-list-approvals",
     "allow-integrity-status"

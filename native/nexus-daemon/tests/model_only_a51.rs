@@ -498,6 +498,7 @@ fn request_for(ctx: &Ctx, prompt: &str, expected: Option<ExpectedTarget>) -> Mod
         core: ctx.core.clone(),
         extension: ctx.extension.clone(),
         expected,
+        max_output_tokens: None,
     }
 }
 

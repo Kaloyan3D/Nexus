@@ -296,6 +296,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-broker"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "hex",
+ "libc",
+ "nexus-client",
+ "nexus-contracts",
+ "nexus-kernel",
+ "nexus-model",
+ "nexus-transcript",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "nexus-cli"
 version = "0.1.0"
 dependencies = [

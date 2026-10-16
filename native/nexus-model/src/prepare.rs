@@ -104,6 +104,7 @@ pub fn prepare(
     let session = input
         .effective_session(&target.session.session_id)?
         .to_owned();
+    let max_output = input.effective_max_output(target.output_limit_tokens)?;
     // Exact OpenCode-compatible body. The model id, reasoning effort, and
     // session come ONLY from the pinned target + confirmed overrides.
     let body = serde_json::json!({
@@ -115,7 +116,7 @@ pub fn prepare(
         "stream": true,
         // A5.2 budget: the Registry-sealed output limit travels with every
         // request so the provider itself bounds the billable output.
-        "max_output_tokens": target.output_limit_tokens,
+        "max_output_tokens": max_output,
         "session": { "id": session },
         "tools": input.tools.iter().map(|t| {
             serde_json::json!({

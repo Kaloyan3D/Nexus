@@ -351,6 +351,59 @@ export interface ModelRunStatus {
   text: string;
 }
 
+// ---- A5.3 intent broker ------------------------------------------------------
+// Mirrors native/nexus-client `intent_client`. The renderer can submit text with
+// an explicit model, read status and cancel. Nothing here carries a credential,
+// grant, capability, URL, path or tool vocabulary.
+
+export interface IntentRun {
+  runId: string;
+  requestId: string;
+  clientId: string;
+  state: string;
+  terminal: boolean;
+  intentType: string;
+  responseMode: string;
+  taskId: string | null;
+  taskInstanceId: string | null;
+  attemptId: string | null;
+  commandId: string | null;
+  conversationId: string | null;
+  providerId: string | null;
+  remoteModelId: string | null;
+  logicalModelId: string | null;
+  endpointKind: string | null;
+  requestDigest: string | null;
+  httpStatus: number | null;
+  usageInputTokens: number | null;
+  usageOutputTokens: number | null;
+  finishReason: string | null;
+  latencyMs: number | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  cancelRequested: boolean;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface AllowedModel {
+  providerId: string;
+  remoteModelId: string;
+  logicalModelId: string;
+  endpointKind: string;
+  outputLimitTokens: number;
+}
+
+export interface IntentSubmitReply {
+  run: IntentRun;
+  replay: boolean;
+}
+
+export interface IntentCancelReply {
+  run: IntentRun;
+  outcome: string;
+}
+
 export interface ConversationQuery {
   afterSeq?: number;
   beforeSeq?: number;

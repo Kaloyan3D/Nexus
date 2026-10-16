@@ -3490,3 +3490,7 @@ fn multuid_sandboxed_process_under_approval_and_witness() {
     assert_eq!(integ["integrity"]["state"], "verified", "{integ}");
     println!("PROCESS RESULT: ok={} code={}", r["ok"], code_of(&r));
 }
+
+// A5.3 final audit: the intent broker under real distinct UIDs.
+#[path = "multuid_support/broker_a53.rs"]
+mod broker_a53;

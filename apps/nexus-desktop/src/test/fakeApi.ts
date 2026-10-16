@@ -1,5 +1,6 @@
 import type { NativeApi } from "../lib/api";
 import type {
+  IntentRun,
   ConversationView,
   ModelIoView,
   TranscriptEvent,
@@ -139,6 +140,39 @@ export function view(events: TranscriptEvent[], over: Partial<ConversationView> 
   };
 }
 
+export function fakeRun(over: Partial<IntentRun> = {}): IntentRun {
+  return {
+    runId: "run_" + "a".repeat(32),
+    requestId: "gui-req",
+    clientId: "uid:1000",
+    state: "executing",
+    terminal: false,
+    intentType: "model-only",
+    responseMode: "stream",
+    taskId: "INTENT-00001",
+    taskInstanceId: "task-x",
+    attemptId: "INTENT-00001-A1",
+    commandId: "shadow-x",
+    conversationId: "model_0123456789abcdef0123456789abcdef",
+    providerId: "acme",
+    remoteModelId: "acme-large-1",
+    logicalModelId: "acme/large",
+    endpointKind: "provider",
+    requestDigest: null,
+    httpStatus: null,
+    usageInputTokens: null,
+    usageOutputTokens: null,
+    finishReason: null,
+    latencyMs: null,
+    errorCode: null,
+    errorMessage: null,
+    cancelRequested: false,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+    ...over,
+  };
+}
+
 export function fakeApi(over: Partial<NativeApi> = {}): NativeApi {
   const tasks: TasksResult = {
     available: true,
@@ -192,6 +226,16 @@ export function fakeApi(over: Partial<NativeApi> = {}): NativeApi {
       note: "No verified provider request records exist for this task.",
     }),
     listMockConversations: async () => [],
+    intentModels: async () => [
+      { providerId: "acme", remoteModelId: "acme-large-1", logicalModelId: "acme/large", endpointKind: "provider", outputLimitTokens: 1024 },
+    ],
+    intentSubmit: async (_p: string, _m: unknown, key: string) => ({
+      replay: false,
+      run: fakeRun({ runId: "run_" + "a".repeat(32), requestId: key, conversationId: null, state: "preparing" }),
+    }),
+    intentStatus: async (id: string) => fakeRun({ runId: id }),
+    intentCancel: async (id: string) => ({ run: fakeRun({ runId: id, cancelRequested: true }), outcome: "requested" }),
+    intentList: async () => [],
     listModelConversations: async () => [],
     modelRunStatus: async (id: string) => ({
       conversationId: id,

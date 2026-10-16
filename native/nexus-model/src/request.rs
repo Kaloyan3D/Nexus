@@ -58,6 +58,9 @@ pub struct ModelRequest {
     /// Streaming is mandatory: terminal normalization requires the SSE
     /// event stream. Non-streaming requests are refused.
     pub stream: bool,
+    /// Optional per-request output cap (A5.3). It can only LOWER the
+    /// Registry-sealed output limit; a value above it is `wrong-target`.
+    pub max_output_tokens: Option<u64>,
 }
 
 impl ModelRequest {
@@ -72,6 +75,23 @@ impl ModelRequest {
             reasoning_effort_override: None,
             session_override: None,
             stream: true,
+            max_output_tokens: None,
+        }
+    }
+
+    /// Effective output cap: the sealed limit, or a lower caller request.
+    pub fn effective_max_output(&self, sealed: u64) -> Result<u64, ModelError> {
+        match self.max_output_tokens {
+            None => Ok(sealed),
+            Some(0) => Err(ModelError::new(
+                ModelErrorCode::TargetIncomplete,
+                "output cap must be positive",
+            )),
+            Some(n) if n <= sealed => Ok(n),
+            Some(_) => Err(ModelError::new(
+                ModelErrorCode::WrongTarget,
+                "requested output cap exceeds the Registry-sealed output limit",
+            )),
         }
     }
 

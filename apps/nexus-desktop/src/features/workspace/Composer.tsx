@@ -1,7 +1,7 @@
-import { ArrowUp, Code2, FileText, Globe, Loader2, Paperclip, Search, Sparkles } from "lucide-react";
+import { ArrowUp, Ban, Code2, FileText, Globe, Loader2, Paperclip, Search, Send, Sparkles } from "lucide-react";
 import { useRef, useState } from "react";
 import { useNexus } from "../../state/NexusContext";
-import { Badge, Button, Kbd, modKeys } from "../../components/ui/primitives";
+import { Alert, Badge, Button, Kbd, modKeys } from "../../components/ui/primitives";
 
 const TOOLS = [
   { id: "code", label: "Code", icon: Code2 },
@@ -13,8 +13,21 @@ const TOOLS = [
 export const COMPOSER_PLACEHOLDER = "Describe the next step, ask Nova, or give an engineering task...";
 
 export function Composer() {
-  const { startMock, mockBusy } = useNexus();
+  const {
+    startMock,
+    mockBusy,
+    intentModels,
+    intentModelsError,
+    intentPending,
+    intentSubmitting,
+    intentError,
+    sendIntent,
+    cancelPendingIntent,
+  } = useNexus();
   const [text, setText] = useState("");
+  const [modelIdx, setModelIdx] = useState(0);
+  const model = intentModels && intentModels.length > 0 ? intentModels[Math.min(modelIdx, intentModels.length - 1)]! : null;
+  const canSend = model !== null && !intentSubmitting && intentPending === null;
   const ref = useRef<HTMLTextAreaElement>(null);
   const empty = text.trim().length === 0;
 
@@ -23,6 +36,13 @@ export function Composer() {
     const prompt = text;
     setText("");
     void startMock(prompt);
+  };
+
+  const send = () => {
+    if (empty || !canSend) return;
+    const prompt = text;
+    // Keep the text until the broker accepted it, so a refusal loses nothing.
+    void sendIntent(prompt, model).then((ok) => ok && setText(""));
   };
 
   return (
@@ -82,10 +102,70 @@ export function Composer() {
           >
             Run Mock
           </Button>
+          <label className="nv-sr-only" htmlFor="nv-model-select">
+            Model
+          </label>
+          <select
+            id="nv-model-select"
+            className="nv-chip"
+            value={modelIdx}
+            disabled={!intentModels || intentModels.length === 0}
+            onChange={(e) => setModelIdx(Number(e.target.value))}
+            title="Registry-issued models allowed by the broker"
+          >
+            {(intentModels ?? []).map((m, i) => (
+              <option key={`${m.providerId}/${m.remoteModelId}`} value={i}>
+                {m.providerId} · {m.remoteModelId}
+                {m.endpointKind === "provider" ? "" : " (loopback fixture)"}
+              </option>
+            ))}
+            {(!intentModels || intentModels.length === 0) && <option value={0}>No model available</option>}
+          </select>
+          {intentPending ? (
+            <Button
+              variant="ghost"
+              onClick={() => void cancelPendingIntent()}
+              aria-label="Cancel submission"
+              icon={<Ban size={15} />}
+              disabled={intentPending.cancelRequested}
+            >
+              {intentPending.cancelRequested ? "Cancelling…" : "Cancel"}
+            </Button>
+          ) : null}
+          <Button
+            variant="primary"
+            disabled={empty || !canSend}
+            onClick={send}
+            aria-label="Send to model"
+            title={
+              model
+                ? `Send as a text-only model request through the Nexus broker (${model.providerId}/${model.remoteModelId})`
+                : "No broker model is available"
+            }
+            icon={intentSubmitting || intentPending ? <Loader2 size={15} className="nv-spin" /> : <Send size={15} />}
+          >
+            Send
+          </Button>
         </div>
       </div>
+      {intentPending && (
+        <div className="nv-composer__hint" role="status">
+          Submitted {intentPending.runId.slice(0, 12)}… · {intentPending.state}
+        </div>
+      )}
+      {intentError && (
+        <Alert tone="error" title={`Send failed: ${intentError.code}`}>
+          {intentError.message}
+        </Alert>
+      )}
+      {!intentError && intentModelsError && (
+        <div className="nv-composer__hint">
+          Model sending is unavailable: {intentModelsError.message}
+        </div>
+      )}
       <div className="nv-composer__hint">
-        Runs the isolated native mock workflow only. No provider traffic. <Kbd keys={modKeys("↵")} />
+        Send: text-only request to the selected Registry model via the broker (no tools, no files). Run Mock:
+        isolated fixture only. <Kbd keys={modKeys("↵")} />
       </div>
     </section>
   );

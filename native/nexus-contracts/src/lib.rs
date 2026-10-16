@@ -3,6 +3,7 @@
 pub mod canonical;
 pub mod destination;
 pub mod errors;
+pub mod intent;
 pub mod target;
 pub mod types;
 

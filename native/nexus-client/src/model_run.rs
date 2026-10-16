@@ -35,7 +35,6 @@ use nexus_transcript::{
     Actor, EventKind, InputClass, MessageState, Source, Speaker, TranscriptEventV1, TranscriptStore,
 };
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -79,6 +78,9 @@ pub struct ModelRunRequest {
     pub extension: serde_json::Value,
     #[serde(default)]
     pub expected: Option<ExpectedTarget>,
+    /// Optional per-request output cap; may only lower the sealed limit.
+    #[serde(default)]
+    pub max_output_tokens: Option<u64>,
 }
 
 /// Result of the pure preparation step (no network, no IPC).
@@ -253,14 +255,14 @@ pub enum ModelRunUpdate {
     Text { delta: String },
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 
-fn urandom_hex(n: usize) -> Result<String, ClientError> {
+pub(crate) fn urandom_hex(n: usize) -> Result<String, ClientError> {
     use std::io::Read;
     let mut buf = vec![0u8; n];
     std::fs::File::open("/dev/urandom")
@@ -387,7 +389,7 @@ pub fn prepare_model_run(req: &ModelRunRequest) -> Result<PreparedModelRun, Clie
             &b.issued,
             &req.snapshot,
             &b.target,
-            &ModelRequest::text_only("user", &req.prompt),
+            &model_input(req),
         )
         .map_err(|e| ClientError::usage(format!("request preparation refused: {e}")))?;
     Ok(PreparedModelRun {
@@ -400,6 +402,12 @@ pub fn prepare_model_run(req: &ModelRunRequest) -> Result<PreparedModelRun, Clie
         extension_digest: b.target.extension_digest(),
         output_limit_tokens: b.target.output_limit_tokens,
     })
+}
+
+fn model_input(req: &ModelRunRequest) -> ModelRequest {
+    let mut m = ModelRequest::text_only("user", &req.prompt);
+    m.max_output_tokens = req.max_output_tokens;
+    m
 }
 
 fn cancel_marker(cfg: &ClientConfig, conv: &str) -> PathBuf {
@@ -556,35 +564,13 @@ fn grant_from_json(
     })
 }
 
-/// Build an issuer-authenticated IPC frame (same canonical bytes as the JS
-/// and Rust daemon verifiers).
+/// Build an issuer-authenticated IPC frame (see `crate::issuer`).
 fn authed_frame(
     cap_hex: &str,
     cmd: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, ClientError> {
-    use hmac::Mac;
-    let key = hex::decode(cap_hex.trim())
-        .map_err(|_| ClientError::unauthorized("issuer capability file is not hex"))?;
-    let nonce = urandom_hex(16)?;
-    let id = format!("model-{}", &nonce[..12]);
-    let ts = now_ms() as i64;
-    let mut envelope = serde_json::Map::new();
-    envelope.insert("protocol".to_owned(), serde_json::Value::from(1u64));
-    envelope.insert("id".to_owned(), serde_json::Value::String(id.clone()));
-    envelope.insert("cmd".to_owned(), serde_json::Value::String(cmd.to_owned()));
-    envelope.insert("params".to_owned(), params.clone());
-    envelope.insert("nonce".to_owned(), serde_json::Value::String(nonce.clone()));
-    envelope.insert("ts".to_owned(), serde_json::Value::from(ts));
-    let canonical = nexus_contracts::canonical_json(&serde_json::Value::Object(envelope));
-    let mut mac = hmac::Hmac::<Sha256>::new_from_slice(&key)
-        .map_err(|_| ClientError::unauthorized("issuer capability has an invalid length"))?;
-    mac.update(canonical.as_bytes());
-    let tag = hex::encode(mac.finalize().into_bytes());
-    Ok(serde_json::json!({
-        "protocol": 1, "id": id, "cmd": cmd, "params": params,
-        "auth": { "nonce": nonce, "ts": ts, "tag": tag },
-    }))
+    crate::issuer::signed_frame(cap_hex, cmd, params)
 }
 
 fn read_cap(path: &Path) -> Result<String, ClientError> {
@@ -614,7 +600,7 @@ pub fn run_model_only(
             &bound.issued,
             &req.snapshot,
             &bound.target,
-            &ModelRequest::text_only("user", &req.prompt),
+            &model_input(req),
         )
         .map_err(|e| ClientError::usage(format!("request preparation refused: {e}")))?;
     let attested = runtime
@@ -1205,6 +1191,7 @@ mod tests {
             core: serde_json::json!({}),
             extension: serde_json::json!({}),
             expected: None,
+            max_output_tokens: None,
         };
         let e = prepare_model_run(&req).expect_err("not user initiated");
         assert!(e.message.contains("user-initiated"), "{e}");

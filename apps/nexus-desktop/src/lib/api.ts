@@ -5,6 +5,10 @@ import type {
   ConversationQuery,
   ConversationView,
   IntegrityView,
+  AllowedModel,
+  IntentCancelReply,
+  IntentRun,
+  IntentSubmitReply,
   MockConversationSummary,
   ModelConversationSummary,
   ModelRunStatus,
@@ -32,6 +36,17 @@ export interface NativeApi {
   conversationRead(taskInstanceId: string, q?: ConversationQuery): Promise<ConversationView>;
   modelIoRead(taskInstanceId: string): Promise<ModelIoView>;
   listMockConversations(): Promise<MockConversationSummary[]>;
+  /** A5.3: Registry-issued models the broker lets this client select. */
+  intentModels(): Promise<AllowedModel[]>;
+  /** A5.3: submit text through the same broker the CLI uses. */
+  intentSubmit(
+    prompt: string,
+    model: { providerId: string; remoteModelId: string } | null,
+    idempotencyKey: string,
+  ): Promise<IntentSubmitReply>;
+  intentStatus(runId: string): Promise<IntentRun>;
+  intentCancel(runId: string): Promise<IntentCancelReply>;
+  intentList(): Promise<IntentRun[]>;
   /** A5.1: recorded user-initiated model-only runs (read-only). */
   listModelConversations(): Promise<ModelConversationSummary[]>;
   /** A5.1: durable status of one model-only run (read-only). */
@@ -79,6 +94,17 @@ export const tauriApi: NativeApi = {
     }),
   modelIoRead: (taskInstanceId) => invoke<ModelIoView>("model_io_read", { taskInstanceId }),
   listMockConversations: () => invoke<MockConversationSummary[]>("list_mock_conversations"),
+  intentModels: () => invoke<AllowedModel[]>("intent_models"),
+  intentSubmit: (prompt, model, idempotencyKey) =>
+    invoke<IntentSubmitReply>("intent_submit", {
+      prompt,
+      providerId: model?.providerId ?? null,
+      remoteModelId: model?.remoteModelId ?? null,
+      idempotencyKey,
+    }),
+  intentStatus: (runId) => invoke<IntentRun>("intent_status", { runId }),
+  intentCancel: (runId) => invoke<IntentCancelReply>("intent_cancel", { runId }),
+  intentList: () => invoke<IntentRun[]>("intent_list"),
   listModelConversations: () => invoke<ModelConversationSummary[]>("list_model_conversations"),
   modelRunStatus: (conversationId) => invoke<ModelRunStatus>("model_run_status", { conversationId }),
   cancelModelRun: (conversationId) => invoke<void>("cancel_model_run", { conversationId }),
@@ -129,6 +155,11 @@ export const unavailableApi: NativeApi = {
   conversationRead: () => Promise.reject(notInShell),
   modelIoRead: () => Promise.reject(notInShell),
   listMockConversations: () => Promise.resolve([]),
+  intentModels: () => Promise.reject(notInShell),
+  intentSubmit: () => Promise.reject(notInShell),
+  intentStatus: () => Promise.reject(notInShell),
+  intentCancel: () => Promise.reject(notInShell),
+  intentList: () => Promise.resolve([]),
   listModelConversations: () => Promise.resolve([]),
   modelRunStatus: () => Promise.reject(notInShell),
   cancelModelRun: () => Promise.reject(notInShell),

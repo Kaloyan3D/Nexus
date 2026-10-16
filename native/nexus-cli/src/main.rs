@@ -33,6 +33,8 @@ fn help_text() -> String {
     );
     s.push_str("    run                   live execution gate (always blocked in A2.4)\n");
     s.push_str("    interactive           line-based interactive session (mock only)\n");
+    s.push_str("    intent submit|status|result|follow|cancel|list|models   A5.3 unprivileged intent client (talks to nexus-broker only;\n");
+    s.push_str("                          needs no issuer capability and no provider credential; see `nexus intent --help`)\n");
     s.push_str("    model prepare --request <file>      A5.1 pure request preparation (digest, target, endpoint); sends nothing\n");
     s.push_str("    model run --request <file> --grant <file> --cap <file> --credentials <file>\n");
     s.push_str("                          A5.1 user-initiated, text-only, model-only run (needs a daemon started\n");
@@ -486,6 +488,258 @@ fn cmd_model(args: &[String], cfg: &ClientConfig) -> ExitCode {
             ExitCode::Ok
         }
         Err(e) => emit_err(cfg.json, &e),
+    }
+}
+
+const INTENT_HELP: &str = "nexus intent <submit|status|result|follow|cancel|list|models> [--json]\n\
+  submit  (--input FILE|- | --intent FILE|-) [--model provider/model] [--idempotency-key K]\n\
+          [--request-id R] [--max-output-tokens N] [--follow | --wait]\n\
+  status|result|cancel <runId>      follow <runId> [--from-offset N]      list [--limit N]      models\n\
+Global: --broker-socket PATH (or NEXUS_BROKER_SOCKET). JSON envelope schema: nexus.intent.cli/v1.\n\
+Exit codes: 0 ok / completed, 2 usage or rejected, 3 broker unreachable, 4 unauthorized, 6 run ended without completing.\n\
+Pass a STABLE --idempotency-key when you may retry: the same key + payload never creates a second billable attempt.";
+
+fn intent_class(code: &str, exit: ExitCode) -> &'static str {
+    match exit {
+        ExitCode::Unauthorized => "auth",
+        ExitCode::Disconnected => "transport",
+        ExitCode::Usage if code == "bad-usage" => "usage",
+        ExitCode::Usage => "rejected",
+        _ => "internal",
+    }
+}
+
+fn intent_error(cfg: &ClientConfig, e: &nexus_client::ClientError) -> ExitCode {
+    if cfg.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": nexus_client::intent_client::CLI_SCHEMA, "ok": false,
+                "error": { "code": e.code, "message": e.message, "class": intent_class(e.code, e.exit) },
+            })
+        );
+    } else {
+        eprintln!("nexus: error [{}]: {}", e.code, e.message);
+    }
+    e.exit
+}
+
+fn intent_ok(cfg: &ClientConfig, mut body: serde_json::Value, human: &str) {
+    if cfg.json {
+        body["schema"] = serde_json::json!(nexus_client::intent_client::CLI_SCHEMA);
+        body["ok"] = serde_json::json!(true);
+        println!("{body}");
+    } else {
+        println!("{human}");
+    }
+}
+
+fn read_input(path: &str) -> Result<String, nexus_client::ClientError> {
+    use std::io::Read;
+    let mut s = String::new();
+    if path == "-" {
+        std::io::stdin()
+            .take(256 * 1024)
+            .read_to_string(&mut s)
+            .map_err(|e| nexus_client::ClientError::usage(format!("cannot read stdin: {e}")))?;
+    } else {
+        s = std::fs::read_to_string(path)
+            .map_err(|e| nexus_client::ClientError::usage(format!("cannot read {path}: {e}")))?;
+    }
+    Ok(s)
+}
+
+fn run_line(r: &nexus_client::intent_client::IntentRun) -> String {
+    format!(
+        "{} {} {}/{} {}",
+        r.run_id,
+        r.state,
+        r.provider_id.as_deref().unwrap_or("?"),
+        r.remote_model_id.as_deref().unwrap_or("?"),
+        r.error_code.as_deref().unwrap_or("")
+    )
+}
+
+/// Follow a run to its end, emitting NDJSON events (--json) or live text.
+fn follow_run(
+    cfg: &ClientConfig,
+    sock: &std::path::Path,
+    id: &str,
+    mut offset: u64,
+) -> Result<nexus_client::intent_client::IntentRun, nexus_client::ClientError> {
+    let mut seen: Option<String> = None;
+    loop {
+        let f = nexus_client::intent_client::follow(sock, id, offset, seen.as_deref(), 1_500)?;
+        if seen.as_deref() != Some(f.run.state.as_str()) {
+            seen = Some(f.run.state.clone());
+            if cfg.json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "schema": nexus_client::intent_client::CLI_SCHEMA, "event": "state", "run": f.run })
+                );
+            } else {
+                eprintln!("[intent] state {}", f.run.state);
+            }
+        }
+        if !f.text_delta.is_empty() {
+            if cfg.json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "schema": nexus_client::intent_client::CLI_SCHEMA, "event": "text", "runId": id, "delta": f.text_delta, "offset": offset, "nextOffset": f.next_offset })
+                );
+            } else {
+                print!("{}", f.text_delta);
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+            }
+        }
+        offset = f.next_offset;
+        if f.run.terminal && f.text_delta.is_empty() {
+            if cfg.json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "schema": nexus_client::intent_client::CLI_SCHEMA, "event": "end", "run": f.run })
+                );
+            } else {
+                println!();
+            }
+            return Ok(f.run);
+        }
+    }
+}
+
+/// A5.3 intent client. Unprivileged by construction: it speaks only to the
+/// broker socket and never reads a capability or credential file.
+fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
+    use nexus_client::intent_client as ic;
+    let sock = flag_value(args, "--broker-socket")
+        .map(PathBuf::from)
+        .unwrap_or_else(ic::default_broker_socket);
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("");
+    if sub.is_empty() || sub == "--help" {
+        println!("{INTENT_HELP}");
+        return ExitCode::Ok;
+    }
+    let pos = || {
+        args.iter()
+            .skip(1)
+            .find(|a| !a.starts_with("--"))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let r: Result<ExitCode, nexus_client::ClientError> = (|| {
+        match sub {
+        "models" => {
+            let m = ic::models(&sock)?;
+            let human = m
+                .iter()
+                .map(|x| format!("{}/{} ({}, max out {})", x.provider_id, x.remote_model_id, x.endpoint_kind, x.output_limit_tokens))
+                .collect::<Vec<_>>()
+                .join("\n");
+            intent_ok(cfg, serde_json::json!({ "models": m }), &human);
+            Ok(ExitCode::Ok)
+        }
+        "submit" => {
+            let intent = if let Some(p) = flag_value(args, "--intent") {
+                let v: serde_json::Value = serde_json::from_str(&read_input(&p)?)
+                    .map_err(|_| nexus_client::ClientError::usage("--intent is not valid JSON"))?;
+                nexus_client::intent_contract::NexusIntentV1::parse(&v)
+                    .map_err(|e| nexus_client::ClientError::usage(format!("{}: {}", e.code, e.message)))?
+            } else {
+                let p = flag_value(args, "--input").ok_or_else(|| {
+                    nexus_client::ClientError::usage("submit needs --input FILE|- or --intent FILE|-")
+                })?;
+                let content = read_input(&p)?;
+                let model = flag_value(args, "--model")
+                    .map(|m| {
+                        m.split_once('/')
+                            .map(|(p, r)| nexus_client::intent_contract::ModelSelection {
+                                provider_id: p.to_owned(),
+                                remote_model_id: r.to_owned(),
+                            })
+                            .ok_or_else(|| nexus_client::ClientError::usage("--model must be provider/model"))
+                    })
+                    .transpose()?;
+                let max_out = flag_value(args, "--max-output-tokens")
+                    .map(|v| v.parse::<u64>().map_err(|_| nexus_client::ClientError::usage("--max-output-tokens must be an integer")))
+                    .transpose()?;
+                nexus_client::intent_contract::NexusIntentV1 {
+                    schema_version: 1,
+                    request_id: flag_value(args, "--request-id").unwrap_or_else(|| ic::fresh_key("cli")),
+                    idempotency_key: flag_value(args, "--idempotency-key").unwrap_or_else(|| ic::fresh_key("idem")),
+                    intent_type: "model-only".to_owned(),
+                    content,
+                    model,
+                    limits: nexus_client::intent_contract::IntentLimits { max_output_tokens: max_out },
+                    response_mode: if args.iter().any(|a| a == "--wait") {
+                        nexus_client::intent_contract::ResponseMode::Final
+                    } else {
+                        nexus_client::intent_contract::ResponseMode::Stream
+                    },
+                    client_label: Some("nexus-cli".to_owned()),
+                }
+            };
+            let reply = ic::submit(&sock, &intent)?;
+            let id = reply.run.run_id.clone();
+            let followed = args.iter().any(|a| a == "--follow");
+            let waited = args.iter().any(|a| a == "--wait");
+            if !followed && !waited {
+                intent_ok(cfg, serde_json::json!({ "run": reply.run, "replay": reply.replay }), &format!("submitted {}", run_line(&reply.run)));
+                return Ok(ExitCode::Ok);
+            }
+            if followed {
+                if cfg.json {
+                    println!("{}", serde_json::json!({ "schema": ic::CLI_SCHEMA, "event": "submitted", "run": reply.run, "replay": reply.replay }));
+                } else {
+                    eprintln!("[intent] submitted {}", run_line(&reply.run));
+                }
+                let end = follow_run(cfg, &sock, &id, 0)?;
+                return Ok(if end.state == "completed" { ExitCode::Ok } else { ExitCode::MockFailed });
+            }
+            let mut offset = 0;
+            let end = loop {
+                let f = ic::follow(&sock, &id, offset, None, 1_500)?;
+                offset = f.next_offset;
+                if f.run.terminal && f.text_delta.is_empty() {
+                    break f.run;
+                }
+            };
+            let res = ic::result(&sock, &id)?;
+            intent_ok(cfg, serde_json::json!({ "run": res.run, "text": res.text, "replay": reply.replay }), &res.text);
+            Ok(if end.state == "completed" { ExitCode::Ok } else { ExitCode::MockFailed })
+        }
+        "status" => {
+            let run = ic::status(&sock, &pos())?;
+            intent_ok(cfg, serde_json::json!({ "run": run }), &run_line(&run));
+            Ok(ExitCode::Ok)
+        }
+        "result" => {
+            let res = ic::result(&sock, &pos())?;
+            intent_ok(cfg, serde_json::json!({ "run": res.run, "text": res.text }), &res.text);
+            Ok(if res.run.state == "completed" { ExitCode::Ok } else { ExitCode::MockFailed })
+        }
+        "follow" => {
+            let off = flag_value(args, "--from-offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let end = follow_run(cfg, &sock, &pos(), off)?;
+            Ok(if end.state == "completed" { ExitCode::Ok } else { ExitCode::MockFailed })
+        }
+        "cancel" => {
+            let c = ic::cancel(&sock, &pos())?;
+            intent_ok(cfg, serde_json::json!({ "run": c.run, "outcome": c.outcome }), &format!("{} ({})", run_line(&c.run), c.outcome));
+            Ok(ExitCode::Ok)
+        }
+        "list" => {
+            let limit = flag_value(args, "--limit").and_then(|v| v.parse().ok()).unwrap_or(50);
+            let runs = ic::list(&sock, limit)?;
+            let human = runs.iter().map(run_line).collect::<Vec<_>>().join("\n");
+            intent_ok(cfg, serde_json::json!({ "runs": runs }), &human);
+            Ok(ExitCode::Ok)
+        }
+        _ => Err(nexus_client::ClientError::usage("usage: nexus intent <submit|status|result|follow|cancel|list|models> (see `nexus intent --help`)")),
+    }
+    })();
+    match r {
+        Ok(c) => c,
+        Err(e) => intent_error(cfg, &e),
     }
 }
 
@@ -994,6 +1248,7 @@ fn main() {
         "run" => cmd_run(&args, &cfg),
         "interactive" => cmd_interactive(&cfg),
         "model" => cmd_model(&args, &cfg),
+        "intent" => cmd_intent(&args, &cfg),
         "tools" => cmd_tools(&args, &cfg),
         "approvals" => cmd_approvals(&args, &cfg),
         "integrity" => match nexus_client::integrity(&cfg) {
