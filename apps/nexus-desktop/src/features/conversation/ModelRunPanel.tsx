@@ -1,10 +1,11 @@
 import { Ban } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { asUiError } from "../../lib/api";
-import type { DiffReply, IntentRun, ModelRunStatus, ToolActivity } from "../../lib/contracts";
+import type { DiffReply, IntentRun, ModelRunStatus, PendingApproval, ToolActivity } from "../../lib/contracts";
 import { endpointLabel, modelStateView, usageLabel } from "../../lib/modelRun";
 import { useNexus } from "../../state/NexusContext";
 import { Alert, Badge, Button, Loading, StatusDot } from "../../components/ui/primitives";
+import { CopyButton } from "./ConversationPanel";
 
 const POLL_MS = 1000;
 
@@ -70,6 +71,7 @@ export function useInspectRun(conversationId: string | null, active: boolean): I
   useEffect(() => {
     if (!conversationId) return;
     let alive = true;
+    let t: ReturnType<typeof setInterval> | undefined;
     const load = () =>
       api
         .intentList()
@@ -79,14 +81,20 @@ export function useInspectRun(conversationId: string | null, active: boolean): I
             (r) => r.conversationId === conversationId && (r.intentType === "repo-inspect" || r.intentType === "repo-code"),
           );
           setRun(mine ?? null);
+          // A terminal run never changes again: stop polling. Reopening or
+          // navigating back remounts this effect and fetches it afresh.
+          if (mine?.terminal && t !== undefined) {
+            clearInterval(t);
+            t = undefined;
+          }
         })
         .catch(() => alive && setRun(null));
     load();
     if (!active) return () => void (alive = false);
-    const t = setInterval(load, 1500);
+    t = setInterval(load, 1500);
     return () => {
       alive = false;
-      clearInterval(t);
+      if (t !== undefined) clearInterval(t);
     };
   }, [api, conversationId, active]);
   return run;
@@ -203,6 +211,76 @@ export function DiffViewer({ diff, truncated }: { diff: string; truncated: boole
   );
 }
 
+
+/** Seconds-resolution clock for expiry display. */
+function useNow(intervalMs = 1000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(t);
+  }, [intervalMs]);
+  return now;
+}
+
+/**
+ * A6.1: a model-proposed write or command that is waiting for an INDEPENDENT
+ * approval. Display only: Desktop holds no approver credential and offers no
+ * approve control; the reviewer uses the separate `nexus-approver review`
+ * terminal, which shows the daemon-derived exact diff or argv.
+ */
+export function ApprovalCard({ approval }: { approval: PendingApproval }) {
+  const now = useNow();
+  const expired = approval.expiresAtMs != null && now >= approval.expiresAtMs;
+  const left = approval.expiresAtMs != null ? Math.max(0, Math.round((approval.expiresAtMs - now) / 1000)) : null;
+  const kind = approval.operation === "command" ? "command" : "edit";
+  const what = approval.operation === "command" ? "Run command" : approval.operation === "write" ? "Write file" : "Edit file";
+  return (
+    <section className="nv-stack" style={{ gap: 6 }} role="region" aria-label="Pending approval" data-expired={expired ? "true" : "false"}>
+      <Alert tone={expired ? "error" : "warning"} title={expired ? "Approval expired — nothing ran" : "Waiting for an independent approval — nothing has run"}>
+        <div className="nv-stack" style={{ gap: 6 }}>
+          <div className="nv-heading__meta">
+            <Badge tone="purple">{what}</Badge>
+            <Badge mono>{approval.target ?? approval.tool}</Badge>
+            <Badge tone={expired ? "error" : "warning"}>
+              {expired ? "expired" : left != null ? `expires in ${left}s` : "pending"}
+            </Badge>
+          </div>
+          <p className="nv-note" role="note">
+            <strong>Model proposal — not the authoritative request.</strong> Nexus shows what the model asked for, as the broker understood it. The
+            exact request that would run is derived by the daemon and is shown only to the approver. Inspect that actual request in{" "}
+            <span className="nv-mono">nexus-approver review</span> before approving anything.
+          </p>
+          {approval.proposal ? (
+            <pre className="nv-msg__pre" aria-label="Proposed operation (model proposal, unverified)">{approval.proposal}</pre>
+          ) : (
+            <p className="nv-note">{approval.summary}</p>
+          )}
+          {(approval.restrictions?.length ?? 0) > 0 && (
+            <ul className="nv-list" aria-label="Restrictions">
+              {approval.restrictions!.map((r) => (
+                <li key={r}>{r}</li>
+              ))}
+            </ul>
+          )}
+          <p className="nv-note">
+            The approver sees the exact {kind === "command" ? "argument vector and sandbox policy" : "diff"} derived by the daemon (request digest{" "}
+            <span className="nv-mono">{short(approval.requestDigest)}</span>). Nexus Desktop cannot approve or deny; review it in a separate terminal:
+          </p>
+          <pre className="nv-msg__pre" aria-label="Approver command">{`nexus-approver --socket <daemon socket> --cap-file <approver credential file> review ${approval.approvalId}`}</pre>
+          <CopyButton text={approval.approvalId} label="Copy approval id" />
+        </div>
+      </Alert>
+    </section>
+  );
+}
+
+/** Prominent, page-level view of a pending approval for the selected coding run. */
+export function PendingApprovalBanner({ conversationId }: { conversationId: string }) {
+  const run = useInspectRun(conversationId, true);
+  if (!run || run.intentType !== "repo-code" || !run.pendingApproval || run.terminal) return null;
+  return <ApprovalCard approval={run.pendingApproval} />;
+}
+
 /** A5.6: controlled coding - approvals, edits, tests and the reviewable diff. */
 export function CodeRunSection({ run }: { run: IntentRun }) {
   const { api } = useNexus();
@@ -242,11 +320,10 @@ export function CodeRunSection({ run }: { run: IntentRun }) {
         )}
       </div>
       {pa && (
-        <Alert tone="warning" title="Waiting for an independent approval">
-          <span className="nv-mono">{pa.tool}</span>: {pa.summary}. Nothing has run. A separate approver must review the
-          exact {pa.tool === "proc_run" ? "command" : "patch"} (digest <span className="nv-mono">{short(pa.requestDigest)}</span>)
-          with the approver tool; Nexus Desktop cannot approve, and the request expires on its own.
-        </Alert>
+        <p className="nv-note" role="status">
+          Waiting for an independent approval of <span className="nv-mono">{pa.target ?? pa.tool}</span>; the details are in the approval panel above the
+          composer.
+        </p>
       )}
       {run.stopReason && (
         <Alert tone="warning" title="Stopped at a policy limit">

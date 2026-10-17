@@ -2140,6 +2140,20 @@ fn multuid_a56_positive_independent_approval_executes_edit_and_sandboxed_test_vi
         std::thread::sleep(Duration::from_millis(100));
     };
     assert_eq!(pending["tool"], "fs_edit");
+    // A6.1: the Desktop UID can read what is being asked, without being able to answer it
+    assert_eq!(
+        (pending["operation"].as_str(), pending["target"].as_str()),
+        (Some("edit"), Some("src/lib.rs"))
+    );
+    assert!(
+        pending["proposal"].as_str().unwrap().contains("+ a + b"),
+        "{pending}"
+    );
+    assert!(
+        pending["restrictions"].as_array().unwrap().len() >= 2,
+        "{pending}"
+    );
+    assert!(pending["expiresAtMs"].as_u64().unwrap() > pending["createdAtMs"].as_u64().unwrap());
     let copy = std::fs::read_dir(&wts)
         .unwrap()
         .flatten()

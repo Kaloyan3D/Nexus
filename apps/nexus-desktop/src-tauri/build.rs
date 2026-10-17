@@ -19,6 +19,7 @@ const COMMANDS: &[&str] = &[
     "intent_workspaces",
     "intent_inspect_submit",
     "intent_code_sources",
+    "intent_code_limits",
     "intent_code_submit",
     "intent_diff",
     "intent_status",

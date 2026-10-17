@@ -12,6 +12,12 @@ pub struct WorkspaceSpec {
     pub root: PathBuf,
     /// Peer UIDs allowed to select it. Empty = every UID the broker allows.
     pub allowed_uids: Vec<u32>,
+    /// repo-code only (A6.1): the exact 40-hex commit the source must be at.
+    /// The daemon refuses to hand out a working copy of any other commit.
+    pub pinned_commit: Option<String>,
+    /// repo-code only (A6.1): path prefixes (`dir/`) or exact files the model may
+    /// propose writes to. Empty = whole project. Enforced before any approval.
+    pub write_allow: Vec<String>,
 }
 
 #[derive(Clone)]

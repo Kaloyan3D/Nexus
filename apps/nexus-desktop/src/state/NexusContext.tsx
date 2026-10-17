@@ -15,6 +15,7 @@ import type {
   AllowedModel,
   AllowedWorkspace,
   AllowedCodeSource,
+  DesktopCodeLimits,
   IntentRun,
   LiveBlockers,
   MockEvent,
@@ -82,6 +83,8 @@ export interface NexusState {
   sendIntent: (prompt: string, model: AllowedModel | null) => Promise<boolean>;
   /** A5.6: sources (identities) that may be modified in an isolated copy. */
   intentCodeSources: AllowedCodeSource[] | null;
+  /** A6.1: the fixed limits a coding task will run with (null = not loaded). */
+  intentCodeLimits: DesktopCodeLimits | null;
   /** A5.6: submit a controlled coding task for a source identity. */
   sendCode: (prompt: string, sourceId: string) => Promise<boolean>;
   /** A5.5: submit a read-only repository inspection for a workspace identity. */
@@ -250,6 +253,17 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
       .intentCodeSources()
       .then((w) => alive && setIntentCodeSources(w))
       .catch(() => alive && setIntentCodeSources(null));
+    return () => {
+      alive = false;
+    };
+  }, [nativeApi]);
+  const [intentCodeLimits, setIntentCodeLimits] = useState<DesktopCodeLimits | null>(null);
+  useEffect(() => {
+    let alive = true;
+    nativeApi
+      .intentCodeLimits()
+      .then((l) => alive && setIntentCodeLimits(l))
+      .catch(() => alive && setIntentCodeLimits(null));
     return () => {
       alive = false;
     };
@@ -439,6 +453,7 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     intentModelsError,
     intentWorkspaces,
     intentCodeSources,
+    intentCodeLimits,
     sendCode,
     intentPending,
     intentSubmitting,

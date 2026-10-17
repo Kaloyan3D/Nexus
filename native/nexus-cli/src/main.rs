@@ -616,8 +616,10 @@ fn follow_run(
                     );
                 } else {
                     eprintln!(
-                        "[approval pending] {} {} - waiting for an independent approver",
-                        pa.approval_id, pa.summary
+                        "[approval pending] {} {} {} - waiting for an independent approver (nothing has run)",
+                        pa.approval_id,
+                        pa.operation.as_deref().unwrap_or("operation"),
+                        pa.target.as_deref().unwrap_or(&pa.summary)
                     );
                 }
             }

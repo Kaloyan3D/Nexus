@@ -1876,9 +1876,30 @@ fn wt_meta_path(root: &std::path::Path, task: &str) -> std::path::PathBuf {
 }
 
 fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
-    if let Err(r) = only_keys(&req.params, &["taskInstanceId", "sourceRoot"], &req.id) {
+    if let Err(r) = only_keys(
+        &req.params,
+        &["taskInstanceId", "sourceRoot", "expectedCommit"],
+        &req.id,
+    ) {
         return r;
     }
+    let expected_commit: Option<String> = match req.params.get("expectedCommit") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(c))
+            if c.len() == 40
+                && c.bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) =>
+        {
+            Some(c.clone())
+        }
+        Some(_) => {
+            return fail(
+                &req.id,
+                "bad-request",
+                "bad-request: 'expectedCommit' must be a 40-character lowercase hex commit id",
+            )
+        }
+    };
     let root = match wt_root(daemon, &req.id) {
         Ok(r) => r,
         Err(r) => return r,
@@ -1921,6 +1942,20 @@ fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         Ok(i) => i,
         Err(e) => return wt_fail(daemon, &req.id, &e),
     };
+    // A6.1: a source can be pinned to one exact commit by the operator. The
+    // copy is made from the commit the source REALLY has; if that is not the
+    // pinned one the copy is removed again and nothing is handed out.
+    if let Some(want) = &expected_commit {
+        if &info.source.commit != want {
+            let _ = nexus_tools::gitwt::remove(root, &task);
+            daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                "scope-refused",
+                "the source repository is not at the commit the operator pinned for it",
+            );
+        }
+    }
     // Authoritative record of what this copy was made from (outside the
     // workspace the tools can reach).
     let meta_dir = root.join(".meta");

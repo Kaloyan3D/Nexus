@@ -293,6 +293,13 @@ async fn intent_code_sources(
     .map_err(|_| internal())?
 }
 
+/// A6.1: the fixed run limits a Desktop coding task uses (shown to the user
+/// before submitting; not renderer-controlled).
+#[tauri::command]
+fn intent_code_limits() -> nexus_client::intent_client::DesktopCodeLimits {
+    nexus_client::intent_client::DESKTOP_CODE_LIMITS
+}
+
 /// A5.6: submit one user-typed `repo-code` task. The renderer supplies text,
 /// a source IDENTITY from `intent_code_sources` and an idempotency key - no
 /// path, tool, command, limit, model or approval. The work happens in an
@@ -305,7 +312,7 @@ async fn intent_code_submit(
     idempotency_key: String,
 ) -> Result<nexus_client::intent_client::SubmitReply, UiError> {
     tauri::async_runtime::spawn_blocking(move || {
-        use nexus_client::intent_contract::{IntentLimits, NexusIntentV1, ResponseMode};
+        use nexus_client::intent_contract::{NexusIntentV1, ResponseMode};
         let intent = NexusIntentV1 {
             schema_version: 1,
             request_id: nexus_client::intent_client::fresh_key("gui"),
@@ -314,10 +321,7 @@ async fn intent_code_submit(
             content: prompt,
             model: None,
             workspace_id: Some(source_id),
-            limits: IntentLimits {
-                max_output_tokens: Some(1024),
-                ..IntentLimits::default()
-            },
+            limits: nexus_client::intent_client::DESKTOP_CODE_LIMITS.to_intent_limits(),
             response_mode: ResponseMode::Stream,
             client_label: Some("nexus-desktop".to_owned()),
         };
@@ -493,6 +497,7 @@ pub fn run() {
             intent_workspaces,
             intent_inspect_submit,
             intent_code_sources,
+            intent_code_limits,
             intent_code_submit,
             intent_diff,
             intent_status,
@@ -529,6 +534,7 @@ mod authz_tests {
         "intent_workspaces",
         "intent_inspect_submit",
         "intent_code_sources",
+        "intent_code_limits",
         "intent_code_submit",
         "intent_diff",
         "intent_status",
@@ -831,6 +837,8 @@ mod authz_tests {
         std::env::set_var("NEXUS_BROKER_SOCKET", &sock);
         let src = tauri::async_runtime::block_on(super::intent_code_sources()).unwrap();
         assert_eq!(src[0].source_id, "proj");
+        // the limits shown to the user are the backend constants (no broker round trip)
+        assert_eq!(super::intent_code_limits(), nexus_client::intent_client::DESKTOP_CODE_LIMITS);
         let r = tauri::async_runtime::block_on(super::intent_code_submit("fix the test".into(), "proj".into(), "gui-0123456789abcdef".into())).unwrap();
         assert!(!r.replay);
         let d = tauri::async_runtime::block_on(super::intent_diff(r.run.run_id.clone())).unwrap();
@@ -845,7 +853,13 @@ mod authz_tests {
         assert_eq!(keys, ["clientLabel", "content", "idempotencyKey", "intentType", "limits", "model", "requestId", "responseMode", "schemaVersion", "workspaceId"]);
         assert_eq!(i["intentType"], "repo-code");
         assert_eq!(i["workspaceId"], "proj");
-        assert_eq!(i["limits"], serde_json::json!({"maxOutputTokens": 1024}), "no edit/test/turn/tool limit is renderer-controlled");
+        assert_eq!(
+            i["limits"],
+            serde_json::to_value(nexus_client::intent_client::DESKTOP_CODE_LIMITS.to_intent_limits()).unwrap(),
+            "limits are the fixed, backend-defined Desktop set (not renderer-controlled)"
+        );
+        assert_eq!(i["limits"]["maxEdits"], 5);
+        assert_eq!(i["limits"]["maxTests"], 5);
         let src = include_str!("lib.rs");
         let (prod, _) = src.split_once("#[cfg(test)]").unwrap();
         for forbidden in [

@@ -56,19 +56,36 @@ const PROTECTED_NAMES: &[&str] = &[
     "docker-compose.yml",
 ];
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct CodePolicy {
     pub max_edits: u32,
     pub max_tests: u32,
     pub max_total_write_bytes: u64,
+    /// Operator-configured write scope for this source (A6.1). Empty = the
+    /// whole project (minus the always-protected files). Entries ending in
+    /// `/` are directory prefixes, anything else is one exact file.
+    pub write_allow: Vec<String>,
 }
 
-pub fn resolve_policy(intent: &NexusIntentV1) -> CodePolicy {
+pub fn resolve_policy(intent: &NexusIntentV1, write_allow: &[String]) -> CodePolicy {
     CodePolicy {
         max_edits: intent.limits.max_edits.unwrap_or(DEFAULT_MAX_EDITS),
         max_tests: intent.limits.max_tests.unwrap_or(DEFAULT_MAX_TESTS),
         max_total_write_bytes: MAX_TOTAL_WRITE_BYTES,
+        write_allow: write_allow.to_vec(),
     }
+}
+
+/// Is `path` (already normalized, relative) inside the operator's write scope?
+pub fn in_write_scope(path: &str, allow: &[String]) -> bool {
+    allow.is_empty()
+        || allow.iter().any(|a| {
+            if a.ends_with('/') {
+                path.starts_with(a.as_str())
+            } else {
+                path == a
+            }
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,6 +329,129 @@ pub fn validate_code_proposal(
     })
 }
 
+/// What the Desktop/CLI may show about a pending approval. Built from the
+/// model's own validated proposal; never from the approver's review.
+#[derive(Debug, Clone, Default)]
+pub struct ProposalView {
+    pub summary: String,
+    pub operation: &'static str,
+    pub target: String,
+    pub proposal: String,
+    pub restrictions: Vec<String>,
+}
+
+const PROPOSAL_MAX: usize = 4096;
+
+fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_owned();
+    }
+    let mut cut = max;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!(
+        "{}\n[... {} more bytes not shown]",
+        &s[..cut],
+        s.len() - cut
+    )
+}
+
+fn prefixed(prefix: &str, text: &str) -> String {
+    text.lines()
+        .map(|l| format!("{prefix}{l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn proposal_view(cp: &CodeProposal) -> ProposalView {
+    let args = &cp.inner.args;
+    let isolated = vec![
+        "changes are made only in the throw-away working copy, never in your repository".to_owned(),
+        "the path is confined to the project (no hidden, credential or build-steering files)"
+            .to_owned(),
+        "nothing is committed, pushed or merged".to_owned(),
+    ];
+    match cp.inner.model_name {
+        "fs_edit" => {
+            let mut out = String::new();
+            for (i, e) in args
+                .get("edits")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+            {
+                let old = e.get("oldText").and_then(|v| v.as_str()).unwrap_or("");
+                let new = e.get("newText").and_then(|v| v.as_str()).unwrap_or("");
+                out.push_str(&format!(
+                    "@@ edit {} @@\n{}\n{}\n",
+                    i + 1,
+                    prefixed("- ", old),
+                    prefixed("+ ", new)
+                ));
+            }
+            ProposalView {
+                summary: cp.summary.clone(),
+                operation: "edit",
+                target: cp.path.clone().unwrap_or_default(),
+                proposal: clip(&out, PROPOSAL_MAX),
+                restrictions: isolated,
+            }
+        }
+        "fs_write" => {
+            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let mode = args
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("create");
+            ProposalView {
+                summary: cp.summary.clone(),
+                operation: "write",
+                target: cp.path.clone().unwrap_or_default(),
+                proposal: clip(
+                    &format!(
+                        "{mode} file ({} bytes)\n{}",
+                        content.len(),
+                        prefixed("+ ", content)
+                    ),
+                    PROPOSAL_MAX,
+                ),
+                restrictions: isolated,
+            }
+        }
+        _ => {
+            let program = args.get("program").and_then(|v| v.as_str()).unwrap_or("");
+            let argv: Vec<&str> = args
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+                .unwrap_or_default();
+            let cwd = args.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
+            ProposalView {
+                summary: cp.summary.clone(),
+                operation: "command",
+                target: program.to_owned(),
+                proposal: clip(
+                    &format!("{} {}\n(working directory: {cwd})", program, argv.join(" ")),
+                    PROPOSAL_MAX,
+                ),
+                restrictions: vec![
+                    "network access is disabled".to_owned(),
+                    "runs over a read-only snapshot of the working copy; nothing it writes is kept"
+                        .to_owned(),
+                    "no host paths and no ambient credentials; environment is an allowlist"
+                        .to_owned(),
+                    "CPU, memory, process count, output and wall time are bounded".to_owned(),
+                    "only cargo check|test|build|fmt, npm test|run build and tsc --noEmit exist"
+                        .to_owned(),
+                ],
+            }
+        }
+    }
+}
+
 /// How an approval request ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalOutcome {
@@ -395,7 +535,7 @@ pub fn request_and_wait(
     params: &Value,
     ai_origin: &str,
     tool_label: &str,
-    summary: &str,
+    view: &ProposalView,
 ) -> ApprovalOutcome {
     let mut p = params.clone();
     let ttl = APPROVAL_TTL_MS.min(
@@ -444,9 +584,14 @@ pub fn request_and_wait(
         r.pending_approval = Some(PendingApproval {
             approval_id: id.clone(),
             tool: tool_label.to_owned(),
-            summary: summary.chars().take(160).collect(),
+            summary: view.summary.chars().take(160).collect(),
             request_digest: digest.clone(),
             expires_at_ms: expires,
+            operation: Some(view.operation.to_owned()),
+            target: Some(view.target.clone()),
+            proposal: Some(view.proposal.clone()),
+            restrictions: view.restrictions.clone(),
+            created_at_ms: Some(now_ms()),
         });
     });
     let clear = |b: &Broker| {
@@ -694,6 +839,35 @@ mod tests {
     }
 
     #[test]
+    fn the_operator_write_scope_is_exact_on_directories_and_files() {
+        let a = vec![
+            "native/nexus-client/src/".to_owned(),
+            "native/nexus-client/Cargo.toml".to_owned(),
+        ];
+        for ok in [
+            "native/nexus-client/src/lib.rs",
+            "native/nexus-client/src/a/b.rs",
+            "native/nexus-client/Cargo.toml",
+        ] {
+            assert!(in_write_scope(ok, &a), "{ok}");
+        }
+        for bad in [
+            "native/nexus-client/srcx/lib.rs",
+            "native/nexus-client/Cargo.toml.bak",
+            "native/nexus-kernel/src/lib.rs",
+            "native/nexus-client/src",
+            "README.md",
+            "native/nexus-client/tests/x.rs",
+        ] {
+            assert!(!in_write_scope(bad, &a), "{bad}");
+        }
+        assert!(
+            in_write_scope("anything/at/all.rs", &[]),
+            "no scope configured = whole project"
+        );
+    }
+
+    #[test]
     fn the_catalog_is_exactly_the_three_read_tools_plus_write_edit_and_run() {
         assert!(v("fs_read", json!({"path": "src/a.rs"})).is_ok());
         assert_eq!(
@@ -904,7 +1078,7 @@ mod tests {
             "limits": {"maxEdits": 2, "maxTests": 3},
         }))
         .unwrap();
-        let p = resolve_policy(&i);
+        let p = resolve_policy(&i, &[]);
         assert_eq!((p.max_edits, p.max_tests), (2, 3));
         assert_eq!(p.max_total_write_bytes, MAX_TOTAL_WRITE_BYTES);
     }

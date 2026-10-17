@@ -1,5 +1,5 @@
 import { ArrowUp, Ban, Code2, FileText, Globe, Loader2, Paperclip, Search, Send, Sparkles } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNexus } from "../../state/NexusContext";
 import { Alert, Badge, Button, Kbd, modKeys } from "../../components/ui/primitives";
 
@@ -12,6 +12,17 @@ const TOOLS = [
 
 export const COMPOSER_PLACEHOLDER = "Describe the next step, ask Nova, or give an engineering task...";
 
+/** SHA-256 (hex) of the exact UTF-8 bytes that would be submitted. */
+async function sha256Hex(text: string): Promise<string | null> {
+  try {
+    const bytes = new TextEncoder().encode(text);
+    const d = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(d), (b) => b.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return null;
+  }
+}
+
 export function Composer() {
   const {
     startMock,
@@ -23,6 +34,7 @@ export function Composer() {
     intentError,
     intentWorkspaces,
     intentCodeSources,
+    intentCodeLimits,
     sendIntent,
     sendInspect,
     sendCode,
@@ -38,14 +50,29 @@ export function Composer() {
   const [wsIdx, setWsIdx] = useState(0);
   const [srcIdx, setSrcIdx] = useState(0);
   const sources = intentCodeSources ?? [];
+  // A6.1: sending source text to the provider needs a fresh, explicit acknowledgement per task.
+  const [ack, setAck] = useState(false);
   const source = sources.length > 0 ? sources[Math.min(srcIdx, sources.length - 1)]! : null;
   const workspaces = intentWorkspaces ?? [];
   const workspace = workspaces.length > 0 ? workspaces[Math.min(wsIdx, workspaces.length - 1)]! : null;
   const model = intentModels && intentModels.length > 0 ? intentModels[Math.min(modelIdx, intentModels.length - 1)]! : null;
   const canSend =
-    (mode === "inspect" ? workspace !== null && model !== null : mode === "code" ? source !== null && model !== null : model !== null) &&
+    (mode === "inspect" ? workspace !== null && model !== null : mode === "code" ? source !== null && model !== null && intentCodeLimits !== null && ack : model !== null) &&
     !intentSubmitting &&
     intentPending === null;
+  // A6.1: a live session authorization is bound to the SHA-256 of the exact prompt bytes. Show the
+  // fingerprint of what would be sent so the operator can compare it with `sha256sum` / the record.
+  const [fp, setFp] = useState<{ text: string; bytes: number; sha: string | null } | null>(null);
+  useEffect(() => {
+    if (mode !== "code" || text.length === 0) return;
+    let alive = true;
+    void sha256Hex(text).then((sha) => alive && setFp({ text, bytes: new TextEncoder().encode(text).length, sha }));
+    return () => {
+      alive = false;
+    };
+  }, [mode, text]);
+  // only ever show the fingerprint of the text currently in the box
+  const fingerprint = mode === "code" && fp !== null && fp.text === text ? fp : null;
   const ref = useRef<HTMLTextAreaElement>(null);
   const empty = text.trim().length === 0;
 
@@ -61,7 +88,12 @@ export function Composer() {
     const prompt = text;
     // Keep the text until the broker accepted it, so a refusal loses nothing.
     if (mode === "code" && source) {
-      void sendCode(prompt, source.sourceId).then((ok) => ok && setText(""));
+      void sendCode(prompt, source.sourceId).then((ok) => {
+        if (ok) {
+          setText("");
+          setAck(false);
+        }
+      });
       return;
     }
     if (mode === "inspect" && workspace) {
@@ -288,6 +320,30 @@ export function Composer() {
           to <span className="nv-mono">{model.providerId}</span>; commands run offline in a sandbox. Each model turn
           is a billable request.
         </Alert>
+      )}
+      {mode === "code" && source && (
+        <section className="nv-stack" style={{ gap: 6, padding: "0 var(--nv-s-3)" }} aria-label="Coding task terms">
+          <dl className="nv-kv">
+            <dt>Source</dt>
+            <dd className="nv-mono">{source.sourceId} (registered by the operator; not a typed path)</dd>
+            <dt>Run limits</dt>
+            <dd>
+              {intentCodeLimits
+                ? `${intentCodeLimits.maxTurns} model turns · ${intentCodeLimits.maxToolCalls} tool calls · ${intentCodeLimits.maxEdits} edits · ${intentCodeLimits.maxTests} commands · ${intentCodeLimits.maxOutputTokens} output tokens per call · ${Math.round(intentCodeLimits.maxToolResultBytes / 1024)} KiB of tool results · ${Math.round(intentCodeLimits.maxRuntimeSecs / 60)} min`
+                : "unavailable (the backend did not report limits, so submitting is disabled)"}
+            </dd>
+          </dl>
+          <p className="nv-note" aria-label="Prompt fingerprint">
+            {fingerprint
+              ? `Prompt as it will be sent: ${fingerprint.bytes} bytes · sha256 ${fingerprint.sha ?? "unavailable"} (compare with \`sha256sum\` of your prompt file; whitespace and a trailing newline change it)`
+              : "Prompt fingerprint appears once you type a task."}
+          </p>
+          <label className="nv-note">
+            <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} aria-label="Acknowledge disclosure" />{" "}
+            I understand that selected text from <span className="nv-mono">{source.sourceId}</span> and command output will be sent to the
+            model provider, and that every edit and command waits for a separate approval.
+          </label>
+        </section>
       )}
       <div className="nv-composer__hint">
         Send: text-only request to the selected Registry model via the broker (no tools, no files). Run Mock:

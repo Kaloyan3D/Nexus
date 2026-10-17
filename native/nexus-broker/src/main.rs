@@ -20,7 +20,7 @@ fn usage() -> i32 {
     eprintln!("         [--allowed-uids U,U] [--socket-group GID] [--node PATH] [--max-active N]");
     eprintln!("         [--rate-per-minute N] [--allow-model provider/model]... [--read-timeout-ms N] [--total-timeout-ms N]");
     eprintln!("         [--workspace ID=ABS_PATH]... [--workspace-allow ID=UID,UID]...   (A5.5 repo-inspect workspaces)");
-    eprintln!("         [--code-source ID=ABS_PATH]... [--code-allow ID=UID,UID]...   (A5.6 repo-code sources; the daemon also needs --enable-repo-code --worktree-root)");
+    eprintln!("         [--code-source ID=ABS_PATH]... [--code-allow ID=UID,UID]... [--code-commit ID=SHA40]... [--code-write-allow ID=PATH[,PATH]]...   (A5.6 repo-code sources; the daemon also needs --enable-repo-code --worktree-root)");
     eprintln!("Runs as the issuer identity. Refuses to start unless the daemon has the model pilot enabled.");
     2
 }
@@ -123,7 +123,63 @@ fn parse_workspaces(args: &[String]) -> Result<Vec<nexus_broker::WorkspaceSpec>,
 
 /// `--code-source ID=ABS_PATH` and optional `--code-allow ID=UID,UID` (A5.6).
 fn parse_code_sources(args: &[String]) -> Result<Vec<nexus_broker::WorkspaceSpec>, String> {
-    parse_specs(args, "--code-source", "--code-allow")
+    let mut out = parse_specs(args, "--code-source", "--code-allow")?;
+    // `--code-commit ID=SHA`: pin a source to one exact commit (A6.1).
+    for (i, a) in args.iter().enumerate() {
+        if a != "--code-commit" {
+            continue;
+        }
+        let v = args.get(i + 1).ok_or("--code-commit needs ID=COMMIT")?;
+        let (id, sha) = v.split_once('=').ok_or("--code-commit needs ID=COMMIT")?;
+        if sha.len() != 40
+            || !sha
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("--code-commit needs a 40-character lowercase hex commit id".into());
+        }
+        let w = out
+            .iter_mut()
+            .find(|w| w.id == id)
+            .ok_or_else(|| format!("--code-commit names unknown code source {id}"))?;
+        if w.pinned_commit.is_some() {
+            return Err(format!("duplicate --code-commit for {id}"));
+        }
+        w.pinned_commit = Some(sha.to_owned());
+    }
+    // `--code-write-allow ID=PREFIX[,PREFIX...]`: restrict model-proposed writes (A6.1).
+    for (i, a) in args.iter().enumerate() {
+        if a != "--code-write-allow" {
+            continue;
+        }
+        let v = args
+            .get(i + 1)
+            .ok_or("--code-write-allow needs ID=PATH[,PATH]")?;
+        let (id, list) = v
+            .split_once('=')
+            .ok_or("--code-write-allow needs ID=PATH[,PATH]")?;
+        let w = out
+            .iter_mut()
+            .find(|w| w.id == id)
+            .ok_or_else(|| format!("--code-write-allow names unknown code source {id}"))?;
+        for p in list.split(',').filter(|p| !p.is_empty()) {
+            if p.starts_with('/')
+                || p.contains("..")
+                || p.contains("//")
+                || p.contains('\0')
+                || p == "."
+            {
+                return Err(format!(
+                    "--code-write-allow entry {p:?} must be a relative path without '..'"
+                ));
+            }
+            w.write_allow.push(p.to_owned());
+        }
+        if w.write_allow.is_empty() {
+            return Err("--code-write-allow needs at least one path".into());
+        }
+    }
+    Ok(out)
 }
 
 fn parse_specs(
@@ -145,6 +201,8 @@ fn parse_specs(
             id: id.to_owned(),
             root: PathBuf::from(path),
             allowed_uids: Vec::new(),
+            pinned_commit: None,
+            write_allow: Vec::new(),
         });
     }
     for (i, a) in args.iter().enumerate() {

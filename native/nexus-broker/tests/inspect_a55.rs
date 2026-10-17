@@ -635,6 +635,8 @@ impl Fx {
                 id: "demo".into(),
                 root: self.repo.clone(),
                 allowed_uids: vec![],
+                pinned_commit: None,
+                write_allow: Vec::new(),
             }],
             code_sources: vec![],
         }

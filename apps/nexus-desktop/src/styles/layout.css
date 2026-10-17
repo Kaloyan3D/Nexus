@@ -356,7 +356,9 @@
    group wraps to its own row on narrow widths. */
 .nv-composer__actions {
   display: flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  flex-wrap: wrap; /* A6.1: three modes + source + model no longer fit one row; never clip */
+  max-width: 100%;
   align-items: center;
   justify-content: flex-end;
   gap: var(--nv-s-2);

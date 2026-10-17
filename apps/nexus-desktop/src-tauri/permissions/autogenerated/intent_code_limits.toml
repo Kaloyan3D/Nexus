@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-intent-code-limits"
+description = "Enables the intent_code_limits command without any pre-configured scope."
+commands.allow = ["intent_code_limits"]
+
+[[permission]]
+identifier = "deny-intent-code-limits"
+description = "Denies the intent_code_limits command without any pre-configured scope."
+commands.deny = ["intent_code_limits"]

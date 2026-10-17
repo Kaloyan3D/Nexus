@@ -24,6 +24,7 @@
     "allow-intent-workspaces",
     "allow-intent-inspect-submit",
     "allow-intent-code-sources",
+    "allow-intent-code-limits",
     "allow-intent-code-submit",
     "allow-intent-diff",
     "allow-intent-status",

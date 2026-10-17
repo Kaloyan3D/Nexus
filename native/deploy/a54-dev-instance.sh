@@ -12,6 +12,7 @@
 #   sh deploy/a54-dev-instance.sh synthetic-code-repo   create $A54_HOME/code-base/repo (a tiny Rust crate with a FAILING test, committed) for A5.6
 #   (A5.6) export A56_CODE_SOURCE=ID=ABS_PATH before `start` to enable repo-code on that ONE git repository (single-UID,
 #          TEST-ONLY approver: a human must still approve every edit/command with the approver tool; see docs/A5.6-LIVE-ACCEPTANCE.md)
+#   (A6.1) also set A56_CODE_COMMIT=<40-hex> to pin the source to one commit and A61_CODE_WRITE_ALLOW=dir/,file to scope model writes, A61_DEP_CACHE=/abs/dir for dependency-bearing builds
 #   sh deploy/a54-dev-instance.sh check      read-only: is the running broker the installed build?
 #   sh deploy/a54-dev-instance.sh stop
 #   sh deploy/a54-dev-instance.sh env         print the exports for the CLI
@@ -131,8 +132,23 @@ start)
     [ -d "$CPATH/.git" ] || { echo "the code source must be a git repository root" >&2; exit 2; }
     CBASE=$(dirname "$CPATH"); WTR="$CBASE/worktrees"
     mkdir -p "$WTR"
-    EXTRA_D="--workspace-bases $CBASE --enable-repo-inspect --enable-repo-code --enable-writes --enable-process --require-human-approval --allow-nonindependent-approver-test-only --approver-cap $A/daemon/approver.cap --approver-uids $UIDN --worktree-root $WTR"
+    DEPC=""
+    if [ -n "${A61_DEP_CACHE:-}" ]; then
+      case "$A61_DEP_CACHE" in /*) ;; *) echo "A61_DEP_CACHE must be an absolute directory" >&2; exit 2;; esac
+      DEPC="--dep-cache $A61_DEP_CACHE"   # operator-populated offline crate cache (see docs/A6.1-SELFHOSTING-PROPOSAL.md)
+    fi
+    EXTRA_D="$DEPC --workspace-bases $CBASE --enable-repo-inspect --enable-repo-code --enable-writes --enable-process --require-human-approval --allow-nonindependent-approver-test-only --approver-cap $A/daemon/approver.cap --approver-uids $UIDN --worktree-root $WTR"
     EXTRA_B="--code-source $CID=$CPATH"
+    # A6.1: pin the source to ONE exact commit (the daemon refuses any other HEAD) and, optionally,
+    # limit the files the model may propose writes to (dir/ prefixes or exact files, comma separated).
+    if [ -n "${A56_CODE_COMMIT:-}" ]; then
+      case "$A56_CODE_COMMIT" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;; *) echo "A56_CODE_COMMIT must be a 40-hex commit id" >&2; exit 2;; esac
+      [ ${#A56_CODE_COMMIT} -eq 40 ] || { echo "A56_CODE_COMMIT must be 40 hex characters" >&2; exit 2; }
+      EXTRA_B="$EXTRA_B --code-commit $CID=$A56_CODE_COMMIT"
+    fi
+    if [ -n "${A61_CODE_WRITE_ALLOW:-}" ]; then
+      EXTRA_B="$EXTRA_B --code-write-allow $CID=$A61_CODE_WRITE_ALLOW"
+    fi
   fi
   # shellcheck disable=SC2086
   "$BIN/nexusd" $EXTRA_D --db "$A/daemon/k.db" --socket "$A/daemon/n.sock" --cap "$A/daemon/issuer.cap" \

@@ -554,6 +554,10 @@ fn spawn_daemon(
     for (k, v) in env {
         c.env(k, v);
     }
+    // A6.1 rehearsal only: an operator-populated offline dependency cache.
+    if let Ok(dc) = std::env::var("NEXUS_A61_DEPCACHE") {
+        c.arg("--dep-cache").arg(dc);
+    }
     c.stdout(Stdio::null())
         .stderr(Stdio::null())
         .current_dir(tmp);
@@ -706,17 +710,35 @@ impl Fx {
                 id: "demo".into(),
                 root: self.repo.clone(),
                 allowed_uids: vec![],
+                pinned_commit: None,
+                write_allow: Vec::new(),
             }],
             code_sources: vec![WorkspaceSpec {
                 id: "proj".into(),
                 root: self.repo.clone(),
                 allowed_uids: vec![],
+                pinned_commit: None,
+                write_allow: Vec::new(),
             }],
         }
     }
 
     fn start(&self, name: &str) -> BrokerHandle {
         nexus_broker::start(self.config(name)).expect("broker starts")
+    }
+
+    /// Start with the model's writes limited to `allow` (A6.1).
+    fn start_scoped(&self, name: &str, allow: &[&str]) -> BrokerHandle {
+        let mut c = self.config(name);
+        c.code_sources[0].write_allow = allow.iter().map(|s| s.to_string()).collect();
+        nexus_broker::start(c).expect("broker starts")
+    }
+
+    /// Start with the code source pinned to `commit` (A6.1).
+    fn start_pinned(&self, name: &str, commit: &str) -> BrokerHandle {
+        let mut c = self.config(name);
+        c.code_sources[0].pinned_commit = Some(commit.to_owned());
+        nexus_broker::start(c).expect("broker starts")
     }
 }
 
@@ -830,6 +852,8 @@ enum Decide {
     Deny,
     /// Never decide (the run's own limits must end it).
     Ignore,
+    /// Not yet: look again on the next poll (the test releases it later).
+    Wait,
 }
 
 struct Approver {
@@ -877,6 +901,10 @@ impl Approver {
                     let full = g["approval"].clone();
                     seen2.lock().unwrap().push(full.clone());
                     let d = policy(&full);
+                    if d == Decide::Wait {
+                        seen2.lock().unwrap().pop();
+                        continue;
+                    }
                     if d == Decide::Ignore {
                         decided.insert(id);
                         continue;
@@ -2451,4 +2479,455 @@ fn a56_crash_after_a_sandboxed_command_exits_but_before_its_receipt_is_uncertain
         "proc.run",
         &["authorized", "prepared", "running"],
     );
+}
+
+// ------------------------------------------------------------- A6.1 Desktop path
+
+/// The intent exactly as the Desktop's Tauri backend builds it.
+fn desktop_code_intent(prompt: &str, key: &str) -> NexusIntentV1 {
+    NexusIntentV1 {
+        schema_version: 1,
+        request_id: ic::fresh_key("gui"),
+        idempotency_key: key.to_owned(),
+        intent_type: "repo-code".to_owned(),
+        content: prompt.to_owned(),
+        model: None,
+        workspace_id: Some("proj".to_owned()),
+        limits: ic::DESKTOP_CODE_LIMITS.to_intent_limits(),
+        response_mode: ResponseMode::Stream,
+        client_label: Some("nexus-desktop".to_owned()),
+    }
+}
+
+/// read -> one correct edit -> test -> answer (each step reacts to the result).
+fn simple_fix_responder() -> Responder {
+    Arc::new(|n, body| {
+        let resp = format!("resp_{n}");
+        match n {
+            0 => Answer::Frames(call_frames(
+                &resp,
+                n,
+                "c_read",
+                "fs_read",
+                r#"{"path":"src/lib.rs"}"#,
+            )),
+            1 => {
+                assert!(last_output(body).unwrap().to_string().contains("a - b"));
+                let args = json!({"path": "src/lib.rs", "edits": [{"oldText": "a - b", "newText": "a + b"}]}).to_string();
+                Answer::Frames(call_frames(&resp, n, "c_edit", "fs_edit", &args))
+            }
+            2 => Answer::Frames(call_frames(
+                &resp,
+                n,
+                "c_test",
+                "proc_run",
+                r#"{"program":"cargo","args":["test","--offline"]}"#,
+            )),
+            _ => Answer::Frames(text_frames(
+                &resp,
+                "Fixed add (a - b -> a + b); cargo test passes.",
+            )),
+        }
+    })
+}
+
+#[test]
+fn a61_desktop_path_shows_the_pending_operation_survives_reconnect_and_ends_with_a_diff() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture(simple_fix_responder());
+    // the "operator" approves an id only after the test has looked at it
+    let allowed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let al = allowed.clone();
+    let appr = Approver::start(
+        &fx,
+        Arc::new(move |full| {
+            if al
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|i| Some(i.as_str()) == full["approvalId"].as_str())
+            {
+                Decide::Approve
+            } else {
+                Decide::Wait
+            }
+        }),
+    );
+    let b = fx.start("desk");
+    let sock = b.socket_path().to_owned();
+    assert_eq!(
+        ic::code_sources(&sock)
+            .unwrap()
+            .iter()
+            .map(|s| s.source_id.as_str())
+            .collect::<Vec<_>>(),
+        ["proj"]
+    );
+    let run0 = ic::submit(
+        &sock,
+        &desktop_code_intent("Fix the failing add test.", "gui-a61-desktop-1"),
+    )
+    .unwrap()
+    .run;
+    let mut seen: Vec<ic::PendingApproval> = Vec::new();
+    let end = Instant::now() + Duration::from_secs(240);
+    let run = loop {
+        let cur = ic::status(&sock, &run0.run_id).unwrap();
+        if let Some(p) = cur.pending_approval.clone() {
+            if !seen.iter().any(|x| x.approval_id == p.approval_id) {
+                assert_eq!(cur.state, "approval-pending");
+                let copy = working_copy(&fx).expect("isolated copy exists while pending");
+                let lib = std::fs::read_to_string(copy.join("src/lib.rs")).unwrap();
+                if seen.is_empty() {
+                    // first operation: the edit. Nothing has run yet.
+                    assert!(lib.contains("a - b"), "edit ran before approval");
+                    assert_eq!(
+                        (p.operation.as_deref(), p.target.as_deref()),
+                        (Some("edit"), Some("src/lib.rs"))
+                    );
+                    let text = p.proposal.clone().unwrap();
+                    assert!(
+                        text.contains("- a - b") && text.contains("+ a + b"),
+                        "{text}"
+                    );
+                    assert!(p
+                        .restrictions
+                        .iter()
+                        .any(|r| r.contains("throw-away working copy")));
+                } else {
+                    // second operation: the command; the edit is applied, the test not run yet
+                    assert!(lib.contains("a + b"));
+                    assert_eq!(
+                        (p.operation.as_deref(), p.target.as_deref()),
+                        (Some("command"), Some("cargo"))
+                    );
+                    assert!(p.proposal.clone().unwrap().contains("cargo test --offline"));
+                    assert!(p
+                        .restrictions
+                        .iter()
+                        .any(|r| r.contains("network access is disabled")));
+                    assert!(p
+                        .restrictions
+                        .iter()
+                        .any(|r| r.contains("read-only snapshot")));
+                    assert_eq!(cur.tests_used, 1, "the command is counted when proposed");
+                    assert!(
+                        cur.last_test_verification.is_none(),
+                        "no test result before approval"
+                    );
+                }
+                assert!(p.expires_at_ms.unwrap() > p.created_at_ms.unwrap(), "{p:?}");
+                assert_eq!(p.request_digest.as_deref().map(str::len), Some(64));
+                // a reconnecting client finds the same pending operation in run history
+                let hist = ic::list(&sock, 20).unwrap();
+                assert!(hist.iter().any(|r| r.run_id == run0.run_id
+                    && r.pending_approval.as_ref().map(|x| &x.approval_id)
+                        == Some(&p.approval_id)));
+                allowed.lock().unwrap().push(p.approval_id.clone());
+                seen.push(p);
+            }
+        }
+        if cur.terminal {
+            break cur;
+        }
+        assert!(Instant::now() < end, "run never finished: {cur:?}");
+        std::thread::sleep(Duration::from_millis(60));
+    };
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(
+        seen.len(),
+        2,
+        "both operations were observed pending before they ran"
+    );
+    assert_eq!(run.last_test_verification.as_deref(), Some("pass"));
+    assert_eq!(
+        (run.max_turns, run.max_edits, run.max_tests),
+        (
+            ic::DESKTOP_CODE_LIMITS.max_turns,
+            ic::DESKTOP_CODE_LIMITS.max_edits,
+            ic::DESKTOP_CODE_LIMITS.max_tests
+        )
+    );
+    let d = ic::diff(&sock, &run.run_id).unwrap();
+    assert!(d.diff.contains("+    a + b"));
+    drop(appr);
+    b.shutdown();
+    // the app restarted against a restarted service: the persisted result is intact
+    let b2 = fx.start("desk");
+    let again = ic::status(b2.socket_path(), &run.run_id).unwrap();
+    assert_eq!(
+        (again.state.as_str(), again.last_test_verification.clone()),
+        ("completed", Some("pass".into()))
+    );
+    assert_eq!(again.tool_activity.len(), run.tool_activity.len());
+    assert_eq!(
+        ic::diff(b2.socket_path(), &run.run_id).unwrap().diff_digest,
+        d.diff_digest
+    );
+    b2.shutdown();
+}
+
+#[test]
+fn a61_a_source_pinned_to_another_commit_is_refused_before_anything_is_sent() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture(script(vec![], "never"));
+    let _appr = Approver::start(&fx, approve_all());
+    let head = git_out(&fx.repo, &["rev-parse", "HEAD"]).trim().to_owned();
+    // wrong pin
+    let b = fx.start_pinned("pin-bad", &"0".repeat(40));
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent("go", "a61-pin-wrong-0001", |_| {}),
+        60,
+    );
+    assert!(run.terminal && run.state != "completed", "{run:?}");
+    assert_eq!(
+        fx.provider.accepted.load(Ordering::SeqCst),
+        0,
+        "nothing may be sent for an unpinned commit"
+    );
+    assert!(
+        working_copy(&fx).is_none(),
+        "no copy of the wrong commit may remain"
+    );
+    b.shutdown();
+    // the right pin proceeds, and the copy is exactly that commit
+    let b = fx.start_pinned("pin-ok", &head);
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent("go", "a61-pin-right-0001", |_| {}),
+        90,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(run.worktree_commit.as_deref(), Some(head.as_str()));
+    // the broker refuses a malformed pin at its command line (unit-level: daemon rejects non-hex)
+    let cap = nexus_client::issuer::read_capability(&fx.cap).unwrap();
+    let r = nexus_client::issuer::issuer_call(&fx.daemon_socket, &cap, "worktree-create", json!({"taskInstanceId": "task-aaaaaaaaaaaaaaaaaaaaaaaa", "sourceRoot": fx.repo.to_str().unwrap(), "expectedCommit": "HEAD"})).unwrap();
+    assert_eq!(r["ok"], false, "{r}");
+    b.shutdown();
+}
+
+#[test]
+fn a61_the_operator_write_scope_refuses_other_files_before_any_approval_exists() {
+    if !sandbox_ready() {
+        return;
+    }
+    let calls = vec![
+        ("fs_read", r#"{"path":"README.md"}"#.to_owned()),
+        (
+            "fs_edit",
+            r##"{"path":"README.md","edits":[{"oldText":"# calc","newText":"# hacked"}]}"##
+                .to_owned(),
+        ),
+        (
+            "fs_write",
+            r#"{"path":"tests/new.rs","content":"// x\n","mode":"create"}"#.to_owned(),
+        ),
+        ("fs_read", r#"{"path":"src/lib.rs"}"#.to_owned()),
+        (
+            "fs_edit",
+            r#"{"path":"src/lib.rs","edits":[{"oldText":"a - b","newText":"a + b"}]}"#.to_owned(),
+        ),
+    ];
+    let fx = fixture(script(calls, "done"));
+    let appr = Approver::start(&fx, approve_all());
+    let b = fx.start_scoped("scope", &["src/"]);
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent("go", "a61-scope-0000001", |_| {}),
+        120,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let st = statuses(&run);
+    assert_eq!(st[1].1, "refused", "{st:?}");
+    assert_eq!(st[1].2.as_deref(), Some("path-not-in-scope"), "{st:?}");
+    assert_eq!(
+        st[2].2.as_deref(),
+        Some("path-not-in-scope"),
+        "creating a file outside the scope is refused too: {st:?}"
+    );
+    assert_eq!(
+        st[4].1, "executed",
+        "the in-scope edit goes through its approval: {st:?}"
+    );
+    assert_eq!(
+        appr.reviewed().len(),
+        1,
+        "out-of-scope proposals never reach an approver"
+    );
+    let d = ic::diff(b.socket_path(), &run.run_id).unwrap();
+    assert_eq!(
+        d.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+        ["src/lib.rs"]
+    );
+    assert!(!working_copy(&fx).unwrap().join("tests/new.rs").exists());
+    b.shutdown();
+}
+
+/// A6.1 REHEARSAL (manual, no provider, no network): run the exact validation
+/// command of the self-hosting proposal through the real daemon, approvals and
+/// sandbox against the real self-hosting snapshot, with a scripted "model".
+///
+///   NEXUS_A61_SNAPSHOT=<snapshot dir> NEXUS_A61_DEPCACHE=<admitted cache> \
+///     cargo test -p nexus-broker --test code_a56 -- --ignored a61_rehearsal --nocapture
+#[test]
+#[ignore = "manual rehearsal; needs NEXUS_A61_SNAPSHOT and NEXUS_A61_DEPCACHE"]
+fn a61_rehearsal_selfhost_validation_command_in_the_sandbox() {
+    let (Ok(snap), Ok(_dc)) = (
+        std::env::var("NEXUS_A61_SNAPSHOT"),
+        std::env::var("NEXUS_A61_DEPCACHE"),
+    ) else {
+        println!("NOT RUN: set NEXUS_A61_SNAPSHOT and NEXUS_A61_DEPCACHE");
+        return;
+    };
+    if !sandbox_ready() {
+        return;
+    }
+    let calls = vec![(
+        "proc_run",
+        r#"{"program":"cargo","args":["test","--offline","--locked","-p","nexus-client"],"cwd":"."}"#.to_owned(),
+    )];
+    let fx = fixture_with(
+        script(calls, "validated"),
+        Box::new(move |root| {
+            for e in std::fs::read_dir(root).unwrap().flatten() {
+                let p = e.path();
+                if std::fs::symlink_metadata(&p).unwrap().is_dir() {
+                    let _ = std::fs::remove_dir_all(&p);
+                } else {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+            let o = Command::new("cp")
+                .arg("-a")
+                .arg(format!("{snap}/."))
+                .arg(root)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+            let _ = std::fs::remove_dir_all(root.join(".git"));
+        }),
+    );
+    let _appr = Approver::start(&fx, approve_all());
+    let b = fx.start("rehearsal");
+    let t0 = Instant::now();
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent("validate", "a61-rehearsal-0001", |_| {}),
+        900,
+    );
+    println!(
+        "REHEARSAL state={} wall={:?} activity={:?}",
+        run.state,
+        t0.elapsed(),
+        run.tool_activity
+            .iter()
+            .map(|a| (
+                a.tool.clone(),
+                a.status.clone(),
+                a.exit_code,
+                a.verification.clone(),
+                a.error_code.clone()
+            ))
+            .collect::<Vec<_>>()
+    );
+    let out = fx
+        .provider
+        .bodies
+        .lock()
+        .unwrap()
+        .last()
+        .and_then(last_output);
+    println!(
+        "REHEARSAL output tail: {}",
+        out.map(|o| o
+            .to_string()
+            .chars()
+            .rev()
+            .take(1400)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>())
+            .unwrap_or_default()
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(
+        run.last_test_verification.as_deref(),
+        Some("pass"),
+        "{run:?}"
+    );
+    b.shutdown();
+}
+
+/// A6.1 MANUAL FIXTURE for the Desktop smoke test (no provider, no network):
+/// the real daemon, broker, bridge and sandbox with a scripted model, held open
+/// so the real Tauri app can be pointed at the broker socket.
+///
+///   NEXUS_A61_HOLD_DIR=<dir> cargo test -p nexus-broker --test code_a56 -- --ignored a61_gui_fixture_hold --nocapture
+///
+/// It writes `<dir>/socket`, submits a Desktop-shaped run, and then follows
+/// files you create in `<dir>`: `approve-1` (approve the edit), `approve-2`
+/// (approve the command), `release` (shut down). Approvals are NEVER granted
+/// without those files.
+#[test]
+#[ignore = "manual GUI fixture; needs NEXUS_A61_HOLD_DIR"]
+fn a61_gui_fixture_hold() {
+    let Ok(hold) = std::env::var("NEXUS_A61_HOLD_DIR") else {
+        println!("NOT RUN: set NEXUS_A61_HOLD_DIR");
+        return;
+    };
+    if !sandbox_ready() {
+        return;
+    }
+    let hold = PathBuf::from(hold);
+    let fx = fixture(simple_fix_responder());
+    let order: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let (o2, h2) = (order.clone(), hold.clone());
+    let _appr = Approver::start(
+        &fx,
+        Arc::new(move |full| {
+            let id = full["approvalId"].as_str().unwrap_or("").to_owned();
+            let mut o = o2.lock().unwrap();
+            if !o.contains(&id) {
+                o.push(id.clone());
+            }
+            let idx = o.iter().position(|x| *x == id).unwrap() + 1;
+            if h2.join(format!("approve-{idx}")).exists() {
+                Decide::Approve
+            } else {
+                Decide::Wait
+            }
+        }),
+    );
+    let b = fx.start("hold");
+    std::fs::write(
+        hold.join("socket"),
+        b.socket_path().to_string_lossy().as_bytes(),
+    )
+    .unwrap();
+    let run = ic::submit(
+        b.socket_path(),
+        &desktop_code_intent(
+            "Fix the failing add test (GUI fixture run).",
+            "gui-a61-fixture-1",
+        ),
+    )
+    .unwrap()
+    .run;
+    std::fs::write(hold.join("run-id"), run.run_id.as_bytes()).unwrap();
+    println!(
+        "FIXTURE READY socket={} run={}",
+        b.socket_path().display(),
+        run.run_id
+    );
+    let end = Instant::now() + Duration::from_secs(3600);
+    while !hold.join("release").exists() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    b.shutdown();
 }

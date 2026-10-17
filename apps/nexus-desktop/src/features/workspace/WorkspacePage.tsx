@@ -1,5 +1,5 @@
 import { Bot, Compass, FlaskConical, Play } from "lucide-react";
-import { CancelModelRunButton, useModelRunStatus } from "../conversation/ModelRunPanel";
+import { CancelModelRunButton, PendingApprovalBanner, useModelRunStatus } from "../conversation/ModelRunPanel";
 import { endpointLabel, modelStateView, usageLabel } from "../../lib/modelRun";
 import { relativeTime } from "../../lib/format";
 import { taskStatusView } from "../../lib/status";
@@ -27,6 +27,7 @@ export function WorkspacePage() {
         </span>
       </nav>
       <Heading />
+      {selectedModel && <PendingApprovalBanner conversationId={selectedModel.conversationId} />}
       <Composer />
       {selectedMock && <span className="nv-sr-only" />}
       <div className="nv-split">

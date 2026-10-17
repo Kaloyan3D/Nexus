@@ -424,6 +424,26 @@ export interface PendingApproval {
   summary: string;
   requestDigest: string | null;
   expiresAtMs: number | null;
+  /** `edit` | `write` | `command` (A6.1). */
+  operation?: string | null;
+  /** File path inside the working copy, or the executable. */
+  target?: string | null;
+  /** The MODEL'S proposal (changed lines / argv); the approver reviews the daemon-derived diff. */
+  proposal?: string | null;
+  /** Fixed restrictions that apply to this operation. */
+  restrictions?: string[];
+  createdAtMs?: number | null;
+}
+
+/** The fixed run limits a Desktop coding task uses (defined by the backend, not the renderer). */
+export interface DesktopCodeLimits {
+  maxTurns: number;
+  maxToolCalls: number;
+  maxToolResultBytes: number;
+  maxEdits: number;
+  maxTests: number;
+  maxOutputTokens: number;
+  maxRuntimeSecs: number;
 }
 
 export interface ChangedFile {

@@ -8,6 +8,7 @@ import type {
   AllowedModel,
   AllowedWorkspace,
   AllowedCodeSource,
+  DesktopCodeLimits,
   DiffReply,
   IntentCancelReply,
   IntentRun,
@@ -57,6 +58,8 @@ export interface NativeApi {
   ): Promise<IntentSubmitReply>;
   /** A5.6: sources (identities) the broker lets this client have MODIFIED in an isolated copy. */
   intentCodeSources(): Promise<AllowedCodeSource[]>;
+  /** A6.1: the fixed limits a Desktop coding task uses (shown before submitting). */
+  intentCodeLimits(): Promise<DesktopCodeLimits>;
   /** A5.6: submit a controlled coding task (text + source identity only). */
   intentCodeSubmit(
     prompt: string,
@@ -127,6 +130,7 @@ export const tauriApi: NativeApi = {
   intentInspectSubmit: (prompt, workspaceId, idempotencyKey) =>
     invoke<IntentSubmitReply>("intent_inspect_submit", { prompt, workspaceId, idempotencyKey }),
   intentCodeSources: () => invoke<AllowedCodeSource[]>("intent_code_sources"),
+  intentCodeLimits: () => invoke<DesktopCodeLimits>("intent_code_limits"),
   intentCodeSubmit: (prompt, sourceId, idempotencyKey) =>
     invoke<IntentSubmitReply>("intent_code_submit", { prompt, sourceId, idempotencyKey }),
   intentDiff: (runId) => invoke<DiffReply>("intent_diff", { runId }),
@@ -188,6 +192,7 @@ export const unavailableApi: NativeApi = {
   intentWorkspaces: () => Promise.resolve([]),
   intentInspectSubmit: () => Promise.reject(notInShell),
   intentCodeSources: () => Promise.resolve([]),
+  intentCodeLimits: () => Promise.reject(notInShell),
   intentCodeSubmit: () => Promise.reject(notInShell),
   intentDiff: () => Promise.reject(notInShell),
   intentStatus: () => Promise.reject(notInShell),

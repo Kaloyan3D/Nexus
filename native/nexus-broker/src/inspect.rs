@@ -724,7 +724,7 @@ pub(crate) fn run(
             )
         })?
         .clone();
-    let policy = crate::code::resolve_policy(intent);
+    let policy = crate::code::resolve_policy(intent, &ws.write_allow);
     b.update(run_id, |r| {
         r.state = "preparing".into();
         r.workspace_id = Some(workspace_id.clone());
@@ -828,7 +828,12 @@ pub(crate) fn run(
         let wt = daemon(
             b,
             "worktree-create",
-            serde_json::json!({ "taskInstanceId": task_instance, "sourceRoot": root }),
+            match &ws.pinned_commit {
+                Some(c) => {
+                    serde_json::json!({ "taskInstanceId": task_instance, "sourceRoot": root, "expectedCommit": c })
+                }
+                None => serde_json::json!({ "taskInstanceId": task_instance, "sourceRoot": root }),
+            },
         )?;
         root = wt
             .pointer("/worktree/path")
@@ -1323,6 +1328,20 @@ fn turn_loop(
                     })
                 }
             };
+            // 1b. operator write scope (A6.1): refused before any approval exists
+            let validated = validated.and_then(|cp| {
+                if cp.kind == Kind::Write {
+                    if let Some(path) = &cp.path {
+                        if !crate::code::in_write_scope(path, &sh.policy.write_allow) {
+                            return Err(Refusal {
+                                code: "path-not-in-scope",
+                                message: "that path is outside the files the operator allowed for this source; propose a change inside the allowed scope".to_owned(),
+                            });
+                        }
+                    }
+                }
+                Ok(cp)
+            });
             let rendered = match validated {
                 Err(r) => {
                     act.status = "refused".into();
@@ -1405,7 +1424,7 @@ fn turn_loop(
                                 &params,
                                 &origin_tag,
                                 p.model_name,
-                                &cp.summary,
+                                &crate::code::proposal_view(&cp),
                             );
                             act.approval_id = outcome.approval_id().map(str::to_owned);
                             act.approval_outcome = Some(outcome.label().to_owned());

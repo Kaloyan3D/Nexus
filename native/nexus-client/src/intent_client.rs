@@ -191,6 +191,60 @@ pub struct PendingApproval {
     pub summary: String,
     pub request_digest: Option<String>,
     pub expires_at_ms: Option<u64>,
+    /// `edit` | `write` | `command` (A6.1: what the reviewer will be asked about).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// File path inside the working copy, or the executable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Bounded text of the MODEL'S proposal (changed lines / argv). The
+    /// authoritative, daemon-derived diff is only shown to the approver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<String>,
+    /// Fixed, human-readable restrictions that apply to this operation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restrictions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_ms: Option<u64>,
+}
+
+/// The fixed run limits the Desktop uses for `repo-code` (A6.1). They are
+/// defined here, shown to the user before submitting, and cannot be chosen by
+/// the renderer. A live session authorization must allow at least these.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopCodeLimits {
+    pub max_turns: u32,
+    pub max_tool_calls: u32,
+    pub max_tool_result_bytes: u64,
+    pub max_edits: u32,
+    pub max_tests: u32,
+    pub max_output_tokens: u64,
+    pub max_runtime_secs: u64,
+}
+
+pub const DESKTOP_CODE_LIMITS: DesktopCodeLimits = DesktopCodeLimits {
+    max_turns: 12,
+    max_tool_calls: 30,
+    max_tool_result_bytes: 131_072,
+    max_edits: 5,
+    max_tests: 5,
+    max_output_tokens: 1024,
+    max_runtime_secs: 1800,
+};
+
+impl DesktopCodeLimits {
+    pub fn to_intent_limits(self) -> nexus_contracts::intent::IntentLimits {
+        nexus_contracts::intent::IntentLimits {
+            max_output_tokens: Some(self.max_output_tokens),
+            max_turns: Some(self.max_turns),
+            max_tool_calls: Some(self.max_tool_calls),
+            max_tool_result_bytes: Some(self.max_tool_result_bytes),
+            max_runtime_secs: Some(self.max_runtime_secs),
+            max_edits: Some(self.max_edits),
+            max_tests: Some(self.max_tests),
+        }
+    }
 }
 
 /// One file of the final reviewable change set.
