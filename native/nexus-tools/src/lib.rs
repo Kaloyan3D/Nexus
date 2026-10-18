@@ -27,6 +27,7 @@ pub mod offline;
 pub mod process;
 pub mod read;
 pub mod redact;
+pub mod registry;
 pub mod result;
 pub mod sandbox;
 pub mod search;

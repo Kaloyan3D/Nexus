@@ -113,6 +113,10 @@ pub struct Daemon {
     pub workspace_bases: Vec<std::path::PathBuf>,
     /// A5.6: directory holding one isolated working copy per coding task.
     pub worktree_root: Option<std::path::PathBuf>,
+    /// A6.1.3: operator project registry (directory + trusted owner uids). When
+    /// set, working copies are made only for registered projects, named by id;
+    /// a caller-supplied path is refused.
+    pub project_registry: Option<(std::path::PathBuf, nexus_tools::registry::Trust)>,
     /// A5.6: repo-code pilot (also latched in the Kernel handle).
     pub repo_code_enabled: bool,
     /// A3.3: mutating tools are refused unless explicitly enabled.
@@ -1145,6 +1149,57 @@ fn approval_state_view(r: &nexus_store::ApprovalRow, full: bool) -> serde_json::
 /// Issuer submits one proposed mutation/process. The daemon (not the
 /// submitter) derives the authoritative operation description, pre/post
 /// image identity and diff from the live workspace.
+/// A6.1.3: the daemon enforces the project's write scope itself (the broker's
+/// check is only a courtesy that keeps out-of-scope proposals from an approver).
+/// The scope was frozen into the working copy's identity record at creation.
+fn write_scope_refusal(
+    daemon: &Daemon,
+    request: &nexus_tools::ToolRequestV1,
+) -> Option<serde_json::Value> {
+    let root = daemon.worktree_root.as_ref()?;
+    daemon.project_registry.as_ref()?;
+    let tool = nexus_tools::ToolId::parse(&request.tool_id)?;
+    if !tool.is_mutating() || !nexus_tools::gitwt::valid_task_id(&request.task_instance_id) {
+        return None;
+    }
+    let raw = std::fs::read_to_string(wt_meta_path(root, &request.task_instance_id)).ok()?;
+    let meta: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let allow: Vec<String> = meta
+        .get("writeAllow")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    if allow.is_empty() {
+        return None;
+    }
+    let path = request
+        .args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let path = path.strip_prefix("./").unwrap_or(path);
+    let ok = !path.is_empty()
+        && !path.starts_with('/')
+        && !path.split('/').any(|c| c == ".." || c == ".")
+        && allow.iter().any(|a| {
+            if a.ends_with('/') {
+                path.starts_with(a.as_str())
+            } else {
+                path == a
+            }
+        });
+    if ok {
+        return None;
+    }
+    daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+    Some(fail(
+        &request.task_instance_id,
+        "path-not-in-scope",
+        "the path is outside the project's write scope",
+    ))
+}
+
 fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     let refuse = |code: &str, msg: &str| {
         daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
@@ -1193,6 +1248,9 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     }
     if (is_write && !daemon.writes_enabled) || (is_proc && !daemon.process_enabled) {
         return refuse("scope-refused", "the requested tool class is not enabled");
+    }
+    if let Some(r) = write_scope_refusal(daemon, &request) {
+        return with_id(r, &req.id);
     }
     let ceiling = nexus_tools::ToolBudgets::ceiling();
     let mut kernel = match lock_kernel(daemon, &req.id) {
@@ -1878,7 +1936,12 @@ fn wt_meta_path(root: &std::path::Path, task: &str) -> std::path::PathBuf {
 fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     if let Err(r) = only_keys(
         &req.params,
-        &["taskInstanceId", "sourceRoot", "expectedCommit"],
+        &[
+            "taskInstanceId",
+            "sourceRoot",
+            "expectedCommit",
+            "projectId",
+        ],
         &req.id,
     ) {
         return r;
@@ -1908,36 +1971,94 @@ fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         Ok(v) => v,
         Err(r) => return with_id(r, &req.id),
     };
-    let source = match get_string(&req.params, "sourceRoot") {
-        Ok(v) => v,
-        Err(r) => return with_id(r, &req.id),
+    // A6.1.3: with a project registry the daemon decides what a project is: the
+    // caller names an id, never a path, and the pin comes from the registry.
+    let mut project_id: Option<String> = None;
+    let mut project_write_allow: Vec<String> = Vec::new();
+    let mut expected_commit = expected_commit;
+    let canon = if let Some((dir, trust)) = &daemon.project_registry {
+        if req.params.get("sourceRoot").is_some() {
+            daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                "scope-refused",
+                "this daemon is registry-managed: a caller-supplied source path is refused",
+            );
+        }
+        let pid = match get_string(&req.params, "projectId") {
+            Ok(v) => v,
+            Err(r) => return with_id(r, &req.id),
+        };
+        let rec = match nexus_tools::registry::resolve(dir, trust, &pid) {
+            Ok(r) => r,
+            Err(e) => {
+                daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                return fail(&req.id, "scope-refused", format!("project refused: {e}"));
+            }
+        };
+        let canon = std::path::PathBuf::from(&rec.source_path);
+        if canon.starts_with(root) || root.starts_with(&canon) {
+            daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                "scope-refused",
+                "project source overlaps the working-copy root",
+            );
+        }
+        if let Some(c) = &expected_commit {
+            if c != &rec.pinned_commit {
+                daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                return fail(
+                    &req.id,
+                    "scope-refused",
+                    "the requested commit is not the commit the operator pinned for this project",
+                );
+            }
+        }
+        expected_commit = Some(rec.pinned_commit.clone());
+        project_write_allow = rec.write_allow.clone();
+        project_id = Some(pid);
+        canon
+    } else {
+        if req.params.get("projectId").is_some() {
+            return fail(
+                &req.id,
+                "scope-refused",
+                "this daemon has no project registry",
+            );
+        }
+        let source = match get_string(&req.params, "sourceRoot") {
+            Ok(v) => v,
+            Err(r) => return with_id(r, &req.id),
+        };
+        if !source.starts_with('/') || source.contains('\0') {
+            return fail(
+                &req.id,
+                "scope-refused",
+                "source root must be an absolute path",
+            );
+        }
+        // The source repository must lie beneath an operator-allowed base, just
+        // like a bound workspace (the issuer does not get to pick any directory).
+        let canon = match std::fs::canonicalize(&source) {
+            Ok(c) => c,
+            Err(_) => return fail(&req.id, "scope-refused", "source repository does not exist"),
+        };
+        let beneath = daemon.workspace_bases.iter().any(|b| {
+            std::fs::canonicalize(b)
+                .map(|cb| cb != std::path::Path::new("/") && canon.starts_with(&cb))
+                .unwrap_or(false)
+        });
+        if !beneath {
+            daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                "scope-refused",
+                "source repository is not beneath an operator-allowed workspace base",
+            );
+        }
+        canon
     };
-    if !source.starts_with('/') || source.contains('\0') {
-        return fail(
-            &req.id,
-            "scope-refused",
-            "source root must be an absolute path",
-        );
-    }
-    // The source repository must lie beneath an operator-allowed base, just
-    // like a bound workspace (the issuer does not get to pick any directory).
-    let canon = match std::fs::canonicalize(&source) {
-        Ok(c) => c,
-        Err(_) => return fail(&req.id, "scope-refused", "source repository does not exist"),
-    };
-    let beneath = daemon.workspace_bases.iter().any(|b| {
-        std::fs::canonicalize(b)
-            .map(|cb| cb != std::path::Path::new("/") && canon.starts_with(&cb))
-            .unwrap_or(false)
-    });
-    if !beneath {
-        daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
-        return fail(
-            &req.id,
-            "scope-refused",
-            "source repository is not beneath an operator-allowed workspace base",
-        );
-    }
     let info = match nexus_tools::gitwt::create(&canon, root, &task) {
         Ok(i) => i,
         Err(e) => return wt_fail(daemon, &req.id, &e),
@@ -1963,6 +2084,13 @@ fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         "taskInstanceId": task,
         "sourceCommit": info.source.commit,
         "sourceRepoId": info.source.repo_id,
+        "projectId": project_id,
+        // Frozen at creation: a later registry change never alters a started task.
+        "writeAllow": project_write_allow,
+        "createdAtMs": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
     });
     let wrote = (|| -> std::io::Result<()> {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -2042,6 +2170,120 @@ fn do_worktree_diff(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     }
 }
 
+fn wt_meta_view(root: &std::path::Path, task: &str) -> serde_json::Value {
+    let meta: serde_json::Value = std::fs::read_to_string(wt_meta_path(root, task))
+        .ok()
+        .and_then(|r| serde_json::from_str(&r).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let (bytes, entries, truncated) =
+        nexus_tools::gitwt::disk_usage(root, task).unwrap_or((0, 0, false));
+    let created = meta
+        .get("createdAtMs")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            std::fs::symlink_metadata(root.join(task))
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+        });
+    serde_json::json!({
+        "taskInstanceId": task,
+        "projectId": meta.get("projectId").cloned().unwrap_or(serde_json::Value::Null),
+        "sourceCommit": meta.get("sourceCommit").cloned().unwrap_or(serde_json::Value::Null),
+        "createdAtMs": created,
+        "approxBytes": bytes,
+        "entries": entries,
+        "usageTruncated": truncated,
+        "hasMeta": !meta.is_null(),
+    })
+}
+
+/// A6.1.3 (issuer): every retained working copy under the managed root. Only real
+/// directories directly beneath the root with a valid task-id name are listed;
+/// symlinks and anything else are ignored.
+fn do_worktree_list(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    if let Err(r) = only_keys(&req.params, &[], &req.id) {
+        return r;
+    }
+    let root = match wt_root(daemon, &req.id) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(root) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !nexus_tools::gitwt::valid_task_id(&name) {
+                continue;
+            }
+            match std::fs::symlink_metadata(e.path()) {
+                Ok(m) if m.file_type().is_dir() => out.push(wt_meta_view(root, &name)),
+                _ => {}
+            }
+        }
+    }
+    out.sort_by_key(|v| v["createdAtMs"].as_u64().unwrap_or(0));
+    ok(&req.id, serde_json::json!({ "worktrees": out }))
+}
+
+fn do_worktree_stat(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    if let Err(r) = only_keys(&req.params, &["taskInstanceId"], &req.id) {
+        return r;
+    }
+    let root = match wt_root(daemon, &req.id) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let task = match get_string(&req.params, "taskInstanceId") {
+        Ok(v) => v,
+        Err(r) => return with_id(r, &req.id),
+    };
+    if !nexus_tools::gitwt::valid_task_id(&task) {
+        return fail(
+            &req.id,
+            "bad-request",
+            "bad-request: invalid task instance id",
+        );
+    }
+    match std::fs::symlink_metadata(root.join(&task)) {
+        Ok(m) if m.file_type().is_dir() => ok(
+            &req.id,
+            serde_json::json!({ "retained": true, "copy": wt_meta_view(root, &task) }),
+        ),
+        _ => ok(&req.id, serde_json::json!({ "retained": false })),
+    }
+}
+
+/// Is a task's working copy in use? A pending/approved approval or a tool
+/// execution that has not reached a terminal phase means yes.
+fn wt_is_leased(daemon: &Daemon, task: &str) -> Result<bool, serde_json::Value> {
+    let mut kernel = lock_kernel(daemon, "lease-check")?;
+    if let Ok(rows) = kernel.list_approvals(Some(task), 500) {
+        if rows
+            .iter()
+            .any(|r| r.state == "pending" || r.state == "approved")
+        {
+            return Ok(true);
+        }
+    }
+    if let Ok(entries) = kernel.list_tool_journal(Some(task)) {
+        let mut last: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for e in &entries {
+            last.insert(e.execution_id.as_str(), e.phase.as_str());
+        }
+        if last.values().any(|p| {
+            matches!(
+                *p,
+                "authorized" | "started" | "running" | "planned" | "prepared" | "applied"
+            )
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn do_worktree_remove(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     if let Err(r) = only_keys(&req.params, &["taskInstanceId"], &req.id) {
         return r;
@@ -2054,6 +2296,20 @@ fn do_worktree_remove(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         Ok(v) => v,
         Err(r) => return with_id(r, &req.id),
     };
+    if nexus_tools::gitwt::valid_task_id(&task) {
+        match wt_is_leased(daemon, &task) {
+            Ok(false) => {}
+            Ok(true) => {
+                daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                return fail(
+                    &req.id,
+                    "scope-refused",
+                    "the working copy is in use (pending approval or unfinished tool execution)",
+                );
+            }
+            Err(r) => return r,
+        }
+    }
     match nexus_tools::gitwt::remove(root, &task) {
         Ok(()) => {
             let _ = std::fs::remove_file(wt_meta_path(root, &task));
@@ -2269,6 +2525,9 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         args,
         budgets,
     };
+    if let Some(r) = write_scope_refusal(daemon, &request) {
+        return with_id(r, &req.id);
+    }
     // Bounded concurrency (backpressure, never an unbounded queue).
     if daemon.tool_inflight.fetch_add(1, Ordering::SeqCst) >= MAX_TOOL_INFLIGHT {
         daemon.tool_inflight.fetch_sub(1, Ordering::SeqCst);
@@ -2849,6 +3108,8 @@ pub fn dispatch(
             "worktree-create" => do_worktree_create(daemon, req),
             "worktree-diff" => do_worktree_diff(daemon, req),
             "worktree-remove" => do_worktree_remove(daemon, req),
+            "worktree-list" => do_worktree_list(daemon, req),
+            "worktree-stat" => do_worktree_stat(daemon, req),
             "seal" => do_seal(daemon, req),
             "accept" => do_accept(daemon, req),
             _ => unreachable!("privileged set is fixed"),
@@ -3382,6 +3643,7 @@ mod isolation_tests {
             reconcile_latch: Mutex::new(None),
             workspace_bases: Vec::new(),
             worktree_root: None,
+            project_registry: None,
             repo_code_enabled: false,
             writes_enabled: false,
             process_enabled: false,

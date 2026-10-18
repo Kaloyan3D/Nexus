@@ -42,6 +42,7 @@ fn help_text() -> String {
     s.push_str("    model status|cancel|recover <conversation-id>   inspect / stop / close out a model run\n");
     s.push_str("    model list            recorded model-only conversations\n");
     s.push_str("    integrity             read-only journal integrity (states the verification scope; never a bare 'secure')\n");
+    s.push_str("    project <add|list|show|remove|repin|set-scope|set-clients> ...   OPERATOR project registry (changes need ownership of the registry directory; the Desktop cannot register)\n");
     s.push_str("    approvals [--task <instance-id>]   read-only human-approval status (approve/deny only via the terminal approver)\n");
     s.push_str("    tools list            native read-only tools (fs.list, fs.read, fs.search)\n");
     s.push_str("    tools inspect <id>    tool contract, arguments, budgets and policy\n");
@@ -560,13 +561,24 @@ fn read_input(path: &str) -> Result<String, nexus_client::ClientError> {
 }
 
 fn run_line(r: &nexus_client::intent_client::IntentRun) -> String {
+    let outcome = r
+        .coding_outcome
+        .as_ref()
+        .map(|o| {
+            format!(
+                " [coding: change {} · verification {}]",
+                o.change, o.verification
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "{} {} {}/{} {}",
+        "{} {} {}/{} {}{}",
         r.run_id,
         r.state,
         r.provider_id.as_deref().unwrap_or("?"),
         r.remote_model_id.as_deref().unwrap_or("?"),
-        r.error_code.as_deref().unwrap_or("")
+        r.error_code.as_deref().unwrap_or(""),
+        outcome
     )
 }
 
@@ -1372,6 +1384,7 @@ fn main() {
         "model" => cmd_model(&args, &cfg),
         "intent" => cmd_intent(&args, &cfg),
         "tools" => cmd_tools(&args, &cfg),
+        "project" => cmd_project(&args, &cfg),
         "approvals" => cmd_approvals(&args, &cfg),
         "integrity" => match nexus_client::integrity(&cfg) {
             Ok(v) => {
@@ -1406,6 +1419,288 @@ fn main() {
         ),
     };
     std::process::exit(code as i32);
+}
+
+/// `nexus project ...` (A6.1.3) — the OPERATOR project registry.
+///
+/// Changing it requires owning the registry directory (default `~/.nexus/projects`,
+/// created 0700), which is the whole authority model: the Desktop and the broker
+/// only read it. Remove needs `--yes`; re-pinning needs the explicit new commit.
+fn cmd_project(args: &[String], cfg: &ClientConfig) -> ExitCode {
+    use nexus_tools::registry as reg;
+    let sub = args.first().map(String::as_str).unwrap_or("");
+    let rest = &args[1.min(args.len())..];
+    let dir = flag_value(args, "--registry")
+        .or_else(|| {
+            std::env::var("NEXUS_PROJECT_REGISTRY")
+                .ok()
+                .filter(|v| !v.is_empty())
+        })
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".nexus").join("projects"))
+        });
+    let Some(dir) = dir else {
+        return fail(
+            cfg,
+            "no registry directory: pass --registry DIR or set NEXUS_PROJECT_REGISTRY",
+        );
+    };
+    let mut uids = Vec::new();
+    if let Some(u) = flag_value(args, "--owner-uid") {
+        for p in u.split(',').filter(|p| !p.is_empty()) {
+            match p.parse::<u32>() {
+                Ok(n) => uids.push(n),
+                Err(_) => return fail(cfg, "--owner-uid must be uid numbers"),
+            }
+        }
+    }
+    let trust = reg::Trust { owner_uids: uids };
+    let positional: Vec<&String> = {
+        let mut v = Vec::new();
+        let mut i = 0;
+        while i < rest.len() {
+            if matches!(
+                rest[i].as_str(),
+                "--registry"
+                    | "--owner-uid"
+                    | "--commit"
+                    | "--write-allow"
+                    | "--to"
+                    | "--allow-uid"
+            ) {
+                i += 2;
+            } else if rest[i].starts_with("--") {
+                i += 1;
+            } else {
+                v.push(&rest[i]);
+                i += 1;
+            }
+        }
+        v
+    };
+    let scope = || -> Vec<String> {
+        flag_value(args, "--write-allow")
+            .map(|l| {
+                l.split(',')
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let uid_list = || -> Result<Vec<u32>, &'static str> {
+        let mut v = Vec::new();
+        if let Some(l) = flag_value(args, "--allow-uid") {
+            for p in l.split(',').filter(|p| !p.is_empty()) {
+                v.push(
+                    p.parse::<u32>()
+                        .map_err(|_| "--allow-uid must be uid numbers")?,
+                );
+            }
+        }
+        Ok(v)
+    };
+    let show = |p: &reg::ProjectRecord| -> (serde_json::Value, String) {
+        let v = serde_json::json!({
+            "id": p.id, "sourcePath": p.source_path, "pinnedCommit": p.pinned_commit,
+            "writeAllow": p.write_allow, "allowedUids": p.allowed_uids, "createdAtMs": p.created_at_ms, "updatedAtMs": p.updated_at_ms,
+            "executionRestrictions": reg::EXECUTION_RESTRICTIONS, "disclosureScope": reg::DISCLOSURE_SCOPE,
+        });
+        let h = format!(
+            "{}\n  source:  {}\n  pinned:  {}\n  writes:  {}\n  restrictions:\n{}\n  disclosure: {}",
+            p.id,
+            p.source_path,
+            p.pinned_commit,
+            if p.write_allow.is_empty() { "whole project".to_owned() } else { p.write_allow.join(", ") },
+            reg::EXECUTION_RESTRICTIONS.iter().map(|r| format!("    - {r}")).collect::<Vec<_>>().join("\n"),
+            reg::DISCLOSURE_SCOPE
+        );
+        (v, h)
+    };
+    let fail_reg = |e: reg::RegError| {
+        emit_err(
+            cfg.json,
+            &nexus_client::ClientError::usage(format!("project {}: {}", e.code, e.message)),
+        )
+    };
+    match sub {
+        "add" => {
+            let (Some(id), Some(path)) = (positional.first(), positional.get(1)) else {
+                return fail(cfg, "usage: nexus project add <id> <abs-git-path> [--commit <sha40>] [--write-allow dir/,file] [--allow-uid U,U] [--defer-verify] [--registry DIR]");
+            };
+            let uids = match uid_list() {
+                Ok(u) => u,
+                Err(m) => return fail(cfg, m),
+            };
+            match reg::add_with(
+                &dir,
+                &trust,
+                id,
+                std::path::Path::new(path.as_str()),
+                flag_value(args, "--commit").as_deref(),
+                scope(),
+                uids,
+                args.iter().any(|a| a == "--defer-verify"),
+            ) {
+                Ok(p) => {
+                    let (v, h) = show(&p);
+                    emit(cfg, &v, &format!("registered {h}"));
+                    ExitCode::Ok
+                }
+                Err(e) => fail_reg(e),
+            }
+        }
+        "list" => match reg::load(&dir, &trust) {
+            Ok(f) => {
+                let h = if f.projects.is_empty() {
+                    "no projects registered".to_owned()
+                } else {
+                    f.projects
+                        .iter()
+                        .map(|p| {
+                            format!(
+                                "{:<24} {}  {}  writes: {}",
+                                p.id,
+                                &p.pinned_commit[..12],
+                                p.source_path,
+                                if p.write_allow.is_empty() {
+                                    "whole project".into()
+                                } else {
+                                    p.write_allow.join(",")
+                                }
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                emit(
+                    cfg,
+                    &serde_json::json!({"generation": f.generation, "projects": f.projects}),
+                    &h,
+                );
+                ExitCode::Ok
+            }
+            Err(e) => fail_reg(e),
+        },
+        "show" => {
+            let Some(id) = positional.first() else {
+                return fail(cfg, "usage: nexus project show <id>");
+            };
+            match reg::load(&dir, &trust) {
+                Ok(f) => match f.get(id) {
+                    Some(p) => {
+                        let (v, h) = show(p);
+                        emit(cfg, &v, &h);
+                        ExitCode::Ok
+                    }
+                    None => fail(cfg, &format!("project not-found: no project {id}")),
+                },
+                Err(e) => fail_reg(e),
+            }
+        }
+        "remove" => {
+            let Some(id) = positional.first() else {
+                return fail(cfg, "usage: nexus project remove <id> --yes");
+            };
+            if !args.iter().any(|a| a == "--yes") {
+                return fail(cfg, "remove is an explicit operator action: repeat with --yes (running tasks and retained copies are not affected)");
+            }
+            match reg::remove(&dir, &trust, id) {
+                Ok(()) => {
+                    emit(cfg, &serde_json::json!({"removed": id}), &format!("removed {id} (new tasks only; running tasks and retained copies are unaffected)"));
+                    ExitCode::Ok
+                }
+                Err(e) => fail_reg(e),
+            }
+        }
+        "repin" => {
+            let (Some(id), Some(to)) = (positional.first(), flag_value(args, "--to")) else {
+                return fail(cfg, "usage: nexus project repin <id> --to <sha40>   (the source must already be checked out, clean, at that commit)");
+            };
+            match reg::repin_with(
+                &dir,
+                &trust,
+                id,
+                &to,
+                args.iter().any(|a| a == "--defer-verify"),
+            ) {
+                Ok((o, n)) => {
+                    emit(
+                        cfg,
+                        &serde_json::json!({"id": id, "from": o, "to": n}),
+                        &format!("{id}: pin {o} -> {n} (new tasks only)"),
+                    );
+                    ExitCode::Ok
+                }
+                Err(e) => fail_reg(e),
+            }
+        }
+        "set-clients" => {
+            let Some(id) = positional.first() else {
+                return fail(
+                    cfg,
+                    "usage: nexus project set-clients <id> (--allow-uid U,U | --all)",
+                );
+            };
+            let list = if args.iter().any(|a| a == "--all") {
+                Vec::new()
+            } else if flag_value(args, "--allow-uid").is_some() {
+                match uid_list() {
+                    Ok(u) => u,
+                    Err(m) => return fail(cfg, m),
+                }
+            } else {
+                return fail(
+                    cfg,
+                    "give --allow-uid U,U or --all (every uid the broker allows)",
+                );
+            };
+            match reg::set_allowed_uids(&dir, &trust, id, list.clone()) {
+                Ok(()) => {
+                    emit(
+                        cfg,
+                        &serde_json::json!({"id": id, "allowedUids": list}),
+                        &format!("{id}: client uids updated (new tasks only)"),
+                    );
+                    ExitCode::Ok
+                }
+                Err(e) => fail_reg(e),
+            }
+        }
+        "set-scope" => {
+            let Some(id) = positional.first() else {
+                return fail(
+                    cfg,
+                    "usage: nexus project set-scope <id> (--write-allow dir/,file | --all)",
+                );
+            };
+            let list = if args.iter().any(|a| a == "--all") {
+                Vec::new()
+            } else if flag_value(args, "--write-allow").is_some() {
+                scope()
+            } else {
+                return fail(cfg, "give --write-allow dir/,file or --all (whole project)");
+            };
+            match reg::set_write_allow(&dir, &trust, id, list.clone()) {
+                Ok(()) => {
+                    emit(
+                        cfg,
+                        &serde_json::json!({"id": id, "writeAllow": list}),
+                        &format!("{id}: write scope updated (new tasks only)"),
+                    );
+                    ExitCode::Ok
+                }
+                Err(e) => fail_reg(e),
+            }
+        }
+        _ => fail(
+            cfg,
+            "usage: nexus project <add|list|show|remove|repin|set-scope|set-clients> ...",
+        ),
+    }
 }
 
 /// `nexus tools depcache <admit|verify|list|stats|gc> --cache <dir> ...`

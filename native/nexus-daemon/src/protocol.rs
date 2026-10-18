@@ -273,6 +273,8 @@ pub fn is_privileged(cmd: &str) -> bool {
             | "worktree-create"
             | "worktree-diff"
             | "worktree-remove"
+            | "worktree-list"
+            | "worktree-stat"
     )
 }
 

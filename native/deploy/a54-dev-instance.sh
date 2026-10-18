@@ -12,6 +12,7 @@
 #   sh deploy/a54-dev-instance.sh synthetic-code-repo   create $A54_HOME/code-base/repo (a tiny Rust crate with a FAILING test, committed) for A5.6
 #   (A5.6) export A56_CODE_SOURCE=ID=ABS_PATH before `start` to enable repo-code on that ONE git repository (single-UID,
 #          TEST-ONLY approver: a human must still approve every edit/command with the approver tool; see docs/A5.6-LIVE-ACCEPTANCE.md)
+#   (A6.1.3) export A613_PROJECT_REGISTRY=/abs/dir instead for several registered projects (see docs/A6.1.3-PROJECT-OPERATIONS.md)
 #   (A6.1) also set A56_CODE_COMMIT=<40-hex> to pin the source to one commit and A61_CODE_WRITE_ALLOW=dir/,file to scope model writes, A61_DEP_CACHE=/abs/dir for dependency-bearing builds
 #   sh deploy/a54-dev-instance.sh check      read-only: is the running broker the installed build?
 #   sh deploy/a54-dev-instance.sh stop
@@ -149,6 +150,28 @@ start)
     if [ -n "${A61_CODE_WRITE_ALLOW:-}" ]; then
       EXTRA_B="$EXTRA_B --code-write-allow $CID=$A61_CODE_WRITE_ALLOW"
     fi
+  fi
+  # A6.1.3: multi-project mode. The operator registry (nexus project add/list/show/remove/repin)
+  # replaces the single A56_CODE_SOURCE; the daemon makes working copies only for registered
+  # projects, by id. Optional lower limits: A613_CAP_TURNS/TOOL_CALLS/EDITS/COMMANDS/MINUTES.
+  if [ -n "${A613_PROJECT_REGISTRY:-}" ]; then
+    [ -z "${A56_CODE_SOURCE:-}${A55_WORKSPACE:-}" ] || { echo "A613_PROJECT_REGISTRY replaces A56_CODE_SOURCE/A55_WORKSPACE; unset them" >&2; exit 2; }
+    case "$A613_PROJECT_REGISTRY" in /*) ;; *) echo "A613_PROJECT_REGISTRY must be an absolute directory" >&2; exit 2;; esac
+    [ -d "$A613_PROJECT_REGISTRY" ] || { echo "register at least one project first (nexus project add ...); registry directory missing" >&2; exit 2; }
+    CBASE="$A/code-base"; WTR="$CBASE/worktrees"; mkdir -p "$WTR"
+    DEPC=""
+    if [ -n "${A61_DEP_CACHE:-}" ]; then
+      case "$A61_DEP_CACHE" in /*) ;; *) echo "A61_DEP_CACHE must be an absolute directory" >&2; exit 2;; esac
+      DEPC="--dep-cache $A61_DEP_CACHE"
+    fi
+    EXTRA_D="$DEPC --workspace-bases $CBASE --enable-repo-code --enable-writes --enable-process --require-human-approval --allow-nonindependent-approver-test-only --approver-cap $A/daemon/approver.cap --approver-uids $UIDN --worktree-root $WTR --project-registry $A613_PROJECT_REGISTRY"
+    EXTRA_B="--project-registry $A613_PROJECT_REGISTRY"
+    [ -z "${A613_CAP_TURNS:-}" ] || EXTRA_B="$EXTRA_B --code-cap-turns $A613_CAP_TURNS"
+    [ -z "${A613_CAP_TOOL_CALLS:-}" ] || EXTRA_B="$EXTRA_B --code-cap-tool-calls $A613_CAP_TOOL_CALLS"
+    [ -z "${A613_CAP_EDITS:-}" ] || EXTRA_B="$EXTRA_B --code-cap-edits $A613_CAP_EDITS"
+    [ -z "${A613_CAP_COMMANDS:-}" ] || EXTRA_B="$EXTRA_B --code-cap-commands $A613_CAP_COMMANDS"
+    [ -z "${A613_CAP_MINUTES:-}" ] || EXTRA_B="$EXTRA_B --code-cap-minutes $A613_CAP_MINUTES"
+    [ -z "${A613_APPROVAL_TTL_SECS:-}" ] || EXTRA_B="$EXTRA_B --approval-ttl-secs $A613_APPROVAL_TTL_SECS"
   fi
   # shellcheck disable=SC2086
   "$BIN/nexusd" $EXTRA_D --db "$A/daemon/k.db" --socket "$A/daemon/n.sock" --cap "$A/daemon/issuer.cap" \

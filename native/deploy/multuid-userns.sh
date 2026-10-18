@@ -33,6 +33,7 @@ nexus-approver-test:x:20005:20005::/nonexistent:/usr/sbin/nologin
 nexus-witness-test:x:20007:20007::/nonexistent:/usr/sbin/nologin
 nexus-desktop-test:x:20010:20010::/nonexistent:/usr/sbin/nologin
 nexus-desktop2-test:x:20011:20011::/nonexistent:/usr/sbin/nologin
+nexus-operator-test:x:20012:20012::/nonexistent:/usr/sbin/nologin
 P
 cat >> "$M/etc/group" <<G
 nexusd-test:x:20001:
@@ -46,6 +47,8 @@ nexus-witnessc-test:x:20008:nexusd-test,nexus-witness-test,nexus-bystander-test
 nexus-brokerclient-test:x:20009:nexus-issuer-test,nexus-desktop-test,nexus-desktop2-test,nexus-bystander-test
 nexus-desktop-test:x:20010:
 nexus-desktop2-test:x:20011:
+nexus-operator-test:x:20012:
+nexus-registry-test:x:20013:nexusd-test,nexus-issuer-test,nexus-operator-test
 G
 cat > "$M/run.sh" <<'R'
 #!/bin/sh

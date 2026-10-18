@@ -20,6 +20,8 @@ fn usage() -> i32 {
     eprintln!("         [--allowed-uids U,U] [--socket-group GID] [--node PATH] [--max-active N]");
     eprintln!("         [--rate-per-minute N] [--allow-model provider/model]... [--read-timeout-ms N] [--total-timeout-ms N]");
     eprintln!("         [--workspace ID=ABS_PATH]... [--workspace-allow ID=UID,UID]...   (A5.5 repo-inspect workspaces)");
+    eprintln!("         [--code-cap-turns N] [--code-cap-tool-calls N] [--code-cap-edits N] [--code-cap-commands N] [--code-cap-minutes N]   (A6.1.3: LOWER the fixed repo-code limits 12/30/5/5/30; cannot raise them)");
+    eprintln!("         [--project-registry DIR [--project-registry-owner-uid UID[,UID]]]   (A6.1.3: coding projects from the operator registry; exclusive with --code-source)");
     eprintln!("         [--code-source ID=ABS_PATH]... [--code-allow ID=UID,UID]... [--code-commit ID=SHA40]... [--code-write-allow ID=PATH[,PATH]]...   (A5.6 repo-code sources; the daemon also needs --enable-repo-code --worktree-root)");
     eprintln!("Runs as the issuer identity. Refuses to start unless the daemon has the model pilot enabled.");
     2
@@ -292,8 +294,105 @@ fn authorize_live_session(args: &[String]) -> i32 {
     }
 }
 
+/// A6.1.3 operator working-copy lifecycle: `worktree list|patch|remove`.
+fn worktree_command(args: &[String]) -> i32 {
+    let get = |n: &str| {
+        args.iter()
+            .position(|a| a == n)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let flag = |n: &str| args.iter().any(|a| a == n);
+    let json = flag("--json");
+    let (Some(state), Some(sock), Some(cap)) =
+        (get("--state-dir"), get("--daemon-socket"), get("--cap"))
+    else {
+        eprintln!("usage: nexus-broker worktree <list|patch|remove> --state-dir D --daemon-socket S --cap F [ID] [--out FILE] [--yes] [--orphan] [--json]");
+        return 2;
+    };
+    let c = nexus_broker::worktree_ops::Ctx {
+        state_dir: PathBuf::from(state),
+        daemon_socket: PathBuf::from(sock),
+        cap_path: PathBuf::from(cap),
+    };
+    let value_flags = ["--state-dir", "--daemon-socket", "--cap", "--out"];
+    let positional: Option<&String> = {
+        let mut i = 1;
+        let mut found = None;
+        while i < args.len() {
+            if value_flags.contains(&args[i].as_str()) {
+                i += 2;
+            } else if args[i].starts_with("--") {
+                i += 1;
+            } else {
+                found = Some(&args[i]);
+                break;
+            }
+        }
+        found
+    };
+    let r: Result<serde_json::Value, String> = match args.first().map(String::as_str) {
+        Some("list") => {
+            nexus_broker::worktree_ops::list(&c).map(|v| serde_json::json!({ "copies": v }))
+        }
+        Some("patch") => match positional {
+            Some(k) => nexus_broker::worktree_ops::patch(
+                &c,
+                k,
+                get("--out").as_deref().map(std::path::Path::new),
+                flag("--allow-truncated"),
+            ),
+            None => Err("patch needs a run id or working-copy id".into()),
+        },
+        Some("remove") => match positional {
+            Some(k) if flag("--yes") => nexus_broker::worktree_ops::remove(&c, k, flag("--orphan")),
+            Some(_) => Err("remove is an explicit operator action: repeat with --yes".into()),
+            None => Err("remove needs a run id or working-copy id".into()),
+        },
+        _ => Err("unknown worktree command (list | patch | remove)".into()),
+    };
+    match r {
+        Ok(v) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+            } else if let Some(items) = v.get("copies").and_then(|c| c.as_array()) {
+                if items.is_empty() {
+                    println!("no retained working copies");
+                }
+                for w in items {
+                    println!(
+                        "{:<30} {:<9} {:<14} base {}  {} KiB  age {}s  run {}",
+                        w["taskInstanceId"].as_str().unwrap_or(""),
+                        w["status"].as_str().unwrap_or(""),
+                        w["project"].as_str().unwrap_or("-"),
+                        w["baseCommit"]
+                            .as_str()
+                            .map(|c| &c[..c.len().min(12)])
+                            .unwrap_or("-"),
+                        w["approxBytes"].as_u64().unwrap_or(0) / 1024,
+                        w["ageMs"].as_u64().unwrap_or(0) / 1000,
+                        w["runId"].as_str().unwrap_or("-"),
+                    );
+                }
+            } else if let Some(p) = v.get("patch").and_then(|p| p.as_str()) {
+                print!("{p}");
+            } else {
+                println!("{v}");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("nexus-broker worktree: {e}");
+            2
+        }
+    }
+}
+
 fn run() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("worktree") {
+        return worktree_command(&args[1..]);
+    }
     if args.first().map(String::as_str) == Some("authorize-live") {
         return authorize_live(&args[1..]);
     }
@@ -356,6 +455,41 @@ fn run() -> i32 {
             transport: None,
             workspaces: parse_workspaces(&args)?,
             code_sources: parse_code_sources(&args)?,
+            approval_ttl_ms: match get("--approval-ttl-secs") {
+                None => None,
+                Some(v) => match v.parse::<i64>() {
+                    Ok(n) if (1..=300).contains(&n) => Some(n * 1000),
+                    _ => return Err("--approval-ttl-secs must be 1..=300 (it can only shorten the 300 s default)".into()),
+                },
+            },
+            code_caps: {
+                let num = |n: &str| -> Result<Option<u64>, String> {
+                    get(n)
+                        .map(|v| v.parse::<u64>().map_err(|_| format!("{n} must be a number")))
+                        .transpose()
+                };
+                nexus_broker::CodeCaps {
+                    max_turns: num("--code-cap-turns")?.map(|v| v as u32),
+                    max_tool_calls: num("--code-cap-tool-calls")?.map(|v| v as u32),
+                    max_edits: num("--code-cap-edits")?.map(|v| v as u32),
+                    max_tests: num("--code-cap-commands")?.map(|v| v as u32),
+                    max_runtime_secs: num("--code-cap-minutes")?.map(|m| m * 60),
+                }
+            },
+            project_registry: match get("--project-registry") {
+                None => None,
+                Some(d) => {
+                    let mut uids = Vec::new();
+                    for u in get("--project-registry-owner-uid")
+                        .unwrap_or_default()
+                        .split(',')
+                        .filter(|u| !u.is_empty())
+                    {
+                        uids.push(u.parse::<u32>().map_err(|_| "--project-registry-owner-uid must be uid numbers")?);
+                    }
+                    Some((PathBuf::from(d), nexus_tools::registry::Trust { owner_uids: uids }))
+                }
+            },
             state_dir: state,
         })
     };

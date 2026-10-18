@@ -23,6 +23,7 @@ pub mod pipeline;
 pub mod server;
 pub mod store;
 pub mod trust;
+pub mod worktree_ops;
 
-pub use config::{BrokerConfig, WorkspaceSpec};
+pub use config::{BrokerConfig, CodeCaps, WorkspaceSpec};
 pub use server::{start, BrokerHandle};

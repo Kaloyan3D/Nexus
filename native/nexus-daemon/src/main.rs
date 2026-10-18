@@ -63,6 +63,7 @@ fn usage() -> i32 {
     println!("         [--require-external-witness]  (refuse to start without --external-witness; production units)");
     println!("         [--require-human-approval]  (A4.2: per-operation human approval; needs --require-independent-approver)");
     println!("         [--enable-repo-inspect]  (A5.5: model-proposed read-only tools in repo-inspect commands; default off; needs --enable-model-pilot + --workspace-bases)");
+    println!("         [--project-registry DIR [--project-registry-owner-uid UID[,UID]]]  (A6.1.3: operator project registry; with it the daemon makes working copies only for registered projects, by id)");
     println!("         [--enable-repo-code --worktree-root DIR]  (A5.6: bounded autonomous coding in isolated working copies; default off; needs the model pilot, --enable-writes, --enable-process, --require-human-approval and a worktree root beneath --workspace-bases)");
     println!("         [--enable-model-pilot]  (A5.1: model-only text inference scope; default off; needs shadow-test + --allowed-uids)");
     println!("Trust modes: readonly (default, privileged mutations disabled) |");
@@ -1059,6 +1060,49 @@ fn run(args: &[String]) -> i32 {
                 .collect()
         })
         .unwrap_or_default();
+    // A6.1.3: operator project registry (read-only here; the operator owns it).
+    let project_registry = match flag_str(args, "--project-registry") {
+        None => {
+            if flag_str(args, "--project-registry-owner-uid").is_some() {
+                return fatal(
+                    "bad-config",
+                    "--project-registry-owner-uid needs --project-registry (failing closed)",
+                );
+            }
+            None
+        }
+        Some(dir) => {
+            if !repo_code_enabled {
+                return fatal(
+                    "bad-config",
+                    "--project-registry is only valid together with --enable-repo-code (failing closed)",
+                );
+            }
+            let mut uids = Vec::new();
+            for u in flag_str(args, "--project-registry-owner-uid")
+                .unwrap_or_default()
+                .split(',')
+                .filter(|u| !u.is_empty())
+            {
+                match u.parse::<u32>() {
+                    Ok(n) => uids.push(n),
+                    Err(_) => {
+                        return fatal(
+                            "bad-config",
+                            "--project-registry-owner-uid must be uid numbers",
+                        )
+                    }
+                }
+            }
+            let trust = nexus_tools::registry::Trust { owner_uids: uids };
+            let dir = std::path::PathBuf::from(dir);
+            // Fail closed at start-up on an untrusted or malformed registry.
+            if let Err(e) = nexus_tools::registry::load(&dir, &trust) {
+                return fatal("bad-config", &format!("project registry refused: {e}"));
+            }
+            Some((dir, trust))
+        }
+    };
     let daemon = Arc::new(Daemon {
         kernel: Mutex::new(kernel),
         trust_mode,
@@ -1071,6 +1115,7 @@ fn run(args: &[String]) -> i32 {
         reconcile_latch: Mutex::new(None),
         workspace_bases,
         worktree_root: worktree_root.and_then(|r| std::fs::canonicalize(r).ok()),
+        project_registry,
         repo_code_enabled,
         writes_enabled,
         process_enabled,

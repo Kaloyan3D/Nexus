@@ -154,6 +154,9 @@ impl Broker {
         if is_agentic(&run.intent_type) && !run.terminal {
             text.clear();
         }
+        // A6.1.1: what the runtime verified (derived on read, so historical
+        // records get it too); never from the model's text.
+        run.coding_outcome = nexus_client::intent_client::derive_coding_outcome(&run);
         (run, text)
     }
 
@@ -431,6 +434,41 @@ impl Broker {
         }))
     }
 
+    /// Read-only facts about the retained isolated working copy of one of THIS
+    /// client's runs (A6.1.3). Never a path; ownership-checked like the diff.
+    fn copy_info(&self, client: &str, run_id: &str) -> CmdResult {
+        let rec = self.owned(client, run_id)?;
+        if rec.run.intent_type != nexus_contracts::intent::INTENT_REPO_CODE {
+            return Err(("not-found", "this run has no working copy".into()));
+        }
+        let task = rec
+            .run
+            .task_instance_id
+            .clone()
+            .ok_or(("not-found", "this run has no working copy yet".to_owned()))?;
+        let resp = pipeline::daemon(self, "worktree-stat", json!({ "taskInstanceId": task }))
+            .map_err(|e| {
+                (
+                    "internal",
+                    format!("the working copy could not be inspected ({})", e.code),
+                )
+            })?;
+        let copy = resp.get("copy").cloned().unwrap_or(Value::Null);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let created = copy.get("createdAtMs").and_then(|v| v.as_u64());
+        Ok(json!({
+            "retained": resp.get("retained").cloned().unwrap_or(Value::Bool(false)),
+            "active": !rec.run.terminal,
+            "projectId": rec.run.workspace_id,
+            "baseCommit": rec.run.worktree_commit,
+            "ageMs": created.map(|c| now.saturating_sub(c)),
+            "approxBytes": copy.get("approxBytes").cloned().unwrap_or(Value::Null),
+        }))
+    }
+
     fn follow(&self, client: &str, params: &Value) -> CmdResult {
         let run_id = params.get("runId").and_then(|v| v.as_str()).unwrap_or("");
         let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -530,12 +568,34 @@ impl Broker {
             }
             "intent-models" => Ok(json!({ "models": self.models()? })),
             "intent-code-sources" => Ok(json!({
+                // identities plus the operator's read-only restrictions (never a path)
                 "sources": crate::inspect::code_sources_for(&self.cfg, client)
                     .into_iter()
-                    .map(|id| json!({ "sourceId": id }))
+                    .map(|id| {
+                        let pool = self.cfg.effective_code_sources();
+                        let spec = pool.iter().find(|w| w.id == id);
+                        let mut v = json!({ "sourceId": id });
+                        if let Some(c) = spec.and_then(|w| w.pinned_commit.as_ref()) {
+                            v["pinnedCommit"] = json!(c);
+                        }
+                        if let Some(w) = spec.filter(|w| !w.write_allow.is_empty()) {
+                            v["writeAllow"] = json!(w.write_allow);
+                        }
+                        v
+                    })
                     .collect::<Vec<_>>(),
             })),
             "intent-diff" => self.diff(client, run_id),
+            "intent-copy" => self.copy_info(client, run_id),
+            "intent-code-config" => Ok(json!({
+                "limits": self.cfg.code_caps.effective(),
+                "approvalLifetimeSecs": self
+                    .cfg
+                    .approval_ttl_ms
+                    .unwrap_or(crate::code::APPROVAL_TTL_MS)
+                    .clamp(1_000, crate::code::APPROVAL_TTL_MS)
+                    / 1000,
+            })),
             "intent-workspaces" => Ok(json!({
                 "workspaces": crate::inspect::workspaces_for(&self.cfg, client)
                     .into_iter()
@@ -786,6 +846,14 @@ pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
         .map_err(|e| format!("lock: {e}"))?;
     lock.try_lock_exclusive()
         .map_err(|_| "another broker already owns this state directory".to_owned())?;
+    cfg.code_caps.validate()?;
+    if cfg.project_registry.is_some() && !cfg.code_sources.is_empty() {
+        return Err("--project-registry and --code-source are mutually exclusive".into());
+    }
+    if let Some((dir, trust)) = &cfg.project_registry {
+        nexus_tools::registry::load(dir, trust)
+            .map_err(|e| format!("project registry refused: {e}"))?;
+    }
     let (workspaces, code_sources) = crate::inspect::validate_code_sources(&cfg)?;
     cfg.workspaces = workspaces;
     cfg.code_sources = code_sources;

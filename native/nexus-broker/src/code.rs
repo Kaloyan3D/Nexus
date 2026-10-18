@@ -538,11 +538,16 @@ pub fn request_and_wait(
     view: &ProposalView,
 ) -> ApprovalOutcome {
     let mut p = params.clone();
-    let ttl = APPROVAL_TTL_MS.min(
-        deadline
-            .saturating_duration_since(Instant::now())
-            .as_millis() as i64,
-    );
+    let ttl = b
+        .cfg
+        .approval_ttl_ms
+        .unwrap_or(APPROVAL_TTL_MS)
+        .clamp(1_000, APPROVAL_TTL_MS)
+        .min(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as i64,
+        );
     if ttl < 1_000 {
         return ApprovalOutcome::Refused {
             code: "max-runtime".into(),

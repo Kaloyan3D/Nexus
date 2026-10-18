@@ -230,7 +230,7 @@ pub fn validate_code_sources(
 /// Code sources this client may select, by identity only.
 pub fn code_sources_for(cfg: &crate::BrokerConfig, client: &str) -> Vec<String> {
     let uid = uid_of(client);
-    cfg.code_sources
+    cfg.effective_code_sources()
         .iter()
         .filter(|w| {
             w.allowed_uids.is_empty() || uid.map(|u| w.allowed_uids.contains(&u)).unwrap_or(false)
@@ -694,7 +694,16 @@ pub(crate) fn run(
     let ctx = Ctx { b, run_id, flag };
     let started = Instant::now();
     let mode = Mode::of(intent);
-    let limits = resolve_limits(intent);
+    let mut limits = resolve_limits(intent);
+    if mode == Mode::Code {
+        // A6.1.3: operator caps only ever lower what the client asked for.
+        let eff = b.cfg.code_caps.effective();
+        limits.turns = limits.turns.min(eff.max_turns);
+        limits.tool_calls = limits.tool_calls.min(eff.max_tool_calls);
+        limits.runtime = limits
+            .runtime
+            .min(Duration::from_secs(eff.max_runtime_secs));
+    }
     let workspace_id = intent
         .workspace_id
         .clone()
@@ -704,9 +713,10 @@ pub(crate) fn run(
         .load(run_id)
         .map(|r| r.run.client_id)
         .unwrap_or_default();
+    // Resolved ONCE here: a registry change after this point cannot alter this run.
     let pool = match mode {
-        Mode::Inspect => &b.cfg.workspaces,
-        Mode::Code => &b.cfg.code_sources,
+        Mode::Inspect => b.cfg.workspaces.clone(),
+        Mode::Code => b.cfg.effective_code_sources(),
     };
     let ws = pool
         .iter()
@@ -724,7 +734,12 @@ pub(crate) fn run(
             )
         })?
         .clone();
-    let policy = crate::code::resolve_policy(intent, &ws.write_allow);
+    let mut policy = crate::code::resolve_policy(intent, &ws.write_allow);
+    if mode == Mode::Code {
+        let eff = b.cfg.code_caps.effective();
+        policy.max_edits = policy.max_edits.min(eff.max_edits);
+        policy.max_tests = policy.max_tests.min(eff.max_tests);
+    }
     b.update(run_id, |r| {
         r.state = "preparing".into();
         r.workspace_id = Some(workspace_id.clone());
@@ -825,10 +840,14 @@ pub(crate) fn run(
     let mut root = ws.root.to_string_lossy().into_owned();
     let mut created_worktree = false;
     if mode == Mode::Code {
+        let registry_managed = b.cfg.project_registry.is_some();
         let wt = daemon(
             b,
             "worktree-create",
             match &ws.pinned_commit {
+                Some(c) if registry_managed => {
+                    serde_json::json!({ "taskInstanceId": task_instance, "projectId": ws.id, "expectedCommit": c })
+                }
                 Some(c) => {
                     serde_json::json!({ "taskInstanceId": task_instance, "sourceRoot": root, "expectedCommit": c })
                 }
@@ -1251,10 +1270,17 @@ fn turn_loop(
         session
             .state(
                 nexus_client::model_run::ModelRunState::ToolRunning,
-                &format!(
-                    "Model proposed {} read-only tool call(s); validating.",
-                    proposals.len()
-                ),
+                &if sh.mode == Mode::Code {
+                    format!(
+                        "Model proposed {} tool call(s); every edit and command still needs an independent approval; validating.",
+                        proposals.len()
+                    )
+                } else {
+                    format!(
+                        "Model proposed {} read-only tool call(s); validating.",
+                        proposals.len()
+                    )
+                },
                 None,
             )
             .map_err(|e| se(e.code, e.message))?;

@@ -335,66 +335,71 @@ fn serve(l: TcpListener, pki: &Pki, responder: Responder) -> Provider {
         for _ in 0..64 {
             let Ok((tcp, _)) = l.accept() else { return };
             let n = a.fetch_add(1, Ordering::SeqCst);
-            tcp.set_read_timeout(Some(Duration::from_secs(5))).ok();
-            let Ok(conn) = rustls::ServerConnection::new(cfg.clone()) else {
-                return;
-            };
-            let mut s = rustls::StreamOwned::new(conn, tcp);
-            let (mut buf, mut tmp, mut at) = (Vec::new(), [0u8; 8192], None);
-            while at.is_none() {
-                match s.read(&mut tmp) {
-                    Ok(0) | Err(_) => break,
-                    Ok(k) => {
-                        buf.extend_from_slice(&tmp[..k]);
-                        at = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4);
+            // one thread per connection: a deliberately slow stream (the GUI fixture's `running`
+            // scenario) must not stall every other run behind it
+            let (cfg, bs, hs, responder) = (cfg.clone(), bs.clone(), hs.clone(), responder.clone());
+            std::thread::spawn(move || {
+                tcp.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                let Ok(conn) = rustls::ServerConnection::new(cfg.clone()) else {
+                    return;
+                };
+                let mut s = rustls::StreamOwned::new(conn, tcp);
+                let (mut buf, mut tmp, mut at) = (Vec::new(), [0u8; 8192], None);
+                while at.is_none() {
+                    match s.read(&mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(k) => {
+                            buf.extend_from_slice(&tmp[..k]);
+                            at = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4);
+                        }
                     }
                 }
-            }
-            let Some(at) = at else { continue };
-            let head = String::from_utf8_lossy(&buf[..at]).into_owned();
-            let want: usize = head
-                .lines()
-                .find_map(|l| {
-                    l.to_ascii_lowercase()
-                        .strip_prefix("content-length:")
-                        .and_then(|v| v.trim().parse().ok())
-                })
-                .unwrap_or(0);
-            let mut body = buf[at..].to_vec();
-            while body.len() < want {
-                match s.read(&mut tmp) {
-                    Ok(0) | Err(_) => break,
-                    Ok(k) => body.extend_from_slice(&tmp[..k]),
+                let Some(at) = at else { return };
+                let head = String::from_utf8_lossy(&buf[..at]).into_owned();
+                let want: usize = head
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse().ok())
+                    })
+                    .unwrap_or(0);
+                let mut body = buf[at..].to_vec();
+                while body.len() < want {
+                    match s.read(&mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(k) => body.extend_from_slice(&tmp[..k]),
+                    }
                 }
-            }
-            let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-            hs.lock().unwrap().push(head);
-            bs.lock().unwrap().push(parsed.clone());
-            let ans = responder(n, &parsed);
-            let (frames, gap_ms, hold_ms) = match ans {
-                Answer::Close => continue,
-                Answer::Frames(f) => (f, 0, 0),
-                Answer::Slow {
-                    frames,
-                    gap_ms,
-                    hold_ms,
-                } => (frames, gap_ms, hold_ms),
-            };
-            // Real endpoints answer chunked; so does the fixture.
-            let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n");
-            let _ = s.flush();
-            for f in frames {
-                let chunk = format!("{:x}\r\n{}\r\n", f.len(), f);
-                if s.write_all(chunk.as_bytes()).is_err() {
-                    break;
-                }
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                hs.lock().unwrap().push(head);
+                bs.lock().unwrap().push(parsed.clone());
+                let ans = responder(n, &parsed);
+                let (frames, gap_ms, hold_ms) = match ans {
+                    Answer::Close => return,
+                    Answer::Frames(f) => (f, 0, 0),
+                    Answer::Slow {
+                        frames,
+                        gap_ms,
+                        hold_ms,
+                    } => (frames, gap_ms, hold_ms),
+                };
+                // Real endpoints answer chunked; so does the fixture.
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n");
                 let _ = s.flush();
-                std::thread::sleep(Duration::from_millis(gap_ms));
-            }
-            std::thread::sleep(Duration::from_millis(hold_ms));
-            let _ = s.write_all(b"0\r\n\r\n");
-            s.conn.send_close_notify();
-            let _ = s.flush();
+                for f in frames {
+                    let chunk = format!("{:x}\r\n{}\r\n", f.len(), f);
+                    if s.write_all(chunk.as_bytes()).is_err() {
+                        break;
+                    }
+                    let _ = s.flush();
+                    std::thread::sleep(Duration::from_millis(gap_ms));
+                }
+                std::thread::sleep(Duration::from_millis(hold_ms));
+                let _ = s.write_all(b"0\r\n\r\n");
+                s.conn.send_close_notify();
+                let _ = s.flush();
+            });
         }
     });
     Provider {
@@ -475,6 +480,9 @@ struct Fx {
     repo: PathBuf,
     approver_cap: PathBuf,
     worktrees: PathBuf,
+    /// A6.1.3: operator project registry directory (registry-mode fixtures only).
+    reg_dir: Option<PathBuf>,
+    repo2: Option<PathBuf>,
     _acap_dir: tempfile::TempDir,
 }
 
@@ -494,6 +502,7 @@ fn health(socket: &Path) -> bool {
     line.contains("\"ok\":true")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_daemon(
     tmp: &Path,
     ddir: &Path,
@@ -502,6 +511,7 @@ fn spawn_daemon(
     approver_cap: &Path,
     repo_code: bool,
     env: &[(&str, &str)],
+    project_registry: Option<&Path>,
 ) -> (Child, PathBuf, PathBuf) {
     let uid = own_uid().to_string();
     let (db, wit, socket, cap) = (
@@ -547,6 +557,9 @@ fn spawn_daemon(
         .arg(approver_cap)
         .arg("--worktree-root")
         .arg(worktrees);
+        if let Some(r) = project_registry {
+            c.arg("--project-registry").arg(r);
+        }
     }
     // An AMBIENT credential in the daemon's environment: the sandbox must
     // never hand it to a model-launched process.
@@ -585,6 +598,22 @@ fn fixture_with(responder: Responder, extra: Box<dyn Fn(&Path)>) -> Fx {
 
 /// `env` is given to the daemon only (e.g. a deterministic crash point).
 fn fixture_env(responder: Responder, extra: Box<dyn Fn(&Path)>, env: &[(&str, &str)]) -> Fx {
+    fixture_inner(responder, extra, env, false)
+}
+
+/// A6.1.3: the daemon and broker are registry-managed; two independent
+/// projects, `proj` (the usual crate) and `other` (a second, separate repo), are
+/// registered through the operator API.
+fn fixture_registry(responder: Responder) -> Fx {
+    fixture_inner(responder, Box::new(|_| {}), &[], true)
+}
+
+fn fixture_inner(
+    responder: Responder,
+    extra: Box<dyn Fn(&Path)>,
+    env: &[(&str, &str)],
+    with_registry: bool,
+) -> Fx {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let pki = Pki::new();
@@ -615,6 +644,18 @@ fn fixture_env(responder: Responder, extra: Box<dyn Fn(&Path)>, env: &[(&str, &s
     let acap_dir = tempfile::tempdir().unwrap();
     std::fs::set_permissions(acap_dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let approver_cap = acap_dir.path().join("approver.cap");
+    let (reg_dir, repo2) = if with_registry {
+        let rd = tmp.path().join("projreg");
+        let r2 = work.join("repo2");
+        std::fs::create_dir_all(&r2).unwrap();
+        make_repo(&r2, &|_| {});
+        let t = nexus_tools::registry::Trust::default();
+        nexus_tools::registry::add(&rd, &t, "proj", &repo, None, vec![]).unwrap();
+        nexus_tools::registry::add(&rd, &t, "other", &r2, None, vec!["src/".into()]).unwrap();
+        (Some(rd), Some(r2))
+    } else {
+        (None, None)
+    };
     let (daemon, daemon_socket, cap) = spawn_daemon(
         tmp.path(),
         &ddir,
@@ -623,6 +664,7 @@ fn fixture_env(responder: Responder, extra: Box<dyn Fn(&Path)>, env: &[(&str, &s
         &approver_cap,
         true,
         env,
+        reg_dir.as_deref(),
     );
     let creds = tmp.path().join("provider-credentials.json");
     std::fs::write(&creds, json!({ CRED_REF: SECRET }).to_string()).unwrap();
@@ -641,6 +683,8 @@ fn fixture_env(responder: Responder, extra: Box<dyn Fn(&Path)>, env: &[(&str, &s
         repo,
         approver_cap,
         worktrees,
+        reg_dir,
+        repo2,
         _acap_dir: acap_dir,
     }
 }
@@ -660,6 +704,7 @@ impl Fx {
             &self.approver_cap,
             true,
             &[],
+            self.reg_dir.as_deref(),
         );
         self.daemon = child;
         self.daemon_socket = socket;
@@ -720,11 +765,40 @@ impl Fx {
                 pinned_commit: None,
                 write_allow: Vec::new(),
             }],
+            approval_ttl_ms: None,
+            project_registry: None,
+            code_caps: Default::default(),
         }
+    }
+
+    /// A6.1.3: broker whose coding projects come from the operator registry.
+    fn start_registry(&self, name: &str) -> BrokerHandle {
+        let mut c = self.config(name);
+        c.code_sources = Vec::new();
+        c.project_registry = Some((
+            self.reg_dir.clone().expect("registry fixture"),
+            nexus_tools::registry::Trust::default(),
+        ));
+        nexus_broker::start(c).expect("broker starts")
     }
 
     fn start(&self, name: &str) -> BrokerHandle {
         nexus_broker::start(self.config(name)).expect("broker starts")
+    }
+
+    /// Start for the GUI fixture: long enough request budgets for a deliberately slow stream.
+    fn start_hold(&self, name: &str, ttl_ms: Option<i64>) -> BrokerHandle {
+        let mut c = self.config(name);
+        c.limits.total_timeout_ms = 600_000;
+        c.approval_ttl_ms = ttl_ms;
+        nexus_broker::start(c).expect("broker starts")
+    }
+
+    /// Start with a SHORTER approval lifetime (A6.1.1 fixtures/tests).
+    fn start_ttl(&self, name: &str, ms: i64) -> BrokerHandle {
+        let mut c = self.config(name);
+        c.approval_ttl_ms = Some(ms);
+        nexus_broker::start(c).expect("broker starts")
     }
 
     /// Start with the model's writes limited to `allow` (A6.1).
@@ -962,6 +1036,15 @@ fn sandbox_ready() -> bool {
 }
 
 fn code_intent(task: &str, key: &str, f: impl Fn(&mut IntentLimits)) -> NexusIntentV1 {
+    code_intent_for("proj", task, key, f)
+}
+
+fn code_intent_for(
+    ws: &str,
+    task: &str,
+    key: &str,
+    f: impl Fn(&mut IntentLimits),
+) -> NexusIntentV1 {
     let mut limits = IntentLimits {
         max_output_tokens: Some(512),
         ..Default::default()
@@ -974,7 +1057,7 @@ fn code_intent(task: &str, key: &str, f: impl Fn(&mut IntentLimits)) -> NexusInt
         intent_type: "repo-code".into(),
         content: task.to_owned(),
         model: None,
-        workspace_id: Some("proj".into()),
+        workspace_id: Some(ws.into()),
         limits,
         response_mode: ResponseMode::Stream,
         client_label: Some("a56-test".into()),
@@ -2302,6 +2385,13 @@ fn crash_boundary(
         Some("tool-outcome-uncertain"),
         "{run:?}"
     );
+    // A6.1.1: neither the change nor the test is ever reported as verified
+    let oc = run.coding_outcome.clone().expect("outcome");
+    assert_eq!(
+        (oc.change.as_str(), oc.verification.as_str()),
+        ("uncertain", "uncertain"),
+        "{oc:?}"
+    );
     let last = run.tool_activity.last().unwrap();
     assert_eq!(last.status, "uncertain", "{last:?}");
     assert!(last.approval_id.is_some(), "it ran under an approval");
@@ -2643,6 +2733,10 @@ fn a61_desktop_path_shows_the_pending_operation_survives_reconnect_and_ends_with
     );
     assert_eq!(run.last_test_verification.as_deref(), Some("pass"));
     assert_eq!(
+        run.coding_outcome.as_ref().map(|o| o.verification.as_str()),
+        Some("verified-passed")
+    );
+    assert_eq!(
         (run.max_turns, run.max_edits, run.max_tests),
         (
             ic::DESKTOP_CODE_LIMITS.max_turns,
@@ -2697,6 +2791,13 @@ fn a61_a_source_pinned_to_another_commit_is_refused_before_anything_is_sent() {
     b.shutdown();
     // the right pin proceeds, and the copy is exactly that commit
     let b = fx.start_pinned("pin-ok", &head);
+    // the pin is shown to the client read-only (identity + pin, never a path)
+    let srcs = ic::code_sources(b.socket_path()).unwrap();
+    assert_eq!(
+        (srcs[0].source_id.as_str(), srcs[0].pinned_commit.as_deref()),
+        ("proj", Some(head.as_str()))
+    );
+    assert!(srcs[0].write_allow.is_empty());
     let run = submit_wait(
         b.socket_path(),
         &code_intent("go", "a61-pin-right-0001", |_| {}),
@@ -2736,6 +2837,12 @@ fn a61_the_operator_write_scope_refuses_other_files_before_any_approval_exists()
     let fx = fixture(script(calls, "done"));
     let appr = Approver::start(&fx, approve_all());
     let b = fx.start_scoped("scope", &["src/"]);
+    let srcs = ic::code_sources(b.socket_path()).unwrap();
+    assert_eq!(
+        srcs[0].write_allow,
+        ["src/"],
+        "the scope is shown to the client read-only"
+    );
     let run = submit_wait(
         b.socket_path(),
         &code_intent("go", "a61-scope-0000001", |_| {}),
@@ -2864,16 +2971,314 @@ fn a61_rehearsal_selfhost_validation_command_in_the_sandbox() {
     b.shutdown();
 }
 
+// ------------------------------------------------ A6.1.1 outcome integrity
+
+/// A scripted model with SCENARIOS, selected by a `[scenario:NAME]` tag in the
+/// task text. Every scenario reads, proposes the one-line edit, proposes the
+/// test command, and then answers; they differ only in what the answer says:
+/// `liar` claims success whatever the tools returned (this is the fixture
+/// defect observed in the first manual Desktop test, now deliberate and named);
+/// all others report what the tool results actually said.
+fn scenario_responder() -> Responder {
+    Arc::new(|n, body| {
+        let text = body.to_string();
+        let liar = text.contains("[scenario:liar]");
+        let done = body["input"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["type"] == "function_call_output")
+                    .count()
+            })
+            .unwrap_or(0);
+        let resp = format!("resp_{n}");
+        if text.contains("[scenario:running]") {
+            // reads two things, then streams a slow answer (~2.5 minutes) so a GUI can watch a live run
+            return match done {
+                0 => Answer::Frames(call_frames(
+                    &resp,
+                    n,
+                    "c_list",
+                    "fs_list",
+                    r#"{"path":"."}"#,
+                )),
+                1 => Answer::Frames(call_frames(
+                    &resp,
+                    n,
+                    "c_read",
+                    "fs_read",
+                    r#"{"path":"src/lib.rs"}"#,
+                )),
+                _ => {
+                    let mut frames = vec![created(&resp)];
+                    for i in 0..60 {
+                        frames.push(sse(
+                            "response.output_text.delta",
+                            json!({"type":"response.output_text.delta","delta": format!("Still looking at the code ({i})… ")}),
+                        ));
+                    }
+                    frames.push(completed(&resp));
+                    Answer::Slow {
+                        frames,
+                        gap_ms: 2500,
+                        hold_ms: 0,
+                    }
+                }
+            };
+        }
+        match done {
+            0 => Answer::Frames(call_frames(
+                &resp,
+                n,
+                "c_read",
+                "fs_read",
+                r#"{"path":"src/lib.rs"}"#,
+            )),
+            1 => {
+                let args = json!({"path": "src/lib.rs", "edits": [{"oldText": "a - b", "newText": "a + b"}]}).to_string();
+                Answer::Frames(call_frames(&resp, n, "c_edit", "fs_edit", &args))
+            }
+            2 => Answer::Frames(call_frames(
+                &resp,
+                n,
+                "c_test",
+                "proc_run",
+                r#"{"program":"cargo","args":["test","--offline"]}"#,
+            )),
+            _ => {
+                let said = if liar {
+                    "Fixed add (a - b -> a + b); cargo test passes.".to_owned()
+                } else {
+                    let out = last_output(body).unwrap_or(Value::Null).to_string();
+                    if out.contains("\"verification\":\"pass\"") {
+                        "Fixed add (a - b -> a + b); cargo test passes.".to_owned()
+                    } else if out.contains("approval-") {
+                        "My edit and test were not approved, so nothing was changed or verified."
+                            .to_owned()
+                    } else {
+                        "I could not verify the fix.".to_owned()
+                    }
+                };
+                Answer::Frames(text_frames(&resp, &said))
+            }
+        }
+    })
+}
+
+type Scenario = Arc<Mutex<String>>;
+
+/// Approver whose behaviour depends on the scenario currently being run.
+fn scenario_approver(fx: &Fx, current: Scenario, hold: Option<PathBuf>) -> Approver {
+    let order: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    Approver::start(
+        fx,
+        Arc::new(move |full| match current.lock().unwrap().as_str() {
+            "approved" => Decide::Approve,
+            "denied" => Decide::Deny,
+            "pending" => {
+                // only ever approved by a file the operator creates: approve-1, approve-2
+                let id = full["approvalId"].as_str().unwrap_or("").to_owned();
+                let mut o = order.lock().unwrap();
+                if !o.contains(&id) {
+                    o.push(id.clone());
+                }
+                let idx = o.iter().position(|x| *x == id).unwrap() + 1;
+                match &hold {
+                    Some(h) if h.join(format!("approve-{idx}")).exists() => Decide::Approve,
+                    _ => Decide::Wait,
+                }
+            }
+            _ => Decide::Ignore, // expired / liar: nobody answers, the daemon expires the request
+        }),
+    )
+}
+
+fn run_scenario(sock: &Path, cur: &Scenario, name: &str, secs: u64) -> ic::IntentRun {
+    *cur.lock().unwrap() = name.to_owned();
+    let intent = desktop_code_intent(
+        &format!("Fix the failing add test. [scenario:{name}]"),
+        &format!("gui-a611-{name}-0001"),
+    );
+    submit_wait(sock, &intent, secs)
+}
+
+#[test]
+fn a611_expired_denied_and_lying_runs_are_judged_by_receipts_not_by_the_model_or_the_lifecycle() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture(scenario_responder());
+    let cur: Scenario = Arc::new(Mutex::new(String::new()));
+    let _appr = scenario_approver(&fx, cur.clone(), None);
+    let b = fx.start_ttl("a611", 2000);
+    let sock = b.socket_path().to_owned();
+    let src0 = src_fp(&fx);
+
+    // 1+2. both approvals EXPIRE (nobody answers) and the model lies about it
+    let liar = run_scenario(&sock, &cur, "liar", 120);
+    assert_eq!(
+        liar.state, "completed",
+        "lifecycle: the model finished answering: {liar:?}"
+    );
+    let o = liar
+        .coding_outcome
+        .clone()
+        .expect("a coding run always carries a verified outcome");
+    assert_eq!(
+        (o.change.as_str(), o.verification.as_str()),
+        ("not-applied", "blocked-by-approval"),
+        "{o:?}"
+    );
+    assert_eq!(
+        (o.edits_applied, o.tests_executed, o.blocked_by_approval),
+        (0, 0, 2),
+        "{o:?}"
+    );
+    assert_eq!(liar.last_test_verification, None, "no test ever ran");
+    let acts = statuses(&liar);
+    assert_eq!(acts[1].1, "refused", "{acts:?}");
+    assert_eq!(acts[1].2.as_deref(), Some("approval-expired"), "{acts:?}");
+    assert_eq!(acts[2].2.as_deref(), Some("approval-expired"), "{acts:?}");
+    assert_eq!(
+        liar.tool_activity[1].approval_outcome.as_deref(),
+        Some("expired")
+    );
+    // 3. the model's claim is preserved for audit, but nothing in the run record turns it into a result
+    let transcript = std::fs::read_to_string(
+        fx.tmp
+            .path()
+            .join("transcripts")
+            .join(format!("{}.jsonl", liar.conversation_id.clone().unwrap())),
+    )
+    .unwrap();
+    assert!(
+        transcript.contains("cargo test passes."),
+        "the model's claim is kept verbatim in the durable transcript"
+    );
+    assert!(!transcript.contains("verified-passed"));
+    // nothing changed anywhere
+    assert!(
+        std::fs::read_to_string(working_copy(&fx).unwrap().join("src/lib.rs"))
+            .unwrap()
+            .contains("a - b")
+    );
+    assert_eq!(src_fp(&fx), src0);
+
+    // honest model + expiry: same verdict, different words
+    let honest = run_scenario(&sock, &cur, "expired", 120);
+    let o2 = honest.coding_outcome.clone().unwrap();
+    assert_eq!(
+        (o2.change.as_str(), o2.verification.as_str()),
+        ("not-applied", "blocked-by-approval")
+    );
+
+    // denied (explicit decision) is also "blocked", with the real outcome kept
+    let denied = run_scenario(&sock, &cur, "denied", 120);
+    let o3 = denied.coding_outcome.clone().unwrap();
+    assert_eq!(
+        (o3.change.as_str(), o3.verification.as_str()),
+        ("not-applied", "blocked-by-approval")
+    );
+    assert_eq!(
+        denied.tool_activity[1].approval_outcome.as_deref(),
+        Some("denied")
+    );
+
+    // 5. a genuinely approved and passing run verifies, and its receipts say why
+    let ok = run_scenario(&sock, &cur, "approved", 180);
+    let o4 = ok.coding_outcome.clone().unwrap();
+    assert_eq!(
+        (o4.change.as_str(), o4.verification.as_str()),
+        ("applied", "verified-passed"),
+        "{o4:?}"
+    );
+    assert_eq!(
+        (o4.edits_applied, o4.tests_executed, o4.last_exit_code),
+        (1, 1, Some(0))
+    );
+    assert!(ok.tool_activity[1].post_sha256.is_some());
+    // history: a restarted broker serves the same outcomes (derived on read, not stored)
+    b.shutdown();
+    let b2 = fx.start("a611");
+    for r in [&liar, &honest, &denied, &ok] {
+        let again = ic::status(b2.socket_path(), &r.run_id).unwrap();
+        assert_eq!(again.coding_outcome, r.coding_outcome, "{}", r.run_id);
+    }
+    assert!(ic::list(b2.socket_path(), 20)
+        .unwrap()
+        .iter()
+        .filter(|r| r.intent_type == "repo-code")
+        .all(|r| r.coding_outcome.is_some()));
+    b2.shutdown();
+}
+
+#[test]
+fn a611_a_run_still_awaiting_approval_is_pending_not_verified_and_the_gui_cannot_decide() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture(scenario_responder());
+    let cur: Scenario = Arc::new(Mutex::new("pending".to_owned()));
+    let _appr = scenario_approver(&fx, cur.clone(), None); // no hold dir: never approves
+    let b = fx.start("a611p");
+    let sock = b.socket_path().to_owned();
+    let intent = desktop_code_intent(
+        "Fix the failing add test. [scenario:pending]",
+        "gui-a611-pending-0001",
+    );
+    let run0 = ic::submit(&sock, &intent).unwrap().run;
+    let end = Instant::now() + Duration::from_secs(60);
+    let cur_run = loop {
+        let r = ic::status(&sock, &run0.run_id).unwrap();
+        if r.pending_approval.is_some() {
+            break r;
+        }
+        assert!(Instant::now() < end, "{r:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let o = cur_run.coding_outcome.clone().unwrap();
+    assert_eq!(
+        (o.change.as_str(), o.verification.as_str()),
+        ("pending-approval", "not-yet-verified"),
+        "{o:?}"
+    );
+    assert_eq!(cur_run.state, "approval-pending");
+    assert!(!cur_run.terminal);
+    // the client protocol has no verb that decides it
+    for cmd in [
+        "approval-decide",
+        "approval-get",
+        "approve",
+        "intent-approve",
+    ] {
+        let r = nexus_client::transport::ipc_roundtrip(&sock, &json!({"protocol": 1, "id": "x", "cmd": cmd, "params": {"approvalId": cur_run.pending_approval.as_ref().unwrap().approval_id}}), 5000).unwrap();
+        assert_eq!(r["ok"], false, "{cmd}: {r}");
+    }
+    ic::cancel(&sock, &run0.run_id).unwrap();
+    let _ = wait_terminal(&sock, &run0.run_id, 30);
+    b.shutdown();
+}
+
 /// A6.1 MANUAL FIXTURE for the Desktop smoke test (no provider, no network):
-/// the real daemon, broker, bridge and sandbox with a scripted model, held open
-/// so the real Tauri app can be pointed at the broker socket.
+/// the real daemon, broker, bridge and sandbox with a scripted model. It runs
+/// five named scenarios so the real Tauri window has real durable history to
+/// show, then holds a sixth run at a pending approval:
+///
+///   approved  – edit and test approved, genuinely passes
+///   expired   – nobody answers, both approvals expire; honest model
+///   denied    – explicit denial; honest model
+///   liar      – approvals expire but the model CLAIMS success
+///   pending   – held at the edit approval until you create `<dir>/approve-1`
+///               (then `approve-2` for the command); `<dir>/release` stops it
+///   running   – a live run that streams slowly for ~2.5 minutes (approve-1 delays
+///               the pending run's next turn until that stream ends)
+///
+/// `<dir>/runs.json` maps each scenario to its conversation id (deep link:
+/// `#/workspace/run/<id>`).
 ///
 ///   NEXUS_A61_HOLD_DIR=<dir> cargo test -p nexus-broker --test code_a56 -- --ignored a61_gui_fixture_hold --nocapture
 ///
-/// It writes `<dir>/socket`, submits a Desktop-shaped run, and then follows
-/// files you create in `<dir>`: `approve-1` (approve the edit), `approve-2`
-/// (approve the command), `release` (shut down). Approvals are NEVER granted
-/// without those files.
+/// It writes `<dir>/socket`. Approvals are NEVER granted without those files.
 #[test]
 #[ignore = "manual GUI fixture; needs NEXUS_A61_HOLD_DIR"]
 fn a61_gui_fixture_hold() {
@@ -2885,49 +3290,1231 @@ fn a61_gui_fixture_hold() {
         return;
     }
     let hold = PathBuf::from(hold);
-    let fx = fixture(simple_fix_responder());
-    let order: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let (o2, h2) = (order.clone(), hold.clone());
+    let fx = fixture(scenario_responder());
+    let cur: Scenario = Arc::new(Mutex::new(String::new()));
+    let _appr = scenario_approver(&fx, cur.clone(), Some(hold.clone()));
+    let mut ids = serde_json::Map::new();
+    // short approval lifetime ONLY while the expiry scenarios run
+    let b = fx.start_hold("hold", Some(3000));
+    for name in ["approved", "expired", "denied", "liar"] {
+        let r = run_scenario(b.socket_path(), &cur, name, 240);
+        println!(
+            "FIXTURE scenario {name}: state={} outcome={:?}",
+            r.state,
+            r.coding_outcome
+                .as_ref()
+                .map(|o| (&o.change, &o.verification))
+        );
+        ids.insert(name.to_owned(), json!(r.conversation_id));
+    }
+    b.shutdown();
+    let b = fx.start_hold("hold", None);
+    // the pending run first (it needs no further provider turn until you approve), then the slow `running` one
+    *cur.lock().unwrap() = "pending".to_owned();
+    let pending = ic::submit(
+        b.socket_path(),
+        &desktop_code_intent(
+            "Fix the failing add test. [scenario:pending]",
+            "gui-a611-fixture-pending",
+        ),
+    )
+    .unwrap()
+    .run;
+    let end = Instant::now() + Duration::from_secs(120);
+    let pending_conv = loop {
+        let r = ic::status(b.socket_path(), &pending.run_id).unwrap();
+        if r.pending_approval.is_some() {
+            break r.conversation_id.clone();
+        }
+        assert!(Instant::now() < end, "{r:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    ids.insert("pending".to_owned(), json!(pending_conv));
+    *cur.lock().unwrap() = "running".to_owned();
+    let running = ic::submit(
+        b.socket_path(),
+        &desktop_code_intent(
+            "Fix the failing add test. [scenario:running]",
+            "gui-a611-fixture-running",
+        ),
+    )
+    .unwrap()
+    .run;
+    let end = Instant::now() + Duration::from_secs(120);
+    let running_conv = loop {
+        let r = ic::status(b.socket_path(), &running.run_id).unwrap();
+        if r.conversation_id.is_some() && r.tool_calls >= 1 {
+            break r.conversation_id.clone();
+        }
+        assert!(Instant::now() < end, "{r:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    ids.insert("running".to_owned(), json!(running_conv));
+    std::fs::write(
+        hold.join("socket"),
+        b.socket_path().to_string_lossy().as_bytes(),
+    )
+    .unwrap();
+    std::fs::write(hold.join("runs.json"), Value::Object(ids).to_string()).unwrap();
+    println!(
+        "FIXTURE READY socket={} runs={}",
+        b.socket_path().display(),
+        hold.join("runs.json").display()
+    );
+    let end = Instant::now() + Duration::from_secs(3600);
+    while !hold.join("release").exists() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    b.shutdown();
+}
+
+// ─── A6.1.3 operator project registry ────────────────────────────────────────
+
+fn fp_of(dir: &Path) -> Vec<u8> {
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "cd {} && find . -type f | sort | xargs sha256sum && git status --porcelain=v1 --ignored",
+            dir.display()
+        ))
+        .output()
+        .unwrap()
+        .stdout
+}
+
+fn fix_calls() -> Vec<(&'static str, String)> {
+    vec![
+        ("fs_read", r#"{"path":"src/lib.rs"}"#.to_owned()),
+        (
+            "fs_edit",
+            r#"{"path":"src/lib.rs","edits":[{"oldText":"a - b","newText":"a + b"}]}"#.to_owned(),
+        ),
+        (
+            "proc_run",
+            r#"{"program":"cargo","args":["test","--offline"]}"#.to_owned(),
+        ),
+    ]
+}
+
+#[test]
+fn a613_registry_projects_run_end_to_end_with_their_own_pin_and_scope_and_an_untouched_original() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_registry(script(fix_calls(), "Fixed."));
+    let _appr = Approver::start(&fx, approve_all());
+    let b = fx.start_registry("reg");
+    let repo2 = fx.repo2.clone().unwrap();
+    let srcs = ic::code_sources(b.socket_path()).unwrap();
+    let mut ids: Vec<_> = srcs.iter().map(|s| s.source_id.as_str()).collect();
+    ids.sort();
+    assert_eq!(ids, ["other", "proj"]);
+    let other = srcs.iter().find(|s| s.source_id == "other").unwrap();
+    let head2 = git_out(&repo2, &["rev-parse", "HEAD"]).trim().to_owned();
+    assert_eq!(other.pinned_commit.as_deref(), Some(head2.as_str()));
+    assert_eq!(other.write_allow, ["src/"], "scope comes from the registry");
+    let (before1, before2) = (fp_of(&fx.repo), fp_of(&repo2));
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "a613-other-0000001", |_| {}),
+        150,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(run.workspace_id.as_deref(), Some("other"));
+    assert_eq!(run.worktree_commit.as_deref(), Some(head2.as_str()));
+    assert_eq!(
+        run.coding_outcome.as_ref().map(|o| o.verification.as_str()),
+        Some("verified-passed"),
+        "{run:?}"
+    );
+    let d = ic::diff(b.socket_path(), &run.run_id).unwrap();
+    assert_eq!(
+        d.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+        ["src/lib.rs"]
+    );
+    assert_eq!(fp_of(&fx.repo), before1, "the other project is untouched");
+    assert_eq!(fp_of(&repo2), before2, "the original project is untouched");
+    // the daemon recorded which project the copy belongs to
+    let meta_dir = fx.worktrees.join(".meta");
+    let metas: Vec<String> = std::fs::read_dir(&meta_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap())
+        .collect();
+    assert!(
+        metas.iter().any(|m| m.contains("\"projectId\":\"other\"")),
+        "{metas:?}"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn a613_a_registry_managed_daemon_refuses_paths_spoofed_ids_and_foreign_pins() {
+    let fx = fixture_registry(script(vec![], "never"));
+    let cap = nexus_client::issuer::read_capability(&fx.cap).unwrap();
+    let call =
+        |p: Value| nexus_client::issuer::issuer_call(&fx.daemon_socket, &cap, "worktree-create", p);
+    let head = git_out(&fx.repo, &["rev-parse", "HEAD"]).trim().to_owned();
+    let head2 = git_out(fx.repo2.as_ref().unwrap(), &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let t = "task-aaaaaaaaaaaaaaaaaaaaaaaa";
+    // a caller-supplied path is refused outright, even a valid project's own path
+    let r = call(json!({"taskInstanceId": t, "sourceRoot": fx.repo.to_str().unwrap()})).unwrap();
+    assert_eq!(r["ok"], false, "{r}");
+    let r = call(
+        json!({"taskInstanceId": t, "sourceRoot": fx.repo.to_str().unwrap(), "projectId": "proj"}),
+    )
+    .unwrap();
+    assert_eq!(r["ok"], false, "{r}");
+    // spoofed / unknown / traversal ids
+    for id in ["PROJ", "proj ", "proj/../other", "../proj", "nope", ""] {
+        let r = call(json!({"taskInstanceId": t, "projectId": id})).unwrap();
+        assert_eq!(r["ok"], false, "{id:?}: {r}");
+    }
+    assert!(working_copy(&fx).is_none(), "nothing was created");
+    // a foreign pin (another project's commit, or garbage) is refused
+    for c in [head2.as_str(), &"0".repeat(40), "HEAD"] {
+        if c == head {
+            continue;
+        }
+        let r =
+            call(json!({"taskInstanceId": t, "projectId": "proj", "expectedCommit": c})).unwrap();
+        assert_eq!(r["ok"], false, "{c}: {r}");
+    }
+    assert!(working_copy(&fx).is_none());
+    // the real thing works and is recorded against its project
+    let r =
+        call(json!({"taskInstanceId": t, "projectId": "proj", "expectedCommit": head})).unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["worktree"]["sourceCommit"], head, "{r}");
+    let r = nexus_client::issuer::issuer_call(
+        &fx.daemon_socket,
+        &cap,
+        "worktree-remove",
+        json!({"taskInstanceId": t}),
+    )
+    .unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+}
+
+#[test]
+fn a613_registry_changes_reach_new_runs_but_never_change_a_run_that_has_started() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_registry(script(fix_calls(), "Fixed."));
+    let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let g2 = gate.clone();
     let _appr = Approver::start(
         &fx,
-        Arc::new(move |full| {
-            let id = full["approvalId"].as_str().unwrap_or("").to_owned();
-            let mut o = o2.lock().unwrap();
-            if !o.contains(&id) {
-                o.push(id.clone());
-            }
-            let idx = o.iter().position(|x| *x == id).unwrap() + 1;
-            if h2.join(format!("approve-{idx}")).exists() {
+        Arc::new(move |_| {
+            if g2.load(Ordering::SeqCst) {
                 Decide::Approve
             } else {
                 Decide::Wait
             }
         }),
     );
-    let b = fx.start("hold");
+    let b = fx.start_registry("live");
+    let sock = b.socket_path().to_owned();
+    let rd = fx.reg_dir.clone().unwrap();
+    let trust = nexus_tools::registry::Trust::default();
+    let run0 = ic::submit(
+        &sock,
+        &code_intent_for("other", "go", "a613-active-000001", |_| {}),
+    )
+    .unwrap()
+    .run;
+    let end = Instant::now() + Duration::from_secs(120);
+    while ic::status(&sock, &run0.run_id)
+        .unwrap()
+        .pending_approval
+        .is_none()
+    {
+        assert!(Instant::now() < end, "never reached its first approval");
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    // The operator now narrows the scope to docs/ and removes the project.
+    nexus_tools::registry::set_write_allow(&rd, &trust, "other", vec!["docs/".into()]).unwrap();
+    nexus_tools::registry::remove(&rd, &trust, "other").unwrap();
+    let ids: Vec<_> = ic::code_sources(&sock)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.source_id)
+        .collect();
+    assert_eq!(
+        ids,
+        ["proj"],
+        "new listings see the change without a restart"
+    );
+    let e = ic::submit(
+        &sock,
+        &code_intent_for("other", "go", "a613-active-000002", |_| {}),
+    )
+    .unwrap_err();
+    assert!(format!("{e:?}").contains("workspace-not-allowed"), "{e:?}");
+    // The run that already started keeps its identity, pin and scope.
+    gate.store(true, Ordering::SeqCst);
+    let run = wait_terminal(&sock, &run0.run_id, 150);
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(run.workspace_id.as_deref(), Some("other"));
+    let d = ic::diff(&sock, &run.run_id).unwrap();
+    assert_eq!(
+        d.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+        ["src/lib.rs"]
+    );
+    b.shutdown();
+}
+
+#[test]
+fn a613_an_untrusted_or_tampered_registry_fails_closed_for_listing_and_for_new_runs() {
+    let fx = fixture_registry(script(vec![], "never"));
+    let b = fx.start_registry("tamper");
+    let sock = b.socket_path().to_owned();
+    let f = fx.reg_dir.clone().unwrap().join("projects.json");
+    assert_eq!(ic::code_sources(&sock).unwrap().len(), 2);
+    // group/world-writable registry file: nothing is offered or run
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(ic::code_sources(&sock).unwrap().is_empty());
+    let e = ic::submit(
+        &sock,
+        &code_intent_for("proj", "go", "a613-tamper-000001", |_| {}),
+    )
+    .unwrap_err();
+    assert!(format!("{e:?}").contains("workspace-not-allowed"), "{e:?}");
+    let cap = nexus_client::issuer::read_capability(&fx.cap).unwrap();
+    let r = nexus_client::issuer::issuer_call(
+        &fx.daemon_socket,
+        &cap,
+        "worktree-create",
+        json!({"taskInstanceId": "task-bbbbbbbbbbbbbbbbbbbbbbbb", "projectId": "proj"}),
+    )
+    .unwrap();
+    assert_eq!(r["ok"], false, "the daemon refuses independently: {r}");
+    // malformed content
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let good = std::fs::read_to_string(&f).unwrap();
+    std::fs::write(&f, "{\"schema\":").unwrap();
+    assert!(ic::code_sources(&sock).unwrap().is_empty());
+    // a path swapped for a symlink to another repository after registration
+    std::fs::write(&f, &good).unwrap();
+    assert_eq!(ic::code_sources(&sock).unwrap().len(), 2);
+    let moved = fx.work.join("repo-moved");
+    std::fs::rename(&fx.repo, &moved).unwrap();
+    std::os::unix::fs::symlink(fx.repo2.as_ref().unwrap(), &fx.repo).unwrap();
+    let r = nexus_client::issuer::issuer_call(
+        &fx.daemon_socket,
+        &cap,
+        "worktree-create",
+        json!({"taskInstanceId": "task-cccccccccccccccccccccccc", "projectId": "proj"}),
+    )
+    .unwrap();
+    assert_eq!(r["ok"], false, "a re-pointed source path is refused: {r}");
+    assert!(working_copy(&fx).is_none());
+    b.shutdown();
+}
+
+#[test]
+fn a613_the_daemon_enforces_the_frozen_write_scope_itself_even_if_the_broker_is_bypassed() {
+    let fx = fixture_registry(script(vec![], "never"));
+    let cap = nexus_client::issuer::read_capability(&fx.cap).unwrap();
+    let t = "task-dddddddddddddddddddddddd";
+    let r = nexus_client::issuer::issuer_call(
+        &fx.daemon_socket,
+        &cap,
+        "worktree-create",
+        json!({"taskInstanceId": t, "projectId": "other"}),
+    )
+    .unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    let meta =
+        std::fs::read_to_string(fx.worktrees.join(".meta").join(format!("{t}.json"))).unwrap();
+    assert!(meta.contains("\"writeAllow\":[\"src/\"]"), "{meta}");
+    let exec = |path: &str| {
+        let p = json!({
+            "requestId": "r1", "cancellationId": "c1", "taskInstanceId": t, "attemptId": "a1",
+            "commandId": "cmd1", "leaseEpoch": 1, "storeIncarnation": "x", "toolId": "fs.edit",
+            "toolVersion": 1,
+            "args": {"path": path, "edits": [{"oldText": "a", "newText": "b"}]}
+        });
+        nexus_client::issuer::issuer_call(&fx.daemon_socket, &cap, "tool-execute", p)
+    };
+    for bad in [
+        "README.md",
+        "../x",
+        "src/../Cargo.toml",
+        "/etc/passwd",
+        "srcx/lib.rs",
+        "",
+    ] {
+        let r = exec(bad);
+        let s = format!("{r:?}");
+        assert!(s.contains("path-not-in-scope"), "{bad:?}: {s}");
+    }
+    // an in-scope path is NOT refused for scope (it fails later: no Controller binding here)
+    let s = format!("{:?}", exec("src/lib.rs"));
+    assert!(!s.contains("path-not-in-scope"), "{s}");
+    let r = nexus_client::issuer::issuer_call(
+        &fx.daemon_socket,
+        &cap,
+        "worktree-remove",
+        json!({"taskInstanceId": t}),
+    )
+    .unwrap();
+    assert_eq!(r["ok"], true);
+}
+
+// ─── A6.1.3 working-copy lifecycle ───────────────────────────────────────────
+
+fn ops(fx: &Fx, name: &str) -> nexus_broker::worktree_ops::Ctx {
+    nexus_broker::worktree_ops::Ctx {
+        state_dir: fx.tmp.path().join(format!("broker-{name}")),
+        daemon_socket: fx.daemon_socket.clone(),
+        cap_path: fx.cap.clone(),
+    }
+}
+
+#[test]
+fn a613_a_finished_copy_is_listed_exported_as_a_patch_and_removed_without_losing_evidence() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_registry(script(fix_calls(), "Fixed."));
+    let _appr = Approver::start(&fx, approve_all());
+    let b = fx.start_registry("life");
+    let c = ops(&fx, "life");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "a613-life-00000001", |_| {}),
+        150,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let repo2 = fx.repo2.clone().unwrap();
+    let before = fp_of(&repo2);
+    // read-only facts a Desktop user sees (ownership-checked, no path)
+    let info = ic::copy_info(b.socket_path(), &run.run_id).unwrap();
+    assert!(info.retained && !info.active, "{info:?}");
+    assert_eq!(info.project_id.as_deref(), Some("other"));
+    assert!(info.approx_bytes.unwrap_or(0) > 0);
+    // operator view
+    let l = nexus_broker::worktree_ops::list(&c).unwrap();
+    assert_eq!(l.len(), 1, "{l:?}");
+    assert_eq!(l[0]["status"], "inactive");
+    assert_eq!(l[0]["project"], "other");
+    assert_eq!(l[0]["runId"], run.run_id.as_str());
+    // patch export: exclusive create, 0600, never over an existing file or symlink
+    let out = fx.tmp.path().join("fix.patch");
+    let p = nexus_broker::worktree_ops::patch(&c, &run.run_id, Some(&out), false).unwrap();
+    assert_eq!(p["files"][0]["path"], "src/lib.rs");
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        text.contains("-pub fn add") || text.contains("a - b"),
+        "{text}"
+    );
+    assert!(text.contains("a + b"), "{text}");
+    assert_eq!(
+        std::fs::metadata(&out).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(
+        nexus_broker::worktree_ops::patch(&c, &run.run_id, Some(&out), false).is_err(),
+        "never overwrites"
+    );
+    let victim = fx.tmp.path().join("victim.txt");
+    std::fs::write(&victim, "keep").unwrap();
+    let link = fx.tmp.path().join("l.patch");
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+    assert!(nexus_broker::worktree_ops::patch(&c, &run.run_id, Some(&link), false).is_err());
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    // explicit removal of the inactive copy only
+    assert!(nexus_broker::worktree_ops::remove(&c, "../../etc", false).is_err());
+    assert!(nexus_broker::worktree_ops::remove(&c, "/tmp", false).is_err());
+    let r = nexus_broker::worktree_ops::remove(&c, &run.run_id, false).unwrap();
+    assert_eq!(r["project"], "other");
+    assert!(working_copy(&fx).is_none(), "the copy is gone");
+    assert!(nexus_broker::worktree_ops::list(&c).unwrap().is_empty());
+    assert_eq!(
+        fp_of(&repo2),
+        before,
+        "the original is untouched by removal"
+    );
+    // evidence survives independently of the copy
+    let again = ic::status(b.socket_path(), &run.run_id).unwrap();
+    assert_eq!(
+        again
+            .coding_outcome
+            .as_ref()
+            .map(|o| o.verification.as_str()),
+        Some("verified-passed")
+    );
+    assert_eq!(again.tool_activity.len(), 3);
+    let info = ic::copy_info(b.socket_path(), &run.run_id).unwrap();
+    assert!(!info.retained);
+    assert!(
+        ic::diff(b.socket_path(), &run.run_id).is_err(),
+        "the diff needs the copy"
+    );
+    let log = std::fs::read_to_string(c.state_dir.join("worktree-ops.jsonl")).unwrap();
+    assert!(
+        log.contains(&run.run_id)
+            && log.contains("worktree-remove")
+            && log.contains(&p["diffDigest"].as_str().unwrap().to_owned()),
+        "{log}"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn a613_an_active_or_leased_copy_is_never_removed_and_arbitrary_targets_are_refused() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_registry(script(fix_calls(), "Fixed."));
+    let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let g2 = gate.clone();
+    let _appr = Approver::start(
+        &fx,
+        Arc::new(move |_| {
+            if g2.load(Ordering::SeqCst) {
+                Decide::Approve
+            } else {
+                Decide::Wait
+            }
+        }),
+    );
+    let b = fx.start_registry("lease");
+    let c = ops(&fx, "lease");
+    let run0 = ic::submit(
+        b.socket_path(),
+        &code_intent_for("proj", "go", "a613-lease-0000001", |_| {}),
+    )
+    .unwrap()
+    .run;
+    let end = Instant::now() + Duration::from_secs(120);
+    while ic::status(b.socket_path(), &run0.run_id)
+        .unwrap()
+        .pending_approval
+        .is_none()
+    {
+        assert!(Instant::now() < end);
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    let wc = working_copy(&fx).expect("copy exists while pending");
+    let l = nexus_broker::worktree_ops::list(&c).unwrap();
+    assert_eq!(l[0]["status"], "active", "{l:?}");
+    let e = nexus_broker::worktree_ops::remove(&c, &run0.run_id, false).unwrap_err();
+    assert!(e.contains("active"), "{e}");
+    assert!(
+        nexus_broker::worktree_ops::remove(&c, &run0.run_id, true).is_err(),
+        "--orphan never overrides an active run"
+    );
+    // even a direct issuer call (no broker guard) is refused by the daemon: pending approval = leased
+    let task = wc.file_name().unwrap().to_string_lossy().into_owned();
+    let cap = nexus_client::issuer::read_capability(&fx.cap).unwrap();
+    let r = nexus_client::issuer::issuer_call(
+        &fx.daemon_socket,
+        &cap,
+        "worktree-remove",
+        json!({"taskInstanceId": task}),
+    )
+    .unwrap();
+    assert_eq!(r["ok"], false, "{r}");
+    assert!(wc.exists());
+    // a planted symlink with a valid-looking name is neither listed nor followed
+    let outside = fx.tmp.path().join("precious");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("f"), "x").unwrap();
+    std::os::unix::fs::symlink(&outside, fx.worktrees.join("task-evil")).unwrap();
+    assert!(nexus_broker::worktree_ops::list(&c)
+        .unwrap()
+        .iter()
+        .all(|w| w["taskInstanceId"] != "task-evil"));
+    let r = nexus_client::issuer::issuer_call(
+        &fx.daemon_socket,
+        &cap,
+        "worktree-remove",
+        json!({"taskInstanceId": "task-evil"}),
+    )
+    .unwrap();
+    assert_eq!(r["ok"], false, "{r}");
+    assert!(outside.join("f").exists());
+    // the original project and path-shaped ids are never targets
+    for t in [
+        "..",
+        "../work/repo",
+        "/",
+        fx.repo.to_str().unwrap(),
+        "a/b",
+        "",
+    ] {
+        let r = nexus_client::issuer::issuer_call(
+            &fx.daemon_socket,
+            &cap,
+            "worktree-remove",
+            json!({"taskInstanceId": t}),
+        )
+        .unwrap();
+        assert_eq!(r["ok"], false, "{t:?}: {r}");
+    }
+    assert!(fx.repo.join(".git").exists());
+    // an unexplained (orphan) directory needs --orphan AND age
+    std::fs::create_dir_all(fx.worktrees.join("task-orphan0000000000000001")).unwrap();
+    let e =
+        nexus_broker::worktree_ops::remove(&c, "task-orphan0000000000000001", false).unwrap_err();
+    assert!(e.contains("--orphan"), "{e}");
+    let e =
+        nexus_broker::worktree_ops::remove(&c, "task-orphan0000000000000001", true).unwrap_err();
+    assert!(e.contains("10 minutes"), "{e}");
+    gate.store(true, Ordering::SeqCst);
+    let run = wait_terminal(b.socket_path(), &run0.run_id, 150);
+    assert_eq!(run.state, "completed", "{run:?}");
+    b.shutdown();
+}
+
+#[test]
+fn a613_cancel_then_daemon_restart_leaves_a_recoverable_inactive_copy_that_can_be_removed() {
+    if !sandbox_ready() {
+        return;
+    }
+    let mut fx = fixture_registry(script(fix_calls(), "never"));
+    let _appr = Approver::start(&fx, Arc::new(|_| Decide::Wait));
+    let b = fx.start_registry("canc");
+    let c = ops(&fx, "canc");
+    let run0 = ic::submit(
+        b.socket_path(),
+        &code_intent_for("proj", "go", "a613-canc-00000001", |_| {}),
+    )
+    .unwrap()
+    .run;
+    let end = Instant::now() + Duration::from_secs(120);
+    while ic::status(b.socket_path(), &run0.run_id)
+        .unwrap()
+        .pending_approval
+        .is_none()
+    {
+        assert!(Instant::now() < end);
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    ic::cancel(b.socket_path(), &run0.run_id).unwrap();
+    let run = wait_terminal(b.socket_path(), &run0.run_id, 60);
+    assert!(run.terminal && run.state != "completed", "{run:?}");
+    b.shutdown();
+    fx.restart_daemon();
+    let l = nexus_broker::worktree_ops::list(&ops(&fx, "canc")).unwrap_or_default();
+    assert_eq!(l.len(), 1, "the copy survives a daemon restart: {l:?}");
+    assert_eq!(l[0]["status"], "inactive");
+    let _ = c;
+    let c = ops(&fx, "canc");
+    nexus_broker::worktree_ops::remove(&c, &run0.run_id, false).unwrap();
+    assert!(working_copy(&fx).is_none());
+}
+
+#[test]
+fn a613_another_owners_run_and_copy_are_invisible_for_diff_and_copy_info() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_registry(script(fix_calls(), "Fixed."));
+    let _appr = Approver::start(&fx, approve_all());
+    let b = fx.start_registry("owner");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "a613-owner-0000001", |_| {}),
+        150,
+    );
+    assert_eq!(run.state, "completed");
+    assert!(ic::diff(b.socket_path(), &run.run_id).is_ok());
+    // re-label the durable record as another uid's run (the broker re-reads it per request)
+    let f = fx
+        .tmp
+        .path()
+        .join("broker-owner")
+        .join("runs")
+        .join(format!("{}.json", run.run_id));
+    let raw = std::fs::read_to_string(&f).unwrap();
+    let me = format!("\"clientId\":\"uid:{}\"", own_uid());
+    assert!(raw.contains(&me), "{raw}");
+    std::fs::write(&f, raw.replace(&me, "\"clientId\":\"uid:4242424\"")).unwrap();
+    for e in [
+        format!("{:?}", ic::diff(b.socket_path(), &run.run_id).unwrap_err()),
+        format!(
+            "{:?}",
+            ic::copy_info(b.socket_path(), &run.run_id).unwrap_err()
+        ),
+        format!(
+            "{:?}",
+            ic::status(b.socket_path(), &run.run_id).unwrap_err()
+        ),
+    ] {
+        assert!(e.contains("not-found"), "{e}");
+    }
+    b.shutdown();
+}
+
+// ─── A6.1.3 operator limits ──────────────────────────────────────────────────
+
+#[test]
+fn a613_operator_caps_lower_the_limits_even_when_the_client_asks_for_the_maximum_and_never_raise_them(
+) {
+    if !sandbox_ready() {
+        return;
+    }
+    let e = |n: u32| {
+        r#"{"path":"src/extra.rs","content":"pub fn x() {}\n","mode":"create"}"#
+            .replace("extra", &format!("extra{n}"))
+    };
+    let calls = vec![
+        ("fs_write", e(1)),
+        ("fs_write", e(2)),
+        (
+            "proc_run",
+            r#"{"program":"cargo","args":["check","--offline"]}"#.to_owned(),
+        ),
+        (
+            "proc_run",
+            r#"{"program":"cargo","args":["check","--offline"]}"#.to_owned(),
+        ),
+    ];
+    let fx = fixture(script(calls, "stopped at the operator's budget"));
+    let appr = Approver::start(&fx, approve_all());
+    let mut c = fx.config("caps");
+    c.code_caps = nexus_broker::CodeCaps {
+        max_edits: Some(1),
+        max_tests: Some(1),
+        max_turns: Some(8),
+        ..Default::default()
+    };
+    c.approval_ttl_ms = Some(120_000);
+    let b = nexus_broker::start(c).expect("starts");
+    // what the Desktop shows: the lowered limits and the approval lifetime
+    let cfg = ic::code_config(b.socket_path()).unwrap();
+    assert_eq!(
+        (
+            cfg.limits.max_edits,
+            cfg.limits.max_tests,
+            cfg.limits.max_turns
+        ),
+        (1, 1, 8)
+    );
+    assert_eq!(
+        cfg.limits.max_tool_calls,
+        ic::DESKTOP_CODE_LIMITS.max_tool_calls
+    );
+    assert_eq!(cfg.approval_lifetime_secs, 120);
+    // the client asks for the fixed MAXIMUM (as the Desktop does): the cap still wins
+    let run = submit_wait(
+        b.socket_path(),
+        &desktop_code_intent("go", "a613-caps-00000001"),
+        150,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(run.max_edits, 1);
+    assert_eq!(run.max_tests, 1);
+    assert_eq!(run.max_turns, 8);
+    assert_eq!((run.edits_used, run.tests_used), (1, 1));
+    assert_eq!(
+        appr.reviewed().len(),
+        2,
+        "over-budget proposals never reach an approver"
+    );
+    b.shutdown();
+    // operators cannot raise a limit
+    for bad in [
+        nexus_broker::CodeCaps {
+            max_turns: Some(13),
+            ..Default::default()
+        },
+        nexus_broker::CodeCaps {
+            max_edits: Some(6),
+            ..Default::default()
+        },
+        nexus_broker::CodeCaps {
+            max_runtime_secs: Some(1801),
+            ..Default::default()
+        },
+        nexus_broker::CodeCaps {
+            max_tests: Some(0),
+            ..Default::default()
+        },
+    ] {
+        let mut c = fx.config("capsbad");
+        c.code_caps = bad;
+        assert!(nexus_broker::start(c).is_err());
+    }
+}
+
+// ─── A6.1.3 independent project rehearsal (scripted model, real daemon/broker/sandbox) ───
+
+/// A small, independent (non-Nexus) multi-file crate with TWO separate bugs: the
+/// parser does not trim, and the report ignores negative amounts.
+fn make_ledger_repo(root: &Path) {
+    let w = |rel: &str, text: &str| {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    };
+    w(
+        "Cargo.toml",
+        "[package]\nname = \"ledger\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+    );
+    w("Cargo.lock", "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = \"ledger\"\nversion = \"0.1.0\"\n");
+    w(".gitignore", "target/\n");
+    w(
+        "README.md",
+        "# ledger\nParses `name,amount` lines and totals them (refunds are negative).\n",
+    );
+    w(
+        "src/lib.rs",
+        "pub mod parser;\npub mod report;\n\npub use parser::parse_line;\npub use report::total;\n",
+    );
+    w("src/parser.rs", "/// Parse \"name,amount\" into an entry; surrounding spaces are allowed.\npub fn parse_line(line: &str) -> Option<(String, i64)> {\n    let (name, amount) = line.split_once(',')?;\n    let amount = amount.parse::<i64>().ok()?;\n    Some((name.to_string(), amount))\n}\n");
+    w("src/report.rs", "/// Sum of all amounts; refunds (negative) reduce the total.\npub fn total(entries: &[(String, i64)]) -> i64 {\n    entries.iter().filter(|e| e.1 > 0).map(|e| e.1).sum()\n}\n");
+    w("tests/ledger.rs", "use ledger::{parse_line, total};\n\n#[test]\nfn parses_lines_with_spaces() {\n    assert_eq!(parse_line(\" apples , 5\"), Some((\"apples\".to_string(), 5)));\n}\n\n#[test]\nfn totals_include_refunds() {\n    let entries: Vec<_> = [\"a,10\", \"b,-3\"].iter().filter_map(|l| parse_line(l)).collect();\n    assert_eq!(total(&entries), 7);\n}\n");
+    let git = |args: &[&str]| {
+        let o = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "init"]);
+}
+
+fn ledger_calls() -> Vec<(&'static str, String)> {
+    let test = r#"{"program":"cargo","args":["test","--offline"]}"#.to_owned();
+    vec![
+        ("fs_list", r#"{"path":"."}"#.to_owned()),
+        ("fs_read", r#"{"path":"src/lib.rs"}"#.to_owned()),
+        ("fs_read", r#"{"path":"src/parser.rs"}"#.to_owned()),
+        ("fs_read", r#"{"path":"src/report.rs"}"#.to_owned()),
+        ("fs_read", r#"{"path":"tests/ledger.rs"}"#.to_owned()),
+        // fix 1 (parser) - the first test now passes, the second still fails
+        ("fs_edit", r#"{"path":"src/parser.rs","edits":[{"oldText":"    let (name, amount) = line.split_once(',')?;\n    let amount = amount.parse::<i64>().ok()?;\n    Some((name.to_string(), amount))","newText":"    let (name, amount) = line.split_once(',')?;\n    let amount = amount.trim().parse::<i64>().ok()?;\n    Some((name.trim().to_string(), amount))"}]}"#.to_owned()),
+        ("proc_run", test.clone()),
+        // correction after the failure (report)
+        ("fs_edit", r#"{"path":"src/report.rs","edits":[{"oldText":"entries.iter().filter(|e| e.1 > 0).map(|e| e.1).sum()","newText":"entries.iter().map(|e| e.1).sum()"}]}"#.to_owned()),
+        ("proc_run", test),
+    ]
+}
+
+fn operator_cli(registry: &Path, args: &[&str]) -> (bool, String) {
+    let o = Command::new(native_bin("nexus"))
+        .env("NEXUS_PROJECT_REGISTRY", registry)
+        .args(args)
+        .output()
+        .unwrap();
+    (
+        o.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        ),
+    )
+}
+
+#[test]
+fn a613_independent_project_rehearsal_multi_file_fail_then_correct_then_pass_and_cleanup() {
+    if !sandbox_ready() {
+        return;
+    }
+    let mut fx = fixture_registry(script(
+        ledger_calls(),
+        "Fixed the parser and the report; cargo test passes.",
+    ));
+    let _appr = Approver::start(&fx, approve_all());
+    // 1. an independent project, registered ONLY through the operator interface
+    let proj = fx.work.join("ledger");
+    std::fs::create_dir_all(&proj).unwrap();
+    make_ledger_repo(&proj);
+    let rd = fx.reg_dir.clone().unwrap();
+    let (ok, out) = operator_cli(
+        &rd,
+        &[
+            "project",
+            "add",
+            "ledger",
+            proj.to_str().unwrap(),
+            "--write-allow",
+            "src/",
+        ],
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = operator_cli(&rd, &["project", "show", "ledger"]);
+    assert!(
+        ok && out.contains("src/") && out.contains("network access disabled"),
+        "{out}"
+    );
+    let head = git_out(&proj, &["rev-parse", "HEAD"]).trim().to_owned();
+    let before = fp_of(&proj);
+    // 2. the Desktop's view of it (identity, pin, scope - no path)
+    let b = fx.start_registry("reh");
+    let srcs = ic::code_sources(b.socket_path()).unwrap();
+    let s = srcs
+        .iter()
+        .find(|s| s.source_id == "ledger")
+        .expect("listed without a restart");
+    assert_eq!(
+        (s.pinned_commit.as_deref(), s.write_allow.as_slice()),
+        (Some(head.as_str()), &["src/".to_string()][..])
+    );
+    // 3-8. multi-file inspect, approved edits, a failing test, a correction, the passing test
+    let run = submit_wait(
+        b.socket_path(),
+        &desktop_code_intent_for(
+            "ledger",
+            "Fix the failing tests in this crate.",
+            "a613-reh-000000001",
+        ),
+        240,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let st = statuses(&run);
+    assert_eq!(st.iter().filter(|s| s.0 == "fs_read").count(), 4, "{st:?}");
+    assert_eq!(
+        st.iter()
+            .filter(|s| s.0 == "fs_edit" && s.1 == "executed")
+            .count(),
+        2,
+        "{st:?}"
+    );
+    let tests: Vec<_> = run
+        .tool_activity
+        .iter()
+        .filter(|a| a.tool == "proc_run")
+        .collect();
+    assert_eq!(tests.len(), 2);
+    assert_eq!(
+        tests[0].verification.as_deref(),
+        Some("fail"),
+        "the first run fails (second bug remains): {tests:?}"
+    );
+    assert_eq!(tests[1].verification.as_deref(), Some("pass"));
+    let o = run.coding_outcome.as_ref().unwrap();
+    assert_eq!(
+        (
+            o.verification.as_str(),
+            o.change.as_str(),
+            o.stale_after_edit
+        ),
+        ("verified-passed", "applied", false),
+        "{o:?}"
+    );
+    assert_eq!((o.edits_applied, o.tests_executed), (2, 2));
+    let mut files: Vec<_> = run.changed_files.iter().map(|f| f.path.as_str()).collect();
+    files.sort();
+    assert_eq!(files, ["src/parser.rs", "src/report.rs"]);
+    let d = ic::diff(b.socket_path(), &run.run_id).unwrap();
+    assert!(
+        d.diff
+            .contains("+    let amount = amount.trim().parse::<i64>().ok()?;"),
+        "{}",
+        d.diff
+    );
+    assert!(
+        d.diff
+            .contains("-    entries.iter().filter(|e| e.1 > 0).map(|e| e.1).sum()")
+            && d.diff.contains("+    entries.iter().map(|e| e.1).sum()"),
+        "{}",
+        d.diff
+    );
+    assert!(d.diff.contains("src/parser.rs") && d.diff.contains("src/report.rs"));
+    // 9. reconnect: a brand-new broker over the same state shows the same completed result
+    b.shutdown();
+    let b2 = fx.start_registry("reh");
+    let again = ic::status(b2.socket_path(), &run.run_id).unwrap();
+    assert_eq!(again.state, "completed");
+    assert_eq!(
+        again
+            .coding_outcome
+            .as_ref()
+            .map(|o| o.verification.as_str()),
+        Some("verified-passed")
+    );
+    assert_eq!(again.changed_files.len(), 2);
+    assert_eq!(
+        ic::diff(b2.socket_path(), &run.run_id).unwrap().diff_digest,
+        d.diff_digest
+    );
+    // 10. the original project is byte-identical
+    assert_eq!(fp_of(&proj), before);
+    // 11. safe removal of the (now inactive) copy; evidence stays
+    let c = ops(&fx, "reh");
+    let l = nexus_broker::worktree_ops::list(&c).unwrap();
+    assert_eq!(
+        (l.len(), l[0]["project"].as_str(), l[0]["status"].as_str()),
+        (1, Some("ledger"), Some("inactive")),
+        "{l:?}"
+    );
+    let patch = fx.tmp.path().join("ledger.patch");
+    nexus_broker::worktree_ops::patch(&c, &run.run_id, Some(&patch), false).unwrap();
+    assert!(std::fs::read_to_string(&patch)
+        .unwrap()
+        .contains("src/report.rs"));
+    nexus_broker::worktree_ops::remove(&c, &run.run_id, false).unwrap();
+    assert!(nexus_broker::worktree_ops::list(&c).unwrap().is_empty());
+    let kept = ic::status(b2.socket_path(), &run.run_id).unwrap();
+    assert_eq!(
+        kept.coding_outcome
+            .as_ref()
+            .map(|o| o.verification.as_str()),
+        Some("verified-passed")
+    );
+    assert_eq!(fp_of(&proj), before);
+    // the operator can re-pin only to the real, clean HEAD, and remove the project
+    let (ok, out) = operator_cli(
+        &rd,
+        &["project", "repin", "ledger", "--to", &"0".repeat(40)],
+    );
+    assert!(!ok && out.contains("commit-mismatch"), "{out}");
+    let (ok, _) = operator_cli(&rd, &["project", "remove", "ledger", "--yes"]);
+    assert!(ok);
+    assert!(ic::code_sources(b2.socket_path())
+        .unwrap()
+        .iter()
+        .all(|s| s.source_id != "ledger"));
+    b2.shutdown();
+    fx.restart_daemon();
+}
+
+fn desktop_code_intent_for(ws: &str, prompt: &str, key: &str) -> NexusIntentV1 {
+    let mut i = desktop_code_intent(prompt, key);
+    i.workspace_id = Some(ws.to_owned());
+    i
+}
+
+/// A6.1.3 GUI rehearsal fixture (manual, offline, no provider): the real daemon,
+/// broker and sandbox in registry mode with the independent `ledger` project
+/// registered through the OPERATOR CLI and one completed multi-file
+/// fail-correct-pass run left behind as real history. Everything is a fixture.
+///
+///   NEXUS_A61_HOLD_DIR=<dir> cargo test --offline -p nexus-broker --test code_a56 -- --ignored a613_gui_fixture_hold --nocapture
+#[test]
+#[ignore = "manual GUI fixture; needs NEXUS_A61_HOLD_DIR"]
+fn a613_gui_fixture_hold() {
+    let Ok(hold) = std::env::var("NEXUS_A61_HOLD_DIR") else {
+        println!("NOT RUN: set NEXUS_A61_HOLD_DIR");
+        return;
+    };
+    if !sandbox_ready() {
+        return;
+    }
+    let hold = PathBuf::from(hold);
+    let fx = fixture_registry(script(
+        ledger_calls(),
+        "Fixed the parser and the report; cargo test passes.",
+    ));
+    let _appr = Approver::start(&fx, approve_all());
+    let proj = fx.work.join("ledger");
+    std::fs::create_dir_all(&proj).unwrap();
+    make_ledger_repo(&proj);
+    let (ok, out) = operator_cli(
+        fx.reg_dir.as_ref().unwrap(),
+        &[
+            "project",
+            "add",
+            "ledger",
+            proj.to_str().unwrap(),
+            "--write-allow",
+            "src/",
+        ],
+    );
+    assert!(ok, "{out}");
+    let b = fx.start_registry("gui");
+    let run = submit_wait(
+        b.socket_path(),
+        &desktop_code_intent_for(
+            "ledger",
+            "Fix the failing tests in this crate.",
+            "gui-a613-fixture-1",
+        ),
+        240,
+    );
+    println!(
+        "FIXTURE ledger run: state={} outcome={:?}",
+        run.state,
+        run.coding_outcome
+            .as_ref()
+            .map(|o| (&o.change, &o.verification))
+    );
     std::fs::write(
         hold.join("socket"),
         b.socket_path().to_string_lossy().as_bytes(),
     )
     .unwrap();
-    let run = ic::submit(
-        b.socket_path(),
-        &desktop_code_intent(
-            "Fix the failing add test (GUI fixture run).",
-            "gui-a61-fixture-1",
-        ),
+    std::fs::write(
+        hold.join("runs.json"),
+        json!({"ledger": run.conversation_id, "runId": run.run_id}).to_string(),
     )
-    .unwrap()
-    .run;
-    std::fs::write(hold.join("run-id"), run.run_id.as_bytes()).unwrap();
-    println!(
-        "FIXTURE READY socket={} run={}",
-        b.socket_path().display(),
-        run.run_id
-    );
+    .unwrap();
+    println!("FIXTURE READY socket={}", b.socket_path().display());
     let end = Instant::now() + Duration::from_secs(3600);
     while !hold.join("release").exists() && Instant::now() < end {
         std::thread::sleep(Duration::from_millis(200));
     }
+    b.shutdown();
+}
+
+/// A6.1.3 acceptance-project rehearsal (manual; no provider, no network): the exact
+/// project and commit prepared for the first real GUI task, cloned into a throwaway
+/// fixture and driven by a scripted model that follows the prepared prompt's shape
+/// (4 reads, 3 edits, a failing test run, a correction, a passing run). The real
+/// project and the operator's real registry are never touched.
+///
+///   NEXUS_A613_PROJECT=$HOME/work/tinycsv cargo test --offline -p nexus-broker --test code_a56 -- --ignored a613_rehearsal_acceptance_project --nocapture
+#[test]
+#[ignore = "manual rehearsal; needs NEXUS_A613_PROJECT"]
+fn a613_rehearsal_acceptance_project() {
+    let Ok(origin) = std::env::var("NEXUS_A613_PROJECT") else {
+        println!("NOT RUN: set NEXUS_A613_PROJECT");
+        return;
+    };
+    if !sandbox_ready() {
+        return;
+    }
+    let parser_new = "    let mut out = Vec::new();\n    let mut cur = String::new();\n    let mut quoted = false;\n    let mut chars = line.chars().peekable();\n    while let Some(c) = chars.next() {\n        match c {\n            '\"' if quoted && chars.peek() == Some(&'\"') => {\n                cur.push('\"');\n                chars.next();\n            }\n            '\"' => quoted = !quoted,\n            ',' if !quoted => {\n                out.push(cur.trim().to_string());\n                cur.clear();\n            }\n            _ => cur.push(c),\n        }\n    }\n    out.push(cur.trim().to_string());\n    out";
+    let edit = |path: &str, old: &str, new: &str| {
+        json!({"path": path, "edits": [{"oldText": old, "newText": new}]}).to_string()
+    };
+    let test = r#"{"program":"cargo","args":["test","--offline"]}"#.to_owned();
+    let calls: Vec<(&'static str, String)> = vec![
+        ("fs_read", r#"{"path":"src/parser.rs"}"#.to_owned()),
+        ("fs_read", r#"{"path":"src/table.rs"}"#.to_owned()),
+        ("fs_read", r#"{"path":"src/stats.rs"}"#.to_owned()),
+        ("fs_read", r#"{"path":"tests/table.rs"}"#.to_owned()),
+        ("fs_edit", edit("src/parser.rs", "    line.split(',').map(|f| f.trim().to_string()).collect()", parser_new)),
+        ("fs_edit", edit("src/stats.rs", "    let sum: f64 = values.iter().sum();", "    if values.is_empty() {\n        return None;\n    }\n    let sum: f64 = values.iter().sum();")),
+        ("proc_run", test.clone()),
+        ("fs_edit", edit("src/table.rs", "        for row in std::iter::once(&self.header).chain(self.rows.iter()) {\n            total += row[idx].parse::<f64>().unwrap();\n        }", "        for row in &self.rows {\n            if let Some(v) = row.get(idx).and_then(|c| c.parse::<f64>().ok()) {\n                total += v;\n            }\n        }")),
+        ("proc_run", test),
+    ];
+    let fx = fixture_registry(script(
+        calls,
+        "Fixed the parser, the mean of an empty slice and the column sum; cargo test passes.",
+    ));
+    let _appr = Approver::start(&fx, approve_all());
+    let proj = fx.work.join("tinycsv");
+    let o = Command::new("git")
+        .args(["clone", "-q", &origin, proj.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let rd = fx.reg_dir.clone().unwrap();
+    let (ok, out) = operator_cli(
+        &rd,
+        &[
+            "project",
+            "add",
+            "tinycsv",
+            proj.to_str().unwrap(),
+            "--write-allow",
+            "src/",
+        ],
+    );
+    assert!(ok, "{out}");
+    let head = git_out(&proj, &["rev-parse", "HEAD"]).trim().to_owned();
+    assert_eq!(
+        head,
+        git_out(Path::new(&origin), &["rev-parse", "HEAD"]).trim(),
+        "same commit as the real project"
+    );
+    let before = fp_of(&proj);
+    let mut c = fx.config("acc");
+    c.code_sources = Vec::new();
+    c.project_registry = Some((rd.clone(), nexus_tools::registry::Trust::default()));
+    c.code_caps = nexus_broker::CodeCaps {
+        max_edits: Some(4),
+        max_tests: Some(3),
+        ..Default::default()
+    };
+    let b = nexus_broker::start(c).expect("starts");
+    let prompt = std::fs::read_to_string(std::env::var("NEXUS_A613_PROMPT").unwrap_or_else(|_| {
+        format!(
+            "{}/.nexus-a54/gui-task-tinycsv.txt",
+            std::env::var("HOME").unwrap()
+        )
+    }))
+    .unwrap_or_else(|_| "Fix the failing tests.".into());
+    let run = submit_wait(
+        b.socket_path(),
+        &desktop_code_intent_for("tinycsv", &prompt, "a613-acc-00000001"),
+        300,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let tests: Vec<_> = run
+        .tool_activity
+        .iter()
+        .filter(|a| a.tool == "proc_run")
+        .map(|a| a.verification.clone())
+        .collect();
+    assert_eq!(
+        tests,
+        [Some("fail".to_owned()), Some("pass".to_owned())],
+        "{run:?}"
+    );
+    let o = run.coding_outcome.as_ref().unwrap();
+    assert_eq!(
+        (
+            o.verification.as_str(),
+            o.edits_applied,
+            o.tests_executed,
+            o.stale_after_edit
+        ),
+        ("verified-passed", 3, 2, false),
+        "{o:?}"
+    );
+    assert_eq!((run.max_edits, run.max_tests, run.max_turns), (4, 3, 12));
+    let mut files: Vec<_> = run.changed_files.iter().map(|f| f.path.as_str()).collect();
+    files.sort();
+    assert_eq!(files, ["src/parser.rs", "src/stats.rs", "src/table.rs"]);
+    assert_eq!(run.worktree_commit.as_deref(), Some(head.as_str()));
+    assert_eq!(fp_of(&proj), before, "the original is unchanged");
+    println!(
+        "ACCEPTANCE REHEARSAL OK: turns={} tool_calls={} edits={} tests={}",
+        run.turn, run.tool_calls, run.edits_used, run.tests_used
+    );
+    b.shutdown();
+}
+
+#[test]
+fn a613_concurrent_diff_requests_for_one_copy_all_succeed() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_registry(script(fix_calls(), "Fixed."));
+    let _appr = Approver::start(&fx, approve_all());
+    let b = fx.start_registry("cdiff");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "a613-cdiff-0000001", |_| {}),
+        150,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let sock = b.socket_path().to_owned();
+    let mut digests = Vec::new();
+    for _round in 0..4 {
+        let hs: Vec<_> = (0..10)
+            .map(|_| {
+                let (s, id) = (sock.clone(), run.run_id.clone());
+                std::thread::spawn(move || ic::diff(&s, &id).map(|d| d.diff_digest))
+            })
+            .collect();
+        for h in hs {
+            digests.push(h.join().unwrap().expect("every concurrent diff succeeds"));
+        }
+    }
+    assert!(digests.iter().all(|d| d == &digests[0]));
     b.shutdown();
 }

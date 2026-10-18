@@ -51,6 +51,8 @@ const FORBIDDEN: &[&str] = &[
     // A5.6 development pilot: autonomous coding is not part of production-v1.
     "--enable-repo-code",
     "--worktree-root",
+    "--project-registry",
+    "--project-registry-owner-uid",
 ];
 
 /// Environment variables that arm test-only behaviour.

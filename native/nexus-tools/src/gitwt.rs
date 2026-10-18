@@ -474,6 +474,45 @@ pub fn sweep_stale(root: &Path) -> usize {
     n
 }
 
+/// Approximate disk usage of one managed working copy: lstat sizes, symlinks
+/// never followed, bounded work. Returns (bytes, entries, truncated).
+pub fn disk_usage(root: &Path, id: &str) -> Result<(u64, u64, bool), WtError> {
+    use std::os::unix::fs::MetadataExt;
+    if !valid_task_id(id) {
+        return Err(err("bad-task-id", "invalid task id"));
+    }
+    let root = std::fs::canonicalize(root).map_err(|_| err("bad-root", "worktree root missing"))?;
+    let top = root.join(id);
+    let md =
+        std::fs::symlink_metadata(&top).map_err(|_| err("not-found", "no such working copy"))?;
+    if !md.file_type().is_dir() {
+        return Err(err("not-found", "not a working copy directory"));
+    }
+    const MAX_ENTRIES: u64 = 200_000;
+    let (mut bytes, mut n, mut trunc) = (0u64, 0u64, false);
+    let mut stack = vec![top];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            n += 1;
+            if n > MAX_ENTRIES {
+                trunc = true;
+                return Ok((bytes, n, trunc));
+            }
+            let Ok(m) = std::fs::symlink_metadata(e.path()) else {
+                continue;
+            };
+            bytes += m.blocks() * 512;
+            if m.file_type().is_dir() {
+                stack.push(e.path());
+            }
+        }
+    }
+    Ok((bytes, n, trunc))
+}
+
 /// Explicit operator removal of one task's copy.
 pub fn remove(root: &Path, id: &str) -> Result<(), WtError> {
     if !valid_task_id(id) {
@@ -492,6 +531,11 @@ pub fn remove(root: &Path, id: &str) -> Result<(), WtError> {
 /// The reviewable change set of a working copy relative to its base commit:
 /// file list, unified diff and digest. Never commits.
 pub fn diff(wt: &Path, base_commit: &str) -> Result<DiffReport, WtError> {
+    // `git add -A` stages into the copy's own index, which must never be written by two
+    // diffs at once (index.lock): one diff at a time in this process. (Found by the real
+    // Desktop asking for the same diff twice.)
+    static DIFF_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_at_a_time = DIFF_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if !is_hex_commit(base_commit) {
         return Err(err("bad-commit", "base commit is malformed"));
     }

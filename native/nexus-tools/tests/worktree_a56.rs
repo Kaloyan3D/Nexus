@@ -501,3 +501,34 @@ fn clone_isolation_audit_no_shared_inodes_alternates_remotes_hooks_or_source_wri
     assert_eq!(snapshot(&src), dirty);
     assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
 }
+
+#[test]
+fn concurrent_diffs_of_one_copy_never_collide_on_the_index() {
+    let (_d, r) = repo();
+    // a bigger tree makes `git add -A` slow enough for two diffs to overlap
+    for i in 0..400 {
+        std::fs::write(r.join(format!("f{i}.txt")), format!("file {i}\n")).unwrap();
+    }
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-qm", "many"]);
+    let (_rd, root) = roots();
+    let info = create(&r, &root, "task-concurrent-diff").unwrap();
+    let wt = info.path.clone();
+    for i in 0..400 {
+        std::fs::write(wt.join(format!("f{i}.txt")), format!("changed {i}\n")).unwrap();
+    }
+    let base = info.source.commit.clone();
+    for _round in 0..3 {
+        let hs: Vec<_> = (0..8)
+            .map(|_| {
+                let (w, b) = (wt.clone(), base.clone());
+                std::thread::spawn(move || diff(&w, &b).map(|d| d.diff_digest))
+            })
+            .collect();
+        let ds: Vec<_> = hs
+            .into_iter()
+            .map(|h| h.join().unwrap().expect("a concurrent diff must succeed"))
+            .collect();
+        assert!(ds.iter().all(|d| d == &ds[0]));
+    }
+}

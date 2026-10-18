@@ -639,6 +639,9 @@ impl Fx {
                 write_allow: Vec::new(),
             }],
             code_sources: vec![],
+            approval_ttl_ms: None,
+            project_registry: None,
+            code_caps: Default::default(),
         }
     }
 

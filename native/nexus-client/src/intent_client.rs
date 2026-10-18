@@ -112,6 +112,11 @@ pub struct IntentRun {
     /// repo-code: the operation waiting for an independent approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_approval: Option<PendingApproval>,
+    /// repo-code (A6.1.1): what the RUNTIME verified, derived on read from the
+    /// recorded tool receipts. Independent of the lifecycle `state` and of
+    /// anything the model said. Absent on other run types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coding_outcome: Option<CodingOutcome>,
     /// repo-code: commit the isolated working copy was made from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_commit: Option<String>,
@@ -208,6 +213,157 @@ pub struct PendingApproval {
     pub created_at_ms: Option<u64>,
 }
 
+/// What the runtime actually verified about a coding run (A6.1.1). Derived
+/// ONLY from execution receipts in the run's tool activity (approval outcome,
+/// execution status, write post-image hashes, command verdicts), never from
+/// model text, and never defaulting to success: missing evidence is
+/// `not-yet-verified`, `no-test-executed` or `uncertain`.
+///
+/// The run's lifecycle (`state`: completed, failed, cancelled, ...) is a
+/// separate concept: a run is `completed` when the model stopped answering,
+/// whatever became of its proposed edits and commands.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CodingOutcome {
+    /// `verified-passed` | `verified-failed` | `blocked-by-approval` |
+    /// `no-test-executed` | `not-yet-verified` | `uncertain`
+    pub verification: String,
+    /// `none-proposed` | `pending-approval` | `applied` | `partially-applied` |
+    /// `not-applied` | `uncertain`
+    pub change: String,
+    /// Edits/writes that executed AND returned a post-image receipt.
+    pub edits_applied: u32,
+    /// Proposed edits/writes that did not execute (denied, expired, revoked,
+    /// cancelled, timed out, refused, failed).
+    pub edits_not_applied: u32,
+    /// Commands that executed and returned a verdict.
+    pub tests_executed: u32,
+    /// Proposed commands that did not execute.
+    pub tests_not_executed: u32,
+    /// Operations (edit or command) that an approval decision/expiry stopped.
+    pub blocked_by_approval: u32,
+    /// Exit code of the last executed command, when it exited.
+    pub last_exit_code: Option<i64>,
+    /// The last executed command ran BEFORE the last applied edit, so it does
+    /// not verify the current state of the working copy.
+    pub stale_after_edit: bool,
+    /// Number of operations whose recorded evidence is inconsistent or missing
+    /// (e.g. an edit reported executed without a post-image hash).
+    pub uncertain_operations: u32,
+}
+
+/// Derive the verified coding outcome of a `repo-code` run from its receipts.
+/// Returns `None` for any other run type.
+pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
+    if run.intent_type != "repo-code" {
+        return None;
+    }
+    let mut o = CodingOutcome::default();
+    let mut last_test: Option<(u32, bool, Option<i64>)> = None; // (index, passed, exit)
+    let mut last_applied_edit: Option<u32> = None;
+    let mut cmd_blocked = false;
+    let mut mut_proposed = false;
+    for a in &run.tool_activity {
+        let is_edit = a.tool == "fs_edit" || a.tool == "fs_write";
+        let is_cmd = a.tool == "proc_run";
+        if !is_edit && !is_cmd {
+            continue;
+        }
+        let executed = a.status == "executed";
+        let stopped_by_approval = !executed
+            && a.approval_outcome
+                .as_deref()
+                .is_some_and(|x| x != "approved");
+        if stopped_by_approval {
+            o.blocked_by_approval += 1;
+        }
+        if a.status == "uncertain" {
+            o.uncertain_operations += 1;
+            if is_edit {
+                mut_proposed = true;
+            }
+            continue;
+        }
+        if is_edit {
+            mut_proposed = true;
+            if executed {
+                if a.post_sha256.is_some() {
+                    o.edits_applied += 1;
+                    last_applied_edit = Some(a.index);
+                } else {
+                    o.uncertain_operations += 1; // "executed" without a receipt is not an applied change
+                }
+            } else {
+                o.edits_not_applied += 1;
+            }
+        } else {
+            if executed {
+                match a.verification.as_deref() {
+                    Some("pass") => {
+                        o.tests_executed += 1;
+                        last_test = Some((a.index, true, a.exit_code));
+                    }
+                    Some("fail") => {
+                        o.tests_executed += 1;
+                        last_test = Some((a.index, false, a.exit_code));
+                    }
+                    _ => o.uncertain_operations += 1, // no verdict recorded: never assume a pass
+                }
+            } else {
+                o.tests_not_executed += 1;
+                if stopped_by_approval {
+                    cmd_blocked = true;
+                }
+            }
+        }
+    }
+    o.last_exit_code = last_test.and_then(|t| t.2);
+    let run_uncertain =
+        run.state == "uncertain" || run.error_code.as_deref() == Some("tool-outcome-uncertain");
+    let uncertain = run_uncertain || o.uncertain_operations > 0;
+    o.stale_after_edit = match (last_test, last_applied_edit) {
+        (Some((ti, _, _)), Some(ei)) => ei > ti,
+        _ => false,
+    };
+    o.change = if uncertain {
+        "uncertain"
+    } else if run
+        .pending_approval
+        .as_ref()
+        .is_some_and(|p| p.operation.as_deref() != Some("command"))
+    {
+        "pending-approval"
+    } else if o.edits_applied > 0 && o.edits_not_applied > 0 {
+        "partially-applied"
+    } else if o.edits_applied > 0 {
+        "applied"
+    } else if mut_proposed {
+        "not-applied"
+    } else {
+        "none-proposed"
+    }
+    .to_owned();
+    o.verification = if uncertain {
+        "uncertain"
+    } else if let Some((_, passed, _)) = last_test {
+        if o.stale_after_edit {
+            "not-yet-verified"
+        } else if passed {
+            "verified-passed"
+        } else {
+            "verified-failed"
+        }
+    } else if cmd_blocked {
+        "blocked-by-approval"
+    } else if run.terminal {
+        "no-test-executed"
+    } else {
+        "not-yet-verified"
+    }
+    .to_owned();
+    Some(o)
+}
+
 /// The fixed run limits the Desktop uses for `repo-code` (A6.1). They are
 /// defined here, shown to the user before submitting, and cannot be chosen by
 /// the renderer. A live session authorization must allow at least these.
@@ -262,6 +418,12 @@ pub struct ChangedFile {
 #[serde(rename_all = "camelCase")]
 pub struct AllowedCodeSource {
     pub source_id: String,
+    /// The exact commit the operator pinned this source to, if any (read-only display).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_commit: Option<String>,
+    /// Files/directories (`dir/`) the model may propose writes to; empty = whole project.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_allow: Vec<String>,
 }
 
 /// The reviewable result of a repo-code run, from the isolated working copy.
@@ -275,6 +437,22 @@ pub struct DiffReply {
     pub diff: String,
     pub diff_digest: String,
     pub diff_truncated: bool,
+}
+
+/// Read-only facts about a run's retained working copy (A6.1.3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyInfo {
+    pub retained: bool,
+    pub active: bool,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub base_commit: Option<String>,
+    #[serde(default)]
+    pub age_ms: Option<u64>,
+    #[serde(default)]
+    pub approx_bytes: Option<u64>,
 }
 
 /// A workspace this client may select (identity only, never a path).
@@ -497,6 +675,34 @@ pub fn diff(socket: &Path, run_id: &str) -> Result<DiffReply, ClientError> {
         "intent-diff",
         serde_json::json!({ "runId": run_id }),
         30_000,
+    )?)
+}
+
+/// The repo-code limits a run will really get (the fixed maximums lowered by
+/// the operator's caps) and how long an approval stays decidable (A6.1.3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeConfig {
+    pub limits: DesktopCodeLimits,
+    pub approval_lifetime_secs: u64,
+}
+
+pub fn code_config(socket: &Path) -> Result<CodeConfig, ClientError> {
+    decode(call(
+        socket,
+        "intent-code-config",
+        serde_json::json!({}),
+        10_000,
+    )?)
+}
+
+/// Facts about the retained working copy of one of THIS client's repo-code runs.
+pub fn copy_info(socket: &Path, run_id: &str) -> Result<CopyInfo, ClientError> {
+    decode(call(
+        socket,
+        "intent-copy",
+        serde_json::json!({ "runId": run_id }),
+        15_000,
     )?)
 }
 
