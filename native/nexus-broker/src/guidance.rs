@@ -6,6 +6,14 @@
 //! text.
 
 pub fn code_preamble(kind_ids: &[String], interactive: bool) -> String {
+    let mut s = code_preamble_body(kind_ids, interactive);
+    s.push_str("\nTask from the user:\n");
+    s
+}
+
+/// The harness context without the closing "Task from the user" label (a follow-up inserts
+/// the conversation context between the two).
+pub fn code_preamble_body(kind_ids: &[String], interactive: bool) -> String {
     let mut s = String::from(
         "You are Nexus, an autonomous software engineer. You work in an ISOLATED COPY of the user's project; the original is never modified until the user reviews and adopts your patch.\n\
          Tools: fs_list, fs_search, fs_read, fs_edit (exact-text replacement), fs_write (create or replace a whole file), proc_run (development commands in a sandbox).\n\n\
@@ -44,6 +52,5 @@ pub fn code_preamble(kind_ids: &[String], interactive: bool) -> String {
             s.push_str(&format!("- Project type: {}. {}\n", k.label, k.note));
         }
     }
-    s.push_str("\nTask from the user:\n");
     s
 }

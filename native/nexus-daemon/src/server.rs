@@ -2393,11 +2393,16 @@ fn wt_read_meta(root: &std::path::Path, task: &str) -> Option<(String, String)> 
 fn do_worktree_seed(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     if let Err(r) = only_keys(
         &req.params,
-        &["taskInstanceId", "fromTaskInstanceId"],
+        &["taskInstanceId", "fromTaskInstanceId", "rebase"],
         &req.id,
     ) {
         return r;
     }
+    let rebase = req
+        .params
+        .get("rebase")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let root = match wt_root(daemon, &req.id) {
         Ok(r) => r,
         Err(r) => return r,
@@ -2425,23 +2430,68 @@ fn do_worktree_seed(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     let (Some(m_to), Some(m_from)) = (meta(&to), meta(&from)) else {
         return fail(&req.id, "not-found", "both working copies must exist");
     };
-    // same project, same base commit: otherwise the carried files would not belong here
+    // same project: otherwise the carried files would not belong here
     if m_to.get("projectId") != m_from.get("projectId")
-        || m_to.get("sourceCommit") != m_from.get("sourceCommit")
         || m_to.get("projectId").is_none_or(|v| v.is_null())
     {
         return fail(
             &req.id,
             "scope-refused",
-            "the two copies are not of the same project snapshot",
+            "the two copies are not of the same project",
         );
+    }
+    // A conversation follow-up may start from a NEWER snapshot of the project (the folder
+    // changed, or the earlier patch was applied to it): per file, carry / already applied /
+    // conflict. Never silently: a conflict writes nothing and says which files.
+    if m_to.get("sourceCommit") != m_from.get("sourceCommit") {
+        if !rebase {
+            return fail(
+                &req.id,
+                "scope-refused",
+                "the two copies are not of the same project snapshot",
+            );
+        }
+        let (Some(old_base), Some(new_base)) = (
+            m_from.get("sourceCommit").and_then(|v| v.as_str()),
+            m_to.get("sourceCommit").and_then(|v| v.as_str()),
+        ) else {
+            return fail(&req.id, "not-found", "both working copies must exist");
+        };
+        return match nexus_tools::gitwt::seed_rebase(
+            &root.join(&from),
+            old_base,
+            &root.join(&to),
+            new_base,
+        ) {
+            Ok(r) if r.conflicts.is_empty() => ok(
+                &req.id,
+                serde_json::json!({ "seeded": r.carried, "alreadyApplied": r.already_applied, "relation": "rebased" }),
+            ),
+            Ok(r) => {
+                daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                let shown: Vec<&str> = r.conflicts.iter().take(10).map(String::as_str).collect();
+                fail(
+                    &req.id,
+                    "workspace-conflict",
+                    format!(
+                        "{} file(s) were changed both by this conversation and in your project since: {}",
+                        r.conflicts.len(),
+                        shown.join(", ")
+                    ),
+                )
+            }
+            Err(e) => wt_fail(daemon, &req.id, &e),
+        };
     }
     let base = m_from
         .get("sourceCommit")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     match nexus_tools::gitwt::seed_copy(&root.join(&from), base, &root.join(&to)) {
-        Ok(n) => ok(&req.id, serde_json::json!({ "seeded": n })),
+        Ok(n) => ok(
+            &req.id,
+            serde_json::json!({ "seeded": n, "alreadyApplied": 0, "relation": "continued" }),
+        ),
         Err(e) => wt_fail(daemon, &req.id, &e),
     }
 }

@@ -737,6 +737,121 @@ pub fn seed_copy(from_wt: &Path, base_commit: &str, to_wt: &Path) -> Result<usiz
     Ok(n)
 }
 
+/// What carrying a conversation's earlier work onto a NEWER snapshot of the project did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RebaseReport {
+    /// Files reproduced in the new copy (the project did not touch them since the old base).
+    pub carried: usize,
+    /// Files whose content the new snapshot already has (the change was applied to the folder).
+    pub already_applied: usize,
+    /// Files changed both by the earlier work and in the project since: nothing is written.
+    pub conflicts: Vec<String>,
+}
+
+fn blob_of(cwd: &Path, spec: &str) -> Option<String> {
+    let o = git(Some(cwd), &["rev-parse", "--verify", "-q", spec]).ok()?;
+    if o.status != 0 {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&o.stdout).trim().to_owned();
+    (!s.is_empty()).then_some(s)
+}
+
+/// Like [`seed_copy`], but the new copy was made from a DIFFERENT snapshot of the same
+/// project (`new_base`) than the earlier one (`old_base`): the folder changed between the
+/// two. Per file the earlier work touched:
+///   * the new snapshot already has the earlier work's content -> nothing to do (applied);
+///   * the project did not change that file since `old_base` -> the earlier work is carried;
+///   * otherwise both sides changed it -> conflict.
+///
+/// Any conflict means NOTHING is written (the caller reports it; the user decides).
+pub fn seed_rebase(
+    from_wt: &Path,
+    old_base: &str,
+    to_wt: &Path,
+    new_base: &str,
+) -> Result<RebaseReport, WtError> {
+    static SEED_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = SEED_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    if !is_hex_commit(old_base) || !is_hex_commit(new_base) {
+        return Err(err("bad-commit", "base commit is malformed"));
+    }
+    git_ok(from_wt, &["add", "-A", "--", "."])?;
+    let ns = git(
+        Some(from_wt),
+        &[
+            "diff",
+            "--cached",
+            "--name-status",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "-z",
+            old_base,
+        ],
+    )?;
+    if ns.status != 0 {
+        return Err(err("git-failed", "git diff failed"));
+    }
+    let text = String::from_utf8_lossy(&ns.stdout).into_owned();
+    let mut parts = text.split('\0').filter(|p| !p.is_empty());
+    let mut report = RebaseReport::default();
+    let mut plan: Vec<(bool, String)> = Vec::new(); // (delete?, path)
+    while let (Some(status), Some(path)) = (parts.next(), parts.next()) {
+        let ok_path = !path.starts_with('/')
+            && path
+                .split('/')
+                .all(|c| !c.is_empty() && c != "." && c != ".." && c != ".git");
+        if !ok_path {
+            continue;
+        }
+        let deleted = status.starts_with('D');
+        let head = if deleted {
+            None
+        } else {
+            blob_of(from_wt, &format!(":{path}"))
+        };
+        let b1 = blob_of(from_wt, &format!("{old_base}:{path}"));
+        let b2 = blob_of(to_wt, &format!("{new_base}:{path}"));
+        if head == b2 {
+            report.already_applied += 1;
+        } else if b2 == b1 {
+            plan.push((deleted, path.to_owned()));
+        } else {
+            report.conflicts.push(path.to_owned());
+        }
+    }
+    if !report.conflicts.is_empty() {
+        return Ok(report);
+    }
+    for (deleted, path) in plan {
+        let from = from_wt.join(&path);
+        let to = to_wt.join(&path);
+        if deleted {
+            let _ = std::fs::remove_file(&to);
+            report.carried += 1;
+            continue;
+        }
+        let Ok(md) = std::fs::symlink_metadata(&from) else {
+            continue;
+        };
+        if !md.file_type().is_file() || md.len() > 64 * 1024 * 1024 {
+            continue;
+        }
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| err("io", e.to_string()))?;
+        }
+        if let Ok(t) = std::fs::symlink_metadata(&to) {
+            if t.file_type().is_symlink() {
+                continue;
+            }
+        }
+        std::fs::copy(&from, &to).map_err(|e| err("io", e.to_string()))?;
+        report.carried += 1;
+    }
+    Ok(report)
+}
+
 pub fn run_git(cwd: &Path, args: &[&str]) -> Result<(i32, Vec<u8>), WtError> {
     let o = git(Some(cwd), args)?;
     Ok((o.status, o.stdout))

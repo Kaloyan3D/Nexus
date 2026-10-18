@@ -27,6 +27,7 @@ pub mod projects;
 pub mod recovery;
 pub mod server;
 pub mod store;
+pub mod threads;
 pub mod trust;
 pub mod worktree_ops;
 

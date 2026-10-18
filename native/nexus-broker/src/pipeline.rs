@@ -259,6 +259,7 @@ pub fn execute(b: Arc<Broker>, run_id: String, intent: NexusIntentV1, flag: Arc<
     if let Ok(mut g) = b.cancel_flags.lock() {
         g.remove(&run_id);
     }
+    crate::threads::sync_run(&b, &run_id, None);
     auto_adopt(&b, &run_id);
     auto_continue(&b, &run_id);
 }
@@ -322,7 +323,9 @@ fn auto_adopt(b: &Arc<Broker>, run_id: &str) {
     let Some(rec) = b.store.load(run_id) else {
         return;
     };
-    if rec.run.state != "completed"
+    // a read-only request never writes to the user's folder, whatever its copy contains
+    if rec.run.read_only
+        || rec.run.state != "completed"
         || rec.run.intent_type != nexus_contracts::intent::INTENT_REPO_CODE
     {
         return;

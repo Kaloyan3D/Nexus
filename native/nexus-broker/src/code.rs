@@ -48,6 +48,8 @@ pub struct CodePolicy {
     /// whole project (minus the always-protected files). Entries ending in
     /// `/` are directory prefixes, anything else is one exact file.
     pub write_allow: Vec<String>,
+    /// A7.1: the request was read-only: every write proposal is refused by the broker.
+    pub read_only: bool,
 }
 
 pub fn resolve_policy(intent: &NexusIntentV1, write_allow: &[String]) -> CodePolicy {
@@ -56,6 +58,7 @@ pub fn resolve_policy(intent: &NexusIntentV1, write_allow: &[String]) -> CodePol
         max_tests: intent.limits.max_tests.unwrap_or(DEFAULT_MAX_TESTS),
         max_total_write_bytes: MAX_TOTAL_WRITE_BYTES,
         write_allow: write_allow.to_vec(),
+        read_only: false,
     }
 }
 

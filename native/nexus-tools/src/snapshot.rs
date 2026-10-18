@@ -181,7 +181,9 @@ pub fn fingerprint(origin: &Path, limits: &SnapshotLimits) -> Result<String, Sna
         let Ok(m) = std::fs::symlink_metadata(origin.join(&rel)) else {
             continue;
         };
-        if !m.file_type().is_file() {
+        // the same files the snapshot copies: a file it leaves out (too large) must not make
+        // the folder look "changed since the snapshot" forever
+        if !m.file_type().is_file() || m.len() > limits.max_file_bytes {
             continue;
         }
         h.update(rel.as_bytes());
@@ -569,6 +571,24 @@ mod tests {
         assert!(st.is_empty());
         let after = Command::new("sh").arg("-c").arg(format!("cd {} && find . -type f -not -path './.git/*' | sort | xargs sha256sum && git status --porcelain", d.display())).output().unwrap().stdout;
         assert_eq!(before, after);
+    }
+
+    /// Found by the A7.1 live acceptance: a project holding a file larger than the snapshot's
+    /// per-file limit (a PDF) looked "changed" after every snapshot, so every task re-snapshotted.
+    #[test]
+    fn a_file_the_snapshot_leaves_out_does_not_make_the_folder_look_changed() {
+        let o = tempfile::tempdir().unwrap();
+        let d = o.path();
+        w(d, "index.js", "console.log(1)\n");
+        let lim = SnapshotLimits {
+            max_file_bytes: 64,
+            ..SnapshotLimits::default()
+        };
+        std::fs::write(d.join("big.pdf"), vec![7u8; 4096]).unwrap();
+        let dr = tempfile::tempdir().unwrap();
+        let info = snapshot(d, &dr.path().join("a"), false, &lim).unwrap();
+        assert_eq!(info.skipped_total, 1, "{info:?}");
+        assert_eq!(fingerprint(d, &lim).unwrap(), info.fingerprint);
     }
 
     #[test]

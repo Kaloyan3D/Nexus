@@ -40,6 +40,8 @@ const TERMINAL: &[&str] = &[
 pub struct Broker {
     pub cfg: BrokerConfig,
     pub store: Store,
+    /// A7.1: durable conversations over the run store.
+    pub threads: crate::threads::ThreadStore,
     /// The daemon's issuer capability. A restarted daemon issues a new one; it is re-read
     /// from its file when the daemon stops accepting the one held here.
     pub(crate) cap_hex: std::sync::RwLock<String>,
@@ -279,6 +281,18 @@ impl Broker {
         params: &Value,
         continuation: Option<&str>,
     ) -> CmdResult {
+        self.submit_linked(client, params, continuation, None)
+    }
+
+    /// As `submit_with`, for a run that belongs to a conversation (A7.1): the link says
+    /// which one, whether the request is read-only and which earlier run's copy to start from.
+    pub(crate) fn submit_linked(
+        self: &Arc<Self>,
+        client: &str,
+        params: &Value,
+        continuation: Option<&str>,
+        link: Option<crate::threads::ThreadLink>,
+    ) -> CmdResult {
         if self.shutdown.load(Ordering::SeqCst) {
             return Err(("broker-shutting-down", "the broker is shutting down".into()));
         }
@@ -392,6 +406,10 @@ impl Broker {
                 created_at_ms: now,
                 updated_at_ms: now,
                 continuation_of: continuation.map(str::to_owned),
+                thread_id: link.as_ref().map(|l| l.thread_id.clone()),
+                read_only: link.as_ref().is_some_and(|l| l.read_only),
+                seed_from: link.as_ref().and_then(|l| l.seed_from.clone()),
+                workspace_relation: link.as_ref().and_then(|l| l.relation_hint.clone()),
                 ..Default::default()
             };
             let rec = RunRecord {
@@ -488,6 +506,14 @@ impl Broker {
                 "this task was already continued three times".into(),
             ));
         }
+        if let Some(tid) = &r.thread_id {
+            if !crate::threads::may_continue(self, tid, old_id) {
+                return Err((
+                    "not-available",
+                    "a newer request in this conversation superseded this run".into(),
+                ));
+            }
+        }
         let why = r.error_code.clone().unwrap_or_else(|| r.state.clone());
         let done = crate::inspect::receipts_summary(&r.tool_activity);
         let content = format!(
@@ -511,10 +537,19 @@ impl Broker {
             client_label: Some("nexus-continuation".to_owned()),
         };
         let params = json!({ "intent": serde_json::to_value(&intent).unwrap_or_default() });
-        let out = self.submit_with(&r.client_id.clone(), &params, Some(old_id))?;
+        let link = r.thread_id.clone().map(|t| crate::threads::ThreadLink {
+            thread_id: t,
+            read_only: r.read_only,
+            seed_from: None,
+            relation_hint: None,
+        });
+        let out = self.submit_linked(&r.client_id.clone(), &params, Some(old_id), link)?;
         if let Some(new_id) = out.pointer("/run/runId").and_then(|v| v.as_str()) {
             let n = new_id.to_owned();
-            self.annotate(old_id, |x| x.continued_as = Some(n));
+            self.annotate(old_id, |x| x.continued_as = Some(n.clone()));
+            if let Some(t) = &r.thread_id {
+                crate::threads::attach_continuation(self, t, new_id, old_id);
+            }
         }
         Ok(out)
     }
@@ -894,6 +929,11 @@ impl Broker {
                     .map_err(|_| ("internal", "the conversation could not be read".to_owned()))?;
                 Ok(json!({ "view": view }))
             }
+            "thread-send" => crate::threads::send(self, client, params),
+            "thread-list" => crate::threads::list(self, client, params),
+            "thread-get" => crate::threads::get(self, client, params),
+            "thread-create" => crate::threads::create(self, client, params),
+            "thread-update" => crate::threads::update(self, client, params),
             "intent-models" => Ok(json!({ "models": self.models()? })),
             "intent-code-sources" => Ok(json!({
                 // identities plus the operator's read-only restrictions (never a path)
@@ -1223,6 +1263,8 @@ pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
     use fs2::FileExt;
     use std::os::unix::fs::PermissionsExt;
     let store = Store::open(&cfg.state_dir).map_err(|e| format!("state dir: {e}"))?;
+    let threads = crate::threads::ThreadStore::open(&cfg.state_dir)
+        .map_err(|e| format!("conversation store: {e}"))?;
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -1339,6 +1381,7 @@ pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
     let broker = Arc::new(Broker {
         cfg,
         store,
+        threads,
         cap_hex: std::sync::RwLock::new(cap_hex),
         node_abs,
         cancel_flags: Mutex::new(HashMap::new()),
@@ -1358,6 +1401,7 @@ pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
         .map(|r| r.run.run_id)
         .collect();
     recover(&broker);
+    crate::threads::startup(&broker);
     if broker.cfg.interactive && !interrupted.is_empty() {
         // Autonomy: work that was running when the runtime went down is continued, not
         // abandoned. Runs the user cancelled, or that made no progress, are left alone.

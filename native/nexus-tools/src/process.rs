@@ -902,6 +902,15 @@ pub fn run_process(
     if let Some(w) = cmd.wall_ms {
         limits.wall_ms = limits.wall_ms.max(w.min(ctx.scope_max_wall_ms.max(1)));
     }
+    // The network is off, but programs still resolve `localhost` (test runners bind a loopback
+    // server): give the sandbox a minimal hosts file of its own - never the host's.
+    let mut ro_binds = cmd.ro_binds.clone();
+    if !cmd.install {
+        let hosts = run_dir.join("sandbox-hosts");
+        if std::fs::write(&hosts, "127.0.0.1 localhost\n::1 localhost ip6-localhost\n").is_ok() {
+            ro_binds.push((hosts, "/etc/hosts".to_owned()));
+        }
+    }
     let spec = SandboxSpec {
         id: ctx.execution_id.to_owned(),
         program: cmd.program.clone(),
@@ -909,7 +918,7 @@ pub fn run_process(
         src_dir: src.clone(),
         cwd: cmd.cwd.clone(),
         env: cmd.env.clone(),
-        ro_binds: cmd.ro_binds.clone(),
+        ro_binds,
         rw_binds,
         src_writable: ctx.policy.is_workbench(),
         net: cmd.install,

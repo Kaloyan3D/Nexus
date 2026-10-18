@@ -508,6 +508,8 @@ const INTENT_HELP: &str = "nexus intent <submit|status|result|follow|cancel|list
   workspaces                        list the read-only workspace identities this client may inspect\n\
   code-sources                      list the source repositories this client may ask Nexus to modify\n\
   diff <runId>                      the reviewable change set of a repo-code run (isolated copy vs recorded commit)\n\
+  thread list|show|send             A7.1 persistent conversations (interactive profile): list, read, or send a message\n\
+                                    (`thread send <project> [--thread ID] [--mode auto|review|edit] [--fresh] --input FILE|-`)\n\
   status|result|cancel <runId>      follow <runId> [--from-offset N]      list [--limit N]      models\n\
 Global: --broker-socket PATH (or NEXUS_BROKER_SOCKET). JSON envelope schema: nexus.intent.cli/v1.\n\
 Exit codes: 0 ok / completed, 2 usage or rejected, 3 broker unreachable, 4 unauthorized, 6 run ended without completing.\n\
@@ -859,6 +861,71 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
             let end = follow_run(cfg, &sock, &pos(), off)?;
             Ok(if end.state == "completed" { ExitCode::Ok } else { ExitCode::MockFailed })
         }
+        "thread" => {
+            // A7.1 persistent conversations: the same client functions the Desktop uses.
+            let verb = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            let nth = |n: usize| {
+                args.iter()
+                    .skip(2)
+                    .filter(|a| !a.starts_with("--"))
+                    .nth(n)
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            match verb {
+                "list" => {
+                    let v = ic::thread_list(&sock, flag_value(args, "--project").as_deref(), args.iter().any(|a| a == "--all"))?;
+                    let human = v["threads"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .map(|t| {
+                                    format!(
+                                        "{} {} runs={} {} {}",
+                                        t["threadId"].as_str().unwrap_or("?"),
+                                        t["projectId"].as_str().unwrap_or("?"),
+                                        t["runCount"],
+                                        if t["active"] == true { "ACTIVE" } else { t["lastState"].as_str().unwrap_or("") },
+                                        t["title"].as_str().unwrap_or("")
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .unwrap_or_default();
+                    intent_ok(cfg, v, &human);
+                    Ok(ExitCode::Ok)
+                }
+                "show" => {
+                    let v = ic::thread_get(&sock, &nth(0), None)?;
+                    let human = serde_json::to_string_pretty(&v).unwrap_or_default();
+                    intent_ok(cfg, v, &human);
+                    Ok(ExitCode::Ok)
+                }
+                "send" => {
+                    // nexus intent thread send <project-id> [--thread ID] [--mode auto|review|edit] [--fresh] --input FILE|-
+                    let project = nth(0);
+                    let content = read_input(&flag_value(args, "--input").ok_or_else(|| nexus_client::ClientError::usage("--input FILE|- is required"))?)?;
+                    let thread = flag_value(args, "--thread");
+                    let key = ic::fresh_key("thr");
+                    let v = ic::thread_send(
+                        &sock,
+                        &ic::ThreadSend {
+                            thread_id: thread.as_deref(),
+                            project_id: &project,
+                            content: &content,
+                            mode: &flag_value(args, "--mode").unwrap_or_else(|| "auto".into()),
+                            workspace: if args.iter().any(|a| a == "--fresh") { "fresh" } else { "continue" },
+                            idempotency_key: &key,
+                        },
+                    )?;
+                    let human = format!("thread {} run {}", v["threadId"].as_str().unwrap_or("?"), v["run"]["runId"].as_str().unwrap_or("?"));
+                    intent_ok(cfg, v, &human);
+                    Ok(ExitCode::Ok)
+                }
+                _ => Err(nexus_client::ClientError::usage("usage: nexus intent thread <list [--project ID] [--all]|show <threadId>|send <projectId> [--thread ID] [--mode auto|review|edit] [--fresh] --input FILE|->")),
+            }
+        }
         "resume" => {
             // continue an interrupted coding task in a new run that starts from its work
             let v = ic::resume(&sock, &pos())?;
@@ -879,7 +946,7 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
             intent_ok(cfg, serde_json::json!({ "runs": runs }), &human);
             Ok(ExitCode::Ok)
         }
-        _ => Err(nexus_client::ClientError::usage("usage: nexus intent <submit|status|result|follow|cancel|list|models|workspaces> (see `nexus intent --help`)")),
+        _ => Err(nexus_client::ClientError::usage("usage: nexus intent <submit|status|result|follow|cancel|list|models|workspaces|thread> (see `nexus intent --help`)")),
     }
     })();
     match r {

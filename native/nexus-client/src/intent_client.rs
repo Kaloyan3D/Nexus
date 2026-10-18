@@ -164,6 +164,23 @@ pub struct IntentRun {
     pub changed_files: Vec<ChangedFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_digest: Option<String>,
+    /// A7.1: the conversation this run belongs to (absent on runs started without one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// A7.1: the request was read-only: the run could not change a file (enforced by the
+    /// broker's proposal gate, not by the model's instructions).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_only: bool,
+    /// A7.1: how the working copy relates to earlier runs of the conversation:
+    /// `fresh` | `continued` | `rebased` | `fresh-by-choice`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_relation: Option<String>,
+    /// A7.1: plain-language detail of that relation (files carried, already applied, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_note: Option<String>,
+    /// A7.1: the earlier run whose working copy this run started from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_from: Option<String>,
     /// Bounded, ordered record of every proposed tool call.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_activity: Vec<ToolActivity>,
@@ -176,6 +193,9 @@ pub struct IntentRun {
     pub citations_unverified: Vec<String>,
 }
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
 fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
@@ -627,6 +647,11 @@ fn leak_code(code: &str) -> &'static str {
         "not-terminal",
         "not-found",
         "busy",
+        "thread-busy",
+        "thread-closed",
+        "workspace-conflict",
+        "workspace-missing",
+        "project-mismatch",
         "rate-limited",
         "pilot-disabled",
         "broker-shutting-down",
@@ -957,5 +982,92 @@ pub fn project_adopt(socket: &Path, run_id: &str) -> Result<serde_json::Value, C
         "project-adopt",
         serde_json::json!({ "runId": run_id }),
         60_000,
+    )
+}
+
+// ---- A7.1 conversations ----------------------------------------------------------
+
+/// Conversations (newest activity first), optionally of one project.
+pub fn thread_list(
+    socket: &Path,
+    project_id: Option<&str>,
+    include_archived: bool,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "thread-list",
+        serde_json::json!({ "projectId": project_id, "includeArchived": include_archived }),
+        30_000,
+    )
+}
+
+/// One conversation: ordered messages, runs with their verified evidence, findings, the
+/// workspace head. `after_seq` returns only messages newer than that.
+pub fn thread_get(
+    socket: &Path,
+    thread_id: &str,
+    after_seq: Option<u64>,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "thread-get",
+        serde_json::json!({ "threadId": thread_id, "afterSeq": after_seq }),
+        30_000,
+    )
+}
+
+/// Parameters of one message sent into a conversation (or into a new one).
+#[derive(Debug, Clone, Default)]
+pub struct ThreadSend<'a> {
+    pub thread_id: Option<&'a str>,
+    pub project_id: &'a str,
+    pub content: &'a str,
+    /// `auto` | `review` | `edit`
+    pub mode: &'a str,
+    /// `continue` | `fresh`
+    pub workspace: &'a str,
+    pub idempotency_key: &'a str,
+}
+
+pub fn thread_send(socket: &Path, s: &ThreadSend<'_>) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "thread-send",
+        serde_json::json!({
+            "threadId": s.thread_id, "projectId": s.project_id, "content": s.content,
+            "mode": if s.mode.is_empty() { "auto" } else { s.mode },
+            "workspace": if s.workspace.is_empty() { "continue" } else { s.workspace },
+            "idempotencyKey": s.idempotency_key,
+        }),
+        90_000,
+    )
+}
+
+/// An empty conversation for a project ("New conversation").
+pub fn thread_create(
+    socket: &Path,
+    project_id: &str,
+    title: Option<&str>,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "thread-create",
+        serde_json::json!({ "projectId": project_id, "title": title }),
+        15_000,
+    )
+}
+
+/// Rename and/or archive a conversation. Nothing is ever deleted.
+pub fn thread_update(
+    socket: &Path,
+    thread_id: &str,
+    title: Option<&str>,
+    archived: Option<bool>,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "thread-update",
+        serde_json::json!({ "threadId": thread_id, "title": title, "archived": archived }),
+        15_000,
     )
 }

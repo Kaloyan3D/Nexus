@@ -758,6 +758,11 @@ pub(crate) fn run(
             .effective(b.cfg.interactive);
         policy.max_edits = policy.max_edits.min(eff.max_edits);
         policy.max_tests = policy.max_tests.min(eff.max_tests);
+        // A7.1: a read-only request cannot change a file: the gate refuses every write.
+        policy.read_only = b.store.load(run_id).is_some_and(|r| r.run.read_only);
+        if policy.read_only {
+            policy.max_edits = 0;
+        }
     }
     b.update(run_id, |r| {
         r.state = "preparing".into();
@@ -901,30 +906,95 @@ pub(crate) fn run(
             .map(str::to_owned);
         created_worktree = true;
         b.update(run_id, |r| r.worktree_commit = commit);
-        // A continuation of an interrupted task starts from the work already done.
-        let from = b
-            .store
-            .load(run_id)
-            .and_then(|r| r.run.continuation_of)
-            .and_then(|old| b.store.load(&old))
-            .and_then(|o| o.run.task_instance_id);
+        // A continuation of an interrupted task, or a follow-up in a conversation, starts from
+        // the work already done (A7.1: even when the project's files moved on in between).
+        let me = b.store.load(run_id).map(|r| r.run);
+        let from_rec = me
+            .as_ref()
+            .and_then(|r| r.continuation_of.clone().or_else(|| r.seed_from.clone()))
+            .and_then(|old| b.store.load(&old));
+        let thread_follow = me.as_ref().is_some_and(|r| r.seed_from.is_some());
+        let from = from_rec
+            .as_ref()
+            .and_then(|o| o.run.task_instance_id.clone());
+        let from_n = me.as_ref().and_then(|r| {
+            let (t, f) = (r.thread_id.as_ref()?, from_rec.as_ref()?);
+            crate::threads::run_number(b, t, &f.run.run_id)
+        });
+        let mut relation: Option<(String, String)> = None;
         if let Some(from) = from {
             let seeded = daemon(
                 b,
                 "worktree-seed",
-                serde_json::json!({ "taskInstanceId": task_instance, "fromTaskInstanceId": from }),
+                serde_json::json!({ "taskInstanceId": task_instance, "fromTaskInstanceId": from, "rebase": true }),
             );
-            if let Err(e) = seeded {
-                let _ = daemon(
-                    b,
-                    "worktree-remove",
-                    serde_json::json!({ "taskInstanceId": task_instance }),
-                );
-                return Err(se(
-                    "seed-failed",
-                    format!("the earlier work could not be carried over: {}", e.message),
-                ));
+            match seeded {
+                Ok(v) => {
+                    let n = v.get("seeded").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let already = v
+                        .get("alreadyApplied")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0);
+                    let rel = v
+                        .get("relation")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("continued");
+                    let src = from_n
+                        .map(|n| format!("run {n}"))
+                        .unwrap_or_else(|| "the earlier run".into());
+                    let note = if rel == "rebased" {
+                        format!("Your project changed since {src}: {n} file(s) of its work were carried over, {already} were already in your folder.")
+                    } else {
+                        format!("Started from the working copy of {src}: {n} file(s) carried over.")
+                    };
+                    relation = Some((rel.to_owned(), note));
+                }
+                Err(e) => {
+                    let had_changes = from_rec.as_ref().is_some_and(|o| {
+                        !o.run.changed_files.is_empty()
+                            || nexus_client::intent_client::derive_coding_outcome(&o.run)
+                                .is_some_and(|c| c.edits_applied > 0)
+                    });
+                    // daemon refusals arrive as `daemon-<code>`
+                    let code = e.code.strip_prefix("daemon-").unwrap_or(&e.code).to_owned();
+                    if code == "not-found" && thread_follow && !had_changes {
+                        // the earlier copy is gone but held no changes: nothing is lost
+                        relation = Some((
+                            "fresh".into(),
+                            "The earlier working copy was no longer available; it held no changes, so this run starts from your project's current files.".into(),
+                        ));
+                    } else {
+                        let _ = daemon(
+                            b,
+                            "worktree-remove",
+                            serde_json::json!({ "taskInstanceId": task_instance }),
+                        );
+                        return Err(match code.as_str() {
+                            "workspace-conflict" => se("workspace-conflict", e.message),
+                            "not-found" => se(
+                                "workspace-missing",
+                                "the working copy holding this conversation's earlier changes is no longer available",
+                            ),
+                            _ => se(
+                                "seed-failed",
+                                format!("the earlier work could not be carried over: {}", e.message),
+                            ),
+                        });
+                    }
+                }
             }
+        }
+        if let Some((rel, note)) = relation {
+            b.update(run_id, |r| {
+                r.workspace_relation = Some(rel);
+                r.workspace_note = Some(note);
+            });
+        } else if me
+            .as_ref()
+            .and_then(|r| r.workspace_relation.as_deref())
+            .is_none()
+        {
+            b.update(run_id, |r| r.workspace_relation = Some("fresh".into()));
         }
     }
     let ws_digest = nexus_contracts::sha256_hex(&root);
@@ -1405,11 +1475,23 @@ fn turn_loop(
                     .and_then(|w| f.get(w).map(|p| p.kinds.clone()))
             })
             .unwrap_or_default();
-        format!(
-            "{}{}",
-            crate::guidance::code_preamble(&kinds, true),
-            sh.intent.content
-        )
+        let ro = b.store.load(ctx.run_id).is_some_and(|r| r.run.read_only);
+        // A7.1: the conversation's earlier requests, answers, findings and runtime evidence
+        // travel with the first turn of every follow-up run, within a fixed budget.
+        let prior = crate::threads::context_for_run(b, ctx.run_id);
+        let pre = crate::guidance::code_preamble_body(&kinds, true);
+        let mut c = pre;
+        if let Some(p) = &prior {
+            c.push('\n');
+            c.push_str(p);
+        } else {
+            c.push_str("\nTask from the user:\n");
+        }
+        if ro {
+            c.push_str("[READ-ONLY REQUEST] The user asked for no changes. fs_edit and fs_write are refused by the runtime for this request; use fs_list, fs_search and fs_read (and proc_run only to inspect or verify) and answer in text.\n\n");
+        }
+        c.push_str(&sh.intent.content);
+        c
     } else {
         sh.intent.content.clone()
     };
@@ -2183,7 +2265,9 @@ fn budget_refusal(cp: &CodeProposal, ls: &LoopState, pol: &CodePolicy) -> Option
     match cp.kind {
         Kind::Read => None,
         Kind::Write => {
-            if ls.edits_used >= pol.max_edits {
+            if pol.read_only {
+                Some("this request is READ-ONLY: the user asked you not to change any file, so every edit and write is refused. Investigate with fs_list, fs_search and fs_read and answer in text; if a change would help, describe it instead of making it")
+            } else if ls.edits_used >= pol.max_edits {
                 Some("the edit budget for this run is exhausted; summarize your work and finish")
             } else if ls.write_bytes + cp.bytes > pol.max_total_write_bytes {
                 Some("the total write-size budget for this run is exhausted")
@@ -2284,8 +2368,16 @@ fn exec_with_cancel(
     // A sandboxed process may run for its full wall budget; the IPC read must
     // outlast it so a timeout can only mean "daemon gone".
     let long = params.get("toolId").and_then(|t| t.as_str()) == Some("proc.run");
+    // (the wall budget is the one sealed into THIS request: the interactive workbench allows
+    // 15 minutes for installs and builds; a shorter read timeout made a slow `npm ci` look like
+    // a lost daemon and its outcome "uncertain" - found by the A7.1 live acceptance)
     let ms = if long {
-        crate::code::PROC_WALL_MS + 30_000
+        params
+            .pointer("/budgets/procWallMs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(crate::code::PROC_WALL_MS)
+            .max(crate::code::PROC_WALL_MS)
+            + 30_000
     } else {
         30_000
     };
@@ -2629,6 +2721,16 @@ fn finalize(
         r.stop_reason = stop_reason;
         r.updated_at_ms = now_ms();
     });
+    // A7.1: the answer and the runtime's evidence become part of the conversation (the run
+    // record is final now; the loop still holds the complete activity list and answer).
+    crate::threads::sync_run(
+        ctx.b,
+        ctx.run_id,
+        Some(crate::threads::RunFacts {
+            final_text: ls.final_text.clone(),
+            activity: ls.activity.clone(),
+        }),
+    );
 }
 
 #[cfg(test)]
