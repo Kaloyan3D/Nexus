@@ -1,0 +1,30 @@
+diff --git a/src/legacy.rs b/src/legacy.rs
+deleted file mode 100644
+index 6307d21..0000000
+--- a/src/legacy.rs
++++ /dev/null
+@@ -1,4 +0,0 @@
+-//! Old CSV helpers kept for a migration that finished long ago. Nothing in this crate calls them.
+-pub fn legacy_join(fields: &[&str]) -> String {
+-    fields.join(";")
+-}
+diff --git a/src/lib.rs b/src/lib.rs
+index e2ef587..653da4c 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -6,4 +6,3 @@ pub mod table;
+ 
+ pub use parser::parse_line;
+ pub use table::Table;
+-pub mod legacy;
+diff --git a/tests/legacy.rs b/tests/legacy.rs
+deleted file mode 100644
+index a836108..0000000
+--- a/tests/legacy.rs
++++ /dev/null
+@@ -1,5 +0,0 @@
+-use tinycsv::legacy::legacy_join;
+-#[test]
+-fn legacy_join_uses_semicolons() {
+-    assert_eq!(legacy_join(&["a", "b"]), "a;b");
+-}

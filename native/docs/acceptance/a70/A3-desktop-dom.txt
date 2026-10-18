@@ -1,0 +1,30 @@
+CODE
+sentry-8fa537
+opencode-go-native / muse-spark-1.3-contributor
+Completed
+Perform a read-only architecture and security audit of this repository (a pnpm/TypeScript monorepo: apps/ and packages/). Do not modify any file.
+Review report — 23 files read, 8 searches, nothing changed
+
+Recovered from 2 interruptions on its own (last: send-uncertain: Submission outcome is UNCERTAIN (the request may have been processed and billed). It was not re-sent.). Nothing completed so far was lost or repeated.
+
+Read-only architecture & security audit (pnpm/TypeScript monorepo)
+
+No file was modified and no command was executed. All evidence below comes from repository listings, searches, and the file ranges actually returned with content. Where a read was compacted/omitted, I treat it as not inspected and say so.
+
+1. Architecture
+1.1 Components observed
+
+Top level:
+
+apps/cli, apps/desktop, apps/runtime
+packages/: at least run-engine, harness-opencode, harness-* (other harnesses referenced by docs/names but not enumerated with content), persistence, runtime-protocol, snapshot-engine, shared, workspace-factory, schemas (referenced by imports), and others present but not fully listed in visible output.
+
+Responsibilities (from names plus the files actually read):
+
+apps/desktop: Electron host. src/main owns runtime lifecycle, credentials, path preparation, IPC/CLI broker, and export save; src/preload exposes the renderer bridge; src/renderer is the UI; src/shared holds the IPC contract.
+Evidence: apps/desktop/src/main/services/desktop-service.ts:1-9 — "Electron main owns NO Sentry domain state … Every QA operation is a typed RuntimeClient.request() over the shared stdio transport to the long-lived Linux runtime. Host keeps: safeStorage credentials, runtime lifecycle, path preparation, live-update fan-out. Secrets stay in main; renderer receives statuses."
+Services listed: apps/desktop/src/main/services/ contains desktop-service.ts, export-save.ts, wsl-runtime-client.ts.
+Runtime clients: apps/desktop/src/main/runtime/ contains runtime-client.ts, stdio-runtime-client.ts (contents not inspected — reads were compacted).
+apps/runtime: execution runtime. src/ contains host.ts, index.ts, runtime.ts (runtime.ts is ~67 KB; only a small range was requested and its content was compacted, so its handlers were not inspected).
+apps/cli: CLI frontend; src/, tests/, package.json, vitest.config.ts listed but contents not inspected.
+packages/run-engine: run orchestration (src listing compacted; c

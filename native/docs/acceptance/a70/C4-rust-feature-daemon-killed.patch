@@ -1,0 +1,307 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 437dd07..a9dad47 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -7,4 +7,4 @@ pub mod store;
+ 
+ pub use model::{Priority, Status, Task};
+ pub use parser::{parse_command, Command};
+-pub use store::Store;
++pub use store::{Stats, Store};
+diff --git a/src/model.rs b/src/model.rs
+index 318c49e..63172c9 100644
+--- a/src/model.rs
++++ b/src/model.rs
+@@ -7,6 +7,15 @@ pub enum Priority {
+ }
+ 
+ impl Priority {
++    /// Rank with high-priority first: high -> 0, normal -> 1, low -> 2.
++    pub fn rank(self) -> u8 {
++        match self {
++            Priority::High => 0,
++            Priority::Normal => 1,
++            Priority::Low => 2,
++        }
++    }
++
+     pub fn parse(word: &str) -> Option<Priority> {
+         match word {
+             "low" => Some(Priority::Low),
+diff --git a/src/parser.rs b/src/parser.rs
+index 6e1e8bb..153fae8 100644
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -12,6 +12,10 @@ pub enum Command {
+ ///
+ /// Tags start with `#`, end at whitespace, and never include trailing `,` `.` or `;`.
+ /// A tag is stored lower-cased. The priority is `!low`, `!normal` (default) or `!high`.
++fn clean_tag(raw: &str) -> String {
++    raw.trim_end_matches([',', '.', ';']).to_lowercase()
++}
++
+ pub fn parse_command(line: &str) -> Option<Command> {
+     let mut words = line.split_whitespace();
+     match words.next()? {
+@@ -21,7 +25,7 @@ pub fn parse_command(line: &str) -> Option<Command> {
+             let mut priority = Priority::Normal;
+             for w in words {
+                 if let Some(tag) = w.strip_prefix('#') {
+-                    tags.push(tag.to_string());
++                    tags.push(clean_tag(tag));
+                 } else if let Some(p) = w.strip_prefix('!') {
+                     priority = Priority::parse(p)?;
+                 } else {
+@@ -35,7 +39,7 @@ pub fn parse_command(line: &str) -> Option<Command> {
+         }
+         "done" => words.next()?.parse().ok().map(Command::Done),
+         "list" => {
+-            let tag = words.next().and_then(|w| w.strip_prefix('#')).map(str::to_string);
++            let tag = words.next().and_then(|w| w.strip_prefix('#')).map(clean_tag);
+             Some(Command::List { tag })
+         }
+         _ => None,
+diff --git a/src/report.rs b/src/report.rs
+index 0de4c8c..230d599 100644
+--- a/src/report.rs
++++ b/src/report.rs
+@@ -1,14 +1,25 @@
+-use crate::model::{Status, Task};
++use crate::model::{Priority, Status, Task};
+ 
+ /// One line per task, grouped by priority (high first) and then by id:
+ /// `[ ] #3 (high) Write docs`   or   `[x] #1 (low) Old thing`
++///
++/// The output ends with a summary line `high: H normal: N low: L`.
+ pub fn render(tasks: &[&Task]) -> String {
+     let mut sorted: Vec<&&Task> = tasks.iter().collect();
+-    sorted.sort_by_key(|t| (t.priority, t.id));
++    sorted.sort_by_key(|t| (t.priority.rank(), t.id));
++    let mut high = 0usize;
++    let mut normal = 0usize;
++    let mut low = 0usize;
+     let mut out = String::new();
+     for t in sorted {
++        match t.priority {
++            Priority::High => high += 1,
++            Priority::Normal => normal += 1,
++            Priority::Low => low += 1,
++        }
+         let mark = if t.status == Status::Done { "x" } else { " " };
+         out.push_str(&format!("[{}] #{} ({}) {}\n", mark, t.id, t.priority.label(), t.title));
+     }
++    out.push_str(&format!("high: {high} normal: {normal} low: {low}\n"));
+     out
+ }
+diff --git a/src/store.rs b/src/store.rs
+index c743335..3f3d780 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -6,9 +6,19 @@ pub struct Store {
+     next_id: u32,
+ }
+ 
++/// Counts of tasks per status and per priority.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++pub struct Stats {
++    pub open: usize,
++    pub done: usize,
++    pub high: usize,
++    pub normal: usize,
++    pub low: usize,
++}
++
+ impl Store {
+     pub fn new() -> Store {
+-        Store { tasks: Vec::new(), next_id: 0 }
++        Store { tasks: Vec::new(), next_id: 1 }
+     }
+ 
+     /// Add a task; ids start at 1.
+@@ -35,6 +45,31 @@ impl Store {
+ 
+     /// Tasks carrying `tag` (case-insensitive).
+     pub fn with_tag(&self, tag: &str) -> Vec<&Task> {
+-        self.tasks.iter().filter(|t| t.tags.iter().any(|x| x == tag)).collect()
++        let needle = tag.to_lowercase();
++        self.tasks.iter().filter(|t| t.tags.iter().any(|x| x.to_lowercase() == needle)).collect()
++    }
++
++    /// Tasks sorted by priority (high first) and then by title.
++    pub fn sorted_by_priority(&self) -> Vec<&Task> {
++        let mut out: Vec<&Task> = self.tasks.iter().collect();
++        out.sort_by(|a, b| a.priority.rank().cmp(&b.priority.rank()).then_with(|| a.title.cmp(&b.title)));
++        out
++    }
++
++    /// Counts per status and per priority.
++    pub fn stats(&self) -> Stats {
++        let mut st = Stats::default();
++        for t in &self.tasks {
++            match t.status {
++                Status::Open => st.open += 1,
++                Status::Done => st.done += 1,
++            }
++            match t.priority {
++                Priority::High => st.high += 1,
++                Priority::Normal => st.normal += 1,
++                Priority::Low => st.low += 1,
++            }
++        }
++        st
+     }
+ }
+diff --git a/src/store.rs.new b/src/store.rs.new
+new file mode 100644
+index 0000000..5df1433
+--- /dev/null
++++ b/src/store.rs.new
+@@ -0,0 +1,83 @@
++use crate::model::{Priority, Status, Task};
++
++#[derive(Debug, Default)]
++pub struct Store {
++    tasks: Vec<Task>,
++    next_id: u32,
++}
++
++/// Counts of tasks per status and per priority.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++pub struct Stats {
++    pub open: usize,
++    pub done: usize,
++    pub high: usize,
++    pub normal: usize,
++    pub low: usize,
++}
++
++impl Store {
++    pub fn new() -> Store {
++        Store { tasks: Vec::new(), next_id: 1 }
++    }
++
++    /// Add a task; ids start at 1.
++    pub fn add(&mut self, title: &str, tags: Vec<String>, priority: Priority) -> u32 {
++        let id = self.next_id;
++        self.next_id += 1;
++        self.tasks.push(Task { id, title: title.to_string(), tags, priority, status: Status::Open });
++        id
++    }
++
++    pub fn complete(&mut self, id: u32) -> bool {
++        match self.tasks.iter_mut().find(|t| t.id == id) {
++            Some(t) => {
++                t.status = Status::Done;
++                true
++            }
++            None => false,
++        }
++    }
++
++    pub fn all(&self) -> &[Task] {
++        &self.tasks
++    }
++
++    /// Tasks carrying `tag` (case-insensitive).
++    pub fn with_tag(&self, tag: &str) -> Vec<&Task> {
++        let needle = tag.to_lowercase();
++        self.tasks
++            .iter()
++            .filter(|t| t.tags.iter().any(|x| x.to_lowercase() == needle))
++            .collect()
++    }
++
++    /// Tasks sorted by priority (high first) and then by title.
++    pub fn sorted_by_priority(&self) -> Vec<&Task> {
++        let mut out: Vec<&Task> = self.tasks.iter().collect();
++        out.sort_by(|a, b| {
++            a.priority
++                .rank()
++                .cmp(&b.priority.rank())
++                .then_with(|| a.title.cmp(&b.title))
++        });
++        out
++    }
++
++    /// Counts per status and per priority.
++    pub fn stats(&self) -> Stats {
++        let mut st = Stats::default();
++        for t in &self.tasks {
++            match t.status {
++                Status::Open => st.open += 1,
++                Status::Done => st.done += 1,
++            }
++            match t.priority {
++                Priority::High => st.high += 1,
++                Priority::Normal => st.normal += 1,
++                Priority::Low => st.low += 1,
++            }
++        }
++        st
++    }
++}
+diff --git a/tests/priority.rs b/tests/priority.rs
+new file mode 100644
+index 0000000..f389608
+--- /dev/null
++++ b/tests/priority.rs
+@@ -0,0 +1,47 @@
++use taskboard::{report::render, Priority, Store};
++
++#[test]
++fn sorted_by_priority_orders_high_first_then_title() {
++    let mut s = Store::new();
++    s.add("delta", vec![], Priority::Low);
++    s.add("bravo", vec![], Priority::High);
++    s.add("alpha", vec![], Priority::High);
++    s.add("charlie", vec![], Priority::Normal);
++    let titles: Vec<&str> = s.sorted_by_priority().iter().map(|t| t.title.as_str()).collect();
++    assert_eq!(titles, vec!["alpha", "bravo", "charlie", "delta"]);
++}
++
++#[test]
++fn sorted_by_priority_on_empty_store_is_empty() {
++    assert!(Store::new().sorted_by_priority().is_empty());
++}
++
++#[test]
++fn priority_parses_all_labels_and_rejects_unknown() {
++    assert_eq!(Priority::parse("low"), Some(Priority::Low));
++    assert_eq!(Priority::parse("normal"), Some(Priority::Normal));
++    assert_eq!(Priority::parse("high"), Some(Priority::High));
++    assert_eq!(Priority::parse("urgent"), None);
++    assert_eq!(Priority::High.label(), "high");
++    assert_eq!(Priority::Normal.label(), "normal");
++    assert_eq!(Priority::Low.label(), "low");
++}
++
++#[test]
++fn report_ends_with_priority_summary_line() {
++    let mut s = Store::new();
++    s.add("a", vec![], Priority::High);
++    s.add("b", vec![], Priority::Normal);
++    s.add("c", vec![], Priority::Low);
++    s.add("d", vec![], Priority::High);
++    let all: Vec<_> = s.all().iter().collect();
++    let out = render(&all);
++    assert!(out.ends_with("high: 2 normal: 1 low: 1\n"), "got:\n{out}");
++}
++
++#[test]
++fn report_summary_of_empty_board_is_zero() {
++    let store = Store::new();
++    let all: Vec<_> = store.all().iter().collect();
++    assert_eq!(render(&all), "high: 0 normal: 0 low: 0\n");
++}
+diff --git a/tests/report.rs b/tests/report.rs
+index 067e831..3b15471 100644
+--- a/tests/report.rs
++++ b/tests/report.rs
+@@ -11,6 +11,6 @@ fn report_groups_by_priority_high_first_then_id() {
+     let all: Vec<_> = s.all().iter().collect();
+     assert_eq!(
+         render(&all),
+-        "[x] #2 (high) high one\n[ ] #4 (high) high two\n[ ] #3 (normal) normal one\n[ ] #1 (low) low one\n"
++        "[x] #2 (high) high one\n[ ] #4 (high) high two\n[ ] #3 (normal) normal one\n[ ] #1 (low) low one\nhigh: 2 normal: 1 low: 1\n"
+     );
+ }

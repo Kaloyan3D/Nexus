@@ -1,0 +1,102 @@
+{
+  "checks": {
+    "adopted-folder-passes-its-tests": {
+      "detail": "   Doc-tests exprcalc |      Running tests/errors.rs (target/debug/deps/errors-456a383ccabab657)",
+      "ok": true
+    },
+    "adoption-applied-after-confirmation": {
+      "detail": "{\"applied\":[\"src/lexer.rs\",\"src/parser.rs\"]}",
+      "ok": true
+    },
+    "changes-and-commands-ran-under-automated-policy": {
+      "detail": "6 operations",
+      "ok": true
+    },
+    "consent-given-once": {
+      "detail": "native confirmation (scripted)",
+      "ok": true
+    },
+    "diff-available": {
+      "detail": "2 files",
+      "ok": true
+    },
+    "independent-verification-passes": {
+      "detail": "   Doc-tests exprcalc |      Running tests/errors.rs (target/debug/deps/errors-456a383ccabab657) |      Running tests/arith.rs (target/debug/deps/arith-a9b0439faf6cc259)",
+      "ok": true
+    },
+    "interactive-mode": {
+      "detail": "no operator-run broker is named",
+      "ok": true
+    },
+    "model-inspected-sources": {
+      "detail": "14 read-only calls",
+      "ok": true
+    },
+    "no-human-approval-was-ever-needed": {
+      "detail": "no pending approval observed",
+      "ok": true
+    },
+    "original-unchanged-before-adoption": {
+      "detail": "byte-identical",
+      "ok": true
+    },
+    "patch-applies-to-a-clean-clone": {
+      "detail": "",
+      "ok": true
+    },
+    "persisted-across-restart": {
+      "detail": "same state, outcome and diff digest",
+      "ok": true
+    },
+    "project-opened-and-detected": {
+      "detail": "[{\"id\":\"rust\",\"label\":\"Rust (Cargo)\",\"supported\":true}]",
+      "ok": true
+    },
+    "project-snapshot": {
+      "detail": "{\"bytes\":9811,\"files\":11,\"skipped\":[],\"skippedTotal\":0}",
+      "ok": true
+    },
+    "provider-connected-once": {
+      "detail": "PASS reachability-auth - reachable + authenticated | PASS text-completion (reasoning:low) - responses text completion (8 chars of generated text) + reasoning effort low acknowledged | PASS streaming - SSE stream with 5 content event(s) of 10 | PASS tool-call-emission - provider emitted probe_echo with call id call_e5e3bac2-da3c-46cc-b4ef-dd81e0424f41 (call id call_e5e3bac2-da3c-46cc-b4ef-dd81e0424f41 reused for the continuation) | PASS tool-result-continuation - provider continued with generated text after the tool result | route verified | engineering-v2 bound to opencode-go-native/muse",
+      "ok": true
+    },
+    "run-completed": {
+      "detail": "state=completed error=None",
+      "ok": true
+    },
+    "runtime-started-automatically": {
+      "detail": "None",
+      "ok": true
+    },
+    "second-adoption-is-refused-folder-changed": {
+      "detail": "Err(\"origin-changed: the folder changed since Nexus copied it, so the patch might not fit; refresh the project and run the task again, or apply the patch by hand\")",
+      "ok": true
+    },
+    "tests-ran-in-sandbox": {
+      "detail": "2 commands, 1 failing before the fix",
+      "ok": true
+    },
+    "verified-passed": {
+      "detail": "Some(CodingOutcome { verification: \"verified-passed\", change: \"applied\", edits_applied: 4, edits_not_applied: 0, tests_executed: 2, tests_not_executed: 0, blocked_by_approval: 0, last_exit_code: Some(0), stale_after_edit: false, uncertain_operations: 0 })",
+      "ok": true
+    }
+  },
+  "dialogs": "scripted",
+  "kind": "provider",
+  "maxTurn": 21,
+  "project": "~/work/exprcalc",
+  "run": {
+    "commands": 2,
+    "edits": 4,
+    "errorCode": null,
+    "failedTestRunsBeforeFix": 1,
+    "inputTokens": 150474,
+    "outputTokens": 11444,
+    "runId": "run_e1983a468c847d7e81d162d839329222",
+    "seconds": 98,
+    "state": "completed",
+    "toolCalls": 20,
+    "turns": 21
+  },
+  "totalSeconds": 100
+}

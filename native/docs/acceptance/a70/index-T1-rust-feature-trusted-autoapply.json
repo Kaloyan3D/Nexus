@@ -1,0 +1,22 @@
+{
+  "T1-rust-feature-trusted-autoapply": {
+    "run": "run_0bbcfdbc2afb2beafde30b6d5df3fcc7",
+    "state": "completed",
+    "turns": 59,
+    "tools": 57,
+    "recoveries": 4,
+    "seconds": 178,
+    "outcome": {
+      "blockedByApproval": 0,
+      "change": "partially-applied",
+      "editsApplied": 22,
+      "editsNotApplied": 1,
+      "lastExitCode": 0,
+      "staleAfterEdit": false,
+      "testsExecuted": 9,
+      "testsNotExecuted": 0,
+      "uncertainOperations": 0,
+      "verification": "verified-passed"
+    }
+  }
+}

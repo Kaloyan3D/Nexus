@@ -1,0 +1,102 @@
+{
+  "checks": {
+    "adopted-folder-passes-its-tests": {
+      "detail": "OK | ",
+      "ok": true
+    },
+    "adoption-applied-after-confirmation": {
+      "detail": "{\"applied\":[\"inventory/items.py\",\"inventory/pricing.py\",\"inventory/report.py\"]}",
+      "ok": true
+    },
+    "changes-and-commands-ran-under-automated-policy": {
+      "detail": "5 operations",
+      "ok": true
+    },
+    "consent-given-once": {
+      "detail": "native confirmation (scripted)",
+      "ok": true
+    },
+    "diff-available": {
+      "detail": "3 files",
+      "ok": true
+    },
+    "independent-verification-passes": {
+      "detail": "OK |  | Ran 9 tests in 0.001s",
+      "ok": true
+    },
+    "interactive-mode": {
+      "detail": "no operator-run broker is named",
+      "ok": true
+    },
+    "model-inspected-sources": {
+      "detail": "11 read-only calls",
+      "ok": true
+    },
+    "no-human-approval-was-ever-needed": {
+      "detail": "no pending approval observed",
+      "ok": true
+    },
+    "original-unchanged-before-adoption": {
+      "detail": "byte-identical",
+      "ok": true
+    },
+    "patch-applies-to-a-clean-clone": {
+      "detail": "",
+      "ok": true
+    },
+    "persisted-across-restart": {
+      "detail": "same state, outcome and diff digest",
+      "ok": true
+    },
+    "project-opened-and-detected": {
+      "detail": "[{\"id\":\"python\",\"label\":\"Python\",\"supported\":true}]",
+      "ok": true
+    },
+    "project-snapshot": {
+      "detail": "{\"bytes\":4194,\"files\":9,\"skipped\":[],\"skippedTotal\":0}",
+      "ok": true
+    },
+    "provider-connected-once": {
+      "detail": "PASS reachability-auth - reachable + authenticated | PASS text-completion (reasoning:low) - responses text completion (8 chars of generated text) + reasoning effort low acknowledged | PASS streaming - SSE stream with 5 content event(s) of 10 | PASS tool-call-emission - provider emitted probe_echo with call id call_e60a04a6-24b0-4fc6-b9f8-80d31d359044 (call id call_e60a04a6-24b0-4fc6-b9f8-80d31d359044 reused for the continuation) | PASS tool-result-continuation - provider continued with generated text after the tool result | route verified | engineering-v2 bound to opencode-go-native/muse",
+      "ok": true
+    },
+    "run-completed": {
+      "detail": "state=completed error=None",
+      "ok": true
+    },
+    "runtime-started-automatically": {
+      "detail": "None",
+      "ok": true
+    },
+    "second-adoption-is-refused-folder-changed": {
+      "detail": "Err(\"origin-changed: the folder changed since Nexus copied it, so the patch might not fit; refresh the project and run the task again, or apply the patch by hand\")",
+      "ok": true
+    },
+    "tests-ran-in-sandbox": {
+      "detail": "1 commands, 0 failing before the fix",
+      "ok": true
+    },
+    "verified-passed": {
+      "detail": "Some(CodingOutcome { verification: \"verified-passed\", change: \"partially-applied\", edits_applied: 3, edits_not_applied: 1, tests_executed: 1, tests_not_executed: 0, blocked_by_approval: 1, last_exit_code: Some(0), stale_after_edit: false, uncertain_operations: 0 })",
+      "ok": true
+    }
+  },
+  "dialogs": "scripted",
+  "kind": "provider",
+  "maxTurn": 17,
+  "project": "~/work/inventory-py",
+  "run": {
+    "commands": 1,
+    "edits": 4,
+    "errorCode": null,
+    "failedTestRunsBeforeFix": 0,
+    "inputTokens": 83108,
+    "outputTokens": 4130,
+    "runId": "run_82a949aaf93e6eae22f5567031369534",
+    "seconds": 50,
+    "state": "completed",
+    "toolCalls": 16,
+    "turns": 17
+  },
+  "totalSeconds": 51
+}

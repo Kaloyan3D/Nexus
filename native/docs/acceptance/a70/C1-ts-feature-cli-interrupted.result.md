@@ -1,0 +1,1 @@
+Still a style gap — let me diff against the formatter's expected output.

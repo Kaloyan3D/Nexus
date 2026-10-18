@@ -1,0 +1,266 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 437dd07..a9dad47 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -7,4 +7,4 @@ pub mod store;
+ 
+ pub use model::{Priority, Status, Task};
+ pub use parser::{parse_command, Command};
+-pub use store::Store;
++pub use store::{Stats, Store};
+diff --git a/src/parser.rs b/src/parser.rs
+index 6e1e8bb..936a724 100644
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -3,9 +3,15 @@ use crate::model::Priority;
+ /// One parsed input line.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub enum Command {
+-    Add { title: String, tags: Vec<String>, priority: Priority },
++    Add {
++        title: String,
++        tags: Vec<String>,
++        priority: Priority,
++    },
+     Done(u32),
+-    List { tag: Option<String> },
++    List {
++        tag: Option<String>,
++    },
+ }
+ 
+ /// Parse `add <title words> [#tag ...] [!priority]`, `done <id>` or `list [#tag]`.
+@@ -21,7 +27,10 @@ pub fn parse_command(line: &str) -> Option<Command> {
+             let mut priority = Priority::Normal;
+             for w in words {
+                 if let Some(tag) = w.strip_prefix('#') {
+-                    tags.push(tag.to_string());
++                    let cleaned = tag.trim_end_matches([',', '.', ';']);
++                    if !cleaned.is_empty() {
++                        tags.push(cleaned.to_lowercase());
++                    }
+                 } else if let Some(p) = w.strip_prefix('!') {
+                     priority = Priority::parse(p)?;
+                 } else {
+@@ -31,11 +40,18 @@ pub fn parse_command(line: &str) -> Option<Command> {
+             if title.is_empty() {
+                 return None;
+             }
+-            Some(Command::Add { title: title.join(" "), tags, priority })
++            Some(Command::Add {
++                title: title.join(" "),
++                tags,
++                priority,
++            })
+         }
+         "done" => words.next()?.parse().ok().map(Command::Done),
+         "list" => {
+-            let tag = words.next().and_then(|w| w.strip_prefix('#')).map(str::to_string);
++            let tag = words
++                .next()
++                .and_then(|w| w.strip_prefix('#'))
++                .map(|t| t.trim_end_matches([',', '.', ';']).to_lowercase());
+             Some(Command::List { tag })
+         }
+         _ => None,
+diff --git a/src/report.rs b/src/report.rs
+index 0de4c8c..ad48d65 100644
+--- a/src/report.rs
++++ b/src/report.rs
+@@ -1,14 +1,21 @@
+ use crate::model::{Status, Task};
++use std::cmp::Reverse;
+ 
+ /// One line per task, grouped by priority (high first) and then by id:
+ /// `[ ] #3 (high) Write docs`   or   `[x] #1 (low) Old thing`
+ pub fn render(tasks: &[&Task]) -> String {
+     let mut sorted: Vec<&&Task> = tasks.iter().collect();
+-    sorted.sort_by_key(|t| (t.priority, t.id));
++    sorted.sort_by_key(|t| (Reverse(t.priority), t.id));
+     let mut out = String::new();
+     for t in sorted {
+         let mark = if t.status == Status::Done { "x" } else { " " };
+-        out.push_str(&format!("[{}] #{} ({}) {}\n", mark, t.id, t.priority.label(), t.title));
++        out.push_str(&format!(
++            "[{}] #{} ({}) {}\n",
++            mark,
++            t.id,
++            t.priority.label(),
++            t.title
++        ));
+     }
+     out
+ }
+diff --git a/src/store.rs b/src/store.rs
+index c743335..96623c9 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1,4 +1,15 @@
+ use crate::model::{Priority, Status, Task};
++use std::cmp::Reverse;
++
++/// Counts of tasks per status and per priority (see `tests/stats.rs`).
++#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
++pub struct Stats {
++    pub open: usize,
++    pub done: usize,
++    pub high: usize,
++    pub normal: usize,
++    pub low: usize,
++}
+ 
+ #[derive(Debug, Default)]
+ pub struct Store {
+@@ -8,14 +19,23 @@ pub struct Store {
+ 
+ impl Store {
+     pub fn new() -> Store {
+-        Store { tasks: Vec::new(), next_id: 0 }
++        Store {
++            tasks: Vec::new(),
++            next_id: 1,
++        }
+     }
+ 
+     /// Add a task; ids start at 1.
+     pub fn add(&mut self, title: &str, tags: Vec<String>, priority: Priority) -> u32 {
+         let id = self.next_id;
+         self.next_id += 1;
+-        self.tasks.push(Task { id, title: title.to_string(), tags, priority, status: Status::Open });
++        self.tasks.push(Task {
++            id,
++            title: title.to_string(),
++            tags,
++            priority,
++            status: Status::Open,
++        });
+         id
+     }
+ 
+@@ -35,6 +55,43 @@ impl Store {
+ 
+     /// Tasks carrying `tag` (case-insensitive).
+     pub fn with_tag(&self, tag: &str) -> Vec<&Task> {
+-        self.tasks.iter().filter(|t| t.tags.iter().any(|x| x == tag)).collect()
++        let needle = tag.to_lowercase();
++        self.tasks
++            .iter()
++            .filter(|t| t.tags.iter().any(|x| x.to_lowercase() == needle))
++            .collect()
++    }
++
++    /// Counts per status and per priority.
++    pub fn stats(&self) -> Stats {
++        let mut st = Stats::default();
++        for t in &self.tasks {
++            match t.status {
++                Status::Open => st.open += 1,
++                Status::Done => st.done += 1,
++            }
++            match t.priority {
++                Priority::High => st.high += 1,
++                Priority::Normal => st.normal += 1,
++                Priority::Low => st.low += 1,
++            }
++        }
++        st
++    }
++
++    /// Tasks ordered by priority (high first), then by title.
++    pub fn sorted_by_priority(&self) -> Vec<&Task> {
++        let mut v: Vec<&Task> = self.tasks.iter().collect();
++        v.sort_by_key(|t| (Reverse(t.priority), t.title.clone()));
++        v
++    }
++
++    /// All task titles in priority order (high first, then title),
++    /// so callers do not need to call `sorted_by_priority` by hand.
++    pub fn titles(&self) -> Vec<String> {
++        self.sorted_by_priority()
++            .iter()
++            .map(|t| t.title.clone())
++            .collect()
+     }
+ }
+diff --git a/tests/parser.rs b/tests/parser.rs
+index be0e523..56eab28 100644
+--- a/tests/parser.rs
++++ b/tests/parser.rs
+@@ -4,7 +4,11 @@ use taskboard::{parse_command, Command, Priority};
+ fn add_with_tags_and_priority() {
+     assert_eq!(
+         parse_command("add Write docs #docs !high"),
+-        Some(Command::Add { title: "Write docs".into(), tags: vec!["docs".into()], priority: Priority::High })
++        Some(Command::Add {
++            title: "Write docs".into(),
++            tags: vec!["docs".into()],
++            priority: Priority::High
++        })
+     );
+ }
+ 
+@@ -12,7 +16,11 @@ fn add_with_tags_and_priority() {
+ fn tags_are_lowercased_and_lose_trailing_punctuation() {
+     assert_eq!(
+         parse_command("add Ship it #Release, #Docs."),
+-        Some(Command::Add { title: "Ship it".into(), tags: vec!["release".into(), "docs".into()], priority: Priority::Normal })
++        Some(Command::Add {
++            title: "Ship it".into(),
++            tags: vec!["release".into(), "docs".into()],
++            priority: Priority::Normal
++        })
+     );
+ }
+ 
+@@ -25,6 +33,11 @@ fn unknown_priority_or_empty_title_is_rejected() {
+ #[test]
+ fn done_and_list() {
+     assert_eq!(parse_command("done 7"), Some(Command::Done(7)));
+-    assert_eq!(parse_command("list #Docs"), Some(Command::List { tag: Some("docs".into()) }));
++    assert_eq!(
++        parse_command("list #Docs"),
++        Some(Command::List {
++            tag: Some("docs".into())
++        })
++    );
+     assert_eq!(parse_command("list"), Some(Command::List { tag: None }));
+ }
+diff --git a/tests/stats.rs b/tests/stats.rs
+index 8769fba..84bf530 100644
+--- a/tests/stats.rs
++++ b/tests/stats.rs
+@@ -15,5 +15,8 @@ fn stats_count_by_status_and_priority() {
+ #[test]
+ fn stats_of_an_empty_board_are_zero() {
+     let st = Store::new().stats();
+-    assert_eq!((st.open, st.done, st.high, st.normal, st.low), (0, 0, 0, 0, 0));
++    assert_eq!(
++        (st.open, st.done, st.high, st.normal, st.low),
++        (0, 0, 0, 0, 0)
++    );
+ }
+diff --git a/tests/titles.rs b/tests/titles.rs
+new file mode 100644
+index 0000000..f3aa328
+--- /dev/null
++++ b/tests/titles.rs
+@@ -0,0 +1,19 @@
++use taskboard::{Priority, Store};
++
++#[test]
++fn titles_come_back_in_priority_order_high_first_then_title() {
++    let mut s = Store::new();
++    s.add("low one", vec![], Priority::Low);
++    s.add("high b", vec![], Priority::High);
++    s.add("normal one", vec![], Priority::Normal);
++    s.add("high a", vec![], Priority::High);
++    assert_eq!(
++        s.titles(),
++        vec!["high a", "high b", "normal one", "low one"]
++    );
++}
++
++#[test]
++fn titles_of_an_empty_board_is_empty() {
++    assert!(Store::new().titles().is_empty());
++}

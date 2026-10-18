@@ -1,0 +1,745 @@
+diff --git a/src/index.ts b/src/index.ts
+index ede636a..74d1e3b 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,5 +1,7 @@
+ export * from "./encoding";
+ export * from "./parse";
++export * from "./protocol";
+ export * from "./query";
++export * from "./slashes";
+ export * from "./url";
+ export * from "./utils";
+diff --git a/src/parse.ts b/src/parse.ts
+index b2a2e7e..3f777ab 100644
+--- a/src/parse.ts
++++ b/src/parse.ts
+@@ -1,5 +1,5 @@
+ import { decode } from "./encoding";
+-import { hasProtocol } from "./utils";
++import { hasProtocol } from "./protocol";
+ 
+ const protocolRelative = Symbol.for("ufo:protocolRelative");
+ 
+diff --git a/src/protocol.ts b/src/protocol.ts
+new file mode 100644
+index 0000000..d5eb602
+--- /dev/null
++++ b/src/protocol.ts
+@@ -0,0 +1,161 @@
++const PROTOCOL_STRICT_REGEX = /^[\s\w\0+.-]{2,}:([/\\]{1,2})/;
++const PROTOCOL_REGEX = /^[\s\w\0+.-]{2,}:([/\\]{2})?/;
++const PROTOCOL_RELATIVE_REGEX = /^([/\\]\s*){2,}[^/\\]/;
++const PROTOCOL_SCRIPT_RE = /^[\s\0]*(blob|data|javascript|vbscript):$/i;
++
++/**
++ * Check if a path starts with `./` or `../`.
++ *
++ * @example
++ * ```js
++ * isRelative("./foo"); // true
++ * ```
++ *
++ * @group utils
++ */
++export function isRelative(inputString: string) {
++  return ["./", "../"].some((string_) => inputString.startsWith(string_));
++}
++
++export interface HasProtocolOptions {
++  acceptRelative?: boolean;
++  strict?: boolean;
++}
++
++export function hasProtocol(
++  inputString: string,
++  opts?: HasProtocolOptions,
++): boolean;
++
++/** @deprecated Same as { hasProtocol(inputString, { acceptRelative: true }) */
++export function hasProtocol(
++  inputString: string,
++  acceptRelative: boolean,
++): boolean;
++
++/**
++ * Checks if the input has a protocol.
++ *
++ * You can use `{ acceptRelative: true }` to accept relative URLs as valid protocol.
++ *
++ * @example
++ *
++ * ```js
++ * hasProtocol('https://example.com'); // true
++ *
++ * hasProtocol("//example.com"); // false
++ *
++ * hasProtocol('//example.com', { acceptRelative: true });  // true
++ *
++ * hasProtocol("ftp://example.com"); // true
++ *
++ * hasProtocol('data:text/plain'); // true
++ *
++ * hasProtocol('data:text/plain', { strict: true }); // false
++ * ```
++ *
++ * @group utils
++ */
++export function hasProtocol(
++  inputString: string,
++  opts: boolean | HasProtocolOptions = {},
++): boolean {
++  if (typeof opts === "boolean") {
++    opts = { acceptRelative: opts };
++  }
++  if (opts.strict) {
++    return PROTOCOL_STRICT_REGEX.test(inputString);
++  }
++  return (
++    PROTOCOL_REGEX.test(inputString) ||
++    (opts.acceptRelative ? PROTOCOL_RELATIVE_REGEX.test(inputString) : false)
++  );
++}
++
++/**
++ * Checks if the input protocol is any of the dangerous `blob:`, `data:`, `javascript`: or `vbscript:` protocols.
++ *
++ * @example
++ *
++ * ```js
++ * isScriptProtocol("javascript:alert(1)"); // true
++ *
++ * isScriptProtocol("data:text/html,hello"); // true
++ *
++ * isScriptProtocol("blob:hello"); // true
++ *
++ * isScriptProtocol("vbscript:alert(1)"); // true
++ *
++ * isScriptProtocol("https://example.com"); // false
++ * ```
++ *
++ * @group utils
++ */
++export function isScriptProtocol(protocol?: string) {
++  return !!protocol && PROTOCOL_SCRIPT_RE.test(protocol);
++}
++
++/**
++ * Adds or replaces the URL protocol to `http://`.
++ *
++ * @example
++ *
++ * ```js
++ * withHttp("https://example.com"); // http://example.com
++ * ```
++ *
++ * @group utils
++ */
++export function withHttp(input: string): string {
++  return withProtocol(input, "http://");
++}
++
++/**
++ * Adds or replaces the URL protocol to `https://`.
++ *
++ * @example
++ *
++ * ```js
++ * withHttps("http://example.com"); // https://example.com
++ * ```
++ *
++ * @group utils
++ */
++export function withHttps(input: string): string {
++  return withProtocol(input, "https://");
++}
++
++/**
++ * Removes the protocol from the input.
++ *
++ * @example
++ *
++ * ```js
++ * withoutProtocol("http://example.com"); // "example.com"
++ * ```
++ */
++export function withoutProtocol(input: string): string {
++  return withProtocol(input, "");
++}
++
++/**
++ * Adds or replaces protocol of the input URL.
++ *
++ * @example
++ *
++ * ```js
++ * withProtocol("http://example.com", "ftp://"); // "ftp://example.com"
++ * ```
++ *
++ * @group utils
++ */
++export function withProtocol(input: string, protocol: string): string {
++  let match = input.match(PROTOCOL_REGEX);
++  if (!match) {
++    match = input.match(/^\/{2,}/);
++  }
++  if (!match) {
++    return protocol + input;
++  }
++  return protocol + input.slice(match[0].length);
++}
+diff --git a/src/slashes.ts b/src/slashes.ts
+new file mode 100644
+index 0000000..1f92a8e
+--- /dev/null
++++ b/src/slashes.ts
+@@ -0,0 +1,166 @@
++const TRAILING_SLASH_RE = /\/$|\/\?|\/#/;
++
++/**
++ * Checks if the input has a trailing slash.
++ *
++ * @example
++ *
++ * ```js
++ * hasTrailingSlash("/foo/"); // true
++ *
++ * hasTrailingSlash("/foo"); // false
++ *
++ * hasTrailingSlash("/foo?query=true", true); // false
++ *
++ * hasTrailingSlash("/foo/?query=true", true); // true
++ * ```
++ *
++ * @group utils
++ */
++export function hasTrailingSlash(
++  input = "",
++  respectQueryAndFragment?: boolean,
++): boolean {
++  if (!respectQueryAndFragment) {
++    return input.endsWith("/");
++  }
++  return TRAILING_SLASH_RE.test(input);
++}
++
++/**
++ * Removes the trailing slash from the URL or pathname.
++ *
++ * If second argument is `true`, it will only remove the trailing slash if it's not part of the query or fragment with cost of more expensive operations.
++ *
++ * @example
++ *
++ * ```js
++ * withoutTrailingSlash("/foo/"); // "/foo"
++ *
++ * withoutTrailingSlash("/path/?query=true", true); // "/path?query=true"
++ * ```
++ *
++ * @group utils
++ */
++export function withoutTrailingSlash(
++  input = "",
++  respectQueryAndFragment?: boolean,
++): string {
++  if (!respectQueryAndFragment) {
++    return (hasTrailingSlash(input) ? input.slice(0, -1) : input) || "/";
++  }
++  if (!hasTrailingSlash(input, true)) {
++    return input || "/";
++  }
++  let path = input;
++  let fragment = "";
++  const fragmentIndex = input.indexOf("#");
++  if (fragmentIndex !== -1) {
++    path = input.slice(0, fragmentIndex);
++    fragment = input.slice(fragmentIndex);
++  }
++  const [s0, ...s] = path.split("?");
++  const cleanPath = s0.endsWith("/") ? s0.slice(0, -1) : s0;
++  return (
++    (cleanPath || "/") + (s.length > 0 ? `?${s.join("?")}` : "") + fragment
++  );
++}
++
++/**
++ * Ensures the URL ends with a trailing slash.
++ *
++ * If second argument is `true`, it will only add the trailing slash if it's not part of the query or fragment with cost of more expensive operation.
++ *
++ * @example
++ *
++ * ```js
++ * withTrailingSlash("/foo"); // "/foo/"
++ *
++ * withTrailingSlash("/path?query=true", true); // "/path/?query=true"
++ * ```
++ *
++ * @group utils
++ */
++export function withTrailingSlash(
++  input = "",
++  respectQueryAndFragment?: boolean,
++): string {
++  if (!respectQueryAndFragment) {
++    return input.endsWith("/") ? input : input + "/";
++  }
++  if (hasTrailingSlash(input, true)) {
++    return input || "/";
++  }
++  let path = input;
++  let fragment = "";
++  const fragmentIndex = input.indexOf("#");
++  if (fragmentIndex !== -1) {
++    path = input.slice(0, fragmentIndex);
++    fragment = input.slice(fragmentIndex);
++    if (!path) {
++      return fragment;
++    }
++  }
++  const [s0, ...s] = path.split("?");
++  return s0 + "/" + (s.length > 0 ? `?${s.join("?")}` : "") + fragment;
++}
++
++/**
++ * Checks if the input has a leading slash (e.g. `/foo`).
++ *
++ * @group utils
++ */
++export function hasLeadingSlash(input = ""): boolean {
++  return input.startsWith("/");
++}
++
++/**
++ * Removes leading slash from the URL or pathname.
++ *
++ * @example
++ *
++ * ```js
++ * withoutLeadingSlash("/foo"); // "foo"
++ * ```
++ *
++ * @group utils
++ */
++export function withoutLeadingSlash(input = ""): string {
++  return (hasLeadingSlash(input) ? input.slice(1) : input) || "/";
++}
++
++/**
++ * Ensures the URL or pathname has a leading slash.
++ *
++ * @example
++ *
++ * ```js
++ * withLeadingSlash("foo"); // "/foo"
++ * ```
++ *
++ * @group utils
++ */
++export function withLeadingSlash(input = ""): string {
++  return hasLeadingSlash(input) ? input : "/" + input;
++}
++
++/**
++ * Removes double slashes from the URL.
++ *
++ * @example
++ *
++ * ```js
++ * cleanDoubleSlashes("//foo//bar//"); // "/foo/bar/"
++ *
++ * cleanDoubleSlashes("http://example.com/analyze//http://localhost:3000//");
++ * // Returns "http://example.com/analyze/http://localhost:3000/"
++ * ```
++ *
++ * @group utils
++ */
++export function cleanDoubleSlashes(input = ""): string {
++  return input
++    .split("://")
++    .map((string_) => string_.replace(/\/{2,}/g, "/"))
++    .join("://");
++}
+diff --git a/src/url.ts b/src/url.ts
+index 2cf9ffd..3b62f24 100644
+--- a/src/url.ts
++++ b/src/url.ts
+@@ -1,6 +1,6 @@
+ import { parseURL, parseAuth, parseHost } from "./parse";
+ import { QueryObject, parseQuery, stringifyQuery } from "./query";
+-import { withoutLeadingSlash, withTrailingSlash } from "./utils";
++import { withoutLeadingSlash, withTrailingSlash } from "./slashes";
+ import {
+   encodeHash,
+   encodePath,
+diff --git a/src/utils.ts b/src/utils.ts
+index ea98aba..40ce93d 100644
+--- a/src/utils.ts
++++ b/src/utils.ts
+@@ -7,270 +7,18 @@ import {
+   encodeHost,
+   encodePath,
+ } from "./encoding";
++import { hasProtocol } from "./protocol";
++import {
++  withLeadingSlash,
++  withTrailingSlash,
++  withoutLeadingSlash,
++  withoutTrailingSlash,
++} from "./slashes";
+ 
+-const PROTOCOL_STRICT_REGEX = /^[\s\w\0+.-]{2,}:([/\\]{1,2})/;
+-const PROTOCOL_REGEX = /^[\s\w\0+.-]{2,}:([/\\]{2})?/;
+-const PROTOCOL_RELATIVE_REGEX = /^([/\\]\s*){2,}[^/\\]/;
+-const PROTOCOL_SCRIPT_RE = /^[\s\0]*(blob|data|javascript|vbscript):$/i;
+-const TRAILING_SLASH_RE = /\/$|\/\?|\/#/;
+-const JOIN_LEADING_SLASH_RE = /^\.?\//;
+-
+-/**
+- * Check if a path starts with `./` or `../`.
+- *
+- * @example
+- * ```js
+- * isRelative("./foo"); // true
+- * ```
+- *
+- * @group utils
+- */
+-export function isRelative(inputString: string) {
+-  return ["./", "../"].some((string_) => inputString.startsWith(string_));
+-}
+-
+-export interface HasProtocolOptions {
+-  acceptRelative?: boolean;
+-  strict?: boolean;
+-}
+-
+-export function hasProtocol(
+-  inputString: string,
+-  opts?: HasProtocolOptions,
+-): boolean;
+-
+-/** @deprecated Same as { hasProtocol(inputString, { acceptRelative: true }) */
+-export function hasProtocol(
+-  inputString: string,
+-  acceptRelative: boolean,
+-): boolean;
+-
+-/**
+- * Checks if the input has a protocol.
+- *
+- * You can use `{ acceptRelative: true }` to accept relative URLs as valid protocol.
+- *
+- * @example
+- *
+- * ```js
+- * hasProtocol('https://example.com'); // true
+- *
+- * hasProtocol("//example.com"); // false
+- *
+- * hasProtocol('//example.com', { acceptRelative: true });  // true
+- *
+- * hasProtocol("ftp://example.com"); // true
+- *
+- * hasProtocol('data:text/plain'); // true
+- *
+- * hasProtocol('data:text/plain', { strict: true }); // false
+- * ```
+- *
+- * @group utils
+- */
+-export function hasProtocol(
+-  inputString: string,
+-  opts: boolean | HasProtocolOptions = {},
+-): boolean {
+-  if (typeof opts === "boolean") {
+-    opts = { acceptRelative: opts };
+-  }
+-  if (opts.strict) {
+-    return PROTOCOL_STRICT_REGEX.test(inputString);
+-  }
+-  return (
+-    PROTOCOL_REGEX.test(inputString) ||
+-    (opts.acceptRelative ? PROTOCOL_RELATIVE_REGEX.test(inputString) : false)
+-  );
+-}
+-
+-/**
+- * Checks if the input protocol is any of the dangerous `blob:`, `data:`, `javascript`: or `vbscript:` protocols.
+- *
+- * @example
+- *
+- * ```js
+- * isScriptProtocol("javascript:alert(1)"); // true
+- *
+- * isScriptProtocol("data:text/html,hello"); // true
+- *
+- * isScriptProtocol("blob:hello"); // true
+- *
+- * isScriptProtocol("vbscript:alert(1)"); // true
+- *
+- * isScriptProtocol("https://example.com"); // false
+- * ```
+- *
+- * @group utils
+- */
+-export function isScriptProtocol(protocol?: string) {
+-  return !!protocol && PROTOCOL_SCRIPT_RE.test(protocol);
+-}
+-
+-/**
+- * Checks if the input has a trailing slash.
+- *
+- * @example
+- *
+- * ```js
+- * hasTrailingSlash("/foo/"); // true
+- *
+- * hasTrailingSlash("/foo"); // false
+- *
+- * hasTrailingSlash("/foo?query=true", true); // false
+- *
+- * hasTrailingSlash("/foo/?query=true", true); // true
+- * ```
+- *
+- * @group utils
+- */
+-export function hasTrailingSlash(
+-  input = "",
+-  respectQueryAndFragment?: boolean,
+-): boolean {
+-  if (!respectQueryAndFragment) {
+-    return input.endsWith("/");
+-  }
+-  return TRAILING_SLASH_RE.test(input);
+-}
+-
+-/**
+- * Removes the trailing slash from the URL or pathname.
+- *
+- * If second argument is `true`, it will only remove the trailing slash if it's not part of the query or fragment with cost of more expensive operations.
+- *
+- * @example
+- *
+- * ```js
+- * withoutTrailingSlash("/foo/"); // "/foo"
+- *
+- * withoutTrailingSlash("/path/?query=true", true); // "/path?query=true"
+- * ```
+- *
+- * @group utils
+- */
+-export function withoutTrailingSlash(
+-  input = "",
+-  respectQueryAndFragment?: boolean,
+-): string {
+-  if (!respectQueryAndFragment) {
+-    return (hasTrailingSlash(input) ? input.slice(0, -1) : input) || "/";
+-  }
+-  if (!hasTrailingSlash(input, true)) {
+-    return input || "/";
+-  }
+-  let path = input;
+-  let fragment = "";
+-  const fragmentIndex = input.indexOf("#");
+-  if (fragmentIndex !== -1) {
+-    path = input.slice(0, fragmentIndex);
+-    fragment = input.slice(fragmentIndex);
+-  }
+-  const [s0, ...s] = path.split("?");
+-  const cleanPath = s0.endsWith("/") ? s0.slice(0, -1) : s0;
+-  return (
+-    (cleanPath || "/") + (s.length > 0 ? `?${s.join("?")}` : "") + fragment
+-  );
+-}
+-
+-/**
+- * Ensures the URL ends with a trailing slash.
+- *
+- * If second argument is `true`, it will only add the trailing slash if it's not part of the query or fragment with cost of more expensive operation.
+- *
+- * @example
+- *
+- * ```js
+- * withTrailingSlash("/foo"); // "/foo/"
+- *
+- * withTrailingSlash("/path?query=true", true); // "/path/?query=true"
+- * ```
+- *
+- * @group utils
+- */
+-export function withTrailingSlash(
+-  input = "",
+-  respectQueryAndFragment?: boolean,
+-): string {
+-  if (!respectQueryAndFragment) {
+-    return input.endsWith("/") ? input : input + "/";
+-  }
+-  if (hasTrailingSlash(input, true)) {
+-    return input || "/";
+-  }
+-  let path = input;
+-  let fragment = "";
+-  const fragmentIndex = input.indexOf("#");
+-  if (fragmentIndex !== -1) {
+-    path = input.slice(0, fragmentIndex);
+-    fragment = input.slice(fragmentIndex);
+-    if (!path) {
+-      return fragment;
+-    }
+-  }
+-  const [s0, ...s] = path.split("?");
+-  return s0 + "/" + (s.length > 0 ? `?${s.join("?")}` : "") + fragment;
+-}
+-
+-/**
+- * Checks if the input has a leading slash (e.g. `/foo`).
+- *
+- * @group utils
+- */
+-export function hasLeadingSlash(input = ""): boolean {
+-  return input.startsWith("/");
+-}
+-
+-/**
+- * Removes leading slash from the URL or pathname.
+- *
+- * @example
+- *
+- * ```js
+- * withoutLeadingSlash("/foo"); // "foo"
+- * ```
+- *
+- * @group utils
+- */
+-export function withoutLeadingSlash(input = ""): string {
+-  return (hasLeadingSlash(input) ? input.slice(1) : input) || "/";
+-}
+-
+-/**
+- * Ensures the URL or pathname has a leading slash.
+- *
+- * @example
+- *
+- * ```js
+- * withLeadingSlash("foo"); // "/foo"
+- * ```
+- *
+- * @group utils
+- */
+-export function withLeadingSlash(input = ""): string {
+-  return hasLeadingSlash(input) ? input : "/" + input;
+-}
++export * from "./protocol";
++export * from "./slashes";
+ 
+-/**
+- * Removes double slashes from the URL.
+- *
+- * @example
+- *
+- * ```js
+- * cleanDoubleSlashes("//foo//bar//"); // "/foo/bar/"
+- *
+- * cleanDoubleSlashes("http://example.com/analyze//http://localhost:3000//");
+- * // Returns "http://example.com/analyze/http://localhost:3000/"
+- * ```
+- *
+- * @group utils
+- */
+-export function cleanDoubleSlashes(input = ""): string {
+-  return input
+-    .split("://")
+-    .map((string_) => string_.replace(/\/{2,}/g, "/"))
+-    .join("://");
+-}
++const JOIN_LEADING_SLASH_RE = /^\.?\//;
+ 
+ /**
+  * Ensures the URL or pathname starts with base.
+@@ -512,69 +260,6 @@ export function joinRelativeURL(..._input: string[]): string {
+   return url;
+ }
+ 
+-/**
+- * Adds or replaces the URL protocol to `http://`.
+- *
+- * @example
+- *
+- * ```js
+- * withHttp("https://example.com"); // http://example.com
+- * ```
+- *
+- * @group utils
+- */
+-export function withHttp(input: string): string {
+-  return withProtocol(input, "http://");
+-}
+-
+-/**
+- * Adds or replaces the URL protocol to `https://`.
+- *
+- * @example
+- *
+- * ```js
+- * withHttps("http://example.com"); // https://example.com
+- * ```
+- *
+- * @group utils
+- */
+-export function withHttps(input: string): string {
+-  return withProtocol(input, "https://");
+-}
+-
+-/**
+- * Removes the protocol from the input.
+- *
+- * @example
+- * ```js
+- * withoutProtocol("http://example.com"); // "example.com"
+- * ```
+- */
+-export function withoutProtocol(input: string): string {
+-  return withProtocol(input, "");
+-}
+-
+-/**
+- * Adds or replaces protocol of the input URL.
+- *
+- * @example
+- * ```js
+- * withProtocol("http://example.com", "ftp://"); // "ftp://example.com"
+- * ```
+- *
+- * @group utils
+- */
+-export function withProtocol(input: string, protocol: string): string {
+-  let match = input.match(PROTOCOL_REGEX);
+-  if (!match) {
+-    match = input.match(/^\/{2,}/);
+-  }
+-  if (!match) {
+-    return protocol + input;
+-  }
+-  return protocol + input.slice(match[0].length);
+-}
+-
+ /**
+  * Normalizes the input URL:
+  *
+@@ -666,6 +351,7 @@ export function resolveURL(base = "", ...inputs: string[]): string {
+  * Check if two paths are equal or not. Trailing slash and encoding are normalized before comparison.
+  *
+  * @example
++ *
+  * ```js
+  * isSamePath("/foo", "/foo/"); // true
+  * ```
+@@ -762,6 +448,7 @@ export function withoutFragment(input: string): string {
+  * Removes the host from the URL while preserving everything else.
+  *
+  * @example
++ *
+  * ```js
+  * withoutHost("http://example.com/foo?q=123#bar")
+  * // Returns "/foo?q=123#bar"
