@@ -425,6 +425,16 @@ export interface IntentRun {
   worktreeCommit?: string | null;
   changedFiles?: ChangedFile[];
   diffDigest?: string | null;
+  // ---- A7.1 conversations ----
+  /** The conversation this run belongs to. */
+  threadId?: string | null;
+  /** The request was read-only: the broker refused every write for this run. */
+  readOnly?: boolean;
+  /** How the working copy relates to earlier runs: fresh | continued | rebased | fresh-by-choice. */
+  workspaceRelation?: string | null;
+  workspaceNote?: string | null;
+  /** The earlier run whose working copy this run started from. */
+  seedFrom?: string | null;
 }
 
 /**
@@ -825,4 +835,129 @@ export interface IntegrityView {
   configured: boolean;
   journals: JournalIntegrity[];
   detail: string;
+}
+
+
+// ---- A7.1 persistent conversations ------------------------------------------------
+
+/** One row of the conversation list (History, Recent, switching). */
+export interface ThreadSummary {
+  threadId: string;
+  projectId: string;
+  title: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+  archived: boolean;
+  /** Built from a single-run record that predates conversations. */
+  legacy: boolean;
+  runCount: number;
+  messageCount: number;
+  lastPreview: string;
+  /** Lifecycle of the LAST run (not of the conversation). */
+  lastState: string;
+  /** A run of this conversation is in progress. */
+  active: boolean;
+  activeRunId: string | null;
+  findingCount: number;
+}
+
+export interface ThreadMessage {
+  seq: number;
+  role: "user" | "assistant" | "system";
+  /** request | answer | note */
+  kind: string;
+  runId: string | null;
+  atMs: number;
+  text: string;
+  truncated: boolean;
+}
+
+export interface ThreadReceipt {
+  tool: string;
+  summary: string;
+  status: string;
+  verdict?: string | null;
+}
+
+/** What the runtime recorded about a finished run (kept beyond the run record's bounded activity list). */
+export interface ThreadRunDigest {
+  filesTouched: string[];
+  changedTotal: string[];
+  editsApplied: number;
+  receipts: ThreadReceipt[];
+  verification: string;
+  change: string;
+  lastTest: string | null;
+  turns: number;
+  toolCalls: number;
+  recoveries: number;
+  compactions: number;
+  stopReason: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+
+/** What the model was given of the conversation when a run started. */
+export interface ThreadContextInfo {
+  bytes: number;
+  sha256: string;
+  priorRuns: number;
+  findings: number;
+}
+
+export interface ThreadRunView {
+  runId: string;
+  n: number;
+  userSeq: number | null;
+  assistantSeq: number | null;
+  /** review (read-only) | edit */
+  mode: string;
+  readOnly: boolean;
+  /** Why the mode is what it is, in words for the user. */
+  modeReason: string;
+  continuationOf: string | null;
+  state: string;
+  ended: boolean;
+  startedAtMs: number;
+  endedAtMs: number | null;
+  digest: ThreadRunDigest | null;
+  /** Absent on the first run of a conversation. */
+  context?: ThreadContextInfo | null;
+  /** The broker's live record of the run (verified outcome, tool activity, ...). */
+  run: IntentRun | null;
+}
+
+export interface ThreadFinding {
+  id: string;
+  title: string;
+  detail: string;
+  runId: string;
+  addressedIn: number | null;
+  addressedVerification: string | null;
+}
+
+export interface ThreadDetail {
+  thread: ThreadSummary;
+  messages: ThreadMessage[];
+  runs: ThreadRunView[];
+  findings: ThreadFinding[];
+  head: { runId: string; n: number; changedFiles: number } | null;
+}
+
+export interface ThreadSendReply {
+  threadId: string;
+  run: IntentRun;
+  replay: boolean;
+  mode?: { readOnly: boolean; reason: string };
+}
+
+export type ThreadMode = "auto" | "review" | "edit";
+export interface ThreadSendInput {
+  threadId: string | null;
+  projectId: string;
+  content: string;
+  mode: ThreadMode;
+  /** `fresh` starts from the project's current files instead of the conversation's workspace. */
+  workspace: "continue" | "fresh";
+  idempotencyKey: string;
 }

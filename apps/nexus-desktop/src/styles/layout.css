@@ -1344,3 +1344,26 @@
 .nv-md__table { border-collapse: collapse; font-size: var(--nv-text-sm); }
 .nv-md__table th, .nv-md__table td { border: 1px solid var(--nv-border-subtle); padding: 3px 8px; vertical-align: top; text-align: left; }
 .nv-md__table th { background: var(--nv-surface-2, transparent); }
+
+
+/* ================= A7.1 persistent conversations ================= */
+.nv-thread { gap: var(--nv-s-3); }
+.nv-thread__top { display: flex; align-items: center; gap: var(--nv-s-2); flex-wrap: wrap; }
+.nv-thread__log { display: flex; flex-direction: column; gap: var(--nv-s-5); }
+.nv-turn { display: flex; flex-direction: column; gap: var(--nv-s-3); }
+.nv-turn__auto { font-style: italic; }
+.nv-msgbubble { border-radius: var(--nv-radius-lg); padding: var(--nv-s-3) var(--nv-s-4); display: flex; flex-direction: column; gap: var(--nv-s-1); }
+.nv-msgbubble--you { background: var(--nv-purple-tint); border: 1px solid var(--nv-purple-border); align-self: flex-end; max-width: 86%; }
+.nv-msgbubble--nexus { background: var(--nv-surface); border: 1px solid var(--nv-border); }
+.nv-msgbubble__meta { display: flex; gap: var(--nv-s-2); align-items: baseline; font-size: var(--nv-text-sm); }
+.nv-msgbubble__text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.nv-run { border: 1px solid var(--nv-border-subtle); border-radius: var(--nv-radius-lg); padding: var(--nv-s-3) var(--nv-s-4); display: flex; flex-direction: column; gap: var(--nv-s-2); background: var(--nv-surface); }
+.nv-run__head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--nv-s-2); }
+.nv-run__n { font-weight: 600; font-size: var(--nv-text-sm); color: var(--nv-text-secondary); }
+.nv-run__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--nv-s-2); }
+.nv-run__ws { margin: 0; }
+.nv-findings { display: flex; flex-wrap: wrap; align-items: center; gap: var(--nv-s-2); border: 1px solid var(--nv-border-subtle); border-radius: var(--nv-radius-lg); padding: var(--nv-s-2) var(--nv-s-3); }
+.nv-findings__list { list-style: none; margin: 0; padding: 0; width: 100%; display: flex; flex-direction: column; gap: var(--nv-s-2); }
+.nv-thread__composer { position: sticky; bottom: 0; background: var(--nv-bg); z-index: 5; margin-top: auto; }
+.nv-thread__wsproblem { padding: var(--nv-s-3) var(--nv-s-3) 0; }
+.nv-row__preview { display: block; color: var(--nv-text-muted); font-size: var(--nv-text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }

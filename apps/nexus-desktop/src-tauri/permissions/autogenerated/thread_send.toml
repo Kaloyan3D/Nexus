@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-thread-send"
+description = "Enables the thread_send command without any pre-configured scope."
+commands.allow = ["thread_send"]
+
+[[permission]]
+identifier = "deny-thread-send"
+description = "Denies the thread_send command without any pre-configured scope."
+commands.deny = ["thread_send"]

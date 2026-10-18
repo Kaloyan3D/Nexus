@@ -46,6 +46,11 @@
     "allow-project-set-policy",
     "allow-code-limits-set",
     "allow-project-forget",
-    "allow-project-adopt"
+    "allow-project-adopt",
+    "allow-thread-list",
+    "allow-thread-get",
+    "allow-thread-send",
+    "allow-thread-create",
+    "allow-thread-update"
   ]
 }

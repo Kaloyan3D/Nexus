@@ -42,6 +42,11 @@ const COMMANDS: &[&str] = &[
     "code_limits_set",
     "project_forget",
     "project_adopt",
+    "thread_list",
+    "thread_get",
+    "thread_send",
+    "thread_create",
+    "thread_update",
 ];
 
 fn main() {

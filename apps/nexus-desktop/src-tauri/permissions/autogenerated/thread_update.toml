@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-thread-update"
+description = "Enables the thread_update command without any pre-configured scope."
+commands.allow = ["thread_update"]
+
+[[permission]]
+identifier = "deny-thread-update"
+description = "Denies the thread_update command without any pre-configured scope."
+commands.deny = ["thread_update"]

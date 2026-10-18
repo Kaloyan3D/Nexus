@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-thread-get"
+description = "Enables the thread_get command without any pre-configured scope."
+commands.allow = ["thread_get"]
+
+[[permission]]
+identifier = "deny-thread-get"
+description = "Denies the thread_get command without any pre-configured scope."
+commands.deny = ["thread_get"]

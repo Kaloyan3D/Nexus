@@ -74,7 +74,7 @@ function Header({ summary, record, status, reload, interactiveHeader }: { intera
 }
 
 /** Apply the patch to the user's own folder: explicit, confirmed natively, never automatic. */
-function AdoptButton({ run }: { run: IntentRun }) {
+export function AdoptButton({ run }: { run: IntentRun }) {
   const { api, runtimeState, projects, refreshProjects } = useNexus();
   const [state, setState] = useState<{ busy: boolean; msg: string | null; ok: boolean }>({ busy: false, msg: null, ok: false });
   const managed = projects.some((p) => p.projectId === run.workspaceId && p.managed);

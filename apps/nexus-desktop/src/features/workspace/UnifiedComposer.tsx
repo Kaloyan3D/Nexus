@@ -2,6 +2,8 @@ import { ArrowUp, Ban, FolderOpen, Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useNexus } from "../../state/NexusContext";
 import { Alert, Button } from "../../components/ui/primitives";
+import type { ThreadMode } from "../../lib/contracts";
+import { ModeSwitch } from "../thread/ThreadComposer";
 
 export const COMPOSER_PLACEHOLDER = "Describe the task…";
 
@@ -36,6 +38,9 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
     sendIntent,
     sendInspect,
     sendCode,
+    sendThread,
+    threadSending,
+    threadError,
     cancelPendingIntent,
     runtimeState,
     openProject,
@@ -45,6 +50,7 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
   const consentGiven = !interactive || (runtimeState?.consent.given === true && runtimeState.providerConnected);
   const [text, setText] = useState("");
   const [chosenMode, setMode] = useState<Mode | null>(null);
+  const [threadMode, setThreadMode] = useState<ThreadMode>("auto");
   const [modelIdx, setModelIdx] = useState(0);
   const [wsIdx, setWsIdx] = useState(0);
   const [srcIdx, setSrcIdx] = useState(0);
@@ -77,6 +83,7 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
 
   const canSend =
     !intentSubmitting &&
+    !threadSending &&
     intentPending === null &&
     !empty &&
     model !== null &&
@@ -86,7 +93,10 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
     if (!canSend || !model) return;
     const prompt = text;
     // Keep the text until the broker accepted it, so a refusal loses nothing.
-    if (mode === "code" && source) {
+    if (mode === "code" && source && interactive) {
+      // A7.1: every task is a conversation; this starts a NEW one with fresh context.
+      void sendThread({ threadId: null, projectId: source.sourceId, content: prompt, mode: threadMode }).then((r) => r && setText(""));
+    } else if (mode === "code" && source) {
       void sendCode(prompt, source.sourceId).then((ok) => {
         if (ok) {
           setText("");
@@ -201,6 +211,7 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
           ))}
           {(!intentModels || intentModels.length === 0) && <option value={0}>No model available</option>}
         </select>
+        {mode === "code" && interactive && <ModeSwitch value={threadMode} onChange={setThreadMode} />}
         <span className="nv-composer__spacer" />
         {intentPending && (
           <Button variant="ghost" onClick={() => void cancelPendingIntent()} aria-label="Cancel submission" icon={<Ban size={15} />} disabled={intentPending.cancelRequested}>
@@ -221,7 +232,7 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
                   ? `Send as a text-only request through the Nexus broker (${model.providerId}/${model.remoteModelId})`
                   : "No broker model is available"
           }
-          icon={intentSubmitting || intentPending ? <Loader2 size={15} className="nv-spin" /> : <ArrowUp size={15} />}
+          icon={intentSubmitting || threadSending || intentPending ? <Loader2 size={15} className="nv-spin" /> : <ArrowUp size={15} />}
         >
           {label}
         </Button>
@@ -298,6 +309,11 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
       {intentError && (
         <Alert tone="error" title={`Send failed: ${intentError.code}`}>
           {intentError.message}
+        </Alert>
+      )}
+      {interactive && mode === "code" && threadError && (
+        <Alert tone="error" title={`Send failed: ${threadError.code}`}>
+          {threadError.message}
         </Alert>
       )}
       {!intentError && intentModelsError && <div className="nv-composer__hint">Sending is unavailable: {intentModelsError.message}</div>}

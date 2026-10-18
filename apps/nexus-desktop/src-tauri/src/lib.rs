@@ -556,6 +556,114 @@ async fn project_adopt(
         .map_err(|m| ui_msg("adopt", m))
 }
 
+// ---- A7.1 conversations ----------------------------------------------------------
+//
+// A conversation is the broker's durable record of a project discussion. The renderer can
+// list and read them and send a message (text + project identity + a mode/workspace choice);
+// it cannot name a path, a tool, a limit, a model or an approval, and it cannot change what
+// a read-only request may do (the broker enforces that).
+
+#[tauri::command]
+async fn thread_list(
+    project_id: Option<String>,
+    include_archived: Option<bool>,
+) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::thread_list(
+            &nexus_client::intent_client::default_broker_socket(),
+            project_id.as_deref(),
+            include_archived.unwrap_or(false),
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+#[tauri::command]
+async fn thread_get(
+    thread_id: String,
+    after_seq: Option<u64>,
+) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::thread_get(
+            &nexus_client::intent_client::default_broker_socket(),
+            &thread_id,
+            after_seq,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// One message into a conversation (created when `thread_id` is absent). The broker starts
+/// the run, continuing from the conversation's workspace.
+#[tauri::command]
+async fn thread_send(
+    thread_id: Option<String>,
+    project_id: String,
+    content: String,
+    mode: Option<String>,
+    workspace: Option<String>,
+    idempotency_key: String,
+) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        interactive::guarded(|| {
+            nexus_client::intent_client::thread_send(
+                &nexus_client::intent_client::default_broker_socket(),
+                &nexus_client::intent_client::ThreadSend {
+                    thread_id: thread_id.as_deref(),
+                    project_id: &project_id,
+                    content: &content,
+                    mode: mode.as_deref().unwrap_or("auto"),
+                    workspace: workspace.as_deref().unwrap_or("continue"),
+                    idempotency_key: &idempotency_key,
+                },
+            )
+            .map_err(|e| backend::ui_error(&e))
+        })
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+#[tauri::command]
+async fn thread_create(
+    project_id: String,
+    title: Option<String>,
+) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::thread_create(
+            &nexus_client::intent_client::default_broker_socket(),
+            &project_id,
+            title.as_deref(),
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+#[tauri::command]
+async fn thread_update(
+    thread_id: String,
+    title: Option<String>,
+    archived: Option<bool>,
+) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::thread_update(
+            &nexus_client::intent_client::default_broker_socket(),
+            &thread_id,
+            title.as_deref(),
+            archived,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
 /// A5.6: the reviewable change set of one of this user's repo-code runs.
 /// Read-only; nothing here can apply, commit or push it.
 #[tauri::command]
@@ -764,7 +872,12 @@ pub fn run() {
             project_set_policy,
             code_limits_set,
             project_forget,
-            project_adopt
+            project_adopt,
+            thread_list,
+            thread_get,
+            thread_send,
+            thread_create,
+            thread_update
         ])
         .build(tauri::generate_context!())
         .expect("error while building Nexus")
@@ -821,6 +934,11 @@ mod authz_tests {
         "code_limits_set",
         "project_forget",
         "project_adopt",
+        "thread_list",
+        "thread_get",
+        "thread_send",
+        "thread_create",
+        "thread_update",
     ];
 
     #[test]

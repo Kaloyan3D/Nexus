@@ -5,6 +5,8 @@ import { Loading } from "../../components/ui/primitives";
 import { RunList } from "../history/RunList";
 import { TaskView } from "../task/TaskView";
 import { SetupCard } from "../setup/SetupCard";
+import { ThreadView } from "../thread/ThreadView";
+import { ThreadList } from "../thread/ThreadList";
 import { UnifiedComposer } from "./UnifiedComposer";
 
 /** Idle shows 5 recent runs, 3 on short windows. */
@@ -20,6 +22,7 @@ function useRecentLimit(): number {
 
 function IdleView() {
   const { setPage, runtimeState } = useNexus();
+  const interactive = runtimeState?.mode === "interactive";
   const limit = useRecentLimit();
   const needsSetup =
     runtimeState?.mode === "interactive" &&
@@ -42,7 +45,7 @@ function IdleView() {
             View all in History →
           </button>
         </div>
-        <RunList limit={limit} />
+        {interactive ? <ThreadList limit={limit} /> : <RunList limit={limit} />}
       </section>
     </div>
   );
@@ -50,6 +53,7 @@ function IdleView() {
 
 export function WorkspacePage() {
   const { selection, selectedModel, select } = useNexus();
+  if (selection?.kind === "thread") return <ThreadView key={selection.id} threadId={selection.id} />;
   if (selection?.kind !== "model") return <IdleView />;
   return (
     <div className="nv-page nv-narrow nv-task">

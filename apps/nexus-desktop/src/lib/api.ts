@@ -21,6 +21,10 @@ import type {
   ModelIoView,
   ProjectOpenReply,
   ProjectView,
+  ThreadDetail,
+  ThreadSendInput,
+  ThreadSendReply,
+  ThreadSummary,
   RuntimeState,
   JournalResult,
   LiveBlockers,
@@ -91,6 +95,12 @@ export interface NativeApi {
   projectForget(projectId: string): Promise<{ forgotten: string }>;
   /** Apply a finished run's patch to the user's folder after a native confirmation. */
   projectAdopt(runId: string): Promise<{ applied: string[] }>;
+  /** A7.1: persistent conversations (the broker's durable record). */
+  threadList(projectId?: string | null, includeArchived?: boolean): Promise<{ threads: ThreadSummary[] }>;
+  threadGet(threadId: string, afterSeq?: number | null): Promise<ThreadDetail>;
+  threadSend(input: ThreadSendInput): Promise<ThreadSendReply>;
+  threadCreate(projectId: string, title?: string | null): Promise<{ thread: ThreadSummary }>;
+  threadUpdate(threadId: string, patch: { title?: string | null; archived?: boolean | null }): Promise<{ thread: ThreadSummary }>;
   intentStatus(runId: string): Promise<IntentRun>;
   intentResult(runId: string): Promise<string>;
   intentCancel(runId: string): Promise<IntentCancelReply>;
@@ -171,6 +181,19 @@ export const tauriApi: NativeApi = {
   projectSetPolicy: (projectId, policy) => invoke<unknown>("project_set_policy", { projectId, installs: policy.installs ?? null, trusted: policy.trusted ?? null }),
   projectForget: (projectId) => invoke<{ forgotten: string }>("project_forget", { projectId }),
   projectAdopt: (runId) => invoke<{ applied: string[] }>("project_adopt", { runId }),
+  threadList: (projectId, includeArchived) => invoke<{ threads: ThreadSummary[] }>("thread_list", { projectId: projectId ?? null, includeArchived: includeArchived ?? false }),
+  threadGet: (threadId, afterSeq) => invoke<ThreadDetail>("thread_get", { threadId, afterSeq: afterSeq ?? null }),
+  threadSend: (i) =>
+    invoke<ThreadSendReply>("thread_send", {
+      threadId: i.threadId,
+      projectId: i.projectId,
+      content: i.content,
+      mode: i.mode,
+      workspace: i.workspace,
+      idempotencyKey: i.idempotencyKey,
+    }),
+  threadCreate: (projectId, title) => invoke<{ thread: ThreadSummary }>("thread_create", { projectId, title: title ?? null }),
+  threadUpdate: (threadId, patch) => invoke<{ thread: ThreadSummary }>("thread_update", { threadId, title: patch.title ?? null, archived: patch.archived ?? null }),
   intentStatus: (runId) => invoke<IntentRun>("intent_status", { runId }),
   intentResult: (runId) => invoke<string>("intent_result", { runId }),
   intentCancel: (runId) => invoke<IntentCancelReply>("intent_cancel", { runId }),
@@ -246,6 +269,11 @@ export const unavailableApi: NativeApi = {
   projectSetPolicy: () => Promise.reject(notInShell),
   projectForget: () => Promise.reject(notInShell),
   projectAdopt: () => Promise.reject(notInShell),
+  threadList: () => Promise.resolve({ threads: [] }),
+  threadGet: () => Promise.reject(notInShell),
+  threadSend: () => Promise.reject(notInShell),
+  threadCreate: () => Promise.reject(notInShell),
+  threadUpdate: () => Promise.reject(notInShell),
   intentStatus: () => Promise.reject(notInShell),
   intentResult: () => Promise.reject(notInShell),
   intentCancel: () => Promise.reject(notInShell),

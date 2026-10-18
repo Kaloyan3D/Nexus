@@ -24,6 +24,9 @@ import type {
   ModelCatalog,
   ProjectOpenReply,
   ProjectView,
+  ThreadMode,
+  ThreadSendReply,
+  ThreadSummary,
   RuntimeSnapshot,
   RuntimeState,
   TaskRecord,
@@ -37,6 +40,8 @@ export type Selection =
   | { kind: "task"; id: string }
   | { kind: "mock"; id: string }
   | { kind: "model"; id: string }
+  /** A7.1: a persistent conversation (the broker's durable record). */
+  | { kind: "thread"; id: string }
   | null;
 
 export type Page =
@@ -75,7 +80,9 @@ export interface NexusState {
   select: (s: Selection) => void;
   /** The side panel (null = closed). Never open by default. */
   panel: PanelKind | null;
-  openPanel: (k: PanelKind) => void;
+  /** The run the panel talks about when it was opened from a conversation (else the selected run). */
+  panelRun: IntentRun | null;
+  openPanel: (k: PanelKind, run?: IntentRun | null) => void;
   closePanel: () => void;
   selectedTask: TaskRecord | null;
   selectedMock: MockRun | null;
@@ -103,6 +110,17 @@ export interface NexusState {
   /** A6.1: the fixed limits a coding task will run with (null = not loaded). */
   intentCodeLimits: DesktopCodeLimits | null;
   saveCodeLimits: (limits: Record<string, number>) => Promise<void>;
+  /** A7.1: the user's conversations, newest activity first (the broker's durable record). */
+  threads: ThreadSummary[];
+  refreshThreads: () => Promise<void>;
+  openThread: (threadId: string) => void;
+  /** Leave the open conversation; the next message starts a NEW one with fresh context. */
+  newConversation: () => void;
+  /** Send a message into a conversation (a new one when `threadId` is null) and open it. */
+  sendThread: (input: { threadId: string | null; projectId: string; content: string; mode: ThreadMode; workspace?: "continue" | "fresh" }) => Promise<ThreadSendReply | null>;
+  threadSending: boolean;
+  threadError: UiError | null;
+  clearThreadError: () => void;
   /** A5.6: submit a controlled coding task for a source identity. */
   sendCode: (prompt: string, sourceId: string) => Promise<boolean>;
   /** A5.5: submit a read-only repository inspection for a workspace identity. */
@@ -333,19 +351,28 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
   const [selection, setSelection] = useState<Selection>(initialRoute.selection);
   const [page, setPageState] = useState<Page>(initialRoute.page);
   const [panel, setPanel] = useState<PanelKind | null>(null);
-  const openPanel = useCallback((k: PanelKind) => setPanel(k), []);
-  const closePanel = useCallback(() => setPanel(null), []);
+  const [panelRun, setPanelRun] = useState<IntentRun | null>(null);
+  const openPanel = useCallback((k: PanelKind, run?: IntentRun | null) => {
+    setPanel(k);
+    if (run !== undefined) setPanelRun(run);
+  }, []);
+  const closePanel = useCallback(() => {
+    setPanel(null);
+    setPanelRun(null);
+  }, []);
   // Selecting a run opens it in the Workspace; selecting anything closes the panel.
   const select = useCallback((s: Selection) => {
     setSelection(s);
     setPanel(null);
-    if (s?.kind === "model") setPageState("workspace");
+    setPanelRun(null);
+    if (s?.kind === "model" || s?.kind === "thread") setPageState("workspace");
     if (s?.kind === "task" || s?.kind === "mock") setPageState((p) => (p === "tasks" || p === "mock" ? p : "mock"));
   }, []);
   const setPage = useCallback((p: Page) => {
     setPageState(p);
     setPanel(null);
-    if (p !== "workspace") setSelection((cur) => (cur?.kind === "model" ? null : cur));
+    setPanelRun(null);
+    if (p !== "workspace") setSelection((cur) => (cur?.kind === "model" || cur?.kind === "thread" ? null : cur));
   }, []);
   // The URL hash follows the state and the state follows the hash (back/forward, deep links, restarts).
   useEffect(() => {
@@ -356,7 +383,7 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     const onHash = () => {
       const r = parseHash(window.location.hash);
       setPageState(r.page);
-      setSelection((cur) => (r.selection ?? (cur?.kind === "model" ? null : cur)));
+      setSelection((cur) => (r.selection ?? (cur?.kind === "model" || cur?.kind === "thread" ? null : cur)));
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
@@ -575,6 +602,86 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
   );
   const forgetProject = useCallback(async (id: string) => void (await guarded("project", () => nativeApi.projectForget(id))), [guarded, nativeApi]);
 
+  // ---- A7.1 conversations -----------------------------------------------------------
+  const [threads, setThreads] = useState<ThreadSummary[]>([]);
+  // Reopening the app returns to the conversation the user was in (only when no route was given).
+  const restored = useRef(false);
+  const applyThreads = useCallback(
+    (list: ThreadSummary[]) => {
+      setThreads(list);
+      if (!restored.current && list.length > 0) {
+        restored.current = true;
+        if (initialRoute.page === "workspace" && initialRoute.selection === null) {
+          try {
+            const last = window.localStorage.getItem("nexus.lastThread");
+            if (last && list.some((t) => t.threadId === last)) setSelection({ kind: "thread", id: last });
+          } catch {
+            /* storage unavailable: start on the idle view */
+          }
+        }
+      }
+    },
+    [initialRoute],
+  );
+  const refreshThreads = useCallback(async () => {
+    try {
+      applyThreads((await nativeApi.threadList(null, false)).threads);
+    } catch {
+      /* transient: the next poll tries again */
+    }
+  }, [nativeApi, applyThreads]);
+  const anyThreadActive = threads.some((t) => t.active);
+  useEffect(() => {
+    let alive = true;
+    const tick = () =>
+      nativeApi
+        .threadList(null, false)
+        .then((r) => alive && applyThreads(r.threads))
+        .catch(() => undefined);
+    tick();
+    const t = setInterval(tick, anyThreadActive ? 1_500 : 6_000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [nativeApi, applyThreads, anyThreadActive, readyKey, reloadTick]);
+  const [threadSending, setThreadSending] = useState(false);
+  const [threadError, setThreadError] = useState<UiError | null>(null);
+  const clearThreadError = useCallback(() => setThreadError(null), []);
+  const openThread = useCallback((id: string) => select({ kind: "thread", id }), [select]);
+  const newConversation = useCallback(() => {
+    select(null);
+    setPageState("workspace");
+  }, [select]);
+  const sendThread = useCallback(
+    async (input: { threadId: string | null; projectId: string; content: string; mode: ThreadMode; workspace?: "continue" | "fresh" }) => {
+      // One key per click: a retried call never creates a second run or message.
+      const key = newIdempotencyKey();
+      setThreadSending(true);
+      setThreadError(null);
+      try {
+        const reply = await nativeApi.threadSend({ ...input, workspace: input.workspace ?? "continue", idempotencyKey: key });
+        await refreshThreads();
+        select({ kind: "thread", id: reply.threadId });
+        return reply;
+      } catch (e) {
+        setThreadError(asUiError(e));
+        return null;
+      } finally {
+        setThreadSending(false);
+      }
+    },
+    [nativeApi, refreshThreads, select],
+  );
+  useEffect(() => {
+    if (selection?.kind !== "thread") return;
+    try {
+      window.localStorage.setItem("nexus.lastThread", selection.id);
+    } catch {
+      /* ignore */
+    }
+  }, [selection]);
+
   const cancelPendingIntent = useCallback(async () => {
     if (!intentPending) return;
     try {
@@ -611,6 +718,7 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     setPage,
     select,
     panel,
+    panelRun,
     openPanel,
     closePanel,
     selectedTask,
@@ -629,6 +737,14 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     intentCodeSources,
     intentCodeLimits,
     saveCodeLimits,
+    threads,
+    refreshThreads,
+    openThread,
+    newConversation,
+    sendThread,
+    threadSending,
+    threadError,
+    clearThreadError,
     sendCode,
     intentPending,
     intentSubmitting,
