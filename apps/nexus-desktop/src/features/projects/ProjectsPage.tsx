@@ -1,14 +1,102 @@
-import { FolderGit2 } from "lucide-react";
+import { FolderGit2, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 import { useNexus } from "../../state/NexusContext";
-import { Badge, EmptyState } from "../../components/ui/primitives";
+import { Alert, Badge, Button, EmptyState } from "../../components/ui/primitives";
 
 /**
  * Read-only: the projects the operator has authorized. Registering a project (a path, a
  * commit pin, a write scope, a credential) is an operator action on the broker, never
  * something the Desktop can do or request.
  */
+function OpenedProjects() {
+  const { projects, openProject, refreshProject, forgetProject, setProjectPolicy, refreshProjects, setupBusy, setupError } = useNexus();
+  const managed = projects.filter((p) => p.managed);
+  return (
+    <section aria-label="Your projects" className="nv-stack" style={{ gap: 10 }}>
+      <div className="nv-heading__meta">
+        <h1 className="nv-pagetitle">Projects</h1>
+        <span className="nv-composer__spacer" />
+        <Button onClick={() => void refreshProjects(true)} size="sm" icon={<RefreshCw size={13} />} aria-label="Check for changes">
+          Check for changes
+        </Button>
+        <Button variant="primary" icon={<FolderOpen size={15} />} onClick={() => void openProject()} disabled={setupBusy === "project"}>
+          {setupBusy === "project" ? "Opening…" : "Open project…"}
+        </Button>
+      </div>
+      <p className="nv-note">
+        Choose a folder with the system picker. Nexus reads it, keeps a private snapshot to work from, and never changes your folder; new tasks start from your current files.
+      </p>
+      {setupError && <Alert tone="warning" title="That did not finish">{setupError.message}</Alert>}
+      {managed.length === 0 ? (
+        <EmptyState icon={FolderGit2} title="No project open yet">
+          Press “Open project…”, pick a software project folder, then describe a task on the Workspace page.
+        </EmptyState>
+      ) : (
+        <table className="nv-table" aria-label="Opened projects">
+          <thead>
+            <tr>
+              <th>Project</th>
+              <th>Type</th>
+              <th>Snapshot</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {managed.map((p) => (
+              <tr key={p.projectId}>
+                <td>
+                  <span className="nv-mono">{p.label}</span>
+                </td>
+                <td>
+                  {p.kinds.length === 0 ? <Badge tone="warning">not detected</Badge> : p.kinds.map((k) => (
+                    <Badge key={k.id} tone={k.supported ? "purple" : "warning"} title={k.supported ? "Nexus can build and test this" : "Nexus can read and edit this but cannot run its builds yet"}>
+                      {k.label}{k.supported ? "" : " · edit only"}
+                    </Badge>
+                  ))}
+                </td>
+                <td className="nv-note">
+                  {new Date(p.snapshotAtMs).toLocaleString()}
+                  {p.changedSinceSnapshot === true ? " · folder changed since (new tasks refresh automatically)" : ""}
+                  {p.originDirty ? " · had uncommitted changes" : ""}
+                </td>
+                <td>
+                  <label className="nv-note" title="Lets Nexus download this project's dependencies (npm ci, pip install, ...) inside its sandbox. Everything else runs without network.">
+                    <input type="checkbox" checked={p.installs === true} onChange={(e) => void setProjectPolicy(p.projectId, { installs: e.target.checked })} disabled={setupBusy === "project"} aria-label={`Allow dependency installs for ${p.label}`} /> installs
+                  </label>{" "}
+                  <label className="nv-note" title="Trusted workspace: when a task finishes and its checks pass, Nexus applies the change to your folder by itself (all-or-nothing, only if your folder did not change meanwhile). Nothing is committed or pushed.">
+                    <input type="checkbox" checked={p.trusted === true} onChange={(e) => void setProjectPolicy(p.projectId, { trusted: e.target.checked })} disabled={setupBusy === "project"} aria-label={`Apply finished work to ${p.label} automatically`} /> apply automatically
+                  </label>{" "}
+                  <Button size="sm" variant="ghost" icon={<RefreshCw size={13} />} aria-label={`Refresh ${p.label}`} onClick={() => void refreshProject(p.projectId)} disabled={setupBusy === "project"}>
+                    Refresh
+                  </Button>
+                  <Button size="sm" variant="ghost" icon={<Trash2 size={13} />} aria-label={`Remove ${p.label}`} onClick={() => void forgetProject(p.projectId)} disabled={setupBusy === "project"}>
+                    Remove
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  );
+}
+
 export function ProjectsPage() {
-  const { intentCodeSources, intentWorkspaces, intentCodeLimits } = useNexus();
+  const { intentCodeSources, intentWorkspaces, intentCodeLimits, runtimeState } = useNexus();
+  if (runtimeState?.mode === "interactive") {
+    return (
+      <div className="nv-page nv-narrow">
+        <OpenedProjects />
+        <h2 className="nv-subheading">What applies to every task</h2>
+        <ul className="nv-list" aria-label="Execution policy">
+          <li>Nexus works in an isolated copy of your project; your folder is never modified, and nothing is committed, pushed or merged.</li>
+          <li>Edits and build/test commands run automatically under a workspace policy (recorded as automated grants, never as your approval). Commands run in a sandbox with the network off.</li>
+          <li>Protected files (lock files, build scripts, hidden and credential-shaped paths, version-control internals) cannot be written.</li>
+          <li>Selected source text and command output are sent to your connected provider; each model turn is a billable request. You can revoke consent in Settings.</li>
+        </ul>
+      </div>
+    );
+  }
   const code = intentCodeSources ?? [];
   const inspect = intentWorkspaces ?? [];
   const ids = Array.from(new Set([...code.map((c) => c.sourceId), ...inspect.map((w) => w.workspaceId)]));

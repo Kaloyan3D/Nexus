@@ -1,4 +1,4 @@
-import { ArrowUp, Ban, Loader2 } from "lucide-react";
+import { ArrowUp, Ban, FolderOpen, Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useNexus } from "../../state/NexusContext";
 import { Alert, Button } from "../../components/ui/primitives";
@@ -37,9 +37,14 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
     sendInspect,
     sendCode,
     cancelPendingIntent,
+    runtimeState,
+    openProject,
+    setupBusy,
   } = useNexus();
+  const interactive = runtimeState?.mode === "interactive";
+  const consentGiven = !interactive || (runtimeState?.consent.given === true && runtimeState.providerConnected);
   const [text, setText] = useState("");
-  const [mode, setMode] = useState<Mode>("ask");
+  const [chosenMode, setMode] = useState<Mode | null>(null);
   const [modelIdx, setModelIdx] = useState(0);
   const [wsIdx, setWsIdx] = useState(0);
   const [srcIdx, setSrcIdx] = useState(0);
@@ -51,6 +56,8 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
   const source = sources.length > 0 ? sources[Math.min(srcIdx, sources.length - 1)]! : null;
   const model = intentModels && intentModels.length > 0 ? intentModels[Math.min(modelIdx, intentModels.length - 1)]! : null;
   const empty = text.trim().length === 0;
+  // Interactive profile: working on a project is THE default once one is open.
+  const mode: Mode = chosenMode ?? (interactive ? "code" : "ask");
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (autoFocus) ref.current?.focus();
@@ -73,7 +80,7 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
     intentPending === null &&
     !empty &&
     model !== null &&
-    (mode === "ask" || (mode === "inspect" && workspace !== null) || (mode === "code" && source !== null && intentCodeLimits !== null && ack));
+    (mode === "ask" || (mode === "inspect" && workspace !== null) || (mode === "code" && source !== null && intentCodeLimits !== null && (interactive ? consentGiven : ack)));
 
   const send = () => {
     if (!canSend || !model) return;
@@ -93,7 +100,7 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
     }
   };
 
-  const label = mode === "code" ? "Start coding" : mode === "inspect" ? "Inspect" : "Ask";
+  const label = mode === "code" ? (interactive ? "Run" : "Start coding") : mode === "inspect" ? "Inspect" : "Ask";
   return (
     <section className="nv-composer nv-composer--unified" aria-label="Task composer">
       <label className="nv-sr-only" htmlFor="nv-composer-input">
@@ -119,6 +126,7 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
           <button type="button" role="radio" aria-checked={mode === "ask"} onClick={() => setMode("ask")} title="Text-only request: no tools, no files">
             Ask
           </button>
+          {!interactive && (
           <button
             type="button"
             role="radio"
@@ -129,15 +137,16 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
           >
             Inspect
           </button>
+          )}
           <button
             type="button"
             role="radio"
             aria-checked={mode === "code"}
             onClick={() => setMode("code")}
-            disabled={sources.length === 0}
-            title={sources.length === 0 ? "No project has been authorized for coding by the operator" : "Let the model propose edits and commands in an isolated copy (each needs separate approval)"}
+            disabled={!interactive && sources.length === 0}
+            title={!interactive && sources.length === 0 ? "No project has been authorized for coding by the operator" : "Let the model propose edits and commands in an isolated copy (each needs separate approval)"}
           >
-            Code in copy
+            {interactive ? "Work on project" : "Code in copy"}
           </button>
         </div>
         {mode === "inspect" && (
@@ -159,13 +168,18 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
             <label className="nv-sr-only" htmlFor="nv-source-select">
               Project
             </label>
-            <select id="nv-source-select" className="nv-select" value={srcIdx} onChange={(e) => setSrcIdx(Number(e.target.value))} title="Operator-authorized projects (identities, not paths)">
+            <select id="nv-source-select" className="nv-select" value={srcIdx} onChange={(e) => setSrcIdx(Number(e.target.value))} title={interactive ? "Projects you have opened in Nexus" : "Operator-authorized projects (identities, not paths)"}>
               {sources.map((w, i) => (
                 <option key={w.sourceId} value={i}>
-                  {w.sourceId}
+                  {w.label ?? w.sourceId}
                 </option>
               ))}
             </select>
+            {interactive && (
+              <Button size="sm" icon={<FolderOpen size={14} />} onClick={() => void openProject()} disabled={setupBusy === "project"} aria-label="Open project">
+                {setupBusy === "project" ? "Opening…" : "Open…"}
+              </Button>
+            )}
           </>
         )}
         <label className="nv-sr-only" htmlFor="nv-model-select">
@@ -213,7 +227,24 @@ export function UnifiedComposer({ autoFocus = false }: { autoFocus?: boolean }) 
         </Button>
       </div>
 
-      {mode === "code" && source && (
+      {mode === "code" && interactive && source && (
+        <section className="nv-terms" aria-label="Autonomous run">
+          <div className="nv-terms__line">
+            <span>
+              <span className="nv-mono">{source.label ?? source.sourceId}</span>
+              {source.kinds && source.kinds.length > 0 ? ` · ${source.kinds.join(", ")}` : ""} · Nexus works in an isolated copy and runs builds and tests there automatically. Your folder is not changed until you apply the patch.
+            </span>
+          </div>
+          <div className="nv-terms__line nv-note">
+            {intentCodeLimits
+              ? `Up to ${intentCodeLimits.maxTurns} model turns, ${intentCodeLimits.maxEdits} edits and ${intentCodeLimits.maxTests} test runs · ${Math.round(intentCodeLimits.maxRuntimeSecs / 60)} min`
+              : "Run limits unavailable — the runtime did not report them, so Run is disabled."}
+          </div>
+          {runtimeState?.updatePending && <Alert tone="info" title="Nexus was updated">A task is still running. Nexus restarts by itself when it finishes; new tasks can start right after.</Alert>}
+          {!consentGiven && <Alert tone="warning" title="Autonomous work is not allowed yet">Finish setup first (connect OpenCode Go and allow autonomous work).</Alert>}
+        </section>
+      )}
+      {mode === "code" && !interactive && source && (
         <section className="nv-terms" aria-label="Coding task terms">
           <div className="nv-terms__line">
             <span>

@@ -215,7 +215,7 @@ function EvidenceTab({ run }: { run: IntentRun }) {
             <tr key={a.index}>
               <td>{a.index}</td>
               <td className="nv-mono">{a.tool} {a.argsSummary}</td>
-              <td className="nv-mono">{a.approvalId ? `${short(a.approvalId, 8)} · ${a.approvalOutcome ?? "?"}` : "—"}</td>
+              <td className="nv-mono">{a.approvalId ? `${short(a.approvalId, 8)} · ${a.approvalActor === "automated-policy" ? "automated workspace policy (not a person)" : (a.approvalOutcome ?? "?")}` : "—"}</td>
               <td>{a.status}{a.errorCode ? ` · ${a.errorCode}` : ""}</td>
               <td className="nv-mono">
                 {a.postSha256 ? `${short(a.preSha256)} → ${short(a.postSha256)}` : a.exitCode != null ? `exit ${a.exitCode} · ${a.verification ?? "no verdict"}` : "—"}

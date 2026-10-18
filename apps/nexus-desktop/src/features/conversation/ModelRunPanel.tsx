@@ -236,7 +236,7 @@ export function ToolCallsTable({ run }: { run: IntentRun }) {
               {a.tool} <Badge tone={toolKind(a.tool) === "read" ? "neutral" : "purple"}>{toolKind(a.tool)}</Badge>
             </td>
             <td className="nv-mono">{a.argsSummary}</td>
-            <td>{a.approvalOutcome ? <Badge tone={a.approvalOutcome === "approved" ? "success" : "warning"}>{a.approvalOutcome}</Badge> : "—"}</td>
+            <td>{a.approvalOutcome ? <Badge tone={a.approvalOutcome === "approved" ? "success" : "warning"}>{a.approvalActor === "automated-policy" ? "granted by policy" : a.approvalOutcome}</Badge> : "—"}</td>
             <td>
               <Badge tone={activityTone(a)}>
                 {a.status}

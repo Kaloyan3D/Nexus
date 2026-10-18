@@ -264,6 +264,19 @@ describe("markdown-lite", () => {
     const { container } = render(<MarkdownLite text="<img src=x onerror=alert(1)> [a](http://e.com)" />);
     expect(container.querySelector("img, a")).toBeNull();
   });
+  it("renders report structure (headings, lists, tables, quotes) as plain elements", () => {
+    const { container } = render(
+      <MarkdownLite text={"# Title\n\n## 1. Architecture\n\n- one **bold** `code`\n- two\n\n1. first\n2. second\n\n| Layer | Job |\n|---|---|\n| UI | shell |\n\n> quoted\n\n---\n\n[x](http://e.com) <b>no</b>"} />,
+    );
+    expect(container.querySelectorAll("h2, h3").length).toBe(2);
+    expect(container.querySelectorAll("ul li").length).toBe(2);
+    expect(container.querySelectorAll("ol li").length).toBe(2);
+    expect(container.querySelectorAll("table th").length).toBe(2);
+    expect(container.querySelector("td")?.textContent).toBe("UI");
+    expect(container.querySelector("blockquote")?.textContent).toBe("quoted");
+    expect(container.querySelector("hr")).not.toBeNull();
+    expect(container.querySelector("a, b")).toBeNull();
+  });
   it("is quiet about unused vi", () => {
     expect(vi).toBeDefined();
   });

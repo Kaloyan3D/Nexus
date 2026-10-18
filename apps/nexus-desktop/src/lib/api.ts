@@ -8,6 +8,7 @@ import type {
   AllowedModel,
   AllowedWorkspace,
   AllowedCodeSource,
+  ConnectReport,
   CopyInfo,
   DesktopCodeLimits,
   DiffReply,
@@ -18,6 +19,9 @@ import type {
   ModelConversationSummary,
   ModelRunStatus,
   ModelIoView,
+  ProjectOpenReply,
+  ProjectView,
+  RuntimeState,
   JournalResult,
   LiveBlockers,
   MockEvent,
@@ -61,6 +65,7 @@ export interface NativeApi {
   intentCodeSources(): Promise<AllowedCodeSource[]>;
   /** A6.1: the fixed limits a Desktop coding task uses (shown before submitting). */
   intentCodeLimits(): Promise<DesktopCodeLimits>;
+  codeLimitsSet(limits: Record<string, number>): Promise<unknown>;
   /** A5.6: submit a controlled coding task (text + source identity only). */
   intentCodeSubmit(
     prompt: string,
@@ -70,7 +75,24 @@ export interface NativeApi {
   /** A5.6: read-only change set of this user's repo-code run. */
   intentDiff(runId: string): Promise<DiffReply>;
   intentCopy(runId: string): Promise<CopyInfo>;
+  /** A6.1.4: the native runtime's state (interactive profile) or `external`. */
+  runtimeState(): Promise<RuntimeState>;
+  runtimeStart(): Promise<void>;
+  /** Native password prompt, then one-time provider connection. The key never reaches this page. */
+  providerConnect(): Promise<ConnectReport>;
+  /** Native confirmation of the exact consent text. */
+  providerConsent(): Promise<RuntimeState["consent"]>;
+  providerRevoke(): Promise<RuntimeState["consent"]>;
+  /** Native folder picker, then open the folder as a project. No path crosses this API. */
+  projectPick(): Promise<ProjectOpenReply>;
+  projectList(withChanges?: boolean): Promise<{ projects: ProjectView[] }>;
+  projectRefresh(projectId: string): Promise<ProjectOpenReply>;
+  projectSetPolicy(projectId: string, policy: { installs?: boolean; trusted?: boolean }): Promise<unknown>;
+  projectForget(projectId: string): Promise<{ forgotten: string }>;
+  /** Apply a finished run's patch to the user's folder after a native confirmation. */
+  projectAdopt(runId: string): Promise<{ applied: string[] }>;
   intentStatus(runId: string): Promise<IntentRun>;
+  intentResult(runId: string): Promise<string>;
   intentCancel(runId: string): Promise<IntentCancelReply>;
   intentList(): Promise<IntentRun[]>;
   /** A5.1: recorded user-initiated model-only runs (read-only). */
@@ -133,11 +155,24 @@ export const tauriApi: NativeApi = {
     invoke<IntentSubmitReply>("intent_inspect_submit", { prompt, workspaceId, idempotencyKey }),
   intentCodeSources: () => invoke<AllowedCodeSource[]>("intent_code_sources"),
   intentCodeLimits: () => invoke<DesktopCodeLimits>("intent_code_limits"),
+  codeLimitsSet: (limits) => invoke<unknown>("code_limits_set", { limits }),
   intentCodeSubmit: (prompt, sourceId, idempotencyKey) =>
     invoke<IntentSubmitReply>("intent_code_submit", { prompt, sourceId, idempotencyKey }),
   intentDiff: (runId) => invoke<DiffReply>("intent_diff", { runId }),
   intentCopy: (runId) => invoke<CopyInfo>("intent_copy", { runId }),
+  runtimeState: () => invoke<RuntimeState>("runtime_state"),
+  runtimeStart: () => invoke<void>("runtime_start"),
+  providerConnect: () => invoke<ConnectReport>("provider_connect"),
+  providerConsent: () => invoke<RuntimeState["consent"]>("provider_consent"),
+  providerRevoke: () => invoke<RuntimeState["consent"]>("provider_revoke"),
+  projectPick: () => invoke<ProjectOpenReply>("project_pick"),
+  projectList: (withChanges) => invoke<{ projects: ProjectView[] }>("project_list", { withChanges: withChanges ?? false }),
+  projectRefresh: (projectId) => invoke<ProjectOpenReply>("project_refresh", { projectId }),
+  projectSetPolicy: (projectId, policy) => invoke<unknown>("project_set_policy", { projectId, installs: policy.installs ?? null, trusted: policy.trusted ?? null }),
+  projectForget: (projectId) => invoke<{ forgotten: string }>("project_forget", { projectId }),
+  projectAdopt: (runId) => invoke<{ applied: string[] }>("project_adopt", { runId }),
   intentStatus: (runId) => invoke<IntentRun>("intent_status", { runId }),
+  intentResult: (runId) => invoke<string>("intent_result", { runId }),
   intentCancel: (runId) => invoke<IntentCancelReply>("intent_cancel", { runId }),
   intentList: () => invoke<IntentRun[]>("intent_list"),
   listModelConversations: () => invoke<ModelConversationSummary[]>("list_model_conversations"),
@@ -196,10 +231,23 @@ export const unavailableApi: NativeApi = {
   intentInspectSubmit: () => Promise.reject(notInShell),
   intentCodeSources: () => Promise.resolve([]),
   intentCodeLimits: () => Promise.reject(notInShell),
+  codeLimitsSet: () => Promise.reject(notInShell),
   intentCodeSubmit: () => Promise.reject(notInShell),
   intentDiff: () => Promise.reject(notInShell),
   intentCopy: () => Promise.reject(notInShell),
+  runtimeState: () => Promise.reject(notInShell),
+  runtimeStart: () => Promise.reject(notInShell),
+  providerConnect: () => Promise.reject(notInShell),
+  providerConsent: () => Promise.reject(notInShell),
+  providerRevoke: () => Promise.reject(notInShell),
+  projectPick: () => Promise.reject(notInShell),
+  projectList: () => Promise.resolve({ projects: [] }),
+  projectRefresh: () => Promise.reject(notInShell),
+  projectSetPolicy: () => Promise.reject(notInShell),
+  projectForget: () => Promise.reject(notInShell),
+  projectAdopt: () => Promise.reject(notInShell),
   intentStatus: () => Promise.reject(notInShell),
+  intentResult: () => Promise.reject(notInShell),
   intentCancel: () => Promise.reject(notInShell),
   intentList: () => Promise.resolve([]),
   listModelConversations: () => Promise.resolve([]),

@@ -128,8 +128,9 @@ const GO_PROFILE = 'opencode-go-responses'
 const GO_BASE_URL = 'https://opencode.ai/inference/go/openai/v1'
 const GO_MODELS_URL = 'https://opencode.ai/inference/go/v1/models'
 // Muse is a reasoning model: with 128 the first live probe came back
-// status "incomplete" (budget spent before any text). Probe-only ceiling.
-const GO_PROBE_MAX_OUTPUT = 1024
+// status "incomplete" (budget spent before any text); 1024 still flaked on the
+// tool-result continuation (A6.1.4 P0: reasoning tokens count against the cap). Probe-only ceiling.
+const GO_PROBE_MAX_OUTPUT = 4096
 function isGoProfile(provider) {
   return !!(provider && provider.metadata && provider.metadata.wireProfile === GO_PROFILE)
 }

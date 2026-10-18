@@ -16,12 +16,16 @@ import type {
   AllowedWorkspace,
   AllowedCodeSource,
   DesktopCodeLimits,
+  ConnectReport,
   IntentRun,
   LiveBlockers,
   MockEvent,
   ModelConversationSummary,
   ModelCatalog,
+  ProjectOpenReply,
+  ProjectView,
   RuntimeSnapshot,
+  RuntimeState,
   TaskRecord,
   TasksResult,
   UiError,
@@ -98,11 +102,28 @@ export interface NexusState {
   intentCodeSources: AllowedCodeSource[] | null;
   /** A6.1: the fixed limits a coding task will run with (null = not loaded). */
   intentCodeLimits: DesktopCodeLimits | null;
+  saveCodeLimits: (limits: Record<string, number>) => Promise<void>;
   /** A5.6: submit a controlled coding task for a source identity. */
   sendCode: (prompt: string, sourceId: string) => Promise<boolean>;
   /** A5.5: submit a read-only repository inspection for a workspace identity. */
   sendInspect: (prompt: string, workspaceId: string) => Promise<boolean>;
   cancelPendingIntent: () => Promise<void>;
+  /** A6.1.4: the native runtime / setup state (null until the first answer). */
+  runtimeState: RuntimeState | null;
+  /** The setup action in flight (a native dialog may be open) and its last error. */
+  setupBusy: "connect" | "consent" | "project" | "start" | null;
+  setupError: UiError | null;
+  connectProvider: () => Promise<ConnectReport | null>;
+  giveConsent: () => Promise<void>;
+  revokeConsent: () => Promise<void>;
+  retryRuntime: () => Promise<void>;
+  /** Projects Nexus knows (opened from the Desktop or registered by an operator). */
+  projects: ProjectView[];
+  refreshProjects: (withChanges?: boolean) => Promise<void>;
+  openProject: () => Promise<ProjectOpenReply | null>;
+  refreshProject: (projectId: string) => Promise<void>;
+  forgetProject: (projectId: string) => Promise<void>;
+  setProjectPolicy: (projectId: string, policy: { installs?: boolean; trusted?: boolean }) => Promise<void>;
 }
 
 function newIdempotencyKey(): string {
@@ -249,6 +270,11 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
   // A5.3: the composer's Send goes through the SAME broker the CLI uses.
   const [intentModels, setIntentModels] = useState<AllowedModel[] | null>(null);
   const [intentModelsError, setIntentModelsError] = useState<UiError | null>(null);
+  // A6.1.4: everything the broker serves is re-read when the runtime becomes ready or a
+  // setup step (provider, consent, project) completes.
+  const [runtimeState, setRuntimeState] = useState<RuntimeState | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
+  const readyKey = `${runtimeState?.phase ?? "?"}:${runtimeState?.providerConnected ? 1 : 0}:${runtimeState?.consent.given ? 1 : 0}`;
   useEffect(() => {
     let alive = true;
     nativeApi
@@ -258,7 +284,7 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     return () => {
       alive = false;
     };
-  }, [nativeApi]);
+  }, [nativeApi, readyKey, reloadTick]);
   const [intentWorkspaces, setIntentWorkspaces] = useState<AllowedWorkspace[] | null>(null);
   useEffect(() => {
     let alive = true;
@@ -280,7 +306,7 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     return () => {
       alive = false;
     };
-  }, [nativeApi]);
+  }, [nativeApi, readyKey, reloadTick]);
   const [intentCodeLimits, setIntentCodeLimits] = useState<DesktopCodeLimits | null>(null);
   useEffect(() => {
     let alive = true;
@@ -291,7 +317,14 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     return () => {
       alive = false;
     };
-  }, [nativeApi]);
+  }, [nativeApi, readyKey, reloadTick]);
+  const saveCodeLimits = useCallback(
+    async (limits: Record<string, number>) => {
+      await nativeApi.codeLimitsSet(limits);
+      setIntentCodeLimits(await nativeApi.intentCodeLimits());
+    },
+    [nativeApi],
+  );
   const [intentPending, setIntentPending] = useState<IntentRun | null>(null);
   const [intentSubmitting, setIntentSubmitting] = useState(false);
   const [intentError, setIntentError] = useState<UiError | null>(null);
@@ -459,6 +492,89 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     [nativeApi, followSubmitted],
   );
 
+  // ---- A6.1.4 runtime, setup and projects ------------------------------------------
+  const refreshRuntimeState = useCallback(async () => {
+    try {
+      setRuntimeState(await nativeApi.runtimeState());
+    } catch {
+      setRuntimeState(null);
+    }
+  }, [nativeApi]);
+  const setupDone =
+    runtimeState === null ||
+    runtimeState.mode === "external" ||
+    (runtimeState.phase === "ready" && runtimeState.providerConnected && runtimeState.consent.given);
+  useEffect(() => {
+    let alive = true;
+    const tick = () =>
+      nativeApi
+        .runtimeState()
+        .then((st) => alive && setRuntimeState(st))
+        .catch(() => alive && setRuntimeState(null));
+    tick();
+    const t = setInterval(tick, setupDone ? 15_000 : 1_500);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [nativeApi, setupDone]);
+  const [setupBusy, setSetupBusy] = useState<NexusState["setupBusy"]>(null);
+  const [setupError, setSetupError] = useState<UiError | null>(null);
+  const guarded = useCallback(
+    async <T,>(what: NonNullable<NexusState["setupBusy"]>, f: () => Promise<T>): Promise<T | null> => {
+      setSetupBusy(what);
+      setSetupError(null);
+      try {
+        return await f();
+      } catch (e) {
+        const u = asUiError(e);
+        // dismissing a native dialog is not an error
+        if (u.code !== "cancelled") setSetupError(u);
+        return null;
+      } finally {
+        setSetupBusy(null);
+        await refreshRuntimeState();
+        setReloadTick((n) => n + 1);
+      }
+    },
+    [refreshRuntimeState],
+  );
+  const connectProvider = useCallback(() => guarded("connect", () => nativeApi.providerConnect()), [guarded, nativeApi]);
+  const giveConsent = useCallback(async () => void (await guarded("consent", () => nativeApi.providerConsent())), [guarded, nativeApi]);
+  const revokeConsent = useCallback(async () => void (await guarded("consent", () => nativeApi.providerRevoke())), [guarded, nativeApi]);
+  const retryRuntime = useCallback(async () => void (await guarded("start", () => nativeApi.runtimeStart())), [guarded, nativeApi]);
+  const [projects, setProjects] = useState<ProjectView[]>([]);
+  const refreshProjects = useCallback(
+    async (withChanges?: boolean) => {
+      try {
+        setProjects((await nativeApi.projectList(withChanges)).projects);
+      } catch {
+        setProjects([]);
+      }
+    },
+    [nativeApi],
+  );
+  useEffect(() => {
+    let alive = true;
+    nativeApi
+      .projectList()
+      .then((r) => alive && setProjects(r.projects))
+      .catch(() => alive && setProjects([]));
+    return () => {
+      alive = false;
+    };
+  }, [nativeApi, readyKey, reloadTick]);
+  const openProject = useCallback(() => guarded("project", () => nativeApi.projectPick()), [guarded, nativeApi]);
+  const refreshProject = useCallback(async (id: string) => void (await guarded("project", () => nativeApi.projectRefresh(id))), [guarded, nativeApi]);
+  const setProjectPolicy = useCallback(
+    async (id: string, policy: { installs?: boolean; trusted?: boolean }) => {
+      await guarded("project", () => nativeApi.projectSetPolicy(id, policy));
+      await refreshProjects(false);
+    },
+    [guarded, nativeApi, refreshProjects],
+  );
+  const forgetProject = useCallback(async (id: string) => void (await guarded("project", () => nativeApi.projectForget(id))), [guarded, nativeApi]);
+
   const cancelPendingIntent = useCallback(async () => {
     if (!intentPending) return;
     try {
@@ -512,6 +628,7 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     intentWorkspaces,
     intentCodeSources,
     intentCodeLimits,
+    saveCodeLimits,
     sendCode,
     intentPending,
     intentSubmitting,
@@ -519,6 +636,19 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     sendIntent,
     sendInspect,
     cancelPendingIntent,
+    runtimeState,
+    setupBusy,
+    setupError,
+    connectProvider,
+    giveConsent,
+    revokeConsent,
+    retryRuntime,
+    projects,
+    refreshProjects,
+    openProject,
+    refreshProject,
+    forgetProject,
+    setProjectPolicy,
   };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

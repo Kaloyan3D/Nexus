@@ -1980,6 +1980,7 @@ name = "nexus-desktop"
 version = "0.1.0"
 dependencies = [
  "nexus-client",
+ "nexus-runtime",
  "serde",
  "serde_json",
  "tauri",
@@ -2016,6 +2017,16 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "webpki-roots",
+]
+
+[[package]]
+name = "nexus-runtime"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nexus-client",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

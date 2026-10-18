@@ -43,6 +43,9 @@ function blockedWords(run: IntentRun): string {
  */
 export function outcomeView(run: IntentRun | null | undefined): OutcomeView | null {
   if (!run || run.intentType !== "repo-code") return null;
+  if (run.continuedAs) {
+    return { label: "Interrupted · continued automatically", tone: "warning", detail: "The runtime was interrupted. Nexus carried this run's changes into a new run and carried on there." };
+  }
   const o: CodingOutcome | null | undefined = run.codingOutcome;
   if (!o) return { label: "Outcome not reported", tone: "warning", detail: "This broker did not report a verified outcome; nothing is assumed." };
   const applied = o.editsApplied;

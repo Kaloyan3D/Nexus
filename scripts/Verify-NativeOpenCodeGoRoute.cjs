@@ -22,10 +22,10 @@ const PROVIDER_ID = 'opencode-go-native';
 const CRED_REF = 'credential://connections/conn-opencode-go-native';
 const EXPECTED = [
   'GET  https://opencode.ai/inference/go/v1/models   (authorization, x-opencode-session)',
-  'POST https://opencode.ai/inference/go/openai/v1/responses  text probe, reasoning.effort=low, max_output_tokens=1024',
+  'POST https://opencode.ai/inference/go/openai/v1/responses  text probe, reasoning.effort=low, max_output_tokens=4096',
   'POST https://opencode.ai/inference/go/openai/v1/responses  same body + stream=true',
-  'POST https://opencode.ai/inference/go/openai/v1/responses  synthetic tool probe (probe_echo), max_output_tokens=1024',
-  'POST https://opencode.ai/inference/go/openai/v1/responses  stateless tool-result continuation, max_output_tokens=1024',
+  'POST https://opencode.ai/inference/go/openai/v1/responses  synthetic tool probe (probe_echo), max_output_tokens=4096',
+  'POST https://opencode.ai/inference/go/openai/v1/responses  stateless tool-result continuation, max_output_tokens=4096',
 ];
 const RECORD = 'route-verification-authorization.json';
 

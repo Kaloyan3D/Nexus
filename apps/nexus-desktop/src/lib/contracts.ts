@@ -408,6 +408,14 @@ export interface IntentRun {
   editsUsed?: number;
   maxEdits?: number;
   testsUsed?: number;
+  /** Turns whose conversation was shortened to stay inside the model context budget. */
+  contextCompactions?: number;
+  /** Provider interruptions the broker recovered from by itself. */
+  recoveries?: number;
+  continuationOf?: string | null;
+  continuedAs?: string | null;
+  autoAdopt?: string | null;
+  lastRecovery?: string | null;
   maxTests?: number;
   /** `pass` / `fail` of the most recent approved test or build command. */
   lastTestVerification?: string | null;
@@ -467,6 +475,8 @@ export interface DesktopCodeLimits {
   maxRuntimeSecs: number;
   /** How long an approval stays decidable (broker-defined; operators can only shorten it). */
   approvalLifetimeSecs?: number;
+  /** The built-in maximums the user's own limits are lowered from. */
+  builtIn?: DesktopCodeLimits | null;
 }
 
 /** Read-only facts about a run's retained isolated working copy (never a path). */
@@ -493,6 +503,58 @@ export interface AllowedCodeSource {
   pinnedCommit?: string | null;
   /** Files or `dir/` prefixes the model may propose writes to; empty/absent = the whole project. */
   writeAllow?: string[];
+  /** A6.1.4: display name, detected kinds and origin of a project opened from the Desktop. */
+  label?: string | null;
+  managed?: boolean;
+  kinds?: string[];
+}
+
+/** A6.1.4 interactive profile: what the native backend reports about its runtime. */
+export interface RuntimeState {
+  /** `interactive`: this app runs the runtime. `external`: an operator-run broker (strict profile). */
+  mode: "interactive" | "external";
+  phase: "starting" | "ready" | "error" | "stopped";
+  message: string | null;
+  home: string | null;
+  providerConnected: boolean;
+  consent: { given: boolean; providerId: string | null; remoteModelId: string | null; text: string | null };
+  /** The broker can open project folders (interactive profile). */
+  canOpenProjects: boolean;
+  updatePending?: boolean;
+}
+
+export interface ProjectKindView {
+  id: string;
+  label: string;
+  supported: boolean;
+}
+
+export interface ProjectView {
+  projectId: string;
+  label: string;
+  managed: boolean;
+  kinds: ProjectKindView[];
+  pinnedCommit: string;
+  writeAllow: string[];
+  /** Nexus may install this project's dependencies (network, in the sandbox, install commands only). */
+  installs?: boolean;
+  /** Trusted workspace: finished, verified work is applied to the user's folder automatically. */
+  trusted?: boolean;
+  snapshotAtMs: number;
+  originDirty: boolean;
+  /** True when the folder changed since Nexus last copied it (new tasks refresh automatically). */
+  changedSinceSnapshot: boolean | null;
+}
+
+export interface ProjectOpenReply {
+  project: ProjectView;
+  created: boolean;
+  snapshot: { files: number; bytes: number; skippedTotal: number; skipped: { path: string; reason: string }[] };
+}
+
+export interface ConnectReport {
+  verified: boolean;
+  checks: string[];
 }
 
 /** The reviewable result of a repo-code run, from the isolated working copy. */
@@ -527,6 +589,8 @@ export interface ToolActivity {
   approvalId?: string | null;
   /** `approved` | `denied` | `expired` | `revoked` | `cancelled` | `timed-out` */
   approvalOutcome?: string | null;
+  /** `automated-policy` when the daemon's workspace policy (never a person) granted it. */
+  approvalActor?: string | null;
   preSha256?: string | null;
   postSha256?: string | null;
   exitCode?: number | null;

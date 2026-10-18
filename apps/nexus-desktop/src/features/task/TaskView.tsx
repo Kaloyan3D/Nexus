@@ -1,5 +1,6 @@
 import { CheckCircle2, ChevronDown, ChevronRight, CircleSlash, Loader2, TriangleAlert } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { asUiError } from "../../lib/api";
 import type { IntentRun, ModelConversationSummary } from "../../lib/contracts";
 import { modelStateView } from "../../lib/modelRun";
 import { countSteps, describeStep, nowLine, type StepTone } from "../../lib/progress";
@@ -43,7 +44,7 @@ function Steps({ run, limit }: { run: IntentRun; limit?: number }) {
   );
 }
 
-function Header({ summary, record, status, reload }: { summary: ModelConversationSummary; record: IntentRun | null; status: ReturnType<typeof useModelRunStatus>["status"]; reload: () => void }) {
+function Header({ summary, record, status, reload, interactiveHeader }: { interactiveHeader?: boolean; summary: ModelConversationSummary; record: IntentRun | null; status: ReturnType<typeof useModelRunStatus>["status"]; reload: () => void }) {
   const kind = runKind(record);
   const state = record?.state ?? status?.state ?? summary.state;
   const terminal = record?.terminal ?? status?.terminal ?? summary.terminal;
@@ -62,7 +63,7 @@ function Header({ summary, record, status, reload }: { summary: ModelConversatio
         </span>
         <span className="nv-taskhead__spacer" />
         <Badge tone={v.tone} icon={<StatusDot tone={v.tone} pulse={v.pulse} />} title="Lifecycle: what the run did, not whether the task succeeded">
-          {kind === "code" && state === "completed" ? "Model completed" : v.label}
+          {kind === "code" && state === "completed" ? (interactiveHeader ? "Completed" : "Model completed") : v.label}
         </Badge>
         {elapsed != null && <span className="nv-note">{clock(elapsed)}</span>}
         {status && <CancelModelRunButton status={status} onDone={reload} />}
@@ -72,8 +73,40 @@ function Header({ summary, record, status, reload }: { summary: ModelConversatio
   );
 }
 
+/** Apply the patch to the user's own folder: explicit, confirmed natively, never automatic. */
+function AdoptButton({ run }: { run: IntentRun }) {
+  const { api, runtimeState, projects, refreshProjects } = useNexus();
+  const [state, setState] = useState<{ busy: boolean; msg: string | null; ok: boolean }>({ busy: false, msg: null, ok: false });
+  const managed = projects.some((p) => p.projectId === run.workspaceId && p.managed);
+  if (runtimeState?.mode !== "interactive" || !managed) return null;
+  const adopt = async () => {
+    setState({ busy: true, msg: null, ok: false });
+    try {
+      const r = await api.projectAdopt(run.runId);
+      setState({ busy: false, ok: true, msg: `Applied ${r.applied.length} file${r.applied.length === 1 ? "" : "s"} to your folder. Nothing was committed.` });
+      void refreshProjects(true);
+    } catch (e) {
+      const u = asUiError(e);
+      setState({ busy: false, ok: false, msg: u.code === "cancelled" ? null : u.message });
+    }
+  };
+  return (
+    <>
+      <Button size="sm" variant="primary" onClick={() => void adopt()} disabled={state.busy || state.ok}>
+        {state.ok ? "Applied" : state.busy ? "Applying…" : "Apply to my folder…"}
+      </Button>
+      {state.msg && (
+        <span className="nv-note" role="status">
+          {state.msg}
+        </span>
+      )}
+    </>
+  );
+}
+
 function OutcomeCard({ run }: { run: IntentRun }) {
-  const { openPanel } = useNexus();
+  const { openPanel, runtimeState } = useNexus();
+  const interactive = runtimeState?.mode === "interactive";
   const v = outcomeView(run);
   if (!v) return null;
   const o = run.codingOutcome;
@@ -92,11 +125,11 @@ function OutcomeCard({ run }: { run: IntentRun }) {
           {" · "}
           {o.testsExecuted} command(s) executed, {o.testsNotExecuted} not executed
           {lastRun ? ` · ${lastRun.argsSummary}` : ""}
-          {o.blockedByApproval > 0 ? ` · ${o.blockedByApproval} stopped at approval` : ""}
+          {o.blockedByApproval > 0 ? ` · ${o.blockedByApproval} ${interactive ? "refused by policy" : "stopped at approval"}` : ""}
         </p>
       )}
       {o?.verification === "verified-passed" && (
-        <p className="nv-note">A passing validation command is evidence that the command succeeded in the sandbox (network off); it does not prove the whole task is correct. Review the changes.</p>
+        <p className="nv-note">A passing validation command is evidence that the command succeeded in the sandbox; it does not prove the whole task is correct. Review the changes.</p>
       )}
       {o?.verification !== "verified-passed" && <p className="nv-note">{v.detail}</p>}
       <div className="nv-outcome__actions">
@@ -116,6 +149,7 @@ function OutcomeCard({ run }: { run: IntentRun }) {
         <Button size="sm" variant="ghost" onClick={() => openPanel("source")}>
           Source
         </Button>
+        {hasDiff && o?.change === "applied" && <AdoptButton run={run} />}
       </div>
     </section>
   );
@@ -161,13 +195,66 @@ function Details({ summary, record }: { summary: ModelConversationSummary; recor
   );
 }
 
-function Answer({ text, kind, partial }: { text: string; kind: RunKind; partial: boolean }) {
+/** A code run that only looked: no file was proposed for change and nothing verified a change
+ *  (read-only commands such as grep or ls do not make it a coding run). */
+function isReview(run: IntentRun | null): boolean {
+  if (!run || run.intentType !== "repo-code") return false;
+  const acts = run.toolActivity ?? [];
+  if (acts.length === 0) return false;
+  if (acts.some((a) => a.tool === "fs_write" || a.tool === "fs_edit")) return false;
+  const v = run.codingOutcome?.verification;
+  return v === undefined || v === "no-test-executed";
+}
+
+function RecoveryNote({ run }: { run: IntentRun }) {
+  const n = run.recoveries ?? 0;
+  if (n === 0) return null;
+  return (
+    <p className="nv-note" role="status">
+      Recovered from {n} interruption{n === 1 ? "" : "s"} on its own{run.lastRecovery ? ` (last: ${run.lastRecovery})` : ""}. Nothing completed so far was lost or repeated.
+    </p>
+  );
+}
+
+/** How this run relates to others and to the user's folder (continuation, automatic apply). */
+function RunLinks({ run }: { run: IntentRun }) {
+  const notes: string[] = [];
+  if (run.continuationOf) notes.push("This run continues an earlier one that was interrupted; its changes were carried over.");
+  if (run.continuedAs) notes.push("This run was interrupted. Nexus continued the task in a new run.");
+  if (run.autoAdopt) notes.push(`Trusted workspace: ${run.autoAdopt}.`);
+  if (notes.length === 0) return null;
+  return (
+    <div className="nv-note" role="status">
+      {notes.map((n) => (
+        <p key={n}>{n}</p>
+      ))}
+    </div>
+  );
+}
+
+/** The result of a read-only investigation: the report itself, not diagnostics about it. */
+function ReviewReport({ run, text }: { run: IntentRun; text: string }) {
+  const acts = run.toolActivity ?? [];
+  const files = new Set(acts.filter((a) => a.tool === "fs_read").map((a) => a.argsSummary.replace(/^path=/, "").split(" ")[0]));
+  const searches = acts.filter((a) => a.tool === "fs_search").length;
+  return (
+    <section className="nv-answer nv-answer--report" role="region" aria-label="Review report">
+      <div className="nv-answer__label">
+        Review report — {files.size} file{files.size === 1 ? "" : "s"} read, {searches} search{searches === 1 ? "" : "es"}, nothing changed
+      </div>
+      <RecoveryNote run={run} />
+      {text.trim() ? <MarkdownLite text={text} /> : <p className="nv-note">The run ended without a written report. See Details for what it inspected.</p>}
+    </section>
+  );
+}
+
+function Answer({ text, kind, partial, interactive }: { text: string; kind: RunKind; partial: boolean; interactive?: boolean }) {
   if (!text.trim()) return null;
   const code = kind === "code";
   return (
-    <section className={`nv-answer${code ? " nv-answer--claim" : ""}`} aria-label={code ? "Model's summary" : "Answer"}>
+    <section className={`nv-answer${code && !interactive ? " nv-answer--claim" : ""}`} aria-label={code ? "Model's summary" : "Answer"}>
       <div className="nv-answer__label">
-        {code ? "Model's summary — a claim, not verified" : partial ? "Answer (streaming)" : kind === "inspect" ? "Answer — read-only, nothing was changed" : "Answer — text only, nothing was executed"}
+        {code ? (interactive ? "Summary" : "Model's summary — a claim, not verified") : partial ? "Answer (streaming)" : kind === "inspect" ? "Answer — read-only, nothing was changed" : "Answer — text only, nothing was executed"}
       </div>
       <MarkdownLite text={text} />
     </section>
@@ -176,7 +263,8 @@ function Answer({ text, kind, partial }: { text: string; kind: RunKind; partial:
 
 /** The task-first view of one run, shaped by its state. Everything shown comes from the run record and receipts. */
 export function TaskView({ summary }: { summary: ModelConversationSummary }) {
-  const { runByConversation } = useNexus();
+  const { runByConversation, runtimeState } = useNexus();
+  const interactive = runtimeState?.mode === "interactive";
   const id = summary.conversationId;
   const record = runByConversation.get(id) ?? null;
   const { status, error, reload } = useModelRunStatus(id, !summary.terminal);
@@ -184,10 +272,28 @@ export function TaskView({ summary }: { summary: ModelConversationSummary }) {
   const state = record?.state ?? status?.state ?? summary.state;
   const terminal = record?.terminal ?? status?.terminal ?? summary.terminal;
   const pending = record && !record.terminal ? record.pendingApproval ?? null : null;
-  const text = status?.text ?? "";
+  const { api } = useNexus();
+  // The final answer of a finished coding run is the broker's recorded result: the model
+  // conversation status only keeps the latest turn's text, which a nudge or a retry can blank.
+  const [finalText, setFinalText] = useState<{ run: string; text: string } | null>(null);
+  const runId = record?.runId ?? null;
+  const wantResult = terminal && kind === "code" && runId !== null;
+  useEffect(() => {
+    if (!wantResult || !runId) return;
+    let alive = true;
+    api
+      .intentResult(runId)
+      .then((t) => alive && setFinalText({ run: runId, text: t }))
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [api, wantResult, runId]);
+  const brokerText = finalText && finalText.run === runId ? finalText.text : "";
+  const text = brokerText || (status?.text ?? "");
   return (
     <div className="nv-taskview">
-      <Header summary={summary} record={record} status={status} reload={reload} />
+      <Header summary={summary} record={record} status={status} reload={reload} interactiveHeader={interactive} />
       {error && <Alert tone="warning" title="Run status unavailable">{error}</Alert>}
       {pending && <ApprovalBanner approval={pending} />}
       {!terminal && (
@@ -209,10 +315,14 @@ export function TaskView({ summary }: { summary: ModelConversationSummary }) {
               })()}
             </p>
           )}
+          {record && <RecoveryNote run={record} />}
           {kind !== "code" && <Answer text={text} kind={kind} partial />}
         </section>
       )}
-      {terminal && kind === "code" && record && <OutcomeCard run={record} />}
+      {record && kind === "code" && <RunLinks run={record} />}
+      {terminal && interactive && kind === "code" && isReview(record) && record && <ReviewReport run={record} text={text} />}
+      {terminal && kind === "code" && record && !(interactive && isReview(record)) && <OutcomeCard run={record} />}
+      {terminal && kind === "code" && record && !(interactive && isReview(record)) && <RecoveryNote run={record} />}
       {terminal && status?.state === "uncertain" && (
         <Alert tone="warning" title="Submission outcome is uncertain">
           The request may have been processed and billed. Nexus never re-sends it automatically.
@@ -223,7 +333,7 @@ export function TaskView({ summary }: { summary: ModelConversationSummary }) {
           See the transcript under Details for the recorded explanation.
         </Alert>
       )}
-      {terminal && <Answer text={text} kind={kind} partial={false} />}
+      {terminal && !(interactive && kind === "code" && isReview(record)) && <Answer text={text} kind={kind} partial={false} interactive={interactive} />}
       {terminal && kind === "inspect" && record && (record.citationsVerified?.length ?? 0) + (record.citationsUnverified?.length ?? 0) > 0 && (
         <dl className="nv-kv">
           <dt>Supported references</dt>

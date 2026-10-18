@@ -20,6 +20,7 @@
     "allow-model-run-status",
     "allow-cancel-model-run",
     "allow-intent-models",
+    "allow-intent-result",
     "allow-intent-submit",
     "allow-intent-workspaces",
     "allow-intent-inspect-submit",
@@ -33,6 +34,18 @@
     "allow-intent-list",
     "allow-tool-events",
     "allow-list-approvals",
-    "allow-integrity-status"
+    "allow-integrity-status",
+    "allow-runtime-state",
+    "allow-runtime-start",
+    "allow-provider-connect",
+    "allow-provider-consent",
+    "allow-provider-revoke",
+    "allow-project-pick",
+    "allow-project-list",
+    "allow-project-refresh",
+    "allow-project-set-policy",
+    "allow-code-limits-set",
+    "allow-project-forget",
+    "allow-project-adopt"
   ]
 }

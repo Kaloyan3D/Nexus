@@ -4,11 +4,14 @@
 //! are mirrored 1:1 by `build.rs` and `capabilities/main.json`.
 
 mod backend;
-mod dto;
+pub mod dialogs;
+pub mod dto;
+pub mod interactive;
 
 use dto::*;
 use nexus_client::ClientConfig;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use tauri::ipc::Channel;
 
 struct AppState {
@@ -217,11 +220,13 @@ async fn intent_submit(
             response_mode: ResponseMode::Stream,
             client_label: Some("nexus-desktop".to_owned()),
         };
-        nexus_client::intent_client::submit(
-            &nexus_client::intent_client::default_broker_socket(),
-            &intent,
-        )
-        .map_err(|e| backend::ui_error(&e))
+        interactive::guarded(|| {
+            nexus_client::intent_client::submit(
+                &nexus_client::intent_client::default_broker_socket(),
+                &intent,
+            )
+            .map_err(|e| backend::ui_error(&e))
+        })
     })
     .await
     .map_err(|_| internal())?
@@ -268,11 +273,13 @@ async fn intent_inspect_submit(
             response_mode: ResponseMode::Stream,
             client_label: Some("nexus-desktop".to_owned()),
         };
-        nexus_client::intent_client::submit(
-            &nexus_client::intent_client::default_broker_socket(),
-            &intent,
-        )
-        .map_err(|e| backend::ui_error(&e))
+        interactive::guarded(|| {
+            nexus_client::intent_client::submit(
+                &nexus_client::intent_client::default_broker_socket(),
+                &intent,
+            )
+            .map_err(|e| backend::ui_error(&e))
+        })
     })
     .await
     .map_err(|_| internal())?
@@ -302,6 +309,7 @@ struct CodeLimitsView {
     #[serde(flatten)]
     limits: nexus_client::intent_client::DesktopCodeLimits,
     approval_lifetime_secs: u64,
+    built_in: Option<nexus_client::intent_client::DesktopCodeLimits>,
 }
 
 #[tauri::command]
@@ -313,6 +321,7 @@ async fn intent_code_limits() -> Result<CodeLimitsView, UiError> {
         .map(|c| CodeLimitsView {
             limits: c.limits,
             approval_lifetime_secs: c.approval_lifetime_secs,
+            built_in: c.built_in,
         })
         .map_err(|e| backend::ui_error(&e))
     })
@@ -341,15 +350,24 @@ async fn intent_code_submit(
             content: prompt,
             model: None,
             workspace_id: Some(source_id),
-            limits: nexus_client::intent_client::DESKTOP_CODE_LIMITS.to_intent_limits(),
+            // The limits are the broker's (fixed maximums lowered by the operator, or the
+            // interactive defaults); the renderer never states one.
+            limits: nexus_client::intent_client::code_config(
+                &nexus_client::intent_client::default_broker_socket(),
+            )
+            .map_err(|e| backend::ui_error(&e))?
+            .limits
+            .to_intent_limits(),
             response_mode: ResponseMode::Stream,
             client_label: Some("nexus-desktop".to_owned()),
         };
-        nexus_client::intent_client::submit(
-            &nexus_client::intent_client::default_broker_socket(),
-            &intent,
-        )
-        .map_err(|e| backend::ui_error(&e))
+        interactive::guarded(|| {
+            nexus_client::intent_client::submit(
+                &nexus_client::intent_client::default_broker_socket(),
+                &intent,
+            )
+            .map_err(|e| backend::ui_error(&e))
+        })
     })
     .await
     .map_err(|_| internal())?
@@ -370,6 +388,174 @@ async fn intent_copy(run_id: String) -> Result<nexus_client::intent_client::Copy
     .map_err(|_| internal())?
 }
 
+// ---- A6.1.4 interactive profile ------------------------------------------------
+
+#[tauri::command]
+async fn runtime_state(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+) -> Result<interactive::RuntimeState, UiError> {
+    let rt = rt.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || rt.state())
+        .await
+        .map_err(|_| internal())
+}
+
+#[tauri::command]
+async fn runtime_start(rt: tauri::State<'_, Arc<interactive::Runtime>>) -> Result<(), UiError> {
+    rt.inner().start_async();
+    Ok(())
+}
+
+fn ui_msg(code: &str, m: String) -> UiError {
+    UiError {
+        code: if m == "cancelled" {
+            "cancelled".to_owned()
+        } else {
+            code.to_owned()
+        },
+        message: m,
+    }
+}
+
+#[tauri::command]
+async fn provider_connect(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+) -> Result<nexus_runtime::ConnectReport, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || rt.provider_connect(d.as_ref()))
+        .await
+        .map_err(|_| internal())?
+        .map_err(|m| ui_msg("provider-connect", m))
+}
+
+#[tauri::command]
+async fn provider_consent(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+) -> Result<interactive::ConsentView, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || rt.provider_consent(d.as_ref()))
+        .await
+        .map_err(|_| internal())?
+        .map_err(|m| ui_msg("consent", m))
+}
+
+#[tauri::command]
+async fn provider_revoke(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+) -> Result<interactive::ConsentView, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || rt.provider_revoke(d.as_ref()))
+        .await
+        .map_err(|_| internal())?
+        .map_err(|m| ui_msg("consent", m))
+}
+
+/// Native folder picker, then the broker opens the folder as a project. No path
+/// parameter exists: the renderer cannot name a folder.
+#[tauri::command]
+async fn project_pick(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+) -> Result<serde_json::Value, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || rt.project_pick(d.as_ref()))
+        .await
+        .map_err(|_| internal())?
+        .map_err(|m| ui_msg("project", m))
+}
+
+#[tauri::command]
+async fn project_list(with_changes: Option<bool>) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::project_list(
+            &nexus_client::intent_client::default_broker_socket(),
+            with_changes.unwrap_or(false),
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// Settings: the user's own, lower run limits. Everything is optional; leaving a field out
+/// resets it to the built-in value. The broker clamps to 1..=built-in.
+#[tauri::command]
+async fn code_limits_set(
+    limits: serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::limits_set(
+            &nexus_client::intent_client::default_broker_socket(),
+            &limits,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+#[tauri::command]
+async fn project_set_policy(
+    project_id: String,
+    installs: Option<bool>,
+    trusted: Option<bool>,
+) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::project_policy(
+            &nexus_client::intent_client::default_broker_socket(),
+            &project_id,
+            installs,
+            trusted,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+#[tauri::command]
+async fn project_refresh(project_id: String) -> Result<serde_json::Value, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::project_refresh(
+            &nexus_client::intent_client::default_broker_socket(),
+            &project_id,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+#[tauri::command]
+async fn project_forget(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+    project_id: String,
+) -> Result<serde_json::Value, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || rt.project_forget(d.as_ref(), &project_id))
+        .await
+        .map_err(|_| internal())?
+        .map_err(|m| ui_msg("project", m))
+}
+
+/// Apply a finished run's patch to the user's own folder after a native confirmation.
+#[tauri::command]
+async fn project_adopt(
+    rt: tauri::State<'_, Arc<interactive::Runtime>>,
+    dialogs: tauri::State<'_, Arc<dyn dialogs::Dialogs>>,
+    run_id: String,
+) -> Result<serde_json::Value, UiError> {
+    let (rt, d) = (rt.inner().clone(), dialogs.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || rt.adopt_patch(d.as_ref(), &run_id))
+        .await
+        .map_err(|_| internal())?
+        .map_err(|m| ui_msg("adopt", m))
+}
+
 /// A5.6: the reviewable change set of one of this user's repo-code runs.
 /// Read-only; nothing here can apply, commit or push it.
 #[tauri::command]
@@ -379,6 +565,21 @@ async fn intent_diff(run_id: String) -> Result<nexus_client::intent_client::Diff
             &nexus_client::intent_client::default_broker_socket(),
             &run_id,
         )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// The final text of a finished run, as the broker recorded it (the report or summary).
+#[tauri::command]
+async fn intent_result(run_id: String) -> Result<String, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::result(
+            &nexus_client::intent_client::default_broker_socket(),
+            &run_id,
+        )
+        .map(|r| r.text)
         .map_err(|e| backend::ui_error(&e))
     })
     .await
@@ -506,8 +707,17 @@ fn internal() -> UiError {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // A6.1.4: unless an operator-run broker is named, this app owns the runtime. The
+    // runtime object sets the socket environment BEFORE the client config resolves.
+    let runtime = Arc::new(interactive::Runtime::new());
+    interactive::install(runtime.clone());
+    runtime.watch_for_updates();
+    runtime.start_async();
     let cfg = ClientConfig::resolve(None, None, false).expect("client configuration");
+    let rt_exit = runtime.clone();
     tauri::Builder::default()
+        .manage(runtime)
+        .manage::<Arc<dyn dialogs::Dialogs>>(Arc::new(dialogs::SystemDialogs))
         .manage(AppState {
             cfg,
             mock_running: AtomicBool::new(false),
@@ -537,14 +747,32 @@ pub fn run() {
             intent_diff,
             intent_copy,
             intent_status,
+            intent_result,
             intent_cancel,
             intent_list,
             tool_events,
             list_approvals,
-            integrity_status
+            integrity_status,
+            runtime_state,
+            runtime_start,
+            provider_connect,
+            provider_consent,
+            provider_revoke,
+            project_pick,
+            project_list,
+            project_refresh,
+            project_set_policy,
+            code_limits_set,
+            project_forget,
+            project_adopt
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Nexus");
+        .build(tauri::generate_context!())
+        .expect("error while building Nexus")
+        .run(move |_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                rt_exit.shutdown();
+            }
+        });
 }
 
 #[cfg(test)]
@@ -575,11 +803,24 @@ mod authz_tests {
         "intent_diff",
         "intent_copy",
         "intent_status",
+        "intent_result",
         "intent_cancel",
         "intent_list",
         "tool_events",
         "list_approvals",
         "integrity_status",
+        "runtime_state",
+        "runtime_start",
+        "provider_connect",
+        "provider_consent",
+        "provider_revoke",
+        "project_pick",
+        "project_list",
+        "project_refresh",
+        "project_set_policy",
+        "code_limits_set",
+        "project_forget",
+        "project_adopt",
     ];
 
     #[test]
@@ -854,10 +1095,12 @@ mod authz_tests {
         let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
         let f2 = frames.clone();
         std::thread::spawn(move || {
-            for stream in l.incoming().take(5) {
+            for stream in l.incoming().take(6) {
                 let mut s = stream.unwrap();
                 let mut line = String::new();
-                BufReader::new(s.try_clone().unwrap()).read_line(&mut line).unwrap();
+                BufReader::new(s.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
                 let v: serde_json::Value = serde_json::from_str(&line).unwrap();
                 let cmd = v["cmd"].as_str().unwrap_or("").to_owned();
                 let rid = v["id"].clone();
@@ -865,12 +1108,24 @@ mod authz_tests {
                 let run = serde_json::json!({"runId":"run_00000000000000000000000000000000","requestId":"r","clientId":"uid:1","state":"preparing","terminal":false,"intentType":"repo-code","responseMode":"stream","cancelRequested":false,"createdAtMs":1,"updatedAtMs":1,"workspaceId":"proj"});
                 let result = match cmd.as_str() {
                     "intent-submit" => serde_json::json!({"run": run, "replay": false}),
-                    "intent-diff" => serde_json::json!({"run": run, "baseCommit": "abc", "files": [{"path": "src/lib.rs", "status": "M", "additions": 1, "deletions": 1}], "filesTruncated": false, "diff": "--- a\n+++ b\n", "diffDigest": "d", "diffTruncated": false}),
-                    "intent-code-config" => serde_json::json!({"limits": {"maxTurns": 12, "maxToolCalls": 30, "maxToolResultBytes": 131072, "maxEdits": 5, "maxTests": 5, "maxOutputTokens": 1024, "maxRuntimeSecs": 1800}, "approvalLifetimeSecs": 300}),
-                    "intent-copy" => serde_json::json!({"retained": true, "active": false, "projectId": "proj", "baseCommit": "abc", "ageMs": 5, "approxBytes": 1024}),
+                    "intent-diff" => {
+                        serde_json::json!({"run": run, "baseCommit": "abc", "files": [{"path": "src/lib.rs", "status": "M", "additions": 1, "deletions": 1}], "filesTruncated": false, "diff": "--- a\n+++ b\n", "diffDigest": "d", "diffTruncated": false})
+                    }
+                    "intent-code-config" => {
+                        serde_json::json!({"limits": {"maxTurns": 12, "maxToolCalls": 30, "maxToolResultBytes": 131072, "maxEdits": 5, "maxTests": 5, "maxOutputTokens": 1024, "maxRuntimeSecs": 1800}, "approvalLifetimeSecs": 300})
+                    }
+                    "intent-copy" => {
+                        serde_json::json!({"retained": true, "active": false, "projectId": "proj", "baseCommit": "abc", "ageMs": 5, "approxBytes": 1024})
+                    }
                     _ => serde_json::json!({"sources": [{"sourceId": "proj"}]}),
                 };
-                let _ = s.write_all(format!("{}\n", serde_json::json!({"protocol":1,"id":rid,"ok":true,"result":result})).as_bytes());
+                let _ = s.write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::json!({"protocol":1,"id":rid,"ok":true,"result":result})
+                    )
+                    .as_bytes(),
+                );
             }
         });
         std::env::set_var("NEXUS_BROKER_SOCKET", &sock);
@@ -880,7 +1135,12 @@ mod authz_tests {
         let lim = tauri::async_runtime::block_on(super::intent_code_limits()).unwrap();
         assert_eq!(lim.limits.max_edits, 5);
         assert_eq!(lim.approval_lifetime_secs, 300);
-        let r = tauri::async_runtime::block_on(super::intent_code_submit("fix the test".into(), "proj".into(), "gui-0123456789abcdef".into())).unwrap();
+        let r = tauri::async_runtime::block_on(super::intent_code_submit(
+            "fix the test".into(),
+            "proj".into(),
+            "gui-0123456789abcdef".into(),
+        ))
+        .unwrap();
         assert!(!r.replay);
         let d = tauri::async_runtime::block_on(super::intent_diff(r.run.run_id.clone())).unwrap();
         assert_eq!(d.files[0].path, "src/lib.rs");
@@ -889,31 +1149,68 @@ mod authz_tests {
         let got = frames.lock().unwrap().clone();
         assert_eq!(got[0]["cmd"], "intent-code-sources");
         assert_eq!(got[1]["cmd"], "intent-code-config");
-        assert_eq!(got[2]["cmd"], "intent-submit");
-        assert_eq!(got[3]["cmd"], "intent-diff");
-        assert_eq!(got[4]["cmd"], "intent-copy");
-        assert_eq!(got[4]["params"].as_object().unwrap().len(), 1);
-        let i = got[2]["params"]["intent"].as_object().unwrap();
+        assert_eq!(
+            got[2]["cmd"], "intent-code-config",
+            "submit reads the broker's limits"
+        );
+        assert_eq!(got[3]["cmd"], "intent-submit");
+        assert_eq!(got[4]["cmd"], "intent-diff");
+        assert_eq!(got[5]["cmd"], "intent-copy");
+        assert_eq!(got[5]["params"].as_object().unwrap().len(), 1);
+        let i = got[3]["params"]["intent"].as_object().unwrap();
         let mut keys: Vec<&str> = i.keys().map(|k| k.as_str()).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["clientLabel", "content", "idempotencyKey", "intentType", "limits", "model", "requestId", "responseMode", "schemaVersion", "workspaceId"]);
+        assert_eq!(
+            keys,
+            [
+                "clientLabel",
+                "content",
+                "idempotencyKey",
+                "intentType",
+                "limits",
+                "model",
+                "requestId",
+                "responseMode",
+                "schemaVersion",
+                "workspaceId"
+            ]
+        );
         assert_eq!(i["intentType"], "repo-code");
         assert_eq!(i["workspaceId"], "proj");
         assert_eq!(
             i["limits"],
-            serde_json::to_value(nexus_client::intent_client::DESKTOP_CODE_LIMITS.to_intent_limits()).unwrap(),
-            "limits are the fixed, backend-defined Desktop set (not renderer-controlled)"
+            serde_json::to_value(
+                nexus_client::intent_client::DESKTOP_CODE_LIMITS.to_intent_limits()
+            )
+            .unwrap(),
+            "limits are the broker's reported set (not renderer-controlled)"
         );
         assert_eq!(i["limits"]["maxEdits"], 5);
         assert_eq!(i["limits"]["maxTests"], 5);
         let src = include_str!("lib.rs");
         let (prod, _) = src.split_once("#[cfg(test)]").unwrap();
         for forbidden in [
-            "approval-decide", "approval-get", "approval-request", "approval-revoke", "approval_decide", "approvalDecide",
-            "fs_write", "fs_edit", "proc_run", "fs.write", "fs.edit", "proc.run", "worktree", "git ", "Command::new",
+            "approval-decide",
+            "approval-get",
+            "approval-request",
+            "approval-revoke",
+            "approval_decide",
+            "approvalDecide",
+            "fs_write",
+            "fs_edit",
+            "proc_run",
+            "fs.write",
+            "fs.edit",
+            "proc.run",
+            "worktree",
+            "git ",
+            "Command::new",
             "std::process",
         ] {
-            assert!(!prod.contains(forbidden), "Tauri backend must not reference {forbidden}");
+            assert!(
+                !prod.contains(forbidden),
+                "Tauri backend must not reference {forbidden}"
+            );
         }
         assert!(prod.contains("fn intent_code_submit(\n    prompt: String,\n    source_id: String,\n    idempotency_key: String,\n)"));
     }

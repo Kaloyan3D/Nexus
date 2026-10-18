@@ -4,6 +4,7 @@ import { useNexus } from "../../state/NexusContext";
 import { Loading } from "../../components/ui/primitives";
 import { RunList } from "../history/RunList";
 import { TaskView } from "../task/TaskView";
+import { SetupCard } from "../setup/SetupCard";
 import { UnifiedComposer } from "./UnifiedComposer";
 
 /** Idle shows 5 recent runs, 3 on short windows. */
@@ -18,8 +19,18 @@ function useRecentLimit(): number {
 }
 
 function IdleView() {
-  const { setPage } = useNexus();
+  const { setPage, runtimeState } = useNexus();
   const limit = useRecentLimit();
+  const needsSetup =
+    runtimeState?.mode === "interactive" &&
+    !(runtimeState.phase === "ready" && runtimeState.providerConnected && runtimeState.consent.given);
+  if (needsSetup) {
+    return (
+      <div className="nv-page nv-narrow nv-idle">
+        <SetupCard />
+      </div>
+    );
+  }
   return (
     <div className="nv-page nv-narrow nv-idle">
       <h1 className="nv-hero">What should Nexus work on?</h1>

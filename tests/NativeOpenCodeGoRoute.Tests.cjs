@@ -71,7 +71,7 @@ function stub(calls, overrides) {
     }
     const body = JSON.parse(calls[1].body);
     assert.deepEqual(Object.keys(body).sort(), ['input', 'max_output_tokens', 'model', 'reasoning']);
-    assert.equal(body.model, 'muse-spark-1.3-contributor'); assert.equal(body.max_output_tokens, 1024);
+    assert.equal(body.model, 'muse-spark-1.3-contributor'); assert.equal(body.max_output_tokens, 4096);
     assert.equal(JSON.parse(calls[2].body).stream, true);
     assert.ok(!('tools' in body));
   });
