@@ -27,6 +27,7 @@
     "allow-intent-code-limits",
     "allow-intent-code-submit",
     "allow-intent-diff",
+    "allow-intent-copy",
     "allow-intent-status",
     "allow-intent-cancel",
     "allow-intent-list",

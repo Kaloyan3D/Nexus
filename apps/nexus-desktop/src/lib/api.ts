@@ -8,6 +8,7 @@ import type {
   AllowedModel,
   AllowedWorkspace,
   AllowedCodeSource,
+  CopyInfo,
   DesktopCodeLimits,
   DiffReply,
   IntentCancelReply,
@@ -68,6 +69,7 @@ export interface NativeApi {
   ): Promise<IntentSubmitReply>;
   /** A5.6: read-only change set of this user's repo-code run. */
   intentDiff(runId: string): Promise<DiffReply>;
+  intentCopy(runId: string): Promise<CopyInfo>;
   intentStatus(runId: string): Promise<IntentRun>;
   intentCancel(runId: string): Promise<IntentCancelReply>;
   intentList(): Promise<IntentRun[]>;
@@ -134,6 +136,7 @@ export const tauriApi: NativeApi = {
   intentCodeSubmit: (prompt, sourceId, idempotencyKey) =>
     invoke<IntentSubmitReply>("intent_code_submit", { prompt, sourceId, idempotencyKey }),
   intentDiff: (runId) => invoke<DiffReply>("intent_diff", { runId }),
+  intentCopy: (runId) => invoke<CopyInfo>("intent_copy", { runId }),
   intentStatus: (runId) => invoke<IntentRun>("intent_status", { runId }),
   intentCancel: (runId) => invoke<IntentCancelReply>("intent_cancel", { runId }),
   intentList: () => invoke<IntentRun[]>("intent_list"),
@@ -195,6 +198,7 @@ export const unavailableApi: NativeApi = {
   intentCodeLimits: () => Promise.reject(notInShell),
   intentCodeSubmit: () => Promise.reject(notInShell),
   intentDiff: () => Promise.reject(notInShell),
+  intentCopy: () => Promise.reject(notInShell),
   intentStatus: () => Promise.reject(notInShell),
   intentCancel: () => Promise.reject(notInShell),
   intentList: () => Promise.resolve([]),

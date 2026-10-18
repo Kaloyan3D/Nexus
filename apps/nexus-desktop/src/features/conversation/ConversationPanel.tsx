@@ -26,6 +26,7 @@ import { absoluteTime } from "../../lib/format";
 import { MarkdownLite } from "../../lib/markdown";
 import { stickToBottom } from "../../lib/useViewport";
 import { useNexus } from "../../state/NexusContext";
+import { normalizeEventText, runKind } from "../../lib/runKind";
 import { Alert, Badge, Button, EmptyState, Loading } from "../../components/ui/primitives";
 import type { ConversationState } from "./useConversation";
 
@@ -176,6 +177,8 @@ function Meta({ e }: { e: TranscriptEvent }) {
 
 function EventRow({ e }: { e: TranscriptEvent }) {
   const [open, setOpen] = useState(false);
+  const { runByConversation } = useNexus();
+  const kind = runKind(runByConversation.get(e.taskInstanceId));
   const text = e.text ?? "";
   if (e.kind === "model-handoff") {
     return (
@@ -186,9 +189,12 @@ function EventRow({ e }: { e: TranscriptEvent }) {
     );
   }
   if (e.kind === "status") {
+    // Old transcripts call every tool proposal "read-only"; for a coding run show the accurate wording
+    // (display only: the stored record is untouched and the original is in the tooltip).
+    const shown = normalizeEventText(text, kind);
     return (
       <div className="nv-status-line">
-        <Layers size={12} aria-hidden="true" /> <span>{text}</span> <Flags e={e} />
+        <Layers size={12} aria-hidden="true" /> <span title={shown !== text ? `Recorded as: ${text}` : undefined}>{shown}</span> <Flags e={e} />
         <Meta e={e} />
       </div>
     );

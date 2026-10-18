@@ -6,7 +6,8 @@ import { NexusProvider } from "../state/NexusContext";
 import { fakeApi, snapshot } from "./fakeApi";
 import type { NativeApi } from "../lib/api";
 
-function mount(api: NativeApi) {
+function mount(api: NativeApi, hash = "#") {
+  window.history.replaceState(null, "", hash);
   return render(
     <NexusProvider api={api}>
       <App />
@@ -15,28 +16,39 @@ function mount(api: NativeApi) {
 }
 
 describe("Nexus shell", () => {
-  it("renders all navigation destinations and the spec placeholder", async () => {
+  it("renders the six primary destinations, a collapsed Advanced group and one composer", async () => {
+    const user = userEvent.setup();
     mount(fakeApi());
     const nav = screen.getByRole("navigation", { name: "Primary" });
-    for (const n of ["Workspace", "Tasks", "Control Room", "Models", "Sentry", "Sessions", "Settings"]) {
+    for (const n of ["Workspace", "Projects", "History", "Models", "Sentry", "Settings"]) {
       expect(within(nav).getByRole("button", { name: new RegExp(n) })).toBeInTheDocument();
     }
-    expect(
-      screen.getByPlaceholderText("Describe the next step, ask Nova, or give an engineering task..."),
-    ).toBeInTheDocument();
-    await screen.findByText("Native runtime connected");
+    // developer destinations are NOT primary; they live in a collapsed Advanced group and nothing is lost
+    for (const n of ["Control Room", "Controller ledger", "Mock runs"]) expect(within(nav).queryByRole("button", { name: new RegExp(n) })).toBeNull();
+    const adv = within(nav).getByRole("button", { name: "Advanced" });
+    expect(adv).toHaveAttribute("aria-expanded", "false");
+    await user.click(adv);
+    for (const n of ["Control Room", "Controller ledger", "Mock runs"]) expect(within(nav).getByRole("button", { name: new RegExp(n) })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Describe the task…")).toBeInTheDocument();
+    expect(await screen.findByText(/Runtime ready/)).toBeInTheDocument();
   });
 
-  it("never offers a live-ready primary action", async () => {
+  it("the idle Workspace has one primary action, no inert chips, no mock controls and no empty inspector", async () => {
     mount(fakeApi());
-    expect(screen.getByRole("button", { name: "Run Mock" })).toBeDisabled(); // empty prompt
-    expect(screen.getAllByText(/Live execution unavailable/).length).toBeGreaterThan(0);
+    const ask = await screen.findByRole("button", { name: "Ask" });
+    expect(ask).toBeDisabled(); // empty prompt
+    for (const inert of ["Code", "File", "Web", "Deep Research", "Run Mock", "Attach (unavailable)"]) {
+      expect(screen.queryByRole("button", { name: inert })).toBeNull();
+    }
     expect(screen.queryByRole("button", { name: /^Run Task$/ })).toBeNull();
+    expect(screen.queryByRole("complementary", { name: "Task inspector" })).toBeNull();
+    expect(screen.queryByRole("complementary", { name: "Evidence panel" })).toBeNull();
+    expect(screen.queryByText(/Mock only/)).toBeNull();
   });
 
   it("shows ledger tasks and selects one into the inspector", async () => {
     const user = userEvent.setup();
-    mount(fakeApi());
+    mount(fakeApi(), "#/advanced/mock");
     const row = await screen.findByRole("button", { name: /Fix the bug/ });
     await user.click(row);
     const insp = screen.getByRole("complementary", { name: "Task inspector" });
@@ -51,6 +63,7 @@ describe("Nexus shell", () => {
       fakeApi({
         listTasks: async () => ({ available: false, source: null, error: "ledger unreadable", tasks: [] }),
       }),
+      "#/advanced/mock",
     );
     expect(await screen.findAllByText(/Task ledger unavailable/)).not.toHaveLength(0);
     expect(screen.queryByText("TASK-0001")).toBeNull();
@@ -59,7 +72,7 @@ describe("Nexus shell", () => {
   it("runs a mock workflow end to end and labels it MOCK", async () => {
     const user = userEvent.setup();
     const runMock = vi.fn(fakeApi().runMock);
-    mount(fakeApi({ runMock }));
+    mount(fakeApi({ runMock }), "#/advanced/mock");
     await user.type(screen.getByLabelText("Task prompt"), "Привет, Nova");
     await user.click(screen.getByRole("button", { name: "Run Mock" }));
     await waitFor(() => expect(runMock).toHaveBeenCalledWith("Привет, Nova", expect.any(Function)));
@@ -74,6 +87,7 @@ describe("Nexus shell", () => {
     const user = userEvent.setup();
     mount(
       fakeApi({ runMock: async () => Promise.reject({ code: "internal", message: "mock kernel unavailable" }) }),
+      "#/advanced/mock",
     );
     await user.type(screen.getByLabelText("Task prompt"), "go");
     await user.click(screen.getByRole("button", { name: "Run Mock" }));
@@ -83,7 +97,7 @@ describe("Nexus shell", () => {
 
   it("disables unavailable activity tabs with truthful copy", async () => {
     const user = userEvent.setup();
-    mount(fakeApi());
+    mount(fakeApi(), "#/advanced/mock");
     await user.click(await screen.findByRole("button", { name: /Fix the bug/ }));
     await user.click(screen.getByRole("tab", { name: "Terminal" }));
     expect(screen.getByText(/Terminal unavailable/)).toBeInTheDocument();
@@ -96,8 +110,13 @@ describe("Nexus shell", () => {
           snapshot({ connection: "disconnected", detail: "socket missing", state: null }),
       }),
     );
-    expect(await screen.findByText("Runtime disconnected")).toBeInTheDocument();
-    expect(screen.getByText("Daemon offline")).toBeInTheDocument();
+    // one runtime pill; the reasons are in its popover (and nothing says "connected" when it is not)
+    const pill = await screen.findByRole("button", { name: /Runtime/ });
+    const user = userEvent.setup();
+    await user.click(pill);
+    const pop = await screen.findByRole("dialog", { name: "Runtime status" });
+    expect(within(pop).getByText("Runtime disconnected")).toBeInTheDocument();
+    expect(within(pop).queryByText("Native runtime connected")).toBeNull();
   });
 
   it("opens the command palette with Ctrl+K and closes with Escape", async () => {
@@ -105,7 +124,7 @@ describe("Nexus shell", () => {
     mount(fakeApi());
     await user.keyboard("{Control>}k{/Control}");
     const dialog = await screen.findByRole("dialog", { name: "Command palette" });
-    expect(within(dialog).getByRole("option", { name: /Control Room/ })).toBeInTheDocument();
+    expect(within(dialog).getByRole("option", { name: /Advanced: Control Room/ })).toBeInTheDocument();
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Command palette" })).toBeNull());
   });
@@ -113,7 +132,7 @@ describe("Nexus shell", () => {
   it("palette finds real tasks only", async () => {
     const user = userEvent.setup();
     mount(fakeApi());
-    await screen.findByText("Native runtime connected");
+    await screen.findByText(/Runtime ready/);
     await user.keyboard("{Control>}k{/Control}");
     await user.keyboard("registry");
     const dialog = await screen.findByRole("dialog", { name: "Command palette" });

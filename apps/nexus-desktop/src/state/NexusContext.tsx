@@ -27,6 +27,7 @@ import type {
   UiError,
 } from "../lib/contracts";
 import { mockReducer, type MockRun } from "./mockRuns";
+import { formatHash, parseHash } from "../lib/route";
 
 export type Selection =
   | { kind: "task"; id: string }
@@ -36,12 +37,18 @@ export type Selection =
 
 export type Page =
   | "workspace"
-  | "tasks"
-  | "control-room"
+  | "projects"
+  | "history"
   | "models"
   | "sentry"
-  | "sessions"
-  | "settings";
+  | "settings"
+  // Advanced / diagnostics (A6.1.2): kept, just not primary
+  | "tasks"
+  | "control-room"
+  | "mock";
+
+/** The on-demand side panel (A6.1.2): evidence about the selected run, opened by the user. */
+export type PanelKind = "diff" | "test" | "evidence" | "source";
 
 interface Loadable<T> {
   data: T | null;
@@ -62,9 +69,15 @@ export interface NexusState {
   page: Page;
   setPage: (p: Page) => void;
   select: (s: Selection) => void;
+  /** The side panel (null = closed). Never open by default. */
+  panel: PanelKind | null;
+  openPanel: (k: PanelKind) => void;
+  closePanel: () => void;
   selectedTask: TaskRecord | null;
   selectedMock: MockRun | null;
   modelRuns: ModelConversationSummary[];
+  /** A6.1.1: the broker's record of each run, by conversation id (kind, lifecycle, verified outcome). */
+  runByConversation: Map<string, IntentRun>;
   selectedModel: ModelConversationSummary | null;
   refreshModelRuns: () => void;
   refreshRuntime: () => void;
@@ -210,12 +223,23 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
   // A5.1 model-only runs are recorded by the backend executor; the renderer
   // only lists and follows them. Poll fast while one is in flight.
   const [modelRuns, setModelRuns] = useState<ModelConversationSummary[]>([]);
+  const [intentRuns, setIntentRuns] = useState<IntentRun[]>([]);
   const refreshModelRuns = useCallback(() => {
     nativeApi
       .listModelConversations()
       .then((list) => setModelRuns(list))
       .catch(() => {});
+    // The transcript list does not say what KIND of run it was; the broker's record does.
+    nativeApi
+      .intentList()
+      .then((runs) => setIntentRuns(runs))
+      .catch(() => {});
   }, [nativeApi]);
+  const runByConversation = useMemo(() => {
+    const m = new Map<string, IntentRun>();
+    for (const r of intentRuns) if (r.conversationId) m.set(r.conversationId, r);
+    return m;
+  }, [intentRuns]);
   const anyActive = modelRuns.some((m) => !m.terminal);
   useEffect(() => {
     refreshModelRuns();
@@ -272,8 +296,38 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
   const [intentSubmitting, setIntentSubmitting] = useState(false);
   const [intentError, setIntentError] = useState<UiError | null>(null);
   const [mockBusy, setMockBusy] = useState(false);
-  const [selection, select] = useState<Selection>(null);
-  const [page, setPage] = useState<Page>("workspace");
+  const initialRoute = useMemo(() => parseHash(window.location.hash), []);
+  const [selection, setSelection] = useState<Selection>(initialRoute.selection);
+  const [page, setPageState] = useState<Page>(initialRoute.page);
+  const [panel, setPanel] = useState<PanelKind | null>(null);
+  const openPanel = useCallback((k: PanelKind) => setPanel(k), []);
+  const closePanel = useCallback(() => setPanel(null), []);
+  // Selecting a run opens it in the Workspace; selecting anything closes the panel.
+  const select = useCallback((s: Selection) => {
+    setSelection(s);
+    setPanel(null);
+    if (s?.kind === "model") setPageState("workspace");
+    if (s?.kind === "task" || s?.kind === "mock") setPageState((p) => (p === "tasks" || p === "mock" ? p : "mock"));
+  }, []);
+  const setPage = useCallback((p: Page) => {
+    setPageState(p);
+    setPanel(null);
+    if (p !== "workspace") setSelection((cur) => (cur?.kind === "model" ? null : cur));
+  }, []);
+  // The URL hash follows the state and the state follows the hash (back/forward, deep links, restarts).
+  useEffect(() => {
+    const want = formatHash(page, selection);
+    if (window.location.hash !== want) window.history.replaceState(null, "", want);
+  }, [page, selection]);
+  useEffect(() => {
+    const onHash = () => {
+      const r = parseHash(window.location.hash);
+      setPageState(r.page);
+      setSelection((cur) => (r.selection ?? (cur?.kind === "model" ? null : cur)));
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
   const counter = useRef(0);
 
   const startMock = useCallback(
@@ -310,7 +364,7 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
         setMockBusy(false);
       }
     },
-    [nativeApi],
+    [nativeApi, select],
   );
 
   const followSubmitted = useCallback(
@@ -336,7 +390,7 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
         setIntentPending(null);
       }
     },
-    [nativeApi, refreshModelRuns],
+    [nativeApi, refreshModelRuns, select],
   );
 
   const sendIntent = useCallback(
@@ -440,9 +494,13 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     page,
     setPage,
     select,
+    panel,
+    openPanel,
+    closePanel,
     selectedTask,
     selectedMock,
     modelRuns,
+    runByConversation,
     selectedModel,
     refreshModelRuns,
     refreshRuntime,

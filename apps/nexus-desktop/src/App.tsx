@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useState, type ReactElement } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 import { CommandPalette } from "./components/shell/CommandPalette";
-import { Inspector } from "./components/shell/Inspector";
+import { SidePanel } from "./components/shell/SidePanel";
 import { Sidebar } from "./components/shell/Sidebar";
 import { TopBar } from "./components/shell/TopBar";
 import { ControlRoomPage } from "./features/control-room/ControlRoomPage";
 import { ModelsPage } from "./features/models/ModelsPage";
 import { SentryPage } from "./features/sentry/SentryPage";
-import { SessionsPage } from "./features/sessions/SessionsPage";
+import { HistoryPage } from "./features/history/HistoryPage";
+import { MockPage } from "./features/mock/MockPage";
+import { ProjectsPage } from "./features/projects/ProjectsPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { TasksPage } from "./features/tasks/TasksPage";
 import { WorkspacePage } from "./features/workspace/WorkspacePage";
@@ -19,20 +21,20 @@ const PAGES: Record<Page, () => ReactElement> = {
   "control-room": ControlRoomPage,
   models: ModelsPage,
   sentry: SentryPage,
-  sessions: SessionsPage,
+  projects: ProjectsPage,
+  history: HistoryPage,
   settings: SettingsPage,
+  mock: MockPage,
 };
 
 export function App() {
-  const { page } = useNexus();
+  const { page, panel } = useNexus();
   const layout = useLayout();
   const compact = layout === "compact";
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
-  const [overlayInspector, setOverlayInspector] = useState(false);
 
-  // Cmd/Ctrl+K opens the palette; Escape closes overlays (palette handles its own).
+  // Cmd/Ctrl+K opens the palette; Escape closes overlays (palette and panel handle their own).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -40,39 +42,23 @@ export function App() {
         setPaletteOpen((o) => !o);
       } else if (e.key === "Escape") {
         setNavOpen(false);
-        setOverlayInspector(false);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const toggleInspector = useCallback(() => {
-    if (compact) setOverlayInspector((o) => !o);
-    else setInspectorOpen((o) => !o);
-  }, [compact]);
-
   const Page = PAGES[page];
-  const showInline = !compact && (layout === "wide" || inspectorOpen);
-
+  // The evidence panel docks only on wide windows; below that it is an overlay so it never steals width from the task.
+  const docked = layout === "wide" && panel !== null;
   return (
-    <div
-      className="nv-app"
-      data-layout={layout}
-      data-inspector={showInline ? "open" : "closed"}
-    >
+    <div className="nv-app" data-layout={layout} data-panel={docked ? "open" : "closed"}>
       {!compact && <Sidebar />}
-      <TopBar
-        compact={compact}
-        onOpenNav={() => setNavOpen(true)}
-        onToggleInspector={toggleInspector}
-        inspectorOpen={compact ? overlayInspector : showInline}
-        onOpenPalette={() => setPaletteOpen(true)}
-      />
+      <TopBar compact={compact} onOpenNav={() => setNavOpen(true)} onOpenPalette={() => setPaletteOpen(true)} />
       <main className="nv-main">
         <Page />
       </main>
-      {showInline && <Inspector overlay={false} />}
+      {docked && <SidePanel overlay={false} />}
       {compact && navOpen && (
         <>
           <div className="nv-overlay" onMouseDown={() => setNavOpen(false)} aria-hidden="true" />
@@ -81,10 +67,10 @@ export function App() {
           </div>
         </>
       )}
-      {compact && overlayInspector && (
+      {!docked && panel !== null && (
         <>
-          <div className="nv-overlay" onMouseDown={() => setOverlayInspector(false)} aria-hidden="true" />
-          <Inspector overlay onClose={() => setOverlayInspector(false)} />
+          <div className="nv-overlay" onMouseDown={() => undefined} aria-hidden="true" />
+          <SidePanel overlay />
         </>
       )}
       {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}

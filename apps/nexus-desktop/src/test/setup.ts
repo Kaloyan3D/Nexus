@@ -6,7 +6,11 @@ import { cleanup, configure } from "@testing-library/react";
 // parallel build); the assertions themselves are unchanged.
 configure({ asyncUtilTimeout: 5000 });
 
-afterEach(() => cleanup());
+// The route lives in the URL hash, which persists across tests in one file: start every test at the root.
+afterEach(() => {
+  cleanup();
+  window.history.replaceState(null, "", "#");
+});
 
 if (!window.matchMedia) {
   window.matchMedia = (query: string) =>

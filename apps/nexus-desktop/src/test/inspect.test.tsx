@@ -61,20 +61,20 @@ describe("Desktop repo-inspect (A5.5)", () => {
   it("offers Inspect only with an operator-approved workspace, and discloses what is sent", async () => {
     const user = userEvent.setup();
     mount(fakeApi({ intentWorkspaces: async () => [] }));
-    const none = await screen.findByRole("button", { name: "Inspect repo" });
+    const none = await screen.findByRole("radio", { name: "Inspect" });
     await waitFor(() => expect(none).toBeDisabled());
-    expect(none).toHaveAttribute("title", expect.stringMatching(/No read-only workspace has been approved/));
-    expect(screen.queryByText(/Repository contents may be sent/)).not.toBeInTheDocument();
+    expect(none).toHaveAttribute("title", expect.stringMatching(/No project has been authorized for inspection/));
+    expect(screen.queryByText(/text it reads is sent to/i)).not.toBeInTheDocument();
 
     const api = fakeApi({ intentWorkspaces: async () => [{ workspaceId: "demo" }] });
     cleanup();
     mount(api);
-    const btn = await screen.findByRole("button", { name: "Inspect repo" });
+    const btn = await screen.findByRole("radio", { name: "Inspect" });
     await waitFor(() => expect(btn).toBeEnabled());
     await user.click(btn);
-    expect(await screen.findByText("Repository contents may be sent to the model provider")).toBeInTheDocument();
+    expect(await screen.findByText(/text it reads is sent to/i)).toBeInTheDocument();
     expect(screen.getByText(/Nothing is written or executed/)).toBeInTheDocument();
-    expect(screen.getByLabelText("Workspace")).toBeInTheDocument();
+    expect(screen.getByLabelText("Project")).toBeInTheDocument();
   });
 
   it("submits a workspace IDENTITY with the text: no path, model, tool or limit from the renderer", async () => {
@@ -91,10 +91,10 @@ describe("Desktop repo-inspect (A5.5)", () => {
     const user = userEvent.setup();
     mount(api);
     await user.type(await screen.findByLabelText("Task prompt"), "explain auth");
-    const mode = await screen.findByRole("button", { name: "Inspect repo" });
+    const mode = await screen.findByRole("radio", { name: "Inspect" });
     await waitFor(() => expect(mode).toBeEnabled());
     await user.click(mode);
-    const send = await screen.findByRole("button", { name: "Inspect repository" });
+    const send = await screen.findByRole("button", { name: "Inspect" });
     await waitFor(() => expect(send).toBeEnabled());
     await user.click(send);
     await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
@@ -146,7 +146,8 @@ describe("Desktop repo-inspect (A5.5)", () => {
     const user = userEvent.setup();
     mount(api);
     await user.click(await screen.findByRole("button", { name: /Explain the auth flow/ }));
-    await user.click(await screen.findByRole("tab", { name: "Activity" }));
+    await user.click(await screen.findByRole("button", { name: "Details" }));
+    await user.click(await screen.findByRole("tab", { name: "Tool calls" }));
     const section = await screen.findByRole("region", { name: "Repository inspection" });
     expect(within(section).getByText("Read-only inspection")).toBeInTheDocument();
     expect(within(section).getByText("Workspace demo")).toBeInTheDocument();

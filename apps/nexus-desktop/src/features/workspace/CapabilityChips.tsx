@@ -1,3 +1,6 @@
+// Preserved for future integration (A6.1.2): the four capability chips and the legacy composer
+// body. They are NOT rendered: the unified composer hides every control that does not work
+// today. Re-introduce a chip only when its capability exists behind the broker.
 import { ArrowUp, Ban, Code2, FileText, Globe, Loader2, Paperclip, Search, Send, Sparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useNexus } from "../../state/NexusContext";

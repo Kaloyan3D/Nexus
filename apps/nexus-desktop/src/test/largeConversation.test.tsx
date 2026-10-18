@@ -11,6 +11,7 @@ const A = "task_0123456789abcdef0123456789abcdef";
 const B = "task_ffffffffffffffffffffffffffffffff";
 
 function mount(api: NativeApi) {
+  window.history.replaceState(null, "", "#/advanced/mock");
   return render(
     <NexusProvider api={api}>
       <App />

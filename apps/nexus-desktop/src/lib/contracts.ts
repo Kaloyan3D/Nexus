@@ -403,6 +403,8 @@ export interface IntentRun {
   citationsVerified?: string[];
   citationsUnverified?: string[];
   // ---- A5.6 repo-code progress (absent for other run types) ----
+  /** A6.1.1: verified outcome of a coding run (absent for other run types and for older brokers). */
+  codingOutcome?: CodingOutcome | null;
   editsUsed?: number;
   maxEdits?: number;
   testsUsed?: number;
@@ -415,6 +417,25 @@ export interface IntentRun {
   worktreeCommit?: string | null;
   changedFiles?: ChangedFile[];
   diffDigest?: string | null;
+}
+
+/**
+ * What the RUNTIME verified about a coding run (A6.1.1), derived by the broker from
+ * execution receipts only - never from model text and never from the lifecycle state.
+ */
+export interface CodingOutcome {
+  /** verified-passed | verified-failed | blocked-by-approval | no-test-executed | not-yet-verified | uncertain */
+  verification: string;
+  /** none-proposed | pending-approval | applied | partially-applied | not-applied | uncertain */
+  change: string;
+  editsApplied: number;
+  editsNotApplied: number;
+  testsExecuted: number;
+  testsNotExecuted: number;
+  blockedByApproval: number;
+  lastExitCode: number | null;
+  staleAfterEdit: boolean;
+  uncertainOperations: number;
 }
 
 /** An operation waiting for an independent approval (A5.6). Desktop only shows it. */
@@ -444,6 +465,18 @@ export interface DesktopCodeLimits {
   maxTests: number;
   maxOutputTokens: number;
   maxRuntimeSecs: number;
+  /** How long an approval stays decidable (broker-defined; operators can only shorten it). */
+  approvalLifetimeSecs?: number;
+}
+
+/** Read-only facts about a run's retained isolated working copy (never a path). */
+export interface CopyInfo {
+  retained: boolean;
+  active: boolean;
+  projectId?: string | null;
+  baseCommit?: string | null;
+  ageMs?: number | null;
+  approxBytes?: number | null;
 }
 
 export interface ChangedFile {
@@ -456,6 +489,10 @@ export interface ChangedFile {
 /** A source repository the operator lets this user have modified (identity only). */
 export interface AllowedCodeSource {
   sourceId: string;
+  /** The exact commit the operator pinned this project to (read-only display). */
+  pinnedCommit?: string | null;
+  /** Files or `dir/` prefixes the model may propose writes to; empty/absent = the whole project. */
+  writeAllow?: string[];
 }
 
 /** The reviewable result of a repo-code run, from the isolated working copy. */

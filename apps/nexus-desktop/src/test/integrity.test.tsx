@@ -14,6 +14,7 @@ async function open(view: IntegrityView | Error) {
     },
   });
   const user = userEvent.setup();
+  window.history.replaceState(null, "", "#/advanced/control-room");
   render(
     <NexusProvider api={api}>
       <App />

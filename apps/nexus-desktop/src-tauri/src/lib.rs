@@ -293,11 +293,31 @@ async fn intent_code_sources(
     .map_err(|_| internal())?
 }
 
-/// A6.1: the fixed run limits a Desktop coding task uses (shown to the user
-/// before submitting; not renderer-controlled).
+/// The limits a Desktop coding task will really get plus the approval lifetime
+/// (A6.1.3): the fixed maximums lowered by the operator's caps, read from the
+/// broker. Shown before submitting; never renderer-controlled.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodeLimitsView {
+    #[serde(flatten)]
+    limits: nexus_client::intent_client::DesktopCodeLimits,
+    approval_lifetime_secs: u64,
+}
+
 #[tauri::command]
-fn intent_code_limits() -> nexus_client::intent_client::DesktopCodeLimits {
-    nexus_client::intent_client::DESKTOP_CODE_LIMITS
+async fn intent_code_limits() -> Result<CodeLimitsView, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::code_config(
+            &nexus_client::intent_client::default_broker_socket(),
+        )
+        .map(|c| CodeLimitsView {
+            limits: c.limits,
+            approval_lifetime_secs: c.approval_lifetime_secs,
+        })
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
 }
 
 /// A5.6: submit one user-typed `repo-code` task. The renderer supplies text,
@@ -328,6 +348,21 @@ async fn intent_code_submit(
         nexus_client::intent_client::submit(
             &nexus_client::intent_client::default_broker_socket(),
             &intent,
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// A6.1.3: read-only facts (retained?, age, size, base commit) about the
+/// isolated working copy of one of this user's repo-code runs. Never a path.
+#[tauri::command]
+async fn intent_copy(run_id: String) -> Result<nexus_client::intent_client::CopyInfo, UiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        nexus_client::intent_client::copy_info(
+            &nexus_client::intent_client::default_broker_socket(),
+            &run_id,
         )
         .map_err(|e| backend::ui_error(&e))
     })
@@ -500,6 +535,7 @@ pub fn run() {
             intent_code_limits,
             intent_code_submit,
             intent_diff,
+            intent_copy,
             intent_status,
             intent_cancel,
             intent_list,
@@ -537,6 +573,7 @@ mod authz_tests {
         "intent_code_limits",
         "intent_code_submit",
         "intent_diff",
+        "intent_copy",
         "intent_status",
         "intent_cancel",
         "intent_list",
@@ -817,7 +854,7 @@ mod authz_tests {
         let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
         let f2 = frames.clone();
         std::thread::spawn(move || {
-            for stream in l.incoming().take(3) {
+            for stream in l.incoming().take(5) {
                 let mut s = stream.unwrap();
                 let mut line = String::new();
                 BufReader::new(s.try_clone().unwrap()).read_line(&mut line).unwrap();
@@ -829,6 +866,8 @@ mod authz_tests {
                 let result = match cmd.as_str() {
                     "intent-submit" => serde_json::json!({"run": run, "replay": false}),
                     "intent-diff" => serde_json::json!({"run": run, "baseCommit": "abc", "files": [{"path": "src/lib.rs", "status": "M", "additions": 1, "deletions": 1}], "filesTruncated": false, "diff": "--- a\n+++ b\n", "diffDigest": "d", "diffTruncated": false}),
+                    "intent-code-config" => serde_json::json!({"limits": {"maxTurns": 12, "maxToolCalls": 30, "maxToolResultBytes": 131072, "maxEdits": 5, "maxTests": 5, "maxOutputTokens": 1024, "maxRuntimeSecs": 1800}, "approvalLifetimeSecs": 300}),
+                    "intent-copy" => serde_json::json!({"retained": true, "active": false, "projectId": "proj", "baseCommit": "abc", "ageMs": 5, "approxBytes": 1024}),
                     _ => serde_json::json!({"sources": [{"sourceId": "proj"}]}),
                 };
                 let _ = s.write_all(format!("{}\n", serde_json::json!({"protocol":1,"id":rid,"ok":true,"result":result})).as_bytes());
@@ -838,16 +877,23 @@ mod authz_tests {
         let src = tauri::async_runtime::block_on(super::intent_code_sources()).unwrap();
         assert_eq!(src[0].source_id, "proj");
         // the limits shown to the user are the backend constants (no broker round trip)
-        assert_eq!(super::intent_code_limits(), nexus_client::intent_client::DESKTOP_CODE_LIMITS);
+        let lim = tauri::async_runtime::block_on(super::intent_code_limits()).unwrap();
+        assert_eq!(lim.limits.max_edits, 5);
+        assert_eq!(lim.approval_lifetime_secs, 300);
         let r = tauri::async_runtime::block_on(super::intent_code_submit("fix the test".into(), "proj".into(), "gui-0123456789abcdef".into())).unwrap();
         assert!(!r.replay);
         let d = tauri::async_runtime::block_on(super::intent_diff(r.run.run_id.clone())).unwrap();
         assert_eq!(d.files[0].path, "src/lib.rs");
+        let c = tauri::async_runtime::block_on(super::intent_copy(r.run.run_id.clone())).unwrap();
+        assert!(c.retained && !c.active && c.approx_bytes == Some(1024));
         let got = frames.lock().unwrap().clone();
         assert_eq!(got[0]["cmd"], "intent-code-sources");
-        assert_eq!(got[1]["cmd"], "intent-submit");
-        assert_eq!(got[2]["cmd"], "intent-diff");
-        let i = got[1]["params"]["intent"].as_object().unwrap();
+        assert_eq!(got[1]["cmd"], "intent-code-config");
+        assert_eq!(got[2]["cmd"], "intent-submit");
+        assert_eq!(got[3]["cmd"], "intent-diff");
+        assert_eq!(got[4]["cmd"], "intent-copy");
+        assert_eq!(got[4]["params"].as_object().unwrap().len(), 1);
+        let i = got[2]["params"]["intent"].as_object().unwrap();
         let mut keys: Vec<&str> = i.keys().map(|k| k.as_str()).collect();
         keys.sort_unstable();
         assert_eq!(keys, ["clientLabel", "content", "idempotencyKey", "intentType", "limits", "model", "requestId", "responseMode", "schemaVersion", "workspaceId"]);
@@ -888,7 +934,7 @@ mod authz_tests {
         let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
         let f2 = frames.clone();
         std::thread::spawn(move || {
-            for stream in l.incoming().take(3) {
+            for stream in l.incoming().take(4) {
                 let mut s = stream.unwrap();
                 let mut line = String::new();
                 BufReader::new(s.try_clone().unwrap())

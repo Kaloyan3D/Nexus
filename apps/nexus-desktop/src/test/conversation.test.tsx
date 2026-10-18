@@ -13,6 +13,7 @@ import type { TranscriptEvent } from "../lib/contracts";
 const TASK_ID = "task_0123456789abcdef0123456789abcdef";
 
 function mount(api: NativeApi) {
+  window.history.replaceState(null, "", "#/advanced/mock");
   return render(
     <NexusProvider api={api}>
       <App />

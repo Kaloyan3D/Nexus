@@ -46,6 +46,7 @@ afterEach(() => {
 });
 
 function mount(api: NativeApi) {
+  window.history.replaceState(null, "", "#/advanced/mock");
   return render(
     <NexusProvider api={api}>
       <App />

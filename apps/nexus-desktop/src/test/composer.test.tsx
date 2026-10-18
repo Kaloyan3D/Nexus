@@ -35,7 +35,7 @@ describe("Composer -> intent broker (A5.3)", () => {
     const user = userEvent.setup();
     mount(api);
     await type(user, "design it");
-    const send = await screen.findByRole("button", { name: "Send to model" });
+    const send = await screen.findByRole("button", { name: "Ask" });
     await waitFor(() => expect(send).toBeEnabled());
     await user.click(send);
     await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
@@ -61,7 +61,7 @@ describe("Composer -> intent broker (A5.3)", () => {
     const user = userEvent.setup();
     mount(api);
     await type(user, "once");
-    const send = await screen.findByRole("button", { name: "Send to model" });
+    const send = await screen.findByRole("button", { name: "Ask" });
     await waitFor(() => expect(send).toBeEnabled());
     await user.click(send);
     await user.click(send);
@@ -80,7 +80,7 @@ describe("Composer -> intent broker (A5.3)", () => {
     const user = userEvent.setup();
     mount(api);
     await type(user, "keep me");
-    const send = await screen.findByRole("button", { name: "Send to model" });
+    const send = await screen.findByRole("button", { name: "Ask" });
     await waitFor(() => expect(send).toBeEnabled());
     await user.click(send);
     expect(await screen.findByText("Send failed: model-not-available", {}, { timeout: 5000 })).toBeInTheDocument();
@@ -97,7 +97,7 @@ describe("Composer -> intent broker (A5.3)", () => {
     const user = userEvent.setup();
     mount(api);
     await type(user, "slow start");
-    const send = await screen.findByRole("button", { name: "Send to model" });
+    const send = await screen.findByRole("button", { name: "Ask" });
     await waitFor(() => expect(send).toBeEnabled());
     await user.click(send);
     const stop = await screen.findByRole("button", { name: "Cancel submission" });
@@ -112,9 +112,9 @@ describe("Composer -> intent broker (A5.3)", () => {
       }) as NativeApi["intentModels"],
     });
     mount(api);
-    const send = await screen.findByRole("button", { name: "Send to model" });
+    const send = await screen.findByRole("button", { name: "Ask" });
     expect(send).toBeDisabled();
-    expect(await screen.findByText(/Model sending is unavailable: daemon socket unreachable/)).toBeInTheDocument();
+    expect(await screen.findByText(/Sending is unavailable: daemon socket unreachable/)).toBeInTheDocument();
   });
 
   it("the renderer API exposes no secret, grant, capability or tool vocabulary", () => {

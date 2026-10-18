@@ -46,6 +46,7 @@ async function open(data: TaskToolEvents | Error, seen: string[] = []) {
     },
   });
   const user = userEvent.setup();
+  window.history.replaceState(null, "", "#/advanced/mock");
   render(
     <NexusProvider api={api}>
       <App />

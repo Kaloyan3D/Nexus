@@ -1,11 +1,11 @@
 import { Ban } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { asUiError } from "../../lib/api";
-import type { DiffReply, IntentRun, ModelRunStatus, PendingApproval, ToolActivity } from "../../lib/contracts";
+import type { IntentRun, ModelRunStatus, ToolActivity } from "../../lib/contracts";
 import { endpointLabel, modelStateView, usageLabel } from "../../lib/modelRun";
 import { useNexus } from "../../state/NexusContext";
 import { Alert, Badge, Button, Loading, StatusDot } from "../../components/ui/primitives";
-import { CopyButton } from "./ConversationPanel";
+import { toolKind } from "../../lib/runKind";
 
 const POLL_MS = 1000;
 
@@ -212,195 +212,48 @@ export function DiffViewer({ diff, truncated }: { diff: string; truncated: boole
 }
 
 
-/** Seconds-resolution clock for expiry display. */
-function useNow(intervalMs = 1000): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), intervalMs);
-    return () => clearInterval(t);
-  }, [intervalMs]);
-  return now;
-}
-
-/**
- * A6.1: a model-proposed write or command that is waiting for an INDEPENDENT
- * approval. Display only: Desktop holds no approver credential and offers no
- * approve control; the reviewer uses the separate `nexus-approver review`
- * terminal, which shows the daemon-derived exact diff or argv.
- */
-export function ApprovalCard({ approval }: { approval: PendingApproval }) {
-  const now = useNow();
-  const expired = approval.expiresAtMs != null && now >= approval.expiresAtMs;
-  const left = approval.expiresAtMs != null ? Math.max(0, Math.round((approval.expiresAtMs - now) / 1000)) : null;
-  const kind = approval.operation === "command" ? "command" : "edit";
-  const what = approval.operation === "command" ? "Run command" : approval.operation === "write" ? "Write file" : "Edit file";
-  return (
-    <section className="nv-stack" style={{ gap: 6 }} role="region" aria-label="Pending approval" data-expired={expired ? "true" : "false"}>
-      <Alert tone={expired ? "error" : "warning"} title={expired ? "Approval expired — nothing ran" : "Waiting for an independent approval — nothing has run"}>
-        <div className="nv-stack" style={{ gap: 6 }}>
-          <div className="nv-heading__meta">
-            <Badge tone="purple">{what}</Badge>
-            <Badge mono>{approval.target ?? approval.tool}</Badge>
-            <Badge tone={expired ? "error" : "warning"}>
-              {expired ? "expired" : left != null ? `expires in ${left}s` : "pending"}
-            </Badge>
-          </div>
-          <p className="nv-note" role="note">
-            <strong>Model proposal — not the authoritative request.</strong> Nexus shows what the model asked for, as the broker understood it. The
-            exact request that would run is derived by the daemon and is shown only to the approver. Inspect that actual request in{" "}
-            <span className="nv-mono">nexus-approver review</span> before approving anything.
-          </p>
-          {approval.proposal ? (
-            <pre className="nv-msg__pre" aria-label="Proposed operation (model proposal, unverified)">{approval.proposal}</pre>
-          ) : (
-            <p className="nv-note">{approval.summary}</p>
-          )}
-          {(approval.restrictions?.length ?? 0) > 0 && (
-            <ul className="nv-list" aria-label="Restrictions">
-              {approval.restrictions!.map((r) => (
-                <li key={r}>{r}</li>
-              ))}
-            </ul>
-          )}
-          <p className="nv-note">
-            The approver sees the exact {kind === "command" ? "argument vector and sandbox policy" : "diff"} derived by the daemon (request digest{" "}
-            <span className="nv-mono">{short(approval.requestDigest)}</span>). Nexus Desktop cannot approve or deny; review it in a separate terminal:
-          </p>
-          <pre className="nv-msg__pre" aria-label="Approver command">{`nexus-approver --socket <daemon socket> --cap-file <approver credential file> review ${approval.approvalId}`}</pre>
-          <CopyButton text={approval.approvalId} label="Copy approval id" />
-        </div>
-      </Alert>
-    </section>
-  );
-}
-
-/** Prominent, page-level view of a pending approval for the selected coding run. */
-export function PendingApprovalBanner({ conversationId }: { conversationId: string }) {
-  const run = useInspectRun(conversationId, true);
-  if (!run || run.intentType !== "repo-code" || !run.pendingApproval || run.terminal) return null;
-  return <ApprovalCard approval={run.pendingApproval} />;
-}
-
-/** A5.6: controlled coding - approvals, edits, tests and the reviewable diff. */
-export function CodeRunSection({ run }: { run: IntentRun }) {
-  const { api } = useNexus();
+/** Every proposed tool call with its approval and receipt, from the run record (never from model text). */
+export function ToolCallsTable({ run }: { run: IntentRun }) {
   const acts = run.toolActivity ?? [];
-  const [diff, setDiff] = useState<DiffReply | null>(null);
-  const [diffErr, setDiffErr] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const pa = run.pendingApproval ?? null;
-  const loadDiff = () => {
-    setLoading(true);
-    setDiffErr(null);
-    api
-      .intentDiff(run.runId)
-      .then(setDiff)
-      .catch((e) => setDiffErr(asUiError(e).message))
-      .finally(() => setLoading(false));
-  };
-  const files = run.changedFiles ?? [];
+  if (acts.length === 0) return <p className="nv-note">No tool has been proposed yet.</p>;
   return (
-    <section className="nv-stack" style={{ gap: 8 }} aria-label="Controlled coding">
-      <div className="nv-heading__meta">
-        <Badge tone="warning">Code in isolated copy</Badge>
-        <Badge tone="neutral">Source {run.workspaceId ?? "—"}</Badge>
-        <Badge tone="neutral">
-          Turn {run.turn ?? 0}/{run.maxTurns ?? "—"}
-        </Badge>
-        <Badge tone="neutral">
-          Edits {run.editsUsed ?? 0}/{run.maxEdits ?? "—"}
-        </Badge>
-        <Badge tone="neutral">
-          Commands {run.testsUsed ?? 0}/{run.maxTests ?? "—"}
-        </Badge>
-        {run.lastTestVerification && (
-          <Badge tone={run.lastTestVerification === "pass" ? "success" : "error"}>
-            Last test: {run.lastTestVerification === "pass" ? "passed" : "failed"}
-          </Badge>
-        )}
-      </div>
-      {pa && (
-        <p className="nv-note" role="status">
-          Waiting for an independent approval of <span className="nv-mono">{pa.target ?? pa.tool}</span>; the details are in the approval panel above the
-          composer.
-        </p>
-      )}
-      {run.stopReason && (
-        <Alert tone="warning" title="Stopped at a policy limit">
-          The run ended cleanly at {STOP_REASONS[run.stopReason] ?? run.stopReason}; the working copy is kept for review.
-        </Alert>
-      )}
-      {run.errorCode === "tool-outcome-uncertain" && (
-        <Alert tone="error" title="A write or command may or may not have happened">
-          Its effect is unknown and was not repeated. Review the diff below before trusting the working copy.
-        </Alert>
-      )}
-      {acts.length > 0 ? (
-        <table className="nv-table" aria-label="Proposed edits and tool activity">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Tool</th>
-              <th>Proposed</th>
-              <th>Approval</th>
-              <th>Outcome</th>
-              <th>Receipt</th>
-            </tr>
-          </thead>
-          <tbody>
-            {acts.map((a) => (
-              <tr key={a.index}>
-                <td>{a.index}</td>
-                <td className="nv-mono">{a.tool}</td>
-                <td className="nv-mono">{a.argsSummary}</td>
-                <td>{a.approvalOutcome ? <Badge tone={a.approvalOutcome === "approved" ? "success" : "warning"}>{a.approvalOutcome}</Badge> : "—"}</td>
-                <td>
-                  <Badge tone={activityTone(a)}>
-                    {a.status}
-                    {a.errorCode ? ` · ${a.errorCode}` : ""}
-                  </Badge>
-                  {a.verification && (
-                    <Badge tone={a.verification === "pass" ? "success" : "error"}>
-                      {a.verification === "pass" ? "tests passed" : "tests failed"}
-                      {a.exitCode != null ? ` (exit ${a.exitCode})` : ""}
-                    </Badge>
-                  )}
-                </td>
-                <td className="nv-mono">{a.postSha256 ? `${short(a.preSha256)} → ${short(a.postSha256)}` : "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      ) : (
-        <p className="nv-note">No tool has been proposed yet.</p>
-      )}
-      <h4 className="nv-subheading">Changes in the isolated copy</h4>
-      {files.length > 0 ? (
-        <ul className="nv-list" aria-label="Changed files">
-          {files.map((f) => (
-            <li key={f.path} className="nv-mono">
-              {f.status} {f.path} {f.additions != null ? `+${f.additions}` : ""} {f.deletions != null ? `-${f.deletions}` : ""}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="nv-note">{run.terminal ? "No file was changed." : "No change has been applied yet."}</p>
-      )}
-      {run.terminal && (
-        <div>
-          <Button size="sm" onClick={loadDiff} disabled={loading}>
-            {loading ? "Loading diff…" : diff ? "Reload diff" : "Show diff"}
-          </Button>
-          {diffErr && <span className="nv-note"> {diffErr}</span>}
-        </div>
-      )}
-      {diff && <DiffViewer diff={diff.diff || "(no changes)"} truncated={diff.diffTruncated} />}
-      <p className="nv-note">
-        Edits and commands ran only in a throw-away copy of commit <span className="nv-mono">{short(run.worktreeCommit)}</span>;
-        your repository is unchanged. Nothing is committed, pushed or merged automatically. Tool output and file contents
-        are untrusted data.
-      </p>
-    </section>
+    <table className="nv-table" aria-label="Proposed edits and tool activity">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Tool</th>
+          <th>Proposed</th>
+          <th>Approval</th>
+          <th>Outcome</th>
+          <th>Receipt</th>
+        </tr>
+      </thead>
+      <tbody>
+        {acts.map((a) => (
+          <tr key={a.index}>
+            <td>{a.index}</td>
+            <td className="nv-mono">
+              {a.tool} <Badge tone={toolKind(a.tool) === "read" ? "neutral" : "purple"}>{toolKind(a.tool)}</Badge>
+            </td>
+            <td className="nv-mono">{a.argsSummary}</td>
+            <td>{a.approvalOutcome ? <Badge tone={a.approvalOutcome === "approved" ? "success" : "warning"}>{a.approvalOutcome}</Badge> : "—"}</td>
+            <td>
+              <Badge tone={activityTone(a)}>
+                {a.status}
+                {a.errorCode ? ` · ${a.errorCode}` : ""}
+              </Badge>
+              {a.verification && (
+                <Badge tone={a.verification === "pass" ? "success" : "error"}>
+                  {a.verification === "pass" ? "tests passed" : "tests failed"}
+                  {a.exitCode != null ? ` (exit ${a.exitCode})` : ""}
+                </Badge>
+              )}
+            </td>
+            <td className="nv-mono">{a.postSha256 ? `${short(a.preSha256)} → ${short(a.postSha256)}` : "—"}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
@@ -461,9 +314,7 @@ export function ModelRunPanel({ conversationId }: { conversationId: string }) {
         <dt>Finish</dt>
         <dd>{status.finishReason ?? "—"}</dd>
       </dl>
-      {inspect?.intentType === "repo-code" ? (
-        <CodeRunSection run={inspect} />
-      ) : inspect ? (
+      {inspect?.intentType === "repo-code" ? null : inspect ? (
         <InspectRunSection run={inspect} />
       ) : (
         <p className="nv-note">

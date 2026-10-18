@@ -22,6 +22,7 @@ const COMMANDS: &[&str] = &[
     "intent_code_limits",
     "intent_code_submit",
     "intent_diff",
+    "intent_copy",
     "intent_status",
     "intent_cancel",
     "intent_list",

@@ -14,6 +14,7 @@ async function open(view: ApprovalsView | Error) {
     },
   });
   const user = userEvent.setup();
+  window.history.replaceState(null, "", "#/advanced/mock");
   render(
     <NexusProvider api={api}>
       <App />

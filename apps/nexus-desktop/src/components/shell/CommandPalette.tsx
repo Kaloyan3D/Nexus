@@ -13,12 +13,14 @@ interface Item {
 
 const DESTINATIONS: Array<{ id: Page; label: string }> = [
   { id: "workspace", label: "Workspace" },
-  { id: "tasks", label: "Tasks" },
-  { id: "control-room", label: "Control Room" },
+  { id: "projects", label: "Projects" },
+  { id: "history", label: "History" },
   { id: "models", label: "Models" },
   { id: "sentry", label: "Sentry" },
-  { id: "sessions", label: "Sessions" },
   { id: "settings", label: "Settings" },
+  { id: "tasks", label: "Advanced: Controller ledger" },
+  { id: "control-room", label: "Advanced: Control Room" },
+  { id: "mock", label: "Advanced: Mock runs" },
 ];
 
 export function CommandPalette({ onClose }: { onClose: () => void }) {
@@ -53,7 +55,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
             label: t.title,
             hint: t.taskId,
             run: () => {
-              setPage("workspace");
+              setPage("mock");
               select({ kind: "task", id: t.taskId });
             },
           }))
