@@ -241,3 +241,41 @@ fn a_dotnet_project_restores_once_then_builds_and_runs_offline() {
     assert_eq!(v["verification"], "pass", "{}", out(&v));
     assert!(out(&v).contains("hello-from-dotnet 42"), "{}", out(&v));
 }
+
+/// Found by the A7.1 live acceptance: a test runner (vitest) binds `localhost`; the network-off
+/// sandbox had no hosts file, so it failed before running a single test.
+#[test]
+fn an_offline_command_resolves_localhost_from_the_sandbox_own_hosts_file() {
+    if !ready() {
+        return;
+    }
+    let mut fx = fixture("wb-localhost");
+    fx.approve_process(60_000);
+    let v = run(
+        &mut fx,
+        None,
+        "node",
+        &[
+            "-e",
+            "require('dns').lookup('localhost',(e,a)=>{console.log(e?'ERR '+e.code:'OK '+a); process.exit(e?1:0)})",
+        ],
+    )
+    .expect("node runs");
+    assert!(
+        out(&v).contains("OK 127.0.0.1") || out(&v).contains("OK ::1"),
+        "{}",
+        out(&v)
+    );
+    fx.approve_process(60_000);
+    let h = run(
+        &mut fx,
+        None,
+        "node",
+        &[
+            "-e",
+            "console.log(require('fs').readFileSync('/etc/hosts','utf8'))",
+        ],
+    )
+    .expect("hosts");
+    assert!(out(&h).contains("127.0.0.1 localhost"), "{}", out(&h));
+}

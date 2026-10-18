@@ -1,0 +1,55 @@
+diff --git a/src/game/engine.test.ts b/src/game/engine.test.ts
+index 331e25f..34390dc 100644
+--- a/src/game/engine.test.ts
++++ b/src/game/engine.test.ts
+@@ -201,6 +201,36 @@ describe("pure game engine", () => {
+         .error,
+     ).toMatch(/forbidden/);
+   });
++  it("rejects out-of-turn mortgage but allows the settlement debtor to mortgage", () => {
++    const fresh = make();
++    const active = fresh.activePlayer!;
++    const outsider = fresh.initiative.find((id) => id !== active)!;
++    const outsiderCash = fresh.players[outsider].cash;
++    const denied = applyAction(fresh, {
++      type: "mortgage",
++      player: outsider,
++      count: 1,
++    });
++    expect(denied.error).toMatch(/another player/);
++    expect(fresh.players[outsider].cash).toBe(outsiderCash);
++    expect(fresh.players[outsider].presidencyMortgaged).toBe(0);
++    // Company 0 owes dividends: one outside share at dividend 1, no treasury.
++    const s = make();
++    s.initiative = [0, 1, 2];
++    s.phase = "end";
++    s.settlement = { cursor: 0 };
++    s.activePlayer = 0;
++    s.stocks[0].index = 7;
++    s.players[1].shares[0] = 1;
++    s.stocks[0].available -= 1;
++    s.players[0].cash = 0;
++    const debtorCash = s.players[0].cash;
++    const allowed = act(s, { type: "mortgage", player: 0, count: 1 });
++    expect(allowed.players[0].presidencyMortgaged).toBe(1);
++    expect(allowed.players[0].cash).toBe(
++      debtorCash + Math.floor(getStockValue(allowed, 0) / 2),
++    );
++  });
+   it("mortgage excludes presidency from wealth and redeem uses stock turn", () => {
+     let s = make();
+     const player = s.activePlayer!,
+diff --git a/src/game/engine.ts b/src/game/engine.ts
+index d829b1c..af94468 100644
+--- a/src/game/engine.ts
++++ b/src/game/engine.ts
+@@ -964,8 +964,7 @@ export function applyAction(
+       fail("Invalid acting player");
+     if (s.phase === "finished") fail("The game is finished");
+     const p = s.players[action.player];
+-    if (action.type !== "mortgage" && s.activePlayer !== p.id)
+-      fail("It is another player’s turn");
++    if (s.activePlayer !== p.id) fail("It is another player’s turn");
+     switch (action.type) {
+       case "placeAgent": {
+         if (s.phase !== "agents") fail("Place agents only in the Agent phase");

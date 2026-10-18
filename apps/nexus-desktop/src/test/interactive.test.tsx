@@ -5,7 +5,7 @@ import { App } from "../App";
 import { NexusProvider } from "../state/NexusContext";
 import { fakeApi, fakeRun } from "./fakeApi";
 import type { NativeApi } from "../lib/api";
-import type { ProjectView, RuntimeState } from "../lib/contracts";
+import type { ProjectView, RuntimeState, ThreadSendInput } from "../lib/contracts";
 
 const CONV = "model_0123456789abcdef0123456789abcdef";
 
@@ -114,9 +114,9 @@ describe("Run on a project without ceremony (A6.1.4)", () => {
   }
 
   it("defaults to the project, needs no acknowledgement, hash or limit choice, and Run submits text + identity only", async () => {
-    const submit = vi.fn(async (_p: string, _s: string, key: string) => ({ replay: false, run: fakeRun({ requestId: key, conversationId: CONV, state: "executing", intentType: "repo-code", workspaceId: "tinycsv-6c94b7" }) }));
+    const submit = vi.fn(async (i: ThreadSendInput) => ({ threadId: "thr_" + "a".repeat(32), replay: false, run: fakeRun({ requestId: i.idempotencyKey, conversationId: CONV, state: "executing", intentType: "repo-code", workspaceId: "tinycsv-6c94b7" }) }));
     const user = userEvent.setup();
-    mount(api({ intentCodeSubmit: submit as NativeApi["intentCodeSubmit"] }));
+    mount(api({ threadSend: submit as NativeApi["threadSend"] }));
     const run = await screen.findByRole("button", { name: "Run" });
     expect(screen.getByRole("radio", { name: "Work on project" })).toBeChecked();
     expect(screen.queryByRole("radio", { name: "Inspect" })).not.toBeInTheDocument();
@@ -131,9 +131,12 @@ describe("Run on a project without ceremony (A6.1.4)", () => {
     expect(within(terms).getByText(/60 model turns, 60 edits and 40 test runs/)).toBeInTheDocument();
     await user.click(run);
     await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
-    expect(submit.mock.calls[0]![0]).toBe("fix the failing tests");
-    expect(submit.mock.calls[0]![1]).toBe("tinycsv-6c94b7");
-    expect(submit.mock.calls[0]).toHaveLength(3); // text, identity, idempotency key - no limit, path or approval
+    const sent = submit.mock.calls[0]![0];
+    expect(sent.content).toBe("fix the failing tests");
+    expect(sent.projectId).toBe("tinycsv-6c94b7");
+    expect(sent.threadId).toBeNull(); // a task from the idle view starts a NEW conversation
+    // text, identity, mode choice and an idempotency key - no limit, path, tool or approval
+    expect(Object.keys(sent).sort()).toEqual(["content", "idempotencyKey", "mode", "projectId", "threadId", "workspace"]);
   });
 
   it("Open… asks the native backend to pick a folder (no path can be typed) and the project becomes selectable", async () => {
@@ -268,12 +271,10 @@ describe("Task-oriented result (autonomy-first)", () => {
       intentList: async () => [run],
       intentResult: async () => report,
     });
-    const user = userEvent.setup();
-    mount(api);
-    await user.click(await screen.findByRole("button", { name: /Audit this repository/ }));
+    mount(api, `#/workspace/run/${CONV}`);
     const region = await screen.findByRole("region", { name: "Review report" });
     expect(within(region).getByText(/3 files read/)).toBeInTheDocument();
-    expect(within(region).getByRole("heading", { name: /1\. Architecture/ })).toBeInTheDocument();
+    expect(await within(region).findByRole("heading", { name: /1\. Architecture/ })).toBeInTheDocument();
     expect(within(region).getByRole("cell", { name: "shell" })).toBeInTheDocument();
     expect(within(region).getByText(/Recovered from 2 interruptions/)).toBeInTheDocument();
     // no approval vocabulary, no "claim, not verified" framing

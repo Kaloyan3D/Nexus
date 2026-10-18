@@ -5099,3 +5099,1388 @@ fn a614_an_interrupted_task_is_continued_in_a_new_run_that_starts_from_its_work(
     assert!(again.is_err(), "already continued");
     b.shutdown();
 }
+
+// ======================================================================================
+// A7.1 persistent conversations: the REAL stack (daemon, bridge, sandbox, broker loop) with a
+// scripted model. What matters here is what the model is SENT and what the runtime does.
+// ======================================================================================
+
+const A71_REPORT: &str = "# Repository review\n\nThe crate is small.\n\n## Findings\n\n### F1 — add() subtracts instead of adding\nsrc/lib.rs:2 computes `a - b`; the public `add` is wrong and tests/add.rs fails.\n\n### F2 — No overflow handling in add()\nsrc/lib.rs:2 uses unchecked arithmetic; `i32::MAX + 1` panics in debug builds.\n\n## Summary\nF1 is the urgent one.\n";
+
+fn interactive_broker(fx: &Fx, name: &str) -> BrokerHandle {
+    let mut c = fx.config(name);
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.interactive = true;
+    nexus_broker::start(c).expect("broker starts")
+}
+
+/// The text of the request the user is asking NOW (the part after the conversation context).
+fn current_request(body: &Value) -> String {
+    let first = body["input"][0].to_string();
+    first
+        .rsplit("The user's new request")
+        .next()
+        .unwrap_or("")
+        .to_owned()
+}
+
+fn a71_responder() -> Responder {
+    Arc::new(|n, body| {
+        let resp = format!("resp_{n}");
+        let done = body["input"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["type"] == "function_call_output")
+                    .count()
+            })
+            .unwrap_or(0);
+        let cur = current_request(body);
+        let calls: Vec<(&str, String)>;
+        let text: String;
+        if cur.contains("CONTINUED after an interruption") {
+            calls = vec![];
+            text = "Checked the carried-over file; the task is done.".into();
+        } else if cur.contains("REVIEW-ONE") {
+            calls = vec![("fs_read", r#"{"path":"src/lib.rs"}"#.into())];
+            text = A71_REPORT.into();
+        } else if cur.contains("FIX-F1") {
+            calls = vec![
+                ("fs_read", r#"{"path":"src/lib.rs"}"#.into()),
+                ("fs_edit", r#"{"path":"src/lib.rs","edits":[{"oldText":"a - b","newText":"a + b"}]}"#.into()),
+                ("fs_write", r##"{"path":"tests/regression.rs","content":"#[test]\nfn add_adds_regression_f1() {\n    assert_eq!(calc::add(40, 2), 42);\n}\n","mode":"create"}"##.into()),
+                ("proc_run", r#"{"program":"cargo","args":["test","--offline"]}"#.into()),
+            ];
+            text =
+                "Fixed F1: add() now adds, and tests/regression.rs covers it. cargo test passes."
+                    .into();
+        } else if cur.contains("EXPLAIN-F2") {
+            calls = vec![
+                ("fs_read", r#"{"path":"src/lib.rs"}"#.into()),
+                // a misbehaving model tries to edit in a read-only request
+                ("fs_edit", r#"{"path":"src/lib.rs","edits":[{"oldText":"a + b","newText":"a.wrapping_add(b)"}]}"#.into()),
+            ];
+            text = "F2 is a problem because add() uses unchecked arithmetic: i32::MAX + 1 overflows and panics in debug builds (src/lib.rs:2). No file was changed.".into();
+        } else if cur.contains("OTHER-EDIT") {
+            calls = vec![
+                ("fs_read", r#"{"path":"docs/NOTES.md"}"#.into()),
+                ("fs_edit", r#"{"path":"docs/NOTES.md","edits":[{"oldText":"edited by the user","newText":"edited by the conversation"}]}"#.into()),
+            ];
+            text = "Changed the notes.".into();
+        } else if cur.contains("SLOW-WRITE") {
+            if done == 0 {
+                return Answer::Frames(call_frames(
+                    &resp,
+                    n,
+                    "c_w",
+                    "fs_write",
+                    r#"{"path":"src/carried.txt","content":"work before the stop\n","mode":"create"}"#,
+                ));
+            }
+            return Answer::Slow {
+                frames: text_frames(&resp, "thinking"),
+                gap_ms: 100,
+                hold_ms: 120_000,
+            };
+        } else if cur.contains("AFTER-STOP") {
+            calls = vec![("fs_read", r#"{"path":"src/carried.txt"}"#.into())];
+            text = "The carried file exists and holds the earlier work.".into();
+        } else if cur.contains("BIG-ANSWER") {
+            calls = vec![];
+            text = format!(
+                "Long answer. {}",
+                "Detailed discussion of the module. ".repeat(300)
+            );
+        } else if cur.contains("AFTER-RESTART") {
+            calls = vec![];
+            // a status answer that lists the findings again must not rewrite them
+            text =
+                "Status:\n\nF1 — retitled by a status answer\nfixed\n\nF2 — also retitled\nopen\n"
+                    .into();
+        } else {
+            calls = vec![("fs_read", r#"{"path":"src/lib.rs"}"#.into())];
+            text = format!(
+                "Answered the request: {}",
+                cur.chars()
+                    .take(60)
+                    .collect::<String>()
+                    .replace(['"', '\\'], "")
+            );
+        }
+        match calls.get(done) {
+            Some((name, args)) => {
+                Answer::Frames(call_frames(&resp, n, &format!("call_{done}"), name, args))
+            }
+            None => Answer::Frames(text_frames(&resp, &text)),
+        }
+    })
+}
+
+fn tsend(
+    sock: &Path,
+    thread: Option<&str>,
+    project: &str,
+    text: &str,
+    mode: &str,
+    workspace: &str,
+    key: &str,
+) -> Result<Value, nexus_client::error::ClientError> {
+    ic::thread_send(
+        sock,
+        &ic::ThreadSend {
+            thread_id: thread,
+            project_id: project,
+            content: text,
+            mode,
+            workspace,
+            idempotency_key: key,
+        },
+    )
+}
+
+/// Wait until the conversation has folded `n` runs (answer + evidence stored).
+fn wait_folded(sock: &Path, tid: &str, n: usize) -> Value {
+    let end = Instant::now() + Duration::from_secs(60);
+    loop {
+        let t = ic::thread_get(sock, tid, None).expect("thread-get");
+        let runs = t["runs"].as_array().unwrap();
+        if runs.len() >= n && runs.iter().take(n).all(|r| r["ended"] == true) {
+            return t;
+        }
+        assert!(
+            Instant::now() < end,
+            "conversation never folded {n} runs: {t}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Requests that opened a run (the first turn of each), in arrival order.
+fn first_turns(fx: &Fx) -> Vec<String> {
+    fx.provider
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|b| b["input"].as_array().is_some_and(|a| a.len() == 1))
+        .map(|b| b["input"][0].to_string())
+        .collect()
+}
+
+fn run_of(t: &Value, i: usize) -> ic::IntentRun {
+    serde_json::from_value(t["runs"][i]["run"].clone()).expect("run view")
+}
+
+fn commit_all(dir: &Path, msg: &str) {
+    for args in [&["add", "-A"][..], &["commit", "-qm", msg][..]] {
+        let o = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+}
+
+#[test]
+fn a71_one_conversation_reviews_then_fixes_what_f1_means_then_explains_f2_read_only_and_survives_a_restart(
+) {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(a71_responder());
+    let b = interactive_broker(&fx, "a71-main");
+    let sock = b.socket_path().to_owned();
+    let original = std::fs::read(fx.repo.join("src/lib.rs")).unwrap();
+
+    // 1. a read-only review (stated in the request itself)
+    let s1 = tsend(
+        &sock,
+        None,
+        "proj",
+        "REVIEW-ONE: review this repository. Read-only, do not change any files.",
+        "auto",
+        "continue",
+        "a71-key-0000001",
+    )
+    .expect("send 1");
+    let tid = s1["threadId"].as_str().unwrap().to_owned();
+    assert_eq!(s1["mode"]["readOnly"], true);
+    let run1 = wait_terminal(&sock, s1["run"]["runId"].as_str().unwrap(), 180);
+    assert_eq!(run1.state, "completed", "{run1:?}");
+    assert!(run1.read_only && run1.thread_id.as_deref() == Some(tid.as_str()));
+    let t = wait_folded(&sock, &tid, 1);
+    let ids: Vec<&str> = t["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        ["F1", "F2"],
+        "findings are indexed from the answer: {t}"
+    );
+    assert!(t["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["role"] == "assistant"
+            && m["text"].as_str().unwrap().contains("F2 — No overflow")));
+
+    // 2. "Fix finding F1 and add regression tests." - same conversation, no repetition of the report
+    let s2 = tsend(
+        &sock,
+        Some(&tid),
+        "proj",
+        "FIX-F1: Fix finding F1 and add regression tests.",
+        "auto",
+        "continue",
+        "a71-key-0000002",
+    )
+    .expect("send 2");
+    assert_eq!(
+        s2["mode"]["readOnly"], false,
+        "an explicit change request may change files"
+    );
+    let run2 = wait_terminal(&sock, s2["run"]["runId"].as_str().unwrap(), 300);
+    assert_eq!(run2.state, "completed", "{run2:?}");
+    let o2 = run2.coding_outcome.clone().expect("outcome");
+    assert_eq!(o2.verification, "verified-passed", "{o2:?}");
+    let t = wait_folded(&sock, &tid, 2);
+    let r2 = run_of(&t, 1);
+    assert!(r2.changed_files.iter().any(|f| f.path == "src/lib.rs"));
+    assert!(r2
+        .changed_files
+        .iter()
+        .any(|f| f.path == "tests/regression.rs"));
+    // THE MODEL RECEIVED THE EARLIER CONVERSATION (not just the UI)
+    let turns = first_turns(&fx);
+    assert_eq!(turns.len(), 2, "{turns:?}");
+    assert!(
+        !turns[0].contains("Conversation context"),
+        "the first request has no history"
+    );
+    for must in [
+        "Conversation context",
+        "REVIEW-ONE",
+        "F1 — add() subtracts instead of adding",
+        "F2 — No overflow handling",
+        "src/lib.rs:2 computes",
+        "FIX-F1: Fix finding F1",
+        "starts from the working copy of run 1",
+    ] {
+        assert!(
+            turns[1].contains(must),
+            "run 2 first turn lacks {must:?}:\n{}",
+            turns[1]
+        );
+    }
+    // the conversation records what the model was given (size + digest), on the second run only
+    assert!(t["runs"][0]["context"].is_null());
+    assert_eq!(t["runs"][1]["context"]["priorRuns"], 1);
+    assert_eq!(t["runs"][1]["context"]["findings"], 2);
+    assert!(t["runs"][1]["context"]["bytes"].as_u64().unwrap() > 500);
+    assert_eq!(
+        t["runs"][1]["context"]["sha256"].as_str().unwrap().len(),
+        64
+    );
+    assert_eq!(t["findings"][0]["addressedIn"], 2, "{t}");
+    assert_eq!(t["findings"][0]["addressedVerification"], "verified-passed");
+    assert!(t["findings"][1]["addressedIn"].is_null());
+
+    // 3. "Now explain exactly why F2 is a problem. Don't change any files."
+    let s3 = tsend(
+        &sock,
+        Some(&tid),
+        "proj",
+        "EXPLAIN-F2: Now explain exactly why F2 is a problem. Don't change any files.",
+        "auto",
+        "continue",
+        "a71-key-0000003",
+    )
+    .expect("send 3");
+    assert_eq!(s3["mode"]["readOnly"], true);
+    let run3 = wait_terminal(&sock, s3["run"]["runId"].as_str().unwrap(), 200);
+    assert_eq!(run3.state, "completed", "{run3:?}");
+    assert!(run3.read_only);
+    let t = wait_folded(&sock, &tid, 3);
+    let r3 = run_of(&t, 2);
+    // the attempted edit was refused by the broker's gate; nothing was written
+    let edit = r3
+        .tool_activity
+        .iter()
+        .find(|a| a.tool == "fs_edit")
+        .expect("the model tried an edit");
+    assert_eq!(edit.status, "refused", "{edit:?}");
+    assert_eq!(edit.error_code.as_deref(), Some("budget-exhausted"));
+    assert_eq!(r3.edits_used, 0);
+    assert!(r3
+        .tool_activity
+        .iter()
+        .all(|a| !(matches!(a.tool.as_str(), "fs_edit" | "fs_write") && a.status == "executed")));
+    // run 3 still SEES the fix of run 2 (it continues from run 2's copy) and changed nothing more
+    let copy = |r: &ic::IntentRun| fx.worktrees.join(r.task_instance_id.clone().unwrap());
+    let lib3 = std::fs::read_to_string(copy(&r3).join("src/lib.rs")).unwrap();
+    assert!(lib3.contains("a + b"), "{lib3}");
+    assert_eq!(
+        r3.changed_files
+            .iter()
+            .map(|f| f.path.clone())
+            .collect::<Vec<_>>(),
+        r2.changed_files
+            .iter()
+            .map(|f| f.path.clone())
+            .collect::<Vec<_>>(),
+        "a read-only run adds no change of its own"
+    );
+    let turns = first_turns(&fx);
+    for must in [
+        "F1 — add() subtracts",
+        "addressed in run 2; runtime-verified outcome: verified-passed",
+        "READ-ONLY REQUEST",
+        "cargo test",
+        "Fixed F1: add() now adds",
+    ] {
+        assert!(
+            turns[2].contains(must),
+            "run 3 first turn lacks {must:?}:\n{}",
+            turns[2]
+        );
+    }
+    // the user's own project was never touched
+    assert_eq!(std::fs::read(fx.repo.join("src/lib.rs")).unwrap(), original);
+
+    // 4. close and reopen: a NEW broker process over the same state restores the conversation
+    b.shutdown();
+    let b = interactive_broker(&fx, "a71-main");
+    let sock = b.socket_path().to_owned();
+    let list = ic::thread_list(&sock, Some("proj"), false).unwrap();
+    let th = &list["threads"][0];
+    assert_eq!(th["threadId"], tid.as_str());
+    assert_eq!(th["runCount"], 3);
+    assert_eq!(th["active"], false);
+    let t = ic::thread_get(&sock, &tid, None).unwrap();
+    assert_eq!(
+        t["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "user")
+            .count(),
+        3
+    );
+    assert_eq!(
+        t["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .count(),
+        3
+    );
+    // ... and the next message continues it, with the history in the model's hands
+    let s4 = tsend(
+        &sock,
+        Some(&tid),
+        "proj",
+        "AFTER-RESTART: where did we leave F1 and F2?",
+        "auto",
+        "continue",
+        "a71-key-0000004",
+    )
+    .expect("send 4");
+    let run4 = wait_terminal(&sock, s4["run"]["runId"].as_str().unwrap(), 200);
+    assert_eq!(run4.state, "completed", "{run4:?}");
+    let t = wait_folded(&sock, &tid, 4);
+    let turns = first_turns(&fx);
+    assert_eq!(turns.len(), 4);
+    for must in [
+        "REVIEW-ONE",
+        "FIX-F1",
+        "EXPLAIN-F2",
+        "F2 is a problem because add() uses unchecked arithmetic",
+        "addressed in run 2",
+    ] {
+        assert!(turns[3].contains(must), "run 4 first turn lacks {must:?}");
+    }
+    assert_eq!(
+        t["findings"][0]["title"], "add() subtracts instead of adding",
+        "{t}"
+    );
+    assert_eq!(t["findings"][1]["title"], "No overflow handling in add()");
+    let lib4 = std::fs::read_to_string(copy(&run_of(&t, 3)).join("src/lib.rs")).unwrap();
+    assert!(
+        lib4.contains("a + b"),
+        "the fix is still in the conversation's workspace"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn a71_a_stopped_run_is_continued_in_the_same_conversation_from_its_work_and_a_busy_conversation_refuses_a_second_message(
+) {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(a71_responder());
+    let b = interactive_broker(&fx, "a71-stop");
+    let sock = b.socket_path().to_owned();
+    let s1 = tsend(
+        &sock,
+        None,
+        "proj",
+        "SLOW-WRITE: write the carried file",
+        "edit",
+        "continue",
+        "a71-stop-000001",
+    )
+    .unwrap();
+    let tid = s1["threadId"].as_str().unwrap().to_owned();
+    let run1 = s1["run"]["runId"].as_str().unwrap().to_owned();
+    let end = Instant::now() + Duration::from_secs(90);
+    loop {
+        let r = ic::status(&sock, &run1).unwrap();
+        if r.tool_activity
+            .iter()
+            .any(|a| a.tool == "fs_write" && a.status == "executed")
+        {
+            break;
+        }
+        assert!(Instant::now() < end, "write never ran: {r:?}");
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    // while it runs, the conversation takes no second message and cannot be archived
+    let busy = tsend(
+        &sock,
+        Some(&tid),
+        "proj",
+        "AFTER-STOP: too early",
+        "auto",
+        "continue",
+        "a71-stop-000002",
+    )
+    .unwrap_err();
+    assert_eq!(busy.code, "thread-busy", "{busy:?}");
+    assert!(ic::thread_update(&sock, &tid, None, Some(true)).is_err());
+    let list = ic::thread_list(&sock, None, false).unwrap();
+    assert_eq!(list["threads"][0]["active"], true);
+    ic::cancel(&sock, &run1).unwrap();
+    let r1 = wait_terminal(&sock, &run1, 90);
+    assert_eq!(r1.state, "cancelled", "{r1:?}");
+    let t = wait_folded(&sock, &tid, 1);
+    let notes: Vec<&Value> = t["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["kind"] == "note")
+        .collect();
+    assert!(
+        !notes.is_empty() && notes[0]["text"].as_str().unwrap().contains("cancelled"),
+        "{t}"
+    );
+    // the composer is usable again: the next message continues from the stopped run's copy
+    let s2 = tsend(
+        &sock,
+        Some(&tid),
+        "proj",
+        "AFTER-STOP: carry on",
+        "auto",
+        "continue",
+        "a71-stop-000003",
+    )
+    .unwrap();
+    let r2 = wait_terminal(&sock, s2["run"]["runId"].as_str().unwrap(), 180);
+    assert_eq!(r2.state, "completed", "{r2:?}");
+    assert_eq!(r2.seed_from.as_deref(), Some(run1.as_str()));
+    assert_eq!(r2.workspace_relation.as_deref(), Some("continued"));
+    let t = wait_folded(&sock, &tid, 2);
+    let r2v = run_of(&t, 1);
+    assert_eq!(
+        std::fs::read_to_string(
+            fx.worktrees
+                .join(r2v.task_instance_id.clone().unwrap())
+                .join("src/carried.txt")
+        )
+        .unwrap(),
+        "work before the stop\n"
+    );
+    let turns = first_turns(&fx);
+    let last = turns.last().unwrap();
+    for must in [
+        "SLOW-WRITE",
+        "ended: cancelled",
+        "src/carried.txt",
+        "starts from the working copy of run 1",
+    ] {
+        assert!(last.contains(must), "follow-up lacks {must:?}:\n{last}");
+    }
+    // nothing the first run did was executed again
+    assert!(r2v.tool_activity.iter().all(|a| a.tool != "fs_write"));
+    b.shutdown();
+}
+
+#[test]
+fn a71_two_conversations_of_one_project_and_a_second_project_never_share_state_or_context() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(a71_responder());
+    let b = interactive_broker(&fx, "a71-iso");
+    let sock = b.socket_path().to_owned();
+    // conversation A fixes F1 (so its workspace differs from the project)
+    let a1 = tsend(
+        &sock,
+        None,
+        "proj",
+        "REVIEW-ONE: review, read-only",
+        "auto",
+        "continue",
+        "a71-iso-0000001",
+    )
+    .unwrap();
+    let ta = a1["threadId"].as_str().unwrap().to_owned();
+    wait_terminal(&sock, a1["run"]["runId"].as_str().unwrap(), 180);
+    wait_folded(&sock, &ta, 1);
+    let a2 = tsend(
+        &sock,
+        Some(&ta),
+        "proj",
+        "FIX-F1: fix F1 and add tests",
+        "edit",
+        "continue",
+        "a71-iso-0000002",
+    )
+    .unwrap();
+    wait_terminal(&sock, a2["run"]["runId"].as_str().unwrap(), 300);
+    wait_folded(&sock, &ta, 2);
+    // conversation B on the SAME project starts fresh: no history, no changes of A
+    let b1 = tsend(
+        &sock,
+        None,
+        "proj",
+        "Where is the add function defined?",
+        "auto",
+        "continue",
+        "a71-iso-0000003",
+    )
+    .unwrap();
+    let tb = b1["threadId"].as_str().unwrap().to_owned();
+    assert_ne!(ta, tb);
+    let rb = wait_terminal(&sock, b1["run"]["runId"].as_str().unwrap(), 180);
+    assert_eq!(rb.state, "completed", "{rb:?}");
+    assert_eq!(rb.workspace_relation.as_deref(), Some("fresh"));
+    assert!(rb.seed_from.is_none());
+    let tbv = wait_folded(&sock, &tb, 1);
+    let rbv = run_of(&tbv, 0);
+    let lib_b = std::fs::read_to_string(
+        fx.worktrees
+            .join(rbv.task_instance_id.clone().unwrap())
+            .join("src/lib.rs"),
+    )
+    .unwrap();
+    assert!(lib_b.contains("a - b"), "B must not see A's fix: {lib_b}");
+    assert!(tbv["findings"].as_array().unwrap().is_empty());
+    let turns = first_turns(&fx);
+    let b_first = turns
+        .iter()
+        .find(|t| t.contains("Where is the add function"))
+        .unwrap();
+    assert!(
+        !b_first.contains("Conversation context")
+            && !b_first.contains("REVIEW-ONE")
+            && !b_first.contains("F1 —"),
+        "{b_first}"
+    );
+    // ... and A, continuing afterwards, never hears about B
+    let a3 = tsend(
+        &sock,
+        Some(&ta),
+        "proj",
+        "EXPLAIN-F2: explain, don't change anything",
+        "auto",
+        "continue",
+        "a71-iso-0000004",
+    )
+    .unwrap();
+    wait_terminal(&sock, a3["run"]["runId"].as_str().unwrap(), 180);
+    let turns = first_turns(&fx);
+    let a_third = turns.iter().find(|t| t.contains("EXPLAIN-F2")).unwrap();
+    assert!(
+        a_third.contains("FIX-F1") && !a_third.contains("Where is the add function"),
+        "{a_third}"
+    );
+    // a conversation belongs to one project; a message for another project is refused, not mixed in
+    let mism = tsend(
+        &sock,
+        Some(&ta),
+        "other",
+        "Look at the other project",
+        "auto",
+        "continue",
+        "a71-iso-0000005",
+    )
+    .unwrap_err();
+    assert_eq!(mism.code, "project-mismatch", "{mism:?}");
+    let unknown = tsend(
+        &sock,
+        Some("thr_00000000000000000000000000000000"),
+        "proj",
+        "hello",
+        "auto",
+        "continue",
+        "a71-iso-0000006",
+    )
+    .unwrap_err();
+    assert_eq!(unknown.code, "not-found");
+    // a second project has its own conversations
+    let o1 = tsend(
+        &sock,
+        None,
+        "other",
+        "What does this project do?",
+        "auto",
+        "continue",
+        "a71-iso-0000007",
+    )
+    .unwrap();
+    wait_terminal(&sock, o1["run"]["runId"].as_str().unwrap(), 180);
+    let by_project = |p: &str| {
+        ic::thread_list(&sock, Some(p), false).unwrap()["threads"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!((by_project("proj"), by_project("other")), (2, 1));
+    // an explicit "new conversation" is empty and accepts a first message with no context
+    let created = ic::thread_create(&sock, "proj", Some("Scratch")).unwrap();
+    assert_eq!(created["thread"]["runCount"], 0);
+    // a retried send with the same key never creates a second run or message
+    let again = tsend(
+        &sock,
+        Some(&ta),
+        "proj",
+        "EXPLAIN-F2: explain, don't change anything",
+        "auto",
+        "continue",
+        "a71-iso-0000004",
+    )
+    .unwrap();
+    assert_eq!(again["replay"], true);
+    let t = ic::thread_get(&sock, &ta, None).unwrap();
+    assert_eq!(t["runs"].as_array().unwrap().len(), 3);
+    b.shutdown();
+}
+
+/// A managed project (what the Desktop creates): a plain folder Nexus snapshots, opened through
+/// the broker's own `project-open`.
+fn open_managed_project(fx: &Fx, sock: &Path, folder: &Path) -> String {
+    std::fs::create_dir_all(folder.join("src")).unwrap();
+    std::fs::create_dir_all(folder.join("tests")).unwrap();
+    std::fs::create_dir_all(folder.join("docs")).unwrap();
+    let w = |rel: &str, text: &str| std::fs::write(folder.join(rel), text).unwrap();
+    w(
+        "Cargo.toml",
+        "[package]\nname = \"calc\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+    );
+    w("Cargo.lock", "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = \"calc\"\nversion = \"0.1.0\"\n");
+    w("src/lib.rs", FAILING_BODY);
+    w(
+        "tests/add.rs",
+        "#[test]\nfn adds_positive_numbers() {\n    assert_eq!(calc::add(2, 3), 5);\n}\n",
+    );
+    w("docs/NOTES.md", "# Notes\n\noriginal notes\n");
+    let _ = fx;
+    let v = ic::project_open(sock, folder.to_str().unwrap()).expect("project-open");
+    v["project"]["projectId"]
+        .as_str()
+        .expect("project id")
+        .to_owned()
+}
+
+fn managed_broker(fx: &Fx, name: &str) -> BrokerHandle {
+    let mut c = fx.config(name);
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.project_snapshots = Some(fx.tmp.path().join("snapshots"));
+    c.interactive = true;
+    nexus_broker::start(c).expect("broker starts")
+}
+
+#[test]
+fn a71_workspace_continuity_survives_a_changed_project_applied_patches_and_refuses_real_conflicts()
+{
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(a71_responder());
+    let b = managed_broker(&fx, "a71-ws");
+    let sock = b.socket_path().to_owned();
+    let folder = fx.work.join("managed");
+    let pid = open_managed_project(&fx, &sock, &folder);
+    let copy_of = |r: &ic::IntentRun| fx.worktrees.join(r.task_instance_id.clone().unwrap());
+    let read = |p: PathBuf| std::fs::read_to_string(p).unwrap();
+
+    let s1 = tsend(
+        &sock,
+        None,
+        &pid,
+        "FIX-F1: fix F1 and add tests",
+        "edit",
+        "continue",
+        "a71-ws-00000001",
+    )
+    .unwrap();
+    let tid = s1["threadId"].as_str().unwrap().to_owned();
+    let r1 = wait_terminal(&sock, s1["run"]["runId"].as_str().unwrap(), 300);
+    assert_eq!(r1.state, "completed", "{r1:?}");
+    assert_eq!(r1.workspace_relation.as_deref(), Some("fresh"));
+    wait_folded(&sock, &tid, 1);
+    assert!(
+        read(folder.join("src/lib.rs")).contains("a - b"),
+        "the user's folder is untouched"
+    );
+
+    // (a) the user edits an UNRELATED file in the folder meanwhile: both changes are kept
+    std::fs::write(
+        folder.join("docs/NOTES.md"),
+        "# Notes\n\nedited by the user\n",
+    )
+    .unwrap();
+    let s2 = tsend(
+        &sock,
+        Some(&tid),
+        &pid,
+        "REVIEW-TWO: look again",
+        "review",
+        "continue",
+        "a71-ws-00000002",
+    )
+    .unwrap();
+    let r2 = wait_terminal(&sock, s2["run"]["runId"].as_str().unwrap(), 200);
+    assert_eq!(r2.state, "completed", "{r2:?}");
+    assert_eq!(r2.workspace_relation.as_deref(), Some("rebased"), "{r2:?}");
+    assert!(
+        r2.workspace_note
+            .as_deref()
+            .unwrap()
+            .contains("2 file(s) of its work were carried over"),
+        "{:?}",
+        r2.workspace_note
+    );
+    assert!(read(copy_of(&r2).join("src/lib.rs")).contains("a + b"));
+    assert!(read(copy_of(&r2).join("docs/NOTES.md")).contains("edited by the user"));
+    wait_folded(&sock, &tid, 2);
+
+    // (b) the patch was applied to the folder (same content): nothing is carried twice
+    std::fs::write(
+        folder.join("src/lib.rs"),
+        std::fs::read(copy_of(&r2).join("src/lib.rs")).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        folder.join("tests/regression.rs"),
+        std::fs::read(copy_of(&r2).join("tests/regression.rs")).unwrap(),
+    )
+    .unwrap();
+    let s3 = tsend(
+        &sock,
+        Some(&tid),
+        &pid,
+        "REVIEW-THREE: and now",
+        "review",
+        "continue",
+        "a71-ws-00000003",
+    )
+    .unwrap();
+    let r3 = wait_terminal(&sock, s3["run"]["runId"].as_str().unwrap(), 200);
+    assert_eq!(r3.state, "completed", "{r3:?}");
+    assert_eq!(r3.workspace_relation.as_deref(), Some("rebased"));
+    assert!(
+        r3.workspace_note
+            .as_deref()
+            .unwrap()
+            .contains("2 were already in your folder"),
+        "{:?}",
+        r3.workspace_note
+    );
+    wait_folded(&sock, &tid, 3);
+    let d3 = ic::diff(&sock, &r3.run_id).unwrap();
+    assert!(
+        d3.files.is_empty(),
+        "the folder already has everything: {d3:?}"
+    );
+
+    // (c) the conversation changes a file, then the user changes the SAME file differently
+    let s4 = tsend(
+        &sock,
+        Some(&tid),
+        &pid,
+        "OTHER-EDIT: change the notes",
+        "edit",
+        "continue",
+        "a71-ws-00000004",
+    )
+    .unwrap();
+    let r4 = wait_terminal(&sock, s4["run"]["runId"].as_str().unwrap(), 200);
+    assert_eq!(r4.state, "completed", "{r4:?}");
+    wait_folded(&sock, &tid, 4);
+    assert!(read(copy_of(&r4).join("docs/NOTES.md")).contains("edited by the conversation"));
+    std::fs::write(
+        folder.join("docs/NOTES.md"),
+        "# Notes\n\nthe user rewrote this entirely\n",
+    )
+    .unwrap();
+    let s5 = tsend(
+        &sock,
+        Some(&tid),
+        &pid,
+        "REVIEW-FIVE: anything else?",
+        "review",
+        "continue",
+        "a71-ws-00000005",
+    )
+    .unwrap();
+    let r5 = wait_terminal(&sock, s5["run"]["runId"].as_str().unwrap(), 200);
+    assert_eq!(
+        r5.state, "rejected",
+        "an explicit conflict, never a silent merge: {r5:?}"
+    );
+    assert_eq!(r5.error_code.as_deref(), Some("workspace-conflict"));
+    assert!(
+        r5.error_message
+            .as_deref()
+            .unwrap()
+            .contains("docs/NOTES.md"),
+        "{:?}",
+        r5.error_message
+    );
+    assert!(
+        r5.tool_activity.is_empty() && r5.usage_input_tokens.is_none(),
+        "nothing was sent to the model"
+    );
+    let t = wait_folded(&sock, &tid, 5);
+    let note = t["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|m| m["kind"] == "note")
+        .unwrap();
+    assert!(
+        note["text"]
+            .as_str()
+            .unwrap()
+            .contains("workspace-conflict")
+            || note["text"].as_str().unwrap().contains("docs/NOTES.md"),
+        "{note}"
+    );
+    assert_eq!(
+        read(folder.join("docs/NOTES.md")),
+        "# Notes\n\nthe user rewrote this entirely\n",
+        "the user's file is untouched"
+    );
+    // the user decides: continue from the project's CURRENT files (the earlier copy stays for review)
+    let s6 = tsend(
+        &sock,
+        Some(&tid),
+        &pid,
+        "REVIEW-SIX: start from my files",
+        "review",
+        "fresh",
+        "a71-ws-00000006",
+    )
+    .unwrap();
+    let r6 = wait_terminal(&sock, s6["run"]["runId"].as_str().unwrap(), 200);
+    assert_eq!(r6.state, "completed", "{r6:?}");
+    assert_eq!(r6.workspace_relation.as_deref(), Some("fresh-by-choice"));
+    assert!(read(copy_of(&r6).join("docs/NOTES.md")).contains("rewrote this entirely"));
+    assert!(
+        copy_of(&r4).join("docs/NOTES.md").exists(),
+        "the conversation's earlier copy is kept"
+    );
+    let turns = first_turns(&fx);
+    assert!(turns
+        .last()
+        .unwrap()
+        .contains("changes from earlier runs are NOT in this copy"));
+    b.shutdown();
+}
+
+#[test]
+fn a71_context_compaction_keeps_findings_requirements_and_verified_results_within_the_conversations_budget(
+) {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(a71_responder());
+    let mut c = fx.config("a71-compact");
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.interactive = true;
+    // a small overall context budget: the conversation's share is a quarter of it (20 KB)
+    c.context_budget_bytes = Some(80_000);
+    let b = nexus_broker::start(c).expect("broker");
+    let sock = b.socket_path().to_owned();
+    let s = tsend(
+        &sock,
+        None,
+        "proj",
+        "REVIEW-ONE: review this repository, read-only",
+        "auto",
+        "continue",
+        "a71-cmp-0000001",
+    )
+    .unwrap();
+    let tid = s["threadId"].as_str().unwrap().to_owned();
+    wait_terminal(&sock, s["run"]["runId"].as_str().unwrap(), 180);
+    wait_folded(&sock, &tid, 1);
+    for i in 2..=8usize {
+        let s = tsend(
+            &sock,
+            Some(&tid),
+            "proj",
+            &format!("BIG-ANSWER number {i}: discuss module {i} at length"),
+            "review",
+            "continue",
+            &format!("a71-cmp-{i:07}"),
+        )
+        .unwrap();
+        let r = wait_terminal(&sock, s["run"]["runId"].as_str().unwrap(), 180);
+        assert_eq!(r.state, "completed", "{r:?}");
+        wait_folded(&sock, &tid, i);
+    }
+    let s = tsend(
+        &sock,
+        Some(&tid),
+        "proj",
+        "Summarize what we decided about F1 and F2",
+        "auto",
+        "continue",
+        "a71-cmp-0000099",
+    )
+    .unwrap();
+    wait_terminal(&sock, s["run"]["runId"].as_str().unwrap(), 180);
+    let turns = first_turns(&fx);
+    let last = turns.last().unwrap();
+    // 8 earlier runs, 7 of them with ~10 KB answers: the model gets a bounded digest, not a transcript
+    assert!(
+        last.len() < 40_000,
+        "the context is bounded: {} bytes",
+        last.len()
+    );
+    for must in [
+        "Conversation context",
+        "F1 — add() subtracts instead of adding",
+        "F2 — No overflow handling",
+        "### Run 8",
+        "BIG-ANSWER number 8",
+        "Runtime record:",
+        "Summarize what we decided",
+    ] {
+        assert!(last.contains(must), "compacted context lost {must:?}");
+    }
+    // the stored record itself is complete: nothing was thrown away, only not re-sent
+    let t = wait_folded(&sock, &tid, 9);
+    assert_eq!(
+        t["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .count(),
+        9
+    );
+    assert!(t["messages"][1]["text"].as_str().unwrap().len() > 100);
+    b.shutdown();
+}
+
+#[test]
+fn a71_records_from_before_conversations_become_conversations_and_a_crash_between_run_and_fold_is_repaired(
+) {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(a71_responder());
+    let b = interactive_broker(&fx, "a71-legacy");
+    let sock = b.socket_path().to_owned();
+    // a single-run record exactly as earlier versions made it (no conversation)
+    let legacy = ic::submit(
+        &sock,
+        &code_intent_for(
+            "proj",
+            "REVIEW-ONE: legacy review, read-only",
+            "a71-legacy-0000001",
+            |_| {},
+        ),
+    )
+    .unwrap()
+    .run;
+    let lr = wait_terminal(&sock, &legacy.run_id, 180);
+    assert_eq!(lr.state, "completed");
+    assert!(lr.thread_id.is_none());
+    b.shutdown();
+
+    // reopened: it is a conversation now, with its request and answer, and can be continued
+    let b = interactive_broker(&fx, "a71-legacy");
+    let sock = b.socket_path().to_owned();
+    let list = ic::thread_list(&sock, Some("proj"), false).unwrap();
+    assert_eq!(list["threads"].as_array().unwrap().len(), 1, "{list}");
+    let tid = list["threads"][0]["threadId"].as_str().unwrap().to_owned();
+    assert_eq!(list["threads"][0]["legacy"], true);
+    let t = ic::thread_get(&sock, &tid, None).unwrap();
+    let msgs = t["messages"].as_array().unwrap();
+    assert_eq!(msgs[0]["role"], "user");
+    assert!(msgs[0]["text"].as_str().unwrap().contains("legacy review"));
+    assert!(
+        msgs.iter().any(|m| m["role"] == "assistant"
+            && m["text"].as_str().unwrap().contains("F1 — add() subtracts")),
+        "{t}"
+    );
+    assert_eq!(t["findings"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        ic::status(&sock, &lr.run_id).unwrap().thread_id.as_deref(),
+        Some(tid.as_str())
+    );
+    let s = tsend(
+        &sock,
+        Some(&tid),
+        "proj",
+        "FIX-F1: fix F1 and add regression tests",
+        "auto",
+        "continue",
+        "a71-legacy-0000002",
+    )
+    .unwrap();
+    let r = wait_terminal(&sock, s["run"]["runId"].as_str().unwrap(), 300);
+    assert_eq!(r.state, "completed", "{r:?}");
+    wait_folded(&sock, &tid, 2);
+    let turns = first_turns(&fx);
+    assert!(
+        turns
+            .last()
+            .unwrap()
+            .contains("F1 — add() subtracts instead of adding")
+            && turns.last().unwrap().contains("legacy review")
+    );
+    b.shutdown();
+
+    // crash simulation 1: the run finished but its answer was never folded into the conversation
+    let dir = fx.config("a71-legacy").state_dir.join("threads");
+    let meta_path = dir.join(format!("{tid}.json"));
+    let log_path = dir.join(format!("{tid}.log"));
+    let mut meta: Value = serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+    let last_run = meta["runs"][1]["runId"].as_str().unwrap().to_owned();
+    meta["runs"][1]["ended"] = json!(false);
+    meta["runs"][1]["assistantSeq"] = Value::Null;
+    meta["runs"][1]["digest"] = Value::Null;
+    std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    let kept: Vec<String> = std::fs::read_to_string(&log_path)
+        .unwrap()
+        .lines()
+        .filter(|l| {
+            let m: Value = serde_json::from_str(l).unwrap();
+            !(m["role"] == "assistant" && m["runId"] == last_run.as_str())
+        })
+        .map(str::to_owned)
+        .collect();
+    std::fs::write(&log_path, kept.join("\n") + "\n").unwrap();
+    // crash simulation 2: a run exists whose conversation entry (and request message) was never written
+    let s3 = {
+        let b = interactive_broker(&fx, "a71-legacy");
+        let sock = b.socket_path().to_owned();
+        let s = tsend(
+            &sock,
+            Some(&tid),
+            "proj",
+            "THIRD-REQUEST: one more question",
+            "auto",
+            "continue",
+            "a71-legacy-0000003",
+        )
+        .unwrap();
+        let run3 = s["run"]["runId"].as_str().unwrap().to_owned();
+        wait_terminal(&sock, &run3, 200);
+        b.shutdown();
+        run3
+    };
+    let mut meta: Value = serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+    let runs = meta["runs"].as_array_mut().unwrap();
+    runs.retain(|r| r["runId"] != s3.as_str());
+    std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    let kept: Vec<String> = std::fs::read_to_string(&log_path)
+        .unwrap()
+        .lines()
+        .filter(|l| {
+            let m: Value = serde_json::from_str(l).unwrap();
+            m["runId"] != s3.as_str()
+        })
+        .map(str::to_owned)
+        .collect();
+    std::fs::write(&log_path, kept.join("\n") + "\n").unwrap();
+
+    let b = interactive_broker(&fx, "a71-legacy");
+    let sock = b.socket_path().to_owned();
+    let t = wait_folded(&sock, &tid, 3);
+    let msgs = t["messages"].as_array().unwrap();
+    assert!(
+        msgs.iter()
+            .any(|m| m["role"] == "assistant" && m["runId"] == last_run.as_str()),
+        "the answer was folded again: {t}"
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m["role"] == "user" && m["text"].as_str().unwrap().contains("THIRD-REQUEST")),
+        "the request was restored from the run record: {t}"
+    );
+    assert_eq!(t["runs"].as_array().unwrap().len(), 3);
+    // sequence numbers stay unique and ordered after the repair
+    let seqs: Vec<u64> = msgs.iter().map(|m| m["seq"].as_u64().unwrap()).collect();
+    let mut sorted = seqs.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(seqs, sorted);
+    b.shutdown();
+}
+
+#[test]
+fn a71_a_provider_interruption_does_not_repeat_what_an_earlier_run_of_the_conversation_already_did()
+{
+    if !sandbox_ready() {
+        return;
+    }
+    let drops = Arc::new(AtomicUsize::new(0));
+    let d2 = drops.clone();
+    let inner = a71_responder();
+    let responder: Responder = Arc::new(move |n, body| {
+        // the follow-up's first provider requests are lost (the provider closes the stream)
+        if current_request(body).contains("FLAKY") && d2.fetch_add(1, Ordering::SeqCst) < 2 {
+            return Answer::Close;
+        }
+        inner(n, body)
+    });
+    let fx = fixture_autonomous(responder);
+    let b = interactive_broker(&fx, "a71-flaky");
+    let sock = b.socket_path().to_owned();
+    let s1 = tsend(
+        &sock,
+        None,
+        "proj",
+        "SLOW-WRITE: write the carried file",
+        "edit",
+        "continue",
+        "a71-flaky-000001",
+    )
+    .unwrap();
+    let tid = s1["threadId"].as_str().unwrap().to_owned();
+    let r1id = s1["run"]["runId"].as_str().unwrap().to_owned();
+    let end = Instant::now() + Duration::from_secs(90);
+    while !ic::status(&sock, &r1id)
+        .unwrap()
+        .tool_activity
+        .iter()
+        .any(|a| a.tool == "fs_write" && a.status == "executed")
+    {
+        assert!(Instant::now() < end);
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    ic::cancel(&sock, &r1id).unwrap();
+    wait_terminal(&sock, &r1id, 90);
+    wait_folded(&sock, &tid, 1);
+    let s2 = tsend(
+        &sock,
+        Some(&tid),
+        "proj",
+        "FLAKY AFTER-STOP: check the carried file",
+        "auto",
+        "continue",
+        "a71-flaky-000002",
+    )
+    .unwrap();
+    let r2 = wait_terminal(&sock, s2["run"]["runId"].as_str().unwrap(), 300);
+    assert_eq!(r2.state, "completed", "{r2:?}");
+    assert!(
+        r2.recoveries >= 1,
+        "the lost provider answers were recovered: {r2:?}"
+    );
+    // the write of run 1 was executed exactly once in the whole conversation
+    let writes = |r: &ic::IntentRun| {
+        r.tool_activity
+            .iter()
+            .filter(|a| a.tool == "fs_write" && a.status == "executed")
+            .count()
+    };
+    assert_eq!(writes(&ic::status(&sock, &r1id).unwrap()), 1);
+    assert_eq!(writes(&r2), 0);
+    b.shutdown();
+}
+
+#[test]
+fn a71_an_interrupted_run_continued_by_nexus_stays_in_its_conversation_and_a_newer_message_supersedes_it(
+) {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(a71_responder());
+    let b = interactive_broker(&fx, "a71-resume");
+    let sock = b.socket_path().to_owned();
+    let s1 = tsend(
+        &sock,
+        None,
+        "proj",
+        "SLOW-WRITE: write the carried file",
+        "edit",
+        "continue",
+        "a71-res-0000001",
+    )
+    .unwrap();
+    let tid = s1["threadId"].as_str().unwrap().to_owned();
+    let r1 = s1["run"]["runId"].as_str().unwrap().to_owned();
+    let end = Instant::now() + Duration::from_secs(90);
+    while !ic::status(&sock, &r1)
+        .unwrap()
+        .tool_activity
+        .iter()
+        .any(|a| a.tool == "fs_write" && a.status == "executed")
+    {
+        assert!(Instant::now() < end);
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    ic::cancel(&sock, &r1).unwrap();
+    wait_terminal(&sock, &r1, 90);
+    wait_folded(&sock, &tid, 1);
+    // Nexus (or the user) continues the interrupted run: it joins the SAME conversation
+    let v = ic::resume(&sock, &r1).expect("resume");
+    let r2 = v["run"]["runId"].as_str().unwrap().to_owned();
+    assert_eq!(v["run"]["threadId"], tid.as_str());
+    let run2 = wait_terminal(&sock, &r2, 200);
+    assert_eq!(run2.continuation_of.as_deref(), Some(r1.as_str()));
+    let t = wait_folded(&sock, &tid, 2);
+    assert_eq!(t["runs"].as_array().unwrap().len(), 2);
+    assert!(
+        t["runs"][1]["userSeq"].is_null(),
+        "a continuation has no request of its own"
+    );
+    assert!(t["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["kind"] == "note"
+            && m["text"]
+                .as_str()
+                .unwrap()
+                .contains("continued the interrupted run")));
+    // a user message that arrives after supersedes an interrupted run: it can no longer be continued
+    let s3 = tsend(
+        &sock,
+        Some(&tid),
+        "proj",
+        "AFTER-STOP: my own follow-up",
+        "auto",
+        "continue",
+        "a71-res-0000002",
+    )
+    .unwrap();
+    wait_terminal(&sock, s3["run"]["runId"].as_str().unwrap(), 200);
+    wait_folded(&sock, &tid, 3);
+    let again = ic::resume(&sock, &r2);
+    assert!(
+        again.is_err(),
+        "a finished, superseded run is not continued: {again:?}"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn a71_two_conversations_running_at_the_same_time_keep_separate_messages_runs_and_workspaces() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(a71_responder());
+    let b = interactive_broker(&fx, "a71-conc");
+    let sock = b.socket_path().to_owned();
+    let (s1, s2) = std::thread::scope(|sc| {
+        let h1 = sc.spawn(|| {
+            tsend(
+                &sock,
+                None,
+                "proj",
+                "FIX-F1: conversation ONE fixes the crate",
+                "edit",
+                "continue",
+                "a71-conc-000001",
+            )
+            .unwrap()
+        });
+        let h2 = sc.spawn(|| {
+            tsend(
+                &sock,
+                None,
+                "proj",
+                "OTHER-QUESTION: conversation TWO just reads",
+                "review",
+                "continue",
+                "a71-conc-000002",
+            )
+            .unwrap()
+        });
+        (h1.join().unwrap(), h2.join().unwrap())
+    });
+    let (t1, t2) = (
+        s1["threadId"].as_str().unwrap().to_owned(),
+        s2["threadId"].as_str().unwrap().to_owned(),
+    );
+    assert_ne!(t1, t2);
+    let r1 = wait_terminal(&sock, s1["run"]["runId"].as_str().unwrap(), 300);
+    let r2 = wait_terminal(&sock, s2["run"]["runId"].as_str().unwrap(), 300);
+    assert_eq!(
+        (r1.state.as_str(), r2.state.as_str()),
+        ("completed", "completed")
+    );
+    let d1 = wait_folded(&sock, &t1, 1);
+    let d2 = wait_folded(&sock, &t2, 1);
+    let texts = |d: &Value| {
+        d["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["text"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(texts(&d1).contains("conversation ONE") && !texts(&d1).contains("conversation TWO"));
+    assert!(texts(&d2).contains("conversation TWO") && !texts(&d2).contains("conversation ONE"));
+    // workspaces: one fixed the crate, the other did not see or change it
+    let lib = |r: &ic::IntentRun| {
+        std::fs::read_to_string(
+            fx.worktrees
+                .join(r.task_instance_id.clone().unwrap())
+                .join("src/lib.rs"),
+        )
+        .unwrap()
+    };
+    assert!(lib(&r1).contains("a + b") && lib(&r2).contains("a - b"));
+    assert_eq!(
+        std::fs::read_to_string(fx.repo.join("src/lib.rs")).unwrap(),
+        FAILING_BODY
+    );
+    b.shutdown();
+}

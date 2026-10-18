@@ -574,3 +574,70 @@ fn an_interrupted_tasks_work_is_carried_into_a_fresh_copy_of_the_same_snapshot()
     // a base that is not a commit is refused
     assert!(gitwt::seed_copy(&o, "not-a-commit", &n).is_err());
 }
+
+/// A7.1: a conversation follow-up whose project snapshot moved on since the earlier run.
+#[test]
+fn conversation_work_is_rebased_onto_a_newer_snapshot_without_silent_overwrites() {
+    let (_d, src) = repo();
+    std::fs::write(src.join("notes.txt"), "notes v1\n").unwrap();
+    git(&src, &["add", "-A"]);
+    git(&src, &["commit", "-qm", "notes"]);
+    let (_r, root) = roots();
+    let old = create(&src, &root, "task-old-2").unwrap();
+    let o = root.join("task-old-2");
+    // the earlier run changed two files and added one
+    std::fs::write(
+        o.join("src/lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+    )
+    .unwrap();
+    std::fs::write(o.join("notes.txt"), "notes v2 (by the run)\n").unwrap();
+    std::fs::write(o.join("added.txt"), "new\n").unwrap();
+
+    // 1. the project moved on in an UNRELATED file: all of the run's work is carried
+    std::fs::write(src.join("README.md"), "# demo, edited by the user\n").unwrap();
+    git(&src, &["add", "-A"]);
+    git(&src, &["commit", "-qm", "user edit"]);
+    let new = create(&src, &root, "task-new-2").unwrap();
+    let n = root.join("task-new-2");
+    let r = gitwt::seed_rebase(&o, &old.source.commit, &n, &new.source.commit).unwrap();
+    assert!(r.conflicts.is_empty(), "{r:?}");
+    assert_eq!((r.carried, r.already_applied), (3, 0));
+    assert_eq!(
+        std::fs::read_to_string(n.join("src/lib.rs")).unwrap(),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(n.join("README.md")).unwrap(),
+        "# demo, edited by the user\n",
+        "the user's own change is kept"
+    );
+
+    // 2. the run's patch was applied to the folder (identical content): nothing to carry
+    std::fs::write(
+        src.join("src/lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("notes.txt"), "notes v2 (by the run)\n").unwrap();
+    std::fs::write(src.join("added.txt"), "new\n").unwrap();
+    git(&src, &["add", "-A"]);
+    git(&src, &["commit", "-qm", "adopted"]);
+    let adopted = create(&src, &root, "task-new-3").unwrap();
+    let a = root.join("task-new-3");
+    let r = gitwt::seed_rebase(&o, &old.source.commit, &a, &adopted.source.commit).unwrap();
+    assert!(r.conflicts.is_empty(), "{r:?}");
+    assert_eq!((r.carried, r.already_applied), (0, 3));
+
+    // 3. the same file was changed differently in the project: conflict, nothing written
+    std::fs::write(src.join("notes.txt"), "notes v3 (by the user)\n").unwrap();
+    git(&src, &["add", "-A"]);
+    git(&src, &["commit", "-qm", "conflicting edit"]);
+    let theirs = create(&src, &root, "task-new-4").unwrap();
+    let t = root.join("task-new-4");
+    let before = snapshot(&t);
+    let r = gitwt::seed_rebase(&o, &old.source.commit, &t, &theirs.source.commit).unwrap();
+    assert_eq!(r.conflicts, vec!["notes.txt".to_owned()], "{r:?}");
+    assert_eq!(snapshot(&t), before, "a conflict writes nothing");
+    assert!(gitwt::seed_rebase(&o, "nope", &t, &theirs.source.commit).is_err());
+}
