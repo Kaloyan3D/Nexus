@@ -642,6 +642,9 @@ impl Fx {
             approval_ttl_ms: None,
             project_registry: None,
             code_caps: Default::default(),
+            interactive: false,
+            project_snapshots: None,
+            context_budget_bytes: None,
         }
     }
 
@@ -1606,6 +1609,7 @@ fn plant_crashed_run(fx: &Fx, name: &str, state: nexus_client::model_run::ModelR
             run,
             payload_digest: "d".into(),
             idempotency_key: "idem-crash-01".into(),
+            prompt: None,
         })
         .unwrap();
     run_id

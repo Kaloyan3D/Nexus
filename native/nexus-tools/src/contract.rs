@@ -92,7 +92,7 @@ pub struct SearchArgs {
 pub struct WriteArgs {
     pub path: String,
     pub content: String,
-    /// `create` | `replace`
+    /// `create` | `replace` | `delete`
     pub mode: String,
     /// Required for `replace`: sha256 hex of the current file bytes.
     #[serde(default)]
@@ -212,7 +212,16 @@ impl ToolArgs {
                         Some(h) if is_sha256_hex(h) => {}
                         _ => return inv("replace requires a 64-hex expectedSha256"),
                     },
-                    _ => return inv("mode must be 'create' or 'replace'"),
+                    "delete" => {
+                        if !a.content.is_empty() {
+                            return inv("delete must not carry content");
+                        }
+                        match &a.expected_sha256 {
+                            Some(h) if is_sha256_hex(h) => {}
+                            _ => return inv("delete requires a 64-hex expectedSha256"),
+                        }
+                    }
+                    _ => return inv("mode must be 'create', 'replace' or 'delete'"),
                 }
                 if a.content.contains('\0') {
                     return inv("content must be text (no NUL)");

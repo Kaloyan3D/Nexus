@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MAX_FRAME: u64 = 80 * 1024;
-const MAX_CONNECTIONS: usize = 16;
+const MAX_CONNECTIONS: usize = 128;
 const MAX_UNAUTH_CONNECTIONS: usize = 4;
 const MAX_FOLLOW_DELTA: usize = 32 * 1024;
 const TERMINAL: &[&str] = &[
@@ -40,7 +40,9 @@ const TERMINAL: &[&str] = &[
 pub struct Broker {
     pub cfg: BrokerConfig,
     pub store: Store,
-    pub(crate) cap_hex: String,
+    /// The daemon's issuer capability. A restarted daemon issues a new one; it is re-read
+    /// from its file when the daemon stops accepting the one held here.
+    pub(crate) cap_hex: std::sync::RwLock<String>,
     pub(crate) node_abs: std::path::PathBuf,
     pub(crate) cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub(crate) bridge_lock: Mutex<()>,
@@ -121,7 +123,53 @@ impl Broker {
         }
     }
 
-    fn view(&self, rec: &RunRecord) -> (IntentRun, String) {
+    /// Annotate a record that is already final (links between runs, what happened to its
+    /// patch). Never changes its state, outcome or counters.
+    pub fn annotate(&self, run_id: &str, f: impl FnOnce(&mut IntentRun)) {
+        let _g = self.store.lock();
+        if let Some(mut rec) = self.store.load(run_id) {
+            f(&mut rec.run);
+            let _ = self.store.put(&rec);
+        }
+    }
+
+    /// The run for listings and status polls. A finished or agentic run needs no transcript
+    /// or provider-status I/O to be described (the text is served by `intent-result` only),
+    /// so a Desktop polling its history stays fast however long that history gets. The prompt
+    /// preview is remembered on the record the first time it has to be read.
+    pub(crate) fn view_light(&self, rec: &RunRecord) -> IntentRun {
+        // The strict profile never keeps task text in its state directory (an audited
+        // property); its listings keep the original, transcript-reading view.
+        if !self.cfg.interactive || (!rec.run.terminal && !is_agentic(&rec.run.intent_type)) {
+            return self.view(rec).0;
+        }
+        let mut run = rec.run.clone();
+        if run.prompt_preview.is_none() {
+            let preview: Option<String> = rec
+                .prompt
+                .as_ref()
+                .map(|p| p.chars().take(160).collect())
+                .or_else(|| {
+                    let conv = run.conversation_id.as_ref()?;
+                    let store =
+                        nexus_transcript::TranscriptStore::open(&self.cfg.transcript_dir).ok()?;
+                    let l = store.load(conv).ok()?;
+                    l.events
+                        .iter()
+                        .find(|e| e.kind == nexus_transcript::EventKind::UserMessage)
+                        .and_then(|e| e.text.clone())
+                        .map(|t| t.chars().take(160).collect())
+                });
+            if let (Some(p), true) = (preview.clone(), run.terminal) {
+                self.annotate(&run.run_id.clone(), move |r| r.prompt_preview = Some(p));
+            }
+            run.prompt_preview = preview;
+        }
+        run.coding_outcome = nexus_client::intent_client::derive_coding_outcome(&run);
+        run
+    }
+
+    pub(crate) fn view(&self, rec: &RunRecord) -> (IntentRun, String) {
         let mut run = rec.run.clone();
         let mut text = String::new();
         if let Some(conv) = &run.conversation_id {
@@ -220,6 +268,17 @@ impl Broker {
     }
 
     fn submit(self: &Arc<Self>, client: &str, params: &Value) -> CmdResult {
+        self.submit_with(client, params, None)
+    }
+
+    /// `continuation` is set only by the broker itself (never by a client): the run it
+    /// continues, whose work is carried into the new run's working copy.
+    fn submit_with(
+        self: &Arc<Self>,
+        client: &str,
+        params: &Value,
+        continuation: Option<&str>,
+    ) -> CmdResult {
         if self.shutdown.load(Ordering::SeqCst) {
             return Err(("broker-shutting-down", "the broker is shutting down".into()));
         }
@@ -332,12 +391,16 @@ impl Broker {
                 },
                 created_at_ms: now,
                 updated_at_ms: now,
+                continuation_of: continuation.map(str::to_owned),
                 ..Default::default()
             };
             let rec = RunRecord {
                 run,
                 payload_digest: digest,
                 idempotency_key: intent.idempotency_key.clone(),
+                prompt: (intent.intent_type == nexus_contracts::intent::INTENT_REPO_CODE
+                    && self.cfg.interactive)
+                    .then(|| intent.content.clone()),
             };
             // Record first, then the index: a crash between the two leaves
             // an unindexed record (recovered as abandoned), never a key that
@@ -371,6 +434,89 @@ impl Broker {
             .ok_or(("internal", "run vanished".to_owned()))?;
         let (run, _) = self.view(&rec);
         Ok(json!({ "run": run, "replay": false }))
+    }
+
+    /// Continue an interrupted coding task: a NEW run on the same project whose working
+    /// copy already holds the earlier run's changes, told what was done and asked to carry
+    /// on. Never a replay: nothing the earlier run did is executed again.
+    pub(crate) fn resume_run(
+        self: &Arc<Self>,
+        client: &str,
+        old_id: &str,
+        auto: bool,
+    ) -> CmdResult {
+        let old = self.owned(client, old_id)?;
+        let r = &old.run;
+        if !self.cfg.interactive || r.intent_type != nexus_contracts::intent::INTENT_REPO_CODE {
+            return Err((
+                "not-available",
+                "only interactive coding runs can be continued".into(),
+            ));
+        }
+        if !r.terminal || r.state == "completed" {
+            return Err(("not-terminal", "this run is not an interrupted one".into()));
+        }
+        if let Some(n) = &r.continued_as {
+            return Err((
+                "already-continued",
+                format!("this run was already continued as {n}"),
+            ));
+        }
+        let (Some(task), Some(project), Some(_)) = (
+            old.prompt.clone(),
+            r.workspace_id.clone(),
+            r.task_instance_id.clone(),
+        ) else {
+            return Err((
+                "not-available",
+                "this run kept no task text or working copy".into(),
+            ));
+        };
+        if auto && (r.cancel_requested || r.tool_activity.is_empty()) {
+            return Err(("not-available", "nothing to continue".into()));
+        }
+        // a chain of continuations is bounded: a task that keeps dying is reported, not looped
+        let mut depth = 0;
+        let mut cur = r.continuation_of.clone();
+        while let Some(p) = cur {
+            depth += 1;
+            cur = self.store.load(&p).and_then(|x| x.run.continuation_of);
+        }
+        if auto && depth >= 3 {
+            return Err((
+                "not-available",
+                "this task was already continued three times".into(),
+            ));
+        }
+        let why = r.error_code.clone().unwrap_or_else(|| r.state.clone());
+        let done = crate::inspect::receipts_summary(&r.tool_activity);
+        let content = format!(
+            "{task}\n\n---\nHARNESS NOTE: this task is being CONTINUED after an interruption ({why}). The working copy already contains the changes made so far; do not redo finished work. First check the current state (read the files you changed, re-run the tests), then carry on until the task is complete and verified.\n\nWhat had been done before the interruption:\n{done}\n"
+        );
+        let intent = NexusIntentV1 {
+            schema_version: 1,
+            request_id: format!("resume-{}", rand_hex(8)),
+            idempotency_key: format!("resume-{old_id}"),
+            intent_type: nexus_contracts::intent::INTENT_REPO_CODE.to_owned(),
+            content,
+            model: None,
+            workspace_id: Some(project),
+            limits: self
+                .cfg
+                .code_caps
+                .with_user_limits(&self.cfg.state_dir)
+                .effective(true)
+                .to_intent_limits(),
+            response_mode: nexus_contracts::intent::ResponseMode::Stream,
+            client_label: Some("nexus-continuation".to_owned()),
+        };
+        let params = json!({ "intent": serde_json::to_value(&intent).unwrap_or_default() });
+        let out = self.submit_with(&r.client_id.clone(), &params, Some(old_id))?;
+        if let Some(new_id) = out.pointer("/run/runId").and_then(|v| v.as_str()) {
+            let n = new_id.to_owned();
+            self.annotate(old_id, |x| x.continued_as = Some(n));
+        }
+        Ok(out)
     }
 
     fn cancel(&self, client: &str, run_id: &str) -> CmdResult {
@@ -469,6 +615,187 @@ impl Broker {
         }))
     }
 
+    /// Apply a finished run's patch to the user's ORIGINAL folder. Only reachable from the
+    /// native backend after a native confirmation; ownership-checked; all-or-nothing;
+    /// refuses a changed folder or a refreshed project; audited.
+    pub(crate) fn project_adopt(&self, client: &str, run_id: &str) -> CmdResult {
+        let env = self.cfg.project_env().ok_or((
+            "not-available",
+            "this broker cannot adopt patches".to_owned(),
+        ))?;
+        let rec = self.owned(client, run_id)?;
+        if rec.run.intent_type != nexus_contracts::intent::INTENT_REPO_CODE || !rec.run.terminal {
+            return Err(("not-ready", "only a finished coding run has a patch".into()));
+        }
+        let (ws, task) = match (
+            rec.run.workspace_id.clone(),
+            rec.run.task_instance_id.clone(),
+        ) {
+            (Some(w), Some(t)) => (w, t),
+            _ => return Err(("not-found", "this run has no working copy".into())),
+        };
+        let reg = nexus_tools::registry::load(env.registry_dir, env.trust)
+            .map_err(|e| ("registry", e.to_string()))?;
+        let p = reg
+            .get(&ws)
+            .filter(|p| p.managed)
+            .ok_or((
+                "not-adoptable",
+                "only projects opened in Nexus can receive a patch automatically".to_owned(),
+            ))?
+            .clone();
+        if rec.run.worktree_commit.as_deref() != Some(p.pinned_commit.as_str()) {
+            return Err((
+                "project-refreshed",
+                "the project was refreshed after this run; copy the patch and apply it by hand"
+                    .into(),
+            ));
+        }
+        let (origin, fp) = (
+            p.origin.clone().unwrap_or_default(),
+            p.snapshot_fingerprint.clone().unwrap_or_default(),
+        );
+        let resp = pipeline::daemon(self, "worktree-diff", json!({ "taskInstanceId": task }))
+            .map_err(|e| {
+                (
+                    "internal",
+                    format!("the change set could not be read ({})", e.code),
+                )
+            })?;
+        let d = resp.get("diff").cloned().unwrap_or_default();
+        if d.get("diffTruncated") == Some(&Value::Bool(true)) {
+            return Err((
+                "too-large",
+                "the patch is too large to apply automatically; export it with the operator tools"
+                    .into(),
+            ));
+        }
+        let text = d.get("diff").and_then(|v| v.as_str()).unwrap_or("");
+        let files = nexus_tools::snapshot::apply_patch(
+            std::path::Path::new(&origin),
+            &fp,
+            text,
+            &nexus_tools::snapshot::SnapshotLimits::default(),
+        )
+        .map_err(|e| ("adopt-refused", e.to_string()))?;
+        crate::consent::audit(
+            &self.cfg.state_dir,
+            json!({"atMs": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
+                   "kind": "patch-adopted", "runId": run_id, "project": ws, "files": files,
+                   "diffDigest": d.get("diffDigest"), "client": client}),
+        );
+        Ok(json!({ "applied": files }))
+    }
+
+    fn project_verb(&self, cmd: &str, params: &Value) -> CmdResult {
+        let env = self.cfg.project_env().ok_or((
+            "not-available",
+            "this broker cannot open projects (not in the interactive profile)".to_owned(),
+        ))?;
+        let s = |k: &str| params.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        match cmd {
+            "project-open" => crate::projects::open(&env, s("path")),
+            "project-list" => crate::projects::list(
+                &env,
+                params
+                    .get("changes")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            ),
+            "project-forget" => crate::projects::forget(&env, s("projectId")),
+            "project-policy" => crate::projects::set_policy(
+                &env,
+                s("projectId"),
+                params.get("installs").and_then(|v| v.as_bool()),
+                params.get("trusted").and_then(|v| v.as_bool()),
+            ),
+            _ => {
+                // refresh = re-open the recorded origin folder (re-validated)
+                let f = nexus_tools::registry::load(env.registry_dir, env.trust)
+                    .map_err(|e| ("registry", e.to_string()))?;
+                let p = f
+                    .get(s("projectId"))
+                    .ok_or(("not-found", "no such project".to_owned()))?;
+                let origin = p
+                    .origin
+                    .clone()
+                    .ok_or(("not-found", "that project has no origin folder".to_owned()))?;
+                crate::projects::open(&env, &origin)
+            }
+        }
+    }
+
+    /// The consent the user has given (if any) plus the exact text a new consent
+    /// must present. Interactive profile only.
+    fn consent_status(&self) -> CmdResult {
+        if !self.cfg.interactive {
+            return Ok(json!({ "interactive": false }));
+        }
+        // before the provider is connected there is no verified route yet: say so
+        // instead of failing (the Desktop then shows the connection step)
+        let not_ready = json!({ "interactive": true, "providerReady": false, "consent": null });
+        let Ok(m) = self.models() else {
+            return Ok(not_ready);
+        };
+        let Some(first) = m.first() else {
+            return Ok(not_ready);
+        };
+        let text = crate::consent::consent_text(&first.provider_id, &first.remote_model_id);
+        Ok(json!({
+            "interactive": true,
+            "providerId": first.provider_id, "remoteModelId": first.remote_model_id,
+            "endpointKind": first.endpoint_kind,
+            "text": text, "textSha256": crate::live_auth::prompt_digest(&text),
+            "consent": crate::consent::status(&self.cfg.state_dir),
+        }))
+    }
+
+    fn consent_grant(&self, client: &str, params: &Value) -> CmdResult {
+        if !self.cfg.interactive {
+            return Err((
+                "not-available",
+                "this broker is not in the interactive profile".into(),
+            ));
+        }
+        let s = |k: &str| {
+            params
+                .get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned()
+        };
+        let m = self.models()?;
+        let (p, r) = (s("providerId"), s("remoteModelId"));
+        if !m
+            .iter()
+            .any(|x| x.provider_id == p && x.remote_model_id == r)
+        {
+            return Err((
+                "bad-request",
+                "that provider/model is not configured".into(),
+            ));
+        }
+        let kinds: Vec<String> = params
+            .get("intentTypes")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_else(|| vec!["repo-code".to_owned(), "repo-inspect".to_owned()]);
+        crate::consent::grant(
+            &self.cfg.state_dir,
+            &p,
+            &r,
+            &kinds,
+            &s("textSha256"),
+            client,
+        )
+        .map(|c| json!({ "consent": c }))
+        .map_err(|e| ("bad-request", e))
+    }
+
     fn follow(&self, client: &str, params: &Value) -> CmdResult {
         let run_id = params.get("runId").and_then(|v| v.as_str()).unwrap_or("");
         let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -509,9 +836,10 @@ impl Broker {
         let run_id = params.get("runId").and_then(|v| v.as_str()).unwrap_or("");
         match cmd {
             "intent-submit" => self.submit(client, params),
+            "intent-resume" => self.resume_run(client, run_id, false),
             "intent-status" => {
                 let rec = self.owned(client, run_id)?;
-                Ok(json!({ "run": self.view(&rec).0 }))
+                Ok(json!({ "run": self.view_light(&rec) }))
             }
             "intent-result" => {
                 let rec = self.owned(client, run_id)?;
@@ -538,7 +866,7 @@ impl Broker {
                     .iter()
                     .filter(|r| r.run.client_id == client)
                     .take(limit)
-                    .map(|r| self.view(r).0)
+                    .map(|r| self.view_light(r))
                     .collect();
                 Ok(json!({ "runs": runs }))
             }
@@ -575,6 +903,16 @@ impl Broker {
                         let pool = self.cfg.effective_code_sources();
                         let spec = pool.iter().find(|w| w.id == id);
                         let mut v = json!({ "sourceId": id });
+                        if let Some((dir, trust)) = &self.cfg.project_registry {
+                            if let Some(r) = nexus_tools::registry::load(dir, trust)
+                                .ok()
+                                .and_then(|f| f.get(&id).cloned())
+                            {
+                                v["label"] = json!(r.label.clone().unwrap_or_else(|| r.id.clone()));
+                                v["managed"] = json!(r.managed);
+                                v["kinds"] = json!(r.kinds);
+                            }
+                        }
                         if let Some(c) = spec.and_then(|w| w.pinned_commit.as_ref()) {
                             v["pinnedCommit"] = json!(c);
                         }
@@ -587,8 +925,55 @@ impl Broker {
             })),
             "intent-diff" => self.diff(client, run_id),
             "intent-copy" => self.copy_info(client, run_id),
+            "project-open" | "project-list" | "project-forget" | "project-refresh"
+            | "project-policy" => self.project_verb(cmd, params),
+            "project-adopt" => self.project_adopt(client, run_id),
+            "provider-consent-status" => self.consent_status(),
+            "provider-consent-grant" => self.consent_grant(client, params),
+            "provider-consent-revoke" => {
+                if !self.cfg.interactive {
+                    return Err((
+                        "not-available",
+                        "this broker is not in the interactive profile".into(),
+                    ));
+                }
+                Ok(json!({ "revoked": crate::consent::revoke(&self.cfg.state_dir, client) }))
+            }
+            "intent-limits-set" => {
+                // The user's own, LOWER limits (Settings). Each field is optional; null or
+                // absent resets it. Values are clamped to 1..=the built-in maximum.
+                let base = self.cfg.code_caps.effective(self.cfg.interactive);
+                let mut out = serde_json::Map::new();
+                for (k, max) in [
+                    ("maxTurns", u64::from(base.max_turns)),
+                    ("maxToolCalls", u64::from(base.max_tool_calls)),
+                    ("maxEdits", u64::from(base.max_edits)),
+                    ("maxTests", u64::from(base.max_tests)),
+                    ("maxRuntimeSecs", base.max_runtime_secs),
+                ] {
+                    if let Some(n) = params.get(k).and_then(|v| v.as_u64()) {
+                        out.insert(k.to_owned(), json!(n.clamp(1, max)));
+                    }
+                }
+                let path = self.cfg.state_dir.join(crate::config::USER_LIMITS_FILE);
+                if out.is_empty() {
+                    let _ = std::fs::remove_file(&path);
+                } else {
+                    std::fs::write(&path, serde_json::Value::Object(out).to_string())
+                        .map_err(|e| ("internal", format!("cannot save limits: {e}")))?;
+                }
+                Ok(json!({
+                    "limits": self.cfg.code_caps.with_user_limits(&self.cfg.state_dir).effective(self.cfg.interactive),
+                    "builtIn": base,
+                }))
+            }
             "intent-code-config" => Ok(json!({
-                "limits": self.cfg.code_caps.effective(),
+                "builtIn": self.cfg.code_caps.effective(self.cfg.interactive),
+                "limits": self
+                    .cfg
+                    .code_caps
+                    .with_user_limits(&self.cfg.state_dir)
+                    .effective(self.cfg.interactive),
                 "approvalLifetimeSecs": self
                     .cfg
                     .approval_ttl_ms
@@ -846,7 +1231,7 @@ pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
         .map_err(|e| format!("lock: {e}"))?;
     lock.try_lock_exclusive()
         .map_err(|_| "another broker already owns this state directory".to_owned())?;
-    cfg.code_caps.validate()?;
+    cfg.code_caps.validate(cfg.interactive)?;
     if cfg.project_registry.is_some() && !cfg.code_sources.is_empty() {
         return Err("--project-registry and --code-source are mutually exclusive".into());
     }
@@ -954,7 +1339,7 @@ pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
     let broker = Arc::new(Broker {
         cfg,
         store,
-        cap_hex,
+        cap_hex: std::sync::RwLock::new(cap_hex),
         node_abs,
         cancel_flags: Mutex::new(HashMap::new()),
         bridge_lock: Mutex::new(()),
@@ -965,7 +1350,38 @@ pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
         models: Mutex::new(None),
         _lock: lock,
     });
+    let interrupted: Vec<String> = broker
+        .store
+        .all()
+        .into_iter()
+        .filter(|r| !r.run.terminal)
+        .map(|r| r.run.run_id)
+        .collect();
     recover(&broker);
+    if broker.cfg.interactive && !interrupted.is_empty() {
+        // Autonomy: work that was running when the runtime went down is continued, not
+        // abandoned. Runs the user cancelled, or that made no progress, are left alone.
+        let b3 = Arc::clone(&broker);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            for id in interrupted {
+                let Some(rec) = b3.store.load(&id) else {
+                    continue;
+                };
+                if !rec.run.terminal || rec.run.state == "completed" {
+                    continue;
+                }
+                for _ in 0..30 {
+                    match b3.resume_run(&rec.run.client_id.clone(), &id, true) {
+                        Err((c, _)) if c == "busy" || c == "rate-limited" => {
+                            std::thread::sleep(std::time::Duration::from_secs(20));
+                        }
+                        _ => break,
+                    }
+                }
+            }
+        });
+    }
     let b2 = Arc::clone(&broker);
     let accept = std::thread::spawn(move || {
         while !b2.shutdown.load(Ordering::SeqCst) {

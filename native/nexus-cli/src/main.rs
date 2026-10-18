@@ -43,6 +43,9 @@ fn help_text() -> String {
     s.push_str("    model list            recorded model-only conversations\n");
     s.push_str("    integrity             read-only journal integrity (states the verification scope; never a bare 'secure')\n");
     s.push_str("    project <add|list|show|remove|repin|set-scope|set-clients> ...   OPERATOR project registry (changes need ownership of the registry directory; the Desktop cannot register)\n");
+    s.push_str("    runtime <status|start|stop>   A6.1.4: the native runtime for this user (starts nexusd + broker automatically)\n");
+    s.push_str("    provider <connect|consent|revoke|status>   A6.1.4: one-time provider connection and consent\n");
+    s.push_str("    code run <project> --input FILE|-   A6.1.4: run a coding task with the interactive limits (same path as the Desktop)\n");
     s.push_str("    approvals [--task <instance-id>]   read-only human-approval status (approve/deny only via the terminal approver)\n");
     s.push_str("    tools list            native read-only tools (fs.list, fs.read, fs.search)\n");
     s.push_str("    tools inspect <id>    tool contract, arguments, budgets and policy\n");
@@ -856,6 +859,14 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
             let end = follow_run(cfg, &sock, &pos(), off)?;
             Ok(if end.state == "completed" { ExitCode::Ok } else { ExitCode::MockFailed })
         }
+        "resume" => {
+            // continue an interrupted coding task in a new run that starts from its work
+            let v = ic::resume(&sock, &pos())?;
+            let run: ic::IntentRun = serde_json::from_value(v["run"].clone())
+                .map_err(|e| nexus_client::ClientError::internal(e.to_string()))?;
+            intent_ok(cfg, v.clone(), &run_line(&run));
+            Ok(ExitCode::Ok)
+        }
         "cancel" => {
             let c = ic::cancel(&sock, &pos())?;
             intent_ok(cfg, serde_json::json!({ "run": c.run, "outcome": c.outcome }), &format!("{} ({})", run_line(&c.run), c.outcome));
@@ -1385,6 +1396,9 @@ fn main() {
         "intent" => cmd_intent(&args, &cfg),
         "tools" => cmd_tools(&args, &cfg),
         "project" => cmd_project(&args, &cfg),
+        "runtime" => cmd_runtime(&args, &cfg),
+        "provider" => cmd_provider(&args, &cfg),
+        "code" => cmd_code(&args, &cfg),
         "approvals" => cmd_approvals(&args, &cfg),
         "integrity" => match nexus_client::integrity(&cfg) {
             Ok(v) => {
@@ -1638,6 +1652,37 @@ fn cmd_project(args: &[String], cfg: &ClientConfig) -> ExitCode {
                 Err(e) => fail_reg(e),
             }
         }
+        "open" | "forget" | "refresh" | "ls" | "policy" => {
+            // A6.1.4: through the BROKER (the same verbs the Desktop's native backend uses).
+            use nexus_client::intent_client as ic;
+            let sock = flag_value(args, "--broker-socket")
+                .map(PathBuf::from)
+                .unwrap_or_else(ic::default_broker_socket);
+            let arg = positional.first().map(|s| s.as_str()).unwrap_or("");
+            let r = match sub {
+                "open" => ic::project_open(&sock, arg),
+                "forget" => ic::project_forget(&sock, arg),
+                "refresh" => ic::project_refresh(&sock, arg),
+                "policy" => {
+                    let flag = |n: &str| {
+                        flag_value(args, n).map(|v| matches!(v.as_str(), "on" | "true" | "yes"))
+                    };
+                    ic::project_policy(&sock, arg, flag("--installs"), flag("--trusted"))
+                }
+                _ => ic::project_list(&sock, args.iter().any(|a| a == "--changes")),
+            };
+            match r {
+                Ok(v) => {
+                    emit(
+                        cfg,
+                        &v,
+                        &serde_json::to_string_pretty(&v).unwrap_or_default(),
+                    );
+                    ExitCode::Ok
+                }
+                Err(e) => emit_err(cfg.json, &e),
+            }
+        }
         "set-clients" => {
             let Some(id) = positional.first() else {
                 return fail(
@@ -1700,6 +1745,239 @@ fn cmd_project(args: &[String], cfg: &ClientConfig) -> ExitCode {
             cfg,
             "usage: nexus project <add|list|show|remove|repin|set-scope|set-clients> ...",
         ),
+    }
+}
+
+/// `nexus runtime <status|start|stop>` (A6.1.4).
+fn cmd_runtime(args: &[String], cfg: &ClientConfig) -> ExitCode {
+    let home = match nexus_runtime::Home::resolve() {
+        Ok(h) => h,
+        Err(e) => return fail(cfg, &e),
+    };
+    match args.first().map(String::as_str).unwrap_or("status") {
+        "status" => {
+            let st = nexus_runtime::status(&home);
+            emit(
+                cfg,
+                &serde_json::to_value(&st).unwrap_or_default(),
+                &format!(
+                    "{:?} home={} providerConnected={}",
+                    st.phase, st.home, st.provider_connected
+                ),
+            );
+            ExitCode::Ok
+        }
+        "start" => {
+            let sock = home.broker_socket();
+            // a running runtime is only replaced when no task is running (a restart would end it)
+            let idle = || -> Result<(), String> {
+                match nexus_client::intent_client::list(&sock, 200) {
+                    Ok(r) if r.iter().any(|x| !x.terminal) => {
+                        Err("a task is still running; not restarting".to_owned())
+                    }
+                    Err(e) if e.code == "busy" => {
+                        Err("the runtime is busy serving work; not restarting".to_owned())
+                    }
+                    _ => Ok(()),
+                }
+            };
+            match nexus_runtime::Tools::discover()
+                .and_then(|t| nexus_runtime::start_if(&home, &t, idle))
+            {
+                Ok(st) => {
+                    emit(
+                        cfg,
+                        &serde_json::to_value(&st).unwrap_or_default(),
+                        &format!("{:?} (broker {})", st.phase, st.broker_socket),
+                    );
+                    ExitCode::Ok
+                }
+                Err(e) => fail(cfg, &format!("runtime: {e}")),
+            }
+        }
+        "stop" => match nexus_runtime::stop(&home) {
+            Ok(()) => {
+                emit(cfg, &serde_json::json!({"stopped": true}), "stopped");
+                ExitCode::Ok
+            }
+            Err(e) => fail(cfg, &format!("runtime: {e}")),
+        },
+        _ => fail(cfg, "usage: nexus runtime <status|start|stop>"),
+    }
+}
+
+/// `nexus provider <connect|consent|revoke|status>` (A6.1.4).
+fn cmd_provider(args: &[String], cfg: &ClientConfig) -> ExitCode {
+    use nexus_client::intent_client as ic;
+    let home = match nexus_runtime::Home::resolve() {
+        Ok(h) => h,
+        Err(e) => return fail(cfg, &e),
+    };
+    let sock = home.broker_socket();
+    match args.first().map(String::as_str).unwrap_or("status") {
+        "connect" => {
+            let key = flag_value(args, "--key-env")
+                .and_then(|n| std::env::var(n).ok())
+                .or_else(|| std::env::var("OPENCODE_API_KEY").ok())
+                .or_else(|| {
+                    flag_value(args, "--key-file")
+                        .and_then(|f| std::fs::read_to_string(f).ok())
+                        .map(|s| s.trim().to_owned())
+                });
+            let Some(key) = key else {
+                return fail(cfg, "give the key via OPENCODE_API_KEY, --key-env NAME or --key-file FILE (it is never taken as an argument)");
+            };
+            match nexus_runtime::Tools::discover()
+                .and_then(|t| nexus_runtime::connect_provider(&home, &t, &key))
+            {
+                Ok(r) => {
+                    emit(
+                        cfg,
+                        &serde_json::to_value(&r).unwrap_or_default(),
+                        &r.checks.join("\n"),
+                    );
+                    if r.verified {
+                        ExitCode::Ok
+                    } else {
+                        ExitCode::Internal
+                    }
+                }
+                Err(e) => fail(cfg, &format!("provider: {e}")),
+            }
+        }
+        "status" | "consent" => match ic::consent_status(&sock) {
+            Ok(v) => {
+                if args.first().map(String::as_str) == Some("consent")
+                    && args.iter().any(|a| a == "--yes")
+                {
+                    let (p, m, d) = (
+                        v["providerId"].as_str().unwrap_or(""),
+                        v["remoteModelId"].as_str().unwrap_or(""),
+                        v["textSha256"].as_str().unwrap_or(""),
+                    );
+                    return match ic::consent_grant(&sock, p, m, d) {
+                        Ok(g) => {
+                            emit(cfg, &g, &format!("consent recorded for {p} ({m})"));
+                            ExitCode::Ok
+                        }
+                        Err(e) => emit_err(cfg.json, &e),
+                    };
+                }
+                let human = format!(
+                    "{}\n\nconsent: {}",
+                    v["text"].as_str().unwrap_or(""),
+                    if v["consent"].is_null() {
+                        "not given (run: nexus provider consent --yes)"
+                    } else {
+                        "given"
+                    }
+                );
+                emit(cfg, &v, &human);
+                ExitCode::Ok
+            }
+            Err(e) => emit_err(cfg.json, &e),
+        },
+        "revoke" => match ic::consent_revoke(&sock) {
+            Ok(v) => {
+                emit(cfg, &v, "consent revoked");
+                ExitCode::Ok
+            }
+            Err(e) => emit_err(cfg.json, &e),
+        },
+        _ => fail(
+            cfg,
+            "usage: nexus provider <connect|consent [--yes]|revoke|status>",
+        ),
+    }
+}
+
+/// `nexus code run <project> --input FILE|- [--wait]` (A6.1.4): the Desktop's coding path.
+fn cmd_code(args: &[String], cfg: &ClientConfig) -> ExitCode {
+    use nexus_client::intent_client as ic;
+    if args.first().map(String::as_str) != Some("run") {
+        return fail(
+            cfg,
+            "usage: nexus code run <project-id> --input FILE|- [--wait]",
+        );
+    }
+    let Some(project) = args.get(1).filter(|a| !a.starts_with("--")) else {
+        return fail(
+            cfg,
+            "usage: nexus code run <project-id> --input FILE|- [--wait]",
+        );
+    };
+    let sock = flag_value(args, "--broker-socket")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            nexus_runtime::Home::resolve()
+                .map(|h| h.broker_socket())
+                .unwrap_or_else(|_| ic::default_broker_socket())
+        });
+    let content = match flag_value(args, "--input").map(|p| read_input(&p)) {
+        Some(Ok(c)) => c,
+        Some(Err(e)) => return emit_err(cfg.json, &e),
+        None => return fail(cfg, "--input FILE|- is required"),
+    };
+    let conf = match ic::code_config(&sock) {
+        Ok(c) => c,
+        Err(e) => return emit_err(cfg.json, &e),
+    };
+    let intent = nexus_client::intent_contract::NexusIntentV1 {
+        schema_version: 1,
+        request_id: ic::fresh_key("code"),
+        idempotency_key: ic::fresh_key("idem"),
+        intent_type: "repo-code".to_owned(),
+        content,
+        model: None,
+        workspace_id: Some(project.clone()),
+        limits: conf.limits.to_intent_limits(),
+        response_mode: nexus_client::intent_contract::ResponseMode::Stream,
+        client_label: Some("nexus-cli-code".to_owned()),
+    };
+    let run = match ic::submit(&sock, &intent) {
+        Ok(r) => r.run,
+        Err(e) => return emit_err(cfg.json, &e),
+    };
+    if !args.iter().any(|a| a == "--wait") {
+        emit(
+            cfg,
+            &serde_json::json!({"run": run}),
+            &format!("submitted {}", run.run_id),
+        );
+        return ExitCode::Ok;
+    }
+    let end = std::time::Instant::now()
+        + std::time::Duration::from_secs(
+            flag_value(args, "--timeout-secs")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3600),
+        );
+    let mut last = String::new();
+    loop {
+        match ic::status(&sock, &run.run_id) {
+            Ok(r) => {
+                let line = run_line(&r);
+                if line != last && !cfg.json {
+                    eprintln!("{line}");
+                    last = line;
+                }
+                if r.terminal {
+                    emit(cfg, &serde_json::json!({"run": r}), &run_line(&r));
+                    return if r.state == "completed" {
+                        ExitCode::Ok
+                    } else {
+                        ExitCode::Internal
+                    };
+                }
+            }
+            // a busy or briefly unreachable broker is not the end of the run: keep waiting
+            Err(e) if matches!(e.code, "busy" | "disconnected") => {}
+            Err(e) => return emit_err(cfg.json, &e),
+        }
+        if std::time::Instant::now() > end {
+            return fail(cfg, "timed out waiting for the run (it keeps running)");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
 }
 

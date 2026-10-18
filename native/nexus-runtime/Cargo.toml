@@ -1,0 +1,14 @@
+[package]
+name = "nexus-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Runtime supervisor: bootstraps and runs the native daemon and broker for the interactive profile"
+
+[dependencies]
+nexus-client = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

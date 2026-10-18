@@ -15,7 +15,7 @@ pub mod server;
 
 pub use auth::IssuerAuth;
 pub use protocol::IPC_PROTOCOL_VERSION;
-pub use server::{Daemon, Lifecycle, TrustMode};
+pub use server::{AutonomousConfig, Daemon, Lifecycle, TrustMode};
 
 use std::path::{Path, PathBuf};
 

@@ -600,6 +600,7 @@ pub fn run_process_call(
     policy: &crate::process::CommandPolicy,
     run_root: &std::path::Path,
     scope_max_wall_ms: u64,
+    env: Option<&crate::process::ProjectEnv>,
     hooks: &mut dyn crate::process::ProcessHooks,
 ) -> Result<ToolResultV1, ToolError> {
     let p = &call.prepared;
@@ -611,6 +612,7 @@ pub fn run_process_call(
     };
     let ctx = crate::process::ProcessContext {
         ws: &p.workspace,
+        env,
         run_root,
         execution_id: &call.grant.execution_id,
         policy,
@@ -629,6 +631,27 @@ pub fn execute_process(
     run_root: &std::path::Path,
     scope_max_wall_ms: u64,
 ) -> Result<ToolExecutionOutcome, ToolError> {
+    execute_process_in(
+        kernel,
+        call,
+        cancel,
+        policy,
+        run_root,
+        scope_max_wall_ms,
+        None,
+    )
+}
+
+/// `execute_process` inside a project-scoped environment (workbench policy).
+pub fn execute_process_in(
+    kernel: &mut Kernel,
+    call: &AuthorizedToolCall,
+    cancel: &CancellationToken,
+    policy: &crate::process::CommandPolicy,
+    run_root: &std::path::Path,
+    scope_max_wall_ms: u64,
+    env: Option<&crate::process::ProjectEnv>,
+) -> Result<ToolExecutionOutcome, ToolError> {
     let started = begin(kernel, call, cancel)?;
     let mut hooks = KernelProcessHooks {
         kernel,
@@ -641,6 +664,7 @@ pub fn execute_process(
         policy,
         run_root,
         scope_max_wall_ms,
+        env,
         &mut hooks,
     )?;
     let journal = hooks.last.ok_or_else(|| {

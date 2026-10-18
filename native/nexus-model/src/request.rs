@@ -18,7 +18,7 @@ pub const MAX_MESSAGE_CHARS: usize = 32 * 1024;
 /// Tool definition bound.
 pub const MAX_TOOLS: usize = 64;
 /// Total serialized request bound (1 MiB).
-pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 
 /// One chat message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +67,7 @@ pub enum ToolProfile {
 }
 
 /// Bounds for a tool-capable conversation.
-pub const MAX_INPUT_ITEMS: usize = 96;
+pub const MAX_INPUT_ITEMS: usize = 480;
 pub const MAX_TOOL_OUTPUT_CHARS: usize = 96 * 1024;
 
 /// Model input. The remote model id, reasoning effort, and session binding

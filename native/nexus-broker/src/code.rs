@@ -18,7 +18,7 @@ use crate::pipeline::{daemon, StepError};
 use crate::server::Broker;
 use nexus_client::intent_client::PendingApproval;
 use nexus_contracts::intent::NexusIntentV1;
-use nexus_tools::{ToolArgs, ToolId, WorkspacePolicy};
+use nexus_tools::{ToolArgs, ToolId};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,23 +38,6 @@ pub const APPROVAL_TTL_MS: i64 = 300_000;
 pub const PROC_WALL_MS: u64 = 120_000;
 /// Longest we wait for the reviewer, even with a long approval TTL.
 pub const APPROVAL_POLL: Duration = Duration::from_millis(150);
-
-/// Files the agent may not create or change even though the tools could:
-/// they steer builds/toolchains/dependency resolution rather than carry the
-/// requested change (and so deserve a human's own hands).
-const PROTECTED_NAMES: &[&str] = &[
-    "build.rs",
-    "cargo.lock",
-    "rust-toolchain",
-    "rust-toolchain.toml",
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-    "makefile",
-    "justfile",
-    "dockerfile",
-    "docker-compose.yml",
-];
 
 #[derive(Debug, Clone)]
 pub struct CodePolicy {
@@ -116,50 +99,23 @@ fn refusal(code: &'static str, message: impl Into<String>) -> Refusal {
     }
 }
 
+/// The programs the strict (independently approved) profile lets a model name.
+const STRICT_PROGRAMS: [&str; 5] = ["cargo", "npm", "tsc", "python3", "node"];
+
 fn norm(p: &str) -> String {
     p.trim_start_matches("./").to_owned()
 }
 
-/// The write path rules the daemon's workspace also enforces, mirrored here so
-/// a hostile proposal never even reaches an approver.
-fn write_path_ok(path: &str) -> Result<(), Refusal> {
-    let pol = WorkspacePolicy::default();
-    if path.is_empty() || path == "." {
-        return Err(refusal("invalid-arguments", "a file path is required"));
+/// The write path rules shared with the daemon's automated workspace policy
+/// (`nexus_tools::protect`), applied here so a hostile proposal never even
+/// reaches the Kernel.
+fn write_path_ok(path: &str, workbench: bool) -> Result<(), Refusal> {
+    if workbench {
+        nexus_tools::protect::workbench_path_check(path)
+    } else {
+        nexus_tools::protect::write_path_check(path)
     }
-    for c in path.split('/') {
-        if c.is_empty() || c == "." || c == ".." {
-            return Err(refusal(
-                "invalid-arguments",
-                "paths must be normalized and relative to the repository root",
-            ));
-        }
-        if c.starts_with('.') {
-            return Err(refusal(
-                "protected-path",
-                "hidden, VCS and internal paths are never writable",
-            ));
-        }
-        if pol.classify_name(c) == nexus_tools::workspace::NameClass::Sensitive {
-            return Err(refusal(
-                "protected-path",
-                "credential or sensitive paths are never writable",
-            ));
-        }
-        if pol.is_ignored_dir(c) {
-            return Err(refusal(
-                "protected-path",
-                "dependency and build directories are not writable",
-            ));
-        }
-        if PROTECTED_NAMES.contains(&c.to_ascii_lowercase().as_str()) {
-            return Err(refusal(
-                "protected-path",
-                "build, toolchain and lock files are changed by a human, not the agent",
-            ));
-        }
-    }
-    Ok(())
+    .map_err(|(code, why)| refusal(code, why))
 }
 
 /// Validate one proposal against the full catalog. `last_sha` is the
@@ -170,6 +126,16 @@ pub fn validate_code_proposal(
     name: &str,
     arguments: &Value,
     last_sha: &BTreeMap<String, String>,
+) -> Result<CodeProposal, Refusal> {
+    validate_code_proposal_in(name, arguments, last_sha, false)
+}
+
+/// `workbench` = the interactive (project-level trust) profile's relaxed write-path rule.
+pub fn validate_code_proposal_in(
+    name: &str,
+    arguments: &Value,
+    last_sha: &BTreeMap<String, String>,
+    workbench: bool,
 ) -> Result<CodeProposal, Refusal> {
     use nexus_model::repo_tools as rt;
     let Some(id) = rt::tool_id_for_profile(nexus_model::ToolProfile::RepoCodeV1, name) else {
@@ -214,12 +180,24 @@ pub fn validate_code_proposal(
         ));
     }
     let mut args = Value::Object(obj.clone());
+    if name == "fs_write" && args.get("content").is_none() {
+        // delete carries no content; create/replace without it fail validation downstream
+        if args.get("mode").and_then(|v| v.as_str()) == Some("delete") {
+            args["content"] = Value::String(String::new());
+        }
+    }
     let (kind, path, bytes, summary) = if tool.is_process() {
         let program = obj.get("program").and_then(|v| v.as_str()).unwrap_or("");
-        if !rt::MODEL_PROGRAMS.contains(&program) {
+        if !rt::MODEL_PROGRAMS.contains(&program)
+            || (!workbench && !STRICT_PROGRAMS.contains(&program))
+        {
             return Err(refusal(
                 "invalid-arguments",
-                "program must be one of cargo, npm, tsc",
+                if workbench {
+                    "program is not one of the available development programs"
+                } else {
+                    "program must be one of cargo, npm, tsc, python3, node"
+                },
             ));
         }
         if let Some(cwd) = obj.get("cwd").and_then(|v| v.as_str()) {
@@ -234,8 +212,8 @@ pub fn validate_code_proposal(
                     .collect()
             })
             .unwrap_or_default();
-        if argv.len() > 12 {
-            return Err(refusal("invalid-arguments", "at most 12 arguments"));
+        if argv.len() > if workbench { 64 } else { 12 } {
+            return Err(refusal("invalid-arguments", "too many arguments"));
         }
         (
             Kind::Process,
@@ -254,11 +232,14 @@ pub fn validate_code_proposal(
             .to_owned();
         crate::inspect::path_ok_pub(&path)?;
         let path = norm(&path);
-        write_path_ok(&path)?;
+        write_path_ok(&path, workbench)?;
         // Pin the edit to the bytes the model saw (never a guess).
         let needs_sha = match name {
             "fs_edit" => true,
-            "fs_write" => obj.get("mode").and_then(|v| v.as_str()) == Some("replace"),
+            "fs_write" => matches!(
+                obj.get("mode").and_then(|v| v.as_str()),
+                Some("replace" | "delete")
+            ),
             _ => false,
         };
         if needs_sha {
@@ -458,6 +439,8 @@ pub enum ApprovalOutcome {
     /// The independent approver approved this exact operation.
     Approved {
         approval_id: String,
+        /// Decided by the daemon's automated workspace policy, not by a human.
+        automated: bool,
     },
     Denied {
         approval_id: String,
@@ -497,7 +480,7 @@ impl ApprovalOutcome {
     }
     pub fn approval_id(&self) -> Option<&str> {
         match self {
-            Self::Approved { approval_id }
+            Self::Approved { approval_id, .. }
             | Self::Denied { approval_id }
             | Self::Expired { approval_id }
             | Self::Revoked { approval_id }
@@ -576,6 +559,19 @@ pub fn request_and_wait(
             message: "approval-request returned no approval id".into(),
         };
     }
+    // A6.1.4: the daemon's automated workspace policy already decided (never a human):
+    // nothing to wait for and nothing for a person to review.
+    if created.pointer("/approval/state").and_then(|v| v.as_str()) == Some("approved")
+        && created
+            .pointer("/approval/decisionKind")
+            .and_then(|v| v.as_str())
+            == Some("automated-policy")
+    {
+        return ApprovalOutcome::Approved {
+            approval_id: id,
+            automated: true,
+        };
+    }
     let digest = created
         .pointer("/approval/requestDigest")
         .and_then(|v| v.as_str())
@@ -633,7 +629,10 @@ pub fn request_and_wait(
         match state.as_deref() {
             Some("approved") => {
                 clear(b);
-                return ApprovalOutcome::Approved { approval_id: id };
+                return ApprovalOutcome::Approved {
+                    approval_id: id,
+                    automated: false,
+                };
             }
             Some("denied") => {
                 clear(b);
@@ -993,7 +992,7 @@ mod tests {
             ),
             (
                 "fs_write",
-                json!({"path": "a.rs", "content": "x".repeat(40_000), "mode": "create"}),
+                json!({"path": "a.rs", "content": "x".repeat(100_000), "mode": "create"}),
             ),
             (
                 "fs_write",
@@ -1014,7 +1013,7 @@ mod tests {
             ),
             (
                 "fs_edit",
-                json!({"path": "a.rs", "expectedSha256": "a".repeat(64), "edits": (0..9).map(|_| json!({"oldText": "a", "newText": "b"})).collect::<Vec<_>>()}),
+                json!({"path": "a.rs", "expectedSha256": "a".repeat(64), "edits": (0..17).map(|_| json!({"oldText": "a", "newText": "b"})).collect::<Vec<_>>()}),
             ),
             ("proc_run", json!({"program": "sh", "args": ["-c", "id"]})),
             ("proc_run", json!({"program": "/bin/sh", "args": []})),

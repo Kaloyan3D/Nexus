@@ -70,14 +70,34 @@ fn ct_eq(a: &str, b: &str) -> bool {
 
 pub const POLICY_TEST_ONLY: &str = "human-required:test-only";
 pub const POLICY_INDEPENDENT: &str = "human-required:independent";
+/// A6.1.4: approvals are decided by a deterministic automated workspace policy
+/// (no human channel). A store at this level can never be restarted at a weaker
+/// level, and a store that ever ran with human approval can never be restarted
+/// at this one (it is ranked BELOW both human levels).
+pub const POLICY_AUTOMATED: &str = "automated:workspace-policy/v1";
 
 fn policy_rank(p: Option<&str>) -> u8 {
     match p {
-        Some(POLICY_INDEPENDENT) => 2,
-        Some(POLICY_TEST_ONLY) => 1,
-        Some(_) => 3, // unknown value: treat as strictest, never lower it
+        Some(POLICY_INDEPENDENT) => 3,
+        Some(POLICY_TEST_ONLY) => 2,
+        Some(POLICY_AUTOMATED) => 1,
+        Some(_) => 4, // unknown value: treat as strictest, never lower it
         None => 0,
     }
+}
+
+/// What the daemon's automated policy attests about one approval it evaluated.
+/// The Kernel re-derives everything else (authority, binding, digests).
+#[derive(Debug, Clone)]
+pub struct PolicyDecision {
+    pub policy_id: String,
+    pub policy_digest: String,
+    /// Digest of the exact request the policy evaluated (TOCTOU guard).
+    pub request_digest: String,
+    /// Coarse scope ceiling bound for the command (same as the human path).
+    pub scope_cap: u64,
+    /// Facts the policy relied on (recorded verbatim in the journal).
+    pub facts: serde_json::Value,
 }
 
 impl Kernel {
@@ -459,6 +479,107 @@ impl Kernel {
         })
     }
 
+    /// A6.1.4: decide a pending approval by automated workspace policy. This is NOT
+    /// a human decision and is recorded as such (`humanAuth.kind =
+    /// automated-policy`, `independent = false`). It is only available in a
+    /// store latched at `POLICY_AUTOMATED`, only for a pending, unexpired
+    /// approval whose digest the policy actually evaluated, and it goes through
+    /// the same authority re-check and scope binding as a human approval.
+    fn decide_by_policy_inner(
+        &mut self,
+        id: &str,
+        d: &PolicyDecision,
+    ) -> KernelResult<ApprovalRow> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            let now = now_ms();
+            if self.store.approval_policy_get()?.as_deref() != Some(POLICY_AUTOMATED) {
+                return Err(refuse(
+                    KernelErrorCode::ScopeRefused,
+                    "automated policy decisions are only available in a store latched at the automated workspace policy",
+                ));
+            }
+            Self::expire_due(&mut self.store, now)?;
+            let row = self
+                .store
+                .approval_fetch(id)?
+                .ok_or_else(|| refuse(KernelErrorCode::DeliveryInvalid, "unknown approval"))?;
+            if row.state != "pending" {
+                return Err(conflict(
+                    "approval is not pending (decided, expired or revoked); decisions are final",
+                ));
+            }
+            if !ct_eq(&row.request_digest, &d.request_digest) {
+                return Err(refuse(
+                    KernelErrorCode::BindingMismatch,
+                    "the policy evaluated a different request than the pending approval",
+                ));
+            }
+            Self::approval_authority(&mut self.store, self.witness.as_ref(), &row, now)?;
+            let approver_id = format!("automated-policy:{}", d.policy_id);
+            let decision = serde_json::json!({
+                "decision": "approved",
+                "reason": "automated workspace policy grant",
+                "approverId": approver_id,
+                "independent": false,
+                "humanAuth": {
+                    "kind": "automated-policy",
+                    "human": false,
+                    "policyId": d.policy_id,
+                    "policyDigest": d.policy_digest,
+                    "facts": d.facts,
+                },
+                "requestDigest": row.request_digest,
+            });
+            let upd = ApprovalUpdate {
+                decision_json: Some(canonical_json(&decision)),
+                decided_ms: Some(now),
+                ..Default::default()
+            };
+            match row.scope.as_str() {
+                "write" => {
+                    Self::bind_write_scope_inner(
+                        &mut self.store,
+                        self.witness.as_ref(),
+                        &row.command_id,
+                        &approver_id,
+                        false,
+                        &Self::request_field(&row, "workspaceRootDigest"),
+                        d.scope_cap,
+                    )?;
+                }
+                "process" => {
+                    Self::bind_process_scope_inner(
+                        &mut self.store,
+                        self.witness.as_ref(),
+                        &row.command_id,
+                        &approver_id,
+                        false,
+                        &Self::request_field(&row, "workspaceRootDigest"),
+                        d.scope_cap,
+                    )?;
+                }
+                _ => return Err(refuse(KernelErrorCode::ScopeRefused, "unsupported scope")),
+            }
+            let won = self.store.approval_transition(
+                id,
+                &["pending"],
+                "approved",
+                &upd,
+                "approved-by-policy",
+                &decision,
+                now,
+            )?;
+            if !won {
+                return Err(conflict(
+                    "approval was decided concurrently; decision is final",
+                ));
+            }
+            self.store
+                .approval_fetch(id)?
+                .ok_or_else(|| refuse(KernelErrorCode::StoreError, "approval vanished"))
+        })
+    }
+
     fn request_field(row: &ApprovalRow, key: &str) -> String {
         serde_json::from_str::<serde_json::Value>(&row.request_json)
             .ok()
@@ -639,6 +760,16 @@ impl Kernel {
     pub fn decide_approval(&mut self, id: &str, d: &ApprovalDecision) -> KernelResult<ApprovalRow> {
         self.anchor_gate()?;
         let r = self.decide_approval_inner(id, d);
+        self.anchored(r)
+    }
+
+    pub fn decide_approval_by_policy(
+        &mut self,
+        id: &str,
+        d: &PolicyDecision,
+    ) -> KernelResult<ApprovalRow> {
+        self.anchor_gate()?;
+        let r = self.decide_by_policy_inner(id, d);
         self.anchored(r)
     }
 

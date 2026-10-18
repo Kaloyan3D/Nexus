@@ -120,9 +120,68 @@ pub(crate) fn daemon_timeout(
     params: Value,
     timeout_ms: u64,
 ) -> Result<Value, StepError> {
-    let resp =
-        issuer::issuer_call_with_timeout(&b.cfg.daemon_socket, &b.cap_hex, cmd, params, timeout_ms)
-            .map_err(|e| se("daemon-unreachable", e.message))?;
+    // Autonomy: a daemon that is briefly gone (restarting, being replaced) is waited for.
+    // "Unreachable" at CONNECT time means nothing was sent, so asking again is always safe;
+    // after a send the outcome is ambiguous, which only read-only commands may retry.
+    if b.cfg.interactive {
+        let mut waited = std::time::Duration::ZERO;
+        let mut delay = std::time::Duration::from_millis(500);
+        loop {
+            match daemon_once(b, cmd, &params, timeout_ms) {
+                Err(e)
+                    if e.code == "daemon-unreachable"
+                        && (e.message.contains("daemon socket unreachable")
+                            || is_read_only_daemon_cmd(cmd))
+                        && waited < std::time::Duration::from_secs(300)
+                        && !b.shutdown.load(std::sync::atomic::Ordering::SeqCst) =>
+                {
+                    std::thread::sleep(delay);
+                    waited += delay;
+                    delay = (delay * 2).min(std::time::Duration::from_secs(8));
+                }
+                other => return other,
+            }
+        }
+    }
+    daemon_once(b, cmd, &params, timeout_ms)
+}
+
+fn is_read_only_daemon_cmd(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "status"
+            | "approval-list"
+            | "approval-get"
+            | "tool-events"
+            | "worktree-diff"
+            | "worktree-stat"
+            | "worktree-list"
+            | "events"
+    )
+}
+
+fn daemon_once(b: &Broker, cmd: &str, params: &Value, timeout_ms: u64) -> Result<Value, StepError> {
+    let call = |cap: &str| {
+        issuer::issuer_call_with_timeout(&b.cfg.daemon_socket, cap, cmd, params.clone(), timeout_ms)
+    };
+    let used = b.cap_hex.read().map(|c| c.clone()).unwrap_or_default();
+    let mut resp = call(&used);
+    // A daemon that was restarted issues a new capability: re-read it and ask once more.
+    let stale_cap = match &resp {
+        Ok(r) => r.get("code").and_then(|c| c.as_str()) == Some("issuer-untrusted"),
+        Err(_) => true,
+    };
+    if stale_cap {
+        if let Ok(fresh) = issuer::read_capability(&b.cfg.cap_path) {
+            if fresh != used {
+                if let Ok(mut w) = b.cap_hex.write() {
+                    *w = fresh.clone();
+                }
+                resp = call(&fresh);
+            }
+        }
+    }
+    let resp = resp.map_err(|e| se("daemon-unreachable", e.message))?;
     if resp.get("ok") == Some(&Value::Bool(true)) {
         Ok(resp)
     } else {
@@ -200,6 +259,112 @@ pub fn execute(b: Arc<Broker>, run_id: String, intent: NexusIntentV1, flag: Arc<
     if let Ok(mut g) = b.cancel_flags.lock() {
         g.remove(&run_id);
     }
+    auto_adopt(&b, &run_id);
+    auto_continue(&b, &run_id);
+}
+
+/// A run that ended because the runtime underneath it broke (not because the task failed
+/// or the user stopped it) is continued by the broker itself, bounded to a few times.
+fn auto_continue(b: &Arc<Broker>, run_id: &str) {
+    if !b.cfg.interactive || b.shutdown.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some(rec) = b.store.load(run_id) else {
+        return;
+    };
+    let r = &rec.run;
+    let code = r.error_code.clone().unwrap_or_default();
+    let infra = r.terminal
+        && !r.cancel_requested
+        && r.state != "completed"
+        && matches!(
+            code.as_str(),
+            "daemon-unreachable"
+                | "bridge-unavailable"
+                | "loop-interrupted"
+                | "tool-outcome-uncertain"
+                | "provider-unavailable"
+        );
+    if !infra {
+        return;
+    }
+    let delay = if code == "provider-unavailable" {
+        60
+    } else {
+        8
+    };
+    let (b2, id, client) = (Arc::clone(b), run_id.to_owned(), r.client_id.clone());
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(delay));
+        // a full broker or a rate limit only delays the continuation
+        for _ in 0..30 {
+            if b2.shutdown.load(Ordering::SeqCst) {
+                return;
+            }
+            match b2.resume_run(&client, &id, true) {
+                Err((code, _)) if code == "busy" || code == "rate-limited" => {
+                    std::thread::sleep(std::time::Duration::from_secs(20));
+                }
+                _ => return,
+            }
+        }
+    });
+}
+
+/// Trusted workspace mode: a task that finished, changed files and did not end with a
+/// failing or unknown verification has its patch applied to the user's folder by itself.
+/// The same all-or-nothing, folder-unchanged checks as a manual adoption apply, and the
+/// outcome (applied, or why not) is recorded on the run either way.
+fn auto_adopt(b: &Arc<Broker>, run_id: &str) {
+    if !b.cfg.interactive {
+        return;
+    }
+    let Some(rec) = b.store.load(run_id) else {
+        return;
+    };
+    if rec.run.state != "completed"
+        || rec.run.intent_type != nexus_contracts::intent::INTENT_REPO_CODE
+    {
+        return;
+    }
+    let Some(ws) = rec.run.workspace_id.clone() else {
+        return;
+    };
+    let trusted = b
+        .cfg
+        .project_env()
+        .and_then(|env| nexus_tools::registry::load(env.registry_dir, env.trust).ok())
+        .and_then(|f| f.get(&ws).map(|p| p.trusted))
+        .unwrap_or(false);
+    if !trusted {
+        return;
+    }
+    let (view, _) = b.view(&rec);
+    let Some(o) = view.coding_outcome.clone() else {
+        return;
+    };
+    if o.change != "applied" && o.change != "partially-applied" {
+        return;
+    }
+    let verdict = if o.verification == "verified-failed" || o.verification == "uncertain" {
+        Some(format!(
+            "not applied to your folder automatically: the final verification was {}",
+            o.verification
+        ))
+    } else {
+        None
+    };
+    let msg = match verdict {
+        Some(m) => m,
+        None => match b.project_adopt(&rec.run.client_id.clone(), run_id) {
+            Ok(v) => {
+                let n = v["applied"].as_array().map(Vec::len).unwrap_or(0);
+                format!("applied {n} file(s) to your folder automatically")
+            }
+            Err((_, why)) => format!("not applied automatically: {why}"),
+        },
+    };
+    b.annotate(run_id, |r| r.auto_adopt = Some(msg));
 }
 
 fn run_steps(
@@ -337,7 +502,7 @@ fn run_steps(
         if crate::identity::self_stale() {
             return Err(se(
                 "broker-stale",
-                "this broker process predates the installed nexus-broker binary; restart it (nothing sent, authorization kept)",
+                "this broker process predates the installed nexus-broker binary; Nexus restarts it automatically when no task is running, then send again (nothing was sent, authorization kept)",
             ));
         }
         crate::live_auth::consume(

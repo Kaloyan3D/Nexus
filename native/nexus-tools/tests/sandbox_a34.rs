@@ -56,6 +56,9 @@ fn spec(id: &str, program: &str, args: &[&str], src: &std::path::Path) -> Sandbo
         cwd: "/work/src".to_owned(),
         env,
         ro_binds: vec![],
+        rw_binds: vec![],
+        src_writable: false,
+        net: false,
         limits: SandboxLimits {
             wall_ms: 20_000,
             cpu_secs: 20,

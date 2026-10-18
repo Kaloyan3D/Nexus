@@ -1399,3 +1399,59 @@ fn staged_recovery_preserves_displaced_foreign_file_inside_the_stage() {
     assert_eq!(o["tmpRemoved"], true, "{o}");
     assert!(!stage2.exists());
 }
+
+#[test]
+fn delete_removes_exactly_the_expected_file_and_refuses_anything_else() {
+    // a stale pre-image is a conflict and removes nothing
+    let mut fx = fixture("w-delete-stale");
+    fx.approve_write(64 * 1024);
+    fx.write("old.txt", b"bye\n");
+    let r = fx
+        .run_write(
+            "fs.write",
+            json!({"path": "old.txt", "content": "", "mode": "delete", "expectedSha256": sha("not it\n")}),
+        )
+        .unwrap();
+    assert_eq!(
+        r.result.error.as_ref().map(|e| e.code.as_str()),
+        Some("conflict")
+    );
+    assert_eq!(fx.disk("old.txt").unwrap(), "bye\n");
+
+    // the right pre-image: gone, nothing else touched, no leftovers
+    let mut fx = fixture("w-delete-ok");
+    fx.approve_write(64 * 1024);
+    fx.write("old.txt", b"bye\n");
+    fx.write("other.txt", b"stay\n");
+    let r = fx
+        .run_write(
+            "fs.write",
+            json!({"path": "old.txt", "content": "", "mode": "delete", "expectedSha256": sha("bye\n")}),
+        )
+        .unwrap();
+    assert!(r.result.error.is_none(), "{:?}", r.result.error);
+    assert_eq!(r.result.output.as_ref().unwrap()["operation"], "delete");
+    assert!(fx.disk("old.txt").is_none());
+    assert_eq!(fx.disk("other.txt").unwrap(), "stay\n");
+    assert!(fx.tmp_leftovers().is_empty());
+    assert!(phases(&fx).ends_with(&[
+        "planned".into(),
+        "prepared".into(),
+        "applied".into(),
+        "verified".into()
+    ]));
+
+    // deleting what is not there is refused
+    let mut fx = fixture("w-delete-absent");
+    fx.approve_write(64 * 1024);
+    let r = fx
+        .run_write(
+            "fs.write",
+            json!({"path": "old.txt", "content": "", "mode": "delete", "expectedSha256": sha("bye\n")}),
+        )
+        .unwrap();
+    assert_eq!(
+        r.result.error.as_ref().map(|e| e.code.as_str()),
+        Some("conflict")
+    );
+}

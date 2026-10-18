@@ -16,17 +16,37 @@ pub const BROKER_PROTOCOL_VERSION: u32 = 1;
 /// Schema tag on every CLI JSON envelope.
 pub const CLI_SCHEMA: &str = "nexus.intent.cli/v1";
 
-/// Default broker socket: `NEXUS_BROKER_SOCKET` or `~/.nexus/broker.sock`.
+/// Default broker socket: `NEXUS_BROKER_SOCKET`, else the interactive profile's
+/// `$NEXUS_HOME/broker.sock` (A6.1.4), else `$XDG_DATA_HOME/nexus/broker.sock` when
+/// that runtime exists, else `~/.nexus/broker.sock`.
 pub fn default_broker_socket() -> PathBuf {
     if let Ok(p) = std::env::var("NEXUS_BROKER_SOCKET") {
         if !p.is_empty() {
             return PathBuf::from(p);
         }
     }
+    if let Ok(h) = std::env::var("NEXUS_HOME") {
+        if !h.is_empty() {
+            return PathBuf::from(h).join("broker.sock");
+        }
+    }
+    let xdg = std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+    if let Some(x) = xdg.map(|b| b.join("nexus").join("broker.sock")) {
+        if x.exists() {
+            return x;
+        }
+    }
     match std::env::var("HOME") {
         Ok(h) if !h.is_empty() => PathBuf::from(h).join(".nexus").join("broker.sock"),
         _ => PathBuf::from("/tmp/nexus-broker.sock"),
     }
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Server-assigned view of one run. Identity fields (`clientId`, ids) are
@@ -104,6 +124,25 @@ pub struct IntentRun {
     /// repo-code: approved test/build executions used / allowed.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub tests_used: u32,
+    /// A6.1.4: turns whose conversation was shortened to stay inside the context budget.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub context_compactions: u32,
+    /// Provider interruptions the broker recovered from by itself (nothing was lost).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub recoveries: u32,
+    /// This run continues an interrupted one (its work was carried into this run's copy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_of: Option<String>,
+    /// Trusted workspace mode: what happened when the finished task's patch was applied to
+    /// the user's folder by itself (files applied, or why it was not).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_adopt: Option<String>,
+    /// This run was continued by another run after it was interrupted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continued_as: Option<String>,
+    /// What the last recovery was about, for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_recovery: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub max_tests: u32,
     /// repo-code: `pass` / `fail` of the most recent test execution.
@@ -174,6 +213,10 @@ pub struct ToolActivity {
     /// `approved` | `denied` | `expired` | `revoked` | `cancelled` | `timed-out`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_outcome: Option<String>,
+    /// Who decided the approval: `automated-policy` (daemon workspace policy, never a
+    /// human) or absent for a human decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_actor: Option<String>,
     /// Write/edit: sha256 of the file before and after (receipt).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_sha256: Option<String>,
@@ -263,8 +306,17 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
     let mut last_applied_edit: Option<u32> = None;
     let mut cmd_blocked = false;
     let mut mut_proposed = false;
-    for a in &run.tool_activity {
+    for (ai, a) in run.tool_activity.iter().enumerate() {
         let is_edit = a.tool == "fs_edit" || a.tool == "fs_write";
+        // A failed attempt that the agent later redid successfully (same tool, same target)
+        // is iteration, not an unapplied change.
+        let superseded = matches!(a.status.as_str(), "failed" | "refused")
+            && run.tool_activity[ai + 1..].iter().any(|b| {
+                b.tool == a.tool && b.args_summary == a.args_summary && b.status == "executed"
+            });
+        if superseded {
+            continue;
+        }
         let is_cmd = a.tool == "proc_run";
         if !is_edit && !is_cmd {
             continue;
@@ -307,6 +359,8 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
                         o.tests_executed += 1;
                         last_test = Some((a.index, false, a.exit_code));
                     }
+                    // a command that ran but verifies nothing (install, listing, script)
+                    Some("run-pass" | "run-fail") => {}
                     _ => o.uncertain_operations += 1, // no verdict recorded: never assume a pass
                 }
             } else {
@@ -339,6 +393,10 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
         "applied"
     } else if mut_proposed {
         "not-applied"
+    } else if run.continuation_of.is_some() && !run.changed_files.is_empty() {
+        // a continuation starts from the work of the run it continues: its copy already
+        // holds those changes even though this run made none itself
+        "applied"
     } else {
         "none-proposed"
     }
@@ -389,6 +447,20 @@ pub const DESKTOP_CODE_LIMITS: DesktopCodeLimits = DesktopCodeLimits {
     max_runtime_secs: 1800,
 };
 
+/// A6.1.4 interactive defaults: sensible limits for real engineering, applied
+/// automatically (the user never sets them per task). The output cap is per model
+/// turn and INCLUDES reasoning tokens (measured 738-1793 of 1024-2048 at effort
+/// `low`); 16384 completed 20/20 real requests with at most 2492 used.
+pub const INTERACTIVE_CODE_LIMITS: DesktopCodeLimits = DesktopCodeLimits {
+    max_turns: 500,
+    max_tool_calls: 4000,
+    max_tool_result_bytes: 256 * 1024 * 1024,
+    max_edits: 2000,
+    max_tests: 1000,
+    max_output_tokens: 32_768,
+    max_runtime_secs: 8 * 3600,
+};
+
 impl DesktopCodeLimits {
     pub fn to_intent_limits(self) -> nexus_contracts::intent::IntentLimits {
         nexus_contracts::intent::IntentLimits {
@@ -424,6 +496,13 @@ pub struct AllowedCodeSource {
     /// Files/directories (`dir/`) the model may propose writes to; empty = whole project.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_allow: Vec<String>,
+    /// A6.1.4: display name and detected kinds of a project opened from the Desktop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub managed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<String>,
 }
 
 /// The reviewable result of a repo-code run, from the isolated working copy.
@@ -646,6 +725,16 @@ pub fn follow(
     )?)
 }
 
+/// Continue an interrupted coding run (a new run that starts from its work).
+pub fn resume(socket: &Path, run_id: &str) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "intent-resume",
+        serde_json::json!({ "runId": run_id }),
+        30_000,
+    )
+}
+
 pub fn cancel(socket: &Path, run_id: &str) -> Result<CancelReply, ClientError> {
     decode(call(
         socket,
@@ -685,6 +774,22 @@ pub fn diff(socket: &Path, run_id: &str) -> Result<DiffReply, ClientError> {
 pub struct CodeConfig {
     pub limits: DesktopCodeLimits,
     pub approval_lifetime_secs: u64,
+    /// The built-in maximums (what the user's own limits are lowered from).
+    #[serde(default)]
+    pub built_in: Option<DesktopCodeLimits>,
+}
+
+/// Save the user's own (lower) limits; fields left out are reset to the built-in values.
+pub fn limits_set(
+    socket: &Path,
+    limits: &serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "intent-limits-set",
+        serde_json::Value::Object(limits.clone()),
+        10_000,
+    )
 }
 
 pub fn code_config(socket: &Path) -> Result<CodeConfig, ClientError> {
@@ -752,4 +857,105 @@ pub fn run_for_conversation(
 /// must pass their own stable key).
 pub fn fresh_key(prefix: &str) -> String {
     format!("{prefix}-{}", next_id())
+}
+
+// ---- A6.1.4 interactive profile: projects and provider consent ------------------
+
+/// Open a folder (chosen in the native picker) as a managed project.
+pub fn project_open(socket: &Path, path: &str) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "project-open",
+        serde_json::json!({ "path": path }),
+        180_000,
+    )
+}
+
+pub fn project_list(socket: &Path, with_changes: bool) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "project-list",
+        serde_json::json!({ "changes": with_changes }),
+        60_000,
+    )
+}
+
+pub fn project_refresh(socket: &Path, project_id: &str) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "project-refresh",
+        serde_json::json!({ "projectId": project_id }),
+        180_000,
+    )
+}
+
+/// Allow or forbid dependency installation for an opened project.
+pub fn project_policy(
+    socket: &Path,
+    project_id: &str,
+    installs: Option<bool>,
+    trusted: Option<bool>,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "project-policy",
+        serde_json::json!({ "projectId": project_id, "installs": installs, "trusted": trusted }),
+        30_000,
+    )
+}
+
+pub fn project_forget(socket: &Path, project_id: &str) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "project-forget",
+        serde_json::json!({ "projectId": project_id }),
+        60_000,
+    )
+}
+
+/// The consent state plus the exact text a new consent must present.
+pub fn consent_status(socket: &Path) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "provider-consent-status",
+        serde_json::json!({}),
+        15_000,
+    )
+}
+
+pub fn consent_grant(
+    socket: &Path,
+    provider_id: &str,
+    remote_model_id: &str,
+    text_sha256: &str,
+) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "provider-consent-grant",
+        serde_json::json!({
+            "providerId": provider_id, "remoteModelId": remote_model_id,
+            "textSha256": text_sha256, "intentTypes": ["repo-code", "repo-inspect"],
+        }),
+        15_000,
+    )
+}
+
+pub fn consent_revoke(socket: &Path) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "provider-consent-revoke",
+        serde_json::json!({}),
+        15_000,
+    )
+}
+
+/// Apply a finished run's patch to the user's original folder (after the native
+/// backend's own confirmation). All-or-nothing; refused if the folder changed.
+pub fn project_adopt(socket: &Path, run_id: &str) -> Result<serde_json::Value, ClientError> {
+    call(
+        socket,
+        "project-adopt",
+        serde_json::json!({ "runId": run_id }),
+        60_000,
+    )
 }

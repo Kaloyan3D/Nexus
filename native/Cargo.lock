@@ -320,6 +320,7 @@ name = "nexus-cli"
 version = "0.1.0"
 dependencies = [
  "nexus-client",
+ "nexus-runtime",
  "nexus-tools",
  "serde_json",
  "tempfile",
@@ -407,6 +408,17 @@ dependencies = [
  "tempfile",
  "thiserror",
  "webpki-roots",
+]
+
+[[package]]
+name = "nexus-runtime"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nexus-client",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

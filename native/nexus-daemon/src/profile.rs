@@ -52,6 +52,7 @@ const FORBIDDEN: &[&str] = &[
     "--enable-repo-code",
     "--worktree-root",
     "--project-registry",
+    "--autonomous-workspace-policy",
     "--project-registry-owner-uid",
 ];
 

@@ -220,6 +220,24 @@ pub fn run_write(
             }
         };
 
+    if let Op::Write(a) = &op {
+        if a.mode == "delete" {
+            return run_delete(
+                ws,
+                &dir,
+                &name,
+                tool,
+                path_s,
+                a,
+                pre_sha.as_deref(),
+                pre_bytes.as_ref().map(|b| b.len()),
+                execution_id,
+                cancel,
+                hooks,
+            );
+        }
+    }
+
     // 2. Decide the post-image and check expectations. Never silently
     //    overwrite an unexpected state.
     let (post, file_mode, op_name): (Vec<u8>, u32, &str) = match &op {
@@ -560,6 +578,165 @@ pub fn run_write(
     }
 }
 
+/// `fs.write` mode `delete`: the file is moved atomically into a private stage directory
+/// (so what is removed is exactly the inode that was observed), its bytes are checked
+/// against the expected pre-image, and only then unlinked. A mismatch moves it back.
+#[allow(clippy::too_many_arguments)]
+fn run_delete(
+    ws: &Workspace,
+    dir: &crate::workspace::Opened,
+    name: &str,
+    tool: &str,
+    path_s: &str,
+    a: &WriteArgs,
+    pre_sha: Option<&str>,
+    pre_len: Option<usize>,
+    execution_id: &str,
+    cancel: &CancellationToken,
+    hooks: &mut dyn WriteHooks,
+) -> Result<ToolResultV1, ToolError> {
+    let none = |hooks: &mut dyn WriteHooks, code: ToolErrorCode, msg: &str| {
+        let e = ToolError::new(code, msg.to_owned());
+        if e.code == ToolErrorCode::Conflict {
+            hooks.journal(
+                PH_CONFLICT,
+                serde_json::json!({"mutation": "none", "errorCode": "conflict", "conflict": "delete", "reason": e.message}),
+            )?;
+        } else {
+            hooks.journal(
+                PH_FAILED,
+                serde_json::json!({"mutation": "none", "errorCode": e.code.as_str(), "reason": e.message}),
+            )?;
+        }
+        Ok::<_, ToolError>(out_err(tool, e))
+    };
+    let Some(cur) = pre_sha else {
+        return none(
+            hooks,
+            ToolErrorCode::Conflict,
+            "delete refused: the target does not exist",
+        );
+    };
+    if Some(cur) != a.expected_sha256.as_deref() {
+        return none(
+            hooks,
+            ToolErrorCode::Conflict,
+            "delete refused: the file changed since it was read",
+        );
+    }
+    let tmp = temp_name(execution_id);
+    let stage = stage_name(execution_id);
+    if cancel.is_cancelled() {
+        return none(
+            hooks,
+            ToolErrorCode::Cancelled,
+            "cancelled before any mutation",
+        );
+    }
+    if let Err(e) = hooks.fence() {
+        return none(hooks, e.code, &e.message);
+    }
+    hooks.journal(
+        PH_PLANNED,
+        serde_json::json!({
+            "toolId": tool, "operation": "delete", "path": path_s,
+            "preSha256": cur, "preBytes": pre_len,
+            "postSha256": serde_json::Value::Null, "postBytes": 0,
+            "tmpName": tmp, "stageName": stage,
+        }),
+    )?;
+    crash_point("after-planned");
+    let dfd = dir.fd.as_raw_fd();
+    let stage_fd = match mutate::mkdir_private(dfd, &stage) {
+        Ok(f) => f,
+        Err(e) => return none(hooks, e.code, &e.message),
+    };
+    let sfd = stage_fd.as_raw_fd();
+    if let Err(e) = hooks.journal(
+        PH_PREPARED,
+        serde_json::json!({
+            "tmpName": tmp, "stageName": stage, "postSha256": serde_json::Value::Null,
+        }),
+    ) {
+        mutate::rmdir(dfd, &stage);
+        return Err(e);
+    }
+    crash_point("after-prepared");
+    match mutate::renameat2_dirs(dfd, name, sfd, &tmp, mutate::RENAME_NOREPLACE) {
+        Ok(()) => {}
+        Err(e) => {
+            mutate::rmdir(dfd, &stage);
+            return none(
+                hooks,
+                ToolErrorCode::WriteFailed,
+                &format!("cannot remove the file (errno {e})"),
+            );
+        }
+    }
+    crash_point("after-exchange");
+    // What was actually moved must be the expected pre-image; otherwise put it back.
+    let moved = ws.open_file_in_dir(&stage_fd, &tmp).ok();
+    let moved_id = moved.as_ref().map(|o| (o.identity.dev, o.identity.ino));
+    let ok = moved
+        .and_then(|o| read_bounded(std::fs::File::from(o.fd), 64 * 1024 * 1024).ok())
+        .map(|b| sha256_bytes_hex(&b) == cur)
+        .unwrap_or(false);
+    if !ok {
+        let back = mutate::renameat2_dirs(sfd, &tmp, dfd, name, mutate::RENAME_NOREPLACE);
+        mutate::rmdir(dfd, &stage);
+        let msg = if back.is_ok() {
+            "the file changed during deletion; it was restored"
+        } else {
+            "the file changed during deletion and could not be restored in place; it was preserved"
+        };
+        return none(hooks, ToolErrorCode::Conflict, msg);
+    }
+    if let Some(id) = moved_id {
+        let _ = mutate::unlink_if_identity(sfd, &tmp, id);
+    }
+    mutate::rmdir(dfd, &stage);
+    let sync = mutate::fsync(dfd);
+    hooks.journal(
+        PH_APPLIED,
+        serde_json::json!({"postSha256": serde_json::Value::Null, "dirSynced": sync.is_ok()}),
+    )?;
+    crash_point("after-applied");
+    let gone = matches!(ws.stat_in_dir(&dir.fd, name), Ok(None));
+    if gone && sync.is_ok() {
+        hooks.journal(
+            PH_VERIFIED,
+            serde_json::json!({
+                "toolId": tool, "operation": "delete", "path": path_s,
+                "preSha256": cur, "postSha256": serde_json::Value::Null, "postBytes": 0,
+                "mutation": "applied",
+            }),
+        )?;
+        Ok(out_ok(
+            tool,
+            path_s,
+            "delete",
+            Some(cur),
+            &sha256_bytes_hex(b""),
+            0,
+        ))
+    } else {
+        hooks.journal(
+            PH_FAILED,
+            serde_json::json!({
+                "mutation": "published-unverified", "errorCode": "published-unverified",
+                "dirSynced": sync.is_ok(),
+            }),
+        )?;
+        Ok(out_err(
+            tool,
+            ToolError::new(
+                ToolErrorCode::PublishedUnverified,
+                "the file was removed but the removal could not be verified",
+            ),
+        ))
+    }
+}
+
 enum Reversal {
     /// Original restored; our (unmodified) inode discarded.
     Restored,
@@ -667,6 +844,10 @@ pub fn observe_for_recovery(
         None => ("unobservable", "uncertain"),
         Some(Some(d)) if Some(d.as_str()) == post => ("post-image-present", "applied-unverified"),
         Some(Some(d)) if Some(d.as_str()) == pre => ("pre-image-intact", "none"),
+        // a delete plans no post-image: the file being gone IS the post state
+        Some(None) if post.is_none() && pre.is_some() => {
+            ("post-image-present", "applied-unverified")
+        }
         Some(None) if pre.is_none() => ("pre-image-intact", "none"),
         Some(_) => ("diverged", "uncertain"),
     };
@@ -840,6 +1021,17 @@ pub fn preview_write(
                 .unwrap_or(0o644);
             (a.content.clone().into_bytes(), mode, "create")
         }
+        (Some(a), _) if a.mode == "delete" => {
+            let Some(cur) = &pre_sha else {
+                return Err(conflict("delete refused: the target does not exist"));
+            };
+            if Some(cur) != a.expected_sha256.as_ref() {
+                return Err(conflict(
+                    "delete refused: the file changed since it was read",
+                ));
+            }
+            (Vec::new(), pre_mode.unwrap_or(0o644), "delete")
+        }
         (Some(a), _) => {
             let Some(cur) = &pre_sha else {
                 return Err(conflict("replace refused: the target does not exist"));
@@ -884,7 +1076,7 @@ pub fn preview_write(
         ));
     }
     let post_sha256 = sha256_bytes_hex(&post);
-    if pre_sha.as_deref() == Some(post_sha256.as_str()) {
+    if op_name != "delete" && pre_sha.as_deref() == Some(post_sha256.as_str()) {
         return Err(conflict(
             "the requested change leaves the file byte-identical",
         ));

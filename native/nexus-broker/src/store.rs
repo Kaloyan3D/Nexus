@@ -16,6 +16,9 @@ pub struct RunRecord {
     pub run: IntentRun,
     pub payload_digest: String,
     pub idempotency_key: String,
+    /// The task text, kept so an interrupted task can be continued (never sent anywhere).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 pub struct Store {

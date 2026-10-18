@@ -63,6 +63,8 @@ fn usage() -> i32 {
     println!("         [--require-external-witness]  (refuse to start without --external-witness; production units)");
     println!("         [--require-human-approval]  (A4.2: per-operation human approval; needs --require-independent-approver)");
     println!("         [--enable-repo-inspect]  (A5.5: model-proposed read-only tools in repo-inspect commands; default off; needs --enable-model-pilot + --workspace-bases)");
+    println!("         [--project-envs DIR]  (project-scoped dependency/build environments; one private directory per project)
+         [--autonomous-workspace-policy]  (A6.1.4 interactive profile: approvals decided by an automated workspace policy, no human approver; needs --enable-repo-code --enable-writes --enable-process; never combined with human approval)");
     println!("         [--project-registry DIR [--project-registry-owner-uid UID[,UID]]]  (A6.1.3: operator project registry; with it the daemon makes working copies only for registered projects, by id)");
     println!("         [--enable-repo-code --worktree-root DIR]  (A5.6: bounded autonomous coding in isolated working copies; default off; needs the model pilot, --enable-writes, --enable-process, --require-human-approval and a worktree root beneath --workspace-bases)");
     println!("         [--enable-model-pilot]  (A5.1: model-only text inference scope; default off; needs shadow-test + --allowed-uids)");
@@ -498,7 +500,10 @@ fn run(args: &[String]) -> i32 {
     {
         let human = args.iter().any(|a| a == "--require-human-approval");
         let indep = args.iter().any(|a| a == "--require-independent-approver");
-        let level = if !human {
+        let auto = args.iter().any(|a| a == "--autonomous-workspace-policy");
+        let level = if auto {
+            Some(nexus_kernel::approvals::POLICY_AUTOMATED)
+        } else if !human {
             None
         } else if indep {
             Some(nexus_kernel::approvals::POLICY_INDEPENDENT)
@@ -686,8 +691,35 @@ fn run(args: &[String]) -> i32 {
     let require_independent = args.iter().any(|a| a == "--require-independent-approver");
     // A4.2: human approval mode. Every mutation/process then needs one
     // reviewed, confirmed, single-use approval bound to its exact operation.
-    let require_human_approval = args.iter().any(|a| a == "--require-human-approval");
-    if require_human_approval {
+    // A6.1.4: automated workspace policy (interactive profile). Approvals are still
+    // created, journaled and consumed, but decided by `autonomous-workspace/v1`;
+    // there is NO human approver channel and no approver credential. It is a
+    // different mode from (and never combined with) human approval.
+    let autonomous = args.iter().any(|a| a == "--autonomous-workspace-policy");
+    if autonomous {
+        for f in [
+            "--require-human-approval",
+            "--allow-nonindependent-approver-test-only",
+            "--require-independent-approver",
+            "--approver-cap",
+            "--approver-uids",
+        ] {
+            if args.iter().any(|a| a == f) {
+                return fatal(
+                    "bad-config",
+                    &format!("--autonomous-workspace-policy cannot be combined with {f}: it has no human approver channel (failing closed)"),
+                );
+            }
+        }
+        if !(writes_enabled && process_enabled) || !args.iter().any(|a| a == "--enable-repo-code") {
+            return fatal(
+                "bad-config",
+                "--autonomous-workspace-policy requires --enable-repo-code, --enable-writes and --enable-process (failing closed)",
+            );
+        }
+    }
+    let require_human_approval = autonomous || args.iter().any(|a| a == "--require-human-approval");
+    if require_human_approval && !autonomous {
         if !(writes_enabled || process_enabled) {
             return fatal(
                 "bad-config",
@@ -714,7 +746,20 @@ fn run(args: &[String]) -> i32 {
     }
     let mut approver_auth: Option<Arc<nexus_daemon::IssuerAuth>> = None;
     let mut approver_independent = false;
-    if writes_enabled || process_enabled {
+    if autonomous {
+        if trust_mode != TrustMode::ShadowTest {
+            return fatal(
+                "bad-config",
+                "--autonomous-workspace-policy requires --trust-mode shadow-test (failing closed)",
+            );
+        }
+        if allowed_uids.is_none() || !workspace_bases_nonempty(args) {
+            return fatal(
+                "bad-config",
+                "--autonomous-workspace-policy requires --allowed-uids and --workspace-bases (failing closed)",
+            );
+        }
+    } else if writes_enabled || process_enabled {
         if trust_mode != TrustMode::ShadowTest {
             return fatal(
                 "bad-config",
@@ -1103,6 +1148,9 @@ fn run(args: &[String]) -> i32 {
             Some((dir, trust))
         }
     };
+    if autonomous {
+        nexus_tools::workspace::enable_workbench_names();
+    }
     let daemon = Arc::new(Daemon {
         kernel: Mutex::new(kernel),
         trust_mode,
@@ -1116,6 +1164,9 @@ fn run(args: &[String]) -> i32 {
         workspace_bases,
         worktree_root: worktree_root.and_then(|r| std::fs::canonicalize(r).ok()),
         project_registry,
+        project_envs: flag_str(args, "--project-envs").map(std::path::PathBuf::from),
+        autonomous: autonomous.then(nexus_daemon::AutonomousConfig::default),
+        autonomous_counters: Default::default(),
         repo_code_enabled,
         writes_enabled,
         process_enabled,
@@ -1123,6 +1174,9 @@ fn run(args: &[String]) -> i32 {
             let p = nexus_tools::process::CommandPolicy::standard(
                 nexus_tools::process::Toolchain::discover(),
             );
+            // the interactive (automated workspace policy) profile runs the workbench
+            // command set; the strict profile keeps its exact-argv set
+            let p = if autonomous { p.with_workbench() } else { p };
             match flag(args, "--dep-cache") {
                 Some(d) => p.with_dep_cache(d),
                 None => p,

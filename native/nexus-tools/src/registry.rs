@@ -80,6 +80,30 @@ pub struct ProjectRecord {
     /// every uid the broker itself allows. Enforced by the broker.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_uids: Vec<u32>,
+    /// A6.1.4: display name, origin folder and detected kinds of a project opened from
+    /// the Desktop. `managed` projects live in a Nexus-owned snapshot repository whose
+    /// current commit is the pin; the origin folder is only ever read.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub managed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub snapshot_origin_dirty: bool,
+    /// Autonomy-first: the project policy allows dependency installation (network for the
+    /// install forms of package managers, inside the sandbox). Chosen when the project is
+    /// opened; changeable in the project's settings.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub installs: bool,
+    /// Trusted workspace mode: a finished, verified task's patch is applied to the user's
+    /// folder by itself (still all-or-nothing, still refused if the folder changed meanwhile).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trusted: bool,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -504,6 +528,14 @@ pub fn add_with(
         pinned_commit: head,
         write_allow,
         allowed_uids,
+        managed: false,
+        label: None,
+        origin: None,
+        kinds: Vec::new(),
+        snapshot_fingerprint: None,
+        snapshot_origin_dirty: false,
+        installs: false,
+        trusted: false,
         created_at_ms: now_ms(),
         updated_at_ms: now_ms(),
     };
@@ -651,4 +683,144 @@ pub fn resolve(dir: &Path, trust: &Trust, id: &str) -> Result<ProjectRecord, Reg
         ));
     }
     Ok(rec)
+}
+
+/// What the Desktop learned when it opened a project (A6.1.4).
+#[derive(Debug, Clone)]
+pub struct ManagedMeta {
+    pub label: String,
+    pub origin: String,
+    pub kinds: Vec<String>,
+    pub fingerprint: String,
+    pub origin_dirty: bool,
+}
+
+/// Register (or re-register) a managed project whose source is a Nexus-owned snapshot
+/// repository. The snapshot must verify clean at exactly `commit`.
+pub fn upsert_managed(
+    dir: &Path,
+    trust: &Trust,
+    id: &str,
+    snapshot_path: &Path,
+    commit: &str,
+    meta: &ManagedMeta,
+    write_allow: Vec<String>,
+) -> Result<ProjectRecord, RegError> {
+    if !valid_project_id(id) {
+        return Err(err("bad-id", "invalid project id"));
+    }
+    if !valid_commit(commit) {
+        return Err(err(
+            "bad-commit",
+            "commit must be 40 lowercase hex characters",
+        ));
+    }
+    let (canon, head) = inspect_source(snapshot_path)?;
+    if head != commit {
+        return Err(err(
+            "commit-mismatch",
+            "the snapshot is not at the stated commit",
+        ));
+    }
+    let mut out: Option<ProjectRecord> = None;
+    mutate(dir, trust, |f| {
+        let now = now_ms();
+        let path = canon.to_string_lossy().into_owned();
+        if let Some(o) = f
+            .projects
+            .iter()
+            .find(|p| p.source_path == path && p.id != id)
+        {
+            return Err(err(
+                "duplicate-source",
+                format!("that snapshot belongs to {}", o.id),
+            ));
+        }
+        if let Some(p) = f.projects.iter_mut().find(|p| p.id == id) {
+            if !p.managed {
+                return Err(err(
+                    "not-managed",
+                    "that project was registered by the operator, not opened from the Desktop",
+                ));
+            }
+            p.source_path = path;
+            p.pinned_commit = commit.to_owned();
+            p.label = Some(meta.label.clone());
+            p.origin = Some(meta.origin.clone());
+            p.kinds = meta.kinds.clone();
+            p.snapshot_fingerprint = Some(meta.fingerprint.clone());
+            p.snapshot_origin_dirty = meta.origin_dirty;
+            p.updated_at_ms = now;
+            out = Some(p.clone());
+        } else {
+            let rec = ProjectRecord {
+                id: id.to_owned(),
+                source_path: path,
+                pinned_commit: commit.to_owned(),
+                write_allow,
+                allowed_uids: Vec::new(),
+                managed: true,
+                label: Some(meta.label.clone()),
+                origin: Some(meta.origin.clone()),
+                kinds: meta.kinds.clone(),
+                snapshot_fingerprint: Some(meta.fingerprint.clone()),
+                snapshot_origin_dirty: meta.origin_dirty,
+                installs: true,
+                trusted: false,
+                created_at_ms: now,
+                updated_at_ms: now,
+            };
+            f.projects.push(rec.clone());
+            out = Some(rec);
+        }
+        Ok(())
+    })?;
+    out.ok_or_else(|| err("internal", "no record"))
+}
+
+/// Change whether a managed project may install dependencies (the project-level policy).
+pub fn set_installs(
+    dir: &Path,
+    trust: &Trust,
+    id: &str,
+    installs: Option<bool>,
+    trusted: Option<bool>,
+) -> Result<ProjectRecord, RegError> {
+    let mut out: Option<ProjectRecord> = None;
+    mutate(dir, trust, |f| {
+        match f.projects.iter_mut().find(|p| p.id == id && p.managed) {
+            Some(p) => {
+                if let Some(i) = installs {
+                    p.installs = i;
+                }
+                if let Some(t) = trusted {
+                    p.trusted = t;
+                }
+                p.updated_at_ms = now_ms();
+                out = Some(p.clone());
+                Ok(())
+            }
+            None => Err(err("not-found", format!("no opened project {id}"))),
+        }
+    })?;
+    out.ok_or_else(|| err("internal", "no record"))
+}
+
+/// Remove a managed project from the registry (the user's folder is untouched).
+pub fn remove_managed(dir: &Path, trust: &Trust, id: &str) -> Result<ProjectRecord, RegError> {
+    let mut gone: Option<ProjectRecord> = None;
+    mutate(dir, trust, |f| {
+        match f.projects.iter().position(|p| p.id == id) {
+            Some(i) if f.projects[i].managed => {
+                gone = Some(f.projects.remove(i));
+                Ok(())
+            }
+            Some(_) => Err(err(
+                "not-managed",
+                "operator-registered projects are removed by the operator",
+            )),
+            None => Err(err("not-found", format!("no project {id}"))),
+        }
+    })?;
+    gone.ok_or_else(|| err("internal", "no record"))
 }

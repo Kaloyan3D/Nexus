@@ -94,6 +94,28 @@ pub enum NameClass {
     Sensitive,
 }
 
+static WORKBENCH_NAMES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Autonomy-first (interactive profile, set once at daemon start): ordinary dotfiles
+/// (`.eslintrc`, `.prettierignore`, `.dockerignore`, ...) are readable and writable.
+/// Credentials, `.git` and the other always-denied names stay out of reach.
+pub fn enable_workbench_names() {
+    WORKBENCH_NAMES.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn workbench_names() -> bool {
+    WORKBENCH_NAMES.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Extensions of source code and documentation (never secret stores themselves).
+fn is_source_file_name(lower: &str) -> bool {
+    const EXT: [&str; 22] = [
+        ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".rs", ".py", ".go", ".java", ".kt", ".cs",
+        ".rb", ".php", ".swift", ".c", ".h", ".cpp", ".md", ".mts", ".cts", ".sh",
+    ];
+    EXT.iter().any(|e| lower.ends_with(e))
+}
+
 impl WorkspacePolicy {
     pub fn is_ignored_dir(&self, name: &str) -> bool {
         self.ignored_dirs.contains(&name)
@@ -159,12 +181,15 @@ impl WorkspacePolicy {
             if sensitive_exact.contains(&lower.as_str())
                 || sensitive_prefix.iter().any(|p| lower.starts_with(p))
                 || sensitive_suffix.iter().any(|s| lower.ends_with(s))
-                || lower.contains("credential")
+                // `credentials.json`, `.aws/credentials`: secrets. But source files that merely
+                // NAME the concept (`provider-credentials.ts`, `credentials_store.rs`) are code a
+                // reviewer must be able to read.
+                || (lower.contains("credential") && !is_source_file_name(&lower))
             {
                 return NameClass::Sensitive;
             }
         }
-        if lower.starts_with('.') && !allow_listed {
+        if lower.starts_with('.') && !allow_listed && !workbench_names() {
             return NameClass::Hidden;
         }
         NameClass::Allowed
@@ -772,7 +797,7 @@ impl Workspace {
             ));
         }
         for c in rel.components() {
-            if c.starts_with('.') {
+            if c.starts_with('.') && !workbench_names() {
                 return Err(ToolError::new(
                     ToolErrorCode::HiddenPathRefused,
                     "hidden, VCS and internal paths are never writable",
@@ -884,6 +909,11 @@ mod a55_policy_tests {
             "dispatch.rs",
             "README.md",
             "capability.rs",
+            // code that is ABOUT credentials is code (found by a real repository review)
+            "provider-credentials.ts",
+            "credentials_store.rs",
+            "CredentialService.cs",
+            "credentials.md",
         ] {
             assert_eq!(p.classify_name(n), NameClass::Allowed, "{n}");
         }

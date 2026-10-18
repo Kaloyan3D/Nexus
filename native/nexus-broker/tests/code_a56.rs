@@ -483,6 +483,7 @@ struct Fx {
     /// A6.1.3: operator project registry directory (registry-mode fixtures only).
     reg_dir: Option<PathBuf>,
     repo2: Option<PathBuf>,
+    autonomous: bool,
     _acap_dir: tempfile::TempDir,
 }
 
@@ -512,6 +513,7 @@ fn spawn_daemon(
     repo_code: bool,
     env: &[(&str, &str)],
     project_registry: Option<&Path>,
+    autonomous: bool,
 ) -> (Child, PathBuf, PathBuf) {
     let uid = own_uid().to_string();
     let (db, wit, socket, cap) = (
@@ -539,7 +541,21 @@ fn spawn_daemon(
         .arg("--workspace-bases")
         .arg(bases)
         .arg("--enable-model-pilot");
-    if repo_code {
+    if repo_code && autonomous {
+        // A6.1.4 interactive profile: no approver, no human channel, automated policy.
+        c.args([
+            "--enable-repo-inspect",
+            "--enable-repo-code",
+            "--enable-writes",
+            "--enable-process",
+            "--autonomous-workspace-policy",
+        ])
+        .arg("--worktree-root")
+        .arg(worktrees);
+        if let Some(r) = project_registry {
+            c.arg("--project-registry").arg(r);
+        }
+    } else if repo_code {
         // The single-UID test topology: the approver shares the test UID, which
         // the daemon only accepts under this explicit test-only flag. The
         // independence boundary itself is proven by the multi-UID suite.
@@ -598,14 +614,20 @@ fn fixture_with(responder: Responder, extra: Box<dyn Fn(&Path)>) -> Fx {
 
 /// `env` is given to the daemon only (e.g. a deterministic crash point).
 fn fixture_env(responder: Responder, extra: Box<dyn Fn(&Path)>, env: &[(&str, &str)]) -> Fx {
-    fixture_inner(responder, extra, env, false)
+    fixture_inner(responder, extra, env, false, false)
 }
 
 /// A6.1.3: the daemon and broker are registry-managed; two independent
 /// projects, `proj` (the usual crate) and `other` (a second, separate repo), are
 /// registered through the operator API.
 fn fixture_registry(responder: Responder) -> Fx {
-    fixture_inner(responder, Box::new(|_| {}), &[], true)
+    fixture_inner(responder, Box::new(|_| {}), &[], true, false)
+}
+
+/// A6.1.4: registry-managed AND the interactive profile: automated workspace
+/// policy instead of a human approver (no approver is ever started in these tests).
+fn fixture_autonomous(responder: Responder) -> Fx {
+    fixture_inner(responder, Box::new(|_| {}), &[], true, true)
 }
 
 fn fixture_inner(
@@ -613,6 +635,7 @@ fn fixture_inner(
     extra: Box<dyn Fn(&Path)>,
     env: &[(&str, &str)],
     with_registry: bool,
+    autonomous: bool,
 ) -> Fx {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -665,6 +688,7 @@ fn fixture_inner(
         true,
         env,
         reg_dir.as_deref(),
+        autonomous,
     );
     let creds = tmp.path().join("provider-credentials.json");
     std::fs::write(&creds, json!({ CRED_REF: SECRET }).to_string()).unwrap();
@@ -685,6 +709,7 @@ fn fixture_inner(
         worktrees,
         reg_dir,
         repo2,
+        autonomous,
         _acap_dir: acap_dir,
     }
 }
@@ -705,6 +730,7 @@ impl Fx {
             true,
             &[],
             self.reg_dir.as_deref(),
+            self.autonomous,
         );
         self.daemon = child;
         self.daemon_socket = socket;
@@ -768,6 +794,9 @@ impl Fx {
             approval_ttl_ms: None,
             project_registry: None,
             code_caps: Default::default(),
+            interactive: false,
+            project_snapshots: None,
+            context_budget_bytes: None,
         }
     }
 
@@ -4516,5 +4545,557 @@ fn a613_concurrent_diff_requests_for_one_copy_all_succeed() {
         }
     }
     assert!(digests.iter().all(|d| d == &digests[0]));
+    b.shutdown();
+}
+
+// ─── A6.1.4 automated workspace policy (interactive profile) ─────────────────
+
+#[test]
+fn a614_a_run_completes_with_no_human_approver_and_every_grant_is_recorded_as_automated() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(script(fix_calls(), "Fixed."));
+    // NOTE: no Approver is started. There is no approver credential at all.
+    let b = fx.start_registry("auto");
+    let repo2 = fx.repo2.clone().unwrap();
+    let before = fp_of(&repo2);
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "a614-auto-00000001", |_| {}),
+        150,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let o = run.coding_outcome.as_ref().unwrap();
+    assert_eq!(
+        (o.verification.as_str(), o.change.as_str()),
+        ("verified-passed", "applied"),
+        "{o:?}"
+    );
+    // truthful attribution: automated grants, never human approvals
+    let muts: Vec<_> = run
+        .tool_activity
+        .iter()
+        .filter(|a| a.tool != "fs_read")
+        .collect();
+    assert_eq!(muts.len(), 2, "{muts:?}");
+    for a in &muts {
+        assert_eq!(a.approval_outcome.as_deref(), Some("approved"));
+        assert_eq!(
+            a.approval_actor.as_deref(),
+            Some("automated-policy"),
+            "{a:?}"
+        );
+        assert!(a.approval_id.is_some());
+    }
+    assert!(run.pending_approval.is_none());
+    // the Kernel's own approval journal says so, with the policy digest and facts
+    let cap = nexus_client::issuer::read_capability(&fx.cap).unwrap();
+    let l = nexus_client::issuer::issuer_call(
+        &fx.daemon_socket,
+        &cap,
+        "approval-list",
+        json!({"limit": 50}),
+    )
+    .unwrap();
+    let rows = l["approvals"].as_array().unwrap();
+    assert!(!rows.is_empty());
+    for r in rows {
+        assert_eq!(r["decisionKind"], "automated-policy", "{r}");
+        assert!(
+            r["approverId"]
+                .as_str()
+                .unwrap()
+                .starts_with("automated-policy:"),
+            "{r}"
+        );
+        assert_eq!(r["state"], "consumed", "single use: {r}");
+    }
+    let st =
+        nexus_client::issuer::issuer_call(&fx.daemon_socket, &cap, "status", json!({})).unwrap();
+    assert_eq!(st["automatedPolicy"], "autonomous-workspace/v1", "{st}");
+    assert_eq!(st["requireHumanApproval"], false);
+    assert_eq!(st["approvalGated"], true);
+    assert_eq!(fp_of(&repo2), before, "the original is unchanged");
+    b.shutdown();
+}
+
+#[test]
+fn a614_the_automated_policy_refuses_what_it_does_not_cover_and_the_human_channel_does_not_exist() {
+    if !sandbox_ready() {
+        return;
+    }
+    let rd = || ("fs_read", r#"{"path":"src/lib.rs"}"#.to_owned());
+    let calls = vec![
+        rd(),
+        // protected build file, hidden file, outside the project's write scope (other has src/ only)
+        (
+            "fs_write",
+            r#"{"path":".github/workflows/ci.yml","content":"on: push\n","mode":"create"}"#
+                .to_owned(),
+        ),
+        rd(),
+        (
+            "fs_write",
+            r#"{"path":".env","content":"X=1\n","mode":"create"}"#.to_owned(),
+        ),
+        rd(),
+        (
+            "fs_write",
+            r#"{"path":"README.md","content":"x\n","mode":"overwrite"}"#.to_owned(),
+        ),
+        rd(),
+        (
+            "fs_write",
+            r#"{"path":"../escape.txt","content":"x\n","mode":"create"}"#.to_owned(),
+        ),
+        rd(),
+        // commands outside the sandbox allowlist
+        (
+            "proc_run",
+            r#"{"program":"git","args":["push"]}"#.to_owned(),
+        ),
+        rd(),
+        (
+            "proc_run",
+            r#"{"program":"curl","args":["http://example.invalid"]}"#.to_owned(),
+        ),
+    ];
+    let fx = fixture_autonomous(script(calls, "done"));
+    let b = fx.start_registry("autoref");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "a614-auto-00000002", |_| {}),
+        150,
+    );
+    // the scripted model never stops asking: the run ends at its turn limit, having executed nothing
+    assert!(run.terminal && run.state != "failed", "{}", run.state);
+    for a in run.tool_activity.iter().filter(|a| a.tool != "fs_read") {
+        assert_ne!(a.status, "executed", "must not execute: {a:?}");
+        assert!(a.approval_actor.is_none(), "nothing was granted: {a:?}");
+    }
+    assert!(
+        run.tool_activity
+            .iter()
+            .filter(|a| a.tool != "fs_read")
+            .count()
+            >= 5
+    );
+    assert_eq!(run.edits_used + run.tests_used, 0);
+    assert!(!working_copy(&fx).unwrap().join(".github").exists());
+    assert!(!working_copy(&fx).unwrap().join(".env").exists());
+    // there is no approver credential and no human decision path on this daemon
+    let cap = nexus_client::issuer::read_capability(&fx.cap).unwrap();
+    for cmd in [
+        "approval-get",
+        "approval-decide",
+        "write-scope-approve",
+        "process-scope-approve",
+    ] {
+        let r = nexus_client::issuer::issuer_call(
+            &fx.daemon_socket,
+            &cap,
+            cmd,
+            json!({"approvalId": "x"}),
+        )
+        .unwrap();
+        assert_eq!(r["ok"], false, "{cmd}: {r}");
+    }
+    b.shutdown();
+}
+
+/// A turn the provider ends at `max_output_tokens` while a tool call is half written.
+fn truncated_frames(resp: &str, n: usize) -> Vec<String> {
+    let item = format!("fc_{n}");
+    vec![
+        created(resp),
+        sse(
+            "response.output_item.added",
+            json!({"type":"response.output_item.added","output_index":0,
+                   "item":{"type":"function_call","id":item,"call_id":"call_cut","name":"fs_edit","arguments":""}}),
+        ),
+        sse(
+            "response.function_call_arguments.delta",
+            json!({"type":"response.function_call_arguments.delta","item_id":item,"delta":"{\"path\":\"src/lib.rs\",\"edits\":[{\"oldText\":\"a - b\",\"newTe"}),
+        ),
+        sse(
+            "response.incomplete",
+            json!({"type":"response.incomplete","response":{"id":resp,"status":"incomplete",
+                   "incomplete_details":{"reason":"max_output_tokens"},
+                   "usage":{"input_tokens":50,"output_tokens":512,"output_tokens_details":{"reasoning_tokens":480}}}}),
+        ),
+    ]
+}
+
+#[test]
+fn a614_a_turn_cut_off_at_the_output_limit_executes_nothing_and_is_asked_again_with_a_larger_cap() {
+    if !sandbox_ready() {
+        return;
+    }
+    let caps: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+    let c2 = caps.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        c2.lock()
+            .unwrap()
+            .push(body["max_output_tokens"].as_u64().unwrap_or(0));
+        let resp = format!("resp_{n}");
+        match n {
+            0 => Answer::Frames(truncated_frames(&resp, n)),
+            1 => Answer::Frames(call_frames(
+                &resp,
+                n,
+                "c_read",
+                "fs_read",
+                r#"{"path":"src/lib.rs"}"#,
+            )),
+            _ => Answer::Frames(text_frames(&resp, "Read it; stopping.")),
+        }
+    });
+    let fx = fixture_autonomous(responder);
+    let mut c = fx.config("trunc");
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.interactive = true;
+    let b = nexus_broker::start(c).expect("starts");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "a614-trunc-0000001", |l| {
+            l.max_output_tokens = Some(512)
+        }),
+        120,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    // the second request carried the larger cap, the third went back to the base cap
+    assert_eq!(*caps.lock().unwrap(), [512, 1024, 512]);
+    // the half-written edit never became a tool call and nothing was granted or executed
+    assert!(
+        run.tool_activity.iter().all(|a| a.tool == "fs_read"),
+        "{:?}",
+        run.tool_activity
+    );
+    assert_eq!(run.edits_used, 0);
+    assert!(run.pending_approval.is_none());
+    b.shutdown();
+}
+
+#[test]
+fn a614_repeated_truncation_ends_the_run_with_a_clear_cause_and_never_loops() {
+    if !sandbox_ready() {
+        return;
+    }
+    let seen = Arc::new(AtomicUsize::new(0));
+    let s2 = seen.clone();
+    let responder: Responder = Arc::new(move |n, _| {
+        s2.fetch_add(1, Ordering::SeqCst);
+        Answer::Frames(truncated_frames(&format!("resp_{n}"), n))
+    });
+    let fx = fixture_autonomous(responder);
+    let mut c = fx.config("trunc2");
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.interactive = true;
+    let b = nexus_broker::start(c).expect("starts");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "a614-trunc-0000002", |l| {
+            l.max_output_tokens = Some(512)
+        }),
+        120,
+    );
+    assert_eq!(run.state, "failed", "{}", run.state);
+    assert_eq!(run.error_code.as_deref(), Some("output-limit"));
+    // 512 -> 1024, then no room left: exactly two provider requests, no executions
+    assert_eq!(seen.load(Ordering::SeqCst), 2);
+    assert!(run.tool_activity.is_empty());
+    b.shutdown();
+}
+
+#[test]
+fn a614_a_long_loop_stays_inside_the_context_budget_and_still_completes() {
+    if !sandbox_ready() {
+        return;
+    }
+    let sizes: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+    let saw_note = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (s2, n2) = (sizes.clone(), saw_note.clone());
+    let responder: Responder = Arc::new(move |n, body| {
+        let raw = body.to_string();
+        s2.lock().unwrap().push(raw.len());
+        if raw.contains("an older tool result was omitted") || raw.contains("[Nexus note]") {
+            n2.store(true, Ordering::SeqCst);
+        }
+        let resp = format!("resp_{n}");
+        if n < 55 {
+            // distinct windows of a big file: ~24 KB results each
+            let args = json!({"path": "big.txt", "startLine": 1 + (n % 30) * 40, "maxLines": 400})
+                .to_string();
+            Answer::Frames(call_frames(
+                &resp,
+                n,
+                &format!("call_{n}"),
+                "fs_read",
+                &args,
+            ))
+        } else {
+            Answer::Frames(text_frames(&resp, "Read enough."))
+        }
+    });
+    let fx = fixture_inner(
+        responder,
+        Box::new(|root| {
+            let text: String = (0..1800)
+                .map(|i| format!("line {i:05} {}\n", "x".repeat(100)))
+                .collect();
+            std::fs::write(root.join("big.txt"), text).unwrap();
+        }),
+        &[],
+        true,
+        true,
+    );
+    let mut c = fx.config("ctx");
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.interactive = true;
+    c.context_budget_bytes = Some(300_000);
+    let b = nexus_broker::start(c).expect("starts");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("proj", "read", "a614-ctx-00000001", |l| {
+            l.max_turns = Some(60);
+            l.max_tool_calls = Some(200);
+            l.max_tool_result_bytes = Some(8 * 1024 * 1024);
+        }),
+        600,
+    );
+    assert_eq!(
+        run.state, "completed",
+        "{} {:?} {:?}",
+        run.state, run.error_code, run.error_message
+    );
+    assert_eq!(run.tool_calls, 55);
+    let max = *sizes.lock().unwrap().iter().max().unwrap();
+    println!(
+        "A614 max request bytes {max}; total result bytes {}",
+        run.tool_result_bytes
+    );
+    assert!(
+        max < 450_000,
+        "no request may balloon past the compaction budget: {max}"
+    );
+    assert!(
+        saw_note.load(Ordering::SeqCst),
+        "old results were compacted to stubs"
+    );
+    b.shutdown();
+}
+
+// ---- autonomy-first: provider interruptions are recovered, not fatal ------------------
+
+#[test]
+fn a614_provider_interruptions_midway_are_recovered_without_losing_or_repeating_work() {
+    if !sandbox_ready() {
+        return;
+    }
+    // requests 0..: read, [connection lost], read, [connection lost x2], read, final text
+    let bodies: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let b2 = bodies.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        b2.lock().unwrap().push(body.clone());
+        let resp = format!("resp_{n}");
+        let done = body["input"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["type"] == "function_call_output")
+                    .count()
+            })
+            .unwrap_or(0);
+        // the 2nd, 4th and 5th provider requests are lost after being read
+        if matches!(n, 1 | 3 | 4) {
+            return Answer::Close;
+        }
+        match done {
+            0..=2 => Answer::Frames(call_frames(
+                &resp,
+                n,
+                &format!("call_{done}"),
+                "fs_read",
+                r#"{"path":"src/lib.rs"}"#,
+            )),
+            _ => Answer::Frames(text_frames(
+                &resp,
+                "All three reads done; nothing else to do.",
+            )),
+        }
+    });
+    let fx = fixture_autonomous(responder);
+    let mut c = fx.config("recover");
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.interactive = true;
+    let b = nexus_broker::start(c).expect("starts");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "a614-recover-000001", |_| {}),
+        180,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(run.recoveries, 3, "{run:?}");
+    assert!(run.last_recovery.is_some());
+    // every completed read ran exactly once; the lost requests were simply asked again
+    let reads: Vec<_> = run
+        .tool_activity
+        .iter()
+        .filter(|a| a.tool == "fs_read")
+        .collect();
+    assert_eq!(reads.len(), 3, "{:?}", run.tool_activity);
+    assert!(reads.iter().all(|a| a.status == "executed"));
+    // the retried requests carried the SAME durable history as the lost ones
+    let seen = bodies.lock().unwrap();
+    assert_eq!(seen.len(), 7, "3 answered + 3 lost + 1 final");
+    let outs = |v: &Value| {
+        v["input"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["type"] == "function_call_output")
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    assert_eq!(outs(&seen[1]), 1);
+    assert_eq!(outs(&seen[2]), 1, "retry after the lost request");
+    assert_eq!(outs(&seen[3]), 2);
+    assert_eq!(outs(&seen[5]), 2, "second retry of the same turn");
+    b.shutdown();
+}
+
+#[test]
+fn a614_an_interrupted_task_is_continued_in_a_new_run_that_starts_from_its_work() {
+    if !sandbox_ready() {
+        return;
+    }
+    let continued_seen = Arc::new(AtomicUsize::new(0));
+    let c2 = continued_seen.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        let text = body.to_string();
+        if text.contains("CONTINUED") {
+            c2.fetch_add(1, Ordering::SeqCst);
+            return Answer::Frames(text_frames(
+                &resp,
+                "Checked the carried-over file; the task is done.",
+            ));
+        }
+        let done = body["input"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["type"] == "function_call_output")
+                    .count()
+            })
+            .unwrap_or(0);
+        if done == 0 {
+            Answer::Frames(call_frames(
+                &resp,
+                n,
+                "c_w",
+                "fs_write",
+                r#"{"path":"src/carried.txt","content":"work done before the interruption\n","mode":"create"}"#,
+            ))
+        } else {
+            // hold the run open so it can be interrupted
+            Answer::Slow {
+                frames: text_frames(&resp, "thinking"),
+                gap_ms: 100,
+                hold_ms: 120_000,
+            }
+        }
+    });
+    let fx = fixture_autonomous(responder);
+    let mut c = fx.config("cont");
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.interactive = true;
+    let b = nexus_broker::start(c).expect("starts");
+    let sock = b.socket_path().to_owned();
+    let first = ic::submit(
+        &sock,
+        &code_intent_for(
+            "other",
+            "write the carried file",
+            "a614-cont-0000001",
+            |_| {},
+        ),
+    )
+    .expect("submit")
+    .run;
+    // wait for the write to be executed, then interrupt
+    let end = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let r = ic::status(&sock, &first.run_id).unwrap();
+        if r.tool_activity
+            .iter()
+            .any(|a| a.tool == "fs_write" && a.status == "executed")
+        {
+            break;
+        }
+        assert!(std::time::Instant::now() < end, "write never ran: {r:?}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    ic::cancel(&sock, &first.run_id).unwrap();
+    let first = wait_terminal(&sock, &first.run_id, 60);
+    assert!(first.terminal && first.state != "completed", "{first:?}");
+    // the interrupted task is continued: a NEW run, whose copy already holds the file
+    let v = ic::resume(&sock, &first.run_id).expect("resume");
+    let second_id = v["run"]["runId"].as_str().unwrap().to_owned();
+    assert_ne!(second_id, first.run_id);
+    let second = wait_terminal(&sock, &second_id, 120);
+    assert_eq!(second.state, "completed", "{second:?}");
+    assert_eq!(
+        second.continuation_of.as_deref(),
+        Some(first.run_id.as_str())
+    );
+    assert_eq!(
+        continued_seen.load(Ordering::SeqCst),
+        1,
+        "the model was told it is a continuation"
+    );
+    let first_after = ic::status(&sock, &first.run_id).unwrap();
+    assert_eq!(
+        first_after.continued_as.as_deref(),
+        Some(second_id.as_str())
+    );
+    let copy_of = |run: &ic::IntentRun| {
+        fx.worktrees
+            .join(run.task_instance_id.clone().expect("task instance"))
+    };
+    assert_eq!(
+        std::fs::read_to_string(copy_of(&second).join("src/carried.txt")).unwrap(),
+        "work done before the interruption\n"
+    );
+    // nothing was re-executed in the continuation, and asking again does not create a third run
+    assert!(
+        second.tool_activity.is_empty(),
+        "{:?}",
+        second.tool_activity
+    );
+    let again = ic::resume(&sock, &first.run_id);
+    assert!(again.is_err(), "already continued");
     b.shutdown();
 }

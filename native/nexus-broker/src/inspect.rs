@@ -49,6 +49,10 @@ pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 2048;
 pub const PER_RESULT_BYTES: usize = 24 * 1024;
 /// Consecutive refused/invalid proposals tolerated before the run stops.
 pub const MAX_CONSECUTIVE_REFUSALS: u32 = 3;
+/// Largest multiple of the per-turn output cap a truncated turn may be re-asked with.
+pub const OUTPUT_ESCALATION_FACTOR: u64 = 2;
+/// Consecutive truncated turns tolerated before the run stops.
+pub const MAX_TRUNCATIONS_IN_A_ROW: u32 = 2;
 /// Retained tool-activity entries in the run view.
 pub const MAX_ACTIVITY: usize = 64;
 
@@ -697,7 +701,11 @@ pub(crate) fn run(
     let mut limits = resolve_limits(intent);
     if mode == Mode::Code {
         // A6.1.3: operator caps only ever lower what the client asked for.
-        let eff = b.cfg.code_caps.effective();
+        let eff = b
+            .cfg
+            .code_caps
+            .with_user_limits(&b.cfg.state_dir)
+            .effective(b.cfg.interactive);
         limits.turns = limits.turns.min(eff.max_turns);
         limits.tool_calls = limits.tool_calls.min(eff.max_tool_calls);
         limits.runtime = limits
@@ -713,6 +721,13 @@ pub(crate) fn run(
         .load(run_id)
         .map(|r| r.run.client_id)
         .unwrap_or_default();
+    // A6.1.4: a project opened from the Desktop starts every NEW task from its current
+    // files (re-snapshot when the folder changed); already-running tasks keep their copy.
+    if mode == Mode::Code {
+        if let Some(env) = b.cfg.project_env() {
+            crate::projects::ensure_fresh(&env, &workspace_id);
+        }
+    }
     // Resolved ONCE here: a registry change after this point cannot alter this run.
     let pool = match mode {
         Mode::Inspect => b.cfg.workspaces.clone(),
@@ -736,7 +751,11 @@ pub(crate) fn run(
         .clone();
     let mut policy = crate::code::resolve_policy(intent, &ws.write_allow);
     if mode == Mode::Code {
-        let eff = b.cfg.code_caps.effective();
+        let eff = b
+            .cfg
+            .code_caps
+            .with_user_limits(&b.cfg.state_dir)
+            .effective(b.cfg.interactive);
         policy.max_edits = policy.max_edits.min(eff.max_edits);
         policy.max_tests = policy.max_tests.min(eff.max_tests);
     }
@@ -761,11 +780,11 @@ pub(crate) fn run(
         if !(on("repoCodeEnabled")
             && on("writesEnabled")
             && on("processEnabled")
-            && on("requireHumanApproval"))
+            && (on("approvalGated") || on("requireHumanApproval")))
         {
             return Err(se(
                 "code-not-available",
-                "the daemon is not configured for autonomous coding (repo-code, writes, processes and mandatory human approval must all be enabled)",
+                "the daemon is not configured for autonomous coding (repo-code, writes, processes and mandatory per-operation approval, human or automated policy, must all be enabled)",
             ));
         }
     }
@@ -832,6 +851,23 @@ pub(crate) fn run(
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     let out_tokens = out_tokens.map(|n| if sealed_out > 0 { n.min(sealed_out) } else { n });
+    // A6.1.4: a turn that ends at the output limit (reasoning tokens count against it)
+    // may be re-asked with a larger cap, up to this ceiling. The interactive
+    // authorization covers the ceiling; a strict (manual-record) run has none.
+    let out_ceiling = if b.cfg.interactive {
+        out_tokens.map(|n| {
+            let c = n
+                .saturating_mul(OUTPUT_ESCALATION_FACTOR)
+                .min(crate::consent::MAX_OUTPUT_TOKENS);
+            if sealed_out > 0 {
+                c.min(sealed_out)
+            } else {
+                c
+            }
+        })
+    } else {
+        out_tokens
+    };
 
     // 1b. repo-code: the isolated working copy, created by the daemon (trusted
     //     native code), BEFORE any authorization can be spent so that a dirty
@@ -865,6 +901,31 @@ pub(crate) fn run(
             .map(str::to_owned);
         created_worktree = true;
         b.update(run_id, |r| r.worktree_commit = commit);
+        // A continuation of an interrupted task starts from the work already done.
+        let from = b
+            .store
+            .load(run_id)
+            .and_then(|r| r.run.continuation_of)
+            .and_then(|old| b.store.load(&old))
+            .and_then(|o| o.run.task_instance_id);
+        if let Some(from) = from {
+            let seeded = daemon(
+                b,
+                "worktree-seed",
+                serde_json::json!({ "taskInstanceId": task_instance, "fromTaskInstanceId": from }),
+            );
+            if let Err(e) = seeded {
+                let _ = daemon(
+                    b,
+                    "worktree-remove",
+                    serde_json::json!({ "taskInstanceId": task_instance }),
+                );
+                return Err(se(
+                    "seed-failed",
+                    format!("the earlier work could not be carried over: {}", e.message),
+                ));
+            }
+        }
     }
     let ws_digest = nexus_contracts::sha256_hex(&root);
     // Until a conversation exists nothing worth keeping has happened: a
@@ -886,24 +947,34 @@ pub(crate) fn run(
         if crate::identity::self_stale() {
             return Err(discard(se(
                 "broker-stale",
-                "this broker process predates the installed nexus-broker binary; restart it (nothing sent, authorization kept)",
+                "this broker process predates the installed nexus-broker binary; Nexus restarts it automatically when no task is running, then send again (nothing was sent, authorization kept)",
             )));
         }
-        crate::live_auth::consume_session(
-            &b.cfg.state_dir,
-            &crate::live_auth::SessionAttempt {
-                intent_type: mode.scope(),
-                provider_id: &provider_id,
-                remote_model_id: &remote_model_id,
-                workspace_id: &workspace_id,
-                prompt: &intent.content,
-                max_turns: limits.turns,
-                max_tool_calls: limits.tool_calls,
-                max_output_tokens: limits.output_tokens,
-                max_tool_result_bytes: limits.result_bytes,
+        let attempt = crate::live_auth::SessionAttempt {
+            intent_type: mode.scope(),
+            provider_id: &provider_id,
+            remote_model_id: &remote_model_id,
+            workspace_id: &workspace_id,
+            prompt: &intent.content,
+            max_turns: limits.turns,
+            max_tool_calls: limits.tool_calls,
+            max_output_tokens: if b.cfg.interactive {
+                out_ceiling
+            } else {
+                limits.output_tokens
             },
-        )
-        .map_err(|(c, m)| discard(se(c, m)))?;
+            max_tool_result_bytes: limits.result_bytes,
+        };
+        if b.cfg.interactive {
+            // A6.1.4: issued by the broker from the standing user consent, per run, audited.
+            crate::consent::authorize_run(&b.cfg.state_dir, &attempt, run_id)
+                .map(|_| ())
+                .map_err(|(c, m)| discard(se(c, m)))?;
+        } else {
+            crate::live_auth::consume_session(&b.cfg.state_dir, &attempt)
+                .map(|_| ())
+                .map_err(|(c, m)| discard(se(c, m)))?;
+        }
     }
     if ctx.stop() {
         let _ = discard(se("cancelled", "cancelled"));
@@ -980,6 +1051,7 @@ pub(crate) fn run(
         &opts,
         &limits,
         out_tokens,
+        out_ceiling,
         &started,
         &Shared {
             mode,
@@ -1022,6 +1094,10 @@ struct Shared<'a> {
 
 #[derive(Default)]
 struct LoopState {
+    /// Turns whose conversation was shortened by the context manager (A6.1.4).
+    compactions: u32,
+    /// Provider interruptions recovered from (autonomy-first refactor).
+    recoveries: u32,
     activity: Vec<ToolActivity>,
     turns: u32,
     tool_calls: u32,
@@ -1041,6 +1117,16 @@ struct LoopState {
     tests_used: u32,
     write_bytes: u64,
     last_test: Option<String>,
+    /// A file was changed after the last verification command (or none ran yet).
+    dirty_since_test: bool,
+    /// Files this run created and has not deleted (to catch scratch files left behind).
+    created: std::collections::BTreeSet<String>,
+    tidy_nudges: u32,
+    /// Times the harness asked the model to continue instead of accepting its reply.
+    nudges: u32,
+    verify_nudges: u32,
+    fail_nudges: u32,
+    report_nudges: u32,
     mode_code: bool,
 }
 
@@ -1073,6 +1159,223 @@ impl Ctx<'_> {
     }
 }
 
+/// What the runtime itself recorded so far (never model text): files changed and the last
+/// command with its verdict. Used when old steps are dropped from the conversation.
+pub(crate) fn receipts_summary(activity: &[ToolActivity]) -> String {
+    let mut files: Vec<String> = Vec::new();
+    let mut last_cmd: Option<String> = None;
+    let mut refused = 0;
+    for a in activity {
+        match (a.tool.as_str(), a.status.as_str()) {
+            ("fs_edit" | "fs_write", "executed") => {
+                let f = a
+                    .args_summary
+                    .split_whitespace()
+                    .last()
+                    .unwrap_or("?")
+                    .to_owned();
+                if !files.contains(&f) {
+                    files.push(f);
+                }
+            }
+            ("proc_run", "executed") => {
+                last_cmd = Some(format!(
+                    "{} -> {}",
+                    a.args_summary,
+                    a.verification.as_deref().unwrap_or("no verdict")
+                ));
+            }
+            (_, "refused") => refused += 1,
+            _ => {}
+        }
+    }
+    let mut s = String::new();
+    if files.is_empty() {
+        s.push_str("no file has been changed yet; ");
+    } else {
+        s.push_str(&format!("files changed so far: {}; ", files.join(", ")));
+    }
+    match last_cmd {
+        Some(c) => s.push_str(&format!("last command: {c}; ")),
+        None => s.push_str("no command has run yet; "),
+    }
+    if refused > 0 {
+        s.push_str(&format!("{refused} proposed operation(s) were refused; "));
+    }
+    s.trim_end().to_owned() + "."
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Times the harness will ask a model that stopped early to carry on.
+pub const MAX_NUDGES: u32 = 4;
+
+/// A reply that has the shape of a finished written report (long and structured).
+fn looks_like_report(t: &str) -> bool {
+    t.len() >= 1500
+        && t.lines().any(|l| {
+            let l = l.trim_start();
+            l.starts_with('#')
+                || l.starts_with("**")
+                || l.starts_with("- ")
+                || l.starts_with("* ")
+                || l.split_once('.')
+                    .is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+}
+
+/// Should the harness refuse to accept this reply as the end of the task? Returns the
+/// message to send the model and a short reason for the timeline. The check is about the
+/// SHAPE of the stop (work visibly unfinished), never about the quality of the answer.
+fn premature_stop(ls: &mut LoopState, text: &str) -> Option<(&'static str, &'static str)> {
+    let t = text.trim();
+    let lower = t.to_ascii_lowercase();
+    // 1. an announcement of the next step instead of the step
+    const MIDFLIGHT: [&str; 10] = [
+        "re-issuing",
+        "reissuing",
+        "let me ",
+        "i'll ",
+        "i will ",
+        "now i",
+        "next, i",
+        "continuing",
+        "going to ",
+        "proceeding",
+    ];
+    if ls.tool_calls > 0
+        && t.len() < 700
+        && (t.is_empty() || MIDFLIGHT.iter().any(|m| lower.contains(m)))
+    {
+        return Some((
+            "You ended your turn without making the next tool call or writing the final answer. Continue the work now: call the tools you need, or if you are finished, write the complete final answer (for a review, the full report with evidence).",
+            "no tool call and no final answer",
+        ));
+    }
+    // 1b. a long investigation that ends without a written report
+    if ls.edits_used == 0
+        && ls.last_test.is_none()
+        && ls.tool_calls >= 8
+        && ls.report_nudges < 3
+        && !looks_like_report(t)
+    {
+        ls.report_nudges += 1;
+        return Some((
+            "Your last message is not a finished report. Do not plan or narrate further. If you still need evidence, make the tool calls now (one call per step is fine). Otherwise write the COMPLETE final report now as your reply: headings, each finding with severity, the file path and line numbers you actually read, why it matters and a recommended fix, then a prioritized summary and what you did not inspect.",
+            "no finished report yet",
+        ));
+    }
+    // 1c. scratch files left in the project
+    if ls.tidy_nudges < 1 {
+        let junk: Vec<&String> = ls
+            .created
+            .iter()
+            .filter(|p| {
+                let l = p.to_ascii_lowercase();
+                [".new", ".bak", ".orig", ".tmp", ".old", "~"]
+                    .iter()
+                    .any(|e| l.ends_with(e))
+            })
+            .collect();
+        if !junk.is_empty() {
+            ls.tidy_nudges += 1;
+            return Some((
+                "You left scratch files in the project that are not part of the change. Delete them now with fs_write mode \"delete\" (and only them), then give your final answer.",
+                "scratch files left behind",
+            ));
+        }
+    }
+    // 2. changes that were never verified
+    if ls.edits_used > 0 && ls.dirty_since_test && ls.verify_nudges < 1 {
+        ls.verify_nudges += 1;
+        return Some((
+            "You changed files but no build, test or type-check has run since your last change. Run the project's verification now (install dependencies first if they are missing) and fix anything that fails. Only then give your final answer.",
+            "changes not verified",
+        ));
+    }
+    // 3. the last verification failed
+    if ls.last_test.as_deref() == Some("fail") && ls.edits_used > 0 && ls.fail_nudges < 2 {
+        ls.fail_nudges += 1;
+        return Some((
+            "Your last verification command failed. Read its output. If your change caused it, fix the cause and run it again. If the failure was already there and is unrelated to the task, do not widen the task to fix it: say so explicitly in your final answer with the evidence.",
+            "last verification failed",
+        ));
+    }
+    None
+}
+
+/// TEST ONLY: `NEXUS_FAULT_INJECT_DISPATCHES=3,7` loses the answer of the 3rd and 7th
+/// provider request of a run (after the provider really answered).
+fn fault_injected(dispatch: u32) -> bool {
+    std::env::var("NEXUS_FAULT_INJECT_DISPATCHES")
+        .ok()
+        .is_some_and(|v| {
+            v.split(',')
+                .filter_map(|x| x.trim().parse::<u32>().ok())
+                .any(|n| n == dispatch)
+        })
+}
+
+/// A provider interruption in the interactive profile: record it, wait with bounded
+/// backoff (cancellable) and let the caller ask again. `Some(end)` = stop the run.
+fn recover_wait(
+    ctx: &Ctx<'_>,
+    session: &mut InspectSession,
+    ls: &mut LoopState,
+    failures: u32,
+    code: &str,
+    why: &str,
+) -> Result<Option<LoopEnd>, StepError> {
+    if failures >= crate::recovery::BREAKER_AFTER {
+        return Ok(Some(LoopEnd::Failed(
+            "provider-unavailable".into(),
+            format!(
+                "the provider failed {failures} times in a row (last: {code}); the work so far is kept in the working copy and the transcript"
+            ),
+        )));
+    }
+    let wait = crate::recovery::backoff(failures);
+    ls.recoveries += 1;
+    let (n, msg) = (
+        ls.recoveries,
+        format!("{code}: {}", why.chars().take(160).collect::<String>()),
+    );
+    ctx.b.update(ctx.run_id, |r| {
+        r.recoveries = n;
+        r.last_recovery = Some(msg.clone());
+    });
+    let _ = session.state(
+        nexus_client::model_run::ModelRunState::ToolRunning,
+        &format!(
+            "The provider connection was interrupted ({code}). Everything done so far is kept; asking again in {}s (recovery {n}).",
+            wait.as_secs()
+        ),
+        None,
+    );
+    let end = Instant::now() + wait;
+    while Instant::now() < end {
+        if ctx.stop() {
+            return Ok(Some(LoopEnd::Cancelled));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    Ok(None)
+}
+
+/// Wait (bounded, cancellable) until the tool daemon answers again.
+fn wait_for_daemon(ctx: &Ctx<'_>, max_secs: u64) -> bool {
+    let end = Instant::now() + std::time::Duration::from_secs(max_secs);
+    while Instant::now() < end {
+        if ctx.stop() {
+            return false;
+        }
+        if daemon(ctx.b, "status", serde_json::json!({})).is_ok() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    false
+}
+
 #[allow(clippy::too_many_arguments)]
 fn turn_loop(
     ctx: &Ctx<'_>,
@@ -1080,26 +1383,60 @@ fn turn_loop(
     opts: &ModelRunOptions,
     limits: &Limits,
     out_tokens: Option<u64>,
+    out_ceiling: Option<u64>,
     started: &Instant,
     sh: &Shared<'_>,
     ls: &mut LoopState,
 ) -> Result<LoopEnd, StepError> {
     let b = ctx.b;
     let ledger = b.cfg.ledger_workspace.to_string_lossy().into_owned();
+    // A6.1.4: harness context + detected project kinds travel with the first user turn
+    // (the task text itself, recorded and digest-bound, is unchanged).
+    let first_content = if sh.mode == Mode::Code && b.cfg.interactive {
+        let kinds: Vec<String> = b
+            .cfg
+            .project_registry
+            .as_ref()
+            .and_then(|(dir, trust)| nexus_tools::registry::load(dir, trust).ok())
+            .and_then(|f| {
+                sh.intent
+                    .workspace_id
+                    .as_deref()
+                    .and_then(|w| f.get(w).map(|p| p.kinds.clone()))
+            })
+            .unwrap_or_default();
+        format!(
+            "{}{}",
+            crate::guidance::code_preamble(&kinds, true),
+            sh.intent.content
+        )
+    } else {
+        sh.intent.content.clone()
+    };
     let mut items: Vec<InputItem> = vec![InputItem::Message {
         role: "user".into(),
-        content: sh.intent.content.clone(),
+        content: first_content,
     }];
     let mut evidence = Evidence::default();
     let mut seen_calls: Vec<String> = Vec::new();
     let mut refusals_in_a_row = 0u32;
+    let mut turn_cap = out_tokens;
+    let mut truncations_in_a_row = 0u32;
     let mut attempt_id = b
         .store
         .load(ctx.run_id)
         .and_then(|r| r.run.attempt_id)
         .unwrap_or_default();
 
-    for turn in 1..=limits.turns {
+    // Provider requests made so far (a recovered turn is asked again as a NEW attempt).
+    let mut dispatches = 0u32;
+    let mut failures_in_a_row = 0u32;
+    let mut turn = 0u32;
+    loop {
+        turn += 1;
+        if turn > limits.turns {
+            break;
+        }
         if ctx.stop() {
             return Ok(LoopEnd::Cancelled);
         }
@@ -1107,7 +1444,7 @@ fn turn_loop(
             return Ok(LoopEnd::Limit("max-runtime"));
         }
         // Each model turn is its own Controller attempt of the same task.
-        if turn > 1 {
+        if dispatches > 0 {
             let _g = b.bridge_lock.lock().unwrap_or_else(|p| p.into_inner());
             let a = bridge(
                 b,
@@ -1140,6 +1477,28 @@ fn turn_loop(
             })),
         )?;
         let kintent = kernel_intent.get("intent").cloned().unwrap_or_default();
+        // A6.1.4 P4: keep long conversations inside a budget, from the runtime's own receipts.
+        if sh.mode == Mode::Code
+            && crate::context::compact(
+                &mut items,
+                &receipts_summary(&ls.activity),
+                b.cfg
+                    .context_budget_bytes
+                    .unwrap_or(crate::context::COMPACT_BYTES)
+                    .min(
+                        (b.cfg
+                            .context_budget_bytes
+                            .unwrap_or(crate::context::COMPACT_BYTES)
+                            as f64
+                            * crate::recovery::context_scale(failures_in_a_row))
+                            as usize,
+                    ),
+            )
+        {
+            ls.compactions += 1;
+            let n = ls.compactions;
+            b.update(ctx.run_id, |r| r.context_compactions = n);
+        }
         let req = ModelRunRequest {
             user_initiated: true,
             prompt: sh.intent.content.clone(),
@@ -1161,7 +1520,7 @@ fn turn_loop(
                     provider_id: m.provider_id.clone(),
                     remote_model_id: m.remote_model_id.clone(),
                 }),
-            max_output_tokens: out_tokens,
+            max_output_tokens: turn_cap,
         };
         let prepared = nexus_client::prepare_inspect_turn(&req, &items, sh.mode.profile())
             .map_err(|e| se("prepare-refused", e.message))?;
@@ -1213,7 +1572,13 @@ fn turn_loop(
             }),
         )?;
         let grant = auth.get("grant").cloned().unwrap_or_default();
-        session.begin_turn(turn, &attempt_id, &command_id, &prepared.request_digest);
+        dispatches += 1;
+        session.begin_turn(
+            dispatches,
+            &attempt_id,
+            &command_id,
+            &prepared.request_digest,
+        );
         ls.turns = turn;
         b.update(ctx.run_id, |r| r.attempt_id = Some(attempt_id.clone()));
         ctx.progress(ls, "executing");
@@ -1231,11 +1596,102 @@ fn turn_loop(
             },
             ctx.flag,
             &mut |_t| {},
-        )
-        .map_err(|e| se(e.code, e.message))?;
+        );
+        let end = match end {
+            Ok(TurnEnd::Output(o)) if b.cfg.interactive && fault_injected(dispatches) => {
+                // TEST ONLY (NEXUS_FAULT_INJECT_DISPATCHES): the provider really answered and
+                // the answer is discarded, exactly like a connection lost after the send.
+                drop(o);
+                Ok(TurnEnd::Ended {
+                    state: nexus_client::model_run::ModelRunState::Uncertain,
+                    code: "send-uncertain".to_owned(),
+                    message: "[injected] the provider answered but the response was lost"
+                        .to_owned(),
+                    latency_ms: 0,
+                })
+            }
+            other => other,
+        };
+        let end = match end {
+            Err(e) if b.cfg.interactive && e.code == "disconnected" => Ok(TurnEnd::Ended {
+                state: nexus_client::model_run::ModelRunState::Failed,
+                code: "disconnected".to_owned(),
+                message: e.message,
+                latency_ms: 0,
+            }),
+            other => other.map_err(|e| se(e.code, e.message)),
+        }?;
         let out = match end {
-            TurnEnd::Output(o) => *o,
-            TurnEnd::Ended { .. } => return Ok(LoopEnd::Recorded),
+            TurnEnd::Output(o) => {
+                truncations_in_a_row = 0;
+                failures_in_a_row = 0;
+                turn_cap = out_tokens;
+                *o
+            }
+            TurnEnd::Ended { code, message, .. } => {
+                if b.cfg.interactive && crate::recovery::is_recoverable(&code) {
+                    failures_in_a_row += 1;
+                    if let Some(end) =
+                        recover_wait(ctx, session, ls, failures_in_a_row, &code, &message)?
+                    {
+                        return Ok(end);
+                    }
+                    // the same turn is asked again as a fresh attempt: all completed tool
+                    // results stay in `items`, nothing local is re-run
+                    turn -= 1;
+                    continue;
+                }
+                return Ok(LoopEnd::Recorded);
+            }
+            TurnEnd::Truncated(o) => {
+                // Nothing from this turn executes (the client discarded any partial tool
+                // call). The provider request is NOT repeated silently: the next loop
+                // iteration is a fresh Controller attempt and Kernel authorization with a
+                // larger output cap, shown in the timeline, bounded, and counted as a turn.
+                if let Some((i, u)) = o.usage {
+                    ls.usage_in += i;
+                    ls.usage_out += u;
+                    ls.saw_usage = true;
+                    session.set_usage(ls.usage_in, ls.usage_out);
+                }
+                truncations_in_a_row += 1;
+                let cur = turn_cap.unwrap_or(0);
+                let next = out_ceiling
+                    .filter(|c| *c > cur)
+                    .map(|c| (cur.saturating_mul(OUTPUT_ESCALATION_FACTOR)).min(c));
+                match next {
+                    Some(n) if truncations_in_a_row <= MAX_TRUNCATIONS_IN_A_ROW => {
+                        session
+                            .state(
+                                nexus_client::model_run::ModelRunState::ToolRunning,
+                                &format!(
+                                    "The model's response was cut off at the output limit ({cur} tokens, reasoning included). Nothing from it was executed; asking again with a larger limit ({n} tokens)."
+                                ),
+                                None,
+                            )
+                            .map_err(|e| se(e.code, e.message))?;
+                        turn_cap = Some(n);
+                        continue;
+                    }
+                    _ if !b.cfg.interactive => {
+                        // strict profile: no escalation exists; keep the established semantics
+                        return Ok(if o.partial_tool {
+                            LoopEnd::Failed(
+                                "incomplete-tool-turn".into(),
+                                "the provider ended the response early while proposing a tool; nothing was executed".into(),
+                            )
+                        } else {
+                            LoopEnd::Limit("output-limit")
+                        });
+                    }
+                    _ => {
+                        return Ok(LoopEnd::Failed(
+                            "output-limit".into(),
+                            "the provider ended the response at the output limit even after enlarging it; nothing from that response was executed".into(),
+                        ))
+                    }
+                }
+            }
         };
         if let Some((i, o)) = out.usage {
             ls.usage_in += i;
@@ -1249,6 +1705,31 @@ fn turn_loop(
         if proposals.is_empty() {
             if out.finish_reason.starts_with("incomplete:") {
                 return Ok(LoopEnd::Limit("output-limit"));
+            }
+            if b.cfg.interactive && sh.mode == Mode::Code && ls.nudges < MAX_NUDGES {
+                if let Some(msg) = premature_stop(ls, &out.text) {
+                    ls.nudges += 1;
+                    let n = ls.nudges;
+                    let _ = session.state(
+                        nexus_client::model_run::ModelRunState::ToolRunning,
+                        &format!(
+                            "The model stopped early; asking it to continue ({n}): {}",
+                            msg.1
+                        ),
+                        None,
+                    );
+                    if !out.text.trim().is_empty() {
+                        items.push(InputItem::Message {
+                            role: "assistant".into(),
+                            content: out.text.chars().take(8 * 1024).collect(),
+                        });
+                    }
+                    items.push(InputItem::Message {
+                        role: "user".into(),
+                        content: msg.0.to_owned(),
+                    });
+                    continue;
+                }
             }
             let (v, u) = check_citations(&out.text, &evidence);
             ls.citations_verified = v;
@@ -1270,7 +1751,12 @@ fn turn_loop(
         session
             .state(
                 nexus_client::model_run::ModelRunState::ToolRunning,
-                &if sh.mode == Mode::Code {
+                &if sh.mode == Mode::Code && b.cfg.interactive {
+                    format!(
+                        "Model proposed {} tool call(s); edits and commands run under the automated workspace policy; validating.",
+                        proposals.len()
+                    )
+                } else if sh.mode == Mode::Code {
                     format!(
                         "Model proposed {} tool call(s); every edit and command still needs an independent approval; validating.",
                         proposals.len()
@@ -1341,9 +1827,12 @@ fn turn_loop(
             };
             // 1. deterministic validation (the catalog depends on the mode)
             let validated = match sh.mode {
-                Mode::Code => {
-                    crate::code::validate_code_proposal(&call.name, &call.arguments, &ls.last_sha)
-                }
+                Mode::Code => crate::code::validate_code_proposal_in(
+                    &call.name,
+                    &call.arguments,
+                    &ls.last_sha,
+                    b.cfg.interactive,
+                ),
                 Mode::Inspect => {
                     validate_proposal(&call.name, &call.arguments).map(|v| CodeProposal {
                         summary: String::new(),
@@ -1425,7 +1914,7 @@ fn turn_loop(
                             "storeIncarnation": sh.incarnation,
                             "toolId": p.tool_id.as_str(), "toolVersion": nexus_tools::TOOL_VERSION,
                             "args": p.args,
-                            "budgets": budgets_for(cp.kind),
+                            "budgets": budgets_for(cp.kind, b.cfg.interactive),
                         });
                         // 2. Mutations and commands first need an independent
                         //    approval of this exact operation.
@@ -1454,6 +1943,12 @@ fn turn_loop(
                             );
                             act.approval_id = outcome.approval_id().map(str::to_owned);
                             act.approval_outcome = Some(outcome.label().to_owned());
+                            if let ApprovalOutcome::Approved {
+                                automated: true, ..
+                            } = &outcome
+                            {
+                                act.approval_actor = Some("automated-policy".into());
+                            }
                             match outcome {
                                 ApprovalOutcome::Approved { .. } => {}
                                 ApprovalOutcome::Refused { code, message } => {
@@ -1531,7 +2026,7 @@ fn turn_loop(
                                     record_receipts(ls, &mut act, &cp, &result);
                                     r
                                 }
-                                Err(e) => {
+                                Err(e) => 'arm: {
                                     let code = e
                                         .code
                                         .strip_prefix("daemon-")
@@ -1540,6 +2035,46 @@ fn turn_loop(
                                     // A lost answer to a WRITE or PROCESS is not a failure
                                     // we may assume: the operation may have happened. Stop,
                                     // keep the copy, and require explicit reconciliation.
+                                    if e.code == "daemon-unreachable"
+                                        && b.cfg.interactive
+                                        && !ctx.stop()
+                                    {
+                                        // Autonomy-first: the tool runtime restarting is not the
+                                        // end of the task. Wait for it (bounded), tell the model
+                                        // plainly that THIS operation's outcome is unknown and let
+                                        // it reconcile by reading state. Commands run in a hermetic
+                                        // sandbox without write-back, so asking again is safe.
+                                        act.status = "uncertain".into();
+                                        act.error_code = Some("tool-outcome-uncertain".into());
+                                        let back = wait_for_daemon(ctx, 300);
+                                        if ctx.stop() {
+                                            ls.activity.push(act);
+                                            return Ok(LoopEnd::Cancelled);
+                                        }
+                                        if !back {
+                                            ls.activity.push(act);
+                                            return Ok(LoopEnd::Uncertain(
+                                                "tool-outcome-uncertain".into(),
+                                                "the tool runtime did not come back within five minutes while a step was running; its effect is unknown. Nothing was repeated. Review the working copy diff".into(),
+                                            ));
+                                        }
+                                        ls.recoveries += 1;
+                                        let n = ls.recoveries;
+                                        b.update(ctx.run_id, |r| {
+                                            r.recoveries = n;
+                                            r.last_recovery =
+                                                Some("the tool runtime restarted".into());
+                                        });
+                                        break 'arm render_error(
+                                            p.model_name,
+                                            "outcome-unknown",
+                                            if cp.kind == crate::code::Kind::Write {
+                                                "The connection to the tool runtime was lost while this file change ran; whether it was applied is unknown. Read the file again and compare with what you intended before continuing."
+                                            } else {
+                                                "The connection to the tool runtime was lost while this operation ran. It left no trace in the working copy; run it again if you still need its output."
+                                            },
+                                        );
+                                    }
                                     if e.code == "daemon-unreachable"
                                         && cp.kind != crate::code::Kind::Read
                                     {
@@ -1625,7 +2160,13 @@ fn turn_loop(
             });
             ls.activity.push(act);
             ctx.progress(ls, "tool-running");
-            if refusals_in_a_row >= MAX_CONSECUTIVE_REFUSALS {
+            if refusals_in_a_row
+                >= if b.cfg.interactive {
+                    25
+                } else {
+                    MAX_CONSECUTIVE_REFUSALS
+                }
+            {
                 return Ok(LoopEnd::Failed(
                     "too-many-refused-tool-calls".into(),
                     "the model kept proposing refused or invalid tool calls; the run was stopped"
@@ -1661,7 +2202,28 @@ fn budget_refusal(cp: &CodeProposal, ls: &LoopState, pol: &CodePolicy) -> Option
 }
 
 /// Tool budgets sealed into the Kernel grant (and the approval) per kind.
-fn budgets_for(kind: Kind) -> Value {
+fn budgets_for(kind: Kind, workbench: bool) -> Value {
+    if workbench {
+        // project-level trust: budgets sized for real repositories (the Kernel still clamps
+        // every field to its own ceiling)
+        return match kind {
+            Kind::Read => serde_json::json!({
+                "maxOutputBytes": 64 * 1024u64, "maxFileBytes": 1024 * 1024u64,
+                "maxMatches": nexus_model::repo_tools::MODEL_MAX_SEARCH_MATCHES,
+                "maxEntries": 2000u32, "maxDepth": 12u32, "deadlineMs": 20_000u64,
+            }),
+            Kind::Write => serde_json::json!({
+                "maxFileBytes": 1024 * 1024u64, "maxWriteBytes": 512 * 1024u64, "deadlineMs": 20_000u64,
+            }),
+            Kind::Process => serde_json::json!({
+                "procWallMs": 900_000u64, "procCpuSecs": 900u64,
+                "procMemoryBytes": 4u64 * 1024 * 1024 * 1024, "procMaxProcs": 512u64,
+                "procOutputBytes": 256 * 1024u64, "procScratchBytes": 1024u64 * 1024 * 1024,
+                "stageMaxFiles": 100_000u64, "stageMaxBytes": 1024u64 * 1024 * 1024,
+                "deadlineMs": 20_000u64,
+            }),
+        };
+    }
     match kind {
         Kind::Read => serde_json::json!({
             "maxOutputBytes": 32 * 1024u64, "maxFileBytes": 512 * 1024u64,
@@ -1750,6 +2312,7 @@ fn record_receipts(ls: &mut LoopState, act: &mut ToolActivity, cp: &CodeProposal
             }
         }
         "fs_write" | "fs_edit" => {
+            ls.dirty_since_test = true;
             act.pre_sha256 = out
                 .get("preSha256")
                 .and_then(|v| v.as_str())
@@ -1764,6 +2327,18 @@ fn record_receipts(ls: &mut LoopState, act: &mut ToolActivity, cp: &CodeProposal
             ) {
                 ls.last_sha.insert(p.to_owned(), h.to_owned());
             }
+            if let Some(p) = out.get("path").and_then(|v| v.as_str()) {
+                match out.get("operation").and_then(|v| v.as_str()) {
+                    Some("create") => {
+                        ls.created.insert(p.to_owned());
+                    }
+                    Some("delete") => {
+                        ls.created.remove(p);
+                        ls.last_sha.remove(p);
+                    }
+                    _ => {}
+                }
+            }
         }
         "proc_run" => {
             act.exit_code = out.get("exitCode").and_then(|v| v.as_i64());
@@ -1771,10 +2346,66 @@ fn record_receipts(ls: &mut LoopState, act: &mut ToolActivity, cp: &CodeProposal
                 .get("verification")
                 .and_then(|v| v.as_str())
                 .map(str::to_owned);
-            ls.last_test = act.verification.clone();
+            // only build/test/check-like commands verify anything; installs and `ls` do not
+            if is_verification_command(&cp.inner.args) {
+                ls.last_test = act.verification.clone();
+                ls.dirty_since_test = false;
+            } else {
+                // an install, a listing, a one-off script: it ran, but verifies nothing
+                act.verification = act.verification.take().map(|v| format!("run-{v}"));
+            }
         }
         _ => {}
     }
+}
+
+/// Does this `proc_run` verify the work (tests, type-check, build, lint) rather than merely run?
+fn is_verification_command(args: &Value) -> bool {
+    let prog = args.get("program").and_then(|v| v.as_str()).unwrap_or("");
+    let argv: Vec<&str> = args
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+        .unwrap_or_default();
+    let line = format!("{prog} {}", argv.join(" ")).to_ascii_lowercase();
+    const INSTALL: [&str; 9] = [
+        "npm ci",
+        "npm install",
+        "npm i ",
+        "pip install",
+        "pnpm install",
+        "yarn install",
+        "go mod download",
+        "dotnet restore",
+        "cargo fetch",
+    ];
+    if INSTALL
+        .iter()
+        .any(|i| line.starts_with(i) || line.contains(&format!(" {i}")))
+        && !line.contains(" test")
+    {
+        return false;
+    }
+    const WORDS: [&str; 16] = [
+        "test",
+        "tests",
+        "build",
+        "check",
+        "clippy",
+        "lint",
+        "tsc",
+        "vitest",
+        "jest",
+        "pytest",
+        "unittest",
+        "compileall",
+        "mypy",
+        "vet",
+        "compile",
+        "typecheck",
+    ];
+    line.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| WORDS.contains(&w))
 }
 
 /// What the model sees of a finished command: exit status and the TAIL of
@@ -2002,6 +2633,81 @@ fn finalize(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_build_test_and_check_commands_count_as_verification() {
+        let v =
+            |prog: &str, a: &[&str]| is_verification_command(&json!({"program": prog, "args": a}));
+        for (p, a) in [
+            ("npm", &["test"][..]),
+            ("npx", &["vitest", "run"]),
+            ("cargo", &["test"]),
+            ("cargo", &["clippy"]),
+            ("python3", &["-m", "pytest", "-q"]),
+            ("npx", &["tsc", "--noEmit"]),
+            ("npm", &["run", "build"]),
+            ("sh", &["-c", "npm test 2>&1 | tail"]),
+            ("go", &["vet", "./..."]),
+            ("dotnet", &["build"]),
+        ] {
+            assert!(v(p, a), "{p} {a:?}");
+        }
+        for (p, a) in [
+            ("npm", &["ci"][..]),
+            ("npm", &["install", "--legacy-peer-deps"]),
+            ("pip", &["install", "-r", "requirements.txt"]),
+            ("node", &["--version"]),
+            ("sh", &["-c", "ls node_modules/.bin"]),
+            ("cargo", &["fetch"]),
+            ("python3", &["-m", "pip", "install", "x"]),
+        ] {
+            assert!(!v(p, a), "{p} {a:?}");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn the_harness_does_not_accept_an_announcement_or_an_unverified_change_as_the_end() {
+        let mut ls = LoopState::default();
+        ls.tool_calls = 12;
+        // announcing the next step instead of taking it
+        assert!(premature_stop(&mut ls, "Let me check the remaining files now.").is_some());
+        // a long investigation that never wrote a report
+        let mut ls = LoopState::default();
+        ls.tool_calls = 30;
+        let narr = "Collecting evidence and validating findings. ".repeat(10);
+        assert!(premature_stop(&mut ls, &narr).is_some());
+        // a finished, structured report is accepted
+        let report = format!(
+            "# Report\n\n- finding one\n- finding two\n\n{}",
+            "Evidence and analysis. ".repeat(100)
+        );
+        let mut ls = LoopState::default();
+        ls.tool_calls = 30;
+        assert!(premature_stop(&mut ls, &report).is_none());
+        // changed files with no verification since: asked once, then accepted
+        let mut ls = LoopState::default();
+        ls.tool_calls = 5;
+        ls.edits_used = 2;
+        ls.dirty_since_test = true;
+        let done = "Implemented the change in two files and added tests.";
+        assert!(premature_stop(&mut ls, done).is_some());
+        assert!(premature_stop(&mut ls, done).is_none(), "asked only once");
+        // a failing last verification is questioned (twice at most)
+        let mut ls = LoopState::default();
+        ls.tool_calls = 5;
+        ls.edits_used = 1;
+        ls.last_test = Some("fail".into());
+        assert!(premature_stop(&mut ls, done).is_some());
+        assert!(premature_stop(&mut ls, done).is_some());
+        assert!(premature_stop(&mut ls, done).is_none());
+        // a short answer after verified work is fine
+        let mut ls = LoopState::default();
+        ls.tool_calls = 9;
+        ls.edits_used = 1;
+        ls.last_test = Some("pass".into());
+        assert!(premature_stop(&mut ls, done).is_none());
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -2049,7 +2755,7 @@ mod tests {
             ("fs_read", json!({})),
             ("fs_read", json!({"path": "a", "write": true})),
             ("fs_read", json!({"path": "a", "startLine": 0})),
-            ("fs_read", json!({"path": "a", "maxLines": 401})),
+            ("fs_read", json!({"path": "a", "maxLines": 801})),
             ("fs_read", json!({"path": "../etc/passwd"})),
             ("fs_read", json!({"path": "a/../../b"})),
             ("fs_read", json!({"path": "/etc/passwd"})),
@@ -2061,7 +2767,7 @@ mod tests {
             ("fs_list", json!({"path": ".", "recursive": true})),
             ("fs_search", json!({"query": ""})),
             ("fs_search", json!({"query": "x".repeat(257)})),
-            ("fs_search", json!({"query": "a", "maxMatches": 51})),
+            ("fs_search", json!({"query": "a", "maxMatches": 101})),
             ("fs_search", json!({"query": "a", "maxMatches": 0})),
             ("fs_search", json!({"query": "a", "regex": true})),
         ];

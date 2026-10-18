@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 nexus-client = { workspace = true }
 nexus-tools = { workspace = true }
+nexus-runtime = { path = "../nexus-runtime" }
 serde_json = { workspace = true }
 
 [dev-dependencies]

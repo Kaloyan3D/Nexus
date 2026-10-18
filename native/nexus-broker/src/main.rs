@@ -20,6 +20,8 @@ fn usage() -> i32 {
     eprintln!("         [--allowed-uids U,U] [--socket-group GID] [--node PATH] [--max-active N]");
     eprintln!("         [--rate-per-minute N] [--allow-model provider/model]... [--read-timeout-ms N] [--total-timeout-ms N]");
     eprintln!("         [--workspace ID=ABS_PATH]... [--workspace-allow ID=UID,UID]...   (A5.5 repo-inspect workspaces)");
+    eprintln!("         [--project-snapshots DIR]   (A6.1.4: let the Desktop open project folders; Nexus keeps owned snapshots here)");
+    eprintln!("         [--interactive-profile]   (A6.1.4: per-run provider authorization from a one-time user consent; no manual session records)");
     eprintln!("         [--code-cap-turns N] [--code-cap-tool-calls N] [--code-cap-edits N] [--code-cap-commands N] [--code-cap-minutes N]   (A6.1.3: LOWER the fixed repo-code limits 12/30/5/5/30; cannot raise them)");
     eprintln!("         [--project-registry DIR [--project-registry-owner-uid UID[,UID]]]   (A6.1.3: coding projects from the operator registry; exclusive with --code-source)");
     eprintln!("         [--code-source ID=ABS_PATH]... [--code-allow ID=UID,UID]... [--code-commit ID=SHA40]... [--code-write-allow ID=PATH[,PATH]]...   (A5.6 repo-code sources; the daemon also needs --enable-repo-code --worktree-root)");
@@ -412,6 +414,16 @@ fn run() -> i32 {
     let build = || -> Result<BrokerConfig, String> {
         let state = PathBuf::from(need("--state-dir")?);
         let mut limits = nexus_client::TransportLimits::default();
+        if args.iter().any(|a| a == "--interactive-profile") {
+            // Real coding turns stream long reasoning and whole files: the acceptance-test
+            // bounds (about 384 KiB raw, 30 s silence, 2 min) cut perfectly good responses
+            // off (observed on a real repository audit). Still bounded, just sized for work.
+            limits.max_text_bytes = 3 * 1024 * 1024;
+            limits.max_arg_bytes = 768 * 1024;
+            limits.max_events = 32_768;
+            limits.read_timeout_ms = 180_000;
+            limits.total_timeout_ms = 900_000;
+        }
         if let Some(v) = get("--read-timeout-ms") {
             limits.read_timeout_ms = v.parse().map_err(|_| "--read-timeout-ms".to_owned())?;
         }
@@ -444,12 +456,22 @@ fn run() -> i32 {
             registry_data_root: PathBuf::from(need("--registry-data-root")?),
             node: get("--node").unwrap_or_else(|| "node".to_owned()),
             extra_trusted_owner_uids: Vec::new(),
-            max_active: get("--max-active")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(2),
-            rate_per_minute: get("--rate-per-minute")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(10),
+            // an interactive user may have several tasks in flight (and the broker itself
+            // submits continuations): generous defaults there, the strict ones elsewhere
+            max_active: get("--max-active").and_then(|v| v.parse().ok()).unwrap_or(
+                if args.iter().any(|a| a == "--interactive-profile") {
+                    8
+                } else {
+                    2
+                },
+            ),
+            rate_per_minute: get("--rate-per-minute").and_then(|v| v.parse().ok()).unwrap_or(
+                if args.iter().any(|a| a == "--interactive-profile") {
+                    30
+                } else {
+                    10
+                },
+            ),
             limits,
             allow_models: allow,
             transport: None,
@@ -462,6 +484,12 @@ fn run() -> i32 {
                     _ => return Err("--approval-ttl-secs must be 1..=300 (it can only shorten the 300 s default)".into()),
                 },
             },
+            interactive: args.iter().any(|a| a == "--interactive-profile"),
+            project_snapshots: get("--project-snapshots").map(PathBuf::from),
+            // test hook: a small budget forces context compaction on ordinary tasks
+            context_budget_bytes: std::env::var("NEXUS_CONTEXT_BUDGET_BYTES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok()),
             code_caps: {
                 let num = |n: &str| -> Result<Option<u64>, String> {
                     get(n)

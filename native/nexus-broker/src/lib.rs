@@ -16,10 +16,15 @@
 
 pub mod code;
 pub mod config;
+pub mod consent;
+pub mod context;
+pub mod guidance;
 pub mod identity;
 pub mod inspect;
 pub mod live_auth;
 pub mod pipeline;
+pub mod projects;
+pub mod recovery;
 pub mod server;
 pub mod store;
 pub mod trust;

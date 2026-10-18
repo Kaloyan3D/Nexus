@@ -113,12 +113,12 @@ pub const INTENT_REPO_INSPECT: &str = "repo-inspect";
 pub const INTENT_REPO_CODE: &str = "repo-code";
 
 /// Hard ceilings for `repo-code` (policy may be lower).
-pub const MAX_CODE_TURNS: u32 = 24;
-pub const MAX_CODE_TOOL_CALLS: u32 = 80;
-pub const MAX_CODE_RESULT_BYTES: u64 = 4 * 1024 * 1024;
-pub const MAX_CODE_RUNTIME_SECS: u64 = 3600;
-pub const MAX_CODE_EDITS: u32 = 20;
-pub const MAX_CODE_TESTS: u32 = 20;
+pub const MAX_CODE_TURNS: u32 = 2000;
+pub const MAX_CODE_TOOL_CALLS: u32 = 10_000;
+pub const MAX_CODE_RESULT_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_CODE_RUNTIME_SECS: u64 = 86_400;
+pub const MAX_CODE_EDITS: u32 = 5000;
+pub const MAX_CODE_TESTS: u32 = 2000;
 
 /// Hard ceilings a client may request for the loop (policy may be lower).
 pub const MAX_INSPECT_TURNS: u32 = 12;
@@ -519,9 +519,9 @@ mod tests {
         let i = NexusIntentV1::parse(&v).expect("valid repo-code");
         assert_eq!(i.limits.max_edits, Some(5));
         // code ceilings are higher than inspect's, but still bounded
-        v["limits"]["maxTurns"] = serde_json::json!(25);
+        v["limits"]["maxTurns"] = serde_json::json!(2001);
         assert!(NexusIntentV1::parse(&v).is_err());
-        v["limits"] = serde_json::json!({"maxEdits": 21});
+        v["limits"] = serde_json::json!({"maxEdits": 5001});
         assert!(NexusIntentV1::parse(&v).is_err());
         v["limits"] = serde_json::json!({"maxTests": 0});
         assert!(NexusIntentV1::parse(&v).is_err());

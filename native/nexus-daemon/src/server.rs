@@ -113,10 +113,19 @@ pub struct Daemon {
     pub workspace_bases: Vec<std::path::PathBuf>,
     /// A5.6: directory holding one isolated working copy per coding task.
     pub worktree_root: Option<std::path::PathBuf>,
+    /// Autonomy-first: where project-scoped environments (installed dependencies, build
+    /// caches) live. One private directory per project; never inside a workspace.
+    pub project_envs: Option<std::path::PathBuf>,
     /// A6.1.3: operator project registry (directory + trusted owner uids). When
     /// set, working copies are made only for registered projects, named by id;
     /// a caller-supplied path is refused.
     pub project_registry: Option<(std::path::PathBuf, nexus_tools::registry::Trust)>,
+    /// A6.1.4: automated workspace policy (no human approver channel). When set,
+    /// approvals are still created, journaled and consumed, but decided by
+    /// `autonomous-workspace/v1` for operations inside daemon-made isolated copies.
+    pub autonomous: Option<AutonomousConfig>,
+    /// Per-task counters (edits, commands) of automated grants.
+    pub autonomous_counters: Mutex<std::collections::HashMap<String, (u32, u32)>>,
     /// A5.6: repo-code pilot (also latched in the Kernel handle).
     pub repo_code_enabled: bool,
     /// A3.3: mutating tools are refused unless explicitly enabled.
@@ -1138,6 +1147,7 @@ fn approval_state_view(r: &nexus_store::ApprovalRow, full: bool) -> serde_json::
         "decisionReason": decision.get("reason"),
         "approverId": decision.get("approverId"),
         "humanAuthMechanism": decision.get("humanAuth").and_then(|h| h.get("mechanism")),
+        "decisionKind": decision.get("humanAuth").and_then(|h| h.get("kind")),
         "grantRequestId": r.grant_request_id,
     });
     if full {
@@ -1198,6 +1208,164 @@ fn write_scope_refusal(
         "path-not-in-scope",
         "the path is outside the project's write scope",
     ))
+}
+
+/// Limits of the automated workspace policy (A6.1.4). The rules themselves are
+/// code (below), not configuration, so a config file can never widen them.
+#[derive(Debug, Clone)]
+pub struct AutonomousConfig {
+    pub max_edits_per_task: u32,
+    pub max_commands_per_task: u32,
+    pub max_write_bytes: u64,
+}
+
+pub const AUTONOMOUS_POLICY_ID: &str = "autonomous-workspace/v1";
+
+impl Default for AutonomousConfig {
+    fn default() -> Self {
+        Self {
+            max_edits_per_task: 5000,
+            max_commands_per_task: 2000,
+            max_write_bytes: 2 * 1024 * 1024,
+        }
+    }
+}
+
+fn autonomous_policy_digest(c: &AutonomousConfig) -> String {
+    sha256_hex_str(&nexus_contracts::canonical_json(&serde_json::json!({
+        "id": AUTONOMOUS_POLICY_ID,
+        "maxEditsPerTask": c.max_edits_per_task,
+        "maxCommandsPerTask": c.max_commands_per_task,
+        "maxWriteBytes": c.max_write_bytes,
+        "protectedNames": nexus_tools::protect::PROTECTED_NAMES,
+        "tools": ["fs.write", "fs.edit", "proc.run"],
+    })))
+}
+
+/// Evaluate `autonomous-workspace/v1` for one pending approval. Inputs are facts
+/// the daemon holds (its own copy identity record, the Kernel-built operation
+/// description, its command policy) - never model or renderer claims. `Ok` =
+/// the facts relied on; `Err` = the refusal reason.
+fn evaluate_autonomous_policy(
+    daemon: &Daemon,
+    cfg: &AutonomousConfig,
+    sub: &nexus_kernel::ApprovalSubmission,
+) -> Result<serde_json::Value, String> {
+    let root = daemon
+        .worktree_root
+        .as_ref()
+        .ok_or("no working-copy root is configured")?;
+    let task = &sub.task_instance_id;
+    if !nexus_tools::gitwt::valid_task_id(task) {
+        return Err("invalid task instance".into());
+    }
+    let copy = root.join(task);
+    match std::fs::symlink_metadata(&copy) {
+        Ok(m) if m.file_type().is_dir() => {}
+        _ => return Err("the task has no isolated working copy".into()),
+    }
+    if sha256_hex_str(&copy.to_string_lossy()) != sub.workspace_root_digest {
+        return Err("the operation's workspace is not this task's isolated copy".into());
+    }
+    let meta: serde_json::Value = std::fs::read_to_string(wt_meta_path(root, task))
+        .ok()
+        .and_then(|r| serde_json::from_str(&r).ok())
+        .ok_or("the working copy has no identity record")?;
+    let project = meta
+        .get("projectId")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let (edits, commands) = daemon
+        .autonomous_counters
+        .lock()
+        .map(|m| m.get(task).copied().unwrap_or((0, 0)))
+        .unwrap_or((u32::MAX, u32::MAX));
+    match (sub.tool_id.as_str(), sub.scope.as_str()) {
+        ("fs.write" | "fs.edit", "write") => {
+            if edits >= cfg.max_edits_per_task {
+                return Err("the per-task edit budget of the workspace policy is exhausted".into());
+            }
+            if sub.paths.len() != 1 {
+                return Err("exactly one file per edit".into());
+            }
+            let path = &sub.paths[0];
+            nexus_tools::protect::workbench_path_check(path).map_err(|(_, why)| why.to_owned())?;
+            let allow: Vec<String> = meta
+                .get("writeAllow")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !allow.is_empty()
+                && !allow.iter().any(|a| {
+                    if a.ends_with('/') {
+                        path.starts_with(a.as_str())
+                    } else {
+                        path == a
+                    }
+                })
+            {
+                return Err("the path is outside the project's write scope".into());
+            }
+            let post = sub
+                .operation
+                .get("postImageBytes")
+                .and_then(|v| v.as_u64())
+                .ok_or("the operation does not state its post-image size")?;
+            if post > cfg.max_write_bytes {
+                return Err("the resulting file is larger than the workspace policy allows".into());
+            }
+            Ok(serde_json::json!({
+                "copy": task, "project": project, "tool": sub.tool_id, "path": path,
+                "postImageBytes": post, "editsSoFar": edits, "maxEdits": cfg.max_edits_per_task,
+            }))
+        }
+        ("proc.run", "process") => {
+            if commands >= cfg.max_commands_per_task {
+                return Err(
+                    "the per-task command budget of the workspace policy is exhausted".into(),
+                );
+            }
+            let sandbox = sub.operation.get("sandbox");
+            let net = sandbox
+                .and_then(|s| s.get("network"))
+                .and_then(|v| v.as_str());
+            let installs_ok = meta.get("installs").and_then(|v| v.as_bool()) == Some(true);
+            let net_ok = match net {
+                Some("none") => true,
+                // dependency installation: the only networked class, only where the
+                // project's policy allows it
+                Some("install") => installs_ok,
+                _ => false,
+            };
+            if !net_ok
+                || sandbox
+                    .and_then(|s| s.get("writeBack"))
+                    .and_then(|v| v.as_str())
+                    != Some("none")
+            {
+                return Err(if net == Some("install") && !installs_ok {
+                    "installing dependencies is not enabled for this project".into()
+                } else {
+                    "the command would not run in the sandbox without network and without write-back".into()
+                });
+            }
+            let argv_digest = sub
+                .operation
+                .get("argvDigest")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            Ok(serde_json::json!({
+                "copy": task, "project": project, "tool": sub.tool_id,
+                "program": sub.operation.get("program"), "argvDigest": argv_digest,
+                "commandsSoFar": commands, "maxCommands": cfg.max_commands_per_task,
+            }))
+        }
+        _ => Err("this tool class is outside the automated workspace policy".into()),
+    }
 }
 
 fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
@@ -1395,9 +1563,11 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                 "argvDigest": resolved.argv_digest(),
                 "cwd": resolved.cwd,
                 "sandbox": {
-                    "backend": "bubblewrap+seccomp+cgroup-v2", "network": "none",
-                    "workspace": "read-only snapshot", "writeBack": "none",
-                    "env": "allowlist", "shell": false,
+                    "backend": "bubblewrap+seccomp+cgroup-v2",
+                    "network": if resolved.install { "install" } else { "none" },
+                    "workspace": if daemon.command_policy.is_workbench() { "throw-away copy of the snapshot" } else { "read-only snapshot" },
+                    "writeBack": "none",
+                    "env": "allowlist", "shell": resolved.name == "sh",
                 },
                 "filesystemEffects": "none to the workspace: runs on a staged read-only snapshot; scratch output is discarded",
             }),
@@ -1424,6 +1594,52 @@ fn do_approval_request(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     }
     match kernel.create_approval(&sub) {
         Ok(row) => {
+            let mut row = row;
+            if let Some(cfg) = &daemon.autonomous {
+                // A6.1.4: decide by automated workspace policy; never by a human.
+                match evaluate_autonomous_policy(daemon, cfg, &sub) {
+                    Ok(facts) => {
+                        let d = nexus_kernel::PolicyDecision {
+                            policy_id: AUTONOMOUS_POLICY_ID.to_owned(),
+                            policy_digest: autonomous_policy_digest(cfg),
+                            request_digest: row.request_digest.clone(),
+                            scope_cap: if sub.scope == "process" {
+                                ceiling.proc_wall_ms
+                            } else {
+                                ceiling.max_write_bytes
+                            },
+                            facts,
+                        };
+                        match kernel.decide_approval_by_policy(&row.approval_id, &d) {
+                            Ok(decided) => {
+                                if let Ok(mut m) = daemon.autonomous_counters.lock() {
+                                    let e = m.entry(sub.task_instance_id.clone()).or_insert((0, 0));
+                                    if sub.scope == "process" {
+                                        e.1 += 1;
+                                    } else {
+                                        e.0 += 1;
+                                    }
+                                }
+                                row = decided;
+                            }
+                            Err(e) => {
+                                let _ = kernel
+                                    .revoke_approval(&row.approval_id, "policy-decision-failed");
+                                return kernel_fail(daemon, &req.id, &e);
+                            }
+                        }
+                    }
+                    Err(why) => {
+                        let _ = kernel.revoke_approval(&row.approval_id, "policy-refused");
+                        daemon.counters.refused.fetch_add(1, Ordering::Relaxed);
+                        return fail(
+                            &req.id,
+                            "policy-refused",
+                            format!("automated workspace policy refused this operation: {why}"),
+                        );
+                    }
+                }
+            }
             log_line("approval-request", &req.id, "ok", &req.cmd);
             ok(
                 &req.id,
@@ -1929,6 +2145,40 @@ fn wt_root<'a>(daemon: &'a Daemon, id: &str) -> Result<&'a std::path::PathBuf, s
     })
 }
 
+/// The project environment of a task: derived only from the daemon's own copy identity
+/// record (the project the copy was made for), never from what a caller asserts.
+fn project_env_for(daemon: &Daemon, task: &str) -> Option<nexus_tools::process::ProjectEnv> {
+    let envs = daemon.project_envs.as_ref()?;
+    let root = daemon.worktree_root.as_ref()?;
+    if !nexus_tools::gitwt::valid_task_id(task) {
+        return None;
+    }
+    let meta: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(wt_meta_path(root, task)).ok()?).ok()?;
+    let pid = meta.get("projectId")?.as_str()?;
+    if pid.is_empty()
+        || pid.len() > 80
+        || !pid
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        return None;
+    }
+    let dir = envs.join(pid);
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .ok()?;
+    }
+    Some(nexus_tools::process::ProjectEnv {
+        dir,
+        installs: meta.get("installs").and_then(|v| v.as_bool()) == Some(true),
+    })
+}
+
 fn wt_meta_path(root: &std::path::Path, task: &str) -> std::path::PathBuf {
     root.join(".meta").join(format!("{task}.json"))
 }
@@ -1975,6 +2225,7 @@ fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     // caller names an id, never a path, and the pin comes from the registry.
     let mut project_id: Option<String> = None;
     let mut project_write_allow: Vec<String> = Vec::new();
+    let mut project_installs = false;
     let mut expected_commit = expected_commit;
     let canon = if let Some((dir, trust)) = &daemon.project_registry {
         if req.params.get("sourceRoot").is_some() {
@@ -2017,6 +2268,7 @@ fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         }
         expected_commit = Some(rec.pinned_commit.clone());
         project_write_allow = rec.write_allow.clone();
+        project_installs = rec.installs;
         project_id = Some(pid);
         canon
     } else {
@@ -2087,6 +2339,7 @@ fn do_worktree_create(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
         "projectId": project_id,
         // Frozen at creation: a later registry change never alters a started task.
         "writeAllow": project_write_allow,
+        "installs": project_installs,
         "createdAtMs": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -2133,6 +2386,64 @@ fn wt_read_meta(root: &std::path::Path, task: &str) -> Option<(String, String)> 
         v.get("sourceCommit")?.as_str()?.to_owned(),
         v.get("sourceRepoId")?.as_str()?.to_owned(),
     ))
+}
+
+/// Carry an interrupted task's work into a fresh copy of the SAME project. Both copies are
+/// daemon-owned; the caller names two task ids, never a path.
+fn do_worktree_seed(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    if let Err(r) = only_keys(
+        &req.params,
+        &["taskInstanceId", "fromTaskInstanceId"],
+        &req.id,
+    ) {
+        return r;
+    }
+    let root = match wt_root(daemon, &req.id) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let (to, from) = match (
+        get_string(&req.params, "taskInstanceId"),
+        get_string(&req.params, "fromTaskInstanceId"),
+    ) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(r), _) | (_, Err(r)) => return with_id(r, &req.id),
+    };
+    if !nexus_tools::gitwt::valid_task_id(&to)
+        || !nexus_tools::gitwt::valid_task_id(&from)
+        || to == from
+    {
+        return fail(
+            &req.id,
+            "bad-request",
+            "bad-request: invalid task instance id",
+        );
+    }
+    let meta = |t: &str| -> Option<serde_json::Value> {
+        serde_json::from_str(&std::fs::read_to_string(wt_meta_path(root, t)).ok()?).ok()
+    };
+    let (Some(m_to), Some(m_from)) = (meta(&to), meta(&from)) else {
+        return fail(&req.id, "not-found", "both working copies must exist");
+    };
+    // same project, same base commit: otherwise the carried files would not belong here
+    if m_to.get("projectId") != m_from.get("projectId")
+        || m_to.get("sourceCommit") != m_from.get("sourceCommit")
+        || m_to.get("projectId").is_none_or(|v| v.is_null())
+    {
+        return fail(
+            &req.id,
+            "scope-refused",
+            "the two copies are not of the same project snapshot",
+        );
+    }
+    let base = m_from
+        .get("sourceCommit")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match nexus_tools::gitwt::seed_copy(&root.join(&from), base, &root.join(&to)) {
+        Ok(n) => ok(&req.id, serde_json::json!({ "seeded": n })),
+        Err(e) => wt_fail(daemon, &req.id, &e),
+    }
 }
 
 fn do_worktree_diff(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
@@ -2662,12 +2973,14 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             verified: started.verified(),
             last_seq: 0,
         };
+        let penv = project_env_for(daemon, &call.prepared().request().task_instance_id);
         return match nexus_tools::run_process_call(
             &call,
             &cancel,
             &daemon.command_policy,
             &daemon.run_root,
             proc_wall,
+            penv.as_ref(),
             &mut hooks,
         ) {
             Ok(result) => ok(
@@ -2681,7 +2994,8 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                         "aiInitiated": false,
                         "scope": "process",
                         "approverIndependent": daemon.approver_independent,
-                        "testOnlyApproval": !daemon.approver_independent,
+                        "testOnlyApproval": !daemon.approver_independent && daemon.autonomous.is_none(),
+                        "automatedPolicy": daemon.autonomous.as_ref().map(|_| AUTONOMOUS_POLICY_ID),
                     },
                 }),
             ),
@@ -2714,7 +3028,8 @@ fn do_tool_execute(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
                         "aiInitiated": false,
                         "scope": "write",
                         "approverIndependent": daemon.approver_independent,
-                        "testOnlyApproval": !daemon.approver_independent,
+                        "testOnlyApproval": !daemon.approver_independent && daemon.autonomous.is_none(),
+                        "automatedPolicy": daemon.autonomous.as_ref().map(|_| AUTONOMOUS_POLICY_ID),
                     },
                 }),
             ),
@@ -3016,7 +3331,9 @@ fn do_status(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
             "modelPilotEnabled": model_pilot_enabled,
             "repoInspectEnabled": repo_inspect_enabled,
             "repoCodeEnabled": daemon.repo_code_enabled,
-            "requireHumanApproval": daemon.require_human_approval,
+            "requireHumanApproval": daemon.require_human_approval && daemon.autonomous.is_none(),
+            "approvalGated": daemon.require_human_approval,
+            "automatedPolicy": daemon.autonomous.as_ref().map(|_| AUTONOMOUS_POLICY_ID),
             "writesEnabled": daemon.writes_enabled,
             "processEnabled": daemon.process_enabled,
             "sandbox": daemon.sandbox_caps.as_ref().map(|c| serde_json::json!({
@@ -3107,6 +3424,7 @@ pub fn dispatch(
             "approval-revoke" => do_approval_revoke(daemon, req),
             "worktree-create" => do_worktree_create(daemon, req),
             "worktree-diff" => do_worktree_diff(daemon, req),
+            "worktree-seed" => do_worktree_seed(daemon, req),
             "worktree-remove" => do_worktree_remove(daemon, req),
             "worktree-list" => do_worktree_list(daemon, req),
             "worktree-stat" => do_worktree_stat(daemon, req),
@@ -3643,7 +3961,10 @@ mod isolation_tests {
             reconcile_latch: Mutex::new(None),
             workspace_bases: Vec::new(),
             worktree_root: None,
+            project_envs: None,
             project_registry: None,
+            autonomous: None,
+            autonomous_counters: Mutex::new(Default::default()),
             repo_code_enabled: false,
             writes_enabled: false,
             process_enabled: false,
@@ -3666,6 +3987,212 @@ mod isolation_tests {
 
     fn own_uid() -> u32 {
         unsafe { libc::geteuid() }
+    }
+
+    // ---- A6.1.4 automated workspace policy: the rules, directly -------------
+
+    fn sub(
+        task: &str,
+        root_digest: &str,
+        tool: &str,
+        scope: &str,
+        paths: &[&str],
+        op: serde_json::Value,
+    ) -> nexus_kernel::ApprovalSubmission {
+        nexus_kernel::ApprovalSubmission {
+            command_id: "cmd".into(),
+            task_instance_id: task.into(),
+            attempt_id: "a".into(),
+            lease_epoch: 1,
+            store_incarnation: "i".into(),
+            tool_id: tool.into(),
+            tool_version: 1,
+            scope: scope.into(),
+            args_digest: "d".into(),
+            budget_digest: "b".into(),
+            workspace_root_digest: root_digest.into(),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+            operation: op,
+            preview: serde_json::json!({}),
+            limits: serde_json::json!({}),
+            ttl_ms: 1000,
+        }
+    }
+
+    fn policy_rig(write_allow: &[&str]) -> (Daemon, tempfile::TempDir, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let task = "task-policy0000000000000001".to_owned();
+        std::fs::create_dir_all(root.join(&task)).unwrap();
+        std::fs::create_dir_all(root.join(".meta")).unwrap();
+        std::fs::write(
+            wt_meta_path(&root, &task),
+            serde_json::json!({"taskInstanceId": task, "sourceCommit": "0".repeat(40), "projectId": "p", "writeAllow": write_allow}).to_string(),
+        )
+        .unwrap();
+        let mut d = test_daemon(Some(vec![own_uid()]), TrustMode::ShadowTest);
+        d.worktree_root = Some(root.clone());
+        d.autonomous = Some(AutonomousConfig::default());
+        let digest = sha256_hex_str(&root.join(&task).to_string_lossy());
+        (d, dir, task, digest)
+    }
+
+    fn edit(task: &str, digest: &str, path: &str, bytes: u64) -> nexus_kernel::ApprovalSubmission {
+        sub(
+            task,
+            digest,
+            "fs.edit",
+            "write",
+            &[path],
+            serde_json::json!({"postImageBytes": bytes}),
+        )
+    }
+
+    fn proc_op(network: &str, shell: bool, write_back: &str) -> serde_json::Value {
+        serde_json::json!({"program": "cargo", "argvDigest": "x", "sandbox": {"network": network, "shell": shell, "writeBack": write_back}})
+    }
+
+    #[test]
+    fn the_automated_policy_allows_only_the_covered_operations_in_the_tasks_own_copy() {
+        let (d, _keep, task, digest) = policy_rig(&["src/"]);
+        let cfg = d.autonomous.clone().unwrap();
+        let ev = |s: &nexus_kernel::ApprovalSubmission| evaluate_autonomous_policy(&d, &cfg, s);
+        // covered
+        assert!(ev(&edit(&task, &digest, "src/lib.rs", 100)).is_ok());
+        assert!(ev(&sub(
+            &task,
+            &digest,
+            "proc.run",
+            "process",
+            &[],
+            proc_op("none", false, "none")
+        ))
+        .is_ok());
+        // protected, hidden, outside the project's write scope, oversize, many files
+        for p in [
+            "build.rs",
+            "Cargo.lock",
+            ".env",
+            ".git/config",
+            "src/../x",
+            "node_modules/a.js",
+            "package.json",
+        ] {
+            assert!(ev(&edit(&task, &digest, p, 1)).is_err(), "{p}");
+        }
+        assert!(ev(&edit(&task, &digest, "README.md", 1))
+            .unwrap_err()
+            .contains("write scope"));
+        assert!(ev(&edit(&task, &digest, "src/lib.rs", 10 * 1024 * 1024)).is_err());
+        let mut two = edit(&task, &digest, "src/a.rs", 1);
+        two.paths.push("src/b.rs".into());
+        assert!(ev(&two).is_err());
+        // a different workspace, a missing copy, an invalid task id
+        assert!(ev(&edit(&task, &"0".repeat(64), "src/lib.rs", 1))
+            .unwrap_err()
+            .contains("isolated copy"));
+        assert!(ev(&edit(
+            "task-nonexistent0000000001",
+            &digest,
+            "src/lib.rs",
+            1
+        ))
+        .is_err());
+        assert!(ev(&edit("../etc", &digest, "src/lib.rs", 1)).is_err());
+        // commands that would not run in the confined sandbox
+        for (n, sh, wb) in [
+            ("host", false, "none"),
+            ("install", false, "none"), // this copy's project does not allow installs
+            ("none", false, "workspace"),
+        ] {
+            assert!(
+                ev(&sub(
+                    &task,
+                    &digest,
+                    "proc.run",
+                    "process",
+                    &[],
+                    proc_op(n, sh, wb)
+                ))
+                .is_err(),
+                "{n} {sh} {wb}"
+            );
+        }
+        // tool classes the policy does not cover, or scope/tool mismatches
+        assert!(ev(&sub(
+            &task,
+            &digest,
+            "fs.read",
+            "write",
+            &["src/lib.rs"],
+            serde_json::json!({"postImageBytes": 1})
+        ))
+        .is_err());
+        assert!(ev(&sub(
+            &task,
+            &digest,
+            "fs.edit",
+            "process",
+            &[],
+            proc_op("none", false, "none")
+        ))
+        .is_err());
+        assert!(ev(&sub(
+            &task,
+            &digest,
+            "proc.run",
+            "write",
+            &["src/lib.rs"],
+            serde_json::json!({})
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn the_automated_policy_budgets_are_per_task_and_a_swapped_copy_is_refused() {
+        let (d, keep, task, digest) = policy_rig(&[]);
+        let cfg = AutonomousConfig {
+            max_edits_per_task: 2,
+            max_commands_per_task: 1,
+            max_write_bytes: 1000,
+        };
+        d.autonomous_counters
+            .lock()
+            .unwrap()
+            .insert(task.clone(), (2, 1));
+        assert!(
+            evaluate_autonomous_policy(&d, &cfg, &edit(&task, &digest, "src/a.rs", 1))
+                .unwrap_err()
+                .contains("budget")
+        );
+        assert!(evaluate_autonomous_policy(
+            &d,
+            &cfg,
+            &sub(
+                &task,
+                &digest,
+                "proc.run",
+                "process",
+                &[],
+                proc_op("none", false, "none")
+            )
+        )
+        .unwrap_err()
+        .contains("budget"));
+        d.autonomous_counters.lock().unwrap().clear();
+        assert!(
+            evaluate_autonomous_policy(&d, &cfg, &edit(&task, &digest, "src/a.rs", 1001)).is_err()
+        );
+        assert!(
+            evaluate_autonomous_policy(&d, &cfg, &edit(&task, &digest, "src/a.rs", 1000)).is_ok()
+        );
+        // the copy directory replaced by a symlink to elsewhere is not a daemon-made copy
+        let root = d.worktree_root.clone().unwrap();
+        std::fs::remove_dir_all(root.join(&task)).unwrap();
+        std::os::unix::fs::symlink(keep.path(), root.join(&task)).unwrap();
+        assert!(
+            evaluate_autonomous_policy(&d, &cfg, &edit(&task, &digest, "src/a.rs", 1)).is_err()
+        );
     }
 
     static NONCE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);

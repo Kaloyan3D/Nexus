@@ -113,6 +113,16 @@ pub struct SandboxSpec {
     pub env: BTreeMap<String, String>,
     /// Extra read-only bind mounts `(host path, sandbox path)`.
     pub ro_binds: Vec<(PathBuf, String)>,
+    /// Extra READ-WRITE bind mounts: project-scoped environment directories only
+    /// (dependency installs, build caches). Never the workspace or the host.
+    pub rw_binds: Vec<(PathBuf, String)>,
+    /// The staged snapshot is a private per-execution copy; when true it is mounted
+    /// writable so build tools can write their output next to the sources. Whatever is
+    /// written there is discarded with the execution (there is no write-back).
+    pub src_writable: bool,
+    /// Share the host network namespace (dependency installation only). Everything else
+    /// runs in a fresh, empty network namespace.
+    pub net: bool,
     pub limits: SandboxLimits,
     /// Host cgroup directory under which the execution cgroup is created.
     pub cgroup_base: PathBuf,
@@ -359,7 +369,6 @@ pub fn bwrap_argv(spec: &SandboxSpec) -> Vec<String> {
     for f in [
         "--unshare-user",
         "--unshare-pid",
-        "--unshare-net",
         "--unshare-ipc",
         "--unshare-uts",
         "--unshare-cgroup-try",
@@ -369,6 +378,9 @@ pub fn bwrap_argv(spec: &SandboxSpec) -> Vec<String> {
         "--clearenv",
     ] {
         push(f);
+    }
+    if !spec.net {
+        push("--unshare-net");
     }
     push("--hostname");
     push("nexus-sandbox");
@@ -401,11 +413,40 @@ pub fn bwrap_argv(spec: &SandboxSpec) -> Vec<String> {
     a.push(l.scratch_bytes.to_string());
     a.push("--tmpfs".to_owned());
     a.push("/work/out".to_owned());
-    a.push("--ro-bind".to_owned());
+    a.push(
+        if spec.src_writable {
+            "--bind"
+        } else {
+            "--ro-bind"
+        }
+        .to_owned(),
+    );
     a.push(spec.src_dir.to_string_lossy().into_owned());
     a.push("/work/src".to_owned());
+    if spec.net {
+        // name resolution and TLS trust only; no other host configuration
+        for f in [
+            "/etc/resolv.conf",
+            "/etc/hosts",
+            "/etc/nsswitch.conf",
+            "/etc/ssl",
+            "/etc/ca-certificates",
+            "/etc/pki",
+        ] {
+            if std::path::Path::new(f).exists() {
+                a.push("--ro-bind".to_owned());
+                a.push(f.to_owned());
+                a.push(f.to_owned());
+            }
+        }
+    }
     for (h, s) in &spec.ro_binds {
         a.push("--ro-bind".to_owned());
+        a.push(h.to_string_lossy().into_owned());
+        a.push(s.clone());
+    }
+    for (h, s) in &spec.rw_binds {
+        a.push("--bind".to_owned());
         a.push(h.to_string_lossy().into_owned());
         a.push(s.clone());
     }
@@ -590,6 +631,9 @@ pub fn preflight() -> SandboxCapabilities {
             cwd: "/work/src".to_owned(),
             env: BTreeMap::new(),
             ro_binds: vec![],
+            rw_binds: vec![],
+            src_writable: false,
+            net: false,
             limits: SandboxLimits {
                 wall_ms: 10_000,
                 ..Default::default()

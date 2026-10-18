@@ -1,5 +1,5 @@
 [workspace]
-members = ["nexus-contracts", "nexus-store", "nexus-kernel", "nexus-daemon", "nexus-model", "nexus-client", "nexus-cli", "nexus-transcript", "nexus-tools", "nexus-broker"]
+members = ["nexus-contracts", "nexus-store", "nexus-kernel", "nexus-daemon", "nexus-model", "nexus-client", "nexus-cli", "nexus-transcript", "nexus-tools", "nexus-broker", "nexus-runtime"]
 resolver = "2"
 
 [workspace.dependencies]

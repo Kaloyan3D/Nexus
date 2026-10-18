@@ -12,7 +12,8 @@ pub mod tools;
 
 pub use accept::{AcceptRequest, GenerationState};
 pub use approvals::{
-    ApprovalDecision, ApprovalSubmission, APPROVAL_TTL_DEFAULT_MS, APPROVAL_TTL_MAX_MS,
+    ApprovalDecision, ApprovalSubmission, PolicyDecision, APPROVAL_TTL_DEFAULT_MS,
+    APPROVAL_TTL_MAX_MS,
 };
 pub use dispatch::{
     NativeDispatchGrant, NativeDispatchRequest, PublishedIntent, SealedNativeDispatchGrant,

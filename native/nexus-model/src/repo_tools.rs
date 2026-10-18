@@ -18,9 +18,9 @@ use serde_json::{json, Value};
 pub const REPO_TOOLS_VERSION: u32 = 1;
 
 /// Largest line count the model may request in one `fs_read`.
-pub const MODEL_MAX_READ_LINES: u32 = 400;
+pub const MODEL_MAX_READ_LINES: u32 = 800;
 /// Largest match count the model may request in one `fs_search`.
-pub const MODEL_MAX_SEARCH_MATCHES: u32 = 50;
+pub const MODEL_MAX_SEARCH_MATCHES: u32 = 100;
 
 /// One catalog entry: provider-visible name and Kernel tool id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,11 +62,14 @@ pub const CODE_EXTRA: [RepoTool; 3] = [
 ];
 
 /// Largest `content` the model may propose in one `fs_write`.
-pub const MODEL_MAX_WRITE_CHARS: usize = 32 * 1024;
+pub const MODEL_MAX_WRITE_CHARS: usize = 96 * 1024;
 /// Largest number of edit operations in one `fs_edit`.
-pub const MODEL_MAX_EDITS: usize = 8;
+pub const MODEL_MAX_EDITS: usize = 16;
 /// Commands the model may name (the sandbox command policy still decides).
-pub const MODEL_PROGRAMS: [&str; 3] = ["cargo", "npm", "tsc"];
+pub const MODEL_PROGRAMS: [&str; 13] = [
+    "cargo", "npm", "npx", "pnpm", "yarn", "node", "tsc", "python3", "pip", "go", "dotnet", "sh",
+    "make",
+];
 
 /// Map a provider-proposed tool name to its Kernel tool id for `profile`.
 pub fn tool_id_for_profile(
@@ -158,23 +161,23 @@ fn code_definitions() -> Vec<Value> {
         json!({
             "type": "function",
             "name": "fs_write",
-            "description": "Create a new UTF-8 text file or replace an existing one inside the isolated working copy. Every write needs independent human approval before it runs; you will be told if it is denied. `replace` needs the `fileSha256` that fs_read returned for that file. Protected, hidden, credential and VCS paths are refused.",
+            "description": "Create a new UTF-8 text file, replace an existing one, or delete one inside the isolated working copy. `replace` and `delete` need the `fileSha256` that fs_read returned for that file (filled in for you if you read it earlier). `delete` takes no content. Credential, VCS, CI and generated-directory paths are refused.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "File relative to the repository root."},
-                    "content": {"type": "string", "maxLength": MODEL_MAX_WRITE_CHARS, "description": "Complete new file content."},
-                    "mode": {"type": "string", "enum": ["create", "replace"]},
+                    "content": {"type": "string", "maxLength": MODEL_MAX_WRITE_CHARS, "description": "Complete new file content (omit for delete)."},
+                    "mode": {"type": "string", "enum": ["create", "replace", "delete"]},
                     "expectedSha256": {"type": "string", "description": "fileSha256 of the file as you last read it (replace only; filled in for you if omitted)."}
                 },
-                "required": ["path", "content", "mode"],
+                "required": ["path", "mode"],
                 "additionalProperties": false
             }
         }),
         json!({
             "type": "function",
             "name": "fs_edit",
-            "description": "Apply exact-text replacements to an existing file. Each oldText must occur exactly once. Needs independent human approval. Prefer this over fs_write for small changes.",
+            "description": "Apply exact-text replacements to an existing file. Each oldText must occur exactly once. Runs under the approval policy in force. Prefer this over fs_write for small changes.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -200,12 +203,12 @@ fn code_definitions() -> Vec<Value> {
         json!({
             "type": "function",
             "name": "proc_run",
-            "description": "Run an approved build or test command in an offline sandbox over a read-only snapshot of the working copy (no network, no writes persist). Only `cargo check|test|build|fmt --check` (with --offline), `npm test`, `npm run build` and `tsc --noEmit` exist. Needs independent human approval. Output is bounded.",
+            "description": "Run a development command in an isolated sandbox over a throw-away copy of the working copy. No network except dependency installation (`npm ci`/`npm install`, `pip install`, `go mod download`, `dotnet restore`, `cargo fetch`, which are allowed when the project permits installs; installed dependencies stay available to later commands). Files a command writes (build output, caches) are discarded; change files with fs_write/fs_edit. Available: cargo (check/test/build/fmt/clippy/doc/run/bench/fetch), npm/pnpm/yarn (install forms, test, run <script>, exec), npx <local-bin> (tsc, vitest, jest, eslint, ...), node, tsc, python3 (-m pytest/unittest/pip, scripts), pip, go, dotnet, make, and `sh -c \"<script>\"` for pipelines and && chains. A failing command is information: read its output, fix the cause and run it again. Output is bounded.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "program": {"type": "string", "enum": MODEL_PROGRAMS},
-                    "args": {"type": "array", "items": {"type": "string"}, "maxItems": 12},
+                    "args": {"type": "array", "items": {"type": "string"}, "maxItems": 64},
                     "cwd": {"type": "string", "description": "Directory relative to the repository root. Default \".\"."}
                 },
                 "required": ["program", "args"],

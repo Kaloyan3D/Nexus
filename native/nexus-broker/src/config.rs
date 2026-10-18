@@ -33,9 +33,50 @@ pub struct CodeCaps {
     pub max_runtime_secs: Option<u64>,
 }
 
+/// The fixed maximums caps can only lower: the strict-profile acceptance limits, or the
+/// interactive profile's engineering defaults.
+fn base_limits(interactive: bool) -> nexus_client::intent_client::DesktopCodeLimits {
+    if interactive {
+        nexus_client::intent_client::INTERACTIVE_CODE_LIMITS
+    } else {
+        nexus_client::intent_client::DESKTOP_CODE_LIMITS
+    }
+}
+
+/// File inside the broker state directory with the limits the USER chose in Settings
+/// (lower than the built-in ones; never required).
+pub const USER_LIMITS_FILE: &str = "user-limits.json";
+
 impl CodeCaps {
-    pub fn validate(&self) -> Result<(), String> {
-        use nexus_client::intent_client::DESKTOP_CODE_LIMITS as M;
+    /// These caps tightened by the user's own limits file, if any.
+    pub fn with_user_limits(&self, state_dir: &std::path::Path) -> CodeCaps {
+        let mut out = self.clone();
+        let Some(v) = std::fs::read_to_string(state_dir.join(USER_LIMITS_FILE))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        else {
+            return out;
+        };
+        let lower = |cur: Option<u64>, key: &str| -> Option<u64> {
+            match (cur, v.get(key).and_then(|x| x.as_u64())) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (None, b) => b,
+                (a, None) => a,
+            }
+        };
+        out.max_turns = lower(self.max_turns.map(u64::from), "maxTurns").map(|n| n as u32);
+        out.max_tool_calls =
+            lower(self.max_tool_calls.map(u64::from), "maxToolCalls").map(|n| n as u32);
+        out.max_edits = lower(self.max_edits.map(u64::from), "maxEdits").map(|n| n as u32);
+        out.max_tests = lower(self.max_tests.map(u64::from), "maxTests").map(|n| n as u32);
+        out.max_runtime_secs = lower(self.max_runtime_secs, "maxRuntimeSecs");
+        out
+    }
+}
+
+impl CodeCaps {
+    pub fn validate(&self, interactive: bool) -> Result<(), String> {
+        let m = base_limits(interactive);
         let chk = |name: &str, v: Option<u64>, max: u64| match v {
             Some(0) => Err(format!("{name} must be at least 1")),
             Some(n) if n > max => Err(format!(
@@ -43,35 +84,35 @@ impl CodeCaps {
             )),
             _ => Ok(()),
         };
-        chk("turns", self.max_turns.map(u64::from), M.max_turns.into())?;
+        chk("turns", self.max_turns.map(u64::from), m.max_turns.into())?;
         chk(
             "tool calls",
             self.max_tool_calls.map(u64::from),
-            M.max_tool_calls.into(),
+            m.max_tool_calls.into(),
         )?;
-        chk("edits", self.max_edits.map(u64::from), M.max_edits.into())?;
+        chk("edits", self.max_edits.map(u64::from), m.max_edits.into())?;
         chk(
             "commands",
             self.max_tests.map(u64::from),
-            M.max_tests.into(),
+            m.max_tests.into(),
         )?;
-        chk("runtime seconds", self.max_runtime_secs, M.max_runtime_secs)
+        chk("runtime seconds", self.max_runtime_secs, m.max_runtime_secs)
     }
 
     /// The limits a run will actually get: the fixed maximums lowered by the caps.
-    pub fn effective(&self) -> nexus_client::intent_client::DesktopCodeLimits {
-        use nexus_client::intent_client::DESKTOP_CODE_LIMITS as M;
+    pub fn effective(&self, interactive: bool) -> nexus_client::intent_client::DesktopCodeLimits {
+        let m = base_limits(interactive);
         nexus_client::intent_client::DesktopCodeLimits {
-            max_turns: self.max_turns.map_or(M.max_turns, |c| c.min(M.max_turns)),
+            max_turns: self.max_turns.map_or(m.max_turns, |c| c.min(m.max_turns)),
             max_tool_calls: self
                 .max_tool_calls
-                .map_or(M.max_tool_calls, |c| c.min(M.max_tool_calls)),
-            max_edits: self.max_edits.map_or(M.max_edits, |c| c.min(M.max_edits)),
-            max_tests: self.max_tests.map_or(M.max_tests, |c| c.min(M.max_tests)),
+                .map_or(m.max_tool_calls, |c| c.min(m.max_tool_calls)),
+            max_edits: self.max_edits.map_or(m.max_edits, |c| c.min(m.max_edits)),
+            max_tests: self.max_tests.map_or(m.max_tests, |c| c.min(m.max_tests)),
             max_runtime_secs: self
                 .max_runtime_secs
-                .map_or(M.max_runtime_secs, |c| c.min(M.max_runtime_secs)),
-            ..M
+                .map_or(m.max_runtime_secs, |c| c.min(m.max_runtime_secs)),
+            ..m
         }
     }
 }
@@ -132,9 +173,44 @@ pub struct BrokerConfig {
     pub project_registry: Option<(PathBuf, nexus_tools::registry::Trust)>,
     /// A6.1.3: operator-selected lower limits for repo-code runs.
     pub code_caps: CodeCaps,
+    /// A6.1.4 interactive profile: per-run provider authorization is issued by the
+    /// broker from a one-time user consent instead of an operator-created record.
+    pub interactive: bool,
+    /// A6.1.4: directory for Nexus-owned project snapshots; enables opening projects
+    /// from the Desktop (needs `project_registry` and the interactive profile).
+    pub project_snapshots: Option<PathBuf>,
+    /// A6.1.4: override of the conversation budget (bytes) before older steps are
+    /// compacted. `None` = the built-in default. Tests and tuning only.
+    pub context_budget_bytes: Option<usize>,
 }
 
 impl BrokerConfig {
+    /// Project onboarding environment, when this broker can open projects.
+    pub fn project_env(&self) -> Option<crate::projects::Env<'_>> {
+        let (dir, trust) = self.project_registry.as_ref()?;
+        let snaps = self.project_snapshots.as_ref()?;
+        if !self.interactive {
+            return None;
+        }
+        let mut forbidden = vec![self.state_dir.clone(), snaps.clone()];
+        forbidden.extend(
+            [&self.registry_data_root, &self.transcript_dir, dir]
+                .into_iter()
+                .cloned(),
+        );
+        for f in forbidden.iter_mut() {
+            if let Ok(c) = std::fs::canonicalize(&*f) {
+                *f = c;
+            }
+        }
+        Some(crate::projects::Env {
+            registry_dir: dir,
+            trust,
+            snapshots_dir: snaps,
+            forbidden,
+        })
+    }
+
     /// The coding sources usable right now: the static single-source list or the
     /// registry's projects. An unreadable/untrusted registry yields none (fail closed).
     pub fn effective_code_sources(&self) -> Vec<WorkspaceSpec> {

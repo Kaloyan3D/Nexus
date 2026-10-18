@@ -532,3 +532,45 @@ fn concurrent_diffs_of_one_copy_never_collide_on_the_index() {
         assert!(ds.iter().all(|d| d == &ds[0]));
     }
 }
+
+#[test]
+fn an_interrupted_tasks_work_is_carried_into_a_fresh_copy_of_the_same_snapshot() {
+    let (_d, src) = repo();
+    let (_r, root) = roots();
+    let old = create(&src, &root, "task-old-1").unwrap();
+    let new = create(&src, &root, "task-new-1").unwrap();
+    let (o, n) = (root.join("task-old-1"), root.join("task-new-1"));
+    // the interrupted task edited a file, added one (in a new directory) and deleted one
+    std::fs::write(
+        o.join("src/lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(o.join("tests")).unwrap();
+    std::fs::write(o.join("tests/add.rs"), "#[test] fn t() {}\n").unwrap();
+    std::fs::remove_file(o.join("README.md")).unwrap();
+    // a link and a git-internal path are never carried
+    std::os::unix::fs::symlink("/etc/passwd", o.join("link")).unwrap();
+    let n_files = gitwt::seed_copy(&o, &old.source.commit, &n).unwrap();
+    assert!(n_files >= 3, "{n_files}");
+    assert_eq!(
+        std::fs::read_to_string(n.join("src/lib.rs")).unwrap(),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(n.join("tests/add.rs")).unwrap(),
+        "#[test] fn t() {}\n"
+    );
+    assert!(!n.join("README.md").exists());
+    assert!(
+        std::fs::symlink_metadata(n.join("link")).is_err(),
+        "links are not carried"
+    );
+    // the new copy's diff is exactly the old copy's work (the link was never part of it)
+    std::fs::remove_file(o.join("link")).unwrap();
+    let a = diff(&o, &old.source.commit).unwrap();
+    let b = diff(&n, &new.source.commit).unwrap();
+    assert_eq!(a.diff_digest, b.diff_digest, "same change set");
+    // a base that is not a commit is refused
+    assert!(gitwt::seed_copy(&o, "not-a-commit", &n).is_err());
+}

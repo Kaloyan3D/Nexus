@@ -485,6 +485,9 @@ impl Fx {
             approval_ttl_ms: None,
             project_registry: None,
             code_caps: Default::default(),
+            interactive: false,
+            project_snapshots: None,
+            context_budget_bytes: None,
         }
     }
 
@@ -950,6 +953,7 @@ fn a53_clients_are_authenticated_by_peer_uid_and_isolated_from_each_other() {
                 run,
                 payload_digest: "d".into(),
                 idempotency_key: "k".into(),
+                prompt: None,
             })
             .unwrap();
     }
@@ -1286,6 +1290,9 @@ fn broker_child_entry() {
         approval_ttl_ms: None,
         project_registry: None,
         code_caps: Default::default(),
+        interactive: false,
+        project_snapshots: None,
+        context_budget_bytes: None,
     };
     let _h = nexus_broker::start(cfg).expect("child broker");
     std::thread::sleep(Duration::from_secs(600));
@@ -1386,6 +1393,7 @@ fn a53_broker_crash_and_daemon_restart_never_duplicate_a_billable_submission() {
                 run,
                 payload_digest: "d".into(),
                 idempotency_key: "k2".into(),
+                prompt: None,
             })
             .unwrap();
     }
@@ -1722,6 +1730,7 @@ fn a531_conversation_is_served_per_run_by_ownership_with_incremental_paging() {
                 run,
                 payload_digest: "d".into(),
                 idempotency_key: "k".into(),
+                prompt: None,
             })
             .unwrap();
     }

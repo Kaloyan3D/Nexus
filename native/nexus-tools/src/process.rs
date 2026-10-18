@@ -46,7 +46,7 @@ pub trait ProcessHooks {
 
 // ------------------------------------------------------------ policy
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolvedCommand {
     /// Logical name (`cargo`, `npm`, `tsc`, or a test-policy name).
     pub name: String,
@@ -55,6 +55,11 @@ pub struct ResolvedCommand {
     pub cwd: String,
     pub env: BTreeMap<String, String>,
     pub ro_binds: Vec<(PathBuf, String)>,
+    /// Dependency installation: runs with the host network, may populate the project
+    /// environment, and is only allowed when the project permits installs.
+    pub install: bool,
+    /// Wall-clock allowance this command class needs (installs and builds are longer).
+    pub wall_ms: Option<u64>,
 }
 
 impl ResolvedCommand {
@@ -126,6 +131,8 @@ pub struct CommandPolicy {
     /// Operator-provisioned, verified dependency cache (A3.5). `None`
     /// means cargo sees no vendored source (dependency-free projects only).
     dep_cache: Option<PathBuf>,
+    /// Autonomy-first command set (`workbench.rs`) instead of the strict exact-argv one.
+    workbench: bool,
 }
 
 fn arg_ok(a: &str) -> bool {
@@ -146,7 +153,27 @@ impl CommandPolicy {
             toolchain,
             dep_cache: None,
             test_programs: Vec::new(),
+            workbench: false,
         }
+    }
+
+    /// The workbench command set: ordinary development programs and arguments, bounded
+    /// by the sandbox and the project environment rather than by exact argv shapes.
+    pub fn with_workbench(mut self) -> Self {
+        self.workbench = true;
+        self
+    }
+
+    pub fn is_workbench(&self) -> bool {
+        self.workbench
+    }
+
+    pub(crate) fn toolchain_has_cargo(&self) -> bool {
+        self.toolchain.cargo_home_bin.is_some()
+    }
+
+    pub(crate) fn toolchain_binds_pub(&self) -> Vec<(PathBuf, String)> {
+        self.toolchain_binds()
     }
 
     /// Attach an operator-provisioned dependency cache directory.
@@ -161,6 +188,7 @@ impl CommandPolicy {
             toolchain,
             dep_cache: None,
             test_programs: programs.iter().map(|s| s.to_string()).collect(),
+            workbench: false,
         }
     }
 
@@ -209,6 +237,9 @@ impl CommandPolicy {
 
     /// Validate and resolve. Pure: no filesystem, no process.
     pub fn resolve(&self, a: &ProcessArgs) -> Result<ResolvedCommand, ToolError> {
+        if self.workbench {
+            return crate::workbench::resolve(self, a);
+        }
         let cwd_rel = crate::workspace::RelPath::parse(&a.cwd)
             .map_err(|e| refuse_cmd(format!("cwd refused: {}", e.message)))?;
         let cwd = if cwd_rel.is_root() {
@@ -270,6 +301,7 @@ impl CommandPolicy {
                     cwd,
                     env,
                     ro_binds: binds,
+                    ..Default::default()
                 })
             }
             "npm" => {
@@ -299,6 +331,95 @@ impl CommandPolicy {
                     cwd,
                     env,
                     ro_binds: Vec::new(),
+                    ..Default::default()
+                })
+            }
+            "python3" => {
+                // `python3 -m unittest|pytest|compileall` only: no `-c`, no script file, no
+                // other module. The project's own tests run in the sandbox like `cargo test`.
+                let a0 = a.args.first().map(String::as_str);
+                let module = a.args.get(1).map(String::as_str).unwrap_or("");
+                if a0 != Some("-m") || !["unittest", "pytest", "compileall"].contains(&module) {
+                    return Err(refuse_cmd(
+                        "python3: only `-m unittest`, `-m pytest` and `-m compileall` are permitted",
+                    ));
+                }
+                let rest = &a.args[2..];
+                let mut i = 0;
+                while i < rest.len() {
+                    let x = rest[i].as_str();
+                    let flag_ok = matches!(
+                        (module, x),
+                        ("unittest", "discover" | "-v" | "-q" | "-f" | "-b")
+                            | ("pytest", "-q" | "-x" | "-v" | "--tb=short" | "--no-header")
+                            | ("compileall", "-q")
+                    );
+                    if flag_ok {
+                        i += 1;
+                        continue;
+                    }
+                    if module == "unittest" && ["-s", "-t", "-p", "-k"].contains(&x) {
+                        match rest.get(i + 1) {
+                            Some(v) if arg_ok(v) && !v.starts_with('-') && !v.starts_with('/') => {
+                                i += 2;
+                                continue;
+                            }
+                            _ => {
+                                return Err(refuse_cmd("python3: bad value for a unittest option"))
+                            }
+                        }
+                    }
+                    // a positional: a dotted module name, or a relative path (no options, no abs)
+                    if arg_ok(x) && !x.starts_with('-') && !x.starts_with('/') {
+                        i += 1;
+                        continue;
+                    }
+                    return Err(refuse_cmd(format!(
+                        "python3: argument '{}' is not permitted",
+                        x.chars().take(40).collect::<String>()
+                    )));
+                }
+                let prog = ["/usr/bin/python3", "/usr/local/bin/python3"]
+                    .iter()
+                    .find(|p| Path::new(p).exists())
+                    .ok_or_else(|| refuse_cmd("python3 is not available on this host"))?;
+                env.insert("PYTHONDONTWRITEBYTECODE".into(), "1".into());
+                env.insert("PYTHONPYCACHEPREFIX".into(), "/work/out/pycache".into());
+                env.insert("PYTHONNOUSERSITE".into(), "1".into());
+                env.insert("PYTHONUNBUFFERED".into(), "1".into());
+                env.insert("PYTHONHASHSEED".into(), "0".into());
+                Ok(ResolvedCommand {
+                    name: "python3".into(),
+                    program: (*prog).to_owned(),
+                    argv: a.args.clone(),
+                    cwd,
+                    env,
+                    ro_binds: Vec::new(),
+                    ..Default::default()
+                })
+            }
+            "node" => {
+                // Node's built-in test runner only: `node --test [paths]`.
+                if a.args.first().map(String::as_str) != Some("--test") {
+                    return Err(refuse_cmd("node: only `--test [PATH...]` is permitted"));
+                }
+                for x in &a.args[1..] {
+                    if !arg_ok(x) || x.starts_with('-') || x.starts_with('/') {
+                        return Err(refuse_cmd("node: bad test path"));
+                    }
+                }
+                let prog = ["/usr/bin/node", "/usr/local/bin/node"]
+                    .iter()
+                    .find(|p| Path::new(p).exists())
+                    .ok_or_else(|| refuse_cmd("node is not available on this host"))?;
+                Ok(ResolvedCommand {
+                    name: "node".into(),
+                    program: (*prog).to_owned(),
+                    argv: a.args.clone(),
+                    cwd,
+                    env,
+                    ro_binds: Vec::new(),
+                    ..Default::default()
                 })
             }
             "tsc" => {
@@ -337,6 +458,7 @@ impl CommandPolicy {
                     cwd,
                     env,
                     ro_binds: Vec::new(),
+                    ..Default::default()
                 })
             }
             other if other.starts_with('/') && self.test_programs.iter().any(|p| p == other) => {
@@ -347,6 +469,7 @@ impl CommandPolicy {
                     cwd,
                     env,
                     ro_binds: Vec::new(),
+                    ..Default::default()
                 })
             }
             other => Err(refuse_cmd(format!(
@@ -359,8 +482,93 @@ impl CommandPolicy {
 
 // --------------------------------------------------------- execution
 
+/// The project-scoped environment of one task: where its dependency installs and build
+/// caches live between commands, and whether it may install dependencies at all.
+#[derive(Debug, Clone)]
+pub struct ProjectEnv {
+    /// Host directory (private to the project; never inside a workspace).
+    pub dir: PathBuf,
+    /// The project allows dependency installation (network for the install forms).
+    pub installs: bool,
+}
+
+/// Directories an install writes into the source tree that later commands need: npm's
+/// `node_modules` and the .NET restore output `obj/` (assets file, generated props). They
+/// are kept per relative location in the project environment and mounted back over the
+/// sources.
+const NM_STORE: &str = "nm";
+const INSTALL_DIRS: [&str; 2] = ["node_modules", "obj"];
+
+fn find_node_modules(root: &Path, rel: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth > 4 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(root.join(rel)) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let Ok(ft) = e.file_type() else { continue };
+        if !ft.is_dir() {
+            continue;
+        }
+        let name = e.file_name();
+        let r = rel.join(&name);
+        if INSTALL_DIRS.iter().any(|d| name == *d) {
+            out.push(r);
+        } else if name != ".git" {
+            find_node_modules(root, &r, depth + 1, out);
+        }
+    }
+}
+
+/// Mount points for the stored `node_modules` of this project.
+fn stored_node_modules(env: &ProjectEnv) -> Vec<(PathBuf, String)> {
+    let base = env.dir.join(NM_STORE);
+    let mut found = Vec::new();
+    find_node_modules(&base, Path::new(""), 0, &mut found);
+    found
+        .into_iter()
+        .map(|rel| {
+            let sbx = format!("/work/src/{}", rel.to_string_lossy());
+            (base.join(&rel), sbx)
+        })
+        .collect()
+}
+
+/// After a successful install: keep what it put under `node_modules` for later commands.
+fn harvest_node_modules(src: &Path, env: &ProjectEnv) -> Result<usize, String> {
+    let mut found = Vec::new();
+    find_node_modules(src, Path::new(""), 0, &mut found);
+    if found.is_empty() {
+        return Ok(0);
+    }
+    let base = env.dir.join(NM_STORE);
+    let _ = std::fs::remove_dir_all(&base);
+    for rel in &found {
+        let to = base.join(rel);
+        if let Some(p) = to.parent() {
+            std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
+        }
+        let from = src.join(rel);
+        if std::fs::rename(&from, &to).is_err() {
+            let st = std::process::Command::new("cp")
+                .arg("-a")
+                .arg(&from)
+                .arg(&to)
+                .status()
+                .map_err(|e| e.to_string())?;
+            if !st.success() {
+                return Err("cannot keep node_modules".into());
+            }
+        }
+    }
+    Ok(found.len())
+}
+
 pub struct ProcessContext<'a> {
     pub ws: &'a Workspace,
+    /// Project-scoped environment (workbench policy); `None` = ephemeral.
+    pub env: Option<&'a ProjectEnv>,
     /// Private host directory under which per-execution dirs are created.
     pub run_root: &'a Path,
     pub execution_id: &'a str,
@@ -516,7 +724,7 @@ impl SandboxControl for Control<'_, '_> {
     fn on_spawned(&mut self, pid: u32, cgroup: &str) -> Result<(), ToolError> {
         self.hooks.journal(
             PH_RUNNING,
-            serde_json::json!({"pid": pid, "cgroup": cgroup, "network": "none"}),
+            serde_json::json!({"pid": pid, "cgroup": cgroup}),
         )
     }
 }
@@ -644,8 +852,56 @@ pub fn run_process(
             }
         }
     }
+    // 1c. Project environment (workbench): a persistent directory for dependencies and
+    //     caches mounted at /work/env, with stored node_modules mounted over the sources.
+    let mut rw_binds: Vec<(PathBuf, String)> = Vec::new();
+    if ctx.policy.is_workbench() {
+        let env_dir = match ctx.env {
+            Some(e) => e.dir.join("shared"),
+            None => run_dir.join("env"),
+        };
+        if let Err(e) = std::fs::create_dir_all(&env_dir) {
+            return failed(
+                hooks,
+                &run_dir,
+                ToolErrorCode::SnapshotFailed,
+                format!("environment dir: {e}"),
+            );
+        }
+        rw_binds.push((env_dir, "/work/env".to_owned()));
+        if cmd.install {
+            match ctx.env {
+                Some(e) if e.installs => {}
+                _ => {
+                    return failed(
+                        hooks,
+                        &run_dir,
+                        ToolErrorCode::CommandRefused,
+                        "installing dependencies is not enabled for this project (it can be enabled in the project's settings)".into(),
+                    )
+                }
+            }
+        } else if let Some(e) = ctx.env {
+            rw_binds.extend(stored_node_modules(e));
+        }
+        if cmd.name == "cargo" || cmd.name == "go" {
+            // toolchain homes live in the shared environment
+        }
+    }
     // 2. Sandbox configuration.
-    let limits = limits_from(ctx.budgets, ctx.scope_max_wall_ms);
+    let mut limits = limits_from(ctx.budgets, ctx.scope_max_wall_ms);
+    if ctx.policy.is_workbench() {
+        // Modern runtimes (V8 WebAssembly, Go, the .NET GC) RESERVE far more address space
+        // than they use. Real memory stays bounded by the resident-memory ceiling; the
+        // address-space rlimit is only a backstop.
+        limits.address_space_bytes = limits
+            .memory_bytes
+            .saturating_mul(16)
+            .max(32 * 1024 * 1024 * 1024);
+    }
+    if let Some(w) = cmd.wall_ms {
+        limits.wall_ms = limits.wall_ms.max(w.min(ctx.scope_max_wall_ms.max(1)));
+    }
     let spec = SandboxSpec {
         id: ctx.execution_id.to_owned(),
         program: cmd.program.clone(),
@@ -654,6 +910,9 @@ pub fn run_process(
         cwd: cmd.cwd.clone(),
         env: cmd.env.clone(),
         ro_binds: cmd.ro_binds.clone(),
+        rw_binds,
+        src_writable: ctx.policy.is_workbench(),
+        net: cmd.install,
         limits: limits.clone(),
         cgroup_base: base.clone(),
     };
@@ -689,8 +948,8 @@ pub fn run_process(
             "sandboxDigest": sbx_digest,
             "dependencies": dep_note,
             "sandbox": {
-                "backend": "bubblewrap+seccomp+cgroup-v2", "network": "none",
-                "rootfs": "synthetic (usr ro, tmpfs scratch)", "workspace": "snapshot-ro",
+                "backend": "bubblewrap+seccomp+cgroup-v2", "network": if cmd.install { "install" } else { "none" },
+                "rootfs": "synthetic (usr ro, tmpfs scratch)", "workspace": if ctx.policy.is_workbench() { "snapshot-scratch" } else { "snapshot-ro" },
                 "writeBack": "none", "env": "allowlist",
             },
             "resourceEnforcement": if kernel_mode { "kernel-cgroup" } else { "rlimit-polling" },
@@ -726,6 +985,16 @@ pub fn run_process(
         let mut control = Control { cancel, hooks };
         run_sandboxed(&spec, &mut control)
     };
+    // A successful install keeps its node_modules for the commands that follow.
+    let mut env_note = serde_json::Value::Null;
+    if let (true, Ok(o), Some(e)) = (cmd.install, &outcome, ctx.env) {
+        if matches!(o.exit, ExitKind::Exited(0)) {
+            env_note = match harvest_node_modules(&src, e) {
+                Ok(n) => serde_json::json!({ "nodeModulesKept": n }),
+                Err(m) => serde_json::json!({ "nodeModulesKept": false, "error": m }),
+            };
+        }
+    }
     let _ = std::fs::remove_dir_all(&run_dir);
     let out = match outcome {
         Ok(o) => o,
@@ -786,7 +1055,8 @@ pub fn run_process(
         "resourceEnforcement": out.resource_enforcement,
         "oomKilled": out.oom_killed, "pidsLimitHit": out.pids_limit_hit,
         "snapshotDigest": report.digest, "sandboxDigest": sbx_digest,
-        "network": "none", "writeBack": "none",
+        "network": if cmd.install { "install" } else { "none" }, "writeBack": "none",
+        "environment": env_note,
     });
     let mut trunc = Truncation::default();
     if out.stdout_truncated {

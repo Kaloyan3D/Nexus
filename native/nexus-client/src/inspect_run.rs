@@ -194,7 +194,13 @@ impl InspectSession {
     }
 
     /// Start a model turn: its own attempt/command/request digest.
-    pub fn begin_turn(&mut self, turn: u32, attempt_id: &str, command_id: &str, digest: &str) {
+    pub fn begin_turn(
+        &mut self,
+        turn: impl std::fmt::Display,
+        attempt_id: &str,
+        command_id: &str,
+        digest: &str,
+    ) {
         self.rec.suffix = format!("-t{turn}");
         self.rec.attempt_id = attempt_id.to_owned();
         self.rec.meta.attempt_id = Some(attempt_id.to_owned());
@@ -317,6 +323,8 @@ pub struct TurnOutput {
     pub first_token_ms: Option<u64>,
     pub latency_ms: u64,
     pub request_digest: String,
+    /// Truncated turns only: the response had started (or even finished) a tool call.
+    pub partial_tool: bool,
 }
 
 /// How a turn ended.
@@ -324,6 +332,11 @@ pub struct TurnOutput {
 pub enum TurnEnd {
     /// A complete provider response (text and/or proposed tool calls).
     Output(Box<TurnOutput>),
+    /// A6.1.4: the provider ended the response at `max_output_tokens` (reasoning
+    /// tokens included). Whatever it had assembled, including any half-written
+    /// tool call, is DISCARDED: nothing from this turn may execute. Not terminal;
+    /// the caller decides whether to spend another authorized turn on a larger cap.
+    Truncated(Box<TurnOutput>),
     /// Anything else: cancelled, timed out, uncertain, refused, failed. The
     /// terminal run state has ALREADY been recorded; the loop must stop.
     Ended {
@@ -581,6 +594,29 @@ pub fn run_inspect_turn(
                 };
                 return end(rec, state, code, text.to_owned());
             }
+            if report.finish_reason.as_deref() == Some("incomplete:max_output_tokens") {
+                if !rec.text.is_empty() {
+                    rec.assistant(MessageState::Interrupted)?;
+                }
+                return Ok(TurnEnd::Truncated(Box::new(TurnOutput {
+                    text: rec.text.clone(),
+                    tool_calls: Vec::new(),
+                    usage,
+                    response_id,
+                    finish_reason: "incomplete:max_output_tokens".to_owned(),
+                    http_status: report.http_status,
+                    provider_request_id: report.provider_request_id.clone(),
+                    first_token_ms,
+                    latency_ms,
+                    request_digest,
+                    partial_tool: report.events.iter().any(|e| {
+                        matches!(
+                            e,
+                            ModelEvent::ToolFragment { .. } | ModelEvent::ToolDone { .. }
+                        )
+                    }),
+                })));
+            }
             if let Some(e) = assemble_err {
                 return end(
                     rec,
@@ -607,6 +643,7 @@ pub fn run_inspect_turn(
                         first_token_ms,
                         latency_ms,
                         request_digest,
+                        partial_tool: false,
                     })))
                 }
                 Err(e) => end(

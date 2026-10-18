@@ -668,3 +668,76 @@ pub fn diff(wt: &Path, base_commit: &str) -> Result<DiffReport, WtError> {
         diff_truncated,
     })
 }
+
+/// Hardened Git for callers outside this module (snapshots): no shell, cleared
+/// environment, no hooks. Returns `(exit status, stdout)`; stdout is bounded.
+/// Carry the work of an earlier (interrupted) task over into a fresh copy of the same
+/// project: every file the earlier copy added, changed or deleted relative to its base
+/// commit is reproduced in `to_wt`. Regular files only; nothing under `.git`; paths are
+/// validated components. Returns how many files were carried over.
+pub fn seed_copy(from_wt: &Path, base_commit: &str, to_wt: &Path) -> Result<usize, WtError> {
+    static SEED_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = SEED_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    if !is_hex_commit(base_commit) {
+        return Err(err("bad-commit", "base commit is malformed"));
+    }
+    git_ok(from_wt, &["add", "-A", "--", "."])?;
+    let ns = git(
+        Some(from_wt),
+        &[
+            "diff",
+            "--cached",
+            "--name-status",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "-z",
+            base_commit,
+        ],
+    )?;
+    if ns.status != 0 {
+        return Err(err("git-failed", "git diff failed"));
+    }
+    let text = String::from_utf8_lossy(&ns.stdout).into_owned();
+    let mut parts = text.split('\0').filter(|p| !p.is_empty());
+    let mut n = 0usize;
+    while let (Some(status), Some(path)) = (parts.next(), parts.next()) {
+        let ok_path = !path.starts_with('/')
+            && path
+                .split('/')
+                .all(|c| !c.is_empty() && c != "." && c != ".." && c != ".git");
+        if !ok_path {
+            continue;
+        }
+        let from = from_wt.join(path);
+        let to = to_wt.join(path);
+        if status.starts_with('D') {
+            let _ = std::fs::remove_file(&to);
+            n += 1;
+            continue;
+        }
+        let Ok(md) = std::fs::symlink_metadata(&from) else {
+            continue;
+        };
+        if !md.file_type().is_file() || md.len() > 64 * 1024 * 1024 {
+            continue;
+        }
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| err("io", e.to_string()))?;
+        }
+        // never write through a link that appeared in the fresh copy
+        if let Ok(t) = std::fs::symlink_metadata(&to) {
+            if t.file_type().is_symlink() {
+                continue;
+            }
+        }
+        std::fs::copy(&from, &to).map_err(|e| err("io", e.to_string()))?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+pub fn run_git(cwd: &Path, args: &[&str]) -> Result<(i32, Vec<u8>), WtError> {
+    let o = git(Some(cwd), args)?;
+    Ok((o.status, o.stdout))
+}
