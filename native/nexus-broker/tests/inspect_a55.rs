@@ -32,6 +32,10 @@ fn repo_root() -> PathBuf {
 }
 
 fn native_bin(name: &str) -> PathBuf {
+    // a build in a custom target directory (CI, the Nexus sandbox) is where cargo put the binaries
+    if let Some(dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        return PathBuf::from(dir).join("debug").join(name);
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("target")

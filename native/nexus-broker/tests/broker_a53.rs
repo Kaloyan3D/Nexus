@@ -20,6 +20,9 @@ use std::time::{Duration, Instant};
 const SECRET: &str = "sk-a53-secret-marker-5d2e";
 const HOST: &str = "api.provider.test";
 const CRED_REF: &str = "credential://connections/conn-e2e-mock";
+/// R-NATIVE-2: the second fixture connection has its own credential.
+const CRED_REF_B: &str = "credential://connections/conn-e2e-mock-b";
+const SECRET_B: &str = "sk-second-connection-marker-b7f1";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -426,7 +429,11 @@ fn fixture(reply: Reply, pilot: bool) -> Fx {
     );
     let daemon = spawn_daemon(tmp.path(), &db, &wit, &socket, &cap, pilot);
     let creds = tmp.path().join("provider-credentials.json");
-    std::fs::write(&creds, serde_json::json!({ CRED_REF: SECRET }).to_string()).unwrap();
+    std::fs::write(
+        &creds,
+        serde_json::json!({ CRED_REF: SECRET, CRED_REF_B: SECRET_B }).to_string(),
+    )
+    .unwrap();
     std::fs::set_permissions(&creds, std::fs::Permissions::from_mode(0o600)).unwrap();
     Fx {
         tmp,
@@ -789,6 +796,8 @@ fn a53_models_and_intents_are_validated_before_any_run_exists() {
     bad.model = Some(ModelSelection {
         provider_id: "e2e-mock".into(),
         remote_model_id: "other-model".into(),
+        logical_model_id: None,
+        route_id: None,
     });
     assert_eq!(
         ic::submit(&sock, &bad).unwrap_err().code,
@@ -798,6 +807,8 @@ fn a53_models_and_intents_are_validated_before_any_run_exists() {
     other.model = Some(ModelSelection {
         provider_id: "someone-else".into(),
         remote_model_id: "e2e-mock-model".into(),
+        logical_model_id: None,
+        route_id: None,
     });
     assert_eq!(
         ic::submit(&sock, &other).unwrap_err().code,
@@ -869,6 +880,8 @@ fn a53_models_and_intents_are_validated_before_any_run_exists() {
     ok.model = Some(ModelSelection {
         provider_id: "e2e-mock".into(),
         remote_model_id: "e2e-mock-model".into(),
+        logical_model_id: None,
+        route_id: None,
     });
     assert_eq!(
         ic::submit(b2.socket_path(), &ok).unwrap_err().code,
@@ -898,6 +911,8 @@ fn rn1_selected_second_registry_model_reaches_provider_and_non_issuable_is_refus
     sel.model = Some(ModelSelection {
         provider_id: "e2e-mock".into(),
         remote_model_id: "e2e-mock-model-2".into(),
+        logical_model_id: None,
+        route_id: None,
     });
     let reply = ic::submit(&sock, &sel).expect("selected submit");
     let run = wait_terminal(&sock, &reply.run.run_id, 30);
@@ -914,6 +929,8 @@ fn rn1_selected_second_registry_model_reaches_provider_and_non_issuable_is_refus
     bad.model = Some(ModelSelection {
         provider_id: "e2e-mock".into(),
         remote_model_id: "e2e-mock-ghost".into(),
+        logical_model_id: None,
+        route_id: None,
     });
     assert_eq!(
         ic::submit(&sock, &bad).unwrap_err().code,
@@ -937,6 +954,8 @@ fn rn1_selected_second_registry_model_reaches_provider_and_non_issuable_is_refus
     cfgd.model = Some(ModelSelection {
         provider_id: "e2e-mock".into(),
         remote_model_id: "e2e-mock-model-3".into(),
+        logical_model_id: None,
+        route_id: None,
     });
     let err = ic::submit(&sock, &cfgd).unwrap_err();
     assert_eq!(err.code, "model-not-available");
@@ -947,6 +966,78 @@ fn rn1_selected_second_registry_model_reaches_provider_and_non_issuable_is_refus
         "no run for a configured, non-issuable target"
     );
     assert_eq!(fx.provider.accepted.load(Ordering::SeqCst), 1);
+    b.shutdown();
+}
+
+/// R-NATIVE-2 item 7: the catalog's `issuable` is exactly what the issuing bridge accepts, and the
+/// catalog's reason is exactly the refusal's reason - for EVERY target of the fixture Registry
+/// (the built-in providers contribute many different refusal reasons).
+#[test]
+fn rn2_catalog_issuable_is_exactly_what_issuance_accepts_with_the_same_reasons() {
+    let fx = fixture(hello(), true);
+    let b = fx.start("rn2-parity");
+    let sock = b.socket_path().to_owned();
+    let targets = ic::registry_targets(&sock).expect("targets");
+    assert!(
+        targets.len() >= 8,
+        "a meaningful catalog: {}",
+        targets.len()
+    );
+    let bridge = repo_root()
+        .join("config")
+        .join("registry")
+        .join("native-intent-bridge.cjs");
+    let mut reasons = std::collections::BTreeSet::new();
+    let (mut accepted, mut refused) = (0, 0);
+    for t in &targets {
+        let sel =
+            serde_json::json!({ "logicalModelId": t.logical_model_id, "routeId": t.route_id })
+                .to_string();
+        let out = std::process::Command::new("node")
+            .arg(&bridge)
+            .args([
+                "issue",
+                repo_root().to_str().unwrap(),
+                fx.registry.to_str().unwrap(),
+                "task-parity",
+                "session-parity",
+                &sel,
+            ])
+            .output()
+            .expect("node");
+        let v: serde_json::Value =
+            serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
+        let ok = v["ok"] == true;
+        assert_eq!(
+            ok, t.issuable,
+            "catalog says issuable={} but issuance ok={ok} for {}: {v}",
+            t.issuable, t.route_id
+        );
+        if ok {
+            accepted += 1;
+            // the issued identity is the catalog's identity
+            assert_eq!(v["core"]["routeId"], t.route_id.as_str());
+            assert_eq!(v["core"]["remoteModelId"], t.remote_model_id.as_str());
+        } else {
+            refused += 1;
+            let reason = t.reason.clone().expect("a refusal carries a reason");
+            reasons.insert(reason.clone());
+            assert_eq!(v["code"], "registry-selection-not-issuable", "{v}");
+            assert!(
+                v["message"].as_str().unwrap_or("").contains(&reason),
+                "refusal does not carry the catalog reason {reason} for {}: {v}",
+                t.route_id
+            );
+        }
+    }
+    assert!(
+        accepted >= 2 && refused >= 3,
+        "{accepted} accepted / {refused} refused"
+    );
+    assert!(
+        reasons.len() >= 3,
+        "several distinct reasons covered: {reasons:?}"
+    );
     b.shutdown();
 }
 

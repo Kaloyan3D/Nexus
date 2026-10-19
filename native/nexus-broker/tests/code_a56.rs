@@ -25,6 +25,9 @@ const REPO_SECRET: &str = "SUPERSECRET-ENV-VALUE-do-not-leak-9f3a";
 const AMBIENT: &str = "AMBIENT-CRED-MARKER-42b7";
 const HOST: &str = "api.provider.test";
 const CRED_REF: &str = "credential://connections/conn-e2e-mock";
+/// R-NATIVE-2: the second fixture connection has its own credential.
+const CRED_REF_B: &str = "credential://connections/conn-e2e-mock-b";
+const SECRET_B: &str = "sk-second-connection-marker-b7f1";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -33,6 +36,10 @@ fn repo_root() -> PathBuf {
 }
 
 fn native_bin(name: &str) -> PathBuf {
+    // a build in a custom target directory (CI, the Nexus sandbox) is where cargo put the binaries
+    if let Some(dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        return PathBuf::from(dir).join("debug").join(name);
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("target")
@@ -691,7 +698,11 @@ fn fixture_inner(
         autonomous,
     );
     let creds = tmp.path().join("provider-credentials.json");
-    std::fs::write(&creds, json!({ CRED_REF: SECRET }).to_string()).unwrap();
+    std::fs::write(
+        &creds,
+        json!({ CRED_REF: SECRET, CRED_REF_B: SECRET_B }).to_string(),
+    )
+    .unwrap();
     std::fs::set_permissions(&creds, std::fs::Permissions::from_mode(0o600)).unwrap();
     Fx {
         tmp,
@@ -1057,6 +1068,12 @@ fn sandbox_ready() -> bool {
     if !c.available || tc.cargo_home_bin.is_none() || tc.rustup_home.is_none() {
         println!(
             "NOT RUN: sandbox or cargo toolchain unavailable: {:?}",
+            c.problems
+        );
+        // an acceptance run sets NEXUS_REQUIRE_SANDBOX=1: a test that cannot run must not count as passed
+        assert!(
+            std::env::var_os("NEXUS_REQUIRE_SANDBOX").is_none(),
+            "NEXUS_REQUIRE_SANDBOX is set but the sandbox or toolchain is unavailable: {:?}",
             c.problems
         );
         return false;
@@ -5250,6 +5267,8 @@ fn tsend(
             mode,
             workspace,
             idempotency_key: key,
+            model: None,
+            route: None,
         },
     )
 }
@@ -7682,5 +7701,664 @@ fn completion_a_long_exploration_keeps_everything_it_read_until_the_context_real
         !bodies.iter().any(|b| saw(b, "\"compacted\":true")),
         "nothing was stubbed"
     );
+    b.shutdown();
+}
+
+// ---------------------------------------------------------------------------------------------
+// R-NATIVE-2 acceptance: model resolution and execution binding through the REAL broker, daemon,
+// sandbox and the scripted TLS provider. Every provider request is recorded (body + head), so
+// "the provider saw model X with credential Y on every call" is observed, not inferred.
+// ---------------------------------------------------------------------------------------------
+
+const M1: &str = "e2e-mock/e2e-mock-model";
+const M2: &str = "e2e-mock/e2e-mock-model-2";
+
+fn rn2_responder() -> Responder {
+    Arc::new(|n, body| {
+        let resp = format!("resp_{n}");
+        let done = body["input"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["type"] == "function_call_output")
+                    .count()
+            })
+            .unwrap_or(0);
+        let cur = current_request(body);
+        // unique per provider request even when compaction shortens the history
+        let call = |name: &str, args: &str| {
+            Answer::Frames(call_frames(&resp, n, &format!("call_{n}"), name, args))
+        };
+        if cur.contains("RN2-WIDE") {
+            // a long exploration: 90 distinct reads, then the answer
+            if n < 90 {
+                let paths = ["src/lib.rs", "README.md", "Cargo.toml", "tests/add.rs"];
+                let args = format!(r#"{{"path":"{}","maxLines":{}}}"#, paths[n % 4], 1 + n);
+                return call("fs_read", &args);
+            }
+            return Answer::Frames(text_frames(
+                &resp,
+                "Explored everything; nothing to change.",
+            ));
+        }
+        if cur.contains("RN2-CODE") {
+            return match done {
+                0 => call("fs_read", r#"{"path":"src/lib.rs"}"#),
+                1 => call("fs_read", r#"{"path":"README.md"}"#),
+                2 => call(
+                    "fs_edit",
+                    r#"{"path":"src/lib.rs","edits":[{"oldText":"a - b","newText":"a + b"}]}"#,
+                ),
+                3 => call(
+                    "proc_run",
+                    r#"{"program":"cargo","args":["check","--offline"]}"#,
+                ),
+                _ => Answer::Frames(text_frames(&resp, "Fixed add(); cargo check passes.")),
+            };
+        }
+        if cur.contains("RN2-FOLLOW") {
+            return match done {
+                0 => call("fs_read", r#"{"path":"README.md"}"#),
+                _ => Answer::Frames(text_frames(
+                    &resp,
+                    "Read the README again; nothing to change.",
+                )),
+            };
+        }
+        Answer::Frames(text_frames(&resp, "ok"))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tsend_m(
+    sock: &Path,
+    thread: Option<&str>,
+    text: &str,
+    mode: &str,
+    key: &str,
+    model: Option<&str>,
+    route: Option<&str>,
+) -> Result<Value, nexus_client::error::ClientError> {
+    ic::thread_send(
+        sock,
+        &ic::ThreadSend {
+            thread_id: thread,
+            project_id: "proj",
+            content: text,
+            mode,
+            workspace: "continue",
+            idempotency_key: key,
+            model,
+            route,
+        },
+    )
+}
+
+/// Send, wait for the run and for the conversation to fold it. Returns (thread id, run).
+fn rn2_send(
+    sock: &Path,
+    tid: Option<&str>,
+    text: &str,
+    key: &str,
+    model: Option<&str>,
+    route: Option<&str>,
+) -> (String, ic::IntentRun) {
+    let s = tsend_m(sock, tid, text, "edit", key, model, route).expect("send");
+    let thread = s["threadId"].as_str().unwrap().to_owned();
+    let run = wait_terminal(sock, s["run"]["runId"].as_str().unwrap(), 240);
+    let n = ic::thread_get(sock, &thread, None).unwrap()["runs"]
+        .as_array()
+        .unwrap()
+        .len();
+    wait_folded(sock, &thread, n);
+    (thread, run)
+}
+
+fn rn2_bodies(fx: &Fx, from: usize) -> Vec<Value> {
+    fx.provider.bodies.lock().unwrap()[from..].to_vec()
+}
+fn rn2_heads(fx: &Fx, from: usize) -> Vec<String> {
+    fx.provider.heads.lock().unwrap()[from..].to_vec()
+}
+fn rn2_mark(fx: &Fx) -> usize {
+    fx.provider.bodies.lock().unwrap().len()
+}
+
+/// Every provider request carried exactly this model and exactly this credential.
+fn assert_bound(
+    fx: &Fx,
+    from: usize,
+    model_id: &str,
+    secret: &str,
+    other_secret: &str,
+    max_out: u64,
+) {
+    let bodies = rn2_bodies(fx, from);
+    let heads = rn2_heads(fx, from);
+    assert!(
+        bodies.len() >= 2,
+        "a coding run is several provider calls: {}",
+        bodies.len()
+    );
+    assert_eq!(bodies.len(), heads.len());
+    for (i, b) in bodies.iter().enumerate() {
+        assert_eq!(
+            b["model"], model_id,
+            "request {i} used another model: {}",
+            b["model"]
+        );
+        let cap = b["max_output_tokens"].as_u64().unwrap_or(0);
+        assert!(
+            cap > 0 && cap <= max_out,
+            "request {i}: output cap {cap} > target limit {max_out}"
+        );
+    }
+    for (i, h) in heads.iter().enumerate() {
+        assert!(
+            h.contains(secret),
+            "request {i} did not carry the target's credential"
+        );
+        assert!(
+            !h.contains(other_secret),
+            "request {i} carried ANOTHER connection's credential"
+        );
+    }
+}
+
+#[test]
+fn rn2_a_coding_run_on_the_second_model_is_bound_to_it_and_its_connection_on_every_provider_call() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(rn2_responder());
+    let b = interactive_broker(&fx, "rn2-bound");
+    let sock = b.socket_path().to_owned();
+    let from = rn2_mark(&fx);
+    let (tid, run) = rn2_send(
+        &sock,
+        None,
+        "Implement RN2-CODE: fix add()",
+        "rn2-bound-00001",
+        Some(M2),
+        None,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(run.completion.as_deref(), Some("fulfilled"), "{run:?}");
+    // the run record carries the resolved identity (and no credential material)
+    assert_eq!(run.remote_model_id.as_deref(), Some("e2e-mock-model-2"));
+    assert_eq!(run.route_id.as_deref(), Some("e2e-mock/e2e-2"));
+    assert_eq!(run.connection_id.as_deref(), Some("conn-e2e-mock-b"));
+    assert_eq!(run.context_limit_tokens, Some(8192));
+    assert_eq!(run.output_limit_tokens, Some(512));
+    let rec = serde_json::to_string(&run).unwrap();
+    assert!(
+        !rec.contains(SECRET) && !rec.contains(SECRET_B) && !rec.contains("credential://"),
+        "{rec}"
+    );
+    // every provider request of the run: second model, its own credential, its own output limit
+    assert!(rn2_bodies(&fx, from).len() >= 5, "a multi-turn coding run");
+    assert_bound(&fx, from, "e2e-mock-model-2", SECRET_B, SECRET, 512);
+    // the conversation record stays free of credential material too
+    let t = serde_json::to_string(&ic::thread_get(&sock, &tid, None).unwrap()).unwrap();
+    assert!(!t.contains(SECRET) && !t.contains(SECRET_B) && !t.contains("credential://"));
+    b.shutdown();
+}
+
+#[test]
+fn rn2_a_conversation_keeps_its_target_switches_only_explicitly_and_says_so() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(rn2_responder());
+    let b = interactive_broker(&fx, "rn2-conv");
+    let sock = b.socket_path().to_owned();
+    // 1. started on the second model
+    let (tid, r1) = rn2_send(
+        &sock,
+        None,
+        "Implement RN2-CODE: fix add()",
+        "rn2-conv-000001",
+        Some(M2),
+        None,
+    );
+    assert_eq!(r1.state, "completed", "{r1:?}");
+    // 2. a follow-up WITHOUT a selection reuses the conversation's target (not the default)
+    let from = rn2_mark(&fx);
+    let (_, r2) = rn2_send(
+        &sock,
+        Some(&tid),
+        "RN2-FOLLOW: look at the README",
+        "rn2-conv-000002",
+        None,
+        None,
+    );
+    assert_eq!(r2.state, "completed", "{r2:?}");
+    assert_eq!(r2.route_id.as_deref(), Some("e2e-mock/e2e-2"));
+    assert_bound(&fx, from, "e2e-mock-model-2", SECRET_B, SECRET, 512);
+    let notes = |tid: &str| -> Vec<String> {
+        ic::thread_get(&sock, tid, None).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "system")
+            .map(|m| m["text"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert!(
+        !notes(&tid).iter().any(|n| n.contains("model changed")),
+        "no switch yet: {:?}",
+        notes(&tid)
+    );
+    // 3. an EXPLICIT different selection switches, runs on the new model/credential, and is noted
+    let from = rn2_mark(&fx);
+    let (_, r3) = rn2_send(
+        &sock,
+        Some(&tid),
+        "RN2-FOLLOW: and once more",
+        "rn2-conv-000003",
+        Some(M1),
+        None,
+    );
+    assert_eq!(r3.state, "completed", "{r3:?}");
+    assert_eq!(r3.route_id.as_deref(), Some("e2e-mock/e2e-1"));
+    assert_bound(&fx, from, "e2e-mock-model", SECRET, SECRET_B, 1024);
+    assert!(
+        notes(&tid)
+            .iter()
+            .any(|n| n.contains("model changed to e2e-mock/e2e-mock-model")),
+        "{:?}",
+        notes(&tid)
+    );
+    // 4. and the new target is now the conversation's
+    let from = rn2_mark(&fx);
+    let (_, r4) = rn2_send(
+        &sock,
+        Some(&tid),
+        "RN2-FOLLOW: a last time",
+        "rn2-conv-000004",
+        None,
+        None,
+    );
+    assert_eq!(r4.route_id.as_deref(), Some("e2e-mock/e2e-1"), "{r4:?}");
+    assert_bound(&fx, from, "e2e-mock-model", SECRET, SECRET_B, 1024);
+    b.shutdown();
+}
+
+#[test]
+fn rn2_a_conversation_whose_target_is_no_longer_issued_is_refused_before_any_run_and_never_falls_back(
+) {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(rn2_responder());
+    let b = interactive_broker(&fx, "rn2-stale");
+    let sock = b.socket_path().to_owned();
+    let (tid, r1) = rn2_send(
+        &sock,
+        None,
+        "Implement RN2-CODE: fix add()",
+        "rn2-stale-000001",
+        Some(M2),
+        None,
+    );
+    assert_eq!(r1.state, "completed", "{r1:?}");
+    // the Registry stops issuing the model (a real Registry change, not a doctored record)
+    let reg = node_json(&[
+        "registry-disable",
+        fx.registry.to_str().unwrap(),
+        repo_root().to_str().unwrap(),
+        "e2e/e2e-2",
+    ]);
+    assert_eq!(reg["ok"], true, "{reg}");
+    let runs_before = ic::list(&sock, 200).unwrap().len();
+    let accepted_before = fx.provider.accepted.load(Ordering::SeqCst);
+    // the broker caches the catalog for a short time: the refusal must arrive once it is re-read
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut attempt = 0;
+    let err = loop {
+        attempt += 1;
+        let key = format!("rn2-stale-attempt-{attempt:04}");
+        match tsend_m(
+            &sock,
+            Some(&tid),
+            "RN2-FOLLOW: still there?",
+            "edit",
+            &key,
+            None,
+            None,
+        ) {
+            Err(e) => break e,
+            Ok(s) => {
+                // not yet refused: let that run finish, then try again with a new key
+                wait_terminal(&sock, s["run"]["runId"].as_str().unwrap(), 120);
+                assert!(
+                    Instant::now() < deadline,
+                    "the stale target was never refused"
+                );
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        }
+    };
+    assert_eq!(err.code, "model-not-available", "{err:?}");
+    assert!(
+        err.message.contains("model-disabled"),
+        "the catalog reason is reported: {}",
+        err.message
+    );
+    // an explicit selection of the same stale model is refused as well, with no run and no request
+    let mark = rn2_mark(&fx);
+    let runs_now = ic::list(&sock, 200).unwrap().len();
+    let e2 = tsend_m(
+        &sock,
+        Some(&tid),
+        "RN2-FOLLOW: explicit",
+        "edit",
+        "rn2-stale-000003",
+        Some(M2),
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(e2.code, "model-not-available", "{e2:?}");
+    assert_eq!(
+        ic::list(&sock, 200).unwrap().len(),
+        runs_now,
+        "a refused send creates no run"
+    );
+    assert_eq!(rn2_mark(&fx), mark, "a refused send reaches no provider");
+    assert!(runs_now >= runs_before);
+    let _ = accepted_before;
+    // the conversation was not silently moved to the default: choosing the default is explicit
+    let (_, r5) = rn2_send(
+        &sock,
+        Some(&tid),
+        "RN2-FOLLOW: back on the default",
+        "rn2-stale-000004",
+        Some(M1),
+        None,
+    );
+    assert_eq!(r5.state, "completed", "{r5:?}");
+    assert_eq!(r5.route_id.as_deref(), Some("e2e-mock/e2e-1"));
+    b.shutdown();
+}
+
+#[test]
+fn rn2_the_conversation_context_is_byte_identical_whatever_the_target() {
+    if !sandbox_ready() {
+        return;
+    }
+    // the same history on two different models: what the model RECEIVES about the past must not depend on it
+    let first_message = |model: Option<&str>, name: &str, key: &str| -> String {
+        let fx = fixture_autonomous(rn2_responder());
+        let b = interactive_broker(&fx, name);
+        let sock = b.socket_path().to_owned();
+        let (tid, r1) = rn2_send(
+            &sock,
+            None,
+            "Implement RN2-CODE: fix add()",
+            &format!("{key}-1"),
+            model,
+            None,
+        );
+        assert_eq!(r1.state, "completed", "{r1:?}");
+        let from = rn2_mark(&fx);
+        let (_, r2) = rn2_send(
+            &sock,
+            Some(&tid),
+            "RN2-FOLLOW: what changed?",
+            &format!("{key}-2"),
+            None,
+            None,
+        );
+        assert_eq!(r2.state, "completed", "{r2:?}");
+        let bodies = rn2_bodies(&fx, from);
+        let msg = bodies[0]["input"][0]["content"].to_string();
+        b.shutdown();
+        msg
+    };
+    let a = first_message(Some(M1), "rn2-ctx-a", "rn2-ctx-a0000");
+    let b = first_message(Some(M2), "rn2-ctx-b", "rn2-ctx-b0000");
+    assert!(
+        a.contains("Conversation context"),
+        "the follow-up carries the context block: {a}"
+    );
+    assert!(
+        !a.contains("e2e-mock-model") && !b.contains("e2e-mock-model"),
+        "the block names no model"
+    );
+    assert_eq!(a, b, "the context block differs between targets");
+}
+
+#[test]
+fn rn2_the_small_window_target_compacts_and_writes_its_memory_earlier_the_default_does_not_change()
+{
+    if !sandbox_ready() {
+        return;
+    }
+    let run_wide = |model: Option<&str>, name: &str, key: &str| -> (ic::IntentRun, Vec<Value>) {
+        let fx = fixture_autonomous(rn2_responder());
+        let b = interactive_broker(&fx, name);
+        let sock = b.socket_path().to_owned();
+        let (_, r) = rn2_send(
+            &sock,
+            None,
+            "Explore RN2-WIDE: read everything",
+            key,
+            model,
+            None,
+        );
+        let bodies = rn2_bodies(&fx, 0);
+        b.shutdown();
+        (r, bodies)
+    };
+    // default target: a 1M-token window - behaviour identical to before (no compaction, no memory request)
+    let (rd, bd) = run_wide(None, "rn2-wide-d", "rn2-wide-d0001");
+    assert_eq!(rd.state, "completed", "{rd:?}");
+    assert_eq!(
+        rd.context_compactions, 0,
+        "the default target must not compact this run: {rd:?}"
+    );
+    assert!(
+        !bd.iter().any(|b| saw(b, "WORKING MEMORY")),
+        "no memory request for the default target"
+    );
+    // small window (8192 tokens): the same exploration must compact, and the model must be asked for
+    // its working memory BEFORE older steps are dropped (otherwise it re-reads and loops)
+    let (rs, bs) = run_wide(Some(M2), "rn2-wide-s", "rn2-wide-s0001");
+    assert_eq!(rs.state, "completed", "{rs:?}");
+    assert!(
+        rs.context_compactions >= 1,
+        "the small target must compact: {rs:?}"
+    );
+    assert!(
+        bs.iter().any(|b| saw(b, "WORKING MEMORY")),
+        "the small target compacted without ever asking for the working memory (budgets disagree inside the loop)"
+    );
+    // and every one of its requests respected the target's output limit and model
+    for b in &bs {
+        assert_eq!(b["model"], "e2e-mock-model-2");
+        assert!(b["max_output_tokens"].as_u64().unwrap_or(0) <= 512);
+    }
+}
+
+#[test]
+fn rn2_a_run_without_any_selection_uses_the_default_target_exactly_as_before() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(rn2_responder());
+    let b = interactive_broker(&fx, "rn2-default");
+    let sock = b.socket_path().to_owned();
+    let (_, run) = rn2_send(
+        &sock,
+        None,
+        "Implement RN2-CODE: fix add()",
+        "rn2-default-0001",
+        None,
+        None,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(run.remote_model_id.as_deref(), Some("e2e-mock-model"));
+    assert_eq!(run.route_id.as_deref(), Some("e2e-mock/e2e-1"));
+    assert_eq!(run.context_limit_tokens, Some(1_000_000));
+    assert_bound(&fx, 0, "e2e-mock-model", SECRET, SECRET_B, 1024);
+    b.shutdown();
+}
+
+#[test]
+fn rn2_the_default_target_is_the_saved_slot_even_when_another_issuable_route_sorts_first() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(rn2_responder());
+    // another issuable route whose id sorts BEFORE the saved default ("a0-first/e2e" < "e2e-mock/e2e-1")
+    let reg = node_json(&[
+        "registry-first",
+        fx.registry.to_str().unwrap(),
+        repo_root().to_str().unwrap(),
+        &fx.provider.port.to_string(),
+        &format!("https://{HOST}:{}/v1", fx.provider.port),
+        "openai-responses",
+    ]);
+    assert_eq!(reg["ok"], true, "{reg}");
+    let b = interactive_broker(&fx, "rn2-d2");
+    let sock = b.socket_path().to_owned();
+    let (_, run) = rn2_send(
+        &sock,
+        None,
+        "Implement RN2-CODE: fix add()",
+        "rn2-d2-000001",
+        None,
+        None,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    // no selection => the saved engineering-v2 slot (e2e-1), as before R-NATIVE-2
+    assert_eq!(
+        run.route_id.as_deref(),
+        Some("e2e-mock/e2e-1"),
+        "default silently changed: {run:?}"
+    );
+    assert_bound(&fx, 0, "e2e-mock-model", SECRET, SECRET_B, 1024);
+    b.shutdown();
+}
+
+#[test]
+fn rn2_the_cli_selects_model_and_route_end_to_end_and_lists_the_targets() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(rn2_responder());
+    let b = interactive_broker(&fx, "rn2-cli");
+    let sock = b.socket_path().to_owned();
+    let nexus = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("target")
+        .join("debug")
+        .join("nexus");
+    let nexus = std::env::var("CARGO_TARGET_DIR")
+        .map(|d| PathBuf::from(d).join("debug").join("nexus"))
+        .unwrap_or(nexus);
+    let cli = |args: &[&str], stdin: Option<&str>| -> (bool, Value, String) {
+        let mut c = Command::new(&nexus);
+        c.arg("--json")
+            .arg("intent")
+            .args(args)
+            .arg("--broker-socket")
+            .arg(&sock);
+        c.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut ch = c.spawn().expect("nexus cli");
+        if let Some(t) = stdin {
+            ch.stdin.take().unwrap().write_all(t.as_bytes()).unwrap();
+        } else {
+            drop(ch.stdin.take());
+        }
+        let out = ch.wait_with_output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        (
+            out.status.success(),
+            serde_json::from_str(&text).unwrap_or(Value::Null),
+            text + &String::from_utf8_lossy(&out.stderr),
+        )
+    };
+    // listing
+    let (ok, v, raw) = cli(&["models", "--targets"], None);
+    assert!(ok, "{raw}");
+    let targets = v["targets"].as_array().unwrap_or_else(|| panic!("{raw}"));
+    let t2 = targets
+        .iter()
+        .find(|t| t["routeId"] == "e2e-mock/e2e-2")
+        .expect("route 2 listed");
+    assert_eq!(t2["issuable"], true);
+    assert_eq!(t2["connectionId"], "conn-e2e-mock-b");
+    assert_eq!(t2["contextLimitTokens"], 8192);
+    assert!(
+        !raw.contains(SECRET) && !raw.contains(SECRET_B) && !raw.contains("credential://"),
+        "{raw}"
+    );
+    // a conversation started by the CLI on the second model, by model AND route
+    let from = rn2_mark(&fx);
+    let (ok, v, raw) = cli(
+        &[
+            "thread",
+            "send",
+            "proj",
+            "--mode",
+            "edit",
+            "--model",
+            M2,
+            "--route",
+            "e2e-mock/e2e-2",
+            "--input",
+            "-",
+        ],
+        Some("Implement RN2-CODE: fix add()"),
+    );
+    assert!(ok, "{raw}");
+    let tid = v["threadId"].as_str().expect("thread id").to_owned();
+    wait_terminal(&sock, v["run"]["runId"].as_str().unwrap(), 240);
+    wait_folded(&sock, &tid, 1);
+    assert_bound(&fx, from, "e2e-mock-model-2", SECRET_B, SECRET, 512);
+    // a route that does not belong to the named model is refused by the CLI path too: no run, no request
+    let runs = ic::list(&sock, 200).unwrap().len();
+    let mark = rn2_mark(&fx);
+    let (ok, _, raw) = cli(
+        &[
+            "thread",
+            "send",
+            "proj",
+            "--thread",
+            &tid,
+            "--model",
+            M1,
+            "--route",
+            "e2e-mock/e2e-2",
+            "--input",
+            "-",
+        ],
+        Some("RN2-FOLLOW: mismatch"),
+    );
+    assert!(!ok, "a model/route mismatch must be refused: {raw}");
+    assert!(raw.contains("model-not-available"), "{raw}");
+    assert_eq!(ic::list(&sock, 200).unwrap().len(), runs);
+    assert_eq!(rn2_mark(&fx), mark);
+    // an ambiguous... a route alone selects exactly that route
+    let (ok, v, raw) = cli(
+        &[
+            "thread",
+            "send",
+            "proj",
+            "--thread",
+            &tid,
+            "--route",
+            "e2e-mock/e2e-1",
+            "--input",
+            "-",
+        ],
+        Some("RN2-FOLLOW: by route only"),
+    );
+    assert!(ok, "{raw}");
+    let r = wait_terminal(&sock, v["run"]["runId"].as_str().unwrap(), 240);
+    assert_eq!(r.route_id.as_deref(), Some("e2e-mock/e2e-1"), "{r:?}");
     b.shutdown();
 }

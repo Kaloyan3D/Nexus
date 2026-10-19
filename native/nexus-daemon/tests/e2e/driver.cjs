@@ -120,7 +120,7 @@ async function cmdRegistry(args) {
   const service = makeService(installRoot, dataRoot);
   let r = service.saveProvider({ id: 'e2e-mock', name: 'E2E Mock', transportId: transportArg, baseUrl: baseUrlArg, authType: 'api-key', metadata: Object.assign({ billingTier: 'e2e-unmetered-test' }, wireProfileArg ? { wireProfile: wireProfileArg } : {}) }, {});
   if (!r.ok) return fail('provider', r);
-  r = service.saveModel({ id: 'e2e/e2e-1', vendor: 'E2E', displayName: 'E2E Mock', checkpoint: 'e2e-1', capabilities: { textInput: true, imageInput: false, toolCalling: true, streaming: true, reasoning: true }, dataUseTier: 'contributor', contextWindow: 8192, maxOutputTokens: 1024, enabled: true, engines: ['muse-v0'] }, {});
+  r = service.saveModel({ id: 'e2e/e2e-1', vendor: 'E2E', displayName: 'E2E Mock', checkpoint: 'e2e-1', capabilities: { textInput: true, imageInput: false, toolCalling: true, streaming: true, reasoning: true }, dataUseTier: 'contributor', contextWindow: 1000000, maxOutputTokens: 1024, enabled: true, engines: ['muse-v0'] }, {});
   if (!r.ok) return fail('model', r);
   r = service.saveConnection({ id: 'conn-e2e-mock', providerId: 'e2e-mock', connectionKind: 'api-key', authMethod: 'api-key (test)', credentialRef: 'credential://connections/conn-e2e-mock', status: 'not-connected' }, {});
   if (!r.ok) return fail('connection', r);
@@ -130,9 +130,14 @@ async function cmdRegistry(args) {
   if (!r.ok) return fail('route', r);
   // R-NATIVE-1: second issuable fixture model on the same provider/connection
   // (the selection target). Default main slot below stays on e2e-1.
-  r = service.saveModel({ id: 'e2e/e2e-2', vendor: 'E2E', displayName: 'E2E Mock 2', checkpoint: 'e2e-2', capabilities: { textInput: true, imageInput: false, toolCalling: true, streaming: true, reasoning: true }, dataUseTier: 'contributor', contextWindow: 8192, maxOutputTokens: 1024, enabled: true, engines: ['muse-v0'] }, {});
+  r = service.saveModel({ id: 'e2e/e2e-2', vendor: 'E2E', displayName: 'E2E Mock 2', checkpoint: 'e2e-2', capabilities: { textInput: true, imageInput: false, toolCalling: true, streaming: true, reasoning: true }, dataUseTier: 'contributor', contextWindow: 8192, maxOutputTokens: 512, enabled: true, engines: ['muse-v0'] }, {});
   if (!r.ok) return fail('model-2', r);
-  r = service.saveRoute({ id: 'e2e-mock/e2e-2', providerId: 'e2e-mock', logicalModelId: 'e2e/e2e-2', remoteModelId: 'e2e-mock-model-2', connectionId: 'conn-e2e-mock', reasoningLevels: ['low'], availability: 'probe-required', executionKind: 'raw-model', accessType: 'api-key', compatibility: { transport: transportArg } }, {});
+  // R-NATIVE-2: a second connection with its own credential reference, used by the second route
+  r = service.saveConnection({ id: 'conn-e2e-mock-b', providerId: 'e2e-mock', connectionKind: 'api-key', authMethod: 'api-key (test)', credentialRef: 'credential://connections/conn-e2e-mock-b', status: 'not-connected' }, {});
+  if (!r.ok) return fail('connection-b', r);
+  r = service.setConnectionStatus('conn-e2e-mock-b', 'connected', { attested: true });
+  if (!r.ok) return fail('connection-b-status', r);
+  r = service.saveRoute({ id: 'e2e-mock/e2e-2', providerId: 'e2e-mock', logicalModelId: 'e2e/e2e-2', remoteModelId: 'e2e-mock-model-2', connectionId: 'conn-e2e-mock-b', reasoningLevels: ['low'], availability: 'probe-required', executionKind: 'raw-model', accessType: 'api-key', compatibility: { transport: transportArg } }, {});
   if (!r.ok) return fail('route-2', r);
   // R-NATIVE-1: a CONFIGURED but non-issuable target: the route is saved but never probe-verified,
   // so the Registry must refuse to issue it (catalog reason, refusal before any run exists).
@@ -154,6 +159,32 @@ async function cmdRegistry(args) {
   r = service.save('engineering-v2', { schemaVersion: 1, modeId: 'engineering-v2', revision: 0, slots: { main: { logicalModelId: 'e2e/e2e-1', routeId: 'e2e-mock/e2e-1', reasoning: 'low' } }, roleOverrides: {} }, null, {});
   if (!r.ok) return fail('mode-config', r);
   emit({ ok: true });
+}
+
+// R-NATIVE-2 test helpers (run AFTER `registry`): an extra issuable route whose id sorts BEFORE the saved default,
+// and the disabling of a model (a target that stops being issuable).
+async function cmdRegistryFirst(args) {
+  const service = makeService(args[1], args[0]);
+  const port = Number(args[2]);
+  const transportArg = args[4] || 'local-openai-compatible';
+  let r = service.saveModel({ id: 'e2e/a0', vendor: 'E2E', displayName: 'E2E A0', checkpoint: 'a0', capabilities: { textInput: true, imageInput: false, toolCalling: true, streaming: true, reasoning: true }, dataUseTier: 'contributor', contextWindow: 1000000, maxOutputTokens: 1024, enabled: true, engines: ['muse-v0'] }, {});
+  if (!r.ok) return emit({ ok: false, where: 'a0-model', code: r.code, message: r.message });
+  r = service.saveRoute({ id: 'a0-first/e2e', providerId: 'e2e-mock', logicalModelId: 'e2e/a0', remoteModelId: 'e2e-mock-model-a0', connectionId: 'conn-e2e-mock', reasoningLevels: ['low'], availability: 'probe-required', executionKind: 'raw-model', accessType: 'api-key', compatibility: { transport: transportArg } }, {});
+  if (!r.ok) return emit({ ok: false, where: 'a0-route', code: r.code, message: r.message });
+  const verified = await service.verifyProviderRoute('a0-first/e2e', { fetchImpl: probeFetch, testBearer: 'e2e-probe-bearer', lookup: async function () { return [{ address: '8.8.8.8', family: 4 }]; } });
+  if (!verified.ok) return emit({ ok: false, where: 'a0-probe', code: 'route-probe-failed', message: JSON.stringify(verified.errors || verified).slice(0, 300) });
+  emit({ ok: true });
+}
+
+function cmdRegistryDisable(args) {
+  const service = makeService(args[1], args[0]);
+  const id = args[2];
+  const eff = service.effectiveSnapshot();
+  const models = (eff && eff.snapshot && eff.snapshot.models) || [];
+  const m = models.find(function (x) { return x.id === id; });
+  if (!m) return emit({ ok: false, where: 'disable', code: 'not-found', message: id });
+  const r = service.saveModel(Object.assign({}, m, { enabled: false }), {});
+  emit(r.ok ? { ok: true } : { ok: false, where: 'disable', code: r.code, message: r.message });
 }
 
 function cmdIssue(args) {
@@ -212,6 +243,8 @@ function main() {
   const sub = process.argv[2];
   const args = process.argv.slice(3);
   if (sub === 'registry') return cmdRegistry(args);
+  if (sub === 'registry-first') return cmdRegistryFirst(args);
+  if (sub === 'registry-disable') return cmdRegistryDisable(args);
   if (sub === 'issue') return cmdIssue(args);
   if (sub === 'intent') return cmdIntent(args);
   if (sub === 'kernel-intent') {
