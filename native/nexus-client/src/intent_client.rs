@@ -580,6 +580,37 @@ pub struct AllowedModel {
     pub output_limit_tokens: u64,
 }
 
+/// R-NATIVE-1 read-only Registry target (serde camelCase). The broker's
+/// `intent-models` reply carries these alongside every existing
+/// `AllowedModel` field; extra fields are optional so older clients keep
+/// working. Never carries a credential value, reference or path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryTarget {
+    pub provider_id: String,
+    pub logical_model_id: String,
+    pub remote_model_id: String,
+    pub route_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub connection_status: String,
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub context_limit_tokens: u64,
+    #[serde(default)]
+    pub output_limit_tokens: u64,
+    #[serde(default)]
+    pub billing_tier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_use: Option<String>,
+    #[serde(default)]
+    pub issuable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitReply {
@@ -703,6 +734,13 @@ fn decode<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> Result<T, Cli
 pub fn models(socket: &Path) -> Result<Vec<AllowedModel>, ClientError> {
     let v = call(socket, "intent-models", serde_json::json!({}), 20_000)?;
     decode(v.get("models").cloned().unwrap_or_default())
+}
+
+/// R-NATIVE-1 read-only Registry target catalog (extra `targets` field on
+/// the `intent-models` reply; existing `models` are unchanged).
+pub fn registry_targets(socket: &Path) -> Result<Vec<RegistryTarget>, ClientError> {
+    let v = call(socket, "intent-models", serde_json::json!({}), 20_000)?;
+    decode(v.get("targets").cloned().unwrap_or_default())
 }
 
 /// Submit one intent. The intent is validated locally first (fail fast) and

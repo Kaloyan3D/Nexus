@@ -28,6 +28,9 @@ fn repo_root() -> PathBuf {
 }
 
 fn native_bin(name: &str) -> PathBuf {
+    if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
+        return PathBuf::from(dir).join("debug").join(name);
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("target")
@@ -872,6 +875,79 @@ fn a53_models_and_intents_are_validated_before_any_run_exists() {
         "model-not-allowed"
     );
     b2.shutdown();
+}
+
+#[test]
+fn rn1_selected_second_registry_model_reaches_provider_and_non_issuable_is_refused() {
+    let fx = fixture(hello(), true);
+    let b = fx.start("rn1");
+    let sock = b.socket_path().to_owned();
+    // Catalog carries both fixture targets; the default model is unchanged.
+    let targets = ic::registry_targets(&sock).expect("targets");
+    assert!(targets
+        .iter()
+        .any(|t| t.remote_model_id == "e2e-mock-model" && t.issuable));
+    assert!(targets
+        .iter()
+        .any(|t| t.remote_model_id == "e2e-mock-model-2" && t.issuable));
+    let models = ic::models(&sock).expect("models");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].remote_model_id, "e2e-mock-model");
+    // A selected second Registry model reaches the intended provider target.
+    let mut sel = intent("second model please", "rn1-second-0001");
+    sel.model = Some(ModelSelection {
+        provider_id: "e2e-mock".into(),
+        remote_model_id: "e2e-mock-model-2".into(),
+    });
+    let reply = ic::submit(&sock, &sel).expect("selected submit");
+    let run = wait_terminal(&sock, &reply.run.run_id, 30);
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(run.remote_model_id.as_deref(), Some("e2e-mock-model-2"));
+    assert_eq!(run.provider_id.as_deref(), Some("e2e-mock"));
+    let reqs = fx.provider.requests.lock().unwrap();
+    assert_eq!(reqs.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].1).unwrap();
+    assert_eq!(body["model"], "e2e-mock-model-2");
+    drop(reqs);
+    // A non-issuable model is refused before a run exists.
+    let mut bad = intent("hi", "rn1-bad-0001");
+    bad.model = Some(ModelSelection {
+        provider_id: "e2e-mock".into(),
+        remote_model_id: "e2e-mock-ghost".into(),
+    });
+    assert_eq!(
+        ic::submit(&sock, &bad).unwrap_err().code,
+        "model-not-available"
+    );
+    assert_eq!(
+        ic::list(&sock, 50).unwrap().len(),
+        1,
+        "refused submit created no run"
+    );
+    assert_eq!(fx.provider.accepted.load(Ordering::SeqCst), 1);
+    // A CONFIGURED but non-issuable target (route saved, never verified): listed with a machine
+    // reason, refused with that reason, and still no run and no provider request.
+    let unverified = targets
+        .iter()
+        .find(|t| t.remote_model_id == "e2e-mock-model-3")
+        .expect("the configured third target is in the catalog");
+    assert!(!unverified.issuable, "{unverified:?}");
+    let reason = unverified.reason.clone().expect("a machine reason");
+    let mut cfgd = intent("configured but not issuable", "rn1-unverified-0001");
+    cfgd.model = Some(ModelSelection {
+        provider_id: "e2e-mock".into(),
+        remote_model_id: "e2e-mock-model-3".into(),
+    });
+    let err = ic::submit(&sock, &cfgd).unwrap_err();
+    assert_eq!(err.code, "model-not-available");
+    assert!(err.message.contains(&reason), "{} / {reason}", err.message);
+    assert_eq!(
+        ic::list(&sock, 50).unwrap().len(),
+        1,
+        "no run for a configured, non-issuable target"
+    );
+    assert_eq!(fx.provider.accepted.load(Ordering::SeqCst), 1);
+    b.shutdown();
 }
 
 #[test]

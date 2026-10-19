@@ -410,15 +410,33 @@ fn run_steps(
         return Ok(());
     }
 
-    // 2. Registry issuance (V1 resolution + V2 extension).
+    // 2. Registry issuance (V1 resolution + V2 extension). A submitted
+    // model selection travels as the in-memory-only bridge selection: it
+    // was proven issuable by the submit gate, and issuance fails closed
+    // again here before any run state is touched.
     let repo = b.cfg.repo_root.to_string_lossy().into_owned();
     let data = b.cfg.registry_data_root.to_string_lossy().into_owned();
-    let issued = bridge(
-        b,
-        "issue",
-        &[&repo, &data, &task_instance, &session_id],
-        None,
-    )?;
+    let mut issue_args: Vec<&str> = vec![&repo, &data, &task_instance, &session_id];
+    let selection_json;
+    if let Some(m) = &intent.model {
+        // resolve the route for this (provider, remote) pair from the catalog
+        let route = b.registry_targets().ok().and_then(|ts| {
+            ts.into_iter()
+                .filter(|t| {
+                    t.issuable
+                        && t.provider_id == m.provider_id
+                        && t.remote_model_id == m.remote_model_id
+                })
+                .map(|t| (t.logical_model_id, t.route_id))
+                .next()
+        });
+        if let Some((logical, route_id)) = route {
+            let sel = serde_json::json!({ "logicalModelId": logical, "routeId": route_id });
+            selection_json = serde_json::to_string(&sel).unwrap_or_default();
+            issue_args.push(&selection_json);
+        }
+    }
+    let issued = bridge(b, "issue", &issue_args, None)?;
     let shadow = bridge(
         b,
         "shadow",

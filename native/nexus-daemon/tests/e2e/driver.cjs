@@ -46,7 +46,7 @@ async function probeFetch(url, init) {
   const u = String(url);
   const method = (init && init.method) || 'GET';
   if (method === 'GET' && u.indexOf('/models') !== -1) {
-    return probeJson(200, JSON.stringify({ data: [{ id: 'e2e-mock-model' }] }));
+    return probeJson(200, JSON.stringify({ data: [{ id: 'e2e-mock-model' }, { id: 'e2e-mock-model-2' }] }));
   }
   if (method === 'POST' && u.indexOf('/responses') !== -1) {
     let effort = 'low';
@@ -128,12 +128,26 @@ async function cmdRegistry(args) {
   if (!r.ok) return fail('connection-status', r);
   r = service.saveRoute({ id: 'e2e-mock/e2e-1', providerId: 'e2e-mock', logicalModelId: 'e2e/e2e-1', remoteModelId: 'e2e-mock-model', connectionId: 'conn-e2e-mock', reasoningLevels: ['low'], availability: 'probe-required', executionKind: 'raw-model', accessType: 'api-key', compatibility: { transport: transportArg } }, {});
   if (!r.ok) return fail('route', r);
+  // R-NATIVE-1: second issuable fixture model on the same provider/connection
+  // (the selection target). Default main slot below stays on e2e-1.
+  r = service.saveModel({ id: 'e2e/e2e-2', vendor: 'E2E', displayName: 'E2E Mock 2', checkpoint: 'e2e-2', capabilities: { textInput: true, imageInput: false, toolCalling: true, streaming: true, reasoning: true }, dataUseTier: 'contributor', contextWindow: 8192, maxOutputTokens: 1024, enabled: true, engines: ['muse-v0'] }, {});
+  if (!r.ok) return fail('model-2', r);
+  r = service.saveRoute({ id: 'e2e-mock/e2e-2', providerId: 'e2e-mock', logicalModelId: 'e2e/e2e-2', remoteModelId: 'e2e-mock-model-2', connectionId: 'conn-e2e-mock', reasoningLevels: ['low'], availability: 'probe-required', executionKind: 'raw-model', accessType: 'api-key', compatibility: { transport: transportArg } }, {});
+  if (!r.ok) return fail('route-2', r);
+  // R-NATIVE-1: a CONFIGURED but non-issuable target: the route is saved but never probe-verified,
+  // so the Registry must refuse to issue it (catalog reason, refusal before any run exists).
+  r = service.saveModel({ id: 'e2e/e2e-3', vendor: 'E2E', displayName: 'E2E Mock 3', checkpoint: 'e2e-3', capabilities: { textInput: true, imageInput: false, toolCalling: true, streaming: true, reasoning: true }, dataUseTier: 'contributor', contextWindow: 8192, maxOutputTokens: 1024, enabled: true, engines: ['muse-v0'] }, {});
+  if (!r.ok) return fail('model-3', r);
+  r = service.saveRoute({ id: 'e2e-mock/e2e-3', providerId: 'e2e-mock', logicalModelId: 'e2e/e2e-3', remoteModelId: 'e2e-mock-model-3', connectionId: 'conn-e2e-mock', reasoningLevels: ['low'], availability: 'probe-required', executionKind: 'raw-model', accessType: 'api-key', compatibility: { transport: transportArg } }, {});
+  if (!r.ok) return fail('route-3', r);
 
 
 
   try {
-    const verified = await service.verifyProviderRoute('e2e-mock/e2e-1', { fetchImpl: probeFetch, testBearer: 'e2e-probe-bearer', lookup: async function () { return [{ address: '8.8.8.8', family: 4 }]; } });
-    if (!verified.ok) return fail('route-probe', { code: 'route-probe-failed', message: JSON.stringify(verified.errors || verified).slice(0, 400) });
+    for (const rid of ['e2e-mock/e2e-1', 'e2e-mock/e2e-2']) {
+      const verified = await service.verifyProviderRoute(rid, { fetchImpl: probeFetch, testBearer: 'e2e-probe-bearer', lookup: async function () { return [{ address: '8.8.8.8', family: 4 }]; } });
+      if (!verified.ok) return fail('route-probe', { code: 'route-probe-failed', message: rid + ':' + JSON.stringify(verified.errors || verified).slice(0, 400) });
+    }
   } catch (e) {
     return fail('route-probe', { code: 'route-probe-threw', message: String((e && e.message) || e).slice(0, 200) });
   }

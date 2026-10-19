@@ -8,7 +8,7 @@
 use crate::config::BrokerConfig;
 use crate::pipeline;
 use crate::store::{RunRecord, Store};
-use nexus_client::intent_client::{AllowedModel, IntentRun};
+use nexus_client::intent_client::{AllowedModel, IntentRun, RegistryTarget};
 use nexus_client::{ClientConfig, ModelRunStatus};
 use nexus_contracts::intent::NexusIntentV1;
 use serde_json::{json, Value};
@@ -53,6 +53,7 @@ pub struct Broker {
     unauth_conns: AtomicUsize,
     workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
     models: Mutex<Option<(Instant, Vec<AllowedModel>)>>,
+    registry_targets: Mutex<Option<(Instant, Vec<RegistryTarget>)>>,
     _lock: std::fs::File,
 }
 
@@ -210,7 +211,59 @@ impl Broker {
         (run, text)
     }
 
+    /// R-NATIVE-1 read-only Registry target catalog. The default model is
+    /// the first issuable target in catalog order (bridge `target-info`
+    /// order); every existing `AllowedModel` field keeps its meaning and
+    /// the default model is unchanged. Extra fields are optional.
+    pub fn registry_targets(&self) -> Result<Vec<RegistryTarget>, (&'static str, String)> {
+        {
+            let g = self
+                .registry_targets
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if let Some((t, m)) = g.as_ref() {
+                if t.elapsed() < Duration::from_secs(30) {
+                    return Ok(m.clone());
+                }
+            }
+        }
+        let repo = self.cfg.repo_root.to_string_lossy().into_owned();
+        let data = self.cfg.registry_data_root.to_string_lossy().into_owned();
+        let info = pipeline::bridge(self, "catalog", &[&repo, &data], None).map_err(|e| {
+            (
+                "internal",
+                format!("Registry catalog unavailable: {}", e.message),
+            )
+        })?;
+        let arr = info
+            .get("targets")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut out: Vec<RegistryTarget> = Vec::new();
+        for v in arr {
+            let t: RegistryTarget = serde_json::from_value(v)
+                .map_err(|e| ("internal", format!("Registry catalog shape: {e}")))?;
+            out.push(t);
+        }
+        // No credential material ever crosses this boundary: assert identity
+        // fields only (belt and braces; the bridge never emits them).
+        let text = serde_json::to_string(&out)
+            .unwrap_or_default()
+            .to_lowercase();
+        debug_assert!(!text.contains("credential"));
+        debug_assert!(!text.contains("secret"));
+        *self
+            .registry_targets
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some((Instant::now(), out.clone()));
+        Ok(out)
+    }
+
     pub fn models(&self) -> Result<Vec<AllowedModel>, (&'static str, String)> {
+        // R-NATIVE-1: unchanged default model (the saved-config main slot
+        // via `target-info`); the wider catalog travels separately as
+        // `targets` so existing clients keep their exact contract.
         {
             let g = self.models.lock().unwrap_or_else(|p| p.into_inner());
             if let Some((t, m)) = g.as_ref() {
@@ -330,8 +383,21 @@ impl Broker {
             }
         }
         // Model selection is checked BEFORE a run exists: a wrong model
-        // costs nothing and leaves no state.
+        // costs nothing and leaves no state. A named model that is not
+        // issuable is refused here; the pipeline below then issues the
+        // selected target (issuability was just proven).
         let available = self.models()?;
+        // R-NATIVE-1: any issuable catalog target is selectable; the
+        // default list above is unchanged (existing clients keep it).
+        let issuable: Vec<(String, String)> = self
+            .registry_targets()
+            .map(|ts| {
+                ts.into_iter()
+                    .filter(|t| t.issuable)
+                    .map(|t| (t.provider_id, t.remote_model_id))
+                    .collect()
+            })
+            .unwrap_or_default();
         if let Some(m) = &intent.model {
             if !self.cfg.allow_models.is_empty()
                 && !self
@@ -345,13 +411,29 @@ impl Broker {
                     "the broker does not allow this model".into(),
                 ));
             }
-            if !available
+            let is_default = available
                 .iter()
-                .any(|a| a.provider_id == m.provider_id && a.remote_model_id == m.remote_model_id)
-            {
+                .any(|a| a.provider_id == m.provider_id && a.remote_model_id == m.remote_model_id);
+            let is_issuable = issuable
+                .iter()
+                .any(|(p, r)| *p == m.provider_id && *r == m.remote_model_id);
+            if !is_default && !is_issuable {
+                let reason = self
+                    .registry_targets()
+                    .ok()
+                    .and_then(|ts| {
+                        ts.into_iter()
+                            .filter(|t| {
+                                t.provider_id == m.provider_id
+                                    && t.remote_model_id == m.remote_model_id
+                            })
+                            .map(|t| t.reason.unwrap_or_else(|| "not-issuable".into()))
+                            .next()
+                    })
+                    .unwrap_or_else(|| "unknown-target".into());
                 return Err((
                     "model-not-available",
-                    "the Registry does not currently issue this provider/model".into(),
+                    format!("the Registry does not currently issue this provider/model ({reason})"),
                 ));
             }
         } else if available.is_empty() {
@@ -934,7 +1016,9 @@ impl Broker {
             "thread-get" => crate::threads::get(self, client, params),
             "thread-create" => crate::threads::create(self, client, params),
             "thread-update" => crate::threads::update(self, client, params),
-            "intent-models" => Ok(json!({ "models": self.models()? })),
+            "intent-models" => {
+                Ok(json!({ "models": self.models()?, "targets": self.registry_targets()? }))
+            }
             "intent-code-sources" => Ok(json!({
                 // identities plus the operator's read-only restrictions (never a path)
                 "sources": crate::inspect::code_sources_for(&self.cfg, client)
@@ -1391,6 +1475,7 @@ pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
         unauth_conns: AtomicUsize::new(0),
         workers: Mutex::new(Vec::new()),
         models: Mutex::new(None),
+        registry_targets: Mutex::new(None),
         _lock: lock,
     });
     let interrupted: Vec<String> = broker
