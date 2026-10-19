@@ -8539,3 +8539,77 @@ fn r3_a_failed_check_is_cleared_only_by_a_genuine_rerun_of_the_same_command_to_a
         .any(|b| saw(b, "were never re-run successfully")));
     b.shutdown();
 }
+
+#[test]
+fn rn3_the_conversations_bound_target_is_exposed_as_identities_only_and_absent_when_unbound() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(rn2_responder());
+    let b = interactive_broker(&fx, "rn3-target");
+    let sock = b.socket_path().to_owned();
+    let target_of = |v: &Value| v["thread"]["target"].clone();
+    let listed = |tid: &str| -> Value {
+        ic::thread_list(&sock, Some("proj"), true).unwrap()["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["threadId"] == tid)
+            .cloned()
+            .expect("listed")
+    };
+    // 1. a conversation that was only created has no target: the key is absent (not null)
+    let created = ic::thread_create(&sock, "proj", Some("empty")).unwrap();
+    let empty = created["thread"]["threadId"].as_str().unwrap().to_owned();
+    let got = ic::thread_get(&sock, &empty, None).unwrap();
+    assert!(got["thread"].get("target").is_none(), "{got}");
+    assert!(listed(&empty).get("target").is_none());
+    // 2. after a send that SELECTS the second model, get and list carry its identity - exactly four fields
+    let (tid, run) = rn2_send(
+        &sock,
+        None,
+        "Implement RN2-CODE: fix add()",
+        "rn3-target-0001",
+        Some(M2),
+        None,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let got = ic::thread_get(&sock, &tid, None).unwrap();
+    let want = json!({
+        "providerId": "e2e-mock",
+        "remoteModelId": "e2e-mock-model-2",
+        "logicalModelId": "e2e/e2e-2",
+        "routeId": "e2e-mock/e2e-2",
+    });
+    assert_eq!(target_of(&got), want, "{got}");
+    assert_eq!(listed(&tid)["target"], want);
+    // 3. the conversation summary and its list entry carry identities only: no connection or limits
+    let summary = format!("{}{}", got["thread"], listed(&tid));
+    for banned in ["conn-e2e-mock", "contextLimit", "outputLimit"] {
+        assert!(
+            !summary.contains(banned),
+            "{banned} leaked into the conversation summary: {summary}"
+        );
+    }
+    // and nothing secret or path-like is anywhere in what the Desktop receives
+    let all = format!("{got}{}", listed(&tid));
+    for banned in [SECRET, SECRET_B, "credential://", "provider-credentials"] {
+        assert!(!all.contains(banned), "{banned} leaked: {all}");
+    }
+    // 4. an explicit switch moves the bound target
+    let (_, r2) = rn2_send(
+        &sock,
+        Some(&tid),
+        "RN2-FOLLOW: look again",
+        "rn3-target-0002",
+        Some(M1),
+        None,
+    );
+    assert_eq!(r2.state, "completed", "{r2:?}");
+    let t = target_of(&ic::thread_get(&sock, &tid, None).unwrap());
+    assert_eq!(
+        (t["routeId"].as_str(), t["remoteModelId"].as_str()),
+        (Some("e2e-mock/e2e-1"), Some("e2e-mock-model"))
+    );
+    b.shutdown();
+}

@@ -6,6 +6,7 @@ import type {
   TranscriptEvent,
   MockEvent,
   MockResult,
+  RegistryTarget,
   RuntimeSnapshot,
   TaskRecord,
   TasksResult,
@@ -173,6 +174,31 @@ export function fakeRun(over: Partial<IntentRun> = {}): IntentRun {
   };
 }
 
+/** Registry targets exactly as the broker serializes them (see test/contract/registry-targets.json). */
+export const REGISTRY_TARGETS: RegistryTarget[] = [
+  {
+    providerId: "acme", logicalModelId: "acme/large", remoteModelId: "acme-large-1", routeId: "acme/large",
+    connectionId: "conn-acme", connectionStatus: "connected", protocol: "openai-responses",
+    contextLimitTokens: 200000, outputLimitTokens: 8192, billingTier: "standard", dataUse: "contributor", issuable: true,
+  },
+  {
+    providerId: "acme", logicalModelId: "acme/medium", remoteModelId: "acme-medium-1", routeId: "acme/medium",
+    connectionId: "conn-acme", connectionStatus: "connected", protocol: "openai-responses",
+    contextLimitTokens: 64000, outputLimitTokens: 4096, billingTier: "standard", dataUse: "contributor", issuable: true,
+  },
+  {
+    providerId: "acme", logicalModelId: "acme/small", remoteModelId: "acme-small-1", routeId: "acme/small",
+    connectionId: "conn-acme", connectionStatus: "connected", protocol: "openai-responses",
+    contextLimitTokens: 8192, outputLimitTokens: 1024, billingTier: "standard", dataUse: "contributor",
+    issuable: false, reason: "route-not-verified",
+  },
+  {
+    providerId: "beta", logicalModelId: "beta/one", remoteModelId: "beta-1", routeId: "beta/one",
+    connectionStatus: "missing", protocol: "unknown", contextLimitTokens: 0, outputLimitTokens: 0, billingTier: "",
+    issuable: false, reason: "some-new-reason",
+  },
+];
+
 export function fakeApi(over: Partial<NativeApi> = {}): NativeApi {
   const tasks: TasksResult = {
     available: true,
@@ -229,6 +255,7 @@ export function fakeApi(over: Partial<NativeApi> = {}): NativeApi {
     intentModels: async () => [
       { providerId: "acme", remoteModelId: "acme-large-1", logicalModelId: "acme/large", endpointKind: "provider", outputLimitTokens: 1024 },
     ],
+    intentTargets: async () => REGISTRY_TARGETS,
     intentSubmit: async (_p: string, _m: unknown, key: string) => ({
       replay: false,
       run: fakeRun({ runId: "run_" + "a".repeat(32), requestId: key, conversationId: null, state: "preparing" }),

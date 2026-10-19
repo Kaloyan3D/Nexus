@@ -5,7 +5,7 @@ Status of the ground truth (verified in the repository, not assumed):
 * What the Native runtime cannot do yet: **choose among Registry targets**. The broker's `intent-models` returns exactly one model (whatever the saved `engineering-v2` `main` slot resolves to: `meta/muse-spark-1.3-contributor-native` via route `opencode-go-native/muse`). The Registry holds 10 providers, 9 models, 11 routes, 10 connections (only `conn-opencode-go-native` is `connected`).
 * Do **not** build another registry, copy catalog data into Native, or hand-write endpoints/limits in Rust.
 
-Status: **checkpoints 1 and 2 are done and committed** (R-NATIVE-1: `567a6f0`, `be08c2e`; R-NATIVE-2: `d756958` product, `bf6653b` acceptance tests, plus the D5 verification fix). Checkpoint 3 is prepared below; checkpoint 4 is written only after 3 is merged and green.
+Status: **checkpoints 1, 2 and 3 are done and committed** (R-NATIVE-1: `567a6f0`, `be08c2e`; R-NATIVE-2: `d756958` product, `bf6653b` acceptance tests, plus the D5 verification fix; R-NATIVE-3: `572ee07` completion reliability, `ce56920` Desktop Registry integration, then its acceptance tests and the Tauri dead-code cleanup). Checkpoint 4 (real multi-model acceptance through the Desktop) needs a second connected provider and your explicit authorization, and is written only when you ask for it.
 
 Checkpoints (each ends with verified code **and** tests before the next starts; each is one bounded Nexus task):
 
@@ -50,17 +50,12 @@ Implemented by Nexus (conversation runs 9-12), independently reviewed and comple
 4. Apply the patch to the branch only after review, commit as logical local commits (product, tests/infrastructure, separate fixes), never push.
 5. Anything claimed but not executed is recorded as incomplete and sent back as a `continue` with the exact missing items.
 
-## Checkpoint 3 — Desktop Registry integration (prepared, not started)
-Task text: `R-NATIVE-3-desktop-registry-integration.task.txt` (verbatim). Grounded in verified gaps: the Tauri `intent_models` returns only the default; `thread_send` / `intent_submit` send no route identity; `thread-get` does not expose a conversation's bound target; the renderer must stay identities-only behind the Tauri allowlist. Start it in a NEW conversation on project **Nexus** (refresh the project snapshot first so it contains checkpoint 2):
+## Checkpoint 3 — Desktop Registry integration (done)
+Nexus's run 14 produced the implementation; it could not run the frontend or Tauri checks in its sandbox, ended on 15 KB of narration with five unresolved failed checks, and was accepted as `fulfilled`. The patch was preserved, repaired by review and given the missing tests; acceptance record and requirement-to-evidence map: `../R-NATIVE-3-ACCEPTANCE.md`; diagnosis: `../diagnostics/DIAG-r-native-3-run14.md`. Task text kept as `R-NATIVE-3-desktop-registry-integration.task.txt`.
 
-    Implement checkpoint R-NATIVE-3 from `native/docs/tasks/R-NATIVE-3-desktop-registry-integration.task.txt`.
-
-    Read the complete task specification and the files it lists before modifying code.
-    Implement only this checkpoint, on top of the committed R-NATIVE-1 and R-NATIVE-2 contracts. Preserve default OpenCode Go behaviour.
-    Work autonomously in the isolated project workspace, implement the required changes and tests, run the required checks and report their real results.
-    Do not start R-NATIVE-4 or real multi-provider execution.
-    Do not modify the original repository, commit, push or deploy.
-    Deliver a reviewable patch, the test results and any remaining limitations.
+Two things this milestone did **not** solve:
+* **Model/tool-call degeneration is a separate, high-priority investigation.** The completion fix only stops a run that left failed checks from being accepted as verified (`failing-checks`); it does not stop the model from ending turns on long narration instead of making tool calls, and it says nothing about why that happens (the evidence points at the model/provider: 18 text-only turns in run 14, 10 of them directly after a lost-answer re-ask; 77 lost answers in 279 attempts).
+* Real multi-provider execution (checkpoint 4).
 
 ## After checkpoint 3
-Checkpoint 4 (real multi-model acceptance through the Desktop; needs a second connected provider and explicit authorization) is written only after checkpoint 3 is merged and green.
+Checkpoint 4 (real multi-model acceptance through the Desktop; needs a second connected provider and explicit authorization) is written only when you ask for it.

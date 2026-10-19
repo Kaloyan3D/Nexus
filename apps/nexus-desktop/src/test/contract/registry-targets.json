@@ -1,0 +1,29 @@
+[
+  {
+    "providerId": "acme",
+    "logicalModelId": "acme/large",
+    "remoteModelId": "acme-large-1",
+    "routeId": "acme/large",
+    "connectionId": "conn-acme",
+    "connectionStatus": "connected",
+    "protocol": "openai-responses",
+    "contextLimitTokens": 200000,
+    "outputLimitTokens": 8192,
+    "billingTier": "standard",
+    "dataUse": "contributor",
+    "issuable": true
+  },
+  {
+    "providerId": "beta",
+    "logicalModelId": "beta/small",
+    "remoteModelId": "beta-small-1",
+    "routeId": "beta/small",
+    "connectionStatus": "missing",
+    "protocol": "unknown",
+    "contextLimitTokens": 0,
+    "outputLimitTokens": 0,
+    "billingTier": "",
+    "issuable": false,
+    "reason": "connection-not-connected"
+  }
+]

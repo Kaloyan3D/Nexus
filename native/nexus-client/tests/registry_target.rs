@@ -97,3 +97,26 @@ fn allowed_model_shape_is_unchanged_and_targets_are_optional() {
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].route_id, "e2e-mock/e2e-1");
 }
+
+/// The golden wire shape shared with the Desktop: the same file is typed against the TypeScript
+/// `RegistryTarget` in `apps/nexus-desktop/src/test/contract.test.ts`. Whatever Rust serializes must be
+/// exactly this (optional fields omitted, never null), so the two sides cannot drift apart silently.
+#[test]
+fn the_registry_target_wire_shape_is_the_one_the_desktop_contract_expects() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../apps/nexus-desktop/src/test/contract/registry-targets.json"
+    );
+    let raw = std::fs::read_to_string(path).expect("golden contract file");
+    let golden: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let parsed: Vec<nexus_client::intent_client::RegistryTarget> =
+        serde_json::from_value(golden.clone()).expect("the golden file parses as RegistryTarget");
+    assert_eq!(parsed.len(), 2);
+    assert!(parsed[0].issuable && parsed[0].reason.is_none());
+    assert!(!parsed[1].issuable && parsed[1].reason.as_deref() == Some("connection-not-connected"));
+    assert_eq!(
+        serde_json::to_value(&parsed).unwrap(),
+        golden,
+        "Rust serializes a RegistryTarget differently from the contract file"
+    );
+}
