@@ -73,6 +73,15 @@ pub struct IntentRun {
     pub provider_id: Option<String>,
     pub remote_model_id: Option<String>,
     pub logical_model_id: Option<String>,
+    /// R-NATIVE-2: resolved target identity bound to this run (identity only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_limit_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_limit_tokens: Option<u64>,
     /// `provider` | `loopback-test-double`
     pub endpoint_kind: Option<String>,
     pub request_digest: Option<String>,
@@ -1073,6 +1082,11 @@ pub struct ThreadSend<'a> {
     /// `continue` | `fresh`
     pub workspace: &'a str,
     pub idempotency_key: &'a str,
+    /// Optional model selection `providerId/remoteModelId`, optionally with
+    /// `/logicalModelId` or a bare `routeId`; bound to the conversation.
+    pub model: Option<&'a str>,
+    /// Optional route identity: exact catalog `routeId`.
+    pub route: Option<&'a str>,
 }
 
 pub fn thread_send(socket: &Path, s: &ThreadSend<'_>) -> Result<serde_json::Value, ClientError> {
@@ -1084,6 +1098,7 @@ pub fn thread_send(socket: &Path, s: &ThreadSend<'_>) -> Result<serde_json::Valu
             "mode": if s.mode.is_empty() { "auto" } else { s.mode },
             "workspace": if s.workspace.is_empty() { "continue" } else { s.workspace },
             "idempotencyKey": s.idempotency_key,
+            "model": s.model, "route": s.route,
         }),
         90_000,
     )

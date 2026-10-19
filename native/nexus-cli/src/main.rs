@@ -724,6 +724,27 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
             Ok(ExitCode::Ok)
         }
         "models" => {
+            if args.iter().any(|a| a == "--targets") {
+                let t = ic::registry_targets(&sock)?;
+                let human = t
+                    .iter()
+                    .map(|x| {
+                        format!(
+                            "{}/{} route={} conn={} ctx={} out={} {}",
+                            x.provider_id,
+                            x.remote_model_id,
+                            x.route_id,
+                            x.connection_id.as_deref().unwrap_or("-"),
+                            x.context_limit_tokens,
+                            x.output_limit_tokens,
+                            if x.issuable { "issuable" } else { "blocked" }
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                intent_ok(cfg, serde_json::json!({ "targets": t }), &human);
+                return Ok(ExitCode::Ok);
+            }
             let m = ic::models(&sock)?;
             let human = m
                 .iter()
@@ -775,12 +796,20 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
                 let content = read_input(&p)?;
                 let model = flag_value(args, "--model")
                     .map(|m| {
-                        m.split_once('/')
-                            .map(|(p, r)| nexus_client::intent_contract::ModelSelection {
-                                provider_id: p.to_owned(),
-                                remote_model_id: r.to_owned(),
-                            })
-                            .ok_or_else(|| nexus_client::ClientError::usage("--model must be provider/model"))
+                        let route = flag_value(args, "--route");
+                        let mut parts = m.splitn(3, '/');
+                        let p = parts.next().unwrap_or("");
+                        let r = parts.next().unwrap_or("");
+                        let l = parts.next().map(|s| s.to_owned());
+                        if p.is_empty() || r.is_empty() {
+                            return Err(nexus_client::ClientError::usage("--model must be provider/model[/logical]"));
+                        }
+                        Ok::<_, nexus_client::ClientError>(nexus_client::intent_contract::ModelSelection {
+                            provider_id: p.to_owned(),
+                            remote_model_id: r.to_owned(),
+                            logical_model_id: l,
+                            route_id: route,
+                        })
                     })
                     .transpose()?;
                 let max_out = flag_value(args, "--max-output-tokens")
@@ -903,10 +932,12 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
                     Ok(ExitCode::Ok)
                 }
                 "send" => {
-                    // nexus intent thread send <project-id> [--thread ID] [--mode auto|review|edit] [--fresh] --input FILE|-
+                    // nexus intent thread send <project-id> [--thread ID] [--mode auto|review|edit] [--fresh] [--model provider/model[/logical]] [--route ROUTE] --input FILE|-
                     let project = nth(0);
                     let content = read_input(&flag_value(args, "--input").ok_or_else(|| nexus_client::ClientError::usage("--input FILE|- is required"))?)?;
                     let thread = flag_value(args, "--thread");
+                    let model = flag_value(args, "--model");
+                    let route = flag_value(args, "--route");
                     let key = ic::fresh_key("thr");
                     let v = ic::thread_send(
                         &sock,
@@ -917,13 +948,15 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
                             mode: &flag_value(args, "--mode").unwrap_or_else(|| "auto".into()),
                             workspace: if args.iter().any(|a| a == "--fresh") { "fresh" } else { "continue" },
                             idempotency_key: &key,
+                            model: model.as_deref(),
+                            route: route.as_deref(),
                         },
                     )?;
                     let human = format!("thread {} run {}", v["threadId"].as_str().unwrap_or("?"), v["run"]["runId"].as_str().unwrap_or("?"));
                     intent_ok(cfg, v, &human);
                     Ok(ExitCode::Ok)
                 }
-                _ => Err(nexus_client::ClientError::usage("usage: nexus intent thread <list [--project ID] [--all]|show <threadId>|send <projectId> [--thread ID] [--mode auto|review|edit] [--fresh] --input FILE|->")),
+                _ => Err(nexus_client::ClientError::usage("usage: nexus intent thread <list [--project ID] [--all]|show <threadId>|send <projectId> [--thread ID] [--mode auto|review|edit] [--fresh] [--model provider/model[/logical]] [--route ROUTE] --input FILE|->")),
             }
         }
         "resume" => {

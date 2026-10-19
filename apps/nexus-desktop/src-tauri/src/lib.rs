@@ -199,6 +199,8 @@ async fn intent_submit(
             (Some(p), Some(m)) => Some(ModelSelection {
                 provider_id: p,
                 remote_model_id: m,
+                logical_model_id: None,
+                route_id: None,
             }),
             (None, None) => None,
             _ => {
@@ -619,6 +621,9 @@ async fn thread_send(
                     mode: mode.as_deref().unwrap_or("auto"),
                     workspace: workspace.as_deref().unwrap_or("continue"),
                     idempotency_key: &idempotency_key,
+                    // the Desktop sends no model until checkpoint R-NATIVE-3 (identities only, later)
+                    model: None,
+                    route: None,
                 },
             )
             .map_err(|e| backend::ui_error(&e))

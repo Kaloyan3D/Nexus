@@ -156,6 +156,21 @@ pub struct Finding {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct ThreadTarget {
+    pub provider_id: String,
+    pub logical_model_id: String,
+    pub remote_model_id: String,
+    pub route_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_limit_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_limit_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct Thread {
     pub schema: u32,
     pub thread_id: String,
@@ -172,6 +187,9 @@ pub struct Thread {
     pub last_preview: String,
     pub runs: Vec<ThreadRun>,
     pub findings: Vec<Finding>,
+    /// R-NATIVE-2: the conversation's bound target identity (identity only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<ThreadTarget>,
 }
 
 // ------------------------------------------------------------------------- store
@@ -1451,6 +1469,8 @@ pub struct ThreadLink {
     pub seed_from: Option<String>,
     /// `fresh-by-choice` when the user asked to ignore the conversation's changes.
     pub relation_hint: Option<String>,
+    /// R-NATIVE-2: resolved target for this run (already refused pre-run).
+    pub resolved: Option<crate::resolution::ResolvedTarget>,
 }
 
 fn owned_thread(b: &Broker, client: &str, tid: &str) -> Result<Thread, (&'static str, String)> {
@@ -1458,6 +1478,72 @@ fn owned_thread(b: &Broker, client: &str, tid: &str) -> Result<Thread, (&'static
         Some(t) if t.client_id == client => Ok(t),
         _ => Err(("not-found", "no such conversation".to_owned())),
     }
+}
+
+fn to_selection(t: &crate::resolution::ResolvedTarget) -> nexus_contracts::intent::ModelSelection {
+    nexus_contracts::intent::ModelSelection {
+        provider_id: t.provider_id.clone(),
+        remote_model_id: t.remote_model_id.clone(),
+        logical_model_id: Some(t.logical_model_id.clone()),
+        route_id: Some(t.route_id.clone()),
+    }
+}
+
+/// R-NATIVE-2: parse the optional thread-send selection: `model` is
+/// `provider/remote` (optionally `provider/remote/logical`), `route` is an
+/// exact catalog `routeId` and wins over the model pair.
+fn parse_thread_selection(
+    params: &serde_json::Value,
+) -> Result<Option<nexus_contracts::intent::ModelSelection>, (&'static str, String)> {
+    let model = params
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    let route = params
+        .get("route")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    if model.is_empty() && route.is_empty() {
+        return Ok(None);
+    }
+    if !route.is_empty() {
+        if route.len() > 200 || model.len() > 400 {
+            return Err(("bad-intent", "selection is too long".into()));
+        }
+        if !model.is_empty() {
+            let parts: Vec<&str> = model.split('/').collect();
+            if parts.len() < 2 || parts.len() > 3 || parts.iter().any(|p| p.is_empty()) {
+                return Err(("bad-intent", "model must be provider/model".into()));
+            }
+            return Ok(Some(nexus_contracts::intent::ModelSelection {
+                provider_id: parts[0].to_owned(),
+                remote_model_id: parts[1].to_owned(),
+                logical_model_id: parts.get(2).map(|s| (*s).to_owned()),
+                route_id: Some(route),
+            }));
+        }
+        // Bare routeId: match by route alone.
+        return Ok(Some(nexus_contracts::intent::ModelSelection {
+            provider_id: String::new(),
+            remote_model_id: String::new(),
+            logical_model_id: None,
+            route_id: Some(route),
+        }));
+    }
+    let parts: Vec<&str> = model.split('/').collect();
+    if parts.len() < 2 || parts.len() > 3 || parts.iter().any(|p| p.is_empty()) {
+        return Err(("bad-intent", "model must be provider/model".into()));
+    }
+    Ok(Some(nexus_contracts::intent::ModelSelection {
+        provider_id: parts[0].to_owned(),
+        remote_model_id: parts[1].to_owned(),
+        logical_model_id: parts.get(2).map(|s| (*s).to_owned()),
+        route_id: None,
+    }))
 }
 
 /// The newest run of the conversation that has a retained working copy.
@@ -1582,6 +1668,49 @@ pub fn send(b: &Arc<Broker>, client: &str, params: &Value) -> CmdResult {
         ));
     }
     let decision = classify_mode(&content, mode_req);
+    // R-NATIVE-2: optional selection; else the conversation's target.
+    // Refused before any run exists; a switch is recorded as a note.
+    let explicit = parse_thread_selection(params)?;
+    let catalog = b.registry_targets().map_err(|(_, m)| ("internal", m))?;
+    let conv_target: Option<crate::resolution::ResolvedTarget> =
+        th.target
+            .clone()
+            .map(|t| crate::resolution::ResolvedTarget {
+                provider_id: t.provider_id,
+                logical_model_id: t.logical_model_id,
+                remote_model_id: t.remote_model_id,
+                route_id: t.route_id,
+                connection_id: t.connection_id,
+                context_limit_tokens: t.context_limit_tokens.unwrap_or(0),
+                output_limit_tokens: t.output_limit_tokens.unwrap_or(0),
+                billing_tier: String::new(),
+            });
+    let resolved = {
+        // no selection and no conversation target: the saved default, not the first catalog entry
+        let default_sel = if explicit.is_none() && conv_target.is_none() {
+            b.default_selection()
+        } else {
+            None
+        };
+        crate::resolution::resolve_target(
+            &catalog,
+            explicit.as_ref().or(default_sel.as_ref()),
+            conv_target.as_ref(),
+        )
+    }
+    .map_err(|(c, m)| {
+        let code: &'static str = match c.as_str() {
+            "ambiguous-target" => "ambiguous-target",
+            "model-not-allowed" => "model-not-allowed",
+            _ => "model-not-available",
+        };
+        (code, m)
+    })?;
+    let switched = match (&explicit, &conv_target) {
+        (Some(_), Some(c)) => !resolved.matches_selection(&to_selection(c)),
+        (Some(_), None) => th.target.is_some(),
+        (None, _) => false,
+    };
     // where the new run's working copy comes from
     let head = head_run(b, &th);
     let (seed_from, relation_hint) = match (&head, fresh) {
@@ -1595,7 +1724,12 @@ pub fn send(b: &Arc<Broker>, client: &str, params: &Value) -> CmdResult {
         idempotency_key: key.clone(),
         intent_type: nexus_contracts::intent::INTENT_REPO_CODE.to_owned(),
         content: content.clone(),
-        model: None,
+        model: Some(nexus_contracts::intent::ModelSelection {
+            provider_id: resolved.provider_id.clone(),
+            remote_model_id: resolved.remote_model_id.clone(),
+            logical_model_id: Some(resolved.logical_model_id.clone()),
+            route_id: Some(resolved.route_id.clone()),
+        }),
         workspace_id: Some(project.clone()),
         limits: b
             .cfg
@@ -1611,6 +1745,7 @@ pub fn send(b: &Arc<Broker>, client: &str, params: &Value) -> CmdResult {
         read_only: decision.read_only,
         seed_from,
         relation_hint,
+        resolved: Some(resolved.clone()),
     };
     let out = b.submit_linked(
         client,
@@ -1629,7 +1764,29 @@ pub fn send(b: &Arc<Broker>, client: &str, params: &Value) -> CmdResult {
     if th.title.is_empty() {
         th.title = title_from(&content);
     }
+    th.target = Some(ThreadTarget {
+        provider_id: resolved.provider_id.clone(),
+        logical_model_id: resolved.logical_model_id.clone(),
+        remote_model_id: resolved.remote_model_id.clone(),
+        route_id: resolved.route_id.clone(),
+        connection_id: resolved.connection_id.clone(),
+        context_limit_tokens: Some(resolved.context_limit_tokens),
+        output_limit_tokens: Some(resolved.output_limit_tokens),
+    });
     let user_seq = push_message(b, &mut th, "user", "request", Some(&run_id), &content);
+    if switched {
+        push_message(
+            b,
+            &mut th,
+            "system",
+            "note",
+            Some(&run_id),
+            &format!(
+                "model changed to {}/{}",
+                resolved.provider_id, resolved.remote_model_id
+            ),
+        );
+    }
     th.runs.push(ThreadRun {
         run_id: run_id.clone(),
         n: th.runs.len() as u32 + 1,

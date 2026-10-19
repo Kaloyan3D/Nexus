@@ -26,6 +26,7 @@ pub mod live_auth;
 pub mod pipeline;
 pub mod projects;
 pub mod recovery;
+pub mod resolution;
 pub mod server;
 pub mod store;
 pub mod threads;

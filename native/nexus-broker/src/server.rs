@@ -7,6 +7,7 @@
 
 use crate::config::BrokerConfig;
 use crate::pipeline;
+use crate::resolution;
 use crate::store::{RunRecord, Store};
 use nexus_client::intent_client::{AllowedModel, IntentRun, RegistryTarget};
 use nexus_client::{ClientConfig, ModelRunStatus};
@@ -314,6 +315,36 @@ impl Broker {
         Ok(list)
     }
 
+    /// The saved default (the engineering-v2 main slot) as a selection; `None` when unreadable.
+    pub(crate) fn default_selection(&self) -> Option<nexus_contracts::intent::ModelSelection> {
+        let m = self.models().ok()?.into_iter().next()?;
+        Some(nexus_contracts::intent::ModelSelection {
+            provider_id: m.provider_id,
+            remote_model_id: m.remote_model_id,
+            logical_model_id: Some(m.logical_model_id).filter(|l| !l.is_empty()),
+            route_id: None,
+        })
+    }
+
+    /// The conversation's bound target identity, when any.
+    pub(crate) fn conversation_target(
+        &self,
+        thread_id: &str,
+    ) -> Option<crate::resolution::ResolvedTarget> {
+        let th = self.threads.load(thread_id)?;
+        let t = th.target?;
+        Some(crate::resolution::ResolvedTarget {
+            provider_id: t.provider_id,
+            logical_model_id: t.logical_model_id,
+            remote_model_id: t.remote_model_id,
+            route_id: t.route_id,
+            connection_id: t.connection_id,
+            context_limit_tokens: t.context_limit_tokens.unwrap_or(0),
+            output_limit_tokens: t.output_limit_tokens.unwrap_or(0),
+            billing_tier: String::new(),
+        })
+    }
+
     fn owned(&self, client: &str, run_id: &str) -> Result<RunRecord, (&'static str, String)> {
         match self.store.load(run_id) {
             Some(r) if r.run.client_id == client => Ok(r),
@@ -344,7 +375,7 @@ impl Broker {
         client: &str,
         params: &Value,
         continuation: Option<&str>,
-        link: Option<crate::threads::ThreadLink>,
+        mut link: Option<crate::threads::ThreadLink>,
     ) -> CmdResult {
         if self.shutdown.load(Ordering::SeqCst) {
             return Err(("broker-shutting-down", "the broker is shutting down".into()));
@@ -382,61 +413,58 @@ impl Broker {
                 ));
             }
         }
-        // Model selection is checked BEFORE a run exists: a wrong model
-        // costs nothing and leaves no state. A named model that is not
-        // issuable is refused here; the pipeline below then issues the
-        // selected target (issuability was just proven).
-        let available = self.models()?;
-        // R-NATIVE-1: any issuable catalog target is selectable; the
-        // default list above is unchanged (existing clients keep it).
-        let issuable: Vec<(String, String)> = self
-            .registry_targets()
-            .map(|ts| {
-                ts.into_iter()
-                    .filter(|t| t.issuable)
-                    .map(|t| (t.provider_id, t.remote_model_id))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if let Some(m) = &intent.model {
-            if !self.cfg.allow_models.is_empty()
-                && !self
-                    .cfg
-                    .allow_models
-                    .iter()
-                    .any(|(p, r)| *p == m.provider_id && *r == m.remote_model_id)
-            {
-                return Err((
-                    "model-not-allowed",
-                    "the broker does not allow this model".into(),
-                ));
-            }
-            let is_default = available
+        // R-NATIVE-2: one shared resolution before the run exists. Explicit
+        // selection, else the conversation's target, else the default.
+        // Refused before any run: unknown / non-issuable / ambiguous.
+        let catalog = self.registry_targets().map_err(|(_, m)| ("internal", m))?;
+        let conv_target: Option<resolution::ResolvedTarget> = link
+            .as_ref()
+            .and_then(|l| self.conversation_target(&l.thread_id));
+        // no selection and no conversation target: the DEFAULT is the saved engineering-v2 slot
+        // (`models()[0]`), not whichever issuable route sorts first in the catalog
+        let default_sel = if intent.model.is_none() && conv_target.is_none() {
+            self.default_selection()
+        } else {
+            None
+        };
+        let resolved = resolution::resolve_target(
+            &catalog,
+            intent.model.as_ref().or(default_sel.as_ref()),
+            conv_target.as_ref(),
+        )
+        .map_err(|(c, m)| {
+            let code: &'static str = match c.as_str() {
+                "ambiguous-target" => "ambiguous-target",
+                "model-not-allowed" => "model-not-allowed",
+                _ => "model-not-available",
+            };
+            (code, m)
+        })?;
+        if !self.cfg.allow_models.is_empty()
+            && !self
+                .cfg
+                .allow_models
                 .iter()
-                .any(|a| a.provider_id == m.provider_id && a.remote_model_id == m.remote_model_id);
-            let is_issuable = issuable
-                .iter()
-                .any(|(p, r)| *p == m.provider_id && *r == m.remote_model_id);
-            if !is_default && !is_issuable {
-                let reason = self
-                    .registry_targets()
-                    .ok()
-                    .and_then(|ts| {
-                        ts.into_iter()
-                            .filter(|t| {
-                                t.provider_id == m.provider_id
-                                    && t.remote_model_id == m.remote_model_id
-                            })
-                            .map(|t| t.reason.unwrap_or_else(|| "not-issuable".into()))
-                            .next()
-                    })
-                    .unwrap_or_else(|| "unknown-target".into());
-                return Err((
-                    "model-not-available",
-                    format!("the Registry does not currently issue this provider/model ({reason})"),
-                ));
-            }
-        } else if available.is_empty() {
+                .any(|(p, r)| *p == resolved.provider_id && *r == resolved.remote_model_id)
+        {
+            return Err((
+                "model-not-allowed",
+                "the broker does not allow this model".into(),
+            ));
+        }
+        if let Some(l) = link.as_mut() {
+            l.resolved = Some(resolved.clone());
+        }
+        // Normalize the selection so the pipelines issue exactly this target.
+        let mut intent = intent;
+        intent.model = Some(nexus_contracts::intent::ModelSelection {
+            provider_id: resolved.provider_id.clone(),
+            remote_model_id: resolved.remote_model_id.clone(),
+            logical_model_id: Some(resolved.logical_model_id.clone()),
+            route_id: Some(resolved.route_id.clone()),
+        });
+        let available_empty = catalog.iter().all(|t| !t.issuable);
+        if available_empty {
             return Err((
                 "model-not-allowed",
                 "no model is allowed for this broker".into(),
@@ -492,6 +520,13 @@ impl Broker {
                 read_only: link.as_ref().is_some_and(|l| l.read_only),
                 seed_from: link.as_ref().and_then(|l| l.seed_from.clone()),
                 workspace_relation: link.as_ref().and_then(|l| l.relation_hint.clone()),
+                provider_id: Some(resolved.provider_id.clone()),
+                remote_model_id: Some(resolved.remote_model_id.clone()),
+                logical_model_id: Some(resolved.logical_model_id.clone()),
+                route_id: Some(resolved.route_id.clone()),
+                connection_id: resolved.connection_id.clone(),
+                context_limit_tokens: Some(resolved.context_limit_tokens),
+                output_limit_tokens: Some(resolved.output_limit_tokens),
                 ..Default::default()
             };
             let rec = RunRecord {
@@ -624,6 +659,7 @@ impl Broker {
             read_only: r.read_only,
             seed_from: None,
             relation_hint: None,
+            resolved: None,
         });
         let out = self.submit_linked(&r.client_id.clone(), &params, Some(old_id), link)?;
         if let Some(new_id) = out.pointer("/run/runId").and_then(|v| v.as_str()) {

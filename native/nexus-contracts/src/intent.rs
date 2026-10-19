@@ -59,6 +59,10 @@ pub enum ResponseMode {
 pub struct ModelSelection {
     pub provider_id: String,
     pub remote_model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_id: Option<String>,
 }
 
 /// Explicit, bounded limits. They can only tighten broker/Registry limits.
@@ -307,6 +311,14 @@ impl NexusIntentV1 {
                     "bad-intent",
                     "model selection ids are empty, too long or carry forbidden characters",
                 ));
+            }
+            for s in [&m.logical_model_id, &m.route_id].into_iter().flatten() {
+                if !bounded_id(s) {
+                    return Err(IntentError::new(
+                        "bad-intent",
+                        "model selection ids are empty, too long or carry forbidden characters",
+                    ));
+                }
             }
         }
         if let Some(n) = self.limits.max_output_tokens {

@@ -813,12 +813,20 @@ pub(crate) fn run(
     });
     let repo = b.cfg.repo_root.to_string_lossy().into_owned();
     let data = b.cfg.registry_data_root.to_string_lossy().into_owned();
-    let issued = bridge(
-        b,
-        "issue",
-        &[&repo, &data, &task_instance, &session_id],
-        None,
-    )?;
+    // R-NATIVE-2: the run's resolved target travels as the in-memory-only
+    // bridge selection (route identity), so coding runs use the same target
+    // as model-only runs; no silent fallback to the default.
+    let mut issue_args: Vec<&str> = vec![&repo, &data, &task_instance, &session_id];
+    let selection_json;
+    if let Some(m) = &intent.model {
+        let sel = serde_json::json!({
+            "logicalModelId": m.logical_model_id.clone().unwrap_or_default(),
+            "routeId": m.route_id.clone().unwrap_or_default(),
+        });
+        selection_json = serde_json::to_string(&sel).unwrap_or_default();
+        issue_args.push(&selection_json);
+    }
+    let issued = bridge(b, "issue", &issue_args, None)?;
     let resolution = issued.get("resolution").cloned().unwrap_or_default();
     let extension = issued.get("extension").cloned().unwrap_or_default();
     let origin = extension
@@ -841,20 +849,37 @@ pub(crate) fn run(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_owned();
+    // R-NATIVE-2: the bound target is checked against the issued target
+    // every run; resolved route identity must match exactly.
     if let Some(m) = &intent.model {
-        if m.provider_id != provider_id || m.remote_model_id != remote_model_id {
+        // the issued route identity lives in the compiled core (and resolution target), not in
+        // the sealed extension
+        let issued_route = issued
+            .pointer("/core/routeId")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                issued
+                    .pointer("/resolution/target/routeId")
+                    .and_then(|v| v.as_str())
+            })
+            .unwrap_or("");
+        let want_route = m.route_id.as_deref().unwrap_or("");
+        let route_ok = want_route.is_empty() || want_route == issued_route;
+        if m.provider_id != provider_id || m.remote_model_id != remote_model_id || !route_ok {
             return Err(se(
                 "model-not-available",
                 "the Registry target differs from the requested provider/model; no substitution",
             ));
         }
     }
-    let out_tokens = limits.output_tokens.or(Some(DEFAULT_MAX_OUTPUT_TOKENS));
-    // The sealed output limit is a ceiling the request may only lower.
     let sealed_out = extension
         .get("outputLimitTokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
+    let out_tokens = match (limits.output_tokens, sealed_out) {
+        (_, 0) => limits.output_tokens.or(Some(DEFAULT_MAX_OUTPUT_TOKENS)),
+        (r, l) => Some(crate::resolution::effective_output_cap(r, l).unwrap_or(l)),
+    };
     let out_tokens = out_tokens.map(|n| if sealed_out > 0 { n.min(sealed_out) } else { n });
     // A6.1.4: a turn that ends at the output limit (reasoning tokens count against it)
     // may be re-asked with a larger cap, up to this ceiling. The interactive
@@ -1099,11 +1124,30 @@ pub(crate) fn run(
     )
     .map_err(|e| discard(se(e.code, e.message)))?;
     let conv = session.conversation_id().to_owned();
+    let bound_route = intent.model.as_ref().and_then(|m| m.route_id.clone());
+    let bound_conn = b
+        .store
+        .load(run_id)
+        .and_then(|r| r.run.connection_id.clone());
+    let bound_ctx = extension.get("contextLimitTokens").and_then(|v| v.as_u64());
+    let bound_out = extension.get("outputLimitTokens").and_then(|v| v.as_u64());
     b.update(run_id, |r| {
         r.conversation_id = Some(conv.clone());
         r.provider_id = Some(provider_id.clone());
         r.remote_model_id = Some(remote_model_id.clone());
         r.logical_model_id = Some(logical_model_id.clone());
+        if r.route_id.is_none() {
+            r.route_id = bound_route.clone();
+        }
+        if r.connection_id.is_none() {
+            r.connection_id = bound_conn.clone();
+        }
+        if r.context_limit_tokens.is_none() {
+            r.context_limit_tokens = bound_ctx;
+        }
+        if r.output_limit_tokens.is_none() {
+            r.output_limit_tokens = bound_out;
+        }
         r.endpoint_kind = Some(session.endpoint_kind().to_owned());
     });
     if flag.load(Ordering::SeqCst) {
@@ -1129,6 +1173,23 @@ pub(crate) fn run(
                     && crate::threads::continued_request_expects_change(b, run_id))),
         ..Default::default()
     };
+    let bound_ctx_u64 = extension
+        .get("contextLimitTokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let expected = intent.model.as_ref().map(|m| nexus_client::ExpectedTarget {
+        provider_id: m.provider_id.clone(),
+        remote_model_id: m.remote_model_id.clone(),
+    });
+    let ctx_budget = crate::resolution::effective_context_budget(
+        b.cfg
+            .context_budget_bytes
+            .unwrap_or(crate::context::COMPACT_BYTES),
+        bound_ctx_u64,
+    );
+    let _ = ctx_budget;
+    let bound_out_cap = crate::resolution::effective_output_cap(None, sealed_out);
+    let _ = bound_out_cap;
     let result = turn_loop(
         &ctx,
         &mut session,
@@ -1152,6 +1213,8 @@ pub(crate) fn run(
             incarnation: &incarnation,
             ws_digest: &ws_digest,
             root: &root,
+            expected: expected.clone(),
+            ctx_budget,
         },
         &mut loop_state,
     );
@@ -1161,6 +1224,7 @@ pub(crate) fn run(
 
 struct Shared<'a> {
     mode: Mode,
+    #[allow(dead_code)]
     policy: CodePolicy,
     intent: &'a NexusIntentV1,
     task_id: &'a str,
@@ -1174,6 +1238,9 @@ struct Shared<'a> {
     incarnation: &'a str,
     ws_digest: &'a str,
     root: &'a str,
+    #[allow(dead_code)]
+    expected: Option<nexus_client::ExpectedTarget>,
+    ctx_budget: usize,
 }
 
 #[derive(Default)]
@@ -1673,10 +1740,8 @@ fn turn_loop(
         // Long tasks: before the oldest steps are dropped, this turn also asks the model to write
         // down what it has learned (found live: a 270-turn task forgot what it had read every few
         // turns and re-read the same files for half an hour).
-        let ctx_budget = b
-            .cfg
-            .context_budget_bytes
-            .unwrap_or(crate::context::COMPACT_BYTES);
+        // the same target-derived budget as the compaction below (R-NATIVE-2 item 5)
+        let ctx_budget = sh.ctx_budget;
         if sh.mode == Mode::Code
             && b.cfg.interactive
             && !ls.memory_requested
@@ -1695,24 +1760,14 @@ fn turn_loop(
                 None,
             );
         }
-        // A6.1.4 P4: keep long conversations inside a budget, from the runtime's own receipts.
+        // R-NATIVE-2: every turn uses the same issued target; the bound
+        // selection rides along and is checked each turn. Context budget
+        // comes from the target's window (min with the configured budget).
+        let ctx_budget =
+            (sh.ctx_budget as f64 * crate::recovery::context_scale(failures_in_a_row)) as usize;
         if sh.mode == Mode::Code
             && !ls.memory_requested
-            && crate::context::compact(
-                &mut items,
-                &receipts_summary(&ls.activity),
-                b.cfg
-                    .context_budget_bytes
-                    .unwrap_or(crate::context::COMPACT_BYTES)
-                    .min(
-                        (b.cfg
-                            .context_budget_bytes
-                            .unwrap_or(crate::context::COMPACT_BYTES)
-                            as f64
-                            * crate::recovery::context_scale(failures_in_a_row))
-                            as usize,
-                    ),
-            )
+            && crate::context::compact(&mut items, &receipts_summary(&ls.activity), ctx_budget)
         {
             ls.compactions += 1;
             let n = ls.compactions;

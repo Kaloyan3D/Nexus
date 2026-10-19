@@ -410,31 +410,20 @@ fn run_steps(
         return Ok(());
     }
 
-    // 2. Registry issuance (V1 resolution + V2 extension). A submitted
-    // model selection travels as the in-memory-only bridge selection: it
-    // was proven issuable by the submit gate, and issuance fails closed
-    // again here before any run state is touched.
+    // 2. Registry issuance (V1 resolution + V2 extension). The submit gate
+    // resolved the run's target and normalized the selection; issuance uses
+    // exactly that route and fails closed here before any run state.
     let repo = b.cfg.repo_root.to_string_lossy().into_owned();
     let data = b.cfg.registry_data_root.to_string_lossy().into_owned();
     let mut issue_args: Vec<&str> = vec![&repo, &data, &task_instance, &session_id];
     let selection_json;
     if let Some(m) = &intent.model {
-        // resolve the route for this (provider, remote) pair from the catalog
-        let route = b.registry_targets().ok().and_then(|ts| {
-            ts.into_iter()
-                .filter(|t| {
-                    t.issuable
-                        && t.provider_id == m.provider_id
-                        && t.remote_model_id == m.remote_model_id
-                })
-                .map(|t| (t.logical_model_id, t.route_id))
-                .next()
+        let sel = serde_json::json!({
+            "logicalModelId": m.logical_model_id.clone().unwrap_or_default(),
+            "routeId": m.route_id.clone().unwrap_or_default(),
         });
-        if let Some((logical, route_id)) = route {
-            let sel = serde_json::json!({ "logicalModelId": logical, "routeId": route_id });
-            selection_json = serde_json::to_string(&sel).unwrap_or_default();
-            issue_args.push(&selection_json);
-        }
+        selection_json = serde_json::to_string(&sel).unwrap_or_default();
+        issue_args.push(&selection_json);
     }
     let issued = bridge(b, "issue", &issue_args, None)?;
     let shadow = bridge(
@@ -504,7 +493,17 @@ fn run_steps(
             provider_id: m.provider_id.clone(),
             remote_model_id: m.remote_model_id.clone(),
         }),
-        max_output_tokens: intent.limits.max_output_tokens,
+        max_output_tokens: {
+            let sealed = extension
+                .get("outputLimitTokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            match (intent.limits.max_output_tokens, sealed) {
+                (r, 0) => r,
+                (None, l) => Some(l),
+                (Some(r), l) => Some(r.min(l)),
+            }
+        },
     };
     let prepared = nexus_client::prepare_model_run(&req).map_err(|e| {
         let code = if e.code == "wrong-model" {
@@ -541,6 +540,9 @@ fn run_steps(
         r.provider_id = Some(prepared.provider_id.clone());
         r.remote_model_id = Some(prepared.remote_model_id.clone());
         r.logical_model_id = Some(prepared.logical_model_id.clone());
+        if r.route_id.is_none() {
+            r.route_id = intent.model.as_ref().and_then(|m| m.route_id.clone());
+        }
         r.request_digest = Some(prepared.request_digest.clone());
     });
     if stop(b) {
