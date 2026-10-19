@@ -1529,6 +1529,19 @@ fn premature_stop(ls: &mut LoopState, text: &str) -> Option<(&'static str, &'sta
             "changes not verified",
         ));
     }
+    // 3a. verification commands are still failing although the LAST one passed (a narrower command
+    //     hides them; found live: five unresolved failures and a closing 15 KB narration)
+    if ls.last_test.as_deref() != Some("fail")
+        && !ls.failed_checks.is_empty()
+        && ls.edits_used > 0
+        && ls.fail_nudges < 2
+    {
+        ls.fail_nudges += 1;
+        return Some((
+            crate::completion::MSG_UNRESOLVED_CHECKS,
+            "failed checks never re-run successfully",
+        ));
+    }
     // 3. the last verification failed
     if ls.last_test.as_deref() == Some("fail") && ls.edits_used > 0 && ls.fail_nudges < 2 {
         ls.fail_nudges += 1;
@@ -2053,11 +2066,12 @@ fn turn_loop(
             ls.citations_unverified = u;
             // A provider "stop" is not task completion: classify it from the request and the
             // receipts. An implementation task that ended on a plan is incomplete, not done.
-            let c = crate::completion::decide(
+            let c = crate::completion::decide_run(
                 ls.expects_change,
                 applied_edits(ls),
                 ls.last_test.as_deref(),
                 &out.text,
+                ls.failed_checks.len() as u32,
             );
             ls.completion = Some(c.as_str());
             if c == crate::completion::Completion::Incomplete {
@@ -3098,6 +3112,11 @@ fn finalize(
         }
         r.stop_reason = stop_reason;
         r.completion = completion.map(str::to_owned);
+        if r.completion.as_deref() == Some("failing-checks") {
+            r.completion_note = Some(crate::completion::failing_checks_note(
+                unresolved_failed_checks,
+            ));
+        }
         if r.completion.as_deref() == Some("incomplete") {
             r.completion_note = Some(crate::completion::incomplete_note(
                 edits_used,
@@ -3428,6 +3447,39 @@ mod tests {
             assert!(stop(&mut ls) >= 1);
             assert_eq!(stop(&mut ls), 0);
         }
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn unresolved_failed_checks_are_asked_about_whatever_the_length_of_the_closing_text() {
+        // run 14 of the R-NATIVE-3 acceptance: edits made, the LAST check passed, five checks failed and
+        // were never re-run, and the closing message was 15 KB of narration (every length-capped gate
+        // in premature_stop looked past it)
+        let text = include_str!("../tests/fixtures/run14-terminal-response.txt");
+        let mut ls = LoopState::default();
+        ls.expects_change = true;
+        ls.tool_calls = 184;
+        ls.edits_used = 41;
+        ls.last_test = Some("pass".into());
+        // no unresolved failure: nothing to ask (the earlier blind spot, documented)
+        assert!(premature_stop(&mut ls, text).is_none());
+        for k in ["a", "b", "c", "d", "e"] {
+            ls.failed_checks.insert(k.into());
+        }
+        let (msg, why) = premature_stop(&mut ls, text).expect("asked about the failed checks");
+        assert!(msg.contains("were never re-run successfully"), "{msg}");
+        assert!(why.contains("failed checks"), "{why}");
+        // bounded: asked twice, then the run ends (as `failing-checks`, not `fulfilled`)
+        assert!(premature_stop(&mut ls, text).is_some());
+        assert!(premature_stop(&mut ls, text).is_none());
+        // a short text is asked about just the same
+        let mut ls2 = LoopState::default();
+        ls2.expects_change = true;
+        ls2.tool_calls = 10;
+        ls2.edits_used = 3;
+        ls2.last_test = Some("pass".into());
+        ls2.failed_checks.insert("x".into());
+        assert!(premature_stop(&mut ls2, "All done.").is_some());
     }
 
     #[test]

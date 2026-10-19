@@ -327,6 +327,9 @@ pub enum Completion {
     NoChangeReported,
     /// Asked to implement; the run ended on a plan or with nothing done.
     Incomplete,
+    /// Files were changed, but verification commands failed and were never re-run successfully.
+    /// Not a success: the receipts, not the model's closing text, say the work is unverified.
+    FailingChecks,
 }
 
 impl Completion {
@@ -336,6 +339,7 @@ impl Completion {
             Self::NoChangeVerified => "no-change-verified",
             Self::NoChangeReported => "no-change-reported",
             Self::Incomplete => "incomplete",
+            Self::FailingChecks => "failing-checks",
         }
     }
 }
@@ -368,6 +372,44 @@ pub fn decide(
     Completion::NoChangeReported
 }
 
+/// `decide`, then the receipts of the whole run: an implementation that changed files is only
+/// `Fulfilled` when no verification command is left failing (a later pass of the SAME command clears
+/// it). Independent of what the final message says or how long it is.
+pub fn decide_run(
+    expects_change: bool,
+    applied_edits: u32,
+    last_test: Option<&str>,
+    final_text: &str,
+    unresolved_failed_checks: u32,
+) -> Completion {
+    let c = decide(expects_change, applied_edits, last_test, final_text);
+    if c == Completion::Fulfilled
+        && expects_change
+        && applied_edits > 0
+        && unresolved_failed_checks > 0
+    {
+        return Completion::FailingChecks;
+    }
+    c
+}
+
+/// Why a `failing-checks` run is not accepted as done. Plain words for the Desktop; blocked or
+/// unverified is not passed, whatever the cause of the failure (an environment that cannot run the
+/// check included). Only a genuine re-run of the same command to a pass clears it.
+pub fn failing_checks_note(n: u32) -> String {
+    format!(
+        "Files were changed, but {n} verification command{} failed and {} never re-run successfully. {} blocked or unverified, not passed: re-run {} to a pass, or verify {} independently, before relying on this change.",
+        if n == 1 { "" } else { "s" },
+        if n == 1 { "was" } else { "were" },
+        if n == 1 { "It is" } else { "They are" },
+        if n == 1 { "it" } else { "them" },
+        if n == 1 { "it" } else { "them" },
+    )
+}
+
+/// Sent when the model stops while verification commands are still failing.
+pub const MSG_UNRESOLVED_CHECKS: &str = "Some verification commands failed and were never re-run successfully. Run them again after fixing the cause until they pass, or - if a failure was already there and is unrelated to the task - say so explicitly in your final answer with the evidence. Do not finish while they are unexplained.";
+
 /// The plain-language reason of an `incomplete` run, from the receipts: an end after real changes
 /// is not "nothing changed".
 pub fn incomplete_note(applied_edits: u32, last_test: Option<&str>) -> String {
@@ -389,6 +431,83 @@ mod tests {
     use super::*;
 
     const INCIDENT: &str = include_str!("../tests/fixtures/planning-loop-final-answer.txt");
+
+    /// The model's actual closing message of the R-NATIVE-3 acceptance run 14 (15 KB of reasoning about
+    /// making a tool call, no tool call): 41 edits, last check passed, 5 failed checks never re-run.
+    const RUN14_TERMINAL: &str = include_str!("../tests/fixtures/run14-terminal-response.txt");
+
+    #[test]
+    fn the_actual_run14_terminal_response_was_accepted_as_fulfilled_by_the_text_only_decision() {
+        assert!(RUN14_TERMINAL.len() > 10_000);
+        // the existing detectors: the text IS plan-like, but the announcement cap (500 chars) and the
+        // zero-edit scope of plan_like let it through
+        assert!(plan_like(RUN14_TERMINAL));
+        assert!(!announcement(RUN14_TERMINAL));
+        assert_eq!(
+            decide(true, 41, Some("pass"), RUN14_TERMINAL),
+            Completion::Fulfilled
+        );
+        // with the run's receipts it is not fulfilled
+        assert_eq!(
+            decide_run(true, 41, Some("pass"), RUN14_TERMINAL, 5),
+            Completion::FailingChecks
+        );
+        // and the failure of one check that was genuinely re-run (nothing unresolved) is unchanged
+        assert_eq!(
+            decide_run(true, 41, Some("pass"), "Done.", 0),
+            Completion::Fulfilled
+        );
+    }
+
+    #[test]
+    fn the_failing_checks_note_is_plain_and_counts() {
+        let one = failing_checks_note(1);
+        assert!(
+            one.contains("1 verification command failed and was never re-run successfully"),
+            "{one}"
+        );
+        assert!(one.contains("blocked or unverified, not passed"), "{one}");
+        let five = failing_checks_note(5);
+        assert!(
+            five.contains("5 verification commands failed and were never re-run"),
+            "{five}"
+        );
+    }
+
+    #[test]
+    fn a_change_with_checks_still_failing_is_never_fulfilled_whatever_the_closing_text_says() {
+        // run 14 of the R-NATIVE-3 acceptance: 41 edits, last check passed, 5 failed checks never re-run,
+        // and a 15 KB closing narration that no length-capped gate looked at
+        let long = "Now re-reading the files. I must make a tool call. ".repeat(300);
+        assert_eq!(
+            decide(true, 41, Some("pass"), &long),
+            Completion::Fulfilled,
+            "the text-only decision is blind to it"
+        );
+        assert_eq!(
+            decide_run(true, 41, Some("pass"), &long, 5),
+            Completion::FailingChecks
+        );
+        assert_eq!(
+            decide_run(true, 41, Some("pass"), "Done; all checks pass.", 1),
+            Completion::FailingChecks
+        );
+        // nothing unresolved: unchanged
+        assert_eq!(
+            decide_run(true, 41, Some("pass"), "Done; all checks pass.", 0),
+            Completion::Fulfilled
+        );
+        // not an implementation task / no change: unchanged
+        assert_eq!(
+            decide_run(false, 0, None, "Review.", 3),
+            Completion::Fulfilled
+        );
+        assert_eq!(
+            decide_run(true, 0, Some("pass"), "Nothing to change.", 2),
+            Completion::NoChangeVerified
+        );
+        assert_eq!(Completion::FailingChecks.as_str(), "failing-checks");
+    }
 
     #[test]
     fn a_bare_continue_is_a_continuation_not_a_task() {

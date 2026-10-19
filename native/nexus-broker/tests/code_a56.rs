@@ -7771,6 +7771,49 @@ fn rn2_responder() -> Responder {
                 _ => Answer::Frames(text_frames(&resp, "Checked the crate: cargo check passes.")),
             };
         }
+        if cur.contains("R3-FAILING") {
+            // a change, a failing suite hidden behind tail, a different passing command, then a long
+            // closing narration instead of a report
+            if saw(body, "were never re-run successfully") {
+                return Answer::Frames(text_frames(
+                    &resp,
+                    "The cargo test failure is the existing add() bug, unrelated to this change; cargo check passes.",
+                ));
+            }
+            return match done {
+                0 => call(
+                    "fs_write",
+                    r#"{"path":"part0.txt","content":"p\n","mode":"create"}"#,
+                ),
+                1 => call(
+                    "proc_run",
+                    r#"{"program":"sh","args":["-c","cargo test --offline 2>&1 | tail -n 3"]}"#,
+                ),
+                2 => call(
+                    "proc_run",
+                    r#"{"program":"cargo","args":["check","--offline"]}"#,
+                ),
+                _ => Answer::Frames(text_frames(
+                    &resp,
+                    &"Now re-reading the files for correctness. I must make a tool call now. "
+                        .repeat(40),
+                )),
+            };
+        }
+        if cur.contains("R3-CLEARED") {
+            // the same suite fails, the cause is fixed, and the IDENTICAL command is re-run to a pass
+            let suite = r#"{"program":"sh","args":["-c","cargo test --offline 2>&1 | tail -n 3"]}"#;
+            return match done {
+                0 => call("proc_run", suite),
+                1 => call("fs_read", r#"{"path":"src/lib.rs"}"#),
+                2 => call(
+                    "fs_edit",
+                    r#"{"path":"src/lib.rs","edits":[{"oldText":"a - b","newText":"a + b"}]}"#,
+                ),
+                3 => call("proc_run", suite),
+                _ => Answer::Frames(text_frames(&resp, "Fixed add(); the suite passes.")),
+            };
+        }
         if cur.contains("RN2-FOLLOW") {
             return match done {
                 0 => call("fs_read", r#"{"path":"README.md"}"#),
@@ -8415,5 +8458,84 @@ fn d5_a_failing_suite_piped_through_tail_is_a_failure_and_a_later_narrower_pass_
     let o = run.coding_outcome.as_ref().expect("an outcome");
     assert_eq!(o.verification, "verified-mixed", "{o:?}");
     assert_eq!(o.checks_failed_unresolved, 1);
+    b.shutdown();
+}
+
+#[test]
+fn r3_a_run_with_failed_checks_left_unresolved_is_not_fulfilled_and_is_asked_about_them() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(rn2_responder());
+    let b = interactive_broker(&fx, "r3-failing");
+    let sock = b.socket_path().to_owned();
+    let (_, run) = rn2_send(
+        &sock,
+        None,
+        "Implement R3-FAILING: add part0.txt and verify",
+        "r3-failing-00001",
+        None,
+        None,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    // the model was asked about the unresolved failure although its closing text was long narration
+    assert!(
+        rn2_bodies(&fx, 0)
+            .iter()
+            .any(|b| saw(b, "were never re-run successfully")),
+        "no nudge about the unresolved failed check"
+    );
+    assert_eq!(run.unresolved_failed_checks, 1, "{run:?}");
+    assert_eq!(run.completion.as_deref(), Some("failing-checks"), "{run:?}");
+    let note = run.completion_note.clone().unwrap_or_default();
+    assert!(note.contains("blocked or unverified, not passed"), "{note}");
+    let o = run.coding_outcome.as_ref().unwrap();
+    assert_eq!(o.verification, "verified-mixed");
+    b.shutdown();
+}
+
+#[test]
+fn r3_a_failed_check_is_cleared_only_by_a_genuine_rerun_of_the_same_command_to_a_pass() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(rn2_responder());
+    let b = interactive_broker(&fx, "r3-cleared");
+    let sock = b.socket_path().to_owned();
+    let (_, run) = rn2_send(
+        &sock,
+        None,
+        "Implement R3-CLEARED: fix add() and prove it",
+        "r3-cleared-00001",
+        None,
+        None,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let cmds: Vec<&ic::ToolActivity> = run
+        .tool_activity
+        .iter()
+        .filter(|a| a.tool == "proc_run")
+        .collect();
+    assert_eq!(cmds.len(), 2);
+    assert_eq!(
+        (cmds[0].verification.as_deref(), cmds[0].exit_code),
+        (Some("fail"), Some(101))
+    );
+    assert_eq!(cmds[1].verification.as_deref(), Some("pass"));
+    assert_eq!(
+        cmds[0].args_digest, cmds[1].args_digest,
+        "the identical command"
+    );
+    // cleared: nothing unresolved, a clean fulfilment and a plain verified pass
+    assert_eq!(run.unresolved_failed_checks, 0, "{run:?}");
+    assert_eq!(run.completion.as_deref(), Some("fulfilled"), "{run:?}");
+    assert_eq!(
+        run.coding_outcome.as_ref().unwrap().verification,
+        "verified-passed"
+    );
+    // no nudge about failed checks was needed
+    assert!(!rn2_bodies(&fx, 0)
+        .iter()
+        .any(|b| saw(b, "were never re-run successfully")));
     b.shutdown();
 }

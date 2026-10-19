@@ -69,6 +69,14 @@ function evidenceBadge(r: ThreadRunView): { label: string; tone: "success" | "wa
       detail: run.completionNote ?? "The model ended before finishing the work.",
     };
   }
+  if (run.completion === "failing-checks") {
+    const n = run.unresolvedFailedChecks ?? run.codingOutcome?.checksFailedUnresolved ?? 0;
+    return {
+      label: `Changes made · ${n || "some"} check${n === 1 ? "" : "s"} failed, not verified`,
+      tone: "warning",
+      detail: run.completionNote ?? "Verification commands failed and were never re-run successfully; the change is blocked or unverified, not passed.",
+    };
+  }
   if (run.completion === "no-change-reported") {
     return { label: "Completed · no change was made", tone: "warning", detail: "The request asked for an implementation, but no file was changed and no check ran. Read the answer to see why." };
   }
@@ -116,6 +124,11 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
         )}
         {elapsed != null && <span className="nv-note">{Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, "0")}</span>}
       </div>
+      {run?.completion === "failing-checks" && ev && (
+        <p className="nv-note" role="note">
+          {ev.detail}
+        </p>
+      )}
       {note && (
         <p className="nv-note nv-run__ws" title={run?.workspaceNote ?? undefined}>
           {note}

@@ -203,7 +203,7 @@ fn code_definitions() -> Vec<Value> {
         json!({
             "type": "function",
             "name": "proc_run",
-            "description": "Run a development command in an isolated sandbox over a throw-away copy of the working copy. No network except dependency installation (`npm ci`/`npm install`, `pip install`, `go mod download`, `dotnet restore`, `cargo fetch`, which are allowed when the project permits installs; installed dependencies stay available to later commands). Files a command writes (build output, caches) are discarded; change files with fs_write/fs_edit. Available: cargo (check/test/build/fmt/clippy/doc/run/bench/fetch), npm/pnpm/yarn (install forms, test, run <script>, exec), npx <local-bin> (tsc, vitest, jest, eslint, ...), node, tsc, python3 (-m pytest/unittest/pip, scripts), pip, go, dotnet, make, and `sh -c \"<script>\"` for pipelines and && chains. A failing command is information: read its output, fix the cause and run it again. Output is bounded.",
+            "description": "Run a development command in an isolated sandbox over a throw-away copy of the working copy. No network except dependency installation (`npm ci`/`npm install`, `pip install`, `go mod download`, `dotnet restore`, `cargo fetch`, which are allowed when the project permits installs; installed dependencies stay available to later commands). Run installs (npm ci, cargo fetch) DIRECTLY as their own command, never inside `sh -c` (no network there). Files a command writes (build output, caches) are discarded; change files with fs_write/fs_edit. Available: cargo (check/test/build/fmt/clippy/doc/run/bench/fetch), npm/pnpm/yarn (install forms, test, run <script>, exec), npx <local-bin> (tsc, vitest, jest, eslint, ...), node, tsc, python3 (-m pytest/unittest/pip, scripts), pip, go, dotnet, make, and `sh -c \"<script>\"` for pipelines and && chains (a pipeline fails if any stage fails; one cut off by `head` is `unverified`). A failing command is information: read its output, fix the cause and run it again. Output is bounded.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -235,6 +235,31 @@ pub fn catalog_digest() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_command_tool_tells_the_model_that_installs_must_run_directly() {
+        // found live (R-NATIVE-3 run 14): `npm install` inside `sh -c` has no network, the model tried it
+        // once, gave up, and never ran the frontend checks
+        let defs = definitions_for(crate::request::ToolProfile::RepoCodeV1);
+        let d = defs
+            .iter()
+            .find(|d| d["name"] == "proc_run")
+            .expect("proc_run is offered")["description"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(d.contains("DIRECTLY"), "{d}");
+        assert!(d.contains("inside `sh -c`"), "{d}");
+        assert!(d.contains("cargo fetch"), "{d}");
+        assert!(d.contains("npm ci"), "{d}");
+        // every byte of this text is sent with EVERY request (a614's request-size limit has little headroom)
+        assert!(
+            d.len() < 2200,
+            "the command tool description grew to {} bytes",
+            d.len()
+        );
+        assert!(d.contains("`unverified`"), "{d}");
+    }
+
     use super::*;
 
     #[test]

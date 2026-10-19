@@ -237,6 +237,23 @@ describe("Persistent conversations (A7.1)", () => {
     expect(screen.getByLabelText("Message")).toBeEnabled();
   });
 
+  it("a run that changed files but left verification commands failing is NOT shown as a clean success", async () => {
+    const note = "Files were changed, but 5 verification commands failed and were never re-run successfully. They are blocked or unverified, not passed: re-run them to a pass, or verify them independently, before relying on this change.";
+    const d = detail({
+      thread: summary({ lastState: "completed", runCount: 3 }),
+      messages: [...detail().messages, msg(5, "user", "request", R("3"), "Implement it now"), msg(6, "assistant", "answer", R("3"), "Re-reading the files. I must make a tool call.")],
+      runs: [
+        ...detail().runs,
+        runView(3, { state: "completed", userSeq: 5, assistantSeq: 6 }, { state: "completed", completion: "failing-checks", completionNote: note, unresolvedFailedChecks: 5 }),
+      ],
+    });
+    mount(base({ threadGet: async () => d, threadList: async () => ({ threads: [d.thread] }) }), `#/workspace/c/${T1}`);
+    const run3 = await screen.findByRole("region", { name: "Run 3" });
+    expect(within(run3).getByText(/Changes made · 5 checks failed, not verified/)).toBeInTheDocument();
+    expect(screen.getByText(/blocked or unverified, not passed/)).toBeInTheDocument();
+    expect(within(run3).queryByText(/Tests passed/)).not.toBeInTheDocument();
+  });
+
   it("a no-change completion of an implementation request is labelled as such", async () => {
     const d = detail();
     d.runs[1]!.run = { ...d.runs[1]!.run!, completion: "no-change-reported", codingOutcome: null };
