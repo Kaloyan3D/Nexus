@@ -5,7 +5,7 @@ Status of the ground truth (verified in the repository, not assumed):
 * What the Native runtime cannot do yet: **choose among Registry targets**. The broker's `intent-models` returns exactly one model (whatever the saved `engineering-v2` `main` slot resolves to: `meta/muse-spark-1.3-contributor-native` via route `opencode-go-native/muse`). The Registry holds 10 providers, 9 models, 11 routes, 10 connections (only `conn-opencode-go-native` is `connected`).
 * Do **not** build another registry, copy catalog data into Native, or hand-write endpoints/limits in Rust.
 
-Status: **checkpoint 1 is done and committed** (`567a6f0` Registry catalog + selection, `be08c2e` Rust contracts, broker refusal and tests). Checkpoint 2 is prepared below; checkpoints 3-4 are written only after the previous one is merged and green.
+Status: **checkpoints 1 and 2 are done and committed** (R-NATIVE-1: `567a6f0`, `be08c2e`; R-NATIVE-2: `d756958` product, `bf6653b` acceptance tests, plus the D5 verification fix). Checkpoint 3 is prepared below; checkpoint 4 is written only after 3 is merged and green.
 
 Checkpoints (each ends with verified code **and** tests before the next starts; each is one bounded Nexus task):
 
@@ -40,29 +40,27 @@ Goal: let the Native runtime LIST and, later, SELECT Registry targets, read-only
 Constraints: no UI changes, no execution-binding or credential changes, no new dependencies, keep the Kernel seal and sealed-extension formats untouched. Run: node tests/NativeRepoInspectBridge.Tests.cjs, your new JS test, cargo fmt --check, cargo clippy -p nexus-broker -p nexus-client --all-targets -- -D warnings, cargo test -p nexus-client -p nexus-broker. Fix what you break. Finish with the list of changed files and the test results; do not widen the task.
 ---
 
-## Checkpoint 2 — model resolution and execution binding (prepared, not started)
-Task text: `R-NATIVE-2-model-resolution-and-binding.task.txt` (verbatim, ≈7 KB). It is grounded in verified gaps left by checkpoint 1:
-* coding runs (`inspect.rs`) still issue only the default target, so the selection reaches only the model-only path;
-* conversations carry no target; context/output limits are global constants rather than the target's;
-* the catalog's `issuable` is not proven equal to what `issue` accepts; route identity is not part of the selection.
+## Checkpoint 2 — model resolution and execution binding (done)
+Implemented by Nexus (conversation runs 9-12), independently reviewed and completed; record and evidence in `../R-NATIVE-2-ACCEPTANCE.md`; the shell-pipeline verification defect found on the way is in `../D5-PIPELINE-VERIFICATION.md`. Task text kept as `R-NATIVE-2-model-resolution-and-binding.task.txt`.
 
-Start it in Nexus Desktop (project **Nexus**, new conversation; the project snapshot must be refreshed first so it contains checkpoint 1):
+### Independent review protocol (Claude as reviewer, Nexus as implementer) - used for checkpoint 2, reuse for 3
+1. Do not interfere while the run is productive; stop it only for a proven non-productive loop (evidence first).
+2. Never accept the final report as evidence. Copy the run's working tree (`code-base/worktrees/<task>`) to a scratch directory and run there, with `NEXUS_REQUIRE_SANDBOX=1`: `cargo fmt --check`, clippy for native/ and for apps/nexus-desktop/src-tauri, `cargo test --workspace`, both JS suites, vitest/tsc/eslint, and the Tauri backend tests (use `CARGO_INCREMENTAL=0` for the Tauri crate). Rerun a failing load-flaky test alone before judging it.
+3. Check each numbered item of the task against the actual diff and a test that exercises the real path (broker + daemon + sandbox + scripted provider), not only a unit test of a helper. Look for: a second copy of an issuance rule, a silent fallback to the default, credential material in records, changed default limits, tests that cannot fail, tests that return early without the sandbox.
+4. Apply the patch to the branch only after review, commit as logical local commits (product, tests/infrastructure, separate fixes), never push.
+5. Anything claimed but not executed is recorded as incomplete and sent back as a `continue` with the exact missing items.
 
-    Implement checkpoint R-NATIVE-2 from `native/docs/tasks/R-NATIVE-2-model-resolution-and-binding.task.txt`.
+## Checkpoint 3 — Desktop Registry integration (prepared, not started)
+Task text: `R-NATIVE-3-desktop-registry-integration.task.txt` (verbatim). Grounded in verified gaps: the Tauri `intent_models` returns only the default; `thread_send` / `intent_submit` send no route identity; `thread-get` does not expose a conversation's bound target; the renderer must stay identities-only behind the Tauri allowlist. Start it in a NEW conversation on project **Nexus** (refresh the project snapshot first so it contains checkpoint 2):
+
+    Implement checkpoint R-NATIVE-3 from `native/docs/tasks/R-NATIVE-3-desktop-registry-integration.task.txt`.
 
     Read the complete task specification and the files it lists before modifying code.
-    Implement only this checkpoint, on top of the committed R-NATIVE-1 contracts. Preserve default OpenCode Go behaviour.
+    Implement only this checkpoint, on top of the committed R-NATIVE-1 and R-NATIVE-2 contracts. Preserve default OpenCode Go behaviour.
     Work autonomously in the isolated project workspace, implement the required changes and tests, run the required checks and report their real results.
-    Do not start R-NATIVE-3 (Desktop UI) or real multi-provider execution.
+    Do not start R-NATIVE-4 or real multi-provider execution.
     Do not modify the original repository, commit, push or deploy.
     Deliver a reviewable patch, the test results and any remaining limitations.
 
-### Independent review protocol (Claude as reviewer, Nexus as implementer)
-1. Do not interfere while the run is productive; stop it only for a proven non-productive loop (evidence first).
-2. Never accept the final report as evidence. Copy the run's working tree (`code-base/worktrees/<task>`) to a scratch directory, and run there: `cargo fmt --check`, clippy for the affected crates, `cargo test --workspace`, both JS suites. Rerun a failing load-flaky test alone before judging it.
-3. Check each numbered item of the task against the actual diff and a test that exercises the real path (not only a unit test of a helper). Look especially for: a second copy of an issuance rule, a silent fallback to the default model, credential material in records, changed default limits, tests that cannot fail.
-4. Apply the patch to the branch only after review, commit as logical local commits, never push.
-5. Anything the run claims but did not execute is recorded as incomplete, and sent back to Nexus as a `continue` with the exact missing items.
-
-## After checkpoint 2
-Checkpoint 3 (Desktop picker and read-only status; selection travels as identities only) and 4 (real multi-model acceptance, needs a second connected provider and explicit authorization) follow the same rule: written only after the previous checkpoint is merged and green.
+## After checkpoint 3
+Checkpoint 4 (real multi-model acceptance through the Desktop; needs a second connected provider and explicit authorization) is written only after checkpoint 3 is merged and green.
