@@ -120,6 +120,10 @@ function cmdTaskCreate(args) {
 // of the SAME task, so every provider request has its own command identity,
 // request digest and single-use sealed grant. Append-only: attempts are never
 // rewritten, and the next sequence is derived from the committed ledger.
+// Was 96 (A5.5, when a run had 12 turns). A long self-development task reached it at turn 92 plus
+// four recoveries and failed with nothing to show for it; runs may now take up to 2000 turns.
+const MAX_ATTEMPTS = 5000;
+
 function cmdAttemptAdd(args) {
   const workspace = args[0];
   const taskId = args[1];
@@ -138,7 +142,9 @@ function cmdAttemptAdd(args) {
   const first = lines.find(function (r) { return r.status === 'started'; });
   if (!first) return failOut('ledger-unreadable', 'task has no started attempt');
   const seq = lines.filter(function (r) { return r.status === 'started'; }).length + 1;
-  if (seq > 96) return failOut('too-many-attempts', 'attempt limit reached');
+  // One attempt per provider request (model turns AND re-asked recoveries). The bound only has to
+  // stop a runaway ledger; the run's own turn/time limits end a task long before it.
+  if (seq > MAX_ATTEMPTS) return failOut('too-many-attempts', 'attempt limit reached (' + MAX_ATTEMPTS + ' provider requests in one task)');
   const attemptId = taskId + '-A' + seq;
   const attempt = { taskId: taskId, taskInstanceId: taskInstanceId, attemptId: attemptId, sequence: seq, status: 'started', executionClass: first.executionClass, sessionId: first.sessionId, startedByTurn: 'turn-' + seq };
   atomicWrite(file, lines.map(function (r) { return JSON.stringify(r); }).concat([JSON.stringify(attempt)]).join('\n') + '\n');

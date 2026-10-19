@@ -63,13 +63,23 @@ check('attempt-add refuses a foreign instance, a model-only task and hostile ids
   assert.equal(run(['attempt-add', d, 'INTENT-99999', t.taskInstanceId]).ok, false);
 });
 
-check('the attempt count is bounded', () => {
+check('the attempt count is bounded far above any run (a 92-turn task with recoveries must not hit it)', () => {
   const d = tmp();
   const t = run(['task-create', d, 'repo-inspect']);
-  let last;
-  for (let i = 0; i < 100; i++) last = run(['attempt-add', d, t.taskId, t.taskInstanceId]);
-  assert.equal(last.ok, false);
-  assert.equal(last.code, "too-many-attempts");
+  // a long task: 96 attempts already (the former limit) and the next one still works
+  for (let i = 0; i < 100; i++) assert.equal(run(['attempt-add', d, t.taskId, t.taskInstanceId]).ok, true);
+  // seed the ledger just below the bound instead of spawning thousands of processes
+  const f = path.join(d, '.ai-harness', 'runs', t.taskId, 'attempts.jsonl');
+  const first = attempts(d, t.taskId)[0];
+  const lines = [];
+  for (let i = 1; i <= 4999; i++) lines.push(JSON.stringify(Object.assign({}, first, { attemptId: t.taskId + '-A' + i, sequence: i })));
+  fs.writeFileSync(f, lines.join('\n') + '\n');
+  const last = run(['attempt-add', d, t.taskId, t.taskInstanceId]);
+  assert.equal(last.ok, true);
+  assert.equal(last.sequence, 5000);
+  const over = run(['attempt-add', d, t.taskId, t.taskInstanceId]);
+  assert.equal(over.ok, false);
+  assert.equal(over.code, 'too-many-attempts');
 });
 
 const issuance = () => ({
