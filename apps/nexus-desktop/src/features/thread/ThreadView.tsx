@@ -60,6 +60,21 @@ function evidenceBadge(r: ThreadRunView): { label: string; tone: "success" | "wa
       detail: "The runtime refuses every edit and write in a read-only request.",
     };
   }
+  // The task asked for an implementation: say what the runtime found, not what the model said.
+  if (run.completion === "incomplete") {
+    const kept = run.codingOutcome?.editsApplied ?? 0;
+    return {
+      label: kept > 0 ? `Incomplete · ${kept} change${kept === 1 ? "" : "s"} kept, work not finished` : "Incomplete · nothing changed, nothing verified",
+      tone: "warning",
+      detail: run.completionNote ?? "The model ended before finishing the work.",
+    };
+  }
+  if (run.completion === "no-change-reported") {
+    return { label: "Completed · no change was made", tone: "warning", detail: "The request asked for an implementation, but no file was changed and no check ran. Read the answer to see why." };
+  }
+  if (run.completion === "no-change-verified") {
+    return { label: "No change needed · checks passed", tone: "success", detail: "Nothing was changed; the relevant check passed (a verified no-op)." };
+  }
   const v = outcomeView(run);
   return v ? { label: v.label, tone: v.tone, detail: v.detail } : null;
 }
@@ -69,7 +84,7 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
   const run = r.run;
   const now = useNow(1000);
   const [open, setOpen] = useState(false);
-  const v = modelStateView(run?.state ?? r.state);
+  const v = modelStateView(run?.stopReason === "no-implementation" ? "incomplete" : (run?.state ?? r.state));
   const live = run !== null && !run.terminal;
   const ev = evidenceBadge(r);
   const files = run?.changedFiles ?? [];

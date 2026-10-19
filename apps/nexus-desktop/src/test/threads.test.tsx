@@ -195,6 +195,56 @@ describe("Persistent conversations (A7.1)", () => {
     expect(send.mock.calls[0]![0].workspace).toBe("fresh");
   });
 
+  it("an implementation request that ended on a plan is shown as INCOMPLETE with its reason, not as a success", async () => {
+    const note = "The task asked for an implementation, but the model ended without changing any file and nothing was verified (its last message was a plan or narration). Nothing was lost: send \"continue\" to try again from here.";
+    const d = detail({
+      thread: summary({ lastState: "incomplete", runCount: 3 }),
+      messages: [...detail().messages, msg(5, "user", "request", R("3"), "Implement it now"), msg(6, "assistant", "answer", R("3"), "Plan: next I'll call fs_edit…"), msg(7, "system", "note", R("3"), note)],
+      runs: [
+        ...detail().runs,
+        runView(3, { state: "limit-reached", userSeq: 5, assistantSeq: 6 }, { state: "limit-reached", stopReason: "no-implementation", completion: "incomplete", completionNote: note }),
+      ],
+    });
+    mount(base({ threadGet: async () => d, threadList: async () => ({ threads: [d.thread] }) }), `#/workspace/c/${T1}`);
+    const run3 = await screen.findByRole("region", { name: "Run 3" });
+    expect(within(run3).getByText("Incomplete")).toBeInTheDocument();
+    expect(within(run3).getByText(/Incomplete · nothing changed, nothing verified/)).toBeInTheDocument();
+    expect(screen.getByText(/ended without changing any file/)).toBeInTheDocument();
+    expect(within(run3).queryByText("Completed")).not.toBeInTheDocument();
+    // and the composer is still there to continue
+    expect(screen.getByLabelText("Message")).toBeEnabled();
+  });
+
+
+  it("an implementation that stopped after real changes says so: changes kept, work not finished", async () => {
+    const kept = "The run stopped before the work was finished: 20 change(s) were made and are kept in the working copy, and the last check failed. Send \"continue\" to resume from here.";
+    const d = detail({
+      thread: summary({ lastState: "incomplete", runCount: 3 }),
+      messages: [...detail().messages, msg(5, "user", "request", R("3"), "Implement it now"), msg(6, "assistant", "answer", R("3"), "Plan: next I'll call fs_edit…"), msg(7, "system", "note", R("3"), kept)],
+      runs: [
+        ...detail().runs,
+        runView(3, { state: "limit-reached", userSeq: 5, assistantSeq: 6 }, { state: "limit-reached", stopReason: "no-implementation", completion: "incomplete", completionNote: kept, codingOutcome: { change: "applied", verification: "failed", editsApplied: 20, editsNotApplied: 0, testsExecuted: 4, testsNotExecuted: 0, blockedByApproval: 0, lastExitCode: 1, staleAfterEdit: false, uncertainOperations: 0 } }),
+      ],
+    });
+    mount(base({ threadGet: async () => d, threadList: async () => ({ threads: [d.thread] }) }), `#/workspace/c/${T1}`);
+    const run3 = await screen.findByRole("region", { name: "Run 3" });
+    expect(within(run3).getByText("Incomplete")).toBeInTheDocument();
+    expect(within(run3).getByText(/Incomplete · 20 changes kept, work not finished/)).toBeInTheDocument();
+    expect(screen.getAllByText(/20 change\(s\) were made and are kept/).length).toBeGreaterThan(0);
+    expect(within(run3).queryByText(/nothing changed/)).not.toBeInTheDocument();
+    expect(within(run3).queryByText("Completed")).not.toBeInTheDocument();
+    // and the composer is still there to continue
+    expect(screen.getByLabelText("Message")).toBeEnabled();
+  });
+
+  it("a no-change completion of an implementation request is labelled as such", async () => {
+    const d = detail();
+    d.runs[1]!.run = { ...d.runs[1]!.run!, completion: "no-change-reported", codingOutcome: null };
+    mount(base({ threadGet: async () => d }), `#/workspace/c/${T1}`);
+    const run2 = await screen.findByRole("region", { name: "Run 2" });
+    expect(within(run2).getByText("Completed · no change was made")).toBeInTheDocument();
+  });
+
   it("the mode switch sends the user's choice; Auto is the default", async () => {
     const send = vi.fn(async (i) => ({ threadId: T1, replay: false, run: fakeRun({ runId: R("3"), requestId: i.idempotencyKey, threadId: T1 }) }));
     const user = userEvent.setup();

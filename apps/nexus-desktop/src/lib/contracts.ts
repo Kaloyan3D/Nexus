@@ -435,6 +435,9 @@ export interface IntentRun {
   workspaceNote?: string | null;
   /** The earlier run whose working copy this run started from. */
   seedFrom?: string | null;
+  /** Derived from the request and the receipts: fulfilled | no-change-verified | no-change-reported | incomplete. */
+  completion?: string | null;
+  completionNote?: string | null;
 }
 
 /**
