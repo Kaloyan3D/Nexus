@@ -332,7 +332,7 @@ fn serve(l: TcpListener, pki: &Pki, responder: Responder) -> Provider {
         .unwrap(),
     );
     std::thread::spawn(move || {
-        for _ in 0..64 {
+        for _ in 0..600 {
             let Ok((tcp, _)) = l.accept() else { return };
             let n = a.fetch_add(1, Ordering::SeqCst);
             // one thread per connection: a deliberately slow stream (the GUI fixture's `running`
@@ -4810,6 +4810,12 @@ fn a614_repeated_truncation_ends_the_run_with_a_clear_cause_and_never_loops() {
     );
     assert_eq!(run.state, "failed", "{}", run.state);
     assert_eq!(run.error_code.as_deref(), Some("output-limit"));
+    // the user sees WHY (it used to be the generic "run ended as failed")
+    let msg = run.error_message.clone().unwrap_or_default();
+    assert!(
+        msg.contains("output limit") && !msg.starts_with("run ended as"),
+        "{msg}"
+    );
     // 512 -> 1024, then no room left: exactly two provider requests, no executions
     assert_eq!(seen.load(Ordering::SeqCst), 2);
     assert!(run.tool_activity.is_empty());
@@ -5189,6 +5195,12 @@ fn a71_responder() -> Responder {
         } else if cur.contains("AFTER-STOP") {
             calls = vec![("fs_read", r#"{"path":"src/carried.txt"}"#.into())];
             text = "The carried file exists and holds the earlier work.".into();
+        } else if cur.contains("HUGE-ANSWER") {
+            calls = vec![];
+            text = format!(
+                "Huge answer. {}",
+                "Detailed discussion of the module. ".repeat(420)
+            );
         } else if cur.contains("BIG-ANSWER") {
             calls = vec![];
             text = format!(
@@ -6481,6 +6493,1194 @@ fn a71_two_conversations_running_at_the_same_time_keep_separate_messages_runs_an
     assert_eq!(
         std::fs::read_to_string(fx.repo.join("src/lib.rs")).unwrap(),
         FAILING_BODY
+    );
+    b.shutdown();
+}
+
+#[test]
+fn a71_a_task_that_reaches_the_controllers_attempt_bound_ends_as_a_clean_limit_with_its_reason() {
+    if !sandbox_ready() {
+        return;
+    }
+    // every request asks for another read; the first one is held back so the test can fill the
+    // task's attempt ledger to the bound before the second turn asks for its attempt
+    let responder: Responder = Arc::new(|n, _body| {
+        let resp = format!("resp_{n}");
+        let frames = call_frames(
+            &resp,
+            n,
+            &format!("c{n}"),
+            "fs_read",
+            r#"{"path":"src/lib.rs"}"#,
+        );
+        if n == 0 {
+            Answer::Slow {
+                frames,
+                gap_ms: 0,
+                hold_ms: 4_000,
+            }
+        } else {
+            Answer::Frames(frames)
+        }
+    });
+    let fx = fixture_autonomous(responder);
+    let b = interactive_broker(&fx, "a71-bound");
+    let sock = b.socket_path().to_owned();
+    let s = tsend(
+        &sock,
+        None,
+        "proj",
+        "Read the library over and over",
+        "edit",
+        "continue",
+        "a71-bound-000001",
+    )
+    .unwrap();
+    let rid = s["run"]["runId"].as_str().unwrap().to_owned();
+    let tid = s["threadId"].as_str().unwrap().to_owned();
+    let end = Instant::now() + Duration::from_secs(60);
+    let task = loop {
+        let r = ic::status(&sock, &rid).unwrap();
+        if let (Some(t), "request-started" | "streaming" | "executing") =
+            (r.task_id.clone(), r.state.as_str())
+        {
+            if r.conversation_id.is_some() {
+                break t;
+            }
+        }
+        assert!(Instant::now() < end, "run never started: {r:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let file = fx
+        .tmp
+        .path()
+        .join("intent-ledger/.ai-harness/runs")
+        .join(&task)
+        .join("attempts.jsonl");
+    let first: Value = serde_json::from_str(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    let mut lines = String::new();
+    for i in 1..=5000 {
+        let mut a = first.clone();
+        a["attemptId"] = json!(format!("{task}-A{i}"));
+        a["sequence"] = json!(i);
+        lines.push_str(&a.to_string());
+        lines.push('\n');
+    }
+    std::fs::write(&file, lines).unwrap();
+    let r = wait_terminal(&sock, &rid, 120);
+    assert_eq!(
+        r.state, "limit-reached",
+        "a bound is a clean stop, not a failure: {r:?}"
+    );
+    assert_eq!(r.stop_reason.as_deref(), Some("max-attempts"));
+    assert!(r.error_code.as_deref() != Some("too-many-attempts"));
+    // the work and the answer slot are kept in the conversation, which is usable again
+    let t = wait_folded(&sock, &tid, 1);
+    assert_eq!(t["runs"][0]["state"], "limit-reached");
+    assert!(
+        t["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["kind"] == "note" && m["text"].as_str().unwrap().contains("limit")),
+        "{t}"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn a71_a_follow_up_after_very_long_answers_still_fits_the_transports_message_bound() {
+    if !sandbox_ready() {
+        return;
+    }
+    // Found live: ~31 KB of conversation context plus the harness text exceeded the 32 KiB
+    // per-message bound and the follow-up failed with "message content is empty or oversized".
+    let fx = fixture_autonomous(a71_responder());
+    let b = interactive_broker(&fx, "a71-fit");
+    let sock = b.socket_path().to_owned();
+    let s = tsend(
+        &sock,
+        None,
+        "proj",
+        "REVIEW-ONE: review, read-only",
+        "auto",
+        "continue",
+        "a71-fit-0000001",
+    )
+    .unwrap();
+    let tid = s["threadId"].as_str().unwrap().to_owned();
+    wait_terminal(&sock, s["run"]["runId"].as_str().unwrap(), 180);
+    wait_folded(&sock, &tid, 1);
+    for i in 2..=5usize {
+        let s = tsend(
+            &sock,
+            Some(&tid),
+            "proj",
+            &format!("HUGE-ANSWER number {i}: discuss the module at length"),
+            "review",
+            "continue",
+            &format!("a71-fit-{i:07}"),
+        )
+        .unwrap();
+        let r = wait_terminal(&sock, s["run"]["runId"].as_str().unwrap(), 180);
+        assert_eq!(
+            r.state, "completed",
+            "run {i} must not be refused for size: {r:?}"
+        );
+        wait_folded(&sock, &tid, i);
+    }
+    let first_turn_sizes: Vec<usize> = fx
+        .provider
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|b| b["input"].as_array().is_some_and(|a| a.len() == 1))
+        .map(|b| b["input"][0]["content"].as_str().map(str::len).unwrap_or(0))
+        .collect();
+    assert_eq!(first_turn_sizes.len(), 5);
+    assert!(
+        first_turn_sizes.iter().all(|n| *n <= 32 * 1024),
+        "{first_turn_sizes:?}"
+    );
+    // the conversation context is still there, with the findings
+    let last = first_turns(&fx).pop().unwrap();
+    assert!(
+        last.contains("F1 — add() subtracts instead of adding")
+            && last.contains("HUGE-ANSWER number 4")
+    );
+    b.shutdown();
+}
+
+// ---------------------------------------------------------------------------------------
+// Completion classification (found by a real self-development run): a provider "stop" is not
+// task completion. These drive the REAL decision paths with a scripted model.
+// ---------------------------------------------------------------------------------------
+
+fn narrated_call_frames(
+    resp: &str,
+    n: usize,
+    call_id: &str,
+    name: &str,
+    args: &str,
+    text: &str,
+) -> Vec<String> {
+    let mut v = call_frames(resp, n, call_id, name, args);
+    v.insert(
+        1,
+        sse(
+            "response.output_text.delta",
+            json!({"type":"response.output_text.delta","delta":text}),
+        ),
+    );
+    v
+}
+
+fn called_id(body: &Value, id: &str) -> bool {
+    body["input"].as_array().is_some_and(|a| {
+        a.iter()
+            .any(|i| i["type"] == "function_call" && i["call_id"] == id)
+    })
+}
+
+/// Has the model already issued a call to `name` (a real function_call item)?
+fn called(body: &Value, name: &str) -> bool {
+    body["input"].as_array().is_some_and(|a| {
+        a.iter()
+            .any(|i| i["type"] == "function_call" && i["name"] == name)
+    })
+}
+
+fn saw(body: &Value, needle: &str) -> bool {
+    body["input"].to_string().contains(needle)
+}
+
+const PLAN_TEXT: &str = "Plan for implementation: next I'll call fs_edit on src/lib.rs, then proc_run cargo test. Let me read the file first with fs_read, I will now fire the calls, composing the tool call messages. Firing now for real. Here they are, going to emit them. I keep deliberating about the order of the calls, the batching of the calls and the shape of the arguments of each of the tool calls instead of making them; padding padding padding padding padding padding padding padding. ZZ-TAIL-MARKER";
+
+fn completion_responder() -> Responder {
+    Arc::new(|n, body| {
+        let resp = format!("resp_{n}");
+        let done = body["input"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["type"] == "function_call_output")
+                    .count()
+            })
+            .unwrap_or(0);
+        let cur = current_request(body);
+        let call = |name: &str, args: &str| {
+            Answer::Frames(call_frames(&resp, n, &format!("call_{done}"), name, args))
+        };
+        let fix = |done: usize| -> Option<Answer> {
+            let calls: [(&str, &str); 3] = [
+                ("fs_read", r#"{"path":"src/lib.rs"}"#),
+                (
+                    "fs_edit",
+                    r#"{"path":"src/lib.rs","edits":[{"oldText":"a - b","newText":"a + b"}]}"#,
+                ),
+                (
+                    "proc_run",
+                    r#"{"program":"cargo","args":["test","--offline"]}"#,
+                ),
+            ];
+            calls.get(done).map(|(name, args)| {
+                Answer::Frames(call_frames(&resp, n, &format!("call_{done}"), name, args))
+            })
+        };
+        if cur.contains("PLAN-LOOP") {
+            return Answer::Frames(text_frames(&resp, PLAN_TEXT));
+        }
+        if cur.contains("TEXT-CALLS") {
+            if saw(body, "written as plain text") {
+                return fix(done).unwrap_or_else(|| {
+                    Answer::Frames(text_frames(&resp, "Fixed add(); cargo test passes."))
+                });
+            }
+            return Answer::Frames(text_frames(&resp, "I will call fs_edit({\"path\":\"src/lib.rs\"}) and then proc_run({\"program\":\"cargo\"})."));
+        }
+        if cur.contains("WIDE-READ") {
+            // 80 distinct reads, then a fix: a long exploration the old 160-item cap would have cut
+            if done < 80 {
+                let paths = ["src/lib.rs", "README.md", "Cargo.toml", "tests/add.rs"];
+                let args = format!(
+                    r#"{{"path":"{}","maxLines":{}}}"#,
+                    paths[done % 4],
+                    1 + done
+                );
+                return Answer::Frames(call_frames(
+                    &resp,
+                    n,
+                    &format!("call_{done}"),
+                    "fs_read",
+                    &args,
+                ));
+            }
+            if !called_id(body, "call_full") {
+                return Answer::Frames(call_frames(
+                    &resp,
+                    n,
+                    "call_full",
+                    "fs_read",
+                    r#"{"path":"src/lib.rs"}"#,
+                ));
+            }
+            if !called(body, "fs_edit") {
+                return Answer::Frames(call_frames(
+                    &resp,
+                    n,
+                    "call_edit",
+                    "fs_edit",
+                    r#"{"path":"src/lib.rs","edits":[{"oldText":"a - b","newText":"a + b"}]}"#,
+                ));
+            }
+            if !called(body, "proc_run") {
+                return Answer::Frames(call_frames(
+                    &resp,
+                    n,
+                    "call_test",
+                    "proc_run",
+                    r#"{"program":"cargo","args":["test","--offline"]}"#,
+                ));
+            }
+            return Answer::Frames(text_frames(&resp, "Fixed add(); cargo test passes."));
+        }
+        if cur.contains("LONG-TASK") {
+            let last_is_memory_request = body["input"]
+                .as_array()
+                .and_then(|a| a.last())
+                .is_some_and(|i| {
+                    i["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("WORKING MEMORY"))
+                });
+            if last_is_memory_request {
+                return Answer::Frames(text_frames(
+                    &resp,
+                    &format!("MEM-MARKER-7: the task is to fix add() in src/lib.rs (a - b should be a + b); tests/add.rs checks it. I have read the crate files already. Changes so far: none. Next steps: 1) read src/lib.rs in full, 2) fs_edit a - b to a + b, 3) cargo test --offline, 4) report. {}", "x".repeat(200)),
+                ));
+            }
+            let memory_in_place = saw(body, "MEM-MARKER-7") && saw(body, "Your working memory");
+            if memory_in_place {
+                if !called_id(body, "call_full") {
+                    return Answer::Frames(call_frames(
+                        &resp,
+                        n,
+                        "call_full",
+                        "fs_read",
+                        r#"{"path":"src/lib.rs"}"#,
+                    ));
+                }
+                if !called(body, "fs_edit") {
+                    return Answer::Frames(call_frames(
+                        &resp,
+                        n,
+                        "call_edit",
+                        "fs_edit",
+                        r#"{"path":"src/lib.rs","edits":[{"oldText":"a - b","newText":"a + b"}]}"#,
+                    ));
+                }
+                if !called(body, "proc_run") {
+                    return Answer::Frames(call_frames(
+                        &resp,
+                        n,
+                        "call_test",
+                        "proc_run",
+                        r#"{"program":"cargo","args":["test","--offline"]}"#,
+                    ));
+                }
+                return Answer::Frames(text_frames(&resp, "Fixed add(); cargo test passes."));
+            }
+            let paths = ["src/lib.rs", "README.md", "Cargo.toml", "tests/add.rs"];
+            let args = format!(
+                r#"{{"path":"{}","maxLines":{}}}"#,
+                paths[done % 4],
+                1 + done
+            );
+            return Answer::Frames(call_frames(
+                &resp,
+                n,
+                &format!("call_{done}"),
+                "fs_read",
+                &args,
+            ));
+        }
+        if cur.contains("STALL-REPEATEDLY") {
+            // a productive model with a habit: write a part, stop on "now the next part", 8 times
+            let items = body["input"].as_array().cloned().unwrap_or_default();
+            let count = |f: &dyn Fn(&Value) -> bool| items.iter().filter(|i| f(i)).count();
+            let nudges = count(&|i| {
+                i["role"] == "user"
+                    && i["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("only announced the next step"))
+            });
+            let writes = count(&|i| i["type"] == "function_call" && i["name"] == "fs_write");
+            if nudges >= 8 {
+                return if !called(body, "proc_run") {
+                    Answer::Frames(call_frames(
+                        &resp,
+                        n,
+                        "call_check",
+                        "proc_run",
+                        r#"{"program":"cargo","args":["check","--offline"]}"#,
+                    ))
+                } else {
+                    Answer::Frames(text_frames(
+                        &resp,
+                        "All eight parts are written and cargo check passes.",
+                    ))
+                };
+            }
+            if writes > nudges {
+                return Answer::Frames(text_frames(
+                    &resp,
+                    &format!("Wrote part {writes} - now the next part."),
+                ));
+            }
+            let args = format!(
+                r#"{{"path":"part{writes}.txt","content":"part {writes}\n","mode":"create"}}"#
+            );
+            return Answer::Frames(call_frames(
+                &resp,
+                n,
+                &format!("call_w{writes}"),
+                "fs_write",
+                &args,
+            ));
+        }
+        if cur.contains("ANNOUNCE-FOREVER") {
+            return match done {
+                0 => call(
+                    "fs_write",
+                    r#"{"path":"part0.txt","content":"p\n","mode":"create"}"#,
+                ),
+                _ => Answer::Frames(text_frames(&resp, "Wrote part 0 - now the next part.")),
+            };
+        }
+        let bare_continue = cur
+            .trim_end_matches("\",\"role\":\"user\"}")
+            .ends_with("\\ncontinue");
+        if bare_continue && saw(body, "CONT-INHERIT") {
+            // a bare "continue" after an implementation request; the model answers with an announcement
+            if saw(body, "only announced the next step") {
+                return if !called(body, "proc_run") {
+                    Answer::Frames(call_frames(
+                        &resp,
+                        n,
+                        "call_test",
+                        "proc_run",
+                        r#"{"program":"cargo","args":["check","--offline"]}"#,
+                    ))
+                } else {
+                    Answer::Frames(text_frames(&resp, "Verified: cargo check passes."))
+                };
+            }
+            return Answer::Frames(text_frames(
+                &resp,
+                "Understood - now I will run the checks.",
+            ));
+        }
+        if cur.contains("CONT-INHERIT") {
+            return match done {
+                0 => call(
+                    "fs_write",
+                    r#"{"path":"part0.txt","content":"p\n","mode":"create"}"#,
+                ),
+                _ => Answer::Frames(text_frames(&resp, "Wrote part0.txt; cargo check passes.")),
+            };
+        }
+        if cur.contains("GREP-IS-NOT-A-CHECK") {
+            if saw(body, "only announced the next step") {
+                return if !called_id(body, "call_test") {
+                    Answer::Frames(call_frames(
+                        &resp,
+                        n,
+                        "call_test",
+                        "proc_run",
+                        r#"{"program":"cargo","args":["test","--offline"]}"#,
+                    ))
+                } else {
+                    Answer::Frames(text_frames(&resp, "Fixed add(); cargo test passes."))
+                };
+            }
+            return match done {
+                0 => call("fs_read", r#"{"path":"src/lib.rs"}"#),
+                1 => call(
+                    "fs_edit",
+                    r#"{"path":"src/lib.rs","edits":[{"oldText":"a - b","newText":"a + b"}]}"#,
+                ),
+                2 => call(
+                    "proc_run",
+                    r#"{"program":"sh","args":["-c","grep -n 'check' tests/add.rs; echo ---"]}"#,
+                ),
+                _ => Answer::Frames(text_frames(
+                    &resp,
+                    "Edit wired - now adding the final proof.",
+                )),
+            };
+        }
+        if cur.contains("ANNOUNCE-STOP") {
+            // edits, then stops on an announcement; after the nudge it verifies and reports
+            if saw(body, "only announced the next step") {
+                return if !called(body, "proc_run") {
+                    Answer::Frames(call_frames(
+                        &resp,
+                        n,
+                        "call_test",
+                        "proc_run",
+                        r#"{"program":"cargo","args":["test","--offline"]}"#,
+                    ))
+                } else {
+                    Answer::Frames(text_frames(&resp, "Fixed add(); cargo test passes."))
+                };
+            }
+            return match done {
+                0 => call("fs_read", r#"{"path":"src/lib.rs"}"#),
+                1 => call(
+                    "fs_edit",
+                    r#"{"path":"src/lib.rs","edits":[{"oldText":"a - b","newText":"a + b"}]}"#,
+                ),
+                _ => Answer::Frames(text_frames(&resp, "Edit wired — now the tests.")),
+            };
+        }
+        if cur.contains("NOOP-VERIFIED") {
+            return match done {
+                0 => call("fs_read", r#"{"path":"src/lib.rs"}"#),
+                1 => call("proc_run", r#"{"program":"cargo","args":["check","--offline"]}"#),
+                _ => Answer::Frames(text_frames(&resp, "Nothing to change: the crate already builds (cargo check passes) and the requested function exists.")),
+            };
+        }
+        if cur.contains("NOOP-PLAIN") {
+            return match done {
+                0 => call("fs_read", r#"{"path":"src/lib.rs"}"#),
+                _ => Answer::Frames(text_frames(
+                    &resp,
+                    "The function already exists in src/lib.rs:1-3; no change is needed.",
+                )),
+            };
+        }
+        if cur.contains("EXPLORE-LOOP") {
+            // reads forever, narrating the same sentence, until Nexus tells it to start
+            if saw(body, "[Nexus] You have made") {
+                if !called(body, "fs_edit") {
+                    return Answer::Frames(call_frames(
+                        &resp,
+                        n,
+                        "call_edit",
+                        "fs_edit",
+                        r#"{"path":"src/lib.rs","edits":[{"oldText":"a - b","newText":"a + b"}]}"#,
+                    ));
+                }
+                if !called(body, "proc_run") {
+                    return Answer::Frames(call_frames(
+                        &resp,
+                        n,
+                        "call_test",
+                        "proc_run",
+                        r#"{"program":"cargo","args":["test","--offline"]}"#,
+                    ));
+                }
+                return Answer::Frames(text_frames(&resp, "Implemented; cargo test passes."));
+            }
+            let paths = ["src/lib.rs", "README.md", "Cargo.toml", "tests/add.rs"];
+            let args = format!(
+                r#"{{"path":"{}","maxLines":{}}}"#,
+                paths[done % 4],
+                1 + done
+            );
+            return Answer::Frames(narrated_call_frames(
+                &resp,
+                n,
+                &format!("call_{done}"),
+                "fs_read",
+                &args,
+                "Exploration is done - now I will implement the change.",
+            ));
+        }
+        if cur.contains("QUIET-LOOP") {
+            if saw(body, "[Nexus] You have made") {
+                let full_read = body["input"].as_array().is_some_and(|a| {
+                    a.iter()
+                        .any(|i| i["type"] == "function_call" && i["call_id"] == "call_full")
+                });
+                if !full_read {
+                    return Answer::Frames(call_frames(
+                        &resp,
+                        n,
+                        "call_full",
+                        "fs_read",
+                        r#"{"path":"src/lib.rs"}"#,
+                    ));
+                }
+                if !called(body, "fs_edit") {
+                    return Answer::Frames(call_frames(
+                        &resp,
+                        n,
+                        "call_edit",
+                        "fs_edit",
+                        r#"{"path":"src/lib.rs","edits":[{"oldText":"a - b","newText":"a + b"}]}"#,
+                    ));
+                }
+                return Answer::Frames(text_frames(&resp, "Implemented the fix."));
+            }
+            let paths = ["src/lib.rs", "README.md", "Cargo.toml", "tests/add.rs"];
+            let args = format!(
+                r#"{{"path":"{}","maxLines":{}}}"#,
+                paths[done % 4],
+                1 + done
+            );
+            return call("fs_read", &args);
+        }
+        if cur.contains("REAL-FIX") {
+            return fix(done).unwrap_or_else(|| {
+                Answer::Frames(text_frames(
+                    &resp,
+                    "Fixed add() in src/lib.rs; cargo test passes.",
+                ))
+            });
+        }
+        if cur.contains("REVIEW-PLAN") {
+            return Answer::Frames(text_frames(&resp, PLAN_TEXT));
+        }
+        Answer::Frames(text_frames(&resp, "ok"))
+    })
+}
+
+fn send_wait(
+    sock: &Path,
+    tid: Option<&str>,
+    text: &str,
+    mode: &str,
+    key: &str,
+    secs: u64,
+) -> (String, ic::IntentRun) {
+    let s = tsend(sock, tid, "proj", text, mode, "continue", key).expect("send");
+    let thread = s["threadId"].as_str().unwrap().to_owned();
+    let run = wait_terminal(sock, s["run"]["runId"].as_str().unwrap(), secs);
+    wait_folded(
+        sock,
+        &thread,
+        ic::thread_get(sock, &thread, None).unwrap()["runs"]
+            .as_array()
+            .unwrap()
+            .len(),
+    );
+    (thread, run)
+}
+
+#[test]
+fn completion_a_plan_instead_of_the_work_is_nudged_then_incomplete_and_the_conversation_continues()
+{
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(completion_responder());
+    let b = interactive_broker(&fx, "cmp-plan");
+    let sock = b.socket_path().to_owned();
+    let (tid, r1) = send_wait(
+        &sock,
+        None,
+        "Implement PLAN-LOOP: fix add() in src/lib.rs and run the tests",
+        "edit",
+        "cmp-plan-000001",
+        180,
+    );
+    // the provider said "stop" six times in a row with a plan: NOT a completed task
+    assert_eq!(r1.state, "limit-reached", "{r1:?}");
+    assert_eq!(r1.stop_reason.as_deref(), Some("no-implementation"));
+    assert_eq!(r1.completion.as_deref(), Some("incomplete"));
+    assert!(r1
+        .completion_note
+        .as_deref()
+        .unwrap()
+        .contains("changing any file"));
+    assert_eq!(r1.edits_used, 0);
+    // exactly 1 + 5 provider requests: the original and the bounded nudges, no side effects
+    assert_eq!(fx.provider.bodies.lock().unwrap().len(), 6);
+    assert!(fx
+        .provider
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .skip(1)
+        .all(|b| saw(b, "ended your turn with a plan")
+            || saw(b, "tool calls written as plain text")
+            || saw(b, "IMPLEMENT")));
+    let t = ic::thread_get(&sock, &tid, None).unwrap();
+    assert!(
+        t["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["kind"] == "note"
+                && m["text"].as_str().unwrap().contains("changing any file")),
+        "the reason is stored for the UI: {t}"
+    );
+    // continuing in the same conversation: the plan is NOT fed back as the model's answer
+    let (_, r2) = send_wait(
+        &sock,
+        Some(&tid),
+        "Implement it now: REAL-FIX",
+        "edit",
+        "cmp-plan-000002",
+        240,
+    );
+    assert_eq!(r2.state, "completed", "{r2:?}");
+    assert_eq!(r2.completion.as_deref(), Some("fulfilled"));
+    assert_eq!(
+        r2.coding_outcome.as_ref().unwrap().verification,
+        "verified-passed"
+    );
+    let turns = first_turns(&fx);
+    let second = turns.last().unwrap();
+    assert!(
+        second.contains("INCOMPLETE") && second.contains("only a plan"),
+        "{second}"
+    );
+    assert!(
+        !second.contains("ZZ-TAIL-MARKER"),
+        "the ramble must not be replayed to the model"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn completion_tool_calls_written_as_text_are_redirected_to_real_calls_and_the_task_is_then_done() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(completion_responder());
+    let b = interactive_broker(&fx, "cmp-text");
+    let sock = b.socket_path().to_owned();
+    let (_, r) = send_wait(
+        &sock,
+        None,
+        "Implement TEXT-CALLS: fix add() and run the tests",
+        "edit",
+        "cmp-text-0000001",
+        240,
+    );
+    assert_eq!(r.state, "completed", "{r:?}");
+    assert_eq!(r.completion.as_deref(), Some("fulfilled"));
+    assert!(r
+        .tool_activity
+        .iter()
+        .any(|a| a.tool == "fs_edit" && a.status == "executed"));
+    assert_eq!(
+        r.coding_outcome.as_ref().unwrap().verification,
+        "verified-passed"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn completion_valid_no_ops_stay_possible_and_read_only_answers_are_never_flagged() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(completion_responder());
+    let b = interactive_broker(&fx, "cmp-noop");
+    let sock = b.socket_path().to_owned();
+    let (_, verified) = send_wait(
+        &sock,
+        None,
+        "Implement NOOP-VERIFIED: make sure add() exists",
+        "edit",
+        "cmp-noop-0000001",
+        200,
+    );
+    assert_eq!(verified.state, "completed", "{verified:?}");
+    assert_eq!(verified.completion.as_deref(), Some("no-change-verified"));
+    assert_eq!(verified.edits_used, 0);
+    let (_, plain) = send_wait(
+        &sock,
+        None,
+        "Implement NOOP-PLAIN: add() should exist",
+        "edit",
+        "cmp-noop-0000002",
+        200,
+    );
+    assert_eq!(plain.state, "completed", "{plain:?}");
+    assert_eq!(
+        plain.completion.as_deref(),
+        Some("no-change-reported"),
+        "shown as 'no change', never as fulfilled"
+    );
+    // a read-only request is not an implementation task: even plan-like text is just an answer
+    let (_, review) = send_wait(
+        &sock,
+        None,
+        "Review REVIEW-PLAN: read-only, do not change any files",
+        "auto",
+        "cmp-noop-0000003",
+        120,
+    );
+    assert_eq!(review.state, "completed", "{review:?}");
+    assert!(review.completion.is_none() || review.completion.as_deref() == Some("fulfilled"));
+    // and a plain question about HOW to implement something is not an implementation task either
+    let (_, how) = send_wait(
+        &sock,
+        None,
+        "How would I implement REVIEW-PLAN retries here?",
+        "edit",
+        "cmp-noop-0000004",
+        120,
+    );
+    assert_eq!(how.state, "completed", "{how:?}");
+    b.shutdown();
+}
+
+#[test]
+fn completion_an_exploration_that_never_starts_is_steered_early_when_it_narrates_in_a_loop_and_at_the_bound_when_silent(
+) {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(completion_responder());
+    let b = interactive_broker(&fx, "cmp-steer");
+    let sock = b.socket_path().to_owned();
+    // narrating the same sentence: steered after a handful of reads, then it implements
+    let (_, r) = send_wait(
+        &sock,
+        None,
+        "Implement EXPLORE-LOOP: fix add() and run the tests",
+        "edit",
+        "cmp-steer-000001",
+        240,
+    );
+    assert_eq!(r.state, "completed", "{r:?}");
+    let reads_before_edit = r
+        .tool_activity
+        .iter()
+        .take_while(|a| a.tool != "fs_edit")
+        .count();
+    assert!(
+        r.tool_activity
+            .iter()
+            .any(|a| a.tool == "fs_edit" && a.status == "executed"),
+        "{r:?}"
+    );
+    assert!(
+        reads_before_edit <= 8,
+        "steered by the repeated narration, not left to read on: {reads_before_edit}"
+    );
+    // silent reading: steered at the bound (24 calls), exactly once
+    let before = fx.provider.bodies.lock().unwrap().len();
+    let (_, q) = send_wait(
+        &sock,
+        None,
+        "Implement QUIET-LOOP: fix add()",
+        "edit",
+        "cmp-steer-000002",
+        300,
+    );
+    assert_eq!(q.state, "completed", "{q:?}");
+    // the first request that carries the steer follows exactly 24 tool results (the bound)
+    let first_steer_outputs = fx
+        .provider
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .skip(before)
+        .find(|b| saw(b, "[Nexus] You have made 24"))
+        .map(|b| {
+            b["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|i| i["type"] == "function_call_output")
+                .count()
+        });
+    assert_eq!(
+        first_steer_outputs,
+        Some(24),
+        "the steer comes at the bound"
+    );
+    let steers = fx
+        .provider
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .skip(before)
+        .filter(|b| saw(b, "[Nexus] You have made 24"))
+        .count();
+    assert!(steers >= 1);
+    assert!(q
+        .tool_activity
+        .iter()
+        .any(|a| a.tool == "fs_edit" && a.status == "executed"));
+    b.shutdown();
+}
+
+#[test]
+fn completion_an_implementation_task_that_forbids_touching_the_original_is_not_read_only() {
+    if !sandbox_ready() {
+        return;
+    }
+    // Found live: "Do not modify the original repository, commit, push or deploy." made the
+    // first run of a real "Implement checkpoint R-NATIVE-1" task read-only.
+    let fx = fixture_autonomous(completion_responder());
+    let b = interactive_broker(&fx, "cmp-mode");
+    let sock = b.socket_path().to_owned();
+    let task = "Implement checkpoint REAL-FIX from the task file.\n\nWork autonomously in the isolated project workspace, implement the required adapter and tests, and verify the result.\n\nDo not proceed to the next checkpoint.\n\nDo not modify the original repository, commit, push or deploy.\n\nDeliver a reviewable patch.";
+    let s = tsend(
+        &sock,
+        None,
+        "proj",
+        task,
+        "auto",
+        "continue",
+        "cmp-mode-000001",
+    )
+    .unwrap();
+    assert_eq!(s["mode"]["readOnly"], false, "{s}");
+    let r = wait_terminal(&sock, s["run"]["runId"].as_str().unwrap(), 240);
+    assert_eq!(r.state, "completed", "{r:?}");
+    assert!(!r.read_only);
+    assert!(r
+        .tool_activity
+        .iter()
+        .any(|a| a.tool == "fs_edit" && a.status == "executed"));
+    // the original really is untouched
+    assert_eq!(
+        std::fs::read_to_string(fx.repo.join("src/lib.rs")).unwrap(),
+        FAILING_BODY
+    );
+    b.shutdown();
+}
+
+#[test]
+fn completion_stopping_on_an_announcement_after_edits_is_redirected_to_the_next_step() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(completion_responder());
+    let b = interactive_broker(&fx, "cmp-ann");
+    let sock = b.socket_path().to_owned();
+    let (_, r) = send_wait(
+        &sock,
+        None,
+        "Implement ANNOUNCE-STOP: fix add() and run the tests",
+        "edit",
+        "cmp-ann-0000001",
+        240,
+    );
+    assert_eq!(r.state, "completed", "{r:?}");
+    assert_eq!(r.completion.as_deref(), Some("fulfilled"));
+    assert_eq!(
+        r.coding_outcome.as_ref().unwrap().verification,
+        "verified-passed"
+    );
+    assert!(r
+        .tool_activity
+        .iter()
+        .any(|a| a.tool == "proc_run" && a.verification.as_deref() == Some("pass")));
+    b.shutdown();
+}
+
+#[test]
+fn completion_a_productive_run_that_keeps_stopping_on_announcements_is_not_ended_by_a_lifetime_budget(
+) {
+    if !sandbox_ready() {
+        return;
+    }
+    // Found live in the final R-NATIVE-1 acceptance run: 20 edits, 4 test runs, then "incomplete"
+    // at turn 120 because the run-wide nudge budget had been spent by earlier stalls. The budget
+    // bounds consecutive stalls; every real change since the last one starts it over.
+    let fx = fixture_autonomous(completion_responder());
+    let b = interactive_broker(&fx, "cmp-stall");
+    let sock = b.socket_path().to_owned();
+    let (_, r) = send_wait(
+        &sock,
+        None,
+        "Implement STALL-REPEATEDLY: write the eight parts and check the crate",
+        "edit",
+        "cmp-stall-000001",
+        400,
+    );
+    assert_eq!(r.state, "completed", "{r:?}");
+    assert_eq!(r.completion.as_deref(), Some("fulfilled"), "{r:?}");
+    assert_eq!(
+        r.tool_activity
+            .iter()
+            .filter(|a| a.tool == "fs_write" && a.status == "executed")
+            .count(),
+        8
+    );
+    assert!(r
+        .tool_activity
+        .iter()
+        .any(|a| a.tool == "proc_run" && a.verification.as_deref() == Some("pass")));
+    b.shutdown();
+}
+
+#[test]
+fn completion_a_stalled_run_after_real_changes_says_what_was_kept_not_nothing_changed() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(completion_responder());
+    let b = interactive_broker(&fx, "cmp-keptnote");
+    let sock = b.socket_path().to_owned();
+    let (_, r) = send_wait(
+        &sock,
+        None,
+        "Implement ANNOUNCE-FOREVER: write a part, then keep announcing",
+        "edit",
+        "cmp-keptnote-0001",
+        400,
+    );
+    assert_eq!(r.completion.as_deref(), Some("incomplete"), "{r:?}");
+    let note = r.completion_note.clone().unwrap_or_default();
+    assert!(
+        note.contains("1 change(s) were made and are kept"),
+        "{note}"
+    );
+    assert!(!note.contains("without changing any file"), "{note}");
+    b.shutdown();
+}
+
+#[test]
+fn completion_a_grep_whose_arguments_say_check_is_not_a_passing_check() {
+    if !sandbox_ready() {
+        return;
+    }
+    // Found live (R-NATIVE-1 acceptance): `sh -c "grep ... check ... Tests.cjs"` was recorded as a
+    // passing check, so an announcement after one write was accepted as "fulfilled".
+    let fx = fixture_autonomous(completion_responder());
+    let b = interactive_broker(&fx, "cmp-grep");
+    let sock = b.socket_path().to_owned();
+    let (_, r) = send_wait(
+        &sock,
+        None,
+        "Implement GREP-IS-NOT-A-CHECK: fix add() and run the tests",
+        "edit",
+        "cmp-grep-0000001",
+        240,
+    );
+    assert_eq!(r.state, "completed", "{r:?}");
+    let grep = r
+        .tool_activity
+        .iter()
+        .find(|a| a.tool == "proc_run" && a.args_summary.contains("grep"))
+        .expect("grep ran");
+    assert!(
+        grep.verification
+            .as_deref()
+            .is_some_and(|v| v.starts_with("run-")),
+        "{grep:?}"
+    );
+    // the announcement was not accepted: the model was sent back and really verified
+    assert!(r
+        .tool_activity
+        .iter()
+        .any(|a| a.tool == "proc_run" && a.verification.as_deref() == Some("pass")));
+    assert_eq!(r.completion.as_deref(), Some("fulfilled"));
+    b.shutdown();
+}
+
+#[test]
+fn completion_a_bare_continue_inherits_the_intent_of_the_request_it_continues() {
+    if !sandbox_ready() {
+        return;
+    }
+    // Found live (R-NATIVE-1 acceptance): "continue" has no implementation verb, so the run had no
+    // completion check at all and a degenerate answer ended it as "fulfilled".
+    let fx = fixture_autonomous(completion_responder());
+    let b = interactive_broker(&fx, "cmp-cont");
+    let sock = b.socket_path().to_owned();
+    let s1 = tsend(
+        &sock,
+        None,
+        "proj",
+        "Implement CONT-INHERIT: write part0.txt",
+        "edit",
+        "continue",
+        "cmp-cont-0000001",
+    )
+    .expect("send 1");
+    let tid = s1["threadId"].as_str().unwrap().to_owned();
+    let r1 = wait_terminal(&sock, s1["run"]["runId"].as_str().unwrap(), 180);
+    assert_eq!(r1.completion.as_deref(), Some("fulfilled"), "{r1:?}");
+    wait_folded(&sock, &tid, 1);
+    let s2 = tsend(
+        &sock,
+        Some(&tid),
+        "proj",
+        "continue",
+        "edit",
+        "continue",
+        "cmp-cont-0000002",
+    )
+    .expect("send 2");
+    let r2 = wait_terminal(&sock, s2["run"]["runId"].as_str().unwrap(), 180);
+    assert_eq!(r2.state, "completed", "{r2:?}");
+    // the announcement was not accepted as the end: the model was sent back and verified
+    assert!(
+        r2.tool_activity
+            .iter()
+            .any(|a| a.tool == "proc_run" && a.verification.as_deref() == Some("pass")),
+        "{r2:?}"
+    );
+    assert_eq!(r2.completion.as_deref(), Some("no-change-verified"));
+    b.shutdown();
+}
+
+#[test]
+fn completion_a_long_task_keeps_its_understanding_through_a_model_written_working_memory() {
+    if !sandbox_ready() {
+        return;
+    }
+    // Found live: at 160 items every turn dropped the oldest step, the model forgot what it had
+    // read, re-read it, and looped for 280 turns. Before the oldest steps go, the model now
+    // writes down what it learned; that memory replaces them.
+    let fx = fixture_autonomous(completion_responder());
+    let mut c = fx.config("cmp-mem");
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.interactive = true;
+    // a small byte budget so the memory is requested after ~25 reads instead of ~110 turns
+    c.context_budget_bytes = Some(60_000);
+    let b = nexus_broker::start(c).expect("broker");
+    let sock = b.socket_path().to_owned();
+    let (_, r) = send_wait(
+        &sock,
+        None,
+        "Implement LONG-TASK: fix add() and run the tests",
+        "edit",
+        "cmp-mem-0000001",
+        420,
+    );
+    assert_eq!(r.state, "completed", "{r:?}");
+    assert_eq!(r.completion.as_deref(), Some("fulfilled"));
+    assert_eq!(
+        r.coding_outcome.as_ref().unwrap().verification,
+        "verified-passed"
+    );
+    let bodies = fx.provider.bodies.lock().unwrap().clone();
+    let requests = bodies
+        .iter()
+        .filter(|b| {
+            saw(b, "[Nexus] This conversation is about to be shortened")
+                && b["input"].as_array().unwrap().last().unwrap()["content"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("WORKING MEMORY"))
+        })
+        .count();
+    assert_eq!(requests, 1, "the memory is requested once");
+    // after the fold the conversation is short again and carries the memory, not 40 old steps
+    let after = bodies
+        .iter()
+        .find(|b| saw(b, "Your working memory"))
+        .expect("a request after the fold");
+    let n = after["input"].as_array().unwrap().len();
+    assert!(n < 60, "{n} items after the fold");
+    assert!(saw(after, "MEM-MARKER-7"));
+    assert!(r.context_compactions >= 1);
+    // the run did not drop steps blindly before the memory existed
+    let before_fold = bodies
+        .iter()
+        .take_while(|b| !saw(b, "Your working memory"))
+        .map(|b| b["input"].as_array().unwrap().len())
+        .max()
+        .unwrap();
+    assert!(before_fold <= 125, "{before_fold}");
+    assert!(
+        before_fold > 20,
+        "the memory was not requested at the very start: {before_fold}"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn completion_a_long_exploration_keeps_everything_it_read_until_the_context_really_needs_room() {
+    if !sandbox_ready() {
+        return;
+    }
+    // Found live: at 160 ITEMS (far below the model's window) every further turn stubbed all
+    // results older than twelve turns and dropped a step; the model re-read the same files
+    // for 230 turns. Item count alone must not shorten the conversation any more.
+    let fx = fixture_autonomous(completion_responder());
+    let b = interactive_broker(&fx, "cmp-wide");
+    let sock = b.socket_path().to_owned();
+    let (_, r) = send_wait(
+        &sock,
+        None,
+        "Implement WIDE-READ: fix add() and run the tests",
+        "edit",
+        "cmp-wide-0000001",
+        420,
+    );
+    assert_eq!(r.state, "completed", "{r:?}");
+    assert_eq!(r.completion.as_deref(), Some("fulfilled"));
+    assert_eq!(r.context_compactions, 0, "no shortening below the budget");
+    let bodies = fx.provider.bodies.lock().unwrap().clone();
+    let max_items = bodies
+        .iter()
+        .map(|b| b["input"].as_array().unwrap().len())
+        .max()
+        .unwrap();
+    assert!(
+        max_items > 165,
+        "the conversation grew past the old cap: {max_items}"
+    );
+    assert!(
+        !bodies.iter().any(|b| saw(b, "\"compacted\":true")),
+        "nothing was stubbed"
     );
     b.shutdown();
 }

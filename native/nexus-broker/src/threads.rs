@@ -402,6 +402,20 @@ const OBJECTS: &[&str] = &[
     "sources",
 ];
 const EXCEPT: &[&str] = &["except", "besides", "apart", "outside", "unless", "other"];
+/// "Do not modify the ORIGINAL repository" restates where changes go (Nexus never touches the
+/// original); it is not an instruction to change nothing. Found live: it made an
+/// "Implement checkpoint R-NATIVE-1" task read-only.
+const PROTECTED_TARGET: &[&str] = &[
+    "original",
+    "upstream",
+    "remote",
+    "production",
+    "prod",
+    "live",
+    "origin",
+    "main",
+    "master",
+];
 /// Verbs that make a request a request for CHANGES (used by the review-intent heuristic).
 const REQUEST_CHANGE_VERBS: &[&str] = &[
     "fix",
@@ -521,6 +535,13 @@ fn negated_change(clause: &[String]) -> bool {
             continue;
         }
         let rest = &clause[after + 1..];
+        if rest
+            .iter()
+            .take(5)
+            .any(|w| PROTECTED_TARGET.contains(&w.as_str()))
+        {
+            continue;
+        }
         if rest.iter().any(|w| EXCEPT.contains(&w.as_str())) {
             continue;
         }
@@ -991,7 +1012,15 @@ fn evidence_line(tr: &ThreadRun) -> String {
     if refused > 0 {
         parts.push(format!("{refused} proposed operation(s) were refused"));
     }
-    let mut end = format!("ended: {}", tr.state);
+    let mut end = if d.stop_reason.as_deref() == Some("no-implementation") {
+        if d.files_touched.is_empty() {
+            "ended: INCOMPLETE - the model answered with a plan and changed nothing; this request still has to be implemented".to_owned()
+        } else {
+            "ended: INCOMPLETE - the model stopped before finishing; the changes above are kept in the working copy and the request still has to be completed".to_owned()
+        }
+    } else {
+        format!("ended: {}", tr.state)
+    };
     if let Some(m) = d.error_message.as_deref().or(d.stop_reason.as_deref()) {
         end.push_str(&format!(" ({})", clip(m, 200)));
     }
@@ -1095,7 +1124,17 @@ fn render(
             s.push_str(&format!("{}\n\n", evidence_line(tr)));
             continue;
         }
+        let incomplete = tr
+            .digest
+            .as_ref()
+            .is_some_and(|d| d.stop_reason.as_deref() == Some("no-implementation"));
         match ans {
+            // a plan/ramble that changed nothing must not be fed back as "your answer": it
+            // would only teach the model to repeat it
+            Some(a) if incomplete => s.push_str(&format!(
+                "Your answer then was only a plan or narration and changed nothing (opening, shortened): {}\n",
+                clip(a.text.trim(), 300)
+            )),
             Some(a) => {
                 let cap = if from_end <= lv.full_answers {
                     lv.full_cap
@@ -1198,6 +1237,11 @@ fn note_for(run: &IntentRun) -> Option<String> {
     Some(match run.state.as_str() {
         "cancelled" => "This run was cancelled before it finished. Work done so far is kept in the working copy.".to_owned(),
         "uncertain" => format!("This run ended with an uncertain outcome: {why}"),
+        "limit-reached" if run.stop_reason.as_deref() == Some("no-implementation") => {
+            run.completion_note
+                .clone()
+                .unwrap_or_else(|| crate::completion::INCOMPLETE_NOTE.to_owned())
+        }
         "limit-reached" => format!("This run stopped at a policy limit; findings and changes so far are kept. ({why})"),
         _ => format!("This run ended as {}: {why}", run.state),
     })
@@ -1652,6 +1696,13 @@ pub fn attach_continuation(b: &Broker, thread_id: &str, new_run: &str, old_run: 
     let _ = b.threads.put(&th);
 }
 
+/// The context may use at most what the first message has left after the harness text and the
+/// request (`reserve` bytes): the transport refuses a single message above its bound.
+pub fn fit_budget(configured: usize, reserve: usize) -> usize {
+    let room = nexus_model::request::MAX_MESSAGE_CHARS.saturating_sub(reserve);
+    configured.min(room).max(1024)
+}
+
 /// 1-based position of a run in its conversation.
 pub fn run_number(b: &Broker, thread_id: &str, run_id: &str) -> Option<u32> {
     b.threads
@@ -1663,7 +1714,22 @@ pub fn run_number(b: &Broker, thread_id: &str, run_id: &str) -> Option<u32> {
 }
 
 /// The context block and workspace facts for a run about to start (called by the executor).
-pub fn context_for_run(b: &Broker, run_id: &str) -> Option<String> {
+/// For a bare "continue": did the request it continues ask for an implementation? The most recent
+/// user request of the conversation that is not itself a continuation decides.
+pub fn continued_request_expects_change(b: &Broker, run_id: &str) -> bool {
+    let Some(tid) = b.store.load(run_id).and_then(|r| r.run.thread_id) else {
+        return false;
+    };
+    b.threads
+        .messages(&tid)
+        .iter()
+        .rev()
+        .filter(|m| m.role == "user" && m.kind == "request")
+        .find(|m| !crate::completion::is_continuation(&m.text))
+        .is_some_and(|m| crate::completion::expects_change(&m.text))
+}
+
+pub fn context_for_run(b: &Broker, run_id: &str, reserve: usize) -> Option<String> {
     let rec = b.store.load(run_id)?;
     let tid = rec.run.thread_id.clone()?;
     // a send in progress holds the conversation's lock until its message is stored
@@ -1701,11 +1767,12 @@ pub fn context_for_run(b: &Broker, run_id: &str) -> Option<String> {
         changed,
     };
     // the conversation's share of the context budget: a quarter, never more than the fixed cap
-    let budget = b
+    let configured = b
         .cfg
         .context_budget_bytes
         .map(|c| (c / 4).clamp(2048, CONTEXT_BUDGET_BYTES))
         .unwrap_or(CONTEXT_BUDGET_BYTES);
+    let budget = fit_budget(configured, reserve);
     let text = build_context(&th, &msgs, run_id, &ws, budget)?;
     let prior_runs = th.runs.iter().take_while(|r| r.run_id != run_id).count() as u32;
     let findings = th.findings.len() as u32;
@@ -1724,7 +1791,18 @@ pub fn context_for_run(b: &Broker, run_id: &str) -> Option<String> {
 
 fn thread_summary(b: &Broker, th: &Thread) -> Value {
     let active = has_active_run(b, th);
-    let last_state = th.runs.last().map(|r| r.state.clone()).unwrap_or_default();
+    let last_state = th
+        .runs
+        .last()
+        .map(|r| {
+            if r.digest.as_ref().and_then(|d| d.stop_reason.as_deref()) == Some("no-implementation")
+            {
+                "incomplete".to_owned()
+            } else {
+                r.state.clone()
+            }
+        })
+        .unwrap_or_default();
     json!({
         "threadId": th.thread_id, "projectId": th.project_id, "title": th.title,
         "createdAtMs": th.created_at_ms, "updatedAtMs": th.updated_at_ms, "archived": th.archived,
@@ -2024,6 +2102,7 @@ mod tests {
             "Do not make any changes to the files",
             "You must not touch any file",
             "just review the diff",
+            "Do not modify files, only report.",
         ] {
             assert!(explicit_read_only(t), "{t}");
         }
@@ -2037,6 +2116,9 @@ mod tests {
             "Fix it. No changes to the API please",
             "Don't change any file except src/lib.rs",
             "Implement F2 without breaking the CLI",
+            "Do not modify the original repository, commit, push or deploy.",
+            "Implement checkpoint R-NATIVE-1.\n\nWork autonomously in the isolated workspace.\n\nDo not modify the original repository, commit, push or deploy.\n\nDeliver a reviewable patch.",
+            "Don't change the production database or the live config",
         ] {
             assert!(!explicit_read_only(t), "{t}");
         }
@@ -2218,6 +2300,20 @@ mod tests {
         )
         .unwrap();
         assert!(c.contains(&"x".repeat(3000)));
+    }
+
+    #[test]
+    fn the_context_always_leaves_the_first_message_inside_the_transport_bound() {
+        let max = nexus_model::request::MAX_MESSAGE_CHARS;
+        // typical: ~5 KB of harness text and a short request leave ~26 KB, not the configured 48 KB
+        let b = fit_budget(CONTEXT_BUDGET_BYTES, 5_000 + 600);
+        assert!(b + 5_600 <= max && b > 20_000, "{b}");
+        // a long request leaves less; the context shrinks, it never pushes the message over
+        let b = fit_budget(CONTEXT_BUDGET_BYTES, 5_000 + 16_000);
+        assert!(b + 21_000 <= max, "{b}");
+        // never zero, never above the configured size
+        assert_eq!(fit_budget(2_048, max), 1_024);
+        assert_eq!(fit_budget(4_000, 100), 4_000);
     }
 
     #[test]

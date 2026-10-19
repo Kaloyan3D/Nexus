@@ -15,6 +15,7 @@
 //! * clients can only see and cancel runs owned by their own client id.
 
 pub mod code;
+pub mod completion;
 pub mod config;
 pub mod consent;
 pub mod context;

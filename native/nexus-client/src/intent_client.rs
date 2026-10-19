@@ -181,6 +181,14 @@ pub struct IntentRun {
     /// A7.1: the earlier run whose working copy this run started from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed_from: Option<String>,
+    /// How the end of a coding run relates to what was asked, from the request and the
+    /// execution receipts (never from the model's claim): `fulfilled` | `no-change-verified`
+    /// | `no-change-reported` | `incomplete`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<String>,
+    /// Plain-language reason shown with an `incomplete` run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_note: Option<String>,
     /// Bounded, ordered record of every proposed tool call.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_activity: Vec<ToolActivity>,

@@ -1111,8 +1111,22 @@ pub(crate) fn run(
     }
 
     // From here a conversation exists: every exit records a terminal state.
+    let me = b.store.load(run_id).map(|r| r.run);
+    let read_only = me.as_ref().is_some_and(|r| r.read_only);
+    let carried_work = me
+        .as_ref()
+        .and_then(|r| r.continuation_of.clone().or_else(|| r.seed_from.clone()))
+        .and_then(|id| b.store.load(&id))
+        .is_some_and(|o| !o.run.changed_files.is_empty());
     let mut loop_state = LoopState {
         mode_code: mode == Mode::Code,
+        carried_work,
+        expects_change: mode == Mode::Code
+            && b.cfg.interactive
+            && !read_only
+            && (crate::completion::expects_change(&intent.content)
+                || (crate::completion::is_continuation(&intent.content)
+                    && crate::threads::continued_request_expects_change(b, run_id))),
         ..Default::default()
     };
     let result = turn_loop(
@@ -1198,6 +1212,22 @@ struct LoopState {
     fail_nudges: u32,
     report_nudges: u32,
     mode_code: bool,
+    /// The request asks for an implementation (decided from its text, read-only runs never).
+    expects_change: bool,
+    /// The copy already holds changes of earlier runs (a continuation / follow-up): a run that
+    /// only verifies them is legitimately edit-free and tool-free.
+    carried_work: bool,
+    plan_nudges: u32,
+    /// edits + checks at the last stall-budget refresh (see `refresh_stall_budget`)
+    progress_mark: u32,
+    steers: u32,
+    /// Normalized progress sentences of the last turns (a narration loop shows here).
+    recent_narration: Vec<String>,
+    completion: Option<&'static str>,
+    /// A turn was spent asking the model to write its working memory; its answer is that memory.
+    memory_requested: bool,
+    memory_tries: u32,
+    memories: u32,
 }
 
 /// How the loop ended (a terminal state is ALWAYS recorded by `finalize`).
@@ -1227,6 +1257,11 @@ impl Ctx<'_> {
             r.tool_activity = activity.into_iter().skip(skip).collect();
         });
     }
+}
+
+/// The Controller refused another attempt of this task (its bound on provider requests).
+pub(crate) fn is_attempt_limit(code: &str) -> bool {
+    code == "too-many-attempts" || code.ends_with("too-many-attempts")
 }
 
 /// What the runtime itself recorded so far (never model text): files changed and the last
@@ -1277,7 +1312,7 @@ pub(crate) fn receipts_summary(activity: &[ToolActivity]) -> String {
 
 #[allow(clippy::too_many_arguments)]
 /// Times the harness will ask a model that stopped early to carry on.
-pub const MAX_NUDGES: u32 = 4;
+pub const MAX_NUDGES: u32 = 7;
 
 /// A reply that has the shape of a finished written report (long and structured).
 fn looks_like_report(t: &str) -> bool {
@@ -1293,12 +1328,71 @@ fn looks_like_report(t: &str) -> bool {
         })
 }
 
+/// Edits and writes that really executed in this run (receipts, not proposals).
+fn applied_edits(ls: &LoopState) -> u32 {
+    ls.activity
+        .iter()
+        .filter(|a| matches!(a.tool.as_str(), "fs_edit" | "fs_write") && a.status == "executed")
+        .count() as u32
+}
+
+/// The nudge budgets bound CONSECUTIVE stalls, not the length of a run. Found live: a productive
+/// run (20 edits, 7 files, 4 test runs) ended "incomplete" at turn 120 because the model's habit of
+/// ending turns on "Next: ..." had used the run-wide budget of 5 over those 120 turns. A real edit or
+/// check since the last refresh proves the earlier stalls were overcome, so the budgets start over.
+fn refresh_stall_budget(ls: &mut LoopState) {
+    let progress = ls.edits_used + ls.tests_used;
+    if progress > ls.progress_mark {
+        ls.progress_mark = progress;
+        ls.nudges = 0;
+        ls.plan_nudges = 0;
+        ls.report_nudges = 0;
+        ls.verify_nudges = 0;
+        ls.fail_nudges = 0;
+    }
+}
+
 /// Should the harness refuse to accept this reply as the end of the task? Returns the
 /// message to send the model and a short reason for the timeline. The check is about the
 /// SHAPE of the stop (work visibly unfinished), never about the quality of the answer.
 fn premature_stop(ls: &mut LoopState, text: &str) -> Option<(&'static str, &'static str)> {
     let t = text.trim();
     let lower = t.to_ascii_lowercase();
+    // 0. an implementation was asked for, nothing was changed and nothing was verified, yet
+    //    the model ended on a plan or on tool calls written as prose (found live: a 40 KB
+    //    planning ramble was accepted as the finished task)
+    if ls.expects_change
+        && applied_edits(ls) == 0
+        && ls.last_test.as_deref() != Some("pass")
+        && ls.plan_nudges < crate::completion::MAX_PLAN_NUDGES
+    {
+        if crate::completion::text_tool_calls(t) {
+            ls.plan_nudges += 1;
+            return Some((
+                crate::completion::MSG_TEXT_CALLS,
+                "tool calls written as text",
+            ));
+        }
+        if crate::completion::plan_like(t)
+            || t.is_empty()
+            || (ls.tool_calls == 0 && !ls.carried_work)
+        {
+            ls.plan_nudges += 1;
+            return Some((crate::completion::MSG_PLAN, "a plan instead of the work"));
+        }
+    }
+    // 0b. changes exist, but the model stopped on "now the next step" (found live: five edits,
+    //     then a one-line announcement was accepted as the end of the task)
+    if ls.expects_change
+        && ls.plan_nudges < crate::completion::MAX_PLAN_NUDGES
+        && crate::completion::announcement(t)
+    {
+        ls.plan_nudges += 1;
+        return Some((
+            crate::completion::MSG_ANNOUNCE,
+            "an announcement instead of the step",
+        ));
+    }
     // 1. an announcement of the next step instead of the step
     const MIDFLIGHT: [&str; 10] = [
         "re-issuing",
@@ -1355,7 +1449,10 @@ fn premature_stop(ls: &mut LoopState, text: &str) -> Option<(&'static str, &'sta
         }
     }
     // 2. changes that were never verified
-    if ls.edits_used > 0 && ls.dirty_since_test && ls.verify_nudges < 1 {
+    if ls.edits_used > 0
+        && ls.dirty_since_test
+        && ls.verify_nudges < if ls.expects_change { 3 } else { 1 }
+    {
         ls.verify_nudges += 1;
         return Some((
             "You changed files but no build, test or type-check has run since your last change. Run the project's verification now (install dependencies first if they are missing) and fix anything that fails. Only then give your final answer.",
@@ -1476,10 +1573,19 @@ fn turn_loop(
             })
             .unwrap_or_default();
         let ro = b.store.load(ctx.run_id).is_some_and(|r| r.run.read_only);
-        // A7.1: the conversation's earlier requests, answers, findings and runtime evidence
-        // travel with the first turn of every follow-up run, within a fixed budget.
-        let prior = crate::threads::context_for_run(b, ctx.run_id);
         let pre = crate::guidance::code_preamble_body(&kinds, true);
+        let ro_note = if ro {
+            "[READ-ONLY REQUEST] The user asked for no changes. fs_edit and fs_write are refused by the runtime for this request; use fs_list, fs_search and fs_read (and proc_run only to inspect or verify) and answer in text.\n\n"
+        } else {
+            ""
+        };
+        // A7.1: the conversation's earlier requests, answers, findings and runtime evidence
+        // travel with the first turn of every follow-up run. The whole first message must fit
+        // the transport's per-message bound, so the conversation gets what the harness text
+        // and the user's request leave over (a 31 KB context once made a follow-up fail with
+        // "message content is empty or oversized").
+        let reserve = pre.len() + ro_note.len() + sh.intent.content.len() + 256;
+        let prior = crate::threads::context_for_run(b, ctx.run_id, reserve);
         let mut c = pre;
         if let Some(p) = &prior {
             c.push('\n');
@@ -1487,9 +1593,7 @@ fn turn_loop(
         } else {
             c.push_str("\nTask from the user:\n");
         }
-        if ro {
-            c.push_str("[READ-ONLY REQUEST] The user asked for no changes. fs_edit and fs_write are refused by the runtime for this request; use fs_list, fs_search and fs_read (and proc_run only to inspect or verify) and answer in text.\n\n");
-        }
+        c.push_str(ro_note);
         c.push_str(&sh.intent.content);
         c
     } else {
@@ -1528,12 +1632,19 @@ fn turn_loop(
         // Each model turn is its own Controller attempt of the same task.
         if dispatches > 0 {
             let _g = b.bridge_lock.lock().unwrap_or_else(|p| p.into_inner());
-            let a = bridge(
+            let a = match bridge(
                 b,
                 "attempt-add",
                 &[&ledger, sh.task_id, sh.task_instance],
                 None,
-            )?;
+            ) {
+                Ok(a) => a,
+                // The Controller's per-task bound on provider requests is a policy limit, not
+                // a malfunction: end cleanly with the work kept (a self-development task died
+                // here as an opaque "failed" at 96 attempts).
+                Err(e) if is_attempt_limit(&e.code) => return Ok(LoopEnd::Limit("max-attempts")),
+                Err(e) => return Err(e),
+            };
             attempt_id = str_of(&a, "attemptId")?;
         }
         let shadow = bridge(
@@ -1559,8 +1670,34 @@ fn turn_loop(
             })),
         )?;
         let kintent = kernel_intent.get("intent").cloned().unwrap_or_default();
+        // Long tasks: before the oldest steps are dropped, this turn also asks the model to write
+        // down what it has learned (found live: a 270-turn task forgot what it had read every few
+        // turns and re-read the same files for half an hour).
+        let ctx_budget = b
+            .cfg
+            .context_budget_bytes
+            .unwrap_or(crate::context::COMPACT_BYTES);
+        if sh.mode == Mode::Code
+            && b.cfg.interactive
+            && !ls.memory_requested
+            && ls.memory_tries < 2
+            && crate::context::wants_memory(&items, ctx_budget)
+        {
+            ls.memory_requested = true;
+            ls.memory_tries += 1;
+            items.push(InputItem::Message {
+                role: "user".into(),
+                content: crate::context::MEMORY_PROMPT.to_owned(),
+            });
+            let _ = session.state(
+                nexus_client::model_run::ModelRunState::ToolRunning,
+                "The conversation is long: asking the model to write its working memory before older steps are shortened.",
+                None,
+            );
+        }
         // A6.1.4 P4: keep long conversations inside a budget, from the runtime's own receipts.
         if sh.mode == Mode::Code
+            && !ls.memory_requested
             && crate::context::compact(
                 &mut items,
                 &receipts_summary(&ls.activity),
@@ -1781,6 +1918,45 @@ fn turn_loop(
             ls.saw_usage = true;
             session.set_usage(ls.usage_in, ls.usage_out);
         }
+        if ls.memory_requested {
+            ls.memory_requested = false;
+            let mem = out.text.trim().to_owned();
+            if out.tool_calls.is_empty() {
+                // a memory (or an unusable answer: then plain shortening takes over next turn);
+                // either way this reply is NOT the end of the task
+                let folded = mem.len() >= 200
+                    && crate::context::fold_into_memory(
+                        &mut items,
+                        &mem,
+                        &receipts_summary(&ls.activity),
+                    );
+                if !folded
+                    && matches!(items.last(), Some(InputItem::Message { content, .. }) if content == crate::context::MEMORY_PROMPT)
+                {
+                    items.pop();
+                }
+                if folded {
+                    ls.memories += 1;
+                    ls.compactions += 1;
+                    ls.memory_tries = 0;
+                    let n = ls.compactions;
+                    b.update(ctx.run_id, |r| r.context_compactions = n);
+                    let _ = session.state(
+                        nexus_client::model_run::ModelRunState::ToolRunning,
+                        &format!("Older steps were replaced by the model's working memory ({} characters).", mem.len()),
+                        None,
+                    );
+                }
+                continue;
+            }
+            // it called tools (or said nothing useful) instead: that turn is handled as a normal
+            // one below; the request is withdrawn and will be repeated once, then the plain
+            // shortening takes over
+            if matches!(items.last(), Some(InputItem::Message { content, .. }) if content == crate::context::MEMORY_PROMPT)
+            {
+                items.pop();
+            }
+        }
         ls.final_text = out.text.clone();
         ls.last_output = Some(out.clone());
         let proposals = out.tool_calls.clone();
@@ -1788,6 +1964,7 @@ fn turn_loop(
             if out.finish_reason.starts_with("incomplete:") {
                 return Ok(LoopEnd::Limit("output-limit"));
             }
+            refresh_stall_budget(ls);
             if b.cfg.interactive && sh.mode == Mode::Code && ls.nudges < MAX_NUDGES {
                 if let Some(msg) = premature_stop(ls, &out.text) {
                     ls.nudges += 1;
@@ -1816,6 +1993,18 @@ fn turn_loop(
             let (v, u) = check_citations(&out.text, &evidence);
             ls.citations_verified = v;
             ls.citations_unverified = u;
+            // A provider "stop" is not task completion: classify it from the request and the
+            // receipts. An implementation task that ended on a plan is incomplete, not done.
+            let c = crate::completion::decide(
+                ls.expects_change,
+                applied_edits(ls),
+                ls.last_test.as_deref(),
+                &out.text,
+            );
+            ls.completion = Some(c.as_str());
+            if c == crate::completion::Completion::Incomplete {
+                return Ok(LoopEnd::Limit("no-implementation"));
+            }
             return Ok(LoopEnd::Completed);
         }
         // A response that was cut off must never trigger a tool.
@@ -1853,6 +2042,11 @@ fn turn_loop(
             )
             .map_err(|e| se(e.code, e.message))?;
         ctx.progress(ls, "tool-running");
+        ls.recent_narration
+            .push(crate::completion::normalize_narration(&out.text));
+        if ls.recent_narration.len() > 4 {
+            ls.recent_narration.remove(0);
+        }
         if !out.text.trim().is_empty() {
             items.push(InputItem::Message {
                 role: "assistant".into(),
@@ -2256,6 +2450,27 @@ fn turn_loop(
                 ));
             }
         }
+        // An implementation task that keeps reading: after a block of tool calls with no change
+        // (or the same progress sentence three turns running) tell the model to start. Bounded;
+        // it creates no side effect and does not stop the run.
+        if ls.expects_change && applied_edits(ls) == 0 && ls.steers < crate::completion::MAX_STEERS
+        {
+            let due = ls.tool_calls >= crate::completion::STEER_EVERY * (ls.steers + 1);
+            if due || crate::completion::repeated_narration(&ls.recent_narration) {
+                ls.steers += 1;
+                let n = ls.tool_calls;
+                let _ = session.state(
+                    nexus_client::model_run::ModelRunState::ToolRunning,
+                    &format!("{n} tool calls and no change yet; asking the model to start implementing (reminder {}).", ls.steers),
+                    None,
+                );
+                items.push(InputItem::Message {
+                    role: "user".into(),
+                    content: crate::completion::steer_message(n),
+                });
+                ls.recent_narration.clear();
+            }
+        }
     }
     Ok(LoopEnd::Limit("max-turns"))
 }
@@ -2459,7 +2674,73 @@ fn is_verification_command(args: &Value) -> bool {
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
         .unwrap_or_default();
-    let line = format!("{prog} {}", argv.join(" ")).to_ascii_lowercase();
+    // `sh -c "<script>"`: judge each command of the script, not the words of its arguments
+    // (found live: `sh -c "grep -n check ... Tests.cjs"` was recorded as a passing check and let an
+    // unfinished run end as fulfilled). Text after a heredoc marker is data.
+    let shell = matches!(prog, "sh" | "bash" | "zsh" | "dash");
+    let script = argv
+        .iter()
+        .position(|a| *a == "-c" || *a == "-lc")
+        .and_then(|i| argv.get(i + 1))
+        .filter(|_| shell);
+    if let Some(script) = script {
+        let script = script.split("<<").next().unwrap_or("");
+        return shell_segments(script)
+            .iter()
+            .any(|seg| segment_verifies(seg.trim()));
+    }
+    segment_verifies(&format!("{prog} {}", argv.join(" ")))
+}
+
+/// The commands of a shell script, split at `; & | newline` outside quotes.
+fn shell_segments(script: &str) -> Vec<String> {
+    let (mut out, mut cur, mut quote) = (Vec::new(), String::new(), None::<char>);
+    let mut chars = script.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == '\\' && q == '"' {
+                    cur.push(c);
+                    if let Some(n) = chars.next() {
+                        cur.push(n);
+                    }
+                    continue;
+                }
+                if c == q {
+                    quote = None;
+                }
+                cur.push(c);
+            }
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    cur.push(c);
+                }
+                ';' | '&' | '|' | '\n' => out.push(std::mem::take(&mut cur)),
+                _ => cur.push(c),
+            },
+        }
+    }
+    out.push(cur);
+    out
+}
+
+/// Programs that only read, search or print: whatever words their arguments hold, they verify nothing.
+const INSPECTORS: [&str; 22] = [
+    "grep", "egrep", "rg", "cat", "sed", "awk", "head", "tail", "ls", "find", "echo", "printf",
+    "git", "wc", "diff", "sort", "cut", "tr", "stat", "file", "less", "tee",
+];
+
+fn segment_verifies(seg: &str) -> bool {
+    let line = seg.to_ascii_lowercase();
+    let first = line
+        .split_whitespace()
+        .find(|w| !w.contains('='))
+        .unwrap_or("");
+    let first = first.rsplit('/').next().unwrap_or(first);
+    if INSPECTORS.contains(&first) {
+        return false;
+    }
     const INSTALL: [&str; 9] = [
         "npm ci",
         "npm install",
@@ -2611,6 +2892,8 @@ fn finalize(
         Err(e) => LoopEnd::Failed(e.code, e.message),
     };
     let mut stop_reason: Option<String> = None;
+    // the real reason of a failure (the status only knows "failed")
+    let mut failure: Option<String> = None;
     match end {
         LoopEnd::Recorded => {}
         LoopEnd::Completed => {
@@ -2635,6 +2918,17 @@ fn finalize(
                 None,
             );
         }
+        LoopEnd::Limit("no-implementation") => {
+            stop_reason = Some("no-implementation".to_owned());
+            let _ = session.state(
+                S::LimitReached,
+                &format!(
+                    "Incomplete: {}",
+                    crate::completion::incomplete_note(ls.edits_used, ls.last_test.as_deref())
+                ),
+                Some("no-implementation"),
+            );
+        }
         LoopEnd::Limit(why) => {
             stop_reason = Some(why.to_owned());
             let _ = session.state(
@@ -2651,9 +2945,11 @@ fn finalize(
             );
         }
         LoopEnd::Failed(code, msg) => {
+            failure = Some(msg.clone());
             let _ = session.state(S::Failed, &format!("Failed: {msg}"), Some(&code));
         }
         LoopEnd::Uncertain(code, msg) => {
+            failure = Some(msg.clone());
             let _ = session.state(S::Uncertain, &format!("Uncertain: {msg}"), Some(&code));
         }
     }
@@ -2688,6 +2984,7 @@ fn finalize(
             }
         }
     }
+    let completion = ls.completion;
     let (edits_used, tests_used, last_test) = (ls.edits_used, ls.tests_used, ls.last_test.clone());
     let verified = ls.citations_verified.clone();
     let unverified = ls.citations_unverified.clone();
@@ -2719,6 +3016,16 @@ fn finalize(
             r.last_test_verification = last_test;
         }
         r.stop_reason = stop_reason;
+        r.completion = completion.map(str::to_owned);
+        if r.completion.as_deref() == Some("incomplete") {
+            r.completion_note = Some(crate::completion::incomplete_note(
+                edits_used,
+                r.last_test_verification.as_deref(),
+            ));
+        }
+        if let Some(m) = failure {
+            r.error_message = Some(m.chars().take(300).collect());
+        }
         r.updated_at_ms = now_ms();
     });
     // A7.1: the answer and the runtime's evidence become part of the conversation (the run
@@ -2748,6 +3055,14 @@ mod tests {
             ("npx", &["tsc", "--noEmit"]),
             ("npm", &["run", "build"]),
             ("sh", &["-c", "npm test 2>&1 | tail"]),
+            (
+                "sh",
+                &[
+                    "-c",
+                    "cd native && cargo test --offline -p nexus-client 2>&1 | tail -5",
+                ],
+            ),
+            ("node", &["tests/NativeRegistryCatalog.Tests.cjs"]),
             ("go", &["vet", "./..."]),
             ("dotnet", &["build"]),
         ] {
@@ -2759,6 +3074,10 @@ mod tests {
             ("pip", &["install", "-r", "requirements.txt"]),
             ("node", &["--version"]),
             ("sh", &["-c", "ls node_modules/.bin"]),
+            // words inside file names / patterns of read-only commands verify nothing
+            ("sh", &["-c", "grep -n \"check\\|test\" config/registry/resolver.cjs | head; echo ---; sed -n 1,5p tests/NativeRegistryCatalog.Tests.cjs"]),
+            ("sh", &["-c", "cat > /tmp/dbg.cjs <<'EOF'\nconst r = require('./check')\nEOF"]),
+            ("git", &["diff", "--stat", "tests/"]),
             ("cargo", &["fetch"]),
             ("python3", &["-m", "pip", "install", "x"]),
         ] {
@@ -2948,6 +3267,93 @@ mod tests {
         );
         i.limits.max_turns = Some(2);
         assert_eq!(resolve_limits(&i).turns, 2);
+    }
+
+    const INCIDENT: &str = include_str!("../tests/fixtures/planning-loop-final-answer.txt");
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn a_planning_ramble_is_no_longer_accepted_as_the_finished_task() {
+        // the mechanism of the incident: after 40 read-only calls the 40 KB ramble LOOKS like a report
+        assert!(looks_like_report(INCIDENT));
+        let mut ls = LoopState::default();
+        ls.tool_calls = 40;
+        // an old-style run (no implementation intent) would have been accepted
+        assert!(premature_stop(&mut ls, INCIDENT).is_none());
+        // an implementation task with nothing changed and nothing verified is redirected, three times
+        let mut ls = LoopState::default();
+        ls.tool_calls = 40;
+        ls.expects_change = true;
+        for _ in 0..3 {
+            let (msg, why) = premature_stop(&mut ls, INCIDENT).expect("nudged");
+            assert!(
+                msg.contains("IMPLEMENT") || msg.contains("plain text"),
+                "{msg}"
+            );
+            assert!(why.contains("plan") || why.contains("text"), "{why}");
+        }
+        assert_eq!(ls.plan_nudges, 3);
+        // an applied edit or a passing check changes the picture: no plan nudge
+        let mut ls = LoopState::default();
+        ls.tool_calls = 40;
+        ls.expects_change = true;
+        ls.last_test = Some("pass".into());
+        assert!(premature_stop(&mut ls, INCIDENT).is_none());
+        assert_eq!(ls.plan_nudges, 0);
+        // a read-only / non-implementation run is never nudged by this rule
+        let mut ls = LoopState::default();
+        ls.tool_calls = 40;
+        assert_eq!(ls.plan_nudges, 0);
+        let _ = premature_stop(&mut ls, INCIDENT);
+        assert_eq!(ls.plan_nudges, 0);
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn stall_budgets_start_over_when_the_run_makes_progress() {
+        // found live: 20 edits over 120 turns, ended "incomplete" because the run-wide budget of
+        // announcement nudges was spent
+        let mut ls = LoopState::default();
+        ls.expects_change = true;
+        ls.tool_calls = 30;
+        ls.edits_used = 1;
+        ls.activity.push(ToolActivity {
+            tool: "fs_edit".into(),
+            status: "executed".into(),
+            ..Default::default()
+        });
+        // the caller's gate, as in the run loop
+        let stop = |ls: &mut LoopState| -> u32 {
+            let mut nudged = 0;
+            loop {
+                refresh_stall_budget(ls);
+                if ls.nudges < MAX_NUDGES
+                    && premature_stop(ls, "Next: inspect the stub. Proceeding.").is_some()
+                {
+                    ls.nudges += 1;
+                    nudged += 1;
+                } else {
+                    return nudged;
+                }
+            }
+        };
+        let first = stop(&mut ls);
+        assert!((1..=MAX_NUDGES).contains(&first), "bounded: {first}");
+        // no progress: the next stop is final
+        assert_eq!(stop(&mut ls), 0);
+        // every further edit or check is progress: the model is asked again, many times over
+        for _ in 0..6 {
+            ls.edits_used += 1;
+            assert!(stop(&mut ls) >= 1);
+            assert_eq!(stop(&mut ls), 0);
+        }
+    }
+
+    #[test]
+    fn the_controllers_attempt_bound_is_a_clean_limit_not_a_failure() {
+        assert!(is_attempt_limit("too-many-attempts"));
+        assert!(is_attempt_limit("bridge-too-many-attempts"));
+        assert!(!is_attempt_limit("bridge-error"));
     }
 
     #[test]
