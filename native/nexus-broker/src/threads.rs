@@ -1946,6 +1946,17 @@ pub fn context_for_run(b: &Broker, run_id: &str, reserve: usize) -> Option<Strin
     Some(text)
 }
 
+/// R-NATIVE-3: conversation bound target as identities only (no connection
+/// reference, no credential material, no path). Absent when unbound.
+fn bound_target_json(t: Option<&ThreadTarget>) -> Option<Value> {
+    t.map(|t| {
+        json!({
+            "providerId": t.provider_id, "remoteModelId": t.remote_model_id,
+            "logicalModelId": t.logical_model_id, "routeId": t.route_id,
+        })
+    })
+}
+
 fn thread_summary(b: &Broker, th: &Thread) -> Value {
     let active = has_active_run(b, th);
     let last_state = th
@@ -1960,13 +1971,19 @@ fn thread_summary(b: &Broker, th: &Thread) -> Value {
             }
         })
         .unwrap_or_default();
-    json!({
+    let mut v = json!({
         "threadId": th.thread_id, "projectId": th.project_id, "title": th.title,
         "createdAtMs": th.created_at_ms, "updatedAtMs": th.updated_at_ms, "archived": th.archived,
         "legacy": th.legacy, "runCount": th.runs.len(), "messageCount": th.message_count,
         "lastPreview": th.last_preview, "lastState": last_state,
         "active": active.is_some(), "activeRunId": active, "findingCount": th.findings.len(),
-    })
+    });
+    // R-NATIVE-3: conversation bound target as identities only (no connection
+    // reference, no credential material, no path). Absent when unbound.
+    if let Some(t) = bound_target_json(th.target.as_ref()) {
+        v["target"] = t;
+    }
+    v
 }
 
 pub fn list(b: &Broker, client: &str, params: &Value) -> CmdResult {
@@ -2499,5 +2516,57 @@ mod tests {
         assert_eq!(d.edits_applied, 2);
         assert_eq!(d.receipts.len(), 4);
         assert_eq!(d.receipts.last().unwrap().verdict.as_deref(), Some("pass"));
+    }
+
+    /// The wire shape of the bound target is the golden file the Desktop types against
+    /// (`apps/nexus-desktop/src/test/contract/thread-target.json`).
+    #[test]
+    fn the_bound_target_wire_shape_is_the_one_the_desktop_contract_expects() {
+        let golden: Value = serde_json::from_str(include_str!(
+            "../../../apps/nexus-desktop/src/test/contract/thread-target.json"
+        ))
+        .unwrap();
+        let t = ThreadTarget {
+            provider_id: "acme".into(),
+            logical_model_id: "acme/large".into(),
+            remote_model_id: "acme-large-1".into(),
+            route_id: "acme/large".into(),
+            connection_id: Some("conn-acme".into()),
+            context_limit_tokens: Some(200_000),
+            output_limit_tokens: Some(8_192),
+        };
+        assert_eq!(bound_target_json(Some(&t)).unwrap(), golden);
+    }
+
+    #[test]
+    fn the_bound_target_is_identities_only_and_absent_when_unbound() {
+        // Unbound conversation: no target key at all.
+        assert!(bound_target_json(None).is_none());
+        // Bound conversation: exactly the four identity keys, even when the
+        // stored target also carries connection and limit metadata.
+        let t = ThreadTarget {
+            provider_id: "acme".into(),
+            logical_model_id: "acme/large".into(),
+            remote_model_id: "acme-large-1".into(),
+            route_id: "acme/large".into(),
+            connection_id: Some("conn-acme".into()),
+            context_limit_tokens: Some(200_000),
+            output_limit_tokens: Some(8_192),
+        };
+        let v = bound_target_json(Some(&t)).expect("bound target renders");
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["logicalModelId", "providerId", "remoteModelId", "routeId"]
+        );
+        assert_eq!(v["providerId"], "acme");
+        assert_eq!(v["remoteModelId"], "acme-large-1");
+        assert_eq!(v["logicalModelId"], "acme/large");
+        assert_eq!(v["routeId"], "acme/large");
+        let flat = v.to_string();
+        assert!(!flat.contains("conn-acme"), "{flat}");
+        assert!(!flat.contains("connection"), "{flat}");
+        assert!(!flat.contains("credential"), "{flat}");
     }
 }

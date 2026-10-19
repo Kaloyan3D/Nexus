@@ -1367,3 +1367,40 @@
 .nv-thread__composer { position: sticky; bottom: 0; background: var(--nv-bg); z-index: 5; margin-top: auto; }
 .nv-thread__wsproblem { padding: var(--nv-s-3) var(--nv-s-3) 0; }
 .nv-row__preview { display: block; color: var(--nv-text-muted); font-size: var(--nv-text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+
+/* ---------- R-NATIVE-3: model picker and the read-only Registry models table ---------- */
+.nv-modelpicker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nv-s-2) var(--nv-s-3);
+  min-width: 0;
+}
+.nv-modelpicker__label {
+  color: var(--nv-text-muted);
+  font-size: var(--nv-text-sm);
+}
+.nv-modelpicker__select {
+  flex: 1 1 220px;
+  min-width: 0;
+  max-width: 100%;
+}
+.nv-modelpicker > .nv-note {
+  flex-basis: 100%;
+  margin: 0;
+}
+.nv-table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  border-radius: var(--nv-radius-lg);
+}
+.nv-table-scroll:focus-visible {
+  outline: 2px solid var(--nv-purple);
+  outline-offset: 2px;
+}
+.nv-table--targets {
+  min-width: 1040px;
+}
+.nv-table--targets .nv-table__row {
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+}

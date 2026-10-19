@@ -1,8 +1,10 @@
 import { ArrowUp, Loader2, Square } from "lucide-react";
 import { useRef, useState } from "react";
-import type { ThreadDetail, ThreadMode } from "../../lib/contracts";
+import type { ModelSelection, ThreadDetail, ThreadMode } from "../../lib/contracts";
 import { Alert, Button } from "../../components/ui/primitives";
 import { useNexus } from "../../state/NexusContext";
+import { ModelPicker } from "../models/ModelPicker";
+import { failedBeforeSubmissionMessage, refusalMessage } from "../models/modelTargets";
 
 export const THREAD_PLACEHOLDER = "Message Nexus about this project…";
 
@@ -33,9 +35,12 @@ export function ModeSwitch({ value, onChange }: { value: ThreadMode; onChange: (
  * conversation's project is fixed - the page cannot name another one.
  */
 export function ThreadComposer({ detail, onSent }: { detail: ThreadDetail; onSent: () => void }) {
-  const { sendThread, threadSending, threadError, clearThreadError, api, runtimeState } = useNexus();
+  const { sendThread, threadSending, threadError, clearThreadError, api, runtimeState, intentTargets } = useNexus();
   const [text, setText] = useState("");
   const [mode, setMode] = useState<ThreadMode>("auto");
+  // R-NATIVE-3: null = broker default (sends NO selection); a choice sends identities only.
+  // Never reset on refusal: the user's choice stays visible (no silent fallback).
+  const [model, setModel] = useState<ModelSelection | null>(null);
   const [fresh, setFresh] = useState(false);
   const [stopping, setStopping] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -44,13 +49,14 @@ export function ThreadComposer({ detail, onSent }: { detail: ThreadDetail; onSen
   const interactive = runtimeState?.mode === "interactive";
   const consentOk = !interactive || (runtimeState?.consent.given === true && runtimeState.providerConnected);
   const workspaceProblem = last?.run?.errorCode && WORKSPACE_CODES.has(last.run.errorCode) ? last.run : null;
+  const cacheNote = failedBeforeSubmissionMessage(last?.run?.errorCode ?? null, last?.run?.errorMessage ?? null);
   const busy = t.active;
   const empty = text.trim().length === 0;
   const canSend = !busy && !threadSending && !empty && consentOk && !t.archived;
 
   const send = async () => {
     if (!canSend) return;
-    const reply = await sendThread({ threadId: t.threadId, projectId: t.projectId, content: text, mode, workspace: fresh ? "fresh" : "continue" });
+    const reply = await sendThread({ threadId: t.threadId, projectId: t.projectId, content: text, mode, workspace: fresh ? "fresh" : "continue", model });
     if (reply) {
       setText("");
       setFresh(false);
@@ -102,6 +108,7 @@ export function ThreadComposer({ detail, onSent }: { detail: ThreadDetail; onSen
         }}
       />
       <div className="nv-composer__ctx">
+        <ModelPicker targets={intentTargets} value={model} bound={t.target ?? null} disabled={busy} onChange={setModel} />
         <ModeSwitch value={mode} onChange={setMode} />
         {fresh && <span className="nv-note">Next message starts from your project's current files.</span>}
         <span className="nv-composer__spacer" />
@@ -117,9 +124,10 @@ export function ThreadComposer({ detail, onSent }: { detail: ThreadDetail; onSen
       </div>
       {!consentOk && <Alert tone="warning" title="Autonomous work is not allowed yet">Finish setup first (connect OpenCode Go and allow autonomous work).</Alert>}
       {t.archived && <p className="nv-note">This conversation is archived.</p>}
+      {cacheNote && <Alert tone="info" title="The model list changed">{cacheNote}</Alert>}
       {threadError && (
         <Alert tone="error" title={threadError.code === "thread-busy" ? "Still working" : `Send failed: ${threadError.code}`}>
-          {threadError.message}{" "}
+          {refusalMessage(threadError.code, threadError.message)}{" "}
           <button type="button" className="nv-linkbtn" onClick={clearThreadError}>
             Dismiss
           </button>

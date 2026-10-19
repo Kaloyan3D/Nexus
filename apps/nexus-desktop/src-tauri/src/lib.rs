@@ -181,6 +181,35 @@ async fn intent_models() -> Result<Vec<nexus_client::intent_client::AllowedModel
     .map_err(|_| internal())?
 }
 
+/// R-NATIVE-3: read-only Registry target catalog (identities + status only;
+/// no secret, path or limit the renderer could set). Same broker socket
+/// and client as every other intent command.
+#[tauri::command]
+async fn intent_targets() -> Result<Vec<nexus_client::intent_client::RegistryTarget>, UiError> {
+    tauri::async_runtime::spawn_blocking(|| {
+        nexus_client::intent_client::registry_targets(
+            &nexus_client::intent_client::default_broker_socket(),
+        )
+        .map_err(|e| backend::ui_error(&e))
+    })
+    .await
+    .map_err(|_| internal())?
+}
+
+/// R-NATIVE-3: one identity part of a model selection. Provider and remote
+/// model ids are single path segments; logical model ids and route ids may
+/// themselves contain '/'. Identities only: no path, tool, limit, secret
+/// or authority can cross here.
+fn valid_identity_part(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty() && t.len() <= 200 && !t.contains('/') && !t.chars().any(|c| c.is_control())
+}
+
+fn valid_route_id(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty() && t.len() <= 200 && !t.chars().any(|c| c.is_control())
+}
+
 /// Submit one user-typed model-only intent. `idempotency_key` is generated
 /// once per Send click by the UI so a duplicate click or a retried call can
 /// never create a second billable attempt.
@@ -189,20 +218,68 @@ async fn intent_submit(
     prompt: String,
     provider_id: Option<String>,
     remote_model_id: Option<String>,
+    logical_model_id: Option<String>,
+    route_id: Option<String>,
     idempotency_key: String,
 ) -> Result<nexus_client::intent_client::SubmitReply, UiError> {
+    // R-NATIVE-3: identities only. Anything else (paths, tools, limits,
+    // secrets, authority) is rejected before reaching the broker.
+    for part in [&provider_id, &remote_model_id, &logical_model_id, &route_id]
+        .into_iter()
+        .flatten()
+    {
+        if !valid_identity_part(part) && !valid_route_id(part) {
+            return Err(UiError {
+                code: "bad-usage".to_owned(),
+                message: "model selection is not valid".to_owned(),
+            });
+        }
+    }
+    if let Some(r) = route_id.as_deref() {
+        if r.trim().is_empty() || r.len() > 200 {
+            return Err(UiError {
+                code: "bad-usage".to_owned(),
+                message: "model selection is not valid".to_owned(),
+            });
+        }
+    }
     tauri::async_runtime::spawn_blocking(move || {
         use nexus_client::intent_contract::{
             IntentLimits, ModelSelection, NexusIntentV1, ResponseMode,
         };
-        let model = match (provider_id, remote_model_id) {
-            (Some(p), Some(m)) => Some(ModelSelection {
-                provider_id: p,
-                remote_model_id: m,
-                logical_model_id: None,
-                route_id: None,
-            }),
-            (None, None) => None,
+        let model = match (provider_id, remote_model_id, logical_model_id, route_id) {
+            (Some(p), Some(m), l, r) => {
+                if !valid_identity_part(&p) || !valid_identity_part(&m) {
+                    return Err(UiError {
+                        code: "bad-usage".to_owned(),
+                        message: "model selection is not valid".to_owned(),
+                    });
+                }
+                if let Some(l) = l.as_deref() {
+                    // Logical ids may contain '/' (e.g. "acme/large").
+                    if !valid_route_id(l) {
+                        return Err(UiError {
+                            code: "bad-usage".to_owned(),
+                            message: "model selection is not valid".to_owned(),
+                        });
+                    }
+                }
+                if let Some(r) = r.as_deref() {
+                    if !valid_route_id(r) {
+                        return Err(UiError {
+                            code: "bad-usage".to_owned(),
+                            message: "model selection is not valid".to_owned(),
+                        });
+                    }
+                }
+                Some(ModelSelection {
+                    provider_id: p,
+                    remote_model_id: m,
+                    logical_model_id: l,
+                    route_id: r,
+                })
+            }
+            (None, None, None, None) => None,
             _ => {
                 return Err(UiError {
                     code: "bad-usage".to_owned(),
@@ -602,14 +679,58 @@ async fn thread_get(
 /// One message into a conversation (created when `thread_id` is absent). The broker starts
 /// the run, continuing from the conversation's workspace.
 #[tauri::command]
+// The renderer calls this by NAMED arguments (the frontend/backend contract in api.ts); the four
+// identity fields of an optional selection are separate named arguments by design.
+#[allow(clippy::too_many_arguments)]
 async fn thread_send(
     thread_id: Option<String>,
     project_id: String,
     content: String,
     mode: Option<String>,
     workspace: Option<String>,
+    provider_id: Option<String>,
+    remote_model_id: Option<String>,
+    logical_model_id: Option<String>,
+    route_id: Option<String>,
     idempotency_key: String,
 ) -> Result<serde_json::Value, UiError> {
+    // R-NATIVE-3: optional selection as identities only (default sends none,
+    // byte-for-byte the same request as before). Rejected before the broker.
+    let (model, route) = match (&provider_id, &remote_model_id, &logical_model_id, &route_id) {
+        (None, None, None, None) => (None, None),
+        (p, m, l, r) => {
+            // Provider and remote model ids are single segments; the logical
+            // id may itself contain '/' (e.g. "acme/large"), so it is
+            // validated leniently and never packed into the `model` path.
+            // The exact catalog routeId carries the disambiguation instead.
+            for part in [p, m].into_iter().flatten() {
+                if !valid_identity_part(part) {
+                    return Err(UiError {
+                        code: "bad-usage".to_owned(),
+                        message: "model selection is not valid".to_owned(),
+                    });
+                }
+            }
+            for part in [l, r].into_iter().flatten() {
+                if !valid_route_id(part) {
+                    return Err(UiError {
+                        code: "bad-usage".to_owned(),
+                        message: "model selection is not valid".to_owned(),
+                    });
+                }
+            }
+            match (p, m) {
+                (Some(p), Some(m)) => (Some(format!("{p}/{m}")), r.clone()),
+                (None, None) if r.is_some() => (None, r.clone()),
+                _ => {
+                    return Err(UiError {
+                        code: "bad-usage".to_owned(),
+                        message: "provider and model must be selected together".to_owned(),
+                    })
+                }
+            }
+        }
+    };
     tauri::async_runtime::spawn_blocking(move || {
         interactive::guarded(|| {
             nexus_client::intent_client::thread_send(
@@ -621,9 +742,8 @@ async fn thread_send(
                     mode: mode.as_deref().unwrap_or("auto"),
                     workspace: workspace.as_deref().unwrap_or("continue"),
                     idempotency_key: &idempotency_key,
-                    // the Desktop sends no model until checkpoint R-NATIVE-3 (identities only, later)
-                    model: None,
-                    route: None,
+                    model: model.as_deref(),
+                    route: route.as_deref(),
                 },
             )
             .map_err(|e| backend::ui_error(&e))
@@ -851,6 +971,7 @@ pub fn run() {
             model_run_status,
             cancel_model_run,
             intent_models,
+            intent_targets,
             intent_submit,
             intent_workspaces,
             intent_inspect_submit,
@@ -912,6 +1033,7 @@ mod authz_tests {
         "model_run_status",
         "cancel_model_run",
         "intent_models",
+        "intent_targets",
         "intent_submit",
         "intent_workspaces",
         "intent_inspect_submit",
@@ -1096,9 +1218,41 @@ mod authz_tests {
                 "Tauri backend must not reference {forbidden}"
             );
         }
-        // The submit command cannot carry anything but text + an explicit
-        // provider/model pair + an idempotency key.
-        assert!(prod.contains("fn intent_submit(\n    prompt: String,\n    provider_id: Option<String>,\n    remote_model_id: Option<String>,\n    idempotency_key: String,\n)"));
+        // The submit command cannot carry anything but text + an optional
+        // identity-only selection + an idempotency key.
+        assert!(prod.contains("fn intent_submit(\n    prompt: String,\n    provider_id: Option<String>,\n    remote_model_id: Option<String>,\n    logical_model_id: Option<String>,\n    route_id: Option<String>,\n    idempotency_key: String,\n)"));
+        // The thread-send command accepts the same identities only.
+        assert!(prod.contains("logical_model_id: Option<String>,\n    route_id: Option<String>,\n    idempotency_key: String,"));
+        // The read-only catalog command exists and takes no renderer input.
+        assert!(prod.contains("async fn intent_targets()"));
+        // No path, tool, limit, secret or approval vocabulary in the three commands that carry or
+        // list selections (the global guard above covers the whole backend and is unchanged).
+        for name in [
+            "async fn intent_submit(",
+            "async fn thread_send(",
+            "async fn intent_targets(",
+        ] {
+            let start = prod.find(name).unwrap_or_else(|| panic!("{name} exists"));
+            let rest = &prod[start..];
+            let body = &rest[..rest[name.len()..]
+                .find("#[tauri::command]")
+                .map_or(rest.len(), |e| e + name.len())];
+            for forbidden in [
+                "credential",
+                "approval",
+                "context_limit",
+                "output_limit",
+                "max_output",
+                "workspace_root",
+                "tool-execute",
+                "fs_write",
+            ] {
+                assert!(
+                    !body.contains(forbidden),
+                    "{name} must not reference {forbidden}"
+                );
+            }
+        }
     }
 
     /// `NEXUS_BROKER_SOCKET` is process-global: the fake-broker tests must not
@@ -1384,6 +1538,8 @@ mod authz_tests {
             "hello model".into(),
             Some("acme".into()),
             Some("acme-large-1".into()),
+            None,
+            None,
             "gui-0123456789abcdef".into(),
         ))
         .unwrap();
@@ -1452,5 +1608,253 @@ mod authz_tests {
                 "the backend must not read transcripts directly: {forbidden}"
             );
         }
+    }
+
+    /// R-NATIVE-3: `intent_targets` reads the broker's `intent-models` reply
+    /// (the same verb the CLI path uses) and surfaces the `targets` field;
+    /// the frame carries no auth, path, credential or limit the renderer
+    /// could set.
+    #[test]
+    fn desktop_intent_targets_reads_the_registry_catalog() {
+        let _env = BROKER_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!("nexus-tauri-rn3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("broker.sock");
+        let _ = std::fs::remove_file(&sock);
+        let l = UnixListener::bind(&sock).unwrap();
+        let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let f2 = frames.clone();
+        std::thread::spawn(move || {
+            for stream in l.incoming().take(1) {
+                let mut s = stream.unwrap();
+                let mut line = String::new();
+                BufReader::new(s.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let rid = v["id"].clone();
+                f2.lock().unwrap().push(v);
+                let result = serde_json::json!({
+                    "models": [],
+                    "targets": [{
+                        "providerId": "acme", "remoteModelId": "acme-large-1",
+                        "logicalModelId": "acme/large", "routeId": "acme/large",
+                        "issuable": true, "allowed": true,
+                    }],
+                });
+                let _ = s.write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::json!({"protocol":1,"id":rid,"ok":true,"result":result})
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("NEXUS_BROKER_SOCKET", &sock);
+        let targets = tauri::async_runtime::block_on(super::intent_targets()).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].provider_id, "acme");
+        assert_eq!(targets[0].remote_model_id, "acme-large-1");
+        assert_eq!(targets[0].route_id, "acme/large");
+        let got = frames.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["cmd"], "intent-models");
+        assert!(
+            got[0].get("auth").is_none(),
+            "the renderer path signs nothing"
+        );
+        let wire = got[0].to_string();
+        assert!(!wire.contains("secret") && !wire.contains("credential"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R-NATIVE-3: `intent_submit` forwards a chosen target as identities (provider, model, logical
+    /// model, route) inside the intent's `model`; a malformed or lone half of a selection never reaches
+    /// the broker socket.
+    #[test]
+    fn desktop_intent_submit_forwards_the_selection_identities_and_rejects_malformed_ones() {
+        let _env = BROKER_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let dir =
+            std::env::temp_dir().join(format!("nexus-tauri-rn3-submit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("broker.sock");
+        let _ = std::fs::remove_file(&sock);
+        let l = UnixListener::bind(&sock).unwrap();
+        let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let f2 = frames.clone();
+        std::thread::spawn(move || {
+            for stream in l.incoming().take(1) {
+                let mut s = stream.unwrap();
+                let mut line = String::new();
+                BufReader::new(s.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let rid = v["id"].clone();
+                f2.lock().unwrap().push(v);
+                let run = serde_json::json!({"runId":"run_00000000000000000000000000000000","requestId":"r","clientId":"uid:1","state":"preparing","terminal":false,"intentType":"model-only","responseMode":"stream","cancelRequested":false,"createdAtMs":1,"updatedAtMs":1});
+                let result = serde_json::json!({"run": run, "replay": false});
+                let _ = s.write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::json!({"protocol":1,"id":rid,"ok":true,"result":result})
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("NEXUS_BROKER_SOCKET", &sock);
+        tauri::async_runtime::block_on(super::intent_submit(
+            "hello".into(),
+            Some("acme".into()),
+            Some("acme-large-1".into()),
+            Some("acme/large".into()),
+            Some("acme/large".into()),
+            "gui-0000000000000011".into(),
+        ))
+        .unwrap();
+        let got = frames.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            got[0]["params"]["intent"]["model"],
+            serde_json::json!({"providerId":"acme","remoteModelId":"acme-large-1","logicalModelId":"acme/large","routeId":"acme/large"})
+        );
+        // malformed identities, and half a selection, are refused before any broker contact
+        for (p, m, l, r) in [
+            (Some("acme"), Some("../../etc/passwd"), None, None),
+            (Some("acme"), None, None, None),
+            (None, None, Some("acme/large"), None),
+            (Some("acme"), Some("acme-large-1"), Some("bad\nid"), None),
+        ] {
+            let e = tauri::async_runtime::block_on(super::intent_submit(
+                "hello".into(),
+                p.map(str::to_owned),
+                m.map(str::to_owned),
+                l.map(str::to_owned),
+                r.map(str::to_owned),
+                "gui-0000000000000012".into(),
+            ))
+            .unwrap_err();
+            assert_eq!(e.code, "bad-usage", "{p:?} {m:?} {l:?} {r:?}");
+        }
+        assert_eq!(
+            frames.lock().unwrap().len(),
+            1,
+            "nothing malformed reached the broker"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R-NATIVE-3: `thread_send` with no selection puts `model: null` and
+    /// `route: null` on the `thread-send` wire frame (byte-identical to the
+    /// pre-R-NATIVE-3 request); a chosen model+route forwards the identities
+    /// (`provider/remote` plus the exact route id); malformed or oversized
+    /// identities are rejected before any broker contact.
+    #[test]
+    fn desktop_thread_send_forwards_identities_only() {
+        let _env = BROKER_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!("nexus-tauri-rn3-send-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("broker.sock");
+        let _ = std::fs::remove_file(&sock);
+        let l = UnixListener::bind(&sock).unwrap();
+        let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let f2 = frames.clone();
+        std::thread::spawn(move || {
+            for stream in l.incoming().take(2) {
+                let mut s = stream.unwrap();
+                let mut line = String::new();
+                BufReader::new(s.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let rid = v["id"].clone();
+                f2.lock().unwrap().push(v);
+                let result = serde_json::json!({
+                    "threadId": "thr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "run": {"runId":"run_00000000000000000000000000000000","requestId":"r","clientId":"uid:1","state":"preparing","terminal":false,"intentType":"repo-code","responseMode":"stream","cancelRequested":false,"createdAtMs":1,"updatedAtMs":1},
+                    "replay": false,
+                });
+                let _ = s.write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::json!({"protocol":1,"id":rid,"ok":true,"result":result})
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("NEXUS_BROKER_SOCKET", &sock);
+        // Default: no selection -> model/route are null.
+        tauri::async_runtime::block_on(super::thread_send(
+            None,
+            "east-india".into(),
+            "hello".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "gui-0000000000000001".into(),
+        ))
+        .unwrap();
+        // Choice: identities only (logical id with a slash stays intact via route).
+        tauri::async_runtime::block_on(super::thread_send(
+            None,
+            "east-india".into(),
+            "hello".into(),
+            None,
+            None,
+            Some("acme".into()),
+            Some("acme-large-1".into()),
+            Some("acme/large".into()),
+            Some("acme/large".into()),
+            "gui-0000000000000002".into(),
+        ))
+        .unwrap();
+        let got = frames.lock().unwrap().clone();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0]["cmd"], "thread-send");
+        assert!(got[0]["params"]["model"].is_null());
+        assert!(got[0]["params"]["route"].is_null());
+        assert_eq!(got[1]["params"]["model"], "acme/acme-large-1");
+        assert_eq!(got[1]["params"]["route"], "acme/large");
+        // Malformed identities never reach the broker socket.
+        let bad = tauri::async_runtime::block_on(super::thread_send(
+            None,
+            "east-india".into(),
+            "hello".into(),
+            None,
+            None,
+            Some("acme".into()),
+            Some("../../etc/passwd".into()),
+            None,
+            None,
+            "gui-0000000000000003".into(),
+        ));
+        assert_eq!(bad.unwrap_err().code, "bad-usage");
+        let lone = tauri::async_runtime::block_on(super::thread_send(
+            None,
+            "east-india".into(),
+            "hello".into(),
+            None,
+            None,
+            Some("acme".into()),
+            None,
+            None,
+            None,
+            "gui-0000000000000004".into(),
+        ));
+        assert_eq!(lone.unwrap_err().code, "bad-usage");
+        assert_eq!(frames.lock().unwrap().len(), 2, "rejections send no frames");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

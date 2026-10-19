@@ -375,6 +375,8 @@ export interface IntentRun {
   providerId: string | null;
   remoteModelId: string | null;
   logicalModelId: string | null;
+  /** R-NATIVE-2 resolved target identity bound to this run (identity only). */
+  routeId?: string | null;
   endpointKind: string | null;
   requestDigest: string | null;
   httpStatus: number | null;
@@ -631,6 +633,42 @@ export interface AllowedModel {
   outputLimitTokens: number;
 }
 
+/** R-NATIVE-3: one broker `intent-models` target (read-only status, identities only). */
+export interface RegistryTarget {
+  providerId: string;
+  logicalModelId: string;
+  remoteModelId: string;
+  routeId: string;
+  /** Omitted by the broker when the route has no connection. */
+  connectionId?: string | null;
+  connectionStatus: string;
+  protocol: string;
+  contextLimitTokens: number;
+  outputLimitTokens: number;
+  billingTier: string;
+  /** Omitted by the broker when the model declares none. */
+  dataUse?: string | null;
+  issuable: boolean;
+  /** Machine reason, present exactly when the target is not issuable. */
+  reason?: string | null;
+}
+
+/** R-NATIVE-3: identities-only model selection (never a path, limit or credential). */
+export interface ModelSelection {
+  providerId: string;
+  remoteModelId: string;
+  logicalModelId?: string | null;
+  routeId?: string | null;
+}
+
+/** R-NATIVE-3: a conversation's bound target (identities only). */
+export interface ThreadTarget {
+  providerId: string;
+  remoteModelId: string;
+  logicalModelId: string;
+  routeId: string;
+}
+
 export interface IntentSubmitReply {
   run: IntentRun;
   replay: boolean;
@@ -869,6 +907,8 @@ export interface ThreadSummary {
   active: boolean;
   activeRunId: string | null;
   findingCount: number;
+  /** R-NATIVE-3: the conversation's bound target (identities only; absent when unbound). */
+  target?: ThreadTarget | null;
 }
 
 export interface ThreadMessage {
@@ -970,4 +1010,6 @@ export interface ThreadSendInput {
   /** `fresh` starts from the project's current files instead of the conversation's workspace. */
   workspace: "continue" | "fresh";
   idempotencyKey: string;
+  /** R-NATIVE-3: optional identities-only selection. Absent = broker default. */
+  model?: ModelSelection | null;
 }

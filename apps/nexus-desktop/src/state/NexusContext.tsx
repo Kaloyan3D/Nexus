@@ -22,8 +22,10 @@ import type {
   MockEvent,
   ModelConversationSummary,
   ModelCatalog,
+  ModelSelection,
   ProjectOpenReply,
   ProjectView,
+  RegistryTarget,
   ThreadMode,
   ThreadSendReply,
   ThreadSummary,
@@ -98,6 +100,9 @@ export interface NexusState {
   /** A5.3: models the broker lets this client choose (null = not loaded). */
   intentModels: AllowedModel[] | null;
   intentModelsError: UiError | null;
+  /** R-NATIVE-3: read-only Registry target catalog (null = not loaded). */
+  intentTargets: RegistryTarget[] | null;
+  intentTargetsError: UiError | null;
   /** A5.5: read-only workspaces (identities) available for inspection. */
   intentWorkspaces: AllowedWorkspace[] | null;
   /** The run being submitted/prepared (before its conversation exists). */
@@ -117,7 +122,7 @@ export interface NexusState {
   /** Leave the open conversation; the next message starts a NEW one with fresh context. */
   newConversation: () => void;
   /** Send a message into a conversation (a new one when `threadId` is null) and open it. */
-  sendThread: (input: { threadId: string | null; projectId: string; content: string; mode: ThreadMode; workspace?: "continue" | "fresh" }) => Promise<ThreadSendReply | null>;
+  sendThread: (input: { threadId: string | null; projectId: string; content: string; mode: ThreadMode; workspace?: "continue" | "fresh"; model?: ModelSelection | null }) => Promise<ThreadSendReply | null>;
   threadSending: boolean;
   threadError: UiError | null;
   clearThreadError: () => void;
@@ -288,6 +293,9 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
   // A5.3: the composer's Send goes through the SAME broker the CLI uses.
   const [intentModels, setIntentModels] = useState<AllowedModel[] | null>(null);
   const [intentModelsError, setIntentModelsError] = useState<UiError | null>(null);
+  // R-NATIVE-3: the read-only Registry target catalog behind the picker/Models view.
+  const [intentTargets, setIntentTargets] = useState<RegistryTarget[] | null>(null);
+  const [intentTargetsError, setIntentTargetsError] = useState<UiError | null>(null);
   // A6.1.4: everything the broker serves is re-read when the runtime becomes ready or a
   // setup step (provider, consent, project) completes.
   const [runtimeState, setRuntimeState] = useState<RuntimeState | null>(null);
@@ -299,6 +307,10 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
       .intentModels()
       .then((m) => alive && (setIntentModels(m), setIntentModelsError(null)))
       .catch((e) => alive && (setIntentModels(null), setIntentModelsError(asUiError(e))));
+    nativeApi
+      .intentTargets()
+      .then((t) => alive && (setIntentTargets(t), setIntentTargetsError(null)))
+      .catch((e) => alive && (setIntentTargets(null), setIntentTargetsError(asUiError(e))));
     return () => {
       alive = false;
     };
@@ -654,13 +666,20 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     setPageState("workspace");
   }, [select]);
   const sendThread = useCallback(
-    async (input: { threadId: string | null; projectId: string; content: string; mode: ThreadMode; workspace?: "continue" | "fresh" }) => {
+    async (input: { threadId: string | null; projectId: string; content: string; mode: ThreadMode; workspace?: "continue" | "fresh"; model?: ModelSelection | null }) => {
       // One key per click: a retried call never creates a second run or message.
       const key = newIdempotencyKey();
       setThreadSending(true);
       setThreadError(null);
       try {
-        const reply = await nativeApi.threadSend({ ...input, workspace: input.workspace ?? "continue", idempotencyKey: key });
+        const { model, ...rest } = input;
+        const reply = await nativeApi.threadSend({
+          ...rest,
+          workspace: input.workspace ?? "continue",
+          // default = NO selection key at all (the same request as before R-NATIVE-3); a choice carries identities only
+          ...(model ? { model } : {}),
+          idempotencyKey: key,
+        });
         await refreshThreads();
         select({ kind: "thread", id: reply.threadId });
         return reply;
@@ -733,6 +752,8 @@ export function NexusProvider({ api, children }: { api?: NativeApi; children: Re
     mockBusy,
     intentModels,
     intentModelsError,
+    intentTargets,
+    intentTargetsError,
     intentWorkspaces,
     intentCodeSources,
     intentCodeLimits,

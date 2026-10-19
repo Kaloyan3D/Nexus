@@ -20,6 +20,7 @@
     "allow-model-run-status",
     "allow-cancel-model-run",
     "allow-intent-models",
+    "allow-intent-targets",
     "allow-intent-result",
     "allow-intent-submit",
     "allow-intent-workspaces",

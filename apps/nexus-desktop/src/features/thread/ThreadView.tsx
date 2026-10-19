@@ -116,6 +116,11 @@ function RunBlock({ r, isLast, detail }: { r: ThreadRunView; isLast: boolean; de
             {ev.label}
           </Badge>
         )}
+        {run && (run.providerId || run.remoteModelId) && (
+          <Badge mono title={run.routeId ? `Route ${run.routeId}: the model and route this run used` : "The model this run used"}>
+            {run.providerId ?? "?"} / {run.remoteModelId ?? "?"}{run.routeId ? ` · route ${run.routeId}` : ""}
+          </Badge>
+        )}
         {r.context && (
           <Badge title={`The conversation's memory given to the model when this run started · sha256 ${r.context.sha256.slice(0, 12)}…`}>
             Memory: {r.context.priorRuns} earlier run{r.context.priorRuns === 1 ? "" : "s"}
@@ -308,6 +313,12 @@ export function ThreadView({ threadId }: { threadId: string }) {
         <Button variant="ghost" size="sm" onClick={() => void archive()} disabled={t.active} aria-label="Archive conversation" icon={<Archive size={14} />} />
       </div>
       <h1 className="nv-taskhead__title">{t.title || "Conversation"}</h1>
+      {t.target && (
+        <p className="nv-note" aria-label="Conversation model">
+          Runs on {t.target.providerId} / {t.target.remoteModelId}
+          {t.target.routeId ? ` · route ${t.target.routeId}` : ""}.
+        </p>
+      )}
       {t.legacy && <p className="nv-note">Recorded before conversations existed; you can continue it from here.</p>}
       <FindingsBar findings={detail.findings} />
       <div className="nv-thread__log" ref={logRef} role="log" aria-label="Conversation">

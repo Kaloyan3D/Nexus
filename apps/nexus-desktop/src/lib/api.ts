@@ -21,6 +21,7 @@ import type {
   ModelIoView,
   ProjectOpenReply,
   ProjectView,
+  RegistryTarget,
   ThreadDetail,
   ThreadSendInput,
   ThreadSendReply,
@@ -51,10 +52,12 @@ export interface NativeApi {
   listMockConversations(): Promise<MockConversationSummary[]>;
   /** A5.3: Registry-issued models the broker lets this client select. */
   intentModels(): Promise<AllowedModel[]>;
+  /** R-NATIVE-3: read-only Registry target catalog (status, identities only). */
+  intentTargets(): Promise<RegistryTarget[]>;
   /** A5.3: submit text through the same broker the CLI uses. */
   intentSubmit(
     prompt: string,
-    model: { providerId: string; remoteModelId: string } | null,
+    model: { providerId: string; remoteModelId: string; logicalModelId?: string | null; routeId?: string | null } | null,
     idempotencyKey: string,
   ): Promise<IntentSubmitReply>;
   /** A5.5: read-only workspaces (identities) the broker lets this client inspect. */
@@ -153,11 +156,14 @@ export const tauriApi: NativeApi = {
   modelIoRead: (taskInstanceId) => invoke<ModelIoView>("model_io_read", { taskInstanceId }),
   listMockConversations: () => invoke<MockConversationSummary[]>("list_mock_conversations"),
   intentModels: () => invoke<AllowedModel[]>("intent_models"),
+  intentTargets: () => invoke<RegistryTarget[]>("intent_targets"),
   intentSubmit: (prompt, model, idempotencyKey) =>
     invoke<IntentSubmitReply>("intent_submit", {
       prompt,
       providerId: model?.providerId ?? null,
       remoteModelId: model?.remoteModelId ?? null,
+      logicalModelId: model?.logicalModelId ?? null,
+      routeId: model?.routeId ?? null,
       idempotencyKey,
     }),
   intentWorkspaces: () => invoke<AllowedWorkspace[]>("intent_workspaces"),
@@ -190,6 +196,10 @@ export const tauriApi: NativeApi = {
       content: i.content,
       mode: i.mode,
       workspace: i.workspace,
+      providerId: i.model?.providerId ?? null,
+      remoteModelId: i.model?.remoteModelId ?? null,
+      logicalModelId: i.model?.logicalModelId ?? null,
+      routeId: i.model?.routeId ?? null,
       idempotencyKey: i.idempotencyKey,
     }),
   threadCreate: (projectId, title) => invoke<{ thread: ThreadSummary }>("thread_create", { projectId, title: title ?? null }),
@@ -249,6 +259,7 @@ export const unavailableApi: NativeApi = {
   modelIoRead: () => Promise.reject(notInShell),
   listMockConversations: () => Promise.resolve([]),
   intentModels: () => Promise.reject(notInShell),
+  intentTargets: () => Promise.reject(notInShell),
   intentSubmit: () => Promise.reject(notInShell),
   intentWorkspaces: () => Promise.resolve([]),
   intentInspectSubmit: () => Promise.reject(notInShell),
