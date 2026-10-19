@@ -445,7 +445,7 @@ export interface IntentRun {
  * execution receipts only - never from model text and never from the lifecycle state.
  */
 export interface CodingOutcome {
-  /** verified-passed | verified-failed | blocked-by-approval | no-test-executed | not-yet-verified | uncertain */
+  /** verified-passed | verified-mixed | verified-failed | blocked-by-approval | no-test-executed | not-yet-verified | uncertain */
   verification: string;
   /** none-proposed | pending-approval | applied | partially-applied | not-applied | uncertain */
   change: string;
@@ -457,6 +457,10 @@ export interface CodingOutcome {
   lastExitCode: number | null;
   staleAfterEdit: boolean;
   uncertainOperations: number;
+  /** Checks whose latest result is a failure and that were not re-run successfully (older brokers omit it). */
+  checksFailedUnresolved?: number;
+  /** Commands whose verdict proved nothing (a pipeline cut off or without pipefail). */
+  checksUnverified?: number;
 }
 
 /** An operation waiting for an independent approval (A5.6). Desktop only shows it. */

@@ -7756,6 +7756,21 @@ fn rn2_responder() -> Responder {
                 _ => Answer::Frames(text_frames(&resp, "Fixed add(); cargo check passes.")),
             };
         }
+        if cur.contains("D5-MIXED") {
+            // the failing suite is piped through tail (the shape that used to be recorded as a pass),
+            // then a different, narrower command passes
+            return match done {
+                0 => call(
+                    "proc_run",
+                    r#"{"program":"sh","args":["-c","cargo test --offline 2>&1 | tail -n 3"]}"#,
+                ),
+                1 => call(
+                    "proc_run",
+                    r#"{"program":"cargo","args":["check","--offline"]}"#,
+                ),
+                _ => Answer::Frames(text_frames(&resp, "Checked the crate: cargo check passes.")),
+            };
+        }
         if cur.contains("RN2-FOLLOW") {
             return match done {
                 0 => call("fs_read", r#"{"path":"README.md"}"#),
@@ -8360,5 +8375,45 @@ fn rn2_the_cli_selects_model_and_route_end_to_end_and_lists_the_targets() {
     assert!(ok, "{raw}");
     let r = wait_terminal(&sock, v["run"]["runId"].as_str().unwrap(), 240);
     assert_eq!(r.route_id.as_deref(), Some("e2e-mock/e2e-1"), "{r:?}");
+    b.shutdown();
+}
+
+#[test]
+fn d5_a_failing_suite_piped_through_tail_is_a_failure_and_a_later_narrower_pass_does_not_hide_it() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(rn2_responder());
+    let b = interactive_broker(&fx, "d5-mixed");
+    let sock = b.socket_path().to_owned();
+    let (_, run) = rn2_send(
+        &sock,
+        None,
+        "Look at the crate D5-MIXED and run its checks",
+        "d5-mixed-000001",
+        None,
+        None,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let cmds: Vec<&ic::ToolActivity> = run
+        .tool_activity
+        .iter()
+        .filter(|a| a.tool == "proc_run")
+        .collect();
+    assert_eq!(cmds.len(), 2, "{cmds:?}");
+    // the piped suite really failed (the fixture crate has a bug) and is recorded as a failure
+    assert_eq!(cmds[0].exit_code, Some(101), "{:?}", cmds[0]);
+    assert_eq!(
+        cmds[0].verification.as_deref(),
+        Some("fail"),
+        "{:?}",
+        cmds[0]
+    );
+    assert_eq!(cmds[1].verification.as_deref(), Some("pass"));
+    // the run-wide count and the derived outcome keep the failure visible
+    assert_eq!(run.unresolved_failed_checks, 1, "{run:?}");
+    let o = run.coding_outcome.as_ref().expect("an outcome");
+    assert_eq!(o.verification, "verified-mixed", "{o:?}");
+    assert_eq!(o.checks_failed_unresolved, 1);
     b.shutdown();
 }

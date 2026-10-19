@@ -63,6 +63,14 @@ export function outcomeView(run: IntentRun | null | undefined): OutcomeView | nu
         tone: o.change === "not-applied" || o.change === "none-proposed" ? "warning" : "success",
         detail: `${applied} edit(s) applied and ${o.testsExecuted} command(s) executed; the last command exited ${o.lastExitCode ?? "without a code"}. This verifies the command, not that every requirement is met.`,
       };
+    case "verified-mixed": {
+      const n = o.checksFailedUnresolved ?? 0;
+      return {
+        label: `Last check passed · ${n} other check${n === 1 ? "" : "s"} failed`,
+        tone: "warning",
+        detail: `The last command exited ${o.lastExitCode ?? "without a code"}, but ${n} earlier verification command${n === 1 ? "" : "s"} failed and ${n === 1 ? "was" : "were"} never re-run successfully. This is not a passing run: open the commands and read the failures.`,
+      };
+    }
     case "verified-failed":
       return { label: `Tests failed · exit ${o.lastExitCode ?? "?"}`, tone: "error", detail: "The last executed test command failed." };
     case "blocked-by-approval":

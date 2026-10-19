@@ -1285,6 +1285,9 @@ struct LoopState {
     /// only verifies them is legitimately edit-free and tool-free.
     carried_work: bool,
     plan_nudges: u32,
+    /// Verification commands (by arguments digest) whose latest result is a failure. A later pass of
+    /// the SAME command clears it; a pass of a different, narrower command does not.
+    failed_checks: std::collections::BTreeSet<String>,
     /// edits + checks at the last stall-budget refresh (see `refresh_stall_budget`)
     progress_mark: u32,
     steers: u32,
@@ -2709,9 +2712,25 @@ fn record_receipts(ls: &mut LoopState, act: &mut ToolActivity, cp: &CodeProposal
                 .and_then(|v| v.as_str())
                 .map(str::to_owned);
             // only build/test/check-like commands verify anything; installs and `ls` do not
-            if is_verification_command(&cp.inner.args) {
+            if act.verification.as_deref() == Some("unverified") {
+                // a pipeline whose status proves nothing (no pipefail, or a stage cut off by
+                // SIGPIPE): neither a pass nor a failure - the work stays unverified
+            } else if is_verification_command(&cp.inner.args) {
                 ls.last_test = act.verification.clone();
                 ls.dirty_since_test = false;
+                let key = act
+                    .args_digest
+                    .clone()
+                    .unwrap_or_else(|| act.args_summary.clone());
+                match act.verification.as_deref() {
+                    Some("pass") => {
+                        ls.failed_checks.remove(&key);
+                    }
+                    Some("fail") => {
+                        ls.failed_checks.insert(key);
+                    }
+                    _ => {}
+                }
             } else {
                 // an install, a listing, a one-off script: it ran, but verifies nothing
                 act.verification = act.verification.take().map(|v| format!("run-{v}"));
@@ -2870,7 +2889,12 @@ pub fn render_process(result: &Value, cap: usize) -> Rendered {
     loop {
         let env = serde_json::json!({
             "tool": "proc_run",
-            "status": if out.get("verification").and_then(|v| v.as_str()) == Some("pass") { "ok" } else { "failed" },
+            "status": match out.get("verification").and_then(|v| v.as_str()) {
+                Some("pass") => "ok",
+                Some("unverified") => "unverified",
+                _ => "failed",
+            },
+            "pipefail": out.get("pipefail").cloned().unwrap_or(Value::Null),
             "untrustedOutput": true,
             "reason": out.get("reason").cloned().unwrap_or(Value::Null),
             "exitCode": out.get("exitCode").cloned().unwrap_or(Value::Null),
@@ -3041,6 +3065,7 @@ fn finalize(
     }
     let completion = ls.completion;
     let (edits_used, tests_used, last_test) = (ls.edits_used, ls.tests_used, ls.last_test.clone());
+    let unresolved_failed_checks = ls.failed_checks.len() as u32;
     let verified = ls.citations_verified.clone();
     let unverified = ls.citations_unverified.clone();
     let activity = ls.activity.clone();
@@ -3069,6 +3094,7 @@ fn finalize(
             r.edits_used = edits_used;
             r.tests_used = tests_used;
             r.last_test_verification = last_test;
+            r.unresolved_failed_checks = unresolved_failed_checks;
         }
         r.stop_reason = stop_reason;
         r.completion = completion.map(str::to_owned);

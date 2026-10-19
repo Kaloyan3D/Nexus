@@ -60,6 +60,8 @@ pub struct ResolvedCommand {
     pub install: bool,
     /// Wall-clock allowance this command class needs (installs and builds are longer).
     pub wall_ms: Option<u64>,
+    /// A `sh -c` script that contains a pipeline: its exit status is only trustworthy with `pipefail`.
+    pub shell_pipeline: bool,
 }
 
 impl ResolvedCommand {
@@ -749,6 +751,90 @@ fn failed(
     ))
 }
 
+/// Does the script contain a pipeline (`a | b`, not `a || b`)? Quote-unaware on purpose: a false
+/// positive only adds the (harmless) pipefail handling.
+pub fn script_has_pipeline(script: &str) -> bool {
+    let b = script.as_bytes();
+    (0..b.len()).any(|i| {
+        b[i] == b'|' && (i == 0 || b[i - 1] != b'|') && b.get(i + 1).is_none_or(|n| *n != b'|')
+    })
+}
+
+/// Does this shell understand `set -o pipefail`? Probed, never assumed (`dash` before 0.5.12 and
+/// other POSIX shells do not). Cached per program path.
+fn shell_supports_pipefail(program: &str) -> bool {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(v) = cache
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(program)
+        .copied()
+    {
+        return v;
+    }
+    // `(set -o pipefail)` in a subshell: an unsupported option must not end the probing shell
+    let ok = std::process::Command::new(program)
+        .args(["-c", "(set -o pipefail) 2>/dev/null"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    cache
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(program.to_owned(), ok);
+    ok
+}
+
+/// What happened to the exit status of a pipeline script.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pipefail {
+    /// Not a shell pipeline: the command ran exactly as requested.
+    NotApplicable,
+    /// `set -o pipefail` was prepended: the status is the first failing stage's.
+    Applied,
+    /// The shell has no pipefail: a pipeline's status is the last stage's, so it proves nothing.
+    Unsupported,
+}
+
+impl Pipefail {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Pipefail::NotApplicable => "not-applicable",
+            Pipefail::Applied => "applied",
+            Pipefail::Unsupported => "unsupported",
+        }
+    }
+}
+
+/// Make a shell pipeline's exit status mean what it says (D5): `cargo test | tail` must fail when
+/// `cargo test` fails. Rewrites the script only when it is a pipeline AND the shell supports it.
+pub fn apply_pipefail(cmd: &mut ResolvedCommand) -> Pipefail {
+    if !cmd.shell_pipeline || cmd.argv.len() != 2 {
+        return Pipefail::NotApplicable;
+    }
+    if !shell_supports_pipefail(&cmd.program) {
+        return Pipefail::Unsupported;
+    }
+    cmd.argv[1] = format!("set -o pipefail\n{}", cmd.argv[1]);
+    Pipefail::Applied
+}
+
+/// The verification verdict of a finished command. A pipeline never reports a pass it cannot back:
+/// without pipefail the status says nothing about the first stage, and under pipefail a status of
+/// 141 means a stage was cut off by SIGPIPE (`... | head`) before it finished - its result is unknown.
+pub fn verdict(exit_code: Option<i64>, pipefail: Pipefail) -> &'static str {
+    match exit_code {
+        Some(0) if pipefail == Pipefail::Unsupported => "unverified",
+        Some(0) => "pass",
+        Some(141) if pipefail == Pipefail::Applied => "unverified",
+        _ => "fail",
+    }
+}
+
 /// Run one process request to a terminal lifecycle state.
 pub fn run_process(
     ctx: &ProcessContext<'_>,
@@ -759,10 +845,11 @@ pub fn run_process(
     let run_dir = ctx
         .run_root
         .join(crate::sandbox::cgroup_leaf_name(ctx.execution_id));
-    let cmd = match ctx.policy.resolve(args) {
+    let mut cmd = match ctx.policy.resolve(args) {
         Ok(c) => c,
         Err(e) => return failed(hooks, &run_dir, e.code, e.message),
     };
+    let pipefail = apply_pipefail(&mut cmd);
     if cancel.is_cancelled() {
         return failed(
             hooks,
@@ -829,7 +916,6 @@ pub fn run_process(
     // 1b. Dependency view (A3.5): a per-execution, read-only vendor tree
     //     built only from verified cache objects named by the snapshot's
     //     own Cargo.lock; plus a generated source-replacement config.
-    let mut cmd = cmd;
     let mut dep_note = serde_json::Value::Null;
     if let (Some(dir), "cargo") = (&ctx.policy.dep_cache, cmd.name.as_str()) {
         if args.args.first().map(String::as_str) != Some("fmt") {
@@ -1024,7 +1110,13 @@ pub fn run_process(
         _ => (None, None),
     };
     let reason = out.exit.reason();
-    let pass = matches!(out.exit, ExitKind::Exited(0));
+    let verification = verdict(
+        match &out.exit {
+            ExitKind::Exited(c) => Some(i64::from(*c)),
+            _ => None,
+        },
+        pipefail,
+    );
     let phase = match out.exit {
         ExitKind::Cancelled | ExitKind::Revoked(_) => PH_CANCELLED,
         _ => PH_EXITED,
@@ -1040,7 +1132,7 @@ pub fn run_process(
         "reason": reason,
         "exitCode": code,
         "signal": signal,
-        "verification": if pass { "pass" } else { "fail" },
+        "verification": verification, "pipefail": pipefail.as_str(),
         "wallMs": out.wall_ms, "userMs": out.user_ms, "sysMs": out.sys_ms,
         "maxRssKb": out.max_rss_kb, "peakRssBytes": out.peak_rss_bytes, "peakProcs": out.peak_procs,
         "stdoutBytes": out.stdout_bytes, "stderrBytes": out.stderr_bytes,
@@ -1056,7 +1148,7 @@ pub fn run_process(
     hooks.journal(phase, record)?;
     let output = serde_json::json!({
         "reason": reason, "exitCode": code, "signal": signal,
-        "verification": if pass { "pass" } else { "fail" },
+        "verification": verification, "pipefail": pipefail.as_str(),
         "stdout": so, "stderr": se,
         "stdoutTruncated": out.stdout_truncated, "stderrTruncated": out.stderr_truncated,
         "wallMs": out.wall_ms, "userMs": out.user_ms, "sysMs": out.sys_ms,

@@ -255,3 +255,105 @@ fn only_coding_runs_have_an_outcome_and_the_json_shape_is_stable() {
     .unwrap();
     assert!(old.coding_outcome.is_none());
 }
+
+// ---- D5: the outcome must not show "all tests passed" while a recorded check failed
+
+fn digest_run(index: u32, verdict: &str, exit: i64, digest: &str) -> ToolActivity {
+    ToolActivity {
+        args_digest: Some(digest.into()),
+        ..test_run(index, verdict, exit)
+    }
+}
+
+#[test]
+fn an_earlier_failed_check_is_not_hidden_by_a_later_pass_of_a_different_command() {
+    // the wide suite failed, then a narrower command passed: NOT "verified-passed"
+    let r = run(
+        "completed",
+        vec![
+            applied_edit(1),
+            digest_run(2, "fail", 101, "wide-suite"),
+            digest_run(3, "pass", 0, "narrow-test"),
+        ],
+    );
+    let o = derive_coding_outcome(&r).unwrap();
+    assert_eq!(o.verification, "verified-mixed", "{o:?}");
+    assert_eq!(o.checks_failed_unresolved, 1);
+    assert_eq!(o.tests_executed, 2);
+}
+
+#[test]
+fn re_running_the_same_command_to_a_pass_clears_its_earlier_failure() {
+    let r = run(
+        "completed",
+        vec![
+            applied_edit(1),
+            digest_run(2, "fail", 101, "suite"),
+            applied_edit(3),
+            digest_run(4, "pass", 0, "suite"),
+        ],
+    );
+    let o = derive_coding_outcome(&r).unwrap();
+    assert_eq!(o.verification, "verified-passed", "{o:?}");
+    assert_eq!(o.checks_failed_unresolved, 0);
+}
+
+#[test]
+fn failures_that_left_the_bounded_activity_list_still_count() {
+    // the activity list keeps only the latest entries; the run's own count covers the whole run
+    let mut r = run(
+        "completed",
+        vec![applied_edit(70), digest_run(71, "pass", 0, "narrow")],
+    );
+    r.unresolved_failed_checks = 2;
+    let o = derive_coding_outcome(&r).unwrap();
+    assert_eq!(o.verification, "verified-mixed");
+    assert_eq!(o.checks_failed_unresolved, 2);
+}
+
+#[test]
+fn an_unverified_pipeline_is_neither_a_pass_nor_a_failure_nor_an_uncertain_operation() {
+    let r = run(
+        "completed",
+        vec![applied_edit(1), digest_run(2, "unverified", 141, "piped")],
+    );
+    let o = derive_coding_outcome(&r).unwrap();
+    assert_eq!(o.verification, "no-test-executed", "{o:?}");
+    assert_eq!(
+        (
+            o.tests_executed,
+            o.checks_unverified,
+            o.uncertain_operations
+        ),
+        (0, 1, 0)
+    );
+    // and it never turns an earlier failure into a pass
+    let r = run(
+        "completed",
+        vec![
+            digest_run(1, "fail", 101, "suite"),
+            digest_run(2, "unverified", 141, "piped"),
+        ],
+    );
+    let o = derive_coding_outcome(&r).unwrap();
+    assert_eq!(o.verification, "verified-failed", "{o:?}");
+}
+
+#[test]
+fn a_plain_pass_or_fail_is_unchanged() {
+    let o = derive_coding_outcome(&run(
+        "completed",
+        vec![applied_edit(1), test_run(2, "pass", 0)],
+    ))
+    .unwrap();
+    assert_eq!(
+        (o.verification.as_str(), o.checks_failed_unresolved),
+        ("verified-passed", 0)
+    );
+    let o = derive_coding_outcome(&run(
+        "completed",
+        vec![applied_edit(1), test_run(2, "fail", 1)],
+    ))
+    .unwrap();
+    assert_eq!(o.verification, "verified-failed");
+}

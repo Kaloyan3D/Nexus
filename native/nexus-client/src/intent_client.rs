@@ -157,6 +157,11 @@ pub struct IntentRun {
     /// repo-code: `pass` / `fail` of the most recent test execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_test_verification: Option<String>,
+    /// repo-code: verification commands whose latest result is a failure (the same command passing
+    /// later clears it, a different one does not). Counted over the whole run, not the bounded
+    /// activity list.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub unresolved_failed_checks: u32,
     /// repo-code: the operation waiting for an independent approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_approval: Option<PendingApproval>,
@@ -305,7 +310,8 @@ pub struct PendingApproval {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CodingOutcome {
-    /// `verified-passed` | `verified-failed` | `blocked-by-approval` |
+    /// `verified-passed` | `verified-mixed` (the last check passed but another failed and was never
+    /// re-run successfully) | `verified-failed` | `blocked-by-approval` |
     /// `no-test-executed` | `not-yet-verified` | `uncertain`
     pub verification: String,
     /// `none-proposed` | `pending-approval` | `applied` | `partially-applied` |
@@ -330,6 +336,14 @@ pub struct CodingOutcome {
     /// Number of operations whose recorded evidence is inconsistent or missing
     /// (e.g. an edit reported executed without a post-image hash).
     pub uncertain_operations: u32,
+    /// Verification commands whose latest result is a failure and that were not re-run
+    /// successfully (a pass of the SAME command clears it; a narrower command does not).
+    #[serde(default)]
+    pub checks_failed_unresolved: u32,
+    /// Commands that ran but whose verdict proved nothing (a pipeline without pipefail, or cut off
+    /// by SIGPIPE): neither passed nor failed.
+    #[serde(default)]
+    pub checks_unverified: u32,
 }
 
 /// Derive the verified coding outcome of a `repo-code` run from its receipts.
@@ -340,6 +354,7 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
     }
     let mut o = CodingOutcome::default();
     let mut last_test: Option<(u32, bool, Option<i64>)> = None; // (index, passed, exit)
+    let mut failed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut last_applied_edit: Option<u32> = None;
     let mut cmd_blocked = false;
     let mut mut_proposed = false;
@@ -391,11 +406,23 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
                     Some("pass") => {
                         o.tests_executed += 1;
                         last_test = Some((a.index, true, a.exit_code));
+                        failed.remove(
+                            &a.args_digest
+                                .clone()
+                                .unwrap_or_else(|| a.args_summary.clone()),
+                        );
                     }
                     Some("fail") => {
                         o.tests_executed += 1;
                         last_test = Some((a.index, false, a.exit_code));
+                        failed.insert(
+                            a.args_digest
+                                .clone()
+                                .unwrap_or_else(|| a.args_summary.clone()),
+                        );
                     }
+                    // a pipeline whose status proves nothing: not a pass, not a failure
+                    Some("unverified") => o.checks_unverified += 1,
                     // a command that ran but verifies nothing (install, listing, script)
                     Some("run-pass" | "run-fail") => {}
                     _ => o.uncertain_operations += 1, // no verdict recorded: never assume a pass
@@ -409,6 +436,8 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
         }
     }
     o.last_exit_code = last_test.and_then(|t| t.2);
+    // the run's own count covers failures that left the bounded activity list
+    o.checks_failed_unresolved = (failed.len() as u32).max(run.unresolved_failed_checks);
     let run_uncertain =
         run.state == "uncertain" || run.error_code.as_deref() == Some("tool-outcome-uncertain");
     let uncertain = run_uncertain || o.uncertain_operations > 0;
@@ -443,6 +472,8 @@ pub fn derive_coding_outcome(run: &IntentRun) -> Option<CodingOutcome> {
     } else if let Some((_, passed, _)) = last_test {
         if o.stale_after_edit {
             "not-yet-verified"
+        } else if passed && o.checks_failed_unresolved > 0 {
+            "verified-mixed"
         } else if passed {
             "verified-passed"
         } else {

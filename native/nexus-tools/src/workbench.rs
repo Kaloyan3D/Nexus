@@ -352,7 +352,13 @@ pub(crate) fn resolve(pol: &CommandPolicy, a: &ProcessArgs) -> Result<ResolvedCo
             )))
         }
     }
-    finish(name, program, argv, cwd, env, install, pol)
+    let pipeline = name == "sh"
+        && argv
+            .get(1)
+            .is_some_and(|s| crate::process::script_has_pipeline(s));
+    let mut rc = finish(name, program, argv, cwd, env, install, pol)?;
+    rc.shell_pipeline = pipeline;
+    Ok(rc)
 }
 
 fn finish(
@@ -377,6 +383,7 @@ fn finish(
         } else {
             BUILD_WALL_MS
         }),
+        shell_pipeline: false,
     })
 }
 
