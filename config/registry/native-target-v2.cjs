@@ -110,10 +110,17 @@ function positiveInt(v) {
 /**
  * Issue the authoritative V2 extension for one Controller generation.
  *
- * options: { installRoot, dataRoot, taskInstanceId, sessionId, role? }
+ * options: { installRoot, dataRoot, taskInstanceId, sessionId, role?, selection? }
  *   sessionId is the Controller attempt session (required, non-empty).
+ *   selection is an optional { logicalModelId, routeId } override: it is
+ *   applied to an IN-MEMORY clone of the saved engineering-v2 mode
+ *   configuration (the saved configuration is never written) and compiled
+ *   through the same trusted pipeline. Absent selection behaves exactly as
+ *   before; a present selection is covered by the snapshot/target/issuance
+ *   digests because the compiled snapshot and mode config carry it.
  * deps: { service?, compiled? } — a live service or a precompiled issuance
  *   (tests inject compiled fixtures shaped like native-issuer output).
+ *   An injected compiled fixture cannot be combined with a selection.
  */
 function issueExecutionTargetV2(options, deps) {
   const o = options || {};
@@ -138,6 +145,17 @@ function issueExecutionTargetV2(options, deps) {
     }
   }
   let compiled = d.compiled || null;
+  const selection = o.selection !== undefined && o.selection !== null ? o.selection : null;
+  if (selection !== null && compiled !== null) {
+    return fail('registry-binding-invalid', 'an injected compilation cannot be combined with a selection; refusing to issue');
+  }
+  if (selection !== null) {
+    compiled = compileWithSelection(service, selection);
+    if (!compiled || compiled.ok !== true) {
+      return fail(compiled && compiled.code ? compiled.code : 'registry-unresolved', (compiled && compiled.message) || 'selection does not compile');
+    }
+    compiled = compiled.compiled;
+  }
   if (!compiled) {
     compiled = issuer.compileTrustedMode({ installRoot: o.installRoot, dataRoot: o.dataRoot, modeId: 'engineering-v2', role: o.role || 'muse_main' }, { service: service });
   }
@@ -245,8 +263,132 @@ function issueExecutionTargetV2(options, deps) {
   };
 }
 
+/**
+ * Compile the trusted engineering-v2/muse_main pipeline with an in-memory
+ * main-slot override. The saved mode configuration is only read, never
+ * written: the override applies to a deep clone. Unknown or non-issuable
+ * selections fail closed with the catalog machine reason.
+ */
+function compileWithSelection(service, selection) {
+  const sel = selection || {};
+  const logicalModelId = isNonEmptyString(sel.logicalModelId) ? sel.logicalModelId : '';
+  const routeId = isNonEmptyString(sel.routeId) ? sel.routeId : '';
+  if (logicalModelId === '' || routeId === '') {
+    return fail('registry-selection-not-issuable', 'selection carries no usable logicalModelId/routeId pair: unknown-target');
+  }
+  let eff = null;
+  try {
+    eff = service.effectiveSnapshot();
+  } catch (e) {
+    return fail('registry-unavailable', 'effective snapshot is unreadable: ' + String((e && e.message) || e));
+  }
+  if (!eff || !eff.snapshot) {
+    return fail('registry-unresolved', 'effective snapshot is unresolved; refusing to select');
+  }
+  const records = eff.snapshot;
+  const route = findById(records.routes, routeId);
+  if (!route || route.logicalModelId !== logicalModelId) {
+    return fail('registry-selection-not-issuable', 'selection ' + logicalModelId + '/' + routeId + ' names no known route: unknown-target');
+  }
+  const gate = catalogIssuability({
+    route: route,
+    model: findById(records.models, route.logicalModelId),
+    provider: findById(records.providers, route.providerId),
+    connection: route.connectionId ? findById(records.connections, route.connectionId) : null,
+  });
+  if (gate.issuable !== true) {
+    return fail('registry-selection-not-issuable', 'selection ' + logicalModelId + '/' + routeId + ' is not issuable: ' + (gate.reason || 'not-issuable'));
+  }
+  let staged = null;
+  try {
+    staged = service.getModeConfiguration('engineering-v2', {});
+  } catch (e) {
+    return fail('registry-unavailable', 'effective mode configuration is unreadable: ' + String((e && e.message) || e));
+  }
+  if (!staged || !staged.result || !staged.result.config) {
+    return fail('registry-unresolved', 'effective mode configuration for engineering-v2 is unresolved; refusing to select');
+  }
+  const modeConfig = JSON.parse(JSON.stringify(staged.result.config));
+  const current = (modeConfig.slots && modeConfig.slots.main) || {};
+  modeConfig.slots = modeConfig.slots || {};
+  modeConfig.slots.main = {
+    logicalModelId: logicalModelId,
+    routeId: routeId,
+    reasoning: isNonEmptyString(current.reasoning) ? current.reasoning : (Array.isArray(route.reasoningLevels) && isNonEmptyString(route.reasoningLevels[0]) ? route.reasoningLevels[0] : current.reasoning),
+  };
+  if (modeConfig.roleOverrides && modeConfig.roleOverrides.muse_main) {
+    delete modeConfig.roleOverrides.muse_main;
+  }
+  let preview = null;
+  try {
+    preview = service.compilePreview(modeConfig);
+  } catch (e) {
+    return fail('registry-unavailable', 'registry compilation failed: ' + String((e && e.message) || e));
+  }
+  if (!preview || preview.ok !== true || !preview.snapshot) {
+    const codes = ((preview && preview.errors) || []).map(function (e) { return e && e.code; }).join(',');
+    const detail = ((preview && preview.errors) || []).map(function (e) { return e && e.message; }).join('; ');
+    return fail(codes.split(',')[0] || 'registry-unresolved', 'selection ' + logicalModelId + '/' + routeId + ' does not compile (' + codes + '): ' + detail);
+  }
+  const snapshot = preview.snapshot;
+  const binding = snapshot.roles && snapshot.roles.muse_main;
+  if (!binding || typeof binding !== 'object') {
+    return fail('registry-role-unauthorized', 'role muse_main has no compiled binding for the selection; refusing to issue');
+  }
+  return {
+    ok: true,
+    compiled: {
+      ok: true, code: null, message: null, issuance: null,
+      snapshot: snapshot, binding: binding, modeConfig: modeConfig,
+      persisted: false,
+      configRevision: staged.result.revision != null ? staged.result.revision : modeConfig.revision,
+    },
+  };
+}
+
+function catalogIssuability(input) {
+  const r = input || {};
+  const route = r.route || null;
+  const model = r.model || null;
+  const provider = r.provider || null;
+  const connection = r.connection || null;
+  if (!route) return { issuable: false, reason: 'unknown-route' };
+  if (!model) return { issuable: false, reason: 'unknown-model' };
+  if (!provider) return { issuable: false, reason: 'unknown-provider' };
+  if (model.enabled === false) return { issuable: false, reason: 'model-disabled' };
+  if (provider.status !== 'enabled') return { issuable: false, reason: 'provider-disabled' };
+  const resolver = require('./resolver.cjs');
+  const routeGate = resolver.routeEligibility(route);
+  if (routeGate) return { issuable: false, reason: routeGate.code || 'route-not-verified' };
+  if (route.logicalModelId !== model.id) return { issuable: false, reason: 'route-model-identity-mismatch' };
+  if (route.providerId !== provider.id) return { issuable: false, reason: 'route-provider-mismatch' };
+  if (!connection) return { issuable: false, reason: 'connection-not-connected' };
+  const connGate = resolver.connectionEligibility(connection);
+  if (connGate) return { issuable: false, reason: 'connection-not-connected' };
+  if (connection.providerId !== provider.id) return { issuable: false, reason: 'connection-not-connected' };
+  const protocolId = (route.compatibility && route.compatibility.transport) || 'unknown';
+  if (!DIALECT_RESPONSE_PATHS[protocolId]) return { issuable: false, reason: 'protocol-unsupported' };
+  if (!isNonEmptyString(connection.credentialRef)) return { issuable: false, reason: 'no-credential-ref' };
+  const split = splitBaseUrl(provider.baseUrl);
+  if (!split) return { issuable: false, reason: 'protocol-unsupported' };
+  if (split.protocol === 'http' && !isLoopbackHost(split.host)) return { issuable: false, reason: 'protocol-unsupported' };
+  if (positiveInt(model.contextWindow) === 0) return { issuable: false, reason: 'context-unknown' };
+  const routeMax = route.capacityConstraints && route.capacityConstraints.maxOutputTokens;
+  if (positiveInt(routeMax) === 0 && positiveInt(model.maxOutputTokens) === 0) return { issuable: false, reason: 'output-unknown' };
+  if (billingTierOf(provider, connection) === '') return { issuable: false, reason: 'no-billing-tier' };
+  const dataUse = typeof model.dataUseTier === 'string' && model.dataUseTier !== '' ? model.dataUseTier : null;
+  if (!isNonEmptyString(dataUse)) return { issuable: false, reason: 'no-data-use' };
+  return { issuable: true, reason: null };
+}
+
 module.exports = {
   TARGET_EXTENSION_VERSION: TARGET_EXTENSION_VERSION,
   DIALECT_RESPONSE_PATHS: DIALECT_RESPONSE_PATHS,
   issueExecutionTargetV2: issueExecutionTargetV2,
+  catalogIssuability: catalogIssuability,
+  splitBaseUrl: splitBaseUrl,
+  billingTierOf: billingTierOf,
+  positiveInt: positiveInt,
+  isLoopbackHost: isLoopbackHost,
+  endpointPath: endpointPath,
 };

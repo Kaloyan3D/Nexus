@@ -18,8 +18,9 @@
  * Subcommands:
  *   task-create <workspace> [repo-inspect|repo-code]        allocate task + attempt + session
  *   attempt-add <workspace> <taskId> <taskInstanceId>   next attempt of the same task (one per model turn)
- *   target-info <repoRoot> <dataRoot>             Registry-selected target (no side effects)
- *   issue <repoRoot> <dataRoot> <taskInstanceId> <sessionId>
+ *   target-info <repoRoot> <dataRoot> [selectionJson]   Registry-selected target (no side effects)
+ *   issue <repoRoot> <dataRoot> <taskInstanceId> <sessionId> [selectionJson]
+ *   catalog <repoRoot> <dataRoot>   read-only Registry target catalog (no side effects)
  *   shadow <workspace> <taskId> <attemptId> <taskInstanceId>
  *   kernel-intent        (stdin {shadowIntent, issuance})
  *   publish              (stdin; scope and initiator are FIXED here)
@@ -158,14 +159,39 @@ function loadService(repoRoot, dataRoot) {
   return serviceModule.createService({ installRoot: repoRoot, dataRoot: dataRoot });
 }
 
-function issueFor(repoRoot, dataRoot, taskInstanceId, sessionId) {
+function parseSelectionJson(text) {
+  if (text === undefined || text === null || text === '') return { ok: true, selection: null };
+  let sel = null;
+  try {
+    sel = JSON.parse(String(text));
+  } catch (e) {
+    return { ok: false, selection: null };
+  }
+  if (sel === null || typeof sel !== 'object' || Array.isArray(sel)) return { ok: false, selection: null };
+  const keys = Object.keys(sel);
+  if (keys.length !== 2 || keys.indexOf('logicalModelId') === -1 || keys.indexOf('routeId') === -1) return { ok: false, selection: null };
+  if (typeof sel.logicalModelId !== 'string' || typeof sel.routeId !== 'string') return { ok: false, selection: null };
+  return { ok: true, selection: { logicalModelId: sel.logicalModelId, routeId: sel.routeId } };
+}
+
+function issueFor(repoRoot, dataRoot, taskInstanceId, sessionId, selection) {
   const v2 = require(path.join(REPO, 'config', 'registry', 'native-target-v2.cjs'));
   const service = loadService(repoRoot, dataRoot);
-  return v2.issueExecutionTargetV2({ installRoot: repoRoot, dataRoot: dataRoot, taskInstanceId: taskInstanceId, sessionId: sessionId }, { service: service });
+  return v2.issueExecutionTargetV2({ installRoot: repoRoot, dataRoot: dataRoot, taskInstanceId: taskInstanceId, sessionId: sessionId, selection: selection === undefined ? null : selection }, { service: service });
+}
+
+function cmdCatalog(args) {
+  const service = loadService(args[0], args[1]);
+  const catalog = require(path.join(REPO, 'config', 'registry', 'native-registry-catalog.cjs'));
+  const out = catalog.listRegistryTargets(service);
+  if (!out.ok) return failOut(out.code, out.message);
+  emit({ ok: true, targets: out.targets });
 }
 
 function cmdTargetInfo(args) {
-  const out = issueFor(args[0], args[1], 'task-target-info', 'session-target-info');
+  const parsed = parseSelectionJson(args[2]);
+  if (!parsed.ok) return failOut('bad-args', 'invalid selection');
+  const out = issueFor(args[0], args[1], 'task-target-info', 'session-target-info', parsed.selection);
   if (!out.ok) return failOut(out.code, out.message);
   const ep = out.target.extension.endpoint;
   emit({
@@ -182,7 +208,9 @@ function cmdTargetInfo(args) {
 }
 
 function cmdIssue(args) {
-  const out = issueFor(args[0], args[1], args[2], args[3]);
+  const parsed = parseSelectionJson(args[4]);
+  if (!parsed.ok) return failOut('bad-args', 'invalid selection');
+  const out = issueFor(args[0], args[1], args[2], args[3], parsed.selection);
   if (!out.ok) return failOut(out.code, out.message);
   emit({ ok: true, resolution: out.target.issuance.resolution, snapshot: out.target.issuance.snapshot, core: out.target.core, extension: out.target.extension, extensionDigest: out.target.extensionDigest, issuanceId: out.target.issuance.issuanceId, modeId: out.target.issuance.modeId, role: out.target.issuance.role, modeConfigRevision: out.target.issuance.modeConfigRevision, modeConfigDigest: out.target.issuance.modeConfigDigest });
 }
@@ -242,6 +270,7 @@ function main() {
     switch (sub) {
       case 'task-create': return cmdTaskCreate(args);
       case 'attempt-add': return cmdAttemptAdd(args);
+      case 'catalog': return cmdCatalog(args);
       case 'target-info': return cmdTargetInfo(args);
       case 'issue':
         if (!SAFE_ID.test(args[2] || '') || !SAFE_ID.test(args[3] || '')) return failOut('bad-args', 'invalid task/session id');
