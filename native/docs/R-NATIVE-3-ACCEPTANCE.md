@@ -25,7 +25,7 @@ Checkpoint 3 of the Registry → Native integration: **Desktop Registry integrat
 ## Known behaviours and limitations
 * The broker caches the Registry catalog for 30 s (see R-NATIVE-2): right after a Registry change a send can be accepted and then end "failed before submission"; the Desktop says so. After the cache expires the send is refused up front.
 * 49 multi-UID tests are `#[ignore]`d (prepared multi-UID host required) and were not executed.
-* `cargo clippy -D warnings` for the Tauri crate reports two dead-code errors in `backend.rs` (`MAX_PAGE_LIMIT`, `conversation_read`). They are identical at the previous commit, in code this milestone does not touch, and were left alone.
+* `cargo clippy -D warnings` for the Tauri crate was red before this milestone because of two dead-code items in `backend.rs` (`MAX_PAGE_LIMIT` and the old `conversation_read` helper, superseded since A5.3.1 by `desktop_contract::conversation_read`, which has the same 1-500 page clamp and is what the Tauri command calls). They were removed in a separate cleanup commit; the clippy gate is green.
 * The Tauri crate fails to link with incremental compilation in this environment (undefined `anon…llvm` symbols); with `CARGO_INCREMENTAL=0` it builds and tests normally.
 * The Desktop is tested against a fake API and fake-broker sockets; no test drives the real Tauri window against a live broker.
 * Nexus's run could not execute the frontend or Tauri checks in its sandbox: see `diagnostics/DIAG-r-native-3-run14.md` and the updated tool description.

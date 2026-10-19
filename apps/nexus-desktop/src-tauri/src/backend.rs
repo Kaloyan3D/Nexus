@@ -411,23 +411,6 @@ pub fn live_blockers() -> LiveBlockers {
     }
 }
 
-const MAX_PAGE_LIMIT: u32 = 500;
-
-pub fn conversation_read(
-    cfg: &nc::ClientConfig,
-    task_instance_id: &str,
-    after_seq: Option<u64>,
-    before_seq: Option<u64>,
-    limit: Option<u32>,
-) -> Result<nc::ConversationView, UiError> {
-    let spec = nc::transcript::PageSpec {
-        after_seq,
-        before_seq,
-        limit: limit.unwrap_or(200).clamp(1, MAX_PAGE_LIMIT),
-    };
-    nc::conversation(cfg, task_instance_id, spec).map_err(|e| ui_error(&e))
-}
-
 pub fn model_io_read(
     cfg: &nc::ClientConfig,
     task_instance_id: &str,
