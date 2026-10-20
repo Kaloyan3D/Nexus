@@ -662,8 +662,8 @@ pub fn run_inspect_turn(
             let state = classify(code, te.bytes_sent);
             let text = match state {
                 ModelRunState::Cancelled => "Cancelled by the user. Any provider-side effect is unknown; the request was not re-sent.".to_owned(),
-                ModelRunState::TimedOut => "The provider timed out. The outcome is unknown; the request was not re-sent.".to_owned(),
-                ModelRunState::Uncertain => "Submission outcome is UNCERTAIN (the request may have been processed and billed). It was not re-sent.".to_owned(),
+                ModelRunState::TimedOut => format!("The provider timed out. The outcome is unknown; the request was not re-sent. ({})", te.error.message),
+                ModelRunState::Uncertain => format!("Submission outcome is UNCERTAIN (the request may have been processed and billed). It was not re-sent. ({})", te.error.message),
                 ModelRunState::Refused => format!("Refused before any byte was sent: {}", te.error.message),
                 _ => format!("Failed: {}", te.error.message),
             };

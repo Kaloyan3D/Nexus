@@ -503,49 +503,44 @@ impl HttpSseTransport {
         );
         // NOTE: `auth` is written to the socket only; it never enters any
         // error, log, or snapshot on this path.
-        stream.write_all(head.as_bytes()).map_err(|e| {
+        let stall = Duration::from_millis(limits.read_timeout_ms);
+        let send_err = |what: &str, e: std::io::Error| {
+            let code = if e.kind() == std::io::ErrorKind::Interrupted && cancel.is_cancelled() {
+                ModelErrorCode::Cancelled
+            } else {
+                ModelErrorCode::SendUncertain
+            };
             TransportError::after_send(ModelError::new(
-                ModelErrorCode::SendUncertain,
-                format!("header send outcome unknown: {}", redact(&e.to_string())),
+                code,
+                format!("{what} send outcome unknown: {}", redact(&e.to_string())),
             ))
-        })?;
-        stream
-            .write_all(format!("authorization: {auth}\r\n").as_bytes())
-            .map_err(|e| {
-                TransportError::after_send(ModelError::new(
-                    ModelErrorCode::SendUncertain,
-                    format!(
-                        "credential header send outcome unknown: {}",
-                        redact(&e.to_string())
-                    ),
-                ))
-            })?;
+        };
+        write_all_bounded(&mut stream, head.as_bytes(), cancel, deadline, stall)
+            .map_err(|e| send_err("header", e))?;
+        write_all_bounded(
+            &mut stream,
+            format!("authorization: {auth}\r\n").as_bytes(),
+            cancel,
+            deadline,
+            stall,
+        )
+        .map_err(|e| send_err("credential header", e))?;
         // Blank line terminating the header block, then the exact body.
-        stream.write_all(b"\r\n").map_err(|e| {
-            TransportError::after_send(ModelError::new(
-                ModelErrorCode::SendUncertain,
-                format!(
-                    "header terminator send outcome unknown: {}",
-                    redact(&e.to_string())
-                ),
-            ))
-        })?;
+        write_all_bounded(&mut stream, b"\r\n", cancel, deadline, stall)
+            .map_err(|e| send_err("header terminator", e))?;
         // Drop the secret from memory as early as possible (best effort;
         // `String` zeroization is not guaranteed, so the guarantee stated
         // is narrower: the value never reaches logs/errors/snapshots).
         let _ = auth.len();
-        stream.write_all(&prepared.request_bytes).map_err(|e| {
-            TransportError::after_send(ModelError::new(
-                ModelErrorCode::SendUncertain,
-                format!("body send outcome unknown: {}", redact(&e.to_string())),
-            ))
-        })?;
-        stream.flush().map_err(|e| {
-            TransportError::after_send(ModelError::new(
-                ModelErrorCode::SendUncertain,
-                format!("body flush outcome unknown: {}", redact(&e.to_string())),
-            ))
-        })?;
+        write_all_bounded(
+            &mut stream,
+            &prepared.request_bytes,
+            cancel,
+            deadline,
+            stall,
+        )
+        .and_then(|()| flush_bounded(&mut stream, cancel, deadline, stall))
+        .map_err(|e| send_err("body", e))?;
         // From here the bytes may exist provider-side: every later failure
         // is uncertain or partial, never "not sent".
         cancel.check().map_err(|_| {
@@ -790,6 +785,98 @@ fn host_port_header(origin: &str, host: &str, port: u16) -> String {
     } else {
         format!("{h}:{port}")
     }
+}
+
+/// `write_all` for a socket whose writes time out every [`crate::egress::IO_SLICE_MS`]
+/// (so cancellation and the deadline are observed while blocked). A timed-out slice
+/// means the peer is not draining the request yet - ordinary TCP backpressure, for
+/// example a proxy streaming a large body upstream - and is waited out, exactly as
+/// the read loop waits out a silent slice. Only the exchange deadline, a stall as
+/// long as the read deadline (`stall`), cancellation or a real socket error end the
+/// upload. (Found live, R-NATIVE-3 run 14: plain
+/// `write_all` gave up on the first slow slice, so 77 of 279 requests with large
+/// conversations were reported as `send-uncertain` and asked again.)
+fn write_all_bounded(
+    stream: &mut dyn Write,
+    mut buf: &[u8],
+    cancel: &CancellationToken,
+    deadline: std::time::Instant,
+    stall: Duration,
+) -> std::io::Result<()> {
+    let mut idle_since = std::time::Instant::now();
+    while !buf.is_empty() {
+        check_send_bounds(cancel, deadline, idle_since, stall)?;
+        match stream.write(buf) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "the connection accepted no more request bytes",
+                ))
+            }
+            Ok(n) => {
+                buf = &buf[n..];
+                idle_since = std::time::Instant::now();
+            }
+            Err(e) if is_slice_timeout(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// `flush` with the same backpressure semantics as [`write_all_bounded`] (TLS
+/// records may still be queued after the last plaintext byte was accepted).
+fn flush_bounded(
+    stream: &mut dyn Write,
+    cancel: &CancellationToken,
+    deadline: std::time::Instant,
+    stall: Duration,
+) -> std::io::Result<()> {
+    let idle_since = std::time::Instant::now();
+    loop {
+        check_send_bounds(cancel, deadline, idle_since, stall)?;
+        match stream.flush() {
+            Ok(()) => return Ok(()),
+            Err(e) if is_slice_timeout(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn is_slice_timeout(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::Interrupted
+    )
+}
+
+fn check_send_bounds(
+    cancel: &CancellationToken,
+    deadline: std::time::Instant,
+    idle_since: std::time::Instant,
+    stall: Duration,
+) -> std::io::Result<()> {
+    if cancel.is_cancelled() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "cancelled while sending the request",
+        ));
+    }
+    if std::time::Instant::now() >= deadline {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "exchange deadline expired while sending the request",
+        ));
+    }
+    if idle_since.elapsed() >= stall {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the provider accepted no request bytes within the read deadline",
+        ));
+    }
+    Ok(())
 }
 
 /// Bounded read returning bytes-so-far plus the terminal read outcome.

@@ -1587,7 +1587,7 @@ fn recover_wait(
     ls.recoveries += 1;
     let (n, msg) = (
         ls.recoveries,
-        format!("{code}: {}", why.chars().take(160).collect::<String>()),
+        format!("{code}: {}", why.chars().take(320).collect::<String>()),
     );
     ctx.b.update(ctx.run_id, |r| {
         r.recoveries = n;
