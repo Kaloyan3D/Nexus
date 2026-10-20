@@ -228,6 +228,21 @@ function cmdRegistrySlotPolicy(args) {
   emit(r.ok ? { ok: true, revision: r.revision } : { ok: false, where: 'policy', code: ((r.errors || [])[0] || {}).code, errors: r.errors || r.code || r });
 }
 
+// EM-03 fixture: scope the fixture models to an additional orchestration engine.
+function cmdRegistryEngineScope(args) {
+  const service = makeService(args[1], args[0]);
+  const eff = service.effectiveSnapshot();
+  const models = (eff && eff.snapshot && eff.snapshot.models) || [];
+  for (const id of ['e2e/e2e-1', 'e2e/e2e-2']) {
+    const m = models.find(function (x) { return x.id === id; });
+    if (!m) return emit({ ok: false, where: 'scope', code: 'not-found', message: id });
+    const engines = Array.from(new Set((m.engines || []).concat([args[2]])));
+    const r = service.saveModel(Object.assign({}, m, { engines: engines }), {});
+    if (!r.ok) return emit({ ok: false, where: 'scope', code: r.code, message: r.message, errors: r.errors });
+  }
+  emit({ ok: true });
+}
+
 function cmdIssueAttempt(stdinJson) {
   const tb = require(path.join(REPO, 'config', 'registry', 'native-task-binding.cjs'));
   const out = tb.authorizeAttemptTarget(JSON.parse(stdinJson));
@@ -301,6 +316,7 @@ function main() {
   if (sub === 'registry-levels') return cmdRegistryLevels(args);
   if (sub === 'registry-default') return cmdRegistryDefault(args);
   if (sub === 'registry-slot-policy') return cmdRegistrySlotPolicy(args);
+  if (sub === 'registry-engine-scope') return cmdRegistryEngineScope(args);
   if (sub === 'issue-attempt') {
     let text = '';
     process.stdin.setEncoding('utf8');

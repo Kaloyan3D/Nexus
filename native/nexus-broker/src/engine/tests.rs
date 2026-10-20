@@ -17,6 +17,8 @@ fn host() -> EngineHost {
 fn muse(s: &EngineState) -> &MuseV0State {
     match &s.data {
         EngineStateData::MuseV0(d) => d,
+        #[allow(unreachable_patterns)]
+        _ => panic!("not muse-v0 state"),
     }
 }
 
@@ -331,6 +333,7 @@ fn a_hostile_engine_cannot_bypass_the_host() {
         roles: &["muse_main"],
         state_schema: 1,
         may_propose_effort: true, // even a descriptor that claims effort authority
+        inherits_state: false,
     };
     impl EngineExtension for Hostile {
         fn descriptor(&self) -> &EngineDescriptor {
@@ -372,6 +375,9 @@ fn a_hostile_engine_cannot_bypass_the_host() {
             _: &EngineSnapshot,
         ) -> Result<(), String> {
             Ok(())
+        }
+        fn persist_state(&self, _: &EngineState) -> serde_json::Value {
+            serde_json::Value::Null
         }
     }
     static HOSTILE: Hostile = Hostile;
@@ -661,6 +667,7 @@ fn muse_v0_makes_exactly_the_decisions_of_the_pre_extension_loop() {
                 expects_change,
                 carried_work,
                 response_text: text.clone(),
+                ..Default::default()
             };
             let (new_decision, old_decision) = if rng.chance(55) {
                 // a reply with tool calls: the steer after the tool phase
@@ -833,7 +840,11 @@ fn a_refused_proposal_applies_nothing() {
             Hook::FinalResponse,
         ]);
         let mut p = MUSE_V0.propose(hook, &base, h.state(), h.receipts().len() as u64 + 1);
-        let EngineStateData::MuseV0(d) = &mut p.next_state.data;
+        #[allow(irrefutable_let_patterns)]
+        let EngineStateData::MuseV0(d) = &mut p.next_state.data
+        else {
+            unreachable!()
+        };
         match rng.next() % 12 {
             0 => p.proposal_id += 1 + rng.next() % 3,
             1 => p.based_on_revision = p.based_on_revision.wrapping_add(1),
@@ -918,4 +929,206 @@ fn a_restart_or_a_repeated_proposal_id_cannot_bypass_the_transition_checks() {
     // (identical to what the new host's engine proposes itself)
     let own = MUSE_V0.propose(Hook::FinalResponse, &s, b.state(), 1);
     assert_eq!(own, proposals[0]);
+}
+
+// ------------------------------------------------------------------ contract v2 (EM-03)
+
+mod v2 {
+    use super::super::test_engine::{EffortTestState, EFFORT_TEST_V0};
+    use super::super::*;
+
+    fn snap2(dispatched: u32, current: &str) -> EngineSnapshot {
+        EngineSnapshot {
+            kind: Some(RunKind::Code),
+            interactive: true,
+            attempts_dispatched: dispatched,
+            current_effort: current.into(),
+            authorized_efforts: vec!["high".into(), "low".into()],
+            ..Default::default()
+        }
+    }
+
+    fn prop(
+        h: &EngineHost,
+        effort: EffortProposal,
+        action: EngineAction,
+        dispatched: u32,
+    ) -> EngineProposal {
+        let mut p = EFFORT_TEST_V0.propose(
+            Hook::BeforeRequest,
+            &snap2(dispatched, "low"),
+            h.state(),
+            h.next_proposal_id(),
+        );
+        p.effort = effort;
+        p.action = action;
+        p
+    }
+
+    #[test]
+    fn an_accepted_change_designates_the_next_attempt_and_never_an_earlier_one() {
+        let mut h = EngineHost::new(&EFFORT_TEST_V0);
+        // one attempt dispatched; the change is for attempt 2 on
+        let p = prop(
+            &h,
+            EffortProposal::Change("high".into()),
+            EngineAction::Continue,
+            1,
+        );
+        h.accept(Hook::BeforeRequest, &snap2(1, "low"), p).unwrap();
+        let sel = h.effort_selection().unwrap().clone();
+        assert_eq!(
+            (sel.effort.as_str(), sel.from_attempt, sel.proposal_id),
+            ("high", 2, 1)
+        );
+        assert_eq!(h.effort_for_attempt(1), None, "never retroactive");
+        assert_eq!(h.effort_for_attempt(2), Some("high"));
+        assert_eq!(
+            h.effort_for_attempt(9),
+            Some("high"),
+            "in force until changed"
+        );
+        assert_eq!(h.receipts()[0].effort.as_ref(), Some(&sel));
+    }
+
+    #[test]
+    fn unauthorized_changes_are_refused_and_change_nothing() {
+        let cases: Vec<(
+            &dyn EngineExtension,
+            EffortProposal,
+            EngineAction,
+            Hook,
+            &str,
+        )> = vec![
+            // a level outside the task binding
+            (
+                &EFFORT_TEST_V0,
+                EffortProposal::Change("xhigh".into()),
+                EngineAction::Continue,
+                Hook::BeforeRequest,
+                "engine-effort-not-authorized",
+            ),
+            // a change while finishing
+            (
+                &EFFORT_TEST_V0,
+                EffortProposal::Change("high".into()),
+                EngineAction::Finish,
+                Hook::FinalResponse,
+                "engine-effort-not-admitted",
+            ),
+            // an engine without effort authority (muse-v0)
+            (
+                &muse_v0::MUSE_V0,
+                EffortProposal::Change("high".into()),
+                EngineAction::Continue,
+                Hook::BeforeRequest,
+                "engine-effort-not-authorized",
+            ),
+        ];
+        for (ext, effort, action, hook, code) in cases {
+            let mut h = EngineHost::new(ext);
+            let mut p = ext.propose(hook, &snap2(0, "low"), h.state(), 1);
+            p.effort = effort;
+            p.action = action;
+            assert_eq!(h.accept(hook, &snap2(0, "low"), p).unwrap_err().code, code);
+            assert_eq!(h.state(), &ext.initial_state());
+            assert!(h.effort_selection().is_none() && h.receipts().is_empty());
+            assert_eq!(h.next_proposal_id(), 1);
+        }
+    }
+
+    #[test]
+    fn a_restored_host_refuses_replayed_stale_and_reordered_proposals() {
+        let mut state = EFFORT_TEST_V0.initial_state();
+        state.revision = 5;
+        if let EngineStateData::EffortTestV0(d) = &mut state.data {
+            d.proposals = 5;
+        }
+        let sel = EffortSelection {
+            effort: "high".into(),
+            from_attempt: 2,
+            proposal_id: 5,
+        };
+        let mut h = EngineHost::restored(&EFFORT_TEST_V0, state, 5, Some(sel.clone()));
+        assert_eq!(h.next_proposal_id(), 6);
+        assert_eq!(
+            h.effort_for_attempt(3),
+            Some("high"),
+            "the durable selection is restored"
+        );
+        // the same id as before the restart: a replay
+        let mut p = prop(&h, EffortProposal::KeepPinned, EngineAction::Continue, 3);
+        p.proposal_id = 5;
+        assert_eq!(
+            h.accept(Hook::BeforeRequest, &snap2(3, "high"), p)
+                .unwrap_err()
+                .code,
+            "engine-proposal-replayed"
+        );
+        // two proposals built on the same revision (reordered): the second is stale
+        let a = prop(
+            &h,
+            EffortProposal::Change("low".into()),
+            EngineAction::Continue,
+            3,
+        );
+        let mut b = a.clone();
+        b.proposal_id = 7;
+        h.accept(Hook::BeforeRequest, &snap2(3, "high"), a).unwrap();
+        assert_eq!(
+            h.accept(Hook::BeforeRequest, &snap2(3, "low"), b)
+                .unwrap_err()
+                .code,
+            "engine-state-stale"
+        );
+        assert_eq!(h.effort_for_attempt(4), Some("low"));
+        // a proposal skipping ahead
+        let mut c = prop(&h, EffortProposal::KeepPinned, EngineAction::Continue, 3);
+        c.proposal_id = 99;
+        assert_eq!(
+            h.accept(Hook::BeforeRequest, &snap2(3, "low"), c)
+                .unwrap_err()
+                .code,
+            "engine-proposal-replayed"
+        );
+        let _ = EffortTestState::default();
+    }
+
+    #[test]
+    fn the_test_engine_payload_round_trips_and_refuses_foreign_shapes() {
+        let mut s = EFFORT_TEST_V0.initial_state();
+        if let EngineStateData::EffortTestV0(d) = &mut s.data {
+            d.attempts_total = 3;
+            d.root_causes = vec!["off-by-one in add()".into()];
+        }
+        let v = EFFORT_TEST_V0.persist_state(&s);
+        let r = EFFORT_TEST_V0.restore_state(&v, 0).unwrap();
+        let EngineStateData::EffortTestV0(d) = &r.data else {
+            panic!()
+        };
+        assert_eq!(
+            (d.attempts_total, d.attempts_here, d.root_causes.len()),
+            (3, 0, 1)
+        );
+        let mut bad = v.clone();
+        bad["governorEffort"] = "max".into();
+        assert!(
+            EFFORT_TEST_V0.restore_state(&bad, 0).is_none(),
+            "unknown field"
+        );
+        let mut bad = v.clone();
+        bad["rootCauses"] = serde_json::json!(vec!["x"; 9]);
+        assert!(
+            EFFORT_TEST_V0.restore_state(&bad, 0).is_none(),
+            "out of bounds"
+        );
+        // muse-v0 never inherits, and persists no model text
+        assert!(muse_v0::MUSE_V0.restore_state(&v, 0).is_none());
+        let mut m = muse_v0::MUSE_V0.initial_state();
+        if let EngineStateData::MuseV0(d) = &mut m.data {
+            d.recent_narration = vec!["Now I will edit src/lib.rs".into()];
+        }
+        let pv = muse_v0::MUSE_V0.persist_state(&m).to_string();
+        assert!(!pv.contains("edit src/lib.rs") && pv.contains("narrationDigests"));
+    }
 }

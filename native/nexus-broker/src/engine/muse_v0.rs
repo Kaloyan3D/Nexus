@@ -37,6 +37,8 @@ pub static MUSE_V0: MuseV0 = MuseV0 {
         roles: &["muse_main"],
         state_schema: 1,
         may_propose_effort: false,
+        // EM-01 behaviour: every task generation (incl. a continuation) starts from scratch
+        inherits_state: false,
     },
 };
 
@@ -71,8 +73,22 @@ impl MuseV0State {
 }
 
 fn data(s: &EngineState) -> &MuseV0State {
+    static FOREIGN: MuseV0State = MuseV0State {
+        nudges: 0,
+        plan_nudges: 0,
+        verify_nudges: 0,
+        fail_nudges: 0,
+        report_nudges: 0,
+        tidy_nudges: 0,
+        steers: 0,
+        progress_mark: 0,
+        recent_narration: Vec::new(),
+    };
     match &s.data {
         EngineStateData::MuseV0(d) => d,
+        // only reachable with another engine's data, which `check_transition` refuses
+        #[allow(unreachable_patterns)]
+        _ => &FOREIGN,
     }
 }
 
@@ -265,6 +281,28 @@ impl EngineExtension for MuseV0 {
         &self.descriptor
     }
 
+    /// EM-03 persisted form: the counters as they are; the narration window (normalized MODEL
+    /// text) only as SHA-256 digests, so no model output is written to the engine state store.
+    fn persist_state(&self, state: &EngineState) -> serde_json::Value {
+        let s = data(state);
+        let digests: Vec<String> = s
+            .recent_narration
+            .iter()
+            .map(|n| nexus_contracts::sha256_hex(n))
+            .collect();
+        serde_json::json!({
+            "nudges": s.nudges,
+            "planNudges": s.plan_nudges,
+            "verifyNudges": s.verify_nudges,
+            "failNudges": s.fail_nudges,
+            "reportNudges": s.report_nudges,
+            "tidyNudges": s.tidy_nudges,
+            "steers": s.steers,
+            "progressMark": s.progress_mark,
+            "narrationDigests": digests,
+        })
+    }
+
     fn initial_state(&self) -> EngineState {
         EngineState {
             engine_id: self.descriptor.engine_id,
@@ -335,6 +373,10 @@ impl EngineExtension for MuseV0 {
         to: &EngineState,
         snap: &EngineSnapshot,
     ) -> Result<(), String> {
+        #[allow(irrefutable_let_patterns)]
+        let (EngineStateData::MuseV0(_), EngineStateData::MuseV0(_)) = (&from.data, &to.data) else {
+            return Err("state data of another engine".into());
+        };
         let (a, b) = (data(from), data(to));
         let progress = snap.edits_used + snap.tests_used;
         let reset_ok = progress > a.progress_mark;

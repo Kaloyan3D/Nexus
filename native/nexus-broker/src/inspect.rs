@@ -837,6 +837,19 @@ pub(crate) fn run(
     // EM-02: a continuation keeps the task binding of the run it continues (model, route,
     // provider, connection, endpoint, credential, mode, engine, default effort) or fails closed.
     task_binding_continuity(b, run_id, &issued)?;
+    // EM-03: the interrupted run's engine state is examined (authenticated, same engine, mode,
+    // contract and schema) before this continuation creates anything; refused = nothing exists.
+    if let Some(pred) = predecessor_of(b, run_id) {
+        let mode = resolution
+            .pointer("/target/modeId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        crate::engine_state::EngineStateStore::open(&b.cfg.state_dir)
+            .and_then(|store| {
+                crate::engine_state::examine_predecessor(&store, engine, mode, Some(pred))
+            })
+            .map_err(|e| se(e.code, e.message))?;
+    }
     let extension = issued.get("extension").cloned().unwrap_or_default();
     let origin = extension
         .pointer("/endpoint/origin")
@@ -1124,6 +1137,33 @@ pub(crate) fn run(
             "the run's task binding could not be recorded; nothing was sent",
         )));
     }
+    // EM-03: the run's durable, task-owned engine state, created before any attempt exists. A
+    // continuation carries the interrupted run's lineage (and, for an inheriting engine, its
+    // validated payload); anything unauthenticated or foreign fails closed here.
+    #[cfg(feature = "test-engines")]
+    crate::engine::test_faults::bind(&intent.idempotency_key, &task_instance);
+    let predecessor = predecessor_of(b, run_id);
+    let bound_mode = task_target
+        .binding
+        .target
+        .get("modeId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let mut engine_run = crate::engine_state::EngineStateStore::open(&b.cfg.state_dir)
+        .and_then(|store| {
+            crate::engine_state::EngineRun::start(
+                store,
+                engine,
+                run_id,
+                &task_instance,
+                &bound_mode,
+                &task_target.binding_digest,
+                task_target.default_effort(),
+                predecessor,
+            )
+        })
+        .map_err(|e| discard(se(e.code, e.message)))?;
 
     let opts = ModelRunOptions {
         cap_path: b.cfg.cap_path.clone(),
@@ -1236,11 +1276,33 @@ pub(crate) fn run(
             root: &root,
             expected: expected.clone(),
             ctx_budget,
-            engine,
         },
         &mut loop_state,
+        &mut engine_run,
     );
+    // EM-03: the run's end is part of its durable engine state
+    let how = match &result {
+        Ok(LoopEnd::Completed) => "completed".to_owned(),
+        Ok(LoopEnd::Limit(l)) => format!("limit {l}"),
+        Ok(LoopEnd::Cancelled) => "cancelled".to_owned(),
+        Ok(LoopEnd::Recorded) => "ended by the executor".to_owned(),
+        Ok(LoopEnd::Failed(c, _)) => format!("failed {c}"),
+        Ok(LoopEnd::Uncertain(c, _)) => format!("uncertain {c}"),
+        Err(e) => format!("error {}", e.code),
+    };
+    // The run record (written by `finalize`) holds the authoritative completion verdict; the
+    // engine record's end is written AFTER it, so engine state can never claim an end the run
+    // record does not have. If that last write fails, the record simply lacks its end (the last
+    // attempt then reads as unresolved, never re-sent); the verdict is unaffected.
     finalize(&ctx, &mut session, &cfg, &loop_state, result);
+    #[cfg(feature = "test-engines")]
+    crate::engine::test_faults::crash(&intent.idempotency_key, "after-finalize");
+    if let Err(e) = engine_run.finish(&how) {
+        eprintln!(
+            "[broker] run {run_id}: the engine state could not record the end of the run ({}): {}",
+            e.code, e.message
+        );
+    }
     Ok(())
 }
 
@@ -1262,8 +1324,6 @@ struct Shared<'a> {
     #[allow(dead_code)]
     expected: Option<nexus_client::ExpectedTarget>,
     ctx_budget: usize,
-    /// The run's Engineering Mode extension (EM-01).
-    engine: &'static dyn crate::engine::EngineExtension,
 }
 
 #[derive(Default)]
@@ -1447,6 +1507,17 @@ fn engine_for_run(
     Ok(engine)
 }
 
+/// EM-03: the run this one continues (after an interruption or a restart), if any.
+fn predecessor_of(b: &Broker, run_id: &str) -> Option<crate::engine_state::Predecessor> {
+    b.store
+        .load(run_id)
+        .and_then(|r| r.run.continuation_of)
+        .map(|old| crate::engine_state::Predecessor {
+            task_instance_id: b.store.load(&old).and_then(|o| o.run.task_instance_id),
+            run_id: old,
+        })
+}
+
 /// EM-02: a continuation (after an interruption or a broker restart) is a new task generation
 /// with a fresh issuance; it must keep the binding identity of the run it continues. Records
 /// written before EM-02 carry no identity: their recorded model, route, provider and connection
@@ -1507,6 +1578,8 @@ fn task_binding_continuity(b: &Broker, run_id: &str, issued: &Value) -> Result<(
 fn engine_snapshot(
     ls: &LoopState,
     sh: &Shared<'_>,
+    er: &crate::engine_state::EngineRun,
+    dispatches: u32,
     interactive: bool,
     turn: u32,
     response_text: &str,
@@ -1529,7 +1602,21 @@ fn engine_snapshot(
         expects_change: ls.expects_change,
         carried_work: ls.carried_work,
         response_text: response_text.to_owned(),
+        attempts_dispatched: dispatches,
+        current_effort: er
+            .host
+            .effort_for_attempt(dispatches + 1)
+            .unwrap_or(sh.task_target.default_effort())
+            .to_owned(),
+        authorized_efforts: sh.task_target.binding.supported_reasoning.clone(),
     }
+}
+
+/// EM-03 TEST-ONLY crash point (feature `test-engines`; a no-op in production builds).
+#[allow(unused_variables)]
+fn fault(sh: &Shared<'_>, point: &str) {
+    #[cfg(feature = "test-engines")]
+    crate::engine::test_faults::crash(&sh.intent.idempotency_key, point);
 }
 
 /// Edits and writes that really executed in this run (receipts, not proposals).
@@ -1692,6 +1779,7 @@ fn turn_loop(
     started: &Instant,
     sh: &Shared<'_>,
     ls: &mut LoopState,
+    er: &mut crate::engine_state::EngineRun,
 ) -> Result<LoopEnd, StepError> {
     let b = ctx.b;
     let ledger = b.cfg.ledger_workspace.to_string_lossy().into_owned();
@@ -1756,8 +1844,14 @@ fn turn_loop(
     let mut dispatches = 0u32;
     let mut failures_in_a_row = 0u32;
     let mut turn = 0u32;
-    // EM-01: this run's Engineering Mode extension and its revisioned state (never shared)
-    let mut engine = crate::engine::EngineHost::new(sh.engine);
+    // EM-01/EM-03: this run's Engineering Mode extension lives in `er` (host + durable state,
+    // never shared). Registry-authorized targets of non-default efforts, per effort (they are
+    // content-addressed per task, so one authorization serves every attempt of that effort; the
+    // Kernel still accepts each attempt on its own).
+    let mut attempt_targets: std::collections::HashMap<
+        String,
+        crate::attempt_target::AttemptTarget,
+    > = std::collections::HashMap::new();
     loop {
         turn += 1;
         if turn > limits.turns {
@@ -1846,20 +1940,38 @@ fn turn_loop(
             let n = ls.compactions;
             b.update(ctx.run_id, |r| r.context_compactions = n);
         }
+        fault(sh, "before-accept");
         // EM-01: the engine is consulted before every request. Contract v1 admits only
         // `Continue` with the pinned effort: nothing about the request can change here.
-        if let Err(r) = engine.consult(
+        if let Err(r) = er.consult(
             crate::engine::Hook::BeforeRequest,
-            &engine_snapshot(ls, sh, b.cfg.interactive, turn, ""),
+            &engine_snapshot(ls, sh, er, dispatches, b.cfg.interactive, turn, ""),
         ) {
             return Ok(LoopEnd::Failed(r.code.into(), r.message));
         }
-        // EM-02: the target of THIS attempt. The EngineExtension v1 contract admits no effort
-        // proposal, so every attempt executes the task's own pinned target, exactly as before.
-        let attempt_target = sh
-            .task_target
-            .for_attempt(b, crate::attempt_target::EffortRequest::Pinned)
-            .map_err(StepError::from)?;
+        fault(sh, "after-accept");
+        // EM-02/EM-03: the target of THIS attempt: the task's pinned target, unless an accepted
+        // (and already durable) effort selection is in force for it; then the Registry issues
+        // and the Kernel seals that effort's target under the task binding.
+        let ordinal = dispatches + 1;
+        let attempt_target = match er.host.effort_for_attempt(ordinal).map(str::to_owned) {
+            None => sh
+                .task_target
+                .for_attempt(b, crate::attempt_target::EffortRequest::Pinned)
+                .map_err(StepError::from)?,
+            Some(e) => match attempt_targets.get(&e) {
+                Some(t) => t.clone(),
+                None => {
+                    let t = sh
+                        .task_target
+                        .for_attempt(b, crate::attempt_target::EffortRequest::Authorized(&e))
+                        .map_err(StepError::from)?;
+                    attempt_targets.insert(e, t.clone());
+                    t
+                }
+            },
+        };
+        fault(sh, "after-authorize");
         let req = ModelRunRequest {
             user_initiated: true,
             prompt: sh.intent.content.clone(),
@@ -1885,6 +1997,24 @@ fn turn_loop(
         };
         let prepared = nexus_client::prepare_inspect_turn(&req, &items, sh.mode.profile())
             .map_err(|e| se("prepare-refused", e.message))?;
+        // EM-03 write-ahead: the attempt -> target association (and every accepted proposal
+        // so far) is durable BEFORE the attempt is published and dispatched.
+        let issuance_id = attempt_target
+            .resolution
+            .pointer("/provenance/issuanceId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        if let Err(e) = er.bind_attempt(
+            ordinal,
+            &attempt_id,
+            &attempt_target.effort,
+            &issuance_id,
+            &attempt_target.extension_digest,
+        ) {
+            return Ok(LoopEnd::Failed(e.code.into(), e.message));
+        }
+        fault(sh, "after-bind");
         let bundle = bridge(
             b,
             sh.mode.publish(),
@@ -1982,6 +2112,19 @@ fn turn_loop(
             }),
             other => other.map_err(|e| se(e.code, e.message)),
         }?;
+        er.attempt_outcome(
+            ordinal,
+            match &end {
+                TurnEnd::Output(_) => "answered",
+                TurnEnd::Truncated(_) => "truncated",
+                TurnEnd::Ended {
+                    state: nexus_client::model_run::ModelRunState::Uncertain,
+                    ..
+                } => "uncertain",
+                TurnEnd::Ended { .. } => "failed",
+            },
+        );
+        fault(sh, "after-answer");
         let out = match end {
             TurnEnd::Output(o) => {
                 truncations_in_a_row = 0;
@@ -2109,9 +2252,9 @@ fn turn_loop(
             // EM-01: the Engineering Mode decides whether a reply without a tool call ends the
             // turn or the model is asked to carry on; completion itself stays the Controller's
             // (`decide_run` below, from receipts).
-            match engine.consult(
+            match er.consult(
                 crate::engine::Hook::FinalResponse,
-                &engine_snapshot(ls, sh, b.cfg.interactive, turn, &out.text),
+                &engine_snapshot(ls, sh, er, dispatches, b.cfg.interactive, turn, &out.text),
             ) {
                 Err(r) => return Ok(LoopEnd::Failed(r.code.into(), r.message)),
                 Ok(crate::engine::EngineDecision::Guide(g)) => {
@@ -2587,9 +2730,9 @@ fn turn_loop(
         }
         // EM-01: after the tool phase the Engineering Mode may add bounded guidance (muse-v0: the
         // "start implementing" reminder for an implementation task that keeps reading).
-        match engine.consult(
+        match er.consult(
             crate::engine::Hook::AfterToolPhase,
-            &engine_snapshot(ls, sh, b.cfg.interactive, turn, &out.text),
+            &engine_snapshot(ls, sh, er, dispatches, b.cfg.interactive, turn, &out.text),
         ) {
             Err(r) => return Ok(LoopEnd::Failed(r.code.into(), r.message)),
             Ok(crate::engine::EngineDecision::Guide(g)) => {

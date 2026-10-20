@@ -32,8 +32,11 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # the binary so a fixture CA and resolver can be injected. NEVER enabled by
 # default or by the workspace build; verification stays mandatory either way.
 test-fixtures = ["dep:rustls"]
+# EM-03: deterministic test-only engines; NEVER enabled by production builds
+test-engines = []
 
 [dev-dependencies]
+nexus-broker = { path = ".", features = ["test-engines"] }
 tempfile = { workspace = true }
 rusqlite = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

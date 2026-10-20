@@ -302,6 +302,7 @@ dependencies = [
  "fs2",
  "hex",
  "libc",
+ "nexus-broker",
  "nexus-client",
  "nexus-contracts",
  "nexus-kernel",

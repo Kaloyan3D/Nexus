@@ -492,6 +492,9 @@ struct Fx {
     repo2: Option<PathBuf>,
     autonomous: bool,
     _acap_dir: tempfile::TempDir,
+    /// EM-03: the Registry install root (the repository, or a fixture copy of its `config/`).
+    install_root: PathBuf,
+    _install_dir: Option<tempfile::TempDir>,
 }
 
 fn own_uid() -> u32 {
@@ -644,6 +647,56 @@ fn fixture_inner(
     with_registry: bool,
     autonomous: bool,
 ) -> Fx {
+    fixture_full(responder, extra, env, with_registry, autonomous, None)
+}
+
+/// EM-03: an autonomous fixture whose Registry install root is a copy of the repository's
+/// `config/` in which the engineering-v2 mode names `engine` (and the fixture models are scoped
+/// to it): the REAL Registry then issues that engine, exactly as it issues `muse-v0` normally.
+fn fixture_engine(responder: Responder, engine: &str) -> Fx {
+    let dir = tempfile::tempdir().unwrap();
+    let st = Command::new("cp")
+        .args(["-r", "--reflink=auto"])
+        .arg(repo_root().join("config"))
+        .arg(dir.path().join("config"))
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let mode = dir.path().join("config/registry/modes/engineering-v2.json");
+    let mut m: Value = serde_json::from_slice(&std::fs::read(&mode).unwrap()).unwrap();
+    m["orchestrationEngineId"] = engine.into();
+    std::fs::write(&mode, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+    let install = dir.path().to_path_buf();
+    let fx = fixture_full(
+        responder,
+        Box::new(|_| {}),
+        &[],
+        true,
+        true,
+        Some((install.clone(), dir)),
+    );
+    let r = node_json(&[
+        "registry-engine-scope",
+        fx.registry.to_str().unwrap(),
+        install.to_str().unwrap(),
+        engine,
+    ]);
+    assert_eq!(r["ok"], true, "{r}");
+    fx
+}
+
+fn fixture_full(
+    responder: Responder,
+    extra: Box<dyn Fn(&Path)>,
+    env: &[(&str, &str)],
+    with_registry: bool,
+    autonomous: bool,
+    install: Option<(PathBuf, tempfile::TempDir)>,
+) -> Fx {
+    let (install_root, install_dir) = match install {
+        Some((p, d)) => (p, Some(d)),
+        None => (repo_root(), None),
+    };
     let tmp = tempfile::tempdir().unwrap();
     std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let pki = Pki::new();
@@ -651,7 +704,7 @@ fn fixture_inner(
     let provider = serve(l, &pki, responder);
     let registry = tmp.path().join("registry");
     std::fs::create_dir_all(&registry).unwrap();
-    let repo_root_dir = repo_root();
+    let repo_root_dir = install_root.clone();
     let reg = node_json(&[
         "registry",
         registry.to_str().unwrap(),
@@ -722,6 +775,8 @@ fn fixture_inner(
         repo2,
         autonomous,
         _acap_dir: acap_dir,
+        install_root,
+        _install_dir: install_dir,
     }
 }
 
@@ -774,7 +829,7 @@ impl Fx {
             cap_path: self.cap.clone(),
             credentials_path: self.creds.clone(),
             transcript_dir: root.join("transcripts"),
-            repo_root: repo_root(),
+            repo_root: self.install_root.clone(),
             registry_data_root: self.registry.clone(),
             ledger_workspace: root.join("intent-ledger"),
             node: "node".into(),
@@ -9369,6 +9424,954 @@ fn em02_recovered_attempts_keep_the_tasks_single_issuance_and_are_never_dispatch
         attempts.len(),
         receipts.len(),
         "each request is its own Controller attempt"
+    );
+    b.shutdown();
+}
+
+// ---- EM-03: durable engine state and EngineExtension v2 --------------------------------
+
+/// The durable engine state record of a task generation, as the broker wrote it.
+fn em03_state(fx: &Fx, broker: &str, task: &str) -> Value {
+    let p = fx
+        .config(broker)
+        .state_dir
+        .join("engine")
+        .join(format!("{task}.json"));
+    serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap()
+}
+
+/// A responder that answers `reads` tool-call rounds, then a final text.
+fn em03_responder(reads: usize) -> Responder {
+    Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        let done = body["input"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["type"] == "function_call_output")
+                    .count()
+            })
+            .unwrap_or(0);
+        if done < reads {
+            Answer::Frames(call_frames(
+                &resp,
+                n,
+                &format!("call_{done}"),
+                "fs_read",
+                r#"{"path":"src/lib.rs"}"#,
+            ))
+        } else {
+            Answer::Frames(text_frames(&resp, "Read what was needed; done."))
+        }
+    })
+}
+
+/// The test engine's fixture: the Registry issues `effort-test-v0`, the route declares low and
+/// high, and the operator's slot policy authorizes both (controlled fixture).
+fn em03_fixture(responder: Responder) -> Fx {
+    let fx = fixture_engine(responder, "effort-test-v0");
+    let root = fx.install_root.to_str().unwrap().to_owned();
+    let data = fx.registry.to_str().unwrap().to_owned();
+    let r = node_json(&[
+        "registry-levels",
+        &data,
+        &root,
+        "e2e-mock/e2e-1",
+        "[\"low\",\"high\"]",
+    ]);
+    assert_eq!(r["ok"], true, "{r}");
+    let r = node_json(&["registry-slot-policy", &data, &root, "[\"low\",\"high\"]"]);
+    assert_eq!(r["ok"], true, "{r}");
+    fx
+}
+
+fn em03_broker(fx: &Fx, name: &str) -> BrokerHandle {
+    let mut c = fx.config(name);
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.interactive = true;
+    nexus_broker::start(c).expect("broker starts")
+}
+
+fn em03_receipts(fx: &Fx, task: &str) -> Vec<Value> {
+    let frame = json!({"protocol": 1, "id": "j", "cmd": "journal",
+        "params": {"taskInstanceId": task, "backend": "native"}});
+    let resp = nexus_client::transport::ipc_roundtrip(&fx.daemon_socket, &frame, 10_000).unwrap();
+    assert_eq!(resp["ok"], true, "{resp}");
+    let mut r = resp["receipts"]
+        .as_array()
+        .or_else(|| resp["result"]["receipts"].as_array())
+        .cloned()
+        .unwrap_or_default();
+    r.sort_by_key(|x| x["eventSeq"].as_i64().unwrap_or(0));
+    r
+}
+
+/// The success criterion: a trusted (test) engine proposes low -> high -> low; each proposal is
+/// durable before the Registry authorizes it, the Kernel seals and accepts each attempt's target,
+/// and every provider request carries exactly the effort authorized for that attempt.
+#[test]
+fn em03_a_test_engine_moves_low_high_low_through_registry_and_kernel_one_attempt_at_a_time() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = em03_fixture(em03_responder(2));
+    let b = em03_broker(&fx, "em03-lhl");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "read src/lib.rs", "em03-lhl-0000001", |_| {}),
+        180,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let bodies = fx.provider.bodies.lock().unwrap().clone();
+    let efforts: Vec<&str> = bodies
+        .iter()
+        .map(|x| x["reasoning"]["effort"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        efforts,
+        ["low", "high", "low"],
+        "one effort per attempt, as authorized"
+    );
+    // same model / everything else identical across the effort change
+    for x in &bodies {
+        assert_eq!(x["model"], "e2e-mock-model");
+    }
+    let task = run.task_instance_id.clone().unwrap();
+    let st = em03_state(&fx, "em03-lhl", &task);
+    assert_eq!(st["engineId"], "effort-test-v0");
+    assert_eq!(st["defaultEffort"], "low");
+    let att: Vec<(u64, String)> = st["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            (
+                a["ordinal"].as_u64().unwrap(),
+                a["effort"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        att,
+        [(1, "low".into()), (2, "high".into()), (3, "low".into())]
+    );
+    assert!(st["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|a| a["state"] == "answered"));
+    // every effort selection was durable (an event) before the attempt it designates was bound
+    let ev = st["events"].as_array().unwrap();
+    let pos = |kind: &str, attempt: u64| {
+        ev.iter()
+            .position(|e| e["kind"] == kind && e["attempt"] == attempt)
+            .unwrap_or_else(|| panic!("no {kind} for attempt {attempt}: {ev:?}"))
+    };
+    assert!(pos("effort-selected", 2) < pos("attempt-bound", 2));
+    assert!(pos("effort-selected", 3) < pos("attempt-bound", 3));
+    assert_eq!(ev.last().unwrap()["kind"], "run-ended");
+    // the Kernel accepted attempt 2 under a different issuance than attempts 1 and 3
+    let receipts = em03_receipts(&fx, &task);
+    assert_eq!(receipts.len(), 3, "{receipts:?}");
+    let iss: Vec<&str> = receipts
+        .iter()
+        .map(|r| r["issuanceId"].as_str().unwrap())
+        .collect();
+    assert_eq!(iss[0], iss[2]);
+    assert_ne!(iss[0], iss[1]);
+    for (a, r) in st["attempts"].as_array().unwrap().iter().zip(&receipts) {
+        assert_eq!(
+            a["issuanceId"], r["issuanceId"],
+            "the durable record names the sealed target"
+        );
+        assert_eq!(a["attemptId"], r["attemptId"]);
+    }
+    b.shutdown();
+}
+
+struct Em03Crash {
+    fx: Fx,
+    b: BrokerHandle,
+    first: ic::IntentRun,
+    second: ic::IntentRun,
+    old_state: Value,
+    new_state: Value,
+    old_requests: Vec<Value>,
+    new_requests: Vec<Value>,
+}
+
+/// A test-engine run that crashes at `point` (its `nth` hit), a broker restart, then the user
+/// continues the interrupted task. Checks shared by every crash point: the crashed record is
+/// authentic and never partially applied, the continuation records its lineage, every request
+/// carries the effort its own task's durable record bound for that attempt, and the Kernel
+/// accepted exactly the attempts that were sent, each under the target the record names.
+fn em03_crash_then_continue(point: &str, nth: u32, key: &str) -> Em03Crash {
+    let fx = em03_fixture(em03_responder(2));
+    let b = em03_broker(&fx, "em03-crash");
+    nexus_broker::engine::test_faults::arm_nth(key, point, nth);
+    let first = ic::submit(
+        b.socket_path(),
+        &code_intent_for("other", "read src/lib.rs", key, |_| {}),
+    )
+    .expect("submit")
+    .run;
+    let first = wait_terminal(b.socket_path(), &first.run_id, 120);
+    // the crashed worker wrote nothing more; the pipeline closed the run (terminal, resumable)
+    assert!(first.terminal && first.state != "completed", "{first:?}");
+    assert_eq!(
+        first.error_code.as_deref(),
+        Some("internal-panic"),
+        "{first:?}"
+    );
+    let old_requests = fx.provider.bodies.lock().unwrap().clone();
+    // restart: nothing of the old process survives but the durable stores
+    b.shutdown();
+    let b = em03_broker(&fx, "em03-crash");
+    let state_dir = fx.config("em03-crash").state_dir;
+    let store = nexus_broker::engine_state::EngineStateStore::open(&state_dir).unwrap();
+    let old_task = first.task_instance_id.clone().unwrap();
+    let old_rec = store.load(&old_task).expect("authentic").expect("present");
+    let v = ic::resume(b.socket_path(), &first.run_id).expect("resume");
+    let second_id = v["run"]["runId"].as_str().unwrap().to_owned();
+    let second = wait_terminal(b.socket_path(), &second_id, 180);
+    assert_eq!(second.state, "completed", "{second:?}");
+    let new_task = second.task_instance_id.clone().unwrap();
+    let new_rec = store.load(&new_task).expect("authentic").expect("present");
+    let all = fx.provider.bodies.lock().unwrap().clone();
+    let new_requests = all[old_requests.len()..].to_vec();
+    // lineage: the continuation names the crashed record at its durable revision
+    let lin = new_rec.lineage.as_ref().expect("lineage");
+    assert_eq!(lin.predecessor_run, first.run_id);
+    assert_eq!(lin.predecessor_task.as_deref(), Some(old_task.as_str()));
+    assert_eq!(lin.predecessor_revision, Some(old_rec.revision));
+    assert_eq!(lin.rule, "inherited");
+    assert!(new_rec.events.iter().any(|e| e.kind == "created"));
+    // each task: its requests carry exactly the efforts its record bound, in order, and every
+    // non-default effort was selected (durably) before the attempt was bound
+    for (rec, requests) in [(&old_rec, &old_requests), (&new_rec, &new_requests)] {
+        let bound: Vec<&str> = rec.attempts.iter().map(|a| a.effort.as_str()).collect();
+        let sent: Vec<&str> = requests
+            .iter()
+            .map(|r| r["reasoning"]["effort"].as_str().unwrap())
+            .collect();
+        assert!(
+            sent.len() <= bound.len(),
+            "nothing is sent unbound: {sent:?} vs {bound:?}"
+        );
+        assert_eq!(
+            sent,
+            bound[..sent.len()],
+            "each request carries its bound effort"
+        );
+        for a in rec
+            .attempts
+            .iter()
+            .filter(|a| a.effort != rec.default_effort)
+        {
+            let sel = rec
+                .events
+                .iter()
+                .position(|e| {
+                    e.kind == "effort-selected" && e.attempt.is_some_and(|x| x <= a.ordinal)
+                })
+                .expect("a durable selection precedes a non-default attempt");
+            let bnd = rec
+                .events
+                .iter()
+                .position(|e| e.kind == "attempt-bound" && e.attempt == Some(a.ordinal))
+                .unwrap();
+            assert!(sel < bnd);
+        }
+        assert!(rec.events.windows(2).all(|w| w[1].seq > w[0].seq));
+        // the Kernel accepted exactly the bound attempts, under the targets the record names
+        let receipts = em03_receipts(&fx, &rec.task_instance_id);
+        assert!(receipts.len() <= rec.attempts.len());
+        for (r, a) in receipts.iter().zip(&rec.attempts) {
+            assert_eq!(r["issuanceId"].as_str(), Some(a.issuance_id.as_str()));
+            assert_eq!(r["attemptId"].as_str(), Some(a.attempt_id.as_str()));
+        }
+    }
+    let old_state = serde_json::to_value(&old_rec).unwrap();
+    let new_state = serde_json::to_value(&new_rec).unwrap();
+    Em03Crash {
+        fx,
+        b,
+        first,
+        second,
+        old_state,
+        new_state,
+        old_requests,
+        new_requests,
+    }
+}
+
+fn events(v: &Value) -> Vec<(String, Option<u64>, Option<String>)> {
+    v["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["kind"].as_str().unwrap().to_owned(),
+                e["attempt"].as_u64(),
+                e["effort"].as_str().map(str::to_owned),
+            )
+        })
+        .collect()
+}
+
+/// Crash after attempt 1, before the engine's proposal for attempt 2 is accepted: nothing about
+/// attempt 2 exists anywhere; the continuation starts over at the default effort.
+#[test]
+fn em03_restart_before_a_proposal_is_accepted_leaves_no_trace_of_it() {
+    if !sandbox_ready() {
+        return;
+    }
+    let c = em03_crash_then_continue("before-accept", 2, "em03-crash-00001");
+    let ev = events(&c.old_state);
+    assert!(!ev.iter().any(|e| e.0 == "effort-selected"), "{ev:?}");
+    assert_eq!(c.old_requests.len(), 1);
+    assert_eq!(c.old_state["attempts"].as_array().unwrap().len(), 1);
+    assert_eq!(c.new_requests[0]["reasoning"]["effort"], "low");
+    c.b.shutdown();
+}
+
+/// Crash after the selection of "high" for attempt 2 is durable but before the Registry
+/// authorized it: no target was issued, nothing was sent; the continuation starts at the
+/// default (explicit event) and the engine must propose again under the NEW task's binding.
+#[test]
+fn em03_restart_after_durable_acceptance_before_authorization_never_sends_it() {
+    if !sandbox_ready() {
+        return;
+    }
+    let c = em03_crash_then_continue("after-accept", 2, "em03-crash-00002");
+    let ev = events(&c.old_state);
+    assert!(
+        ev.contains(&("effort-selected".into(), Some(2), Some("high".into()))),
+        "{ev:?}"
+    );
+    assert!(!ev.iter().any(|e| e.0 == "attempt-bound" && e.1 == Some(2)));
+    assert_eq!(c.old_requests.len(), 1, "attempt 2 was never sent");
+    assert_eq!(
+        em03_receipts(&c.fx, c.first.task_instance_id.as_deref().unwrap()).len(),
+        1
+    );
+    let nev = events(&c.new_state);
+    assert!(
+        nev.contains(&(
+            "effort-reset-continuation".into(),
+            None,
+            Some("high".into())
+        )),
+        "{nev:?}"
+    );
+    // the inherited engine re-proposes "high" for the task's 2nd attempt; it is durable before
+    // the continuation's first attempt is bound, and authorized under the continuation's binding
+    assert!(
+        nev.iter().position(|e| e.0 == "effort-selected").unwrap()
+            < nev.iter().position(|e| e.0 == "attempt-bound").unwrap()
+    );
+    assert_eq!(c.new_requests[0]["reasoning"]["effort"], "high");
+    c.b.shutdown();
+}
+
+/// Crash after the Registry authorized and the Kernel sealed attempt 2's target, before it was
+/// bound or dispatched: the sealed target is never used by the crashed task.
+#[test]
+fn em03_restart_after_authorization_before_dispatch_never_sends_it() {
+    if !sandbox_ready() {
+        return;
+    }
+    let c = em03_crash_then_continue("after-authorize", 2, "em03-crash-00003");
+    assert_eq!(c.old_requests.len(), 1);
+    assert_eq!(c.old_state["attempts"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        em03_receipts(&c.fx, c.first.task_instance_id.as_deref().unwrap()).len(),
+        1
+    );
+    c.b.shutdown();
+}
+
+/// Crash after attempt 2 was bound, dispatched and answered, before its outcome was recorded
+/// (an ambiguous delivery from the record's point of view): the continuation records the
+/// unresolved attempt and never re-sends it; the Kernel accepted it exactly once.
+#[test]
+fn em03_restart_during_an_active_attempt_never_resends_it() {
+    if !sandbox_ready() {
+        return;
+    }
+    let c = em03_crash_then_continue("after-answer", 2, "em03-crash-00004");
+    assert_eq!(c.old_requests.len(), 2);
+    assert_eq!(c.old_requests[1]["reasoning"]["effort"], "high");
+    let a2 = &c.old_state["attempts"][1];
+    assert_eq!(
+        (a2["ordinal"].as_u64(), a2["state"].as_str()),
+        (Some(2), Some("bound"))
+    );
+    let nev = events(&c.new_state);
+    assert!(
+        nev.contains(&(
+            "predecessor-attempt-unresolved".into(),
+            Some(2),
+            Some("high".into())
+        )),
+        "{nev:?}"
+    );
+    assert_eq!(
+        em03_receipts(&c.fx, c.first.task_instance_id.as_deref().unwrap()).len(),
+        2
+    );
+    let old_cmds: Vec<String> = em03_receipts(&c.fx, c.first.task_instance_id.as_deref().unwrap())
+        .iter()
+        .map(|r| r["commandId"].as_str().unwrap().to_owned())
+        .collect();
+    let new_cmds: Vec<String> = em03_receipts(&c.fx, c.second.task_instance_id.as_deref().unwrap())
+        .iter()
+        .map(|r| r["commandId"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        old_cmds.iter().all(|c| !new_cmds.contains(c)),
+        "no command is executed twice"
+    );
+    c.b.shutdown();
+}
+
+/// Crash after attempt 2 completed (its outcome durable with attempt 3's binding).
+#[test]
+fn em03_restart_after_a_completed_attempt_keeps_its_recorded_outcome() {
+    if !sandbox_ready() {
+        return;
+    }
+    let c = em03_crash_then_continue("after-bind", 3, "em03-crash-00005");
+    let att = c.old_state["attempts"].as_array().unwrap();
+    assert_eq!(att[1]["state"], "answered");
+    assert_eq!(att[2]["state"], "bound");
+    assert_eq!(
+        c.old_requests.len(),
+        2,
+        "attempt 3 was bound but never sent"
+    );
+    c.b.shutdown();
+}
+
+/// Crash a test-engine run after attempt 2 is bound, restart, alter its durable record, then
+/// continue: the continuation is refused before any working copy or request.
+fn em03_continue_after_tamper(key: &str, alter: impl Fn(&mut Value)) -> ic::IntentRun {
+    let fx = em03_fixture(em03_responder(2));
+    let b = em03_broker(&fx, "em03-tamper");
+    nexus_broker::engine::test_faults::arm_nth(key, "after-bind", 2);
+    let first = ic::submit(
+        b.socket_path(),
+        &code_intent_for("other", "read", key, |_| {}),
+    )
+    .expect("submit")
+    .run;
+    let first = wait_terminal(b.socket_path(), &first.run_id, 120);
+    b.shutdown();
+    let path = fx
+        .config("em03-tamper")
+        .state_dir
+        .join("engine")
+        .join(format!("{}.json", first.task_instance_id.clone().unwrap()));
+    let mut v: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    alter(&mut v);
+    std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    let b = em03_broker(&fx, "em03-tamper");
+    let before = fx.provider.bodies.lock().unwrap().len();
+    let v = ic::resume(b.socket_path(), &first.run_id).expect("resume is accepted, then refused");
+    let second = wait_terminal(b.socket_path(), v["run"]["runId"].as_str().unwrap(), 60);
+    assert_eq!(
+        fx.provider.bodies.lock().unwrap().len(),
+        before,
+        "nothing was sent"
+    );
+    assert!(second.worktree_commit.is_none(), "no working copy");
+    b.shutdown();
+    second
+}
+
+#[test]
+fn em03_a_tampered_engine_state_refuses_the_continuation_before_dispatch() {
+    if !sandbox_ready() {
+        return;
+    }
+    let second = em03_continue_after_tamper("em03-tamper-0001", |v| {
+        // an escalation smuggled into the durable record
+        v["effort"] = json!({"effort": "high", "fromAttempt": 1, "proposalId": 1});
+    });
+    assert_eq!(second.state, "rejected", "{second:?}");
+    assert_eq!(
+        second.error_code.as_deref(),
+        Some("engine-state-unauthenticated")
+    );
+}
+
+#[test]
+fn em03_an_engine_state_of_another_version_refuses_the_continuation() {
+    if !sandbox_ready() {
+        return;
+    }
+    let second = em03_continue_after_tamper("em03-tamper-0002", |v| v["schemaVersion"] = 2.into());
+    assert_eq!(
+        second.error_code.as_deref(),
+        Some("engine-state-version"),
+        "{second:?}"
+    );
+}
+
+/// The route declares "high" but no slot policy authorizes it: the engine's proposal is refused
+/// by the host (first gate) and the run fails closed after the default-effort attempt.
+#[test]
+fn em03_an_effort_outside_the_slot_policy_is_refused_and_never_sent() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_engine(em03_responder(2), "effort-test-v0");
+    let root = fx.install_root.to_str().unwrap().to_owned();
+    let data = fx.registry.to_str().unwrap().to_owned();
+    let r = node_json(&[
+        "registry-levels",
+        &data,
+        &root,
+        "e2e-mock/e2e-1",
+        "[\"low\",\"high\"]",
+    ]);
+    assert_eq!(r["ok"], true, "{r}");
+    let b = em03_broker(&fx, "em03-policy");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "read", "em03-policy-00001", |_| {}),
+        120,
+    );
+    assert_eq!(run.state, "failed", "{run:?}");
+    assert_eq!(
+        run.error_code.as_deref(),
+        Some("engine-effort-not-authorized")
+    );
+    let efforts: Vec<Value> = fx
+        .provider
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|x| x["reasoning"]["effort"].clone())
+        .collect();
+    assert_eq!(efforts, [json!("low")]);
+    let st = em03_state(&fx, "em03-policy", run.task_instance_id.as_deref().unwrap());
+    assert!(!st["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["kind"] == "effort-selected"));
+    b.shutdown();
+}
+
+/// Engine state that cannot be written stops the run before anything is sent.
+#[test]
+fn em03_a_failure_to_persist_engine_state_fails_closed_before_dispatch() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = em03_fixture(em03_responder(1));
+    let b = em03_broker(&fx, "em03-persist");
+    nexus_broker::engine::test_faults::arm("em03-persist-0001", "persist");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "read", "em03-persist-0001", |_| {}),
+        120,
+    );
+    assert!(run.terminal && run.state != "completed", "{run:?}");
+    assert_eq!(
+        run.error_code.as_deref(),
+        Some("engine-state-unpersisted"),
+        "{run:?}"
+    );
+    assert!(
+        fx.provider.bodies.lock().unwrap().is_empty(),
+        "nothing was sent"
+    );
+    b.shutdown();
+}
+
+/// A lost answer (ambiguous delivery) is recovered as a NEW attempt with its own authorized
+/// effort; the lost attempt stays `uncertain` in the record and is never re-sent; the Kernel
+/// accepted exactly one command per provider request.
+#[test]
+fn em03_an_ambiguous_delivery_is_recovered_as_a_new_attempt_never_a_resend() {
+    if !sandbox_ready() {
+        return;
+    }
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        let done = body["input"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["type"] == "function_call_output")
+                    .count()
+            })
+            .unwrap_or(0);
+        if n == 1 {
+            return Answer::Close; // the 2nd request (effort high) is read, its answer lost
+        }
+        if done < 2 {
+            Answer::Frames(call_frames(
+                &resp,
+                n,
+                &format!("call_{done}"),
+                "fs_read",
+                r#"{"path":"src/lib.rs"}"#,
+            ))
+        } else {
+            Answer::Frames(text_frames(&resp, "done"))
+        }
+    });
+    let fx = em03_fixture(responder);
+    let b = em03_broker(&fx, "em03-ambig");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "read", "em03-ambig-000001", |_| {}),
+        180,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(run.recoveries, 1);
+    let bodies = fx.provider.bodies.lock().unwrap().clone();
+    let task = run.task_instance_id.clone().unwrap();
+    let st = em03_state(&fx, "em03-ambig", &task);
+    let att = st["attempts"].as_array().unwrap();
+    assert_eq!(att.len(), bodies.len());
+    assert_eq!(
+        (att[1]["effort"].as_str(), att[1]["state"].as_str()),
+        (Some("high"), Some("uncertain"))
+    );
+    for (a, x) in att.iter().zip(&bodies) {
+        assert_eq!(
+            a["effort"], x["reasoning"]["effort"],
+            "each request carries its attempt's effort"
+        );
+    }
+    let receipts = em03_receipts(&fx, &task);
+    assert_eq!(
+        receipts.len(),
+        bodies.len(),
+        "one accepted command per request"
+    );
+    let cmds: std::collections::BTreeSet<&str> = receipts
+        .iter()
+        .map(|r| r["commandId"].as_str().unwrap())
+        .collect();
+    assert_eq!(cmds.len(), receipts.len(), "no command dispatched twice");
+    b.shutdown();
+}
+
+/// muse-v0 (production path): a durable record is written, no effort ever changes, every attempt
+/// is at the configured default, and no model text is persisted.
+#[test]
+fn em03_muse_v0_keeps_its_default_effort_and_persists_no_model_text() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(em03_responder(2));
+    let b = em03_broker(&fx, "em03-muse");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "read src/lib.rs", "em03-muse-0000001", |_| {}),
+        180,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let st = em03_state(&fx, "em03-muse", run.task_instance_id.as_deref().unwrap());
+    assert_eq!(st["engineId"], "muse-v0");
+    assert!(st["effort"].is_null());
+    assert!(st["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|a| a["effort"] == "low"));
+    assert!(!st["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["kind"] == "effort-selected"));
+    let raw = st.to_string();
+    assert!(
+        !raw.contains("Read what was needed") && !raw.contains("src/lib.rs"),
+        "no model or task text"
+    );
+    assert!(raw.len() < nexus_broker::engine_state::MAX_RECORD_BYTES);
+    for x in fx.provider.bodies.lock().unwrap().iter() {
+        assert_eq!(x["reasoning"]["effort"], "low");
+    }
+    b.shutdown();
+}
+
+/// A run recorded before EM-03 (no engine state) is continued under an explicit rule: fresh
+/// state for the SAME engine (EM-01 continuity), lineage `pre-em03-no-state`, default effort.
+#[test]
+fn em03_a_pre_em03_run_is_continued_under_an_explicit_rule() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(em03_responder(2));
+    let b = em03_broker(&fx, "em03-legacy");
+    nexus_broker::engine::test_faults::arm_nth("em03-legacy-000001", "after-bind", 2);
+    let first = ic::submit(
+        b.socket_path(),
+        &code_intent_for("other", "read", "em03-legacy-000001", |_| {}),
+    )
+    .expect("submit")
+    .run;
+    let first = wait_terminal(b.socket_path(), &first.run_id, 120);
+    b.shutdown();
+    // the record a pre-EM-03 broker would never have written
+    let dir = fx.config("em03-legacy").state_dir.join("engine");
+    std::fs::remove_file(dir.join(format!("{}.json", first.task_instance_id.clone().unwrap())))
+        .unwrap();
+    let b = em03_broker(&fx, "em03-legacy");
+    let v = ic::resume(b.socket_path(), &first.run_id).expect("resume");
+    let second = wait_terminal(b.socket_path(), v["run"]["runId"].as_str().unwrap(), 180);
+    assert_eq!(second.state, "completed", "{second:?}");
+    let st = em03_state(
+        &fx,
+        "em03-legacy",
+        second.task_instance_id.as_deref().unwrap(),
+    );
+    assert_eq!(st["lineage"]["rule"], "pre-em03-no-state");
+    assert_eq!(st["engineId"], "muse-v0");
+    assert!(st["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["kind"] == "continued-without-predecessor-state"));
+    b.shutdown();
+}
+
+// ---- EM-03 final durability review --------------------------------------------------------
+
+fn em03_store(fx: &Fx, broker: &str) -> nexus_broker::engine_state::EngineStateStore {
+    nexus_broker::engine_state::EngineStateStore::open(&fx.config(broker).state_dir).unwrap()
+}
+
+/// The end-of-run engine write fails on a COMPLETED run: the run record (authoritative) says
+/// completed; the engine record authenticates and lacks only its end; after a restart nothing is
+/// contradictory: the run stays completed, it cannot be continued, and the Kernel receipts match
+/// the attempts the record bound.
+#[test]
+fn em03_a_failed_terminal_write_never_contradicts_a_completed_run() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = em03_fixture(em03_responder(2));
+    let b = em03_broker(&fx, "em03-final");
+    nexus_broker::engine::test_faults::arm("em03-final-000001", "persist-final");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "read", "em03-final-000001", |_| {}),
+        180,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    b.shutdown();
+    let b = em03_broker(&fx, "em03-final");
+    let after = ic::status(b.socket_path(), &run.run_id).unwrap();
+    assert_eq!(
+        after.state, "completed",
+        "still completed after the restart"
+    );
+    let task = run.task_instance_id.clone().unwrap();
+    let rec = em03_store(&fx, "em03-final")
+        .load(&task)
+        .expect("authentic")
+        .unwrap();
+    assert!(
+        !rec.events.iter().any(|e| e.kind == "run-ended"),
+        "the failed end is absent, not forged"
+    );
+    let receipts = em03_receipts(&fx, &task);
+    assert_eq!(receipts.len(), rec.attempts.len());
+    assert_eq!(receipts.len(), fx.provider.bodies.lock().unwrap().len());
+    assert!(
+        ic::resume(b.socket_path(), &run.run_id).is_err(),
+        "a completed run is never continued"
+    );
+    b.shutdown();
+}
+
+/// A crash AFTER the authoritative verdict but before the engine end: the run record is terminal
+/// (completed) and the engine record simply lacks its end. Engine state can never claim an end
+/// that the run record does not have (the end is written after the verdict).
+#[test]
+fn em03_a_crash_between_the_verdict_and_the_engine_end_leaves_the_verdict_authoritative() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = em03_fixture(em03_responder(1));
+    let b = em03_broker(&fx, "em03-order");
+    nexus_broker::engine::test_faults::arm("em03-order-000001", "after-finalize");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "read", "em03-order-000001", |_| {}),
+        180,
+    );
+    assert_eq!(
+        run.state, "completed",
+        "{run:?} (the verdict was written before the crash)"
+    );
+    b.shutdown();
+    let b = em03_broker(&fx, "em03-order");
+    assert_eq!(
+        ic::status(b.socket_path(), &run.run_id).unwrap().state,
+        "completed"
+    );
+    let rec = em03_store(&fx, "em03-order")
+        .load(run.task_instance_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(!rec.events.iter().any(|e| e.kind == "run-ended"));
+    b.shutdown();
+}
+
+/// The end-of-run write fails on a FAILED run, then a restart and a continuation: the
+/// continuation authenticates the incomplete record, records the last attempt as unresolved, never
+/// re-sends it, and starts at the default effort.
+#[test]
+fn em03_a_failed_terminal_write_on_a_failed_run_continues_safely() {
+    if !sandbox_ready() {
+        return;
+    }
+    // route declares high, no slot policy: the engine's high proposal is refused -> run fails
+    let fx = fixture_engine(em03_responder(2), "effort-test-v0");
+    let root = fx.install_root.to_str().unwrap().to_owned();
+    let data = fx.registry.to_str().unwrap().to_owned();
+    assert_eq!(
+        node_json(&[
+            "registry-levels",
+            &data,
+            &root,
+            "e2e-mock/e2e-1",
+            "[\"low\",\"high\"]"
+        ])["ok"],
+        true
+    );
+    let b = em03_broker(&fx, "em03-ffinal");
+    nexus_broker::engine::test_faults::arm("em03-ffinal-00001", "persist-final");
+    let first = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "read", "em03-ffinal-00001", |_| {}),
+        180,
+    );
+    assert_eq!(
+        first.error_code.as_deref(),
+        Some("engine-effort-not-authorized"),
+        "{first:?}"
+    );
+    b.shutdown();
+    let b = em03_broker(&fx, "em03-ffinal");
+    let old_task = first.task_instance_id.clone().unwrap();
+    let old_rec = em03_store(&fx, "em03-ffinal")
+        .load(&old_task)
+        .unwrap()
+        .unwrap();
+    assert!(!old_rec.events.iter().any(|e| e.kind == "run-ended"));
+    let sent_before = fx.provider.bodies.lock().unwrap().len();
+    assert_eq!(sent_before, 1);
+    let v = ic::resume(b.socket_path(), &first.run_id).expect("resume");
+    let second = wait_terminal(b.socket_path(), v["run"]["runId"].as_str().unwrap(), 180);
+    let new_rec = em03_store(&fx, "em03-ffinal")
+        .load(second.task_instance_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(new_rec
+        .events
+        .iter()
+        .any(|e| e.kind == "predecessor-attempt-unresolved" && e.attempt == Some(1)));
+    assert_eq!(
+        new_rec.lineage.unwrap().predecessor_revision,
+        Some(old_rec.revision)
+    );
+    // the old attempt was accepted once and never again
+    assert_eq!(em03_receipts(&fx, &old_task).len(), 1);
+    for x in &fx.provider.bodies.lock().unwrap()[sent_before..] {
+        assert_eq!(
+            x["reasoning"]["effort"], "low",
+            "never above the authorized default"
+        );
+    }
+    b.shutdown();
+}
+
+/// A proposal durably accepted whose Registry authorization FAILS: the run stops before the
+/// attempt is bound or sent; the accepted selection never authorizes or dispatches anything,
+/// neither in that run nor after a restart (the continuation resets to the default and needs a
+/// new proposal and a new authorization under its own binding).
+#[test]
+fn em03_an_accepted_proposal_whose_authorization_fails_never_dispatches() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = em03_fixture(em03_responder(2));
+    let b = em03_broker(&fx, "em03-authfail");
+    nexus_broker::engine::test_faults::arm("em03-authfail-0001", "authorize-fail");
+    let first = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "read", "em03-authfail-0001", |_| {}),
+        180,
+    );
+    assert!(first.terminal && first.state != "completed", "{first:?}");
+    assert_eq!(
+        first.error_code.as_deref(),
+        Some("registry-unavailable"),
+        "{first:?}"
+    );
+    let old_task = first.task_instance_id.clone().unwrap();
+    let old = em03_store(&fx, "em03-authfail")
+        .load(&old_task)
+        .unwrap()
+        .unwrap();
+    assert!(old
+        .events
+        .iter()
+        .any(|e| e.kind == "effort-selected" && e.attempt == Some(2)));
+    assert!(
+        !old.attempts.iter().any(|a| a.ordinal == 2),
+        "attempt 2 was never bound"
+    );
+    let old_sent: Vec<Value> = fx.provider.bodies.lock().unwrap().clone();
+    assert_eq!(old_sent.len(), 1);
+    assert_eq!(old_sent[0]["reasoning"]["effort"], "low");
+    assert_eq!(em03_receipts(&fx, &old_task).len(), 1);
+    b.shutdown();
+    let b = em03_broker(&fx, "em03-authfail");
+    let v = ic::resume(b.socket_path(), &first.run_id).expect("resume");
+    let second = wait_terminal(b.socket_path(), v["run"]["runId"].as_str().unwrap(), 180);
+    assert_eq!(second.state, "completed", "{second:?}");
+    let new = em03_store(&fx, "em03-authfail")
+        .load(second.task_instance_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    let kinds: Vec<&str> = new.events.iter().map(|e| e.kind.as_str()).collect();
+    assert!(kinds.contains(&"effort-reset-continuation"), "{kinds:?}");
+    // the old task never executed "high"; the continuation's high (if any) has its own durable
+    // selection before its own binding, under its own task's issuance
+    for a in new.attempts.iter().filter(|a| a.effort == "high") {
+        let sel = new
+            .events
+            .iter()
+            .position(|e| e.kind == "effort-selected" && e.attempt.is_some_and(|x| x <= a.ordinal))
+            .unwrap();
+        let bnd = new
+            .events
+            .iter()
+            .position(|e| e.kind == "attempt-bound" && e.attempt == Some(a.ordinal))
+            .unwrap();
+        assert!(sel < bnd);
+    }
+    assert_eq!(
+        em03_receipts(&fx, &old_task).len(),
+        1,
+        "nothing more ran under the old task"
     );
     b.shutdown();
 }

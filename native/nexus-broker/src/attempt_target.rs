@@ -220,6 +220,16 @@ impl TaskTarget {
             }
             EffortRequest::Authorized(e) => e,
         };
+        #[cfg(feature = "test-engines")]
+        if crate::engine::test_faults::armed_for_task(
+            &self.binding.task_instance_id,
+            "authorize-fail",
+        ) {
+            return Err(te(
+                "registry-unavailable",
+                "[injected] the Registry refused to authorize the attempt",
+            ));
+        }
         if !self.binding.supported_reasoning.iter().any(|l| l == effort) {
             return Err(te(
                 "reasoning-level-not-supported",

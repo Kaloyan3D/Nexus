@@ -25,9 +25,15 @@
 //! any provider request. Extensions are compiled in (no runtime registration).
 
 pub mod muse_v0;
+#[cfg(feature = "test-engines")]
+pub mod test_engine;
+#[cfg(feature = "test-engines")]
+pub mod test_faults;
 
 /// Version of this contract. A change of any type below bumps it.
-pub const ENGINE_CONTRACT_VERSION: u32 = 1;
+pub const ENGINE_CONTRACT_VERSION: u32 = 2;
+/// EM-03: contract v2 adds effort proposals for the NEXT attempt (within the task binding's
+/// authorized levels), durable engine state (`engine_state.rs`) and continuation inheritance.
 /// Largest guidance message an engine may ask the Core to send (it becomes request bytes).
 pub const MAX_GUIDANCE_BYTES: usize = 2048;
 /// The engine of runs recorded before EM-01: the inline Native loop, which `muse-v0` reproduces
@@ -52,6 +58,9 @@ pub struct EngineDescriptor {
     /// Whether the engine may propose an effort different from the pinned target. Always
     /// `false` in contract v1 (the Registry-authorized per-attempt issuance does not exist).
     pub may_propose_effort: bool,
+    /// EM-03: whether a continuation inherits this engine's persisted payload (validated by the
+    /// engine's `restore_state`). `false` = every task generation starts from `initial_state`.
+    pub inherits_state: bool,
 }
 
 /// Where in the turn loop the Core consults the engine.
@@ -102,6 +111,12 @@ pub struct EngineSnapshot {
     pub carried_work: bool,
     /// Text of the response this hook is about (empty for `BeforeRequest`).
     pub response_text: String,
+    /// EM-03: model attempts dispatched so far in this run (the next attempt is this + 1).
+    pub attempts_dispatched: u32,
+    /// EM-03: the effort the next attempt will use unless a proposal changes it.
+    pub current_effort: String,
+    /// EM-03: the levels the task binding authorizes (TaskBindingV1.supportedReasoning).
+    pub authorized_efforts: Vec<String>,
 }
 
 /// What the engine asks the Core to do.
@@ -141,14 +156,25 @@ pub enum GuidanceKind {
     Steer,
 }
 
-/// Reasoning effort for the NEXT request.
+/// Reasoning effort for the NEXT model attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffortProposal {
-    /// Use the run's pinned target unchanged.
+    /// Keep the effort currently in force (initially the task's pinned default).
     KeepPinned,
-    /// A different effort. Refused in contract v1: only a Registry-issued, per-attempt pinned
-    /// target may carry another effort (see the EM-01 specification).
+    /// From the next attempt on, use this level. Admitted (contract v2) only for an engine whose
+    /// descriptor declares `may_propose_effort`, only for a level the task binding authorizes,
+    /// and never together with `Finish`. The Registry then issues and the Kernel seals that
+    /// attempt's target; an existing issuance is never altered.
     Change(String),
+}
+
+/// EM-03: an accepted effort selection: in force from attempt `from_attempt` (1-based) on.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffortSelection {
+    pub effort: String,
+    pub from_attempt: u32,
+    pub proposal_id: u64,
 }
 
 /// An engine's revisioned state. `data` is the engine's own typed state.
@@ -164,12 +190,17 @@ pub struct EngineState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineStateData {
     MuseV0(muse_v0::MuseV0State),
+    /// Test-only deterministic engine (feature `test-engines`, never in production builds).
+    #[cfg(feature = "test-engines")]
+    EffortTestV0(test_engine::EffortTestState),
 }
 
 impl EngineStateData {
     fn encoded_len(&self) -> usize {
         match self {
             Self::MuseV0(s) => s.encoded_len(),
+            #[cfg(feature = "test-engines")]
+            Self::EffortTestV0(s) => s.encoded_len(),
         }
     }
 }
@@ -205,6 +236,14 @@ pub trait EngineExtension: Send + Sync {
         to: &EngineState,
         snapshot: &EngineSnapshot,
     ) -> Result<(), String>;
+    /// EM-03: the persistable form of `state.data` (bounded; no model text, no secrets). The
+    /// Core owns persistence; the engine only says what its payload looks like on disk.
+    fn persist_state(&self, state: &EngineState) -> serde_json::Value;
+    /// EM-03: rebuild a state from its persisted payload for an inheriting continuation.
+    /// `None` = invalid (the continuation fails closed) or not inheritable.
+    fn restore_state(&self, _payload: &serde_json::Value, _revision: u64) -> Option<EngineState> {
+        None
+    }
 }
 
 /// A refused selection or proposal. The run fails closed with this code.
@@ -221,9 +260,14 @@ fn refuse(code: &'static str, message: impl Into<String>) -> EngineRefusal {
     }
 }
 
-/// The compiled-in engines.
-fn built_in() -> [&'static dyn EngineExtension; 1] {
-    [&muse_v0::MUSE_V0]
+/// The compiled-in engines. The test engine exists only in `test-engines` builds (tests); it
+/// is selectable only if the Registry issues its id (a fixture mode), like any other engine.
+fn built_in() -> Vec<&'static dyn EngineExtension> {
+    #[allow(unused_mut)]
+    let mut v: Vec<&'static dyn EngineExtension> = vec![&muse_v0::MUSE_V0];
+    #[cfg(feature = "test-engines")]
+    v.push(&test_engine::EFFORT_TEST_V0);
+    v
 }
 
 /// Resolve the extension for a run from its SEALED Registry resolution. Unknown or
@@ -309,6 +353,8 @@ pub struct ProposalReceipt {
     pub proposal_id: u64,
     pub hook: Hook,
     pub revision: u64,
+    /// EM-03: the effort selection this proposal made, if any.
+    pub effort: Option<EffortSelection>,
 }
 
 /// The Core side of the boundary for ONE run: owns the engine state, validates every proposal
@@ -318,6 +364,8 @@ pub struct EngineHost {
     state: EngineState,
     next_proposal: u64,
     receipts: Vec<ProposalReceipt>,
+    /// EM-03: the effort selection in force (None = the task's pinned default).
+    effort: Option<EffortSelection>,
 }
 
 impl EngineHost {
@@ -327,7 +375,48 @@ impl EngineHost {
             state: ext.initial_state(),
             next_proposal: 1,
             receipts: Vec::new(),
+            effort: None,
         }
+    }
+
+    /// EM-03: a host resuming durable state (`engine_state.rs` validated it). Proposal ids
+    /// continue after `last_proposal_id`, so a pre-restart id can never be accepted again.
+    pub fn restored(
+        ext: &'static dyn EngineExtension,
+        state: EngineState,
+        last_proposal_id: u64,
+        effort: Option<EffortSelection>,
+    ) -> Self {
+        Self {
+            ext,
+            state,
+            next_proposal: last_proposal_id + 1,
+            receipts: Vec::new(),
+            effort,
+        }
+    }
+
+    pub fn extension(&self) -> &'static dyn EngineExtension {
+        self.ext
+    }
+
+    /// The id the next proposal must carry (= last accepted id + 1).
+    pub fn next_proposal_id(&self) -> u64 {
+        self.next_proposal
+    }
+
+    /// The effort selection in force (None = the pinned default).
+    pub fn effort_selection(&self) -> Option<&EffortSelection> {
+        self.effort.as_ref()
+    }
+
+    /// The effort for model attempt `ordinal` (1-based), or None for the pinned default. A
+    /// selection is effective only from its designated attempt on, never retroactively.
+    pub fn effort_for_attempt(&self, ordinal: u32) -> Option<&str> {
+        self.effort
+            .as_ref()
+            .filter(|e| ordinal >= e.from_attempt)
+            .map(|e| e.effort.as_str())
     }
 
     pub fn engine_id(&self) -> &'static str {
@@ -375,19 +464,37 @@ impl EngineHost {
                 "the proposal was based on another engine state revision",
             ));
         }
-        // effort: the Registry-issued pin is the only authority in contract v1
-        if let EffortProposal::Change(_) = &p.effort {
-            if !d.may_propose_effort {
-                return Err(refuse(
-                    "engine-effort-not-authorized",
-                    "this engine may not change the reasoning effort of the pinned target",
-                ));
+        // effort (contract v2): only an effort-capable engine, only a level the task binding
+        // authorizes, never while finishing; effective from the NEXT attempt. The Registry and the
+        // Kernel authorize and seal that attempt's target; this is the first of three gates.
+        let effort = match &p.effort {
+            EffortProposal::KeepPinned => None,
+            EffortProposal::Change(level) => {
+                if !d.may_propose_effort {
+                    return Err(refuse(
+                        "engine-effort-not-authorized",
+                        "this engine may not change the reasoning effort of the pinned target",
+                    ));
+                }
+                if matches!(p.action, EngineAction::Finish) {
+                    return Err(refuse(
+                        "engine-effort-not-admitted",
+                        "an effort change cannot accompany Finish",
+                    ));
+                }
+                if !snapshot.authorized_efforts.iter().any(|l| l == level) {
+                    return Err(refuse(
+                        "engine-effort-not-authorized",
+                        "the proposed effort is not one the task binding authorizes",
+                    ));
+                }
+                Some(EffortSelection {
+                    effort: level.clone(),
+                    from_attempt: snapshot.attempts_dispatched + 1,
+                    proposal_id: p.proposal_id,
+                })
             }
-            return Err(refuse(
-                "engine-effort-not-authorized",
-                "per-attempt effort changes require a Registry-issued target (not available in contract v1)",
-            ));
-        }
+        };
         // the action must be admitted at this hook
         let decision = match (&hook, &p.action) {
             (_, EngineAction::Continue) if hook != Hook::FinalResponse => EngineDecision::Continue,
@@ -402,7 +509,7 @@ impl EngineHost {
                 return Err(refuse(
                     "engine-action-not-admitted",
                     format!(
-                        "action {} is not admitted at {:?} in contract v1",
+                        "action {} is not admitted at {:?} in contract v2",
                         action_name(a),
                         hook
                     ),
@@ -446,10 +553,14 @@ impl EngineHost {
             .map_err(|m| refuse("engine-state-transition", m))?;
         // commit
         self.state = p.next_state;
+        if effort.is_some() {
+            self.effort = effort.clone();
+        }
         self.receipts.push(ProposalReceipt {
             proposal_id: p.proposal_id,
             hook,
             revision: self.state.revision,
+            effort,
         });
         self.next_proposal += 1;
         Ok(decision)
