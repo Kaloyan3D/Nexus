@@ -261,6 +261,7 @@ pub fn is_privileged(cmd: &str) -> bool {
             | "seal"
             | "accept"
             | "seal-extension"
+            | "seal-task-binding"
             | "intent-publish"
             | "intent-fence"
             | "dispatch-authorize"

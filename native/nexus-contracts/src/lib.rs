@@ -5,6 +5,7 @@ pub mod destination;
 pub mod errors;
 pub mod intent;
 pub mod target;
+pub mod task_binding;
 pub mod types;
 
 pub use canonical::{
@@ -16,6 +17,7 @@ pub use destination::{
 };
 pub use errors::{KernelError, KernelErrorCode, KernelResult};
 pub use target::{ExecutionTargetCoreV1, RegistryProvenanceV1, RegistryResolutionV1};
+pub use task_binding::{authorized_levels, project_extension, project_target, TaskBindingV1};
 pub use types::{
     generation_key, CommandReceiptV1, ControllerIntentV1, ExecutionPinV1, GenerationLeaseV1,
     KernelCommandV1, KernelEventKind, KernelEventV1, ReceiptStatus,

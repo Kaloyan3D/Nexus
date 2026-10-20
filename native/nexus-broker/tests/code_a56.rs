@@ -9007,3 +9007,368 @@ const EM01_P0_KEYS: &[&str] = &[
 ];
 const EM01_P0_TOOLS_SHA256: &str =
     "58f513de4ac7097e2d2c44999180ec74295aaaf590d585ff15787b784db8d90b";
+
+// ---- EM-02: Registry-authorized per-attempt reasoning -----------------------------------
+
+fn em02_record(fx: &Fx, broker: &str, run_id: &str) -> Value {
+    let path = fx
+        .config(broker)
+        .state_dir
+        .join("runs")
+        .join(format!("{run_id}.json"));
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// Every coding run executes under a Kernel-sealed task binding recorded on its run record; its
+/// requests keep the pinned default effort.
+#[test]
+fn em02_a_run_executes_under_a_sealed_task_binding_with_the_pinned_default_effort() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(p0_reasoning_responder());
+    let b = interactive_broker(&fx, "em02-run");
+    let sock = b.socket_path().to_owned();
+    let (_, run) = rn2_send(
+        &sock,
+        None,
+        "P0-REASON: what does README.md say? Do not change anything.",
+        "em02-run-0000001",
+        None,
+        None,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let rec = em02_record(&fx, "em02-run", &run.run_id);
+    let digest = rec["taskBindingDigest"].as_str().unwrap_or("");
+    assert_eq!(digest.len(), 64, "{rec}");
+    assert_eq!(rec["taskBindingIdentity"].as_str().unwrap_or("").len(), 64);
+    for body in rn2_bodies(&fx, 0) {
+        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(body["model"], "e2e-mock-model");
+    }
+    b.shutdown();
+}
+
+/// The broker's per-attempt path through the REAL bridge and daemon: the pinned default needs
+/// no call; another effort is issued by the Registry under the binding and sealed by the Kernel;
+/// an undeclared effort is refused before any call.
+#[test]
+fn em02_the_broker_authorizes_a_declared_effort_per_attempt_through_registry_and_kernel() {
+    use nexus_broker::attempt_target::{EffortRequest, TaskTarget};
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(p0_reasoning_responder());
+    let r = node_json(&[
+        "registry-levels",
+        fx.registry.to_str().unwrap(),
+        repo_root().to_str().unwrap(),
+        "e2e-mock/e2e-1",
+        "[\"low\",\"high\"]",
+    ]);
+    assert_eq!(r["ok"], true, "{r}");
+    let b = interactive_broker(&fx, "em02-attempt");
+    // the route declares "high", but the operator authorized no slot policy: default only
+    let route_only = TaskTarget::issue(&b.broker, "task-em02-e2e-0", "session-em02-e2e-0")
+        .expect("task without policy");
+    assert_eq!(route_only.binding.supported_reasoning, vec!["low"]);
+    let err = route_only
+        .for_attempt(&b.broker, EffortRequest::Authorized("high"))
+        .unwrap_err();
+    assert_eq!(err.code, "reasoning-level-not-supported");
+    // controlled fixture policy: the operator authorizes "low" and "high" for the main slot
+    let r = node_json(&[
+        "registry-slot-policy",
+        fx.registry.to_str().unwrap(),
+        repo_root().to_str().unwrap(),
+        "[\"low\",\"high\"]",
+    ]);
+    assert_eq!(r["ok"], true, "{r}");
+    let tt = TaskTarget::issue(&b.broker, "task-em02-e2e", "session-em02-e2e").expect("task");
+    assert_eq!(tt.default_effort(), "low");
+    assert_eq!(tt.binding.supported_reasoning, vec!["high", "low"]);
+    let pinned = tt.for_attempt(&b.broker, EffortRequest::Pinned).unwrap();
+    assert_eq!(pinned, tt.pinned());
+    assert_eq!(
+        tt.for_attempt(&b.broker, EffortRequest::Authorized("low"))
+            .unwrap(),
+        pinned
+    );
+    let high = tt
+        .for_attempt(&b.broker, EffortRequest::Authorized("high"))
+        .expect("high");
+    assert_eq!(high.effort, "high");
+    assert_eq!(high.core()["reasoning"], "high");
+    assert_eq!(high.extension["reasoningEffort"], "high");
+    assert_ne!(high.extension_digest, pinned.extension_digest);
+    for k in [
+        "providerId",
+        "remoteModelId",
+        "logicalModelId",
+        "routeId",
+        "connectionId",
+    ] {
+        assert_eq!(high.core()[k], pinned.core()[k], "{k}");
+    }
+    for k in ["endpoint", "credentialRef", "connectionBinding", "session"] {
+        assert_eq!(high.extension[k], pinned.extension[k], "{k}");
+    }
+    let err = tt
+        .for_attempt(&b.broker, EffortRequest::Authorized("xhigh"))
+        .unwrap_err();
+    assert_eq!(err.code, "reasoning-level-not-supported");
+    // the same task cannot be re-bound (the Kernel keeps the first binding)
+    let again = TaskTarget::issue(&b.broker, "task-em02-e2e", "session-em02-e2e").expect("same");
+    assert_eq!(again.binding_digest, tt.binding_digest);
+    b.shutdown();
+}
+
+/// A continuation after an interruption AND a broker restart runs on the interrupted run's model
+/// and route even when the operator switched the Registry default in between (before EM-02 it
+/// silently ran on the new default); its binding identity is the same.
+#[test]
+fn em02_a_continuation_keeps_its_model_and_route_when_the_registry_default_changes() {
+    if !sandbox_ready() {
+        return;
+    }
+    let continued = Arc::new(AtomicUsize::new(0));
+    let c2 = continued.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        if body.to_string().contains("CONTINUED") {
+            c2.fetch_add(1, Ordering::SeqCst);
+            return Answer::Frames(text_frames(&resp, "Checked; the task is done."));
+        }
+        Answer::Slow {
+            frames: text_frames(&resp, "thinking"),
+            gap_ms: 100,
+            hold_ms: 120_000,
+        }
+    });
+    let fx = fixture_autonomous(responder);
+    let config = || {
+        let mut c = fx.config("em02-cont");
+        c.code_sources = Vec::new();
+        c.project_registry = Some((
+            fx.reg_dir.clone().unwrap(),
+            nexus_tools::registry::Trust::default(),
+        ));
+        c.interactive = true;
+        c
+    };
+    let b = nexus_broker::start(config()).expect("starts");
+    let sock = b.socket_path().to_owned();
+    let first = ic::submit(
+        &sock,
+        &code_intent_for("other", "write a file", "em02-cont-000001", |_| {}),
+    )
+    .expect("submit")
+    .run;
+    let end = std::time::Instant::now() + Duration::from_secs(60);
+    while em02_record(&fx, "em02-cont", &first.run_id)["taskBindingIdentity"].is_null() {
+        assert!(std::time::Instant::now() < end, "no binding recorded");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    ic::cancel(&sock, &first.run_id).unwrap();
+    let first = wait_terminal(&sock, &first.run_id, 60);
+    assert!(first.terminal && first.state != "completed", "{first:?}");
+    // the operator switches the default model while the task is interrupted
+    let r = node_json(&[
+        "registry-default",
+        fx.registry.to_str().unwrap(),
+        repo_root().to_str().unwrap(),
+        "e2e/e2e-2",
+        "e2e-mock/e2e-2",
+    ]);
+    assert_eq!(r["ok"], true, "{r}");
+    // ... and the broker restarts (nothing cached survives)
+    b.shutdown();
+    let b = nexus_broker::start(config()).expect("restarts");
+    let sock = b.socket_path().to_owned();
+    let before = fx.provider.bodies.lock().unwrap().len();
+    let v = ic::resume(&sock, &first.run_id).expect("resume");
+    let second_id = v["run"]["runId"].as_str().unwrap().to_owned();
+    let second = wait_terminal(&sock, &second_id, 120);
+    assert_eq!(second.state, "completed", "{second:?}");
+    assert_eq!(second.remote_model_id.as_deref(), Some("e2e-mock-model"));
+    assert_eq!(second.route_id.as_deref(), Some("e2e-mock/e2e-1"));
+    assert!(
+        continued.load(Ordering::SeqCst) >= 1,
+        "the continuation ran"
+    );
+    for body in fx.provider.bodies.lock().unwrap()[before..].iter() {
+        assert_eq!(body["model"], "e2e-mock-model", "never the new default");
+        assert_eq!(body["reasoning"]["effort"], "low");
+    }
+    assert_eq!(
+        em02_record(&fx, "em02-cont", &first.run_id)["taskBindingIdentity"],
+        em02_record(&fx, "em02-cont", &second_id)["taskBindingIdentity"]
+    );
+    b.shutdown();
+}
+
+/// A continuation whose new binding identity differs from the interrupted run's (here: the
+/// record names another identity, as an edited route or effort would) fails closed before any
+/// working copy or provider request.
+#[test]
+fn em02_a_continuation_under_another_binding_identity_is_refused_before_dispatch() {
+    if !sandbox_ready() {
+        return;
+    }
+    let continued = Arc::new(AtomicUsize::new(0));
+    let c2 = continued.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        if body.to_string().contains("CONTINUED") {
+            c2.fetch_add(1, Ordering::SeqCst);
+        }
+        Answer::Slow {
+            frames: text_frames(&resp, "thinking"),
+            gap_ms: 100,
+            hold_ms: 120_000,
+        }
+    });
+    let fx = fixture_autonomous(responder);
+    let mut c = fx.config("em02-mis");
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.interactive = true;
+    let state_dir = c.state_dir.clone();
+    let b = nexus_broker::start(c).expect("starts");
+    let sock = b.socket_path().to_owned();
+    let first = ic::submit(
+        &sock,
+        &code_intent_for("other", "write a file", "em02-mis-0000001", |_| {}),
+    )
+    .expect("submit")
+    .run;
+    let end = std::time::Instant::now() + Duration::from_secs(60);
+    while em02_record(&fx, "em02-mis", &first.run_id)["taskBindingIdentity"].is_null() {
+        assert!(std::time::Instant::now() < end, "no binding recorded");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    ic::cancel(&sock, &first.run_id).unwrap();
+    let first = wait_terminal(&sock, &first.run_id, 60);
+    let path = state_dir
+        .join("runs")
+        .join(format!("{}.json", first.run_id));
+    let mut rec: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    // a run whose route was never recorded is not continued at all (its binding is unknown)
+    let mut unknown = rec.clone();
+    unknown["run"].as_object_mut().unwrap().remove("routeId");
+    std::fs::write(&path, serde_json::to_vec(&unknown).unwrap()).unwrap();
+    let err = ic::resume(&sock, &first.run_id).expect_err("no recorded route");
+    assert!(
+        err.message.contains("model and route are not recorded"),
+        "{err:?}"
+    );
+    rec["taskBindingIdentity"] = json!("0".repeat(64));
+    std::fs::write(&path, serde_json::to_vec(&rec).unwrap()).unwrap();
+    let v = ic::resume(&sock, &first.run_id).expect("resume is accepted, then refused");
+    let second_id = v["run"]["runId"].as_str().unwrap().to_owned();
+    let second = wait_terminal(&sock, &second_id, 60);
+    assert_eq!(second.state, "rejected", "{second:?}");
+    assert_eq!(
+        second.error_code.as_deref(),
+        Some("task-binding-mismatch"),
+        "{second:?}"
+    );
+    assert_eq!(continued.load(Ordering::SeqCst), 0, "nothing was sent");
+    assert_eq!(second.turn, 0);
+    assert!(second.worktree_commit.is_none(), "no working copy");
+    b.shutdown();
+}
+
+/// Provider interruptions are recovered with NEW Controller attempts (one command, one accepted
+/// receipt, one dispatch each); no attempt is dispatched twice, and every attempt executes the
+/// task's one pinned issuance (an uncertain outcome never mints another target authorization).
+#[test]
+fn em02_recovered_attempts_keep_the_tasks_single_issuance_and_are_never_dispatched_twice() {
+    if !sandbox_ready() {
+        return;
+    }
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        let done = body["input"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["type"] == "function_call_output")
+                    .count()
+            })
+            .unwrap_or(0);
+        if matches!(n, 1 | 3) {
+            return Answer::Close; // read by the provider, answer lost
+        }
+        match done {
+            0..=1 => Answer::Frames(call_frames(
+                &resp,
+                n,
+                &format!("call_{done}"),
+                "fs_read",
+                r#"{"path":"src/lib.rs"}"#,
+            )),
+            _ => Answer::Frames(text_frames(&resp, "Both reads done; nothing else to do.")),
+        }
+    });
+    let fx = fixture_autonomous(responder);
+    let mut c = fx.config("em02-recover");
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.interactive = true;
+    let b = nexus_broker::start(c).expect("starts");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "go", "em02-recover-00001", |_| {}),
+        180,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(run.recoveries, 2, "{run:?}");
+    let requests = fx.provider.bodies.lock().unwrap().clone();
+    assert!(requests.iter().all(|r| r["reasoning"]["effort"] == "low"));
+    let task = run.task_instance_id.clone().unwrap();
+    let frame = json!({"protocol": 1, "id": "j", "cmd": "journal",
+        "params": {"taskInstanceId": task, "backend": "native"}});
+    let resp = nexus_client::transport::ipc_roundtrip(&fx.daemon_socket, &frame, 10_000).unwrap();
+    assert_eq!(resp["ok"], true, "{resp}");
+    let receipts = resp["receipts"]
+        .as_array()
+        .or_else(|| resp["result"]["receipts"].as_array())
+        .cloned()
+        .unwrap_or_default();
+    let ids: std::collections::BTreeSet<String> = receipts
+        .iter()
+        .map(|r| r["commandId"].as_str().unwrap_or("").to_owned())
+        .collect();
+    assert_eq!(ids.len(), receipts.len(), "one receipt per command");
+    assert_eq!(
+        receipts.len(),
+        requests.len(),
+        "one accepted command per provider request"
+    );
+    let issuances: std::collections::BTreeSet<String> = receipts
+        .iter()
+        .map(|r| r["issuanceId"].as_str().unwrap_or("").to_owned())
+        .collect();
+    assert_eq!(
+        issuances.len(),
+        1,
+        "every attempt executed the task's one issuance: {issuances:?}"
+    );
+    let attempts: std::collections::BTreeSet<String> = receipts
+        .iter()
+        .map(|r| r["attemptId"].as_str().unwrap_or("").to_owned())
+        .collect();
+    assert_eq!(
+        attempts.len(),
+        receipts.len(),
+        "each request is its own Controller attempt"
+    );
+    b.shutdown();
+}

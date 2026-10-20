@@ -40,29 +40,43 @@ struct Setup {
 }
 
 fn build(attempt: &str, command: &str) -> Setup {
+    build_publishing(attempt, command, kernel_ext())
+}
+
+/// `published_ext`: the extension the Controller intent names (normally the one the request is
+/// prepared from).
+fn build_publishing(attempt: &str, command: &str, published_ext: serde_json::Value) -> Setup {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("k.db");
     let wit = dir.path().join("k.wit.db");
     let mut kernel = nexus_kernel::Kernel::open(&db, Some(&wit)).expect("open");
-    let target = ExecutionTargetV2::test_target(ORIGIN, "/v1/responses");
-    let snapshot_model = serde_json::json!({"schemaVersion": 1, "tag": "auth-test"});
-    let tv = serde_json::to_value(&target.core).expect("core");
-    let mut issued_model = RegistryResolutionV1 {
+    let ktarget =
+        ExecutionTargetCoreV1::sample("muse_main", "engineering-v2", serde_json::json!(3));
+    let kv = serde_json::to_value(&ktarget).expect("kcore");
+    let ksnapshot =
+        serde_json::json!({"schemaVersion": 1, "tag": "synthetic-test-snapshot", "modes": []});
+    let mut kissued = RegistryResolutionV1 {
         schema_version: CONTRACT_SCHEMA_VERSION,
-        issuer: "nexus-registry-bridge/1".to_owned(),
+        issuer: "registry-bridge".to_owned(),
         task_instance_id: TASK.to_owned(),
         role: "muse_main".to_owned(),
-        target: target.core.clone(),
+        target: ktarget,
         provenance: RegistryProvenanceV1 {
-            issuer: "nexus-registry-bridge/1".to_owned(),
-            resolution_id_compat: target.core.resolution_id.clone(),
-            registry_snapshot_digest: nexus_contracts::snapshot_digest_of(&snapshot_model),
-            target_digest: nexus_contracts::target_digest_of(&tv),
-            mode_config_revision: target.core.mode_config_revision.clone(),
+            issuer: "registry-bridge".to_owned(),
+            resolution_id_compat: "compat".to_owned(),
+            registry_snapshot_digest: nexus_contracts::snapshot_digest_of(&ksnapshot),
+            target_digest: nexus_contracts::target_digest_of(&kv),
+            mode_config_revision: serde_json::json!(3),
             issuance_id: String::new(),
         },
     };
-    issued_model.provenance.issuance_id = issued_model.issuance_id_of();
+    kissued.provenance.issuance_id = kissued.issuance_id_of();
+    // EM-02: the request is prepared from exactly the target the Kernel seals for this attempt
+    // (the grant names it, and dispatch refuses any other).
+    let target = ExecutionTargetV2::from_extension_json(kissued.target.clone(), &kernel_ext())
+        .expect("target from the sealed core + extension");
+    let snapshot_model = ksnapshot.clone();
+    let issued_model = kissued.clone();
     let pin = VerifiedExecutionPin::bind(
         TASK,
         command,
@@ -110,27 +124,6 @@ fn build(attempt: &str, command: &str) -> Setup {
         serde_json::json!({"op": "engineer-turn"}),
     )
     .with_lease(lease.lease_epoch, &lease.store_incarnation);
-    let ktarget =
-        ExecutionTargetCoreV1::sample("muse_main", "engineering-v2", serde_json::json!(3));
-    let kv = serde_json::to_value(&ktarget).expect("kcore");
-    let ksnapshot =
-        serde_json::json!({"schemaVersion": 1, "tag": "synthetic-test-snapshot", "modes": []});
-    let mut kissued = RegistryResolutionV1 {
-        schema_version: CONTRACT_SCHEMA_VERSION,
-        issuer: "registry-bridge".to_owned(),
-        task_instance_id: TASK.to_owned(),
-        role: "muse_main".to_owned(),
-        target: ktarget,
-        provenance: RegistryProvenanceV1 {
-            issuer: "registry-bridge".to_owned(),
-            resolution_id_compat: "compat".to_owned(),
-            registry_snapshot_digest: nexus_contracts::snapshot_digest_of(&ksnapshot),
-            target_digest: nexus_contracts::target_digest_of(&kv),
-            mode_config_revision: serde_json::json!(3),
-            issuance_id: String::new(),
-        },
-    };
-    kissued.provenance.issuance_id = kissued.issuance_id_of();
     kernel.seal_issuance(&kissued).expect("seal issuance");
     kernel
         .accept_command(&nexus_kernel::AcceptRequest {
@@ -139,7 +132,7 @@ fn build(attempt: &str, command: &str) -> Setup {
             snapshot: ksnapshot.clone(),
         })
         .expect("accept");
-    let ext = kernel_ext();
+    let ext = published_ext;
     let extd = ext_digest(&ext);
     kernel.seal_extension(&ext).expect("seal ext");
     let bundle = serde_json::json!({ "commandId": command, "taskInstanceId": TASK, "attemptId": attempt, "leaseEpoch": lease.lease_epoch, "storeIncarnation": lease.store_incarnation, "role": "muse_main", "targetDigest": kissued.provenance.target_digest, "snapshotDigest": kissued.provenance.registry_snapshot_digest, "issuanceId": kissued.provenance.issuance_id, "extensionDigest": extd, "requestDigest": request_digest, "sessionId": "session-test", "scope": SCOPE_MOCK_E2E });
@@ -376,5 +369,42 @@ fn replay_with_fresh_tracker_after_success_sends_nothing_more() {
         t.sends(),
         1,
         "re-presented grant must not cause a second provider call"
+    );
+}
+
+/// EM-02: the Kernel grants what the Controller intent names; the executor sends only if that is
+/// the target it prepared. Here the intent names another (Kernel-valid) extension than the one
+/// the request bytes were prepared from: nothing is sent.
+#[test]
+fn a_grant_naming_another_target_extension_sends_nothing() {
+    let mut other = kernel_ext();
+    other["outputLimitTokens"] = serde_json::json!(512);
+    let mut s = build_publishing("attempt-a8", "cmd-a8", other.clone());
+    assert_eq!(s.grant.extension_digest, ext_digest(&other));
+    assert_ne!(
+        s.grant.extension_digest,
+        s.attested.prepared().extension_digest
+    );
+    let t = mock(testkit::load_fixture("basic-text").sse_body);
+    let mut attempt = AttemptTracker::new(&s.attempt_id);
+    let mut store = AttemptStore::new();
+    let err = dispatch_authorized(
+        &t,
+        &mut s.kernel,
+        &s.grant,
+        &s.attested,
+        CRED_REF,
+        &Credential::test_credential(SECRET),
+        &CancellationToken::new(),
+        &TransportLimits::default(),
+        &mut attempt,
+        &mut store,
+    )
+    .expect_err("another target");
+    assert!(!err.bytes_sent);
+    assert_eq!(t.sends(), 0);
+    assert!(
+        format!("{err:?}").contains("another target or extension"),
+        "{err:?}"
     );
 }

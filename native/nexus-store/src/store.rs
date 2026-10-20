@@ -4,7 +4,7 @@
 //! conflict by re-reading inside the contention window.
 
 use crate::approvals::DDL_V4_APPROVALS;
-use crate::schema::{DDL_V1, DDL_V2, DDL_V3_TOOLS, STORE_SCHEMA_VERSION};
+use crate::schema::{DDL_V1, DDL_V2, DDL_V3_TOOLS, DDL_V5_TASK_BINDINGS, STORE_SCHEMA_VERSION};
 use nexus_contracts::{generation_key, KernelError, KernelErrorCode, KernelResult};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::io::Read;
@@ -134,6 +134,7 @@ impl Store {
             .and_then(|_| conn.execute_batch(DDL_V2))
             .and_then(|_| conn.execute_batch(DDL_V3_TOOLS))
             .and_then(|_| conn.execute_batch(DDL_V4_APPROVALS))
+            .and_then(|_| conn.execute_batch(DDL_V5_TASK_BINDINGS))
             .map_err(|e| busy_or("migrate", e))?;
         let version: Option<i64> = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
@@ -419,6 +420,77 @@ impl Store {
             .optional()
             .map_err(|e| db_fail("read", e))?;
         Ok(row)
+    }
+
+    /// EM-02: record a task generation's immutable binding. Re-sealing the identical binding is
+    /// idempotent; any different binding for the same task is refused (bindings never change).
+    pub fn seal_task_binding(
+        &mut self,
+        task_instance_id: &str,
+        binding_digest: &str,
+        binding_json: &str,
+        seal_hex: &str,
+    ) -> KernelResult<SealOutcome> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| db_fail("begin", e))?;
+        let existing: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT binding_digest, binding_json, seal_hex FROM task_bindings WHERE task_instance_id = ?1",
+                params![task_instance_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| db_fail("read", e))?;
+        match existing {
+            None => {
+                tx.execute("INSERT INTO task_bindings (task_instance_id, binding_digest, binding_json, seal_hex, created_at_utc) VALUES (?1, ?2, ?3, ?4, ?5)", params![task_instance_id, binding_digest, binding_json, seal_hex, now_utc()]).map_err(|e| db_fail("seal", e))?;
+                tx.commit().map_err(|e| db_fail("commit", e))?;
+                Ok(SealOutcome::Created)
+            }
+            Some((digest, stored_json, stored_seal)) => {
+                if digest == binding_digest
+                    && stored_seal == seal_hex
+                    && canonical_equal(&stored_json, binding_json)
+                {
+                    Ok(SealOutcome::Identical)
+                } else {
+                    Err(KernelError::new(
+                        KernelErrorCode::IssuanceConflict,
+                        "this task is already bound to a different target; task bindings are immutable",
+                    ))
+                }
+            }
+        }
+    }
+
+    /// EM-02: the sealed binding of a task generation, if any: (digest, json, seal).
+    pub fn fetch_task_binding(
+        &self,
+        task_instance_id: &str,
+    ) -> KernelResult<Option<(String, String, String)>> {
+        self.conn
+            .query_row(
+                "SELECT binding_digest, binding_json, seal_hex FROM task_bindings WHERE task_instance_id = ?1",
+                params![task_instance_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| db_fail("read", e))
+    }
+
+    /// EM-02: issuances already accepted for a task generation (distinct).
+    pub fn accepted_issuance_ids(&self, task_instance_id: &str) -> KernelResult<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT DISTINCT issuance_id FROM commands WHERE task_instance_id = ?1")
+            .map_err(|e| db_fail("read", e))?;
+        let rows = st
+            .query_map(params![task_instance_id], |r| r.get::<_, String>(0))
+            .map_err(|e| db_fail("read", e))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| db_fail("read", e))
     }
 
     pub fn publish_intent(

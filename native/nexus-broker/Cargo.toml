@@ -35,5 +35,6 @@ test-fixtures = ["dep:rustls"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+rusqlite = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 nexus-kernel = { workspace = true }

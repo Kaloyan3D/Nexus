@@ -834,6 +834,9 @@ pub(crate) fn run(
     // the engine of the run this one continues, fails closed here, before any working copy,
     // grant or provider request exists.
     let engine = engine_for_run(b, run_id, &resolution)?;
+    // EM-02: a continuation keeps the task binding of the run it continues (model, route,
+    // provider, connection, endpoint, credential, mode, engine, default effort) or fails closed.
+    task_binding_continuity(b, run_id, &issued)?;
     let extension = issued.get("extension").cloned().unwrap_or_default();
     let origin = extension
         .pointer("/endpoint/origin")
@@ -1107,6 +1110,20 @@ pub(crate) fn run(
     )
     .map_err(discard)?;
     let extension_digest = str_of(&sealed, "extensionDigest")?;
+    // EM-02: the task's immutable binding, sealed by the Kernel before any attempt exists. Every
+    // attempt's target is checked against it (Kernel publish/accept, executor dispatch).
+    let task_target = crate::attempt_target::TaskTarget::seal(b, &issued, &extension_digest)
+        .map_err(|e| discard(e.into()))?;
+    if !b.bind_task_target(
+        run_id,
+        &task_target.binding_digest,
+        &task_target.identity_digest(),
+    ) {
+        return Err(discard(se(
+            "task-binding-unrecorded",
+            "the run's task binding could not be recorded; nothing was sent",
+        )));
+    }
 
     let opts = ModelRunOptions {
         cap_path: b.cfg.cap_path.clone(),
@@ -1212,9 +1229,7 @@ pub(crate) fn run(
             task_instance: &task_instance,
             session_id: &session_id,
             issued: &issued,
-            resolution: &resolution,
-            extension: &extension,
-            extension_digest: &extension_digest,
+            task_target: &task_target,
             lease_epoch,
             incarnation: &incarnation,
             ws_digest: &ws_digest,
@@ -1238,9 +1253,8 @@ struct Shared<'a> {
     task_instance: &'a str,
     session_id: &'a str,
     issued: &'a Value,
-    resolution: &'a Value,
-    extension: &'a Value,
-    extension_digest: &'a str,
+    /// EM-02: the task binding and the task's own target; every attempt's target comes from it.
+    task_target: &'a crate::attempt_target::TaskTarget,
     lease_epoch: u64,
     incarnation: &'a str,
     ws_digest: &'a str,
@@ -1431,6 +1445,60 @@ fn engine_for_run(
         ));
     }
     Ok(engine)
+}
+
+/// EM-02: a continuation (after an interruption or a broker restart) is a new task generation
+/// with a fresh issuance; it must keep the binding identity of the run it continues. Records
+/// written before EM-02 carry no identity: their recorded model, route, provider and connection
+/// must all be present and equal, or the continuation fails closed.
+fn task_binding_continuity(b: &Broker, run_id: &str, issued: &Value) -> Result<(), StepError> {
+    let binding: nexus_contracts::TaskBindingV1 = serde_json::from_value(
+        issued.get("taskBinding").cloned().unwrap_or_default(),
+    )
+    .map_err(|_| {
+        se(
+            "task-binding-unavailable",
+            "the Registry issued no valid task binding; nothing was sent",
+        )
+    })?;
+    let Some(prev) = b
+        .store
+        .load(run_id)
+        .and_then(|r| r.run.continuation_of)
+        .and_then(|old| b.store.load(&old))
+    else {
+        return Ok(());
+    };
+    let refuse = || {
+        se(
+            "task-binding-mismatch",
+            "this run continues one that was bound to another model, route, connection or effort; nothing was sent",
+        )
+    };
+    match prev.task_binding_identity.as_deref() {
+        Some(id) => {
+            if id != crate::attempt_target::identity_digest(&binding) {
+                return Err(refuse());
+            }
+        }
+        None => {
+            let t = &binding.target;
+            let same = |recorded: &Option<String>, key: &str| {
+                recorded
+                    .as_deref()
+                    .is_some_and(|r| t.get(key).and_then(|v| v.as_str()) == Some(r))
+            };
+            if !(same(&prev.run.provider_id, "providerId")
+                && same(&prev.run.remote_model_id, "remoteModelId")
+                && same(&prev.run.logical_model_id, "logicalModelId")
+                && same(&prev.run.route_id, "routeId")
+                && same(&prev.run.connection_id, "connectionId"))
+            {
+                return Err(refuse());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The read-only facts an Engineering Mode extension may see at a hook: the runtime's receipts
@@ -1786,6 +1854,12 @@ fn turn_loop(
         ) {
             return Ok(LoopEnd::Failed(r.code.into(), r.message));
         }
+        // EM-02: the target of THIS attempt. The EngineExtension v1 contract admits no effort
+        // proposal, so every attempt executes the task's own pinned target, exactly as before.
+        let attempt_target = sh
+            .task_target
+            .for_attempt(b, crate::attempt_target::EffortRequest::Pinned)
+            .map_err(StepError::from)?;
         let req = ModelRunRequest {
             user_initiated: true,
             prompt: sh.intent.content.clone(),
@@ -1795,10 +1869,10 @@ fn turn_loop(
             lease_epoch: sh.lease_epoch,
             store_incarnation: sh.incarnation.to_owned(),
             intent_digest: str_of(&kintent, "intentDigest")?,
-            resolution: sh.resolution.clone(),
+            resolution: attempt_target.resolution.clone(),
             snapshot: sh.issued.get("snapshot").cloned().unwrap_or_default(),
-            core: sh.issued.get("core").cloned().unwrap_or_default(),
-            extension: sh.extension.clone(),
+            core: attempt_target.core(),
+            extension: attempt_target.extension.clone(),
             expected: sh
                 .intent
                 .model
@@ -1819,8 +1893,8 @@ fn turn_loop(
                 "shadowIntent": shadow_intent,
                 "lease": { "epoch": sh.lease_epoch, "storeIncarnation": sh.incarnation },
                 "role": sh.issued.get("role"),
-                "issuance": { "taskInstanceId": sh.task_instance, "resolution": sh.resolution },
-                "extensionDigest": sh.extension_digest,
+                "issuance": { "taskInstanceId": sh.task_instance, "resolution": attempt_target.resolution },
+                "extensionDigest": attempt_target.extension_digest,
                 "requestDigest": prepared.request_digest,
                 "sessionId": sh.session_id,
             })),
@@ -1834,7 +1908,7 @@ fn turn_loop(
             b,
             "accept",
             serde_json::json!({
-                "intent": kintent, "resolution": sh.resolution,
+                "intent": kintent, "resolution": attempt_target.resolution,
                 "snapshot": sh.issued.get("snapshot").cloned().unwrap_or_default(),
                 "lease": { "epoch": sh.lease_epoch, "storeIncarnation": sh.incarnation },
             }),

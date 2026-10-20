@@ -535,6 +535,45 @@ fn do_seal_extension(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     }
 }
 
+/// EM-02: seal a task generation's immutable binding (see `Kernel::seal_task_binding`).
+fn do_seal_task_binding(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
+    let binding = match req.params.get("binding") {
+        Some(v) if v.is_object() => v.clone(),
+        _ => {
+            return fail(
+                &req.id,
+                codes::BAD_REQUEST,
+                "bad-request: binding must be an object",
+            )
+        }
+    };
+    let (Some(issuance_id), Some(extension_digest)) = (
+        req.params.get("issuanceId").and_then(|v| v.as_str()),
+        req.params.get("extensionDigest").and_then(|v| v.as_str()),
+    ) else {
+        return fail(
+            &req.id,
+            codes::BAD_REQUEST,
+            "bad-request: issuanceId and extensionDigest are required",
+        );
+    };
+    let mut kernel = match daemon.kernel.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            daemon.counters.errors.fetch_add(1, Ordering::Relaxed);
+            return fail(
+                &req.id,
+                codes::STORE_UNHEALTHY,
+                "kernel mutex is poisoned; failing closed",
+            );
+        }
+    };
+    match kernel.seal_task_binding(&binding, issuance_id, extension_digest) {
+        Ok(digest) => ok(&req.id, serde_json::json!({ "taskBindingDigest": digest })),
+        Err(e) => kernel_fail(daemon, &req.id, &e),
+    }
+}
+
 fn do_intent_publish(daemon: &Daemon, req: &IpcRequest) -> serde_json::Value {
     let intent = match req.params.get("intent") {
         Some(v) if v.is_object() => v.clone(),
@@ -3463,6 +3502,7 @@ pub fn dispatch(
         let response = match req.cmd.as_str() {
             "acquire" => do_acquire(daemon, req),
             "seal-extension" => do_seal_extension(daemon, req),
+            "seal-task-binding" => do_seal_task_binding(daemon, req),
             "intent-publish" => do_intent_publish(daemon, req),
             "intent-fence" => do_intent_fence(daemon, req),
             "dispatch-authorize" => do_dispatch_authorize(daemon, req),

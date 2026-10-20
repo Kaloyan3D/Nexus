@@ -24,6 +24,10 @@ pub struct ExecutionTargetCoreV1 {
     pub access_type: String,
     pub protocol_id: String,
     pub reasoning: String,
+    /// EM-02: the operator-authorized reasoning levels of the slot (Registry-resolved, route-
+    /// checked). Absent on targets without a slot policy: only `reasoning` is authorized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_reasoning: Option<Vec<String>>,
     pub required_capabilities: Vec<String>,
     pub slot_requirements: serde_json::Value,
     pub data_use_tier: Option<String>,
@@ -61,6 +65,15 @@ impl ExecutionTargetCoreV1 {
                 "mandatory target field orchestrationEngineId is missing",
             ));
         }
+        // EM-02: a slot policy, when present, must authorize the target's own effort
+        if let Some(levels) = &self.allowed_reasoning {
+            if levels.is_empty() || !levels.contains(&self.reasoning) {
+                return Err(KernelError::new(
+                    KernelErrorCode::BindingMismatch,
+                    "the target's reasoning effort is outside its slot reasoning policy",
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -81,6 +94,7 @@ impl ExecutionTargetCoreV1 {
             access_type: "managed".to_owned(),
             protocol_id: "https".to_owned(),
             reasoning: "low".to_owned(),
+            allowed_reasoning: None,
             required_capabilities: Vec::new(),
             slot_requirements: serde_json::json!({}),
             data_use_tier: None,

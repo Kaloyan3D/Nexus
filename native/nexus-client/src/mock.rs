@@ -105,26 +105,38 @@ pub fn run_mock_streaming(
     let task = "task-mock-cli";
     let attempt = "attempt-mock-1";
     let command = "cmd-mock-1";
-    let target = ExecutionTargetV2::test_target("http://127.0.0.1:9", "/v1/responses");
-    let snapshot = serde_json::json!({"schemaVersion": 1, "tag": "cli-mock"});
-    let tv = serde_json::to_value(&target.core)
-        .map_err(|e| ClientError::internal(format!("mock target: {e}")))?;
-    let mut issued = nexus_contracts::RegistryResolutionV1 {
+    let ktarget = nexus_contracts::ExecutionTargetCoreV1::sample(
+        "muse_main",
+        "engineering-v2",
+        serde_json::json!(3),
+    );
+    let kv = serde_json::to_value(&ktarget)
+        .map_err(|e| ClientError::internal(format!("mock core: {e}")))?;
+    let ksnapshot =
+        serde_json::json!({"schemaVersion": 1, "tag": "synthetic-test-snapshot", "modes": []});
+    let mut kissued = nexus_contracts::RegistryResolutionV1 {
         schema_version: nexus_contracts::CONTRACT_SCHEMA_VERSION,
-        issuer: "nexus-registry-bridge/1".to_owned(),
+        issuer: "registry-bridge".to_owned(),
         task_instance_id: task.to_owned(),
         role: "muse_main".to_owned(),
-        target: target.core.clone(),
+        target: ktarget,
         provenance: nexus_contracts::RegistryProvenanceV1 {
-            issuer: "nexus-registry-bridge/1".to_owned(),
-            resolution_id_compat: target.core.resolution_id.clone(),
-            registry_snapshot_digest: nexus_contracts::snapshot_digest_of(&snapshot),
-            target_digest: nexus_contracts::target_digest_of(&tv),
-            mode_config_revision: target.core.mode_config_revision.clone(),
+            issuer: "registry-bridge".to_owned(),
+            resolution_id_compat: "compat".to_owned(),
+            registry_snapshot_digest: nexus_contracts::snapshot_digest_of(&ksnapshot),
+            target_digest: nexus_contracts::target_digest_of(&kv),
+            mode_config_revision: serde_json::json!(3),
             issuance_id: String::new(),
         },
     };
-    issued.provenance.issuance_id = issued.issuance_id_of();
+    kissued.provenance.issuance_id = kissued.issuance_id_of();
+    let ext = serde_json::json!({ "extensionVersion": 1, "endpoint": { "protocol": "http", "origin": "http://127.0.0.1:9", "path": "/v1/responses", "method": "POST", "localLoopback": true }, "remoteModelIdConfirmed": "remote-model", "reasoningEffort": "low", "billing": { "tier": "test-unmetered", "dataUse": "standard" }, "session": { "sessionId": "session-test" }, "capabilities": ["text"], "contextLimitTokens": 8192, "outputLimitTokens": 1024, "connectionBinding": "connection", "credentialRef": "credential://connections/connection" });
+    // EM-02: the request is prepared from exactly the target the Kernel seals for this attempt
+    // (the grant names it, and the executor refuses any other).
+    let target = ExecutionTargetV2::from_extension_json(kissued.target.clone(), &ext)
+        .map_err(|e| ClientError::internal(format!("mock target: {e}")))?;
+    let snapshot = ksnapshot.clone();
+    let issued = kissued.clone();
     let pin = VerifiedExecutionPin::bind(
         task,
         command,
@@ -180,31 +192,6 @@ pub fn run_mock_streaming(
         serde_json::json!({"op": "engineer-turn"}),
     )
     .with_lease(lease.lease_epoch, &lease.store_incarnation);
-    let ktarget = nexus_contracts::ExecutionTargetCoreV1::sample(
-        "muse_main",
-        "engineering-v2",
-        serde_json::json!(3),
-    );
-    let kv = serde_json::to_value(&ktarget)
-        .map_err(|e| ClientError::internal(format!("mock core: {e}")))?;
-    let ksnapshot =
-        serde_json::json!({"schemaVersion": 1, "tag": "synthetic-test-snapshot", "modes": []});
-    let mut kissued = nexus_contracts::RegistryResolutionV1 {
-        schema_version: nexus_contracts::CONTRACT_SCHEMA_VERSION,
-        issuer: "registry-bridge".to_owned(),
-        task_instance_id: task.to_owned(),
-        role: "muse_main".to_owned(),
-        target: ktarget,
-        provenance: nexus_contracts::RegistryProvenanceV1 {
-            issuer: "registry-bridge".to_owned(),
-            resolution_id_compat: "compat".to_owned(),
-            registry_snapshot_digest: nexus_contracts::snapshot_digest_of(&ksnapshot),
-            target_digest: nexus_contracts::target_digest_of(&kv),
-            mode_config_revision: serde_json::json!(3),
-            issuance_id: String::new(),
-        },
-    };
-    kissued.provenance.issuance_id = kissued.issuance_id_of();
     kernel
         .seal_issuance(&kissued)
         .map_err(|e| ClientError::internal(format!("mock seal: {e}")))?;
@@ -215,7 +202,6 @@ pub fn run_mock_streaming(
             snapshot: ksnapshot.clone(),
         })
         .map_err(|e| ClientError::internal(format!("mock accept: {e}")))?;
-    let ext = serde_json::json!({ "extensionVersion": 1, "endpoint": { "protocol": "http", "origin": "http://127.0.0.1:9", "path": "/v1/responses", "method": "POST", "localLoopback": true }, "remoteModelIdConfirmed": "remote-model", "reasoningEffort": "low", "billing": { "tier": "test-unmetered", "dataUse": "standard" }, "session": { "sessionId": "session-test" }, "capabilities": ["text"], "contextLimitTokens": 8192, "outputLimitTokens": 1024, "connectionBinding": "connection", "credentialRef": "credential://connections/connection" });
     let extd = nexus_contracts::sha256_hex(&nexus_contracts::canonical_json(&ext));
     kernel
         .seal_extension(&ext)

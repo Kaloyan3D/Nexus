@@ -187,6 +187,58 @@ function cmdRegistryDisable(args) {
   emit(r.ok ? { ok: true } : { ok: false, where: 'disable', code: r.code, message: r.message });
 }
 
+// EM-02 fixture: re-declare the reasoning levels of one fixture route (fixture capability data,
+// e.g. '["low","high"]'), then re-verify it like `registry` does.
+async function cmdRegistryLevels(args) {
+  const service = makeService(args[1], args[0]);
+  const routeId = args[2];
+  const levels = JSON.parse(args[3]);
+  const eff = service.effectiveSnapshot();
+  const route = ((eff && eff.snapshot && eff.snapshot.routes) || []).find(function (r) { return r.id === routeId; });
+  if (!route) return emit({ ok: false, where: 'levels', code: 'not-found', message: routeId });
+  const doc = { id: route.id, providerId: route.providerId, logicalModelId: route.logicalModelId, remoteModelId: route.remoteModelId, connectionId: route.connectionId, reasoningLevels: levels, availability: 'probe-required', executionKind: route.executionKind, accessType: route.accessType, compatibility: route.compatibility };
+  const r = service.saveRoute(doc, {});
+  if (!r.ok) return emit({ ok: false, where: 'levels-save', code: r.code, message: r.message });
+  const verified = await service.verifyProviderRoute(routeId, { fetchImpl: probeFetch, testBearer: 'e2e-probe-bearer', lookup: async function () { return [{ address: '8.8.8.8', family: 4 }]; } });
+  if (!verified.ok) return emit({ ok: false, where: 'levels-probe', code: 'route-probe-failed', message: JSON.stringify(verified.errors || verified).slice(0, 300) });
+  emit({ ok: true });
+}
+
+// EM-02 fixture: the operator switches the saved default (main slot) to another model/route.
+function cmdRegistryDefault(args) {
+  const service = makeService(args[1], args[0]);
+  const cur = service.getModeConfiguration('engineering-v2', {});
+  const rev = cur && cur.result ? cur.result.revision : null;
+  const config = { schemaVersion: 1, modeId: 'engineering-v2', revision: rev, slots: { main: { logicalModelId: args[2], routeId: args[3], reasoning: 'low' } }, roleOverrides: {} };
+  const r = service.save('engineering-v2', config, rev, {});
+  emit(r.ok ? { ok: true, revision: r.revision } : { ok: false, where: 'default', errors: r.errors || r.code || r });
+}
+
+// EM-02 fixture: the operator's reasoning policy for the main slot ('none' removes it).
+function cmdRegistrySlotPolicy(args) {
+  const service = makeService(args[1], args[0]);
+  const cur = service.getModeConfiguration('engineering-v2', {});
+  if (!cur || !cur.result || !cur.result.config) return emit({ ok: false, where: 'policy', code: 'unreadable' });
+  const rev = cur.result.revision;
+  const config = JSON.parse(JSON.stringify(cur.result.config));
+  config.revision = rev;
+  if (args[2] === 'none') delete config.slots.main.allowedReasoning;
+  else config.slots.main.allowedReasoning = JSON.parse(args[2]);
+  const r = service.save('engineering-v2', config, rev, {});
+  emit(r.ok ? { ok: true, revision: r.revision } : { ok: false, where: 'policy', code: ((r.errors || [])[0] || {}).code, errors: r.errors || r.code || r });
+}
+
+function cmdIssueAttempt(stdinJson) {
+  const tb = require(path.join(REPO, 'config', 'registry', 'native-task-binding.cjs'));
+  const out = tb.authorizeAttemptTarget(JSON.parse(stdinJson));
+  if (!out.ok) {
+    emit({ ok: false, code: out.code, message: out.message });
+    process.exitCode = 1;
+    return;
+  }
+  emit(Object.assign({ ok: true }, out.attempt));
+}
+
 function cmdIssue(args) {
   const installRoot = args[0];
   const dataRoot = args[1];
@@ -199,7 +251,7 @@ function cmdIssue(args) {
     process.exitCode = 1;
     return;
   }
-  emit({ ok: true, resolution: out.target.issuance.resolution, snapshot: out.target.issuance.snapshot, core: out.target.core, extension: out.target.extension, extensionDigest: out.target.extensionDigest, issuanceId: out.target.issuance.issuanceId, modeId: out.target.issuance.modeId, role: out.target.issuance.role, modeConfigRevision: out.target.issuance.modeConfigRevision, modeConfigDigest: out.target.issuance.modeConfigDigest });
+  emit({ ok: true, resolution: out.target.issuance.resolution, snapshot: out.target.issuance.snapshot, core: out.target.core, extension: out.target.extension, extensionDigest: out.target.extensionDigest, issuanceId: out.target.issuance.issuanceId, modeId: out.target.issuance.modeId, role: out.target.issuance.role, modeConfigRevision: out.target.issuance.modeConfigRevision, modeConfigDigest: out.target.issuance.modeConfigDigest, taskBinding: out.target.taskBinding, taskBindingDigest: out.target.taskBindingDigest });
 }
 
 function cmdKernelIntent(args, stdinJson) {
@@ -246,6 +298,16 @@ function main() {
   if (sub === 'registry-first') return cmdRegistryFirst(args);
   if (sub === 'registry-disable') return cmdRegistryDisable(args);
   if (sub === 'issue') return cmdIssue(args);
+  if (sub === 'registry-levels') return cmdRegistryLevels(args);
+  if (sub === 'registry-default') return cmdRegistryDefault(args);
+  if (sub === 'registry-slot-policy') return cmdRegistrySlotPolicy(args);
+  if (sub === 'issue-attempt') {
+    let text = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', function (c) { text += c; });
+    process.stdin.on('end', function () { cmdIssueAttempt(text); });
+    return;
+  }
   if (sub === 'intent') return cmdIntent(args);
   if (sub === 'kernel-intent') {
     let text = '';

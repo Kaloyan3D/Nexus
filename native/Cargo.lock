@@ -308,6 +308,7 @@ dependencies = [
  "nexus-model",
  "nexus-tools",
  "nexus-transcript",
+ "rusqlite",
  "rustls",
  "serde",
  "serde_json",

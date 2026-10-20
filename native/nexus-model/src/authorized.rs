@@ -92,6 +92,18 @@ pub fn dispatch_authorized<T: Transport>(
         store.record_failed(&attempt.attempt_id, &prepared.request_digest, &me);
         return Err(TransportError::refused(me));
     }
+    // EM-02: the grant names the target and extension the Kernel validated for this attempt
+    // (under the task binding); the request must have been prepared from exactly those.
+    if grant.target_digest != prepared.target_digest
+        || grant.extension_digest != prepared.extension_digest
+    {
+        let me = ModelError::new(
+            ModelErrorCode::AttestationFailed,
+            "grant names another target or extension than the prepared request (refusing dispatch)",
+        );
+        store.record_failed(&attempt.attempt_id, &prepared.request_digest, &me);
+        return Err(TransportError::refused(me));
+    }
     if prepared.attempt_id != attempt.attempt_id || prepared.attempt_id != grant.attempt_id {
         let me = ModelError::new(
             ModelErrorCode::AttestationFailed,
@@ -212,10 +224,13 @@ pub fn dispatch_redeemed_streaming<T: Transport>(
         || grant.credential_ref != credential_ref
         || grant.attempt_id != prepared.attempt_id
         || prepared.attempt_id != attempt.attempt_id
+        // EM-02: and the target/extension the Kernel validated for this attempt
+        || grant.target_digest != prepared.target_digest
+        || grant.extension_digest != prepared.extension_digest
     {
         let me = ModelError::new(
             ModelErrorCode::AttestationFailed,
-            "grant does not bind this request, endpoint, credential or attempt (refusing dispatch)",
+            "grant does not bind this request, endpoint, credential, attempt or target (refusing dispatch)",
         );
         return Err(refuse(attempt, store, me));
     }

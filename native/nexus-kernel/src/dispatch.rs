@@ -318,6 +318,68 @@ fn scope_admitted(
 }
 
 impl Kernel {
+    /// EM-02: seal the immutable binding of one task generation. The binding must describe
+    /// exactly the task's own sealed issuance and sealed extension (everything but the effort,
+    /// with the issuance's effort as its default). First writer wins: re-sealing the identical
+    /// binding is idempotent, a different binding for the same task is refused.
+    pub fn seal_task_binding(
+        &mut self,
+        binding: &serde_json::Value,
+        issuance_id: &str,
+        extension_digest: &str,
+    ) -> KernelResult<String> {
+        Self::critical(&self.lock_file, &self.in_process, || {
+            let parsed: nexus_contracts::TaskBindingV1 = serde_json::from_value(binding.clone())
+                .map_err(|_| {
+                    KernelError::new(
+                        KernelErrorCode::DeliveryInvalid,
+                        "task binding does not match TaskBindingV1",
+                    )
+                })?;
+            parsed.validate()?;
+            let (issued_json, _) = self.store.fetch_sealed(issuance_id)?.ok_or_else(|| {
+                KernelError::new(
+                    KernelErrorCode::ForgedIssuer,
+                    "no sealed issuance for this task binding; seal first",
+                )
+            })?;
+            let (ext_json, _) = self
+                .store
+                .fetch_extension(extension_digest)?
+                .ok_or_else(|| {
+                    KernelError::new(
+                        KernelErrorCode::ForgedIssuer,
+                        "no sealed target extension for this task binding; seal first",
+                    )
+                })?;
+            let issued: RegistryResolutionV1 =
+                serde_json::from_str(&issued_json).map_err(|_| {
+                    KernelError::new(
+                        KernelErrorCode::StoreCorrupt,
+                        "sealed issuance is not a resolution",
+                    )
+                })?;
+            let ext: serde_json::Value = serde_json::from_str(&ext_json).map_err(|_| {
+                KernelError::new(
+                    KernelErrorCode::StoreCorrupt,
+                    "sealed extension is not JSON",
+                )
+            })?;
+            parsed.matches_task_issuance(&issued, &ext)?;
+            let canonical = nexus_contracts::canonical_json(
+                &serde_json::to_value(&parsed).unwrap_or(serde_json::Value::Null),
+            );
+            let digest = nexus_contracts::sha256_hex(&canonical);
+            let key_hex = self.store.issuance_key_hex()?;
+            let seal = hmac_seal_hex(&key_hex, &canonical)?;
+            self.store
+                .seal_task_binding(&parsed.task_instance_id, &digest, &canonical, &seal)?;
+            Ok(digest)
+        })
+    }
+}
+
+impl Kernel {
     /// Seal one Registry-issued V2 extension under its digest identity,
     /// using the issuance key (same trust root as V1 seals). The extension
     /// must be a JSON object; its canonical digest becomes the seal id.
@@ -449,6 +511,11 @@ impl Kernel {
                     KernelErrorCode::BindingMismatch,
                     "sealed extension disagrees with the sealed core identity",
                 ));
+            }
+            // EM-02: under a sealed task binding, every attempt's target keeps the task's model,
+            // route, provider, connection, endpoint and credential; only a supported effort varies.
+            if let Some(binding) = sealed_task_binding(&mut self.store, &task_instance_id)? {
+                binding.admits(&issued, &ext_value)?;
             }
             match self.store.current_generation(&task_instance_id, "native")? {
                 Some(g) if g.epoch == lease_epoch && g.incarnation == store_incarnation => {}
@@ -1186,4 +1253,34 @@ impl Kernel {
         })?;
         Ok(verified)
     }
+}
+
+/// EM-02: the sealed binding of a task generation, authenticated (seal + digest), if any.
+pub(crate) fn sealed_task_binding(
+    store: &mut nexus_store::store::Store,
+    task_instance_id: &str,
+) -> KernelResult<Option<nexus_contracts::TaskBindingV1>> {
+    let Some((digest, json, seal)) = store.fetch_task_binding(task_instance_id)? else {
+        return Ok(None);
+    };
+    let key_hex = store.issuance_key_hex()?;
+    if hmac_seal_hex(&key_hex, &json)? != seal || nexus_contracts::sha256_hex(&json) != digest {
+        return Err(KernelError::new(
+            KernelErrorCode::StoreCorrupt,
+            "sealed task binding failed authentication; failing closed",
+        ));
+    }
+    let parsed: nexus_contracts::TaskBindingV1 = serde_json::from_str(&json).map_err(|_| {
+        KernelError::new(
+            KernelErrorCode::StoreCorrupt,
+            "sealed task binding is not a TaskBindingV1",
+        )
+    })?;
+    if parsed.task_instance_id != task_instance_id {
+        return Err(KernelError::new(
+            KernelErrorCode::StoreCorrupt,
+            "sealed task binding belongs to another task",
+        ));
+    }
+    Ok(Some(parsed))
 }

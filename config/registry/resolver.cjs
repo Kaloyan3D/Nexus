@@ -237,6 +237,21 @@ function resolveRoleBinding(registry, mode, role, assignment, runtime) {
   if (!Array.isArray(route.reasoningLevels) || !route.reasoningLevels.includes(assignment.reasoning)) {
     errors.push(err('reasoning-level-not-supported', 'roles.' + role + '.reasoning', 'reasoning ' + JSON.stringify(assignment.reasoning) + ' is not supported by route ' + route.id + '; never downshifted'))
   }
+  // EM-02: operator-authorized levels for this slot must be route-declared and include the
+  // default; the authorized set is the operator's policy, never the route's whole capability.
+  let allowedReasoning
+  if (assignment.allowedReasoning !== undefined) {
+    const policy = Array.isArray(assignment.allowedReasoning) ? assignment.allowedReasoning : []
+    for (const level of policy) {
+      if (!Array.isArray(route.reasoningLevels) || !route.reasoningLevels.includes(level)) {
+        errors.push(err('reasoning-level-not-supported', 'roles.' + role + '.allowedReasoning', 'reasoning ' + JSON.stringify(level) + ' is not supported by route ' + route.id + '; never authorized beyond the route'))
+      }
+    }
+    if (!policy.includes(assignment.reasoning)) {
+      errors.push(err('slot-assignment-invalid', 'roles.' + role + '.allowedReasoning', 'allowedReasoning must include the assignment reasoning'))
+    }
+    allowedReasoning = Array.from(new Set(policy)).sort()
+  }
   errors.push(...checkRuntimeCompatibility(route, runtime, role))
   if (errors.length > 0) return { errors, binding: null }
 
@@ -256,6 +271,7 @@ function resolveRoleBinding(registry, mode, role, assignment, runtime) {
     accessType: route.accessType,
     protocolId: (route.compatibility && route.compatibility.transport) || 'unknown',
     reasoning: assignment.reasoning,
+    ...(allowedReasoning !== undefined ? { allowedReasoning } : {}),
     requiredCapabilities: Object.keys((slot && slot.requirements) || {}).sort(),
     slotRequirements: { ...((slot && slot.requirements) || {}) },
     dataUseTier: model.dataUseTier || null,
@@ -330,6 +346,9 @@ function compileModeConfig(modeConfig, registry, options) {
       routeId: override.routeId || base.routeId,
       reasoning: override.reasoning || base.reasoning,
     }
+    // EM-02: the operator's reasoning policy follows the assignment it was written for
+    const policy = override.allowedReasoning !== undefined ? override.allowedReasoning : base.allowedReasoning
+    if (policy !== undefined) assignment.allowedReasoning = policy
     const result = resolveRoleBinding(registry, mode, role, assignment, runtime)
     if (result.errors.length > 0) roleErrors.push(...result.errors)
     else bindings[role] = result.binding
@@ -358,6 +377,7 @@ function compileModeConfig(modeConfig, registry, options) {
         accessType: b.accessType,
         protocolId: b.protocolId,
         reasoning: b.reasoning,
+        ...(b.allowedReasoning !== undefined ? { allowedReasoning: b.allowedReasoning } : {}),
         requiredCapabilities: b.requiredCapabilities,
         slotRequirements: b.slotRequirements,
         dataUseTier: b.dataUseTier,

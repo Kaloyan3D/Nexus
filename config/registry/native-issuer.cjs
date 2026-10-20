@@ -149,6 +149,10 @@ function issueForGeneration(compiled, taskInstanceId) {
     accessType: binding.accessType,
     protocolId: binding.protocolId,
     reasoning: binding.reasoning,
+    // EM-02: the operator-authorized reasoning levels of this slot (route-checked by the
+    // resolver), sealed with the target. Emitted only when configured, so every target without a
+    // policy is byte-for-byte unchanged.
+    ...(Array.isArray(binding.allowedReasoning) ? { allowedReasoning: binding.allowedReasoning.slice() } : {}),
     requiredCapabilities: binding.requiredCapabilities,
     slotRequirements: binding.slotRequirements,
     dataUseTier: binding.dataUseTier != null ? binding.dataUseTier : null,

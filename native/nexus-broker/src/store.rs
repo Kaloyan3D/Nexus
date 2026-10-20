@@ -25,6 +25,12 @@ pub struct RunRecord {
     pub engine_mode_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_id: Option<String>,
+    /// EM-02: digest of the task binding the Kernel sealed for this run, and the identity a
+    /// continuation must keep (absent on records written before EM-02). Broker-internal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_binding_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_binding_identity: Option<String>,
 }
 
 pub struct Store {

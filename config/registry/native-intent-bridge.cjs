@@ -21,6 +21,9 @@
  *   target-info <repoRoot> <dataRoot> [selectionJson]   Registry-selected target (no side effects)
  *   issue <repoRoot> <dataRoot> <taskInstanceId> <sessionId> [selectionJson]
  *   catalog <repoRoot> <dataRoot>   read-only Registry target catalog (no side effects)
+ *   issue-attempt        (stdin {taskBinding, taskBindingDigest, resolution, extension, requestedEffort})
+ *                        EM-02: one attempt's target under the sealed task binding (no Registry
+ *                        configuration is read: the binding is the only authority input)
  *   shadow <workspace> <taskId> <attemptId> <taskInstanceId>
  *   kernel-intent        (stdin {shadowIntent, issuance})
  *   publish              (stdin; scope and initiator are FIXED here)
@@ -212,7 +215,15 @@ function cmdIssue(args) {
   if (!parsed.ok) return failOut('bad-args', 'invalid selection');
   const out = issueFor(args[0], args[1], args[2], args[3], parsed.selection);
   if (!out.ok) return failOut(out.code, out.message);
-  emit({ ok: true, resolution: out.target.issuance.resolution, snapshot: out.target.issuance.snapshot, core: out.target.core, extension: out.target.extension, extensionDigest: out.target.extensionDigest, issuanceId: out.target.issuance.issuanceId, modeId: out.target.issuance.modeId, role: out.target.issuance.role, modeConfigRevision: out.target.issuance.modeConfigRevision, modeConfigDigest: out.target.issuance.modeConfigDigest });
+  emit({ ok: true, resolution: out.target.issuance.resolution, snapshot: out.target.issuance.snapshot, core: out.target.core, extension: out.target.extension, extensionDigest: out.target.extensionDigest, issuanceId: out.target.issuance.issuanceId, modeId: out.target.issuance.modeId, role: out.target.issuance.role, modeConfigRevision: out.target.issuance.modeConfigRevision, modeConfigDigest: out.target.issuance.modeConfigDigest, taskBinding: out.target.taskBinding, taskBindingDigest: out.target.taskBindingDigest });
+}
+
+function cmdIssueAttempt(text) {
+  const input = JSON.parse(text);
+  const tb = require(path.join(REPO, 'config', 'registry', 'native-task-binding.cjs'));
+  const out = tb.authorizeAttemptTarget(input);
+  if (!out.ok) return failOut(out.code, out.message);
+  emit(Object.assign({ ok: true }, out.attempt));
 }
 
 function cmdShadow(args) {
@@ -276,6 +287,7 @@ function main() {
         if (!SAFE_ID.test(args[2] || '') || !SAFE_ID.test(args[3] || '')) return failOut('bad-args', 'invalid task/session id');
         return cmdIssue(args);
       case 'shadow': return cmdShadow(args);
+      case 'issue-attempt': return readStdin(function (t) { try { cmdIssueAttempt(t); } catch (e) { failOut('bridge-error', String((e && e.message) || e).slice(0, 200)); } });
       case 'kernel-intent': return readStdin(function (t) { try { cmdKernelIntent(t); } catch (e) { failOut('bridge-error', String((e && e.message) || e).slice(0, 200)); } });
       case 'publish': return readStdin(function (t) { try { cmdPublish(t); } catch (e) { failOut('bridge-error', String((e && e.message) || e).slice(0, 200)); } });
       case 'publish-code': return readStdin(function (t) { try { cmdPublishCode(t); } catch (e) { failOut('bridge-error', String((e && e.message) || e).slice(0, 200)); } });

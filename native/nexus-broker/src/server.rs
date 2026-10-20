@@ -148,6 +148,24 @@ impl Broker {
         self.store.put(&rec).is_ok()
     }
 
+    /// EM-02: record the task binding a (running) run executes under. Set once; `false` when it
+    /// cannot be recorded or another one is already recorded (the caller fails closed).
+    pub(crate) fn bind_task_target(&self, run_id: &str, digest: &str, identity: &str) -> bool {
+        let _g = self.store.lock();
+        let Some(mut rec) = self.store.load(run_id) else {
+            return false;
+        };
+        if let Some(have) = &rec.task_binding_digest {
+            return have == digest && rec.task_binding_identity.as_deref() == Some(identity);
+        }
+        if rec.run.terminal {
+            return false;
+        }
+        rec.task_binding_digest = Some(digest.to_owned());
+        rec.task_binding_identity = Some(identity.to_owned());
+        self.store.put(&rec).is_ok()
+    }
+
     /// Annotate a record that is already final (links between runs, what happened to its
     /// patch). Never changes its state, outcome or counters.
     pub fn annotate(&self, run_id: &str, f: impl FnOnce(&mut IntentRun)) {
@@ -559,6 +577,8 @@ impl Broker {
                     .then(|| intent.content.clone()),
                 engine_mode_id: None,
                 engine_id: None,
+                task_binding_digest: None,
+                task_binding_identity: None,
             };
             // Record first, then the index: a crash between the two leaves
             // an unindexed record (recovered as abandoned), never a key that
@@ -654,6 +674,26 @@ impl Broker {
                 ));
             }
         }
+        // EM-02: the continuation runs on the SAME model and route as the interrupted run, never on
+        // whatever the Registry's default is now; the new task's binding is then checked against
+        // the interrupted run's (model, route, connection, endpoint, credential, default effort).
+        let (Some(provider_id), Some(remote_model_id), Some(logical), Some(route)) = (
+            r.provider_id.clone(),
+            r.remote_model_id.clone(),
+            r.logical_model_id.clone(),
+            r.route_id.clone(),
+        ) else {
+            return Err((
+                "not-available",
+                "the interrupted run's model and route are not recorded; it cannot be continued on the same target".into(),
+            ));
+        };
+        let model = nexus_contracts::intent::ModelSelection {
+            provider_id,
+            remote_model_id,
+            logical_model_id: Some(logical),
+            route_id: Some(route),
+        };
         let why = r.error_code.clone().unwrap_or_else(|| r.state.clone());
         let done = crate::inspect::receipts_summary(&r.tool_activity);
         let content = format!(
@@ -665,7 +705,7 @@ impl Broker {
             idempotency_key: format!("resume-{old_id}"),
             intent_type: nexus_contracts::intent::INTENT_REPO_CODE.to_owned(),
             content,
-            model: None,
+            model: Some(model),
             workspace_id: Some(project),
             limits: self
                 .cfg

@@ -92,3 +92,9 @@ CREATE TABLE IF NOT EXISTS write_scope_bindings (command_id TEXT PRIMARY KEY, bi
 CREATE TABLE IF NOT EXISTS process_scope_bindings (command_id TEXT PRIMARY KEY, binding_json TEXT NOT NULL, seal_hex TEXT NOT NULL, created_at_utc TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tool_revocations (command_id TEXT PRIMARY KEY, reason TEXT NOT NULL, revoked_at_utc TEXT NOT NULL);
 ";
+
+/// EM-02 immutable task bindings (additive; no version bump). One row per task generation,
+/// written once by the Kernel (first writer wins) and HMAC-sealed; never updated.
+pub const DDL_V5_TASK_BINDINGS: &str = "
+CREATE TABLE IF NOT EXISTS task_bindings (task_instance_id TEXT PRIMARY KEY, binding_digest TEXT NOT NULL, binding_json TEXT NOT NULL, seal_hex TEXT NOT NULL, created_at_utc TEXT NOT NULL);
+";

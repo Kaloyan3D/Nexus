@@ -245,6 +245,10 @@ function issueExecutionTargetV2(options, deps) {
     return fail('registry-target-unauthorized', 'extension confirmation drifts from the sealed core identity; refusing to issue');
   }
   const extensionDigest = issuer.canonicalSha256(extension);
+  // EM-02: the immutable task binding (everything but the effort, plus the route's declared
+  // reasoning levels at issuance). Additive: the issuance and extension above are unchanged.
+  const taskBinding = require('./native-task-binding.cjs').buildTaskBinding({ issuance: issued.issuance, extension: extension }, route);
+  if (!taskBinding.ok) return fail(taskBinding.code, taskBinding.message);
   return {
     ok: true,
     code: null,
@@ -259,6 +263,8 @@ function issueExecutionTargetV2(options, deps) {
       snapshot: snapshot,
       taskInstanceId: taskInstanceId,
       sessionId: sessionId,
+      taskBinding: taskBinding.binding,
+      taskBindingDigest: taskBinding.bindingDigest,
     },
   };
 }
@@ -316,6 +322,11 @@ function compileWithSelection(service, selection) {
     routeId: routeId,
     reasoning: isNonEmptyString(current.reasoning) ? current.reasoning : (Array.isArray(route.reasoningLevels) && isNonEmptyString(route.reasoningLevels[0]) ? route.reasoningLevels[0] : current.reasoning),
   };
+  // EM-02: the operator's reasoning policy was written for the saved assignment; it applies to a
+  // selection only when the selection IS that assignment. Any other model gets the default only.
+  if (Array.isArray(current.allowedReasoning) && current.logicalModelId === logicalModelId && current.routeId === routeId) {
+    modeConfig.slots.main.allowedReasoning = current.allowedReasoning.slice();
+  }
   if (modeConfig.roleOverrides && modeConfig.roleOverrides.muse_main) {
     delete modeConfig.roleOverrides.muse_main;
   }

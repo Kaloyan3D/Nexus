@@ -137,6 +137,23 @@ impl Kernel {
                     "mode mismatch between intent and issued target",
                 ));
             }
+            // EM-02: the task binding decides which issuances one task may execute. With a sealed
+            // binding: only targets it admits. Without one (legacy flows): one issuance per task,
+            // so an unbound task can never switch its target between attempts.
+            match crate::dispatch::sealed_task_binding(&mut self.store, &intent.task_instance_id)? {
+                Some(binding) => {
+                    binding.admits_target(issued)?;
+                }
+                None => {
+                    let accepted = self.store.accepted_issuance_ids(&intent.task_instance_id)?;
+                    if accepted.iter().any(|id| *id != computed_issuance) {
+                        return Err(KernelError::new(
+                            KernelErrorCode::BindingMismatch,
+                            "this task has no sealed task binding and already executes another issuance; refusing to switch targets",
+                        ));
+                    }
+                }
+            }
             let lease = intent.lease.as_ref().ok_or_else(|| {
                 KernelError::new(KernelErrorCode::StaleLease, "missing lease authorization")
             })?;

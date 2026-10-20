@@ -165,7 +165,30 @@ function validateModeDefinition(doc, path) {
 /* ── ModeConfiguration ──────────────────────────────────────────────── */
 
 const MODE_CONFIG_FIELDS = new Set(['schemaVersion', 'modeId', 'revision', 'slots', 'roleOverrides'])
-const SLOT_ASSIGNMENT_FIELDS = new Set(['logicalModelId', 'routeId', 'reasoning'])
+const SLOT_ASSIGNMENT_FIELDS = new Set(['logicalModelId', 'routeId', 'reasoning', 'allowedReasoning'])
+
+// EM-02: the operator's reasoning policy for one slot assignment. Optional: absent means only the
+// assignment's own `reasoning` is authorized. Present: 1..16 distinct levels (1..32 visible ASCII
+// chars) that include `reasoning`; the resolver additionally requires each to be declared by
+// the assigned route. Never widened by the route alone.
+const MAX_ALLOWED_REASONING = 16
+function validateAllowedReasoning(value, reasoning, path, errors) {
+  if (value === undefined) return
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ALLOWED_REASONING) {
+    errors.push(err('slot-assignment-invalid', path, 'allowedReasoning must be a non-empty array of at most ' + MAX_ALLOWED_REASONING + ' levels'))
+    return
+  }
+  const seen = new Set()
+  for (let i = 0; i < value.length; i += 1) {
+    const l = value[i]
+    if (typeof l !== 'string' || !/^[\x21-\x7E]{1,32}$/.test(l)) errors.push(err('slot-assignment-invalid', path + '[' + i + ']', 'reasoning level must be 1..32 visible ASCII characters'))
+    else if (seen.has(l)) errors.push(err('slot-assignment-invalid', path + '[' + i + ']', 'duplicate reasoning level: ' + l))
+    else seen.add(l)
+  }
+  if (typeof reasoning === 'string' && reasoning !== '' && !seen.has(reasoning)) {
+    errors.push(err('slot-assignment-invalid', path, 'allowedReasoning must include the assignment reasoning ' + JSON.stringify(reasoning)))
+  }
+}
 
 function validateSlotAssignment(assignment, path) {
   const errors = []
@@ -174,6 +197,7 @@ function validateSlotAssignment(assignment, path) {
   if (typeof assignment.logicalModelId !== 'string' || assignment.logicalModelId === '') errors.push(err('slot-assignment-invalid', path + '.logicalModelId', 'logicalModelId is required'))
   if (typeof assignment.routeId !== 'string' || assignment.routeId === '') errors.push(err('slot-assignment-invalid', path + '.routeId', 'routeId is required'))
   if (typeof assignment.reasoning !== 'string' || assignment.reasoning === '') errors.push(err('slot-assignment-invalid', path + '.reasoning', 'reasoning is required'))
+  validateAllowedReasoning(assignment.allowedReasoning, assignment.reasoning, path + '.allowedReasoning', errors)
   return errors
 }
 
@@ -212,6 +236,8 @@ function validateModeConfiguration(doc, path) {
         if (override.reasoning !== undefined && (typeof override.reasoning !== 'string' || override.reasoning === '')) {
           errors.push(err('mode-config-invalid', where + '.roleOverrides.' + role + '.reasoning', 'reasoning must be a non-empty string'))
         }
+        // the effective reasoning is checked against the effective policy by the resolver
+        validateAllowedReasoning(override.allowedReasoning, undefined, where + '.roleOverrides.' + role + '.allowedReasoning', errors)
       }
     }
   }
@@ -399,7 +425,7 @@ function validateConnection(doc, path) {
 /* ── ResolvedModeConfiguration / RuntimeModelBinding ─────────────────── */
 
 const SNAPSHOT_FIELDS = new Set(['schemaVersion', 'modeId', 'orchestrationEngineId', 'configurationRevision', 'resolutionId', 'roles'])
-const BINDING_FIELDS = new Set(['schemaVersion', 'resolutionId', 'modeId', 'orchestrationEngineId', 'modeConfigRevision', 'roleId', 'logicalModelId', 'routeId', 'providerId', 'remoteModelId', 'connectionId', 'executionKind', 'accessType', 'protocolId', 'reasoning', 'requiredCapabilities', 'slotRequirements', 'dataUseTier'])
+const BINDING_FIELDS = new Set(['schemaVersion', 'resolutionId', 'modeId', 'orchestrationEngineId', 'modeConfigRevision', 'roleId', 'logicalModelId', 'routeId', 'providerId', 'remoteModelId', 'connectionId', 'executionKind', 'accessType', 'protocolId', 'reasoning', 'allowedReasoning', 'requiredCapabilities', 'slotRequirements', 'dataUseTier'])
 
 function validateRuntimeModelBinding(doc, path) {
   const errors = []
@@ -432,6 +458,7 @@ function validateRuntimeModelBinding(doc, path) {
   if (doc.dataUseTier !== undefined && doc.dataUseTier !== null && !DATA_USE_TIERS.includes(doc.dataUseTier)) {
     errors.push(err('binding-invalid', where + '.dataUseTier', 'dataUseTier must be one of ' + DATA_USE_TIERS.join(', ')))
   }
+  validateAllowedReasoning(doc.allowedReasoning, doc.reasoning, where + '.allowedReasoning', errors)
   return errors
 }
 
