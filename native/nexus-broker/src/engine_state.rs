@@ -460,6 +460,8 @@ pub struct EngineRun {
     pub host: crate::engine::EngineHost,
     pub rec: EngineStateRecord,
     store: EngineStateStore,
+    /// EM-04A: capabilities lent to the engine at every consultation.
+    pub env: crate::engine::EngineEnv,
 }
 
 /// What a continuation knows about the run it continues.
@@ -513,7 +515,12 @@ impl EngineRun {
         }
         store.create(&mut rec)?;
         let host = crate::engine::EngineHost::restored(ext, initial, 0, None);
-        Ok(Self { host, rec, store })
+        Ok(Self {
+            host,
+            rec,
+            store,
+            env: crate::engine::EngineEnv::default(),
+        })
     }
 
     fn stage(&mut self) {
@@ -539,7 +546,7 @@ impl EngineRun {
         let before = self.host.effort_selection().cloned();
         let decision = self
             .host
-            .consult(hook, snapshot)
+            .consult_in(hook, snapshot, &self.env)
             .map_err(|r| err(r.code, r.message))?;
         if self.host.effort_selection() != before.as_ref() {
             let sel = self
@@ -1137,5 +1144,226 @@ mod tests {
         let d2 = tempfile::tempdir().unwrap();
         EngineStateStore::open(d2.path()).unwrap();
         assert_ne!(std::fs::read(d2.path().join(KEY_FILE)).unwrap(), original);
+    }
+}
+
+/// EM-04A compatibility: records WRITTEN BY THE EM-03 COMMIT (`b5a939a`, real code, captured in
+/// `tests/fixtures/em03-engine-state` with their broker-local test key) are reopened, authenticated
+/// and continued by this build. The persisted schema (record schema 1, engine contract 2) is
+/// unchanged by EM-04A; only Rust API types grew additively, so no migration exists or is needed.
+#[cfg(all(test, feature = "test-engines"))]
+mod em03_records_compatibility {
+    use super::*;
+    use crate::engine::muse_v0::MUSE_V0;
+    use crate::engine::muse_v1::MUSE_V1;
+    use crate::engine::test_engine::EFFORT_TEST_V0;
+    use crate::engine::{EngineSnapshot, Hook, RunKind};
+    use std::os::unix::fs::PermissionsExt;
+
+    const TASKS: [&str; 3] = ["task_em03_muse", "task_em03_effort", "task_em03_done"];
+
+    /// A broker state directory holding the EM-03 key and records (permissions as the broker
+    /// writes them; git does not keep them).
+    fn em03_state_dir() -> tempfile::TempDir {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/em03-engine-state");
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("engine")).unwrap();
+        // the throwaway key of the directory the EM-03 code wrote these records in (README.md)
+        std::fs::copy(
+            src.join("TEST-ONLY-throwaway-em03-hmac-key.hex"),
+            d.path().join("engine-state.key"),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            d.path().join("engine-state.key"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        for t in TASKS {
+            let to = d.path().join(format!("engine/{t}.json"));
+            std::fs::copy(src.join(format!("engine/{t}.json")), &to).unwrap();
+            std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        std::fs::set_permissions(
+            d.path().join("engine"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        d
+    }
+
+    fn cont(
+        dir: &Path,
+        ext: &'static dyn crate::engine::EngineExtension,
+        task: &str,
+        pred: &str,
+    ) -> Result<EngineRun, StateError> {
+        EngineRun::start(
+            EngineStateStore::open(dir).unwrap(),
+            ext,
+            &format!("run_{task}"),
+            task,
+            "engineering-v2",
+            &"b".repeat(64),
+            "low",
+            Some(Predecessor {
+                run_id: format!("run_{pred}"),
+                task_instance_id: Some(pred.to_owned()),
+            }),
+        )
+    }
+
+    fn snap(dispatched: u32) -> EngineSnapshot {
+        EngineSnapshot {
+            kind: Some(RunKind::Code),
+            interactive: true,
+            attempts_dispatched: dispatched,
+            current_effort: "low".into(),
+            authorized_efforts: vec!["high".into(), "low".into()],
+            generation: "gen-new".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn em03_records_reopen_byte_for_byte_and_authenticate() {
+        let d = em03_state_dir();
+        let key_before = std::fs::read(d.path().join("engine-state.key")).unwrap();
+        let store = EngineStateStore::open(d.path()).expect("the EM-03 key is accepted");
+        assert_eq!(
+            std::fs::read(d.path().join("engine-state.key")).unwrap(),
+            key_before,
+            "never regenerated"
+        );
+        for t in TASKS {
+            let bytes = std::fs::read(d.path().join(format!("engine/{t}.json"))).unwrap();
+            let rec = store.load(t).expect("authentic").expect("present");
+            assert_eq!(rec.schema_version, RECORD_SCHEMA);
+            assert_eq!(rec.engine_contract, crate::engine::ENGINE_CONTRACT_VERSION);
+            // lossless: this build's types serialize the EM-03 record to the identical bytes
+            assert_eq!(serde_json::to_vec(&rec).unwrap(), bytes, "{t}");
+        }
+        // tampering with an EM-03 record is still refused
+        let p = d.path().join("engine/task_em03_done.json");
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        v["defaultEffort"] = "high".into();
+        std::fs::write(&p, serde_json::to_vec(&v).unwrap()).unwrap();
+        assert_eq!(
+            store.load("task_em03_done").err().unwrap().code,
+            "engine-state-unauthenticated"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_em03_muse_v0_task_is_continued_safely() {
+        let d = em03_state_dir();
+        let old = std::fs::read(d.path().join("engine/task_em03_muse.json")).unwrap();
+        let mut r = cont(d.path(), &MUSE_V0, "task_new_muse", "task_em03_muse").unwrap();
+        let l = r.rec.lineage.clone().unwrap();
+        assert_eq!(l.rule, "fresh-engine-does-not-inherit");
+        let old_rev = serde_json::from_slice::<Value>(&old).unwrap()["revision"].as_u64();
+        assert_eq!(
+            l.predecessor_revision, old_rev,
+            "lineage names the durable revision"
+        );
+        let ev: Vec<(&str, Option<u32>)> = r
+            .rec
+            .events
+            .iter()
+            .map(|e| (e.kind.as_str(), e.attempt))
+            .collect();
+        assert_eq!(
+            ev,
+            [
+                ("created", None),
+                ("predecessor-attempt-unresolved", Some(2))
+            ],
+            "the interrupted attempt is recorded, never re-sent"
+        );
+        // the continuation runs under this build: consult (EM-04A snapshot), bind, finish
+        r.consult(Hook::BeforeRequest, &snap(0)).unwrap();
+        r.bind_attempt(1, "att_n1", "low", "iss_low", "ext_low")
+            .unwrap();
+        r.attempt_outcome(1, "answered");
+        r.finish("completed").unwrap();
+        let store = EngineStateStore::open(d.path()).unwrap();
+        let back = store.load("task_new_muse").unwrap().unwrap();
+        assert_eq!(back.attempts.len(), 1);
+        assert_eq!(back.events.last().unwrap().kind, "run-ended");
+        assert_eq!(
+            std::fs::read(d.path().join("engine/task_em03_muse.json")).unwrap(),
+            old,
+            "the predecessor record is never rewritten"
+        );
+        // a completed EM-03 run continues with nothing unresolved
+        let c = cont(d.path(), &MUSE_V0, "task_new_done", "task_em03_done").unwrap();
+        assert_eq!(
+            c.rec
+                .events
+                .iter()
+                .map(|e| e.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["created"]
+        );
+    }
+
+    #[test]
+    fn an_em03_effort_selection_is_inherited_reset_and_reauthorized_never_escalated() {
+        let d = em03_state_dir();
+        let mut r = cont(
+            d.path(),
+            &EFFORT_TEST_V0,
+            "task_new_effort",
+            "task_em03_effort",
+        )
+        .unwrap();
+        assert_eq!(r.rec.lineage.clone().unwrap().rule, "inherited");
+        let ev: Vec<(&str, Option<u32>, Option<&str>)> = r
+            .rec
+            .events
+            .iter()
+            .map(|e| (e.kind.as_str(), e.attempt, e.effort.as_deref()))
+            .collect();
+        assert_eq!(
+            ev,
+            [
+                ("created", None, Some("low")),
+                ("predecessor-attempt-unresolved", Some(2), Some("high")),
+                ("effort-reset-continuation", None, Some("high")),
+            ]
+        );
+        assert!(
+            r.host.effort_selection().is_none(),
+            "restarts at the default"
+        );
+        assert_eq!(r.host.effort_for_attempt(1), None);
+        // the inherited payload drives the next proposal; it is durable before its attempt
+        r.consult(Hook::BeforeRequest, &snap(0)).unwrap();
+        let sel = r
+            .host
+            .effort_selection()
+            .cloned()
+            .expect("re-proposed under the new binding");
+        assert_eq!((sel.effort.as_str(), sel.from_attempt), ("high", 1));
+        r.bind_attempt(1, "att_n1", "high", "iss_high_new", "ext_high_new")
+            .unwrap();
+        let back = EngineStateStore::open(d.path())
+            .unwrap()
+            .load("task_new_effort")
+            .unwrap()
+            .unwrap();
+        let kinds: Vec<&str> = back.events.iter().map(|e| e.kind.as_str()).collect();
+        let sel_at = kinds.iter().position(|k| *k == "effort-selected").unwrap();
+        let bound_at = kinds.iter().position(|k| *k == "attempt-bound").unwrap();
+        assert!(sel_at < bound_at);
+    }
+
+    #[test]
+    fn an_em03_record_is_never_reinterpreted_by_the_shadow_engine() {
+        let d = em03_state_dir();
+        let e = cont(d.path(), &MUSE_V1, "task_new_shadow", "task_em03_muse")
+            .err()
+            .unwrap();
+        assert_eq!(e.code, "engine-state-identity");
     }
 }

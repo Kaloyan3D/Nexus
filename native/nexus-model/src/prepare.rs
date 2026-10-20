@@ -177,35 +177,7 @@ pub fn prepare(
                     | crate::request::ToolProfile::RepoCodeV1),
                 ) => serde_json::json!({
                     "model": target.remote_model_id_confirmed,
-                    "input": input.items.iter().map(|it| match it {
-                        crate::request::InputItem::Message { role, content } => {
-                            serde_json::json!({ "role": role, "content": content })
-                        }
-                        crate::request::InputItem::FunctionCall { call_id, name, arguments } => {
-                            serde_json::json!({
-                                "type": "function_call", "call_id": call_id,
-                                "name": name, "arguments": arguments,
-                            })
-                        }
-                        crate::request::InputItem::FunctionCallOutput { call_id, output } => {
-                            serde_json::json!({
-                                "type": "function_call_output", "call_id": call_id, "output": output,
-                            })
-                        }
-                        // the model's own reasoning item, verbatim (validated canonical JSON,
-                        // parse checked above)
-                        crate::request::InputItem::Reasoning { item } => {
-                            serde_json::from_str::<serde_json::Value>(item)
-                                .unwrap_or(serde_json::Value::Null)
-                        }
-                        // the model's own message item, phase intact (Responses `message` item)
-                        crate::request::InputItem::AssistantPhase { phase, content } => {
-                            serde_json::json!({
-                                "type": "message", "role": "assistant", "phase": phase,
-                                "content": [{ "type": "output_text", "text": content }],
-                            })
-                        }
-                    }).collect::<Vec<_>>(),
+                    "input": input.items.iter().map(responses_input_item).collect::<Vec<_>>(),
                     "tools": crate::repo_tools::definitions_for(profile),
                     "tool_choice": "auto",
                     "parallel_tool_calls": false,
@@ -249,6 +221,50 @@ pub fn prepare(
         extension_digest: pin.extension_digest.clone(),
         pin_digest: pin.pin_digest(),
     })
+}
+
+/// The exact Responses wire form of one tool-conversation item (the `input` array element the
+/// OpenCode Go adapter sends). Public so the broker's request-size budget (EM-04A) measures the
+/// SAME bytes `prepare` serializes, item by item, instead of an approximation.
+pub fn responses_input_item(it: &crate::request::InputItem) -> serde_json::Value {
+    match it {
+        crate::request::InputItem::Message { role, content } => {
+            serde_json::json!({ "role": role, "content": content })
+        }
+        crate::request::InputItem::FunctionCall {
+            call_id,
+            name,
+            arguments,
+        } => {
+            serde_json::json!({
+                "type": "function_call", "call_id": call_id,
+                "name": name, "arguments": arguments,
+            })
+        }
+        crate::request::InputItem::FunctionCallOutput { call_id, output } => {
+            serde_json::json!({
+                "type": "function_call_output", "call_id": call_id, "output": output,
+            })
+        }
+        // the model's own reasoning item, verbatim (validated canonical JSON, parse checked by
+        // `prepare` before serialization)
+        crate::request::InputItem::Reasoning { item } => {
+            serde_json::from_str::<serde_json::Value>(item).unwrap_or(serde_json::Value::Null)
+        }
+        // the model's own message item, phase intact (Responses `message` item)
+        crate::request::InputItem::AssistantPhase { phase, content } => {
+            serde_json::json!({
+                "type": "message", "role": "assistant", "phase": phase,
+                "content": [{ "type": "output_text", "text": content }],
+            })
+        }
+    }
+}
+
+/// Exact canonical wire bytes of one item inside the request body's `input` array (without the
+/// separating comma).
+pub fn responses_input_item_bytes(it: &crate::request::InputItem) -> usize {
+    nexus_contracts::canonical_json(&responses_input_item(it)).len()
 }
 
 /// Re-verify the full binding and issue the dispatch attestation. The

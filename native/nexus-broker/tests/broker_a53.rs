@@ -498,6 +498,7 @@ impl Fx {
             interactive: false,
             project_snapshots: None,
             context_budget_bytes: None,
+            request_budget_bytes: None,
         }
     }
 
@@ -1464,6 +1465,7 @@ fn broker_child_entry() {
         interactive: false,
         project_snapshots: None,
         context_budget_bytes: None,
+        request_budget_bytes: None,
     };
     let _h = nexus_broker::start(cfg).expect("child broker");
     std::thread::sleep(Duration::from_secs(600));

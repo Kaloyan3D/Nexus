@@ -649,6 +649,7 @@ impl Fx {
             interactive: false,
             project_snapshots: None,
             context_budget_bytes: None,
+            request_budget_bytes: None,
         }
     }
 

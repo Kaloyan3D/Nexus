@@ -654,6 +654,11 @@ fn fixture_inner(
 /// `config/` in which the engineering-v2 mode names `engine` (and the fixture models are scoped
 /// to it): the REAL Registry then issues that engine, exactly as it issues `muse-v0` normally.
 fn fixture_engine(responder: Responder, engine: &str) -> Fx {
+    fixture_engine_with(responder, engine, Box::new(|_| {}))
+}
+
+/// `fixture_engine` with extra repository content (EM-04A).
+fn fixture_engine_with(responder: Responder, engine: &str, extra: Box<dyn Fn(&Path)>) -> Fx {
     let dir = tempfile::tempdir().unwrap();
     let st = Command::new("cp")
         .args(["-r", "--reflink=auto"])
@@ -669,7 +674,7 @@ fn fixture_engine(responder: Responder, engine: &str) -> Fx {
     let install = dir.path().to_path_buf();
     let fx = fixture_full(
         responder,
-        Box::new(|_| {}),
+        extra,
         &[],
         true,
         true,
@@ -863,6 +868,7 @@ impl Fx {
             interactive: false,
             project_snapshots: None,
             context_budget_bytes: None,
+            request_budget_bytes: None,
         }
     }
 
@@ -10374,4 +10380,515 @@ fn em03_an_accepted_proposal_whose_authorization_fails_never_dispatches() {
         "nothing more ran under the old task"
     );
     b.shutdown();
+}
+
+// ---- EM-04A: request-size budget and the shadow Muse Governor ---------------------------
+
+const SHADOW: &str = "muse-v1-shadow";
+
+/// The shadow engine's fixture; `adaptive` = the route declares and the operator's slot policy
+/// explicitly authorizes the Governor's levels (otherwise the binding authorizes the default only).
+fn em04a_fixture(responder: Responder, adaptive: bool, extra: Box<dyn Fn(&Path)>) -> Fx {
+    let fx = fixture_engine_with(responder, SHADOW, extra);
+    if adaptive {
+        let root = fx.install_root.to_str().unwrap().to_owned();
+        let data = fx.registry.to_str().unwrap().to_owned();
+        let levels = "[\"low\",\"medium\",\"high\",\"xhigh\"]";
+        let r = node_json(&["registry-levels", &data, &root, "e2e-mock/e2e-1", levels]);
+        assert_eq!(r["ok"], true, "{r}");
+        let r = node_json(&["registry-slot-policy", &data, &root, levels]);
+        assert_eq!(r["ok"], true, "{r}");
+    }
+    fx
+}
+
+fn em04a_broker(fx: &Fx, name: &str, budget: Option<usize>, ctx: Option<usize>) -> BrokerHandle {
+    let mut c = fx.config(name);
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.interactive = true;
+    c.request_budget_bytes = budget;
+    c.context_budget_bytes = ctx;
+    nexus_broker::start(c).expect("broker starts")
+}
+
+fn em04a_history(st: &Value) -> Vec<Value> {
+    st["payload"]["history"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Every `function_call_output` in a request body follows its own `function_call`.
+fn em04a_pairs_intact(body: &Value) -> bool {
+    let mut open: Vec<String> = Vec::new();
+    for i in body["input"].as_array().unwrap() {
+        match i["type"].as_str() {
+            Some("function_call") => open.push(i["call_id"].as_str().unwrap().to_owned()),
+            Some("function_call_output")
+                if !open.iter().any(|c| c == i["call_id"].as_str().unwrap()) =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+fn em04a_effort_script() -> Responder {
+    script(
+        vec![
+            ("fs_read", r#"{"path":"src/lib.rs"}"#.into()),
+            // the fixture crate's tests fail: a failed verification receipt
+            (
+                "proc_run",
+                r#"{"program":"cargo","args":["test","--offline"]}"#.into(),
+            ),
+            (
+                "fs_write",
+                r#"{"path":"src/note.rs","mode":"create","content":"// note\n"}"#.into(),
+            ),
+        ],
+        "Read the code, ran the tests, left a note.",
+    )
+}
+
+/// The success criterion of EM-04A: with the Governor's levels explicitly authorized, the
+/// historical Governor is evaluated before every request on the Core's trusted receipts, its
+/// decisions are durable, and NOTHING about the requests changes: every attempt carries the pinned
+/// `low`, no effort is selected, and the Kernel accepts one target for the whole run.
+#[test]
+fn em04a_the_shadow_governor_decides_on_trusted_receipts_but_never_changes_a_request() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = em04a_fixture(em04a_effort_script(), true, Box::new(|_| {}));
+    let b = em04a_broker(&fx, "em04a-shadow", None, None);
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "read src/lib.rs", "em04a-shadow-0001", |_| {}),
+        240,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let bodies = fx.provider.bodies.lock().unwrap().clone();
+    assert!(bodies.len() >= 4, "{}", bodies.len());
+    for x in &bodies {
+        assert_eq!(
+            x["reasoning"]["effort"], "low",
+            "the shadow is never applied"
+        );
+        // no new tool or request field
+        let tools: Vec<&str> = x["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(!tools.contains(&"muse_update_reasoning_state"));
+    }
+    let task = run.task_instance_id.clone().unwrap();
+    let st = em03_state(&fx, "em04a-shadow", &task);
+    assert_eq!(st["engineId"], SHADOW);
+    assert!(
+        !events(&st).iter().any(|e| e.0 == "effort-selected"),
+        "no effort selection exists"
+    );
+    let receipts = em03_receipts(&fx, &task);
+    assert_eq!(
+        receipts.len(),
+        bodies.len(),
+        "one Kernel acceptance per request"
+    );
+    assert!(receipts
+        .windows(2)
+        .all(|w| w[0]["issuanceId"] == w[1]["issuanceId"]));
+    // the Governor's decisions, on trusted receipts only
+    let h = em04a_history(&st);
+    assert_eq!(
+        st["payload"]["evaluations"].as_u64().unwrap() as usize,
+        bodies.len()
+    );
+    assert!(
+        h.iter()
+            .all(|d| d["inForce"] == "low" && d["outcome"] == "resolved"),
+        "{h:?}"
+    );
+    let first = h
+        .iter()
+        .find(|d| d["attempt"] == 1)
+        .expect("attempt 1 kept");
+    assert_eq!(first["governorEffort"], "medium");
+    assert_eq!(first["effectivePhase"], "discover");
+    assert_eq!(first["would"], "change:medium");
+    let sources: Vec<&str> = h
+        .iter()
+        .map(|d| d["effectiveSource"].as_str().unwrap())
+        .collect();
+    let rec = sources
+        .iter()
+        .position(|s| *s == "recovery-needed")
+        .expect("a failed check");
+    let imp = sources
+        .iter()
+        .position(|s| *s == "implementation-active")
+        .expect("a verified mutation");
+    assert!(rec < imp, "{sources:?}");
+    assert_eq!(h[rec]["governorEffort"], "high");
+    assert_eq!(h[rec]["would"], "change:high");
+    assert_eq!(h[imp]["governorEffort"], "medium");
+    // the evidence: one mutation, one failed verification; the semantic state never moved
+    let act = &st["payload"]["museActivity"];
+    assert_eq!(act["mutationCount"], 1);
+    assert_eq!(act["verification"]["status"], "failed");
+    assert_eq!(act["verification"]["family"], "native:cargo");
+    assert_eq!(st["payload"]["museReasoning"]["phase"], "discover");
+    assert_eq!(st["payload"]["museReasoning"]["failedHypotheses"], 0);
+    assert!(h
+        .iter()
+        .all(|d| d["evidence"].as_str().unwrap().len() == 64));
+    assert_eq!(st["payload"]["chain"].as_str().unwrap().len(), 64);
+    // no model text in the durable state
+    let raw = st.to_string();
+    assert!(!raw.contains("Read the code, ran the tests"));
+    b.shutdown();
+}
+
+/// Default-only configuration (no slot policy): the binding authorizes `low` only, which is not on
+/// the historical ladder. The Governor fails closed (capability unavailable) and the shadow keeps
+/// the authorized effort; nothing escalates.
+#[test]
+fn em04a_a_default_only_binding_keeps_low_and_the_governor_fails_closed() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = em04a_fixture(em03_responder(2), false, Box::new(|_| {}));
+    let b = em04a_broker(&fx, "em04a-default", None, None);
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "read src/lib.rs", "em04a-default-001", |_| {}),
+        180,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let bodies = fx.provider.bodies.lock().unwrap().clone();
+    assert!(bodies.iter().all(|x| x["reasoning"]["effort"] == "low"));
+    let st = em03_state(&fx, "em04a-default", &run.task_instance_id.clone().unwrap());
+    let h = em04a_history(&st);
+    assert_eq!(h.len(), bodies.len());
+    for d in &h {
+        assert_eq!(d["outcome"], "capability-unavailable", "{d}");
+        assert_eq!(d["would"], "keep");
+        assert!(d["governorEffort"].is_null());
+    }
+    b.shutdown();
+}
+
+fn em04a_big_file(root: &Path) {
+    let text: String = (0..1800)
+        .map(|i| format!("line {i:05} {}\n", "x".repeat(100)))
+        .collect();
+    std::fs::write(root.join("big.txt"), text).unwrap();
+}
+
+fn em04a_long_reads(sizes: Arc<Mutex<Vec<usize>>>, last: usize) -> Responder {
+    Arc::new(move |n, body| {
+        sizes.lock().unwrap().push(body.to_string().len());
+        let resp = format!("resp_{n}");
+        if n < last {
+            let args = json!({"path": "big.txt", "startLine": 1 + (n % 30) * 40, "maxLines": 400})
+                .to_string();
+            Answer::Frames(call_frames(
+                &resp,
+                n,
+                &format!("call_{n}"),
+                "fs_read",
+                &args,
+            ))
+        } else {
+            Answer::Frames(text_frames(&resp, "Read enough."))
+        }
+    })
+}
+
+/// A614 with room for the future signals tool: the same 55-read loop, under the shadow engine
+/// (2,882 B reserved) and a request budget one byte under the A614 guard. Every request leaves
+/// the reserve free, so adding the tool keeps every request under 450,000 B; calls and results stay
+/// paired; the run still completes.
+#[test]
+fn em04a_a614_long_loop_leaves_measured_room_for_the_signals_tool() {
+    if !sandbox_ready() {
+        return;
+    }
+    let sizes: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+    let fx = em04a_fixture(
+        em04a_long_reads(sizes.clone(), 55),
+        false,
+        Box::new(em04a_big_file),
+    );
+    let target = 449_999;
+    let b = em04a_broker(&fx, "em04a-a614", Some(target), Some(300_000));
+    let started = std::time::Instant::now();
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("proj", "read", "em04a-a614-000001", |l| {
+            l.max_turns = Some(60);
+            l.max_tool_calls = Some(200);
+            l.max_tool_result_bytes = Some(8 * 1024 * 1024);
+        }),
+        900,
+    );
+    let wall = started.elapsed();
+    assert_eq!(
+        run.state, "completed",
+        "{:?} {:?}",
+        run.error_code, run.error_message
+    );
+    assert_eq!(run.tool_calls, 55);
+    let max = *sizes.lock().unwrap().iter().max().unwrap();
+    let limit = target - nexus_broker::engine::muse_v1::SIGNALS_TOOL_RESERVE_BYTES;
+    println!(
+        "EM-04A A614 max request bytes {max} (limit {limit}; with the signals tool {}); wall {:.2}s; compactions {}",
+        max + nexus_broker::engine::muse_v1::SIGNALS_TOOL_RESERVE_BYTES,
+        wall.as_secs_f64(),
+        run.context_compactions
+    );
+    assert!(max <= limit, "{max} > {limit}");
+    assert!(max + nexus_broker::engine::muse_v1::SIGNALS_TOOL_RESERVE_BYTES < 450_000);
+    for body in fx.provider.bodies.lock().unwrap().iter() {
+        assert!(em04a_pairs_intact(body));
+        assert_eq!(
+            body["input"][0]["role"], "user",
+            "the task message is never removed"
+        );
+        assert_eq!(body["reasoning"]["effort"], "low");
+    }
+    b.shutdown();
+}
+
+/// A request that cannot fit is never sent: explicit failure before dispatch.
+#[test]
+fn em04a_a_request_that_cannot_fit_the_budget_fails_before_dispatch() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(em03_responder(2));
+    let b = em04a_broker(&fx, "em04a-tiny", Some(1_000), None);
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "read src/lib.rs", "em04a-tiny-000001", |_| {}),
+        120,
+    );
+    assert_eq!(run.state, "failed", "{run:?}");
+    assert_eq!(run.error_code.as_deref(), Some("request-budget-exceeded"));
+    assert!(run
+        .error_message
+        .clone()
+        .unwrap_or_default()
+        .contains("nothing was sent"));
+    assert!(
+        fx.provider.bodies.lock().unwrap().is_empty(),
+        "no provider request"
+    );
+    let task = run.task_instance_id.clone().unwrap();
+    assert!(em03_receipts(&fx, &task).is_empty(), "no Kernel acceptance");
+    // the shadow engine's reserve larger than the budget: refused the same way
+    let fx = em04a_fixture(em03_responder(2), false, Box::new(|_| {}));
+    let b2 = em04a_broker(&fx, "em04a-reserve", Some(2_000), None);
+    let run = submit_wait(
+        b2.socket_path(),
+        &code_intent_for("other", "read src/lib.rs", "em04a-resv-000001", |_| {}),
+        120,
+    );
+    assert_eq!(run.error_code.as_deref(), Some("request-budget-exceeded"));
+    assert!(fx.provider.bodies.lock().unwrap().is_empty());
+    b2.shutdown();
+    b.shutdown();
+}
+
+/// Budget active + a lost provider answer: the retry is a new attempt prepared under the same
+/// budget; every request fits, stays paired, and nothing is sent twice by the Kernel.
+#[test]
+fn em04a_a_lost_answer_under_the_budget_is_retried_within_it() {
+    if !sandbox_ready() {
+        return;
+    }
+    let sizes: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+    // 7 reads (below muse-v0's report-nudge threshold of 8 tool calls); request 6 is lost
+    let inner = em04a_long_reads(sizes.clone(), 7);
+    let responder: Responder = Arc::new(move |n, body| {
+        if n == 5 {
+            return Answer::Close;
+        }
+        inner(if n > 5 { n - 1 } else { n }, body)
+    });
+    let fx = fixture_inner(responder, Box::new(em04a_big_file), &[], true, true);
+    let budget = 110_000;
+    let b = em04a_broker(&fx, "em04a-retry", Some(budget), None);
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("proj", "read", "em04a-retry-00001", |l| {
+            l.max_turns = Some(30);
+            l.max_tool_result_bytes = Some(8 * 1024 * 1024);
+        }),
+        300,
+    );
+    assert_eq!(
+        run.state, "completed",
+        "{:?} {:?}",
+        run.error_code, run.error_message
+    );
+    assert_eq!(run.recoveries, 1);
+    assert!(
+        run.context_compactions >= 1,
+        "the budget reduced the conversation"
+    );
+    let bodies = fx.provider.bodies.lock().unwrap().clone();
+    for x in &bodies {
+        assert!(x.to_string().len() <= budget, "{}", x.to_string().len());
+        assert!(em04a_pairs_intact(x));
+    }
+    let task = run.task_instance_id.clone().unwrap();
+    let receipts = em03_receipts(&fx, &task);
+    let cmds: std::collections::BTreeSet<&str> = receipts
+        .iter()
+        .map(|r| r["commandId"].as_str().unwrap())
+        .collect();
+    assert_eq!(cmds.len(), receipts.len(), "no command dispatched twice");
+    assert_eq!(receipts.len(), bodies.len());
+    b.shutdown();
+}
+
+/// The shadow state is durable: a crash mid-run, a broker restart and the user's continuation.
+/// The continuation inherits the cognitive state and the decision history, restarts its
+/// observation frontier and effort, and still never changes a request.
+#[test]
+fn em04a_the_shadow_state_survives_a_crash_restart_and_continuation() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = em04a_fixture(em04a_effort_script(), true, Box::new(|_| {}));
+    let b = em04a_broker(&fx, "em04a-crash", None, None);
+    let key = "em04a-crash-00001";
+    nexus_broker::engine::test_faults::arm_nth(key, "after-answer", 3);
+    let first = ic::submit(
+        b.socket_path(),
+        &code_intent_for("other", "read src/lib.rs", key, |_| {}),
+    )
+    .expect("submit")
+    .run;
+    let first = wait_terminal(b.socket_path(), &first.run_id, 180);
+    assert!(first.terminal && first.state != "completed", "{first:?}");
+    let old_requests = fx.provider.bodies.lock().unwrap().len();
+    b.shutdown();
+    let b = em04a_broker(&fx, "em04a-crash", None, None);
+    let old_task = first.task_instance_id.clone().unwrap();
+    let old = em03_state(&fx, "em04a-crash", &old_task);
+    let v = ic::resume(b.socket_path(), &first.run_id).expect("resume");
+    let second_id = v["run"]["runId"].as_str().unwrap().to_owned();
+    let second = wait_terminal(b.socket_path(), &second_id, 240);
+    assert_eq!(second.state, "completed", "{second:?}");
+    let new = em03_state(
+        &fx,
+        "em04a-crash",
+        &second.task_instance_id.clone().unwrap(),
+    );
+    assert_eq!(new["lineage"]["rule"], "inherited");
+    let (oh, nh) = (em04a_history(&old), em04a_history(&new));
+    let old_evals = old["payload"]["evaluations"].as_u64().unwrap();
+    assert!(old_evals >= 2);
+    let new_requests = fx.provider.bodies.lock().unwrap().len() - old_requests;
+    assert_eq!(
+        new["payload"]["evaluations"].as_u64().unwrap(),
+        old_evals + new_requests as u64,
+        "the count continues across the continuation"
+    );
+    // the newest old decisions are still in the inherited history
+    let kept = oh.last().unwrap();
+    assert!(nh.contains(kept) || nh.len() == 8, "{nh:?}");
+    assert_ne!(
+        new["payload"]["chain"], old["payload"]["chain"],
+        "the chain continues"
+    );
+    // the inherited evidence: the failed check of the crashed run is still known
+    let rev = |v: &Value| {
+        v["payload"]["museActivity"]["revision"]
+            .as_u64()
+            .unwrap_or(0)
+    };
+    assert!(rev(&new) >= rev(&old));
+    // every request of both runs at the pinned effort; no selection anywhere
+    for x in fx.provider.bodies.lock().unwrap().iter() {
+        assert_eq!(x["reasoning"]["effort"], "low");
+    }
+    for st in [&old, &new] {
+        assert!(!events(st).iter().any(|e| e.0 == "effort-selected"));
+    }
+    b.shutdown();
+}
+
+/// MEASUREMENT (explicit: `--ignored --nocapture em04a_measure_a614`): A614's 55-read loop in four
+/// configurations on the same fixture type, two alternating rounds. Also proves that an active
+/// budget that is not needed changes no request byte (muse-v0 with and without the budget).
+#[test]
+#[ignore]
+fn em04a_measure_a614_configurations() {
+    if !sandbox_ready() {
+        return;
+    }
+    let configs: [(&str, Option<usize>); 4] = [
+        ("muse-v0", None),
+        ("muse-v0", Some(449_999)),
+        (SHADOW, None),
+        (SHADOW, Some(449_999)),
+    ];
+    let mut bodies_by_config: Vec<Vec<String>> = vec![Vec::new(); 4];
+    for round in 0..2 {
+        for (i, (engine, budget)) in configs.iter().enumerate() {
+            let sizes: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+            let fx = fixture_engine_with(
+                em04a_long_reads(sizes.clone(), 55),
+                engine,
+                Box::new(em04a_big_file),
+            );
+            let name = format!("m{round}{i}");
+            let b = em04a_broker(&fx, &name, *budget, Some(300_000));
+            let t = std::time::Instant::now();
+            let run = submit_wait(
+                b.socket_path(),
+                &code_intent_for("proj", "read", &format!("em04a-meas-{round}{i}-00"), |l| {
+                    l.max_turns = Some(60);
+                    l.max_tool_calls = Some(200);
+                    l.max_tool_result_bytes = Some(8 * 1024 * 1024);
+                }),
+                900,
+            );
+            let wall = t.elapsed().as_secs_f64();
+            assert_eq!(run.state, "completed");
+            let max = *sizes.lock().unwrap().iter().max().unwrap();
+            println!(
+                "EM-04A A614 round {round} engine {engine:>14} budget {:>8}: wall {wall:6.2}s max {max} requests {} compactions {}",
+                budget.map(|b| b.to_string()).unwrap_or_else(|| "none".into()),
+                sizes.lock().unwrap().len(),
+                run.context_compactions
+            );
+            if round == 0 {
+                bodies_by_config[i] = fx
+                    .provider
+                    .bodies
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|x| x.to_string())
+                    .collect();
+            }
+            b.shutdown();
+        }
+    }
+    assert_eq!(
+        bodies_by_config[0], bodies_by_config[1],
+        "an unneeded budget changes no request byte"
+    );
 }

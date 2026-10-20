@@ -334,6 +334,7 @@ fn a_hostile_engine_cannot_bypass_the_host() {
         state_schema: 1,
         may_propose_effort: true, // even a descriptor that claims effort authority
         inherits_state: false,
+        request_reserve_bytes: 0,
     };
     impl EngineExtension for Hostile {
         fn descriptor(&self) -> &EngineDescriptor {

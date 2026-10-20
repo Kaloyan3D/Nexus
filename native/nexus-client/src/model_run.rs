@@ -95,6 +95,8 @@ pub struct PreparedModelRun {
     pub logical_model_id: String,
     pub extension_digest: String,
     pub output_limit_tokens: u64,
+    /// EM-04A: exact length of the serialized provider request (the bytes the digest covers).
+    pub request_bytes: usize,
 }
 
 /// Explicit executor configuration. Paths only; never secret values.
@@ -426,6 +428,7 @@ pub fn prepare_model_run(req: &ModelRunRequest) -> Result<PreparedModelRun, Clie
         logical_model_id: b.target.core.logical_model_id.clone(),
         extension_digest: b.target.extension_digest(),
         output_limit_tokens: b.target.output_limit_tokens,
+        request_bytes: prepared.request_bytes.len(),
     })
 }
 

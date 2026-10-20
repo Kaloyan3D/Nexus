@@ -1164,6 +1164,13 @@ pub(crate) fn run(
             )
         })
         .map_err(|e| discard(se(e.code, e.message)))?;
+    // EM-04A: only the shadow Governor engine is lent the historical Muse policy (a bounded,
+    // pure Node bridge); every other engine runs exactly as in EM-03.
+    if engine.descriptor().engine_id == crate::engine::muse_v1::ENGINE_ID {
+        engine_run.env.governor = Some(std::sync::Arc::new(
+            crate::engine::governor_bridge::NodeGovernorBridge::new(b.node_abs.clone()),
+        ));
+    }
 
     let opts = ModelRunOptions {
         cap_path: b.cfg.cap_path.clone(),
@@ -1333,6 +1340,8 @@ struct LoopState {
     /// Provider interruptions recovered from (autonomy-first refactor).
     recoveries: u32,
     activity: Vec<ToolActivity>,
+    /// EM-04A: trusted activity observations derived from `activity` receipts (engine feed).
+    observations: Vec<crate::engine::ActivityObservation>,
     turns: u32,
     tool_calls: u32,
     result_bytes: u64,
@@ -1609,7 +1618,53 @@ fn engine_snapshot(
             .unwrap_or(sh.task_target.default_effort())
             .to_owned(),
         authorized_efforts: sh.task_target.binding.supported_reasoning.clone(),
+        generation: sh.task_instance.to_owned(),
+        activity: ls.observations.clone(),
     }
+}
+
+/// EM-04A: the trusted observation an executed tool call yields, from the Core's own receipt
+/// (status, Kernel execution id, Native verification verdict) - never from model text. Refused,
+/// failed, uncertain or cancelled calls, reads and non-verification commands yield none.
+pub(crate) fn observe(
+    act: &ToolActivity,
+    verification_command: bool,
+    attempt: u32,
+    generation: &str,
+) -> Option<crate::engine::ActivityObservation> {
+    use crate::engine::{ObservationKind, VerificationOutcome};
+    if act.status != "executed" {
+        return None;
+    }
+    let execution_id = act.execution_id.clone().filter(|e| !e.is_empty())?;
+    let kind = match act.tool.as_str() {
+        "fs_write" | "fs_edit" => ObservationKind::Mutation,
+        "proc_run" if verification_command => ObservationKind::Verification {
+            outcome: match act.verification.as_deref() {
+                Some("pass") => VerificationOutcome::Passed,
+                Some("fail") => VerificationOutcome::Failed,
+                Some("unverified") => VerificationOutcome::Started,
+                _ => return None,
+            },
+            family: act
+                .args_summary
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                .take(32)
+                .collect(),
+        },
+        _ => return None,
+    };
+    Some(crate::engine::ActivityObservation {
+        seq: act.index,
+        attempt,
+        generation: generation.to_owned(),
+        execution_id,
+        kind,
+    })
 }
 
 /// EM-03 TEST-ONLY crash point (feature `test-engines`; a no-op in production builds).
@@ -1995,8 +2050,50 @@ fn turn_loop(
                 }),
             max_output_tokens: turn_cap,
         };
-        let prepared = nexus_client::prepare_inspect_turn(&req, &items, sh.mode.profile())
+        let mut prepared = nexus_client::prepare_inspect_turn(&req, &items, sh.mode.profile())
             .map_err(|e| se("prepare-refused", e.message))?;
+        // EM-04A RequestBudgetV1 (opt-in; never configured in production): the EXACT serialized
+        // request must fit the budget minus the engine's measured reserve. Reduced only at safe
+        // item boundaries, re-prepared and re-checked; otherwise nothing is sent.
+        if let Some(target_bytes) = b.cfg.request_budget_bytes {
+            let budget = crate::request_budget::RequestBudget {
+                target_bytes,
+                reserve_bytes: er.host.extension().descriptor().request_reserve_bytes,
+            };
+            let Some(limit) = budget.limit() else {
+                return Ok(LoopEnd::Failed(
+                    "request-budget-exceeded".into(),
+                    "the engine's reserved request bytes exceed the request budget; nothing was sent".into(),
+                ));
+            };
+            match crate::request_budget::fit(&mut items, prepared.request_bytes, limit) {
+                Err(e) => {
+                    return Ok(LoopEnd::Failed(
+                        "request-budget-exceeded".into(),
+                        e.message(),
+                    ))
+                }
+                Ok(report) if report.changed() => {
+                    prepared = nexus_client::prepare_inspect_turn(&req, &items, sh.mode.profile())
+                        .map_err(|e| se("prepare-refused", e.message))?;
+                    if prepared.request_bytes != report.request_bytes_after
+                        || prepared.request_bytes > limit
+                    {
+                        return Ok(LoopEnd::Failed(
+                            "request-budget-exceeded".into(),
+                            format!(
+                                "the reduced request measured {} bytes (budget {limit}); nothing was sent",
+                                prepared.request_bytes
+                            ),
+                        ));
+                    }
+                    ls.compactions += 1;
+                    let n = ls.compactions;
+                    b.update(ctx.run_id, |r| r.context_compactions = n);
+                }
+                Ok(_) => {}
+            }
+        }
         // EM-03 write-ahead: the attempt -> target association (and every accepted proposal
         // so far) is durable BEFORE the attempt is published and dispatched.
         let issuance_id = attempt_target
@@ -2366,6 +2463,7 @@ fn turn_loop(
             } else {
                 args_text.clone()
             };
+            let mut pending_observation = None;
             let mut act = ToolActivity {
                 index: idx,
                 turn,
@@ -2578,6 +2676,13 @@ fn turn_loop(
                                     }
                                     record_evidence(&mut evidence, p.model_name, &p.args, &result);
                                     record_receipts(ls, &mut act, &cp, &result);
+                                    pending_observation = observe(
+                                        &act,
+                                        p.model_name == "proc_run"
+                                            && is_verification_command(&p.args),
+                                        dispatches,
+                                        sh.task_instance,
+                                    );
                                     r
                                 }
                                 Err(e) => 'arm: {
@@ -2712,6 +2817,7 @@ fn turn_loop(
                 call_id: call_id.clone(),
                 output: rendered.text.clone(),
             });
+            ls.observations.extend(pending_observation);
             ls.activity.push(act);
             ctx.progress(ls, "tool-running");
             if refusals_in_a_row
@@ -2964,7 +3070,7 @@ fn record_receipts(ls: &mut LoopState, act: &mut ToolActivity, cp: &CodeProposal
 }
 
 /// Does this `proc_run` verify the work (tests, type-check, build, lint) rather than merely run?
-fn is_verification_command(args: &Value) -> bool {
+pub(crate) fn is_verification_command(args: &Value) -> bool {
     let prog = args.get("program").and_then(|v| v.as_str()).unwrap_or("");
     let argv: Vec<&str> = args
         .get("args")

@@ -182,6 +182,11 @@ pub struct BrokerConfig {
     /// A6.1.4: override of the conversation budget (bytes) before older steps are
     /// compacted. `None` = the built-in default. Tests and tuning only.
     pub context_budget_bytes: Option<usize>,
+    /// EM-04A RequestBudgetV1: ceiling (bytes) of one serialized provider request, measured on
+    /// the exact wire bytes. `None` (the default and every production configuration) = no
+    /// request budget: requests are byte-identical to EM-03. Tests and the future mode-level
+    /// activation (EM-04B) only.
+    pub request_budget_bytes: Option<usize>,
 }
 
 impl BrokerConfig {

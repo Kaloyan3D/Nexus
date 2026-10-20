@@ -1,0 +1,754 @@
+//! `muse-v1-shadow` (EM-04A): the historical Muse Reasoning Governor in SHADOW mode.
+//!
+//! What it does:
+//! * its strategy (guidance, finish) is `muse-v0`'s, delegated decision for decision, so a run
+//!   under `muse-v1-shadow` behaves exactly like one under `muse-v0`;
+//! * before every request it folds the run's NEW trusted activity observations (Core receipts:
+//!   verified mutations and verification outcomes) into the historical `museActivity` block and
+//!   asks the historical Governor, through the Runtime's own per-request seam, which effort the next
+//!   attempt would get - against the task binding's authorized levels as capabilities;
+//! * it records that decision (deterministic evidence, bounded history) in its versioned EM-03
+//!   engine state - and NEVER applies it: the proposal is always `KeepPinned`, its descriptor says
+//!   `may_propose_effort: false` (the host would refuse a change anyway), and the provider request
+//!   carries the pinned effort.
+//!
+//! It is not selectable in production (`MUSE_V1_PRODUCTION_ENABLED = false`): only `test-engines`
+//! builds register it, and only a fixture Registry mode can issue it.
+//!
+//! State ownership: the historical `museReasoning` / `museActivity` blocks live in this engine's
+//! payload (`<state>/engine/<task>.json`, HMAC-authenticated, revisioned), never in a DSH
+//! routing-state file. In EM-04A there is no signals tool, so the SEMANTIC fields (phase,
+//! establishment flags, failure counters, conflict, max request) can never change: the transition
+//! rule refuses it. Only the trusted activity block, the resolution diagnostics and this engine's
+//! own bookkeeping move.
+
+use super::governor_bridge::{sources_digest, BridgeError};
+use super::muse_v0::{MuseV0State, MUSE_V0};
+use super::{
+    EffortProposal, EngineDescriptor, EngineEnv, EngineExtension, EngineProposal, EngineSnapshot,
+    EngineState, EngineStateData, Hook, ObservationKind,
+};
+use serde_json::{json, Value};
+
+/// The shadow engine's Registry id. `muse-v1` itself stays reserved for the ACTIVE Governor
+/// engine (EM-04B/C), which this one is not.
+pub const ENGINE_ID: &str = "muse-v1-shadow";
+
+/// Exact wire bytes of the future `muse_update_reasoning_state` tool in the request's `tools`
+/// array, including its separator: measured from `config/Muse-ReasoningSignals.cjs` (9 properties,
+/// 1,174-character description) in the Native definition format. Re-measured by a test.
+pub const SIGNALS_TOOL_RESERVE_BYTES: usize = 2_882;
+
+/// The historical Governor ladder (unchanged; `low` is NOT part of it).
+pub const MUSE_LADDER: [&str; 4] = ["medium", "high", "xhigh", "max"];
+pub const MUSE_PHASES: [&str; 7] = [
+    "discover",
+    "diagnose",
+    "design",
+    "implement",
+    "verify",
+    "recover",
+    "review",
+];
+
+/// Kernel execution ids remembered for replay refusal.
+pub const MAX_SEEN_EXECUTIONS: usize = 64;
+/// Shadow decisions kept (newest last).
+pub const MAX_DECISION_HISTORY: usize = 8;
+
+pub static MUSE_V1: MuseV1 = MuseV1 {
+    descriptor: EngineDescriptor {
+        engine_id: ENGINE_ID,
+        contract_version: super::ENGINE_CONTRACT_VERSION,
+        mode_ids: &["engineering-v2"],
+        roles: &["muse_main"],
+        state_schema: 1,
+        // SHADOW: the Governor's proposal is observed, never applied
+        may_propose_effort: false,
+        // the cognitive state continues with the task (see `restore_state`)
+        inherits_state: true,
+        // room for the future signals tool, so EM-04B adds no request bytes the budget did not hold
+        request_reserve_bytes: SIGNALS_TOOL_RESERVE_BYTES,
+    },
+};
+
+pub struct MuseV1 {
+    descriptor: EngineDescriptor,
+}
+
+/// One shadow evaluation (what the Governor decided for an attempt, and what was really used).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShadowDecision {
+    /// The model attempt the decision is for (1-based).
+    pub attempt: u32,
+    /// `resolved` | `capability-unavailable` | a bridge error code (`bridge-unavailable`, ...).
+    pub outcome: String,
+    /// The Governor's effort after its own downward-only capability clamp (historical ladder).
+    pub governor_effort: Option<String>,
+    /// The effort the Governor's policy asked for before the clamp.
+    pub requested: Option<String>,
+    pub reason: Option<String>,
+    pub effective_phase: Option<String>,
+    pub effective_source: Option<String>,
+    pub trace: Vec<String>,
+    /// The effort that attempt actually carries (always the authorized effort in force).
+    pub in_force: String,
+    /// What an ACTIVE Governor would propose: `keep` or `change:<level>` (never applied here).
+    pub would: String,
+    /// Observations folded by this evaluation.
+    pub folded: u32,
+    /// Observations offered that were refused (another generation, replayed or stale).
+    pub refused: u32,
+    /// SHA-256 over the embedded sources, the bridge input and its output.
+    pub evidence: String,
+}
+
+/// Engine state: `muse-v0`'s strategy counters plus the historical Muse blocks and the shadow
+/// bookkeeping.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MuseV1State {
+    pub v0: MuseV0State,
+    /// Historical `museReasoning` block (None until the first resolution).
+    pub reasoning: Option<Value>,
+    /// Historical `museActivity` block (None until the first observation).
+    pub activity: Option<Value>,
+    /// Task generation the observation frontier belongs to.
+    pub generation: String,
+    /// Highest observation `seq` folded in `generation`.
+    pub observed_through: u32,
+    /// Kernel execution ids folded (bounded, oldest dropped first).
+    pub seen: Vec<String>,
+    /// Shadow evaluations so far (across generations).
+    pub evaluations: u32,
+    pub history: Vec<ShadowDecision>,
+    /// Hash chain over EVERY decision's evidence (`sha256(previous chain || evidence)`), so the
+    /// full sequence stays verifiable by replay although only the newest decisions are kept.
+    pub chain: String,
+}
+
+impl MuseV1State {
+    pub(super) fn encoded_len(&self) -> usize {
+        persisted(self).to_string().len()
+    }
+}
+
+fn v0_state(v0: &MuseV0State, like: &EngineState) -> EngineState {
+    EngineState {
+        engine_id: MUSE_V0.descriptor().engine_id,
+        schema: MUSE_V0.descriptor().state_schema,
+        revision: like.revision,
+        data: EngineStateData::MuseV0(v0.clone()),
+    }
+}
+
+fn data(s: &EngineState) -> Option<&MuseV1State> {
+    match &s.data {
+        EngineStateData::MuseV1(d) => Some(d),
+        _ => None,
+    }
+}
+
+fn decision_json(d: &ShadowDecision) -> Value {
+    json!({
+        "attempt": d.attempt, "outcome": d.outcome, "governorEffort": d.governor_effort,
+        "requested": d.requested, "reason": d.reason, "effectivePhase": d.effective_phase,
+        "effectiveSource": d.effective_source, "trace": d.trace, "inForce": d.in_force,
+        "would": d.would, "folded": d.folded, "refused": d.refused, "evidence": d.evidence,
+    })
+}
+
+/// The decision chain after `d` (see `MuseV1State::chain`).
+pub(crate) fn extend_chain(previous: &str, d: &ShadowDecision) -> String {
+    nexus_contracts::sha256_hex(&format!(
+        "{previous}\n{}",
+        nexus_contracts::canonical_json(&decision_json(d))
+    ))
+}
+
+fn decision_from(v: &Value) -> Option<ShadowDecision> {
+    let o = v.as_object()?;
+    let allowed = [
+        "attempt",
+        "outcome",
+        "governorEffort",
+        "requested",
+        "reason",
+        "effectivePhase",
+        "effectiveSource",
+        "trace",
+        "inForce",
+        "would",
+        "folded",
+        "refused",
+        "evidence",
+    ];
+    if o.keys().any(|k| !allowed.contains(&k.as_str())) {
+        return None;
+    }
+    let opt = |k: &str| -> Option<Option<String>> {
+        match o.get(k)? {
+            Value::Null => Some(None),
+            Value::String(s) if s.len() <= 64 => Some(Some(s.clone())),
+            _ => None,
+        }
+    };
+    let s = |k: &str| {
+        o.get(k)?
+            .as_str()
+            .filter(|x| x.len() <= 64)
+            .map(str::to_owned)
+    };
+    let u = |k: &str| o.get(k)?.as_u64().and_then(|x| u32::try_from(x).ok());
+    let trace: Vec<String> = o
+        .get("trace")?
+        .as_array()?
+        .iter()
+        .map(|t| t.as_str().filter(|x| x.len() <= 160).map(str::to_owned))
+        .collect::<Option<_>>()?;
+    if trace.len() > 8 {
+        return None;
+    }
+    Some(ShadowDecision {
+        attempt: u("attempt")?,
+        outcome: s("outcome")?,
+        governor_effort: opt("governorEffort")?,
+        requested: opt("requested")?,
+        reason: opt("reason")?,
+        effective_phase: opt("effectivePhase")?,
+        effective_source: opt("effectiveSource")?,
+        trace,
+        in_force: s("inForce")?,
+        would: s("would")?,
+        folded: u("folded")?,
+        refused: u("refused")?,
+        evidence: s("evidence")?,
+    })
+}
+
+fn persisted(s: &MuseV1State) -> Value {
+    json!({
+        "v0": MUSE_V0.persist_state(&EngineState {
+            engine_id: MUSE_V0.descriptor().engine_id,
+            schema: 1,
+            revision: 0,
+            data: EngineStateData::MuseV0(s.v0.clone()),
+        }),
+        "museReasoning": s.reasoning,
+        "museActivity": s.activity,
+        "generation": s.generation,
+        "observedThrough": s.observed_through,
+        "seen": s.seen,
+        "evaluations": s.evaluations,
+        "history": s.history.iter().map(decision_json).collect::<Vec<_>>(),
+        "chain": s.chain,
+        "sourcesDigest": sources_digest(),
+    })
+}
+
+// ---- validation of the historical blocks (Rust side; the bridge validates them again) -------
+
+const SEMANTIC_FIELDS: [&str; 10] = [
+    "phase",
+    "rootCauseEstablished",
+    "solutionEstablished",
+    "failedHypotheses",
+    "failedImplementationAttempts",
+    "totalFailedHypotheses",
+    "totalFailedImplementationAttempts",
+    "conflictingEvidence",
+    "requestMax",
+    "processedSignalIds",
+];
+
+/// A structurally valid historical `museReasoning` block.
+pub fn valid_reasoning_block(v: &Value) -> bool {
+    let Some(o) = v.as_object() else { return false };
+    let allowed: Vec<&str> = SEMANTIC_FIELDS
+        .iter()
+        .copied()
+        .chain(["currentEffort", "lastResolution"])
+        .collect();
+    if o.keys().any(|k| !allowed.contains(&k.as_str())) {
+        return false;
+    }
+    let phase_ok = o
+        .get("phase")
+        .and_then(Value::as_str)
+        .is_some_and(|p| MUSE_PHASES.contains(&p));
+    let counters_ok = [
+        "failedHypotheses",
+        "failedImplementationAttempts",
+        "totalFailedHypotheses",
+        "totalFailedImplementationAttempts",
+    ]
+    .iter()
+    .all(|k| {
+        o.get(*k)
+            .and_then(Value::as_u64)
+            .is_some_and(|n| n < 1_000_000)
+    });
+    let flags_ok = [
+        "rootCauseEstablished",
+        "solutionEstablished",
+        "conflictingEvidence",
+        "requestMax",
+    ]
+    .iter()
+    .all(|k| o.get(*k).is_some_and(Value::is_boolean));
+    let effort_ok = match o.get("currentEffort") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(e)) => MUSE_LADDER.contains(&e.as_str()),
+        _ => false,
+    };
+    let signals_ok = match o.get("processedSignalIds") {
+        None => true,
+        Some(Value::Array(a)) => {
+            a.len() <= 100 && a.iter().all(|x| x.as_str().is_some_and(|s| s.len() <= 128))
+        }
+        _ => false,
+    };
+    let last_ok = match o.get("lastResolution") {
+        None | Some(Value::Null) => true,
+        Some(Value::Object(l)) => {
+            l.len() <= 12 && Value::Object(l.clone()).to_string().len() <= 2048
+        }
+        _ => false,
+    };
+    phase_ok && counters_ok && flags_ok && effort_ok && signals_ok && last_ok
+}
+
+/// A structurally valid historical `museActivity` block (schema 1).
+pub fn valid_activity_block(v: &Value) -> bool {
+    let Some(o) = v.as_object() else { return false };
+    let allowed = [
+        "schemaVersion",
+        "revision",
+        "semanticRevision",
+        "lastMutationRevision",
+        "mutationCount",
+        "verification",
+    ];
+    if o.len() != allowed.len() || o.keys().any(|k| !allowed.contains(&k.as_str())) {
+        return false;
+    }
+    let n = |k: &str| o.get(k).and_then(Value::as_u64);
+    let Some(rev) = n("revision") else {
+        return false;
+    };
+    let ok = o.get("schemaVersion") == Some(&json!(1))
+        && n("semanticRevision").is_some_and(|x| x <= rev)
+        && n("lastMutationRevision").is_some_and(|x| x <= rev)
+        && n("mutationCount").is_some();
+    let Some(ver) = o.get("verification").and_then(Value::as_object) else {
+        return false;
+    };
+    let ver_ok = ver.len() == 3
+        && ver
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|s| ["none", "started", "passed", "failed"].contains(&s))
+        && ver
+            .get("revision")
+            .and_then(Value::as_u64)
+            .is_some_and(|x| x <= rev)
+        && match ver.get("family") {
+            Some(Value::Null) => true,
+            Some(Value::String(f)) => f.len() <= 64,
+            _ => false,
+        };
+    ok && ver_ok
+}
+
+fn semantic_of(block: &Option<Value>) -> Value {
+    // the historical initial state (discover, nothing established) when no block exists yet
+    let base = json!({
+        "phase": "discover", "rootCauseEstablished": false, "solutionEstablished": false,
+        "failedHypotheses": 0, "failedImplementationAttempts": 0, "totalFailedHypotheses": 0,
+        "totalFailedImplementationAttempts": 0, "conflictingEvidence": false, "requestMax": false,
+        "processedSignalIds": [],
+    });
+    let mut out = serde_json::Map::new();
+    for k in SEMANTIC_FIELDS {
+        let v = block
+            .as_ref()
+            .and_then(|b| b.get(k))
+            .cloned()
+            .unwrap_or_else(|| base[k].clone());
+        out.insert(k.to_owned(), v);
+    }
+    Value::Object(out)
+}
+
+pub(crate) fn classification(kind: &ObservationKind) -> Value {
+    match kind {
+        ObservationKind::Mutation => json!({ "kind": "mutation" }),
+        ObservationKind::Verification { outcome, family } => json!({
+            "kind": "verification", "outcome": outcome.as_str(), "family": format!("native:{family}"),
+        }),
+    }
+}
+
+/// The shadow evaluation at `BeforeRequest`: fold the new trusted observations, resolve, record.
+fn evaluate(s: &mut MuseV1State, snap: &EngineSnapshot, env: &EngineEnv) {
+    if s.generation != snap.generation {
+        // a new task generation (continuation): its observations start at seq 1 again
+        s.generation = snap.generation.clone();
+        s.observed_through = 0;
+    }
+    let mut fresh = Vec::new();
+    let mut refused = 0u32;
+    let mut last_seq = s.observed_through;
+    for o in &snap.activity {
+        let acceptable = o.generation == s.generation
+            && o.seq > last_seq
+            && !s.seen.contains(&o.execution_id)
+            && !fresh
+                .iter()
+                .any(|(_, id): &(Value, String)| *id == o.execution_id);
+        if acceptable {
+            last_seq = o.seq;
+            fresh.push((classification(&o.kind), o.execution_id.clone()));
+        } else if o.seq > s.observed_through || o.generation != s.generation {
+            // anything not already folded that cannot be folded: forged, replayed or foreign
+            refused += 1;
+        }
+    }
+    let args = json!({
+        "museReasoning": s.reasoning,
+        "museActivity": s.activity,
+        "events": fresh.iter().map(|(c, _)| json!({"type": "activity", "classification": c})).collect::<Vec<_>>(),
+        "capabilities": snap.authorized_efforts,
+        "resolve": true,
+    });
+    let attempt = snap.attempts_dispatched + 1;
+    let result: Result<Value, BridgeError> = match &env.governor {
+        Some(g) => g.call("evaluate", &args),
+        None => Err(BridgeError {
+            code: "bridge-unavailable".into(),
+            message: "no Governor evaluator was lent to this run".into(),
+        }),
+    };
+    let mut d = ShadowDecision {
+        attempt,
+        in_force: snap.current_effort.clone(),
+        would: "keep".into(),
+        refused,
+        ..Default::default()
+    };
+    match result {
+        // the answer must be well-formed, and folding observations must have produced evidence
+        Ok(r)
+            if (r["museReasoning"].is_null() || valid_reasoning_block(&r["museReasoning"]))
+                && (r["museActivity"].is_null() || valid_activity_block(&r["museActivity"]))
+                && (fresh.is_empty() || !r["museActivity"].is_null()) =>
+        {
+            let dec = &r["decision"];
+            let st = |k: &str| {
+                dec[k]
+                    .as_str()
+                    .map(|x| x.chars().take(64).collect::<String>())
+            };
+            d.outcome = st("outcome").unwrap_or_else(|| "bridge-output-invalid".into());
+            d.requested = st("requested");
+            d.reason = st("reason");
+            d.effective_phase = st("effectivePhase");
+            d.effective_source = st("effectiveSource");
+            d.trace = dec["trace"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .take(8)
+                        .map(|t| t.chars().take(160).collect())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if d.outcome == "resolved" {
+                d.governor_effort = st("effort").filter(|e| MUSE_LADDER.contains(&e.as_str()));
+                // the ladder decision: an active Governor would propose only an authorized level,
+                // only when it differs from the effort in force; otherwise it keeps that effort
+                if let Some(e) = &d.governor_effort {
+                    if *e != snap.current_effort && snap.authorized_efforts.contains(e) {
+                        d.would = format!("change:{e}");
+                    }
+                }
+            }
+            if !r["museReasoning"].is_null() {
+                s.reasoning = Some(r["museReasoning"].clone());
+            }
+            if !r["museActivity"].is_null() {
+                s.activity = Some(r["museActivity"].clone());
+            }
+            d.folded = fresh.len() as u32;
+            s.observed_through = last_seq;
+            for (_, id) in fresh {
+                s.seen.push(id);
+            }
+            let excess = s.seen.len().saturating_sub(MAX_SEEN_EXECUTIONS);
+            s.seen.drain(..excess);
+            d.evidence = nexus_contracts::sha256_hex(&format!(
+                "{}\n{}\n{}",
+                sources_digest(),
+                nexus_contracts::canonical_json(&args),
+                nexus_contracts::canonical_json(&r)
+            ));
+        }
+        Ok(_) => {
+            d.outcome = "bridge-output-invalid".into();
+        }
+        Err(e) => {
+            // shadow: an unavailable or refusing Governor changes nothing; the observations stay
+            // unfolded (they are offered again) and the attempt keeps its authorized effort
+            d.outcome = e.code.chars().take(64).collect();
+        }
+    }
+    s.evaluations += 1;
+    s.chain = extend_chain(&s.chain, &d);
+    s.history.push(d);
+    let excess = s.history.len().saturating_sub(MAX_DECISION_HISTORY);
+    s.history.drain(..excess);
+}
+
+impl MuseV1 {
+    fn propose_with(
+        &self,
+        hook: Hook,
+        snap: &EngineSnapshot,
+        state: &EngineState,
+        proposal_id: u64,
+        env: Option<&EngineEnv>,
+    ) -> EngineProposal {
+        let mut s = data(state).cloned().unwrap_or_default();
+        // the strategy: exactly muse-v0's decision on muse-v0's counters
+        let v0 = MUSE_V0.propose(hook, snap, &v0_state(&s.v0, state), proposal_id);
+        if let EngineStateData::MuseV0(next) = v0.next_state.data {
+            s.v0 = next;
+        }
+        if hook == Hook::BeforeRequest {
+            evaluate(&mut s, snap, env.unwrap_or(&EngineEnv::default()));
+        }
+        EngineProposal {
+            proposal_id,
+            based_on_revision: state.revision,
+            action: v0.action,
+            // SHADOW: never applied
+            effort: EffortProposal::KeepPinned,
+            next_state: EngineState {
+                engine_id: self.descriptor.engine_id,
+                schema: self.descriptor.state_schema,
+                revision: state.revision + 1,
+                data: EngineStateData::MuseV1(s),
+            },
+        }
+    }
+}
+
+impl EngineExtension for MuseV1 {
+    fn descriptor(&self) -> &EngineDescriptor {
+        &self.descriptor
+    }
+
+    fn initial_state(&self) -> EngineState {
+        EngineState {
+            engine_id: self.descriptor.engine_id,
+            schema: self.descriptor.state_schema,
+            revision: 0,
+            data: EngineStateData::MuseV1(MuseV1State::default()),
+        }
+    }
+
+    fn propose(
+        &self,
+        hook: Hook,
+        snap: &EngineSnapshot,
+        state: &EngineState,
+        proposal_id: u64,
+    ) -> EngineProposal {
+        self.propose_with(hook, snap, state, proposal_id, None)
+    }
+
+    fn propose_in(
+        &self,
+        hook: Hook,
+        snap: &EngineSnapshot,
+        state: &EngineState,
+        proposal_id: u64,
+        env: &EngineEnv,
+    ) -> EngineProposal {
+        self.propose_with(hook, snap, state, proposal_id, Some(env))
+    }
+
+    fn check_transition(
+        &self,
+        from: &EngineState,
+        to: &EngineState,
+        snap: &EngineSnapshot,
+    ) -> Result<(), String> {
+        let (Some(a), Some(b)) = (data(from), data(to)) else {
+            return Err("state data of another engine".into());
+        };
+        MUSE_V0.check_transition(&v0_state(&a.v0, from), &v0_state(&b.v0, to), snap)?;
+        // no signals tool in EM-04A: the semantic Muse state cannot move at all
+        if semantic_of(&a.reasoning) != semantic_of(&b.reasoning) {
+            return Err(
+                "the semantic Muse state can only change through a validated signal".into(),
+            );
+        }
+        if let Some(r) = &b.reasoning {
+            if !valid_reasoning_block(r) {
+                return Err("invalid museReasoning block".into());
+            }
+        }
+        if let Some(x) = &b.activity {
+            if !valid_activity_block(x) {
+                return Err("invalid museActivity block".into());
+            }
+        }
+        // the observation frontier follows the Core's own feed
+        let same_generation = a.generation == b.generation;
+        if !same_generation && b.generation != snap.generation {
+            return Err("the observation frontier may only move to the run's generation".into());
+        }
+        let max_seq = snap
+            .activity
+            .iter()
+            .filter(|o| o.generation == b.generation)
+            .map(|o| o.seq)
+            .max()
+            .unwrap_or(0);
+        let floor = if same_generation {
+            a.observed_through
+        } else {
+            0
+        };
+        if b.observed_through < floor
+            || (b.observed_through > floor && b.observed_through > max_seq)
+        {
+            return Err("the observation frontier must follow the run's receipts".into());
+        }
+        // activity evidence changes only by folding NEW observations (never by replay or narration)
+        let advanced = b.observed_through > floor;
+        if a.activity != b.activity && !advanced {
+            return Err("activity evidence changed without a new trusted observation".into());
+        }
+        let rev = |x: &Option<Value>| x.as_ref().and_then(|v| v["revision"].as_u64()).unwrap_or(0);
+        if rev(&b.activity) < rev(&a.activity) {
+            return Err("activity revisions never go back".into());
+        }
+        if b.seen.len() > MAX_SEEN_EXECUTIONS || b.history.len() > MAX_DECISION_HISTORY {
+            return Err("shadow bookkeeping out of bounds".into());
+        }
+        // one evaluation at most, for the next attempt, and never an unauthorized proposal
+        if b.evaluations != a.evaluations && b.evaluations != a.evaluations + 1 {
+            return Err("at most one shadow evaluation per consultation".into());
+        }
+        if b.evaluations == a.evaluations && b.chain != a.chain {
+            return Err("the decision chain moves only with an evaluation".into());
+        }
+        if b.evaluations == a.evaluations + 1 {
+            let Some(d) = b.history.last() else {
+                return Err("an evaluation must be recorded".into());
+            };
+            if b.chain != extend_chain(&a.chain, d) {
+                return Err(
+                    "the decision chain must extend the previous one by this decision".into(),
+                );
+            }
+            if d.attempt != snap.attempts_dispatched + 1 || d.in_force != snap.current_effort {
+                return Err("a shadow decision must describe the next attempt".into());
+            }
+            if let Some(e) = &d.governor_effort {
+                if !MUSE_LADDER.contains(&e.as_str()) {
+                    return Err("the Governor effort must be on the historical ladder".into());
+                }
+            }
+            let would_ok = d.would == "keep"
+                || d.would
+                    .strip_prefix("change:")
+                    .is_some_and(|e| snap.authorized_efforts.iter().any(|l| l == e));
+            if !would_ok {
+                return Err("a shadow proposal must stay within the authorized levels".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn persist_state(&self, state: &EngineState) -> Value {
+        persisted(&data(state).cloned().unwrap_or_default())
+    }
+
+    /// A continuation inherits the cognitive state (semantic + activity blocks, shadow history);
+    /// `muse-v0`'s strategy counters start over (as under `muse-v0`), the effort in force restarts
+    /// at the default (EM-03 rule), so the historical `currentEffort` is cleared, and the
+    /// observation frontier restarts with the new generation's own receipts.
+    fn restore_state(&self, v: &Value, revision: u64) -> Option<EngineState> {
+        let o = v.as_object()?;
+        let allowed = [
+            "v0",
+            "museReasoning",
+            "museActivity",
+            "generation",
+            "observedThrough",
+            "seen",
+            "evaluations",
+            "history",
+            "chain",
+            "sourcesDigest",
+        ];
+        if o.keys().any(|k| !allowed.contains(&k.as_str())) || o.len() != allowed.len() {
+            return None;
+        }
+        let mut reasoning = match o.get("museReasoning")? {
+            Value::Null => None,
+            r if valid_reasoning_block(r) => Some(r.clone()),
+            _ => return None,
+        };
+        if let Some(Value::Object(r)) = reasoning.as_mut() {
+            r.insert("currentEffort".into(), Value::Null);
+        }
+        let activity = match o.get("museActivity")? {
+            Value::Null => None,
+            x if valid_activity_block(x) => Some(x.clone()),
+            _ => return None,
+        };
+        let seen: Vec<String> = o
+            .get("seen")?
+            .as_array()?
+            .iter()
+            .map(|x| x.as_str().filter(|s| s.len() <= 128).map(str::to_owned))
+            .collect::<Option<_>>()?;
+        let history: Vec<ShadowDecision> = o
+            .get("history")?
+            .as_array()?
+            .iter()
+            .map(decision_from)
+            .collect::<Option<_>>()?;
+        if seen.len() > MAX_SEEN_EXECUTIONS || history.len() > MAX_DECISION_HISTORY {
+            return None;
+        }
+        let chain = o.get("chain")?.as_str()?;
+        if !(chain.is_empty() || chain.len() == 64 && chain.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return None;
+        }
+        o.get("generation")?.as_str()?;
+        o.get("observedThrough")?.as_u64()?;
+        o.get("v0")?.as_object()?;
+        Some(EngineState {
+            engine_id: self.descriptor.engine_id,
+            schema: self.descriptor.state_schema,
+            revision,
+            data: EngineStateData::MuseV1(MuseV1State {
+                v0: MuseV0State::default(),
+                reasoning,
+                activity,
+                generation: String::new(),
+                observed_through: 0,
+                seen,
+                evaluations: u32::try_from(o.get("evaluations")?.as_u64()?).ok()?,
+                history,
+                chain: chain.to_owned(),
+            }),
+        })
+    }
+}

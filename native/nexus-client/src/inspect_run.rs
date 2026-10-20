@@ -89,6 +89,7 @@ pub fn prepare_inspect_turn(
         logical_model_id: b.target.core.logical_model_id.clone(),
         extension_digest: b.target.extension_digest(),
         output_limit_tokens: b.target.output_limit_tokens,
+        request_bytes: prepared.request_bytes.len(),
     })
 }
 

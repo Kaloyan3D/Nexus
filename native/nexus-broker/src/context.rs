@@ -41,6 +41,20 @@ pub fn total_bytes(items: &[InputItem]) -> usize {
     items.iter().map(size).sum()
 }
 
+/// The valid JSON stub that replaces an old tool result (the call stays; the model may re-run it).
+/// Shared with the request-size budget (`request_budget.rs`) so both write the same bytes.
+pub(crate) fn stub_output(original_bytes: usize) -> String {
+    format!(
+        "{{\"compacted\":true,\"originalBytes\":{original_bytes},\"note\":\"an older tool result was omitted to keep the conversation short; call the tool again if you need it\"}}"
+    )
+}
+
+/// An old assistant message cut at a character boundary (its phase label, if any, is kept by the
+/// caller).
+pub(crate) fn shortened(content: &str) -> String {
+    content.chars().take(240).collect::<String>() + " [shortened]"
+}
+
 fn over(items: &[InputItem], budget: usize) -> bool {
     items.len() > COMPACT_ITEMS || total_bytes(items) > budget
 }
@@ -119,20 +133,17 @@ pub fn compact(items: &mut Vec<InputItem>, receipts: &str, budget: usize) -> boo
         for i in 1..tail_start {
             match &mut items[i] {
                 InputItem::FunctionCallOutput { output, .. } if output.len() > STUB_ABOVE => {
-                    *output = format!(
-                        "{{\"compacted\":true,\"originalBytes\":{},\"note\":\"an older tool result was omitted to keep the conversation short; call the tool again if you need it\"}}",
-                        output.len()
-                    );
+                    *output = stub_output(output.len());
                     changed = true;
                 }
                 InputItem::Message { role, content }
                     if role == "assistant" && content.len() > STUB_ABOVE =>
                 {
-                    *content = content.chars().take(240).collect::<String>() + " [shortened]";
+                    *content = shortened(content);
                     changed = true;
                 }
                 InputItem::AssistantPhase { content, .. } if content.len() > STUB_ABOVE => {
-                    *content = content.chars().take(240).collect::<String>() + " [shortened]";
+                    *content = shortened(content);
                     changed = true;
                 }
                 _ => continue,

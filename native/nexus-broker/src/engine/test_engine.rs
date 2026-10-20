@@ -26,6 +26,7 @@ pub static EFFORT_TEST_V0: EffortTestV0 = EffortTestV0 {
         state_schema: 1,
         may_propose_effort: true,
         inherits_state: true,
+        request_reserve_bytes: 0,
     },
 };
 

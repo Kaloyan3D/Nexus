@@ -39,6 +39,7 @@ pub static MUSE_V0: MuseV0 = MuseV0 {
         may_propose_effort: false,
         // EM-01 behaviour: every task generation (incl. a continuation) starts from scratch
         inherits_state: false,
+        request_reserve_bytes: 0,
     },
 };
 

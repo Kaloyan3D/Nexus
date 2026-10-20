@@ -29,6 +29,7 @@ pub mod live_auth;
 pub mod pipeline;
 pub mod projects;
 pub mod recovery;
+pub mod request_budget;
 pub mod resolution;
 pub mod server;
 pub mod state_lock;

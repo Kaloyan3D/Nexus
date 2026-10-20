@@ -24,13 +24,23 @@
 //! `orchestrationEngineId`) of the run; an engine that is not built in fails closed before
 //! any provider request. Extensions are compiled in (no runtime registration).
 
+pub mod governor_bridge;
 pub mod muse_v0;
+pub mod muse_v1;
 #[cfg(feature = "test-engines")]
 pub mod test_engine;
 #[cfg(feature = "test-engines")]
 pub mod test_faults;
 
-/// Version of this contract. A change of any type below bumps it.
+/// Version of the engine contract AS PERSISTED: every EM-03 engine state record carries it, and a
+/// continuation refuses a record of another version (`engine-state-version`). It therefore changes
+/// only for an INCOMPATIBLE change of what a persisted record means: its serialized engine state,
+/// the semantics of its effort selection, attempts and events, or how a continuation interprets
+/// them. Additive Rust API evolution of the types below - new read-only snapshot fields, defaulted
+/// trait methods, new descriptor fields, capabilities lent per consultation (all EM-04A) - leaves
+/// persisted records and their recovery interpretation unchanged and does NOT bump it. Records
+/// written by EM-03 (`b5a939a`) are reopened byte for byte and continued by this build
+/// (`engine_state::em03_records_compatibility`).
 pub const ENGINE_CONTRACT_VERSION: u32 = 2;
 /// EM-03: contract v2 adds effort proposals for the NEXT attempt (within the task binding's
 /// authorized levels), durable engine state (`engine_state.rs`) and continuation inheritance.
@@ -41,6 +51,10 @@ pub const MAX_GUIDANCE_BYTES: usize = 2048;
 pub const LEGACY_NATIVE_ENGINE: &str = "muse-v0";
 /// Largest serialized engine state.
 pub const MAX_STATE_BYTES: usize = 16 * 1024;
+/// EM-04A production gate for the shadow Muse Governor engine `muse-v1-shadow`: DISABLED. With `false`
+/// the engine is compiled but not built in, so the Registry cannot select it (`engine-unavailable`)
+/// in any production build; `test-engines` builds (this crate's tests) register it.
+pub const MUSE_V1_PRODUCTION_ENABLED: bool = false;
 
 /// What an engine is and what it may ask for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +75,10 @@ pub struct EngineDescriptor {
     /// EM-03: whether a continuation inherits this engine's persisted payload (validated by the
     /// engine's `restore_state`). `false` = every task generation starts from `initial_state`.
     pub inherits_state: bool,
+    /// EM-04A: request bytes this engine's mode adds outside the conversation (a mode-scoped tool
+    /// schema), measured exactly. When a request budget is configured, the conversation may use
+    /// only `target - reserve`. 0 for every engine that adds nothing (`muse-v0`).
+    pub request_reserve_bytes: usize,
 }
 
 /// Where in the turn loop the Core consults the engine.
@@ -117,6 +135,57 @@ pub struct EngineSnapshot {
     pub current_effort: String,
     /// EM-03: the levels the task binding authorizes (TaskBindingV1.supportedReasoning).
     pub authorized_efforts: Vec<String>,
+    /// EM-04A: the task generation this run executes (identity of every observation below).
+    pub generation: String,
+    /// EM-04A: trusted activity of THIS run, in execution order: verified mutations and
+    /// verification commands, derived by the Core from its own tool receipts and the Kernel's
+    /// execution records - never from model text. Read-only for engines.
+    pub activity: Vec<ActivityObservation>,
+}
+
+/// EM-04A: one trusted operational observation (the Native counterpart of the historical Muse
+/// activity observer's classification). Built only by the Core from an executed tool's receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityObservation {
+    /// Order within the run: the tool call's index (strictly increasing, 1-based).
+    pub seq: u32,
+    /// The model attempt whose response proposed the call (1-based dispatch ordinal).
+    pub attempt: u32,
+    /// The task generation that executed it.
+    pub generation: String,
+    /// Replay identity: the Kernel execution id of the operation.
+    pub execution_id: String,
+    pub kind: ObservationKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObservationKind {
+    /// A file change the Kernel executed (`fs_write` / `fs_edit`, receipt `executed`).
+    Mutation,
+    /// A verification command (Native's own classification) and its verified outcome.
+    Verification {
+        outcome: VerificationOutcome,
+        /// The program that ran (from the closed program allow-list), informational.
+        family: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerificationOutcome {
+    /// The command ran but its status proves nothing (Native verdict `unverified`).
+    Started,
+    Passed,
+    Failed,
+}
+
+impl VerificationOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 /// What the engine asks the Core to do.
@@ -190,6 +259,8 @@ pub struct EngineState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineStateData {
     MuseV0(muse_v0::MuseV0State),
+    /// EM-04A shadow Governor engine `muse-v1-shadow` (not selectable in production).
+    MuseV1(muse_v1::MuseV1State),
     /// Test-only deterministic engine (feature `test-engines`, never in production builds).
     #[cfg(feature = "test-engines")]
     EffortTestV0(test_engine::EffortTestState),
@@ -199,6 +270,7 @@ impl EngineStateData {
     fn encoded_len(&self) -> usize {
         match self {
             Self::MuseV0(s) => s.encoded_len(),
+            Self::MuseV1(s) => s.encoded_len(),
             #[cfg(feature = "test-engines")]
             Self::EffortTestV0(s) => s.encoded_len(),
         }
@@ -215,6 +287,15 @@ pub struct EngineProposal {
     pub next_state: EngineState,
 }
 
+/// EM-04A: capabilities the Core lends an engine for ONE consultation. Each is a pure function
+/// from the engine's point of view (no handle, path, credential or side effect reaches the
+/// engine); `None` = not available to this run.
+#[derive(Clone, Default)]
+pub struct EngineEnv {
+    /// The historical Muse policy (Governor, Runtime transitions, Activity reducer).
+    pub governor: Option<std::sync::Arc<dyn governor_bridge::GovernorEvaluator>>,
+}
+
 /// An Engineering Mode extension. Implementations are pure with respect to the Core: they see
 /// a snapshot and their own state and return a proposal; they hold no handles.
 pub trait EngineExtension: Send + Sync {
@@ -229,6 +310,18 @@ pub trait EngineExtension: Send + Sync {
         state: &EngineState,
         proposal_id: u64,
     ) -> EngineProposal;
+    /// EM-04A: `propose` with the capabilities lent for this consultation. Engines that need
+    /// none keep the default (identical to `propose`).
+    fn propose_in(
+        &self,
+        hook: Hook,
+        snapshot: &EngineSnapshot,
+        state: &EngineState,
+        proposal_id: u64,
+        _env: &EngineEnv,
+    ) -> EngineProposal {
+        self.propose(hook, snapshot, state, proposal_id)
+    }
     /// Engine-specific transition rules, checked by the host before a state is committed.
     fn check_transition(
         &self,
@@ -263,10 +356,19 @@ fn refuse(code: &'static str, message: impl Into<String>) -> EngineRefusal {
 /// The compiled-in engines. The test engine exists only in `test-engines` builds (tests); it
 /// is selectable only if the Registry issues its id (a fixture mode), like any other engine.
 fn built_in() -> Vec<&'static dyn EngineExtension> {
-    #[allow(unused_mut)]
+    engines(cfg!(feature = "test-engines"))
+}
+
+/// The engine list of a production build (`test_build = false`) or a `test-engines` build.
+fn engines(test_build: bool) -> Vec<&'static dyn EngineExtension> {
     let mut v: Vec<&'static dyn EngineExtension> = vec![&muse_v0::MUSE_V0];
+    if MUSE_V1_PRODUCTION_ENABLED || test_build {
+        v.push(&muse_v1::MUSE_V1);
+    }
     #[cfg(feature = "test-engines")]
-    v.push(&test_engine::EFFORT_TEST_V0);
+    if test_build {
+        v.push(&test_engine::EFFORT_TEST_V0);
+    }
     v
 }
 
@@ -438,9 +540,19 @@ impl EngineHost {
         hook: Hook,
         snapshot: &EngineSnapshot,
     ) -> Result<EngineDecision, EngineRefusal> {
+        self.consult_in(hook, snapshot, &EngineEnv::default())
+    }
+
+    /// EM-04A: `consult` lending `env` to the engine for this consultation. Validation is the same.
+    pub fn consult_in(
+        &mut self,
+        hook: Hook,
+        snapshot: &EngineSnapshot,
+        env: &EngineEnv,
+    ) -> Result<EngineDecision, EngineRefusal> {
         let p = self
             .ext
-            .propose(hook, snapshot, &self.state, self.next_proposal);
+            .propose_in(hook, snapshot, &self.state, self.next_proposal, env);
         self.accept(hook, snapshot, p)
     }
 
@@ -579,6 +691,10 @@ fn action_name(a: &EngineAction) -> &'static str {
 }
 
 #[cfg(test)]
+mod governor_parity;
+#[cfg(test)]
 mod legacy_reference;
+#[cfg(test)]
+mod muse_v1_tests;
 #[cfg(test)]
 mod tests;

@@ -490,6 +490,8 @@ fn run() -> i32 {
             context_budget_bytes: std::env::var("NEXUS_CONTEXT_BUDGET_BYTES")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok()),
+            // EM-04A: no request budget in production (EM-04B activates it per mode)
+            request_budget_bytes: None,
             code_caps: {
                 let num = |n: &str| -> Result<Option<u64>, String> {
                     get(n)
