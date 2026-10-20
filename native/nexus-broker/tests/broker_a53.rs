@@ -2003,3 +2003,72 @@ fn a54_live_gate_refuses_real_https_runs_without_operator_authorization() {
     );
     b.shutdown();
 }
+
+// ---- R-LOCK-1: state-directory lock lifecycle ------------------------------------------------
+
+/// Two genuine brokers can never own one state directory: while the first one lives, a second
+/// one is refused (even on another socket path) and the first keeps serving; once the first has
+/// shut down, a new one starts.
+#[test]
+fn rlock1_a_live_broker_keeps_exclusive_ownership_of_its_state_directory() {
+    let fx = fixture(hello(), true);
+    let a = fx.start("own");
+    let second = |sock: &str| {
+        let mut c = fx.config("own");
+        c.socket_path = fx.tmp.path().join(sock);
+        nexus_broker::start(c)
+    };
+    for sock in ["own-2.sock", "own-3.sock"] {
+        let e = second(sock).err().expect("refused while the owner lives");
+        assert_eq!(e, nexus_broker::state_lock::OWNED_ELSEWHERE);
+    }
+    assert!(
+        ic::list(a.socket_path(), 5).is_ok(),
+        "the owner still serves"
+    );
+    a.shutdown();
+    let b = second("own-4.sock").expect("free once the owner has shut down");
+    assert!(ic::list(b.socket_path(), 5).is_ok());
+    b.shutdown();
+}
+
+/// The restart race: while other threads of this process keep spawning children (as sibling
+/// tests and the broker's own tools do), a broker restarted right after `shutdown()` must start.
+/// Before R-LOCK-1 an inherited copy of the lock's description refused ~45% of these restarts.
+#[test]
+fn rlock1_a_restart_right_after_shutdown_is_never_refused_while_children_are_spawned() {
+    use std::sync::atomic::AtomicBool;
+    let fx = fixture(hello(), true);
+    let stop = Arc::new(AtomicBool::new(false));
+    let spawned = Arc::new(AtomicUsize::new(0));
+    let storm: Vec<_> = (0..8)
+        .map(|_| {
+            let (stop, spawned) = (stop.clone(), spawned.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let _ = std::process::Command::new("/bin/true").status();
+                    spawned.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        })
+        .collect();
+    let mut refused = Vec::new();
+    for i in 0..60 {
+        match nexus_broker::start(fx.config("restart")) {
+            Ok(b) => {
+                let _ = ic::list(b.socket_path(), 5);
+                b.shutdown();
+            }
+            Err(e) => {
+                refused.push(format!("restart {i}: {e}"));
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    for h in storm {
+        h.join().unwrap();
+    }
+    assert!(spawned.load(Ordering::SeqCst) > 100, "the spawn storm ran");
+    assert!(refused.is_empty(), "{refused:?}");
+}

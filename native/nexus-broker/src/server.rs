@@ -55,7 +55,9 @@ pub struct Broker {
     workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
     models: Mutex<Option<(Instant, Vec<AllowedModel>)>>,
     registry_targets: Mutex<Option<(Instant, Vec<RegistryTarget>)>>,
-    _lock: std::fs::File,
+    /// Single-owner lock on the state directory, released explicitly when the broker is
+    /// dropped (R-LOCK-1). Declared LAST so it is released after every other field.
+    _lock: crate::state_lock::StateLock,
 }
 
 type CmdResult = Result<Value, (&'static str, String)>;
@@ -1401,19 +1403,11 @@ fn recover(b: &Broker) {
 /// Start the broker. Refuses unless the daemon is a shadow-test daemon with
 /// the model pilot enabled (which production-v1 forbids) and dispatch off.
 pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
-    use fs2::FileExt;
     use std::os::unix::fs::PermissionsExt;
     let store = Store::open(&cfg.state_dir).map_err(|e| format!("state dir: {e}"))?;
     let threads = crate::threads::ThreadStore::open(&cfg.state_dir)
         .map_err(|e| format!("conversation store: {e}"))?;
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(cfg.state_dir.join("broker.lock"))
-        .map_err(|e| format!("lock: {e}"))?;
-    lock.try_lock_exclusive()
-        .map_err(|_| "another broker already owns this state directory".to_owned())?;
+    let lock = crate::state_lock::StateLock::acquire(&cfg.state_dir)?;
     cfg.code_caps.validate(cfg.interactive)?;
     if cfg.project_registry.is_some() && !cfg.code_sources.is_empty() {
         return Err("--project-registry and --code-source are mutually exclusive".into());

@@ -29,6 +29,7 @@ pub mod projects;
 pub mod recovery;
 pub mod resolution;
 pub mod server;
+pub mod state_lock;
 pub mod store;
 pub mod threads;
 pub mod trust;
