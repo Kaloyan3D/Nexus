@@ -292,8 +292,15 @@ impl StreamAssembler {
                 }
                 Self::bind_call_id(entry, &call_id)?;
                 match &entry.done {
+                    // An EMPTY completion carries no arguments: it neither conflicts with nor
+                    // replaces a complete one (seen live on OpenCode Go: `arguments.done` with the
+                    // arguments, then `output_item.done` with `"arguments": ""`; DSH's adapter
+                    // falls back to the streamed arguments the same way). Alone it still fails
+                    // as invalid JSON in `finish`.
+                    Some(_) if arguments.is_empty() => {}
+                    Some(prev) if prev.is_empty() => entry.done = Some(arguments),
                     // The same item may be completed twice (arguments.done and
-                    // output_item.done); they must agree.
+                    // output_item.done); non-empty completions must agree.
                     Some(prev) if *prev != arguments => {
                         return Err(ModelError::new(
                             ModelErrorCode::SseMalformed,
@@ -394,7 +401,8 @@ impl StreamAssembler {
         for (item_id, asm) in self.tools {
             // Complete provider arguments, when sent, are authoritative; but
             // they must agree with whatever deltas were assembled.
-            let text = match &asm.done {
+            // An empty completion carries no arguments (see `ToolDone`): the deltas decide.
+            let text = match asm.done.as_ref().filter(|d| !d.is_empty()) {
                 Some(d) => {
                     if !asm.args.is_empty() && asm.args != *d {
                         return Err(ModelError::new(

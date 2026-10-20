@@ -213,6 +213,33 @@ pub fn plan_like(text: &str) -> bool {
 
 /// A short message that announces what comes next instead of reporting a result ("X is wired -
 /// now the bridge commands."). Found live: a run ended on one after five edits, mid-task.
+/// Split at sentence ends (`.` `!` `?` newline), but never at a dot between two digits: a
+/// version or a decimal ("version 0.5.0", "2.5 s") is not a sentence end. (Found in the P0
+/// benchmark: "Item 9 is green. Now the final item 10, version 0.5.0." was read as ending on
+/// "0" and accepted as the final answer with item 10 never done.)
+fn sentences_of(l: &str) -> Vec<&str> {
+    let b = l.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, &c) in b.iter().enumerate() {
+        let end = match c {
+            b'!' | b'?' | b'\n' => true,
+            b'.' => {
+                !(i > 0
+                    && b[i - 1].is_ascii_digit()
+                    && b.get(i + 1).is_some_and(|n| n.is_ascii_digit()))
+            }
+            _ => false,
+        };
+        if end {
+            out.push(&l[start..i]);
+            start = i + 1;
+        }
+    }
+    out.push(&l[start..]);
+    out
+}
+
 pub fn announcement(text: &str) -> bool {
     let t = text.trim();
     if t.is_empty() || t.len() > 500 {
@@ -232,8 +259,8 @@ pub fn announcement(text: &str) -> bool {
     }
     // Judge how the message ENDS: earlier results ("contract tests pass") do not make a closing
     // "now the broker test ... attempting it" an ending (found live in the R-NATIVE-1 acceptance).
-    let sentences: Vec<&str> = l
-        .split(['.', '!', '?', '\n'])
+    let sentences: Vec<&str> = sentences_of(&l)
+        .into_iter()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
@@ -669,5 +696,21 @@ mod tests {
         );
         // not an implementation task: any answer is fine
         assert_eq!(decide(false, 0, None, INCIDENT), Completion::Fulfilled);
+    }
+
+    #[test]
+    fn a_version_number_does_not_end_the_sentence_that_announces_the_next_step() {
+        // the P0 benchmark's base arm, accepted as the final answer with item 10 never done
+        assert!(announcement(
+            "Item 9 is green (68 tests). Now the final item 10, version 0.5.0."
+        ));
+        assert!(announcement(
+            "Tests pass. Next I'll bump the version to 1.2.3."
+        ));
+        // a finished report that mentions a version is still an ending
+        assert!(!announcement("Released version 0.5.0. All tests pass."));
+        assert!(!announcement(
+            "All ten items are done; ledger 0.5.0 is complete."
+        ));
     }
 }

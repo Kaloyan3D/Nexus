@@ -1922,6 +1922,65 @@ fn p0_a_replayed_reasoning_item_must_be_exactly_the_canonical_captured_shape() {
 }
 
 #[test]
+fn p0_an_empty_final_arguments_field_neither_conflicts_nor_replaces_the_complete_arguments() {
+    // the exact live shape (P0 benchmark, replay arm): arguments.done carries the call, the
+    // final output_item.done repeats the item with "arguments": ""
+    let args = r#"{"path":"ledger/cli.py","edits":[{"oldText":"a","newText":"b"}]}"#;
+    for order in [true, false] {
+        let mut ev = vec![
+            added("fc_1", "call_1", "fs_edit"),
+            serde_json::json!({"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":args}),
+            done_item("fc_1", "call_1", "fs_edit", ""),
+        ];
+        if !order {
+            ev.swap(1, 2);
+        }
+        ev.push(completed_ev());
+        let t = assemble(&frames(&ev)).unwrap();
+        assert_eq!(t.tool_calls.len(), 1);
+        assert_eq!(t.tool_calls[0].arguments["path"], "ledger/cli.py");
+    }
+    // two different NON-empty completions still fail closed
+    let e = assemble(&frames(&[
+        added("fc_1", "call_1", "fs_edit"),
+        serde_json::json!({"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":args}),
+        done_item("fc_1", "call_1", "fs_edit", r#"{"path":"other"}"#),
+        completed_ev(),
+    ]))
+    .unwrap_err();
+    assert_eq!(e.code, ModelErrorCode::SseMalformed);
+    // an empty completion alone is still not a usable call
+    assert!(assemble(&frames(&[
+        added("fc_1", "call_1", "fs_edit"),
+        done_item("fc_1", "call_1", "fs_edit", ""),
+        completed_ev(),
+    ]))
+    .is_err());
+}
+
+#[test]
+fn p0_streamed_argument_deltas_survive_an_empty_final_completion() {
+    let args = r#"{"path":"README.md"}"#;
+    let t = assemble(&frames(&[
+        added("fc_1", "call_1", "fs_read"),
+        argdelta("fc_1", &args[..8]),
+        argdelta("fc_1", &args[8..]),
+        done_item("fc_1", "call_1", "fs_read", ""),
+        completed_ev(),
+    ]))
+    .unwrap();
+    assert_eq!(t.tool_calls[0].arguments["path"], "README.md");
+    // deltas that disagree with a NON-empty completion still fail closed
+    assert!(assemble(&frames(&[
+        added("fc_1", "call_1", "fs_read"),
+        argdelta("fc_1", args),
+        done_item("fc_1", "call_1", "fs_read", r#"{"path":"other"}"#),
+        completed_ev(),
+    ]))
+    .is_err());
+}
+
+#[test]
 fn p0_a_repeated_completed_item_is_replayed_once() {
     let reasoning = serde_json::json!({"type":"response.output_item.done","item":
         {"type":"reasoning","id":"rs_1","encrypted_content":"AAAA","summary":[]}});
