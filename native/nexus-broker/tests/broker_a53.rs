@@ -1121,6 +1121,8 @@ fn a53_clients_are_authenticated_by_peer_uid_and_isolated_from_each_other() {
                 payload_digest: "d".into(),
                 idempotency_key: "k".into(),
                 prompt: None,
+                engine_mode_id: None,
+                engine_id: None,
             })
             .unwrap();
     }
@@ -1561,6 +1563,8 @@ fn a53_broker_crash_and_daemon_restart_never_duplicate_a_billable_submission() {
                 payload_digest: "d".into(),
                 idempotency_key: "k2".into(),
                 prompt: None,
+                engine_mode_id: None,
+                engine_id: None,
             })
             .unwrap();
     }
@@ -1898,6 +1902,8 @@ fn a531_conversation_is_served_per_run_by_ownership_with_incremental_paging() {
                 payload_digest: "d".into(),
                 idempotency_key: "k".into(),
                 prompt: None,
+                engine_mode_id: None,
+                engine_id: None,
             })
             .unwrap();
     }

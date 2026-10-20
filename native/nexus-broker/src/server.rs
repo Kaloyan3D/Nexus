@@ -127,6 +127,25 @@ impl Broker {
         }
     }
 
+    /// EM-01: record the engine a (running) run is bound to. Set once, never on a final run.
+    /// `false` when the binding could not be recorded (the caller fails closed).
+    pub(crate) fn bind_engine(&self, run_id: &str, mode_id: &str, engine_id: &str) -> bool {
+        let _g = self.store.lock();
+        let Some(mut rec) = self.store.load(run_id) else {
+            return false;
+        };
+        if rec.engine_id.is_some() {
+            return rec.engine_id.as_deref() == Some(engine_id)
+                && rec.engine_mode_id.as_deref() == Some(mode_id);
+        }
+        if rec.run.terminal {
+            return false;
+        }
+        rec.engine_mode_id = Some(mode_id.to_owned());
+        rec.engine_id = Some(engine_id.to_owned());
+        self.store.put(&rec).is_ok()
+    }
+
     /// Annotate a record that is already final (links between runs, what happened to its
     /// patch). Never changes its state, outcome or counters.
     pub fn annotate(&self, run_id: &str, f: impl FnOnce(&mut IntentRun)) {
@@ -536,6 +555,8 @@ impl Broker {
                 prompt: (intent.intent_type == nexus_contracts::intent::INTENT_REPO_CODE
                     && self.cfg.interactive)
                     .then(|| intent.content.clone()),
+                engine_mode_id: None,
+                engine_id: None,
             };
             // Record first, then the index: a crash between the two leaves
             // an unindexed record (recovered as abandoned), never a key that

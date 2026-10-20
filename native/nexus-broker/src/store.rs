@@ -19,6 +19,12 @@ pub struct RunRecord {
     /// The task text, kept so an interrupted task can be continued (never sent anywhere).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// EM-01: the Registry mode and orchestration engine this run was bound to (absent on
+    /// records written before EM-01). Broker-internal: not part of the run view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_mode_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_id: Option<String>,
 }
 
 pub struct Store {

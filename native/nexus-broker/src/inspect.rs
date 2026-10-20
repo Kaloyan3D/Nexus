@@ -828,6 +828,12 @@ pub(crate) fn run(
     }
     let issued = bridge(b, "issue", &issue_args, None)?;
     let resolution = issued.get("resolution").cloned().unwrap_or_default();
+    // EM-01: the Engineering Mode extension comes from the Registry resolution of this run -
+    // the typed content whose digest is its issuanceId, i.e. exactly what the Kernel seals below
+    // and binds every attempt to. An engine this runtime does not have, or one that differs from
+    // the engine of the run this one continues, fails closed here, before any working copy,
+    // grant or provider request exists.
+    let engine = engine_for_run(b, run_id, &resolution)?;
     let extension = issued.get("extension").cloned().unwrap_or_default();
     let origin = extension
         .pointer("/endpoint/origin")
@@ -1215,6 +1221,7 @@ pub(crate) fn run(
             root: &root,
             expected: expected.clone(),
             ctx_budget,
+            engine,
         },
         &mut loop_state,
     );
@@ -1241,6 +1248,8 @@ struct Shared<'a> {
     #[allow(dead_code)]
     expected: Option<nexus_client::ExpectedTarget>,
     ctx_budget: usize,
+    /// The run's Engineering Mode extension (EM-01).
+    engine: &'static dyn crate::engine::EngineExtension,
 }
 
 #[derive(Default)]
@@ -1272,27 +1281,15 @@ struct LoopState {
     dirty_since_test: bool,
     /// Files this run created and has not deleted (to catch scratch files left behind).
     created: std::collections::BTreeSet<String>,
-    tidy_nudges: u32,
-    /// Times the harness asked the model to continue instead of accepting its reply.
-    nudges: u32,
-    verify_nudges: u32,
-    fail_nudges: u32,
-    report_nudges: u32,
     mode_code: bool,
     /// The request asks for an implementation (decided from its text, read-only runs never).
     expects_change: bool,
     /// The copy already holds changes of earlier runs (a continuation / follow-up): a run that
     /// only verifies them is legitimately edit-free and tool-free.
     carried_work: bool,
-    plan_nudges: u32,
     /// Verification commands (by arguments digest) whose latest result is a failure. A later pass of
     /// the SAME command clears it; a pass of a different, narrower command does not.
     failed_checks: std::collections::BTreeSet<String>,
-    /// edits + checks at the last stall-budget refresh (see `refresh_stall_budget`)
-    progress_mark: u32,
-    steers: u32,
-    /// Normalized progress sentences of the last turns (a narration loop shows here).
-    recent_narration: Vec<String>,
     completion: Option<&'static str>,
     /// A turn was spent asking the model to write its working memory; its answer is that memory.
     memory_requested: bool,
@@ -1380,22 +1377,91 @@ pub(crate) fn receipts_summary(activity: &[ToolActivity]) -> String {
     s.trim_end().to_owned() + "."
 }
 
-#[allow(clippy::too_many_arguments)]
-/// Times the harness will ask a model that stopped early to carry on.
-pub const MAX_NUDGES: u32 = 7;
+/// EM-01: the run's engine, from its Registry resolution, and bound to the run record.
+///
+/// * The identity is read from the TYPED resolution, only after its content digest was checked
+///   against its issuanceId (the Kernel seals that issuanceId and refuses any attempt whose
+///   intent disagrees with it), so the engine is the one the Registry issued and the Kernel seals.
+/// * A continuation (after an interruption or a broker restart) is a new run with a fresh
+///   issuance; it must resolve to the SAME engine as the run it continues. Records written before
+///   EM-01 carry no engine: they ran the inline loop that `muse-v0` reproduces exactly (see the
+///   EM-01 parity evidence), so they continue only as `muse-v0`.
+/// * The identity is recorded once, before anything is sent; if it cannot be recorded, or a
+///   different one is already recorded, the run fails closed.
+fn engine_for_run(
+    b: &Broker,
+    run_id: &str,
+    resolution: &Value,
+) -> Result<&'static dyn crate::engine::EngineExtension, StepError> {
+    let (engine, mode_id) =
+        crate::engine::resolve_issued(resolution).map_err(|r| se(r.code, r.message))?;
+    let id = engine.descriptor().engine_id;
+    let me = b.store.load(run_id);
+    if let Some(prev) = me
+        .as_ref()
+        .and_then(|r| r.run.continuation_of.clone())
+        .and_then(|old| b.store.load(&old))
+    {
+        let was = prev
+            .engine_id
+            .as_deref()
+            .unwrap_or(crate::engine::LEGACY_NATIVE_ENGINE);
+        let was_mode = prev.engine_mode_id.as_deref().unwrap_or(&mode_id);
+        if was != id || was_mode != mode_id {
+            return Err(se(
+                "engine-continuity-mismatch",
+                format!(
+                    "this run continues one that ran under another Engineering Mode engine than the one the Registry now selects ('{id}'); nothing was sent"
+                ),
+            ));
+        }
+    }
+    if let Some(have) = me.as_ref().and_then(|r| r.engine_id.as_deref()) {
+        if have != id {
+            return Err(se(
+                "engine-continuity-mismatch",
+                "this run is already bound to another engine; nothing was sent",
+            ));
+        }
+    }
+    if !b.bind_engine(run_id, &mode_id, id) {
+        return Err(se(
+            "engine-binding-unrecorded",
+            "the run's engine binding could not be recorded; nothing was sent",
+        ));
+    }
+    Ok(engine)
+}
 
-/// A reply that has the shape of a finished written report (long and structured).
-fn looks_like_report(t: &str) -> bool {
-    t.len() >= 1500
-        && t.lines().any(|l| {
-            let l = l.trim_start();
-            l.starts_with('#')
-                || l.starts_with("**")
-                || l.starts_with("- ")
-                || l.starts_with("* ")
-                || l.split_once('.')
-                    .is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-        })
+/// The read-only facts an Engineering Mode extension may see at a hook: the runtime's receipts
+/// and the Controller's classification of the request. No handle, grant, credential, target or
+/// path beyond the names of files this run created.
+fn engine_snapshot(
+    ls: &LoopState,
+    sh: &Shared<'_>,
+    interactive: bool,
+    turn: u32,
+    response_text: &str,
+) -> crate::engine::EngineSnapshot {
+    crate::engine::EngineSnapshot {
+        kind: Some(match sh.mode {
+            Mode::Code => crate::engine::RunKind::Code,
+            Mode::Inspect => crate::engine::RunKind::Inspect,
+        }),
+        interactive,
+        turn,
+        tool_calls: ls.tool_calls,
+        edits_used: ls.edits_used,
+        tests_used: ls.tests_used,
+        applied_edits: applied_edits(ls),
+        last_test: ls.last_test.clone(),
+        dirty_since_test: ls.dirty_since_test,
+        failed_checks: ls.failed_checks.len() as u32,
+        created_files: ls.created.iter().cloned().collect(),
+        expects_change: ls.expects_change,
+        carried_work: ls.carried_work,
+        response_text: response_text.to_owned(),
+    }
 }
 
 /// Edits and writes that really executed in this run (receipts, not proposals).
@@ -1404,153 +1470,6 @@ fn applied_edits(ls: &LoopState) -> u32 {
         .iter()
         .filter(|a| matches!(a.tool.as_str(), "fs_edit" | "fs_write") && a.status == "executed")
         .count() as u32
-}
-
-/// The nudge budgets bound CONSECUTIVE stalls, not the length of a run. Found live: a productive
-/// run (20 edits, 7 files, 4 test runs) ended "incomplete" at turn 120 because the model's habit of
-/// ending turns on "Next: ..." had used the run-wide budget of 5 over those 120 turns. A real edit or
-/// check since the last refresh proves the earlier stalls were overcome, so the budgets start over.
-fn refresh_stall_budget(ls: &mut LoopState) {
-    let progress = ls.edits_used + ls.tests_used;
-    if progress > ls.progress_mark {
-        ls.progress_mark = progress;
-        ls.nudges = 0;
-        ls.plan_nudges = 0;
-        ls.report_nudges = 0;
-        ls.verify_nudges = 0;
-        ls.fail_nudges = 0;
-    }
-}
-
-/// Should the harness refuse to accept this reply as the end of the task? Returns the
-/// message to send the model and a short reason for the timeline. The check is about the
-/// SHAPE of the stop (work visibly unfinished), never about the quality of the answer.
-fn premature_stop(ls: &mut LoopState, text: &str) -> Option<(&'static str, &'static str)> {
-    let t = text.trim();
-    let lower = t.to_ascii_lowercase();
-    // 0. an implementation was asked for, nothing was changed and nothing was verified, yet
-    //    the model ended on a plan or on tool calls written as prose (found live: a 40 KB
-    //    planning ramble was accepted as the finished task)
-    if ls.expects_change
-        && applied_edits(ls) == 0
-        && ls.last_test.as_deref() != Some("pass")
-        && ls.plan_nudges < crate::completion::MAX_PLAN_NUDGES
-    {
-        if crate::completion::text_tool_calls(t) {
-            ls.plan_nudges += 1;
-            return Some((
-                crate::completion::MSG_TEXT_CALLS,
-                "tool calls written as text",
-            ));
-        }
-        if crate::completion::plan_like(t)
-            || t.is_empty()
-            || (ls.tool_calls == 0 && !ls.carried_work)
-        {
-            ls.plan_nudges += 1;
-            return Some((crate::completion::MSG_PLAN, "a plan instead of the work"));
-        }
-    }
-    // 0b. changes exist, but the model stopped on "now the next step" (found live: five edits,
-    //     then a one-line announcement was accepted as the end of the task)
-    if ls.expects_change
-        && ls.plan_nudges < crate::completion::MAX_PLAN_NUDGES
-        && crate::completion::announcement(t)
-    {
-        ls.plan_nudges += 1;
-        return Some((
-            crate::completion::MSG_ANNOUNCE,
-            "an announcement instead of the step",
-        ));
-    }
-    // 1. an announcement of the next step instead of the step
-    const MIDFLIGHT: [&str; 10] = [
-        "re-issuing",
-        "reissuing",
-        "let me ",
-        "i'll ",
-        "i will ",
-        "now i",
-        "next, i",
-        "continuing",
-        "going to ",
-        "proceeding",
-    ];
-    if ls.tool_calls > 0
-        && t.len() < 700
-        && (t.is_empty() || MIDFLIGHT.iter().any(|m| lower.contains(m)))
-    {
-        return Some((
-            "You ended your turn without making the next tool call or writing the final answer. Continue the work now: call the tools you need, or if you are finished, write the complete final answer (for a review, the full report with evidence).",
-            "no tool call and no final answer",
-        ));
-    }
-    // 1b. a long investigation that ends without a written report
-    if ls.edits_used == 0
-        && ls.last_test.is_none()
-        && ls.tool_calls >= 8
-        && ls.report_nudges < 3
-        && !looks_like_report(t)
-    {
-        ls.report_nudges += 1;
-        return Some((
-            "Your last message is not a finished report. Do not plan or narrate further. If you still need evidence, make the tool calls now (one call per step is fine). Otherwise write the COMPLETE final report now as your reply: headings, each finding with severity, the file path and line numbers you actually read, why it matters and a recommended fix, then a prioritized summary and what you did not inspect.",
-            "no finished report yet",
-        ));
-    }
-    // 1c. scratch files left in the project
-    if ls.tidy_nudges < 1 {
-        let junk: Vec<&String> = ls
-            .created
-            .iter()
-            .filter(|p| {
-                let l = p.to_ascii_lowercase();
-                [".new", ".bak", ".orig", ".tmp", ".old", "~"]
-                    .iter()
-                    .any(|e| l.ends_with(e))
-            })
-            .collect();
-        if !junk.is_empty() {
-            ls.tidy_nudges += 1;
-            return Some((
-                "You left scratch files in the project that are not part of the change. Delete them now with fs_write mode \"delete\" (and only them), then give your final answer.",
-                "scratch files left behind",
-            ));
-        }
-    }
-    // 2. changes that were never verified
-    if ls.edits_used > 0
-        && ls.dirty_since_test
-        && ls.verify_nudges < if ls.expects_change { 3 } else { 1 }
-    {
-        ls.verify_nudges += 1;
-        return Some((
-            "You changed files but no build, test or type-check has run since your last change. Run the project's verification now (install dependencies first if they are missing) and fix anything that fails. Only then give your final answer.",
-            "changes not verified",
-        ));
-    }
-    // 3a. verification commands are still failing although the LAST one passed (a narrower command
-    //     hides them; found live: five unresolved failures and a closing 15 KB narration)
-    if ls.last_test.as_deref() != Some("fail")
-        && !ls.failed_checks.is_empty()
-        && ls.edits_used > 0
-        && ls.fail_nudges < 2
-    {
-        ls.fail_nudges += 1;
-        return Some((
-            crate::completion::MSG_UNRESOLVED_CHECKS,
-            "failed checks never re-run successfully",
-        ));
-    }
-    // 3. the last verification failed
-    if ls.last_test.as_deref() == Some("fail") && ls.edits_used > 0 && ls.fail_nudges < 2 {
-        ls.fail_nudges += 1;
-        return Some((
-            "Your last verification command failed. Read its output. If your change caused it, fix the cause and run it again. If the failure was already there and is unrelated to the task, do not widen the task to fix it: say so explicitly in your final answer with the evidence.",
-            "last verification failed",
-        ));
-    }
-    None
 }
 
 /// Reasoning items replayed at most (the latest ones; older ones are dropped first).
@@ -1769,6 +1688,8 @@ fn turn_loop(
     let mut dispatches = 0u32;
     let mut failures_in_a_row = 0u32;
     let mut turn = 0u32;
+    // EM-01: this run's Engineering Mode extension and its revisioned state (never shared)
+    let mut engine = crate::engine::EngineHost::new(sh.engine);
     loop {
         turn += 1;
         if turn > limits.turns {
@@ -1856,6 +1777,14 @@ fn turn_loop(
             ls.compactions += 1;
             let n = ls.compactions;
             b.update(ctx.run_id, |r| r.context_compactions = n);
+        }
+        // EM-01: the engine is consulted before every request. Contract v1 admits only
+        // `Continue` with the pinned effort: nothing about the request can change here.
+        if let Err(r) = engine.consult(
+            crate::engine::Hook::BeforeRequest,
+            &engine_snapshot(ls, sh, b.cfg.interactive, turn, ""),
+        ) {
+            return Ok(LoopEnd::Failed(r.code.into(), r.message));
         }
         let req = ModelRunRequest {
             user_initiated: true,
@@ -2103,16 +2032,20 @@ fn turn_loop(
             if out.finish_reason.starts_with("incomplete:") {
                 return Ok(LoopEnd::Limit("output-limit"));
             }
-            refresh_stall_budget(ls);
-            if b.cfg.interactive && sh.mode == Mode::Code && ls.nudges < MAX_NUDGES {
-                if let Some(msg) = premature_stop(ls, &out.text) {
-                    ls.nudges += 1;
-                    let n = ls.nudges;
+            // EM-01: the Engineering Mode decides whether a reply without a tool call ends the
+            // turn or the model is asked to carry on; completion itself stays the Controller's
+            // (`decide_run` below, from receipts).
+            match engine.consult(
+                crate::engine::Hook::FinalResponse,
+                &engine_snapshot(ls, sh, b.cfg.interactive, turn, &out.text),
+            ) {
+                Err(r) => return Ok(LoopEnd::Failed(r.code.into(), r.message)),
+                Ok(crate::engine::EngineDecision::Guide(g)) => {
                     let _ = session.state(
                         nexus_client::model_run::ModelRunState::ToolRunning,
                         &format!(
-                            "The model stopped early; asking it to continue ({n}): {}",
-                            msg.1
+                            "The model stopped early; asking it to continue ({}): {}",
+                            g.ordinal, g.reason
                         ),
                         None,
                     );
@@ -2120,10 +2053,11 @@ fn turn_loop(
                     push_model_text(&mut items, &out);
                     items.push(InputItem::Message {
                         role: "user".into(),
-                        content: msg.0.to_owned(),
+                        content: g.message,
                     });
                     continue;
                 }
+                Ok(_) => {}
             }
             let (v, u) = check_citations(&out.text, &evidence);
             ls.citations_verified = v;
@@ -2178,11 +2112,6 @@ fn turn_loop(
             )
             .map_err(|e| se(e.code, e.message))?;
         ctx.progress(ls, "tool-running");
-        ls.recent_narration
-            .push(crate::completion::normalize_narration(&out.text));
-        if ls.recent_narration.len() > 4 {
-            ls.recent_narration.remove(0);
-        }
         push_model_reasoning(&mut items, &out);
         push_model_text(&mut items, &out);
         for call in proposals {
@@ -2582,26 +2511,29 @@ fn turn_loop(
                 ));
             }
         }
-        // An implementation task that keeps reading: after a block of tool calls with no change
-        // (or the same progress sentence three turns running) tell the model to start. Bounded;
-        // it creates no side effect and does not stop the run.
-        if ls.expects_change && applied_edits(ls) == 0 && ls.steers < crate::completion::MAX_STEERS
-        {
-            let due = ls.tool_calls >= crate::completion::STEER_EVERY * (ls.steers + 1);
-            if due || crate::completion::repeated_narration(&ls.recent_narration) {
-                ls.steers += 1;
+        // EM-01: after the tool phase the Engineering Mode may add bounded guidance (muse-v0: the
+        // "start implementing" reminder for an implementation task that keeps reading).
+        match engine.consult(
+            crate::engine::Hook::AfterToolPhase,
+            &engine_snapshot(ls, sh, b.cfg.interactive, turn, &out.text),
+        ) {
+            Err(r) => return Ok(LoopEnd::Failed(r.code.into(), r.message)),
+            Ok(crate::engine::EngineDecision::Guide(g)) => {
                 let n = ls.tool_calls;
                 let _ = session.state(
                     nexus_client::model_run::ModelRunState::ToolRunning,
-                    &format!("{n} tool calls and no change yet; asking the model to start implementing (reminder {}).", ls.steers),
+                    &format!(
+                        "{n} tool calls and no change yet; asking the model to start implementing (reminder {}).",
+                        g.ordinal
+                    ),
                     None,
                 );
                 items.push(InputItem::Message {
                     role: "user".into(),
-                    content: crate::completion::steer_message(n),
+                    content: g.message,
                 });
-                ls.recent_narration.clear();
             }
+            Ok(_) => {}
         }
     }
     Ok(LoopEnd::Limit("max-turns"))
@@ -3245,50 +3177,6 @@ mod tests {
         }
     }
 
-    #[test]
-    #[allow(clippy::field_reassign_with_default)]
-    fn the_harness_does_not_accept_an_announcement_or_an_unverified_change_as_the_end() {
-        let mut ls = LoopState::default();
-        ls.tool_calls = 12;
-        // announcing the next step instead of taking it
-        assert!(premature_stop(&mut ls, "Let me check the remaining files now.").is_some());
-        // a long investigation that never wrote a report
-        let mut ls = LoopState::default();
-        ls.tool_calls = 30;
-        let narr = "Collecting evidence and validating findings. ".repeat(10);
-        assert!(premature_stop(&mut ls, &narr).is_some());
-        // a finished, structured report is accepted
-        let report = format!(
-            "# Report\n\n- finding one\n- finding two\n\n{}",
-            "Evidence and analysis. ".repeat(100)
-        );
-        let mut ls = LoopState::default();
-        ls.tool_calls = 30;
-        assert!(premature_stop(&mut ls, &report).is_none());
-        // changed files with no verification since: asked once, then accepted
-        let mut ls = LoopState::default();
-        ls.tool_calls = 5;
-        ls.edits_used = 2;
-        ls.dirty_since_test = true;
-        let done = "Implemented the change in two files and added tests.";
-        assert!(premature_stop(&mut ls, done).is_some());
-        assert!(premature_stop(&mut ls, done).is_none(), "asked only once");
-        // a failing last verification is questioned (twice at most)
-        let mut ls = LoopState::default();
-        ls.tool_calls = 5;
-        ls.edits_used = 1;
-        ls.last_test = Some("fail".into());
-        assert!(premature_stop(&mut ls, done).is_some());
-        assert!(premature_stop(&mut ls, done).is_some());
-        assert!(premature_stop(&mut ls, done).is_none());
-        // a short answer after verified work is fine
-        let mut ls = LoopState::default();
-        ls.tool_calls = 9;
-        ls.edits_used = 1;
-        ls.last_test = Some("pass".into());
-        assert!(premature_stop(&mut ls, done).is_none());
-    }
-
     use super::*;
     use serde_json::json;
 
@@ -3427,119 +3315,6 @@ mod tests {
         );
         i.limits.max_turns = Some(2);
         assert_eq!(resolve_limits(&i).turns, 2);
-    }
-
-    const INCIDENT: &str = include_str!("../tests/fixtures/planning-loop-final-answer.txt");
-
-    #[test]
-    #[allow(clippy::field_reassign_with_default)]
-    fn a_planning_ramble_is_no_longer_accepted_as_the_finished_task() {
-        // the mechanism of the incident: after 40 read-only calls the 40 KB ramble LOOKS like a report
-        assert!(looks_like_report(INCIDENT));
-        let mut ls = LoopState::default();
-        ls.tool_calls = 40;
-        // an old-style run (no implementation intent) would have been accepted
-        assert!(premature_stop(&mut ls, INCIDENT).is_none());
-        // an implementation task with nothing changed and nothing verified is redirected, three times
-        let mut ls = LoopState::default();
-        ls.tool_calls = 40;
-        ls.expects_change = true;
-        for _ in 0..3 {
-            let (msg, why) = premature_stop(&mut ls, INCIDENT).expect("nudged");
-            assert!(
-                msg.contains("IMPLEMENT") || msg.contains("plain text"),
-                "{msg}"
-            );
-            assert!(why.contains("plan") || why.contains("text"), "{why}");
-        }
-        assert_eq!(ls.plan_nudges, 3);
-        // an applied edit or a passing check changes the picture: no plan nudge
-        let mut ls = LoopState::default();
-        ls.tool_calls = 40;
-        ls.expects_change = true;
-        ls.last_test = Some("pass".into());
-        assert!(premature_stop(&mut ls, INCIDENT).is_none());
-        assert_eq!(ls.plan_nudges, 0);
-        // a read-only / non-implementation run is never nudged by this rule
-        let mut ls = LoopState::default();
-        ls.tool_calls = 40;
-        assert_eq!(ls.plan_nudges, 0);
-        let _ = premature_stop(&mut ls, INCIDENT);
-        assert_eq!(ls.plan_nudges, 0);
-    }
-
-    #[test]
-    #[allow(clippy::field_reassign_with_default)]
-    fn stall_budgets_start_over_when_the_run_makes_progress() {
-        // found live: 20 edits over 120 turns, ended "incomplete" because the run-wide budget of
-        // announcement nudges was spent
-        let mut ls = LoopState::default();
-        ls.expects_change = true;
-        ls.tool_calls = 30;
-        ls.edits_used = 1;
-        ls.activity.push(ToolActivity {
-            tool: "fs_edit".into(),
-            status: "executed".into(),
-            ..Default::default()
-        });
-        // the caller's gate, as in the run loop
-        let stop = |ls: &mut LoopState| -> u32 {
-            let mut nudged = 0;
-            loop {
-                refresh_stall_budget(ls);
-                if ls.nudges < MAX_NUDGES
-                    && premature_stop(ls, "Next: inspect the stub. Proceeding.").is_some()
-                {
-                    ls.nudges += 1;
-                    nudged += 1;
-                } else {
-                    return nudged;
-                }
-            }
-        };
-        let first = stop(&mut ls);
-        assert!((1..=MAX_NUDGES).contains(&first), "bounded: {first}");
-        // no progress: the next stop is final
-        assert_eq!(stop(&mut ls), 0);
-        // every further edit or check is progress: the model is asked again, many times over
-        for _ in 0..6 {
-            ls.edits_used += 1;
-            assert!(stop(&mut ls) >= 1);
-            assert_eq!(stop(&mut ls), 0);
-        }
-    }
-
-    #[test]
-    #[allow(clippy::field_reassign_with_default)]
-    fn unresolved_failed_checks_are_asked_about_whatever_the_length_of_the_closing_text() {
-        // run 14 of the R-NATIVE-3 acceptance: edits made, the LAST check passed, five checks failed and
-        // were never re-run, and the closing message was 15 KB of narration (every length-capped gate
-        // in premature_stop looked past it)
-        let text = include_str!("../tests/fixtures/run14-terminal-response.txt");
-        let mut ls = LoopState::default();
-        ls.expects_change = true;
-        ls.tool_calls = 184;
-        ls.edits_used = 41;
-        ls.last_test = Some("pass".into());
-        // no unresolved failure: nothing to ask (the earlier blind spot, documented)
-        assert!(premature_stop(&mut ls, text).is_none());
-        for k in ["a", "b", "c", "d", "e"] {
-            ls.failed_checks.insert(k.into());
-        }
-        let (msg, why) = premature_stop(&mut ls, text).expect("asked about the failed checks");
-        assert!(msg.contains("were never re-run successfully"), "{msg}");
-        assert!(why.contains("failed checks"), "{why}");
-        // bounded: asked twice, then the run ends (as `failing-checks`, not `fulfilled`)
-        assert!(premature_stop(&mut ls, text).is_some());
-        assert!(premature_stop(&mut ls, text).is_none());
-        // a short text is asked about just the same
-        let mut ls2 = LoopState::default();
-        ls2.expects_change = true;
-        ls2.tool_calls = 10;
-        ls2.edits_used = 3;
-        ls2.last_test = Some("pass".into());
-        ls2.failed_checks.insert("x".into());
-        assert!(premature_stop(&mut ls2, "All done.").is_some());
     }
 
     #[test]

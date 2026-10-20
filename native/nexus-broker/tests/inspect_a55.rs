@@ -1614,6 +1614,8 @@ fn plant_crashed_run(fx: &Fx, name: &str, state: nexus_client::model_run::ModelR
             payload_digest: "d".into(),
             idempotency_key: "idem-crash-01".into(),
             prompt: None,
+            engine_mode_id: None,
+            engine_id: None,
         })
         .unwrap();
     run_id

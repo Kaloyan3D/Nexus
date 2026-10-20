@@ -5120,6 +5120,108 @@ fn a614_an_interrupted_task_is_continued_in_a_new_run_that_starts_from_its_work(
     );
     let again = ic::resume(&sock, &first.run_id);
     assert!(again.is_err(), "already continued");
+    // EM-01: both runs are bound to the engine of their sealed resolution, and it is the same
+    for id in [&first.run_id, &second_id] {
+        assert_eq!(
+            em01_engine_of(&fx, "cont", id),
+            ("engineering-v2".to_owned(), "muse-v0".to_owned())
+        );
+    }
+    b.shutdown();
+}
+
+/// EM-01: the engine binding recorded for a run (`engineModeId`, `engineId`).
+fn em01_engine_of(fx: &Fx, broker: &str, run_id: &str) -> (String, String) {
+    let path = fx
+        .config(broker)
+        .state_dir
+        .join("runs")
+        .join(format!("{run_id}.json"));
+    let rec: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    (
+        rec["engineModeId"].as_str().unwrap_or("").to_owned(),
+        rec["engineId"].as_str().unwrap_or("").to_owned(),
+    )
+}
+
+/// EM-01: a continuation must run under the engine of the run it continues. When the run it
+/// continues was bound to another engine (here: its record names one, as a Registry change
+/// between the interruption and the continuation would), the continuation fails closed with
+/// `engine-continuity-mismatch` before any working copy or provider request.
+#[test]
+fn em01_a_continuation_under_another_engine_is_refused_before_dispatch() {
+    if !sandbox_ready() {
+        return;
+    }
+    let continued_seen = Arc::new(AtomicUsize::new(0));
+    let c2 = continued_seen.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        if body.to_string().contains("CONTINUED") {
+            c2.fetch_add(1, Ordering::SeqCst);
+            return Answer::Frames(text_frames(&resp, "done"));
+        }
+        Answer::Slow {
+            frames: text_frames(&resp, "thinking"),
+            gap_ms: 100,
+            hold_ms: 120_000,
+        }
+    });
+    let fx = fixture_autonomous(responder);
+    let mut c = fx.config("em01-cont");
+    c.code_sources = Vec::new();
+    c.project_registry = Some((
+        fx.reg_dir.clone().unwrap(),
+        nexus_tools::registry::Trust::default(),
+    ));
+    c.interactive = true;
+    let state_dir = c.state_dir.clone();
+    let b = nexus_broker::start(c).expect("starts");
+    let sock = b.socket_path().to_owned();
+    let first = ic::submit(
+        &sock,
+        &code_intent_for("other", "write a file", "em01-cont-000001", |_| {}),
+    )
+    .expect("submit")
+    .run;
+    // the binding is recorded before the first request goes out
+    let end = std::time::Instant::now() + Duration::from_secs(60);
+    while em01_engine_of(&fx, "em01-cont", &first.run_id).1.is_empty() {
+        assert!(
+            std::time::Instant::now() < end,
+            "no engine binding recorded"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        em01_engine_of(&fx, "em01-cont", &first.run_id),
+        ("engineering-v2".to_owned(), "muse-v0".to_owned())
+    );
+    ic::cancel(&sock, &first.run_id).unwrap();
+    let first = wait_terminal(&sock, &first.run_id, 60);
+    assert!(first.terminal && first.state != "completed", "{first:?}");
+    // the interrupted run was bound to another engine
+    let path = state_dir
+        .join("runs")
+        .join(format!("{}.json", first.run_id));
+    let mut rec: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    rec["engineId"] = json!("dual-v1");
+    std::fs::write(&path, serde_json::to_vec(&rec).unwrap()).unwrap();
+    let v = ic::resume(&sock, &first.run_id).expect("resume is accepted, then refused");
+    let second_id = v["run"]["runId"].as_str().unwrap().to_owned();
+    let second = wait_terminal(&sock, &second_id, 60);
+    assert_eq!(second.state, "rejected", "{second:?}");
+    assert_eq!(
+        second.error_code.as_deref(),
+        Some("engine-continuity-mismatch"),
+        "{second:?}"
+    );
+    assert_eq!(continued_seen.load(Ordering::SeqCst), 0, "nothing was sent");
+    assert!(second.tool_activity.is_empty());
+    assert_eq!(second.turn, 0, "no provider turn");
+    assert!(second.worktree_commit.is_none(), "no working copy was made");
+    // and a refused continuation is not bound to the engine it was refused
+    assert_eq!(em01_engine_of(&fx, "em01-cont", &second_id).1, "");
     b.shutdown();
 }
 
@@ -8839,3 +8941,69 @@ fn p0_the_models_reasoning_goes_back_before_its_call_on_the_next_request() {
     assert!(!saw(&bodies[0], "P0ENCRYPTEDREASONING"));
     b.shutdown();
 }
+
+/// EM-01: the engine boundary adds nothing to what reaches the provider. Every request of a
+/// run carries exactly the P0 top-level fields, the same tool schemas byte for byte (digest
+/// frozen from a497b87, before the extension existed) and the Registry-pinned effort.
+#[test]
+fn em01_the_engine_boundary_adds_no_request_field_and_no_tool_schema() {
+    use sha2::{Digest, Sha256};
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(p0_reasoning_responder());
+    let b = interactive_broker(&fx, "em01-shape");
+    let sock = b.socket_path().to_owned();
+    let (_, run) = rn2_send(
+        &sock,
+        None,
+        "P0-REASON: what does README.md say? Do not change anything.",
+        "em01-shape-000001",
+        None,
+        None,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let bodies = rn2_bodies(&fx, 0);
+    assert!(bodies.len() >= 2, "a tool turn and a final turn");
+    for body in &bodies {
+        let mut keys: Vec<&str> = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort_unstable();
+        let tools = serde_json::to_vec(&body["tools"]).unwrap();
+        let digest: String = Sha256::digest(&tools)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        println!(
+            "EM01 keys={keys:?} tools={} sha256={digest} reasoning={}",
+            body["tools"].as_array().map_or(0, |t| t.len()),
+            body["reasoning"]
+        );
+        assert_eq!(keys, EM01_P0_KEYS, "no new top-level request field");
+        assert_eq!(
+            digest, EM01_P0_TOOLS_SHA256,
+            "no new or changed tool schema"
+        );
+        assert_eq!(
+            body["reasoning"]["effort"], "low",
+            "the pinned effort is untouched"
+        );
+    }
+    b.shutdown();
+}
+const EM01_P0_KEYS: &[&str] = &[
+    "input",
+    "max_output_tokens",
+    "model",
+    "parallel_tool_calls",
+    "reasoning",
+    "stream",
+    "tool_choice",
+    "tools",
+];
+const EM01_P0_TOOLS_SHA256: &str =
+    "58f513de4ac7097e2d2c44999180ec74295aaaf590d585ff15787b784db8d90b";
