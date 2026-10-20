@@ -8759,3 +8759,83 @@ fn p0_unlabelled_text_is_replayed_exactly_as_before() {
     );
     b.shutdown();
 }
+
+fn p0_reasoning_responder() -> Responder {
+    Arc::new(|n, body| {
+        let resp = format!("resp_{n}");
+        let done = body["input"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["type"] == "function_call_output")
+                    .count()
+            })
+            .unwrap_or(0);
+        match done {
+            0 => {
+                let mut v = vec![created(&resp)];
+                v.push(sse(
+                    "response.output_item.done",
+                    json!({"type":"response.output_item.done","output_index":0,
+                        "item":{"type":"reasoning","id":format!("rs_p0_{n}"),"status":"completed",
+                                "encrypted_content":"P0ENCRYPTEDREASONING","summary":[]}}),
+                ));
+                let mut call = call_frames(
+                    &resp,
+                    n,
+                    &format!("call_{n}"),
+                    "fs_read",
+                    r#"{"path":"README.md"}"#,
+                );
+                call.remove(0);
+                v.extend(call);
+                Answer::Frames(v)
+            }
+            _ => Answer::Frames(text_frames(
+                &resp,
+                "P0-FINAL The README describes the add() crate.",
+            )),
+        }
+    })
+}
+
+#[test]
+fn p0_the_models_reasoning_goes_back_before_its_call_on_the_next_request() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(p0_reasoning_responder());
+    let b = interactive_broker(&fx, "p0-reason");
+    let sock = b.socket_path().to_owned();
+    let (_, run) = rn2_send(
+        &sock,
+        None,
+        "P0-REASON: what does README.md say? Do not change anything.",
+        "p0-reason-000001",
+        None,
+        None,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let bodies = rn2_bodies(&fx, 0);
+    let after = bodies
+        .iter()
+        .find(|b| saw(b, "function_call_output"))
+        .expect("a request after the tool ran");
+    let input = after["input"].as_array().unwrap();
+    let r = input
+        .iter()
+        .position(|i| i["type"] == "reasoning")
+        .expect("the reasoning item was replayed");
+    assert_eq!(
+        input[r],
+        json!({"type":"reasoning","id":input[r]["id"],"encrypted_content":"P0ENCRYPTEDREASONING","summary":[]})
+    );
+    let c = input
+        .iter()
+        .position(|i| i["type"] == "function_call")
+        .unwrap();
+    assert!(r < c, "reasoning precedes the call it produced");
+    // the first request of the run had nothing to replay
+    assert!(!saw(&bodies[0], "P0ENCRYPTEDREASONING"));
+    b.shutdown();
+}

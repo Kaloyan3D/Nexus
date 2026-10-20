@@ -1841,3 +1841,98 @@ fn p0_phased_items_are_validated() {
         "must end on user/output"
     );
 }
+
+// ---- P0: reasoning items are captured verbatim and replayed only in a validated shape ----
+
+fn reasoning_done(item: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"type":"response.output_item.done","item":item})
+}
+
+#[test]
+fn p0_reasoning_items_are_captured_reduced_to_replayable_fields() {
+    let body = frames(&[
+        reasoning_done(
+            serde_json::json!({"type":"reasoning","id":"rs_6abb:rs_01a0","status":"completed",
+            "encrypted_content":"Q-PaDg_ab+/=","summary":[{"type":"summary_text","text":"plan"}],"extra":"x"}),
+        ),
+        reasoning_done(serde_json::json!({"type":"reasoning","id":"rs_2","summary":[]})),
+        reasoning_done(
+            serde_json::json!({"type":"reasoning","id":"bad id!","encrypted_content":"abc"}),
+        ),
+        reasoning_done(
+            serde_json::json!({"type":"reasoning","id":"rs_3","encrypted_content":"not base64 <script>"}),
+        ),
+        completed_ev(),
+    ]);
+    let t = assemble(&body).unwrap();
+    assert_eq!(
+        t.reasoning_items.len(),
+        1,
+        "only the well-formed encrypted item is replayable"
+    );
+    let v: serde_json::Value = serde_json::from_str(&t.reasoning_items[0]).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({"type":"reasoning","id":"rs_6abb:rs_01a0","encrypted_content":"Q-PaDg_ab+/=",
+            "summary":[{"type":"summary_text","text":"plan"}]})
+    );
+}
+
+#[test]
+fn p0_a_replayed_reasoning_item_must_be_exactly_the_canonical_captured_shape() {
+    let item = nexus_model::sse::replayable_reasoning(&serde_json::json!({
+        "type":"reasoning","id":"rs_1","encrypted_content":"AAAA","summary":[]}))
+    .unwrap();
+    let call = InputItem::FunctionCall {
+        call_id: "call_1".into(),
+        name: "fs_read".into(),
+        arguments: "{}".into(),
+    };
+    let out = InputItem::FunctionCallOutput {
+        call_id: "call_1".into(),
+        output: "{}".into(),
+    };
+    let r = |s: &str| InputItem::Reasoning { item: s.into() };
+    let ok =
+        |items: Vec<InputItem>| prep(WireProfile::OpenCodeGoResponses, &tool_req(items)).is_ok();
+    assert!(ok(vec![user("a"), r(&item), call.clone(), out.clone()]));
+    let p = prep(
+        WireProfile::OpenCodeGoResponses,
+        &tool_req(vec![user("a"), r(&item), call.clone(), out.clone()]),
+    )
+    .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&p.request_bytes).unwrap();
+    assert_eq!(
+        v["input"][1],
+        serde_json::json!({"type":"reasoning","id":"rs_1","encrypted_content":"AAAA","summary":[]})
+    );
+    // anything that is not the captured canonical shape is refused before any byte exists
+    for bad in [
+        r#"{"type":"reasoning","id":"rs_1","encrypted_content":"AAAA","summary":[],"x":1}"#,
+        r#"{"type":"message","id":"rs_1","encrypted_content":"AAAA","summary":[]}"#,
+        r#"{"type":"reasoning","id":"rs 1","encrypted_content":"AAAA","summary":[]}"#,
+        "not json",
+    ] {
+        assert!(
+            !ok(vec![user("a"), r(bad), call.clone(), out.clone()]),
+            "{bad}"
+        );
+    }
+    assert!(!ok(vec![user("a"), r(&item)]), "must end on user/output");
+}
+
+#[test]
+fn p0_a_repeated_completed_item_is_replayed_once() {
+    let reasoning = serde_json::json!({"type":"response.output_item.done","item":
+        {"type":"reasoning","id":"rs_1","encrypted_content":"AAAA","summary":[]}});
+    let t = assemble(&frames(&[
+        msg_done("msg_1", Some("commentary"), "Reading."),
+        msg_done("msg_1", Some("commentary"), "Reading."),
+        reasoning.clone(),
+        reasoning,
+        completed_ev(),
+    ]))
+    .unwrap();
+    assert_eq!(t.messages.len(), 1);
+    assert_eq!(t.reasoning_items.len(), 1);
+}

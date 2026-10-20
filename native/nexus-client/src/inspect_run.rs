@@ -317,6 +317,8 @@ pub struct TurnOutput {
     /// The response's assistant `message` items with the provider's phase, in wire order
     /// (empty when the provider completed none; `text` is always the whole text).
     pub messages: Vec<nexus_model::AssembledMessage>,
+    /// The response's replayable `reasoning` items (canonical JSON), in wire order.
+    pub reasoning: Vec<String>,
     pub tool_calls: Vec<AssembledToolCall>,
     pub usage: Option<(u64, u64)>,
     pub response_id: Option<String>,
@@ -604,6 +606,7 @@ pub fn run_inspect_turn(
                 return Ok(TurnEnd::Truncated(Box::new(TurnOutput {
                     text: rec.text.clone(),
                     messages: Vec::new(),
+                    reasoning: Vec::new(),
                     tool_calls: Vec::new(),
                     usage,
                     response_id,
@@ -639,6 +642,7 @@ pub fn run_inspect_turn(
                     Ok(TurnEnd::Output(Box::new(TurnOutput {
                         text: t.text,
                         messages: t.messages,
+                        reasoning: t.reasoning_items,
                         tool_calls: t.tool_calls,
                         usage,
                         response_id,

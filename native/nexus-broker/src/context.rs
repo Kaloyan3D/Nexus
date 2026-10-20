@@ -29,6 +29,7 @@ fn size(it: &InputItem) -> usize {
         InputItem::Message { content, .. } | InputItem::AssistantPhase { content, .. } => {
             content.len()
         }
+        InputItem::Reasoning { item } => item.len(),
         InputItem::FunctionCall {
             arguments, name, ..
         } => arguments.len() + name.len() + 40,
@@ -102,6 +103,19 @@ pub fn compact(items: &mut Vec<InputItem>, receipts: &str, budget: usize) -> boo
     //    than the tail at once left the model a working memory of twelve turns.) A conversation
     //    that is over only by item count gains nothing from stubbing: step 2 handles it.
     if total_bytes(items) > budget {
+        let before = items.len();
+        let mut i = 1;
+        while i < tail_start.min(items.len()) && total_bytes(items) > budget {
+            if matches!(items[i], InputItem::Reasoning { .. }) {
+                items.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        changed |= items.len() != before;
+    }
+    let tail_start = items.len().saturating_sub(KEEP_TAIL).max(1);
+    if total_bytes(items) > budget {
         for i in 1..tail_start {
             match &mut items[i] {
                 InputItem::FunctionCallOutput { output, .. } if output.len() > STUB_ABOVE => {
@@ -152,7 +166,9 @@ pub fn compact(items: &mut Vec<InputItem>, receipts: &str, budget: usize) -> boo
                 // output here means its call was already gone - nothing more to do
                 let _ = call_id;
             }
-            InputItem::Message { .. } | InputItem::AssistantPhase { .. } => {}
+            InputItem::Message { .. }
+            | InputItem::AssistantPhase { .. }
+            | InputItem::Reasoning { .. } => {}
         }
         changed = true;
         if note_at.is_none() {

@@ -57,6 +57,9 @@ pub enum InputItem {
     /// gave it (`commentary` or `final_answer`). Phase-aware models treat an unlabelled
     /// assistant message as a final answer.
     AssistantPhase { phase: String, content: String },
+    /// One of the model's own `reasoning` items from an earlier response of this run,
+    /// replayed verbatim (canonical JSON from `sse::replayable_reasoning`).
+    Reasoning { item: String },
 }
 
 /// Which fixed tool catalog a request offers. `None` on a request means
@@ -243,6 +246,15 @@ impl ModelRequest {
                         return refuse("function call output is malformed or oversized");
                     }
                 }
+                InputItem::Reasoning { item } => {
+                    let ok = serde_json::from_str::<serde_json::Value>(item)
+                        .ok()
+                        .and_then(|v| crate::sse::replayable_reasoning(&v))
+                        .is_some_and(|canon| canon == *item);
+                    if !ok {
+                        return refuse("reasoning item is malformed");
+                    }
+                }
                 InputItem::AssistantPhase { phase, content } => {
                     if phase != "commentary" && phase != "final_answer" {
                         return refuse("assistant message phase is not a documented value");
@@ -271,7 +283,9 @@ impl ModelRequest {
                     open.remove(pos);
                     answered.push(call_id);
                 }
-                InputItem::Message { .. } | InputItem::AssistantPhase { .. } => {}
+                InputItem::Message { .. }
+                | InputItem::AssistantPhase { .. }
+                | InputItem::Reasoning { .. } => {}
             }
         }
         if !open.is_empty() {
@@ -279,7 +293,12 @@ impl ModelRequest {
         }
         // The conversation must end on something the model should answer.
         match self.items.last() {
-            Some(InputItem::FunctionCall { .. } | InputItem::AssistantPhase { .. }) | None => {
+            Some(
+                InputItem::FunctionCall { .. }
+                | InputItem::AssistantPhase { .. }
+                | InputItem::Reasoning { .. },
+            )
+            | None => {
                 return refuse("conversation must end with a user message or a function output")
             }
             Some(InputItem::Message { role, .. }) if role != "user" => {

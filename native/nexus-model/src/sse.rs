@@ -62,6 +62,9 @@ pub struct TerminalResponse {
     /// The assistant `message` items with their phase, in wire order (empty when the
     /// provider never completed an item; `text` above is always the full text).
     pub messages: Vec<AssembledMessage>,
+    /// The response's `reasoning` items (canonical JSON, see [`ModelEvent::ReasoningDone`]),
+    /// in wire order, for verbatim replay on the next request of the same run.
+    pub reasoning_items: Vec<String>,
     /// Provider-reported usage.
     pub usage: Usage,
     /// Provider response id, when the provider supplied one.
@@ -102,6 +105,9 @@ pub enum ModelEvent {
     /// Provider response identifier (`response.id`), as supplied. Never
     /// synthesized.
     ResponseId(String),
+    /// A complete `reasoning` item (`output_item.done`), reduced to the fields a later
+    /// request may echo (`type`, `id`, `encrypted_content`, `summary`) as canonical JSON.
+    ReasoningDone { item: String },
     /// A complete assistant `message` item (`output_item.done`) with its phase.
     MessageDone {
         item_id: String,
@@ -127,6 +133,7 @@ pub struct StreamAssembler {
     tools: BTreeMap<String, ToolAssembly>,
     messages: Vec<AssembledMessage>,
     message_bytes: usize,
+    reasoning_items: Vec<String>,
     usage: Usage,
     response_id: Option<String>,
     finish_reason: Option<String>,
@@ -155,6 +162,7 @@ impl StreamAssembler {
             tools: BTreeMap::new(),
             messages: Vec::new(),
             message_bytes: 0,
+            reasoning_items: Vec::new(),
             usage: Usage::default(),
             response_id: None,
             finish_reason: None,
@@ -304,6 +312,20 @@ impl StreamAssembler {
                 self.response_id = Some(id);
                 Ok(())
             }
+            ModelEvent::ReasoningDone { item } => {
+                self.message_bytes += item.len();
+                if self.message_bytes > self.max_text_bytes {
+                    return Err(ModelError::new(
+                        ModelErrorCode::PayloadTooLarge,
+                        "completed reasoning items exceed the text bound",
+                    ));
+                }
+                // a provider repeating the same completed item must not duplicate the replay
+                if !self.reasoning_items.contains(&item) {
+                    self.reasoning_items.push(item);
+                }
+                Ok(())
+            }
             ModelEvent::MessageDone {
                 item_id,
                 phase,
@@ -404,6 +426,7 @@ impl StreamAssembler {
             reasoning_text: self.reasoning,
             tool_calls: calls,
             messages: self.messages,
+            reasoning_items: self.reasoning_items,
             usage: self.usage,
             response_id: self.response_id,
             finish_reason: reason,
@@ -472,6 +495,52 @@ fn push_function_call_done(
         arguments: arguments.to_owned(),
     });
     Ok(())
+}
+
+/// Largest `encrypted_content` accepted for replay.
+pub const MAX_REASONING_ITEM_BYTES: usize = 128 * 1024;
+
+/// A `reasoning` output item reduced to what may be echoed back, as canonical JSON:
+/// `type`, an id of at most 128 token characters, the opaque `encrypted_content`
+/// (base64 alphabet only) and the `summary` parts (`summary_text` strings). Anything
+/// else, or an item without encrypted content, is not replayable (`None`).
+pub fn replayable_reasoning(item: &serde_json::Value) -> Option<String> {
+    if item.get("type").and_then(|v| v.as_str()) != Some("reasoning") {
+        return None;
+    }
+    let id = item.get("id").and_then(|v| v.as_str())?;
+    let id_ok = !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'));
+    let enc = item.get("encrypted_content").and_then(|v| v.as_str())?;
+    let enc_ok = !enc.is_empty()
+        && enc.len() <= MAX_REASONING_ITEM_BYTES
+        && enc
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'+' | b'/' | b'='));
+    if !id_ok || !enc_ok {
+        return None;
+    }
+    let summary: Vec<serde_json::Value> = item
+        .get("summary")
+        .and_then(|v| v.as_array())
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|p| {
+                    let text = p.get("text").and_then(|t| t.as_str())?;
+                    (p.get("type").and_then(|t| t.as_str()) == Some("summary_text")
+                        && text.len() <= 16 * 1024)
+                        .then(|| serde_json::json!({"type": "summary_text", "text": text}))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(nexus_contracts::canonical_json(&serde_json::json!({
+        "type": "reasoning", "id": id, "encrypted_content": enc, "summary": summary,
+    })))
 }
 
 /// Emit a [`ModelEvent::MessageDone`] for a complete assistant `message` item. Only the
@@ -592,6 +661,9 @@ pub fn parse_data_payload(
             if let Some(item) = value.get("item") {
                 push_function_call_done(item, out)?;
                 push_message_done(item, out);
+                if let Some(r) = replayable_reasoning(item) {
+                    out.push(ModelEvent::ReasoningDone { item: r });
+                }
             }
             Ok(false)
         }

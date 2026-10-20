@@ -857,7 +857,8 @@ pub fn run_model_only(
                 ModelEvent::ReasoningDelta(_)
                 | ModelEvent::ToolFragment { .. }
                 | ModelEvent::ToolDone { .. }
-                | ModelEvent::MessageDone { .. } => {}
+                | ModelEvent::MessageDone { .. }
+                | ModelEvent::ReasoningDone { .. } => {}
             }
         };
         nexus_model::dispatch_redeemed_streaming(

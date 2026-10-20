@@ -158,6 +158,17 @@ pub fn prepare(
                     "output cap is below the provider minimum of 16 tokens",
                 ));
             }
+            // `validate_shape` already proved every replayed reasoning item is its own canonical
+            // capture; re-check here so the serializer below can never emit a placeholder.
+            if input.items.iter().any(|it| {
+                matches!(it, crate::request::InputItem::Reasoning { item }
+                    if serde_json::from_str::<serde_json::Value>(item).is_err())
+            }) {
+                return Err(ModelError::new(
+                    ModelErrorCode::TransportRefused,
+                    "reasoning item is malformed",
+                ));
+            }
             match input.tool_profile {
                 // A5.5 tool-enabled variant: fixed catalog, stateless history
                 // (function_call + function_call_output items), one call at a time.
@@ -180,6 +191,12 @@ pub fn prepare(
                             serde_json::json!({
                                 "type": "function_call_output", "call_id": call_id, "output": output,
                             })
+                        }
+                        // the model's own reasoning item, verbatim (validated canonical JSON,
+                        // parse checked above)
+                        crate::request::InputItem::Reasoning { item } => {
+                            serde_json::from_str::<serde_json::Value>(item)
+                                .unwrap_or(serde_json::Value::Null)
                         }
                         // the model's own message item, phase intact (Responses `message` item)
                         crate::request::InputItem::AssistantPhase { phase, content } => {

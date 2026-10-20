@@ -1553,6 +1553,31 @@ fn premature_stop(ls: &mut LoopState, text: &str) -> Option<(&'static str, &'sta
     None
 }
 
+/// Reasoning items replayed at most (the latest ones; older ones are dropped first).
+pub const REASONING_REPLAY_ITEMS: usize = 12;
+
+/// The model's own reasoning from its latest responses goes back with the next request, before
+/// that response's messages and calls - as DSH's adapter does. Without it the model loses its
+/// chain of thought at every tool call and re-derives it (CCv2 RC1 incident on this route). Only
+/// the most recent items are kept: a long run would otherwise carry megabytes of opaque data.
+fn push_model_reasoning(items: &mut Vec<InputItem>, out: &nexus_client::TurnOutput) {
+    for r in &out.reasoning {
+        items.push(InputItem::Reasoning { item: r.clone() });
+    }
+    let mut extra = items
+        .iter()
+        .filter(|i| matches!(i, InputItem::Reasoning { .. }))
+        .count()
+        .saturating_sub(REASONING_REPLAY_ITEMS);
+    items.retain(|i| {
+        if extra > 0 && matches!(i, InputItem::Reasoning { .. }) {
+            extra -= 1;
+            return false;
+        }
+        true
+    });
+}
+
 /// Characters of one response's text that are replayed to the model.
 pub const REPLAYED_TEXT_CHARS: usize = 8 * 1024;
 
@@ -2091,6 +2116,7 @@ fn turn_loop(
                         ),
                         None,
                     );
+                    push_model_reasoning(&mut items, &out);
                     push_model_text(&mut items, &out);
                     items.push(InputItem::Message {
                         role: "user".into(),
@@ -2157,6 +2183,7 @@ fn turn_loop(
         if ls.recent_narration.len() > 4 {
             ls.recent_narration.remove(0);
         }
+        push_model_reasoning(&mut items, &out);
         push_model_text(&mut items, &out);
         for call in proposals {
             if ctx.stop() {
@@ -3556,6 +3583,7 @@ mod tests {
                     text: t.to_owned(),
                 })
                 .collect(),
+            reasoning: Vec::new(),
             tool_calls: Vec::new(),
             usage: None,
             response_id: None,
@@ -3639,5 +3667,48 @@ mod tests {
             .sum();
         assert_eq!(total, REPLAYED_TEXT_CHARS);
         assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn the_models_reasoning_goes_back_before_its_text_and_only_the_latest_items_are_kept() {
+        let item = |n: usize| {
+            nexus_model::sse::replayable_reasoning(&serde_json::json!({
+                "type": "reasoning", "id": format!("rs_{n}"), "encrypted_content": "AAAA", "summary": []
+            }))
+            .unwrap()
+        };
+        let mut items = vec![InputItem::Message {
+            role: "user".into(),
+            content: "task".into(),
+        }];
+        for n in 0..(REASONING_REPLAY_ITEMS + 3) {
+            let mut out = output_with("Reading.", vec![(Some("commentary"), "Reading.")]);
+            out.reasoning = vec![item(n)];
+            push_model_reasoning(&mut items, &out);
+            push_model_text(&mut items, &out);
+        }
+        let kept: Vec<&String> = items
+            .iter()
+            .filter_map(|i| match i {
+                InputItem::Reasoning { item } => Some(item),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kept.len(), REASONING_REPLAY_ITEMS);
+        assert!(
+            kept[0].contains("rs_3")
+                && kept
+                    .last()
+                    .unwrap()
+                    .contains(&format!("rs_{}", REASONING_REPLAY_ITEMS + 2))
+        );
+        // every kept reasoning item directly precedes its own response's preamble
+        for (i, it) in items.iter().enumerate() {
+            if matches!(it, InputItem::Reasoning { .. }) {
+                assert!(matches!(items[i + 1], InputItem::AssistantPhase { .. }));
+            }
+        }
+        // the task message is never touched
+        assert!(matches!(&items[0], InputItem::Message { content, .. } if content == "task"));
     }
 }

@@ -295,6 +295,11 @@ pub fn run_mock_streaming(
                 kind: "response-id".to_owned(),
                 content: id.clone(),
             },
+            ModelEvent::ReasoningDone { item } => MockStreamItem {
+                index: i as u64,
+                kind: "reasoning-complete".to_owned(),
+                content: format!("{} bytes", item.len()),
+            },
             ModelEvent::MessageDone { phase, text, .. } => MockStreamItem {
                 index: i as u64,
                 kind: "message-complete".to_owned(),
