@@ -53,6 +53,10 @@ pub enum InputItem {
     },
     /// The result of executing that call (untrusted repository data).
     FunctionCallOutput { call_id: String, output: String },
+    /// One of the model's own earlier `message` items, replayed with the phase the provider
+    /// gave it (`commentary` or `final_answer`). Phase-aware models treat an unlabelled
+    /// assistant message as a final answer.
+    AssistantPhase { phase: String, content: String },
 }
 
 /// Which fixed tool catalog a request offers. `None` on a request means
@@ -239,6 +243,14 @@ impl ModelRequest {
                         return refuse("function call output is malformed or oversized");
                     }
                 }
+                InputItem::AssistantPhase { phase, content } => {
+                    if phase != "commentary" && phase != "final_answer" {
+                        return refuse("assistant message phase is not a documented value");
+                    }
+                    if content.is_empty() || content.len() > MAX_MESSAGE_CHARS {
+                        return refuse("message content is empty or oversized");
+                    }
+                }
             }
         }
         // Every output must answer an earlier call with the same id, once.
@@ -259,7 +271,7 @@ impl ModelRequest {
                     open.remove(pos);
                     answered.push(call_id);
                 }
-                InputItem::Message { .. } => {}
+                InputItem::Message { .. } | InputItem::AssistantPhase { .. } => {}
             }
         }
         if !open.is_empty() {
@@ -267,7 +279,7 @@ impl ModelRequest {
         }
         // The conversation must end on something the model should answer.
         match self.items.last() {
-            Some(InputItem::FunctionCall { .. }) | None => {
+            Some(InputItem::FunctionCall { .. } | InputItem::AssistantPhase { .. }) | None => {
                 return refuse("conversation must end with a user message or a function output")
             }
             Some(InputItem::Message { role, .. }) if role != "user" => {

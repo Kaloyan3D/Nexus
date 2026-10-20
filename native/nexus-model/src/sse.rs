@@ -25,6 +25,18 @@ pub struct AssembledToolCall {
     pub arguments: serde_json::Value,
 }
 
+/// One complete assistant `message` output item, as the provider labelled it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssembledMessage {
+    /// Provider item id (sanitized token; may be empty).
+    pub item_id: String,
+    /// `commentary` (a preamble before tool calls) or `final_answer`; `None` when the
+    /// provider sent no phase. Phase-aware models need it back verbatim on replay.
+    pub phase: Option<String>,
+    /// The item's output text.
+    pub text: String,
+}
+
 /// Token usage reported by the provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Usage {
@@ -47,6 +59,9 @@ pub struct TerminalResponse {
     pub reasoning_text: String,
     /// Assembled tool calls (data only).
     pub tool_calls: Vec<AssembledToolCall>,
+    /// The assistant `message` items with their phase, in wire order (empty when the
+    /// provider never completed an item; `text` above is always the full text).
+    pub messages: Vec<AssembledMessage>,
     /// Provider-reported usage.
     pub usage: Usage,
     /// Provider response id, when the provider supplied one.
@@ -87,6 +102,12 @@ pub enum ModelEvent {
     /// Provider response identifier (`response.id`), as supplied. Never
     /// synthesized.
     ResponseId(String),
+    /// A complete assistant `message` item (`output_item.done`) with its phase.
+    MessageDone {
+        item_id: String,
+        phase: Option<String>,
+        text: String,
+    },
 }
 
 struct ToolAssembly {
@@ -104,6 +125,8 @@ pub struct StreamAssembler {
     text: String,
     reasoning: String,
     tools: BTreeMap<String, ToolAssembly>,
+    messages: Vec<AssembledMessage>,
+    message_bytes: usize,
     usage: Usage,
     response_id: Option<String>,
     finish_reason: Option<String>,
@@ -130,6 +153,8 @@ impl StreamAssembler {
             text: String::new(),
             reasoning: String::new(),
             tools: BTreeMap::new(),
+            messages: Vec::new(),
+            message_bytes: 0,
             usage: Usage::default(),
             response_id: None,
             finish_reason: None,
@@ -279,6 +304,30 @@ impl StreamAssembler {
                 self.response_id = Some(id);
                 Ok(())
             }
+            ModelEvent::MessageDone {
+                item_id,
+                phase,
+                text,
+            } => {
+                // the same text already arrived as deltas: bounded separately so a provider
+                // cannot double the assembled output through completed items
+                self.message_bytes += text.len();
+                if self.message_bytes > self.max_text_bytes {
+                    return Err(ModelError::new(
+                        ModelErrorCode::PayloadTooLarge,
+                        "completed assistant messages exceed the text bound",
+                    ));
+                }
+                // a provider repeating the same completed item must not duplicate the replay
+                if item_id.is_empty() || !self.messages.iter().any(|m| m.item_id == item_id) {
+                    self.messages.push(AssembledMessage {
+                        item_id,
+                        phase,
+                        text,
+                    });
+                }
+                Ok(())
+            }
         }
     }
 
@@ -354,6 +403,7 @@ impl StreamAssembler {
             text: self.text,
             reasoning_text: self.reasoning,
             tool_calls: calls,
+            messages: self.messages,
             usage: self.usage,
             response_id: self.response_id,
             finish_reason: reason,
@@ -422,6 +472,39 @@ fn push_function_call_done(
         arguments: arguments.to_owned(),
     });
     Ok(())
+}
+
+/// Emit a [`ModelEvent::MessageDone`] for a complete assistant `message` item. Only the
+/// two documented phases are kept; any other value is dropped (never echoed back).
+fn push_message_done(item: &serde_json::Value, out: &mut Vec<ModelEvent>) {
+    if item.get("type").and_then(|v| v.as_str()) != Some("message") {
+        return;
+    }
+    let text: String = item
+        .get("content")
+        .and_then(|c| c.as_array())
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("output_text"))
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let phase = item
+        .get("phase")
+        .and_then(|v| v.as_str())
+        .filter(|p| matches!(*p, "commentary" | "final_answer"))
+        .map(str::to_owned);
+    out.push(ModelEvent::MessageDone {
+        item_id: item
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(safe_token)
+            .unwrap_or_default(),
+        phase,
+        text,
+    });
 }
 
 /// Parse one raw SSE payload line (the text after `data: `). Returns `None`
@@ -508,6 +591,7 @@ pub fn parse_data_payload(
         "response.output_item.done" => {
             if let Some(item) = value.get("item") {
                 push_function_call_done(item, out)?;
+                push_message_done(item, out);
             }
             Ok(false)
         }

@@ -295,6 +295,11 @@ pub fn run_mock_streaming(
                 kind: "response-id".to_owned(),
                 content: id.clone(),
             },
+            ModelEvent::MessageDone { phase, text, .. } => MockStreamItem {
+                index: i as u64,
+                kind: "message-complete".to_owned(),
+                content: format!("{}: {}", phase.as_deref().unwrap_or("-"), text.len()),
+            },
             ModelEvent::Usage(u) => {
                 usage_in = u.input_tokens;
                 usage_out = u.output_tokens;

@@ -8613,3 +8613,149 @@ fn rn3_the_conversations_bound_target_is_exposed_as_identities_only_and_absent_w
     );
     b.shutdown();
 }
+
+// ---- P0 (DSH vs Native): the model's own preamble goes back with its phase ------------------
+
+/// A preamble `message` item labelled with `phase`, then a function call: the shape the
+/// OpenCode Go Responses stream has used since 2026-10.
+fn phased_call_frames(
+    resp: &str,
+    n: usize,
+    phase: Option<&str>,
+    text: &str,
+    call_id: &str,
+    name: &str,
+    args: &str,
+) -> Vec<String> {
+    let msg = format!("msg_{n}");
+    let mut item = json!({"type":"message","id":msg,"role":"assistant","status":"completed",
+        "content":[{"type":"output_text","text":text,"annotations":[]}]});
+    if let Some(p) = phase {
+        item["phase"] = json!(p);
+    }
+    let mut v = vec![created(resp)];
+    v.push(sse(
+        "response.output_text.delta",
+        json!({"type":"response.output_text.delta","item_id":msg,"output_index":0,"delta":text}),
+    ));
+    if phase.is_some() || text.contains("ITEM") {
+        v.push(sse(
+            "response.output_item.done",
+            json!({"type":"response.output_item.done","output_index":0,"item":item}),
+        ));
+    }
+    let mut call = call_frames(resp, n, call_id, name, args);
+    call.remove(0); // its own response.created
+    v.extend(call);
+    v
+}
+
+fn p0_phase_responder() -> Responder {
+    Arc::new(|n, body| {
+        let resp = format!("resp_{n}");
+        let done = body["input"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["type"] == "function_call_output")
+                    .count()
+            })
+            .unwrap_or(0);
+        let phase = if current_request(body).contains("P0-PLAIN") {
+            None
+        } else {
+            Some("commentary")
+        };
+        match done {
+            0 => Answer::Frames(phased_call_frames(
+                &resp,
+                n,
+                phase,
+                "P0-PREAMBLE reading the README first.",
+                &format!("call_{n}"),
+                "fs_read",
+                r#"{"path":"README.md"}"#,
+            )),
+            _ => Answer::Frames(text_frames(
+                &resp,
+                "P0-FINAL The README describes the add() crate.",
+            )),
+        }
+    })
+}
+
+#[test]
+fn p0_a_preamble_goes_back_to_the_model_with_its_phase_before_its_call() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(p0_phase_responder());
+    let b = interactive_broker(&fx, "p0-phase");
+    let sock = b.socket_path().to_owned();
+    let (_, run) = rn2_send(
+        &sock,
+        None,
+        "P0-PHASE: what does README.md say? Do not change anything.",
+        "p0-phase-0000001",
+        None,
+        None,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let bodies = rn2_bodies(&fx, 0);
+    let after = bodies
+        .iter()
+        .find(|b| saw(b, "function_call_output"))
+        .expect("a request after the tool ran");
+    let input = after["input"].as_array().unwrap();
+    let pre: Vec<&Value> = input
+        .iter()
+        .filter(|i| i.to_string().contains("P0-PREAMBLE"))
+        .collect();
+    assert_eq!(pre.len(), 1, "{input:?}");
+    assert_eq!(
+        *pre[0],
+        json!({"type":"message","role":"assistant","phase":"commentary",
+            "content":[{"type":"output_text","text":"P0-PREAMBLE reading the README first."}]})
+    );
+    let at = |f: &dyn Fn(&Value) -> bool| input.iter().position(f).unwrap();
+    assert!(
+        at(&|i| i.to_string().contains("P0-PREAMBLE")) < at(&|i| i["type"] == "function_call"),
+        "the preamble precedes its call"
+    );
+    b.shutdown();
+}
+
+#[test]
+fn p0_unlabelled_text_is_replayed_exactly_as_before() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = fixture_autonomous(p0_phase_responder());
+    let b = interactive_broker(&fx, "p0-plain");
+    let sock = b.socket_path().to_owned();
+    let (_, run) = rn2_send(
+        &sock,
+        None,
+        "P0-PLAIN: what does README.md say? Do not change anything.",
+        "p0-plain-0000001",
+        None,
+        None,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let bodies = rn2_bodies(&fx, 0);
+    let after = bodies
+        .iter()
+        .find(|b| saw(b, "function_call_output"))
+        .expect("a request after the tool ran");
+    let pre: Vec<&Value> = after["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i.to_string().contains("P0-PREAMBLE"))
+        .collect();
+    assert_eq!(
+        pre,
+        vec![&json!({"role":"assistant","content":"P0-PREAMBLE reading the README first."})]
+    );
+    b.shutdown();
+}

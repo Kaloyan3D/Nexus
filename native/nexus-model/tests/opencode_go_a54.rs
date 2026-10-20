@@ -1711,3 +1711,133 @@ fn a55_partial_or_inconsistent_calls_are_errors_never_tool_calls() {
     ]);
     assert!(assemble(&body).is_err());
 }
+
+// ---- P0: assistant message phase (DSH vs Native investigation) ----
+
+fn msg_done(id: &str, phase: Option<&str>, text: &str) -> serde_json::Value {
+    let mut item = serde_json::json!({"type":"message","id":id,"role":"assistant","status":"completed",
+        "content":[{"type":"output_text","text":text,"annotations":[]}]});
+    if let Some(p) = phase {
+        item["phase"] = serde_json::json!(p);
+    }
+    serde_json::json!({"type":"response.output_item.done","item":item})
+}
+
+#[test]
+fn p0_completed_message_items_keep_the_providers_phase_and_only_documented_values() {
+    let body = frames(&[
+        serde_json::json!({"type":"response.output_text.delta","delta":"Reading the README."}),
+        msg_done("msg_1", Some("commentary"), "Reading the README."),
+        added("fc_1", "call_1", "fs_read"),
+        done_item("fc_1", "call_1", "fs_read", "{\"path\":\"README.md\"}"),
+        msg_done("msg_2", Some("bogus-phase"), "x"),
+        msg_done("msg_3", None, "y"),
+        completed_ev(),
+    ]);
+    let t = assemble(&body).unwrap();
+    assert_eq!(
+        t.text, "Reading the README.",
+        "the text still comes from the deltas"
+    );
+    assert_eq!(t.messages.len(), 3);
+    assert_eq!(t.messages[0].phase.as_deref(), Some("commentary"));
+    assert_eq!(t.messages[0].text, "Reading the README.");
+    assert_eq!(t.messages[0].item_id, "msg_1");
+    assert_eq!(
+        t.messages[1].phase, None,
+        "an undocumented phase is never echoed back"
+    );
+    assert_eq!(t.messages[2].phase, None);
+    assert_eq!(t.tool_calls.len(), 1);
+}
+
+#[test]
+fn p0_completed_messages_are_bounded_like_the_text() {
+    let big = "z".repeat(2048);
+    let body = frames(&[msg_done("m", Some("commentary"), &big), completed_ev()]);
+    let (events, finish) = nexus_model::sse::parse_sse_body(&body, 100).unwrap();
+    let mut a = StreamAssembler::new("att", "dig", 100, 1024, 1024);
+    let err = events.into_iter().try_for_each(|e| a.push(e)).unwrap_err();
+    assert_eq!(err.code, ModelErrorCode::PayloadTooLarge);
+    assert!(finish.is_some());
+}
+
+#[test]
+fn p0_a_phased_assistant_item_is_sent_as_a_responses_message_item() {
+    let p = prep(
+        WireProfile::OpenCodeGoResponses,
+        &tool_req(vec![
+            user("task"),
+            InputItem::AssistantPhase {
+                phase: "commentary".into(),
+                content: "Reading the README.".into(),
+            },
+            InputItem::FunctionCall {
+                call_id: "call_1".into(),
+                name: "fs_read".into(),
+                arguments: "{}".into(),
+            },
+            InputItem::FunctionCallOutput {
+                call_id: "call_1".into(),
+                output: "{}".into(),
+            },
+        ]),
+    )
+    .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&p.request_bytes).unwrap();
+    assert_eq!(
+        v["input"][1],
+        serde_json::json!({"type":"message","role":"assistant","phase":"commentary",
+            "content":[{"type":"output_text","text":"Reading the README."}]})
+    );
+    // an unlabelled assistant message keeps its old (plain) shape
+    let q = prep(
+        WireProfile::OpenCodeGoResponses,
+        &tool_req(vec![
+            user("task"),
+            InputItem::Message {
+                role: "assistant".into(),
+                content: "plain".into(),
+            },
+            user("go on"),
+        ]),
+    )
+    .unwrap();
+    let w: serde_json::Value = serde_json::from_slice(&q.request_bytes).unwrap();
+    assert_eq!(
+        w["input"][1],
+        serde_json::json!({"role":"assistant","content":"plain"})
+    );
+}
+
+#[test]
+fn p0_phased_items_are_validated() {
+    let ph = |phase: &str, content: &str| InputItem::AssistantPhase {
+        phase: phase.into(),
+        content: content.into(),
+    };
+    let ok =
+        |items: Vec<InputItem>| prep(WireProfile::OpenCodeGoResponses, &tool_req(items)).is_ok();
+    assert!(ok(vec![user("a"), ph("commentary", "x"), user("b")]));
+    assert!(ok(vec![user("a"), ph("final_answer", "x"), user("b")]));
+    assert!(
+        !ok(vec![user("a"), ph("analysis", "x"), user("b")]),
+        "undocumented phase"
+    );
+    assert!(
+        !ok(vec![user("a"), ph("commentary", ""), user("b")]),
+        "empty"
+    );
+    assert!(
+        !ok(vec![
+            user("a"),
+            ph("commentary", &"x".repeat(40 * 1024)),
+            user("b")
+        ]),
+        "oversize"
+    );
+    assert!(
+        !ok(vec![user("a"), ph("commentary", "x")]),
+        "must end on user/output"
+    );
+}

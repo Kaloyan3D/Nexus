@@ -26,7 +26,9 @@ pub const STUB_ABOVE: usize = 600;
 
 fn size(it: &InputItem) -> usize {
     match it {
-        InputItem::Message { content, .. } => content.len(),
+        InputItem::Message { content, .. } | InputItem::AssistantPhase { content, .. } => {
+            content.len()
+        }
         InputItem::FunctionCall {
             arguments, name, ..
         } => arguments.len() + name.len() + 40,
@@ -115,6 +117,10 @@ pub fn compact(items: &mut Vec<InputItem>, receipts: &str, budget: usize) -> boo
                     *content = content.chars().take(240).collect::<String>() + " [shortened]";
                     changed = true;
                 }
+                InputItem::AssistantPhase { content, .. } if content.len() > STUB_ABOVE => {
+                    *content = content.chars().take(240).collect::<String>() + " [shortened]";
+                    changed = true;
+                }
                 _ => continue,
             }
             if total_bytes(items) <= budget {
@@ -146,7 +152,7 @@ pub fn compact(items: &mut Vec<InputItem>, receipts: &str, budget: usize) -> boo
                 // output here means its call was already gone - nothing more to do
                 let _ = call_id;
             }
-            InputItem::Message { .. } => {}
+            InputItem::Message { .. } | InputItem::AssistantPhase { .. } => {}
         }
         changed = true;
         if note_at.is_none() {

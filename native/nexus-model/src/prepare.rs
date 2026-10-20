@@ -181,6 +181,13 @@ pub fn prepare(
                                 "type": "function_call_output", "call_id": call_id, "output": output,
                             })
                         }
+                        // the model's own message item, phase intact (Responses `message` item)
+                        crate::request::InputItem::AssistantPhase { phase, content } => {
+                            serde_json::json!({
+                                "type": "message", "role": "assistant", "phase": phase,
+                                "content": [{ "type": "output_text", "text": content }],
+                            })
+                        }
                     }).collect::<Vec<_>>(),
                     "tools": crate::repo_tools::definitions_for(profile),
                     "tool_choice": "auto",

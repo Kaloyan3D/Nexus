@@ -1553,6 +1553,49 @@ fn premature_stop(ls: &mut LoopState, text: &str) -> Option<(&'static str, &'sta
     None
 }
 
+/// Characters of one response's text that are replayed to the model.
+pub const REPLAYED_TEXT_CHARS: usize = 8 * 1024;
+
+/// Replay the model's own text exactly as the provider labelled it. A phase-aware model
+/// (`phase: commentary` on the short preamble before a tool call) reads an UNLABELLED assistant
+/// message as a final answer; replaying its preambles that way taught it to stop after an
+/// announcement (R-NATIVE-3 run 14: 14 of 20 replays of the real history stalled with the labels
+/// dropped, 0 of 20 with them kept). Text the provider did not label stays a plain assistant
+/// message, as before. The replayed text keeps the same total bound as before.
+fn push_model_text(items: &mut Vec<InputItem>, out: &nexus_client::TurnOutput) {
+    let labelled = out.messages.iter().any(|m| m.phase.is_some());
+    if !labelled {
+        if !out.text.trim().is_empty() {
+            items.push(InputItem::Message {
+                role: "assistant".into(),
+                content: out.text.chars().take(REPLAYED_TEXT_CHARS).collect(),
+            });
+        }
+        return;
+    }
+    let mut left = REPLAYED_TEXT_CHARS;
+    for m in &out.messages {
+        if left == 0 {
+            break;
+        }
+        if m.text.trim().is_empty() {
+            continue;
+        }
+        let content: String = m.text.chars().take(left).collect();
+        left -= content.chars().count();
+        items.push(match &m.phase {
+            Some(phase) => InputItem::AssistantPhase {
+                phase: phase.clone(),
+                content,
+            },
+            None => InputItem::Message {
+                role: "assistant".into(),
+                content,
+            },
+        });
+    }
+}
+
 /// TEST ONLY: `NEXUS_FAULT_INJECT_DISPATCHES=3,7` loses the answer of the 3rd and 7th
 /// provider request of a run (after the provider really answered).
 fn fault_injected(dispatch: u32) -> bool {
@@ -2048,12 +2091,7 @@ fn turn_loop(
                         ),
                         None,
                     );
-                    if !out.text.trim().is_empty() {
-                        items.push(InputItem::Message {
-                            role: "assistant".into(),
-                            content: out.text.chars().take(8 * 1024).collect(),
-                        });
-                    }
+                    push_model_text(&mut items, &out);
                     items.push(InputItem::Message {
                         role: "user".into(),
                         content: msg.0.to_owned(),
@@ -2119,12 +2157,7 @@ fn turn_loop(
         if ls.recent_narration.len() > 4 {
             ls.recent_narration.remove(0);
         }
-        if !out.text.trim().is_empty() {
-            items.push(InputItem::Message {
-                role: "assistant".into(),
-                content: out.text.chars().take(8 * 1024).collect(),
-            });
-        }
+        push_model_text(&mut items, &out);
         for call in proposals {
             if ctx.stop() {
                 return Ok(LoopEnd::Cancelled);
@@ -3510,5 +3543,101 @@ mod tests {
         ] {
             assert!(!is_authority_failure(c), "{c}");
         }
+    }
+
+    fn output_with(text: &str, messages: Vec<(Option<&str>, &str)>) -> nexus_client::TurnOutput {
+        nexus_client::TurnOutput {
+            text: text.to_owned(),
+            messages: messages
+                .into_iter()
+                .map(|(p, t)| nexus_model::AssembledMessage {
+                    item_id: String::new(),
+                    phase: p.map(str::to_owned),
+                    text: t.to_owned(),
+                })
+                .collect(),
+            tool_calls: Vec::new(),
+            usage: None,
+            response_id: None,
+            finish_reason: "stop".into(),
+            http_status: Some(200),
+            provider_request_id: None,
+            first_token_ms: None,
+            latency_ms: 0,
+            request_digest: String::new(),
+            partial_tool: false,
+        }
+    }
+
+    #[test]
+    fn the_models_preambles_go_back_with_their_phase_and_unlabelled_text_stays_plain() {
+        // labelled: one item per message, phase intact, in wire order
+        let mut items = Vec::new();
+        push_model_text(
+            &mut items,
+            &output_with(
+                "Reading the file.Done reading.",
+                vec![
+                    (Some("commentary"), "Reading the file."),
+                    (None, "Done reading."),
+                ],
+            ),
+        );
+        assert_eq!(
+            items,
+            vec![
+                InputItem::AssistantPhase {
+                    phase: "commentary".into(),
+                    content: "Reading the file.".into()
+                },
+                InputItem::Message {
+                    role: "assistant".into(),
+                    content: "Done reading.".into()
+                },
+            ]
+        );
+        // no phase anywhere (older providers, the test fixtures): exactly the old behaviour
+        let mut items = Vec::new();
+        push_model_text(
+            &mut items,
+            &output_with("plain narration", vec![(None, "plain narration")]),
+        );
+        assert_eq!(
+            items,
+            vec![InputItem::Message {
+                role: "assistant".into(),
+                content: "plain narration".into()
+            }]
+        );
+        let mut items = Vec::new();
+        push_model_text(&mut items, &output_with("from deltas only", vec![]));
+        assert_eq!(items.len(), 1);
+        // nothing to replay
+        let mut items = Vec::new();
+        push_model_text(
+            &mut items,
+            &output_with("  ", vec![(Some("commentary"), " ")]),
+        );
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn replayed_text_keeps_the_old_total_bound_across_labelled_items() {
+        let a = "a".repeat(6 * 1024);
+        let b = "b".repeat(6 * 1024);
+        let mut items = Vec::new();
+        push_model_text(
+            &mut items,
+            &output_with("", vec![(Some("commentary"), &a), (Some("commentary"), &b)]),
+        );
+        let total: usize = items
+            .iter()
+            .map(|i| match i {
+                InputItem::AssistantPhase { content, .. } => content.chars().count(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(total, REPLAYED_TEXT_CHARS);
+        assert_eq!(items.len(), 2);
     }
 }

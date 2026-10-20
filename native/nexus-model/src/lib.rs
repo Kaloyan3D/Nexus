@@ -39,7 +39,9 @@ pub use prepare::{
 };
 pub use request::{ChatMessage, InputItem, ModelRequest, ToolDefinition, ToolProfile};
 pub use runtime::{ModelRuntime, OfflineModelRuntime};
-pub use sse::{AssembledToolCall, ModelEvent, StreamAssembler, TerminalResponse, Usage};
+pub use sse::{
+    AssembledMessage, AssembledToolCall, ModelEvent, StreamAssembler, TerminalResponse, Usage,
+};
 pub use stream::{AttemptState, AttemptStore, AttemptTracker, CancellationToken};
 pub use target::{
     AuthoritativeEndpoint, BillingProvenance, ExecutionTargetV2, SessionBinding, WireProfile,

@@ -856,7 +856,8 @@ pub fn run_model_only(
                 // dispatched: a fragment is inert text at most.
                 ModelEvent::ReasoningDelta(_)
                 | ModelEvent::ToolFragment { .. }
-                | ModelEvent::ToolDone { .. } => {}
+                | ModelEvent::ToolDone { .. }
+                | ModelEvent::MessageDone { .. } => {}
             }
         };
         nexus_model::dispatch_redeemed_streaming(
