@@ -28,6 +28,7 @@ pub mod sse;
 pub mod stream;
 pub mod target;
 pub mod testkit;
+pub mod trace;
 pub mod transport;
 
 pub use authorized::{dispatch_authorized, dispatch_redeemed_streaming, RedeemedDispatch};

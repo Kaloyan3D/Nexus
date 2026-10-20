@@ -280,3 +280,64 @@ fn p0_upload_blocked_on_backpressure_observes_cancellation_promptly() {
         e.error
     );
 }
+
+/// The opt-in provider trace records the exchange's STRUCTURE and nothing the user or the
+/// repository wrote, and never the credential.
+#[test]
+fn p0_the_provider_trace_is_structural_and_private() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("trace.jsonl");
+    // the variable is read per exchange; other tests in this binary may add their own lines
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var("NEXUS_PROVIDER_TRACE", &file);
+    }
+    let srv = slow_reader(0);
+    let p = prepare_big(&srv, 48 * 1024);
+    send(&p, &CancellationToken::new(), &limits()).expect("answered");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let mine: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["requestDigest"] == p.attested.prepared().request_digest.as_str())
+        .collect();
+    assert_eq!(mine.len(), 1, "{text}");
+    let r = &mine[0];
+    assert_eq!(r["response"]["status"], 200);
+    assert_eq!(r["response"]["usage"]["input"], 7);
+    assert!(r["request"]["bytes"].as_u64().unwrap() > 40_000);
+    assert!(r["timing"]["connectMs"].is_u64() && r["timing"]["uploadMs"].is_u64());
+    assert!(r["response"]["events"]
+        .to_string()
+        .contains("response.completed"));
+    assert!(
+        !text.contains("lorem"),
+        "request text leaked into the trace"
+    );
+    assert!(
+        !text.contains("sk-p0-upload-marker"),
+        "the credential leaked into the trace"
+    );
+    assert!(
+        !text.contains("\"ok\""),
+        "response text leaked into the trace"
+    );
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // a symlink planted at the trace path is never followed
+    let victim = dir.path().join("victim.txt");
+    std::fs::write(&victim, "untouched").unwrap();
+    let link = dir.path().join("link.jsonl");
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var("NEXUS_PROVIDER_TRACE", &link);
+    }
+    let srv2 = slow_reader(0);
+    let p2 = prepare_big(&srv2, 48 * 1024);
+    send(&p2, &CancellationToken::new(), &limits()).expect("answered");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+}

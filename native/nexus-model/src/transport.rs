@@ -192,6 +192,11 @@ impl Credential {
     }
 }
 
+/// `O_NOFOLLOW` for `OpenOptionsExt::custom_flags` (shared with the provider trace).
+pub(crate) fn o_nofollow() -> i32 {
+    libc_o_nofollow()
+}
+
 #[cfg(target_os = "linux")]
 fn libc_o_nofollow() -> i32 {
     0o400000 // O_NOFOLLOW on Linux (x86_64/aarch64)
@@ -434,8 +439,35 @@ impl HttpSseTransport {
         credential: &Credential,
         cancel: &CancellationToken,
         limits: &TransportLimits,
-        mut on_event: Option<&mut dyn FnMut(&ModelEvent)>,
+        on_event: Option<&mut dyn FnMut(&ModelEvent)>,
     ) -> Result<SendReport, TransportError> {
+        let mut ex = crate::trace::Exchange::start();
+        let r = self.send_inner(request, credential, cancel, limits, on_event, &mut ex);
+        crate::trace::record(
+            request.prepared(),
+            &ex,
+            match &r {
+                Ok(_) => Ok(()),
+                Err(te) => Err((
+                    te.error.code.as_str(),
+                    te.error.message.as_str(),
+                    te.bytes_sent,
+                )),
+            },
+        );
+        r
+    }
+
+    fn send_inner(
+        &self,
+        request: &AttestedPreparedModelRequest,
+        credential: &Credential,
+        cancel: &CancellationToken,
+        limits: &TransportLimits,
+        mut on_event: Option<&mut dyn FnMut(&ModelEvent)>,
+        ex: &mut crate::trace::Exchange,
+    ) -> Result<SendReport, TransportError> {
+        let exchange_start = std::time::Instant::now();
         let deadline = std::time::Instant::now() + Duration::from_millis(limits.total_timeout_ms);
         credential.check().map_err(TransportError::refused)?;
         cancel.check().map_err(|_| {
@@ -488,6 +520,7 @@ impl HttpSseTransport {
         // connect AND the TLS handshake completed with a verified peer.
         let mut stream = crate::egress::connect(&dest, &tls, cancel, deadline)
             .map_err(TransportError::refused)?;
+        ex.connect_ms = Some(exchange_start.elapsed().as_millis());
         let (host, port) = (dest.host.clone(), dest.port);
         // Exact request line + fixed header allowlist. The credential
         // enters exactly one header and never the body.
@@ -504,6 +537,7 @@ impl HttpSseTransport {
         // NOTE: `auth` is written to the socket only; it never enters any
         // error, log, or snapshot on this path.
         let stall = Duration::from_millis(limits.read_timeout_ms);
+        let mut held = 0u32;
         let send_err = |what: &str, e: std::io::Error| {
             let code = if e.kind() == std::io::ErrorKind::Interrupted && cancel.is_cancelled() {
                 ModelErrorCode::Cancelled
@@ -515,32 +549,45 @@ impl HttpSseTransport {
                 format!("{what} send outcome unknown: {}", redact(&e.to_string())),
             ))
         };
-        write_all_bounded(&mut stream, head.as_bytes(), cancel, deadline, stall)
-            .map_err(|e| send_err("header", e))?;
+        write_all_bounded(
+            &mut stream,
+            head.as_bytes(),
+            cancel,
+            deadline,
+            stall,
+            &mut held,
+        )
+        .map_err(|e| send_err("header", e))?;
         write_all_bounded(
             &mut stream,
             format!("authorization: {auth}\r\n").as_bytes(),
             cancel,
             deadline,
             stall,
+            &mut held,
         )
         .map_err(|e| send_err("credential header", e))?;
         // Blank line terminating the header block, then the exact body.
-        write_all_bounded(&mut stream, b"\r\n", cancel, deadline, stall)
+        write_all_bounded(&mut stream, b"\r\n", cancel, deadline, stall, &mut held)
             .map_err(|e| send_err("header terminator", e))?;
         // Drop the secret from memory as early as possible (best effort;
         // `String` zeroization is not guaranteed, so the guarantee stated
         // is narrower: the value never reaches logs/errors/snapshots).
         let _ = auth.len();
-        write_all_bounded(
+        let body = write_all_bounded(
             &mut stream,
             &prepared.request_bytes,
             cancel,
             deadline,
             stall,
+            &mut held,
         )
-        .and_then(|()| flush_bounded(&mut stream, cancel, deadline, stall))
-        .map_err(|e| send_err("body", e))?;
+        .and_then(|()| flush_bounded(&mut stream, cancel, deadline, stall, &mut held));
+        ex.held_slices = held;
+        ex.upload_ms = ex
+            .connect_ms
+            .map(|c| exchange_start.elapsed().as_millis().saturating_sub(c));
+        body.map_err(|e| send_err("body", e))?;
         // From here the bytes may exist provider-side: every later failure
         // is uncertain or partial, never "not sent".
         cancel.check().map_err(|_| {
@@ -559,7 +606,11 @@ impl HttpSseTransport {
         // those already delivered are handed to `on_event` in wire order.
         let mut emitted = 0usize;
         let mut stream_ok: Option<bool> = None;
+        let first_byte = std::cell::Cell::new(None::<u128>);
         let mut observe = |buf: &[u8]| {
+            if first_byte.get().is_none() {
+                first_byte.set(Some(exchange_start.elapsed().as_millis()));
+            }
             let Some(cb) = on_event.as_mut() else {
                 return;
             };
@@ -608,6 +659,10 @@ impl HttpSseTransport {
             }
         };
         let (raw, read_err) = read_all_partial(&mut stream, cancel, limits, deadline, &mut observe);
+        ex.first_byte_ms = first_byte.get();
+        if ex.enabled {
+            ex.raw = raw.clone();
+        }
         // Cancellation wins over partial bytes: stop now, keep the attempt
         // uncertain, and never present a cancelled stream as data.
         if let Some(ref e) = read_err {
@@ -802,6 +857,7 @@ fn write_all_bounded(
     cancel: &CancellationToken,
     deadline: std::time::Instant,
     stall: Duration,
+    held: &mut u32,
 ) -> std::io::Result<()> {
     let mut idle_since = std::time::Instant::now();
     while !buf.is_empty() {
@@ -817,7 +873,11 @@ fn write_all_bounded(
                 buf = &buf[n..];
                 idle_since = std::time::Instant::now();
             }
-            Err(e) if is_slice_timeout(&e) => {}
+            Err(e) if is_slice_timeout(&e) => {
+                if e.kind() != std::io::ErrorKind::Interrupted {
+                    *held += 1;
+                }
+            }
             Err(e) => return Err(e),
         }
     }
@@ -831,13 +891,18 @@ fn flush_bounded(
     cancel: &CancellationToken,
     deadline: std::time::Instant,
     stall: Duration,
+    held: &mut u32,
 ) -> std::io::Result<()> {
     let idle_since = std::time::Instant::now();
     loop {
         check_send_bounds(cancel, deadline, idle_since, stall)?;
         match stream.flush() {
             Ok(()) => return Ok(()),
-            Err(e) if is_slice_timeout(&e) => {}
+            Err(e) if is_slice_timeout(&e) => {
+                if e.kind() != std::io::ErrorKind::Interrupted {
+                    *held += 1;
+                }
+            }
             Err(e) => return Err(e),
         }
     }
