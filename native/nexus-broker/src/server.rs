@@ -166,6 +166,23 @@ impl Broker {
         self.store.put(&rec).is_ok()
     }
 
+    /// EM-04C1: record the tool catalog a (running) run is offered. Set once; `false` when it
+    /// cannot be recorded or another catalog is already recorded (the caller fails closed).
+    pub(crate) fn bind_tool_catalog(&self, run_id: &str, digest: &str) -> bool {
+        let _g = self.store.lock();
+        let Some(mut rec) = self.store.load(run_id) else {
+            return false;
+        };
+        if let Some(have) = &rec.tool_catalog_digest {
+            return have == digest;
+        }
+        if rec.run.terminal {
+            return false;
+        }
+        rec.tool_catalog_digest = Some(digest.to_owned());
+        self.store.put(&rec).is_ok()
+    }
+
     /// Annotate a record that is already final (links between runs, what happened to its
     /// patch). Never changes its state, outcome or counters.
     pub fn annotate(&self, run_id: &str, f: impl FnOnce(&mut IntentRun)) {
@@ -579,6 +596,7 @@ impl Broker {
                 engine_id: None,
                 task_binding_digest: None,
                 task_binding_identity: None,
+                tool_catalog_digest: None,
             };
             // Record first, then the index: a crash between the two leaves
             // an unindexed record (recovered as abandoned), never a key that

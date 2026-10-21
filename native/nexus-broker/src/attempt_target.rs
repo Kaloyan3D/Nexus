@@ -123,6 +123,17 @@ impl TaskTarget {
                     ),
                 )
             })?;
+        // EM-04C1: the request budget is Registry policy sealed with the target. The binding's
+        // projection must carry exactly the issuance's value, in range, or nothing is sent.
+        let sealed_budget = binding.target.get("requestBudgetBytes");
+        if sealed_budget.is_some_and(|v| v.as_u64().is_none())
+            || sealed_budget.and_then(|v| v.as_u64()) != typed.target.request_budget_bytes
+        {
+            return Err(te(
+                "task-binding-invalid",
+                "the task binding's request budget is not the issuance's; nothing was sent",
+            ));
+        }
         let claimed = issued
             .get("taskBindingDigest")
             .and_then(|v| v.as_str())
@@ -187,6 +198,23 @@ impl TaskTarget {
 
     pub fn default_effort(&self) -> &str {
         &self.binding.default_reasoning
+    }
+
+    /// EM-04C1: the Registry-sealed serialized-request budget of this task's mode, if its mode
+    /// declares one. Read from the sealed binding only, so it is fixed for the task, identical in
+    /// every attempt's issuance (the binding admits only targets equal to it outside the effort)
+    /// and unaffected by any later configuration, flag, model or tool output.
+    pub fn request_budget_bytes(&self) -> Option<usize> {
+        self.binding
+            .target
+            .get("requestBudgetBytes")
+            .and_then(|v| v.as_u64())
+            .filter(|b| {
+                (nexus_contracts::MIN_REQUEST_BUDGET_BYTES
+                    ..=nexus_contracts::MAX_REQUEST_BUDGET_BYTES)
+                    .contains(b)
+            })
+            .map(|b| b as usize)
     }
 
     /// Identity a continuation must keep (model, route, provider, connection, endpoint,
@@ -302,7 +330,7 @@ pub fn identity_digest(binding: &nexus_contracts::TaskBindingV1) -> String {
     let x = &binding.extension;
     let pick = |v: &Value, k: &str| v.get(k).cloned().unwrap_or(Value::Null);
     let endpoint = x.get("endpoint").cloned().unwrap_or(Value::Null);
-    nexus_contracts::digest_value(&serde_json::json!({
+    let mut identity = serde_json::json!({
         "modeId": pick(t, "modeId"),
         "orchestrationEngineId": pick(t, "orchestrationEngineId"),
         "roleId": pick(t, "roleId"),
@@ -322,5 +350,11 @@ pub fn identity_digest(binding: &nexus_contracts::TaskBindingV1) -> String {
         "credentialRef": pick(x, "credentialRef"),
         "wireProfile": pick(x, "wireProfile"),
         "defaultReasoning": binding.default_reasoning,
-    }))
+    });
+    // EM-04C1: a budgeted mode's budget is part of the identity a continuation must keep; a mode
+    // without one hashes exactly as before (the key is absent, not null).
+    if let Some(b) = t.get("requestBudgetBytes") {
+        identity["requestBudgetBytes"] = b.clone();
+    }
+    nexus_contracts::digest_value(&identity)
 }

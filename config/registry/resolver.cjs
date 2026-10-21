@@ -272,6 +272,8 @@ function resolveRoleBinding(registry, mode, role, assignment, runtime) {
     protocolId: (route.compatibility && route.compatibility.transport) || 'unknown',
     reasoning: assignment.reasoning,
     ...(allowedReasoning !== undefined ? { allowedReasoning } : {}),
+    // EM-04C1: the mode's request budget policy, only when the mode declares one
+    ...(mode.requestBudgetBytes !== undefined ? { requestBudgetBytes: mode.requestBudgetBytes } : {}),
     requiredCapabilities: Object.keys((slot && slot.requirements) || {}).sort(),
     slotRequirements: { ...((slot && slot.requirements) || {}) },
     dataUseTier: model.dataUseTier || null,
@@ -378,6 +380,7 @@ function compileModeConfig(modeConfig, registry, options) {
         protocolId: b.protocolId,
         reasoning: b.reasoning,
         ...(b.allowedReasoning !== undefined ? { allowedReasoning: b.allowedReasoning } : {}),
+        ...(b.requestBudgetBytes !== undefined ? { requestBudgetBytes: b.requestBudgetBytes } : {}),
         requiredCapabilities: b.requiredCapabilities,
         slotRequirements: b.slotRequirements,
         dataUseTier: b.dataUseTier,

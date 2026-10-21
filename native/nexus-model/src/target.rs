@@ -409,6 +409,7 @@ impl ExecutionTargetV2 {
             protocol_id: "https".to_owned(),
             reasoning: "low".to_owned(),
             allowed_reasoning: None,
+            request_budget_bytes: None,
             required_capabilities: vec!["text".to_owned()],
             slot_requirements: serde_json::json!({}),
             data_use_tier: Some("standard".to_owned()),

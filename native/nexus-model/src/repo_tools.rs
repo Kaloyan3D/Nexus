@@ -292,6 +292,47 @@ pub fn catalog_digest_for(profile: crate::request::ToolProfile) -> String {
     )))
 }
 
+/// EM-04C1: digest of the exact bytes of an arbitrary `tools` array (the digest a request's
+/// catalog would have).
+pub fn catalog_digest_of(definitions: &[Value]) -> String {
+    nexus_contracts::sha256_hex(&nexus_contracts::canonical_json(&Value::Array(
+        definitions.to_vec(),
+    )))
+}
+
+/// EM-04C1: the frozen identity of each catalog. A catalog is a product of this crate's code
+/// alone; these constants pin what each profile offered at EM-04C1 so that ANY edit of a profile's
+/// tools (a description, a parameter, one more tool) is caught by a test and by the run-start
+/// guard (`verify_catalog`) instead of silently reaching a provider. `RepoCodeV1` is the
+/// production `muse-v0` catalog and must never change here; the signals catalog is the future Muse
+/// engine's and has its own, distinct identity.
+pub const REPO_INSPECT_V1_CATALOG_DIGEST: &str =
+    "b06d9c9f542b2e3fcc3d2a289f89c2ea201ff9b4ffec4af7d327ba62b4592ff6";
+pub const REPO_CODE_V1_CATALOG_DIGEST: &str =
+    "58f513de4ac7097e2d2c44999180ec74295aaaf590d585ff15787b784db8d90b";
+pub const REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST: &str =
+    "5f7d19e2e0cce856e0f1dd1cf245a7906dfdcabdf64b9f02413d6f039f424510";
+
+/// The frozen digest of `profile`'s catalog.
+pub fn frozen_catalog_digest(profile: crate::request::ToolProfile) -> &'static str {
+    use crate::request::ToolProfile as P;
+    match profile {
+        P::RepoInspectV1 => REPO_INSPECT_V1_CATALOG_DIGEST,
+        P::RepoCodeV1 => REPO_CODE_V1_CATALOG_DIGEST,
+        P::RepoCodeMuseSignalsV1 => REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST,
+    }
+}
+
+/// Whether `definitions` are exactly the frozen catalog of `profile`.
+pub fn catalog_matches(profile: crate::request::ToolProfile, definitions: &[Value]) -> bool {
+    catalog_digest_of(definitions) == frozen_catalog_digest(profile)
+}
+
+/// Whether this build offers exactly the frozen catalog for `profile`.
+pub fn verify_catalog(profile: crate::request::ToolProfile) -> bool {
+    catalog_matches(profile, &definitions_for(profile))
+}
+
 /// Digest of the exact catalog bytes (recorded with every run so a changed
 /// schema is visible in the evidence).
 pub fn catalog_digest() -> String {
@@ -443,6 +484,93 @@ mod tests {
             nexus_contracts::canonical_json(&Value::Array(sig.clone())).len(),
             nexus_contracts::canonical_json(&Value::Array(code)).len() + 2_882
         );
+    }
+
+    /// The three catalogs have DISTINCT, frozen identities. The first two are what the baseline
+    /// build (`49026e8`, before EM-04C1) offered, byte for byte; the signals catalog is the future
+    /// Muse engine's and can never be mistaken for `muse-v0`'s.
+    #[test]
+    fn each_catalog_has_its_own_frozen_identity() {
+        use crate::request::ToolProfile as P;
+        assert_eq!(
+            REPO_INSPECT_V1_CATALOG_DIGEST,
+            "b06d9c9f542b2e3fcc3d2a289f89c2ea201ff9b4ffec4af7d327ba62b4592ff6"
+        );
+        assert_eq!(
+            REPO_CODE_V1_CATALOG_DIGEST,
+            "58f513de4ac7097e2d2c44999180ec74295aaaf590d585ff15787b784db8d90b"
+        );
+        assert_eq!(
+            REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST,
+            "5f7d19e2e0cce856e0f1dd1cf245a7906dfdcabdf64b9f02413d6f039f424510"
+        );
+        let all = [P::RepoInspectV1, P::RepoCodeV1, P::RepoCodeMuseSignalsV1];
+        for p in all {
+            assert_eq!(catalog_digest_for(p), frozen_catalog_digest(p), "{p:?}");
+            assert!(verify_catalog(p), "{p:?}");
+        }
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(frozen_catalog_digest(*a), frozen_catalog_digest(*b));
+            }
+        }
+    }
+
+    /// Any edit of a catalog - a description, a parameter, an added or removed tool, a reordering,
+    /// or the signals tool smuggled into the production catalog - changes its digest and is caught.
+    #[test]
+    fn a_mismatched_catalog_is_detected() {
+        use crate::request::ToolProfile as P;
+        let code = definitions_for(P::RepoCodeV1);
+        let sig = definitions_for(P::RepoCodeMuseSignalsV1);
+        // the production catalog offered with the signals tool, and the signals catalog without it
+        assert!(!catalog_matches(P::RepoCodeV1, &sig));
+        assert!(!catalog_matches(P::RepoCodeMuseSignalsV1, &code));
+        // cross-profile
+        assert!(!catalog_matches(P::RepoInspectV1, &code));
+        assert!(!catalog_matches(
+            P::RepoCodeV1,
+            &definitions_for(P::RepoInspectV1)
+        ));
+        // one character of one description
+        let mut edited = code.clone();
+        let d = edited[0]["description"].as_str().unwrap().to_owned();
+        edited[0]["description"] = Value::String(format!("{d} "));
+        assert!(!catalog_matches(P::RepoCodeV1, &edited));
+        // a parameter widened
+        let mut widened = code.clone();
+        widened[1]["parameters"]["additionalProperties"] = Value::Bool(true);
+        assert!(!catalog_matches(P::RepoCodeV1, &widened));
+        // reordered
+        let mut swapped = code.clone();
+        swapped.swap(0, 1);
+        assert!(!catalog_matches(P::RepoCodeV1, &swapped));
+        // an extra or a missing tool
+        let mut extra = code.clone();
+        extra.push(muse_signals_definition());
+        assert!(!catalog_matches(P::RepoCodeV1, &extra));
+        assert!(!catalog_matches(P::RepoCodeV1, &code[..code.len() - 1]));
+        // and the real ones match
+        assert!(catalog_matches(P::RepoCodeV1, &code));
+        assert!(catalog_matches(P::RepoCodeMuseSignalsV1, &sig));
+    }
+
+    /// The signals tool is a tool of exactly one profile; the production profiles refuse its name.
+    #[test]
+    fn the_signals_tool_belongs_to_one_catalog_only() {
+        use crate::request::ToolProfile as P;
+        let names = |p: P| -> Vec<String> {
+            definitions_for(p)
+                .iter()
+                .map(|d| d["name"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert!(!names(P::RepoInspectV1).contains(&MUSE_SIGNALS_TOOL.to_owned()));
+        assert!(!names(P::RepoCodeV1).contains(&MUSE_SIGNALS_TOOL.to_owned()));
+        assert!(names(P::RepoCodeMuseSignalsV1).contains(&MUSE_SIGNALS_TOOL.to_owned()));
+        for p in [P::RepoInspectV1, P::RepoCodeV1, P::RepoCodeMuseSignalsV1] {
+            assert!(tool_id_for_profile(p, MUSE_SIGNALS_TOOL).is_none(), "{p:?}");
+        }
     }
 
     #[test]

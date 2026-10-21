@@ -310,6 +310,110 @@ mod tests {
         }
     }
 
+    /// EM-04C1: a target of a mode without a request budget serializes WITHOUT the key, with the
+    /// digest it always had; a budgeted target is a different target that no other binding admits.
+    fn issued_budget(budget: Option<u64>) -> (RegistryResolutionV1, serde_json::Value) {
+        let (mut r, ext) = issued("low");
+        r.target.request_budget_bytes = budget;
+        r.provenance.target_digest = digest_value(&serde_json::to_value(&r.target).unwrap());
+        r.provenance.issuance_id = r.issuance_id_of();
+        (r, ext)
+    }
+
+    #[test]
+    fn a_target_without_a_budget_is_byte_for_byte_what_it_was() {
+        let (plain, _) = issued("low");
+        let v = serde_json::to_value(&plain.target).unwrap();
+        assert!(v.get("requestBudgetBytes").is_none(), "{v}");
+        // the digest of a budget-less sample target is pinned: the new field cannot move it
+        let mut t =
+            ExecutionTargetCoreV1::sample("muse_main", "engineering-v2", serde_json::json!(0));
+        t.reasoning = "low".into();
+        assert_eq!(
+            digest_value(&serde_json::to_value(&t).unwrap()),
+            digest_value(&serde_json::json!({
+                "schemaVersion": 1, "resolutionId": "compat-resolution", "modeId": "engineering-v2",
+                "orchestrationEngineId": "muse", "modeConfigRevision": 0, "roleId": "muse_main",
+                "logicalModelId": "logical-model", "routeId": "route", "providerId": "provider",
+                "remoteModelId": "remote-model", "connectionId": "connection",
+                "executionKind": "raw-model", "accessType": "managed", "protocolId": "https",
+                "reasoning": "low", "requiredCapabilities": [], "slotRequirements": {},
+                "dataUseTier": null,
+            }))
+        );
+        // an old serialized target (no key) still reads, as `None`
+        let back: ExecutionTargetCoreV1 = serde_json::from_value(v).unwrap();
+        assert_eq!(back.request_budget_bytes, None);
+    }
+
+    #[test]
+    fn a_budgeted_target_round_trips_and_is_bounded() {
+        let (r, _) = issued_budget(Some(428_722));
+        let v = serde_json::to_value(&r.target).unwrap();
+        assert_eq!(v["requestBudgetBytes"], 428_722);
+        let back: ExecutionTargetCoreV1 = serde_json::from_value(v).unwrap();
+        assert_eq!(back.request_budget_bytes, Some(428_722));
+        back.validate_complete().unwrap();
+        for ok in [
+            crate::MIN_REQUEST_BUDGET_BYTES,
+            450_000,
+            crate::MAX_REQUEST_BUDGET_BYTES,
+        ] {
+            let mut t = back.clone();
+            t.request_budget_bytes = Some(ok);
+            t.validate_complete().unwrap();
+        }
+        for bad in [
+            0,
+            1,
+            crate::MIN_REQUEST_BUDGET_BYTES - 1,
+            crate::MAX_REQUEST_BUDGET_BYTES + 1,
+            u64::MAX,
+        ] {
+            let mut t = back.clone();
+            t.request_budget_bytes = Some(bad);
+            assert_eq!(
+                t.validate_complete().unwrap_err().code,
+                KernelErrorCode::BindingMismatch,
+                "{bad}"
+            );
+        }
+        // a non-integer budget is not representable
+        let mut v = serde_json::to_value(&back).unwrap();
+        v["requestBudgetBytes"] = serde_json::json!("450000");
+        assert!(serde_json::from_value::<ExecutionTargetCoreV1>(v).is_err());
+    }
+
+    #[test]
+    fn a_binding_admits_only_targets_with_its_own_budget() {
+        let (r0, ext) = issued_budget(Some(428_722));
+        let b = binding_of(&r0, &ext, &["high", "low"]);
+        assert_eq!(
+            b.target["requestBudgetBytes"], 428_722,
+            "the projection keeps it"
+        );
+        b.matches_task_issuance(&r0, &ext).unwrap();
+        // another budget, no budget, or a widened one: refused
+        for other in [Some(100_000), None, Some(crate::MAX_REQUEST_BUDGET_BYTES)] {
+            let (r, ext) = issued_budget(other);
+            assert!(b.admits(&r, &ext).is_err(), "{other:?}");
+            assert!(b.admits_target(&r).is_err(), "{other:?}");
+        }
+        // and a budget-less binding refuses a budgeted target
+        let (plain, ext) = issued_budget(None);
+        let bp = binding_of(&plain, &ext, &["high", "low"]);
+        bp.matches_task_issuance(&plain, &ext).unwrap();
+        assert!(bp.admits(&r0, &ext).is_err());
+        // the effort still changes freely inside the same budget
+        let (mut hi, ext) = issued_budget(Some(428_722));
+        hi.target.reasoning = "high".into();
+        hi.provenance.target_digest = digest_value(&serde_json::to_value(&hi.target).unwrap());
+        hi.provenance.issuance_id = hi.issuance_id_of();
+        let mut ext_hi = ext.clone();
+        ext_hi["reasoningEffort"] = "high".into();
+        assert_eq!(b.admits(&hi, &ext_hi).unwrap(), "high");
+    }
+
     #[test]
     fn supported_efforts_are_admitted_with_an_identical_projection() {
         let b = binding(&["high", "low"]);

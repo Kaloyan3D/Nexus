@@ -14,16 +14,15 @@
 //! every resolution (effort, requested, reason, trace, effective phase and source), and the final
 //! semantic and activity state (timestamp and family label excluded, as in EM-04A).
 
-use super::governor_bridge::{GovernorEvaluator, NodeGovernorBridge};
 use super::governor_parity::{
     comparable_activity, comparable_reasoning, config_dir, dsh_tool, native_tool, node, Tool,
 };
 use super::muse_v1::{MuseV1State, MUSE_V1_SIGNALS};
+use super::worker_bridge::test_evaluator;
 use super::{EngineEnv, EngineExtension, EngineHost, EngineSnapshot, EngineStateData, Hook};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 
 const ALL: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
@@ -162,7 +161,7 @@ pub(crate) fn run_dsh(caps: &[&str], steps: &[S]) -> Run {
 
 fn env() -> EngineEnv {
     EngineEnv {
-        governor: Some(Arc::new(NodeGovernorBridge::new(node().unwrap()))),
+        governor: Some(test_evaluator(node().unwrap())),
     }
 }
 
@@ -263,7 +262,7 @@ pub(crate) fn run_engine(caps: &[&str], steps: &[S]) -> Run {
 /// The Core + bridge path without the engine (the historical code with carried blocks).
 pub(crate) fn run_bridge(caps: &[&str], steps: &[S]) -> Vec<Value> {
     let ks = keys(steps);
-    let b = NodeGovernorBridge::new(node().unwrap());
+    let b = test_evaluator(node().unwrap());
     let (mut reasoning, mut activity) = (Value::Null, Value::Null);
     let mut acks = Vec::new();
     let mut pending: Vec<Value> = Vec::new();

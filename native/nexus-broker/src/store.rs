@@ -31,6 +31,10 @@ pub struct RunRecord {
     pub task_binding_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_binding_identity: Option<String>,
+    /// EM-04C1: digest of the exact tool catalog this run was offered (the frozen identity of its
+    /// profile). Absent on records written before EM-04C1. Broker-internal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_catalog_digest: Option<String>,
 }
 
 pub struct Store {

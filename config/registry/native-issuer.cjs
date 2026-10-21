@@ -153,6 +153,9 @@ function issueForGeneration(compiled, taskInstanceId) {
     // resolver), sealed with the target. Emitted only when configured, so every target without a
     // policy is byte-for-byte unchanged.
     ...(Array.isArray(binding.allowedReasoning) ? { allowedReasoning: binding.allowedReasoning.slice() } : {}),
+    // EM-04C1: the mode's serialized-request budget, sealed with the target. Emitted only when
+    // the mode declares one, so every target without a budget is byte-for-byte unchanged.
+    ...(Number.isInteger(binding.requestBudgetBytes) ? { requestBudgetBytes: binding.requestBudgetBytes } : {}),
     requiredCapabilities: binding.requiredCapabilities,
     slotRequirements: binding.slotRequirements,
     dataUseTier: binding.dataUseTier != null ? binding.dataUseTier : null,

@@ -1,12 +1,13 @@
 //! EM-04A: `muse-v1-shadow` - the shadow guarantee and adversarial inputs (forged activity,
 //! stale or replayed observations, cross-task events, forged transitions, corrupt state).
 
-use super::governor_bridge::{BridgeError, GovernorEvaluator, NodeGovernorBridge};
+use super::governor_bridge::{BridgeError, GovernorEvaluator};
 use super::muse_v0::MUSE_V0;
 use super::muse_v1::{
     extend_chain, valid_activity_block, MuseV1State, ShadowDecision, ENGINE_ID,
     MAX_DECISION_HISTORY, MUSE_V1, SIGNALS_TOOL_RESERVE_BYTES,
 };
+use super::worker_bridge::test_evaluator;
 use super::*;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -19,7 +20,7 @@ fn node_env() -> Option<EngineEnv> {
         .status
         .success();
     ok.then(|| EngineEnv {
-        governor: Some(Arc::new(NodeGovernorBridge::new("node".into()))),
+        governor: Some(test_evaluator("node".into())),
     })
 }
 
@@ -648,4 +649,28 @@ fn em04a_measure_bridge_latency() {
         "EM-04A bridge evaluation (consult incl. node spawn): n=60 median {:.1} ms p95 {:.1} ms max {:.1} ms",
         ms[30], ms[56], ms[59]
     );
+}
+
+// ---- EM-04C1: the persistent worker dying under a Governor evaluation --------------------
+
+/// The worker dies while evaluating the Governor for a request: the decision is the same one a
+/// worker that never failed gives, recorded once, and the shadow is still never applied.
+#[test]
+fn a_worker_dying_during_a_governor_evaluation_yields_the_same_single_decision() {
+    let Some(healthy) = node_env() else { return };
+    let m = std::env::temp_dir().join(format!("nexus-c1-{}-gov", std::process::id()));
+    let _ = std::fs::remove_file(&m);
+    let crashing = super::signals_tests::crash_once_env_for_governor(&m);
+    let mut a = EngineHost::new(&MUSE_V1);
+    let mut b = EngineHost::new(&MUSE_V1);
+    let s1 = snap(0, vec![]);
+    a.consult_in(Hook::BeforeRequest, &s1, &crashing).unwrap();
+    b.consult_in(Hook::BeforeRequest, &s1, &healthy).unwrap();
+    assert!(m.exists(), "the first worker really died");
+    assert_eq!(last(&a), last(&b));
+    assert_eq!(a.state(), b.state());
+    assert_eq!(last(&a).outcome, "resolved");
+    assert_eq!(a.state().data, b.state().data);
+    assert!(a.effort_selection().is_none(), "shadow: nothing applied");
+    let _ = std::fs::remove_file(&m);
 }

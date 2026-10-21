@@ -59,7 +59,7 @@ pub struct BridgeError {
     pub message: String,
 }
 
-fn berr(code: &str, message: impl Into<String>) -> BridgeError {
+pub(crate) fn berr(code: &str, message: impl Into<String>) -> BridgeError {
     BridgeError {
         code: code.to_owned(),
         message: message.into(),

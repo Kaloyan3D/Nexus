@@ -31,6 +31,7 @@ pub mod muse_v1;
 pub mod test_engine;
 #[cfg(feature = "test-engines")]
 pub mod test_faults;
+pub mod worker_bridge;
 
 /// Version of the engine contract AS PERSISTED: every EM-03 engine state record carries it, and a
 /// continuation refuses a record of another version (`engine-state-version`). It therefore changes
@@ -58,6 +59,26 @@ pub const MAX_SIGNAL_ACK_BYTES: usize = 1024;
 /// the engine is compiled but not built in, so the Registry cannot select it (`engine-unavailable`)
 /// in any production build; `test-engines` builds (this crate's tests) register it.
 pub const MUSE_V1_PRODUCTION_ENABLED: bool = false;
+
+/// EM-04C1: the ONE authority for the tool catalog a run is offered. It is a pure function of the
+/// run's kind and the engine id of its SEALED Registry resolution (the engine was already selected
+/// from that resolution, or the run failed closed). It reads no broker configuration, no model or
+/// tool output, no Registry free text: nothing but the sealed engine identity can add a tool.
+///
+/// * every read-only run: `RepoInspectV1`;
+/// * every coding run: `RepoCodeV1` - the production `muse-v0` catalog, frozen byte for byte;
+/// * a coding run of the experimental `muse-v1-signals` engine only: `RepoCodeMuseSignalsV1`
+///   (`RepoCodeV1` plus `muse_update_reasoning_state`). That id exists only in `test-engines` builds.
+///
+/// The future production `muse-v1` engine gets its row here deliberately (EM-04C2), not by flag.
+pub fn tool_catalog_profile(engine_id: &str, code_run: bool) -> nexus_model::ToolProfile {
+    use nexus_model::ToolProfile as P;
+    match (code_run, engine_id) {
+        (false, _) => P::RepoInspectV1,
+        (true, muse_v1::SIGNALS_ENGINE_ID) => P::RepoCodeMuseSignalsV1,
+        (true, _) => P::RepoCodeV1,
+    }
+}
 
 /// What an engine is and what it may ask for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -807,6 +828,10 @@ fn action_name(a: &EngineAction) -> &'static str {
 }
 
 #[cfg(test)]
+mod anti_thrash_review;
+#[cfg(test)]
+mod catalog_tests;
+#[cfg(test)]
 mod governor_parity;
 #[cfg(test)]
 mod legacy_reference;
@@ -818,3 +843,5 @@ mod signals_parity;
 mod signals_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod worker_tests;

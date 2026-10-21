@@ -103,7 +103,20 @@ function validateAgentSlot(slot, path) {
 
 /* ── ModeDefinition ─────────────────────────────────────────────────── */
 
-const MODE_FIELDS = new Set(['schemaVersion', 'id', 'displayName', 'status', 'orchestrationEngineId', 'selectable', 'runnable', 'slots', 'internalRoles', 'optionalCapabilities'])
+const MODE_FIELDS = new Set(['schemaVersion', 'id', 'displayName', 'status', 'orchestrationEngineId', 'selectable', 'runnable', 'slots', 'internalRoles', 'optionalCapabilities', 'requestBudgetBytes'])
+
+// EM-04C1: the serialized-request budget of a mode (bytes of the exact provider request body).
+// Optional: a mode that declares none is not budgeted and its requests are unchanged. When present
+// it is an integer inside [MIN, MAX], carried into the compiled binding and the sealed target, and
+// so is Registry policy: it cannot be set by a broker flag, a model or a tool.
+const MIN_REQUEST_BUDGET_BYTES = 65536
+const MAX_REQUEST_BUDGET_BYTES = 4194304
+function validateRequestBudget(value, path, errors, code) {
+  if (value === undefined) return
+  if (!Number.isInteger(value) || value < MIN_REQUEST_BUDGET_BYTES || value > MAX_REQUEST_BUDGET_BYTES) {
+    errors.push(err(code, path, 'requestBudgetBytes must be an integer between ' + MIN_REQUEST_BUDGET_BYTES + ' and ' + MAX_REQUEST_BUDGET_BYTES))
+  }
+}
 
 function validateModeDefinition(doc, path) {
   const errors = []
@@ -116,6 +129,7 @@ function validateModeDefinition(doc, path) {
   if (typeof doc.orchestrationEngineId !== 'string' || doc.orchestrationEngineId === '') errors.push(err('mode-invalid', where + '.orchestrationEngineId', 'orchestrationEngineId must be a non-empty string'))
   if (doc.selectable !== undefined && typeof doc.selectable !== 'boolean') errors.push(err('mode-invalid', where + '.selectable', 'selectable must be boolean'))
   if (doc.runnable !== undefined && typeof doc.runnable !== 'boolean') errors.push(err('mode-invalid', where + '.runnable', 'runnable must be boolean'))
+  validateRequestBudget(doc.requestBudgetBytes, where + '.requestBudgetBytes', errors, 'mode-invalid')
   if (!Array.isArray(doc.slots) || doc.slots.length === 0) {
     errors.push(err('mode-invalid', where + '.slots', 'mode must declare at least one slot'))
   } else {
@@ -425,7 +439,7 @@ function validateConnection(doc, path) {
 /* ── ResolvedModeConfiguration / RuntimeModelBinding ─────────────────── */
 
 const SNAPSHOT_FIELDS = new Set(['schemaVersion', 'modeId', 'orchestrationEngineId', 'configurationRevision', 'resolutionId', 'roles'])
-const BINDING_FIELDS = new Set(['schemaVersion', 'resolutionId', 'modeId', 'orchestrationEngineId', 'modeConfigRevision', 'roleId', 'logicalModelId', 'routeId', 'providerId', 'remoteModelId', 'connectionId', 'executionKind', 'accessType', 'protocolId', 'reasoning', 'allowedReasoning', 'requiredCapabilities', 'slotRequirements', 'dataUseTier'])
+const BINDING_FIELDS = new Set(['schemaVersion', 'resolutionId', 'modeId', 'orchestrationEngineId', 'modeConfigRevision', 'roleId', 'logicalModelId', 'routeId', 'providerId', 'remoteModelId', 'connectionId', 'executionKind', 'accessType', 'protocolId', 'reasoning', 'allowedReasoning', 'requestBudgetBytes', 'requiredCapabilities', 'slotRequirements', 'dataUseTier'])
 
 function validateRuntimeModelBinding(doc, path) {
   const errors = []
@@ -459,6 +473,7 @@ function validateRuntimeModelBinding(doc, path) {
     errors.push(err('binding-invalid', where + '.dataUseTier', 'dataUseTier must be one of ' + DATA_USE_TIERS.join(', ')))
   }
   validateAllowedReasoning(doc.allowedReasoning, doc.reasoning, where + '.allowedReasoning', errors)
+  validateRequestBudget(doc.requestBudgetBytes, where + '.requestBudgetBytes', errors, 'binding-invalid')
   return errors
 }
 
@@ -577,6 +592,8 @@ function validateRuntimeCapabilities(runtime, path) {
 
 module.exports = {
   SCHEMA_VERSION,
+  MIN_REQUEST_BUDGET_BYTES,
+  MAX_REQUEST_BUDGET_BYTES,
   validateAgentSlot,
   validateModeDefinition,
   validateModeConfiguration,

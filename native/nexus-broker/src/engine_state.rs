@@ -1457,9 +1457,7 @@ mod em04b_measure {
         )
         .unwrap();
         run.env = EngineEnv {
-            governor: Some(std::sync::Arc::new(
-                crate::engine::governor_bridge::NodeGovernorBridge::new("node".into()),
-            )),
+            governor: Some(crate::engine::worker_bridge::test_evaluator("node".into())),
         };
         let mut snap = EngineSnapshot {
             current_effort: "low".into(),

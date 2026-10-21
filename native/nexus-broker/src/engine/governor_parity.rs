@@ -16,8 +16,8 @@
 //! records the program) - both are recorded in EM-04A-GOVERNOR-PARITY.md. Known classification
 //! differences are asserted AS differences, never hidden.
 
-use super::governor_bridge::{GovernorEvaluator, NodeGovernorBridge};
 use super::muse_v1::{classification, MuseV1State, MUSE_V1};
+use super::worker_bridge::test_evaluator;
 use super::{EngineExtension, EngineState, EngineStateData};
 use nexus_client::intent_client::ToolActivity;
 use serde_json::{json, Value};
@@ -193,7 +193,7 @@ pub(crate) fn run_dsh(caps: &[&str], steps: &[Step]) -> Outcome {
 }
 
 pub(crate) fn run_native(caps: &[&str], steps: &[Step]) -> Outcome {
-    let bridge = NodeGovernorBridge::new(node().expect("node"));
+    let bridge = test_evaluator(node().expect("node"));
     let mut reasoning = Value::Null;
     let mut activity = Value::Null;
     let mut pending: Vec<Value> = Vec::new();
@@ -563,7 +563,7 @@ fn known_difference_shell_wrapped_verification_is_recognized_only_by_native() {
 #[test]
 fn the_unchanged_ladder_never_contains_low() {
     need_node!();
-    let r = NodeGovernorBridge::new(node().unwrap())
+    let r = test_evaluator(node().unwrap())
         .call("ladder", &json!({}))
         .unwrap();
     assert!(!r["efforts"].as_array().unwrap().iter().any(|e| e == "low"));

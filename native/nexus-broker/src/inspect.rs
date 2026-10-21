@@ -123,12 +123,6 @@ impl Mode {
             Self::Code => "publish-code",
         }
     }
-    fn profile(self) -> nexus_model::ToolProfile {
-        match self {
-            Self::Inspect => nexus_model::ToolProfile::RepoInspectV1,
-            Self::Code => nexus_model::ToolProfile::RepoCodeV1,
-        }
-    }
 }
 
 /// Validate operator workspaces at broker start. A workspace may never
@@ -1167,17 +1161,45 @@ pub(crate) fn run(
     // EM-04A: only the shadow Governor engines are lent the historical Muse policy (a bounded,
     // pure Node bridge); every other engine runs exactly as in EM-03.
     // EM-04B: only the experimental signals engine, in a coding run, offers the signals tool.
-    let signals_run = mode == Mode::Code
-        && engine.descriptor().engine_id == crate::engine::muse_v1::SIGNALS_ENGINE_ID;
+    let mut worker_lease: Option<crate::engine::worker_bridge::WorkerLease> = None;
+    // EM-04C1: the catalog follows the sealed engine identity and nothing else; this build must
+    // offer exactly that catalog's frozen bytes, and the run records which one it was offered.
+    let catalog_profile =
+        crate::engine::tool_catalog_profile(engine.descriptor().engine_id, mode == Mode::Code);
+    if !nexus_model::repo_tools::verify_catalog(catalog_profile) {
+        return Err(discard(se(
+            "tool-catalog-mismatch",
+            "this build's tool catalog is not the frozen one for the run's engine; nothing was sent",
+        )));
+    }
+    if !b.bind_tool_catalog(
+        run_id,
+        nexus_model::repo_tools::frozen_catalog_digest(catalog_profile),
+    ) {
+        return Err(discard(se(
+            "tool-catalog-mismatch",
+            "the run is already bound to another tool catalog, or the binding could not be recorded; nothing was sent",
+        )));
+    }
+    let signals_run = catalog_profile == nexus_model::ToolProfile::RepoCodeMuseSignalsV1;
     if [
         crate::engine::muse_v1::ENGINE_ID,
         crate::engine::muse_v1::SIGNALS_ENGINE_ID,
     ]
     .contains(&engine.descriptor().engine_id)
     {
-        engine_run.env.governor = Some(std::sync::Arc::new(
-            crate::engine::governor_bridge::NodeGovernorBridge::new(b.node_abs.clone()),
+        // EM-04C1: ONE supervised, persistent worker owned by this run (scope = the task
+        // generation, cancelled with the run, killed when the lease below drops). Logically
+        // stateless: the engine state, not the worker, is the ledger.
+        let worker = std::sync::Arc::new(crate::engine::worker_bridge::WorkerGovernorBridge::new(
+            b.node_abs.clone(),
+            task_instance.clone(),
+            std::sync::Arc::clone(flag),
         ));
+        worker_lease = Some(crate::engine::worker_bridge::WorkerLease::new(
+            std::sync::Arc::clone(&worker),
+        ));
+        engine_run.env.governor = Some(worker);
     }
 
     let opts = ModelRunOptions {
@@ -1292,11 +1314,7 @@ pub(crate) fn run(
             expected: expected.clone(),
             ctx_budget,
             signals: signals_run,
-            profile: if signals_run {
-                nexus_model::ToolProfile::RepoCodeMuseSignalsV1
-            } else {
-                mode.profile()
-            },
+            profile: catalog_profile,
         },
         &mut loop_state,
         &mut engine_run,
@@ -1324,6 +1342,8 @@ pub(crate) fn run(
             e.code, e.message
         );
     }
+    // EM-04C1: the run's Governor worker ends with the run, after its last durable write
+    drop(worker_lease);
     Ok(())
 }
 
@@ -2141,7 +2161,27 @@ fn turn_loop(
         // EM-04A RequestBudgetV1 (opt-in; never configured in production): the EXACT serialized
         // request must fit the budget minus the engine's measured reserve. Reduced only at safe
         // item boundaries, re-prepared and re-checked; otherwise nothing is sent.
-        if let Some(target_bytes) = b.cfg.request_budget_bytes {
+        // EM-04C1: the budget is Registry policy, sealed with the task binding. This attempt's own
+        // issuance must carry the same value (a different one is refused, nothing is sent); a
+        // broker-level `request_budget_bytes` can only TIGHTEN it (test seam, `None` in production).
+        let sealed_budget = sh.task_target.request_budget_bytes();
+        if attempt_target
+            .resolution
+            .pointer("/target/requestBudgetBytes")
+            .and_then(|v| v.as_u64())
+            != sealed_budget.map(|b| b as u64)
+        {
+            return Ok(LoopEnd::Failed(
+                "request-budget-mismatch".into(),
+                "the attempt's request budget differs from the task's sealed budget; nothing was sent"
+                    .into(),
+            ));
+        }
+        let effective_budget = match (sealed_budget, b.cfg.request_budget_bytes) {
+            (Some(s), Some(c)) => Some(s.min(c)),
+            (s, c) => s.or(c),
+        };
+        if let Some(target_bytes) = effective_budget {
             let budget = crate::request_budget::RequestBudget {
                 target_bytes,
                 reserve_bytes: er.host.extension().descriptor().request_reserve_bytes,

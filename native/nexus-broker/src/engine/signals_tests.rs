@@ -2,9 +2,10 @@
 //! engine; stale, cross-task, replayed and forged signals are refused; the host validates every
 //! semantic move; a signal never changes effort or an issued target; acceptance is durable.
 
-use super::governor_bridge::{BridgeError, GovernorEvaluator, NodeGovernorBridge};
+use super::governor_bridge::{BridgeError, GovernorEvaluator};
 use super::muse_v0::MUSE_V0;
 use super::muse_v1::{MuseV1State, MUSE_V1, MUSE_V1_SIGNALS};
+use super::worker_bridge::test_evaluator;
 use super::*;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -17,7 +18,7 @@ fn node_env() -> Option<EngineEnv> {
         .status
         .success();
     ok.then(|| EngineEnv {
-        governor: Some(Arc::new(NodeGovernorBridge::new("node".into()))),
+        governor: Some(test_evaluator("node".into())),
     })
 }
 
@@ -388,5 +389,106 @@ fn the_state_stays_bounded_with_the_full_processed_window() {
         st(&h).encoded_len() <= MAX_STATE_BYTES,
         "{}",
         st(&h).encoded_len()
+    );
+}
+
+// ---- EM-04C1: the persistent worker dying under the engine -------------------------------
+
+/// A worker whose first process dies (once, process-wide marker file) when it is about to answer.
+pub(super) fn crash_once_env_for_governor(marker: &std::path::Path) -> EngineEnv {
+    crash_once_env(marker, false)
+}
+
+fn crash_once_env(marker: &std::path::Path, always: bool) -> EngineEnv {
+    use super::worker_bridge::{WorkerConfig, WorkerGovernorBridge, WORKER_SOURCE};
+    let m = marker
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'");
+    let action = if always {
+        "process.exit(9);".to_owned()
+    } else {
+        format!(
+            "const fs = require('node:fs'); if (!fs.existsSync('{m}')) {{ fs.writeFileSync('{m}', '1'); process.exit(9); }}"
+        )
+    };
+    let script = format!(
+        "(function(){{ let w = 0; const orig = process.stdout.write.bind(process.stdout);\
+         process.stdout.write = function (b) {{ w += 1; if (w === 2) {{ {action} }} return orig(b); }}; }})();\n{WORKER_SOURCE}"
+    );
+    let mut cfg = WorkerConfig::new("node".into());
+    cfg.script = script;
+    cfg.timeout = std::time::Duration::from_secs(10);
+    EngineEnv {
+        governor: Some(Arc::new(WorkerGovernorBridge::with_config(
+            cfg,
+            "test",
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ))),
+    }
+}
+
+fn marker(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("nexus-c1-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_file(&d);
+    d
+}
+
+/// The worker dies while it is evaluating a signal: the supervisor re-asks a clean worker, the
+/// signal is applied ONCE (the state travels with the request, so a restart loses and duplicates
+/// nothing), and the host's state equals a run on a worker that never failed.
+#[test]
+fn a_worker_dying_during_signal_acceptance_neither_loses_nor_doubles_the_signal() {
+    let Some(healthy) = node_env() else { return };
+    let m = marker("sig");
+    let crashing = crash_once_env(&m, false);
+    let s = sig(
+        1,
+        "task-A",
+        json!({"phase": "diagnose", "recordHypothesisFailure": true}),
+    );
+    let mut a = EngineHost::new(&MUSE_V1_SIGNALS);
+    let mut b = EngineHost::new(&MUSE_V1_SIGNALS);
+    let ra = ack(&a.consult_signal(&snap(vec![s.clone()]), &crashing).unwrap());
+    let rb = ack(&b.consult_signal(&snap(vec![s.clone()]), &healthy).unwrap());
+    assert!(m.exists(), "the first worker really died");
+    assert_eq!(
+        ra, rb,
+        "the acknowledgement is the one a healthy worker gives"
+    );
+    assert_eq!(ra["duplicate"], false);
+    assert_eq!(st(&a).reasoning, st(&b).reasoning);
+    assert_eq!(st(&a).reasoning.as_ref().unwrap()["failedHypotheses"], 1);
+    // a replay of the same delivery is still a duplicate afterwards
+    let mut again = s.clone();
+    again.seq = 2;
+    let r2 = ack(&a.consult_signal(&snap(vec![s, again]), &crashing).unwrap());
+    assert_eq!(r2["duplicate"], true);
+    assert_eq!(st(&a).reasoning.as_ref().unwrap()["failedHypotheses"], 1);
+    let _ = std::fs::remove_file(&m);
+}
+
+/// A worker that keeps dying: the signal is reported "not recorded", nothing is applied, and the
+/// signal is never applied later behind the model's back (the same fail-safe as an absent bridge).
+#[test]
+fn a_worker_that_keeps_dying_leaves_the_signal_unrecorded_and_never_applied_later() {
+    let Some(healthy) = node_env() else { return };
+    let m = marker("sig-always");
+    let dying = crash_once_env(&m, true);
+    let first = sig(1, "task-A", json!({"recordHypothesisFailure": true}));
+    let mut h = EngineHost::new(&MUSE_V1_SIGNALS);
+    let a = ack(&h
+        .consult_signal(&snap(vec![first.clone()]), &dying)
+        .unwrap());
+    assert_eq!(a["ok"], false, "{a}");
+    assert!(st(&h).reasoning.is_none(), "nothing applied");
+    let second = sig(2, "task-A", json!({"phase": "diagnose"}));
+    h.consult_signal(&snap(vec![first, second]), &healthy)
+        .unwrap();
+    let r = st(&h).reasoning.clone().unwrap();
+    assert_eq!(
+        (r["phase"].as_str(), r["failedHypotheses"].as_u64()),
+        (Some("diagnose"), Some(0)),
+        "the unrecorded signal stayed unrecorded"
     );
 }

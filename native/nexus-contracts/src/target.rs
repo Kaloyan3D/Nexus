@@ -6,6 +6,10 @@ use crate::errors::{KernelError, KernelErrorCode, KernelResult};
 use crate::CONTRACT_SCHEMA_VERSION;
 use serde::{Deserialize, Serialize};
 
+/// EM-04C1: bounds of a Registry-sealed request budget (identical to the Registry schema's).
+pub const MIN_REQUEST_BUDGET_BYTES: u64 = 65_536;
+pub const MAX_REQUEST_BUDGET_BYTES: u64 = 4_194_304;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionTargetCoreV1 {
@@ -28,6 +32,11 @@ pub struct ExecutionTargetCoreV1 {
     /// checked). Absent on targets without a slot policy: only `reasoning` is authorized.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_reasoning: Option<Vec<String>>,
+    /// EM-04C1: the mode's serialized-request budget (bytes of the exact provider request body),
+    /// Registry policy sealed with the target. Absent on targets of modes without a budget, which
+    /// keeps their serialization, digests and behavior byte-for-byte unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_budget_bytes: Option<u64>,
     pub required_capabilities: Vec<String>,
     pub slot_requirements: serde_json::Value,
     pub data_use_tier: Option<String>,
@@ -74,6 +83,15 @@ impl ExecutionTargetCoreV1 {
                 ));
             }
         }
+        // EM-04C1: a sealed budget must be a sane one (the Registry enforces the same bounds)
+        if let Some(b) = self.request_budget_bytes {
+            if !(MIN_REQUEST_BUDGET_BYTES..=MAX_REQUEST_BUDGET_BYTES).contains(&b) {
+                return Err(KernelError::new(
+                    KernelErrorCode::BindingMismatch,
+                    "the target's request budget is outside the permitted range",
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -95,6 +113,7 @@ impl ExecutionTargetCoreV1 {
             protocol_id: "https".to_owned(),
             reasoning: "low".to_owned(),
             allowed_reasoning: None,
+            request_budget_bytes: None,
             required_capabilities: Vec::new(),
             slot_requirements: serde_json::json!({}),
             data_use_tier: None,

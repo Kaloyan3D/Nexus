@@ -1,0 +1,104 @@
+//! EM-04C1: tool catalog integrity. The catalog a run is offered is a pure function of its kind
+//! and the SEALED engine identity; the production catalog is frozen; the signals tool exists in
+//! exactly one catalog.
+
+use super::muse_v0::MUSE_V0;
+use super::muse_v1::MUSE_V1_SIGNALS;
+use super::*;
+use nexus_model::repo_tools as rt;
+use nexus_model::ToolProfile as P;
+
+#[test]
+fn the_catalog_follows_the_sealed_engine_identity_and_nothing_else() {
+    // every coding run is RepoCodeV1 except the one experimental engine's
+    for id in [
+        "muse-v0",
+        "muse-v1",
+        "muse-v1-shadow",
+        "dual-v1",
+        "effort-test-v0",
+        "",
+        " ",
+        "MUSE-V1-SIGNALS",
+        "muse-v1-signals ",
+        " muse-v1-signals",
+        "muse-v1-signals\n",
+        "muse-v1-signals\0",
+        "muse-v1-signal",
+        "muse-v1-signalsX",
+        "../muse-v1-signals",
+        "muse_v1_signals",
+        "muse-v1-signals/../muse-v0",
+    ] {
+        assert_eq!(tool_catalog_profile(id, true), P::RepoCodeV1, "{id:?}");
+        assert_eq!(tool_catalog_profile(id, false), P::RepoInspectV1, "{id:?}");
+    }
+    assert_eq!(
+        tool_catalog_profile(muse_v1::SIGNALS_ENGINE_ID, true),
+        P::RepoCodeMuseSignalsV1
+    );
+    // a read-only run never gets the coding catalog, whatever the engine
+    assert_eq!(
+        tool_catalog_profile(muse_v1::SIGNALS_ENGINE_ID, false),
+        P::RepoInspectV1
+    );
+}
+
+#[test]
+fn production_muse_v0_offers_the_frozen_baseline_catalog() {
+    let p = tool_catalog_profile(MUSE_V0.descriptor().engine_id, true);
+    assert_eq!(p, P::RepoCodeV1);
+    assert!(rt::verify_catalog(p));
+    assert_eq!(
+        rt::catalog_digest_for(p),
+        "58f513de4ac7097e2d2c44999180ec74295aaaf590d585ff15787b784db8d90b",
+        "the digest of the production catalog at baseline 49026e8"
+    );
+    // the future Muse engine's catalog is another identity
+    let m = tool_catalog_profile(muse_v1::SIGNALS_ENGINE_ID, true);
+    assert_ne!(rt::frozen_catalog_digest(p), rt::frozen_catalog_digest(m));
+}
+
+#[test]
+fn every_profile_a_run_can_get_matches_its_frozen_identity() {
+    for e in engines(true) {
+        for code in [true, false] {
+            let p = tool_catalog_profile(e.descriptor().engine_id, code);
+            assert!(rt::verify_catalog(p), "{} {code}", e.descriptor().engine_id);
+        }
+    }
+}
+
+#[test]
+fn the_signals_catalog_cannot_be_reached_from_a_production_engine_list() {
+    // a production build has only muse-v0: the engine that selects the signals catalog is absent,
+    // so a Registry resolution naming it fails closed before any catalog is chosen
+    let prod: Vec<&str> = engines(false)
+        .iter()
+        .map(|e| e.descriptor().engine_id)
+        .collect();
+    assert_eq!(prod, ["muse-v0"]);
+    for id in prod {
+        assert_ne!(
+            tool_catalog_profile(id, true),
+            P::RepoCodeMuseSignalsV1,
+            "{id}"
+        );
+    }
+    // and the production gate stays closed
+    const { assert!(!MUSE_V1_PRODUCTION_ENABLED) };
+}
+
+#[test]
+fn only_the_sealed_signals_engine_descriptor_carries_the_signals_catalog() {
+    // the descriptors that select a profile other than RepoCodeV1
+    let special: Vec<&str> = engines(true)
+        .iter()
+        .map(|e| e.descriptor().engine_id)
+        .filter(|id| tool_catalog_profile(id, true) != P::RepoCodeV1)
+        .collect();
+    assert_eq!(special, [muse_v1::SIGNALS_ENGINE_ID]);
+    // its descriptor reserves nothing: the tool's real bytes are in every measured request
+    assert_eq!(MUSE_V1_SIGNALS.descriptor().request_reserve_bytes, 0);
+    assert_eq!(MUSE_V0.descriptor().request_reserve_bytes, 0);
+}

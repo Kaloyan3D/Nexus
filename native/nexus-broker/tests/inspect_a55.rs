@@ -1619,6 +1619,7 @@ fn plant_crashed_run(fx: &Fx, name: &str, state: nexus_client::model_run::ModelR
             engine_id: None,
             task_binding_digest: None,
             task_binding_identity: None,
+            tool_catalog_digest: None,
         })
         .unwrap();
     run_id

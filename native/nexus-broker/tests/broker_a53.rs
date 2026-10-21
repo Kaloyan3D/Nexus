@@ -1126,6 +1126,7 @@ fn a53_clients_are_authenticated_by_peer_uid_and_isolated_from_each_other() {
                 engine_id: None,
                 task_binding_digest: None,
                 task_binding_identity: None,
+                tool_catalog_digest: None,
             })
             .unwrap();
     }
@@ -1571,6 +1572,7 @@ fn a53_broker_crash_and_daemon_restart_never_duplicate_a_billable_submission() {
                 engine_id: None,
                 task_binding_digest: None,
                 task_binding_identity: None,
+                tool_catalog_digest: None,
             })
             .unwrap();
     }
@@ -1912,6 +1914,7 @@ fn a531_conversation_is_served_per_run_by_ownership_with_incremental_paging() {
                 engine_id: None,
                 task_binding_digest: None,
                 task_binding_identity: None,
+                tool_catalog_digest: None,
             })
             .unwrap();
     }

@@ -16,7 +16,10 @@ pub use destination::{
     classify_host, classify_ip, is_public_https_origin, origin_scheme_host, DestinationVerdict,
 };
 pub use errors::{KernelError, KernelErrorCode, KernelResult};
-pub use target::{ExecutionTargetCoreV1, RegistryProvenanceV1, RegistryResolutionV1};
+pub use target::{
+    ExecutionTargetCoreV1, RegistryProvenanceV1, RegistryResolutionV1, MAX_REQUEST_BUDGET_BYTES,
+    MIN_REQUEST_BUDGET_BYTES,
+};
 pub use task_binding::{authorized_levels, project_extension, project_target, TaskBindingV1};
 pub use types::{
     generation_key, CommandReceiptV1, ControllerIntentV1, ExecutionPinV1, GenerationLeaseV1,
