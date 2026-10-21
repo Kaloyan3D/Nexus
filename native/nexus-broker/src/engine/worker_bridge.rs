@@ -56,9 +56,57 @@ pub const MAX_LIVE_WORKERS: usize = 16;
 pub const MAX_SPAWNS_PER_WINDOW: usize = 6;
 pub const SPAWN_WINDOW: Duration = Duration::from_secs(60);
 /// V8 old-space ceiling of the worker (MiB). The historical modules need a few MiB.
-pub const WORKER_HEAP_MB: u32 = 96;
+pub const WORKER_HEAP_MB: u32 = 48;
+/// V8 young-generation (semi-space) ceiling (MiB). The old-space cap does not bound it: with the
+/// default it grew the worker to 200+ MiB RSS on the bundled Node 24; with 2 MiB it stays ~80 MiB.
+pub const WORKER_SEMI_SPACE_MB: u32 = 2;
+/// The node flags of every worker, in order. `--permission` is Node's deny-all permission mode:
+/// NO `--allow-fs-read`, `--allow-fs-write`, `--allow-child-process`, `--allow-worker` or
+/// `--allow-addons` is ever added. It needs Node >= 23.5 (stable name); an older Node rejects the
+/// option and the worker simply does not start (fail closed, no unprotected fallback).
+pub fn worker_node_flags() -> Vec<String> {
+    vec![
+        "--permission".to_owned(),
+        format!("--max-old-space-size={WORKER_HEAP_MB}"),
+        format!("--max-semi-space-size={WORKER_SEMI_SPACE_MB}"),
+    ]
+}
 
 static LIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+/// The worker allowance of ONE broker: derived from its configured `max_active` (a run that is
+/// admitted can have one worker), never more than [`MAX_LIVE_WORKERS`]. The process-wide
+/// `LIVE_WORKERS` count stays as an absolute backstop.
+#[derive(Debug)]
+pub struct WorkerSlots {
+    live: AtomicUsize,
+    max: usize,
+}
+
+impl WorkerSlots {
+    pub fn for_max_active(max_active: usize) -> Self {
+        Self {
+            live: AtomicUsize::new(0),
+            max: max_active.clamp(1, MAX_LIVE_WORKERS),
+        }
+    }
+    pub fn max(&self) -> usize {
+        self.max
+    }
+    pub fn live(&self) -> usize {
+        self.live.load(Ordering::SeqCst)
+    }
+    fn acquire(&self) -> bool {
+        if self.live.fetch_add(1, Ordering::SeqCst) >= self.max {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+    fn release(&self) {
+        self.live.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// Number of worker processes alive right now in this broker process.
 pub fn live_workers() -> usize {
@@ -80,6 +128,10 @@ pub struct WorkerConfig {
     pub max_pending: usize,
     pub max_spawns: usize,
     pub spawn_window: Duration,
+    /// Node flags before `-e` (see [`worker_node_flags`]). Only tests may change them.
+    pub node_flags: Vec<String>,
+    /// The broker's worker allowance; `None` = only the process-wide backstop.
+    pub slots: Option<Arc<WorkerSlots>>,
 }
 
 impl WorkerConfig {
@@ -91,7 +143,23 @@ impl WorkerConfig {
             max_pending: MAX_PENDING_CALLS,
             max_spawns: MAX_SPAWNS_PER_WINDOW,
             spawn_window: SPAWN_WINDOW,
+            node_flags: worker_node_flags(),
+            slots: None,
         }
+    }
+
+    /// The configuration of a run's worker under a broker's allowance.
+    pub fn with_slots(mut self, slots: Arc<WorkerSlots>) -> Self {
+        self.slots = Some(slots);
+        self
+    }
+
+    /// TEST ONLY: start the worker WITHOUT the permission mode, to prove that the worker and the
+    /// supervisor refuse to run unprotected. Not available in production builds.
+    #[cfg(any(test, feature = "test-engines"))]
+    pub fn without_permission_for_tests(mut self) -> Self {
+        self.node_flags.retain(|f| f != "--permission");
+        self
     }
 }
 
@@ -155,6 +223,7 @@ enum Incoming {
 }
 
 struct WorkerProc {
+    slots: Option<Arc<WorkerSlots>>,
     child: Child,
     to_worker: Option<SyncSender<Vec<u8>>>,
     from_worker: mpsc::Receiver<Incoming>,
@@ -192,6 +261,9 @@ impl Drop for WorkerProc {
     fn drop(&mut self) {
         self.terminate();
         LIVE_WORKERS.fetch_sub(1, Ordering::SeqCst);
+        if let Some(sl) = &self.slots {
+            sl.release();
+        }
     }
 }
 
@@ -210,6 +282,14 @@ pub struct WorkerGovernorBridge {
     pending: AtomicUsize,
     inner: Mutex<Inner>,
     stats: WorkerStats,
+}
+
+/// A worker-supplied code, reduced to a short identifier before it enters an error message.
+fn safe_code(c: &str) -> String {
+    c.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .take(48)
+        .collect()
 }
 
 fn frame(body: &[u8]) -> Vec<u8> {
@@ -291,6 +371,10 @@ impl WorkerGovernorBridge {
     }
 
     fn spawn(&self, inner: &mut Inner) -> Result<(), BridgeError> {
+        // D3: outside test builds the flags are EXACTLY the reviewed set - no `--allow-*` grant,
+        // no dropped `--permission`, nothing added - whatever a caller put in the configuration
+        check_worker_flags(&self.cfg.node_flags, TEST_FLAG_OVERRIDES_ALLOWED)
+            .map_err(|m| berr("bridge-unavailable", m))?;
         let now = Instant::now();
         while inner
             .spawns
@@ -305,16 +389,27 @@ impl WorkerGovernorBridge {
                 "the Governor worker failed too often; not restarted until the window passes",
             ));
         }
+        if let Some(sl) = &self.cfg.slots {
+            if !sl.acquire() {
+                return Err(berr(
+                    "bridge-busy",
+                    "this broker's Governor worker allowance (its max_active) is in use",
+                ));
+            }
+        }
         if LIVE_WORKERS.fetch_add(1, Ordering::SeqCst) >= MAX_LIVE_WORKERS {
             LIVE_WORKERS.fetch_sub(1, Ordering::SeqCst);
+            if let Some(sl) = &self.cfg.slots {
+                sl.release();
+            }
             return Err(berr(
                 "bridge-busy",
                 "too many Governor workers are running in this broker",
             ));
         }
-        // From here `LIVE_WORKERS` is owned by the WorkerProc (released in its Drop).
+        // From here the counts are owned by the WorkerProc (released in its Drop).
         let mut child = match Command::new(&self.cfg.node)
-            .arg(format!("--max-old-space-size={WORKER_HEAP_MB}"))
+            .args(&self.cfg.node_flags)
             .arg("-e")
             .arg(&self.cfg.script)
             // the scope (a task generation id) is visible in `ps`: it names whose worker this is
@@ -329,6 +424,9 @@ impl WorkerGovernorBridge {
             Ok(c) => c,
             Err(e) => {
                 LIVE_WORKERS.fetch_sub(1, Ordering::SeqCst);
+                if let Some(sl) = &self.cfg.slots {
+                    sl.release();
+                }
                 return Err(berr(
                     "bridge-unavailable",
                     format!("cannot start node: {e}"),
@@ -368,6 +466,7 @@ impl WorkerGovernorBridge {
             }
         });
         let mut proc = WorkerProc {
+            slots: self.cfg.slots.clone(),
             child,
             to_worker: Some(to_worker),
             from_worker,
@@ -381,7 +480,12 @@ impl WorkerGovernorBridge {
                 Ok(())
             }
             Err(f) => {
-                let e = self.fail_error(&f);
+                let mut e = self.fail_error(&f);
+                if matches!(f, Fail::Died(_) | Fail::Timeout) {
+                    e.message.push_str(
+                        " (a Governor worker needs Node >= 23.5 with --permission and proves it at start-up; there is no unprotected fallback)",
+                    );
+                }
                 drop(proc);
                 Err(e)
             }
@@ -405,14 +509,28 @@ impl WorkerGovernorBridge {
         let obj = v
             .as_object()
             .ok_or_else(|| Fail::Protocol("ready is not an object".into()))?;
+        if obj.get("v") == Some(&Value::from(WORKER_PROTOCOL))
+            && obj.get("type").and_then(|t| t.as_str()) == Some("fatal")
+        {
+            // e.g. `permission-not-enforced`: the worker refused to run unprotected
+            let code = obj.get("code").and_then(|c| c.as_str()).unwrap_or("?");
+            return Err(Fail::Died(format!(
+                "the worker reported {}",
+                safe_code(code)
+            )));
+        }
         if obj
             .keys()
-            .any(|k| !["v", "type", "digests", "node"].contains(&k.as_str()))
+            .any(|k| !["v", "type", "digests", "node", "permission"].contains(&k.as_str()))
             || obj.get("v") != Some(&Value::from(WORKER_PROTOCOL))
             || obj.get("type").and_then(|t| t.as_str()) != Some("ready")
         {
             return Err(Fail::Protocol("unexpected start-up message".into()));
         }
+        // EM-04C2 S1 (D3): the worker must PROVE Node's deny-all permission mode. Checked here
+        // independently of the worker's own refusal; a missing, disabled or partial report is a
+        // protocol violation and the process is killed - never used.
+        verify_permission(obj.get("permission"))?;
         let want = [
             ("governor", GOVERNOR_SOURCE),
             ("runtime", RUNTIME_SOURCE),
@@ -553,7 +671,10 @@ impl WorkerGovernorBridge {
             Some("response") => {}
             Some("fatal") => {
                 let code = obj.get("code").and_then(|c| c.as_str()).unwrap_or("?");
-                return Err(Fail::Died(format!("the worker reported {code}")));
+                return Err(Fail::Died(format!(
+                    "the worker reported {}",
+                    safe_code(code)
+                )));
             }
             _ => return Err(Fail::Protocol("an unknown message type".into())),
         }
@@ -611,6 +732,68 @@ impl Drop for WorkerLease {
     fn drop(&mut self) {
         self.0.shutdown();
     }
+}
+
+/// Test builds may add `--allow-*` grants to a TEST script (and may drop `--permission` to prove the
+/// refusal); production builds never can.
+pub(crate) const TEST_FLAG_OVERRIDES_ALLOWED: bool = cfg!(any(test, feature = "test-engines"));
+
+/// The flags a worker may be started with. In production they must equal [`worker_node_flags`]
+/// exactly; this makes "no filesystem or process exception is ever granted to the worker" a property
+/// of the supervisor and not only of how the default configuration happens to be built.
+pub(crate) fn check_worker_flags(flags: &[String], overrides_allowed: bool) -> Result<(), String> {
+    if overrides_allowed || flags == worker_node_flags().as_slice() {
+        return Ok(());
+    }
+    Err("the Governor worker is started only with the reviewed Node flags (deny-all permission mode, no --allow-* grant); refusing to start another configuration".to_owned())
+}
+
+/// The permission report of a `ready` message must say: enforced, every scope denied, and the four
+/// canary operations refused with the permission error.
+fn verify_permission(p: Option<&Value>) -> Result<(), Fail> {
+    let bad = |m: &str| {
+        Err(Fail::Protocol(format!(
+            "permission mode is not enforced: {m}"
+        )))
+    };
+    let Some(p) = p.and_then(|p| p.as_object()) else {
+        return bad("no permission report");
+    };
+    if p.keys()
+        .any(|k| !["enforced", "scopes", "canaries"].contains(&k.as_str()))
+    {
+        return bad("unexpected report fields");
+    }
+    if p.get("enforced") != Some(&Value::Bool(true)) {
+        return bad("the worker reports it disabled");
+    }
+    let Some(scopes) = p.get("scopes").and_then(|s| s.as_object()) else {
+        return bad("no scope report");
+    };
+    let want_scopes = ["fs.read", "fs.write", "child", "worker", "addon"];
+    if scopes.len() != want_scopes.len()
+        || !want_scopes
+            .iter()
+            .all(|k| scopes.get(*k) == Some(&Value::Bool(false)))
+    {
+        return bad("a scope is not denied");
+    }
+    let Some(c) = p.get("canaries").and_then(|c| c.as_object()) else {
+        return bad("no canary report");
+    };
+    let code = |k: &str| c.get(k).and_then(|v| v.as_str());
+    if c.len() != 4
+        || code("read") != Some("ERR_ACCESS_DENIED")
+        || code("write") != Some("ERR_ACCESS_DENIED")
+        || code("child") != Some("ERR_ACCESS_DENIED")
+        || !matches!(
+            code("addon"),
+            Some("ERR_DLOPEN_DISABLED" | "ERR_ACCESS_DENIED")
+        )
+    {
+        return bad("a canary operation was not refused");
+    }
+    Ok(())
 }
 
 struct PendingGuard<'a>(&'a AtomicUsize);

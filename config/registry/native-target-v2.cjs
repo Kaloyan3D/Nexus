@@ -7,7 +7,7 @@
  * effective-snapshot records) or from the Controller attempt session passed
  * explicitly by the caller. Nothing is invented, defaulted, or fallen back.
  *
- * Initial scope mirrors native-issuer.cjs: mode 'engineering-v2', role
+ * Scope mirrors native-issuer.cjs: the closed table of reviewed (mode, engine) pairs, role
  * 'muse_main', executionKind 'raw-model' only. Anything else fails closed.
  *
  * Field provenance:
@@ -111,6 +111,10 @@ function positiveInt(v) {
  * Issue the authoritative V2 extension for one Controller generation.
  *
  * options: { installRoot, dataRoot, taskInstanceId, sessionId, role?, selection? }
+ *   selection may also carry `modeId` (EM-04C2 S4): one of the reviewed modes of
+ *   native-issuer.cjs `NATIVE_SCOPES`, default 'engineering-v2'. A selection of only a
+ *   `modeId` keeps the mode's saved assignment; with a model/route it overrides the saved
+ *   main slot in memory exactly as before.
  *   sessionId is the Controller attempt session (required, non-empty).
  *   selection is an optional { logicalModelId, routeId } override: it is
  *   applied to an IN-MEMORY clone of the saved engineering-v2 mode
@@ -149,15 +153,21 @@ function issueExecutionTargetV2(options, deps) {
   if (selection !== null && compiled !== null) {
     return fail('registry-binding-invalid', 'an injected compilation cannot be combined with a selection; refusing to issue');
   }
-  if (selection !== null) {
-    compiled = compileWithSelection(service, selection);
+  // EM-04C2 S4: the mode is chosen from the CLOSED reviewed table, default engineering-v2
+  const modeId = selection !== null && selection.modeId !== undefined ? selection.modeId : issuer.SUPPORTED_MODE_ID;
+  if (!issuer.scopeOf(modeId)) {
+    return fail('registry-unsupported-scope', 'the Native issuance path does not issue mode ' + String(modeId).slice(0, 64));
+  }
+  const hasModel = selection !== null && (selection.logicalModelId !== undefined || selection.routeId !== undefined);
+  if (selection !== null && hasModel) {
+    compiled = compileWithSelection(service, selection, modeId);
     if (!compiled || compiled.ok !== true) {
       return fail(compiled && compiled.code ? compiled.code : 'registry-unresolved', (compiled && compiled.message) || 'selection does not compile');
     }
     compiled = compiled.compiled;
   }
   if (!compiled) {
-    compiled = issuer.compileTrustedMode({ installRoot: o.installRoot, dataRoot: o.dataRoot, modeId: 'engineering-v2', role: o.role || 'muse_main' }, { service: service });
+    compiled = issuer.compileTrustedMode({ installRoot: o.installRoot, dataRoot: o.dataRoot, modeId: modeId, role: o.role || 'muse_main' }, { service: service });
   }
   if (!compiled || compiled.ok !== true) {
     return fail(compiled && compiled.code ? compiled.code : 'registry-unresolved', (compiled && compiled.message) || 'no trusted compilation to extend');
@@ -270,12 +280,12 @@ function issueExecutionTargetV2(options, deps) {
 }
 
 /**
- * Compile the trusted engineering-v2/muse_main pipeline with an in-memory
+ * Compile the trusted <mode>/muse_main pipeline (engineering-v2 unless a reviewed `modeId` was chosen) with an in-memory
  * main-slot override. The saved mode configuration is only read, never
  * written: the override applies to a deep clone. Unknown or non-issuable
  * selections fail closed with the catalog machine reason.
  */
-function compileWithSelection(service, selection) {
+function compileWithSelection(service, selection, modeId) {
   const sel = selection || {};
   const logicalModelId = isNonEmptyString(sel.logicalModelId) ? sel.logicalModelId : '';
   const routeId = isNonEmptyString(sel.routeId) ? sel.routeId : '';
@@ -307,12 +317,17 @@ function compileWithSelection(service, selection) {
   }
   let staged = null;
   try {
-    staged = service.getModeConfiguration('engineering-v2', {});
+    staged = service.getModeConfiguration(modeId, {});
   } catch (e) {
     return fail('registry-unavailable', 'effective mode configuration is unreadable: ' + String((e && e.message) || e));
   }
+  const scope = issuer.scopeOf(modeId);
+  if (!scope) return fail('registry-unsupported-scope', 'the Native issuance path does not issue mode ' + String(modeId).slice(0, 64));
+  if (scope.requiresSavedConfiguration && (!staged || !staged.result || staged.result.persisted !== true)) {
+    return fail('registry-mode-configuration-required', 'mode ' + modeId + ' runs only from a ModeConfiguration the operator has saved; none is created or adopted for it');
+  }
   if (!staged || !staged.result || !staged.result.config) {
-    return fail('registry-unresolved', 'effective mode configuration for engineering-v2 is unresolved; refusing to select');
+    return fail('registry-unresolved', 'effective mode configuration for ' + modeId + ' is unresolved; refusing to select');
   }
   const modeConfig = JSON.parse(JSON.stringify(staged.result.config));
   const current = (modeConfig.slots && modeConfig.slots.main) || {};

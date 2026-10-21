@@ -47,6 +47,8 @@ pub struct Broker {
     /// from its file when the daemon stops accepting the one held here.
     pub(crate) cap_hex: std::sync::RwLock<String>,
     pub(crate) node_abs: std::path::PathBuf,
+    /// EM-04C2 S1: the Governor worker allowance, derived from `cfg.max_active` (<= 16).
+    pub(crate) worker_slots: Arc<crate::engine::worker_bridge::WorkerSlots>,
     pub(crate) cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub(crate) bridge_lock: Mutex<()>,
     pub shutdown: AtomicBool,
@@ -150,19 +152,28 @@ impl Broker {
 
     /// EM-02: record the task binding a (running) run executes under. Set once; `false` when it
     /// cannot be recorded or another one is already recorded (the caller fails closed).
-    pub(crate) fn bind_task_target(&self, run_id: &str, digest: &str, identity: &str) -> bool {
+    pub(crate) fn bind_task_target(
+        &self,
+        run_id: &str,
+        digest: &str,
+        identity: &str,
+        version: u32,
+    ) -> bool {
         let _g = self.store.lock();
         let Some(mut rec) = self.store.load(run_id) else {
             return false;
         };
         if let Some(have) = &rec.task_binding_digest {
-            return have == digest && rec.task_binding_identity.as_deref() == Some(identity);
+            return have == digest
+                && rec.task_binding_identity.as_deref() == Some(identity)
+                && rec.task_binding_identity_version == Some(version);
         }
         if rec.run.terminal {
             return false;
         }
         rec.task_binding_digest = Some(digest.to_owned());
         rec.task_binding_identity = Some(identity.to_owned());
+        rec.task_binding_identity_version = Some(version);
         self.store.put(&rec).is_ok()
     }
 
@@ -379,6 +390,7 @@ impl Broker {
             remote_model_id: m.remote_model_id,
             logical_model_id: Some(m.logical_model_id).filter(|l| !l.is_empty()),
             route_id: None,
+            mode_id: None,
         })
     }
 
@@ -511,13 +523,16 @@ impl Broker {
         if let Some(l) = link.as_mut() {
             l.resolved = Some(resolved.clone());
         }
-        // Normalize the selection so the pipelines issue exactly this target.
+        // Normalize the selection so the pipelines issue exactly this target. The client's
+        // Engineering Mode choice (EM-04C2 S4) is carried unchanged: the Registry alone judges it.
         let mut intent = intent;
+        let chosen_mode = intent.model.as_ref().and_then(|m| m.mode_id.clone());
         intent.model = Some(nexus_contracts::intent::ModelSelection {
             provider_id: resolved.provider_id.clone(),
             remote_model_id: resolved.remote_model_id.clone(),
             logical_model_id: Some(resolved.logical_model_id.clone()),
             route_id: Some(resolved.route_id.clone()),
+            mode_id: chosen_mode,
         });
         let available_empty = catalog.iter().all(|t| !t.issuable);
         if available_empty {
@@ -596,6 +611,7 @@ impl Broker {
                 engine_id: None,
                 task_binding_digest: None,
                 task_binding_identity: None,
+                task_binding_identity_version: None,
                 tool_catalog_digest: None,
             };
             // Record first, then the index: a crash between the two leaves
@@ -711,6 +727,9 @@ impl Broker {
             remote_model_id,
             logical_model_id: Some(logical),
             route_id: Some(route),
+            // a continuation is issued in the Engineering Mode of the run it continues (the
+            // default mode is the absence of a choice, exactly as before)
+            mode_id: old.engine_mode_id.clone().filter(|m| m != "engineering-v2"),
         };
         let why = r.error_code.clone().unwrap_or_else(|| r.state.clone());
         let done = crate::inspect::receipts_summary(&r.tool_activity);
@@ -1571,12 +1590,16 @@ pub fn start(mut cfg: BrokerConfig) -> Result<BrokerHandle, String> {
     let listener = setup?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let socket = cfg.socket_path.clone();
+    let cfg_max_active = cfg.max_active;
     let broker = Arc::new(Broker {
         cfg,
         store,
         threads,
         cap_hex: std::sync::RwLock::new(cap_hex),
         node_abs,
+        worker_slots: Arc::new(crate::engine::worker_bridge::WorkerSlots::for_max_active(
+            cfg_max_active,
+        )),
         cancel_flags: Mutex::new(HashMap::new()),
         bridge_lock: Mutex::new(()),
         shutdown: AtomicBool::new(false),

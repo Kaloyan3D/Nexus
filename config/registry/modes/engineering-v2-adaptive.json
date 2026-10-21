@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "engineering-v2-adaptive",
+  "displayName": "Engineering Mode v2 (Adaptive reasoning)",
+  "status": "planned",
+  "orchestrationEngineId": "muse-v1",
+  "selectable": false,
+  "runnable": false,
+  "slots": [
+    {
+      "id": "main",
+      "label": "Main Engineer",
+      "required": true,
+      "internalRoles": [
+        "muse_main"
+      ],
+      "requirements": {
+        "toolCalling": true,
+        "adaptiveReasoningContract": "muse-v1",
+        "singleAgent": true
+      }
+    }
+  ],
+  "internalRoles": [
+    "muse_main"
+  ],
+  "optionalCapabilities": []
+}

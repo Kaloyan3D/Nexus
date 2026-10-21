@@ -419,6 +419,13 @@ fn crash_once_env(marker: &std::path::Path, always: bool) -> EngineEnv {
     let mut cfg = WorkerConfig::new("node".into());
     cfg.script = script;
     cfg.timeout = std::time::Duration::from_secs(10);
+    // TEST HOOK ONLY: the crash-once marker is a file, and the worker runs under the deny-all
+    // permission mode, so this one path (and nothing else) is granted to the TEST script. The
+    // product configuration never carries an `--allow-*` flag (`worker_flags_..._grant_nothing`).
+    cfg.node_flags
+        .push(format!("--allow-fs-read={}", marker.display()));
+    cfg.node_flags
+        .push(format!("--allow-fs-write={}", marker.display()));
     EngineEnv {
         governor: Some(Arc::new(WorkerGovernorBridge::with_config(
             cfg,

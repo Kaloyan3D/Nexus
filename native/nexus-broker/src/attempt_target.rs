@@ -324,8 +324,11 @@ impl TaskTarget {
     }
 }
 
-/// See [`TaskTarget::identity_digest`].
-pub fn identity_digest(binding: &nexus_contracts::TaskBindingV1) -> String {
+/// Version of the identity digest recorded with a run (EM-04C2 S3). Version 2 added the slot's
+/// `allowedReasoning` policy; runs recorded before carry no version (legacy, version 1).
+pub const IDENTITY_VERSION: u32 = 2;
+
+fn identity_base(binding: &nexus_contracts::TaskBindingV1) -> Value {
     let t = &binding.target;
     let x = &binding.extension;
     let pick = |v: &Value, k: &str| v.get(k).cloned().unwrap_or(Value::Null);
@@ -356,5 +359,217 @@ pub fn identity_digest(binding: &nexus_contracts::TaskBindingV1) -> String {
     if let Some(b) = t.get("requestBudgetBytes") {
         identity["requestBudgetBytes"] = b.clone();
     }
+    identity
+}
+
+/// The identity a continuation must keep: model, route, provider, connection, credential, mode,
+/// engine, default effort, request budget and - EM-04C2 S3 (G-1) - the slot's explicit
+/// `allowedReasoning` policy, as a sorted, de-duplicated list. The policy key is present ONLY when
+/// the target carries one, so every policy-less binding hashes byte-for-byte as before. A widened,
+/// narrowed or removed policy is therefore another identity: `task-binding-mismatch` before any
+/// request, never a silent inheritance of broader (or different) authorization.
+pub fn identity_digest(binding: &nexus_contracts::TaskBindingV1) -> String {
+    let mut identity = identity_base(binding);
+    if let Some(policy) = binding.target.get("allowedReasoning") {
+        identity["allowedReasoning"] = canonical_policy(policy);
+    }
     nexus_contracts::digest_value(&identity)
+}
+
+/// The identity digest of runs recorded before EM-04C2 (no policy key). Kept only to verify
+/// legacy records.
+pub fn identity_digest_v1(binding: &nexus_contracts::TaskBindingV1) -> String {
+    nexus_contracts::digest_value(&identity_base(binding))
+}
+
+/// The policy as a canonical list: a list of strings is sorted and de-duplicated; anything else is
+/// carried verbatim (the Registry never issues it, and carrying it makes any change visible).
+fn canonical_policy(policy: &Value) -> Value {
+    match policy.as_array() {
+        Some(a) if a.iter().all(|v| v.is_string()) => {
+            let mut l: Vec<String> = a
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect();
+            l.sort();
+            l.dedup();
+            serde_json::json!(l)
+        }
+        _ => policy.clone(),
+    }
+}
+
+/// Whether a run recorded with `recorded` (identity digest) and `version` may be continued under
+/// `binding`.
+///
+/// * version 2: the recorded digest must equal this binding's v2 digest (policy included).
+/// * no version (a run recorded before EM-04C2): the recorded digest must equal the legacy digest,
+///   AND the new binding must carry no explicit policy: the old record cannot prove which policy
+///   it ran under, so a binding that authorizes extra levels cannot be shown to be unchanged
+///   and is refused. (A legacy run under an engine that cannot change effort, which is every
+///   shipped engine, never used the policy.)
+pub fn identity_matches(
+    recorded: &str,
+    version: Option<u32>,
+    binding: &nexus_contracts::TaskBindingV1,
+) -> bool {
+    match version {
+        Some(IDENTITY_VERSION) => recorded == identity_digest(binding),
+        Some(_) => false,
+        None => {
+            recorded == identity_digest_v1(binding)
+                && binding.target.get("allowedReasoning").is_none()
+        }
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use nexus_contracts::TaskBindingV1;
+
+    fn binding(policy: Option<&[&str]>, budget: Option<u64>) -> TaskBindingV1 {
+        let mut target = serde_json::json!({
+            "modeId": "engineering-v2", "orchestrationEngineId": "muse-v0", "roleId": "muse_main",
+            "logicalModelId": "m", "routeId": "r", "providerId": "p", "remoteModelId": "x",
+            "connectionId": "c", "executionKind": "raw-model", "protocolId": "p"
+        });
+        if let Some(p) = policy {
+            target["allowedReasoning"] = serde_json::json!(p);
+        }
+        if let Some(b) = budget {
+            target["requestBudgetBytes"] = serde_json::json!(b);
+        }
+        TaskBindingV1 {
+            schema_version: 1,
+            task_instance_id: "t".into(),
+            role: "muse_main".into(),
+            issuer: "i".into(),
+            registry_snapshot_digest: "s".into(),
+            mode_config_revision: serde_json::json!(0),
+            target,
+            extension: serde_json::json!({"endpoint": {"protocol": "https", "origin": "o",
+                "path": "/p", "method": "POST"}, "credentialRef": "cr", "wireProfile": "w"}),
+            default_reasoning: "low".into(),
+            supported_reasoning: policy
+                .map(|p| p.iter().map(|s| s.to_string()).collect())
+                .unwrap_or_else(|| vec!["low".into()]),
+        }
+    }
+
+    /// Digests computed by the BASELINE code (`50a24d7`, before this change) for these inputs.
+    #[test]
+    fn policy_less_identities_are_byte_identical_to_the_baseline() {
+        assert_eq!(
+            identity_digest(&binding(None, None)),
+            "b367efc6807d64e4f2aa532ac1423e3704a573d9c9d8bc48314f765643b7a07d"
+        );
+        assert_eq!(
+            identity_digest(&binding(None, Some(428_722))),
+            "bbebf7348bd6632f2a0f72e029c6e13b75f209e37054b8bd2b03f1b362543bd9"
+        );
+        assert_eq!(
+            identity_digest(&binding(None, None)),
+            identity_digest_v1(&binding(None, None))
+        );
+        // the legacy digest ignores a policy, exactly as the baseline did
+        assert_eq!(
+            identity_digest_v1(&binding(Some(&["low", "medium"]), None)),
+            "b367efc6807d64e4f2aa532ac1423e3704a573d9c9d8bc48314f765643b7a07d"
+        );
+    }
+
+    #[test]
+    fn the_policy_is_part_of_the_identity_canonically() {
+        let none = identity_digest(&binding(None, None));
+        let only = identity_digest(&binding(Some(&["low"]), None));
+        let wide = identity_digest(&binding(Some(&["low", "medium", "high", "xhigh"]), None));
+        let mid = identity_digest(&binding(Some(&["low", "medium"]), None));
+        // default-only policy, widened, narrowed and absent are four distinct identities
+        let all = [&none, &only, &wide, &mid];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        // order and duplicates do not matter (canonical sorted set)
+        assert_eq!(
+            wide,
+            identity_digest(&binding(
+                Some(&["xhigh", "high", "low", "medium", "high"]),
+                None
+            ))
+        );
+        // the budget and the policy are independent parts
+        assert_ne!(
+            identity_digest(&binding(Some(&["low"]), Some(100_000))),
+            identity_digest(&binding(Some(&["low"]), Some(200_000)))
+        );
+        // everything else of the identity still counts
+        let mut other = binding(Some(&["low"]), None);
+        other.target["routeId"] = "r2".into();
+        assert_ne!(identity_digest(&other), only);
+    }
+
+    /// EM-04C2 S4: the mode and its engine are part of the identity, so no continuation can move
+    /// between modes (or between the engines they name) and keep its binding.
+    #[test]
+    fn the_mode_and_the_engine_are_part_of_the_identity() {
+        let base = binding(Some(&["low", "medium"]), None);
+        let id = identity_digest(&base);
+        let mut other_mode = base.clone();
+        other_mode.target["modeId"] = "engineering-v2-adaptive".into();
+        let mut other_engine = base.clone();
+        other_engine.target["orchestrationEngineId"] = "muse-v1".into();
+        let mut both = other_mode.clone();
+        both.target["orchestrationEngineId"] = "muse-v1".into();
+        for changed in [&other_mode, &other_engine, &both] {
+            assert_ne!(identity_digest(changed), id);
+            assert!(!identity_matches(&id, Some(IDENTITY_VERSION), changed));
+        }
+        assert!(identity_matches(&id, Some(IDENTITY_VERSION), &base));
+    }
+
+    #[test]
+    fn a_continuation_needs_the_same_policy_and_legacy_records_fail_closed_on_a_policy() {
+        let rec = |b: &TaskBindingV1| (identity_digest(b), Some(IDENTITY_VERSION));
+        let (id, v) = rec(&binding(Some(&["low"]), None));
+        // identical policy continues
+        assert!(identity_matches(&id, v, &binding(Some(&["low"]), None)));
+        assert!(identity_matches(&id, v, &binding(Some(&["low"]), None)));
+        // widened, narrowed (to another set) and removed policies do not
+        for changed in [
+            binding(Some(&["low", "medium", "high", "xhigh"]), None),
+            binding(Some(&["low", "medium"]), None),
+            binding(None, None),
+        ] {
+            assert!(!identity_matches(&id, v, &changed));
+        }
+        // a policy-less run cannot be continued under a newly added policy either
+        let (id0, v0) = rec(&binding(None, None));
+        assert!(identity_matches(&id0, v0, &binding(None, None)));
+        assert!(!identity_matches(
+            &id0,
+            v0,
+            &binding(Some(&["low", "high"]), None)
+        ));
+        // a record written before EM-04C2 (no version): its digest is the legacy one
+        let legacy = identity_digest_v1(&binding(None, None));
+        assert!(
+            identity_matches(&legacy, None, &binding(None, None)),
+            "legacy + policy-less continues"
+        );
+        assert!(
+            !identity_matches(&legacy, None, &binding(Some(&["low", "high"]), None)),
+            "legacy + an explicit policy: it cannot be shown unchanged, so it is refused"
+        );
+        assert!(!identity_matches(&legacy, None, &{
+            let mut b = binding(None, None);
+            b.target["routeId"] = "other".into();
+            b
+        }));
+        // unknown versions never match
+        assert!(!identity_matches(&id0, Some(1), &binding(None, None)));
+        assert!(!identity_matches(&id0, Some(3), &binding(None, None)));
+    }
 }

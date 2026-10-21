@@ -574,9 +574,16 @@ impl EngineRun {
     }
 
     /// EM-04B: accept the newest reasoning signal of `snapshot`. The engine's answer is validated
-    /// by the host, then the new state and a `signal-accepted` event (with the dispatch key) are
-    /// committed DURABLY; only then is the acknowledgement returned for the model. A refusal or a
-    /// failed commit returns an error and the model receives no acknowledgement.
+    /// by the host, then the new state and a `signal-handled` event are committed DURABLY; only
+    /// then is the acknowledgement returned for the model. A refusal or a failed commit returns an
+    /// error and the model receives no acknowledgement.
+    ///
+    /// EM-04C2 (E-1): the event says WHAT happened, because "accepted" used to be written for every
+    /// answer, including "not recorded". Its `detail` is `<outcome> <dispatch key>` with outcome
+    /// `applied`, `duplicate`, `stale`, `refused:<code>` or `unrecorded:<code>` (see
+    /// [`signal_outcome`]); only `applied` changed the Muse state. Records written before EM-04C2
+    /// carry `signal-accepted` events; they stay readable (event kinds are free labels) and are
+    /// never rewritten, but their meaning is the old, ambiguous one.
     pub fn consult_signal(
         &mut self,
         snapshot: &crate::engine::EngineSnapshot,
@@ -594,9 +601,15 @@ impl EngineRun {
             ));
         }
         self.stage();
-        let key = snapshot.signals.last().map(|x| x.dispatch_key.as_str());
+        let key = snapshot
+            .signals
+            .last()
+            .map(|x| x.dispatch_key.as_str())
+            .unwrap_or("-");
         let id = self.host.next_proposal_id() - 1;
-        self.rec.event("signal-accepted", Some(id), None, None, key);
+        let detail = format!("{} {key}", signal_outcome(&ack));
+        self.rec
+            .event("signal-handled", Some(id), None, None, Some(&detail));
         self.store.commit(&mut self.rec)?;
         Ok(ack)
     }
@@ -642,6 +655,47 @@ impl EngineRun {
         self.stage();
         self.rec.event("run-ended", None, None, None, Some(how));
         self.store.commit(&mut self.rec)
+    }
+}
+
+/// EM-04C2 (E-1): the audit label of the engine's answer to a signal. Distinct, unambiguous
+/// outcomes; anything unparseable is `unrecorded:bad-ack` (never `applied`).
+///
+/// * `applied`: the historical code applied the signal to the Muse state;
+/// * `duplicate`: the same delivery was already applied, nothing changed;
+/// * `stale`: the signal was out of order, foreign or already consumed, nothing changed;
+/// * `refused:<code>`: the historical validation refused it (`signal-<reason>`), nothing recorded;
+/// * `unrecorded:<code>`: the engine could not evaluate it (bridge or state failure), nothing
+///   recorded and it will never be applied later.
+pub fn signal_outcome(ack: &str) -> String {
+    let safe = |c: &str| -> String {
+        c.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            .take(48)
+            .collect()
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(ack) else {
+        return "unrecorded:bad-ack".into();
+    };
+    match v.get("ok").and_then(|o| o.as_bool()) {
+        Some(true) => match v.get("duplicate").and_then(|d| d.as_bool()) {
+            Some(false) => "applied".into(),
+            Some(true) => "duplicate".into(),
+            None => "unrecorded:bad-ack".into(),
+        },
+        Some(false) => {
+            let code = safe(v.get("code").and_then(|c| c.as_str()).unwrap_or(""));
+            if code == "signal-stale" {
+                "stale".into()
+            } else if code.starts_with("signal-") {
+                format!("refused:{code}")
+            } else if code.is_empty() {
+                "unrecorded:bad-ack".into()
+            } else {
+                format!("unrecorded:{code}")
+            }
+        }
+        None => "unrecorded:bad-ack".into(),
     }
 }
 
@@ -1513,5 +1567,364 @@ mod em04b_measure {
             "EM-04B catalog serialization: RepoCodeV1 {} B median {:.1} us; with signals {} B median {:.1} us",
             a[100].1, a[100].0, b[100].1, b[100].0
         );
+    }
+}
+
+/// EM-04C2 S2 (E-1): the audit trail of signals says exactly what happened. Applied, duplicate,
+/// stale, refused and unrecorded signals have distinct outcomes; only `applied` changed the Muse
+/// state; nothing is ever written as `signal-accepted` again; the events are durable.
+#[cfg(all(test, feature = "test-engines"))]
+mod s2_signal_audit {
+    use super::*;
+    use crate::engine::governor_bridge::{BridgeError, GovernorEvaluator};
+    use crate::engine::muse_v1::{MuseV1State, MUSE_V1_SIGNALS};
+    use crate::engine::{EngineEnv, EngineSnapshot, EngineStateData, SignalObservation};
+    use std::sync::Arc;
+
+    struct Failing(&'static str);
+    impl GovernorEvaluator for Failing {
+        fn call(&self, _: &str, _: &serde_json::Value) -> Result<serde_json::Value, BridgeError> {
+            Err(BridgeError {
+                code: self.0.into(),
+                message: "injected".into(),
+            })
+        }
+    }
+
+    fn obs(seq: u32, signal: serde_json::Value) -> SignalObservation {
+        SignalObservation {
+            seq,
+            attempt: 1,
+            generation: "task_a".into(),
+            call_id: format!("call_{seq}"),
+            dispatch_key: crate::signals::dispatch_key(
+                "task_a",
+                1,
+                &format!("call_{seq}"),
+                &signal,
+            ),
+            signal,
+        }
+    }
+
+    fn muse(run: &EngineRun) -> &MuseV1State {
+        match &run.host.state().data {
+            EngineStateData::MuseV1(d) => d,
+            _ => panic!("not a muse-v1 state"),
+        }
+    }
+
+    fn details(run: &EngineRun) -> Vec<String> {
+        run.rec
+            .events
+            .iter()
+            .filter(|e| e.kind == "signal-handled")
+            .map(|e| e.detail.clone().unwrap_or_default())
+            .collect()
+    }
+
+    #[test]
+    fn the_outcome_label_is_unambiguous_for_every_answer() {
+        let o = signal_outcome;
+        assert_eq!(
+            o(r#"{"ok":true,"duplicate":false,"applied":["phase"]}"#),
+            "applied"
+        );
+        assert_eq!(o(r#"{"ok":true,"duplicate":true}"#), "duplicate");
+        assert_eq!(
+            o(r#"{"ok":false,"code":"signal-stale","recorded":false}"#),
+            "stale"
+        );
+        assert_eq!(
+            o(r#"{"ok":false,"code":"signal-forbidden-field","recorded":false}"#),
+            "refused:signal-forbidden-field"
+        );
+        assert_eq!(
+            o(r#"{"ok":false,"code":"bridge-timeout","recorded":false}"#),
+            "unrecorded:bridge-timeout"
+        );
+        assert_eq!(
+            o(r#"{"ok":false,"code":"state-invalid","recorded":false}"#),
+            "unrecorded:state-invalid"
+        );
+        // anything malformed or ambiguous is never "applied"
+        for bad in [
+            "",
+            "not json",
+            "null",
+            "[]",
+            "{}",
+            r#"{"ok":"true"}"#,
+            r#"{"ok":true}"#,
+            r#"{"ok":true,"duplicate":"no"}"#,
+            r#"{"ok":false}"#,
+            r#"{"ok":1,"duplicate":false}"#,
+        ] {
+            assert!(o(bad).starts_with("unrecorded:"), "{bad:?} -> {}", o(bad));
+        }
+        // a hostile code is reduced to identifier characters and bounded
+        let s = o(&format!(
+            r#"{{"ok":false,"code":"x y\n;{}"}}"#,
+            "a".repeat(500)
+        ));
+        assert!(s.len() < 80 && !s.contains(' ') && !s.contains(';'), "{s}");
+    }
+
+    #[test]
+    fn applied_duplicate_stale_refused_and_unrecorded_signals_are_audited_distinctly_and_durably() {
+        let node_ok = std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .ok()
+            .is_some_and(|o| o.status.success());
+        if !node_ok {
+            return;
+        }
+        let healthy = crate::engine::worker_bridge::test_evaluator("node".into());
+        let d = tempfile::tempdir().unwrap();
+        let store = EngineStateStore::open(d.path()).unwrap();
+        let mut run = EngineRun::start(
+            store,
+            &MUSE_V1_SIGNALS,
+            "run_a",
+            "task_a",
+            "engineering-v2",
+            &"c".repeat(64),
+            "low",
+            None,
+        )
+        .unwrap();
+        let env_with = |g: Arc<dyn GovernorEvaluator>| EngineEnv { governor: Some(g) };
+        let mut snap = EngineSnapshot {
+            current_effort: "low".into(),
+            authorized_efforts: vec!["low".into(), "medium".into()],
+            generation: "task_a".into(),
+            ..Default::default()
+        };
+        // 1. applied
+        run.env = env_with(healthy.clone());
+        let s1 = obs(
+            1,
+            serde_json::json!({"phase": "diagnose", "recordHypothesisFailure": true}),
+        );
+        snap.signals.push(s1.clone());
+        run.consult_signal(&snap).unwrap();
+        assert_eq!(
+            (muse(&run).signals_accepted, muse(&run).signals_duplicate),
+            (1, 0)
+        );
+        // 2. duplicate: the same delivery under a new call/seq has the SAME historical identity
+        //    only if the Core reuses the key, which is what a redelivery is
+        let mut s2 = s1.clone();
+        s2.seq = 2;
+        snap.signals.push(s2);
+        run.consult_signal(&snap).unwrap();
+        assert_eq!(
+            (muse(&run).signals_accepted, muse(&run).signals_duplicate),
+            (1, 1)
+        );
+        // 3. stale: nothing new above the frontier
+        run.consult_signal(&snap).unwrap();
+        assert_eq!(
+            (muse(&run).signals_accepted, muse(&run).signals_duplicate),
+            (1, 1)
+        );
+        // 4. unrecorded: the evaluator fails; the state does not move
+        let before = muse(&run).reasoning.clone();
+        run.env = env_with(Arc::new(Failing("bridge-timeout")));
+        snap.signals
+            .push(obs(3, serde_json::json!({"recordHypothesisFailure": true})));
+        run.consult_signal(&snap).unwrap();
+        assert_eq!(
+            muse(&run).reasoning,
+            before,
+            "an unrecorded signal changed nothing"
+        );
+        // 5. refused by the historical validation (forged past the Core)
+        run.env = env_with(Arc::new(Failing("signal-forbidden-field")));
+        snap.signals
+            .push(obs(4, serde_json::json!({"recordHypothesisFailure": true})));
+        run.consult_signal(&snap).unwrap();
+        assert_eq!(muse(&run).reasoning, before);
+        assert_eq!(
+            (muse(&run).signals_accepted, muse(&run).signals_duplicate),
+            (1, 1)
+        );
+
+        let got = details(&run);
+        let outcomes: Vec<&str> = got.iter().map(|d| d.split(' ').next().unwrap()).collect();
+        assert_eq!(
+            outcomes,
+            [
+                "applied",
+                "duplicate",
+                "stale",
+                "unrecorded:bridge-timeout",
+                "refused:signal-forbidden-field"
+            ],
+            "{got:?}"
+        );
+        // exactly one `applied` per signal that changed the state, and the key is recorded
+        assert_eq!(
+            outcomes.iter().filter(|o| **o == "applied").count() as u32,
+            muse(&run).signals_accepted
+        );
+        assert!(got[0].ends_with(&s1.dispatch_key), "{got:?}");
+        // nothing is called "accepted" any more
+        assert!(!run.rec.events.iter().any(|e| e.kind == "signal-accepted"));
+        // durable: the reopened record has the same events
+        let back = EngineStateStore::open(d.path())
+            .unwrap()
+            .load("task_a")
+            .unwrap()
+            .unwrap();
+        let persisted: Vec<_> = back
+            .events
+            .iter()
+            .filter(|e| e.kind == "signal-handled")
+            .map(|e| e.detail.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(persisted, got);
+    }
+
+    #[test]
+    fn historical_signal_accepted_events_stay_readable_and_are_not_rewritten() {
+        // a record as EM-04B wrote it: kind `signal-accepted`, detail = the bare dispatch key
+        let d = tempfile::tempdir().unwrap();
+        let store = EngineStateStore::open(d.path()).unwrap();
+        let mut run = EngineRun::start(
+            store,
+            &MUSE_V1_SIGNALS,
+            "run_h",
+            "task_h",
+            "engineering-v2",
+            &"d".repeat(64),
+            "low",
+            None,
+        )
+        .unwrap();
+        run.rec
+            .event("signal-accepted", Some(1), None, None, Some("n1:legacykey"));
+        run.store.commit(&mut run.rec).unwrap();
+        let back = EngineStateStore::open(d.path())
+            .unwrap()
+            .load("task_h")
+            .unwrap()
+            .unwrap();
+        let e = back
+            .events
+            .iter()
+            .find(|e| e.kind == "signal-accepted")
+            .unwrap();
+        assert_eq!(e.detail.as_deref(), Some("n1:legacykey"));
+        // a later handled signal appends beside it; the old event is untouched
+        run.rec.event(
+            "signal-handled",
+            Some(2),
+            None,
+            None,
+            Some("applied n1:new"),
+        );
+        run.store.commit(&mut run.rec).unwrap();
+        let back = EngineStateStore::open(d.path())
+            .unwrap()
+            .load("task_h")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            back.events
+                .iter()
+                .filter(|e| e.kind == "signal-accepted")
+                .count(),
+            1
+        );
+        assert_eq!(
+            back.events
+                .iter()
+                .filter(|e| e.kind == "signal-handled")
+                .count(),
+            1
+        );
+    }
+}
+
+/// EM-04C2 S2 (E-2) at the durable boundary: a no-op effort proposal is refused with a
+/// deterministic code and leaves the durable record byte-for-byte as it was - no new
+/// `effort-selected` event, no new revision, so there is nothing for the Core to authorize.
+#[cfg(all(test, feature = "test-engines"))]
+mod s2_noop_effort {
+    use super::*;
+    use crate::engine::test_engine::EFFORT_TEST_V0;
+    use crate::engine::{EngineSnapshot, Hook, RunKind};
+
+    fn snap(dispatched: u32, current: &str) -> EngineSnapshot {
+        EngineSnapshot {
+            kind: Some(RunKind::Code),
+            interactive: true,
+            attempts_dispatched: dispatched,
+            current_effort: current.into(),
+            authorized_efforts: vec!["high".into(), "low".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_noop_effort_change_leaves_the_durable_record_untouched() {
+        let d = tempfile::tempdir().unwrap();
+        let mut run = EngineRun::start(
+            EngineStateStore::open(d.path()).unwrap(),
+            &EFFORT_TEST_V0,
+            "run_n",
+            "task_n",
+            "engineering-v2",
+            &"e".repeat(64),
+            "low",
+            None,
+        )
+        .unwrap();
+        let file = d.path().join("engine").join("task_n.json");
+        // attempt 1 wants `low`: nothing to change
+        run.consult(Hook::BeforeRequest, &snap(0, "low")).unwrap();
+        // attempt 2 wants `high`: a real change, durable
+        run.consult(Hook::BeforeRequest, &snap(1, "low")).unwrap();
+        let selected = |r: &EngineRun| {
+            r.rec
+                .events
+                .iter()
+                .filter(|e| e.kind == "effort-selected")
+                .count()
+        };
+        assert_eq!(
+            selected(&run),
+            1,
+            "{:?}",
+            run.rec
+                .events
+                .iter()
+                .map(|e| (e.kind.clone(), e.attempt, e.effort.clone()))
+                .collect::<Vec<_>>()
+        );
+        let on_disk = std::fs::read(&file).unwrap();
+        let (rev, sel) = (run.rec.revision, run.host.effort_selection().cloned());
+        // the Core's description is stale (still `low`): the engine proposes `high` AGAIN
+        let e = run
+            .consult(Hook::BeforeRequest, &snap(1, "low"))
+            .unwrap_err();
+        assert_eq!(e.code, "engine-effort-noop", "{}", e.message);
+        assert_eq!(selected(&run), 1, "no second selection event");
+        assert_eq!(
+            (run.rec.revision, run.host.effort_selection().cloned()),
+            (rev, sel)
+        );
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            on_disk,
+            "the durable record is byte-identical"
+        );
+        // with the Core's accurate description the engine's next proposal is a REAL change
+        // (the schedule returns to `low` at attempt 3) and is made durable as usual
+        run.consult(Hook::BeforeRequest, &snap(2, "high")).unwrap();
+        assert_eq!(selected(&run), 2);
+        assert_eq!(run.host.effort_selection().unwrap().effort, "low");
     }
 }

@@ -1486,6 +1486,7 @@ fn to_selection(t: &crate::resolution::ResolvedTarget) -> nexus_contracts::inten
         remote_model_id: t.remote_model_id.clone(),
         logical_model_id: Some(t.logical_model_id.clone()),
         route_id: Some(t.route_id.clone()),
+        mode_id: None,
     }
 }
 
@@ -1524,6 +1525,7 @@ fn parse_thread_selection(
                 remote_model_id: parts[1].to_owned(),
                 logical_model_id: parts.get(2).map(|s| (*s).to_owned()),
                 route_id: Some(route),
+                mode_id: None,
             }));
         }
         // Bare routeId: match by route alone.
@@ -1532,6 +1534,7 @@ fn parse_thread_selection(
             remote_model_id: String::new(),
             logical_model_id: None,
             route_id: Some(route),
+            mode_id: None,
         }));
     }
     let parts: Vec<&str> = model.split('/').collect();
@@ -1543,6 +1546,7 @@ fn parse_thread_selection(
         remote_model_id: parts[1].to_owned(),
         logical_model_id: parts.get(2).map(|s| (*s).to_owned()),
         route_id: None,
+        mode_id: None,
     }))
 }
 
@@ -1729,6 +1733,7 @@ pub fn send(b: &Arc<Broker>, client: &str, params: &Value) -> CmdResult {
             remote_model_id: resolved.remote_model_id.clone(),
             logical_model_id: Some(resolved.logical_model_id.clone()),
             route_id: Some(resolved.route_id.clone()),
+            mode_id: None,
         }),
         workspace_id: Some(project.clone()),
         limits: b

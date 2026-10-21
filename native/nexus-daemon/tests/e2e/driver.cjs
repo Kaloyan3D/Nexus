@@ -19,6 +19,17 @@ function makeService(installRoot, dataRoot) {
   return serviceModule.createService({ installRoot: installRoot, dataRoot: dataRoot });
 }
 
+// EM-04C2 S4 fixtures: the Registry CODE of an install root (its mode definitions are read next to
+// the module), so a fixture install root that activates a mode is honoured by the same code the
+// broker's bridge runs. Falls back to this repository's own modules for the repository root.
+function registryOf(installRoot) {
+  const base = path.join(String(installRoot), 'config', 'registry');
+  return {
+    service: require(path.join(base, 'service.cjs')),
+    v2: require(path.join(base, 'native-target-v2.cjs')),
+  };
+}
+
 function probeText(status, text) {
   return {
     ok: status >= 200 && status < 300,
@@ -228,6 +239,17 @@ function cmdRegistrySlotPolicy(args) {
   emit(r.ok ? { ok: true, revision: r.revision } : { ok: false, where: 'policy', code: ((r.errors || [])[0] || {}).code, errors: r.errors || r.code || r });
 }
 
+// EM-04C2 S4 fixture: the operator SAVES a ModeConfiguration for `modeId` (main slot on
+// model/route, reasoning `low`, optional policy). Nothing else writes a mode configuration.
+function cmdRegistrySaveMode(args) {
+  const service = registryOf(args[1]).service.createService({ installRoot: args[1], dataRoot: args[0] });
+  const modeId = args[2];
+  const config = { schemaVersion: 1, modeId: modeId, revision: 0, slots: { main: { logicalModelId: args[3], routeId: args[4], reasoning: 'low' } }, roleOverrides: {} };
+  if (args[5] && args[5] !== 'none') config.slots.main.allowedReasoning = JSON.parse(args[5]);
+  const r = service.save(modeId, config, undefined, {});
+  emit(r.ok ? { ok: true, revision: r.revision } : { ok: false, where: 'save-mode', code: ((r.errors || [])[0] || {}).code, errors: r.errors || r.code || r });
+}
+
 // EM-03 fixture: scope the fixture models to an additional orchestration engine.
 function cmdRegistryEngineScope(args) {
   const service = makeService(args[1], args[0]);
@@ -259,8 +281,11 @@ function cmdIssue(args) {
   const dataRoot = args[1];
   const taskInstanceId = args[2];
   const sessionId = args[3];
-  const service = makeService(installRoot, dataRoot);
-  const out = v2.issueExecutionTargetV2({ installRoot: installRoot, dataRoot: dataRoot, taskInstanceId: taskInstanceId, sessionId: sessionId }, { service: service });
+  const reg = registryOf(installRoot);
+  const service = reg.service.createService({ installRoot: installRoot, dataRoot: dataRoot });
+  // EM-04C2 S4 fixture: an optional selection JSON (as the broker passes it) as the fifth argument
+  const selection = args[4] ? JSON.parse(args[4]) : null;
+  const out = reg.v2.issueExecutionTargetV2({ installRoot: installRoot, dataRoot: dataRoot, taskInstanceId: taskInstanceId, sessionId: sessionId, selection: selection }, { service: service });
   if (!out.ok) {
     emit({ ok: false, code: out.code, message: out.message });
     process.exitCode = 1;
@@ -317,6 +342,7 @@ function main() {
   if (sub === 'registry-default') return cmdRegistryDefault(args);
   if (sub === 'registry-slot-policy') return cmdRegistrySlotPolicy(args);
   if (sub === 'registry-engine-scope') return cmdRegistryEngineScope(args);
+  if (sub === 'registry-save-mode') return cmdRegistrySaveMode(args);
   if (sub === 'issue-attempt') {
     let text = '';
     process.stdin.setEncoding('utf8');

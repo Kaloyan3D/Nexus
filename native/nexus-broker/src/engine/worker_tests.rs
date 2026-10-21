@@ -5,6 +5,7 @@
 
 use super::governor_bridge::{BridgeError, GovernorEvaluator, NodeGovernorBridge};
 use super::worker_bridge::*;
+use super::worker_bridge::{check_worker_flags, TEST_FLAG_OVERRIDES_ALLOWED};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -86,6 +87,8 @@ const sha = (t) => crypto.createHash('sha256').update(t, 'utf8').digest('hex');
 let buf = Buffer.alloc(0), hello = true;
 function frame(o) {{ const b = Buffer.from(typeof o === 'string' ? o : JSON.stringify(o)); const h = Buffer.alloc(4); h.writeUInt32BE(b.length); return Buffer.concat([h, b]); }}
 const put = (o) => process.stdout.write(frame(o));
+const PERM = {{ enforced: true, scopes: {{ 'fs.read': false, 'fs.write': false, child: false, worker: false, addon: false }},
+  canaries: {{ read: 'ERR_ACCESS_DENIED', write: 'ERR_ACCESS_DENIED', child: 'ERR_ACCESS_DENIED', addon: 'ERR_DLOPEN_DISABLED' }} }};
 const ok = (m, result) => put({{ v: 1, type: 'response', id: m.id, scope: m.scope, bridge: {{ ok: true, result }} }});
 process.stdin.on('data', (c) => {{
   buf = Buffer.concat([buf, c]);
@@ -101,7 +104,7 @@ process.stdin.on('data', (c) => {{
       for (const k of ['governor', 'runtime', 'activity', 'signals']) d[k] = sha(m.sources[k]);
       d.bridge = sha(m.bridge);
       DIGEST_TAMPER
-      put({{ v: 1, type: 'ready', digests: d, node: process.version }});
+      put({{ v: 1, type: 'ready', digests: d, node: process.version, permission: PERM }});
       continue;
     }}
     {reply}
@@ -791,6 +794,7 @@ struct Raw {
 impl Raw {
     fn start() -> Self {
         let child = Command::new("node")
+            .args(worker_node_flags())
             .arg("-e")
             .arg(WORKER_SOURCE)
             .env_clear()
@@ -1122,4 +1126,359 @@ fn hwm_kb(pid: u32) -> u64 {
                 .and_then(|l| l.split_whitespace().nth(1)?.parse().ok())
         })
         .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------------------------
+// EM-04C2 S1: deny-all permission mode, memory flags, worker allowance
+// ---------------------------------------------------------------------------------------------
+
+fn nodes() -> Vec<(String, PathBuf)> {
+    let mut v = vec![];
+    if let Some(n) = node() {
+        v.push(("system".to_owned(), n));
+    }
+    if let Some(h) = std::env::var_os("HOME") {
+        let b = PathBuf::from(h).join(".local/share/nexus/runtime/node/bin/node");
+        if b.is_file() {
+            v.push(("bundled".to_owned(), b));
+        }
+    }
+    v
+}
+
+#[test]
+fn the_worker_flags_are_exactly_the_reviewed_set_and_grant_nothing() {
+    assert_eq!(
+        worker_node_flags(),
+        [
+            "--permission",
+            "--max-old-space-size=48",
+            "--max-semi-space-size=2"
+        ]
+    );
+    for f in worker_node_flags() {
+        assert!(!f.starts_with("--allow"), "{f}");
+        assert!(!f.contains("experimental"), "{f}");
+    }
+    assert_eq!(
+        WorkerConfig::new("node".into()).node_flags,
+        worker_node_flags()
+    );
+}
+
+/// What a compromised worker realm could try, run under the worker's exact flags.
+const PROBE: &str = r#"
+const out = {};
+const t = (n, f) => { try { const r = f(); out[n] = 'ALLOWED'; return r } catch (e) { out[n] = (e && e.code) || 'ERR' } };
+const fs = require('node:fs');
+const key = process.argv[process.argv.length - 2], target = process.argv[process.argv.length - 1];
+t('read-a-0600-file-of-the-same-uid', () => fs.readFileSync(key, 'utf8'));
+t('read-proc-environ', () => fs.readFileSync('/proc/self/environ'));
+t('write-a-file', () => fs.writeFileSync(target, 'pwned'));
+t('delete-a-file', () => fs.unlinkSync(key));
+t('child_process', () => require('node:child_process').execSync('id'));
+t('worker_threads', () => new (require('node:worker_threads').Worker)('1', { eval: true }));
+t('native-addon', () => process.dlopen({ exports: {} }, '/nonexistent.node'));
+t('inspector', () => require('node:inspector').open(0));
+t('process.binding', () => process.binding('fs'));
+// the residual boundary, stated honestly: the permission model does not restrict the network
+try { const s = require('node:net').connect(9, '127.0.0.1'); s.on('error', () => {}); s.destroy(); out['network-socket'] = 'ALLOWED' } catch (e) { out['network-socket'] = e.code || 'ERR' }
+console.log(JSON.stringify(out));
+"#;
+
+fn run_probe(node: &PathBuf, flags: &[String], dir: &std::path::Path) -> Value {
+    let key = dir.join("engine-state.key");
+    let target = dir.join("written-by-the-worker");
+    std::fs::write(&key, "SECRET-KEY-MATERIAL").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let out = Command::new(node)
+        .args(flags)
+        .arg("-e")
+        .arg(PROBE)
+        .arg("--")
+        .arg(&key)
+        .arg(&target)
+        .env_clear()
+        .output()
+        .unwrap();
+    serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|_| panic!("probe output: {}", String::from_utf8_lossy(&out.stderr)))
+}
+
+#[test]
+fn the_worker_denies_filesystem_process_and_addon_access_on_every_node() {
+    let all = nodes();
+    if all.is_empty() {
+        return;
+    }
+    for (name, n) in all {
+        let dir = tempfile::tempdir().unwrap();
+        // control: without the flag the same realm can do all of it (this is what the mode removes)
+        let open = run_probe(&n, &[], dir.path());
+        assert_eq!(
+            open["read-a-0600-file-of-the-same-uid"], "ALLOWED",
+            "{name}"
+        );
+        assert_eq!(open["child_process"], "ALLOWED", "{name}");
+        assert!(
+            dir.path().join("written-by-the-worker").exists(),
+            "{name}: control write"
+        );
+        std::fs::remove_file(dir.path().join("written-by-the-worker")).unwrap();
+        std::fs::write(dir.path().join("engine-state.key"), "SECRET-KEY-MATERIAL").unwrap();
+        // the worker's flags
+        let r = run_probe(&n, &worker_node_flags(), dir.path());
+        for op in [
+            "read-a-0600-file-of-the-same-uid",
+            "read-proc-environ",
+            "write-a-file",
+            "delete-a-file",
+            "child_process",
+            "worker_threads",
+            "inspector",
+            "process.binding",
+        ] {
+            assert_eq!(r[op], "ERR_ACCESS_DENIED", "{name}: {op}: {r}");
+        }
+        assert!(
+            matches!(
+                r["native-addon"].as_str(),
+                Some("ERR_DLOPEN_DISABLED" | "ERR_ACCESS_DENIED")
+            ),
+            "{name}: {r}"
+        );
+        assert!(
+            !dir.path().join("written-by-the-worker").exists(),
+            "{name}: nothing was written"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("engine-state.key")).unwrap(),
+            "SECRET-KEY-MATERIAL",
+            "{name}: nothing was deleted"
+        );
+        // documented residual: sockets can still be created
+        assert_eq!(
+            r["network-socket"], "ALLOWED",
+            "{name}: the network is NOT restricted"
+        );
+    }
+}
+
+#[test]
+fn the_real_worker_proves_the_permission_mode_in_its_handshake() {
+    for (name, n) in nodes() {
+        let w = WorkerGovernorBridge::new(n, "scope-A", Arc::new(AtomicBool::new(false)));
+        w.call("evaluate", &evalq())
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert_eq!(w.stats().spawns, 1, "{name}");
+    }
+}
+
+#[test]
+fn a_worker_without_the_permission_mode_never_starts_to_answer() {
+    need_node!();
+    let cfg = WorkerConfig::new("node".into()).without_permission_for_tests();
+    assert!(!cfg.node_flags.iter().any(|f| f == "--permission"));
+    let w = WorkerGovernorBridge::with_config(cfg, "scope-A", Arc::new(AtomicBool::new(false)));
+    let e = w.call("evaluate", &evalq()).unwrap_err();
+    assert_eq!(e.code, "bridge-failed", "{e:?}");
+    assert!(e.message.contains("permission-not-enforced"), "{e:?}");
+    assert!(e.message.contains("no unprotected fallback"), "{e:?}");
+    assert!(w.pid().is_none(), "no worker is kept");
+    // and it stays that way: every later call also fails, nothing is ever answered unprotected
+    assert!(w.call("ladder", &json!({})).is_err());
+}
+
+#[test]
+fn a_ready_without_a_complete_permission_proof_is_rejected() {
+    need_node!();
+    let good = "permission: PERM";
+    for (name, patch) in [
+        ("no report", ", permission: undefined"),
+        ("report disabled", ", permission: Object.assign({}, PERM, { enforced: false })"),
+        ("a scope allowed", ", permission: Object.assign({}, PERM, { scopes: Object.assign({}, PERM.scopes, { child: true }) })"),
+        ("a scope missing", ", permission: Object.assign({}, PERM, { scopes: { 'fs.read': false } })"),
+        ("read canary allowed", ", permission: Object.assign({}, PERM, { canaries: Object.assign({}, PERM.canaries, { read: 'allowed' }) })"),
+        ("write canary ENOENT", ", permission: Object.assign({}, PERM, { canaries: Object.assign({}, PERM.canaries, { write: 'ENOENT' }) })"),
+        ("child canary allowed", ", permission: Object.assign({}, PERM, { canaries: Object.assign({}, PERM.canaries, { child: 'allowed' }) })"),
+        ("addon canary failed normally", ", permission: Object.assign({}, PERM, { canaries: Object.assign({}, PERM.canaries, { addon: 'ERR_DLOPEN_FAILED' }) })"),
+        ("an extra field", ", permission: Object.assign({}, PERM, { granted: ['fs.read'] })"),
+        ("a string", ", permission: 'enforced'"),
+    ] {
+        let t = fake(normal_reply()).replace(&format!(", {good} }}"), &format!("{patch} }}"));
+        assert_ne!(t, fake(normal_reply()), "{name}: the patch applied");
+        let w = with_script(t, 3000);
+        let e = w.call("ladder", &json!({})).unwrap_err();
+        assert_eq!(e.code, "bridge-protocol", "{name}: {e:?}");
+        assert!(w.pid().is_none(), "{name}: killed, never used");
+    }
+    // and the honest report is accepted
+    let w = with_script(fake(normal_reply()), 3000);
+    assert_eq!(
+        w.call("ladder", &json!({})).unwrap(),
+        json!({"echo": "ladder"})
+    );
+}
+
+#[test]
+fn a_node_that_rejects_the_permission_flag_fails_closed() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    // an "old Node": it does not know --permission and exits like a real one does for a bad option
+    let shim = dir.path().join("node");
+    std::fs::write(&shim, "#!/bin/sh\necho \"bad option: $1\" >&2\nexit 9\n").unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let w = WorkerGovernorBridge::new(shim, "scope-A", Arc::new(AtomicBool::new(false)));
+    let e = w.call("evaluate", &evalq()).unwrap_err();
+    assert_eq!(e.code, "bridge-failed", "{e:?}");
+    assert!(e.message.contains("Node >= 23.5"), "{e:?}");
+    assert!(w.pid().is_none());
+    assert_eq!(
+        w.stats().retries,
+        0,
+        "a failed start-up is not retried unprotected"
+    );
+}
+
+#[test]
+fn the_worker_allowance_follows_max_active_and_never_exceeds_sixteen() {
+    need_node!();
+    assert_eq!(WorkerSlots::for_max_active(0).max(), 1);
+    assert_eq!(WorkerSlots::for_max_active(2).max(), 2);
+    assert_eq!(WorkerSlots::for_max_active(8).max(), 8);
+    assert_eq!(WorkerSlots::for_max_active(1000).max(), MAX_LIVE_WORKERS);
+    let slots = Arc::new(WorkerSlots::for_max_active(2));
+    let mk = |scope: &str| {
+        WorkerGovernorBridge::with_config(
+            WorkerConfig::new("node".into()).with_slots(slots.clone()),
+            scope,
+            Arc::new(AtomicBool::new(false)),
+        )
+    };
+    let (a, b, c) = (mk("a"), mk("b"), mk("c"));
+    a.call("evaluate", &evalq()).unwrap();
+    b.call("evaluate", &evalq()).unwrap();
+    assert_eq!(slots.live(), 2);
+    let e = c.call("evaluate", &evalq()).unwrap_err();
+    assert_eq!(e.code, "bridge-busy", "{e:?}");
+    assert_eq!(slots.live(), 2, "a refused spawn takes nothing");
+    drop(a);
+    assert_eq!(slots.live(), 1, "ending a worker returns its slot");
+    c.call("evaluate", &evalq()).unwrap();
+    assert_eq!(slots.live(), 2);
+    drop((b, c));
+    assert_eq!(slots.live(), 0);
+}
+
+/// One request of the specified memory workload: a signal on every second request.
+fn memory_args(i: usize) -> Value {
+    let events = if i % 2 == 1 {
+        json!([{"type": "signal", "signal": {"phase": "diagnose", "recordHypothesisFailure": true}, "dispatchKey": "n1:mem"}])
+    } else {
+        json!([])
+    };
+    eval_args(
+        &Value::Null,
+        &Value::Null,
+        events,
+        &["low", "medium", "high", "xhigh"],
+    )
+}
+
+fn memory_run(requests: usize) {
+    for (name, n) in nodes() {
+        let w = WorkerGovernorBridge::new(n, "scope-mem", Arc::new(AtomicBool::new(false)));
+        let t = Instant::now();
+        let mut lat = Vec::with_capacity(requests);
+        for i in 1..=requests {
+            let t0 = Instant::now();
+            w.call("evaluate", &memory_args(i)).unwrap();
+            lat.push(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+        let pid = w.pid().unwrap();
+        let rss_mib = rss_kb(pid) as f64 / 1024.0;
+        lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "MEM node={name} requests={requests} rss={rss_mib:.1} MiB hwm={:.1} MiB median={:.2} ms p95={:.2} ms p99={:.2} ms total={:.1}s",
+            hwm_kb(pid) as f64 / 1024.0,
+            lat[lat.len() / 2],
+            lat[lat.len() * 95 / 100],
+            lat[lat.len() * 99 / 100],
+            t.elapsed().as_secs_f64()
+        );
+        assert!(
+            rss_mib <= 100.0,
+            "{name}: RSS {rss_mib:.1} MiB after {requests} requests exceeds 100 MiB"
+        );
+    }
+}
+
+#[test]
+fn the_worker_stays_inside_its_memory_budget_on_every_node() {
+    memory_run(2_000);
+}
+
+/// `cargo test --release -p nexus-broker --lib the_worker_memory_budget_after_ten_thousand -- --ignored --nocapture`
+#[test]
+#[ignore = "measurement: 10,000 requests per node"]
+fn the_worker_memory_budget_after_ten_thousand_requests() {
+    memory_run(10_000);
+}
+
+#[test]
+fn the_real_worker_without_the_permission_mode_answers_its_hello_with_a_fatal() {
+    need_node!();
+    let child = Command::new("node")
+        .arg("-e")
+        .arg(WORKER_SOURCE)
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut r = Raw { child };
+    let f = r.hello();
+    assert_eq!(
+        (f["type"].as_str(), f["code"].as_str()),
+        (Some("fatal"), Some("permission-not-enforced")),
+        "{f}"
+    );
+    assert!(r.exited(), "it does not stay up to answer requests");
+}
+
+#[test]
+fn production_refuses_any_worker_flag_set_but_the_reviewed_one() {
+    let reviewed = worker_node_flags();
+    assert!(check_worker_flags(&reviewed, false).is_ok());
+    let with = |extra: &str| {
+        let mut v = reviewed.clone();
+        v.push(extra.to_owned());
+        v
+    };
+    for bad in [
+        with("--allow-fs-read=*"),
+        with("--allow-fs-write=/tmp"),
+        with("--allow-child-process"),
+        with("--allow-worker"),
+        with("--allow-addons"),
+        with("--experimental-permission"),
+        with("--inspect"),
+        with("--max-old-space-size=4096"),
+        vec![
+            "--max-old-space-size=48".to_owned(),
+            "--max-semi-space-size=2".to_owned(),
+        ], // --permission dropped
+        vec![],
+        reviewed.iter().rev().cloned().collect::<Vec<_>>(), // reordered
+    ] {
+        assert!(check_worker_flags(&bad, false).is_err(), "{bad:?}");
+        // test builds may override (the restart tests grant ONE marker path to a test script)
+        assert!(check_worker_flags(&bad, true).is_ok());
+    }
+    // the build-time switch is on in this (test) build and is what the constructors consult
+    const { assert!(TEST_FLAG_OVERRIDES_ALLOWED) };
 }

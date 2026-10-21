@@ -661,9 +661,24 @@ impl EngineHost {
                         "the proposed effort is not one the task binding authorizes",
                     ));
                 }
+                // EM-04C2 (E-2): a change to the effort that ALREADY applies to the next attempt is a
+                // no-op, never a new selection: it would commit a durable `effort-selected` event
+                // and could trigger a Registry issuance and two Kernel seals for nothing, on every
+                // request, from a buggy or hostile engine. Both the Core's view (the snapshot's
+                // `current_effort`: the selection in force or the pinned default) and the host's
+                // own selection are consulted. Nothing is changed or committed.
+                let next_attempt = snapshot.attempts_dispatched + 1;
+                if snapshot.current_effort == *level
+                    || self.effort_for_attempt(next_attempt) == Some(level.as_str())
+                {
+                    return Err(refuse(
+                        "engine-effort-noop",
+                        "the proposed effort already applies to the next attempt; no new selection is made",
+                    ));
+                }
                 Some(EffortSelection {
                     effort: level.clone(),
-                    from_attempt: snapshot.attempts_dispatched + 1,
+                    from_attempt: next_attempt,
                     proposal_id: p.proposal_id,
                 })
             }

@@ -277,6 +277,8 @@ async fn intent_submit(
                     remote_model_id: m,
                     logical_model_id: l,
                     route_id: r,
+                    // the Desktop never chooses an Engineering Mode (EM-04C2 S4)
+                    mode_id: None,
                 })
             }
             (None, None, None, None) => None,

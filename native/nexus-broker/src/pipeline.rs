@@ -418,10 +418,15 @@ fn run_steps(
     let mut issue_args: Vec<&str> = vec![&repo, &data, &task_instance, &session_id];
     let selection_json;
     if let Some(m) = &intent.model {
-        let sel = serde_json::json!({
+        let mut sel = serde_json::json!({
             "logicalModelId": m.logical_model_id.clone().unwrap_or_default(),
             "routeId": m.route_id.clone().unwrap_or_default(),
         });
+        // EM-04C2 S4: an Engineering Mode choice, only when the client made one; the Registry
+        // judges it against its closed table of reviewed modes
+        if let Some(mode) = &m.mode_id {
+            sel["modeId"] = serde_json::Value::String(mode.clone());
+        }
         selection_json = serde_json::to_string(&sel).unwrap_or_default();
         issue_args.push(&selection_json);
     }

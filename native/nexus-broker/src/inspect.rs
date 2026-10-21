@@ -813,10 +813,15 @@ pub(crate) fn run(
     let mut issue_args: Vec<&str> = vec![&repo, &data, &task_instance, &session_id];
     let selection_json;
     if let Some(m) = &intent.model {
-        let sel = serde_json::json!({
+        let mut sel = serde_json::json!({
             "logicalModelId": m.logical_model_id.clone().unwrap_or_default(),
             "routeId": m.route_id.clone().unwrap_or_default(),
         });
+        // EM-04C2 S4: an Engineering Mode choice, only when the client made one; the Registry
+        // judges it against its closed table of reviewed modes
+        if let Some(mode) = &m.mode_id {
+            sel["modeId"] = serde_json::Value::String(mode.clone());
+        }
         selection_json = serde_json::to_string(&sel).unwrap_or_default();
         issue_args.push(&selection_json);
     }
@@ -827,10 +832,13 @@ pub(crate) fn run(
     // and binds every attempt to. An engine this runtime does not have, or one that differs from
     // the engine of the run this one continues, fails closed here, before any working copy,
     // grant or provider request exists.
-    let engine = engine_for_run(b, run_id, &resolution)?;
     // EM-02: a continuation keeps the task binding of the run it continues (model, route,
-    // provider, connection, endpoint, credential, mode, engine, default effort) or fails closed.
+    // provider, connection, endpoint, credential, mode, engine, default effort, request budget and
+    // - EM-04C2 - the slot's reasoning policy) or fails closed. EM-04C2 S4: this is judged BEFORE
+    // the engine is selected, so a continuation that changed mode (and therefore engine) is a
+    // `task-binding-mismatch`, never an `engine-unavailable` that would hide the mode change.
     task_binding_continuity(b, run_id, &issued)?;
+    let engine = engine_for_run(b, run_id, &resolution)?;
     // EM-03: the interrupted run's engine state is examined (authenticated, same engine, mode,
     // contract and schema) before this continuation creates anything; refused = nothing exists.
     if let Some(pred) = predecessor_of(b, run_id) {
@@ -1125,6 +1133,7 @@ pub(crate) fn run(
         run_id,
         &task_target.binding_digest,
         &task_target.identity_digest(),
+        crate::attempt_target::IDENTITY_VERSION,
     ) {
         return Err(discard(se(
             "task-binding-unrecorded",
@@ -1191,11 +1200,16 @@ pub(crate) fn run(
         // EM-04C1: ONE supervised, persistent worker owned by this run (scope = the task
         // generation, cancelled with the run, killed when the lease below drops). Logically
         // stateless: the engine state, not the worker, is the ledger.
-        let worker = std::sync::Arc::new(crate::engine::worker_bridge::WorkerGovernorBridge::new(
-            b.node_abs.clone(),
-            task_instance.clone(),
-            std::sync::Arc::clone(flag),
-        ));
+        // EM-04C2 S1: the worker count is bounded by this broker's `max_active` (never above 16)
+        // and the process is started under Node's deny-all permission mode, proven at hand-shake.
+        let worker = std::sync::Arc::new(
+            crate::engine::worker_bridge::WorkerGovernorBridge::with_config(
+                crate::engine::worker_bridge::WorkerConfig::new(b.node_abs.clone())
+                    .with_slots(std::sync::Arc::clone(&b.worker_slots)),
+                task_instance.clone(),
+                std::sync::Arc::clone(flag),
+            ),
+        );
         worker_lease = Some(crate::engine::worker_bridge::WorkerLease::new(
             std::sync::Arc::clone(&worker),
         ));
@@ -1598,7 +1612,11 @@ fn task_binding_continuity(b: &Broker, run_id: &str, issued: &Value) -> Result<(
     };
     match prev.task_binding_identity.as_deref() {
         Some(id) => {
-            if id != crate::attempt_target::identity_digest(&binding) {
+            if !crate::attempt_target::identity_matches(
+                id,
+                prev.task_binding_identity_version,
+                &binding,
+            ) {
                 return Err(refuse());
             }
         }

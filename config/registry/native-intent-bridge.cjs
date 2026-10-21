@@ -162,6 +162,13 @@ function loadService(repoRoot, dataRoot) {
   return serviceModule.createService({ installRoot: repoRoot, dataRoot: dataRoot });
 }
 
+// The selection is exactly one of three closed shapes:
+//   { logicalModelId, routeId }                  a model/route override (as before)
+//   { logicalModelId, routeId, modeId }          the same, in a reviewed mode (EM-04C2 S4)
+//   { modeId }                                   a reviewed mode with its saved assignment
+// `modeId` must be a key of the reviewed Native scope table (native-issuer NATIVE_SCOPES); an
+// unknown, non-string or inherited name is refused here and again by the issuer. Absent modeId =
+// engineering-v2, and then the selection is byte-for-byte what it always was.
 function parseSelectionJson(text) {
   if (text === undefined || text === null || text === '') return { ok: true, selection: null };
   let sel = null;
@@ -171,10 +178,18 @@ function parseSelectionJson(text) {
     return { ok: false, selection: null };
   }
   if (sel === null || typeof sel !== 'object' || Array.isArray(sel)) return { ok: false, selection: null };
-  const keys = Object.keys(sel);
-  if (keys.length !== 2 || keys.indexOf('logicalModelId') === -1 || keys.indexOf('routeId') === -1) return { ok: false, selection: null };
-  if (typeof sel.logicalModelId !== 'string' || typeof sel.routeId !== 'string') return { ok: false, selection: null };
-  return { ok: true, selection: { logicalModelId: sel.logicalModelId, routeId: sel.routeId } };
+  const keys = Object.keys(sel).sort();
+  const shape = keys.join(',');
+  if (shape !== 'logicalModelId,routeId' && shape !== 'logicalModelId,modeId,routeId' && shape !== 'modeId') return { ok: false, selection: null };
+  if (keys.indexOf('logicalModelId') !== -1 && (typeof sel.logicalModelId !== 'string' || typeof sel.routeId !== 'string')) return { ok: false, selection: null };
+  if (keys.indexOf('modeId') !== -1) {
+    const issuer = require(path.join(REPO, 'config', 'registry', 'native-issuer.cjs'));
+    if (typeof sel.modeId !== 'string' || !issuer.scopeOf(sel.modeId)) return { ok: false, selection: null };
+  }
+  const out = {};
+  if (keys.indexOf('logicalModelId') !== -1) { out.logicalModelId = sel.logicalModelId; out.routeId = sel.routeId; }
+  if (keys.indexOf('modeId') !== -1) out.modeId = sel.modeId;
+  return { ok: true, selection: out };
 }
 
 function issueFor(repoRoot, dataRoot, taskInstanceId, sessionId, selection) {

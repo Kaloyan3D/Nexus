@@ -40,6 +40,44 @@ const ISSUER_SCHEMA_VERSION = 1;
 const ISSUER_ID = 'nexus-registry-bridge/1';
 const SUPPORTED_MODE_ID = 'engineering-v2';
 const SUPPORTED_ROLE = 'muse_main';
+
+/**
+ * EM-04C2 S4: the CLOSED, reviewed table of the Engineering Modes the Native issuance path may
+ * issue, with the orchestration engine each one MUST declare. Adding a mode here is a code
+ * change that is reviewed like any other; nothing (no selection, no configuration, no model) can
+ * add an entry. `engineering-v2` is the default and keeps its engine `muse-v0`. The adaptive mode
+ * maps to `muse-v1` and additionally requires an operator-SAVED ModeConfiguration: no preview,
+ * no adoption from a legacy profile, nothing is created on the operator's behalf.
+ */
+const NATIVE_SCOPES = Object.freeze({
+  'engineering-v2': Object.freeze({
+    engineId: 'muse-v0',
+    // The deterministic EXPERIMENTAL engines of the Rust runtime (compiled only into `test-engines`
+    // builds; a production runtime answers `engine-unavailable` for each). Fixture install roots
+    // name them in the default mode to drive them end to end, exactly as before this table existed.
+    // The adaptive production engine `muse-v1` is NOT among them: it can never be issued here.
+    experimentalEngineIds: Object.freeze(['effort-test-v0', 'muse-v1-shadow', 'muse-v1-signals']),
+    role: SUPPORTED_ROLE,
+    requiresSavedConfiguration: false,
+  }),
+  'engineering-v2-adaptive': Object.freeze({
+    engineId: 'muse-v1',
+    experimentalEngineIds: Object.freeze([]),
+    role: SUPPORTED_ROLE,
+    requiresSavedConfiguration: true,
+  }),
+});
+
+/** Whether `engineId` is an engine the reviewed table allows for the scope. */
+function engineAllowed(scope, engineId) {
+  return !!scope && typeof engineId === 'string' && (engineId === scope.engineId || scope.experimentalEngineIds.indexOf(engineId) !== -1);
+}
+
+/** The scope of a mode id, or null. Own properties only: `__proto__`, `constructor` etc. are not modes. */
+function scopeOf(modeId) {
+  if (typeof modeId !== 'string' || !Object.prototype.hasOwnProperty.call(NATIVE_SCOPES, modeId)) return null;
+  return NATIVE_SCOPES[modeId];
+}
 const EXPECTED_EXECUTION_KIND = 'raw-model';
 
 function canonicalSha256(value) {
@@ -61,12 +99,13 @@ function compileTrustedMode(options, deps) {
   const installRoot = typeof o.installRoot === 'string' ? o.installRoot : '';
   const dataRoot = typeof o.dataRoot === 'string' ? o.dataRoot : '';
   const modeId = typeof o.modeId === 'string' ? o.modeId : SUPPORTED_MODE_ID;
-  if (modeId !== SUPPORTED_MODE_ID) {
-    return { ok: false, code: 'registry-unsupported-scope', message: 'A1.2 supports only mode engineering-v2; ' + modeId + ' is explicitly unsupported/skipped', issuance: null };
+  const scope = scopeOf(modeId);
+  if (!scope) {
+    return { ok: false, code: 'registry-unsupported-scope', message: 'the Native issuance path does not issue mode ' + String(modeId).slice(0, 64) + '; it is explicitly unsupported/skipped', issuance: null };
   }
-  const role = typeof o.role === 'string' ? o.role : SUPPORTED_ROLE;
-  if (role !== SUPPORTED_ROLE) {
-    return { ok: false, code: 'registry-unsupported-scope', message: 'A1.2 supports only role muse_main; ' + role + ' is explicitly unsupported/skipped', issuance: null };
+  const role = typeof o.role === 'string' ? o.role : scope.role;
+  if (role !== scope.role) {
+    return { ok: false, code: 'registry-unsupported-scope', message: 'mode ' + modeId + ' issues only role ' + scope.role + '; ' + String(role).slice(0, 64) + ' is explicitly unsupported/skipped', issuance: null };
   }
   if (installRoot === '' || dataRoot === '') return fail('registry-host-missing', 'installRoot and dataRoot are required');
   const d = deps || {};
@@ -81,6 +120,9 @@ function compileTrustedMode(options, deps) {
     staged = service.getModeConfiguration(modeId, {});
   } catch (e) {
     return fail('registry-unavailable', 'effective mode configuration is unreadable: ' + String((e && e.message) || e));
+  }
+  if (scope.requiresSavedConfiguration && (!staged || !staged.result || staged.result.persisted !== true)) {
+    return fail('registry-mode-configuration-required', 'mode ' + modeId + ' runs only from a ModeConfiguration the operator has saved; none is created or adopted for it');
   }
   if (!staged || !staged.result || !staged.result.config) {
     const codes = ((staged && staged.errors) || []).map(function (e) { return e && e.code; }).join(',');
@@ -98,6 +140,10 @@ function compileTrustedMode(options, deps) {
     return fail('registry-unresolved', 'mode configuration does not compile (' + codes + '); refusing to issue');
   }
   const snapshot = compiled.snapshot;
+  // the shipped definition must declare exactly the engine the reviewed table maps this mode to
+  if (!engineAllowed(scope, snapshot.orchestrationEngineId)) {
+    return { ok: false, code: 'registry-unsupported-scope', message: 'mode ' + modeId + ' declares orchestration engine ' + String(snapshot.orchestrationEngineId).slice(0, 64) + ', not the reviewed ' + scope.engineId + ' (or a listed experimental engine); refusing to issue', issuance: null };
+  }
   const binding = snapshot.roles && snapshot.roles[role];
   if (!binding || typeof binding !== 'object') {
     return fail('registry-role-unauthorized', 'role ' + role + ' has no compiled binding in mode ' + modeId + '; refusing to issue');
@@ -127,8 +173,9 @@ function issueForGeneration(compiled, taskInstanceId) {
   if (binding.executionKind !== EXPECTED_EXECUTION_KIND) {
     return fail('registry-target-unauthorized', 'compiled binding executionKind ' + binding.executionKind + ' is not the authorized raw-model target; refusing to issue');
   }
-  if (binding.roleId !== SUPPORTED_ROLE || binding.modeId !== SUPPORTED_MODE_ID) {
-    return fail('registry-role-unauthorized', 'compiled binding is not the authorized engineering-v2/muse_main target; refusing to issue');
+  const scope = scopeOf(binding.modeId);
+  if (!scope || binding.roleId !== scope.role || !engineAllowed(scope, binding.orchestrationEngineId)) {
+    return fail('registry-role-unauthorized', 'compiled binding is not an authorized (mode, engine, role) of the reviewed Native scope table; refusing to issue');
   }
   // Complete real target identity — field-for-field the Rust
   // ExecutionTargetCoreV1 (camelCase). No invented endpoint, billing,
@@ -225,7 +272,7 @@ function issueForGeneration(compiled, taskInstanceId) {
     issuance: {
       schemaVersion: ISSUER_SCHEMA_VERSION,
       issuer: ISSUER_ID,
-      modeId: SUPPORTED_MODE_ID,
+      modeId: binding.modeId,
       role: SUPPORTED_ROLE,
       taskInstanceId: taskInstanceId,
       target: target,
@@ -258,6 +305,9 @@ module.exports = {
   ISSUER_SCHEMA_VERSION: ISSUER_SCHEMA_VERSION,
   ISSUER_ID: ISSUER_ID,
   SUPPORTED_MODE_ID: SUPPORTED_MODE_ID,
+  NATIVE_SCOPES: NATIVE_SCOPES,
+  scopeOf: scopeOf,
+  engineAllowed: engineAllowed,
   SUPPORTED_ROLE: SUPPORTED_ROLE,
   canonicalSha256: canonicalSha256,
   compileTrustedMode: compileTrustedMode,

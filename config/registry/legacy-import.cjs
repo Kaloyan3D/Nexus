@@ -31,7 +31,7 @@ function readJson(filePath) {
 function loadModeDefinitions() {
   const dir = path.join(__dirname, 'modes')
   const modes = []
-  for (const file of ['engineering-v1.json', 'engineering-v2.json', 'engineering-v3.json']) {
+  for (const file of ['engineering-v1.json', 'engineering-v2.json', 'engineering-v2-adaptive.json', 'engineering-v3.json']) {
     const doc = readJson(path.join(dir, file))
     if (doc) modes.push(doc)
   }

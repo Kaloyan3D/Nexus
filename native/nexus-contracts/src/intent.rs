@@ -63,6 +63,11 @@ pub struct ModelSelection {
     pub logical_model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_id: Option<String>,
+    /// EM-04C2 S4: the Engineering Mode to issue the run in. Absent = `engineering-v2` (the
+    /// default, unchanged). Only a bounded identifier is checked here; the closed set of reviewed
+    /// modes is the Registry's (`native-issuer.cjs` `NATIVE_SCOPES`), which refuses any other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_id: Option<String>,
 }
 
 /// Explicit, bounded limits. They can only tighten broker/Registry limits.
@@ -312,7 +317,16 @@ impl NexusIntentV1 {
                     "model selection ids are empty, too long or carry forbidden characters",
                 ));
             }
-            for s in [&m.logical_model_id, &m.route_id].into_iter().flatten() {
+            if m.mode_id.is_some() && self.intent_type != INTENT_REPO_CODE {
+                return Err(IntentError::new(
+                    "bad-intent",
+                    "an Engineering Mode choice applies to repo-code intents only",
+                ));
+            }
+            for s in [&m.logical_model_id, &m.route_id, &m.mode_id]
+                .into_iter()
+                .flatten()
+            {
                 if !bounded_id(s) {
                     return Err(IntentError::new(
                         "bad-intent",
@@ -367,6 +381,52 @@ mod tests {
             "intentType": "model-only",
             "content": "hello",
         })
+    }
+
+    fn code_intent(mode: Option<&str>) -> serde_json::Value {
+        let mut v = base();
+        v["intentType"] = serde_json::json!("repo-code");
+        v["workspaceId"] = serde_json::json!("proj");
+        let mut m = serde_json::json!({"providerId": "p", "remoteModelId": "m", "logicalModelId": "l", "routeId": "r"});
+        if let Some(mode) = mode {
+            m["modeId"] = serde_json::json!(mode);
+        }
+        v["model"] = m;
+        v
+    }
+
+    /// EM-04C2 S4: the Engineering Mode choice is optional, invisible when absent (every existing
+    /// intent serializes and digests exactly as before), bounded, and only for repo-code.
+    #[test]
+    fn the_mode_choice_is_optional_bounded_and_for_coding_runs_only() {
+        let plain = NexusIntentV1::parse(&code_intent(None)).expect("valid");
+        let m = plain.model.as_ref().unwrap();
+        assert_eq!(m.mode_id, None);
+        let back = serde_json::to_value(&plain).unwrap();
+        assert!(back["model"].get("modeId").is_none(), "{back}");
+        let chosen =
+            NexusIntentV1::parse(&code_intent(Some("engineering-v2-adaptive"))).expect("valid");
+        assert_eq!(
+            chosen.model.as_ref().unwrap().mode_id.as_deref(),
+            Some("engineering-v2-adaptive")
+        );
+        assert_eq!(
+            serde_json::to_value(&chosen).unwrap()["model"]["modeId"],
+            "engineering-v2-adaptive"
+        );
+        // malformed identifiers are refused by the contract (the Registry judges membership)
+        for bad in ["", "a b", "x\n", &"a".repeat(300)] {
+            assert!(
+                NexusIntentV1::parse(&code_intent(Some(bad))).is_err(),
+                "{bad:?}"
+            );
+        }
+        // a mode choice on a text-only or inspect intent is refused
+        for t in ["model-only", "repo-inspect"] {
+            let mut v = code_intent(Some("engineering-v2-adaptive"));
+            v["intentType"] = serde_json::json!(t);
+            assert!(NexusIntentV1::parse(&v).is_err(), "{t}");
+        }
     }
 
     #[test]

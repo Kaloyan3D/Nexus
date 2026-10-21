@@ -992,6 +992,111 @@ mod v2 {
         assert_eq!(h.receipts()[0].effort.as_ref(), Some(&sel));
     }
 
+    /// EM-04C2 S2 (E-2): a `Change` to the effort that already applies to the next attempt is a
+    /// deterministic no-op refusal. Nothing is selected, committed or counted.
+    #[test]
+    fn a_change_to_the_effort_that_already_applies_is_refused_and_selects_nothing() {
+        let mut h = EngineHost::new(&EFFORT_TEST_V0);
+        // the pinned default is `low`: Change(low) with the default in force is a no-op
+        let before_state = h.state().clone();
+        let p = prop(
+            &h,
+            EffortProposal::Change("low".into()),
+            EngineAction::Continue,
+            0,
+        );
+        let e = h
+            .accept(Hook::BeforeRequest, &snap2(0, "low"), p)
+            .unwrap_err();
+        assert_eq!(e.code, "engine-effort-noop", "{}", e.message);
+        assert!(h.effort_selection().is_none(), "no selection was made");
+        assert!(h.receipts().is_empty(), "no proposal was admitted");
+        assert_eq!(h.next_proposal_id(), 1, "the proposal id was not consumed");
+        assert_eq!(h.state(), &before_state, "no state change");
+        // a real change is admitted (positive control) ...
+        let p = prop(
+            &h,
+            EffortProposal::Change("high".into()),
+            EngineAction::Continue,
+            1,
+        );
+        h.accept(Hook::BeforeRequest, &snap2(1, "low"), p).unwrap();
+        assert_eq!(h.effort_selection().unwrap().effort, "high");
+        let (sel, receipts, next) = (
+            h.effort_selection().cloned(),
+            h.receipts().len(),
+            h.next_proposal_id(),
+        );
+        // ... and repeating it, as the Core describes the situation, is a no-op
+        let p = prop(
+            &h,
+            EffortProposal::Change("high".into()),
+            EngineAction::Continue,
+            2,
+        );
+        let e = h
+            .accept(Hook::BeforeRequest, &snap2(2, "high"), p)
+            .unwrap_err();
+        assert_eq!(e.code, "engine-effort-noop");
+        // the host's own selection is consulted too: a STALE snapshot cannot hide the no-op
+        let p = prop(
+            &h,
+            EffortProposal::Change("high".into()),
+            EngineAction::Continue,
+            2,
+        );
+        let e = h
+            .accept(Hook::BeforeRequest, &snap2(2, "low"), p)
+            .unwrap_err();
+        assert_eq!(
+            e.code, "engine-effort-noop",
+            "selection high is in force from attempt 2"
+        );
+        assert_eq!(h.effort_selection().cloned(), sel);
+        assert_eq!((h.receipts().len(), h.next_proposal_id()), (receipts, next));
+        // returning to the default is a real change, not a no-op
+        let p = prop(
+            &h,
+            EffortProposal::Change("low".into()),
+            EngineAction::Continue,
+            2,
+        );
+        h.accept(Hook::BeforeRequest, &snap2(2, "high"), p).unwrap();
+        assert_eq!(h.effort_selection().unwrap().effort, "low");
+        assert_eq!(h.effort_selection().unwrap().from_attempt, 3);
+    }
+
+    /// The refusal precedes every other effort rule's effect and is not a way around them: an
+    /// unauthorized or finishing proposal keeps its own, more specific code.
+    #[test]
+    fn the_noop_rule_does_not_mask_the_other_effort_refusals() {
+        let mut h = EngineHost::new(&EFFORT_TEST_V0);
+        let p = prop(
+            &h,
+            EffortProposal::Change("xhigh".into()),
+            EngineAction::Continue,
+            0,
+        );
+        assert_eq!(
+            h.accept(Hook::BeforeRequest, &snap2(0, "xhigh"), p)
+                .unwrap_err()
+                .code,
+            "engine-effort-not-authorized"
+        );
+        let p = prop(
+            &h,
+            EffortProposal::Change("high".into()),
+            EngineAction::Finish,
+            0,
+        );
+        assert_eq!(
+            h.accept(Hook::FinalResponse, &snap2(0, "high"), p)
+                .unwrap_err()
+                .code,
+            "engine-effort-not-admitted"
+        );
+    }
+
     #[test]
     fn unauthorized_changes_are_refused_and_change_nothing() {
         let cases: Vec<(

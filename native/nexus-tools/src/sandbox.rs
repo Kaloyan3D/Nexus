@@ -732,6 +732,87 @@ fn spawn_reader<R: Read + Send + 'static>(
     })
 }
 
+/// Longest excerpt of a helper's stderr kept in a refusal message.
+const DIAGNOSTIC_MAX: usize = 300;
+
+/// A bounded, printable, secret-redacted excerpt of helper output for an error message
+/// (EM-04C2 S0). Control characters become spaces and runs of whitespace collapse; a value after
+/// `token`/`secret`/`password`/`passwd`/`credential`/`apikey`/`api_key`/`authorization`/`bearer` and any
+/// 24+ character run of base64/hex-like characters containing a digit is replaced by `<redacted>`.
+pub fn sanitize_diagnostic(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw);
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let mut words: Vec<String> = Vec::new();
+    let mut redact_next = false;
+    for w in flat.split_whitespace() {
+        let lower = w.to_ascii_lowercase();
+        let keyed = [
+            "token",
+            "secret",
+            "password",
+            "passwd",
+            "credential",
+            "apikey",
+            "api_key",
+            "authorization",
+            "bearer",
+        ]
+        .iter()
+        .any(|k| lower.contains(k));
+        let long_blob = w.len() >= 24
+            && w.chars().any(|c| c.is_ascii_digit())
+            && w.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-'));
+        if redact_next {
+            words.push("<redacted>".to_owned());
+            redact_next = false;
+        } else if keyed {
+            // `name=value` and `name: value` both lose the value
+            match w.split_once(['=', ':']) {
+                Some((k, v)) if !v.is_empty() => words.push(format!("{k}=<redacted>")),
+                _ => {
+                    words.push(w.to_owned());
+                    redact_next = true;
+                }
+            }
+        } else if long_blob {
+            words.push("<redacted>".to_owned());
+        } else {
+            words.push(w.to_owned());
+        }
+    }
+    let joined = words.join(" ");
+    joined.chars().take(DIAGNOSTIC_MAX).collect()
+}
+
+/// `"; systemd-run said: <excerpt>"` from a reader thread of the failed launcher, or the empty
+/// string. Never blocks: a thread still reading after a short grace (a surviving grandchild holds
+/// the pipe) is abandoned.
+fn diagnostic_from(h: Option<std::thread::JoinHandle<(Vec<u8>, u64)>>) -> String {
+    let Some(h) = h else { return String::new() };
+    let until = Instant::now() + Duration::from_millis(300);
+    while !h.is_finished() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !h.is_finished() {
+        return String::new();
+    }
+    match h.join() {
+        Ok((bytes, _)) => {
+            let s = sanitize_diagnostic(&bytes);
+            if s.is_empty() {
+                String::new()
+            } else {
+                format!("; systemd-run said: {s}")
+            }
+        }
+        Err(_) => String::new(),
+    }
+}
+
 /// Run one program in the sandbox and supervise it to completion.
 pub fn run_sandboxed(
     spec: &SandboxSpec,
@@ -878,9 +959,15 @@ pub fn run_sandboxed(
                 unsafe { libc::kill(pid as i32, libc::SIGKILL) };
                 let mut st = 0;
                 unsafe { libc::waitpid(pid as i32, &mut st, 0) };
-                return Err(refuse(
-                    "systemd scope was not created; kernel-enforced limits unavailable (nothing was run)",
-                ));
+                // EM-04C2 S0: say WHY. What `systemd-run` printed is the only evidence of a
+                // transient user-manager problem; it is bounded, stripped of control characters
+                // and of anything that looks like a secret, and never contains the environment
+                // (the command ran with a cleared one). The refusal itself is unchanged:
+                // nothing was run and there is no unsandboxed fallback.
+                let said = diagnostic_from(err_h);
+                return Err(refuse(format!(
+                    "systemd scope was not created; kernel-enforced limits unavailable (nothing was run){said}"
+                )));
             }
         }
     } else {
@@ -1027,4 +1114,60 @@ pub fn run_sandboxed(
         oom_killed: oom_seen > 0,
         pids_limit_hit: pids_hit > 0,
     })
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn a_diagnostic_is_bounded_printable_and_has_no_secrets() {
+        let raw =
+            b"Failed to start transient scope unit: Connection timed out\n\x1b[31mred\x1b[0m\0";
+        let s = sanitize_diagnostic(raw);
+        assert!(s.starts_with("Failed to start transient scope unit: Connection timed out"));
+        assert!(!s.chars().any(|c| c.is_control()));
+        // secrets: keyed values, bearer values and long opaque blobs
+        let hostile = b"token=abc123 Authorization: Bearer sk-live-0123456789abcdef0123456789 password hunter2 \
+                        XDG_RUNTIME_DIR=/run/user/1000 blob AAAAAAAAAAAAAAAAAAAAAAAAAAA1 ok";
+        let s = sanitize_diagnostic(hostile);
+        for leak in [
+            "abc123",
+            "sk-live",
+            "0123456789abcdef",
+            "hunter2",
+            "AAAAAAAAAAAA",
+        ] {
+            assert!(!s.contains(leak), "{leak} leaked: {s}");
+        }
+        assert!(s.contains("<redacted>") && s.contains("ok"), "{s}");
+        // bounded
+        let big = vec![b'x'; 100_000];
+        assert!(sanitize_diagnostic(&big).chars().count() <= DIAGNOSTIC_MAX);
+        // empty and binary input are harmless
+        assert_eq!(sanitize_diagnostic(b""), "");
+        assert!(sanitize_diagnostic(&[0xff, 0xfe, 0x00])
+            .chars()
+            .all(|c| !c.is_control()));
+    }
+
+    #[test]
+    fn the_refusal_text_keeps_its_stable_prefix_and_never_hangs() {
+        // no reader: nothing is appended
+        assert_eq!(diagnostic_from(None), "");
+        // a finished reader is appended, redacted
+        let h = std::thread::spawn(|| (b"boom token=XYZ".to_vec(), 14u64));
+        let d = diagnostic_from(Some(h));
+        assert_eq!(d, "; systemd-run said: boom token=<redacted>");
+        // a reader that never finishes is abandoned within the grace period
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let h = std::thread::spawn(move || {
+            let _ = rx.recv();
+            (Vec::new(), 0u64)
+        });
+        let t = Instant::now();
+        assert_eq!(diagnostic_from(Some(h)), "");
+        assert!(t.elapsed() < Duration::from_secs(2));
+        drop(tx);
+    }
 }

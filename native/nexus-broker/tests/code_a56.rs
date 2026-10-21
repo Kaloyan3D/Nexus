@@ -1160,23 +1160,235 @@ fn approve_all() -> Arc<dyn Fn(&Value) -> Decide + Send + Sync> {
     Arc::new(|_| Decide::Approve)
 }
 
+/// Attempts of one sandbox probe in the test helper (EM-04C2 S0).
+const PROBE_ATTEMPTS: usize = 3;
+
+/// The only probe failure treated as transient: the host's systemd user manager did not create
+/// the execution scope in time. Everything else (no bwrap, no cgroup v2, wrong architecture) is
+/// permanent and is reported at once.
+fn probe_failure_is_transient(problems: &[String]) -> bool {
+    !problems.is_empty()
+        && problems
+            .iter()
+            .all(|p| p.contains("systemd scope was not created"))
+}
+
+/// The decision, with the probe and the pause injected so it is testable: `Ok(attempts used)` as
+/// soon as one probe succeeds; `Err((attempts used, problems of the last probe))` once a
+/// permanent problem is seen or the attempts are used up. Test-helper policy only: the product's
+/// sandbox stays fail-closed with no retry and no unsandboxed fallback.
+fn sandbox_decision(
+    probe: &mut dyn FnMut() -> (bool, Vec<String>),
+    pause: &mut dyn FnMut(Duration),
+    attempts: usize,
+) -> Result<usize, (usize, Vec<String>)> {
+    let mut last = Vec::new();
+    for n in 1..=attempts {
+        let (ok, problems) = probe();
+        if ok {
+            return Ok(n);
+        }
+        let transient = probe_failure_is_transient(&problems);
+        last = problems;
+        if !transient || n == attempts {
+            return Err((n, last));
+        }
+        pause(Duration::from_millis(250 * n as u64));
+    }
+    Err((attempts, last))
+}
+
+/// Short, fixed diagnostics about the host's user manager for a failed probe. Fixed commands, a
+/// cleared environment (only the two variables systemd needs), output truncated: nothing
+/// secret can be in it.
+fn sandbox_host_diagnostics() -> String {
+    let mut c = Command::new("/usr/bin/systemctl");
+    c.env_clear().args(["--user", "is-system-running"]);
+    for k in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"] {
+        if let Some(v) = std::env::var_os(k) {
+            c.env(k, v);
+        }
+    }
+    let state = c
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .chars()
+                .take(40)
+                .collect::<String>()
+        })
+        .unwrap_or_else(|e| format!("systemctl unavailable: {e}"));
+    let load = std::fs::read_to_string("/proc/loadavg")
+        .unwrap_or_default()
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("systemd user manager: {state}; loadavg: {load}")
+}
+
+/// The fail-or-skip rule: with `require` (an acceptance run sets `NEXUS_REQUIRE_SANDBOX`) a
+/// sandbox that stays unavailable FAILS the test; without it the test is skipped as before.
+fn sandbox_gate(
+    probe: &mut dyn FnMut() -> (bool, Vec<String>),
+    pause: &mut dyn FnMut(Duration),
+    require: bool,
+    what: &str,
+) -> bool {
+    match sandbox_decision(probe, pause, PROBE_ATTEMPTS) {
+        Ok(_) => true,
+        Err((used, problems)) => {
+            println!("NOT RUN: {what} unavailable after {used} probe(s): {problems:?}");
+            assert!(
+                !require,
+                "NEXUS_REQUIRE_SANDBOX is set but the {what} is unavailable after {used} probe(s): {problems:?} ({})",
+                sandbox_host_diagnostics()
+            );
+            false
+        }
+    }
+}
+
 fn sandbox_ready() -> bool {
-    let c = nexus_tools::sandbox::preflight();
-    let tc = nexus_tools::process::Toolchain::discover();
-    if !c.available || tc.cargo_home_bin.is_none() || tc.rustup_home.is_none() {
-        println!(
-            "NOT RUN: sandbox or cargo toolchain unavailable: {:?}",
-            c.problems
-        );
-        // an acceptance run sets NEXUS_REQUIRE_SANDBOX=1: a test that cannot run must not count as passed
-        assert!(
-            std::env::var_os("NEXUS_REQUIRE_SANDBOX").is_none(),
-            "NEXUS_REQUIRE_SANDBOX is set but the sandbox or toolchain is unavailable: {:?}",
-            c.problems
-        );
+    use std::sync::atomic::AtomicBool;
+    // a probe that succeeded is not repeated by the other tests of this binary, and only one test
+    // probes at a time (a battery otherwise creates one systemd scope per test just to ask)
+    static OK: AtomicBool = AtomicBool::new(false);
+    static LOCK: Mutex<()> = Mutex::new(());
+    let require = std::env::var_os("NEXUS_REQUIRE_SANDBOX").is_some();
+    // harness self-test hook: simulate a host whose sandbox is permanently unavailable
+    let forced = std::env::var_os("NEXUS_TEST_FORCE_SANDBOX_UNAVAILABLE").is_some();
+    if !forced && OK.load(Ordering::SeqCst) {
+        return true;
+    }
+    let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    if !forced && OK.load(Ordering::SeqCst) {
+        return true;
+    }
+    let mut probe = || {
+        if forced {
+            return (
+                false,
+                vec!["[forced] sandbox unavailable (harness self-test)".to_owned()],
+            );
+        }
+        let c = nexus_tools::sandbox::preflight();
+        (c.available, c.problems)
+    };
+    if !sandbox_gate(&mut probe, &mut std::thread::sleep, require, "sandbox") {
         return false;
     }
+    // the cargo toolchain is a separate, permanent precondition
+    let tc = nexus_tools::process::Toolchain::discover();
+    if tc.cargo_home_bin.is_none() || tc.rustup_home.is_none() {
+        let mut none = || (false, vec!["cargo toolchain unavailable".to_owned()]);
+        return sandbox_gate(&mut none, &mut |_| {}, require, "cargo toolchain");
+    }
+    OK.store(true, Ordering::SeqCst);
     true
+}
+
+#[test]
+fn s0_a_transient_probe_failure_is_retried_and_a_success_ends_it() {
+    let transient = || {
+        vec!["functional probe failed: sandbox-unavailable: systemd scope was not created; kernel-enforced limits unavailable (nothing was run)".to_owned()]
+    };
+    let mut calls = 0;
+    let mut pauses = vec![];
+    let r = sandbox_decision(
+        &mut || {
+            calls += 1;
+            if calls < 3 {
+                (false, transient())
+            } else {
+                (true, vec![])
+            }
+        },
+        &mut |d| pauses.push(d),
+        PROBE_ATTEMPTS,
+    );
+    assert_eq!(r, Ok(3));
+    assert_eq!(
+        pauses,
+        [Duration::from_millis(250), Duration::from_millis(500)]
+    );
+}
+
+#[test]
+fn s0_a_permanently_unavailable_sandbox_is_never_turned_into_a_pass() {
+    let transient = vec![
+        "functional probe failed: sandbox-unavailable: systemd scope was not created".to_owned(),
+    ];
+    // transient forever: every attempt is used, then the failure is returned
+    let mut calls = 0;
+    let r = sandbox_decision(
+        &mut || {
+            calls += 1;
+            (false, transient.clone())
+        },
+        &mut |_| {},
+        PROBE_ATTEMPTS,
+    );
+    assert_eq!(r, Err((PROBE_ATTEMPTS, transient.clone())));
+    assert_eq!(calls, PROBE_ATTEMPTS);
+    // permanent problems are not retried at all
+    for permanent in [
+        vec!["/usr/bin/bwrap not found".to_owned()],
+        vec!["cgroup v2 hierarchy not found".to_owned()],
+        vec!["seccomp filter is implemented for x86_64 only".to_owned()],
+        // a mixture is permanent too
+        vec![
+            "/usr/bin/bwrap not found".to_owned(),
+            "functional probe failed: systemd scope was not created".to_owned(),
+        ],
+    ] {
+        let mut calls = 0;
+        let r = sandbox_decision(
+            &mut || {
+                calls += 1;
+                (false, permanent.clone())
+            },
+            &mut |_| {},
+            PROBE_ATTEMPTS,
+        );
+        assert_eq!(r, Err((1, permanent.clone())));
+        assert_eq!(calls, 1);
+    }
+    // an unavailable sandbox without the requirement is a skip ...
+    assert!(!sandbox_gate(
+        &mut || (false, vec!["bwrap not found".into()]),
+        &mut |_| {},
+        false,
+        "sandbox"
+    ));
+}
+
+#[test]
+#[should_panic(
+    expected = "NEXUS_REQUIRE_SANDBOX is set but the sandbox is unavailable after 3 probe(s)"
+)]
+fn s0_with_the_requirement_set_an_unavailable_sandbox_fails_the_test() {
+    // ... and with the requirement it FAILS, after the transient attempts, with diagnostics
+    sandbox_gate(
+        &mut || (false, vec!["systemd scope was not created".to_owned()]),
+        &mut |_| {},
+        true,
+        "sandbox",
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "NEXUS_REQUIRE_SANDBOX is set but the sandbox is unavailable after 1 probe(s)"
+)]
+fn s0_with_the_requirement_set_a_permanent_problem_fails_at_once() {
+    sandbox_gate(
+        &mut || (false, vec!["bubblewrap not found".to_owned()]),
+        &mut |_| {},
+        true,
+        "sandbox",
+    );
 }
 
 fn code_intent(task: &str, key: &str, f: impl Fn(&mut IntentLimits)) -> NexusIntentV1 {
@@ -11054,10 +11266,24 @@ fn em04b_signals_are_validated_durable_and_observed_but_never_select_effort() {
     let accepted: Vec<usize> = ev
         .iter()
         .enumerate()
-        .filter(|(_, e)| e.0 == "signal-accepted")
+        .filter(|(_, e)| e.0 == "signal-handled")
         .map(|(i, _)| i)
         .collect();
     assert_eq!(accepted.len(), 3, "{ev:?}");
+    // EM-04C2 E-1: each of them says what happened (applied), with its dispatch key
+    for e in st["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "signal-handled")
+    {
+        let d = e["detail"].as_str().unwrap_or_default();
+        assert!(d.starts_with("applied n1:"), "{d}");
+    }
+    assert!(
+        !ev.iter().any(|e| e.0 == "signal-accepted"),
+        "the ambiguous label is gone"
+    );
     for i in &accepted {
         assert!(
             ev[*i + 1..].iter().any(|e| e.0 == "attempt-bound"),
@@ -11146,7 +11372,9 @@ fn em04b_production_and_shadow_runs_never_offer_or_accept_the_signals_tool() {
         assert_eq!(a.status, "refused", "{name}");
         let st = em03_state(&fx, name, &run.task_instance_id.clone().unwrap());
         assert!(
-            !events(&st).iter().any(|e| e.0 == "signal-accepted"),
+            !events(&st)
+                .iter()
+                .any(|e| e.0 == "signal-handled" || e.0 == "signal-accepted"),
             "{name}"
         );
         b.shutdown();
@@ -11196,7 +11424,7 @@ fn em04b_a_crash_around_durable_acceptance_never_loses_or_invents_a_signal() {
         let old = em03_state(&fx, "em04b-crash", &first.task_instance_id.clone().unwrap());
         let n_old = events(&old)
             .iter()
-            .filter(|e| e.0 == "signal-accepted")
+            .filter(|e| e.0 == "signal-handled")
             .count();
         assert_eq!(n_old, usize::from(durable), "{point}");
         let failed = |v: &Value| {
@@ -11221,7 +11449,7 @@ fn em04b_a_crash_around_durable_acceptance_never_loses_or_invents_a_signal() {
             .unwrap_or(0);
         let n_new = events(&new)
             .iter()
-            .filter(|e| e.0 == "signal-accepted")
+            .filter(|e| e.0 == "signal-handled")
             .count();
         assert_eq!(
             n_new, new_calls,
@@ -11263,7 +11491,9 @@ fn em04b_a_signal_that_cannot_be_persisted_is_never_acknowledged() {
     let bodies = fx.provider.bodies.lock().unwrap().clone();
     assert_eq!(bodies.len(), 1, "no request after the failed acceptance");
     let st = em03_state(&fx, "em04b-persist", &run.task_instance_id.clone().unwrap());
-    assert!(!events(&st).iter().any(|e| e.0 == "signal-accepted"));
+    assert!(!events(&st)
+        .iter()
+        .any(|e| e.0 == "signal-handled" || e.0 == "signal-accepted"));
     b.shutdown();
 }
 
@@ -11771,7 +12001,9 @@ fn em04c1_forged_profile_selection_and_cross_engine_tool_calls_change_nothing() 
         "em04c1-forge-v0",
         &run.task_instance_id.clone().unwrap(),
     );
-    assert!(!events(&state).iter().any(|e| e.0 == "signal-accepted"));
+    assert!(!events(&state)
+        .iter()
+        .any(|e| e.0 == "signal-handled" || e.0 == "signal-accepted"));
     b.shutdown();
     // the experimental engine: its catalog, not a larger one
     let fx = fixture_engine_with(
@@ -11829,7 +12061,7 @@ fn em04c1_worker_pids(task: &str) -> Vec<i32> {
             continue;
         };
         let cmd = String::from_utf8_lossy(&cmd).into_owned();
-        if !cmd.contains("--max-old-space-size=96") || !cmd.trim_end_matches('\0').ends_with(task) {
+        if !cmd.contains("--permission") || !cmd.trim_end_matches('\0').ends_with(task) {
             continue;
         }
         let ppid = std::fs::read_to_string(format!("/proc/{pid}/status"))
@@ -12081,7 +12313,12 @@ fn em04c1_probe(fx: &Fx, broker: &str, b: &BrokerHandle, key: &str) -> Em04c1Pro
                             .map(|v| v.len())
                             .unwrap_or(0),
                     );
-                    if let Ok(c) = std::fs::read(format!("/proc/{pid}/cmdline")) {
+                    // (a worker that is being torn down shows an empty command line: skip it, the
+                    // earlier samples of the same process already described it)
+                    if let Some(c) = std::fs::read(format!("/proc/{pid}/cmdline"))
+                        .ok()
+                        .filter(|c| !c.is_empty())
+                    {
                         let c = String::from_utf8_lossy(&c).replace('\0', " ");
                         // the worker script is long; keep only the flags and the scope
                         let short = c.split(" -e ").next().unwrap_or("").to_owned()
@@ -12166,9 +12403,9 @@ fn em04c1_the_worker_is_lazy_and_inherits_neither_environment_nor_descriptors() 
         // nothing but the node binary, the heap flag and the task generation id
         let tail = c.rsplit(" -- ").next().unwrap_or("");
         assert!(
-            c.starts_with("/usr/bin/node --max-old-space-size=96 ... -- ")
-                || c.ends_with("node --max-old-space-size=96 ... -- ")
-                || c.contains("--max-old-space-size=96 ... -- task-"),
+            c.contains(
+                "node --permission --max-old-space-size=48 --max-semi-space-size=2 ... -- task-"
+            ),
             "{c}"
         );
         assert!(
@@ -12177,5 +12414,547 @@ fn em04c1_the_worker_is_lazy_and_inherits_neither_environment_nor_descriptors() 
             "{c}"
         );
     }
+    b.shutdown();
+}
+
+// ---- EM-04C2 S3: a continuation never silently inherits another reasoning policy ---------
+
+/// Interrupt a run under policy `before`, change the operator's slot policy to `after`
+/// (`"none"` removes it), continue: the continuation either runs (same policy) or is REJECTED
+/// with `task-binding-mismatch` before any provider request.
+fn s3_continue_after_policy_change(
+    fx: &Fx,
+    broker: &str,
+    sock: &Path,
+    key: &str,
+    before: &str,
+    after: &str,
+    continued: &Arc<AtomicUsize>,
+) -> (ic::IntentRun, usize) {
+    let root = fx.install_root.to_str().unwrap().to_owned();
+    let data = fx.registry.to_str().unwrap().to_owned();
+    let set = |p: &str| {
+        let r = node_json(&["registry-slot-policy", &data, &root, p]);
+        assert_eq!(r["ok"], true, "{p}: {r}");
+    };
+    set(before);
+    let first = ic::submit(sock, &code_intent_for("proj", "write a file", key, |_| {}))
+        .expect("submit")
+        .run;
+    let end = std::time::Instant::now() + Duration::from_secs(60);
+    while em02_record(fx, broker, &first.run_id)["taskBindingIdentity"].is_null() {
+        assert!(std::time::Instant::now() < end, "no binding recorded");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let rec = em02_record(fx, broker, &first.run_id);
+    assert_eq!(rec["taskBindingIdentityVersion"], 2, "{rec}");
+    ic::cancel(sock, &first.run_id).unwrap();
+    let first = wait_terminal(sock, &first.run_id, 60);
+    assert!(first.terminal && first.state != "completed", "{first:?}");
+    set(after);
+    let before_requests = fx.provider.bodies.lock().unwrap().len();
+    let v = ic::resume(sock, &first.run_id).expect("resume is accepted, then judged");
+    let second_id = v["run"]["runId"].as_str().unwrap().to_owned();
+    let second = wait_terminal(sock, &second_id, 120);
+    let _ = continued;
+    (second, before_requests)
+}
+
+#[test]
+fn s3_a_continuation_with_another_reasoning_policy_is_rejected_before_any_request() {
+    if !sandbox_ready() {
+        return;
+    }
+    let continued = Arc::new(AtomicUsize::new(0));
+    let c2 = continued.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        if body.to_string().contains("CONTINUED") {
+            c2.fetch_add(1, Ordering::SeqCst);
+            return Answer::Frames(text_frames(&resp, "Checked; the task is done."));
+        }
+        Answer::Slow {
+            frames: text_frames(&resp, "thinking"),
+            gap_ms: 100,
+            hold_ms: 120_000,
+        }
+    });
+    let fx = fixture_autonomous(responder);
+    let root = fx.install_root.to_str().unwrap().to_owned();
+    let data = fx.registry.to_str().unwrap().to_owned();
+    let levels = "[\"low\",\"medium\",\"high\",\"xhigh\"]";
+    let r = node_json(&["registry-levels", &data, &root, "e2e-mock/e2e-1", levels]);
+    assert_eq!(r["ok"], true, "{r}");
+    let b = em04a_broker(&fx, "s3-pol", None, None);
+    let sock = b.socket_path().to_owned();
+    let wide = "[\"low\",\"medium\",\"high\",\"xhigh\"]";
+    let mid = "[\"low\",\"medium\"]";
+    let only = "[\"low\"]";
+    let cases: [(&str, &str, &str, bool); 7] = [
+        ("s3-pol-same-000001", wide, wide, true),
+        ("s3-pol-wide-000001", only, wide, false), // default-only -> widened
+        ("s3-pol-mid-0000001", mid, wide, false),  // widened
+        ("s3-pol-narrow-0001", wide, mid, false),  // narrowed
+        ("s3-pol-remove-001", wide, "none", false), // removed
+        ("s3-pol-add-000001", "none", mid, false), // added
+        ("s3-pol-order-0001", mid, "[\"medium\",\"low\"]", true), // same set, other spelling
+    ];
+    for (key, before, after, ok) in cases {
+        let bodies_before = fx.provider.bodies.lock().unwrap().len();
+        let (second, at_resume) =
+            s3_continue_after_policy_change(&fx, "s3-pol", &sock, key, before, after, &continued);
+        if ok {
+            assert_eq!(second.state, "completed", "{key}: {second:?}");
+        } else {
+            assert_eq!(
+                second.state, "rejected",
+                "{key} {before} -> {after}: {second:?}"
+            );
+            assert_eq!(
+                second.error_code.as_deref(),
+                Some("task-binding-mismatch"),
+                "{key}: {second:?}"
+            );
+            assert_eq!(
+                fx.provider.bodies.lock().unwrap().len(),
+                at_resume,
+                "{key}: nothing was sent to the provider for the rejected continuation"
+            );
+            assert_eq!(second.turn, 0, "{key}");
+        }
+        let _ = bodies_before;
+    }
+    b.shutdown();
+}
+
+/// A run recorded before EM-04C2 has no identity version and the legacy digest (identical to the
+/// current one for a policy-less binding): it continues exactly as before.
+#[test]
+fn s3_a_run_recorded_before_the_policy_was_part_of_the_identity_still_continues() {
+    if !sandbox_ready() {
+        return;
+    }
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        if body.to_string().contains("CONTINUED") {
+            return Answer::Frames(text_frames(&resp, "Checked; the task is done."));
+        }
+        Answer::Slow {
+            frames: text_frames(&resp, "thinking"),
+            gap_ms: 100,
+            hold_ms: 120_000,
+        }
+    });
+    let fx = fixture_autonomous(responder);
+    let b = em04a_broker(&fx, "s3-legacy", None, None);
+    let sock = b.socket_path().to_owned();
+    let first = ic::submit(
+        &sock,
+        &code_intent_for("proj", "write a file", "s3-legacy-0000001", |_| {}),
+    )
+    .expect("submit")
+    .run;
+    let end = std::time::Instant::now() + Duration::from_secs(60);
+    while em02_record(&fx, "s3-legacy", &first.run_id)["taskBindingIdentity"].is_null() {
+        assert!(std::time::Instant::now() < end, "no binding recorded");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    ic::cancel(&sock, &first.run_id).unwrap();
+    let first = wait_terminal(&sock, &first.run_id, 60);
+    // rewrite the record as EM-04C2-less code wrote it: no version key
+    let path = fx
+        .config("s3-legacy")
+        .state_dir
+        .join("runs")
+        .join(format!("{}.json", first.run_id));
+    let mut rec: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(rec["taskBindingIdentityVersion"], 2);
+    rec.as_object_mut()
+        .unwrap()
+        .remove("taskBindingIdentityVersion");
+    std::fs::write(&path, serde_json::to_vec(&rec).unwrap()).unwrap();
+    let v = ic::resume(&sock, &first.run_id).expect("resume");
+    let second = wait_terminal(&sock, v["run"]["runId"].as_str().unwrap(), 120);
+    assert_eq!(second.state, "completed", "{second:?}");
+    b.shutdown();
+}
+
+// ---- EM-04C2 S4: the independently selectable adaptive mode (dormant) --------------------
+
+const ADAPTIVE_MODE: &str = "engineering-v2-adaptive";
+
+fn s4_listing(dir: &Path) -> Vec<String> {
+    fn walk(d: &Path, root: &Path, out: &mut Vec<String>) {
+        if let Ok(rd) = std::fs::read_dir(d) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, root, out);
+                } else if let Ok(bytes) = std::fs::read(&p) {
+                    out.push(format!(
+                        "{} {}",
+                        p.strip_prefix(root).unwrap().display(),
+                        nexus_contracts::sha256_hex(&String::from_utf8_lossy(&bytes))
+                    ));
+                }
+            }
+        }
+    }
+    let mut v = Vec::new();
+    walk(dir, dir, &mut v);
+    v.sort();
+    v
+}
+
+/// A fixture whose install root ACTIVATES the dormant adaptive definition (what step S6 will
+/// ship), with the fixture models optionally scoped to `muse-v1`. No ModeConfiguration is saved:
+/// that is the operator's explicit act (`s4_save_adaptive`).
+fn s4_fixture(responder: Responder, scoped: bool) -> Fx {
+    let fx = fixture_engine_with(responder, "muse-v0", Box::new(|_| {}));
+    let mode = fx
+        .install_root
+        .join("config/registry/modes/engineering-v2-adaptive.json");
+    let mut m: Value = serde_json::from_slice(&std::fs::read(&mode).unwrap()).unwrap();
+    assert_eq!(m["orchestrationEngineId"], "muse-v1");
+    m["status"] = "active".into();
+    m["selectable"] = true.into();
+    m["runnable"] = true.into();
+    std::fs::write(&mode, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+    if scoped {
+        let r = node_json(&[
+            "registry-engine-scope",
+            fx.registry.to_str().unwrap(),
+            fx.install_root.to_str().unwrap(),
+            "muse-v1",
+        ]);
+        assert_eq!(r["ok"], true, "{r}");
+    }
+    fx
+}
+
+/// The operator saves the adaptive mode's configuration (main slot on the first fixture model).
+fn s4_save_adaptive(fx: &Fx, policy: &str) -> Value {
+    let data = fx.registry.to_str().unwrap().to_owned();
+    let root = fx.install_root.to_str().unwrap().to_owned();
+    if policy != "none" {
+        let r = node_json(&["registry-levels", &data, &root, "e2e-mock/e2e-1", policy]);
+        assert_eq!(r["ok"], true, "{r}");
+    }
+    node_json(&[
+        "registry-save-mode",
+        &data,
+        &root,
+        ADAPTIVE_MODE,
+        "e2e/e2e-1",
+        "e2e-mock/e2e-1",
+        policy,
+    ])
+}
+
+fn s4_intent(key: &str, mode: Option<&str>) -> NexusIntentV1 {
+    let mut i = code_intent_for("proj", "read src/lib.rs", key, |_| {});
+    i.model = Some(nexus_contracts::intent::ModelSelection {
+        provider_id: "e2e-mock".into(),
+        remote_model_id: "e2e-mock-model".into(),
+        logical_model_id: Some("e2e/e2e-1".into()),
+        route_id: Some("e2e-mock/e2e-1".into()),
+        mode_id: mode.map(str::to_owned),
+    });
+    i
+}
+
+fn s4_issue(fx: &Fx, selection: Option<&str>) -> Value {
+    let root = fx.install_root.to_str().unwrap().to_owned();
+    let data = fx.registry.to_str().unwrap().to_owned();
+    let driver = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("nexus-daemon")
+        .join("tests")
+        .join("e2e")
+        .join("driver.cjs");
+    // the driver's argument order is (installRoot, dataRoot, task, session[, selection]); a
+    // refusal exits non-zero by design, so the JSON line is read whatever the status
+    let mut c = Command::new("node");
+    c.arg(driver)
+        .args(["issue", &root, &data, "task-s4", "session-s4"]);
+    if let Some(s) = selection {
+        c.arg(s);
+    }
+    let out = c.output().expect("node");
+    serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|_| panic!("driver output: {}", String::from_utf8_lossy(&out.stderr)))
+}
+
+/// Before the operator saves a configuration the Registry refuses the adaptive mode - and creates
+/// nothing. After it does, the Registry issues it (mode and engine sealed in the binding), and the
+/// RUNTIME still refuses it: production `muse-v1` is unavailable at this checkpoint.
+#[test]
+fn s4_the_adaptive_mode_needs_a_saved_configuration_and_the_runtime_still_refuses_it() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s4_fixture(em03_responder(1), true);
+    let b = em04a_broker(&fx, "s4-adaptive", None, None);
+    let before = s4_listing(&fx.registry);
+    // 1. nothing saved: refused by the Registry before any run state, nothing created
+    let run = submit_wait(
+        b.socket_path(),
+        &s4_intent("s4-adaptive-000001", Some(ADAPTIVE_MODE)),
+        120,
+    );
+    assert_ne!(run.state, "completed", "{run:?}");
+    assert_eq!(
+        run.error_code.as_deref(),
+        Some("registry-mode-configuration-required"),
+        "{run:?}"
+    );
+    assert_eq!(
+        fx.provider.accepted.load(Ordering::SeqCst),
+        0,
+        "no provider request"
+    );
+    assert_eq!(
+        s4_listing(&fx.registry),
+        before,
+        "the Registry data root is untouched"
+    );
+    // 2. the operator saves it explicitly: the Registry issues, and seals mode + engine
+    let saved = s4_save_adaptive(&fx, "[\"low\",\"medium\",\"high\",\"xhigh\"]");
+    assert_eq!(saved["ok"], true, "{saved}");
+    let sel = r#"{"logicalModelId":"e2e/e2e-1","routeId":"e2e-mock/e2e-1","modeId":"engineering-v2-adaptive"}"#;
+    let issued = s4_issue(&fx, Some(sel));
+    assert_eq!(issued["ok"], true, "{issued}");
+    assert_eq!(issued["modeId"], ADAPTIVE_MODE);
+    assert_eq!(issued["resolution"]["target"]["modeId"], ADAPTIVE_MODE);
+    assert_eq!(
+        issued["resolution"]["target"]["orchestrationEngineId"],
+        "muse-v1"
+    );
+    assert_eq!(issued["taskBinding"]["target"]["modeId"], ADAPTIVE_MODE);
+    assert_eq!(
+        issued["taskBinding"]["target"]["orchestrationEngineId"],
+        "muse-v1"
+    );
+    assert_eq!(
+        issued["taskBinding"]["supportedReasoning"],
+        json!(["high", "low", "medium", "xhigh"])
+    );
+    // a selection that is ONLY a mode keeps the saved assignment
+    let only = s4_issue(&fx, Some(r#"{"modeId":"engineering-v2-adaptive"}"#));
+    assert_eq!(only["ok"], true, "{only}");
+    assert_eq!(only["resolution"]["target"]["routeId"], "e2e-mock/e2e-1");
+    // 3. the runtime has no `muse-v1` engine: the run fails closed before any request or working copy
+    let run = submit_wait(
+        b.socket_path(),
+        &s4_intent("s4-adaptive-000002", Some(ADAPTIVE_MODE)),
+        120,
+    );
+    assert_ne!(run.state, "completed", "{run:?}");
+    assert_eq!(
+        run.error_code.as_deref(),
+        Some("engine-unavailable"),
+        "{run:?}"
+    );
+    assert_eq!(
+        fx.provider.accepted.load(Ordering::SeqCst),
+        0,
+        "no provider request"
+    );
+    assert_eq!(run.turn, 0);
+    assert!(run.worktree_commit.is_none(), "no working copy");
+    assert!(run.tool_activity.is_empty());
+    // 4. and the ordinary run in the same installation is the unchanged muse-v0 run
+    let ok = submit_wait(b.socket_path(), &s4_intent("s4-default-0000001", None), 180);
+    assert_eq!(ok.state, "completed", "{ok:?}");
+    assert!(fx.provider.accepted.load(Ordering::SeqCst) >= 2);
+    for x in fx.provider.bodies.lock().unwrap().iter() {
+        assert_eq!(x["reasoning"]["effort"], "low");
+        assert_eq!(
+            em04c1_wire_digest(x),
+            nexus_model::repo_tools::REPO_CODE_V1_CATALOG_DIGEST
+        );
+    }
+    b.shutdown();
+}
+
+/// The Registry validates the engine's model scope: models that are not scoped to `muse-v1` cannot
+/// be assigned to the adaptive mode, so no configuration can even be saved for it.
+#[test]
+fn s4_models_outside_the_engine_scope_cannot_be_assigned_to_the_adaptive_mode() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s4_fixture(em03_responder(1), false);
+    let saved = s4_save_adaptive(&fx, "none");
+    assert_eq!(saved["ok"], false, "{saved}");
+    assert_eq!(saved["code"], "engine-scope-mismatch", "{saved}");
+    // the failed save left nothing behind, so the mode stays unissuable
+    let issued = s4_issue(&fx, Some(r#"{"modeId":"engineering-v2-adaptive"}"#));
+    assert_eq!(issued["ok"], false);
+    assert_eq!(
+        issued["code"], "registry-mode-configuration-required",
+        "{issued}"
+    );
+}
+
+/// An ordinary selection (no mode) and one naming the default mode issue exactly the same target,
+/// extension and binding; unknown mode names are refused.
+#[test]
+fn s4_a_selection_without_a_mode_is_exactly_what_it_was_and_unknown_modes_are_refused() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s4_fixture(em03_responder(1), true);
+    let plain = s4_issue(
+        &fx,
+        Some(r#"{"logicalModelId":"e2e/e2e-1","routeId":"e2e-mock/e2e-1"}"#),
+    );
+    let explicit = s4_issue(
+        &fx,
+        Some(
+            r#"{"logicalModelId":"e2e/e2e-1","routeId":"e2e-mock/e2e-1","modeId":"engineering-v2"}"#,
+        ),
+    );
+    let none = s4_issue(&fx, None);
+    for k in [
+        "resolution",
+        "core",
+        "extension",
+        "extensionDigest",
+        "taskBinding",
+        "taskBindingDigest",
+        "issuanceId",
+        "modeId",
+    ] {
+        assert_eq!(plain[k], explicit[k], "{k}");
+    }
+    assert_eq!(plain["modeId"], "engineering-v2");
+    assert_eq!(
+        plain["resolution"]["target"]["orchestrationEngineId"],
+        "muse-v0"
+    );
+    // the saved default (no selection) is the same mode and engine
+    assert_eq!(none["modeId"], "engineering-v2");
+    assert_eq!(
+        none["resolution"]["target"]["orchestrationEngineId"],
+        "muse-v0"
+    );
+    // the budget-less / policy-less default carries no new key
+    assert!(plain["resolution"]["target"]
+        .get("allowedReasoning")
+        .is_none());
+    for bad in [
+        r#"{"modeId":"engineering-v3"}"#,
+        r#"{"modeId":"nonsense"}"#,
+        r#"{"modeId":"__proto__"}"#,
+        r#"{"logicalModelId":"e2e/e2e-1","routeId":"e2e-mock/e2e-1","modeId":"engineering-v1"}"#,
+    ] {
+        let r = s4_issue(&fx, Some(bad));
+        assert_eq!(r["ok"], false, "{bad}: {r}");
+    }
+}
+
+/// Mode names the Registry does not know are refused whole, before any run state.
+#[test]
+fn s4_a_run_naming_an_unknown_mode_is_refused_before_any_request() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s4_fixture(em03_responder(1), true);
+    assert_eq!(s4_save_adaptive(&fx, "none")["ok"], true);
+    let b = em04a_broker(&fx, "s4-unknown", None, None);
+    for (i, mode) in ["engineering-v3", "engineering-v1", "nonsense", "__proto__"]
+        .iter()
+        .enumerate()
+    {
+        let key = format!("s4-unknown-{i:07}");
+        match ic::submit(b.socket_path(), &s4_intent(&key, Some(mode))) {
+            Err(_) => {} // refused at the door
+            Ok(started) => {
+                let run = wait_terminal(b.socket_path(), &started.run.run_id, 120);
+                assert_ne!(run.state, "completed", "{mode}: {run:?}");
+                assert_eq!(run.turn, 0, "{mode}");
+            }
+        }
+    }
+    assert_eq!(
+        fx.provider.accepted.load(Ordering::SeqCst),
+        0,
+        "no provider request"
+    );
+    // a mode choice on a non-coding intent is refused by the contract itself
+    let mut model_only = s4_intent("s4-unknown-modeonly", Some(ADAPTIVE_MODE));
+    model_only.intent_type = "model-only".into();
+    model_only.workspace_id = None;
+    assert!(model_only.validate().is_err());
+    b.shutdown();
+}
+
+/// A continuation that would run in another mode (and so another engine) than the run it
+/// continues is a `task-binding-mismatch` - not an `engine-unavailable` that hides the change - and
+/// nothing is sent.
+#[test]
+fn s4_a_cross_mode_continuation_is_a_task_binding_mismatch() {
+    if !sandbox_ready() {
+        return;
+    }
+    let continued = Arc::new(AtomicUsize::new(0));
+    let c2 = continued.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        if body.to_string().contains("CONTINUED") {
+            c2.fetch_add(1, Ordering::SeqCst);
+            return Answer::Frames(text_frames(&resp, "done"));
+        }
+        Answer::Slow {
+            frames: text_frames(&resp, "thinking"),
+            gap_ms: 100,
+            hold_ms: 120_000,
+        }
+    });
+    let fx = s4_fixture(responder, true);
+    assert_eq!(s4_save_adaptive(&fx, "none")["ok"], true);
+    let b = em04a_broker(&fx, "s4-cross", None, None);
+    let sock = b.socket_path().to_owned();
+    let first = ic::submit(&sock, &s4_intent("s4-cross-00000001", None))
+        .expect("submit")
+        .run;
+    let end = std::time::Instant::now() + Duration::from_secs(60);
+    while em02_record(&fx, "s4-cross", &first.run_id)["taskBindingIdentity"].is_null() {
+        assert!(std::time::Instant::now() < end, "no binding recorded");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    ic::cancel(&sock, &first.run_id).unwrap();
+    let first = wait_terminal(&sock, &first.run_id, 60);
+    assert!(first.terminal && first.state != "completed", "{first:?}");
+    // the run was recorded in the default mode; make the continuation ask for the adaptive one
+    // (as a Registry that re-pointed the run's mode would)
+    let path = fx
+        .config("s4-cross")
+        .state_dir
+        .join("runs")
+        .join(format!("{}.json", first.run_id));
+    let mut rec: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(rec["engineModeId"], "engineering-v2");
+    assert_eq!(rec["engineId"], "muse-v0");
+    rec["engineModeId"] = ADAPTIVE_MODE.into();
+    std::fs::write(&path, serde_json::to_vec(&rec).unwrap()).unwrap();
+    let before = fx.provider.bodies.lock().unwrap().len();
+    let v = ic::resume(&sock, &first.run_id).expect("resume is accepted, then judged");
+    let second = wait_terminal(&sock, v["run"]["runId"].as_str().unwrap(), 120);
+    assert_eq!(second.state, "rejected", "{second:?}");
+    assert_eq!(
+        second.error_code.as_deref(),
+        Some("task-binding-mismatch"),
+        "{second:?}"
+    );
+    assert_eq!(
+        fx.provider.bodies.lock().unwrap().len(),
+        before,
+        "nothing was sent"
+    );
+    assert_eq!(continued.load(Ordering::SeqCst), 0);
+    assert_eq!(second.turn, 0);
+    assert!(second.worktree_commit.is_none());
     b.shutdown();
 }

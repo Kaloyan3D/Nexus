@@ -19,6 +19,14 @@
 //   -> request  { v:1, type:'request', id, scope, op, args }        id = previous id + 1, from 1
 //   <- response { v:1, type:'response', id, scope, bridge:{ ok, result | code, message } }
 //   <- fatal    { v:1, type:'fatal', code }                         then the process exits
+// EM-04C2 S1: the supervisor starts the process with Node's deny-all permission mode
+// (`--permission`, no `--allow-*`), and `ready` carries the proof that it is in force: the
+// permission API reports every scope denied AND four harmless canary operations (read, write,
+// child process, native addon) fail with the permission error. A worker that cannot prove it
+// exits with `fatal permission-not-enforced` and never answers a request. The permission mode is
+// a safeguard against accidents and bugs in the pinned modules, NOT an OS sandbox: it does not
+// restrict network access.
+//
 // A violation (oversized or malformed frame, wrong order, a replayed or skipped id, a second
 // hello, unknown fields) ends the process: the supervisor sees the exit and starts a clean one.
 // EOF on stdin (the broker is gone or closed the pipe) ends the process too.
@@ -115,6 +123,53 @@ function runBridge(text) {
   return out;
 }
 
+// Checks the permission mode from the inside. The canaries cannot do harm when enforcement is
+// absent: the read is an access check of the node binary, the write targets a directory that does
+// not exist, the child is `node -v`, the addon is a file that does not exist.
+function permissionReport() {
+  const fs = require('node:fs');
+  const cp = require('node:child_process');
+  const p = process.permission;
+  const api = typeof p === 'object' && p !== null && typeof p.has === 'function';
+  const scopes = {};
+  if (api) {
+    for (const sc of ['fs.read', 'fs.write', 'child', 'worker', 'addon']) {
+      try {
+        scopes[sc] = p.has(sc, sc.indexOf('fs.') === 0 ? '/' : undefined) === true;
+      } catch {
+        scopes[sc] = true;
+      }
+    }
+  }
+  const code = (f) => {
+    try {
+      const r = f();
+      if (r && r.error) return (r.error && r.error.code) || 'error';
+      return 'allowed';
+    } catch (e) {
+      return (e && e.code) || 'error';
+    }
+  };
+  const root = path.parse(process.execPath).root;
+  const missing = path.join(root, 'nexus-permission-canary-nonexistent');
+  const canaries = {
+    read: code(() => fs.accessSync(process.execPath)),
+    write: code(() => fs.openSync(path.join(missing, 'x'), 'w')),
+    child: code(() => cp.spawnSync(process.execPath, ['-v'], { stdio: 'ignore', timeout: 2000 })),
+    addon: code(() => process.dlopen({ exports: {} }, missing + '.node')),
+  };
+  const denied = (c) => c === 'ERR_ACCESS_DENIED';
+  const enforced =
+    api &&
+    Object.keys(scopes).length === 5 &&
+    Object.keys(scopes).every((k) => scopes[k] === false) &&
+    denied(canaries.read) &&
+    denied(canaries.write) &&
+    denied(canaries.child) &&
+    (canaries.addon === 'ERR_DLOPEN_DISABLED' || denied(canaries.addon));
+  return { enforced, scopes, canaries };
+}
+
 function onHello(body) {
   let msg;
   try {
@@ -142,7 +197,9 @@ function onHello(body) {
   const digests = {};
   for (const k of SOURCE_KEYS) digests[k] = sha(sources[k]);
   digests.bridge = sha(msg.bridge);
-  writeFrame({ v: PROTOCOL, type: 'ready', digests, node: process.version });
+  const permission = permissionReport();
+  if (!permission.enforced) return fatal('permission-not-enforced');
+  writeFrame({ v: PROTOCOL, type: 'ready', digests, node: process.version, permission });
 }
 
 function onRequest(body) {

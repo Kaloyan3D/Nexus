@@ -358,6 +358,7 @@ mod tests {
             remote_model_id: "r1".into(),
             logical_model_id: None,
             route_id: None,
+            mode_id: None,
         };
         let t = resolve_target(&catalog(), Some(&sel), None).expect("explicit");
         assert_eq!(t.route_id, "route-1");
@@ -371,6 +372,7 @@ mod tests {
             remote_model_id: "r2".into(),
             logical_model_id: Some("l2".into()),
             route_id: Some("route-2b".into()),
+            mode_id: None,
         };
         let t = resolve_target(&catalog(), Some(&sel), None).expect("route");
         assert_eq!(t.route_id, "route-2b");
@@ -380,6 +382,7 @@ mod tests {
             remote_model_id: "r2".into(),
             logical_model_id: None,
             route_id: Some("route-nope".into()),
+            mode_id: None,
         };
         let (code, _) = resolve_target(&catalog(), Some(&bad), None).expect_err("unknown");
         assert_eq!(code, "model-not-available");
@@ -392,6 +395,7 @@ mod tests {
             remote_model_id: "r2".into(),
             logical_model_id: None,
             route_id: None,
+            mode_id: None,
         };
         let (code, msg) = resolve_target(&catalog(), Some(&sel), None).expect_err("ambiguous");
         assert_eq!(code, "ambiguous-target");
@@ -406,6 +410,7 @@ mod tests {
             remote_model_id: "r3".into(),
             logical_model_id: None,
             route_id: None,
+            mode_id: None,
         };
         let (code, msg) = resolve_target(&catalog(), Some(&sel), None).expect_err("refused");
         assert_eq!(code, "model-not-available");
@@ -415,6 +420,7 @@ mod tests {
             remote_model_id: "ghost".into(),
             logical_model_id: None,
             route_id: None,
+            mode_id: None,
         };
         let (code, _) = resolve_target(&catalog(), Some(&ghost), None).expect_err("unknown");
         assert_eq!(code, "model-not-available");
@@ -429,6 +435,7 @@ mod tests {
                 remote_model_id: "r1".into(),
                 logical_model_id: None,
                 route_id: None,
+                mode_id: None,
             }),
             None,
         )
@@ -441,6 +448,7 @@ mod tests {
             remote_model_id: "r2".into(),
             logical_model_id: None,
             route_id: Some("route-2a".into()),
+            mode_id: None,
         };
         let conv2 = resolve_target(&catalog(), Some(&sel2), None).expect("second");
         let follow = resolve_target(&catalog(), None, Some(&conv2)).expect("follow-up");

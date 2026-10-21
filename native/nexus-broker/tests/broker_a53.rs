@@ -799,6 +799,7 @@ fn a53_models_and_intents_are_validated_before_any_run_exists() {
         remote_model_id: "other-model".into(),
         logical_model_id: None,
         route_id: None,
+        mode_id: None,
     });
     assert_eq!(
         ic::submit(&sock, &bad).unwrap_err().code,
@@ -810,6 +811,7 @@ fn a53_models_and_intents_are_validated_before_any_run_exists() {
         remote_model_id: "e2e-mock-model".into(),
         logical_model_id: None,
         route_id: None,
+        mode_id: None,
     });
     assert_eq!(
         ic::submit(&sock, &other).unwrap_err().code,
@@ -883,6 +885,7 @@ fn a53_models_and_intents_are_validated_before_any_run_exists() {
         remote_model_id: "e2e-mock-model".into(),
         logical_model_id: None,
         route_id: None,
+        mode_id: None,
     });
     assert_eq!(
         ic::submit(b2.socket_path(), &ok).unwrap_err().code,
@@ -914,6 +917,7 @@ fn rn1_selected_second_registry_model_reaches_provider_and_non_issuable_is_refus
         remote_model_id: "e2e-mock-model-2".into(),
         logical_model_id: None,
         route_id: None,
+        mode_id: None,
     });
     let reply = ic::submit(&sock, &sel).expect("selected submit");
     let run = wait_terminal(&sock, &reply.run.run_id, 30);
@@ -932,6 +936,7 @@ fn rn1_selected_second_registry_model_reaches_provider_and_non_issuable_is_refus
         remote_model_id: "e2e-mock-ghost".into(),
         logical_model_id: None,
         route_id: None,
+        mode_id: None,
     });
     assert_eq!(
         ic::submit(&sock, &bad).unwrap_err().code,
@@ -957,6 +962,7 @@ fn rn1_selected_second_registry_model_reaches_provider_and_non_issuable_is_refus
         remote_model_id: "e2e-mock-model-3".into(),
         logical_model_id: None,
         route_id: None,
+        mode_id: None,
     });
     let err = ic::submit(&sock, &cfgd).unwrap_err();
     assert_eq!(err.code, "model-not-available");
@@ -1126,6 +1132,7 @@ fn a53_clients_are_authenticated_by_peer_uid_and_isolated_from_each_other() {
                 engine_id: None,
                 task_binding_digest: None,
                 task_binding_identity: None,
+                task_binding_identity_version: None,
                 tool_catalog_digest: None,
             })
             .unwrap();
@@ -1572,6 +1579,7 @@ fn a53_broker_crash_and_daemon_restart_never_duplicate_a_billable_submission() {
                 engine_id: None,
                 task_binding_digest: None,
                 task_binding_identity: None,
+                task_binding_identity_version: None,
                 tool_catalog_digest: None,
             })
             .unwrap();
@@ -1914,6 +1922,7 @@ fn a531_conversation_is_served_per_run_by_ownership_with_incremental_paging() {
                 engine_id: None,
                 task_binding_digest: None,
                 task_binding_identity: None,
+                task_binding_identity_version: None,
                 tool_catalog_digest: None,
             })
             .unwrap();

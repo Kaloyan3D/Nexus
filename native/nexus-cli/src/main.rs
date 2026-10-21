@@ -809,6 +809,7 @@ fn cmd_intent(args: &[String], cfg: &ClientConfig) -> ExitCode {
                             remote_model_id: r.to_owned(),
                             logical_model_id: l,
                             route_id: route,
+                            mode_id: None,
                         })
                     })
                     .transpose()?;

@@ -46,6 +46,7 @@ fn rn2_resolution_run_binding_shape() {
         remote_model_id: "e2e-mock-model-2".into(),
         logical_model_id: None,
         route_id: None,
+        mode_id: None,
     };
     let t = nexus_broker::resolution::resolve_target(&catalog, Some(&sel), None)
         .expect("second target resolves");
@@ -144,6 +145,7 @@ fn rn2_catalog_parity_rule_matches_resolver() {
         remote_model_id: "r1".into(),
         logical_model_id: None,
         route_id: None,
+        mode_id: None,
     };
     assert!(nexus_broker::resolution::resolve_target(&catalog, Some(&ok_sel), None).is_ok());
     let bad_sel = ModelSelection {
@@ -151,6 +153,7 @@ fn rn2_catalog_parity_rule_matches_resolver() {
         remote_model_id: "r3".into(),
         logical_model_id: None,
         route_id: None,
+        mode_id: None,
     };
     let (code, msg) = nexus_broker::resolution::resolve_target(&catalog, Some(&bad_sel), None)
         .expect_err("non-issuable refused");

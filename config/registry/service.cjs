@@ -37,7 +37,7 @@ const runtimeProjection = require('./runtime-projection.cjs')
 const subscriptions = require('./subscription-connections.cjs')
 
 const SERVICE_SCHEMA_VERSION = 1
-const SUPPORTED_MODES = ['engineering-v1', 'engineering-v2', 'engineering-v3']
+const SUPPORTED_MODES = ['engineering-v1', 'engineering-v2', 'engineering-v2-adaptive', 'engineering-v3']
 
 // Default legacy profile seeding each mode preview. Alternatives remain
 // adoptable via getModeConfiguration(modeId, { adopt: <profileId> }).
@@ -102,7 +102,7 @@ function createService(options) {
         const fs = require('node:fs')
         const p = require('node:path')
         defs = []
-        for (const f of ['engineering-v1.json', 'engineering-v2.json', 'engineering-v3.json']) {
+        for (const f of ['engineering-v1.json', 'engineering-v2.json', 'engineering-v2-adaptive.json', 'engineering-v3.json']) {
           try { defs.push(JSON.parse(fs.readFileSync(p.join(installRoot, 'config', 'registry', 'modes', f), 'utf8'))) } catch { /* skip; reported below */ }
         }
       } catch { /* handled below */ }
@@ -159,6 +159,11 @@ function createService(options) {
     const compat = compatConfigs(canonical)
     if (modeId === 'engineering-v3') {
       return { preview: { modeId, persisted: false, runnable: false, reason: 'mode-not-runnable: engineering-v3 is planned/preview; orchestration is not implemented in R3', slotsManifest: (modeById(canonical.snapshot, modeId) || {}).slots || [] }, errors: [] }
+    }
+    // EM-04C2 S4: the adaptive mode has NO legacy profile to seed it: it exists only as a
+    // ModeConfiguration the operator saves. Nothing is previewed, adopted or created for it.
+    if (modeId === 'engineering-v2-adaptive') {
+      return { preview: null, errors: [err('mode-configuration-required', 'modeId', 'mode engineering-v2-adaptive has no default and cannot be adopted from a legacy profile; the operator must save its ModeConfiguration')] }
     }
     const adoptable = ADOPTABLE_PROFILES[modeId] || []
     const wanted = adoptProfileId || DEFAULT_ADOPT_PROFILE[modeId] || null
