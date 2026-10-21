@@ -1,0 +1,2683 @@
+{
+  "capabilities": [
+    "low",
+    "medium",
+    "high",
+    "xhigh"
+  ],
+  "note": "Generated from the unchanged historical Governor by anti_thrash_review::governor_traces(); the `governor` and `l3` blocks are the pinned results of the policy in effort_limiter.rs. Regenerate only as a reviewed action (see effort_limiter_tests.rs).",
+  "policy": {
+    "dwell": 2,
+    "rearmTokens": 2,
+    "version": 1
+  },
+  "schema": "em04c2-governor-traces/1",
+  "traces": [
+    {
+      "attempts": [
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        }
+      ],
+      "governor": {
+        "changes": 24,
+        "xhighAttempts": 0
+      },
+      "id": "A1",
+      "l3": {
+        "applied": [
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high"
+        ],
+        "changes": 1,
+        "excess": 12,
+        "heldEscalations": 0,
+        "rules": [
+          "up",
+          "down-pending",
+          "noop",
+          "down-pending",
+          "noop",
+          "down-pending",
+          "noop",
+          "down-pending",
+          "noop",
+          "down-pending",
+          "noop",
+          "down-pending",
+          "noop",
+          "down-pending",
+          "noop",
+          "down-pending",
+          "noop",
+          "down-pending",
+          "noop",
+          "down-pending",
+          "noop",
+          "down-pending",
+          "noop",
+          "down-pending"
+        ],
+        "xhighAttempts": 0
+      },
+      "name": "phase flapping diagnose/implement x24"
+    },
+    {
+      "attempts": [
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        }
+      ],
+      "governor": {
+        "changes": 3,
+        "xhighAttempts": 16
+      },
+      "id": "A3",
+      "l3": {
+        "applied": [
+          "medium",
+          "medium",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "medium",
+          "medium"
+        ],
+        "changes": 3,
+        "excess": 0,
+        "heldEscalations": 0,
+        "rules": [
+          "up",
+          "noop",
+          "up",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "down-progress",
+          "noop"
+        ],
+        "xhighAttempts": 16
+      },
+      "name": "sticky escalation then progress"
+    },
+    {
+      "attempts": [
+        {
+          "claimDelta": 1,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        }
+      ],
+      "governor": {
+        "changes": 13,
+        "xhighAttempts": 6
+      },
+      "id": "A4",
+      "l3": {
+        "applied": [
+          "medium",
+          "xhigh",
+          "medium",
+          "medium",
+          "medium",
+          "xhigh",
+          "medium",
+          "medium",
+          "medium",
+          "xhigh",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium"
+        ],
+        "changes": 7,
+        "excess": 0,
+        "heldEscalations": 3,
+        "rules": [
+          "up",
+          "up",
+          "down-progress",
+          "noop",
+          "noop",
+          "up",
+          "down-progress",
+          "noop",
+          "noop",
+          "up",
+          "down-progress",
+          "noop",
+          "noop",
+          "hold-rearm",
+          "noop",
+          "noop",
+          "noop",
+          "hold-rearm",
+          "noop",
+          "noop",
+          "noop",
+          "hold-rearm",
+          "noop",
+          "noop"
+        ],
+        "xhighAttempts": 3
+      },
+      "name": "claim-only re-arm lap x6"
+    },
+    {
+      "attempts": [
+        {
+          "claimDelta": 1,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        }
+      ],
+      "governor": {
+        "changes": 9,
+        "xhighAttempts": 4
+      },
+      "id": "A4s",
+      "l3": {
+        "applied": [
+          "medium",
+          "xhigh",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "xhigh",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "xhigh",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium"
+        ],
+        "changes": 7,
+        "excess": 0,
+        "heldEscalations": 1,
+        "rules": [
+          "up",
+          "up",
+          "down-progress",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "up",
+          "down-progress",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "up",
+          "down-progress",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "hold-rearm",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop"
+        ],
+        "xhighAttempts": 3
+      },
+      "name": "claim-only re-arm lap x4, 4 quiet attempts each"
+    },
+    {
+      "attempts": [
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "implementation-active",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        }
+      ],
+      "governor": {
+        "changes": 10,
+        "xhighAttempts": 4
+      },
+      "id": "G1",
+      "l3": {
+        "applied": [
+          "medium",
+          "high",
+          "xhigh",
+          "high",
+          "high",
+          "high",
+          "high",
+          "xhigh",
+          "high",
+          "high",
+          "high",
+          "high",
+          "xhigh",
+          "high",
+          "high",
+          "high",
+          "high",
+          "xhigh",
+          "high",
+          "high"
+        ],
+        "changes": 10,
+        "excess": 0,
+        "heldEscalations": 0,
+        "rules": [
+          "up",
+          "up",
+          "up",
+          "down-progress",
+          "noop",
+          "noop",
+          "noop",
+          "up",
+          "down-progress",
+          "noop",
+          "noop",
+          "noop",
+          "up",
+          "down-progress",
+          "noop",
+          "noop",
+          "noop",
+          "up",
+          "down-progress",
+          "noop"
+        ],
+        "xhighAttempts": 4
+      },
+      "name": "genuine laps with failing tests x4"
+    },
+    {
+      "attempts": [
+        {
+          "claimDelta": 1,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": true,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "implementation-active",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "implementation-active",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "implementation-active",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedImplementationAttempts>=2]->xhigh"
+          ],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedImplementationAttempts>=2]->xhigh"
+          ],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        }
+      ],
+      "governor": {
+        "changes": 5,
+        "xhighAttempts": 3
+      },
+      "id": "G2",
+      "l3": {
+        "applied": [
+          "medium",
+          "xhigh",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "medium",
+          "high",
+          "xhigh",
+          "xhigh"
+        ],
+        "changes": 5,
+        "excess": 0,
+        "heldEscalations": 0,
+        "rules": [
+          "up",
+          "up",
+          "down-progress",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "up",
+          "up",
+          "noop"
+        ],
+        "xhighAttempts": 3
+      },
+      "name": "genuine second problem after progress"
+    },
+    {
+      "attempts": [
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[conflictingEvidence]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[conflictingEvidence]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[conflictingEvidence]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[conflictingEvidence]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[conflictingEvidence]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[conflictingEvidence]->xhigh"
+          ],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        }
+      ],
+      "governor": {
+        "changes": 2,
+        "xhighAttempts": 6
+      },
+      "id": "A5",
+      "l3": {
+        "applied": [
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh"
+        ],
+        "changes": 1,
+        "excess": 2,
+        "heldEscalations": 0,
+        "rules": [
+          "up",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "down-pending"
+        ],
+        "xhighAttempts": 7
+      },
+      "name": "conflicting evidence then resolution"
+    },
+    {
+      "attempts": [
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "implementation-active",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "implementation-active",
+          "trustedFail": 0
+        }
+      ],
+      "governor": {
+        "changes": 3,
+        "xhighAttempts": 0
+      },
+      "id": "A6",
+      "l3": {
+        "applied": [
+          "medium",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high"
+        ],
+        "changes": 2,
+        "excess": 1,
+        "heldEscalations": 0,
+        "rules": [
+          "up",
+          "up",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "noop",
+          "down-pending"
+        ],
+        "xhighAttempts": 0
+      },
+      "name": "edit/test loop then pass"
+    },
+    {
+      "attempts": [
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "discover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "design",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": true,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "implementation-active",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "implementation-active",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "implementation-active",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "implementation-active",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "review",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "review",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        }
+      ],
+      "governor": {
+        "changes": 8,
+        "xhighAttempts": 0
+      },
+      "id": "A7",
+      "l3": {
+        "applied": [
+          "medium",
+          "high",
+          "high",
+          "high",
+          "medium",
+          "medium",
+          "medium",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high",
+          "high"
+        ],
+        "changes": 4,
+        "excess": 2,
+        "heldEscalations": 0,
+        "rules": [
+          "up",
+          "up",
+          "noop",
+          "noop",
+          "down-progress",
+          "noop",
+          "noop",
+          "up",
+          "down-pending",
+          "noop",
+          "noop",
+          "down-pending",
+          "noop",
+          "noop"
+        ],
+        "xhighAttempts": 0
+      },
+      "name": "ordinary session"
+    },
+    {
+      "attempts": [
+        {
+          "claimDelta": 1,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 2,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedImplementationAttempts>=2]->xhigh"
+          ],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": true,
+          "source": "semantic",
+          "trustedFail": 0
+        }
+      ],
+      "governor": {
+        "changes": 5,
+        "xhighAttempts": 2
+      },
+      "id": "P1",
+      "l3": {
+        "applied": [
+          "high",
+          "xhigh",
+          "high",
+          "xhigh",
+          "medium"
+        ],
+        "changes": 5,
+        "excess": 0,
+        "heldEscalations": 0,
+        "rules": [
+          "up",
+          "up",
+          "down-progress",
+          "up",
+          "down-progress"
+        ],
+        "xhighAttempts": 2
+      },
+      "name": "parity: failure escalation and progress"
+    },
+    {
+      "attempts": [
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": true,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[conflictingEvidence]->xhigh"
+          ],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": true,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        }
+      ],
+      "governor": {
+        "changes": 3,
+        "xhighAttempts": 1
+      },
+      "id": "P2",
+      "l3": {
+        "applied": [
+          "medium",
+          "medium",
+          "xhigh",
+          "xhigh",
+          "medium",
+          "medium",
+          "medium"
+        ],
+        "changes": 3,
+        "excess": 2,
+        "heldEscalations": 0,
+        "rules": [
+          "up",
+          "noop",
+          "up",
+          "down-pending",
+          "down-confirmed",
+          "noop",
+          "noop"
+        ],
+        "xhighAttempts": 2
+      },
+      "name": "parity: root cause, conflict, invalidation"
+    },
+    {
+      "attempts": [
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "implementation-active",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "implementation-active",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "verify",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "verification-passed",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "medium",
+          "esc": [],
+          "phase": "verify",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "high",
+          "esc": [],
+          "phase": "review",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        }
+      ],
+      "governor": {
+        "changes": 5,
+        "xhighAttempts": 0
+      },
+      "id": "P3",
+      "l3": {
+        "applied": [
+          "high",
+          "high",
+          "high",
+          "medium",
+          "high",
+          "high",
+          "high",
+          "high",
+          "medium",
+          "high"
+        ],
+        "changes": 5,
+        "excess": 2,
+        "heldEscalations": 0,
+        "rules": [
+          "up",
+          "noop",
+          "down-pending",
+          "down-confirmed",
+          "up",
+          "noop",
+          "noop",
+          "down-pending",
+          "down-confirmed",
+          "up"
+        ],
+        "xhighAttempts": 0
+      },
+      "name": "parity: trusted activity"
+    },
+    {
+      "attempts": [
+        {
+          "claimDelta": 1,
+          "effort": "high",
+          "esc": [],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 1,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "diagnose",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "semantic",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "implement",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "implementation-active",
+          "trustedFail": 0
+        },
+        {
+          "claimDelta": 0,
+          "effort": "xhigh",
+          "esc": [
+            "escalation:[failedHypotheses>=2]->xhigh"
+          ],
+          "phase": "recover",
+          "rootEdge": false,
+          "solEdge": false,
+          "source": "recovery-needed",
+          "trustedFail": 1
+        }
+      ],
+      "governor": {
+        "changes": 2,
+        "xhighAttempts": 3
+      },
+      "id": "P4",
+      "l3": {
+        "applied": [
+          "high",
+          "xhigh",
+          "xhigh",
+          "xhigh"
+        ],
+        "changes": 2,
+        "excess": 0,
+        "heldEscalations": 0,
+        "rules": [
+          "up",
+          "up",
+          "noop",
+          "noop"
+        ],
+        "xhighAttempts": 3
+      },
+      "name": "parity: restart and continuation"
+    }
+  ]
+}

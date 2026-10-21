@@ -10,6 +10,7 @@
 //!
 //! Run with `--nocapture` to print the tables used by the review document.
 
+use super::effort_limiter::{is_escalation_entry, EvidenceBaseline};
 use super::worker_bridge::test_evaluator;
 use serde_json::{json, Value};
 
@@ -409,4 +410,329 @@ fn a10_max_is_not_reachable_through_the_model_facing_path() {
         );
         assert_eq!(r.unwrap_err().code, "signal-forbidden-field", "{forbidden}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// EM-04C2 S5: per-attempt traces of the REAL Governor for the Effort Transition Limiter.
+//
+// `governor_traces()` drives the unchanged Governor/Runtime/Activity modules (through the worker)
+// with the thirteen scenarios of `EM-04C2-ANTI-THRASH-POLICY.md` §4 and returns, per attempt, the
+// Governor's decision plus the evidence deltas the limiter consumes. The pinned copy lives in
+// `tests/fixtures/em04c2-governor-traces.json`; regenerating it is the explicit, reviewed action
+// described in `effort_limiter_tests.rs` and never happens during a normal test run.
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Clone)]
+enum TStep {
+    /// resolve now: one attempt
+    Res,
+    /// a model signal (dispatch key unique per use)
+    Sig(Value),
+    /// a Kernel-backed fact: `mutation` | `fail` | `pass` | `started`
+    Act(&'static str),
+    /// persisted blocks survive, `currentEffort` and the process do not
+    Restart,
+}
+use TStep::{Act, Res, Restart, Sig};
+
+fn failh() -> TStep {
+    Sig(json!({"recordHypothesisFailure": true}))
+}
+fn faili() -> TStep {
+    Sig(json!({"recordImplementationFailure": true}))
+}
+fn sg(v: Value) -> TStep {
+    Sig(v)
+}
+
+fn trace_scenarios() -> Vec<(&'static str, &'static str, Vec<TStep>)> {
+    let lap = || {
+        vec![
+            failh(),
+            Res,
+            failh(),
+            Res,
+            sg(json!({"markRootCauseEstablished": true})),
+            Res,
+            sg(json!({"invalidateRootCause": true})),
+            Res,
+        ]
+    };
+    let mut a1 = Vec::new();
+    for i in 0..24 {
+        a1.push(sg(
+            json!({"phase": if i % 2 == 0 { "diagnose" } else { "implement" }}),
+        ));
+        a1.push(Res);
+    }
+    let mut a3 = vec![Res, failh(), Res, failh(), Res];
+    a3.extend(std::iter::repeat_n(Res, 15));
+    a3.extend([sg(json!({"markRootCauseEstablished": true})), Res, Res]);
+    let a4: Vec<TStep> = (0..6).flat_map(|_| lap()).collect();
+    let a4s: Vec<TStep> = (0..4)
+        .flat_map(|_| {
+            let mut l = lap();
+            l.extend(std::iter::repeat_n(Res, 4));
+            l
+        })
+        .collect();
+    let g1: Vec<TStep> = (0..4)
+        .flat_map(|_| {
+            vec![
+                Act("mutation"),
+                Res,
+                Act("fail"),
+                failh(),
+                Res,
+                Act("fail"),
+                failh(),
+                Res,
+                sg(json!({"markRootCauseEstablished": true})),
+                Res,
+                sg(json!({"invalidateRootCause": true})),
+                Res,
+            ]
+        })
+        .collect();
+    let g2 = vec![
+        failh(),
+        Res,
+        failh(),
+        Res,
+        sg(json!({"markRootCauseEstablished": true, "phase": "implement"})),
+        Res,
+        sg(json!({"markSolutionEstablished": true})),
+        Res,
+        Act("mutation"),
+        Res,
+        Res,
+        Res,
+        Act("fail"),
+        faili(),
+        Res,
+        Act("fail"),
+        faili(),
+        Res,
+        Res,
+    ];
+    let a5 = {
+        let mut v = vec![sg(json!({"conflictingEvidence": true})), Res];
+        v.extend(std::iter::repeat_n(Res, 5));
+        v.extend([sg(json!({"resolveConflictingEvidence": true})), Res]);
+        v
+    };
+    let a6 = {
+        let mut v = vec![Act("mutation"), Res, Act("fail"), Res];
+        for _ in 0..6 {
+            v.extend([Act("mutation"), Res, Act("fail"), Res]);
+        }
+        v.extend([Act("mutation"), Res, Act("pass"), Res]);
+        v
+    };
+    let a7 = vec![
+        Res,
+        sg(json!({"phase": "diagnose"})),
+        Res,
+        Res,
+        sg(json!({"markRootCauseEstablished": true, "phase": "design"})),
+        Res,
+        sg(json!({"markSolutionEstablished": true, "phase": "implement"})),
+        Res,
+        Act("mutation"),
+        Res,
+        Act("mutation"),
+        Res,
+        sg(json!({"phase": "verify"})),
+        Act("fail"),
+        Res,
+        Act("mutation"),
+        Res,
+        Act("fail"),
+        Res,
+        Act("mutation"),
+        Res,
+        Act("pass"),
+        Res,
+        sg(json!({"phase": "review"})),
+        Res,
+        Res,
+    ];
+    // transcribed from `governor_parity.rs`
+    let p1 = vec![
+        sg(json!({"phase": "diagnose"})),
+        failh(),
+        Res,
+        failh(),
+        Res,
+        sg(json!({"markRootCauseEstablished": true})),
+        Res,
+        sg(json!({"phase": "implement"})),
+        faili(),
+        faili(),
+        Res,
+        sg(json!({"markSolutionEstablished": true})),
+        Res,
+    ];
+    let p2 = vec![
+        sg(json!({"phase": "implement"})),
+        sg(json!({"markRootCauseEstablished": true})),
+        Res,
+        sg(json!({"markSolutionEstablished": true})),
+        Res,
+        sg(json!({"conflictingEvidence": true})),
+        Res,
+        sg(json!({"resolveConflictingEvidence": true})),
+        Res,
+        sg(json!({"invalidateRootCause": true})),
+        Res,
+        sg(json!({"markRootCauseEstablished": true})),
+        Res,
+        sg(json!({"invalidateSolution": true})),
+        Res,
+    ];
+    let p3 = vec![
+        sg(json!({"phase": "diagnose"})),
+        Res,
+        Res,
+        Act("mutation"),
+        Res,
+        Act("mutation"),
+        Act("mutation"),
+        Res,
+        Act("fail"),
+        Res,
+        Act("fail"),
+        Res,
+        Act("mutation"),
+        Res,
+        sg(json!({"phase": "verify"})),
+        Act("pass"),
+        Res,
+        Act("started"),
+        Res,
+        sg(json!({"phase": "review"})),
+        Res,
+    ];
+    let p4 = vec![
+        sg(json!({"phase": "diagnose"})),
+        failh(),
+        Res,
+        Restart,
+        failh(),
+        Res,
+        Act("mutation"),
+        Restart,
+        Res,
+        Act("fail"),
+        Restart,
+        Res,
+    ];
+    vec![
+        ("A1", "phase flapping diagnose/implement x24", a1),
+        ("A3", "sticky escalation then progress", a3),
+        ("A4", "claim-only re-arm lap x6", a4),
+        (
+            "A4s",
+            "claim-only re-arm lap x4, 4 quiet attempts each",
+            a4s,
+        ),
+        ("G1", "genuine laps with failing tests x4", g1),
+        ("G2", "genuine second problem after progress", g2),
+        ("A5", "conflicting evidence then resolution", a5),
+        ("A6", "edit/test loop then pass", a6),
+        ("A7", "ordinary session", a7),
+        ("P1", "parity: failure escalation and progress", p1),
+        ("P2", "parity: root cause, conflict, invalidation", p2),
+        ("P3", "parity: trusted activity", p3),
+        ("P4", "parity: restart and continuation", p4),
+    ]
+}
+
+/// Runs one scenario against the real Governor; one JSON row per attempt.
+fn run_trace(steps: &[TStep]) -> Vec<Value> {
+    let mut b = test_evaluator("node".into());
+    let (mut reasoning, mut activity) = (Value::Null, Value::Null);
+    let (mut pending, mut key, mut trusted) = (Vec::<Value>::new(), 0u32, 0u32);
+    let mut baseline = EvidenceBaseline::default();
+    let mut rows = Vec::new();
+    for step in steps {
+        match step {
+            Sig(s) => {
+                key += 1;
+                pending.push(
+                    json!({"type": "signal", "signal": s, "dispatchKey": format!("n1:{key}")}),
+                );
+            }
+            Act(kind) => {
+                let c = match *kind {
+                    "mutation" => json!({"kind": "mutation"}),
+                    "fail" | "pass" | "started" => {
+                        let outcome = match *kind {
+                            "fail" => "failed",
+                            "pass" => "passed",
+                            _ => "started",
+                        };
+                        json!({"kind": "verification", "outcome": outcome, "family": "native:cargo"})
+                    }
+                    other => panic!("unknown activity {other}"),
+                };
+                if *kind == "fail" {
+                    trusted += 1;
+                }
+                pending.push(json!({"type": "activity", "classification": c}));
+            }
+            Restart => {
+                if let Some(o) = reasoning.as_object_mut() {
+                    o.insert("currentEffort".into(), Value::Null);
+                }
+                b = test_evaluator("node".into());
+            }
+            Res => {
+                let r = b
+                    .call(
+                        "evaluate",
+                        &json!({"museReasoning": reasoning, "museActivity": activity,
+                                "events": std::mem::take(&mut pending),
+                                "capabilities": CAPS, "resolve": true}),
+                    )
+                    .unwrap();
+                reasoning = r["museReasoning"].clone();
+                activity = r["museActivity"].clone();
+                let d = &r["decision"];
+                let now = EvidenceBaseline::from_reasoning(Some(&reasoning)).unwrap();
+                let (claims, edge_any) = baseline.delta_to(&now);
+                let edge_root = now.root_cause_established && !baseline.root_cause_established;
+                let edge_sol = now.solution_established && !baseline.solution_established;
+                debug_assert_eq!(edge_any, edge_root || edge_sol);
+                let esc: Vec<Value> = d["trace"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|t| is_escalation_entry(t.as_str().unwrap()))
+                    .cloned()
+                    .collect();
+                rows.push(json!({
+                    "effort": d["effort"], "source": d["effectiveSource"],
+                    "phase": d["effectivePhase"], "esc": esc,
+                    "claimDelta": claims,
+                    "trustedFail": trusted,
+                    "rootEdge": edge_root, "solEdge": edge_sol,
+                }));
+                baseline = now;
+                trusted = 0;
+            }
+        }
+    }
+    rows
+}
+
+/// All thirteen traces of the real Governor, in the fixture's shape (without the limiter's pinned
+/// results, which the limiter tests add). `None` when no `node` is available.
+pub(super) fn governor_traces() -> Option<Value> {
+    node()?;
+    let traces: Vec<Value> = trace_scenarios()
+        .into_iter()
+        .map(|(id, name, steps)| json!({"id": id, "name": name, "attempts": run_trace(&steps)}))
+        .collect();
+    Some(json!({ "capabilities": CAPS, "traces": traces }))
 }

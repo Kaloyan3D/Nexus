@@ -24,6 +24,7 @@
 //! `orchestrationEngineId`) of the run; an engine that is not built in fails closed before
 //! any provider request. Extensions are compiled in (no runtime registration).
 
+pub mod effort_limiter;
 pub mod governor_bridge;
 pub mod muse_v0;
 pub mod muse_v1;
@@ -846,6 +847,8 @@ fn action_name(a: &EngineAction) -> &'static str {
 mod anti_thrash_review;
 #[cfg(test)]
 mod catalog_tests;
+#[cfg(test)]
+mod effort_limiter_tests;
 #[cfg(test)]
 mod governor_parity;
 #[cfg(test)]
