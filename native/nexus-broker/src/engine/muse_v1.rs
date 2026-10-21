@@ -25,8 +25,8 @@
 use super::governor_bridge::{sources_digest, BridgeError};
 use super::muse_v0::{MuseV0State, MUSE_V0};
 use super::{
-    EffortProposal, EngineDescriptor, EngineEnv, EngineExtension, EngineProposal, EngineSnapshot,
-    EngineState, EngineStateData, Hook, ObservationKind,
+    EffortProposal, EngineAction, EngineDescriptor, EngineEnv, EngineExtension, EngineProposal,
+    EngineSnapshot, EngineState, EngineStateData, Hook, ObservationKind, SignalObservation,
 };
 use serde_json::{json, Value};
 
@@ -53,6 +53,10 @@ pub const MUSE_PHASES: [&str; 7] = [
 
 /// Kernel execution ids remembered for replay refusal.
 pub const MAX_SEEN_EXECUTIONS: usize = 64;
+/// EM-04B: the EXPERIMENTAL signals engine's Registry id (test-only, like the shadow engine).
+pub const SIGNALS_ENGINE_ID: &str = "muse-v1-signals";
+/// The historical processed-signal window (`MAX_PROCESSED_SIGNAL_IDS`).
+pub const MAX_PROCESSED_SIGNAL_IDS: usize = 100;
 /// Shadow decisions kept (newest last).
 pub const MAX_DECISION_HISTORY: usize = 8;
 
@@ -70,10 +74,30 @@ pub static MUSE_V1: MuseV1 = MuseV1 {
         // room for the future signals tool, so EM-04B adds no request bytes the budget did not hold
         request_reserve_bytes: SIGNALS_TOOL_RESERVE_BYTES,
     },
+    signals: false,
+};
+
+/// EM-04B: the shadow Governor PLUS the model-visible reasoning-signals tool. Same strategy, same
+/// shadow (never applied); its catalog carries the tool, so nothing is reserved for it: the tool's
+/// bytes are part of every prepared request the budget measures.
+pub static MUSE_V1_SIGNALS: MuseV1 = MuseV1 {
+    descriptor: EngineDescriptor {
+        engine_id: SIGNALS_ENGINE_ID,
+        contract_version: super::ENGINE_CONTRACT_VERSION,
+        mode_ids: &["engineering-v2"],
+        roles: &["muse_main"],
+        state_schema: 1,
+        may_propose_effort: false,
+        inherits_state: true,
+        request_reserve_bytes: 0,
+    },
+    signals: true,
 };
 
 pub struct MuseV1 {
     descriptor: EngineDescriptor,
+    /// Takes reasoning signals (`muse-v1-signals` only).
+    signals: bool,
 }
 
 /// One shadow evaluation (what the Governor decided for an attempt, and what was really used).
@@ -124,6 +148,14 @@ pub struct MuseV1State {
     /// Hash chain over EVERY decision's evidence (`sha256(previous chain || evidence)`), so the
     /// full sequence stays verifiable by replay although only the newest decisions are kept.
     pub chain: String,
+    /// EM-04B: highest signal `seq` consumed in `generation`.
+    pub signals_through: u32,
+    /// Signals applied / recognized as duplicate deliveries (across generations).
+    pub signals_accepted: u32,
+    pub signals_duplicate: u32,
+    /// Signals of the LAST signal consultation that were consumed but not applied (the historical
+    /// path refused them or the bridge was unavailable); the model was told so.
+    pub last_unapplied: Vec<u32>,
 }
 
 impl MuseV1State {
@@ -242,7 +274,97 @@ fn persisted(s: &MuseV1State) -> Value {
         "history": s.history.iter().map(decision_json).collect::<Vec<_>>(),
         "chain": s.chain,
         "sourcesDigest": sources_digest(),
+        "signalsThrough": s.signals_through,
+        "signalsAccepted": s.signals_accepted,
+        "signalsDuplicate": s.signals_duplicate,
+        "lastUnapplied": s.last_unapplied,
     })
+}
+
+// ---- the historical signal transition, re-stated for the host's validation (EM-04B) ----------
+
+/// The semantic fields after one signal, exactly as the historical `applyReasoningSignal` +
+/// `transitionMuseReasoningState` compute them: duplicate dispatch keys change nothing;
+/// established and conflicting flags move false -> true only, and explicit invalidation is the
+/// only way back; failure events count +1 (active and total); a NEWLY established root cause
+/// resets the hypothesis window and conflict, and a newly established solution resets the
+/// implementation window; the key joins the bounded processed window. Pure. `semantic` is a
+/// `semantic_of` object; the signal was validated by the Core (`signals::validate`).
+pub(crate) fn fold_signal(semantic: &Value, signal: &Value, key: &str) -> (Value, bool) {
+    let mut out = semantic.clone();
+    let ids: Vec<String> = semantic["processedSignalIds"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    if ids.iter().any(|x| x == key) {
+        return (out, false);
+    }
+    let on = |f: &str| signal.get(f) == Some(&Value::Bool(true));
+    let b = |k: &str| semantic[k].as_bool().unwrap_or(false);
+    let n = |k: &str| semantic[k].as_u64().unwrap_or(0);
+    let mut patch = serde_json::Map::new();
+    if let Some(p) = signal.get("phase").and_then(Value::as_str) {
+        if let Some(p) = crate::signals::normalized_phase(p) {
+            patch.insert("phase".into(), json!(p));
+        }
+    }
+    if on("markRootCauseEstablished") && !b("rootCauseEstablished") {
+        patch.insert("rootCauseEstablished".into(), json!(true));
+    }
+    if on("markSolutionEstablished") && !b("solutionEstablished") {
+        patch.insert("solutionEstablished".into(), json!(true));
+    }
+    if on("conflictingEvidence") && !b("conflictingEvidence") {
+        patch.insert("conflictingEvidence".into(), json!(true));
+    }
+    if on("invalidateRootCause") {
+        patch.insert("rootCauseEstablished".into(), json!(false));
+        patch.insert("solutionEstablished".into(), json!(false));
+    }
+    if on("invalidateSolution") {
+        patch.insert("solutionEstablished".into(), json!(false));
+    }
+    if on("resolveConflictingEvidence") {
+        patch.insert("conflictingEvidence".into(), json!(false));
+    }
+    if on("recordHypothesisFailure") {
+        patch.insert("failedHypotheses".into(), json!(n("failedHypotheses") + 1));
+        patch.insert(
+            "totalFailedHypotheses".into(),
+            json!(n("totalFailedHypotheses") + 1),
+        );
+    }
+    if on("recordImplementationFailure") {
+        patch.insert(
+            "failedImplementationAttempts".into(),
+            json!(n("failedImplementationAttempts") + 1),
+        );
+        patch.insert(
+            "totalFailedImplementationAttempts".into(),
+            json!(n("totalFailedImplementationAttempts") + 1),
+        );
+    }
+    // progress-window resets on the false -> true establishment edge only
+    if patch.get("rootCauseEstablished") == Some(&json!(true)) && !b("rootCauseEstablished") {
+        patch.insert("failedHypotheses".into(), json!(0));
+        patch.insert("conflictingEvidence".into(), json!(false));
+    }
+    if patch.get("solutionEstablished") == Some(&json!(true)) && !b("solutionEstablished") {
+        patch.insert("failedImplementationAttempts".into(), json!(0));
+    }
+    for (k, v) in patch {
+        out[k.as_str()] = v;
+    }
+    let mut ids: Vec<String> = ids.into_iter().filter(|x| x != key).collect();
+    ids.push(key.to_owned());
+    let excess = ids.len().saturating_sub(MAX_PROCESSED_SIGNAL_IDS);
+    ids.drain(..excess);
+    out["processedSignalIds"] = json!(ids);
+    (out, true)
 }
 
 // ---- validation of the historical blocks (Rust side; the bridge validates them again) -------
@@ -509,6 +631,105 @@ fn evaluate(s: &mut MuseV1State, snap: &EngineSnapshot, env: &EngineEnv) {
     s.history.drain(..excess);
 }
 
+/// EM-04B: consume the run's new signals (and the trusted observations made before the newest
+/// one, so the historical event order holds) through the historical `applyReasoningSignal`.
+/// Returns the acknowledgement for the newest signal.
+fn take_signals(s: &mut MuseV1State, snap: &EngineSnapshot, env: &EngineEnv) -> Value {
+    if s.generation != snap.generation {
+        s.generation = snap.generation.clone();
+        s.observed_through = 0;
+        s.signals_through = 0;
+    }
+    let fresh: Vec<&SignalObservation> = snap
+        .signals
+        .iter()
+        .filter(|x| x.generation == s.generation && x.seq > s.signals_through)
+        .collect();
+    let Some(newest) = fresh.last().map(|x| x.seq) else {
+        return json!({"ok": false, "code": "signal-stale", "recorded": false});
+    };
+    // trusted observations that happened before the newest signal, in order
+    let mut obs = Vec::new();
+    let mut last_obs = s.observed_through;
+    for o in &snap.activity {
+        if o.generation == s.generation
+            && o.seq > last_obs
+            && o.seq < newest
+            && !s.seen.contains(&o.execution_id)
+            && !obs
+                .iter()
+                .any(|(_, id, _): &(Value, String, u32)| *id == o.execution_id)
+        {
+            last_obs = o.seq;
+            obs.push((classification(&o.kind), o.execution_id.clone(), o.seq));
+        }
+    }
+    let mut events: Vec<(u32, Value)> = obs
+        .iter()
+        .map(|(c, _, seq)| (*seq, json!({"type": "activity", "classification": c})))
+        .collect();
+    for x in &fresh {
+        events.push((
+            x.seq,
+            json!({"type": "signal", "signal": x.signal, "dispatchKey": x.dispatch_key}),
+        ));
+    }
+    events.sort_by_key(|(seq, _)| *seq);
+    let args = json!({
+        "museReasoning": s.reasoning,
+        "museActivity": s.activity,
+        "events": events.iter().map(|(_, e)| e.clone()).collect::<Vec<_>>(),
+        "capabilities": snap.authorized_efforts,
+        "resolve": false,
+    });
+    s.signals_through = newest;
+    let result: Result<Value, BridgeError> = match &env.governor {
+        Some(g) => g.call("evaluate", &args),
+        None => Err(BridgeError {
+            code: "bridge-unavailable".into(),
+            message: String::new(),
+        }),
+    };
+    match result {
+        Ok(r)
+            if valid_reasoning_block(&r["museReasoning"])
+                && valid_activity_block(&r["museActivity"])
+                && r["acks"].as_array().is_some_and(|a| a.len() == fresh.len()) =>
+        {
+            s.reasoning = Some(r["museReasoning"].clone());
+            s.activity = Some(r["museActivity"].clone());
+            s.observed_through = last_obs;
+            for (_, id, _) in obs {
+                s.seen.push(id);
+            }
+            let excess = s.seen.len().saturating_sub(MAX_SEEN_EXECUTIONS);
+            s.seen.drain(..excess);
+            for a in r["acks"].as_array().unwrap() {
+                if a["duplicate"] == true {
+                    s.signals_duplicate += 1;
+                } else {
+                    s.signals_accepted += 1;
+                }
+            }
+            r["acks"]
+                .as_array()
+                .unwrap()
+                .last()
+                .cloned()
+                .unwrap_or(Value::Null)
+        }
+        other => {
+            // nothing is applied; the model is told the signal was not recorded
+            s.last_unapplied = fresh.iter().map(|x| x.seq).collect();
+            let code = match other {
+                Err(e) => e.code,
+                Ok(_) => "bridge-output-invalid".into(),
+            };
+            json!({"ok": false, "code": code.chars().take(64).collect::<String>(), "recorded": false})
+        }
+    }
+}
+
 impl MuseV1 {
     fn propose_with(
         &self,
@@ -519,6 +740,7 @@ impl MuseV1 {
         env: Option<&EngineEnv>,
     ) -> EngineProposal {
         let mut s = data(state).cloned().unwrap_or_default();
+        s.last_unapplied.clear();
         // the strategy: exactly muse-v0's decision on muse-v0's counters
         let v0 = MUSE_V0.propose(hook, snap, &v0_state(&s.v0, state), proposal_id);
         if let EngineStateData::MuseV0(next) = v0.next_state.data {
@@ -578,6 +800,33 @@ impl EngineExtension for MuseV1 {
         self.propose_with(hook, snap, state, proposal_id, Some(env))
     }
 
+    fn propose_signal(
+        &self,
+        snap: &EngineSnapshot,
+        state: &EngineState,
+        proposal_id: u64,
+        env: &EngineEnv,
+    ) -> Option<EngineProposal> {
+        if !self.signals {
+            return None;
+        }
+        let mut s = data(state).cloned().unwrap_or_default();
+        s.last_unapplied.clear();
+        let ack = take_signals(&mut s, snap, env);
+        Some(EngineProposal {
+            proposal_id,
+            based_on_revision: state.revision,
+            action: EngineAction::Acknowledge(nexus_contracts::canonical_json(&ack)),
+            effort: EffortProposal::KeepPinned,
+            next_state: EngineState {
+                engine_id: self.descriptor.engine_id,
+                schema: self.descriptor.state_schema,
+                revision: state.revision + 1,
+                data: EngineStateData::MuseV1(s),
+            },
+        })
+    }
+
     fn check_transition(
         &self,
         from: &EngineState,
@@ -588,11 +837,57 @@ impl EngineExtension for MuseV1 {
             return Err("state data of another engine".into());
         };
         MUSE_V0.check_transition(&v0_state(&a.v0, from), &v0_state(&b.v0, to), snap)?;
-        // no signals tool in EM-04A: the semantic Muse state cannot move at all
-        if semantic_of(&a.reasoning) != semantic_of(&b.reasoning) {
+        // the generation the frontiers belong to
+        let same_generation = a.generation == b.generation;
+        if !same_generation && b.generation != snap.generation {
+            return Err("the observation frontier may only move to the run's generation".into());
+        }
+        // EM-04B: the semantic state moves ONLY as the run's newly consumed, Core-validated signals
+        // imply (historical transition, re-stated in `fold_signal`); without signals it is immutable
+        let sfloor = if same_generation {
+            a.signals_through
+        } else {
+            0
+        };
+        if !self.signals && b.signals_through != 0 && b.signals_through != a.signals_through {
+            return Err("this engine takes no reasoning signals".into());
+        }
+        if b.signals_through < sfloor {
+            return Err("the signal frontier never goes back".into());
+        }
+        let window: Vec<&SignalObservation> = snap
+            .signals
+            .iter()
+            .filter(|x| {
+                x.generation == b.generation && x.seq > sfloor && x.seq <= b.signals_through
+            })
+            .collect();
+        if b.signals_through > sfloor && window.last().map(|x| x.seq) != Some(b.signals_through) {
+            return Err("the signal frontier must follow the run's validated signals".into());
+        }
+        if b.last_unapplied
+            .iter()
+            .any(|q| !window.iter().any(|x| x.seq == *q))
+        {
+            return Err("only signals consumed now can be reported unapplied".into());
+        }
+        let mut expected = semantic_of(&a.reasoning);
+        let mut applied = 0u32;
+        for x in window.iter().filter(|x| !b.last_unapplied.contains(&x.seq)) {
+            let (next, changed) = fold_signal(&expected, &x.signal, &x.dispatch_key);
+            expected = next;
+            applied += u32::from(changed);
+        }
+        if semantic_of(&b.reasoning) != expected {
             return Err(
                 "the semantic Muse state can only change through a validated signal".into(),
             );
+        }
+        let consumed = (window.len() - b.last_unapplied.len()) as u32;
+        if b.signals_accepted.checked_sub(a.signals_accepted) != Some(applied)
+            || b.signals_duplicate.checked_sub(a.signals_duplicate) != Some(consumed - applied)
+        {
+            return Err("signal counters must follow the applied signals".into());
         }
         if let Some(r) = &b.reasoning {
             if !valid_reasoning_block(r) {
@@ -605,10 +900,6 @@ impl EngineExtension for MuseV1 {
             }
         }
         // the observation frontier follows the Core's own feed
-        let same_generation = a.generation == b.generation;
-        if !same_generation && b.generation != snap.generation {
-            return Err("the observation frontier may only move to the run's generation".into());
-        }
         let max_seq = snap
             .activity
             .iter()
@@ -628,7 +919,8 @@ impl EngineExtension for MuseV1 {
         }
         // activity evidence changes only by folding NEW observations (never by replay or narration)
         let advanced = b.observed_through > floor;
-        if a.activity != b.activity && !advanced {
+        // (an applied signal also writes the activity block: a phase re-baselines its frontier)
+        if a.activity != b.activity && !advanced && applied == 0 {
             return Err("activity evidence changed without a new trusted observation".into());
         }
         let rev = |x: &Option<Value>| x.as_ref().and_then(|v| v["revision"].as_u64()).unwrap_or(0);
@@ -695,8 +987,32 @@ impl EngineExtension for MuseV1 {
             "chain",
             "sourcesDigest",
         ];
-        if o.keys().any(|k| !allowed.contains(&k.as_str())) || o.len() != allowed.len() {
+        // EM-04B keys (absent in EM-04A payloads: read as zero)
+        let optional = [
+            "signalsThrough",
+            "signalsAccepted",
+            "signalsDuplicate",
+            "lastUnapplied",
+        ];
+        if o.keys()
+            .any(|k| !allowed.contains(&k.as_str()) && !optional.contains(&k.as_str()))
+            || allowed.iter().any(|k| !o.contains_key(*k))
+        {
             return None;
+        }
+        let count = |k: &str| -> Option<u32> {
+            match o.get(k) {
+                None => Some(0),
+                Some(v) => u32::try_from(v.as_u64()?).ok(),
+            }
+        };
+        let signals_accepted = count("signalsAccepted")?;
+        let signals_duplicate = count("signalsDuplicate")?;
+        count("signalsThrough")?;
+        if let Some(l) = o.get("lastUnapplied") {
+            if l.as_array().is_none_or(|a| a.len() > 64) {
+                return None;
+            }
         }
         let mut reasoning = match o.get("museReasoning")? {
             Value::Null => None,
@@ -748,6 +1064,11 @@ impl EngineExtension for MuseV1 {
                 evaluations: u32::try_from(o.get("evaluations")?.as_u64()?).ok()?,
                 history,
                 chain: chain.to_owned(),
+                // a new generation consumes its own signals from seq 1
+                signals_through: 0,
+                signals_accepted,
+                signals_duplicate,
+                last_unapplied: Vec::new(),
             }),
         })
     }

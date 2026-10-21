@@ -319,6 +319,12 @@ impl EngineStateStore {
         let key: [u8; 32] = raw
             .try_into()
             .map_err(|_| err("engine-state-unauthenticated", "malformed engine state key"))?;
+        if !key_admissible(&key, cfg!(feature = "test-engines")) {
+            return Err(err(
+                "engine-state-key-refused",
+                "the engine state key is a published test fixture key; a production broker never uses it",
+            ));
+        }
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
         Ok(Self { dir, key })
     }
@@ -565,6 +571,34 @@ impl EngineRun {
             self.store.commit(&mut self.rec)?;
         }
         Ok(decision)
+    }
+
+    /// EM-04B: accept the newest reasoning signal of `snapshot`. The engine's answer is validated
+    /// by the host, then the new state and a `signal-accepted` event (with the dispatch key) are
+    /// committed DURABLY; only then is the acknowledgement returned for the model. A refusal or a
+    /// failed commit returns an error and the model receives no acknowledgement.
+    pub fn consult_signal(
+        &mut self,
+        snapshot: &crate::engine::EngineSnapshot,
+    ) -> Result<String, StateError> {
+        let ack = self
+            .host
+            .consult_signal(snapshot, &self.env)
+            .map_err(|r| err(r.code, r.message))?;
+        #[cfg(feature = "test-engines")]
+        if crate::engine::test_faults::armed_for_task(&self.rec.task_instance_id, "persist-signal")
+        {
+            return Err(err(
+                "engine-state-unpersisted",
+                "[injected] the accepted signal could not be written",
+            ));
+        }
+        self.stage();
+        let key = snapshot.signals.last().map(|x| x.dispatch_key.as_str());
+        let id = self.host.next_proposal_id() - 1;
+        self.rec.event("signal-accepted", Some(id), None, None, key);
+        self.store.commit(&mut self.rec)?;
+        Ok(ack)
     }
 
     /// Write-ahead before dispatch: attempt `ordinal` executes `effort` under issuance
@@ -1147,6 +1181,17 @@ mod tests {
     }
 }
 
+/// SHA-256 of the throwaway HMAC key published with the EM-03 compatibility fixtures
+/// (`tests/fixtures/em03-engine-state/TEST-ONLY-throwaway-em03-hmac-key.hex`, hex text of the key).
+/// Anyone can read it, so records under it are forgeable: only `test-engines` builds accept it.
+pub const PUBLISHED_TEST_KEY_SHA256: &str =
+    "e5d9a803ae250616755e6d8c00befa4625f4e3bd6282dd449017902c5af1dcd7";
+
+/// EM-04B: whether `key` may authenticate engine state in this build.
+pub fn key_admissible(key: &[u8; 32], test_build: bool) -> bool {
+    test_build || nexus_contracts::sha256_hex(&hex::encode(key)) != PUBLISHED_TEST_KEY_SHA256
+}
+
 /// EM-04A compatibility: records WRITTEN BY THE EM-03 COMMIT (`b5a939a`, real code, captured in
 /// `tests/fixtures/em03-engine-state` with their broker-local test key) are reopened, authenticated
 /// and continued by this build. The persisted schema (record schema 1, engine contract 2) is
@@ -1359,11 +1404,116 @@ mod em03_records_compatibility {
     }
 
     #[test]
+    fn the_published_fixture_key_is_refused_by_a_production_build() {
+        let hex_key = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/em03-engine-state/TEST-ONLY-throwaway-em03-hmac-key.hex"),
+        )
+        .unwrap();
+        let key: [u8; 32] = hex::decode(hex_key.trim()).unwrap().try_into().unwrap();
+        assert_eq!(
+            nexus_contracts::sha256_hex(&hex_key),
+            PUBLISHED_TEST_KEY_SHA256,
+            "the fingerprint is the fixture file's"
+        );
+        assert!(!key_admissible(&key, false), "production refuses it");
+        assert!(key_admissible(&key, true), "only test builds accept it");
+        // any other key is admissible in production
+        assert!(key_admissible(&[7u8; 32], false));
+    }
+
+    #[test]
     fn an_em03_record_is_never_reinterpreted_by_the_shadow_engine() {
         let d = em03_state_dir();
         let e = cont(d.path(), &MUSE_V1, "task_new_shadow", "task_em03_muse")
             .err()
             .unwrap();
         assert_eq!(e.code, "engine-state-identity");
+    }
+}
+
+/// MEASUREMENT (explicit: `--ignored --nocapture em04b_measure`): one reasoning signal end to end
+/// at the engine boundary: Core validation + dispatch key, the historical path through the bridge,
+/// host validation (Rust fold) and the durable commit.
+#[cfg(all(test, feature = "test-engines"))]
+mod em04b_measure {
+    use super::*;
+    use crate::engine::muse_v1::MUSE_V1_SIGNALS;
+    use crate::engine::{EngineEnv, EngineSnapshot, SignalObservation};
+
+    #[test]
+    #[ignore]
+    fn em04b_measure_signal_processing() {
+        let d = tempfile::tempdir().unwrap();
+        let mut run = EngineRun::start(
+            EngineStateStore::open(d.path()).unwrap(),
+            &MUSE_V1_SIGNALS,
+            "run_m",
+            "task_m",
+            "engineering-v2",
+            &"b".repeat(64),
+            "low",
+            None,
+        )
+        .unwrap();
+        run.env = EngineEnv {
+            governor: Some(std::sync::Arc::new(
+                crate::engine::governor_bridge::NodeGovernorBridge::new("node".into()),
+            )),
+        };
+        let mut snap = EngineSnapshot {
+            current_effort: "low".into(),
+            authorized_efforts: vec!["low".into(), "medium".into()],
+            generation: "task_m".into(),
+            ..Default::default()
+        };
+        let (mut core_us, mut total_ms) = (Vec::new(), Vec::new());
+        for i in 1..=50u32 {
+            let signal = serde_json::json!({"phase": if i % 2 == 0 { "verify" } else { "implement" },
+                "recordImplementationFailure": i % 3 == 0});
+            let t = std::time::Instant::now();
+            crate::signals::validate(&signal, signal.to_string().len()).unwrap();
+            let key = crate::signals::dispatch_key("task_m", 1, &format!("call_{i}"), &signal);
+            core_us.push(t.elapsed().as_secs_f64() * 1e6);
+            snap.signals.push(SignalObservation {
+                seq: i,
+                attempt: 1,
+                generation: "task_m".into(),
+                call_id: format!("call_{i}"),
+                dispatch_key: key,
+                signal,
+            });
+            let t = std::time::Instant::now();
+            run.consult_signal(&snap).unwrap();
+            total_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        core_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        total_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "EM-04B signal: Core validation + key median {:.1} us; accept (bridge + host fold + durable commit) median {:.1} ms p95 {:.1} ms (n=50)",
+            core_us[25], total_ms[25], total_ms[47]
+        );
+        // serialization: the catalog with and without the tool, as `prepare` canonicalizes it
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for _ in 0..200 {
+            let t = std::time::Instant::now();
+            let x = nexus_contracts::canonical_json(&serde_json::Value::Array(
+                nexus_model::repo_tools::definitions_for(nexus_model::ToolProfile::RepoCodeV1),
+            ));
+            a.push((t.elapsed().as_secs_f64() * 1e6, x.len()));
+            let t = std::time::Instant::now();
+            let y = nexus_contracts::canonical_json(&serde_json::Value::Array(
+                nexus_model::repo_tools::definitions_for(
+                    nexus_model::ToolProfile::RepoCodeMuseSignalsV1,
+                ),
+            ));
+            b.push((t.elapsed().as_secs_f64() * 1e6, y.len()));
+        }
+        a.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+        b.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+        println!(
+            "EM-04B catalog serialization: RepoCodeV1 {} B median {:.1} us; with signals {} B median {:.1} us",
+            a[100].1, a[100].0, b[100].1, b[100].0
+        );
     }
 }

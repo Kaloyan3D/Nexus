@@ -27,12 +27,12 @@ use std::process::{Command, Stdio};
 
 const ALL: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
-fn node() -> Option<PathBuf> {
+pub(crate) fn node() -> Option<PathBuf> {
     let out = Command::new("node").arg("--version").output().ok()?;
     out.status.success().then(|| PathBuf::from("node"))
 }
 
-fn config_dir() -> String {
+pub(crate) fn config_dir() -> String {
     std::fs::canonicalize(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config"))
         .unwrap()
         .to_string_lossy()
@@ -62,7 +62,7 @@ pub(crate) enum Step {
 }
 use Step::*;
 
-fn dsh_tool(t: Tool) -> (Value, Value) {
+pub(crate) fn dsh_tool(t: Tool) -> (Value, Value) {
     let bash = |c: &str| json!({"name": "bash", "arguments": {"command": c}});
     match t {
         Tool::Edit => (
@@ -101,7 +101,7 @@ fn dsh_tool(t: Tool) -> (Value, Value) {
 }
 
 /// The Native receipt for the same outcome, and the proc_run arguments Native classifies.
-fn native_tool(t: Tool, index: u32) -> (ToolActivity, Value) {
+pub(crate) fn native_tool(t: Tool, index: u32) -> (ToolActivity, Value) {
     let mut a = ToolActivity {
         index,
         turn: 1,
@@ -266,7 +266,7 @@ pub(crate) fn run_native(caps: &[&str], steps: &[Step]) -> Outcome {
     }
 }
 
-fn comparable_reasoning(v: &Value) -> Value {
+pub(crate) fn comparable_reasoning(v: &Value) -> Value {
     let mut v = v.clone();
     if let Some(l) = v.get_mut("lastResolution").and_then(Value::as_object_mut) {
         l.remove("atUtc");
@@ -274,7 +274,7 @@ fn comparable_reasoning(v: &Value) -> Value {
     v
 }
 
-fn comparable_activity(v: &Value) -> Value {
+pub(crate) fn comparable_activity(v: &Value) -> Value {
     let mut v = v.clone();
     if let Some(ver) = v.get_mut("verification").and_then(Value::as_object_mut) {
         ver.remove("family");

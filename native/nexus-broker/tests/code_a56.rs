@@ -10892,3 +10892,385 @@ fn em04a_measure_a614_configurations() {
         "an unneeded budget changes no request byte"
     );
 }
+
+// ---- EM-04B: the Muse reasoning-signals tool (experimental engine only) ------------------
+
+const SIGNALS_ENGINE: &str = "muse-v1-signals";
+const SIGNALS_TOOL: &str = "muse_update_reasoning_state";
+
+fn em04b_fixture(responder: Responder, adaptive: bool, extra: Box<dyn Fn(&Path)>) -> Fx {
+    let fx = fixture_engine_with(responder, SIGNALS_ENGINE, extra);
+    if adaptive {
+        let root = fx.install_root.to_str().unwrap().to_owned();
+        let data = fx.registry.to_str().unwrap().to_owned();
+        let levels = "[\"low\",\"medium\",\"high\",\"xhigh\"]";
+        let r = node_json(&["registry-levels", &data, &root, "e2e-mock/e2e-1", levels]);
+        assert_eq!(r["ok"], true, "{r}");
+        let r = node_json(&["registry-slot-policy", &data, &root, levels]);
+        assert_eq!(r["ok"], true, "{r}");
+    }
+    fx
+}
+
+fn tool_names(body: &Value) -> Vec<String> {
+    body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The outputs the model received for calls of `name`, in order.
+fn outputs_for(body: &Value, name: &str) -> Vec<String> {
+    let input = body["input"].as_array().unwrap();
+    let ids: Vec<&str> = input
+        .iter()
+        .filter(|i| i["type"] == "function_call" && i["name"] == name)
+        .map(|i| i["call_id"].as_str().unwrap())
+        .collect();
+    input
+        .iter()
+        .filter(|i| {
+            i["type"] == "function_call_output" && ids.contains(&i["call_id"].as_str().unwrap())
+        })
+        .map(|i| i["output"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn em04b_script() -> Responder {
+    script(
+        vec![
+            (SIGNALS_TOOL, r#"{"phase":"diagnose"}"#.into()),
+            ("fs_read", r#"{"path":"src/lib.rs"}"#.into()),
+            (SIGNALS_TOOL, r#"{"recordHypothesisFailure":true}"#.into()),
+            (SIGNALS_TOOL, r#"{"recordHypothesisFailure":true}"#.into()),
+            // the model tries to select an effort: refused, nothing recorded
+            (
+                SIGNALS_TOOL,
+                r#"{"effort":"xhigh","phase":"recover"}"#.into(),
+            ),
+            (
+                "proc_run",
+                r#"{"program":"cargo","args":["test","--offline"]}"#.into(),
+            ),
+        ],
+        "Investigated; the tests fail.",
+    )
+}
+
+/// The success criterion of EM-04B: under the isolated experimental engine, the model-visible tool
+/// is offered, every valid signal is validated, accepted durably before its acknowledgement and fed
+/// to the shadow Governor; an effort-selecting signal is refused; requests keep the pinned effort;
+/// signals never reach the Kernel; trusted receipts stay the evidence source.
+#[test]
+fn em04b_signals_are_validated_durable_and_observed_but_never_select_effort() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = em04b_fixture(em04b_script(), true, Box::new(|_| {}));
+    let b = em04a_broker(&fx, "em04b-signals", None, None);
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "read src/lib.rs", "em04b-signals-001", |_| {}),
+        240,
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let bodies = fx.provider.bodies.lock().unwrap().clone();
+    let code_catalog =
+        nexus_model::repo_tools::definitions_for(nexus_model::ToolProfile::RepoCodeV1);
+    for x in &bodies {
+        assert_eq!(
+            x["reasoning"]["effort"], "low",
+            "a signal never selects effort"
+        );
+        let tools = x["tools"].as_array().unwrap();
+        assert_eq!(
+            tools[..code_catalog.len()],
+            code_catalog[..],
+            "the code catalog is unchanged"
+        );
+        assert_eq!(tools.len(), code_catalog.len() + 1);
+        assert_eq!(
+            tools[code_catalog.len()],
+            nexus_model::repo_tools::muse_signals_definition()
+        );
+    }
+    // the model's view: four acknowledgements (never an effort) and one refusal
+    let last = bodies.last().unwrap();
+    let outs = outputs_for(last, SIGNALS_TOOL);
+    assert_eq!(outs.len(), 4, "{outs:?}");
+    for o in &outs[..3] {
+        assert!(o.starts_with("Reasoning state updated:"), "{o}");
+        assert!(!o.to_ascii_lowercase().contains("effort"), "{o}");
+    }
+    assert!(outs[2].contains("failedHypotheses: 2"), "{}", outs[2]);
+    assert!(
+        outs[3].contains("\"errorCode\":\"forbidden-field\""),
+        "{}",
+        outs[3]
+    );
+    // durable: three accepted signals, each before the next attempt was bound
+    let task = run.task_instance_id.clone().unwrap();
+    let st = em03_state(&fx, "em04b-signals", &task);
+    let ev = events(&st);
+    let accepted: Vec<usize> = ev
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.0 == "signal-accepted")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(accepted.len(), 3, "{ev:?}");
+    for i in &accepted {
+        assert!(
+            ev[*i + 1..].iter().any(|e| e.0 == "attempt-bound"),
+            "a signal is durable before the next request"
+        );
+    }
+    assert!(!ev.iter().any(|e| e.0 == "effort-selected"));
+    let r = &st["payload"]["museReasoning"];
+    assert_eq!(
+        (r["phase"].as_str(), r["failedHypotheses"].as_u64()),
+        (Some("diagnose"), Some(2))
+    );
+    assert_eq!(r["processedSignalIds"].as_array().unwrap().len(), 3);
+    // the shadow Governor observed them: escalation to xhigh would be proposed, never applied
+    let h = em04a_history(&st);
+    assert!(
+        h.iter().any(|d| d["reason"] == "escalation"
+            && d["governorEffort"] == "xhigh"
+            && d["would"] == "change:xhigh"),
+        "{h:?}"
+    );
+    // trusted evidence is still the receipts: the failed cargo test is a failed verification
+    assert_eq!(
+        st["payload"]["museActivity"]["verification"]["status"],
+        "failed"
+    );
+    // signals never reached the Kernel: one acceptance per model request, no execution ids
+    assert_eq!(em03_receipts(&fx, &task).len(), bodies.len());
+    let sig_acts: Vec<_> = run
+        .tool_activity
+        .iter()
+        .filter(|a| a.tool == SIGNALS_TOOL)
+        .collect();
+    assert_eq!(sig_acts.len(), 4);
+    assert!(sig_acts
+        .iter()
+        .all(|a| a.execution_id.is_none() && a.journal_seq.is_none()));
+    assert_eq!(
+        sig_acts
+            .iter()
+            .map(|a| a.status.as_str())
+            .collect::<Vec<_>>(),
+        ["executed", "executed", "executed", "refused"]
+    );
+    b.shutdown();
+}
+
+/// Production `muse-v0` and the EM-04A shadow engine never offer the tool; a call naming it is an
+/// unknown tool there, refused and recorded nowhere.
+#[test]
+fn em04b_production_and_shadow_runs_never_offer_or_accept_the_signals_tool() {
+    if !sandbox_ready() {
+        return;
+    }
+    let calls = || {
+        script(
+            vec![(SIGNALS_TOOL, r#"{"phase":"implement"}"#.into())],
+            "Done.",
+        )
+    };
+    for (engine, name) in [(None, "em04b-v0"), (Some("muse-v1-shadow"), "em04b-shadow")] {
+        let fx = match engine {
+            None => fixture_autonomous(calls()),
+            Some(e) => fixture_engine(calls(), e),
+        };
+        let b = em04a_broker(&fx, name, None, None);
+        let run = submit_wait(
+            b.socket_path(),
+            &code_intent_for(
+                "other",
+                "read src/lib.rs",
+                &format!("{name}-000000001"),
+                |_| {},
+            ),
+            180,
+        );
+        assert!(run.terminal, "{run:?}");
+        for x in fx.provider.bodies.lock().unwrap().iter() {
+            assert!(!tool_names(x).contains(&SIGNALS_TOOL.to_owned()), "{name}");
+        }
+        let a = run
+            .tool_activity
+            .iter()
+            .find(|a| a.tool == SIGNALS_TOOL)
+            .expect("the call");
+        assert_eq!(a.status, "refused", "{name}");
+        let st = em03_state(&fx, name, &run.task_instance_id.clone().unwrap());
+        assert!(
+            !events(&st).iter().any(|e| e.0 == "signal-accepted"),
+            "{name}"
+        );
+        b.shutdown();
+    }
+}
+
+/// Crash immediately before / after the durable acceptance of a signal, restart, continue. Before:
+/// the signal does not exist anywhere. After: it is durable (the model never saw its ack) and
+/// inherited. In both, the continuation accepts exactly the signals its own requests made:
+/// recovery never manufactures one.
+#[test]
+fn em04b_a_crash_around_durable_acceptance_never_loses_or_invents_a_signal() {
+    if !sandbox_ready() {
+        return;
+    }
+    for (point, key, durable) in [
+        ("before-signal-accept", "em04b-crash-before1", false),
+        ("after-signal-accept", "em04b-crash-after-1", true),
+    ] {
+        let responder = script(
+            vec![
+                ("fs_read", r#"{"path":"src/lib.rs"}"#.into()),
+                (
+                    SIGNALS_TOOL,
+                    r#"{"phase":"diagnose","recordHypothesisFailure":true}"#.into(),
+                ),
+            ],
+            "Done.",
+        );
+        let fx = em04b_fixture(responder, true, Box::new(|_| {}));
+        let b = em04a_broker(&fx, "em04b-crash", None, None);
+        nexus_broker::engine::test_faults::arm(key, point);
+        let first = ic::submit(
+            b.socket_path(),
+            &code_intent_for("other", "read src/lib.rs", key, |_| {}),
+        )
+        .expect("submit")
+        .run;
+        let first = wait_terminal(b.socket_path(), &first.run_id, 180);
+        assert!(
+            first.terminal && first.state != "completed",
+            "{point}: {first:?}"
+        );
+        let old_requests = fx.provider.bodies.lock().unwrap().len();
+        b.shutdown();
+        let b = em04a_broker(&fx, "em04b-crash", None, None);
+        let old = em03_state(&fx, "em04b-crash", &first.task_instance_id.clone().unwrap());
+        let n_old = events(&old)
+            .iter()
+            .filter(|e| e.0 == "signal-accepted")
+            .count();
+        assert_eq!(n_old, usize::from(durable), "{point}");
+        let failed = |v: &Value| {
+            v["payload"]["museReasoning"]["failedHypotheses"]
+                .as_u64()
+                .unwrap_or(0)
+        };
+        assert_eq!(failed(&old), u64::from(durable), "{point}");
+        let v = ic::resume(b.socket_path(), &first.run_id).expect("resume");
+        let second = wait_terminal(b.socket_path(), v["run"]["runId"].as_str().unwrap(), 240);
+        assert_eq!(second.state, "completed", "{point}: {second:?}");
+        let new = em03_state(
+            &fx,
+            "em04b-crash",
+            &second.task_instance_id.clone().unwrap(),
+        );
+        // the continuation's own signal calls are the only signals it accepted
+        let bodies = fx.provider.bodies.lock().unwrap().clone();
+        let new_calls = bodies[old_requests..]
+            .last()
+            .map(|x| outputs_for(x, SIGNALS_TOOL).len())
+            .unwrap_or(0);
+        let n_new = events(&new)
+            .iter()
+            .filter(|e| e.0 == "signal-accepted")
+            .count();
+        assert_eq!(
+            n_new, new_calls,
+            "{point}: recovery never manufactures a signal"
+        );
+        // the inherited window: what was durable plus what the continuation sent
+        assert_eq!(
+            failed(&new),
+            u64::from(durable) + new_calls as u64,
+            "{point}"
+        );
+        assert!(bodies.iter().all(|x| x["reasoning"]["effort"] == "low"));
+        b.shutdown();
+    }
+}
+
+/// A failed durable write of an accepted signal fails the run closed before the model is
+/// acknowledged and before any further request.
+#[test]
+fn em04b_a_signal_that_cannot_be_persisted_is_never_acknowledged() {
+    if !sandbox_ready() {
+        return;
+    }
+    let responder = script(
+        vec![(SIGNALS_TOOL, r#"{"phase":"diagnose"}"#.into())],
+        "Done.",
+    );
+    let fx = em04b_fixture(responder, false, Box::new(|_| {}));
+    let b = em04a_broker(&fx, "em04b-persist", None, None);
+    let key = "em04b-persist-0001";
+    nexus_broker::engine::test_faults::arm(key, "persist-signal");
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("other", "read src/lib.rs", key, |_| {}),
+        120,
+    );
+    assert_eq!(run.state, "failed", "{run:?}");
+    assert_eq!(run.error_code.as_deref(), Some("engine-state-unpersisted"));
+    let bodies = fx.provider.bodies.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 1, "no request after the failed acceptance");
+    let st = em03_state(&fx, "em04b-persist", &run.task_instance_id.clone().unwrap());
+    assert!(!events(&st).iter().any(|e| e.0 == "signal-accepted"));
+    b.shutdown();
+}
+
+/// A614 with the REAL signals tool in every request (no reserve: its bytes are in the measured
+/// request), under a budget one byte below the A614 guard.
+#[test]
+fn em04b_a614_long_loop_with_the_signals_tool_stays_under_the_guard() {
+    if !sandbox_ready() {
+        return;
+    }
+    let sizes: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+    let fx = em04b_fixture(
+        em04a_long_reads(sizes.clone(), 55),
+        false,
+        Box::new(em04a_big_file),
+    );
+    let b = em04a_broker(&fx, "em04b-a614", Some(449_999), Some(300_000));
+    let t = std::time::Instant::now();
+    let run = submit_wait(
+        b.socket_path(),
+        &code_intent_for("proj", "read", "em04b-a614-000001", |l| {
+            l.max_turns = Some(60);
+            l.max_tool_calls = Some(200);
+            l.max_tool_result_bytes = Some(8 * 1024 * 1024);
+        }),
+        900,
+    );
+    assert_eq!(
+        run.state, "completed",
+        "{:?} {:?}",
+        run.error_code, run.error_message
+    );
+    assert_eq!(run.tool_calls, 55);
+    let max = *sizes.lock().unwrap().iter().max().unwrap();
+    println!(
+        "EM-04B A614 with the signals tool: max request {max} B; wall {:.2}s; compactions {}",
+        t.elapsed().as_secs_f64(),
+        run.context_compactions
+    );
+    assert!(max < 450_000, "{max}");
+    for body in fx.provider.bodies.lock().unwrap().iter() {
+        assert!(tool_names(body).contains(&SIGNALS_TOOL.to_owned()));
+        assert!(em04a_pairs_intact(body));
+        assert_eq!(body["input"][0]["role"], "user");
+    }
+    b.shutdown();
+}

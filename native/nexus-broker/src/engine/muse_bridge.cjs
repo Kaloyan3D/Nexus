@@ -14,6 +14,8 @@
 //                                  filesystem is never touched; writes elsewhere are refused.
 //   ./Engineering-Profiles.cjs  -> { routingStatePath } naming that virtual document.
 //   Date                        -> a fixed clock, so decision evidence is deterministic.
+//   node:module (Signals only)  -> createRequire refuses: the DSH tool registration path
+//                                  (`apply`) is never used; only `applyReasoningSignal` is.
 // Any other require is refused. The Governor policy, the Runtime transitions (progress-window
 // resets, signal bookkeeping) and the Activity reducer are the historical code paths.
 
@@ -61,6 +63,12 @@ const vfs = Object.freeze({
 const profilesAdapter = Object.freeze({
   routingStatePath() {
     return STATE;
+  },
+});
+
+const moduleAdapter = Object.freeze({
+  createRequire() {
+    throw fail('require-refused', 'the DSH tool registration path is not available in the bridge');
   },
 });
 
@@ -117,6 +125,7 @@ function evaluate(mods, args) {
   const levels = Array.isArray(args.capabilities) ? args.capabilities.filter((x) => typeof x === 'string') : [];
   files.set(REGISTRY, JSON.stringify({ models: [{ id: SLOT_MODEL, supportedReasoningLevels: levels }] }));
   const applied = [];
+  const acks = [];
   for (const ev of Array.isArray(args.events) ? args.events : []) {
     if (ev && ev.type === 'activity') {
       const current = JSON.parse(files.get(STATE));
@@ -126,6 +135,17 @@ function evaluate(mods, args) {
       current.museActivity = next;
       files.set(STATE, JSON.stringify(current));
       applied.push('activity:' + ev.classification.kind);
+    } else if (ev && ev.type === 'signal') {
+      // EM-04B: the historical model-facing signal path, unchanged: strict validation, trusted
+      // dispatch-key deduplication, ONE Runtime transition, the model-facing acknowledgement
+      const ack = mods.signals.applyReasoningSignal({
+        installRoot: ROOT,
+        binding: BINDING,
+        signal: ev.signal,
+        dispatchKey: ev.dispatchKey,
+      });
+      acks.push(ack);
+      applied.push('signal:' + (ack.duplicate ? 'duplicate' : 'applied'));
     } else if (ev && ev.type === 'semantic' && Object.prototype.hasOwnProperty.call(SEMANTIC, ev.op)) {
       SEMANTIC[ev.op](mods.runtime, ev);
       applied.push('semantic:' + ev.op);
@@ -167,6 +187,7 @@ function evaluate(mods, args) {
     effective: mods.runtime.effectiveMuseStateOf(out),
     decision,
     applied,
+    acks,
   };
 }
 
@@ -189,7 +210,18 @@ function main(text) {
       './Engineering-Profiles.cjs': profilesAdapter,
       './Muse-ReasoningActivity.cjs': activity,
     });
-    const mods = { governor, activity, runtime };
+    const signals = src.signals
+      ? load('Muse-ReasoningSignals.cjs', String(src.signals), {
+          'node:crypto': crypto,
+          'node:fs': vfs,
+          'node:path': path,
+          'node:module': moduleAdapter,
+          './Muse-ReasoningGovernor.cjs': governor,
+          './Engineering-Profiles.cjs': profilesAdapter,
+          './Muse-ReasoningRuntime.cjs': runtime,
+        })
+      : null;
+    const mods = { governor, activity, runtime, signals };
     if (input.op === 'evaluate') return { ok: true, result: evaluate(mods, input.args || {}) };
     if (input.op === 'ladder') {
       return { ok: true, result: { efforts: Array.from(governor.MUSE_REASONING_EFFORTS), phases: Array.from(governor.MUSE_REASONING_PHASES) } };
@@ -197,9 +229,11 @@ function main(text) {
     return { ok: false, code: 'op-invalid', message: 'unknown op' };
   } catch (e) {
     // a TypeError from the historical validators = corrupt or forged state: fail closed
+    const signalCode =
+      e && typeof e.code === 'string' && /^Muse reasoning signal rejected/.test(String(e.message)) ? 'signal-' + e.code : null;
     return {
       ok: false,
-      code: e && e.bridgeCode ? e.bridgeCode : e instanceof TypeError ? 'state-invalid' : 'bridge-error',
+      code: e && e.bridgeCode ? e.bridgeCode : signalCode ? signalCode : e instanceof TypeError ? 'state-invalid' : 'bridge-error',
       message: String((e && e.message) || e).slice(0, 300),
     };
   }

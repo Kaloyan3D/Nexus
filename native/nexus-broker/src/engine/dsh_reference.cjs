@@ -20,6 +20,7 @@ function load(configDir) {
     runtime: require(path.join(configDir, 'Muse-ReasoningRuntime.cjs')),
     governor: require(path.join(configDir, 'Muse-ReasoningGovernor.cjs')),
     profiles: require(path.join(configDir, 'Engineering-Profiles.cjs')),
+    signals: require(path.join(configDir, 'Muse-ReasoningSignals.cjs')),
   };
 }
 
@@ -38,6 +39,7 @@ function run(input) {
     fs.writeFileSync(statePath, '{}');
     const call = { installRoot: root, binding };
     const resolutions = [];
+    const acks = [];
     for (const s of input.steps) {
       if (s.t === 'sem') {
         const f = {
@@ -55,6 +57,17 @@ function run(input) {
         f();
       } else if (s.t === 'tool') {
         m.runtime.recordMuseToolOutcome({ ...call, exec: s.exec, result: s.result });
+      } else if (s.t === 'signal') {
+        // the historical model-facing path (the DSH tool's execute() calls exactly this)
+        try {
+          acks.push(m.signals.applyReasoningSignal({ ...call, signal: s.signal, dispatchKey: s.dispatchKey }));
+        } catch (e) {
+          if (e && typeof e.code === 'string' && /signal rejected/.test(String(e.message))) {
+            acks.push({ refused: e.code });
+          } else {
+            throw e;
+          }
+        }
       } else if (s.t === 'restart') {
         m = load(input.configDir);
       } else if (s.t === 'resolve') {
@@ -75,7 +88,7 @@ function run(input) {
       }
     }
     const doc = JSON.parse(fs.readFileSync(statePath, 'utf8'));
-    return { ok: true, resolutions, final: { museReasoning: doc.museReasoning || null, museActivity: doc.museActivity || null } };
+    return { ok: true, resolutions, acks, final: { museReasoning: doc.museReasoning || null, museActivity: doc.museActivity || null } };
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

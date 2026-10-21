@@ -51,6 +51,9 @@ pub const MAX_GUIDANCE_BYTES: usize = 2048;
 pub const LEGACY_NATIVE_ENGINE: &str = "muse-v0";
 /// Largest serialized engine state.
 pub const MAX_STATE_BYTES: usize = 16 * 1024;
+/// EM-04B: largest acknowledgement an engine may return for a reasoning signal (it becomes the
+/// tool result the model reads).
+pub const MAX_SIGNAL_ACK_BYTES: usize = 1024;
 /// EM-04A production gate for the shadow Muse Governor engine `muse-v1-shadow`: DISABLED. With `false`
 /// the engine is compiled but not built in, so the Registry cannot select it (`engine-unavailable`)
 /// in any production build; `test-engines` builds (this crate's tests) register it.
@@ -141,6 +144,26 @@ pub struct EngineSnapshot {
     /// verification commands, derived by the Core from its own tool receipts and the Kernel's
     /// execution records - never from model text. Read-only for engines.
     pub activity: Vec<ActivityObservation>,
+    /// EM-04B: model-authored reasoning signals of THIS run that passed the Core's strict
+    /// validation, in call order. Cognitive CLAIMS, kept apart from `activity` (evidence).
+    pub signals: Vec<SignalObservation>,
+}
+
+/// EM-04B: one validated call of the reasoning-signals tool. The Core builds it from the provider's
+/// call and its own identity facts; the model supplies only `signal` (closed schema, no effort).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignalObservation {
+    /// Order within the run, shared with `ActivityObservation::seq` (the tool call's index).
+    pub seq: u32,
+    /// The model attempt whose response made the call.
+    pub attempt: u32,
+    pub generation: String,
+    pub call_id: String,
+    /// Trusted dispatch identity (generation, attempt, call id and the signal's canonical hash):
+    /// the historical deduplication key.
+    pub dispatch_key: String,
+    /// The validated signal object, exactly as the model sent it (only historical fields).
+    pub signal: serde_json::Value,
 }
 
 /// EM-04A: one trusted operational observation (the Native counterpart of the historical Muse
@@ -204,6 +227,8 @@ pub enum EngineAction {
     AskOperator,
     /// Not admitted in contract v1 (reserved: EMv3 child runs).
     RequestChildRun,
+    /// EM-04B: the acknowledgement of a reasoning signal (admitted ONLY by `consult_signal`).
+    Acknowledge(String),
 }
 
 /// One bounded guidance message.
@@ -332,6 +357,18 @@ pub trait EngineExtension: Send + Sync {
     /// EM-03: the persistable form of `state.data` (bounded; no model text, no secrets). The
     /// Core owns persistence; the engine only says what its payload looks like on disk.
     fn persist_state(&self, state: &EngineState) -> serde_json::Value;
+    /// EM-04B: answer the newest signal in `snapshot.signals` (an `Acknowledge` action, never an
+    /// effort change). `None` = this engine takes no signals (every engine but the experimental
+    /// signals engine); the host then refuses the call.
+    fn propose_signal(
+        &self,
+        _snapshot: &EngineSnapshot,
+        _state: &EngineState,
+        _proposal_id: u64,
+        _env: &EngineEnv,
+    ) -> Option<EngineProposal> {
+        None
+    }
     /// EM-03: rebuild a state from its persisted payload for an inheriting continuation.
     /// `None` = invalid (the continuation fails closed) or not inheritable.
     fn restore_state(&self, _payload: &serde_json::Value, _revision: u64) -> Option<EngineState> {
@@ -364,6 +401,7 @@ fn engines(test_build: bool) -> Vec<&'static dyn EngineExtension> {
     let mut v: Vec<&'static dyn EngineExtension> = vec![&muse_v0::MUSE_V0];
     if MUSE_V1_PRODUCTION_ENABLED || test_build {
         v.push(&muse_v1::MUSE_V1);
+        v.push(&muse_v1::MUSE_V1_SIGNALS);
     }
     #[cfg(feature = "test-engines")]
     if test_build {
@@ -457,6 +495,8 @@ pub struct ProposalReceipt {
     pub revision: u64,
     /// EM-03: the effort selection this proposal made, if any.
     pub effort: Option<EffortSelection>,
+    /// EM-04B: the proposal answered a reasoning signal (not a hook).
+    pub signal: bool,
 }
 
 /// The Core side of the boundary for ONE run: owns the engine state, validates every proposal
@@ -640,8 +680,30 @@ impl EngineHost {
                 ));
             }
         }
-        // generic state invariants
-        let n = &p.next_state;
+        self.admit_next_state(&p.next_state, snapshot)?;
+        // commit
+        self.state = p.next_state;
+        if effort.is_some() {
+            self.effort = effort.clone();
+        }
+        self.receipts.push(ProposalReceipt {
+            proposal_id: p.proposal_id,
+            hook,
+            revision: self.state.revision,
+            effort,
+            signal: false,
+        });
+        self.next_proposal += 1;
+        Ok(decision)
+    }
+
+    /// Generic state invariants and the engine's own transition rules (every admission path).
+    fn admit_next_state(
+        &self,
+        n: &EngineState,
+        snapshot: &EngineSnapshot,
+    ) -> Result<(), EngineRefusal> {
+        let d = self.ext.descriptor();
         if n.engine_id != d.engine_id || n.schema != d.state_schema {
             return Err(refuse(
                 "engine-state-foreign",
@@ -662,20 +724,73 @@ impl EngineHost {
         }
         self.ext
             .check_transition(&self.state, n, snapshot)
-            .map_err(|m| refuse("engine-state-transition", m))?;
-        // commit
-        self.state = p.next_state;
-        if effort.is_some() {
-            self.effort = effort.clone();
+            .map_err(|m| refuse("engine-state-transition", m))
+    }
+
+    /// EM-04B: hand the newest validated reasoning signal (`snapshot.signals`) to the engine and
+    /// admit its answer: only an `Acknowledge` within bounds, never an effort change, and the same
+    /// state rules as every proposal. On success the new state is committed (in memory; the caller
+    /// makes it durable before the acknowledgement reaches the model) and the acknowledgement
+    /// returned; on refusal nothing changes.
+    pub fn consult_signal(
+        &mut self,
+        snapshot: &EngineSnapshot,
+        env: &EngineEnv,
+    ) -> Result<String, EngineRefusal> {
+        let Some(p) = self
+            .ext
+            .propose_signal(snapshot, &self.state, self.next_proposal, env)
+        else {
+            return Err(refuse(
+                "engine-signals-unsupported",
+                "this engine takes no reasoning signals",
+            ));
+        };
+        if p.proposal_id != self.next_proposal {
+            return Err(refuse(
+                "engine-proposal-replayed",
+                "the proposal id is not the next one for this run (duplicate or out of order)",
+            ));
         }
+        if p.based_on_revision != self.state.revision {
+            return Err(refuse(
+                "engine-state-stale",
+                "the proposal was based on another engine state revision",
+            ));
+        }
+        if p.effort != EffortProposal::KeepPinned {
+            return Err(refuse(
+                "engine-effort-not-admitted",
+                "a reasoning signal never changes the reasoning effort",
+            ));
+        }
+        let EngineAction::Acknowledge(ack) = &p.action else {
+            return Err(refuse(
+                "engine-action-not-admitted",
+                format!(
+                    "action {} is not admitted for a reasoning signal",
+                    action_name(&p.action)
+                ),
+            ));
+        };
+        if ack.is_empty() || ack.len() > MAX_SIGNAL_ACK_BYTES {
+            return Err(refuse(
+                "engine-ack-invalid",
+                "the signal acknowledgement must be non-empty and bounded",
+            ));
+        }
+        let ack = ack.clone();
+        self.admit_next_state(&p.next_state, snapshot)?;
+        self.state = p.next_state;
         self.receipts.push(ProposalReceipt {
             proposal_id: p.proposal_id,
-            hook,
+            hook: Hook::AfterToolPhase,
             revision: self.state.revision,
-            effort,
+            effort: None,
+            signal: true,
         });
         self.next_proposal += 1;
-        Ok(decision)
+        Ok(ack)
     }
 }
 
@@ -687,6 +802,7 @@ fn action_name(a: &EngineAction) -> &'static str {
         EngineAction::RequestVerification => "request-verification",
         EngineAction::AskOperator => "ask-operator",
         EngineAction::RequestChildRun => "request-child-run",
+        EngineAction::Acknowledge(_) => "acknowledge",
     }
 }
 
@@ -696,5 +812,9 @@ mod governor_parity;
 mod legacy_reference;
 #[cfg(test)]
 mod muse_v1_tests;
+#[cfg(test)]
+mod signals_parity;
+#[cfg(test)]
+mod signals_tests;
 #[cfg(test)]
 mod tests;

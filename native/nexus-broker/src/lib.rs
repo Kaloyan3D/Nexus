@@ -32,6 +32,7 @@ pub mod recovery;
 pub mod request_budget;
 pub mod resolution;
 pub mod server;
+pub mod signals;
 pub mod state_lock;
 pub mod store;
 pub mod threads;

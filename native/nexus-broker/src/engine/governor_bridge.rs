@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 pub const GOVERNOR_SOURCE: &str = include_str!("../../../../config/Muse-ReasoningGovernor.cjs");
 pub const RUNTIME_SOURCE: &str = include_str!("../../../../config/Muse-ReasoningRuntime.cjs");
 pub const ACTIVITY_SOURCE: &str = include_str!("../../../../config/Muse-ReasoningActivity.cjs");
+/// EM-04B: the historical model-facing signal path (`applyReasoningSignal`).
+pub const SIGNALS_SOURCE: &str = include_str!("../../../../config/Muse-ReasoningSignals.cjs");
 /// The Native adapter script.
 pub const BRIDGE_SOURCE: &str = include_str!("muse_bridge.cjs");
 
@@ -37,10 +39,11 @@ pub const MAX_BRIDGE_INPUT: usize = 1024 * 1024;
 /// SHA-256 of the embedded sources, recorded with every decision as its evidence.
 pub fn sources_digest() -> String {
     nexus_contracts::sha256_hex(&format!(
-        "{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}",
         nexus_contracts::sha256_hex(GOVERNOR_SOURCE),
         nexus_contracts::sha256_hex(RUNTIME_SOURCE),
         nexus_contracts::sha256_hex(ACTIVITY_SOURCE),
+        nexus_contracts::sha256_hex(SIGNALS_SOURCE),
         nexus_contracts::sha256_hex(BRIDGE_SOURCE),
     ))
 }
@@ -81,6 +84,7 @@ impl GovernorEvaluator for NodeGovernorBridge {
                 "governor": GOVERNOR_SOURCE,
                 "runtime": RUNTIME_SOURCE,
                 "activity": ACTIVITY_SOURCE,
+                "signals": SIGNALS_SOURCE,
             },
             "op": op,
             "args": args,
@@ -190,6 +194,7 @@ mod tests {
         assert_eq!(GOVERNOR_SOURCE, repo_file("Muse-ReasoningGovernor.cjs"));
         assert_eq!(RUNTIME_SOURCE, repo_file("Muse-ReasoningRuntime.cjs"));
         assert_eq!(ACTIVITY_SOURCE, repo_file("Muse-ReasoningActivity.cjs"));
+        assert_eq!(SIGNALS_SOURCE, repo_file("Muse-ReasoningSignals.cjs"));
         assert_eq!(sources_digest().len(), 64);
     }
 

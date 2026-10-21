@@ -71,6 +71,11 @@ pub enum ToolProfile {
     /// `fs_list`, `fs_read`, `fs_search` plus `fs_write`, `fs_edit`,
     /// `proc_run` (A5.6, `repo-code` only; every mutation needs approval).
     RepoCodeV1,
+    /// EM-04B EXPERIMENTAL (test fixtures only): `RepoCodeV1` plus the Muse reasoning-signals tool
+    /// `muse_update_reasoning_state`, which the broker handles as control-plane input (no Kernel
+    /// tool, no effect outside engine state). Offered only to the isolated `muse-v1-signals` engine;
+    /// `RepoCodeV1` stays byte-identical.
+    RepoCodeMuseSignalsV1,
 }
 
 /// Bounds for a tool-capable conversation.

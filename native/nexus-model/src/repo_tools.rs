@@ -79,7 +79,8 @@ pub fn tool_id_for_profile(
     use crate::request::ToolProfile as P;
     match profile {
         P::RepoInspectV1 => tool_id_for(model_name),
-        P::RepoCodeV1 => tool_id_for(model_name).or_else(|| {
+        // the signals tool is broker-handled control-plane input: it has no Kernel tool id
+        P::RepoCodeV1 | P::RepoCodeMuseSignalsV1 => tool_id_for(model_name).or_else(|| {
             CODE_EXTRA
                 .iter()
                 .find(|t| t.model_name == model_name)
@@ -149,11 +150,77 @@ pub fn definitions() -> Vec<Value> {
 
 /// The exact `tools` array for one profile.
 pub fn definitions_for(profile: crate::request::ToolProfile) -> Vec<Value> {
+    use crate::request::ToolProfile as P;
     let mut v = definitions();
-    if matches!(profile, crate::request::ToolProfile::RepoCodeV1) {
+    if matches!(profile, P::RepoCodeV1 | P::RepoCodeMuseSignalsV1) {
         v.extend(code_definitions());
     }
+    if profile == P::RepoCodeMuseSignalsV1 {
+        v.push(muse_signals_definition());
+    }
     v
+}
+
+/// EM-04B: the historical Muse reasoning-signals tool (`config/Muse-ReasoningSignals.cjs`,
+/// `defineReasoningSignalTool`), in the Native definition shape: the same name, description and
+/// nine event fields, closed with `additionalProperties: false`. There is deliberately no effort,
+/// counter, identity or provider field. A test compares it byte for byte with the definition the
+/// CommonJS module produces.
+pub const MUSE_SIGNALS_TOOL: &str = "muse_update_reasoning_state";
+
+/// The canonical cognitive phases (historical Governor order).
+pub const MUSE_PHASES: [&str; 7] = [
+    "discover",
+    "diagnose",
+    "design",
+    "implement",
+    "verify",
+    "recover",
+    "review",
+];
+
+pub fn muse_signals_definition() -> Value {
+    let description = [
+        "Report a structured reasoning-state change for the current Muse engineering task.",
+        "Call when the trajectory meaningfully changes cognitive phase or when strong evidence is established:",
+        "starting investigation (discover), resolving root cause (diagnose), choosing a technical approach (design),",
+        "executing an established solution (implement), checking a result (verify), responding to an unexpected",
+        "failure (recover), or critically inspecting a candidate result (review).",
+        "Also report a confirmed root cause, a confirmed solution, a ruled-out hypothesis, a failed implementation",
+        "attempt, or conflicting observations.",
+        "Report implement before beginning established implementation work, verify before checking a candidate",
+        "implementation, and recover when an unexpected failure turns the task into failure investigation.",
+        "Do not call before every ordinary read, edit, or test -- only on meaningful transitions.",
+        "Fields are events, not settings: recordHypothesisFailure and recordImplementationFailure each record ONE",
+        "event (Nexus counts them). You cannot select reasoning effort and there is no effort field; Nexus validates",
+        "every signal and allocates compute from the resulting state.",
+    ]
+    .join(" ");
+    let flag = |d: &str| json!({"type": "boolean", "description": d});
+    json!({
+        "type": "function",
+        "name": MUSE_SIGNALS_TOOL,
+        "description": description,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "phase": {
+                    "type": "string",
+                    "enum": MUSE_PHASES,
+                    "description": "New cognitive phase: discover, diagnose, design, implement, verify, recover, or review.",
+                },
+                "markRootCauseEstablished": flag("The root cause is confirmed. Event: true records it and opens a fresh diagnosis window; omit or false for no change."),
+                "invalidateRootCause": flag("Later evidence disproved the diagnosis. Event: true clears both the root cause and the solution; omit or false for no change."),
+                "markSolutionEstablished": flag("The technical solution is confirmed. Event: true records it and opens a fresh implementation window; omit or false for no change."),
+                "invalidateSolution": flag("Implementation evidence disproved the chosen approach (diagnosis still holds). Event: true clears the solution only; omit or false for no change."),
+                "recordHypothesisFailure": flag("One ruled-out hypothesis. Event: true records exactly one failure; Nexus counts."),
+                "recordImplementationFailure": flag("One failed implementation attempt. Event: true records exactly one failure; Nexus counts."),
+                "conflictingEvidence": flag("Observations genuinely conflict. Event: true records it; omit or false for no change."),
+                "resolveConflictingEvidence": flag("New evidence reconciled the conflict. Event: true clears it; omit or false for no change."),
+            },
+            "additionalProperties": false,
+        },
+    })
 }
 
 fn code_definitions() -> Vec<Value> {
@@ -339,6 +406,43 @@ mod tests {
             catalog_digest_for(P::RepoInspectV1)
         );
         assert_eq!(catalog_digest_for(P::RepoInspectV1), catalog_digest());
+    }
+
+    #[test]
+    fn the_experimental_signals_catalog_only_adds_the_signals_tool_and_code_is_unchanged() {
+        use crate::request::ToolProfile as P;
+        let code = definitions_for(P::RepoCodeV1);
+        let sig = definitions_for(P::RepoCodeMuseSignalsV1);
+        assert_eq!(
+            sig[..code.len()],
+            code[..],
+            "RepoCodeV1 is a byte-identical prefix"
+        );
+        assert_eq!(sig.len(), code.len() + 1);
+        assert_eq!(sig[code.len()]["name"], MUSE_SIGNALS_TOOL);
+        // no effort/counter/identity field is offered
+        let props = sig[code.len()]["parameters"]["properties"]
+            .as_object()
+            .unwrap();
+        assert_eq!(props.len(), 9);
+        for k in props.keys() {
+            assert!(!k.to_ascii_lowercase().contains("effort"), "{k}");
+        }
+        // broker-handled: no Kernel tool id
+        assert!(tool_id_for_profile(P::RepoCodeMuseSignalsV1, MUSE_SIGNALS_TOOL).is_none());
+        assert_eq!(
+            tool_id_for_profile(P::RepoCodeMuseSignalsV1, "fs_write"),
+            tool_id_for_profile(P::RepoCodeV1, "fs_write")
+        );
+        // the exact measured wire bytes (EM-04A reserve: 2,881 + separator)
+        assert_eq!(
+            nexus_contracts::canonical_json(&muse_signals_definition()).len(),
+            2_881
+        );
+        assert_eq!(
+            nexus_contracts::canonical_json(&Value::Array(sig.clone())).len(),
+            nexus_contracts::canonical_json(&Value::Array(code)).len() + 2_882
+        );
     }
 
     #[test]

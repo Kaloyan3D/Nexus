@@ -1164,9 +1164,17 @@ pub(crate) fn run(
             )
         })
         .map_err(|e| discard(se(e.code, e.message)))?;
-    // EM-04A: only the shadow Governor engine is lent the historical Muse policy (a bounded,
+    // EM-04A: only the shadow Governor engines are lent the historical Muse policy (a bounded,
     // pure Node bridge); every other engine runs exactly as in EM-03.
-    if engine.descriptor().engine_id == crate::engine::muse_v1::ENGINE_ID {
+    // EM-04B: only the experimental signals engine, in a coding run, offers the signals tool.
+    let signals_run = mode == Mode::Code
+        && engine.descriptor().engine_id == crate::engine::muse_v1::SIGNALS_ENGINE_ID;
+    if [
+        crate::engine::muse_v1::ENGINE_ID,
+        crate::engine::muse_v1::SIGNALS_ENGINE_ID,
+    ]
+    .contains(&engine.descriptor().engine_id)
+    {
         engine_run.env.governor = Some(std::sync::Arc::new(
             crate::engine::governor_bridge::NodeGovernorBridge::new(b.node_abs.clone()),
         ));
@@ -1283,6 +1291,12 @@ pub(crate) fn run(
             root: &root,
             expected: expected.clone(),
             ctx_budget,
+            signals: signals_run,
+            profile: if signals_run {
+                nexus_model::ToolProfile::RepoCodeMuseSignalsV1
+            } else {
+                mode.profile()
+            },
         },
         &mut loop_state,
         &mut engine_run,
@@ -1331,6 +1345,11 @@ struct Shared<'a> {
     #[allow(dead_code)]
     expected: Option<nexus_client::ExpectedTarget>,
     ctx_budget: usize,
+    /// EM-04B: the run's engine takes reasoning signals (the experimental `muse-v1-signals`
+    /// engine in a coding run); its catalog then carries the signals tool.
+    signals: bool,
+    /// The tool catalog every request of this run offers.
+    profile: nexus_model::ToolProfile,
 }
 
 #[derive(Default)]
@@ -1342,6 +1361,8 @@ struct LoopState {
     activity: Vec<ToolActivity>,
     /// EM-04A: trusted activity observations derived from `activity` receipts (engine feed).
     observations: Vec<crate::engine::ActivityObservation>,
+    /// EM-04B: validated reasoning signals (model claims; kept apart from `observations`).
+    signals: Vec<crate::engine::SignalObservation>,
     turns: u32,
     tool_calls: u32,
     result_bytes: u64,
@@ -1620,7 +1641,72 @@ fn engine_snapshot(
         authorized_efforts: sh.task_target.binding.supported_reasoning.clone(),
         generation: sh.task_instance.to_owned(),
         activity: ls.observations.clone(),
+        signals: ls.signals.clone(),
     }
+}
+
+/// EM-04B: one call of the reasoning-signals tool (broker-handled control-plane input, never a
+/// Kernel tool). Strict historical validation first; a refused signal records nothing. A valid one
+/// becomes a `SignalObservation` with the Core's own identity facts, the engine applies it through
+/// the historical path, the host validates the transition and the new state is committed DURABLY
+/// before the acknowledgement is returned to the model. A failed acceptance fails the run closed.
+#[allow(clippy::too_many_arguments)]
+fn signal_call(
+    sh: &Shared<'_>,
+    ls: &mut LoopState,
+    er: &mut crate::engine_state::EngineRun,
+    act: &mut ToolActivity,
+    args: &Value,
+    args_len: usize,
+    attempt: u32,
+    interactive: bool,
+    turn: u32,
+) -> Result<Rendered, LoopEnd> {
+    let tool = crate::signals::TOOL;
+    act.tool = tool.to_owned();
+    if let Err(r) = crate::signals::validate(args, args_len) {
+        act.status = "refused".into();
+        act.error_code = Some(r.code.to_owned());
+        act.args_summary = "invalid signal".into();
+        return Ok(render_error(tool, r.code, &r.message));
+    }
+    act.args_summary = crate::signals::summary(args);
+    ls.signals.push(crate::engine::SignalObservation {
+        seq: act.index,
+        attempt,
+        generation: sh.task_instance.to_owned(),
+        call_id: act.call_id.clone(),
+        dispatch_key: crate::signals::dispatch_key(sh.task_instance, attempt, &act.call_id, args),
+        signal: args.clone(),
+    });
+    fault(sh, "before-signal-accept");
+    let snap = engine_snapshot(ls, sh, er, attempt, interactive, turn, "");
+    let ack = er
+        .consult_signal(&snap)
+        .map_err(|e| LoopEnd::Failed(e.code.into(), e.message))?;
+    fault(sh, "after-signal-accept");
+    let ack: Value = serde_json::from_str(&ack).unwrap_or(Value::Null);
+    if ack["ok"] != true {
+        act.status = "failed".into();
+        let code = ack["code"]
+            .as_str()
+            .unwrap_or("signal-not-recorded")
+            .to_owned();
+        act.error_code = Some(code.clone());
+        return Ok(render_error(
+            tool,
+            &code,
+            "the reasoning signal was not recorded; nothing changed",
+        ));
+    }
+    act.status = "executed".into();
+    let text = crate::signals::render_ack(&ack);
+    Ok(Rendered {
+        digest: digest_of(&text),
+        text,
+        is_error: false,
+        truncated: false,
+    })
 }
 
 /// EM-04A: the trusted observation an executed tool call yields, from the Core's own receipt
@@ -2050,7 +2136,7 @@ fn turn_loop(
                 }),
             max_output_tokens: turn_cap,
         };
-        let mut prepared = nexus_client::prepare_inspect_turn(&req, &items, sh.mode.profile())
+        let mut prepared = nexus_client::prepare_inspect_turn(&req, &items, sh.profile)
             .map_err(|e| se("prepare-refused", e.message))?;
         // EM-04A RequestBudgetV1 (opt-in; never configured in production): the EXACT serialized
         // request must fit the budget minus the engine's measured reserve. Reduced only at safe
@@ -2074,7 +2160,7 @@ fn turn_loop(
                     ))
                 }
                 Ok(report) if report.changed() => {
-                    prepared = nexus_client::prepare_inspect_turn(&req, &items, sh.mode.profile())
+                    prepared = nexus_client::prepare_inspect_turn(&req, &items, sh.profile)
                         .map_err(|e| se("prepare-refused", e.message))?;
                     if prepared.request_bytes != report.request_bytes_after
                         || prepared.request_bytes > limit
@@ -2177,7 +2263,7 @@ fn turn_loop(
             opts,
             session,
             &InspectTurn {
-                profile: sh.mode.profile(),
+                profile: sh.profile,
                 request: &req,
                 items: items.clone(),
                 grant: &grant,
@@ -2477,26 +2563,57 @@ fn turn_loop(
                 args_summary: fallback_summary(&call.name, &call.arguments),
                 ..Default::default()
             };
-            // 1. deterministic validation (the catalog depends on the mode)
-            let validated = match sh.mode {
-                Mode::Code => crate::code::validate_code_proposal_in(
-                    &call.name,
+            // EM-04B: the reasoning-signals tool is answered by the broker (experimental engine only)
+            let signals_call = sh.signals && call.name == crate::signals::TOOL;
+            let rendered = if signals_call {
+                match signal_call(
+                    sh,
+                    ls,
+                    er,
+                    &mut act,
                     &call.arguments,
-                    &ls.last_sha,
+                    args_text.len(),
+                    dispatches,
                     b.cfg.interactive,
-                ),
-                Mode::Inspect => {
-                    validate_proposal(&call.name, &call.arguments).map(|v| CodeProposal {
-                        summary: String::new(),
-                        inner: v,
-                        kind: Kind::Read,
-                        path: None,
-                        bytes: 0,
-                    })
+                    turn,
+                ) {
+                    Ok(r) => {
+                        let _ = session.tool_call(
+                            idx,
+                            &call_id,
+                            crate::signals::TOOL,
+                            &args_echo,
+                            if r.is_error { "refused" } else { "executed" },
+                            r.is_error,
+                        );
+                        r
+                    }
+                    Err(end) => {
+                        ls.activity.push(act);
+                        return Ok(end);
+                    }
                 }
-            };
-            // 1b. operator write scope (A6.1): refused before any approval exists
-            let validated = validated.and_then(|cp| {
+            } else {
+                // 1. deterministic validation (the catalog depends on the mode)
+                let validated = match sh.mode {
+                    Mode::Code => crate::code::validate_code_proposal_in(
+                        &call.name,
+                        &call.arguments,
+                        &ls.last_sha,
+                        b.cfg.interactive,
+                    ),
+                    Mode::Inspect => {
+                        validate_proposal(&call.name, &call.arguments).map(|v| CodeProposal {
+                            summary: String::new(),
+                            inner: v,
+                            kind: Kind::Read,
+                            path: None,
+                            bytes: 0,
+                        })
+                    }
+                };
+                // 1b. operator write scope (A6.1): refused before any approval exists
+                let validated = validated.and_then(|cp| {
                 if cp.kind == Kind::Write {
                     if let Some(path) = &cp.path {
                         if !crate::code::in_write_scope(path, &sh.policy.write_allow) {
@@ -2509,272 +2626,284 @@ fn turn_loop(
                 }
                 Ok(cp)
             });
-            let rendered = match validated {
-                Err(r) => {
-                    act.status = "refused".into();
-                    act.error_code = Some(r.code.to_owned());
-                    let _ =
-                        session.tool_call(idx, &call_id, &act.tool, &args_echo, "refused", true);
-                    refusals_in_a_row += 1;
-                    render_error(&act.tool, r.code, &r.message)
-                }
-                Ok(cp) => {
-                    let p = &cp.inner;
-                    act.tool = p.model_name.to_owned();
-                    act.args_summary = match cp.kind {
-                        Kind::Read => args_summary(p),
-                        _ => cp.summary.clone(),
-                    };
-                    act.args_digest = Some(p.args_digest.clone());
-                    // Per-run budgets for mutations and commands.
-                    if let Some(msg) = budget_refusal(&cp, ls, &sh.policy) {
+                match validated {
+                    Err(r) => {
                         act.status = "refused".into();
-                        act.error_code = Some("budget-exhausted".into());
-                        let _ = session.tool_call(
-                            idx,
-                            &call_id,
-                            p.model_name,
-                            &args_echo,
-                            "refused",
-                            true,
-                        );
+                        act.error_code = Some(r.code.to_owned());
+                        let _ = session
+                            .tool_call(idx, &call_id, &act.tool, &args_echo, "refused", true);
                         refusals_in_a_row += 1;
-                        render_error(p.model_name, "budget-exhausted", msg)
-                    } else {
-                        let _ = session.tool_call(
-                            idx,
-                            &call_id,
-                            p.model_name,
-                            &args_echo,
-                            if cp.kind == Kind::Read {
-                                "authorizing"
-                            } else {
-                                "awaiting-approval"
-                            },
-                            false,
-                        );
-                        let rid = format!("ri-{}-t{}-c{}", &ctx.run_id[4..16], turn, idx);
-                        let origin_tag = format!(
-                            "{}/{}",
-                            safe_id(out.response_id.as_deref().unwrap_or("noresp")),
-                            call_id
-                        );
-                        let params = serde_json::json!({
-                            "requestId": rid, "cancellationId": rid,
-                            "taskInstanceId": sh.task_instance, "attemptId": attempt_id,
-                            "commandId": command_id, "leaseEpoch": sh.lease_epoch,
-                            "storeIncarnation": sh.incarnation,
-                            "toolId": p.tool_id.as_str(), "toolVersion": nexus_tools::TOOL_VERSION,
-                            "args": p.args,
-                            "budgets": budgets_for(cp.kind, b.cfg.interactive),
-                        });
-                        // 2. Mutations and commands first need an independent
-                        //    approval of this exact operation.
-                        let mut proceed = true;
-                        let mut denial: Option<Rendered> = None;
-                        if cp.kind != Kind::Read {
-                            match cp.kind {
-                                Kind::Write => ls.edits_used += 1,
-                                _ => ls.tests_used += 1,
-                            }
-                            ls.write_bytes += cp.bytes;
-                            let (e, t) = (ls.edits_used, ls.tests_used);
-                            b.update(ctx.run_id, |r| {
-                                r.edits_used = e;
-                                r.tests_used = t;
-                            });
-                            let outcome = crate::code::request_and_wait(
-                                b,
-                                ctx.run_id,
-                                ctx.flag,
-                                *started + limits.runtime,
-                                &params,
-                                &origin_tag,
+                        render_error(&act.tool, r.code, &r.message)
+                    }
+                    Ok(cp) => {
+                        let p = &cp.inner;
+                        act.tool = p.model_name.to_owned();
+                        act.args_summary = match cp.kind {
+                            Kind::Read => args_summary(p),
+                            _ => cp.summary.clone(),
+                        };
+                        act.args_digest = Some(p.args_digest.clone());
+                        // Per-run budgets for mutations and commands.
+                        if let Some(msg) = budget_refusal(&cp, ls, &sh.policy) {
+                            act.status = "refused".into();
+                            act.error_code = Some("budget-exhausted".into());
+                            let _ = session.tool_call(
+                                idx,
+                                &call_id,
                                 p.model_name,
-                                &crate::code::proposal_view(&cp),
+                                &args_echo,
+                                "refused",
+                                true,
                             );
-                            act.approval_id = outcome.approval_id().map(str::to_owned);
-                            act.approval_outcome = Some(outcome.label().to_owned());
-                            if let ApprovalOutcome::Approved {
-                                automated: true, ..
-                            } = &outcome
-                            {
-                                act.approval_actor = Some("automated-policy".into());
-                            }
-                            match outcome {
-                                ApprovalOutcome::Approved { .. } => {}
-                                ApprovalOutcome::Refused { code, message } => {
-                                    proceed = false;
-                                    if is_authority_failure(&code) {
-                                        act.status = "refused".into();
-                                        act.error_code = Some(code.clone());
-                                        ls.activity.push(act);
-                                        return Ok(LoopEnd::Failed(
+                            refusals_in_a_row += 1;
+                            render_error(p.model_name, "budget-exhausted", msg)
+                        } else {
+                            let _ = session.tool_call(
+                                idx,
+                                &call_id,
+                                p.model_name,
+                                &args_echo,
+                                if cp.kind == Kind::Read {
+                                    "authorizing"
+                                } else {
+                                    "awaiting-approval"
+                                },
+                                false,
+                            );
+                            let rid = format!("ri-{}-t{}-c{}", &ctx.run_id[4..16], turn, idx);
+                            let origin_tag = format!(
+                                "{}/{}",
+                                safe_id(out.response_id.as_deref().unwrap_or("noresp")),
+                                call_id
+                            );
+                            let params = serde_json::json!({
+                                "requestId": rid, "cancellationId": rid,
+                                "taskInstanceId": sh.task_instance, "attemptId": attempt_id,
+                                "commandId": command_id, "leaseEpoch": sh.lease_epoch,
+                                "storeIncarnation": sh.incarnation,
+                                "toolId": p.tool_id.as_str(), "toolVersion": nexus_tools::TOOL_VERSION,
+                                "args": p.args,
+                                "budgets": budgets_for(cp.kind, b.cfg.interactive),
+                            });
+                            // 2. Mutations and commands first need an independent
+                            //    approval of this exact operation.
+                            let mut proceed = true;
+                            let mut denial: Option<Rendered> = None;
+                            if cp.kind != Kind::Read {
+                                match cp.kind {
+                                    Kind::Write => ls.edits_used += 1,
+                                    _ => ls.tests_used += 1,
+                                }
+                                ls.write_bytes += cp.bytes;
+                                let (e, t) = (ls.edits_used, ls.tests_used);
+                                b.update(ctx.run_id, |r| {
+                                    r.edits_used = e;
+                                    r.tests_used = t;
+                                });
+                                let outcome = crate::code::request_and_wait(
+                                    b,
+                                    ctx.run_id,
+                                    ctx.flag,
+                                    *started + limits.runtime,
+                                    &params,
+                                    &origin_tag,
+                                    p.model_name,
+                                    &crate::code::proposal_view(&cp),
+                                );
+                                act.approval_id = outcome.approval_id().map(str::to_owned);
+                                act.approval_outcome = Some(outcome.label().to_owned());
+                                if let ApprovalOutcome::Approved {
+                                    automated: true, ..
+                                } = &outcome
+                                {
+                                    act.approval_actor = Some("automated-policy".into());
+                                }
+                                match outcome {
+                                    ApprovalOutcome::Approved { .. } => {}
+                                    ApprovalOutcome::Refused { code, message } => {
+                                        proceed = false;
+                                        if is_authority_failure(&code) {
+                                            act.status = "refused".into();
+                                            act.error_code = Some(code.clone());
+                                            ls.activity.push(act);
+                                            return Ok(LoopEnd::Failed(
                                             "tool-authority-refused".into(),
                                             format!("the daemon refused to create the approval ({code}); the run was stopped (fail closed)"),
                                         ));
+                                        }
+                                        act.status = "refused".into();
+                                        act.error_code = Some(code.clone());
+                                        refusals_in_a_row += 1;
+                                        denial = Some(render_error(p.model_name, &code, &message));
                                     }
-                                    act.status = "refused".into();
-                                    act.error_code = Some(code.clone());
-                                    refusals_in_a_row += 1;
-                                    denial = Some(render_error(p.model_name, &code, &message));
-                                }
-                                ApprovalOutcome::Cancelled { .. } => {
-                                    act.status = "cancelled".into();
-                                    ls.activity.push(act);
-                                    return Ok(LoopEnd::Cancelled);
-                                }
-                                ApprovalOutcome::TimedOut { .. } => {
-                                    act.status = "cancelled".into();
-                                    ls.activity.push(act);
-                                    return Ok(LoopEnd::Limit("max-runtime"));
-                                }
-                                other => {
-                                    proceed = false;
-                                    let code = format!("approval-{}", other.label());
-                                    act.status = "refused".into();
-                                    act.error_code = Some(code.clone());
-                                    denial = Some(render_error(
+                                    ApprovalOutcome::Cancelled { .. } => {
+                                        act.status = "cancelled".into();
+                                        ls.activity.push(act);
+                                        return Ok(LoopEnd::Cancelled);
+                                    }
+                                    ApprovalOutcome::TimedOut { .. } => {
+                                        act.status = "cancelled".into();
+                                        ls.activity.push(act);
+                                        return Ok(LoopEnd::Limit("max-runtime"));
+                                    }
+                                    other => {
+                                        proceed = false;
+                                        let code = format!("approval-{}", other.label());
+                                        act.status = "refused".into();
+                                        act.error_code = Some(code.clone());
+                                        denial = Some(render_error(
                                         p.model_name,
                                         &code,
                                         "the independent approver did not approve this operation; it was not run",
                                     ));
+                                    }
                                 }
                             }
-                        }
-                        if !proceed {
-                            denial.unwrap_or_else(|| {
-                                render_error(p.model_name, "refused", "the operation was not run")
-                            })
-                        } else {
-                            // 3. Kernel-mediated execution via the existing tool path.
-                            let mut exec = params.clone();
-                            exec["aiOrigin"] = serde_json::json!(origin_tag);
-                            let resp = exec_with_cancel(b, ctx.flag, &exec, command_id.as_str());
-                            match resp {
-                                Ok(v) => {
-                                    refusals_in_a_row = 0;
-                                    let result = v.get("result").cloned().unwrap_or_default();
-                                    let r = if p.model_name == "proc_run" {
-                                        render_process(&result, PER_RESULT_BYTES)
-                                    } else {
-                                        render_result(p.model_name, &result, PER_RESULT_BYTES)
-                                    };
-                                    act.status =
-                                        if r.is_error { "failed" } else { "executed" }.into();
-                                    act.execution_id = v
-                                        .pointer("/execution/executionId")
-                                        .and_then(|x| x.as_str())
-                                        .map(str::to_owned);
-                                    act.journal_seq =
-                                        v.pointer("/execution/journalSeq").and_then(|x| x.as_i64());
-                                    if r.is_error {
-                                        act.error_code = result
-                                            .pointer("/error/code")
+                            if !proceed {
+                                denial.unwrap_or_else(|| {
+                                    render_error(
+                                        p.model_name,
+                                        "refused",
+                                        "the operation was not run",
+                                    )
+                                })
+                            } else {
+                                // 3. Kernel-mediated execution via the existing tool path.
+                                let mut exec = params.clone();
+                                exec["aiOrigin"] = serde_json::json!(origin_tag);
+                                let resp =
+                                    exec_with_cancel(b, ctx.flag, &exec, command_id.as_str());
+                                match resp {
+                                    Ok(v) => {
+                                        refusals_in_a_row = 0;
+                                        let result = v.get("result").cloned().unwrap_or_default();
+                                        let r = if p.model_name == "proc_run" {
+                                            render_process(&result, PER_RESULT_BYTES)
+                                        } else {
+                                            render_result(p.model_name, &result, PER_RESULT_BYTES)
+                                        };
+                                        act.status =
+                                            if r.is_error { "failed" } else { "executed" }.into();
+                                        act.execution_id = v
+                                            .pointer("/execution/executionId")
                                             .and_then(|x| x.as_str())
                                             .map(str::to_owned);
-                                    }
-                                    record_evidence(&mut evidence, p.model_name, &p.args, &result);
-                                    record_receipts(ls, &mut act, &cp, &result);
-                                    pending_observation = observe(
-                                        &act,
-                                        p.model_name == "proc_run"
-                                            && is_verification_command(&p.args),
-                                        dispatches,
-                                        sh.task_instance,
-                                    );
-                                    r
-                                }
-                                Err(e) => 'arm: {
-                                    let code = e
-                                        .code
-                                        .strip_prefix("daemon-")
-                                        .unwrap_or(&e.code)
-                                        .to_owned();
-                                    // A lost answer to a WRITE or PROCESS is not a failure
-                                    // we may assume: the operation may have happened. Stop,
-                                    // keep the copy, and require explicit reconciliation.
-                                    if e.code == "daemon-unreachable"
-                                        && b.cfg.interactive
-                                        && !ctx.stop()
-                                    {
-                                        // Autonomy-first: the tool runtime restarting is not the
-                                        // end of the task. Wait for it (bounded), tell the model
-                                        // plainly that THIS operation's outcome is unknown and let
-                                        // it reconcile by reading state. Commands run in a hermetic
-                                        // sandbox without write-back, so asking again is safe.
-                                        act.status = "uncertain".into();
-                                        act.error_code = Some("tool-outcome-uncertain".into());
-                                        let back = wait_for_daemon(ctx, 300);
-                                        if ctx.stop() {
-                                            ls.activity.push(act);
-                                            return Ok(LoopEnd::Cancelled);
+                                        act.journal_seq = v
+                                            .pointer("/execution/journalSeq")
+                                            .and_then(|x| x.as_i64());
+                                        if r.is_error {
+                                            act.error_code = result
+                                                .pointer("/error/code")
+                                                .and_then(|x| x.as_str())
+                                                .map(str::to_owned);
                                         }
-                                        if !back {
-                                            ls.activity.push(act);
-                                            return Ok(LoopEnd::Uncertain(
+                                        record_evidence(
+                                            &mut evidence,
+                                            p.model_name,
+                                            &p.args,
+                                            &result,
+                                        );
+                                        record_receipts(ls, &mut act, &cp, &result);
+                                        pending_observation = observe(
+                                            &act,
+                                            p.model_name == "proc_run"
+                                                && is_verification_command(&p.args),
+                                            dispatches,
+                                            sh.task_instance,
+                                        );
+                                        r
+                                    }
+                                    Err(e) => 'arm: {
+                                        let code = e
+                                            .code
+                                            .strip_prefix("daemon-")
+                                            .unwrap_or(&e.code)
+                                            .to_owned();
+                                        // A lost answer to a WRITE or PROCESS is not a failure
+                                        // we may assume: the operation may have happened. Stop,
+                                        // keep the copy, and require explicit reconciliation.
+                                        if e.code == "daemon-unreachable"
+                                            && b.cfg.interactive
+                                            && !ctx.stop()
+                                        {
+                                            // Autonomy-first: the tool runtime restarting is not the
+                                            // end of the task. Wait for it (bounded), tell the model
+                                            // plainly that THIS operation's outcome is unknown and let
+                                            // it reconcile by reading state. Commands run in a hermetic
+                                            // sandbox without write-back, so asking again is safe.
+                                            act.status = "uncertain".into();
+                                            act.error_code = Some("tool-outcome-uncertain".into());
+                                            let back = wait_for_daemon(ctx, 300);
+                                            if ctx.stop() {
+                                                ls.activity.push(act);
+                                                return Ok(LoopEnd::Cancelled);
+                                            }
+                                            if !back {
+                                                ls.activity.push(act);
+                                                return Ok(LoopEnd::Uncertain(
                                                 "tool-outcome-uncertain".into(),
                                                 "the tool runtime did not come back within five minutes while a step was running; its effect is unknown. Nothing was repeated. Review the working copy diff".into(),
                                             ));
+                                            }
+                                            ls.recoveries += 1;
+                                            let n = ls.recoveries;
+                                            b.update(ctx.run_id, |r| {
+                                                r.recoveries = n;
+                                                r.last_recovery =
+                                                    Some("the tool runtime restarted".into());
+                                            });
+                                            break 'arm render_error(
+                                                p.model_name,
+                                                "outcome-unknown",
+                                                if cp.kind == crate::code::Kind::Write {
+                                                    "The connection to the tool runtime was lost while this file change ran; whether it was applied is unknown. Read the file again and compare with what you intended before continuing."
+                                                } else {
+                                                    "The connection to the tool runtime was lost while this operation ran. It left no trace in the working copy; run it again if you still need its output."
+                                                },
+                                            );
                                         }
-                                        ls.recoveries += 1;
-                                        let n = ls.recoveries;
-                                        b.update(ctx.run_id, |r| {
-                                            r.recoveries = n;
-                                            r.last_recovery =
-                                                Some("the tool runtime restarted".into());
-                                        });
-                                        break 'arm render_error(
-                                            p.model_name,
-                                            "outcome-unknown",
-                                            if cp.kind == crate::code::Kind::Write {
-                                                "The connection to the tool runtime was lost while this file change ran; whether it was applied is unknown. Read the file again and compare with what you intended before continuing."
-                                            } else {
-                                                "The connection to the tool runtime was lost while this operation ran. It left no trace in the working copy; run it again if you still need its output."
-                                            },
-                                        );
-                                    }
-                                    if e.code == "daemon-unreachable"
-                                        && cp.kind != crate::code::Kind::Read
-                                    {
-                                        act.status = "uncertain".into();
-                                        act.error_code = Some("tool-outcome-uncertain".into());
-                                        ls.activity.push(act);
-                                        return Ok(LoopEnd::Uncertain(
+                                        if e.code == "daemon-unreachable"
+                                            && cp.kind != crate::code::Kind::Read
+                                        {
+                                            act.status = "uncertain".into();
+                                            act.error_code = Some("tool-outcome-uncertain".into());
+                                            ls.activity.push(act);
+                                            return Ok(LoopEnd::Uncertain(
                                             "tool-outcome-uncertain".into(),
                                             "the daemon did not answer while a write or command was running; its effect is unknown. Nothing was repeated. Review the working copy diff before trusting it".into(),
                                         ));
-                                    }
-                                    if is_authority_failure(&code) {
-                                        act.status = "refused".into();
-                                        act.error_code = Some(code.clone());
-                                        ls.activity.push(act);
-                                        return Ok(LoopEnd::Failed(
+                                        }
+                                        if is_authority_failure(&code) {
+                                            act.status = "refused".into();
+                                            act.error_code = Some(code.clone());
+                                            ls.activity.push(act);
+                                            return Ok(LoopEnd::Failed(
                                             "tool-authority-refused".into(),
                                             format!("the Kernel refused the tool call ({code}); the run was stopped (fail closed)"),
                                         ));
+                                        }
+                                        // An ordinary tool failure (not-found, sensitive
+                                        // path, conflict, ...) is data for the model.
+                                        act.status = "failed".into();
+                                        act.error_code = Some(code.clone());
+                                        if matches!(
+                                            code.as_str(),
+                                            "sensitive-path-refused"
+                                                | "hidden-path-refused"
+                                                | "symlink-refused"
+                                                | "special-file-refused"
+                                                | "hardlink-refused"
+                                                | "path-invalid"
+                                                | "invalid-arguments"
+                                                | "unsupported-tool"
+                                                | "command-refused"
+                                        ) {
+                                            refusals_in_a_row += 1;
+                                        } else {
+                                            refusals_in_a_row = 0;
+                                        }
+                                        render_error(p.model_name, &code, &e.message)
                                     }
-                                    // An ordinary tool failure (not-found, sensitive
-                                    // path, conflict, ...) is data for the model.
-                                    act.status = "failed".into();
-                                    act.error_code = Some(code.clone());
-                                    if matches!(
-                                        code.as_str(),
-                                        "sensitive-path-refused"
-                                            | "hidden-path-refused"
-                                            | "symlink-refused"
-                                            | "special-file-refused"
-                                            | "hardlink-refused"
-                                            | "path-invalid"
-                                            | "invalid-arguments"
-                                            | "unsupported-tool"
-                                            | "command-refused"
-                                    ) {
-                                        refusals_in_a_row += 1;
-                                    } else {
-                                        refusals_in_a_row = 0;
-                                    }
-                                    render_error(p.model_name, &code, &e.message)
                                 }
                             }
                         }

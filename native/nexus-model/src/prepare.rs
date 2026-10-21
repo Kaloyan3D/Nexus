@@ -174,7 +174,8 @@ pub fn prepare(
                 // (function_call + function_call_output items), one call at a time.
                 Some(
                     profile @ (crate::request::ToolProfile::RepoInspectV1
-                    | crate::request::ToolProfile::RepoCodeV1),
+                    | crate::request::ToolProfile::RepoCodeV1
+                    | crate::request::ToolProfile::RepoCodeMuseSignalsV1),
                 ) => serde_json::json!({
                     "model": target.remote_model_id_confirmed,
                     "input": input.items.iter().map(responses_input_item).collect::<Vec<_>>(),

@@ -390,7 +390,10 @@ pub fn run_inspect_turn(
     let grant = grant_from_json(turn.grant)?;
     let want_scope = match turn.profile {
         ToolProfile::RepoInspectV1 => nexus_kernel::SCOPE_REPO_INSPECT,
-        ToolProfile::RepoCodeV1 => nexus_kernel::SCOPE_REPO_CODE,
+        // the experimental signals tool is broker-handled: the Kernel scope stays repo-code
+        ToolProfile::RepoCodeV1 | ToolProfile::RepoCodeMuseSignalsV1 => {
+            nexus_kernel::SCOPE_REPO_CODE
+        }
     };
     if grant.scope != want_scope {
         return Err(ClientError::usage(
