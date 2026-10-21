@@ -22,17 +22,26 @@
 //! rule refuses it. Only the trusted activity block, the resolution diagnostics and this engine's
 //! own bookkeeping move.
 
+use super::effort_limiter::Level;
 use super::governor_bridge::{sources_digest, BridgeError};
 use super::muse_v0::{MuseV0State, MUSE_V0};
+use super::muse_v1_adaptive::{
+    check_adaptive, evaluate_limiter, record_effort, strong_escalation_of_block,
+    strong_escalation_of_decision, Adaptive, LimiterRecord, ACTIVE_STATE_SCHEMA,
+    MAX_PENDING_TRUSTED,
+};
 use super::{
     EffortProposal, EngineAction, EngineDescriptor, EngineEnv, EngineExtension, EngineProposal,
-    EngineSnapshot, EngineState, EngineStateData, Hook, ObservationKind, SignalObservation,
+    EngineSnapshot, EngineState, EngineStateData, Hook, ObservationKind, RestoreContext,
+    SignalObservation,
 };
 use serde_json::{json, Value};
 
-/// The shadow engine's Registry id. `muse-v1` itself stays reserved for the ACTIVE Governor
-/// engine (EM-04B/C), which this one is not.
+/// The shadow engine's Registry id (test-only).
 pub const ENGINE_ID: &str = "muse-v1-shadow";
+/// EM-04C2 S6: the ACTIVE adaptive engine's Registry id and its one mode.
+pub const ACTIVE_ENGINE_ID: &str = "muse-v1";
+pub const ADAPTIVE_MODE_ID: &str = "engineering-v2-adaptive";
 
 /// Exact wire bytes of the future `muse_update_reasoning_state` tool in the request's `tools`
 /// array, including its separator: measured from `config/Muse-ReasoningSignals.cjs` (9 properties,
@@ -75,6 +84,7 @@ pub static MUSE_V1: MuseV1 = MuseV1 {
         request_reserve_bytes: SIGNALS_TOOL_RESERVE_BYTES,
     },
     signals: false,
+    adaptive: false,
 };
 
 /// EM-04B: the shadow Governor PLUS the model-visible reasoning-signals tool. Same strategy, same
@@ -92,12 +102,37 @@ pub static MUSE_V1_SIGNALS: MuseV1 = MuseV1 {
         request_reserve_bytes: 0,
     },
     signals: true,
+    adaptive: false,
+};
+
+/// EM-04C2 S6: the ACTIVE adaptive engine. Same strategy, Governor and signals tool as the
+/// experimental engines, but its limiter-approved effort proposals ARE applied (through the host's
+/// admission, the Registry's attempt issuance and the Kernel's seal). Runs only in mode
+/// `engineering-v2-adaptive`; registered in production builds only when
+/// `MUSE_V1_PRODUCTION_ENABLED` is opened (S10); refuses to dispatch without a Registry-sealed
+/// request-size budget.
+pub static MUSE_V1_ACTIVE: MuseV1 = MuseV1 {
+    descriptor: EngineDescriptor {
+        engine_id: ACTIVE_ENGINE_ID,
+        contract_version: super::ENGINE_CONTRACT_VERSION,
+        mode_ids: &[ADAPTIVE_MODE_ID],
+        roles: &["muse_main"],
+        state_schema: ACTIVE_STATE_SCHEMA,
+        may_propose_effort: true,
+        inherits_state: true,
+        // the signals tool is part of the active catalog: its bytes are in every measured request
+        request_reserve_bytes: 0,
+    },
+    signals: true,
+    adaptive: true,
 };
 
 pub struct MuseV1 {
     descriptor: EngineDescriptor,
-    /// Takes reasoning signals (`muse-v1-signals` only).
+    /// Takes reasoning signals (`muse-v1-signals` and `muse-v1`).
     signals: bool,
+    /// The limiter-governed active engine (`muse-v1`): proposes efforts, carries `Adaptive` state.
+    adaptive: bool,
 }
 
 /// One shadow evaluation (what the Governor decided for an attempt, and what was really used).
@@ -125,6 +160,9 @@ pub struct ShadowDecision {
     pub refused: u32,
     /// SHA-256 over the embedded sources, the bridge input and its output.
     pub evidence: String,
+    /// EM-04C2 S6: the limiter's decision for this attempt (`muse-v1` only; `None` for every other
+    /// engine and for evaluations the Governor did not resolve).
+    pub limiter: Option<LimiterRecord>,
 }
 
 /// Engine state: `muse-v0`'s strategy counters plus the historical Muse blocks and the shadow
@@ -156,6 +194,8 @@ pub struct MuseV1State {
     /// Signals of the LAST signal consultation that were consumed but not applied (the historical
     /// path refused them or the bridge was unavailable); the model was told so.
     pub last_unapplied: Vec<u32>,
+    /// EM-04C2 S6: limiter state, evidence baseline and pending trusted evidence (`muse-v1` only).
+    pub adaptive: Option<Adaptive>,
 }
 
 impl MuseV1State {
@@ -181,12 +221,18 @@ fn data(s: &EngineState) -> Option<&MuseV1State> {
 }
 
 fn decision_json(d: &ShadowDecision) -> Value {
-    json!({
+    let mut v = json!({
         "attempt": d.attempt, "outcome": d.outcome, "governorEffort": d.governor_effort,
         "requested": d.requested, "reason": d.reason, "effectivePhase": d.effective_phase,
         "effectiveSource": d.effective_source, "trace": d.trace, "inForce": d.in_force,
         "would": d.would, "folded": d.folded, "refused": d.refused, "evidence": d.evidence,
-    })
+    });
+    // present only for the active engine, so every other engine's decision (and chain) is
+    // byte-identical to what it always was
+    if let Some(l) = &d.limiter {
+        v["limiter"] = l.to_value();
+    }
+    v
 }
 
 /// The decision chain after `d` (see `MuseV1State::chain`).
@@ -197,8 +243,13 @@ pub(crate) fn extend_chain(previous: &str, d: &ShadowDecision) -> String {
     ))
 }
 
-fn decision_from(v: &Value) -> Option<ShadowDecision> {
+fn decision_from(v: &Value, adaptive: bool) -> Option<ShadowDecision> {
     let o = v.as_object()?;
+    let limiter = match o.get("limiter") {
+        None => None,
+        Some(l) if adaptive => Some(LimiterRecord::from_value(l)?),
+        Some(_) => return None,
+    };
     let allowed = [
         "attempt",
         "outcome",
@@ -214,7 +265,9 @@ fn decision_from(v: &Value) -> Option<ShadowDecision> {
         "refused",
         "evidence",
     ];
-    if o.keys().any(|k| !allowed.contains(&k.as_str())) {
+    if o.keys()
+        .any(|k| k != "limiter" && !allowed.contains(&k.as_str()))
+    {
         return None;
     }
     let opt = |k: &str| -> Option<Option<String>> {
@@ -254,11 +307,12 @@ fn decision_from(v: &Value) -> Option<ShadowDecision> {
         folded: u("folded")?,
         refused: u("refused")?,
         evidence: s("evidence")?,
+        limiter,
     })
 }
 
 fn persisted(s: &MuseV1State) -> Value {
-    json!({
+    let mut v = json!({
         "v0": MUSE_V0.persist_state(&EngineState {
             engine_id: MUSE_V0.descriptor().engine_id,
             schema: 1,
@@ -278,7 +332,11 @@ fn persisted(s: &MuseV1State) -> Value {
         "signalsAccepted": s.signals_accepted,
         "signalsDuplicate": s.signals_duplicate,
         "lastUnapplied": s.last_unapplied,
-    })
+    });
+    if let Some(a) = &s.adaptive {
+        v["adaptive"] = a.to_value();
+    }
+    v
 }
 
 // ---- the historical signal transition, re-stated for the host's validation (EM-04B) ----------
@@ -511,7 +569,7 @@ pub(crate) fn classification(kind: &ObservationKind) -> Value {
 }
 
 /// The shadow evaluation at `BeforeRequest`: fold the new trusted observations, resolve, record.
-fn evaluate(s: &mut MuseV1State, snap: &EngineSnapshot, env: &EngineEnv) {
+fn evaluate(s: &mut MuseV1State, snap: &EngineSnapshot, env: &EngineEnv, adaptive: bool) {
     if s.generation != snap.generation {
         // a new task generation (continuation): its observations start at seq 1 again
         s.generation = snap.generation.clone();
@@ -562,7 +620,8 @@ fn evaluate(s: &mut MuseV1State, snap: &EngineSnapshot, env: &EngineEnv) {
         Ok(r)
             if (r["museReasoning"].is_null() || valid_reasoning_block(&r["museReasoning"]))
                 && (r["museActivity"].is_null() || valid_activity_block(&r["museActivity"]))
-                && (fresh.is_empty() || !r["museActivity"].is_null()) =>
+                && (fresh.is_empty() || !r["museActivity"].is_null())
+                && (!adaptive || adaptive_response_ok(&r)) =>
         {
             let dec = &r["decision"];
             let st = |k: &str| {
@@ -601,6 +660,41 @@ fn evaluate(s: &mut MuseV1State, snap: &EngineSnapshot, env: &EngineEnv) {
             if !r["museActivity"].is_null() {
                 s.activity = Some(r["museActivity"].clone());
             }
+            if adaptive {
+                // EM-04C2 S6: the limiter judges the COMPLETE, validated Governor answer
+                let fresh_failed = fresh
+                    .iter()
+                    .filter(|(c, _)| c["kind"] == "verification" && c["outcome"] == "failed")
+                    .count() as u32;
+                let a = s.adaptive.unwrap_or_default();
+                if d.outcome == "resolved" {
+                    let (strong, trace_len) =
+                        strong_escalation_of_decision(dec).unwrap_or((false, 0));
+                    let (next, rec) = evaluate_limiter(
+                        &a,
+                        snap,
+                        d.governor_effort.as_deref(),
+                        strong,
+                        s.reasoning.as_ref(),
+                        fresh_failed,
+                        trace_len,
+                    );
+                    d.would = rec.action.clone();
+                    d.limiter = Some(rec);
+                    s.adaptive = Some(next);
+                } else {
+                    // the Governor resolved no effort (e.g. a default-only slot): the limiter does
+                    // not run; trusted failures folded now stay pending for the next judgement
+                    d.would = "keep".into();
+                    s.adaptive = Some(Adaptive {
+                        pending_trusted: a
+                            .pending_trusted
+                            .saturating_add(fresh_failed)
+                            .min(MAX_PENDING_TRUSTED),
+                        ..a
+                    });
+                }
+            }
             d.folded = fresh.len() as u32;
             s.observed_through = last_seq;
             for (_, id) in fresh {
@@ -629,6 +723,24 @@ fn evaluate(s: &mut MuseV1State, snap: &EngineSnapshot, env: &EngineEnv) {
     s.history.push(d);
     let excess = s.history.len().saturating_sub(MAX_DECISION_HISTORY);
     s.history.drain(..excess);
+}
+
+/// F-3 + forged-answer defence for the active engine: a RESOLVED Governor answer is accepted only
+/// if its complete trace is within bounds and its strong-escalation evidence agrees with the
+/// Governor's own condition over the returned block. Anything else is `bridge-output-invalid`
+/// (the observations stay unfolded and are offered again) - never a shortened or guessed answer.
+fn adaptive_response_ok(r: &Value) -> bool {
+    let dec = &r["decision"];
+    if dec["outcome"].as_str() != Some("resolved") {
+        return true;
+    }
+    match strong_escalation_of_decision(dec) {
+        Ok((strong, _)) => {
+            strong == strong_escalation_of_block(Some(&r["museReasoning"]))
+                && dec["effort"].as_str().is_some()
+        }
+        Err(_) => false,
+    }
 }
 
 /// EM-04B: consume the run's new signals (and the trusted observations made before the newest
@@ -699,6 +811,17 @@ fn take_signals(s: &mut MuseV1State, snap: &EngineSnapshot, env: &EngineEnv) -> 
             s.reasoning = Some(r["museReasoning"].clone());
             s.activity = Some(r["museActivity"].clone());
             s.observed_through = last_obs;
+            if let Some(a) = s.adaptive.as_mut() {
+                // trusted failures folded WITH the signal are still unjudged evidence
+                let failed = obs
+                    .iter()
+                    .filter(|(c, _, _)| c["kind"] == "verification" && c["outcome"] == "failed")
+                    .count() as u32;
+                a.pending_trusted = a
+                    .pending_trusted
+                    .saturating_add(failed)
+                    .min(MAX_PENDING_TRUSTED);
+            }
             for (_, id, _) in obs {
                 s.seen.push(id);
             }
@@ -740,6 +863,9 @@ impl MuseV1 {
         env: Option<&EngineEnv>,
     ) -> EngineProposal {
         let mut s = data(state).cloned().unwrap_or_default();
+        if self.adaptive && s.adaptive.is_none() {
+            s.adaptive = Some(Adaptive::default());
+        }
         s.last_unapplied.clear();
         // the strategy: exactly muse-v0's decision on muse-v0's counters
         let v0 = MUSE_V0.propose(hook, snap, &v0_state(&s.v0, state), proposal_id);
@@ -747,14 +873,28 @@ impl MuseV1 {
             s.v0 = next;
         }
         if hook == Hook::BeforeRequest {
-            evaluate(&mut s, snap, env.unwrap_or(&EngineEnv::default()));
+            evaluate(
+                &mut s,
+                snap,
+                env.unwrap_or(&EngineEnv::default()),
+                self.adaptive,
+            );
         }
+        // SHADOW engines: never applied. The ACTIVE engine proposes only what its limiter decided
+        // for THIS evaluation (the host re-derives and re-checks it before anything is committed).
+        let effort = match (self.adaptive && hook == Hook::BeforeRequest)
+            .then(|| s.history.last().and_then(|d| d.limiter.as_ref()))
+            .flatten()
+            .and_then(record_effort)
+        {
+            Some(level) => EffortProposal::Change(level),
+            None => EffortProposal::KeepPinned,
+        };
         EngineProposal {
             proposal_id,
             based_on_revision: state.revision,
             action: v0.action,
-            // SHADOW: never applied
-            effort: EffortProposal::KeepPinned,
+            effort,
             next_state: EngineState {
                 engine_id: self.descriptor.engine_id,
                 schema: self.descriptor.state_schema,
@@ -775,7 +915,10 @@ impl EngineExtension for MuseV1 {
             engine_id: self.descriptor.engine_id,
             schema: self.descriptor.state_schema,
             revision: 0,
-            data: EngineStateData::MuseV1(MuseV1State::default()),
+            data: EngineStateData::MuseV1(MuseV1State {
+                adaptive: self.adaptive.then(Adaptive::default),
+                ..MuseV1State::default()
+            }),
         }
     }
 
@@ -962,7 +1105,78 @@ impl EngineExtension for MuseV1 {
                 return Err("a shadow proposal must stay within the authorized levels".into());
             }
         }
+        // EM-04C2 S6: the limiter, its evidence baseline and its audit trail
+        match (self.adaptive, &a.adaptive, &b.adaptive) {
+            (false, None, None) => {
+                if b.history.iter().any(|d| d.limiter.is_some()) {
+                    return Err("this engine has no limiter".into());
+                }
+            }
+            (true, Some(aa), Some(bb)) => {
+                // the observations THIS transition folded, from the Core's own feed and the two
+                // frontiers (never from the engine's claim)
+                let folded_failed = super::muse_v1_adaptive::failed_verifications(
+                    snap.activity.iter().filter(|o| {
+                        o.generation == b.generation
+                            && o.seq > floor
+                            && o.seq <= b.observed_through
+                            && !a.seen.contains(&o.execution_id)
+                    }),
+                );
+                let evaluated = b.evaluations == a.evaluations + 1;
+                check_adaptive(
+                    aa,
+                    bb,
+                    snap,
+                    b.reasoning.as_ref(),
+                    b.history.last(),
+                    evaluated,
+                    folded_failed,
+                )?;
+            }
+            _ => return Err("adaptive state does not match the engine".into()),
+        }
         Ok(())
+    }
+
+    fn check_effort(
+        &self,
+        from: &EngineState,
+        to: &EngineState,
+        effort: &EffortProposal,
+        _snap: &EngineSnapshot,
+    ) -> Result<(), String> {
+        if !self.adaptive {
+            return Ok(());
+        }
+        let (Some(a), Some(b)) = (data(from), data(to)) else {
+            return Err("state data of another engine".into());
+        };
+        let expected = if b.evaluations == a.evaluations + 1 {
+            b.history
+                .last()
+                .and_then(|d| d.limiter.as_ref())
+                .and_then(record_effort)
+        } else {
+            None
+        };
+        match (effort, expected) {
+            (EffortProposal::KeepPinned, None) => Ok(()),
+            (EffortProposal::Change(l), Some(e)) if *l == e => Ok(()),
+            _ => Err("the effort proposal is not the decision the limiter recorded".into()),
+        }
+    }
+
+    fn effort_detail(&self, state: &EngineState) -> Option<String> {
+        if !self.adaptive {
+            return None;
+        }
+        let rec = data(state)?.history.last()?.limiter.as_ref()?;
+        Some(format!("limiter:{}", rec.rule))
+    }
+
+    fn requires_sealed_request_budget(&self) -> bool {
+        self.adaptive
     }
 
     fn persist_state(&self, state: &EngineState) -> Value {
@@ -974,6 +1188,28 @@ impl EngineExtension for MuseV1 {
     /// at the default (EM-03 rule), so the historical `currentEffort` is cleared, and the
     /// observation frontier restarts with the new generation's own receipts.
     fn restore_state(&self, v: &Value, revision: u64) -> Option<EngineState> {
+        self.restore(v, revision, None)
+    }
+
+    fn restore_state_in(
+        &self,
+        v: &Value,
+        revision: u64,
+        ctx: &RestoreContext,
+    ) -> Option<EngineState> {
+        self.restore(v, revision, Some(ctx))
+    }
+}
+
+impl MuseV1 {
+    /// A continuation inherits the cognitive state; `ctx` says what the interrupted run's effort
+    /// was (the active engine accounts for the implicit reset, see `LimiterStateV2`).
+    fn restore(
+        &self,
+        v: &Value,
+        revision: u64,
+        ctx: Option<&RestoreContext>,
+    ) -> Option<EngineState> {
         let o = v.as_object()?;
         let allowed = [
             "v0",
@@ -994,10 +1230,16 @@ impl EngineExtension for MuseV1 {
             "signalsDuplicate",
             "lastUnapplied",
         ];
-        if o.keys()
-            .any(|k| !allowed.contains(&k.as_str()) && !optional.contains(&k.as_str()))
-            || allowed.iter().any(|k| !o.contains_key(*k))
+        if o.keys().any(|k| {
+            !allowed.contains(&k.as_str())
+                && !optional.contains(&k.as_str())
+                && !(self.adaptive && k == "adaptive")
+        }) || allowed.iter().any(|k| !o.contains_key(*k))
         {
+            return None;
+        }
+        // the active engine's payload is versioned and complete; every other engine has none
+        if self.adaptive != o.contains_key("adaptive") {
             return None;
         }
         let count = |k: &str| -> Option<u32> {
@@ -1037,7 +1279,7 @@ impl EngineExtension for MuseV1 {
             .get("history")?
             .as_array()?
             .iter()
-            .map(decision_from)
+            .map(|d| decision_from(d, self.adaptive))
             .collect::<Option<_>>()?;
         if seen.len() > MAX_SEEN_EXECUTIONS || history.len() > MAX_DECISION_HISTORY {
             return None;
@@ -1050,6 +1292,34 @@ impl EngineExtension for MuseV1 {
         o.get("generation")?.as_str()?;
         o.get("observedThrough")?.as_u64()?;
         o.get("v0")?.as_object()?;
+        let adaptive = if self.adaptive {
+            let a = Adaptive::from_value(o.get("adaptive")?)?;
+            // the baseline is a past view of the Governor's totals: it can never be ahead of them
+            let totals =
+                super::effort_limiter::EvidenceBaseline::from_reasoning(reasoning.as_ref())
+                    .ok()?
+                    .total_failures;
+            if a.baseline.total_failures > totals {
+                return None;
+            }
+            // the continuation: budget and drop history are per logical task and are kept; an
+            // elevated effort silently reset to the default is itself a drop (policy V2)
+            let limiter = match ctx.and_then(|c| c.effort_in_force.as_deref().map(|e| (e, c))) {
+                Some((e, c)) => match (Level::parse(e), Level::parse(&c.default_effort)) {
+                    (Some(e), Some(d)) => a.limiter.continued_after_reset(e, d),
+                    _ => {
+                        // an effort that cannot be compared is treated as a drop (fail closed)
+                        let mut l = a.limiter.continued();
+                        l.dropped_before = true;
+                        l
+                    }
+                },
+                None => a.limiter.continued(),
+            };
+            Some(Adaptive { limiter, ..a })
+        } else {
+            None
+        };
         Some(EngineState {
             engine_id: self.descriptor.engine_id,
             schema: self.descriptor.state_schema,
@@ -1069,6 +1339,7 @@ impl EngineExtension for MuseV1 {
                 signals_accepted,
                 signals_duplicate,
                 last_unapplied: Vec::new(),
+                adaptive,
             }),
         })
     }

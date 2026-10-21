@@ -423,7 +423,7 @@ fn a10_max_is_not_reachable_through_the_model_facing_path() {
 // ---------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
-enum TStep {
+pub(super) enum TStep {
     /// resolve now: one attempt
     Res,
     /// a model signal (dispatch key unique per use)
@@ -433,7 +433,7 @@ enum TStep {
     /// persisted blocks survive, `currentEffort` and the process do not
     Restart,
 }
-use TStep::{Act, Res, Restart, Sig};
+pub(super) use TStep::{Act, Res, Restart, Sig};
 
 fn failh() -> TStep {
     Sig(json!({"recordHypothesisFailure": true}))
@@ -445,7 +445,7 @@ fn sg(v: Value) -> TStep {
     Sig(v)
 }
 
-fn trace_scenarios() -> Vec<(&'static str, &'static str, Vec<TStep>)> {
+pub(super) fn trace_scenarios() -> Vec<(&'static str, &'static str, Vec<TStep>)> {
     let lap = || {
         vec![
             failh(),

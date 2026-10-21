@@ -1194,6 +1194,7 @@ pub(crate) fn run(
     if [
         crate::engine::muse_v1::ENGINE_ID,
         crate::engine::muse_v1::SIGNALS_ENGINE_ID,
+        crate::engine::muse_v1::ACTIVE_ENGINE_ID,
     ]
     .contains(&engine.descriptor().engine_id)
     {
@@ -1534,6 +1535,22 @@ fn engine_for_run(
     let (engine, mode_id) =
         crate::engine::resolve_issued(resolution).map_err(|r| se(r.code, r.message))?;
     let id = engine.descriptor().engine_id;
+    // EM-04C2 S6: an engine whose mode needs a Registry-sealed request-size budget (the adaptive
+    // engine) never dispatches without one. Judged from the SEALED resolution, before the run is
+    // bound to the engine, before any Kernel lease, engine state, working copy or request exists.
+    if engine.requires_sealed_request_budget()
+        && !resolution
+            .pointer("/target/requestBudgetBytes")
+            .and_then(|v| v.as_u64())
+            .is_some_and(|n| n > 0)
+    {
+        return Err(se(
+            "engine-budget-required",
+            format!(
+                "mode '{mode_id}' runs engine '{id}', which must not dispatch without a Registry-sealed request-size budget, and this resolution carries none; nothing was sent"
+            ),
+        ));
+    }
     let me = b.store.load(run_id);
     if let Some(prev) = me
         .as_ref()

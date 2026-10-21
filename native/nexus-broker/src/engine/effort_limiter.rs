@@ -302,6 +302,12 @@ impl LimiterState {
 
     /// Strict invariant check (policy §5). A forged or corrupted state is refused, never repaired.
     pub fn validate(&self, b: &StateBounds<'_>) -> Result<(), LimiterError> {
+        self.validate_with(b, self.last_down_attempt.is_some())
+    }
+
+    /// `has_dropped`: whether the task has applied a move down (Policy V1: this generation's
+    /// `last_down_attempt`; Policy V2: the logical-task flag `dropped_before`).
+    fn validate_with(&self, b: &StateBounds<'_>, has_dropped: bool) -> Result<(), LimiterError> {
         let bad = |m: String| Err(LimiterError::State(m));
         if self.rearm_tokens_used > REARM_TOKENS {
             return bad(format!(
@@ -309,7 +315,7 @@ impl LimiterState {
                 self.rearm_tokens_used
             ));
         }
-        if self.trusted_since_down && self.last_down_attempt.is_none() {
+        if self.trusted_since_down && !has_dropped {
             return bad("trustedSinceDown without a previous move down".into());
         }
         if let Some(max) = b.max_attempt {
@@ -367,20 +373,41 @@ impl LimiterState {
     /// Strict decoder: exactly the five keys, exact types, levels from the closed set (never
     /// `max`), integers in range, the token budget respected. Anything else is refused.
     pub fn from_value(v: &Value) -> Result<Self, LimiterError> {
+        let (s, _) = Self::decode(v, false)?;
+        if s.trusted_since_down && s.last_down_attempt.is_none() {
+            return Err(LimiterError::State(
+                "trustedSinceDown without a previous move down".to_owned(),
+            ));
+        }
+        Ok(s)
+    }
+
+    /// Shared strict decoder. `v2` adds exactly one key, `droppedBefore` (Policy V2), returned
+    /// separately. The coupling of `trustedSinceDown` to the drop history is the caller's check
+    /// (it depends on the policy version).
+    fn decode(v: &Value, v2: bool) -> Result<(Self, bool), LimiterError> {
         let bad = |m: &str| LimiterError::State(m.to_owned());
         let o = v
             .as_object()
             .ok_or_else(|| bad("the limiter state is not an object"))?;
-        exact_keys(
-            o,
-            &[
-                "pendingDown",
-                "lastDownAttempt",
-                "trustedSinceDown",
-                "rearmTokensUsed",
-                "lastAttempt",
-            ],
-        )?;
+        let mut keys = vec![
+            "pendingDown",
+            "lastDownAttempt",
+            "trustedSinceDown",
+            "rearmTokensUsed",
+            "lastAttempt",
+        ];
+        if v2 {
+            keys.push("droppedBefore");
+        }
+        exact_keys(o, &keys)?;
+        let dropped_before = if v2 {
+            o["droppedBefore"]
+                .as_bool()
+                .ok_or_else(|| bad("droppedBefore is not a boolean"))?
+        } else {
+            false
+        };
         let uint = |k: &str| -> Result<u32, LimiterError> {
             o[k].as_u64()
                 .and_then(|n| u32::try_from(n).ok())
@@ -429,10 +456,7 @@ impl LimiterState {
         if s.rearm_tokens_used > REARM_TOKENS {
             return Err(bad("rearmTokensUsed exceeds the budget"));
         }
-        if s.trusted_since_down && s.last_down_attempt.is_none() {
-            return Err(bad("trustedSinceDown without a previous move down"));
-        }
-        Ok(s)
+        Ok((s, dropped_before))
     }
 }
 
@@ -472,8 +496,9 @@ fn out(
     action: LimiterAction,
     rule: LimiterRule,
     state: LimiterState,
+    dropped_before: bool,
     i: &LimiterInput<'_>,
-) -> Result<LimiterDecision, LimiterError> {
+) -> Result<(LimiterDecision, bool), LimiterError> {
     if let LimiterAction::Change(e) = action {
         if e == i.current || e == Level::Max || !i.authorized.contains(&e) {
             return Err(LimiterError::Invariant(format!(
@@ -483,21 +508,47 @@ fn out(
             )));
         }
     }
-    Ok(LimiterDecision {
-        action,
-        rule,
-        state,
-    })
+    Ok((
+        LimiterDecision {
+            action,
+            rule,
+            state,
+        },
+        dropped_before,
+    ))
 }
 
-/// The policy. Pure: equal `(prev, input)` give equal results and `prev` is never touched.
+/// Policy V1 (EM-04C2 S5, pinned by the S5 tests and fixture). Pure: equal `(prev, input)` give
+/// equal results and `prev` is never touched.
 pub fn limit(prev: &LimiterState, i: &LimiterInput<'_>) -> Result<LimiterDecision, LimiterError> {
+    step(prev, None, i).map(|(d, _)| d)
+}
+
+/// The one algorithm behind both policy versions. `dropped_before` is `None` for Policy V1 (the
+/// history of a drop is this generation's `last_down_attempt`) and `Some(flag)` for Policy V2 (the
+/// persisted logical-task flag). Returns the decision and the flag after it (V2; always `false`
+/// for V1, where it is not used).
+fn step(
+    prev: &LimiterState,
+    dropped_before: Option<bool>,
+    i: &LimiterInput<'_>,
+) -> Result<(LimiterDecision, bool), LimiterError> {
     check_input(i)?;
-    prev.validate(&StateBounds {
-        current: i.current,
-        authorized: i.authorized,
-        max_attempt: None,
-    })?;
+    let v2 = dropped_before.is_some();
+    let flag = dropped_before.unwrap_or(false);
+    let has_dropped = if v2 {
+        flag
+    } else {
+        prev.last_down_attempt.is_some()
+    };
+    prev.validate_with(
+        &StateBounds {
+            current: i.current,
+            authorized: i.authorized,
+            max_attempt: None,
+        },
+        has_dropped,
+    )?;
     let n = i.attempt;
 
     // 0. replay / out-of-order guard: the attempt must advance the state
@@ -506,12 +557,13 @@ pub fn limit(prev: &LimiterState, i: &LimiterInput<'_>) -> Result<LimiterDecisio
             LimiterAction::KeepPinned,
             LimiterRule::ReplayGuard,
             *prev,
+            flag,
             i,
         );
     }
     let mut s = *prev;
     s.last_attempt = n;
-    if i.new_trusted_failures > 0 && s.last_down_attempt.is_some() {
+    if i.new_trusted_failures > 0 && has_dropped {
         s.trusted_since_down = true;
     }
     let (gov, cur) = (i.governor, i.current);
@@ -519,27 +571,33 @@ pub fn limit(prev: &LimiterState, i: &LimiterInput<'_>) -> Result<LimiterDecisio
     // 1. identical: nothing to do, and nothing pending any more
     if gov == cur {
         s.pending_down = None;
-        return out(LimiterAction::KeepPinned, LimiterRule::Noop, s, i);
+        return out(LimiterAction::KeepPinned, LimiterRule::Noop, s, flag, i);
     }
 
     // 2. escalation
     if gov > cur {
         s.pending_down = None;
-        let claim_rearm = i.strong_escalation && s.last_down_attempt.is_some();
+        let claim_rearm = i.strong_escalation && has_dropped;
         if !claim_rearm {
             // an ordinary, or the first strong, escalation: never delayed
-            return out(LimiterAction::Change(gov), LimiterRule::Up, s, i);
+            return out(LimiterAction::Change(gov), LimiterRule::Up, s, flag, i);
         }
         if s.trusted_since_down {
             // fresh Kernel-verified failure since the drop: free
             s.trusted_since_down = false;
-            return out(LimiterAction::Change(gov), LimiterRule::Up, s, i);
+            return out(LimiterAction::Change(gov), LimiterRule::Up, s, flag, i);
         }
         if s.rearm_tokens_used < REARM_TOKENS {
             s.rearm_tokens_used += 1;
-            return out(LimiterAction::Change(gov), LimiterRule::Up, s, i);
+            return out(LimiterAction::Change(gov), LimiterRule::Up, s, flag, i);
         }
-        return out(LimiterAction::KeepPinned, LimiterRule::HoldRearm, s, i);
+        return out(
+            LimiterAction::KeepPinned,
+            LimiterRule::HoldRearm,
+            s,
+            flag,
+            i,
+        );
     }
 
     // 3. de-escalation
@@ -549,11 +607,23 @@ pub fn limit(prev: &LimiterState, i: &LimiterInput<'_>) -> Result<LimiterDecisio
         s.pending_down = None;
         s.last_down_attempt = Some(n);
         s.trusted_since_down = false;
-        return out(LimiterAction::Change(gov), LimiterRule::DownProgress, s, i);
+        return out(
+            LimiterAction::Change(gov),
+            LimiterRule::DownProgress,
+            s,
+            v2,
+            i,
+        );
     }
     if evidence {
         s.pending_down = None;
-        return out(LimiterAction::KeepPinned, LimiterRule::ResetEvidence, s, i);
+        return out(
+            LimiterAction::KeepPinned,
+            LimiterRule::ResetEvidence,
+            s,
+            flag,
+            i,
+        );
     }
     if let Some(p) = s
         .pending_down
@@ -567,6 +637,7 @@ pub fn limit(prev: &LimiterState, i: &LimiterInput<'_>) -> Result<LimiterDecisio
             LimiterAction::Change(target),
             LimiterRule::DownConfirmed,
             s,
+            v2,
             i,
         );
     }
@@ -574,7 +645,13 @@ pub fn limit(prev: &LimiterState, i: &LimiterInput<'_>) -> Result<LimiterDecisio
         target: gov,
         attempt: n,
     });
-    out(LimiterAction::KeepPinned, LimiterRule::DownPending, s, i)
+    out(
+        LimiterAction::KeepPinned,
+        LimiterRule::DownPending,
+        s,
+        flag,
+        i,
+    )
 }
 
 /// The host's independent check of a recorded transition: `next` and `action` must be exactly the
@@ -598,6 +675,173 @@ pub fn verify_transition(
         max_attempt: Some(max_attempt),
     })?;
     let want = limit(prev, input)?;
+    if want.action != action || want.state != *next {
+        return Err(LimiterError::Transition(format!(
+            "the recorded transition is not the policy's result (rule {})",
+            want.rule.as_str()
+        )));
+    }
+    Ok(want.rule)
+}
+
+// =============================================================================================
+// Policy V2 (EM-04C2 S6, decision F-2)
+// =============================================================================================
+//
+// V1 remembers "a move down happened" only in `last_down_attempt`, which is generation-local and
+// therefore cleared by a continuation: each continuation would grant one more FREE claim-only
+// strong escalation (finding F-2 of S5). V2 adds one persisted logical-task flag,
+// `dropped_before`, that is set by the first applied move down and never returns to false. It
+// replaces `last_down_attempt.is_some()` wherever V1 asked "has the task dropped?":
+//
+// * a strong escalation is "free" only while `dropped_before` is false;
+// * a Kernel-verified failure is credited as corroboration only once `dropped_before` is true;
+// * `rearm_tokens_used` (R = 2 per logical task) is inherited as in V1;
+// * a continuation that resets an effort above the pinned default back to that default is itself
+//   a drop (`continued_after_reset`), so the reset cannot refill the privilege either.
+//
+// Everything else is the S5 algorithm, shared code: the V1 tests and the pinned traces keep proving
+// it, and the V2 tests prove the differences.
+
+/// Version of this policy as recorded in the `muse-v1` payload.
+pub const LIMITER_POLICY_VERSION_V2: u32 = 2;
+
+/// Limiter state of Policy V2: the five V1 fields plus the logical-task drop history.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LimiterStateV2 {
+    pub core: LimiterState,
+    /// A move down has been applied at least once in this LOGICAL task (any generation), or a
+    /// continuation reset an elevated effort to the default. Monotonic: never returns to false.
+    pub dropped_before: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LimiterDecisionV2 {
+    pub action: LimiterAction,
+    pub rule: LimiterRule,
+    pub state: LimiterStateV2,
+}
+
+impl LimiterDecisionV2 {
+    pub fn detail(&self) -> String {
+        format!("limiter:{}", self.rule.as_str())
+    }
+}
+
+impl LimiterStateV2 {
+    pub const fn new() -> Self {
+        LimiterStateV2 {
+            core: LimiterState::new(),
+            dropped_before: false,
+        }
+    }
+
+    /// The state a CONTINUATION starts from, BEFORE the effort reset is accounted for: the budget
+    /// (`rearm_tokens_used`) and the drop history (`dropped_before`) are per logical task and are
+    /// kept; everything generation-local is reset (see [`LimiterState::continued`]).
+    pub const fn continued(&self) -> Self {
+        LimiterStateV2 {
+            core: self.core.continued(),
+            dropped_before: self.dropped_before,
+        }
+    }
+
+    /// The continuation state when the interrupted task's effort in force was `in_force` and the
+    /// continuation restarts at `default`: an elevated effort silently reset to the default is a
+    /// drop for this policy, so the claim-only privilege cannot be refilled by interrupting.
+    pub fn continued_after_reset(&self, in_force: Level, default: Level) -> Self {
+        let mut c = self.continued();
+        if in_force > default {
+            c.dropped_before = true;
+        }
+        c
+    }
+
+    pub fn validate(&self, b: &StateBounds<'_>) -> Result<(), LimiterError> {
+        self.core.validate_with(b, self.dropped_before)?;
+        let bad = |m: &str| Err(LimiterError::State(m.to_owned()));
+        if self.core.last_down_attempt.is_some() && !self.dropped_before {
+            return bad("lastDownAttempt without droppedBefore");
+        }
+        if self.core.rearm_tokens_used > 0 && !self.dropped_before {
+            return bad("a re-arm token was spent before any move down");
+        }
+        Ok(())
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut v = self.core.to_value();
+        v["droppedBefore"] = json!(self.dropped_before);
+        v
+    }
+
+    /// Strict decoder: the six keys of V2 and nothing else.
+    pub fn from_value(v: &Value) -> Result<Self, LimiterError> {
+        let (core, dropped_before) = LimiterState::decode(v, true)?;
+        let s = LimiterStateV2 {
+            core,
+            dropped_before,
+        };
+        if s.core.trusted_since_down && !s.dropped_before {
+            return Err(LimiterError::State(
+                "trustedSinceDown without droppedBefore".to_owned(),
+            ));
+        }
+        if s.core.last_down_attempt.is_some() && !s.dropped_before {
+            return Err(LimiterError::State(
+                "lastDownAttempt without droppedBefore".to_owned(),
+            ));
+        }
+        if s.core.rearm_tokens_used > 0 && !s.dropped_before {
+            return Err(LimiterError::State(
+                "a re-arm token was spent before any move down".to_owned(),
+            ));
+        }
+        Ok(s)
+    }
+}
+
+/// Policy V2. Pure, like [`limit`].
+pub fn limit_v2(
+    prev: &LimiterStateV2,
+    i: &LimiterInput<'_>,
+) -> Result<LimiterDecisionV2, LimiterError> {
+    // the V2-only invariants first (the shared step re-checks the rest)
+    prev.validate(&StateBounds {
+        current: i.current,
+        authorized: i.authorized,
+        max_attempt: None,
+    })?;
+    let (d, dropped_before) = step(&prev.core, Some(prev.dropped_before), i)?;
+    Ok(LimiterDecisionV2 {
+        action: d.action,
+        rule: d.rule,
+        state: LimiterStateV2 {
+            core: d.state,
+            // a move down is the only thing that sets the flag; nothing clears it
+            dropped_before: dropped_before || prev.dropped_before,
+        },
+    })
+}
+
+/// The host's independent check of a recorded V2 transition (see [`verify_transition`]).
+pub fn verify_transition_v2(
+    prev: &LimiterStateV2,
+    input: &LimiterInput<'_>,
+    action: LimiterAction,
+    next: &LimiterStateV2,
+    max_attempt: u32,
+) -> Result<LimiterRule, LimiterError> {
+    let after = match action {
+        LimiterAction::Change(e) => e,
+        LimiterAction::KeepPinned => input.current,
+    };
+    next.validate(&StateBounds {
+        current: after,
+        authorized: input.authorized,
+        max_attempt: Some(max_attempt),
+    })?;
+    let want = limit_v2(prev, input)?;
     if want.action != action || want.state != *next {
         return Err(LimiterError::Transition(format!(
             "the recorded transition is not the policy's result (rule {})",

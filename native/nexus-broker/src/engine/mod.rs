@@ -28,6 +28,7 @@ pub mod effort_limiter;
 pub mod governor_bridge;
 pub mod muse_v0;
 pub mod muse_v1;
+pub mod muse_v1_adaptive;
 #[cfg(feature = "test-engines")]
 pub mod test_engine;
 #[cfg(feature = "test-engines")]
@@ -56,9 +57,12 @@ pub const MAX_STATE_BYTES: usize = 16 * 1024;
 /// EM-04B: largest acknowledgement an engine may return for a reasoning signal (it becomes the
 /// tool result the model reads).
 pub const MAX_SIGNAL_ACK_BYTES: usize = 1024;
-/// EM-04A production gate for the shadow Muse Governor engine `muse-v1-shadow`: DISABLED. With `false`
-/// the engine is compiled but not built in, so the Registry cannot select it (`engine-unavailable`)
-/// in any production build; `test-engines` builds (this crate's tests) register it.
+/// EM-04C2 production gate for the ACTIVE adaptive engine `muse-v1`: DISABLED until the final
+/// activation step (S10). With `false` the engine is compiled (and fully tested) but not built in,
+/// so the Registry cannot select it (`engine-unavailable`) in any production build; `test-engines`
+/// builds (this crate's tests) register it. This is a compile-time constant, deliberately NOT a
+/// runtime switch. The experimental `muse-v1-shadow` and `muse-v1-signals` engines are test-only
+/// whatever this constant says: they are never registered in a production build.
 pub const MUSE_V1_PRODUCTION_ENABLED: bool = false;
 
 /// EM-04C1: the ONE authority for the tool catalog a run is offered. It is a pure function of the
@@ -71,12 +75,14 @@ pub const MUSE_V1_PRODUCTION_ENABLED: bool = false;
 /// * a coding run of the experimental `muse-v1-signals` engine only: `RepoCodeMuseSignalsV1`
 ///   (`RepoCodeV1` plus `muse_update_reasoning_state`). That id exists only in `test-engines` builds.
 ///
-/// The future production `muse-v1` engine gets its row here deliberately (EM-04C2), not by flag.
+/// * a coding run of the active `muse-v1` engine (EM-04C2 S6): the same `RepoCodeMuseSignalsV1`
+///   catalog, deliberately by row and not by flag. Its digest is the frozen one; the signals tool is
+///   scoped to Muse engines only.
 pub fn tool_catalog_profile(engine_id: &str, code_run: bool) -> nexus_model::ToolProfile {
     use nexus_model::ToolProfile as P;
     match (code_run, engine_id) {
         (false, _) => P::RepoInspectV1,
-        (true, muse_v1::SIGNALS_ENGINE_ID) => P::RepoCodeMuseSignalsV1,
+        (true, muse_v1::SIGNALS_ENGINE_ID | muse_v1::ACTIVE_ENGINE_ID) => P::RepoCodeMuseSignalsV1,
         (true, _) => P::RepoCodeV1,
     }
 }
@@ -303,7 +309,11 @@ pub struct EngineState {
 }
 
 /// Typed state of each built-in engine.
+///
+/// One value exists per run (never in a hot path); the Muse variant carries the Governor blocks and,
+/// for the active engine, the limiter state - boxing it would only move the allocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum EngineStateData {
     MuseV0(muse_v0::MuseV0State),
     /// EM-04A shadow Governor engine `muse-v1-shadow` (not selectable in production).
@@ -396,6 +406,49 @@ pub trait EngineExtension: Send + Sync {
     fn restore_state(&self, _payload: &serde_json::Value, _revision: u64) -> Option<EngineState> {
         None
     }
+    /// EM-04C2 S6: `restore_state` with what the interrupted run's durable record says about its
+    /// effort (the continuation restarts at the default; an engine whose policy depends on that
+    /// reset needs to know what was reset). Engines that do not care keep the default.
+    fn restore_state_in(
+        &self,
+        payload: &serde_json::Value,
+        revision: u64,
+        _ctx: &RestoreContext,
+    ) -> Option<EngineState> {
+        self.restore_state(payload, revision)
+    }
+    /// EM-04C2 S6: the engine's own explanation of an effort proposal, verified by the host AFTER
+    /// the state transition and BEFORE anything is committed: the proposal's effort must be exactly
+    /// the decision the engine's recorded (and independently re-validated) state says it took.
+    /// The default accepts only what every other engine may do under the generic rules.
+    fn check_effort(
+        &self,
+        _from: &EngineState,
+        _to: &EngineState,
+        _effort: &EffortProposal,
+        _snapshot: &EngineSnapshot,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    /// EM-04C2 S6: audit detail for the `effort-selected` event of the proposal that produced `state`.
+    fn effort_detail(&self, _state: &EngineState) -> Option<String> {
+        None
+    }
+    /// EM-04C2 S6: an engine whose mode must not dispatch without a Registry-sealed request-size
+    /// budget (the adaptive engine). Judged by the broker before any state or request exists.
+    fn requires_sealed_request_budget(&self) -> bool {
+        false
+    }
+}
+
+/// What a continuation knows about the interrupted run's effort (see `restore_state_in`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreContext {
+    /// The effort selection in force when the interrupted run's record was last committed
+    /// (`None` = it ran at the pinned default).
+    pub effort_in_force: Option<String>,
+    /// The pinned default effort of the task (the continuation restarts there).
+    pub default_effort: String,
 }
 
 /// A refused selection or proposal. The run fails closed with this code.
@@ -420,8 +473,17 @@ fn built_in() -> Vec<&'static dyn EngineExtension> {
 
 /// The engine list of a production build (`test_build = false`) or a `test-engines` build.
 fn engines(test_build: bool) -> Vec<&'static dyn EngineExtension> {
+    engines_with(test_build, MUSE_V1_PRODUCTION_ENABLED)
+}
+
+/// `engines` with the production gate as a parameter, so that the day the gate is opened (S10) is
+/// already proven by a test: opening it registers ONLY the active `muse-v1`.
+fn engines_with(test_build: bool, muse_v1_enabled: bool) -> Vec<&'static dyn EngineExtension> {
     let mut v: Vec<&'static dyn EngineExtension> = vec![&muse_v0::MUSE_V0];
-    if MUSE_V1_PRODUCTION_ENABLED || test_build {
+    if muse_v1_enabled || test_build {
+        v.push(&muse_v1::MUSE_V1_ACTIVE);
+    }
+    if test_build {
         v.push(&muse_v1::MUSE_V1);
         v.push(&muse_v1::MUSE_V1_SIGNALS);
     }
@@ -718,6 +780,11 @@ impl EngineHost {
             }
         }
         self.admit_next_state(&p.next_state, snapshot)?;
+        // EM-04C2 S6: the effort asked for must be exactly the decision the engine's validated
+        // state records (an engine cannot propose an effort its own audit trail does not justify)
+        self.ext
+            .check_effort(&self.state, &p.next_state, &p.effort, snapshot)
+            .map_err(|m| refuse("engine-effort-unjustified", m))?;
         // commit
         self.state = p.next_state;
         if effort.is_some() {
@@ -850,9 +917,13 @@ mod catalog_tests;
 #[cfg(test)]
 mod effort_limiter_tests;
 #[cfg(test)]
+mod effort_limiter_v2_tests;
+#[cfg(test)]
 mod governor_parity;
 #[cfg(test)]
 mod legacy_reference;
+#[cfg(test)]
+mod muse_v1_active_tests;
 #[cfg(test)]
 mod muse_v1_tests;
 #[cfg(test)]

@@ -3,7 +3,7 @@
 //! exactly one catalog.
 
 use super::muse_v0::MUSE_V0;
-use super::muse_v1::MUSE_V1_SIGNALS;
+use super::muse_v1::{MUSE_V1_ACTIVE, MUSE_V1_SIGNALS};
 use super::*;
 use nexus_model::repo_tools as rt;
 use nexus_model::ToolProfile as P;
@@ -13,7 +13,6 @@ fn the_catalog_follows_the_sealed_engine_identity_and_nothing_else() {
     // every coding run is RepoCodeV1 except the one experimental engine's
     for id in [
         "muse-v0",
-        "muse-v1",
         "muse-v1-shadow",
         "dual-v1",
         "effort-test-v0",
@@ -37,11 +36,25 @@ fn the_catalog_follows_the_sealed_engine_identity_and_nothing_else() {
         tool_catalog_profile(muse_v1::SIGNALS_ENGINE_ID, true),
         P::RepoCodeMuseSignalsV1
     );
-    // a read-only run never gets the coding catalog, whatever the engine
+    // EM-04C2 S6: the ACTIVE engine has its own row, by exact id (the same frozen catalog)
     assert_eq!(
-        tool_catalog_profile(muse_v1::SIGNALS_ENGINE_ID, false),
-        P::RepoInspectV1
+        tool_catalog_profile(muse_v1::ACTIVE_ENGINE_ID, true),
+        P::RepoCodeMuseSignalsV1
     );
+    for near in [
+        "muse-v1 ",
+        " muse-v1",
+        "MUSE-V1",
+        "muse-v1\n",
+        "muse-v11",
+        "muse-v1/../muse-v0",
+    ] {
+        assert_eq!(tool_catalog_profile(near, true), P::RepoCodeV1, "{near:?}");
+    }
+    // a read-only run never gets the coding catalog, whatever the engine
+    for id in [muse_v1::SIGNALS_ENGINE_ID, muse_v1::ACTIVE_ENGINE_ID] {
+        assert_eq!(tool_catalog_profile(id, false), P::RepoInspectV1);
+    }
 }
 
 #[test]
@@ -90,15 +103,20 @@ fn the_signals_catalog_cannot_be_reached_from_a_production_engine_list() {
 }
 
 #[test]
-fn only_the_sealed_signals_engine_descriptor_carries_the_signals_catalog() {
+fn only_the_sealed_signals_capable_engine_descriptors_carry_the_signals_catalog() {
     // the descriptors that select a profile other than RepoCodeV1
     let special: Vec<&str> = engines(true)
         .iter()
         .map(|e| e.descriptor().engine_id)
         .filter(|id| tool_catalog_profile(id, true) != P::RepoCodeV1)
         .collect();
-    assert_eq!(special, [muse_v1::SIGNALS_ENGINE_ID]);
+    assert_eq!(
+        special,
+        [muse_v1::ACTIVE_ENGINE_ID, muse_v1::SIGNALS_ENGINE_ID],
+        "the two Muse signals-capable engines, and no other"
+    );
     // its descriptor reserves nothing: the tool's real bytes are in every measured request
     assert_eq!(MUSE_V1_SIGNALS.descriptor().request_reserve_bytes, 0);
+    assert_eq!(MUSE_V1_ACTIVE.descriptor().request_reserve_bytes, 0);
     assert_eq!(MUSE_V0.descriptor().request_reserve_bytes, 0);
 }

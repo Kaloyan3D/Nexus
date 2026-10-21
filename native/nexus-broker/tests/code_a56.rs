@@ -12686,10 +12686,11 @@ fn s4_issue(fx: &Fx, selection: Option<&str>) -> Value {
 }
 
 /// Before the operator saves a configuration the Registry refuses the adaptive mode - and creates
-/// nothing. After it does, the Registry issues it (mode and engine sealed in the binding), and the
-/// RUNTIME still refuses it: production `muse-v1` is unavailable at this checkpoint.
+/// nothing. After it does, the Registry issues it (mode and engine sealed in the binding). From S6
+/// the runtime HAS the engine, so a different gate stops the run: the mode declares no sealed
+/// request-size budget, and an adaptive run never dispatches without one.
 #[test]
-fn s4_the_adaptive_mode_needs_a_saved_configuration_and_the_runtime_still_refuses_it() {
+fn s4_the_adaptive_mode_needs_a_saved_configuration_and_a_sealed_budget_to_dispatch() {
     if !sandbox_ready() {
         return;
     }
@@ -12739,11 +12740,18 @@ fn s4_the_adaptive_mode_needs_a_saved_configuration_and_the_runtime_still_refuse
         issued["taskBinding"]["supportedReasoning"],
         json!(["high", "low", "medium", "xhigh"])
     );
+    assert!(
+        issued["resolution"]["target"]
+            .get("requestBudgetBytes")
+            .is_none(),
+        "the shipped definition declares no budget (S7 declares it)"
+    );
     // a selection that is ONLY a mode keeps the saved assignment
     let only = s4_issue(&fx, Some(r#"{"modeId":"engineering-v2-adaptive"}"#));
     assert_eq!(only["ok"], true, "{only}");
     assert_eq!(only["resolution"]["target"]["routeId"], "e2e-mock/e2e-1");
-    // 3. the runtime has no `muse-v1` engine: the run fails closed before any request or working copy
+    // 3. the runtime has the engine but the resolution carries no sealed budget: the run fails
+    // closed before any request, Kernel lease, engine state or working copy
     let run = submit_wait(
         b.socket_path(),
         &s4_intent("s4-adaptive-000002", Some(ADAPTIVE_MODE)),
@@ -12752,7 +12760,7 @@ fn s4_the_adaptive_mode_needs_a_saved_configuration_and_the_runtime_still_refuse
     assert_ne!(run.state, "completed", "{run:?}");
     assert_eq!(
         run.error_code.as_deref(),
-        Some("engine-unavailable"),
+        Some("engine-budget-required"),
         "{run:?}"
     );
     assert_eq!(
@@ -12763,6 +12771,15 @@ fn s4_the_adaptive_mode_needs_a_saved_configuration_and_the_runtime_still_refuse
     assert_eq!(run.turn, 0);
     assert!(run.worktree_commit.is_none(), "no working copy");
     assert!(run.tool_activity.is_empty());
+    assert!(
+        !fx.config("s4-adaptive").state_dir.join("engine").exists()
+            || std::fs::read_dir(fx.config("s4-adaptive").state_dir.join("engine"))
+                .map(|d| d
+                    .flatten()
+                    .all(|e| !e.file_name().to_string_lossy().ends_with(".json")))
+                .unwrap_or(true),
+        "no engine state was created for the refused run"
+    );
     // 4. and the ordinary run in the same installation is the unchanged muse-v0 run
     let ok = submit_wait(b.socket_path(), &s4_intent("s4-default-0000001", None), 180);
     assert_eq!(ok.state, "completed", "{ok:?}");
@@ -12956,5 +12973,530 @@ fn s4_a_cross_mode_continuation_is_a_task_binding_mismatch() {
     assert_eq!(continued.load(Ordering::SeqCst), 0);
     assert_eq!(second.turn, 0);
     assert!(second.worktree_commit.is_none());
+    b.shutdown();
+}
+
+// =================================================================================================
+// EM-04C2 S6: the ACTIVE `muse-v1` engine on the mock provider (no paid inference)
+// =================================================================================================
+
+const S6_BUDGET: u64 = 440_000;
+const S6_WIDE: &str = "[\"low\",\"medium\",\"high\",\"xhigh\"]";
+
+/// The operator-complete adaptive installation: the definition activated (what the final activation
+/// step will ship), the models scoped to `muse-v1`, a SEALED request-size budget declared, and the
+/// operator's saved configuration with `policy` as the slot's allowed reasoning.
+fn s6_fixture(responder: Responder, budget: Option<u64>, policy: &str) -> Fx {
+    let fx = s4_fixture(responder, true);
+    if let Some(b) = budget {
+        let mode = fx
+            .install_root
+            .join("config/registry/modes/engineering-v2-adaptive.json");
+        let mut m: Value = serde_json::from_slice(&std::fs::read(&mode).unwrap()).unwrap();
+        m["requestBudgetBytes"] = b.into();
+        std::fs::write(&mode, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+    }
+    let saved = s4_save_adaptive(&fx, policy);
+    assert_eq!(saved["ok"], true, "{saved}");
+    fx
+}
+
+fn s6_run(b: &BrokerHandle, key: &str) -> ic::IntentRun {
+    submit_wait(b.socket_path(), &s4_intent(key, Some(ADAPTIVE_MODE)), 240)
+}
+
+/// Two claimed hypothesis failures, a read, then the final answer.
+fn s6_claims() -> Responder {
+    script(
+        vec![
+            (SIGNALS_TOOL, r#"{"recordHypothesisFailure":true}"#.into()),
+            (SIGNALS_TOOL, r#"{"recordHypothesisFailure":true}"#.into()),
+            ("fs_read", r#"{"path":"src/lib.rs"}"#.into()),
+        ],
+        "Investigated; done.",
+    )
+}
+
+fn s6_efforts(fx: &Fx) -> Vec<String> {
+    fx.provider
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|x| x["reasoning"]["effort"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The success criterion: the Governor's escalation, judged by the limiter, becomes a durable
+/// selection, a Registry issuance under the sealed binding and a Kernel-sealed target BEFORE the
+/// request that carries it; every other attempt reuses the already-issued target.
+#[test]
+fn s6_an_adaptive_run_changes_effort_only_through_registry_and_kernel_before_each_request() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s6_fixture(s6_claims(), Some(S6_BUDGET), S6_WIDE);
+    let b = em04a_broker(&fx, "s6-adaptive", None, None);
+    let run = s6_run(&b, "s6-adaptive-000001");
+    assert_eq!(run.state, "completed", "{run:?}");
+    // 1. the requests: the Governor's phase default, then the claimed escalation, then steady
+    let efforts = s6_efforts(&fx);
+    assert_eq!(
+        efforts,
+        ["medium", "medium", "xhigh", "xhigh"],
+        "{efforts:?}"
+    );
+    let bodies = fx.provider.bodies.lock().unwrap().clone();
+    for x in &bodies {
+        // the active Muse catalog, byte for byte; nothing else moved
+        assert_eq!(
+            em04c1_wire_digest(x),
+            nexus_model::repo_tools::REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST
+        );
+        assert_eq!(x["model"], "e2e-mock-model");
+        assert!(tool_names(x).contains(&SIGNALS_TOOL.to_owned()));
+    }
+    // 2. the durable record
+    let task = run.task_instance_id.clone().unwrap();
+    let st = em03_state(&fx, "s6-adaptive", &task);
+    assert_eq!(st["engineId"], "muse-v1");
+    assert_eq!(st["modeId"], ADAPTIVE_MODE);
+    assert_eq!(st["stateSchema"], 2);
+    assert_eq!(st["payload"]["adaptive"]["policyVersion"], 2);
+    let ev = st["events"].as_array().unwrap();
+    let sel: Vec<(u64, String, String)> = ev
+        .iter()
+        .filter(|e| e["kind"] == "effort-selected")
+        .map(|e| {
+            (
+                e["attempt"].as_u64().unwrap(),
+                e["effort"].as_str().unwrap().to_owned(),
+                e["detail"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        sel,
+        [
+            (1, "medium".into(), "limiter:up".into()),
+            (3, "xhigh".into(), "limiter:up".into())
+        ],
+        "two durable selections, each explained by its limiter rule"
+    );
+    let pos = |kind: &str, attempt: u64| {
+        ev.iter()
+            .position(|e| e["kind"] == kind && e["attempt"] == attempt)
+            .unwrap_or_else(|| panic!("no {kind} for attempt {attempt}: {ev:?}"))
+    };
+    for a in [1, 3] {
+        assert!(pos("effort-selected", a) < pos("attempt-bound", a));
+    }
+    // 3. Registry issuance and Kernel seal: one target per effort, shared by its attempts
+    let receipts = em03_receipts(&fx, &task);
+    assert_eq!(receipts.len(), 4, "{receipts:?}");
+    let iss: Vec<&str> = receipts
+        .iter()
+        .map(|r| r["issuanceId"].as_str().unwrap())
+        .collect();
+    assert_eq!(iss[0], iss[1]);
+    assert_eq!(iss[2], iss[3]);
+    assert_ne!(iss[1], iss[2], "xhigh is another sealed target");
+    for (a, r) in st["attempts"].as_array().unwrap().iter().zip(&receipts) {
+        assert_eq!(a["issuanceId"], r["issuanceId"]);
+        assert_eq!(a["attemptId"], r["attemptId"]);
+        assert_eq!(a["state"], "answered");
+    }
+    // 4. the limiter's audit trail: the strong escalation of the task was the free one
+    let hist = em04a_history(&st);
+    let rec: Vec<(String, String)> = hist
+        .iter()
+        .map(|d| {
+            (
+                d["limiter"]["rule"].as_str().unwrap().to_owned(),
+                d["limiter"]["action"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rec,
+        [
+            ("up".into(), "change:medium".into()),
+            ("noop".into(), "keep".into()),
+            ("up".into(), "change:xhigh".into()),
+            ("noop".into(), "keep".into())
+        ]
+    );
+    assert_eq!(hist[2]["limiter"]["strong"], true);
+    assert_eq!(hist[2]["limiter"]["claims"], 1);
+    assert_eq!(st["payload"]["adaptive"]["limiter"]["droppedBefore"], false);
+    assert_eq!(st["payload"]["adaptive"]["limiter"]["rearmTokensUsed"], 0);
+    // 5. the run records the catalog it was offered
+    assert_eq!(
+        em02_record(&fx, "s6-adaptive", &run.run_id)["toolCatalogDigest"],
+        nexus_model::repo_tools::REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST
+    );
+    b.shutdown();
+}
+
+/// A default-only slot ("low" is the only authorized level): the Governor cannot be satisfied, the
+/// limiter never runs, and no request ever leaves the pinned effort - an adaptive mode that never
+/// adapts, exactly as the operator authorized.
+#[test]
+fn s6_default_only_authorization_never_changes_effort() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s6_fixture(s6_claims(), Some(S6_BUDGET), "none");
+    let b = em04a_broker(&fx, "s6-default", None, None);
+    let run = s6_run(&b, "s6-default-000001");
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert_eq!(s6_efforts(&fx), ["low", "low", "low", "low"]);
+    let st = em03_state(&fx, "s6-default", &run.task_instance_id.clone().unwrap());
+    assert!(!events(&st).iter().any(|e| e.0 == "effort-selected"));
+    let hist = em04a_history(&st);
+    assert!(hist
+        .iter()
+        .all(|d| d["outcome"] == "capability-unavailable" && d["limiter"].is_null()));
+    b.shutdown();
+}
+
+/// A1 on the real path: a model that flips its phase on every request moves the historical
+/// Governor's effort on every request; the limiter turns that into at most one durable change.
+#[test]
+fn s6_phase_flapping_is_bounded_on_the_real_path() {
+    if !sandbox_ready() {
+        return;
+    }
+    let mut calls: Vec<(&'static str, String)> = Vec::new();
+    for i in 0..6 {
+        calls.push((
+            SIGNALS_TOOL,
+            if i % 2 == 0 {
+                r#"{"phase":"diagnose"}"#.into()
+            } else {
+                r#"{"phase":"implement"}"#.into()
+            },
+        ));
+    }
+    let fx = s6_fixture(script(calls, "Done."), Some(S6_BUDGET), S6_WIDE);
+    let b = em04a_broker(&fx, "s6-flap", None, None);
+    let run = s6_run(&b, "s6-flap-00000001");
+    assert_eq!(run.state, "completed", "{run:?}");
+    let st = em03_state(&fx, "s6-flap", &run.task_instance_id.clone().unwrap());
+    let hist = em04a_history(&st);
+    // the Governor alone would have flipped between high and medium on (almost) every request
+    let governor: Vec<&str> = hist
+        .iter()
+        .filter_map(|d| d["governorEffort"].as_str())
+        .collect();
+    let flips = governor.windows(2).filter(|w| w[0] != w[1]).count();
+    assert!(flips >= 6, "the Governor flaps: {governor:?}");
+    let applied = s6_efforts(&fx);
+    let changes = applied.windows(2).filter(|w| w[0] != w[1]).count();
+    assert!(changes <= 2, "the limiter bounds it: {applied:?}");
+    let selections = events(&st)
+        .iter()
+        .filter(|e| e.0 == "effort-selected")
+        .count();
+    assert!(selections <= 3, "durable selections: {selections}");
+    b.shutdown();
+}
+
+/// Changing the slot's reasoning policy between an interruption and its continuation fails before
+/// a single request: the task binding no longer matches (S3 identity covers the adaptive mode too).
+#[test]
+fn s6_a_changed_slot_policy_on_an_adaptive_continuation_fails_before_dispatch() {
+    if !sandbox_ready() {
+        return;
+    }
+    let responder: Responder = Arc::new(|n, _| Answer::Slow {
+        frames: text_frames(&format!("resp_{n}"), "thinking"),
+        gap_ms: 100,
+        hold_ms: 120_000,
+    });
+    let fx = s6_fixture(responder, Some(S6_BUDGET), S6_WIDE);
+    let b = em04a_broker(&fx, "s6-pol", None, None);
+    let sock = b.socket_path().to_owned();
+    let first = ic::submit(&sock, &s4_intent("s6-pol-000000001", Some(ADAPTIVE_MODE)))
+        .expect("submit")
+        .run;
+    let end = std::time::Instant::now() + Duration::from_secs(60);
+    while em02_record(&fx, "s6-pol", &first.run_id)["taskBindingIdentity"].is_null() {
+        assert!(std::time::Instant::now() < end, "no binding recorded");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    ic::cancel(&sock, &first.run_id).unwrap();
+    let first = wait_terminal(&sock, &first.run_id, 60);
+    assert!(first.terminal && first.state != "completed", "{first:?}");
+    // the operator narrows the policy
+    let saved = node_json(&[
+        "registry-save-mode",
+        fx.registry.to_str().unwrap(),
+        fx.install_root.to_str().unwrap(),
+        ADAPTIVE_MODE,
+        "e2e/e2e-1",
+        "e2e-mock/e2e-1",
+        "[\"low\",\"medium\"]",
+        "0",
+    ]);
+    assert_eq!(saved["ok"], true, "{saved}");
+    let at_resume = fx.provider.bodies.lock().unwrap().len();
+    let v = ic::resume(&sock, &first.run_id).expect("accepted, then judged");
+    let second = wait_terminal(&sock, v["run"]["runId"].as_str().unwrap(), 120);
+    assert_eq!(second.state, "rejected", "{second:?}");
+    assert_eq!(second.error_code.as_deref(), Some("task-binding-mismatch"));
+    assert_eq!(second.turn, 0);
+    assert_eq!(
+        fx.provider.bodies.lock().unwrap().len(),
+        at_resume,
+        "nothing reached the provider"
+    );
+    b.shutdown();
+}
+
+struct S6Crash {
+    fx: Fx,
+    b: BrokerHandle,
+    old: nexus_broker::engine_state::EngineStateRecord,
+    new: nexus_broker::engine_state::EngineStateRecord,
+    old_requests: Vec<Value>,
+    new_requests: Vec<Value>,
+}
+
+/// An adaptive run that crashes at `point` (its `nth` hit), a broker restart, then the continuation.
+/// Shared checks: both records authentic; every request carries the effort its own record bound,
+/// in order; every non-default attempt was selected durably before it was bound; the Kernel accepted
+/// exactly the bound attempts under the targets the records name; no attempt ordinal is bound twice.
+fn s6_crash_then_continue(point: &str, nth: u32, key: &str) -> S6Crash {
+    let fx = s6_fixture(s6_claims(), Some(S6_BUDGET), S6_WIDE);
+    let b = em04a_broker(&fx, "s6-crash", None, None);
+    nexus_broker::engine::test_faults::arm_nth(key, point, nth);
+    let first = ic::submit(b.socket_path(), &s4_intent(key, Some(ADAPTIVE_MODE)))
+        .expect("submit")
+        .run;
+    let first = wait_terminal(b.socket_path(), &first.run_id, 120);
+    assert!(first.terminal && first.state != "completed", "{first:?}");
+    // a crash point panics (`internal-panic`); a failed signal write is an ordinary refusal
+    assert!(
+        matches!(
+            first.error_code.as_deref(),
+            Some("internal-panic" | "engine-state-unpersisted")
+        ),
+        "{first:?}"
+    );
+    let old_requests = fx.provider.bodies.lock().unwrap().clone();
+    b.shutdown();
+    let b = em04a_broker(&fx, "s6-crash", None, None);
+    let store =
+        nexus_broker::engine_state::EngineStateStore::open(&fx.config("s6-crash").state_dir)
+            .unwrap();
+    let old = store
+        .load(first.task_instance_id.as_deref().unwrap())
+        .expect("authentic")
+        .expect("present");
+    let v = ic::resume(b.socket_path(), &first.run_id).expect("resume");
+    let second = wait_terminal(b.socket_path(), v["run"]["runId"].as_str().unwrap(), 180);
+    assert_eq!(second.state, "completed", "{second:?}");
+    let new = store
+        .load(second.task_instance_id.as_deref().unwrap())
+        .expect("authentic")
+        .expect("present");
+    let all = fx.provider.bodies.lock().unwrap().clone();
+    let new_requests = all[old_requests.len()..].to_vec();
+    assert_eq!(new.engine_id, "muse-v1");
+    assert_eq!(new.lineage.as_ref().unwrap().rule, "inherited");
+    for (rec, requests) in [(&old, &old_requests), (&new, &new_requests)] {
+        let bound: Vec<&str> = rec.attempts.iter().map(|a| a.effort.as_str()).collect();
+        let sent: Vec<&str> = requests
+            .iter()
+            .map(|r| r["reasoning"]["effort"].as_str().unwrap())
+            .collect();
+        assert!(
+            sent.len() <= bound.len(),
+            "nothing is sent unbound: {sent:?} vs {bound:?}"
+        );
+        assert_eq!(
+            sent,
+            bound[..sent.len()],
+            "each request carries its bound effort"
+        );
+        let mut ords: Vec<u32> = rec.attempts.iter().map(|a| a.ordinal).collect();
+        let n = ords.len();
+        ords.dedup();
+        assert_eq!(ords.len(), n, "no attempt ordinal is bound twice");
+        for a in rec
+            .attempts
+            .iter()
+            .filter(|a| a.effort != rec.default_effort)
+        {
+            let sel = rec
+                .events
+                .iter()
+                .position(|e| {
+                    e.kind == "effort-selected" && e.attempt.is_some_and(|x| x <= a.ordinal)
+                })
+                .expect("a durable selection precedes a non-default attempt");
+            let bnd = rec
+                .events
+                .iter()
+                .position(|e| e.kind == "attempt-bound" && e.attempt == Some(a.ordinal))
+                .unwrap();
+            assert!(sel < bnd);
+        }
+        let receipts = em03_receipts(&fx, &rec.task_instance_id);
+        assert!(receipts.len() <= rec.attempts.len());
+        for (r, a) in receipts.iter().zip(&rec.attempts) {
+            assert_eq!(r["issuanceId"].as_str(), Some(a.issuance_id.as_str()));
+            assert_eq!(r["attemptId"].as_str(), Some(a.attempt_id.as_str()));
+        }
+        // the limiter and the baseline are one validated unit in every durable revision
+        let a =
+            nexus_broker::engine::muse_v1_adaptive::Adaptive::from_value(&rec.payload["adaptive"])
+                .expect("a valid adaptive block");
+        assert!(a.limiter.core.rearm_tokens_used <= 2);
+    }
+    S6Crash {
+        fx,
+        b,
+        old,
+        new,
+        old_requests,
+        new_requests,
+    }
+}
+
+fn s6_dropped(rec: &nexus_broker::engine_state::EngineStateRecord) -> bool {
+    rec.payload["adaptive"]["limiter"]["droppedBefore"] == true
+}
+
+#[test]
+fn s6_a_crash_after_the_durable_selection_never_duplicates_or_misapplies_it() {
+    if !sandbox_ready() {
+        return;
+    }
+    // the escalation to xhigh is the THIRD proposal (attempt 3)
+    for (point, key) in [
+        ("after-accept", "s6-crash-accept-01"),
+        ("after-authorize", "s6-crash-author-01"),
+        ("after-bind", "s6-crash-bind-001"),
+    ] {
+        let c = s6_crash_then_continue(point, 3, key);
+        // the selection of xhigh was durable in the crashed record (it precedes authorization)
+        assert_eq!(
+            c.old.effort.as_ref().map(|e| e.effort.as_str()),
+            Some("xhigh"),
+            "{point}"
+        );
+        // the continuation restarts at the default; an elevated effort silently reset is a drop,
+        // so the same claims now cost the budget (and only once)
+        assert!(s6_dropped(&c.new), "{point}: the implicit reset is a drop");
+        assert_eq!(
+            c.new.payload["adaptive"]["limiter"]["rearmTokensUsed"], 1,
+            "{point}: re-asking the same claims costs exactly one token"
+        );
+        assert!(
+            c.new_requests
+                .iter()
+                .any(|r| r["reasoning"]["effort"] == "xhigh"),
+            "{point}"
+        );
+        let _ = (&c.fx, &c.old_requests);
+        c.b.shutdown();
+    }
+}
+
+#[test]
+fn s6_a_crash_around_signal_acceptance_never_loses_or_invents_evidence() {
+    if !sandbox_ready() {
+        return;
+    }
+    let c = s6_crash_then_continue("persist-signal", 2, "s6-crash-signal-01");
+    // the second signal could not be written: it was never acknowledged, never counted
+    assert_eq!(c.old.payload["signalsAccepted"], 1, "{}", c.old.payload);
+    // the continuation re-derives everything from its own validated signals
+    assert!(c.new.payload["signalsAccepted"].as_u64().unwrap() >= 2);
+    assert!(c
+        .new_requests
+        .iter()
+        .any(|r| r["reasoning"]["effort"] == "xhigh"));
+    c.b.shutdown();
+}
+
+/// A killed Governor worker is an unavailable Governor: the attempt keeps its authorized effort,
+/// the limiter and the evidence baseline do not move, and the evidence is judged when the worker is
+/// back. At no point does a request carry an effort the limiter did not approve.
+#[test]
+fn s6_a_worker_killed_repeatedly_cannot_bypass_the_limiter() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s6_fixture(s6_claims(), Some(S6_BUDGET), S6_WIDE);
+    let b = em04a_broker(&fx, "s6-kill", None, None);
+    let sock = b.socket_path().to_owned();
+    let run0 = ic::submit(&sock, &s4_intent("s6-kill-000000001", Some(ADAPTIVE_MODE)))
+        .expect("submit")
+        .run;
+    let rec_path = fx
+        .config("s6-kill")
+        .state_dir
+        .join("runs")
+        .join(format!("{}.json", run0.run_id));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let killed = Arc::new(AtomicUsize::new(0));
+    let (s2, k2) = (stop.clone(), killed.clone());
+    let killer = std::thread::spawn(move || {
+        let mut task = None;
+        while !s2.load(Ordering::SeqCst) {
+            task = task.or_else(|| em04c1_task_of(&rec_path));
+            if let Some(t) = &task {
+                for pid in em04c1_worker_pids(t) {
+                    // SAFETY: killing our own test's worker child
+                    if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+                        k2.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    });
+    let run = wait_terminal(&sock, &run0.run_id, 240);
+    stop.store(true, Ordering::SeqCst);
+    killer.join().unwrap();
+    println!(
+        "S6 worker kills during the run: {}",
+        killed.load(Ordering::SeqCst)
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    let task = run.task_instance_id.clone().unwrap();
+    let st = em03_state(&fx, "s6-kill", &task);
+    let hist = em04a_history(&st);
+    // every durable selection is explained by a recorded, host-validated limiter decision
+    let sel: Vec<_> = events(&st)
+        .into_iter()
+        .filter(|e| e.0 == "effort-selected")
+        .collect();
+    for (_, attempt, effort) in &sel {
+        let d = hist
+            .iter()
+            .find(|d| d["attempt"].as_u64() == *attempt)
+            .unwrap_or_else(|| panic!("no decision recorded for attempt {attempt:?}"));
+        assert_eq!(
+            d["limiter"]["action"].as_str(),
+            Some(format!("change:{}", effort.as_deref().unwrap()).as_str())
+        );
+    }
+    // an attempt whose Governor evaluation failed carries the effort in force, never a new one
+    for d in hist.iter().filter(|d| d["limiter"].is_null()) {
+        let a = d["attempt"].as_u64().unwrap();
+        assert!(
+            !sel.iter().any(|s| s.1 == Some(a)),
+            "attempt {a}: a failed evaluation selected an effort"
+        );
+    }
+    let efforts = s6_efforts(&fx);
+    assert!(efforts
+        .iter()
+        .all(|e| ["low", "medium", "high", "xhigh"].contains(&e.as_str())));
+    assert_eq!(em03_receipts(&fx, &task).len(), efforts.len());
     b.shutdown();
 }

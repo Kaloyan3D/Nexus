@@ -246,7 +246,10 @@ function cmdRegistrySaveMode(args) {
   const modeId = args[2];
   const config = { schemaVersion: 1, modeId: modeId, revision: 0, slots: { main: { logicalModelId: args[3], routeId: args[4], reasoning: 'low' } }, roleOverrides: {} };
   if (args[5] && args[5] !== 'none') config.slots.main.allowedReasoning = JSON.parse(args[5]);
-  const r = service.save(modeId, config, undefined, {});
+  // an optional expected revision (a re-save of an existing configuration)
+  const expected = args[6] === undefined ? undefined : Number(args[6]);
+  if (expected !== undefined) config.revision = expected;
+  const r = service.save(modeId, config, expected, {});
   emit(r.ok ? { ok: true, revision: r.revision } : { ok: false, where: 'save-mode', code: ((r.errors || [])[0] || {}).code, errors: r.errors || r.code || r });
 }
 

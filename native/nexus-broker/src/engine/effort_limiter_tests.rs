@@ -996,43 +996,43 @@ fn the_evidence_baseline_measures_claims_and_progress_edges_like_the_governors_o
 // ---------------------------------------------------------------------------------------------
 
 /// SplitMix64: tiny, deterministic, reproducible from a printed seed.
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(super) fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
     }
-    fn below(&mut self, n: u64) -> u64 {
+    pub(super) fn below(&mut self, n: u64) -> u64 {
         self.next() % n
     }
     /// true with probability `num/den`
-    fn chance(&mut self, num: u64, den: u64) -> bool {
+    pub(super) fn chance(&mut self, num: u64, den: u64) -> bool {
         self.below(den) < num
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Gs {
-    attempt: u32,
-    gov: Level,
-    strong: bool,
-    claims: u32,
-    trusted: u32,
-    edge: bool,
+pub(super) struct Gs {
+    pub(super) attempt: u32,
+    pub(super) gov: Level,
+    pub(super) strong: bool,
+    pub(super) claims: u32,
+    pub(super) trusted: u32,
+    pub(super) edge: bool,
 }
 
-const PROPERTY_TRACES: u64 = 5_000;
-const PROPERTY_ATTEMPTS: usize = 60;
+pub(super) const PROPERTY_TRACES: u64 = 5_000;
+pub(super) const PROPERTY_ATTEMPTS: usize = 60;
 const BASE_SEED: u64 = 0x0E4C_2005_5EED_0001;
 
-fn trace_seed(index: u64) -> u64 {
+pub(super) fn trace_seed(index: u64) -> u64 {
     BASE_SEED ^ index.wrapping_mul(0xA24B_AED4_963E_E407)
 }
 
-fn generate(seed: u64) -> (Vec<Level>, Vec<Gs>) {
+pub(super) fn generate(seed: u64) -> (Vec<Level>, Vec<Gs>) {
     let mut r = Rng(seed);
     // the authorized set always holds the default (low); the others are present with p = 3/4
     let mut auth = vec![Low];

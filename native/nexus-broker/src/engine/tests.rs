@@ -63,7 +63,6 @@ fn the_registry_selected_mode_resolves_to_its_extension_and_anything_else_fails_
     for (mode, engine) in [
         ("engineering-v1", "dual-v1"),
         ("engineering-v3", "nova-v3"),
-        ("engineering-v2", "muse-v1"),
         ("engineering-v2", "muse"),
         ("engineering-v2", ""),
     ] {
@@ -71,6 +70,26 @@ fn the_registry_selected_mode_resolves_to_its_extension_and_anything_else_fails_
         assert_eq!(r.code, "engine-unavailable", "{engine}");
         assert!(r.message.contains("nothing was sent"));
     }
+    // EM-04C2 S6: `muse-v1` exists in test builds but runs ONLY in the adaptive mode, and the
+    // default engine never runs there
+    assert_eq!(
+        resolve("engineering-v2", "muse-v1").err().unwrap().code,
+        "engine-mode-mismatch"
+    );
+    assert_eq!(
+        resolve("engineering-v2-adaptive", "muse-v0")
+            .err()
+            .unwrap()
+            .code,
+        "engine-mode-mismatch"
+    );
+    assert_eq!(
+        resolve("engineering-v2-adaptive", "muse-v1")
+            .expect("the adaptive engine")
+            .descriptor()
+            .engine_id,
+        "muse-v1"
+    );
     // a known engine asked to run a mode it does not declare
     assert_eq!(
         resolve("engineering-v1", "muse-v0").err().unwrap().code,

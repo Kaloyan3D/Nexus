@@ -561,12 +561,13 @@ impl EngineRun {
                 .cloned()
                 .expect("changed to a selection");
             self.stage();
+            let detail = self.host.extension().effort_detail(self.host.state());
             self.rec.event(
                 "effort-selected",
                 Some(sel.proposal_id),
                 Some(sel.from_attempt),
                 Some(&sel.effort),
-                None,
+                detail.as_deref(),
             );
             self.store.commit(&mut self.rec)?;
         }
@@ -751,12 +752,18 @@ pub fn examine_predecessor(
                     notes.push(("predecessor-attempt-unresolved".into(), Some(a.ordinal), Some(a.effort.clone()), "the interrupted run's attempt was bound but its outcome was never recorded; it is never re-sent".into()));
                 }
                 if d.inherits_state {
-                    initial = ext.restore_state(&prev.payload, 0).ok_or_else(|| {
-                        err(
-                            "engine-state-corrupt",
-                            "the interrupted run's engine payload is not valid for this engine",
-                        )
-                    })?;
+                    let ctx = crate::engine::RestoreContext {
+                        effort_in_force: prev.effort.as_ref().map(|e| e.effort.clone()),
+                        default_effort: prev.default_effort.clone(),
+                    };
+                    initial = ext
+                        .restore_state_in(&prev.payload, 0, &ctx)
+                        .ok_or_else(|| {
+                            err(
+                                "engine-state-corrupt",
+                                "the interrupted run's engine payload is not valid for this engine",
+                            )
+                        })?;
                 }
                 if let Some(sel) = prev
                     .effort
