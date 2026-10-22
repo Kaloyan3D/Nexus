@@ -19,6 +19,7 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
+const schemas = require('./schemas.cjs')
 
 function readJson(filePath) {
   try {
@@ -28,12 +29,29 @@ function readJson(filePath) {
   }
 }
 
+// The three legacy definitions are REQUIRED and keep their exact historical loading semantics.
+const REQUIRED_MODE_IDS = ['engineering-v1', 'engineering-v2', 'engineering-v3']
+
+// EM-04C2: the adaptive definition is OPTIONAL and recognized only through this closed identity: the
+// fixed file name, the fixed mode id, the fixed engine, and a valid Registry mode schema. Anything else
+// at that path (another id, another engine, a malformed or schema-invalid document, invalid JSON) is
+// treated as ABSENT: it can neither break the three legacy modes nor become listable or importable.
+// No other file in the modes directory is ever read (there is no directory scan).
+const OPTIONAL_MODE = Object.freeze({ file: 'engineering-v2-adaptive.json', id: 'engineering-v2-adaptive', engineId: 'muse-v1' })
+function isOptionalModeDefinition(doc) {
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return false
+  if (doc.id !== OPTIONAL_MODE.id || doc.orchestrationEngineId !== OPTIONAL_MODE.engineId) return false
+  return schemas.validateModeDefinition(doc, 'mode').length === 0
+}
+
 function loadModeDefinitions() {
   const dir = path.join(__dirname, 'modes')
   const modes = []
-  for (const file of ['engineering-v1.json', 'engineering-v2.json', 'engineering-v2-adaptive.json', 'engineering-v3.json']) {
+  for (const file of ['engineering-v1.json', 'engineering-v2.json', OPTIONAL_MODE.file, 'engineering-v3.json']) {
     const doc = readJson(path.join(dir, file))
-    if (doc) modes.push(doc)
+    if (!doc) continue
+    if (file === OPTIONAL_MODE.file && !isOptionalModeDefinition(doc)) continue
+    modes.push(doc)
   }
   return modes
 }
@@ -259,7 +277,10 @@ function buildRegistrySnapshot(installRoot) {
   const connections = providerIds.map(normalizeConnection)
   const routes = legacy.models.flatMap(normalizeRoutes)
   const modes = loadModeDefinitions()
-  if (modes.length !== 3) errors.push('registry-mode-definitions-incomplete')
+  // The three legacy mode definitions are REQUIRED; the dormant adaptive definition is OPTIONAL (it may
+  // be present or absent), so completeness is judged by id, not by count.
+  const present = new Set(modes.map((m) => m && m.id))
+  if (!REQUIRED_MODE_IDS.every((id) => present.has(id))) errors.push('registry-mode-definitions-incomplete')
   const snapshot = {
     schemaVersion: 1,
     modes,
@@ -391,6 +412,8 @@ function importLegacyProfiles(installRoot, snapshot) {
 }
 
 module.exports = {
+  isOptionalModeDefinition,
+  OPTIONAL_MODE_ID: OPTIONAL_MODE.id,
   buildRegistrySnapshot,
   importLegacyProfiles,
   importDualProfile,

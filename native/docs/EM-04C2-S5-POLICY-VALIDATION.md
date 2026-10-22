@@ -132,3 +132,9 @@ Conditions the reviewer should confirm before S6 (none blocks S5):
 3. F-3: `strong_escalation` is taken from the untruncated Governor trace.
 4. The Checkpoint 2 gates remain open: limiter wiring (S6), two consecutive green batteries on the final C2
    commit, OS-level worker confinement decision, and the unexplained historical sandbox failure.
+
+## Erratum (added in S7–S9)
+
+The JS row of the result table ("identical pass/fail set to the baseline tree") compared this tree with the
+Checkpoint-1 tree, not with the pre-adaptive baseline `50a24d7`; it hid seven real regressions introduced by S4
+(`EM-04C2-S7-S9-IMPLEMENTATION-REPORT.md` §4). It does not say the S5 limiter work caused any.

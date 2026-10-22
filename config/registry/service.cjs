@@ -38,6 +38,9 @@ const subscriptions = require('./subscription-connections.cjs')
 
 const SERVICE_SCHEMA_VERSION = 1
 const SUPPORTED_MODES = ['engineering-v1', 'engineering-v2', 'engineering-v2-adaptive', 'engineering-v3']
+// EM-04C2: the dormant adaptive definition is OPTIONAL: listed (as planned, unselectable, non-executable)
+// when a valid definition exists, never invented when it does not
+const OPTIONAL_MODE_ID = legacyImport.OPTIONAL_MODE_ID
 
 // Default legacy profile seeding each mode preview. Alternatives remain
 // adoptable via getModeConfiguration(modeId, { adopt: <profileId> }).
@@ -103,13 +106,21 @@ function createService(options) {
         const p = require('node:path')
         defs = []
         for (const f of ['engineering-v1.json', 'engineering-v2.json', 'engineering-v2-adaptive.json', 'engineering-v3.json']) {
-          try { defs.push(JSON.parse(fs.readFileSync(p.join(installRoot, 'config', 'registry', 'modes', f), 'utf8'))) } catch { /* skip; reported below */ }
+          try {
+            const doc = JSON.parse(fs.readFileSync(p.join(installRoot, 'config', 'registry', 'modes', f), 'utf8'))
+            // the optional adaptive definition counts only through its closed identity (legacy-import)
+            if (f === 'engineering-v2-adaptive.json' && !legacyImport.isOptionalModeDefinition(doc)) continue
+            defs.push(doc)
+          } catch { /* skip; reported below */ }
         }
       } catch { /* handled below */ }
     }
     const out = []
     for (const modeId of SUPPORTED_MODES) {
       const mode = defs.find((m) => m && m.id === modeId) || null
+      // the dormant adaptive mode is OPTIONAL: without a valid definition no row is listed for it (a
+      // phantom "missing" mode would be a visible entry for something that does not exist)
+      if (!mode && modeId === OPTIONAL_MODE_ID) continue
       if (!mode) {
         out.push({ id: modeId, present: false, executable: false, reason: 'mode-definition-missing', savedRevision: null, savedValid: false, savedErrors: [] })
         continue

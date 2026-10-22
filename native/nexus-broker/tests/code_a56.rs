@@ -12610,7 +12610,12 @@ fn s4_listing(dir: &Path) -> Vec<String> {
 /// ship), with the fixture models optionally scoped to `muse-v1`. No ModeConfiguration is saved:
 /// that is the operator's explicit act (`s4_save_adaptive`).
 fn s4_fixture(responder: Responder, scoped: bool) -> Fx {
-    let fx = fixture_engine_with(responder, "muse-v0", Box::new(|_| {}));
+    s4_fixture_with(responder, scoped, Box::new(|_| {}))
+}
+
+/// `s4_fixture` with extra repository content (long-read scenarios).
+fn s4_fixture_with(responder: Responder, scoped: bool, extra: Box<dyn Fn(&Path)>) -> Fx {
+    let fx = fixture_engine_with(responder, "muse-v0", extra);
     let mode = fx
         .install_root
         .join("config/registry/modes/engineering-v2-adaptive.json");
@@ -12740,18 +12745,18 @@ fn s4_the_adaptive_mode_needs_a_saved_configuration_and_a_sealed_budget_to_dispa
         issued["taskBinding"]["supportedReasoning"],
         json!(["high", "low", "medium", "xhigh"])
     );
-    assert!(
-        issued["resolution"]["target"]
-            .get("requestBudgetBytes")
-            .is_none(),
-        "the shipped definition declares no budget (S7 declares it)"
+    assert_eq!(
+        issued["resolution"]["target"]["requestBudgetBytes"], 440_000,
+        "EM-04C2 S7: the shipped definition seals the intended request budget"
     );
     // a selection that is ONLY a mode keeps the saved assignment
     let only = s4_issue(&fx, Some(r#"{"modeId":"engineering-v2-adaptive"}"#));
     assert_eq!(only["ok"], true, "{only}");
     assert_eq!(only["resolution"]["target"]["routeId"], "e2e-mock/e2e-1");
-    // 3. the runtime has the engine but the resolution carries no sealed budget: the run fails
-    // closed before any request, Kernel lease, engine state or working copy
+    // 3. the runtime has the engine but the resolution carries no sealed budget (the definition in
+    // THIS installation had it removed): the run fails closed before any request, Kernel lease,
+    // engine state or working copy
+    s7_set_budget(&fx, None);
     let run = submit_wait(
         b.socket_path(),
         &s4_intent("s4-adaptive-000002", Some(ADAPTIVE_MODE)),
@@ -12987,15 +12992,33 @@ const S6_WIDE: &str = "[\"low\",\"medium\",\"high\",\"xhigh\"]";
 /// step will ship), the models scoped to `muse-v1`, a SEALED request-size budget declared, and the
 /// operator's saved configuration with `policy` as the slot's allowed reasoning.
 fn s6_fixture(responder: Responder, budget: Option<u64>, policy: &str) -> Fx {
-    let fx = s4_fixture(responder, true);
-    if let Some(b) = budget {
-        let mode = fx
-            .install_root
-            .join("config/registry/modes/engineering-v2-adaptive.json");
-        let mut m: Value = serde_json::from_slice(&std::fs::read(&mode).unwrap()).unwrap();
-        m["requestBudgetBytes"] = b.into();
-        std::fs::write(&mode, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+    s6_fixture_with(responder, budget, policy, Box::new(|_| {}))
+}
+
+/// Sets (or removes) the request budget the INSTALLATION's adaptive definition declares.
+/// The shipped definition declares 440,000 (S7); `None` simulates a missing budget.
+fn s7_set_budget(fx: &Fx, budget: Option<u64>) {
+    let mode = fx
+        .install_root
+        .join("config/registry/modes/engineering-v2-adaptive.json");
+    let mut m: Value = serde_json::from_slice(&std::fs::read(&mode).unwrap()).unwrap();
+    match budget {
+        Some(b) => m["requestBudgetBytes"] = b.into(),
+        None => {
+            m.as_object_mut().unwrap().remove("requestBudgetBytes");
+        }
     }
+    std::fs::write(&mode, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+}
+
+fn s6_fixture_with(
+    responder: Responder,
+    budget: Option<u64>,
+    policy: &str,
+    extra: Box<dyn Fn(&Path)>,
+) -> Fx {
+    let fx = s4_fixture_with(responder, true, extra);
+    s7_set_budget(&fx, budget);
     let saved = s4_save_adaptive(&fx, policy);
     assert_eq!(saved["ok"], true, "{saved}");
     fx
@@ -13498,5 +13521,1134 @@ fn s6_a_worker_killed_repeatedly_cannot_bypass_the_limiter() {
         .iter()
         .all(|e| ["low", "medium", "high", "xhigh"].contains(&e.as_str())));
     assert_eq!(em03_receipts(&fx, &task).len(), efforts.len());
+    b.shutdown();
+}
+
+// =================================================================================================
+// EM-04C2 S7: the Registry-sealed request budget of the ADAPTIVE mode (440,000 B)
+// =================================================================================================
+
+fn s7_intent(key: &str, f: impl Fn(&mut IntentLimits)) -> NexusIntentV1 {
+    let mut i = code_intent_for("proj", "read", key, f);
+    i.model = Some(nexus_contracts::intent::ModelSelection {
+        provider_id: "e2e-mock".into(),
+        remote_model_id: "e2e-mock-model".into(),
+        logical_model_id: Some("e2e/e2e-1".into()),
+        route_id: Some("e2e-mock/e2e-1".into()),
+        mode_id: Some(ADAPTIVE_MODE.into()),
+    });
+    i
+}
+
+fn s7_long_limits(l: &mut IntentLimits) {
+    l.max_turns = Some(60);
+    l.max_tool_calls = Some(200);
+    l.max_tool_result_bytes = Some(8 * 1024 * 1024);
+}
+
+/// The 55-read A614 loop, but each tool call is preceded by an (encrypted) reasoning item that the
+/// client must replay before the call it produced.
+fn s7_long_reads_with_reasoning(sizes: Arc<Mutex<Vec<usize>>>, last: usize) -> Responder {
+    Arc::new(move |n, body| {
+        sizes.lock().unwrap().push(body.to_string().len());
+        let resp = format!("resp_{n}");
+        if n < last {
+            let args = json!({"path": "big.txt", "startLine": 1 + (n % 30) * 40, "maxLines": 400})
+                .to_string();
+            let mut v = vec![created(&resp)];
+            v.push(sse(
+                "response.output_item.done",
+                json!({"type":"response.output_item.done","output_index":0,
+                    "item":{"type":"reasoning","id":format!("rs_s7_{n}"),"status":"completed",
+                            "encrypted_content":format!("S7ENC{n}"),"summary":[]}}),
+            ));
+            let mut call = call_frames(&resp, n, &format!("call_{n}"), "fs_read", &args);
+            call.remove(0);
+            v.extend(call);
+            Answer::Frames(v)
+        } else {
+            Answer::Frames(text_frames(&resp, "Read enough."))
+        }
+    })
+}
+
+/// A request whose replayed reasoning is protocol-valid: every reasoning item is still the
+/// immediately preceding sibling of the call it produced, byte for byte, and calls and results pair.
+fn s7_replay_valid(body: &Value) -> bool {
+    let input = body["input"].as_array().unwrap();
+    for (k, i) in input.iter().enumerate() {
+        if i["type"] == "reasoning" {
+            let enc_ok = i["encrypted_content"]
+                .as_str()
+                .is_some_and(|e| e.starts_with("S7ENC"));
+            let next_ok = input
+                .get(k + 1)
+                .is_some_and(|n| n["type"] == "function_call");
+            if !(enc_ok && next_ok) {
+                return false;
+            }
+        }
+    }
+    em04a_pairs_intact(body)
+}
+
+fn s7_a614(
+    budget: Option<u64>,
+    flag: Option<usize>,
+    key: &str,
+    reasoning: bool,
+) -> (Fx, Vec<usize>, ic::IntentRun, BrokerHandle) {
+    let sizes: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+    let responder = if reasoning {
+        s7_long_reads_with_reasoning(sizes.clone(), 55)
+    } else {
+        em04a_long_reads(sizes.clone(), 55)
+    };
+    let fx = s6_fixture_with(responder, budget, S6_WIDE, Box::new(em04a_big_file));
+    let b = em04a_broker(&fx, "s7", flag, Some(300_000));
+    let run = submit_wait(b.socket_path(), &s7_intent(key, s7_long_limits), 900);
+    let s = sizes.lock().unwrap().clone();
+    (fx, s, run, b)
+}
+
+/// The long A614 scenario with the ACTUAL adaptive engine and its tool catalog (the real signals
+/// tool in every request), under the shipped sealed budget: the observed maximum is compared with
+/// the budget (440,000) and the unchanged guard (450,000).
+#[test]
+fn s7_a614_with_the_real_adaptive_engine_stays_under_the_sealed_budget_and_the_guard() {
+    if !sandbox_ready() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let (fx, sizes, run, b) = s7_a614(Some(440_000), None, "s7-a614-0000001", false);
+    let wall = started.elapsed();
+    assert_eq!(
+        run.state, "completed",
+        "{:?} {:?}",
+        run.error_code, run.error_message
+    );
+    assert_eq!(run.tool_calls, 55);
+    let max = *sizes.iter().max().unwrap();
+    println!(
+        "EM-04C2 S7 A614 (adaptive muse-v1, real catalog + signals tool): max request {max} B \
+         (budget 440000, guard 450000, EM-04B reference 428722); {} requests; wall {:.1}s; compactions {}",
+        sizes.len(),
+        wall.as_secs_f64(),
+        run.context_compactions
+    );
+    assert!(max <= 440_000, "{max} exceeds the sealed budget");
+    assert!(max < 450_000, "{max} reaches the A614 guard");
+    for body in fx.provider.bodies.lock().unwrap().iter() {
+        // the exact request: the adaptive catalog (with the real tool), the task message, valid pairs
+        assert_eq!(
+            em04c1_wire_digest(body),
+            nexus_model::repo_tools::REPO_CODE_MUSE_SIGNALS_V1_CATALOG_DIGEST
+        );
+        assert!(tool_names(body).contains(&SIGNALS_TOOL.to_owned()));
+        assert!(em04a_pairs_intact(body));
+        assert_eq!(
+            body["input"][0]["role"], "user",
+            "the task message is never cut"
+        );
+        assert!(
+            ["medium", "high", "xhigh"].contains(&body["reasoning"]["effort"].as_str().unwrap())
+        );
+    }
+    // the sealed budget is part of the identity the Registry issued and the Kernel sealed
+    let rec = em02_record(&fx, "s7", &run.run_id);
+    assert!(rec["taskBindingIdentity"].is_string());
+    let st = em03_state(&fx, "s7", &run.task_instance_id.clone().unwrap());
+    assert_eq!(st["engineId"], "muse-v1");
+    b.shutdown();
+}
+
+/// A broker-local value may only TIGHTEN the sealed budget.
+#[test]
+fn s7_a_broker_value_can_only_tighten_the_adaptive_budget() {
+    if !sandbox_ready() {
+        return;
+    }
+    let (_fx, sizes, run, b) = s7_a614(Some(440_000), Some(4_000_000), "s7-loose-000001", false);
+    assert_eq!(run.state, "completed", "{:?}", run.error_message);
+    let max = *sizes.iter().max().unwrap();
+    assert!(
+        max <= 440_000,
+        "a looser broker value widened the Registry's: {max}"
+    );
+    b.shutdown();
+    let (_fx, sizes, run, b) = s7_a614(Some(440_000), Some(380_000), "s7-tight-000001", false);
+    assert_eq!(run.state, "completed", "{:?}", run.error_message);
+    let max = *sizes.iter().max().unwrap();
+    assert!(max <= 380_000, "{max}");
+    b.shutdown();
+}
+
+/// The smallest budget the Registry permits compacts OLDER steps only and completes; a budget no
+/// safe compaction can satisfy fails before dispatch and the oversized request is never sent.
+#[test]
+fn s7_the_smallest_adaptive_budget_compacts_safely_and_an_impossible_one_fails_before_dispatch() {
+    if !sandbox_ready() {
+        return;
+    }
+    let make = |sizes: Arc<Mutex<Vec<usize>>>| -> Responder {
+        Arc::new(move |n, body| {
+            sizes.lock().unwrap().push(body.to_string().len());
+            let resp = format!("resp_{n}");
+            if n < 6 {
+                let args = json!({"path": "big.txt", "startLine": 1 + n * 400, "maxLines": 400})
+                    .to_string();
+                Answer::Frames(call_frames(
+                    &resp,
+                    n,
+                    &format!("call_{n}"),
+                    "fs_read",
+                    &args,
+                ))
+            } else {
+                Answer::Frames(text_frames(&resp, "Read enough."))
+            }
+        })
+    };
+    let min = nexus_contracts::MIN_REQUEST_BUDGET_BYTES;
+    let sizes = Arc::new(Mutex::new(Vec::new()));
+    let fx = s6_fixture_with(
+        make(sizes.clone()),
+        Some(min),
+        S6_WIDE,
+        Box::new(em04a_big_file),
+    );
+    let b = em04a_broker(&fx, "s7-min", None, Some(300_000));
+    let run = submit_wait(
+        b.socket_path(),
+        &s7_intent("s7-min-00000001", |l| {
+            l.max_turns = Some(20);
+            l.max_tool_calls = Some(50);
+        }),
+        180,
+    );
+    assert_eq!(
+        run.state, "completed",
+        "{:?} {:?}",
+        run.error_code, run.error_message
+    );
+    assert!(
+        sizes.lock().unwrap().iter().all(|s| *s <= min as usize),
+        "{:?}",
+        sizes.lock().unwrap()
+    );
+    assert!(run.context_compactions > 0, "older steps were compacted");
+    for body in fx.provider.bodies.lock().unwrap().iter() {
+        assert!(em04a_pairs_intact(body));
+        assert_eq!(body["input"][0]["role"], "user");
+        assert!(tool_names(body).contains(&SIGNALS_TOOL.to_owned()));
+    }
+    b.shutdown();
+    // impossible: tightened (broker value) below the catalog plus the latest step
+    let sizes = Arc::new(Mutex::new(Vec::new()));
+    let fx = s6_fixture_with(
+        make(sizes.clone()),
+        Some(min),
+        S6_WIDE,
+        Box::new(em04a_big_file),
+    );
+    let b = em04a_broker(&fx, "s7-imp", Some(20_000), Some(300_000));
+    let run = submit_wait(
+        b.socket_path(),
+        &s7_intent("s7-imp-00000001", |l| {
+            l.max_turns = Some(20);
+            l.max_tool_calls = Some(50);
+        }),
+        180,
+    );
+    assert_ne!(run.state, "completed");
+    assert_eq!(
+        run.error_code.as_deref(),
+        Some("request-budget-exceeded"),
+        "{run:?}"
+    );
+    for s in sizes.lock().unwrap().iter() {
+        assert!(*s <= 20_000, "an oversized request left the broker: {s}");
+    }
+    b.shutdown();
+}
+
+/// Reasoning replay stays protocol-valid when the budget forces compaction: every replayed
+/// reasoning item still immediately precedes the call it produced, byte for byte, and no call or
+/// result is orphaned - on the full 55-read loop under the shipped budget AND under the minimum.
+#[test]
+fn s7_reasoning_replay_and_tool_pairs_stay_valid_under_compaction() {
+    if !sandbox_ready() {
+        return;
+    }
+    let (fx, sizes, run, b) = s7_a614(Some(440_000), None, "s7-replay-000001", true);
+    assert_eq!(
+        run.state, "completed",
+        "{:?} {:?}",
+        run.error_code, run.error_message
+    );
+    let max = *sizes.iter().max().unwrap();
+    assert!(max <= 440_000, "{max}");
+    let bodies = fx.provider.bodies.lock().unwrap().clone();
+    assert!(
+        bodies.iter().skip(1).any(|b| saw(b, "S7ENC")),
+        "reasoning was replayed"
+    );
+    for b in &bodies {
+        assert!(s7_replay_valid(b));
+    }
+    println!(
+        "S7 replay (shipped budget): max {max} B, compactions {}",
+        run.context_compactions
+    );
+    b.shutdown();
+    // the minimum budget forces heavy compaction of older steps
+    let sizes = Arc::new(Mutex::new(Vec::new()));
+    let min = nexus_contracts::MIN_REQUEST_BUDGET_BYTES;
+    let fx = s6_fixture_with(
+        s7_long_reads_with_reasoning(sizes.clone(), 20),
+        Some(min),
+        S6_WIDE,
+        Box::new(em04a_big_file),
+    );
+    let b = em04a_broker(&fx, "s7", None, Some(300_000));
+    let run = submit_wait(
+        b.socket_path(),
+        &s7_intent("s7-replay-000002", |l| {
+            l.max_turns = Some(40);
+            l.max_tool_calls = Some(60);
+            l.max_tool_result_bytes = Some(8 * 1024 * 1024);
+        }),
+        600,
+    );
+    assert_eq!(
+        run.state, "completed",
+        "{:?} {:?}",
+        run.error_code, run.error_message
+    );
+    assert!(run.context_compactions > 0);
+    for body in fx.provider.bodies.lock().unwrap().iter() {
+        assert!(body.to_string().len() <= min as usize);
+        assert!(s7_replay_valid(body), "{body}");
+        assert_eq!(body["input"][0]["role"], "user");
+    }
+    b.shutdown();
+}
+
+/// A continuation keeps the sealed budget (same identity); a changed budget between interruption and
+/// continuation is a task-binding mismatch before a single request.
+#[test]
+fn s7_an_adaptive_continuation_keeps_the_sealed_budget_and_a_changed_one_is_refused() {
+    if !sandbox_ready() {
+        return;
+    }
+    let continued = Arc::new(AtomicUsize::new(0));
+    let c2 = continued.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        if body.to_string().contains("CONTINUED") {
+            c2.fetch_add(1, Ordering::SeqCst);
+            return Answer::Frames(text_frames(&resp, "Checked; the task is done."));
+        }
+        Answer::Slow {
+            frames: text_frames(&resp, "thinking"),
+            gap_ms: 100,
+            hold_ms: 120_000,
+        }
+    });
+    let fx = s6_fixture(responder, Some(440_000), S6_WIDE);
+    let b = em04a_broker(&fx, "s7-cont", None, None);
+    let sock = b.socket_path().to_owned();
+    let interrupted = |key: &str| {
+        let first = ic::submit(&sock, &s4_intent(key, Some(ADAPTIVE_MODE)))
+            .expect("submit")
+            .run;
+        let end = std::time::Instant::now() + Duration::from_secs(60);
+        while em02_record(&fx, "s7-cont", &first.run_id)["taskBindingIdentity"].is_null() {
+            assert!(std::time::Instant::now() < end, "no binding recorded");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let id = em02_record(&fx, "s7-cont", &first.run_id)["taskBindingIdentity"].clone();
+        ic::cancel(&sock, &first.run_id).unwrap();
+        let first = wait_terminal(&sock, &first.run_id, 60);
+        assert!(first.terminal && first.state != "completed", "{first:?}");
+        (first, id)
+    };
+    let (first, id1) = interrupted("s7-cont-0000001");
+    let v = ic::resume(&sock, &first.run_id).expect("resume");
+    let second_id = v["run"]["runId"].as_str().unwrap().to_owned();
+    let second = wait_terminal(&sock, &second_id, 120);
+    assert_eq!(second.state, "completed", "{second:?}");
+    assert_eq!(
+        em02_record(&fx, "s7-cont", &second_id)["taskBindingIdentity"],
+        id1,
+        "the budget is part of the identity a continuation keeps"
+    );
+    assert!(continued.load(Ordering::SeqCst) >= 1);
+    // another interrupted run; the operator then changes the sealed budget (both directions)
+    for (key, changed) in [
+        ("s7-cont-0000002", 420_000u64),
+        ("s7-cont-0000003", 450_000u64),
+    ] {
+        let (first, _) = interrupted(key);
+        s7_set_budget(&fx, Some(changed));
+        let before = fx.provider.bodies.lock().unwrap().len();
+        let v = ic::resume(&sock, &first.run_id).expect("accepted, then refused");
+        let third = wait_terminal(&sock, v["run"]["runId"].as_str().unwrap(), 60);
+        assert_eq!(third.state, "rejected", "{changed}: {third:?}");
+        assert_eq!(third.error_code.as_deref(), Some("task-binding-mismatch"));
+        assert_eq!(third.turn, 0);
+        assert_eq!(
+            fx.provider.bodies.lock().unwrap().len(),
+            before,
+            "nothing was sent"
+        );
+        s7_set_budget(&fx, Some(440_000));
+    }
+    b.shutdown();
+}
+
+/// A missing budget, and budgets the Registry's validator forbids, never dispatch.
+#[test]
+fn s7_a_missing_or_forged_request_budget_never_dispatches() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s6_fixture(em03_responder(1), Some(440_000), S6_WIDE);
+    let b = em04a_broker(&fx, "s7-forged", None, None);
+    let cases: [(&str, Option<Value>); 6] = [
+        ("s7-forged-missing1", None),
+        ("s7-forged-below-01", Some(json!(1_000))),
+        ("s7-forged-above-01", Some(json!(5_000_000))),
+        ("s7-forged-string01", Some(json!("440000"))),
+        ("s7-forged-float-01", Some(json!(440000.5))),
+        ("s7-forged-zero-001", Some(json!(0))),
+    ];
+    for (key, budget) in cases {
+        let mode = fx
+            .install_root
+            .join("config/registry/modes/engineering-v2-adaptive.json");
+        let mut m: Value = serde_json::from_slice(&std::fs::read(&mode).unwrap()).unwrap();
+        match &budget {
+            Some(v) => m["requestBudgetBytes"] = v.clone(),
+            None => {
+                m.as_object_mut().unwrap().remove("requestBudgetBytes");
+            }
+        }
+        std::fs::write(&mode, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+        let before = fx.provider.accepted.load(Ordering::SeqCst);
+        let run = submit_wait(b.socket_path(), &s4_intent(key, Some(ADAPTIVE_MODE)), 120);
+        assert_ne!(run.state, "completed", "{key}: {run:?}");
+        assert_eq!(
+            fx.provider.accepted.load(Ordering::SeqCst),
+            before,
+            "{key}: a request left"
+        );
+        assert_eq!(run.turn, 0, "{key}");
+        assert!(run.worktree_commit.is_none(), "{key}");
+        let code = run.error_code.as_deref().unwrap_or("");
+        if budget.is_none() {
+            assert_eq!(code, "engine-budget-required", "{key}");
+        } else {
+            println!("S7 forged budget {budget:?} -> {code}");
+            assert!(
+                !code.is_empty() && code != "engine-unavailable",
+                "{key}: {code}"
+            );
+        }
+    }
+    b.shutdown();
+}
+
+// =================================================================================================
+// EM-04C2 S8: recovery and stress matrix for the adaptive engine
+// =================================================================================================
+
+fn s8_intent(workspace: &str, key: &str) -> NexusIntentV1 {
+    let mut i = s7_intent(key, s7_long_limits);
+    i.workspace_id = Some(workspace.into());
+    i
+}
+
+fn s8_status_task(sock: &Path, run_id: &str) -> Option<String> {
+    ic::status(sock, run_id)
+        .ok()
+        .and_then(|r| r.task_instance_id)
+}
+
+/// The durable adaptive block of a task's record, or None while it does not exist yet.
+fn s8_record(fx: &Fx, broker: &str, task: &str) -> Option<Value> {
+    let p = fx
+        .config(broker)
+        .state_dir
+        .join("engine")
+        .join(format!("{task}.json"));
+    serde_json::from_slice(&std::fs::read(p).ok()?).ok()
+}
+
+fn s8_adaptive(rec: &Value) -> (bool, u64, u64, u64) {
+    let l = &rec["payload"]["adaptive"]["limiter"];
+    (
+        l["droppedBefore"].as_bool().unwrap(),
+        l["rearmTokensUsed"].as_u64().unwrap(),
+        rec["payload"]["adaptive"]["baseline"]["totalFailures"]
+            .as_u64()
+            .unwrap(),
+        rec["payload"]["adaptive"]["pendingTrusted"]
+            .as_u64()
+            .unwrap(),
+    )
+}
+
+/// A. Crash BEFORE the adaptive proposal is accepted: nothing about it exists durably, no request is
+/// dispatched under it, the continuation starts from the authorized default, and the evidence is
+/// neither invented nor double-counted.
+#[test]
+fn s8_a_crash_before_acceptance_leaves_no_phantom_selection_and_no_double_counted_evidence() {
+    if !sandbox_ready() {
+        return;
+    }
+    // the escalation to xhigh would be accepted at the THIRD proposal; the crash precedes it
+    let c = s6_crash_then_continue("before-accept", 3, "s8-before-accept-1");
+    // no phantom selection: the durable record holds only the first (medium) selection
+    let sels: Vec<(Option<u32>, String)> = c
+        .old
+        .events
+        .iter()
+        .filter(|e| e.kind == "effort-selected")
+        .map(|e| (e.attempt, e.effort.clone().unwrap()))
+        .collect();
+    assert_eq!(sels, [(Some(1), "medium".to_owned())], "{sels:?}");
+    assert_eq!(c.old.effort.as_ref().unwrap().effort, "medium");
+    assert!(
+        c.old_requests
+            .iter()
+            .all(|r| r["reasoning"]["effort"] != "xhigh"),
+        "nothing was dispatched under an uncommitted selection"
+    );
+    assert_eq!(c.old.attempts.len(), 2, "attempts 1 and 2 only");
+    // the continuation starts from the authorized default under its OWN binding: the record says
+    // so (default `low`, the explicit EM-03 reset note naming the elevated effort it replaced); any
+    // effort above the default is a NEW proposal, selected durably before it is bound
+    assert_eq!(c.new.default_effort, "low");
+    let reset = c
+        .new
+        .events
+        .iter()
+        .find(|e| e.kind == "effort-reset-continuation")
+        .expect("reset note");
+    assert_eq!(
+        reset.effort.as_deref(),
+        Some("medium"),
+        "the uncommitted xhigh never existed"
+    );
+    assert!(c.new.attempts[0].attempt_id != c.old.attempts[0].attempt_id);
+    assert!(c.new.events.iter().any(|e| e.kind == "created"));
+    assert!(s8_dropped(&c.new));
+    // evidence: every claim is judged exactly once across the two tasks (the continuation's script
+    // makes further claims of its own, so the invariant is accounting, not a fixed number)
+    let judged = |rec: &nexus_broker::engine_state::EngineStateRecord| -> Vec<u64> {
+        rec.payload["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|d| d["limiter"]["claims"].as_u64())
+            .collect()
+    };
+    let (old_made, old_judged) = (
+        c.old.payload["museReasoning"]["totalFailedHypotheses"]
+            .as_u64()
+            .unwrap(),
+        c.old.payload["adaptive"]["baseline"]["totalFailures"]
+            .as_u64()
+            .unwrap(),
+    );
+    assert_eq!(
+        (old_made, old_judged),
+        (2, 1),
+        "two claims made; the crash lost the judgement of one"
+    );
+    // the continuation inherits the retained history: only its own evaluations are new
+    let fresh = (c.new.payload["evaluations"].as_u64().unwrap()
+        - c.old.payload["evaluations"].as_u64().unwrap()) as usize;
+    let all_new = judged(&c.new);
+    let new_claims: Vec<u64> = all_new[all_new.len() - fresh..].to_vec();
+    assert_eq!(
+        new_claims[0],
+        old_made - old_judged,
+        "the claim whose judgement was lost is judged by the continuation - once"
+    );
+    let total: u64 = judged(&c.old).iter().chain(new_claims.iter()).sum();
+    assert_eq!(
+        total,
+        c.new.payload["adaptive"]["baseline"]["totalFailures"].as_u64().unwrap(),
+        "claims judged across both tasks equal the growth of the Governor's totals: none lost, none doubled"
+    );
+    println!(
+        "S8-A claims judged: old {:?}, new {:?}",
+        judged(&c.old),
+        new_claims
+    );
+    c.b.shutdown();
+}
+
+fn s8_dropped(rec: &nexus_broker::engine_state::EngineStateRecord) -> bool {
+    rec.payload["adaptive"]["limiter"]["droppedBefore"] == true
+}
+
+/// B. A real A4 through actual brokers and the mock provider: the same two claims are made in every
+/// one of six task generations, each interrupted while the effort is elevated. `dropped_before` is
+/// monotonic, tokens never refill, `xhigh` is applied in exactly one free + R = 2 generations, a
+/// Kernel-verified failed check still escalates immediately once the budget is spent, and a changed
+/// slot authorization refuses the continuation before dispatch.
+#[test]
+fn s8_a_real_a4_over_six_generations_is_bounded_by_one_free_plus_r() {
+    if !sandbox_ready() {
+        return;
+    }
+    let phase = Arc::new(AtomicUsize::new(0)); // 0 = claims then hold, 1 = claims, a failing check, answer
+    let p2 = phase.clone();
+    let responder: Responder = Arc::new(move |n, body| {
+        let resp = format!("resp_{n}");
+        let outs = body["input"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|i| i["type"] == "function_call_output")
+                    .count()
+            })
+            .unwrap_or(0);
+        let claim = r#"{"recordHypothesisFailure":true}"#;
+        // a continuation conversation may carry earlier results: only this response chain counts
+        let done = outs % 4;
+        match (p2.load(Ordering::SeqCst), done) {
+            (_, 0) | (_, 1) => Answer::Frames(call_frames(
+                &resp,
+                n,
+                &format!("call_{n}"),
+                SIGNALS_TOOL,
+                claim,
+            )),
+            (0, _) => Answer::Slow {
+                frames: text_frames(&resp, "thinking"),
+                gap_ms: 100,
+                hold_ms: 120_000,
+            },
+            (_, 2) => Answer::Frames(call_frames(
+                &resp,
+                n,
+                &format!("call_{n}"),
+                "proc_run",
+                r#"{"program":"cargo","args":["test","--offline"]}"#,
+            )),
+            _ => Answer::Frames(text_frames(&resp, "Investigated; the tests fail.")),
+        }
+    });
+    let fx = s6_fixture(responder, Some(440_000), S6_WIDE);
+    let b = em04a_broker(&fx, "s8-a4", None, None);
+    let sock = b.socket_path().to_owned();
+    // (dropped_before, tokens, xhigh selected in this generation)
+    let mut gens: Vec<(bool, u64, bool)> = Vec::new();
+    let mut run_id = ic::submit(&sock, &s8_intent("other", "s8-a4-00000000001"))
+        .expect("submit")
+        .run
+        .run_id;
+    for g in 1..=6 {
+        // wait until the generation has bound its third attempt (the provider holds it), then interrupt
+        let end = std::time::Instant::now() + Duration::from_secs(120);
+        let (task, rec) = loop {
+            assert!(
+                std::time::Instant::now() < end,
+                "generation {g} never reached attempt 3"
+            );
+            if let Some(t) = s8_status_task(&sock, &run_id) {
+                if let Some(r) = s8_record(&fx, "s8-a4", &t) {
+                    if r["attempts"].as_array().is_some_and(|a| a.len() >= 3) {
+                        break (t, r);
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        ic::cancel(&sock, &run_id).unwrap();
+        let ended = wait_terminal(&sock, &run_id, 60);
+        assert!(
+            ended.terminal && ended.state != "completed",
+            "gen {g}: {ended:?}"
+        );
+        let rec = s8_record(&fx, "s8-a4", &task).unwrap_or(rec);
+        let xhigh = rec["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "effort-selected" && e["effort"] == "xhigh");
+        let (dropped, tokens, _, _) = s8_adaptive(&rec);
+        println!(
+            "S8-B generation {g}: dropped_before {dropped}, tokens {tokens}, xhigh applied {xhigh}"
+        );
+        gens.push((dropped, tokens, xhigh));
+        if g < 6 {
+            let v = ic::resume(&sock, &run_id).expect("resume");
+            run_id = v["run"]["runId"].as_str().unwrap().to_owned();
+        }
+    }
+    // monotonic history, a budget that never refills
+    for w in gens.windows(2) {
+        assert!(w[1].0 >= w[0].0, "dropped_before went back: {gens:?}");
+        assert!(w[1].1 >= w[0].1, "a token was refunded: {gens:?}");
+    }
+    assert_eq!(
+        gens[0],
+        (false, 0, true),
+        "generation 1: the free escalation"
+    );
+    assert_eq!(gens[1], (true, 1, true), "generation 2: token 1");
+    assert_eq!(gens[2], (true, 2, true), "generation 3: token 2");
+    for (g, x) in gens.iter().enumerate().skip(3) {
+        assert_eq!(
+            (x.0, x.1, x.2),
+            (true, 2, false),
+            "generation {}: held",
+            g + 1
+        );
+    }
+    assert_eq!(gens.iter().filter(|g| g.2).count(), 3, "one free + R = 2");
+
+    // a fresh Kernel-verified failure bypasses the exhausted budget at once
+    phase.store(1, Ordering::SeqCst);
+    let v = ic::resume(&sock, &run_id).expect("resume");
+    let last = wait_terminal(&sock, v["run"]["runId"].as_str().unwrap(), 300);
+    assert_eq!(last.state, "completed", "{last:?}");
+    let rec = s8_record(&fx, "s8-a4", last.task_instance_id.as_deref().unwrap()).unwrap();
+    let (dropped, tokens, _, _) = s8_adaptive(&rec);
+    assert!(dropped);
+    assert_eq!(tokens, 2, "the budget is untouched by the trusted bypass");
+    let efforts: Vec<&str> = rec["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["effort"].as_str().unwrap())
+        .collect();
+    println!("S8-B final generation efforts per attempt: {efforts:?}");
+    assert_eq!(
+        efforts.last().copied(),
+        Some("xhigh"),
+        "escalated once the check had failed: {efforts:?}"
+    );
+    assert!(
+        efforts[..efforts.len() - 1].iter().all(|e| *e != "xhigh"),
+        "held until the Kernel-verified failure: {efforts:?}"
+    );
+    assert_eq!(
+        rec["payload"]["museActivity"]["verification"]["status"],
+        "failed"
+    );
+
+    // a changed slot authorization refuses the continuation before dispatch (a separate chain,
+    // interrupted at its third attempt like the others)
+    phase.store(0, Ordering::SeqCst);
+    let fresh = ic::submit(&sock, &s8_intent("other", "s8-a4-policy-0001"))
+        .expect("submit")
+        .run
+        .run_id;
+    let end = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        assert!(
+            std::time::Instant::now() < end,
+            "the policy chain never reached attempt 3"
+        );
+        if let Some(r) = s8_status_task(&sock, &fresh).and_then(|t| s8_record(&fx, "s8-a4", &t)) {
+            if r["attempts"].as_array().is_some_and(|a| a.len() >= 3) {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    ic::cancel(&sock, &fresh).unwrap();
+    let ended = wait_terminal(&sock, &fresh, 60);
+    assert!(ended.terminal && ended.state != "completed", "{ended:?}");
+    let narrowed = node_json(&[
+        "registry-save-mode",
+        fx.registry.to_str().unwrap(),
+        fx.install_root.to_str().unwrap(),
+        ADAPTIVE_MODE,
+        "e2e/e2e-1",
+        "e2e-mock/e2e-1",
+        "[\"low\",\"medium\"]",
+        "0",
+    ]);
+    assert_eq!(narrowed["ok"], true, "{narrowed}");
+    let before = fx.provider.bodies.lock().unwrap().len();
+    let v = ic::resume(&sock, &fresh).expect("accepted, then judged");
+    let refused = wait_terminal(&sock, v["run"]["runId"].as_str().unwrap(), 60);
+    assert_eq!(refused.state, "rejected", "{refused:?}");
+    assert_eq!(refused.error_code.as_deref(), Some("task-binding-mismatch"));
+    assert_eq!(refused.turn, 0);
+    assert_eq!(
+        fx.provider.bodies.lock().unwrap().len(),
+        before,
+        "nothing reached the provider"
+    );
+    // the rejected continuation created no engine state; resuming IT cannot start a task from
+    // nothing (pinned: if this ever stopped failing before dispatch, the inherited budget could be
+    // bypassed by way of a rejected continuation)
+    let again = ic::resume(&sock, &refused.run_id).expect("accepted, then judged");
+    let again = wait_terminal(&sock, again["run"]["runId"].as_str().unwrap(), 60);
+    assert_ne!(again.state, "completed", "{again:?}");
+    assert_eq!(again.turn, 0);
+    assert_eq!(
+        fx.provider.bodies.lock().unwrap().len(),
+        before,
+        "still nothing was sent"
+    );
+    println!(
+        "S8-B resume of a rejected continuation: {:?}",
+        again.error_code
+    );
+    b.shutdown();
+}
+
+/// A long adaptive mock task: claims, reads, a failing check, more claims and reads, so that the
+/// Governor, the limiter and the trusted-evidence path are all exercised repeatedly.
+fn s8_long_script() -> Responder {
+    let claim = || {
+        (
+            SIGNALS_TOOL,
+            r#"{"recordHypothesisFailure":true}"#.to_owned(),
+        )
+    };
+    let read = || ("fs_read", r#"{"path":"src/lib.rs"}"#.to_owned());
+    let check = || {
+        (
+            "proc_run",
+            r#"{"program":"cargo","args":["test","--offline"]}"#.to_owned(),
+        )
+    };
+    let phase = |p: &str| (SIGNALS_TOOL, format!(r#"{{"phase":"{p}"}}"#));
+    let mut calls: Vec<(&'static str, String)> = Vec::new();
+    // signals BEFORE a failed verification, the verification, signals AFTER it, repeated
+    for round in 0..4 {
+        calls.extend([
+            phase("diagnose"),
+            read(),
+            claim(),
+            claim(),
+            check(),
+            phase(if round % 2 == 0 {
+                "implement"
+            } else {
+                "verify"
+            }),
+            claim(),
+            read(),
+        ]);
+    }
+    script(calls, "Investigated; the tests fail.")
+}
+
+/// What must hold for ANY adaptive run, whatever happened to its worker.
+fn s8_invariants(fx: &Fx, broker: &str, run: &ic::IntentRun) {
+    s8_invariants_from(fx, broker, run, 0)
+}
+
+/// `skip`: provider requests that belong to EARLIER runs of the same fixture.
+fn s8_invariants_from(fx: &Fx, broker: &str, run: &ic::IntentRun, skip: usize) {
+    let task = run.task_instance_id.clone().expect("a task");
+    let st = em03_state(fx, broker, &task);
+    // strict decoding of everything the engine wrote
+    let adaptive =
+        nexus_broker::engine::muse_v1_adaptive::Adaptive::from_value(&st["payload"]["adaptive"])
+            .expect("a valid adaptive block");
+    assert!(adaptive.limiter.core.rearm_tokens_used <= 2);
+    let hist = em04a_history(&st);
+    for d in &hist {
+        if !d["limiter"].is_null() {
+            nexus_broker::engine::muse_v1_adaptive::LimiterRecord::from_value(&d["limiter"])
+                .expect("a valid limiter record");
+        }
+    }
+    // attempts: unique ordinals, answered or terminal, the requests are their prefix
+    let attempts = st["attempts"].as_array().unwrap();
+    let ords: Vec<u64> = attempts
+        .iter()
+        .map(|a| a["ordinal"].as_u64().unwrap())
+        .collect();
+    let mut dedup = ords.clone();
+    dedup.dedup();
+    assert_eq!(ords, dedup, "no ordinal bound twice");
+    let all_bodies = fx.provider.bodies.lock().unwrap().clone();
+    let bodies = all_bodies[skip.min(all_bodies.len())..].to_vec();
+    let sent: Vec<&str> = bodies
+        .iter()
+        .map(|r| r["reasoning"]["effort"].as_str().unwrap())
+        .collect();
+    // the record keeps the newest 32 attempts: align by ordinal (1-based position in `sent`)
+    // (a bound attempt may not have been dispatched yet when the run ended)
+    assert!(attempts.len() <= sent.len() + 1);
+    for a in attempts {
+        let n = a["ordinal"].as_u64().unwrap() as usize;
+        if let Some(e) = sent.get(n - 1) {
+            assert_eq!(
+                *e,
+                a["effort"].as_str().unwrap(),
+                "attempt {n}: the request carries its bound effort"
+            );
+        }
+    }
+    assert!(
+        sent.iter()
+            .all(|e| ["low", "medium", "high", "xhigh"].contains(e)),
+        "{sent:?}"
+    );
+    // every durable selection is explained by a recorded limiter decision for that attempt
+    let ev = st["events"].as_array().unwrap();
+    for e in ev.iter().filter(|e| e["kind"] == "effort-selected") {
+        assert!(
+            e["detail"].as_str().unwrap_or("").starts_with("limiter:"),
+            "{e}"
+        );
+        let a = e["attempt"].as_u64().unwrap();
+        // the decision may have left the 8-entry window; when retained it must agree
+        if let Some(d) = hist.iter().find(|d| d["attempt"].as_u64() == Some(a)) {
+            assert_eq!(
+                d["limiter"]["action"].as_str(),
+                Some(format!("change:{}", e["effort"].as_str().unwrap()).as_str())
+            );
+        }
+    }
+    // a decision without a limiter record (failed evaluation) selected nothing
+    for d in hist.iter().filter(|d| d["limiter"].is_null()) {
+        let a = d["attempt"].as_u64().unwrap();
+        assert!(
+            !ev.iter()
+                .any(|e| e["kind"] == "effort-selected" && e["attempt"].as_u64() == Some(a)),
+            "attempt {a}: a failed evaluation selected an effort"
+        );
+    }
+    // Kernel evidence matches what was bound
+    let receipts = em03_receipts(fx, &task);
+    for a in attempts {
+        // every retained attempt that was sent has its Kernel receipt, under the target it names
+        if let Some(r) = receipts.iter().find(|r| r["attemptId"] == a["attemptId"]) {
+            assert_eq!(r["issuanceId"], a["issuanceId"]);
+        }
+    }
+    assert!(receipts.len() <= sent.len() + 1);
+    // no worker outlives its run
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while !em04c1_worker_pids(&task).is_empty() && std::time::Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        em04c1_worker_pids(&task).is_empty(),
+        "a worker outlived its run"
+    );
+}
+
+/// Kills (or stops) the run's Governor worker over and over.
+fn s8_storm(
+    fx: &Fx,
+    broker: &str,
+    run_id: &str,
+    signal: i32,
+    period_ms: u64,
+    limit: usize,
+) -> (
+    std::thread::JoinHandle<()>,
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<AtomicUsize>,
+) {
+    let rec_path = fx
+        .config(broker)
+        .state_dir
+        .join("runs")
+        .join(format!("{run_id}.json"));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hits = Arc::new(AtomicUsize::new(0));
+    let (s2, h2) = (stop.clone(), hits.clone());
+    let h = std::thread::spawn(move || {
+        let mut task = None;
+        while !s2.load(Ordering::SeqCst) {
+            task = task.or_else(|| em04c1_task_of(&rec_path));
+            if let Some(t) = &task {
+                if h2.load(Ordering::SeqCst) < limit {
+                    for pid in em04c1_worker_pids(t) {
+                        // SAFETY: signalling our own test's worker child
+                        if unsafe { libc::kill(pid, signal) } == 0 {
+                            h2.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(period_ms));
+        }
+    });
+    (h, stop, hits)
+}
+
+/// C. A long adaptive task whose Governor worker is killed continuously (every 40 ms), well past
+/// the restart limit, so evaluations alternate between answered, `bridge-died`, `bridge-busy` and
+/// `bridge-restart-limit`. The run completes, and no failure ever produced a selection, a dispatch
+/// under an unauthorized effort, or a double-counted piece of evidence. The control run (no
+/// interference) has the same shape and a superset of the selections.
+#[test]
+fn s8_a_long_adaptive_run_survives_continuous_worker_kills_without_bypassing_the_limiter() {
+    if !sandbox_ready() {
+        return;
+    }
+    // control
+    let fx = s6_fixture(s8_long_script(), Some(440_000), S6_WIDE);
+    let b = em04a_broker(&fx, "s8-ctl", None, None);
+    let t0 = std::time::Instant::now();
+    let control = submit_wait(
+        b.socket_path(),
+        &s8_intent("other", "s8-control-0000001"),
+        600,
+    );
+    println!("S8-C control run wall {:.1}s", t0.elapsed().as_secs_f64());
+    assert_eq!(control.state, "completed", "{control:?}");
+    s8_invariants(&fx, "s8-ctl", &control);
+    let ctl_efforts = s6_efforts(&fx);
+    let ctl_selections = em03_state(&fx, "s8-ctl", &control.task_instance_id.clone().unwrap())
+        ["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "effort-selected")
+        .count();
+    b.shutdown();
+    // stress
+    let fx = s6_fixture(s8_long_script(), Some(440_000), S6_WIDE);
+    let b = em04a_broker(&fx, "s8-kill", None, None);
+    let sock = b.socket_path().to_owned();
+    let run0 = ic::submit(&sock, &s8_intent("other", "s8-kill-00000001"))
+        .expect("submit")
+        .run;
+    let (h, stop, kills) = s8_storm(&fx, "s8-kill", &run0.run_id, libc::SIGKILL, 40, 400);
+    let run = wait_terminal(&sock, &run0.run_id, 900);
+    stop.store(true, Ordering::SeqCst);
+    h.join().unwrap();
+    println!(
+        "S8-C kills {}; control: {} requests / {} selections; stress: {} requests",
+        kills.load(Ordering::SeqCst),
+        ctl_efforts.len(),
+        ctl_selections,
+        fx.provider.bodies.lock().unwrap().len()
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    assert!(
+        kills.load(Ordering::SeqCst) >= 3,
+        "the storm really happened"
+    );
+    s8_invariants(&fx, "s8-kill", &run);
+    let st = em03_state(&fx, "s8-kill", &run.task_instance_id.clone().unwrap());
+    let hist = em04a_history(&st);
+    let failed = hist.iter().filter(|d| d["limiter"].is_null()).count();
+    println!(
+        "S8-C evaluations without a limiter decision (worker unavailable): {failed} of {}",
+        hist.len()
+    );
+    // the stressed run never applied an effort the control run's Governor path could not reach
+    let max_ctl = ctl_efforts
+        .iter()
+        .max_by_key(|e| {
+            ["low", "medium", "high", "xhigh"]
+                .iter()
+                .position(|x| x == &e.as_str())
+        })
+        .unwrap();
+    for e in s6_efforts(&fx) {
+        let rank = |x: &str| {
+            ["low", "medium", "high", "xhigh"]
+                .iter()
+                .position(|y| *y == x)
+                .unwrap()
+        };
+        assert!(
+            rank(&e) <= rank(max_ctl),
+            "{e} above anything the control run reached ({max_ctl})"
+        );
+    }
+    b.shutdown();
+}
+
+/// C. Timeouts: the worker is STOPPED (SIGSTOP) while a request is in flight; the supervisor times
+/// the call out, kills and replaces the process, and the evaluation of that attempt is unavailable
+/// (never guessed). Then the run is cancelled mid-flight: it ends terminal, the record is
+/// authentic and consistent, and no worker survives.
+#[test]
+fn s8_worker_timeouts_and_cancellation_leave_consistent_durable_state() {
+    if !sandbox_ready() {
+        return;
+    }
+    let fx = s6_fixture(s8_long_script(), Some(440_000), S6_WIDE);
+    let b = em04a_broker(&fx, "s8-stop", None, None);
+    let sock = b.socket_path().to_owned();
+    let started = std::time::Instant::now();
+    let run0 = ic::submit(&sock, &s8_intent("other", "s8-stop-00000001"))
+        .expect("submit")
+        .run;
+    // stop the worker twice (each costs one bridge timeout), then let it run
+    let (h, stop, stops) = s8_storm(&fx, "s8-stop", &run0.run_id, libc::SIGSTOP, 700, 2);
+    let end = std::time::Instant::now() + Duration::from_secs(300);
+    let run = loop {
+        let r = ic::status(&sock, &run0.run_id).expect("status");
+        if r.terminal {
+            break r;
+        }
+        assert!(std::time::Instant::now() < end, "the run never ended");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    stop.store(true, Ordering::SeqCst);
+    h.join().unwrap();
+    println!(
+        "S8-C SIGSTOPs {}; run {} ({:?}); wall {:.1}s",
+        stops.load(Ordering::SeqCst),
+        run.state,
+        run.error_code,
+        started.elapsed().as_secs_f64()
+    );
+    assert_eq!(run.state, "completed", "{run:?}");
+    s8_invariants(&fx, "s8-stop", &run);
+    let st = em03_state(&fx, "s8-stop", &run.task_instance_id.clone().unwrap());
+    let timed_out = em04a_history(&st)
+        .iter()
+        .filter(|d| {
+            d["outcome"].as_str().is_some_and(|o| {
+                o.contains("timeout") || o.contains("died") || o.contains("unavailable")
+            })
+        })
+        .count();
+    println!("S8-C evaluations lost to the stopped worker: {timed_out}");
+    b.shutdown();
+
+    // cancellation in the middle of a long run
+    let fx = s6_fixture(s8_long_script(), Some(440_000), S6_WIDE);
+    let b = em04a_broker(&fx, "s8-cancel", None, None);
+    let sock = b.socket_path().to_owned();
+    let run0 = ic::submit(&sock, &s8_intent("other", "s8-cancel-0000001"))
+        .expect("submit")
+        .run;
+    let end = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        assert!(std::time::Instant::now() < end, "never reached attempt 5");
+        if let Some(r) =
+            s8_status_task(&sock, &run0.run_id).and_then(|t| s8_record(&fx, "s8-cancel", &t))
+        {
+            if r["attempts"].as_array().is_some_and(|a| a.len() >= 5) {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    ic::cancel(&sock, &run0.run_id).unwrap();
+    let run = wait_terminal(&sock, &run0.run_id, 120);
+    assert!(run.terminal && run.state != "completed", "{run:?}");
+    s8_invariants(&fx, "s8-cancel", &run);
+    // and the cancelled task continues: the durable state it left is a valid predecessor
+    let already = fx.provider.bodies.lock().unwrap().len();
+    let v = ic::resume(&sock, &run0.run_id).expect("resume");
+    let next = wait_terminal(&sock, v["run"]["runId"].as_str().unwrap(), 600);
+    assert_eq!(next.state, "completed", "{next:?}");
+    s8_invariants_from(&fx, "s8-cancel", &next, already);
     b.shutdown();
 }

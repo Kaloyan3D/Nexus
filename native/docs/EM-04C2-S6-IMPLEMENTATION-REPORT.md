@@ -119,3 +119,11 @@ effort changes is unobserved; F-4/F-5 need owner decisions; the activation const
 ## 10. Recommendation
 
 **APPROVE** for review and a local commit of S6, with conditions: (1) acknowledge F-4 (`pending_trusted`, a fourth durable field) and decide F-5; (2) the activation constant stays `false` and the mode dormant until S10; (3) S7–S10 as in `EM-04C2-S7-S10-HANDOFF.md`, including two consecutive green batteries on the final commit and the open worker-confinement decision. Evidence: the adaptive engine executes authorized effort transitions on the mock provider through durable selection, Registry issuance and Kernel seal before every request; limiter and evidence baseline are re-derived by the host from independent inputs; Policy V2 closes the continuation loophole (1 free + R=2 over any number of generations); `muse-v0` behaviour and bodies are unchanged; no incomplete adaptive mode is dispatchable (compile-time gate, closed Registry table, dormant definition, operator configuration and the new sealed-budget gate).
+
+## Erratum (added in S7–S9)
+
+The JS line of §9 ("the identical pass/fail set as the S5 tree") shares the error described in
+`EM-04C2-CHECKPOINT-1-REPORT.md`: S5 and S6 were compared with Checkpoint 1, which already contained seven real
+JS regressions from S4. They are fixed in S7–S9. The installation statement in
+`EM-04C2-S6-AUTHORIZATION-AND-RECOVERY.md` §1 (gate 2) is superseded by owner decision D-1: installations carry the
+dormant definition.

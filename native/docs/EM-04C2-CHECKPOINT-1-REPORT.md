@@ -160,3 +160,17 @@ consecutive green batteries on the final C2 commit, OS-confinement decision, lim
 
 The historical "systemd scope was not created" host condition is **not** claimed eliminated: S0 added
 diagnostics and a test-helper retry, and its root cause remains unproven.
+
+## Erratum (added in S7–S9; the original text above is kept as written)
+
+* **JavaScript suites.** The statements that the Registry/Native/MusePreset JS suites "all exit 0" (validation
+  table) were **incorrect**. Seven suites that pass on the true pre-adaptive baseline `50a24d7` failed on this
+  checkpoint's commit for real reasons that S4 introduced: `RegistryCore`, `RegistryR2Compatibility`,
+  `RegistryRequestBudget`, `MusePresetRegistryModes`, `RegistryR3UI`, `RegistryInstalledRuntime`,
+  `NativeTargetV2`. They were later hidden among the failures caused by a missing `@deepseek-ai/dsh-tools` and
+  `pwsh`, and the later comparison "identical to baseline" used this very commit as the baseline. They are fixed
+  in S7–S9 (`EM-04C2-S7-S9-IMPLEMENTATION-REPORT.md` §4).
+* **Installations.** The preset dependency closure excludes `engineering-v2-adaptive.json`, but both installers
+  copy `config/registry/` recursively, so installations DO carry the dormant definition. Owner decision D-1
+  (S7–S9 review): accepted, as long as it stays `planned`, non-selectable, non-runnable and unavailable to production
+  execution.

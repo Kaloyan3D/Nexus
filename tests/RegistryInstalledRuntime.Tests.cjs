@@ -45,7 +45,15 @@ function closure(root) {
   for (const f of files(source)) assert.deepEqual(fs.readFileSync(path.join(dest, f)), fs.readFileSync(path.join(source, f)))
   const svc = require(path.join(dest, 'service.cjs')).createService({ installRoot: root, dataRoot: path.join(root, 'data') })
   assert.deepEqual(svc.listModes().errors, [])
-  assert.equal(svc.listModes().modes.length, 3)
+  // the three legacy modes, plus the DORMANT adaptive definition the installer publishes with the
+  // rest of the Registry directory (EM-04C2): planned, neither selectable nor runnable nor executable
+  const listed = svc.listModes().modes
+  assert.deepEqual(listed.map(m => m.id), ['engineering-v1', 'engineering-v2', 'engineering-v2-adaptive', 'engineering-v3'])
+  const adaptive = listed.find(m => m.id === 'engineering-v2-adaptive')
+  assert.equal(adaptive.status, 'planned')
+  assert.equal(adaptive.selectable, false)
+  assert.equal(adaptive.runnable, false)
+  assert.equal(adaptive.executable, false)
   preserved(root)
 }
 async function main() {
@@ -90,7 +98,12 @@ async function main() {
         writeHead(code) { status = code }, end(text) { body = JSON.parse(text) }
       })
       assert.equal(status, 200)
-      assert.deepEqual(body.modes.map(m => m.id).sort(), ['engineering-v1', 'engineering-v2', 'engineering-v3'])
+      assert.deepEqual(body.modes.map(m => m.id).sort(), ['engineering-v1', 'engineering-v2', 'engineering-v2-adaptive', 'engineering-v3'])
+      // the dormant adaptive mode is listed honestly and can be neither selected nor run
+      const dormant = body.modes.find(m => m.id === 'engineering-v2-adaptive')
+      assert.equal(dormant.selectable, false)
+      assert.equal(dormant.runnable, false)
+      assert.equal(dormant.executable, false)
       assert.ok(body.modes.find(m => m.id === 'engineering-v2').executable)
     }
     process.env.AIH_INSTALL_ROOT = root

@@ -1,0 +1,30 @@
+# EM-04C2 S9: functional release-mode gates for the PRODUCTION build of the broker.
+#
+# This package is deliberately OUTSIDE the main workspace (own `[workspace]`): the broker's own test
+# targets carry a `test-engines` dev-dependency on themselves, so nothing built inside the workspace
+# can prove what a production binary contains. Here `nexus-broker` is a plain dependency with its
+# DEFAULT features, exactly as a production build links it.
+#
+#   cargo test --release --manifest-path native/tools/prodgate/Cargo.toml
+[package]
+name = "nexus-prodgate"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "EM-04C2 S9 production gates (no test-engines)"
+
+[dependencies]
+nexus-broker = { path = "../../nexus-broker" }
+nexus-contracts = { path = "../../nexus-contracts" }
+nexus-model = { path = "../../nexus-model" }
+serde_json = "1"
+hex = "0.4"
+libc = "0.2"
+tempfile = "3"
+
+[features]
+# SELF-TEST ONLY: links the broker WITH its test engines, to prove that the gates fail when a
+# production build would leak them (`cargo test --release --features selftest-leak` must FAIL).
+selftest-leak = ["nexus-broker/test-engines"]
+
+[workspace]

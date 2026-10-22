@@ -35,7 +35,8 @@ function baseBinding(overrides) {
     schemaVersion: 1,
     resolutionId: 'compat-resolution',
     modeId: 'engineering-v2',
-    orchestrationEngineId: 'muse',
+    // the engine the Registry's engineering-v2 definition declares (EM-04C2 S4 closed table)
+    orchestrationEngineId: 'muse-v0',
     modeConfigRevision: 3,
     roleId: 'muse_main',
     logicalModelId: 'logi-test',

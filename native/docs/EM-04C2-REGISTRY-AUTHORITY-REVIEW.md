@@ -148,3 +148,14 @@ the adaptive mode fully activated) is `task-binding-mismatch`.
 The Registry remains the only authority over modes, engines, models, reasoning policy and budgets; the
 new mode is defined, validated and sealed but unreachable; continuity can no longer silently inherit a
 different mode or reasoning authorization. **APPROVE**, with concerns 1–3 recorded for the reviewer.
+
+## Erratum (added in S7–S9; the original text above is kept as written)
+
+* §3 gate 2 ("a real install does not carry the definition") is correct only for the preset dependency closure.
+  Both installers publish `config/registry/` recursively, so installations carry the dormant definition and the
+  Registry lists it as a non-executable `planned` row (owner decision D-1: accepted). Gate 2 is therefore NOT an
+  independent barrier; the barriers are gates 1 and 3–6.
+* §5 "34 existing Registry / Native / MusePreset JS suites … all exit 0" was incorrect: seven of them failed
+  at this commit (see `EM-04C2-CHECKPOINT-1-REPORT.md`, erratum). The defect was in `legacy-import.cjs`
+  (a count-based completeness check) and `service.cjs` (a phantom row for an absent optional mode); both are
+  fixed in S7–S9 with a closed identity for the optional definition.

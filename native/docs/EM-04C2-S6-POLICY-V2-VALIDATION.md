@@ -112,3 +112,8 @@ elevated effort is a drop).
 ## 6. Battery
 
 **Full offline workspace battery** `NEXUS_REQUIRE_SANDBOX=1 cargo test --workspace --no-fail-fast`, run once on the final tree: **1,215 passed, 0 failed, 57 ignored** (91 result lines, exit 0). The S5 battery was 1,175 / 0 / 57: +40 passed = 10 V2 pure + 23 engine + 7 new end-to-end tests; ignored unchanged. This is one green battery; two consecutive ones are required only on the final S10 commit. The historical sandbox failure did not occur in this run and is not claimed eliminated.
+
+## Erratum (added in S7–S9)
+
+§5's JS bullet ("unchanged from the baseline tree … pre-existing") is superseded by
+`EM-04C2-S7-S9-IMPLEMENTATION-REPORT.md` §4: part of those failures were real S4 regressions, now fixed.
